@@ -22,7 +22,7 @@ import type { RootState } from '@renderer/store'
 import store, { useAppDispatch } from '@renderer/store'
 import { messageBlocksSelectors } from '@renderer/store/messageBlock'
 import { selectMessagesForTopic } from '@renderer/store/newMessage'
-import { removeBlocksThunk } from '@renderer/store/thunk/messageThunk'
+import { insertMessagesThunk, removeBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import { TraceIcon } from '@renderer/trace/pages/Component'
 import type { Assistant, Model, Topic, TranslateLanguage } from '@renderer/types'
 import { type Message, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
@@ -60,6 +60,7 @@ import {
   Languages,
   ListChecks,
   Menu,
+  MessageSquarePlus,
   NotebookPen,
   Save,
   Split,
@@ -217,6 +218,11 @@ const MessageMenubar: FC<Props> = (props) => {
     window.toast.success(t('chat.message.new.branch.created'))
   }, [index, t])
 
+  const onInsertMessages = useCallback(async () => {
+    await dispatch(insertMessagesThunk(topic.id, message.id, assistant.id))
+    window.toast.success(t('chat.message.insert.success'))
+  }, [dispatch, topic.id, message.id, assistant.id, t])
+
   const handleResendUserMessage = useCallback(
     async (messageUpdate?: Message) => {
       await resendMessage(messageUpdate ?? message, assistant)
@@ -322,6 +328,12 @@ const MessageMenubar: FC<Props> = (props) => {
         onClick: () => {
           toggleMultiSelectMode(true)
         }
+      },
+      {
+        label: t('chat.message.insert.label'),
+        key: 'insert-message',
+        icon: <MessageSquarePlus size={15} />,
+        onClick: onInsertMessages
       },
       {
         label: t('chat.save.label'),
@@ -478,6 +490,7 @@ const MessageMenubar: FC<Props> = (props) => {
     message,
     messageContainerRef,
     onEdit,
+    onInsertMessages,
     onNewBranch,
     t,
     toggleMultiSelectMode,
