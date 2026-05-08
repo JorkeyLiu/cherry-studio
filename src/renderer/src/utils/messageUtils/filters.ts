@@ -91,12 +91,27 @@ export function filterEmptyMessages(messages: Message[]): Message[] {
 export function getGroupedMessages(messages: Message[]): { [key: string]: (Message & { index: number })[] } {
   const groups: { [key: string]: (Message & { index: number })[] } = {}
   messages.forEach((message, index) => {
-    // Use askId if available (should be on assistant messages), otherwise group user messages individually
-    const key = message.role === 'assistant' && message.askId ? 'assistant' + message.askId : message.role + message.id
+    let key = message.role === 'assistant' && message.askId ? 'assistant' + message.askId : message.role + message.id
+
     if (key && !groups[key]) {
       groups[key] = []
+    } else if (key && groups[key]) {
+      // Only group with the same key if the previous message was also grouped under this same key (consecutive)
+      const prevMessage = messages[index - 1]
+      if (prevMessage) {
+        const prevKey =
+          prevMessage.role === 'assistant' && prevMessage.askId
+            ? 'assistant' + prevMessage.askId
+            : prevMessage.role + prevMessage.id
+        if (prevKey !== key) {
+          // Not consecutive — create a separate group with a unique key
+          key = key + '_' + index
+          groups[key] = []
+        }
+      }
     }
-    groups[key].push({ ...message, index }) // Add message with its original index
+
+    groups[key].push({ ...message, index })
   })
   return groups
 }
