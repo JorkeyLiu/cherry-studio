@@ -108,9 +108,12 @@ describe('buildReorderedMessageGroup', () => {
 
 describe('reorderMessageGroupThunk', () => {
   beforeEach(() => {
-    vi.mocked(db.transaction).mockImplementation(async (_mode, _table, callback) => {
-      await callback()
-    })
+    ;(db.transaction as any).mockImplementation(
+      async (_mode: string, _table: unknown, callback: () => Promise<void>) => {
+        await callback()
+        return { timeout: vi.fn() }
+      }
+    )
     vi.mocked(db.topics.update).mockResolvedValue(1)
   })
 
@@ -133,7 +136,7 @@ describe('reorderMessageGroupThunk', () => {
           [topicId]: messages.map((message) => message.id)
         }
       }
-    }))
+    })) as () => any
 
     await reorderMessageGroupThunk(
       topicId,
