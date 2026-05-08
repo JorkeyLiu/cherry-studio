@@ -1,5 +1,6 @@
 import { ArrowsAltOutlined, ShrinkOutlined } from '@ant-design/icons'
 import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
+import { Sortable } from '@renderer/components/dnd'
 import { HStack } from '@renderer/components/Layout'
 import Scrollbar from '@renderer/components/Scrollbar'
 import { useSettings } from '@renderer/hooks/useSettings'
@@ -8,7 +9,7 @@ import { setFoldDisplayMode } from '@renderer/store/settings'
 import type { Model } from '@renderer/types'
 import { AssistantMessageStatus, type Message } from '@renderer/types/newMessage'
 import { lightbulbSoftVariants } from '@renderer/utils/motionVariants'
-import { Avatar, Segmented as AntdSegmented, Tooltip } from 'antd'
+import { Tooltip } from 'antd'
 import { motion } from 'motion/react'
 import type { FC } from 'react'
 import { memo, useCallback } from 'react'
@@ -19,11 +20,17 @@ interface MessageGroupModelListProps {
   messages: Message[]
   selectMessageId: string
   setSelectedMessage: (message: Message) => void
+  onReorderMessages?: (messages: Message[]) => void
 }
 
 type DisplayMode = 'compact' | 'expanded'
 
-const MessageGroupModelList: FC<MessageGroupModelListProps> = ({ messages, selectMessageId, setSelectedMessage }) => {
+const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
+  messages,
+  selectMessageId,
+  setSelectedMessage,
+  onReorderMessages
+}) => {
   const dispatch = useAppDispatch()
   const { t } = useTranslation()
   const { foldDisplayMode } = useSettings()
@@ -36,6 +43,16 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({ messages, selec
       AssistantMessageStatus.SEARCHING
     ].includes(message.status as AssistantMessageStatus)
   }, [])
+
+  const handleSortEnd = useCallback(
+    ({ oldIndex, newIndex }: { oldIndex: number; newIndex: number }) => {
+      const reorderedMessages = [...messages]
+      const [movedMessage] = reorderedMessages.splice(oldIndex, 1)
+      reorderedMessages.splice(newIndex, 0, movedMessage)
+      onReorderMessages?.(reorderedMessages)
+    },
+    [messages, onReorderMessages]
+  )
 
   const renderLabel = useCallback(
     (message: Message) => {
@@ -59,10 +76,16 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({ messages, selec
         )
       }
       return (
-        <SegmentedLabel>
-          <ModelAvatar className={isProcessing ? 'animation-pulse' : ''} model={message.model as Model} size={20} />
-          <ModelName>{message.model?.name}</ModelName>
-        </SegmentedLabel>
+        <SegmentedItem
+          $isSelected={message.id === selectMessageId}
+          onClick={() => {
+            setSelectedMessage(message)
+          }}>
+          <SegmentedLabel>
+            <ModelAvatar className={isProcessing ? 'animation-pulse' : ''} model={message.model as Model} size={20} />
+            <ModelName>{message.model?.name}</ModelName>
+          </SegmentedLabel>
+        </SegmentedItem>
       )
     },
     [isCompact, isMessageProcessing, selectMessageId, setSelectedMessage]
@@ -86,24 +109,15 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({ messages, selec
         </DisplayModeToggle>
       </Tooltip>
       <ModelsContainer $displayMode={foldDisplayMode}>
-        {isCompact ? (
-          /* Compact style display */
-          <Avatar.Group className="avatar-group">{messages.map((message) => renderLabel(message))}</Avatar.Group>
-        ) : (
-          /* Expanded style display */
-          <Segmented
-            value={selectMessageId}
-            onChange={(value) => {
-              const message = messages.find((message) => message.id === value) as Message
-              setSelectedMessage(message)
-            }}
-            options={messages.map((message) => ({
-              label: renderLabel(message),
-              value: message.id
-            }))}
-            size="small"
-          />
-        )}
+        <Sortable
+          items={messages}
+          itemKey="id"
+          onSortEnd={handleSortEnd}
+          renderItem={(message) => renderLabel(message)}
+          horizontal
+          useDragOverlay
+          className={isCompact ? 'avatar-group ant-avatar-group' : 'segmented-list'}
+        />
       </ModelsContainer>
     </Container>
   )
@@ -181,6 +195,11 @@ const ModelsContainer = styled(Scrollbar)<{ $displayMode: DisplayMode }>`
       margin-left: -4px !important;
     }
   }
+
+  .segmented-list {
+    width: 100%;
+    background-color: transparent;
+  }
 `
 
 const AvatarWrapper = styled.div<{ $isSelected: boolean }>`
@@ -203,23 +222,6 @@ const AvatarWrapper = styled.div<{ $isSelected: boolean }>`
   }
 `
 
-const Segmented = styled(AntdSegmented)`
-  width: 100%;
-  background-color: transparent !important;
-
-  .ant-segmented-item {
-    border-radius: var(--list-item-border-radius) !important;
-    &:hover {
-      background: transparent !important;
-    }
-  }
-  .ant-segmented-thumb,
-  .ant-segmented-item-selected {
-    border: 0.5px solid var(--color-border);
-    border-radius: var(--list-item-border-radius) !important;
-  }
-`
-
 const SegmentedLabel = styled.div`
   display: flex;
   align-items: center;
@@ -230,6 +232,18 @@ const SegmentedLabel = styled.div`
 const ModelName = styled.span`
   font-weight: 500;
   font-size: 12px;
+`
+
+const SegmentedItem = styled.div<{ $isSelected: boolean }>`
+  cursor: pointer;
+  padding: 0 11px;
+  border-radius: var(--list-item-border-radius);
+  border: ${({ $isSelected }) => ($isSelected ? '0.5px solid var(--color-border)' : '0.5px solid transparent')};
+  background: ${({ $isSelected }) => ($isSelected ? 'var(--color-background)' : 'transparent')};
+
+  &:hover {
+    background: ${({ $isSelected }) => ($isSelected ? 'var(--color-background)' : 'var(--color-hover)')};
+  }
 `
 
 export default memo(MessageGroupModelList)

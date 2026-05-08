@@ -6,7 +6,9 @@ import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
+import { useAppDispatch } from '@renderer/store'
 import type { MultiModelMessageStyle } from '@renderer/store/settings'
+import { reorderMessageGroupThunk } from '@renderer/store/thunk/messageGroupReorder'
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { classNames } from '@renderer/utils'
@@ -34,6 +36,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement }: Props) => {
   const { multiModelMessageStyle: multiModelMessageStyleSetting, gridColumns, gridPopoverTrigger } = useSettings()
   const { isMultiSelectMode } = useChatContext(topic)
   const { setTimeoutTimer } = useTimer()
+  const dispatch = useAppDispatch()
 
   const isGrouped = isMultiSelectMode ? false : messageLength > 1 && messages.every((m) => m.role === 'assistant')
 
@@ -180,6 +183,18 @@ const MessageGroup = ({ messages, topic, registerMessageElement }: Props) => {
     [editMessage, messages]
   )
 
+  const handleReorderMessages = useCallback(
+    (reorderedMessages: Message[]) => {
+      void dispatch(
+        reorderMessageGroupThunk(
+          topic.id,
+          reorderedMessages.map((message) => message.id)
+        )
+      )
+    },
+    [dispatch, topic.id]
+  )
+
   const groupContextMessageId = useMemo(() => {
     // NOTE: 旧数据可能存在一组消息有多个useful的情况，只取第一个，不再另作迁移
     // find first useful
@@ -287,6 +302,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement }: Props) => {
             messages={messages}
             selectMessageId={selectedMessageId}
             setSelectedMessage={setSelectedMessage}
+            onReorderMessages={handleReorderMessages}
             topic={topic}
           />
         )}

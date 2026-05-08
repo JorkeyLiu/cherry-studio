@@ -29,6 +29,7 @@ interface Props {
   messages: Message[]
   selectMessageId: string
   setSelectedMessage: (message: Message) => void
+  onReorderMessages: (messages: Message[]) => void
   topic: Topic
 }
 
@@ -38,6 +39,7 @@ const MessageGroupMenuBar: FC<Props> = ({
   messages,
   selectMessageId,
   setSelectedMessage,
+  onReorderMessages,
   topic
 }) => {
   const { t } = useTranslation()
@@ -130,6 +132,7 @@ const MessageGroupMenuBar: FC<Props> = ({
             messages={messages}
             selectMessageId={selectMessageId}
             setSelectedMessage={setSelectedMessage}
+            onReorderMessages={onReorderMessages}
           />
         )}
         {multiModelMessageStyle === 'grid' && <MessageGroupSettings />}
