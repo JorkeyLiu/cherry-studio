@@ -1657,7 +1657,19 @@ export const insertMessagesThunk =
         return
       }
 
-      const insertIndex = afterMessageIndex + 1
+      // If the clicked message is part of a multi-model assistant group (has askId),
+      // insert after the LAST message in the same group to avoid splitting the group
+      let insertIndex = afterMessageIndex + 1
+      const afterMessage = topicMessages[afterMessageIndex]
+      if (afterMessage?.role === 'assistant' && afterMessage.askId) {
+        for (let i = afterMessageIndex + 1; i < topicMessages.length; i++) {
+          if (topicMessages[i].role === 'assistant' && topicMessages[i].askId === afterMessage.askId) {
+            insertIndex = i + 1
+          } else {
+            break
+          }
+        }
+      }
       const now = new Date().toISOString()
 
       // Create user message with block
