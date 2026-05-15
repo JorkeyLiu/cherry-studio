@@ -12,6 +12,7 @@ dayjs.extend(relativeTime)
 
 export interface TopicTrashPanelProps {
   assistantId: string
+  refreshVersion: number
   onRestore: (topicId: string) => void
   onPermanentDelete: (topicId: string) => void
   onEmptyTrash: () => void
@@ -19,6 +20,7 @@ export interface TopicTrashPanelProps {
 
 export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
   assistantId,
+  refreshVersion,
   onRestore,
   onPermanentDelete,
   onEmptyTrash
@@ -44,7 +46,7 @@ export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
 
   useEffect(() => {
     void fetchTrashTopics()
-  }, [fetchTrashTopics])
+  }, [fetchTrashTopics, refreshVersion])
 
   const handleRestore = useCallback(
     (e: React.MouseEvent, topicId: string) => {

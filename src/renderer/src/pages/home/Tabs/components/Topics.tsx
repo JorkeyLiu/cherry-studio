@@ -90,6 +90,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   const [deletingTopicId, setDeletingTopicId] = useState<string | null>(null)
   const deleteTimerRef = useRef<NodeJS.Timeout>(null)
   const [editingTopicId, setEditingTopicId] = useState<string | null>(null)
+  const [trashRefreshVersion, setTrashRefreshVersion] = useState(0)
   const listRef = useRef<DraggableVirtualListRef>(null)
 
   // 管理模式状态
@@ -114,6 +115,9 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   const isPending = useCallback((topicId: string) => topicLoadingQuery[topicId], [topicLoadingQuery])
   const isFulfilled = useCallback((topicId: string) => topicFulfilledQuery[topicId], [topicFulfilledQuery])
   const dispatch = useDispatch()
+  const refreshTrashTopics = useCallback(() => {
+    setTrashRefreshVersion((version) => version + 1)
+  }, [])
 
   useEffect(() => {
     dispatch(newMessagesActions.setTopicFulfilled({ topicId: activeTopic.id, fulfilled: false }))
@@ -159,8 +163,9 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         delete restoredTopic.deletedAt
         addTopic(restoredTopic)
       }
+      refreshTrashTopics()
     },
-    [addTopic]
+    [addTopic, refreshTrashTopics]
   )
 
   const onClearMessages = useCallback((topic: Topic) => {
@@ -184,10 +189,11 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         }
       }
       await modelGenerating()
-      removeTopic(topic)
+      await removeTopic(topic)
+      refreshTrashTopics()
       setDeletingTopicId(null)
     },
-    [activeTopic.id, addTopic, assistant.id, assistant.topics, removeTopic, setActiveTopic]
+    [activeTopic.id, addTopic, assistant.id, assistant.topics, removeTopic, setActiveTopic, refreshTrashTopics]
   )
 
   const onPinTopic = useCallback(
@@ -235,9 +241,10 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         const index = findIndex(assistant.topics, (t) => t.id === topic.id)
         setActiveTopic(assistant.topics[index + 1 === assistant.topics.length ? index - 1 : index + 1])
       }
-      removeTopic(topic)
+      await removeTopic(topic)
+      refreshTrashTopics()
     },
-    [assistant.topics, removeTopic, setActiveTopic, activeTopic]
+    [assistant.topics, removeTopic, setActiveTopic, activeTopic, refreshTrashTopics]
   )
 
   const onMoveTopic = useCallback(
@@ -743,20 +750,24 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         moveTopic={moveTopic}
         manageState={manageState}
         filteredTopics={filteredTopics}
+        onTrashChanged={refreshTrashTopics}
       />
 
       {/* 回收站面板 */}
       <TopicTrashPanel
         assistantId={assistant.id}
+        refreshVersion={trashRefreshVersion}
         onRestore={handleRestoreTopic}
         onPermanentDelete={async (topicId) => {
           await TopicManager.removeTopic(topicId)
+          refreshTrashTopics()
         }}
         onEmptyTrash={async () => {
           const trashTopics = await TopicManager.getTrashTopics(assistant.id)
           for (const topic of trashTopics) {
             await TopicManager.removeTopic(topic.id)
           }
+          refreshTrashTopics()
         }}
       />
     </div>
