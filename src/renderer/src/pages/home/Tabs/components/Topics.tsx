@@ -1,3 +1,4 @@
+import { loggerService } from '@logger'
 import AddButton from '@renderer/components/AddButton'
 import AssistantAvatar from '@renderer/components/Avatar/AssistantAvatar'
 import type { DraggableVirtualListRef } from '@renderer/components/DraggableList'
@@ -61,6 +62,7 @@ import { useDispatch, useSelector } from 'react-redux'
 import styled from 'styled-components'
 
 import { TopicManagePanel, useTopicManageMode } from './TopicManageMode'
+import { TopicTrashPanel } from './TopicTrashPanel'
 
 interface Props {
   assistant: Assistant
@@ -75,6 +77,8 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   const { assistants } = useAssistants()
   const { assistant, addTopic, removeTopic, moveTopic, updateTopic, updateTopics } = useAssistant(_assistant.id)
   const { showTopicTime, pinTopicsToTop, setTopicPosition, topicPosition } = useSettings()
+
+  const logger = useMemo(() => loggerService.withContext('Topics'), [])
 
   const renamingTopics = useSelector((state: RootState) => state.runtime.chat.renamingTopics)
   const topicLoadingQuery = useSelector((state: RootState) => state.messages.loadingByTopic)
@@ -115,6 +119,11 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     dispatch(newMessagesActions.setTopicFulfilled({ topicId: activeTopic.id, fulfilled: false }))
   }, [activeTopic.id, dispatch, topicFulfilledQuery])
 
+  // Purge expired trash topics on first mount
+  useEffect(() => {
+    TopicManager.purgeExpiredTopics().catch((err) => logger.error('Failed to purge expired topics:', err))
+  }, [logger])
+
   const isRenaming = useCallback(
     (topicId: string) => {
       return renamingTopics.includes(topicId)
@@ -140,6 +149,19 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
 
     deleteTimerRef.current = setTimeout(() => setDeletingTopicId(null), 2000)
   }, [])
+
+  const handleRestoreTopic = useCallback(
+    async (topicId: string) => {
+      await TopicManager.restoreTopic(topicId)
+      const topic = await TopicManager.getTopic(topicId)
+      if (topic) {
+        const restoredTopic = { ...(topic as Topic) }
+        delete restoredTopic.deletedAt
+        addTopic(restoredTopic)
+      }
+    },
+    [addTopic]
+  )
 
   const onClearMessages = useCallback((topic: Topic) => {
     // window.keyv.set(EVENT_NAMES.CHAT_COMPLETION_PAUSED, true)
@@ -715,6 +737,21 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         moveTopic={moveTopic}
         manageState={manageState}
         filteredTopics={filteredTopics}
+      />
+
+      {/* 回收站面板 */}
+      <TopicTrashPanel
+        assistantId={assistant.id}
+        onRestore={handleRestoreTopic}
+        onPermanentDelete={async (topicId) => {
+          await TopicManager.removeTopic(topicId)
+        }}
+        onEmptyTrash={async () => {
+          const trashTopics = await TopicManager.getTrashTopics(assistant.id)
+          for (const topic of trashTopics) {
+            await TopicManager.removeTopic(topic.id)
+          }
+        }}
       />
     </>
   )

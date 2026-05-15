@@ -1488,6 +1488,12 @@
         "title": "搜索"
       },
       "title": "话题",
+      "trash": {
+        "empty": "回收站为空",
+        "empty_trash": "清空回收站",
+        "label": "回收站",
+        "restore": "恢复"
+      },
       "unpin": "取消固定"
     },
     "translate": "翻译",

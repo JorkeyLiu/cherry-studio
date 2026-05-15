@@ -135,6 +135,18 @@ const assistantsSlice = createSlice({
           : assistant
       )
     },
+    addTopicFromTrash: (state, action: PayloadAction<{ assistantId: string; topic: Topic }>) => {
+      const topic = { ...action.payload.topic }
+      delete topic.deletedAt
+      state.assistants = state.assistants.map((assistant) =>
+        assistant.id === action.payload.assistantId
+          ? {
+              ...assistant,
+              topics: uniqBy([topic, ...normalizeTopics(assistant.topics)], 'id')
+            }
+          : assistant
+      )
+    },
     removeTopic: (state, action: PayloadAction<{ assistantId: string; topic: Topic }>) => {
       state.assistants = state.assistants.map((assistant) =>
         assistant.id === action.payload.assistantId
@@ -253,6 +265,7 @@ export const {
   removeAssistant,
   updateAssistant,
   addTopic,
+  addTopicFromTrash,
   removeTopic,
   updateTopic,
   updateTopics,

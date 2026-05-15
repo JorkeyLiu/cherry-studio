@@ -12,6 +12,7 @@ import { useAppDispatch, useAppSelector } from '@renderer/store'
 import {
   addAssistant,
   addTopic,
+  addTopicFromTrash,
   insertAssistant,
   removeAllTopics,
   removeAssistant,
@@ -153,8 +154,17 @@ export function useAssistant(id: string) {
     model,
     addTopic: (topic: Topic) => dispatch(addTopic({ assistantId: assistant.id, topic })),
     removeTopic: (topic: Topic) => {
-      void TopicManager.removeTopic(topic.id)
+      void TopicManager.softRemoveTopic(topic)
       dispatch(removeTopic({ assistantId: assistant.id, topic }))
+    },
+    restoreTopic: async (topicId: string) => {
+      const topic = (await TopicManager.getTopic(topicId)) as Topic | undefined
+      if (topic) {
+        await TopicManager.restoreTopic(topicId)
+        const restoredTopic = { ...topic }
+        delete restoredTopic.deletedAt
+        dispatch(addTopicFromTrash({ assistantId: assistant.id, topic: restoredTopic }))
+      }
     },
     moveTopic: (topic: Topic, toAssistant: Assistant) => {
       dispatch(addTopic({ assistantId: toAssistant.id, topic: { ...topic, assistantId: toAssistant.id } }))

@@ -1488,6 +1488,12 @@
         "title": "Search"
       },
       "title": "Topics",
+      "trash": {
+        "empty": "Trash is empty",
+        "empty_trash": "Empty Trash",
+        "label": "Recycle Bin",
+        "restore": "Restore"
+      },
       "unpin": "Unpin Topic"
     },
     "translate": "Translate",
