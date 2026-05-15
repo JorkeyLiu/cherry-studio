@@ -248,6 +248,9 @@ export interface SettingsState {
   // API Server
   apiServer: ApiServerConfig
   showMessageOutline: boolean
+  // Sidebar widths (resizable)
+  assistantsWidth: number
+  topicListWidth: number
 }
 
 export type MultiModelMessageStyle = 'horizontal' | 'vertical' | 'fold' | 'grid'
@@ -449,7 +452,9 @@ export const initialState: SettingsState = {
     port: API_SERVER_DEFAULTS.PORT,
     apiKey: `cs-sk-${uuid()}`
   },
-  showMessageOutline: false
+  showMessageOutline: false,
+  assistantsWidth: 275,
+  topicListWidth: 275
 }
 
 const settingsSlice = createSlice({
@@ -899,6 +904,12 @@ const settingsSlice = createSlice({
     },
     setShowMessageOutline: (state, action: PayloadAction<boolean>) => {
       state.showMessageOutline = action.payload
+    },
+    setAssistantsWidth: (state, action: PayloadAction<number>) => {
+      state.assistantsWidth = action.payload
+    },
+    setTopicListWidth: (state, action: PayloadAction<number>) => {
+      state.topicListWidth = action.payload
     }
   }
 })
@@ -1029,6 +1040,8 @@ export const {
   setS3Partial,
   setEnableDeveloperMode,
   setNavbarPosition,
+  setAssistantsWidth,
+  setTopicListWidth,
   setShowMessageOutline,
   // API Server actions
   setApiServerEnabled,

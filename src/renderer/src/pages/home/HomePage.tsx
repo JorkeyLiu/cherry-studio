@@ -1,4 +1,5 @@
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
+import ResizableHandle from '@renderer/components/ResizableHandle'
 import { useAssistants } from '@renderer/hooks/useAssistant'
 import { useNavbarPosition, useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
@@ -7,6 +8,7 @@ import { useActiveTopic } from '@renderer/hooks/useTopic'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import NavigationService from '@renderer/services/NavigationService'
 import { newMessagesActions } from '@renderer/store/newMessage'
+import { setAssistantsWidth } from '@renderer/store/settings'
 import type { Assistant, Topic } from '@renderer/types'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SECOND_MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { AnimatePresence, motion } from 'motion/react'
@@ -38,6 +40,13 @@ const HomePage: FC = () => {
   const { setShowAssistants, toggleShowAssistants } = useShowAssistants()
   const { toggleShowTopics } = useShowTopics()
   const dispatch = useDispatch()
+
+  const handleLeftResizeEnd = useCallback(
+    (width: number) => {
+      dispatch(setAssistantsWidth(width))
+    },
+    [dispatch]
+  )
 
   _activeAssistant = activeAssistant
 
@@ -149,6 +158,9 @@ const HomePage: FC = () => {
             </ErrorBoundary>
           )}
         </AnimatePresence>
+        {showAssistants && (
+          <ResizableHandle cssVar="--assistants-width" onResizeEnd={handleLeftResizeEnd} side="left" />
+        )}
         <ErrorBoundary>
           <Chat
             assistant={activeAssistant}
