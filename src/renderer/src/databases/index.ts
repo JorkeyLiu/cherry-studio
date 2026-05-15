@@ -32,7 +32,7 @@ export const db = new Dexie('CherryStudio', {
   chromeTransactionDurability: 'strict'
 }) as Dexie & {
   files: EntityTable<FileMetadata, 'id'>
-  topics: EntityTable<{ id: string; messages: NewMessage[] }, 'id'> // Correct type for topics
+  topics: EntityTable<{ id: string; messages: NewMessage[]; deletedAt?: string }, 'id'> // Correct type for topics
   settings: EntityTable<{ id: string; value: any }, 'id'>
   knowledge_notes: EntityTable<KnowledgeNoteItem, 'id'>
   translate_history: EntityTable<TranslateHistory, 'id'>
