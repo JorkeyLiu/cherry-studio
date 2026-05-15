@@ -582,13 +582,19 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   const singlealone = topicPosition === 'right' && position === 'right'
 
   return (
-    <>
+    <div className="relative flex h-full min-h-0 flex-col">
       <DraggableVirtualList
         ref={listRef}
         className="topics-tab"
         list={filteredTopics}
         onUpdate={updateTopics}
-        style={{ height: '100%', padding: '8px 0 10px 10px', paddingBottom: isManageMode ? 70 : 10 }}
+        style={{
+          flex: '1 1 auto',
+          minHeight: 0,
+          height: 'auto',
+          padding: '8px 0 10px 10px',
+          paddingBottom: isManageMode ? 70 : 10
+        }}
         itemContainerStyle={{ paddingBottom: '8px' }}
         header={
           <HeaderRow>
@@ -753,7 +759,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
           }
         }}
       />
-    </>
+    </div>
   )
 }
 
