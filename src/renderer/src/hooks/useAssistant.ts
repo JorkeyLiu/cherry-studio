@@ -153,8 +153,8 @@ export function useAssistant(id: string) {
     assistant: assistantWithModel,
     model,
     addTopic: (topic: Topic) => dispatch(addTopic({ assistantId: assistant.id, topic })),
-    removeTopic: (topic: Topic) => {
-      void TopicManager.softRemoveTopic(topic)
+    removeTopic: async (topic: Topic) => {
+      await TopicManager.softRemoveTopic(topic)
       dispatch(removeTopic({ assistantId: assistant.id, topic }))
     },
     restoreTopic: async (topicId: string) => {

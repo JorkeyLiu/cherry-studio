@@ -73,6 +73,7 @@ interface TopicManagePanelProps {
   moveTopic: (topic: Topic, toAssistant: Assistant) => void
   manageState: TopicManageModeState
   filteredTopics: Topic[]
+  onTrashChanged?: () => void
 }
 
 /**
@@ -86,7 +87,8 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
   updateTopics,
   moveTopic,
   manageState,
-  filteredTopics
+  filteredTopics,
+  onTrashChanged
 }) => {
   const { t } = useTranslation()
   const { isManageMode, selectedIds, searchText, exitManageMode, setSelectedIds, setSearchText } = manageState
@@ -174,8 +176,11 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
     } else {
       window.toast.error(t('chat.topics.manage.delete.error'))
     }
+    if (successfulIds.size > 0) {
+      onTrashChanged?.()
+    }
     exitManageMode()
-  }, [selectedIds, assistant.topics, activeTopic.id, setActiveTopic, t, exitManageMode, updateTopics])
+  }, [selectedIds, assistant.topics, activeTopic.id, setActiveTopic, t, exitManageMode, updateTopics, onTrashChanged])
 
   // Handle move selected topics to another assistant
   const handleMoveSelected = useCallback(
