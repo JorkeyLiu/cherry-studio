@@ -229,7 +229,7 @@ const SessionListItem = styled.div`
   flex-direction: column;
   justify-content: space-between;
   cursor: pointer;
-  width: calc(var(--assistants-width) - 20px);
+  width: calc(100% - 20px);
 
   .menu {
     opacity: 0;

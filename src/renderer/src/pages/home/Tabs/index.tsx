@@ -6,7 +6,7 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { Assistant, Topic } from '@renderer/types'
 import type { Tab } from '@renderer/types/chat'
 import { classNames, uuid } from '@renderer/utils'
-import type { FC } from 'react'
+import type { CSSProperties, FC } from 'react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
@@ -21,7 +21,7 @@ interface Props {
   setActiveTopic: (topic: Topic) => void
   position: 'left' | 'right'
   forceToSeeAllTab?: boolean
-  style?: React.CSSProperties
+  style?: CSSProperties
 }
 
 let _tab: Tab | null = null
@@ -48,6 +48,9 @@ const HomeTabs: FC<Props> = ({
     position === 'left'
       ? { borderRight: isLeftNavbar ? borderStyle : 'none' }
       : { borderLeft: isLeftNavbar ? borderStyle : 'none', borderTopLeftRadius: 0 }
+  const tabsWidthStyle = {
+    '--tabs-width': position === 'right' ? 'var(--topic-list-width, 275px)' : 'var(--assistants-width, 275px)'
+  } as CSSProperties
 
   if (position === 'left' && topicPosition === 'left') {
     _tab = tab
@@ -97,7 +100,7 @@ const HomeTabs: FC<Props> = ({
 
   return (
     <Container
-      style={{ ...border, ...style }}
+      style={{ ...border, ...tabsWidthStyle, ...style }}
       className={classNames('home-tabs', { right: position === 'right' && topicPosition === 'right' })}>
       {position === 'left' && topicPosition === 'left' && (
         <CustomTabs>
@@ -135,7 +138,7 @@ const HomeTabs: FC<Props> = ({
 const Container = styled.div`
   display: flex;
   flex-direction: column;
-  width: var(--assistants-width);
+  width: var(--tabs-width, 275px);
   transition: width 0.3s;
   height: calc(100vh - var(--navbar-height));
   position: relative;

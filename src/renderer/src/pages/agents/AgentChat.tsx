@@ -1,4 +1,5 @@
 import { QuickPanelProvider } from '@renderer/components/QuickPanel'
+import ResizableHandle from '@renderer/components/ResizableHandle'
 import { useActiveAgent } from '@renderer/hooks/agents/useActiveAgent'
 import { useAgents } from '@renderer/hooks/agents/useAgents'
 import { useCreateDefaultSession } from '@renderer/hooks/agents/useCreateDefaultSession'
@@ -6,6 +7,8 @@ import { useRuntime } from '@renderer/hooks/useRuntime'
 import { useNavbarPosition, useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
+import { useAppDispatch } from '@renderer/store'
+import { setTopicListWidth } from '@renderer/store/settings'
 import { cn } from '@renderer/utils'
 import { buildAgentSessionTopicId } from '@renderer/utils/agentSession'
 import { Alert, Spin } from 'antd'
@@ -26,6 +29,7 @@ const AgentChat = () => {
   const { messageNavigation, messageStyle, topicPosition } = useSettings()
   const { showTopics } = useShowTopics()
   const { chat } = useRuntime()
+  const dispatch = useAppDispatch()
   const { activeAgentId, activeSessionIdMap, isMultiSelectMode } = chat
   const activeSessionId = activeAgentId ? activeSessionIdMap[activeAgentId] : null
   // undefined = session not yet initialized, null = initialized but no sessions
@@ -110,17 +114,26 @@ const AgentChat = () => {
         </div>
       </QuickPanelProvider>
 
+      {/* Resizable Handle */}
+      {showRightSessions && (
+        <ResizableHandle
+          cssVar="--topic-list-width"
+          onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
+          side="right"
+        />
+      )}
+
       {/* Sessions Panel */}
       <AnimatePresence initial={false}>
         {showRightSessions && (
           <motion.div
             key="right-sessions"
             initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 'var(--assistants-width)', opacity: 1 }}
+            animate={{ width: 'var(--topic-list-width, 275px)', opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
             transition={{ duration: 0.3, ease: 'easeInOut' }}
             className="overflow-hidden">
-            <div className="flex h-full w-(--assistants-width) flex-col overflow-hidden">
+            <div className="flex h-full w-[var(--topic-list-width,275px)] flex-col overflow-hidden">
               <Sessions agentId={activeAgentId} />
             </div>
           </motion.div>

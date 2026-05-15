@@ -66,6 +66,16 @@ import { defaultWebSearchProviders } from './websearch'
 
 const logger = loggerService.withContext('Migrate')
 
+const DEFAULT_SIDEBAR_WIDTH = 275
+const MIN_SIDEBAR_WIDTH = 180
+const MAX_SIDEBAR_WIDTH = 600
+
+function normalizeSidebarWidth(width: unknown) {
+  return typeof width === 'number' && Number.isFinite(width)
+    ? Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, width))
+    : DEFAULT_SIDEBAR_WIDTH
+}
+
 // remove logo base64 data to reduce the size of the state
 function removeMiniAppIconsFromState(state: RootState) {
   if (state.minapps) {
@@ -3410,6 +3420,22 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 206 error', error as Error)
+      return state
+    }
+  },
+  '207': (state: RootState) => {
+    try {
+      state.settings = {
+        ...settingsInitialState,
+        ...state.settings,
+        assistantsWidth: normalizeSidebarWidth(state.settings?.assistantsWidth),
+        topicListWidth: normalizeSidebarWidth(state.settings?.topicListWidth)
+      }
+
+      logger.info('migrate 207 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 207 error', error as Error)
       return state
     }
   }

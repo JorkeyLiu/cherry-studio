@@ -1,5 +1,6 @@
 import { Navbar, NavbarCenter } from '@renderer/components/app/Navbar'
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
+import ResizableHandle from '@renderer/components/ResizableHandle'
 import { useActiveAgent } from '@renderer/hooks/agents/useActiveAgent'
 import { useAgents } from '@renderer/hooks/agents/useAgents'
 import { useApiServer } from '@renderer/hooks/useApiServer'
@@ -8,12 +9,14 @@ import { useNavbarPosition, useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowAssistants, useShowTopics } from '@renderer/hooks/useStore'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
+import { setAssistantsWidth } from '@renderer/store/settings'
 import { cn } from '@renderer/utils'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SECOND_MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { AnimatePresence, motion } from 'motion/react'
 import type { PropsWithChildren } from 'react'
 import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useDispatch } from 'react-redux'
 
 import AgentChat from './AgentChat'
 import AgentNavbar from './AgentNavbar'
@@ -25,6 +28,7 @@ const AgentPage = () => {
   const { showAssistants, toggleShowAssistants } = useShowAssistants()
   const { showTopics, toggleShowTopics } = useShowTopics()
   const { topicPosition } = useSettings()
+  const dispatch = useDispatch()
   const { chat } = useRuntime()
   const { activeAgentId } = chat
   const { agents } = useAgents()
@@ -63,6 +67,10 @@ const AgentPage = () => {
       void window.api.window.resetMinimumSize()
     }
   }, [showAssistants, showTopics, topicPosition])
+
+  const handleLeftResizeEnd = (width: number) => {
+    dispatch(setAssistantsWidth(width))
+  }
 
   if (!apiServerConfig.enabled) {
     return (
@@ -108,7 +116,7 @@ const AgentPage = () => {
             <ErrorBoundary>
               <motion.div
                 initial={{ width: 0, opacity: 0 }}
-                animate={{ width: 'var(--assistants-width)', opacity: 1 }}
+                animate={{ width: 'var(--assistants-width, 275px)', opacity: 1 }}
                 exit={{ width: 0, opacity: 0 }}
                 transition={{ duration: 0.3, ease: 'easeInOut' }}
                 style={{ overflow: 'hidden' }}>
@@ -117,6 +125,9 @@ const AgentPage = () => {
             </ErrorBoundary>
           )}
         </AnimatePresence>
+        {showAssistants && (
+          <ResizableHandle cssVar="--assistants-width" onResizeEnd={handleLeftResizeEnd} side="left" />
+        )}
         <ErrorBoundary>
           <AgentChat />
         </ErrorBoundary>

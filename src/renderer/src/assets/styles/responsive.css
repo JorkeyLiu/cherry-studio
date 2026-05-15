@@ -23,3 +23,9 @@
     --settings-width: 210px;
   }
 }
+
+/* Suppress all CSS transitions during panel resize dragging */
+html[data-resizing='true'] * {
+  transition-duration: 0s !important;
+  animation-duration: 0s !important;
+}

@@ -6,6 +6,7 @@ import MultiSelectActionPopup from '@renderer/components/Popups/MultiSelectionPo
 import PromptPopup from '@renderer/components/Popups/PromptPopup'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
 import { QuickPanelProvider } from '@renderer/components/QuickPanel'
+import ResizableHandle from '@renderer/components/ResizableHandle'
 import { isEmbeddingModel, isRerankModel, isWebSearchModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
@@ -14,6 +15,8 @@ import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
+import { useAppDispatch } from '@renderer/store'
+import { setTopicListWidth } from '@renderer/store/settings'
 import type { Assistant, Model, Topic } from '@renderer/types'
 import { classNames } from '@renderer/utils'
 import { Flex } from 'antd'
@@ -47,6 +50,7 @@ const Chat: FC<Props> = (props) => {
   const { showTopics } = useShowTopics()
   const { isMultiSelectMode } = useChatContext(props.activeTopic)
   const { isTopNavbar } = useNavbarPosition()
+  const dispatch = useAppDispatch()
 
   const mainRef = React.useRef<HTMLDivElement>(null)
   const contentSearchRef = React.useRef<ContentSearchRef>(null)
@@ -199,12 +203,19 @@ const Chat: FC<Props> = (props) => {
             </QuickPanelProvider>
           </Main>
         </motion.div>
+        {topicPosition === 'right' && showTopics && (
+          <ResizableHandle
+            cssVar="--topic-list-width"
+            onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
+            side="right"
+          />
+        )}
         <AnimatePresence initial={false}>
           {topicPosition === 'right' && showTopics && (
             <motion.div
               key="right-tabs"
               initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 'var(--assistants-width)', opacity: 1 }}
+              animate={{ width: 'var(--topic-list-width, 275px)', opacity: 1 }}
               exit={{ width: 0, opacity: 0 }}
               transition={{ duration: 0.3, ease: 'easeInOut' }}
               style={{
