@@ -20,7 +20,7 @@ const SettingsButton = () => {
         placement="right"
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        width="var(--assistants-width)"
+        width="var(--assistant-settings-width, 275px)"
         closable={false}
         styles={{ body: { padding: 0, paddingTop: 'var(--navbar-height)' } }}>
         <AgentSettingsTab />

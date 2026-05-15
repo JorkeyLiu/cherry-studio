@@ -6,6 +6,7 @@
   --input-bar-height: 100px;
 
   --assistants-width: 275px;
+  --assistant-settings-width: 275px;
   --topic-list-width: 275px;
   --settings-width: 250px;
 }
@@ -19,6 +20,7 @@
 @media (max-width: 1080px) {
   :root {
     --assistants-width: 210px;
+    --assistant-settings-width: 275px;
     --topic-list-width: 210px;
     --settings-width: 210px;
   }
