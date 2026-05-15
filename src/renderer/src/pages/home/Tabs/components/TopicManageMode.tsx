@@ -142,10 +142,12 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
 
     await modelGenerating()
 
-    const idsArray = Array.from(selectedIds)
+    const topicsToDelete = assistant.topics.filter((topic) => selectedIds.has(topic.id))
 
-    // Delete DB records and files
-    const results = await Promise.allSettled(idsArray.map((id) => TopicManager.removeTopic(id).then(() => id)))
+    // Soft-delete topics (move to trash)
+    const results = await Promise.allSettled(
+      topicsToDelete.map((topic) => TopicManager.softRemoveTopic(topic).then(() => topic.id))
+    )
 
     // Filter successful ids
     const successfulIds = new Set(
@@ -160,13 +162,13 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
       setActiveTopic(actualRemainingTopics[0])
     }
 
-    if (successfulIds.size === idsArray.length) {
+    if (successfulIds.size === topicsToDelete.length) {
       window.toast.success(t('chat.topics.manage.delete.success', { count: successfulIds.size }))
     } else if (successfulIds.size > 0) {
       window.toast.warning(
         t('chat.topics.manage.delete.partial_success', {
           successCount: successfulIds.size,
-          failedCount: idsArray.length - successfulIds.size
+          failedCount: topicsToDelete.length - successfulIds.size
         })
       )
     } else {

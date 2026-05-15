@@ -116,6 +116,7 @@ const ThinkModelTypes = [
   'gemini3_flash',
   'gemini3_pro',
   'gemini3_1_pro',
+  'gemma4_hosted',
   'qwen',
   'qwen_thinking',
   'doubao',
@@ -272,6 +273,7 @@ export type Topic = {
   name: string
   createdAt: string
   updatedAt: string
+  deletedAt?: string
   messages: Message[]
   pinned?: boolean
   prompt?: string

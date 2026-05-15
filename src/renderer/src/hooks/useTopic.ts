@@ -13,6 +13,7 @@ import type { FileMessageBlock, ImageMessageBlock } from '@renderer/types/newMes
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { findMainTextBlocks } from '@renderer/utils/messageUtils/find'
 import { truncateText } from '@renderer/utils/naming'
+import dayjs from 'dayjs'
 import { find, isEmpty } from 'lodash'
 import { type Dispatch, type SetStateAction, useEffect, useState } from 'react'
 
@@ -261,5 +262,47 @@ export const TopicManager = {
     if (filesToDelete.length > 0) {
       await safeDeleteFiles(filesToDelete)
     }
+  },
+
+  // Soft-delete: persist topic metadata in DB, keep messages/files intact
+  async softRemoveTopic(topic: Topic) {
+    const dbTopic = await db.topics.get(topic.id)
+    await db.topics.put({
+      ...topic,
+      messages: dbTopic?.messages ?? topic.messages ?? [],
+      deletedAt: new Date().toISOString()
+    } as Topic)
+  },
+
+  // Restore: clear deletedAt in DB
+  async restoreTopic(id: string) {
+    await db.topics.update(id, { deletedAt: undefined })
+  },
+
+  // Get all soft-deleted topics for a specific assistant (from DB)
+  async getTrashTopics(assistantId: string): Promise<Topic[]> {
+    const all = await db.topics.toArray()
+    return all.filter((t) => t.deletedAt && (t as Topic).assistantId === assistantId) as Topic[]
+  },
+
+  // Get all soft-deleted topics (from DB), regardless of assistant
+  async getAllTrashTopics(): Promise<Topic[]> {
+    const all = await db.topics.toArray()
+    return all.filter((t) => t.deletedAt) as Topic[]
+  },
+
+  // Permanently delete topics that have been in trash for >= 5 days
+  // Uses the existing removeTopic which clears messages+files
+  async purgeExpiredTopics(): Promise<number> {
+    const now = dayjs()
+    const trashTopics = await db.topics.filter((t) => !!t.deletedAt).toArray()
+    let count = 0
+    for (const topic of trashTopics) {
+      if (now.diff(dayjs(topic.deletedAt), 'day') >= 5) {
+        await TopicManager.removeTopic(topic.id) // existing hard delete
+        count++
+      }
+    }
+    return count
   }
 }
