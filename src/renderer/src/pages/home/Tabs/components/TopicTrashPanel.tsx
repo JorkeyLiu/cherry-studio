@@ -154,7 +154,7 @@ export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
 // ─── Styled sub-components ───────────────────────────────────────────────────
 
 const PanelWrapper: FC<PropsWithChildren> = ({ children }) => (
-  <div className="relative mt-auto w-full px-3 pb-3">{children}</div>
+  <div className="relative mt-auto w-full shrink-0 px-3 pb-3">{children}</div>
 )
 
 const CollapsedBar: FC<PropsWithChildren<React.HTMLAttributes<HTMLDivElement>>> = ({
