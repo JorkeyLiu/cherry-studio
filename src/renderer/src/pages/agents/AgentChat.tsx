@@ -117,7 +117,7 @@ const AgentChat = () => {
       {/* Resizable Handle */}
       {showRightSessions && (
         <ResizableHandle
-          cssVar="--assistants-width"
+          cssVar="--topic-list-width"
           onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
           side="right"
         />
@@ -129,11 +129,11 @@ const AgentChat = () => {
           <motion.div
             key="right-sessions"
             initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 'var(--assistants-width)', opacity: 1 }}
+            animate={{ width: 'var(--topic-list-width, 275px)', opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
             transition={{ duration: 0.3, ease: 'easeInOut' }}
             className="overflow-hidden">
-            <div className="flex h-full w-(--assistants-width) flex-col overflow-hidden">
+            <div className="flex h-full w-[var(--topic-list-width,275px)] flex-col overflow-hidden">
               <Sessions agentId={activeAgentId} />
             </div>
           </motion.div>

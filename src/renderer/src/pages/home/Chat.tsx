@@ -205,7 +205,7 @@ const Chat: FC<Props> = (props) => {
         </motion.div>
         {topicPosition === 'right' && showTopics && (
           <ResizableHandle
-            cssVar="--assistants-width"
+            cssVar="--topic-list-width"
             onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
             side="right"
           />
@@ -215,7 +215,7 @@ const Chat: FC<Props> = (props) => {
             <motion.div
               key="right-tabs"
               initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 'var(--assistants-width)', opacity: 1 }}
+              animate={{ width: 'var(--topic-list-width, 275px)', opacity: 1 }}
               exit={{ width: 0, opacity: 0 }}
               transition={{ duration: 0.3, ease: 'easeInOut' }}
               style={{

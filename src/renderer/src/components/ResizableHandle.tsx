@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { styled } from 'styled-components'
 
 interface ResizableHandleProps {
@@ -30,6 +30,7 @@ const ResizableHandle = ({
   const isDragging = useRef(false)
   const startX = useRef(0)
   const startWidth = useRef(0)
+  const [isActive, setIsActive] = useState(false)
 
   const getCurrentWidth = useCallback(() => {
     const raw = getComputedStyle(document.documentElement).getPropertyValue(cssVar).trim()
@@ -43,6 +44,7 @@ const ResizableHandle = ({
       isDragging.current = true
       startX.current = e.clientX
       startWidth.current = getCurrentWidth()
+      setIsActive(true)
 
       document.documentElement.setAttribute('data-resizing', 'true')
       document.body.style.cursor = 'col-resize'
@@ -61,6 +63,7 @@ const ResizableHandle = ({
 
       const handleMouseUp = () => {
         isDragging.current = false
+        setIsActive(false)
         document.documentElement.removeAttribute('data-resizing')
         document.body.style.cursor = ''
         document.body.style.userSelect = ''
@@ -83,19 +86,22 @@ const ResizableHandle = ({
       document.documentElement.removeAttribute('data-resizing')
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
+      setIsActive(false)
     }
   }, [])
 
-  return <Handle onMouseDown={handleMouseDown} $side={side} />
+  return <Handle $isActive={isActive} $side={side} onMouseDown={handleMouseDown} />
 }
 
-const Handle = styled.div<{ $side: 'left' | 'right' }>`
+const Handle = styled.div<{ $isActive: boolean; $side: 'left' | 'right' }>`
   width: ${HANDLE_WIDTH}px;
   min-width: ${HANDLE_WIDTH}px;
+  height: 100%;
   cursor: col-resize;
   position: relative;
   z-index: 10;
   flex-shrink: 0;
+  align-self: stretch;
   transition: width 0.15s ease, background-color 0.15s ease;
 
   &::after {
@@ -118,7 +124,9 @@ const Handle = styled.div<{ $side: 'left' | 'right' }>`
     }
   }
 
-  html[data-resizing='true'] & {
+  ${({ $isActive }) =>
+    $isActive &&
+    `
     width: ${HANDLE_HOVER_WIDTH}px;
     min-width: ${HANDLE_HOVER_WIDTH}px;
     background: transparent;
@@ -127,7 +135,7 @@ const Handle = styled.div<{ $side: 'left' | 'right' }>`
       background: var(--color-primary, #00b96b);
       width: 2px;
     }
-  }
+  `}
 `
 
 export default ResizableHandle

@@ -17,6 +17,19 @@ import Router from './Router'
 
 const logger = loggerService.withContext('App.tsx')
 
+const DEFAULT_SIDEBAR_WIDTH = 275
+const MIN_SIDEBAR_WIDTH = 180
+const MAX_SIDEBAR_WIDTH = 600
+
+const formatSidebarWidth = (width: unknown) => {
+  const normalized =
+    typeof width === 'number' && Number.isFinite(width)
+      ? Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, width))
+      : DEFAULT_SIDEBAR_WIDTH
+
+  return `${normalized}px`
+}
+
 // 创建 React Query 客户端
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -36,8 +49,8 @@ function SidebarWidthInitializer() {
   const topicListWidth = useAppSelector((s) => s.settings.topicListWidth)
 
   useEffect(() => {
-    document.documentElement.style.setProperty('--assistants-width', `${assistantsWidth}px`)
-    document.documentElement.style.setProperty('--topic-list-width', `${topicListWidth}px`)
+    document.documentElement.style.setProperty('--assistants-width', formatSidebarWidth(assistantsWidth))
+    document.documentElement.style.setProperty('--topic-list-width', formatSidebarWidth(topicListWidth))
   }, [assistantsWidth, topicListWidth])
 
   return null

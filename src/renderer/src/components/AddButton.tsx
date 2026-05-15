@@ -7,7 +7,7 @@ import styled from 'styled-components'
 const StyledButton = styled(Button)`
   height: 36px;
   min-height: 36px;
-  width: calc(var(--assistants-width) - 20px);
+  width: calc(var(--tabs-width, var(--assistants-width, 275px)) - 20px);
   justify-content: flex-start;
   border-radius: var(--list-item-border-radius);
   padding: 0 12px;
