@@ -13,7 +13,7 @@ import type { Assistant, Topic } from '@renderer/types'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SECOND_MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { AnimatePresence, motion } from 'motion/react'
 import type { FC } from 'react'
-import { startTransition, useCallback, useEffect, useState } from 'react'
+import { startTransition, useCallback, useEffect, useRef, useState } from 'react'
 import { useDispatch } from 'react-redux'
 import { useLocation, useNavigate } from 'react-router-dom'
 import styled from 'styled-components'
@@ -40,6 +40,7 @@ const HomePage: FC = () => {
   const { setShowAssistants, toggleShowAssistants } = useShowAssistants()
   const { toggleShowTopics } = useShowTopics()
   const dispatch = useDispatch()
+  const lastTopicByAssistantRef = useRef<Record<string, string>>({})
 
   const handleLeftResizeEnd = useCallback(
     (width: number) => {
@@ -87,24 +88,33 @@ const HomePage: FC = () => {
   const setActiveAssistant = useCallback(
     (newAssistant: Assistant) => {
       if (newAssistant.id === activeAssistant?.id) return
+      if (activeAssistant?.id && activeTopic?.id) {
+        lastTopicByAssistantRef.current[activeAssistant.id] = activeTopic.id
+      }
+
       startTransition(() => {
         _setActiveAssistant(newAssistant)
         // 同步更新 active topic，避免不必要的重新渲染
-        const newTopic = newAssistant.topics[0]
-        _setActiveTopic((prev) => (newTopic?.id === prev.id ? prev : newTopic))
+        const lastTopicId = lastTopicByAssistantRef.current[newAssistant.id]
+        const newTopic = newAssistant.topics.find((topic) => topic.id === lastTopicId) ?? newAssistant.topics[0]
+        _setActiveTopic((prev) => (newTopic?.id === prev?.id ? prev : newTopic))
       })
     },
-    [_setActiveTopic, activeAssistant?.id]
+    [_setActiveTopic, activeAssistant?.id, activeTopic?.id]
   )
 
   const setActiveTopic = useCallback(
     (newTopic: Topic) => {
+      if (activeAssistant?.id && newTopic?.id) {
+        lastTopicByAssistantRef.current[activeAssistant.id] = newTopic.id
+      }
+
       startTransition(() => {
-        _setActiveTopic((prev) => (newTopic?.id === prev.id ? prev : newTopic))
+        _setActiveTopic((prev) => (newTopic?.id === prev?.id ? prev : newTopic))
         dispatch(newMessagesActions.setTopicFulfilled({ topicId: newTopic.id, fulfilled: false }))
       })
     },
-    [_setActiveTopic, dispatch]
+    [_setActiveTopic, activeAssistant?.id, dispatch]
   )
 
   useEffect(() => {
