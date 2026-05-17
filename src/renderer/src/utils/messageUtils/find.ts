@@ -1,6 +1,7 @@
 import store from '@renderer/store'
 import { formatCitationsFromBlock, messageBlocksSelectors } from '@renderer/store/messageBlock'
 import type { FileMetadata } from '@renderer/types'
+import { ERROR_I18N_KEY_STREAM_PAUSED } from '@renderer/types/error'
 import type {
   CitationMessageBlock,
   FileMessageBlock,
@@ -11,7 +12,7 @@ import type {
   ThinkingMessageBlock,
   TranslationMessageBlock
 } from '@renderer/types/newMessage'
-import { MessageBlockType } from '@renderer/types/newMessage'
+import { AssistantMessageStatus, MessageBlockType } from '@renderer/types/newMessage'
 
 export const findAllBlocks = (message: Message): MessageBlock[] => {
   if (!message || !message.blocks || message.blocks.length === 0) {
@@ -116,6 +117,36 @@ export const findFileBlocks = (message: Message): FileMessageBlock[] => {
 export const getMainTextContent = (message: Message): string => {
   const textBlocks = findMainTextBlocks(message)
   return textBlocks.map((block) => block.content).join('\n\n')
+}
+
+export const isAssistantInterruptedThinkingOnlyMessage = (message: Message): boolean => {
+  if (message.role !== 'assistant') {
+    return false
+  }
+
+  const blocks = findAllBlocks(message)
+  if (blocks.length !== message.blocks.length || blocks.length === 0) {
+    return false
+  }
+
+  const hasThinkingBlock = blocks.some((block) => block.type === MessageBlockType.THINKING)
+  if (!hasThinkingBlock) {
+    return false
+  }
+
+  const isThinkingOnly = blocks.every((block) => block.type === MessageBlockType.THINKING)
+  if (message.status === AssistantMessageStatus.PAUSED && isThinkingOnly) {
+    return true
+  }
+
+  const hasPausedErrorBlock = blocks.some(
+    (block) => block.type === MessageBlockType.ERROR && block.error?.i18nKey === ERROR_I18N_KEY_STREAM_PAUSED
+  )
+  return (
+    message.status === AssistantMessageStatus.SUCCESS &&
+    hasPausedErrorBlock &&
+    blocks.every((block) => block.type === MessageBlockType.THINKING || block.type === MessageBlockType.ERROR)
+  )
 }
 
 /**

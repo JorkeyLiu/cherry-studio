@@ -45,7 +45,8 @@ import {
   findMainTextBlocks,
   findTranslationBlocks,
   findTranslationBlocksById,
-  getMainTextContent
+  getMainTextContent,
+  isAssistantInterruptedThinkingOnlyMessage
 } from '@renderer/utils/messageUtils/find'
 import type { MenuProps } from 'antd'
 import { Dropdown, Popconfirm, Tooltip } from 'antd'
@@ -294,7 +295,7 @@ const MessageMenubar: FC<Props> = (props) => {
   const { buttonIds, dropdownRootAllowKeys } = getMessageMenubarConfig(menubarScope)
 
   const isEditable = useMemo(() => {
-    return findMainTextBlocks(message).length > 0 // 使用 MCP Server 后会有大于一段 MatinTextBlock
+    return findMainTextBlocks(message).length > 0 || isAssistantInterruptedThinkingOnlyMessage(message) // 使用 MCP Server 后会有大于一段 MatinTextBlock
   }, [message])
 
   const dropdownItems = useMemo(() => {
