@@ -16,8 +16,8 @@ import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { classNames } from '@renderer/utils'
 import { getFilesFromDropEvent, isSendMessageKeyPressed } from '@renderer/utils/input'
-import { createFileBlock, createImageBlock } from '@renderer/utils/messageUtils/create'
-import { findAllBlocks } from '@renderer/utils/messageUtils/find'
+import { createFileBlock, createImageBlock, createMainTextBlock } from '@renderer/utils/messageUtils/create'
+import { findAllBlocks, isAssistantInterruptedThinkingOnlyMessage } from '@renderer/utils/messageUtils/find'
 import { documentExts, imageExts, textExts } from '@shared/config/constant'
 import { Space, Tooltip } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
@@ -41,9 +41,27 @@ interface Props {
 
 const logger = loggerService.withContext('MessageBlockEditor')
 
-const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onCancel }) => {
+const getInitialEditableBlocks = (message: Message) => {
   const allBlocks = findAllBlocks(message)
-  const [editedBlocks, setEditedBlocks] = useState<MessageBlock[]>(allBlocks)
+
+  if (
+    !allBlocks.some((block) => block.type === MessageBlockType.MAIN_TEXT) &&
+    isAssistantInterruptedThinkingOnlyMessage(message)
+  ) {
+    return [
+      ...allBlocks,
+      createMainTextBlock(message.id, '', {
+        model: message.model,
+        status: MessageBlockStatus.SUCCESS
+      })
+    ]
+  }
+
+  return allBlocks
+}
+
+const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onCancel }) => {
+  const [editedBlocks, setEditedBlocks] = useState<MessageBlock[]>(() => getInitialEditableBlocks(message))
   const [files, setFiles] = useState<FileMetadata[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
   const [isFileDragging, setIsFileDragging] = useState(false)
