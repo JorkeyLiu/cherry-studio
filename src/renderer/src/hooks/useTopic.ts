@@ -282,13 +282,17 @@ export const TopicManager = {
   // Get all soft-deleted topics for a specific assistant (from DB)
   async getTrashTopics(assistantId: string): Promise<Topic[]> {
     const all = await db.topics.toArray()
-    return all.filter((t) => t.deletedAt && (t as Topic).assistantId === assistantId) as Topic[]
+    return all
+      .filter((t) => t.deletedAt && (t as Topic).assistantId === assistantId)
+      .sort((a, b) => new Date(b.deletedAt!).getTime() - new Date(a.deletedAt!).getTime()) as Topic[]
   },
 
   // Get all soft-deleted topics (from DB), regardless of assistant
   async getAllTrashTopics(): Promise<Topic[]> {
     const all = await db.topics.toArray()
-    return all.filter((t) => t.deletedAt) as Topic[]
+    return all
+      .filter((t) => t.deletedAt)
+      .sort((a, b) => new Date(b.deletedAt!).getTime() - new Date(a.deletedAt!).getTime()) as Topic[]
   },
 
   // Permanently delete topics that have been in trash for >= 5 days
