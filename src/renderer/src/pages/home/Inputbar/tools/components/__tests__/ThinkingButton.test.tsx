@@ -433,6 +433,9 @@ describe('ThinkingButton', () => {
       fireEvent.click(getActionIconButton())
       expect(mockUpdateSettings).toHaveBeenCalledWith({
         reasoning_effort: 'none',
+        reasoning_effort_by_model: {
+          'openai:doubao-seed-1-6': 'none'
+        },
         reasoning_effort_cache: 'none',
         qwenThinkMode: false
       })

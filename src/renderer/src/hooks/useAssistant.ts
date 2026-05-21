@@ -26,6 +26,7 @@ import {
 } from '@renderer/store/assistants'
 import { setDefaultModel, setQuickModel, setTranslateModel } from '@renderer/store/llm'
 import type { Assistant, AssistantSettings, Model, ThinkingOption, Topic } from '@renderer/types'
+import { getModelReasoningEffortKey } from '@renderer/types'
 import { uuid } from '@renderer/utils'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -93,6 +94,7 @@ export function useAssistant(id: string) {
   )
 
   const settingsRef = useRef(assistant?.settings)
+  const previousModelKeyRef = useRef(getModelReasoningEffortKey(model))
 
   useEffect(() => {
     settingsRef.current = assistant?.settings
@@ -110,41 +112,90 @@ export function useAssistant(id: string) {
     const settings = settingsRef.current
     if (settings) {
       const currentReasoningEffort = settings.reasoning_effort
+      const currentModelKey = getModelReasoningEffortKey(model)
+      const previousModelKey = previousModelKeyRef.current
+      const reasoningEffortByModel = { ...settings.reasoning_effort_by_model }
+      const isModelChanged = previousModelKey !== undefined && previousModelKey !== currentModelKey
+
+      if (isModelChanged && previousModelKey && currentReasoningEffort) {
+        reasoningEffortByModel[previousModelKey] = currentReasoningEffort
+      }
+
       if (isSupportedThinkingTokenModel(model) || isSupportedReasoningEffortModel(model)) {
         const modelType = getThinkModelType(model)
         const supportedOptions = MODEL_SUPPORTED_OPTIONS[modelType]
-        if (supportedOptions.every((option) => option !== currentReasoningEffort)) {
+        const modelCachedOption = currentModelKey ? reasoningEffortByModel[currentModelKey] : undefined
+
+        if (modelCachedOption && supportedOptions.includes(modelCachedOption)) {
+          if (
+            modelCachedOption !== currentReasoningEffort ||
+            reasoningEffortByModel[currentModelKey!] !== modelCachedOption
+          ) {
+            updateAssistantSettings({
+              reasoning_effort: modelCachedOption,
+              reasoning_effort_by_model: reasoningEffortByModel,
+              qwenThinkMode: modelCachedOption !== 'none' && modelCachedOption !== 'default'
+            })
+          }
+        } else if (isModelChanged || supportedOptions.every((option) => option !== currentReasoningEffort)) {
           const cache = settings.reasoning_effort_cache
           let fallbackOption: ThinkingOption
 
-          // 选项不支持时，首先尝试恢复到上次使用的值
-          if (cache && supportedOptions.includes(cache)) {
+          // 选项不支持时，首先尝试恢复到上次使用的旧缓存值
+          if (!isModelChanged && cache && supportedOptions.includes(cache)) {
             fallbackOption = cache
           } else {
             // 灵活回退到支持的值
             // 注意：这里假设可用的options不会为空
-            const enableThinking = currentReasoningEffort !== undefined
+            const enableThinking = currentReasoningEffort !== undefined && currentReasoningEffort !== 'none'
             fallbackOption = enableThinking
               ? MODEL_SUPPORTED_REASONING_EFFORT[modelType][0]
               : MODEL_SUPPORTED_OPTIONS[modelType][0]
           }
 
+          if (currentModelKey) {
+            reasoningEffortByModel[currentModelKey] = fallbackOption
+          }
+
           updateAssistantSettings({
-            reasoning_effort: fallbackOption === 'none' ? undefined : fallbackOption,
-            reasoning_effort_cache: fallbackOption === 'none' ? undefined : fallbackOption,
-            qwenThinkMode: fallbackOption === 'none' ? undefined : true
+            reasoning_effort: fallbackOption,
+            reasoning_effort_by_model: reasoningEffortByModel,
+            reasoning_effort_cache: fallbackOption,
+            qwenThinkMode: fallbackOption !== 'none' && fallbackOption !== 'default'
           })
         } else {
-          // 对于支持的选项, 不再更新 cache.
+          if (
+            currentModelKey &&
+            currentReasoningEffort &&
+            reasoningEffortByModel[currentModelKey] !== currentReasoningEffort
+          ) {
+            reasoningEffortByModel[currentModelKey] = currentReasoningEffort
+            updateAssistantSettings({
+              reasoning_effort_by_model: reasoningEffortByModel,
+              reasoning_effort_cache: currentReasoningEffort,
+              qwenThinkMode: currentReasoningEffort !== 'none' && currentReasoningEffort !== 'default'
+            })
+          }
         }
       } else {
-        // 切换到非思考模型时保留cache
-        updateAssistantSettings({
-          reasoning_effort: undefined,
-          reasoning_effort_cache: currentReasoningEffort,
-          qwenThinkMode: undefined
-        })
+        // 切换到非思考模型时保留当前模型缓存，active值设为none以表达显式关闭
+        const shouldUpdate =
+          currentReasoningEffort !== 'none' ||
+          (isModelChanged &&
+            previousModelKey &&
+            settings.reasoning_effort_by_model?.[previousModelKey] !== currentReasoningEffort) ||
+          settings.reasoning_effort_cache !== currentReasoningEffort
+
+        if (shouldUpdate) {
+          updateAssistantSettings({
+            reasoning_effort: 'none',
+            reasoning_effort_by_model: reasoningEffortByModel,
+            reasoning_effort_cache: currentReasoningEffort,
+            qwenThinkMode: false
+          })
+        }
       }
+      previousModelKeyRef.current = currentModelKey
     }
   }, [model, updateAssistantSettings])
 
