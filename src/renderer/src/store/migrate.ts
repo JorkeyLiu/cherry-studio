@@ -42,7 +42,7 @@ import type {
   TranslateLanguageCode,
   WebSearchProvider
 } from '@renderer/types'
-import { isBuiltinMCPServer, isSystemProvider, SystemProviderIds } from '@renderer/types'
+import { getModelReasoningEffortKey, isBuiltinMCPServer, isSystemProvider, SystemProviderIds } from '@renderer/types'
 import { getDefaultGroupName, getLeadingEmoji, runAsyncFunction, uuid } from '@renderer/utils'
 import {
   isSupportArrayContentProvider,
@@ -3436,6 +3436,31 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 207 error', error as Error)
+      return state
+    }
+  },
+  '208': (state: RootState) => {
+    try {
+      const migrateAssistantReasoningEffort = (assistant: Assistant) => {
+        const settings = assistant.settings
+        const reasoningEffort = settings?.reasoning_effort
+        const modelKey = getModelReasoningEffortKey(assistant.model ?? assistant.defaultModel ?? state.llm.defaultModel)
+
+        if (settings && reasoningEffort && modelKey) {
+          settings.reasoning_effort_by_model = {
+            ...settings.reasoning_effort_by_model,
+            [modelKey]: settings.reasoning_effort_by_model?.[modelKey] ?? reasoningEffort
+          }
+        }
+      }
+
+      migrateAssistantReasoningEffort(state.assistants.defaultAssistant)
+      state.assistants.assistants.forEach(migrateAssistantReasoningEffort)
+
+      logger.info('migrate 208 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 208 error', error as Error)
       return state
     }
   }

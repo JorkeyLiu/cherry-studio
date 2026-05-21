@@ -186,6 +186,11 @@ export type AssistantSettings = {
   customParameters?: AssistantSettingCustomParameters[]
   reasoning_effort: ReasoningEffortOption
   /**
+   * Preserve each model's selected reasoning effort independently.
+   * Key format should be stable across sessions, e.g. `${provider}:${model.id}`.
+   */
+  reasoning_effort_by_model?: Record<string, ReasoningEffortOption>
+  /**
    * Preserve the effective reasoning effort (not 'default') from the last use of a thinking model which supports thinking control,
    * and restore it when switching back from a non-thinking or fixed reasoning model.
    * FIXME: It should be managed by external cache service instead of being stored in the assistant
@@ -333,6 +338,11 @@ export type Model = {
   endpoint_type?: EndpointType
   supported_endpoint_types?: EndpointType[]
   supported_text_delta?: boolean
+}
+
+export function getModelReasoningEffortKey(model?: Model): string | undefined {
+  if (!model?.provider || !model.id) return undefined
+  return `${model.provider}:${model.id}`
 }
 
 export type Suggestion = {

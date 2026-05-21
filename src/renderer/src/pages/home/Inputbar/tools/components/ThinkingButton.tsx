@@ -21,6 +21,7 @@ import {
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import type { ToolQuickPanelApi } from '@renderer/pages/home/Inputbar/types'
 import type { Model, ThinkingOption } from '@renderer/types'
+import { getModelReasoningEffortKey } from '@renderer/types'
 import { Tooltip } from 'antd'
 import type { FC, ReactElement } from 'react'
 import { useCallback, useEffect, useMemo } from 'react'
@@ -78,8 +79,12 @@ const ThinkingButton: FC<Props> = ({
       }
 
       if (!isEnabled) {
+        const modelKey = getModelReasoningEffortKey(model)
         updateAssistantSettings({
           reasoning_effort: option,
+          reasoning_effort_by_model: modelKey
+            ? { ...assistant.settings?.reasoning_effort_by_model, [modelKey]: option }
+            : assistant.settings?.reasoning_effort_by_model,
           reasoning_effort_cache: option,
           qwenThinkMode: false
         })
@@ -94,13 +99,25 @@ const ThinkingButton: FC<Props> = ({
         window.toast.warning(t('chat.web_search.warning.openai'))
         return
       }
+      const modelKey = getModelReasoningEffortKey(model)
       updateAssistantSettings({
         reasoning_effort: option,
+        reasoning_effort_by_model: modelKey
+          ? { ...assistant.settings?.reasoning_effort_by_model, [modelKey]: option }
+          : assistant.settings?.reasoning_effort_by_model,
         reasoning_effort_cache: option,
         qwenThinkMode: true
       })
     },
-    [isControlled, onReasoningEffortChange, updateAssistantSettings, assistant.enableWebSearch, model, t]
+    [
+      isControlled,
+      onReasoningEffortChange,
+      updateAssistantSettings,
+      assistant.enableWebSearch,
+      assistant.settings?.reasoning_effort_by_model,
+      model,
+      t
+    ]
   )
 
   const reasoningEffortOptionLabelMap = {
@@ -222,9 +239,9 @@ const ThinkingButton: FC<Props> = ({
     <Tooltip placement="top" title={ariaLabel} mouseLeaveDelay={0} arrow>
       <ActionIconButton
         onClick={handleOpenQuickPanel}
-        active={isFixedReasoning || currentReasoningEffort !== 'none'}
+        active={isFixedReasoning || isThinkingEnabled}
         aria-label={ariaLabel}
-        aria-pressed={currentReasoningEffort !== 'none'}
+        aria-pressed={isThinkingEnabled}
         style={isFixedReasoning ? { cursor: 'default' } : undefined}>
         {ThinkingIcon({ option: currentReasoningEffort, isFixedReasoning })}
       </ActionIconButton>
