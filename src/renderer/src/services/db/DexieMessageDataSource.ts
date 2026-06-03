@@ -19,6 +19,7 @@ import db from '@renderer/databases'
 import FileManager from '@renderer/services/FileManager'
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
+import { setSkipSyncCollection } from '@renderer/sync'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { isEmpty } from 'lodash'
 
@@ -93,22 +94,25 @@ export class DexieMessageDataSource implements MessageDataSource {
           throw new Error(`Failed to create topic ${topicId}`)
         }
 
-        const updatedMessages = [...(topic.messages || [])]
-
-        // Check if message already exists
-        const existingIndex = updatedMessages.findIndex((m) => m.id === message.id)
-        if (existingIndex !== -1) {
-          updatedMessages[existingIndex] = message
-        } else {
-          // Insert at specific index or append
-          if (insertIndex !== undefined && insertIndex >= 0 && insertIndex <= updatedMessages.length) {
-            updatedMessages.splice(insertIndex, 0, message)
-          } else {
-            updatedMessages.push(message)
-          }
-        }
-
-        await db.topics.update(topicId, { messages: updatedMessages })
+        // Use incremental modify to add/update message in-place
+        await db.topics
+          .where('id')
+          .equals(topicId)
+          .modify((topic) => {
+            if (!topic) return
+            const messages = topic.messages || []
+            const existingIndex = messages.findIndex((m) => m.id === message.id)
+            if (existingIndex !== -1) {
+              messages[existingIndex] = message
+            } else {
+              // Insert at specific index or append
+              if (insertIndex !== undefined && insertIndex >= 0 && insertIndex <= messages.length) {
+                messages.splice(insertIndex, 0, message)
+              } else {
+                messages.push(message)
+              }
+            }
+          })
       })
 
       store.dispatch(updateTopicUpdatedAt({ topicId }))
@@ -207,9 +211,14 @@ export class DexieMessageDataSource implements MessageDataSource {
           await db.message_blocks.bulkDelete(blockIds)
         }
 
-        // Remove message from topic
-        topic.messages.splice(messageIndex, 1)
-        await db.topics.update(topicId, { messages: topic.messages })
+        // Remove message from topic using incremental modify
+        await db.topics
+          .where('id')
+          .equals(topicId)
+          .modify((topic) => {
+            if (!topic || !topic.messages) return
+            topic.messages.splice(messageIndex, 1)
+          })
       })
 
       store.dispatch(updateTopicUpdatedAt({ topicId }))
@@ -254,9 +263,14 @@ export class DexieMessageDataSource implements MessageDataSource {
           await db.message_blocks.bulkDelete(allBlockIds)
         }
 
-        // Remove messages from topic
-        const remainingMessages = topic.messages.filter((m) => !messageIds.includes(m.id))
-        await db.topics.update(topicId, { messages: remainingMessages })
+        // Remove messages from topic using incremental modify
+        await db.topics
+          .where('id')
+          .equals(topicId)
+          .modify((topic) => {
+            if (!topic || !topic.messages) return
+            topic.messages = topic.messages.filter((m) => !messageIds.includes(m.id))
+          })
       })
       store.dispatch(updateTopicUpdatedAt({ topicId }))
     } catch (error) {
@@ -359,8 +373,15 @@ export class DexieMessageDataSource implements MessageDataSource {
           await db.message_blocks.bulkDelete(blockIds)
         }
 
-        // Clear messages
+        // Clear messages — this is a device-local operation and MUST NOT sync to
+        // other devices. If it synced, remote devices would have their messages
+        // arrays emptied unexpectedly.
+        // Rationale: each device independently manages its own message display
+        // state. Clearing messages is equivalent to "hide/clear locally", not
+        // "delete from all devices".
+        setSkipSyncCollection(true)
         await db.topics.update(topicId, { messages: [] })
+        setSkipSyncCollection(false)
       })
 
       store.dispatch(updateTopicUpdatedAt({ topicId }))

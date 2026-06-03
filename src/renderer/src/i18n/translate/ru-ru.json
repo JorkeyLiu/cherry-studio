@@ -5852,6 +5852,35 @@
       "title": "Масштаб страницы"
     }
   },
+  "sync": {
+    "apiKey": "[to be translated]:API Key",
+    "description": "[to be translated]:Keep your data synchronized across devices",
+    "deviceId": "[to be translated]:Device ID",
+    "hoursAgo": "[to be translated]:{{count}} hours ago",
+    "justNow": "[to be translated]:Just now",
+    "lastSync": "[to be translated]:Last Sync",
+    "minutesAgo": "[to be translated]:{{count}} minutes ago",
+    "never": "[to be translated]:Never",
+    "password": "[to be translated]:Password",
+    "pendingChanges": "[to be translated]:Pending Changes",
+    "status": {
+      "disconnected": "[to be translated]:Disconnected",
+      "error": "[to be translated]:Error",
+      "idle": "[to be translated]:Idle",
+      "syncing": "[to be translated]:Syncing...",
+      "title": "[to be translated]:Status"
+    },
+    "syncNow": "[to be translated]:Sync Now",
+    "title": "[to be translated]:Cross-Device Sync",
+    "transport": {
+      "couchdb": "[to be translated]:CouchDB",
+      "disabled": "[to be translated]:Disabled",
+      "rest": "[to be translated]:REST API",
+      "title": "[to be translated]:Sync Method"
+    },
+    "url": "[to be translated]:Server URL",
+    "username": "[to be translated]:Username"
+  },
   "title": {
     "apps": "Приложения",
     "code": "Code",

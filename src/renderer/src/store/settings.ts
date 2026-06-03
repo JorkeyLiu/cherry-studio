@@ -248,6 +248,14 @@ export interface SettingsState {
   // API Server
   apiServer: ApiServerConfig
   showMessageOutline: boolean
+  // Cross-device sync settings
+  sync: {
+    transport: 'disabled' | 'couchdb' | 'rest'
+    url: string
+    username: string
+    password: string
+    apiKey: string
+  }
 }
 
 export type MultiModelMessageStyle = 'horizontal' | 'vertical' | 'fold' | 'grid'
@@ -449,7 +457,15 @@ export const initialState: SettingsState = {
     port: API_SERVER_DEFAULTS.PORT,
     apiKey: `cs-sk-${uuid()}`
   },
-  showMessageOutline: false
+  showMessageOutline: false,
+  // Cross-device sync settings
+  sync: {
+    transport: 'disabled',
+    url: '',
+    username: '',
+    password: '',
+    apiKey: ''
+  }
 }
 
 const settingsSlice = createSlice({
@@ -899,6 +915,9 @@ const settingsSlice = createSlice({
     },
     setShowMessageOutline: (state, action: PayloadAction<boolean>) => {
       state.showMessageOutline = action.payload
+    },
+    setSyncSettings: (state, action: PayloadAction<SettingsState['sync']>) => {
+      state.sync = action.payload
     }
   }
 })
@@ -1033,7 +1052,9 @@ export const {
   // API Server actions
   setApiServerEnabled,
   setApiServerPort,
-  setApiServerApiKey
+  setApiServerApiKey,
+  // Sync actions
+  setSyncSettings
 } = settingsSlice.actions
 
 export default settingsSlice.reducer

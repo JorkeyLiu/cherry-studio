@@ -811,10 +811,9 @@ const dispatchMultiModelResponses = async (
 
   const topicFromDB = await db.topics.get(topicId)
   if (topicFromDB) {
-    const currentTopicMessageIds = getState().messages.messageIdsByTopic[topicId] || []
-    const currentEntities = getState().messages.entities
-    const messagesToSaveInDB = currentTopicMessageIds.map((id) => currentEntities[id]).filter((m): m is Message => !!m)
-    await db.topics.update(topicId, { messages: messagesToSaveInDB })
+    for (const stub of assistantMessageStubs) {
+      await dbService.appendMessage(topicId, stub, [])
+    }
   } else {
     logger.error(`[dispatchMultiModelResponses] Topic ${topicId} not found in DB during multi-model save.`)
     throw new Error(`Topic ${topicId} not found in DB.`)
@@ -1278,12 +1277,14 @@ export const resendMessageThunk =
       const originModelSet = new Set(assistantMessagesToReset.map((m) => m.model).filter((m) => m !== undefined))
       const mentionedModelSet = new Set(userMessageToResend.mentions ?? [])
       const newModelSet = new Set([...mentionedModelSet].filter((m) => !originModelSet.has(m)))
+      const newAssistantMessages: Message[] = [] // Track new messages for incremental DB append
       for (const model of newModelSet) {
         const assistantMessage = createAssistantMessage(assistant.id, topicId, {
           askId: userMessageToResend.id,
           model: model,
           modelId: model.id
         })
+        newAssistantMessages.push(assistantMessage)
         resetDataList.push(assistantMessage)
         dispatch(newMessagesActions.addMessage({ topicId, message: assistantMessage }))
       }
@@ -1292,11 +1293,16 @@ export const resendMessageThunk =
       cleanupMultipleBlocks(dispatch, allBlockIdsToDelete)
 
       try {
+        // Incremental DB operations: delete blocks, update reset messages, append new messages
         if (allBlockIdsToDelete.length > 0) {
-          await db.message_blocks.bulkDelete(allBlockIdsToDelete)
+          await dbService.deleteBlocks(allBlockIdsToDelete)
         }
-        const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
-        await db.topics.update(topicId, { messages: finalMessagesToSave })
+        for (const msgUpdate of messagesToUpdateInRedux) {
+          await dbService.updateMessage(msgUpdate.topicId, msgUpdate.messageId, msgUpdate.updates)
+        }
+        for (const newMsg of newAssistantMessages) {
+          await dbService.appendMessage(topicId, newMsg, [])
+        }
       } catch (dbError) {
         logger.error('[resendMessageThunk] Error updating database:', dbError as Error)
       }
@@ -1410,18 +1416,11 @@ export const regenerateAssistantResponseThunk =
       // 6. Remove old blocks from Redux
       cleanupMultipleBlocks(dispatch, blockIdsToDelete)
 
-      // 7. Update DB: Save the reset message state within the topic and delete old blocks
-      // Fetch the current state *after* Redux updates to get the latest message list
-      // Use the selector to get the final ordered list of messages for the topic
-      const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
-
-      await db.transaction('rw', db.topics, db.message_blocks, async () => {
-        // Use the result from the selector to update the DB
-        await db.topics.update(topicId, { messages: finalMessagesToSave })
-        if (blockIdsToDelete.length > 0) {
-          await db.message_blocks.bulkDelete(blockIdsToDelete)
-        }
-      })
+      // 7. Update DB: Incremental operations — update reset message in-place and delete old blocks
+      await dbService.updateMessage(topicId, resetAssistantMsg.id, resetAssistantMsg)
+      if (blockIdsToDelete.length > 0) {
+        await dbService.deleteBlocks(blockIdsToDelete)
+      }
 
       // 8. Add fetch/process call to the queue
       const queue = getTopicQueue(topicId)
@@ -1492,13 +1491,20 @@ export const initiateTranslationThunk =
         })
       )
 
-      // 3. Update Database
-      // Get the final message list from Redux state *after* updates
-      const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
-
+      // 3. Update Database — incremental: save new block + update message's block list in-place
       await db.transaction('rw', db.topics, db.message_blocks, async () => {
         await db.message_blocks.put(newBlock) // Save the initial block
-        await db.topics.update(topicId, { messages: finalMessagesToSave }) // Save updated message list
+        // Update only the blocks array on the affected message
+        await db.topics
+          .where('id')
+          .equals(topicId)
+          .modify((topic) => {
+            if (!topic || !topic.messages) return
+            const messageIndex = topic.messages.findIndex((m) => m.id === messageId)
+            if (messageIndex !== -1) {
+              topic.messages[messageIndex].blocks = updatedBlockIds
+            }
+          })
       })
       return newBlock.id // Return the ID
     } catch (error) {
@@ -1744,9 +1750,16 @@ export const cloneMessagesToNewTopicThunk =
 
       // 5. Update Database (Atomic Transaction)
       await db.transaction('rw', db.topics, db.message_blocks, db.files, async () => {
-        // Update the NEW topic with the cloned messages
-        // Assumes topic entry was added by caller, so we UPDATE.
-        await db.topics.put({ id: newTopic.id, messages: clonedMessages })
+        // Set messages on the new topic using update (partial modifications) rather
+        // than put (full object replace). This ensures the sync layer captures only
+        // { messages: [...] } instead of the entire topic object, reducing sync payload.
+        //
+        // KNOWN LIMITATION: For large topics (500+ messages), the full messages array
+        // is still transmitted as a single UPDATE sync change. A per-message incremental
+        // approach (dbService.appendMessage) was considered but rejected because each
+        // call generates an UPDATE with the growing messages array, resulting in O(N²)
+        // total sync data. If this becomes a bottleneck, evaluate a batching strategy.
+        await db.topics.update(newTopic.id, { messages: clonedMessages })
 
         // Add the NEW blocks
         if (clonedBlocks.length > 0) {
@@ -1863,21 +1876,12 @@ export const removeBlocksThunk =
       )
       cleanupMultipleBlocks(dispatch, blockIdsToRemove)
 
-      // 2. Update database - different handling for agent vs Dexie topics
-      if (isAgentSessionTopicId(topicId)) {
-        // For agent topics: dbService.updateMessage routes to AgentMessageDataSource
-        await dbService.updateMessage(topicId, messageId, {
-          blocks: updatedBlockIds
-        })
-      } else {
-        // For Dexie topics: use transaction for atomicity
-        const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
-        await db.transaction('rw', db.topics, db.message_blocks, async () => {
-          await db.topics.update(topicId, { messages: finalMessagesToSave })
-          if (blockIdsToRemove.length > 0) {
-            await db.message_blocks.bulkDelete(blockIdsToRemove)
-          }
-        })
+      // 2. Update database — incremental operations for both agent and Dexie topics
+      await dbService.updateMessage(topicId, messageId, {
+        blocks: updatedBlockIds
+      })
+      if (blockIdsToRemove.length > 0) {
+        await dbService.deleteBlocks(blockIdsToRemove)
       }
 
       dispatch(updateTopicUpdatedAt({ topicId }))

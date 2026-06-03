@@ -8,6 +8,7 @@ import store from '@renderer/store'
 import { updateTopic } from '@renderer/store/assistants'
 import { setNewlyRenamedTopics, setRenamingTopics } from '@renderer/store/runtime'
 import { loadTopicMessagesThunk } from '@renderer/store/thunk/messageThunk'
+import { setSkipSyncCollection } from '@renderer/sync'
 import type { Assistant, FileMetadata, Topic } from '@renderer/types'
 import type { FileMessageBlock, ImageMessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
@@ -261,5 +262,74 @@ export const TopicManager = {
     if (filesToDelete.length > 0) {
       await safeDeleteFiles(filesToDelete)
     }
+  }
+}
+
+/**
+ * Restore a soft-deleted topic from the trash by clearing its deletedAt field.
+ * The sync layer's ConflictResolver has restore-wins semantics for deletedAt,
+ * so this change will propagate to other devices as a restore operation.
+ */
+export const addTopicFromTrash = async (topicId: string): Promise<void> => {
+  try {
+    await db.topics.update(topicId, { deletedAt: null } as any)
+    logger.info(`Topic ${topicId} restored from trash`)
+  } catch (error) {
+    logger.error(`Failed to restore topic ${topicId} from trash:`, error as Error)
+    throw error
+  }
+}
+
+/**
+ * Permanently delete topics that have been in the trash (soft-deleted) for
+ * more than 5 days. Also removes associated message_blocks.
+ *
+ * This operation is intentionally local-only (sync is suppressed) because each
+ * device should independently manage its own trash cleanup. If one device purges
+ * an expired topic, other devices should not have their topics forcibly removed.
+ */
+export const purgeExpiredTopics = async (): Promise<void> => {
+  try {
+    const fiveDaysAgo = Date.now() - 5 * 24 * 60 * 60 * 1000
+
+    // Find topics where deletedAt is set and older than 5 days
+    // deletedAt can be stored as ISO string or numeric timestamp
+    const expiredTopics = await db.topics
+      .filter((topic) => {
+        const deletedAt = (topic as any).deletedAt
+        if (deletedAt == null) return false
+        const deletedTime =
+          typeof deletedAt === 'string' ? new Date(deletedAt).getTime() : typeof deletedAt === 'number' ? deletedAt : 0
+        return deletedTime > 0 && deletedTime < fiveDaysAgo
+      })
+      .toArray()
+
+    if (expiredTopics.length === 0) {
+      logger.info('No expired topics to purge')
+      return
+    }
+
+    logger.info(`Purging ${expiredTopics.length} expired topics`)
+
+    // Suppress sync — each device independently purges its own expired trash
+    setSkipSyncCollection(true)
+    try {
+      for (const topic of expiredTopics) {
+        const blockIds = ((topic as any).messages || []).flatMap((m: any) => m.blocks || [])
+
+        if (blockIds.length > 0) {
+          await db.message_blocks.bulkDelete(blockIds)
+        }
+
+        await db.topics.delete(topic.id)
+        logger.silly(`Purged topic ${topic.id}`)
+      }
+    } finally {
+      setSkipSyncCollection(false)
+    }
+
+    logger.info(`Purged ${expiredTopics.length} expired topics`)
+  } catch (error) {
+    logger.error('Failed to purge expired topics:', error as Error)
   }
 }

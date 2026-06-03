@@ -27,7 +27,25 @@ import { Dexie, type EntityTable } from 'dexie'
 
 import { upgradeToV5, upgradeToV7, upgradeToV8 } from './upgrades'
 
-// Database declaration (move this to its own module also)
+// ── Sync queue entry (stored in `_sync_queue` table) ────────────
+
+export interface SyncQueueEntry {
+  id: string
+  table: string
+  op: string
+  key: string
+  newValue?: unknown
+  oldValue?: unknown
+  txId?: string
+  deviceId: string
+  timestamp: number
+  /** 0 = pending (awaiting push), 1 = synced */
+  synced: number
+  vector: Record<string, number>
+}
+
+// ── Database declaration ────────────────────────────────────────
+
 export const db = new Dexie('CherryStudio', {
   chromeTransactionDurability: 'strict'
 }) as Dexie & {
@@ -39,6 +57,7 @@ export const db = new Dexie('CherryStudio', {
   quick_phrases: EntityTable<QuickPhrase, 'id'>
   message_blocks: EntityTable<MessageBlock, 'id'> // Correct type for message_blocks
   translate_languages: EntityTable<CustomTranslateLanguage, 'id'>
+  _sync_queue: EntityTable<SyncQueueEntry, 'id'>
 }
 
 db.version(1).stores({
@@ -133,6 +152,19 @@ db.version(10).stores({
   translate_languages: '&id, langCode',
   quick_phrases: 'id',
   message_blocks: 'id, messageId, file.id'
+})
+
+// Version 11: Add sync queue table for cross-device sync
+db.version(11).stores({
+  files: 'id, name, origin_name, path, size, ext, type, created_at, count',
+  topics: '&id',
+  settings: '&id, value',
+  knowledge_notes: '&id, baseId, type, content, created_at, updated_at',
+  translate_history: '&id, sourceText, targetText, sourceLanguage, targetLanguage, createdAt',
+  translate_languages: '&id, langCode',
+  quick_phrases: 'id',
+  message_blocks: 'id, messageId, file.id',
+  _sync_queue: 'id, table, key, synced, timestamp'
 })
 
 export default db

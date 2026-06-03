@@ -41,6 +41,7 @@ import QuickPhraseSettings from './QuickPhraseSettings'
 import SelectionAssistantSettings from './SelectionAssistantSettings/SelectionAssistantSettings'
 import ShortcutSettings from './ShortcutSettings'
 import SkillsSettings from './SkillsSettings'
+import SyncSettings from './SyncSettings'
 import TasksSettings from './TasksSettings'
 import { ApiServerSettings } from './ToolSettings/ApiServerSettings'
 import WebSearchSettings from './WebSearchSettings'
@@ -87,6 +88,12 @@ const SettingsPage: FC = () => {
             <MenuItem className={isRoute('/settings/data')}>
               <HardDrive size={18} />
               {t('settings.data.title')}
+            </MenuItem>
+          </MenuItemLink>
+          <MenuItemLink to="/settings/sync">
+            <MenuItem className={isRoute('/settings/sync')}>
+              <Cloud size={18} />
+              {t('sync.title')}
             </MenuItem>
           </MenuItemLink>
           <Divider />
@@ -190,6 +197,7 @@ const SettingsPage: FC = () => {
             <Route path="quickAssistant" element={<QuickAssistantSettings />} />
             <Route path="selectionAssistant" element={<SelectionAssistantSettings />} />
             <Route path="data" element={<DataSettings />} />
+            <Route path="sync" element={<SyncSettings />} />
             <Route path="about" element={<AboutSettings />} />
           </Routes>
         </SettingContent>

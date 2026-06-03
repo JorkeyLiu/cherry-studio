@@ -5852,6 +5852,36 @@
       "title": "缩放"
     }
   },
+  "sync": {
+    "apiKey": "API 密钥",
+    "description": "在您的设备之间同步数据",
+    "deviceId": "设备 ID",
+    "hoursAgo": "{{count}} 小时前",
+    "justNow": "刚刚",
+    "lastSync": "上次同步",
+    "minutesAgo": "{{count}} 分钟前",
+    "never": "从未",
+    "password": "密码",
+    "pendingChanges": "待同步变更",
+    "status": {
+      "connecting": "连接中...",
+      "disconnected": "未连接",
+      "error": "错误",
+      "idle": "空闲",
+      "syncing": "同步中...",
+      "title": "状态"
+    },
+    "syncNow": "立即同步",
+    "title": "跨设备同步",
+    "transport": {
+      "couchdb": "CouchDB",
+      "disabled": "禁用",
+      "rest": "REST API",
+      "title": "同步方式"
+    },
+    "url": "服务器地址",
+    "username": "用户名"
+  },
   "title": {
     "apps": "小程序",
     "code": "Code",

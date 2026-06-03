@@ -5852,6 +5852,36 @@
       "title": "Page Zoom"
     }
   },
+  "sync": {
+    "apiKey": "API Key",
+    "description": "Keep your data synchronized across devices",
+    "deviceId": "Device ID",
+    "hoursAgo": "{{count}} hours ago",
+    "justNow": "Just now",
+    "lastSync": "Last Sync",
+    "minutesAgo": "{{count}} minutes ago",
+    "never": "Never",
+    "password": "Password",
+    "pendingChanges": "Pending Changes",
+    "status": {
+      "connecting": "Connecting...",
+      "disconnected": "Disconnected",
+      "error": "Error",
+      "idle": "Idle",
+      "syncing": "Syncing...",
+      "title": "Status"
+    },
+    "syncNow": "Sync Now",
+    "title": "Cross-Device Sync",
+    "transport": {
+      "couchdb": "CouchDB",
+      "disabled": "Disabled",
+      "rest": "REST API",
+      "title": "Sync Method"
+    },
+    "url": "Server URL",
+    "username": "Username"
+  },
   "title": {
     "apps": "Apps",
     "code": "Code",
