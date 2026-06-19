@@ -1,7 +1,7 @@
 import { loggerService } from '@logger'
 import ContextMenu from '@renderer/components/ContextMenu'
 import { LoadingIcon } from '@renderer/components/Icons'
-import { LOAD_MORE_COUNT } from '@renderer/config/constant'
+import { INITIAL_MESSAGES_COUNT, LOAD_MORE_COUNT, SCROLL_CONTEXT_COUNT } from '@renderer/config/constant'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageOperations, useTopicMessages } from '@renderer/hooks/useMessageOperations'
@@ -28,11 +28,12 @@ import {
   removeSpecialCharactersForFileName,
   runAsyncFunction
 } from '@renderer/utils'
+import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import { last } from 'lodash'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
@@ -51,15 +52,55 @@ interface MessagesProps {
   onFirstUpdate?(): void
 }
 
+export interface MessagesHandle {
+  scrollToMessageById: (messageId: string) => void
+}
+
+/**
+ * Find the first visible message element in the scroll container.
+ * Returns the element and its bounding rect, or null if not found.
+ */
+const findFirstVisibleMessage = (
+  container: HTMLElement | null,
+  elements: Map<string, HTMLElement>
+): { element: HTMLElement; rect: DOMRect } | null => {
+  if (!container) return null
+  const containerRect = container.getBoundingClientRect()
+
+  let closest: { element: HTMLElement; rect: DOMRect } | null = null
+  let minDistance = Infinity
+  for (const el of elements.values()) {
+    const rect = el.getBoundingClientRect()
+    const distance = Math.abs(rect.top - containerRect.top)
+    if (distance < minDistance) {
+      minDistance = distance
+      closest = { element: el, rect }
+    }
+  }
+  return closest
+}
+
 const logger = loggerService.withContext('Messages')
 
-const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, onComponentUpdate, onFirstUpdate }) => {
-  const { containerRef: scrollContainerRef, handleScroll: handleScrollPosition } = useScrollPosition(
-    `topic-${topic.id}`
-  )
+const Messages = ({
+  ref,
+  assistant,
+  topic,
+  setActiveTopic,
+  onComponentUpdate,
+  onFirstUpdate
+}: MessagesProps & { ref?: React.RefObject<MessagesHandle | null> }) => {
+  const {
+    containerRef: scrollContainerRef,
+    handleScroll: handleScrollPosition,
+    getSavedPosition,
+    clearSavedPosition
+  } = useScrollPosition(`topic-${topic.id}`)
   const [displayMessages, setDisplayMessages] = useState<Message[]>([])
   const [hasMore, setHasMore] = useState(false)
+  const [hasMoreNewer, setHasMoreNewer] = useState(false)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const [isLoadingNewer, setIsLoadingNewer] = useState(false)
   const [isProcessingContext, setIsProcessingContext] = useState(false)
 
   const { addTopic } = useAssistant(assistant.id)
@@ -74,6 +115,25 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
 
   const messageElements = useRef<Map<string, HTMLElement>>(new Map())
   const messagesRef = useRef<Message[]>(messages)
+  const jumpTargetRef = useRef<string | null>(null)
+  const lastDisplayMessagesRef = useRef<Message[]>([])
+
+  // On mount (topic switch), check if we need to restore to a specific message
+  useEffect(() => {
+    const saved = getSavedPosition()
+    if (saved?.anchorId) {
+      // Message-based restoration: set jumpTargetRef for Scenario 1
+      jumpTargetRef.current = saved.anchorId
+    } else if (saved?.scrollTop) {
+      // Pixel-based fallback (old format data or no anchor available)
+      // Schedule after initial message load so container has content
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          scrollContainerRef.current?.scrollTo({ top: saved.scrollTop })
+        }, 100)
+      })
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     messagesRef.current = messages
@@ -87,14 +147,100 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
     }
   }, [])
 
+  const checkBoundaries = useCallback(() => {
+    const current = lastDisplayMessagesRef.current
+    if (current.length === 0 || messages.length === 0) return { hasOlder: false, hasNewer: false }
+
+    const newestInWindow = current[0] // newest in window (first in reverse-ordered array)
+    const oldestInWindow = current[current.length - 1] // oldest in window
+    const newestInArray = messages[messages.length - 1]
+    const oldestInArray = messages[0]
+
+    return {
+      hasOlder: oldestInWindow?.id !== oldestInArray?.id,
+      hasNewer: newestInWindow?.id !== newestInArray?.id
+    }
+  }, [messages])
+
   useEffect(() => {
-    const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
-    setDisplayMessages(newDisplayMessages)
-    setHasMore(messages.length > displayCount)
-  }, [messages, displayCount])
+    // Scenario 1: Jump target (deep navigation / topic switch restore)
+    if (jumpTargetRef.current) {
+      const targetId = jumpTargetRef.current
+      jumpTargetRef.current = null
+      const startIndex = computeStartIndex(messages, targetId, SCROLL_CONTEXT_COUNT)
+      const newDisplayMessages = computeDisplayMessages(messages, startIndex, startIndex + INITIAL_MESSAGES_COUNT)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+
+      // Scroll to target message after render
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          const el = document.getElementById(`message-${targetId}`)
+          if (el) {
+            scrollIntoView(el, { behavior: 'auto', block: 'start', container: 'nearest' })
+          }
+        }, 50)
+      })
+      return
+    }
+
+    // Scenario 2: First load
+    if (lastDisplayMessagesRef.current.length === 0) {
+      const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+      return
+    }
+
+    // Scenario 3: Messages content changed (edit/delete/etc) - incremental update
+    const earliestLoadedId = lastDisplayMessagesRef.current[lastDisplayMessagesRef.current.length - 1]?.id
+    const earliestIndex = messages.findIndex((m) => m.id === earliestLoadedId)
+
+    if (earliestIndex === -1) {
+      // Earliest loaded message was deleted, need full recalc
+      const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+    } else {
+      // Keep window position, rebuild from earliest to end
+      const newDisplayMessages: Message[] = []
+      for (let i = messages.length - 1; i >= earliestIndex; i--) {
+        newDisplayMessages.push(messages[i])
+      }
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+    }
+  }, [messages, displayCount, checkBoundaries])
 
   // NOTE: 如果设置为平滑滚动会导致滚动条无法跟随生成的新消息保持在底部位置
   const scrollToBottom = useCallback(() => {
+    // Check if newest message is in the window
+    const current = lastDisplayMessagesRef.current
+    const newestInWindow = current[0]
+    const newestInArray = messages[messages.length - 1]
+
+    if (newestInWindow?.id !== newestInArray?.id) {
+      // Reset window to include newest messages
+      const newDisplayMessages = computeDisplayMessages(messages, 0, INITIAL_MESSAGES_COUNT)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+    }
+
     if (scrollContainerRef.current) {
       requestAnimationFrame(() => {
         if (scrollContainerRef.current) {
@@ -102,7 +248,42 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
         }
       })
     }
-  }, [scrollContainerRef])
+  }, [scrollContainerRef, messages, checkBoundaries])
+
+  const scrollToMessageById = useCallback(
+    (messageId: string) => {
+      // Check if message is in current loading window
+      const el = document.getElementById(`message-${messageId}`)
+      if (el) {
+        scrollIntoView(el, { behavior: 'smooth', block: 'start', container: 'nearest' })
+        return
+      }
+
+      // Not in window, compute jump directly (no jumpTargetRef)
+      const startIndex = computeStartIndex(messages, messageId, SCROLL_CONTEXT_COUNT)
+      const newDisplayMessages = computeDisplayMessages(messages, startIndex, startIndex + INITIAL_MESSAGES_COUNT)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+
+      // Scroll after render
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          const targetEl = document.getElementById(`message-${messageId}`)
+          if (targetEl) {
+            scrollIntoView(targetEl, { behavior: 'auto', block: 'start', container: 'nearest' })
+          }
+        }, 50)
+      })
+    },
+    [messages, checkBoundaries]
+  )
+
+  useImperativeHandle(ref, () => ({
+    scrollToMessageById
+  }))
 
   const clearTopic = useCallback(
     async (data: Topic) => {
@@ -113,8 +294,12 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
 
       await clearTopicMessages()
       setDisplayMessages([])
+      lastDisplayMessagesRef.current = []
+      setHasMoreNewer(false)
+      setIsLoadingNewer(false)
+      clearSavedPosition()
     },
-    [clearTopicMessages, topic.id]
+    [clearTopicMessages, topic.id, clearSavedPosition]
   )
 
   useEffect(() => {
@@ -253,19 +438,122 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
     if (!hasMore || isLoadingMore) return
 
     setIsLoadingMore(true)
+
+    // Capture anchor before DOM changes
+    const container = scrollContainerRef.current
+    const anchor = findFirstVisibleMessage(container, messageElements.current)
+
     setTimeoutTimer(
       'loadMoreMessages',
       () => {
-        const currentLength = displayMessages.length
-        const newMessages = computeDisplayMessages(messages, currentLength, LOAD_MORE_COUNT)
+        // Find the oldest loaded message and load messages before it
+        const currentDisplay = lastDisplayMessagesRef.current
+        const oldestInWindow = currentDisplay[currentDisplay.length - 1]
+        const oldestIndex = messages.findIndex((m) => m.id === oldestInWindow?.id)
 
-        setDisplayMessages((prev) => [...prev, ...newMessages])
-        setHasMore(currentLength + LOAD_MORE_COUNT < messages.length)
+        if (oldestIndex <= 0) {
+          setIsLoadingMore(false)
+          return
+        }
+
+        const startIndex = messages.length - oldestIndex
+        const newMessages = computeDisplayMessages(messages, startIndex, LOAD_MORE_COUNT)
+
+        setDisplayMessages((prev) => {
+          const merged = [...prev, ...newMessages]
+          lastDisplayMessagesRef.current = merged
+          return merged
+        })
+        const { hasOlder, hasNewer } = checkBoundaries()
+        setHasMore(hasOlder)
+        setHasMoreNewer(hasNewer)
         setIsLoadingMore(false)
+
+        // Restore scroll position after re-render
+        if (anchor) {
+          requestAnimationFrame(() => {
+            if (container && anchor.element && anchor.element.isConnected) {
+              const newRect = anchor.element.getBoundingClientRect()
+              const delta = newRect.top - anchor.rect.top
+              if (Math.abs(delta) > 1) {
+                container.scrollTop += delta
+              }
+            }
+          })
+        }
       },
-      300
+      50
     )
-  }, [displayMessages.length, hasMore, isLoadingMore, messages, setTimeoutTimer])
+  }, [hasMore, isLoadingMore, messages, setTimeoutTimer, scrollContainerRef, checkBoundaries])
+
+  const loadNewerMessages = useCallback(() => {
+    if (!hasMoreNewer || isLoadingNewer) return
+
+    setIsLoadingNewer(true)
+
+    // Capture anchor before DOM changes
+    const container = scrollContainerRef.current
+    const anchor = findFirstVisibleMessage(container, messageElements.current)
+
+    setTimeoutTimer(
+      'loadNewerMessages',
+      () => {
+        // Find the newest loaded message
+        const currentDisplay = lastDisplayMessagesRef.current
+        const newestInWindow = currentDisplay[0]
+        const newestIndex = messages.findIndex((m) => m.id === newestInWindow?.id)
+
+        if (newestIndex < 0 || newestIndex >= messages.length - 1) {
+          setIsLoadingNewer(false)
+          return
+        }
+
+        // Load messages newer than the current newest
+        const countToLoad = Math.min(LOAD_MORE_COUNT, messages.length - 1 - newestIndex)
+        const newMessages: Message[] = []
+        for (let i = messages.length - 1; i > newestIndex && newMessages.length < countToLoad; i--) {
+          newMessages.push(messages[i])
+        }
+
+        setDisplayMessages((prev) => {
+          const merged = [...newMessages, ...prev] // Prepend newer messages
+          lastDisplayMessagesRef.current = merged
+          return merged
+        })
+        const { hasOlder, hasNewer } = checkBoundaries()
+        setHasMore(hasOlder)
+        setHasMoreNewer(hasNewer)
+        setIsLoadingNewer(false)
+
+        // Restore scroll position after re-render
+        if (anchor) {
+          requestAnimationFrame(() => {
+            if (container && anchor.element && anchor.element.isConnected) {
+              const newRect = anchor.element.getBoundingClientRect()
+              const delta = newRect.top - anchor.rect.top
+              if (Math.abs(delta) > 1) {
+                container.scrollTop += delta
+              }
+            }
+          })
+        }
+      },
+      50
+    )
+  }, [hasMoreNewer, isLoadingNewer, messages, setTimeoutTimer, scrollContainerRef, checkBoundaries])
+
+  const handleScroll = useCallback(() => {
+    handleScrollPosition()
+
+    // Check if near bottom for loading newer messages
+    // In column-reverse, scrollTop=0 is the bottom
+    const container = scrollContainerRef.current
+    if (container && hasMoreNewer && !isLoadingNewer && !isLoadingMore) {
+      if (container.scrollTop < 150) {
+        loadNewerMessages()
+      }
+    }
+  }, [handleScrollPosition, hasMoreNewer, isLoadingNewer, isLoadingMore, loadNewerMessages, scrollContainerRef])
 
   useShortcut('copy_last_message', () => {
     const lastMessage = last(messages)
@@ -306,7 +594,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
       className="messages-container"
       ref={scrollContainerRef}
       key={assistant.id}
-      onScroll={handleScrollPosition}>
+      onScroll={handleScroll}>
       <NarrowLayout style={{ display: 'flex', flexDirection: 'column-reverse' }}>
         <InfiniteScroll
           dataLength={displayMessages.length}
@@ -318,6 +606,11 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
           style={{ overflow: 'visible' }}>
           <ContextMenu>
             <ScrollContainer>
+              {isLoadingNewer && (
+                <LoaderContainer>
+                  <LoadingIcon color="var(--color-text-2)" />
+                </LoaderContainer>
+              )}
               {groupedMessages.map(([key, groupMessages]) => (
                 <MessageGroup
                   key={key}
@@ -337,7 +630,9 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
 
         {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
       </NarrowLayout>
-      {messageNavigation === 'anchor' && <MessageAnchorLine messages={displayMessages} />}
+      {messageNavigation === 'anchor' && (
+        <MessageAnchorLine messages={displayMessages} scrollToMessageById={scrollToMessageById} />
+      )}
       <SelectionBox
         isMultiSelectMode={isMultiSelectMode}
         scrollContainerRef={scrollContainerRef}
@@ -383,6 +678,13 @@ const computeDisplayMessages = (messages: Message[], startIndex: number, display
   }
 
   return displayMessages
+}
+
+const computeStartIndex = (messages: Message[], targetMessageId: string, contextCount: number): number => {
+  const targetIndex = messages.findIndex((m) => m.id === targetMessageId)
+  if (targetIndex === -1) return 0
+  const startIndex = Math.max(0, messages.length - 1 - targetIndex - contextCount)
+  return startIndex
 }
 
 const LoaderContainer = styled.div`
