@@ -24,6 +24,7 @@ import { type Topic, TopicType } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { addAbortController } from '@renderer/utils/abortController'
 import { buildAgentSessionTopicId } from '@renderer/utils/agentSession'
+import { scrollIntoView } from '@renderer/utils/dom'
 import { Spin } from 'antd'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import InfiniteScroll from 'react-infinite-scroll-component'
@@ -235,6 +236,14 @@ const AgentSessionMessages = ({ agentId, sessionId }: Props) => {
     messageCount: messages.length
   })
 
+  // Basic scrollToMessageById for agent sessions (no deep navigation)
+  const scrollToMessageById = useCallback((messageId: string) => {
+    const el = document.getElementById(`message-${messageId}`)
+    if (el) {
+      scrollIntoView(el, { behavior: 'smooth', block: 'start', container: 'nearest' })
+    }
+  }, [])
+
   // Scroll to bottom function
   const scrollToBottom = useCallback(() => {
     if (scrollContainerRef.current) {
@@ -287,7 +296,9 @@ const AgentSessionMessages = ({ agentId, sessionId }: Props) => {
           </ContextMenu>
         </InfiniteScroll>
       </NarrowLayout>
-      {messageNavigation === 'anchor' && <MessageAnchorLine messages={displayMessages} />}
+      {messageNavigation === 'anchor' && (
+        <MessageAnchorLine messages={displayMessages} scrollToMessageById={scrollToMessageById} />
+      )}
     </MessagesContainer>
   )
 }

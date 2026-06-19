@@ -22,6 +22,7 @@ import styled from 'styled-components'
 
 interface MessageLineProps {
   messages: Message[]
+  scrollToMessageById: (messageId: string) => void
 }
 
 const getAvatarSource = (isLocalAi: boolean, modelId: string | undefined) => {
@@ -29,7 +30,7 @@ const getAvatarSource = (isLocalAi: boolean, modelId: string | undefined) => {
   return modelId ? getModelLogoById(modelId) : undefined
 }
 
-const MessageAnchorLine: FC<MessageLineProps> = ({ messages }) => {
+const MessageAnchorLine: FC<MessageLineProps> = ({ messages, scrollToMessageById }) => {
   const { t } = useTranslation()
   const avatar = useAvatar()
   const { theme } = useTheme()
@@ -134,7 +135,11 @@ const MessageAnchorLine: FC<MessageLineProps> = ({ messages }) => {
     (message: Message) => {
       const messageElement = document.getElementById(`message-${message.id}`)
 
-      if (!messageElement) return
+      if (!messageElement) {
+        // Message not in current loading window, use deep navigation
+        scrollToMessageById(message.id)
+        return
+      }
 
       const display = messageElement ? window.getComputedStyle(messageElement).display : null
       if (display === 'none') {
@@ -144,7 +149,7 @@ const MessageAnchorLine: FC<MessageLineProps> = ({ messages }) => {
 
       scrollIntoView(messageElement, { behavior: 'smooth', block: 'start', container: 'nearest' })
     },
-    [setSelectedMessage]
+    [setSelectedMessage, scrollToMessageById]
   )
 
   const scrollToBottom = useCallback(() => {

@@ -36,9 +36,10 @@ const RIGHT_GAP = 16
 
 interface ChatNavigationProps {
   containerId: string
+  scrollToMessageById?: (messageId: string) => void
 }
 
-const ChatNavigation: FC<ChatNavigationProps> = ({ containerId }) => {
+const ChatNavigation: FC<ChatNavigationProps> = ({ containerId, scrollToMessageById }) => {
   const { t } = useTranslation()
   const [isVisible, setIsVisible] = useState(false)
   const timerKey = 'hide'
@@ -119,6 +120,14 @@ const ChatNavigation: FC<ChatNavigationProps> = ({ containerId }) => {
   }
 
   const scrollToMessage = (element: HTMLElement) => {
+    if (!element.isConnected && scrollToMessageById) {
+      // Element not in DOM, try deep navigation by finding the message ID
+      const messageId = element.id?.replace('message-', '')
+      if (messageId) {
+        scrollToMessageById(messageId)
+        return
+      }
+    }
     // Use container: 'nearest' to keep scroll within the chat pane (Chromium-only, see #11565, #11567)
     scrollIntoView(element, { behavior: 'smooth', block: 'start', container: 'nearest' })
   }
