@@ -8,12 +8,15 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 const findFirstVisibleMessageId = (container: HTMLElement | null): string | null => {
   if (!container) return null
   const containerRect = container.getBoundingClientRect()
-  const elements = container.querySelectorAll('[id^="message-"]')
+  // Exclude message-group-* containers — their IDs are not valid message IDs
+  const elements = container.querySelectorAll('[id^="message-"]:not([id^="message-group-"])')
 
   let closestId: string | null = null
   let minDistance = Infinity
   for (const el of elements) {
     const rect = el.getBoundingClientRect()
+    // Skip hidden elements (folded messages in groups have display:none → height 0)
+    if (rect.height === 0) continue
     const distance = Math.abs(rect.top - containerRect.top)
     if (distance < minDistance) {
       minDistance = distance
