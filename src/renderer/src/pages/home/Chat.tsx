@@ -31,7 +31,7 @@ import styled from 'styled-components'
 import ChatNavbar from './components/ChatNavBar'
 import Inputbar from './Inputbar/Inputbar'
 import ChatNavigation from './Messages/ChatNavigation'
-import Messages from './Messages/Messages'
+import Messages, { type MessagesHandle } from './Messages/Messages'
 import Tabs from './Tabs'
 
 const logger = loggerService.withContext('Chat')
@@ -54,6 +54,7 @@ const Chat: FC<Props> = (props) => {
 
   const mainRef = React.useRef<HTMLDivElement>(null)
   const contentSearchRef = React.useRef<ContentSearchRef>(null)
+  const messagesRef = React.useRef<MessagesHandle>(null)
   const [filterIncludeUser, setFilterIncludeUser] = useState(false)
 
   const { setTimeoutTimer } = useTimer()
@@ -182,6 +183,7 @@ const Chat: FC<Props> = (props) => {
                 className="flex flex-1 flex-col justify-between"
                 style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
                 <Messages
+                  ref={messagesRef}
                   key={props.activeTopic.id}
                   assistant={assistant}
                   topic={props.activeTopic}
@@ -196,7 +198,12 @@ const Chat: FC<Props> = (props) => {
                   includeUser={filterIncludeUser}
                   onIncludeUserChange={userOutlinedItemClickHandler}
                 />
-                {messageNavigation === 'buttons' && <ChatNavigation containerId="messages" />}
+                {messageNavigation === 'buttons' && (
+                  <ChatNavigation
+                    containerId="messages"
+                    scrollToMessageById={messagesRef.current?.scrollToMessageById}
+                  />
+                )}
                 <Inputbar assistant={assistant} setActiveTopic={props.setActiveTopic} topic={props.activeTopic} />
                 {isMultiSelectMode && <MultiSelectActionPopup topic={props.activeTopic} />}
               </div>

@@ -1610,6 +1610,7 @@
     "copy_failed": "複製失敗",
     "current": "目前",
     "cut": "剪下",
+    "decline": "拒絕",
     "default": "預設",
     "delete": "刪除",
     "delete_confirm": "確定要刪除嗎？",
@@ -2496,6 +2497,10 @@
       "completed": "已完成",
       "error": "發生錯誤",
       "groupHeader": "{{count}} 次工具呼叫",
+      "groupHeaderMessages": "{{count}} 則訊息",
+      "groupHeaderThinking": "{{count}} 次思考",
+      "groupHeaderWithDetails": "{{toolCount}} 次工具呼叫 · {{thinkingCount}} 次思考 · {{messageCount}} 則訊息",
+      "groupHeaderWithMessages": "{{toolCount}} 次工具呼叫 · {{messageCount}} 則訊息",
       "invoking": "呼叫中",
       "labels": {
         "bash": "執行命令",
@@ -2914,6 +2919,12 @@
     "title": "Ollama"
   },
   "onboarding": {
+    "privacy": {
+      "accept_and_continue": "同意並繼續",
+      "notice": "繼續即表示你已閱讀並同意",
+      "period": "。",
+      "policy": "隱私政策"
+    },
     "select_model": {
       "change_later": "您可以隨時在設定中更改此項目",
       "start": "開始使用",
@@ -2957,7 +2968,7 @@
     "install_progress": "安裝進度",
     "installed_at": "OpenClaw 安裝路徑",
     "migration": {
-      "description": "偵測到透過 npm 安裝的舊版本 OpenClaw，請重新安裝以取得最新官方版本。",
+      "description": "偵測到 PATH 中存在外部 OpenClaw 安裝，但 Cherry Studio 只使用受管理的 OpenClaw 二進位檔。請安裝受管理版本後繼續。",
       "install_button": "重新安裝 OpenClaw",
       "title": "OpenClaw 需要更新"
     },
@@ -3391,6 +3402,14 @@
     "source": "檢視原始碼",
     "zoom_in": "放大",
     "zoom_out": "縮小"
+  },
+  "privacy_policy": {
+    "title": "隱私協議"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "我們更新了隱私協議。請查看最新的",
+    "policy": "隱私協議",
+    "title": "隱私協議更新"
   },
   "prompts": {
     "explanation": "幫我解釋一下這個概念",

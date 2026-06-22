@@ -352,6 +352,7 @@ describe('Claude & regional providers', () => {
     expect(isMiniMaxReasoningModel(createModel({ id: 'minimax-m2-pro' }))).toBe(true)
     expect(isMiniMaxReasoningModel(createModel({ id: 'minimax-m2.7' }))).toBe(true)
     expect(isMiniMaxReasoningModel(createModel({ id: 'minimax-m2.7-highspeed' }))).toBe(true)
+    expect(isMiniMaxReasoningModel(createModel({ id: 'minimax-m3' }))).toBe(true)
   })
 })
 
@@ -669,6 +670,7 @@ describe('Reasoning effort helpers', () => {
   it('aggregates other reasoning effort families', () => {
     expect(isSupportedReasoningEffortModel(createModel({ id: 'o3' }))).toBe(true)
     expect(isSupportedReasoningEffortModel(createModel({ id: 'grok-3-mini' }))).toBe(true)
+    expect(isSupportedReasoningEffortModel(createModel({ id: 'grok-4.3' }))).toBe(true)
     expect(isSupportedReasoningEffortModel(createModel({ id: 'sonar-deep-research', provider: 'perplexity' }))).toBe(
       true
     )
@@ -677,6 +679,7 @@ describe('Reasoning effort helpers', () => {
 
   it('flags grok specific helpers correctly', () => {
     expect(isSupportedReasoningEffortGrokModel(createModel({ id: 'grok-3-mini' }))).toBe(true)
+    expect(isSupportedReasoningEffortGrokModel(createModel({ id: 'grok-4.3' }))).toBe(true)
     expect(
       isSupportedReasoningEffortGrokModel(createModel({ id: 'grok-4-fast-openrouter', provider: 'openrouter' }))
     ).toBe(true)
@@ -747,6 +750,10 @@ describe('isReasoningModel', () => {
   // Regression test for mistral-small-2603 reasoning support
   it('should return true for mistral-small-2603', () => {
     expect(isReasoningModel(createModel({ id: 'mistral-small-2603' }))).toBe(true)
+  })
+
+  it('should return true for grok-build-0.1', () => {
+    expect(isReasoningModel(createModel({ id: 'grok-build-0.1' }))).toBe(true)
   })
 
   it('excludes non-fixed reasoning models from isFixedReasoningModel', () => {
@@ -1880,6 +1887,22 @@ describe('isGemini3ThinkingTokenModel', () => {
         group: ''
       })
     ).toBe(true)
+    expect(
+      isGemini3ThinkingTokenModel({
+        id: 'gemini-flash-latest',
+        name: '',
+        provider: '',
+        group: ''
+      })
+    ).toBe(true)
+    expect(
+      isGemini3ThinkingTokenModel({
+        id: 'gemini-pro-latest',
+        name: '',
+        provider: '',
+        group: ''
+      })
+    ).toBe(true)
   })
 
   it('should return false for Gemini 3 image models', () => {
@@ -2140,6 +2163,16 @@ describe('getModelSupportedReasoningEffortOptions', () => {
       expect(
         getModelSupportedReasoningEffortOptions(createModel({ id: 'grok-4-fast', provider: 'openrouter' }))
       ).toEqual(['default', 'none', 'auto'])
+    })
+
+    it('should return correct options for Grok 4.3', () => {
+      expect(getModelSupportedReasoningEffortOptions(createModel({ id: 'grok-4.3' }))).toEqual([
+        'default',
+        'none',
+        'low',
+        'medium',
+        'high'
+      ])
     })
   })
 
@@ -2663,6 +2696,13 @@ describe('Claude Models', () => {
       expect(getThinkModelType(createModel({ id: 'anthropic.claude-opus-4-6-v1' }))).toBe('claude46')
     })
 
+    it('should return claude46 for Claude Opus 4.7 and newer models', () => {
+      expect(getThinkModelType(createModel({ id: 'claude-opus-4-7' }))).toBe('claude46')
+      expect(getThinkModelType(createModel({ id: 'claude-opus-4-8' }))).toBe('claude46')
+      expect(getThinkModelType(createModel({ id: 'anthropic.claude-opus-4-8-v1:0' }))).toBe('claude46')
+      expect(getThinkModelType(createModel({ id: 'claude-opus-4-10' }))).toBe('claude46')
+    })
+
     it('should return default for non-reasoning Claude models', () => {
       expect(getThinkModelType(createModel({ id: 'claude-3-opus' }))).toBe('default')
       expect(getThinkModelType(createModel({ id: 'claude-3-haiku' }))).toBe('default')
@@ -2730,17 +2770,22 @@ describe('Claude Models', () => {
     })
   })
 
-  describe('Claude 4.7 thinking model type and token limits', () => {
-    it('routes Opus 4.7 through the claude46 thinking type', () => {
+  describe('Claude Opus 4.7+ thinking model type and token limits', () => {
+    it('routes Opus 4.7+ through the claude46 thinking type', () => {
       expect(getThinkModelType(createModel({ id: 'claude-opus-4-7' }))).toBe('claude46')
       expect(getThinkModelType(createModel({ id: 'anthropic.claude-opus-4-7-v1' }))).toBe('claude46')
+      expect(getThinkModelType(createModel({ id: 'claude-opus-4-8' }))).toBe('claude46')
+      expect(getThinkModelType(createModel({ id: 'claude-opus-4-10' }))).toBe('claude46')
     })
 
-    it('returns 128K max tokens for Opus 4.7 models', () => {
+    it('returns 128K max tokens for Opus 4.7+ models', () => {
       expect(findTokenLimit('claude-opus-4-7')).toEqual({ min: 1024, max: 128_000 })
       expect(findTokenLimit('claude-opus-4.7')).toEqual({ min: 1024, max: 128_000 })
       expect(findTokenLimit('anthropic.claude-opus-4-7-v1')).toEqual({ min: 1024, max: 128_000 })
       expect(findTokenLimit('claude-opus-4-7@20260401')).toEqual({ min: 1024, max: 128_000 })
+      expect(findTokenLimit('claude-opus-4-8')).toEqual({ min: 1024, max: 128_000 })
+      expect(findTokenLimit('anthropic.claude-opus-4-8-v1:0')).toEqual({ min: 1024, max: 128_000 })
+      expect(findTokenLimit('claude-opus-4-10')).toEqual({ min: 1024, max: 128_000 })
     })
   })
 })

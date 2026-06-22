@@ -42,7 +42,7 @@ import type {
   TranslateLanguageCode,
   WebSearchProvider
 } from '@renderer/types'
-import { getModelReasoningEffortKey, isBuiltinMCPServer, isSystemProvider, SystemProviderIds } from '@renderer/types'
+import { isBuiltinMCPServer, isSystemProvider, SystemProviderIds } from '@renderer/types'
 import { getDefaultGroupName, getLeadingEmoji, runAsyncFunction, uuid } from '@renderer/utils'
 import {
   isSupportArrayContentProvider,
@@ -65,16 +65,6 @@ import { initialState as shortcutsInitialState } from './shortcuts'
 import { defaultWebSearchProviders } from './websearch'
 
 const logger = loggerService.withContext('Migrate')
-
-const DEFAULT_SIDEBAR_WIDTH = 275
-const MIN_SIDEBAR_WIDTH = 180
-const MAX_SIDEBAR_WIDTH = 600
-
-function normalizeSidebarWidth(width: unknown) {
-  return typeof width === 'number' && Number.isFinite(width)
-    ? Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, width))
-    : DEFAULT_SIDEBAR_WIDTH
-}
 
 // remove logo base64 data to reduce the size of the state
 function removeMiniAppIconsFromState(state: RootState) {
@@ -3425,12 +3415,11 @@ const migrateConfig = {
   },
   '207': (state: RootState) => {
     try {
-      state.settings = {
-        ...settingsInitialState,
-        ...state.settings,
-        assistantsWidth: normalizeSidebarWidth(state.settings?.assistantsWidth),
-        topicListWidth: normalizeSidebarWidth(state.settings?.topicListWidth)
-      }
+      state.llm.providers.forEach((provider) => {
+        if (provider.id === 'stepfun' && !provider.anthropicApiHost) {
+          provider.anthropicApiHost = 'https://api.stepfun.com'
+        }
+      })
 
       logger.info('migrate 207 success')
       return state
@@ -3441,22 +3430,7 @@ const migrateConfig = {
   },
   '208': (state: RootState) => {
     try {
-      const migrateAssistantReasoningEffort = (assistant: Assistant) => {
-        const settings = assistant.settings
-        const reasoningEffort = settings?.reasoning_effort
-        const modelKey = getModelReasoningEffortKey(assistant.model ?? assistant.defaultModel ?? state.llm.defaultModel)
-
-        if (settings && reasoningEffort && modelKey) {
-          settings.reasoning_effort_by_model = {
-            ...settings.reasoning_effort_by_model,
-            [modelKey]: settings.reasoning_effort_by_model?.[modelKey] ?? reasoningEffort
-          }
-        }
-      }
-
-      migrateAssistantReasoningEffort(state.assistants.defaultAssistant)
-      state.assistants.assistants.forEach(migrateAssistantReasoningEffort)
-
+      state.settings.enableDataCollection = true
       logger.info('migrate 208 success')
       return state
     } catch (error) {

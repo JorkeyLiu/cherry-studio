@@ -24,6 +24,7 @@ import { type Topic, TopicType } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { addAbortController } from '@renderer/utils/abortController'
 import { buildAgentSessionTopicId } from '@renderer/utils/agentSession'
+import { scrollIntoView } from '@renderer/utils/dom'
 import { Spin } from 'antd'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import InfiniteScroll from 'react-infinite-scroll-component'
@@ -40,7 +41,7 @@ type Props = {
 }
 
 const AgentSessionMessages = ({ agentId, sessionId }: Props) => {
-  const { session } = useSession(agentId, sessionId)
+  const { session, isLoading: isSessionLoading } = useSession(agentId, sessionId)
   const sessionTopicId = useMemo(() => buildAgentSessionTopicId(sessionId), [sessionId])
   // Use the same hook as Messages.tsx for consistent behavior
   const messages = useTopicMessages(sessionTopicId)
@@ -179,6 +180,20 @@ const AgentSessionMessages = ({ agentId, sessionId }: Props) => {
     })
     return Object.entries(newGrouped)
   }, [displayMessages])
+  const [showSessionLoading, setShowSessionLoading] = useState(false)
+
+  useEffect(() => {
+    if (!isSessionLoading || groupedMessages.length > 0 || session) {
+      setShowSessionLoading(false)
+      return
+    }
+
+    const timer = setTimeout(() => {
+      setShowSessionLoading(true)
+    }, 1000)
+
+    return () => clearTimeout(timer)
+  }, [groupedMessages.length, isSessionLoading, session])
 
   const loadMoreMessages = useCallback(() => {
     if (!hasMore || isLoadingMore || isRestoringScrollRef.current) return
@@ -221,6 +236,14 @@ const AgentSessionMessages = ({ agentId, sessionId }: Props) => {
     messageCount: messages.length
   })
 
+  // Basic scrollToMessageById for agent sessions (no deep navigation)
+  const scrollToMessageById = useCallback((messageId: string) => {
+    const el = document.getElementById(`message-${messageId}`)
+    if (el) {
+      scrollIntoView(el, { behavior: 'smooth', block: 'start', container: 'nearest' })
+    }
+  }, [])
+
   // Scroll to bottom function
   const scrollToBottom = useCallback(() => {
     if (scrollContainerRef.current) {
@@ -259,7 +282,7 @@ const AgentSessionMessages = ({ agentId, sessionId }: Props) => {
                 groupedMessages.map(([key, groupMessages]) => (
                   <MessageGroup key={key} messages={groupMessages} topic={derivedTopic} />
                 ))
-              ) : !session ? (
+              ) : showSessionLoading ? (
                 <div className="flex items-center justify-center py-5">
                   <Spin size="small" />
                 </div>
@@ -273,7 +296,9 @@ const AgentSessionMessages = ({ agentId, sessionId }: Props) => {
           </ContextMenu>
         </InfiniteScroll>
       </NarrowLayout>
-      {messageNavigation === 'anchor' && <MessageAnchorLine messages={displayMessages} />}
+      {messageNavigation === 'anchor' && (
+        <MessageAnchorLine messages={displayMessages} scrollToMessageById={scrollToMessageById} />
+      )}
     </MessagesContainer>
   )
 }

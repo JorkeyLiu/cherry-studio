@@ -167,6 +167,11 @@ describe('isVisionModel', () => {
     expect(isVisionModel(createModel({ id: 'gpt-4o-mini' }))).toBe(true)
   })
 
+  it('matches MiniMax M3 as vision but not text-only M2.x', () => {
+    expect(isVisionModel(createModel({ id: 'MiniMax-M3', provider: 'minimax' }))).toBe(true)
+    expect(isVisionModel(createModel({ id: 'MiniMax-M2.7', provider: 'minimax' }))).toBe(false)
+  })
+
   it('leverages image enhancement regex when standard vision regex does not match', () => {
     expect(isVisionModel(createModel({ id: 'qwen-image-edit' }))).toBe(true)
   })
@@ -367,6 +372,18 @@ describe('isVisionModel', () => {
       expect(isVisionModel(createModel({ id: 'qwen3.5-plus' }))).toBe(true)
       expect(isVisionModel(createModel({ id: 'qwen3.5-plus-2026-02-15' }))).toBe(true)
       expect(isVisionModel(createModel({ id: 'qwen3.5-397b-a17b' }))).toBe(true)
+    })
+
+    it('should return false for Qwen max series models (non-vision)', () => {
+      expect(isVisionModel(createModel({ id: 'qwen3.7-max' }))).toBe(false)
+      expect(isVisionModel(createModel({ id: 'qwen-max' }))).toBe(false)
+      expect(isVisionModel(createModel({ id: 'qwen3.5-max' }))).toBe(false)
+    })
+
+    it('should return true for Qwen VL series with max suffix', () => {
+      expect(isVisionModel(createModel({ id: 'qwen-vl-max' }))).toBe(true)
+      expect(isVisionModel(createModel({ id: 'qwen2-vl-max' }))).toBe(true)
+      expect(isVisionModel(createModel({ id: 'qwen3-vl-max' }))).toBe(true)
     })
   })
 })

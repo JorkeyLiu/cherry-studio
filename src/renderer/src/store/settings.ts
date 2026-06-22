@@ -16,7 +16,7 @@
  */
 import type { PayloadAction } from '@reduxjs/toolkit'
 import { createSlice } from '@reduxjs/toolkit'
-import { DEFAULT_STREAM_OPTIONS_INCLUDE_USAGE, isMac } from '@renderer/config/constant'
+import { DEFAULT_STREAM_OPTIONS_INCLUDE_USAGE, isMac, LATEST_PRIVACY_POLICY_VERSION } from '@renderer/config/constant'
 import { TRANSLATE_PROMPT } from '@renderer/config/prompts'
 import { DEFAULT_SIDEBAR_ICONS } from '@renderer/config/sidebar'
 import type {
@@ -195,6 +195,7 @@ export interface SettingsState {
   /** Mini app region filter: 'auto' (detect from IP), 'CN', or 'Global' */
   minAppRegion: MinAppRegionFilter
   // 隐私设置
+  privacyPolicyVersion?: string
   enableDataCollection: boolean
   enableSpellCheck: boolean
   spellCheckLanguages: string[]
@@ -383,7 +384,8 @@ export const initialState: SettingsState = {
   showOpenedMinappsInSidebar: true,
   minappsOpenLinkExternal: false,
   minAppRegion: 'auto',
-  enableDataCollection: false,
+  privacyPolicyVersion: LATEST_PRIVACY_POLICY_VERSION,
+  enableDataCollection: true,
   enableSpellCheck: false,
   spellCheckLanguages: [],
   enableQuickPanelTriggers: false,
@@ -813,6 +815,9 @@ const settingsSlice = createSlice({
     setEnableDataCollection: (state, action: PayloadAction<boolean>) => {
       state.enableDataCollection = action.payload
     },
+    setPrivacyPolicyVersion: (state, action: PayloadAction<string>) => {
+      state.privacyPolicyVersion = action.payload
+    },
     setEnableSpellCheck: (state, action: PayloadAction<boolean>) => {
       state.enableSpellCheck = action.payload
     },
@@ -1017,6 +1022,7 @@ export const {
   setMinappsOpenLinkExternal,
   setMinAppRegion,
   setEnableDataCollection,
+  setPrivacyPolicyVersion,
   setEnableSpellCheck,
   setSpellCheckLanguages,
   setExportMenuOptions,

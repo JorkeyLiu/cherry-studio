@@ -1610,6 +1610,7 @@
     "copy_failed": "Copy failed",
     "current": "Current",
     "cut": "Cut",
+    "decline": "Decline",
     "default": "Default",
     "delete": "Delete",
     "delete_confirm": "Are you sure you want to delete?",
@@ -2496,6 +2497,10 @@
       "completed": "Completed",
       "error": "Error occurred",
       "groupHeader": "{{count}} tool calls",
+      "groupHeaderMessages": "{{count}} messages",
+      "groupHeaderThinking": "{{count}} thoughts",
+      "groupHeaderWithDetails": "{{toolCount}} tool calls · {{thinkingCount}} thoughts · {{messageCount}} messages",
+      "groupHeaderWithMessages": "{{toolCount}} tool calls · {{messageCount}} messages",
       "invoking": "Invoking",
       "labels": {
         "bash": "Bash",
@@ -2914,6 +2919,12 @@
     "title": "Ollama"
   },
   "onboarding": {
+    "privacy": {
+      "accept_and_continue": "Accept and Continue",
+      "notice": "By continuing, you confirm that you have read and agree to the",
+      "period": ".",
+      "policy": "Privacy Policy"
+    },
     "select_model": {
       "change_later": "You can change this anytime in settings",
       "start": "Get Started",
@@ -2957,7 +2968,7 @@
     "install_progress": "Install Progress",
     "installed_at": "OpenClaw installed at",
     "migration": {
-      "description": "An outdated version of OpenClaw installed via npm has been detected. Please reinstall to get the latest official version.",
+      "description": "An external OpenClaw installation was detected in PATH, but Cherry Studio uses its managed OpenClaw binary. Install the managed version to continue.",
       "install_button": "Reinstall OpenClaw",
       "title": "OpenClaw Needs Update"
     },
@@ -3391,6 +3402,14 @@
     "source": "View Source Code",
     "zoom_in": "Zoom In",
     "zoom_out": "Zoom Out"
+  },
+  "privacy_policy": {
+    "title": "Privacy Policy"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "We have updated the privacy policy. Please review the latest ",
+    "policy": "Privacy Policy",
+    "title": "Privacy Policy Updated"
   },
   "prompts": {
     "explanation": "Explain this concept to me",

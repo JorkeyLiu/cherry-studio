@@ -321,24 +321,29 @@ export const isMaxTemperatureOneModel = (model: Model): boolean => {
   return false
 }
 
-// major version, including 3.x
+// major version, including current 3.x aliases.
+// NOTE: gemini-flash-latest and gemini-pro-latest are treated as Gemini 3.x based on
+// current upstream alias targets and product expectations. Downstream UI capability
+// gates, reasoning behavior, and sampling-parameter filtering all depend on this helper.
+// If upstream repoints either alias to a non-3.x model, revisit this check and the
+// related Gemini UI / reasoning / sampling tests before updating the mapping.
 export const isGemini3Model = (model: Model) => {
   const modelId = getLowerBaseModelName(model.id)
-  return modelId.includes('gemini-3')
+  return modelId.includes('gemini-3') || modelId === 'gemini-flash-latest' || modelId === 'gemini-pro-latest'
 }
 
-// major version, including 3.x
+// major version, including 3.x aliases
 export const isGemini3ThinkingTokenModel = (model: Model) => {
   const modelId = getLowerBaseModelName(model.id)
   return isGemini3Model(model) && !modelId.includes('image')
 }
 
 /**
- * Check if the model is a Gemini 3 Flash model
- * Matches: gemini-3-flash, gemini-3-flash-preview, gemini-3-flash-preview-09-2025, gemini-flash-latest (alias)
- * Excludes: gemini-3-flash-image-preview, 3.x flash versions
+ * Check if the model is a Gemini 3.x Flash model
+ * Matches: gemini-3-flash, gemini-3.1-flash-preview, gemini-3.2-flash-preview-09-2025, gemini-flash-latest (alias)
+ * Excludes: gemini-3-flash-image-preview, gemini-3.1-flash-image-preview
  * @param model - The model to check
- * @returns true if the model is a Gemini 3 Flash model
+ * @returns true if the model is a Gemini 3.x Flash model
  */
 export const isGemini3FlashModel = (model: Model | undefined | null): boolean => {
   if (!model) {
@@ -350,7 +355,7 @@ export const isGemini3FlashModel = (model: Model | undefined | null): boolean =>
     return true
   }
   // Check for gemini-3-flash with optional suffixes, excluding image variants
-  return /gemini-3-flash(?!-image)(?:-[\w-]+)*$/i.test(modelId)
+  return /gemini-3(?:\.\d+)?-flash(?!-image)(?:-[\w-]+)*$/i.test(modelId)
 }
 
 /**
@@ -426,15 +431,34 @@ export function isClaude46SeriesModel(model: Model | undefined | null): boolean 
   return regex.test(modelId)
 }
 
-/**
- * Check if the model is Claude Opus 4.7.
- * 4.7 rejects temperature/top_p/top_k and natively supports xhigh reasoning effort.
- */
-export function isClaude47SeriesModel(model: Model | undefined | null): boolean {
+function isClaudeOpus47OrNewerModel(model: Model | undefined | null): boolean {
   if (!model) {
     return false
   }
   const modelId = getLowerBaseModelName(model.id, '/')
-  const regex = /(?:anthropic\.)?claude-opus-4[.-]7(?:[@\-:][\w\-:]+)?$/i
+  const regex = /(?:anthropic\.)?claude-opus-4[.-](?:[7-9]|[1-9]\d)(?:[@\-:][\w\-:]+)?$/i
   return regex.test(modelId)
+}
+
+/**
+ * Check if the Claude model uses adaptive thinking rather than budget-token thinking.
+ */
+export function isSupportAdaptiveThinkingClaudeModel(model: Model | undefined | null): boolean {
+  return isClaudeOpus47OrNewerModel(model)
+}
+
+/**
+ * Claude sampling-parameter rejection predicates intentionally stay separate from
+ * adaptive-thinking support so each API rule can diverge independently later.
+ */
+export function isClaudeModelRejectsTemperature(model: Model | undefined | null): boolean {
+  return isClaudeOpus47OrNewerModel(model)
+}
+
+export function isClaudeModelRejectsTopP(model: Model | undefined | null): boolean {
+  return isClaudeOpus47OrNewerModel(model)
+}
+
+export function isClaudeModelRejectsTopK(model: Model | undefined | null): boolean {
+  return isClaudeOpus47OrNewerModel(model)
 }
