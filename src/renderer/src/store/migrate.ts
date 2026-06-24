@@ -3437,6 +3437,32 @@ const migrateConfig = {
       logger.error('migrate 208 error', error as Error)
       return state
     }
+  },
+  '209': (state: RootState) => {
+    try {
+      // Migrate fixedWindowAnchorIndex (per-assistant, index-based) to fixedWindowAnchor (per-topic, messageId-based)
+      const migrateAssistant = (assistant: Assistant) => {
+        if (assistant.settings && 'fixedWindowAnchorIndex' in assistant.settings) {
+          delete (assistant.settings as any).fixedWindowAnchorIndex
+        }
+        if (!assistant.settings?.fixedWindowAnchor) {
+          if (!assistant.settings) {
+            assistant.settings = {}
+          }
+          assistant.settings.fixedWindowAnchor = {}
+        }
+        return assistant
+      }
+
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
+
+      logger.info('migrate 209 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 209 error', error as Error)
+      return state
+    }
   }
 }
 

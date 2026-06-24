@@ -1059,6 +1059,7 @@
         "placeholder": "搜索"
       }
     },
+    "context_window_start": "上下文起始位置",
     "deeply_thought": "已深度思考（用时 {{seconds}} 秒）",
     "default": {
       "description": "你好，我是默认助手。你可以立刻开始跟我聊天",
@@ -1210,6 +1211,7 @@
       "regenerate": {
         "model": "切换模型"
       },
+      "set_context_anchor": "设为上下文起始位置",
       "useful": {
         "label": "设置为上下文",
         "tip": "在这组消息中，该消息将被选择加入上下文"
@@ -1351,6 +1353,10 @@
       "context_count": {
         "label": "上下文数",
         "tip": "要保留在上下文中的消息数量，数值越大，上下文越长，消耗的 Token 越多。普通聊天建议 5-10"
+      },
+      "context_window_mode": {
+        "label": "固定上下文窗口",
+        "tip": "开启后，上下文窗口将固定在指定位置，不再随对话滑动"
       },
       "max": "不限",
       "max_tokens": {

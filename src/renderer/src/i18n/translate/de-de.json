@@ -1059,6 +1059,7 @@
         "placeholder": "Suchen"
       }
     },
+    "context_window_start": "[to be translated]:Context Start",
     "deeply_thought": "Tiefgehend nachgedacht ({{seconds}} Sekunden)",
     "default": {
       "description": "Hallo, ich bin der Standardassistent. Sie können sofort mit mir chatten",
@@ -1210,6 +1211,7 @@
       "regenerate": {
         "model": "Modell wechseln"
       },
+      "set_context_anchor": "[to be translated]:Mark as Context Start",
       "useful": {
         "label": "Als Kontext festlegen",
         "tip": "In dieser Nachrichtengruppe wird diese Nachricht in den Kontext aufgenommen"
@@ -1351,6 +1353,10 @@
       "context_count": {
         "label": "Kontextanzahl",
         "tip": "Anzahl der im Kontext zu behaltenden Nachrichten. Je größer der Wert, desto länger der Kontext und desto mehr Token werden verbraucht. Für normales Chatten wird 5-10 empfohlen"
+      },
+      "context_window_mode": {
+        "label": "[to be translated]:Fixed Context Window",
+        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
       },
       "max": "Unbegrenzt",
       "max_tokens": {
@@ -1600,6 +1606,7 @@
     "copy_failed": "Kopieren fehlgeschlagen",
     "current": "Aktuell",
     "cut": "Ausschneiden",
+    "decline": "[to be translated]:Decline",
     "default": "Standard",
     "delete": "Löschen",
     "delete_confirm": "Möchten Sie wirklich löschen?",
@@ -2909,6 +2916,7 @@
   },
   "onboarding": {
     "privacy": {
+      "accept_and_continue": "[to be translated]:Accept and Continue",
       "notice": "Durch die Fortsetzung bestätigen Sie, dass Sie gelesen haben und zustimmen",
       "period": ".",
       "policy": "Datenschutzerklärung"
@@ -3390,6 +3398,14 @@
     "source": "Quellcode anzeigen",
     "zoom_in": "Vergrößern",
     "zoom_out": "Verkleinern"
+  },
+  "privacy_policy": {
+    "title": "[to be translated]:Privacy Policy"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "[to be translated]:We have updated the privacy policy. Please review the latest ",
+    "policy": "[to be translated]:Privacy Policy",
+    "title": "[to be translated]:Privacy Policy Updated"
   },
   "prompts": {
     "explanation": "Helfen Sie mir, dieses Konzept zu erklären",

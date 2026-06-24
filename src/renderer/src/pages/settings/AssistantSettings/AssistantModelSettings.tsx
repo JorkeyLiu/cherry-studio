@@ -6,6 +6,7 @@ import { DeleteIcon, ResetIcon } from '@renderer/components/Icons'
 import { HStack } from '@renderer/components/Layout'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
 import Selector from '@renderer/components/Selector'
+import { HelpTooltip } from '@renderer/components/TooltipIcons'
 import {
   DEFAULT_CONTEXTCOUNT,
   DEFAULT_TEMPERATURE,
@@ -17,7 +18,13 @@ import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { SettingRow } from '@renderer/pages/settings'
 import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/AssistantService'
-import type { Assistant, AssistantSettingCustomParameters, AssistantSettings, Model } from '@renderer/types'
+import type {
+  Assistant,
+  AssistantSettingCustomParameters,
+  AssistantSettings,
+  ContextWindowMode,
+  Model
+} from '@renderer/types'
 import { modalConfirm } from '@renderer/utils'
 import { Button, Col, Divider, Input, InputNumber, Row, Select, Slider, Switch, Tooltip } from 'antd'
 import { isNull } from 'lodash'
@@ -69,6 +76,9 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
   const enableTemperature = useMemo(
     () => assistant?.settings?.enableTemperature ?? DEFAULT_ASSISTANT_SETTINGS.enableTemperature,
     [assistant?.settings?.enableTemperature]
+  )
+  const [contextWindowMode, setContextWindowMode] = useState<ContextWindowMode>(
+    assistant?.settings?.contextWindowMode ?? 'sliding'
   )
 
   const customParametersRef = useRef(customParameters)
@@ -216,6 +226,7 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
     setTopP(DEFAULT_ASSISTANT_SETTINGS.topP)
     setCustomParameters(DEFAULT_ASSISTANT_SETTINGS.customParameters)
     setMaxToolCalls(DEFAULT_ASSISTANT_SETTINGS.maxToolCalls)
+    setContextWindowMode('sliding')
     updateAssistantSettings(DEFAULT_ASSISTANT_SETTINGS)
   }
   const modelFilter = (model: Model) => !isEmbeddingModel(model) && !isRerankModel(model)
@@ -369,6 +380,28 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
           </Col>
         </Row>
       )}
+      <Divider style={{ margin: '10px 0' }} />
+
+      <SettingRow style={{ minHeight: 30 }}>
+        <HStack alignItems="center">
+          <Label>
+            {t('chat.settings.context_window_mode.label')}
+            <HelpTooltip title={t('chat.settings.context_window_mode.tip')} />
+          </Label>
+        </HStack>
+        <Switch
+          checked={contextWindowMode === 'fixed'}
+          onChange={(checked) => {
+            const mode: ContextWindowMode = checked ? 'fixed' : 'sliding'
+            setContextWindowMode(mode)
+            if (mode === 'sliding') {
+              updateAssistantSettings({ contextWindowMode: mode, fixedWindowAnchor: {} })
+            } else {
+              updateAssistantSettings({ contextWindowMode: mode })
+            }
+          }}
+        />
+      </SettingRow>
       <Divider style={{ margin: '10px 0' }} />
 
       <Row align="middle">

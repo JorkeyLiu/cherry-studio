@@ -1059,6 +1059,7 @@
         "placeholder": "検索"
       }
     },
+    "context_window_start": "[to be translated]:Context Start",
     "deeply_thought": "深く考えています（{{seconds}} 秒）",
     "default": {
       "description": "こんにちは、私はデフォルトのアシスタントです。すぐにチャットを始められます。",
@@ -1210,6 +1211,7 @@
       "regenerate": {
         "model": "モデルを切り替え"
       },
+      "set_context_anchor": "[to be translated]:Mark as Context Start",
       "useful": {
         "label": "上下文として設定する",
         "tip": "このメッセージは、このメッセージセットの中でコンテキストに含まれるために選択されます"
@@ -1351,6 +1353,10 @@
       "context_count": {
         "label": "コンテキスト",
         "tip": "コンテキストに保持する以前のメッセージの数"
+      },
+      "context_window_mode": {
+        "label": "[to be translated]:Fixed Context Window",
+        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
       },
       "max": "制限なし",
       "max_tokens": {
@@ -1600,6 +1606,7 @@
     "copy_failed": "コピーに失敗しました",
     "current": "現在",
     "cut": "切り取り",
+    "decline": "[to be translated]:Decline",
     "default": "デフォルト",
     "delete": "削除",
     "delete_confirm": "削除してもよろしいですか？",
@@ -2909,6 +2916,7 @@
   },
   "onboarding": {
     "privacy": {
+      "accept_and_continue": "[to be translated]:Accept and Continue",
       "notice": "続行することで、あなたは以下を読み、同意したことを確認します。",
       "period": "。",
       "policy": "プライバシーポリシー"
@@ -3390,6 +3398,14 @@
     "source": "ソースコードを表示",
     "zoom_in": "拡大",
     "zoom_out": "縮小"
+  },
+  "privacy_policy": {
+    "title": "[to be translated]:Privacy Policy"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "[to be translated]:We have updated the privacy policy. Please review the latest ",
+    "policy": "[to be translated]:Privacy Policy",
+    "title": "[to be translated]:Privacy Policy Updated"
   },
   "prompts": {
     "explanation": "この概念を説明してください",

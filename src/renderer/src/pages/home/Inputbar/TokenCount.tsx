@@ -1,6 +1,8 @@
 import { HStack, VStack } from '@renderer/components/Layout'
 import MaxContextCount from '@renderer/components/MaxContextCount'
+import { MAX_CONTEXT_COUNT } from '@renderer/config/constant'
 import { useSettings } from '@renderer/hooks/useSettings'
+import type { ContextWindowMode } from '@renderer/types'
 import { Divider, Popover } from 'antd'
 import { ArrowUp, MenuIcon } from 'lucide-react'
 import type { FC } from 'react'
@@ -11,9 +13,19 @@ type Props = {
   estimateTokenCount: number
   inputTokenCount: number
   contextCount: { current: number; max: number }
+  contextWindowMode?: ContextWindowMode
+  hasAnchor?: boolean
+  onUpdateAnchor?: () => void
 } & React.HTMLAttributes<HTMLDivElement>
 
-const TokenCount: FC<Props> = ({ estimateTokenCount, inputTokenCount, contextCount }) => {
+const TokenCount: FC<Props> = ({
+  estimateTokenCount,
+  inputTokenCount,
+  contextCount,
+  contextWindowMode,
+  hasAnchor,
+  onUpdateAnchor
+}) => {
   const { t } = useTranslation()
   const { showInputEstimatedTokens } = useSettings()
 
@@ -30,7 +42,9 @@ const TokenCount: FC<Props> = ({ estimateTokenCount, inputTokenCount, contextCou
             <HStack style={{ alignItems: 'center' }}>
               {contextCount.current}
               <SlashSeparatorSpan>/</SlashSeparatorSpan>
-              <MaxContextCount maxContext={contextCount.max} />
+              <MaxContextCount
+                maxContext={contextWindowMode === 'fixed' && hasAnchor ? MAX_CONTEXT_COUNT : contextCount.max}
+              />
             </HStack>
           </Text>
         </HStack>
@@ -43,16 +57,45 @@ const TokenCount: FC<Props> = ({ estimateTokenCount, inputTokenCount, contextCou
     )
   }
 
+  const contextCountBlock = (() => {
+    if (contextWindowMode === 'fixed') {
+      if (hasAnchor) {
+        // Fixed mode + anchored: show current / ∞, click to unanchor
+        return (
+          <HStack style={{ alignItems: 'center', cursor: 'pointer' }} onClick={onUpdateAnchor}>
+            <MenuIcon size={12} className="icon" />
+            {contextCount.current}
+            <SlashSeparatorSpan>/</SlashSeparatorSpan>
+            <MaxContextCount maxContext={MAX_CONTEXT_COUNT} style={{ color: 'var(--color-primary)' }} />
+          </HStack>
+        )
+      }
+      // Fixed mode + no anchor: show current / max, click to anchor
+      return (
+        <HStack style={{ alignItems: 'center', cursor: 'pointer' }} onClick={onUpdateAnchor}>
+          <MenuIcon size={12} className="icon" />
+          {contextCount.current}
+          <SlashSeparatorSpan>/</SlashSeparatorSpan>
+          <MaxContextCount maxContext={contextCount.max} />
+        </HStack>
+      )
+    }
+    // Sliding mode: not clickable
+    return (
+      <HStack style={{ alignItems: 'center' }}>
+        <MenuIcon size={12} className="icon" />
+        {contextCount.current}
+        <SlashSeparatorSpan>/</SlashSeparatorSpan>
+        <MaxContextCount maxContext={contextCount.max} />
+      </HStack>
+    )
+  })()
+
   return (
     <Container>
       <Popover content={PopoverContent} arrow={false}>
         <HStack>
-          <HStack style={{ alignItems: 'center' }}>
-            <MenuIcon size={12} className="icon" />
-            {contextCount.current}
-            <SlashSeparatorSpan>/</SlashSeparatorSpan>
-            <MaxContextCount maxContext={contextCount.max} />
-          </HStack>
+          {contextCountBlock}
           <Divider type="vertical" style={{ marginTop: 3, marginLeft: 5, marginRight: 3 }} />
           <HStack style={{ alignItems: 'center' }}>
             <ArrowUp size={12} className="icon" />
@@ -72,7 +115,7 @@ const Container = styled.div`
   color: var(--color-text-2);
   z-index: 10;
   padding: 3px 10px;
-  user-select: none;
+  user-select: text;
   border-radius: 20px;
   display: flex;
   align-items: center;

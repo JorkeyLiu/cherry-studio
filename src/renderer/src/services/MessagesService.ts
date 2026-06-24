@@ -43,10 +43,24 @@ export {
   getGroupedMessages
 } from '@renderer/utils/messageUtils/filters'
 
-export function getContextCount(assistant: Assistant, messages: Message[]) {
-  const settingContextCount = assistant?.settings?.contextCount ?? DEFAULT_CONTEXTCOUNT
+export function getContextCount(assistant: Assistant, messages: Message[], topicId?: string) {
+  const settings = assistant?.settings
+  const settingContextCount = settings?.contextCount ?? DEFAULT_CONTEXTCOUNT
   const actualContextCount = settingContextCount === MAX_CONTEXT_COUNT ? UNLIMITED_CONTEXT_COUNT : settingContextCount
 
+  if (settings?.contextWindowMode === 'fixed') {
+    const anchorMessageId = topicId ? settings?.fixedWindowAnchor?.[topicId] : undefined
+    if (anchorMessageId) {
+      const anchorIndex = messages.findIndex((m) => m.id === anchorMessageId)
+      if (anchorIndex >= 0) {
+        const contextMsgs = messages.slice(anchorIndex)
+        return { current: contextMsgs.length, max: settingContextCount }
+      }
+    }
+    // No anchor set or anchor not found: fall through to sliding mode
+  }
+
+  // Sliding mode: unchanged
   const contextMsgs = filterContextMessages(messages, actualContextCount)
 
   return {
