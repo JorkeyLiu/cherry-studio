@@ -1600,6 +1600,7 @@
     "copy_failed": "Échec de la copie",
     "current": "Actuel",
     "cut": "Couper",
+    "decline": "[to be translated]:Decline",
     "default": "Défaut",
     "delete": "Supprimer",
     "delete_confirm": "Êtes-vous sûr de vouloir supprimer ?",
@@ -2909,6 +2910,7 @@
   },
   "onboarding": {
     "privacy": {
+      "accept_and_continue": "[to be translated]:Accept and Continue",
       "notice": "En continuant, vous confirmez avoir lu et accepté",
       "period": ".",
       "policy": "Politique de confidentialité"
@@ -3390,6 +3392,14 @@
     "source": "Voir le code source",
     "zoom_in": "agrandir",
     "zoom_out": "réduire"
+  },
+  "privacy_policy": {
+    "title": "[to be translated]:Privacy Policy"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "[to be translated]:We have updated the privacy policy. Please review the latest ",
+    "policy": "[to be translated]:Privacy Policy",
+    "title": "[to be translated]:Privacy Policy Updated"
   },
   "prompts": {
     "explanation": "Aidez-moi à expliquer ce concept",
@@ -5011,6 +5021,7 @@
         "hover": "Afficher au survol",
         "label": "Déclencheur de popover de la grille"
       },
+      "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "Confirmer avant de supprimer le message",
         "confirm_regenerate_message": "Confirmer avant de régénérer le message",

@@ -29,6 +29,7 @@ import {
   setConfirmRegenerateMessage,
   setEnableQuickPanelTriggers,
   setFontSize,
+  setInjectContextTimestamp,
   setMathEnableSingleDollar,
   setMathEngine,
   setMessageFont,
@@ -105,6 +106,7 @@ const AssistantSettingsTab = (props: Props) => {
     thoughtAutoCollapse,
     messageNavigation,
     enableQuickPanelTriggers,
+    injectContextTimestamp,
     showTranslateConfirm,
     showMessageOutline,
     confirmDeleteMessage,
@@ -192,6 +194,15 @@ const AssistantSettingsTab = (props: Props) => {
               size="small"
               checked={showMessageOutline}
               onChange={(checked) => dispatch(setShowMessageOutline(checked))}
+            />
+          </SettingRow>
+          <SettingDivider />
+          <SettingRow>
+            <SettingRowTitleSmall>{t('settings.messages.inject_context_timestamp')}</SettingRowTitleSmall>
+            <Switch
+              size="small"
+              checked={injectContextTimestamp}
+              onChange={(checked) => dispatch(setInjectContextTimestamp(checked))}
             />
           </SettingRow>
           <SettingDivider />
