@@ -1059,6 +1059,7 @@
         "placeholder": "Search"
       }
     },
+    "context_window_start": "Context Start",
     "deeply_thought": "Deeply thought ({{seconds}} seconds)",
     "default": {
       "description": "Hello, I'm Default Assistant. You can start chatting with me right away",
@@ -1214,6 +1215,7 @@
       "regenerate": {
         "model": "Switch Model"
       },
+      "set_context_anchor": "Mark as Context Start",
       "useful": {
         "label": "Set as context",
         "tip": "In this group of messages, this message will be selected to join the context"
@@ -1355,6 +1357,10 @@
       "context_count": {
         "label": "Context",
         "tip": "The number of previous messages to keep in the context."
+      },
+      "context_window_mode": {
+        "label": "Fixed Context Window",
+        "tip": "When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
       },
       "max": "Unlimited",
       "max_tokens": {

@@ -57,7 +57,9 @@ export const DEFAULT_ASSISTANT_SETTINGS = {
   // It would gracefully fallback to prompt if not supported by model.
   toolUseMode: 'function',
   maxToolCalls: 20,
-  enableMaxToolCalls: true
+  enableMaxToolCalls: true,
+  contextWindowMode: 'sliding',
+  fixedWindowAnchor: {}
 } as const satisfies AssistantSettings
 
 /**
@@ -254,7 +256,9 @@ export const getAssistantSettings = (assistant: Assistant): AssistantSettings =>
     enableMaxToolCalls: assistant?.settings?.enableMaxToolCalls ?? DEFAULT_ASSISTANT_SETTINGS.enableMaxToolCalls,
     defaultModel: assistant?.defaultModel ?? DEFAULT_ASSISTANT_SETTINGS.defaultModel,
     reasoning_effort: assistant?.settings?.reasoning_effort ?? DEFAULT_ASSISTANT_SETTINGS.reasoning_effort,
-    customParameters: assistant?.settings?.customParameters ?? DEFAULT_ASSISTANT_SETTINGS.customParameters
+    customParameters: assistant?.settings?.customParameters ?? DEFAULT_ASSISTANT_SETTINGS.customParameters,
+    contextWindowMode: assistant?.settings?.contextWindowMode ?? DEFAULT_ASSISTANT_SETTINGS.contextWindowMode,
+    fixedWindowAnchor: assistant?.settings?.fixedWindowAnchor ?? DEFAULT_ASSISTANT_SETTINGS.fixedWindowAnchor
   }
 }
 

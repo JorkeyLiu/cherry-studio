@@ -1059,6 +1059,7 @@
         "placeholder": "Αναζήτηση"
       }
     },
+    "context_window_start": "[to be translated]:Context Start",
     "deeply_thought": "Έχει βαθιά σκεφτεί (χρήση {{seconds}} δευτερόλεπτα)",
     "default": {
       "description": "Γεια σου, είμαι ο προεπαγγελματικός βοηθός. Μπορείς να ξεκινήσεις να μου μιλάς αμέσως.",
@@ -1210,6 +1211,7 @@
       "regenerate": {
         "model": "Εναλλαγή μοντέλου"
       },
+      "set_context_anchor": "[to be translated]:Mark as Context Start",
       "useful": {
         "label": "Ορισμός ως πλαίσιο αναφοράς",
         "tip": "Σε αυτή την ομάδα μηνυμάτων, αυτό το μήνυμα θα επιλεγεί για να συμπεριληφθεί στο πλαίσιο"
@@ -1351,6 +1353,10 @@
       "context_count": {
         "label": "Πλήθος ενδιάμεσων",
         "tip": "Πλήθος των μηνυμάτων που θα παραμείνουν στα ενδιάμεσα, όσο μεγαλύτερο είναι το αριθμός, τόσο μεγαλύτερο είναι το μήκος του ενδιάμεσου και τόσο περισσότερα tokens χρησιμοποιούνται. Συνομιλία συνήθως συνιστάται μεταξύ 5-10"
+      },
+      "context_window_mode": {
+        "label": "[to be translated]:Fixed Context Window",
+        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
       },
       "max": "άπειρος",
       "max_tokens": {

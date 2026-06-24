@@ -1,7 +1,12 @@
 import { loggerService } from '@logger'
 import ContextMenu from '@renderer/components/ContextMenu'
 import { LoadingIcon } from '@renderer/components/Icons'
-import { INITIAL_MESSAGES_COUNT, LOAD_MORE_COUNT, SCROLL_CONTEXT_COUNT } from '@renderer/config/constant'
+import {
+  INITIAL_MESSAGES_COUNT,
+  LOAD_MORE_COUNT,
+  SCROLL_CONTEXT_COUNT,
+  UNLIMITED_CONTEXT_COUNT
+} from '@renderer/config/constant'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageOperations, useTopicMessages } from '@renderer/hooks/useMessageOperations'
@@ -11,7 +16,7 @@ import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
-import { getDefaultTopic } from '@renderer/services/AssistantService'
+import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getContextCount, getGroupedMessages, getUserMessage } from '@renderer/services/MessagesService'
 import { estimateHistoryTokens } from '@renderer/services/TokenService'
@@ -30,10 +35,17 @@ import {
 } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
+import {
+  filterAdjacentUserMessaegs,
+  filterAfterContextClearMessages,
+  filterErrorOnlyMessagesWithRelated,
+  filterLastAssistantMessage,
+  filterUsefulMessages
+} from '@renderer/utils/messageUtils/filters'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import { last } from 'lodash'
-import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
@@ -429,10 +441,10 @@ const Messages = ({
     void runAsyncFunction(async () => {
       void EventEmitter.emit(EVENT_NAMES.ESTIMATED_TOKEN_COUNT, {
         tokensCount: await estimateHistoryTokens(assistant, messages),
-        contextCount: getContextCount(assistant, messages)
+        contextCount: getContextCount(assistant, messages, topic.id)
       })
     }).then(() => onFirstUpdate?.())
-  }, [assistant, messages, onFirstUpdate])
+  }, [assistant, messages, onFirstUpdate, topic.id])
 
   const loadMoreMessages = useCallback(() => {
     if (!hasMore || isLoadingMore) return
@@ -589,6 +601,80 @@ const Messages = ({
     return Object.entries(newGrouped)
   }, [displayMessages])
 
+  // Compute context window boundary index in displayMessages space (reversed order).
+  // displayMessages is rendered with column-reverse, so:
+  //   displayMessages[0]           = newest message (bottom of visual view)
+  //   displayMessages[N-1]         = oldest displayed message (top of visual view)
+  // The divider should appear visually ABOVE the anchor (closer to top/older side),
+  // which maps to a HIGHER index in the reversed array.
+  const contextWindowBoundaryIndex = useMemo(() => {
+    if (!assistant) return -1
+    const settings = getAssistantSettings(assistant)
+
+    // Unlimited context: hide the divider since there's no boundary
+    if (settings.contextCount >= UNLIMITED_CONTEXT_COUNT) return -1
+
+    // Apply the first 5 filter steps (mirrors ConversationService.filterMessagesPipeline)
+    // to derive the pre-filtered message array used for boundary computation.
+    const preFiltered = filterAdjacentUserMessaegs(
+      filterLastAssistantMessage(
+        filterErrorOnlyMessagesWithRelated(filterUsefulMessages(filterAfterContextClearMessages(messages)))
+      )
+    )
+
+    let anchorOriginalIndex = -1
+
+    if (settings.contextWindowMode === 'fixed') {
+      // Fixed mode: locate the anchor message in the pre-filtered stream
+      const anchorMessageId = settings.fixedWindowAnchor?.[topic.id]
+      if (anchorMessageId) {
+        const filteredIndex = preFiltered.findIndex((m) => m.id === anchorMessageId)
+        if (filteredIndex >= 0) {
+          // Map back to the anchor's original index in the full messages array
+          anchorOriginalIndex = messages.findIndex((m) => m.id === anchorMessageId)
+        }
+      }
+
+      // Anchor not found or not set — fall through to sliding logic
+      if (anchorOriginalIndex < 0) {
+        const windowStartIndex = Math.max(0, messages.length - settings.contextCount)
+        if (windowStartIndex === 0) return -1
+        anchorOriginalIndex = windowStartIndex
+      }
+    } else {
+      // Sliding mode: compute where the window starts
+      const windowStartIndex = Math.max(0, messages.length - settings.contextCount)
+      // All messages fit inside the context window → hide the divider
+      if (windowStartIndex === 0) return -1
+      anchorOriginalIndex = windowStartIndex
+    }
+
+    if (anchorOriginalIndex < 0) return -1
+
+    // Convert to reversed index (displayMessages is newest-first for column-reverse)
+    const anchorInReversed = messages.length - 1 - anchorOriginalIndex
+    if (anchorInReversed >= 0 && anchorInReversed < displayMessages.length) {
+      // +1: the divider renders before the group (visually ABOVE the anchor,
+      // separating in-context messages from out-of-context older messages)
+      return anchorInReversed + 1
+    }
+    return -1
+  }, [assistant, messages, displayMessages.length, topic.id])
+
+  // Find the group key where the context window divider should be rendered
+  const contextDividerGroupKey = useMemo(() => {
+    if (contextWindowBoundaryIndex < 0) return null
+    for (const [key, groupMessages] of groupedMessages) {
+      // groupMessages is in chronological order (oldest first = highest displayMessages index first)
+      // Check if the oldest message in this group is at or past the boundary
+      const oldestMsgIndex = groupMessages[0]?.index ?? -1
+      if (oldestMsgIndex >= contextWindowBoundaryIndex) {
+        return key
+      }
+    }
+    return null
+  }, [groupedMessages, contextWindowBoundaryIndex])
+
   return (
     <MessagesContainer
       id="messages"
@@ -613,12 +699,20 @@ const Messages = ({
                 </LoaderContainer>
               )}
               {groupedMessages.map(([key, groupMessages]) => (
-                <MessageGroup
-                  key={key}
-                  messages={groupMessages}
-                  topic={topic}
-                  registerMessageElement={registerMessageElement}
-                />
+                <Fragment key={key}>
+                  {key === contextDividerGroupKey && (
+                    <ContextWindowDivider>
+                      <ContextWindowDividerLine />
+                      <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
+                      <ContextWindowDividerLine />
+                    </ContextWindowDivider>
+                  )}
+                  <MessageGroup
+                    messages={groupMessages}
+                    topic={topic}
+                    registerMessageElement={registerMessageElement}
+                  />
+                </Fragment>
               ))}
               {isLoadingMore && (
                 <LoaderContainer>
@@ -695,6 +789,26 @@ const LoaderContainer = styled.div`
   width: 100%;
   background: var(--color-background);
   pointer-events: none;
+`
+
+const ContextWindowDivider = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  margin: 4px 0;
+`
+
+const ContextWindowDividerLine = styled.div`
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
+`
+
+const ContextWindowDividerText = styled.span`
+  font-size: 12px;
+  color: var(--color-text-3);
+  white-space: nowrap;
 `
 
 export default Messages

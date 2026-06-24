@@ -1059,6 +1059,7 @@
         "placeholder": "Buscar"
       }
     },
+    "context_window_start": "[to be translated]:Context Start",
     "deeply_thought": "Profundamente pensado (tomó {{seconds}} segundos)",
     "default": {
       "description": "Hola, soy el asistente predeterminado. Puedes comenzar a conversar conmigo de inmediato.",
@@ -1210,6 +1211,7 @@
       "regenerate": {
         "model": "Cambiar modelo"
       },
+      "set_context_anchor": "[to be translated]:Mark as Context Start",
       "useful": {
         "label": "establecer como contexto",
         "tip": "En este grupo de mensajes, este mensaje se seleccionará para unirse al contexto"
@@ -1351,6 +1353,10 @@
       "context_count": {
         "label": "Número de contextos",
         "tip": "Número de mensajes que se deben mantener en el contexto. Cuanto mayor sea el valor, más largo será el contexto y más tokens se consumirán. Para una conversación normal, se sugiere un valor entre 5-10"
+      },
+      "context_window_mode": {
+        "label": "[to be translated]:Fixed Context Window",
+        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
       },
       "max": "Sin límite",
       "max_tokens": {

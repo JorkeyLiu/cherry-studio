@@ -1059,6 +1059,7 @@
         "placeholder": "Tìm kiếm"
       }
     },
+    "context_window_start": "[to be translated]:Context Start",
     "deeply_thought": "Suy nghĩ sâu ({{seconds}} giây)",
     "default": {
       "description": "Xin chào, tôi là Trợ lý Mặc định. Bạn có thể bắt đầu trò chuyện với tôi ngay bây giờ",
@@ -1210,6 +1211,7 @@
       "regenerate": {
         "model": "Chuyển đổi mô hình"
       },
+      "set_context_anchor": "[to be translated]:Mark as Context Start",
       "useful": {
         "label": "Đặt làm ngữ cảnh",
         "tip": "Trong nhóm tin nhắn này, tin nhắn này sẽ được chọn để tham gia vào ngữ cảnh"
@@ -1351,6 +1353,10 @@
       "context_count": {
         "label": "Ngữ cảnh",
         "tip": "Số lượng tin nhắn trước đó cần giữ trong ngữ cảnh."
+      },
+      "context_window_mode": {
+        "label": "[to be translated]:Fixed Context Window",
+        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
       },
       "max": "Không giới hạn",
       "max_tokens": {

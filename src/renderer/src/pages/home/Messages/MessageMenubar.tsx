@@ -9,12 +9,14 @@ import { isEmbeddingModel, isRerankModel, isVisionModel } from '@renderer/config
 import type { MessageMenubarButtonId, MessageMenubarScope } from '@renderer/config/registry/messageMenubar'
 import { DEFAULT_MESSAGE_MENUBAR_SCOPE, getMessageMenubarConfig } from '@renderer/config/registry/messageMenubar'
 import { useMessageEditing } from '@renderer/context/MessageEditingContext'
+import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
 import { useEnableDeveloperMode, useMessageStyle, useSettings } from '@renderer/hooks/useSettings'
 import { useTemporaryValue } from '@renderer/hooks/useTemporaryValue'
 import useTranslate from '@renderer/hooks/useTranslate'
+import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getMessageTitle } from '@renderer/services/MessagesService'
 import { translateText } from '@renderer/services/TranslateService'
@@ -53,6 +55,7 @@ import { Dropdown, Popconfirm, Tooltip } from 'antd'
 import dayjs from 'dayjs'
 import type { TFunction } from 'i18next'
 import {
+  Anchor,
   AtSign,
   Bug,
   Check,
@@ -105,16 +108,19 @@ type MessageMenubarButtonContext = {
   blockEntities: ReturnType<typeof messageBlocksSelectors.selectEntities>
   confirmDeleteMessage: boolean
   confirmRegenerateMessage: boolean
+  contextWindowMode?: 'sliding' | 'fixed'
   copied: boolean
   deleteMessage: MessageOperationsHandlers['deleteMessage']
   dropdownItems: MenuProps['items']
   enableDeveloperMode: boolean
   handleResendUserMessage: (messageUpdate?: Message) => Promise<void>
+  handleSetContextAnchor: () => void
   handleTraceUserMessage: () => void | Promise<void>
   handleTranslate: (language: TranslateLanguage) => Promise<void>
   hasTranslationBlocks: boolean
   isAssistantMessage: boolean
   isBubbleStyle: boolean
+  isContextAnchor: boolean
   isGrouped?: boolean
   isLastMessage: boolean
   isTranslating: boolean
@@ -170,6 +176,28 @@ const MessageMenubar: FC<Props> = (props) => {
   const { isBubbleStyle } = useMessageStyle()
   const { enableDeveloperMode } = useEnableDeveloperMode()
   const { confirmDeleteMessage, confirmRegenerateMessage } = useSettings()
+  const { updateAssistantSettings } = useAssistant(assistant.id)
+
+  // Context anchor logic for fixed context window mode
+  const assistantSettings = getAssistantSettings(assistant)
+  const contextWindowMode = assistantSettings.contextWindowMode
+  const handleSetContextAnchor = useCallback(() => {
+    const currentAnchor = assistantSettings.fixedWindowAnchor?.[topic.id]
+    const newAnchor = { ...assistantSettings.fixedWindowAnchor }
+    if (currentAnchor === message.id) {
+      // Already anchored here, remove anchor
+      delete newAnchor[topic.id]
+    } else {
+      // Set new anchor
+      newAnchor[topic.id] = message.id
+    }
+    updateAssistantSettings({ fixedWindowAnchor: newAnchor })
+  }, [assistantSettings, topic.id, message.id, updateAssistantSettings])
+
+  const isContextAnchor = useMemo(() => {
+    const settings = getAssistantSettings(assistant)
+    return settings.fixedWindowAnchor?.[topic.id] === message.id
+  }, [assistant, topic.id, message.id])
 
   // const loading = useTopicLoading(topic)
 
@@ -574,16 +602,19 @@ const MessageMenubar: FC<Props> = (props) => {
     blockEntities,
     confirmDeleteMessage,
     confirmRegenerateMessage,
+    contextWindowMode,
     copied,
     deleteMessage,
     dropdownItems,
     enableDeveloperMode,
     handleResendUserMessage,
+    handleSetContextAnchor,
     handleTraceUserMessage,
     handleTranslate,
     hasTranslationBlocks,
     isAssistantMessage,
     isBubbleStyle,
+    isContextAnchor,
     isGrouped,
     isLastMessage,
     isTranslating,
@@ -1045,6 +1076,19 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       <Tooltip title="Inspect Data (Dev)" mouseEnterDelay={0.8}>
         <ActionButton className="message-action-button" onClick={handleInspect}>
           <Bug size={15} />
+        </ActionButton>
+      </Tooltip>
+    )
+  },
+  'context-anchor': ({ contextWindowMode, isContextAnchor, handleSetContextAnchor, softHoverBg, t }) => {
+    if (contextWindowMode !== 'fixed') {
+      return null
+    }
+
+    return (
+      <Tooltip title={t('chat.message.set_context_anchor')} mouseEnterDelay={0.8}>
+        <ActionButton className="message-action-button" onClick={handleSetContextAnchor} $softHoverBg={softHoverBg}>
+          <Anchor size={15} style={isContextAnchor ? { color: 'var(--color-primary)' } : undefined} />
         </ActionButton>
       </Tooltip>
     )

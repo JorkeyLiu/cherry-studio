@@ -1059,6 +1059,7 @@
         "placeholder": "Caută"
       }
     },
+    "context_window_start": "[to be translated]:Context Start",
     "deeply_thought": "Gândit profund ({{seconds}} secunde)",
     "default": {
       "description": "Salut, sunt Asistentul Implicit. Poți începe să discuți cu mine imediat",
@@ -1210,6 +1211,7 @@
       "regenerate": {
         "model": "Schimbă modelul"
       },
+      "set_context_anchor": "[to be translated]:Mark as Context Start",
       "useful": {
         "label": "Setează ca context",
         "tip": "În acest grup de mesaje, acest mesaj va fi selectat pentru a se alătura contextului"
@@ -1351,6 +1353,10 @@
       "context_count": {
         "label": "Context",
         "tip": "Numărul de mesaje anterioare de păstrat în context."
+      },
+      "context_window_mode": {
+        "label": "[to be translated]:Fixed Context Window",
+        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
       },
       "max": "Nelimitat",
       "max_tokens": {

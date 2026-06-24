@@ -11,7 +11,7 @@ import {
 import db from '@renderer/databases'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useInputText } from '@renderer/hooks/useInputText'
-import { useMessageOperations, useTopicLoading } from '@renderer/hooks/useMessageOperations'
+import { useMessageOperations, useTopicLoading, useTopicMessages } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTextareaResize } from '@renderer/hooks/useTextareaResize'
@@ -22,7 +22,7 @@ import {
   useInputbarToolsInternalDispatch,
   useInputbarToolsState
 } from '@renderer/pages/home/Inputbar/context/InputbarToolsProvider'
-import { getDefaultTopic } from '@renderer/services/AssistantService'
+import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { CacheService } from '@renderer/services/CacheService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import FileManager from '@renderer/services/FileManager'
@@ -158,13 +158,16 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     minHeight: 30
   })
 
-  const { assistant, addTopic, model, setModel, updateAssistant } = useAssistant(initialAssistant.id)
+  const { assistant, addTopic, model, setModel, updateAssistant, updateAssistantSettings } = useAssistant(
+    initialAssistant.id
+  )
   const { sendMessageShortcut, showInputEstimatedTokens, enableQuickPanelTriggers } = useSettings()
   const [estimateTokenCount, setEstimateTokenCount] = useState(0)
   const [contextCount, setContextCount] = useState({ current: 0, max: 0 })
 
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)
+  const topicMessages = useTopicMessages(topic.id)
   const loading = useTopicLoading(topic)
   const dispatch = useAppDispatch()
   const isVisionAssistant = useMemo(() => isVisionModel(model), [model])
@@ -298,6 +301,41 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
       contextCount
     }
   }, [config.showTokenCount, contextCount, estimateTokenCount, showInputEstimatedTokens])
+
+  const contextWindowMode = useMemo(() => {
+    return getAssistantSettings(assistant).contextWindowMode
+  }, [assistant])
+
+  const settings = getAssistantSettings(assistant)
+  const hasAnchor = settings.contextWindowMode === 'fixed' && !!settings.fixedWindowAnchor?.[topic.id]
+
+  const onUpdateAnchor = useCallback(() => {
+    const settings = getAssistantSettings(assistant)
+    const topicMessagesList = topicMessages || []
+    const hasAnchor = settings.contextWindowMode === 'fixed' && !!settings.fixedWindowAnchor?.[topic.id]
+
+    if (hasAnchor && topic.id) {
+      // 1. Has anchor: unanchor (restore sliding)
+      updateAssistantSettings({
+        fixedWindowAnchor: {
+          ...settings.fixedWindowAnchor,
+          [topic.id]: undefined as unknown as string // Set to undefined to persist as empty
+        }
+      })
+    } else {
+      // 2. No anchor: anchor
+      const anchorIndex = Math.max(0, topicMessagesList.length - settings.contextCount)
+      const anchorMessage = topicMessagesList[anchorIndex]
+      if (anchorMessage && topic.id) {
+        updateAssistantSettings({
+          fixedWindowAnchor: {
+            ...settings.fixedWindowAnchor,
+            [topic.id]: anchorMessage.id
+          }
+        })
+      }
+    }
+  }, [assistant, topicMessages, topic.id, updateAssistantSettings])
 
   const onPause = useCallback(async () => {
     await pauseMessages()
@@ -488,6 +526,9 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
           estimateTokenCount={tokenCountProps.estimateTokenCount}
           inputTokenCount={tokenCountProps.inputTokenCount}
           contextCount={tokenCountProps.contextCount}
+          contextWindowMode={contextWindowMode}
+          hasAnchor={hasAnchor}
+          onUpdateAnchor={onUpdateAnchor}
           onClick={onNewContext}
         />
       )}

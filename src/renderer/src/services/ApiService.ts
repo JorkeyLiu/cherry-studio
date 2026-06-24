@@ -156,10 +156,14 @@ export async function transformMessagesAndFetch(
   },
   onChunkReceived: (chunk: Chunk) => void
 ) {
-  const { messages, assistant } = request
+  const { messages, assistant, topicId } = request
 
   try {
-    const { modelMessages, uiMessages } = await ConversationService.prepareMessagesForModel(messages, assistant)
+    const { modelMessages, uiMessages } = await ConversationService.prepareMessagesForModel(
+      messages,
+      assistant,
+      topicId
+    )
 
     // replace prompt variables
     assistant.prompt = await replacePromptVariables(assistant.prompt, assistant.model?.name)

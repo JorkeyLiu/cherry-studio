@@ -174,6 +174,8 @@ export const EFFORT_RATIO: EffortRatio = {
   auto: 2
 }
 
+export type ContextWindowMode = 'sliding' | 'fixed'
+
 export type AssistantSettings = {
   maxTokens?: number
   enableMaxTokens?: boolean
@@ -201,6 +203,8 @@ export type AssistantSettings = {
   toolUseMode: 'function' | 'prompt'
   maxToolCalls?: number
   enableMaxToolCalls?: boolean
+  contextWindowMode?: ContextWindowMode
+  fixedWindowAnchor?: Record<string, string> // { [topicId]: anchorMessageId }
 }
 
 export type AssistantPreset = Omit<Assistant, 'model'> & {
