@@ -1600,6 +1600,7 @@
     "copy_failed": "Falha ao copiar",
     "current": "Atual",
     "cut": "Cortar",
+    "decline": "[to be translated]:Decline",
     "default": "Padrão",
     "delete": "Excluir",
     "delete_confirm": "Tem certeza de que deseja excluir?",
@@ -2909,6 +2910,7 @@
   },
   "onboarding": {
     "privacy": {
+      "accept_and_continue": "[to be translated]:Accept and Continue",
       "notice": "Ao continuar, você confirma que leu e concorda com",
       "period": ".",
       "policy": "Política de Privacidade"
@@ -3390,6 +3392,14 @@
     "source": "Ver código-fonte",
     "zoom_in": "ampliar",
     "zoom_out": "reduzir"
+  },
+  "privacy_policy": {
+    "title": "[to be translated]:Privacy Policy"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "[to be translated]:We have updated the privacy policy. Please review the latest ",
+    "policy": "[to be translated]:Privacy Policy",
+    "title": "[to be translated]:Privacy Policy Updated"
   },
   "prompts": {
     "explanation": "Ajude-me a explicar este conceito",
@@ -5011,6 +5021,7 @@
         "hover": "Passe o mouse para mostrar",
         "label": "Disparador de detalhes da grade"
       },
+      "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "confirmar antes de excluir a mensagem",
         "confirm_regenerate_message": "Confirmar antes de regenerar a mensagem",

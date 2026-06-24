@@ -1600,6 +1600,7 @@
     "copy_failed": "Не удалось скопировать",
     "current": "Текущий",
     "cut": "Вырезать",
+    "decline": "[to be translated]:Decline",
     "default": "По умолчанию",
     "delete": "Удалить",
     "delete_confirm": "Вы уверены, что хотите удалить?",
@@ -2909,6 +2910,7 @@
   },
   "onboarding": {
     "privacy": {
+      "accept_and_continue": "[to be translated]:Accept and Continue",
       "notice": "Продолжая, вы подтверждаете, что прочитали и соглашаетесь с",
       "period": ".",
       "policy": "Политика конфиденциальности"
@@ -3390,6 +3392,14 @@
     "source": "Смотреть исходный код",
     "zoom_in": "Увеличить",
     "zoom_out": "Уменьшить"
+  },
+  "privacy_policy": {
+    "title": "[to be translated]:Privacy Policy"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "[to be translated]:We have updated the privacy policy. Please review the latest ",
+    "policy": "[to be translated]:Privacy Policy",
+    "title": "[to be translated]:Privacy Policy Updated"
   },
   "prompts": {
     "explanation": "Объясните мне этот концепт",
@@ -5011,6 +5021,7 @@
         "hover": "Наведение для отображения",
         "label": "Триггер для отображения подробной информации в сетке"
       },
+      "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "Подтверждать перед удалением сообщений",
         "confirm_regenerate_message": "Подтверждать перед пересозданием сообщений",

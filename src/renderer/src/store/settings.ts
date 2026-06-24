@@ -200,6 +200,7 @@ export interface SettingsState {
   enableSpellCheck: boolean
   spellCheckLanguages: string[]
   enableQuickPanelTriggers: boolean
+  injectContextTimestamp: boolean
   // 硬件加速设置
   disableHardwareAcceleration: boolean
   // 使用系统标题栏 (仅Linux)
@@ -386,6 +387,7 @@ export const initialState: SettingsState = {
   enableSpellCheck: false,
   spellCheckLanguages: [],
   enableQuickPanelTriggers: false,
+  injectContextTimestamp: false,
   // 消息操作确认设置
   confirmDeleteMessage: true,
   confirmRegenerateMessage: true,
@@ -825,6 +827,9 @@ const settingsSlice = createSlice({
     setEnableQuickPanelTriggers: (state, action: PayloadAction<boolean>) => {
       state.enableQuickPanelTriggers = action.payload
     },
+    setInjectContextTimestamp: (state, action: PayloadAction<boolean>) => {
+      state.injectContextTimestamp = action.payload
+    },
     setConfirmDeleteMessage: (state, action: PayloadAction<boolean>) => {
       state.confirmDeleteMessage = action.payload
     },
@@ -1016,6 +1021,7 @@ export const {
   setSpellCheckLanguages,
   setExportMenuOptions,
   setEnableQuickPanelTriggers,
+  setInjectContextTimestamp,
   setConfirmDeleteMessage,
   setConfirmRegenerateMessage,
   setDisableHardwareAcceleration,

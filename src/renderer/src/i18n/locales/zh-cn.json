@@ -5021,6 +5021,7 @@
         "hover": "悬停显示",
         "label": "网格详情触发"
       },
+      "inject_context_timestamp": "注入上下文时间戳",
       "input": {
         "confirm_delete_message": "删除消息前确认",
         "confirm_regenerate_message": "重新生成消息前确认",

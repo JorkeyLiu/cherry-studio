@@ -1600,6 +1600,7 @@
     "copy_failed": "Copiere eșuată",
     "current": "Curent",
     "cut": "Decupează",
+    "decline": "[to be translated]:Decline",
     "default": "Implicit",
     "delete": "Șterge",
     "delete_confirm": "Ești sigur că vrei să ștergi?",
@@ -2909,6 +2910,7 @@
   },
   "onboarding": {
     "privacy": {
+      "accept_and_continue": "[to be translated]:Accept and Continue",
       "notice": "Continuând, confirmi că ai citit și ești de acord cu",
       "period": ".",
       "policy": "Politica de confidențialitate"
@@ -3390,6 +3392,14 @@
     "source": "Vezi codul sursă",
     "zoom_in": "Mărește",
     "zoom_out": "Micșorează"
+  },
+  "privacy_policy": {
+    "title": "[to be translated]:Privacy Policy"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "[to be translated]:We have updated the privacy policy. Please review the latest ",
+    "policy": "[to be translated]:Privacy Policy",
+    "title": "[to be translated]:Privacy Policy Updated"
   },
   "prompts": {
     "explanation": "Explică-mi acest concept",
@@ -5011,6 +5021,7 @@
         "hover": "Plasează cursorul pentru a afișa",
         "label": "Declanșator detaliu grilă"
       },
+      "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "Confirmă înainte de ștergerea mesajelor",
         "confirm_regenerate_message": "Confirmă înainte de regenerarea mesajelor",

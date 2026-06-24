@@ -5021,6 +5021,7 @@
         "hover": "停留顯示",
         "label": "網格詳細資訊觸發"
       },
+      "inject_context_timestamp": "注入上下文時間戳",
       "input": {
         "confirm_delete_message": "刪除訊息前確認",
         "confirm_regenerate_message": "重新產生訊息前確認",

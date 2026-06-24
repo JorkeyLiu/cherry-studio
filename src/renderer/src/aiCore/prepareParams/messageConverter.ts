@@ -6,6 +6,7 @@
 import type { ReasoningPart } from '@ai-sdk/provider-utils'
 import { loggerService } from '@logger'
 import { isVisionModel } from '@renderer/config/models'
+import store from '@renderer/store'
 import type { Message, Model } from '@renderer/types'
 import type {
   FileMessageBlock,
@@ -30,6 +31,7 @@ import type {
   TextPart,
   UserModelMessage
 } from 'ai'
+import dayjs from 'dayjs'
 import i18n from 'i18next'
 
 import { convertFileBlockToFilePart, convertFileBlockToTextPart } from './fileProcessor'
@@ -45,7 +47,14 @@ export async function convertMessageToSdkParam(
   isVisionModel = false,
   model?: Model
 ): Promise<ModelMessage | ModelMessage[]> {
-  const content = getMainTextContent(message)
+  let content = getMainTextContent(message)
+
+  // Inject context timestamp if enabled
+  if (store.getState().settings.injectContextTimestamp && message.createdAt && message.role === 'user') {
+    const timestamp = dayjs(message.createdAt).format('YYYY-MM-DD HH:mm:ss')
+    content = `<message_time>${timestamp}</message_time>\n${content}`
+  }
+
   const fileBlocks = findFileBlocks(message)
   const imageBlocks = findImageBlocks(message)
   const reasoningBlocks = findThinkingBlocks(message)

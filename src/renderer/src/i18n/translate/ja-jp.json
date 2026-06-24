@@ -1600,6 +1600,7 @@
     "copy_failed": "コピーに失敗しました",
     "current": "現在",
     "cut": "切り取り",
+    "decline": "[to be translated]:Decline",
     "default": "デフォルト",
     "delete": "削除",
     "delete_confirm": "削除してもよろしいですか？",
@@ -2909,6 +2910,7 @@
   },
   "onboarding": {
     "privacy": {
+      "accept_and_continue": "[to be translated]:Accept and Continue",
       "notice": "続行することで、あなたは以下を読み、同意したことを確認します。",
       "period": "。",
       "policy": "プライバシーポリシー"
@@ -3390,6 +3392,14 @@
     "source": "ソースコードを表示",
     "zoom_in": "拡大",
     "zoom_out": "縮小"
+  },
+  "privacy_policy": {
+    "title": "[to be translated]:Privacy Policy"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "[to be translated]:We have updated the privacy policy. Please review the latest ",
+    "policy": "[to be translated]:Privacy Policy",
+    "title": "[to be translated]:Privacy Policy Updated"
   },
   "prompts": {
     "explanation": "この概念を説明してください",
@@ -5011,6 +5021,7 @@
         "hover": "ホバーで表示",
         "label": "グリッド詳細トリガー"
       },
+      "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "メッセージ削除前に確認",
         "confirm_regenerate_message": "メッセージ再生成前に確認",

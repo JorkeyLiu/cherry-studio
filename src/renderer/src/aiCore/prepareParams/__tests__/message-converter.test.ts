@@ -1,3 +1,4 @@
+import type * as ConfigModels from '@renderer/config/models'
 import type { Message, Model } from '@renderer/types'
 import type { FileMetadata } from '@renderer/types/file'
 import { FILE_TYPE } from '@renderer/types/file'
@@ -26,10 +27,14 @@ vi.mock('../fileProcessor', () => ({
 const visionModelIds = new Set(['gpt-4o-mini', 'qwen-image-edit'])
 const imageEnhancementModelIds = new Set(['qwen-image-edit'])
 
-vi.mock('@renderer/config/models', () => ({
-  isVisionModel: (model: Model) => visionModelIds.has(model.id),
-  isImageEnhancementModel: (model: Model) => imageEnhancementModelIds.has(model.id)
-}))
+vi.mock('@renderer/config/models', async (importOriginal) => {
+  const actual = await importOriginal<typeof ConfigModels>()
+  return {
+    ...actual,
+    isVisionModel: (model: Model) => visionModelIds.has(model.id),
+    isImageEnhancementModel: (model: Model) => imageEnhancementModelIds.has(model.id)
+  }
+})
 
 type MockableMessage = Message & {
   __mockContent?: string
