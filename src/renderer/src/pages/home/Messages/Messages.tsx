@@ -70,7 +70,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [isProcessingContext, setIsProcessingContext] = useState(false)
 
-  const { addTopic } = useAssistant(assistant.id)
+  const { addTopic, updateAssistantSettings } = useAssistant(assistant.id)
   const { showPrompt, messageNavigation } = useSettings()
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
@@ -198,6 +198,30 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
           setActiveTopic(newTopic)
           // 4. Trigger auto-rename for the new topic
           void autoRenameTopic(assistant, newTopic.id)
+          // 5. Inherit fixed context window anchor
+          const assistantSettings = getAssistantSettings(assistant)
+          if (assistantSettings.contextWindowMode === 'fixed') {
+            const sourceAnchorId = assistantSettings.fixedWindowAnchor?.[topic.id]
+            if (sourceAnchorId) {
+              // Find the anchor's index in the original messages
+              const anchorIndex = currentMessages.findIndex((m) => m.id === sourceAnchorId)
+              // Anchor must be within the cloned range (before the branch point)
+              const clonedCount = currentMessages.length - index
+              if (anchorIndex >= 0 && anchorIndex < clonedCount) {
+                // Get the new topic's message IDs from the store
+                const newTopicMessageIds = store.getState().messages.messageIdsByTopic[newTopic.id]
+                if (newTopicMessageIds && newTopicMessageIds.length > anchorIndex) {
+                  const newAnchorId = newTopicMessageIds[anchorIndex]
+                  updateAssistantSettings({
+                    fixedWindowAnchor: {
+                      ...assistantSettings.fixedWindowAnchor,
+                      [newTopic.id]: newAnchorId
+                    }
+                  })
+                }
+              }
+            }
+          }
         } else {
           // Optional: Handle cloning failure (e.g., show an error message)
           // You might want to remove the added topic if cloning fails
