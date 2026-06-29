@@ -34,10 +34,10 @@ export const DEFAULT_MESSAGE_MENUBAR_BUTTON_IDS: MessageMenubarButtonId[] = [
   'translate',
   'useful',
   'notes',
+  'context-anchor',
   'delete',
   'trace',
   'inspect-data',
-  'context-anchor',
   'more-menu'
 ]
 
