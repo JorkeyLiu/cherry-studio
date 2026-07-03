@@ -2,7 +2,6 @@ import { TopView } from '@renderer/components/TopView'
 import { useAssistants, useDefaultAssistant } from '@renderer/hooks/useAssistant'
 import { useAssistantPresets } from '@renderer/hooks/useAssistantPresets'
 import { useTimer } from '@renderer/hooks/useTimer'
-import { useSystemAssistantPresets } from '@renderer/pages/store/assistants/presets'
 import { createAssistantFromAgent } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { Assistant, AssistantPreset } from '@renderer/types'
@@ -31,14 +30,13 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
   const { defaultAssistant } = useDefaultAssistant()
   const { assistants, addAssistant } = useAssistants()
   const inputRef = useRef<InputRef>(null)
-  const systemPresets = useSystemAssistantPresets()
   const loadingRef = useRef(false)
   const [selectedIndex, setSelectedIndex] = useState(0)
   const containerRef = useRef<HTMLDivElement>(null)
   const { setTimeoutTimer } = useTimer()
 
   const presets = useMemo(() => {
-    const allPresets = [...userPresets, ...systemPresets] as AssistantPreset[]
+    const allPresets = [...userPresets] as AssistantPreset[]
     const list = [defaultAssistant, ...allPresets.filter((preset) => !assistants.map((a) => a.id).includes(preset.id))]
     const filtered = searchText
       ? list.filter(
@@ -60,7 +58,7 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
       return [newAgent, ...filtered]
     }
     return filtered
-  }, [assistants, defaultAssistant, searchText, systemPresets, userPresets])
+  }, [assistants, defaultAssistant, searchText, userPresets])
 
   // 重置选中索引当搜索或列表内容变更时
   useEffect(() => {

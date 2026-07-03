@@ -30,7 +30,6 @@ import type { CreateDirectoryOptions, FileStat } from 'webdav'
 import { getDataPath } from '../utils'
 import { isPathInside, resolveAndValidatePath } from '../utils/file'
 import S3Storage from './S3Storage'
-import selectionService from './SelectionService'
 import WebDav from './WebDav'
 import { windowService } from './WindowService'
 
@@ -265,166 +264,6 @@ class BackupManager {
   }
 
   /**
-   * Legacy backup method (JSON format, used by LanTransfer)
-   * Creates a backup in the old format with data.json and optional Data directory.
-   * @param _ - Electron IPC event
-   * @param fileName - Name of the backup file
-   * @param data - JSON string data to backup
-   * @param destinationPath - Path to save the backup (defaults to this.backupDir)
-   * @param skipBackupFile - Whether to skip backing up the Data directory
-   * @returns Path to the created backup file
-   */
-  async backupLegacy(
-    _: Electron.IpcMainInvokeEvent,
-    fileName: string,
-    data: string,
-    destinationPath: string = this.backupDir,
-    skipBackupFile: boolean = false
-  ): Promise<string> {
-    const onProgress = this.onProgress(IpcChannel.BackupProgress, true)
-
-    try {
-      await fs.ensureDir(this.tempDir)
-      onProgress({ stage: 'preparing', progress: 0, total: 100 })
-
-      // Write data.json using streaming
-      const tempDataPath = path.join(this.tempDir, 'data.json')
-
-      await new Promise<void>((resolve, reject) => {
-        const writeStream = fs.createWriteStream(tempDataPath)
-        writeStream.write(data)
-        writeStream.end()
-
-        writeStream.on('finish', () => resolve())
-        writeStream.on('error', (error) => reject(error))
-      })
-
-      onProgress({ stage: 'writing_data', progress: 20, total: 100 })
-
-      logger.debug(`BackupManager IPC, skipBackupFile: ${skipBackupFile}`)
-
-      if (!skipBackupFile) {
-        // Copy Data directory to temp directory
-        const sourcePath = path.join(app.getPath('userData'), 'Data')
-        const tempDataDir = path.join(this.tempDir, 'Data')
-
-        // Get total size of source directory
-        const totalSize = await this.getDirSize(sourcePath, { dereferenceSymlinks: true })
-
-        // Use streaming copy
-        await this.copyDirWithProgress(
-          sourcePath,
-          tempDataDir,
-          this.createCopyProgressHandler(totalSize, 0, 50, 'copying_files', onProgress),
-          { dereferenceSymlinks: true }
-        )
-
-        onProgress({ stage: 'preparing_compression', progress: 50, total: 100 })
-      } else {
-        logger.debug('Skip the backup of the file')
-        await fs.promises.mkdir(path.join(this.tempDir, 'Data')) // Creating empty Data dir is required, otherwise restore will fail
-      }
-
-      // Create output file stream
-      const backupedFilePath = path.join(destinationPath, fileName)
-      const output = fs.createWriteStream(backupedFilePath)
-
-      // Create archiver instance, enable ZIP64 support
-      const archive = archiver('zip', {
-        zlib: { level: 1 }, // Use lowest compression level for speed
-        zip64: true // Enable ZIP64 support for large files
-      })
-
-      let lastProgress = 50
-      let totalEntries = 0
-      let processedEntries = 0
-      let totalBytes = 0
-      let processedBytes = 0
-
-      // First calculate total files and size, but don't log details
-      const calculateTotals = async (dirPath: string) => {
-        try {
-          const items = await fs.readdir(dirPath, { withFileTypes: true })
-          for (const item of items) {
-            const fullPath = path.join(dirPath, item.name)
-            if (item.isDirectory()) {
-              await calculateTotals(fullPath)
-            } else {
-              totalEntries++
-              const stats = await fs.stat(fullPath)
-              totalBytes += stats.size
-            }
-          }
-        } catch (error) {
-          // Only log on error
-          logger.error('[BackupManager] Error calculating totals:', error as Error)
-        }
-      }
-
-      await calculateTotals(this.tempDir)
-
-      // Listen for file entry events
-      archive.on('entry', () => {
-        processedEntries++
-        if (totalEntries > 0) {
-          const progressPercent = Math.min(55, 50 + Math.floor((processedEntries / totalEntries) * 5))
-          if (progressPercent > lastProgress) {
-            lastProgress = progressPercent
-            onProgress({ stage: 'compressing', progress: progressPercent, total: 100 })
-          }
-        }
-      })
-
-      // Listen for data write events
-      archive.on('data', (chunk) => {
-        processedBytes += chunk.length
-        if (totalBytes > 0) {
-          const progressPercent = Math.min(99, 55 + Math.floor((processedBytes / totalBytes) * 44))
-          if (progressPercent > lastProgress) {
-            lastProgress = progressPercent
-            onProgress({ stage: 'compressing', progress: progressPercent, total: 100 })
-          }
-        }
-      })
-
-      // Use Promise to wait for compression to complete
-      await new Promise<void>((resolve, reject) => {
-        output.on('close', () => {
-          onProgress({ stage: 'compressing', progress: 100, total: 100 })
-          resolve()
-        })
-        archive.on('error', reject)
-        archive.on('warning', (err: any) => {
-          if (err.code !== 'ENOENT') {
-            logger.warn('[BackupManager] Archive warning:', err)
-          }
-        })
-
-        // Pipe output stream to archiver
-        archive.pipe(output)
-
-        // Add entire temp directory to archive
-        archive.directory(this.tempDir, false)
-
-        // Finalize compression
-        archive.finalize()
-      })
-
-      // Clean up temp directory
-      await fs.remove(this.tempDir)
-      onProgress({ stage: 'completed', progress: 100, total: 100 })
-
-      logger.info('Backup completed successfully')
-      return backupedFilePath
-    } catch (error) {
-      logger.error('[BackupManager] Backup failed:', error as Error)
-      // Ensure temp directory is cleaned up
-      await fs.remove(this.tempDir).catch(() => {})
-      throw error
-    }
-  }
-
-  /**
    * Direct backup to local directory
    * Creates a backup and saves it to a local directory.
    * @param _ - Electron IPC event
@@ -642,7 +481,6 @@ class BackupManager {
 
       logger.info('[restoreDirect] Restore staged successfully, relaunching app to apply...')
 
-      selectionService?.quit()
       app.relaunch()
       app.exit(0)
     } catch (error) {
@@ -1221,65 +1059,6 @@ class BackupManager {
 
   // ==================== Legacy & Temp Methods ====================
   // These methods are for legacy backup format and temporary file operations.
-
-  /**
-   * Create a legacy backup
-   * Creates a lightweight backup (skipBackupFile=true) in the temp directory
-   * Returns the path to the created ZIP file
-   * @param data - JSON string data to backup
-   * @param destinationPath - Path to save the backup
-   */
-  async createLanTransferBackup(
-    _: Electron.IpcMainInvokeEvent,
-    data: string,
-    destinationPath?: string
-  ): Promise<string> {
-    const timestamp = new Date()
-      .toISOString()
-      .replace(/[-:T.Z]/g, '')
-      .slice(0, 14)
-
-    const fileName = `cherry-studio.${timestamp}.zip`
-    const tempPath = path.join(app.getPath('temp'), 'cherry-studio', 'lan-transfer')
-    const targetPath = destinationPath || tempPath
-
-    // Ensure temp directory exists
-    await fs.ensureDir(targetPath)
-
-    // Create backup with skipBackupFile=true (no Data folder)
-    const backupedFilePath = await this.backupLegacy(_, fileName, data, targetPath, true)
-
-    logger.info(`[BackupManager] Created LAN transfer backup at: ${backupedFilePath}`)
-
-    return backupedFilePath
-  }
-
-  /**
-   * Delete a temporary backup file after LAN transfer completes
-   */
-  async deleteLanTransferBackup(_: Electron.IpcMainInvokeEvent, filePath: string): Promise<boolean> {
-    try {
-      // Security check: only allow deletion within temp directory
-      const tempBase = path.normalize(path.join(app.getPath('temp'), 'cherry-studio', 'lan-transfer'))
-      const resolvedPath = path.normalize(path.resolve(filePath))
-
-      // Use normalized paths with trailing separator to prevent prefix attacks (e.g., /temp-evil)
-      if (!resolvedPath.startsWith(tempBase + path.sep) && resolvedPath !== tempBase) {
-        logger.warn(`[BackupManager] Attempted to delete file outside temp directory: ${filePath}`)
-        return false
-      }
-
-      if (await fs.pathExists(resolvedPath)) {
-        await fs.remove(resolvedPath)
-        logger.info(`[BackupManager] Deleted temp backup: ${resolvedPath}`)
-        return true
-      }
-      return false
-    } catch (error) {
-      logger.error('[BackupManager] Failed to delete temp backup:', error as Error)
-      return false
-    }
-  }
 
   // ==================== S3 Methods ====================
   // These methods handle backup operations with S3-compatible storage.

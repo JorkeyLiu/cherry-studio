@@ -3,8 +3,6 @@ export {
   isBlockWaitingApproval,
   type ToolApprovalActions,
   type ToolApprovalState,
-  useAgentToolApproval,
-  type UseAgentToolApprovalOptions,
   useMcpToolApproval,
   useToolApproval,
   type UseToolApprovalOptions

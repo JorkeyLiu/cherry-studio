@@ -19,16 +19,11 @@ vi.mock('@renderer/services/AssistantService', () => ({
 }))
 
 // Mock dependencies
-const mockUseAppSelector = vi.fn()
 const mockUseTranslation = vi.fn()
 
 vi.mock('@renderer/store', () => ({
-  useAppSelector: (selector: any) => mockUseAppSelector(selector),
+  useAppSelector: () => null,
   useAppDispatch: () => vi.fn()
-}))
-
-vi.mock('@renderer/store/toolPermissions', () => ({
-  selectPendingPermission: vi.fn()
 }))
 
 vi.mock('react-i18next', () => ({
@@ -125,11 +120,6 @@ vi.mock('@renderer/components/Icons', () => ({
   LoadingIcon: () => <span data-testid="loading-icon" />
 }))
 
-// Mock ToolPermissionRequestCard
-vi.mock('../ToolPermissionRequestCard', () => ({
-  default: () => <div data-testid="permission-card">Permission Required</div>
-}))
-
 describe('MessageAgentTools', () => {
   // Mock translations for tools
   const mockTranslations: Record<string, string> = {
@@ -166,7 +156,6 @@ describe('MessageAgentTools', () => {
   }
 
   beforeEach(() => {
-    mockUseAppSelector.mockReturnValue(null) // No pending permission
     mockUseTranslation.mockReturnValue({
       t: (key: string, options?: string | { count?: number }) => {
         // Handle plural keys with count option
@@ -325,20 +314,7 @@ describe('MessageAgentTools', () => {
   })
 
   describe('pending without streaming', () => {
-    it('should show permission card when pending permission exists', () => {
-      mockUseAppSelector.mockReturnValue({ toolCallId: 'call-123' }) // Has pending permission
-
-      const toolResponse = createToolResponse({
-        status: 'pending',
-        partialArguments: undefined
-      })
-
-      render(<MessageAgentTools toolResponse={toolResponse} />)
-
-      expect(screen.getByTestId('permission-card')).toBeInTheDocument()
-    })
-
-    it('should show pending indicator when no streaming and no permission', () => {
+    it('should show pending indicator when no streaming', () => {
       const toolResponse = createToolResponse({
         status: 'pending',
         partialArguments: undefined

@@ -10,7 +10,7 @@ import type { KnowledgeBase, KnowledgeBaseParams, Provider } from '@types'
 import type { Response } from 'express'
 import type * as z from 'zod'
 
-import type { ValidationRequest } from '../agents/validators/zodValidator'
+import type { ValidationRequest } from '../../utils/zodValidator'
 import type { KnowledgeSearchSchema } from './validators/zodSchemas'
 
 const logger = loggerService.withContext('KnowledgeHandlers')

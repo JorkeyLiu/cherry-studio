@@ -15,7 +15,6 @@ const ALLOWED_ROUTES = [
   '/settings/',
   '/agents',
   '/knowledge',
-  '/openclaw',
   '/paintings',
   '/translate',
   '/files',
@@ -552,7 +551,6 @@ class AssistantServer {
         launchToTray: configManager.getLaunchToTray(),
         autoUpdate: configManager.getAutoUpdate(),
         enableQuickAssistant: configManager.getEnableQuickAssistant(),
-        selectionAssistantEnabled: configManager.getSelectionAssistantEnabled(),
         enableDeveloperMode: configManager.getEnableDeveloperMode(),
         disableHardwareAcceleration: configManager.getDisableHardwareAcceleration(),
         useSystemTitleBar: configManager.getUseSystemTitleBar()

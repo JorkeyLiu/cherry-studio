@@ -1,9 +1,7 @@
 import { InfoCircleOutlined } from '@ant-design/icons'
 import { Client } from '@notionhq/client'
 import { HStack } from '@renderer/components/Layout'
-import { AppLogo } from '@renderer/config/env'
 import { useTheme } from '@renderer/context/ThemeProvider'
-import { useMinappPopup } from '@renderer/hooks/useMinappPopup'
 import type { RootState } from '@renderer/store'
 import { useAppDispatch } from '@renderer/store'
 import {
@@ -23,7 +21,6 @@ const NotionSettings: FC = () => {
   const { t } = useTranslation()
   const { theme } = useTheme()
   const dispatch = useAppDispatch()
-  const { openSmartMinapp } = useMinappPopup()
 
   const notionApiKey = useSelector((state: RootState) => state.settings.notionApiKey)
   const notionDatabaseID = useSelector((state: RootState) => state.settings.notionDatabaseID)
@@ -69,12 +66,7 @@ const NotionSettings: FC = () => {
   }
 
   const handleNotionTitleClick = () => {
-    openSmartMinapp({
-      id: 'notion-help',
-      name: 'Notion Help',
-      url: 'https://docs.cherry-ai.com/advanced-basic/notion',
-      logo: AppLogo
-    })
+    window.open('https://docs.cherry-ai.com/advanced-basic/notion', '_blank')
   }
 
   const handleNotionExportReasoningChange = (checked: boolean) => {

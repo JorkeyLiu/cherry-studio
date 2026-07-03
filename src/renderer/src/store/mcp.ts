@@ -213,29 +213,6 @@ export const builtinMCPServers: BuiltinMCPServer[] = [
   },
   {
     id: nanoid(),
-    name: '@cherry/didi-mcp',
-    reference: 'https://mcp.didichuxing.com/',
-    type: 'inMemory',
-    isActive: false,
-    env: {
-      DIDI_API_KEY: 'YOUR_DIDI_API_KEY'
-    },
-    shouldConfig: true,
-    provider: 'CherryAI',
-    installSource: 'builtin',
-    isTrusted: true
-  },
-  {
-    id: nanoid(),
-    name: BuiltinMCPServerNames.browser,
-    type: 'inMemory',
-    isActive: false,
-    provider: 'CherryAI',
-    installSource: 'builtin',
-    isTrusted: true
-  },
-  {
-    id: nanoid(),
     name: BuiltinMCPServerNames.nowledgeMem,
     reference: 'https://mem.nowledge.co/',
     type: 'inMemory',

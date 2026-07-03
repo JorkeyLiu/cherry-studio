@@ -35,7 +35,6 @@ export enum IpcChannel {
   App_GetBinaryPath = 'app:get-binary-path',
   App_InstallUvBinary = 'app:install-uv-binary',
   App_InstallBunBinary = 'app:install-bun-binary',
-  App_InstallOvmsBinary = 'app:install-ovms-binary',
   App_LogToMain = 'app:log-to-main',
   App_SaveData = 'app:save-data',
   App_GetDiskInfo = 'app:get-disk-info',
@@ -100,34 +99,6 @@ export enum IpcChannel {
   Mcp_ServerLog = 'mcp:server-log',
   // Python
   Python_Execute = 'python:execute',
-
-  // agent messages
-  AgentMessage_PersistExchange = 'agent-message:persist-exchange',
-  AgentMessage_GetHistory = 'agent-message:get-history',
-
-  AgentToolPermission_Request = 'agent-tool-permission:request',
-  AgentToolPermission_Response = 'agent-tool-permission:response',
-  AgentToolPermission_Result = 'agent-tool-permission:result',
-
-  // Agent session stream (IM channel -> renderer real-time)
-  AgentSessionStream_Subscribe = 'agent-session-stream:subscribe',
-  AgentSessionStream_Unsubscribe = 'agent-session-stream:unsubscribe',
-  AgentSessionStream_Abort = 'agent-session-stream:abort',
-  AgentSessionStream_Chunk = 'agent-session-stream:chunk',
-  AgentSession_Changed = 'agent-session:changed',
-
-  // WeChat channel
-  WeChat_QrLogin = 'wechat:qr-login',
-  WeChat_HasCredentials = 'wechat:has-credentials',
-
-  // Feishu channel
-  Feishu_QrLogin = 'feishu:qr-login',
-
-  // Channel status & logs
-  Channel_StatusChange = 'channel:status-change',
-  Channel_Log = 'channel:log',
-  Channel_GetLogs = 'channel:get-logs',
-  Channel_GetStatuses = 'channel:get-statuses',
 
   //copilot
   Copilot_GetAuthMessage = 'copilot:get-auth-message',
@@ -268,8 +239,6 @@ export enum IpcChannel {
   Backup_ListS3Files = 'backup:listS3Files',
   Backup_DeleteS3File = 'backup:deleteS3File',
   Backup_CheckS3Connection = 'backup:checkS3Connection',
-  Backup_CreateLanTransferBackup = 'backup:createLanTransferBackup',
-  Backup_DeleteLanTransferBackup = 'backup:deleteLanTransferBackup',
 
   // zip
   Zip_Compress = 'zip:compress',
@@ -321,25 +290,6 @@ export enum IpcChannel {
   // Provider
   Provider_AddKey = 'provider:add-key',
 
-  //Selection Assistant
-  Selection_TextSelected = 'selection:text-selected',
-  Selection_ToolbarHide = 'selection:toolbar-hide',
-  Selection_ToolbarVisibilityChange = 'selection:toolbar-visibility-change',
-  Selection_ToolbarDetermineSize = 'selection:toolbar-determine-size',
-  Selection_WriteToClipboard = 'selection:write-to-clipboard',
-  Selection_SetEnabled = 'selection:set-enabled',
-  Selection_SetTriggerMode = 'selection:set-trigger-mode',
-  Selection_SetFilterMode = 'selection:set-filter-mode',
-  Selection_SetFilterList = 'selection:set-filter-list',
-  Selection_SetFollowToolbar = 'selection:set-follow-toolbar',
-  Selection_SetRemeberWinSize = 'selection:set-remeber-win-size',
-  Selection_ActionWindowClose = 'selection:action-window-close',
-  Selection_ActionWindowMinimize = 'selection:action-window-minimize',
-  Selection_ActionWindowPin = 'selection:action-window-pin',
-  Selection_ProcessAction = 'selection:process-action',
-  Selection_UpdateActionData = 'selection:update-action-data',
-  Selection_GetLinuxEnvInfo = 'selection:get-linux-env-info',
-
   // Memory
   Memory_Add = 'memory:add',
   Memory_Search = 'memory:search',
@@ -388,66 +338,12 @@ export enum IpcChannel {
   // ExternalApps
   ExternalApps_DetectInstalled = 'external-apps:detect-installed',
 
-  // CodeTools
-  CodeTools_Run = 'code-tools:run',
-  CodeTools_GetAvailableTerminals = 'code-tools:get-available-terminals',
-  CodeTools_SetCustomTerminalPath = 'code-tools:set-custom-terminal-path',
-  CodeTools_GetCustomTerminalPath = 'code-tools:get-custom-terminal-path',
-  CodeTools_RemoveCustomTerminalPath = 'code-tools:remove-custom-terminal-path',
-
   // OCR
   OCR_ocr = 'ocr:ocr',
   OCR_ListProviders = 'ocr:list-providers',
 
-  // OVMS
-  Ovms_IsSupported = 'ovms:is-supported',
-  Ovms_AddModel = 'ovms:add-model',
-  Ovms_StopAddModel = 'ovms:stop-addmodel',
-  Ovms_GetModels = 'ovms:get-models',
-  Ovms_IsRunning = 'ovms:is-running',
-  Ovms_GetStatus = 'ovms:get-status',
-  Ovms_RunOVMS = 'ovms:run-ovms',
-  Ovms_StopOVMS = 'ovms:stop-ovms',
-
   // CherryAI
   Cherryai_GetSignature = 'cherryai:get-signature',
-
-  // Global Skills
-  Skill_List = 'skill:list',
-  Skill_Install = 'skill:install',
-  Skill_Uninstall = 'skill:uninstall',
-  Skill_Toggle = 'skill:toggle',
-  Skill_InstallFromZip = 'skill:install-from-zip',
-  Skill_InstallFromDirectory = 'skill:install-from-directory',
-  Skill_ReadFile = 'skill:read-file',
-  Skill_ListFiles = 'skill:list-files',
-  Skill_ListLocal = 'skill:list-local',
-
-  // Local Transfer
-  LocalTransfer_ListServices = 'local-transfer:list',
-  LocalTransfer_StartScan = 'local-transfer:start-scan',
-  LocalTransfer_StopScan = 'local-transfer:stop-scan',
-  LocalTransfer_ServicesUpdated = 'local-transfer:services-updated',
-  LocalTransfer_Connect = 'local-transfer:connect',
-  LocalTransfer_Disconnect = 'local-transfer:disconnect',
-  LocalTransfer_ClientEvent = 'local-transfer:client-event',
-  LocalTransfer_SendFile = 'local-transfer:send-file',
-  LocalTransfer_CancelTransfer = 'local-transfer:cancel-transfer',
-
-  // OpenClaw
-  OpenClaw_CheckInstalled = 'openclaw:check-installed',
-  OpenClaw_Install = 'openclaw:install',
-  OpenClaw_Uninstall = 'openclaw:uninstall',
-  OpenClaw_InstallProgress = 'openclaw:install-progress',
-  OpenClaw_StartGateway = 'openclaw:start-gateway',
-  OpenClaw_StopGateway = 'openclaw:stop-gateway',
-  OpenClaw_GetStatus = 'openclaw:get-status',
-  OpenClaw_CheckHealth = 'openclaw:check-health',
-  OpenClaw_GetDashboardUrl = 'openclaw:get-dashboard-url',
-  OpenClaw_SyncConfig = 'openclaw:sync-config',
-  OpenClaw_GetChannels = 'openclaw:get-channels',
-  OpenClaw_CheckUpdate = 'openclaw:check-update',
-  OpenClaw_PerformUpdate = 'openclaw:perform-update',
 
   // Analytics
   Analytics_TrackTokenUsage = 'analytics:track-token-usage'

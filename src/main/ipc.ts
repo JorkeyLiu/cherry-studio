@@ -20,33 +20,20 @@ import { handleZoomFactor } from '@main/utils/zoom'
 import type { SpanEntity, TokenUsage } from '@mcp-trace/trace-core'
 import type { UpgradeChannel } from '@shared/config/constant'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH } from '@shared/config/constant'
-import type { LocalTransferConnectPayload } from '@shared/config/types'
 import { IpcChannel } from '@shared/IpcChannel'
 import { extractPdfText } from '@shared/utils/pdf'
-import type {
-  AgentPersistedMessage,
-  FileMetadata,
-  Notification,
-  OcrProvider,
-  Provider,
-  Shortcut,
-  SupportedOcrFile,
-  ThemeMode
-} from '@types'
+import type { FileMetadata, Notification, OcrProvider, Provider, Shortcut, SupportedOcrFile, ThemeMode } from '@types'
 import checkDiskSpace from 'check-disk-space'
 import type { ProxyConfig } from 'electron'
 import { BrowserWindow, dialog, ipcMain, session, shell, systemPreferences, webContents } from 'electron'
 import fontList from 'font-list'
 
-import { agentMessageRepository } from './services/agents/database'
-import { skillService } from './services/agents/skills/SkillService'
 import { analyticsService } from './services/AnalyticsService'
 import { apiServerService } from './services/ApiServerService'
 import appService from './services/AppService'
 import AppUpdater from './services/AppUpdater'
 import BackupManager from './services/BackupManager'
 import CherryINOAuthService from './services/CherryINOAuthService'
-import { codeToolsService } from './services/CodeToolsService'
 import { ConfigKeys, configManager } from './services/ConfigManager'
 import CopilotService from './services/CopilotService'
 import DxtService from './services/DxtService'
@@ -55,8 +42,6 @@ import { externalAppsService } from './services/ExternalAppsService'
 import { fileStorage as fileManager } from './services/FileStorage'
 import FileService from './services/FileSystemService'
 import KnowledgeService from './services/KnowledgeService'
-import { lanTransferClientService } from './services/lanTransfer'
-import { localTransferService } from './services/LocalTransferService'
 import mcpService from './services/MCPService'
 import MemoryService from './services/memory/MemoryService'
 import { openTraceWindow, setTraceWindowTitle } from './services/NodeTraceService'
@@ -64,15 +49,12 @@ import NotificationService from './services/NotificationService'
 import * as NutstoreService from './services/NutstoreService'
 import ObsidianVaultService from './services/ObsidianVaultService'
 import { ocrService } from './services/ocr/OcrService'
-import { openClawService } from './services/OpenClawService'
-import { isOvmsSupported } from './services/OvmsManager'
 import powerMonitorService from './services/PowerMonitorService'
 import { proxyManager } from './services/ProxyManager'
 import { pythonService } from './services/PythonService'
 import { FileServiceManager } from './services/remotefile/FileServiceManager'
 import { searchService } from './services/SearchService'
 import { isSafeExternalUrl } from './services/security'
-import { SelectionService } from './services/SelectionService'
 import { registerShortcuts, unregisterAllShortcuts } from './services/ShortcutService'
 import {
   addEndMessage,
@@ -92,7 +74,7 @@ import { themeService } from './services/ThemeService'
 import VertexAIService from './services/VertexAIService'
 import { setOpenLinkExternal } from './services/WebviewService'
 import { windowService } from './services/WindowService'
-import { calculateDirectorySize, getDataPath, getResourcePath } from './utils'
+import { calculateDirectorySize, getResourcePath } from './utils'
 import { decrypt, encrypt } from './utils/aes'
 import {
   getCacheDir,
@@ -248,27 +230,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
       configManager.setTestChannel(channel)
     }
   })
-
-  ipcMain.handle(IpcChannel.AgentMessage_PersistExchange, async (_event, payload) => {
-    try {
-      return await agentMessageRepository.persistExchange(payload)
-    } catch (error) {
-      logger.error('Failed to persist agent session messages', error as Error)
-      throw error
-    }
-  })
-
-  ipcMain.handle(
-    IpcChannel.AgentMessage_GetHistory,
-    async (_event, { sessionId }: { sessionId: string }): Promise<AgentPersistedMessage[]> => {
-      try {
-        return await agentMessageRepository.getSessionHistory(sessionId)
-      } catch (error) {
-        logger.error('Failed to get agent session history', error as Error)
-        throw error
-      }
-    }
-  )
 
   //only for mac
   if (isMac) {
@@ -593,9 +554,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.Backup_ListS3Files, backupManager.listS3Files.bind(backupManager))
   ipcMain.handle(IpcChannel.Backup_DeleteS3File, backupManager.deleteS3File.bind(backupManager))
   ipcMain.handle(IpcChannel.Backup_CheckS3Connection, backupManager.checkS3Connection.bind(backupManager))
-  ipcMain.handle(IpcChannel.Backup_CreateLanTransferBackup, backupManager.createLanTransferBackup.bind(backupManager))
-  ipcMain.handle(IpcChannel.Backup_DeleteLanTransferBackup, backupManager.deleteLanTransferBackup.bind(backupManager))
-
   // file
   ipcMain.handle(IpcChannel.File_Open, fileManager.open.bind(fileManager))
   ipcMain.handle(IpcChannel.File_OpenPath, fileManager.openPath.bind(fileManager))
@@ -816,17 +774,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.Mcp_GetServerVersion, mcpService.getServerVersion)
   ipcMain.handle(IpcChannel.Mcp_GetServerLogs, mcpService.getServerLogs)
 
-  // Channel logs & status
-  ipcMain.handle(IpcChannel.Channel_GetLogs, async (_event, channelId: string) => {
-    const { channelManager } = await import('@main/services/agents/services/channels/ChannelManager')
-    return channelManager.getChannelLogs(channelId)
-  })
-
-  ipcMain.handle(IpcChannel.Channel_GetStatuses, async () => {
-    const { channelManager } = await import('@main/services/agents/services/channels/ChannelManager')
-    return channelManager.getAllStatuses()
-  })
-
   // DXT upload handler
   ipcMain.handle(IpcChannel.Mcp_UploadDxt, async (event, fileBuffer: ArrayBuffer, fileName: string) => {
     try {
@@ -857,7 +804,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.App_GetBinaryPath, (_, name: string) => getBinaryPath(name))
   ipcMain.handle(IpcChannel.App_InstallUvBinary, () => runInstallScript('install-uv.js'))
   ipcMain.handle(IpcChannel.App_InstallBunBinary, () => runInstallScript('install-bun.js'))
-  ipcMain.handle(IpcChannel.App_InstallOvmsBinary, () => runInstallScript('install-ovms.js'))
 
   //copilot
   ipcMain.handle(IpcChannel.Copilot_GetAuthMessage, CopilotService.getAuthMessage.bind(CopilotService))
@@ -926,9 +872,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   // store sync
   storeSyncService.registerIpcHandler()
 
-  // selection assistant
-  SelectionService.registerIpcHandler()
-
   ipcMain.handle(IpcChannel.App_QuoteToMain, (_, text: string) => windowService.quoteToMainWindow(text))
 
   ipcMain.handle(IpcChannel.App_SetDisableHardwareAcceleration, (_, isDisable: boolean) => {
@@ -995,204 +938,17 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   // ExternalApps
   ipcMain.handle(IpcChannel.ExternalApps_DetectInstalled, () => externalAppsService.detectInstalledApps())
 
-  // CodeTools
-  ipcMain.handle(IpcChannel.CodeTools_Run, codeToolsService.run)
-  ipcMain.handle(IpcChannel.CodeTools_GetAvailableTerminals, () => codeToolsService.getAvailableTerminalsForPlatform())
-  ipcMain.handle(IpcChannel.CodeTools_SetCustomTerminalPath, (_, terminalId: string, path: string) =>
-    codeToolsService.setCustomTerminalPath(terminalId, path)
-  )
-  ipcMain.handle(IpcChannel.CodeTools_GetCustomTerminalPath, (_, terminalId: string) =>
-    codeToolsService.getCustomTerminalPath(terminalId)
-  )
-  ipcMain.handle(IpcChannel.CodeTools_RemoveCustomTerminalPath, (_, terminalId: string) =>
-    codeToolsService.removeCustomTerminalPath(terminalId)
-  )
-
   // OCR
   ipcMain.handle(IpcChannel.OCR_ocr, (_, file: SupportedOcrFile, provider: OcrProvider) =>
     ocrService.ocr(file, provider)
   )
   ipcMain.handle(IpcChannel.OCR_ListProviders, () => ocrService.listProviderIds())
 
-  // OVMS
-  ipcMain.handle(IpcChannel.Ovms_IsSupported, () => isOvmsSupported)
-  if (isOvmsSupported) {
-    const { ovmsManager } = await import('./services/OvmsManager')
-    if (ovmsManager) {
-      ipcMain.handle(
-        IpcChannel.Ovms_AddModel,
-        (_, modelName: string, modelId: string, modelSource: string, task: string) =>
-          ovmsManager.addModel(modelName, modelId, modelSource, task)
-      )
-      ipcMain.handle(IpcChannel.Ovms_StopAddModel, () => ovmsManager.stopAddModel())
-      ipcMain.handle(IpcChannel.Ovms_GetModels, () => ovmsManager.getModels())
-      ipcMain.handle(IpcChannel.Ovms_IsRunning, () => ovmsManager.initializeOvms())
-      ipcMain.handle(IpcChannel.Ovms_GetStatus, () => ovmsManager.getOvmsStatus())
-      ipcMain.handle(IpcChannel.Ovms_RunOVMS, () => ovmsManager.runOvms())
-      ipcMain.handle(IpcChannel.Ovms_StopOVMS, () => ovmsManager.stopOvms())
-    } else {
-      logger.error('Unexpected behavior: undefined ovmsManager, but OVMS should be supported.')
-    }
-  } else {
-    const fallback = () => {
-      throw new Error('OVMS is only supported on Windows with intel CPU.')
-    }
-    ipcMain.handle(IpcChannel.Ovms_AddModel, fallback)
-    ipcMain.handle(IpcChannel.Ovms_StopAddModel, fallback)
-    ipcMain.handle(IpcChannel.Ovms_GetModels, fallback)
-    ipcMain.handle(IpcChannel.Ovms_IsRunning, fallback)
-    ipcMain.handle(IpcChannel.Ovms_GetStatus, fallback)
-    ipcMain.handle(IpcChannel.Ovms_RunOVMS, fallback)
-    ipcMain.handle(IpcChannel.Ovms_StopOVMS, fallback)
-  }
-
   // CherryAI
   ipcMain.handle(IpcChannel.Cherryai_GetSignature, (_, params) => generateSignature(params))
 
-  // Global Skills
-  ipcMain.handle(IpcChannel.Skill_List, async (_, agentId?: string) => {
-    try {
-      const data = await skillService.list(agentId)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to list skills', { error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_Install, async (_, options) => {
-    try {
-      const data = await skillService.install(options)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to install skill', { options, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_Uninstall, async (_, skillId: string) => {
-    try {
-      await skillService.uninstall(skillId)
-      return { success: true, data: undefined }
-    } catch (error) {
-      logger.error('Failed to uninstall skill', { skillId, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_Toggle, async (_, options) => {
-    try {
-      if (
-        !options ||
-        typeof options.skillId !== 'string' ||
-        !options.skillId ||
-        typeof options.agentId !== 'string' ||
-        !options.agentId ||
-        typeof options.isEnabled !== 'boolean'
-      ) {
-        return { success: false, error: 'Invalid toggle options' }
-      }
-      const data = await skillService.toggle(options)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to toggle skill', { options, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_InstallFromZip, async (_, options) => {
-    try {
-      const data = await skillService.installFromZip(options)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to install skill from ZIP', { options, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_InstallFromDirectory, async (_, options) => {
-    try {
-      const data = await skillService.installFromDirectory(options)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to install skill from directory', { options, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_ReadFile, async (_, skillId: string, filename: string) => {
-    try {
-      const data = await skillService.readFile(skillId, filename)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to read skill file', { skillId, filename, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_ListFiles, async (_, skillId: string) => {
-    try {
-      const data = await skillService.listFiles(skillId)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to list skill files', { skillId, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_ListLocal, async (_, workdir: string) => {
-    try {
-      if (!workdir || typeof workdir !== 'string') {
-        return { success: false, error: 'Invalid workdir' }
-      }
-      const data = await skillService.listLocal(workdir)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to list local plugins', { workdir, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.LocalTransfer_ListServices, () => localTransferService.getState())
-  ipcMain.handle(IpcChannel.LocalTransfer_StartScan, () => localTransferService.startDiscovery({ resetList: true }))
-  ipcMain.handle(IpcChannel.LocalTransfer_StopScan, () => localTransferService.stopDiscovery())
-  ipcMain.handle(IpcChannel.LocalTransfer_Connect, (_, payload: LocalTransferConnectPayload) =>
-    lanTransferClientService.connectAndHandshake(payload)
-  )
-  ipcMain.handle(IpcChannel.LocalTransfer_Disconnect, () => lanTransferClientService.disconnect())
-  ipcMain.handle(IpcChannel.LocalTransfer_SendFile, (_, payload: { filePath: string }) =>
-    lanTransferClientService.sendFile(payload.filePath)
-  )
-  ipcMain.handle(IpcChannel.LocalTransfer_CancelTransfer, () => lanTransferClientService.cancelTransfer())
-
   ipcMain.handle(IpcChannel.APP_CrashRenderProcess, () => {
     mainWindow.webContents.forcefullyCrashRenderer()
-  })
-
-  // OpenClaw
-  ipcMain.handle(IpcChannel.OpenClaw_CheckInstalled, openClawService.checkInstalled)
-  ipcMain.handle(IpcChannel.OpenClaw_Install, openClawService.install)
-  ipcMain.handle(IpcChannel.OpenClaw_Uninstall, openClawService.uninstall)
-  ipcMain.handle(IpcChannel.OpenClaw_StartGateway, openClawService.startGateway)
-  ipcMain.handle(IpcChannel.OpenClaw_StopGateway, openClawService.stopGateway)
-  ipcMain.handle(IpcChannel.OpenClaw_GetStatus, openClawService.getStatus)
-  ipcMain.handle(IpcChannel.OpenClaw_CheckHealth, openClawService.checkHealth)
-  ipcMain.handle(IpcChannel.OpenClaw_GetDashboardUrl, openClawService.getDashboardUrl)
-  ipcMain.handle(IpcChannel.OpenClaw_SyncConfig, openClawService.syncProviderConfig)
-  ipcMain.handle(IpcChannel.OpenClaw_GetChannels, openClawService.getChannelStatus)
-  ipcMain.handle(IpcChannel.OpenClaw_CheckUpdate, openClawService.checkUpdate)
-  ipcMain.handle(IpcChannel.OpenClaw_PerformUpdate, openClawService.performUpdate)
-
-  // WeChat
-  ipcMain.handle(IpcChannel.WeChat_HasCredentials, async (_, channelId: string) => {
-    const tokenPath = path.join(getDataPath('Channels'), `weixin_bot_${channelId}.json`)
-    try {
-      const raw = await fs.promises.readFile(tokenPath, 'utf8')
-      const parsed = JSON.parse(raw)
-      return { exists: true, userId: parsed.userId as string | undefined }
-    } catch {
-      return { exists: false }
-    }
   })
 
   // Analytics

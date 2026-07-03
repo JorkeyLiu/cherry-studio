@@ -10,30 +10,21 @@ import MemoryService from '@renderer/services/MemoryService'
 import { handleSaveData, useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectMemoryConfig } from '@renderer/store/memory'
 import { setAvatar, setFilesPath, setResourcesPath, setUpdateState } from '@renderer/store/runtime'
-import {
-  type ToolPermissionRequestPayload,
-  type ToolPermissionResultPayload,
-  toolPermissionsActions
-} from '@renderer/store/toolPermissions'
 import { delay, runAsyncFunction } from '@renderer/utils'
 import { checkDataLimit } from '@renderer/utils'
-import { sendToolApprovalNotification } from '@renderer/utils/userConfirmation'
 import { defaultLanguage } from '@shared/config/constant'
 import { IpcChannel } from '@shared/IpcChannel'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useEffect } from 'react'
-import { useTranslation } from 'react-i18next'
 
 import { useDefaultModel } from './useAssistant'
 import useFullScreenNotice from './useFullScreenNotice'
-import { useRuntime } from './useRuntime'
 import { useNavbarPosition, useSettings } from './useSettings'
 import useUpdateHandler from './useUpdateHandler'
 
 const logger = loggerService.withContext('useAppInit')
 
 export function useAppInit() {
-  const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const {
     proxyUrl,
@@ -47,7 +38,6 @@ export function useAppInit() {
     privacyPolicyVersion
   } = useSettings()
   const { isLeftNavbar } = useNavbarPosition()
-  const { minappShow } = useRuntime()
   const { setDefaultModel, setQuickModel, setTranslateModel } = useDefaultModel()
   const avatar = useLiveQuery(() => db.settings.get('image://avatar'))
   const { theme } = useTheme()
@@ -140,13 +130,8 @@ export function useAppInit() {
   useEffect(() => {
     const isMacTransparentWindow = windowStyle === 'transparent' && isMac
 
-    if (minappShow && isLeftNavbar) {
-      window.root.style.background = isMacTransparentWindow ? 'var(--color-background)' : 'var(--navbar-background)'
-      return
-    }
-
     window.root.style.background = isMacTransparentWindow ? 'var(--navbar-background-mac)' : 'var(--navbar-background)'
-  }, [windowStyle, minappShow, theme, isLeftNavbar])
+  }, [windowStyle, theme, isLeftNavbar])
 
   useEffect(() => {
     if (isLocalAi) {
@@ -183,97 +168,6 @@ export function useAppInit() {
       document.head.appendChild(customCssElement)
     }
   }, [customCss])
-
-  useEffect(() => {
-    if (!window.electron?.ipcRenderer) return
-
-    const requestListener = async (_event: Electron.IpcRendererEvent, payload: ToolPermissionRequestPayload) => {
-      logger.debug('Renderer received tool permission request', {
-        requestId: payload.requestId,
-        toolName: payload.toolName,
-        suggestionCount: payload.suggestions.length,
-        autoApprove: payload.autoApprove
-      })
-
-      if (payload.autoApprove) {
-        logger.debug('Auto-approving tool permission request', {
-          requestId: payload.requestId,
-          toolName: payload.toolName
-        })
-
-        try {
-          const response = await window.api.agentTools.respondToPermission({
-            requestId: payload.requestId,
-            behavior: 'allow',
-            updatedInput: payload.input,
-            updatedPermissions: payload.suggestions
-          })
-
-          if (!response?.success) {
-            throw new Error('Auto-approval response rejected by main process')
-          }
-
-          logger.debug('Auto-approval acknowledged by main process', {
-            requestId: payload.requestId,
-            toolName: payload.toolName
-          })
-        } catch (error) {
-          logger.error('Failed to send auto-approval response', error as Error)
-          // Fall through to add to store for manual approval
-          dispatch(toolPermissionsActions.requestReceived(payload))
-        }
-        return
-      }
-
-      dispatch(toolPermissionsActions.requestReceived(payload))
-
-      // Send system notification for agent tool approval
-      sendToolApprovalNotification(payload.toolName)
-    }
-
-    const resultListener = (_event: Electron.IpcRendererEvent, payload: ToolPermissionResultPayload) => {
-      logger.debug('Renderer received tool permission result', {
-        requestId: payload.requestId,
-        behavior: payload.behavior,
-        reason: payload.reason
-      })
-      dispatch(toolPermissionsActions.requestResolved(payload))
-
-      if (payload.behavior === 'deny') {
-        const message =
-          payload.reason === 'timeout'
-            ? (payload.message ?? t('agent.toolPermission.toast.timeout'))
-            : (payload.message ?? t('agent.toolPermission.toast.denied'))
-
-        if (payload.reason === 'no-window') {
-          logger.debug('Displaying deny toast for tool permission', {
-            requestId: payload.requestId,
-            behavior: payload.behavior,
-            reason: payload.reason
-          })
-          window.toast?.error?.(message)
-        } else if (payload.reason === 'timeout') {
-          logger.debug('Displaying timeout toast for tool permission', {
-            requestId: payload.requestId
-          })
-          window.toast?.warning?.(message)
-        } else {
-          logger.debug('Displaying info toast for tool permission deny', {
-            requestId: payload.requestId,
-            reason: payload.reason
-          })
-          window.toast?.info?.(message)
-        }
-      }
-    }
-
-    const removeListeners = [
-      window.electron.ipcRenderer.on(IpcChannel.AgentToolPermission_Request, requestListener),
-      window.electron.ipcRenderer.on(IpcChannel.AgentToolPermission_Result, resultListener)
-    ]
-
-    return () => removeListeners.forEach((removeListener) => removeListener())
-  }, [dispatch, t])
 
   useEffect(() => {
     void window.api.config.set('enableDataCollection', enableDataCollection)

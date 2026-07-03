@@ -48,22 +48,6 @@ const initialState: ShortcutsState = {
       system: true
     },
     {
-      //enable/disable selection assistant
-      key: 'selection_assistant_toggle',
-      shortcut: [],
-      editable: true,
-      enabled: false,
-      system: true
-    },
-    {
-      //to select text with selection assistant
-      key: 'selection_assistant_select_text',
-      shortcut: [],
-      editable: true,
-      enabled: false,
-      system: true
-    },
-    {
       key: 'new_topic',
       shortcut: ['CommandOrControl', 'N'],
       editable: true,

@@ -24,7 +24,6 @@ import storage from 'redux-persist/lib/storage'
 import storeSyncService from '../services/StoreSyncService'
 import assistants from './assistants'
 import backup from './backup'
-import codeTools from './codeTools'
 import copilot from './copilot'
 import inputToolsReducer from './inputTools'
 import knowledge from './knowledge'
@@ -33,21 +32,16 @@ import mcp from './mcp'
 import memory from './memory'
 import messageBlocksReducer from './messageBlock'
 import migrate from './migrate'
-import minapps from './minapps'
 import newMessagesReducer from './newMessage'
 import { setNotesPath } from './note'
 import note from './note'
 import nutstore from './nutstore'
 import ocr from './ocr'
-import openclaw from './openclaw'
-import paintings from './paintings'
 import preprocess from './preprocess'
 import runtime from './runtime'
-import selectionStore from './selectionStore'
 import settings from './settings'
 import shortcuts from './shortcuts'
 import tabs from './tabs'
-import toolPermissions from './toolPermissions'
 import translate from './translate'
 import websearch from './websearch'
 
@@ -56,21 +50,16 @@ const logger = loggerService.withContext('Store')
 const rootReducer = combineReducers({
   assistants,
   backup,
-  codeTools,
   nutstore,
-  paintings,
   llm,
   settings,
   runtime,
   shortcuts,
   knowledge,
-  minapps,
   websearch,
   mcp,
   memory,
   copilot,
-  openclaw,
-  selectionStore,
   tabs,
   preprocess,
   messages: newMessagesReducer,
@@ -78,15 +67,14 @@ const rootReducer = combineReducers({
   inputTools: inputToolsReducer,
   translate,
   ocr,
-  note,
-  toolPermissions
+  note
 })
 
 const persistedReducer = persistReducer(
   {
     key: 'cherry-studio',
     storage,
-    version: 209,
+    version: 210,
     blacklist: ['runtime', 'messages', 'messageBlocks', 'tabs', 'toolPermissions'],
     migrate
   },
@@ -105,7 +93,7 @@ const persistedReducer = persistReducer(
  * Call storeSyncService.subscribe() in the window's entryPoint.tsx
  */
 storeSyncService.setOptions({
-  syncList: ['assistants/', 'settings/', 'llm/', 'selectionStore/', 'note/']
+  syncList: ['assistants/', 'settings/', 'llm/', 'note/']
 })
 
 const store = configureStore({

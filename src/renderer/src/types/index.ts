@@ -2,7 +2,6 @@ import type { LanguageModelV3Source } from '@ai-sdk/provider'
 import type { WebSearchResultBlock } from '@anthropic-ai/sdk/resources'
 import type OpenAI from '@cherrystudio/openai'
 import type { GenerateImagesConfig, GroundingMetadata, PersonGeneration } from '@google/genai'
-import type { CSSProperties } from 'react'
 
 export * from './file'
 export * from './note'
@@ -17,7 +16,6 @@ import type { MCPConfigSample, MCPServerInstallSource, McpServerType } from './m
 import type { Message } from './newMessage'
 import type { BaseTool, MCPTool } from './tool'
 
-export * from './agent'
 export * from './apiModels'
 export * from './apiServer'
 export * from './knowledge'
@@ -362,8 +360,6 @@ export type PaintingParams = {
   providerId?: string
 }
 
-export type PaintingProvider = 'zhipu' | 'aihubmix' | 'silicon' | 'dmxapi' | 'new-api' | 'ovms' | 'cherryin' | 'ppio'
-
 export interface Painting extends PaintingParams {
   model?: string
   prompt?: string
@@ -464,16 +460,6 @@ export interface TokenFluxPainting extends PaintingParams {
   status?: 'starting' | 'processing' | 'succeeded' | 'failed' | 'cancelled'
 }
 
-export interface OvmsPainting extends PaintingParams {
-  model?: string
-  prompt?: string
-  size?: string
-  num_inference_steps?: number
-  rng_seed?: number
-  safety_check?: boolean
-  response_format?: 'url' | 'b64_json'
-}
-
 export interface PpioPainting extends PaintingParams {
   model?: string
   prompt?: string
@@ -493,14 +479,7 @@ export interface PpioPainting extends PaintingParams {
 }
 
 export type PaintingAction = Partial<
-  GeneratePainting &
-    RemixPainting &
-    EditPainting &
-    ScalePainting &
-    DmxapiPainting &
-    TokenFluxPainting &
-    OvmsPainting &
-    PpioPainting
+  GeneratePainting & RemixPainting & EditPainting & ScalePainting & DmxapiPainting & TokenFluxPainting & PpioPainting
 > &
   PaintingParams
 
@@ -521,34 +500,10 @@ export interface PaintingsState {
   // OpenAI
   openai_image_generate: Partial<GeneratePainting> & PaintingParams[]
   openai_image_edit: Partial<EditPainting> & PaintingParams[]
-  // OVMS
-  ovms_paintings: OvmsPainting[]
   // PPIO
   ppio_draw: PpioPainting[]
   ppio_edit: PpioPainting[]
 }
-
-export type MinAppType = {
-  id: string
-  name: string
-  /** i18n key for translatable names */
-  nameKey?: string
-  /** Regions where this app is available. If includes 'Global', shown to international users. */
-  supportedRegions?: MinAppRegion[]
-  logo?: string
-  url: string
-  // FIXME: It should be `bordered`
-  bodered?: boolean
-  background?: string
-  style?: CSSProperties
-  addTime?: string
-  type?: 'Custom' | 'Default' // Added the 'type' property
-}
-
-/** Region types for miniapps visibility */
-export type MinAppRegion = 'CN' | 'Global'
-
-export type MinAppRegionFilter = 'auto' | MinAppRegion
 
 export enum ThemeMode {
   light = 'light',
@@ -696,18 +651,7 @@ export const isAutoDetectionMethod = (method: string): method is AutoDetectionMe
   return Object.hasOwn(AutoDetectionMethods, method)
 }
 
-export type SidebarIcon =
-  | 'assistants'
-  | 'agents'
-  | 'store'
-  | 'paintings'
-  | 'translate'
-  | 'minapp'
-  | 'knowledge'
-  | 'files'
-  | 'code_tools'
-  | 'notes'
-  | 'openclaw'
+export type SidebarIcon = 'assistants' | 'knowledge' | 'files' | 'notes'
 
 export type ExternalToolResult = {
   mcpTools?: MCPTool[]
@@ -878,8 +822,6 @@ export const BuiltinMCPServerNames = {
   filesystem: '@cherry/filesystem',
   difyKnowledge: '@cherry/dify-knowledge',
   python: '@cherry/python',
-  didiMCP: '@cherry/didi-mcp',
-  browser: '@cherry/browser',
   nowledgeMem: '@cherry/nowledge-mem',
   hub: '@cherry/hub'
 } as const

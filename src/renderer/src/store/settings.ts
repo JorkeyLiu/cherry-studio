@@ -25,9 +25,7 @@ import type {
   CodeStyleVarious,
   LanguageVarious,
   MathEngine,
-  MinAppRegionFilter,
   OpenAIServiceTier,
-  PaintingProvider,
   S3Config,
   SidebarIcon,
   TranslateLanguageCode
@@ -188,12 +186,6 @@ export interface SettingsState {
   siyuanRootPath: string | null
   // 订阅的助手地址
   agentssubscribeUrl: string | null
-  // MinApps
-  maxKeepAliveMinapps: number
-  showOpenedMinappsInSidebar: boolean
-  minappsOpenLinkExternal: boolean
-  /** Mini app region filter: 'auto' (detect from IP), 'CN', or 'Global' */
-  minAppRegion: MinAppRegionFilter
   // 隐私设置
   privacyPolicyVersion?: string
   enableDataCollection: boolean
@@ -241,7 +233,6 @@ export interface SettingsState {
   localBackupSyncInterval: number
   localBackupMaxBackups: number
   localBackupSkipBackupFile: boolean
-  defaultPaintingProvider: PaintingProvider
   s3: S3Config
   // Developer mode
   enableDeveloperMode: boolean
@@ -380,11 +371,6 @@ export const initialState: SettingsState = {
   siyuanBoxId: null,
   siyuanRootPath: null,
   agentssubscribeUrl: '',
-  // MinApps
-  maxKeepAliveMinapps: 3,
-  showOpenedMinappsInSidebar: true,
-  minappsOpenLinkExternal: false,
-  minAppRegion: 'auto',
   privacyPolicyVersion: LATEST_PRIVACY_POLICY_VERSION,
   enableDataCollection: true,
   enableSpellCheck: false,
@@ -431,7 +417,6 @@ export const initialState: SettingsState = {
   localBackupSyncInterval: 0,
   localBackupMaxBackups: 0,
   localBackupSkipBackupFile: false,
-  defaultPaintingProvider: 'cherryin',
   s3: {
     endpoint: '',
     region: '',
@@ -802,18 +787,6 @@ const settingsSlice = createSlice({
     setAgentssubscribeUrl: (state, action: PayloadAction<string>) => {
       state.agentssubscribeUrl = action.payload
     },
-    setMaxKeepAliveMinapps: (state, action: PayloadAction<number>) => {
-      state.maxKeepAliveMinapps = action.payload
-    },
-    setShowOpenedMinappsInSidebar: (state, action: PayloadAction<boolean>) => {
-      state.showOpenedMinappsInSidebar = action.payload
-    },
-    setMinappsOpenLinkExternal: (state, action: PayloadAction<boolean>) => {
-      state.minappsOpenLinkExternal = action.payload
-    },
-    setMinAppRegion: (state, action: PayloadAction<MinAppRegionFilter>) => {
-      state.minAppRegion = action.payload
-    },
     setEnableDataCollection: (state, action: PayloadAction<boolean>) => {
       state.enableDataCollection = action.payload
     },
@@ -877,9 +850,6 @@ const settingsSlice = createSlice({
     },
     setLocalBackupSkipBackupFile: (state, action: PayloadAction<boolean>) => {
       state.localBackupSkipBackupFile = action.payload
-    },
-    setDefaultPaintingProvider: (state, action: PayloadAction<PaintingProvider>) => {
-      state.defaultPaintingProvider = action.payload
     },
     setS3: (state, action: PayloadAction<S3Config>) => {
       state.s3 = action.payload
@@ -1020,12 +990,8 @@ export const {
   setSiyuanApiUrl,
   setSiyuanToken,
   setSiyuanBoxId,
-  setAgentssubscribeUrl,
   setSiyuanRootPath,
-  setMaxKeepAliveMinapps,
-  setShowOpenedMinappsInSidebar,
-  setMinappsOpenLinkExternal,
-  setMinAppRegion,
+  setAgentssubscribeUrl,
   setEnableDataCollection,
   setPrivacyPolicyVersion,
   setEnableSpellCheck,
@@ -1047,7 +1013,6 @@ export const {
   setLocalBackupSyncInterval,
   setLocalBackupMaxBackups,
   setLocalBackupSkipBackupFile,
-  setDefaultPaintingProvider,
   setS3,
   setS3Partial,
   setEnableDeveloperMode,

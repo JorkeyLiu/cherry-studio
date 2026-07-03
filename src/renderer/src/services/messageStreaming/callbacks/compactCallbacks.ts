@@ -4,7 +4,7 @@ import { updateOneBlock } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import type { MainTextMessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
-import type { ClaudeCodeRawValue } from '@shared/agents/claudecode/types'
+import type { ClaudeCodeRawValue } from '@shared/types/claude-code'
 
 import type { BlockManager } from '../BlockManager'
 

@@ -15,19 +15,11 @@ import { isDev, isLinux, isWin } from './constant'
 import process from 'node:process'
 
 import { registerIpc } from './ipc'
-import { agentService } from './services/agents'
-import { schedulerService } from './services/agents/services/SchedulerService'
-import { bootstrapBuiltinAgents } from './services/agents/services/builtin/BuiltinAgentBootstrap'
-import { channelManager } from './services/agents/services/channels'
-import { registerSessionStreamIpc } from './services/agents/services/channels/sessionStreamIpc'
 import { analyticsService } from './services/AnalyticsService'
 import { apiServerService } from './services/ApiServerService'
 import { appMenuService } from './services/AppMenuService'
 import { configManager } from './services/ConfigManager'
-import { lanTransferClientService } from './services/lanTransfer'
 import mcpService from './services/MCPService'
-import { localTransferService } from './services/LocalTransferService'
-import { openClawService } from './services/OpenClawService'
 import { nodeTraceService } from './services/NodeTraceService'
 import powerMonitorService from './services/PowerMonitorService'
 import {
@@ -36,14 +28,12 @@ import {
   registerProtocolClient,
   setupAppImageDeepLink
 } from './services/ProtocolClient'
-import selectionService, { initSelectionService } from './services/SelectionService'
 import { registerShortcuts } from './services/ShortcutService'
 import { TrayService } from './services/TrayService'
 import { versionService } from './services/VersionService'
 import { windowService } from './services/WindowService'
 import { initWebviewHotkeys } from './services/WebviewService'
 import { runAsyncFunction } from './utils'
-import { isOvmsSupported } from './services/OvmsManager'
 import { extractRtkBinaries } from './utils/rtk'
 
 const logger = loggerService.withContext('MainEntry')
@@ -66,8 +56,6 @@ if (disableHardwareAcceleration) {
 
 /**
  * Disable chromium's window animations
- * main purpose for this is to avoid the transparent window flashing when it is shown
- * (especially on Windows for SelectionAssistant Toolbar)
  * Know Issue: https://github.com/electron/electron/issues/12130#issuecomment-627198990
  */
 if (isWin) {
@@ -188,7 +176,6 @@ if (!app.requestSingleInstanceLock()) {
     registerShortcuts(mainWindow)
 
     await registerIpc(mainWindow, app)
-    localTransferService.startDiscovery({ resetList: true })
 
     replaceDevtoolsFont(mainWindow)
 
@@ -201,45 +188,15 @@ if (!app.requestSingleInstanceLock()) {
         .catch((err) => logger.error('An error occurred: ', err))
     }
 
-    //start selection assistant service
-    initSelectionService()
-
     void runAsyncFunction(async () => {
-      // Initialize built-in skills and agents (sequential to avoid SQLITE_BUSY)
-      // TODO: v2 lifecycle
-      await bootstrapBuiltinAgents()
-
-      // Start API server if enabled or if agents exist
+      // Start API server if enabled
       try {
         const config = await apiServerService.getCurrentConfig()
         logger.info('API server config:', config)
 
-        // Check if there are any agents
-        let shouldStart = config.enabled
-        if (!shouldStart) {
-          try {
-            const { total } = await agentService.listAgents({ limit: 1 })
-            if (total > 0) {
-              shouldStart = true
-              logger.info(`Detected ${total} agent(s), auto-starting API server`)
-            }
-          } catch (error: any) {
-            logger.warn('Failed to check agent count:', error)
-          }
-        }
-
-        if (shouldStart) {
+        if (config.enabled) {
           await apiServerService.start()
         }
-
-        // Restore CherryClaw schedulers after services are ready
-        await schedulerService.restoreSchedulers()
-
-        // Register IPC handlers for session stream before starting channels
-        registerSessionStreamIpc()
-
-        // Start CherryClaw channel adapters (Telegram, etc.)
-        await channelManager.start()
       } catch (error: any) {
         logger.error('Failed to check/start API server:', error)
       }
@@ -278,32 +235,13 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', () => {
     app.isQuitting = true
-
-    // quit selection service
-    if (selectionService) {
-      selectionService.quit()
-    }
-
-    lanTransferClientService.dispose()
-    localTransferService.dispose()
   })
 
   app.on('will-quit', async () => {
     // 简单的资源清理，不阻塞退出流程
-    if (isOvmsSupported) {
-      const { ovmsManager } = await import('./services/OvmsManager')
-      if (ovmsManager) {
-        await ovmsManager.stopOvms()
-      } else {
-        logger.warn('Unexpected behavior: undefined ovmsManager, but OVMS should be supported.')
-      }
-    }
 
     try {
-      schedulerService.stopAll()
-      await channelManager.stop()
       await analyticsService.destroy()
-      await openClawService.stopGateway()
       await mcpService.cleanup()
       await apiServerService.stop()
     } catch (error) {

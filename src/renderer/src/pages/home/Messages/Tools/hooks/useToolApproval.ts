@@ -1,6 +1,5 @@
 import type { ToolMessageBlock } from '@renderer/types/newMessage'
 
-import { useAgentToolApproval } from './useAgentToolApproval'
 import { useMcpToolApproval } from './useMcpToolApproval'
 
 /**
@@ -44,20 +43,11 @@ export interface UseToolApprovalOptions {
  */
 export function useToolApproval(
   block: ToolMessageBlock,
-  options: UseToolApprovalOptions = {}
+  _options: UseToolApprovalOptions = {}
 ): ToolApprovalState & ToolApprovalActions {
-  const { forceType } = options
-
-  const toolResponse = block.metadata?.rawMcpToolResponse
-  const tool = toolResponse?.tool
-
-  const isMcpTool =
-    forceType === 'mcp' ||
-    (forceType !== 'agent' && (tool?.type === 'mcp' || tool?.type === 'builtin' || tool?.type === 'provider'))
   const mcpApproval = useMcpToolApproval(block)
-  const agentApproval = useAgentToolApproval(block)
 
-  return isMcpTool ? mcpApproval : agentApproval
+  return mcpApproval
 }
 
 /**
@@ -67,5 +57,4 @@ export function isBlockWaitingApproval(block: ToolMessageBlock): boolean {
   return block.metadata?.rawMcpToolResponse?.status === 'pending'
 }
 
-export { useAgentToolApproval, type UseAgentToolApprovalOptions } from './useAgentToolApproval'
 export { useMcpToolApproval } from './useMcpToolApproval'

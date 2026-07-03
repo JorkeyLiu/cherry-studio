@@ -5,7 +5,7 @@
  */
 
 import { loggerService } from '@logger'
-import type { AgentType, BuiltinMCPServerName, BuiltinOcrProviderId } from '@renderer/types'
+import type { BuiltinMCPServerName, BuiltinOcrProviderId } from '@renderer/types'
 import { BuiltinMCPServerNames } from '@renderer/types'
 
 import i18n from './index'
@@ -141,7 +141,6 @@ export const getRestoreProgressLabel = (key: string): string => {
 
 const titleKeyMap = {
   // TODO: update i18n key
-  store: 'title.store',
   apps: 'title.apps',
   code: 'title.code',
   files: 'title.files',
@@ -151,11 +150,7 @@ const titleKeyMap = {
   'mcp-servers': 'title.mcp-servers',
   memories: 'title.memories',
   notes: 'title.notes',
-  paintings: 'title.paintings',
-  settings: 'title.settings',
-  translate: 'title.translate',
-  openclaw: 'openclaw.title',
-  agents: 'agent.sidebar_title'
+  settings: 'title.settings'
 } as const
 
 export const getTitleLabel = (key: string): string => {
@@ -186,16 +181,9 @@ export const getThemeModeLabel = (key: string): string => {
 
 const sidebarIconKeyMap = {
   assistants: 'assistants.title',
-  agents: 'agent.sidebar_title',
-  store: 'assistants.presets.title',
-  paintings: 'paintings.title',
-  translate: 'translate.title',
-  minapp: 'minapp.title',
   knowledge: 'knowledge.title',
   files: 'files.title',
-  code_tools: 'code.title',
-  notes: 'notes.title',
-  openclaw: 'openclaw.title'
+  notes: 'notes.title'
 } as const
 
 export const getSidebarIconLabel = (key: string): string => {
@@ -222,8 +210,6 @@ const shortcutKeyMap = {
   search_message: 'settings.shortcuts.search_message',
   search_message_in_chat: 'settings.shortcuts.search_message_in_chat',
   select_model: 'settings.shortcuts.select_model',
-  selection_assistant_select_text: 'settings.shortcuts.selection_assistant_select_text',
-  selection_assistant_toggle: 'settings.shortcuts.selection_assistant_toggle',
   show_app: 'settings.shortcuts.show_app',
   show_settings: 'settings.shortcuts.show_settings',
   title: 'settings.shortcuts.title',
@@ -237,54 +223,6 @@ const shortcutKeyMap = {
 
 export const getShortcutLabel = (key: string): string => {
   return getLabel(shortcutKeyMap, key)
-}
-
-const selectionDescriptionKeyMap = {
-  linux: 'selection.settings.toolbar.trigger_mode.description_note.linux',
-  mac: 'selection.settings.toolbar.trigger_mode.description_note.mac',
-  windows: 'selection.settings.toolbar.trigger_mode.description_note.windows'
-} as const
-
-export const getSelectionDescriptionLabel = (key: string): string => {
-  return getLabel(selectionDescriptionKeyMap, key)
-}
-
-const paintingsImageSizeOptionsKeyMap = {
-  auto: 'paintings.image_size_options.auto'
-} as const
-
-export const getPaintingsImageSizeOptionsLabel = (key: string): string => {
-  return paintingsImageSizeOptionsKeyMap[key] ? getLabel(paintingsImageSizeOptionsKeyMap, key) : key
-}
-
-const paintingsQualityOptionsKeyMap = {
-  auto: 'paintings.quality_options.auto',
-  high: 'paintings.quality_options.high',
-  low: 'paintings.quality_options.low',
-  medium: 'paintings.quality_options.medium'
-} as const
-
-export const getPaintingsQualityOptionsLabel = (key: string): string => {
-  return getLabel(paintingsQualityOptionsKeyMap, key)
-}
-
-const paintingsModerationOptionsKeyMap = {
-  auto: 'paintings.moderation_options.auto',
-  low: 'paintings.moderation_options.low'
-} as const
-
-export const getPaintingsModerationOptionsLabel = (key: string): string => {
-  return getLabel(paintingsModerationOptionsKeyMap, key)
-}
-
-const paintingsBackgroundOptionsKeyMap = {
-  auto: 'paintings.background_options.auto',
-  opaque: 'paintings.background_options.opaque',
-  transparent: 'paintings.background_options.transparent'
-} as const
-
-export const getPaintingsBackgroundOptionsLabel = (key: string): string => {
-  return getLabel(paintingsBackgroundOptionsKeyMap, key)
 }
 
 const mcpTypeKeyMap = {
@@ -356,8 +294,6 @@ const builtInMcpDescriptionKeyMap: Record<BuiltinMCPServerName, string> = {
   [BuiltinMCPServerNames.filesystem]: 'settings.mcp.builtinServersDescriptions.filesystem',
   [BuiltinMCPServerNames.difyKnowledge]: 'settings.mcp.builtinServersDescriptions.dify_knowledge',
   [BuiltinMCPServerNames.python]: 'settings.mcp.builtinServersDescriptions.python',
-  [BuiltinMCPServerNames.didiMCP]: 'settings.mcp.builtinServersDescriptions.didi_mcp',
-  [BuiltinMCPServerNames.browser]: 'settings.mcp.builtinServersDescriptions.browser',
   [BuiltinMCPServerNames.nowledgeMem]: 'settings.mcp.builtinServersDescriptions.nowledge_mem',
   [BuiltinMCPServerNames.hub]: 'settings.mcp.builtinServersDescriptions.hub'
 } as const
@@ -381,6 +317,6 @@ export const getBuiltinOcrProviderLabel = (key: BuiltinOcrProviderId) => {
 }
 
 // oxlint-disable-next-line no-unused-vars -- placeholder for future agent type labels
-export const getAgentTypeLabel = (_key: AgentType) => {
+export const getAgentTypeLabel = (_key: 'claude-code') => {
   return 'Agent'
 }

@@ -4,7 +4,6 @@ import { HStack } from '@renderer/components/Layout'
 import UpdateDialogPopup from '@renderer/components/Popups/UpdateDialogPopup'
 import { APP_NAME, AppLogo } from '@renderer/config/env'
 import { useTheme } from '@renderer/context/ThemeProvider'
-import { useMinappPopup } from '@renderer/hooks/useMinappPopup'
 import { useRuntime } from '@renderer/hooks/useRuntime'
 import { useSettings } from '@renderer/hooks/useSettings'
 import i18n from '@renderer/i18n'
@@ -34,7 +33,6 @@ const AboutSettings: FC = () => {
   const { theme } = useTheme()
   const dispatch = useAppDispatch()
   const { update } = useRuntime()
-  const { openSmartMinapp } = useMinappPopup()
 
   const onCheckUpdate = debounce(
     async () => {
@@ -86,12 +84,10 @@ const AboutSettings: FC = () => {
 
   const showReleases = async () => {
     const { appPath } = await window.api.getAppInfo()
-    openSmartMinapp({
-      id: 'cherrystudio-releases',
-      name: t('settings.about.releases.title'),
-      url: `file://${appPath}/resources/cherry-studio/releases.html?theme=${theme === ThemeMode.dark ? 'dark' : 'light'}`,
-      logo: AppLogo
-    })
+    window.open(
+      `file://${appPath}/resources/cherry-studio/releases.html?theme=${theme === ThemeMode.dark ? 'dark' : 'light'}`,
+      '_blank'
+    )
   }
 
   const currentChannelByVersion =

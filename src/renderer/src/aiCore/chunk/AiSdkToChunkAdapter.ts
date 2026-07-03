@@ -12,7 +12,7 @@ import { ProviderSpecificError } from '@renderer/types/provider-specific-error'
 import { formatErrorMessage, isAbortError } from '@renderer/utils/error'
 import type { IdleTimeoutHandle } from '@renderer/utils/IdleTimeoutController'
 import { convertLinks, flushLinkConverterBuffer } from '@renderer/utils/linkConverter'
-import type { ClaudeCodeRawValue } from '@shared/agents/claudecode/types'
+import type { ClaudeCodeRawValue } from '@shared/types/claude-code'
 import { AISDKError, type TextStreamPart, type ToolSet } from 'ai'
 
 import { ToolCallChunkHandler } from './handleToolCallChunk'

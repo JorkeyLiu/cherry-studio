@@ -16,7 +16,6 @@
  */
 import { loggerService } from '@logger'
 import { AiSdkToChunkAdapter } from '@renderer/aiCore/chunk/AiSdkToChunkAdapter'
-import { AgentApiClient } from '@renderer/api/agent'
 import db from '@renderer/databases'
 import { getModel } from '@renderer/hooks/useModel'
 import { fetchMessagesSummary, transformMessagesAndFetch } from '@renderer/services/ApiService'
@@ -30,12 +29,30 @@ import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
 import { type ApiServerConfig, type Assistant, type FileMetadata, type Model, type Topic } from '@renderer/types'
-import type {
-  AgentEffort,
-  AgentSessionEntity,
-  AgentThinkingConfig,
-  GetAgentSessionResponse
-} from '@renderer/types/agent'
+// Agent types inlined (agent.ts removed)
+type AgentEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+type AgentThinkingConfig =
+  | { type: 'enabled'; budgetTokens?: number }
+  | { type: 'disabled' }
+  | { type: 'adaptive'; display?: 'omitted' | 'summarized' }
+interface AgentSessionEntity {
+  id: string
+  agent_id: string
+  name?: string
+  [key: string]: any
+}
+interface GetAgentSessionResponse extends AgentSessionEntity {
+  tools?: Array<{ id: string; name: string; type: string; description?: string }>
+  messages?: Array<{
+    id: number
+    session_id: string
+    role: string
+    content: unknown
+    created_at: string
+    updated_at: string
+  }>
+  plugins?: Array<{ filename: string; type: string; metadata: any }>
+}
 import { ChunkType } from '@renderer/types/chunk'
 import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
 import {
@@ -46,11 +63,7 @@ import {
 } from '@renderer/types/newMessage'
 import { uuid } from '@renderer/utils'
 import { addAbortController } from '@renderer/utils/abortController'
-import {
-  buildAgentSessionTopicId,
-  extractAgentSessionIdFromTopicId,
-  isAgentSessionTopicId
-} from '@renderer/utils/agentSession'
+import { extractAgentSessionIdFromTopicId, isAgentSessionTopicId } from '@renderer/utils/agentSession'
 import {
   createAssistantMessage,
   createTranslationBlock,
@@ -58,7 +71,6 @@ import {
 } from '@renderer/utils/messageUtils/create'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { getTopicQueue, waitForTopicQueue } from '@renderer/utils/queue'
-import { IpcChannel } from '@shared/IpcChannel'
 import { defaultAppHeaders } from '@shared/utils'
 import type { TextStreamPart } from 'ai'
 import { t } from 'i18next'
@@ -185,18 +197,18 @@ export const renameAgentSessionIfNeeded = async (
     }
 
     const baseURL = buildAgentBaseURL(apiServer)
-    const client = new AgentApiClient({
-      baseURL,
-      headers: {
-        Authorization: `Bearer ${apiServer.apiKey}`
-      }
-    })
+    const authHeaders = { Authorization: `Bearer ${apiServer.apiKey}` }
+    const sessionBasePath = `/v1/agents/${agentSession.agentId}/sessions`
 
     agentSessionRenameLocks.add(lockId)
 
     let session: GetAgentSessionResponse
     try {
-      session = await client.getSession(agentSession.agentId, agentSession.sessionId)
+      const res = await fetch(`${baseURL}${sessionBasePath}/${agentSession.sessionId}`, {
+        headers: { ...authHeaders, 'Content-Type': 'application/json' }
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      session = await res.json()
     } catch (error) {
       logger.warn('Failed to fetch agent session for rename', error as Error)
       return
@@ -209,24 +221,27 @@ export const renameAgentSessionIfNeeded = async (
 
     let updatedSession: GetAgentSessionResponse
     try {
-      updatedSession = await client.updateSession(agentSession.agentId, {
-        id: agentSession.sessionId,
-        name: summaryText
+      const res = await fetch(`${baseURL}${sessionBasePath}/${agentSession.sessionId}`, {
+        method: 'PUT',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: agentSession.sessionId, name: summaryText })
       })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      updatedSession = await res.json()
     } catch (error) {
       logger.warn('Failed to update agent session name', error as Error)
       return
     }
 
-    const paths = client.getSessionPaths(agentSession.agentId)
+    const sessionPath = `${sessionBasePath}/${agentSession.sessionId}`
 
     try {
-      await mutate(paths.withId(agentSession.sessionId), updatedSession, {
+      await mutate(sessionPath, updatedSession, {
         revalidate: false
       })
 
       await mutate<AgentSessionEntity[]>(
-        paths.base,
+        sessionBasePath,
         (prev) =>
           prev?.map((sessionItem) =>
             sessionItem.id === updatedSession.id
@@ -730,14 +745,8 @@ const fetchAndProcessAgentResponseImpl = async (
         const apiServer = stateAfterUpdate.settings.apiServer
         if (apiServer?.apiKey) {
           const baseURL = buildAgentBaseURL(apiServer)
-          const client = new AgentApiClient({
-            baseURL,
-            headers: {
-              Authorization: `Bearer ${apiServer.apiKey}`
-            }
-          })
-          const paths = client.getSessionPaths(agentSession.agentId)
-          await mutate(paths.withId(agentSession.sessionId))
+          const sessionPath = `/v1/agents/${agentSession.agentId}/sessions/${agentSession.sessionId}`
+          await mutate(`${baseURL}${sessionPath}`)
           logger.info('Refreshed session data after sessionId update', {
             agentId: agentSession.agentId,
             sessionId: agentSession.sessionId
@@ -908,32 +917,11 @@ const fetchAndProcessAssistantResponseImpl = async (
     logger.silly('Add Abort Controller', { id: userMessageId })
     addAbortController(userMessageId!, () => abortController.abort())
 
-    // Fetch agent allowed_tools for MCP auto-approval
-    let allowedTools: string[] | undefined
-    const activeAgentId = getState().runtime.chat.activeAgentId
-    const apiServer = getState().settings.apiServer
-    if (activeAgentId && apiServer?.apiKey) {
-      try {
-        const baseURL = buildAgentBaseURL(apiServer)
-        const agentClient = new AgentApiClient({
-          baseURL,
-          headers: {
-            Authorization: `Bearer ${apiServer.apiKey}`
-          }
-        })
-        const agentData = await agentClient.getAgent(activeAgentId)
-        allowedTools = agentData?.allowed_tools
-      } catch {
-        // Agent fetch failed — proceed without allowedTools
-      }
-    }
-
     await transformMessagesAndFetch(
       {
         messages: messagesForContext,
         assistant,
         topicId,
-        allowedTools,
         blockManager,
         assistantMsgId,
         callbacks,
@@ -1058,53 +1046,6 @@ export const sendMessage =
       logger.error('Error in sendMessage thunk:', error as Error)
     } finally {
       void finishTopicLoading(topicId)
-    }
-  }
-
-/**
- * Loads agent session messages from backend
- */
-export const loadAgentSessionMessagesThunk =
-  // oxlint-disable-next-line no-unused-vars
-  (sessionId: string) => async (dispatch: AppDispatch, _getState: () => RootState) => {
-    const topicId = buildAgentSessionTopicId(sessionId)
-
-    try {
-      dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
-
-      // Fetch from agent backend
-      const historicalMessages = await window.electron?.ipcRenderer.invoke(IpcChannel.AgentMessage_GetHistory, {
-        sessionId
-      })
-
-      if (historicalMessages && Array.isArray(historicalMessages)) {
-        const messages: Message[] = []
-        const blocks: MessageBlock[] = []
-
-        for (const persistedMsg of historicalMessages) {
-          if (persistedMsg?.message) {
-            messages.push(persistedMsg.message)
-            if (persistedMsg.blocks && persistedMsg.blocks.length > 0) {
-              blocks.push(...persistedMsg.blocks)
-            }
-          }
-        }
-
-        // Update Redux store
-        if (blocks.length > 0) {
-          dispatch(upsertManyBlocks(blocks))
-        }
-        dispatch(newMessagesActions.messagesReceived({ topicId, messages }))
-
-        logger.silly(`Loaded ${messages.length} messages for agent session ${sessionId}`)
-      } else {
-        dispatch(newMessagesActions.messagesReceived({ topicId, messages: [] }))
-      }
-    } catch (error) {
-      logger.error(`Failed to load agent session messages for ${sessionId}:`, error as Error)
-      dispatch(newMessagesActions.messagesReceived({ topicId, messages: [] }))
-    } finally {
-      dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
     }
   }
 

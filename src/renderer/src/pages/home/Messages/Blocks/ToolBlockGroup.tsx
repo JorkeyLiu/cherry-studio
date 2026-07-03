@@ -1,6 +1,4 @@
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
-import { useAppSelector } from '@renderer/store'
-import type { ToolPermissionEntry } from '@renderer/store/toolPermissions'
 import type { MCPToolResponseStatus } from '@renderer/types'
 import type { Message, MessageBlock, ToolMessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
@@ -184,7 +182,7 @@ function isCompletedToolBlock(block: ToolMessageBlock): boolean {
 }
 
 // Calculate actual waiting state for a block (not depending on hooks)
-function getBlockIsWaiting(block: ToolMessageBlock, agentPermissions: Record<string, ToolPermissionEntry>): boolean {
+function getBlockIsWaiting(block: ToolMessageBlock): boolean {
   const toolResponse = block.metadata?.rawMcpToolResponse
   if (!toolResponse || toolResponse.status !== 'pending') return false
 
@@ -192,20 +190,15 @@ function getBlockIsWaiting(block: ToolMessageBlock, agentPermissions: Record<str
   if (tool?.type === 'mcp') {
     // MCP tools: check the global confirmation queue
     return isToolPending(toolResponse.id)
-  } else {
-    // Agent tools: check Redux store for pending permission
-    const permission = Object.values(agentPermissions).find((p) => p.toolCallId === toolResponse.toolCallId)
-    return permission?.status === 'pending'
   }
+  // Agent tools: no longer need permission checking
+  return false
 }
 
 // Get effective UI status for a block
-function getBlockEffectiveStatus(
-  block: ToolMessageBlock,
-  agentPermissions: Record<string, ToolPermissionEntry>
-): ToolStatus {
+function getBlockEffectiveStatus(block: ToolMessageBlock): ToolStatus {
   const toolResponse = block.metadata?.rawMcpToolResponse
-  const isWaiting = getBlockIsWaiting(block, agentPermissions)
+  const isWaiting = getBlockIsWaiting(block)
   return getEffectiveStatus(toolResponse?.status, isWaiting)
 }
 
@@ -244,7 +237,6 @@ interface GroupHeaderContentProps {
 
 const GroupHeaderContent = React.memo(({ blocks, allCompleted }: GroupHeaderContentProps) => {
   const { t } = useTranslation()
-  const agentPermissions = useAppSelector((state) => state.toolPermissions.requests)
   const toolBlocks = blocks.filter((block): block is ToolMessageBlock => block.type === MessageBlockType.TOOL)
   const thinkingBlockCount = blocks.filter((block) => block.type === MessageBlockType.THINKING).length
   const messageBlockCount = blocks.filter((block) => block.type === MessageBlockType.MAIN_TEXT).length
@@ -274,7 +266,7 @@ const GroupHeaderContent = React.memo(({ blocks, allCompleted }: GroupHeaderCont
   }
 
   // Find blocks actually waiting for approval (using effective status)
-  const waitingBlocks = toolBlocks.filter((block) => getBlockEffectiveStatus(block, agentPermissions) === 'waiting')
+  const waitingBlocks = toolBlocks.filter((block) => getBlockEffectiveStatus(block) === 'waiting')
 
   // Prioritize showing waiting blocks that need approval
   const lastWaitingBlock = waitingBlocks[waitingBlocks.length - 1]
@@ -295,7 +287,7 @@ const GroupHeaderContent = React.memo(({ blocks, allCompleted }: GroupHeaderCont
 
   // Find running blocks (invoking or streaming)
   const runningBlocks = toolBlocks.filter((block) => {
-    const status = getBlockEffectiveStatus(block, agentPermissions)
+    const status = getBlockEffectiveStatus(block)
     return status === 'invoking' || status === 'streaming'
   })
 
@@ -381,7 +373,6 @@ const ToolBlockGroup: React.FC<Props> = ({ blocks, role = 'assistant' }) => {
   const [activeKey, setActiveKey] = useState<string[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
   const wasAllCompletedRef = useRef(false)
-  const agentPermissions = useAppSelector((state) => state.toolPermissions.requests)
   const toolBlocks = useMemo(
     () => blocks.filter((block): block is ToolMessageBlock => block.type === MessageBlockType.TOOL),
     [blocks]
@@ -396,8 +387,8 @@ const ToolBlockGroup: React.FC<Props> = ({ blocks, role = 'assistant' }) => {
   }, [toolBlocks])
 
   const hasWaitingTool = useMemo(() => {
-    return toolBlocks.some((block) => getBlockEffectiveStatus(block, agentPermissions) === 'waiting')
-  }, [toolBlocks, agentPermissions])
+    return toolBlocks.some((block) => getBlockEffectiveStatus(block) === 'waiting')
+  }, [toolBlocks])
 
   useEffect(() => {
     if (activeKey.includes('tool-group') && currentRunningBlock && scrollRef.current) {

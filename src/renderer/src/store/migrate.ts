@@ -22,7 +22,6 @@ import {
   DEFAULT_TEMPERATURE,
   isMac
 } from '@renderer/config/constant'
-import { allMinApps } from '@renderer/config/minapps'
 import { isFunctionCallingModel, isNotSupportTextDeltaModel, qwenModel, SYSTEM_MODELS } from '@renderer/config/models'
 import { BUILTIN_OCR_PROVIDERS, BUILTIN_OCR_PROVIDERS_MAP, DEFAULT_OCR_PROVIDER } from '@renderer/config/ocr'
 import { TRANSLATE_PROMPT } from '@renderer/config/prompts'
@@ -59,48 +58,27 @@ import { DEFAULT_TOOL_ORDER, DEFAULT_TOOL_ORDER_BY_SCOPE } from './inputTools'
 import { initialState as llmInitialState, moveProvider } from './llm'
 import { mcpSlice } from './mcp'
 import { initialState as notesInitialState } from './note'
-import { defaultActionItems } from './selectionStore'
 import { initialState as settingsInitialState } from './settings'
-import { initialState as shortcutsInitialState } from './shortcuts'
 import { defaultWebSearchProviders } from './websearch'
 
 const logger = loggerService.withContext('Migrate')
 
-// remove logo base64 data to reduce the size of the state
-function removeMiniAppIconsFromState(state: RootState) {
-  if (state.minapps) {
-    state.minapps.enabled = state.minapps.enabled.map((app) => ({
-      ...app,
-      logo: undefined
-    }))
-    state.minapps.disabled = state.minapps.disabled.map((app) => ({
-      ...app,
-      logo: undefined
-    }))
-    state.minapps.pinned = state.minapps.pinned.map((app) => ({
-      ...app,
-      logo: undefined
-    }))
-  }
+// MinApp functions removed - kept as no-ops for migration compatibility
+function removeMiniAppIconsFromState(_state: RootState) {
+  // no-op: minapp module removed
 }
 
-function removeMiniAppFromState(state: RootState, id: string) {
-  if (state.minapps) {
-    state.minapps.pinned = state.minapps.pinned.filter((app) => app.id !== id)
-    state.minapps.enabled = state.minapps.enabled.filter((app) => app.id !== id)
-    state.minapps.disabled = state.minapps.disabled.filter((app) => app.id !== id)
-  }
+function removeMiniAppFromState(_state: RootState, _id: string) {
+  // no-op: minapp module removed
 }
 
-function addMiniApp(state: RootState, id: string) {
-  if (state.minapps) {
-    const app = allMinApps.find((app) => app.id === id)
-    if (app) {
-      if (!state.minapps.enabled.find((app) => app.id === id)) {
-        state.minapps.enabled.push(app)
-      }
-    }
-  }
+function addMiniApp(_state: RootState, _id: string) {
+  // no-op: minapp module removed
+}
+
+// addShortcuts removed - kept as no-op for migration compatibility
+function addShortcuts(_state: RootState, _ids: string[], _position: string) {
+  // no-op: shortcuts module slimmed
 }
 
 // add provider to state
@@ -166,60 +144,6 @@ function updateWebSearchProvider(state: RootState, provider: Partial<WebSearchPr
   }
 }
 
-function addSelectionAction(state: RootState, id: string) {
-  if (state.selectionStore && state.selectionStore.actionItems) {
-    if (!state.selectionStore.actionItems.some((item) => item.id === id)) {
-      const action = defaultActionItems.find((item) => item.id === id)
-      if (action) {
-        state.selectionStore.actionItems.push(action)
-      }
-    }
-  }
-}
-
-/**
- * Add shortcuts(ids from shortcutsInitialState) after the shortcut(afterId)
- * if afterId is 'first', add to the first
- * if afterId is 'last', add to the last
- */
-function addShortcuts(state: RootState, ids: string[], afterId: string) {
-  const defaultShortcuts = shortcutsInitialState.shortcuts
-
-  // 确保 state.shortcuts 存在
-  if (!state.shortcuts) {
-    return
-  }
-
-  // 从 defaultShortcuts 中找到要添加的快捷键
-  const shortcutsToAdd = defaultShortcuts.filter((shortcut) => ids.includes(shortcut.key))
-
-  // 过滤掉已经存在的快捷键
-  const existingKeys = state.shortcuts.shortcuts.map((s) => s.key)
-  const newShortcuts = shortcutsToAdd.filter((shortcut) => !existingKeys.includes(shortcut.key))
-
-  if (newShortcuts.length === 0) {
-    return
-  }
-
-  if (afterId === 'first') {
-    // 添加到最前面
-    state.shortcuts.shortcuts.unshift(...newShortcuts)
-  } else if (afterId === 'last') {
-    // 添加到最后面
-    state.shortcuts.shortcuts.push(...newShortcuts)
-  } else {
-    // 添加到指定快捷键后面
-    const afterIndex = state.shortcuts.shortcuts.findIndex((shortcut) => shortcut.key === afterId)
-    if (afterIndex !== -1) {
-      state.shortcuts.shortcuts.splice(afterIndex + 1, 0, ...newShortcuts)
-    } else {
-      // 如果找不到指定的快捷键，则添加到最后
-      state.shortcuts.shortcuts.push(...newShortcuts)
-    }
-  }
-}
-
-// add preprocess provider
 function addPreprocessProviders(state: RootState, id: string) {
   if (state.preprocess && state.preprocess.providers) {
     if (!state.preprocess.providers.find((p) => p.id === id)) {
@@ -1067,20 +991,7 @@ const migrateConfig = {
   },
   '71': (state: RootState) => {
     try {
-      const appIds = ['dify', 'wpslingxi', 'lechat', 'abacus', 'lambdachat', 'baidu-ai-search']
-
-      if (state.minapps) {
-        appIds.forEach((id) => {
-          const app = allMinApps.find((app) => app.id === id)
-          if (app) {
-            state.minapps.enabled.push(app)
-          }
-        })
-        // remove zhihu-zhiada
-        state.minapps.enabled = state.minapps.enabled.filter((app) => app.id !== 'zhihu-zhiada')
-        state.minapps.disabled = state.minapps.disabled.filter((app) => app.id !== 'zhihu-zhiada')
-      }
-
+      // minapp operations removed - no-op for migration compatibility
       state.settings.thoughtAutoCollapse = true
 
       return state
@@ -1293,7 +1204,9 @@ const migrateConfig = {
   },
   '87': (state: RootState) => {
     try {
+      // @ts-ignore legacy minapp settings - removed in slimming refactor
       state.settings.maxKeepAliveMinapps = 3
+      // @ts-ignore legacy minapp settings - removed in slimming refactor
       state.settings.showOpenedMinappsInSidebar = true
       return state
     } catch (error) {
@@ -1635,7 +1548,9 @@ const migrateConfig = {
   },
   '107': (state: RootState) => {
     try {
+      // @ts-ignore legacy paintings state - removed in slimming refactor
       if (state.paintings && !state.paintings.dmxapi_paintings) {
+        // @ts-ignore legacy paintings state - removed in slimming refactor
         state.paintings.dmxapi_paintings = []
       }
       return state
@@ -1666,7 +1581,9 @@ const migrateConfig = {
   },
   '110': (state: RootState) => {
     try {
+      // @ts-ignore legacy paintings state - removed in slimming refactor
       if (state.paintings && !state.paintings.tokenflux_paintings) {
+        // @ts-ignore legacy paintings state - removed in slimming refactor
         state.paintings.tokenflux_paintings = []
       }
       state.settings.testPlan = false
@@ -1678,16 +1595,12 @@ const migrateConfig = {
   },
   '111': (state: RootState) => {
     try {
-      addSelectionAction(state, 'quote')
       if (
         state.llm.translateModel.provider === 'silicon' &&
         state.llm.translateModel.id === 'meta-llama/Llama-3.3-70B-Instruct'
       ) {
         state.llm.translateModel = SYSTEM_MODELS.defaultModel[2]
       }
-
-      // add selection_assistant_toggle and selection_assistant_select_text shortcuts after mini_window
-      addShortcuts(state, ['selection_assistant_toggle', 'selection_assistant_select_text'], 'mini_window')
 
       return state
     } catch (error) {
@@ -2215,14 +2128,6 @@ const migrateConfig = {
   },
   '133': (state: RootState) => {
     try {
-      state.settings.sidebarIcons.visible.push('code_tools')
-      if (state.codeTools) {
-        state.codeTools.environmentVariables = {
-          'qwen-code': '',
-          'claude-code': '',
-          'gemini-cli': ''
-        }
-      }
       return state
     } catch (error) {
       logger.error('migrate 133 error', error as Error)
@@ -2306,9 +2211,6 @@ const migrateConfig = {
           zhipuProvider.models = SYSTEM_MODELS.zhipu
         }
 
-        // Update default painting provider to zhipu
-        state.settings.defaultPaintingProvider = 'zhipu'
-
         // Add zhipu web search provider
         addWebSearchProvider(state, 'zhipu')
 
@@ -2330,28 +2232,7 @@ const migrateConfig = {
   },
   '140': (state: RootState) => {
     try {
-      // @ts-ignore
-      state.paintings = {
-        // @ts-ignore paintings
-        siliconflow_paintings: state?.paintings?.paintings || [],
-        // @ts-ignore DMXAPIPaintings
-        dmxapi_paintings: state?.paintings?.DMXAPIPaintings || [],
-        // @ts-ignore tokenFluxPaintings
-        tokenflux_paintings: state?.paintings?.tokenFluxPaintings || [],
-        zhipu_paintings: [],
-        // @ts-ignore generate
-        aihubmix_image_generate: state?.paintings?.generate || [],
-        // @ts-ignore remix
-        aihubmix_image_remix: state?.paintings?.remix || [],
-        // @ts-ignore edit
-        aihubmix_image_edit: state?.paintings?.edit || [],
-        // @ts-ignore upscale
-        aihubmix_image_upscale: state?.paintings?.upscale || [],
-        openai_image_generate: state?.paintings?.openai_image_generate || [],
-        openai_image_edit: state?.paintings?.openai_image_edit || [],
-        ovms_paintings: []
-      }
-
+      // paintings state removed in slimming refactor
       return state
     } catch (error) {
       logger.error('migrate 140 error', error as Error)
@@ -2683,7 +2564,6 @@ const migrateConfig = {
     try {
       addProvider(state, 'sophnet')
       state.llm.providers = moveProvider(state.llm.providers, 'sophnet', 17)
-      state.settings.defaultPaintingProvider = 'cherryin'
       return state
     } catch (error) {
       logger.error('migrate 170 error', error as Error)
@@ -2719,11 +2599,8 @@ const migrateConfig = {
       addMiniApp(state, 'ling')
       addMiniApp(state, 'huggingchat')
 
-      // Add ovocr provider and clear ovms paintings
+      // Add ovocr provider
       addOcrProvider(state, BUILTIN_OCR_PROVIDERS_MAP.ovocr)
-      if (isEmpty(state.paintings.ovms_paintings)) {
-        state.paintings.ovms_paintings = []
-      }
 
       // Migrate agents to assistants presets
       // @ts-ignore
@@ -2748,18 +2625,15 @@ const migrateConfig = {
         }
       })
 
-      // Migrate sidebar icons
+      // Migrate sidebar icons: filter out removed 'store' icon
       if (state.settings.sidebarIcons) {
-        state.settings.sidebarIcons.visible = state.settings.sidebarIcons.visible.map((icon) => {
-          // @ts-ignore
-          return icon === 'agents' ? 'store' : icon
-        })
-        state.settings.sidebarIcons.disabled = state.settings.sidebarIcons.disabled.map((icon) => {
-          // @ts-ignore
-          return icon === 'agents' ? 'store' : icon
-        })
+        state.settings.sidebarIcons.visible = state.settings.sidebarIcons.visible.filter(
+          (icon) => (icon as string) !== 'store'
+        )
+        state.settings.sidebarIcons.disabled = state.settings.sidebarIcons.disabled.filter(
+          (icon) => (icon as string) !== 'store'
+        )
       }
-
       // Migrate llm providers
       state.llm.providers.forEach((provider) => {
         if (provider.id === SystemProviderIds['new-api'] && provider.type !== 'new-api') {
@@ -3179,8 +3053,6 @@ const migrateConfig = {
           assistant.defaultModel = qwenModel
         }
       })
-      // Initialize mini app region filter setting
-      state.settings.minAppRegion ??= 'auto'
       return state
     } catch (error) {
       logger.error('migrate 194 error', error as Error)
@@ -3189,12 +3061,6 @@ const migrateConfig = {
   },
   '195': (state: RootState) => {
     try {
-      if (state.settings && state.settings.sidebarIcons) {
-        // Add 'openclaw' to visible icons if not already present
-        if (!state.settings.sidebarIcons.visible.includes('openclaw')) {
-          state.settings.sidebarIcons.visible = [...state.settings.sidebarIcons.visible, 'openclaw']
-        }
-      }
       logger.info('migrate 195 success')
       return state
     } catch (error) {
@@ -3204,10 +3070,14 @@ const migrateConfig = {
   },
   '196': (state: RootState) => {
     try {
+      // @ts-ignore legacy paintings state - removed in slimming refactor
       if (state.paintings && !state.paintings.ppio_draw) {
+        // @ts-ignore legacy paintings state - removed in slimming refactor
         state.paintings.ppio_draw = []
       }
+      // @ts-ignore legacy paintings state - removed in slimming refactor
       if (state.paintings && !state.paintings.ppio_edit) {
+        // @ts-ignore legacy paintings state - removed in slimming refactor
         state.paintings.ppio_edit = []
       }
       logger.info('migrate 196 success')
@@ -3219,9 +3089,6 @@ const migrateConfig = {
   },
   '197': (state: RootState) => {
     try {
-      if (state.openclaw?.gatewayPort === 18789) {
-        state.openclaw.gatewayPort = 18790
-      }
       logger.info('migrate 197 success')
       return state
     } catch (error) {
@@ -3260,19 +3127,7 @@ const migrateConfig = {
         }
       })
 
-      // Migrate minimax app id to hailuo
-      if (state.minapps) {
-        const lists: Array<'enabled' | 'disabled' | 'pinned'> = ['enabled', 'disabled', 'pinned']
-        lists.forEach((list) => {
-          state.minapps[list] = state.minapps[list].map((app) =>
-            app.id === 'minimax' ? { ...app, id: 'hailuo' } : app
-          )
-        })
-      }
-      // Add new MiniMax Agent apps
-      addMiniApp(state, 'minimax-agent')
-      addMiniApp(state, 'minimax-agent-global')
-      addMiniApp(state, 'ima')
+      // minapp migration removed - no-op for compatibility
       // Add new providers: minimax-global and zai
       addProvider(state, 'minimax-global')
       addProvider(state, 'zai')
@@ -3313,27 +3168,23 @@ const migrateConfig = {
   '203': (state: RootState) => {
     try {
       if (state.settings && state.settings.sidebarIcons) {
-        // Add 'agents' to visible icons if not already present
-        if (!state.settings.sidebarIcons.visible.includes('agents')) {
-          // Insert after 'assistants' if present, otherwise append
-          const assistantsIndex = state.settings.sidebarIcons.visible.indexOf('assistants')
-          if (assistantsIndex !== -1) {
-            state.settings.sidebarIcons.visible = [
-              ...state.settings.sidebarIcons.visible.slice(0, assistantsIndex + 1),
-              'agents',
-              ...state.settings.sidebarIcons.visible.slice(assistantsIndex + 1)
-            ]
-          } else {
-            state.settings.sidebarIcons.visible = [...state.settings.sidebarIcons.visible, 'agents']
-          }
+        // Remove 'agents' from visible icons if present (agents subsystem removed)
+        const visible = state.settings.sidebarIcons.visible as string[]
+        const agentsIdx = visible.indexOf('agents')
+        if (agentsIdx !== -1) {
+          visible.splice(agentsIdx, 1)
+        }
+        // Also remove from disabled if present
+        const disabled = state.settings.sidebarIcons.disabled as string[]
+        const disabledAgentsIdx = disabled.indexOf('agents')
+        if (disabledAgentsIdx !== -1) {
+          disabled.splice(disabledAgentsIdx, 1)
         }
       }
 
-      // Add 'agents' tab if not already present
-      if (state.tabs && !state.tabs.tabs.some((tab: { id: string }) => tab.id === 'agents')) {
-        const homeIndex = state.tabs.tabs.findIndex((tab: { id: string }) => tab.id === 'home')
-        const insertIndex = homeIndex !== -1 ? homeIndex + 1 : state.tabs.tabs.length
-        state.tabs.tabs.splice(insertIndex, 0, { id: 'agents', path: '/agents' })
+      // Remove 'agents' tab if present
+      if (state.tabs) {
+        state.tabs.tabs = state.tabs.tabs.filter((tab: { id: string }) => tab.id !== 'agents')
       }
 
       logger.info('migrate 203 success')
@@ -3461,6 +3312,43 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 209 error', error as Error)
+      return state
+    }
+  },
+  '210': (state: RootState) => {
+    try {
+      // 清除已删除的 slice 残留数据
+      delete (state as any).paintings
+      delete (state as any).toolPermissions
+      delete (state as any).minapps
+      delete (state as any).openclaw
+      delete (state as any).codeTools
+      delete (state as any).selectionStore
+
+      // 清除 runtime 中已删除的字段
+      if (state.runtime) {
+        delete (state.runtime as any).activeAgentId
+        delete (state.runtime as any).activeSessionIdMap
+        delete (state.runtime as any).minappShow
+        delete (state.runtime as any).openedKeepAliveMinapps
+        delete (state.runtime as any).openedOneOffMinapp
+        delete (state.runtime as any).currentMinappId
+        delete (state.runtime as any).detectedRegion
+      }
+
+      // 清除 settings 中已删除的字段
+      if (state.settings) {
+        delete (state.settings as any).defaultPaintingProvider
+        delete (state.settings as any).maxKeepAliveMinapps
+        delete (state.settings as any).showOpenedMinappsInSidebar
+        delete (state.settings as any).minappsOpenLinkExternal
+        delete (state.settings as any).minAppRegion
+      }
+
+      logger.info('migrate 210 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 210 error', error as Error)
       return state
     }
   }
