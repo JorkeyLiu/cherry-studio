@@ -24,7 +24,6 @@ import storage from 'redux-persist/lib/storage'
 import storeSyncService from '../services/StoreSyncService'
 import assistants from './assistants'
 import backup from './backup'
-import codeTools from './codeTools'
 import copilot from './copilot'
 import inputToolsReducer from './inputTools'
 import knowledge from './knowledge'
@@ -39,7 +38,6 @@ import { setNotesPath } from './note'
 import note from './note'
 import nutstore from './nutstore'
 import ocr from './ocr'
-import openclaw from './openclaw'
 import paintings from './paintings'
 import preprocess from './preprocess'
 import runtime from './runtime'
@@ -56,7 +54,6 @@ const logger = loggerService.withContext('Store')
 const rootReducer = combineReducers({
   assistants,
   backup,
-  codeTools,
   nutstore,
   paintings,
   llm,
@@ -69,7 +66,6 @@ const rootReducer = combineReducers({
   mcp,
   memory,
   copilot,
-  openclaw,
   selectionStore,
   tabs,
   preprocess,

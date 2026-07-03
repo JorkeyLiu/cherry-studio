@@ -2215,14 +2215,6 @@ const migrateConfig = {
   },
   '133': (state: RootState) => {
     try {
-      state.settings.sidebarIcons.visible.push('code_tools')
-      if (state.codeTools) {
-        state.codeTools.environmentVariables = {
-          'qwen-code': '',
-          'claude-code': '',
-          'gemini-cli': ''
-        }
-      }
       return state
     } catch (error) {
       logger.error('migrate 133 error', error as Error)
@@ -2748,18 +2740,15 @@ const migrateConfig = {
         }
       })
 
-      // Migrate sidebar icons
+      // Migrate sidebar icons: filter out removed 'store' icon
       if (state.settings.sidebarIcons) {
-        state.settings.sidebarIcons.visible = state.settings.sidebarIcons.visible.map((icon) => {
-          // @ts-ignore
-          return icon === 'agents' ? 'store' : icon
-        })
-        state.settings.sidebarIcons.disabled = state.settings.sidebarIcons.disabled.map((icon) => {
-          // @ts-ignore
-          return icon === 'agents' ? 'store' : icon
-        })
+        state.settings.sidebarIcons.visible = state.settings.sidebarIcons.visible.filter(
+          (icon) => (icon as string) !== 'store'
+        )
+        state.settings.sidebarIcons.disabled = state.settings.sidebarIcons.disabled.filter(
+          (icon) => (icon as string) !== 'store'
+        )
       }
-
       // Migrate llm providers
       state.llm.providers.forEach((provider) => {
         if (provider.id === SystemProviderIds['new-api'] && provider.type !== 'new-api') {
@@ -3189,12 +3178,6 @@ const migrateConfig = {
   },
   '195': (state: RootState) => {
     try {
-      if (state.settings && state.settings.sidebarIcons) {
-        // Add 'openclaw' to visible icons if not already present
-        if (!state.settings.sidebarIcons.visible.includes('openclaw')) {
-          state.settings.sidebarIcons.visible = [...state.settings.sidebarIcons.visible, 'openclaw']
-        }
-      }
       logger.info('migrate 195 success')
       return state
     } catch (error) {
@@ -3219,9 +3202,6 @@ const migrateConfig = {
   },
   '197': (state: RootState) => {
     try {
-      if (state.openclaw?.gatewayPort === 18789) {
-        state.openclaw.gatewayPort = 18790
-      }
       logger.info('migrate 197 success')
       return state
     } catch (error) {

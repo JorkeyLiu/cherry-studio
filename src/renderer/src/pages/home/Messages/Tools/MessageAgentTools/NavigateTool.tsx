@@ -8,15 +8,12 @@ interface NavigateToolInput {
 const ROUTE_LABELS: Record<string, { icon: string; label: string }> = {
   // Top-level pages
   '/': { icon: '🏠', label: 'Home' },
-  '/store': { icon: '🏪', label: 'Store' },
   '/paintings': { icon: '🎨', label: 'Paintings' },
   '/translate': { icon: '🌐', label: 'Translate' },
   '/files': { icon: '📁', label: 'Files' },
   '/notes': { icon: '📝', label: 'Notes' },
   '/knowledge': { icon: '📚', label: 'Knowledge' },
   '/apps': { icon: '📦', label: 'Mini Apps' },
-  '/code': { icon: '💻', label: 'Code Tools' },
-  '/openclaw': { icon: '🦞', label: 'OpenClaw' },
   '/launchpad': { icon: '🚀', label: 'Launchpad' },
   '/agents': { icon: '🤖', label: 'Agents' },
 

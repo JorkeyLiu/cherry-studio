@@ -32,9 +32,7 @@ import {
   NotepadText,
   Palette,
   Settings,
-  Sparkle,
   Sun,
-  Terminal,
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo } from 'react'
@@ -43,7 +41,6 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import styled from 'styled-components'
 
 import MinAppIcon from '../Icons/MinAppIcon'
-import { OpenClawIcon } from '../Icons/SVGIcon'
 import MinAppTabsPool from '../MinApp/MinAppTabsPool'
 import WindowControls from '../WindowControls'
 
@@ -93,8 +90,6 @@ const getTabIcon = (
       return <Home size={14} />
     case 'agents':
       return <MousePointerClick size={14} />
-    case 'store':
-      return <Sparkle size={14} />
     case 'translate':
       return <Languages size={14} />
     case 'paintings':
@@ -109,10 +104,6 @@ const getTabIcon = (
       return <Folder size={14} />
     case 'settings':
       return <Settings size={14} />
-    case 'code':
-      return <Terminal size={14} />
-    case 'openclaw':
-      return <OpenClawIcon style={{ width: 14, height: 14 }} />
     default:
       return null
   }

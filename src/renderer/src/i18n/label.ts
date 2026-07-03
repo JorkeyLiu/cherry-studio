@@ -141,7 +141,6 @@ export const getRestoreProgressLabel = (key: string): string => {
 
 const titleKeyMap = {
   // TODO: update i18n key
-  store: 'title.store',
   apps: 'title.apps',
   code: 'title.code',
   files: 'title.files',
@@ -154,7 +153,6 @@ const titleKeyMap = {
   paintings: 'title.paintings',
   settings: 'title.settings',
   translate: 'title.translate',
-  openclaw: 'openclaw.title',
   agents: 'agent.sidebar_title'
 } as const
 
@@ -187,15 +185,12 @@ export const getThemeModeLabel = (key: string): string => {
 const sidebarIconKeyMap = {
   assistants: 'assistants.title',
   agents: 'agent.sidebar_title',
-  store: 'assistants.presets.title',
   paintings: 'paintings.title',
   translate: 'translate.title',
   minapp: 'minapp.title',
   knowledge: 'knowledge.title',
   files: 'files.title',
-  code_tools: 'code.title',
-  notes: 'notes.title',
-  openclaw: 'openclaw.title'
+  notes: 'notes.title'
 } as const
 
 export const getSidebarIconLabel = (key: string): string => {
