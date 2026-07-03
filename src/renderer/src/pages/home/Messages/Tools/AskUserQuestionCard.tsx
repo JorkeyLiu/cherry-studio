@@ -1,10 +1,8 @@
 import { loggerService } from '@logger'
-import { useAppDispatch, useAppSelector } from '@renderer/store'
-import { selectPendingPermission, toolPermissionsActions } from '@renderer/store/toolPermissions'
 import type { NormalToolResponse } from '@renderer/types'
 import { cn } from '@renderer/utils'
 import { Button, Checkbox, Input, Radio, Tag } from 'antd'
-import { CheckCircle, CheckCircle2, ChevronLeft, ChevronRight, HelpCircle, Send } from 'lucide-react'
+import { CheckCircle, CheckCircle2, ChevronLeft, ChevronRight, HelpCircle } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -261,14 +259,12 @@ function PendingContent({
 // ==================== Main Component ====================
 export function AskUserQuestionCard({ toolResponse }: { toolResponse: NormalToolResponse }) {
   const { t } = useTranslation()
-  const dispatch = useAppDispatch()
-  const request = useAppSelector((state) => selectPendingPermission(state.toolPermissions, toolResponse.toolCallId))
 
-  const isPending = toolResponse.status === 'pending' && !!request
+  const isPending = toolResponse.status === 'pending'
 
-  // Parse from available sources - prefer request.input when pending, fall back to toolResponse.arguments
+  // Parse from available sources - prefer toolResponse.arguments
   const { questions, answers } = useMemo(() => {
-    const source = isPending ? request.input : toolResponse.arguments
+    const source = toolResponse.arguments
     const parsed = parseAskUserQuestionToolInput(source)
 
     // Debug: log data source
@@ -276,7 +272,6 @@ export function AskUserQuestionCard({ toolResponse }: { toolResponse: NormalTool
       logger.debug('AskUserQuestion: no questions parsed', {
         isPending,
         status: toolResponse.status,
-        hasRequestInput: !!request?.input,
         hasArguments: !!toolResponse.arguments,
         source
       })
@@ -286,18 +281,17 @@ export function AskUserQuestionCard({ toolResponse }: { toolResponse: NormalTool
       questions: parsed?.questions ?? [],
       answers: parsed?.answers ?? {}
     }
-  }, [isPending, request?.input, toolResponse.arguments, toolResponse.status])
+  }, [toolResponse.arguments, toolResponse.status])
 
   const [currentIndex, setCurrentIndex] = useState(0)
   // Use question index as key to avoid collision when questions have identical text
   const [selectedAnswers, setSelectedAnswers] = useState<Record<number, string[]>>({})
   const [customInputs, setCustomInputs] = useState<Record<number, string>>({})
   const [showCustomInput, setShowCustomInput] = useState<Record<number, boolean>>({})
-  const [submittedAnswers, setSubmittedAnswers] = useState<Record<string, string>>({})
+  const [submittedAnswers] = useState<Record<string, string>>({})
 
   const displayAnswers = Object.keys(answers).length > 0 ? answers : submittedAnswers
 
-  const isSubmitting = request?.status === 'submitting-allow'
   const currentQuestion = questions[currentIndex]
   const totalQuestions = questions.length
   const isFirstQuestion = currentIndex === 0
@@ -309,14 +303,6 @@ export function AskUserQuestionCard({ toolResponse }: { toolResponse: NormalTool
     const custom = customInputs[currentIndex]?.trim()
     return selected.length > 0 || (showCustomInput[currentIndex] && !!custom)
   }, [currentQuestion, currentIndex, selectedAnswers, customInputs, showCustomInput])
-
-  const allAnswered = useMemo(() => {
-    return questions.every((_, idx) => {
-      const selected = selectedAnswers[idx] ?? []
-      const custom = customInputs[idx]?.trim()
-      return selected.length > 0 || (showCustomInput[idx] && custom)
-    })
-  }, [questions, selectedAnswers, customInputs, showCustomInput])
 
   const handleSelect = useCallback(
     (questionIndex: number, label: string, checked?: boolean) => {
@@ -354,39 +340,6 @@ export function AskUserQuestionCard({ toolResponse }: { toolResponse: NormalTool
     if (!isLastQuestion) setCurrentIndex((prev) => prev + 1)
   }, [isLastQuestion])
 
-  const handleSubmit = useCallback(async () => {
-    if (!request) return
-
-    const collectedAnswers: Record<string, string> = {}
-    questions.forEach((q, idx) => {
-      const selected = selectedAnswers[idx] ?? []
-      const custom = customInputs[idx]?.trim()
-
-      if (showCustomInput[idx] && custom) {
-        collectedAnswers[q.question] = q.multiSelect && selected.length > 0 ? [...selected, custom].join(', ') : custom
-      } else if (selected.length > 0) {
-        collectedAnswers[q.question] = selected.join(', ')
-      }
-    })
-
-    setSubmittedAnswers(collectedAnswers)
-    dispatch(toolPermissionsActions.submissionSent({ requestId: request.requestId, behavior: 'allow' }))
-
-    try {
-      const response = await window.api.agentTools.respondToPermission({
-        requestId: request.requestId,
-        behavior: 'allow' as const,
-        updatedInput: { ...request.input, answers: collectedAnswers }
-      })
-
-      if (!response?.success) throw new Error('Response rejected by main process')
-    } catch (error) {
-      logger.error('Failed to submit AskUserQuestion answers', { error })
-      window.toast?.error?.(t('agent.toolPermission.error.sendFailed'))
-      dispatch(toolPermissionsActions.submissionFailed({ requestId: request.requestId }))
-    }
-  }, [dispatch, request, questions, selectedAnswers, customInputs, showCustomInput, t])
-
   if (isPending && (questions.length === 0 || !currentQuestion)) {
     return (
       <div className="rounded-xl border border-default-200 bg-default-100 px-4 py-3 text-default-500 text-sm">
@@ -397,20 +350,18 @@ export function AskUserQuestionCard({ toolResponse }: { toolResponse: NormalTool
 
   const answeredCount = Object.keys(displayAnswers).length
 
-  const submitButton = (
-    <Button
-      type="primary"
-      icon={<Send size={16} />}
-      loading={isSubmitting}
-      disabled={!allAnswered || isSubmitting}
-      onClick={handleSubmit}>
-      {t('agent.askUserQuestion.submit')}
-    </Button>
-  )
-
   function renderRightButton(): ReactNode {
     if (isPending && isLastQuestion) {
-      return submitButton
+      return (
+        <Button
+          type="primary"
+          disabled={!isCurrentAnswered}
+          onClick={handleNext}
+          iconPosition="end"
+          icon={<ChevronRight size={16} />}>
+          {t('agent.askUserQuestion.next')}
+        </Button>
+      )
     }
     if (isPending) {
       return (
@@ -469,7 +420,7 @@ export function AskUserQuestionCard({ toolResponse }: { toolResponse: NormalTool
             showPrevious={totalQuestions > 1}
             isFirst={isFirstQuestion}
             onPrevious={handlePrevious}
-            rightButton={totalQuestions === 1 ? submitButton : renderRightButton()}
+            rightButton={totalQuestions === 1 ? renderRightButton() : renderRightButton()}
           />
         )}
       </div>

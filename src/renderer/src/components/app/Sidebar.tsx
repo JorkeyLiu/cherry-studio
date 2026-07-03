@@ -11,17 +11,7 @@ import { getSidebarIconLabel, getThemeModeLabel } from '@renderer/i18n/label'
 import { ThemeMode } from '@renderer/types'
 import { isEmoji } from '@renderer/utils'
 import { Avatar, Tooltip } from 'antd'
-import {
-  FileSearch,
-  Folder,
-  MessageSquare,
-  Monitor,
-  Moon,
-  MousePointerClick,
-  NotepadText,
-  Settings,
-  Sun
-} from 'lucide-react'
+import { FileSearch, Folder, MessageSquare, Monitor, Moon, NotepadText, Settings, Sun } from 'lucide-react'
 import type { FC } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -100,7 +90,6 @@ const MainMenus: FC = () => {
 
   const iconMap = {
     assistants: <MessageSquare size={18} className="icon" />,
-    agents: <MousePointerClick size={18} className="icon" />,
     knowledge: <FileSearch size={18} className="icon" />,
     files: <Folder size={18} className="icon" />,
     notes: <NotepadText size={18} className="icon" />
@@ -108,7 +97,6 @@ const MainMenus: FC = () => {
 
   const pathMap = {
     assistants: '/',
-    agents: '/agents',
     knowledge: '/knowledge',
     files: '/files',
     notes: '/notes'

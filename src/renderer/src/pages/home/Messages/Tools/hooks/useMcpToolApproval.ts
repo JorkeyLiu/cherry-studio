@@ -1,4 +1,3 @@
-import { useActiveAgent } from '@renderer/hooks/agents/useActiveAgent'
 import { useMCPServers } from '@renderer/hooks/useMCPServers'
 import type { MCPServer, MCPToolResponse } from '@renderer/types'
 import type { ToolMessageBlock } from '@renderer/types/newMessage'
@@ -48,7 +47,6 @@ async function resolveHubToolServer(
 export function useMcpToolApproval(block: ToolMessageBlock): ToolApprovalState & ToolApprovalActions {
   const { t } = useTranslation()
   const { mcpServers, updateMCPServer } = useMCPServers()
-  const { agent } = useActiveAgent()
 
   const toolResponse = block.metadata?.rawMcpToolResponse as MCPToolResponse | undefined
   const tool = toolResponse?.tool
@@ -96,11 +94,10 @@ export function useMcpToolApproval(block: ToolMessageBlock): ToolApprovalState &
 
   const isAutoApproved = (() => {
     if (!tool) return false
-    // Check basic auto-approve (built-in, agent allowed_tools, server-level)
+    // Check basic auto-approve (built-in, server-level)
     const basicApproved = isToolAutoApproved(
       tool,
-      mcpServers.find((s) => s.id === tool.serverId),
-      agent?.allowed_tools
+      mcpServers.find((s) => s.id === tool.serverId)
     )
     if (basicApproved) return true
     // For hub invoke/exec, use the async-resolved underlying server result

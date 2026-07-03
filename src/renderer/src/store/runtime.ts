@@ -24,11 +24,6 @@ export interface ChatState {
   isMultiSelectMode: boolean
   selectedMessageIds: string[]
   activeTopic: Topic | null
-  /** UI state. null represents no active agent */
-  activeAgentId: string | null
-  /** UI state. Map agent id to active session id.
-   *  null represents no active session  */
-  activeSessionIdMap: Record<string, string | null>
   /** topic ids that are currently being renamed */
   renamingTopics: string[]
   /** topic ids that are newly renamed */
@@ -98,8 +93,6 @@ const initialState: RuntimeState = {
     isMultiSelectMode: false,
     selectedMessageIds: [],
     activeTopic: null,
-    activeAgentId: null,
-    activeSessionIdMap: {},
     renamingTopics: [],
     newlyRenamedTopics: []
   },
@@ -155,13 +148,6 @@ const runtimeSlice = createSlice({
       // @ts-ignore ts2589 false positive
       state.chat.activeTopic = action.payload
     },
-    setActiveAgentId: (state, action: PayloadAction<string | null>) => {
-      state.chat.activeAgentId = action.payload
-    },
-    setActiveSessionIdAction: (state, action: PayloadAction<{ agentId: string; sessionId: string | null }>) => {
-      const { agentId, sessionId } = action.payload
-      state.chat.activeSessionIdMap[agentId] = sessionId
-    },
     setRenamingTopics: (state, action: PayloadAction<string[]>) => {
       state.chat.renamingTopics = action.payload
     },
@@ -207,8 +193,6 @@ export const {
   toggleMultiSelectMode,
   setSelectedMessageIds,
   setActiveTopic,
-  setActiveAgentId,
-  setActiveSessionIdAction,
   setRenamingTopics,
   setNewlyRenamedTopics,
   startLoadingAction,

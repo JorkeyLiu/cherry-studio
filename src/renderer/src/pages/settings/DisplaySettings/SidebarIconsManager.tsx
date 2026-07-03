@@ -6,7 +6,7 @@ import { useAppDispatch } from '@renderer/store'
 import { setSidebarIcons } from '@renderer/store/settings'
 import type { SidebarIcon } from '@renderer/types'
 import { message } from 'antd'
-import { FileSearch, Folder, MessageSquareQuote, MousePointerClick, NotepadText } from 'lucide-react'
+import { FileSearch, Folder, MessageSquareQuote, NotepadText } from 'lucide-react'
 import type { FC, ReactNode } from 'react'
 import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -106,7 +106,6 @@ const SidebarIconsManager: FC<SidebarIconsManagerProps> = ({
     () =>
       ({
         assistants: <MessageSquareQuote size={16} />,
-        agents: <MousePointerClick size={16} />,
         knowledge: <FileSearch size={16} />,
         files: <Folder size={16} />,
         notes: <NotepadText size={16} />

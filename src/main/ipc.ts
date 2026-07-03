@@ -22,23 +22,12 @@ import type { UpgradeChannel } from '@shared/config/constant'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { IpcChannel } from '@shared/IpcChannel'
 import { extractPdfText } from '@shared/utils/pdf'
-import type {
-  AgentPersistedMessage,
-  FileMetadata,
-  Notification,
-  OcrProvider,
-  Provider,
-  Shortcut,
-  SupportedOcrFile,
-  ThemeMode
-} from '@types'
+import type { FileMetadata, Notification, OcrProvider, Provider, Shortcut, SupportedOcrFile, ThemeMode } from '@types'
 import checkDiskSpace from 'check-disk-space'
 import type { ProxyConfig } from 'electron'
 import { BrowserWindow, dialog, ipcMain, session, shell, systemPreferences, webContents } from 'electron'
 import fontList from 'font-list'
 
-import { agentMessageRepository } from './services/agents/database'
-import { skillService } from './services/agents/skills/SkillService'
 import { analyticsService } from './services/AnalyticsService'
 import { apiServerService } from './services/ApiServerService'
 import appService from './services/AppService'
@@ -85,7 +74,7 @@ import { themeService } from './services/ThemeService'
 import VertexAIService from './services/VertexAIService'
 import { setOpenLinkExternal } from './services/WebviewService'
 import { windowService } from './services/WindowService'
-import { calculateDirectorySize, getDataPath, getResourcePath } from './utils'
+import { calculateDirectorySize, getResourcePath } from './utils'
 import { decrypt, encrypt } from './utils/aes'
 import {
   getCacheDir,
@@ -241,27 +230,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
       configManager.setTestChannel(channel)
     }
   })
-
-  ipcMain.handle(IpcChannel.AgentMessage_PersistExchange, async (_event, payload) => {
-    try {
-      return await agentMessageRepository.persistExchange(payload)
-    } catch (error) {
-      logger.error('Failed to persist agent session messages', error as Error)
-      throw error
-    }
-  })
-
-  ipcMain.handle(
-    IpcChannel.AgentMessage_GetHistory,
-    async (_event, { sessionId }: { sessionId: string }): Promise<AgentPersistedMessage[]> => {
-      try {
-        return await agentMessageRepository.getSessionHistory(sessionId)
-      } catch (error) {
-        logger.error('Failed to get agent session history', error as Error)
-        throw error
-      }
-    }
-  )
 
   //only for mac
   if (isMac) {
@@ -806,17 +774,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.Mcp_GetServerVersion, mcpService.getServerVersion)
   ipcMain.handle(IpcChannel.Mcp_GetServerLogs, mcpService.getServerLogs)
 
-  // Channel logs & status
-  ipcMain.handle(IpcChannel.Channel_GetLogs, async (_event, channelId: string) => {
-    const { channelManager } = await import('@main/services/agents/services/channels/ChannelManager')
-    return channelManager.getChannelLogs(channelId)
-  })
-
-  ipcMain.handle(IpcChannel.Channel_GetStatuses, async () => {
-    const { channelManager } = await import('@main/services/agents/services/channels/ChannelManager')
-    return channelManager.getAllStatuses()
-  })
-
   // DXT upload handler
   ipcMain.handle(IpcChannel.Mcp_UploadDxt, async (event, fileBuffer: ArrayBuffer, fileName: string) => {
     try {
@@ -990,124 +947,8 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   // CherryAI
   ipcMain.handle(IpcChannel.Cherryai_GetSignature, (_, params) => generateSignature(params))
 
-  // Global Skills
-  ipcMain.handle(IpcChannel.Skill_List, async (_, agentId?: string) => {
-    try {
-      const data = await skillService.list(agentId)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to list skills', { error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_Install, async (_, options) => {
-    try {
-      const data = await skillService.install(options)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to install skill', { options, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_Uninstall, async (_, skillId: string) => {
-    try {
-      await skillService.uninstall(skillId)
-      return { success: true, data: undefined }
-    } catch (error) {
-      logger.error('Failed to uninstall skill', { skillId, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_Toggle, async (_, options) => {
-    try {
-      if (
-        !options ||
-        typeof options.skillId !== 'string' ||
-        !options.skillId ||
-        typeof options.agentId !== 'string' ||
-        !options.agentId ||
-        typeof options.isEnabled !== 'boolean'
-      ) {
-        return { success: false, error: 'Invalid toggle options' }
-      }
-      const data = await skillService.toggle(options)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to toggle skill', { options, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_InstallFromZip, async (_, options) => {
-    try {
-      const data = await skillService.installFromZip(options)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to install skill from ZIP', { options, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_InstallFromDirectory, async (_, options) => {
-    try {
-      const data = await skillService.installFromDirectory(options)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to install skill from directory', { options, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_ReadFile, async (_, skillId: string, filename: string) => {
-    try {
-      const data = await skillService.readFile(skillId, filename)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to read skill file', { skillId, filename, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_ListFiles, async (_, skillId: string) => {
-    try {
-      const data = await skillService.listFiles(skillId)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to list skill files', { skillId, error })
-      return { success: false, error }
-    }
-  })
-
-  ipcMain.handle(IpcChannel.Skill_ListLocal, async (_, workdir: string) => {
-    try {
-      if (!workdir || typeof workdir !== 'string') {
-        return { success: false, error: 'Invalid workdir' }
-      }
-      const data = await skillService.listLocal(workdir)
-      return { success: true, data }
-    } catch (error) {
-      logger.error('Failed to list local plugins', { workdir, error })
-      return { success: false, error }
-    }
-  })
-
   ipcMain.handle(IpcChannel.APP_CrashRenderProcess, () => {
     mainWindow.webContents.forcefullyCrashRenderer()
-  })
-
-  // WeChat
-  ipcMain.handle(IpcChannel.WeChat_HasCredentials, async (_, channelId: string) => {
-    const tokenPath = path.join(getDataPath('Channels'), `weixin_bot_${channelId}.json`)
-    try {
-      const raw = await fs.promises.readFile(tokenPath, 'utf8')
-      const parsed = JSON.parse(raw)
-      return { exists: true, userId: parsed.userId as string | undefined }
-    } catch {
-      return { exists: false }
-    }
   })
 
   // Analytics

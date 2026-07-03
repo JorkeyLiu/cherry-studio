@@ -2,7 +2,7 @@ import type { KnowledgeBase } from '@types'
 import type { Response } from 'express'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { ValidationRequest } from '../../agents/validators/zodValidator'
+import type { ValidationRequest } from '../../../utils/zodValidator'
 
 // Mock dependencies BEFORE importing handlers - no top-level variables
 vi.mock('@main/services/ReduxService', () => ({

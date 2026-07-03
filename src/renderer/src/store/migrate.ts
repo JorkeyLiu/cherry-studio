@@ -3168,27 +3168,23 @@ const migrateConfig = {
   '203': (state: RootState) => {
     try {
       if (state.settings && state.settings.sidebarIcons) {
-        // Add 'agents' to visible icons if not already present
-        if (!state.settings.sidebarIcons.visible.includes('agents')) {
-          // Insert after 'assistants' if present, otherwise append
-          const assistantsIndex = state.settings.sidebarIcons.visible.indexOf('assistants')
-          if (assistantsIndex !== -1) {
-            state.settings.sidebarIcons.visible = [
-              ...state.settings.sidebarIcons.visible.slice(0, assistantsIndex + 1),
-              'agents',
-              ...state.settings.sidebarIcons.visible.slice(assistantsIndex + 1)
-            ]
-          } else {
-            state.settings.sidebarIcons.visible = [...state.settings.sidebarIcons.visible, 'agents']
-          }
+        // Remove 'agents' from visible icons if present (agents subsystem removed)
+        const visible = state.settings.sidebarIcons.visible as string[]
+        const agentsIdx = visible.indexOf('agents')
+        if (agentsIdx !== -1) {
+          visible.splice(agentsIdx, 1)
+        }
+        // Also remove from disabled if present
+        const disabled = state.settings.sidebarIcons.disabled as string[]
+        const disabledAgentsIdx = disabled.indexOf('agents')
+        if (disabledAgentsIdx !== -1) {
+          disabled.splice(disabledAgentsIdx, 1)
         }
       }
 
-      // Add 'agents' tab if not already present
-      if (state.tabs && !state.tabs.tabs.some((tab: { id: string }) => tab.id === 'agents')) {
-        const homeIndex = state.tabs.tabs.findIndex((tab: { id: string }) => tab.id === 'home')
-        const insertIndex = homeIndex !== -1 ? homeIndex + 1 : state.tabs.tabs.length
-        state.tabs.tabs.splice(insertIndex, 0, { id: 'agents', path: '/agents' })
+      // Remove 'agents' tab if present
+      if (state.tabs) {
+        state.tabs.tabs = state.tabs.tabs.filter((tab: { id: string }) => tab.id !== 'agents')
       }
 
       logger.info('migrate 203 success')

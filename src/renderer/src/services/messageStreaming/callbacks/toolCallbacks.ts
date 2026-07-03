@@ -2,7 +2,6 @@ import { loggerService } from '@logger'
 import { BUILTIN_WEB_SEARCH_TOOL_NAME } from '@renderer/aiCore/tools/WebSearchTool'
 import type { AppDispatch } from '@renderer/store'
 import store from '@renderer/store'
-import { toolPermissionsActions } from '@renderer/store/toolPermissions'
 import type { MCPToolResponse, NormalToolResponse } from '@renderer/types'
 import { WEB_SEARCH_SOURCE } from '@renderer/types'
 import type { ToolMessageBlock } from '@renderer/types/newMessage'
@@ -23,7 +22,7 @@ interface ToolCallbacksDependencies {
 }
 
 export const createToolCallbacks = (deps: ToolCallbacksDependencies) => {
-  const { blockManager, assistantMsgId, dispatch } = deps
+  const { blockManager, assistantMsgId } = deps
 
   // 内部维护的状态
   const toolCallIdToBlockIdMap = new Map<string, string>()
@@ -100,13 +99,6 @@ export const createToolCallbacks = (deps: ToolCallbacksDependencies) => {
     },
 
     onToolCallComplete: (toolResponse: ToolResponse) => {
-      // Read resolvedInput BEFORE removing from store (removeByToolCallId deletes it)
-      const state = store.getState()
-      const resolvedInput = toolResponse?.id ? state.toolPermissions.resolvedInputs[toolResponse.id] : undefined
-
-      if (toolResponse?.id) {
-        dispatch(toolPermissionsActions.removeByToolCallId({ toolCallId: toolResponse.id }))
-      }
       const existingBlockId = toolCallIdToBlockIdMap.get(toolResponse.id)
       toolCallIdToBlockIdMap.delete(toolResponse.id)
 
@@ -123,15 +115,15 @@ export const createToolCallbacks = (deps: ToolCallbacksDependencies) => {
             ? MessageBlockStatus.SUCCESS
             : MessageBlockStatus.ERROR
 
+        const state = store.getState()
         const existingBlock = state.messageBlocks.entities[existingBlockId] as ToolMessageBlock | undefined
 
         const existingResponse = existingBlock?.metadata?.rawMcpToolResponse
-        // Merge order: toolResponse.arguments (base) -> existingResponse?.arguments -> resolvedInput (user answers take precedence)
+        // Merge order: toolResponse.arguments (base) -> existingResponse?.arguments
         const mergedArguments = Object.assign(
           {},
           isPlainObject(toolResponse.arguments) ? toolResponse.arguments : null,
-          isPlainObject(existingResponse?.arguments) ? existingResponse?.arguments : null,
-          isPlainObject(resolvedInput) ? resolvedInput : null
+          isPlainObject(existingResponse?.arguments) ? existingResponse?.arguments : null
         )
 
         const mergedToolResponse: MCPToolResponse | NormalToolResponse = {

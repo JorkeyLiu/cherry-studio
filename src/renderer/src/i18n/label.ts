@@ -5,7 +5,7 @@
  */
 
 import { loggerService } from '@logger'
-import type { AgentType, BuiltinMCPServerName, BuiltinOcrProviderId } from '@renderer/types'
+import type { BuiltinMCPServerName, BuiltinOcrProviderId } from '@renderer/types'
 import { BuiltinMCPServerNames } from '@renderer/types'
 
 import i18n from './index'
@@ -150,8 +150,7 @@ const titleKeyMap = {
   'mcp-servers': 'title.mcp-servers',
   memories: 'title.memories',
   notes: 'title.notes',
-  settings: 'title.settings',
-  agents: 'agent.sidebar_title'
+  settings: 'title.settings'
 } as const
 
 export const getTitleLabel = (key: string): string => {
@@ -182,7 +181,6 @@ export const getThemeModeLabel = (key: string): string => {
 
 const sidebarIconKeyMap = {
   assistants: 'assistants.title',
-  agents: 'agent.sidebar_title',
   knowledge: 'knowledge.title',
   files: 'files.title',
   notes: 'notes.title'
@@ -319,6 +317,6 @@ export const getBuiltinOcrProviderLabel = (key: BuiltinOcrProviderId) => {
 }
 
 // oxlint-disable-next-line no-unused-vars -- placeholder for future agent type labels
-export const getAgentTypeLabel = (_key: AgentType) => {
+export const getAgentTypeLabel = (_key: 'claude-code') => {
   return 'Agent'
 }
