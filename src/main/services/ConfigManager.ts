@@ -38,12 +38,6 @@ export enum ConfigKeys {
   TestPlan = 'testPlan',
   TestChannel = 'testChannel',
   EnableDataCollection = 'enableDataCollection',
-  SelectionAssistantEnabled = 'selectionAssistantEnabled',
-  SelectionAssistantTriggerMode = 'selectionAssistantTriggerMode',
-  SelectionAssistantFollowToolbar = 'selectionAssistantFollowToolbar',
-  SelectionAssistantRemeberWinSize = 'selectionAssistantRemeberWinSize',
-  SelectionAssistantFilterMode = 'selectionAssistantFilterMode',
-  SelectionAssistantFilterList = 'selectionAssistantFilterList',
   DisableHardwareAcceleration = 'disableHardwareAcceleration',
   UseSystemTitleBar = 'useSystemTitleBar',
   Proxy = 'proxy',
@@ -191,57 +185,6 @@ export class ConfigManager {
 
   setEnableDataCollection(value: boolean) {
     this.set(ConfigKeys.EnableDataCollection, value)
-  }
-
-  // Selection Assistant: is enabled the selection assistant
-  getSelectionAssistantEnabled(): boolean {
-    return this.get<boolean>(ConfigKeys.SelectionAssistantEnabled, false)
-  }
-
-  setSelectionAssistantEnabled(value: boolean) {
-    this.setAndNotify(ConfigKeys.SelectionAssistantEnabled, value)
-  }
-
-  // Selection Assistant: trigger mode (selected, ctrlkey)
-  getSelectionAssistantTriggerMode(): string {
-    return this.get<string>(ConfigKeys.SelectionAssistantTriggerMode, 'selected')
-  }
-
-  setSelectionAssistantTriggerMode(value: string) {
-    this.setAndNotify(ConfigKeys.SelectionAssistantTriggerMode, value)
-  }
-
-  // Selection Assistant: if action window position follow toolbar
-  getSelectionAssistantFollowToolbar(): boolean {
-    return this.get<boolean>(ConfigKeys.SelectionAssistantFollowToolbar, true)
-  }
-
-  setSelectionAssistantFollowToolbar(value: boolean) {
-    this.setAndNotify(ConfigKeys.SelectionAssistantFollowToolbar, value)
-  }
-
-  getSelectionAssistantRemeberWinSize(): boolean {
-    return this.get<boolean>(ConfigKeys.SelectionAssistantRemeberWinSize, false)
-  }
-
-  setSelectionAssistantRemeberWinSize(value: boolean) {
-    this.setAndNotify(ConfigKeys.SelectionAssistantRemeberWinSize, value)
-  }
-
-  getSelectionAssistantFilterMode(): string {
-    return this.get<string>(ConfigKeys.SelectionAssistantFilterMode, 'default')
-  }
-
-  setSelectionAssistantFilterMode(value: string) {
-    this.setAndNotify(ConfigKeys.SelectionAssistantFilterMode, value)
-  }
-
-  getSelectionAssistantFilterList(): string[] {
-    return this.get<string[]>(ConfigKeys.SelectionAssistantFilterList, [])
-  }
-
-  setSelectionAssistantFilterList(value: string[]) {
-    this.setAndNotify(ConfigKeys.SelectionAssistantFilterList, value)
   }
 
   getDisableHardwareAcceleration(): boolean {

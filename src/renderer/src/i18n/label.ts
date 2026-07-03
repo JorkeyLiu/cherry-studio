@@ -212,8 +212,6 @@ const shortcutKeyMap = {
   search_message: 'settings.shortcuts.search_message',
   search_message_in_chat: 'settings.shortcuts.search_message_in_chat',
   select_model: 'settings.shortcuts.select_model',
-  selection_assistant_select_text: 'settings.shortcuts.selection_assistant_select_text',
-  selection_assistant_toggle: 'settings.shortcuts.selection_assistant_toggle',
   show_app: 'settings.shortcuts.show_app',
   show_settings: 'settings.shortcuts.show_settings',
   title: 'settings.shortcuts.title',
@@ -227,16 +225,6 @@ const shortcutKeyMap = {
 
 export const getShortcutLabel = (key: string): string => {
   return getLabel(shortcutKeyMap, key)
-}
-
-const selectionDescriptionKeyMap = {
-  linux: 'selection.settings.toolbar.trigger_mode.description_note.linux',
-  mac: 'selection.settings.toolbar.trigger_mode.description_note.mac',
-  windows: 'selection.settings.toolbar.trigger_mode.description_note.windows'
-} as const
-
-export const getSelectionDescriptionLabel = (key: string): string => {
-  return getLabel(selectionDescriptionKeyMap, key)
 }
 
 const mcpTypeKeyMap = {
@@ -308,8 +296,6 @@ const builtInMcpDescriptionKeyMap: Record<BuiltinMCPServerName, string> = {
   [BuiltinMCPServerNames.filesystem]: 'settings.mcp.builtinServersDescriptions.filesystem',
   [BuiltinMCPServerNames.difyKnowledge]: 'settings.mcp.builtinServersDescriptions.dify_knowledge',
   [BuiltinMCPServerNames.python]: 'settings.mcp.builtinServersDescriptions.python',
-  [BuiltinMCPServerNames.didiMCP]: 'settings.mcp.builtinServersDescriptions.didi_mcp',
-  [BuiltinMCPServerNames.browser]: 'settings.mcp.builtinServersDescriptions.browser',
   [BuiltinMCPServerNames.nowledgeMem]: 'settings.mcp.builtinServersDescriptions.nowledge_mem',
   [BuiltinMCPServerNames.hub]: 'settings.mcp.builtinServersDescriptions.hub'
 } as const

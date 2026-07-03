@@ -58,9 +58,7 @@ import { DEFAULT_TOOL_ORDER, DEFAULT_TOOL_ORDER_BY_SCOPE } from './inputTools'
 import { initialState as llmInitialState, moveProvider } from './llm'
 import { mcpSlice } from './mcp'
 import { initialState as notesInitialState } from './note'
-import { defaultActionItems } from './selectionStore'
 import { initialState as settingsInitialState } from './settings'
-import { initialState as shortcutsInitialState } from './shortcuts'
 import { defaultWebSearchProviders } from './websearch'
 
 const logger = loggerService.withContext('Migrate')
@@ -76,6 +74,11 @@ function removeMiniAppFromState(_state: RootState, _id: string) {
 
 function addMiniApp(_state: RootState, _id: string) {
   // no-op: minapp module removed
+}
+
+// addShortcuts removed - kept as no-op for migration compatibility
+function addShortcuts(_state: RootState, _ids: string[], _position: string) {
+  // no-op: shortcuts module slimmed
 }
 
 // add provider to state
@@ -141,60 +144,6 @@ function updateWebSearchProvider(state: RootState, provider: Partial<WebSearchPr
   }
 }
 
-function addSelectionAction(state: RootState, id: string) {
-  if (state.selectionStore && state.selectionStore.actionItems) {
-    if (!state.selectionStore.actionItems.some((item) => item.id === id)) {
-      const action = defaultActionItems.find((item) => item.id === id)
-      if (action) {
-        state.selectionStore.actionItems.push(action)
-      }
-    }
-  }
-}
-
-/**
- * Add shortcuts(ids from shortcutsInitialState) after the shortcut(afterId)
- * if afterId is 'first', add to the first
- * if afterId is 'last', add to the last
- */
-function addShortcuts(state: RootState, ids: string[], afterId: string) {
-  const defaultShortcuts = shortcutsInitialState.shortcuts
-
-  // 确保 state.shortcuts 存在
-  if (!state.shortcuts) {
-    return
-  }
-
-  // 从 defaultShortcuts 中找到要添加的快捷键
-  const shortcutsToAdd = defaultShortcuts.filter((shortcut) => ids.includes(shortcut.key))
-
-  // 过滤掉已经存在的快捷键
-  const existingKeys = state.shortcuts.shortcuts.map((s) => s.key)
-  const newShortcuts = shortcutsToAdd.filter((shortcut) => !existingKeys.includes(shortcut.key))
-
-  if (newShortcuts.length === 0) {
-    return
-  }
-
-  if (afterId === 'first') {
-    // 添加到最前面
-    state.shortcuts.shortcuts.unshift(...newShortcuts)
-  } else if (afterId === 'last') {
-    // 添加到最后面
-    state.shortcuts.shortcuts.push(...newShortcuts)
-  } else {
-    // 添加到指定快捷键后面
-    const afterIndex = state.shortcuts.shortcuts.findIndex((shortcut) => shortcut.key === afterId)
-    if (afterIndex !== -1) {
-      state.shortcuts.shortcuts.splice(afterIndex + 1, 0, ...newShortcuts)
-    } else {
-      // 如果找不到指定的快捷键，则添加到最后
-      state.shortcuts.shortcuts.push(...newShortcuts)
-    }
-  }
-}
-
-// add preprocess provider
 function addPreprocessProviders(state: RootState, id: string) {
   if (state.preprocess && state.preprocess.providers) {
     if (!state.preprocess.providers.find((p) => p.id === id)) {
@@ -1646,16 +1595,12 @@ const migrateConfig = {
   },
   '111': (state: RootState) => {
     try {
-      addSelectionAction(state, 'quote')
       if (
         state.llm.translateModel.provider === 'silicon' &&
         state.llm.translateModel.id === 'meta-llama/Llama-3.3-70B-Instruct'
       ) {
         state.llm.translateModel = SYSTEM_MODELS.defaultModel[2]
       }
-
-      // add selection_assistant_toggle and selection_assistant_select_text shortcuts after mini_window
-      addShortcuts(state, ['selection_assistant_toggle', 'selection_assistant_select_text'], 'mini_window')
 
       return state
     } catch (error) {
