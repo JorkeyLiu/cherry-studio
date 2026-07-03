@@ -3288,6 +3288,42 @@ const migrateConfig = {
       logger.error('migrate 208 error', error as Error)
       return state
     }
+  },
+  210: (state: any) => {
+    try {
+      // 清除已删除的 slice 残留数据
+      delete state.paintings
+      delete state.toolPermissions
+      delete state.minapps
+      delete state.openclaw
+      delete state.codeTools
+      delete state.selectionStore
+
+      // 清除 runtime 中已删除的字段
+      if (state.runtime) {
+        delete state.runtime.activeAgentId
+        delete state.runtime.activeSessionIdMap
+        delete state.runtime.minappShow
+        delete state.runtime.openedKeepAliveMinapps
+        delete state.runtime.openedOneOffMinapp
+        delete state.runtime.currentMinappId
+        delete state.runtime.detectedRegion
+      }
+
+      // 清除 settings 中已删除的字段
+      if (state.settings) {
+        delete state.settings.defaultPaintingProvider
+        delete state.settings.maxKeepAliveMinapps
+        delete state.settings.showOpenedMinappsInSidebar
+        delete state.settings.minappsOpenLinkExternal
+        delete state.settings.minAppRegion
+      }
+
+      logger.info('migrate 210 success')
+    } catch (e) {
+      // 忽略错误
+    }
+    return state
   }
 }
 

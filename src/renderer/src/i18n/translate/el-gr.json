@@ -1600,6 +1600,7 @@
     "copy_failed": "Αποτυχία αντιγραφής",
     "current": "Τρέχων",
     "cut": "Κοπή",
+    "decline": "[to be translated]:Decline",
     "default": "Προεπιλογή",
     "delete": "Διαγραφή",
     "delete_confirm": "Είστε βέβαιοι ότι θέλετε να διαγράψετε;",
@@ -2909,6 +2910,7 @@
   },
   "onboarding": {
     "privacy": {
+      "accept_and_continue": "[to be translated]:Accept and Continue",
       "notice": "Συνεχίζοντας, επιβεβαιώνετε ότι έχετε διαβάσει και συμφωνείτε με τους",
       "period": ".",
       "policy": "Πολιτική Απορρήτου"
@@ -3390,6 +3392,14 @@
     "source": "Προβολή πηγαίου κώδικα",
     "zoom_in": "Μεγέθυνση",
     "zoom_out": "συρρίκνωση"
+  },
+  "privacy_policy": {
+    "title": "[to be translated]:Privacy Policy"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "[to be translated]:We have updated the privacy policy. Please review the latest ",
+    "policy": "[to be translated]:Privacy Policy",
+    "title": "[to be translated]:Privacy Policy Updated"
   },
   "prompts": {
     "explanation": "Με βοηθήστε να εξηγήσετε αυτό το όρισμα",

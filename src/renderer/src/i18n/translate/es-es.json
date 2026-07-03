@@ -1600,6 +1600,7 @@
     "copy_failed": "Error al copiar",
     "current": "Actual",
     "cut": "Cortar",
+    "decline": "[to be translated]:Decline",
     "default": "Predeterminado",
     "delete": "Eliminar",
     "delete_confirm": "¿Está seguro de que desea eliminarlo?",
@@ -2909,6 +2910,7 @@
   },
   "onboarding": {
     "privacy": {
+      "accept_and_continue": "[to be translated]:Accept and Continue",
       "notice": "Al continuar, confirmas que has leído y aceptas el",
       "period": ".",
       "policy": "Política de Privacidad"
@@ -3390,6 +3392,14 @@
     "source": "Ver código fuente",
     "zoom_in": "ampliar",
     "zoom_out": "reducir"
+  },
+  "privacy_policy": {
+    "title": "[to be translated]:Privacy Policy"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "[to be translated]:We have updated the privacy policy. Please review the latest ",
+    "policy": "[to be translated]:Privacy Policy",
+    "title": "[to be translated]:Privacy Policy Updated"
   },
   "prompts": {
     "explanation": "Ayúdame a explicar este concepto",
