@@ -63,7 +63,6 @@ import NotificationService from './services/NotificationService'
 import * as NutstoreService from './services/NutstoreService'
 import ObsidianVaultService from './services/ObsidianVaultService'
 import { ocrService } from './services/ocr/OcrService'
-import { isOvmsSupported } from './services/OvmsManager'
 import powerMonitorService from './services/PowerMonitorService'
 import { proxyManager } from './services/ProxyManager'
 import { pythonService } from './services/PythonService'
@@ -855,7 +854,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.App_GetBinaryPath, (_, name: string) => getBinaryPath(name))
   ipcMain.handle(IpcChannel.App_InstallUvBinary, () => runInstallScript('install-uv.js'))
   ipcMain.handle(IpcChannel.App_InstallBunBinary, () => runInstallScript('install-bun.js'))
-  ipcMain.handle(IpcChannel.App_InstallOvmsBinary, () => runInstallScript('install-ovms.js'))
 
   //copilot
   ipcMain.handle(IpcChannel.Copilot_GetAuthMessage, CopilotService.getAuthMessage.bind(CopilotService))
@@ -998,38 +996,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
     ocrService.ocr(file, provider)
   )
   ipcMain.handle(IpcChannel.OCR_ListProviders, () => ocrService.listProviderIds())
-
-  // OVMS
-  ipcMain.handle(IpcChannel.Ovms_IsSupported, () => isOvmsSupported)
-  if (isOvmsSupported) {
-    const { ovmsManager } = await import('./services/OvmsManager')
-    if (ovmsManager) {
-      ipcMain.handle(
-        IpcChannel.Ovms_AddModel,
-        (_, modelName: string, modelId: string, modelSource: string, task: string) =>
-          ovmsManager.addModel(modelName, modelId, modelSource, task)
-      )
-      ipcMain.handle(IpcChannel.Ovms_StopAddModel, () => ovmsManager.stopAddModel())
-      ipcMain.handle(IpcChannel.Ovms_GetModels, () => ovmsManager.getModels())
-      ipcMain.handle(IpcChannel.Ovms_IsRunning, () => ovmsManager.initializeOvms())
-      ipcMain.handle(IpcChannel.Ovms_GetStatus, () => ovmsManager.getOvmsStatus())
-      ipcMain.handle(IpcChannel.Ovms_RunOVMS, () => ovmsManager.runOvms())
-      ipcMain.handle(IpcChannel.Ovms_StopOVMS, () => ovmsManager.stopOvms())
-    } else {
-      logger.error('Unexpected behavior: undefined ovmsManager, but OVMS should be supported.')
-    }
-  } else {
-    const fallback = () => {
-      throw new Error('OVMS is only supported on Windows with intel CPU.')
-    }
-    ipcMain.handle(IpcChannel.Ovms_AddModel, fallback)
-    ipcMain.handle(IpcChannel.Ovms_StopAddModel, fallback)
-    ipcMain.handle(IpcChannel.Ovms_GetModels, fallback)
-    ipcMain.handle(IpcChannel.Ovms_IsRunning, fallback)
-    ipcMain.handle(IpcChannel.Ovms_GetStatus, fallback)
-    ipcMain.handle(IpcChannel.Ovms_RunOVMS, fallback)
-    ipcMain.handle(IpcChannel.Ovms_StopOVMS, fallback)
-  }
 
   // CherryAI
   ipcMain.handle(IpcChannel.Cherryai_GetSignature, (_, params) => generateSignature(params))

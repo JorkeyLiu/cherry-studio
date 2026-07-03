@@ -42,7 +42,6 @@ import { versionService } from './services/VersionService'
 import { windowService } from './services/WindowService'
 import { initWebviewHotkeys } from './services/WebviewService'
 import { runAsyncFunction } from './utils'
-import { isOvmsSupported } from './services/OvmsManager'
 import { extractRtkBinaries } from './utils/rtk'
 
 const logger = loggerService.withContext('MainEntry')
@@ -289,14 +288,6 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('will-quit', async () => {
     // 简单的资源清理，不阻塞退出流程
-    if (isOvmsSupported) {
-      const { ovmsManager } = await import('./services/OvmsManager')
-      if (ovmsManager) {
-        await ovmsManager.stopOvms()
-      } else {
-        logger.warn('Unexpected behavior: undefined ovmsManager, but OVMS should be supported.')
-      }
-    }
 
     try {
       schedulerService.stopAll()

@@ -3,9 +3,7 @@ import { HStack } from '@renderer/components/Layout'
 import { S3BackupManager } from '@renderer/components/S3BackupManager'
 import { S3BackupModal, useS3BackupModal } from '@renderer/components/S3Modals'
 import Selector from '@renderer/components/Selector'
-import { AppLogo } from '@renderer/config/env'
 import { useTheme } from '@renderer/context/ThemeProvider'
-import { useMinappPopup } from '@renderer/hooks/useMinappPopup'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { startAutoSync, stopAutoSync } from '@renderer/services/BackupService'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
@@ -49,7 +47,6 @@ const S3Settings: FC = () => {
   const dispatch = useAppDispatch()
   const { theme } = useTheme()
   const { t } = useTranslation()
-  const { openSmartMinapp } = useMinappPopup()
 
   const { s3Sync } = useAppSelector((state) => state.backup)
 
@@ -64,12 +61,7 @@ const S3Settings: FC = () => {
   }
 
   const handleTitleClick = () => {
-    openSmartMinapp({
-      id: 's3-help',
-      name: 'S3 Compatible Storage Help',
-      url: 'https://docs.cherry-ai.com/data-settings/s3-compatible',
-      logo: AppLogo
-    })
+    window.open('https://docs.cherry-ai.com/data-settings/s3-compatible', '_blank')
   }
 
   const onMaxBackupsChange = (value: number) => {

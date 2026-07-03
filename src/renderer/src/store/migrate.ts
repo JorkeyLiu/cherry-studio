@@ -22,7 +22,6 @@ import {
   DEFAULT_TEMPERATURE,
   isMac
 } from '@renderer/config/constant'
-import { allMinApps } from '@renderer/config/minapps'
 import { isFunctionCallingModel, isNotSupportTextDeltaModel, qwenModel, SYSTEM_MODELS } from '@renderer/config/models'
 import { BUILTIN_OCR_PROVIDERS, BUILTIN_OCR_PROVIDERS_MAP, DEFAULT_OCR_PROVIDER } from '@renderer/config/ocr'
 import { TRANSLATE_PROMPT } from '@renderer/config/prompts'
@@ -66,41 +65,17 @@ import { defaultWebSearchProviders } from './websearch'
 
 const logger = loggerService.withContext('Migrate')
 
-// remove logo base64 data to reduce the size of the state
-function removeMiniAppIconsFromState(state: RootState) {
-  if (state.minapps) {
-    state.minapps.enabled = state.minapps.enabled.map((app) => ({
-      ...app,
-      logo: undefined
-    }))
-    state.minapps.disabled = state.minapps.disabled.map((app) => ({
-      ...app,
-      logo: undefined
-    }))
-    state.minapps.pinned = state.minapps.pinned.map((app) => ({
-      ...app,
-      logo: undefined
-    }))
-  }
+// MinApp functions removed - kept as no-ops for migration compatibility
+function removeMiniAppIconsFromState(_state: RootState) {
+  // no-op: minapp module removed
 }
 
-function removeMiniAppFromState(state: RootState, id: string) {
-  if (state.minapps) {
-    state.minapps.pinned = state.minapps.pinned.filter((app) => app.id !== id)
-    state.minapps.enabled = state.minapps.enabled.filter((app) => app.id !== id)
-    state.minapps.disabled = state.minapps.disabled.filter((app) => app.id !== id)
-  }
+function removeMiniAppFromState(_state: RootState, _id: string) {
+  // no-op: minapp module removed
 }
 
-function addMiniApp(state: RootState, id: string) {
-  if (state.minapps) {
-    const app = allMinApps.find((app) => app.id === id)
-    if (app) {
-      if (!state.minapps.enabled.find((app) => app.id === id)) {
-        state.minapps.enabled.push(app)
-      }
-    }
-  }
+function addMiniApp(_state: RootState, _id: string) {
+  // no-op: minapp module removed
 }
 
 // add provider to state
@@ -1067,20 +1042,7 @@ const migrateConfig = {
   },
   '71': (state: RootState) => {
     try {
-      const appIds = ['dify', 'wpslingxi', 'lechat', 'abacus', 'lambdachat', 'baidu-ai-search']
-
-      if (state.minapps) {
-        appIds.forEach((id) => {
-          const app = allMinApps.find((app) => app.id === id)
-          if (app) {
-            state.minapps.enabled.push(app)
-          }
-        })
-        // remove zhihu-zhiada
-        state.minapps.enabled = state.minapps.enabled.filter((app) => app.id !== 'zhihu-zhiada')
-        state.minapps.disabled = state.minapps.disabled.filter((app) => app.id !== 'zhihu-zhiada')
-      }
-
+      // minapp operations removed - no-op for migration compatibility
       state.settings.thoughtAutoCollapse = true
 
       return state
@@ -1293,7 +1255,9 @@ const migrateConfig = {
   },
   '87': (state: RootState) => {
     try {
+      // @ts-ignore legacy minapp settings - removed in slimming refactor
       state.settings.maxKeepAliveMinapps = 3
+      // @ts-ignore legacy minapp settings - removed in slimming refactor
       state.settings.showOpenedMinappsInSidebar = true
       return state
     } catch (error) {
@@ -1635,7 +1599,9 @@ const migrateConfig = {
   },
   '107': (state: RootState) => {
     try {
+      // @ts-ignore legacy paintings state - removed in slimming refactor
       if (state.paintings && !state.paintings.dmxapi_paintings) {
+        // @ts-ignore legacy paintings state - removed in slimming refactor
         state.paintings.dmxapi_paintings = []
       }
       return state
@@ -1666,7 +1632,9 @@ const migrateConfig = {
   },
   '110': (state: RootState) => {
     try {
+      // @ts-ignore legacy paintings state - removed in slimming refactor
       if (state.paintings && !state.paintings.tokenflux_paintings) {
+        // @ts-ignore legacy paintings state - removed in slimming refactor
         state.paintings.tokenflux_paintings = []
       }
       state.settings.testPlan = false
@@ -2298,9 +2266,6 @@ const migrateConfig = {
           zhipuProvider.models = SYSTEM_MODELS.zhipu
         }
 
-        // Update default painting provider to zhipu
-        state.settings.defaultPaintingProvider = 'zhipu'
-
         // Add zhipu web search provider
         addWebSearchProvider(state, 'zhipu')
 
@@ -2322,28 +2287,7 @@ const migrateConfig = {
   },
   '140': (state: RootState) => {
     try {
-      // @ts-ignore
-      state.paintings = {
-        // @ts-ignore paintings
-        siliconflow_paintings: state?.paintings?.paintings || [],
-        // @ts-ignore DMXAPIPaintings
-        dmxapi_paintings: state?.paintings?.DMXAPIPaintings || [],
-        // @ts-ignore tokenFluxPaintings
-        tokenflux_paintings: state?.paintings?.tokenFluxPaintings || [],
-        zhipu_paintings: [],
-        // @ts-ignore generate
-        aihubmix_image_generate: state?.paintings?.generate || [],
-        // @ts-ignore remix
-        aihubmix_image_remix: state?.paintings?.remix || [],
-        // @ts-ignore edit
-        aihubmix_image_edit: state?.paintings?.edit || [],
-        // @ts-ignore upscale
-        aihubmix_image_upscale: state?.paintings?.upscale || [],
-        openai_image_generate: state?.paintings?.openai_image_generate || [],
-        openai_image_edit: state?.paintings?.openai_image_edit || [],
-        ovms_paintings: []
-      }
-
+      // paintings state removed in slimming refactor
       return state
     } catch (error) {
       logger.error('migrate 140 error', error as Error)
@@ -2675,7 +2619,6 @@ const migrateConfig = {
     try {
       addProvider(state, 'sophnet')
       state.llm.providers = moveProvider(state.llm.providers, 'sophnet', 17)
-      state.settings.defaultPaintingProvider = 'cherryin'
       return state
     } catch (error) {
       logger.error('migrate 170 error', error as Error)
@@ -2711,11 +2654,8 @@ const migrateConfig = {
       addMiniApp(state, 'ling')
       addMiniApp(state, 'huggingchat')
 
-      // Add ovocr provider and clear ovms paintings
+      // Add ovocr provider
       addOcrProvider(state, BUILTIN_OCR_PROVIDERS_MAP.ovocr)
-      if (isEmpty(state.paintings.ovms_paintings)) {
-        state.paintings.ovms_paintings = []
-      }
 
       // Migrate agents to assistants presets
       // @ts-ignore
@@ -3168,8 +3108,6 @@ const migrateConfig = {
           assistant.defaultModel = qwenModel
         }
       })
-      // Initialize mini app region filter setting
-      state.settings.minAppRegion ??= 'auto'
       return state
     } catch (error) {
       logger.error('migrate 194 error', error as Error)
@@ -3187,10 +3125,14 @@ const migrateConfig = {
   },
   '196': (state: RootState) => {
     try {
+      // @ts-ignore legacy paintings state - removed in slimming refactor
       if (state.paintings && !state.paintings.ppio_draw) {
+        // @ts-ignore legacy paintings state - removed in slimming refactor
         state.paintings.ppio_draw = []
       }
+      // @ts-ignore legacy paintings state - removed in slimming refactor
       if (state.paintings && !state.paintings.ppio_edit) {
+        // @ts-ignore legacy paintings state - removed in slimming refactor
         state.paintings.ppio_edit = []
       }
       logger.info('migrate 196 success')
@@ -3240,19 +3182,7 @@ const migrateConfig = {
         }
       })
 
-      // Migrate minimax app id to hailuo
-      if (state.minapps) {
-        const lists: Array<'enabled' | 'disabled' | 'pinned'> = ['enabled', 'disabled', 'pinned']
-        lists.forEach((list) => {
-          state.minapps[list] = state.minapps[list].map((app) =>
-            app.id === 'minimax' ? { ...app, id: 'hailuo' } : app
-          )
-        })
-      }
-      // Add new MiniMax Agent apps
-      addMiniApp(state, 'minimax-agent')
-      addMiniApp(state, 'minimax-agent-global')
-      addMiniApp(state, 'ima')
+      // minapp migration removed - no-op for compatibility
       // Add new providers: minimax-global and zai
       addProvider(state, 'minimax-global')
       addProvider(state, 'zai')

@@ -32,13 +32,11 @@ import mcp from './mcp'
 import memory from './memory'
 import messageBlocksReducer from './messageBlock'
 import migrate from './migrate'
-import minapps from './minapps'
 import newMessagesReducer from './newMessage'
 import { setNotesPath } from './note'
 import note from './note'
 import nutstore from './nutstore'
 import ocr from './ocr'
-import paintings from './paintings'
 import preprocess from './preprocess'
 import runtime from './runtime'
 import selectionStore from './selectionStore'
@@ -55,13 +53,11 @@ const rootReducer = combineReducers({
   assistants,
   backup,
   nutstore,
-  paintings,
   llm,
   settings,
   runtime,
   shortcuts,
   knowledge,
-  minapps,
   websearch,
   mcp,
   memory,

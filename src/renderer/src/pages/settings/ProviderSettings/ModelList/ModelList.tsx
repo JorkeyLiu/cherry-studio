@@ -8,7 +8,6 @@ import { getProviderLabel } from '@renderer/i18n/label'
 import { SettingHelpLink, SettingHelpText, SettingHelpTextRow, SettingSubtitle } from '@renderer/pages/settings'
 import EditModelPopup from '@renderer/pages/settings/ProviderSettings/EditModelPopup/EditModelPopup'
 import AddModelPopup from '@renderer/pages/settings/ProviderSettings/ModelList/AddModelPopup'
-import DownloadOVMSModelPopup from '@renderer/pages/settings/ProviderSettings/ModelList/DownloadOVMSModelPopup'
 import ManageModelsPopup from '@renderer/pages/settings/ProviderSettings/ModelList/ManageModelsPopup'
 import NewApiAddModelPopup from '@renderer/pages/settings/ProviderSettings/ModelList/NewApiAddModelPopup'
 import type { Model } from '@renderer/types'
@@ -105,11 +104,6 @@ const ModelList: React.FC<ModelListProps> = ({ providerId }) => {
     }
   }, [provider, t])
 
-  const onDownloadModel = useCallback(
-    () => DownloadOVMSModelPopup.show({ title: t('ovms.download.title'), provider }),
-    [provider, t]
-  )
-
   const isLoading = useMemo(() => displayedModelGroups === null, [displayedModelGroups])
   const hasNoModels = useMemo(() => models.length === 0, [models.length])
 
@@ -118,15 +112,9 @@ const ModelList: React.FC<ModelListProps> = ({ providerId }) => {
       <Button onClick={onManageModel} icon={<RefreshCw size={16} />} disabled={isHealthChecking}>
         {t('settings.models.manage.fetch_list')}
       </Button>
-      {provider.id !== 'ovms' ? (
-        <Tooltip title={t('button.add')} mouseLeaveDelay={0}>
-          <Button onClick={onAddModel} icon={<Plus size={16} />} disabled={isHealthChecking} />
-        </Tooltip>
-      ) : (
-        <Tooltip title={t('button.download')} mouseLeaveDelay={0}>
-          <Button onClick={onDownloadModel} icon={<Plus size={16} />} />
-        </Tooltip>
-      )}
+      <Tooltip title={t('button.add')} mouseLeaveDelay={0}>
+        <Button onClick={onAddModel} icon={<Plus size={16} />} disabled={isHealthChecking} />
+      </Tooltip>
     </Space.Compact>
   )
 

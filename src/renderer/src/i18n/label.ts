@@ -150,9 +150,7 @@ const titleKeyMap = {
   'mcp-servers': 'title.mcp-servers',
   memories: 'title.memories',
   notes: 'title.notes',
-  paintings: 'title.paintings',
   settings: 'title.settings',
-  translate: 'title.translate',
   agents: 'agent.sidebar_title'
 } as const
 
@@ -185,9 +183,6 @@ export const getThemeModeLabel = (key: string): string => {
 const sidebarIconKeyMap = {
   assistants: 'assistants.title',
   agents: 'agent.sidebar_title',
-  paintings: 'paintings.title',
-  translate: 'translate.title',
-  minapp: 'minapp.title',
   knowledge: 'knowledge.title',
   files: 'files.title',
   notes: 'notes.title'
@@ -242,44 +237,6 @@ const selectionDescriptionKeyMap = {
 
 export const getSelectionDescriptionLabel = (key: string): string => {
   return getLabel(selectionDescriptionKeyMap, key)
-}
-
-const paintingsImageSizeOptionsKeyMap = {
-  auto: 'paintings.image_size_options.auto'
-} as const
-
-export const getPaintingsImageSizeOptionsLabel = (key: string): string => {
-  return paintingsImageSizeOptionsKeyMap[key] ? getLabel(paintingsImageSizeOptionsKeyMap, key) : key
-}
-
-const paintingsQualityOptionsKeyMap = {
-  auto: 'paintings.quality_options.auto',
-  high: 'paintings.quality_options.high',
-  low: 'paintings.quality_options.low',
-  medium: 'paintings.quality_options.medium'
-} as const
-
-export const getPaintingsQualityOptionsLabel = (key: string): string => {
-  return getLabel(paintingsQualityOptionsKeyMap, key)
-}
-
-const paintingsModerationOptionsKeyMap = {
-  auto: 'paintings.moderation_options.auto',
-  low: 'paintings.moderation_options.low'
-} as const
-
-export const getPaintingsModerationOptionsLabel = (key: string): string => {
-  return getLabel(paintingsModerationOptionsKeyMap, key)
-}
-
-const paintingsBackgroundOptionsKeyMap = {
-  auto: 'paintings.background_options.auto',
-  opaque: 'paintings.background_options.opaque',
-  transparent: 'paintings.background_options.transparent'
-} as const
-
-export const getPaintingsBackgroundOptionsLabel = (key: string): string => {
-  return getLabel(paintingsBackgroundOptionsKeyMap, key)
 }
 
 const mcpTypeKeyMap = {

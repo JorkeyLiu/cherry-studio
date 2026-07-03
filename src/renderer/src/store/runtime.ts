@@ -17,7 +17,7 @@
 import type { PayloadAction } from '@reduxjs/toolkit'
 import { createSlice } from '@reduxjs/toolkit'
 import { AppLogo, UserAvatar } from '@renderer/config/env'
-import type { MinAppRegion, MinAppType, Topic, WebSearchStatus } from '@renderer/types'
+import type { Topic, WebSearchStatus } from '@renderer/types'
 import type { UpdateInfo } from 'builder-util-runtime'
 
 export interface ChatState {
@@ -56,14 +56,6 @@ export interface RuntimeState {
   generating: boolean
   translating: boolean
   translateAbortKey?: string
-  /** whether the minapp popup is shown */
-  minappShow: boolean
-  /** the minapps that are opened and should be keep alive */
-  openedKeepAliveMinapps: MinAppType[]
-  /** the minapp that is opened for one time */
-  openedOneOffMinapp: MinAppType | null
-  /** the current minapp id */
-  currentMinappId: string
   searching: boolean
   filesPath: string
   resourcesPath: string
@@ -71,8 +63,6 @@ export interface RuntimeState {
   export: ExportState
   chat: ChatState
   websearch: WebSearchState
-  /** Detected region from IP lookup (not persisted, re-detected on each app start) */
-  detectedRegion: MinAppRegion | null
   /** Query whether a task is processing or not. undefined and false share same semantics.  */
   loadingMap: Record<string, boolean>
   // Migrated from useApiServer, it's global state now
@@ -88,10 +78,6 @@ const initialState: RuntimeState = {
   avatar: UserAvatar,
   generating: false,
   translating: false,
-  minappShow: false,
-  openedKeepAliveMinapps: [],
-  openedOneOffMinapp: null,
-  currentMinappId: '',
   searching: false,
   filesPath: '',
   resourcesPath: '',
@@ -120,7 +106,6 @@ const initialState: RuntimeState = {
   websearch: {
     activeSearches: {}
   },
-  detectedRegion: null,
   loadingMap: {},
   apiServerRunning: false
 }
@@ -140,18 +125,6 @@ const runtimeSlice = createSlice({
     },
     setTranslateAbortKey: (state, action: PayloadAction<string>) => {
       state.translateAbortKey = action.payload
-    },
-    setMinappShow: (state, action: PayloadAction<boolean>) => {
-      state.minappShow = action.payload
-    },
-    setOpenedKeepAliveMinapps: (state, action: PayloadAction<MinAppType[]>) => {
-      state.openedKeepAliveMinapps = action.payload
-    },
-    setOpenedOneOffMinapp: (state, action: PayloadAction<MinAppType | null>) => {
-      state.openedOneOffMinapp = action.payload
-    },
-    setCurrentMinappId: (state, action: PayloadAction<string>) => {
-      state.currentMinappId = action.payload
     },
     setSearching: (state, action: PayloadAction<boolean>) => {
       state.searching = action.payload
@@ -214,9 +187,6 @@ const runtimeSlice = createSlice({
       const { id } = action.payload
       delete state.loadingMap[id]
     },
-    setDetectedRegion: (state, action: PayloadAction<MinAppRegion | null>) => {
-      state.detectedRegion = action.payload
-    },
     setApiServerRunningAction: (state, action: PayloadAction<boolean>) => {
       state.apiServerRunning = action.payload
     }
@@ -228,10 +198,6 @@ export const {
   setGenerating,
   setTranslating,
   setTranslateAbortKey,
-  setMinappShow,
-  setOpenedKeepAliveMinapps,
-  setOpenedOneOffMinapp,
-  setCurrentMinappId,
   setSearching,
   setFilesPath,
   setResourcesPath,
@@ -250,8 +216,6 @@ export const {
   // WebSearch related actions
   setActiveSearches,
   setWebSearchStatus,
-  // Region detection
-  setDetectedRegion,
   setApiServerRunningAction
 } = runtimeSlice.actions
 
