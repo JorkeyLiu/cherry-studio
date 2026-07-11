@@ -15,7 +15,7 @@ import { getModelName } from '@renderer/services/ModelService'
 import type { Assistant, Model, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { firstLetter, isEmoji, removeLeadingEmoji } from '@renderer/utils'
-import { Avatar, Checkbox, Tooltip } from 'antd'
+import { Avatar, Tooltip } from 'antd'
 import dayjs from 'dayjs'
 import { Sparkle } from 'lucide-react'
 import type { FC } from 'react'
@@ -50,9 +50,7 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
   const { isBubbleStyle } = useMessageStyle()
   const { openMinappById } = useMinappPopup()
 
-  const { isMultiSelectMode, selectedMessageIds, handleSelectMessage } = useChatContext(topic)
-
-  const isSelected = selectedMessageIds?.includes(message.id)
+  const { isMultiSelectMode } = useChatContext(topic)
 
   const avatarSource = useMemo(() => getAvatarSource(isLocalAi, getMessageModelId(message)), [message])
 
@@ -143,13 +141,6 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
           )}
         </InfoWrap>
       </UserWrap>
-      {isMultiSelectMode && (
-        <Checkbox
-          checked={isSelected}
-          onChange={(e) => handleSelectMessage(message.id, e.target.checked)}
-          style={{ position: 'absolute', right: 0, top: 0 }}
-        />
-      )}
     </Container>
   )
 })

@@ -1066,6 +1066,25 @@
         "name": "Default Topic"
       }
     },
+    "edit": {
+      "clipboardEmpty": "Clipboard is empty",
+      "copied": "Copied {{count}} message(s)",
+      "copy": "Copy",
+      "cut": "Cut {{count}} message(s)",
+      "cutAction": "Cut",
+      "deleteAction": "Delete",
+      "deleted": "Deleted {{count}} message(s)",
+      "enter": "Enter Edit Mode",
+      "exit": "Exit Edit Mode",
+      "pasteAction": "Paste",
+      "pasted": "Pasted {{count}} message(s)",
+      "redoAction": "Redo",
+      "redone": "Redone",
+      "selectFirst": "Please select messages first",
+      "selected": "{{count}} selected",
+      "undoAction": "Undo",
+      "undone": "Undone"
+    },
     "history": {
       "assistant_node": "Assistant",
       "click_to_navigate": "Click to navigate to the message",

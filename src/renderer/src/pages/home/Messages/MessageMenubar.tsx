@@ -9,7 +9,6 @@ import { isEmbeddingModel, isRerankModel, isVisionModel } from '@renderer/config
 import type { MessageMenubarButtonId, MessageMenubarScope } from '@renderer/config/registry/messageMenubar'
 import { DEFAULT_MESSAGE_MENUBAR_SCOPE, getMessageMenubarConfig } from '@renderer/config/registry/messageMenubar'
 import { useMessageEditing } from '@renderer/context/MessageEditingContext'
-import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
 import { useEnableDeveloperMode, useMessageStyle, useSettings } from '@renderer/hooks/useSettings'
@@ -58,7 +57,6 @@ import {
   CirclePause,
   FilePenLine,
   Languages,
-  ListChecks,
   Menu,
   MessageSquarePlus,
   NotebookPen,
@@ -150,7 +148,6 @@ const MessageMenubar: FC<Props> = (props) => {
   } = props
   const { t } = useTranslation()
   const { notesPath } = useNotesSettings()
-  const { toggleMultiSelectMode } = useChatContext(props.topic)
   const [copied, setCopied] = useTemporaryValue(false, 2000)
   const translationAbortKey = createTranslationAbortKey(message.id)
   // remove confirm for regenerate; tooltip stays simple
@@ -322,14 +319,6 @@ const MessageMenubar: FC<Props> = (props) => {
         onClick: onNewBranch
       },
       {
-        label: t('chat.multiple.select.label'),
-        key: 'multi-select',
-        icon: <ListChecks size={15} />,
-        onClick: () => {
-          toggleMultiSelectMode(true)
-        }
-      },
-      {
         label: t('chat.message.insert.label'),
         key: 'insert-message',
         icon: <MessageSquarePlus size={15} />,
@@ -493,7 +482,6 @@ const MessageMenubar: FC<Props> = (props) => {
     onInsertMessages,
     onNewBranch,
     t,
-    toggleMultiSelectMode,
     topic.name
   ])
 

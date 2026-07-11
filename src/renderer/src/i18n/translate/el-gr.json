@@ -1066,6 +1066,25 @@
         "name": "Προεπαγγελματικός θέμα"
       }
     },
+    "edit": {
+      "clipboardEmpty": "[to be translated]:Clipboard is empty",
+      "copied": "[to be translated]:Copied {{count}} message(s)",
+      "copy": "[to be translated]:Copy",
+      "cut": "[to be translated]:Cut {{count}} message(s)",
+      "cutAction": "[to be translated]:Cut",
+      "deleteAction": "[to be translated]:Delete",
+      "deleted": "[to be translated]:Deleted {{count}} message(s)",
+      "enter": "[to be translated]:Enter Edit Mode",
+      "exit": "[to be translated]:Exit Edit Mode",
+      "pasteAction": "[to be translated]:Paste",
+      "pasted": "[to be translated]:Pasted {{count}} message(s)",
+      "redoAction": "[to be translated]:Redo",
+      "redone": "[to be translated]:Redone",
+      "selectFirst": "[to be translated]:Please select messages first",
+      "selected": "[to be translated]:{{count}} selected",
+      "undoAction": "[to be translated]:Undo",
+      "undone": "[to be translated]:Undone"
+    },
     "history": {
       "assistant_node": "Βοηθός",
       "click_to_navigate": "Κάντε κλικ για να μεταβείτε στο αντίστοιχο μήνυμα",

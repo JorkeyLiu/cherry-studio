@@ -1,16 +1,17 @@
 import { loggerService } from '@logger'
 import ContextMenu from '@renderer/components/ContextMenu'
+import EditModeActionBar from '@renderer/components/EditModeActionBar'
 import { LoadingIcon } from '@renderer/components/Icons'
 import { LOAD_MORE_COUNT } from '@renderer/config/constant'
 import { useAssistant } from '@renderer/hooks/useAssistant'
-import { useChatContext } from '@renderer/hooks/useChatContext'
+import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
+import { useEditMode } from '@renderer/hooks/useEditMode'
 import { useMessageOperations, useTopicMessages } from '@renderer/hooks/useMessageOperations'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
-import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
 import { getDefaultTopic } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getContextCount, getGroupedMessages, getUserMessage } from '@renderer/services/MessagesService'
@@ -70,7 +71,9 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
   const { displayCount, clearTopicMessages, deleteMessage, createTopicBranch } = useMessageOperations(topic)
   const { setTimeoutTimer } = useTimer()
 
-  const { isMultiSelectMode, handleSelectMessage } = useChatContext(topic)
+  const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode(topic.id)
+
+  useClipboardKeyboard(topic.id)
 
   const messageElements = useRef<Map<string, HTMLElement>>(new Map())
   const messagesRef = useRef<Message[]>(messages)
@@ -300,6 +303,45 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
     return Object.entries(newGrouped)
   }, [displayMessages])
 
+  // 将消息按是否选中分段，用于连续选中消息的包裹
+  const messageSegments = useMemo(() => {
+    const segments: Array<{ selected: boolean; items: typeof groupedMessages }> = []
+
+    for (const [key, groupMessages] of groupedMessages) {
+      const groupAskId = groupMessages[0]?.askId || groupMessages[0]?.id || ''
+      const selected = isEditMode && selectedGroupIds.includes(groupAskId)
+
+      const lastSeg = segments[segments.length - 1]
+      if (lastSeg && lastSeg.selected === selected) {
+        lastSeg.items.push([key, groupMessages])
+      } else {
+        segments.push({ selected, items: [[key, groupMessages]] })
+      }
+    }
+
+    return segments
+  }, [groupedMessages, isEditMode, selectedGroupIds])
+
+  const renderMessageSegments = () => {
+    return messageSegments.map((seg, i) => {
+      const content = seg.items.map(([key, groupMessages]) => (
+        <MessageGroup
+          key={key}
+          messages={groupMessages}
+          topic={topic}
+          registerMessageElement={registerMessageElement}
+          isEditMode={isEditMode}
+          onGroupClick={handleGroupClick}
+        />
+      ))
+
+      if (seg.selected) {
+        return <SelectionBlock key={`sel-${i}`}>{content}</SelectionBlock>
+      }
+      return content
+    })
+  }
+
   return (
     <MessagesContainer
       id="messages"
@@ -318,14 +360,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
           style={{ overflow: 'visible' }}>
           <ContextMenu>
             <ScrollContainer>
-              {groupedMessages.map(([key, groupMessages]) => (
-                <MessageGroup
-                  key={key}
-                  messages={groupMessages}
-                  topic={topic}
-                  registerMessageElement={registerMessageElement}
-                />
-              ))}
+              {renderMessageSegments()}
               {isLoadingMore && (
                 <LoaderContainer>
                   <LoadingIcon color="var(--color-text-2)" />
@@ -338,12 +373,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
         {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
       </NarrowLayout>
       {messageNavigation === 'anchor' && <MessageAnchorLine messages={displayMessages} />}
-      <SelectionBox
-        isMultiSelectMode={isMultiSelectMode}
-        scrollContainerRef={scrollContainerRef}
-        messageElements={messageElements.current}
-        handleSelectMessage={handleSelectMessage}
-      />
+      {isEditMode && <EditModeActionBar topicId={topic.id} />}
     </MessagesContainer>
   )
 }
@@ -392,6 +422,13 @@ const LoaderContainer = styled.div`
   width: 100%;
   background: var(--color-background);
   pointer-events: none;
+`
+
+const SelectionBlock = styled.div`
+  display: flex;
+  flex-direction: column-reverse;
+  box-shadow: 0 0 0 1.5px var(--color-primary);
+  border-radius: 10px;
 `
 
 export default Messages

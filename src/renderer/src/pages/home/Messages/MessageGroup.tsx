@@ -1,7 +1,6 @@
 import { loggerService } from '@logger'
 import Scrollbar from '@renderer/components/Scrollbar'
 import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
-import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
@@ -24,18 +23,24 @@ interface Props {
   messages: (Message & { index: number })[]
   topic: Topic
   registerMessageElement?: (id: string, element: HTMLElement | null) => void
+  isEditMode?: boolean
+  onGroupClick?: (askId: string, isCtrl: boolean, isShift: boolean) => void
 }
 
-const MessageGroup = ({ messages, topic, registerMessageElement }: Props) => {
+const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = false, onGroupClick }: Props) => {
   const messageLength = messages.length
 
   // Hooks
   const { editMessage } = useMessageOperations(topic)
   const { multiModelMessageStyle: multiModelMessageStyleSetting, gridColumns, gridPopoverTrigger } = useSettings()
-  const { isMultiSelectMode } = useChatContext(topic)
   const { setTimeoutTimer } = useTimer()
 
-  const isGrouped = isMultiSelectMode ? false : messageLength > 1 && messages.every((m) => m.role === 'assistant')
+  // 获取组的 askId（用于编辑模式下的组选择）
+  const groupAskId = useMemo(() => {
+    return messages[0]?.askId || messages[0]?.id || ''
+  }, [messages])
+
+  const isGrouped = messageLength > 1 && messages.every((m) => m.role === 'assistant')
 
   // States
   const [_multiModelMessageStyle, setMultiModelMessageStyle] = useState<MultiModelMessageStyle>(
@@ -201,7 +206,9 @@ const MessageGroup = ({ messages, topic, registerMessageElement }: Props) => {
         isGrouped,
         message,
         topic,
-        index: message.index
+        index: message.index,
+        isEditMode,
+        onGroupClick
       } satisfies ComponentProps<typeof MessageItem>
 
       const messageContent = (
@@ -260,19 +267,33 @@ const MessageGroup = ({ messages, topic, registerMessageElement }: Props) => {
       selectedMessageId,
       onUpdateUseful,
       groupContextMessageId,
-      gridPopoverTrigger
+      gridPopoverTrigger,
+      isEditMode,
+      onGroupClick
     ]
+  )
+
+  // 编辑模式下点击消息组的处理
+  const handleGroupContainerClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (!isEditMode || !groupAskId || !onGroupClick) return
+      const isCtrl = e.metaKey || e.ctrlKey
+      const isShift = e.shiftKey
+      onGroupClick(groupAskId, isCtrl, isShift)
+    },
+    [isEditMode, groupAskId, onGroupClick]
   )
 
   return (
     <MessageEditingProvider>
       <GroupContainer
         id={messages[0].askId ? `message-group-${messages[0].askId}` : undefined}
-        className={classNames([multiModelMessageStyle, { 'multi-select-mode': isMultiSelectMode }])}>
+        className={classNames([multiModelMessageStyle])}
+        onClick={handleGroupContainerClick}>
         <GridContainer
           $count={messageLength}
           $gridColumns={gridColumns}
-          className={classNames([multiModelMessageStyle, { 'multi-select-mode': isMultiSelectMode }])}>
+          className={classNames([multiModelMessageStyle])}>
           {messages.map(renderMessage)}
         </GridContainer>
         {isGrouped && (
@@ -307,6 +328,7 @@ const GroupContainer = styled.div`
   &.multi-select-mode {
     padding: 5px 10px;
   }
+
 `
 
 const GridContainer = styled(Scrollbar)<{ $count: number; $gridColumns: number }>`

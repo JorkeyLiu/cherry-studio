@@ -1,10 +1,11 @@
+import EditModeToggle from '@renderer/components/EditModeToggle'
 import { HStack } from '@renderer/components/Layout'
 import NavbarIcon from '@renderer/components/NavbarIcon'
 import SearchPopup from '@renderer/components/Popups/SearchPopup'
 import { modelGenerating } from '@renderer/hooks/useRuntime'
 import { useNavbarPosition, useSettings } from '@renderer/hooks/useSettings'
 import { useShowTopics } from '@renderer/hooks/useStore'
-import { useAppDispatch } from '@renderer/store'
+import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { setNarrowMode } from '@renderer/store/settings'
 import type { Assistant } from '@renderer/types'
 import { Tooltip } from 'antd'
@@ -24,6 +25,7 @@ const Tools = ({ assistant }: ToolsProps) => {
   const { isTopNavbar } = useNavbarPosition()
   const { topicPosition, narrowMode } = useSettings()
   const dispatch = useAppDispatch()
+  const activeTopicId = useAppSelector((state) => state.runtime.chat.activeTopic?.id)
 
   const handleNarrowModeToggle = async () => {
     await modelGenerating()
@@ -32,6 +34,7 @@ const Tools = ({ assistant }: ToolsProps) => {
 
   return (
     <HStack alignItems="center" gap={8}>
+      {activeTopicId && <EditModeToggle />}
       <SettingsButton assistant={assistant} />
       {isTopNavbar && (
         <Tooltip title={t('navbar.expand')} mouseEnterDelay={0.8}>

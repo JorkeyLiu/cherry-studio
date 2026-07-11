@@ -24,8 +24,10 @@ import storage from 'redux-persist/lib/storage'
 import storeSyncService from '../services/StoreSyncService'
 import assistants from './assistants'
 import backup from './backup'
+import clipboard from './clipboard'
 import codeTools from './codeTools'
 import copilot from './copilot'
+import editMode from './editMode'
 import inputToolsReducer from './inputTools'
 import knowledge from './knowledge'
 import llm from './llm'
@@ -49,6 +51,7 @@ import shortcuts from './shortcuts'
 import tabs from './tabs'
 import toolPermissions from './toolPermissions'
 import translate from './translate'
+import undoStack from './undoStack'
 import websearch from './websearch'
 
 const logger = loggerService.withContext('Store')
@@ -79,7 +82,10 @@ const rootReducer = combineReducers({
   translate,
   ocr,
   note,
-  toolPermissions
+  toolPermissions,
+  clipboard,
+  editMode,
+  undoStack
 })
 
 const persistedReducer = persistReducer(
@@ -87,7 +93,16 @@ const persistedReducer = persistReducer(
     key: 'cherry-studio',
     storage,
     version: 206,
-    blacklist: ['runtime', 'messages', 'messageBlocks', 'tabs', 'toolPermissions'],
+    blacklist: [
+      'runtime',
+      'messages',
+      'messageBlocks',
+      'tabs',
+      'toolPermissions',
+      'clipboard',
+      'editMode',
+      'undoStack'
+    ],
     migrate
   },
   rootReducer
