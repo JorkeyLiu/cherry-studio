@@ -1198,6 +1198,12 @@
       }
     },
     "message": {
+      "insert": {
+        "label": "[to be translated]:Insert Messages",
+        "newAssistantMessage": "[to be translated]:New assistant message",
+        "newUserMessage": "[to be translated]:New user message",
+        "success": "[to be translated]:Messages inserted"
+      },
       "new": {
         "branch": {
           "created": "Ramură nouă creată",

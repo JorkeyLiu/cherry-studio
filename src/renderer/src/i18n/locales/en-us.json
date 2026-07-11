@@ -1200,6 +1200,8 @@
     "message": {
       "insert": {
         "label": "Insert Messages",
+        "newAssistantMessage": "New assistant message",
+        "newUserMessage": "New user message",
         "success": "Messages inserted"
       },
       "new": {

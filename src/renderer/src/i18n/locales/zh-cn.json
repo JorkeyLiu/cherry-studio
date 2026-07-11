@@ -1200,6 +1200,8 @@
     "message": {
       "insert": {
         "label": "插入消息",
+        "newAssistantMessage": "新助手消息",
+        "newUserMessage": "新用户消息",
         "success": "消息已插入"
       },
       "new": {
