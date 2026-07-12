@@ -1625,7 +1625,7 @@ export const insertMessagesThunk =
         id: userBlockId,
         messageId: userMessageId,
         type: MessageBlockType.MAIN_TEXT,
-        content: '新用户消息',
+        content: t('chat.message.insert.newUserMessage'),
         status: MessageBlockStatus.SUCCESS,
         createdAt: now
       }
@@ -1646,7 +1646,7 @@ export const insertMessagesThunk =
         id: assistantBlockId,
         messageId: assistantMessageId,
         type: MessageBlockType.MAIN_TEXT,
-        content: '新助手消息',
+        content: t('chat.message.insert.newAssistantMessage'),
         status: MessageBlockStatus.SUCCESS,
         createdAt: now
       }

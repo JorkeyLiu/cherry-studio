@@ -1068,6 +1068,25 @@
         "name": "預設話題"
       }
     },
+    "edit": {
+      "clipboardEmpty": "剪貼簿為空",
+      "copied": "已複製 {{count}} 則訊息",
+      "copy": "複製",
+      "cut": "已剪下 {{count}} 則訊息",
+      "cutAction": "剪下",
+      "deleteAction": "刪除",
+      "deleted": "已刪除 {{count}} 則訊息",
+      "enter": "進入編輯模式",
+      "exit": "離開編輯模式",
+      "pasteAction": "貼上",
+      "pasted": "已貼上 {{count}} 則訊息",
+      "redoAction": "重做",
+      "redone": "已重做",
+      "selectFirst": "請先選取訊息",
+      "selected": "已選取 {{count}} 則",
+      "undoAction": "復原",
+      "undone": "已復原"
+    },
     "history": {
       "assistant_node": "助手",
       "click_to_navigate": "點選以前往對應訊息",
@@ -1202,6 +1221,8 @@
     "message": {
       "insert": {
         "label": "插入訊息",
+        "newAssistantMessage": "新助手訊息",
+        "newUserMessage": "新使用者訊息",
         "success": "訊息已插入"
       },
       "new": {

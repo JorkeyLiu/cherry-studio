@@ -1068,6 +1068,25 @@
         "name": "默认话题"
       }
     },
+    "edit": {
+      "clipboardEmpty": "剪贴板为空",
+      "copied": "已复制 {{count}} 条消息",
+      "copy": "复制",
+      "cut": "已剪切 {{count}} 条消息",
+      "cutAction": "剪切",
+      "deleteAction": "删除",
+      "deleted": "已删除 {{count}} 条消息",
+      "enter": "进入编辑模式",
+      "exit": "退出编辑模式",
+      "pasteAction": "粘贴",
+      "pasted": "已粘贴 {{count}} 条消息",
+      "redoAction": "重做",
+      "redone": "已重做",
+      "selectFirst": "请先选中消息",
+      "selected": "已选中 {{count}} 条",
+      "undoAction": "撤销",
+      "undone": "已撤销"
+    },
     "history": {
       "assistant_node": "助手",
       "click_to_navigate": "点击跳转到对应消息",
@@ -1202,6 +1221,8 @@
     "message": {
       "insert": {
         "label": "插入消息",
+        "newAssistantMessage": "新助手消息",
+        "newUserMessage": "新用户消息",
         "success": "消息已插入"
       },
       "new": {

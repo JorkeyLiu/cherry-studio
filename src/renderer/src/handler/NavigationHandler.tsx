@@ -1,3 +1,4 @@
+import { cleanupOrphanFiles } from '@renderer/services/OrphanCleanupService'
 import { useAppSelector } from '@renderer/store'
 import { IpcChannel } from '@shared/IpcChannel'
 import { useEffect } from 'react'
@@ -26,6 +27,11 @@ const NavigationHandler: React.FC = () => {
       enabled: showSettingsShortcutEnabled
     }
   )
+
+  // Cleanup orphan files on app startup
+  useEffect(() => {
+    void cleanupOrphanFiles()
+  }, [])
 
   // Listen for navigate to About page event from macOS menu
   useEffect(() => {

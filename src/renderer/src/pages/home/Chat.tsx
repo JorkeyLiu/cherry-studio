@@ -2,14 +2,12 @@ import { loggerService } from '@logger'
 import type { ContentSearchRef } from '@renderer/components/ContentSearch'
 import { ContentSearch } from '@renderer/components/ContentSearch'
 import { HStack } from '@renderer/components/Layout'
-import MultiSelectActionPopup from '@renderer/components/Popups/MultiSelectionPopup'
 import PromptPopup from '@renderer/components/Popups/PromptPopup'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
 import { QuickPanelProvider } from '@renderer/components/QuickPanel'
 import ResizableHandle from '@renderer/components/ResizableHandle'
 import { isEmbeddingModel, isRerankModel, isWebSearchModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
-import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useNavbarPosition, useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
@@ -48,7 +46,6 @@ const Chat: FC<Props> = (props) => {
   const { t } = useTranslation()
   const { topicPosition, messageStyle, messageNavigation } = useSettings()
   const { showTopics } = useShowTopics()
-  const { isMultiSelectMode } = useChatContext(props.activeTopic)
   const { isTopNavbar } = useNavbarPosition()
   const dispatch = useAppDispatch()
 
@@ -158,7 +155,7 @@ const Chat: FC<Props> = (props) => {
   const mainHeight = isTopNavbar ? 'calc(100vh - var(--navbar-height) - 6px)' : 'calc(100vh - var(--navbar-height))'
 
   return (
-    <Container id="chat" className={classNames([messageStyle, { 'multi-select-mode': isMultiSelectMode }])}>
+    <Container id="chat" className={classNames([messageStyle])}>
       <HStack>
         <motion.div
           layout
@@ -205,7 +202,6 @@ const Chat: FC<Props> = (props) => {
                   />
                 )}
                 <Inputbar assistant={assistant} setActiveTopic={props.setActiveTopic} topic={props.activeTopic} />
-                {isMultiSelectMode && <MultiSelectActionPopup topic={props.activeTopic} />}
               </div>
             </QuickPanelProvider>
           </Main>

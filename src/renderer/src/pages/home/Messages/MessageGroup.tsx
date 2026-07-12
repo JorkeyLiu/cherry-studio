@@ -26,9 +26,11 @@ interface Props {
   messages: (Message & { index: number })[]
   topic: Topic
   registerMessageElement?: (id: string, element: HTMLElement | null) => void
+  isEditMode?: boolean
+  onGroupClick?: (askId: string, isCtrl: boolean, isShift: boolean) => void
 }
 
-const MessageGroup = ({ messages, topic, registerMessageElement }: Props) => {
+const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = false, onGroupClick }: Props) => {
   const messageLength = messages.length
 
   // Hooks
@@ -38,7 +40,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement }: Props) => {
   const { setTimeoutTimer } = useTimer()
   const dispatch = useAppDispatch()
 
-  const isGrouped = isMultiSelectMode ? false : messageLength > 1 && messages.every((m) => m.role === 'assistant')
+  const isGrouped = messageLength > 1 && messages.every((m) => m.role === 'assistant')
 
   // States
   const [_multiModelMessageStyle, setMultiModelMessageStyle] = useState<MultiModelMessageStyle>(
@@ -244,7 +246,9 @@ const MessageGroup = ({ messages, topic, registerMessageElement }: Props) => {
         isHorizontalMultiModelLayout: multiModelMessageStyle === 'horizontal',
         message,
         topic,
-        index: message.index
+        index: message.index,
+        isEditMode,
+        onGroupClick
       } satisfies ComponentProps<typeof MessageItem>
 
       const messageContent = (
@@ -303,7 +307,9 @@ const MessageGroup = ({ messages, topic, registerMessageElement }: Props) => {
       selectedMessageId,
       onUpdateUseful,
       groupContextMessageId,
-      gridPopoverTrigger
+      gridPopoverTrigger,
+      isEditMode,
+      onGroupClick
     ]
   )
 
@@ -311,7 +317,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement }: Props) => {
     <MessageEditingProvider>
       <GroupContainer
         id={messages[0].askId ? `message-group-${messages[0].askId}` : undefined}
-        className={classNames([multiModelMessageStyle, { 'multi-select-mode': isMultiSelectMode }])}>
+        className={classNames([multiModelMessageStyle])}>
         <GridContainer
           $count={messageLength}
           $gridColumns={gridColumns}
@@ -352,6 +358,7 @@ const GroupContainer = styled.div`
   &.multi-select-mode {
     padding: 5px 10px;
   }
+
 `
 
 const GridContainer = styled(Scrollbar)<{ $count: number; $gridColumns: number }>`

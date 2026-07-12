@@ -1,5 +1,6 @@
 import { loggerService } from '@logger'
 import ContextMenu from '@renderer/components/ContextMenu'
+import EditModeActionBar from '@renderer/components/EditModeActionBar'
 import { LoadingIcon } from '@renderer/components/Icons'
 import {
   INITIAL_MESSAGES_COUNT,
@@ -9,6 +10,8 @@ import {
 } from '@renderer/config/constant'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
+import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
+import { useEditMode } from '@renderer/hooks/useEditMode'
 import { useMessageOperations, useTopicMessages } from '@renderer/hooks/useMessageOperations'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
 import { useSettings } from '@renderer/hooks/useSettings'
@@ -123,7 +126,10 @@ const Messages = ({
   const { displayCount, clearTopicMessages, deleteMessage, createTopicBranch } = useMessageOperations(topic)
   const { setTimeoutTimer } = useTimer()
 
+  const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode(topic.id)
   const { isMultiSelectMode, handleSelectMessage } = useChatContext(topic)
+
+  useClipboardKeyboard(topic.id)
 
   const messageElements = useRef<Map<string, HTMLElement>>(new Map())
   const messagesRef = useRef<Message[]>(messages)
@@ -699,6 +705,53 @@ const Messages = ({
     return null
   }, [groupedMessages, contextWindowBoundaryIndex])
 
+  // 将消息按是否选中分段，用于连续选中消息的包裹
+  const messageSegments = useMemo(() => {
+    const segments: Array<{ selected: boolean; items: typeof groupedMessages }> = []
+
+    for (const [key, groupMessages] of groupedMessages) {
+      const groupAskId = groupMessages[0]?.askId || groupMessages[0]?.id || ''
+      const selected = isEditMode && selectedGroupIds.includes(groupAskId)
+
+      const lastSeg = segments[segments.length - 1]
+      if (lastSeg && lastSeg.selected === selected) {
+        lastSeg.items.push([key, groupMessages])
+      } else {
+        segments.push({ selected, items: [[key, groupMessages]] })
+      }
+    }
+
+    return segments
+  }, [groupedMessages, isEditMode, selectedGroupIds])
+
+  const renderMessageSegments = () => {
+    return messageSegments.map((seg, i) => {
+      const content = seg.items.map(([key, groupMessages]) => (
+        <Fragment key={key}>
+          {key === contextDividerGroupKey && (
+            <ContextWindowDivider>
+              <ContextWindowDividerLine />
+              <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
+              <ContextWindowDividerLine />
+            </ContextWindowDivider>
+          )}
+          <MessageGroup
+            messages={groupMessages}
+            topic={topic}
+            registerMessageElement={registerMessageElement}
+            isEditMode={isEditMode}
+            onGroupClick={handleGroupClick}
+          />
+        </Fragment>
+      ))
+
+      if (seg.selected) {
+        return <SelectionBlock key={`sel-${i}`}>{content}</SelectionBlock>
+      }
+      return content
+    })
+  }
+
   return (
     <MessagesContainer
       id="messages"
@@ -722,22 +775,7 @@ const Messages = ({
                   <LoadingIcon color="var(--color-text-2)" />
                 </LoaderContainer>
               )}
-              {groupedMessages.map(([key, groupMessages]) => (
-                <Fragment key={key}>
-                  {key === contextDividerGroupKey && (
-                    <ContextWindowDivider>
-                      <ContextWindowDividerLine />
-                      <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
-                      <ContextWindowDividerLine />
-                    </ContextWindowDivider>
-                  )}
-                  <MessageGroup
-                    messages={groupMessages}
-                    topic={topic}
-                    registerMessageElement={registerMessageElement}
-                  />
-                </Fragment>
-              ))}
+              {renderMessageSegments()}
               {isLoadingMore && (
                 <LoaderContainer>
                   <LoadingIcon color="var(--color-text-2)" />
@@ -758,6 +796,7 @@ const Messages = ({
         messageElements={messageElements.current}
         handleSelectMessage={handleSelectMessage}
       />
+      {isEditMode && <EditModeActionBar topicId={topic.id} />}
     </MessagesContainer>
   )
 }
@@ -833,6 +872,13 @@ const ContextWindowDividerText = styled.span`
   font-size: 12px;
   color: var(--color-text-3);
   white-space: nowrap;
+`
+
+const SelectionBlock = styled.div`
+  display: flex;
+  flex-direction: column-reverse;
+  box-shadow: 0 0 0 1.5px var(--color-primary);
+  border-radius: 10px;
 `
 
 export default Messages

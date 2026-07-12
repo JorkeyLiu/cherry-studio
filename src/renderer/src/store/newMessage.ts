@@ -141,13 +141,20 @@ export const messagesSlice = createSlice({
     },
     insertMessageAtIndex(state, action: PayloadAction<InsertMessageAtIndexPayload>) {
       const { topicId, message, index } = action.payload
-      messagesAdapter.addOne(state, message) // Add message to entities
+
       if (!state.messageIdsByTopic[topicId]) {
         state.messageIdsByTopic[topicId] = []
       }
+
+      // Guard: skip if message ID already exists in this topic's ID list
+      if (state.messageIdsByTopic[topicId].includes(message.id)) {
+        return
+      }
+
+      messagesAdapter.addOne(state, message)
       // Ensure index is within bounds
       const safeIndex = Math.max(0, Math.min(index, state.messageIdsByTopic[topicId].length))
-      state.messageIdsByTopic[topicId].splice(safeIndex, 0, message.id) // Insert ID at specified index
+      state.messageIdsByTopic[topicId].splice(safeIndex, 0, message.id)
 
       if (!(topicId in state.loadingByTopic)) {
         state.loadingByTopic[topicId] = false

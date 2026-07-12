@@ -30,7 +30,7 @@ import { checkRateLimit, getUserMessage } from '@renderer/services/MessagesServi
 import { spanManagerService } from '@renderer/services/SpanManagerService'
 import { estimateTextTokens as estimateTxtTokens, estimateUserPromptUsage } from '@renderer/services/TokenService'
 import WebSearchService from '@renderer/services/WebSearchService'
-import { useAppDispatch, useAppSelector } from '@renderer/store'
+import { useAppDispatch } from '@renderer/store'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
 import {
   type Assistant,
@@ -173,7 +173,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   const isVisionAssistant = useMemo(() => isVisionModel(model), [model])
   const isGenerateImageAssistant = useMemo(() => isGenerateImageModel(model), [model])
   const { setTimeoutTimer } = useTimer()
-  const isMultiSelectMode = useAppSelector((state) => state.runtime.chat.isMultiSelectMode)
+  // isEditMode removed: inputbar should remain visible in edit mode
 
   const isVisionSupported = useMemo(
     () =>
@@ -494,10 +494,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
       updateAssistant({ ...assistant, enableGenerateImage: false })
     }
   }, [assistant, model, updateAssistant])
-
-  if (isMultiSelectMode) {
-    return null
-  }
 
   // topContent: 所有顶部预览内容
   const topContent = (

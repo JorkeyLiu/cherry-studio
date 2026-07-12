@@ -44,6 +44,8 @@ interface Props {
   onUpdateUseful?: (msgId: string) => void
   isGroupContextMessage?: boolean
   isHorizontalMultiModelLayout?: boolean
+  isEditMode?: boolean
+  onGroupClick?: (askId: string, isCtrl: boolean, isShift: boolean) => void
 }
 
 const logger = loggerService.withContext('MessageItem')
@@ -67,7 +69,9 @@ const MessageItem: FC<Props> = ({
   isGrouped,
   onUpdateUseful,
   isGroupContextMessage,
-  isHorizontalMultiModelLayout = false
+  isHorizontalMultiModelLayout = false,
+  isEditMode = false,
+  onGroupClick
 }) => {
   const { t } = useTranslation()
   const { assistant, setModel } = useAssistant(message.assistantId)
@@ -126,6 +130,21 @@ const MessageItem: FC<Props> = ({
   const showMenubar = !hideMenuBar && !isEditing && !isProcessing
   const shouldReverseFooter = isLastMessage && (messageStyle === 'plain' || isAssistantMessage)
 
+  // 编辑模式下点击消息内容区域触发组选择
+  const handleMessageClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (!isEditMode || !onGroupClick) return
+      // 排除 Footer（菜单栏）区域，按钮有自己的 handler
+      if ((e.target as HTMLElement).closest('.MessageFooter')) return
+      const askId = message.role === 'user' ? message.id : message.askId || message.id
+      if (!askId) return
+      const isCtrl = e.metaKey || e.ctrlKey
+      const isShift = e.shiftKey
+      onGroupClick(askId, isCtrl, isShift)
+    },
+    [isEditMode, message, onGroupClick]
+  )
+
   const messageHighlightHandler = useCallback(
     (highlight: boolean = true) => {
       if (messageContainerRef.current) {
@@ -173,12 +192,8 @@ const MessageItem: FC<Props> = ({
   if (message.type === 'clear') {
     return (
       <NewContextMessage
-        isMultiSelectMode={isMultiSelectMode}
         className="clear-context-divider"
         onClick={() => {
-          if (isMultiSelectMode) {
-            return
-          }
           void EventEmitter.emit(EVENT_NAMES.NEW_CONTEXT)
         }}>
         <Divider dashed style={{ padding: '0 20px' }} plain>
@@ -195,9 +210,11 @@ const MessageItem: FC<Props> = ({
         className={classNames({
           message: true,
           'message-assistant': isAssistantMessage,
-          'message-user': !isAssistantMessage
+          'message-user': !isAssistantMessage,
+          'edit-mode-message': isEditMode
         })}
-        ref={messageContainerRef}>
+        ref={messageContainerRef}
+        onClick={isEditMode ? handleMessageClick : undefined}>
         <MessageHeader
           message={message}
           assistant={assistant}
@@ -288,6 +305,8 @@ const MessageContainer = styled.div`
       opacity: 1;
     }
   }
+  &.edit-mode-message {
+  }
 `
 
 const MessageContentContainer = styled(Scrollbar)`
@@ -306,11 +325,9 @@ const MessageFooter = styled.div`
   margin-top: 3px;
 `
 
-const NewContextMessage = styled.div<{ isMultiSelectMode: boolean }>`
+const NewContextMessage = styled.div`
   cursor: pointer;
   flex: 1;
-
-  ${({ isMultiSelectMode }) => isMultiSelectMode && 'cursor: default;'}
 `
 
 export default memo(MessageItem)

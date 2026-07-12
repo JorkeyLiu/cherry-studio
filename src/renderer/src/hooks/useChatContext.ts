@@ -1,22 +1,14 @@
-import { loggerService } from '@logger'
-import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
-import { messageBlocksSelectors } from '@renderer/store/messageBlock'
 import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import { setActiveTopic, setSelectedMessageIds, toggleMultiSelectMode } from '@renderer/store/runtime'
 import type { Topic } from '@renderer/types'
 import { useCallback, useEffect, useState } from 'react'
-import { useTranslation } from 'react-i18next'
 import { useDispatch, useSelector, useStore } from 'react-redux'
 
-const logger = loggerService.withContext('useChatContext')
-
 export const useChatContext = (activeTopic: Topic) => {
-  const { t } = useTranslation()
   const dispatch = useDispatch()
   const store = useStore<RootState>()
-  const { deleteMessage } = useMessageOperations(activeTopic)
 
   const [messageRefs, setMessageRefs] = useState<Map<string, HTMLElement>>(new Map())
 
@@ -94,96 +86,10 @@ export const useChatContext = (activeTopic: Topic) => {
     [dispatch, selectedMessageIds]
   )
 
-  const handleMultiSelectAction = useCallback(
-    async (actionType: string, messageIds: string[]) => {
-      if (messageIds.length === 0) {
-        window.toast.warning(t('chat.multiple.select.empty'))
-        return
-      }
-
-      const state = store.getState()
-      const messages = selectMessagesForTopic(state, activeTopic.id)
-      const messageBlocks = messageBlocksSelectors.selectEntities(state)
-
-      switch (actionType) {
-        case 'delete':
-          window.modal.confirm({
-            title: t('message.delete.confirm.title'),
-            content: t('message.delete.confirm.content', { count: messageIds.length }),
-            okButtonProps: { danger: true },
-            centered: true,
-            onOk: async () => {
-              try {
-                await Promise.all(messageIds.map((messageId) => deleteMessage(messageId)))
-                window.toast.success(t('message.delete.success'))
-                handleToggleMultiSelectMode(false)
-              } catch (error) {
-                logger.error('Failed to delete messages:', error as Error)
-                window.toast.error(t('message.delete.failed'))
-              }
-            }
-          })
-          break
-        case 'save': {
-          // 筛选消息，实际并非assistant messages，而是可能包含user messages
-          const assistantMessages = messages.filter((msg) => messageIds.includes(msg.id))
-          if (assistantMessages.length > 0) {
-            const contentToSave = assistantMessages
-              .map((msg) => {
-                return msg.blocks
-                  .map((blockId) => {
-                    const block = messageBlocks[blockId]
-                    return block && 'content' in block ? block.content : ''
-                  })
-                  .filter(Boolean)
-                  .join('\n')
-                  .trim()
-              })
-              .join('\n\n---\n\n')
-            const fileName = `chat_export_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.md`
-            await window.api.file.save(fileName, contentToSave)
-            window.toast.success(t('message.save.success.title'))
-            handleToggleMultiSelectMode(false)
-          } else {
-            // 这个分支不会进入 因为 messageIds.length === 0 已提前返回，需要简化掉
-          }
-          break
-        }
-        case 'copy': {
-          const assistantMessages = messages.filter((msg) => messageIds.includes(msg.id))
-          if (assistantMessages.length > 0) {
-            const contentToCopy = assistantMessages
-              .map((msg) => {
-                return msg.blocks
-                  .map((blockId) => {
-                    const block = messageBlocks[blockId]
-                    return block && 'content' in block ? block.content : ''
-                  })
-                  .filter(Boolean)
-                  .join('\n')
-                  .trim()
-              })
-              .join('\n\n---\n\n')
-            void navigator.clipboard.writeText(contentToCopy)
-            window.toast.success(t('message.copied'))
-            handleToggleMultiSelectMode(false)
-          } else {
-            // 和上面一样
-          }
-          break
-        }
-        default:
-          break
-      }
-    },
-    [t, store, activeTopic.id, deleteMessage, handleToggleMultiSelectMode]
-  )
-
   return {
     isMultiSelectMode,
     selectedMessageIds,
     toggleMultiSelectMode: handleToggleMultiSelectMode,
-    handleMultiSelectAction,
     handleSelectMessage,
     activeTopic,
     locateMessage,

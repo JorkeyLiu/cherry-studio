@@ -181,37 +181,29 @@ export class DexieMessageDataSource implements MessageDataSource {
 
   async deleteMessage(topicId: string, messageId: string): Promise<void> {
     try {
-      await db.transaction('rw', db.topics, db.message_blocks, db.files, async () => {
+      // Phase 1: Read-only TX to collect block IDs
+      let blockIds: string[] = []
+      await db.transaction('r', db.topics, db.message_blocks, async () => {
         const topic = await db.topics.get(topicId)
         if (!topic) return
-
-        const messageIndex = topic.messages.findIndex((m) => m.id === messageId)
-        if (messageIndex === -1) return
-
-        const message = topic.messages[messageIndex]
-        const blockIds = message.blocks || []
-
-        // Delete blocks and handle files
-        if (blockIds.length > 0) {
-          const blocks = await db.message_blocks.where('id').anyOf(blockIds).toArray()
-          const files = blocks
-            .filter((block) => block.type === 'file' || block.type === 'image')
-            .map((block: any) => block.file)
-            .filter((file) => file !== undefined)
-
-          // Clean up files
-          if (!isEmpty(files)) {
-            await Promise.all(files.map((file) => FileManager.deleteFile(file.id, false)))
-          }
-
-          await db.message_blocks.bulkDelete(blockIds)
+        const message = topic.messages.find((m) => m.id === messageId)
+        if (message?.blocks && message.blocks.length > 0) {
+          blockIds = [...message.blocks]
         }
-
-        // Remove message from topic
-        topic.messages.splice(messageIndex, 1)
-        await db.topics.update(topicId, { messages: topic.messages })
       })
 
+      // Phase 2: NO file cleanup — callers handle reference counting
+
+      // Phase 3: Write TX to delete blocks and message
+      await db.transaction('rw', db.topics, db.message_blocks, async () => {
+        if (blockIds.length > 0) {
+          await db.message_blocks.bulkDelete(blockIds)
+        }
+        const topic = await db.topics.get(topicId)
+        if (!topic) return
+        topic.messages = topic.messages.filter((m) => m.id !== messageId)
+        await db.topics.update(topicId, { messages: topic.messages })
+      })
       store.dispatch(updateTopicUpdatedAt({ topicId }))
     } catch (error) {
       logger.error(`Failed to delete message ${messageId} from topic ${topicId}:`, error as Error)
@@ -221,40 +213,29 @@ export class DexieMessageDataSource implements MessageDataSource {
 
   async deleteMessages(topicId: string, messageIds: string[]): Promise<void> {
     try {
-      await db.transaction('rw', db.topics, db.message_blocks, db.files, async () => {
+      // Phase 1: Read-only TX to collect block IDs
+      const allBlockIds: string[] = []
+      await db.transaction('r', db.topics, db.message_blocks, async () => {
         const topic = await db.topics.get(topicId)
         if (!topic) return
-
-        // Collect all block IDs from messages to be deleted
-        const allBlockIds: string[] = []
-        const messagesToDelete: Message[] = []
-
         for (const messageId of messageIds) {
           const message = topic.messages.find((m) => m.id === messageId)
-          if (message) {
-            messagesToDelete.push(message)
-            if (message.blocks && message.blocks.length > 0) {
-              allBlockIds.push(...message.blocks)
-            }
+          if (message?.blocks && message.blocks.length > 0) {
+            allBlockIds.push(...message.blocks)
           }
         }
+      })
 
-        // Delete blocks and handle files
+      // Phase 2: NO file cleanup here — callers handle reference counting
+      // Files are cleaned up by OrphanCleanupService on app startup
+
+      // Phase 3: Write TX to delete blocks and messages
+      await db.transaction('rw', db.topics, db.message_blocks, async () => {
         if (allBlockIds.length > 0) {
-          const blocks = await db.message_blocks.where('id').anyOf(allBlockIds).toArray()
-          const files = blocks
-            .filter((block) => block.type === 'file' || block.type === 'image')
-            .map((block: any) => block.file)
-            .filter((file) => file !== undefined)
-
-          // Clean up files
-          if (!isEmpty(files)) {
-            await Promise.all(files.map((file) => FileManager.deleteFile(file.id, false)))
-          }
           await db.message_blocks.bulkDelete(allBlockIds)
         }
-
-        // Remove messages from topic
+        const topic = await db.topics.get(topicId)
+        if (!topic) return
         const remainingMessages = topic.messages.filter((m) => !messageIds.includes(m.id))
         await db.topics.update(topicId, { messages: remainingMessages })
       })
@@ -299,19 +280,7 @@ export class DexieMessageDataSource implements MessageDataSource {
   async deleteBlocks(blockIds: string[]): Promise<void> {
     try {
       if (blockIds.length === 0) return
-
-      // Get blocks to find associated files
-      const blocks = await db.message_blocks.where('id').anyOf(blockIds).toArray()
-      const files = blocks
-        .filter((block) => block.type === 'file' || block.type === 'image')
-        .map((block: any) => block.file)
-        .filter((file) => file !== undefined)
-
-      // Clean up files
-      if (!isEmpty(files)) {
-        await Promise.all(files.map((file) => FileManager.deleteFile(file.id, false)))
-      }
-
+      // NO file cleanup here — callers handle reference counting
       await db.message_blocks.bulkDelete(blockIds)
     } catch (error) {
       logger.error('Failed to delete blocks:', error as Error)
