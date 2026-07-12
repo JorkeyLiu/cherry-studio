@@ -19,6 +19,7 @@ const StyledUpload = styled(Upload)`
     text-overflow: ellipsis;
     white-space: nowrap;
     vertical-align: bottom;
+    user-select: text;
   }
 `
 

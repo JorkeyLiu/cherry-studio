@@ -575,6 +575,7 @@ const MenusBar = styled.div`
   justify-content: flex-end;
   align-items: center;
   gap: 8px;
+  user-select: none;
 
   &.user-bubble-style {
     margin-top: 5px;

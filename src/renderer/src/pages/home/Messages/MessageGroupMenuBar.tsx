@@ -167,6 +167,7 @@ const GroupMenuBar = styled.div<{ $layout: MultiModelMessageStyle }>`
   overflow: hidden;
   border: 0.5px solid var(--color-border);
   height: 40px;
+  user-select: none;
 `
 
 const LayoutContainer = styled.div`

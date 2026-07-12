@@ -154,6 +154,7 @@ const Container = styled.div`
   gap: 10px;
   position: relative;
   margin-bottom: 10px;
+  user-select: none;
 `
 
 const UserWrap = styled.div`
