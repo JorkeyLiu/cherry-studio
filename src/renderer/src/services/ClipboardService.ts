@@ -556,3 +556,81 @@ export async function deleteSelectedMessages(
   )
   return allMessageIds.length
 }
+
+/**
+ * Delete a single message with undo support.
+ * Unlike deleteSelectedMessages which groups by askId, this operates on exactly one message.
+ */
+export async function deleteSingleMessage(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  message: Message
+): Promise<void> {
+  const state = getState()
+  const msg = state.messages.entities[message.id]
+  if (!msg) return
+
+  // Collect blocks for this message
+  const blockIds = msg.blocks || []
+  const blocksToDelete = blockIds.map((id) => state.messageBlocks.entities[id]).filter(Boolean)
+
+  // Collect file reference deltas (for undo restoration)
+  const fileReferenceDeltas: Array<{ fileId: string; delta: number }> = []
+  for (const block of blocksToDelete) {
+    if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
+      const file = block.file
+      if (file) {
+        fileReferenceDeltas.push({ fileId: file.id, delta: -1 })
+      }
+    }
+  }
+
+  // Calculate position info (for undo restoration to original position)
+  const topicMessages = selectMessagesForTopic(state, topicId)
+  const positionIndex = topicMessages.findIndex((m) => m.id === message.id)
+  const nextMessage = positionIndex >= 0 ? topicMessages[positionIndex + 1] : undefined
+
+  // DB-first: delete from DB before dispatching to Redux
+  try {
+    await deleteMessagesFromDB(topicId, [message.id])
+  } catch (error) {
+    logger.error('[deleteSingleMessage] Failed to delete from DB', error as Error)
+    return
+  }
+
+  // Redux: remove from state only after DB delete succeeds
+  dispatch(newMessagesActions.removeMessages({ topicId, messageIds: [message.id] }))
+  if (blockIds.length > 0) {
+    dispatch(removeManyBlocks(blockIds))
+  }
+
+  // Update file reference counts
+  for (const { fileId, delta } of fileReferenceDeltas) {
+    await dbService.updateFileCount(fileId, delta, false)
+  }
+
+  // Build undo data
+  const groupAnchor: GroupAnchor = {
+    messages: [structuredClone(msg)],
+    blocks: blocksToDelete.map((b) => structuredClone(b)),
+    positionIndex: positionIndex >= 0 ? positionIndex : 0,
+    anchorMessageId: nextMessage?.id ?? null
+  }
+
+  const undoAction: DeleteUndoAction = {
+    id: uuidv4(),
+    type: 'delete',
+    timestamp: Date.now(),
+    targetTopicId: topicId,
+    insertedMessageIds: [message.id],
+    pastedMessagesSnapshot: [],
+    pastedBlocksSnapshot: [],
+    fileReferenceDeltas,
+    groupAnchors: [groupAnchor]
+  }
+
+  dispatch(pushUndoAction(undoAction))
+
+  logger.info(`[deleteSingleMessage] Deleted message ${message.id} from topic ${topicId}`)
+}

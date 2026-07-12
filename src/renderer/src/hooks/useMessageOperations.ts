@@ -1,6 +1,6 @@
 import { loggerService } from '@logger'
 import { createSelector } from '@reduxjs/toolkit'
-import { deleteSelectedMessages } from '@renderer/services/ClipboardService'
+import { deleteSingleMessage } from '@renderer/services/ClipboardService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { appendMessageTrace, pauseTrace, restartTrace } from '@renderer/services/SpanManagerService'
 import { estimateUserPromptUsage } from '@renderer/services/TokenService'
@@ -434,12 +434,11 @@ export function useMessageOperations(topic: Topic) {
 
   /**
    * 删除消息并支持撤销操作。
-   * Deletes a message with undo support via ClipboardService.
+   * Deletes a single message with undo support via ClipboardService.
    */
   const deleteMessageWithUndo = useCallback(
     async (message: Message) => {
-      const groupId = message.role === 'user' ? message.id : (message.askId ?? message.id)
-      await deleteSelectedMessages(dispatch, store.getState, topic.id, [groupId])
+      await deleteSingleMessage(dispatch, store.getState, topic.id, message)
     },
     [dispatch, topic.id]
   )
