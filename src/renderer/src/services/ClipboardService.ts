@@ -18,7 +18,7 @@ const logger = loggerService.withContext('ClipboardService')
  * If the target message is part of an assistant group, insert after the last message in the group.
  */
 function calculateInsertIndex(messages: Message[], targetMessageId: string): number {
-  const targetIndex = messages.findIndex((m) => m.id === targetMessageId)
+  const targetIndex = messages.findIndex((m) => m.id === targetMessageId || m.askId === targetMessageId)
   if (targetIndex === -1) return messages.length
 
   const targetMessage = messages[targetIndex]
@@ -42,6 +42,32 @@ function calculateInsertIndex(messages: Message[], targetMessageId: string): num
 }
 
 /**
+ * Sort group IDs by the position of their first message in the messages array.
+ */
+function sortGroupIdsByPosition(messages: Message[], groupIds: string[]): string[] {
+  return [...groupIds].sort((a, b) => {
+    const aMessages = messages.filter((m) => m.askId === a || m.id === a)
+    const bMessages = messages.filter((m) => m.askId === b || m.id === b)
+    const aIndex = aMessages.length > 0 ? messages.findIndex((m) => m.id === aMessages[0].id) : -1
+    const bIndex = bMessages.length > 0 ? messages.findIndex((m) => m.id === bMessages[0].id) : -1
+    return aIndex - bIndex
+  })
+}
+
+/**
+ * Find the first message after `positionIndex` whose ID is not in `excludedIds`.
+ * Returns the message ID, or null if no such message exists.
+ */
+function findAnchorAfterPosition(messages: Message[], positionIndex: number, excludedIds: Set<string>): string | null {
+  for (let i = positionIndex; i < messages.length; i++) {
+    if (!excludedIds.has(messages[i].id)) {
+      return messages[i].id
+    }
+  }
+  return null
+}
+
+/**
  * Copy selected message groups to clipboard.
  * Returns the number of item groups copied.
  */
@@ -58,9 +84,12 @@ export function copyMessages(
     return 0
   }
 
+  // Sort selected groups by their position in the source topic to preserve original order
+  const sortedGroupIds = sortGroupIdsByPosition(messages, selectedGroupIds)
+
   const items: ClipboardItem[] = []
 
-  for (const askId of selectedGroupIds) {
+  for (const askId of sortedGroupIds) {
     const groupMessages = messages.filter((m) => m.askId === askId || m.id === askId)
 
     if (groupMessages.length === 0) continue
@@ -115,9 +144,12 @@ export function cutMessages(
     return 0
   }
 
+  // Sort selected groups by their position in the source topic to preserve original order
+  const sortedGroupIds = sortGroupIdsByPosition(messages, selectedGroupIds)
+
   const items: ClipboardItem[] = []
 
-  for (const askId of selectedGroupIds) {
+  for (const askId of sortedGroupIds) {
     const groupMessages = messages.filter((m) => m.askId === askId || m.id === askId)
 
     if (groupMessages.length === 0) continue
@@ -165,12 +197,15 @@ export async function pasteMessages(
   targetMessageId: string
 ): Promise<number> {
   const state = getState()
-  const { items, mode, sourceTopicId } = state.clipboard
+  const { items: rawItems, mode, sourceTopicId } = state.clipboard
 
-  if (items.length === 0) {
+  if (rawItems.length === 0) {
     logger.warn('[pasteMessages] Clipboard is empty')
     return 0
   }
+
+  // Sort items by their original position to preserve document order
+  const items = [...rawItems].sort((a, b) => a.positionIndex - b.positionIndex)
 
   const targetMessages = selectMessagesForTopic(state, targetTopicId)
 
@@ -236,6 +271,11 @@ export async function pasteMessages(
         const mappedAskId = idMapping.get(originalMsg.askId)
         if (mappedAskId) {
           newMessage.askId = mappedAskId
+        } else {
+          // Fallback: use the first message in this item as the group key
+          const firstMsgInItem = item.messages[0]
+          const mappedFirstId = idMapping.get(firstMsgInItem.id)
+          newMessage.askId = mappedFirstId || newMsgId
         }
       }
 
@@ -272,6 +312,8 @@ export async function pasteMessages(
   }
 
   // If cut mode: remove source messages
+  let sourceAnchorMessageId: string | null = null
+  let sourceMinIndex = 0
   if (mode === 'cut' && sourceTopicId) {
     const sourceState = getState()
     const sourceMessages = selectMessagesForTopic(sourceState, sourceTopicId)
@@ -287,6 +329,21 @@ export async function pasteMessages(
     }
 
     if (sourceMessageIdsToDelete.length > 0) {
+      // 计算 sourceTopic 的 anchor：被删区域之后的第一条未删除消息
+      const sourceDeletedIdSet = new Set(sourceMessageIdsToDelete)
+      let sourceMaxDeletedIndex = -1
+      for (let i = sourceMessages.length - 1; i >= 0; i--) {
+        if (sourceDeletedIdSet.has(sourceMessages[i].id)) {
+          sourceMaxDeletedIndex = i
+          break
+        }
+      }
+      sourceAnchorMessageId =
+        sourceMaxDeletedIndex >= 0
+          ? findAnchorAfterPosition(sourceMessages, sourceMaxDeletedIndex + 1, sourceDeletedIdSet)
+          : null
+      sourceMinIndex = sourceMaxDeletedIndex >= 0 ? sourceMaxDeletedIndex + 1 : 0
+
       dispatch(newMessagesActions.removeMessages({ topicId: sourceTopicId, messageIds: sourceMessageIdsToDelete }))
     }
     if (sourceBlockIdsToDelete.length > 0) {
@@ -304,17 +361,30 @@ export async function pasteMessages(
   }
 
   // Create undo action
+  // Calculate anchor: first non-pasted message after the paste region
+  const finalTargetMessages = selectMessagesForTopic(getState(), targetTopicId)
+  const afterInsertIndex = insertIndex
+  const insertedIdSet = new Set(insertedMessageIds)
+  const anchorMessageId = findAnchorAfterPosition(finalTargetMessages, afterInsertIndex, insertedIdSet)
+
   const undoAction: UndoAction = {
     id: uuidv4(),
     type: mode === 'cut' ? 'cut_paste' : 'paste',
     timestamp: Date.now(),
-    topicId: targetTopicId,
+    targetTopicId: targetTopicId,
     insertedMessageIds,
-    insertPositionIndex: insertIndex - insertedMessageIds.length,
-    deletedMessageIds: mode === 'cut' ? items.flatMap((item) => item.messages.map((m) => m.id)) : undefined,
-    deletedTopicId: mode === 'cut' && sourceTopicId ? sourceTopicId : undefined,
-    deletedMessagesSnapshot: mode === 'cut' ? items.flatMap((item) => item.messages) : undefined,
-    deletedBlocksSnapshot: mode === 'cut' ? items.flatMap((item) => item.blocks) : undefined,
+    targetInsertPositionIndex: insertIndex - insertedMessageIds.length,
+    targetAnchorMessageId: anchorMessageId,
+    // source 侧：cut 模式下记录源消息信息
+    sourceTopicId: mode === 'cut' && sourceTopicId ? sourceTopicId : undefined,
+    sourceAnchorMessageId: mode === 'cut' && sourceTopicId ? (sourceAnchorMessageId ?? null) : undefined,
+    sourceInsertPositionIndex: mode === 'cut' && sourceTopicId ? sourceMinIndex : undefined,
+    sourceMessageIds: mode === 'cut' ? items.flatMap((item) => item.messages.map((m) => m.id)) : undefined,
+    sourceMessagesSnapshot: mode === 'cut' ? items.flatMap((item) => item.messages) : undefined,
+    sourceBlocksSnapshot: mode === 'cut' ? items.flatMap((item) => item.blocks) : undefined,
+    // after 快照：粘贴后生成的新消息（新 ID）— copy 和 cut 都需要
+    pastedMessagesSnapshot: allInsertedMessages,
+    pastedBlocksSnapshot: allInsertedBlocks,
     fileReferenceDeltas
   }
 
@@ -386,6 +456,10 @@ export async function deleteSelectedMessages(
     }
   }
 
+  // Calculate anchor: first non-deleted message after the deleted region
+  const deletedIdSet = new Set(allMessageIds)
+  const anchorMessageId = findAnchorAfterPosition(messages, positionIndex, deletedIdSet)
+
   // Remove from Redux
   dispatch(newMessagesActions.removeMessages({ topicId, messageIds: allMessageIds }))
   if (allBlockIds.length > 0) {
@@ -405,11 +479,14 @@ export async function deleteSelectedMessages(
     id: uuidv4(),
     type: 'delete',
     timestamp: Date.now(),
-    topicId,
+    targetTopicId: topicId,
     insertedMessageIds: allMessageIds,
-    insertPositionIndex: positionIndex,
-    deletedMessagesSnapshot: allMessagesToDelete,
-    deletedBlocksSnapshot: allBlocksToDelete,
+    targetInsertPositionIndex: positionIndex,
+    targetAnchorMessageId: anchorMessageId,
+    // delete 操作的 source 侧就是同一个 topic
+    sourceTopicId: topicId,
+    sourceMessagesSnapshot: allMessagesToDelete,
+    sourceBlocksSnapshot: allBlocksToDelete,
     fileReferenceDeltas
   }
 

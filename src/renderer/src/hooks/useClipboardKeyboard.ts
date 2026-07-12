@@ -3,14 +3,40 @@ import { useEffect, useRef } from 'react'
 import { useEditMode } from './useEditMode'
 
 /**
+ * 检查当前焦点是否在文本输入元素上。
+ * 当焦点在输入框时，系统原生的复制/粘贴/剪切不应被拦截。
+ */
+function isTextInputFocused(): boolean {
+  const el = document.activeElement
+  if (!el || !(el instanceof HTMLElement)) return false
+
+  // contenteditable 元素
+  if (el.isContentEditable) return true
+
+  // TipTap / ProseMirror 编辑器
+  if (el.classList.contains('ProseMirror') || el.classList.contains('tiptap')) return true
+
+  if (el instanceof HTMLInputElement) {
+    const type = el.type
+    const textTypes = ['text', 'search', 'url', 'email', 'password', 'number']
+    // 无 type 或 type 在文本类型列表中
+    return !type || textTypes.includes(type)
+  }
+
+  if (el instanceof HTMLTextAreaElement) return true
+
+  return false
+}
+
+/**
  * 注册编辑模式的键盘快捷键
+ * 当焦点在文本输入框时，所有快捷键让渡给浏览器原生处理。
  * - Ctrl+C / Cmd+C: 复制
  * - Ctrl+X / Cmd+X: 剪切
  * - Ctrl+V / Cmd+V: 粘贴
  * - Cmd+Backspace / Ctrl+Backspace: 删除
  * - Ctrl+Z / Cmd+Z: 撤销
  * - Ctrl+Shift+Z / Cmd+Shift+Z: 重做
- * - Escape: 退出编辑模式
  */
 export function useClipboardKeyboard(topicId: string) {
   const editMode = useEditMode(topicId)
@@ -23,8 +49,7 @@ export function useClipboardKeyboard(topicId: string) {
     handlePaste: editMode.handlePaste,
     handleDelete: editMode.handleDelete,
     handleUndo: editMode.handleUndo,
-    handleRedo: editMode.handleRedo,
-    toggleEditMode: editMode.toggleEditMode
+    handleRedo: editMode.handleRedo
   })
 
   // 每次渲染更新 ref
@@ -35,8 +60,7 @@ export function useClipboardKeyboard(topicId: string) {
       handlePaste: editMode.handlePaste,
       handleDelete: editMode.handleDelete,
       handleUndo: editMode.handleUndo,
-      handleRedo: editMode.handleRedo,
-      toggleEditMode: editMode.toggleEditMode
+      handleRedo: editMode.handleRedo
     }
   })
 
@@ -47,12 +71,11 @@ export function useClipboardKeyboard(topicId: string) {
       const isMod = e.metaKey || e.ctrlKey
       const cbs = callbacksRef.current
 
+      // 统一守卫：焦点在文本输入框时，让浏览器原生处理所有快捷键
+      if (isTextInputFocused()) return
+
       // Ctrl+Z / Cmd+Z: 撤销
       if (isMod && e.key === 'z' && !e.shiftKey) {
-        // 检查是否有 TipTap 编辑器聚焦
-        const isEditorFocused = document.querySelector('.tiptap:focus, .ProseMirror:focus') !== null
-        if (isEditorFocused) return // 让 TipTap 处理
-
         e.preventDefault()
         void cbs.handleUndo()
         return
@@ -60,9 +83,6 @@ export function useClipboardKeyboard(topicId: string) {
 
       // Ctrl+Shift+Z / Cmd+Shift+Z: 重做
       if (isMod && e.key === 'z' && e.shiftKey) {
-        const isEditorFocused = document.querySelector('.tiptap:focus, .ProseMirror:focus') !== null
-        if (isEditorFocused) return
-
         e.preventDefault()
         void cbs.handleRedo()
         return
@@ -93,13 +113,6 @@ export function useClipboardKeyboard(topicId: string) {
       if (isMod && e.key === 'Backspace') {
         e.preventDefault()
         void cbs.handleDelete()
-        return
-      }
-
-      // Escape: 退出编辑模式
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        cbs.toggleEditMode(false)
         return
       }
     }

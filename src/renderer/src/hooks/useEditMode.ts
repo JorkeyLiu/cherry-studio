@@ -119,13 +119,21 @@ export function useEditMode(topicId: string) {
         window.toast.info(i18n.t('chat.edit.clipboardEmpty'))
         return
       }
-      if (selectedGroupIds.length === 0) {
-        window.toast.warning(i18n.t('chat.edit.selectFirst'))
-        return
+      // Find the visually last selected group (highest position in topic)
+      let lastSelectedAskId = ''
+      if (selectedGroupIds.length > 0) {
+        let maxIndex = -1
+        for (const askId of selectedGroupIds) {
+          const groupIndex = groups.findIndex((g) => g.askId === askId)
+          if (groupIndex > maxIndex) {
+            maxIndex = groupIndex
+            lastSelectedAskId = askId
+          }
+        }
+        if (!lastSelectedAskId) {
+          lastSelectedAskId = selectedGroupIds[selectedGroupIds.length - 1]
+        }
       }
-
-      // 粘贴到最后一条选中消息之后
-      const lastSelectedAskId = selectedGroupIds[selectedGroupIds.length - 1]
       const count = await pasteMessages(dispatch, store.getState, topicId, lastSelectedAskId)
       if (count > 0) {
         window.toast.success(i18n.t('chat.edit.pasted', { count }))
@@ -134,7 +142,7 @@ export function useEditMode(topicId: string) {
     } finally {
       isProcessingRef.current = false
     }
-  }, [dispatch, isEnabled, topicId, clipboard, selectedGroupIds])
+  }, [dispatch, isEnabled, topicId, clipboard, selectedGroupIds, groups])
 
   // 删除
   const handleDelete = useCallback(async () => {

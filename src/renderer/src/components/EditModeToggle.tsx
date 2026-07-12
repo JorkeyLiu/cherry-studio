@@ -32,6 +32,10 @@ const StyledNavbarIcon = styled(NavbarIcon)<{ $active: boolean }>`
     .lucide {
       color: var(--color-icon-white);
     }
+    &:hover {
+      background-color: var(--color-primary);
+      opacity: 0.85;
+    }
   `}
 `
 

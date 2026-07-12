@@ -2,13 +2,30 @@ import { loggerService } from '@logger'
 import { dbService } from '@renderer/services/db'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
-import { newMessagesActions } from '@renderer/store/newMessage'
+import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
 import { deleteMessagesFromDB, saveMessageAndBlocksToDB } from '@renderer/store/thunk/messageThunk'
 import { prepareRedo, prepareUndo } from '@renderer/store/undoStack'
 import type { UndoAction } from '@renderer/types/editMode'
 import { MessageBlockType } from '@renderer/types/newMessage'
 
 const logger = loggerService.withContext('UndoService')
+
+/**
+ * Resolve anchor message ID to a current insertion index.
+ * If anchor exists, insert before it. Otherwise append at end.
+ */
+function resolveAnchorIndex(
+  getState: () => RootState,
+  topicId: string,
+  anchorMessageId: string | null | undefined,
+  fallbackIndex: number
+): number {
+  if (!anchorMessageId) return fallbackIndex
+  const messages = selectMessagesForTopic(getState(), topicId)
+  const anchorIdx = messages.findIndex((m) => m.id === anchorMessageId)
+  if (anchorIdx >= 0) return anchorIdx
+  return messages.length // 锚点不存在，追加到末尾
+}
 
 /**
  * Update file reference counts in DB
@@ -107,12 +124,13 @@ export async function executeRedo(dispatch: AppDispatch, getState: () => RootSta
 /**
  * Undo delete = re-insert deleted messages and blocks
  */
-async function undoDelete(dispatch: AppDispatch, _getState: () => RootState, action: UndoAction): Promise<void> {
+async function undoDelete(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
   const {
-    topicId,
-    deletedMessagesSnapshot = [],
-    deletedBlocksSnapshot = [],
-    insertPositionIndex,
+    targetTopicId,
+    sourceMessagesSnapshot: deletedMessagesSnapshot = [],
+    sourceBlocksSnapshot: deletedBlocksSnapshot = [],
+    targetInsertPositionIndex: insertPositionIndex,
+    targetAnchorMessageId: anchorMessageId,
     fileReferenceDeltas = []
   } = action
 
@@ -126,12 +144,15 @@ async function undoDelete(dispatch: AppDispatch, _getState: () => RootState, act
     dispatch(upsertManyBlocks(deletedBlocksSnapshot))
   }
 
+  // Resolve insertion position from anchor
+  const resolvedIndex = resolveAnchorIndex(getState, targetTopicId, anchorMessageId, insertPositionIndex)
+
   // Insert messages back to Redux in order
-  let index = insertPositionIndex
+  let index = resolvedIndex
   for (const message of deletedMessagesSnapshot) {
     dispatch(
       newMessagesActions.insertMessageAtIndex({
-        topicId,
+        topicId: targetTopicId,
         message,
         index
       })
@@ -143,7 +164,7 @@ async function undoDelete(dispatch: AppDispatch, _getState: () => RootState, act
   for (let i = 0; i < deletedMessagesSnapshot.length; i++) {
     const message = deletedMessagesSnapshot[i]
     const blocksForMessage = deletedBlocksSnapshot.filter((b) => b.messageId === message.id)
-    await saveMessageAndBlocksToDB(topicId, message, blocksForMessage, insertPositionIndex + i)
+    await saveMessageAndBlocksToDB(targetTopicId, message, blocksForMessage, resolvedIndex + i)
   }
 
   // Restore file reference counts (undo delete → need +1, deltas are -1 so use false to negate)
@@ -151,14 +172,14 @@ async function undoDelete(dispatch: AppDispatch, _getState: () => RootState, act
     await updateFileReferenceCounts(fileReferenceDeltas, false)
   }
 
-  logger.info(`[undoDelete] Restored ${deletedMessagesSnapshot.length} messages`)
+  logger.info(`[undoDelete] Restored ${deletedMessagesSnapshot.length} messages at resolved index ${resolvedIndex}`)
 }
 
 /**
  * Undo paste = remove the pasted messages
  */
 async function undoPaste(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
-  const { topicId, insertedMessageIds = [], fileReferenceDeltas = [] } = action
+  const { targetTopicId, insertedMessageIds = [], fileReferenceDeltas = [] } = action
 
   if (insertedMessageIds.length === 0) {
     logger.warn('[undoPaste] No message IDs to remove')
@@ -176,7 +197,7 @@ async function undoPaste(dispatch: AppDispatch, getState: () => RootState, actio
   }
 
   // Remove messages from Redux
-  dispatch(newMessagesActions.removeMessages({ topicId, messageIds: insertedMessageIds }))
+  dispatch(newMessagesActions.removeMessages({ topicId: targetTopicId, messageIds: insertedMessageIds }))
 
   // Remove blocks from Redux
   if (blockIdsToRemove.length > 0) {
@@ -184,7 +205,7 @@ async function undoPaste(dispatch: AppDispatch, getState: () => RootState, actio
   }
 
   // Delete from DB
-  await deleteMessagesFromDB(topicId, insertedMessageIds)
+  await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
 
   // Decrement file reference counts
   if (fileReferenceDeltas.length > 0) {
@@ -202,22 +223,36 @@ async function undoCutPaste(dispatch: AppDispatch, getState: () => RootState, ac
   await undoPaste(dispatch, getState, action)
 
   // Second: restore the deleted source messages (the ones that were cut)
-  const { deletedMessagesSnapshot = [], deletedBlocksSnapshot = [], deletedTopicId, insertPositionIndex } = action
+  const {
+    sourceMessagesSnapshot: deletedMessagesSnapshot = [],
+    sourceBlocksSnapshot: deletedBlocksSnapshot = [],
+    sourceTopicId: actionSourceTopicId,
+    sourceInsertPositionIndex,
+    sourceAnchorMessageId
+  } = action
 
   if (deletedMessagesSnapshot.length === 0) {
     logger.warn('[undoCutPaste] No source messages to restore')
     return
   }
 
-  const sourceTopicId = deletedTopicId || action.topicId
+  const sourceTopicId = actionSourceTopicId || action.targetTopicId
 
   // Restore blocks to Redux
   if (deletedBlocksSnapshot.length > 0) {
     dispatch(upsertManyBlocks(deletedBlocksSnapshot))
   }
 
+  // Resolve insertion position from source anchor
+  const resolvedIndex = resolveAnchorIndex(
+    getState,
+    sourceTopicId,
+    sourceAnchorMessageId,
+    sourceInsertPositionIndex ?? 0
+  )
+
   // Insert source messages back to source topic
-  let index = insertPositionIndex
+  let index = resolvedIndex
   for (const message of deletedMessagesSnapshot) {
     dispatch(
       newMessagesActions.insertMessageAtIndex({
@@ -233,7 +268,7 @@ async function undoCutPaste(dispatch: AppDispatch, getState: () => RootState, ac
   for (let i = 0; i < deletedMessagesSnapshot.length; i++) {
     const message = deletedMessagesSnapshot[i]
     const blocksForMessage = deletedBlocksSnapshot.filter((b) => b.messageId === message.id)
-    await saveMessageAndBlocksToDB(sourceTopicId, message, blocksForMessage, insertPositionIndex + i)
+    await saveMessageAndBlocksToDB(sourceTopicId, message, blocksForMessage, resolvedIndex + i)
   }
 
   // Restore file reference counts for source message blocks
@@ -259,7 +294,7 @@ async function undoCutPaste(dispatch: AppDispatch, getState: () => RootState, ac
  * Redo delete = re-delete the messages again
  */
 async function redoDelete(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
-  const { topicId, insertedMessageIds = [], fileReferenceDeltas = [] } = action
+  const { targetTopicId, insertedMessageIds = [], fileReferenceDeltas = [] } = action
 
   if (insertedMessageIds.length === 0) {
     return
@@ -276,7 +311,7 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
   }
 
   // Remove messages from Redux
-  dispatch(newMessagesActions.removeMessages({ topicId, messageIds: insertedMessageIds }))
+  dispatch(newMessagesActions.removeMessages({ topicId: targetTopicId, messageIds: insertedMessageIds }))
 
   // Remove blocks from Redux
   if (blockIdsToRemove.length > 0) {
@@ -284,7 +319,7 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
   }
 
   // Delete from DB
-  await deleteMessagesFromDB(topicId, insertedMessageIds)
+  await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
 
   // Re-decrement file reference counts (redo delete → need -1, deltas are -1 so use true to keep -1)
   if (fileReferenceDeltas.length > 0) {
@@ -295,33 +330,37 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
 }
 
 /**
- * Redo paste = re-insert the pasted messages
+ * Redo paste = re-insert the pasted messages using after snapshots (new IDs)
  */
-async function redoPaste(dispatch: AppDispatch, _getState: () => RootState, action: UndoAction): Promise<void> {
-  // Redo paste = re-insert the messages (same as undo delete)
+async function redoPaste(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
   const {
-    topicId,
-    deletedMessagesSnapshot = [],
-    deletedBlocksSnapshot = [],
-    insertPositionIndex,
+    targetTopicId,
+    pastedMessagesSnapshot = [],
+    pastedBlocksSnapshot = [],
+    targetInsertPositionIndex: insertPositionIndex,
+    targetAnchorMessageId: anchorMessageId,
     fileReferenceDeltas = []
   } = action
 
-  if (deletedMessagesSnapshot.length === 0) {
+  if (pastedMessagesSnapshot.length === 0) {
+    logger.warn('[redoPaste] No pasted messages snapshot to restore')
     return
   }
 
   // Restore blocks to Redux
-  if (deletedBlocksSnapshot.length > 0) {
-    dispatch(upsertManyBlocks(deletedBlocksSnapshot))
+  if (pastedBlocksSnapshot.length > 0) {
+    dispatch(upsertManyBlocks(pastedBlocksSnapshot))
   }
 
-  // Insert messages back
-  let index = insertPositionIndex
-  for (const message of deletedMessagesSnapshot) {
+  // Resolve insertion position from anchor
+  const resolvedIndex = resolveAnchorIndex(getState, targetTopicId, anchorMessageId, insertPositionIndex)
+
+  // Insert pasted messages back (with their NEW IDs)
+  let index = resolvedIndex
+  for (const message of pastedMessagesSnapshot) {
     dispatch(
       newMessagesActions.insertMessageAtIndex({
-        topicId,
+        topicId: targetTopicId,
         message,
         index
       })
@@ -330,40 +369,43 @@ async function redoPaste(dispatch: AppDispatch, _getState: () => RootState, acti
   }
 
   // Persist to DB
-  for (let i = 0; i < deletedMessagesSnapshot.length; i++) {
-    const message = deletedMessagesSnapshot[i]
-    const blocksForMessage = deletedBlocksSnapshot.filter((b) => b.messageId === message.id)
-    await saveMessageAndBlocksToDB(topicId, message, blocksForMessage, insertPositionIndex + i)
+  for (let i = 0; i < pastedMessagesSnapshot.length; i++) {
+    const message = pastedMessagesSnapshot[i]
+    const blocksForMessage = pastedBlocksSnapshot.filter((b) => b.messageId === message.id)
+    await saveMessageAndBlocksToDB(targetTopicId, message, blocksForMessage, resolvedIndex + i)
   }
 
-  // Restore file reference counts
+  // Re-increment file reference counts
   if (fileReferenceDeltas.length > 0) {
     await updateFileReferenceCounts(fileReferenceDeltas, true)
   }
 
-  logger.info(`[redoPaste] Re-inserted ${deletedMessagesSnapshot.length} messages`)
+  logger.info(
+    `[redoPaste] Re-inserted ${pastedMessagesSnapshot.length} pasted messages at resolved index ${resolvedIndex}`
+  )
 }
 
 /**
- * Redo cut_paste = re-execute the cut+paste
+ * Redo cut_paste = re-execute the cut+paste using snapshots
  */
 async function redoCutPaste(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
-  // Redo cut_paste: delete source messages + re-insert to target
   const {
-    topicId,
-    deletedMessagesSnapshot = [],
-    deletedBlocksSnapshot = [],
-    deletedTopicId,
-    insertPositionIndex,
+    targetTopicId,
+    pastedMessagesSnapshot = [],
+    pastedBlocksSnapshot = [],
+    sourceMessagesSnapshot: deletedMessagesSnapshot = [],
+    sourceBlocksSnapshot: deletedBlocksSnapshot = [],
+    sourceTopicId: actionSourceTopicId,
+    targetInsertPositionIndex: insertPositionIndex,
+    targetAnchorMessageId: anchorMessageId,
     fileReferenceDeltas = []
   } = action
 
-  const sourceTopicId = deletedTopicId || action.topicId
+  const sourceTopicId = actionSourceTopicId || action.targetTopicId
 
-  // Delete source messages from Redux
-  const sourceMsgIds = deletedMessagesSnapshot.map((m) => m.id)
-  if (sourceMsgIds.length > 0) {
-    // Collect block IDs BEFORE dispatching removeMessages to avoid orphaning
+  // Step 1: Delete source messages (using ORIGINAL IDs from deletedMessagesSnapshot)
+  if (deletedMessagesSnapshot.length > 0) {
+    const sourceMsgIds = deletedMessagesSnapshot.map((m) => m.id)
     const stateBefore = getState()
     const blockIdsToRemove: string[] = []
     for (const msgId of sourceMsgIds) {
@@ -374,42 +416,40 @@ async function redoCutPaste(dispatch: AppDispatch, getState: () => RootState, ac
     }
 
     dispatch(newMessagesActions.removeMessages({ topicId: sourceTopicId, messageIds: sourceMsgIds }))
-
-    // Remove source blocks from Redux
     if (blockIdsToRemove.length > 0) {
       dispatch(removeManyBlocks(blockIdsToRemove))
     }
-
-    // Delete source messages from DB
     await deleteMessagesFromDB(sourceTopicId, sourceMsgIds)
 
-    // Decrement file reference counts for source message blocks
+    // Decrement file reference counts for source blocks
     const sourceFileDeltas: Array<{ fileId: string; delta: number }> = []
     for (const block of deletedBlocksSnapshot) {
       if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
         const file = (block as any).file
         if (file) {
-          sourceFileDeltas.push({ fileId: file.id, delta: 1 })
+          sourceFileDeltas.push({ fileId: file.id, delta: -1 })
         }
       }
     }
     if (sourceFileDeltas.length > 0) {
-      await updateFileReferenceCounts(sourceFileDeltas, false)
+      await updateFileReferenceCounts(sourceFileDeltas, true)
     }
   }
 
-  // Re-insert messages to target topic
-  if (deletedMessagesSnapshot.length > 0) {
-    // Restore blocks to Redux (re-use the snapshot)
-    if (deletedBlocksSnapshot.length > 0) {
-      dispatch(upsertManyBlocks(deletedBlocksSnapshot))
+  // Step 2: Re-insert pasted messages to target topic (using NEW IDs from pastedMessagesSnapshot)
+  if (pastedMessagesSnapshot.length > 0) {
+    if (pastedBlocksSnapshot.length > 0) {
+      dispatch(upsertManyBlocks(pastedBlocksSnapshot))
     }
 
-    let index = insertPositionIndex
-    for (const message of deletedMessagesSnapshot) {
+    // Resolve insertion position from anchor
+    const resolvedIndex = resolveAnchorIndex(getState, targetTopicId, anchorMessageId, insertPositionIndex)
+
+    let index = resolvedIndex
+    for (const message of pastedMessagesSnapshot) {
       dispatch(
         newMessagesActions.insertMessageAtIndex({
-          topicId,
+          topicId: targetTopicId,
           message,
           index
         })
@@ -417,20 +457,19 @@ async function redoCutPaste(dispatch: AppDispatch, getState: () => RootState, ac
       index++
     }
 
-    // Persist to DB
-    for (let i = 0; i < deletedMessagesSnapshot.length; i++) {
-      const message = deletedMessagesSnapshot[i]
-      const blocksForMessage = deletedBlocksSnapshot.filter((b) => b.messageId === message.id)
-      await saveMessageAndBlocksToDB(topicId, message, blocksForMessage, insertPositionIndex + i)
+    for (let i = 0; i < pastedMessagesSnapshot.length; i++) {
+      const message = pastedMessagesSnapshot[i]
+      const blocksForMessage = pastedBlocksSnapshot.filter((b) => b.messageId === message.id)
+      await saveMessageAndBlocksToDB(targetTopicId, message, blocksForMessage, resolvedIndex + i)
     }
 
-    // Increment file reference counts for pasted blocks
+    // Re-increment file reference counts for pasted blocks
     if (fileReferenceDeltas.length > 0) {
       await updateFileReferenceCounts(fileReferenceDeltas, true)
     }
   }
 
   logger.info(
-    `[redoCutPaste] Re-executed cut+paste: ${sourceMsgIds.length} messages from ${sourceTopicId} to ${topicId}`
+    `[redoCutPaste] Re-executed cut+paste: ${deletedMessagesSnapshot.length} source messages deleted, ${pastedMessagesSnapshot.length} messages re-inserted`
   )
 }

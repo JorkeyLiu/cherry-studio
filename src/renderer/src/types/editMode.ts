@@ -38,13 +38,25 @@ export interface UndoAction {
   id: string
   type: UndoActionType
   timestamp: number
-  topicId: string
+
+  // target 侧：粘贴目标 / 删除操作所在 topic
+  targetTopicId: string
+  targetAnchorMessageId?: string | null
+  targetInsertPositionIndex: number
+
+  // source 侧：cut 的源 topic / 被删除消息的来源
+  sourceTopicId?: string
+  sourceAnchorMessageId?: string | null // cut 前从 sourceTopic 计算
+  sourceInsertPositionIndex?: number // source 侧的 fallback
+  sourceMessagesSnapshot?: Message[]
+  sourceBlocksSnapshot?: MessageBlock[]
+  sourceMessageIds?: string[]
+
+  // 插入侧快照（新生成的消息）
   insertedMessageIds: string[]
-  insertPositionIndex: number
-  deletedMessageIds?: string[]
-  deletedTopicId?: string
-  deletedMessagesSnapshot?: Message[]
-  deletedBlocksSnapshot?: MessageBlock[]
+  pastedMessagesSnapshot?: Message[]
+  pastedBlocksSnapshot?: MessageBlock[]
+
   fileReferenceDeltas?: Array<{ fileId: string; delta: number }>
 }
 

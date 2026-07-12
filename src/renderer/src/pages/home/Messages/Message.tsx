@@ -119,6 +119,7 @@ const MessageItem: FC<Props> = ({
   const handleMessageClick = useCallback(
     (e: React.MouseEvent) => {
       if (!isEditMode || !onGroupClick) return
+      e.stopPropagation()
       const askId = message.role === 'user' ? message.id : message.askId || message.id
       if (!askId) return
       const isCtrl = e.metaKey || e.ctrlKey
@@ -229,7 +230,7 @@ const MessageItem: FC<Props> = ({
             </MessageErrorBoundary>
           </MessageContentContainer>
           {showMenubar && (
-            <MessageFooter className="MessageFooter">
+            <MessageFooter className="MessageFooter" onClick={(e) => e.stopPropagation()}>
               <HorizontalScrollContainer
                 classNames={{
                   content: cn(
