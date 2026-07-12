@@ -39,7 +39,7 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         existingGroup.messages.push(msg)
       } else {
         // 没有对应的 user 消息，作为独立组
-        currentGroup = { askId: msg.id, messages: [msg], startIndex: i }
+        currentGroup = { askId: msg.askId, messages: [msg], startIndex: i }
         groups.push(currentGroup)
       }
     } else if (msg.role === 'system') {
