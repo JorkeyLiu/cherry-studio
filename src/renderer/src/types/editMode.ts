@@ -28,37 +28,65 @@ export interface EditModeState {
   enabled: boolean
   selectedGroupIds: string[] // askId 列表
   lastSelectedIndex: number | null // Shift 区域选的锚点
+  isProcessing: boolean // 全局操作锁
+}
+
+/** Per-group position anchor for restoring non-contiguous selections */
+export interface GroupAnchor {
+  /** Messages in this group (full snapshots for undo) */
+  messages: Message[]
+  /** Blocks for messages in this group */
+  blocks: MessageBlock[]
+  /** Original position index in the topic */
+  positionIndex: number
+  /** First non-deleted message after this group (null if at end) */
+  anchorMessageId: string | null
 }
 
 // 撤销操作类型
 export type UndoActionType = 'paste' | 'delete' | 'cut_paste'
 
-// 撤销操作
-export interface UndoAction {
+interface BaseUndoAction {
   id: string
   type: UndoActionType
   timestamp: number
-
-  // target 侧：粘贴目标 / 删除操作所在 topic
+  /** Topic where the operation's primary effect occurs */
   targetTopicId: string
-  targetAnchorMessageId?: string | null
-  targetInsertPositionIndex: number
-
-  // source 侧：cut 的源 topic / 被删除消息的来源
-  sourceTopicId?: string
-  sourceAnchorMessageId?: string | null // cut 前从 sourceTopic 计算
-  sourceInsertPositionIndex?: number // source 侧的 fallback
-  sourceMessagesSnapshot?: Message[]
-  sourceBlocksSnapshot?: MessageBlock[]
-  sourceMessageIds?: string[]
-
-  // 插入侧快照（新生成的消息）
+  /** IDs of messages inserted by this operation (for undo removal / redo re-insert) */
   insertedMessageIds: string[]
-  pastedMessagesSnapshot?: Message[]
-  pastedBlocksSnapshot?: MessageBlock[]
-
-  fileReferenceDeltas?: Array<{ fileId: string; delta: number }>
+  /** Snapshot of inserted messages and blocks (for redo) */
+  pastedMessagesSnapshot: Message[]
+  pastedBlocksSnapshot: MessageBlock[]
+  fileReferenceDeltas: Array<{ fileId: string; delta: number }>
 }
+
+export interface DeleteUndoAction extends BaseUndoAction {
+  type: 'delete'
+  /** Per-group anchors for restoring deleted groups to their original positions */
+  groupAnchors: GroupAnchor[]
+}
+
+export interface PasteUndoAction extends BaseUndoAction {
+  type: 'paste'
+  /** Anchor message after the paste region (for redo positioning) */
+  targetAnchorMessageId: string | null
+  /** Fallback position index for redo */
+  targetInsertPositionIndex: number
+}
+
+export interface CutPasteUndoAction extends BaseUndoAction {
+  type: 'cut_paste'
+  /** Anchor message after the paste region in target topic (for redo paste positioning) */
+  targetAnchorMessageId: string | null
+  /** Fallback position index in target topic for redo */
+  targetInsertPositionIndex: number
+  /** Source topic ID */
+  sourceTopicId: string
+  /** Per-group anchors for restoring source groups to their original positions */
+  sourceGroupAnchors: GroupAnchor[]
+}
+
+export type UndoAction = DeleteUndoAction | PasteUndoAction | CutPasteUndoAction
 
 // 撤销栈 state
 export interface UndoStackState {

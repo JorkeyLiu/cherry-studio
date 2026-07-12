@@ -5,7 +5,14 @@ import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
 import { deleteMessagesFromDB, saveMessageAndBlocksToDB } from '@renderer/store/thunk/messageThunk'
 import { prepareRedo, prepareUndo } from '@renderer/store/undoStack'
-import type { UndoAction } from '@renderer/types/editMode'
+import type {
+  CutPasteUndoAction,
+  DeleteUndoAction,
+  GroupAnchor,
+  PasteUndoAction,
+  UndoAction
+} from '@renderer/types/editMode'
+import type { MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 
 const logger = loggerService.withContext('UndoService')
@@ -41,6 +48,62 @@ async function updateFileReferenceCounts(
 }
 
 /**
+ * Restore groups using per-group anchors.
+ * Inserts in reverse position order so earlier positions aren't shifted.
+ */
+async function restoreGroupsByAnchors(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  groupAnchors: GroupAnchor[],
+  allBlocks: MessageBlock[]
+): Promise<void> {
+  // Sort by position descending so we insert from the end first
+  const sorted = [...groupAnchors].sort((a, b) => b.positionIndex - a.positionIndex)
+
+  // Phase 1: DB operations (before any Redux dispatches)
+  // Resolve insertion indices based on current Redux state (unchanged at this point)
+  const resolvedGroups: Array<{ anchor: GroupAnchor; insertIdx: number }> = []
+  for (const anchor of sorted) {
+    let insertIdx: number
+    if (anchor.anchorMessageId) {
+      const messages = selectMessagesForTopic(getState(), topicId)
+      const anchorIdx = messages.findIndex((m) => m.id === anchor.anchorMessageId)
+      insertIdx = anchorIdx >= 0 ? anchorIdx : messages.length
+    } else {
+      insertIdx = Math.min(anchor.positionIndex, selectMessagesForTopic(getState(), topicId).length)
+    }
+    resolvedGroups.push({ anchor, insertIdx })
+
+    // Persist to DB
+    for (let i = 0; i < anchor.messages.length; i++) {
+      const message = anchor.messages[i]
+      const blocksForMessage = allBlocks.filter((b) => b.messageId === message.id)
+      await saveMessageAndBlocksToDB(topicId, message, blocksForMessage, insertIdx + i)
+    }
+  }
+
+  // Phase 2: Redux dispatches (after all DB operations succeed)
+  for (const { anchor, insertIdx } of resolvedGroups) {
+    // Restore blocks
+    if (anchor.blocks.length > 0) {
+      dispatch(upsertManyBlocks(anchor.blocks))
+    }
+
+    // Insert messages
+    for (let i = 0; i < anchor.messages.length; i++) {
+      dispatch(
+        newMessagesActions.insertMessageAtIndex({
+          topicId,
+          message: anchor.messages[i],
+          index: insertIdx + i
+        })
+      )
+    }
+  }
+}
+
+/**
  * Execute undo operation based on the top action in undoStack.
  * Returns the undone action for toast display, or null if nothing to undo.
  */
@@ -69,6 +132,10 @@ export async function executeUndo(dispatch: AppDispatch, getState: () => RootSta
       case 'cut_paste':
         await undoCutPaste(dispatch, getState, action)
         break
+      default: {
+        const _exhaustive: never = action
+        throw new Error(`[executeUndo] Unknown action type: ${(_exhaustive as any).type}`)
+      }
     }
   } catch (error) {
     logger.error('[undo] Failed:', error as Error)
@@ -108,6 +175,10 @@ export async function executeRedo(dispatch: AppDispatch, getState: () => RootSta
       case 'cut_paste':
         await redoCutPaste(dispatch, getState, action)
         break
+      default: {
+        const _exhaustive: never = action
+        throw new Error(`[executeRedo] Unknown action type: ${(_exhaustive as any).type}`)
+      }
     }
   } catch (error) {
     logger.error('[redo] Failed:', error as Error)
@@ -124,61 +195,35 @@ export async function executeRedo(dispatch: AppDispatch, getState: () => RootSta
 /**
  * Undo delete = re-insert deleted messages and blocks
  */
-async function undoDelete(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
-  const {
-    targetTopicId,
-    sourceMessagesSnapshot: deletedMessagesSnapshot = [],
-    sourceBlocksSnapshot: deletedBlocksSnapshot = [],
-    targetInsertPositionIndex: insertPositionIndex,
-    targetAnchorMessageId: anchorMessageId,
-    fileReferenceDeltas = []
-  } = action
+async function undoDelete(dispatch: AppDispatch, getState: () => RootState, action: DeleteUndoAction): Promise<void> {
+  const { targetTopicId, groupAnchors, fileReferenceDeltas = [] } = action
 
-  if (deletedMessagesSnapshot.length === 0) {
-    logger.warn('[undoDelete] No messages in snapshot to restore')
+  if (groupAnchors.length === 0) {
+    logger.warn('[undoDelete] No group anchors to restore')
     return
   }
 
-  // Restore blocks to Redux
-  if (deletedBlocksSnapshot.length > 0) {
-    dispatch(upsertManyBlocks(deletedBlocksSnapshot))
-  }
-
-  // Resolve insertion position from anchor
-  const resolvedIndex = resolveAnchorIndex(getState, targetTopicId, anchorMessageId, insertPositionIndex)
-
-  // Insert messages back to Redux in order
-  let index = resolvedIndex
-  for (const message of deletedMessagesSnapshot) {
-    dispatch(
-      newMessagesActions.insertMessageAtIndex({
-        topicId: targetTopicId,
-        message,
-        index
-      })
-    )
-    index++
-  }
-
-  // Persist to DB
-  for (let i = 0; i < deletedMessagesSnapshot.length; i++) {
-    const message = deletedMessagesSnapshot[i]
-    const blocksForMessage = deletedBlocksSnapshot.filter((b) => b.messageId === message.id)
-    await saveMessageAndBlocksToDB(targetTopicId, message, blocksForMessage, resolvedIndex + i)
-  }
-
-  // Restore file reference counts (undo delete → need +1, deltas are -1 so use false to negate)
+  // Restore file references
   if (fileReferenceDeltas.length > 0) {
     await updateFileReferenceCounts(fileReferenceDeltas, false)
   }
 
-  logger.info(`[undoDelete] Restored ${deletedMessagesSnapshot.length} messages at resolved index ${resolvedIndex}`)
+  // Restore groups using per-group anchors
+  const allBlocks = groupAnchors.flatMap((a) => a.blocks)
+  await restoreGroupsByAnchors(dispatch, getState, targetTopicId, groupAnchors, allBlocks)
+
+  const totalMessages = groupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
+  logger.info(`[undoDelete] Restored ${totalMessages} messages from ${groupAnchors.length} groups`)
 }
 
 /**
  * Undo paste = remove the pasted messages
  */
-async function undoPaste(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
+async function undoPaste(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  action: PasteUndoAction | CutPasteUndoAction
+): Promise<void> {
   const { targetTopicId, insertedMessageIds = [], fileReferenceDeltas = [] } = action
 
   if (insertedMessageIds.length === 0) {
@@ -186,7 +231,7 @@ async function undoPaste(dispatch: AppDispatch, getState: () => RootState, actio
     return
   }
 
-  // Collect block IDs BEFORE dispatching removeMessages to avoid orphaning
+  // Collect block IDs BEFORE any changes
   const stateBefore = getState()
   const blockIdsToRemove: string[] = []
   for (const msgId of insertedMessageIds) {
@@ -196,16 +241,21 @@ async function undoPaste(dispatch: AppDispatch, getState: () => RootState, actio
     }
   }
 
-  // Remove messages from Redux
+  // DB-first: delete from DB before dispatching to Redux
+  try {
+    await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
+  } catch (error) {
+    logger.error('[undoPaste] Failed to delete from DB', error as Error)
+    throw error
+  }
+
+  // Remove messages from Redux only after DB delete succeeds
   dispatch(newMessagesActions.removeMessages({ topicId: targetTopicId, messageIds: insertedMessageIds }))
 
   // Remove blocks from Redux
   if (blockIdsToRemove.length > 0) {
     dispatch(removeManyBlocks(blockIdsToRemove))
   }
-
-  // Delete from DB
-  await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
 
   // Decrement file reference counts
   if (fileReferenceDeltas.length > 0) {
@@ -218,66 +268,31 @@ async function undoPaste(dispatch: AppDispatch, getState: () => RootState, actio
 /**
  * Undo cut_paste = remove pasted messages + restore source messages
  */
-async function undoCutPaste(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
+async function undoCutPaste(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  action: CutPasteUndoAction
+): Promise<void> {
   // First: undo the paste part (remove pasted messages from target topic)
   await undoPaste(dispatch, getState, action)
 
-  // Second: restore the deleted source messages (the ones that were cut)
-  const {
-    sourceMessagesSnapshot: deletedMessagesSnapshot = [],
-    sourceBlocksSnapshot: deletedBlocksSnapshot = [],
-    sourceTopicId: actionSourceTopicId,
-    sourceInsertPositionIndex,
-    sourceAnchorMessageId
-  } = action
+  // Second: restore the deleted source messages using per-group anchors
+  const { sourceTopicId, sourceGroupAnchors } = action
 
-  if (deletedMessagesSnapshot.length === 0) {
-    logger.warn('[undoCutPaste] No source messages to restore')
+  if (sourceGroupAnchors.length === 0) {
+    logger.warn('[undoCutPaste] No source group anchors to restore')
     return
   }
 
-  const sourceTopicId = actionSourceTopicId || action.targetTopicId
-
-  // Restore blocks to Redux
-  if (deletedBlocksSnapshot.length > 0) {
-    dispatch(upsertManyBlocks(deletedBlocksSnapshot))
-  }
-
-  // Resolve insertion position from source anchor
-  const resolvedIndex = resolveAnchorIndex(
-    getState,
-    sourceTopicId,
-    sourceAnchorMessageId,
-    sourceInsertPositionIndex ?? 0
-  )
-
-  // Insert source messages back to source topic
-  let index = resolvedIndex
-  for (const message of deletedMessagesSnapshot) {
-    dispatch(
-      newMessagesActions.insertMessageAtIndex({
-        topicId: sourceTopicId,
-        message,
-        index
-      })
-    )
-    index++
-  }
-
-  // Persist source messages to DB
-  for (let i = 0; i < deletedMessagesSnapshot.length; i++) {
-    const message = deletedMessagesSnapshot[i]
-    const blocksForMessage = deletedBlocksSnapshot.filter((b) => b.messageId === message.id)
-    await saveMessageAndBlocksToDB(sourceTopicId, message, blocksForMessage, resolvedIndex + i)
-  }
-
-  // Restore file reference counts for source message blocks
+  // Restore file reference counts for source blocks
   const sourceFileDeltas: Array<{ fileId: string; delta: number }> = []
-  for (const block of deletedBlocksSnapshot) {
-    if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
-      const file = (block as any).file
-      if (file) {
-        sourceFileDeltas.push({ fileId: file.id, delta: 1 })
+  for (const anchor of sourceGroupAnchors) {
+    for (const block of anchor.blocks) {
+      if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
+        const file = (block as any).file
+        if (file) {
+          sourceFileDeltas.push({ fileId: file.id, delta: 1 })
+        }
       }
     }
   }
@@ -285,7 +300,12 @@ async function undoCutPaste(dispatch: AppDispatch, getState: () => RootState, ac
     await updateFileReferenceCounts(sourceFileDeltas, true)
   }
 
-  logger.info(`[undoCutPaste] Restored ${deletedMessagesSnapshot.length} source messages to ${sourceTopicId}`)
+  // Restore groups using per-group anchors
+  const allSourceBlocks = sourceGroupAnchors.flatMap((a) => a.blocks)
+  await restoreGroupsByAnchors(dispatch, getState, sourceTopicId, sourceGroupAnchors, allSourceBlocks)
+
+  const totalMessages = sourceGroupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
+  logger.info(`[undoCutPaste] Restored ${totalMessages} source messages to ${sourceTopicId}`)
 }
 
 // ==================== Redo Implementations ====================
@@ -293,14 +313,14 @@ async function undoCutPaste(dispatch: AppDispatch, getState: () => RootState, ac
 /**
  * Redo delete = re-delete the messages again
  */
-async function redoDelete(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
+async function redoDelete(dispatch: AppDispatch, getState: () => RootState, action: DeleteUndoAction): Promise<void> {
   const { targetTopicId, insertedMessageIds = [], fileReferenceDeltas = [] } = action
 
   if (insertedMessageIds.length === 0) {
     return
   }
 
-  // Collect block IDs BEFORE dispatching removeMessages to avoid orphaning
+  // Collect block IDs BEFORE any changes
   const stateBefore = getState()
   const blockIdsToRemove: string[] = []
   for (const msgId of insertedMessageIds) {
@@ -310,16 +330,21 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
     }
   }
 
-  // Remove messages from Redux
+  // DB-first: delete from DB before dispatching to Redux
+  try {
+    await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
+  } catch (error) {
+    logger.error('[redoDelete] Failed to delete from DB', error as Error)
+    throw error
+  }
+
+  // Remove messages from Redux only after DB delete succeeds
   dispatch(newMessagesActions.removeMessages({ topicId: targetTopicId, messageIds: insertedMessageIds }))
 
   // Remove blocks from Redux
   if (blockIdsToRemove.length > 0) {
     dispatch(removeManyBlocks(blockIdsToRemove))
   }
-
-  // Delete from DB
-  await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
 
   // Re-decrement file reference counts (redo delete → need -1, deltas are -1 so use true to keep -1)
   if (fileReferenceDeltas.length > 0) {
@@ -332,7 +357,7 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
 /**
  * Redo paste = re-insert the pasted messages using after snapshots (new IDs)
  */
-async function redoPaste(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
+async function redoPaste(dispatch: AppDispatch, getState: () => RootState, action: PasteUndoAction): Promise<void> {
   const {
     targetTopicId,
     pastedMessagesSnapshot = [],
@@ -347,13 +372,25 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
     return
   }
 
-  // Restore blocks to Redux
+  // Resolve insertion position from anchor (before any changes)
+  const resolvedIndex = resolveAnchorIndex(getState, targetTopicId, anchorMessageId, insertPositionIndex)
+
+  // DB-first: Persist to DB before dispatching to Redux
+  try {
+    for (let i = 0; i < pastedMessagesSnapshot.length; i++) {
+      const message = pastedMessagesSnapshot[i]
+      const blocksForMessage = pastedBlocksSnapshot.filter((b) => b.messageId === message.id)
+      await saveMessageAndBlocksToDB(targetTopicId, message, blocksForMessage, resolvedIndex + i)
+    }
+  } catch (error) {
+    logger.error('[redoPaste] Failed to save to DB', error as Error)
+    throw error
+  }
+
+  // Restore blocks to Redux only after DB write succeeds
   if (pastedBlocksSnapshot.length > 0) {
     dispatch(upsertManyBlocks(pastedBlocksSnapshot))
   }
-
-  // Resolve insertion position from anchor
-  const resolvedIndex = resolveAnchorIndex(getState, targetTopicId, anchorMessageId, insertPositionIndex)
 
   // Insert pasted messages back (with their NEW IDs)
   let index = resolvedIndex
@@ -366,13 +403,6 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
       })
     )
     index++
-  }
-
-  // Persist to DB
-  for (let i = 0; i < pastedMessagesSnapshot.length; i++) {
-    const message = pastedMessagesSnapshot[i]
-    const blocksForMessage = pastedBlocksSnapshot.filter((b) => b.messageId === message.id)
-    await saveMessageAndBlocksToDB(targetTopicId, message, blocksForMessage, resolvedIndex + i)
   }
 
   // Re-increment file reference counts
@@ -388,24 +418,25 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
 /**
  * Redo cut_paste = re-execute the cut+paste using snapshots
  */
-async function redoCutPaste(dispatch: AppDispatch, getState: () => RootState, action: UndoAction): Promise<void> {
+async function redoCutPaste(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  action: CutPasteUndoAction
+): Promise<void> {
   const {
     targetTopicId,
     pastedMessagesSnapshot = [],
     pastedBlocksSnapshot = [],
-    sourceMessagesSnapshot: deletedMessagesSnapshot = [],
-    sourceBlocksSnapshot: deletedBlocksSnapshot = [],
-    sourceTopicId: actionSourceTopicId,
+    sourceTopicId,
+    sourceGroupAnchors,
     targetInsertPositionIndex: insertPositionIndex,
     targetAnchorMessageId: anchorMessageId,
     fileReferenceDeltas = []
   } = action
 
-  const sourceTopicId = actionSourceTopicId || action.targetTopicId
-
-  // Step 1: Delete source messages (using ORIGINAL IDs from deletedMessagesSnapshot)
-  if (deletedMessagesSnapshot.length > 0) {
-    const sourceMsgIds = deletedMessagesSnapshot.map((m) => m.id)
+  // Step 1: Delete source messages (DB-first)
+  if (sourceGroupAnchors.length > 0) {
+    const sourceMsgIds = sourceGroupAnchors.flatMap((a) => a.messages.map((m) => m.id))
     const stateBefore = getState()
     const blockIdsToRemove: string[] = []
     for (const msgId of sourceMsgIds) {
@@ -415,19 +446,28 @@ async function redoCutPaste(dispatch: AppDispatch, getState: () => RootState, ac
       }
     }
 
+    // DB-first: delete from DB before dispatching to Redux
+    try {
+      await deleteMessagesFromDB(sourceTopicId, sourceMsgIds)
+    } catch (error) {
+      logger.error('[redoCutPaste] Failed to delete source messages from DB', error as Error)
+      throw error
+    }
+
     dispatch(newMessagesActions.removeMessages({ topicId: sourceTopicId, messageIds: sourceMsgIds }))
     if (blockIdsToRemove.length > 0) {
       dispatch(removeManyBlocks(blockIdsToRemove))
     }
-    await deleteMessagesFromDB(sourceTopicId, sourceMsgIds)
 
     // Decrement file reference counts for source blocks
     const sourceFileDeltas: Array<{ fileId: string; delta: number }> = []
-    for (const block of deletedBlocksSnapshot) {
-      if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
-        const file = (block as any).file
-        if (file) {
-          sourceFileDeltas.push({ fileId: file.id, delta: -1 })
+    for (const anchor of sourceGroupAnchors) {
+      for (const block of anchor.blocks) {
+        if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
+          const file = (block as any).file
+          if (file) {
+            sourceFileDeltas.push({ fileId: file.id, delta: -1 })
+          }
         }
       }
     }
@@ -436,14 +476,27 @@ async function redoCutPaste(dispatch: AppDispatch, getState: () => RootState, ac
     }
   }
 
-  // Step 2: Re-insert pasted messages to target topic (using NEW IDs from pastedMessagesSnapshot)
+  // Step 2: Re-insert pasted messages to target topic (DB-first)
   if (pastedMessagesSnapshot.length > 0) {
+    // Resolve insertion position from anchor (before any changes)
+    const resolvedIndex = resolveAnchorIndex(getState, targetTopicId, anchorMessageId, insertPositionIndex)
+
+    // DB-first: Persist to DB before dispatching to Redux
+    try {
+      for (let i = 0; i < pastedMessagesSnapshot.length; i++) {
+        const message = pastedMessagesSnapshot[i]
+        const blocksForMessage = pastedBlocksSnapshot.filter((b) => b.messageId === message.id)
+        await saveMessageAndBlocksToDB(targetTopicId, message, blocksForMessage, resolvedIndex + i)
+      }
+    } catch (error) {
+      logger.error('[redoCutPaste] Failed to save pasted messages to DB', error as Error)
+      throw error
+    }
+
+    // Redux dispatches only after DB write succeeds
     if (pastedBlocksSnapshot.length > 0) {
       dispatch(upsertManyBlocks(pastedBlocksSnapshot))
     }
-
-    // Resolve insertion position from anchor
-    const resolvedIndex = resolveAnchorIndex(getState, targetTopicId, anchorMessageId, insertPositionIndex)
 
     let index = resolvedIndex
     for (const message of pastedMessagesSnapshot) {
@@ -457,19 +510,14 @@ async function redoCutPaste(dispatch: AppDispatch, getState: () => RootState, ac
       index++
     }
 
-    for (let i = 0; i < pastedMessagesSnapshot.length; i++) {
-      const message = pastedMessagesSnapshot[i]
-      const blocksForMessage = pastedBlocksSnapshot.filter((b) => b.messageId === message.id)
-      await saveMessageAndBlocksToDB(targetTopicId, message, blocksForMessage, resolvedIndex + i)
-    }
-
     // Re-increment file reference counts for pasted blocks
     if (fileReferenceDeltas.length > 0) {
       await updateFileReferenceCounts(fileReferenceDeltas, true)
     }
   }
 
+  const sourceCount = sourceGroupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
   logger.info(
-    `[redoCutPaste] Re-executed cut+paste: ${deletedMessagesSnapshot.length} source messages deleted, ${pastedMessagesSnapshot.length} messages re-inserted`
+    `[redoCutPaste] Re-executed cut+paste: ${sourceCount} source messages deleted, ${pastedMessagesSnapshot.length} messages re-inserted`
   )
 }

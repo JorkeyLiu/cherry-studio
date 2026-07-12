@@ -3,13 +3,15 @@ import { executeRedo, executeUndo } from '@renderer/services/UndoService'
 import store, { useAppDispatch, useAppSelector } from '@renderer/store'
 import {
   clearSelection,
+  finishProcessing,
   setLastSelectedIndex,
   setSelectedGroupIds,
+  startProcessing,
   toggleEditMode as toggleEditModeAction
 } from '@renderer/store/editMode'
 import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import i18n from 'i18next'
-import { useCallback, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 
 import { getGroupIndex, useMessageGroups } from './useMessageGroup'
 
@@ -18,6 +20,7 @@ export function useEditMode(topicId: string) {
 
   // State — precise selectors
   const isEnabled = useAppSelector((state) => state.editMode.enabled)
+  const isProcessing = useAppSelector((state) => state.editMode.isProcessing)
   const selectedGroupIds = useAppSelector((state) => state.editMode.selectedGroupIds)
   const lastSelectedIndex = useAppSelector((state) => state.editMode.lastSelectedIndex)
   const clipboard = useAppSelector((state) => state.clipboard)
@@ -26,6 +29,11 @@ export function useEditMode(topicId: string) {
 
   // 消息组
   const groups = useMessageGroups(messages)
+
+  // W3: 切换 topic 时清空选择
+  useEffect(() => {
+    dispatch(clearSelection())
+  }, [topicId, dispatch])
 
   // 选中的消息组
   const selectedGroups = useMemo(() => {
@@ -91,30 +99,40 @@ export function useEditMode(topicId: string) {
 
   // 复制
   const handleCopy = useCallback(() => {
+    if (isProcessing) return
     if (!isEnabled || selectedGroupIds.length === 0) return
-    const count = copyMessages(dispatch, store.getState, topicId, selectedGroupIds)
-    if (count > 0) {
-      window.toast.success(i18n.t('chat.edit.copied', { count }))
+    dispatch(startProcessing())
+    try {
+      const count = copyMessages(dispatch, store.getState, topicId, selectedGroupIds)
+      if (count > 0) {
+        window.toast.success(i18n.t('chat.edit.copied', { count }))
+      }
+    } finally {
+      dispatch(finishProcessing())
     }
-  }, [dispatch, isEnabled, topicId, selectedGroupIds])
+  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds])
 
   // 剪切
   const handleCut = useCallback(() => {
+    if (isProcessing) return
     if (!isEnabled || selectedGroupIds.length === 0) return
-    const count = cutMessages(dispatch, store.getState, topicId, selectedGroupIds)
-    if (count > 0) {
-      window.toast.success(i18n.t('chat.edit.cut', { count }))
+    dispatch(startProcessing())
+    try {
+      const count = cutMessages(dispatch, store.getState, topicId, selectedGroupIds)
+      if (count > 0) {
+        window.toast.success(i18n.t('chat.edit.cut', { count }))
+      }
+    } finally {
+      dispatch(finishProcessing())
     }
-  }, [dispatch, isEnabled, topicId, selectedGroupIds])
+  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds])
 
   // 粘贴
-  const isProcessingRef = useRef(false)
-
   const handlePaste = useCallback(async () => {
-    if (isProcessingRef.current) return
-    isProcessingRef.current = true
+    if (isProcessing) return
+    if (!isEnabled) return
+    dispatch(startProcessing())
     try {
-      if (!isEnabled) return
       if (clipboard.items.length === 0) {
         window.toast.info(i18n.t('chat.edit.clipboardEmpty'))
         return
@@ -140,41 +158,53 @@ export function useEditMode(topicId: string) {
       }
       dispatch(clearSelection())
     } finally {
-      isProcessingRef.current = false
+      dispatch(finishProcessing())
     }
-  }, [dispatch, isEnabled, topicId, clipboard, selectedGroupIds, groups])
+  }, [dispatch, isEnabled, isProcessing, topicId, clipboard, selectedGroupIds, groups])
 
   // 删除
   const handleDelete = useCallback(async () => {
-    if (isProcessingRef.current) return
-    isProcessingRef.current = true
+    if (isProcessing) return
+    if (!isEnabled || selectedGroupIds.length === 0) return
+    dispatch(startProcessing())
     try {
-      if (!isEnabled || selectedGroupIds.length === 0) return
       const count = await deleteSelectedMessages(dispatch, store.getState, topicId, selectedGroupIds)
       if (count > 0) {
         window.toast.success(i18n.t('chat.edit.deleted', { count }))
       }
       dispatch(clearSelection())
     } finally {
-      isProcessingRef.current = false
+      dispatch(finishProcessing())
     }
-  }, [dispatch, isEnabled, topicId, selectedGroupIds])
+  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds])
 
   // 撤销
   const handleUndo = useCallback(async () => {
-    const action = await executeUndo(dispatch, store.getState)
-    if (action) {
-      window.toast.success(i18n.t('chat.edit.undone'))
+    if (isProcessing) return
+    dispatch(startProcessing())
+    try {
+      const action = await executeUndo(dispatch, store.getState)
+      if (action) {
+        window.toast.success(i18n.t('chat.edit.undone'))
+      }
+    } finally {
+      dispatch(finishProcessing())
     }
-  }, [dispatch])
+  }, [dispatch, isProcessing])
 
   // 重做
   const handleRedo = useCallback(async () => {
-    const action = await executeRedo(dispatch, store.getState)
-    if (action) {
-      window.toast.success(i18n.t('chat.edit.redone'))
+    if (isProcessing) return
+    dispatch(startProcessing())
+    try {
+      const action = await executeRedo(dispatch, store.getState)
+      if (action) {
+        window.toast.success(i18n.t('chat.edit.redone'))
+      }
+    } finally {
+      dispatch(finishProcessing())
     }
-  }, [dispatch])
+  }, [dispatch, isProcessing])
 
   // stable clearSelection
   const stableClearSelection = useCallback(() => {

@@ -6,7 +6,13 @@ import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
 import { deleteMessagesFromDB, saveMessageAndBlocksToDB } from '@renderer/store/thunk/messageThunk'
 import { pushUndoAction } from '@renderer/store/undoStack'
-import type { ClipboardItem, UndoAction } from '@renderer/types/editMode'
+import type {
+  ClipboardItem,
+  CutPasteUndoAction,
+  DeleteUndoAction,
+  GroupAnchor,
+  PasteUndoAction
+} from '@renderer/types/editMode'
 import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { v4 as uuidv4 } from 'uuid'
@@ -65,6 +71,53 @@ function findAnchorAfterPosition(messages: Message[], positionIndex: number, exc
     }
   }
   return null
+}
+
+/**
+ * Build per-group anchors for undo positioning.
+ * Each group gets its own anchor so non-contiguous selections
+ * can be restored to their exact original positions.
+ */
+function buildGroupAnchors(messages: Message[], blocks: MessageBlock[], selectedGroupIds: string[]): GroupAnchor[] {
+  const anchors: GroupAnchor[] = []
+
+  // Pre-compute all selected message IDs (for anchor exclusion)
+  const selectedIdSet = new Set(
+    selectedGroupIds.flatMap((gid) => messages.filter((m) => m.askId === gid || m.id === gid).map((m) => m.id))
+  )
+
+  for (const groupId of selectedGroupIds) {
+    const groupMessages = messages.filter((m) => m.askId === groupId || m.id === groupId)
+    if (groupMessages.length === 0) continue
+
+    // Find position: index of the first message in this group
+    const firstMsgIndex = messages.findIndex((m) => m.id === groupMessages[0].id)
+    const positionIndex = firstMsgIndex >= 0 ? firstMsgIndex : messages.length
+
+    // Find anchor: first message after the last message in this group that isn't in any selected group
+    let lastGroupIndex = -1
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].askId === groupId || messages[i].id === groupId) {
+        lastGroupIndex = i
+        break
+      }
+    }
+    const anchorMessageId =
+      lastGroupIndex >= 0 ? findAnchorAfterPosition(messages, lastGroupIndex + 1, selectedIdSet) : null
+
+    // Collect blocks for this group
+    const groupBlockIds = new Set(groupMessages.flatMap((m) => m.blocks || []))
+    const groupBlocks = blocks.filter((b) => groupBlockIds.has(b.id))
+
+    anchors.push({
+      messages: structuredClone(groupMessages),
+      blocks: structuredClone(groupBlocks),
+      positionIndex,
+      anchorMessageId
+    })
+  }
+
+  return anchors
 }
 
 /**
@@ -221,6 +274,30 @@ export async function pasteMessages(
   const allInsertedMessages: Message[] = []
   const allInsertedBlocks: MessageBlock[] = []
 
+  // C5/C6 fix: Compute source group anchors BEFORE paste loop using pre-paste state.
+  // This must happen before any messages are inserted into the target topic,
+  // because for same-topic cut-paste, the paste loop would contaminate sourceMessages.
+  let sourceGroupAnchors: GroupAnchor[] = []
+  const sourceMessageIdsToDelete: string[] = []
+  const sourceBlockIdsToDelete: string[] = []
+
+  if (mode === 'cut' && sourceTopicId) {
+    sourceGroupAnchors = buildGroupAnchors(
+      selectMessagesForTopic(state, sourceTopicId),
+      Object.values(state.messageBlocks.entities),
+      items.map((item) => item.originalAskId)
+    )
+
+    const sourceMessages = selectMessagesForTopic(state, sourceTopicId)
+    for (const item of items) {
+      const groupMessages = sourceMessages.filter((m) => m.askId === item.originalAskId || m.id === item.originalAskId)
+      for (const msg of groupMessages) {
+        sourceMessageIdsToDelete.push(msg.id)
+        sourceBlockIdsToDelete.push(...(msg.blocks || []))
+      }
+    }
+  }
+
   // ID mapping: original message ID → new message ID
   const idMapping = new Map<string, string>()
 
@@ -279,28 +356,33 @@ export async function pasteMessages(
         }
       }
 
-      // Dispatch to Redux
-      dispatch(
-        newMessagesActions.insertMessageAtIndex({
-          topicId: targetTopicId,
-          message: newMessage,
-          index: insertIndex
-        })
-      )
+      // DB-first: Persist to DB before dispatching to Redux
+      try {
+        await saveMessageAndBlocksToDB(targetTopicId, newMessage, clonedBlocksForMsg, insertIndex)
 
-      // Persist to DB
-      await saveMessageAndBlocksToDB(targetTopicId, newMessage, clonedBlocksForMsg, insertIndex)
+        // Dispatch to Redux only after DB write succeeds
+        dispatch(
+          newMessagesActions.insertMessageAtIndex({
+            topicId: targetTopicId,
+            message: newMessage,
+            index: insertIndex
+          })
+        )
 
-      // Upsert blocks to Redux
-      if (clonedBlocksForMsg.length > 0) {
-        dispatch(upsertManyBlocks(clonedBlocksForMsg))
+        // Upsert blocks to Redux
+        if (clonedBlocksForMsg.length > 0) {
+          dispatch(upsertManyBlocks(clonedBlocksForMsg))
+        }
+
+        allInsertedMessages.push(newMessage)
+        allInsertedBlocks.push(...clonedBlocksForMsg)
+        insertedMessageIds.push(newMsgId)
+
+        insertIndex++
+      } catch (error) {
+        logger.error('[pasteMessages] Failed to save message to DB', error as Error)
+        throw new Error(`[pasteMessages] DB write failed for message ${newMsgId}`)
       }
-
-      allInsertedMessages.push(newMessage)
-      allInsertedBlocks.push(...clonedBlocksForMsg)
-      insertedMessageIds.push(newMsgId)
-
-      insertIndex++
     }
   }
 
@@ -311,46 +393,22 @@ export async function pasteMessages(
     }
   }
 
-  // If cut mode: remove source messages
-  let sourceAnchorMessageId: string | null = null
-  let sourceMinIndex = 0
+  // If cut mode: remove source messages (DB-first)
   if (mode === 'cut' && sourceTopicId) {
-    const sourceState = getState()
-    const sourceMessages = selectMessagesForTopic(sourceState, sourceTopicId)
-    const sourceMessageIdsToDelete: string[] = []
-    const sourceBlockIdsToDelete: string[] = []
-
-    for (const item of items) {
-      const groupMessages = sourceMessages.filter((m) => m.askId === item.originalAskId || m.id === item.originalAskId)
-      for (const msg of groupMessages) {
-        sourceMessageIdsToDelete.push(msg.id)
-        sourceBlockIdsToDelete.push(...(msg.blocks || []))
-      }
-    }
-
+    // DB-first: delete from DB before dispatching to Redux
     if (sourceMessageIdsToDelete.length > 0) {
-      // 计算 sourceTopic 的 anchor：被删区域之后的第一条未删除消息
-      const sourceDeletedIdSet = new Set(sourceMessageIdsToDelete)
-      let sourceMaxDeletedIndex = -1
-      for (let i = sourceMessages.length - 1; i >= 0; i--) {
-        if (sourceDeletedIdSet.has(sourceMessages[i].id)) {
-          sourceMaxDeletedIndex = i
-          break
+      try {
+        await deleteMessagesFromDB(sourceTopicId, sourceMessageIdsToDelete)
+
+        // Dispatch to Redux only after DB delete succeeds
+        dispatch(newMessagesActions.removeMessages({ topicId: sourceTopicId, messageIds: sourceMessageIdsToDelete }))
+        if (sourceBlockIdsToDelete.length > 0) {
+          dispatch(removeManyBlocks(sourceBlockIdsToDelete))
         }
+      } catch (error) {
+        logger.error('[pasteMessages] Failed to delete source messages from DB', error as Error)
       }
-      sourceAnchorMessageId =
-        sourceMaxDeletedIndex >= 0
-          ? findAnchorAfterPosition(sourceMessages, sourceMaxDeletedIndex + 1, sourceDeletedIdSet)
-          : null
-      sourceMinIndex = sourceMaxDeletedIndex >= 0 ? sourceMaxDeletedIndex + 1 : 0
-
-      dispatch(newMessagesActions.removeMessages({ topicId: sourceTopicId, messageIds: sourceMessageIdsToDelete }))
     }
-    if (sourceBlockIdsToDelete.length > 0) {
-      dispatch(removeManyBlocks(sourceBlockIdsToDelete))
-    }
-
-    await deleteMessagesFromDB(sourceTopicId, sourceMessageIdsToDelete)
 
     // Decrement file references for source blocks
     for (const { fileId, delta } of fileReferenceDeltas) {
@@ -367,28 +425,37 @@ export async function pasteMessages(
   const insertedIdSet = new Set(insertedMessageIds)
   const anchorMessageId = findAnchorAfterPosition(finalTargetMessages, afterInsertIndex, insertedIdSet)
 
-  const undoAction: UndoAction = {
-    id: uuidv4(),
-    type: mode === 'cut' ? 'cut_paste' : 'paste',
-    timestamp: Date.now(),
-    targetTopicId: targetTopicId,
-    insertedMessageIds,
-    targetInsertPositionIndex: insertIndex - insertedMessageIds.length,
-    targetAnchorMessageId: anchorMessageId,
-    // source 侧：cut 模式下记录源消息信息
-    sourceTopicId: mode === 'cut' && sourceTopicId ? sourceTopicId : undefined,
-    sourceAnchorMessageId: mode === 'cut' && sourceTopicId ? (sourceAnchorMessageId ?? null) : undefined,
-    sourceInsertPositionIndex: mode === 'cut' && sourceTopicId ? sourceMinIndex : undefined,
-    sourceMessageIds: mode === 'cut' ? items.flatMap((item) => item.messages.map((m) => m.id)) : undefined,
-    sourceMessagesSnapshot: mode === 'cut' ? items.flatMap((item) => item.messages) : undefined,
-    sourceBlocksSnapshot: mode === 'cut' ? items.flatMap((item) => item.blocks) : undefined,
-    // after 快照：粘贴后生成的新消息（新 ID）— copy 和 cut 都需要
-    pastedMessagesSnapshot: allInsertedMessages,
-    pastedBlocksSnapshot: allInsertedBlocks,
-    fileReferenceDeltas
+  if (mode === 'cut' && sourceTopicId) {
+    const undoAction: CutPasteUndoAction = {
+      id: uuidv4(),
+      type: 'cut_paste',
+      timestamp: Date.now(),
+      targetTopicId: targetTopicId,
+      insertedMessageIds,
+      targetInsertPositionIndex: insertIndex - insertedMessageIds.length,
+      targetAnchorMessageId: anchorMessageId,
+      sourceTopicId,
+      sourceGroupAnchors,
+      pastedMessagesSnapshot: allInsertedMessages,
+      pastedBlocksSnapshot: allInsertedBlocks,
+      fileReferenceDeltas
+    }
+    dispatch(pushUndoAction(undoAction))
+  } else {
+    const undoAction: PasteUndoAction = {
+      id: uuidv4(),
+      type: 'paste',
+      timestamp: Date.now(),
+      targetTopicId: targetTopicId,
+      insertedMessageIds,
+      targetInsertPositionIndex: insertIndex - insertedMessageIds.length,
+      targetAnchorMessageId: anchorMessageId,
+      pastedMessagesSnapshot: allInsertedMessages,
+      pastedBlocksSnapshot: allInsertedBlocks,
+      fileReferenceDeltas
+    }
+    dispatch(pushUndoAction(undoAction))
   }
-
-  dispatch(pushUndoAction(undoAction))
 
   logger.info(`[pasteMessages] Pasted ${items.length} groups at index ${insertIndex - insertedMessageIds.length}`)
   return items.length
@@ -447,27 +514,22 @@ export async function deleteSelectedMessages(
     return 0
   }
 
-  // Calculate position index (minimum index of deleted messages)
-  let positionIndex = messages.length
-  for (const msg of allMessagesToDelete) {
-    const idx = messages.findIndex((m) => m.id === msg.id)
-    if (idx >= 0 && idx < positionIndex) {
-      positionIndex = idx
-    }
+  // Build per-group anchors for undo positioning
+  const groupAnchors = buildGroupAnchors(messages, allBlocksToDelete, selectedGroupIds)
+
+  // DB-first: delete from DB before dispatching to Redux
+  try {
+    await deleteMessagesFromDB(topicId, allMessageIds)
+  } catch (error) {
+    logger.error('[deleteSelectedMessages] Failed to delete from DB', error as Error)
+    return 0
   }
 
-  // Calculate anchor: first non-deleted message after the deleted region
-  const deletedIdSet = new Set(allMessageIds)
-  const anchorMessageId = findAnchorAfterPosition(messages, positionIndex, deletedIdSet)
-
-  // Remove from Redux
+  // Remove from Redux only after DB delete succeeds
   dispatch(newMessagesActions.removeMessages({ topicId, messageIds: allMessageIds }))
   if (allBlockIds.length > 0) {
     dispatch(removeManyBlocks(allBlockIds))
   }
-
-  // Delete from DB
-  await deleteMessagesFromDB(topicId, allMessageIds)
 
   // Update file reference counts
   for (const { fileId, delta } of fileReferenceDeltas) {
@@ -475,19 +537,16 @@ export async function deleteSelectedMessages(
   }
 
   // Create undo action
-  const undoAction: UndoAction = {
+  const undoAction: DeleteUndoAction = {
     id: uuidv4(),
     type: 'delete',
     timestamp: Date.now(),
     targetTopicId: topicId,
     insertedMessageIds: allMessageIds,
-    targetInsertPositionIndex: positionIndex,
-    targetAnchorMessageId: anchorMessageId,
-    // delete 操作的 source 侧就是同一个 topic
-    sourceTopicId: topicId,
-    sourceMessagesSnapshot: allMessagesToDelete,
-    sourceBlocksSnapshot: allBlocksToDelete,
-    fileReferenceDeltas
+    pastedMessagesSnapshot: [],
+    pastedBlocksSnapshot: [],
+    fileReferenceDeltas,
+    groupAnchors
   }
 
   dispatch(pushUndoAction(undoAction))

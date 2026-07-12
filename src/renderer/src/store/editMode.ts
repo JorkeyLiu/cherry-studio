@@ -5,7 +5,8 @@ import type { EditModeState } from '@renderer/types/editMode'
 const initialState: EditModeState = {
   enabled: false,
   selectedGroupIds: [],
-  lastSelectedIndex: null
+  lastSelectedIndex: null,
+  isProcessing: false
 }
 
 const editModeSlice = createSlice({
@@ -28,10 +29,23 @@ const editModeSlice = createSlice({
     clearSelection(state) {
       state.selectedGroupIds = []
       state.lastSelectedIndex = null
+    },
+    startProcessing(state) {
+      state.isProcessing = true
+    },
+    finishProcessing(state) {
+      state.isProcessing = false
     }
   }
 })
 
-export const { toggleEditMode, setSelectedGroupIds, setLastSelectedIndex, clearSelection } = editModeSlice.actions
+export const {
+  toggleEditMode,
+  setSelectedGroupIds,
+  setLastSelectedIndex,
+  clearSelection,
+  startProcessing,
+  finishProcessing
+} = editModeSlice.actions
 
 export default editModeSlice.reducer
