@@ -35,11 +35,6 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   const { multiModelMessageStyle: multiModelMessageStyleSetting, gridColumns, gridPopoverTrigger } = useSettings()
   const { setTimeoutTimer } = useTimer()
 
-  // 获取组的 askId（用于编辑模式下的组选择）
-  const groupAskId = useMemo(() => {
-    return messages[0]?.askId || messages[0]?.id || ''
-  }, [messages])
-
   const isGrouped = messageLength > 1 && messages.every((m) => m.role === 'assistant')
 
   // States
@@ -273,23 +268,11 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
     ]
   )
 
-  // 编辑模式下点击消息组的处理
-  const handleGroupContainerClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (!isEditMode || !groupAskId || !onGroupClick) return
-      const isCtrl = e.metaKey || e.ctrlKey
-      const isShift = e.shiftKey
-      onGroupClick(groupAskId, isCtrl, isShift)
-    },
-    [isEditMode, groupAskId, onGroupClick]
-  )
-
   return (
     <MessageEditingProvider>
       <GroupContainer
         id={messages[0].askId ? `message-group-${messages[0].askId}` : undefined}
-        className={classNames([multiModelMessageStyle])}
-        onClick={handleGroupContainerClick}>
+        className={classNames([multiModelMessageStyle])}>
         <GridContainer
           $count={messageLength}
           $gridColumns={gridColumns}

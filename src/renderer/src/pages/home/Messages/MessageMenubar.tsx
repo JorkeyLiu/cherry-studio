@@ -189,9 +189,7 @@ const MessageMenubar: FC<Props> = (props) => {
   }, [message])
 
   const onCopy = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation()
-
+    () => {
       const currentMessageId = message.id // from props
       const latestMessageEntity = store.getState().messages.entities[currentMessageId]
 
@@ -485,8 +483,7 @@ const MessageMenubar: FC<Props> = (props) => {
     topic.name
   ])
 
-  const onRegenerate = async (e: React.MouseEvent | undefined) => {
-    e?.stopPropagation?.()
+  const onRegenerate = async () => {
     // No need to reset or edit the message anymore
     // const selectedModel = isGrouped ? model : assistantModel
     // const _message = resetAssistantMessage(message, selectedModel)
@@ -529,23 +526,15 @@ const MessageMenubar: FC<Props> = (props) => {
     }
   }, [isAssistantMessage, message.askId, topic.id])
 
-  const onMentionModel = useCallback(
-    async (e: React.MouseEvent) => {
-      e.stopPropagation()
-      const selectedModel = await SelectChatModelPopup.show({ model, filter: mentionModelFilter })
-      if (!selectedModel) return
-      void appendAssistantResponse(message, selectedModel, { ...assistant, model: selectedModel })
-    },
-    [appendAssistantResponse, assistant, mentionModelFilter, message, model]
-  )
+  const onMentionModel = useCallback(async () => {
+    const selectedModel = await SelectChatModelPopup.show({ model, filter: mentionModelFilter })
+    if (!selectedModel) return
+    void appendAssistantResponse(message, selectedModel, { ...assistant, model: selectedModel })
+  }, [appendAssistantResponse, assistant, mentionModelFilter, message, model])
 
-  const onUseful = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation()
-      onUpdateUseful?.(message.id)
-    },
-    [message.id, onUpdateUseful]
-  )
+  const onUseful = useCallback(() => {
+    onUpdateUseful?.(message.id)
+  }, [message.id, onUpdateUseful])
 
   const hasTranslationBlocks = useMemo(() => {
     const translationBlocks = findTranslationBlocks(message)
@@ -675,10 +664,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
           onConfirm={() => handleResendUserMessage()}
           onOpenChange={(open) => open && setShowDeleteTooltip(false)}>
           <Tooltip title={t('common.regenerate')} mouseEnterDelay={0.8}>
-            <ActionButton
-              className="message-action-button"
-              onClick={(e) => e.stopPropagation()}
-              $softHoverBg={isBubbleStyle}>
+            <ActionButton className="message-action-button" $softHoverBg={isBubbleStyle}>
               <RefreshIcon size={15} />
             </ActionButton>
           </Tooltip>
@@ -738,10 +724,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
           onConfirm={() => onRegenerate()}
           onOpenChange={(open) => open && setShowDeleteTooltip(false)}>
           <Tooltip title={t('common.regenerate')} mouseEnterDelay={0.8}>
-            <ActionButton
-              className="message-action-button"
-              onClick={(e) => e.stopPropagation()}
-              $softHoverBg={softHoverBg}>
+            <ActionButton className="message-action-button" $softHoverBg={softHoverBg}>
               <RefreshIcon size={15} />
             </ActionButton>
           </Tooltip>
@@ -791,8 +774,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
         <Tooltip title={t('translate.stop')} mouseEnterDelay={0.8}>
           <ActionButton
             className="message-action-button"
-            onClick={(e) => {
-              e.stopPropagation()
+            onClick={() => {
               abortTranslation(message.id)
             }}
             $softHoverBg={softHoverBg}>
@@ -865,17 +847,13 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
             overflowY: 'auto',
             backgroundClip: 'border-box'
           },
-          items,
-          onClick: (e) => e.domEvent.stopPropagation()
+          items
         }}
         trigger={['click']}
         placement="top"
         arrow>
         <Tooltip title={t('chat.translate')} mouseEnterDelay={1.2}>
-          <ActionButton
-            className="message-action-button"
-            onClick={(e) => e.stopPropagation()}
-            $softHoverBg={softHoverBg}>
+          <ActionButton className="message-action-button" $softHoverBg={softHoverBg}>
             <Languages size={15} />
           </ActionButton>
         </Tooltip>
@@ -908,8 +886,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       <Tooltip title={t('notes.save')} mouseEnterDelay={0.8}>
         <ActionButton
           className="message-action-button"
-          onClick={async (e) => {
-            e.stopPropagation()
+          onClick={async () => {
             const title = await getMessageTitle(message)
             const markdown = messageToMarkdown(message)
             void exportMessageToNotes(title, markdown, notesPath)
@@ -951,10 +928,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
           okButtonProps={{ danger: true }}
           onConfirm={async () => await handleDeleteMessage()}
           onOpenChange={(open) => open && setShowDeleteTooltip(false)}>
-          <ActionButton
-            className="message-action-button"
-            onClick={(e) => e.stopPropagation()}
-            $softHoverBg={softHoverBg}>
+          <ActionButton className="message-action-button" $softHoverBg={softHoverBg}>
             {deleteTooltip}
           </ActionButton>
         </Popconfirm>
@@ -964,8 +938,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
     return (
       <ActionButton
         className="message-action-button"
-        onClick={async (e) => {
-          e.stopPropagation()
+        onClick={async () => {
           await handleDeleteMessage()
         }}
         $softHoverBg={softHoverBg}>
@@ -991,8 +964,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       return null
     }
 
-    const handleInspect = (e: React.MouseEvent) => {
-      e.stopPropagation()
+    const handleInspect = () => {
       const blocks = message.blocks.map((blockId) => blockEntities[blockId]).filter(Boolean)
       void InspectMessagePopup.show({
         title: `Message: ${message.id}`,
@@ -1015,11 +987,8 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
     }
 
     return (
-      <Dropdown
-        menu={{ items: dropdownItems, onClick: (e) => e.domEvent.stopPropagation() }}
-        trigger={['click']}
-        placement="topRight">
-        <ActionButton className="message-action-button" onClick={(e) => e.stopPropagation()} $softHoverBg={softHoverBg}>
+      <Dropdown menu={{ items: dropdownItems }} trigger={['click']} placement="topRight">
+        <ActionButton className="message-action-button" $softHoverBg={softHoverBg}>
           <Menu size={19} />
         </ActionButton>
       </Dropdown>

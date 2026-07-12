@@ -115,11 +115,12 @@ const MessageItem: FC<Props> = ({
   const isProcessing = isMessageProcessing(message)
   const showMenubar = !hideMenuBar && !isEditing && !isProcessing
 
-  // 编辑模式下点击消息触发组选择
+  // 编辑模式下点击消息内容区域触发组选择
   const handleMessageClick = useCallback(
     (e: React.MouseEvent) => {
       if (!isEditMode || !onGroupClick) return
-      e.stopPropagation()
+      // 排除 Footer（菜单栏）区域，按钮有自己的 handler
+      if ((e.target as HTMLElement).closest('.MessageFooter')) return
       const askId = message.role === 'user' ? message.id : message.askId || message.id
       if (!askId) return
       const isCtrl = e.metaKey || e.ctrlKey
@@ -230,7 +231,7 @@ const MessageItem: FC<Props> = ({
             </MessageErrorBoundary>
           </MessageContentContainer>
           {showMenubar && (
-            <MessageFooter className="MessageFooter" onClick={(e) => e.stopPropagation()}>
+            <MessageFooter className="MessageFooter">
               <HorizontalScrollContainer
                 classNames={{
                   content: cn(
