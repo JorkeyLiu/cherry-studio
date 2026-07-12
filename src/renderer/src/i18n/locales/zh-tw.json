@@ -1074,6 +1074,7 @@
       "cutAction": "剪下",
       "deleteAction": "刪除",
       "deleted": "已刪除 {{count}} 則訊息",
+      "deselect": "取消選擇",
       "enter": "進入編輯模式",
       "exit": "離開編輯模式",
       "pasteAction": "貼上",

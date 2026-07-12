@@ -18,7 +18,7 @@ const EditModeActionBar = () => {
     handleDelete,
     handleUndo,
     handleRedo,
-    toggleEditMode
+    handleClearSelection
   } = useEditMode()
 
   if (selectedGroupIds.length === 0) {
@@ -91,13 +91,13 @@ const EditModeActionBar = () => {
             />
           </Tooltip>
         </ActionButtons>
-        <Tooltip title={t('chat.navigation.close')}>
+        <Tooltip title={t('chat.edit.deselect')}>
           <ActionButton
             shape="circle"
             color="default"
             variant="text"
             icon={<X size={16} />}
-            onClick={() => toggleEditMode(false)}
+            onClick={handleClearSelection}
           />
         </Tooltip>
       </ActionBar>

@@ -1074,6 +1074,7 @@
       "cutAction": "Cut",
       "deleteAction": "Delete",
       "deleted": "Deleted {{count}} message(s)",
+      "deselect": "Deselect",
       "enter": "Enter Edit Mode",
       "exit": "Exit Edit Mode",
       "pasteAction": "Paste",
