@@ -964,7 +964,6 @@ export function getXAIReasoningParams(
   if (isGrok43) {
     switch (reasoningEffort) {
       case 'none':
-        return {}
       case 'low':
       case 'medium':
       case 'high':

@@ -133,6 +133,14 @@ vi.mock('@renderer/services/TokenService', () => ({
   estimateMessageUsage: vi.fn().mockResolvedValue(0)
 }))
 
+vi.mock('@renderer/store', () => ({
+  useAppDispatch: () => vi.fn()
+}))
+
+vi.mock('@renderer/store/thunk/messageGroupReorder', () => ({
+  reorderMessageGroupThunk: vi.fn()
+}))
+
 vi.mock('@renderer/utils/dom', () => ({
   scrollIntoView: mocks.scrollIntoView
 }))
@@ -144,7 +152,11 @@ vi.mock('@renderer/utils/messageUtils/is', () => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => key
-  })
+  }),
+  initReactI18next: {
+    type: '3rdParty',
+    init: vi.fn()
+  }
 }))
 
 vi.mock('../MessageContent', () => ({
