@@ -1,6 +1,6 @@
 // import { InfoCircleOutlined } from '@ant-design/icons'
 import { loggerService } from '@logger'
-import { CopyIcon, DeleteIcon, RefreshIcon } from '@renderer/components/Icons'
+import { CopyIcon, RefreshIcon } from '@renderer/components/Icons'
 import InspectMessagePopup from '@renderer/components/Popups/InspectMessagePopup'
 import ObsidianExportPopup from '@renderer/components/Popups/ObsidianExportPopup'
 import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePopup'
@@ -92,10 +92,8 @@ type MessageOperationsHandlers = ReturnType<typeof useMessageOperations>
 type MessageMenubarButtonContext = {
   assistant: Assistant
   blockEntities: ReturnType<typeof messageBlocksSelectors.selectEntities>
-  confirmDeleteMessage: boolean
   confirmRegenerateMessage: boolean
   copied: boolean
-  deleteMessage: MessageOperationsHandlers['deleteMessage']
   dropdownItems: MenuProps['items']
   enableDeveloperMode: boolean
   handleResendUserMessage: (messageUpdate?: Message) => Promise<void>
@@ -146,7 +144,6 @@ const MessageMenubar: FC<Props> = (props) => {
   const { translateLanguages } = useTranslate()
   // const assistantModel = assistant?.model
   const {
-    deleteMessage,
     resendMessage,
     regenerateAssistantMessage,
     getTranslationUpdater,
@@ -156,7 +153,7 @@ const MessageMenubar: FC<Props> = (props) => {
 
   const { isBubbleStyle } = useMessageStyle()
   const { enableDeveloperMode } = useEnableDeveloperMode()
-  const { confirmDeleteMessage, confirmRegenerateMessage } = useSettings()
+  const { confirmRegenerateMessage } = useSettings()
 
   // const loading = useTopicLoading(topic)
 
@@ -517,10 +514,8 @@ const MessageMenubar: FC<Props> = (props) => {
   const buttonContext: MessageMenubarButtonContext = {
     assistant,
     blockEntities,
-    confirmDeleteMessage,
     confirmRegenerateMessage,
     copied,
-    deleteMessage,
     dropdownItems,
     enableDeveloperMode,
     handleResendUserMessage,
@@ -851,55 +846,6 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
           <NotebookPen size={15} />
         </ActionButton>
       </Tooltip>
-    )
-  },
-  delete: ({
-    confirmDeleteMessage,
-    deleteMessage,
-    message,
-    setShowDeleteTooltip,
-    showDeleteTooltip,
-    softHoverBg,
-    t
-  }) => {
-    const deleteTooltip = (
-      <Tooltip
-        title={t('common.delete')}
-        mouseEnterDelay={1}
-        open={showDeleteTooltip}
-        onOpenChange={setShowDeleteTooltip}>
-        <DeleteIcon size={15} />
-      </Tooltip>
-    )
-
-    const handleDeleteMessage = async () => {
-      abortTranslation(message.id)
-      await deleteMessage(message.id, message.traceId, message.model?.name)
-    }
-
-    if (confirmDeleteMessage) {
-      return (
-        <Popconfirm
-          title={t('message.message.delete.content')}
-          okButtonProps={{ danger: true }}
-          onConfirm={async () => await handleDeleteMessage()}
-          onOpenChange={(open) => open && setShowDeleteTooltip(false)}>
-          <ActionButton className="message-action-button" $softHoverBg={softHoverBg}>
-            {deleteTooltip}
-          </ActionButton>
-        </Popconfirm>
-      )
-    }
-
-    return (
-      <ActionButton
-        className="message-action-button"
-        onClick={async () => {
-          await handleDeleteMessage()
-        }}
-        $softHoverBg={softHoverBg}>
-        {deleteTooltip}
-      </ActionButton>
     )
   },
   trace: ({ enableDeveloperMode, message, handleTraceUserMessage, t }) => {

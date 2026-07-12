@@ -1130,48 +1130,9 @@ export const deleteSingleMessageThunk =
     try {
       dispatch(newMessagesActions.removeMessage({ topicId, messageId }))
       cleanupMultipleBlocks(dispatch, blockIdsToDelete)
-      await deleteMessageFromDB(topicId, messageId)
+      await dbService.deleteMessage(topicId, messageId)
     } catch (error) {
       logger.error(`[deleteSingleMessage] Failed to delete message ${messageId}:`, error as Error)
-    }
-  }
-
-/**
- * Thunk to delete a group of messages (user query + assistant responses) based on askId.
- */
-export const deleteMessageGroupThunk =
-  (topicId: string, askId: string) => async (dispatch: AppDispatch, getState: () => RootState) => {
-    const currentState = getState()
-    const topicMessageIds = currentState.messages.messageIdsByTopic[topicId] || []
-    const messagesToDelete: Message[] = []
-
-    topicMessageIds.forEach((id) => {
-      const msg = currentState.messages.entities[id]
-      if (msg && msg.askId === askId) {
-        messagesToDelete.push(msg)
-      }
-    })
-
-    // const userQuery = currentState.messages.entities[askId]
-    // if (userQuery && userQuery.topicId === topicId && !idsToDelete.includes(askId)) {
-    //   messagesToDelete.push(userQuery)
-    //   idsToDelete.push(askId)
-    // }
-
-    if (messagesToDelete.length === 0) {
-      logger.warn(`[deleteMessageGroup] No messages found with askId ${askId} in topic ${topicId}.`)
-      return
-    }
-
-    const blockIdsToDelete = messagesToDelete.flatMap((m) => m.blocks || [])
-    const messageIdsToDelete = messagesToDelete.map((m) => m.id)
-
-    try {
-      dispatch(newMessagesActions.removeMessagesByAskId({ topicId, askId }))
-      cleanupMultipleBlocks(dispatch, blockIdsToDelete)
-      await deleteMessagesFromDB(topicId, messageIdsToDelete)
-    } catch (error) {
-      logger.error(`[deleteMessageGroup] Failed to delete messages with askId ${askId}:`, error as Error)
     }
   }
 
@@ -2063,19 +2024,6 @@ export const updateFileCount = async (fileId: string, delta: number, deleteIfZer
     logger.silly('Updated file count', { fileId, delta, deleteIfZero })
   } catch (error) {
     logger.error('Failed to update file count:', { fileId, delta, error })
-    throw error
-  }
-}
-
-/**
- * Delete a single message from database
- */
-export const deleteMessageFromDB = async (topicId: string, messageId: string): Promise<void> => {
-  try {
-    await dbService.deleteMessage(topicId, messageId)
-    logger.silly('Deleted message via DbService', { topicId, messageId })
-  } catch (error) {
-    logger.error('Failed to delete message:', { topicId, messageId, error })
     throw error
   }
 }

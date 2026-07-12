@@ -1,7 +1,6 @@
 import {
   ColumnHeightOutlined,
   ColumnWidthOutlined,
-  DeleteOutlined,
   FolderOutlined,
   NumberOutlined,
   ReloadOutlined
@@ -41,24 +40,8 @@ const MessageGroupMenuBar: FC<Props> = ({
   topic
 }) => {
   const { t } = useTranslation()
-  const { deleteGroupMessages, regenerateAssistantMessage } = useMessageOperations(topic)
+  const { regenerateAssistantMessage } = useMessageOperations(topic)
   const { assistant } = useAssistant(messages[0]?.assistantId)
-
-  const handleDeleteGroup = async () => {
-    const askId = messages[0]?.askId
-    if (!askId) return
-
-    window.modal.confirm({
-      title: t('message.group.delete.title'),
-      content: t('message.group.delete.content'),
-      centered: true,
-      okButtonProps: {
-        danger: true
-      },
-      okText: t('common.delete'),
-      onOk: () => deleteGroupMessages(askId)
-    })
-  }
 
   const isFailedMessage = (m: Message) => {
     if (m.role !== 'assistant') return false
@@ -145,12 +128,6 @@ const MessageGroupMenuBar: FC<Props> = ({
           />
         </Tooltip>
       )}
-      <Button
-        type="text"
-        size="small"
-        icon={<DeleteOutlined style={{ color: 'var(--color-error)' }} />}
-        onClick={handleDeleteGroup}
-      />
     </GroupMenuBar>
   )
 }

@@ -9,7 +9,6 @@ import {
   appendAssistantResponseThunk,
   clearTopicMessagesThunk,
   cloneMessagesToNewTopicThunk,
-  deleteMessageGroupThunk,
   deleteSingleMessageThunk,
   initiateTranslationThunk,
   regenerateAssistantResponseThunk,
@@ -55,17 +54,6 @@ export function useMessageOperations(topic: Topic) {
     async (id: string, traceId?: string, modelName?: string) => {
       await dispatch(deleteSingleMessageThunk(topic.id, id))
       void window.api.trace.cleanHistory(topic.id, traceId || '', modelName)
-    },
-    [dispatch, topic.id]
-  )
-
-  /**
-   * 删除一组消息（基于 askId）。 / Deletes a group of messages (based on askId).
-   * Dispatches deleteMessageGroupThunk.
-   */
-  const deleteGroupMessages = useCallback(
-    async (askId: string) => {
-      await dispatch(deleteMessageGroupThunk(topic.id, askId))
     },
     [dispatch, topic.id]
   )
@@ -408,7 +396,6 @@ export function useMessageOperations(topic: Topic) {
   return {
     displayCount,
     deleteMessage,
-    deleteGroupMessages,
     editMessage,
     resendMessage,
     regenerateAssistantMessage,
