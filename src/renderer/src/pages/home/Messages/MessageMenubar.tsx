@@ -1,6 +1,6 @@
 // import { InfoCircleOutlined } from '@ant-design/icons'
 import { loggerService } from '@logger'
-import { CopyIcon, DeleteIcon, EditIcon, RefreshIcon } from '@renderer/components/Icons'
+import { CopyIcon, DeleteIcon, RefreshIcon } from '@renderer/components/Icons'
 import InspectMessagePopup from '@renderer/components/Popups/InspectMessagePopup'
 import ObsidianExportPopup from '@renderer/components/Popups/ObsidianExportPopup'
 import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePopup'
@@ -8,7 +8,6 @@ import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPop
 import { isEmbeddingModel, isRerankModel, isVisionModel } from '@renderer/config/models'
 import type { MessageMenubarButtonId, MessageMenubarScope } from '@renderer/config/registry/messageMenubar'
 import { DEFAULT_MESSAGE_MENUBAR_SCOPE, getMessageMenubarConfig } from '@renderer/config/registry/messageMenubar'
-import { useMessageEditing } from '@renderer/context/MessageEditingContext'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
 import { useEnableDeveloperMode, useMessageStyle, useSettings } from '@renderer/hooks/useSettings'
@@ -40,12 +39,7 @@ import {
 } from '@renderer/utils/export'
 // import { withMessageThought } from '@renderer/utils/formats'
 import { removeTrailingDoubleSpaces } from '@renderer/utils/markdown'
-import {
-  findMainTextBlocks,
-  findTranslationBlocks,
-  findTranslationBlocksById,
-  getMainTextContent
-} from '@renderer/utils/messageUtils/find'
+import { findTranslationBlocks, findTranslationBlocksById, getMainTextContent } from '@renderer/utils/messageUtils/find'
 import type { MenuProps } from 'antd'
 import { Dropdown, Popconfirm, Tooltip } from 'antd'
 import dayjs from 'dayjs'
@@ -55,7 +49,6 @@ import {
   Bug,
   Check,
   CirclePause,
-  FilePenLine,
   Languages,
   Menu,
   MessageSquarePlus,
@@ -89,7 +82,6 @@ interface Props {
   isLastMessage: boolean
   isAssistantMessage: boolean
   messageContainerRef: React.RefObject<HTMLDivElement>
-  setModel: (model: Model) => void
   onUpdateUseful?: (msgId: string) => void
 }
 
@@ -119,7 +111,6 @@ type MessageMenubarButtonContext = {
   message: Message
   notesPath: string
   onCopy: (e: React.MouseEvent) => void
-  onEdit: () => void | Promise<void>
   onMentionModel: (e: React.MouseEvent) => void | Promise<void>
   onRegenerate: (e?: React.MouseEvent) => void | Promise<void>
   onUseful: (e: React.MouseEvent) => void
@@ -225,12 +216,6 @@ const MessageMenubar: FC<Props> = (props) => {
     [assistant, message, resendMessage]
   )
 
-  const { startEditing } = useMessageEditing()
-
-  const onEdit = useCallback(async () => {
-    startEditing(message.id)
-  }, [message.id, startEditing])
-
   const blockEntities = useSelector(messageBlocksSelectors.selectEntities)
 
   const isTranslating = useMemo(() => {
@@ -294,22 +279,8 @@ const MessageMenubar: FC<Props> = (props) => {
   const menubarScope: MessageMenubarScope = topic?.type ?? DEFAULT_MESSAGE_MENUBAR_SCOPE
   const { buttonIds, dropdownRootAllowKeys } = getMessageMenubarConfig(menubarScope)
 
-  const isEditable = useMemo(() => {
-    return findMainTextBlocks(message).length > 0 // 使用 MCP Server 后会有大于一段 MatinTextBlock
-  }, [message])
-
   const dropdownItems = useMemo(() => {
     const items: MenuProps['items'] = [
-      ...(isEditable
-        ? [
-            {
-              label: t('common.edit'),
-              key: 'edit',
-              icon: <FilePenLine size={15} />,
-              onClick: onEdit
-            }
-          ]
-        : []),
       {
         label: t('chat.message.new.branch.label'),
         key: 'new-branch',
@@ -472,11 +443,9 @@ const MessageMenubar: FC<Props> = (props) => {
     exportMenuOptions.plain_text,
     exportMenuOptions.siyuan,
     exportMenuOptions.yuque,
-    isEditable,
     mainTextContent,
     message,
     messageContainerRef,
-    onEdit,
     onInsertMessages,
     onNewBranch,
     t,
@@ -567,7 +536,6 @@ const MessageMenubar: FC<Props> = (props) => {
     message,
     notesPath,
     onCopy,
-    onEdit,
     onMentionModel,
     onRegenerate,
     onUseful,
@@ -679,19 +647,6 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
           onClick={() => handleResendUserMessage()}
           $softHoverBg={isBubbleStyle}>
           <RefreshIcon size={15} />
-        </ActionButton>
-      </Tooltip>
-    )
-  },
-  'user-edit': ({ message, onEdit, softHoverBg, t }) => {
-    if (message.role !== 'user') {
-      return null
-    }
-
-    return (
-      <Tooltip title={t('common.edit')} mouseEnterDelay={0.8}>
-        <ActionButton className="message-action-button" onClick={onEdit} $softHoverBg={softHoverBg}>
-          <EditIcon size={15} />
         </ActionButton>
       </Tooltip>
     )

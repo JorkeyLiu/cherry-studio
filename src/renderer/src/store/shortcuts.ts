@@ -100,13 +100,6 @@ const initialState: ShortcutsState = {
       system: false
     },
     {
-      key: 'edit_last_user_message',
-      shortcut: ['CommandOrControl', 'Shift', 'E'],
-      editable: true,
-      enabled: false,
-      system: false
-    },
-    {
       key: 'search_message_in_chat',
       shortcut: ['CommandOrControl', 'F'],
       editable: true,

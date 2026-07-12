@@ -2,7 +2,6 @@ import { loggerService } from '@logger'
 import { createSelector } from '@reduxjs/toolkit'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { appendMessageTrace, pauseTrace, restartTrace } from '@renderer/services/SpanManagerService'
-import { estimateUserPromptUsage } from '@renderer/services/TokenService'
 import store, { type RootState, useAppDispatch, useAppSelector } from '@renderer/store'
 import { updateOneBlock } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
@@ -16,7 +15,6 @@ import {
   regenerateAssistantResponseThunk,
   removeBlocksThunk,
   resendMessageThunk,
-  resendUserMessageWithEditThunk,
   updateMessageAndBlocksThunk,
   updateTranslationBlockThunk
 } from '@renderer/store/thunk/messageThunk'
@@ -378,42 +376,6 @@ export function useMessageOperations(topic: Topic) {
   )
 
   /**
-   * 在用户消息的主文本块被编辑后重新发送该消息。 / Resends a user message after its main text block has been edited.
-   * Dispatches resendUserMessageWithEditThunk.
-   */
-  const resendUserMessageWithEdit = useCallback(
-    async (message: Message, editedBlocks: MessageBlock[], assistant: Assistant) => {
-      await editMessageBlocks(message.id, editedBlocks)
-
-      const mainTextBlock = editedBlocks.find((block) => block.type === MessageBlockType.MAIN_TEXT)
-      if (!mainTextBlock) {
-        logger.error('[resendUserMessageWithEdit] Main text block not found in edited blocks')
-        return
-      }
-
-      await restartTrace(message, mainTextBlock.content)
-
-      const fileBlocks = editedBlocks.filter(
-        (block) => block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE
-      )
-
-      const files = fileBlocks.map((block) => block.file).filter((file) => file !== undefined)
-
-      const usage = await estimateUserPromptUsage({ content: mainTextBlock.content, files })
-      const messageUpdates: Partial<Message> & Pick<Message, 'id'> = {
-        id: message.id,
-        updatedAt: new Date().toISOString(),
-        usage
-      }
-
-      dispatch(newMessagesActions.updateMessage({ topicId: topic.id, messageId: message.id, updates: messageUpdates }))
-      // 对于message的修改会在下面的thunk中保存
-      await dispatch(resendUserMessageWithEditThunk(topic.id, message, assistant))
-    },
-    [dispatch, editMessageBlocks, topic.id]
-  )
-
-  /**
    * Removes a specific block from a message.
    */
   const removeMessageBlock = useCallback(
@@ -450,7 +412,6 @@ export function useMessageOperations(topic: Topic) {
     editMessage,
     resendMessage,
     regenerateAssistantMessage,
-    resendUserMessageWithEdit,
     appendAssistantResponse,
     createNewContext,
     clearTopicMessages,

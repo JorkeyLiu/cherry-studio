@@ -4,7 +4,6 @@ export type MessageMenubarScope = TopicType
 
 export type MessageMenubarButtonId =
   | 'user-regenerate'
-  | 'user-edit'
   | 'copy'
   | 'assistant-regenerate'
   | 'assistant-mention-model'
@@ -26,7 +25,6 @@ export const DEFAULT_MESSAGE_MENUBAR_SCOPE: MessageMenubarScope = TopicType.Chat
 
 export const DEFAULT_MESSAGE_MENUBAR_BUTTON_IDS: MessageMenubarButtonId[] = [
   'user-regenerate',
-  'user-edit',
   'copy',
   'assistant-regenerate',
   'assistant-mention-model',

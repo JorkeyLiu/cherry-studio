@@ -1,6 +1,5 @@
 import { loggerService } from '@logger'
 import Scrollbar from '@renderer/components/Scrollbar'
-import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
@@ -269,33 +268,28 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   )
 
   return (
-    <MessageEditingProvider>
-      <GroupContainer
-        id={messages[0].askId ? `message-group-${messages[0].askId}` : undefined}
-        className={classNames([multiModelMessageStyle])}>
-        <GridContainer
-          $count={messageLength}
-          $gridColumns={gridColumns}
-          className={classNames([multiModelMessageStyle])}>
-          {messages.map(renderMessage)}
-        </GridContainer>
-        {isGrouped && (
-          <MessageGroupMenuBar
-            multiModelMessageStyle={multiModelMessageStyle}
-            setMultiModelMessageStyle={(style) => {
-              setMultiModelMessageStyle(style)
-              messages.forEach((message) => {
-                void editMessage(message.id, { multiModelMessageStyle: style })
-              })
-            }}
-            messages={messages}
-            selectMessageId={selectedMessageId}
-            setSelectedMessage={setSelectedMessage}
-            topic={topic}
-          />
-        )}
-      </GroupContainer>
-    </MessageEditingProvider>
+    <GroupContainer
+      id={messages[0].askId ? `message-group-${messages[0].askId}` : undefined}
+      className={classNames([multiModelMessageStyle])}>
+      <GridContainer $count={messageLength} $gridColumns={gridColumns} className={classNames([multiModelMessageStyle])}>
+        {messages.map(renderMessage)}
+      </GridContainer>
+      {isGrouped && (
+        <MessageGroupMenuBar
+          multiModelMessageStyle={multiModelMessageStyle}
+          setMultiModelMessageStyle={(style) => {
+            setMultiModelMessageStyle(style)
+            messages.forEach((message) => {
+              void editMessage(message.id, { multiModelMessageStyle: style })
+            })
+          }}
+          messages={messages}
+          selectMessageId={selectedMessageId}
+          setSelectedMessage={setSelectedMessage}
+          topic={topic}
+        />
+      )}
+    </GroupContainer>
   )
 }
 

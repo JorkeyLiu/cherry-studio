@@ -5,7 +5,7 @@ import { getFileExtension, isSupportedFile } from '@renderer/utils'
 const logger = loggerService.withContext('PasteService')
 
 // Track last focused component
-type ComponentType = 'inputbar' | 'messageEditor' | 'TranslatePage' | null
+type ComponentType = 'inputbar' | 'TranslatePage' | null
 let lastFocusedComponent: ComponentType = 'inputbar' // Default to inputbar
 
 // 处理函数类型
@@ -14,7 +14,6 @@ type PasteHandler = (event: ClipboardEvent) => Promise<boolean>
 // 处理函数存储
 const handlers: {
   inputbar?: PasteHandler
-  messageEditor?: PasteHandler
 } = {}
 
 // 初始化标志

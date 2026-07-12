@@ -1319,17 +1319,6 @@ export const resendMessageThunk =
   }
 
 /**
- * Thunk to resend a user message after its content has been edited.
- * Updates the user message's text block and then triggers the regeneration
- * of its associated assistant responses using resendMessageThunk.
- */
-export const resendUserMessageWithEditThunk =
-  (topicId: Topic['id'], originalMessage: Message, assistant: Assistant) => async (dispatch: AppDispatch) => {
-    // Trigger the regeneration logic for associated assistant messages
-    void dispatch(resendMessageThunk(topicId, originalMessage, assistant))
-  }
-
-/**
  * Thunk to regenerate a specific assistant response.
  */
 export const regenerateAssistantResponseThunk =
