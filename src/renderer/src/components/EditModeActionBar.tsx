@@ -1,14 +1,10 @@
-import { useEditMode } from '@renderer/hooks/useEditMode'
+import { useEditMode } from '@renderer/context/EditModeContext'
 import { Button, Tooltip } from 'antd'
 import { Clipboard, Copy, Redo2, Scissors, Trash2, Undo2, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { styled } from 'styled-components'
 
-interface Props {
-  topicId: string
-}
-
-const EditModeActionBar = ({ topicId }: Props) => {
+const EditModeActionBar = () => {
   const { t } = useTranslation()
   const {
     selectedGroupIds,
@@ -23,7 +19,7 @@ const EditModeActionBar = ({ topicId }: Props) => {
     handleUndo,
     handleRedo,
     toggleEditMode
-  } = useEditMode(topicId)
+  } = useEditMode()
 
   if (selectedGroupIds.length === 0) {
     return null

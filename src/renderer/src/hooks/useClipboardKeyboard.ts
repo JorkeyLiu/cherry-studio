@@ -1,6 +1,5 @@
+import { useEditMode } from '@renderer/context/EditModeContext'
 import { useEffect, useRef } from 'react'
-
-import { useEditMode } from './useEditMode'
 
 /**
  * 检查当前焦点是否在文本输入元素上。
@@ -38,8 +37,8 @@ function isTextInputFocused(): boolean {
  * - Ctrl+Z / Cmd+Z: 撤销
  * - Ctrl+Shift+Z / Cmd+Shift+Z: 重做
  */
-export function useClipboardKeyboard(topicId: string) {
-  const editMode = useEditMode(topicId)
+export function useClipboardKeyboard() {
+  const editMode = useEditMode()
   const { isEnabled } = editMode
 
   // 用 ref 存储最新回调，避免 useEffect 因回调引用变化而重新注册 listener
@@ -49,7 +48,10 @@ export function useClipboardKeyboard(topicId: string) {
     handlePaste: editMode.handlePaste,
     handleDelete: editMode.handleDelete,
     handleUndo: editMode.handleUndo,
-    handleRedo: editMode.handleRedo
+    handleRedo: editMode.handleRedo,
+    handleMoveFocus: editMode.handleMoveFocus,
+    handleExtendSelection: editMode.handleExtendSelection,
+    handleClearSelection: editMode.handleClearSelection
   })
 
   // 每次渲染更新 ref
@@ -60,7 +62,10 @@ export function useClipboardKeyboard(topicId: string) {
       handlePaste: editMode.handlePaste,
       handleDelete: editMode.handleDelete,
       handleUndo: editMode.handleUndo,
-      handleRedo: editMode.handleRedo
+      handleRedo: editMode.handleRedo,
+      handleMoveFocus: editMode.handleMoveFocus,
+      handleExtendSelection: editMode.handleExtendSelection,
+      handleClearSelection: editMode.handleClearSelection
     }
   })
 
@@ -113,6 +118,41 @@ export function useClipboardKeyboard(topicId: string) {
       if (isMod && e.key === 'Backspace') {
         e.preventDefault()
         void cbs.handleDelete()
+        return
+      }
+
+      // ArrowDown: 向下移动焦点（更新的消息）
+      if (e.key === 'ArrowDown' && !isMod && !e.shiftKey) {
+        e.preventDefault()
+        cbs.handleMoveFocus('down')
+        return
+      }
+
+      // ArrowUp: 向上移动焦点（更早的消息）
+      if (e.key === 'ArrowUp' && !isMod && !e.shiftKey) {
+        e.preventDefault()
+        cbs.handleMoveFocus('up')
+        return
+      }
+
+      // Shift+ArrowDown: 向下扩展选区
+      if (e.key === 'ArrowDown' && e.shiftKey && !isMod) {
+        e.preventDefault()
+        cbs.handleExtendSelection('down')
+        return
+      }
+
+      // Shift+ArrowUp: 向上扩展选区
+      if (e.key === 'ArrowUp' && e.shiftKey && !isMod) {
+        e.preventDefault()
+        cbs.handleExtendSelection('up')
+        return
+      }
+
+      // Escape: 清除选区（不退出编辑模式）
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        cbs.handleClearSelection()
         return
       }
     }

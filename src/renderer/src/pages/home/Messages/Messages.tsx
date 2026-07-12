@@ -3,9 +3,9 @@ import ContextMenu from '@renderer/components/ContextMenu'
 import EditModeActionBar from '@renderer/components/EditModeActionBar'
 import { LoadingIcon } from '@renderer/components/Icons'
 import { LOAD_MORE_COUNT } from '@renderer/config/constant'
+import { EditModeProvider, useEditMode } from '@renderer/context/EditModeContext'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
-import { useEditMode } from '@renderer/hooks/useEditMode'
 import { useMessageOperations, useTopicMessages } from '@renderer/hooks/useMessageOperations'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
 import { useSettings } from '@renderer/hooks/useSettings'
@@ -54,6 +54,123 @@ interface MessagesProps {
 
 const logger = loggerService.withContext('Messages')
 
+interface MessagesContentProps {
+  assistant: Assistant
+  topic: Topic
+  scrollContainerRef: React.RefObject<HTMLDivElement | null>
+  handleScrollPosition: () => void
+  displayMessages: Message[]
+  hasMore: boolean
+  isLoadingMore: boolean
+  loadMoreMessages: () => void
+  registerMessageElement: (id: string, element: HTMLElement | null) => void
+}
+
+const MessagesContent: React.FC<MessagesContentProps> = ({
+  assistant,
+  topic,
+  scrollContainerRef,
+  handleScrollPosition,
+  displayMessages,
+  hasMore,
+  isLoadingMore,
+  loadMoreMessages,
+  registerMessageElement
+}) => {
+  const { showPrompt, messageNavigation } = useSettings()
+
+  const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
+  useClipboardKeyboard()
+
+  // NOTE: 因为displayMessages是倒序的，所以得到的groupedMessages每个group内部也是倒序的，需要再倒一遍
+  const groupedMessages = useMemo(() => {
+    const grouped = Object.entries(getGroupedMessages(displayMessages))
+    const newGrouped: {
+      [key: string]: (Message & {
+        index: number
+      })[]
+    } = {}
+    grouped.forEach(([key, group]) => {
+      newGrouped[key] = group.toReversed()
+    })
+    return Object.entries(newGrouped)
+  }, [displayMessages])
+
+  // 将消息按是否选中分段，用于连续选中消息的包裹
+  const messageSegments = useMemo(() => {
+    const segments: Array<{ selected: boolean; items: typeof groupedMessages }> = []
+
+    for (const [key, groupMessages] of groupedMessages) {
+      const groupAskId = groupMessages[0]?.askId || groupMessages[0]?.id || ''
+      const selected = isEditMode && selectedGroupIds.includes(groupAskId)
+
+      const lastSeg = segments[segments.length - 1]
+      if (lastSeg && lastSeg.selected === selected) {
+        lastSeg.items.push([key, groupMessages])
+      } else {
+        segments.push({ selected, items: [[key, groupMessages]] })
+      }
+    }
+
+    return segments
+  }, [groupedMessages, isEditMode, selectedGroupIds])
+
+  const renderMessageSegments = () => {
+    return messageSegments.map((seg, i) => {
+      const content = seg.items.map(([key, groupMessages]) => (
+        <MessageGroup
+          key={key}
+          messages={groupMessages}
+          topic={topic}
+          registerMessageElement={registerMessageElement}
+          isEditMode={isEditMode}
+          onGroupClick={handleGroupClick}
+        />
+      ))
+
+      if (seg.selected) {
+        return <SelectionBlock key={`sel-${i}`}>{content}</SelectionBlock>
+      }
+      return content
+    })
+  }
+
+  return (
+    <MessagesContainer
+      id="messages"
+      className="messages-container"
+      ref={scrollContainerRef}
+      key={assistant.id}
+      onScroll={handleScrollPosition}>
+      <NarrowLayout style={{ display: 'flex', flexDirection: 'column-reverse' }}>
+        <InfiniteScroll
+          dataLength={displayMessages.length}
+          next={loadMoreMessages}
+          hasMore={hasMore}
+          loader={null}
+          scrollableTarget="messages"
+          inverse
+          style={{ overflow: 'visible' }}>
+          <ContextMenu>
+            <ScrollContainer>
+              {renderMessageSegments()}
+              {isLoadingMore && (
+                <LoaderContainer>
+                  <LoadingIcon color="var(--color-text-2)" />
+                </LoaderContainer>
+              )}
+            </ScrollContainer>
+          </ContextMenu>
+        </InfiniteScroll>
+
+        {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
+      </NarrowLayout>
+      {messageNavigation === 'anchor' && <MessageAnchorLine messages={displayMessages} />}
+      {isEditMode && <EditModeActionBar />}
+    </MessagesContainer>
+  )
+}
+
 const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, onComponentUpdate, onFirstUpdate }) => {
   const { containerRef: scrollContainerRef, handleScroll: handleScrollPosition } = useScrollPosition(
     `topic-${topic.id}`
@@ -64,16 +181,33 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
   const [isProcessingContext, setIsProcessingContext] = useState(false)
 
   const { addTopic } = useAssistant(assistant.id)
-  const { showPrompt, messageNavigation } = useSettings()
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const messages = useTopicMessages(topic.id)
   const { displayCount, clearTopicMessages, deleteMessage, createTopicBranch } = useMessageOperations(topic)
   const { setTimeoutTimer } = useTimer()
 
-  const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode(topic.id)
+  // 滚动到指定消息组
+  const scrollToGroup = useCallback((askId: string) => {
+    const element = document.getElementById(`message-group-${askId}`)
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [])
 
-  useClipboardKeyboard(topic.id)
+  // 已渲染的消息组 id 集合，用于限制键盘选择范围
+  const visibleGroupIds = useMemo(() => {
+    return new Set(
+      displayMessages
+        .map((m) => {
+          if (m.role === 'assistant') {
+            return m.askId ?? m.id
+          }
+          return m.id
+        })
+        .filter(Boolean)
+    )
+  }, [displayMessages])
 
   const messageElements = useRef<Map<string, HTMLElement>>(new Map())
   const messagesRef = useRef<Message[]>(messages)
@@ -194,11 +328,8 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
           // 4. Trigger auto-rename for the new topic
           void autoRenameTopic(assistant, newTopic.id)
         } else {
-          // Optional: Handle cloning failure (e.g., show an error message)
-          // You might want to remove the added topic if cloning fails
-          // removeTopic(newTopic.id); // Assuming you have a removeTopic function
           logger.error(`[NEW_BRANCH] Failed to create topic branch for topic ${newTopic.id}`)
-          window.toast.error(t('message.branch.error')) // Example error message
+          window.toast.error(t('message.branch.error'))
         }
       }),
       EventEmitter.on(
@@ -282,92 +413,20 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
     requestAnimationFrame(() => onComponentUpdate?.())
   }, [onComponentUpdate])
 
-  // NOTE: 因为displayMessages是倒序的，所以得到的groupedMessages每个group内部也是倒序的，需要再倒一遍
-  const groupedMessages = useMemo(() => {
-    const grouped = Object.entries(getGroupedMessages(displayMessages))
-    const newGrouped: {
-      [key: string]: (Message & {
-        index: number
-      })[]
-    } = {}
-    grouped.forEach(([key, group]) => {
-      newGrouped[key] = group.toReversed()
-    })
-    return Object.entries(newGrouped)
-  }, [displayMessages])
-
-  // 将消息按是否选中分段，用于连续选中消息的包裹
-  const messageSegments = useMemo(() => {
-    const segments: Array<{ selected: boolean; items: typeof groupedMessages }> = []
-
-    for (const [key, groupMessages] of groupedMessages) {
-      const groupAskId = groupMessages[0]?.askId || groupMessages[0]?.id || ''
-      const selected = isEditMode && selectedGroupIds.includes(groupAskId)
-
-      const lastSeg = segments[segments.length - 1]
-      if (lastSeg && lastSeg.selected === selected) {
-        lastSeg.items.push([key, groupMessages])
-      } else {
-        segments.push({ selected, items: [[key, groupMessages]] })
-      }
-    }
-
-    return segments
-  }, [groupedMessages, isEditMode, selectedGroupIds])
-
-  const renderMessageSegments = () => {
-    return messageSegments.map((seg, i) => {
-      const content = seg.items.map(([key, groupMessages]) => (
-        <MessageGroup
-          key={key}
-          messages={groupMessages}
-          topic={topic}
-          registerMessageElement={registerMessageElement}
-          isEditMode={isEditMode}
-          onGroupClick={handleGroupClick}
-        />
-      ))
-
-      if (seg.selected) {
-        return <SelectionBlock key={`sel-${i}`}>{content}</SelectionBlock>
-      }
-      return content
-    })
-  }
-
   return (
-    <MessagesContainer
-      id="messages"
-      className="messages-container"
-      ref={scrollContainerRef}
-      key={assistant.id}
-      onScroll={handleScrollPosition}>
-      <NarrowLayout style={{ display: 'flex', flexDirection: 'column-reverse' }}>
-        <InfiniteScroll
-          dataLength={displayMessages.length}
-          next={loadMoreMessages}
-          hasMore={hasMore}
-          loader={null}
-          scrollableTarget="messages"
-          inverse
-          style={{ overflow: 'visible' }}>
-          <ContextMenu>
-            <ScrollContainer>
-              {renderMessageSegments()}
-              {isLoadingMore && (
-                <LoaderContainer>
-                  <LoadingIcon color="var(--color-text-2)" />
-                </LoaderContainer>
-              )}
-            </ScrollContainer>
-          </ContextMenu>
-        </InfiniteScroll>
-
-        {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
-      </NarrowLayout>
-      {messageNavigation === 'anchor' && <MessageAnchorLine messages={displayMessages} />}
-      {isEditMode && <EditModeActionBar topicId={topic.id} />}
-    </MessagesContainer>
+    <EditModeProvider topicId={topic.id} scrollToGroup={scrollToGroup} visibleGroupIds={visibleGroupIds}>
+      <MessagesContent
+        assistant={assistant}
+        topic={topic}
+        scrollContainerRef={scrollContainerRef}
+        handleScrollPosition={handleScrollPosition}
+        displayMessages={displayMessages}
+        hasMore={hasMore}
+        isLoadingMore={isLoadingMore}
+        loadMoreMessages={loadMoreMessages}
+        registerMessageElement={registerMessageElement}
+      />
+    </EditModeProvider>
   )
 }
 

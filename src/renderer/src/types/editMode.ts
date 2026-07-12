@@ -28,6 +28,7 @@ export interface EditModeState {
   enabled: boolean
   selectedGroupIds: string[] // askId 列表
   lastSelectedIndex: number | null // Shift 区域选的锚点
+  focusedIndex: number | null // 当前焦点位置
   isProcessing: boolean // 全局操作锁
 }
 

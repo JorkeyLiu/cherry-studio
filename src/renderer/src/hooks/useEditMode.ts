@@ -4,6 +4,8 @@ import store, { useAppDispatch, useAppSelector } from '@renderer/store'
 import {
   clearSelection,
   finishProcessing,
+  moveFocusSelection,
+  setFocusedIndex,
   setLastSelectedIndex,
   setSelectedGroupIds,
   startProcessing,
@@ -15,7 +17,11 @@ import { useCallback, useEffect, useMemo } from 'react'
 
 import { getGroupIndex, useMessageGroups } from './useMessageGroup'
 
-export function useEditMode(topicId: string) {
+export function useCreateEditMode(
+  topicId: string,
+  scrollToGroup?: (askId: string) => void,
+  visibleGroupIds?: Set<string>
+) {
   const dispatch = useAppDispatch()
 
   // State — precise selectors
@@ -23,12 +29,18 @@ export function useEditMode(topicId: string) {
   const isProcessing = useAppSelector((state) => state.editMode.isProcessing)
   const selectedGroupIds = useAppSelector((state) => state.editMode.selectedGroupIds)
   const lastSelectedIndex = useAppSelector((state) => state.editMode.lastSelectedIndex)
+  const focusedIndex = useAppSelector((state) => state.editMode.focusedIndex)
   const clipboard = useAppSelector((state) => state.clipboard)
   const undoStack = useAppSelector((state) => state.undoStack)
   const messages = useAppSelector((state) => selectMessagesForTopic(state, topicId))
 
   // 消息组
-  const groups = useMessageGroups(messages)
+  const allGroups = useMessageGroups(messages)
+  // 使用已渲染的组（分页可见），若未传则使用全部
+  const groups = useMemo(() => {
+    if (!visibleGroupIds) return allGroups
+    return allGroups.filter((g) => visibleGroupIds.has(g.askId))
+  }, [allGroups, visibleGroupIds])
 
   // W3: 切换 topic 时清空选择
   useEffect(() => {
@@ -92,6 +104,7 @@ export function useEditMode(topicId: string) {
 
       if (!isShift) {
         dispatch(setLastSelectedIndex(groupIndex))
+        dispatch(setFocusedIndex(groupIndex))
       }
     },
     [dispatch, groups, selectedGroupIds, lastSelectedIndex, isEnabled]
@@ -206,30 +219,121 @@ export function useEditMode(topicId: string) {
     }
   }, [dispatch, isProcessing])
 
+  // 移动焦点（单选光标）
+  const handleMoveFocus = useCallback(
+    (direction: 'up' | 'down') => {
+      if (groups.length === 0) return
+      const currentIndex = focusedIndex ?? lastSelectedIndex ?? -1
+      const maxIndex = groups.length - 1
+
+      let newIndex: number
+      if (direction === 'up') {
+        // groups 按时间正序：索引越小越旧（视觉越靠上），Up 键向更早消息移动
+        newIndex = Math.max(currentIndex - 1, 0)
+      } else {
+        // Down 键向更新消息移动（索引增大）
+        newIndex = Math.min(currentIndex + 1, maxIndex)
+      }
+
+      if (newIndex === currentIndex) return
+
+      const targetGroup = groups[newIndex]
+      if (targetGroup) {
+        dispatch(moveFocusSelection({ groupId: targetGroup.askId, index: newIndex }))
+        scrollToGroup?.(targetGroup.askId)
+      }
+    },
+    [dispatch, groups, lastSelectedIndex, focusedIndex, scrollToGroup]
+  )
+
+  // 扩展选区（Shift+箭头）
+  const handleExtendSelection = useCallback(
+    (direction: 'up' | 'down') => {
+      if (groups.length === 0) return
+      const anchorIndex = lastSelectedIndex ?? 0
+      const currentFocus = focusedIndex ?? anchorIndex
+
+      let newFocus: number
+      if (direction === 'up') {
+        newFocus = Math.max(currentFocus - 1, 0)
+      } else {
+        newFocus = Math.min(currentFocus + 1, groups.length - 1)
+      }
+
+      if (newFocus === currentFocus) return
+
+      // 从 anchor 到新焦点的范围
+      const start = Math.min(anchorIndex, newFocus)
+      const end = Math.max(anchorIndex, newFocus)
+      const rangeAskIds = groups.slice(start, end + 1).map((g) => g.askId)
+
+      dispatch(setSelectedGroupIds(rangeAskIds))
+      dispatch(setFocusedIndex(newFocus))
+
+      // 滚动到新扩展的边界
+      const boundaryGroup = groups[newFocus]
+      if (boundaryGroup) {
+        scrollToGroup?.(boundaryGroup.askId)
+      }
+    },
+    [dispatch, groups, lastSelectedIndex, focusedIndex, scrollToGroup]
+  )
+
+  // 清除选区（不退出编辑模式）
+  const handleClearSelection = useCallback(() => {
+    dispatch(clearSelection())
+  }, [dispatch])
+
   // stable clearSelection
   const stableClearSelection = useCallback(() => {
     dispatch(clearSelection())
   }, [dispatch])
 
-  return {
-    // State
-    isEnabled,
-    selectedGroupIds,
-    selectedGroups,
-    groups,
-    hasClipboard: clipboard.items.length > 0,
-    canUndo: undoStack.undoStack.length > 0,
-    canRedo: undoStack.redoStack.length > 0,
+  return useMemo(
+    () => ({
+      // State
+      isEnabled,
+      selectedGroupIds,
+      selectedGroups,
+      groups,
+      hasClipboard: clipboard.items.length > 0,
+      canUndo: undoStack.undoStack.length > 0,
+      canRedo: undoStack.redoStack.length > 0,
 
-    // Actions
-    toggleEditMode,
-    handleGroupClick,
-    handleCopy,
-    handleCut,
-    handlePaste,
-    handleDelete,
-    handleUndo,
-    handleRedo,
-    clearSelection: stableClearSelection
-  }
+      // Actions
+      toggleEditMode,
+      handleGroupClick,
+      handleCopy,
+      handleCut,
+      handlePaste,
+      handleDelete,
+      handleMoveFocus,
+      handleExtendSelection,
+      handleClearSelection,
+      handleUndo,
+      handleRedo,
+      clearSelection: stableClearSelection
+    }),
+    [
+      isEnabled,
+      selectedGroupIds,
+      selectedGroups,
+      groups,
+      clipboard.items.length,
+      undoStack.undoStack.length,
+      undoStack.redoStack.length,
+      toggleEditMode,
+      handleGroupClick,
+      handleCopy,
+      handleCut,
+      handlePaste,
+      handleDelete,
+      handleMoveFocus,
+      handleExtendSelection,
+      handleClearSelection,
+      handleUndo,
+      handleRedo,
+      stableClearSelection
+    ]
+  )
 }
