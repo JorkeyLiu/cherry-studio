@@ -409,6 +409,13 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
     }
   })
 
+  useShortcut('edit_last_user_message', () => {
+    const lastUserMessage = messagesRef.current.findLast((m) => m.role === 'user' && m.type !== 'clear')
+    if (lastUserMessage) {
+      void EventEmitter.emit(EVENT_NAMES.EDIT_MESSAGE, lastUserMessage.id)
+    }
+  })
+
   useEffect(() => {
     requestAnimationFrame(() => onComponentUpdate?.())
   }, [onComponentUpdate])

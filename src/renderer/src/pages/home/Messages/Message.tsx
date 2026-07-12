@@ -1,14 +1,18 @@
+import { loggerService } from '@logger'
 import HorizontalScrollContainer from '@renderer/components/HorizontalScrollContainer'
 import Scrollbar from '@renderer/components/Scrollbar'
+import { useMessageEditing } from '@renderer/context/MessageEditingContext'
 import { useAssistant } from '@renderer/hooks/useAssistant'
+import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useModel } from '@renderer/hooks/useModel'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getMessageModelId } from '@renderer/services/MessagesService'
 import { getModelUniqId } from '@renderer/services/ModelService'
+import { estimateMessageUsage } from '@renderer/services/TokenService'
 import type { Assistant, Topic } from '@renderer/types'
-import type { Message } from '@renderer/types/newMessage'
+import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { classNames, cn } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { isMessageProcessing } from '@renderer/utils/messageUtils/is'
@@ -19,6 +23,7 @@ import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import MessageContent from './MessageContent'
+import MessageEditor from './MessageEditor'
 import MessageErrorBoundary from './MessageErrorBoundary'
 import MessageHeader from './MessageHeader'
 import MessageMenubar from './MessageMenubar'
@@ -41,6 +46,8 @@ interface Props {
   onGroupClick?: (askId: string, isCtrl: boolean, isShift: boolean) => void
 }
 
+const logger = loggerService.withContext('MessageItem')
+
 const MessageItem: FC<Props> = ({
   message,
   topic,
@@ -54,16 +61,59 @@ const MessageItem: FC<Props> = ({
   onGroupClick
 }) => {
   const { t } = useTranslation()
-  const { assistant } = useAssistant(message.assistantId)
+  const { assistant, setModel } = useAssistant(message.assistantId)
   const model = useModel(getMessageModelId(message), message.model?.provider) || message.model
   const { messageFont, fontSize, messageStyle, showMessageOutline } = useSettings()
+  const { editMessageBlocks, resendUserMessageWithEdit, editMessage } = useMessageOperations(topic)
   const messageContainerRef = useRef<HTMLDivElement>(null)
+  const { editingMessageId, startEditing, stopEditing } = useMessageEditing()
   const { setTimeoutTimer } = useTimer()
+  const isEditing = editingMessageId === message.id
+
+  useEffect(() => {
+    if (isEditing && messageContainerRef.current) {
+      scrollIntoView(messageContainerRef.current, {
+        behavior: 'smooth',
+        block: 'center',
+        container: 'nearest'
+      })
+    }
+  }, [isEditing])
+
+  const handleEditSave = useCallback(
+    async (blocks: MessageBlock[]) => {
+      try {
+        await editMessageBlocks(message.id, blocks)
+        const usage = await estimateMessageUsage(message)
+        void editMessage(message.id, { usage: usage })
+        stopEditing()
+      } catch (error) {
+        logger.error('Failed to save message blocks:', error as Error)
+      }
+    },
+    [message, editMessageBlocks, stopEditing, editMessage]
+  )
+
+  const handleEditResend = useCallback(
+    async (blocks: MessageBlock[]) => {
+      try {
+        await resendUserMessageWithEdit(message, blocks, assistant)
+        stopEditing()
+      } catch (error) {
+        logger.error('Failed to resend message:', error as Error)
+      }
+    },
+    [message, resendUserMessageWithEdit, assistant, stopEditing]
+  )
+
+  const handleEditCancel = useCallback(() => {
+    stopEditing()
+  }, [stopEditing])
 
   const isLastMessage = index === 0 || !!isGrouped
   const isAssistantMessage = message.role === 'assistant'
   const isProcessing = isMessageProcessing(message)
-  const showMenubar = !hideMenuBar && !isProcessing
+  const showMenubar = !hideMenuBar && !isEditing && !isProcessing
 
   // 编辑模式下点击消息内容区域触发组选择
   const handleMessageClick = useCallback(
@@ -111,6 +161,19 @@ const MessageItem: FC<Props> = ({
     return () => unsubscribes.forEach((unsub) => unsub())
   }, [message.id, messageHighlightHandler])
 
+  // Listen for external edit requests and activate editor for this message if it matches
+  useEffect(() => {
+    const handleEditRequest = (targetId: string) => {
+      if (targetId === message.id) {
+        startEditing(message.id)
+      }
+    }
+    const unsubscribe = EventEmitter.on(EVENT_NAMES.EDIT_MESSAGE, handleEditRequest)
+    return () => {
+      unsubscribe()
+    }
+  }, [message.id, startEditing])
+
   if (message.type === 'clear') {
     return (
       <NewContextMessage
@@ -144,41 +207,55 @@ const MessageItem: FC<Props> = ({
         topic={topic}
         isGroupContextMessage={isGroupContextMessage}
       />
-      {message.role === 'assistant' && showMessageOutline && <MessageOutline message={message} />}
-      <MessageContentContainer
-        className="message-content-container"
-        style={{
-          fontFamily: messageFont === 'serif' ? 'var(--font-family-serif)' : 'var(--font-family)',
-          fontSize,
-          overflowY: 'visible'
-        }}>
-        <MessageErrorBoundary>
-          <MessageContent message={message} />
-        </MessageErrorBoundary>
-      </MessageContentContainer>
-      {showMenubar && (
-        <MessageFooter className="MessageFooter">
-          <HorizontalScrollContainer
-            classNames={{
-              content: cn(
-                'flex-1 items-center justify-between',
-                isLastMessage && messageStyle === 'plain' ? 'flex-row-reverse' : 'flex-row'
-              )
+      {isEditing && (
+        <MessageEditor
+          message={message}
+          topicId={topic.id}
+          onSave={handleEditSave}
+          onResend={handleEditResend}
+          onCancel={handleEditCancel}
+        />
+      )}
+      {!isEditing && (
+        <>
+          {message.role === 'assistant' && showMessageOutline && <MessageOutline message={message} />}
+          <MessageContentContainer
+            className="message-content-container"
+            style={{
+              fontFamily: messageFont === 'serif' ? 'var(--font-family-serif)' : 'var(--font-family)',
+              fontSize,
+              overflowY: 'visible'
             }}>
-            <MessageMenubar
-              message={message}
-              assistant={assistant}
-              model={model}
-              index={index}
-              topic={topic}
-              isLastMessage={isLastMessage}
-              isAssistantMessage={isAssistantMessage}
-              isGrouped={isGrouped}
-              messageContainerRef={messageContainerRef as React.RefObject<HTMLDivElement>}
-              onUpdateUseful={onUpdateUseful}
-            />
-          </HorizontalScrollContainer>
-        </MessageFooter>
+            <MessageErrorBoundary>
+              <MessageContent message={message} />
+            </MessageErrorBoundary>
+          </MessageContentContainer>
+          {showMenubar && (
+            <MessageFooter className="MessageFooter">
+              <HorizontalScrollContainer
+                classNames={{
+                  content: cn(
+                    'flex-1 items-center justify-between',
+                    isLastMessage && messageStyle === 'plain' ? 'flex-row-reverse' : 'flex-row'
+                  )
+                }}>
+                <MessageMenubar
+                  message={message}
+                  assistant={assistant}
+                  model={model}
+                  index={index}
+                  topic={topic}
+                  isLastMessage={isLastMessage}
+                  isAssistantMessage={isAssistantMessage}
+                  isGrouped={isGrouped}
+                  messageContainerRef={messageContainerRef as React.RefObject<HTMLDivElement>}
+                  setModel={setModel}
+                  onUpdateUseful={onUpdateUseful}
+                />
+              </HorizontalScrollContainer>
+            </MessageFooter>
+          )}
+        </>
       )}
     </MessageContainer>
   )

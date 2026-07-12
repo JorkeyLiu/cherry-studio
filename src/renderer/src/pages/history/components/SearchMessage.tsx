@@ -1,4 +1,5 @@
 import { HStack } from '@renderer/components/Layout'
+import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
 import { getTopicById } from '@renderer/hooks/useTopic'
 import { default as MessageItem } from '@renderer/pages/home/Messages/Message'
 import { locateToMessage } from '@renderer/services/MessagesService'
@@ -40,23 +41,25 @@ const SearchMessage: FC<Props> = ({ message, ...props }) => {
   }
 
   return (
-    <MessagesContainer {...props}>
-      <ContainerWrapper>
-        <MessageItem message={message} topic={topic} hideMenuBar={true} />
-        <Button
-          type="text"
-          size="middle"
-          style={{ color: 'var(--color-text-3)', position: 'absolute', right: 16, top: 16 }}
-          onClick={() => locateToMessage(navigate, message)}
-          icon={<Forward size={16} />}
-        />
-        <HStack mt="10px" justifyContent="center">
-          <Button onClick={() => locateToMessage(navigate, message)} icon={<Forward size={16} />}>
-            {t('history.locate.message')}
-          </Button>
-        </HStack>
-      </ContainerWrapper>
-    </MessagesContainer>
+    <MessageEditingProvider>
+      <MessagesContainer {...props}>
+        <ContainerWrapper>
+          <MessageItem message={message} topic={topic} hideMenuBar={true} />
+          <Button
+            type="text"
+            size="middle"
+            style={{ color: 'var(--color-text-3)', position: 'absolute', right: 16, top: 16 }}
+            onClick={() => locateToMessage(navigate, message)}
+            icon={<Forward size={16} />}
+          />
+          <HStack mt="10px" justifyContent="center">
+            <Button onClick={() => locateToMessage(navigate, message)} icon={<Forward size={16} />}>
+              {t('history.locate.message')}
+            </Button>
+          </HStack>
+        </ContainerWrapper>
+      </MessagesContainer>
+    </MessageEditingProvider>
   )
 }
 

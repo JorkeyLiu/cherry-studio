@@ -1,6 +1,7 @@
 import { MessageOutlined } from '@ant-design/icons'
 import { HStack } from '@renderer/components/Layout'
 import SearchPopup from '@renderer/components/Popups/SearchPopup'
+import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
@@ -56,31 +57,33 @@ const TopicMessages: FC<Props> = ({ topic: _topic, ...props }) => {
   }
 
   return (
-    <MessagesContainer {...props} ref={containerRef} onScroll={handleScroll}>
-      <ContainerWrapper className={messageStyle}>
-        {topic?.messages.map((message) => (
-          <MessageWrapper key={message.id} className={classNames([messageStyle, message.role])}>
-            <MessageItem message={message} topic={topic} hideMenuBar={true} />
-            <Button
-              type="text"
-              size="middle"
-              style={{ color: 'var(--color-text-3)', position: 'absolute', right: 0, top: 5 }}
-              onClick={() => locateToMessage(navigate, message)}
-              icon={<Forward size={16} />}
-            />
-            <Divider style={{ margin: '8px auto 15px' }} variant="dashed" />
-          </MessageWrapper>
-        ))}
-        {isEmpty && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
-        {!isEmpty && (
-          <HStack justifyContent="center">
-            <Button onClick={() => onContinueChat(topic)} icon={<MessageOutlined />}>
-              {t('history.continue_chat')}
-            </Button>
-          </HStack>
-        )}
-      </ContainerWrapper>
-    </MessagesContainer>
+    <MessageEditingProvider>
+      <MessagesContainer {...props} ref={containerRef} onScroll={handleScroll}>
+        <ContainerWrapper className={messageStyle}>
+          {topic?.messages.map((message) => (
+            <MessageWrapper key={message.id} className={classNames([messageStyle, message.role])}>
+              <MessageItem message={message} topic={topic} hideMenuBar={true} />
+              <Button
+                type="text"
+                size="middle"
+                style={{ color: 'var(--color-text-3)', position: 'absolute', right: 0, top: 5 }}
+                onClick={() => locateToMessage(navigate, message)}
+                icon={<Forward size={16} />}
+              />
+              <Divider style={{ margin: '8px auto 15px' }} variant="dashed" />
+            </MessageWrapper>
+          ))}
+          {isEmpty && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+          {!isEmpty && (
+            <HStack justifyContent="center">
+              <Button onClick={() => onContinueChat(topic)} icon={<MessageOutlined />}>
+                {t('history.continue_chat')}
+              </Button>
+            </HStack>
+          )}
+        </ContainerWrapper>
+      </MessagesContainer>
+    </MessageEditingProvider>
   )
 }
 
