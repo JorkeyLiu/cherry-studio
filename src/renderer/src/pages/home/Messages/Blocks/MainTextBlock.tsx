@@ -63,6 +63,7 @@ const MainTextBlock: React.FC<Props> = ({ block, citationBlockId, role, mentions
 
 const MentionTag = styled.span`
   color: var(--color-link);
+  user-select: text;
 `
 
 export default React.memo(MainTextBlock)

@@ -1,5 +1,6 @@
 import { loggerService } from '@logger'
 import { createSelector } from '@reduxjs/toolkit'
+import { deleteSingleMessage } from '@renderer/services/ClipboardService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { appendMessageTrace, pauseTrace, restartTrace } from '@renderer/services/SpanManagerService'
 import { estimateUserPromptUsage } from '@renderer/services/TokenService'
@@ -10,7 +11,6 @@ import {
   appendAssistantResponseThunk,
   clearTopicMessagesThunk,
   cloneMessagesToNewTopicThunk,
-  deleteMessageGroupThunk,
   deleteSingleMessageThunk,
   initiateTranslationThunk,
   regenerateAssistantResponseThunk,
@@ -57,17 +57,6 @@ export function useMessageOperations(topic: Topic) {
     async (id: string, traceId?: string, modelName?: string) => {
       await dispatch(deleteSingleMessageThunk(topic.id, id))
       void window.api.trace.cleanHistory(topic.id, traceId || '', modelName)
-    },
-    [dispatch, topic.id]
-  )
-
-  /**
-   * 删除一组消息（基于 askId）。 / Deletes a group of messages (based on askId).
-   * Dispatches deleteMessageGroupThunk.
-   */
-  const deleteGroupMessages = useCallback(
-    async (askId: string) => {
-      await dispatch(deleteMessageGroupThunk(topic.id, askId))
     },
     [dispatch, topic.id]
   )
@@ -443,10 +432,21 @@ export function useMessageOperations(topic: Topic) {
     [dispatch, topic?.id]
   )
 
+  /**
+   * 删除消息并支持撤销操作。
+   * Deletes a single message with undo support via ClipboardService.
+   */
+  const deleteMessageWithUndo = useCallback(
+    async (message: Message) => {
+      await deleteSingleMessage(dispatch, store.getState, topic.id, message)
+    },
+    [dispatch, topic.id]
+  )
+
   return {
     displayCount,
     deleteMessage,
-    deleteGroupMessages,
+    deleteMessageWithUndo,
     editMessage,
     resendMessage,
     regenerateAssistantMessage,

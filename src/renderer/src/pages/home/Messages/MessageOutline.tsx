@@ -105,6 +105,7 @@ const MessageOutlineContainer = styled.div`
   inset: 63px 0 36px 10px;
   z-index: 999;
   pointer-events: none;
+  user-select: none;
   & ~ .message-content-container {
     padding-left: 46px !important;
   }

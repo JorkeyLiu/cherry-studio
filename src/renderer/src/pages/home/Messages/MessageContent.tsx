@@ -27,6 +27,7 @@ const MessageContent: React.FC<Props> = ({ message }) => {
 
 const MentionTag = styled.span`
   color: var(--color-link);
+  user-select: text;
 `
 
 // const SearchingText = styled.div`

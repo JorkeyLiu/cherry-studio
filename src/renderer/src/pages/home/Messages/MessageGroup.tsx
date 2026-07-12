@@ -32,6 +32,7 @@ interface Props {
 
 const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = false, onGroupClick }: Props) => {
   const messageLength = messages.length
+  const groupId = messages[0]?.askId || messages[0]?.id
 
   // Hooks
   const { editMessage } = useMessageOperations(topic)
@@ -316,7 +317,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   return (
     <MessageEditingProvider>
       <GroupContainer
-        id={messages[0].askId ? `message-group-${messages[0].askId}` : undefined}
+        id={groupId ? `message-group-${groupId}` : undefined}
         className={classNames([multiModelMessageStyle])}>
         <GridContainer
           $count={messageLength}

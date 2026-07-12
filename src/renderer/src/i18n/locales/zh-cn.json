@@ -1076,6 +1076,7 @@
       "cutAction": "剪切",
       "deleteAction": "删除",
       "deleted": "已删除 {{count}} 条消息",
+      "deselect": "取消选择",
       "enter": "进入编辑模式",
       "exit": "退出编辑模式",
       "pasteAction": "粘贴",

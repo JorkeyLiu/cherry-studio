@@ -1,14 +1,10 @@
-import { useEditMode } from '@renderer/hooks/useEditMode'
+import { useEditMode } from '@renderer/context/EditModeContext'
 import { Button, Tooltip } from 'antd'
 import { Clipboard, Copy, Redo2, Scissors, Trash2, Undo2, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { styled } from 'styled-components'
 
-interface Props {
-  topicId: string
-}
-
-const EditModeActionBar = ({ topicId }: Props) => {
+const EditModeActionBar = () => {
   const { t } = useTranslation()
   const {
     selectedGroupIds,
@@ -22,8 +18,8 @@ const EditModeActionBar = ({ topicId }: Props) => {
     handleDelete,
     handleUndo,
     handleRedo,
-    toggleEditMode
-  } = useEditMode(topicId)
+    handleClearSelection
+  } = useEditMode()
 
   if (selectedGroupIds.length === 0) {
     return null
@@ -95,13 +91,13 @@ const EditModeActionBar = ({ topicId }: Props) => {
             />
           </Tooltip>
         </ActionButtons>
-        <Tooltip title={t('chat.navigation.close')}>
+        <Tooltip title={t('chat.edit.deselect')}>
           <ActionButton
             shape="circle"
             color="default"
             variant="text"
             icon={<X size={16} />}
-            onClick={() => toggleEditMode(false)}
+            onClick={handleClearSelection}
           />
         </Tooltip>
       </ActionBar>

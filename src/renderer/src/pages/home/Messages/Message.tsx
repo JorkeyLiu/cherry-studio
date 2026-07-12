@@ -323,6 +323,7 @@ const MessageFooter = styled.div`
   gap: 10px;
   margin-left: 46px;
   margin-top: 3px;
+  user-select: none;
 `
 
 const NewContextMessage = styled.div`

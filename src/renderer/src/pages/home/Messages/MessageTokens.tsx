@@ -104,7 +104,7 @@ const MessageTokens: React.FC<MessageTokensProps> = ({ message }) => {
 const MessageMetadata = styled.div`
   font-size: 10px;
   color: var(--color-text-3);
-  user-select: text;
+  user-select: none;
   cursor: pointer;
   text-align: right;
 

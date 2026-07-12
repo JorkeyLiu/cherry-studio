@@ -381,6 +381,7 @@ const CodeHeader = styled.div<{ $isInSpecialView?: boolean }>`
   margin-top: ${(props) => (props.$isInSpecialView ? '6px' : '0')};
   height: ${(props) => (props.$isInSpecialView ? '16px' : '34px')};
   background-color: ${(props) => (props.$isInSpecialView ? 'transparent' : 'var(--color-background-mute)')};
+  user-select: none;
 `
 
 const SplitViewWrapper = styled.div<{ $isSpecialView: boolean; $isSplitView: boolean }>`

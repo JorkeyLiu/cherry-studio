@@ -108,7 +108,7 @@ type MessageMenubarButtonContext = {
   confirmRegenerateMessage: boolean
   contextWindowMode?: 'sliding' | 'fixed'
   copied: boolean
-  deleteMessage: MessageOperationsHandlers['deleteMessage']
+  deleteMessageWithUndo: MessageOperationsHandlers['deleteMessageWithUndo']
   dropdownItems: MenuProps['items']
   enableDeveloperMode: boolean
   handleResendUserMessage: (messageUpdate?: Message) => Promise<void>
@@ -162,7 +162,7 @@ const MessageMenubar: FC<Props> = (props) => {
   const { translateLanguages } = useTranslate()
   // const assistantModel = assistant?.model
   const {
-    deleteMessage,
+    deleteMessageWithUndo,
     resendMessage,
     regenerateAssistantMessage,
     getTranslationUpdater,
@@ -581,7 +581,7 @@ const MessageMenubar: FC<Props> = (props) => {
     confirmRegenerateMessage,
     contextWindowMode,
     copied,
-    deleteMessage,
+    deleteMessageWithUndo,
     dropdownItems,
     enableDeveloperMode,
     handleResendUserMessage,
@@ -670,6 +670,11 @@ const MenusBar = styled.div`
   justify-content: flex-end;
   align-items: center;
   gap: 8px;
+  user-select: none;
+
+  &.user-bubble-style {
+    margin-top: 5px;
+  }
 `
 
 const ActionButton = styled.div<{ $softHoverBg?: boolean }>`
@@ -958,7 +963,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
   },
   delete: ({
     confirmDeleteMessage,
-    deleteMessage,
+    deleteMessageWithUndo,
     message,
     setShowDeleteTooltip,
     showDeleteTooltip,
@@ -977,7 +982,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
 
     const handleDeleteMessage = async () => {
       abortTranslation(message.id)
-      await deleteMessage(message.id, message.traceId, message.model?.name)
+      await deleteMessageWithUndo(message)
     }
 
     if (confirmDeleteMessage) {
@@ -997,9 +1002,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
     return (
       <ActionButton
         className="message-action-button"
-        onClick={async () => {
-          await handleDeleteMessage()
-        }}
+        onClick={async () => await handleDeleteMessage()}
         $softHoverBg={softHoverBg}>
         {deleteTooltip}
       </ActionButton>
