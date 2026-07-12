@@ -34,7 +34,7 @@ import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import { last } from 'lodash'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
@@ -93,6 +93,7 @@ interface MessagesContentProps {
   isLoadingMore: boolean
   loadMoreMessages: () => void
   registerMessageElement: (id: string, element: HTMLElement | null) => void
+  scrollToMessageById: (messageId: string) => void
 }
 
 const MessagesContent: React.FC<MessagesContentProps> = ({
@@ -104,7 +105,8 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   hasMore,
   isLoadingMore,
   loadMoreMessages,
-  registerMessageElement
+  registerMessageElement,
+  scrollToMessageById
 }) => {
   const { showPrompt, messageNavigation } = useSettings()
 
@@ -194,13 +196,22 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
 
         {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
       </NarrowLayout>
-      {messageNavigation === 'anchor' && <MessageAnchorLine messages={displayMessages} />}
+      {messageNavigation === 'anchor' && (
+        <MessageAnchorLine messages={displayMessages} scrollToMessageById={scrollToMessageById} />
+      )}
       {isEditMode && <EditModeActionBar />}
     </MessagesContainer>
   )
 }
 
-const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, onComponentUpdate, onFirstUpdate }) => {
+const Messages = ({
+  ref,
+  assistant,
+  topic,
+  setActiveTopic,
+  onComponentUpdate,
+  onFirstUpdate
+}: MessagesProps & { ref?: React.RefObject<MessagesHandle | null> }) => {
   const {
     containerRef: scrollContainerRef,
     handleScroll: handleScrollPosition,
@@ -245,6 +256,14 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
   const messagesRef = useRef<Message[]>(messages)
   const jumpTargetRef = useRef<string | null>(null)
   const lastDisplayMessagesRef = useRef<Message[]>([])
+
+  const scrollToMessageById = useCallback((messageId: string) => {
+    jumpTargetRef.current = messageId
+    // Force re-render to trigger the jump effect
+    setDisplayMessages((prev) => [...prev])
+  }, [])
+
+  useImperativeHandle(ref, () => ({ scrollToMessageById }), [scrollToMessageById])
 
   // On mount (topic switch), check if we need to restore to a specific message
   useEffect(() => {
@@ -299,7 +318,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
       const newDisplayMessages = computeDisplayMessages(messages, startIndex, startIndex + INITIAL_MESSAGES_COUNT)
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
+      const { hasOlder } = checkBoundaries()
       setHasMore(hasOlder)
 
       // Scroll to target message after render
@@ -319,7 +338,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
       const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
+      const { hasOlder } = checkBoundaries()
       setHasMore(hasOlder)
 
       return
@@ -334,7 +353,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
       const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
+      const { hasOlder } = checkBoundaries()
       setHasMore(hasOlder)
     } else {
       // Keep window position, rebuild from earliest to end
@@ -344,7 +363,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
       }
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
+      const { hasOlder } = checkBoundaries()
       setHasMore(hasOlder)
     }
   }, [messages, displayCount, checkBoundaries])
@@ -361,7 +380,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
       const newDisplayMessages = computeDisplayMessages(messages, 0, INITIAL_MESSAGES_COUNT)
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
+      const { hasOlder } = checkBoundaries()
       setHasMore(hasOlder)
     }
 
@@ -572,7 +591,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
           lastDisplayMessagesRef.current = merged
           return merged
         })
-        const { hasOlder, hasNewer } = checkBoundaries()
+        const { hasOlder } = checkBoundaries()
         setHasMore(hasOlder)
 
         setIsLoadingMore(false)
@@ -625,6 +644,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
         isLoadingMore={isLoadingMore}
         loadMoreMessages={loadMoreMessages}
         registerMessageElement={registerMessageElement}
+        scrollToMessageById={scrollToMessageById}
       />
     </EditModeProvider>
   )
@@ -681,26 +701,6 @@ const LoaderContainer = styled.div`
   width: 100%;
   background: var(--color-background);
   pointer-events: none;
-`
-
-const ContextWindowDivider = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  margin: 4px 0;
-`
-
-const ContextWindowDividerLine = styled.div`
-  flex: 1;
-  height: 1px;
-  background: var(--color-border);
-`
-
-const ContextWindowDividerText = styled.span`
-  font-size: 12px;
-  color: var(--color-text-3);
-  white-space: nowrap;
 `
 
 const SelectionBlock = styled.div`
