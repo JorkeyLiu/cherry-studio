@@ -283,21 +283,24 @@ describe('MessagesContent memo', () => {
     expect(source).toMatch(memoPattern)
   })
 
-  it('parent Messages stabilizes assistant with useMemo keyed on id', () => {
+  it('parent Messages passes assistant directly to MessagesContent without useMemo', () => {
     const sourcePath = path.resolve(__dirname, '../Messages.tsx')
     const source = fs.readFileSync(sourcePath, 'utf-8')
 
-    // Check that useMemo is used for assistant stabilization
-    const useMemoAssistantPattern = /useMemo\s*\(\s*\(\)\s*=>\s*assistant\s*,\s*\[\s*assistant\.id\s*\]\s*\)/
-    expect(source).toMatch(useMemoAssistantPattern)
+    // Verify that assistant is passed directly as a prop (no useMemo stabilization)
+    // This was intentionally removed because useMemo caused stale data
+    expect(source).toMatch(/assistant=\{assistant\}/)
+    expect(source).not.toMatch(/assistant=\{stableAssistant\}/)
   })
 
-  it('parent Messages stabilizes topic with useMemo keyed on id', () => {
+  it('parent Messages passes topic directly to MessagesContent without useMemo', () => {
     const sourcePath = path.resolve(__dirname, '../Messages.tsx')
     const source = fs.readFileSync(sourcePath, 'utf-8')
 
-    const useMemoTopicPattern = /useMemo\s*\(\s*\(\)\s*=>\s*topic\s*,\s*\[\s*topic\.id\s*\]\s*\)/
-    expect(source).toMatch(useMemoTopicPattern)
+    // Verify that topic is passed directly as a prop (no useMemo stabilization)
+    // This was intentionally removed because useMemo caused stale data
+    expect(source).toMatch(/topic=\{topic\}/)
+    expect(source).not.toMatch(/topic=\{stableTopic\}/)
   })
 
   it('parent Messages stabilizes handleScrollPosition with useCallback', () => {
@@ -319,14 +322,15 @@ describe('MessagesContent memo', () => {
     expect(messagesBody).toMatch(useCallbackHandleScrollPattern)
   })
 
-  it('MessagesContent uses stable props (assistant/topic) from parent useMemo', () => {
+  it('MessagesContent receives assistant and topic props directly (not useMemo-stabilized)', () => {
     const sourcePath = path.resolve(__dirname, '../Messages.tsx')
     const source = fs.readFileSync(sourcePath, 'utf-8')
 
-    // Verify MessagesContent receives stableAssistant and stableTopic
-    const usesStableAssistant = source.includes('assistant={stableAssistant}')
-    const usesStableTopic = source.includes('topic={stableTopic}')
-    expect(usesStableAssistant).toBe(true)
-    expect(usesStableTopic).toBe(true)
+    // Verify MessagesContent receives assistant and topic directly
+    // (stableAssistant/stableTopic were removed to avoid stale data)
+    expect(source).toMatch(/assistant=\{assistant\}/)
+    expect(source).toMatch(/topic=\{topic\}/)
+    expect(source).not.toMatch(/stableAssistant/)
+    expect(source).not.toMatch(/stableTopic/)
   })
 })

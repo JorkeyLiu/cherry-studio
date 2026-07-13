@@ -1,14 +1,18 @@
 import type { VideoMessageBlock } from '@renderer/types/newMessage'
-import React from 'react'
+import React, { Suspense } from 'react'
 
-import MessageVideo from '../MessageVideo'
+const MessageVideo = React.lazy(() => import('../MessageVideo'))
 
 interface Props {
   block: VideoMessageBlock
 }
 
 const VideoBlock: React.FC<Props> = ({ block }) => {
-  return <MessageVideo block={block} />
+  return (
+    <Suspense fallback={null}>
+      <MessageVideo block={block} />
+    </Suspense>
+  )
 }
 
 export default React.memo(VideoBlock)

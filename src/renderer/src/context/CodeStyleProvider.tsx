@@ -5,10 +5,84 @@ import type { HighlightChunkResult, ShikiPreProperties } from '@renderer/service
 import { shikiStreamService } from '@renderer/services/ShikiStreamService'
 import { ThemeMode } from '@renderer/types'
 import { getHighlighter, getMarkdownIt, getShiki, loadLanguageIfNeeded, loadThemeIfNeeded } from '@renderer/utils/shiki'
-import * as cmThemes from '@uiw/codemirror-themes-all'
 import type React from 'react'
 import { createContext, type PropsWithChildren, use, useCallback, useEffect, useMemo, useState } from 'react'
 import type { BundledThemeInfo } from 'shiki/types'
+
+/**
+ * Static list of CodeMirror theme names exported by @uiw/codemirror-themes-all.
+ * Derived from Object.keys(cmThemes) with functions, defaultSettings, and *Style filtered out.
+ * This avoids eagerly importing the entire theme bundle.
+ */
+export const CM_THEME_NAMES: string[] = [
+  'abcdef',
+  'abyss',
+  'androidstudio',
+  'andromeda',
+  'atomone',
+  'aura',
+  'basicDark',
+  'basicLight',
+  'bbedit',
+  'bespin',
+  'consoleDark',
+  'consoleLight',
+  'copilot',
+  'darcula',
+  'dracula',
+  'duotoneDark',
+  'duotoneLight',
+  'eclipse',
+  'githubDark',
+  'githubLight',
+  'gruvboxDark',
+  'gruvboxLight',
+  'kimbie',
+  'material',
+  'materialDark',
+  'materialLight',
+  'monokai',
+  'monokaiDimmed',
+  'noctisLilac',
+  'nord',
+  'okaidia',
+  'quietlight',
+  'red',
+  'solarizedDark',
+  'solarizedLight',
+  'sublime',
+  'tokyoNight',
+  'tokyoNightStorm',
+  'tokyoNightDay',
+  'tomorrowNightBlue',
+  'vscodeLight',
+  'vscodeDark',
+  'whiteDark',
+  'whiteLight',
+  'xcodeDark',
+  'xcodeLight'
+]
+
+// Module-level cache for the lazily loaded theme module
+let cmThemesCache: Record<string, unknown> | null = null
+let cmThemesPromise: Promise<Record<string, unknown>> | null = null
+
+/**
+ * Lazily load the @uiw/codemirror-themes-all module.
+ * Returns a cached module after the first load, avoiding redundant network requests.
+ */
+async function loadCmThemes(): Promise<Record<string, unknown>> {
+  if (cmThemesCache) {
+    return cmThemesCache
+  }
+  if (!cmThemesPromise) {
+    cmThemesPromise = import('@uiw/codemirror-themes-all').then((mod) => {
+      cmThemesCache = mod as unknown as Record<string, unknown>
+      return cmThemesCache
+    })
+  }
+  return cmThemesPromise
+}
 
 interface CodeStyleContextType {
   highlightCodeChunk: (trunk: string, language: string, callerId: string) => Promise<HighlightChunkResult>
@@ -42,6 +116,7 @@ export const CodeStyleProvider: React.FC<PropsWithChildren> = ({ children }) => 
   const { codeEditor, codeViewer } = useSettings()
   const { theme } = useTheme()
   const [shikiThemesInfo, setShikiThemesInfo] = useState<BundledThemeInfo[]>([])
+  const [loadedCmThemes, setLoadedCmThemes] = useState<Record<string, unknown> | null>(null)
   useMermaid()
 
   useEffect(() => {
@@ -52,15 +127,19 @@ export const CodeStyleProvider: React.FC<PropsWithChildren> = ({ children }) => 
     }
   }, [codeEditor.enabled])
 
+  // Lazily load CodeMirror themes when the code editor is enabled
+  useEffect(() => {
+    if (codeEditor.enabled && !loadedCmThemes) {
+      void loadCmThemes().then(setLoadedCmThemes)
+    }
+  }, [codeEditor.enabled, loadedCmThemes])
+
   // 获取支持的主题名称列表
   const themeNames = useMemo(() => {
     // CodeMirror 主题
-    // 更保险的做法可能是硬编码主题列表
+    // 使用静态主题名列表，避免加载整个主题包
     if (codeEditor.enabled) {
-      return ['auto', 'light', 'dark']
-        .concat(Object.keys(cmThemes))
-        .filter((item) => typeof cmThemes[item as keyof typeof cmThemes] !== 'function')
-        .filter((item) => !/^(defaultSettings)/.test(item) && !/(Style)$/.test(item))
+      return ['auto', 'light', 'dark'].concat(CM_THEME_NAMES)
     }
 
     // Shiki 主题，取出所有 BundledThemeInfo 的 id 作为主题名
@@ -89,8 +168,12 @@ export const CodeStyleProvider: React.FC<PropsWithChildren> = ({ children }) => 
     if (!themeName || themeName === 'auto' || !themeNames.includes(themeName)) {
       themeName = theme === ThemeMode.light ? 'materialLight' : 'dark'
     }
-    return cmThemes[themeName as keyof typeof cmThemes] || themeName
-  }, [theme, codeEditor, themeNames])
+    if (loadedCmThemes) {
+      return loadedCmThemes[themeName] || themeName
+    }
+    // While loading, return themeName string as fallback (CodeMirror accepts it)
+    return themeName
+  }, [theme, codeEditor, themeNames, loadedCmThemes])
 
   // 自定义 shiki 语言别名
   const languageAliases = useMemo(() => {
