@@ -2,7 +2,12 @@ import { loggerService } from '@logger'
 import ContextMenu from '@renderer/components/ContextMenu'
 import EditModeActionBar from '@renderer/components/EditModeActionBar'
 import { LoadingIcon } from '@renderer/components/Icons'
-import { INITIAL_MESSAGES_COUNT, LOAD_MORE_COUNT, SCROLL_CONTEXT_COUNT } from '@renderer/config/constant'
+import {
+  INITIAL_MESSAGES_COUNT,
+  LOAD_MORE_COUNT,
+  SCROLL_CONTEXT_COUNT,
+  UNLIMITED_CONTEXT_COUNT
+} from '@renderer/config/constant'
 import { EditModeProvider, useEditMode } from '@renderer/context/EditModeContext'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
@@ -31,10 +36,17 @@ import {
 } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
+import {
+  filterAdjacentUserMessaegs,
+  filterAfterContextClearMessages,
+  filterErrorOnlyMessagesWithRelated,
+  filterLastAssistantMessage,
+  filterUsefulMessages
+} from '@renderer/utils/messageUtils/filters'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import { last } from 'lodash'
-import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
@@ -89,6 +101,7 @@ interface MessagesContentProps {
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
   handleScrollPosition: () => void
   displayMessages: Message[]
+  messages: Message[]
   hasMore: boolean
   isLoadingMore: boolean
   loadMoreMessages: () => void
@@ -102,6 +115,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   scrollContainerRef,
   handleScrollPosition,
   displayMessages,
+  messages,
   hasMore,
   isLoadingMore,
   loadMoreMessages,
@@ -109,6 +123,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   scrollToMessageById
 }) => {
   const { showPrompt, messageNavigation } = useSettings()
+  const { t } = useTranslation()
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
   useClipboardKeyboard()
@@ -146,17 +161,94 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     return segments
   }, [groupedMessages, isEditMode, selectedGroupIds])
 
+  // Context window boundary: compute where the context window starts
+  const contextWindowBoundaryIndex = useMemo(() => {
+    if (!assistant) return -1
+    const settings = getAssistantSettings(assistant)
+
+    // Unlimited context: hide the divider since there's no boundary
+    if (settings.contextCount >= UNLIMITED_CONTEXT_COUNT) return -1
+
+    // Apply the first 5 filter steps (mirrors ConversationService.filterMessagesPipeline)
+    // to derive the pre-filtered message array used for boundary computation.
+    const preFiltered = filterAdjacentUserMessaegs(
+      filterLastAssistantMessage(
+        filterErrorOnlyMessagesWithRelated(filterUsefulMessages(filterAfterContextClearMessages(messages)))
+      )
+    )
+
+    let anchorOriginalIndex = -1
+
+    if (settings.contextWindowMode === 'fixed') {
+      // Fixed mode: locate the anchor message in the pre-filtered stream
+      const anchorMessageId = settings.fixedWindowAnchor?.[topic.id]
+      if (anchorMessageId) {
+        const filteredIndex = preFiltered.findIndex((m) => m.id === anchorMessageId)
+        if (filteredIndex >= 0) {
+          // Map back to the anchor's original index in the full messages array
+          anchorOriginalIndex = messages.findIndex((m) => m.id === anchorMessageId)
+        }
+      }
+
+      // Anchor not found or not set — fall through to sliding logic
+      if (anchorOriginalIndex < 0) {
+        const windowStartIndex = Math.max(0, messages.length - settings.contextCount)
+        if (windowStartIndex === 0) return -1
+        anchorOriginalIndex = windowStartIndex
+      }
+    } else {
+      // Sliding mode: compute where the window starts
+      const windowStartIndex = Math.max(0, messages.length - settings.contextCount)
+      // All messages fit inside the context window → hide the divider
+      if (windowStartIndex === 0) return -1
+      anchorOriginalIndex = windowStartIndex
+    }
+
+    if (anchorOriginalIndex < 0) return -1
+
+    // Convert to reversed index (displayMessages is newest-first for column-reverse)
+    const anchorInReversed = messages.length - 1 - anchorOriginalIndex
+    if (anchorInReversed >= 0 && anchorInReversed < displayMessages.length) {
+      // +1: the divider renders before the group (visually ABOVE the anchor,
+      // separating in-context messages from out-of-context older messages)
+      return anchorInReversed + 1
+    }
+    return -1
+  }, [assistant, messages, displayMessages.length, topic.id])
+
+  // Find the group key where the context window divider should be rendered
+  const contextDividerGroupKey = useMemo(() => {
+    if (contextWindowBoundaryIndex < 0) return null
+    for (const [key, groupMessages] of groupedMessages) {
+      // groupMessages is in chronological order (oldest first = highest displayMessages index first)
+      // Check if the oldest message in this group is at or past the boundary
+      const oldestMsgIndex = groupMessages[0]?.index ?? -1
+      if (oldestMsgIndex >= contextWindowBoundaryIndex) {
+        return key
+      }
+    }
+    return null
+  }, [groupedMessages, contextWindowBoundaryIndex])
+
   const renderMessageSegments = () => {
     return messageSegments.map((seg, i) => {
       const content = seg.items.map(([key, groupMessages]) => (
-        <MessageGroup
-          key={key}
-          messages={groupMessages}
-          topic={topic}
-          registerMessageElement={registerMessageElement}
-          isEditMode={isEditMode}
-          onGroupClick={handleGroupClick}
-        />
+        <Fragment key={key}>
+          {key === contextDividerGroupKey && (
+            <ContextWindowDivider data-context-boundary>
+              <ContextWindowDividerLine />
+              <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
+              <ContextWindowDividerLine />
+            </ContextWindowDivider>
+          )}
+          <MessageGroup
+            messages={groupMessages}
+            topic={topic}
+            registerMessageElement={registerMessageElement}
+            isEditMode={isEditMode}
+            onGroupClick={handleGroupClick}
+          />
+        </Fragment>
       ))
 
       if (seg.selected) {
@@ -640,6 +732,7 @@ const Messages = ({
         scrollContainerRef={scrollContainerRef}
         handleScrollPosition={handleScrollPosition}
         displayMessages={displayMessages}
+        messages={messages}
         hasMore={hasMore}
         isLoadingMore={isLoadingMore}
         loadMoreMessages={loadMoreMessages}
@@ -708,6 +801,26 @@ const SelectionBlock = styled.div`
   flex-direction: column-reverse;
   box-shadow: 0 0 0 1.5px var(--color-primary);
   border-radius: 10px;
+`
+
+const ContextWindowDivider = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  margin: 4px 0;
+`
+
+const ContextWindowDividerLine = styled.div`
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
+`
+
+const ContextWindowDividerText = styled.span`
+  font-size: 12px;
+  color: var(--color-text-3);
+  white-space: nowrap;
 `
 
 export default Messages
