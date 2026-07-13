@@ -304,10 +304,6 @@ const Messages = ({
   onComponentUpdate,
   onFirstUpdate
 }: MessagesProps & { ref?: React.RefObject<MessagesHandle | null> }) => {
-  // Stabilize object props to prevent unnecessary re-renders of MessagesContent
-  const stableAssistant = useMemo(() => assistant, [assistant.id])
-  const stableTopic = useMemo(() => topic, [topic.id])
-
   const {
     containerRef: scrollContainerRef,
     handleScroll: rawHandleScrollPosition,
@@ -735,8 +731,8 @@ const Messages = ({
   return (
     <EditModeProvider topicId={topic.id} scrollToGroup={scrollToGroup} visibleGroupIds={visibleGroupIds}>
       <MessagesContent
-        assistant={stableAssistant}
-        topic={stableTopic}
+        assistant={assistant}
+        topic={topic}
         scrollContainerRef={scrollContainerRef}
         handleScrollPosition={handleScrollPosition}
         displayMessages={displayMessages}

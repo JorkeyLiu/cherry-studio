@@ -1,7 +1,7 @@
 import { loggerService } from '@logger'
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
 import { IpcChannel } from '@shared/IpcChannel'
-import type { ReduxAction } from '@shared/ReduxIpc'
+import { type ReduxAction, ReduxSelector } from '@shared/ReduxIpc'
 import { useDispatch, useSelector, useStore } from 'react-redux'
 import { FLUSH, PAUSE, PERSIST, persistReducer, persistStore, PURGE, REGISTER, REHYDRATE } from 'redux-persist'
 import storage from 'redux-persist/lib/storage'
@@ -143,20 +143,20 @@ window.store = store
 window.__reduxSelectState = (selector: string): unknown => {
   const state = store.getState()
   switch (selector) {
-    case 'knowledge.bases':
+    case ReduxSelector.KnowledgeBases:
       return state.knowledge.bases
-    case 'llm.providers':
+    case ReduxSelector.LlmProviders:
       return state.llm.providers
-    case 'llm.settings.cherryIn.accessToken':
-      return state.llm.settings?.cherryIn?.accessToken
-    case 'llm.settings.cherryIn.refreshToken':
-      return state.llm.settings?.cherryIn?.refreshToken
-    case 'llm.settings.vertexai':
-      return state.llm.settings?.vertexai
-    case 'mcp.servers':
-      return state.mcp.servers
-    case 'settings':
+    case ReduxSelector.Settings:
       return state.settings
+    case ReduxSelector.McpServers:
+      return state.mcp.servers
+    case ReduxSelector.LlmSettingsVertexAI:
+      return (state.llm as any)?.settings?.vertexai
+    case ReduxSelector.LlmSettingsCherryInAccessToken:
+      return (state.llm as any)?.settings?.cherryIn?.accessToken
+    case ReduxSelector.LlmSettingsCherryInRefreshToken:
+      return (state.llm as any)?.settings?.cherryIn?.refreshToken
     default:
       throw new Error(`Unknown Redux selector: ${selector}`)
   }

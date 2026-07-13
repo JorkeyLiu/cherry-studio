@@ -30,3 +30,9 @@ export type ReduxAction =
   | { type: 'settings/setApiServerApiKey'; payload: string }
   | { type: 'llm/setCherryInTokens'; payload: { accessToken: string; refreshToken?: string } }
   | { type: 'llm/clearCherryInTokens' }
+  | { type: 'llm/updateProvider'; payload: { id: string; [key: string]: any } }
+  | { type: 'llm/updateProviders'; payload: any[] }
+  | { type: 'llm/addProvider'; payload: any }
+  | { type: 'llm/removeProvider'; payload: string }
+  | { type: 'llm/addModel'; payload: { providerId: string; model: any } }
+  | { type: 'llm/removeModel'; payload: { providerId: string; modelId: string } }
