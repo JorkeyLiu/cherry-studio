@@ -365,8 +365,20 @@ const api = {
       const listener = (_event: Electron.IpcRendererEvent, log: MCPServerLogEntry & { serverId?: string }) => {
         callback(log)
       }
+      const batchListener = (
+        _event: Electron.IpcRendererEvent,
+        batch: (MCPServerLogEntry & { serverId?: string })[]
+      ) => {
+        for (const log of batch) {
+          callback(log)
+        }
+      }
       ipcRenderer.on(IpcChannel.Mcp_ServerLog, listener)
-      return () => ipcRenderer.off(IpcChannel.Mcp_ServerLog, listener)
+      ipcRenderer.on(IpcChannel.Mcp_ServerLogBatch, batchListener)
+      return () => {
+        ipcRenderer.off(IpcChannel.Mcp_ServerLog, listener)
+        ipcRenderer.off(IpcChannel.Mcp_ServerLogBatch, batchListener)
+      }
     }
   },
   python: {

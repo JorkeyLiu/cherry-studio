@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
 import { IpcChannel } from '@shared/IpcChannel'
+import type { ReduxAction } from '@shared/ReduxIpc'
 import { useDispatch, useSelector, useStore } from 'react-redux'
 import { FLUSH, PAUSE, PERSIST, persistReducer, persistStore, PURGE, REGISTER, REHYDRATE } from 'redux-persist'
 import storage from 'redux-persist/lib/storage'
@@ -136,6 +137,35 @@ export const useAppDispatch = useDispatch.withTypes<AppDispatch>()
 export const useAppSelector = useSelector.withTypes<RootState>()
 export const useAppStore = useStore.withTypes<typeof store>()
 window.store = store
+
+// Type-safe state resolver for main process access via executeJavaScript.
+// The main process calls window.__reduxSelectState(selector) with a ReduxSelector enum value.
+window.__reduxSelectState = (selector: string): unknown => {
+  const state = store.getState()
+  switch (selector) {
+    case 'knowledge.bases':
+      return state.knowledge.bases
+    case 'llm.providers':
+      return state.llm.providers
+    case 'llm.settings.cherryIn.accessToken':
+      return state.llm.settings?.cherryIn?.accessToken
+    case 'llm.settings.cherryIn.refreshToken':
+      return state.llm.settings?.cherryIn?.refreshToken
+    case 'llm.settings.vertexai':
+      return state.llm.settings?.vertexai
+    case 'mcp.servers':
+      return state.mcp.servers
+    case 'settings':
+      return state.settings
+    default:
+      throw new Error(`Unknown Redux selector: ${selector}`)
+  }
+}
+
+// Type-safe dispatch for main process access via executeJavaScript.
+window.__reduxDispatch = (action: ReduxAction): void => {
+  store.dispatch(action as Parameters<typeof store.dispatch>[0])
+}
 
 export async function handleSaveData() {
   logger.info('Flushing redux persistor data')

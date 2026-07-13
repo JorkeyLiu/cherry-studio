@@ -1,4 +1,5 @@
 import { API_SERVER_DEFAULTS } from '@shared/config/constant'
+import { ReduxSelector } from '@shared/ReduxIpc'
 import type { ApiServerConfig } from '@types'
 import { v4 as uuidv4 } from 'uuid'
 
@@ -16,7 +17,7 @@ class ConfigManager {
 
   async load(): Promise<ApiServerConfig> {
     try {
-      const settings = await reduxService.select('state.settings')
+      const settings = await reduxService.select(ReduxSelector.Settings)
       const serverSettings = settings?.apiServer
       let apiKey = serverSettings?.apiKey
       if (!apiKey || apiKey.trim() === '') {

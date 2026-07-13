@@ -14,7 +14,7 @@ import { message } from 'antd'
 import { Check, ChevronRight, ShieldCheck, Wrench } from 'lucide-react'
 import { parse as parsePartialJson } from 'partial-json'
 import type { FC } from 'react'
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
@@ -50,6 +50,7 @@ const MessageMcpTool: FC<Props> = ({ block }) => {
   const { messageFont, fontSize } = useSettings()
   const [progress, setProgress] = useState<number>(0)
   const { setTimeoutTimer } = useTimer()
+  const rafRef = useRef<number | undefined>(undefined)
 
   // Use the unified approval hook
   const approval = useToolApproval(block)
@@ -69,11 +70,13 @@ const MessageMcpTool: FC<Props> = ({ block }) => {
       (_event: Electron.IpcRendererEvent, data: MCPProgressEvent) => {
         // Only update progress if this event is for our specific tool call
         if (data.callId === id) {
-          setProgress(data.progress)
+          if (rafRef.current !== undefined) cancelAnimationFrame(rafRef.current)
+          rafRef.current = requestAnimationFrame(() => setProgress(data.progress))
         }
       }
     )
     return () => {
+      if (rafRef.current !== undefined) cancelAnimationFrame(rafRef.current)
       setProgress(0)
       removeListener()
     }

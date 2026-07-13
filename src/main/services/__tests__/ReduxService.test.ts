@@ -47,7 +47,9 @@ describe('ReduxService provider cache invalidation', () => {
   })
 
   it('clears the API server provider cache for provider mutations', async () => {
-    await reduxService.dispatch({ type: 'llm/updateProvider', payload: { id: 'openai', apiKey: 'new-key' } })
+    // Provider mutation actions are dispatched internally and tested via cache invalidation.
+    // Use type assertion since these action types are not in the ReduxAction union.
+    await reduxService.dispatch({ type: 'llm/updateProvider', payload: { id: 'openai', apiKey: 'new-key' } } as any)
 
     expect(mockExecuteJavaScript).toHaveBeenCalled()
     expect(mockCacheRemove).toHaveBeenCalledWith('api-server:providers')

@@ -156,6 +156,9 @@ class McpService {
   private dxtService = new DxtService()
   private activeToolCalls: Map<string, AbortController> = new Map()
   private serverLogs = new ServerLogBuffer(200)
+  private progressThrottles = new Map<string, number>() // callId → lastEmitTime
+  private logBatch: (MCPServerLogEntry & { serverId?: string })[] = []
+  private logFlushTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor() {
     this.initClient = this.initClient.bind(this)
@@ -251,9 +254,19 @@ class McpService {
   private emitServerLog(server: MCPServer, entry: MCPServerLogEntry) {
     const serverKey = this.getServerKey(server)
     this.serverLogs.append(serverKey, entry)
-    const mainWindow = windowService.getMainWindow()
-    if (mainWindow) {
-      mainWindow.webContents.send(IpcChannel.Mcp_ServerLog, { ...entry, serverId: server.id })
+
+    // Batch for IPC to prevent flooding
+    this.logBatch.push({ ...entry, serverId: server.id })
+    if (!this.logFlushTimer) {
+      this.logFlushTimer = setTimeout(() => {
+        const batch = this.logBatch
+        this.logBatch = []
+        this.logFlushTimer = null
+        const mainWindow = windowService.getMainWindow()
+        if (mainWindow && batch.length > 0) {
+          mainWindow.webContents.send(IpcChannel.Mcp_ServerLogBatch, batch)
+        }
+      }, 200)
     }
   }
 
@@ -855,6 +868,18 @@ class McpService {
   }
 
   async cleanup() {
+    // Flush any pending log batch
+    if (this.logFlushTimer) {
+      clearTimeout(this.logFlushTimer)
+      const batch = this.logBatch
+      this.logBatch = []
+      this.logFlushTimer = null
+      const mainWindow = windowService.getMainWindow()
+      if (mainWindow && batch.length > 0) {
+        mainWindow.webContents.send(IpcChannel.Mcp_ServerLogBatch, batch)
+      }
+    }
+
     for (const [key] of this.clients) {
       try {
         await this.closeClient(key)
@@ -978,6 +1003,12 @@ class McpService {
         const client = await this.initClient(server)
         const result = await client.callTool({ name, arguments: args }, undefined, {
           onprogress: (process) => {
+            // Throttle progress events to max 10 per second per tool call
+            const now = Date.now()
+            const lastEmit = this.progressThrottles.get(toolCallId) || 0
+            if (now - lastEmit < 100) return
+            this.progressThrottles.set(toolCallId, now)
+
             getServerLogger(server, { tool: name, callId: toolCallId }).debug(`Progress`, {
               ratio: process.progress / (process.total || 1)
             })
@@ -1002,6 +1033,7 @@ class McpService {
         throw error
       } finally {
         this.activeToolCalls.delete(toolCallId)
+        this.progressThrottles.delete(toolCallId)
       }
     }
 

@@ -1,5 +1,6 @@
 import { loggerService } from '@logger'
 import { IpcChannel } from '@shared/IpcChannel'
+import type { ReduxAction, ReduxSelector } from '@shared/ReduxIpc'
 import { ipcMain } from 'electron'
 
 import { CacheService } from './CacheService'
@@ -60,27 +61,24 @@ export class ReduxService {
     return mainWindow.webContents
   }
 
-  // Select state from renderer process
-  async select<T = StoreValue>(selector: string): Promise<T> {
+  // Select state from renderer process using a type-safe selector enum
+  async select<T = StoreValue>(selector: ReduxSelector): Promise<T> {
     try {
       const webContents = await this.getWebContents()
-      return await webContents.executeJavaScript(`
-        (() => {
-          const state = window.store.getState();
-          return ${selector};
-        })()
-      `)
+      // JSON.stringify produces a safe string literal — no code injection possible
+      return await webContents.executeJavaScript(`window.__reduxSelectState(${JSON.stringify(selector)})`)
     } catch (error) {
       logger.error('Failed to select store value:', error as Error)
       throw error
     }
   }
 
-  // Dispatch action
-  async dispatch(action: any): Promise<void> {
+  // Dispatch action using a type-safe action object
+  async dispatch(action: ReduxAction): Promise<void> {
     try {
       const webContents = await this.getWebContents()
-      await webContents.executeJavaScript(`window.store.dispatch(${JSON.stringify(action)})`)
+      // JSON.stringify produces a safe string literal — no code injection possible
+      await webContents.executeJavaScript(`window.__reduxDispatch(${JSON.stringify(action)})`)
       if (action?.type && typeof action.type === 'string') {
         invalidateApiServerProvidersCacheForAction(action.type)
       }
@@ -102,7 +100,7 @@ export class ReduxService {
   }
 
   // Batch dispatch actions
-  async batch(actions: any[]): Promise<void> {
+  async batch(actions: ReduxAction[]): Promise<void> {
     for (const action of actions) {
       await this.dispatch(action)
     }
@@ -115,20 +113,20 @@ export const reduxService = new ReduxService()
  * @example
  * async function example() {
  *   try {
- *     // Select state
- *     const settings = await reduxService.select('state.settings')
+ *     // Select state using typed enum
+ *     const settings = await reduxService.select(ReduxSelector.Settings)
  *     logger.log('settings', settings)
  *
- *     // Dispatch action
+ *     // Dispatch typed action
  *     await reduxService.dispatch({
- *       type: 'settings/updateApiKey',
+ *       type: 'settings/setApiServerApiKey',
  *       payload: 'new-api-key'
  *     })
  *
- *     // Batch dispatch actions
+ *     // Batch dispatch typed actions
  *     await reduxService.batch([
- *       { type: 'action1', payload: 'data1' },
- *       { type: 'action2', payload: 'data2' }
+ *       { type: 'llm/clearCherryInTokens' },
+ *       { type: 'settings/setApiServerApiKey', payload: 'key' }
  *     ])
  *   } catch (error) {
  *     logger.error('Error:', error)

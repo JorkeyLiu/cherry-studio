@@ -2,6 +2,7 @@
 
 import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk'
 import type KeyvStorage from '@kangfenmao/keyv-storage'
+import type { ReduxAction } from '@shared/ReduxIpc'
 import type { HookAPI } from 'antd/es/modal/useModal'
 import type { NavigateFunction } from 'react-router-dom'
 
@@ -54,5 +55,7 @@ declare global {
         updatedPermissions?: PermissionUpdate[]
       }) => Promise<{ success: boolean }>
     }
+    __reduxSelectState: (selector: string) => unknown
+    __reduxDispatch: (action: ReduxAction) => void
   }
 }

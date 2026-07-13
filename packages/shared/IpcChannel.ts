@@ -97,6 +97,7 @@ export enum IpcChannel {
   Mcp_Progress = 'mcp:progress',
   Mcp_GetServerLogs = 'mcp:get-server-logs',
   Mcp_ServerLog = 'mcp:server-log',
+  Mcp_ServerLogBatch = 'mcp:server-log-batch',
   // Python
   Python_Execute = 'python:execute',
 

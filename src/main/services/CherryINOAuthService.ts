@@ -1,5 +1,6 @@
 import { loggerService } from '@logger'
 import { CHERRYIN_CONFIG } from '@shared/config/constant'
+import { ReduxSelector } from '@shared/ReduxIpc'
 import { createHash, randomBytes } from 'crypto'
 import { net } from 'electron'
 import * as z from 'zod'
@@ -306,7 +307,7 @@ class CherryINOAuthService {
    */
   public getToken = async (): Promise<string | null> => {
     try {
-      const token = await reduxService.select<string>('state.llm.settings.cherryIn.accessToken')
+      const token = await reduxService.select<string>(ReduxSelector.LlmSettingsCherryInAccessToken)
       return token || null
     } catch (error) {
       logger.error('Failed to read token:', error as Error)
@@ -319,7 +320,7 @@ class CherryINOAuthService {
    */
   private getRefreshToken = async (): Promise<string | null> => {
     try {
-      const token = await reduxService.select<string>('state.llm.settings.cherryIn.refreshToken')
+      const token = await reduxService.select<string>(ReduxSelector.LlmSettingsCherryInRefreshToken)
       return token || null
     } catch (error) {
       logger.error('Failed to read refresh token:', error as Error)

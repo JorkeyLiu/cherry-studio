@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 import KnowledgeService from '@main/services/KnowledgeService'
 import { reduxService } from '@main/services/ReduxService'
+import { ReduxSelector } from '@shared/ReduxIpc'
 import type { KnowledgeBase, KnowledgeBaseParams, Provider } from '@types'
 import type { Response } from 'express'
 import type * as z from 'zod'
@@ -34,7 +35,7 @@ export const listKnowledgeBases = async (req: ValidationRequest, res: Response):
     // Get knowledge bases from Redux store
     let bases: KnowledgeBase[]
     try {
-      bases = await reduxService.select<KnowledgeBase[]>('state.knowledge.bases')
+      bases = await reduxService.select<KnowledgeBase[]>(ReduxSelector.KnowledgeBases)
     } catch (error) {
       if (isReduxUnavailableError(error)) {
         logger.warn('Redux store not available, returning 503')
@@ -77,7 +78,7 @@ export const getKnowledgeBase = async (req: ValidationRequest, res: Response): P
 
     logger.debug(`Getting knowledge base: ${id}`)
 
-    const bases = await reduxService.select<KnowledgeBase[]>('state.knowledge.bases')
+    const bases = await reduxService.select<KnowledgeBase[]>(ReduxSelector.KnowledgeBases)
     const base = bases?.find((b) => b.id === id)
 
     if (!base) {
@@ -119,7 +120,7 @@ export const getKnowledgeBase = async (req: ValidationRequest, res: Response): P
  *       try/catch and converted to 503 responses via isReduxUnavailableError().
  */
 async function getProviderConfig(providerId: string): Promise<{ apiKey: string; baseURL: string } | null> {
-  const providers = await reduxService.select<Provider[]>('state.llm.providers')
+  const providers = await reduxService.select<Provider[]>(ReduxSelector.LlmProviders)
   const provider = providers?.find((p) => p.id === providerId)
   if (!provider) {
     logger.warn(`Provider not found: ${providerId}`)
@@ -205,7 +206,7 @@ export const searchKnowledge = async (req: ValidationRequest, res: Response): Pr
     logger.debug(`Searching knowledge bases: "${query}"`, { knowledge_base_ids, document_count })
 
     // Get knowledge bases from Redux
-    const bases = await reduxService.select<KnowledgeBase[]>('state.knowledge.bases')
+    const bases = await reduxService.select<KnowledgeBase[]>(ReduxSelector.KnowledgeBases)
 
     if (!bases || bases.length === 0) {
       return res.json({

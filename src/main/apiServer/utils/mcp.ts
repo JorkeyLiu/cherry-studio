@@ -3,6 +3,7 @@ import mcpService from '@main/services/MCPService'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import type { ListToolsResult } from '@modelcontextprotocol/sdk/types.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { ReduxSelector } from '@shared/ReduxIpc'
 import type { MCPServer } from '@types'
 
 import { loggerService } from '../../services/LoggerService'
@@ -56,7 +57,7 @@ export async function getMCPServersFromRedux(): Promise<MCPServer[]> {
     }
 
     // If cache is not available, get fresh data from Redux
-    const servers = await reduxService.select<MCPServer[]>('state.mcp.servers')
+    const servers = await reduxService.select<MCPServer[]>(ReduxSelector.McpServers)
     const serverList = servers || []
 
     // Cache the results

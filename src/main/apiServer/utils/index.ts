@@ -3,6 +3,7 @@ import { CacheService } from '@main/services/CacheService'
 import { loggerService } from '@main/services/LoggerService'
 import { reduxService } from '@main/services/ReduxService'
 import { isSiliconAnthropicCompatibleModel } from '@shared/config/providers'
+import { ReduxSelector } from '@shared/ReduxIpc'
 import type { ApiModel, Model, Provider, ProviderType } from '@types'
 
 const logger = loggerService.withContext('ApiServerUtils')
@@ -23,7 +24,7 @@ export async function getAvailableProviders(): Promise<Provider[]> {
     }
 
     // If cache is not available, get fresh data from Redux
-    const providers = await reduxService.select('state.llm.providers')
+    const providers = await reduxService.select(ReduxSelector.LlmProviders)
     if (!providers || !Array.isArray(providers)) {
       logger.warn('No providers found in Redux store')
       return []
