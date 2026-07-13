@@ -427,7 +427,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
               {groupedMessages.map(([key, groupMessages]) => (
                 <Fragment key={key}>
                   {key === contextDividerGroupKey && (
-                    <ContextWindowDivider>
+                    <ContextWindowDivider data-context-boundary>
                       <ContextWindowDividerLine />
                       <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
                       <ContextWindowDividerLine />

@@ -49,6 +49,8 @@ const ChatNavigation: FC<ChatNavigationProps> = ({ containerId }) => {
   const lastMoveTime = useRef(0)
   const isHoveringNavigationRef = useRef(false)
   const isPointerInTriggerAreaRef = useRef(false)
+  const stoppedAtBoundaryRef = useRef(false)
+  const isProgrammaticScrollRef = useRef(false)
   const { topicPosition, showTopics } = useSettings()
   const showRightTopics = topicPosition === 'right' && showTopics
 
@@ -188,6 +190,23 @@ const ChatNavigation: FC<ChatNavigationProps> = ({ containerId }) => {
 
   const handleScrollToTop = () => {
     showNavigation()
+
+    if (!stoppedAtBoundaryRef.current) {
+      const container = document.getElementById(containerId)
+      const divider = container?.querySelector('[data-context-boundary]') as HTMLElement | null
+
+      if (divider) {
+        isProgrammaticScrollRef.current = true
+        scrollIntoView(divider, { behavior: 'smooth', block: 'start', container: 'nearest' })
+        stoppedAtBoundaryRef.current = true
+        setTimeout(() => {
+          isProgrammaticScrollRef.current = false
+        }, 1000)
+        return
+      }
+    }
+
+    stoppedAtBoundaryRef.current = false
     scrollToTop()
   }
 
@@ -258,6 +277,11 @@ const ChatNavigation: FC<ChatNavigationProps> = ({ containerId }) => {
 
     // Handle scroll events on the container
     const handleScroll = () => {
+      // Reset boundary stop state on user-initiated scroll
+      if (!isProgrammaticScrollRef.current) {
+        stoppedAtBoundaryRef.current = false
+      }
+
       // Only show buttons when scrolling if cursor is in trigger area or hovering navigation
       if (isPointerInTriggerAreaRef.current || isHoveringNavigationRef.current) {
         showNavigation()
