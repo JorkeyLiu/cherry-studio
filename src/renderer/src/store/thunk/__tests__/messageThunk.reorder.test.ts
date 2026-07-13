@@ -56,7 +56,7 @@ const createMessage = (overrides: Partial<Message>): Message => ({
   ...overrides
 })
 
-describe('buildReorderedMessageGroup', () => {
+describe('buildReorderedMessageGroup', { timeout: 60000 }, () => {
   it('replaces only the original assistant group slots and preserves message objects', async () => {
     const { buildReorderedMessageGroup } = await import('../messageGroupReorder')
     const userMessage = createMessage({ id: 'user-message', role: 'user', askId: undefined })

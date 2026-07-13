@@ -46,7 +46,7 @@ import {
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import { last } from 'lodash'
-import { Fragment, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import React, { Fragment, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
@@ -109,7 +109,7 @@ interface MessagesContentProps {
   scrollToMessageById: (messageId: string) => void
 }
 
-const MessagesContent: React.FC<MessagesContentProps> = ({
+const MessagesContent = React.memo(function MessagesContent({
   assistant,
   topic,
   scrollContainerRef,
@@ -121,7 +121,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   loadMoreMessages,
   registerMessageElement,
   scrollToMessageById
-}) => {
+}: MessagesContentProps) {
   const { showPrompt, messageNavigation } = useSettings()
   const { t } = useTranslation()
 
@@ -294,7 +294,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
       {isEditMode && <EditModeActionBar />}
     </MessagesContainer>
   )
-}
+})
 
 const Messages = ({
   ref,
@@ -304,12 +304,20 @@ const Messages = ({
   onComponentUpdate,
   onFirstUpdate
 }: MessagesProps & { ref?: React.RefObject<MessagesHandle | null> }) => {
+  // Stabilize object props to prevent unnecessary re-renders of MessagesContent
+  const stableAssistant = useMemo(() => assistant, [assistant.id])
+  const stableTopic = useMemo(() => topic, [topic.id])
+
   const {
     containerRef: scrollContainerRef,
-    handleScroll: handleScrollPosition,
+    handleScroll: rawHandleScrollPosition,
     getSavedPosition,
     clearSavedPosition
   } = useScrollPosition(`topic-${topic.id}`)
+  // Stabilize the scroll handler — useScrollPosition creates a new throttle each render
+  const handleScrollPosition = useCallback(() => {
+    rawHandleScrollPosition()
+  }, [rawHandleScrollPosition])
   const [displayMessages, setDisplayMessages] = useState<Message[]>([])
   const [hasMore, setHasMore] = useState(false)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
@@ -727,8 +735,8 @@ const Messages = ({
   return (
     <EditModeProvider topicId={topic.id} scrollToGroup={scrollToGroup} visibleGroupIds={visibleGroupIds}>
       <MessagesContent
-        assistant={assistant}
-        topic={topic}
+        assistant={stableAssistant}
+        topic={stableTopic}
         scrollContainerRef={scrollContainerRef}
         handleScrollPosition={handleScrollPosition}
         displayMessages={displayMessages}

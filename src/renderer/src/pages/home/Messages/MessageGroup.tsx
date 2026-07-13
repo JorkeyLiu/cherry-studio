@@ -61,6 +61,10 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
 
   const isGrid = multiModelMessageStyle === 'grid'
 
+  // Extract length as primitive to avoid unnecessary renderMessage re-creation.
+  // Only the count matters for the multi-model layout CSS class, not the array reference.
+  const messageCount = messages.length
+
   const selectedMessageId = useMemo(() => {
     if (messages.length === 1) return messages[0]?.id
     const selectedMessage = messages.find((message) => message.foldSelected)
@@ -308,7 +312,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
       isGrouped,
       topic,
       multiModelMessageStyle,
-      messages,
+      messageCount,
       selectedMessageId,
       onUpdateUseful,
       groupContextMessageId,

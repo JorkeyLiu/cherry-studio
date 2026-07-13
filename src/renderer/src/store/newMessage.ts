@@ -280,8 +280,6 @@ export const newMessagesActions = messagesSlice.actions
 export default messagesSlice.reducer
 
 // --- Selectors ---
-import { createSelector } from '@reduxjs/toolkit'
-
 import type { RootState } from './index' // Adjust path if necessary
 
 // Base selector for the messages slice state
@@ -295,18 +293,47 @@ export const {
   selectEntities: selectMessageEntities // Selects the entity dictionary { id: message }
 } = messagesAdapter.getSelectors(selectMessagesState)
 
-// Custom Selector: Selects messages for a specific topic in order
-export const selectMessagesForTopic = createSelector(
-  [
-    selectMessageEntities, // Input 1: Get the dictionary of all messages { id: message }
-    (state: RootState, topicId: string) => state.messages.messageIdsByTopic[topicId] // Input 2: Get the ordered IDs for the specific topic
-  ],
-  (messageEntities, topicMessageIds) => {
-    // Logger.log(`[Selector selectMessagesForTopic] Running for topicId: ${topicId}`); // Uncomment for debugging selector runs
-    if (!topicMessageIds) {
-      return [] // Return an empty array if the topic or its IDs don't exist
+// Custom Selector: Selects messages for a specific topic in order.
+// Uses manual memoization to return the same array reference when the result
+// is shallowly equal to the previous one, preventing unnecessary re-renders.
+const _lastResultByTopicId: Record<string, { result: Message[]; topicMessageIds: string[] }> = {}
+
+export function selectMessagesForTopic(state: RootState, topicId: string): Message[] {
+  const messageEntities = selectMessageEntities(state)
+  const topicMessageIds = (state.messages.messageIdsByTopic as Record<string, string[] | undefined>)[topicId]
+
+  if (!topicMessageIds) {
+    // Return a stable empty array reference for nonexistent topics
+    if (!_lastResultByTopicId[topicId]) {
+      _lastResultByTopicId[topicId] = { result: [], topicMessageIds: [] }
     }
-    // Map the ordered IDs to the actual message objects from the dictionary
-    return topicMessageIds.map((id) => messageEntities[id]).filter((m): m is Message => !!m) // Filter out undefined/null in case of inconsistencies
+    return _lastResultByTopicId[topicId].result
   }
-)
+
+  const cached = _lastResultByTopicId[topicId]
+  if (cached && cached.topicMessageIds === topicMessageIds) {
+    // Fast path: the topicMessageIds array reference hasn't changed, so all
+    // entity references inside are the same — return the cached result directly.
+    return cached.result
+  }
+
+  // Slow path: rebuild the array and check element-wise shallow equality.
+  const result = topicMessageIds.map((id) => messageEntities[id]).filter((m): m is Message => !!m)
+
+  if (cached && shallowEqualsArray(cached.result, result)) {
+    // Same content, different intermediate refs — return the previous stable ref.
+    return cached.result
+  }
+
+  _lastResultByTopicId[topicId] = { result, topicMessageIds }
+  return result
+}
+
+/** Element-wise reference equality check. */
+function shallowEqualsArray(a: Message[], b: Message[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}

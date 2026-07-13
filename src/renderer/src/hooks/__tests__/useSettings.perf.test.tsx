@@ -16,6 +16,7 @@ import {
   useSettings
 } from '@renderer/hooks/useSettings'
 import { useAppSelector } from '@renderer/store'
+import type { SendMessageShortcut } from '@renderer/store/settings'
 import settingsReducer, {
   setConfirmDeleteMessage,
   setEnableSpellCheck,
@@ -36,6 +37,8 @@ import settingsReducer, {
   setUserName,
   setWebdavHost
 } from '@renderer/store/settings'
+import type { LanguageVarious } from '@renderer/types'
+import type { ThemeMode } from '@renderer/types'
 import { act, renderHook } from '@testing-library/react'
 import React, { Profiler, type ProfilerOnRenderCallback } from 'react'
 import { Provider } from 'react-redux'
@@ -133,7 +136,7 @@ describe('useSettings render count (baseline)', () => {
 
     // Change the specific setting that the consumer cares about
     act(() => {
-      store.dispatch(setTheme('dark'))
+      store.dispatch(setTheme('dark' as ThemeMode))
     })
 
     const afterCount = renderCount
@@ -193,12 +196,12 @@ describe('useSettings render count (baseline)', () => {
 
     // Sequential changes to different fields
     act(() => {
-      store.dispatch(setTheme('dark'))
+      store.dispatch(setTheme('dark' as ThemeMode))
     })
     counts.push(renderCount)
 
     act(() => {
-      store.dispatch(setLanguage('en-us'))
+      store.dispatch(setLanguage('en-us' as LanguageVarious))
     })
     counts.push(renderCount)
 
@@ -290,7 +293,7 @@ describe('useEditorSettings render count', () => {
     renderHook(() => useEditorSettings(), { wrapper: createWrapper(store) })
 
     act(() => {
-      store.dispatch(setTheme('dark'))
+      store.dispatch(setTheme('dark' as ThemeMode))
     })
 
     expect(renderCount).toBe(1)
@@ -757,7 +760,7 @@ describe('useMessageGroupSettings render count', () => {
     renderHook(() => useMessageGroupSettings(), { wrapper: createWrapper(store) })
 
     act(() => {
-      store.dispatch(setTheme('dark'))
+      store.dispatch(setTheme('dark' as ThemeMode))
     })
 
     expect(renderCount).toBe(1)
@@ -961,7 +964,7 @@ describe('MessageEditor component render optimization — BEFORE migration (useS
     const beforeCount = renderCount
 
     act(() => {
-      store.dispatch(setTheme('dark'))
+      store.dispatch(setTheme('dark' as ThemeMode))
     })
 
     const extraRenders = renderCount - beforeCount
@@ -991,7 +994,7 @@ describe('MessageEditor component render optimization — AFTER migration (useEd
     const beforeCount = renderCount
 
     act(() => {
-      store.dispatch(setTheme('dark'))
+      store.dispatch(setTheme('dark' as ThemeMode))
     })
 
     const extraRenders = renderCount - beforeCount
@@ -1019,7 +1022,7 @@ describe('MessageEditor component render optimization — AFTER migration (useEd
     const beforeCount = renderCount
 
     act(() => {
-      store.dispatch(setSendMessageShortcut('enter'))
+      store.dispatch(setSendMessageShortcut('enter' as SendMessageShortcut))
     })
 
     const extraRenders = renderCount - beforeCount
@@ -1198,7 +1201,7 @@ describe('NarrowLayout component render optimization — BEFORE migration (useSe
     const beforeCount = renderCount
 
     act(() => {
-      store.dispatch(setTheme('dark'))
+      store.dispatch(setTheme('dark' as ThemeMode))
     })
 
     const extraRenders = renderCount - beforeCount
@@ -1222,7 +1225,7 @@ describe('NarrowLayout component render optimization — AFTER migration (useApp
     const beforeCount = renderCount
 
     act(() => {
-      store.dispatch(setTheme('dark'))
+      store.dispatch(setTheme('dark' as ThemeMode))
     })
 
     const extraRenders = renderCount - beforeCount
@@ -1269,7 +1272,7 @@ describe('MessageGroupModelList component render optimization — BEFORE migrati
     const beforeCount = renderCount
 
     act(() => {
-      store.dispatch(setTheme('dark'))
+      store.dispatch(setTheme('dark' as ThemeMode))
     })
 
     const extraRenders = renderCount - beforeCount
@@ -1293,7 +1296,7 @@ describe('MessageGroupModelList component render optimization — AFTER migratio
     const beforeCount = renderCount
 
     act(() => {
-      store.dispatch(setTheme('dark'))
+      store.dispatch(setTheme('dark' as ThemeMode))
     })
 
     const extraRenders = renderCount - beforeCount

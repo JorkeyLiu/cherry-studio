@@ -8,13 +8,12 @@ export function throttle<T extends (...args: any[]) => any>(fn: T, ms: number): 
   let lastCall = 0
   let timer: ReturnType<typeof setTimeout> | null = null
   let lastArgs: Parameters<T> | null = null
-  let lastThis: any = null
+  let lastBoundFn: ((...args: any[]) => any) | null = null
 
   return function (this: any, ...args: Parameters<T>) {
     const now = Date.now()
     lastArgs = args
-    // eslint-disable-next-line typescript-eslint/no-this-alias
-    lastThis = this
+    lastBoundFn = fn.bind(this)
 
     if (now - lastCall >= ms) {
       lastCall = now
@@ -24,10 +23,10 @@ export function throttle<T extends (...args: any[]) => any>(fn: T, ms: number): 
         () => {
           lastCall = Date.now()
           timer = null
-          if (lastArgs) {
-            fn.apply(lastThis, lastArgs)
+          if (lastArgs && lastBoundFn) {
+            lastBoundFn(...lastArgs)
             lastArgs = null
-            lastThis = null
+            lastBoundFn = null
           }
         },
         ms - (now - lastCall)

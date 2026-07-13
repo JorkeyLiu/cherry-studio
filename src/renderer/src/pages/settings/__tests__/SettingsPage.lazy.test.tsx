@@ -1,6 +1,6 @@
 import fs from 'fs'
 import path from 'path'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 
 const settingsDir = path.resolve(__dirname, '..')
 

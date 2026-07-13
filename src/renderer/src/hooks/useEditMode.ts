@@ -14,6 +14,7 @@ import {
 import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import i18n from 'i18next'
 import { useCallback, useEffect, useMemo } from 'react'
+import { shallowEqual } from 'react-redux'
 
 import { getGroupIndex, useMessageGroups } from './useMessageGroup'
 
@@ -32,7 +33,7 @@ export function useCreateEditMode(
   const focusedIndex = useAppSelector((state) => state.editMode.focusedIndex)
   const clipboard = useAppSelector((state) => state.clipboard)
   const undoStack = useAppSelector((state) => state.undoStack)
-  const messages = useAppSelector((state) => selectMessagesForTopic(state, topicId))
+  const messages = useAppSelector((state) => selectMessagesForTopic(state, topicId), shallowEqual)
 
   // 消息组
   const allGroups = useMessageGroups(messages)

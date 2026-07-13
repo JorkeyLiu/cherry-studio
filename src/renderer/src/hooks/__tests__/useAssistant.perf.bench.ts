@@ -89,7 +89,6 @@ test('.find() selector returns correct assistant', () => {
 })
 
 test('memoized selector returns correct assistant', () => {
-  const selectors = new Map<string, ReturnType<typeof createSelectAssistantMemoized>>()
   const selector = createSelectAssistantMemoized('assistant-3')
   const state = { assistants: createAssistants(10) }
 

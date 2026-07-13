@@ -15,7 +15,8 @@ const mockUseSelector = vi.fn()
 
 // Mock hooks
 vi.mock('@renderer/hooks/useSettings', () => ({
-  useSettings: () => mockUseSettings()
+  useSettings: () => mockUseSettings(),
+  useMessageRenderSettings: () => mockUseSettings()
 }))
 
 vi.mock('react-redux', async () => {

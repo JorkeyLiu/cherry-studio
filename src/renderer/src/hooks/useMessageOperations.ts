@@ -26,6 +26,7 @@ import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage
 import { abortCompletion } from '@renderer/utils/abortController'
 import { difference, throttle } from 'lodash'
 import { useCallback } from 'react'
+import { shallowEqual } from 'react-redux'
 
 const logger = loggerService.withContext('UseMessageOperations')
 
@@ -464,7 +465,7 @@ export function useMessageOperations(topic: Topic) {
 }
 
 export const useTopicMessages = (topicId: string) => {
-  return useAppSelector((state) => selectMessagesForTopic(state, topicId))
+  return useAppSelector((state) => selectMessagesForTopic(state, topicId), shallowEqual)
 }
 
 export const useTopicLoading = (topic: Topic) => {

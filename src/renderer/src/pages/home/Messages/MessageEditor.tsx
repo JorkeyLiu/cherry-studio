@@ -26,6 +26,7 @@ import { Save, Send, X } from 'lucide-react'
 import type { FC } from 'react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { shallowEqual } from 'react-redux'
 import styled from 'styled-components'
 
 import { FileNameRender, getFileIcon } from '../Inputbar/AttachmentPreview'
@@ -73,7 +74,7 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
   const textareaRef = useRef<TextAreaRef>(null)
   const isUserMessage = message.role === 'user'
 
-  const topicMessages = useAppSelector((state) => selectMessagesForTopic(state, topicId))
+  const topicMessages = useAppSelector((state) => selectMessagesForTopic(state, topicId), shallowEqual)
 
   const noopQuickPanel = useMemo<ToolQuickPanelApi>(
     () => ({

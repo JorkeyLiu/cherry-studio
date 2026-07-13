@@ -7,6 +7,7 @@
  * 这是 selector 重构前的基线行为。
  */
 import { configureStore } from '@reduxjs/toolkit'
+import type * as ConfigModels from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import assistantsReducer, {
   addAssistant,
@@ -17,6 +18,7 @@ import assistantsReducer, {
 import type { Assistant, Model } from '@renderer/types'
 import { act, renderHook } from '@testing-library/react'
 import React, { Profiler, type ProfilerOnRenderCallback } from 'react'
+import type * as ReactI18next from 'react-i18next'
 import { Provider } from 'react-redux'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -33,7 +35,7 @@ vi.mock('@renderer/store', async () => {
 
 // Mock config/models — prevent useEffect side effects in useAssistant
 vi.mock('@renderer/config/models', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@renderer/config/models')>()
+  const actual = await importOriginal<typeof ConfigModels>()
   return {
     ...actual,
     getThinkModelType: vi.fn(() => 'default'),
@@ -93,7 +95,7 @@ vi.mock('@renderer/hooks/useTopic', () => ({
 
 // Mock react-i18next — keep actual exports, override useTranslation
 vi.mock('react-i18next', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('react-i18next')>()
+  const actual = await importOriginal<typeof ReactI18next>()
   return {
     ...actual,
     useTranslation: () => ({

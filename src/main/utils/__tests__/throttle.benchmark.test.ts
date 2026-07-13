@@ -41,13 +41,10 @@ describe('Window resize throttle performance comparison', () => {
 
     const throttledFn = throttle(() => {}, 16)
 
-    let sendCount = 0
     // Simulate 100 resize events spread over 1 second at ~10ms intervals
     for (let t = 0; t < 1000; t += 10) {
       throttledFn()
       vi.advanceTimersByTime(10)
-      // Check how many times fn was actually called
-      sendCount = throttledFn.length // not tracked, so count manually below
     }
 
     // Count actual invocations by using a tracked function
