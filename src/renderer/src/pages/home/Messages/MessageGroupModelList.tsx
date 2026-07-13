@@ -3,7 +3,7 @@ import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
 import { Sortable } from '@renderer/components/dnd'
 import { HStack } from '@renderer/components/Layout'
 import Scrollbar from '@renderer/components/Scrollbar'
-import { useSettings } from '@renderer/hooks/useSettings'
+import { useMessageGroupSettings } from '@renderer/hooks/useSettings'
 import { useAppDispatch } from '@renderer/store'
 import { setFoldDisplayMode } from '@renderer/store/settings'
 import type { Model } from '@renderer/types'
@@ -33,7 +33,7 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
 }) => {
   const dispatch = useAppDispatch()
   const { t } = useTranslation()
-  const { foldDisplayMode } = useSettings()
+  const { foldDisplayMode } = useMessageGroupSettings()
   const isCompact = foldDisplayMode === 'compact'
 
   const isMessageProcessing = useCallback((message: Message) => {

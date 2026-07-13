@@ -1,4 +1,4 @@
-import store, { useAppDispatch, useAppSelector } from '@renderer/store'
+import store, { type RootState, useAppDispatch, useAppSelector } from '@renderer/store'
 import type { AssistantIconType, SendMessageShortcut, SettingsState } from '@renderer/store/settings'
 import {
   setAssistantIconType,
@@ -23,6 +23,7 @@ import {
 } from '@renderer/store/settings'
 import type { SidebarIcon, ThemeMode, TranslateLanguageCode } from '@renderer/types'
 import type { UpgradeChannel } from '@shared/config/constant'
+import { shallowEqual } from 'react-redux'
 
 export function useSettings() {
   const settings = useAppSelector((state) => state.settings)
@@ -111,7 +112,7 @@ export function useSettings() {
 }
 
 export function useMessageStyle() {
-  const { messageStyle } = useSettings()
+  const messageStyle = useAppSelector((state) => state.settings.messageStyle)
   const isBubbleStyle = messageStyle === 'bubble'
 
   return {
@@ -150,4 +151,62 @@ export const useNavbarPosition = () => {
     isTopNavbar: navbarPosition === 'top',
     setNavbarPosition: (position: 'left' | 'top') => dispatch(setNavbarPosition(position))
   }
+}
+
+// --- Fine-grained settings hooks ---
+
+// 消息渲染样式 — Message, ThinkingBlock, MainTextBlock, MessageMcpTool 共享
+export function useMessageRenderSettings() {
+  return useAppSelector(
+    (state: RootState) => ({
+      messageFont: state.settings.messageFont,
+      fontSize: state.settings.fontSize,
+      messageStyle: state.settings.messageStyle,
+      showMessageOutline: state.settings.showMessageOutline,
+      thoughtAutoCollapse: state.settings.thoughtAutoCollapse,
+      renderInputMessageAsMarkdown: state.settings.renderInputMessageAsMarkdown
+    }),
+    shallowEqual
+  )
+}
+
+// 编辑器通用设置 — InputbarCore, MessageEditor 共享
+export function useEditorSettings() {
+  return useAppSelector(
+    (state: RootState) => ({
+      fontSize: state.settings.fontSize,
+      sendMessageShortcut: state.settings.sendMessageShortcut,
+      pasteLongTextAsFile: state.settings.pasteLongTextAsFile,
+      pasteLongTextThreshold: state.settings.pasteLongTextThreshold,
+      enableSpellCheck: state.settings.enableSpellCheck
+    }),
+    shallowEqual
+  )
+}
+
+// 输入框行为 — Inputbar, TokenCount 共享
+export function useInputbarSettings() {
+  return useAppSelector(
+    (state: RootState) => ({
+      showInputEstimatedTokens: state.settings.showInputEstimatedTokens,
+      enableQuickPanelTriggers: state.settings.enableQuickPanelTriggers,
+      sendMessageShortcut: state.settings.sendMessageShortcut,
+      targetLanguage: state.settings.targetLanguage,
+      autoTranslateWithSpace: state.settings.autoTranslateWithSpace
+    }),
+    shallowEqual
+  )
+}
+
+// 多模型分组布局 — MessageGroup, MessageGroupModelList 共享
+export function useMessageGroupSettings() {
+  return useAppSelector(
+    (state: RootState) => ({
+      multiModelMessageStyle: state.settings.multiModelMessageStyle,
+      gridColumns: state.settings.gridColumns,
+      gridPopoverTrigger: state.settings.gridPopoverTrigger,
+      foldDisplayMode: state.settings.foldDisplayMode
+    }),
+    shallowEqual
+  )
 }

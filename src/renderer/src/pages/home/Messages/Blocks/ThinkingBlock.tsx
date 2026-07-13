@@ -1,7 +1,7 @@
 import { CheckOutlined } from '@ant-design/icons'
 import { loggerService } from '@logger'
 import ThinkingEffect from '@renderer/components/ThinkingEffect'
-import { useSettings } from '@renderer/hooks/useSettings'
+import { useMessageRenderSettings } from '@renderer/hooks/useSettings'
 import { useTemporaryValue } from '@renderer/hooks/useTemporaryValue'
 import { MessageBlockStatus, type ThinkingMessageBlock } from '@renderer/types/newMessage'
 import { Collapse, Tooltip } from 'antd'
@@ -19,7 +19,7 @@ interface Props {
 const ThinkingBlock: React.FC<Props> = ({ block }) => {
   const [copied, setCopied] = useTemporaryValue(false, 2000)
   const { t } = useTranslation()
-  const { messageFont, fontSize, thoughtAutoCollapse } = useSettings()
+  const { messageFont, fontSize, thoughtAutoCollapse } = useMessageRenderSettings()
   const [activeKey, setActiveKey] = useState<'thought' | ''>(thoughtAutoCollapse ? '' : 'thought')
 
   const isThinking = useMemo(() => block.status === MessageBlockStatus.STREAMING, [block.status])

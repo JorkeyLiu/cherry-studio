@@ -1,4 +1,4 @@
-import { useSettings } from '@renderer/hooks/useSettings'
+import { useAppSelector } from '@renderer/store'
 import type { FC, HTMLAttributes } from 'react'
 import styled from 'styled-components'
 
@@ -7,7 +7,7 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
 }
 
 const NarrowLayout: FC<Props> = ({ children, ...props }) => {
-  const { narrowMode } = useSettings()
+  const narrowMode = useAppSelector((state) => state.settings.narrowMode)
 
   return (
     <Container className={`narrow-mode ${narrowMode ? 'active' : ''}`} {...props}>

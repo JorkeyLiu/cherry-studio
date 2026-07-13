@@ -1,4 +1,5 @@
 import { loggerService } from '@logger'
+import { createSelector } from '@reduxjs/toolkit'
 import {
   getThinkModelType,
   isSupportedReasoningEffortModel,
@@ -8,6 +9,7 @@ import {
 } from '@renderer/config/models'
 import { db } from '@renderer/databases'
 import { getDefaultTopic } from '@renderer/services/AssistantService'
+import type { RootState } from '@renderer/store'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import {
   addAssistant,
@@ -33,6 +35,13 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { TopicManager } from './useTopic'
+
+// Memoized selector factory — returns cached result when the target assistant object is unchanged
+const makeSelectAssistantById = () =>
+  createSelector(
+    [(state: RootState) => state.assistants.assistants, (_state: RootState, id: string) => id],
+    (assistants, id) => assistants.find((a) => a.id === id)
+  )
 
 export function useAssistants() {
   const { t } = useTranslation()
@@ -76,7 +85,8 @@ export function useAssistants() {
 }
 
 export function useAssistant(id: string) {
-  const assistant = useAppSelector((state) => state.assistants.assistants.find((a) => a.id === id) as Assistant)
+  const selectAssistant = useMemo(makeSelectAssistantById, [])
+  const assistant = useAppSelector((state) => selectAssistant(state, id)) as Assistant
   const dispatch = useAppDispatch()
   const { defaultModel } = useDefaultModel()
 

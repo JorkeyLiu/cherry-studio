@@ -12,7 +12,7 @@ import { useMessageEditing } from '@renderer/context/MessageEditingContext'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
-import { useEnableDeveloperMode, useMessageStyle, useSettings } from '@renderer/hooks/useSettings'
+import { useEnableDeveloperMode, useMessageStyle } from '@renderer/hooks/useSettings'
 import { useTemporaryValue } from '@renderer/hooks/useTemporaryValue'
 import useTranslate from '@renderer/hooks/useTranslate'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
@@ -20,7 +20,7 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getMessageTitle } from '@renderer/services/MessagesService'
 import { translateText } from '@renderer/services/TranslateService'
 import type { RootState } from '@renderer/store'
-import store, { useAppDispatch } from '@renderer/store'
+import store, { useAppDispatch, useAppSelector } from '@renderer/store'
 import { messageBlocksSelectors } from '@renderer/store/messageBlock'
 import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import { insertMessagesThunk, removeBlocksThunk } from '@renderer/store/thunk/messageThunk'
@@ -172,7 +172,8 @@ const MessageMenubar: FC<Props> = (props) => {
 
   const { isBubbleStyle } = useMessageStyle()
   const { enableDeveloperMode } = useEnableDeveloperMode()
-  const { confirmDeleteMessage, confirmRegenerateMessage } = useSettings()
+  const confirmDeleteMessage = useAppSelector((state) => state.settings.confirmDeleteMessage)
+  const confirmRegenerateMessage = useAppSelector((state) => state.settings.confirmRegenerateMessage)
   const { updateAssistantSettings } = useAssistant(assistant.id)
 
   // Context anchor logic for fixed context window mode

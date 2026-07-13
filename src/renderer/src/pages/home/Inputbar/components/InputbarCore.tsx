@@ -5,7 +5,7 @@ import type { QuickPanelTriggerInfo } from '@renderer/components/QuickPanel'
 import { QuickPanelReservedSymbol, QuickPanelView, useQuickPanel } from '@renderer/components/QuickPanel'
 import TranslateButton from '@renderer/components/TranslateButton'
 import { useRuntime } from '@renderer/hooks/useRuntime'
-import { useSettings } from '@renderer/hooks/useSettings'
+import { useEditorSettings, useInputbarSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
 import useTranslate from '@renderer/hooks/useTranslate'
 import PasteService from '@renderer/services/PasteService'
@@ -129,16 +129,9 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   const { setExtensions } = useInputbarToolsInternalDispatch()
   const isEmpty = text.trim().length === 0
   const [inputFocus, setInputFocus] = useState(false)
-  const {
-    targetLanguage,
-    sendMessageShortcut,
-    fontSize,
-    pasteLongTextAsFile,
-    pasteLongTextThreshold,
-    autoTranslateWithSpace,
-    enableQuickPanelTriggers,
-    enableSpellCheck
-  } = useSettings()
+  const { targetLanguage, autoTranslateWithSpace, enableQuickPanelTriggers } = useInputbarSettings()
+  const { fontSize, sendMessageShortcut, pasteLongTextAsFile, pasteLongTextThreshold, enableSpellCheck } =
+    useEditorSettings()
   const quickPanelTriggersEnabled = forceEnableQuickPanelTriggers ?? enableQuickPanelTriggers
 
   const { t } = useTranslation()

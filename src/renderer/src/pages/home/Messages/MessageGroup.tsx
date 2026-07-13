@@ -3,7 +3,7 @@ import Scrollbar from '@renderer/components/Scrollbar'
 import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
-import { useSettings } from '@renderer/hooks/useSettings'
+import { useMessageGroupSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { useAppDispatch } from '@renderer/store'
@@ -36,7 +36,11 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
 
   // Hooks
   const { editMessage } = useMessageOperations(topic)
-  const { multiModelMessageStyle: multiModelMessageStyleSetting, gridColumns, gridPopoverTrigger } = useSettings()
+  const {
+    multiModelMessageStyle: multiModelMessageStyleSetting,
+    gridColumns,
+    gridPopoverTrigger
+  } = useMessageGroupSettings()
   const { isMultiSelectMode } = useChatContext(topic)
   const { setTimeoutTimer } = useTimer()
   const dispatch = useAppDispatch()

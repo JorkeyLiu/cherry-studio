@@ -1,4 +1,4 @@
-import { useSettings } from '@renderer/hooks/useSettings'
+import { useMessageRenderSettings } from '@renderer/hooks/useSettings'
 import { getModelUniqId } from '@renderer/services/ModelService'
 import type { RootState } from '@renderer/store'
 import { selectFormattedCitationsByBlockId } from '@renderer/store/messageBlock'
@@ -21,7 +21,7 @@ interface Props {
 
 const MainTextBlock: React.FC<Props> = ({ block, citationBlockId, role, mentions = [] }) => {
   // Use the passed citationBlockId directly in the selector
-  const { renderInputMessageAsMarkdown } = useSettings()
+  const { renderInputMessageAsMarkdown } = useMessageRenderSettings()
 
   const rawCitations = useSelector((state: RootState) => selectFormattedCitationsByBlockId(state, citationBlockId))
 
