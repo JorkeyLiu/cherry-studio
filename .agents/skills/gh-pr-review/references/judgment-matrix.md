@@ -23,9 +23,9 @@ low or high risk depending on scope and impact.
 (screenshot comparisons, golden files) are always deferred for user confirmation,
 regardless of risk level.
 
-**V2 block rule**: any fix that would modify Redux state shape or IndexedDB
-schema is ALWAYS deferred for user confirmation with a warning that these
-changes are currently blocked until v2.0.0.
+**State schema rule**: any fix that would modify Redux state shape or IndexedDB
+schema is ALWAYS deferred for user confirmation due to the high risk of
+data migration issues.
 
 ## Worth Fixing?
 

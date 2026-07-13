@@ -130,8 +130,8 @@ Improvements to code quality, performance, and maintainability.
 - List items rendered with stable, unique key (not array index)
 - Side effects correctly placed in useEffect with proper dependency arrays
 - Component state derived correctly (no stale closures, no out-of-sync derived state)
-- Redux state shape not modified (v2 refactoring block)
-- Dexie (IndexedDB) schema not modified (v2 refactoring block)
+- Redux state shape changes are intentional and migration-safe
+- Dexie (IndexedDB) schema changes are intentional and migration-safe
 
 ---
 

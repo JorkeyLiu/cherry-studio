@@ -1,8 +1,3 @@
-// TODO(v2): All Redux store reads in this file (state.knowledge.bases, state.llm.providers)
-//           should migrate to the V2 SQLite/Drizzle data layer (src/main/services/agents/).
-//           Redux is blocked for new data-model features until v2.0.0.
-//           See: src/main/services/agents/database/schema/index.ts
-
 import { loggerService } from '@logger'
 import KnowledgeService from '@main/services/KnowledgeService'
 import { reduxService } from '@main/services/ReduxService'
@@ -37,8 +32,6 @@ export const listKnowledgeBases = async (req: ValidationRequest, res: Response):
     logger.debug('Listing knowledge bases', { limit, offset })
 
     // Get knowledge bases from Redux store
-    // TODO(v2): Migrate to V2 knowledge base storage (SQLite/Drizzle).
-    //           Redux access requires Cherry Studio window to be open.
     let bases: KnowledgeBase[]
     try {
       bases = await reduxService.select<KnowledgeBase[]>('state.knowledge.bases')
@@ -84,7 +77,6 @@ export const getKnowledgeBase = async (req: ValidationRequest, res: Response): P
 
     logger.debug(`Getting knowledge base: ${id}`)
 
-    // TODO(v2): Migrate to V2 knowledge base storage (SQLite/Drizzle).
     const bases = await reduxService.select<KnowledgeBase[]>('state.knowledge.bases')
     const base = bases?.find((b) => b.id === id)
 
@@ -122,9 +114,6 @@ export const getKnowledgeBase = async (req: ValidationRequest, res: Response): P
 
 /**
  * Get provider configuration from Redux store by provider ID
- *
- * TODO(v2): Migrate to V2 provider config storage (SQLite/Drizzle) so the API server
- *           can resolve embedding/rerank provider credentials without a running renderer.
  *
  * NOTE: Redux errors are allowed to propagate - they will be caught by the handler's
  *       try/catch and converted to 503 responses via isReduxUnavailableError().
@@ -216,7 +205,6 @@ export const searchKnowledge = async (req: ValidationRequest, res: Response): Pr
     logger.debug(`Searching knowledge bases: "${query}"`, { knowledge_base_ids, document_count })
 
     // Get knowledge bases from Redux
-    // TODO(v2): Migrate to V2 knowledge base storage (SQLite/Drizzle).
     const bases = await reduxService.select<KnowledgeBase[]>('state.knowledge.bases')
 
     if (!bases || bases.length === 0) {
@@ -249,7 +237,6 @@ export const searchKnowledge = async (req: ValidationRequest, res: Response): Pr
 
         // WORKAROUND: KnowledgeService.search() expects Electron.IpcMainInvokeEvent for IPC signature.
         // The @TraceMethod decorator doesn't currently access event properties, so passing {} is safe.
-        // TODO(v2): Add searchInternal() method to KnowledgeService for non-IPC calls.
         const searchResults = await KnowledgeService.search({} as Electron.IpcMainInvokeEvent, {
           search: query,
           base: params

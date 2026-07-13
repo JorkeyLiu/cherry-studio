@@ -31,19 +31,6 @@
           }
         }
       }
-    },
-    "2.0.0": {
-      "metadata": {
-        "segmentId": "gateway-v2",
-        "segmentType": "breaking"
-      },
-      "minCompatibleVersion": "1.7.0",
-      "description": "Major release v2.0 - required intermediate version for v2.x upgrades",
-      "channels": {
-        "latest": null,
-        "rc": null,
-        "beta": null
-      }
     }
   }
 }

@@ -62,9 +62,8 @@ Static analysis and app launch are independent — run them in parallel to save 
    ```bash
    pnpm typecheck 2>&1 | grep -E "error TS|exited with code"
    ```
-2. **Review blocked files**: Check if the PR modifies files with
-   `@deprecated` / `V2 DATA&UI REFACTORING` headers. These files are blocked
-   for feature changes until v2.0.0.
+2. **Review deprecated files**: Check if the PR modifies files with
+   `@deprecated` headers and flag any potential issues.
 3. **Scan for common issues**:
    - Hardcoded strings (should use i18n)
    - `console.log` usage (should use `loggerService`)

@@ -1,19 +1,3 @@
-/**
- * @deprecated Scheduled for removal in v2.0.0
- * --------------------------------------------------------------------------
- * ⚠️ NOTICE: V2 DATA&UI REFACTORING (by 0xfullex)
- * --------------------------------------------------------------------------
- * STOP: Feature PRs affecting this file are currently BLOCKED.
- * Only critical bug fixes are accepted during this migration phase.
- *
- * This file is being refactored to v2 standards.
- * Any non-critical changes will conflict with the ongoing work.
- *
- * 🔗 Context & Status:
- * - Contribution Hold: https://github.com/CherryHQ/cherry-studio/issues/10954
- * - v2 Refactor PR   : https://github.com/CherryHQ/cherry-studio/pull/10162
- * --------------------------------------------------------------------------
- */
 import { loggerService } from '@logger'
 import { AiSdkToChunkAdapter } from '@renderer/aiCore/chunk/AiSdkToChunkAdapter'
 import db from '@renderer/databases'
@@ -81,18 +65,6 @@ import { mutate } from 'swr'
 import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '../newMessage'
-// import {
-//   bulkAddBlocksV2,
-//   clearMessagesFromDBV2,
-//   deleteMessageFromDBV2,
-//   deleteMessagesFromDBV2,
-//   loadTopicMessagesThunkV2,
-//   saveMessageAndBlocksToDBV2,
-//   updateBlocksV2,
-//   updateFileCountV2,
-//   updateMessageV2,
-//   updateSingleBlockV2
-// } from './messageThunk.v2'
 
 const logger = loggerService.withContext('MessageThunk')
 
@@ -1908,9 +1880,6 @@ export const removeBlocksThunk =
       throw error
     }
   }
-
-//以下内容从原 messageThunk.v2.ts 迁移过来，原文件已经删除
-//原因：v2.ts并不是v2数据重构的一部分，而相关命名对v2重构造成重大误解，故两文件合并，以消除误解
 
 /**
  * Load messages for a topic using unified DbService

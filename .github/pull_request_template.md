@@ -5,14 +5,9 @@
 
 <!--
 
-🚨 Branch Strategy Change (Effective April 3, 2026) 🚨
+Branch Strategy:
 
-The `main` branch is now under CODE FREEZE.
-
-- main branch: Only accepts critical bug fixes via `hotfix/*` branches. Fix PRs must be minimal in scope and must not include any refactoring code.
-- v2 branch: All new features, refactoring, and optimizations should be submitted to the `v2` branch.
-
-If you are submitting a bug fix to main, please ensure your PR is from a `hotfix/*` branch.
+- main branch: All development occurs on `main`. Use `hotfix/*` branches for critical bug fixes only.
 
 -->
 
