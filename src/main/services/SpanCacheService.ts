@@ -14,7 +14,7 @@ import { configManager } from './ConfigManager'
 const logger = loggerService.withContext('SpanCacheService')
 
 /** Maximum number of SpanEntity entries held in memory. */
-const SPAN_CACHE_MAX = 5000
+const SPAN_CACHE_MAX = 10_000
 
 class SpanCacheService implements TraceCache {
   private topicMap: Map<string, string> = new Map<string, string>()

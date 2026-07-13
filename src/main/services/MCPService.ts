@@ -152,7 +152,7 @@ class McpService {
   private clients: Map<string, Client> = new Map()
   private pendingClients: Map<string, Promise<Client>> = new Map()
   private pingCache: Map<string, { result: boolean; timestamp: number }> = new Map()
-  private PING_CACHE_TTL = 10_000 // 10 seconds
+  private PING_CACHE_TTL = 5_000 // 5 seconds — shorter TTL avoids stale cached pings
   private dxtService = new DxtService()
   private activeToolCalls: Map<string, AbortController> = new Map()
   private serverLogs = new ServerLogBuffer(200)

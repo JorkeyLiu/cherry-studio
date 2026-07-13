@@ -32,7 +32,11 @@ const MarkdownEditor: FC<MarkdownEditorProps> = ({
   const [rehypeKatexPlugin, setRehypeKatexPlugin] = useState<any>(null)
 
   useEffect(() => {
-    void import('rehype-katex').then((mod) => setRehypeKatexPlugin(() => mod.default))
+    import('rehype-katex')
+      .then((mod) => setRehypeKatexPlugin(() => mod.default))
+      .catch((err) => {
+        console.warn('Failed to load rehype-katex, math formulas will display as raw LaTeX:', err)
+      })
   }, [])
 
   useEffect(() => {

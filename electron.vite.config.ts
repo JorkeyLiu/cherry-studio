@@ -130,7 +130,7 @@ export default defineConfig({
                 return 'vendor-antd'
               }
               // AI SDK
-              if (id.includes('/ai/') || id.includes('/@ai-sdk/') || id.includes('/@cherrystudio/')) {
+              if (id.includes('/ai/') || id.includes('/@ai-sdk/')) {
                 return 'vendor-ai'
               }
               // TipTap

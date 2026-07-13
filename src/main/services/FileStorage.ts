@@ -154,6 +154,9 @@ class FileStorage {
   private watcherConfig: Required<FileWatcherConfig> = DEFAULT_WATCHER_CONFIG
   private isPaused = false
 
+  // NOTE: Sync calls are intentional here — tempDir is a getter used synchronously in
+  // officeParser and other callers that require a string path at call time. Converting to
+  // async would require refactoring all callers and is deferred to a future iteration.
   private get tempDir(): string {
     if (!fs.existsSync(this._tempDir)) {
       fs.mkdirSync(this._tempDir, { recursive: true })
@@ -165,6 +168,9 @@ class FileStorage {
     this.initStorageDir()
   }
 
+  // NOTE: Sync calls are intentional here — this runs in the constructor where async is not
+  // possible without changing the class instantiation pattern. These one-time sync directory
+  // creations are safe as they only execute once at startup.
   private initStorageDir = (): void => {
     try {
       if (!fs.existsSync(this.storageDir)) {
@@ -195,10 +201,25 @@ class FileStorage {
     logger.debug(`stats: ${stats}, filePath: ${filePath}`)
     const fileSize = stats.size
 
-    const files = await fs.promises.readdir(this.storageDir)
-    for (const file of files) {
-      const storedFilePath = path.join(this.storageDir, file)
-      const storedStats = await fs.promises.stat(storedFilePath)
+    const entries = await fs.promises.readdir(this.storageDir, { withFileTypes: true })
+    const files = entries.filter((e) => e.isFile()).map((e) => e.name)
+
+    // Stat all candidate files in parallel
+    const storedStatsList = await Promise.all(
+      files.map(async (file) => {
+        const storedFilePath = path.join(this.storageDir, file)
+        try {
+          const storedStats = await fs.promises.stat(storedFilePath)
+          return { file, storedFilePath, storedStats }
+        } catch {
+          return null
+        }
+      })
+    )
+
+    for (const entry of storedStatsList) {
+      if (!entry) continue
+      const { file, storedFilePath, storedStats } = entry
 
       if (storedStats.size === fileSize) {
         const [originalHash, storedHash] = await Promise.all([

@@ -88,4 +88,24 @@ describe('throttle', () => {
 
     vi.useRealTimers()
   })
+
+  it('should use the last arguments for trailing call', () => {
+    vi.useFakeTimers()
+    const fn = vi.fn()
+    const throttled = throttle(fn, 16)
+
+    throttled('first', 1) // t=0 → immediate
+    throttled('second', 2) // t=0 → schedule trailing, stores args
+    throttled('third', 3) // t=0 → updates trailing args to latest
+
+    expect(fn).toHaveBeenCalledTimes(1)
+    expect(fn).toHaveBeenCalledWith('first', 1)
+
+    vi.advanceTimersByTime(16)
+    expect(fn).toHaveBeenCalledTimes(2)
+    // Trailing call should use the last arguments, not the first
+    expect(fn).toHaveBeenLastCalledWith('third', 3)
+
+    vi.useRealTimers()
+  })
 })

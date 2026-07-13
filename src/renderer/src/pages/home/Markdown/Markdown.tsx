@@ -53,15 +53,23 @@ const Markdown: FC<Props> = ({ block, postProcess }) => {
 
   useEffect(() => {
     if (mathEngine === 'KaTeX') {
-      void import('rehype-katex').then((mod) => setRehypeKatexPlugin(() => mod.default))
+      import('rehype-katex')
+        .then((mod) => setRehypeKatexPlugin(() => mod.default))
+        .catch((err) => {
+          console.warn('Failed to load rehype-katex, math formulas will display as raw LaTeX:', err)
+        })
       // Side-effect imports: extend KaTeX with copy-to-clipboard and chemical equation support
       // @ts-ignore no type declarations for katex contrib modules
-      void import('katex/dist/contrib/copy-tex')
+      import('katex/dist/contrib/copy-tex').catch(() => {})
       // @ts-ignore no type declarations for katex contrib modules
-      void import('katex/dist/contrib/mhchem')
+      import('katex/dist/contrib/mhchem').catch(() => {})
     } else if (mathEngine === 'MathJax') {
       // @ts-ignore rehype-mathjax is not typed
-      void import('rehype-mathjax').then((mod) => setRehypeMathjaxPlugin(() => mod.default))
+      import('rehype-mathjax')
+        .then((mod) => setRehypeMathjaxPlugin(() => mod.default))
+        .catch((err) => {
+          console.warn('Failed to load rehype-mathjax, math formulas will display as raw LaTeX:', err)
+        })
     }
   }, [mathEngine])
 
