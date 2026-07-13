@@ -4,7 +4,6 @@ import type { FC } from 'react'
 import React, { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import ReactMarkdown from 'react-markdown'
-import rehypeKatex from 'rehype-katex'
 import rehypeRaw from 'rehype-raw'
 import remarkCjkFriendly from 'remark-cjk-friendly'
 import remarkGfm from 'remark-gfm'
@@ -29,6 +28,13 @@ const MarkdownEditor: FC<MarkdownEditorProps> = ({
   const { t } = useTranslation()
   const [inputValue, setInputValue] = useState(value || '')
 
+  // Dynamically loaded rehype-katex (heavy module, loaded on demand)
+  const [rehypeKatexPlugin, setRehypeKatexPlugin] = useState<any>(null)
+
+  useEffect(() => {
+    void import('rehype-katex').then((mod) => setRehypeKatexPlugin(() => mod.default))
+  }, [])
+
   useEffect(() => {
     setInputValue(value || '')
   }, [value])
@@ -45,7 +51,7 @@ const MarkdownEditor: FC<MarkdownEditorProps> = ({
       <PreviewArea className="markdown">
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkCjkFriendly, remarkMath]}
-          rehypePlugins={[rehypeRaw, rehypeKatex]}>
+          rehypePlugins={rehypeKatexPlugin ? [rehypeRaw, rehypeKatexPlugin] : [rehypeRaw]}>
           {inputValue || t('settings.provider.notes.markdown_editor_default_value')}
         </ReactMarkdown>
       </PreviewArea>

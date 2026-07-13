@@ -1,8 +1,7 @@
 import { Navbar, NavbarCenter } from '@renderer/components/app/Navbar'
 import { McpLogo } from '@renderer/components/Icons'
 import Scrollbar from '@renderer/components/Scrollbar'
-import ModelSettings from '@renderer/pages/settings/ModelSettings/ModelSettings'
-import { Divider as AntDivider } from 'antd'
+import { Divider as AntDivider, Spin } from 'antd'
 import {
   Brain,
   Cloud,
@@ -19,23 +18,32 @@ import {
   Zap
 } from 'lucide-react'
 import type { FC } from 'react'
+import React, { Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, Route, Routes, useLocation } from 'react-router-dom'
 import styled from 'styled-components'
 
-import AboutSettings from './AboutSettings'
-import DataSettings from './DataSettings/DataSettings'
-import DisplaySettings from './DisplaySettings/DisplaySettings'
-import DocProcessSettings from './DocProcessSettings'
-import GeneralSettings from './GeneralSettings'
-import MCPSettings from './MCPSettings'
-import MemorySettings from './MemorySettings'
-import { ProviderList } from './ProviderSettings'
-import QuickAssistantSettings from './QuickAssistantSettings'
-import QuickPhraseSettings from './QuickPhraseSettings'
-import ShortcutSettings from './ShortcutSettings'
-import { ApiServerSettings } from './ToolSettings/ApiServerSettings'
-import WebSearchSettings from './WebSearchSettings'
+// Lazy-loaded sub-components for code splitting
+const ModelSettings = React.lazy(() => import('@renderer/pages/settings/ModelSettings/ModelSettings'))
+const AboutSettings = React.lazy(() => import('./AboutSettings'))
+const DataSettings = React.lazy(() => import('./DataSettings/DataSettings'))
+const DisplaySettings = React.lazy(() => import('./DisplaySettings/DisplaySettings'))
+const DocProcessSettings = React.lazy(() => import('./DocProcessSettings'))
+const GeneralSettings = React.lazy(() => import('./GeneralSettings'))
+const MCPSettings = React.lazy(() => import('./MCPSettings'))
+const MemorySettings = React.lazy(() => import('./MemorySettings'))
+const ProviderList = React.lazy(() => import('./ProviderSettings/ProviderList'))
+const QuickAssistantSettings = React.lazy(() => import('./QuickAssistantSettings'))
+const QuickPhraseSettings = React.lazy(() => import('./QuickPhraseSettings'))
+const ShortcutSettings = React.lazy(() => import('./ShortcutSettings'))
+const ApiServerSettings = React.lazy(() => import('./ToolSettings/ApiServerSettings/ApiServerSettings'))
+const WebSearchSettings = React.lazy(() => import('./WebSearchSettings'))
+
+const LoadingFallback: FC = () => (
+  <LoadingFallbackContainer>
+    <Spin />
+  </LoadingFallbackContainer>
+)
 
 const SettingsPage: FC = () => {
   const { pathname } = useLocation()
@@ -140,22 +148,24 @@ const SettingsPage: FC = () => {
           </MenuItemLink>
         </SettingMenus>
         <SettingContent>
-          <Routes>
-            <Route path="provider" element={<ProviderList />} />
-            <Route path="model" element={<ModelSettings />} />
-            <Route path="websearch/*" element={<WebSearchSettings />} />
-            <Route path="api-server" element={<ApiServerSettings />} />
-            <Route path="docprocess" element={<DocProcessSettings />} />
-            <Route path="quickphrase" element={<QuickPhraseSettings />} />
-            <Route path="mcp/*" element={<MCPSettings />} />
-            <Route path="memory" element={<MemorySettings />} />
-            <Route path="general/*" element={<GeneralSettings />} />
-            <Route path="display" element={<DisplaySettings />} />
-            <Route path="shortcut" element={<ShortcutSettings />} />
-            <Route path="quickAssistant" element={<QuickAssistantSettings />} />
-            <Route path="data" element={<DataSettings />} />
-            <Route path="about" element={<AboutSettings />} />
-          </Routes>
+          <Suspense fallback={<LoadingFallback />}>
+            <Routes>
+              <Route path="provider" element={<ProviderList />} />
+              <Route path="model" element={<ModelSettings />} />
+              <Route path="websearch/*" element={<WebSearchSettings />} />
+              <Route path="api-server" element={<ApiServerSettings />} />
+              <Route path="docprocess" element={<DocProcessSettings />} />
+              <Route path="quickphrase" element={<QuickPhraseSettings />} />
+              <Route path="mcp/*" element={<MCPSettings />} />
+              <Route path="memory" element={<MemorySettings />} />
+              <Route path="general/*" element={<GeneralSettings />} />
+              <Route path="display" element={<DisplaySettings />} />
+              <Route path="shortcut" element={<ShortcutSettings />} />
+              <Route path="quickAssistant" element={<QuickAssistantSettings />} />
+              <Route path="data" element={<DataSettings />} />
+              <Route path="about" element={<AboutSettings />} />
+            </Routes>
+          </Suspense>
         </SettingContent>
       </ContentContainer>
     </Container>
@@ -224,6 +234,14 @@ const SettingContent = styled.div`
 
 const Divider = styled(AntDivider)`
   margin: 3px 0;
+`
+
+const LoadingFallbackContainer = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
 `
 
 export default SettingsPage

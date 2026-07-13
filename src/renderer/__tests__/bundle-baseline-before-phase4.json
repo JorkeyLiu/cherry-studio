@@ -1,0 +1,1018 @@
+{
+  "buildDate": "2026-07-13",
+  "buildCommand": "pnpm analyze:renderer (VISUALIZER_RENDERER=true)",
+  "notes": "Baseline established before Phase 2 bundle optimization. Typecheck errors in test files prevented fresh build; used existing build output from 2026-07-13.",
+  "jsFiles": 790,
+  "jsSizeBytes": 61203649,
+  "cssFiles": 4,
+  "cssSizeBytes": 143809,
+  "jsonFiles": 9,
+  "jsonSizeBytes": 4035878,
+  "fontFiles": 69,
+  "fontSizeBytes": 3643340,
+  "imageFiles": 157,
+  "imageSizeBytes": 2009846,
+  "totalSizeBytes": 71036522,
+  "totalFiles": 1029,
+  "largestFiles": [
+    {
+      "name": "store-CTsEjs_2.js",
+      "sizeBytes": 12294581
+    },
+    {
+      "name": "jsx-runtime-TW8Bzhjd.js",
+      "sizeBytes": 5157074
+    },
+    {
+      "name": "index-DhoYlXXe.js",
+      "sizeBytes": 4165706
+    },
+    {
+      "name": "traceWindow-Bya4UVkc.js",
+      "sizeBytes": 2779444
+    },
+    {
+      "name": "ImageViewer-B_RVshRJ.js",
+      "sizeBytes": 1884047
+    },
+    {
+      "name": "esm-_XDuplcg.js",
+      "sizeBytes": 1549147
+    },
+    {
+      "name": "viz-CWe5l55T.js",
+      "sizeBytes": 1491147
+    },
+    {
+      "name": "dash.all.min-DRguwJRL.js",
+      "sizeBytes": 1396446
+    },
+    {
+      "name": "chunk-NNHCCRGN-CHD5_GBH.js",
+      "sizeBytes": 1057813
+    },
+    {
+      "name": "hls-Sp7PWg7z.js",
+      "sizeBytes": 958472
+    },
+    {
+      "name": "cytoscape.esm-DlZvmpoX.js",
+      "sizeBytes": 843818
+    },
+    {
+      "name": "emacs-lisp-Cy-_xiO2.js",
+      "sizeBytes": 782360
+    },
+    {
+      "name": "emacs-lisp-PmKT19wH.js",
+      "sizeBytes": 782360
+    },
+    {
+      "name": "dist-DTnLaD1O.js",
+      "sizeBytes": 736947
+    },
+    {
+      "name": "cpp-Dk-wJWwS.js",
+      "sizeBytes": 668672
+    },
+    {
+      "name": "cpp-MIScMlYE.js",
+      "sizeBytes": 668668
+    },
+    {
+      "name": "wasm-D0Z7NJR-.js",
+      "sizeBytes": 622420
+    },
+    {
+      "name": "wasm-CLj4CQpv.js",
+      "sizeBytes": 622416
+    },
+    {
+      "name": "dist-CBzLNleb.js",
+      "sizeBytes": 535934
+    },
+    {
+      "name": "Component-5BEMe1Jd.js",
+      "sizeBytes": 506584
+    }
+  ],
+  "duplicateChunks": [
+    {
+      "sizeBytes": 782360,
+      "files": ["emacs-lisp-Cy-_xiO2.js", "emacs-lisp-PmKT19wH.js"]
+    },
+    {
+      "sizeBytes": 266968,
+      "files": ["wolfram-Dqs9g_PZ.js", "wolfram-pIOwLI_a.js"]
+    },
+    {
+      "sizeBytes": 190704,
+      "files": ["typescript-BI-wd-8p.js", "typescript-BiIPZBKd.js"]
+    },
+    {
+      "sizeBytes": 187835,
+      "files": ["jsx--Vhk3JR0.js", "jsx-Mt0cOjSs.js"]
+    },
+    {
+      "sizeBytes": 185579,
+      "files": ["tsx-BKOq9lLR.js", "tsx-CtGp4mPG.js"]
+    },
+    {
+      "sizeBytes": 184892,
+      "files": ["javascript-CxCSpJj1.js", "javascript-_FvKZjd1.js"]
+    },
+    {
+      "sizeBytes": 184440,
+      "files": ["objective-cpp-C0cJZwgY.js", "objective-cpp-DlBDqgG3.js"]
+    },
+    {
+      "sizeBytes": 146314,
+      "files": ["mdx-9O-a3QeT.js", "mdx-CL_CIV0C.js"]
+    },
+    {
+      "sizeBytes": 146110,
+      "files": ["asciidoc-B6fvDPBR.js", "asciidoc-cMUHKbNr.js"]
+    },
+    {
+      "sizeBytes": 111915,
+      "files": ["objective-c-BemUaH4e.js", "objective-c-DDkyQrwq.js"]
+    },
+    {
+      "sizeBytes": 95050,
+      "files": ["racket-6D0KD9Vg.js", "racket-IMenCrEe.js"]
+    },
+    {
+      "sizeBytes": 93878,
+      "files": ["swift-CHsNH9rq.js", "swift-Cy8sx_c0.js"]
+    },
+    {
+      "sizeBytes": 82032,
+      "files": ["vyper-BLSJ63Uk.js", "vyper-DtFKY8Z6.js"]
+    },
+    {
+      "sizeBytes": 78127,
+      "files": ["c-DMO2oi1T.js", "c-D_IBjAfc.js"]
+    },
+    {
+      "sizeBytes": 76385,
+      "files": ["mojo-B1_s-UsE.js", "mojo-BHLU60PD.js"]
+    },
+    {
+      "sizeBytes": 67268,
+      "files": ["ocaml-CJb6Uk1q.js", "ocaml-DBGSH-AF.js"]
+    },
+    {
+      "sizeBytes": 64718,
+      "files": ["ballerina-BeKFPjPj.js", "ballerina-Dgbivx-S.js"]
+    },
+    {
+      "sizeBytes": 62341,
+      "files": ["wikitext-DTN-j874.js", "wikitext-fzwZ4XJn.js"]
+    },
+    {
+      "sizeBytes": 58534,
+      "files": ["everforest-light-DhSZ6tCX.js", "everforest-light-gJqeTgj8.js"]
+    },
+    {
+      "sizeBytes": 58529,
+      "files": ["everforest-dark-2suNS-_7.js", "everforest-dark-DBRJ3JBE.js"]
+    },
+    {
+      "sizeBytes": 57354,
+      "files": ["r-3G2Sa7Lt.js", "r-BBO1rmib.js"]
+    },
+    {
+      "sizeBytes": 54838,
+      "files": ["imba-B-QVb_a4.js", "imba-BDP0ThWs.js"]
+    },
+    {
+      "sizeBytes": 54605,
+      "files": ["ada-B_eDiCPI.js", "ada-C3S8BVqd.js"]
+    },
+    {
+      "sizeBytes": 52205,
+      "files": ["css-C2Ce6CFy.js", "css-C4ljcP-J.js"]
+    },
+    {
+      "sizeBytes": 52177,
+      "files": ["apex-BagceDHi.js", "apex-DkoRAop2.js"]
+    },
+    {
+      "sizeBytes": 52137,
+      "files": ["catppuccin-macchiato-BxpRHWFe.js", "catppuccin-macchiato-Dp4pRwAv.js"]
+    },
+    {
+      "sizeBytes": 52126,
+      "files": ["catppuccin-frappe-C38arzqL.js", "catppuccin-frappe-qiLLBTnv.js"]
+    },
+    {
+      "sizeBytes": 52122,
+      "files": ["catppuccin-latte-D6WK3Knw.js", "catppuccin-latte-Hkpsj_z2.js"]
+    },
+    {
+      "sizeBytes": 52121,
+      "files": ["catppuccin-mocha-BxL9W0Av.js", "catppuccin-mocha-CdQJdYJ3.js"]
+    },
+    {
+      "sizeBytes": 48923,
+      "files": ["d-51cUzQk8.js", "d-DGFFiwLE.js"]
+    },
+    {
+      "sizeBytes": 45565,
+      "files": ["haskell-C6ElO37I.js", "haskell-CB6gNPpR.js"]
+    },
+    {
+      "sizeBytes": 45449,
+      "files": ["shellscript-BPygS74z.js", "shellscript-Cd9bNI3A.js"]
+    },
+    {
+      "sizeBytes": 43867,
+      "files": ["asm-B4bQ7lW3.js", "asm-BhHPpHEe.js"]
+    },
+    {
+      "sizeBytes": 39016,
+      "files": ["houston-C7Am8I0L.js", "houston-DT-czxWp.js"]
+    },
+    {
+      "sizeBytes": 38831,
+      "files": ["tokyo-night-CFAgnMn1.js", "tokyo-night-DHDhtZ8i.js"]
+    },
+    {
+      "sizeBytes": 37299,
+      "files": ["one-dark-pro-CjYBDp7Z.js", "one-dark-pro-D1A7hyO6.js"]
+    },
+    {
+      "sizeBytes": 36622,
+      "files": ["poimandres-BRWVzRdl.js", "poimandres-DpVea04t.js"]
+    },
+    {
+      "sizeBytes": 32231,
+      "files": ["night-owl-CA_0nQA1.js", "night-owl-CbXinktQ.js"]
+    },
+    {
+      "sizeBytes": 32079,
+      "files": ["mermaid-BbwNpgQZ.js", "mermaid-D33bCxHR.js"]
+    },
+    {
+      "sizeBytes": 32067,
+      "files": ["applescript-DK8MrLJ_.js", "applescript-LAEuNJUm.js"]
+    },
+    {
+      "sizeBytes": 31309,
+      "files": ["scala-QbdmEKQc.js", "scala-mgy_2RSA.js"]
+    },
+    {
+      "sizeBytes": 30399,
+      "files": ["java-Cs-EdD8w.js", "java-qGtZcIA7.js"]
+    },
+    {
+      "sizeBytes": 29588,
+      "files": ["codeql-BZid4SQS.js", "codeql-BfT3FQrM.js"]
+    },
+    {
+      "sizeBytes": 29533,
+      "files": ["nord-BL0EWwc6.js", "nord-BTPLMhIK.js"]
+    },
+    {
+      "sizeBytes": 28586,
+      "files": ["system-verilog-DgxlGsc_.js", "system-verilog-ijmlEs0p.js"]
+    },
+    {
+      "sizeBytes": 28070,
+      "files": ["one-light-Bx9B3Uy2.js", "one-light-DrgpLxL8.js"]
+    },
+    {
+      "sizeBytes": 26785,
+      "files": ["vhdl-Dz76yRCg.js", "vhdl-JajJdNRG.js"]
+    },
+    {
+      "sizeBytes": 26769,
+      "files": ["purescript-BMgB9Mqo.js", "purescript-DnQbAaUk.js"]
+    },
+    {
+      "sizeBytes": 26543,
+      "files": ["typespec-CkBzy9_q.js", "typespec-EH02aGm3.js"]
+    },
+    {
+      "sizeBytes": 26353,
+      "files": ["cadence-BIP5D4oz.js", "cadence-CUT5CLY6.js"]
+    },
+    {
+      "sizeBytes": 25238,
+      "files": ["gruvbox-light-medium-BMsMEvn8.js", "gruvbox-light-medium-CNmGxpVe.js"]
+    },
+    {
+      "sizeBytes": 25233,
+      "files": ["gruvbox-dark-medium-DHXsqIEV.js", "gruvbox-dark-medium-DSgMmAnQ.js"]
+    },
+    {
+      "sizeBytes": 25230,
+      "files": [
+        "gruvbox-light-hard-B4lsxNAM.js",
+        "gruvbox-light-hard-FGp0tNyr.js",
+        "gruvbox-light-soft-D2B7iaDa.js",
+        "gruvbox-light-soft-hTUWzwyN.js"
+      ]
+    },
+    {
+      "sizeBytes": 25225,
+      "files": [
+        "gruvbox-dark-hard-BaRSnqxx.js",
+        "gruvbox-dark-hard-DFj4P6PL.js",
+        "gruvbox-dark-soft-BFVsuJRE.js",
+        "gruvbox-dark-soft-BQRiAg54.js"
+      ]
+    },
+    {
+      "sizeBytes": 24511,
+      "files": ["sql-CFDY1Cva.js", "sql-VyWTpbEC.js"]
+    },
+    {
+      "sizeBytes": 24046,
+      "files": ["rose-pine-dawn-Ckt6gVbQ.js", "rose-pine-dawn-DC5eCBMs.js"]
+    },
+    {
+      "sizeBytes": 24045,
+      "files": ["rose-pine-moon-ByQGHrqH.js", "rose-pine-moon-CrULPHaR.js"]
+    },
+    {
+      "sizeBytes": 24025,
+      "files": ["rose-pine-Db2WNJEU.js", "rose-pine-sMeyjmuH.js"]
+    },
+    {
+      "sizeBytes": 23929,
+      "files": ["wit-B3-0s6An.js", "wit-dIADKh1M.js"]
+    },
+    {
+      "sizeBytes": 23596,
+      "files": ["common-lisp-DIm6wDvc.js", "common-lisp-K9WJ1yx6.js"]
+    },
+    {
+      "sizeBytes": 23168,
+      "files": ["dracula-soft-Co_YGjEG.js", "dracula-soft-DQMgmHEM.js"]
+    },
+    {
+      "sizeBytes": 23148,
+      "files": ["dracula-2k3vQKdv.js", "dracula-DzaHHRbM.js"]
+    },
+    {
+      "sizeBytes": 23129,
+      "files": ["snazzy-light-C1U1twt-.js", "snazzy-light-LQ642s40.js"]
+    },
+    {
+      "sizeBytes": 22822,
+      "files": ["glimmer-js-DDiALgEd.js", "glimmer-ts-D8-rVsp5.js"]
+    },
+    {
+      "sizeBytes": 22820,
+      "files": ["glimmer-js-DIJH8W2C.js", "glimmer-ts-o69jm9Uk.js"]
+    },
+    {
+      "sizeBytes": 22334,
+      "files": ["nushell-BtZNOG2q.js", "nushell-C7ANJkbc.js"]
+    },
+    {
+      "sizeBytes": 21939,
+      "files": ["powershell-C-5P2_pl.js", "powershell-DUaFgH4w.js"]
+    },
+    {
+      "sizeBytes": 21547,
+      "files": ["groovy-BtvPizM9.js", "groovy-Cy7l6UGB.js"]
+    },
+    {
+      "sizeBytes": 21189,
+      "files": ["viml-TSOpwVSN.js", "viml-gKSeOiSj.js"]
+    },
+    {
+      "sizeBytes": 20435,
+      "files": ["material-theme-palenight-ChOnM73H.js", "material-theme-palenight-D7-zFASt.js"]
+    },
+    {
+      "sizeBytes": 20430,
+      "files": ["material-theme-lighter-Bi45hnIS.js", "material-theme-lighter-lFFogB54.js"]
+    },
+    {
+      "sizeBytes": 20423,
+      "files": ["material-theme-darker-BTaaZK0B.js", "material-theme-darker-CkdAHQkn.js"]
+    },
+    {
+      "sizeBytes": 20421,
+      "files": ["material-theme-ocean-CCcXVhHj.js", "material-theme-ocean-Dm5IxOOw.js"]
+    },
+    {
+      "sizeBytes": 20395,
+      "files": ["material-theme-CK-9iASZ.js", "material-theme-Ddno8L3i.js"]
+    },
+    {
+      "sizeBytes": 19843,
+      "files": ["move-0acGu9lM.js", "move-Bj6Zb8y4.js"]
+    },
+    {
+      "sizeBytes": 18793,
+      "files": ["kanagawa-dragon-7aQBLzZk.js", "kanagawa-dragon-B3P8rVbP.js"]
+    },
+    {
+      "sizeBytes": 18790,
+      "files": ["kanagawa-lotus-CxxkukPx.js", "kanagawa-lotus-DNChzptB.js"]
+    },
+    {
+      "sizeBytes": 18785,
+      "files": ["kanagawa-wave-Bo0znHvn.js", "kanagawa-wave-DMG4PSyp.js"]
+    },
+    {
+      "sizeBytes": 18203,
+      "files": ["cue-3XLcXtdk.js", "cue-DHs-nJnC.js"]
+    },
+    {
+      "sizeBytes": 18066,
+      "files": ["solidity-Bme8l5wD.js", "solidity-fw2AbgU6.js"]
+    },
+    {
+      "sizeBytes": 17947,
+      "files": ["matlab-C8-OBOXt.js", "matlab-CDiIbtz_.js"]
+    },
+    {
+      "sizeBytes": 16928,
+      "files": ["rust-5iAw__zf.js", "rust-CVw6Ec6Q.js"]
+    },
+    {
+      "sizeBytes": 16665,
+      "files": ["ayu-dark-8C83wjO6.js", "ayu-dark-jVEGLu8f.js"]
+    },
+    {
+      "sizeBytes": 16573,
+      "files": ["abap-C4yRz_Vm.js", "abap-CF1nCRm_.js"]
+    },
+    {
+      "sizeBytes": 16313,
+      "files": ["github-dark-high-contrast-DXd9y2nA.js", "github-dark-high-contrast-gdEo7VGr.js"]
+    },
+    {
+      "sizeBytes": 16289,
+      "files": ["gnuplot-BdTyKzf-.js", "gnuplot-BrrLYcAH.js"]
+    },
+    {
+      "sizeBytes": 16267,
+      "files": ["kusto-B4NQLktv.js", "kusto-t2Fo0FVP.js"]
+    },
+    {
+      "sizeBytes": 16125,
+      "files": ["github-dark-default-B1keKv8j.js", "github-dark-default-BQ1K8Okr.js"]
+    },
+    {
+      "sizeBytes": 16121,
+      "files": ["github-dark-dimmed-CCqShrXt.js", "github-dark-dimmed-D83kFqss.js"]
+    },
+    {
+      "sizeBytes": 15957,
+      "files": ["github-light-high-contrast-BjF32j4e.js", "github-light-high-contrast-BkB9lIVt.js"]
+    },
+    {
+      "sizeBytes": 15815,
+      "files": ["clarity-CHPJogvo.js", "clarity-DqSC35SX.js"]
+    },
+    {
+      "sizeBytes": 15814,
+      "files": ["github-light-default-V6uNq15f.js", "github-light-default-n-76tCWR.js"]
+    },
+    {
+      "sizeBytes": 15689,
+      "files": ["actionscript-3-CKZBsEJ7.js", "actionscript-3-DU8nmk0E.js"]
+    },
+    {
+      "sizeBytes": 15668,
+      "files": ["synthwave-84-CbtgfzUW.js", "synthwave-84-D5FDqfx_.js"]
+    },
+    {
+      "sizeBytes": 15355,
+      "files": ["vitesse-dark-BD1ft8sR.js", "vitesse-dark-BeiHlWvC.js"]
+    },
+    {
+      "sizeBytes": 15338,
+      "files": ["luau-Bg0puHmt.js", "luau-CLP6V1lC.js"]
+    },
+    {
+      "sizeBytes": 15275,
+      "files": ["vitesse-black-CxFsOOWN.js", "vitesse-black-D3j7JXye.js"]
+    },
+    {
+      "sizeBytes": 15206,
+      "files": ["vitesse-light-BRYdemUd.js", "vitesse-light-BudZzHnR.js"]
+    },
+    {
+      "sizeBytes": 14905,
+      "files": ["aurora-x-BRQV54gD.js", "aurora-x-B_q06yn6.js"]
+    },
+    {
+      "sizeBytes": 14876,
+      "files": ["v-BzL42AEI.js", "v-_oNJRzta.js"]
+    },
+    {
+      "sizeBytes": 14172,
+      "files": ["bat-DgCMKXMe.js", "bat-tWFkNZJc.js"]
+    },
+    {
+      "sizeBytes": 13966,
+      "files": ["fish-BBnq9bEt.js", "fish-CpRYlDen.js"]
+    },
+    {
+      "sizeBytes": 13790,
+      "files": ["vesper-CJwJe_g7.js", "vesper-DZtY4370.js"]
+    },
+    {
+      "sizeBytes": 13499,
+      "files": ["hjson-BLctnLhi.js", "hjson-Bt79zj56.js"]
+    },
+    {
+      "sizeBytes": 13368,
+      "files": ["apache-ByBGNOs6.js", "apache-CcuXWvTQ.js"]
+    },
+    {
+      "sizeBytes": 13218,
+      "files": ["wasm-D7Bi-P4y.js", "wasm-DxNsu_Ln.js"]
+    },
+    {
+      "sizeBytes": 12789,
+      "files": ["puppet-DMhi-JVI.js", "puppet-DpzD9sRG.js"]
+    },
+    {
+      "sizeBytes": 12775,
+      "files": ["github-dark-CXgg7wIh.js", "github-dark-tFHhqpP4.js"]
+    },
+    {
+      "sizeBytes": 12766,
+      "files": ["terraform-BXxjAeJ8.js", "terraform-D-recpy4.js"]
+    },
+    {
+      "sizeBytes": 12540,
+      "files": ["github-light-BO1gLWZW.js", "github-light-CbsGnmMB.js"]
+    },
+    {
+      "sizeBytes": 12509,
+      "files": ["laserwave-Bqjyvrrg.js", "laserwave-CYLf9ub-.js"]
+    },
+    {
+      "sizeBytes": 12234,
+      "files": ["gherkin-CwXypCQe.js", "gherkin-DJs5m6Ic.js"]
+    },
+    {
+      "sizeBytes": 11878,
+      "files": ["prolog-CI-Y5v0-.js", "prolog-HQoHkMvl.js"]
+    },
+    {
+      "sizeBytes": 11745,
+      "files": ["beancount-Bd9WulCz.js", "beancount-Tyb60Wcr.js"]
+    },
+    {
+      "sizeBytes": 11644,
+      "files": ["dream-maker-Bdm7BhsZ.js", "dream-maker-C9bnwbct.js"]
+    },
+    {
+      "sizeBytes": 11595,
+      "files": ["yaml-Df3gGNfW.js", "yaml-HpsqAZd5.js"]
+    },
+    {
+      "sizeBytes": 11492,
+      "files": ["pkl-DMmw0KMz.js", "pkl-nloRpFQl.js"]
+    },
+    {
+      "sizeBytes": 11376,
+      "files": ["hcl-B24Jpoby.js", "hcl-gkV_38jF.js"]
+    },
+    {
+      "sizeBytes": 11083,
+      "files": ["raku-BFsXMv7v.js", "raku-C9JzcviJ.js"]
+    },
+    {
+      "sizeBytes": 11043,
+      "files": ["light-plus-BHlUTCqo.js", "light-plus-D8bT7m1s.js"]
+    },
+    {
+      "sizeBytes": 10601,
+      "files": ["slack-ochin-BC18yudJ.js", "slack-ochin-uqNZgRoy.js"]
+    },
+    {
+      "sizeBytes": 10423,
+      "files": ["sass-D4cOLgcl.js", "sass-DEGFtW4x.js"]
+    },
+    {
+      "sizeBytes": 10299,
+      "files": ["plastic-9YA00Fba.js", "plastic-M35uKvPb.js"]
+    },
+    {
+      "sizeBytes": 10193,
+      "files": ["slack-dark-B08HtKwQ.js", "slack-dark-ByuCB90C.js"]
+    },
+    {
+      "sizeBytes": 10147,
+      "files": ["dark-plus-CzflfJzq.js", "dark-plus-PQrCM1B1.js"]
+    },
+    {
+      "sizeBytes": 10013,
+      "files": ["make-BveVdvXo.js", "make-CH096rgi.js"]
+    },
+    {
+      "sizeBytes": 9894,
+      "files": ["andromeeda-DYj7-Hik.js", "andromeeda-DhAMoUMM.js"]
+    },
+    {
+      "sizeBytes": 9839,
+      "files": ["kotlin-BoGAIvsB.js", "kotlin-La5Qv-cP.js"]
+    },
+    {
+      "sizeBytes": 9431,
+      "files": ["haml-CVMJdtK_.js", "typst-CCOnm5Ez.js", "typst-CY516ItY.js"]
+    },
+    {
+      "sizeBytes": 9019,
+      "files": ["plsql-B_y8Yenq.js", "plsql-w5f2Y4TB.js"]
+    },
+    {
+      "sizeBytes": 8896,
+      "files": ["monokai-DGZghECx.js", "monokai-Jo52gV2c.js"]
+    },
+    {
+      "sizeBytes": 8854,
+      "files": ["regexp-BPcLhQg6.js", "regexp-CqLJmuCW.js"]
+    },
+    {
+      "sizeBytes": 8764,
+      "files": ["dart-CWKC80aE.js", "dart-DVTiRICL.js"]
+    },
+    {
+      "sizeBytes": 8567,
+      "files": ["systemd-Bom26lBa.js", "systemd-CRr_YmqC.js"]
+    },
+    {
+      "sizeBytes": 7962,
+      "files": ["qss-BFMq588W.js", "qss-CQ_EzXA5.js"]
+    },
+    {
+      "sizeBytes": 7852,
+      "files": ["scheme-CLRfw6B4.js", "scheme-Czdr2zDO.js"]
+    },
+    {
+      "sizeBytes": 7767,
+      "files": ["min-light-DW2ETKSB.js", "min-light-wIr8-YeV.js"]
+    },
+    {
+      "sizeBytes": 7740,
+      "files": ["solarized-dark-Btg7jTS4.js", "solarized-dark-CJr-fpMJ.js"]
+    },
+    {
+      "sizeBytes": 7717,
+      "files": ["talonscript-BNy4LtIP.js", "talonscript-DcXbaOiN.js"]
+    },
+    {
+      "sizeBytes": 7492,
+      "files": ["riscv-C2bRbBks.js", "riscv-w8wr48dg.js"]
+    },
+    {
+      "sizeBytes": 7434,
+      "files": ["proto-BooCauN5.js", "proto-ChC_OfbZ.js"]
+    },
+    {
+      "sizeBytes": 7344,
+      "files": ["solarized-light-I8YWdva8.js", "solarized-light-YwUdR2Kd.js"]
+    },
+    {
+      "sizeBytes": 7305,
+      "files": ["smalltalk-Cm-MWRN0.js", "smalltalk-Dpqedw4h.js"]
+    },
+    {
+      "sizeBytes": 7212,
+      "files": ["toml-BvAkiTpS.js", "toml-CPUTrY2p.js"]
+    },
+    {
+      "sizeBytes": 7188,
+      "files": ["clojure-BZtS8UQS.js", "clojure-CScqdTHQ.js"]
+    },
+    {
+      "sizeBytes": 7140,
+      "files": ["prisma-BId2Od57.js", "prisma-C_xxnuPJ.js"]
+    },
+    {
+      "sizeBytes": 7089,
+      "files": ["ara-BmxHY7Rc.js", "ara-DarDo4Rh.js"]
+    },
+    {
+      "sizeBytes": 7070,
+      "files": ["gdshader-BDnAJwOj.js", "red-CQS1WyPa.js", "red-Wn4FkY8i.js"]
+    },
+    {
+      "sizeBytes": 7007,
+      "files": ["min-dark-D-lmN_v3.js", "min-dark-YKGmmQoo.js"]
+    },
+    {
+      "sizeBytes": 6572,
+      "files": ["cypher-BC872mTV.js", "cypher-CCdvdx88.js"]
+    },
+    {
+      "sizeBytes": 6569,
+      "files": ["powerquery-CtUSaFdO.js", "powerquery-DxDeVIaT.js"]
+    },
+    {
+      "sizeBytes": 6551,
+      "files": ["vb-CmcOufgH.js", "vb-XRcgqTvL.js"]
+    },
+    {
+      "sizeBytes": 6470,
+      "files": ["verilog-BhsKKIrU.js", "verilog-ChgZHcD2.js"]
+    },
+    {
+      "sizeBytes": 6335,
+      "files": ["lean-CZxlfMPq.js", "lean-XhKJM9s7.js"]
+    },
+    {
+      "sizeBytes": 6154,
+      "files": ["awk-B5pCWIFj.js", "awk-brgpYH3W.js"]
+    },
+    {
+      "sizeBytes": 5991,
+      "files": ["coq-CC3VHY1_.js", "coq-CwPY4Eyo.js"]
+    },
+    {
+      "sizeBytes": 5966,
+      "files": ["bicep-CgJiamkq.js", "bicep-NvgerRRy.js"]
+    },
+    {
+      "sizeBytes": 5961,
+      "files": ["zig-CSpEmMh0.js", "zig-DLKYzHph.js"]
+    },
+    {
+      "sizeBytes": 5760,
+      "files": ["wgsl-BwN9nWiV.js", "wgsl-CEjZUx9l.js"]
+    },
+    {
+      "sizeBytes": 5721,
+      "files": ["dax-bvEEbNAK.js", "dax-hrRaOKMj.js"]
+    },
+    {
+      "sizeBytes": 5395,
+      "files": ["bibtex-BPtnjAmG.js", "bibtex-DZfXn4MQ.js"]
+    },
+    {
+      "sizeBytes": 5372,
+      "files": ["polar-DFIbu59Y.js", "polar-spfFdsq1.js"]
+    },
+    {
+      "sizeBytes": 5296,
+      "files": ["llvm-DZc8rPT1.js", "llvm-Do8PimHF.js"]
+    },
+    {
+      "sizeBytes": 5202,
+      "files": ["fennel-2MyCEAM1.js", "fennel-BNqS--y3.js"]
+    },
+    {
+      "sizeBytes": 5121,
+      "files": ["rosmsg-D7kD0_cp.js", "rosmsg-hq2-oN0y.js"]
+    },
+    {
+      "sizeBytes": 5012,
+      "files": ["nextflow-ApC-zghd.js", "nextflow-CFDIUVNe.js"]
+    },
+    {
+      "sizeBytes": 4938,
+      "files": ["tcl-CNZvo4vj.js", "tcl-zULFdClz.js"]
+    },
+    {
+      "sizeBytes": 4472,
+      "files": ["pascal-DxoCL3RO.js", "pascal-V33fh0R_.js"]
+    },
+    {
+      "sizeBytes": 4365,
+      "files": ["zenscript-3dAVZcgX.js", "zenscript-kf5BAKvw.js"]
+    },
+    {
+      "sizeBytes": 4102,
+      "files": ["narrat-CLFRtQhs.js", "narrat-CmcwvZwb.js"]
+    },
+    {
+      "sizeBytes": 4088,
+      "files": ["kdl-C9oX9Z4v.js", "kdl-F0m2ZhAD.js"]
+    },
+    {
+      "sizeBytes": 4030,
+      "files": ["fluent-Ra8idGUh.js", "fluent-oY7_tZF8.js"]
+    },
+    {
+      "sizeBytes": 4028,
+      "files": ["jsonnet-DWKQ3es7.js", "jsonnet-DwfKmKHg.js"]
+    },
+    {
+      "sizeBytes": 3813,
+      "files": ["glsl-aHoNokIV.js", "ssh-config-BqUTuRKo.js", "ssh-config-DPja2V-o.js"]
+    },
+    {
+      "sizeBytes": 3798,
+      "files": ["tasl-DatzK1EO.js", "tasl-hm7npOrg.js"]
+    },
+    {
+      "sizeBytes": 3740,
+      "files": ["rel-9SOeDwim.js", "rel-D6k4VaZr.js"]
+    },
+    {
+      "sizeBytes": 3730,
+      "files": ["vala-DLVufQ32.js", "vala-US1HRhIw.js"]
+    },
+    {
+      "sizeBytes": 3714,
+      "files": ["genie-CbeYH-fc.js", "genie-Cd2lLzpm.js"]
+    },
+    {
+      "sizeBytes": 3700,
+      "files": ["json5-D0C1B7l9.js", "json5-D8Uxp1Iq.js"]
+    },
+    {
+      "sizeBytes": 3699,
+      "files": ["po-B4lWW6Lt.js", "po-BqTbQM2J.js"]
+    },
+    {
+      "sizeBytes": 3637,
+      "files": ["splunk-CJl8t0Wf.js", "splunk-CrefYCQ9.js"]
+    },
+    {
+      "sizeBytes": 3522,
+      "files": ["mipsasm-Cw0tctoa.js", "mipsasm-DqYhrIrg.js"]
+    },
+    {
+      "sizeBytes": 3500,
+      "files": ["jsonc-B0f0uTR-.js", "jsonc-NKaQSvgu.js"]
+    },
+    {
+      "sizeBytes": 3402,
+      "files": ["jsonl-rrn3pXpA.js", "jsonl-srZ3oHJG.js"]
+    },
+    {
+      "sizeBytes": 3389,
+      "files": ["berry-CS17F3w8.js", "berry-DovS9wtM.js"]
+    },
+    {
+      "sizeBytes": 3252,
+      "files": ["logo-BbssGAy6.js", "logo-GvSrWZU0.js"]
+    },
+    {
+      "sizeBytes": 3207,
+      "files": ["json-BMAlG0aJ.js", "json-txB7NGmR.js"]
+    },
+    {
+      "sizeBytes": 3154,
+      "files": ["openscad-DK84SYTI.js", "openscad-tgxoXlc_.js"]
+    },
+    {
+      "sizeBytes": 3137,
+      "files": ["log-DcUikSJo.js", "log-byYtd54b.js"]
+    },
+    {
+      "sizeBytes": 2919,
+      "files": ["gleam-CuvqHLnC.js", "gleam-Dfph-OFw.js"]
+    },
+    {
+      "sizeBytes": 2847,
+      "files": ["hy-Be9tp-ZM.js", "hy-D2rWtxjW.js"]
+    },
+    {
+      "sizeBytes": 2631,
+      "files": ["reg-BGZIC5Xp.js", "reg-Ckx65W97.js"]
+    },
+    {
+      "sizeBytes": 2531,
+      "files": ["jssm-BPKNebRE.js", "jssm-Bs-jF9t9.js"]
+    },
+    {
+      "sizeBytes": 2417,
+      "files": ["wenyan-CRxQmY8s.js", "wenyan-Dihi-Pn5.js"]
+    },
+    {
+      "sizeBytes": 2047,
+      "files": ["desktop-XhOYrgrI.js", "desktop-ubMfKPzO.js"]
+    },
+    {
+      "sizeBytes": 1949,
+      "files": ["docker-B7cyRvbG.js", "docker-C4F49ia8.js"]
+    },
+    {
+      "sizeBytes": 1747,
+      "files": ["ini-B1Y8tL4D.js", "ini-CQJRLei8.js"]
+    },
+    {
+      "sizeBytes": 1637,
+      "files": ["dotenv-BSEXkzCM.js", "dotenv-D_9fGa07.js"]
+    },
+    {
+      "sizeBytes": 1155,
+      "files": ["classDiagram-4FO5ZUOK-DiMIfCrW.js", "classDiagram-v2-Q7XG4LA2-H-kuGtph.js"]
+    },
+    {
+      "sizeBytes": 1152,
+      "files": ["qmldir-B-3NXPqK.js", "qmldir-DuuXCI_4.js"]
+    },
+    {
+      "sizeBytes": 1149,
+      "files": ["chunk-PUPMXCY4-CsZbtrwV.js", "chunk-UIBZB4QT-fA_k7-hE.js"]
+    },
+    {
+      "sizeBytes": 849,
+      "files": ["tsv-CoxYj_SH.js", "tsv-iSdH3ktm.js"]
+    },
+    {
+      "sizeBytes": 653,
+      "files": ["codeowners-CIcGBcx2.js", "codeowners-tdICZVC5.js"]
+    },
+    {
+      "sizeBytes": 171,
+      "files": ["gitGraph-WXDBUCRP-DtVC5Kqo.js", "treeView-BLDUP644-DfppiJQj.js"]
+    },
+    {
+      "sizeBytes": 168,
+      "files": ["treemap-LRROVOQU-BuNDEOpe.js", "wardley-L42UT6IY-BLjG9hHM.js"]
+    },
+    {
+      "sizeBytes": 125,
+      "files": ["html-derivative-BLaoy6Gs.js", "html-derivative-BZni3AsM.js"]
+    },
+    {
+      "sizeBytes": 116,
+      "files": ["angular-html-CyEvBJw7.js", "angular-html-W0o9LANM.js"]
+    },
+    {
+      "sizeBytes": 113,
+      "files": ["shellscript-CYd20aTm.js", "shellscript-UjHQny9Z.js"]
+    },
+    {
+      "sizeBytes": 110,
+      "files": ["javascript-0fjGG2XX.js", "javascript-DxTOf95y.js", "typescript-8wVgZc72.js", "typescript-B8xBBbbI.js"]
+    },
+    {
+      "sizeBytes": 104,
+      "files": ["gdscript-DWTbkz3w.js", "gdshader-DyiOkx6Q.js", "markdown-DXRB-gX7.js"]
+    },
+    {
+      "sizeBytes": 101,
+      "files": ["graphql-UrHPC_iz.js", "graphql-WL_arKuL.js", "postcss-VWy5-eou.js"]
+    },
+    {
+      "sizeBytes": 98,
+      "files": [
+        "csharp-DMq2vzZA.js",
+        "python-BZOz0tH-.js",
+        "regexp-DhxLCx4Q.js",
+        "regexp-N-rNVFvV.js",
+        "stylus-DmAq_S3Y.js",
+        "turtle-CMrQiWIX.js"
+      ]
+    },
+    {
+      "sizeBytes": 92,
+      "files": [
+        "diff-DFMK-MrB.js",
+        "glsl--X-rHW1E.js",
+        "glsl-CiHjoFGd.js",
+        "haml-D_wIhO1h.js",
+        "haml-O7FW5OIl.js",
+        "haxe-8ulJdIkp.js",
+        "hlsl-DsV71T_1.js",
+        "html-CefkW461.js",
+        "html-D9vwDc2A.js",
+        "java-AZN1bT0V.js",
+        "java-C-daPB_o.js",
+        "json-CZvQXtwG.js",
+        "json-DbsquYIQ.js",
+        "less-Bz-e_ggq.js",
+        "ruby-DZx_05Z5.js",
+        "scss-B5PjcZwO.js",
+        "scss-gvYoQMhV.js",
+        "sdbl-BCYZ1iJ2.js",
+        "yaml-5uKUGHTB.js",
+        "yaml-DjHZoM01.js"
+      ]
+    },
+    {
+      "sizeBytes": 89,
+      "files": [
+        "cpp-BihZyx7p.js",
+        "cpp-DLDraLsI.js",
+        "css-DS5NM4OZ.js",
+        "css-FkBLLRUu.js",
+        "csv-3Ce3YnZQ.js",
+        "jsx-BPBfDC8G.js",
+        "jsx-YGzjzdyM.js",
+        "lua-CFUUKjVe.js",
+        "lua-DIwMPLom.js",
+        "php-BIpdtxbv.js",
+        "sql-Cq-9x9KN.js",
+        "sql-D5175luO.js",
+        "tex-DAWeX6X3.js",
+        "tsx-8SnU0pdW.js",
+        "tsx-D8ovzp-F.js",
+        "vue-iVvhASCm.js",
+        "xml-CNxJhUoq.js",
+        "xml-CXU6p--8.js"
+      ]
+    },
+    {
+      "sizeBytes": 83,
+      "files": ["c-DXXaAAzT.js", "c-w1PXceMW.js", "r-DAk95iTQ.js", "r-j_8gjFkr.js"]
+    }
+  ]
+}

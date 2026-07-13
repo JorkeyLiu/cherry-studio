@@ -112,6 +112,35 @@ export default defineConfig({
           miniWindow: resolve(__dirname, 'src/renderer/miniWindow.html'),
           traceWindow: resolve(__dirname, 'src/renderer/traceWindow.html')
         },
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules')) {
+              // React ecosystem
+              if (
+                id.includes('/react/') ||
+                id.includes('/react-dom/') ||
+                id.includes('/react-router') ||
+                id.includes('/react-redux/') ||
+                id.includes('/@reduxjs/')
+              ) {
+                return 'vendor-react'
+              }
+              // Ant Design
+              if (id.includes('/antd/') || id.includes('/@ant-design/')) {
+                return 'vendor-antd'
+              }
+              // AI SDK
+              if (id.includes('/ai/') || id.includes('/@ai-sdk/') || id.includes('/@cherrystudio/')) {
+                return 'vendor-ai'
+              }
+              // TipTap
+              if (id.includes('/@tiptap/')) {
+                return 'vendor-tiptap'
+              }
+            }
+            return undefined
+          }
+        },
         onwarn(warning, warn) {
           if (warning.code === 'COMMONJS_VARIABLE_IN_ESM') return
           warn(warning)

@@ -1,0 +1,123 @@
+{
+  "buildDate": "2026-07-13",
+  "jsFiles": 790,
+  "jsSizeBytes": 61203649,
+  "jsSizeFormatted": "58.37 MB",
+  "cssFiles": 4,
+  "cssSizeBytes": 143809,
+  "cssSizeFormatted": "140.44 KB",
+  "totalSizeBytes": 71036522,
+  "totalSizeFormatted": "67.75 MB",
+  "jsonSizeBytes": 0,
+  "fontSizeBytes": 0,
+  "imageSizeBytes": 0,
+  "jsonSizeFormatted": "0 KB",
+  "fontSizeFormatted": "0 KB",
+  "imageSizeFormatted": "0 KB",
+  "totalFiles": 1029,
+  "jsonFiles": 0,
+  "fontFiles": 0,
+  "imageFiles": 0,
+  "largestFiles": [
+    {
+      "name": "store-CTsEjs_2.js",
+      "sizeBytes": 12294581,
+      "sizeFormatted": "12006.43 KB"
+    },
+    {
+      "name": "jsx-runtime-TW8Bzhjd.js",
+      "sizeBytes": 5157074,
+      "sizeFormatted": "5036.21 KB"
+    },
+    {
+      "name": "index-DhoYlXXe.js",
+      "sizeBytes": 4165706,
+      "sizeFormatted": "4068.07 KB"
+    },
+    {
+      "name": "traceWindow-Bya4UVkc.js",
+      "sizeBytes": 2779444,
+      "sizeFormatted": "2714.30 KB"
+    },
+    {
+      "name": "ImageViewer-B_RVshRJ.js",
+      "sizeBytes": 1884047,
+      "sizeFormatted": "1839.89 KB"
+    },
+    {
+      "name": "esm-_XDuplcg.js",
+      "sizeBytes": 1549147,
+      "sizeFormatted": "1512.84 KB"
+    },
+    {
+      "name": "viz-CWe5l55T.js",
+      "sizeBytes": 1491147,
+      "sizeFormatted": "1456.20 KB"
+    },
+    {
+      "name": "dash.all.min-DRguwJRL.js",
+      "sizeBytes": 1396446,
+      "sizeFormatted": "1363.72 KB"
+    },
+    {
+      "name": "chunk-NNHCCRGN-CHD5_GBH.js",
+      "sizeBytes": 1057813,
+      "sizeFormatted": "1033.02 KB"
+    },
+    {
+      "name": "hls-Sp7PWg7z.js",
+      "sizeBytes": 958472,
+      "sizeFormatted": "936.01 KB"
+    },
+    {
+      "name": "cytoscape.esm-DlZvmpoX.js",
+      "sizeBytes": 843818,
+      "sizeFormatted": "824.04 KB"
+    },
+    {
+      "name": "emacs-lisp-Cy-_xiO2.js",
+      "sizeBytes": 782360,
+      "sizeFormatted": "764.02 KB"
+    },
+    {
+      "name": "emacs-lisp-PmKT19wH.js",
+      "sizeBytes": 782360,
+      "sizeFormatted": "764.02 KB"
+    },
+    {
+      "name": "dist-DTnLaD1O.js",
+      "sizeBytes": 736947,
+      "sizeFormatted": "719.67 KB"
+    },
+    {
+      "name": "cpp-Dk-wJWwS.js",
+      "sizeBytes": 668672,
+      "sizeFormatted": "653.00 KB"
+    },
+    {
+      "name": "cpp-MIScMlYE.js",
+      "sizeBytes": 668668,
+      "sizeFormatted": "653.00 KB"
+    },
+    {
+      "name": "wasm-D0Z7NJR-.js",
+      "sizeBytes": 622420,
+      "sizeFormatted": "607.83 KB"
+    },
+    {
+      "name": "wasm-CLj4CQpv.js",
+      "sizeBytes": 622416,
+      "sizeFormatted": "607.83 KB"
+    },
+    {
+      "name": "dist-CBzLNleb.js",
+      "sizeBytes": 535934,
+      "sizeFormatted": "523.37 KB"
+    },
+    {
+      "name": "Component-5BEMe1Jd.js",
+      "sizeBytes": 506584,
+      "sizeFormatted": "494.71 KB"
+    }
+  ]
+}

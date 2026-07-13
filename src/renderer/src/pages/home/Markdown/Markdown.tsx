@@ -1,6 +1,4 @@
 import 'katex/dist/katex.min.css'
-import 'katex/dist/contrib/copy-tex'
-import 'katex/dist/contrib/mhchem'
 import 'remark-github-blockquote-alert/alert.css'
 
 import ImageViewer from '@renderer/components/ImageViewer'
@@ -19,9 +17,6 @@ import { isEmpty } from 'lodash'
 import { type FC, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import ReactMarkdown, { type Components, defaultUrlTransform } from 'react-markdown'
-import rehypeKatex from 'rehype-katex'
-// @ts-ignore rehype-mathjax is not typed
-import rehypeMathjax from 'rehype-mathjax'
 import rehypeRaw from 'rehype-raw'
 import remarkCjkFriendly from 'remark-cjk-friendly'
 import remarkGfm from 'remark-gfm'
@@ -51,6 +46,24 @@ interface Props {
 const Markdown: FC<Props> = ({ block, postProcess }) => {
   const { t } = useTranslation()
   const { mathEngine, mathEnableSingleDollar } = useSettings()
+
+  // Dynamically loaded rehype math plugins (heavy modules, loaded on demand)
+  const [rehypeKatexPlugin, setRehypeKatexPlugin] = useState<Pluggable | null>(null)
+  const [rehypeMathjaxPlugin, setRehypeMathjaxPlugin] = useState<Pluggable | null>(null)
+
+  useEffect(() => {
+    if (mathEngine === 'KaTeX') {
+      void import('rehype-katex').then((mod) => setRehypeKatexPlugin(() => mod.default))
+      // Side-effect imports: extend KaTeX with copy-to-clipboard and chemical equation support
+      // @ts-ignore no type declarations for katex contrib modules
+      void import('katex/dist/contrib/copy-tex')
+      // @ts-ignore no type declarations for katex contrib modules
+      void import('katex/dist/contrib/mhchem')
+    } else if (mathEngine === 'MathJax') {
+      // @ts-ignore rehype-mathjax is not typed
+      void import('rehype-mathjax').then((mod) => setRehypeMathjaxPlugin(() => mod.default))
+    }
+  }, [mathEngine])
 
   const isTrulyDone = 'status' in block && block.status === 'success'
   const [displayedContent, setDisplayedContent] = useState(postProcess ? postProcess(block.content) : block.content)
@@ -120,13 +133,13 @@ const Markdown: FC<Props> = ({ block, postProcess }) => {
       plugins.push(rehypeRaw, rehypeScalableSvg)
     }
     plugins.push([rehypeHeadingIds, { prefix: `heading-${block.id}` }])
-    if (mathEngine === 'KaTeX') {
-      plugins.push(rehypeKatex)
-    } else if (mathEngine === 'MathJax') {
-      plugins.push(rehypeMathjax)
+    if (mathEngine === 'KaTeX' && rehypeKatexPlugin) {
+      plugins.push(rehypeKatexPlugin)
+    } else if (mathEngine === 'MathJax' && rehypeMathjaxPlugin) {
+      plugins.push(rehypeMathjaxPlugin)
     }
     return plugins
-  }, [mathEngine, messageContent, block.id])
+  }, [mathEngine, messageContent, block.id, rehypeKatexPlugin, rehypeMathjaxPlugin])
 
   const components = useMemo(() => {
     return {
