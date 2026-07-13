@@ -4,7 +4,7 @@ import { loggerService } from '@logger'
 import { NUTSTORE_HOST } from '@shared/config/nutstore'
 import { net } from 'electron'
 import { XMLParser } from 'fast-xml-parser'
-import { isNil, partial } from 'lodash'
+import { partial } from 'lodash-es'
 import { type FileStat } from 'webdav'
 
 import { createOAuthUrl, decryptSecret } from '../integration/nutstore/sso/lib/index.mjs'
@@ -115,7 +115,7 @@ function extractNextLink(linkHeader: string): string | null {
 
 function convertToFileStat(serverBase: string, item: WebDAVResponse['multistatus']['response'][number]): FileStat {
   const props = item.propstat.prop
-  const isDir = !isNil(props.resourcetype?.collection)
+  const isDir = props.resourcetype?.collection != null
   const href = decodeURIComponent(item.href)
   const filename = serverBase === '/' ? href : path.posix.join('/', href.replace(serverBase, ''))
 

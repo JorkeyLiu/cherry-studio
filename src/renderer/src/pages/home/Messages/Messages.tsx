@@ -45,7 +45,6 @@ import {
 } from '@renderer/utils/messageUtils/filters'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
-import { last } from 'lodash'
 import React, { Fragment, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
@@ -539,7 +538,7 @@ const Messages = ({
             return
           }
 
-          const lastMessage = last(messages)
+          const lastMessage = messages.at(-1)
 
           if (lastMessage?.type === 'clear') {
             await deleteMessage(lastMessage.id)
@@ -710,7 +709,7 @@ const Messages = ({
   }, [hasMore, isLoadingMore, messages, setTimeoutTimer, scrollContainerRef, checkBoundaries])
 
   useShortcut('copy_last_message', () => {
-    const lastMessage = last(messages)
+    const lastMessage = messages.at(-1)
     if (lastMessage) {
       void navigator.clipboard.writeText(getMainTextContent(lastMessage))
       window.toast.success(t('message.copy.success'))

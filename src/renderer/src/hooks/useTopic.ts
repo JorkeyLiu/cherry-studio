@@ -14,7 +14,7 @@ import { MessageBlockType } from '@renderer/types/newMessage'
 import { findMainTextBlocks } from '@renderer/utils/messageUtils/find'
 import { truncateText } from '@renderer/utils/naming'
 import dayjs from 'dayjs'
-import { find, isEmpty } from 'lodash'
+import { isEmpty } from 'lodash-es'
 import { type Dispatch, type SetStateAction, useEffect, useState } from 'react'
 
 import { useAssistant } from './useAssistant'
@@ -47,7 +47,7 @@ export function useActiveTopic(assistantId: string, topic?: Topic) {
       assistant.topics &&
       Array.isArray(assistant.topics) &&
       assistant.topics.length > 0 &&
-      !find(assistant.topics, { id: activeTopic?.id })
+      !assistant.topics.find((t) => t.id === activeTopic?.id)
     ) {
       setActiveTopic(assistant.topics[0])
     }

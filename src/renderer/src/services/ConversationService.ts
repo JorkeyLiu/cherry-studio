@@ -3,7 +3,7 @@ import { convertMessagesToSdkMessages } from '@renderer/aiCore/prepareParams'
 import type { Assistant, ContextWindowMode, Message } from '@renderer/types'
 import { filterAdjacentUserMessaegs, filterLastAssistantMessage } from '@renderer/utils/messageUtils/filters'
 import type { ModelMessage } from 'ai'
-import { findLast, isEmpty, takeRight } from 'lodash'
+import { isEmpty } from 'lodash-es'
 
 import { getAssistantSettings, getDefaultModel } from './AssistantService'
 import {
@@ -41,11 +41,11 @@ export class ConversationService {
         limitedByContext = withoutAdjacentUsers.slice(anchorIndex)
       } else {
         // Anchor message not found (deleted?), fallback to sliding
-        limitedByContext = takeRight(withoutAdjacentUsers, contextCount + 2)
+        limitedByContext = withoutAdjacentUsers.slice(-(contextCount + 2))
       }
     } else {
       // Sliding mode: keep the last contextCount + 2 messages
-      limitedByContext = takeRight(withoutAdjacentUsers, contextCount + 2)
+      limitedByContext = withoutAdjacentUsers.slice(-(contextCount + 2))
     }
 
     const contextClearFiltered = filterAfterContextClearMessages(limitedByContext)
@@ -62,7 +62,7 @@ export class ConversationService {
     const { contextCount, contextWindowMode, fixedWindowAnchor } = getAssistantSettings(assistant)
     // This logic is extracted from the original ApiService.fetchChatCompletion
     // const contextMessages = filterContextMessages(messages)
-    const lastUserMessage = findLast(messages, (m) => m.role === 'user')
+    const lastUserMessage = messages.findLast((m) => m.role === 'user')
     if (!lastUserMessage) {
       return {
         modelMessages: [],

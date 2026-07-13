@@ -50,7 +50,6 @@ import { EFFORT_RATIO, isSystemProvider, SystemProviderIds } from '@renderer/typ
 import type { OpenAIReasoningEffort, OpenAIReasoningSummary } from '@renderer/types/aiCoreTypes'
 import { getLowerBaseModelName } from '@renderer/utils'
 import { isSupportEnableThinkingProvider } from '@renderer/utils/provider'
-import { toInteger } from 'lodash'
 import type { OllamaProviderOptions } from 'ollama-ai-provider-v2'
 
 const logger = loggerService.withContext('reasoning')
@@ -363,7 +362,7 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
       return {
         enable_thinking: true,
         // Hard-encoded maximum, only for silicon
-        thinking_budget: budgetTokens ? toInteger(Math.max(budgetTokens, 32768)) : undefined
+        thinking_budget: budgetTokens ? Math.trunc(Math.max(budgetTokens, 32768)) : undefined
       }
     }
     return {}

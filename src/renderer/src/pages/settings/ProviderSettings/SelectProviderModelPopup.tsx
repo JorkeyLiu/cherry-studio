@@ -6,7 +6,6 @@ import i18n from '@renderer/i18n'
 import { getModelUniqId } from '@renderer/services/ModelService'
 import type { Model, Provider } from '@renderer/types'
 import { Modal } from 'antd'
-import { first } from 'lodash'
 import { useCallback, useMemo, useState } from 'react'
 
 interface ShowParams {
@@ -25,7 +24,7 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve, reject }) => {
   // Keep the natural order of models
   const models = useMemo(() => provider.models.filter((m) => !isRerankModel(m)), [provider])
 
-  const [model, setModel] = useState(first(models))
+  const [model, setModel] = useState<Model | undefined>(models[0])
 
   const modelPredicate = useCallback((m: Model) => !isRerankModel(m), [])
 

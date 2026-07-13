@@ -1,7 +1,7 @@
 import { loggerService } from '@logger'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { IpcChannel } from '@shared/IpcChannel'
-import { debounce } from 'lodash'
+import { debounce } from 'lodash-es'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 const logger = loggerService.withContext('useWindowSize')

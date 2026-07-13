@@ -1,6 +1,5 @@
 import type { ChatCompletionContentPart, ChatCompletionMessageParam } from '@cherrystudio/openai/resources'
 import type { Model } from '@renderer/types'
-import { findLast } from 'lodash'
 
 export function processReqMessages(
   model: Model,
@@ -61,7 +60,7 @@ export function processPostsuffixQwen3Model(
       }
     }
   } else if (Array.isArray(content)) {
-    const lastTextPart = findLast(content, (part) => part.type === 'text')
+    const lastTextPart = content.findLast((part) => part.type === 'text')
 
     if (lastTextPart) {
       if (qwenThinkModeEnabled) {

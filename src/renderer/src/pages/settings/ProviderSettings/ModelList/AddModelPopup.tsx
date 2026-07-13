@@ -5,7 +5,6 @@ import type { Model, Provider } from '@renderer/types'
 import { getDefaultGroupName } from '@renderer/utils'
 import type { FormProps } from 'antd'
 import { Button, Flex, Form, Input, Modal } from 'antd'
-import { find } from 'lodash'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -46,7 +45,7 @@ const PopupContainer: React.FC<Props> = ({ title, provider, resolve }) => {
   const onAddModel = (values: FieldType) => {
     const id = values.id.trim()
 
-    if (find(models, { id })) {
+    if (models.some((m) => m.id === id)) {
       window.toast.error(t('error.model.exists'))
       return
     }

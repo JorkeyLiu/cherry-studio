@@ -3,7 +3,7 @@ import CherryINProviderLogo from '@renderer/assets/images/providers/cherryin.png
 import { useProvider } from '@renderer/hooks/useProvider'
 import { oauthWithCherryIn } from '@renderer/utils/oauth'
 import { Button, Skeleton } from 'antd'
-import { isEmpty } from 'lodash'
+import { isEmpty } from 'lodash-es'
 import { CreditCard, LogIn, LogOut, RefreshCw } from 'lucide-react'
 import type { FC } from 'react'
 import { useCallback, useEffect, useState } from 'react'

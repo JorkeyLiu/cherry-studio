@@ -3,7 +3,7 @@ import { processKnowledgeSearch } from '@renderer/services/KnowledgeService'
 import type { Assistant, KnowledgeReference } from '@renderer/types'
 import type { ExtractResults, KnowledgeExtractResults } from '@renderer/utils/extract'
 import { type InferToolInput, type InferToolOutput, tool } from 'ai'
-import { isEmpty } from 'lodash'
+import { isEmpty } from 'lodash-es'
 import * as z from 'zod'
 
 /**

@@ -34,7 +34,7 @@ import {
 } from '@renderer/utils/provider'
 import { API_SERVER_DEFAULTS } from '@shared/config/constant'
 import { defaultByPassRules, UpgradeChannel } from '@shared/config/constant'
-import { isEmpty } from 'lodash'
+import { isEmpty } from 'lodash-es'
 import { createMigrate } from 'redux-persist'
 
 import type { RootState } from '.'

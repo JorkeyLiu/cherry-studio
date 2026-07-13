@@ -58,7 +58,7 @@ import { getTopicQueue, waitForTopicQueue } from '@renderer/utils/queue'
 import { defaultAppHeaders } from '@shared/utils'
 import type { TextStreamPart } from 'ai'
 import { t } from 'i18next'
-import { isEmpty, throttle } from 'lodash'
+import { isEmpty, throttle } from 'lodash-es'
 import { LRUCache } from 'lru-cache'
 import { mutate } from 'swr'
 

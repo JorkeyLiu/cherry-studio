@@ -28,7 +28,7 @@ import type { Assistant } from '@renderer/types'
 import type { ExtractResults } from '@renderer/utils/extract'
 import { extractInfoFromXML } from '@renderer/utils/extract'
 import type { ModelMessage } from 'ai'
-import { isEmpty } from 'lodash'
+import { isEmpty } from 'lodash-es'
 
 import { MemoryProcessor } from '../../services/MemoryProcessor'
 import { knowledgeSearchTool } from '../tools/KnowledgeSearchTool'

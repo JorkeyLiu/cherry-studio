@@ -11,7 +11,7 @@ import { cn, uuid } from '@renderer/utils'
 import { hasTopicPendingRequests } from '@renderer/utils/queue'
 import type { MenuProps } from 'antd'
 import { Dropdown } from 'antd'
-import { omit } from 'lodash'
+import { omit } from 'lodash-es'
 import {
   AlignJustify,
   ArrowDownAZ,

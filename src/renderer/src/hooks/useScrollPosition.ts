@@ -1,4 +1,4 @@
-import { throttle } from 'lodash'
+import { throttle } from 'lodash-es'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 
 /**

@@ -6,7 +6,7 @@ import type { ImageFileMetadata, OcrResult, OcrTesseractConfig, SupportedOcrFile
 import { isImageFileMetadata } from '@types'
 import { app } from 'electron'
 import fs from 'fs'
-import { isEqual } from 'lodash'
+import { isEqual } from 'lodash-es'
 import path from 'path'
 import type { LanguageCode } from 'tesseract.js'
 import type Tesseract from 'tesseract.js'

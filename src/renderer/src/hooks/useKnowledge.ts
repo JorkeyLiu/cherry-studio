@@ -21,7 +21,7 @@ import type { FileMetadata, KnowledgeBase, KnowledgeItem, KnowledgeNoteItem, Pro
 import { isKnowledgeFileItem, isKnowledgeNoteItem, isKnowledgeVideoItem } from '@renderer/types'
 import { runAsyncFunction, uuid } from '@renderer/utils'
 import dayjs from 'dayjs'
-import { cloneDeep } from 'lodash'
+import { cloneDeep } from 'lodash-es'
 import { useCallback, useEffect, useState } from 'react'
 import { useDispatch, useSelector } from 'react-redux'
 

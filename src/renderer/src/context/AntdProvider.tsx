@@ -1,21 +1,36 @@
 import { useSettings } from '@renderer/hooks/useSettings'
-import type { LanguageVarious } from '@renderer/types'
 import { ConfigProvider, theme } from 'antd'
-import deDE from 'antd/locale/de_DE'
-import elGR from 'antd/locale/el_GR'
-import enUS from 'antd/locale/en_US'
-import esES from 'antd/locale/es_ES'
-import frFR from 'antd/locale/fr_FR'
-import jaJP from 'antd/locale/ja_JP'
-import ptPT from 'antd/locale/pt_PT'
-import roRO from 'antd/locale/ro_RO'
-import ruRU from 'antd/locale/ru_RU'
-import viVN from 'antd/locale/vi_VN'
-import zhCN from 'antd/locale/zh_CN'
-import zhTW from 'antd/locale/zh_TW'
 import type { FC, PropsWithChildren } from 'react'
+import { useEffect, useState } from 'react'
 
 import { useTheme } from './ThemeProvider'
+
+const antdLocaleMap: Record<string, () => Promise<any>> = {
+  'de-DE': () => import('antd/locale/de_DE'),
+  'el-GR': () => import('antd/locale/el_GR'),
+  'en-US': () => import('antd/locale/en_US'),
+  'es-ES': () => import('antd/locale/es_ES'),
+  'fr-FR': () => import('antd/locale/fr_FR'),
+  'ja-JP': () => import('antd/locale/ja_JP'),
+  'pt-PT': () => import('antd/locale/pt_PT'),
+  'ro-RO': () => import('antd/locale/ro_RO'),
+  'ru-RU': () => import('antd/locale/ru_RU'),
+  'vi-VN': () => import('antd/locale/vi_VN'),
+  'zh-CN': () => import('antd/locale/zh_CN'),
+  'zh-TW': () => import('antd/locale/zh_TW')
+}
+
+let cachedLocale: any = null
+let cachedLang = ''
+
+async function loadAntdLocale(lang: string) {
+  if (lang === cachedLang && cachedLocale) return cachedLocale
+  const loader = antdLocaleMap[lang] || antdLocaleMap['zh-CN']
+  const mod = await loader()
+  cachedLocale = mod.default || mod
+  cachedLang = lang
+  return cachedLocale
+}
 
 const AntdProvider: FC<PropsWithChildren> = ({ children }) => {
   const {
@@ -23,10 +38,21 @@ const AntdProvider: FC<PropsWithChildren> = ({ children }) => {
     userTheme: { colorPrimary }
   } = useSettings()
   const { theme: _theme } = useTheme()
+  const [locale, setLocale] = useState<any>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    loadAntdLocale(language).then((loc) => {
+      if (!cancelled) setLocale(loc)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [language])
 
   return (
     <ConfigProvider
-      locale={getAntdLocale(language)}
+      locale={locale}
       theme={{
         cssVar: true,
         hashed: false,
@@ -119,37 +145,6 @@ const AntdProvider: FC<PropsWithChildren> = ({ children }) => {
       {children}
     </ConfigProvider>
   )
-}
-
-function getAntdLocale(language: LanguageVarious) {
-  switch (language) {
-    case 'zh-CN':
-      return zhCN
-    case 'zh-TW':
-      return zhTW
-    case 'en-US':
-      return enUS
-    case 'de-DE':
-      return deDE
-    case 'ru-RU':
-      return ruRU
-    case 'ja-JP':
-      return jaJP
-    case 'el-GR':
-      return elGR
-    case 'es-ES':
-      return esES
-    case 'fr-FR':
-      return frFR
-    case 'pt-PT':
-      return ptPT
-    case 'ro-RO':
-      return roRO
-    case 'vi-VN':
-      return viVN
-    default:
-      return zhCN
-  }
 }
 
 export default AntdProvider

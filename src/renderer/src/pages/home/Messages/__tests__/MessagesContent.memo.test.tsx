@@ -201,8 +201,8 @@ vi.mock('@renderer/utils/messageUtils/is', () => ({
   isTextLikeBlock: mocks.isTextLikeBlock
 }))
 
-vi.mock('lodash', async () => {
-  const actual = await import('lodash')
+vi.mock('lodash-es', async () => {
+  const actual = await import('lodash-es')
   return { ...actual }
 })
 

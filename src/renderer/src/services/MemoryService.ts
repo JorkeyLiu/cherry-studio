@@ -11,7 +11,6 @@ import type {
   MemorySearchOptions,
   MemorySearchResult
 } from '@types'
-import { now } from 'lodash'
 
 import { getKnowledgeBaseParams } from './KnowledgeService'
 
@@ -217,8 +216,8 @@ class MemoryService {
         model: getModel(embeddingModel?.id, embeddingModel?.provider),
         dimensions: memoryConfig.embeddingDimensions,
         items: [],
-        created_at: now(),
-        updated_at: now(),
+        created_at: Date.now(),
+        updated_at: Date.now(),
         version: 1
       } as KnowledgeBase)
 

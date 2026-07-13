@@ -4,8 +4,8 @@ import type { Message } from '@renderer/types/newMessage' // Assuming correct Me
 import { MessageBlockType } from '@renderer/types/newMessage'
 // May need Block types if refactoring to use them
 // import type { MessageBlock, MainTextMessageBlock } from '@renderer/types/newMessageTypes';
-import { remove, takeRight } from 'lodash'
-import { isEmpty } from 'lodash'
+import { remove } from 'lodash-es'
+import { isEmpty } from 'lodash-es'
 // Assuming getGroupedMessages is also moved here or imported
 // import { getGroupedMessages } from './path/to/getGroupedMessages';
 
@@ -243,9 +243,7 @@ export function filterContextMessages(messages: Message[], contextCount: number)
   const afterContextClearMsgs = filterAfterContextClearMessages(messages)
   const usefulMsgs = filterUsefulMessages(afterContextClearMsgs)
   const adjacentRemovedMsgs = filterAdjacentUserMessaegs(usefulMsgs)
-  const filteredMessages = filterUserRoleStartMessages(
-    filterEmptyMessages(takeRight(adjacentRemovedMsgs, contextCount))
-  )
+  const filteredMessages = filterUserRoleStartMessages(filterEmptyMessages(adjacentRemovedMsgs.slice(-contextCount)))
 
   return filteredMessages
 }

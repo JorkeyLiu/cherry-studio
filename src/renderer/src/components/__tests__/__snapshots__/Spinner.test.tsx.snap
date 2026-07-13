@@ -9,11 +9,7 @@ exports[`Spinner > should match snapshot 1`] = `
 }
 
 <div
-  animate="defaultColor,dimmed"
-  class="c0"
-  initial="defaultColor"
-  transition="[object Object]"
-  variants="[object Object]"
+  class="c0 animate-pulse-color"
 >
   <svg
     aria-hidden="true"

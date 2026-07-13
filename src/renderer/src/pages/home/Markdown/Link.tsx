@@ -1,6 +1,6 @@
 import { parseJSON } from '@renderer/utils/json'
 import { findCitationInChildren } from '@renderer/utils/markdown'
-import { isEmpty, omit } from 'lodash'
+import { isEmpty, omit } from 'lodash-es'
 import React, { useMemo } from 'react'
 import type { Node } from 'unist'
 

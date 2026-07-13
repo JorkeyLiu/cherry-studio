@@ -8,7 +8,6 @@ import type { Assistant, AssistantPreset } from '@renderer/types'
 import { uuid } from '@renderer/utils'
 import type { InputRef } from 'antd'
 import { Divider, Input, Modal, Tag } from 'antd'
-import { take } from 'lodash'
 import { Search } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -92,7 +91,7 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
     if (!open) return
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      const displayedPresets = take(presets, 100)
+      const displayedPresets = presets.slice(0, 100)
 
       switch (e.key) {
         case 'ArrowDown':
@@ -192,7 +191,7 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
       </HStack>
       <Divider style={{ margin: 0, marginTop: 4, borderBlockStartWidth: 0.5 }} />
       <Container ref={containerRef}>
-        {take(presets, 100).map((preset, index) => (
+        {presets.slice(0, 100).map((preset, index) => (
           <AgentItem
             key={preset.id}
             onClick={() => onCreateAssistant(preset)}

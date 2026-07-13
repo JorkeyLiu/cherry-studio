@@ -8,9 +8,7 @@ import { useAppDispatch } from '@renderer/store'
 import { setFoldDisplayMode } from '@renderer/store/settings'
 import type { Model } from '@renderer/types'
 import { AssistantMessageStatus, type Message } from '@renderer/types/newMessage'
-import { lightbulbSoftVariants } from '@renderer/utils/motionVariants'
 import { Tooltip } from 'antd'
-import { motion } from 'motion/react'
 import type { FC } from 'react'
 import { memo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -68,9 +66,9 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
               onClick={() => {
                 setSelectedMessage(message)
               }}>
-              <motion.span variants={lightbulbSoftVariants} animate={isProcessing ? 'active' : 'idle'} initial="idle">
+              <span className={isProcessing ? 'animate-pulse-soft' : ''}>
                 <ModelAvatar model={message.model as Model} size={22} />
-              </motion.span>
+              </span>
             </AvatarWrapper>
           </Tooltip>
         )

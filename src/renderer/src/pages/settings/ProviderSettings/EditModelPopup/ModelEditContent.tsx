@@ -23,7 +23,7 @@ import { getDefaultGroupName, getDifference, getUnion, uniqueObjectArray } from 
 import { isNewApiProvider } from '@renderer/utils/provider'
 import type { ModalProps } from 'antd'
 import { Button, Divider, Flex, Form, Input, InputNumber, message, Modal, Select, Switch, Tooltip } from 'antd'
-import { cloneDeep } from 'lodash'
+import { cloneDeep } from 'lodash-es'
 import { ChevronDown, ChevronUp, RotateCcw, SaveIcon } from 'lucide-react'
 import type { FC } from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'

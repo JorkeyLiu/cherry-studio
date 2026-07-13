@@ -126,3 +126,44 @@
   white-space: nowrap;
   animation: animation-reveal 0.5s linear both;
 }
+
+/* Motion/Framer-motion CSS replacements */
+@keyframes pulse-opacity {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+
+@keyframes pulse-opacity-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes pulse-color {
+  0%,
+  100% {
+    color: #2a2a2a;
+  }
+  50% {
+    color: #8c9296;
+  }
+}
+
+.animate-pulse {
+  animation: pulse-opacity 1.2s ease-in-out infinite;
+}
+.animate-pulse-soft {
+  animation: pulse-opacity-soft 2s ease-in-out infinite;
+}
+.animate-pulse-color {
+  animation: pulse-color 1.5s ease-in-out infinite reverse;
+}

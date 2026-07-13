@@ -1,7 +1,7 @@
 import { getModelUniqId } from '@renderer/services/ModelService'
 import type { Message } from '@renderer/types/newMessage'
 import { Flex } from 'antd'
-import { isEmpty } from 'lodash'
+import { isEmpty } from 'lodash-es'
 import React from 'react'
 import styled from 'styled-components'
 

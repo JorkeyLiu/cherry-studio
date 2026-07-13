@@ -27,7 +27,6 @@ import type {
 } from '@renderer/types'
 import { modalConfirm } from '@renderer/utils'
 import { Button, Col, Divider, Input, InputNumber, Row, Select, Slider, Switch, Tooltip } from 'antd'
-import { isNull } from 'lodash'
 import { PlusIcon } from 'lucide-react'
 import type { FC } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -323,7 +322,7 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
               value={temperature}
               changeOnBlur
               onChange={(value) => {
-                if (!isNull(value)) {
+                if (value !== null) {
                   setTemperature(value)
                   setTimeoutTimer('temperature_onChange', () => updateAssistantSettings({ temperature: value }), 500)
                 }
@@ -370,7 +369,7 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
               value={topP}
               changeOnBlur
               onChange={(value) => {
-                if (!isNull(value)) {
+                if (value !== null) {
                   setTopP(value)
                   setTimeoutTimer('topP_onChange', () => updateAssistantSettings({ topP: value }), 500)
                 }
@@ -421,7 +420,7 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
             value={contextCount}
             changeOnBlur
             onChange={(value) => {
-              if (!isNull(value)) {
+              if (value !== null) {
                 setContextCount(value)
                 setTimeoutTimer('contextCount_onChange', () => updateAssistantSettings({ contextCount: value }), 500)
               }
@@ -489,7 +488,7 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
               value={maxTokens}
               changeOnBlur
               onChange={(value) => {
-                if (!isNull(value)) {
+                if (value !== null) {
                   setMaxTokens(value)
                   setTimeoutTimer('maxTokens_onChange', () => updateAssistantSettings({ maxTokens: value }), 1000)
                 }
@@ -548,7 +547,7 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
               step={1}
               value={maxToolCalls}
               onChange={(value) => {
-                if (!isNull(value)) {
+                if (value !== null) {
                   setMaxToolCalls(value)
                   setTimeoutTimer('maxToolCalls_onChange', () => updateAssistantSettings({ maxToolCalls: value }), 500)
                 }

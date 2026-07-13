@@ -85,14 +85,6 @@ vi.mock('motion/react', () => ({
   }
 }))
 
-// Mock motion variants
-vi.mock('@renderer/utils/motionVariants', () => ({
-  lightbulbVariants: {
-    active: { rotate: 10, scale: 1.1 },
-    idle: { rotate: 0, scale: 1 }
-  }
-}))
-
 // Mock Markdown component
 vi.mock('@renderer/pages/home/Markdown/Markdown', () => ({
   __esModule: true,

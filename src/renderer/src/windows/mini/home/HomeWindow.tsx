@@ -25,8 +25,7 @@ import { replacePromptVariables } from '@renderer/utils/prompt'
 import { defaultLanguage } from '@shared/config/constant'
 import { IpcChannel } from '@shared/IpcChannel'
 import { Divider } from 'antd'
-import { cloneDeep, isEmpty } from 'lodash'
-import { last } from 'lodash'
+import { cloneDeep, isEmpty } from 'lodash-es'
 import type { FC } from 'react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -491,7 +490,7 @@ const HomeWindow: FC<{ draggable?: boolean }> = ({ draggable = true }) => {
     if (!currentTopic.current) return
 
     const messages = selectMessagesForTopic(store.getState(), currentTopic.current.id)
-    const lastMessage = last(messages)
+    const lastMessage = messages.at(-1)
 
     if (lastMessage) {
       const content = getMainTextContent(lastMessage)

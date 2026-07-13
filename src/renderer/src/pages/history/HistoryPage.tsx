@@ -5,7 +5,6 @@ import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import type { InputRef } from 'antd'
 import { Divider, Input } from 'antd'
-import { last } from 'lodash'
 import { ChevronLeft, CornerDownLeft, Search } from 'lucide-react'
 import type { FC } from 'react'
 import { useEffect, useRef, useState } from 'react'
@@ -70,7 +69,7 @@ const HistoryPage: FC = () => {
     setMessage(message)
   }
 
-  const isShow = (route: Route) => (last(stack) === route ? 'flex' : 'none')
+  const isShow = (route: Route) => (stack.at(-1) === route ? 'flex' : 'none')
 
   useEffect(() => {
     if (inputRef.current) {

@@ -10,7 +10,7 @@ import type {
 } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockStatus } from '@renderer/types/newMessage'
 import type { Transaction } from 'dexie'
-import { isEmpty } from 'lodash'
+import { isEmpty } from 'lodash-es'
 
 import {
   createCitationBlock,

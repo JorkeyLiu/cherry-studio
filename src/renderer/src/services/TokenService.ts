@@ -2,7 +2,6 @@ import type { Assistant, FileMetadata, Usage } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { findFileBlocks, getMainTextContent, getThinkingContent } from '@renderer/utils/messageUtils/find'
-import { flatten, takeRight } from 'lodash'
 import { approximateTokenSize } from 'tokenx'
 
 import { getAssistantSettings } from './AssistantService'
@@ -168,7 +167,7 @@ export async function estimateMessagesUsage({
 export async function estimateHistoryTokens(assistant: Assistant, msgs: Message[]) {
   const { contextCount } = getAssistantSettings(assistant)
   const maxContextCount = contextCount
-  const messages = filterMessages(filterAfterContextClearMessages(takeRight(msgs, maxContextCount)))
+  const messages = filterMessages(filterAfterContextClearMessages(msgs.slice(-maxContextCount)))
 
   // 有 usage 数据的消息，快速计算总数
   const uasageTokens = messages
@@ -188,7 +187,8 @@ export async function estimateHistoryTokens(assistant: Assistant, msgs: Message[
   }
 
   const prompt = assistant.prompt
-  const input = flatten(allMessages)
+  const input = allMessages
+    .flat()
     .map((m) => m.content)
     .join('\n')
 

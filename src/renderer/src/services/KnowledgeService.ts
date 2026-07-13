@@ -24,7 +24,7 @@ import type { ExtractResults } from '@renderer/utils/extract'
 import { createCitationBlock } from '@renderer/utils/messageUtils/create'
 import { isAzureOpenAIProvider, isGeminiProvider } from '@renderer/utils/provider'
 import type { ModelMessage, UserModelMessage } from 'ai'
-import { isEmpty } from 'lodash'
+import { isEmpty } from 'lodash-es'
 
 import { getProviderByModel } from './AssistantService'
 import FileManager from './FileManager'

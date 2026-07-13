@@ -2,7 +2,6 @@ import { getModelLogo } from '@renderer/config/models'
 import type { Model } from '@renderer/types'
 import type { AvatarProps } from 'antd'
 import { Avatar } from 'antd'
-import { first } from 'lodash'
 import type { FC } from 'react'
 
 interface Props {
@@ -27,7 +26,7 @@ const ModelAvatar: FC<Props> = ({ model, size, props, className }) => {
       }}
       {...props}
       className={className}>
-      {first(model?.name)}
+      {model?.name?.[0]}
     </Avatar>
   )
 }

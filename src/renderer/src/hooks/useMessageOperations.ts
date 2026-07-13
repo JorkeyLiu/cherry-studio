@@ -24,7 +24,7 @@ import { type Assistant, type Model, objectKeys, type Topic, type TranslateLangu
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { abortCompletion } from '@renderer/utils/abortController'
-import { difference, throttle } from 'lodash'
+import { difference, throttle } from 'lodash-es'
 import { useCallback } from 'react'
 import { shallowEqual } from 'react-redux'
 

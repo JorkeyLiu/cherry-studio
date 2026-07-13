@@ -4,7 +4,7 @@ import FileManager from '@renderer/services/FileManager'
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
-import { isEmpty } from 'lodash'
+import { isEmpty } from 'lodash-es'
 
 import type { MessageDataSource } from './types'
 

@@ -30,7 +30,7 @@ import {
   isVertexProvider
 } from '@renderer/utils/provider'
 import { defaultAppHeaders } from '@shared/utils'
-import { cloneDeep, isEmpty } from 'lodash'
+import { cloneDeep, isEmpty } from 'lodash-es'
 
 import type { ProviderConfig } from '../types'
 import { COPILOT_DEFAULT_HEADERS } from './constants'

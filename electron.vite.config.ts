@@ -137,6 +137,10 @@ export default defineConfig({
               if (id.includes('/@tiptap/')) {
                 return 'vendor-tiptap'
               }
+              // Lodash
+              if (id.includes('/lodash-es/')) {
+                return 'vendor-lodash'
+              }
             }
             return undefined
           }

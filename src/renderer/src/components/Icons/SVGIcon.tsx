@@ -1,5 +1,3 @@
-import { lightbulbVariants } from '@renderer/utils/motionVariants'
-import { motion } from 'motion/react'
 import { type SVGProps, useId } from 'react'
 
 export const StreamlineGoodHealthAndWellBeing = (
@@ -11,7 +9,7 @@ export const StreamlineGoodHealthAndWellBeing = (
   const { size = '1em', isActive, ...svgProps } = props
 
   return (
-    <motion.span variants={lightbulbVariants} animate={isActive ? 'active' : 'idle'} initial="idle">
+    <span className={isActive ? 'animate-pulse' : ''}>
       <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 -2 14 16" {...svgProps}>
         {/* Icon from Streamline by Streamline - https://creativecommons.org/licenses/by/4.0/ */}
         <g fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.2}>
@@ -19,7 +17,7 @@ export const StreamlineGoodHealthAndWellBeing = (
           <path d="M.621 6.088h1.367l1.823 3.19l4.101-7.747l1.823 3.646"></path>
         </g>
       </svg>
-    </motion.span>
+    </span>
   )
 }
 

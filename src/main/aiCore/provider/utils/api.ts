@@ -1,7 +1,7 @@
 import { reduxService } from '@main/services/ReduxService'
 import { ReduxSelector } from '@shared/ReduxIpc'
 import { formatApiHost, withoutTrailingSlash } from '@shared/utils'
-import { trim } from 'lodash'
+import { trim } from 'lodash-es'
 
 // NOTE: Since #13194, it's re-written with reduxService
 // See: renderer/src/utils/api.ts: formatVertexApiHost

@@ -1,6 +1,6 @@
 import FileManager from '@renderer/services/FileManager'
 import type { FileMetadata } from '@renderer/types'
-import { isEmpty } from 'lodash'
+import { isEmpty } from 'lodash-es'
 import { useEffect, useState } from 'react'
 
 import { useKnowledgeBases } from './useKnowledge'

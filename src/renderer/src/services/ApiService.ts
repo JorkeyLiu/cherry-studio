@@ -25,7 +25,7 @@ import { purifyMarkdownImages } from '@renderer/utils/markdown'
 import { findFileBlocks, findImageBlocks, getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { containsSupportedVariables, replacePromptVariables } from '@renderer/utils/prompt'
 import { NOT_SUPPORT_API_KEY_PROVIDER_TYPES, NOT_SUPPORT_API_KEY_PROVIDERS } from '@renderer/utils/provider'
-import { isEmpty, takeRight } from 'lodash'
+import { isEmpty } from 'lodash-es'
 
 import type { AiProviderConfig } from '../aiCore'
 import { AiProvider } from '../aiCore'
@@ -455,7 +455,7 @@ export async function fetchMessagesSummary({
   }
 
   // 总结上下文总是取最后5条消息
-  const contextMessages = takeRight(messages, 5)
+  const contextMessages = messages.slice(-5)
   const provider = getProviderByModel(model)
 
   if (!hasApiKey(provider)) {

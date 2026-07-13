@@ -9,7 +9,6 @@ import { SettingDivider, SettingRow, SettingRowTitle } from '@renderer/pages/set
 import { getModelUniqId } from '@renderer/services/ModelService'
 import type { Model } from '@renderer/types'
 import { Slider, Tooltip } from 'antd'
-import { find } from 'lodash'
 import { Info } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -34,12 +33,16 @@ const RagSettings = () => {
   }, [providers])
 
   const handleEmbeddingModelChange = (modelValue: string) => {
-    const selectedModel = find(embeddingModels, JSON.parse(modelValue)) as Model
+    const parsed = JSON.parse(modelValue)
+    const selectedModel = embeddingModels.find((m) => m.id === parsed.id && m.provider === parsed.provider) as Model
     updateCompressionConfig({ embeddingModel: selectedModel })
   }
 
   const handleRerankModelChange = (modelValue?: string) => {
-    const selectedModel = modelValue ? (find(rerankModels, JSON.parse(modelValue)) as Model) : undefined
+    const parsed = modelValue ? JSON.parse(modelValue) : undefined
+    const selectedModel = parsed
+      ? (rerankModels.find((m) => m.id === parsed.id && m.provider === parsed.provider) as Model)
+      : undefined
     updateCompressionConfig({ rerankModel: selectedModel })
   }
 

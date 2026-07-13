@@ -1,4 +1,3 @@
-import { lightbulbVariants } from '@renderer/utils/motionVariants'
 import { ChevronRight, Lightbulb } from 'lucide-react'
 import { motion } from 'motion/react'
 import React, { useMemo } from 'react'
@@ -32,9 +31,9 @@ const ThinkingEffect: React.FC<Props> = ({ isThinking, thinkingTimeText, content
   return (
     <ThinkingContainer style={{ height: containerHeight }} className={expanded ? 'expanded' : ''}>
       <LoadingContainer>
-        <motion.div variants={lightbulbVariants} animate={isThinking ? 'active' : 'idle'} initial="idle">
+        <div className={isThinking ? 'animate-pulse' : ''}>
           <Lightbulb size={14} style={{ transition: 'width,height, 150ms' }} />
-        </motion.div>
+        </div>
       </LoadingContainer>
 
       <TextContainer>

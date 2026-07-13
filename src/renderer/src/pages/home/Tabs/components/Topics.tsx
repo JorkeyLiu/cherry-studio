@@ -38,7 +38,6 @@ import type { MenuProps } from 'antd'
 import { Dropdown, Tooltip } from 'antd'
 import type { ItemType, MenuItemType } from 'antd/es/menu/interface'
 import dayjs from 'dayjs'
-import { findIndex } from 'lodash'
 import {
   BrushCleaning,
   CheckSquare,
@@ -183,7 +182,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         addTopic(newTopic)
         setActiveTopic(newTopic)
       } else {
-        const index = findIndex(assistant.topics, (t) => t.id === topic.id)
+        const index = assistant.topics.findIndex((t) => t.id === topic.id)
         if (topic.id === activeTopic.id) {
           setActiveTopic(assistant.topics[index + 1 === assistant.topics.length ? index - 1 : index + 1])
         }
@@ -238,7 +237,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     async (topic: Topic) => {
       await modelGenerating()
       if (topic.id === activeTopic?.id) {
-        const index = findIndex(assistant.topics, (t) => t.id === topic.id)
+        const index = assistant.topics.findIndex((t) => t.id === topic.id)
         setActiveTopic(assistant.topics[index + 1 === assistant.topics.length ? index - 1 : index + 1])
       }
       await removeTopic(topic)
@@ -250,7 +249,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   const onMoveTopic = useCallback(
     async (topic: Topic, toAssistant: Assistant) => {
       await modelGenerating()
-      const index = findIndex(assistant.topics, (t) => t.id === topic.id)
+      const index = assistant.topics.findIndex((t) => t.id === topic.id)
       setActiveTopic(assistant.topics[index + 1 === assistant.topics.length ? 0 : index + 1])
       moveTopic(topic, toAssistant)
     },

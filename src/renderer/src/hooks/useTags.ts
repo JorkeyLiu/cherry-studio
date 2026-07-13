@@ -2,7 +2,7 @@ import { createSelector } from '@reduxjs/toolkit'
 import type { RootState } from '@renderer/store'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { setTagsOrder, updateTagCollapse } from '@renderer/store/assistants'
-import { flatMap, groupBy, uniq } from 'lodash'
+import { groupBy } from 'lodash-es'
 import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -27,7 +27,7 @@ export const useTags = () => {
 
   // 计算所有标签
   const allTags = useMemo(() => {
-    const tags = uniq(flatMap(assistants, (assistant) => assistant.tags || []))
+    const tags = [...new Set(assistants.flatMap((assistant) => assistant.tags || []))]
     if (savedTagsOrder.length > 0) {
       return [
         ...savedTagsOrder.filter((tag) => tags.includes(tag)),
@@ -44,7 +44,7 @@ export const useTags = () => {
 
   const getGroupedAssistants = useMemo(() => {
     // 按标签分组，处理多标签的情况
-    const assistantsByTags = flatMap(assistants, (assistant) => {
+    const assistantsByTags = assistants.flatMap((assistant) => {
       const tags = assistant.tags?.length ? assistant.tags : [t('assistants.tags.untagged')]
       return tags.map((tag) => ({ tag, assistant }))
     })

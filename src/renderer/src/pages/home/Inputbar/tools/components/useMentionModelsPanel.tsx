@@ -11,7 +11,7 @@ import { FILE_TYPE } from '@renderer/types'
 import { getFancyProviderName } from '@renderer/utils'
 import { Avatar } from 'antd'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { first, sortBy } from 'lodash'
+import { sortBy } from 'lodash-es'
 import { AtSign, CircleX, Plus } from 'lucide-react'
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
@@ -145,7 +145,7 @@ export const useMentionModelsPanel = (params: Params, role: 'button' | 'manager'
             description: <ModelTagsWithLabel model={model} showLabel={false} size={10} style={{ opacity: 0.8 }} />,
             icon: (
               <Avatar src={getModelLogo(model)} size={20}>
-                {first(model.name)}
+                {model.name[0]}
               </Avatar>
             ),
             filterText: getFancyProviderName(provider) + model.name,
@@ -178,7 +178,7 @@ export const useMentionModelsPanel = (params: Params, role: 'button' | 'manager'
         description: <ModelTagsWithLabel model={model} showLabel={false} size={10} style={{ opacity: 0.8 }} />,
         icon: (
           <Avatar src={getModelLogo(model)} size={20}>
-            {first(model.name)}
+            {model.name[0]}
           </Avatar>
         ),
         filterText: getFancyProviderName(provider) + model.name,
