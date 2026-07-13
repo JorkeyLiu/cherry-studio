@@ -151,6 +151,8 @@ function withCache<T extends unknown[], R>(
 class McpService {
   private clients: Map<string, Client> = new Map()
   private pendingClients: Map<string, Promise<Client>> = new Map()
+  private pingCache: Map<string, { result: boolean; timestamp: number }> = new Map()
+  private PING_CACHE_TTL = 10_000 // 10 seconds
   private dxtService = new DxtService()
   private activeToolCalls: Map<string, AbortController> = new Map()
   private serverLogs = new ServerLogBuffer(200)
@@ -273,22 +275,37 @@ class McpService {
     const existingClient = this.clients.get(serverKey)
     if (existingClient) {
       try {
-        // Check if the existing client is still connected
-        const pingResult = await existingClient.ping({
-          // add short timeout to prevent hanging
-          timeout: 1000
-        })
-        getServerLogger(server).debug(`Ping result`, { ok: !!pingResult })
-        // If the ping fails, remove the client from the cache
-        // and create a new one
-        if (!pingResult) {
-          this.clients.delete(serverKey)
+        // Check ping cache to avoid redundant network calls
+        const cachedPing = this.pingCache.get(serverKey)
+        const now = Date.now()
+        if (cachedPing && now - cachedPing.timestamp < this.PING_CACHE_TTL) {
+          getServerLogger(server).debug(`Using cached ping result`, { result: cachedPing.result })
+          if (cachedPing.result) {
+            return existingClient
+          } else {
+            this.clients.delete(serverKey)
+            this.pingCache.delete(serverKey)
+          }
         } else {
-          return existingClient
+          // Check if the existing client is still connected
+          const pingResult = await existingClient.ping({
+            // add short timeout to prevent hanging
+            timeout: 1000
+          })
+          getServerLogger(server).debug(`Ping result`, { ok: !!pingResult })
+          this.pingCache.set(serverKey, { result: !!pingResult, timestamp: now })
+          // If the ping fails, remove the client from the cache
+          // and create a new one
+          if (!pingResult) {
+            this.clients.delete(serverKey)
+          } else {
+            return existingClient
+          }
         }
       } catch (error: any) {
         getServerLogger(server).error(`Error pinging server ${server.name}`, error as Error)
         this.clients.delete(serverKey)
+        this.pingCache.delete(serverKey)
       }
     }
 
@@ -758,6 +775,7 @@ class McpService {
       await client.close()
       logger.debug(`Closed server`, { serverKey })
       this.clients.delete(serverKey)
+      this.pingCache.delete(serverKey)
       // Clear all caches for this server
       this.clearServerCache(serverKey)
       this.serverLogs.remove(serverKey)

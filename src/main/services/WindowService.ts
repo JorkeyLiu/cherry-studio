@@ -5,6 +5,7 @@ import { is } from '@electron-toolkit/utils'
 import { loggerService } from '@logger'
 import { isDev, isLinux, isMac, isWin } from '@main/constant'
 import { getFilesDir } from '@main/utils/file'
+import { throttle } from '@main/utils/throttle'
 import { getWindowsBackgroundMaterial } from '@main/utils/windowUtil'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { IpcChannel } from '@shared/IpcChannel'
@@ -207,6 +208,18 @@ export class WindowService {
       mainWindow.webContents.send(IpcChannel.FullscreenStatusChanged, false)
     })
 
+    // Throttled resize handler: setZoomFactor + send resize IPC
+    // 16ms throttle (~60fps) to avoid flooding the renderer
+    const throttledResize = throttle(() => {
+      mainWindow.webContents.setZoomFactor(configManager.getZoomFactor())
+      mainWindow.webContents.send(IpcChannel.Windows_Resize, mainWindow.getSize())
+    }, 16)
+
+    // Throttled maximize/unmaximize handler: send resize IPC only
+    const throttledMaximize = throttle(() => {
+      mainWindow.webContents.send(IpcChannel.Windows_Resize, mainWindow.getSize())
+    }, 16)
+
     // set the zoom factor again when the window is going to resize
     //
     // this is a workaround for the known bug that
@@ -215,10 +228,7 @@ export class WindowService {
     //
     // and resize ipc
     //
-    mainWindow.on('will-resize', () => {
-      mainWindow.webContents.setZoomFactor(configManager.getZoomFactor())
-      mainWindow.webContents.send(IpcChannel.Windows_Resize, mainWindow.getSize())
-    })
+    mainWindow.on('will-resize', throttledResize)
 
     // set the zoom factor again when the window is going to restore
     // minimize and restore will cause zoom reset
@@ -230,19 +240,12 @@ export class WindowService {
     // linux has the same problem, use `resize` listener instead
     // but `resize` will fliker the ui
     if (isLinux) {
-      mainWindow.on('resize', () => {
-        mainWindow.webContents.setZoomFactor(configManager.getZoomFactor())
-        mainWindow.webContents.send(IpcChannel.Windows_Resize, mainWindow.getSize())
-      })
+      mainWindow.on('resize', throttledResize)
     }
 
-    mainWindow.on('unmaximize', () => {
-      mainWindow.webContents.send(IpcChannel.Windows_Resize, mainWindow.getSize())
-    })
+    mainWindow.on('unmaximize', throttledMaximize)
 
-    mainWindow.on('maximize', () => {
-      mainWindow.webContents.send(IpcChannel.Windows_Resize, mainWindow.getSize())
-    })
+    mainWindow.on('maximize', throttledMaximize)
 
     // 添加Escape键退出全屏的支持
     // mainWindow.webContents.on('before-input-event', (event, input) => {

@@ -5,6 +5,7 @@ import { SpanStatusCode } from '@opentelemetry/api'
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base'
 import { HOME_CHERRY_DIR } from '@shared/config/constant'
 import fs from 'fs/promises'
+import { LRUCache } from 'lru-cache'
 import * as os from 'os'
 import * as path from 'path'
 
@@ -12,14 +13,21 @@ import { configManager } from './ConfigManager'
 
 const logger = loggerService.withContext('SpanCacheService')
 
+/** Maximum number of SpanEntity entries held in memory. */
+const SPAN_CACHE_MAX = 5000
+
 class SpanCacheService implements TraceCache {
   private topicMap: Map<string, string> = new Map<string, string>()
   private fileDir: string
-  private cache: Map<string, SpanEntity> = new Map<string, SpanEntity>()
-  pri
+  private cache: LRUCache<string, SpanEntity>
 
-  constructor() {
+  constructor(maxSize: number = SPAN_CACHE_MAX) {
     this.fileDir = path.join(os.homedir(), HOME_CHERRY_DIR, 'trace')
+    this.cache = new LRUCache<string, SpanEntity>({
+      max: maxSize,
+      // No TTL — entries live until evicted by LRU or explicitly cleaned
+      updateAgeOnGet: true
+    })
   }
 
   createSpan: (span: ReadableSpan) => void = (span: ReadableSpan) => {
@@ -393,6 +401,7 @@ class SpanCacheService implements TraceCache {
   }
 }
 
+export { SpanCacheService }
 export const spanCacheService = new SpanCacheService()
 export const cleanTopic = spanCacheService.cleanTopic.bind(spanCacheService)
 export const saveEntity = spanCacheService.saveEntity.bind(spanCacheService)

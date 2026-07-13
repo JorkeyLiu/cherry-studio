@@ -22,7 +22,6 @@ import * as crypto from 'crypto'
 import type { OpenDialogOptions, OpenDialogReturnValue, SaveDialogOptions, SaveDialogReturnValue } from 'electron'
 import { dialog, net, shell } from 'electron'
 import * as fs from 'fs'
-import { writeFileSync } from 'fs'
 import { readFile } from 'fs/promises'
 import { isBinaryFile } from 'isbinaryfile'
 import officeParser from 'officeparser'
@@ -192,14 +191,14 @@ class FileStorage {
   }
 
   private findDuplicateFile = async (filePath: string): Promise<FileMetadata | null> => {
-    const stats = fs.statSync(filePath)
+    const stats = await fs.promises.stat(filePath)
     logger.debug(`stats: ${stats}, filePath: ${filePath}`)
     const fileSize = stats.size
 
     const files = await fs.promises.readdir(this.storageDir)
     for (const file of files) {
       const storedFilePath = path.join(this.storageDir, file)
-      const storedStats = fs.statSync(storedFilePath)
+      const storedStats = await fs.promises.stat(storedFilePath)
 
       if (storedStats.size === fileSize) {
         const [originalHash, storedHash] = await Promise.all([
@@ -254,7 +253,7 @@ class FileStorage {
     }
 
     const fileMetadataPromises = result.filePaths.map(async (filePath) => {
-      const stats = fs.statSync(filePath)
+      const stats = await fs.promises.stat(filePath)
       const ext = path.extname(filePath)
       const fileType = await this.getFileType(filePath)
 
@@ -276,7 +275,7 @@ class FileStorage {
 
   private async compressImage(sourcePath: string, destPath: string): Promise<void> {
     try {
-      const stats = fs.statSync(sourcePath)
+      const stats = await fs.promises.stat(sourcePath)
       const fileSizeInMB = stats.size / MB
 
       // 如果图片大于1MB才进行压缩
@@ -342,11 +341,13 @@ class FileStorage {
   }
 
   public getFile = async (_: Electron.IpcMainInvokeEvent, filePath: string): Promise<FileMetadata | null> => {
-    if (!fs.existsSync(filePath)) {
+    try {
+      await fs.promises.access(filePath)
+    } catch {
       return null
     }
 
-    const stats = fs.statSync(filePath)
+    const stats = await fs.promises.stat(filePath)
     const fileType = await this.getFileType(filePath)
 
     return {
@@ -364,14 +365,18 @@ class FileStorage {
 
   // @TraceProperty({ spanName: 'deleteFile', tag: 'FileStorage' })
   public deleteFile = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<void> => {
-    if (!fs.existsSync(path.join(this.storageDir, id))) {
+    try {
+      await fs.promises.access(path.join(this.storageDir, id))
+    } catch {
       return
     }
     await fs.promises.unlink(path.join(this.storageDir, id))
   }
 
   public deleteDir = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<void> => {
-    if (!fs.existsSync(path.join(this.storageDir, id))) {
+    try {
+      await fs.promises.access(path.join(this.storageDir, id))
+    } catch {
       return
     }
     await fs.promises.rm(path.join(this.storageDir, id), { recursive: true })
@@ -379,7 +384,9 @@ class FileStorage {
 
   public deleteExternalFile = async (_: Electron.IpcMainInvokeEvent, filePath: string): Promise<void> => {
     try {
-      if (!fs.existsSync(filePath)) {
+      try {
+        await fs.promises.access(filePath)
+      } catch {
         return
       }
 
@@ -393,7 +400,9 @@ class FileStorage {
 
   public deleteExternalDir = async (_: Electron.IpcMainInvokeEvent, dirPath: string): Promise<void> => {
     try {
-      if (!fs.existsSync(dirPath)) {
+      try {
+        await fs.promises.access(dirPath)
+      } catch {
         return
       }
 
@@ -407,13 +416,17 @@ class FileStorage {
 
   public moveFile = async (_: Electron.IpcMainInvokeEvent, filePath: string, newPath: string): Promise<void> => {
     try {
-      if (!fs.existsSync(filePath)) {
+      try {
+        await fs.promises.access(filePath)
+      } catch {
         throw new Error(`Source file does not exist: ${filePath}`)
       }
 
       // 确保目标目录存在
       const destDir = path.dirname(newPath)
-      if (!fs.existsSync(destDir)) {
+      try {
+        await fs.promises.access(destDir)
+      } catch {
         await fs.promises.mkdir(destDir, { recursive: true })
       }
 
@@ -428,13 +441,17 @@ class FileStorage {
 
   public moveDir = async (_: Electron.IpcMainInvokeEvent, dirPath: string, newDirPath: string): Promise<void> => {
     try {
-      if (!fs.existsSync(dirPath)) {
+      try {
+        await fs.promises.access(dirPath)
+      } catch {
         throw new Error(`Source directory does not exist: ${dirPath}`)
       }
 
       // 确保目标父目录存在
       const parentDir = path.dirname(newDirPath)
-      if (!fs.existsSync(parentDir)) {
+      try {
+        await fs.promises.access(parentDir)
+      } catch {
         await fs.promises.mkdir(parentDir, { recursive: true })
       }
 
@@ -449,7 +466,9 @@ class FileStorage {
 
   public renameFile = async (_: Electron.IpcMainInvokeEvent, filePath: string, newName: string): Promise<void> => {
     try {
-      if (!fs.existsSync(filePath)) {
+      try {
+        await fs.promises.access(filePath)
+      } catch {
         throw new Error(`Source file does not exist: ${filePath}`)
       }
 
@@ -457,8 +476,14 @@ class FileStorage {
       const newFilePath = path.join(dirPath, newName + '.md')
 
       // 如果目标文件已存在，抛出错误
-      if (fs.existsSync(newFilePath)) {
+      try {
+        await fs.promises.access(newFilePath)
         throw new Error(`Target file already exists: ${newFilePath}`)
+      } catch (error) {
+        if ((error as Error).message.startsWith('Target file already exists')) {
+          throw error
+        }
+        // File doesn't exist, which is what we want
       }
 
       // 重命名文件
@@ -472,7 +497,9 @@ class FileStorage {
 
   public renameDir = async (_: Electron.IpcMainInvokeEvent, dirPath: string, newName: string): Promise<void> => {
     try {
-      if (!fs.existsSync(dirPath)) {
+      try {
+        await fs.promises.access(dirPath)
+      } catch {
         throw new Error(`Source directory does not exist: ${dirPath}`)
       }
 
@@ -480,8 +507,14 @@ class FileStorage {
       const newDirPath = path.join(parentDir, newName)
 
       // 如果目标目录已存在，抛出错误
-      if (fs.existsSync(newDirPath)) {
+      try {
+        await fs.promises.access(newDirPath)
         throw new Error(`Target directory already exists: ${newDirPath}`)
+      } catch (error) {
+        if ((error as Error).message.startsWith('Target directory already exists')) {
+          throw error
+        }
+        // Directory doesn't exist, which is what we want
       }
 
       // 重命名目录
@@ -527,7 +560,7 @@ class FileStorage {
       if (detectEncoding) {
         return readTextFileWithAutoEncoding(filePath)
       } else {
-        return fs.readFileSync(filePath, 'utf-8')
+        return await fs.promises.readFile(filePath, 'utf-8')
       }
     } catch (error) {
       logger.error('Failed to read text file:', error as Error)
@@ -601,7 +634,9 @@ class FileStorage {
     filePath: string,
     detectEncoding: boolean = false
   ): Promise<string> => {
-    if (!fs.existsSync(filePath)) {
+    try {
+      await fs.promises.access(filePath)
+    } catch {
       throw new Error(`File does not exist: ${filePath}`)
     }
 
@@ -629,7 +664,13 @@ class FileStorage {
     const safeName = checkName(fileName)
     const finalName = getName(dirPath, safeName, isFile)
     const fullPath = path.join(dirPath, finalName + (isFile ? '.md' : ''))
-    const exists = fs.existsSync(fullPath)
+    let exists = false
+    try {
+      await fs.promises.access(fullPath)
+      exists = true
+    } catch {
+      exists = false
+    }
 
     logger.debug(`File name guard: ${fileName} -> ${finalName}, exists: ${exists}`)
     return { safeName: finalName, exists }
@@ -684,8 +725,10 @@ class FileStorage {
       })
 
       // 确保目录存在
-      if (!fs.existsSync(this.storageDir)) {
-        fs.mkdirSync(this.storageDir, { recursive: true })
+      try {
+        await fs.promises.access(this.storageDir)
+      } catch {
+        await fs.promises.mkdir(this.storageDir, { recursive: true })
       }
 
       await fs.promises.writeFile(destPath, buffer)
@@ -724,8 +767,10 @@ class FileStorage {
       })
 
       // 确保目录存在
-      if (!fs.existsSync(this.storageDir)) {
-        fs.mkdirSync(this.storageDir, { recursive: true })
+      try {
+        await fs.promises.access(this.storageDir)
+      } catch {
+        await fs.promises.mkdir(this.storageDir, { recursive: true })
       }
 
       // 确保 imageData 是 Buffer
@@ -860,9 +905,10 @@ class FileStorage {
    */
   public openFileWithRelativePath = async (_: Electron.IpcMainInvokeEvent, file: FileMetadata): Promise<void> => {
     const filePath = path.join(this.storageDir, file.name)
-    if (fs.existsSync(filePath)) {
+    try {
+      await fs.promises.access(filePath)
       shell.openPath(filePath).catch((err) => logger.error('[IPC - Error] Failed to open file:', err))
-    } else {
+    } catch {
       logger.warn(`[IPC - Warning] File does not exist: ${filePath}`)
     }
   }
@@ -1372,12 +1418,14 @@ class FileStorage {
       const normalizedPath = path.resolve(dirPath)
 
       // Check if directory exists
-      if (!fs.existsSync(normalizedPath)) {
+      try {
+        await fs.promises.access(normalizedPath)
+      } catch {
         return false
       }
 
       // Check if it's actually a directory
-      const stats = fs.statSync(normalizedPath)
+      const stats = await fs.promises.stat(normalizedPath)
       if (!stats.isDirectory()) {
         return false
       }
@@ -1413,7 +1461,7 @@ class FileStorage {
 
       // Check write permissions
       try {
-        fs.accessSync(normalizedPath, fs.constants.W_OK)
+        await fs.promises.access(normalizedPath, fs.constants.W_OK)
       } catch (error) {
         logger.warn(`Directory not writable: ${normalizedPath}`)
         return false
@@ -1444,7 +1492,7 @@ class FileStorage {
       }
 
       if (!result.canceled && result.filePath) {
-        writeFileSync(result.filePath, content, { encoding: 'utf-8' })
+        await fs.promises.writeFile(result.filePath, content, { encoding: 'utf-8' })
       }
 
       return result.filePath
@@ -1463,7 +1511,7 @@ class FileStorage {
 
       if (filePath) {
         const parseResult = parseDataUrl(data)
-        fs.writeFileSync(filePath, parseResult?.data ?? data, 'base64')
+        await fs.promises.writeFile(filePath, parseResult?.data ?? data, 'base64')
         return true
       }
     } catch (error) {
@@ -1582,7 +1630,9 @@ class FileStorage {
 
       // 确保目标目录存在
       const destDir = path.dirname(destPath)
-      if (!fs.existsSync(destDir)) {
+      try {
+        await fs.promises.access(destDir)
+      } catch {
         await fs.promises.mkdir(destDir, { recursive: true })
       }
 
@@ -1601,9 +1651,11 @@ class FileStorage {
       logger.debug(`Writing file: ${filePath}`)
 
       // 确保目录存在
-      if (!fs.existsSync(this.storageDir)) {
+      try {
+        await fs.promises.access(this.storageDir)
+      } catch {
         logger.debug(`Creating storage directory: ${this.storageDir}`)
-        fs.mkdirSync(this.storageDir, { recursive: true })
+        await fs.promises.mkdir(this.storageDir, { recursive: true })
       }
 
       await fs.promises.writeFile(filePath, content, 'utf8')
@@ -1628,11 +1680,13 @@ class FileStorage {
 
       const normalizedPath = path.resolve(dirPath.trim())
 
-      if (!fs.existsSync(normalizedPath)) {
+      try {
+        await fs.promises.access(normalizedPath)
+      } catch {
         throw new Error(`Directory does not exist: ${normalizedPath}`)
       }
 
-      const stats = fs.statSync(normalizedPath)
+      const stats = await fs.promises.stat(normalizedPath)
       if (!stats.isDirectory()) {
         throw new Error(`Path is not a directory: ${normalizedPath}`)
       }
@@ -1865,7 +1919,9 @@ class FileStorage {
   }
 
   public showInFolder = async (_: Electron.IpcMainInvokeEvent, path: string): Promise<void> => {
-    if (!fs.existsSync(path)) {
+    try {
+      await fs.promises.access(path)
+    } catch {
       const msg = `File or folder does not exist: ${path}`
       logger.error(msg)
       throw new Error(msg)
@@ -1957,7 +2013,9 @@ class FileStorage {
       const sortedFolders = Array.from(foldersSet).sort((a, b) => a.length - b.length)
       for (const folder of sortedFolders) {
         try {
-          if (!fs.existsSync(folder)) {
+          try {
+            await fs.promises.access(folder)
+          } catch {
             await fs.promises.mkdir(folder, { recursive: true })
           }
         } catch (error) {
