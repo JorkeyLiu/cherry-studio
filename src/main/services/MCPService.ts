@@ -157,6 +157,7 @@ class McpService {
   private activeToolCalls: Map<string, AbortController> = new Map()
   private serverLogs = new ServerLogBuffer(200)
   private progressThrottles = new Map<string, number>() // callId → lastEmitTime
+  private lastSkippedProgress = new Map<string, { progress: number; total: number }>() // callId → last skipped event
   private logBatch: (MCPServerLogEntry & { serverId?: string })[] = []
   private logFlushTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -1003,11 +1004,17 @@ class McpService {
         const client = await this.initClient(server)
         const result = await client.callTool({ name, arguments: args }, undefined, {
           onprogress: (process) => {
-            // Throttle progress events to max 10 per second per tool call
+            // Throttle progress events to max 10 per second per tool call,
+            // but always emit terminal (100%) events immediately.
             const now = Date.now()
             const lastEmit = this.progressThrottles.get(toolCallId) || 0
-            if (now - lastEmit < 100) return
+            const isComplete = !!(process.total && process.progress >= process.total)
+            if (!isComplete && now - lastEmit < 100) {
+              this.lastSkippedProgress.set(toolCallId, { progress: process.progress, total: process.total || 1 })
+              return
+            }
             this.progressThrottles.set(toolCallId, now)
+            this.lastSkippedProgress.delete(toolCallId)
 
             getServerLogger(server, { tool: name, callId: toolCallId }).debug(`Progress`, {
               ratio: process.progress / (process.total || 1)
@@ -1032,6 +1039,18 @@ class McpService {
         getServerLogger(server, { tool: name, callId: toolCallId }).error(`Error calling tool`, error as Error)
         throw error
       } finally {
+        // Emit any last skipped progress event before cleaning up
+        const lastSkipped = this.lastSkippedProgress.get(toolCallId)
+        if (lastSkipped) {
+          const mainWindow = windowService.getMainWindow()
+          if (mainWindow) {
+            mainWindow.webContents.send(IpcChannel.Mcp_Progress, {
+              callId: toolCallId,
+              progress: lastSkipped.progress / lastSkipped.total
+            } as MCPProgressEvent)
+          }
+          this.lastSkippedProgress.delete(toolCallId)
+        }
         this.activeToolCalls.delete(toolCallId)
         this.progressThrottles.delete(toolCallId)
       }

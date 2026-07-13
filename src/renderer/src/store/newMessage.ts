@@ -296,7 +296,10 @@ export const {
 // Custom Selector: Selects messages for a specific topic in order.
 // Uses manual memoization to return the same array reference when the result
 // is shallowly equal to the previous one, preventing unnecessary re-renders.
-const _lastResultByTopicId: Record<string, { result: Message[]; topicMessageIds: string[] }> = {}
+const _lastResultByTopicId: Record<
+  string,
+  { result: Message[]; topicMessageIds: string[]; messageEntities: Record<string, Message> }
+> = {}
 
 export function selectMessagesForTopic(state: RootState, topicId: string): Message[] {
   const messageEntities = selectMessageEntities(state)
@@ -305,15 +308,15 @@ export function selectMessagesForTopic(state: RootState, topicId: string): Messa
   if (!topicMessageIds) {
     // Return a stable empty array reference for nonexistent topics
     if (!_lastResultByTopicId[topicId]) {
-      _lastResultByTopicId[topicId] = { result: [], topicMessageIds: [] }
+      _lastResultByTopicId[topicId] = { result: [], topicMessageIds: [], messageEntities: {} }
     }
     return _lastResultByTopicId[topicId].result
   }
 
   const cached = _lastResultByTopicId[topicId]
-  if (cached && cached.topicMessageIds === topicMessageIds) {
-    // Fast path: the topicMessageIds array reference hasn't changed, so all
-    // entity references inside are the same — return the cached result directly.
+  if (cached && cached.topicMessageIds === topicMessageIds && cached.messageEntities === messageEntities) {
+    // Fast path: both the topicMessageIds array reference and messageEntities reference
+    // haven't changed, so all entity references inside are the same — return the cached result.
     return cached.result
   }
 
@@ -325,7 +328,7 @@ export function selectMessagesForTopic(state: RootState, topicId: string): Messa
     return cached.result
   }
 
-  _lastResultByTopicId[topicId] = { result, topicMessageIds }
+  _lastResultByTopicId[topicId] = { result, topicMessageIds, messageEntities }
   return result
 }
 

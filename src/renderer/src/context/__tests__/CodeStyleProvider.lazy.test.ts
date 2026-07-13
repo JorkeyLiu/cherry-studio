@@ -70,8 +70,8 @@ describe('CodeStyleProvider lazy loading', () => {
   it('should use loadedCmThemes state for theme resolution', () => {
     // Should use state to hold the lazily loaded themes
     expect(source).toMatch(/loadedCmThemes/)
-    // Should check if themes are loaded before using them
-    expect(source).toMatch(/if\s*\(\s*loadedCmThemes\s*\)/)
+    // Should check if themes are NOT loaded before using built-in fallback
+    expect(source).toMatch(/if\s*\(\s*!loadedCmThemes\s*\)/)
   })
 
   it('should trigger lazy loading via useEffect when codeEditor is enabled', () => {

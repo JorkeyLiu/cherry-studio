@@ -75,6 +75,13 @@
 
 - Commit: `aab0d19`
 
+**Bundle 瘦身 — react-player 移除:**
+- `dash.all.min` (1.3MB) + `hls` (936KB) 两个 chunk 完全消除
+- react-player 仅用于 2 个文件的本地 `file://` 视频播放，用原生 `<video>` 替代
+- 移除 react-player 及所有 transitive 依赖（dashjs、hls-video-element 等）
+- Bundle 总体积 70MB → 67MB（-3MB）
+- Commit: `ab1f24b`
+
 ## Bundle Size Comparison
 
 | Chunk | Baseline | After P0+P1 | Delta |
@@ -84,6 +91,8 @@
 | ImageViewer | 1.5MB | 1.1MB | -400KB |
 | vendor-lodash | N/A (inline) | 89KB (standalone) | Extracted |
 | vendor-antd | 6.9MB | 6.9MB | 0 |
+| dash.all.min | 1.3MB | ELIMINATED | -1.3MB |
+| hls | 936KB | ELIMINATED | -936KB |
 
 ## Remaining Items
 
@@ -93,6 +102,14 @@
 | 9 | MiniWindow 按需创建 | 1-2h | ✅ 功能已完全移除（Round 6） |
 | 10 | PersistGate 异步化 | 1-2h | ✅ 完成（Round 6） |
 | 11 | devTools 生产环境关闭 | 30m | ✅ 完成（Round 6） |
+
+### Bundle 瘦身 — 已完成
+| 目标 | 大小 | 状态 |
+|---|---|---|
+| dash.all.min | 1.3MB | ✅ 死代码移除（Round 6） |
+| hls | 936KB | ✅ 随 react-player 移除（Round 6） |
+| svg chunk | 2.3MB | ✅ tree-shaking 已生效，无优化空间 |
+| vendor-antd | 6.9MB | ✅ tree-shaking 已生效，无优化空间 |
 
 ### Deferred — Independent Projects
 | Issue | Effort | Notes |
@@ -144,10 +161,16 @@
 - `packages/shared/IpcChannel.ts` — 移除 7 个 MiniWindow channel
 - `src/preload/index.ts` — 移除 miniWindow API
 
+### Bundle 瘦身
+- `src/renderer/src/pages/home/Messages/MessageVideo.tsx` — ReactPlayer → 原生 `<video>`
+- `src/renderer/src/pages/knowledge/components/KnowledgeSearchItem/VideoItem.tsx` — 同上
+- `package.json` — 移除 react-player 依赖
+
 ### Startup Optimization
 - `src/renderer/src/store/index.ts` — devTools 仅开发环境启用
 - `src/renderer/src/App.tsx` — 移除 PersistGate，立即渲染
 
 ## Dependencies Changed
 - `lodash` → `lodash-es` (+ @types/lodash → @types/lodash-es)
+- `react-player` removed (replaced with native `<video>`)
 - electron.vite.config.ts: added vendor-lodash manualChunks rule

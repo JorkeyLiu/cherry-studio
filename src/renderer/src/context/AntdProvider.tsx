@@ -42,9 +42,13 @@ const AntdProvider: FC<PropsWithChildren> = ({ children }) => {
 
   useEffect(() => {
     let cancelled = false
-    loadAntdLocale(language).then((loc) => {
-      if (!cancelled) setLocale(loc)
-    })
+    loadAntdLocale(language)
+      .then((loc) => {
+        if (!cancelled) setLocale(loc)
+      })
+      .catch(() => {
+        // Handle chunk load failures gracefully — locale stays as null (default)
+      })
     return () => {
       cancelled = true
     }

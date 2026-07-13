@@ -168,11 +168,12 @@ export const CodeStyleProvider: React.FC<PropsWithChildren> = ({ children }) => 
     if (!themeName || themeName === 'auto' || !themeNames.includes(themeName)) {
       themeName = theme === ThemeMode.light ? 'materialLight' : 'dark'
     }
-    if (loadedCmThemes) {
-      return loadedCmThemes[themeName] || themeName
+    if (!loadedCmThemes) {
+      // While themes are loading, return a safe built-in fallback instead of
+      // raw theme name strings which are not valid CodeMirror extensions.
+      return theme === ThemeMode.light ? 'light' : 'dark'
     }
-    // While loading, return themeName string as fallback (CodeMirror accepts it)
-    return themeName
+    return loadedCmThemes[themeName] || (theme === ThemeMode.light ? 'light' : 'dark')
   }, [theme, codeEditor, themeNames, loadedCmThemes])
 
   // 自定义 shiki 语言别名
