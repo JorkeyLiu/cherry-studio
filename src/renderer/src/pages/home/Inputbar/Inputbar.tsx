@@ -307,12 +307,36 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   }, [assistant])
 
   const settings = getAssistantSettings(assistant)
-  const hasAnchor = settings.contextWindowMode === 'fixed' && !!settings.fixedWindowAnchor?.[topic.id]
+  const hasAnchor = settings.contextWindowMode === 'fixed' && settings.fixedWindowAnchor?.[topic.id] !== undefined
+
+  // 自动锚点：小开关开启但无有效锚点时，有消息就自动设定
+  useEffect(() => {
+    const settings = getAssistantSettings(assistant)
+    const anchorId = settings.fixedWindowAnchor?.[topic.id]
+    // 小开关开启（anchorId !== undefined）且无有效锚点
+    if (
+      settings.contextWindowMode === 'fixed' &&
+      anchorId !== undefined &&
+      (!anchorId || !topicMessages.some((m) => m.id === anchorId)) &&
+      topicMessages.length > 0
+    ) {
+      const anchorIndex = Math.max(0, topicMessages.length - settings.contextCount)
+      const anchorMessage = topicMessages[anchorIndex]
+      if (anchorMessage) {
+        updateAssistantSettings({
+          fixedWindowAnchor: {
+            ...settings.fixedWindowAnchor,
+            [topic.id]: anchorMessage.id
+          }
+        })
+      }
+    }
+  }, [topicMessages, assistant, topic.id, updateAssistantSettings])
 
   const onUpdateAnchor = useCallback(() => {
     const settings = getAssistantSettings(assistant)
     const topicMessagesList = topicMessages || []
-    const hasAnchor = settings.contextWindowMode === 'fixed' && !!settings.fixedWindowAnchor?.[topic.id]
+    const hasAnchor = settings.contextWindowMode === 'fixed' && settings.fixedWindowAnchor?.[topic.id] !== undefined
 
     if (hasAnchor && topic.id) {
       // 1. Has anchor: unanchor (restore sliding)
@@ -371,8 +395,28 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     addTopic(newTopic)
     setActiveTopic(newTopic)
 
+    // 固定模式下，新话题默认开启小开关（待设锚点状态）
+    const settings = getAssistantSettings(assistant)
+    if (settings.contextWindowMode === 'fixed') {
+      updateAssistantSettings({
+        fixedWindowAnchor: {
+          ...settings.fixedWindowAnchor,
+          [newTopic.id]: ''
+        }
+      })
+    }
+
     setTimeoutTimer('addNewTopic', () => EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR), 0)
-  }, [addTopic, assistant.defaultModel, assistant.id, setActiveTopic, setModel, setTimeoutTimer])
+  }, [
+    addTopic,
+    assistant,
+    assistant.defaultModel,
+    assistant.id,
+    setActiveTopic,
+    setModel,
+    setTimeoutTimer,
+    updateAssistantSettings
+  ])
 
   const handleRemoveModel = useCallback(
     (modelToRemove: Model) => {
