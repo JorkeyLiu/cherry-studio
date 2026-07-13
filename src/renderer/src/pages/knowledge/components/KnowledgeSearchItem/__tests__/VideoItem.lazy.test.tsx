@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 const indexPath = resolve(__dirname, '../index.tsx')
 const indexSource = readFileSync(indexPath, 'utf-8')
 
-describe('KnowledgeSearchItem lazy loading of react-player', () => {
+describe('KnowledgeSearchItem lazy loading of VideoItem', () => {
   it('should use React.lazy for VideoItem import', () => {
     expect(indexSource).toMatch(/const\s+VideoItem\s*=\s*React\.lazy\(\(\)\s*=>\s*import\(['"]\.\/VideoItem['"]\)\)/)
   })

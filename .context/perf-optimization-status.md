@@ -54,6 +54,27 @@
 - motion/framer-motion → CSS @keyframes in 5 files
 - Commit: `04d0dcd`
 
+### Round 6: Feature Removal + Startup Optimization
+
+**MiniWindow (Quick Assistant) 完全移除:**
+- 删除 28 个文件，~1600 行代码
+- 移除 IPC channels、WindowService 方法、ShortcutService handler、TrayService 集成
+- 清理 Redux store（settings、llm、shortcuts slices）
+- 清理 12 个 i18n locale 文件
+- 保留 Redux 迁移链完整性（migration 57 中 qwenlm 逻辑保留）
+- Commit: `c750069`
+
+**P2 — devTools 生产环境关闭:**
+- `store/index.ts`: `devTools: true` → `devTools: import.meta.env.DEV`
+- 生产环境不再注册 Redux DevTools 钩子
+
+**P2 — PersistGate 异步化:**
+- 移除 PersistGate wrapper，应用立即渲染（使用 Redux initialState）
+- redux-persist 在后台 rehydrate，完成后触发 re-render
+- 首屏不再阻塞于 state rehydration
+
+- Commit: `aab0d19`
+
 ## Bundle Size Comparison
 
 | Chunk | Baseline | After P0+P1 | Delta |
@@ -67,11 +88,11 @@
 ## Remaining Items
 
 ### P2 — Low Priority
-| # | Issue | Effort |
-|---|---|---|
-| 9 | MiniWindow 按需创建（启动时不再预创建） | 1-2h |
-| 10 | PersistGate 异步化（首屏不阻塞） | 1-2h |
-| 11 | devTools 生产环境关闭 | 30m |
+| # | Issue | Effort | Status |
+|---|---|---|---|
+| 9 | MiniWindow 按需创建 | 1-2h | ✅ 功能已完全移除（Round 6） |
+| 10 | PersistGate 异步化 | 1-2h | ✅ 完成（Round 6） |
+| 11 | devTools 生产环境关闭 | 30m | ✅ 完成（Round 6） |
 
 ### Deferred — Independent Projects
 | Issue | Effort | Notes |
@@ -87,7 +108,7 @@
 三层门禁：
 1. **静态门禁**: `pnpm build:check`（lint + typecheck + i18n + format + openapi + test）
 2. **Bundle 门禁**: 构建前后 chunk size 对比（.bundle-baseline.txt vs .bundle-after-p1.txt）
-3. **功能门禁**: 3966 tests pass, 0 fail, 72 skip
+3. **功能门禁**: 3965 tests pass, 0 fail, 72 skip
 
 ## Key Files Modified
 
@@ -111,6 +132,21 @@
 - `src/renderer/src/pages/home/Messages/ChatNavigation.tsx` — ReactFlow lazy-load
 - `src/renderer/src/pages/home/Messages/Blocks/VideoBlock.tsx` — react-player lazy-load
 - `src/renderer/src/assets/styles/animation.css` — CSS keyframes for motion replacement
+
+### Feature Removal
+- `src/renderer/src/windows/mini/` — 整个目录删除（12 files）
+- `src/renderer/miniWindow.html` — 删除
+- `src/renderer/src/pages/settings/QuickAssistantSettings.tsx` — 删除
+- `src/main/services/WindowService.ts` — 移除 miniWindow 方法（~200 lines）
+- `src/main/services/ShortcutService.ts` — 移除 mini_window handler
+- `src/main/services/TrayService.ts` — 简化 tray 行为
+- `src/main/services/ConfigManager.ts` — 移除 QA 配置项
+- `packages/shared/IpcChannel.ts` — 移除 7 个 MiniWindow channel
+- `src/preload/index.ts` — 移除 miniWindow API
+
+### Startup Optimization
+- `src/renderer/src/store/index.ts` — devTools 仅开发环境启用
+- `src/renderer/src/App.tsx` — 移除 PersistGate，立即渲染
 
 ## Dependencies Changed
 - `lodash` → `lodash-es` (+ @types/lodash → @types/lodash-es)

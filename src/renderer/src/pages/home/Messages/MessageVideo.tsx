@@ -3,7 +3,6 @@ import type { VideoMessageBlock } from '@renderer/types/newMessage'
 import type { FC } from 'react'
 import { useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import ReactPlayer from 'react-player'
 import styled from 'styled-components'
 
 const logger = loggerService.withContext('MessageVideo')
@@ -31,16 +30,10 @@ const MessageVideo: FC<Props> = ({ block }) => {
     }
 
     const videoSrc = `file://${block.metadata?.video.path}`
-
-    const handleReady = () => {
-      const startTime = Math.floor(block.metadata?.startTime ?? 0)
-      if (playerRef.current) {
-        playerRef.current.currentTime = startTime
-      }
-    }
+    const startTime = Math.floor(block.metadata?.startTime ?? 0)
 
     return (
-      <ReactPlayer
+      <video
         ref={playerRef}
         style={{
           height: '100%',
@@ -48,7 +41,11 @@ const MessageVideo: FC<Props> = ({ block }) => {
         }}
         src={videoSrc}
         controls
-        onReady={handleReady}
+        onLoadedData={() => {
+          if (playerRef.current && startTime > 0) {
+            playerRef.current.currentTime = startTime
+          }
+        }}
       />
     )
   }

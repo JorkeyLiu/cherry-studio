@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 const videoBlockPath = resolve(__dirname, '../VideoBlock.tsx')
 const videoBlockSource = readFileSync(videoBlockPath, 'utf-8')
 
-describe('VideoBlock lazy loading of react-player', () => {
+describe('VideoBlock lazy loading of MessageVideo', () => {
   it('should use React.lazy for MessageVideo import', () => {
     expect(videoBlockSource).toMatch(/React\.lazy\(\(\)\s*=>\s*import\(['"]\.\.\/MessageVideo['"]\)\)/)
   })
