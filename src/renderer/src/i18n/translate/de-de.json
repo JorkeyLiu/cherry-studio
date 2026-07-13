@@ -2676,37 +2676,6 @@
     "xiaoyi": "Xiaoyi",
     "zhihu": "Zhihu Zhida"
   },
-  "miniwindow": {
-    "alert": {
-      "google_login": "Hinweis: Falls Sie beim Google-Login die Meldung \"Nicht vertrauenswürdiger Browser\" erhalten, melden Sie sich bitte zuerst in der Google Mini-App in der Mini-App-Liste an, bevor Sie Google-Login in anderen Mini-Apps verwenden"
-    },
-    "clipboard": {
-      "empty": "Zwischenablage ist leer"
-    },
-    "feature": {
-      "chat": "Diese Frage beantworten",
-      "explanation": "Erklärung",
-      "summary": "Zusammenfassung",
-      "translate": "Textübersetzung"
-    },
-    "footer": {
-      "backspace_clear": "Backspace zum Löschen",
-      "copy_last_message": "C zum Kopieren",
-      "esc": "ESC zum {{action}}",
-      "esc_back": "Zurück",
-      "esc_close": "Schließen",
-      "esc_pause": "Pausieren"
-    },
-    "input": {
-      "placeholder": {
-        "empty": "{{model}} um Hilfe fragen...",
-        "title": "Was möchten Sie mit dem folgenden Text tun"
-      }
-    },
-    "tooltip": {
-      "pin": "Fenster immer im Vordergrund"
-    }
-  },
   "models": {
     "add_parameter": "Parameter hinzufügen",
     "all": "Alle",
@@ -5569,13 +5538,6 @@
       },
       "tip": "Unterstützt Fuzzy-Matching (*.test.com, 192.168.0.0/16)"
     },
-    "quickAssistant": {
-      "click_tray_to_show": "Klicken auf Tray-Symbol zum Starten",
-      "enable_quick_assistant": "Schnellassistent aktivieren",
-      "read_clipboard_at_startup": "Zwischenablage beim Start lesen",
-      "title": "Schnellassistent",
-      "use_shortcut_to_show": "Rechtsklick auf Tray-Icon oder Shortcut zum Starten"
-    },
     "quickPanel": {
       "back": "Zurück",
       "close": "Schließen",
@@ -5619,7 +5581,6 @@
       "enabled": "Aktivieren",
       "exit_fullscreen": "Vollbildmodus beenden",
       "label": "Taste",
-      "mini_window": "Schnellassistent",
       "new_topic": "Neues Thema",
       "press_shortcut": "Shortcut drücken",
       "rename_topic": "Thema umbenennen",
@@ -6070,7 +6031,6 @@
   },
   "tray": {
     "quit": "Beenden",
-    "show_mini_window": "Schnellassistent",
     "show_window": "Fenster anzeigen"
   },
   "update": {

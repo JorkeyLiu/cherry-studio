@@ -2682,37 +2682,6 @@
     "xiaoyi": "Xiaoyi",
     "zhihu": "Zhihu"
   },
-  "miniwindow": {
-    "alert": {
-      "google_login": "Tip: If you see a 'browser not trusted' message when logging into Google, please first login through the Google mini app in the mini app list, then use Google login in other mini apps"
-    },
-    "clipboard": {
-      "empty": "Clipboard is empty"
-    },
-    "feature": {
-      "chat": "Answer this question",
-      "explanation": "Explanation",
-      "summary": "Content summary",
-      "translate": "Text translation"
-    },
-    "footer": {
-      "backspace_clear": "Backspace to clear",
-      "copy_last_message": "Press C to copy",
-      "esc": "ESC to {{action}}",
-      "esc_back": "return",
-      "esc_close": "close",
-      "esc_pause": "pause"
-    },
-    "input": {
-      "placeholder": {
-        "empty": "Ask {{model}} for help...",
-        "title": "What do you want to do with this text?"
-      }
-    },
-    "tooltip": {
-      "pin": "Keep Window on Top"
-    }
-  },
   "models": {
     "add_parameter": "Add Parameter",
     "all": "All",
@@ -5575,13 +5544,6 @@
       },
       "tip": "Supports wildcard matching (*.test.com, 192.168.0.0/16)"
     },
-    "quickAssistant": {
-      "click_tray_to_show": "Click the tray icon to start",
-      "enable_quick_assistant": "Enable Quick Assistant",
-      "read_clipboard_at_startup": "Read clipboard at startup",
-      "title": "Quick Assistant",
-      "use_shortcut_to_show": "Right-click the tray icon or use shortcuts to start"
-    },
     "quickPanel": {
       "back": "Back",
       "close": "Close",
@@ -5625,7 +5587,6 @@
       "enabled": "Enable",
       "exit_fullscreen": "Exit Fullscreen",
       "label": "Key",
-      "mini_window": "Quick Assistant",
       "new_topic": "New Topic",
       "press_shortcut": "Press Shortcut",
       "rename_topic": "Rename Topic",
@@ -6076,7 +6037,6 @@
   },
   "tray": {
     "quit": "Quit",
-    "show_mini_window": "Quick Assistant",
     "show_window": "Show Window"
   },
   "update": {

@@ -2650,37 +2650,6 @@
     "xiaoyi": "Tiểu Nghi",
     "zhihu": "Zhihu"
   },
-  "miniwindow": {
-    "alert": {
-      "google_login": "Mẹo: Nếu bạn thấy thông báo 'trình duyệt không được tin cậy' khi đăng nhập vào Google, vui lòng trước tiên đăng nhập qua mini app Google trong danh sách mini app, sau đó mới dùng đăng nhập Google ở các mini app khác"
-    },
-    "clipboard": {
-      "empty": "Bộ nhớ tạm trống"
-    },
-    "feature": {
-      "chat": "Trả lời câu hỏi này",
-      "explanation": "Giải thích",
-      "summary": "Tóm tắt nội dung",
-      "translate": "Dịch văn bản"
-    },
-    "footer": {
-      "backspace_clear": "Nhấn Backspace để xóa",
-      "copy_last_message": "Nhấn C để sao chép",
-      "esc": "ESC để {{action}}",
-      "esc_back": "trả về",
-      "esc_close": "đóng",
-      "esc_pause": "tạm dừng"
-    },
-    "input": {
-      "placeholder": {
-        "empty": "Hỏi {{model}} để được giúp đỡ...",
-        "title": "Bạn muốn làm gì với văn bản này?"
-      }
-    },
-    "tooltip": {
-      "pin": "Giữ cửa sổ ở trên cùng"
-    }
-  },
   "models": {
     "add_parameter": "Thêm tham số",
     "all": "Tất cả",
@@ -5543,13 +5512,6 @@
       },
       "tip": "Hỗ trợ khớp ký tự đại diện (*.test.com, 192.168.0.0/16)"
     },
-    "quickAssistant": {
-      "click_tray_to_show": "Nhấp vào biểu tượng khay để bắt đầu",
-      "enable_quick_assistant": "Bật Trợ lý Nhanh",
-      "read_clipboard_at_startup": "Đọc clipboard khi khởi động",
-      "title": "Trợ lý Nhanh",
-      "use_shortcut_to_show": "Nhấp chuột phải vào biểu tượng khay hoặc sử dụng phím tắt để bắt đầu"
-    },
     "quickPanel": {
       "back": "Quay lại",
       "close": "Đóng",
@@ -5593,7 +5555,6 @@
       "enabled": "Kích hoạt",
       "exit_fullscreen": "Thoát toàn màn hình",
       "label": "Khóa",
-      "mini_window": "Trợ lý Nhanh",
       "new_topic": "Chủ đề mới",
       "press_shortcut": "Nhấn Phím tắt",
       "rename_topic": "Đổi tên chủ đề",
@@ -6044,7 +6005,6 @@
   },
   "tray": {
     "quit": "Thôi",
-    "show_mini_window": "Trợ lý Nhanh",
     "show_window": "Hiển thị cửa sổ"
   },
   "update": {

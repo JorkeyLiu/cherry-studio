@@ -739,13 +739,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
     vertexAIService.clearAuthCache(projectId, clientEmail)
   })
 
-  // mini window
-  ipcMain.handle(IpcChannel.MiniWindow_Show, () => windowService.showMiniWindow())
-  ipcMain.handle(IpcChannel.MiniWindow_Hide, () => windowService.hideMiniWindow())
-  ipcMain.handle(IpcChannel.MiniWindow_Close, () => windowService.closeMiniWindow())
-  ipcMain.handle(IpcChannel.MiniWindow_Toggle, () => windowService.toggleMiniWindow())
-  ipcMain.handle(IpcChannel.MiniWindow_SetPin, (_, isPinned) => windowService.setPinMiniWindow(isPinned))
-
   // aes
   ipcMain.handle(IpcChannel.Aes_Encrypt, (_, text: string, secretKey: string, iv: string) =>
     encrypt(text, secretKey, iv)

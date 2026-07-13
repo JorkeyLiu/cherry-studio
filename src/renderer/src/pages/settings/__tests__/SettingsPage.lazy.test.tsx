@@ -26,9 +26,9 @@ describe('SettingsPage lazy loading (static verification)', () => {
     expect(source).toContain("import React, { Suspense } from 'react'")
   })
 
-  it('has 14 React.lazy() declarations for sub-components', () => {
+  it('has 13 React.lazy() declarations for sub-components', () => {
     const lazyMatches = source.match(/React\.lazy\(\(\) => import\(/g)
-    expect(lazyMatches).toHaveLength(14)
+    expect(lazyMatches).toHaveLength(13)
   })
 
   it('lazily imports ModelSettings', () => {
@@ -65,10 +65,6 @@ describe('SettingsPage lazy loading (static verification)', () => {
 
   it('lazily imports ProviderList from ProviderSettings', () => {
     expect(source).toContain("React.lazy(() => import('./ProviderSettings/ProviderList'))")
-  })
-
-  it('lazily imports QuickAssistantSettings', () => {
-    expect(source).toContain("React.lazy(() => import('./QuickAssistantSettings'))")
   })
 
   it('lazily imports QuickPhraseSettings', () => {
@@ -114,7 +110,6 @@ describe('SettingsPage lazy loading (static verification)', () => {
       'import GeneralSettings from',
       'import MCPSettings from',
       'import MemorySettings from',
-      'import QuickAssistantSettings from',
       'import QuickPhraseSettings from',
       'import ShortcutSettings from',
       'import WebSearchSettings from'
@@ -133,7 +128,7 @@ describe('SettingsPage lazy loading (static verification)', () => {
     expect(source).toContain("import { Divider as AntDivider, Spin } from 'antd'")
   })
 
-  it('preserves all 14 Route elements', () => {
+  it('preserves all 13 Route elements', () => {
     expect(source).toContain('<Route path="provider" element={<ProviderList />} />')
     expect(source).toContain('<Route path="model" element={<ModelSettings />} />')
     expect(source).toContain('<Route path="websearch/*" element={<WebSearchSettings />} />')
@@ -145,7 +140,6 @@ describe('SettingsPage lazy loading (static verification)', () => {
     expect(source).toContain('<Route path="general/*" element={<GeneralSettings />} />')
     expect(source).toContain('<Route path="display" element={<DisplaySettings />} />')
     expect(source).toContain('<Route path="shortcut" element={<ShortcutSettings />} />')
-    expect(source).toContain('<Route path="quickAssistant" element={<QuickAssistantSettings />} />')
     expect(source).toContain('<Route path="data" element={<DataSettings />} />')
     expect(source).toContain('<Route path="about" element={<AboutSettings />} />')
   })

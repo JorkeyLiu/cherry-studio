@@ -60,11 +60,7 @@ export class TrayService {
     })
 
     this.tray.on('click', () => {
-      if (configManager.getEnableQuickAssistant() && configManager.getClickTrayToShowQuickAssistant()) {
-        windowService.showMiniWindow()
-      } else {
-        windowService.showMainWindow()
-      }
+      windowService.showMainWindow()
     })
   }
 
@@ -72,23 +68,17 @@ export class TrayService {
     const locale = locales[configManager.getLanguage()]
     const { tray: trayLocale } = locale.translation
 
-    const quickAssistantEnabled = configManager.getEnableQuickAssistant()
-
     const template = [
       {
         label: trayLocale.show_window,
         click: () => windowService.showMainWindow()
-      },
-      quickAssistantEnabled && {
-        label: trayLocale.show_mini_window,
-        click: () => windowService.showMiniWindow()
       },
       { type: 'separator' },
       {
         label: trayLocale.quit,
         click: () => this.quit()
       }
-    ].filter(Boolean) as MenuItemConstructorOptions[]
+    ] as MenuItemConstructorOptions[]
 
     this.contextMenu = Menu.buildFromTemplate(template)
   }
@@ -113,10 +103,6 @@ export class TrayService {
     configManager.subscribe(ConfigKeys.Tray, () => this.updateTray())
 
     configManager.subscribe(ConfigKeys.Language, () => {
-      this.updateContextMenu()
-    })
-
-    configManager.subscribe(ConfigKeys.EnableQuickAssistant, () => {
       this.updateContextMenu()
     })
   }

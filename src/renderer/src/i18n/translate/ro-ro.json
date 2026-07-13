@@ -2676,37 +2676,6 @@
     "xiaoyi": "Xiaoyi",
     "zhihu": "Zhihu"
   },
-  "miniwindow": {
-    "alert": {
-      "google_login": "Sfat: Dacă vezi un mesaj 'browser not trusted' când te conectezi la Google, te rugăm să te conectezi mai întâi prin mini-aplicația Google din lista de mini-aplicații, apoi să folosești autentificarea Google în alte mini-aplicații"
-    },
-    "clipboard": {
-      "empty": "Clipboardul este gol"
-    },
-    "feature": {
-      "chat": "Răspunde la această întrebare",
-      "explanation": "Explicație",
-      "summary": "Rezumat conținut",
-      "translate": "Traducere text"
-    },
-    "footer": {
-      "backspace_clear": "Backspace pentru a șterge",
-      "copy_last_message": "Apasă C pentru a copia",
-      "esc": "ESC pentru a {{action}}",
-      "esc_back": "reveni",
-      "esc_close": "închide",
-      "esc_pause": "pune pauză"
-    },
-    "input": {
-      "placeholder": {
-        "empty": "Cere ajutor de la {{model}}...",
-        "title": "Ce vrei să faci cu acest text?"
-      }
-    },
-    "tooltip": {
-      "pin": "Menține fereastra deasupra"
-    }
-  },
   "models": {
     "add_parameter": "Adaugă parametru",
     "all": "Toate",
@@ -5569,13 +5538,6 @@
       },
       "tip": "Acceptă potrivirea cu wildcard (*.test.com, 192.168.0.0/16)"
     },
-    "quickAssistant": {
-      "click_tray_to_show": "Fă clic pe pictograma din zona de notificare pentru a începe",
-      "enable_quick_assistant": "Activează Asistentul rapid",
-      "read_clipboard_at_startup": "Citește clipboardul la pornire",
-      "title": "Asistent rapid",
-      "use_shortcut_to_show": "Clic dreapta pe pictograma din zona de notificare sau folosește comenzile rapide pentru a începe"
-    },
     "quickPanel": {
       "back": "Înapoi",
       "close": "Închide",
@@ -5619,7 +5581,6 @@
       "enabled": "Activează",
       "exit_fullscreen": "Ieși din ecran complet",
       "label": "Tastă",
-      "mini_window": "Asistent rapid",
       "new_topic": "Subiect nou",
       "press_shortcut": "Apasă comanda rapidă",
       "rename_topic": "Redenumește subiectul",
@@ -6070,7 +6031,6 @@
   },
   "tray": {
     "quit": "Ieșire",
-    "show_mini_window": "Asistent rapid",
     "show_window": "Afișează fereastra"
   },
   "update": {

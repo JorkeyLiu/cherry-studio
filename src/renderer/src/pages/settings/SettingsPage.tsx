@@ -11,7 +11,6 @@ import {
   Info,
   MonitorCog,
   Package,
-  PictureInPicture2,
   Search,
   Server,
   Settings2,
@@ -33,7 +32,6 @@ const GeneralSettings = React.lazy(() => import('./GeneralSettings'))
 const MCPSettings = React.lazy(() => import('./MCPSettings'))
 const MemorySettings = React.lazy(() => import('./MemorySettings'))
 const ProviderList = React.lazy(() => import('./ProviderSettings/ProviderList'))
-const QuickAssistantSettings = React.lazy(() => import('./QuickAssistantSettings'))
 const QuickPhraseSettings = React.lazy(() => import('./QuickPhraseSettings'))
 const ShortcutSettings = React.lazy(() => import('./ShortcutSettings'))
 const ApiServerSettings = React.lazy(() => import('./ToolSettings/ApiServerSettings/ApiServerSettings'))
@@ -133,13 +131,6 @@ const SettingsPage: FC = () => {
             </MenuItem>
           </MenuItemLink>
           <Divider />
-          <MenuItemLink to="/settings/quickAssistant">
-            <MenuItem className={isRoute('/settings/quickAssistant')}>
-              <PictureInPicture2 size={18} />
-              {t('settings.quickAssistant.title')}
-            </MenuItem>
-          </MenuItemLink>
-          <Divider />
           <MenuItemLink to="/settings/about">
             <MenuItem className={isRoute('/settings/about')}>
               <Info size={18} />
@@ -161,7 +152,6 @@ const SettingsPage: FC = () => {
               <Route path="general/*" element={<GeneralSettings />} />
               <Route path="display" element={<DisplaySettings />} />
               <Route path="shortcut" element={<ShortcutSettings />} />
-              <Route path="quickAssistant" element={<QuickAssistantSettings />} />
               <Route path="data" element={<DataSettings />} />
               <Route path="about" element={<AboutSettings />} />
             </Routes>
