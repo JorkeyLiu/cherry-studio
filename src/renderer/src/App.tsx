@@ -1,11 +1,10 @@
 import '@renderer/databases'
 
 import { loggerService } from '@logger'
-import store, { persistor, useAppSelector } from '@renderer/store'
+import store, { useAppSelector } from '@renderer/store'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { Provider } from 'react-redux'
-import { PersistGate } from 'redux-persist/integration/react'
 
 import TopViewContainer from './components/TopView'
 import AntdProvider from './context/AntdProvider'
@@ -67,12 +66,10 @@ function App(): React.ReactElement {
             <AntdProvider>
               <NotificationProvider>
                 <CodeStyleProvider>
-                  <PersistGate loading={null} persistor={persistor}>
-                    <SidebarWidthInitializer />
-                    <TopViewContainer>
-                      <Router />
-                    </TopViewContainer>
-                  </PersistGate>
+                  <SidebarWidthInitializer />
+                  <TopViewContainer>
+                    <Router />
+                  </TopViewContainer>
                 </CodeStyleProvider>
               </NotificationProvider>
             </AntdProvider>

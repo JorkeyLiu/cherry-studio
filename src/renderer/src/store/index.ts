@@ -106,7 +106,7 @@ const store = configureStore({
       }
     }).concat(storeSyncService.createMiddleware())
   },
-  devTools: true
+  devTools: import.meta.env.DEV
 })
 
 export type RootState = ReturnType<typeof rootReducer>
