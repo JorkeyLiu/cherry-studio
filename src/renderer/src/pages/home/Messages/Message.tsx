@@ -286,8 +286,6 @@ const MessageContainer = styled.div`
   width: 100%;
   position: relative;
   transition: background-color 0.3s ease;
-  transform: translateZ(0);
-  will-change: transform;
   padding: 10px;
   padding-bottom: 0;
   border-radius: 10px;

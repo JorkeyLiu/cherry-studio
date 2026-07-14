@@ -1,13 +1,7 @@
 import { loggerService } from '@logger'
 import ContextMenu from '@renderer/components/ContextMenu'
 import EditModeActionBar from '@renderer/components/EditModeActionBar'
-import { LoadingIcon } from '@renderer/components/Icons'
-import {
-  INITIAL_MESSAGES_COUNT,
-  LOAD_MORE_COUNT,
-  SCROLL_CONTEXT_COUNT,
-  UNLIMITED_CONTEXT_COUNT
-} from '@renderer/config/constant'
+import { UNLIMITED_CONTEXT_COUNT } from '@renderer/config/constant'
 import { EditModeProvider, useEditMode } from '@renderer/context/EditModeContext'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
@@ -15,7 +9,6 @@ import { useMessageOperations, useTopicMessages } from '@renderer/hooks/useMessa
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
-import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
@@ -34,7 +27,6 @@ import {
   removeSpecialCharactersForFileName,
   runAsyncFunction
 } from '@renderer/utils'
-import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
 import {
   filterAdjacentUserMessaegs,
@@ -45,8 +37,9 @@ import {
 } from '@renderer/utils/messageUtils/filters'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
-import React, { Fragment, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import styled from 'styled-components'
 
 import MessageAnchorLine from './MessageAnchorLine'
@@ -67,45 +60,22 @@ export interface MessagesHandle {
   scrollToMessageById: (messageId: string) => void
 }
 
-/**
- * Find the first visible message element in the scroll container.
- * Returns the element and its bounding rect, or null if not found.
- */
-const findFirstVisibleMessage = (
-  container: HTMLElement | null,
-  elements: Map<string, HTMLElement>
-): { element: HTMLElement; rect: DOMRect } | null => {
-  if (!container) return null
-  const containerRect = container.getBoundingClientRect()
-
-  let closest: { element: HTMLElement; rect: DOMRect } | null = null
-  let minDistance = Infinity
-  for (const el of elements.values()) {
-    const rect = el.getBoundingClientRect()
-    const distance = Math.abs(rect.top - containerRect.top)
-    if (distance < minDistance) {
-      minDistance = distance
-      closest = { element: el, rect }
-    }
-  }
-  return closest
-}
-
 const logger = loggerService.withContext('Messages')
 
-const SCROLL_TOP_THRESHOLD = 200 // pixels from top to trigger load more
+type GroupEntry = [string, (Message & { index: number })[]]
 
 interface MessagesContentProps {
   assistant: Assistant
   topic: Topic
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
   handleScrollPosition: () => void
-  displayMessages: Message[]
   messages: Message[]
-  isLoadingMore: boolean
-  loadMoreMessages: () => void
+  groupedMessages: GroupEntry[]
   registerMessageElement: (id: string, element: HTMLElement | null) => void
   scrollToMessageById: (messageId: string) => void
+  virtuosoRef: React.RefObject<VirtuosoHandle | null>
+  scrollParentEl: HTMLElement | null
+  initialTopMostItemIndex: number
 }
 
 const MessagesContent = React.memo(function MessagesContent({
@@ -113,12 +83,13 @@ const MessagesContent = React.memo(function MessagesContent({
   topic,
   scrollContainerRef,
   handleScrollPosition,
-  displayMessages,
   messages,
-  isLoadingMore,
-  loadMoreMessages,
+  groupedMessages,
   registerMessageElement,
-  scrollToMessageById
+  scrollToMessageById,
+  virtuosoRef,
+  scrollParentEl,
+  initialTopMostItemIndex
 }: MessagesContentProps) {
   const { showPrompt, messageNavigation } = useSettings()
   const { t } = useTranslation()
@@ -126,42 +97,10 @@ const MessagesContent = React.memo(function MessagesContent({
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
   useClipboardKeyboard()
 
-  // Combined scroll handler: saves scroll position + detects top for loading older messages
+  // Scroll handler — just save position (Virtuoso handles virtualization)
   const handleScroll = useCallback(() => {
     handleScrollPosition()
-
-    // Top detection for loading older messages
-    const container = scrollContainerRef.current
-    if (container && container.scrollTop <= SCROLL_TOP_THRESHOLD) {
-      loadMoreMessages()
-    }
-  }, [handleScrollPosition, loadMoreMessages, scrollContainerRef])
-
-  // displayMessages is now in normal order (oldest first), so groupedMessages
-  // groups are also in normal order. No need to reverse within each group.
-  const groupedMessages = useMemo(() => {
-    const grouped = Object.entries(getGroupedMessages(displayMessages))
-    return grouped
-  }, [displayMessages])
-
-  // 将消息按是否选中分段，用于连续选中消息的包裹
-  const messageSegments = useMemo(() => {
-    const segments: Array<{ selected: boolean; items: typeof groupedMessages }> = []
-
-    for (const [key, groupMessages] of groupedMessages) {
-      const groupAskId = groupMessages[0]?.askId || groupMessages[0]?.id || ''
-      const selected = isEditMode && selectedGroupIds.includes(groupAskId)
-
-      const lastSeg = segments[segments.length - 1]
-      if (lastSeg && lastSeg.selected === selected) {
-        lastSeg.items.push([key, groupMessages])
-      } else {
-        segments.push({ selected, items: [[key, groupMessages]] })
-      }
-    }
-
-    return segments
-  }, [groupedMessages, isEditMode, selectedGroupIds])
+  }, [handleScrollPosition])
 
   // Context window boundary: compute where the context window starts
   const contextWindowBoundaryIndex = useMemo(() => {
@@ -208,31 +147,27 @@ const MessagesContent = React.memo(function MessagesContent({
 
     if (anchorOriginalIndex < 0) return -1
 
-    // In normal order (oldest first), find the anchor's position in displayMessages
+    // In normal order (oldest first), find the anchor's position in messages
     // and then find the start of the group containing the anchor.
     // The boundary is the start of that group, so the divider renders before it.
-    const anchorDisplayIndex = displayMessages.findIndex((m) => m.id === messages[anchorOriginalIndex]?.id)
-    if (anchorDisplayIndex < 0) return -1
+    const anchorMessage = messages[anchorOriginalIndex]
+    if (!anchorMessage) return -1
 
-    // Find the start of the group containing the anchor
+    // Find the group containing the anchor message
     for (const [, groupMessages] of groupedMessages) {
       const groupStart = groupMessages[0]?.index ?? -1
       const groupEnd = groupMessages[groupMessages.length - 1]?.index ?? -1
-      if (anchorDisplayIndex >= groupStart && anchorDisplayIndex <= groupEnd) {
-        // +1: the divider renders before the group (visually ABOVE the anchor,
-        // separating in-context messages from out-of-context older messages)
+      if (anchorOriginalIndex >= groupStart && anchorOriginalIndex <= groupEnd) {
         return groupStart
       }
     }
     return -1
-  }, [assistant, messages, displayMessages, groupedMessages, topic.id])
+  }, [assistant, messages, groupedMessages, topic.id])
 
   // Find the group key where the context window divider should be rendered
   const contextDividerGroupKey = useMemo(() => {
     if (contextWindowBoundaryIndex <= 0) return null
     for (const [key, groupMessages] of groupedMessages) {
-      // groupMessages is in chronological order; groupStart is the lowest displayMessages index in the group
-      // Check if the oldest message in this group is at or past the boundary
       const oldestMsgIndex = groupMessages[0]?.index ?? -1
       if (oldestMsgIndex >= contextWindowBoundaryIndex) {
         return key
@@ -241,10 +176,15 @@ const MessagesContent = React.memo(function MessagesContent({
     return null
   }, [groupedMessages, contextWindowBoundaryIndex])
 
-  const renderMessageSegments = () => {
-    return messageSegments.map((seg, i) => {
-      const content = seg.items.map(([key, groupMessages]) => (
-        <Fragment key={key}>
+  // Virtuoso item renderer
+  const renderItem = useCallback(
+    (_index: number, group: GroupEntry) => {
+      const [key, groupMessages] = group
+      const groupAskId = groupMessages[0]?.askId || groupMessages[0]?.id || ''
+      const isSelected = isEditMode && selectedGroupIds.includes(groupAskId)
+
+      return (
+        <VirtuosoItemWrapper key={key} $isSelected={isSelected}>
           {key === contextDividerGroupKey && (
             <ContextWindowDivider data-context-boundary>
               <ContextWindowDividerLine />
@@ -259,15 +199,29 @@ const MessagesContent = React.memo(function MessagesContent({
             isEditMode={isEditMode}
             onGroupClick={handleGroupClick}
           />
-        </Fragment>
-      ))
+        </VirtuosoItemWrapper>
+      )
+    },
+    [contextDividerGroupKey, isEditMode, selectedGroupIds, topic, registerMessageElement, handleGroupClick, t]
+  )
 
-      if (seg.selected) {
-        return <SelectionBlock key={`sel-${i}`}>{content}</SelectionBlock>
+  // Stable item key function
+  const computeItemKey = useCallback(
+    (index: number) => {
+      return groupedMessages[index]?.[0] ?? `group-${index}`
+    },
+    [groupedMessages]
+  )
+
+  // Prompt header component (stable reference via useMemo)
+  const virtuosoComponents = useMemo(() => {
+    return {
+      Header: function VirtuosoHeader() {
+        if (!showPrompt) return null
+        return <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />
       }
-      return content
-    })
-  }
+    }
+  }, [showPrompt, assistant, topic])
 
   return (
     <MessagesContainer
@@ -277,21 +231,29 @@ const MessagesContent = React.memo(function MessagesContent({
       key={assistant.id}
       onScroll={handleScroll}>
       {isEditMode && <EditModeActionBar />}
-      <NarrowLayout style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-        {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
+      <NarrowLayout>
         <ContextMenu>
           <ScrollContainer>
-            {renderMessageSegments()}
-            {isLoadingMore && (
-              <LoaderContainer>
-                <LoadingIcon color="var(--color-text-2)" />
-              </LoaderContainer>
+            {scrollParentEl && (
+              <Virtuoso
+                ref={virtuosoRef}
+                customScrollParent={scrollParentEl}
+                data={groupedMessages}
+                itemContent={renderItem}
+                computeItemKey={computeItemKey}
+                components={virtuosoComponents}
+                followOutput="auto"
+                alignToBottom={true}
+                increaseViewportBy={{ top: 1200, bottom: 1600 }}
+                minOverscanItemCount={3}
+                initialTopMostItemIndex={initialTopMostItemIndex}
+              />
             )}
           </ScrollContainer>
         </ContextMenu>
       </NarrowLayout>
       {messageNavigation === 'anchor' && (
-        <MessageAnchorLine messages={displayMessages} scrollToMessageById={scrollToMessageById} />
+        <MessageAnchorLine messages={messages} scrollToMessageById={scrollToMessageById} />
       )}
     </MessagesContainer>
   )
@@ -315,17 +277,48 @@ const Messages = ({
   const handleScrollPosition = useCallback(() => {
     rawHandleScrollPosition()
   }, [rawHandleScrollPosition])
-  const [displayMessages, setDisplayMessages] = useState<Message[]>([])
-  const [hasMore, setHasMore] = useState(false)
-  const [isLoadingMore, setIsLoadingMore] = useState(false)
+
   const [isProcessingContext, setIsProcessingContext] = useState(false)
+  const [scrollParentEl, setScrollParentEl] = useState<HTMLElement | null>(null)
 
   const { addTopic, updateAssistantSettings } = useAssistant(assistant.id)
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const messages = useTopicMessages(topic.id)
-  const { displayCount, clearTopicMessages, deleteMessage, createTopicBranch } = useMessageOperations(topic)
-  const { setTimeoutTimer } = useTimer()
+  const { clearTopicMessages, deleteMessage, createTopicBranch } = useMessageOperations(topic)
+
+  const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const messagesRef = useRef<Message[]>(messages)
+
+  // Set scroll parent after layout commit (before paint)
+  useLayoutEffect(() => {
+    setScrollParentEl(scrollContainerRef.current)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const groupedMessagesRef = useRef<GroupEntry[]>([])
+
+  // Compute grouped messages from all messages (used by both parent and child)
+  const groupedMessages = useMemo(() => {
+    const newGrouped = Object.entries(getGroupedMessages(messages))
+    // Only rebuild when group keys change (new group count or different keys)
+    const prev = groupedMessagesRef.current
+    if (prev.length === newGrouped.length && prev.every(([key], i) => key === newGrouped[i][0])) {
+      return prev
+    }
+    groupedMessagesRef.current = newGrouped
+    return newGrouped
+  }, [messages])
+
+  // Compute initial scroll position for Virtuoso to avoid flash-of-content from index 0
+  const initialTopMostItemIndex = useMemo(() => {
+    const saved = getSavedPosition()
+    if (saved?.anchorId) {
+      const idx = groupedMessages.findIndex(([, msgs]) => msgs.some((m) => m.id === saved.anchorId))
+      if (idx >= 0) return idx
+    }
+    // Default: scroll to bottom
+    return Math.max(0, groupedMessages.length - 1)
+  }, [getSavedPosition, groupedMessages])
 
   // 滚动到指定消息组
   const scrollToGroup = useCallback((askId: string) => {
@@ -335,10 +328,10 @@ const Messages = ({
     }
   }, [])
 
-  // 已渲染的消息组 id 集合，用于限制键盘选择范围
+  // All message group IDs for edit mode keyboard navigation
   const visibleGroupIds = useMemo(() => {
     return new Set(
-      displayMessages
+      messages
         .map((m) => {
           if (m.role === 'assistant') {
             return m.askId ?? m.id
@@ -347,160 +340,45 @@ const Messages = ({
         })
         .filter(Boolean)
     )
-  }, [displayMessages])
+  }, [messages])
 
-  const messageElements = useRef<Map<string, HTMLElement>>(new Map())
-  const messagesRef = useRef<Message[]>(messages)
-  const jumpTargetRef = useRef<string | null>(null)
-  const lastDisplayMessagesRef = useRef<Message[]>([])
-
-  const scrollToMessageById = useCallback((messageId: string) => {
-    jumpTargetRef.current = messageId
-    // Force re-render to trigger the jump effect
-    setDisplayMessages((prev) => [...prev])
+  // No-op: Virtuoso manages DOM lifecycle; MessageGroup still calls this
+  const registerMessageElement = useCallback((_id: string, _element: HTMLElement | null) => {
+    // no-op
   }, [])
 
-  useImperativeHandle(ref, () => ({ scrollToMessageById }), [scrollToMessageById])
+  const scrollToMessageById = useCallback(
+    (messageId: string) => {
+      // Find the group containing this message
+      const groupIndex = groupedMessages.findIndex(([, msgs]) => msgs.some((m) => m.id === messageId))
+      if (groupIndex >= 0) {
+        virtuosoRef.current?.scrollToIndex({
+          index: groupIndex,
+          align: 'start',
+          behavior: 'auto'
+        })
+      }
+    },
+    [groupedMessages]
+  )
 
-  // On mount (topic switch), check if we need to restore to a specific message
-  useEffect(() => {
-    const saved = getSavedPosition()
-    if (saved?.anchorId) {
-      // Message-based restoration: set jumpTargetRef for Scenario 1
-      jumpTargetRef.current = saved.anchorId
-    } else if (saved?.scrollTop) {
-      // Pixel-based fallback (old format data or no anchor available)
-      // Schedule after initial message load so container has content
-      requestAnimationFrame(() => {
-        setTimeout(() => {
-          scrollContainerRef.current?.scrollTo({ top: saved.scrollTop })
-        }, 100)
-      })
-    }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useImperativeHandle(ref, () => ({ scrollToMessageById }), [scrollToMessageById])
 
   useEffect(() => {
     messagesRef.current = messages
   }, [messages])
 
-  const registerMessageElement = useCallback((id: string, element: HTMLElement | null) => {
-    if (element) {
-      messageElements.current.set(id, element)
-    } else {
-      messageElements.current.delete(id)
-    }
-  }, [])
-
-  const checkBoundaries = useCallback(() => {
-    const current = lastDisplayMessagesRef.current
-    if (current.length === 0 || messages.length === 0) return { hasOlder: false, hasNewer: false }
-
-    const oldestInWindow = current[0] // oldest in window (first in normal-ordered array)
-    const newestInWindow = current[current.length - 1] // newest in window
-    const newestInArray = messages[messages.length - 1]
-    const oldestInArray = messages[0]
-
-    return {
-      hasOlder: oldestInWindow?.id !== oldestInArray?.id,
-      hasNewer: newestInWindow?.id !== newestInArray?.id
-    }
-  }, [messages])
-
-  useEffect(() => {
-    // Scenario 1: Jump target (deep navigation / topic switch restore)
-    if (jumpTargetRef.current) {
-      const targetId = jumpTargetRef.current
-      jumpTargetRef.current = null
-      const startIndex = computeStartIndexAroundTarget(messages, targetId, SCROLL_CONTEXT_COUNT)
-      const newDisplayMessages = computeDisplayMessages(
-        messages,
-        startIndex,
-        SCROLL_CONTEXT_COUNT + INITIAL_MESSAGES_COUNT
-      )
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder } = checkBoundaries()
-      setHasMore(hasOlder)
-
-      // Scroll to target message after render
-      requestAnimationFrame(() => {
-        setTimeout(() => {
-          const el = document.getElementById(`message-${targetId}`)
-          if (el) {
-            scrollIntoView(el, { behavior: 'auto', block: 'start', container: 'nearest' })
-          }
-        }, 50)
-      })
-      return
-    }
-
-    // Scenario 2: First load — show the latest messages in normal order
-    if (lastDisplayMessagesRef.current.length === 0) {
-      const startIndex = computeStartIndexForLatestGroups(messages, displayCount)
-      const newDisplayMessages = computeDisplayMessages(messages, startIndex, displayCount)
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      setHasMore(startIndex > 0)
-
-      // Scroll to bottom after initial render (column layout defaults to top)
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          if (scrollContainerRef.current) {
-            scrollContainerRef.current.scrollTo({ top: scrollContainerRef.current.scrollHeight })
-          }
-        })
-      })
-
-      return
-    }
-
-    // Scenario 3: Messages content changed (edit/delete/etc) - incremental update
-    const earliestLoadedId = lastDisplayMessagesRef.current[0]?.id
-    const earliestIndex = messages.findIndex((m) => m.id === earliestLoadedId)
-
-    if (earliestIndex === -1) {
-      // Earliest loaded message was deleted, need full recalc from latest
-      const startIndex = computeStartIndexForLatestGroups(messages, displayCount)
-      const newDisplayMessages = computeDisplayMessages(messages, startIndex, displayCount)
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      setHasMore(startIndex > 0)
-    } else {
-      // Always extend to end of array — new messages at the end don't disturb
-      // the user's scroll position when browsing older messages
-      const newDisplayMessages = messages.slice(earliestIndex)
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder } = checkBoundaries()
-      setHasMore(hasOlder)
-    }
-  }, [messages, displayCount, checkBoundaries])
-
-  // NOTE: 如果设置为平滑滚动会导致滚动条无法跟随生成的新消息保持在底部位置
+  // Scroll to bottom using Virtuoso API
   const scrollToBottom = useCallback(() => {
-    // Check if newest message is in the window
-    const current = lastDisplayMessagesRef.current
-    const newestInWindow = current[current.length - 1]
-    const newestInArray = messages[messages.length - 1]
-
-    if (newestInWindow?.id !== newestInArray?.id) {
-      // Reset window to include newest messages
-      const startIndex = computeStartIndexForLatestGroups(messages, INITIAL_MESSAGES_COUNT)
-      const newDisplayMessages = computeDisplayMessages(messages, startIndex, INITIAL_MESSAGES_COUNT)
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder } = checkBoundaries()
-      setHasMore(hasOlder)
-    }
-
-    if (scrollContainerRef.current) {
-      requestAnimationFrame(() => {
-        if (scrollContainerRef.current) {
-          scrollContainerRef.current.scrollTo({ top: scrollContainerRef.current.scrollHeight })
-        }
+    if (groupedMessages.length === 0) return
+    requestAnimationFrame(() => {
+      virtuosoRef.current?.scrollToIndex({
+        index: groupedMessages.length - 1,
+        align: 'end',
+        behavior: 'auto'
       })
-    }
-  }, [scrollContainerRef, messages, checkBoundaries])
+    })
+  }, [groupedMessages])
 
   const clearTopic = useCallback(
     async (data: Topic) => {
@@ -510,8 +388,6 @@ const Messages = ({
       }
 
       await clearTopicMessages()
-      setDisplayMessages([])
-      lastDisplayMessagesRef.current = []
       clearSavedPosition()
     },
     [clearTopicMessages, topic.id, clearSavedPosition]
@@ -546,13 +422,13 @@ const Messages = ({
         setIsProcessingContext(true)
 
         try {
-          const messages = messagesRef.current
+          const msgs = messagesRef.current
 
-          if (messages.length === 0) {
+          if (msgs.length === 0) {
             return
           }
 
-          const lastMessage = messages.at(-1)
+          const lastMessage = msgs.at(-1)
 
           if (lastMessage?.type === 'clear') {
             await deleteMessage(lastMessage.id)
@@ -670,55 +546,6 @@ const Messages = ({
     }).then(() => onFirstUpdate?.())
   }, [assistant, messages, onFirstUpdate, topic.id])
 
-  const loadMoreMessages = useCallback(() => {
-    if (!hasMore || isLoadingMore) return
-
-    setIsLoadingMore(true)
-
-    // Capture anchor before DOM changes
-    const container = scrollContainerRef.current
-    const anchor = findFirstVisibleMessage(container, messageElements.current)
-
-    setTimeoutTimer(
-      'loadMoreMessages',
-      () => {
-        // Find the oldest loaded message and load messages before it
-        const currentDisplay = lastDisplayMessagesRef.current
-        const oldestInWindow = currentDisplay[0] // first in normal order = oldest
-        const oldestIndex = messages.findIndex((m) => m.id === oldestInWindow?.id)
-
-        if (oldestIndex <= 0) {
-          setIsLoadingMore(false)
-          return
-        }
-
-        const newStartIndex = Math.max(0, oldestIndex - LOAD_MORE_COUNT)
-        const newMessages = messages.slice(newStartIndex, oldestIndex)
-
-        const merged = [...newMessages, ...currentDisplay]
-        lastDisplayMessagesRef.current = merged
-        setDisplayMessages(merged)
-        setHasMore(merged[0]?.id !== messages[0]?.id)
-
-        setIsLoadingMore(false)
-
-        // Restore scroll position after re-render
-        if (anchor) {
-          requestAnimationFrame(() => {
-            if (container && anchor.element && anchor.element.isConnected) {
-              const newRect = anchor.element.getBoundingClientRect()
-              const delta = newRect.top - anchor.rect.top
-              if (Math.abs(delta) > 1) {
-                container.scrollTop += delta
-              }
-            }
-          })
-        }
-      },
-      50
-    )
-  }, [hasMore, isLoadingMore, messages, setTimeoutTimer, scrollContainerRef])
-
   useShortcut('copy_last_message', () => {
     const lastMessage = messages.at(-1)
     if (lastMessage) {
@@ -745,97 +572,29 @@ const Messages = ({
         topic={topic}
         scrollContainerRef={scrollContainerRef}
         handleScrollPosition={handleScrollPosition}
-        displayMessages={displayMessages}
         messages={messages}
-        isLoadingMore={isLoadingMore}
-        loadMoreMessages={loadMoreMessages}
+        groupedMessages={groupedMessages}
         registerMessageElement={registerMessageElement}
         scrollToMessageById={scrollToMessageById}
+        virtuosoRef={virtuosoRef}
+        scrollParentEl={scrollParentEl}
+        initialTopMostItemIndex={initialTopMostItemIndex}
       />
     </EditModeProvider>
   )
 }
 
-const computeDisplayMessages = (messages: Message[], startIndex: number, displayCount: number) => {
-  if (startIndex >= messages.length) return []
-
-  // 如果剩余消息数量小于 displayCount，直接返回所有剩余消息
-  if (messages.length - startIndex <= displayCount) {
-    return messages.slice(startIndex)
-  }
-
-  const userIdSet = new Set() // 用户消息 id 集合
-  const assistantIdSet = new Set() // 助手消息 askId 集合
-  const displayMessages: Message[] = []
-
-  // 处理单条消息的函数
-  const processMessage = (message: Message) => {
-    if (!message) return
-
-    const idSet = message.role === 'user' ? userIdSet : assistantIdSet
-    const messageId = message.role === 'user' ? message.id : message.askId
-
-    if (messageId && !idSet.has(messageId)) {
-      idSet.add(messageId)
-      displayMessages.push(message)
-      return
-    }
-    // 如果是相同 askId 的助手消息，也要显示
-    displayMessages.push(message)
-  }
-
-  // 正序遍历，从 startIndex 开始收集 displayCount 个唯一消息组
-  for (let i = startIndex; i < messages.length && userIdSet.size + assistantIdSet.size < displayCount; i++) {
-    processMessage(messages[i])
-  }
-
-  return displayMessages
-}
-
-const computeStartIndexAroundTarget = (messages: Message[], targetMessageId: string, contextCount: number): number => {
-  const targetIndex = messages.findIndex((m) => m.id === targetMessageId)
-  if (targetIndex === -1) return 0
-  return Math.max(0, targetIndex - contextCount)
-}
-
-/**
- * Find the start index in messages array that would yield the last `n` unique message groups.
- * Used by scrollToBottom to show the newest messages in normal order.
- */
-const computeStartIndexForLatestGroups = (messages: Message[], n: number): number => {
-  const userIdSet = new Set()
-  const assistantIdSet = new Set()
-  let uniqueCount = 0
-
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]
-    const idSet = msg.role === 'user' ? userIdSet : assistantIdSet
-    const messageId = msg.role === 'user' ? msg.id : msg.askId
-    if (messageId && !idSet.has(messageId)) {
-      idSet.add(messageId)
-      uniqueCount++
-      if (uniqueCount >= n) {
-        return i
-      }
-    }
-  }
-  return 0
-}
-
-const LoaderContainer = styled.div`
-  display: flex;
-  justify-content: center;
-  padding: 10px;
-  width: 100%;
-  background: var(--color-background);
-  pointer-events: none;
-`
-
-const SelectionBlock = styled.div`
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 0 0 1.5px var(--color-primary);
-  border-radius: 10px;
+// NOTE: 编辑模式下每个消息组独立包裹选区样式（box-shadow），
+// 不再将连续选中的多个组合并到单个 SelectionBlock 中。
+// 这是 Virtuoso 虚拟化的限制：每个 item 独立渲染，无法跨 item 合并 DOM 包裹。
+const VirtuosoItemWrapper = styled.div<{ $isSelected?: boolean }>`
+  ${(props) =>
+    props.$isSelected &&
+    `
+    box-shadow: 0 0 0 1.5px var(--color-primary);
+    border-radius: 10px;
+    margin: 2px 0;
+  `}
 `
 
 const ContextWindowDivider = styled.div`

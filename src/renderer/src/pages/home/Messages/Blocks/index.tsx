@@ -12,7 +12,7 @@ import type {
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { isMainTextBlock, isMessageProcessing, isToolBlock, isVideoBlock } from '@renderer/utils/messageUtils/is'
 import { AnimatePresence, motion, type Variants } from 'motion/react'
-import React, { useMemo } from 'react'
+import React, { useCallback, useMemo } from 'react'
 import { useSelector } from 'react-redux'
 import styled from 'styled-components'
 
@@ -55,12 +55,15 @@ const blockWrapperVariants: Variants = {
 }
 
 const AnimatedBlockWrapper: React.FC<AnimatedBlockWrapperProps> = ({ children, enableAnimation }) => {
+  if (!enableAnimation) {
+    return (
+      <div className="block-wrapper">
+        <ErrorBoundary fallbackComponent={BlockErrorFallback}>{children}</ErrorBoundary>
+      </div>
+    )
+  }
   return (
-    <motion.div
-      className="block-wrapper"
-      variants={blockWrapperVariants}
-      initial={enableAnimation ? 'hidden' : 'static'}
-      animate={enableAnimation ? 'visible' : 'static'}>
+    <motion.div className="block-wrapper" variants={blockWrapperVariants} initial="hidden" animate="visible">
       <ErrorBoundary fallbackComponent={BlockErrorFallback}>{children}</ErrorBoundary>
     </motion.div>
   )
@@ -206,25 +209,23 @@ const MessageBlockRenderer: React.FC<Props> = ({ blocks, message }) => {
     [renderedBlocks, allowCollapseExecutionDetails]
   )
 
-  return (
-    <AnimatePresence mode="sync">
-      {groupedBlocks.map((block) => {
+  const renderBlockList = useCallback(
+    (enableAnimation: boolean) =>
+      groupedBlocks.map((block) => {
         if (Array.isArray(block)) {
           const groupKey = block.map((b) => b.id).join('-')
 
           if (block.some(isExecutionDetailBlock)) {
             if (block.length === 1 && isToolBlock(block[0])) {
               return (
-                <AnimatedBlockWrapper key={groupKey} enableAnimation={message.status.includes('ing')}>
+                <AnimatedBlockWrapper key={groupKey} enableAnimation={enableAnimation}>
                   <ToolBlock key={block[0].id} block={block[0]} />
                 </AnimatedBlockWrapper>
               )
             }
 
             return (
-              <AnimatedBlockWrapper
-                key={`execution-group-${groupKey}`}
-                enableAnimation={message.status.includes('ing')}>
+              <AnimatedBlockWrapper key={`execution-group-${groupKey}`} enableAnimation={enableAnimation}>
                 <ToolBlockGroup blocks={block} role={message.role} />
               </AnimatedBlockWrapper>
             )
@@ -233,14 +234,13 @@ const MessageBlockRenderer: React.FC<Props> = ({ blocks, message }) => {
           if (block[0].type === MessageBlockType.IMAGE) {
             if (block.length === 1) {
               return (
-                <AnimatedBlockWrapper key={groupKey} enableAnimation={message.status.includes('ing')}>
+                <AnimatedBlockWrapper key={groupKey} enableAnimation={enableAnimation}>
                   <ImageBlock key={block[0].id} block={block[0]} isSingle={true} />
                 </AnimatedBlockWrapper>
               )
             }
-            // 多张图片使用 ImageBlockGroup 包装
             return (
-              <AnimatedBlockWrapper key={groupKey} enableAnimation={message.status.includes('ing')}>
+              <AnimatedBlockWrapper key={groupKey} enableAnimation={enableAnimation}>
                 <ImageBlockGroup count={block.length}>
                   {block.map((imageBlock) => (
                     <ImageBlock key={imageBlock.id} block={imageBlock as ImageMessageBlock} isSingle={false} />
@@ -249,37 +249,32 @@ const MessageBlockRenderer: React.FC<Props> = ({ blocks, message }) => {
               </AnimatedBlockWrapper>
             )
           } else if (block[0].type === MessageBlockType.VIDEO) {
-            // 对于相同路径的video，只渲染第一个
             if (!isVideoBlock(block[0])) {
               logger.warn('Expected video block but got different type', block[0])
               return null
             }
             const firstVideoBlock = block[0]
             return (
-              <AnimatedBlockWrapper key={groupKey} enableAnimation={message.status.includes('ing')}>
+              <AnimatedBlockWrapper key={groupKey} enableAnimation={enableAnimation}>
                 <VideoBlock key={firstVideoBlock.id} block={firstVideoBlock} />
               </AnimatedBlockWrapper>
             )
           } else if (block[0].type === MessageBlockType.TOOL) {
-            // 对于连续的TOOL，使用分组显示
             if (block.length === 1) {
-              // 单个工具调用，直接渲染
               if (!isToolBlock(block[0])) {
                 logger.warn('Expected tool block but got different type', block[0])
                 return null
               }
               return (
-                <AnimatedBlockWrapper key={groupKey} enableAnimation={message.status.includes('ing')}>
+                <AnimatedBlockWrapper key={groupKey} enableAnimation={enableAnimation}>
                   <ToolBlock key={block[0].id} block={block[0]} />
                 </AnimatedBlockWrapper>
               )
             }
-            // 多个工具调用，使用分组组件
             const toolBlocks = block.filter(isToolBlock)
-            // Use first block ID as stable key to prevent remounting when new blocks are added
             const stableGroupKey = `tool-group-${toolBlocks[0].id}`
             return (
-              <AnimatedBlockWrapper key={stableGroupKey} enableAnimation={message.status.includes('ing')}>
+              <AnimatedBlockWrapper key={stableGroupKey} enableAnimation={enableAnimation}>
                 <ToolBlockGroup blocks={toolBlocks} />
               </AnimatedBlockWrapper>
             )
@@ -299,14 +294,12 @@ const MessageBlockRenderer: React.FC<Props> = ({ blocks, message }) => {
               break
             }
             const mainTextBlock = block
-            // Find the associated citation block ID from the references
             const citationBlockId = mainTextBlock.citationReferences?.[0]?.citationBlockId
 
             blockComponent = (
               <MainTextBlock
                 key={block.id}
                 block={mainTextBlock}
-                // Pass only the ID string
                 citationBlockId={citationBlockId}
                 role={message.role}
               />
@@ -346,25 +339,31 @@ const MessageBlockRenderer: React.FC<Props> = ({ blocks, message }) => {
         }
 
         return (
-          <AnimatedBlockWrapper key={block.id} enableAnimation={message.status.includes('ing')}>
+          <AnimatedBlockWrapper key={block.id} enableAnimation={enableAnimation}>
             {blockComponent}
           </AnimatedBlockWrapper>
         )
-      })}
-      {isProcessing && (
-        <AnimatedBlockWrapper key="message-loading-placeholder" enableAnimation={true}>
-          <PlaceholderBlock
-            block={{
-              id: `loading-${message.id}`,
-              messageId: message.id,
-              type: MessageBlockType.UNKNOWN,
-              status: MessageBlockStatus.PROCESSING,
-              createdAt: new Date().toISOString()
-            }}
-          />
-        </AnimatedBlockWrapper>
-      )}
+      }),
+    [groupedBlocks, message.role, message.id]
+  )
+
+  return message.status.includes('ing') ? (
+    <AnimatePresence mode="sync">
+      {renderBlockList(true)}
+      <AnimatedBlockWrapper key="message-loading-placeholder" enableAnimation={true}>
+        <PlaceholderBlock
+          block={{
+            id: `loading-${message.id}`,
+            messageId: message.id,
+            type: MessageBlockType.UNKNOWN,
+            status: MessageBlockStatus.PROCESSING,
+            createdAt: new Date().toISOString()
+          }}
+        />
+      </AnimatedBlockWrapper>
     </AnimatePresence>
+  ) : (
+    renderBlockList(false)
   )
 }
 
