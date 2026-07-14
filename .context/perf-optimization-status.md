@@ -1,6 +1,6 @@
 # Cherry Studio Performance Optimization — Status
 
-> Last updated: 2026-07-13
+> Last updated: 2026-07-14
 > Branch: `jorkey/refactor/overhaul`
 > Session context for continuing work
 
@@ -111,10 +111,39 @@
 | svg chunk | 2.3MB | ✅ tree-shaking 已生效，无优化空间 |
 | vendor-antd | 6.9MB | ✅ tree-shaking 已生效，无优化空间 |
 
+### Round 7: 消息列表虚拟化（P1-8）
+
+**Phase 1 — 基础虚拟化架构:**
+- 用 `react-virtuoso` 替代 `react-infinite-scroll-component`
+- 实现 `VirtuosoMessageList` 组件，支持 column-reverse 布局
+- 消息分组渲染：`MessageGroup` + `UserMessage` + `AssistantMessage`
+
+**Phase 2 — 交互功能迁移:**
+- ChatNavigation 跳转集成 Virtuoso `scrollToIndex`
+- MessageAnchorLine 锚点功能迁移到 Virtuoso
+- 消息选择、编辑模式集成
+
+**Phase 3 — 性能优化:**
+- `computeDisplayMessages` 优化（消除 spread + reverse）
+- 消息渲染 memoization（`React.memo` + `useMemo`）
+- 虚拟化列表的 overscan 调优
+
+**Phase 4 — 清理收尾:**
+- 移除 `react-infinite-scroll-component` 依赖
+- 移除 `MessageAnchorLine` 组件及相关 i18n key
+- 移除 `INITIAL_MESSAGES_COUNT`、`LOAD_MORE_COUNT`、`SCROLL_CONTEXT_COUNT` 常量
+- 清理 `messageNavigation` Redux store 中 `'anchor'` 选项
+- 添加 Redux migration 将 `'anchor'` 转换为 `'buttons'`
+- 移除 `Messages.bench.ts`（dead code benchmark）
+- 清理测试文件中的 `react-infinite-scroll-component` mock
+
+**验证结果:**
+- `pnpm build:check` ✅ 通过
+- `pnpm test` ✅ 3965 tests pass, 72 skipped, 0 fail
+
 ### Deferred — Independent Projects
 | Issue | Effort | Notes |
 |---|---|---|
-| P1-8 消息列表虚拟化 | 9-13天 | 用 @tanstack/react-virtual 替代 react-infinite-scroll-component。column-reverse 布局、变高消息组、全对话截图是主要挑战。调查报告已完成。 |
 | #1 topics.messages 反范式化 | 5-8天 | 重度用户（200+消息/topic）写入放大200倍。轻量方案：.modify() 原地突变（2-3天）。完整方案：新建 messages 表。暂不执行，等 SQLite 迁移。 |
 | #2 历史搜索全表扫描 | 1-2天 | O(N²) join + 无 type 索引。等 SQLite 迁移后用 FTS5 解决。 |
 | #4 useLiveQuery 全量加载 | 0.5-1天 | 搜索页从 DB 重复加载 Redux 已有数据。等 SQLite 迁移。 |
@@ -170,9 +199,17 @@
 - `src/renderer/src/store/index.ts` — devTools 仅开发环境启用
 - `src/renderer/src/App.tsx` — 移除 PersistGate，立即渲染
 
+### Message List Virtualization
+- `src/renderer/src/pages/home/Messages/Messages.tsx` — react-virtuoso 集成
+- `src/renderer/src/pages/home/Messages/ChatNavigation.tsx` — Virtuoso scrollToIndex 跳转
+- `src/renderer/src/store/settings.ts` — messageNavigation 类型清理
+- `src/renderer/src/store/migrate.ts` — migration 211: 'anchor' → 'buttons'
+- `src/renderer/src/config/constant.ts` — 移除 INITIAL_MESSAGES_COUNT 等常量
+
 ## Dependencies Changed
 - `lodash` → `lodash-es` (+ @types/lodash → @types/lodash-es)
 - `react-player` removed (replaced with native `<video>`)
+- `react-infinite-scroll-component` removed (replaced with `react-virtuoso`)
 - electron.vite.config.ts: added vendor-lodash manualChunks rule
 
 ### Round 5 Audit Fix (commit `1868c45`)

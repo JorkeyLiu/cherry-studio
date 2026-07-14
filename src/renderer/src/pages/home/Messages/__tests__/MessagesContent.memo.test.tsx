@@ -216,10 +216,6 @@ vi.mock('react-i18next', () => ({
   }
 }))
 
-vi.mock('react-infinite-scroll-component', () => ({
-  default: vi.fn(({ children }: { children: ReactNode }) => <div>{children}</div>)
-}))
-
 vi.mock('../MessageGroup', () => ({
   default: vi.fn(() => <div data-testid="message-group" />)
 }))
