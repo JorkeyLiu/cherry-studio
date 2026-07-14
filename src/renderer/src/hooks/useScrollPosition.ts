@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 
 /**
  * Find the ID of the first visible message element in the scroll container.
- * In a column-reverse layout, "first visible" means the element closest to the container top.
+ * "First visible" means the element closest to the container top.
  */
 const findFirstVisibleMessageId = (container: HTMLElement | null): string | null => {
   if (!container) return null

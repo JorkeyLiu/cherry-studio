@@ -47,7 +47,6 @@ import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import React, { Fragment, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
 
 import MessageAnchorLine from './MessageAnchorLine'
@@ -94,6 +93,8 @@ const findFirstVisibleMessage = (
 
 const logger = loggerService.withContext('Messages')
 
+const SCROLL_TOP_THRESHOLD = 200 // pixels from top to trigger load more
+
 interface MessagesContentProps {
   assistant: Assistant
   topic: Topic
@@ -101,7 +102,6 @@ interface MessagesContentProps {
   handleScrollPosition: () => void
   displayMessages: Message[]
   messages: Message[]
-  hasMore: boolean
   isLoadingMore: boolean
   loadMoreMessages: () => void
   registerMessageElement: (id: string, element: HTMLElement | null) => void
@@ -115,7 +115,6 @@ const MessagesContent = React.memo(function MessagesContent({
   handleScrollPosition,
   displayMessages,
   messages,
-  hasMore,
   isLoadingMore,
   loadMoreMessages,
   registerMessageElement,
@@ -127,18 +126,22 @@ const MessagesContent = React.memo(function MessagesContent({
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
   useClipboardKeyboard()
 
-  // NOTE: 因为displayMessages是倒序的，所以得到的groupedMessages每个group内部也是倒序的，需要再倒一遍
+  // Combined scroll handler: saves scroll position + detects top for loading older messages
+  const handleScroll = useCallback(() => {
+    handleScrollPosition()
+
+    // Top detection for loading older messages
+    const container = scrollContainerRef.current
+    if (container && container.scrollTop <= SCROLL_TOP_THRESHOLD) {
+      loadMoreMessages()
+    }
+  }, [handleScrollPosition, loadMoreMessages, scrollContainerRef])
+
+  // displayMessages is now in normal order (oldest first), so groupedMessages
+  // groups are also in normal order. No need to reverse within each group.
   const groupedMessages = useMemo(() => {
     const grouped = Object.entries(getGroupedMessages(displayMessages))
-    const newGrouped: {
-      [key: string]: (Message & {
-        index: number
-      })[]
-    } = {}
-    grouped.forEach(([key, group]) => {
-      newGrouped[key] = group.toReversed()
-    })
-    return Object.entries(newGrouped)
+    return grouped
   }, [displayMessages])
 
   // 将消息按是否选中分段，用于连续选中消息的包裹
@@ -205,21 +208,30 @@ const MessagesContent = React.memo(function MessagesContent({
 
     if (anchorOriginalIndex < 0) return -1
 
-    // Convert to reversed index (displayMessages is newest-first for column-reverse)
-    const anchorInReversed = messages.length - 1 - anchorOriginalIndex
-    if (anchorInReversed >= 0 && anchorInReversed < displayMessages.length) {
-      // +1: the divider renders before the group (visually ABOVE the anchor,
-      // separating in-context messages from out-of-context older messages)
-      return anchorInReversed + 1
+    // In normal order (oldest first), find the anchor's position in displayMessages
+    // and then find the start of the group containing the anchor.
+    // The boundary is the start of that group, so the divider renders before it.
+    const anchorDisplayIndex = displayMessages.findIndex((m) => m.id === messages[anchorOriginalIndex]?.id)
+    if (anchorDisplayIndex < 0) return -1
+
+    // Find the start of the group containing the anchor
+    for (const [, groupMessages] of groupedMessages) {
+      const groupStart = groupMessages[0]?.index ?? -1
+      const groupEnd = groupMessages[groupMessages.length - 1]?.index ?? -1
+      if (anchorDisplayIndex >= groupStart && anchorDisplayIndex <= groupEnd) {
+        // +1: the divider renders before the group (visually ABOVE the anchor,
+        // separating in-context messages from out-of-context older messages)
+        return groupStart
+      }
     }
     return -1
-  }, [assistant, messages, displayMessages.length, topic.id])
+  }, [assistant, messages, displayMessages, groupedMessages, topic.id])
 
   // Find the group key where the context window divider should be rendered
   const contextDividerGroupKey = useMemo(() => {
-    if (contextWindowBoundaryIndex < 0) return null
+    if (contextWindowBoundaryIndex <= 0) return null
     for (const [key, groupMessages] of groupedMessages) {
-      // groupMessages is in chronological order (oldest first = highest displayMessages index first)
+      // groupMessages is in chronological order; groupStart is the lowest displayMessages index in the group
       // Check if the oldest message in this group is at or past the boundary
       const oldestMsgIndex = groupMessages[0]?.index ?? -1
       if (oldestMsgIndex >= contextWindowBoundaryIndex) {
@@ -263,34 +275,24 @@ const MessagesContent = React.memo(function MessagesContent({
       className="messages-container"
       ref={scrollContainerRef}
       key={assistant.id}
-      onScroll={handleScrollPosition}>
-      <NarrowLayout style={{ display: 'flex', flexDirection: 'column-reverse' }}>
-        <InfiniteScroll
-          dataLength={displayMessages.length}
-          next={loadMoreMessages}
-          hasMore={hasMore}
-          loader={null}
-          scrollableTarget="messages"
-          inverse
-          style={{ overflow: 'visible' }}>
-          <ContextMenu>
-            <ScrollContainer>
-              {renderMessageSegments()}
-              {isLoadingMore && (
-                <LoaderContainer>
-                  <LoadingIcon color="var(--color-text-2)" />
-                </LoaderContainer>
-              )}
-            </ScrollContainer>
-          </ContextMenu>
-        </InfiniteScroll>
-
+      onScroll={handleScroll}>
+      {isEditMode && <EditModeActionBar />}
+      <NarrowLayout style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
         {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
+        <ContextMenu>
+          <ScrollContainer>
+            {renderMessageSegments()}
+            {isLoadingMore && (
+              <LoaderContainer>
+                <LoadingIcon color="var(--color-text-2)" />
+              </LoaderContainer>
+            )}
+          </ScrollContainer>
+        </ContextMenu>
       </NarrowLayout>
       {messageNavigation === 'anchor' && (
         <MessageAnchorLine messages={displayMessages} scrollToMessageById={scrollToMessageById} />
       )}
-      {isEditMode && <EditModeActionBar />}
     </MessagesContainer>
   )
 })
@@ -393,8 +395,8 @@ const Messages = ({
     const current = lastDisplayMessagesRef.current
     if (current.length === 0 || messages.length === 0) return { hasOlder: false, hasNewer: false }
 
-    const newestInWindow = current[0] // newest in window (first in reverse-ordered array)
-    const oldestInWindow = current[current.length - 1] // oldest in window
+    const oldestInWindow = current[0] // oldest in window (first in normal-ordered array)
+    const newestInWindow = current[current.length - 1] // newest in window
     const newestInArray = messages[messages.length - 1]
     const oldestInArray = messages[0]
 
@@ -409,8 +411,12 @@ const Messages = ({
     if (jumpTargetRef.current) {
       const targetId = jumpTargetRef.current
       jumpTargetRef.current = null
-      const startIndex = computeStartIndex(messages, targetId, SCROLL_CONTEXT_COUNT)
-      const newDisplayMessages = computeDisplayMessages(messages, startIndex, startIndex + INITIAL_MESSAGES_COUNT)
+      const startIndex = computeStartIndexAroundTarget(messages, targetId, SCROLL_CONTEXT_COUNT)
+      const newDisplayMessages = computeDisplayMessages(
+        messages,
+        startIndex,
+        SCROLL_CONTEXT_COUNT + INITIAL_MESSAGES_COUNT
+      )
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
       const { hasOlder } = checkBoundaries()
@@ -428,34 +434,41 @@ const Messages = ({
       return
     }
 
-    // Scenario 2: First load
+    // Scenario 2: First load — show the latest messages in normal order
     if (lastDisplayMessagesRef.current.length === 0) {
-      const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
+      const startIndex = computeStartIndexForLatestGroups(messages, displayCount)
+      const newDisplayMessages = computeDisplayMessages(messages, startIndex, displayCount)
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder } = checkBoundaries()
-      setHasMore(hasOlder)
+      setHasMore(startIndex > 0)
+
+      // Scroll to bottom after initial render (column layout defaults to top)
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (scrollContainerRef.current) {
+            scrollContainerRef.current.scrollTo({ top: scrollContainerRef.current.scrollHeight })
+          }
+        })
+      })
 
       return
     }
 
     // Scenario 3: Messages content changed (edit/delete/etc) - incremental update
-    const earliestLoadedId = lastDisplayMessagesRef.current[lastDisplayMessagesRef.current.length - 1]?.id
+    const earliestLoadedId = lastDisplayMessagesRef.current[0]?.id
     const earliestIndex = messages.findIndex((m) => m.id === earliestLoadedId)
 
     if (earliestIndex === -1) {
-      // Earliest loaded message was deleted, need full recalc
-      const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
+      // Earliest loaded message was deleted, need full recalc from latest
+      const startIndex = computeStartIndexForLatestGroups(messages, displayCount)
+      const newDisplayMessages = computeDisplayMessages(messages, startIndex, displayCount)
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder } = checkBoundaries()
-      setHasMore(hasOlder)
+      setHasMore(startIndex > 0)
     } else {
-      // Keep window position, rebuild from earliest to end
-      const newDisplayMessages: Message[] = []
-      for (let i = messages.length - 1; i >= earliestIndex; i--) {
-        newDisplayMessages.push(messages[i])
-      }
+      // Always extend to end of array — new messages at the end don't disturb
+      // the user's scroll position when browsing older messages
+      const newDisplayMessages = messages.slice(earliestIndex)
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
       const { hasOlder } = checkBoundaries()
@@ -467,12 +480,13 @@ const Messages = ({
   const scrollToBottom = useCallback(() => {
     // Check if newest message is in the window
     const current = lastDisplayMessagesRef.current
-    const newestInWindow = current[0]
+    const newestInWindow = current[current.length - 1]
     const newestInArray = messages[messages.length - 1]
 
     if (newestInWindow?.id !== newestInArray?.id) {
       // Reset window to include newest messages
-      const newDisplayMessages = computeDisplayMessages(messages, 0, INITIAL_MESSAGES_COUNT)
+      const startIndex = computeStartIndexForLatestGroups(messages, INITIAL_MESSAGES_COUNT)
+      const newDisplayMessages = computeDisplayMessages(messages, startIndex, INITIAL_MESSAGES_COUNT)
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
       const { hasOlder } = checkBoundaries()
@@ -482,7 +496,7 @@ const Messages = ({
     if (scrollContainerRef.current) {
       requestAnimationFrame(() => {
         if (scrollContainerRef.current) {
-          scrollContainerRef.current.scrollTo({ top: 0 })
+          scrollContainerRef.current.scrollTo({ top: scrollContainerRef.current.scrollHeight })
         }
       })
     }
@@ -670,7 +684,7 @@ const Messages = ({
       () => {
         // Find the oldest loaded message and load messages before it
         const currentDisplay = lastDisplayMessagesRef.current
-        const oldestInWindow = currentDisplay[currentDisplay.length - 1]
+        const oldestInWindow = currentDisplay[0] // first in normal order = oldest
         const oldestIndex = messages.findIndex((m) => m.id === oldestInWindow?.id)
 
         if (oldestIndex <= 0) {
@@ -678,16 +692,13 @@ const Messages = ({
           return
         }
 
-        const startIndex = messages.length - oldestIndex
-        const newMessages = computeDisplayMessages(messages, startIndex, LOAD_MORE_COUNT)
+        const newStartIndex = Math.max(0, oldestIndex - LOAD_MORE_COUNT)
+        const newMessages = messages.slice(newStartIndex, oldestIndex)
 
-        setDisplayMessages((prev) => {
-          const merged = [...prev, ...newMessages]
-          lastDisplayMessagesRef.current = merged
-          return merged
-        })
-        const { hasOlder } = checkBoundaries()
-        setHasMore(hasOlder)
+        const merged = [...newMessages, ...currentDisplay]
+        lastDisplayMessagesRef.current = merged
+        setDisplayMessages(merged)
+        setHasMore(merged[0]?.id !== messages[0]?.id)
 
         setIsLoadingMore(false)
 
@@ -706,7 +717,7 @@ const Messages = ({
       },
       50
     )
-  }, [hasMore, isLoadingMore, messages, setTimeoutTimer, scrollContainerRef, checkBoundaries])
+  }, [hasMore, isLoadingMore, messages, setTimeoutTimer, scrollContainerRef])
 
   useShortcut('copy_last_message', () => {
     const lastMessage = messages.at(-1)
@@ -736,7 +747,6 @@ const Messages = ({
         handleScrollPosition={handleScrollPosition}
         displayMessages={displayMessages}
         messages={messages}
-        hasMore={hasMore}
         isLoadingMore={isLoadingMore}
         loadMoreMessages={loadMoreMessages}
         registerMessageElement={registerMessageElement}
@@ -747,14 +757,13 @@ const Messages = ({
 }
 
 const computeDisplayMessages = (messages: Message[], startIndex: number, displayCount: number) => {
-  // 如果剩余消息数量小于 displayCount，直接返回所有剩余消息的倒序切片
+  if (startIndex >= messages.length) return []
+
+  // 如果剩余消息数量小于 displayCount，直接返回所有剩余消息
   if (messages.length - startIndex <= displayCount) {
-    const result: Message[] = []
-    for (let i = messages.length - 1 - startIndex; i >= 0; i--) {
-      result.push(messages[i])
-    }
-    return result
+    return messages.slice(startIndex)
   }
+
   const userIdSet = new Set() // 用户消息 id 集合
   const assistantIdSet = new Set() // 助手消息 askId 集合
   const displayMessages: Message[] = []
@@ -766,7 +775,7 @@ const computeDisplayMessages = (messages: Message[], startIndex: number, display
     const idSet = message.role === 'user' ? userIdSet : assistantIdSet
     const messageId = message.role === 'user' ? message.id : message.askId
 
-    if (!idSet.has(messageId)) {
+    if (messageId && !idSet.has(messageId)) {
       idSet.add(messageId)
       displayMessages.push(message)
       return
@@ -775,19 +784,42 @@ const computeDisplayMessages = (messages: Message[], startIndex: number, display
     displayMessages.push(message)
   }
 
-  // 直接在原数组上倒序遍历，跳过前 startIndex 个，避免全量拷贝和 reverse()
-  for (let i = messages.length - 1 - startIndex; i >= 0 && userIdSet.size + assistantIdSet.size < displayCount; i--) {
+  // 正序遍历，从 startIndex 开始收集 displayCount 个唯一消息组
+  for (let i = startIndex; i < messages.length && userIdSet.size + assistantIdSet.size < displayCount; i++) {
     processMessage(messages[i])
   }
 
   return displayMessages
 }
 
-const computeStartIndex = (messages: Message[], targetMessageId: string, contextCount: number): number => {
+const computeStartIndexAroundTarget = (messages: Message[], targetMessageId: string, contextCount: number): number => {
   const targetIndex = messages.findIndex((m) => m.id === targetMessageId)
   if (targetIndex === -1) return 0
-  const startIndex = Math.max(0, messages.length - 1 - targetIndex - contextCount)
-  return startIndex
+  return Math.max(0, targetIndex - contextCount)
+}
+
+/**
+ * Find the start index in messages array that would yield the last `n` unique message groups.
+ * Used by scrollToBottom to show the newest messages in normal order.
+ */
+const computeStartIndexForLatestGroups = (messages: Message[], n: number): number => {
+  const userIdSet = new Set()
+  const assistantIdSet = new Set()
+  let uniqueCount = 0
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    const idSet = msg.role === 'user' ? userIdSet : assistantIdSet
+    const messageId = msg.role === 'user' ? msg.id : msg.askId
+    if (messageId && !idSet.has(messageId)) {
+      idSet.add(messageId)
+      uniqueCount++
+      if (uniqueCount >= n) {
+        return i
+      }
+    }
+  }
+  return 0
 }
 
 const LoaderContainer = styled.div`
@@ -801,7 +833,7 @@ const LoaderContainer = styled.div`
 
 const SelectionBlock = styled.div`
   display: flex;
-  flex-direction: column-reverse;
+  flex-direction: column;
   box-shadow: 0 0 0 1.5px var(--color-primary);
   border-radius: 10px;
 `

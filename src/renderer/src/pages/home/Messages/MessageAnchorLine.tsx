@@ -189,21 +189,6 @@ const MessageAnchorLine: FC<MessageLineProps> = ({ messages, scrollToMessageById
       onMouseLeave={handleMouseLeave}
       $height={containerHeight}>
       <MessagesList ref={messagesListRef} style={{ transform: `translateY(${listOffsetY}px)` }}>
-        <MessageItem
-          key="bottom-anchor"
-          ref={(el) => {
-            if (el) messageItemsRef.current.set('bottom-anchor', el)
-            else messageItemsRef.current.delete('bottom-anchor')
-          }}
-          style={{
-            opacity: mouseY ? 0.5 : Math.max(0, 0.6 - (0.3 * Math.abs(0 - messages.length / 2)) / 5)
-          }}
-          onClick={scrollToBottom}>
-          <CircleChevronDown
-            size={10 + calculateValueByDistance('bottom-anchor', 20)}
-            style={{ color: theme === 'dark' ? 'var(--color-text)' : 'var(--color-primary)' }}
-          />
-        </MessageItem>
         {messages.map((message, index) => {
           const opacity = 0.5 + calculateValueByDistance(message.id, 1)
           const scale = 1 + calculateValueByDistance(message.id, 1.2)
@@ -259,6 +244,21 @@ const MessageAnchorLine: FC<MessageLineProps> = ({ messages, scrollToMessageById
             </MessageItem>
           )
         })}
+        <MessageItem
+          key="bottom-anchor"
+          ref={(el) => {
+            if (el) messageItemsRef.current.set('bottom-anchor', el)
+            else messageItemsRef.current.delete('bottom-anchor')
+          }}
+          style={{
+            opacity: mouseY ? 0.5 : Math.max(0, 0.6 - (0.3 * Math.abs(messages.length - messages.length / 2)) / 5)
+          }}
+          onClick={scrollToBottom}>
+          <CircleChevronDown
+            size={10 + calculateValueByDistance('bottom-anchor', 20)}
+            style={{ color: theme === 'dark' ? 'var(--color-text)' : 'var(--color-primary)' }}
+          />
+        </MessageItem>
       </MessagesList>
     </MessageLineContainer>
   )
@@ -313,7 +313,7 @@ const MessageLineContainer = styled.div<{ $height: number | null }>`
 
 const MessagesList = styled.div`
   display: flex;
-  flex-direction: column-reverse;
+  flex-direction: column;
   will-change: transform;
 `
 

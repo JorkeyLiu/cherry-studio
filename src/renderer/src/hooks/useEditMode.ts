@@ -13,7 +13,7 @@ import {
 } from '@renderer/store/editMode'
 import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import i18n from 'i18next'
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { shallowEqual } from 'react-redux'
 
 import { getGroupIndex, useMessageGroups } from './useMessageGroup'
@@ -34,6 +34,16 @@ export function useCreateEditMode(
   const clipboard = useAppSelector((state) => state.clipboard)
   const undoStack = useAppSelector((state) => state.undoStack)
   const messages = useAppSelector((state) => selectMessagesForTopic(state, topicId), shallowEqual)
+
+  // Refs to stabilize callbacks that need latest values without causing re-renders
+  const selectedGroupIdsRef = useRef(selectedGroupIds)
+  const lastSelectedIndexRef = useRef(lastSelectedIndex)
+  useEffect(() => {
+    selectedGroupIdsRef.current = selectedGroupIds
+  }, [selectedGroupIds])
+  useEffect(() => {
+    lastSelectedIndexRef.current = lastSelectedIndex
+  }, [lastSelectedIndex])
 
   // 消息组
   const allGroups = useMessageGroups(messages)
@@ -69,15 +79,18 @@ export function useCreateEditMode(
       const groupIndex = getGroupIndex(groups, askId)
       if (groupIndex === -1) return
 
-      if (isShift && lastSelectedIndex !== null) {
+      const currentSelected = selectedGroupIdsRef.current
+      const currentLastIndex = lastSelectedIndexRef.current
+
+      if (isShift && currentLastIndex !== null) {
         // Shift 区域选
-        const start = Math.min(lastSelectedIndex, groupIndex)
-        const end = Math.max(lastSelectedIndex, groupIndex)
+        const start = Math.min(currentLastIndex, groupIndex)
+        const end = Math.max(currentLastIndex, groupIndex)
         const rangeAskIds = groups.slice(start, end + 1).map((g) => g.askId)
 
         if (isCtrl) {
           // Ctrl+Shift: 并集
-          const newSelection = [...new Set([...selectedGroupIds, ...rangeAskIds])]
+          const newSelection = [...new Set([...currentSelected, ...rangeAskIds])]
           dispatch(setSelectedGroupIds(newSelection))
         } else {
           // Shift only: 替换
@@ -85,16 +98,16 @@ export function useCreateEditMode(
         }
       } else if (isCtrl) {
         // Ctrl 点选：切换
-        const index = selectedGroupIds.indexOf(askId)
+        const index = currentSelected.indexOf(askId)
         if (index >= 0) {
-          dispatch(setSelectedGroupIds(selectedGroupIds.filter((id) => id !== askId)))
+          dispatch(setSelectedGroupIds(currentSelected.filter((id) => id !== askId)))
         } else {
-          dispatch(setSelectedGroupIds([...selectedGroupIds, askId]))
+          dispatch(setSelectedGroupIds([...currentSelected, askId]))
         }
       } else {
         // 普通点击
-        const isSelected = selectedGroupIds.includes(askId)
-        if (isSelected && selectedGroupIds.length === 1) {
+        const isSelected = currentSelected.includes(askId)
+        if (isSelected && currentSelected.length === 1) {
           // 点击唯一选中的 → 取消选中
           dispatch(clearSelection())
         } else {
@@ -108,7 +121,7 @@ export function useCreateEditMode(
         dispatch(setFocusedIndex(groupIndex))
       }
     },
-    [dispatch, groups, selectedGroupIds, lastSelectedIndex, isEnabled]
+    [dispatch, groups, isEnabled]
   )
 
   // 复制

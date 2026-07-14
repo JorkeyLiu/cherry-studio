@@ -109,10 +109,12 @@ const Container = styled.div`
   position: sticky;
   top: 0;
   z-index: 10;
+  height: 0;
+  min-height: 0;
+  overflow: visible;
   display: flex;
   justify-content: center;
-  align-items: center;
-  padding: 8px 16px;
+  align-items: flex-start;
 `
 
 const ActionBar = styled.div`
@@ -120,6 +122,7 @@ const ActionBar = styled.div`
   align-items: center;
   justify-content: space-between;
   background-color: var(--color-background);
+  margin: 8px 16px;
   padding: 4px 4px;
   border-radius: 99px;
   box-shadow: 0px 2px 8px 0px rgb(128 128 128 / 20%);

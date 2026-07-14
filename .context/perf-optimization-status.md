@@ -174,3 +174,9 @@
 - `lodash` → `lodash-es` (+ @types/lodash → @types/lodash-es)
 - `react-player` removed (replaced with native `<video>`)
 - electron.vite.config.ts: added vendor-lodash manualChunks rule
+
+### Round 5 Audit Fix (commit `1868c45`)
+- Major#1: selectMessagesForTopic cache now includes entity refs in fast-path check
+- Major#2: MCP progress throttle emits terminal 100% events, flushes last skipped in finally
+- Major#3: CodeMirror lazy theme fallback returns 'light'/'dark' instead of raw theme names
+- Minor: AntdProvider locale loading .catch handler for chunk load failures
