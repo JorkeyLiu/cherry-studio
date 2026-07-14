@@ -12,6 +12,16 @@ import { isEmpty } from 'lodash-es'
 // const logger = loggerService.withContext('Utils.filter')
 
 /**
+ * Wrapper type that preserves the original message reference while adding an index.
+ * Using a wrapper instead of `{ ...message, index }` keeps the original message
+ * object reference stable, which is critical for React.memo on MessageGroup/MessageItem.
+ */
+export interface IndexedMessage {
+  message: Message
+  index: number
+}
+
+/**
  * Filters out messages of type '@' or 'clear' and messages without main text content.
  */
 export const filterMessages = (messages: Message[]) => {
@@ -88,8 +98,8 @@ export function filterEmptyMessages(messages: Message[]): Message[] {
 /**
  * Groups messages by user message ID or assistant askId.
  */
-export function getGroupedMessages(messages: Message[]): { [key: string]: (Message & { index: number })[] } {
-  const groups: { [key: string]: (Message & { index: number })[] } = {}
+export function getGroupedMessages(messages: Message[]): { [key: string]: IndexedMessage[] } {
+  const groups: { [key: string]: IndexedMessage[] } = {}
   messages.forEach((message, index) => {
     let key = message.role === 'assistant' && message.askId ? 'assistant' + message.askId : message.role + message.id
 
@@ -111,7 +121,7 @@ export function getGroupedMessages(messages: Message[]): { [key: string]: (Messa
       }
     }
 
-    groups[key].push({ ...message, index })
+    groups[key].push({ message, index })
   })
   return groups
 }
@@ -126,19 +136,19 @@ export function filterUsefulMessages(messages: Message[]): Message[] {
 
   Object.entries(groupedMessages).forEach(([key, groupedMsgs]) => {
     if (key.startsWith('assistant')) {
-      const usefulMessage = groupedMsgs.find((m) => m.useful === true)
-      if (usefulMessage) {
+      const usefulEntry = groupedMsgs.find((im) => im.message.useful === true)
+      if (usefulEntry) {
         // Remove all messages in the group except the useful one
-        groupedMsgs.forEach((m) => {
-          if (m.id !== usefulMessage.id) {
-            remove(_messages, (o) => o.id === m.id)
+        groupedMsgs.forEach((im) => {
+          if (im.message.id !== usefulEntry.message.id) {
+            remove(_messages, (o) => o.id === im.message.id)
           }
         })
       } else if (groupedMsgs.length > 0) {
         // Keep only the first message if none are marked useful
         const messagesToRemove = groupedMsgs.slice(1)
-        messagesToRemove.forEach((m) => {
-          remove(_messages, (o) => o.id === m.id)
+        messagesToRemove.forEach((im) => {
+          remove(_messages, (o) => o.id === im.message.id)
         })
       }
     }
@@ -211,20 +221,6 @@ export function filterErrorOnlyMessagesWithRelated(messages: Message[]): Message
     return true
   })
 }
-
-// Note: getGroupedMessages might also need to be moved or imported.
-// It depends on message.askId which should still exist on the Message type.
-// export function getGroupedMessages(messages: Message[]): { [key: string]: (Message & { index: number })[] } {
-//   const groups: { [key: string]: (Message & { index: number })[] } = {}
-//   messages.forEach((message, index) => {
-//     const key = message.askId ? 'assistant' + message.askId : 'user' + message.id
-//     if (key && !groups[key]) {
-//       groups[key] = []
-//     }
-//     groups[key].unshift({ ...message, index }) // Keep unshift if order matters for useful filter
-//   })
-//   return groups
-// }
 
 /**
  * Filters and processes messages based on context requirements

@@ -13,9 +13,10 @@ import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { classNames } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
+import type { IndexedMessage } from '@renderer/utils/messageUtils/filters'
 import { Popover } from 'antd'
 import type { ComponentProps, WheelEvent as ReactWheelEvent } from 'react'
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import styled from 'styled-components'
 
 import MessageItem from './Message'
@@ -23,7 +24,7 @@ import MessageGroupMenuBar from './MessageGroupMenuBar'
 
 const logger = loggerService.withContext('MessageGroup')
 interface Props {
-  messages: (Message & { index: number })[]
+  messages: IndexedMessage[]
   topic: Topic
   registerMessageElement?: (id: string, element: HTMLElement | null) => void
   isEditMode?: boolean
@@ -32,7 +33,7 @@ interface Props {
 
 const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = false, onGroupClick }: Props) => {
   const messageLength = messages.length
-  const groupId = messages[0]?.askId || messages[0]?.id
+  const groupId = messages[0]?.message.askId || messages[0]?.message.id
 
   // Hooks
   const { editMessage } = useMessageOperations(topic)
@@ -45,19 +46,24 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   const { setTimeoutTimer } = useTimer()
   const dispatch = useAppDispatch()
 
-  const isGrouped = messageLength > 1 && messages.every((m) => m.role === 'assistant')
+  // Hold messages in a ref so callbacks can read the latest value without depending on
+  // the array reference (which changes every render since getGroupedMessages returns a new array).
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
+
+  const isGrouped = messageLength > 1 && messages.every((im) => im.message.role === 'assistant')
 
   // States
   const [_multiModelMessageStyle, setMultiModelMessageStyle] = useState<MultiModelMessageStyle>(
-    messages[0].multiModelMessageStyle || multiModelMessageStyleSetting
+    messages[0].message.multiModelMessageStyle || multiModelMessageStyleSetting
   )
   const [selectedIndex, setSelectedIndex] = useState(messageLength - 1)
 
   // Local state for selected message (replaces Redux/DB foldSelected to avoid re-render cascade)
   const initialSelectedId = useMemo(() => {
-    if (messages.length === 1) return messages[0]?.id
-    const foldSelected = messages.find((message) => message.foldSelected)
-    return foldSelected ? foldSelected.id : messages[0]?.id
+    if (messages.length === 1) return messages[0]?.message.id
+    const foldSelected = messages.find((im) => im.message.foldSelected)
+    return foldSelected ? foldSelected.message.id : messages[0]?.message.id
   }, []) // only on mount
   const [selectedMessageId, setSelectedMessageIdLocal] = useState<string>(initialSelectedId)
 
@@ -99,16 +105,16 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
       const { messageId } = event.detail
 
       // 查找对应的消息在当前消息组中的索引
-      const targetIndex = messages.findIndex((msg) => msg.id === messageId)
+      const targetIndex = messages.findIndex((im) => im.message.id === messageId)
 
       // 如果找到消息且不是当前选中的索引，则切换标签
       if (targetIndex !== -1 && targetIndex !== selectedIndex) {
         setSelectedIndex(targetIndex)
 
         // 使用setSelectedMessage函数来切换标签，这是处理foldSelected的关键
-        const targetMessage = messages[targetIndex]
-        if (targetMessage) {
-          setSelectedMessage(targetMessage)
+        const targetEntry = messages[targetIndex]
+        if (targetEntry) {
+          setSelectedMessage(targetEntry.message)
         }
       }
     }
@@ -128,17 +134,17 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
     // 为每个消息注册一个定位事件监听器
     const eventHandlers: { [key: string]: () => void } = {}
 
-    messages.forEach((message) => {
-      const eventName = EVENT_NAMES.LOCATE_MESSAGE + ':' + message.id
+    messages.forEach((im) => {
+      const eventName = EVENT_NAMES.LOCATE_MESSAGE + ':' + im.message.id
       const handler = () => {
         // 检查消息是否处于可见状态
-        const element = document.getElementById(`message-${message.id}`)
+        const element = document.getElementById(`message-${im.message.id}`)
         if (element) {
           const display = window.getComputedStyle(element).display
 
           if (display === 'none') {
             // 如果消息隐藏，先切换标签
-            setSelectedMessage(message)
+            setSelectedMessage(im.message)
           } else {
             // 直接滚动
             scrollIntoView(element, { behavior: 'smooth', block: 'start', container: 'nearest' })
@@ -160,34 +166,35 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   }, [messages, setSelectedMessage])
 
   useEffect(() => {
-    messages.forEach((message) => {
-      const element = document.getElementById(`message-${message.id}`)
-      element && registerMessageElement?.(message.id, element)
+    messages.forEach((im) => {
+      const element = document.getElementById(`message-${im.message.id}`)
+      element && registerMessageElement?.(im.message.id, element)
     })
-    return () => messages.forEach((message) => registerMessageElement?.(message.id, null))
+    return () => messages.forEach((im) => registerMessageElement?.(im.message.id, null))
   }, [messages, registerMessageElement])
 
   const onUpdateUseful = useCallback(
     (msgId: string) => {
-      const message = messages.find((msg) => msg.id === msgId)
-      if (!message) {
+      const currentMessages = messagesRef.current
+      const entry = currentMessages.find((im) => im.message.id === msgId)
+      if (!entry) {
         logger.error("the message to update doesn't exist in this group")
         return
       }
-      if (message.useful) {
+      if (entry.message.useful) {
         void editMessage(msgId, { useful: undefined })
         return
       } else {
-        const toResetUsefulMsgs = messages.filter((msg) => msg.id !== msgId && msg.useful)
-        toResetUsefulMsgs.forEach(async (msg) => {
-          void editMessage(msg.id, {
+        const toResetUsefulMsgs = currentMessages.filter((im) => im.message.id !== msgId && im.message.useful)
+        toResetUsefulMsgs.forEach(async (im) => {
+          void editMessage(im.message.id, {
             useful: undefined
           })
         })
         void editMessage(msgId, { useful: true })
       }
     },
-    [editMessage, messages]
+    [editMessage]
   )
 
   const handleReorderMessages = useCallback(
@@ -205,11 +212,11 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   const groupContextMessageId = useMemo(() => {
     // NOTE: 旧数据可能存在一组消息有多个useful的情况，只取第一个，不再另作迁移
     // find first useful
-    const usefulMsg = messages.find((msg) => msg.useful)
-    if (usefulMsg) {
-      return usefulMsg.id
+    const usefulEntry = messages.find((im) => im.message.useful)
+    if (usefulEntry) {
+      return usefulEntry.message.id
     } else if (messages.length > 0) {
-      return messages[0].id
+      return messages[0].message.id
     } else {
       logger.warn('Empty message group')
       return ''
@@ -244,14 +251,15 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   }, [])
 
   const renderMessage = useCallback(
-    (message: Message & { index: number }) => {
+    (im: IndexedMessage) => {
+      const { message, index } = im
       const isGridGroupMessage = isGrid && message.role === 'assistant' && isGrouped
       const messageProps = {
         isGrouped,
         isHorizontalMultiModelLayout: multiModelMessageStyle === 'horizontal',
         message,
         topic,
-        index: message.index,
+        index,
         isEditMode,
         onGroupClick
       } satisfies ComponentProps<typeof MessageItem>
@@ -262,7 +270,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
           key={message.id}
           className={classNames([
             {
-              [multiModelMessageStyle]: message.role === 'assistant' && messages.length > 1,
+              [multiModelMessageStyle]: message.role === 'assistant' && messageCount > 1,
               selected: message.id === selectedMessageId
             }
           ])}>
@@ -284,7 +292,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
                 className={classNames([
                   'in-popover',
                   {
-                    [multiModelMessageStyle]: message.role === 'assistant' && messages.length > 1,
+                    [multiModelMessageStyle]: message.role === 'assistant' && messageCount > 1,
                     selected: message.id === selectedMessageId
                   }
                 ])}>
@@ -335,11 +343,11 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
             multiModelMessageStyle={multiModelMessageStyle}
             setMultiModelMessageStyle={(style) => {
               setMultiModelMessageStyle(style)
-              messages.forEach((message) => {
-                void editMessage(message.id, { multiModelMessageStyle: style })
+              messages.forEach((im) => {
+                void editMessage(im.message.id, { multiModelMessageStyle: style })
               })
             }}
-            messages={messages}
+            messages={messages.map((im) => im.message)}
             selectMessageId={selectedMessageId}
             setSelectedMessage={setSelectedMessage}
             onReorderMessages={handleReorderMessages}

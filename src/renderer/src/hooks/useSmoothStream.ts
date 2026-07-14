@@ -81,6 +81,10 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
   )
 
   useEffect(() => {
+    if (streamDone && chunkQueueRef.current.length === 0) {
+      // Already done, no queued chunks — skip the rAF loop entirely
+      return
+    }
     // 启动渲染循环
     animationFrameRef.current = requestAnimationFrame(renderLoop)
 
@@ -90,7 +94,7 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
         cancelAnimationFrame(animationFrameRef.current)
       }
     }
-  }, [renderLoop])
+  }, [renderLoop, streamDone])
 
   return { addChunk, reset }
 }

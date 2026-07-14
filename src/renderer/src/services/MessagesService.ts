@@ -50,6 +50,7 @@ export function clearPendingLocateMessage(messageId?: string) {
   }
 }
 
+export type { IndexedMessage } from '@renderer/utils/messageUtils/filters'
 export {
   filterAfterContextClearMessages,
   filterEmptyMessages,

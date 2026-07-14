@@ -103,7 +103,6 @@ type MessageOperationsHandlers = ReturnType<typeof useMessageOperations>
 
 type MessageMenubarButtonContext = {
   assistant: Assistant
-  blockEntities: ReturnType<typeof messageBlocksSelectors.selectEntities>
   confirmDeleteMessage: boolean
   confirmRegenerateMessage: boolean
   contextWindowMode?: 'sliding' | 'fixed'
@@ -261,17 +260,15 @@ const MessageMenubar: FC<Props> = (props) => {
     startEditing(message.id)
   }, [message.id, startEditing])
 
-  const blockEntities = useSelector(messageBlocksSelectors.selectEntities)
-
-  const isTranslating = useMemo(() => {
-    const translationBlock = message.blocks
-      .map((blockId) => blockEntities[blockId])
-      .find((block) => block?.type === MessageBlockType.TRANSLATION)
-    return (
-      translationBlock?.status === MessageBlockStatus.STREAMING ||
-      translationBlock?.status === MessageBlockStatus.PROCESSING
-    )
-  }, [message.blocks, blockEntities])
+  const isTranslating = useSelector((state: RootState) => {
+    return message.blocks.some((blockId) => {
+      const block = messageBlocksSelectors.selectById(state, blockId)
+      return (
+        block?.type === MessageBlockType.TRANSLATION &&
+        (block.status === MessageBlockStatus.STREAMING || block.status === MessageBlockStatus.PROCESSING)
+      )
+    })
+  })
 
   const handleTranslate = useCallback(
     async (language: TranslateLanguage) => {
@@ -577,7 +574,6 @@ const MessageMenubar: FC<Props> = (props) => {
 
   const buttonContext: MessageMenubarButtonContext = {
     assistant,
-    blockEntities,
     confirmDeleteMessage,
     confirmRegenerateMessage,
     contextWindowMode,
@@ -825,7 +821,6 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
     handleTranslate,
     hasTranslationBlocks,
     message,
-    blockEntities,
     removeMessageBlock,
     softHoverBg,
     t
@@ -862,8 +857,9 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
               label: '📋 ' + t('common.copy'),
               key: 'translate-copy',
               onClick: () => {
+                const state = store.getState()
                 const translationBlocks = message.blocks
-                  .map((blockId) => blockEntities[blockId])
+                  .map((blockId) => messageBlocksSelectors.selectById(state, blockId))
                   .filter((block) => block?.type === 'translation')
 
                 if (translationBlocks.length > 0) {
@@ -885,8 +881,9 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
               label: '✖ ' + t('translate.close'),
               key: 'translate-close',
               onClick: () => {
+                const state = store.getState()
                 const translationBlocks = message.blocks
-                  .map((blockId) => blockEntities[blockId])
+                  .map((blockId) => messageBlocksSelectors.selectById(state, blockId))
                   .filter((block) => block?.type === 'translation')
                   .map((block) => block?.id)
 
@@ -1022,13 +1019,14 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       </Tooltip>
     )
   },
-  'inspect-data': ({ message, blockEntities, enableDeveloperMode }) => {
+  'inspect-data': ({ message, enableDeveloperMode }) => {
     if (!enableDeveloperMode) {
       return null
     }
 
     const handleInspect = () => {
-      const blocks = message.blocks.map((blockId) => blockEntities[blockId]).filter(Boolean)
+      const state = store.getState()
+      const blocks = message.blocks.map((blockId) => messageBlocksSelectors.selectById(state, blockId)).filter(Boolean)
       void InspectMessagePopup.show({
         title: `Message: ${message.id}`,
         message,

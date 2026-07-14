@@ -206,6 +206,17 @@
 - `src/renderer/src/store/migrate.ts` — migration 211: 'anchor' → 'buttons'
 - `src/renderer/src/config/constant.ts` — 移除 INITIAL_MESSAGES_COUNT 等常量
 
+### Message Rendering Performance (Round 8)
+- `src/renderer/src/pages/home/Messages/Blocks/index.tsx` — selectEntities → selectById + shallowEqual
+- `src/renderer/src/pages/home/Messages/MessageMenubar.tsx` — selectEntities → targeted selector, removed blockEntities context
+- `src/renderer/src/pages/home/Messages/MessageOutline.tsx` — selectEntities → selectById + shallowEqual
+- `src/renderer/src/utils/messageUtils/filters.ts` — IndexedMessage type, removed message spread cloning
+- `src/renderer/src/services/MessagesService.ts` — re-export IndexedMessage
+- `src/renderer/src/pages/home/Messages/Messages.tsx` — GroupEntry type, loading spinner, useDeferredValue, scrollParentEl fix
+- `src/renderer/src/pages/home/Messages/MessageGroup.tsx` — IndexedMessage props, onUpdateUseful stability
+- `src/renderer/src/pages/home/Messages/ChatNavigation.tsx` — prop type update
+- `src/renderer/src/hooks/useSmoothStream.ts` — skip rAF for completed messages
+
 ## Dependencies Changed
 - `lodash` → `lodash-es` (+ @types/lodash → @types/lodash-es)
 - `react-player` removed (replaced with native `<video>`)
@@ -217,3 +228,46 @@
 - Major#2: MCP progress throttle emits terminal 100% events, flushes last skipped in finally
 - Major#3: CodeMirror lazy theme fallback returns 'light'/'dark' instead of raw theme names
 - Minor: AntdProvider locale loading .catch handler for chunk load failures
+
+### Round 8: Message Rendering Pipeline Performance
+
+**诊断方法：** Analyzer + Auditor 双线调查，定位两个独立症状：
+1. Topic 切换时首次渲染慢（IndexedDB 全量加载 + 无加载态）
+2. 滚动时消息"从无到有"加载感（单 item mount 成本高 + 数据流级联）
+
+**根因分析结论：** Virtuoso 虚拟化架构正确，瓶颈在 item 渲染成本 + 数据流级联。
+
+**Batch 1 — selectEntities 级联消除（Critical）：**
+- `MessageBlockRenderer`: `selectEntities` → `selectById` per block + `shallowEqual`
+- `MessageMenubar`: `selectEntities` → targeted `selectById` for `isTranslating`，移除 `blockEntities` context
+- `MessageOutline`: `selectEntities` → `selectById` per block + `shallowEqual`
+- 效果：streaming 时从"所有挂载消息重渲染"降到"只有当前消息重渲染"
+
+**Batch 2 — 数据流引用稳定性（Critical）：**
+- 新增 `IndexedMessage` 类型：`{ message: Message, index: number }` 替代 `{ ...message, index }`
+- `getGroupedMessages` 不再克隆消息对象，保留 Redux entity 原始引用
+- `MessageGroup.onUpdateUseful` 用 `useRef` 稳定化，避免 `React.memo(MessageItem)` 失效
+- `useSmoothStream`：已完成消息跳过 rAF 循环，避免多余 setState
+- 效果：Message 引用稳定，MessageItem 可通过 React.memo 跳过不必要重渲染
+
+**Batch 3 — 单 Item Mount 成本降低（Major）：**
+- Virtuoso `increaseViewportBy`: `{ top: 1200, bottom: 1600 }` → `{ top: 600, bottom: 800 }`
+- `minOverscanItemCount`: 3 → 2
+- 效果：减少约 50% 的预渲染 item 数量
+
+**Batch 4 — Topic 切换体验（Medium）：**
+- Messages 视图新增加载态 `<Spin>`（利用已有 `loadingByTopic` 状态）
+- `contextWindowBoundaryIndex` 使用 `useDeferredValue` 延迟计算
+- 修复 `scrollParentEl` 在 topic 切换后的 DOM 引用过时问题
+- 效果：topic 切换有视觉反馈，streaming 时不被 context 过滤阻塞
+
+**验证结果:**
+- `pnpm typecheck` ✅ 通过
+- `pnpm test` ✅ 3965 tests pass, 72 skipped, 0 fail
+
+**审计修复:**
+- Major: `MessageOutline` selector `.map()` 创建新对象 → 移除 `.map()`，返回 block 引用
+- Major: `onUpdateUseful` 依赖 messages 数组 → 用 `messagesRef.current` 替代
+- Major: `scrollParentEl` topic 切换后过时 → `useLayoutEffect` 依赖 `[isLoading]`
+- Minor: 清理 `filters.ts` 中注释掉的旧 spread 代码
+- Minor: `ChatNavigation.tsx` prop 类型更新为 `IndexedMessage[]`

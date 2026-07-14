@@ -13,7 +13,7 @@ import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage
 import { isMainTextBlock, isMessageProcessing, isToolBlock, isVideoBlock } from '@renderer/utils/messageUtils/is'
 import { AnimatePresence, motion, type Variants } from 'motion/react'
 import React, { useCallback, useMemo } from 'react'
-import { useSelector } from 'react-redux'
+import { shallowEqual, useSelector } from 'react-redux'
 import styled from 'styled-components'
 
 import BlockErrorFallback from './BlockErrorFallback'
@@ -197,10 +197,11 @@ const groupSimilarBlocks = (
 }
 
 const MessageBlockRenderer: React.FC<Props> = ({ blocks, message }) => {
-  // 始终调用useSelector，避免条件调用Hook
-  const blockEntities = useSelector((state: RootState) => messageBlocksSelectors.selectEntities(state))
-  // 根据blocks类型处理渲染数据
-  const renderedBlocks = blocks.map((blockId) => blockEntities[blockId]).filter(Boolean)
+  const renderedBlocks = useSelector(
+    (state: RootState) =>
+      blocks.map((blockId) => messageBlocksSelectors.selectById(state, blockId)).filter(Boolean) as MessageBlock[],
+    shallowEqual
+  )
   // Check if message is still processing
   const isProcessing = isMessageProcessing(message)
   const allowCollapseExecutionDetails = !(message.role === 'assistant' && isProcessing)

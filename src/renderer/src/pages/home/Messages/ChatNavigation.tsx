@@ -11,6 +11,7 @@ import { useTimer } from '@renderer/hooks/useTimer'
 import type { RootState } from '@renderer/store'
 import type { Message } from '@renderer/types/newMessage'
 import { scrollIntoView } from '@renderer/utils/dom'
+import type { IndexedMessage } from '@renderer/utils/messageUtils/filters'
 import { Button, Drawer, Spin, Tooltip } from 'antd'
 import type { FC } from 'react'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -43,7 +44,7 @@ interface ChatNavigationProps {
   /** Virtuoso ref for programmatic scrolling */
   virtuosoRef?: React.RefObject<VirtuosoHandle | null>
   /** Grouped messages for Virtuoso index computation */
-  groupedMessages?: [string, Message[]][]
+  groupedMessages?: [string, IndexedMessage[]][]
 }
 
 const ChatNavigation: FC<ChatNavigationProps> = ({

@@ -1,5 +1,6 @@
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
+import type { IndexedMessage } from '@renderer/utils/messageUtils/filters'
 import { createEvent, fireEvent, render } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -203,13 +204,15 @@ const { default: MessageGroup } = await import('../MessageGroup')
 
 const createMessage = (id: string, index: number, multiModelMessageStyle: Message['multiModelMessageStyle']) =>
   ({
-    id,
-    askId: 'ask-1',
-    role: 'assistant',
-    blocks: [],
-    multiModelMessageStyle,
+    message: {
+      id,
+      askId: 'ask-1',
+      role: 'assistant',
+      blocks: [],
+      multiModelMessageStyle
+    },
     index
-  }) as unknown as Message & { index: number }
+  }) as unknown as IndexedMessage
 
 const setElementSize = (
   element: Element,

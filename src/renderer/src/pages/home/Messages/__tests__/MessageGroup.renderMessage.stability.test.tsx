@@ -1,5 +1,6 @@
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
+import type { IndexedMessage } from '@renderer/utils/messageUtils/filters'
 import { render } from '@testing-library/react'
 import fs from 'fs'
 import path from 'path'
@@ -205,13 +206,15 @@ const { default: MessageGroup } = await import('../MessageGroup')
 
 const createMessage = (id: string, index: number, multiModelMessageStyle: Message['multiModelMessageStyle']) =>
   ({
-    id,
-    askId: 'ask-1',
-    role: 'assistant',
-    blocks: [],
-    multiModelMessageStyle,
+    message: {
+      id,
+      askId: 'ask-1',
+      role: 'assistant',
+      blocks: [],
+      multiModelMessageStyle
+    },
     index
-  }) as unknown as Message & { index: number }
+  }) as unknown as IndexedMessage
 
 describe('MessageGroup renderMessage stability', () => {
   beforeEach(() => {
