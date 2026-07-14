@@ -12,7 +12,13 @@ import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import { getContextCount, getGroupedMessages, getUserMessage } from '@renderer/services/MessagesService'
+import {
+  clearPendingLocateMessage,
+  getContextCount,
+  getGroupedMessages,
+  getPendingLocateMessage,
+  getUserMessage
+} from '@renderer/services/MessagesService'
 import { estimateHistoryTokens } from '@renderer/services/TokenService'
 import store, { useAppDispatch } from '@renderer/store'
 import { messageBlocksSelectors, updateOneBlock } from '@renderer/store/messageBlock'
@@ -42,7 +48,6 @@ import { useTranslation } from 'react-i18next'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import styled from 'styled-components'
 
-import MessageAnchorLine from './MessageAnchorLine'
 import MessageGroup from './MessageGroup'
 import NarrowLayout from './NarrowLayout'
 import Prompt from './Prompt'
@@ -57,7 +62,9 @@ interface MessagesProps {
 }
 
 export interface MessagesHandle {
-  scrollToMessageById: (messageId: string) => void
+  scrollToMessageById: (messageId: string, align?: 'start' | 'center' | 'end') => void
+  virtuosoRef: React.RefObject<VirtuosoHandle | null>
+  groupedMessages: GroupEntry[]
 }
 
 const logger = loggerService.withContext('Messages')
@@ -72,7 +79,6 @@ interface MessagesContentProps {
   messages: Message[]
   groupedMessages: GroupEntry[]
   registerMessageElement: (id: string, element: HTMLElement | null) => void
-  scrollToMessageById: (messageId: string) => void
   virtuosoRef: React.RefObject<VirtuosoHandle | null>
   scrollParentEl: HTMLElement | null
   initialTopMostItemIndex: number
@@ -86,16 +92,48 @@ const MessagesContent = React.memo(function MessagesContent({
   messages,
   groupedMessages,
   registerMessageElement,
-  scrollToMessageById,
   virtuosoRef,
   scrollParentEl,
   initialTopMostItemIndex
 }: MessagesContentProps) {
-  const { showPrompt, messageNavigation } = useSettings()
+  const { showPrompt } = useSettings()
   const { t } = useTranslation()
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
   useClipboardKeyboard()
+
+  // Centralized LOCATE_MESSAGE handler for Virtuoso virtualization compatibility.
+  // When messages are not rendered (outside virtualization window), per-message
+  // listeners don't exist. This centralized handler ensures all LOCATE_MESSAGE
+  // events are handled by scrolling Virtuoso to the correct group.
+
+  useEffect(() => {
+    const handler = (messageId: string) => {
+      const groupIndex = groupedMessages.findIndex(([, msgs]) => msgs.some((m) => m.id === messageId))
+      if (groupIndex >= 0) {
+        clearPendingLocateMessage(messageId)
+        virtuosoRef.current?.scrollToIndex({ index: groupIndex, align: 'center', behavior: 'smooth' })
+      } else {
+        // Message not yet loaded — pending is already set in locateToMessage
+      }
+    }
+    const unsubscribe = EventEmitter.on(EVENT_NAMES.LOCATE_MESSAGE, handler)
+    return () => unsubscribe()
+  }, [groupedMessages, virtuosoRef])
+
+  // When groupedMessages updates, check for pending locate messages
+  useEffect(() => {
+    const pendingId = getPendingLocateMessage()
+    if (pendingId && groupedMessages.length > 0) {
+      const groupIndex = groupedMessages.findIndex(([, msgs]) => msgs.some((m) => m.id === pendingId))
+      if (groupIndex >= 0) {
+        clearPendingLocateMessage(pendingId)
+        requestAnimationFrame(() => {
+          virtuosoRef.current?.scrollToIndex({ index: groupIndex, align: 'center', behavior: 'smooth' })
+        })
+      }
+    }
+  }, [groupedMessages, virtuosoRef])
 
   // Scroll handler — just save position (Virtuoso handles virtualization)
   const handleScroll = useCallback(() => {
@@ -252,9 +290,6 @@ const MessagesContent = React.memo(function MessagesContent({
           </ScrollContainer>
         </ContextMenu>
       </NarrowLayout>
-      {messageNavigation === 'anchor' && (
-        <MessageAnchorLine messages={messages} scrollToMessageById={scrollToMessageById} />
-      )}
     </MessagesContainer>
   )
 })
@@ -295,18 +330,10 @@ const Messages = ({
     setScrollParentEl(scrollContainerRef.current)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const groupedMessagesRef = useRef<GroupEntry[]>([])
-
   // Compute grouped messages from all messages (used by both parent and child)
+  // Object.entries() is cheap; Virtuoso has virtualization protection; no extra memo needed.
   const groupedMessages = useMemo(() => {
-    const newGrouped = Object.entries(getGroupedMessages(messages))
-    // Only rebuild when group keys change (new group count or different keys)
-    const prev = groupedMessagesRef.current
-    if (prev.length === newGrouped.length && prev.every(([key], i) => key === newGrouped[i][0])) {
-      return prev
-    }
-    groupedMessagesRef.current = newGrouped
-    return newGrouped
+    return Object.entries(getGroupedMessages(messages))
   }, [messages])
 
   // Compute initial scroll position for Virtuoso to avoid flash-of-content from index 0
@@ -320,13 +347,23 @@ const Messages = ({
     return Math.max(0, groupedMessages.length - 1)
   }, [getSavedPosition, groupedMessages])
 
-  // 滚动到指定消息组
-  const scrollToGroup = useCallback((askId: string) => {
-    const element = document.getElementById(`message-group-${askId}`)
-    if (element) {
-      element.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-    }
-  }, [])
+  // 滚动到指定消息组 (uses Virtuoso API for virtualization compatibility)
+  const scrollToGroup = useCallback(
+    (askId: string) => {
+      // Find the group containing this askId
+      const groupIndex = groupedMessages.findIndex(([key, msgs]) => {
+        return key === askId || msgs.some((m) => m.askId === askId || m.id === askId)
+      })
+      if (groupIndex >= 0) {
+        virtuosoRef.current?.scrollToIndex({
+          index: groupIndex,
+          align: 'start',
+          behavior: 'smooth'
+        })
+      }
+    },
+    [groupedMessages]
+  )
 
   // All message group IDs for edit mode keyboard navigation
   const visibleGroupIds = useMemo(() => {
@@ -348,13 +385,13 @@ const Messages = ({
   }, [])
 
   const scrollToMessageById = useCallback(
-    (messageId: string) => {
+    (messageId: string, align: 'start' | 'center' | 'end' = 'start') => {
       // Find the group containing this message
       const groupIndex = groupedMessages.findIndex(([, msgs]) => msgs.some((m) => m.id === messageId))
       if (groupIndex >= 0) {
         virtuosoRef.current?.scrollToIndex({
           index: groupIndex,
-          align: 'start',
+          align,
           behavior: 'auto'
         })
       }
@@ -362,7 +399,11 @@ const Messages = ({
     [groupedMessages]
   )
 
-  useImperativeHandle(ref, () => ({ scrollToMessageById }), [scrollToMessageById])
+  useImperativeHandle(ref, () => ({ scrollToMessageById, virtuosoRef, groupedMessages }), [
+    scrollToMessageById,
+    virtuosoRef,
+    groupedMessages
+  ])
 
   useEffect(() => {
     messagesRef.current = messages
@@ -575,7 +616,6 @@ const Messages = ({
         messages={messages}
         groupedMessages={groupedMessages}
         registerMessageElement={registerMessageElement}
-        scrollToMessageById={scrollToMessageById}
         virtuosoRef={virtuosoRef}
         scrollParentEl={scrollParentEl}
         initialTopMostItemIndex={initialTopMostItemIndex}

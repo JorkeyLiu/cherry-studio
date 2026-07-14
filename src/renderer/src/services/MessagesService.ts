@@ -33,6 +33,23 @@ import FileManager from './FileManager'
 
 const logger = loggerService.withContext('MessagesService')
 
+// --- Cross-topic pending locate state ---
+let _pendingLocateMessageId: string | null = null
+
+export function setPendingLocateMessage(messageId: string) {
+  _pendingLocateMessageId = messageId
+}
+
+export function getPendingLocateMessage(): string | null {
+  return _pendingLocateMessageId
+}
+
+export function clearPendingLocateMessage(messageId?: string) {
+  if (!messageId || _pendingLocateMessageId === messageId) {
+    _pendingLocateMessageId = null
+  }
+}
+
 export {
   filterAfterContextClearMessages,
   filterEmptyMessages,
@@ -115,10 +132,18 @@ export async function locateToMessage(navigate: NavigateFunction, message: Messa
   const assistant = getAssistantById(message.assistantId)
   const topic = await getTopicById(message.topicId)
 
+  // Set global pending before navigate (survives cross-topic remount)
+  setPendingLocateMessage(message.id)
+
   navigate('/', { state: { assistant, topic } })
 
   setTimeout(() => EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR), 0)
-  setTimeout(() => EventEmitter.emit(EVENT_NAMES.LOCATE_MESSAGE + ':' + message.id), 300)
+  setTimeout(() => {
+    // Emit generic event for centralized handling in MessagesContent (Virtuoso-compatible)
+    EventEmitter.emit(EVENT_NAMES.LOCATE_MESSAGE, message.id)
+    // Also emit specific event for per-message handlers in rendered components
+    EventEmitter.emit(EVENT_NAMES.LOCATE_MESSAGE + ':' + message.id)
+  }, 300)
 }
 
 /**

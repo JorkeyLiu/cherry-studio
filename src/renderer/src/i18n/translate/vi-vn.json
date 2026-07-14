@@ -1068,6 +1068,26 @@
         "name": "Chủ đề Mặc định"
       }
     },
+    "edit": {
+      "clipboardEmpty": "[to be translated]:Clipboard is empty",
+      "copied": "[to be translated]:Copied {{count}} message(s)",
+      "copy": "[to be translated]:Copy",
+      "cut": "[to be translated]:Cut {{count}} message(s)",
+      "cutAction": "[to be translated]:Cut",
+      "deleteAction": "[to be translated]:Delete",
+      "deleted": "[to be translated]:Deleted {{count}} message(s)",
+      "deselect": "[to be translated]:Deselect",
+      "enter": "[to be translated]:Enter Edit Mode",
+      "exit": "[to be translated]:Exit Edit Mode",
+      "pasteAction": "[to be translated]:Paste",
+      "pasted": "[to be translated]:Pasted {{count}} message(s)",
+      "redoAction": "[to be translated]:Redo",
+      "redone": "[to be translated]:Redone",
+      "selectFirst": "[to be translated]:Please select messages first",
+      "selected": "[to be translated]:{{count}} selected",
+      "undoAction": "[to be translated]:Undo",
+      "undone": "[to be translated]:Undone"
+    },
     "history": {
       "assistant_node": "Trợ lý",
       "click_to_navigate": "Nhấp để điều hướng đến tin nhắn",
@@ -1200,6 +1220,12 @@
       }
     },
     "message": {
+      "insert": {
+        "label": "[to be translated]:Insert Messages",
+        "newAssistantMessage": "[to be translated]:New assistant message",
+        "newUserMessage": "[to be translated]:New user message",
+        "success": "[to be translated]:Messages inserted"
+      },
       "new": {
         "branch": {
           "created": "Chi nhánh mới đã được tạo",
@@ -1494,6 +1520,12 @@
         "title": "Tìm kiếm"
       },
       "title": "Chủ đề",
+      "trash": {
+        "empty": "[to be translated]:Trash is empty",
+        "empty_trash": "[to be translated]:Empty Trash",
+        "label": "[to be translated]:Recycle Bin",
+        "restore": "[to be translated]:Restore"
+      },
       "unpin": "Bỏ ghim chủ đề"
     },
     "translate": "Dịch",
@@ -4585,6 +4617,11 @@
     "display": {
       "assistant": {
         "title": "Cài đặt Trợ lý"
+      },
+      "chat_navigation": {
+        "buttons": "[to be translated]:Buttons",
+        "label": "[to be translated]:Chat Navigation",
+        "none": "[to be translated]:Off"
       },
       "custom": {
         "css": {

@@ -33,7 +33,6 @@ import {
   setMathEnableSingleDollar,
   setMathEngine,
   setMessageFont,
-  setMessageNavigation,
   setMessageStyle,
   setMultiModelMessageStyle,
   setPasteLongTextAsFile,
@@ -104,7 +103,6 @@ const AssistantSettingsTab = (props: Props) => {
     pasteLongTextThreshold,
     multiModelMessageStyle,
     thoughtAutoCollapse,
-    messageNavigation,
     enableQuickPanelTriggers,
     injectContextTimestamp,
     showTranslateConfirm,
@@ -229,19 +227,6 @@ const AssistantSettingsTab = (props: Props) => {
                 { value: 'vertical', label: t('message.message.multi_model_style.vertical') },
                 { value: 'horizontal', label: t('message.message.multi_model_style.horizontal') },
                 { value: 'grid', label: t('message.message.multi_model_style.grid') }
-              ]}
-            />
-          </SettingRow>
-          <SettingDivider />
-          <SettingRow>
-            <SettingRowTitleSmall>{t('settings.messages.navigation.label')}</SettingRowTitleSmall>
-            <Selector
-              value={messageNavigation}
-              onChange={(value) => dispatch(setMessageNavigation(value))}
-              options={[
-                { value: 'none', label: t('settings.messages.navigation.none') },
-                { value: 'buttons', label: t('settings.messages.navigation.buttons') },
-                { value: 'anchor', label: t('settings.messages.navigation.anchor') }
               ]}
             />
           </SettingRow>

@@ -9,13 +9,14 @@ import {
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
 import type { RootState } from '@renderer/store'
-// import { selectCurrentTopicId } from '@renderer/store/newMessage'
+import type { Message } from '@renderer/types/newMessage'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { Button, Drawer, Spin, Tooltip } from 'antd'
 import type { FC } from 'react'
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSelector } from 'react-redux'
+import type { VirtuosoHandle } from 'react-virtuoso'
 import styled from 'styled-components'
 
 const ChatFlowHistory = lazy(() => import('./ChatFlowHistory'))
@@ -37,9 +38,21 @@ const RIGHT_GAP = 16
 interface ChatNavigationProps {
   containerId: string
   scrollToMessageById?: (messageId: string) => void
+  /** Full message list for data-driven navigation (replaces DOM queries with Virtuoso) */
+  messages?: Message[]
+  /** Virtuoso ref for programmatic scrolling */
+  virtuosoRef?: React.RefObject<VirtuosoHandle | null>
+  /** Grouped messages for Virtuoso index computation */
+  groupedMessages?: [string, Message[]][]
 }
 
-const ChatNavigation: FC<ChatNavigationProps> = ({ containerId, scrollToMessageById }) => {
+const ChatNavigation: FC<ChatNavigationProps> = ({
+  containerId,
+  scrollToMessageById,
+  messages = [],
+  virtuosoRef,
+  groupedMessages = []
+}) => {
   const { t } = useTranslation()
   const [isVisible, setIsVisible] = useState(false)
   const timerKey = 'hide'
@@ -54,6 +67,11 @@ const ChatNavigation: FC<ChatNavigationProps> = ({ containerId, scrollToMessageB
   const isProgrammaticScrollRef = useRef(false)
   const { topicPosition, showTopics } = useSettings()
   const showRightTopics = topicPosition === 'right' && showTopics
+
+  // Data-driven: extract user message IDs from the full message list
+  const userMessageIds = useMemo(() => {
+    return messages.filter((m) => m.role === 'user' && m.type !== 'clear').map((m) => m.id)
+  }, [messages])
 
   const clearHideTimer = useCallback(() => {
     clearTimeoutTimer(timerKey)
@@ -104,87 +122,80 @@ const ChatNavigation: FC<ChatNavigationProps> = ({ containerId, scrollToMessageB
     setShowChatHistory(false)
   }
 
-  const findUserMessages = () => {
+  /**
+   * Find the currently visible message ID by scanning rendered DOM elements.
+   * With Virtuoso, only rendered items exist in the DOM, so this finds
+   * the visible message among rendered items and returns its ID.
+   * Only considers messages fully or mostly within the viewport (not overscan).
+   */
+  const findFirstVisibleMessageId = useCallback((): string | null => {
     const container = document.getElementById(containerId)
-    if (!container) return []
+    if (!container) return null
 
-    const userMessages = Array.from(container.getElementsByClassName('message-user'))
-    return userMessages as HTMLElement[]
-  }
+    const containerRect = container.getBoundingClientRect()
 
-  const findAssistantMessages = () => {
-    const container = document.getElementById(containerId)
+    // Query rendered message elements (both user and assistant)
+    const elements = container.querySelectorAll('[id^="message-"]:not([id^="message-group-"])')
 
-    if (!container) return []
+    let closestId: string | null = null
+    let minDistance = Infinity
 
-    const assistantMessages = Array.from(container.getElementsByClassName('message-assistant'))
-    return assistantMessages as HTMLElement[]
-  }
+    for (const el of elements) {
+      const rect = el.getBoundingClientRect()
+      if (rect.height === 0) continue
 
-  const scrollToMessage = (element: HTMLElement) => {
-    if (!element.isConnected && scrollToMessageById) {
-      // Element not in DOM, try deep navigation by finding the message ID
-      const messageId = element.id?.replace('message-', '')
-      if (messageId) {
-        scrollToMessageById(messageId)
-        return
+      // Only consider messages that are truly within the viewport (not overscan)
+      // A message is "visible" if its center is within the container bounds
+      const elementCenter = (rect.top + rect.bottom) / 2
+      if (elementCenter < containerRect.top || elementCenter > containerRect.bottom) {
+        continue
+      }
+
+      const distance = Math.abs(rect.top - containerRect.top)
+      if (distance < minDistance) {
+        minDistance = distance
+        closestId = el.id.replace('message-', '')
       }
     }
-    // Use container: 'nearest' to keep scroll within the chat pane (Chromium-only, see #11565, #11567)
-    scrollIntoView(element, { behavior: 'smooth', block: 'start', container: 'nearest' })
-  }
+
+    return closestId
+  }, [containerId])
+
+  /**
+   * Find the index of a message ID in the userMessageIds array.
+   * Returns -1 if not found.
+   */
+  const findUserMessageIndex = useCallback(
+    (messageId: string): number => {
+      return userMessageIds.indexOf(messageId)
+    },
+    [userMessageIds]
+  )
 
   const scrollToTop = () => {
-    const container = document.getElementById(containerId)
-    container && container.scrollTo({ top: -container.scrollHeight, behavior: 'smooth' })
+    if (virtuosoRef?.current && groupedMessages.length > 0) {
+      // Use Virtuoso API to scroll to the very top
+      virtuosoRef.current.scrollToIndex({ index: 0, align: 'start', behavior: 'smooth' })
+    } else if (scrollToMessageById && userMessageIds.length > 0) {
+      // Fallback: scroll to the first user message
+      scrollToMessageById(userMessageIds[0])
+    } else {
+      const container = document.getElementById(containerId)
+      container && container.scrollTo({ top: -container.scrollHeight, behavior: 'smooth' })
+    }
   }
 
   const scrollToBottom = () => {
-    const container = document.getElementById(containerId)
-    container && container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
-  }
-
-  const getCurrentVisibleIndex = (direction: 'up' | 'down') => {
-    const userMessages = findUserMessages()
-    const assistantMessages = findAssistantMessages()
-    const container = document.getElementById(containerId)
-
-    if (!container) return -1
-
-    const containerRect = container.getBoundingClientRect()
-    const visibleThreshold = containerRect.height * 0.1
-
-    let visibleIndices: number[] = []
-
-    for (let i = 0; i < userMessages.length; i++) {
-      const messageRect = userMessages[i].getBoundingClientRect()
-      const visibleHeight =
-        Math.min(messageRect.bottom, containerRect.bottom) - Math.max(messageRect.top, containerRect.top)
-      if (visibleHeight > 0 && visibleHeight >= Math.min(messageRect.height, visibleThreshold)) {
-        visibleIndices.push(i)
-      }
+    if (virtuosoRef?.current && groupedMessages.length > 0) {
+      // Use Virtuoso API to scroll to the very bottom
+      virtuosoRef.current.scrollToIndex({ index: groupedMessages.length - 1, align: 'end', behavior: 'smooth' })
+    } else if (scrollToMessageById && userMessageIds.length > 0) {
+      // Fallback: scroll to the last user message
+      scrollToMessageById(userMessageIds[userMessageIds.length - 1])
+    } else {
+      const container = document.getElementById(containerId)
+      container && container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
     }
-
-    if (visibleIndices.length > 0) {
-      return direction === 'up' ? Math.max(...visibleIndices) : Math.min(...visibleIndices)
-    }
-
-    visibleIndices = []
-    for (let i = 0; i < assistantMessages.length; i++) {
-      const messageRect = assistantMessages[i].getBoundingClientRect()
-      const visibleHeight =
-        Math.min(messageRect.bottom, containerRect.bottom) - Math.max(messageRect.top, containerRect.top)
-      if (visibleHeight > 0 && visibleHeight >= Math.min(messageRect.height, visibleThreshold)) {
-        visibleIndices.push(i)
-      }
-    }
-
-    if (visibleIndices.length > 0) {
-      const assistantIndex = direction === 'up' ? Math.max(...visibleIndices) : Math.min(...visibleIndices)
-      return assistantIndex < userMessages.length ? assistantIndex : userMessages.length - 1
-    }
-
-    return -1
   }
 
   // 修改 handleCloseChatNavigation 函数
@@ -226,55 +237,81 @@ const ChatNavigation: FC<ChatNavigationProps> = ({ containerId, scrollToMessageB
 
   const handleNextMessage = () => {
     showNavigation()
-    const userMessages = findUserMessages()
-    const assistantMessages = findAssistantMessages()
 
-    if (userMessages.length === 0 && assistantMessages.length === 0) {
-      // window.toast.info(t('chat.navigation.last'))
+    if (userMessageIds.length === 0) {
       return scrollToBottom()
     }
 
-    const visibleIndex = getCurrentVisibleIndex('down')
-
-    if (visibleIndex === -1) {
-      // window.toast.info(t('chat.navigation.last'))
-      return scrollToBottom()
+    const currentVisibleId = findFirstVisibleMessageId()
+    if (!currentVisibleId) {
+      // No visible message found, scroll to last user message (newest)
+      return scrollToMessageById?.(userMessageIds[userMessageIds.length - 1])
     }
 
-    const targetIndex = visibleIndex - 1
+    const currentIndex = findUserMessageIndex(currentVisibleId)
 
-    if (targetIndex < 0) {
-      // window.toast.info(t('chat.navigation.last'))
-      return scrollToBottom()
+    if (currentIndex === -1) {
+      // Current visible message is not a user message; find the nearest newer user message
+      const currentMsgIndex = messages.findIndex((m) => m.id === currentVisibleId)
+      if (currentMsgIndex >= 0) {
+        // Find the next user message (newer = higher index in messages)
+        for (let i = currentMsgIndex + 1; i < messages.length; i++) {
+          if (messages[i].role === 'user' && messages[i].type !== 'clear') {
+            return scrollToMessageById?.(messages[i].id)
+          }
+        }
+      }
+      return
     }
 
-    scrollToMessage(userMessages[targetIndex])
+    // Navigate to the next user message (newer = higher index in userMessageIds)
+    // userMessageIds is ordered from oldest to newest
+    // "Next" (下/ArrowDown) means going DOWN in the conversation (to newer messages)
+    const targetIndex = currentIndex + 1
+    if (targetIndex >= userMessageIds.length) {
+      return
+    }
+
+    scrollToMessageById?.(userMessageIds[targetIndex])
   }
 
   const handlePrevMessage = () => {
     showNavigation()
-    const userMessages = findUserMessages()
-    const assistantMessages = findAssistantMessages()
-    if (userMessages.length === 0 && assistantMessages.length === 0) {
-      // window.toast.info(t('chat.navigation.first'))
+
+    if (userMessageIds.length === 0) {
       return scrollToTop()
     }
 
-    const visibleIndex = getCurrentVisibleIndex('up')
-
-    if (visibleIndex === -1) {
-      // window.toast.info(t('chat.navigation.first'))
-      return scrollToTop()
+    const currentVisibleId = findFirstVisibleMessageId()
+    if (!currentVisibleId) {
+      // No visible message found, scroll to first user message (oldest)
+      return scrollToMessageById?.(userMessageIds[0])
     }
 
-    const targetIndex = visibleIndex + 1
+    const currentIndex = findUserMessageIndex(currentVisibleId)
 
-    if (targetIndex >= userMessages.length) {
-      // window.toast.info(t('chat.navigation.first'))
-      return scrollToTop()
+    if (currentIndex === -1) {
+      // Current visible message is not a user message; find the nearest older user message
+      const currentMsgIndex = messages.findIndex((m) => m.id === currentVisibleId)
+      if (currentMsgIndex >= 0) {
+        // Find the previous user message (older = lower index in messages)
+        for (let i = currentMsgIndex - 1; i >= 0; i--) {
+          if (messages[i].role === 'user' && messages[i].type !== 'clear') {
+            return scrollToMessageById?.(messages[i].id)
+          }
+        }
+      }
+      return
     }
 
-    scrollToMessage(userMessages[targetIndex])
+    // Navigate to the previous user message (older = lower index in userMessageIds)
+    // "Prev" (上/ArrowUp) means going UP in the conversation (to older messages)
+    const targetIndex = currentIndex - 1
+    if (targetIndex < 0) {
+      return
+    }
+
+    scrollToMessageById?.(userMessageIds[targetIndex])
   }
 
   // Set up scroll event listener and mouse position tracking

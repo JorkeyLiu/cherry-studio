@@ -8,6 +8,7 @@ import { QuickPanelProvider } from '@renderer/components/QuickPanel'
 import ResizableHandle from '@renderer/components/ResizableHandle'
 import { isEmbeddingModel, isRerankModel, isWebSearchModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
+import { useTopicMessages } from '@renderer/hooks/useMessageOperations'
 import { useNavbarPosition, useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
@@ -48,11 +49,20 @@ const Chat: FC<Props> = (props) => {
   const { showTopics } = useShowTopics()
   const { isTopNavbar } = useNavbarPosition()
   const dispatch = useAppDispatch()
+  const messages = useTopicMessages(props.activeTopic.id)
 
   const mainRef = React.useRef<HTMLDivElement>(null)
   const contentSearchRef = React.useRef<ContentSearchRef>(null)
   const messagesRef = React.useRef<MessagesHandle>(null)
   const [filterIncludeUser, setFilterIncludeUser] = useState(false)
+  const [messagesHandle, setMessagesHandle] = useState<MessagesHandle | null>(null)
+
+  // Detect when Messages component ref is ready
+  React.useEffect(() => {
+    if (messagesRef.current) {
+      setMessagesHandle(messagesRef.current)
+    }
+  })
 
   const { setTimeoutTimer } = useTimer()
 
@@ -198,7 +208,10 @@ const Chat: FC<Props> = (props) => {
                 {messageNavigation === 'buttons' && (
                   <ChatNavigation
                     containerId="messages"
-                    scrollToMessageById={messagesRef.current?.scrollToMessageById}
+                    scrollToMessageById={messagesHandle?.scrollToMessageById}
+                    messages={messages}
+                    virtuosoRef={messagesHandle?.virtuosoRef}
+                    groupedMessages={messagesHandle?.groupedMessages}
                   />
                 )}
                 <Inputbar assistant={assistant} setActiveTopic={props.setActiveTopic} topic={props.activeTopic} />

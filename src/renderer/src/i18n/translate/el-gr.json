@@ -1520,6 +1520,12 @@
         "title": "Αναζήτηση"
       },
       "title": "Θέματα",
+      "trash": {
+        "empty": "[to be translated]:Trash is empty",
+        "empty_trash": "[to be translated]:Empty Trash",
+        "label": "[to be translated]:Recycle Bin",
+        "restore": "[to be translated]:Restore"
+      },
       "unpin": "Ξεκαρφίτσωμα"
     },
     "translate": "Μετάφραση",
@@ -4611,6 +4617,11 @@
     "display": {
       "assistant": {
         "title": "Ρυθμίσεις Υπηρεσίας"
+      },
+      "chat_navigation": {
+        "buttons": "[to be translated]:Buttons",
+        "label": "[to be translated]:Chat Navigation",
+        "none": "[to be translated]:Off"
       },
       "custom": {
         "css": {

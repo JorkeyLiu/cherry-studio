@@ -53,6 +53,14 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   )
   const [selectedIndex, setSelectedIndex] = useState(messageLength - 1)
 
+  // Local state for selected message (replaces Redux/DB foldSelected to avoid re-render cascade)
+  const initialSelectedId = useMemo(() => {
+    if (messages.length === 1) return messages[0]?.id
+    const foldSelected = messages.find((message) => message.foldSelected)
+    return foldSelected ? foldSelected.id : messages[0]?.id
+  }, []) // only on mount
+  const [selectedMessageId, setSelectedMessageIdLocal] = useState<string>(initialSelectedId)
+
   // 对于单模型消息，采用简单的样式，避免 overflow 影响内部的 sticky 效果
   const multiModelMessageStyle = useMemo(
     () => (messageLength < 2 ? 'fold' : _multiModelMessageStyle),
@@ -65,21 +73,9 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   // Only the count matters for the multi-model layout CSS class, not the array reference.
   const messageCount = messages.length
 
-  const selectedMessageId = useMemo(() => {
-    if (messages.length === 1) return messages[0]?.id
-    const selectedMessage = messages.find((message) => message.foldSelected)
-    if (selectedMessage) {
-      return selectedMessage.id
-    }
-    return messages[0]?.id
-  }, [messages])
-
   const setSelectedMessage = useCallback(
     (message: Message) => {
-      // 前一个
-      void editMessage(selectedMessageId, { foldSelected: false })
-      // 当前选中的消息
-      void editMessage(message.id, { foldSelected: true })
+      setSelectedMessageIdLocal(message.id)
 
       setTimeoutTimer(
         'setSelectedMessage',
@@ -92,7 +88,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         200
       )
     },
-    [editMessage, selectedMessageId, setTimeoutTimer]
+    [setTimeoutTimer]
   )
   // 添加对流程图节点点击事件的监听
   useEffect(() => {

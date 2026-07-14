@@ -4618,6 +4618,11 @@
       "assistant": {
         "title": "Assistant Settings"
       },
+      "chat_navigation": {
+        "buttons": "Buttons",
+        "label": "Chat Navigation",
+        "none": "Off"
+      },
       "custom": {
         "css": {
           "cherrycss": "Get from cherrycss.com",

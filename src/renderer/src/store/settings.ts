@@ -109,7 +109,7 @@ export interface SettingsState {
   foldDisplayMode: 'expanded' | 'compact'
   gridColumns: number
   gridPopoverTrigger: 'hover' | 'click'
-  messageNavigation: 'none' | 'buttons' | 'anchor'
+  messageNavigation: 'none' | 'buttons'
   // 数据目录设置
   skipBackupFile: boolean
   // webdav 配置 host, user, pass, path
@@ -730,7 +730,7 @@ const settingsSlice = createSlice({
     setJoplinExportReasoning: (state, action: PayloadAction<boolean>) => {
       state.joplinExportReasoning = action.payload
     },
-    setMessageNavigation: (state, action: PayloadAction<'none' | 'buttons' | 'anchor'>) => {
+    setMessageNavigation: (state, action: PayloadAction<'none' | 'buttons'>) => {
       state.messageNavigation = action.payload
     },
     setDefaultObsidianVault: (state, action: PayloadAction<string>) => {

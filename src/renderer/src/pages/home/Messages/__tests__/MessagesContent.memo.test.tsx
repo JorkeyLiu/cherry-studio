@@ -220,10 +220,6 @@ vi.mock('react-infinite-scroll-component', () => ({
   default: vi.fn(({ children }: { children: ReactNode }) => <div>{children}</div>)
 }))
 
-vi.mock('../MessageAnchorLine', () => ({
-  default: vi.fn(() => <div data-testid="message-anchor-line" />)
-}))
-
 vi.mock('../MessageGroup', () => ({
   default: vi.fn(() => <div data-testid="message-group" />)
 }))

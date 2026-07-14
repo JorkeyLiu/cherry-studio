@@ -3321,6 +3321,19 @@ const migrateConfig = {
       logger.error('migrate 210 error', error as Error)
       return state
     }
+  },
+  '211': (state: RootState) => {
+    try {
+      // 'anchor' option removed from messageNavigation; convert to 'buttons'
+      if ((state.settings as any).messageNavigation === 'anchor') {
+        state.settings.messageNavigation = 'buttons'
+      }
+      logger.info('migrate 211 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 211 error', error as Error)
+      return state
+    }
   }
 }
 

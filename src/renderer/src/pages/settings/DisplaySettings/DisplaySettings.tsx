@@ -14,6 +14,7 @@ import {
   setAssistantIconType,
   setClickAssistantToShowTopic,
   setCustomCss,
+  setMessageNavigation,
   setPinTopicsToTop,
   setShowTopicTime,
   setSidebarIcons
@@ -69,6 +70,7 @@ const DisplaySettings: FC = () => {
     sidebarIcons,
     setTheme,
     assistantIconType,
+    messageNavigation,
     userTheme,
     useSystemTitleBar,
     setUseSystemTitleBar
@@ -308,6 +310,19 @@ const DisplaySettings: FC = () => {
             options={[
               { label: t('settings.display.navbar.position.left'), value: 'left' },
               { label: t('settings.display.navbar.position.top'), value: 'top' }
+            ]}
+          />
+        </SettingRow>
+        <SettingDivider />
+        <SettingRow>
+          <SettingRowTitle>{t('settings.display.chat_navigation.label')}</SettingRowTitle>
+          <Segmented
+            value={messageNavigation}
+            shape="round"
+            onChange={(value) => dispatch(setMessageNavigation(value as 'none' | 'buttons'))}
+            options={[
+              { label: t('settings.display.chat_navigation.none'), value: 'none' },
+              { label: t('settings.display.chat_navigation.buttons'), value: 'buttons' }
             ]}
           />
         </SettingRow>

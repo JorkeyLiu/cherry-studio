@@ -4618,6 +4618,11 @@
       "assistant": {
         "title": "助手设置"
       },
+      "chat_navigation": {
+        "buttons": "按钮",
+        "label": "对话导航",
+        "none": "关闭"
+      },
       "custom": {
         "css": {
           "cherrycss": "从 cherrycss.com 获取",
