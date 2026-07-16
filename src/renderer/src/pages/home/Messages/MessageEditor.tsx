@@ -270,125 +270,127 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
   }
 
   return (
-    <EditorContainer
-      className={classNames('message-editor', `message-editor-${message.role}`, isFileDragging && 'file-dragging')}
-      onDragEnter={() => setIsFileDragging(true)}
-      onDragOver={(e) => {
-        e.preventDefault()
-        setIsFileDragging(true)
-      }}
-      onDragLeave={(e) => {
-        if (e.currentTarget === e.target) {
-          setIsFileDragging(false)
-        }
-      }}
-      onDrop={handleDrop}>
-      <EditorSurface>
-        <EditorBody>
-          {editedBlocks
-            .filter((block) => block.type === MessageBlockType.MAIN_TEXT)
-            .map((block) => (
-              <TextArea
-                className="editing-message"
-                key={block.id}
-                ref={textareaRef}
-                variant="borderless"
-                value={block.content}
-                onChange={(e) => {
-                  handleTextChange(block.id, e.target.value)
-                }}
-                onKeyDown={handleKeyDown}
-                autoFocus
-                spellCheck={enableSpellCheck}
-                onPaste={(e) => onPaste(e.nativeEvent)}
-                onFocus={() => {
-                  // 记录当前聚焦的组件
-                  PasteService.setLastFocusedComponent('messageEditor')
-                }}
-                onContextMenu={(e) => {
-                  // 阻止事件冒泡，避免触发全局的 Electron contextMenu
-                  e.stopPropagation()
-                }}
-                autoSize={{ minRows: 2, maxRows: 15 }}
-                style={{
-                  fontSize
-                }}>
-                <TranslateButton onTranslated={onTranslated} />
-              </TextArea>
-            ))}
-          {(editedBlocks.some(
-            (block) => block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE
-          ) ||
-            files.length > 0) && (
-            <FileBlocksContainer>
-              {editedBlocks
-                .filter((block) => block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE)
-                .map(
-                  (block) =>
-                    block.file && (
-                      <CustomTag
-                        key={block.id}
-                        icon={getFileIcon(block.file.ext)}
-                        color="#37a5aa"
-                        closable
-                        onClose={() => handleFileRemove(block.id)}>
-                        <FileNameRender file={block.file} />
-                      </CustomTag>
-                    )
-                )}
-
-              {files.map((file) => (
-                <CustomTag
-                  key={file.id}
-                  icon={getFileIcon(file.ext)}
-                  color="#37a5aa"
-                  closable
-                  onClose={() => setFiles((prevFiles) => prevFiles.filter((f) => f.id !== file.id))}>
-                  <FileNameRender file={file} />
-                </CustomTag>
+    <div className="message-editor-area">
+      <EditorContainer
+        className={classNames('message-editor', `message-editor-${message.role}`, isFileDragging && 'file-dragging')}
+        onDragEnter={() => setIsFileDragging(true)}
+        onDragOver={(e) => {
+          e.preventDefault()
+          setIsFileDragging(true)
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget === e.target) {
+            setIsFileDragging(false)
+          }
+        }}
+        onDrop={handleDrop}>
+        <EditorSurface>
+          <EditorBody>
+            {editedBlocks
+              .filter((block) => block.type === MessageBlockType.MAIN_TEXT)
+              .map((block) => (
+                <TextArea
+                  className="editing-message"
+                  key={block.id}
+                  ref={textareaRef}
+                  variant="borderless"
+                  value={block.content}
+                  onChange={(e) => {
+                    handleTextChange(block.id, e.target.value)
+                  }}
+                  onKeyDown={handleKeyDown}
+                  autoFocus
+                  spellCheck={enableSpellCheck}
+                  onPaste={(e) => onPaste(e.nativeEvent)}
+                  onFocus={() => {
+                    // 记录当前聚焦的组件
+                    PasteService.setLastFocusedComponent('messageEditor')
+                  }}
+                  onContextMenu={(e) => {
+                    // 阻止事件冒泡，避免触发全局的 Electron contextMenu
+                    e.stopPropagation()
+                  }}
+                  autoSize={{ minRows: 2, maxRows: 15 }}
+                  style={{
+                    fontSize
+                  }}>
+                  <TranslateButton onTranslated={onTranslated} />
+                </TextArea>
               ))}
-            </FileBlocksContainer>
-          )}
-        </EditorBody>
-        <ActionBar>
-          <ActionBarLeft>
-            {isUserMessage && (
-              <AttachmentButton
-                quickPanel={noopQuickPanel}
-                files={files}
-                setFiles={setFiles}
-                couldAddImageFile={couldAddImageFile}
-                extensions={extensions}
-                disabled={isProcessing}
-              />
+            {(editedBlocks.some(
+              (block) => block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE
+            ) ||
+              files.length > 0) && (
+              <FileBlocksContainer>
+                {editedBlocks
+                  .filter((block) => block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE)
+                  .map(
+                    (block) =>
+                      block.file && (
+                        <CustomTag
+                          key={block.id}
+                          icon={getFileIcon(block.file.ext)}
+                          color="#37a5aa"
+                          closable
+                          onClose={() => handleFileRemove(block.id)}>
+                          <FileNameRender file={block.file} />
+                        </CustomTag>
+                      )
+                  )}
+
+                {files.map((file) => (
+                  <CustomTag
+                    key={file.id}
+                    icon={getFileIcon(file.ext)}
+                    color="#37a5aa"
+                    closable
+                    onClose={() => setFiles((prevFiles) => prevFiles.filter((f) => f.id !== file.id))}>
+                    <FileNameRender file={file} />
+                  </CustomTag>
+                ))}
+              </FileBlocksContainer>
             )}
-          </ActionBarLeft>
-          <ActionBarRight>
-            <Tooltip title={t('common.cancel')}>
-              <ActionIconButton onClick={onCancel} disabled={isProcessing} aria-label={t('common.cancel')}>
-                <X size={16} />
-              </ActionIconButton>
-            </Tooltip>
-            <Tooltip title={t('common.save')}>
-              <ActionIconButton onClick={handleSave} disabled={isProcessing} aria-label={t('common.save')}>
-                <Save size={16} />
-              </ActionIconButton>
-            </Tooltip>
-            {message.role === 'user' && (
-              <Tooltip title={t('chat.resend')}>
-                <ActionIconButton
-                  className="primary-action"
-                  onClick={handleResend}
+          </EditorBody>
+          <ActionBar>
+            <ActionBarLeft>
+              {isUserMessage && (
+                <AttachmentButton
+                  quickPanel={noopQuickPanel}
+                  files={files}
+                  setFiles={setFiles}
+                  couldAddImageFile={couldAddImageFile}
+                  extensions={extensions}
                   disabled={isProcessing}
-                  aria-label={t('chat.resend')}>
-                  <Send size={16} />
+                />
+              )}
+            </ActionBarLeft>
+            <ActionBarRight>
+              <Tooltip title={t('common.cancel')}>
+                <ActionIconButton onClick={onCancel} disabled={isProcessing} aria-label={t('common.cancel')}>
+                  <X size={16} />
                 </ActionIconButton>
               </Tooltip>
-            )}
-          </ActionBarRight>
-        </ActionBar>
-      </EditorSurface>
-    </EditorContainer>
+              <Tooltip title={t('common.save')}>
+                <ActionIconButton onClick={handleSave} disabled={isProcessing} aria-label={t('common.save')}>
+                  <Save size={16} />
+                </ActionIconButton>
+              </Tooltip>
+              {message.role === 'user' && (
+                <Tooltip title={t('chat.resend')}>
+                  <ActionIconButton
+                    className="primary-action"
+                    onClick={handleResend}
+                    disabled={isProcessing}
+                    aria-label={t('chat.resend')}>
+                    <Send size={16} />
+                  </ActionIconButton>
+                </Tooltip>
+              )}
+            </ActionBarRight>
+          </ActionBar>
+        </EditorSurface>
+      </EditorContainer>
+    </div>
   )
 }
 
