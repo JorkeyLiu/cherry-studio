@@ -120,7 +120,24 @@ const MessageItem: FC<Props> = ({
     (e: React.MouseEvent) => {
       if (!isEditMode || !onGroupClick) return
       // 排除 Footer（菜单栏）区域，按钮有自己的 handler
-      if ((e.target as HTMLElement).closest('.MessageFooter')) return
+      if (
+        (e.target as HTMLElement).closest(
+          '.menubar, ' +
+            '.message-editor-area, ' +
+            '.message-header > div:first-child, ' +
+            '.ant-image, ' +
+            '.ant-collapse-header, ' +
+            '.message-attachments, ' +
+            'video, ' +
+            '.message-action-button, ' +
+            '.ant-dropdown, ' +
+            '.ant-dropdown-menu-submenu-popup, ' +
+            '.ant-image-preview-root, ' +
+            '.ant-popover, ' +
+            '.ant-modal'
+        )
+      )
+        return
       const askId = message.role === 'user' ? message.id : message.askId || message.id
       if (!askId) return
       const isCtrl = e.metaKey || e.ctrlKey

@@ -252,7 +252,7 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
   }
 
   return (
-    <>
+    <div className="message-editor-area">
       <EditorContainer
         className="message-editor"
         direction="vertical"
@@ -356,7 +356,7 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
           )}
         </ActionBarRight>
       </ActionBar>
-    </>
+    </div>
   )
 }
 
