@@ -69,6 +69,8 @@ import { mutate } from 'swr'
 import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '../newMessage'
+import { clearSegmentsForTopic } from '../topicSegment'
+import { clearTopicSegmentsFromDB, loadTopicSegmentsThunk, removeMessageFromSegmentsThunk } from './topicSegmentThunk'
 // import {
 //   bulkAddBlocksV2,
 //   clearMessagesFromDBV2,
@@ -1131,6 +1133,9 @@ export const deleteSingleMessageThunk =
       dispatch(newMessagesActions.removeMessage({ topicId, messageId }))
       cleanupMultipleBlocks(dispatch, blockIdsToDelete)
       await dbService.deleteMessage(topicId, messageId)
+
+      // C2: Remove message from associated topic segments
+      await dispatch(removeMessageFromSegmentsThunk({ topicId, messageId }))
     } catch (error) {
       logger.error(`[deleteSingleMessage] Failed to delete message ${messageId}:`, error as Error)
     }
@@ -1156,6 +1161,10 @@ export const clearTopicMessagesThunk =
       dispatch(newMessagesActions.clearTopicMessages(topicId))
       cleanupMultipleBlocks(dispatch, blockIdsToDelete)
       await clearMessagesFromDB(topicId)
+
+      // C1: Also clear topic segments when clearing messages
+      dispatch(clearSegmentsForTopic(topicId))
+      await clearTopicSegmentsFromDB(topicId)
     } catch (error) {
       logger.error(`[clearTopicMessagesThunk] Failed to clear messages for topic ${topicId}:`, error as Error)
     }
@@ -1998,6 +2007,9 @@ export const loadTopicMessagesThunk =
         dispatch(upsertManyBlocks(blocks))
       }
       dispatch(newMessagesActions.messagesReceived({ topicId, messages }))
+
+      // Load topic segments for this topic
+      void dispatch(loadTopicSegmentsThunk(topicId))
     } catch (error) {
       logger.error(`Failed to load messages for topic ${topicId}:`, error as Error)
       // Could dispatch an error action here if needed

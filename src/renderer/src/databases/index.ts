@@ -19,6 +19,7 @@ import type {
   FileMetadata,
   KnowledgeNoteItem,
   QuickPhrase,
+  TopicSegment,
   TranslateHistory
 } from '@renderer/types'
 // Import necessary types for blocks and new message structure
@@ -39,6 +40,7 @@ export const db = new Dexie('CherryStudio', {
   quick_phrases: EntityTable<QuickPhrase, 'id'>
   message_blocks: EntityTable<MessageBlock, 'id'> // Correct type for message_blocks
   translate_languages: EntityTable<CustomTranslateLanguage, 'id'>
+  topic_segments: EntityTable<TopicSegment, 'id'>
 }
 
 db.version(1).stores({
@@ -133,6 +135,18 @@ db.version(10).stores({
   translate_languages: '&id, langCode',
   quick_phrases: 'id',
   message_blocks: 'id, messageId, file.id'
+})
+
+db.version(11).stores({
+  files: 'id, name, origin_name, path, size, ext, type, created_at, count',
+  topics: '&id',
+  settings: '&id, value',
+  knowledge_notes: '&id, baseId, type, content, created_at, updated_at',
+  translate_history: '&id, sourceText, targetText, sourceLanguage, targetLanguage, createdAt',
+  translate_languages: '&id, langCode',
+  quick_phrases: 'id',
+  message_blocks: 'id, messageId, file.id',
+  topic_segments: 'id, topicId'
 })
 
 export default db

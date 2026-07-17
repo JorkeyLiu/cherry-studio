@@ -1,4 +1,5 @@
 import type { Message, MessageBlock } from './newMessage'
+import type { TopicSegment } from './topicSegment'
 
 // 剪贴板模式
 export type ClipboardMode = 'copy' | 'cut'
@@ -31,6 +32,12 @@ export interface EditModeState {
   focusedIndex: number | null // 当前焦点位置
   isProcessing: boolean // 全局操作锁
 }
+
+/**
+ * Snapshot of a TopicSegment before message deletion.
+ * Used to restore segment membership when undoing a delete.
+ */
+export type SegmentSnapshot = TopicSegment
 
 /** Per-group position anchor for restoring non-contiguous selections */
 export interface GroupAnchor {
@@ -65,6 +72,8 @@ export interface DeleteUndoAction extends BaseUndoAction {
   type: 'delete'
   /** Per-group anchors for restoring deleted groups to their original positions */
   groupAnchors: GroupAnchor[]
+  /** Snapshots of affected segments before deletion (for undo segment restoration) */
+  segmentSnapshots: SegmentSnapshot[]
 }
 
 export interface PasteUndoAction extends BaseUndoAction {
@@ -85,6 +94,8 @@ export interface CutPasteUndoAction extends BaseUndoAction {
   sourceTopicId: string
   /** Per-group anchors for restoring source groups to their original positions */
   sourceGroupAnchors: GroupAnchor[]
+  /** Snapshots of affected source segments before deletion (for undo source segment restoration) */
+  sourceSegmentSnapshots: SegmentSnapshot[]
 }
 
 export type UndoAction = DeleteUndoAction | PasteUndoAction | CutPasteUndoAction

@@ -5,13 +5,15 @@ import { clearClipboard, setClipboard } from '@renderer/store/clipboard'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
 import { deleteMessagesFromDB, saveMessageAndBlocksToDB } from '@renderer/store/thunk/messageThunk'
+import { collectSegmentSnapshots, syncSegmentsAfterMessageDeletion } from '@renderer/store/thunk/topicSegmentThunk'
 import { pushUndoAction } from '@renderer/store/undoStack'
 import type {
   ClipboardItem,
   CutPasteUndoAction,
   DeleteUndoAction,
   GroupAnchor,
-  PasteUndoAction
+  PasteUndoAction,
+  SegmentSnapshot
 } from '@renderer/types/editMode'
 import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
@@ -278,6 +280,7 @@ export async function pasteMessages(
   // This must happen before any messages are inserted into the target topic,
   // because for same-topic cut-paste, the paste loop would contaminate sourceMessages.
   let sourceGroupAnchors: GroupAnchor[] = []
+  let sourceSegmentSnapshots: SegmentSnapshot[] = []
   const sourceMessageIdsToDelete: string[] = []
   const sourceBlockIdsToDelete: string[] = []
 
@@ -395,6 +398,9 @@ export async function pasteMessages(
 
   // If cut mode: remove source messages (DB-first)
   if (mode === 'cut' && sourceTopicId) {
+    // Collect segment snapshots BEFORE deletion (needed for undo)
+    sourceSegmentSnapshots = collectSegmentSnapshots(getState, sourceTopicId, sourceMessageIdsToDelete)
+
     // DB-first: delete from DB before dispatching to Redux
     if (sourceMessageIdsToDelete.length > 0) {
       try {
@@ -405,6 +411,9 @@ export async function pasteMessages(
         if (sourceBlockIdsToDelete.length > 0) {
           dispatch(removeManyBlocks(sourceBlockIdsToDelete))
         }
+
+        // Sync segments after source message deletion
+        await syncSegmentsAfterMessageDeletion(dispatch, getState, sourceTopicId, sourceMessageIdsToDelete)
       } catch (error) {
         logger.error('[pasteMessages] Failed to delete source messages from DB', error as Error)
       }
@@ -436,6 +445,7 @@ export async function pasteMessages(
       targetAnchorMessageId: anchorMessageId,
       sourceTopicId,
       sourceGroupAnchors,
+      sourceSegmentSnapshots,
       pastedMessagesSnapshot: allInsertedMessages,
       pastedBlocksSnapshot: allInsertedBlocks,
       fileReferenceDeltas
@@ -517,6 +527,9 @@ export async function deleteSelectedMessages(
   // Build per-group anchors for undo positioning
   const groupAnchors = buildGroupAnchors(messages, allBlocksToDelete, selectedGroupIds)
 
+  // Collect segment snapshots BEFORE deletion (needed for undo)
+  const segmentSnapshots = collectSegmentSnapshots(getState, topicId, allMessageIds)
+
   // DB-first: delete from DB before dispatching to Redux
   try {
     await deleteMessagesFromDB(topicId, allMessageIds)
@@ -530,6 +543,9 @@ export async function deleteSelectedMessages(
   if (allBlockIds.length > 0) {
     dispatch(removeManyBlocks(allBlockIds))
   }
+
+  // Sync segments after message deletion
+  await syncSegmentsAfterMessageDeletion(dispatch, getState, topicId, allMessageIds)
 
   // Update file reference counts
   for (const { fileId, delta } of fileReferenceDeltas) {
@@ -546,7 +562,8 @@ export async function deleteSelectedMessages(
     pastedMessagesSnapshot: [],
     pastedBlocksSnapshot: [],
     fileReferenceDeltas,
-    groupAnchors
+    groupAnchors,
+    segmentSnapshots
   }
 
   dispatch(pushUndoAction(undoAction))
@@ -591,6 +608,9 @@ export async function deleteSingleMessage(
   const positionIndex = topicMessages.findIndex((m) => m.id === message.id)
   const nextMessage = positionIndex >= 0 ? topicMessages[positionIndex + 1] : undefined
 
+  // Collect segment snapshots BEFORE deletion (needed for undo)
+  const segmentSnapshots = collectSegmentSnapshots(getState, topicId, [message.id])
+
   // DB-first: delete from DB before dispatching to Redux
   try {
     await deleteMessagesFromDB(topicId, [message.id])
@@ -604,6 +624,9 @@ export async function deleteSingleMessage(
   if (blockIds.length > 0) {
     dispatch(removeManyBlocks(blockIds))
   }
+
+  // Sync segments after message deletion
+  await syncSegmentsAfterMessageDeletion(dispatch, getState, topicId, [message.id])
 
   // Update file reference counts
   for (const { fileId, delta } of fileReferenceDeltas) {
@@ -627,7 +650,8 @@ export async function deleteSingleMessage(
     pastedMessagesSnapshot: [],
     pastedBlocksSnapshot: [],
     fileReferenceDeltas,
-    groupAnchors: [groupAnchor]
+    groupAnchors: [groupAnchor],
+    segmentSnapshots
   }
 
   dispatch(pushUndoAction(undoAction))

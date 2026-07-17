@@ -6,6 +6,7 @@ import type { CSSProperties } from 'react'
 
 export * from './file'
 export * from './note'
+export * from './topicSegment'
 
 import * as z from 'zod'
 

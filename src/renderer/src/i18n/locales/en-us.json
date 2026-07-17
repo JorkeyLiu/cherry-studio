@@ -1745,6 +1745,17 @@
   "docs": {
     "title": "Docs"
   },
+  "editMode": {
+    "contextMenu": {
+      "copy": "Copy",
+      "cut": "Cut",
+      "delete": "Delete",
+      "paste": "Paste",
+      "redo": "Redo",
+      "selectAll": "Select All",
+      "undo": "Undo"
+    }
+  },
   "endpoint_type": {
     "anthropic": "Anthropic",
     "gemini": "Gemini",
@@ -5886,6 +5897,37 @@
     "settings": "Settings",
     "store": "Assistant Library",
     "translate": "Translate"
+  },
+  "topicSegment": {
+    "create": {
+      "defaultName": "New Message Group",
+      "namePlaceholder": "Enter message group name",
+      "notContinuous": "Only consecutive messages can be grouped",
+      "overlappingMessages": "Selected messages overlap with an existing segment",
+      "selectMessages": "Please select at least one message first",
+      "title": "Create Message Group"
+    },
+    "createAction": "Create Message Group",
+    "dissolve": {
+      "confirm": "Are you sure you want to dissolve this group? Messages will not be deleted."
+    },
+    "dissolveAction": "Dissolve Group",
+    "merge": {
+      "success": "Group merged successfully"
+    },
+    "mergeDown": "Merge into Group Below",
+    "mergeUp": "Merge into Group Above",
+    "messages": {
+      "count": "{{count}} message(s)"
+    },
+    "navigation": {
+      "title": "Message Group Navigation"
+    },
+    "remove": {
+      "success": "Removed from group"
+    },
+    "removeFromSegment": "Remove from Group",
+    "rename": "Rename"
   },
   "trace": {
     "backList": "Back To List",

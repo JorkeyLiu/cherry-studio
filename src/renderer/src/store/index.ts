@@ -50,6 +50,7 @@ import settings from './settings'
 import shortcuts from './shortcuts'
 import tabs from './tabs'
 import toolPermissions from './toolPermissions'
+import topicSegment from './topicSegment'
 import translate from './translate'
 import undoStack from './undoStack'
 import websearch from './websearch'
@@ -85,7 +86,8 @@ const rootReducer = combineReducers({
   toolPermissions,
   clipboard,
   editMode,
-  undoStack
+  undoStack,
+  topicSegments: topicSegment
 })
 
 const persistedReducer = persistReducer(
@@ -101,7 +103,8 @@ const persistedReducer = persistReducer(
       'toolPermissions',
       'clipboard',
       'editMode',
-      'undoStack'
+      'undoStack',
+      'topicSegments'
     ],
     migrate
   },
@@ -120,7 +123,7 @@ const persistedReducer = persistReducer(
  * Call storeSyncService.subscribe() in the window's entryPoint.tsx
  */
 storeSyncService.setOptions({
-  syncList: ['assistants/', 'settings/', 'llm/', 'selectionStore/', 'note/']
+  syncList: ['assistants/', 'settings/', 'llm/', 'selectionStore/', 'note/', 'topicSegments/']
 })
 
 const store = configureStore({
