@@ -49,6 +49,7 @@ import type { FC } from 'react'
 import React, { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import TopicSegmentDrawer from '../Messages/TopicSegmentDrawer'
 import { InputbarCore } from './components/InputbarCore'
 import InputbarTools from './InputbarTools'
 import KnowledgeBaseInput from './KnowledgeBaseInput'
@@ -508,6 +509,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
       leftToolbar={leftToolbar}
       rightToolbar={rightToolbar}
       topContent={topContent}
+      topRightOverlay={<TopicSegmentDrawer topicId={topic.id} />}
     />
   )
 }

@@ -1,5 +1,6 @@
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import type { TopicSegment } from '@renderer/types/topicSegment'
+import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 import { Input, Popconfirm } from 'antd'
 import { Pencil, Trash2 } from 'lucide-react'
 import { memo, useCallback, useState } from 'react'
@@ -18,7 +19,7 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
   const { updateSegmentName, deleteSegment } = useTopicSegments(segment.topicId)
   const [isEditing, setIsEditing] = useState(false)
   const [editName, setEditName] = useState(segment.name)
-  const color = segment.color || 'var(--color-primary)'
+  const color = segment.color || getSegmentColor(segment.id)
 
   const handleRename = useCallback(async () => {
     const trimmed = editName.trim()
@@ -38,7 +39,7 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
   }, [segment.name])
 
   return (
-    <LineContainer $color={color} $isFirst={isFirst} $isLast={isLast}>
+    <LineContainer $isFirst={isFirst} $isLast={isLast}>
       {/* 竖线 */}
       <Line $isFirst={isFirst} $isLast={isLast} $color={color} />
 
@@ -46,6 +47,7 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
       {isFirst && (
         <TabContainer $color={color}>
           <TabContent>
+            <ColorDot $color={color} />
             {isEditing ? (
               <TabInput
                 size="small"
@@ -87,7 +89,6 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
 // ─── Styled Components ───
 
 const LineContainer = styled.div<{
-  $color: string
   $isFirst: boolean
   $isLast: boolean
 }>`
@@ -95,7 +96,7 @@ const LineContainer = styled.div<{
   left: -12px;
   top: 0;
   bottom: 0;
-  width: 3px;
+  width: 4px;
   z-index: 1;
   pointer-events: none;
 `
@@ -107,15 +108,10 @@ const Line = styled.div<{
 }>`
   position: absolute;
   left: 0;
-  width: 3px;
+  width: 4px;
   background-color: ${(props) => props.$color};
   top: ${(props) => (props.$isFirst ? '28px' : '0')};
   bottom: ${(props) => (props.$isLast ? '12px' : '0')};
-  border-radius: ${(props) => {
-    if (props.$isFirst && props.$isLast) return '3px'
-    if (props.$isLast) return '0 0 3px 3px'
-    return '0'
-  }};
 `
 
 const TabContainer = styled.div<{ $color: string }>`
@@ -127,7 +123,8 @@ const TabContainer = styled.div<{ $color: string }>`
   gap: 4px;
   height: 24px;
   padding: 0 8px 0 6px;
-  background: ${(props) => props.$color};
+  background: color-mix(in srgb, ${(props) => props.$color} 10%, var(--color-background));
+  border: 1px solid color-mix(in srgb, ${(props) => props.$color} 22%, transparent);
   border-radius: 4px 8px 8px 4px;
   pointer-events: auto;
   white-space: nowrap;
@@ -142,10 +139,18 @@ const TabContent = styled.div`
   overflow: hidden;
 `
 
+const ColorDot = styled.span<{ $color: string }>`
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: ${(props) => props.$color};
+  flex-shrink: 0;
+`
+
 const TabName = styled.span`
   font-size: 12px;
   font-weight: 500;
-  color: #fff;
+  color: var(--color-text-1);
   cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -167,7 +172,7 @@ const TabInput = styled(Input)`
 
 const TabCount = styled.span`
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--color-text-3);
   flex-shrink: 0;
 `
 
@@ -191,11 +196,11 @@ const TabActionBtn = styled.button`
   padding: 2px;
   display: flex;
   align-items: center;
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--color-text-3);
   transition: color 0.15s;
 
   &:hover {
-    color: #fff;
+    color: var(--color-text-1);
   }
 `
 

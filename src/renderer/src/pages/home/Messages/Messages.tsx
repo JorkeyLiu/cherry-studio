@@ -46,7 +46,6 @@ import NarrowLayout from './NarrowLayout'
 import Prompt from './Prompt'
 import { MessagesContainer, ScrollContainer } from './shared'
 import TopicSegmentLine from './TopicSegmentLine'
-import TopicSegmentNavigation from './TopicSegmentNavigation'
 
 interface MessagesProps {
   assistant: Assistant
@@ -84,9 +83,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   const { showPrompt, messageNavigation } = useSettings()
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
-  const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment, segmentsForTopic } = useTopicSegments(
-    topic.id
-  )
+  const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
   useClipboardKeyboard()
 
   // NOTE: 因为displayMessages是倒序的，所以得到的groupedMessages每个group内部也是倒序的，需要再倒一遍
@@ -209,7 +206,6 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
         {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
       </NarrowLayout>
       {messageNavigation === 'anchor' && <MessageAnchorLine messages={displayMessages} />}
-      {segmentsForTopic.length > 0 && <TopicSegmentNavigation topicId={topic.id} />}
       {isEditMode && <EditModeActionBar />}
     </MessagesContainer>
   )

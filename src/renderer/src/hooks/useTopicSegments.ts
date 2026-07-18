@@ -4,7 +4,21 @@ import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { addSegment, removeSegment, updateSegment } from '@renderer/store/topicSegment'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { uuid } from '@renderer/utils'
+import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 import { useCallback, useMemo } from 'react'
+
+/**
+ * Returns the index of the first message in the segment that still exists in the ordered list.
+ * Iterates through messageIds to find the first one present in the index map,
+ * which is more robust than using messageIds[0] directly (it may have been deleted).
+ */
+export function getSegmentFirstMessageIndex(messageIds: string[], indexMap: Map<string, number>): number {
+  for (const id of messageIds) {
+    const index = indexMap.get(id)
+    if (index !== undefined) return index
+  }
+  return Infinity
+}
 
 const logger = loggerService.withContext('useTopicSegments')
 
@@ -14,10 +28,26 @@ export function useTopicSegments(topicId: string) {
   const segmentsEntities = useAppSelector((state) => state.topicSegments.segments.entities)
   const segmentsByTopic = useAppSelector((state) => state.topicSegments.segmentsByTopic)
 
+  const messageIdsForTopic = useAppSelector((state) => state.messages.messageIdsByTopic[topicId] || [])
+
   const segmentsForTopic = useMemo(() => {
     const ids = segmentsByTopic[topicId] || []
     return ids.map((id) => segmentsEntities[id]).filter(Boolean)
   }, [segmentsEntities, segmentsByTopic, topicId])
+
+  const messageIndexById = useMemo(() => {
+    const map = new Map<string, number>()
+    messageIdsForTopic.forEach((id, index) => map.set(id, index))
+    return map
+  }, [messageIdsForTopic])
+
+  const orderedSegmentsForTopic = useMemo(() => {
+    return [...segmentsForTopic].sort((a, b) => {
+      const aIndex = getSegmentFirstMessageIndex(a.messageIds, messageIndexById)
+      const bIndex = getSegmentFirstMessageIndex(b.messageIds, messageIndexById)
+      return aIndex - bIndex
+    })
+  }, [segmentsForTopic, messageIndexById])
 
   const getSegmentsForTopic = useCallback(
     (tid: string) => {
@@ -30,11 +60,13 @@ export function useTopicSegments(topicId: string) {
   const createSegment = useCallback(
     async (tid: string, name: string, messageIds: string[]): Promise<TopicSegment> => {
       const now = new Date().toISOString()
+      const id = uuid()
       const segment: TopicSegment = {
-        id: uuid(),
+        id,
         topicId: tid,
         name,
         messageIds,
+        color: getSegmentColor(id),
         createdAt: now,
         updatedAt: now
       }
@@ -120,6 +152,8 @@ export function useTopicSegments(topicId: string) {
   return useMemo(
     () => ({
       segmentsForTopic,
+      orderedSegmentsForTopic,
+      messageIndexById,
       getSegmentsForTopic,
       createSegment,
       updateSegmentName,
@@ -133,6 +167,8 @@ export function useTopicSegments(topicId: string) {
     }),
     [
       segmentsForTopic,
+      orderedSegmentsForTopic,
+      messageIndexById,
       getSegmentsForTopic,
       createSegment,
       updateSegmentName,

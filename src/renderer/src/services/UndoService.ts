@@ -4,7 +4,12 @@ import type { AppDispatch, RootState } from '@renderer/store'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
 import { deleteMessagesFromDB, saveMessageAndBlocksToDB } from '@renderer/store/thunk/messageThunk'
-import { restoreSegmentsAfterUndo, syncSegmentsAfterMessageDeletion } from '@renderer/store/thunk/topicSegmentThunk'
+import {
+  deleteSegmentsBySnapshots,
+  restoreSegmentsAfterUndo,
+  restoreTargetSegments,
+  syncSegmentsAfterMessageDeletion
+} from '@renderer/store/thunk/topicSegmentThunk'
 import { prepareRedo, prepareUndo } from '@renderer/store/undoStack'
 import type {
   CutPasteUndoAction,
@@ -228,7 +233,7 @@ async function undoPaste(
   getState: () => RootState,
   action: PasteUndoAction | CutPasteUndoAction
 ): Promise<void> {
-  const { targetTopicId, insertedMessageIds = [], fileReferenceDeltas = [] } = action
+  const { targetTopicId, insertedMessageIds = [], fileReferenceDeltas = [], targetSegmentSnapshots = [] } = action
 
   if (insertedMessageIds.length === 0) {
     logger.warn('[undoPaste] No message IDs to remove')
@@ -261,7 +266,13 @@ async function undoPaste(
     dispatch(removeManyBlocks(blockIdsToRemove))
   }
 
-  // Sync segments after message deletion
+  // Delete target segments that were created during paste BEFORE syncing,
+  // so syncSegmentsAfterMessageDeletion won't find (and double-delete) them.
+  if (targetSegmentSnapshots.length > 0) {
+    await deleteSegmentsBySnapshots(dispatch, targetSegmentSnapshots)
+  }
+
+  // Sync segments after message deletion (only non-target segments remain)
   await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds)
 
   // Decrement file reference counts
@@ -269,7 +280,9 @@ async function undoPaste(
     await updateFileReferenceCounts(fileReferenceDeltas, false)
   }
 
-  logger.info(`[undoPaste] Removed ${insertedMessageIds.length} pasted messages`)
+  logger.info(
+    `[undoPaste] Removed ${insertedMessageIds.length} pasted messages, ${targetSegmentSnapshots.length} target segments`
+  )
 }
 
 /**
@@ -377,7 +390,8 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
     pastedBlocksSnapshot = [],
     targetInsertPositionIndex: insertPositionIndex,
     targetAnchorMessageId: anchorMessageId,
-    fileReferenceDeltas = []
+    fileReferenceDeltas = [],
+    targetSegmentSnapshots = []
   } = action
 
   if (pastedMessagesSnapshot.length === 0) {
@@ -423,8 +437,13 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
     await updateFileReferenceCounts(fileReferenceDeltas, true)
   }
 
+  // Restore target segments that were created during original paste
+  if (targetSegmentSnapshots.length > 0) {
+    await restoreTargetSegments(dispatch, targetSegmentSnapshots)
+  }
+
   logger.info(
-    `[redoPaste] Re-inserted ${pastedMessagesSnapshot.length} pasted messages at resolved index ${resolvedIndex}`
+    `[redoPaste] Re-inserted ${pastedMessagesSnapshot.length} pasted messages at resolved index ${resolvedIndex}, ${targetSegmentSnapshots.length} target segments`
   )
 }
 
@@ -444,7 +463,8 @@ async function redoCutPaste(
     sourceGroupAnchors,
     targetInsertPositionIndex: insertPositionIndex,
     targetAnchorMessageId: anchorMessageId,
-    fileReferenceDeltas = []
+    fileReferenceDeltas = [],
+    targetSegmentSnapshots = []
   } = action
 
   // Step 1: Delete source messages (DB-first)
@@ -532,8 +552,13 @@ async function redoCutPaste(
     }
   }
 
+  // Step 3: Restore target segments that were created during original paste
+  if (targetSegmentSnapshots.length > 0) {
+    await restoreTargetSegments(dispatch, targetSegmentSnapshots)
+  }
+
   const sourceCount = sourceGroupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
   logger.info(
-    `[redoCutPaste] Re-executed cut+paste: ${sourceCount} source messages deleted, ${pastedMessagesSnapshot.length} messages re-inserted`
+    `[redoCutPaste] Re-executed cut+paste: ${sourceCount} source messages deleted, ${pastedMessagesSnapshot.length} messages re-inserted, ${targetSegmentSnapshots.length} target segments restored`
   )
 }

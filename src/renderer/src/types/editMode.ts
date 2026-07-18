@@ -16,12 +16,25 @@ export interface ClipboardItem {
   positionIndex: number
 }
 
+/**
+ * Snapshot of a fully-selected TopicSegment captured at cut/copy time.
+ * Used to rebuild segments on paste via oldId→newId mapping.
+ */
+export interface ClipboardSegmentSnapshot {
+  originalSegmentId: string
+  name: string
+  color?: string
+  originalMessageIds: string[]
+}
+
 // 剪贴板 state
 export interface ClipboardState {
   mode: ClipboardMode | null
   items: ClipboardItem[]
   sourceTopicId: string | null
   timestamp: number
+  /** Snapshots of fully-selected segments for segment reconstruction on paste */
+  segmentSnapshots: ClipboardSegmentSnapshot[]
 }
 
 // 编辑模式 state
@@ -82,6 +95,8 @@ export interface PasteUndoAction extends BaseUndoAction {
   targetAnchorMessageId: string | null
   /** Fallback position index for redo */
   targetInsertPositionIndex: number
+  /** Snapshots of segments created in target topic (for undo delete / redo restore) */
+  targetSegmentSnapshots: TopicSegment[]
 }
 
 export interface CutPasteUndoAction extends BaseUndoAction {
@@ -96,6 +111,8 @@ export interface CutPasteUndoAction extends BaseUndoAction {
   sourceGroupAnchors: GroupAnchor[]
   /** Snapshots of affected source segments before deletion (for undo source segment restoration) */
   sourceSegmentSnapshots: SegmentSnapshot[]
+  /** Snapshots of segments created in target topic (for undo delete / redo restore) */
+  targetSegmentSnapshots: TopicSegment[]
 }
 
 export type UndoAction = DeleteUndoAction | PasteUndoAction | CutPasteUndoAction

@@ -70,6 +70,9 @@ export interface InputbarCoreProps {
   // Pinned content that floats above the inputbar (uses absolute positioning)
   pinnedContent?: React.ReactNode
 
+  // Overlay rendered inside InputBarContainer at top-right (absolute positioned)
+  topRightOverlay?: React.ReactNode
+
   // Override the user preference for quick panel triggers
   forceEnableQuickPanelTriggers?: boolean
 }
@@ -121,6 +124,7 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   rightToolbar,
   topContent,
   pinnedContent,
+  topRightOverlay,
   forceEnableQuickPanelTriggers
 }) => {
   const config = useMemo(() => getInputbarConfig(scope), [scope])
@@ -648,6 +652,7 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
           <DragHandle onMouseDown={handleDragStart}>
             <HolderOutlined style={{ fontSize: 12 }} />
           </DragHandle>
+          {topRightOverlay}
           {files.length > 0 && (
             <AttachmentPreview files={files} setFiles={setFiles} onAttachmentContextMenu={appendTxtContentToInput} />
           )}

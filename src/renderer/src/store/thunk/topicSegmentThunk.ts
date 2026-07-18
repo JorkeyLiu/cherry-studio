@@ -7,8 +7,9 @@ import {
   removeSegment,
   updateSegment
 } from '@renderer/store/topicSegment'
-import type { SegmentSnapshot } from '@renderer/types/editMode'
+import type { ClipboardSegmentSnapshot, SegmentSnapshot } from '@renderer/types/editMode'
 import type { TopicSegment } from '@renderer/types/topicSegment'
+import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 
 import type { AppDispatch, RootState } from '../index'
 
@@ -140,5 +141,61 @@ export const restoreSegmentsAfterUndo = async (
       await db.topic_segments.put(restoredSegment)
       dispatch(addSegment(restoredSegment))
     }
+  }
+}
+
+/**
+ * Collect snapshots of fully-selected segments for clipboard segment reconstruction.
+ * A segment is "fully selected" when ALL of its messageIds are contained in the
+ * selectedMessageIds set.
+ *
+ * Must be called at cut/copy time.
+ */
+export const collectWholeSelectedSegmentsForClipboard = (
+  getState: () => RootState,
+  topicId: string,
+  selectedMessageIds: string[]
+): ClipboardSegmentSnapshot[] => {
+  const state = getState()
+  const segmentIds = state.topicSegments.segmentsByTopic[topicId] || []
+  const selectedSet = new Set(selectedMessageIds)
+  const snapshots: ClipboardSegmentSnapshot[] = []
+
+  for (const segId of segmentIds) {
+    const segment = state.topicSegments.segments.entities[segId]
+    if (!segment) continue
+    // Only record if ALL messageIds of the segment are in the selection
+    if (segment.messageIds.length > 0 && segment.messageIds.every((id) => selectedSet.has(id))) {
+      snapshots.push({
+        originalSegmentId: segment.id,
+        name: segment.name,
+        color: segment.color || getSegmentColor(segment.id),
+        originalMessageIds: [...segment.messageIds]
+      })
+    }
+  }
+
+  return snapshots
+}
+
+/**
+ * Delete segments by their snapshots from DB and Redux.
+ * Used by undo to remove target segments that were created during paste.
+ */
+export const deleteSegmentsBySnapshots = async (dispatch: AppDispatch, snapshots: TopicSegment[]): Promise<void> => {
+  for (const snap of snapshots) {
+    await db.topic_segments.delete(snap.id)
+    dispatch(removeSegment(snap.id))
+  }
+}
+
+/**
+ * Restore target segments from snapshots to DB and Redux.
+ * Used by redo to re-create segments that were created during paste.
+ */
+export const restoreTargetSegments = async (dispatch: AppDispatch, snapshots: TopicSegment[]): Promise<void> => {
+  for (const snap of snapshots) {
+    await db.topic_segments.put(snap)
+    dispatch(addSegment(snap))
   }
 }

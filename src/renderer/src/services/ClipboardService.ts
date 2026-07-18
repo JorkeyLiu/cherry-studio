@@ -1,14 +1,21 @@
 import { loggerService } from '@logger'
+import db from '@renderer/databases'
 import { dbService } from '@renderer/services/db'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { clearClipboard, setClipboard } from '@renderer/store/clipboard'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
 import { deleteMessagesFromDB, saveMessageAndBlocksToDB } from '@renderer/store/thunk/messageThunk'
-import { collectSegmentSnapshots, syncSegmentsAfterMessageDeletion } from '@renderer/store/thunk/topicSegmentThunk'
+import {
+  collectSegmentSnapshots,
+  collectWholeSelectedSegmentsForClipboard,
+  syncSegmentsAfterMessageDeletion
+} from '@renderer/store/thunk/topicSegmentThunk'
+import { addSegment } from '@renderer/store/topicSegment'
 import { pushUndoAction } from '@renderer/store/undoStack'
 import type {
   ClipboardItem,
+  ClipboardSegmentSnapshot,
   CutPasteUndoAction,
   DeleteUndoAction,
   GroupAnchor,
@@ -17,6 +24,7 @@ import type {
 } from '@renderer/types/editMode'
 import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
+import type { TopicSegment } from '@renderer/types/topicSegment'
 import { v4 as uuidv4 } from 'uuid'
 
 const logger = loggerService.withContext('ClipboardService')
@@ -144,10 +152,18 @@ export function copyMessages(
 
   const items: ClipboardItem[] = []
 
+  // Collect all selected message IDs for segment snapshot collection
+  const allSelectedMessageIds: string[] = []
+
   for (const askId of sortedGroupIds) {
     const groupMessages = messages.filter((m) => m.askId === askId || m.id === askId)
 
     if (groupMessages.length === 0) continue
+
+    // Track selected message IDs
+    for (const msg of groupMessages) {
+      allSelectedMessageIds.push(msg.id)
+    }
 
     // Deep clone messages and blocks
     const clonedMessages: Message[] = structuredClone(groupMessages)
@@ -173,12 +189,21 @@ export function copyMessages(
     })
   }
 
+  // Collect segment snapshots for fully-selected segments
+  const segmentSnapshots: ClipboardSegmentSnapshot[] = collectWholeSelectedSegmentsForClipboard(
+    getState,
+    topicId,
+    allSelectedMessageIds
+  )
+
   if (items.length > 0) {
-    dispatch(setClipboard({ mode: 'copy', items, sourceTopicId: topicId }))
+    dispatch(setClipboard({ mode: 'copy', items, sourceTopicId: topicId, segmentSnapshots }))
   }
 
   const totalCount = items.reduce((sum, item) => sum + item.messages.length, 0)
-  logger.info(`[copyMessages] Copied ${totalCount} messages from ${items.length} groups`)
+  logger.info(
+    `[copyMessages] Copied ${totalCount} messages from ${items.length} groups, ${segmentSnapshots.length} segment snapshots`
+  )
   return totalCount
 }
 
@@ -204,10 +229,18 @@ export function cutMessages(
 
   const items: ClipboardItem[] = []
 
+  // Collect all selected message IDs for segment snapshot collection
+  const allSelectedMessageIds: string[] = []
+
   for (const askId of sortedGroupIds) {
     const groupMessages = messages.filter((m) => m.askId === askId || m.id === askId)
 
     if (groupMessages.length === 0) continue
+
+    // Track selected message IDs
+    for (const msg of groupMessages) {
+      allSelectedMessageIds.push(msg.id)
+    }
 
     // Deep clone messages and blocks
     const clonedMessages: Message[] = structuredClone(groupMessages)
@@ -232,12 +265,21 @@ export function cutMessages(
     })
   }
 
+  // Collect segment snapshots for fully-selected segments
+  const segmentSnapshots: ClipboardSegmentSnapshot[] = collectWholeSelectedSegmentsForClipboard(
+    getState,
+    topicId,
+    allSelectedMessageIds
+  )
+
   if (items.length > 0) {
-    dispatch(setClipboard({ mode: 'cut', items, sourceTopicId: topicId }))
+    dispatch(setClipboard({ mode: 'cut', items, sourceTopicId: topicId, segmentSnapshots }))
   }
 
   const totalCount = items.reduce((sum, item) => sum + item.messages.length, 0)
-  logger.info(`[cutMessages] Cut ${totalCount} messages from ${items.length} groups`)
+  logger.info(
+    `[cutMessages] Cut ${totalCount} messages from ${items.length} groups, ${segmentSnapshots.length} segment snapshots`
+  )
   return totalCount
 }
 
@@ -252,7 +294,7 @@ export async function pasteMessages(
   targetMessageId: string
 ): Promise<number> {
   const state = getState()
-  const { items: rawItems, mode, sourceTopicId } = state.clipboard
+  const { items: rawItems, mode, sourceTopicId, segmentSnapshots: clipboardSegmentSnapshots } = state.clipboard
 
   if (rawItems.length === 0) {
     logger.warn('[pasteMessages] Clipboard is empty')
@@ -396,6 +438,53 @@ export async function pasteMessages(
     }
   }
 
+  // Reconstruct segments from clipboard snapshots
+  const targetSegmentSnapshots: TopicSegment[] = []
+  if (clipboardSegmentSnapshots && clipboardSegmentSnapshots.length > 0) {
+    for (const clipSnap of clipboardSegmentSnapshots) {
+      // Map original message IDs to new message IDs
+      const newMessageIds: string[] = []
+      let allMapped = true
+      for (const origId of clipSnap.originalMessageIds) {
+        const mappedId = idMapping.get(origId)
+        if (mappedId) {
+          newMessageIds.push(mappedId)
+        } else {
+          allMapped = false
+          break
+        }
+      }
+
+      // Skip if mapping is incomplete (some original IDs were not part of the paste)
+      if (!allMapped || newMessageIds.length === 0) {
+        logger.warn(
+          `[pasteMessages] Skipping segment "${clipSnap.name}" — incomplete ID mapping (${newMessageIds.length}/${clipSnap.originalMessageIds.length})`
+        )
+        continue
+      }
+
+      // Create new segment with new ID in target topic
+      const newSegment: TopicSegment = {
+        id: uuidv4(),
+        topicId: targetTopicId,
+        name: clipSnap.name,
+        color: clipSnap.color,
+        messageIds: newMessageIds,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+
+      // Persist to DB + Redux
+      await db.topic_segments.put(newSegment)
+      dispatch(addSegment(newSegment))
+      targetSegmentSnapshots.push(newSegment)
+    }
+
+    logger.info(
+      `[pasteMessages] Reconstructed ${targetSegmentSnapshots.length} segments from ${clipboardSegmentSnapshots.length} clipboard snapshots`
+    )
+  }
+
   // If cut mode: remove source messages (DB-first)
   if (mode === 'cut' && sourceTopicId) {
     // Collect segment snapshots BEFORE deletion (needed for undo)
@@ -446,6 +535,7 @@ export async function pasteMessages(
       sourceTopicId,
       sourceGroupAnchors,
       sourceSegmentSnapshots,
+      targetSegmentSnapshots,
       pastedMessagesSnapshot: allInsertedMessages,
       pastedBlocksSnapshot: allInsertedBlocks,
       fileReferenceDeltas
@@ -460,6 +550,7 @@ export async function pasteMessages(
       insertedMessageIds,
       targetInsertPositionIndex: insertIndex - insertedMessageIds.length,
       targetAnchorMessageId: anchorMessageId,
+      targetSegmentSnapshots,
       pastedMessagesSnapshot: allInsertedMessages,
       pastedBlocksSnapshot: allInsertedBlocks,
       fileReferenceDeltas
