@@ -3,9 +3,10 @@ import ContextMenu from '@renderer/components/ContextMenu'
 import EditModeActionBar from '@renderer/components/EditModeActionBar'
 import EditModeContextMenu from '@renderer/components/EditModeContextMenu'
 import { LoadingIcon } from '@renderer/components/Icons'
-import { LOAD_MORE_COUNT } from '@renderer/config/constant'
+import { INITIAL_MESSAGES_COUNT, LOAD_MORE_COUNT, SCROLL_CONTEXT_COUNT } from '@renderer/config/constant'
 import { EditModeProvider, useEditMode } from '@renderer/context/EditModeContext'
 import { useAssistant } from '@renderer/hooks/useAssistant'
+import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
 import { useMessageOperations, useTopicMessages } from '@renderer/hooks/useMessageOperations'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
@@ -14,6 +15,7 @@ import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
+import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
 import { getDefaultTopic } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import {
@@ -42,7 +44,7 @@ import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import { last } from 'lodash'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
@@ -62,6 +64,34 @@ interface MessagesProps {
   onFirstUpdate?(): void
 }
 
+export interface MessagesHandle {
+  scrollToMessageById: (messageId: string) => void
+}
+
+/**
+ * Find the first visible message element in the scroll container.
+ * Returns the element and its bounding rect, or null if not found.
+ */
+const findFirstVisibleMessage = (
+  container: HTMLElement | null,
+  elements: Map<string, HTMLElement>
+): { element: HTMLElement; rect: DOMRect } | null => {
+  if (!container) return null
+  const containerRect = container.getBoundingClientRect()
+
+  let closest: { element: HTMLElement; rect: DOMRect } | null = null
+  let minDistance = Infinity
+  for (const el of elements.values()) {
+    const rect = el.getBoundingClientRect()
+    const distance = Math.abs(rect.top - containerRect.top)
+    if (distance < minDistance) {
+      minDistance = distance
+      closest = { element: el, rect }
+    }
+  }
+  return closest
+}
+
 const logger = loggerService.withContext('Messages')
 
 interface MessagesContentProps {
@@ -72,6 +102,7 @@ interface MessagesContentProps {
   displayMessages: Message[]
   hasMore: boolean
   isLoadingMore: boolean
+  isLoadingNewer: boolean
   loadMoreMessages: () => void
   registerMessageElement: (id: string, element: HTMLElement | null) => void
 }
@@ -84,6 +115,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   displayMessages,
   hasMore,
   isLoadingMore,
+  isLoadingNewer,
   loadMoreMessages,
   registerMessageElement
 }) => {
@@ -131,7 +163,6 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
 
     for (const seg of messageSegments) {
       const content = seg.items.map(([key, groupMessages]) => {
-        // Check if any message in this group belongs to a topic segment
         const firstMsg = groupMessages[0]
         const segment = firstMsg ? isMessageInSegment(firstMsg.id) : undefined
         const isFirst = firstMsg ? !!isMessageFirstInSegment(firstMsg.id) : false
@@ -188,6 +219,11 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           {isEditMode ? (
             <EditModeContextMenu topicId={topic.id}>
               <ScrollContainer>
+                {isLoadingNewer && (
+                  <LoaderContainer>
+                    <LoadingIcon color="var(--color-text-2)" />
+                  </LoaderContainer>
+                )}
                 {renderMessageSegments()}
                 {isLoadingMore && (
                   <LoaderContainer>
@@ -199,6 +235,11 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           ) : (
             <ContextMenu>
               <ScrollContainer>
+                {isLoadingNewer && (
+                  <LoaderContainer>
+                    <LoadingIcon color="var(--color-text-2)" />
+                  </LoaderContainer>
+                )}
                 {renderMessageSegments()}
                 {isLoadingMore && (
                   <LoaderContainer>
@@ -218,13 +259,25 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   )
 }
 
-const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, onComponentUpdate, onFirstUpdate }) => {
-  const { containerRef: scrollContainerRef, handleScroll: handleScrollPosition } = useScrollPosition(
-    `topic-${topic.id}`
-  )
+const Messages = ({
+  ref,
+  assistant,
+  topic,
+  setActiveTopic,
+  onComponentUpdate,
+  onFirstUpdate
+}: MessagesProps & { ref?: React.RefObject<MessagesHandle | null> }) => {
+  const {
+    containerRef: scrollContainerRef,
+    handleScroll: handleScrollPosition,
+    getSavedPosition,
+    clearSavedPosition
+  } = useScrollPosition(`topic-${topic.id}`)
   const [displayMessages, setDisplayMessages] = useState<Message[]>([])
   const [hasMore, setHasMore] = useState(false)
+  const [hasMoreNewer, setHasMoreNewer] = useState(false)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const [isLoadingNewer, setIsLoadingNewer] = useState(false)
   const [isProcessingContext, setIsProcessingContext] = useState(false)
 
   const { addTopic } = useAssistant(assistant.id)
@@ -233,13 +286,32 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
   const messages = useTopicMessages(topic.id)
   const { displayCount, clearTopicMessages, deleteMessage, createTopicBranch, editMessage } =
     useMessageOperations(topic)
-  const { setTimeoutTimer } = useTimer()
+  const { setTimeoutTimer, clearAllTimers } = useTimer()
+
+  const { isMultiSelectMode, handleSelectMessage } = useChatContext(topic)
 
   const messageElements = useRef<Map<string, HTMLElement>>(new Map())
   const messagesRef = useRef<Message[]>(messages)
   const displayMessagesRef = useRef<Message[]>(displayMessages)
+  const jumpTargetRef = useRef<string | null>(null)
+  const lastDisplayMessagesRef = useRef<Message[]>([])
   const selectMessageForFoldRef = useRef<(messageId: string) => Promise<void>>(() => Promise.resolve())
   const navigateGenerationRef = useRef(0)
+  const prevTopicIdRef = useRef(topic.id)
+
+  // On mount (topic switch), check if we need to restore to a specific message
+  useEffect(() => {
+    const saved = getSavedPosition()
+    if (saved?.anchorId) {
+      jumpTargetRef.current = saved.anchorId
+    } else if (saved?.scrollTop) {
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          scrollContainerRef.current?.scrollTo({ top: saved.scrollTop })
+        }, 100)
+      })
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     messagesRef.current = messages
@@ -280,13 +352,87 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
     selectMessageForFoldRef.current = selectMessageForFold
   }, [selectMessageForFold])
 
+  const checkBoundaries = useCallback(() => {
+    const current = lastDisplayMessagesRef.current
+    if (current.length === 0 || messages.length === 0) return { hasOlder: false, hasNewer: false }
+
+    const newestInWindow = current[0]
+    const oldestInWindow = current[current.length - 1]
+    const newestInArray = messages[messages.length - 1]
+    const oldestInArray = messages[0]
+
+    return {
+      hasOlder: oldestInWindow?.id !== oldestInArray?.id,
+      hasNewer: newestInWindow?.id !== newestInArray?.id
+    }
+  }, [messages])
+
   useEffect(() => {
-    // Cancel all in-flight navigation when messages/topic change
-    navigateGenerationRef.current++
-    const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
-    setDisplayMessages(newDisplayMessages)
-    setHasMore(messages.length > displayCount)
-  }, [messages, displayCount])
+    // Only bump generation on topic switch, not on every messages change.
+    // This prevents selectMessageForFold (which calls editMessage → messages update)
+    // from cancelling an in-flight navigation.
+    if (prevTopicIdRef.current !== topic.id) {
+      prevTopicIdRef.current = topic.id
+      navigateGenerationRef.current++
+    }
+
+    // Scenario 1: Jump target (deep navigation / topic switch restore)
+    if (jumpTargetRef.current) {
+      const targetId = jumpTargetRef.current
+      jumpTargetRef.current = null
+      const startIndex = computeStartIndex(messages, targetId, SCROLL_CONTEXT_COUNT)
+      const newDisplayMessages = computeDisplayMessages(messages, startIndex, startIndex + INITIAL_MESSAGES_COUNT)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          const el = document.getElementById(`message-${targetId}`)
+          if (el) {
+            scrollIntoView(el, { behavior: 'auto', block: 'start', container: 'nearest' })
+          }
+        }, 50)
+      })
+      return
+    }
+
+    // Scenario 2: First load
+    if (lastDisplayMessagesRef.current.length === 0) {
+      const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+      return
+    }
+
+    // Scenario 3: Messages content changed (edit/delete/etc) - incremental update
+    const earliestLoadedId = lastDisplayMessagesRef.current[lastDisplayMessagesRef.current.length - 1]?.id
+    const earliestIndex = messages.findIndex((m) => m.id === earliestLoadedId)
+
+    if (earliestIndex === -1) {
+      const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+    } else {
+      const newDisplayMessages: Message[] = []
+      for (let i = messages.length - 1; i >= earliestIndex; i--) {
+        newDisplayMessages.push(messages[i])
+      }
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+    }
+  }, [messages, displayCount, checkBoundaries])
 
   /**
    * Check the DOM status of a message element.
@@ -303,6 +449,7 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
 
   /**
    * Ensure the target message is rendered and visible in the DOM.
+   * Uses scroll-position's window management (scrollToMessageById) for missing messages.
    * Handles fold switching for hidden messages.
    * Does NOT scroll — scrolling is handled by `handleNavigateToMessage`.
    */
@@ -321,67 +468,6 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
       if (initialStatus === 'visible') return true
 
       if (initialStatus === 'hidden') {
-        // Message is rendered but hidden by fold — unfold it
-        await selectMessageForFoldRef.current(messageId)
-        if (generation !== navigateGenerationRef.current) return false
-        // Wait for React to re-render after fold switch
-        await new Promise<void>((resolve) => {
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => resolve())
-          })
-        })
-        if (generation !== navigateGenerationRef.current) return false
-        return true
-      }
-
-      // 3. status === 'missing': Load more messages in batches until the target message enters displayMessages
-      const maxAttempts = Math.ceil(allMessages.length / LOAD_MORE_COUNT) + 1
-      let currentOffset = displayMessagesRef.current.length
-
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        if (generation !== navigateGenerationRef.current) return false
-        if (currentOffset >= allMessages.length) break
-
-        // Compute the next batch of messages to display
-        const newBatch = computeDisplayMessages(allMessages, currentOffset, LOAD_MORE_COUNT)
-        if (newBatch.length === 0) break
-
-        currentOffset += newBatch.length
-
-        // Update state — use functional update to ensure we append to the latest state
-        setDisplayMessages((prev) => [...prev, ...newBatch])
-        setHasMore(currentOffset < allMessages.length)
-
-        // Wait for React to re-render and the DOM to update
-        await new Promise<void>((resolve) => {
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => resolve())
-          })
-        })
-
-        if (generation !== navigateGenerationRef.current) return false
-
-        // Check if the target message is now ready
-        const status = checkElement(messageId)
-        if (status === 'visible') return true
-
-        if (status === 'hidden') {
-          // Message appeared but is hidden by fold — unfold it
-          await selectMessageForFoldRef.current(messageId)
-          if (generation !== navigateGenerationRef.current) return false
-          await new Promise<void>((resolve) => {
-            requestAnimationFrame(() => {
-              requestAnimationFrame(() => resolve())
-            })
-          })
-          if (generation !== navigateGenerationRef.current) return false
-          return true
-        }
-      }
-
-      // 4. Final check after exhausting attempts
-      const finalStatus = checkElement(messageId)
-      if (finalStatus === 'hidden') {
         await selectMessageForFoldRef.current(messageId)
         if (generation !== navigateGenerationRef.current) return false
         await new Promise<void>((resolve) => {
@@ -393,10 +479,43 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
         return true
       }
 
-      return finalStatus === 'visible'
+      // 3. status === 'missing': Use scroll-position's window management to load the target
+      // Compute a new window centered on the target message
+      const startIndex = computeStartIndex(allMessages, messageId, SCROLL_CONTEXT_COUNT)
+      const newDisplayMessages = computeDisplayMessages(allMessages, startIndex, startIndex + INITIAL_MESSAGES_COUNT)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+
+      // Wait for React to re-render
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => resolve())
+        })
+      })
+      if (generation !== navigateGenerationRef.current) return false
+
+      // Check if the target message is now ready
+      const status = checkElement(messageId)
+      if (status === 'visible') return true
+
+      if (status === 'hidden') {
+        await selectMessageForFoldRef.current(messageId)
+        if (generation !== navigateGenerationRef.current) return false
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => resolve())
+          })
+        })
+        if (generation !== navigateGenerationRef.current) return false
+        return true
+      }
+
+      return false
     },
-
-    [checkElement]
+    [checkElement, checkBoundaries]
   )
 
   /**
@@ -407,6 +526,10 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
   const handleNavigateToMessage = useCallback(
     async (messageId: string) => {
       const generation = ++navigateGenerationRef.current
+
+      // Cancel any pending loadMore/loadNewer timers to prevent them from
+      // overwriting the window reset that navigation is about to perform.
+      clearAllTimers()
 
       // 1. Ensure message is rendered in DOM (handles loading + fold switching)
       const ready = await scrollToTargetMessage(messageId, generation)
@@ -425,14 +548,13 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
         scrollIntoView(targetEl, { behavior: 'smooth', block: 'center', container: 'nearest' })
       }
     },
-    [scrollToTargetMessage]
+    [scrollToTargetMessage, clearAllTimers]
   )
 
   // 滚动到指定消息组
   const scrollToGroup = useCallback(
     async (askId: string) => {
       const allMessages = messagesRef.current
-      // Find the first message belonging to this group (by askId or id)
       const targetMessage = allMessages.find((m) => m.askId === askId || m.id === askId)
       if (targetMessage) {
         await handleNavigateToMessage(targetMessage.id)
@@ -457,6 +579,19 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
 
   // NOTE: 如果设置为平滑滚动会导致滚动条无法跟随生成的新消息保持在底部位置
   const scrollToBottom = useCallback(() => {
+    const current = lastDisplayMessagesRef.current
+    const newestInWindow = current[0]
+    const newestInArray = messages[messages.length - 1]
+
+    if (newestInWindow?.id !== newestInArray?.id) {
+      const newDisplayMessages = computeDisplayMessages(messages, 0, INITIAL_MESSAGES_COUNT)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+    }
+
     if (scrollContainerRef.current) {
       requestAnimationFrame(() => {
         if (scrollContainerRef.current) {
@@ -464,7 +599,39 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
         }
       })
     }
-  }, [scrollContainerRef])
+  }, [scrollContainerRef, messages, checkBoundaries])
+
+  const scrollToMessageById = useCallback(
+    (messageId: string) => {
+      const el = document.getElementById(`message-${messageId}`)
+      if (el) {
+        scrollIntoView(el, { behavior: 'smooth', block: 'start', container: 'nearest' })
+        return
+      }
+
+      const startIndex = computeStartIndex(messages, messageId, SCROLL_CONTEXT_COUNT)
+      const newDisplayMessages = computeDisplayMessages(messages, startIndex, startIndex + INITIAL_MESSAGES_COUNT)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      const { hasOlder, hasNewer } = checkBoundaries()
+      setHasMore(hasOlder)
+      setHasMoreNewer(hasNewer)
+
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          const targetEl = document.getElementById(`message-${messageId}`)
+          if (targetEl) {
+            scrollIntoView(targetEl, { behavior: 'auto', block: 'start', container: 'nearest' })
+          }
+        }, 50)
+      })
+    },
+    [messages, checkBoundaries]
+  )
+
+  useImperativeHandle(ref, () => ({
+    scrollToMessageById
+  }))
 
   const clearTopic = useCallback(
     async (data: Topic) => {
@@ -475,13 +642,18 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
 
       await clearTopicMessages()
       setDisplayMessages([])
+      lastDisplayMessagesRef.current = []
+      setHasMoreNewer(false)
+      setIsLoadingNewer(false)
+      clearSavedPosition()
     },
-    [clearTopicMessages, topic.id]
+    [clearTopicMessages, topic.id, clearSavedPosition]
   )
 
   useEffect(() => {
     const unsubscribes = [
       EventEmitter.on(EVENT_NAMES.SEND_MESSAGE, scrollToBottom),
+      EventEmitter.on(EVENT_NAMES.SCROLL_TO_BOTTOM, scrollToBottom),
       EventEmitter.on(EVENT_NAMES.CLEAR_MESSAGES, async (data: Topic) => {
         window.modal.confirm({
           title: t('chat.input.clear.title'),
@@ -541,16 +713,12 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
           return
         }
 
-        // 1. Add the new topic to Redux store FIRST
         addTopic(newTopic)
 
-        // 2. Call the thunk to clone messages and update DB
         const success = await createTopicBranch(topic.id, currentMessages.length - index, newTopic)
 
         if (success) {
-          // 3. Set the new topic as active
           setActiveTopic(newTopic)
-          // 4. Trigger auto-rename for the new topic
           void autoRenameTopic(assistant, newTopic.id)
         } else {
           logger.error(`[NEW_BRANCH] Failed to create topic branch for topic ${newTopic.id}`)
@@ -564,7 +732,6 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
 
           const msgBlock = messageBlocksSelectors.selectById(store.getState(), msgBlockId)
 
-          // FIXME: 目前 error block 没有 content
           if (msgBlock && isTextLikeBlock(msgBlock) && msgBlock.type !== MessageBlockType.ERROR) {
             try {
               const updatedRaw = updateCodeBlock(msgBlock.content, codeBlockId, newContent)
@@ -594,13 +761,9 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
         }
       ),
       EventEmitter.on(EVENT_NAMES.NAVIGATE_TO_MESSAGE, async (messageId: string) => {
-        // Only handle messages that belong to the current topic.
-        // A stale listener from the previous topic may receive this event during
-        // cross-topic navigation — skip it to avoid consuming the pending target.
         if (!messagesRef.current.some((m) => m.id === messageId)) {
           return
         }
-        // Message belongs to current topic — clear pending and navigate.
         clearPendingNavigate()
         await handleNavigateToMessage(messageId)
       })
@@ -610,24 +773,18 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assistant, dispatch, scrollToBottom, handleNavigateToMessage, topic, isProcessingContext])
 
-  // Check for pending cross-topic navigation on mount (set by locateToMessage).
-  // This runs once when the component mounts with a pending navigation target.
-  // We retry until the target message is actually loaded into the messages array,
-  // since messages may not be available immediately after mount.
-  // IMPORTANT: Do NOT clear pending until the message is confirmed loaded —
-  // otherwise a race between the event listener and mount effect can lose the target.
+  // Check for pending cross-topic navigation on mount
   useEffect(() => {
     const pending = getPendingNavigate()
     if (!pending) return
 
-    const MAX_NAVIGATE_RETRIES = 50 // 50 * 100ms = 5 seconds
+    const MAX_NAVIGATE_RETRIES = 50
     let cancelled = false
     let retryCount = 0
 
     const tryNavigate = () => {
       if (cancelled) return
       if (messagesRef.current.some((m) => m.id === pending.messageId)) {
-        // Message is loaded — consume pending and navigate.
         clearPendingNavigate()
         void handleNavigateToMessage(pending.messageId)
       } else if (retryCount < MAX_NAVIGATE_RETRIES) {
@@ -647,7 +804,6 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
     return () => {
       cancelled = true
     }
-    // Only run on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -664,19 +820,114 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
     if (!hasMore || isLoadingMore) return
 
     setIsLoadingMore(true)
+
+    const container = scrollContainerRef.current
+    const anchor = findFirstVisibleMessage(container, messageElements.current)
+
     setTimeoutTimer(
       'loadMoreMessages',
       () => {
-        const currentLength = displayMessages.length
-        const newMessages = computeDisplayMessages(messages, currentLength, LOAD_MORE_COUNT)
+        const currentDisplay = lastDisplayMessagesRef.current
+        const oldestInWindow = currentDisplay[currentDisplay.length - 1]
+        const oldestIndex = messages.findIndex((m) => m.id === oldestInWindow?.id)
 
-        setDisplayMessages((prev) => [...prev, ...newMessages])
-        setHasMore(currentLength + LOAD_MORE_COUNT < messages.length)
+        if (oldestIndex <= 0) {
+          setIsLoadingMore(false)
+          return
+        }
+
+        const startIndex = messages.length - oldestIndex
+        const newMessages = computeDisplayMessages(messages, startIndex, LOAD_MORE_COUNT)
+
+        setDisplayMessages((prev) => {
+          const merged = [...prev, ...newMessages]
+          lastDisplayMessagesRef.current = merged
+          return merged
+        })
+        const { hasOlder, hasNewer } = checkBoundaries()
+        setHasMore(hasOlder)
+        setHasMoreNewer(hasNewer)
         setIsLoadingMore(false)
+
+        if (anchor) {
+          requestAnimationFrame(() => {
+            if (container && anchor.element && anchor.element.isConnected) {
+              const newRect = anchor.element.getBoundingClientRect()
+              const delta = newRect.top - anchor.rect.top
+              if (Math.abs(delta) > 1) {
+                container.scrollTop += delta
+              }
+            }
+          })
+        }
       },
-      300
+      50
     )
-  }, [displayMessages.length, hasMore, isLoadingMore, messages, setTimeoutTimer])
+  }, [hasMore, isLoadingMore, messages, setTimeoutTimer, scrollContainerRef, checkBoundaries])
+
+  const loadNewerMessages = useCallback(() => {
+    if (!hasMoreNewer || isLoadingNewer) return
+
+    setIsLoadingNewer(true)
+
+    const container = scrollContainerRef.current
+    const anchor = findFirstVisibleMessage(container, messageElements.current)
+
+    setTimeoutTimer(
+      'loadNewerMessages',
+      () => {
+        const currentDisplay = lastDisplayMessagesRef.current
+        const newestInWindow = currentDisplay[0]
+        const newestIndex = messages.findIndex((m) => m.id === newestInWindow?.id)
+
+        if (newestIndex < 0 || newestIndex >= messages.length - 1) {
+          setIsLoadingNewer(false)
+          return
+        }
+
+        const countToLoad = Math.min(LOAD_MORE_COUNT, messages.length - 1 - newestIndex)
+        const newMessages: Message[] = []
+        const upperBound = newestIndex + countToLoad
+        for (let i = upperBound; i > newestIndex; i--) {
+          newMessages.push(messages[i])
+        }
+
+        setDisplayMessages((prev) => {
+          const merged = [...newMessages, ...prev]
+          lastDisplayMessagesRef.current = merged
+          return merged
+        })
+        const { hasOlder, hasNewer } = checkBoundaries()
+        setHasMore(hasOlder)
+        setHasMoreNewer(hasNewer)
+        setIsLoadingNewer(false)
+
+        if (anchor) {
+          requestAnimationFrame(() => {
+            if (container && anchor.element && anchor.element.isConnected) {
+              const newRect = anchor.element.getBoundingClientRect()
+              const delta = newRect.top - anchor.rect.top
+              if (Math.abs(delta) > 1) {
+                container.scrollTop += delta
+              }
+            }
+          })
+        }
+      },
+      50
+    )
+  }, [hasMoreNewer, isLoadingNewer, messages, setTimeoutTimer, scrollContainerRef, checkBoundaries])
+
+  const handleScroll = useCallback(() => {
+    handleScrollPosition()
+
+    const container = scrollContainerRef.current
+    if (container && hasMoreNewer && !isLoadingNewer && !isLoadingMore) {
+      if (container.scrollTop < 150) {
+        loadNewerMessages()
+      }
+    }
+  }, [handleScrollPosition, hasMoreNewer, isLoadingNewer, isLoadingMore, loadNewerMessages, scrollContainerRef])
 
   useShortcut('copy_last_message', () => {
     const lastMessage = last(messages)
@@ -703,19 +954,25 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
         assistant={assistant}
         topic={topic}
         scrollContainerRef={scrollContainerRef}
-        handleScrollPosition={handleScrollPosition}
+        handleScrollPosition={handleScroll}
         displayMessages={displayMessages}
         hasMore={hasMore}
         isLoadingMore={isLoadingMore}
+        isLoadingNewer={isLoadingNewer}
         loadMoreMessages={loadMoreMessages}
         registerMessageElement={registerMessageElement}
+      />
+      <SelectionBox
+        isMultiSelectMode={isMultiSelectMode}
+        scrollContainerRef={scrollContainerRef}
+        messageElements={messageElements.current}
+        handleSelectMessage={handleSelectMessage}
       />
     </EditModeProvider>
   )
 }
 
 const computeDisplayMessages = (messages: Message[], startIndex: number, displayCount: number) => {
-  // 如果剩余消息数量小于 displayCount，直接返回所有剩余消息的倒序切片
   if (messages.length - startIndex <= displayCount) {
     const result: Message[] = []
     for (let i = messages.length - 1 - startIndex; i >= 0; i--) {
@@ -723,11 +980,10 @@ const computeDisplayMessages = (messages: Message[], startIndex: number, display
     }
     return result
   }
-  const userIdSet = new Set() // 用户消息 id 集合
-  const assistantIdSet = new Set() // 助手消息 askId 集合
+  const userIdSet = new Set()
+  const assistantIdSet = new Set()
   const displayMessages: Message[] = []
 
-  // 处理单条消息的函数
   const processMessage = (message: Message) => {
     if (!message) return
 
@@ -739,17 +995,21 @@ const computeDisplayMessages = (messages: Message[], startIndex: number, display
       displayMessages.push(message)
       return
     }
-    // 如果是相同 askId 的助手消息，也要显示
     displayMessages.push(message)
   }
 
-  // 直接在原数组上倒序遍历，跳过前 startIndex 个，避免全量拷贝和 reverse()
   for (let i = messages.length - 1 - startIndex; i >= 0 && userIdSet.size + assistantIdSet.size < displayCount; i--) {
-    const message = messages[i]
-    processMessage(message)
+    processMessage(messages[i])
   }
 
   return displayMessages
+}
+
+const computeStartIndex = (messages: Message[], targetMessageId: string, contextCount: number): number => {
+  const targetIndex = messages.findIndex((m) => m.id === targetMessageId)
+  if (targetIndex === -1) return 0
+  const startIndex = Math.max(0, messages.length - 1 - targetIndex - contextCount)
+  return startIndex
 }
 
 const LoaderContainer = styled.div`

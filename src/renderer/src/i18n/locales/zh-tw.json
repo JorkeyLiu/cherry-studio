@@ -490,6 +490,7 @@
       },
       "prompt": "提示設定",
       "skills": {
+        "addMore": "添加更多技能",
         "builtin": "內建",
         "noFilterResults": "沒有符合的技能",
         "noSkills": "未安裝任何技能。請前往「設定」>「技能」安裝技能。",
@@ -1625,6 +1626,7 @@
     "copy_failed": "複製失敗",
     "current": "目前",
     "cut": "剪下",
+    "decline": "拒絕",
     "default": "預設",
     "delete": "刪除",
     "delete_confirm": "確定要刪除嗎？",
@@ -2522,6 +2524,10 @@
       "completed": "已完成",
       "error": "發生錯誤",
       "groupHeader": "{{count}} 次工具呼叫",
+      "groupHeaderMessages": "{{count}} 則訊息",
+      "groupHeaderThinking": "{{count}} 次思考",
+      "groupHeaderWithDetails": "{{toolCount}} 次工具呼叫 · {{thinkingCount}} 次思考 · {{messageCount}} 則訊息",
+      "groupHeaderWithMessages": "{{toolCount}} 次工具呼叫 · {{messageCount}} 則訊息",
       "invoking": "呼叫中",
       "labels": {
         "bash": "執行命令",
@@ -2940,6 +2946,12 @@
     "title": "Ollama"
   },
   "onboarding": {
+    "privacy": {
+      "accept_and_continue": "同意並繼續",
+      "notice": "繼續即表示你已閱讀並同意",
+      "period": "。",
+      "policy": "隱私政策"
+    },
     "select_model": {
       "change_later": "您可以隨時在設定中更改此項目",
       "start": "開始使用",
@@ -2983,7 +2995,7 @@
     "install_progress": "安裝進度",
     "installed_at": "OpenClaw 安裝路徑",
     "migration": {
-      "description": "偵測到透過 npm 安裝的舊版本 OpenClaw，請重新安裝以取得最新官方版本。",
+      "description": "偵測到 PATH 中存在外部 OpenClaw 安裝，但 Cherry Studio 只使用受管理的 OpenClaw 二進位檔。請安裝受管理版本後繼續。",
       "install_button": "重新安裝 OpenClaw",
       "title": "OpenClaw 需要更新"
     },
@@ -3417,6 +3429,14 @@
     "source": "檢視原始碼",
     "zoom_in": "放大",
     "zoom_out": "縮小"
+  },
+  "privacy_policy": {
+    "title": "隱私協議"
+  },
+  "privacy_policy_update": {
+    "description_before_link": "我們更新了隱私協議。請查看最新的",
+    "policy": "隱私協議",
+    "title": "隱私協議更新"
   },
   "prompts": {
     "explanation": "幫我解釋一下這個概念",
@@ -5518,7 +5538,8 @@
         "documentation": "檢視官方文件以取得更多設定詳細資訊：",
         "learn_more": "瞭解更多",
         "location": "地區",
-        "location_help": "Vertex AI 服務地區，例如：us-central1",
+        "location_help": "Vertex AI 服務地區，例如：us-central1。此欄位不會從 Service Account JSON 自動帶入，需手動填寫。",
+        "location_placeholder": "選擇 Vertex AI 地區",
         "project_id": "專案 ID",
         "project_id_help": "您的 Google Cloud 專案 ID",
         "project_id_placeholder": "your-google-cloud-project-id",
@@ -5528,7 +5549,12 @@
           "client_email_help": "從 Google Cloud Console 下載的 JSON 金鑰檔案中的 client_email 欄位",
           "client_email_placeholder": "輸入服務帳戶 client email",
           "description": "使用服務帳戶進行身份驗證，適用於 ADC 無法使用的環境",
-          "incomplete_config": "請先完成服務帳戶設定",
+          "incomplete_config": "請先完整填寫所有必需的 Vertex AI 設定",
+          "json_input": "Service Account JSON",
+          "json_input_help": "貼上完整 JSON 金鑰內容。解析後只會儲存 project_id、client_email 和 private_key，並清空原始 JSON。",
+          "json_input_placeholder": "貼上完整的 Service Account JSON 金鑰內容",
+          "json_parse_error": "解析 Service Account JSON 失敗，請確認格式正確",
+          "json_parse_success": "Service Account JSON 已解析",
           "private_key": "私密金鑰",
           "private_key_help": "從 Google Cloud Console 下載的 JSON 金鑰檔案中的 private_key 欄位",
           "private_key_placeholder": "輸入服務帳戶私密金鑰",
@@ -5644,7 +5670,7 @@
       "noInstalled": "暫無已安裝的技能",
       "noResults": "未找到技能",
       "noSkillFile": "未找到 SKILL.md 檔案",
-      "searchPlaceholder": "跨登錄檔搜尋技能...",
+      "searchPlaceholder": "發現更多技能...",
       "searchRegistryTitle": "在線搜尋技能登錄檔",
       "searchTitle": "搜尋技能",
       "selectFile": "選擇一個檔案查看",

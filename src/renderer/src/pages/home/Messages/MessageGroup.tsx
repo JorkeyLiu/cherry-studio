@@ -10,7 +10,7 @@ import type { Message } from '@renderer/types/newMessage'
 import { classNames } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { Popover } from 'antd'
-import type { ComponentProps } from 'react'
+import type { ComponentProps, WheelEvent as ReactWheelEvent } from 'react'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import styled from 'styled-components'
 
@@ -125,11 +125,39 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
     }
   }, [messages])
 
+  const handleHorizontalGroupWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null
+    if (target?.closest('.message-content-container')) {
+      return
+    }
+
+    const groupContainer = event.currentTarget
+    const contentContainers = Array.from(groupContainer.querySelectorAll<HTMLElement>('.message-content-container'))
+    const hasInnerVerticalScroll = contentContainers.some(
+      (contentContainer) => contentContainer.scrollHeight > contentContainer.clientHeight + 1
+    )
+    const hasHorizontalScroll = groupContainer.scrollWidth > groupContainer.clientWidth + 1
+    const horizontalDelta = Math.abs(event.deltaX) > 0 ? event.deltaX : event.shiftKey ? event.deltaY : 0
+
+    if (horizontalDelta !== 0 && hasHorizontalScroll) {
+      event.preventDefault()
+      event.stopPropagation()
+      groupContainer.scrollLeft += horizontalDelta
+      return
+    }
+
+    if (hasInnerVerticalScroll) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+  }, [])
+
   const renderMessage = useCallback(
     (message: Message & { index: number }) => {
       const isGridGroupMessage = isGrid && message.role === 'assistant' && isGrouped
       const messageProps = {
         isGrouped,
+        isHorizontalMultiModelLayout: multiModelMessageStyle === 'horizontal',
         message,
         topic,
         index: message.index,
@@ -207,7 +235,8 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         <GridContainer
           $count={messageLength}
           $gridColumns={gridColumns}
-          className={classNames([multiModelMessageStyle])}>
+          className={classNames([multiModelMessageStyle, { 'multi-select-mode': isEditMode }])}
+          onWheelCapture={multiModelMessageStyle === 'horizontal' ? handleHorizontalGroupWheel : undefined}>
           {messages.map(renderMessage)}
         </GridContainer>
         {isGrouped && (
@@ -255,6 +284,7 @@ const GridContainer = styled(Scrollbar)<{ $count: number; $gridColumns: number }
     padding-bottom: 4px;
     grid-template-columns: repeat(${({ $count }) => $count}, minmax(420px, 1fr));
     overflow-x: auto;
+    overflow-y: hidden;
   }
   &.fold,
   &.vertical {
@@ -297,7 +327,7 @@ interface MessageWrapperProps {
 const MessageWrapper = styled.div<MessageWrapperProps>`
   &.horizontal {
     padding: 1px;
-    overflow-y: auto;
+    overflow-y: visible;
     .message {
       height: 100%;
       border: 0.5px solid var(--color-border);

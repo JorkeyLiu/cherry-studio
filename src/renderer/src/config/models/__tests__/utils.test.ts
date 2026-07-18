@@ -10,7 +10,12 @@ import {
   groupQwenModels,
   isAnthropicModel,
   isClaude46SeriesModel,
+  isClaudeModelRejectsTemperature,
+  isClaudeModelRejectsTopK,
+  isClaudeModelRejectsTopP,
+  isDeepSeekModel,
   isGemini3FlashModel,
+  isGemini3Model,
   isGemini3ProModel,
   isGemini31ProModel,
   isGeminiModel,
@@ -19,6 +24,7 @@ import {
   isMaxTemperatureOneModel,
   isNotSupportSystemMessageModel,
   isNotSupportTextDeltaModel,
+  isSupportAdaptiveThinkingClaudeModel,
   isSupportedFlexServiceTier,
   isSupportedModel,
   isSupportFlexServiceTierModel,
@@ -220,6 +226,26 @@ describe('model utils', () => {
         expect(isSupportTemperatureModel(qwenMt)).toBe(false)
       })
 
+      it('returns false for Kimi K2.5+ and K3+ models', () => {
+        expect(isSupportTemperatureModel(createModel({ id: 'kimi-k2.5' }))).toBe(false)
+        expect(isSupportTemperatureModel(createModel({ id: 'Kimi-K2.5' }))).toBe(false)
+        expect(isSupportTemperatureModel(createModel({ id: 'moonshot/kimi-k2.5' }))).toBe(false)
+        expect(isSupportTemperatureModel(createModel({ id: 'kimi-k2.6' }))).toBe(false)
+        expect(isSupportTemperatureModel(createModel({ id: 'Kimi-K2.6' }))).toBe(false)
+        expect(isSupportTemperatureModel(createModel({ id: 'moonshot/kimi-k2.6' }))).toBe(false)
+        expect(isSupportTemperatureModel(createModel({ id: 'kimi-k2.7' }))).toBe(false)
+        expect(isSupportTemperatureModel(createModel({ id: 'kimi-k3' }))).toBe(false)
+        expect(isSupportTemperatureModel(createModel({ id: 'kimi-k3.5' }))).toBe(false)
+        expect(isSupportTemperatureModel(createModel({ id: 'kimi-k4' }))).toBe(false)
+      })
+
+      it('returns true for older Kimi models', () => {
+        expect(isSupportTemperatureModel(createModel({ id: 'kimi-k2' }))).toBe(true)
+        expect(isSupportTemperatureModel(createModel({ id: 'kimi-k2-thinking' }))).toBe(true)
+        expect(isSupportTemperatureModel(createModel({ id: 'kimi-k2-0711-preview' }))).toBe(true)
+        expect(isSupportTemperatureModel(createModel({ id: 'kimi-k2-turbo-preview' }))).toBe(true)
+      })
+
       it('returns false for null/undefined models', () => {
         expect(isSupportTemperatureModel(null)).toBe(false)
         expect(isSupportTemperatureModel(undefined)).toBe(false)
@@ -251,6 +277,26 @@ describe('model utils', () => {
       it('returns false for Qwen MT models', () => {
         const qwenMt = createModel({ id: 'qwen-mt-large', provider: 'aliyun' })
         expect(isSupportTopPModel(qwenMt)).toBe(false)
+      })
+
+      it('returns false for Kimi K2.5+ and K3+ models', () => {
+        expect(isSupportTopPModel(createModel({ id: 'kimi-k2.5' }))).toBe(false)
+        expect(isSupportTopPModel(createModel({ id: 'Kimi-K2.5' }))).toBe(false)
+        expect(isSupportTopPModel(createModel({ id: 'moonshot/kimi-k2.5' }))).toBe(false)
+        expect(isSupportTopPModel(createModel({ id: 'kimi-k2.6' }))).toBe(false)
+        expect(isSupportTopPModel(createModel({ id: 'Kimi-K2.6' }))).toBe(false)
+        expect(isSupportTopPModel(createModel({ id: 'moonshot/kimi-k2.6' }))).toBe(false)
+        expect(isSupportTopPModel(createModel({ id: 'kimi-k2.7' }))).toBe(false)
+        expect(isSupportTopPModel(createModel({ id: 'kimi-k3' }))).toBe(false)
+        expect(isSupportTopPModel(createModel({ id: 'kimi-k3.5' }))).toBe(false)
+        expect(isSupportTopPModel(createModel({ id: 'kimi-k4' }))).toBe(false)
+      })
+
+      it('returns true for older Kimi models', () => {
+        expect(isSupportTopPModel(createModel({ id: 'kimi-k2' }))).toBe(true)
+        expect(isSupportTopPModel(createModel({ id: 'kimi-k2-thinking' }))).toBe(true)
+        expect(isSupportTopPModel(createModel({ id: 'kimi-k2-0711-preview' }))).toBe(true)
+        expect(isSupportTopPModel(createModel({ id: 'kimi-k2-turbo-preview' }))).toBe(true)
       })
 
       it('returns false for null/undefined models', () => {
@@ -352,6 +398,24 @@ describe('model utils', () => {
     describe('isGeminiModel', () => {
       it('detects Gemini models', () => {
         expect(isGeminiModel(createModel({ id: 'Gemini-2.0' }))).toBe(true)
+      })
+    })
+
+    describe('isGemini3Model', () => {
+      it('detects explicit Gemini 3.x models', () => {
+        expect(isGemini3Model(createModel({ id: 'gemini-3-flash' }))).toBe(true)
+        expect(isGemini3Model(createModel({ id: 'gemini-3.5-flash' }))).toBe(true)
+        expect(isGemini3Model(createModel({ id: 'gemini-3.1-pro-preview' }))).toBe(true)
+      })
+
+      it('detects Gemini 3.x latest aliases', () => {
+        expect(isGemini3Model(createModel({ id: 'gemini-flash-latest' }))).toBe(true)
+        expect(isGemini3Model(createModel({ id: 'gemini-pro-latest' }))).toBe(true)
+      })
+
+      it('returns false for non-Gemini 3 models', () => {
+        expect(isGemini3Model(createModel({ id: 'gemini-2.5-flash' }))).toBe(false)
+        expect(isGemini3Model(createModel({ id: 'gemini-flash-lite-latest' }))).toBe(false)
       })
     })
 
@@ -508,6 +572,25 @@ describe('model utils', () => {
     describe('isAnthropicModel', () => {
       it('detects Anthropic models', () => {
         expect(isAnthropicModel(createModel({ id: 'claude-3.5' }))).toBe(true)
+      })
+    })
+
+    describe('isDeepSeekModel', () => {
+      it('detects DeepSeek models by id', () => {
+        expect(isDeepSeekModel(createModel({ id: 'deepseek-chat' }))).toBe(true)
+        expect(isDeepSeekModel(createModel({ id: 'DeepSeek-V3' }))).toBe(true)
+      })
+
+      it('detects DeepSeek models by name', () => {
+        expect(isDeepSeekModel(createModel({ id: 'custom-id', name: 'DeepSeek V3' }))).toBe(true)
+      })
+
+      it('returns false for non-DeepSeek models', () => {
+        expect(isDeepSeekModel(createModel({ id: 'gpt-4o' }))).toBe(false)
+      })
+
+      it('returns false for missing model', () => {
+        expect(isDeepSeekModel(undefined)).toBe(false)
       })
     })
 
@@ -705,6 +788,72 @@ describe('model utils', () => {
       it('returns false for undefined and null', () => {
         expect(isClaude46SeriesModel(undefined as unknown as Model)).toBe(false)
         expect(isClaude46SeriesModel(null as unknown as Model)).toBe(false)
+      })
+    })
+  })
+
+  describe('Claude Opus adaptive thinking model detection', () => {
+    describe('isSupportAdaptiveThinkingClaudeModel', () => {
+      it('detects Opus 4.7 in direct API format', () => {
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-opus-4-7' }))).toBe(true)
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-opus-4.7' }))).toBe(true)
+      })
+
+      it('detects Opus 4.8 and future Opus 4 minor versions in direct API format', () => {
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-opus-4-8' }))).toBe(true)
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-opus-4.8' }))).toBe(true)
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-opus-4-10' }))).toBe(true)
+      })
+
+      it('detects Opus 4.7 with version suffixes', () => {
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-opus-4-7-20260401' }))).toBe(true)
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-opus-4-7-preview' }))).toBe(true)
+      })
+
+      it('detects Opus 4.7 in AWS Bedrock format', () => {
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'anthropic.claude-opus-4-7-v1' }))).toBe(true)
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'anthropic.claude-opus-4-7-v2:0' }))).toBe(true)
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'anthropic.claude-opus-4-8-v1:0' }))).toBe(true)
+      })
+
+      it('detects Opus 4.7 with provider prefix', () => {
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'anthropic/claude-opus-4-7' }))).toBe(true)
+      })
+
+      it('handles case insensitivity', () => {
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'CLAUDE-OPUS-4-7' }))).toBe(true)
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'Claude-Opus-4.7' }))).toBe(true)
+      })
+
+      it('returns false for other Claude models', () => {
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-opus-4-6' }))).toBe(false)
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-opus-4-5' }))).toBe(false)
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-opus-4-20250514' }))).toBe(false)
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-sonnet-4-7' }))).toBe(false)
+        expect(isSupportAdaptiveThinkingClaudeModel(createModel({ id: 'claude-haiku-4-7' }))).toBe(false)
+      })
+
+      it('returns false for undefined and null', () => {
+        expect(isSupportAdaptiveThinkingClaudeModel(undefined as unknown as Model)).toBe(false)
+        expect(isSupportAdaptiveThinkingClaudeModel(null as unknown as Model)).toBe(false)
+      })
+
+      it('matches rejection predicates for sampling parameters', () => {
+        const opus47 = createModel({ id: 'claude-opus-4-7' })
+        const opus48 = createModel({ id: 'claude-opus-4-8' })
+        const opus46 = createModel({ id: 'claude-opus-4-6' })
+
+        expect(isClaudeModelRejectsTemperature(opus47)).toBe(true)
+        expect(isClaudeModelRejectsTemperature(opus48)).toBe(true)
+        expect(isClaudeModelRejectsTemperature(opus46)).toBe(false)
+
+        expect(isClaudeModelRejectsTopP(opus47)).toBe(true)
+        expect(isClaudeModelRejectsTopP(opus48)).toBe(true)
+        expect(isClaudeModelRejectsTopP(opus46)).toBe(false)
+
+        expect(isClaudeModelRejectsTopK(opus47)).toBe(true)
+        expect(isClaudeModelRejectsTopK(opus48)).toBe(true)
+        expect(isClaudeModelRejectsTopK(opus46)).toBe(false)
       })
     })
   })

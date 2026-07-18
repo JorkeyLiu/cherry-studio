@@ -15,7 +15,7 @@ import { getModelName } from '@renderer/services/ModelService'
 import type { Assistant, Model, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { firstLetter, isEmoji, removeLeadingEmoji } from '@renderer/utils'
-import { Avatar, Tooltip } from 'antd'
+import { Avatar, Checkbox, Tooltip } from 'antd'
 import dayjs from 'dayjs'
 import { Sparkle } from 'lucide-react'
 import type { FC } from 'react'
@@ -50,7 +50,9 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
   const { isBubbleStyle } = useMessageStyle()
   const { openMinappById } = useMinappPopup()
 
-  const { isMultiSelectMode } = useChatContext(topic)
+  const { isMultiSelectMode, selectedMessageIds, handleSelectMessage } = useChatContext(topic)
+
+  const isSelected = selectedMessageIds?.includes(message.id)
 
   const avatarSource = useMemo(() => getAvatarSource(isLocalAi, getMessageModelId(message)), [message])
 
@@ -72,6 +74,7 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
 
   const isAssistantMessage = message.role === 'assistant'
   const isUserMessage = message.role === 'user'
+  const isUserBubbleMessage = isBubbleStyle && isUserMessage && !isMultiSelectMode
   const showMinappIcon = sidebarIcons.visible.includes('minapp')
 
   const avatarName = useMemo(() => firstLetter(assistant?.name).toUpperCase(), [assistant?.name])
@@ -90,7 +93,7 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
   }, [isBubbleStyle, isUserMessage, isMultiSelectMode])
 
   return (
-    <Container className="message-header">
+    <Container className={isUserBubbleMessage ? 'message-header user-bubble-header' : 'message-header'}>
       {isAssistantMessage ? (
         <Avatar
           src={avatarSource}
@@ -120,27 +123,36 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
           )}
         </>
       )}
-      <UserWrap>
-        <HStack alignItems="center" justifyContent={userNameJustifyContent}>
-          <UserName isBubbleStyle={isBubbleStyle} theme={theme}>
-            {username}
-          </UserName>
-          {isGroupContextMessage && (
-            <Tooltip title={t('chat.message.useful.tip')}>
-              <Sparkle fill="var(--color-primary)" strokeWidth={0} size={18} />
-            </Tooltip>
-          )}
-        </HStack>
-        <InfoWrap className="message-header-info-wrap text-(--color-text-3) text-[10px]">
-          <MessageTime>{dayjs(message?.updatedAt ?? message.createdAt).format('MM/DD HH:mm')}</MessageTime>
-          {isBubbleStyle && message.usage !== undefined && (
-            <>
-              |
-              <MessageTokens message={message} />
-            </>
-          )}
-        </InfoWrap>
-      </UserWrap>
+      {!isUserBubbleMessage && (
+        <UserWrap>
+          <HStack alignItems="center" justifyContent={userNameJustifyContent}>
+            <UserName isBubbleStyle={isBubbleStyle && isUserMessage} theme={theme}>
+              {username}
+            </UserName>
+            {isGroupContextMessage && (
+              <Tooltip title={t('chat.message.useful.tip')}>
+                <Sparkle fill="var(--color-primary)" strokeWidth={0} size={18} />
+              </Tooltip>
+            )}
+          </HStack>
+          <InfoWrap className="message-header-info-wrap text-(--color-text-3) text-[10px]">
+            <MessageTime>{dayjs(message?.updatedAt ?? message.createdAt).format('MM/DD HH:mm')}</MessageTime>
+            {isBubbleStyle && message.usage !== undefined && (
+              <>
+                |
+                <MessageTokens message={message} />
+              </>
+            )}
+          </InfoWrap>
+        </UserWrap>
+      )}
+      {isMultiSelectMode && (
+        <Checkbox
+          checked={isSelected}
+          onChange={(e) => handleSelectMessage(message.id, e.target.checked)}
+          style={{ position: 'absolute', right: 0, top: 0 }}
+        />
+      )}
     </Container>
   )
 })

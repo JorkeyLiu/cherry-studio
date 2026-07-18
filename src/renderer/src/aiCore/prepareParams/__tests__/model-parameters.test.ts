@@ -3,7 +3,7 @@ import { TopicType } from '@renderer/types'
 import { DEFAULT_TIMEOUT } from '@shared/config/constant'
 import { describe, expect, it, vi } from 'vitest'
 
-import { getMaxTokens, getTemperature, getTimeout, getTopP } from '../modelParameters'
+import { filterStandardParams, getMaxTokens, getTemperature, getTimeout, getTopP } from '../modelParameters'
 
 vi.mock('@renderer/services/AssistantService', () => ({
   DEFAULT_ASSISTANT_SETTINGS: {
@@ -191,6 +191,42 @@ describe('modelParameters', () => {
 
       expect(getTemperature(assistant, model)).toBe(0.8)
     })
+
+    it.each([
+      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', group: 'Claude 4.7' },
+      { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', group: 'Claude 4.8' }
+    ])('always returns undefined for $name (rejects sampling parameters)', ({ id, name, group }) => {
+      const assistant = createAssistant({ enableTemperature: true, temperature: 0.5 })
+      const model = createModel({
+        id,
+        name,
+        provider: 'anthropic',
+        group
+      })
+
+      expect(getTemperature(assistant, model)).toBeUndefined()
+    })
+
+    it('returns undefined for Gemini 3.x models', () => {
+      const assistant = createAssistant({ enableTemperature: true, temperature: 0.5 })
+      const model = createModel({ id: 'gemini-3.5-flash', provider: 'gemini', group: 'Google' })
+
+      expect(getTemperature(assistant, model)).toBeUndefined()
+    })
+
+    it('returns undefined for Gemini 3.x aliases', () => {
+      const assistant = createAssistant({ enableTemperature: true, temperature: 0.5 })
+      const model = createModel({ id: 'gemini-flash-latest', provider: 'gemini', group: 'Google' })
+
+      expect(getTemperature(assistant, model)).toBeUndefined()
+    })
+
+    it('returns undefined for Gemini 3.x model ids on non-Gemini providers', () => {
+      const assistant = createAssistant({ enableTemperature: true, temperature: 0.5 })
+      const model = createModel({ id: 'gemini-3.5-flash', provider: 'openai', group: 'Google' })
+
+      expect(getTemperature(assistant, model)).toBeUndefined()
+    })
   })
 
   describe('getTopP', () => {
@@ -234,6 +270,21 @@ describe('modelParameters', () => {
       expect(getTopP(assistant, model)).toBeUndefined()
     })
 
+    it.each([
+      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', group: 'Claude 4.7' },
+      { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', group: 'Claude 4.8' }
+    ])('always returns undefined for $name (rejects sampling parameters)', ({ id, name, group }) => {
+      const assistant = createAssistant({ enableTopP: true, topP: 0.95 })
+      const model = createModel({
+        id,
+        name,
+        provider: 'anthropic',
+        group
+      })
+
+      expect(getTopP(assistant, model)).toBeUndefined()
+    })
+
     it('clamps topP to [0.95, 1] for Claude reasoning models with reasoning effort', () => {
       const assistant = createAssistant({ enableTopP: true, topP: 0.5, reasoning_effort: 'high' })
       const model = createModel({ id: 'claude-sonnet-4.5', provider: 'anthropic', group: 'claude' })
@@ -260,6 +311,73 @@ describe('modelParameters', () => {
       const model = createModel({ id: 'claude-sonnet-4', provider: 'anthropic', group: 'claude' })
 
       expect(getTopP(assistant, model)).toBe(0.97)
+    })
+
+    it('returns undefined for Gemini 3.x models', () => {
+      const assistant = createAssistant({ enableTopP: true, topP: 0.95 })
+      const model = createModel({ id: 'gemini-pro-latest', provider: 'gemini', group: 'Google' })
+
+      expect(getTopP(assistant, model)).toBeUndefined()
+    })
+  })
+
+  describe('filterStandardParams', () => {
+    const opus47PlusModels = [
+      createModel({
+        id: 'claude-opus-4-7',
+        name: 'Claude Opus 4.7',
+        provider: 'anthropic',
+        group: 'Claude 4.7'
+      }),
+      createModel({
+        id: 'claude-opus-4-8',
+        name: 'Claude Opus 4.8',
+        provider: 'anthropic',
+        group: 'Claude 4.8'
+      })
+    ]
+    const sonnet = createModel({
+      id: 'claude-sonnet-4.5',
+      name: 'Claude Sonnet 4.5',
+      provider: 'anthropic',
+      group: 'claude'
+    })
+
+    it('drops topK for Claude Opus 4.7+', () => {
+      for (const model of opus47PlusModels) {
+        expect(filterStandardParams({ topK: 40, frequencyPenalty: 0.1 }, model)).toEqual({ frequencyPenalty: 0.1 })
+      }
+    })
+
+    it('returns the same object when topK is absent for Opus 4.7+', () => {
+      for (const model of opus47PlusModels) {
+        const input = { frequencyPenalty: 0.1, seed: 42 }
+        expect(filterStandardParams(input, model)).toBe(input)
+      }
+    })
+
+    it('keeps topK for non-Opus-4.7+ models', () => {
+      const input = { topK: 40 }
+      expect(filterStandardParams(input, sonnet)).toBe(input)
+    })
+
+    it('returns the same object when standardParams is empty', () => {
+      for (const model of opus47PlusModels) {
+        const input = {}
+        expect(filterStandardParams(input, model)).toBe(input)
+      }
+    })
+
+    it('drops topK for Gemini 3.x models', () => {
+      const gemini35 = createModel({ id: 'gemini-3.5-flash', provider: 'gemini', group: 'Google' })
+
+      expect(filterStandardParams({ topK: 40, frequencyPenalty: 0.1 }, gemini35)).toEqual({ frequencyPenalty: 0.1 })
+    })
+
+    it('drops topK for Gemini 3.x model ids on non-Gemini providers', () => {
+      const proxyGemini = createModel({ id: 'gemini-3.5-flash', provider: 'openai', group: 'Google' })
+
+      expect(filterStandardParams({ topK: 40, frequencyPenalty: 0.1 }, proxyGemini)).toEqual({ frequencyPenalty: 0.1 })
     })
   })
 
@@ -297,6 +415,16 @@ describe('modelParameters', () => {
       const model = createModel({ id: 'claude-sonnet-4-6', provider: 'anthropic', group: 'claude' })
 
       expect(getMaxTokens(assistant, model)).toBe(64000)
+    })
+
+    it.each([
+      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
+      { id: 'claude-opus-4-8', name: 'Claude Opus 4.8' }
+    ])('returns user-configured maxTokens for $name without subtraction', ({ id }) => {
+      const assistant = createAssistant({ enableMaxTokens: true, maxTokens: 128000 })
+      const model = createModel({ id, provider: 'anthropic', group: 'claude' })
+
+      expect(getMaxTokens(assistant, model)).toBe(128000)
     })
 
     it('subtracts thinking budget for non-4.6 Claude models with anthropic provider', () => {

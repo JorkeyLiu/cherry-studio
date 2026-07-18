@@ -490,6 +490,7 @@
       },
       "prompt": "Configurações de Prompt",
       "skills": {
+        "addMore": "Adicionar Mais Skills",
         "builtin": "Integrado",
         "noFilterResults": "Nenhuma habilidade correspondente",
         "noSkills": "Nenhuma habilidade instalada. Instale habilidades em Configurações > Habilidades.",
@@ -2522,6 +2523,10 @@
       "completed": "Completo",
       "error": "Ocorreu um erro",
       "groupHeader": "{{count}} chamadas de ferramenta",
+      "groupHeaderMessages": "{{count}} mensagens",
+      "groupHeaderThinking": "{{count}} reflexões",
+      "groupHeaderWithDetails": "{{toolCount}} chamadas de ferramenta · {{thinkingCount}} reflexões · {{messageCount}} mensagens",
+      "groupHeaderWithMessages": "{{toolCount}} chamadas de ferramenta · {{messageCount}} mensagens",
       "invoking": "Em execução",
       "labels": {
         "bash": "Bash",
@@ -2940,6 +2945,11 @@
     "title": "Ollama"
   },
   "onboarding": {
+    "privacy": {
+      "notice": "Ao continuar, você confirma que leu e concorda com",
+      "period": ".",
+      "policy": "Política de Privacidade"
+    },
     "select_model": {
       "change_later": "Você pode alterar isso a qualquer momento nas configurações",
       "start": "Comece",
@@ -5518,7 +5528,8 @@
         "documentation": "Consulte a documentação oficial para obter mais detalhes de configuração:",
         "learn_more": "Saiba mais",
         "location": "Região",
-        "location_help": "Região do serviço Vertex AI, por exemplo, us-central1",
+        "location_help": "Região do serviço Vertex AI, por exemplo, us-central1. Este campo não é lido do JSON da Conta de Serviço e tem de ser introduzido manualmente.",
+        "location_placeholder": "Selecionar região do Vertex AI",
         "project_id": "ID do Projeto",
         "project_id_help": "Seu ID do projeto no Google Cloud",
         "project_id_placeholder": "seu-id-do-projeto-no-google-cloud",
@@ -5529,6 +5540,11 @@
           "client_email_placeholder": "Por favor, insira o e-mail do cliente da Conta de Serviço",
           "description": "Autenticar usando uma Conta de Serviço, adequado para ambientes onde o ADC não pode ser usado",
           "incomplete_config": "Por favor, configure completamente as informações da Conta de Serviço primeiro",
+          "json_input": "Service Account JSON",
+          "json_input_help": "Cole o conteúdo completo da chave JSON. Após a análise, apenas project_id, client_email e private_key são guardados, e o JSON original é limpo.",
+          "json_input_placeholder": "Cole o conteúdo completo da chave JSON da Conta de Serviço",
+          "json_parse_error": "Falha ao analisar Service Account JSON. Confirme que o formato está correto.",
+          "json_parse_success": "Service Account JSON analisado",
           "private_key": "Chave privada",
           "private_key_help": "Campo private_key do arquivo de chave JSON baixado do Google Cloud Console",
           "private_key_placeholder": "Por favor, insira a chave privada da Conta de Serviço",
@@ -5644,7 +5660,7 @@
       "noInstalled": "Nenhuma habilidade instalada",
       "noResults": "Nenhuma habilidade encontrada",
       "noSkillFile": "Nenhum SKILL.md encontrado",
-      "searchPlaceholder": "Pesquisar competências nos registros...",
+      "searchPlaceholder": "Descobrir mais competências...",
       "searchRegistryTitle": "Procure registros de habilidades online",
       "searchTitle": "Habilidades de Pesquisa",
       "selectFile": "Selecione um arquivo para visualizar",

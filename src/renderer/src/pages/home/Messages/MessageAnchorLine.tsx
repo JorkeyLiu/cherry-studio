@@ -100,10 +100,7 @@ const MessageAnchorLine: FC<MessageLineProps> = ({ messages }) => {
   }, [])
 
   const scrollToBottom = useCallback(() => {
-    const messagesContainer = document.getElementById('messages')
-    if (messagesContainer) {
-      messagesContainer.scrollTo({ top: messagesContainer.scrollHeight, behavior: 'smooth' })
-    }
+    void EventEmitter.emit(EVENT_NAMES.SCROLL_TO_BOTTOM)
   }, [])
 
   if (messages.length === 0) return null

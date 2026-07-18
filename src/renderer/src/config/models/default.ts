@@ -171,6 +171,12 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
       group: 'OpenAI'
     },
     {
+      id: 'gpt-image-2',
+      provider: 'aihubmix',
+      name: 'gpt-image-2',
+      group: 'OpenAI'
+    },
+    {
       id: 'DeepSeek-V3',
       provider: 'aihubmix',
       name: 'DeepSeek-V3',
@@ -374,6 +380,12 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
   ],
   anthropic: [
     {
+      id: 'claude-opus-4-7',
+      provider: 'anthropic',
+      name: 'Claude Opus 4.7',
+      group: 'Claude 4.7'
+    },
+    {
       id: 'claude-opus-4-6',
       provider: 'anthropic',
       name: 'Claude Opus 4.6',
@@ -406,16 +418,16 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
   ],
   deepseek: [
     {
-      id: 'deepseek-chat',
+      id: 'deepseek-v4-flash',
       provider: 'deepseek',
-      name: 'DeepSeek Chat',
-      group: 'DeepSeek Chat'
+      name: 'deepseek-v4-flash',
+      group: 'DeepSeek'
     },
     {
-      id: 'deepseek-reasoner',
+      id: 'deepseek-v4-pro',
       provider: 'deepseek',
-      name: 'DeepSeek Reasoner',
-      group: 'DeepSeek Reasoner'
+      name: 'deepseek-v4-pro',
+      group: 'DeepSeek'
     }
   ],
   together: [
@@ -606,10 +618,10 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
   ],
   copilot: [
     {
-      id: 'gpt-4o-mini',
+      id: 'gpt-5-mini',
       provider: 'copilot',
-      name: 'OpenAI GPT-4o-mini',
-      group: 'OpenAI'
+      name: 'gpt-5-mini',
+      group: 'copilot'
     }
   ],
   yi: [
@@ -729,6 +741,14 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
       provider: 'moonshot',
       name: 'Kimi K2.5',
       group: 'Kimi K2.5',
+      owned_by: 'moonshot',
+      capabilities: [{ type: 'text' }, { type: 'vision' }, { type: 'function_calling' }]
+    },
+    {
+      id: 'kimi-k2.6',
+      provider: 'moonshot',
+      name: 'Kimi K2.6',
+      group: 'Kimi K2.6',
       owned_by: 'moonshot',
       capabilities: [{ type: 'text' }, { type: 'vision' }, { type: 'function_calling' }]
     },
@@ -1036,6 +1056,12 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
   ],
   minimax: [
     {
+      id: 'MiniMax-M3',
+      provider: 'minimax',
+      name: 'MiniMax-M3',
+      group: 'M3'
+    },
+    {
       id: 'MiniMax-M2.7',
       provider: 'minimax',
       name: 'MiniMax-M2.7',
@@ -1046,52 +1072,16 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
       provider: 'minimax',
       name: 'MiniMax-M2.7-highspeed',
       group: 'M2.7'
-    },
-    {
-      id: 'MiniMax-M2.5',
-      provider: 'minimax',
-      name: 'MiniMax-M2.5',
-      group: 'M2.5'
-    },
-    {
-      id: 'MiniMax-M2.5-highspeed',
-      provider: 'minimax',
-      name: 'MiniMax-M2.5-highspeed',
-      group: 'M2.5'
-    },
-    {
-      id: 'MiniMax-M2.5-lightning',
-      provider: 'minimax',
-      name: 'MiniMax-M2.5-lightning',
-      group: 'M2.5'
-    },
-    {
-      id: 'MiniMax-M2.1',
-      provider: 'minimax',
-      name: 'MiniMax-M2.1',
-      group: 'M2.1'
-    },
-    {
-      id: 'MiniMax-M2.1-lightning',
-      provider: 'minimax',
-      name: 'MiniMax-M2.1-lightning',
-      group: 'M2.1'
-    },
-    {
-      id: 'MiniMax-M2',
-      provider: 'minimax',
-      name: 'MiniMax-M2',
-      group: 'M2'
-    },
-    {
-      id: 'M2-her',
-      provider: 'minimax',
-      name: 'M2-her',
-      group: 'M2'
     }
   ],
   'minimax-global': [
     {
+      id: 'MiniMax-M3',
+      provider: 'minimax-global',
+      name: 'MiniMax-M3',
+      group: 'M3'
+    },
+    {
       id: 'MiniMax-M2.7',
       provider: 'minimax-global',
       name: 'MiniMax-M2.7',
@@ -1102,48 +1092,6 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
       provider: 'minimax-global',
       name: 'MiniMax-M2.7-highspeed',
       group: 'M2.7'
-    },
-    {
-      id: 'MiniMax-M2.5',
-      provider: 'minimax-global',
-      name: 'MiniMax-M2.5',
-      group: 'M2.5'
-    },
-    {
-      id: 'MiniMax-M2.5-highspeed',
-      provider: 'minimax-global',
-      name: 'MiniMax-M2.5-highspeed',
-      group: 'M2.5'
-    },
-    {
-      id: 'MiniMax-M2.5-lightning',
-      provider: 'minimax-global',
-      name: 'MiniMax-M2.5-lightning',
-      group: 'M2.5'
-    },
-    {
-      id: 'MiniMax-M2.1',
-      provider: 'minimax-global',
-      name: 'MiniMax-M2.1',
-      group: 'M2.1'
-    },
-    {
-      id: 'MiniMax-M2.1-lightning',
-      provider: 'minimax-global',
-      name: 'MiniMax-M2.1-lightning',
-      group: 'M2.1'
-    },
-    {
-      id: 'MiniMax-M2',
-      provider: 'minimax-global',
-      name: 'MiniMax-M2',
-      group: 'M2'
-    },
-    {
-      id: 'M2-her',
-      provider: 'minimax-global',
-      name: 'M2-her',
-      group: 'M2'
     }
   ],
   hyperbolic: [
@@ -1173,6 +1121,12 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
     }
   ],
   grok: [
+    {
+      id: 'grok-4.3',
+      provider: 'grok',
+      name: 'Grok 4.3',
+      group: 'Grok'
+    },
     {
       id: 'grok-4',
       provider: 'grok',
@@ -2030,22 +1984,28 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
   ],
   mimo: [
     {
+      id: 'mimo-v2.5',
+      name: 'Mimo V2.5',
+      provider: 'mimo',
+      group: 'mimo'
+    },
+    {
+      id: 'mimo-v2.5-pro',
+      name: 'Mimo V2.5 Pro',
+      provider: 'mimo',
+      group: 'mimo'
+    },
+    {
       id: 'mimo-v2-flash',
       name: 'Mimo V2 Flash',
       provider: 'mimo',
-      group: 'Mimo'
-    },
-    {
-      id: 'mimo-v2-pro',
-      name: 'Mimo V2 Pro',
-      provider: 'mimo',
-      group: 'Mimo'
+      group: 'mimo'
     },
     {
       id: 'mimo-v2-omni',
       name: 'Mimo V2 Omni',
       provider: 'mimo',
-      group: 'Mimo'
+      group: 'mimo'
     }
   ],
   zai: [
