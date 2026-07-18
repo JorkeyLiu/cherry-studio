@@ -1753,6 +1753,17 @@
   "docs": {
     "title": "Hilfedokumentation"
   },
+  "editMode": {
+    "contextMenu": {
+      "copy": "[to be translated]:Copy",
+      "cut": "[to be translated]:Cut",
+      "delete": "[to be translated]:Delete",
+      "paste": "[to be translated]:Paste",
+      "redo": "[to be translated]:Redo",
+      "selectAll": "[to be translated]:Select All",
+      "undo": "[to be translated]:Undo"
+    }
+  },
   "endpoint_type": {
     "anthropic": "Anthropic",
     "gemini": "Gemini",
@@ -5919,6 +5930,37 @@
     "settings": "Einstellungen",
     "store": "Assistenten-Bibliothek",
     "translate": "Übersetzen"
+  },
+  "topicSegment": {
+    "create": {
+      "defaultName": "[to be translated]:New Message Group",
+      "namePlaceholder": "[to be translated]:Enter message group name",
+      "notContinuous": "[to be translated]:Only consecutive messages can be grouped",
+      "overlappingMessages": "[to be translated]:Selected messages overlap with an existing segment",
+      "selectMessages": "[to be translated]:Please select at least one message first",
+      "title": "[to be translated]:Create Message Group"
+    },
+    "createAction": "[to be translated]:Create Message Group",
+    "dissolve": {
+      "confirm": "[to be translated]:Are you sure you want to dissolve this group? Messages will not be deleted."
+    },
+    "dissolveAction": "[to be translated]:Dissolve Group",
+    "merge": {
+      "success": "[to be translated]:Group merged successfully"
+    },
+    "mergeDown": "[to be translated]:Merge into Group Below",
+    "mergeUp": "[to be translated]:Merge into Group Above",
+    "messages": {
+      "count": "[to be translated]:{{count}} message(s)"
+    },
+    "navigation": {
+      "title": "[to be translated]:Message Group Navigation"
+    },
+    "remove": {
+      "success": "[to be translated]:Removed from group"
+    },
+    "removeFromSegment": "[to be translated]:Remove from Group",
+    "rename": "[to be translated]:Rename"
   },
   "trace": {
     "backList": "Rückgängig-Liste",

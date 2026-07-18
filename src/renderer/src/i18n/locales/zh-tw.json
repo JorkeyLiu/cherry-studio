@@ -1759,6 +1759,17 @@
   "docs": {
     "title": "說明文件"
   },
+  "editMode": {
+    "contextMenu": {
+      "copy": "[to be translated]:Copy",
+      "cut": "[to be translated]:Cut",
+      "delete": "[to be translated]:Delete",
+      "paste": "[to be translated]:Paste",
+      "redo": "[to be translated]:Redo",
+      "selectAll": "[to be translated]:Select All",
+      "undo": "[to be translated]:Undo"
+    }
+  },
   "endpoint_type": {
     "anthropic": "Anthropic",
     "gemini": "Gemini",
@@ -5925,6 +5936,37 @@
     "settings": "設定",
     "store": "助手庫",
     "translate": "翻譯"
+  },
+  "topicSegment": {
+    "create": {
+      "defaultName": "新建消息組",
+      "namePlaceholder": "請輸入消息組名稱",
+      "notContinuous": "只能將連續的消息建立為消息組",
+      "overlappingMessages": "選取的消息與現有消息組重疊",
+      "selectMessages": "請先選擇至少一條消息",
+      "title": "建立消息組"
+    },
+    "createAction": "建立消息組",
+    "dissolve": {
+      "confirm": "確定要解散此消息組嗎？消息不會被刪除。"
+    },
+    "dissolveAction": "解散消息組",
+    "merge": {
+      "success": "消息組合併成功"
+    },
+    "mergeDown": "合併至下方消息組",
+    "mergeUp": "合併至上方消息組",
+    "messages": {
+      "count": "{{count}} 條消息"
+    },
+    "navigation": {
+      "title": "消息組導航"
+    },
+    "remove": {
+      "success": "已從消息組移除"
+    },
+    "removeFromSegment": "從消息組移除",
+    "rename": "重新命名"
   },
   "trace": {
     "backList": "回到清單",

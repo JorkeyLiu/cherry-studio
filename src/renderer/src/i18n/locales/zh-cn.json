@@ -1759,6 +1759,17 @@
   "docs": {
     "title": "帮助文档"
   },
+  "editMode": {
+    "contextMenu": {
+      "copy": "复制",
+      "cut": "剪切",
+      "delete": "删除",
+      "paste": "粘贴",
+      "redo": "重做",
+      "selectAll": "全选",
+      "undo": "撤销"
+    }
+  },
   "endpoint_type": {
     "anthropic": "Anthropic",
     "gemini": "Gemini",
@@ -5925,6 +5936,37 @@
     "settings": "设置",
     "store": "助手库",
     "translate": "翻译"
+  },
+  "topicSegment": {
+    "create": {
+      "defaultName": "新建消息组",
+      "namePlaceholder": "请输入消息组名称",
+      "notContinuous": "只能将连续的消息创建为消息组",
+      "overlappingMessages": "选中的消息与已有消息组重叠",
+      "selectMessages": "请先选择至少一条消息",
+      "title": "创建消息组"
+    },
+    "createAction": "创建消息组",
+    "dissolve": {
+      "confirm": "确定要解散此消息组吗？消息不会被删除。"
+    },
+    "dissolveAction": "解散消息组",
+    "merge": {
+      "success": "消息组合并成功"
+    },
+    "mergeDown": "合并至下方消息组",
+    "mergeUp": "合并至上方消息组",
+    "messages": {
+      "count": "{{count}} 条消息"
+    },
+    "navigation": {
+      "title": "消息组导航"
+    },
+    "remove": {
+      "success": "已从消息组移除"
+    },
+    "removeFromSegment": "从消息组移除",
+    "rename": "重命名"
   },
   "trace": {
     "backList": "返回列表",

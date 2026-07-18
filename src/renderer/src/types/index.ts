@@ -5,6 +5,7 @@ import type { GenerateImagesConfig, GroundingMetadata, PersonGeneration } from '
 
 export * from './file'
 export * from './note'
+export * from './topicSegment'
 
 import * as z from 'zod'
 

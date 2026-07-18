@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 import ContextMenu from '@renderer/components/ContextMenu'
 import EditModeActionBar from '@renderer/components/EditModeActionBar'
+import EditModeContextMenu from '@renderer/components/EditModeContextMenu'
 import { LoadingIcon } from '@renderer/components/Icons'
 import {
   INITIAL_MESSAGES_COUNT,
@@ -17,6 +18,7 @@ import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
+import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getContextCount, getGroupedMessages, getUserMessage } from '@renderer/services/MessagesService'
@@ -56,6 +58,7 @@ import MessageGroup from './MessageGroup'
 import NarrowLayout from './NarrowLayout'
 import Prompt from './Prompt'
 import { MessagesContainer, ScrollContainer } from './shared'
+import TopicSegmentLine from './TopicSegmentLine'
 
 interface MessagesProps {
   assistant: Assistant
@@ -126,6 +129,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   const { t } = useTranslation()
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
+  const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
   useClipboardKeyboard()
 
   // NOTE: 因为displayMessages是倒序的，所以得到的groupedMessages每个group内部也是倒序的，需要再倒一遍
@@ -232,24 +236,42 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
 
   const renderMessageSegments = () => {
     return messageSegments.map((seg, i) => {
-      const content = seg.items.map(([key, groupMessages]) => (
-        <Fragment key={key}>
-          {key === contextDividerGroupKey && (
-            <ContextWindowDivider data-context-boundary>
-              <ContextWindowDividerLine />
-              <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
-              <ContextWindowDividerLine />
-            </ContextWindowDivider>
-          )}
-          <MessageGroup
-            messages={groupMessages}
-            topic={topic}
-            registerMessageElement={registerMessageElement}
-            isEditMode={isEditMode}
-            onGroupClick={handleGroupClick}
-          />
-        </Fragment>
-      ))
+      const content = seg.items.map(([key, groupMessages]) => {
+        const firstMsg = groupMessages[0]
+        const segment = firstMsg ? isMessageInSegment(firstMsg.id) : undefined
+        const isFirst = firstMsg ? !!isMessageFirstInSegment(firstMsg.id) : false
+        const lastMsg = groupMessages[groupMessages.length - 1]
+        const isLast = lastMsg ? !!isMessageLastInSegment(lastMsg.id) : false
+
+        return (
+          <Fragment key={key}>
+            {key === contextDividerGroupKey && (
+              <ContextWindowDivider data-context-boundary>
+                <ContextWindowDividerLine />
+                <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
+                <ContextWindowDividerLine />
+              </ContextWindowDivider>
+            )}
+            <div style={{ position: 'relative' }}>
+              {segment && (
+                <TopicSegmentLine
+                  segment={segment}
+                  isFirst={isFirst}
+                  isLast={isLast}
+                  messageCount={isFirst ? segment.messageIds.length : undefined}
+                />
+              )}
+              <MessageGroup
+                messages={groupMessages}
+                topic={topic}
+                registerMessageElement={registerMessageElement}
+                isEditMode={isEditMode}
+                onGroupClick={handleGroupClick}
+              />
+            </div>
+          </Fragment>
+        )
+      })
 
       if (seg.selected) {
         return <SelectionBlock key={`sel-${i}`}>{content}</SelectionBlock>
@@ -274,16 +296,29 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           scrollableTarget="messages"
           inverse
           style={{ overflow: 'visible' }}>
-          <ContextMenu>
-            <ScrollContainer>
-              {renderMessageSegments()}
-              {isLoadingMore && (
-                <LoaderContainer>
-                  <LoadingIcon color="var(--color-text-2)" />
-                </LoaderContainer>
-              )}
-            </ScrollContainer>
-          </ContextMenu>
+          {isEditMode ? (
+            <EditModeContextMenu topicId={topic.id}>
+              <ScrollContainer>
+                {renderMessageSegments()}
+                {isLoadingMore && (
+                  <LoaderContainer>
+                    <LoadingIcon color="var(--color-text-2)" />
+                  </LoaderContainer>
+                )}
+              </ScrollContainer>
+            </EditModeContextMenu>
+          ) : (
+            <ContextMenu>
+              <ScrollContainer>
+                {renderMessageSegments()}
+                {isLoadingMore && (
+                  <LoaderContainer>
+                    <LoadingIcon color="var(--color-text-2)" />
+                  </LoaderContainer>
+                )}
+              </ScrollContainer>
+            </ContextMenu>
+          )}
         </InfiniteScroll>
 
         {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
@@ -774,7 +809,8 @@ const computeDisplayMessages = (messages: Message[], startIndex: number, display
 
   // 直接在原数组上倒序遍历，跳过前 startIndex 个，避免全量拷贝和 reverse()
   for (let i = messages.length - 1 - startIndex; i >= 0 && userIdSet.size + assistantIdSet.size < displayCount; i--) {
-    processMessage(messages[i])
+    const message = messages[i]
+    processMessage(message)
   }
 
   return displayMessages

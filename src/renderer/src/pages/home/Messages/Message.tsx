@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 import HorizontalScrollContainer from '@renderer/components/HorizontalScrollContainer'
 import Scrollbar from '@renderer/components/Scrollbar'
+import { useEditMode } from '@renderer/context/EditModeContext'
 import { useMessageEditing } from '@renderer/context/MessageEditingContext'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
@@ -83,6 +84,7 @@ const MessageItem: FC<Props> = ({
   const { editingMessageId, startEditing, stopEditing } = useMessageEditing()
   const { setTimeoutTimer } = useTimer()
   const isEditing = editingMessageId === message.id
+  const { selectedGroupIds } = useEditMode()
 
   useEffect(() => {
     if (isEditing && messageContainerRef.current) {
@@ -139,7 +141,7 @@ const MessageItem: FC<Props> = ({
         (e.target as HTMLElement).closest(
           '.menubar, ' +
             '.message-editor-area, ' +
-            '.message-header > div:first-child, ' +
+            '.message-header > :first-child, ' +
             '.ant-image, ' +
             '.ant-collapse-header, ' +
             '.message-attachments, ' +
@@ -160,6 +162,49 @@ const MessageItem: FC<Props> = ({
       onGroupClick(askId, isCtrl, isShift)
     },
     [isEditMode, message, onGroupClick]
+  )
+
+  // 编辑模式下右键消息内容区域自动选中消息组，不在可选区域时抑制菜单弹出
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      if (!isEditMode || !onGroupClick) return
+
+      // 排除区域：阻止冒泡到 EditModeContextMenu 的 Dropdown，不弹出编辑模式菜单
+      if (
+        (e.target as HTMLElement).closest(
+          '.menubar, ' +
+            '.message-editor-area, ' +
+            '.message-header > :first-child, ' +
+            '.ant-image, ' +
+            '.ant-collapse-header, ' +
+            '.message-attachments, ' +
+            'video, ' +
+            '.message-action-button, ' +
+            '.ant-dropdown, ' +
+            '.ant-dropdown-menu-submenu-popup, ' +
+            '.ant-image-preview-root, ' +
+            '.ant-popover, ' +
+            '.ant-modal'
+        )
+      ) {
+        e.stopPropagation()
+        return
+      }
+
+      const askId = message.role === 'user' ? message.id : message.askId || message.id
+      if (!askId) {
+        e.stopPropagation()
+        return
+      }
+
+      // 右键时：如果目标消息组已在选中列表中，不调用 onGroupClick（避免 toggle 清空选区）
+      // 如果不在选中列表中，调用 onGroupClick 选中它（替换当前选区）
+      if (!selectedGroupIds.includes(askId)) {
+        onGroupClick(askId, false, false)
+      }
+      // 不调用 stopPropagation，让 EditModeContextMenu 的 Dropdown 正常弹出
+    },
+    [isEditMode, message, onGroupClick, selectedGroupIds]
   )
 
   const messageHighlightHandler = useCallback(
@@ -231,7 +276,8 @@ const MessageItem: FC<Props> = ({
           'edit-mode-message': isEditMode
         })}
         ref={messageContainerRef}
-        onClick={isEditMode ? handleMessageClick : undefined}>
+        onClick={isEditMode ? handleMessageClick : undefined}
+        onContextMenu={isEditMode ? handleContextMenu : undefined}>
         <MessageHeader
           message={message}
           assistant={assistant}

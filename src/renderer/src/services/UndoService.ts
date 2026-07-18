@@ -4,6 +4,12 @@ import type { AppDispatch, RootState } from '@renderer/store'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
 import { deleteMessagesFromDB, saveMessageAndBlocksToDB } from '@renderer/store/thunk/messageThunk'
+import {
+  deleteSegmentsBySnapshots,
+  restoreSegmentsAfterUndo,
+  restoreTargetSegments,
+  syncSegmentsAfterMessageDeletion
+} from '@renderer/store/thunk/topicSegmentThunk'
 import { prepareRedo, prepareUndo } from '@renderer/store/undoStack'
 import type {
   CutPasteUndoAction,
@@ -196,7 +202,7 @@ export async function executeRedo(dispatch: AppDispatch, getState: () => RootSta
  * Undo delete = re-insert deleted messages and blocks
  */
 async function undoDelete(dispatch: AppDispatch, getState: () => RootState, action: DeleteUndoAction): Promise<void> {
-  const { targetTopicId, groupAnchors, fileReferenceDeltas = [] } = action
+  const { targetTopicId, groupAnchors, fileReferenceDeltas = [], segmentSnapshots = [] } = action
 
   if (groupAnchors.length === 0) {
     logger.warn('[undoDelete] No group anchors to restore')
@@ -212,6 +218,9 @@ async function undoDelete(dispatch: AppDispatch, getState: () => RootState, acti
   const allBlocks = groupAnchors.flatMap((a) => a.blocks)
   await restoreGroupsByAnchors(dispatch, getState, targetTopicId, groupAnchors, allBlocks)
 
+  // Restore segment membership
+  await restoreSegmentsAfterUndo(dispatch, getState, segmentSnapshots)
+
   const totalMessages = groupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
   logger.info(`[undoDelete] Restored ${totalMessages} messages from ${groupAnchors.length} groups`)
 }
@@ -224,7 +233,7 @@ async function undoPaste(
   getState: () => RootState,
   action: PasteUndoAction | CutPasteUndoAction
 ): Promise<void> {
-  const { targetTopicId, insertedMessageIds = [], fileReferenceDeltas = [] } = action
+  const { targetTopicId, insertedMessageIds = [], fileReferenceDeltas = [], targetSegmentSnapshots = [] } = action
 
   if (insertedMessageIds.length === 0) {
     logger.warn('[undoPaste] No message IDs to remove')
@@ -257,12 +266,23 @@ async function undoPaste(
     dispatch(removeManyBlocks(blockIdsToRemove))
   }
 
+  // Delete target segments that were created during paste BEFORE syncing,
+  // so syncSegmentsAfterMessageDeletion won't find (and double-delete) them.
+  if (targetSegmentSnapshots.length > 0) {
+    await deleteSegmentsBySnapshots(dispatch, targetSegmentSnapshots)
+  }
+
+  // Sync segments after message deletion (only non-target segments remain)
+  await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds)
+
   // Decrement file reference counts
   if (fileReferenceDeltas.length > 0) {
     await updateFileReferenceCounts(fileReferenceDeltas, false)
   }
 
-  logger.info(`[undoPaste] Removed ${insertedMessageIds.length} pasted messages`)
+  logger.info(
+    `[undoPaste] Removed ${insertedMessageIds.length} pasted messages, ${targetSegmentSnapshots.length} target segments`
+  )
 }
 
 /**
@@ -277,7 +297,7 @@ async function undoCutPaste(
   await undoPaste(dispatch, getState, action)
 
   // Second: restore the deleted source messages using per-group anchors
-  const { sourceTopicId, sourceGroupAnchors } = action
+  const { sourceTopicId, sourceGroupAnchors, sourceSegmentSnapshots = [] } = action
 
   if (sourceGroupAnchors.length === 0) {
     logger.warn('[undoCutPaste] No source group anchors to restore')
@@ -303,6 +323,9 @@ async function undoCutPaste(
   // Restore groups using per-group anchors
   const allSourceBlocks = sourceGroupAnchors.flatMap((a) => a.blocks)
   await restoreGroupsByAnchors(dispatch, getState, sourceTopicId, sourceGroupAnchors, allSourceBlocks)
+
+  // Restore source segment membership
+  await restoreSegmentsAfterUndo(dispatch, getState, sourceSegmentSnapshots)
 
   const totalMessages = sourceGroupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
   logger.info(`[undoCutPaste] Restored ${totalMessages} source messages to ${sourceTopicId}`)
@@ -346,6 +369,9 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
     dispatch(removeManyBlocks(blockIdsToRemove))
   }
 
+  // Sync segments after message deletion
+  await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds)
+
   // Re-decrement file reference counts (redo delete → need -1, deltas are -1 so use true to keep -1)
   if (fileReferenceDeltas.length > 0) {
     await updateFileReferenceCounts(fileReferenceDeltas, true)
@@ -364,7 +390,8 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
     pastedBlocksSnapshot = [],
     targetInsertPositionIndex: insertPositionIndex,
     targetAnchorMessageId: anchorMessageId,
-    fileReferenceDeltas = []
+    fileReferenceDeltas = [],
+    targetSegmentSnapshots = []
   } = action
 
   if (pastedMessagesSnapshot.length === 0) {
@@ -410,8 +437,13 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
     await updateFileReferenceCounts(fileReferenceDeltas, true)
   }
 
+  // Restore target segments that were created during original paste
+  if (targetSegmentSnapshots.length > 0) {
+    await restoreTargetSegments(dispatch, targetSegmentSnapshots)
+  }
+
   logger.info(
-    `[redoPaste] Re-inserted ${pastedMessagesSnapshot.length} pasted messages at resolved index ${resolvedIndex}`
+    `[redoPaste] Re-inserted ${pastedMessagesSnapshot.length} pasted messages at resolved index ${resolvedIndex}, ${targetSegmentSnapshots.length} target segments`
   )
 }
 
@@ -431,7 +463,8 @@ async function redoCutPaste(
     sourceGroupAnchors,
     targetInsertPositionIndex: insertPositionIndex,
     targetAnchorMessageId: anchorMessageId,
-    fileReferenceDeltas = []
+    fileReferenceDeltas = [],
+    targetSegmentSnapshots = []
   } = action
 
   // Step 1: Delete source messages (DB-first)
@@ -458,6 +491,9 @@ async function redoCutPaste(
     if (blockIdsToRemove.length > 0) {
       dispatch(removeManyBlocks(blockIdsToRemove))
     }
+
+    // Sync segments after source message deletion
+    await syncSegmentsAfterMessageDeletion(dispatch, getState, sourceTopicId, sourceMsgIds)
 
     // Decrement file reference counts for source blocks
     const sourceFileDeltas: Array<{ fileId: string; delta: number }> = []
@@ -516,8 +552,13 @@ async function redoCutPaste(
     }
   }
 
+  // Step 3: Restore target segments that were created during original paste
+  if (targetSegmentSnapshots.length > 0) {
+    await restoreTargetSegments(dispatch, targetSegmentSnapshots)
+  }
+
   const sourceCount = sourceGroupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
   logger.info(
-    `[redoCutPaste] Re-executed cut+paste: ${sourceCount} source messages deleted, ${pastedMessagesSnapshot.length} messages re-inserted`
+    `[redoCutPaste] Re-executed cut+paste: ${sourceCount} source messages deleted, ${pastedMessagesSnapshot.length} messages re-inserted, ${targetSegmentSnapshots.length} target segments restored`
   )
 }
