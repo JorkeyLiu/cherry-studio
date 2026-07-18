@@ -1985,8 +1985,9 @@ export const loadTopicMessagesThunk =
 
     dispatch(newMessagesActions.setCurrentTopicId(topicId))
 
-    // Skip if already cached and not forcing reload
-    if (!forceReload && state.messages.messageIdsByTopic[topicId]) {
+    // Skip if already cached with valid data and not forcing reload
+    const cachedIds = state.messages.messageIdsByTopic[topicId]
+    if (!forceReload && cachedIds && cachedIds.length > 0) {
       return
     }
 

@@ -16,7 +16,13 @@ import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { getDefaultTopic } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import { getContextCount, getGroupedMessages, getUserMessage } from '@renderer/services/MessagesService'
+import {
+  clearPendingNavigate,
+  getContextCount,
+  getGroupedMessages,
+  getPendingNavigate,
+  getUserMessage
+} from '@renderer/services/MessagesService'
 import { estimateHistoryTokens } from '@renderer/services/TokenService'
 import store, { useAppDispatch } from '@renderer/store'
 import { messageBlocksSelectors, updateOneBlock } from '@renderer/store/messageBlock'
@@ -31,6 +37,7 @@ import {
   removeSpecialCharactersForFileName,
   runAsyncFunction
 } from '@renderer/utils'
+import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
@@ -224,16 +231,215 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const messages = useTopicMessages(topic.id)
-  const { displayCount, clearTopicMessages, deleteMessage, createTopicBranch } = useMessageOperations(topic)
+  const { displayCount, clearTopicMessages, deleteMessage, createTopicBranch, editMessage } =
+    useMessageOperations(topic)
   const { setTimeoutTimer } = useTimer()
 
-  // 滚动到指定消息组
-  const scrollToGroup = useCallback((askId: string) => {
-    const element = document.getElementById(`message-group-${askId}`)
+  const messageElements = useRef<Map<string, HTMLElement>>(new Map())
+  const messagesRef = useRef<Message[]>(messages)
+  const displayMessagesRef = useRef<Message[]>(displayMessages)
+  const selectMessageForFoldRef = useRef<(messageId: string) => Promise<void>>(() => Promise.resolve())
+  const navigateGenerationRef = useRef(0)
+
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
+
+  useEffect(() => {
+    displayMessagesRef.current = displayMessages
+  }, [displayMessages])
+
+  const registerMessageElement = useCallback((id: string, element: HTMLElement | null) => {
     if (element) {
-      element.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      messageElements.current.set(id, element)
+    } else {
+      messageElements.current.delete(id)
     }
   }, [])
+
+  /**
+   * Switch foldSelected for the message group containing the target message.
+   * Used by the centralized NAVIGATE_TO_MESSAGE handler to unfold hidden messages.
+   * Awaits all editMessage calls so the caller can wait for the UI to update.
+   */
+  const selectMessageForFold = useCallback(
+    async (messageId: string) => {
+      const allMessages = messagesRef.current
+      const targetMessage = allMessages.find((m) => m.id === messageId)
+      if (!targetMessage || !targetMessage.askId || targetMessage.role !== 'assistant') return
+
+      const groupMessages = allMessages.filter((m) => m.role === 'assistant' && m.askId === targetMessage.askId)
+      if (groupMessages.length <= 1) return
+
+      await Promise.all(groupMessages.map((m) => editMessage(m.id, { foldSelected: m.id === messageId })))
+    },
+    [editMessage]
+  )
+
+  useEffect(() => {
+    selectMessageForFoldRef.current = selectMessageForFold
+  }, [selectMessageForFold])
+
+  useEffect(() => {
+    // Cancel all in-flight navigation when messages/topic change
+    navigateGenerationRef.current++
+    const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
+    setDisplayMessages(newDisplayMessages)
+    setHasMore(messages.length > displayCount)
+  }, [messages, displayCount])
+
+  /**
+   * Check the DOM status of a message element.
+   * - 'visible': element exists and is displayed
+   * - 'hidden': element exists but is hidden (e.g. by fold)
+   * - 'missing': element not in DOM (needs loading)
+   */
+  const checkElement = useCallback((messageId: string): 'visible' | 'hidden' | 'missing' => {
+    const el = document.getElementById(`message-${messageId}`)
+    if (!el) return 'missing'
+    if (window.getComputedStyle(el).display === 'none') return 'hidden'
+    return 'visible'
+  }, [])
+
+  /**
+   * Ensure the target message is rendered and visible in the DOM.
+   * Handles fold switching for hidden messages.
+   * Does NOT scroll — scrolling is handled by `handleNavigateToMessage`.
+   */
+  const scrollToTargetMessage = useCallback(
+    async (messageId: string, generation: number): Promise<boolean> => {
+      const allMessages = messagesRef.current
+
+      // 1. Check if the message exists in this topic's messages
+      if (!allMessages.some((m) => m.id === messageId)) {
+        logger.warn(`[scrollToTargetMessage] Message ${messageId} not found in topic messages`)
+        return false
+      }
+
+      // 2. Check if the target message is already rendered in DOM
+      const initialStatus = checkElement(messageId)
+      if (initialStatus === 'visible') return true
+
+      if (initialStatus === 'hidden') {
+        // Message is rendered but hidden by fold — unfold it
+        await selectMessageForFoldRef.current(messageId)
+        if (generation !== navigateGenerationRef.current) return false
+        // Wait for React to re-render after fold switch
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => resolve())
+          })
+        })
+        if (generation !== navigateGenerationRef.current) return false
+        return true
+      }
+
+      // 3. status === 'missing': Load more messages in batches until the target message enters displayMessages
+      const maxAttempts = Math.ceil(allMessages.length / LOAD_MORE_COUNT) + 1
+      let currentOffset = displayMessagesRef.current.length
+
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (generation !== navigateGenerationRef.current) return false
+        if (currentOffset >= allMessages.length) break
+
+        // Compute the next batch of messages to display
+        const newBatch = computeDisplayMessages(allMessages, currentOffset, LOAD_MORE_COUNT)
+        if (newBatch.length === 0) break
+
+        currentOffset += newBatch.length
+
+        // Update state — use functional update to ensure we append to the latest state
+        setDisplayMessages((prev) => [...prev, ...newBatch])
+        setHasMore(currentOffset < allMessages.length)
+
+        // Wait for React to re-render and the DOM to update
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => resolve())
+          })
+        })
+
+        if (generation !== navigateGenerationRef.current) return false
+
+        // Check if the target message is now ready
+        const status = checkElement(messageId)
+        if (status === 'visible') return true
+
+        if (status === 'hidden') {
+          // Message appeared but is hidden by fold — unfold it
+          await selectMessageForFoldRef.current(messageId)
+          if (generation !== navigateGenerationRef.current) return false
+          await new Promise<void>((resolve) => {
+            requestAnimationFrame(() => {
+              requestAnimationFrame(() => resolve())
+            })
+          })
+          if (generation !== navigateGenerationRef.current) return false
+          return true
+        }
+      }
+
+      // 4. Final check after exhausting attempts
+      const finalStatus = checkElement(messageId)
+      if (finalStatus === 'hidden') {
+        await selectMessageForFoldRef.current(messageId)
+        if (generation !== navigateGenerationRef.current) return false
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => resolve())
+          })
+        })
+        if (generation !== navigateGenerationRef.current) return false
+        return true
+      }
+
+      return finalStatus === 'visible'
+    },
+
+    [checkElement]
+  )
+
+  /**
+   * Centralized navigation handler for NAVIGATE_TO_MESSAGE events.
+   * Ensures the target message is rendered (with fold handling), then scrolls to it.
+   * Uses generation tracking to cancel stale navigations.
+   */
+  const handleNavigateToMessage = useCallback(
+    async (messageId: string) => {
+      const generation = ++navigateGenerationRef.current
+
+      // 1. Ensure message is rendered in DOM (handles loading + fold switching)
+      const ready = await scrollToTargetMessage(messageId, generation)
+      if (!ready) return
+      if (generation !== navigateGenerationRef.current) return
+
+      // 2. Wait one extra frame for fold-related DOM updates to settle
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve())
+      })
+      if (generation !== navigateGenerationRef.current) return
+
+      // 3. Scroll to the element with consistent behavior
+      const targetEl = document.getElementById(`message-${messageId}`)
+      if (targetEl) {
+        scrollIntoView(targetEl, { behavior: 'smooth', block: 'center', container: 'nearest' })
+      }
+    },
+    [scrollToTargetMessage]
+  )
+
+  // 滚动到指定消息组
+  const scrollToGroup = useCallback(
+    async (askId: string) => {
+      const allMessages = messagesRef.current
+      // Find the first message belonging to this group (by askId or id)
+      const targetMessage = allMessages.find((m) => m.askId === askId || m.id === askId)
+      if (targetMessage) {
+        await handleNavigateToMessage(targetMessage.id)
+      }
+    },
+    [handleNavigateToMessage]
+  )
 
   // 已渲染的消息组 id 集合，用于限制键盘选择范围
   const visibleGroupIds = useMemo(() => {
@@ -248,27 +454,6 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
         .filter(Boolean)
     )
   }, [displayMessages])
-
-  const messageElements = useRef<Map<string, HTMLElement>>(new Map())
-  const messagesRef = useRef<Message[]>(messages)
-
-  useEffect(() => {
-    messagesRef.current = messages
-  }, [messages])
-
-  const registerMessageElement = useCallback((id: string, element: HTMLElement | null) => {
-    if (element) {
-      messageElements.current.set(id, element)
-    } else {
-      messageElements.current.delete(id)
-    }
-  }, [])
-
-  useEffect(() => {
-    const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
-    setDisplayMessages(newDisplayMessages)
-    setHasMore(messages.length > displayCount)
-  }, [messages, displayCount])
 
   // NOTE: 如果设置为平滑滚动会导致滚动条无法跟随生成的新消息保持在底部位置
   const scrollToBottom = useCallback(() => {
@@ -407,12 +592,64 @@ const Messages: React.FC<MessagesProps> = ({ assistant, topic, setActiveTopic, o
             window.toast.error(t('code_block.edit.save.failed.label'))
           }
         }
-      )
+      ),
+      EventEmitter.on(EVENT_NAMES.NAVIGATE_TO_MESSAGE, async (messageId: string) => {
+        // Only handle messages that belong to the current topic.
+        // A stale listener from the previous topic may receive this event during
+        // cross-topic navigation — skip it to avoid consuming the pending target.
+        if (!messagesRef.current.some((m) => m.id === messageId)) {
+          return
+        }
+        // Message belongs to current topic — clear pending and navigate.
+        clearPendingNavigate()
+        await handleNavigateToMessage(messageId)
+      })
     ]
 
     return () => unsubscribes.forEach((unsub) => unsub())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assistant, dispatch, scrollToBottom, topic, isProcessingContext])
+  }, [assistant, dispatch, scrollToBottom, handleNavigateToMessage, topic, isProcessingContext])
+
+  // Check for pending cross-topic navigation on mount (set by locateToMessage).
+  // This runs once when the component mounts with a pending navigation target.
+  // We retry until the target message is actually loaded into the messages array,
+  // since messages may not be available immediately after mount.
+  // IMPORTANT: Do NOT clear pending until the message is confirmed loaded —
+  // otherwise a race between the event listener and mount effect can lose the target.
+  useEffect(() => {
+    const pending = getPendingNavigate()
+    if (!pending) return
+
+    const MAX_NAVIGATE_RETRIES = 50 // 50 * 100ms = 5 seconds
+    let cancelled = false
+    let retryCount = 0
+
+    const tryNavigate = () => {
+      if (cancelled) return
+      if (messagesRef.current.some((m) => m.id === pending.messageId)) {
+        // Message is loaded — consume pending and navigate.
+        clearPendingNavigate()
+        void handleNavigateToMessage(pending.messageId)
+      } else if (retryCount < MAX_NAVIGATE_RETRIES) {
+        retryCount++
+        setTimeout(tryNavigate, 100)
+      } else {
+        logger.warn('Pending navigate timed out after 5s', {
+          messageId: pending.messageId,
+          topicId: pending.topicId
+        })
+        clearPendingNavigate()
+      }
+    }
+
+    requestAnimationFrame(tryNavigate)
+
+    return () => {
+      cancelled = true
+    }
+    // Only run on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     void runAsyncFunction(async () => {

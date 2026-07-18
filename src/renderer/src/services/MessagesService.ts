@@ -33,6 +33,23 @@ import FileManager from './FileManager'
 
 const logger = loggerService.withContext('MessagesService')
 
+/**
+ * Pending cross-topic navigation target.
+ * Set by `locateToMessage` before navigating; consumed by the Messages component on mount
+ * or via the NAVIGATE_TO_MESSAGE event. Includes topicId so stale listeners from the
+ * previous topic cannot accidentally consume a cross-topic pending.
+ */
+type PendingNavigate = { messageId: string; topicId: string }
+let pendingNavigate: PendingNavigate | null = null
+
+export function getPendingNavigate(): PendingNavigate | null {
+  return pendingNavigate
+}
+
+export function clearPendingNavigate(): void {
+  pendingNavigate = null
+}
+
 export {
   filterAfterContextClearMessages,
   filterEmptyMessages,
@@ -101,10 +118,23 @@ export async function locateToMessage(navigate: NavigateFunction, message: Messa
   const assistant = getAssistantById(message.assistantId)
   const topic = await getTopicById(message.topicId)
 
+  // Store the pending navigation target before navigating so the Messages component
+  // can pick it up on mount (cross-topic path: Messages remounts and the mount
+  // effect reads pending). For same-topic navigation the component does NOT
+  // remount, so we also emit the event below.
+  // Pending is only cleared by the consumer (Messages) after successful handling.
+  pendingNavigate = { messageId: message.id, topicId: topic.id }
+
   navigate('/', { state: { assistant, topic } })
 
-  setTimeout(() => EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR), 0)
-  setTimeout(() => EventEmitter.emit(EVENT_NAMES.LOCATE_MESSAGE + ':' + message.id), 300)
+  // Emit NAVIGATE_TO_MESSAGE after a microtask so the route settles first.
+  // If Messages is already mounted (same topic), the event listener handles it.
+  // If Messages is not yet mounted (cross topic), the event is lost but the
+  // mount effect will pick up the pending id instead.
+  setTimeout(() => {
+    void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, message.id)
+    void EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR)
+  }, 0)
 }
 
 /**

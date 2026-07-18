@@ -4,15 +4,11 @@ import { getModelLogoById } from '@renderer/config/models'
 import { useTheme } from '@renderer/context/ThemeProvider'
 import useAvatar from '@renderer/hooks/useAvatar'
 import { useSettings } from '@renderer/hooks/useSettings'
-import { useTimer } from '@renderer/hooks/useTimer'
+import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getMessageModelId } from '@renderer/services/MessagesService'
 import { getModelName } from '@renderer/services/ModelService'
-import { useAppDispatch } from '@renderer/store'
-import { newMessagesActions } from '@renderer/store/newMessage'
-// import { updateMessageThunk } from '@renderer/store/thunk/messageThunk'
 import type { Message } from '@renderer/types/newMessage'
 import { isEmoji, removeLeadingEmoji } from '@renderer/utils'
-import { scrollIntoView } from '@renderer/utils/dom'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { Avatar } from 'antd'
 import { CircleChevronDown } from 'lucide-react'
@@ -33,9 +29,7 @@ const MessageAnchorLine: FC<MessageLineProps> = ({ messages }) => {
   const { t } = useTranslation()
   const avatar = useAvatar()
   const { theme } = useTheme()
-  const dispatch = useAppDispatch()
   const { userName } = useSettings()
-  const { setTimeoutTimer } = useTimer()
 
   const messagesListRef = useRef<HTMLDivElement>(null)
   const messageItemsRef = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -101,51 +95,9 @@ const MessageAnchorLine: FC<MessageLineProps> = ({ messages }) => {
     [userName, t]
   )
 
-  const setSelectedMessage = useCallback(
-    (message: Message) => {
-      const groupMessages = messages.filter((m) => m.askId === message.askId)
-      if (groupMessages.length > 1) {
-        for (const m of groupMessages) {
-          dispatch(
-            newMessagesActions.updateMessage({
-              topicId: m.topicId,
-              messageId: m.id,
-              updates: { foldSelected: m.id === message.id }
-            })
-          )
-        }
-
-        setTimeoutTimer(
-          'setSelectedMessage',
-          () => {
-            const messageElement = document.getElementById(`message-${message.id}`)
-            if (messageElement) {
-              scrollIntoView(messageElement, { behavior: 'auto', block: 'start', container: 'nearest' })
-            }
-          },
-          100
-        )
-      }
-    },
-    [dispatch, messages, setTimeoutTimer]
-  )
-
-  const scrollToMessage = useCallback(
-    (message: Message) => {
-      const messageElement = document.getElementById(`message-${message.id}`)
-
-      if (!messageElement) return
-
-      const display = messageElement ? window.getComputedStyle(messageElement).display : null
-      if (display === 'none') {
-        setSelectedMessage(message)
-        return
-      }
-
-      scrollIntoView(messageElement, { behavior: 'smooth', block: 'start', container: 'nearest' })
-    },
-    [setSelectedMessage]
-  )
+  const scrollToMessage = useCallback((message: Message) => {
+    void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, message.id)
+  }, [])
 
   const scrollToBottom = useCallback(() => {
     const messagesContainer = document.getElementById('messages')

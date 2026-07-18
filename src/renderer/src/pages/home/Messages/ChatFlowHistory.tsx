@@ -7,7 +7,6 @@ import { getModelLogo, getModelLogoById } from '@renderer/config/models'
 import { useTheme } from '@renderer/context/ThemeProvider'
 import useAvatar from '@renderer/hooks/useAvatar'
 import { useSettings } from '@renderer/hooks/useSettings'
-import { useTimer } from '@renderer/hooks/useTimer'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
 import { selectMessagesForTopic } from '@renderer/store/newMessage'
@@ -54,7 +53,6 @@ const TooltipFooter = styled.div`
 // FIXME: no any plz...
 const CustomNode: FC<{ data: any }> = ({ data }) => {
   const { t } = useTranslation()
-  const { setTimeoutTimer } = useTimer()
 
   const nodeType = data.type
   let borderColor = 'var(--color-border)'
@@ -106,27 +104,7 @@ const CustomNode: FC<{ data: any }> = ({ data }) => {
   // 处理节点点击事件，滚动到对应消息
   const handleNodeClick = () => {
     if (data.messageId) {
-      // 创建一个自定义事件来定位消息并切换标签
-      const customEvent = new CustomEvent('flow-navigate-to-message', {
-        detail: {
-          messageId: data.messageId,
-          modelId: data.modelId,
-          modelName: data.model,
-          nodeType: nodeType
-        },
-        bubbles: true
-      })
-
-      // 让监听器处理标签切换
-      document.dispatchEvent(customEvent)
-
-      setTimeoutTimer(
-        'handleNodeClick',
-        () => {
-          void EventEmitter.emit(EVENT_NAMES.LOCATE_MESSAGE + ':' + data.messageId)
-        },
-        250
-      )
+      void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, data.messageId)
     }
   }
 
