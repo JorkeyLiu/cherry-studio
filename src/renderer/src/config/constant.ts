@@ -25,9 +25,7 @@ export const PPIO_APP_SECRET = import.meta.env.RENDERER_VITE_PPIO_APP_SECRET || 
 export const TOKENFLUX_HOST = 'https://tokenflux.ai'
 
 // Messages loading configuration
-export const INITIAL_MESSAGES_COUNT = 20
 export const LOAD_MORE_COUNT = 20
-export const SCROLL_CONTEXT_COUNT = 6
 
 export const DEFAULT_COLOR_PRIMARY = '#00b96b'
 export const THEME_COLOR_PRESETS = [

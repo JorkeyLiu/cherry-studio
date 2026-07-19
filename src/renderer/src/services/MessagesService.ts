@@ -39,15 +39,33 @@ const logger = loggerService.withContext('MessagesService')
  * or via the NAVIGATE_TO_MESSAGE event. Includes topicId so stale listeners from the
  * previous topic cannot accidentally consume a cross-topic pending.
  */
-type PendingNavigate = { messageId: string; topicId: string }
+export type PendingNavigate = { messageId: string; topicId: string }
 let pendingNavigate: PendingNavigate | null = null
 
 export function getPendingNavigate(): PendingNavigate | null {
   return pendingNavigate
 }
 
-export function clearPendingNavigate(): void {
-  pendingNavigate = null
+/**
+ * Compare-and-clear: only clears the pending navigate when the caller's expected
+ * identity matches the current pending exactly (both topicId AND messageId).
+ * Returns true if the pending was cleared, false otherwise (identity mismatch or no pending).
+ */
+export function clearPendingNavigate(expected: PendingNavigate): boolean {
+  if (
+    pendingNavigate &&
+    pendingNavigate.messageId === expected.messageId &&
+    pendingNavigate.topicId === expected.topicId
+  ) {
+    pendingNavigate = null
+    return true
+  }
+  return false
+}
+
+/** @internal Test-only: directly set the pending navigate for unit tests. */
+export function __testSetPendingNavigate(pending: PendingNavigate | null): void {
+  pendingNavigate = pending
 }
 
 export {

@@ -9,7 +9,6 @@ import {
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
 import type { RootState } from '@renderer/store'
-// import { selectCurrentTopicId } from '@renderer/store/newMessage'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { Button, Drawer, Tooltip } from 'antd'
 import type { FC } from 'react'
@@ -34,12 +33,95 @@ const EXCLUDED_SELECTORS = [
 // Gap between the navigation bar and the right element
 const RIGHT_GAP = 16
 
+/**
+ * Resolves the user message ID that serves as the navigation baseline
+ * from visible DOM elements within a scroll container.
+ *
+ * DOM contract (Message.tsx):
+ *   - Every rendered message container carries `data-message-id` (the message's own ID).
+ *   - Assistant message containers additionally carry `data-ask-id` pointing to
+ *     the user message that triggered them.
+ *   - User containers have class `message-user`; assistant containers have `message-assistant`.
+ *
+ * Resolution priority:
+ *   1. Visible user message → its own `data-message-id`
+ *   2. Visible assistant message → its `data-ask-id` (the triggering user message ID)
+ *   3. Nothing visible → null (safe no-op; caller must NOT fall through to top/bottom)
+ *
+ * Multi-model correctness: multiple assistant messages sharing the same askId
+ * all resolve to the same baseline user message, regardless of assistant count.
+ *
+ * @param container - The scroll container element (e.g. #messages)
+ * @param direction - 'up' uses bottommost visible (current position for prev),
+ *                    'down' uses topmost visible (current position for next)
+ * @returns The baseline user message ID, or null
+ */
+export const resolveVisibleBaseline = (container: HTMLElement, direction: 'up' | 'down'): string | null => {
+  const containerRect = container.getBoundingClientRect()
+  const visibleThreshold = containerRect.height * 0.1
+
+  const isVisible = (el: HTMLElement): boolean => {
+    const rect = el.getBoundingClientRect()
+    const visibleHeight = Math.min(rect.bottom, containerRect.bottom) - Math.max(rect.top, containerRect.top)
+    return visibleHeight > 0 && visibleHeight >= Math.min(rect.height, visibleThreshold)
+  }
+
+  // Priority 1: visible user messages → use their own message ID as baseline
+  const userEls = Array.from(container.querySelectorAll<HTMLElement>('.message-user[data-message-id]'))
+  const visibleUserEntries: Array<{ index: number; messageId: string }> = []
+  for (let i = 0; i < userEls.length; i++) {
+    if (isVisible(userEls[i])) {
+      const messageId = userEls[i].dataset.messageId
+      if (messageId) visibleUserEntries.push({ index: i, messageId })
+    }
+  }
+  if (visibleUserEntries.length > 0) {
+    // 'up' → bottommost visible (closest to viewport bottom = current pos for prev)
+    // 'down' → topmost visible (closest to viewport top = current pos for next)
+    const entry =
+      direction === 'up'
+        ? visibleUserEntries.reduce((a, b) => (a.index > b.index ? a : b))
+        : visibleUserEntries.reduce((a, b) => (a.index < b.index ? a : b))
+    return entry.messageId
+  }
+
+  // Priority 2: visible assistant messages → use askId as baseline
+  const assistantEls = Array.from(container.querySelectorAll<HTMLElement>('.message-assistant[data-ask-id]'))
+  const visibleAssistantEntries: Array<{ index: number; askId: string }> = []
+  for (let i = 0; i < assistantEls.length; i++) {
+    if (isVisible(assistantEls[i])) {
+      const askId = assistantEls[i].dataset.askId
+      if (askId) visibleAssistantEntries.push({ index: i, askId })
+    }
+  }
+  if (visibleAssistantEntries.length > 0) {
+    const entry =
+      direction === 'up'
+        ? visibleAssistantEntries.reduce((a, b) => (a.index > b.index ? a : b))
+        : visibleAssistantEntries.reduce((a, b) => (a.index < b.index ? a : b))
+    return entry.askId
+  }
+
+  return null
+}
+
 interface ChatNavigationProps {
   containerId: string
   scrollToMessageById?: (messageId: string) => void
+  scrollToTop?: () => void
+  scrollToBottom?: () => void
+  previousUserMessage?: (currentMessageId: string) => void
+  nextUserMessage?: (currentMessageId: string) => void
 }
 
-const ChatNavigation: FC<ChatNavigationProps> = ({ containerId, scrollToMessageById }) => {
+const ChatNavigation: FC<ChatNavigationProps> = ({
+  containerId,
+  scrollToMessageById,
+  scrollToTop,
+  scrollToBottom,
+  previousUserMessage,
+  nextUserMessage
+}) => {
   const { t } = useTranslation()
   const [isVisible, setIsVisible] = useState(false)
   const timerKey = 'hide'
@@ -119,28 +201,26 @@ const ChatNavigation: FC<ChatNavigationProps> = ({ containerId, scrollToMessageB
     return assistantMessages as HTMLElement[]
   }
 
-  const scrollToMessage = (element: HTMLElement) => {
-    if (!element.isConnected && scrollToMessageById) {
-      // Element not in DOM, try deep navigation by finding the message ID
-      const messageId = element.id?.replace('message-', '')
-      if (messageId) {
-        scrollToMessageById(messageId)
-        return
-      }
-    }
-    // Use container: 'nearest' to keep scroll within the chat pane (Chromium-only, see #11565, #11567)
-    scrollIntoView(element, { behavior: 'smooth', block: 'start', container: 'nearest' })
+  /** Extract the message ID from a rendered message element's DOM id attribute. */
+  const extractMessageId = (element: HTMLElement): string | null => {
+    return element.id?.replace('message-', '') || null
   }
 
-  const scrollToTop = () => {
+  // Fallback direct-scroll helpers for hosts that do not provide the unified
+  // navigation callbacks (e.g. AgentChat). These keep the existing DOM-scroll
+  // behavior until those hosts adopt the transaction system.
+  const fallbackScrollToTop = useCallback(() => {
     const container = document.getElementById(containerId)
-    container && container.scrollTo({ top: -container.scrollHeight, behavior: 'smooth' })
-  }
+    container?.scrollTo({ top: -container.scrollHeight, behavior: 'smooth' })
+  }, [containerId])
 
-  const scrollToBottom = () => {
+  const fallbackScrollToBottom = useCallback(() => {
     const container = document.getElementById(containerId)
-    container && container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
-  }
+    container?.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+  }, [containerId])
+
+  const resolveScrollToTop = scrollToTop ?? fallbackScrollToTop
+  const resolveScrollToBottom = scrollToBottom ?? fallbackScrollToBottom
 
   const getCurrentVisibleIndex = (direction: 'up' | 'down') => {
     const userMessages = findUserMessages()
@@ -197,65 +277,97 @@ const ChatNavigation: FC<ChatNavigationProps> = ({ containerId, scrollToMessageB
 
   const handleScrollToTop = () => {
     showNavigation()
-    scrollToTop()
+    resolveScrollToTop()
   }
 
   const handleScrollToBottom = () => {
     showNavigation()
-    scrollToBottom()
+    resolveScrollToBottom()
   }
 
   const handleNextMessage = () => {
     showNavigation()
     const userMessages = findUserMessages()
+
+    // Main Chat path: resolve baseline from visible DOM, delegate to full-sequence resolver
+    if (nextUserMessage) {
+      const container = document.getElementById(containerId)
+      const baselineId = container ? resolveVisibleBaseline(container, 'down') : null
+      if (baselineId) {
+        nextUserMessage(baselineId)
+        return
+      }
+      // No visible baseline — safe no-op (do not jump to bottom)
+      return
+    }
+
+    // Fallback: DOM-based navigation (AgentChat without full-sequence resolver)
     const assistantMessages = findAssistantMessages()
 
     if (userMessages.length === 0 && assistantMessages.length === 0) {
-      // window.toast.info(t('chat.navigation.last'))
-      return scrollToBottom()
+      return resolveScrollToBottom()
     }
 
     const visibleIndex = getCurrentVisibleIndex('down')
 
     if (visibleIndex === -1) {
-      // window.toast.info(t('chat.navigation.last'))
-      return scrollToBottom()
+      return resolveScrollToBottom()
     }
 
     const targetIndex = visibleIndex - 1
 
     if (targetIndex < 0) {
-      // window.toast.info(t('chat.navigation.last'))
-      return scrollToBottom()
+      return resolveScrollToBottom()
     }
 
-    scrollToMessage(userMessages[targetIndex])
+    const messageId = extractMessageId(userMessages[targetIndex])
+    if (messageId && scrollToMessageById) {
+      scrollToMessageById(messageId)
+    } else if (userMessages[targetIndex]) {
+      scrollIntoView(userMessages[targetIndex], { behavior: 'smooth', block: 'center', container: 'nearest' })
+    }
   }
 
   const handlePrevMessage = () => {
     showNavigation()
     const userMessages = findUserMessages()
+
+    // Main Chat path: resolve baseline from visible DOM, delegate to full-sequence resolver
+    if (previousUserMessage) {
+      const container = document.getElementById(containerId)
+      const baselineId = container ? resolveVisibleBaseline(container, 'up') : null
+      if (baselineId) {
+        previousUserMessage(baselineId)
+        return
+      }
+      // No visible baseline — safe no-op (do not jump to top)
+      return
+    }
+
+    // Fallback: DOM-based navigation (AgentChat without full-sequence resolver)
     const assistantMessages = findAssistantMessages()
     if (userMessages.length === 0 && assistantMessages.length === 0) {
-      // window.toast.info(t('chat.navigation.first'))
-      return scrollToTop()
+      return resolveScrollToTop()
     }
 
     const visibleIndex = getCurrentVisibleIndex('up')
 
     if (visibleIndex === -1) {
-      // window.toast.info(t('chat.navigation.first'))
-      return scrollToTop()
+      return resolveScrollToTop()
     }
 
     const targetIndex = visibleIndex + 1
 
     if (targetIndex >= userMessages.length) {
-      // window.toast.info(t('chat.navigation.first'))
-      return scrollToTop()
+      return resolveScrollToTop()
     }
 
-    scrollToMessage(userMessages[targetIndex])
+    const messageId = extractMessageId(userMessages[targetIndex])
+    if (messageId && scrollToMessageById) {
+      scrollToMessageById(messageId)
+    } else if (userMessages[targetIndex]) {
+      scrollIntoView(userMessages[targetIndex], { behavior: 'smooth', block: 'center', container: 'nearest' })
+    }
   }
 
   // Set up scroll event listener and mouse position tracking
