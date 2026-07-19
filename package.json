@@ -86,6 +86,7 @@
     "@napi-rs/canvas": "0.1.80",
     "@napi-rs/system-ocr": "1.0.2",
     "@paymoapp/electron-shutdown-handler": "1.1.2",
+    "better-sqlite3": "^12.11.1",
     "express": "5.1.0",
     "font-list": "2.0.0",
     "graceful-fs": "4.2.11",
@@ -227,6 +228,7 @@
     "@truto/turndown-plugin-gfm": "^1.0.2",
     "@tryfabric/martian": "^1.2.4",
     "@types/adm-zip": "^0.5.7",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/cli-progress": "^3",
     "@types/content-type": "^1.1.9",
     "@types/cors": "^2.8.19",
@@ -509,6 +511,7 @@
       "registry-js",
       "sharp",
       "tesseract.js",
+      "better-sqlite3",
       "zipfile"
     ]
   },
