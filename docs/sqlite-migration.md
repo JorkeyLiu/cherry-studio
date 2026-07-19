@@ -1,8 +1,8 @@
 # Cherry Studio SQLite 迁移文档
 
-> **文档状态**：In progress（Phase 0 清理完成，Phase 1 骨架完成，Repository 实现待进行）  
-> **分支**：`jorkey/refactor/sqlite-migration`  
-> **最后更新**：2026-07-19  
+> **文档状态**：In progress（Phase 0 完成，Phase 1 完成，Phase 2 Repository 实现待进行）
+> **分支**：`jorkey/refactor/sqlite-migration`
+> **最后更新**：2026-07-20
 > **Owner**：Personal fork（jorkeyliu）
 
 ---
@@ -128,7 +128,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | A-3 | 关系化 schema（非 JSON blob 堆砌） | **Proposed** | topics/messages/blocks 显式关系；JSON 仅用于低查询扩展字段 |
 | A-4 | Command-oriented typed IPC | **Proposed** | Renderer 不暴露 SQL 能力；Main 暴露 typed command handlers |
 | A-5 | 迁移期一次性切换 + Dexie 快照回滚 | **Accepted** | 个人 repo，无 SLA 约束；导出 Dexie→SQLite 后切换路由，旧 Dexie 文件作为回滚快照；切换后观察数天确认稳定；不采用双写。风险：切换后新增数据回滚时丢失，个人使用可接受 |
-| A-6 | 备份策略：checkpoint + online backup | **Proposed** | 当前直接复制 Data 目录无一致性保障；需 WAL checkpoint 或备份锁 |
+| A-6 | 备份策略：online backup adapter + full-operation coordination | **Accepted** | better-sqlite3 `backup()` API 封装为可替换 adapter（抽象层），`BackupManager` 协调全操作（互斥锁、staging、生产路径过滤、恢复后 integrity check）；未来可替换为 PowerSync 方案；不使用 live WAL raw copy |
 | A-7 | 技术栈：better-sqlite3 + Drizzle ORM + drizzle-kit | **Accepted** | better-sqlite3 是 Node.js 生态最成熟 SQLite 驱动，同步 API，Drizzle 官方主推组合；与未来 PowerSync 集成兼容（PowerSync 首选 better-sqlite3）。@libsql/client 保留给 Memory/Knowledge 继续使用，不在本阶段统一 |
 
 > **Phase 1 前置**：A-7（技术栈）和 A-5（authoritative 切换方式）两个 ADR 已关闭（Accepted），Phase 1 可启动。
@@ -221,11 +221,11 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 属性 | 值 |
 |---|---|
-| **状态** | **In progress**（骨架完成：better-sqlite3 + Drizzle ORM 安装；ChatDbService、schema、migration runner、repository 目录已创建；TypeScript 编译通过） |
+| **状态** | **Done** |
 | **前置** | ~~A-7（技术栈）和 A-5（authoritative 切换方式）ADR 必须先关闭~~ **Done**（A-7 Accepted, A-5 Accepted） |
 | **目标** | 建立 SQLite 连接管理、migration 框架、integrity 校验 |
-| **主要任务** | 实现 `ChatDbService`（连接池/will-quit 关闭）；schema + migration 生成；WAL 模式；integrity PRAGMA；backup coordination 接口（含互斥锁、WAL checkpoint、恢复后 integrity check） |
-| **退出条件** | `chat.db` 可创建/打开/关闭；migration 可执行；integrity 校验通过；will-quit 正确关闭；恢复备份后首次打开自动执行 `PRAGMA integrity_check` |
+| **主要任务** | 实现 `ChatDbService`（连接生命周期/will-quit 关闭）；WAL/fk/synchronous/busy_timeout pragmas；inline build-safe initial migration；integrity check；restored-first-open repair gating；startup/will-quit wiring；replaceable online backup adapter（better-sqlite3 `backup()`）；BackupManager full-operation coordination（staging、filtering、production-path tests） |
+| **退出条件** | ✅ `chat.db` 可创建/打开/关闭；migration 可执行；integrity 校验通过；WAL + foreign_keys + synchronous pragmas 正确设置；will-quit 正确关闭；恢复备份后首次打开自动执行 `PRAGMA integrity_check`；repair-required 时 app 继续运行但 chat DB 不可用；BackupManager 协调含互斥锁、staging、生产路径过滤；online backup adapter 可替换 |
 
 ### Phase 2：Schema 与 Repository
 
@@ -310,7 +310,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 风险 | 影响 | 缓解 |
 |---|---|---|
 | 流式 IPC 性能 | 大消息量下 IPC 序列化/反序列化开销 | 批次阈值需基准测试确定；考虑 shared memory 或 streaming |
-| 备份一致性 | 备份期间数据写入导致不一致 | WAL checkpoint + 备份锁；或 online backup API |
+| 备份一致性 | 备份期间数据写入导致不一致 | **Resolved**（A-6 Accepted）：online backup adapter（better-sqlite3 `backup()`）；BackupManager 全操作协调（互斥锁、staging、恢复后 integrity check） |
 | 备份并发 | 多来源同时触发备份导致临时目录冲突或文件撕裂 | 备份操作全局互斥；同一时间只允许一个备份任务执行 |
 | 文件系统非事务 | SQLite 文件操作非原子 | 使用 WAL 模式；备份使用临时文件+rename |
 | 多窗口并发 | 多个 Renderer 窗口同时写入 | Main 单写；Renderer 通过 IPC 串行化 |
@@ -355,7 +355,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | Q-4 | 流式批次阈值：多大消息量触发分批 IPC？ | Phase 3 IPC 设计 | Open |
 | Q-5 | 搜索/FTS 首期是否实现？schema 预留还是 Phase 6 再加？ | Phase 2 schema | Open |
 | Q-6 | 遗留 agents.db 用户文件处理：归档提示还是自动清理？ | Group E 清理 | Open |
-| Q-7 | 备份协调的具体实现：WAL checkpoint 还是 backup API？ | A-6 备份策略 | Open |
+| Q-7 | 备份协调的具体实现：WAL checkpoint 还是 backup API？ | A-6 备份策略 | **Closed/Accepted**：online backup API（better-sqlite3 `backup()`）封装为可替换 adapter，`BackupManager` 全操作协调；不使用 live WAL raw copy（A-6 Accepted） |
 
 ---
 
@@ -369,6 +369,9 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-19 | 创建本迁移文档 | 作为长期决策和阶段状态追踪单一事实源 |
 | 2026-07-19 | A-7 Accepted：better-sqlite3 + Drizzle ORM + drizzle-kit | Node.js 生态最成熟 SQLite 驱动，同步 API，Drizzle 官方主推组合；与未来 PowerSync 集成兼容（PowerSync 首选 better-sqlite3） |
 | 2026-07-19 | A-5 Accepted：一次性切换 + Dexie 快照回滚 | 个人 repo，无 SLA 约束；导出 Dexie→SQLite 后切换路由，旧 Dexie 文件作为回滚快照；切换后观察数天确认稳定；不采用双写 |
+| 2026-07-20 | A-6 Accepted：online backup adapter + full-operation coordination | better-sqlite3 `backup()` API 封装为可替换 adapter；BackupManager 协调互斥锁、staging、生产路径过滤、恢复后 integrity check；未来可替换为 PowerSync；不使用 live WAL raw copy |
+| 2026-07-20 | Q-7 Closed/Accepted | 备份协调采用 online backup API（better-sqlite3 `backup()`）作为 adapter，BackupManager 全操作协调 |
+| 2026-07-20 | Phase 1 完成 | ChatDbService 生命周期硬化；WAL/fk/synchronous/busy_timeout pragmas；inline build-safe initial migration；integrity check；restored-first-open repair gating；startup/will-quit wiring；replaceable online backup adapter；BackupManager full-operation coordination；production-path tests |
 
 ---
 
@@ -380,6 +383,8 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-19 | Phase 0 | Group A 清理完成（Done）：C-1 agents scripts 已删除，C-6 README 标记废弃，C-8 CLAUDE.md 已清理 |
 | 2026-07-19 | Phase 1 | 骨架完成（In progress）：better-sqlite3 + Drizzle ORM 安装；ChatDbService、schema、migration runner、repository 目录已创建；TypeScript 编译通过 |
 | 2026-07-19 | 决策 | A-7 Accepted（better-sqlite3 + Drizzle ORM，PowerSync 兼容）；A-5 Accepted（一次性切换 + Dexie 快照回滚） |
+| 2026-07-20 | Phase 1 | 完成（Done）：ChatDbService 生命周期硬化；WAL/fk/synchronous/busy_timeout pragmas；inline build-safe initial migration；integrity check；restored-first-open repair gating（repair-required 时 app 继续运行，chat DB 不可用）；startup/will-quit wiring；replaceable online backup adapter（better-sqlite3 `backup()`）；BackupManager full-operation coordination（互斥锁、staging、生产路径过滤）；production-path tests |
+| 2026-07-20 | 决策 | A-6 Accepted（online backup adapter + full-operation coordination）；Q-7 Closed/Accepted |
 | 2026-07-19 | Phase 2 | Not started |
 | 2026-07-19 | Phase 3 | Not started |
 | 2026-07-19 | Phase 4 | Not started |

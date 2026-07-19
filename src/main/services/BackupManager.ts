@@ -29,6 +29,7 @@ import type { CreateDirectoryOptions, FileStat } from 'webdav'
 
 import { getDataPath } from '../utils'
 import { isPathInside, resolveAndValidatePath } from '../utils/file'
+import { chatDbService } from './chatDb'
 import S3Storage from './S3Storage'
 import WebDav from './WebDav'
 import { windowService } from './WindowService'
@@ -55,6 +56,11 @@ class BackupManager {
   private tempDir = path.join(app.getPath('temp'), 'cherry-studio', 'backup', 'temp')
   private backupDir = path.join(app.getPath('temp'), 'cherry-studio', 'backup')
 
+  // Process-wide async mutex — serialises full backup operations across
+  // local/WebDAV/S3 entry points. Prevents staging directory collisions,
+  // concurrent snapshot/archive races, and archive file overwrites.
+  private static backupMutex: Promise<unknown> = Promise.resolve()
+
   // Cached instance to avoid recreating
   private s3Storage: S3Storage | null = null
   private webdavInstance: WebDav | null = null
@@ -76,9 +82,37 @@ class BackupManager {
     webdavPath?: string
   } | null = null
 
+  // ---------------------------------------------------------------------------
+  // Finding 1: Restore marker staging
+  //
+  // handleStartupRestore inspects Data.restore/chat.db before replacing live
+  // Data. If chat.db exists, a restore marker is created INSIDE Data.restore
+  // BEFORE any live Data replacement. Marker creation failure aborts before
+  // touching live Data and is NOT swallowed as a successful restore.
+  // ---------------------------------------------------------------------------
+
   /**
-   * Handle backup restoration on app startup
-   * Called after window is created but before renderer is loaded
+   * Handle backup restoration on app startup.
+   *
+   * Called after window is created but before renderer is loaded.
+   *
+   * Finding 1 — marker staging:
+   *   When Data.restore exists and contains chat.db, the restore marker
+   *   (chat.db.restore) is created INSIDE Data.restore BEFORE the
+   *   Data.restore → Data rename. This ensures the marker is atomically
+   *   in place when the live Data directory is replaced.
+   *
+   *   If marker creation fails, the operation aborts BEFORE touching
+   *   live Data. The failure is propagated (not swallowed).
+   *
+   *   If Data.restore has no chat.db, no marker is created — the
+   *   restore only covers non-DB files.
+   *
+   * Finding 2 — no silent usable DB:
+   *   If the rename succeeds but chatDbService.init() later fails
+   *   (e.g., integrity check), ChatDbService persists chat.db.repair
+   *   and refuses all operations. No uninitialized/unchecked DB is
+   *   silently usable.
    */
   static async handleStartupRestore(): Promise<void> {
     const userDataPath = app.getPath('userData')
@@ -92,6 +126,10 @@ class BackupManager {
     const indexedDBDest = path.join(userDataPath, 'IndexedDB')
     const localStorageDest = path.join(userDataPath, 'Local Storage')
     const dataDest = getDataPath()
+
+    // DB filename constant (must match ChatDbService)
+    const DB_FILENAME = 'chat.db'
+    const RESTORE_MARKER_FILENAME = 'chat.db.restore'
 
     try {
       // Check if any restore markers exist
@@ -117,9 +155,36 @@ class BackupManager {
         await fs.rename(localStorageRestore, localStorageDest)
       }
 
-      // Restore Data
+      // Restore Data — Finding 1: staged marker creation
       if (hasDataRestore) {
-        logger.info('[handleStartupRestore] Found Local Data.restore directories, completing restoration...')
+        logger.info('[handleStartupRestore] Found Data.restore directory, completing restoration...')
+
+        // --- Inspect Data.restore/chat.db BEFORE touching live Data ---
+        const restoredChatDbPath = path.join(dataRestore, DB_FILENAME)
+        const hasChatDb = await fs.pathExists(restoredChatDbPath)
+
+        if (hasChatDb) {
+          // Create restore marker INSIDE Data.restore BEFORE replacing live Data.
+          // This ensures the marker is atomically present when the rename completes.
+          logger.info('[handleStartupRestore] Restored chat.db found — creating restore marker inside Data.restore')
+          const markerPath = path.join(dataRestore, RESTORE_MARKER_FILENAME)
+          try {
+            await fs.writeFile(markerPath, new Date().toISOString(), 'utf-8')
+          } catch (error) {
+            // Marker creation failure — abort before touching live Data.
+            // Do NOT swallow as a successful restore.
+            logger.error('[handleStartupRestore] Failed to create restore marker inside Data.restore:', error as Error)
+            throw new Error(
+              `Failed to create restore marker in Data.restore: ${error instanceof Error ? error.message : String(error)}. ` +
+                'Aborting restore — live Data is not modified.'
+            )
+          }
+          logger.info('[handleStartupRestore] Restore marker created inside Data.restore')
+        } else {
+          logger.info('[handleStartupRestore] No chat.db in Data.restore — skipping restore marker')
+        }
+
+        // --- Replace live Data with staged Data (marker already inside if needed) ---
         await fs.remove(dataDest).catch(() => {})
         await fs.rename(dataRestore, dataDest)
       }
@@ -127,10 +192,13 @@ class BackupManager {
       logger.info('[handleStartupRestore] Restoration completed successfully')
     } catch (error) {
       logger.error('[handleStartupRestore] Failed to complete restoration:', error as Error)
-      // Clean up restore markers to avoid endless retry loop
-      await fs.remove(indexedDBRestore).catch(() => {})
-      await fs.remove(localStorageRestore).catch(() => {})
-      await fs.remove(dataRestore).catch(() => {})
+      // Do NOT delete staged restore directories on failure.
+      // dataRestore is retained for retry/diagnosis on next startup.
+      // indexedDBRestore/localStorageRestore may hold the only remaining
+      // copy of the user's data if their rename did not complete.
+      // Only narrow transient artifacts (none exist in this flow) would
+      // be safe to remove.
+      throw error
     }
   }
 
@@ -155,9 +223,31 @@ class BackupManager {
     }
   }
 
+  // Transient files that must NEVER appear in backup archives.
+  // chat.db is replaced by a validated snapshot; WAL/SHM are live-replication
+  // artifacts that are meaningless outside a running DB; .backup is a
+  // transient snapshot staging file.
+  private static readonly EXCLUDED_DATA_ENTRIES = new Set(['chat.db', 'chat.db-wal', 'chat.db-shm', 'chat.db.backup'])
+
   /**
-   * Direct backup method - copies IndexedDB and Local Storage directories directly.
-   * No JSON serialization, better performance for large databases.
+   * Direct backup method — copies IndexedDB, Local Storage, and Data
+   * directories into a ZIP archive with a consistent chat.db snapshot.
+   *
+   * Staging design (Finding 2):
+   * - Each backup operation gets its own unique staging directory (no shared tempDir).
+   * - Data/ is copied EXCLUDING chat.db, chat.db-wal, chat.db-shm, and
+   *   transient backup artifacts (.backup files).
+   * - If a live chat.db exists, a validated online-backup snapshot is created
+   *   and staged as Data/chat.db in the staging directory.
+   * - If the snapshot fails, the entire backup FAILS (no raw-copy fallback).
+   * - The archive contains exactly one Data/chat.db (the snapshot) and no
+   *   WAL/SHM/transient artifacts.
+   *
+   * Mutex design (Finding 4):
+   * - The entire backup operation is serialised across local/WebDAV/S3
+   *   entry points via a process-wide async mutex.
+   * - Staging directory is cleaned up in `finally` to guarantee cleanup.
+   *
    * @param _ - Electron IPC event
    * @param fileName - Name of the backup file
    * @param destinationPath - Path to save the backup (defaults to this.backupDir)
@@ -170,102 +260,193 @@ class BackupManager {
     destinationPath: string = this.backupDir,
     skipBackupFile: boolean = false
   ): Promise<string> {
-    const onProgress = this.onProgress(IpcChannel.BackupProgress, true)
+    // Serialise the entire backup operation across all entry points
+    return BackupManager.withBackupMutex(async () => {
+      // Unique staging directory per backup operation — eliminates races
+      const stagingDir = path.join(
+        app.getPath('temp'),
+        'cherry-studio',
+        'backup',
+        `staging-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      )
 
-    try {
-      await fs.ensureDir(this.tempDir)
-      onProgress({ stage: 'preparing', progress: 0, total: 100 })
+      const onProgress = this.onProgress(IpcChannel.BackupProgress, true)
 
-      const userDataPath = app.getPath('userData')
-      let currentProgress = 10
+      try {
+        await fs.ensureDir(stagingDir)
+        onProgress({ stage: 'preparing', progress: 0, total: 100 })
 
-      // Step 2: Copy IndexedDB and Local Storage directories
-      onProgress({ stage: 'copying_database', progress: 15, total: 100 })
-      logger.debug('[backupDirect] Copying database directories...')
+        const userDataPath = app.getPath('userData')
 
-      const indexedDBSource = path.join(userDataPath, 'IndexedDB')
-      const indexedDBDest = path.join(this.tempDir, 'IndexedDB')
-      if (await fs.pathExists(indexedDBSource)) {
-        await fs.copy(indexedDBSource, indexedDBDest)
-      } else {
-        logger.debug('[backupDirect] IndexedDB directory not found, skipping')
-      }
+        // Step 1: Copy IndexedDB and Local Storage directories
+        onProgress({ stage: 'copying_database', progress: 15, total: 100 })
+        logger.debug('[backupDirect] Copying database directories...')
 
-      const localStorageSource = path.join(userDataPath, 'Local Storage')
-      const localStorageDest = path.join(this.tempDir, 'Local Storage')
-      if (await fs.pathExists(localStorageSource)) {
-        await fs.copy(localStorageSource, localStorageDest)
-      } else {
-        logger.debug('[backupDirect] Local Storage directory not found, skipping')
-      }
-
-      currentProgress = 50
-      onProgress({ stage: 'copying_database', progress: currentProgress, total: 100 })
-
-      // Step 3: Write metadata.json
-      const metadata = this.createDirectBackupMetadata()
-      await fs.writeJson(path.join(this.tempDir, 'metadata.json'), metadata, { spaces: 2 })
-      onProgress({ stage: 'copying_database', progress: 52, total: 100 })
-
-      // Step 4: Copy Data directory (if not skipped)
-      if (!skipBackupFile) {
-        const sourcePath = path.join(userDataPath, 'Data')
-        const tempDataDir = path.join(this.tempDir, 'Data')
-
-        if (await fs.pathExists(sourcePath)) {
-          const totalSize = await this.getDirSize(sourcePath, { dereferenceSymlinks: true })
-
-          await this.copyDirWithProgress(
-            sourcePath,
-            tempDataDir,
-            this.createCopyProgressHandler(totalSize, 52, 80, 'copying_files', onProgress),
-            { dereferenceSymlinks: true }
-          )
+        const indexedDBSource = path.join(userDataPath, 'IndexedDB')
+        const indexedDBDest = path.join(stagingDir, 'IndexedDB')
+        if (await fs.pathExists(indexedDBSource)) {
+          await fs.copy(indexedDBSource, indexedDBDest)
+        } else {
+          logger.debug('[backupDirect] IndexedDB directory not found, skipping')
         }
-      } else {
-        logger.debug('[backupDirect] Skip the backup of the file')
-        await fs.promises.mkdir(path.join(this.tempDir, 'Data'))
-      }
-      onProgress({ stage: 'compressing', progress: 80, total: 100 })
 
-      // Step 5: Create ZIP archive
-      const backupedFilePath = path.join(destinationPath, fileName)
-      const output = fs.createWriteStream(backupedFilePath)
-      const archive = archiver('zip', {
-        zlib: { level: 1 }, // Use lowest compression level for speed (same as legacy backup)
-        zip64: true
-      })
+        const localStorageSource = path.join(userDataPath, 'Local Storage')
+        const localStorageDest = path.join(stagingDir, 'Local Storage')
+        if (await fs.pathExists(localStorageSource)) {
+          await fs.copy(localStorageSource, localStorageDest)
+        } else {
+          logger.debug('[backupDirect] Local Storage directory not found, skipping')
+        }
 
-      await new Promise<void>((resolve, reject) => {
-        output.on('close', () => resolve())
-        archive.on('error', reject)
-        archive.on('warning', (err: any) => {
-          if (err.code !== 'ENOENT') {
-            logger.warn('[backupDirect] Archive warning:', err)
+        onProgress({ stage: 'copying_database', progress: 50, total: 100 })
+
+        // Step 2: Write metadata.json
+        const metadata = this.createDirectBackupMetadata()
+        await fs.writeJson(path.join(stagingDir, 'metadata.json'), metadata, { spaces: 2 })
+        onProgress({ stage: 'copying_database', progress: 52, total: 100 })
+
+        // Step 3: Create consistent chat.db snapshot and copy Data directory
+        if (!skipBackupFile) {
+          const sourcePath = path.join(userDataPath, 'Data')
+          const stagedDataDir = path.join(stagingDir, 'Data')
+
+          if (await fs.pathExists(sourcePath)) {
+            const liveDbPath = path.join(sourcePath, 'chat.db')
+            const liveDbExists = await fs.pathExists(liveDbPath)
+
+            // 3a: If live chat.db exists, create a validated snapshot and stage it
+            if (liveDbExists) {
+              if (!chatDbService.isInitialised()) {
+                throw new Error(
+                  '[backupDirect] Live chat.db exists but ChatDbService is not initialised. ' +
+                    'Cannot create consistent snapshot — backup aborted.'
+                )
+              }
+
+              logger.debug('[backupDirect] Creating validated chat.db snapshot...')
+              const chatDbBackup = chatDbService.getBackup()
+              const stagedDbPath = path.join(stagedDataDir, 'chat.db')
+
+              // Ensure staged Data/ exists before snapshot creation
+              await fs.ensureDir(stagedDataDir)
+
+              try {
+                await chatDbBackup.createSnapshot(stagedDbPath)
+                logger.debug('[backupDirect] Validated chat.db snapshot staged')
+              } catch (snapshotError) {
+                // Snapshot failure is FATAL — no raw-copy fallback
+                logger.error('[backupDirect] Chat DB snapshot creation FAILED', snapshotError as Error)
+                throw new Error(
+                  `[backupDirect] chat.db snapshot failed: ${snapshotError instanceof Error ? snapshotError.message : String(snapshotError)}. ` +
+                    'Backup aborted — raw copy of a live WAL database is not safe.'
+                )
+              }
+            }
+
+            // 3b: Copy Data directory, EXCLUDING chat.db/WAL/SHM/transient artifacts
+            logger.debug('[backupDirect] Copying Data directory (excluding live DB files)...')
+            const totalSize = await this.getDirSize(sourcePath, { dereferenceSymlinks: true })
+
+            await this.copyDirWithProgressFiltered(
+              sourcePath,
+              stagedDataDir,
+              BackupManager.EXCLUDED_DATA_ENTRIES,
+              this.createCopyProgressHandler(totalSize, 52, 80, 'copying_files', onProgress),
+              { dereferenceSymlinks: true }
+            )
           }
+        } else {
+          logger.debug('[backupDirect] Skip the backup of the file')
+          await fs.promises.mkdir(path.join(stagingDir, 'Data'))
+        }
+
+        onProgress({ stage: 'compressing', progress: 80, total: 100 })
+
+        // Step 4: Create ZIP archive from staging directory
+        const backupedFilePath = path.join(destinationPath, fileName)
+        const output = fs.createWriteStream(backupedFilePath)
+        const archive = archiver('zip', {
+          zlib: { level: 1 },
+          zip64: true
         })
-        archive.pipe(output)
-        archive.directory(this.tempDir, false)
-        archive.finalize()
-      })
 
-      // Clean up temp directory
-      await fs.remove(this.tempDir)
-      onProgress({ stage: 'completed', progress: 100, total: 100 })
+        await new Promise<void>((resolve, reject) => {
+          // Settled flag prevents double resolve/reject when both
+          // output error and archive error fire.
+          let settled = false
+          const settle = (fn: () => void) => {
+            if (!settled) {
+              settled = true
+              fn()
+            }
+          }
 
-      logger.info('[backupDirect] Backup completed successfully')
-      return backupedFilePath
-    } catch (error) {
-      logger.error('[backupDirect] Backup failed:', error as Error)
-      await fs.remove(this.tempDir).catch(() => {})
+          output.on('close', () => settle(resolve))
+          output.on('error', (err) => settle(() => reject(err)))
+          archive.on('error', (err) => settle(() => reject(err)))
+          archive.on('warning', (err: NodeJS.ErrnoException) => {
+            if (err.code !== 'ENOENT') {
+              logger.warn('[backupDirect] Archive warning:', err)
+            }
+          })
+          archive.pipe(output)
+          archive.directory(stagingDir, false)
+          archive.finalize()
+        })
 
-      throw error
-    }
+        onProgress({ stage: 'completed', progress: 100, total: 100 })
+
+        logger.info('[backupDirect] Backup completed successfully')
+        return backupedFilePath
+      } catch (error) {
+        logger.error('[backupDirect] Backup failed:', error as Error)
+        // Clean up partial archive on failure
+        const archivePath = path.join(destinationPath, fileName)
+        await fs.remove(archivePath).catch(() => {})
+        throw error
+      } finally {
+        // Guarantee cleanup of the unique staging directory
+        await fs.remove(stagingDir).catch(() => {})
+      }
+    })
   }
 
   /**
-   * Direct backup to local directory
+   * Process-wide async mutex for backup operations.
+   * Ensures only one backup runs at a time across all entry points.
+   */
+  private static async withBackupMutex<T>(fn: () => Promise<T>): Promise<T> {
+    const result = BackupManager.backupMutex.then(
+      () => fn(),
+      () => fn()
+    )
+    BackupManager.backupMutex = result.then(
+      () => {},
+      () => {}
+    )
+    return result
+  }
+
+  // ---------------------------------------------------------------------------
+  // Finding 5: Full backup operation semantics
+  //
+  // Local/WebDAV/S3 operations serialise the ENTIRE create+upload+delete
+  // cycle through withBackupMutex. This prevents:
+  // - Two remote backups reading/writing the same archive file
+  // - Staging directory collisions
+  // - Partial archive leftovers on failure
+  //
+  // Each operation generates a unique archive file name to avoid
+  // collisions even if the mutex were somehow bypassed.
+  //
+  // All failure paths clean up staged directories AND partial archives.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Direct backup to local directory.
    * Creates a backup and saves it to a local directory.
+   * Finding 5: Full operation serialised via backup() which holds the mutex.
+   *
    * @param _ - Electron IPC event
    * @param fileName - Name of the backup file
    * @param localConfig - Local backup configuration (directory path and options)
@@ -287,66 +468,264 @@ class BackupManager {
   }
 
   /**
-   * Direct backup to WebDAV
+   * Direct backup to WebDAV.
    * Creates a backup and uploads it to a WebDAV server.
+   *
+   * Finding 5: The ENTIRE create+upload+delete cycle is serialised
+   * through the backup mutex to prevent archive file races.
+   *
+   * Finding 5: Uses a unique archive file name per operation to avoid
+   * overwriting an active archive from a concurrent operation.
+   *
    * @param _ - Electron IPC event
    * @param webdavConfig - WebDAV configuration including server URL, credentials, and options
    * @returns Result from WebDAV upload operation
    */
   async backupToWebdav(_: Electron.IpcMainInvokeEvent, webdavConfig: WebDavConfig) {
-    const filename = webdavConfig.fileName || 'cherry-studio.backup.zip'
-    const backupedFilePath = await this.backup(_, filename, undefined, webdavConfig.skipBackupFile)
-    const webdavClient = this.getWebDavInstance(webdavConfig)
-    try {
-      let result
-      if (webdavConfig.disableStream) {
-        const fileContent = await fs.readFile(backupedFilePath)
-        result = await webdavClient.putFileContents(filename, fileContent, { overwrite: true })
-      } else {
-        const contentLength = (await fs.stat(backupedFilePath)).size
-        result = await webdavClient.putFileContents(filename, fs.createReadStream(backupedFilePath), {
-          overwrite: true,
-          contentLength
-        })
+    // Finding 5: Serialize entire create+upload+delete through the mutex
+    return BackupManager.withBackupMutex(async () => {
+      // Finding 5: Unique archive file name per operation
+      const uniqueFilename = this.uniqueArchiveName(webdavConfig.fileName || 'cherry-studio.backup.zip')
+      const backupedFilePath = path.join(this.backupDir, uniqueFilename)
+
+      try {
+        // Create the archive (inside staging dir, using our own staging logic)
+        await this.backupInternal(_, uniqueFilename, this.backupDir, webdavConfig.skipBackupFile)
+
+        const webdavClient = this.getWebDavInstance(webdavConfig)
+        let result
+        if (webdavConfig.disableStream) {
+          const fileContent = await fs.readFile(backupedFilePath)
+          result = await webdavClient.putFileContents(uniqueFilename, fileContent, { overwrite: true })
+        } else {
+          const contentLength = (await fs.stat(backupedFilePath)).size
+          result = await webdavClient.putFileContents(uniqueFilename, fs.createReadStream(backupedFilePath), {
+            overwrite: true,
+            contentLength
+          })
+        }
+        return result
+      } catch (error) {
+        logger.error('[backupToWebdav] WebDAV backup failed:', error as Error)
+        throw error
+      } finally {
+        // Finding 5: Always clean up the local archive file
+        await fs.remove(backupedFilePath).catch(() => {})
       }
-      await fs.remove(backupedFilePath)
-      return result
-    } catch (error) {
-      await fs.remove(backupedFilePath).catch(() => {})
-      throw error
-    }
+    })
   }
 
   /**
-   * Direct backup to S3
+   * Direct backup to S3.
    * Creates a backup and uploads it to an S3-compatible storage.
+   *
+   * Finding 5: The ENTIRE create+upload+delete cycle is serialised
+   * through the backup mutex to prevent archive file races.
+   *
+   * Finding 5: Uses a unique archive file name per operation to avoid
+   * overwriting an active archive from a concurrent operation.
+   *
    * @param _ - Electron IPC event
    * @param s3Config - S3 configuration including endpoint, bucket, credentials, and options
    * @returns Result from S3 upload operation
    */
   async backupToS3(_: Electron.IpcMainInvokeEvent, s3Config: S3Config) {
-    const os = require('os')
-    const deviceName = os.hostname ? os.hostname() : 'device'
-    const timestamp = new Date()
-      .toISOString()
-      .replace(/[-:T.Z]/g, '')
-      .slice(0, 14)
-    const filename = s3Config.fileName || `cherry-studio.backup.${deviceName}.${timestamp}.zip`
+    // Finding 5: Serialize entire create+upload+delete through the mutex
+    return BackupManager.withBackupMutex(async () => {
+      const os = require('os')
+      const deviceName = os.hostname ? os.hostname() : 'device'
+      const timestamp = new Date()
+        .toISOString()
+        .replace(/[-:T.Z]/g, '')
+        .slice(0, 14)
+      // Finding 5: Unique archive file name per operation
+      const baseFilename = s3Config.fileName || `cherry-studio.backup.${deviceName}.${timestamp}.zip`
+      const uniqueFilename = this.uniqueArchiveName(baseFilename)
+      const backupedFilePath = path.join(this.backupDir, uniqueFilename)
 
-    logger.debug(`[backupToS3] Starting S3 backup to ${filename}`)
+      logger.debug(`[backupToS3] Starting S3 backup to ${uniqueFilename}`)
 
-    const backupedFilePath = await this.backup(_, filename, undefined, s3Config.skipBackupFile)
-    const s3Client = this.getS3Storage(s3Config)
+      try {
+        // Create the archive (inside staging dir, using our own staging logic)
+        await this.backupInternal(_, uniqueFilename, this.backupDir, s3Config.skipBackupFile)
+
+        const s3Client = this.getS3Storage(s3Config)
+        const fileBuffer = await fs.promises.readFile(backupedFilePath)
+        const result = await s3Client.putFileContents(uniqueFilename, fileBuffer)
+        logger.info(`S3 backup completed: ${uniqueFilename}`)
+        return result
+      } catch (error) {
+        logger.error('[backupToS3] S3 backup failed:', error as Error)
+        throw error
+      } finally {
+        // Finding 5: Always clean up the local archive file
+        await fs.remove(backupedFilePath).catch(() => {})
+      }
+    })
+  }
+
+  /**
+   * Generate a unique archive file name by appending a timestamp+random
+   * suffix before the extension. Prevents collisions between concurrent
+   * operations even if the mutex were somehow bypassed.
+   */
+  private uniqueArchiveName(baseName: string): string {
+    const ext = path.extname(baseName)
+    const base = path.basename(baseName, ext)
+    const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    return `${base}.${suffix}${ext}`
+  }
+
+  /**
+   * Internal backup implementation — creates the archive file at the
+   * specified path. Used by backupToWebdav/backupToS3 which manage
+   * their own mutex and cleanup.
+   *
+   * This is the same logic as backup() but writes to an explicit path
+   * rather than constructing the path from fileName + destinationPath.
+   */
+  private async backupInternal(
+    _: Electron.IpcMainInvokeEvent,
+    fileName: string,
+    destinationPath: string,
+    skipBackupFile: boolean = false
+  ): Promise<string> {
+    // Unique staging directory per backup operation
+    const stagingDir = path.join(
+      app.getPath('temp'),
+      'cherry-studio',
+      'backup',
+      `staging-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    )
+
+    const onProgress = this.onProgress(IpcChannel.BackupProgress, true)
+
     try {
-      const fileBuffer = await fs.promises.readFile(backupedFilePath)
-      const result = await s3Client.putFileContents(filename, fileBuffer)
-      await fs.remove(backupedFilePath)
-      logger.info(`S3 backup completed: ${filename}`)
-      return result
+      await fs.ensureDir(stagingDir)
+      onProgress({ stage: 'preparing', progress: 0, total: 100 })
+
+      const userDataPath = app.getPath('userData')
+
+      // Step 1: Copy IndexedDB and Local Storage directories
+      onProgress({ stage: 'copying_database', progress: 15, total: 100 })
+      logger.debug('[backupInternal] Copying database directories...')
+
+      const indexedDBSource = path.join(userDataPath, 'IndexedDB')
+      const indexedDBDest = path.join(stagingDir, 'IndexedDB')
+      if (await fs.pathExists(indexedDBSource)) {
+        await fs.copy(indexedDBSource, indexedDBDest)
+      }
+
+      const localStorageSource = path.join(userDataPath, 'Local Storage')
+      const localStorageDest = path.join(stagingDir, 'Local Storage')
+      if (await fs.pathExists(localStorageSource)) {
+        await fs.copy(localStorageSource, localStorageDest)
+      }
+
+      onProgress({ stage: 'copying_database', progress: 50, total: 100 })
+
+      // Step 2: Write metadata.json
+      const metadata = this.createDirectBackupMetadata()
+      await fs.writeJson(path.join(stagingDir, 'metadata.json'), metadata, { spaces: 2 })
+      onProgress({ stage: 'copying_database', progress: 52, total: 100 })
+
+      // Step 3: Create consistent chat.db snapshot and copy Data directory
+      if (!skipBackupFile) {
+        const sourcePath = path.join(userDataPath, 'Data')
+        const stagedDataDir = path.join(stagingDir, 'Data')
+
+        if (await fs.pathExists(sourcePath)) {
+          const liveDbPath = path.join(sourcePath, 'chat.db')
+          const liveDbExists = await fs.pathExists(liveDbPath)
+
+          if (liveDbExists) {
+            if (!chatDbService.isInitialised()) {
+              throw new Error(
+                '[backupInternal] Live chat.db exists but ChatDbService is not initialised. ' +
+                  'Cannot create consistent snapshot — backup aborted.'
+              )
+            }
+
+            logger.debug('[backupInternal] Creating validated chat.db snapshot...')
+            const chatDbBackup = chatDbService.getBackup()
+            const stagedDbPath = path.join(stagedDataDir, 'chat.db')
+
+            await fs.ensureDir(stagedDataDir)
+
+            try {
+              await chatDbBackup.createSnapshot(stagedDbPath)
+              logger.debug('[backupInternal] Validated chat.db snapshot staged')
+            } catch (snapshotError) {
+              logger.error('[backupInternal] Chat DB snapshot creation FAILED', snapshotError as Error)
+              throw new Error(
+                `[backupInternal] chat.db snapshot failed: ${snapshotError instanceof Error ? snapshotError.message : String(snapshotError)}. ` +
+                  'Backup aborted — raw copy of a live WAL database is not safe.'
+              )
+            }
+          }
+
+          logger.debug('[backupInternal] Copying Data directory (excluding live DB files)...')
+          const totalSize = await this.getDirSize(sourcePath, { dereferenceSymlinks: true })
+
+          await this.copyDirWithProgressFiltered(
+            sourcePath,
+            stagedDataDir,
+            BackupManager.EXCLUDED_DATA_ENTRIES,
+            this.createCopyProgressHandler(totalSize, 52, 80, 'copying_files', onProgress),
+            { dereferenceSymlinks: true }
+          )
+        }
+      } else {
+        await fs.promises.mkdir(path.join(stagingDir, 'Data'))
+      }
+
+      onProgress({ stage: 'compressing', progress: 80, total: 100 })
+
+      // Step 4: Create ZIP archive from staging directory
+      const archivePath = path.join(destinationPath, fileName)
+      const output = fs.createWriteStream(archivePath)
+      const archive = archiver('zip', {
+        zlib: { level: 1 },
+        zip64: true
+      })
+
+      await new Promise<void>((resolve, reject) => {
+        // Settled flag prevents double resolve/reject when both
+        // output error and archive error fire.
+        let settled = false
+        const settle = (fn: () => void) => {
+          if (!settled) {
+            settled = true
+            fn()
+          }
+        }
+
+        output.on('close', () => settle(resolve))
+        output.on('error', (err) => settle(() => reject(err)))
+        archive.on('error', (err) => settle(() => reject(err)))
+        archive.on('warning', (err: NodeJS.ErrnoException) => {
+          if (err.code !== 'ENOENT') {
+            logger.warn('[backupInternal] Archive warning:', err)
+          }
+        })
+        archive.pipe(output)
+        archive.directory(stagingDir, false)
+        archive.finalize()
+      })
+
+      onProgress({ stage: 'completed', progress: 100, total: 100 })
+
+      logger.info('[backupInternal] Backup completed successfully')
+      return archivePath
     } catch (error) {
-      logger.error('[backupToS3] S3 backup failed:', error as Error)
-      await fs.remove(backupedFilePath)
+      logger.error('[backupInternal] Backup failed:', error as Error)
+      // Clean up partial archive on failure
+      const archivePath = path.join(destinationPath, fileName)
+      await fs.remove(archivePath).catch(() => {})
       throw error
+    } finally {
+      // Guarantee cleanup of the unique staging directory
+      await fs.remove(stagingDir).catch(() => {})
     }
   }
 
@@ -459,6 +838,18 @@ class BackupManager {
       const dataFiles = dataExists ? await fs.readdir(dataSource) : []
 
       if (dataExists && dataFiles.length > 0) {
+        // Validate that the backup contains a chat.db (Finding 5).
+        // If the backup archive has Data/ but no chat.db, the restore marker
+        // will fail on next launch. Warn early so the user knows.
+        const backupChatDbPath = path.join(dataSource, 'chat.db')
+        const hasChatDb = await fs.pathExists(backupChatDbPath)
+        if (!hasChatDb) {
+          logger.warn(
+            '[restoreDirect] Backup Data directory does not contain chat.db. ' +
+              'Restore marker will not be set on next launch — chat DB will not be available.'
+          )
+        }
+
         logger.debug('[restoreDirect] Staging Data directory...')
 
         const totalSize = await this.getDirSize(dataSource, { dereferenceSymlinks: false })
@@ -860,6 +1251,84 @@ class BackupManager {
         const items = await fs.readdir(src, { withFileTypes: true })
 
         for (const item of items) {
+          const sourcePath = path.join(src, item.name)
+          const destPath = path.join(dest, item.name)
+          const entry = await this.getEffectiveEntryStats(sourcePath, copyOptions)
+
+          if (!entry) {
+            continue
+          }
+
+          if (entry.stats.isDirectory()) {
+            try {
+              await copyDir(sourcePath, destPath)
+            } catch (error) {
+              if (!entry.isSymlink) {
+                throw error
+              }
+              await fs.remove(destPath).catch(() => {})
+              this.logSkippedSymlink(sourcePath, error)
+            }
+          } else if (entry.stats.isFile()) {
+            if (entry.isSymlink) {
+              await fs.copy(sourcePath, destPath, { dereference: true })
+            } else {
+              await fs.copy(sourcePath, destPath)
+            }
+            onProgress(entry.stats.size)
+          } else if (entry.isSymlink) {
+            logger.warn('[BackupManager] Skipping symlink to unsupported target', { path: sourcePath })
+          }
+        }
+      } finally {
+        activeDirectoryRealPaths.delete(directoryRealPath)
+      }
+    }
+
+    await copyDir(source, destination)
+  }
+
+  /**
+   * Copy directory with progress reporting, EXCLUDING specific filenames.
+   * Used to copy Data/ while omitting live chat.db, WAL, SHM, and transient
+   * backup artifacts — the snapshot is staged separately.
+   *
+   * @param source - Source directory path
+   * @param destination - Destination directory path
+   * @param excludedNames - Set of filenames to skip (e.g., chat.db, chat.db-wal)
+   * @param onProgress - Callback function called with size of each copied file
+   */
+  private async copyDirWithProgressFiltered(
+    source: string,
+    destination: string,
+    excludedNames: Set<string>,
+    onProgress: (size: number) => void,
+    options: CopyDirOptions
+  ): Promise<void> {
+    const copyOptions = {
+      ...options,
+      sourceRootRealPath: options.sourceRootRealPath ?? (await fs.realpath(source))
+    }
+    const activeDirectoryRealPaths = new Set<string>()
+
+    const copyDir = async (src: string, dest: string): Promise<void> => {
+      const directoryRealPath = await this.enterDirectory(src, activeDirectoryRealPaths)
+
+      if (!directoryRealPath) {
+        return
+      }
+
+      try {
+        await fs.ensureDir(dest)
+
+        const items = await fs.readdir(src, { withFileTypes: true })
+
+        for (const item of items) {
+          // Skip excluded entries (chat.db, WAL, SHM, transients)
+          if (excludedNames.has(item.name)) {
+            continue
+          }
+
           const sourcePath = path.join(src, item.name)
           const destPath = path.join(dest, item.name)
           const entry = await this.getEffectiveEntryStats(sourcePath, copyOptions)

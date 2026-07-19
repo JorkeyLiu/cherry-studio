@@ -33,6 +33,7 @@ import { TrayService } from './services/TrayService'
 import { versionService } from './services/VersionService'
 import { windowService } from './services/WindowService'
 import { initWebviewHotkeys } from './services/WebviewService'
+import { chatDbService } from './services/chatDb'
 import { runAsyncFunction } from './utils'
 import { extractRtkBinaries } from './utils/rtk'
 
@@ -144,7 +145,33 @@ if (!app.requestSingleInstanceLock()) {
 
     // Check for backup restore marker and complete restoration (highest priority, before window creation)
     const { BackupManager } = await import('./services/BackupManager')
-    await BackupManager.handleStartupRestore()
+
+    let restoreSucceeded = true
+    try {
+      await BackupManager.handleStartupRestore()
+    } catch (error) {
+      restoreSucceeded = false
+      logger.error(
+        'Startup restore failed — staged restore directories retained for retry on next startup. ' +
+          'Chat DB will not be initialised this session to prevent unchecked use.',
+        error as Error
+      )
+    }
+
+    // Initialise chat database after restore, before normal app availability.
+    // If init fails (e.g., integrity check after restore), the app continues
+    // but chat DB is marked unavailable for normal operations.
+    // If restore failed, skip init entirely to prevent opening an unchecked
+    // database (Data replacement state may be uncertain).
+    if (restoreSucceeded) {
+      try {
+        await chatDbService.init()
+      } catch (error) {
+        logger.error('ChatDbService initialisation failed (app continues, chat DB unavailable):', error as Error)
+      }
+    } else {
+      logger.warn('ChatDbService init skipped due to restore failure — chat DB unavailable this session')
+    }
 
     const mainWindow = windowService.createMainWindow()
 
@@ -238,14 +265,37 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.on('will-quit', async () => {
-    // 简单的资源清理，不阻塞退出流程
+    // Clean up resources — each service in its own try/catch so one failure
+    // cannot prevent cleanup of subsequent services.
+
+    // CRITICAL (Finding 6): close() MUST execute synchronously and BEFORE
+    // any await. Electron does not guarantee it will await async will-quit
+    // listeners. If the process exits during an await above this call,
+    // chatDbService.close() would never run, leaking a WAL DB handle.
+    // close() is synchronous and safe to call even if init failed or already
+    // closed.
+    try {
+      chatDbService.close()
+    } catch (error) {
+      logger.warn('Error closing chatDbService:', error as Error)
+    }
 
     try {
       await analyticsService.destroy()
+    } catch (error) {
+      logger.warn('Error cleaning up analyticsService:', error as Error)
+    }
+
+    try {
       await mcpService.cleanup()
+    } catch (error) {
+      logger.warn('Error cleaning up mcpService:', error as Error)
+    }
+
+    try {
       await apiServerService.stop()
     } catch (error) {
-      logger.warn('Error cleaning up services:', error as Error)
+      logger.warn('Error cleaning up apiServerService:', error as Error)
     }
 
     // finish the logger
