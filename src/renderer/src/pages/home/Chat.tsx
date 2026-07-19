@@ -198,7 +198,12 @@ const Chat: FC<Props> = (props) => {
                 {messageNavigation === 'buttons' && (
                   <ChatNavigation
                     containerId="messages"
-                    scrollToMessageById={messagesRef.current?.scrollToMessageById}
+                    scrollToMessageById={(id) => messagesRef.current?.scrollToMessageById(id)}
+                    scrollToTop={() => messagesRef.current?.scrollToTop()}
+                    scrollToContextBoundary={() => messagesRef.current?.scrollToContextBoundary()}
+                    scrollToBottom={() => messagesRef.current?.scrollToBottom()}
+                    previousUserMessage={(id) => messagesRef.current?.previousUserMessage(id)}
+                    nextUserMessage={(id) => messagesRef.current?.nextUserMessage(id)}
                   />
                 )}
                 <Inputbar assistant={assistant} setActiveTopic={props.setActiveTopic} topic={props.activeTopic} />

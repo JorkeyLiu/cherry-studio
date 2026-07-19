@@ -3,25 +3,59 @@ import ContextMenu from '@renderer/components/ContextMenu'
 import EditModeActionBar from '@renderer/components/EditModeActionBar'
 import EditModeContextMenu from '@renderer/components/EditModeContextMenu'
 import { LoadingIcon } from '@renderer/components/Icons'
-import {
-  INITIAL_MESSAGES_COUNT,
-  LOAD_MORE_COUNT,
-  SCROLL_CONTEXT_COUNT,
-  UNLIMITED_CONTEXT_COUNT
-} from '@renderer/config/constant'
+import { LOAD_MORE_COUNT } from '@renderer/config/constant'
 import { EditModeProvider, useEditMode } from '@renderer/context/EditModeContext'
 import { useAssistant } from '@renderer/hooks/useAssistant'
+import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
-import { useMessageOperations, useTopicMessages } from '@renderer/hooks/useMessageOperations'
+import { useMessageOperations, useTopicLoading, useTopicMessages } from '@renderer/hooks/useMessageOperations'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
+import { computeContextBoundaryMessageId } from '@renderer/pages/home/Messages/contextBoundary'
+import { findFirstVisibleMessage } from '@renderer/pages/home/Messages/domVisibility'
+import { getBranchEndpoint } from '@renderer/pages/home/Messages/messageBranch'
+import { createMessageViewportGroupModel } from '@renderer/pages/home/Messages/messageGroups'
+import {
+  applyColumnReverseScroll,
+  type BootstrapPhase,
+  canHandleUserViewportScroll,
+  chooseNavigationWindow,
+  handlePendingNavigateEvent,
+  type MessageNavigationIntent,
+  resolveAdjacentUserMessage,
+  resolveBootstrapDecision,
+  resolveMessageNavigation,
+  runMessageNavigationTransaction
+} from '@renderer/pages/home/Messages/messageNavigation'
+import {
+  createMessageViewportState,
+  type MessageViewportLoadDirection,
+  type MessageViewportLoadToken,
+  type MessageViewportNavigationToken,
+  messageViewportReducer,
+  type MessageViewportScrollMode,
+  type MessageViewportScrollToken
+} from '@renderer/pages/home/Messages/messageViewportReducer'
+import {
+  createLatestMessageWindow,
+  expandMessageWindowNewer,
+  expandMessageWindowOlder,
+  type MessageWindow,
+  reconcileMessageWindow
+} from '@renderer/pages/home/Messages/messageWindow'
+import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import { getContextCount, getGroupedMessages, getUserMessage } from '@renderer/services/MessagesService'
+import {
+  clearPendingNavigate,
+  getContextCount,
+  getPendingNavigate,
+  getUserMessage
+} from '@renderer/services/MessagesService'
 import { estimateHistoryTokens } from '@renderer/services/TokenService'
 import store, { useAppDispatch } from '@renderer/store'
 import { messageBlocksSelectors, updateOneBlock } from '@renderer/store/messageBlock'
@@ -38,17 +72,20 @@ import {
 } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
-import {
-  filterAdjacentUserMessaegs,
-  filterAfterContextClearMessages,
-  filterErrorOnlyMessagesWithRelated,
-  filterLastAssistantMessage,
-  filterUsefulMessages
-} from '@renderer/utils/messageUtils/filters'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import { last } from 'lodash'
-import { Fragment, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState
+} from 'react'
 import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
@@ -59,6 +96,7 @@ import NarrowLayout from './NarrowLayout'
 import Prompt from './Prompt'
 import { MessagesContainer, ScrollContainer } from './shared'
 import TopicSegmentLine from './TopicSegmentLine'
+import { createViewportCommitWaiter } from './viewportCommitWaiter'
 
 interface MessagesProps {
   assistant: Assistant
@@ -70,30 +108,11 @@ interface MessagesProps {
 
 export interface MessagesHandle {
   scrollToMessageById: (messageId: string) => void
-}
-
-/**
- * Find the first visible message element in the scroll container.
- * Returns the element and its bounding rect, or null if not found.
- */
-const findFirstVisibleMessage = (
-  container: HTMLElement | null,
-  elements: Map<string, HTMLElement>
-): { element: HTMLElement; rect: DOMRect } | null => {
-  if (!container) return null
-  const containerRect = container.getBoundingClientRect()
-
-  let closest: { element: HTMLElement; rect: DOMRect } | null = null
-  let minDistance = Infinity
-  for (const el of elements.values()) {
-    const rect = el.getBoundingClientRect()
-    const distance = Math.abs(rect.top - containerRect.top)
-    if (distance < minDistance) {
-      minDistance = distance
-      closest = { element: el, rect }
-    }
-  }
-  return closest
+  scrollToBottom: () => void
+  scrollToTop: () => void
+  scrollToContextBoundary: () => void
+  previousUserMessage: (currentMessageId: string) => void
+  nextUserMessage: (currentMessageId: string) => void
 }
 
 const logger = loggerService.withContext('Messages')
@@ -104,12 +123,12 @@ interface MessagesContentProps {
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
   handleScrollPosition: () => void
   displayMessages: Message[]
-  messages: Message[]
+  contextBoundaryMessageId: string | null
   hasMore: boolean
   isLoadingMore: boolean
+  isLoadingNewer: boolean
   loadMoreMessages: () => void
   registerMessageElement: (id: string, element: HTMLElement | null) => void
-  scrollToMessageById: (messageId: string) => void
 }
 
 const MessagesContent: React.FC<MessagesContentProps> = ({
@@ -118,12 +137,12 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   scrollContainerRef,
   handleScrollPosition,
   displayMessages,
-  messages,
+  contextBoundaryMessageId,
   hasMore,
   isLoadingMore,
+  isLoadingNewer,
   loadMoreMessages,
-  registerMessageElement,
-  scrollToMessageById
+  registerMessageElement
 }) => {
   const { showPrompt, messageNavigation } = useSettings()
   const { t } = useTranslation()
@@ -132,18 +151,15 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
   useClipboardKeyboard()
 
-  // NOTE: 因为displayMessages是倒序的，所以得到的groupedMessages每个group内部也是倒序的，需要再倒一遍
+  // NOTE: displayMessages is reversed, so each group's messages must be restored to chronological order for rendering.
   const groupedMessages = useMemo(() => {
-    const grouped = Object.entries(getGroupedMessages(displayMessages))
-    const newGrouped: {
-      [key: string]: (Message & {
-        index: number
-      })[]
-    } = {}
-    grouped.forEach(([key, group]) => {
-      newGrouped[key] = group.toReversed()
-    })
-    return Object.entries(newGrouped)
+    return createMessageViewportGroupModel(displayMessages).groups.map(
+      (group) =>
+        [
+          group.key,
+          group.messages.map((message, offset) => ({ ...message, index: group.range.start + offset })).toReversed()
+        ] as const
+    )
   }, [displayMessages])
 
   // 将消息按是否选中分段，用于连续选中消息的包裹
@@ -165,77 +181,25 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     return segments
   }, [groupedMessages, isEditMode, selectedGroupIds])
 
-  // Context window boundary: compute where the context window starts
-  const contextWindowBoundaryIndex = useMemo(() => {
-    if (!assistant) return -1
-    const settings = getAssistantSettings(assistant)
-
-    // Unlimited context: hide the divider since there's no boundary
-    if (settings.contextCount >= UNLIMITED_CONTEXT_COUNT) return -1
-
-    // Apply the first 5 filter steps (mirrors ConversationService.filterMessagesPipeline)
-    // to derive the pre-filtered message array used for boundary computation.
-    const preFiltered = filterAdjacentUserMessaegs(
-      filterLastAssistantMessage(
-        filterErrorOnlyMessagesWithRelated(filterUsefulMessages(filterAfterContextClearMessages(messages)))
-      )
-    )
-
-    let anchorOriginalIndex = -1
-
-    if (settings.contextWindowMode === 'fixed') {
-      // Fixed mode: locate the anchor message in the pre-filtered stream
-      const anchorMessageId = settings.fixedWindowAnchor?.[topic.id]
-      if (anchorMessageId) {
-        const filteredIndex = preFiltered.findIndex((m) => m.id === anchorMessageId)
-        if (filteredIndex >= 0) {
-          // Map back to the anchor's original index in the full messages array
-          anchorOriginalIndex = messages.findIndex((m) => m.id === anchorMessageId)
-        }
-      }
-
-      // Anchor not found or not set — fall through to sliding logic
-      if (anchorOriginalIndex < 0) {
-        const windowStartIndex = Math.max(0, messages.length - settings.contextCount)
-        if (windowStartIndex === 0) return -1
-        anchorOriginalIndex = windowStartIndex
-      }
-    } else {
-      // Sliding mode: compute where the window starts
-      const windowStartIndex = Math.max(0, messages.length - settings.contextCount)
-      // All messages fit inside the context window → hide the divider
-      if (windowStartIndex === 0) return -1
-      anchorOriginalIndex = windowStartIndex
-    }
-
-    if (anchorOriginalIndex < 0) return -1
-
-    // Convert to reversed index (displayMessages is newest-first for column-reverse)
-    const anchorInReversed = messages.length - 1 - anchorOriginalIndex
-    if (anchorInReversed >= 0 && anchorInReversed < displayMessages.length) {
-      // +1: the divider renders before the group (visually ABOVE the anchor,
-      // separating in-context messages from out-of-context older messages)
-      return anchorInReversed + 1
-    }
-    return -1
-  }, [assistant, messages, displayMessages.length, topic.id])
-
-  // Find the group key where the context window divider should be rendered
+  // Context window boundary: find the group key where the boundary message renders.
+  // The boundary message ID is computed from the full topic messages (not the display
+  // window) by the parent Messages component, using the same filter pipeline as
+  // ConversationService.filterMessagesPipeline.
   const contextDividerGroupKey = useMemo(() => {
-    if (contextWindowBoundaryIndex < 0) return null
+    if (!contextBoundaryMessageId) return null
     for (const [key, groupMessages] of groupedMessages) {
-      // groupMessages is in chronological order (oldest first = highest displayMessages index first)
-      // Check if the oldest message in this group is at or past the boundary
-      const oldestMsgIndex = groupMessages[0]?.index ?? -1
-      if (oldestMsgIndex >= contextWindowBoundaryIndex) {
+      if (groupMessages.some((m) => m.id === contextBoundaryMessageId)) {
         return key
       }
     }
+    // Boundary message not in the current display window — don't show a divider
     return null
-  }, [groupedMessages, contextWindowBoundaryIndex])
+  }, [groupedMessages, contextBoundaryMessageId])
 
   const renderMessageSegments = () => {
-    return messageSegments.map((seg, i) => {
+    const result: React.ReactNode[] = []
+
+    for (const seg of messageSegments) {
       const content = seg.items.map(([key, groupMessages]) => {
         const firstMsg = groupMessages[0]
         const segment = firstMsg ? isMessageInSegment(firstMsg.id) : undefined
@@ -274,10 +238,13 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
       })
 
       if (seg.selected) {
-        return <SelectionBlock key={`sel-${i}`}>{content}</SelectionBlock>
+        result.push(<SelectionBlock key={`sel-${result.length}`}>{content}</SelectionBlock>)
+      } else {
+        result.push(content)
       }
-      return content
-    })
+    }
+
+    return result
   }
 
   return (
@@ -299,6 +266,11 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           {isEditMode ? (
             <EditModeContextMenu topicId={topic.id}>
               <ScrollContainer>
+                {isLoadingNewer && (
+                  <LoaderContainer>
+                    <LoadingIcon color="var(--color-text-2)" />
+                  </LoaderContainer>
+                )}
                 {renderMessageSegments()}
                 {isLoadingMore && (
                   <LoaderContainer>
@@ -310,6 +282,11 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           ) : (
             <ContextMenu>
               <ScrollContainer>
+                {isLoadingNewer && (
+                  <LoaderContainer>
+                    <LoadingIcon color="var(--color-text-2)" />
+                  </LoaderContainer>
+                )}
                 {renderMessageSegments()}
                 {isLoadingMore && (
                   <LoaderContainer>
@@ -323,9 +300,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
 
         {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
       </NarrowLayout>
-      {messageNavigation === 'anchor' && (
-        <MessageAnchorLine messages={displayMessages} scrollToMessageById={scrollToMessageById} />
-      )}
+      {messageNavigation === 'anchor' && <MessageAnchorLine messages={displayMessages} />}
       {isEditMode && <EditModeActionBar />}
     </MessagesContainer>
   )
@@ -345,25 +320,267 @@ const Messages = ({
     getSavedPosition,
     clearSavedPosition
   } = useScrollPosition(`topic-${topic.id}`)
-  const [displayMessages, setDisplayMessages] = useState<Message[]>([])
-  const [hasMore, setHasMore] = useState(false)
-  const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const [viewportState, reduceViewport] = useReducer(messageViewportReducer, null, createMessageViewportState)
+  const displayMessages = useMemo(() => viewportState.window?.displayMessages ?? [], [viewportState.window])
+  const hasMore = viewportState.window?.hasMoreOlder ?? false
+  const hasMoreNewer = viewportState.window?.hasMoreNewer ?? false
+  const isLoadingMore = viewportState.loading.older
+  const isLoadingNewer = viewportState.loading.newer
   const [isProcessingContext, setIsProcessingContext] = useState(false)
 
   const { addTopic, updateAssistantSettings } = useAssistant(assistant.id)
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const messages = useTopicMessages(topic.id)
-  const { displayCount, clearTopicMessages, deleteMessage, createTopicBranch } = useMessageOperations(topic)
-  const { setTimeoutTimer } = useTimer()
+  const isTopicLoading = useTopicLoading(topic)
+  const { displayCount, clearTopicMessages, deleteMessage, createTopicBranch, editMessage } =
+    useMessageOperations(topic)
+  const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
 
-  // 滚动到指定消息组
-  const scrollToGroup = useCallback((askId: string) => {
-    const element = document.getElementById(`message-group-${askId}`)
+  const { isMultiSelectMode, handleSelectMessage } = useChatContext(topic)
+
+  const messageElements = useRef<Map<string, HTMLElement>>(new Map())
+  const messagesRef = useRef<Message[]>(messages)
+  const previousMessagesRef = useRef<Message[]>(messages)
+  const viewportStateRef = useRef(viewportState)
+  const viewportCommitWaiterRef = useRef(createViewportCommitWaiter<typeof viewportState>())
+  useLayoutEffect(() => {
+    viewportStateRef.current = viewportState
+    viewportCommitWaiterRef.current.notify(viewportState)
+  }, [viewportState])
+  const prevTopicIdRef = useRef(topic.id)
+  const savedRestoreHandledRef = useRef(false)
+  const bootstrapPhaseRef = useRef<BootstrapPhase>('idle')
+
+  // Compute the context boundary message ID from the full topic messages.
+  // This uses the same filter pipeline as ConversationService.filterMessagesPipeline.
+  const contextBoundaryMessageId = useMemo(
+    () => computeContextBoundaryMessageId(messages, assistant, topic.id),
+    [messages, assistant, topic.id]
+  )
+
+  const viewportDispatch = reduceViewport
+
+  const waitForNavigationCommit = useCallback((token: MessageViewportNavigationToken, generation: number) => {
+    return viewportCommitWaiterRef.current.wait(viewportStateRef.current, (committedState) => {
+      if (committedState.navigation.token === token) return true
+      if (committedState.navigation.generation > generation) return false
+      return null
+    })
+  }, [])
+
+  const beginScroll = useCallback(
+    (mode: Exclude<MessageViewportScrollMode, 'user'>, token: MessageViewportScrollToken) => {
+      const initialState = viewportStateRef.current
+      const committed = viewportCommitWaiterRef.current.wait(initialState, (committedState) => {
+        if (committedState.scrollToken === token && committedState.scrollMode === mode) return true
+        if (committedState.topicGeneration !== initialState.topicGeneration) return false
+        if (committedState.scrollGeneration > initialState.scrollGeneration + 1) return false
+        return null
+      })
+      viewportDispatch({ type: 'scroll/begin', mode, token })
+      return committed
+    },
+    [viewportDispatch]
+  )
+
+  const applyMessageWindow = useCallback(
+    (window: MessageWindow) => {
+      viewportDispatch({ type: 'window/apply', window })
+    },
+    [viewportDispatch]
+  )
+
+  const isCurrentNavigation = useCallback(
+    (token: MessageViewportNavigationToken) => viewportStateRef.current.navigation.token === token,
+    []
+  )
+
+  const isCurrentLoad = useCallback(
+    (direction: MessageViewportLoadDirection, token: MessageViewportLoadToken, topicGeneration: number) => {
+      const load = viewportStateRef.current.loads[direction]
+      return load.token === token && load.topicGeneration === topicGeneration
+    },
+    []
+  )
+
+  const cancelActiveLoads = useCallback(() => {
+    const state = viewportStateRef.current
+    for (const direction of ['older', 'newer'] as const) {
+      const load = state.loads[direction]
+      if (load.active && load.token) {
+        viewportDispatch({ type: 'load/cancel', direction, token: load.token, topicGeneration: load.topicGeneration })
+      }
+    }
+  }, [viewportDispatch])
+
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
+
+  useEffect(() => {
+    const viewportCommitWaiter = viewportCommitWaiterRef.current
+
+    return () => {
+      viewportCommitWaiter.cancelAll()
+      viewportDispatch({ type: 'navigation/cancel' })
+      cancelActiveLoads()
+    }
+  }, [cancelActiveLoads, viewportDispatch])
+
+  const registerMessageElement = useCallback((id: string, element: HTMLElement | null) => {
     if (element) {
-      element.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      messageElements.current.set(id, element)
+    } else {
+      messageElements.current.delete(id)
     }
   }, [])
+
+  /**
+   * Switch foldSelected for the message group containing the target message.
+   * Used by the centralized NAVIGATE_TO_MESSAGE handler to unfold hidden messages.
+   * Awaits all editMessage calls so the caller can wait for the UI to update.
+   */
+  const selectMessageForFold = useCallback(
+    async (messageId: string) => {
+      const allMessages = messagesRef.current
+      const targetMessage = allMessages.find((m) => m.id === messageId)
+      if (!targetMessage || !targetMessage.askId || targetMessage.role !== 'assistant') return
+
+      const groupMessages = allMessages.filter((m) => m.role === 'assistant' && m.askId === targetMessage.askId)
+      if (groupMessages.length <= 1) return
+
+      await Promise.all(groupMessages.map((m) => editMessage(m.id, { foldSelected: m.id === messageId })))
+    },
+    [editMessage]
+  )
+
+  useEffect(() => {
+    // Only bump generation on topic switch, not on every messages change.
+    // This prevents selectMessageForFold (which calls editMessage → messages update)
+    // from cancelling an in-flight navigation.
+    if (prevTopicIdRef.current !== topic.id) {
+      prevTopicIdRef.current = topic.id
+      savedRestoreHandledRef.current = false
+      bootstrapPhaseRef.current = 'idle'
+      clearTimeoutTimer('loadMoreMessages')
+      clearTimeoutTimer('loadNewerMessages')
+      viewportDispatch({ type: 'topic/reset', window: createLatestMessageWindow([], displayCount) })
+      return
+    }
+
+    // Scenario 1: First load
+    if (!viewportStateRef.current.window?.displayMessages.length) {
+      applyMessageWindow(createLatestMessageWindow(messages, displayCount))
+      return
+    }
+
+    // Scenario 2: Reconcile the existing fixed window against the latest
+    // message objects. Only a window that previously touched the latest edge
+    // follows newly appended messages, retaining its prior group capacity.
+    const currentWindow = viewportStateRef.current.window
+    if (!currentWindow) return
+    const currentDisplayMessages = currentWindow.displayMessages
+    const reconciledWindow = reconcileMessageWindow(messages, previousMessagesRef.current, currentWindow)
+    const newDisplayMessages = reconciledWindow.displayMessages
+
+    if (!areMessageArraysIdentical(currentDisplayMessages, newDisplayMessages) || currentWindow !== reconciledWindow) {
+      applyMessageWindow(reconciledWindow)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, displayCount])
+
+  useEffect(() => {
+    previousMessagesRef.current = messages
+  }, [messages])
+
+  /**
+   * Check the DOM status of a message element.
+   * - 'visible': element exists and is displayed
+   * - 'hidden': element exists but is hidden (e.g. by fold)
+   * - 'missing': element not in DOM (needs loading)
+   */
+  const checkElement = useCallback((messageId: string): 'visible' | 'hidden' | 'missing' => {
+    const el = document.getElementById(`message-${messageId}`)
+    if (!el) return 'missing'
+    if (window.getComputedStyle(el).display === 'none') return 'hidden'
+    return 'visible'
+  }, [])
+
+  const settleNavigationDom = useCallback(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      }),
+    []
+  )
+
+  const cancelNavigationLoadsAndTimers = useCallback(() => {
+    clearTimeoutTimer('loadMoreMessages')
+    clearTimeoutTimer('loadNewerMessages')
+    cancelActiveLoads()
+  }, [cancelActiveLoads, clearTimeoutTimer])
+
+  const navigate = useCallback(
+    (intent: MessageNavigationIntent) =>
+      runMessageNavigationTransaction(intent, {
+        begin: (token, targetId, source, alignment) => {
+          const generation = viewportStateRef.current.navigation.generation
+          const committed = waitForNavigationCommit(token, generation)
+          viewportDispatch({ type: 'navigation/begin', token, targetId, source, alignment })
+          return committed
+        },
+        isCurrent: isCurrentNavigation,
+        cancelLoadsAndTimers: cancelNavigationLoadsAndTimers,
+        resolve: (requestedIntent) => resolveMessageNavigation(messagesRef.current, requestedIntent),
+        prepareWindow: (resolved) =>
+          chooseNavigationWindow(messagesRef.current, viewportStateRef.current.window, resolved, displayCount),
+        applyWindow: (token, window) => {
+          const initialState = viewportStateRef.current
+          const committed = viewportCommitWaiterRef.current.wait(initialState, (committedState) => {
+            if (committedState.navigation.token !== token) return false
+            return committedState.window === window ? true : null
+          })
+          viewportDispatch({ type: 'navigation/apply-window', token, window })
+          return committed
+        },
+        getTargetStatus: checkElement,
+        revealTarget: selectMessageForFold,
+        settleDom: settleNavigationDom,
+        beginProgrammaticScroll: async (token) => {
+          viewportDispatch({ type: 'navigation/phase', token, phase: 'scrolling' })
+          return beginScroll('programmatic', {})
+        },
+        scroll: (resolved) => {
+          applyColumnReverseScroll(resolved, scrollContainerRef.current, (targetId, alignment) => {
+            const target = document.getElementById(`message-${targetId}`)
+            if (target) scrollIntoView(target, { behavior: 'auto', block: alignment, container: 'nearest' })
+          })
+        },
+        finish: (token) => viewportDispatch({ type: 'navigation/finish', token }),
+        cancel: (token) => viewportDispatch({ type: 'navigation/cancel', token })
+      }),
+    [
+      beginScroll,
+      cancelNavigationLoadsAndTimers,
+      checkElement,
+      displayCount,
+      isCurrentNavigation,
+      scrollContainerRef,
+      selectMessageForFold,
+      settleNavigationDom,
+      viewportDispatch,
+      waitForNavigationCommit
+    ]
+  )
+
+  // 滚动到指定消息组
+  const scrollToGroup = useCallback(
+    (askId: string) => {
+      void navigate({ kind: 'group', groupId: askId, source: 'group' })
+    },
+    [navigate]
+  )
 
   // 已渲染的消息组 id 集合，用于限制键盘选择范围
   const visibleGroupIds = useMemo(() => {
@@ -379,146 +596,63 @@ const Messages = ({
     )
   }, [displayMessages])
 
-  const messageElements = useRef<Map<string, HTMLElement>>(new Map())
-  const messagesRef = useRef<Message[]>(messages)
-  const jumpTargetRef = useRef<string | null>(null)
-  const lastDisplayMessagesRef = useRef<Message[]>([])
-
-  const scrollToMessageById = useCallback((messageId: string) => {
-    jumpTargetRef.current = messageId
-    // Force re-render to trigger the jump effect
-    setDisplayMessages((prev) => [...prev])
-  }, [])
-
-  useImperativeHandle(ref, () => ({ scrollToMessageById }), [scrollToMessageById])
-
-  // On mount (topic switch), check if we need to restore to a specific message
-  useEffect(() => {
-    const saved = getSavedPosition()
-    if (saved?.anchorId) {
-      // Message-based restoration: set jumpTargetRef for Scenario 1
-      jumpTargetRef.current = saved.anchorId
-    } else if (saved?.scrollTop) {
-      // Pixel-based fallback (old format data or no anchor available)
-      // Schedule after initial message load so container has content
-      requestAnimationFrame(() => {
-        setTimeout(() => {
-          scrollContainerRef.current?.scrollTo({ top: saved.scrollTop })
-        }, 100)
-      })
-    }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    messagesRef.current = messages
-  }, [messages])
-
-  const registerMessageElement = useCallback((id: string, element: HTMLElement | null) => {
-    if (element) {
-      messageElements.current.set(id, element)
-    } else {
-      messageElements.current.delete(id)
-    }
-  }, [])
-
-  const checkBoundaries = useCallback(() => {
-    const current = lastDisplayMessagesRef.current
-    if (current.length === 0 || messages.length === 0) return { hasOlder: false, hasNewer: false }
-
-    const newestInWindow = current[0] // newest in window (first in reverse-ordered array)
-    const oldestInWindow = current[current.length - 1] // oldest in window
-    const newestInArray = messages[messages.length - 1]
-    const oldestInArray = messages[0]
-
-    return {
-      hasOlder: oldestInWindow?.id !== oldestInArray?.id,
-      hasNewer: newestInWindow?.id !== newestInArray?.id
-    }
-  }, [messages])
-
-  useEffect(() => {
-    // Scenario 1: Jump target (deep navigation / topic switch restore)
-    if (jumpTargetRef.current) {
-      const targetId = jumpTargetRef.current
-      jumpTargetRef.current = null
-      const startIndex = computeStartIndex(messages, targetId, SCROLL_CONTEXT_COUNT)
-      const newDisplayMessages = computeDisplayMessages(messages, startIndex, startIndex + INITIAL_MESSAGES_COUNT)
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder } = checkBoundaries()
-      setHasMore(hasOlder)
-
-      // Scroll to target message after render
-      requestAnimationFrame(() => {
-        setTimeout(() => {
-          const el = document.getElementById(`message-${targetId}`)
-          if (el) {
-            scrollIntoView(el, { behavior: 'auto', block: 'start', container: 'nearest' })
-          }
-        }, 50)
-      })
-      return
-    }
-
-    // Scenario 2: First load
-    if (lastDisplayMessagesRef.current.length === 0) {
-      const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder } = checkBoundaries()
-      setHasMore(hasOlder)
-
-      return
-    }
-
-    // Scenario 3: Messages content changed (edit/delete/etc) - incremental update
-    const earliestLoadedId = lastDisplayMessagesRef.current[lastDisplayMessagesRef.current.length - 1]?.id
-    const earliestIndex = messages.findIndex((m) => m.id === earliestLoadedId)
-
-    if (earliestIndex === -1) {
-      // Earliest loaded message was deleted, need full recalc
-      const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder } = checkBoundaries()
-      setHasMore(hasOlder)
-    } else {
-      // Keep window position, rebuild from earliest to end
-      const newDisplayMessages: Message[] = []
-      for (let i = messages.length - 1; i >= earliestIndex; i--) {
-        newDisplayMessages.push(messages[i])
-      }
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder } = checkBoundaries()
-      setHasMore(hasOlder)
-    }
-  }, [messages, displayCount, checkBoundaries])
-
   // NOTE: 如果设置为平滑滚动会导致滚动条无法跟随生成的新消息保持在底部位置
   const scrollToBottom = useCallback(() => {
-    // Check if newest message is in the window
-    const current = lastDisplayMessagesRef.current
-    const newestInWindow = current[0]
-    const newestInArray = messages[messages.length - 1]
+    void navigate({ kind: 'bottom', source: 'imperative' })
+  }, [navigate])
 
-    if (newestInWindow?.id !== newestInArray?.id) {
-      // Reset window to include newest messages
-      const newDisplayMessages = computeDisplayMessages(messages, 0, INITIAL_MESSAGES_COUNT)
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder } = checkBoundaries()
-      setHasMore(hasOlder)
-    }
+  const scrollToTop = useCallback(() => {
+    void navigate({ kind: 'top', source: 'imperative' })
+  }, [navigate])
 
-    if (scrollContainerRef.current) {
-      requestAnimationFrame(() => {
-        if (scrollContainerRef.current) {
-          scrollContainerRef.current.scrollTo({ top: 0 })
-        }
-      })
+  const scrollToContextBoundary = useCallback(() => {
+    if (contextBoundaryMessageId) {
+      void navigate({ kind: 'message', targetId: contextBoundaryMessageId, source: 'imperative', alignment: 'start' })
+    } else {
+      // No boundary exists — fall through to topic oldest
+      void navigate({ kind: 'top', source: 'imperative' })
     }
-  }, [scrollContainerRef, messages, checkBoundaries])
+  }, [navigate, contextBoundaryMessageId])
+
+  const scrollToMessageById = useCallback(
+    (messageId: string) => {
+      void navigate({ kind: 'message', targetId: messageId, source: 'imperative' })
+    },
+    [navigate]
+  )
+
+  const previousUserMessage = useCallback(
+    (currentMessageId: string) => {
+      const targetId = resolveAdjacentUserMessage(messagesRef.current, currentMessageId, 'older')
+      if (targetId) {
+        void navigate({ kind: 'message', targetId, source: 'imperative' })
+      } else {
+        void navigate({ kind: 'top', source: 'imperative' })
+      }
+    },
+    [navigate]
+  )
+
+  const nextUserMessage = useCallback(
+    (currentMessageId: string) => {
+      const targetId = resolveAdjacentUserMessage(messagesRef.current, currentMessageId, 'newer')
+      if (targetId) {
+        void navigate({ kind: 'message', targetId, source: 'imperative' })
+      } else {
+        void navigate({ kind: 'bottom', source: 'imperative' })
+      }
+    },
+    [navigate]
+  )
+
+  useImperativeHandle(ref, () => ({
+    scrollToMessageById,
+    scrollToBottom,
+    scrollToTop,
+    scrollToContextBoundary,
+    previousUserMessage,
+    nextUserMessage
+  }))
 
   const clearTopic = useCallback(
     async (data: Topic) => {
@@ -528,16 +662,18 @@ const Messages = ({
       }
 
       await clearTopicMessages()
-      setDisplayMessages([])
-      lastDisplayMessagesRef.current = []
+      clearTimeoutTimer('loadMoreMessages')
+      clearTimeoutTimer('loadNewerMessages')
+      viewportDispatch({ type: 'topic/reset', window: createLatestMessageWindow([], displayCount) })
       clearSavedPosition()
     },
-    [clearTopicMessages, topic.id, clearSavedPosition]
+    [clearTimeoutTimer, clearTopicMessages, topic.id, clearSavedPosition, displayCount, viewportDispatch]
   )
 
   useEffect(() => {
     const unsubscribes = [
       EventEmitter.on(EVENT_NAMES.SEND_MESSAGE, scrollToBottom),
+      EventEmitter.on(EVENT_NAMES.SCROLL_TO_BOTTOM, scrollToBottom),
       EventEmitter.on(EVENT_NAMES.CLEAR_MESSAGES, async (data: Topic) => {
         window.modal.confirm({
           title: t('chat.input.clear.title'),
@@ -587,38 +723,32 @@ const Messages = ({
           setIsProcessingContext(false)
         }
       }),
-      EventEmitter.on(EVENT_NAMES.NEW_BRANCH, async (index: number) => {
+      EventEmitter.on(EVENT_NAMES.NEW_BRANCH, async (messageId: string) => {
         const newTopic = getDefaultTopic(assistant.id)
         newTopic.name = topic.name
         const currentMessages = messagesRef.current
 
-        if (index < 0 || index > currentMessages.length) {
-          logger.error(`[NEW_BRANCH] Invalid branch index: ${index}`)
+        const branchEndpoint = getBranchEndpoint(currentMessages, messageId)
+        if (branchEndpoint === null) {
+          logger.error(`[NEW_BRANCH] Message not found: ${messageId}`)
           return
         }
 
-        // 1. Add the new topic to Redux store FIRST
         addTopic(newTopic)
 
-        // 2. Call the thunk to clone messages and update DB
-        const success = await createTopicBranch(topic.id, currentMessages.length - index, newTopic)
+        const success = await createTopicBranch(topic.id, branchEndpoint, newTopic)
 
         if (success) {
-          // 3. Set the new topic as active
           setActiveTopic(newTopic)
-          // 4. Trigger auto-rename for the new topic
           void autoRenameTopic(assistant, newTopic.id)
-          // 5. Inherit fixed context window anchor
+          // Inherit fixed context window anchor
           const assistantSettings = getAssistantSettings(assistant)
           if (assistantSettings.contextWindowMode === 'fixed') {
             const sourceAnchorId = assistantSettings.fixedWindowAnchor?.[topic.id]
             if (sourceAnchorId) {
-              // Find the anchor's index in the original messages
               const anchorIndex = currentMessages.findIndex((m) => m.id === sourceAnchorId)
-              // Anchor must be within the cloned range (before the branch point)
-              const clonedCount = currentMessages.length - index
+              const clonedCount = branchEndpoint
               if (anchorIndex >= 0 && anchorIndex < clonedCount) {
-                // Get the new topic's message IDs from the store
                 const newTopicMessageIds = store.getState().messages.messageIdsByTopic[newTopic.id]
                 if (newTopicMessageIds && newTopicMessageIds.length > anchorIndex) {
                   const newAnchorId = newTopicMessageIds[anchorIndex]
@@ -644,7 +774,6 @@ const Messages = ({
 
           const msgBlock = messageBlocksSelectors.selectById(store.getState(), msgBlockId)
 
-          // FIXME: 目前 error block 没有 content
           if (msgBlock && isTextLikeBlock(msgBlock) && msgBlock.type !== MessageBlockType.ERROR) {
             try {
               const updatedRaw = updateCodeBlock(msgBlock.content, codeBlockId, newContent)
@@ -672,12 +801,63 @@ const Messages = ({
             window.toast.error(t('code_block.edit.save.failed.label'))
           }
         }
-      )
+      ),
+      EventEmitter.on(EVENT_NAMES.NAVIGATE_TO_MESSAGE, async (messageId: string) => {
+        const { source } = await handlePendingNavigateEvent(topic.id, messageId, {
+          getPending: getPendingNavigate,
+          clearPending: clearPendingNavigate,
+          navigate,
+          onDone: () => {
+            bootstrapPhaseRef.current = 'done'
+          }
+        })
+        void source
+      })
     ]
 
     return () => unsubscribes.forEach((unsub) => unsub())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assistant, dispatch, scrollToBottom, topic, isProcessingContext])
+  }, [assistant, dispatch, scrollToBottom, navigate, topic, isProcessingContext])
+
+  /**
+   * Unified topic bootstrap: determines the initial navigation intent with strict priority.
+   *   matching pending > saved restore > default (latest)
+   * Only one transaction is started per mount cycle.
+   */
+  useEffect(() => {
+    const decision = resolveBootstrapDecision({
+      phase: bootstrapPhaseRef.current,
+      isTopicLoading,
+      topicId: topic.id,
+      pending: getPendingNavigate(),
+      savedPosition: savedRestoreHandledRef.current ? null : getSavedPosition(),
+      savedRestoreHandled: savedRestoreHandledRef.current
+    })
+
+    if (decision.action === 'wait' || decision.action === 'done') {
+      if (decision.action === 'done') bootstrapPhaseRef.current = 'done'
+      return
+    }
+
+    if (decision.action === 'pending') {
+      const pending = getPendingNavigate()!
+      bootstrapPhaseRef.current = 'pending-in-flight'
+      void navigate(decision.intent).then((result) => {
+        if (result !== 'cancelled') {
+          clearPendingNavigate(pending)
+          bootstrapPhaseRef.current = 'done'
+        } else {
+          bootstrapPhaseRef.current = 'done'
+        }
+      })
+      return
+    }
+
+    // action === 'restore'
+    savedRestoreHandledRef.current = true
+    bootstrapPhaseRef.current = 'done'
+    void navigate(decision.intent)
+  }, [isTopicLoading, messages, navigate, topic.id, getSavedPosition])
 
   useEffect(() => {
     void runAsyncFunction(async () => {
@@ -689,48 +869,54 @@ const Messages = ({
   }, [assistant, messages, onFirstUpdate, topic.id])
 
   const loadMoreMessages = useCallback(() => {
-    if (!hasMore || isLoadingMore) return
+    const currentState = viewportStateRef.current
+    if (!canHandleUserViewportScroll(currentState) || !currentState.window?.hasMoreOlder || currentState.loading.older)
+      return
 
-    setIsLoadingMore(true)
+    const loadToken = {}
+    const topicGeneration = currentState.topicGeneration
+    viewportDispatch({ type: 'load/start', direction: 'older', token: loadToken })
 
-    // Capture anchor before DOM changes
     const container = scrollContainerRef.current
     const anchor = findFirstVisibleMessage(container, messageElements.current)
 
     setTimeoutTimer(
       'loadMoreMessages',
       () => {
-        // Find the oldest loaded message and load messages before it
-        const currentDisplay = lastDisplayMessagesRef.current
-        const oldestInWindow = currentDisplay[currentDisplay.length - 1]
-        const oldestIndex = messages.findIndex((m) => m.id === oldestInWindow?.id)
-
-        if (oldestIndex <= 0) {
-          setIsLoadingMore(false)
+        if (!isCurrentLoad('older', loadToken, topicGeneration)) return
+        const allMessages = messagesRef.current
+        const currentWindow = viewportStateRef.current.window
+        if (!currentWindow) {
+          viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
           return
         }
+        const olderWindow = expandMessageWindowOlder(allMessages, currentWindow, LOAD_MORE_COUNT)
 
-        const startIndex = messages.length - oldestIndex
-        const newMessages = computeDisplayMessages(messages, startIndex, LOAD_MORE_COUNT)
-
-        setDisplayMessages((prev) => {
-          const merged = [...prev, ...newMessages]
-          lastDisplayMessagesRef.current = merged
-          return merged
+        viewportDispatch({
+          type: 'load/finish',
+          direction: 'older',
+          token: loadToken,
+          topicGeneration,
+          window: olderWindow
         })
-        const { hasOlder } = checkBoundaries()
-        setHasMore(hasOlder)
 
-        setIsLoadingMore(false)
-
-        // Restore scroll position after re-render
         if (anchor) {
-          requestAnimationFrame(() => {
+          requestAnimationFrame(async () => {
+            if (!isCurrentLoad('older', loadToken, topicGeneration)) return
             if (container && anchor.element && anchor.element.isConnected) {
               const newRect = anchor.element.getBoundingClientRect()
               const delta = newRect.top - anchor.rect.top
               if (Math.abs(delta) > 1) {
+                const scrollToken = {}
+                if (!(await beginScroll('anchoring', scrollToken))) return
+                if (!isCurrentLoad('older', loadToken, topicGeneration) || !anchor.element.isConnected) {
+                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
+                  return
+                }
                 container.scrollTop += delta
+                requestAnimationFrame(() => {
+                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
+                })
               }
             }
           })
@@ -738,7 +924,82 @@ const Messages = ({
       },
       50
     )
-  }, [hasMore, isLoadingMore, messages, setTimeoutTimer, scrollContainerRef, checkBoundaries])
+  }, [beginScroll, isCurrentLoad, setTimeoutTimer, scrollContainerRef, viewportDispatch])
+
+  const loadNewerMessages = useCallback(() => {
+    const currentState = viewportStateRef.current
+    if (!canHandleUserViewportScroll(currentState) || !currentState.window?.hasMoreNewer || currentState.loading.newer)
+      return
+
+    const loadToken = {}
+    const topicGeneration = currentState.topicGeneration
+    viewportDispatch({ type: 'load/start', direction: 'newer', token: loadToken })
+
+    const container = scrollContainerRef.current
+    const anchor = findFirstVisibleMessage(container, messageElements.current)
+
+    setTimeoutTimer(
+      'loadNewerMessages',
+      () => {
+        if (!isCurrentLoad('newer', loadToken, topicGeneration)) return
+        const allMessages = messagesRef.current
+        const currentWindow = viewportStateRef.current.window
+        if (!currentWindow) {
+          viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
+          return
+        }
+        const newerWindow = expandMessageWindowNewer(allMessages, currentWindow, LOAD_MORE_COUNT)
+
+        viewportDispatch({
+          type: 'load/finish',
+          direction: 'newer',
+          token: loadToken,
+          topicGeneration,
+          window: newerWindow
+        })
+
+        if (anchor) {
+          requestAnimationFrame(async () => {
+            if (!isCurrentLoad('newer', loadToken, topicGeneration)) return
+            if (container && anchor.element && anchor.element.isConnected) {
+              const newRect = anchor.element.getBoundingClientRect()
+              const delta = newRect.top - anchor.rect.top
+              if (Math.abs(delta) > 1) {
+                const scrollToken = {}
+                if (!(await beginScroll('anchoring', scrollToken))) return
+                if (!isCurrentLoad('newer', loadToken, topicGeneration) || !anchor.element.isConnected) {
+                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
+                  return
+                }
+                container.scrollTop += delta
+                requestAnimationFrame(() => {
+                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
+                })
+              }
+            }
+          })
+        }
+      },
+      50
+    )
+  }, [beginScroll, isCurrentLoad, setTimeoutTimer, scrollContainerRef, viewportDispatch])
+
+  const handleScroll = useCallback(() => {
+    const currentState = viewportStateRef.current
+    if (!canHandleUserViewportScroll(currentState)) return
+
+    handleScrollPosition()
+
+    const container = scrollContainerRef.current
+    if (container && hasMoreNewer && !isLoadingNewer && !isLoadingMore) {
+      // In column-reverse layout, bottom is scrollTop ≈ 0 (or small negative values)
+      // Scrolling toward older messages increases scrollTop (positive direction)
+      const distanceFromBottom = Math.abs(container.scrollTop)
+      if (distanceFromBottom < 150) {
+        loadNewerMessages()
+      }
+    }
+  }, [handleScrollPosition, hasMoreNewer, isLoadingNewer, isLoadingMore, loadNewerMessages, scrollContainerRef])
 
   useShortcut('copy_last_message', () => {
     const lastMessage = last(messages)
@@ -765,63 +1026,27 @@ const Messages = ({
         assistant={assistant}
         topic={topic}
         scrollContainerRef={scrollContainerRef}
-        handleScrollPosition={handleScrollPosition}
+        handleScrollPosition={handleScroll}
         displayMessages={displayMessages}
-        messages={messages}
+        contextBoundaryMessageId={contextBoundaryMessageId}
         hasMore={hasMore}
         isLoadingMore={isLoadingMore}
+        isLoadingNewer={isLoadingNewer}
         loadMoreMessages={loadMoreMessages}
         registerMessageElement={registerMessageElement}
-        scrollToMessageById={scrollToMessageById}
+      />
+      <SelectionBox
+        isMultiSelectMode={isMultiSelectMode}
+        scrollContainerRef={scrollContainerRef}
+        messageElements={messageElements.current}
+        handleSelectMessage={handleSelectMessage}
       />
     </EditModeProvider>
   )
 }
 
-const computeDisplayMessages = (messages: Message[], startIndex: number, displayCount: number) => {
-  // 如果剩余消息数量小于 displayCount，直接返回所有剩余消息的倒序切片
-  if (messages.length - startIndex <= displayCount) {
-    const result: Message[] = []
-    for (let i = messages.length - 1 - startIndex; i >= 0; i--) {
-      result.push(messages[i])
-    }
-    return result
-  }
-  const userIdSet = new Set() // 用户消息 id 集合
-  const assistantIdSet = new Set() // 助手消息 askId 集合
-  const displayMessages: Message[] = []
-
-  // 处理单条消息的函数
-  const processMessage = (message: Message) => {
-    if (!message) return
-
-    const idSet = message.role === 'user' ? userIdSet : assistantIdSet
-    const messageId = message.role === 'user' ? message.id : message.askId
-
-    if (!idSet.has(messageId)) {
-      idSet.add(messageId)
-      displayMessages.push(message)
-      return
-    }
-    // 如果是相同 askId 的助手消息，也要显示
-    displayMessages.push(message)
-  }
-
-  // 直接在原数组上倒序遍历，跳过前 startIndex 个，避免全量拷贝和 reverse()
-  for (let i = messages.length - 1 - startIndex; i >= 0 && userIdSet.size + assistantIdSet.size < displayCount; i--) {
-    const message = messages[i]
-    processMessage(message)
-  }
-
-  return displayMessages
-}
-
-const computeStartIndex = (messages: Message[], targetMessageId: string, contextCount: number): number => {
-  const targetIndex = messages.findIndex((m) => m.id === targetMessageId)
-  if (targetIndex === -1) return 0
-  const startIndex = Math.max(0, messages.length - 1 - targetIndex - contextCount)
-  return startIndex
-}
+const areMessageArraysIdentical = (left: Message[], right: Message[]): boolean =>
+  left.length === right.length && left.every((message, index) => message === right[index])
 
 const LoaderContainer = styled.div`
   display: flex;

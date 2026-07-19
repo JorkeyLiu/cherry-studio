@@ -269,6 +269,9 @@ const MessageItem: FC<Props> = ({
     <WrapperContainer isMultiSelectMode={isMultiSelectMode}>
       <MessageContainer
         key={message.id}
+        id={`message-${message.id}`}
+        data-message-id={message.id}
+        data-ask-id={isAssistantMessage ? message.askId || message.id : undefined}
         className={classNames({
           message: true,
           'message-assistant': isAssistantMessage,

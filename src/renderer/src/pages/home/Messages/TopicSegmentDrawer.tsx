@@ -1,5 +1,5 @@
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
-import { scrollIntoView } from '@renderer/utils/dom'
+import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 import { Popover } from 'antd'
 import { Layers } from 'lucide-react'
@@ -15,12 +15,8 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
 
   const scrollToSegment = useCallback(
     (segmentMessageIds: string[]) => {
-      // Find the first message ID that still exists in the topic's message list
       const firstExistingId = segmentMessageIds.find((id) => messageIndexById.has(id)) || segmentMessageIds[0]
-      const element = document.getElementById(`message-${firstExistingId}`)
-      if (element) {
-        scrollIntoView(element, { behavior: 'smooth', block: 'start', container: 'nearest' })
-      }
+      void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, firstExistingId)
     },
     [messageIndexById]
   )
