@@ -8,7 +8,7 @@ import { EditModeProvider, useEditMode } from '@renderer/context/EditModeContext
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
-import { useMessageOperations, useTopicMessages } from '@renderer/hooks/useMessageOperations'
+import { useMessageOperations, useTopicLoading, useTopicMessages } from '@renderer/hooks/useMessageOperations'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
@@ -93,6 +93,8 @@ const findFirstVisibleMessage = (
 }
 
 const logger = loggerService.withContext('Messages')
+const SAVED_RESTORE_VISUALLY_OLDER_GROUPS = 10
+const SAVED_RESTORE_VISUALLY_NEWER_GROUPS = 19
 
 interface MessagesContentProps {
   assistant: Assistant
@@ -284,27 +286,44 @@ const Messages = ({
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const messages = useTopicMessages(topic.id)
+  const isTopicLoading = useTopicLoading(topic)
   const { displayCount, clearTopicMessages, deleteMessage, createTopicBranch, editMessage } =
     useMessageOperations(topic)
-  const { setTimeoutTimer, clearAllTimers } = useTimer()
+  const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
 
   const { isMultiSelectMode, handleSelectMessage } = useChatContext(topic)
 
   const messageElements = useRef<Map<string, HTMLElement>>(new Map())
   const messagesRef = useRef<Message[]>(messages)
-  const displayMessagesRef = useRef<Message[]>(displayMessages)
+  const previousMessagesRef = useRef<Message[]>(messages)
   const jumpTargetRef = useRef<string | null>(null)
   const lastDisplayMessagesRef = useRef<Message[]>([])
   const selectMessageForFoldRef = useRef<(messageId: string) => Promise<void>>(() => Promise.resolve())
   const navigateGenerationRef = useRef(0)
   const prevTopicIdRef = useRef(topic.id)
+  const isProgrammaticScrollRef = useRef(false)
+  const handleNavigateToMessageRef = useRef<
+    (messageId: string, options?: { generation?: number; windowPrepared?: boolean }) => Promise<void>
+  >(async () => {})
 
   // On mount (topic switch), check if we need to restore to a specific message
   useEffect(() => {
     const saved = getSavedPosition()
-    if (saved?.anchorId) {
+    if (saved?.isAtBottom) {
+      // Bottom state: initialize window with latest messages, then scrollToBottom after DOM commit
+      const newDisplayMessages = computeDisplayMessages(messages, 0, INITIAL_MESSAGES_COUNT)
+      setDisplayMessages(newDisplayMessages)
+      lastDisplayMessagesRef.current = newDisplayMessages
+      setHasMore(messages.length > INITIAL_MESSAGES_COUNT)
+      setHasMoreNewer(false)
+      requestAnimationFrame(() => {
+        scrollToBottom()
+      })
+      return
+    } else if (saved?.anchorId) {
       jumpTargetRef.current = saved.anchorId
-    } else if (saved?.scrollTop) {
+    } else if (saved?.scrollTop !== undefined) {
+      // Use !== undefined (not truthiness) because scrollTop can be 0
       requestAnimationFrame(() => {
         setTimeout(() => {
           scrollContainerRef.current?.scrollTo({ top: saved.scrollTop })
@@ -318,8 +337,12 @@ const Messages = ({
   }, [messages])
 
   useEffect(() => {
-    displayMessagesRef.current = displayMessages
-  }, [displayMessages])
+    const navigateGeneration = navigateGenerationRef
+
+    return () => {
+      navigateGeneration.current++
+    }
+  }, [])
 
   const registerMessageElement = useCallback((id: string, element: HTMLElement | null) => {
     if (element) {
@@ -352,21 +375,6 @@ const Messages = ({
     selectMessageForFoldRef.current = selectMessageForFold
   }, [selectMessageForFold])
 
-  const checkBoundaries = useCallback(() => {
-    const current = lastDisplayMessagesRef.current
-    if (current.length === 0 || messages.length === 0) return { hasOlder: false, hasNewer: false }
-
-    const newestInWindow = current[0]
-    const oldestInWindow = current[current.length - 1]
-    const newestInArray = messages[messages.length - 1]
-    const oldestInArray = messages[0]
-
-    return {
-      hasOlder: oldestInWindow?.id !== oldestInArray?.id,
-      hasNewer: newestInWindow?.id !== newestInArray?.id
-    }
-  }, [messages])
-
   useEffect(() => {
     // Only bump generation on topic switch, not on every messages change.
     // This prevents selectMessageForFold (which calls editMessage → messages update)
@@ -379,22 +387,57 @@ const Messages = ({
     // Scenario 1: Jump target (deep navigation / topic switch restore)
     if (jumpTargetRef.current) {
       const targetId = jumpTargetRef.current
-      jumpTargetRef.current = null
-      const startIndex = computeStartIndex(messages, targetId, SCROLL_CONTEXT_COUNT)
-      const newDisplayMessages = computeDisplayMessages(messages, startIndex, startIndex + INITIAL_MESSAGES_COUNT)
+      const targetExists = messages.some((message) => message.id === targetId)
+
+      if (!targetExists) {
+        // Keep the saved target pending while topic messages load. A subsequent
+        // messages update re-runs this effect without a polling timer.
+        if (isTopicLoading) return
+
+        jumpTargetRef.current = null
+
+        // Loading completed with an empty topic. Clear the stale target so the
+        // normal empty-state initialization is no longer blocked.
+        if (messages.length === 0) {
+          if (lastDisplayMessagesRef.current.length > 0) {
+            lastDisplayMessagesRef.current = []
+            setDisplayMessages([])
+          }
+          setHasMore(false)
+          setHasMoreNewer(false)
+          return
+        }
+
+        // The saved target no longer belongs to the loaded topic. Fall back to
+        // the normal latest-message initialization instead of leaving it empty.
+        const latestMessages = computeDisplayMessages(messages, 0, displayCount)
+        setDisplayMessages(latestMessages)
+        lastDisplayMessagesRef.current = latestMessages
+        setHasMore(latestMessages.at(-1)?.id !== messages[0]?.id)
+        setHasMoreNewer(false)
+        return
+      }
+
+      const generation = ++navigateGenerationRef.current
+      const newDisplayMessages = computeSavedRestoreDisplayWindow(
+        messages,
+        targetId,
+        SAVED_RESTORE_VISUALLY_OLDER_GROUPS,
+        SAVED_RESTORE_VISUALLY_NEWER_GROUPS
+      )
+      const newestInWindow = newDisplayMessages[0]
+      const oldestInWindow = newDisplayMessages[newDisplayMessages.length - 1]
+
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
-      setHasMore(hasOlder)
-      setHasMoreNewer(hasNewer)
+      setHasMore(oldestInWindow?.id !== messages[0]?.id)
+      setHasMoreNewer(newestInWindow?.id !== messages.at(-1)?.id)
+      jumpTargetRef.current = null
 
+      // Wait for the target window to commit before revealing and positioning the message.
       requestAnimationFrame(() => {
-        setTimeout(() => {
-          const el = document.getElementById(`message-${targetId}`)
-          if (el) {
-            scrollIntoView(el, { behavior: 'auto', block: 'start', container: 'nearest' })
-          }
-        }, 50)
+        if (generation !== navigateGenerationRef.current) return
+        void handleNavigateToMessageRef.current(targetId, { generation, windowPrepared: true })
       })
       return
     }
@@ -404,35 +447,33 @@ const Messages = ({
       const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
+      const { hasOlder, hasNewer } = getDisplayWindowBoundaries(messages, newDisplayMessages)
       setHasMore(hasOlder)
       setHasMoreNewer(hasNewer)
       return
     }
 
-    // Scenario 3: Messages content changed (edit/delete/etc) - incremental update
-    const earliestLoadedId = lastDisplayMessagesRef.current[lastDisplayMessagesRef.current.length - 1]?.id
-    const earliestIndex = messages.findIndex((m) => m.id === earliestLoadedId)
+    // Scenario 3: Reconcile the existing fixed window against the latest
+    // message objects. Only a window that previously touched the latest edge
+    // follows newly appended messages, retaining its prior group capacity.
+    const currentDisplayMessages = lastDisplayMessagesRef.current
+    const reconciledMessages = reconcileDisplayWindow(messages, previousMessagesRef.current, currentDisplayMessages)
+    const newDisplayMessages =
+      reconciledMessages.length > 0 ? reconciledMessages : computeDisplayMessages(messages, 0, displayCount)
+    const { hasOlder, hasNewer } = getDisplayWindowBoundaries(messages, newDisplayMessages)
 
-    if (earliestIndex === -1) {
-      const newDisplayMessages = computeDisplayMessages(messages, 0, displayCount)
+    lastDisplayMessagesRef.current = newDisplayMessages
+    if (!areMessageArraysIdentical(currentDisplayMessages, newDisplayMessages)) {
       setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
-      setHasMore(hasOlder)
-      setHasMoreNewer(hasNewer)
-    } else {
-      const newDisplayMessages: Message[] = []
-      for (let i = messages.length - 1; i >= earliestIndex; i--) {
-        newDisplayMessages.push(messages[i])
-      }
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
-      setHasMore(hasOlder)
-      setHasMoreNewer(hasNewer)
     }
-  }, [messages, displayCount, checkBoundaries])
+    setHasMore(hasOlder)
+    setHasMoreNewer(hasNewer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, displayCount, isTopicLoading])
+
+  useEffect(() => {
+    previousMessagesRef.current = messages
+  }, [messages])
 
   /**
    * Check the DOM status of a message element.
@@ -447,14 +488,16 @@ const Messages = ({
     return 'visible'
   }, [])
 
+  type NavigatePrepareResult = 'ready-existing' | 'ready-loaded' | false
+
   /**
    * Ensure the target message is rendered and visible in the DOM.
-   * Uses scroll-position's window management (scrollToMessageById) for missing messages.
+   * Prepares a unified navigation window for missing messages.
    * Handles fold switching for hidden messages.
    * Does NOT scroll — scrolling is handled by `handleNavigateToMessage`.
    */
   const scrollToTargetMessage = useCallback(
-    async (messageId: string, generation: number): Promise<boolean> => {
+    async (messageId: string, generation: number, windowPrepared = false): Promise<NavigatePrepareResult> => {
       const allMessages = messagesRef.current
 
       // 1. Check if the message exists in this topic's messages
@@ -465,7 +508,8 @@ const Messages = ({
 
       // 2. Check if the target message is already rendered in DOM
       const initialStatus = checkElement(messageId)
-      if (initialStatus === 'visible') return true
+
+      if (initialStatus === 'visible') return windowPrepared ? 'ready-loaded' : 'ready-existing'
 
       if (initialStatus === 'hidden') {
         await selectMessageForFoldRef.current(messageId)
@@ -476,16 +520,19 @@ const Messages = ({
           })
         })
         if (generation !== navigateGenerationRef.current) return false
-        return true
+        return checkElement(messageId) === 'visible' ? (windowPrepared ? 'ready-loaded' : 'ready-existing') : false
       }
 
-      // 3. status === 'missing': Use scroll-position's window management to load the target
+      // Scenario 1 already committed the target window; never replace it a second time.
+      if (windowPrepared) return false
+
+      // 3. status === 'missing': Prepare the unified navigation window around the target
       // Compute a new window centered on the target message
       const startIndex = computeStartIndex(allMessages, messageId, SCROLL_CONTEXT_COUNT)
-      const newDisplayMessages = computeDisplayMessages(allMessages, startIndex, startIndex + INITIAL_MESSAGES_COUNT)
+      const newDisplayMessages = computeDisplayMessages(allMessages, startIndex, INITIAL_MESSAGES_COUNT)
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
+      const { hasOlder, hasNewer } = getDisplayWindowBoundaries(allMessages, newDisplayMessages)
       setHasMore(hasOlder)
       setHasMoreNewer(hasNewer)
 
@@ -499,7 +546,7 @@ const Messages = ({
 
       // Check if the target message is now ready
       const status = checkElement(messageId)
-      if (status === 'visible') return true
+      if (status === 'visible') return 'ready-loaded'
 
       if (status === 'hidden') {
         await selectMessageForFoldRef.current(messageId)
@@ -510,12 +557,12 @@ const Messages = ({
           })
         })
         if (generation !== navigateGenerationRef.current) return false
-        return true
+        return checkElement(messageId) === 'visible' ? 'ready-loaded' : false
       }
 
       return false
     },
-    [checkElement, checkBoundaries]
+    [checkElement]
   )
 
   /**
@@ -524,15 +571,24 @@ const Messages = ({
    * Uses generation tracking to cancel stale navigations.
    */
   const handleNavigateToMessage = useCallback(
-    async (messageId: string) => {
-      const generation = ++navigateGenerationRef.current
+    async (messageId: string, options?: { generation?: number; windowPrepared?: boolean }) => {
+      if (!options?.windowPrepared) {
+        jumpTargetRef.current = null
+        clearTimeoutTimer('pendingNavigate')
+      }
+
+      const generation = options?.generation ?? ++navigateGenerationRef.current
+      if (generation !== navigateGenerationRef.current) return
 
       // Cancel any pending loadMore/loadNewer timers to prevent them from
       // overwriting the window reset that navigation is about to perform.
-      clearAllTimers()
+      clearTimeoutTimer('loadMoreMessages')
+      clearTimeoutTimer('loadNewerMessages')
+      setIsLoadingMore(false)
+      setIsLoadingNewer(false)
 
       // 1. Ensure message is rendered in DOM (handles loading + fold switching)
-      const ready = await scrollToTargetMessage(messageId, generation)
+      const ready = await scrollToTargetMessage(messageId, generation, options?.windowPrepared)
       if (!ready) return
       if (generation !== navigateGenerationRef.current) return
 
@@ -543,13 +599,24 @@ const Messages = ({
       if (generation !== navigateGenerationRef.current) return
 
       // 3. Scroll to the element with consistent behavior
+      if (checkElement(messageId) !== 'visible') return
+
       const targetEl = document.getElementById(`message-${messageId}`)
       if (targetEl) {
-        scrollIntoView(targetEl, { behavior: 'smooth', block: 'center', container: 'nearest' })
+        const behavior = ready === 'ready-loaded' ? 'auto' : 'smooth'
+        isProgrammaticScrollRef.current = true
+        scrollIntoView(targetEl, { behavior, block: 'start', container: 'nearest' })
+        requestAnimationFrame(() => {
+          isProgrammaticScrollRef.current = false
+        })
       }
     },
-    [scrollToTargetMessage, clearAllTimers]
+    [checkElement, clearTimeoutTimer, scrollToTargetMessage]
   )
+
+  useEffect(() => {
+    handleNavigateToMessageRef.current = handleNavigateToMessage
+  }, [handleNavigateToMessage])
 
   // 滚动到指定消息组
   const scrollToGroup = useCallback(
@@ -587,7 +654,7 @@ const Messages = ({
       const newDisplayMessages = computeDisplayMessages(messages, 0, INITIAL_MESSAGES_COUNT)
       setDisplayMessages(newDisplayMessages)
       lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
+      const { hasOlder, hasNewer } = getDisplayWindowBoundaries(messages, newDisplayMessages)
       setHasMore(hasOlder)
       setHasMoreNewer(hasNewer)
     }
@@ -595,38 +662,21 @@ const Messages = ({
     if (scrollContainerRef.current) {
       requestAnimationFrame(() => {
         if (scrollContainerRef.current) {
+          isProgrammaticScrollRef.current = true
           scrollContainerRef.current.scrollTo({ top: 0 })
+          requestAnimationFrame(() => {
+            isProgrammaticScrollRef.current = false
+          })
         }
       })
     }
-  }, [scrollContainerRef, messages, checkBoundaries])
+  }, [scrollContainerRef, messages])
 
   const scrollToMessageById = useCallback(
     (messageId: string) => {
-      const el = document.getElementById(`message-${messageId}`)
-      if (el) {
-        scrollIntoView(el, { behavior: 'smooth', block: 'start', container: 'nearest' })
-        return
-      }
-
-      const startIndex = computeStartIndex(messages, messageId, SCROLL_CONTEXT_COUNT)
-      const newDisplayMessages = computeDisplayMessages(messages, startIndex, startIndex + INITIAL_MESSAGES_COUNT)
-      setDisplayMessages(newDisplayMessages)
-      lastDisplayMessagesRef.current = newDisplayMessages
-      const { hasOlder, hasNewer } = checkBoundaries()
-      setHasMore(hasOlder)
-      setHasMoreNewer(hasNewer)
-
-      requestAnimationFrame(() => {
-        setTimeout(() => {
-          const targetEl = document.getElementById(`message-${messageId}`)
-          if (targetEl) {
-            scrollIntoView(targetEl, { behavior: 'auto', block: 'start', container: 'nearest' })
-          }
-        }, 50)
-      })
+      void handleNavigateToMessage(messageId)
     },
-    [messages, checkBoundaries]
+    [handleNavigateToMessage]
   )
 
   useImperativeHandle(ref, () => ({
@@ -776,20 +826,20 @@ const Messages = ({
   // Check for pending cross-topic navigation on mount
   useEffect(() => {
     const pending = getPendingNavigate()
-    if (!pending) return
+    if (!pending || pending.topicId !== topic.id) return
 
     const MAX_NAVIGATE_RETRIES = 50
-    let cancelled = false
+    const generation = navigateGenerationRef.current
     let retryCount = 0
 
     const tryNavigate = () => {
-      if (cancelled) return
+      if (generation !== navigateGenerationRef.current) return
       if (messagesRef.current.some((m) => m.id === pending.messageId)) {
         clearPendingNavigate()
         void handleNavigateToMessage(pending.messageId)
       } else if (retryCount < MAX_NAVIGATE_RETRIES) {
         retryCount++
-        setTimeout(tryNavigate, 100)
+        setTimeoutTimer('pendingNavigate', tryNavigate, 100)
       } else {
         logger.warn('Pending navigate timed out after 5s', {
           messageId: pending.messageId,
@@ -799,10 +849,12 @@ const Messages = ({
       }
     }
 
-    requestAnimationFrame(tryNavigate)
+    requestAnimationFrame(() => {
+      if (generation === navigateGenerationRef.current) tryNavigate()
+    })
 
     return () => {
-      cancelled = true
+      clearTimeoutTimer('pendingNavigate')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -827,26 +879,29 @@ const Messages = ({
     setTimeoutTimer(
       'loadMoreMessages',
       () => {
+        const allMessages = messagesRef.current
         const currentDisplay = lastDisplayMessagesRef.current
         const oldestInWindow = currentDisplay[currentDisplay.length - 1]
-        const oldestIndex = messages.findIndex((m) => m.id === oldestInWindow?.id)
+        const oldestIndex = allMessages.findIndex((m) => m.id === oldestInWindow?.id)
 
         if (oldestIndex <= 0) {
           setIsLoadingMore(false)
+          setHasMore(false)
           return
         }
 
-        const startIndex = messages.length - oldestIndex
-        const newMessages = computeDisplayMessages(messages, startIndex, LOAD_MORE_COUNT)
+        const startIndex = allMessages.length - oldestIndex
+        const newMessages = computeDisplayMessages(allMessages, startIndex, LOAD_MORE_COUNT)
+        const merged = [...currentDisplay, ...newMessages]
+        const newestInMerged = merged[0]
+        const oldestInMerged = merged[merged.length - 1]
+        const newestInArray = allMessages[allMessages.length - 1]
+        const oldestInArray = allMessages[0]
 
-        setDisplayMessages((prev) => {
-          const merged = [...prev, ...newMessages]
-          lastDisplayMessagesRef.current = merged
-          return merged
-        })
-        const { hasOlder, hasNewer } = checkBoundaries()
-        setHasMore(hasOlder)
-        setHasMoreNewer(hasNewer)
+        lastDisplayMessagesRef.current = merged
+        setDisplayMessages(merged)
+        setHasMore(oldestInMerged?.id !== oldestInArray?.id)
+        setHasMoreNewer(newestInMerged?.id !== newestInArray?.id)
         setIsLoadingMore(false)
 
         if (anchor) {
@@ -855,7 +910,11 @@ const Messages = ({
               const newRect = anchor.element.getBoundingClientRect()
               const delta = newRect.top - anchor.rect.top
               if (Math.abs(delta) > 1) {
+                isProgrammaticScrollRef.current = true
                 container.scrollTop += delta
+                requestAnimationFrame(() => {
+                  isProgrammaticScrollRef.current = false
+                })
               }
             }
           })
@@ -863,7 +922,7 @@ const Messages = ({
       },
       50
     )
-  }, [hasMore, isLoadingMore, messages, setTimeoutTimer, scrollContainerRef, checkBoundaries])
+  }, [hasMore, isLoadingMore, setTimeoutTimer, scrollContainerRef])
 
   const loadNewerMessages = useCallback(() => {
     if (!hasMoreNewer || isLoadingNewer) return
@@ -876,30 +935,46 @@ const Messages = ({
     setTimeoutTimer(
       'loadNewerMessages',
       () => {
+        const allMessages = messagesRef.current
         const currentDisplay = lastDisplayMessagesRef.current
         const newestInWindow = currentDisplay[0]
-        const newestIndex = messages.findIndex((m) => m.id === newestInWindow?.id)
+        const newestIndex = allMessages.findIndex((m) => m.id === newestInWindow?.id)
 
-        if (newestIndex < 0 || newestIndex >= messages.length - 1) {
+        if (newestIndex < 0 || newestIndex >= allMessages.length - 1) {
           setIsLoadingNewer(false)
+          setHasMoreNewer(false)
           return
         }
 
-        const countToLoad = Math.min(LOAD_MORE_COUNT, messages.length - 1 - newestIndex)
         const newMessages: Message[] = []
-        const upperBound = newestIndex + countToLoad
-        for (let i = upperBound; i > newestIndex; i--) {
-          newMessages.push(messages[i])
+        let upperBound = newestIndex
+        let groupCount = 0
+        let previousGroupKey: string | null = null
+
+        for (let i = newestIndex + 1; i < allMessages.length; i++) {
+          const groupKey = getDisplayGroupKey(allMessages[i])
+          if (groupKey !== previousGroupKey) {
+            if (groupCount === LOAD_MORE_COUNT) break
+            groupCount++
+            previousGroupKey = groupKey
+          }
+          upperBound = i
         }
 
-        setDisplayMessages((prev) => {
-          const merged = [...newMessages, ...prev]
-          lastDisplayMessagesRef.current = merged
-          return merged
-        })
-        const { hasOlder, hasNewer } = checkBoundaries()
-        setHasMore(hasOlder)
-        setHasMoreNewer(hasNewer)
+        for (let i = upperBound; i > newestIndex; i--) {
+          newMessages.push(allMessages[i])
+        }
+
+        const merged = [...newMessages, ...currentDisplay]
+        const newestInMerged = merged[0]
+        const oldestInMerged = merged[merged.length - 1]
+        const newestInArray = allMessages[allMessages.length - 1]
+        const oldestInArray = allMessages[0]
+
+        lastDisplayMessagesRef.current = merged
+        setDisplayMessages(merged)
+        setHasMore(oldestInMerged?.id !== oldestInArray?.id)
+        setHasMoreNewer(newestInMerged?.id !== newestInArray?.id)
         setIsLoadingNewer(false)
 
         if (anchor) {
@@ -908,7 +983,11 @@ const Messages = ({
               const newRect = anchor.element.getBoundingClientRect()
               const delta = newRect.top - anchor.rect.top
               if (Math.abs(delta) > 1) {
+                isProgrammaticScrollRef.current = true
                 container.scrollTop += delta
+                requestAnimationFrame(() => {
+                  isProgrammaticScrollRef.current = false
+                })
               }
             }
           })
@@ -916,14 +995,19 @@ const Messages = ({
       },
       50
     )
-  }, [hasMoreNewer, isLoadingNewer, messages, setTimeoutTimer, scrollContainerRef, checkBoundaries])
+  }, [hasMoreNewer, isLoadingNewer, setTimeoutTimer, scrollContainerRef])
 
   const handleScroll = useCallback(() => {
+    if (isProgrammaticScrollRef.current) return
+
     handleScrollPosition()
 
     const container = scrollContainerRef.current
     if (container && hasMoreNewer && !isLoadingNewer && !isLoadingMore) {
-      if (container.scrollTop < 150) {
+      // In column-reverse layout, bottom is scrollTop ≈ 0 (or small negative values)
+      // Scrolling toward older messages increases scrollTop (positive direction)
+      const distanceFromBottom = Math.abs(container.scrollTop)
+      if (distanceFromBottom < 150) {
         loadNewerMessages()
       }
     }
@@ -973,33 +1057,37 @@ const Messages = ({
 }
 
 const computeDisplayMessages = (messages: Message[], startIndex: number, displayCount: number) => {
+  let newestSourceIndex = messages.length - 1 - startIndex
+  const startingGroupKey = messages[newestSourceIndex] ? getDisplayGroupKey(messages[newestSourceIndex]) : null
+
+  while (
+    newestSourceIndex < messages.length - 1 &&
+    getDisplayGroupKey(messages[newestSourceIndex + 1]) === startingGroupKey
+  ) {
+    newestSourceIndex++
+  }
+
   if (messages.length - startIndex <= displayCount) {
     const result: Message[] = []
-    for (let i = messages.length - 1 - startIndex; i >= 0; i--) {
+    for (let i = newestSourceIndex; i >= 0; i--) {
       result.push(messages[i])
     }
     return result
   }
-  const userIdSet = new Set()
-  const assistantIdSet = new Set()
   const displayMessages: Message[] = []
+  let groupCount = 0
+  let previousGroupKey: string | null = null
 
-  const processMessage = (message: Message) => {
-    if (!message) return
+  for (let i = newestSourceIndex; i >= 0; i--) {
+    const message = messages[i]
+    const groupKey = getDisplayGroupKey(message)
 
-    const idSet = message.role === 'user' ? userIdSet : assistantIdSet
-    const messageId = message.role === 'user' ? message.id : message.askId
-
-    if (!idSet.has(messageId)) {
-      idSet.add(messageId)
-      displayMessages.push(message)
-      return
+    if (groupKey !== previousGroupKey) {
+      if (groupCount === displayCount) break
+      groupCount++
+      previousGroupKey = groupKey
     }
     displayMessages.push(message)
-  }
-
-  for (let i = messages.length - 1 - startIndex; i >= 0 && userIdSet.size + assistantIdSet.size < displayCount; i--) {
-    processMessage(messages[i])
   }
 
   return displayMessages
@@ -1010,6 +1098,143 @@ const computeStartIndex = (messages: Message[], targetMessageId: string, context
   if (targetIndex === -1) return 0
   const startIndex = Math.max(0, messages.length - 1 - targetIndex - contextCount)
   return startIndex
+}
+
+const getDisplayGroupKey = (message: Message): string =>
+  message.role === 'assistant' && message.askId ? `assistant${message.askId}` : `${message.role}${message.id}`
+
+const countDisplayGroups = (messages: Message[]): number => {
+  let count = 0
+  let previousKey: string | null = null
+
+  for (const message of messages) {
+    const key = getDisplayGroupKey(message)
+    if (key !== previousKey) {
+      count++
+      previousKey = key
+    }
+  }
+
+  return count
+}
+
+const trimDisplayWindowToGroupCapacity = (messages: Message[], groupCapacity: number): Message[] => {
+  if (groupCapacity <= 0) return []
+
+  let groupCount = 0
+  let previousKey: string | null = null
+  let endIndex = 0
+
+  for (const message of messages) {
+    const key = getDisplayGroupKey(message)
+    if (key !== previousKey) {
+      if (groupCount === groupCapacity) break
+      groupCount++
+      previousKey = key
+    }
+    endIndex++
+  }
+
+  return endIndex === messages.length ? messages : messages.slice(0, endIndex)
+}
+
+/**
+ * Refreshes message objects without changing a historical window's IDs. A
+ * window that touched the previous latest edge follows appended messages while
+ * retaining its prior group capacity.
+ */
+const reconcileDisplayWindow = (
+  messages: Message[],
+  previousMessages: Message[],
+  currentDisplayMessages: Message[]
+): Message[] => {
+  const latestById = new Map(messages.map((message) => [message.id, message]))
+  const reconciled = currentDisplayMessages.flatMap((message) => {
+    const latestMessage = latestById.get(message.id)
+    return latestMessage ? [latestMessage] : []
+  })
+  const wasAtLatestEdge = currentDisplayMessages[0]?.id === previousMessages.at(-1)?.id
+
+  if (!wasAtLatestEdge || reconciled.length === 0) return reconciled
+
+  const newestReconciledIndex = messages.findIndex((message) => message.id === reconciled[0]?.id)
+  if (newestReconciledIndex === -1 || newestReconciledIndex === messages.length - 1) return reconciled
+
+  const currentIds = new Set(reconciled.map((message) => message.id))
+  const appendedMessages: Message[] = []
+  for (let index = messages.length - 1; index > newestReconciledIndex; index--) {
+    const message = messages[index]
+    if (!currentIds.has(message.id)) appendedMessages.push(message)
+  }
+
+  if (appendedMessages.length === 0) return reconciled
+
+  const groupCapacity = countDisplayGroups(currentDisplayMessages)
+  return trimDisplayWindowToGroupCapacity([...appendedMessages, ...reconciled], groupCapacity)
+}
+
+const getDisplayWindowBoundaries = (
+  messages: Message[],
+  displayMessages: Message[]
+): { hasOlder: boolean; hasNewer: boolean } => {
+  if (messages.length === 0 || displayMessages.length === 0) return { hasOlder: false, hasNewer: false }
+
+  return {
+    hasOlder: displayMessages.at(-1)?.id !== messages[0]?.id,
+    hasNewer: displayMessages[0]?.id !== messages.at(-1)?.id
+  }
+}
+
+const areMessageArraysIdentical = (left: Message[], right: Message[]): boolean =>
+  left.length === right.length && left.every((message, index) => message === right[index])
+
+/**
+ * Builds a saved-position window in visual chronology: older groups above the
+ * target group and newer groups below it. Messages remain chronological while
+ * selecting the window, then are reversed for the column-reverse display.
+ *
+ * A display group is one user message or one consecutive assistant askId group,
+ * matching getGroupedMessages and computeDisplayMessages counting semantics.
+ */
+const computeSavedRestoreDisplayWindow = (
+  messages: Message[],
+  targetMessageId: string,
+  visuallyOlderGroupCount: number,
+  visuallyNewerGroupCount: number
+): Message[] => {
+  const groups: Message[][] = []
+
+  for (const message of messages) {
+    const groupKey = getDisplayGroupKey(message)
+    const previousGroup = groups.at(-1)
+    const previousMessage = previousGroup?.at(-1)
+    const previousGroupKey = previousMessage ? getDisplayGroupKey(previousMessage) : null
+
+    if (previousGroup && previousGroupKey === groupKey) {
+      previousGroup.push(message)
+    } else {
+      groups.push([message])
+    }
+  }
+
+  const targetGroupIndex = groups.findIndex((group) => group.some((message) => message.id === targetMessageId))
+  if (targetGroupIndex === -1) return []
+
+  const desiredGroupCount = visuallyOlderGroupCount + 1 + visuallyNewerGroupCount
+  let visuallyOldestGroupIndex = Math.max(0, targetGroupIndex - visuallyOlderGroupCount)
+  let visuallyNewestGroupIndexExclusive = Math.min(groups.length, targetGroupIndex + visuallyNewerGroupCount + 1)
+
+  const missingGroups = desiredGroupCount - (visuallyNewestGroupIndexExclusive - visuallyOldestGroupIndex)
+  if (missingGroups > 0) {
+    const additionalOlderGroups = Math.min(visuallyOldestGroupIndex, missingGroups)
+    visuallyOldestGroupIndex -= additionalOlderGroups
+    visuallyNewestGroupIndexExclusive = Math.min(
+      groups.length,
+      visuallyNewestGroupIndexExclusive + missingGroups - additionalOlderGroups
+    )
+  }
+
+  return groups.slice(visuallyOldestGroupIndex, visuallyNewestGroupIndexExclusive).flat().toReversed()
 }
 
 const LoaderContainer = styled.div`

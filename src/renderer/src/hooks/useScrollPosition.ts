@@ -1,6 +1,14 @@
 import { throttle } from 'lodash'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 
+interface SavedScrollPosition {
+  scrollTop: number
+  anchorId: string | null
+  isAtBottom: boolean
+}
+
+const BOTTOM_THRESHOLD = 50 // px
+
 /**
  * Find the ID of the first visible message element in the scroll container.
  * In a column-reverse layout, "first visible" means the element closest to the container top.
@@ -43,24 +51,41 @@ export default function useScrollPosition(key: string, throttleWait?: number) {
     scrollKeyRef.current = scrollKey
   }, [scrollKey])
 
-  const handleScroll = throttle(() => {
+  const persistScrollPosition = useMemo(
+    () =>
+      throttle((snapshot: SavedScrollPosition) => {
+        window.keyv.set(scrollKeyRef.current, snapshot)
+      }, throttleWait ?? 100),
+    [throttleWait]
+  )
+
+  const handleScroll = useCallback(() => {
     const container = containerRef.current
     if (!container) return
-    const position = container.scrollTop
-    const anchorId = findFirstVisibleMessageId(container)
-    window.requestAnimationFrame(() => {
-      window.keyv.set(scrollKeyRef.current, { scrollTop: position, anchorId })
-    })
-  }, throttleWait ?? 100)
 
-  const getSavedPosition = useCallback(() => {
+    const scrollTop = container.scrollTop
+    const snapshot: SavedScrollPosition = {
+      scrollTop,
+      anchorId: findFirstVisibleMessageId(container),
+      // In column-reverse layout, scrollTop ≈ 0 means at the bottom (newest messages)
+      isAtBottom: Math.abs(scrollTop) <= BOTTOM_THRESHOLD
+    }
+
+    persistScrollPosition(snapshot)
+  }, [persistScrollPosition])
+
+  const getSavedPosition = useCallback((): SavedScrollPosition | null => {
     const saved = window.keyv.get(scrollKeyRef.current)
     if (saved && typeof saved === 'object' && 'scrollTop' in saved) {
-      return saved as { scrollTop: number; anchorId: string | null }
+      // Support legacy saved positions without isAtBottom
+      if (!('isAtBottom' in saved)) {
+        return { ...(saved as Omit<SavedScrollPosition, 'isAtBottom'>), isAtBottom: false }
+      }
+      return saved as SavedScrollPosition
     }
     // Backward compatibility: if saved is a plain number
     if (typeof saved === 'number') {
-      return { scrollTop: saved, anchorId: null }
+      return { scrollTop: saved, anchorId: null, isAtBottom: false }
     }
     return null
   }, [])
@@ -70,8 +95,11 @@ export default function useScrollPosition(key: string, throttleWait?: number) {
   }, [])
 
   useEffect(() => {
-    return () => handleScroll.cancel()
-  }, [handleScroll])
+    return () => {
+      persistScrollPosition.flush()
+      persistScrollPosition.cancel()
+    }
+  }, [persistScrollPosition])
 
   return { containerRef, handleScroll, getSavedPosition, clearSavedPosition }
 }
