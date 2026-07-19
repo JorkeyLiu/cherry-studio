@@ -35,14 +35,6 @@ Only investigate CI failures by reading the logs, not by re-running checks local
 When creating an Issue, you MUST use the `gh-create-issue` skill.
 If the skill is unavailable, directly read `.agents/skills/gh-create-issue/SKILL.md` and follow it manually.
 
-### Branch Strategy (Effective April 3, 2026)
-
-> **IMPORTANT**: The `main` branch is now under **code freeze**. Only critical bug fixes submitted via `hotfix/*` branches are accepted. Fix PRs must be minimal in scope and must not include any refactoring code.
->
-> All new features, refactoring, and optimizations should be developed on the **`v2` branch**. We welcome every developer to actively participate in v2 development!
->
-> The `v2` branch will only accept new feature submissions after all current features have been fully refactored.
-
 ## Development Commands
 
 - **Install**: `pnpm install` — Install all project dependencies (requires Node ≥22, pnpm 10.27.0)
@@ -127,7 +119,6 @@ Node.js backend services. Key services:
 Agents subsystem (`src/main/services/agents/`):
 - Drizzle ORM + LibSQL (SQLite) schema at `database/schema/index.ts`
 - Migrations in `resources/database/drizzle/`
-- **Currently undergoing v2 refactor** — only critical bug fixes accepted
 
 ### Renderer Process (`src/renderer/src/`)
 
@@ -165,14 +156,11 @@ Slices (redux-persist enabled):
 | `shortcuts` | Keyboard shortcuts |
 | `tabs` | Tab management |
 
-> **BLOCKED**: Do not add new Redux slices or change existing state shape until v2.0.0.
-
 ### Database Layer
 
 - **IndexedDB** (Dexie): `src/renderer/src/databases/index.ts`
   - Tables: `files`, `topics`, `settings`, `knowledge_notes`, `translate_history`, `quick_phrases`, `message_blocks`, `translate_languages`
   - Schema versioned with upgrade functions (`upgradeToV5`, `upgradeToV7`, `upgradeToV8`)
-  - **BLOCKED**: Do not modify schema until v2.0.0.
 - **SQLite** (Drizzle ORM + LibSQL): `src/main/services/agents/`
   - Used for the agents subsystem
   - DB path: `{userData}/Data/agents.db` (e.g., on macOS: `~/Library/Application Support/CherryStudioDev/Data/agents.db` in dev, `~/Library/Application Support/CherryStudio/Data/agents.db` in prod)
@@ -299,25 +287,6 @@ Several dependencies have patches in `patches/` — be careful when upgrading:
 - **Features without tests are not considered complete**
 
 ## Important Notes
-
-### V2 Refactoring in Progress
-
-The `main` branch is under code freeze. All development has moved to the `v2` branch.
-
-- **`main` branch**: Only accepts critical bug fixes via `hotfix/*` branches. Minimal changes, no refactoring.
-- **`v2` branch**: All new features, refactoring, and optimizations go here.
-
-Files marked with the following header are **blocked for feature changes**:
-
-```typescript
-/**
- * @deprecated Scheduled for removal in v2.0.0
- * ⚠️ NOTICE: V2 DATA&UI REFACTORING
- * STOP: Feature PRs affecting this file are currently BLOCKED.
- */
-```
-
-Do not introduce new features to these files. Bug fixes only.
 
 ### Security
 
