@@ -27,7 +27,8 @@ import {
   resolveAdjacentUserMessage,
   resolveBootstrapDecision,
   resolveMessageNavigation,
-  runMessageNavigationTransaction
+  runMessageNavigationTransaction,
+  shouldPersistNavigationResult
 } from '@renderer/pages/home/Messages/messageNavigation'
 import {
   createMessageViewportState,
@@ -311,7 +312,8 @@ const Messages = ({
     containerRef: scrollContainerRef,
     handleScroll: handleScrollPosition,
     getSavedPosition,
-    clearSavedPosition
+    clearSavedPosition,
+    savePosition
   } = useScrollPosition(`topic-${topic.id}`)
   const [viewportState, reduceViewport] = useReducer(messageViewportReducer, null, createMessageViewportState)
   const displayMessages = useMemo(() => viewportState.window?.displayMessages ?? [], [viewportState.window])
@@ -560,12 +562,30 @@ const Messages = ({
     ]
   )
 
+  /**
+   * User-initiated navigate-and-save: runs a navigation transaction and
+   * persists the resulting scroll position on success.
+   *
+   * Only call this from user-initiated navigation entry points
+   * (button clicks, keyboard shortcuts, message navigation).
+   * Internal triggers (SEND_MESSAGE, NEW_CONTEXT, bootstrap restore)
+   * must use `navigate` directly without persistence.
+   */
+  const navigateAndSave = useCallback(
+    (intent: MessageNavigationIntent) => {
+      void navigate(intent).then((result) => {
+        if (shouldPersistNavigationResult(result)) savePosition()
+      })
+    },
+    [navigate, savePosition]
+  )
+
   // 滚动到指定消息组
   const scrollToGroup = useCallback(
     (askId: string) => {
-      void navigate({ kind: 'group', groupId: askId, source: 'group' })
+      navigateAndSave({ kind: 'group', groupId: askId, source: 'group' })
     },
-    [navigate]
+    [navigateAndSave]
   )
 
   // 已渲染的消息组 id 集合，用于限制键盘选择范围
@@ -584,42 +604,47 @@ const Messages = ({
 
   // NOTE: 如果设置为平滑滚动会导致滚动条无法跟随生成的新消息保持在底部位置
   const scrollToBottom = useCallback(() => {
+    navigateAndSave({ kind: 'bottom', source: 'imperative' })
+  }, [navigateAndSave])
+
+  /** Internal auto-scroll without persistence — for SEND_MESSAGE / NEW_CONTEXT. */
+  const autoScrollToBottom = useCallback(() => {
     void navigate({ kind: 'bottom', source: 'imperative' })
   }, [navigate])
 
   const scrollToTop = useCallback(() => {
-    void navigate({ kind: 'top', source: 'imperative' })
-  }, [navigate])
+    navigateAndSave({ kind: 'top', source: 'imperative' })
+  }, [navigateAndSave])
 
   const scrollToMessageById = useCallback(
     (messageId: string) => {
-      void navigate({ kind: 'message', targetId: messageId, source: 'imperative' })
+      navigateAndSave({ kind: 'message', targetId: messageId, source: 'imperative' })
     },
-    [navigate]
+    [navigateAndSave]
   )
 
   const previousUserMessage = useCallback(
     (currentMessageId: string) => {
       const targetId = resolveAdjacentUserMessage(messagesRef.current, currentMessageId, 'older')
       if (targetId) {
-        void navigate({ kind: 'message', targetId, source: 'imperative' })
+        navigateAndSave({ kind: 'message', targetId, source: 'imperative' })
       } else {
-        void navigate({ kind: 'top', source: 'imperative' })
+        navigateAndSave({ kind: 'top', source: 'imperative' })
       }
     },
-    [navigate]
+    [navigateAndSave]
   )
 
   const nextUserMessage = useCallback(
     (currentMessageId: string) => {
       const targetId = resolveAdjacentUserMessage(messagesRef.current, currentMessageId, 'newer')
       if (targetId) {
-        void navigate({ kind: 'message', targetId, source: 'imperative' })
+        navigateAndSave({ kind: 'message', targetId, source: 'imperative' })
       } else {
-        void navigate({ kind: 'bottom', source: 'imperative' })
+        navigateAndSave({ kind: 'bottom', source: 'imperative' })
       }
     },
-    [navigate]
+    [navigateAndSave]
   )
 
   useImperativeHandle(ref, () => ({
@@ -648,7 +673,7 @@ const Messages = ({
 
   useEffect(() => {
     const unsubscribes = [
-      EventEmitter.on(EVENT_NAMES.SEND_MESSAGE, scrollToBottom),
+      EventEmitter.on(EVENT_NAMES.SEND_MESSAGE, autoScrollToBottom),
       EventEmitter.on(EVENT_NAMES.SCROLL_TO_BOTTOM, scrollToBottom),
       EventEmitter.on(EVENT_NAMES.CLEAR_MESSAGES, async (data: Topic) => {
         window.modal.confirm({
@@ -686,7 +711,7 @@ const Messages = ({
 
           if (lastMessage?.type === 'clear') {
             await deleteMessage(lastMessage.id)
-            scrollToBottom()
+            autoScrollToBottom()
             return
           }
 
@@ -694,7 +719,7 @@ const Messages = ({
           dispatch(newMessagesActions.addMessage({ topicId: topic.id, message: clearMessage }))
           await saveMessageAndBlocksToDB(topic.id, clearMessage, [])
 
-          scrollToBottom()
+          autoScrollToBottom()
         } finally {
           setIsProcessingContext(false)
         }
@@ -758,7 +783,7 @@ const Messages = ({
         }
       ),
       EventEmitter.on(EVENT_NAMES.NAVIGATE_TO_MESSAGE, async (messageId: string) => {
-        const { source } = await handlePendingNavigateEvent(topic.id, messageId, {
+        const { source, result } = await handlePendingNavigateEvent(topic.id, messageId, {
           getPending: getPendingNavigate,
           clearPending: clearPendingNavigate,
           navigate,
@@ -766,14 +791,14 @@ const Messages = ({
             bootstrapPhaseRef.current = 'done'
           }
         })
-        // source is logged for diagnostics; navigation side-effects are inside the helper
+        if (shouldPersistNavigationResult(result)) savePosition()
         void source
       })
     ]
 
     return () => unsubscribes.forEach((unsub) => unsub())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assistant, dispatch, scrollToBottom, navigate, topic, isProcessingContext])
+  }, [assistant, dispatch, scrollToBottom, autoScrollToBottom, navigate, savePosition, topic, isProcessingContext])
 
   /**
    * Unified topic bootstrap: determines the initial navigation intent with strict priority.
@@ -805,6 +830,7 @@ const Messages = ({
         if (result !== 'cancelled') {
           clearPendingNavigate(pending)
           bootstrapPhaseRef.current = 'done'
+          if (shouldPersistNavigationResult(result)) savePosition()
         } else {
           // Pending was cancelled by a newer navigation (user scroll, anchor click, etc.).
           // Mark as done to prevent automatic retry on the next messages change.
@@ -822,7 +848,7 @@ const Messages = ({
     savedRestoreHandledRef.current = true
     bootstrapPhaseRef.current = 'done'
     void navigate(decision.intent)
-  }, [isTopicLoading, messages, navigate, topic.id, getSavedPosition])
+  }, [isTopicLoading, messages, navigate, savePosition, topic.id, getSavedPosition])
 
   useEffect(() => {
     void runAsyncFunction(async () => {
