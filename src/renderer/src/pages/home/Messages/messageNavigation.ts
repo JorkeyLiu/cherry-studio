@@ -94,6 +94,16 @@ export type ResolvedMessageNavigation =
 
 export type MessageNavigationResult = 'success' | 'not-found' | 'cancelled'
 
+/**
+ * Determines whether a successful navigation result should trigger scroll position
+ * persistence. Returns true only for 'success' — callers use this to decide
+ * whether to persist after any navigation transaction.
+ *
+ * Callers that must NOT persist (SEND_MESSAGE, NEW_CONTEXT) simply skip this
+ * check entirely by using `navigate()` directly without persistence.
+ */
+export const shouldPersistNavigationResult = (result: MessageNavigationResult): boolean => result === 'success'
+
 export const canHandleUserViewportScroll = (state: Pick<MessageViewportState, 'navigation' | 'scrollMode'>): boolean =>
   state.navigation.phase === 'idle' && state.scrollMode === 'user'
 

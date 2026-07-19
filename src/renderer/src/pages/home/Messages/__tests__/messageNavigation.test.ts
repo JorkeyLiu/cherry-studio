@@ -12,7 +12,8 @@ import {
   resolveBootstrapDecision,
   resolveColumnReverseScrollTarget,
   resolveMessageNavigation,
-  runMessageNavigationTransaction
+  runMessageNavigationTransaction,
+  shouldPersistNavigationResult
 } from '../messageNavigation'
 import { createOldestMessageWindow, createTargetMessageWindow, type MessageWindow } from '../messageWindow'
 
@@ -45,6 +46,8 @@ const transaction = (intent: MessageNavigationIntent, options: { hidden?: boolea
   const revealTarget = vi.fn(async () => {
     hidden = false
   })
+  const finish = vi.fn()
+  const cancel = vi.fn()
 
   const result = runMessageNavigationTransaction(intent, {
     begin: vi.fn(async () => true),
@@ -59,11 +62,11 @@ const transaction = (intent: MessageNavigationIntent, options: { hidden?: boolea
     settleDom: async () => {},
     beginProgrammaticScroll: async () => true,
     scroll,
-    finish: vi.fn(),
-    cancel: vi.fn()
+    finish,
+    cancel
   })
 
-  return { result, applyWindow, scroll, scrollCalls, cancelLoadsAndTimers, revealTarget }
+  return { result, applyWindow, scroll, scrollCalls, cancelLoadsAndTimers, revealTarget, finish, cancel }
 }
 
 describe('message navigation transaction', () => {
@@ -620,5 +623,53 @@ describe('resolveAdjacentUserMessage', () => {
     const sequence: Message[] = [msg('u1'), msg('a1', 'assistant'), msg('u2')]
     expect(resolveAdjacentUserMessage(sequence, 'nonexistent', 'newer')).toBeNull()
     expect(resolveAdjacentUserMessage(sequence, 'nonexistent', 'older')).toBeNull()
+  })
+})
+
+describe('navigation result contract', () => {
+  it('calls cancel (not finish) when target is not found', async () => {
+    const run = transaction({ kind: 'message', targetId: 'nonexistent', source: 'event' })
+    expect(await run.result).toBe('not-found')
+    expect(run.cancel).toHaveBeenCalled()
+    expect(run.finish).not.toHaveBeenCalled()
+  })
+
+  it('does not call finish when navigation is cancelled by stale token', async () => {
+    let checks = 0
+    const run = transaction({ kind: 'message', targetId: 'm20', source: 'event' }, { current: () => ++checks < 2 })
+    expect(await run.result).toBe('cancelled')
+    expect(run.finish).not.toHaveBeenCalled()
+  })
+
+  it('returns success for all source kinds — persistence eligibility is decided by the caller', async () => {
+    const intents: MessageNavigationIntent[] = [
+      { kind: 'bottom', source: 'imperative' },
+      { kind: 'top', source: 'imperative' },
+      { kind: 'message', targetId: 'm15', source: 'imperative' },
+      { kind: 'message', targetId: 'm15', source: 'event' },
+      { kind: 'message', targetId: 'm15', source: 'pending' },
+      { kind: 'message', targetId: 'm15', source: 'group' },
+      { kind: 'message', targetId: 'm15', source: 'restore' }
+    ]
+
+    for (const intent of intents) {
+      const run = transaction(intent)
+      expect(await run.result).toBe('success')
+      expect(run.finish).toHaveBeenCalledOnce()
+    }
+  })
+})
+
+describe('shouldPersistNavigationResult', () => {
+  it('returns true for success', () => {
+    expect(shouldPersistNavigationResult('success')).toBe(true)
+  })
+
+  it('returns false for cancelled', () => {
+    expect(shouldPersistNavigationResult('cancelled')).toBe(false)
+  })
+
+  it('returns false for not-found', () => {
+    expect(shouldPersistNavigationResult('not-found')).toBe(false)
   })
 })

@@ -60,6 +60,20 @@ vi.mock('@renderer/context/MessageEditingContext', () => ({
   useMessageEditing: () => mocks.useMessageEditing()
 }))
 
+vi.mock('@renderer/context/EditModeContext', () => ({
+  useEditMode: () => ({
+    isEnabled: false,
+    selectedGroupIds: [],
+    handleGroupClick: vi.fn()
+  }),
+  useOptionalEditMode: () => ({
+    isEnabled: false,
+    selectedGroupIds: [],
+    handleGroupClick: vi.fn()
+  }),
+  EditModeProvider: ({ children }: { children: ReactNode }) => <>{children}</>
+}))
+
 vi.mock('@renderer/utils', () => {
   const flattenClassNames = (value: unknown): string[] => {
     if (!value) return []

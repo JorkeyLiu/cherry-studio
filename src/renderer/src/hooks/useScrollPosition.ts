@@ -17,16 +17,14 @@ const BOTTOM_THRESHOLD = 50 // px
  *  - containerRef: React ref for the scrollable container
  *  - handleScroll: Throttled scroll event handler that saves scroll position
  *  - getSavedPosition: Retrieve the saved scroll position with optional anchor message ID
- *  - clearSavedPosition: Clear the saved scroll position
+ *  - clearSavedPosition: Remove the persisted scroll position for this key
+ *  - savePosition: Immediately persist the current scroll position (non-throttled),
+ *    intended for post-navigation snapshot persistence
  */
 export default function useScrollPosition(key: string, throttleWait?: number) {
   const containerRef = useRef<HTMLDivElement>(null)
   const scrollKey = useMemo(() => `scroll:${key}`, [key])
   const scrollKeyRef = useRef(scrollKey)
-
-  useEffect(() => {
-    scrollKeyRef.current = scrollKey
-  }, [scrollKey])
 
   const persistScrollPosition = useMemo(
     () =>
@@ -35,6 +33,18 @@ export default function useScrollPosition(key: string, throttleWait?: number) {
       }, throttleWait ?? 100),
     [throttleWait]
   )
+
+  // Update scrollKeyRef on key change. On cleanup (key change or unmount),
+  // flush the pending trailing snapshot to the OLD key (scrollKeyRef still
+  // points to it), then cancel to prevent any subsequent timer from firing.
+  // This ensures the user's last scroll position is not lost on topic switch.
+  useEffect(() => {
+    scrollKeyRef.current = scrollKey
+    return () => {
+      persistScrollPosition.flush()
+      persistScrollPosition.cancel()
+    }
+  }, [scrollKey, persistScrollPosition])
 
   const handleScroll = useCallback(() => {
     const container = containerRef.current
@@ -71,12 +81,29 @@ export default function useScrollPosition(key: string, throttleWait?: number) {
     window.keyv.remove(scrollKeyRef.current)
   }, [])
 
-  useEffect(() => {
-    return () => {
-      persistScrollPosition.flush()
-      persistScrollPosition.cancel()
+  /**
+   * Immediately persist the current scroll position, bypassing throttle.
+   * Cancels any pending throttle trailing first to prevent a subsequent
+   * timer or unmount flush from overwriting this explicit save.
+   * Use this after programmatic navigations that bypass the scroll event
+   * handler (e.g. message navigation transactions) so the new position
+   * is available for saved-position restore on topic switch.
+   */
+  const savePosition = useCallback(() => {
+    persistScrollPosition.cancel()
+
+    const container = containerRef.current
+    if (!container) return
+
+    const scrollTop = container.scrollTop
+    const snapshot: SavedScrollPosition = {
+      scrollTop,
+      anchorId: findFirstVisibleMessageId(container),
+      isAtBottom: Math.abs(scrollTop) <= BOTTOM_THRESHOLD
     }
+
+    window.keyv.set(scrollKeyRef.current, snapshot)
   }, [persistScrollPosition])
 
-  return { containerRef, handleScroll, getSavedPosition, clearSavedPosition }
+  return { containerRef, handleScroll, getSavedPosition, clearSavedPosition, savePosition }
 }

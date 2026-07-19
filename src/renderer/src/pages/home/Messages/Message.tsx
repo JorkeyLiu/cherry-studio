@@ -1,7 +1,7 @@
 import { loggerService } from '@logger'
 import HorizontalScrollContainer from '@renderer/components/HorizontalScrollContainer'
 import Scrollbar from '@renderer/components/Scrollbar'
-import { useEditMode } from '@renderer/context/EditModeContext'
+import { useOptionalEditMode } from '@renderer/context/EditModeContext'
 import { useMessageEditing } from '@renderer/context/MessageEditingContext'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
@@ -51,6 +51,9 @@ interface Props {
 
 const logger = loggerService.withContext('MessageItem')
 
+/** Module-level stable reference — avoids creating a new [] on every render when editMode is null. */
+const EMPTY_SELECTED_GROUP_IDS: readonly string[] = []
+
 const WrapperContainer = ({
   isMultiSelectMode,
   children
@@ -84,7 +87,8 @@ const MessageItem: FC<Props> = ({
   const { editingMessageId, startEditing, stopEditing } = useMessageEditing()
   const { setTimeoutTimer } = useTimer()
   const isEditing = editingMessageId === message.id
-  const { selectedGroupIds } = useEditMode()
+  const editMode = useOptionalEditMode()
+  const selectedGroupIds = editMode?.selectedGroupIds ?? EMPTY_SELECTED_GROUP_IDS
 
   useEffect(() => {
     if (isEditing && messageContainerRef.current) {
