@@ -4,6 +4,7 @@ import { useTimer } from '@renderer/hooks/useTimer'
 import { getHttpMessageLabel, getProviderLabel } from '@renderer/i18n/label'
 import type { DiagnosisResult } from '@renderer/services/ErrorDiagnosisService'
 import { classifyErrorByAI } from '@renderer/services/ErrorDiagnosisService'
+import NavigationService from '@renderer/services/NavigationService'
 import { getProviderById } from '@renderer/services/ProviderService'
 import { useAppDispatch } from '@renderer/store'
 import { removeBlocksThunk } from '@renderer/store/thunk/messageThunk'
@@ -13,7 +14,6 @@ import { Button } from 'antd'
 import { AlertTriangle, ChevronRight, X } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
-import { Link, useNavigate } from 'react-router-dom'
 
 const HTTP_ERROR_CODES = [400, 401, 403, 404, 429, 500, 502, 503, 504]
 
@@ -27,6 +27,40 @@ interface Props {
 
 const ErrorBlock: React.FC<Props> = ({ block, message }) => {
   return <MessageErrorInfo block={block} message={message} />
+}
+
+/**
+ * Router-independent link that navigates to provider settings via NavigationService.
+ * Uses a semantic <button> for keyboard accessibility, styled as an inline link.
+ * The click handler reads NavigationService.navigate at invocation time (not render time)
+ * so it works even when navigate is null at first render and set later.
+ */
+const ProviderLink: React.FC<{ providerId: string; children?: React.ReactNode }> = ({ providerId, children }) => {
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      NavigationService.navigate?.(`/settings/provider`, { state: { provider: getProviderById(providerId) } })
+    },
+    [providerId]
+  )
+
+  return (
+    <button
+      type="button"
+      style={{
+        color: 'var(--color-link)',
+        cursor: 'pointer',
+        background: 'none',
+        border: 'none',
+        padding: 0,
+        font: 'inherit',
+        textDecoration: 'underline'
+      }}
+      onClick={handleClick}>
+      {children}
+    </button>
+  )
 }
 
 const ErrorMessage: React.FC<{ block: ErrorMessageBlock }> = ({ block }) => {
@@ -47,13 +81,7 @@ const ErrorMessage: React.FC<{ block: ErrorMessageBlock }> = ({ block }) => {
           i18nKey={i18nKey}
           values={{ provider: getProviderLabel(providerId) }}
           components={{
-            provider: (
-              <Link
-                style={{ color: 'var(--color-link)' }}
-                to={`/settings/provider`}
-                state={{ provider: getProviderById(providerId) }}
-              />
-            )
+            provider: <ProviderLink providerId={providerId} />
           }}
         />
       )
@@ -79,7 +107,6 @@ const MessageErrorInfo: React.FC<{ block: ErrorMessageBlock; message: Message }>
   const dispatch = useAppDispatch()
   const { setTimeoutTimer } = useTimer()
   const { t, i18n } = useTranslation()
-  const navigate = useNavigate()
   const [aiSummary, setAiSummary] = useState<string>('')
 
   const providerId = message.model?.provider ?? (block.error?.providerId as string | undefined)
@@ -138,7 +165,7 @@ const MessageErrorInfo: React.FC<{ block: ErrorMessageBlock; message: Message }>
   const onNavigate = (e: React.MouseEvent) => {
     e.stopPropagation()
     if (classification.navTarget) {
-      navigate(classification.navTarget)
+      NavigationService.navigate?.(classification.navTarget)
     }
   }
 

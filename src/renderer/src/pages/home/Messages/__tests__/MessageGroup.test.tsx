@@ -66,6 +66,11 @@ vi.mock('@renderer/context/EditModeContext', () => ({
     selectedGroupIds: [],
     handleGroupClick: vi.fn()
   }),
+  useOptionalEditMode: () => ({
+    isEnabled: false,
+    selectedGroupIds: [],
+    handleGroupClick: vi.fn()
+  }),
   EditModeProvider: ({ children }: { children: ReactNode }) => <>{children}</>
 }))
 
