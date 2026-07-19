@@ -59,11 +59,6 @@ If the skill is unavailable, directly read `.agents/skills/gh-create-issue/SKILL
   - `pnpm i18n:translate` — Auto-translate missing keys
   - `pnpm i18n:check` — Validate i18n completeness
 - **Bundle Analysis**: `pnpm analyze:renderer` / `pnpm analyze:main` — Visualize bundle sizes
-- **Agents DB**:
-  - `pnpm agents:generate` — Generate Drizzle migrations
-  - `pnpm agents:push` — Push schema to SQLite DB
-  - `pnpm agents:studio` — Open Drizzle Studio
-
 ## Project Architecture
 
 ### Electron Structure
@@ -116,10 +111,6 @@ Node.js backend services. Key services:
 | `OvmsManager` | OpenVINO model server management |
 | `NodeTraceService` | OpenTelemetry trace export |
 
-Agents subsystem (`src/main/services/agents/`):
-- Drizzle ORM + LibSQL (SQLite) schema at `database/schema/index.ts`
-- Migrations in `resources/database/drizzle/`
-
 ### Renderer Process (`src/renderer/src/`)
 
 React 19 + Redux Toolkit SPA. Key structure:
@@ -161,9 +152,6 @@ Slices (redux-persist enabled):
 - **IndexedDB** (Dexie): `src/renderer/src/databases/index.ts`
   - Tables: `files`, `topics`, `settings`, `knowledge_notes`, `translate_history`, `quick_phrases`, `message_blocks`, `translate_languages`
   - Schema versioned with upgrade functions (`upgradeToV5`, `upgradeToV7`, `upgradeToV8`)
-- **SQLite** (Drizzle ORM + LibSQL): `src/main/services/agents/`
-  - Used for the agents subsystem
-  - DB path: `{userData}/Data/agents.db` (e.g., on macOS: `~/Library/Application Support/CherryStudioDev/Data/agents.db` in dev, `~/Library/Application Support/CherryStudio/Data/agents.db` in prod)
 
 ### IPC Communication
 
@@ -235,7 +223,7 @@ logger.error("message", error);
 | Build | electron-vite 5 with rolldown-vite 7 (experimental) |
 | Test | Vitest 3 (unit), Playwright (e2e) |
 | Lint/Format | ESLint 9, oxlint, Biome 2 |
-| DB (main) | Drizzle ORM + LibSQL (SQLite) |
+| DB (main) | Drizzle ORM + better-sqlite3 (SQLite) — see `src/main/services/chatDb/` |
 | DB (renderer) | Dexie (IndexedDB) |
 | Logging | Winston + winston-daily-rotate-file |
 | Tracing | OpenTelemetry |

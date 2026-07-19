@@ -1,3 +1,12 @@
+> **⚠️ DEPRECATED — Historical Reference Only**
+>
+> The Agent IPC implementation described in this document no longer exists.
+> The `AgentMessageDataSource` and the agent-related IPC channels have been removed.
+> This document is retained for reference on the `DbService` facade pattern and `DexieMessageDataSource` design.
+>
+> A full rewrite is planned as part of the SQLite migration initiative
+> (see `src/main/services/chatDb/` for the new infrastructure).
+
 # Unified Data Access Layer
 
 This module provides a unified interface for accessing message data from different sources:
