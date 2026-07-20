@@ -431,4 +431,149 @@ describe('wireAdapters', () => {
       expect(wire.content).toBeNull()
     })
   })
+
+  // =========================================================================
+  // Structured Message.model round-trip
+  // =========================================================================
+
+  describe('structured Message.model round-trip', () => {
+    it('preserves structured model in overflow, nulls the column', () => {
+      const structuredModel = {
+        id: 'gpt-4',
+        provider: 'openai',
+        name: 'GPT-4',
+        group: 'gpt',
+        owned_by: 'openai',
+        description: 'Large language model',
+        capabilities: [{ type: 'text' as any }],
+        pricing: { input: 0.03, output: 0.06 }
+      }
+      const json: JsonObject = {
+        id: 'm-1',
+        topicId: 't-1',
+        role: 'assistant',
+        model: structuredModel as any,
+        modelId: 'gpt-4'
+      }
+
+      const msg = wireToMessage(json)
+      // Column model is null (object can't bind to TEXT)
+      expect(msg.model).toBeNull()
+      // modelId from explicit wire field
+      expect(msg.modelId).toBe('gpt-4')
+      // Structured object preserved in overflow
+      expect(msg.overflow.model).toEqual(structuredModel)
+
+      // Round-trip: reconstruct restores structured model
+      const wire = messageToWire(msg)
+      expect(wire.model).toEqual(structuredModel)
+      expect(wire.modelId).toBe('gpt-4')
+      expect(wire.overflow).toBeUndefined()
+    })
+
+    it('extracts modelId from structured model.id when explicit modelId absent', () => {
+      const structuredModel = {
+        id: 'claude-3',
+        provider: 'anthropic',
+        name: 'Claude 3',
+        group: 'claude'
+      }
+      const json: JsonObject = {
+        id: 'm-1',
+        topicId: 't-1',
+        model: structuredModel as any
+        // no modelId field
+      }
+
+      const msg = wireToMessage(json)
+      expect(msg.model).toBeNull()
+      expect(msg.modelId).toBe('claude-3')
+      expect(msg.overflow.model).toEqual(structuredModel)
+
+      const wire = messageToWire(msg)
+      expect(wire.model).toEqual(structuredModel)
+      expect(wire.modelId).toBe('claude-3')
+    })
+
+    it('preserves explicit modelId over structured model.id', () => {
+      const structuredModel = { id: 'model-a', provider: 'p', name: 'A', group: 'g' }
+      const json: JsonObject = {
+        id: 'm-1',
+        topicId: 't-1',
+        model: structuredModel as any,
+        modelId: 'explicit-id'
+      }
+
+      const msg = wireToMessage(json)
+      expect(msg.modelId).toBe('explicit-id')
+      expect(msg.overflow.model).toEqual(structuredModel)
+    })
+
+    it('preserves scalar string model in column (legacy behavior)', () => {
+      const json: JsonObject = {
+        id: 'm-1',
+        topicId: 't-1',
+        model: 'gpt-4-turbo'
+      }
+
+      const msg = wireToMessage(json)
+      expect(msg.model).toBe('gpt-4-turbo')
+      // Not in overflow (it's a scalar)
+      expect(msg.overflow.model).toBeUndefined()
+
+      const wire = messageToWire(msg)
+      expect(wire.model).toBe('gpt-4-turbo')
+    })
+
+    it('handles null model correctly', () => {
+      const json: JsonObject = {
+        id: 'm-1',
+        topicId: 't-1',
+        model: null
+      }
+
+      const msg = wireToMessage(json)
+      expect(msg.model).toBeNull()
+      expect(msg.overflow.model).toBeUndefined()
+
+      const wire = messageToWire(msg)
+      expect(wire.model).toBeNull()
+    })
+
+    it('does not mutate input json', () => {
+      const structuredModel = { id: 'm1', provider: 'p', name: 'M', group: 'g' }
+      const json: JsonObject = {
+        id: 'm-1',
+        topicId: 't-1',
+        model: structuredModel as any
+      }
+      const originalKeys = Object.keys(json)
+      wireToMessage(json)
+      expect(Object.keys(json)).toEqual(originalKeys)
+      expect(json.model).toEqual(structuredModel)
+    })
+
+    it('patch routes structured model to overflow and sets column null', () => {
+      const structuredModel = { id: 'new-m', provider: 'p', name: 'New', group: 'g' }
+      const patch = wireToMessagePatch({ model: structuredModel as any })
+      expect(patch.model).toBeNull()
+      expect(patch.modelId).toBe('new-m')
+      expect(patch.overflow).toBeDefined()
+      expect(patch.overflow!.model).toEqual(structuredModel)
+    })
+
+    it('patch preserves explicit modelId when model is structured', () => {
+      const structuredModel = { id: 'm1', provider: 'p', name: 'M', group: 'g' }
+      const patch = wireToMessagePatch({ model: structuredModel as any, modelId: 'explicit' })
+      expect(patch.model).toBeNull()
+      expect(patch.modelId).toBe('explicit')
+      expect(patch.overflow!.model).toEqual(structuredModel)
+    })
+
+    it('patch preserves scalar model in column (legacy)', () => {
+      const patch = wireToMessagePatch({ model: 'gpt-4' })
+      expect(patch.model).toBe('gpt-4')
+      expect(patch.overflow).toBeUndefined()
+    })
+  })
 })

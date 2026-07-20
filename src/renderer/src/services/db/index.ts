@@ -34,3 +34,5 @@ export {
 // Export implementations (for testing or direct access if needed)
 export { AgentMessageDataSource } from './AgentMessageDataSource'
 export { DexieMessageDataSource } from './DexieMessageDataSource'
+export type { ChatDbApi } from './SqliteMessageDataSource'
+export { ChatDbResultError, SqliteMessageDataSource } from './SqliteMessageDataSource'

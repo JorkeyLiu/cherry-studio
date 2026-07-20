@@ -2,6 +2,22 @@ import type { TokenUsageData } from '@cherrystudio/analytics-client'
 import { electronAPI } from '@electron-toolkit/preload'
 import type { SpanEntity, TokenUsage } from '@mcp-trace/trace-core'
 import type { SpanContext } from '@opentelemetry/api'
+import type {
+  AppendMessageRequest,
+  BulkAddBlocksRequest,
+  ClearMessagesRequest,
+  DeleteBlocksRequest,
+  DeleteMessageRequest,
+  DeleteMessagesRequest,
+  EnsureTopicRequest,
+  FetchMessagesRequest,
+  GetRawTopicRequest,
+  TopicExistsRequest,
+  UpdateBlocksRequest,
+  UpdateMessageAndBlocksRequest,
+  UpdateMessageRequest,
+  UpdateSingleBlockRequest
+} from '@shared/chatDb'
 import type { GitBashPathInfo, UpgradeChannel } from '@shared/config/constant'
 import type { LogLevel, LogSourceWithContext } from '@shared/config/logger'
 import type { FileChangeEvent, WebviewKeyEvent } from '@shared/config/types'
@@ -534,6 +550,24 @@ const api = {
   },
   analytics: {
     trackTokenUsage: (data: TokenUsageData) => ipcRenderer.invoke(IpcChannel.Analytics_TrackTokenUsage, data)
+  },
+  chatDb: {
+    fetchMessages: (request: FetchMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_FetchMessages, request),
+    getRawTopic: (request: GetRawTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_GetRawTopic, request),
+    topicExists: (request: TopicExistsRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_TopicExists, request),
+    ensureTopic: (request: EnsureTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_EnsureTopic, request),
+    appendMessage: (request: AppendMessageRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_AppendMessage, request),
+    updateMessage: (request: UpdateMessageRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_UpdateMessage, request),
+    updateMessageAndBlocks: (request: UpdateMessageAndBlocksRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_UpdateMessageAndBlocks, request),
+    deleteMessage: (request: DeleteMessageRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessage, request),
+    deleteMessages: (request: DeleteMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessages, request),
+    updateBlocks: (request: UpdateBlocksRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_UpdateBlocks, request),
+    updateSingleBlock: (request: UpdateSingleBlockRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_UpdateSingleBlock, request),
+    bulkAddBlocks: (request: BulkAddBlocksRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_BulkAddBlocks, request),
+    deleteBlocks: (request: DeleteBlocksRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteBlocks, request),
+    clearMessages: (request: ClearMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_ClearMessages, request)
   }
 }
 

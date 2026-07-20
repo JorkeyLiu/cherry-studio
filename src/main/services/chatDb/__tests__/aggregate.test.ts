@@ -1060,6 +1060,97 @@ describe('ChatDbAggregateService', () => {
   })
 
   // =========================================================================
+  // Structured model round-trip (real aggregate)
+  // =========================================================================
+
+  describe('structured model round-trip', () => {
+    it('preserves structured model through append+fetch round-trip', () => {
+      const topicId = `t-${uid()}`
+      const structuredModel = {
+        id: 'gpt-4o',
+        provider: 'openai',
+        name: 'GPT-4o',
+        group: 'gpt',
+        owned_by: 'openai',
+        capabilities: [{ type: 'text' }],
+        pricing: { input: 0.005, output: 0.015 }
+      }
+      const msgJson = makeMessageJson(topicId, {
+        model: structuredModel,
+        modelId: 'gpt-4o'
+      })
+
+      const result = agg.appendMessage(topicId, msgJson as any, [])
+      expect(result.ok).toBe(true)
+
+      const fetched = agg.fetchMessages(topicId)
+      expect(fetched.ok).toBe(true)
+      const wireMsg = okValue(fetched).messages[0]
+      // Structured model should be fully preserved in wire output
+      expect(wireMsg.model).toEqual(structuredModel)
+      expect(wireMsg.modelId).toBe('gpt-4o')
+    })
+
+    it('preserves structured model through updateMessage+fetch round-trip', () => {
+      const topicId = `t-${uid()}`
+      const msgJson = makeMessageJson(topicId, { model: 'old-model' })
+      agg.appendMessage(topicId, msgJson as any, [])
+
+      // Update with structured model
+      const newModel = { id: 'claude-3', provider: 'anthropic', name: 'Claude 3', group: 'claude' }
+      const result = agg.updateMessage(topicId, msgJson.id as string, { model: newModel } as any)
+      expect(result.ok).toBe(true)
+
+      const fetched = agg.fetchMessages(topicId)
+      expect(fetched.ok).toBe(true)
+      expect(okValue(fetched).messages[0].model).toEqual(newModel)
+      expect(okValue(fetched).messages[0].modelId).toBe('claude-3')
+    })
+
+    it('handles null model after structured model', () => {
+      const topicId = `t-${uid()}`
+      const structuredModel = { id: 'm1', provider: 'p', name: 'M', group: 'g' }
+      const msgJson = makeMessageJson(topicId, { model: structuredModel })
+      agg.appendMessage(topicId, msgJson as any, [])
+
+      // Update to null model
+      agg.updateMessage(topicId, msgJson.id as string, { model: null } as any)
+
+      const fetched = agg.fetchMessages(topicId)
+      expect(fetched.ok).toBe(true)
+      expect(okValue(fetched).messages[0].model).toBeNull()
+    })
+
+    it('preserves other overflow fields alongside structured model', () => {
+      const topicId = `t-${uid()}`
+      const structuredModel = { id: 'm1', provider: 'p', name: 'M', group: 'g' }
+      const msgJson = makeMessageJson(topicId, {
+        model: structuredModel,
+        customField: 'preserved',
+        usage: { tokens: 100 }
+      })
+
+      agg.appendMessage(topicId, msgJson as any, [])
+
+      const fetched = agg.fetchMessages(topicId)
+      expect(fetched.ok).toBe(true)
+      const wire = okValue(fetched).messages[0]
+      expect(wire.model).toEqual(structuredModel)
+      expect(wire.customField).toBe('preserved')
+      expect(wire.usage).toEqual({ tokens: 100 })
+    })
+
+    it('never binds object to SQLite text column (no throw)', () => {
+      const topicId = `t-${uid()}`
+      const structuredModel = { id: 'm1', provider: 'p', name: 'M', group: 'g' }
+      const msgJson = makeMessageJson(topicId, { model: structuredModel })
+
+      // This should NOT throw "cannot bind object to TEXT column"
+      expect(() => agg.appendMessage(topicId, msgJson as any, [])).not.toThrow()
+    })
+  })
+
+  // =========================================================================
   // Ordering
   // =========================================================================
 

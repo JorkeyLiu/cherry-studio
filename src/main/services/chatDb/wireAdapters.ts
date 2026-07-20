@@ -15,7 +15,7 @@
 
 import type { JsonObject } from '@shared/chatDb'
 
-import { reconstruct, reconstructBlock } from './domain/codec'
+import { OVERFLOW_REMOVE, reconstruct, reconstructBlock } from './domain/codec'
 import type { FileReferenceData, MessageBlockData, MessageData, TopicData } from './domain/types'
 
 // ---------------------------------------------------------------------------
@@ -71,8 +71,63 @@ export function wireToTopic(json: JsonObject): TopicData {
 }
 
 /**
+ * Extract a safe scalar model value from a wire `model` field.
+ *
+ * Policy:
+ * - string → use as-is (legacy scalar behavior).
+ * - null/undefined → null.
+ * - object (structured Model) → store in overflow, return null for column.
+ *   If object has a string `id`, that is already captured separately in modelId.
+ * - Other non-string primitives → null (reject non-serializable).
+ */
+function extractModelScalar(value: unknown): string | null {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string') return value
+  // Object or other non-string → not a valid scalar for TEXT column
+  return null
+}
+
+/**
+ * Extract a safe modelId value from wire fields.
+ *
+ * Policy:
+ * - If explicit `modelId` is a string → use as-is.
+ * - If `model` is an object with string `id` → extract model.id as modelId.
+ * - Otherwise → null.
+ */
+function extractModelId(explicitModelId: unknown, rawModel: unknown): string | null {
+  // Explicit modelId takes precedence
+  if (typeof explicitModelId === 'string' && explicitModelId.length > 0) {
+    return explicitModelId
+  }
+  // Extract from structured model object
+  if (rawModel !== null && rawModel !== undefined && typeof rawModel === 'object' && !Array.isArray(rawModel)) {
+    const obj = rawModel as Record<string, unknown>
+    if (typeof obj.id === 'string' && obj.id.length > 0) {
+      return obj.id
+    }
+  }
+  return null
+}
+
+/**
+ * Determine if a wire `model` value is a structured object that should
+ * be preserved in overflow (not bound to a TEXT column).
+ */
+function isStructuredModel(value: unknown): boolean {
+  return value !== null && value !== undefined && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
  * Convert a JsonObject wire entity to a MessageData domain DTO.
  * Unknown keys are preserved in overflow.
+ *
+ * Structured model handling:
+ * - When wire `model` is a structured JSON object, the complete object is
+ *   preserved in overflow. The promoted SQL `model` column is set to null.
+ * - The `modelId` column is populated from explicit wire `modelId` if present,
+ *   otherwise extracted from the structured object's `id` field.
+ * - Scalar/null legacy model values retain existing behavior.
  */
 export function wireToMessage(json: JsonObject): MessageData {
   const overflow: Record<string, unknown> = {}
@@ -86,6 +141,12 @@ export function wireToMessage(json: JsonObject): MessageData {
     }
   }
 
+  // Handle structured model object: preserve in overflow, null the column
+  const rawModel = result.model
+  if (isStructuredModel(rawModel)) {
+    overflow.model = rawModel
+  }
+
   return {
     id: result.id as string,
     topicId: (result.topicId as string) ?? '',
@@ -93,8 +154,8 @@ export function wireToMessage(json: JsonObject): MessageData {
     content: (result.content as string | null) ?? null,
     status: (result.status as string | null) ?? null,
     askId: (result.askId as string | null) ?? null,
-    model: (result.model as string | null) ?? null,
-    modelId: (result.modelId as string | null) ?? null,
+    model: extractModelScalar(rawModel),
+    modelId: extractModelId(result.modelId, rawModel),
     assistantId: (result.assistantId as string | null) ?? null,
     createdAt: (result.createdAt as string | null) ?? null,
     updatedAt: (result.updatedAt as string | null) ?? null,
@@ -163,9 +224,18 @@ export function topicToWire(topic: TopicData): JsonObject {
  * Convert a MessageData domain DTO to a JsonObject for the wire.
  * Overflow keys are spread as the base, then column values overlay.
  * The `overflow` key itself is excluded from the output.
+ *
+ * Structured model restoration:
+ * If the column `model` is null but overflow contains a structured model
+ * object (stored during wireToMessage), the structured object is restored
+ * as the wire `model` field. This ensures the renderer receives the
+ * original structured Model without generic promoted null overwriting it.
  */
 export function messageToWire(message: MessageData): JsonObject {
-  return reconstruct(message) as JsonObject
+  // If column model is null but overflow has structured model, restore it
+  const overrides: Record<string, unknown> | undefined =
+    message.model === null && isStructuredModel(message.overflow.model) ? { model: message.overflow.model } : undefined
+  return reconstruct(message, overrides) as JsonObject
 }
 
 /**
@@ -328,6 +398,12 @@ export function messagesToWire(messages: MessageData[]): JsonObject[] {
  * Build a partial domain patch from a JsonObject wire patch.
  * Only includes fields present in the input; unknown keys go to overflow.
  * Returns a partial MessageData suitable for repository update methods.
+ *
+ * Structured model handling:
+ * If the wire patch contains a structured `model` object, the object is
+ * routed to overflow (not the column). The scalar `model` column is
+ * set to null to avoid binding an object to a TEXT column.
+ * modelId is extracted from the structured object's id if not explicitly set.
  */
 export function wireToMessagePatch(json: JsonObject): Partial<MessageData> & { overflow?: Record<string, unknown> } {
   const patch: Record<string, unknown> = {}
@@ -335,7 +411,25 @@ export function wireToMessagePatch(json: JsonObject): Partial<MessageData> & { o
 
   for (const [key, value] of Object.entries(json)) {
     if (MESSAGE_FIELDS.has(key)) {
-      patch[key] = value
+      if (key === 'model' && isStructuredModel(value)) {
+        // Structured model object → overflow, null the column
+        overflow.model = value
+        patch.model = null
+        // Extract modelId from structured object if not already in the patch
+        if (!('modelId' in json)) {
+          const obj = value as Record<string, unknown>
+          if (typeof obj.id === 'string' && obj.id.length > 0) {
+            patch.modelId = obj.id
+          }
+        }
+      } else if (key === 'model' && value === null) {
+        // Explicit null model: clear column AND remove from overflow
+        // This ensures a prior structured model in overflow doesn't resurrect
+        patch.model = null
+        overflow.model = OVERFLOW_REMOVE
+      } else {
+        patch[key] = value
+      }
     } else {
       overflow[key] = value
     }

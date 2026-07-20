@@ -1,6 +1,6 @@
 # Cherry Studio SQLite 迁移文档
 
-> **文档状态**：In progress（Phase 0–2 完成，Phase 3.1 完成，Phase 3.2 完成（审计修复），Phase 3.3+ 未开始）
+> **文档状态**：In progress（Phase 0–2 完成，Phase 3.1 完成，Phase 3.2 完成（审计修复），Phase 3.3 完成，Phase 3.4+ 未开始）
 > **分支**：`jorkey/refactor/sqlite-migration`
 > **最后更新**：2026-07-20
 > **Owner**：Personal fork（jorkeyliu）
@@ -243,7 +243,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 属性 | 值 |
 |---|---|
-| **状态** | In progress（Phase 3.1 Done） |
+| **状态** | In progress（Phase 3.1 Done, Phase 3.2 Done (audit-fixed), Phase 3.3 Done, Phase 3.4+ Not started） |
 | **目标** | 建立 Renderer→Main 的 command-oriented typed IPC |
 | **主要任务** | 定义 IPC channel + command types（`packages/shared/IpcChannel.ts`）；Main 侧 handler；Renderer 侧 `SqliteMessageDataSource`；收口 DbService 路由 |
 | **退出条件** | IPC 调用链路端到端可用；DbService 可切换到 SQLite 数据源 |
@@ -273,6 +273,21 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **退出条件** | ✅ ChatDbAggregateService 实现 14 命令；✅ wire adapters 保留结构化 renderer Message.model/tool-object block content/unknown JSON/nullable 语义；✅ repository factory 支持 root DB 和 transaction executor 绑定；✅ 14 个 IPC handler 含 request/result 运行时验证和结构化错误映射；✅ 141 个 Phase 3.2 tests 通过（aggregate 55 + wireAdapters 20 + ipc 27 + errors 39）；✅ 870+ 个 tests 全部通过（含 Phase 2 161 + shared 199 + 2 unflaky renderer timeout failures 被分类为 pre-existing flaky）；✅ typecheck / format 通过 |
 | **事务保证** | ① appendMessage: ensure-topic + message insert + block upsert + file-ref sync in one tx；② updateMessageAndBlocks: message patch + block upsert + file-ref sync in one tx；③ updateBlocks: block upsert + file-ref sync in one tx；④ updateSingleBlock: load/merge/update + file-ref delete/create in one tx；⑤ deleteBlocks: one tx, FK cascade for refs；⑥ clearMessages: one tx, FK cascade for refs + segments；⑦ bulkAddBlocks: duplicate check + insert + file-ref sync in one tx |
 | **非目标** | 无 Renderer/DbService 路由变更；无 preload 变更；无 per-call fallback；无双写；无 file count 迁移 |
+
+#### Phase 3.3：Preload bridge + Renderer SqliteMessageDataSource + structured model fix
+
+| 属性 | 值 |
+|---|---|
+| **状态** | **Done** |
+| **目标** | Preload fixed named bridge（14 方法）；Renderer SqliteMessageDataSource（exported/unrouted）；Main structured Message.model round-trip 缺陷修复 |
+| **交付物** | `src/preload/index.ts` 新增 `window.api.chatDb`（14 个命名方法直接 ipcRenderer.invoke）；`src/renderer/src/services/db/SqliteMessageDataSource.ts`（ChatDbApi 接口 + ChatDbResultError + cloneForWire + MessageDataSource 实现 14 方法）；`src/renderer/src/services/db/index.ts` 导出；`src/main/services/chatDb/wireAdapters.ts` 修复结构化 model round-trip（wireToMessage: 对象→overflow + column null + modelId 提取；messageToWire: 从 overflow 恢复结构化对象；wireToMessagePatch: 对象 model→overflow + null model 清除 overflow）；`__tests__/SqliteMessageDataSource.test.ts`（65 tests）、wireAdapters.test.ts 新增 9 个结构化 model 测试、aggregate.test.ts 新增 5 个结构化 model round-trip 测试 |
+| **结构化 model 修复** | ① wire `model` 为结构化 JSON 对象时，完整对象存入 overflow，promoted SQL `model` 列设为 null；② `modelId` 优先使用显式 wire 字段，否则从结构化对象的 `id` 字段提取；③ 读取时 messageToWire 从 overflow 恢复原始结构化对象，不被 column null 覆盖；④ scalar/null 旧行为保留；⑤ patch 传入 null model 时同时清除 overflow（防止历史结构化 model 残留）；⑥ 绝不绑定对象到 SQLite TEXT 列 |
+| **Preload bridge** | `window.api.chatDb` 含 14 个命名方法：fetchMessages、getRawTopic、topicExists、ensureTopic、appendMessage、updateMessage、updateMessageAndBlocks、deleteMessage、deleteMessages、updateBlocks、updateSingleBlock、bulkAddBlocks、deleteBlocks、clearMessages；直接 ipcRenderer.invoke，无 tracedInvoke；无通用 command/channel dispatcher；无 SQL/repository API；无 file-count 方法 |
+| **Renderer datasource** | 构造函数注入 ChatDbApi（默认 window.api.chatDb）；每个方法调用对应 bridge 方法 + unwrap ChatDbResult；ChatDbResultError 携带 code/message/retryable/details；transport rejection 原样传播；fetchMessages 接受但不发送 forceReload；getRawTopic wire null→renderer undefined；appendMessage -1 sentinel 省略；updateMessageAndBlocks 省略冗余 topicId/sortOrder；updateTopicUpdatedAt 在成功的消息/主题变更后 dispatch；无 file-count 方法；cloneForWire 递归克隆 + 安全验证 |
+| **约束** | Dexie 在 Phase 3/4 期间保持 authoritative；不修改 DbService 路由；不实现 per-call fallback；不自动切换；`updateFileCount(s)` 保留在 Dexie/FileManager |
+| **排除项** | 不修改 DbService 路由或 DexieMessageDataSource；不实现 importer / shadow verification / cutover / FTS / canonical files / fallback；不 commit/push |
+| **退出条件** | ✅ 802 个相关 tests 全部通过（shared 199 + Main 538 + renderer 65）；✅ structured model round-trip 通过 aggregate 实测（append+fetch、update+fetch、null-after-structured、coexistence-with-overflow）；✅ preload 14 个方法映射正确；✅ typecheck 通过；✅ 无 DbService/DexieMessageDataSource 变更 |
+| **Main 验证边界** | Main 侧 runtime validation 通过 shared contracts 验证 request/result；Renderer 不重复验证 |
 
 ### Phase 4：Dexie 导入与 Shadow Verification
 
@@ -426,7 +441,9 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-20 | Phase 3.2 | 完成（Done）：ChatDbAggregateService（14 命令实现）；repository factory（root DB / transaction 绑定）；wire adapters（JSON ↔ Domain，保留结构化 renderer model/tool-object/unknown JSON/nullable 语义）；errors.ts（错误映射 9 类）；ipc.ts（14 个 IPC handler 注册 + request/result 运行时验证 + 结构化错误映射 + disposer）；shared contract 修正（blocks 数组前置验证、identity/reparenting 拒绝、所有权一致性、新错误码）；78 个新 tests 通过；438 个 tests 全部通过；typecheck / format 通过 |
 | 2026-07-20 | Phase 3.2 审计修复 | 修复 9 项审计发现：fetchMessages topic priming；updateBlocks/updateSingleBlock/deleteBlocks/clearMessages 原子性（root tx + tx-bound repos）；clearMessages 移除 fileRefs.deleteByMessage（FK cascade）；typed aggregate errors + SQLite code inspection；IPC validateChatDbResult + malformed result containment；channel ChatDbChannel 类型；错误消息 sanitize；generic storage error non-retryable；53 个新 tests；932 个 total tests 通过 |
 | 2026-07-20 | Phase 3.2 评审修复 | 修复 5 项评审发现：① 替换伪回滚测试为基于 SQLite trigger 的确定性回滚测试（appendMessage/updateMessageAndBlocks/updateSingleBlock 三个 genuine rollback cases）；② IPC 注册模块级生命周期管理（activeRegistrationId + activeDisposer + stale-disposer ownership）；③ shared contract updateMessage/updateSingleBlock patch 拒绝 sortOrder 字段；④ 移除 "abort due to constraint" 冲突误分类（避免 unstructured FK message 被分类为 CONFLICT）；⑤ 141 个 Phase 3.2 tests 通过，870+ total tests 通过 |
-| 2026-07-20 | Phase 3 | In progress（Phase 3.1 Done, Phase 3.2 Done (audit-fixed), Phase 3.3+ Not started） |
+| 2026-07-20 | Phase 3.3 完成 | Preload bridge（window.api.chatDb 14 个命名方法 ipcRenderer.invoke）；Renderer SqliteMessageDataSource（ChatDbApi 构造注入 + ChatDbResultError + cloneForWire + 14 方法 + dispatch parity）；Main structured model 缺陷修复（wireToMessage 对象→overflow + column null + modelId 提取；messageToWire overflow 恢复；wireToMessagePatch null model 清除 overflow）；802 个 tests 通过 |
+| 2026-07-20 | Phase 3 | In progress（Phase 3.1 Done, Phase 3.2 Done (audit-fixed), Phase 3.3 Done, Phase 3.4+ Not started） |
+| 2026-07-20 | Phase 3.3 | 完成（Done）：Preload bridge（`window.api.chatDb` 14 个命名方法）；Renderer SqliteMessageDataSource（ChatDbApi 接口注入 + ChatDbResultError + cloneForWire + 14 方法实现 + updateTopicUpdatedAt dispatch parity）；Main structured Message.model round-trip 缺陷修复（wireToMessage: 结构化对象→overflow + column null + modelId 提取；messageToWire: overflow 恢复；wireToMessagePatch: 对象→overflow + null 清除 overflow）；802 个相关 tests 通过（shared 199 + Main 538 + renderer 65）；typecheck 通过；无 DbService/DexieMessageDataSource 变更 |
 | 2026-07-19 | Phase 4 | Not started |
 | 2026-07-19 | Phase 5 | Not started（切换策略已决策：一次性切换 + Dexie 快照回滚） |
 | 2026-07-19 | Phase 6 | Not started |
@@ -468,6 +485,9 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | `src/main/services/chatDb/__tests__/aggregate.test.ts` | 39 tests: all 14 commands, transaction rollback, ordering, file refs |
 | `src/main/services/chatDb/__tests__/wireAdapters.test.ts` | 20 tests: wire ↔ domain round-trip, tool content, file refs, nullable semantics |
 | `src/main/services/chatDb/__tests__/ipc.test.ts` | 19 tests: 14 handlers, validation, identity rejection, error mapping, disposer |
+| `src/preload/index.ts` | Preload bridge: `window.api.chatDb` with 14 named IPC methods (ChatDb_FetchMessages etc.) |
+| `src/renderer/src/services/db/SqliteMessageDataSource.ts` | Renderer SqliteMessageDataSource: ChatDbApi interface, ChatDbResultError, cloneForWire, 14 methods, updateTopicUpdatedAt dispatch |
+| `src/renderer/src/services/db/__tests__/SqliteMessageDataSource.test.ts` | 65 tests: method mapping, forceReload omission, null→undefined, insertIndex, JSON boundary, unsupported types, ChatDbResultError, transport errors, no retry, dispatch parity, no file-count methods |
 
 ### 历史路径（已不存在）
 
