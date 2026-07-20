@@ -1,8 +1,13 @@
-// ---------------------------------------------------------------------------
-// Repository stubs — to be implemented in Phase 2.
-//
-// Each repository will wrap Drizzle ORM queries for a single table,
-// providing a domain-specific API (CRUD + queries).
-// ---------------------------------------------------------------------------
+/**
+ * Repository layer for the chat database.
+ *
+ * Each repository wraps Drizzle ORM queries for a single table,
+ * providing a domain-specific API (CRUD + queries).
+ */
 
-export {}
+export { BlocksRepository } from './BlocksRepository'
+export { FileReferencesRepository } from './FileReferencesRepository'
+export type { AffectedCount, GetResult } from './helpers'
+export { MessagesRepository } from './MessagesRepository'
+export { TopicSegmentsRepository } from './TopicSegmentsRepository'
+export { TopicsRepository } from './TopicsRepository'

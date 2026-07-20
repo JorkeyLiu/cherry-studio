@@ -108,11 +108,17 @@ vi.mock('drizzle-orm/better-sqlite3', () => ({
 vi.mock('drizzle-orm/sqlite-core', () => ({
   sqliteTable: vi.fn((_name: string, _columns: any, _indexes?: any) => ({})),
   index: vi.fn(() => ({})),
-  integer: vi.fn(() => ({})),
+  uniqueIndex: vi.fn(() => ({})),
+  integer: vi.fn(() => ({
+    notNull: vi.fn().mockReturnThis(),
+    default: vi.fn().mockReturnThis(),
+    references: vi.fn().mockReturnThis()
+  })),
   primaryKey: vi.fn(() => ({})),
   text: vi.fn(() => ({
     primaryKey: vi.fn().mockReturnThis(),
     notNull: vi.fn().mockReturnThis(),
+    default: vi.fn().mockReturnThis(),
     references: vi.fn().mockReturnThis()
   }))
 }))
@@ -353,29 +359,32 @@ describe('ChatDbService', () => {
     it('should return applied count from runMigrations', async () => {
       await chatDbService.init()
       const db = chatDbService.getDatabase()
+      const sqlite = chatDbService.getSqlite()
       // init already applied 001_initial_schema, so a second call returns 0
-      const count = runMigrations(db)
+      const count = runMigrations(db, sqlite)
       expect(count).toBe(0)
     })
 
     it('should return 0 on subsequent runMigrations call (all applied)', async () => {
       await chatDbService.init()
       const db = chatDbService.getDatabase()
-      runMigrations(db)
-      const count = runMigrations(db)
+      const sqlite = chatDbService.getSqlite()
+      runMigrations(db, sqlite)
+      const count = runMigrations(db, sqlite)
       expect(count).toBe(0)
     })
 
     it('should throw on empty migration SQL', async () => {
       await chatDbService.init()
       const db = chatDbService.getDatabase()
+      const sqlite = chatDbService.getSqlite()
       const emptyMigration = { key: 'empty', description: 'Empty', sql: [] }
 
       const originalLength = MIGRATIONS.length
       MIGRATIONS.push(emptyMigration)
 
       try {
-        expect(() => runMigrations(db)).toThrow('has no SQL statements')
+        expect(() => runMigrations(db, sqlite)).toThrow('has no SQL statements')
       } finally {
         MIGRATIONS.splice(originalLength)
       }
@@ -660,9 +669,10 @@ describe('BetterSqlite3BackupAdapter', () => {
 // ---------------------------------------------------------------------------
 
 describe('Migration registry', () => {
-  it('should have exactly one migration (001_initial_schema)', () => {
-    expect(MIGRATIONS).toHaveLength(1)
+  it('should have exactly two migrations (001 + 002)', () => {
+    expect(MIGRATIONS).toHaveLength(2)
     expect(MIGRATIONS[0].key).toBe('001_initial_schema')
+    expect(MIGRATIONS[1].key).toBe('002_corrective_schema')
   })
 
   it('001_initial_schema should have SQL statements', () => {

@@ -108,8 +108,8 @@ describe('ChatDbService Production-Path Integration', () => {
       const sqlite = openTestDb(dbPath)
       const db = wrapDrizzle(sqlite)
 
-      const count = runMigrations(db)
-      expect(count).toBe(1)
+      const count = runMigrations(db, sqlite)
+      expect(count).toBe(2)
 
       // Verify tables exist
       const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as Array<{
@@ -133,8 +133,8 @@ describe('ChatDbService Production-Path Integration', () => {
       const sqlite = openTestDb(dbPath)
       const db = wrapDrizzle(sqlite)
 
-      runMigrations(db)
-      const secondCount = runMigrations(db)
+      runMigrations(db, sqlite)
+      const secondCount = runMigrations(db, sqlite)
       expect(secondCount).toBe(0)
 
       sqlite.close()
@@ -145,13 +145,13 @@ describe('ChatDbService Production-Path Integration', () => {
       const sqlite = openTestDb(dbPath)
       const db = wrapDrizzle(sqlite)
 
-      runMigrations(db)
+      runMigrations(db, sqlite)
 
       const originalLength = MIGRATIONS.length
       MIGRATIONS.push({ key: 'empty_test', description: 'Empty', sql: [] })
 
       try {
-        expect(() => runMigrations(db)).toThrow('has no SQL statements')
+        expect(() => runMigrations(db, sqlite)).toThrow('has no SQL statements')
       } finally {
         MIGRATIONS.splice(originalLength)
       }
@@ -164,7 +164,7 @@ describe('ChatDbService Production-Path Integration', () => {
       const sqlite = openTestDb(dbPath)
       const db = wrapDrizzle(sqlite)
 
-      runMigrations(db)
+      runMigrations(db, sqlite)
 
       // Insert a topic
       sqlite
@@ -204,7 +204,7 @@ describe('ChatDbService Production-Path Integration', () => {
     it('should pass on a valid database', () => {
       const dbPath = realPath.join(tempDir, 'test.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
 
       const result = sqlite.pragma('integrity_check', { simple: true })
       expect(result).toBe('ok')
@@ -215,7 +215,7 @@ describe('ChatDbService Production-Path Integration', () => {
     it('should detect a corrupt database file', () => {
       const dbPath = realPath.join(tempDir, 'test.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
       sqlite.close()
 
       // Corrupt the file by overwriting header bytes
@@ -245,7 +245,7 @@ describe('ChatDbService Production-Path Integration', () => {
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
       const db = wrapDrizzle(sqlite)
-      runMigrations(db)
+      runMigrations(db, sqlite)
 
       // Insert committed data
       sqlite
@@ -285,7 +285,7 @@ describe('ChatDbService Production-Path Integration', () => {
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
       const db = wrapDrizzle(sqlite)
-      runMigrations(db)
+      runMigrations(db, sqlite)
 
       sqlite
         .prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`)
@@ -314,7 +314,7 @@ describe('ChatDbService Production-Path Integration', () => {
     it('should throw and cleanup if backup fails', async () => {
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
 
       const failingAdapter = {
         createSnapshot: async () => {
@@ -335,7 +335,7 @@ describe('ChatDbService Production-Path Integration', () => {
     it('should throw and cleanup if validation fails after snapshot', async () => {
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
 
       const adapter = new BetterSqlite3BackupAdapter(() => sqlite)
       // Override validateSnapshot to simulate failure
@@ -367,7 +367,7 @@ describe('ChatDbService Production-Path Integration', () => {
 
       // Create a real database so the marker check passes
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
       sqlite.close()
 
       const markerPath = realPath.join(dbDir, 'chat.db.restore')
@@ -408,7 +408,7 @@ describe('ChatDbService Production-Path Integration', () => {
 
       const sqlite = openTestDb(liveDbPath)
       const db = wrapDrizzle(sqlite)
-      runMigrations(db)
+      runMigrations(db, sqlite)
 
       // Insert data to ensure WAL activity
       sqlite
@@ -469,7 +469,7 @@ describe('ChatDbService Production-Path Integration', () => {
 
       for (let i = 0; i < 5; i++) {
         const sqlite = openTestDb(dbPath)
-        runMigrations(wrapDrizzle(sqlite))
+        runMigrations(wrapDrizzle(sqlite), sqlite)
         const result = sqlite.pragma('integrity_check', { simple: true })
         expect(result).toBe('ok')
         sqlite.close()
@@ -485,7 +485,7 @@ describe('ChatDbService Production-Path Integration', () => {
     it('close should be safe to call on already-closed database', () => {
       const dbPath = realPath.join(tempDir, 'test.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
 
       sqlite.close()
       expect(sqlite.open).toBe(false)
@@ -494,7 +494,7 @@ describe('ChatDbService Production-Path Integration', () => {
     it('should preserve handle integrity after failed close', () => {
       const dbPath = realPath.join(tempDir, 'test.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
 
       // Insert data
       sqlite
@@ -520,7 +520,7 @@ describe('ChatDbService Production-Path Integration', () => {
     it('should serialize concurrent backup calls', async () => {
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
 
       sqlite
         .prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`)
@@ -562,7 +562,7 @@ describe('ChatDbService Production-Path Integration', () => {
 
       const sqlite = openTestDb(liveDbPath)
       const db = wrapDrizzle(sqlite)
-      runMigrations(db)
+      runMigrations(db, sqlite)
 
       // Insert multiple records
       for (let i = 0; i < 10; i++) {
@@ -642,7 +642,7 @@ describe('ChatDbService Production-Path Integration', () => {
       // 1. Create a valid chat.db (simulating what BackupManager.restore produces)
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
       sqlite.close()
 
       // 2. Create restore marker (simulating handleStartupRestore)
@@ -675,7 +675,7 @@ describe('ChatDbService Production-Path Integration', () => {
       // 1. Create a valid chat.db then corrupt it
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
       sqlite.close()
 
       // Corrupt the database
@@ -714,7 +714,7 @@ describe('ChatDbService Production-Path Integration', () => {
       // 1. Create a valid chat.db
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
       sqlite.close()
 
       // 2. Corrupt it
@@ -733,7 +733,7 @@ describe('ChatDbService Production-Path Integration', () => {
       // 5. Simulate manual repair: replace corrupt DB with valid one, clear marker
       realFs.rmSync(dbPath)
       const repairSqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(repairSqlite))
+      runMigrations(wrapDrizzle(repairSqlite), repairSqlite)
       repairSqlite.close()
 
       service.clearRepairRequired()
@@ -771,7 +771,7 @@ describe('ChatDbService Production-Path Integration', () => {
       // Create a valid DB
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
       sqlite.close()
 
       // Init and close rapidly — close increments generation
@@ -792,7 +792,7 @@ describe('ChatDbService Production-Path Integration', () => {
     it('multiple close() calls should be safe', async () => {
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
       sqlite.close()
 
       await service.init()
@@ -806,7 +806,7 @@ describe('ChatDbService Production-Path Integration', () => {
     it('init after close failure should retry successfully', async () => {
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
       sqlite.close()
 
       await service.init()
@@ -829,7 +829,7 @@ describe('ChatDbService Production-Path Integration', () => {
     it('getDatabase/getSqlite/getBackup refuse while repair marker exists with live handles', async () => {
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
       sqlite.close()
 
       await service.init()
@@ -872,7 +872,7 @@ describe('ChatDbService Production-Path Integration', () => {
     it('setRestorePending should succeed when chat.db exists', () => {
       const dbPath = realPath.join(tempDir, 'chat.db')
       const sqlite = openTestDb(dbPath)
-      runMigrations(wrapDrizzle(sqlite))
+      runMigrations(wrapDrizzle(sqlite), sqlite)
       sqlite.close()
 
       service.setRestorePending()

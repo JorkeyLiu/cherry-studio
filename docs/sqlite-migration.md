@@ -1,6 +1,6 @@
 # Cherry Studio SQLite 迁移文档
 
-> **文档状态**：In progress（Phase 0 完成，Phase 1 完成，Phase 2 Repository 实现待进行）
+> **文档状态**：In progress（Phase 0–2 完成，Phase 3 未开始）
 > **分支**：`jorkey/refactor/sqlite-migration`
 > **最后更新**：2026-07-20
 > **Owner**：Personal fork（jorkeyliu）
@@ -178,9 +178,11 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 ---
 
-## 8. 初步目标 Schema（Draft v0 / Proposed）
+## 8. 初步目标 Schema（Draft v0 → Applied 001+002）
 
 > 以下为表关系和关键字段规划，表达关系和约束意图，**不锁定 DDL**。待技术栈 ADR 决定后生成最终 DDL。
+>
+> **状态更新（2026-07-20）**：Draft v0 规划已通过 append-only migrations `001`（initial，Phase 1）和 `002`（Phase 2 schema extension）落地为 applied schema。当前 `chat.db` 运行的就是 001+002。`file_references` 表在 002 中以 block-linked 方式实现（见 Q-3 决议）；FTS 未包含（见 Q-5 决议）。
 
 | 表 | 关键字段 | 关系 |
 |---|---|---|
@@ -231,10 +233,11 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 属性 | 值 |
 |---|---|
-| **状态** | Not started |
+| **状态** | **Done** |
 | **目标** | 实现类型安全的 Repository 层 |
-| **主要任务** | TopicsRepository、MessagesRepository、BlocksRepository、FileReferencesRepository；批量操作优化；分页查询 |
-| **退出条件** | 所有 Repository 单元测试通过；CRUD + 批量操作覆盖 |
+| **实际交付范围** | Append-only migration `002`（Phase 2 schema extension）；Main-local DTO/codec/mappers/typed cursors；`TopicsRepository`、`MessagesRepository`、`BlocksRepository`、`TopicSegmentsRepository`、`FileReferencesRepository`；block-linked file references（完整元数据快照，无 canonical files 表）；无 FTS |
+| **主要任务** | TopicsRepository、MessagesRepository、BlocksRepository、TopicSegmentsRepository（含）、FileReferencesRepository；批量操作优化；分页查询（keyset pagination + dense ordering）；ownership/cascades/rollback 测试 |
+| **退出条件** | ✅ 所有 Repository 单元测试通过（real better-sqlite3）；CRUD + 批量操作 + keyset pagination + dense ordering 覆盖；ownership/cascades/rollback 事务回滚测试通过；TopicSegmentsRepository 含完整 CRUD 和排序 |
 
 ### Phase 3：IPC 与 Renderer 收口
 
@@ -351,9 +354,9 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 |---|---|---|---|
 | Q-1 | libSQL + Drizzle vs better-sqlite3 / 其他方案？ | A-7 技术栈决策 | **Resolved**：选择 better-sqlite3 + Drizzle ORM（A-7 Accepted） |
 | Q-2 | chat.db 是否未来统一为 app.db（合并 Memory/Knowledge）？ | 架构长期演进 | Open |
-| Q-3 | 文件元数据首期迁移深度：仅 references 还是包含 files 表全量？ | Phase 2 范围 | Open |
+| Q-3 | 文件元数据首期迁移深度：仅 references 还是包含 files 表全量？ | Phase 2 范围 | **Resolved**：Phase 2 使用 block-linked file references，每条引用携带完整元数据快照（file_name, file_path, file_type 等）；不建 canonical files 表。canonical files 表推迟到 FileManager 全局迁移前做显式决策 |
 | Q-4 | 流式批次阈值：多大消息量触发分批 IPC？ | Phase 3 IPC 设计 | Open |
-| Q-5 | 搜索/FTS 首期是否实现？schema 预留还是 Phase 6 再加？ | Phase 2 schema | Open |
+| Q-5 | 搜索/FTS 首期是否实现？schema 预留还是 Phase 6 再加？ | Phase 2 schema | **Resolved**：Phase 2 不含 FTS；后续通过 append-only migration 添加，时机为搜索 projection 设计完成时 |
 | Q-6 | 遗留 agents.db 用户文件处理：归档提示还是自动清理？ | Group E 清理 | Open |
 | Q-7 | 备份协调的具体实现：WAL checkpoint 还是 backup API？ | A-6 备份策略 | **Closed/Accepted**：online backup API（better-sqlite3 `backup()`）封装为可替换 adapter，`BackupManager` 全操作协调；不使用 live WAL raw copy（A-6 Accepted） |
 
@@ -372,6 +375,10 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-20 | A-6 Accepted：online backup adapter + full-operation coordination | better-sqlite3 `backup()` API 封装为可替换 adapter；BackupManager 协调互斥锁、staging、生产路径过滤、恢复后 integrity check；未来可替换为 PowerSync；不使用 live WAL raw copy |
 | 2026-07-20 | Q-7 Closed/Accepted | 备份协调采用 online backup API（better-sqlite3 `backup()`）作为 adapter，BackupManager 全操作协调 |
 | 2026-07-20 | Phase 1 完成 | ChatDbService 生命周期硬化；WAL/fk/synchronous/busy_timeout pragmas；inline build-safe initial migration；integrity check；restored-first-open repair gating；startup/will-quit wiring；replaceable online backup adapter；BackupManager full-operation coordination；production-path tests |
+| 2026-07-20 | Phase 2 完成 | Append-only migration 002；Main-local DTO/codec/mappers/typed cursors；TopicsRepository、MessagesRepository、BlocksRepository、TopicSegmentsRepository、FileReferencesRepository；CRUD/batches/keyset pagination/dense ordering/ownership/cascades/rollback 测试（real better-sqlite3） |
+| 2026-07-20 | Q-3 Resolved | block-linked file references 携带完整元数据快照；canonical files table 推迟到 FileManager 全局迁移前显式决策 |
+| 2026-07-20 | Q-5 Resolved | Phase 2 不含 FTS；后续 append-only migration 添加，时机为搜索 projection 设计完成时 |
+| 2026-07-20 | TopicSegmentsRepository 澄清 | 原 Phase 2 规划遗漏 TopicSegmentsRepository；Phase 2 实际交付包含该 Repository |
 
 ---
 
@@ -385,7 +392,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-19 | 决策 | A-7 Accepted（better-sqlite3 + Drizzle ORM，PowerSync 兼容）；A-5 Accepted（一次性切换 + Dexie 快照回滚） |
 | 2026-07-20 | Phase 1 | 完成（Done）：ChatDbService 生命周期硬化；WAL/fk/synchronous/busy_timeout pragmas；inline build-safe initial migration；integrity check；restored-first-open repair gating（repair-required 时 app 继续运行，chat DB 不可用）；startup/will-quit wiring；replaceable online backup adapter（better-sqlite3 `backup()`）；BackupManager full-operation coordination（互斥锁、staging、生产路径过滤）；production-path tests |
 | 2026-07-20 | 决策 | A-6 Accepted（online backup adapter + full-operation coordination）；Q-7 Closed/Accepted |
-| 2026-07-19 | Phase 2 | Not started |
+| 2026-07-20 | Phase 2 | 完成（Done）：append-only migration 002；Main-local DTO/codec/mappers/typed cursors；TopicsRepository、MessagesRepository、BlocksRepository、TopicSegmentsRepository、FileReferencesRepository；block-linked file references（完整元数据快照）；CRUD/batches/keyset pagination/dense ordering/ownership/cascades/rollback 测试（real better-sqlite3）；Q-3 Resolved（file references 策略）；Q-5 Resolved（无 FTS） |
 | 2026-07-19 | Phase 3 | Not started |
 | 2026-07-19 | Phase 4 | Not started |
 | 2026-07-19 | Phase 5 | Not started（切换策略已决策：一次性切换 + Dexie 快照回滚） |

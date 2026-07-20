@@ -163,7 +163,7 @@ describe('BackupManager Production-Path Integration', () => {
     realFs.mkdirSync(dataDir, { recursive: true })
     const chatDbPath = realPath.join(dataDir, 'chat.db')
     sqlite = openTestDb(chatDbPath)
-    runMigrations(drizzle(sqlite, { schema }))
+    runMigrations(drizzle(sqlite, { schema }), sqlite)
     sqlite
       .prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`)
       .run('t1', 'Production Backup Test', new Date().toISOString())
@@ -199,7 +199,7 @@ describe('BackupManager Production-Path Integration', () => {
 
       const chatDbPath = realPath.join(dataRestoreDir, 'chat.db')
       const restoreSqlite = openTestDb(chatDbPath)
-      runMigrations(drizzle(restoreSqlite, { schema }))
+      runMigrations(drizzle(restoreSqlite, { schema }), restoreSqlite)
       restoreSqlite
         .prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`)
         .run('t1', 'Restore Test', new Date().toISOString())
@@ -249,7 +249,7 @@ describe('BackupManager Production-Path Integration', () => {
 
       const chatDbPath = realPath.join(dataRestoreDir, 'chat.db')
       const restoreSqlite = openTestDb(chatDbPath)
-      runMigrations(drizzle(restoreSqlite, { schema }))
+      runMigrations(drizzle(restoreSqlite, { schema }), restoreSqlite)
       restoreSqlite.close()
 
       // Make Data.restore read-only → marker write will fail with EACCES
@@ -310,7 +310,7 @@ describe('BackupManager Production-Path Integration', () => {
       realFs.mkdirSync(dataRestoreDir, { recursive: true })
       const chatDbPath = realPath.join(dataRestoreDir, 'chat.db')
       const restoreSqlite = openTestDb(chatDbPath)
-      runMigrations(drizzle(restoreSqlite, { schema }))
+      runMigrations(drizzle(restoreSqlite, { schema }), restoreSqlite)
       restoreSqlite.close()
 
       await BackupManager.handleStartupRestore()
@@ -611,7 +611,7 @@ describe('BackupManager Production-Path Integration', () => {
       // Create a real SQLite database separate from the beforeEach one
       const dbPath = realPath.join(tempDir, 'mutex-test-chat.db')
       const mutexSqlite = openTestDb(dbPath)
-      runMigrations(drizzle(mutexSqlite, { schema }))
+      runMigrations(drizzle(mutexSqlite, { schema }), mutexSqlite)
       mutexSqlite
         .prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`)
         .run('t1', 'Mutex Test', new Date().toISOString())

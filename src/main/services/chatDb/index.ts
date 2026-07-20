@@ -231,7 +231,7 @@ class ChatDbService {
     this.db = db
 
     // --- Run pending migrations ---
-    const appliedCount = runMigrations(this.db)
+    const appliedCount = runMigrations(this.db, sqlite)
     if (appliedCount > 0) {
       logger.info(`Applied ${appliedCount} migration(s)`)
     }

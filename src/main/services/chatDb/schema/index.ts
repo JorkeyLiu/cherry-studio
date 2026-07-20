@@ -1,4 +1,4 @@
-import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 
 // ---------------------------------------------------------------------------
 // migration_state — tracks which migrations have been applied
@@ -12,15 +12,19 @@ export const migrationState = sqliteTable('migration_state', {
 // ---------------------------------------------------------------------------
 // topics
 // ---------------------------------------------------------------------------
-export const topics = sqliteTable('topics', {
-  id: text('id').primaryKey(),
-  assistantId: text('assistant_id'),
-  name: text('name'),
-  createdAt: text('created_at'),
-  updatedAt: text('updated_at'),
-  deletedAt: text('deleted_at'),
-  extra: text('extra')
-})
+export const topics = sqliteTable(
+  'topics',
+  {
+    id: text('id').primaryKey(),
+    assistantId: text('assistant_id'),
+    name: text('name'),
+    createdAt: text('created_at'),
+    updatedAt: text('updated_at'),
+    deletedAt: text('deleted_at'),
+    extra: text('extra')
+  },
+  (table) => [index('topics_deleted_at_idx').on(table.deletedAt)]
+)
 
 // ---------------------------------------------------------------------------
 // messages
@@ -31,17 +35,23 @@ export const messages = sqliteTable(
     id: text('id').primaryKey(),
     topicId: text('topic_id')
       .notNull()
-      .references(() => topics.id),
+      .references(() => topics.id, { onDelete: 'cascade' }),
     role: text('role'),
     content: text('content'),
     status: text('status'),
     askId: text('ask_id'),
     model: text('model'),
+    modelId: text('model_id'),
+    assistantId: text('assistant_id'),
     createdAt: text('created_at'),
-    sortOrder: integer('sort_order'),
+    updatedAt: text('updated_at'),
+    sortOrder: integer('sort_order').notNull().default(0),
     extra: text('extra')
   },
-  (table) => [index('messages_topic_id_sort_order_idx').on(table.topicId, table.sortOrder)]
+  (table) => [
+    index('messages_topic_id_sort_order_idx').on(table.topicId, table.sortOrder),
+    index('messages_assistant_id_idx').on(table.assistantId)
+  ]
 )
 
 // ---------------------------------------------------------------------------
@@ -53,10 +63,13 @@ export const messageBlocks = sqliteTable(
     id: text('id').primaryKey(),
     messageId: text('message_id')
       .notNull()
-      .references(() => messages.id),
+      .references(() => messages.id, { onDelete: 'cascade' }),
     type: text('type'),
     content: text('content'),
-    sortOrder: integer('sort_order'),
+    status: text('status'),
+    createdAt: text('created_at'),
+    updatedAt: text('updated_at'),
+    sortOrder: integer('sort_order').notNull().default(0),
     extra: text('extra')
   },
   (table) => [index('message_blocks_message_id_sort_order_idx').on(table.messageId, table.sortOrder)]
@@ -71,8 +84,11 @@ export const topicSegments = sqliteTable(
     id: text('id').primaryKey(),
     topicId: text('topic_id')
       .notNull()
-      .references(() => topics.id),
-    sortOrder: integer('sort_order'),
+      .references(() => topics.id, { onDelete: 'cascade' }),
+    name: text('name'),
+    createdAt: text('created_at'),
+    updatedAt: text('updated_at'),
+    sortOrder: integer('sort_order').notNull().default(0),
     extra: text('extra')
   },
   (table) => [index('topic_segments_topic_id_sort_order_idx').on(table.topicId, table.sortOrder)]
@@ -86,13 +102,17 @@ export const topicSegmentMessages = sqliteTable(
   {
     segmentId: text('segment_id')
       .notNull()
-      .references(() => topicSegments.id),
+      .references(() => topicSegments.id, { onDelete: 'cascade' }),
     messageId: text('message_id')
       .notNull()
-      .references(() => messages.id),
-    sortOrder: integer('sort_order')
+      .references(() => messages.id, { onDelete: 'cascade' }),
+    sortOrder: integer('sort_order').notNull().default(0)
   },
-  (table) => [primaryKey({ columns: [table.segmentId, table.messageId] })]
+  (table) => [
+    primaryKey({ columns: [table.segmentId, table.messageId] }),
+    index('topic_segment_messages_segment_id_sort_order_idx').on(table.segmentId, table.sortOrder),
+    index('topic_segment_messages_message_id_idx').on(table.messageId)
+  ]
 )
 
 // ---------------------------------------------------------------------------
@@ -102,7 +122,9 @@ export const fileReferences = sqliteTable(
   'file_references',
   {
     id: text('id').primaryKey(),
-    messageId: text('message_id').references(() => messages.id),
+    blockId: text('block_id')
+      .notNull()
+      .references(() => messageBlocks.id, { onDelete: 'cascade' }),
     fileId: text('file_id').notNull(),
     fileName: text('file_name'),
     filePath: text('file_path'),
@@ -111,7 +133,8 @@ export const fileReferences = sqliteTable(
     extra: text('extra')
   },
   (table) => [
-    index('file_references_message_id_idx').on(table.messageId),
-    index('file_references_file_id_idx').on(table.fileId)
+    index('file_references_block_id_idx').on(table.blockId),
+    index('file_references_file_id_idx').on(table.fileId),
+    uniqueIndex('file_references_block_id_file_id_uniq').on(table.blockId, table.fileId)
   ]
 )
