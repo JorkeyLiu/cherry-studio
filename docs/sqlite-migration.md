@@ -1,6 +1,6 @@
 # Cherry Studio SQLite 迁移文档
 
-> **文档状态**：In progress（Phase 0–2 完成，Phase 3.1 完成，Phase 3.2 完成（审计修复），Phase 3.3 完成，Phase 3.4+ 未开始）
+> **文档状态**：In progress（Phase 0–3 完成，Phase 4+ 未开始）
 > **分支**：`jorkey/refactor/sqlite-migration`
 > **最后更新**：2026-07-20
 > **Owner**：Personal fork（jorkeyliu）
@@ -243,10 +243,10 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 属性 | 值 |
 |---|---|
-| **状态** | In progress（Phase 3.1 Done, Phase 3.2 Done (audit-fixed), Phase 3.3 Done, Phase 3.4+ Not started） |
+| **状态** | **Done**（Phase 3.1 Done, Phase 3.2 Done (audit-fixed), Phase 3.3 Done, Phase 3.4 Done） |
 | **目标** | 建立 Renderer→Main 的 command-oriented typed IPC |
 | **主要任务** | 定义 IPC channel + command types（`packages/shared/IpcChannel.ts`）；Main 侧 handler；Renderer 侧 `SqliteMessageDataSource`；收口 DbService 路由 |
-| **退出条件** | IPC 调用链路端到端可用；DbService 可切换到 SQLite 数据源 |
+| **退出条件** | ✅ IPC 调用链路端到端可用；✅ DbService 路由可通过注入策略切换到 SQLite 数据源 |
 
 #### Phase 3.1：Shared wire types & contracts
 
@@ -288,6 +288,23 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **排除项** | 不修改 DbService 路由或 DexieMessageDataSource；不实现 importer / shadow verification / cutover / FTS / canonical files / fallback；不 commit/push |
 | **退出条件** | ✅ 802 个相关 tests 全部通过（shared 199 + Main 538 + renderer 65）；✅ structured model round-trip 通过 aggregate 实测（append+fetch、update+fetch、null-after-structured、coexistence-with-overflow）；✅ preload 14 个方法映射正确；✅ typecheck 通过；✅ 无 DbService/DexieMessageDataSource 变更 |
 | **Main 验证边界** | Main 侧 runtime validation 通过 shared contracts 验证 request/result；Renderer 不重复验证 |
+
+#### Phase 3.4：Immutable injected routing policy
+
+| 属性 | 值 |
+|---|---|
+| **状态** | **Done** |
+| **目标** | DbService 路由策略通过构造注入实现不可变切换；生产环境永久默认 Dexie；SQLite 验证仅限显式构造实例 |
+| **交付物** | `src/renderer/src/services/db/routingPolicy.ts`（DbRoutingPolicy 类型 + OrdinaryMessageSource / DexieMessageSource / AgentMessageSource 依赖接口 + DbServiceDeps 构造选项）；`src/renderer/src/services/db/DbService.ts`（公共构造函数 + 不可变注入策略 + 懒加载 SQLite 源 + 永久 Dexie 单例）；`src/renderer/src/services/db/index.ts`（导出路由类型）；`src/renderer/src/services/db/__tests__/DbService.test.ts`（102 tests） |
+| **策略语义** | `'dexie'` — 所有普通操作路由到 Dexie；生产默认。`'sqlite-validation'` — 普通操作路由到 SQLite（懒加载，首次普通操作创建一次）；仅限显式构造。`'sqlite-authoritative'` — Phase 5 保留；构造时同步抛出明确错误 |
+| **Agent 路由** | Agent session 操作始终最高优先级、策略无关；不创建 SQLite 源 |
+| **文件操作** | `updateFileCount` / `updateFileCounts` 始终使用注入的 Dexie 源，与策略无关；不实例化/调用 SQLite / Agent |
+| **混合操作** | `updateBlocks` 按 topicId 分区 agent/ordinary；`updateSingleBlock` 分类 agent/ordinary/unresolved；`bulkAddBlocks` / `deleteBlocks` 路由到配置的普通源 |
+| **getSourceType** | Agent 优先返回 `'agent'`；否则返回策略对应的普通源类型（`'dexie'` / `'sqlite'`） |
+| **禁止项** | 无环境变量 / Redux / localStorage / 可变 setter / 全局 configure/reset API；无 chat.db 存在检测 / ChatDb 初始化 / migration 002 / 就绪探针；无 per-call fallback / retry-to-Dexie / shadow reads / dual writes |
+| **约束** | Dexie 在 Phase 3/4 期间保持 authoritative；sqlite-authoritative 构造同步拒绝 |
+| **排除项** | 不修改 Main / preload / shared IPC / SqliteMessageDataSource / DexieMessageDataSource / AgentMessageDataSource；不实现 importer / shadow verification / cutover / FTS / canonical files / file-count migration |
+| **退出条件** | ✅ 168 个 renderer db tests 通过（DbService 102 + SqliteMessageDataSource 66）；✅ typecheck 通过；✅ format 通过 |
 
 ### Phase 4：Dexie 导入与 Shadow Verification
 
@@ -441,9 +458,10 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-20 | Phase 3.2 | 完成（Done）：ChatDbAggregateService（14 命令实现）；repository factory（root DB / transaction 绑定）；wire adapters（JSON ↔ Domain，保留结构化 renderer model/tool-object/unknown JSON/nullable 语义）；errors.ts（错误映射 9 类）；ipc.ts（14 个 IPC handler 注册 + request/result 运行时验证 + 结构化错误映射 + disposer）；shared contract 修正（blocks 数组前置验证、identity/reparenting 拒绝、所有权一致性、新错误码）；78 个新 tests 通过；438 个 tests 全部通过；typecheck / format 通过 |
 | 2026-07-20 | Phase 3.2 审计修复 | 修复 9 项审计发现：fetchMessages topic priming；updateBlocks/updateSingleBlock/deleteBlocks/clearMessages 原子性（root tx + tx-bound repos）；clearMessages 移除 fileRefs.deleteByMessage（FK cascade）；typed aggregate errors + SQLite code inspection；IPC validateChatDbResult + malformed result containment；channel ChatDbChannel 类型；错误消息 sanitize；generic storage error non-retryable；53 个新 tests；932 个 total tests 通过 |
 | 2026-07-20 | Phase 3.2 评审修复 | 修复 5 项评审发现：① 替换伪回滚测试为基于 SQLite trigger 的确定性回滚测试（appendMessage/updateMessageAndBlocks/updateSingleBlock 三个 genuine rollback cases）；② IPC 注册模块级生命周期管理（activeRegistrationId + activeDisposer + stale-disposer ownership）；③ shared contract updateMessage/updateSingleBlock patch 拒绝 sortOrder 字段；④ 移除 "abort due to constraint" 冲突误分类（避免 unstructured FK message 被分类为 CONFLICT）；⑤ 141 个 Phase 3.2 tests 通过，870+ total tests 通过 |
+| 2026-07-20 | Phase 3.4 完成 | 不可变注入路由策略（DbRoutingPolicy：dexie / sqlite-validation / sqlite-authoritative）；routingPolicy.ts 定义 OrdinaryMessageSource / DexieMessageSource / AgentMessageSource 依赖接口和 DbServiceDeps 构造选项；DbService 重构为公共构造函数 + 不可变注入策略 + 懒加载 SQLite 源（首次普通操作创建一次）+ 永久 Dexie 单例；sqlite-authoritative 构造同步抛出 Phase 5 错误；Agent 路由策略无关最高优先级；updateFileCount(s) 始终 Dexie；无 readiness 检测 / fallback / shadow / dual-write；102 个新 DbService tests 通过（路由 / 懒加载 / Agent / 分区 / 文件操作 / 错误传播 / 无探针 / 参数保持）；168 个 renderer db tests 通过；typecheck / format 通过 |
 | 2026-07-20 | Phase 3.3 完成 | Preload bridge（window.api.chatDb 14 个命名方法 ipcRenderer.invoke）；Renderer SqliteMessageDataSource（ChatDbApi 构造注入 + ChatDbResultError + cloneForWire + 14 方法 + dispatch parity）；Main structured model 缺陷修复（wireToMessage 对象→overflow + column null + modelId 提取；messageToWire overflow 恢复；wireToMessagePatch null model 清除 overflow）；802 个 tests 通过 |
-| 2026-07-20 | Phase 3 | In progress（Phase 3.1 Done, Phase 3.2 Done (audit-fixed), Phase 3.3 Done, Phase 3.4+ Not started） |
-| 2026-07-20 | Phase 3.3 | 完成（Done）：Preload bridge（`window.api.chatDb` 14 个命名方法）；Renderer SqliteMessageDataSource（ChatDbApi 接口注入 + ChatDbResultError + cloneForWire + 14 方法实现 + updateTopicUpdatedAt dispatch parity）；Main structured Message.model round-trip 缺陷修复（wireToMessage: 结构化对象→overflow + column null + modelId 提取；messageToWire: overflow 恢复；wireToMessagePatch: 对象→overflow + null 清除 overflow）；802 个相关 tests 通过（shared 199 + Main 538 + renderer 65）；typecheck 通过；无 DbService/DexieMessageDataSource 变更 |
+| 2026-07-20 | Phase 3 | **Done**（Phase 3.1 Done, Phase 3.2 Done (audit-fixed), Phase 3.3 Done, Phase 3.4 Done） |
+| 2026-07-20 | Phase 3.4 完成 | 不可变注入路由策略；routingPolicy.ts（DbRoutingPolicy + 依赖接口 + DbServiceDeps）；DbService 重构（公共构造函数 + 不可变注入 + 懒加载 SQLite 源 + 永久 Dexie 单例）；sqlite-authoritative 构造同步拒绝；Agent 路由策略无关最高优先级；updateFileCount(s) 始终 Dexie；102 个新 DbService tests 通过；168 个 renderer db tests 通过；typecheck / format 通过 |
 | 2026-07-19 | Phase 4 | Not started |
 | 2026-07-19 | Phase 5 | Not started（切换策略已决策：一次性切换 + Dexie 快照回滚） |
 | 2026-07-19 | Phase 6 | Not started |
@@ -458,7 +476,8 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 |---|---|
 | `src/renderer/src/databases/index.ts` | Dexie `CherryStudio` 数据库定义，所有表结构 |
 | `src/renderer/src/databases/upgrades.ts` | Dexie schema 升级函数 |
-| `src/renderer/src/services/db/DbService.ts` | DbService facade，路由 Dexie/Agent 数据源 |
+| `src/renderer/src/services/db/DbService.ts` | DbService facade，不可变注入路由策略（Phase 3.4），路由 Dexie/SQLite/Agent 数据源 |
+| `src/renderer/src/services/db/routingPolicy.ts` | Phase 3.4：DbRoutingPolicy 类型 + OrdinaryMessageSource / DexieMessageSource / AgentMessageSource 依赖接口 + DbServiceDeps 构造选项 |
 | `src/renderer/src/services/db/DexieMessageDataSource.ts` | Dexie 消息数据源实现 |
 | `src/renderer/src/services/db/AgentMessageDataSource.ts` | Agent 数据源 stub（no-op） |
 | `src/renderer/src/services/db/types.ts` | MessageDataSource 接口 + agent topic ID 工具函数 |
@@ -487,7 +506,8 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | `src/main/services/chatDb/__tests__/ipc.test.ts` | 19 tests: 14 handlers, validation, identity rejection, error mapping, disposer |
 | `src/preload/index.ts` | Preload bridge: `window.api.chatDb` with 14 named IPC methods (ChatDb_FetchMessages etc.) |
 | `src/renderer/src/services/db/SqliteMessageDataSource.ts` | Renderer SqliteMessageDataSource: ChatDbApi interface, ChatDbResultError, cloneForWire, 14 methods, updateTopicUpdatedAt dispatch |
-| `src/renderer/src/services/db/__tests__/SqliteMessageDataSource.test.ts` | 65 tests: method mapping, forceReload omission, null→undefined, insertIndex, JSON boundary, unsupported types, ChatDbResultError, transport errors, no retry, dispatch parity, no file-count methods |
+| `src/renderer/src/services/db/__tests__/SqliteMessageDataSource.test.ts` | 66 tests: method mapping, forceReload omission, null→undefined, insertIndex, JSON boundary, unsupported types, ChatDbResultError, transport errors, no retry, dispatch parity, no file-count methods |
+| `src/renderer/src/services/db/__tests__/DbService.test.ts` | 102 tests: dexie/sqlite-validation routing (14 ops each), lazy factory, agent routing (20 ops), block partitioning, file ops always Dexie, getSourceType, error propagation, no readiness probes, no mutable API, argument preservation |
 
 ### 历史路径（已不存在）
 
