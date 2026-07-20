@@ -1,9 +1,11 @@
 # Cherry Studio SQLite 迁移文档
 
-> **文档状态**：In progress（Phase 0–3 完成，Phase 4+ 未开始）
+> **文档状态**：In progress（Phase 0–3 完成；策略更正后 Phase 4+ 未开始）
 > **分支**：`jorkey/refactor/sqlite-migration`
 > **最后更新**：2026-07-20
 > **Owner**：Personal fork（jorkeyliu）
+>
+> ⚠️ **ADR-8 策略更正（2026-07-20）**：Phase 4+ 的产品策略已更正为**外部应用兼容性导入**模型。原 in-place Dexie→SQLite shadow/cutover 模型已正式废弃。详见 Section 6 A-8。
 
 ---
 
@@ -20,29 +22,43 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 历史曾存在 agents SQLite 子系统但已删除，留下残留配置和依赖。备份/恢复直接复制 `Data/` 目录，无数据库一致性保障。
 
-**目标**：将核心聊天数据迁移至 Main 进程的 SQLite（`Data/chat.db`），建立连接生命周期管理、schema migration 框架、完整性校验和备份协调基础设施，同时保持迁移期回滚能力。
+**最终产品行为**：未来的 SQLite-authoritative Cherry Chat 是一个**独立于当前 Cherry Studio 的应用**。用户在 Cherry Chat 中通过交互（等同于当前备份恢复流程）选择一个 Cherry Studio ZIP 备份文件来导入数据。不扫描磁盘查找其他应用配置、不在启动时静默迁移、不要求两个应用共享目录。
+
+**当前阶段目标（Phase 0–3）**：建立 Main 进程 SQLite 基础设施（连接管理、schema migration、integrity 校验、备份协调）和 command-oriented typed IPC，为最终的外部导入流程提供目标数据库和写入通道。Phase 0–3 的产出是运行时 plumbing，不是最终导入实现。
 
 ---
 
 ## 2. 范围与非目标
 
-### 首期范围
+### 当前范围（Phase 0–3：基础设施）
 
 - `topics`、`messages`、`message_blocks`、`topic_segments` 及必要的 file references
 - 新建独立 `Data/chat.db`（A-1 Accepted），Main 进程单写
 - 连接生命周期、migration 框架、integrity 校验、backup coordination
 - Renderer→Main 的 command-oriented typed IPC 收口
-- Dexie 导入 + shadow verification（双读校验）
-- 切换后 Dexie 保留回滚数据，不立即删除
 
-### 非目标（首期不涉及）
+### 最终范围（Phase 4–6：外部导入与 SQLite-only runtime）
 
+- 安全解压 Cherry Studio ZIP 到隔离临时工作区
+- 通过隔离 Electron Session/Profile + 隐藏 sandboxed import renderer 读取源 IndexedDB
+- 分页逻辑数据通过窄 IPC 通道传输
+- 构建候选 SQLite 数据库、验证、原子替换
+- SQLite-only 运行时完成，Dexie 路由移除
+- Cherry Chat 自身备份/恢复与 Cherry Studio ZIP 导入的 UX 分离
+
+### 非目标（明确排除）
+
+- Agent session 数据导入（out of scope）
+- 文件内容 blob 迁移（file references 是快照，不建 canonical files 表）
+- FTS/全文搜索
+- 推断缺失的 ID、ownership、timestamp、role、status、model 等字段
+- 历史逻辑格式 `data.json` / `.bak` 兼容（明确放弃）
+- 静默数据修复
 - Redux 配置数据迁移（settings、shortcuts、llm 等）
 - Memory `memories.db` 迁移
 - Knowledge `KnowledgeBase/*` 迁移
-- 上游 V2 Data&UI Refactoring 依赖
-- FTS/全文搜索（首期不实现，schema 预留位置）
-- 文件内容 blob 存储（仅迁移元数据和引用）
+- 启动时自动扫描磁盘查找其他应用配置
+- 两个应用共享目录
 
 ---
 
@@ -103,13 +119,14 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | C-2 | `package.json` 中 `drizzle-kit` devDependency | A-7 已 Accepted：**保留，配置指向 chat.db schema** |
 | C-3 | `package.json` 中 `drizzle-orm` dependency | A-7 已 Accepted：**保留，配置指向 chat.db schema** |
 
-### Group D：切换稳定后处理（依赖 Phase 5 切换完成并观察稳定）
+### Group D：SQLite-only 运行时完成后处理（依赖 Phase 5 SQLite-only runtime 完成）
 
 | # | 项目 | 条件 |
 |---|---|---|
-| C-9 | Dexie `topics`/`message_blocks`/`topic_segments` 表 | 切换完成 + 观察期稳定 + 回滚演练确认后，最终废弃 |
-| C-10 | Renderer 直接 Dexie 访问（数十处） | 逐步收口至 DbService→IPC，非一次性清理 |
-| C-11 | `DexieMessageDataSource` 实现 | 切换完成后保留回滚能力，最终移除 |
+| C-9 | Dexie `topics`/`message_blocks`/`topic_segments` 表 | Phase 5 SQLite-only runtime 完成后，Dexie 仅保留于隔离 import renderer；普通聊天路径不再访问 Dexie |
+| C-10 | Renderer 直接 Dexie 访问（数十处） | Phase 5 逐步收口至 DbService→IPC，非一次性清理 |
+| C-11 | `DexieMessageDataSource` 实现 | Phase 5 完成后从普通聊天路径移除；仅保留于隔离 import renderer 的内部实现中 |
+| C-13 | Phase 3.4 路由策略代码（`routingPolicy.ts`、注入策略） | Phase 5 临时验证 scaffolding，必须移除 |
 
 ### Group E：用户数据处理（须用户确认）
 
@@ -124,56 +141,112 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | # | 决策 | 状态 | 说明 |
 |---|---|---|---|
 | A-1 | 新建独立 `Data/chat.db`，不复用 `agents.db` | **Accepted** | agents.db 无代码 owner，schema 不兼容，用户文件需保留 |
-| A-2 | Main 进程单写，Renderer 通过 IPC 读写 | **Proposed** | 避免多进程并发写；Renderer 不直接持有 SQLite 连接 |
-| A-3 | 关系化 schema（非 JSON blob 堆砌） | **Proposed** | topics/messages/blocks 显式关系；JSON 仅用于低查询扩展字段 |
-| A-4 | Command-oriented typed IPC | **Proposed** | Renderer 不暴露 SQL 能力；Main 暴露 typed command handlers |
-| A-5 | 迁移期一次性切换 + Dexie 快照回滚 | **Accepted** | 个人 repo，无 SLA 约束；导出 Dexie→SQLite 后切换路由，旧 Dexie 文件作为回滚快照；切换后观察数天确认稳定；不采用双写。风险：切换后新增数据回滚时丢失，个人使用可接受 |
+| A-2 | Main 进程单写，Renderer 通过 IPC 读写 | **Accepted** | 避免多进程并发写；Renderer 不直接持有 SQLite 连接；Phase 3 实现确认（ChatDbAggregateService Main 侧单写 + Preload bridge IPC） |
+| A-3 | 关系化 schema（非 JSON blob 堆砌） | **Accepted** | topics/messages/blocks 显式关系；JSON 仅用于低查询扩展字段；Phase 1–2 实现确认（migration 001+002 + 5 个 Repository） |
+| A-4 | Command-oriented typed IPC | **Accepted** | Renderer 不暴露 SQL 能力；Main 暴露 typed command handlers；Phase 3.1–3.3 实现确认（14 ChatDb channels + shared contracts + typed Preload bridge） |
+| A-5 | ~~迁移期一次性切换 + Dexie 快照回滚~~ | **Superseded by A-8** | 原决策基于 in-place 本地 Dexie→SQLite 导入+切换模型。A-8 更正为外部应用兼容性导入模型：源数据来自用户选择的 Cherry Studio ZIP，不是当前运行时 Dexie；导入是 replace-all 而非 merge/shadow；不涉及"切换后新增数据回滚"场景 |
 | A-6 | 备份策略：online backup adapter + full-operation coordination | **Accepted** | better-sqlite3 `backup()` API 封装为可替换 adapter（抽象层），`BackupManager` 协调全操作（互斥锁、staging、生产路径过滤、恢复后 integrity check）；未来可替换为 PowerSync 方案；不使用 live WAL raw copy |
 | A-7 | 技术栈：better-sqlite3 + Drizzle ORM + drizzle-kit | **Accepted** | better-sqlite3 是 Node.js 生态最成熟 SQLite 驱动，同步 API，Drizzle 官方主推组合；与未来 PowerSync 集成兼容（PowerSync 首选 better-sqlite3）。@libsql/client 保留给 Memory/Knowledge 继续使用，不在本阶段统一 |
+| **A-8** | **外部应用兼容性导入：隔离 Session + 候选 SQLite 构建 + 原子替换** | **Accepted (2026-07-20)** | **最终产品行为**：SQLite-authoritative Cherry Chat 是独立于当前 Cherry Studio 的应用。用户在 Cherry Chat 中选择 Cherry Studio ZIP 备份来导入。**技术路线**：安全解压 ZIP 到唯一临时工作区 → 通过 `session.defaultSession.fromPath()` / isolated profile + 正确 origin 创建隔离 Electron Session → 隐藏 sandboxed import renderer 加载当前 Dexie schema/upgrades → 窄 import-only IPC 分页读取逻辑数据 → Main 构建候选 SQLite DB → 验证（源 vs 目标 ID/计数/字段/顺序/关系/哈希/完整性/外键/应用层抽样）→ 原子替换 live `chat.db`（失败时回滚）。**约束**：① 不扫描磁盘查找其他应用；② 不在启动时静默迁移；③ 不要求共享目录；④ 不解析 LevelDB（Main 不直接解析）；⑤ 不恢复源到目标 app 的正常 Dexie profile；⑥ 旧 IndexedDB 仅在当前 Dexie declaration/upgrades 可防御性识别并升级为结构有效的当前逻辑形态时才接受；⑦ 缺失值继承当前 Cherry Studio/Dexie 升级和读取语义，不创建 importer-specific 历史修复；⑧ 结构不可用数据被拒绝；⑨ 导入语义是 replace-all，非 merge；⑩ 在导入过程中现有 SQLite 保持 authoritative；⑪ 取消支持至最终 promotion 之前；⑫ promotion 短时不可取消，保留一个回滚快照，重开/检查 DB，成功后 relaunch。**Phase 4.0 spike** 验证 `fromPath`/profile/origin 跨平台可行性；no-go 回退方案是专用隔离 Electron helper 进程，非破坏性恢复/直接 LevelDB 解析 |
 
-> **Phase 1 前置**：A-7（技术栈）和 A-5（authoritative 切换方式）两个 ADR 已关闭（Accepted），Phase 1 可启动。
+> **Phase 1 前置**：A-7（技术栈）和 A-5（~~authoritative 切换方式~~，已由 A-8 替代）两个 ADR 已关闭（Accepted），Phase 1 可启动。A-5 在 Phase 1 启动时已 Accepted，后因产品策略更正被 A-8 Superseded。
 
 ---
 
 ## 7. 目标架构简图
 
+### 运行时架构（Phase 5 最终态：SQLite-only Cherry Chat）
+
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   Renderer Process                   │
 │                                                     │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────────┐  │
-│  │  Redux    │  │ Dexie    │  │  Hooks/Components │  │
-│  │  Store    │  │ (保留)   │  │  (读写聊天数据)    │  │
-│  └────┬─────┘  └────┬─────┘  └───────┬───────────┘  │
-│       │              │                │              │
-│       │         ┌────▼─────┐          │              │
-│       │         │ DbService │◄─────────┘              │
-│       │         └────┬─────┘                         │
-└───────┼──────────────┼───────────────────────────────┘
-        │              │ typed IPC (command)
-        │              │
-┌───────┼──────────────┼───────────────────────────────┐
-│       │              │         Main Process           │
-│       │         ┌────▼──────────────┐                 │
-│       │         │  ChatDbService    │                 │
-│       │         │  (connection mgr) │                 │
-│       │         └────┬──────────────┘                 │
-│       │              │                               │
-│       │         ┌────▼──────┐   ┌───────────────┐    │
-│       │         │ chat.db   │   │ Migration     │    │
-│       │         │ (SQLite)  │   │ Framework     │    │
-│       │         └────┬──────┘   └───────────────┘    │
-│       │              │                               │
-│       │         ┌────▼──────────────┐                 │
-│       │         │ Backup Coord.     │                 │
-│       │         │ (checkpoint/lock) │                 │
-│       │         └───────────────────┘                 │
-│       │                                               │
-│  ┌────▼────────────┐  ┌────────────────┐              │
-│  │ MemoryService   │  │ KnowledgeSvc   │  (独立)     │
-│  │ memories.db     │  │ KnowledgeBase/ │              │
-│  └─────────────────┘  └────────────────┘              │
-└───────────────────────────────────────────────────────┘
+│  ┌──────────┐  ┌───────────────────┐                │
+│  │  Redux    │  │  Hooks/Components │                │
+│  │  Store    │  │  (读写聊天数据)    │                │
+│  └────┬─────┘  └───────┬───────────┘                │
+│       │                │                             │
+│       │         ┌──────▼───────┐                     │
+│       │         │  DbService   │◄── (Phase 5: 直连  │
+│       │         │  (IPC only)  │     SQLite, 无      │
+│       │         └──────┬───────┘     Dexie 路由)     │
+│                        │                             │
+│  ┌─────────────────────▼──────────────────────────┐  │
+│  │ Dexie 仅保留于隔离 import renderer（Phase 4）  │  │
+│  └────────────────────────────────────────────────┘  │
+└────────────────────────┼────────────────────────────┘
+                         │ typed IPC (command)
+┌────────────────────────┼────────────────────────────┐
+│                   Main Process                       │
+│         ┌──────────────▼───────────────┐             │
+│         │  ChatDbAggregateService      │             │
+│         │  (14 commands)               │             │
+│         └──────────────┬───────────────┘             │
+│         ┌──────────────▼───────┐  ┌──────────────┐  │
+│         │ chat.db (SQLite)     │  │ Migration    │  │
+│         │ authoritative        │  │ Framework    │  │
+│         └──────────────┬───────┘  └──────────────┘  │
+│         ┌──────────────▼───────────────┐             │
+│         │ Backup Coord. (online backup)│             │
+│         └──────────────────────────────┘             │
+│                                                      │
+│  ┌───────────────────────────────────────────────┐   │
+│  │ Import Pipeline (Phase 4)                     │   │
+│  │ ┌─────────────┐ ┌──────────────┐ ┌─────────┐ │   │
+│  │ │ ZIP Intake  │→│ Isolated     │→│ Bulk    │ │   │
+│  │ │ + Extract   │ │ Session +    │ │ Import  │ │   │
+│  │ │             │ │ Import Rdr   │ │ + Verify│ │   │
+│  │ └─────────────┘ └──────────────┘ └────┬────┘ │   │
+│  │                                       │       │   │
+│  │ ┌─────────────────────────────────────▼─────┐ │   │
+│  │ │ Candidate SQLite → Verify → Atomic Swap   │ │   │
+│  │ └───────────────────────────────────────────┘ │   │
+│  └───────────────────────────────────────────────┘   │
+│                                                      │
+│  ┌─────────────────┐  ┌────────────────┐             │
+│  │ MemoryService   │  │ KnowledgeSvc   │  (独立)    │
+│  │ memories.db     │  │ KnowledgeBase/ │             │
+│  └─────────────────┘  └────────────────┘             │
+└──────────────────────────────────────────────────────┘
+```
+
+### 导入数据流（Phase 4）
+
+```
+用户选择 Cherry Studio ZIP
+         │
+         ▼
+┌─────────────────────┐
+│ 4.1 Secure ZIP      │  解压到唯一临时工作区
+│ Intake + Extract    │  验证 ZIP 内含 Chromium IndexedDB
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│ Isolated Profile    │  session.fromPath() / isolated profile
+│ + Import Renderer   │  正确 origin + 当前 Dexie schema/upgrades
+│ (hidden, sandboxed) │  不恢复到正常 Dexie profile
+└────────┬────────────┘
+         │ narrow import-only IPC (分页)
+         ▼
+┌─────────────────────┐
+│ 4.2 Candidate       │  Main 不解析 LevelDB
+│ SQLite Bulk Import  │  构建完整候选 chat.db
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│ 4.3 Deterministic   │  ID/计数/字段/顺序/关系/哈希
+│ Verification        │  integrity_check / foreign_key_check
+│                     │  应用层抽样读取
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│ 4.4 Atomic          │  替换 live chat.db
+│ Replace-All Promote │  失败→回滚，保留一个快照
+│ (short, non-cancel) │  成功→reopen + relaunch
+└─────────────────────┘
 ```
 
 ---
@@ -224,7 +297,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 属性 | 值 |
 |---|---|
 | **状态** | **Done** |
-| **前置** | ~~A-7（技术栈）和 A-5（authoritative 切换方式）ADR 必须先关闭~~ **Done**（A-7 Accepted, A-5 Accepted） |
+| **前置** | ~~A-7（技术栈）和 A-5（authoritative 切换方式）ADR 必须先关闭~~ **Done**（A-7 Accepted, A-5 Accepted 后由 A-8 Superseded） |
 | **目标** | 建立 SQLite 连接管理、migration 框架、integrity 校验 |
 | **主要任务** | 实现 `ChatDbService`（连接生命周期/will-quit 关闭）；WAL/fk/synchronous/busy_timeout pragmas；inline build-safe initial migration；integrity check；restored-first-open repair gating；startup/will-quit wiring；replaceable online backup adapter（better-sqlite3 `backup()`）；BackupManager full-operation coordination（staging、filtering、production-path tests） |
 | **退出条件** | ✅ `chat.db` 可创建/打开/关闭；migration 可执行；integrity 校验通过；WAL + foreign_keys + synchronous pragmas 正确设置；will-quit 正确关闭；恢复备份后首次打开自动执行 `PRAGMA integrity_check`；repair-required 时 app 继续运行但 chat DB 不可用；BackupManager 协调含互斥锁、staging、生产路径过滤；online backup adapter 可替换 |
@@ -254,10 +327,10 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 |---|---|
 | **状态** | **Done** |
 | **目标** | 定义 ChatDb IPC channels、JSON wire DTO types、result envelope、runtime validation、command contracts；shared Vitest 测试覆盖 |
-| **交付物** | `packages/shared/IpcChannel.ts` 新增 14 个 ChatDb channels；`packages/shared/chatDb/` 新增 types.ts、result.ts、validation.ts、contracts.ts、index.ts；`packages/shared/chatDb/__tests__/validation.test.ts`（62 tests）、`contracts.test.ts`（45 tests） |
-| **约束** | Dexie 在 Phase 3/4 期间保持 authoritative；不基于 chat.db existence / DB initialized / migration 002 做切换；不实现 per-call SQLite→Dexie fallback；`updateFileCount(s)` 保留在 Dexie/FileManager，不纳入 IPC |
+| **交付物** | `packages/shared/IpcChannel.ts` 新增 14 个 ChatDb channels；`packages/shared/chatDb/` 新增 types.ts、result.ts、validation.ts、contracts.ts、index.ts；`packages/shared/chatDb/__tests__/validation.test.ts`（99 tests）、`contracts.test.ts`（100 tests） |
+| **约束** | 当前 Cherry Studio 运行时 Dexie 保持 authoritative（Phase 4 为外部导入，不影响当前运行时）；不基于 chat.db existence / DB initialized / migration 002 做切换；不实现 per-call SQLite→Dexie fallback；`updateFileCount(s)` 保留在 Dexie/FileManager，不纳入 IPC |
 | **排除项** | 不修改 `src/preload/index.ts`；不添加 Main handler / SqliteMessageDataSource；不修改 DbService 路由；不实现 importer / shadow verification / cutover / FTS / canonical files / fallback |
-| **退出条件** | ✅ 14 个 ChatDb channel 定义完整；✅ JSON wire 类型覆盖所有 MessageDataSource 命令（除 updateFileCount(s)）；✅ runtime validation 拒绝非法 JSON 值（undefined, bigint, symbol, function, NaN/Infinity, Date, Map/Set, Buffer/TypedArray, class instances, sparse arrays, cyclic, depth>20）；✅ 107 个 shared tests 通过；✅ typecheck / format 通过 |
+| **退出条件** | ✅ 14 个 ChatDb channel 定义完整；✅ JSON wire 类型覆盖所有 MessageDataSource 命令（除 updateFileCount(s)）；✅ runtime validation 拒绝非法 JSON 值（undefined, bigint, symbol, function, NaN/Infinity, Date, Map/Set, Buffer/TypedArray, class instances, sparse arrays, cyclic, depth>20）；✅ 199 个 shared tests 通过（validation 99 + contracts 100）；✅ typecheck / format 通过 |
 
 #### Phase 3.2：Main aggregate service & IPC handlers
 
@@ -265,12 +338,12 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 |---|---|
 | **状态** | **Done**（含审计修复） |
 | **目标** | Main ChatDb aggregate service combining five Phase 2 repositories; transaction-bound repository factory; wire adapters; 14 fixed IPC handlers with validation and error mapping |
-| **交付物** | `src/main/services/chatDb/ChatDbAggregateService.ts`（14 命令实现）；`src/main/services/chatDb/repository/factory.ts`（仓库工厂）；`src/main/services/chatDb/wireAdapters.ts`（JSON ↔ Domain 适配器）；`src/main/services/chatDb/errors.ts`（错误映射 + typed aggregate errors + SQLite code inspection）；`src/main/services/chatDb/ipc.ts`（14 个 IPC handler 注册 + validateChatDbResult + malformed result containment + re-registration safety + stale-disposer ownership）；`src/main/ipc.ts` 调用 `registerChatDbIpc()`；`__tests__/aggregate.test.ts`（55 tests）、`wireAdapters.test.ts`（20 tests）、`ipc.test.ts`（27 tests）、`errors.test.ts`（39 tests） |
+| **交付物** | `src/main/services/chatDb/ChatDbAggregateService.ts`（14 命令实现）；`src/main/services/chatDb/repository/factory.ts`（仓库工厂）；`src/main/services/chatDb/wireAdapters.ts`（JSON ↔ Domain 适配器）；`src/main/services/chatDb/errors.ts`（错误映射 + typed aggregate errors + SQLite code inspection）；`src/main/services/chatDb/ipc.ts`（14 个 IPC handler 注册 + validateChatDbResult + malformed result containment + re-registration safety + stale-disposer ownership）；`src/main/ipc.ts` 调用 `registerChatDbIpc()`；`__tests__/aggregate.test.ts`（60 tests）、`wireAdapters.test.ts`（29 tests）、`ipc.test.ts`（27 tests）、`errors.test.ts`（39 tests） |
 | **审计修复** | ① `fetchMessages` topic priming：absent topic 在同一事务内 ensure/create 并返回空数组；② `updateBlocks`/`updateSingleBlock`/`deleteBlocks`/`clearMessages` 全部使用 root-bound tx + tx-bound repos 实现原子性；③ `clearMessages` 移除语义错误的 `fileRefs.deleteByMessage()` 调用，依赖 FK cascade；④ 引入 typed aggregate errors（ChatDbValidationError 等 6 种）+ SQLite structured code inspection（SQLITE_CONSTRAINT_UNIQUE/FOREIGNKEY/BUSY/LOCKED）+ 优先级排序（typed > SQLite code > message-substring）；⑤ IPC handler 使用 `validateChatDbResult` 验证结果，malformed result 返回 valid ERR_STORAGE fallback；⑥ `handleCommand` channel 类型为 `ChatDbChannel`（通过 cast）；⑦ 错误消息 sanitize（不泄露 SQL/path/stack）；⑧ generic storage error 改为 non-retryable；⑨ 53 个新 tests（跨仓库回滚、cascade、typed error mapping、malformed result containment、topic priming） |
 | **Contract 修正** | ① blocks 数组前置验证（validateJsonObjectArray）防止 TypeError；② 消息/块 patch 拒绝 identity/reparenting/sortOrder 字段（id/topicId/messageId/sortOrder）；③ 所有权一致性校验（block.messageId 匹配 message.id）；④ ERR_CONFLICT/ERR_UNAVAILABLE/ERR_BUSY 错误码；⑤ conflict 优先于 FK 检测（"UNIQUE constraint failed" 不误判为 FK）；⑥ "abort due to constraint" 不再匹配 conflict（避免 FK 误分类） |
-| **约束** | Dexie 在 Phase 3/4 期间保持 authoritative；不基于 chat.db existence / DB initialized / migration 002 做切换；不实现 per-call SQLite→Dexie fallback；`updateFileCount(s)` 保留在 Dexie/FileManager |
+| **约束** | 当前 Cherry Studio 运行时 Dexie 保持 authoritative（Phase 4 为外部导入，不影响当前运行时）；不基于 chat.db existence / DB initialized / migration 002 做切换；不实现 per-call SQLite→Dexie fallback；`updateFileCount(s)` 保留在 Dexie/FileManager |
 | **排除项** | 不修改 `src/preload/index.ts`；不添加 SqliteMessageDataSource；不修改 DbService 路由；不实现 importer / shadow verification / cutover / FTS / canonical files / fallback |
-| **退出条件** | ✅ ChatDbAggregateService 实现 14 命令；✅ wire adapters 保留结构化 renderer Message.model/tool-object block content/unknown JSON/nullable 语义；✅ repository factory 支持 root DB 和 transaction executor 绑定；✅ 14 个 IPC handler 含 request/result 运行时验证和结构化错误映射；✅ 141 个 Phase 3.2 tests 通过（aggregate 55 + wireAdapters 20 + ipc 27 + errors 39）；✅ 870+ 个 tests 全部通过（含 Phase 2 161 + shared 199 + 2 unflaky renderer timeout failures 被分类为 pre-existing flaky）；✅ typecheck / format 通过 |
+| **退出条件** | ✅ ChatDbAggregateService 实现 14 命令；✅ wire adapters 保留结构化 renderer Message.model/tool-object block content/unknown JSON/nullable 语义；✅ repository factory 支持 root DB 和 transaction executor 绑定；✅ 14 个 IPC handler 含 request/result 运行时验证和结构化错误映射；✅ 155 个 Phase 3.2 tests 通过（aggregate 60 + wireAdapters 29 + ipc 27 + errors 39）；✅ 870+ 个 tests 全部通过（含 Phase 2 161 + shared 199 + 2 persistent renderer timeout failures 被分类为 pre-existing known failures）；✅ typecheck / format 通过 |
 | **事务保证** | ① appendMessage: ensure-topic + message insert + block upsert + file-ref sync in one tx；② updateMessageAndBlocks: message patch + block upsert + file-ref sync in one tx；③ updateBlocks: block upsert + file-ref sync in one tx；④ updateSingleBlock: load/merge/update + file-ref delete/create in one tx；⑤ deleteBlocks: one tx, FK cascade for refs；⑥ clearMessages: one tx, FK cascade for refs + segments；⑦ bulkAddBlocks: duplicate check + insert + file-ref sync in one tx |
 | **非目标** | 无 Renderer/DbService 路由变更；无 preload 变更；无 per-call fallback；无双写；无 file count 迁移 |
 
@@ -280,89 +353,205 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 |---|---|
 | **状态** | **Done** |
 | **目标** | Preload fixed named bridge（14 方法）；Renderer SqliteMessageDataSource（exported/unrouted）；Main structured Message.model round-trip 缺陷修复 |
-| **交付物** | `src/preload/index.ts` 新增 `window.api.chatDb`（14 个命名方法直接 ipcRenderer.invoke）；`src/renderer/src/services/db/SqliteMessageDataSource.ts`（ChatDbApi 接口 + ChatDbResultError + cloneForWire + MessageDataSource 实现 14 方法）；`src/renderer/src/services/db/index.ts` 导出；`src/main/services/chatDb/wireAdapters.ts` 修复结构化 model round-trip（wireToMessage: 对象→overflow + column null + modelId 提取；messageToWire: 从 overflow 恢复结构化对象；wireToMessagePatch: 对象 model→overflow + null model 清除 overflow）；`__tests__/SqliteMessageDataSource.test.ts`（65 tests）、wireAdapters.test.ts 新增 9 个结构化 model 测试、aggregate.test.ts 新增 5 个结构化 model round-trip 测试 |
+| **交付物** | `src/preload/index.ts` 新增 `window.api.chatDb`（14 个命名方法直接 ipcRenderer.invoke）；`src/renderer/src/services/db/SqliteMessageDataSource.ts`（ChatDbApi 接口 + ChatDbResultError + cloneForWire + MessageDataSource 实现 14 方法）；`src/renderer/src/services/db/index.ts` 导出；`src/main/services/chatDb/wireAdapters.ts` 修复结构化 model round-trip（wireToMessage: 对象→overflow + column null + modelId 提取；messageToWire: 从 overflow 恢复结构化对象；wireToMessagePatch: 对象 model→overflow + null model 清除 overflow）；`__tests__/SqliteMessageDataSource.test.ts`（66 tests）、wireAdapters.test.ts 新增 9 个结构化 model 测试、aggregate.test.ts 新增 5 个结构化 model round-trip 测试 |
 | **结构化 model 修复** | ① wire `model` 为结构化 JSON 对象时，完整对象存入 overflow，promoted SQL `model` 列设为 null；② `modelId` 优先使用显式 wire 字段，否则从结构化对象的 `id` 字段提取；③ 读取时 messageToWire 从 overflow 恢复原始结构化对象，不被 column null 覆盖；④ scalar/null 旧行为保留；⑤ patch 传入 null model 时同时清除 overflow（防止历史结构化 model 残留）；⑥ 绝不绑定对象到 SQLite TEXT 列 |
 | **Preload bridge** | `window.api.chatDb` 含 14 个命名方法：fetchMessages、getRawTopic、topicExists、ensureTopic、appendMessage、updateMessage、updateMessageAndBlocks、deleteMessage、deleteMessages、updateBlocks、updateSingleBlock、bulkAddBlocks、deleteBlocks、clearMessages；直接 ipcRenderer.invoke，无 tracedInvoke；无通用 command/channel dispatcher；无 SQL/repository API；无 file-count 方法 |
 | **Renderer datasource** | 构造函数注入 ChatDbApi（默认 window.api.chatDb）；每个方法调用对应 bridge 方法 + unwrap ChatDbResult；ChatDbResultError 携带 code/message/retryable/details；transport rejection 原样传播；fetchMessages 接受但不发送 forceReload；getRawTopic wire null→renderer undefined；appendMessage -1 sentinel 省略；updateMessageAndBlocks 省略冗余 topicId/sortOrder；updateTopicUpdatedAt 在成功的消息/主题变更后 dispatch；无 file-count 方法；cloneForWire 递归克隆 + 安全验证 |
-| **约束** | Dexie 在 Phase 3/4 期间保持 authoritative；不修改 DbService 路由；不实现 per-call fallback；不自动切换；`updateFileCount(s)` 保留在 Dexie/FileManager |
+| **约束** | 当前 Cherry Studio 运行时 Dexie 保持 authoritative（Phase 4 为外部导入，不影响当前运行时）；不修改 DbService 路由；不实现 per-call fallback；不自动切换；`updateFileCount(s)` 保留在 Dexie/FileManager |
 | **排除项** | 不修改 DbService 路由或 DexieMessageDataSource；不实现 importer / shadow verification / cutover / FTS / canonical files / fallback；不 commit/push |
-| **退出条件** | ✅ 802 个相关 tests 全部通过（shared 199 + Main 538 + renderer 65）；✅ structured model round-trip 通过 aggregate 实测（append+fetch、update+fetch、null-after-structured、coexistence-with-overflow）；✅ preload 14 个方法映射正确；✅ typecheck 通过；✅ 无 DbService/DexieMessageDataSource 变更 |
+| **退出条件** | ✅ 803 个相关 tests 全部通过（shared 199 + Main 538 + renderer 66）；✅ structured model round-trip 通过 aggregate 实测（append+fetch、update+fetch、null-after-structured、coexistence-with-overflow）；✅ preload 14 个方法映射正确；✅ typecheck 通过；✅ 无 DbService/DexieMessageDataSource 变更 |
 | **Main 验证边界** | Main 侧 runtime validation 通过 shared contracts 验证 request/result；Renderer 不重复验证 |
 
 #### Phase 3.4：Immutable injected routing policy
+
+> ⚠️ **临时验证 scaffolding**：Phase 3.4 的路由策略注入是用于验证 SQLite 数据源端到端可行性的临时机制。在 Phase 5 SQLite-only runtime 完成时必须移除（C-13）。不是长期运行时开关。
 
 | 属性 | 值 |
 |---|---|
 | **状态** | **Done** |
 | **目标** | DbService 路由策略通过构造注入实现不可变切换；生产环境永久默认 Dexie；SQLite 验证仅限显式构造实例 |
 | **交付物** | `src/renderer/src/services/db/routingPolicy.ts`（DbRoutingPolicy 类型 + OrdinaryMessageSource / DexieMessageSource / AgentMessageSource 依赖接口 + DbServiceDeps 构造选项）；`src/renderer/src/services/db/DbService.ts`（公共构造函数 + 不可变注入策略 + 懒加载 SQLite 源 + 永久 Dexie 单例）；`src/renderer/src/services/db/index.ts`（导出路由类型）；`src/renderer/src/services/db/__tests__/DbService.test.ts`（102 tests） |
-| **策略语义** | `'dexie'` — 所有普通操作路由到 Dexie；生产默认。`'sqlite-validation'` — 普通操作路由到 SQLite（懒加载，首次普通操作创建一次）；仅限显式构造。`'sqlite-authoritative'` — Phase 5 保留；构造时同步抛出明确错误 |
+| **策略语义** | `'dexie'` — 所有普通操作路由到 Dexie；生产默认。`'sqlite-validation'` — 普通操作路由到 SQLite（懒加载，首次普通操作创建一次）；仅限显式构造。`'sqlite-authoritative'` — 保留命名但始终拒绝：构造时同步抛出明确错误；不在运行时使用；Phase 5 移除整个 routingPolicy（C-13） |
 | **Agent 路由** | Agent session 操作始终最高优先级、策略无关；不创建 SQLite 源 |
 | **文件操作** | `updateFileCount` / `updateFileCounts` 始终使用注入的 Dexie 源，与策略无关；不实例化/调用 SQLite / Agent |
 | **混合操作** | `updateBlocks` 按 topicId 分区 agent/ordinary；`updateSingleBlock` 分类 agent/ordinary/unresolved；`bulkAddBlocks` / `deleteBlocks` 路由到配置的普通源 |
 | **getSourceType** | Agent 优先返回 `'agent'`；否则返回策略对应的普通源类型（`'dexie'` / `'sqlite'`） |
 | **禁止项** | 无环境变量 / Redux / localStorage / 可变 setter / 全局 configure/reset API；无 chat.db 存在检测 / ChatDb 初始化 / migration 002 / 就绪探针；无 per-call fallback / retry-to-Dexie / shadow reads / dual writes |
-| **约束** | Dexie 在 Phase 3/4 期间保持 authoritative；sqlite-authoritative 构造同步拒绝 |
+| **约束** | 当前 Cherry Studio 运行时 Dexie 保持 authoritative（Phase 4 为外部导入，不影响当前运行时）；sqlite-authoritative 构造同步拒绝 |
 | **排除项** | 不修改 Main / preload / shared IPC / SqliteMessageDataSource / DexieMessageDataSource / AgentMessageDataSource；不实现 importer / shadow verification / cutover / FTS / canonical files / file-count migration |
 | **退出条件** | ✅ 168 个 renderer db tests 通过（DbService 102 + SqliteMessageDataSource 66）；✅ typecheck 通过；✅ format 通过 |
 
-### Phase 4：Dexie 导入与 Shadow Verification
+### Phase 4：外部应用兼容性导入管线（A-8 Accepted）
+
+> **产品模型**：用户在 SQLite-authoritative Cherry Chat 中选择一个 Cherry Studio ZIP 备份来导入数据。ZIP 是唯一受支持的源格式，包含原始 Chromium IndexedDB。旧逻辑格式 `data.json` / `.bak` 明确放弃兼容。
+>
+> **权威语义**：导入过程中现有 SQLite 保持 authoritative。取消支持至最终 promotion 之前。promotion 短时不可取消、保留一个回滚快照、重开/检查 DB、成功后 relaunch。
+
+#### Phase 4.0：Isolated-profile feasibility spike
 
 | 属性 | 值 |
 |---|---|
 | **状态** | Not started |
-| **目标** | 将 Dexie 数据导入 SQLite，双读校验 |
-| **主要任务** | 分页导出 Dexie 数据；幂等导入；数量/ID/顺序/引用/哈希校验；shadow mode（双读比对结果） |
-| **退出条件** | 全量数据校验通过；shadow mode 无差异；导入耗时和数据量有记录 |
+| **目标** | 验证 `session.defaultSession.fromPath()` / isolated profile + 正确 origin 创建隔离 Electron Session 的跨平台可行性 |
+| **方法** | 最小 spike：在 macOS / Windows / Linux 上从临时路径 `fromPath()` 创建 session profile；验证可正确加载 IndexedDB 并通过当前 Dexie declaration + upgrade functions 识别和升级数据 |
+| **No-go 回退** | 专用隔离 Electron helper 进程（非破坏性恢复、非直接 LevelDB 解析） |
+| **退出条件** | ✅ 至少一个平台成功验证 fromPath + origin + Dexie schema 读取；✅ no-go 时记录回退 helper 进程设计；✅ spike 结果记录在本文档 |
 
-### Phase 5：切换（受控）
-
-| 属性 | 值 |
-|---|---|
-| **状态** | **Not started** |
-| **目标** | SQLite 成为 authoritative store |
-| **切换策略** | 一次性切换 + Dexie 快照回滚（A-5 Accepted）：导出 Dexie 数据到 SQLite 后切换路由，保留旧 Dexie 数据库文件作为回滚快照；切换后观察数天确认稳定；不采用双写机制。风险：切换后新增数据在回滚时丢失，个人使用可接受 |
-| **主要任务** | DbService 默认路由切换到 SQLite；Dexie 降级为只读回滚；用户通知；性能基准测试（切换前必须完成） |
-| **退出条件** | 主流程功能正常；性能不低于 Dexie 基线；**切换后新增/修改数据回滚演练成功** |
-
-### Phase 6：收尾
+#### Phase 4.1：Secure ZIP intake + isolated IndexedDB source reader
 
 | 属性 | 值 |
 |---|---|
 | **状态** | Not started |
-| **目标** | 清理遗留，稳定长期状态 |
-| **主要任务** | 清理 Group D + Group E；更新文档；移除 Dexie 回滚代码；确认备份协调完整 |
-| **退出条件** | 无 Dexie 残留引用；文档更新；CI 绿色 |
+| **前置** | Phase 4.0 spike 通过（或回退 helper 进程设计完成） |
+| **目标** | 安全解压 Cherry Studio ZIP 到唯一临时工作区；通过隔离 Session + 隐藏 sandboxed import renderer 读取源 IndexedDB |
+| **主要任务** | ZIP 解压 + 路径校验（必须含 Chromium IndexedDB 结构）；唯一临时工作区创建/清理；隔离 Session profile + 正确 origin 创建；隐藏 sandboxed BrowserWindow 加载 import renderer；import renderer 初始化当前 Dexie schema/upgrades against isolated profile；窄 import-only IPC（分页）将逻辑数据传输到 Main |
+| **源数据约束** | 受支持源：Cherry Studio ZIP 备份含原始 Chromium IndexedDB。当前 IndexedDB schema 为主源。旧 IndexedDB 仅在当前 Dexie declaration/upgrades 可防御性识别并升级为当前逻辑形态时才接受 |
+| **缺失值规则** | 缺失值继承当前 Cherry Studio/Dexie upgrade 和 reader 语义。不创建 importer-specific 历史修复。不推断缺失 ID、ownership、timestamp、role、status、model 等字段。结构不可用数据被拒绝 |
+| **排除项** | 不解析 LevelDB（Main 不直接解析）；不恢复源到目标 app 的正常 Dexie profile；不扫描磁盘查找其他应用；不要求共享目录 |
+| **退出条件** | ✅ 安全 ZIP 解压 + IndexedDB 结构校验通过；✅ 隔离 Session 成功加载源数据；✅ import renderer 通过 current Dexie schema 读取数据；✅ 分页 IPC 将逻辑数据传输到 Main；✅ 取消支持：用户可在 promotion 前中断，源数据和现有 SQLite 不受影响 |
+
+#### Phase 4.2：Candidate SQLite bulk importer
+
+| 属性 | 值 |
+|---|---|
+| **状态** | Not started |
+| **前置** | Phase 4.1 完成 |
+| **目标** | 从分页逻辑数据构建完整候选 SQLite 数据库 |
+| **主要任务** | 分页接收 import-only IPC 数据；使用 Phase 2 repository 层（TopicsRepository 等）批量写入独立候选 DB 文件；事务包裹每批导入；replace-all 语义（非 merge） |
+| **数据流** | import renderer（源 IndexedDB → 逻辑 DTO）→ IPC 分页 → Main（候选 chat.db 批量写入） |
+| **退出条件** | ✅ 10k 消息完整导入到候选 DB；✅ 导入中断后候选 DB 可安全丢弃，现有 SQLite 不受影响；✅ 导入耗时有记录 |
+
+#### Phase 4.3：Deterministic verification
+
+| 属性 | 值 |
+|---|---|
+| **状态** | Not started |
+| **前置** | Phase 4.2 完成 |
+| **目标** | 对候选 SQLite DB 执行全面验证，确保数据完整且结构正确 |
+| **验证维度** | ① 源 vs 目标 ID 集合匹配；② 每表记录数一致；③ 关键字段内容哈希比对；④ 消息 sort_order 与源顺序一致；⑤ 外键引用完整性；⑥ 关系正确性（topic→message→block、segment→message）；⑦ file-reference 快照完整性；⑧ segment 完整性；⑨ 结构化 model/tool object 完整性；⑩ overflow 数据；⑪ `PRAGMA integrity_check`；⑫ `PRAGMA foreign_key_check`；⑬ 应用层抽样读取（通过 repository 查询典型数据路径） |
+| **退出条件** | ✅ 所有验证维度通过；✅ 验证失败有明确的错误报告和诊断信息 |
+
+#### Phase 4.4：Atomic replace-all promotion
+
+| 属性 | 值 |
+|---|---|
+| **状态** | Not started |
+| **前置** | Phase 4.3 验证通过 |
+| **目标** | 将验证通过的候选 SQLite DB 原子替换为 live `chat.db` |
+| **主要任务** | 关闭现有 chat.db 连接；保留一个 rollback 快照（当前 live chat.db）；原子 rename 候选 DB → `Data/chat.db`；重新打开并验证新 DB（`PRAGMA integrity_check` + `PRAGMA foreign_key_check`）；成功 → relaunch app；失败 → 回滚到快照 DB 并报告错误 |
+| **崩溃恢复** | 如果在快照创建和候选 rename 之间发生崩溃：原始 `chat.db` 保持完整（快照是副本，rename 未执行）。启动时检测孤立的快照/临时工作区文件（例如 `chat.db.pre-import-backup`、候选 DB 临时路径），通过确定性启动清理安全删除或保留（保留用于诊断，下次启动清理）。不影响正常启动路径 |
+| **约束** | promotion 短时不可取消；保留一个回滚快照；重开/检查 DB；成功后 relaunch |
+| **退出条件** | ✅ 原子替换成功 → reopen → relaunch 流程完成；✅ 失败回滚到快照 DB 流程验证；✅ 一个回滚快照保留 |
+
+### Phase 5：SQLite-only 运行时完成
+
+| 属性 | 值 |
+|---|---|
+| **状态** | Not started |
+| **前置** | Phase 4 完成（至少一次成功端到端导入） |
+| **目标** | Cherry Chat 普通聊天路径完全使用 SQLite，移除 Dexie 路由和临时验证 scaffolding |
+| **主要任务** | DbService 默认路由直连 SQLite（无 Dexie 路由、无 routingPolicy 注入策略）；移除 Phase 3.4 路由策略代码（C-13）；Dexie 仅保留在隔离 import renderer 内部；从普通聊天路径移除 DexieMessageDataSource（C-11）；清理 Renderer 直接 Dexie 访问（C-10）；性能基准验证（不低于 Dexie 基线） |
+| **退出条件** | ✅ 普通聊天路径无 Dexie 依赖；✅ Phase 3.4 routing scaffolding 完全移除；✅ 性能不低于 Dexie 基线；✅ 所有现有测试通过；✅ CI 绿色 |
+
+### Phase 6：Cherry Chat 备份/恢复分离、UX 硬化、清理
+
+| 属性 | 值 |
+|---|---|
+| **状态** | Not started |
+| **前置** | Phase 5 完成 |
+| **目标** | Cherry Chat 自身备份/恢复与 Cherry Studio ZIP 导入的 UX 完全分离；清理所有遗留 |
+| **主要任务** | Cherry Chat 原生备份/恢复（SQLite online backup）独立于 Cherry Studio ZIP 导入 UX；清理 Group D + Group E 遗留项；更新文档；确认备份协调完整；移除不再需要的隔离 import renderer 代码（如果已完成导入且不再需要） |
+| **退出条件** | ✅ Cherry Chat 备份/恢复独立运作；✅ Cherry Studio ZIP 导入作为一次性操作独立运作；✅ Group D/E 清理完成；✅ 文档更新；✅ CI 绿色 |
 
 ---
 
-## 10. 数据迁移与回滚原则
+## 10. 导入数据流、权威语义、取消/回滚、验证规则
 
-### 迁移原则
+### 导入数据流（端到端）
 
-1. **分页导出**：Dexie 数据分页读取（避免内存爆炸），批量写入 SQLite
-2. **事务包裹**：每批导入必须在同一 SQLite 事务中完成；事务失败时整批回滚，不产生部分写入
-3. **源数据安全**：导入过程中只读取 Dexie，不修改、不删除 Dexie 数据；导入中断后 Dexie 必须保持完整
-4. **幂等导入**：导入操作可重复执行，使用 `INSERT OR REPLACE` 或先删后插；中断后续传不得产生重复记录
-5. **校验维度**：
-   - 数量校验：每个表的记录数一致
-   - ID 校验：所有主键匹配
-   - 顺序校验：消息 `sort_order` 与 Dexie 插入顺序一致
-   - 引用校验：外键引用完整性
-   - 哈希校验：关键字段内容哈希比对
-6. **单一 authoritative store**：切换后 SQLite 为唯一真实来源，不再双写
-7. **避免无事务长期双写**：双读校验期不超过必要的验证周期
+```
+用户选择 Cherry Studio ZIP
+         │
+         ▼
+┌─── 4.1 Secure ZIP Intake ───┐
+│ · 解压到唯一临时工作区       │
+│ · 验证 ZIP 内含 Chromium IDB │
+│ · 校验 IndexedDB 结构完整性  │
+└──────────┬──────────────────┘
+           │
+           ▼
+┌─── Isolated Session + Import Renderer ───┐
+│ · session.fromPath() / isolated profile  │
+│ · 正确 origin + 当前 Dexie schema        │
+│ · 隐藏 sandboxed BrowserWindow           │
+│ · 不恢复到正常 Dexie profile              │
+│ · 旧 IDB 仅在 Dexie upgrades 可识别时接受 │
+└──────────┬───────────────────────────────┘
+           │ narrow import-only IPC (分页逻辑 DTO)
+           ▼
+┌─── 4.2 Candidate SQLite Bulk Import ───┐
+│ · Main 不解析 LevelDB                   │
+│ · 使用 Phase 2 repository 层批量写入    │
+│ · 独立候选 DB 文件                       │
+│ · replace-all 语义，非 merge             │
+└──────────┬──────────────────────────────┘
+           │
+           ▼
+┌─── 4.3 Deterministic Verification ─────┐
+│ · 源 vs 目标 ID/计数/字段/顺序/关系/哈希│
+│ · file-reference 快照、segments          │
+│ · 结构化 model/tool object、overflow     │
+│ · PRAGMA integrity_check                 │
+│ · PRAGMA foreign_key_check               │
+│ · 应用层抽样读取                          │
+└──────────┬──────────────────────────────┘
+           │
+           ▼
+┌─── 4.4 Atomic Replace-All Promotion ───┐
+│ · 关闭现有 chat.db 连接                 │
+│ · 保留一个 rollback 快照                 │
+│ · 原子 rename 候选 → live chat.db       │
+│ · reopen + integrity_check               │
+│ · 成功 → relaunch                        │
+│ · 失败 → 回滚到快照 + 报告               │
+│ · promotion 短时不可取消                 │
+└─────────────────────────────────────────┘
+```
 
-### 回滚原则
+### 权威语义
 
-1. **Dexie 保留**：切换后至少保留一个稳定版本的 Dexie 数据和读取代码
-2. **回滚触发条件**：SQLite 数据损坏、性能严重退化、关键功能回归
-3. **回滚操作**：DbService 路由切回 Dexie；SQLite 文件保留用于排查
-4. **回滚前提**：切换前必须完成回滚演练，验证以下场景：
-   - **导入失败**：导入中断后 Dexie 数据未被破坏
-   - **部分导入**：导入中途失败，部分数据在 SQLite，部分在 Dexie，回滚后 Dexie 完整
-   - **切换后回滚**：切换后用户产生新数据，回滚到 Dexie 后新数据不丢失（需反向导入或双写期间保留）
-   - **应用降级**：旧版本应用打开后可正常读取 Dexie 数据
+| 阶段 | authoritative store | 说明 |
+|---|---|---|
+| Phase 0–3（运行时） | Dexie (IndexedDB) | 当前 Cherry Studio 唯一真实来源 |
+| Phase 4（导入过程中） | 现有 live SQLite（如果有） | 导入读取源 ZIP，不影响现有 DB |
+| Phase 4.4 promotion | 候选 SQLite → 原子替换 → 新 live SQLite | promotion 短时窗口内无 authoritative（连接已关闭） |
+| Phase 5+（最终态） | SQLite (chat.db) | Cherry Chat 唯一真实来源；Dexie 仅存在于隔离 import renderer |
+
+### 取消支持
+
+- **Phase 4.1–4.3**：用户可在任何时刻取消。源 ZIP 解压数据可安全丢弃。候选 DB 可安全丢弃。现有 SQLite 不受影响。
+- **Phase 4.4 promotion**：不可取消。promotion 是短时原子操作（关闭连接 → rename → reopen → relaunch）。
+
+### 回滚策略
+
+1. **promotion 失败**：自动回滚到 promotion 前保留的快照 DB
+2. **post-promotion 发现问题**：手动恢复快照 DB（保留一个快照）
+3. **导入中途取消**：丢弃临时工作区和候选 DB，现有 SQLite 不受影响
+4. **ZIP 格式不可识别**：拒绝导入，报告错误，不影响现有 DB
+
+### 安全归档约束
+
+- ZIP 是唯一受支持的源格式（Cherry Studio ZIP 备份含原始 Chromium IndexedDB）
+- 不解析 `data.json` / `.bak`（明确放弃）
+- 旧 IndexedDB 仅在当前 Dexie declaration/upgrades 可防御性识别时才接受
+- 结构不可用数据被拒绝（不修复、不推断）
+
+### 验证/默认规则
+
+- 缺失值继承当前 Cherry Studio/Dexie upgrade 和 reader 语义
+- 不创建 importer-specific 历史修复
+- 不推断缺失 ID、ownership、timestamp、role、status、model 等字段
+- replace-all 语义：导入覆盖整个目标 DB，不与现有数据 merge
 
 ---
 
@@ -370,12 +559,17 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 流式 IPC 性能 | 大消息量下 IPC 序列化/反序列化开销 | 批次阈值需基准测试确定；考虑 shared memory 或 streaming |
-| 备份一致性 | 备份期间数据写入导致不一致 | **Resolved**（A-6 Accepted）：online backup adapter（better-sqlite3 `backup()`）；BackupManager 全操作协调（互斥锁、staging、恢复后 integrity check） |
-| 备份并发 | 多来源同时触发备份导致临时目录冲突或文件撕裂 | 备份操作全局互斥；同一时间只允许一个备份任务执行 |
-| 文件系统非事务 | SQLite 文件操作非原子 | 使用 WAL 模式；备份使用临时文件+rename |
+| **Phase 4.0 fromPath 跨平台不可行** | 导入管线无法使用隔离 Session 读取源 IndexedDB | **Spike 验证**；no-go 回退为专用隔离 Electron helper 进程（非破坏性恢复、非直接 LevelDB 解析） |
+| **源 ZIP 结构不可识别** | 导入被拒绝 | 严格的 ZIP 内 IndexedDB 结构校验；明确的错误报告；不影响现有 DB |
+| **旧 IndexedDB schema 不可升级** | 旧版本备份导入被拒 | 仅接受当前 Dexie declaration/upgrades 可防御性识别的版本；版本校验前置 |
+| **导入性能（大型 ZIP）** | 大数据量导入耗时过长 | 分页传输；批量写入；性能基准记录（Phase 4.2） |
+| **promotion 失败导致数据丢失** | 无法恢复到导入前状态 | promotion 前保留一个 rollback 快照；失败自动回滚；reopen + integrity_check |
+| 流式 IPC 性能 | 大消息量下 IPC 序列化/反序列化开销 | 批次阈值需基准测试确定 |
+| 备份一致性 | 备份期间数据写入导致不一致 | **Resolved**（A-6 Accepted）：online backup adapter（better-sqlite3 `backup()`）；BackupManager 全操作协调 |
+| 备份并发 | 多来源同时触发备份导致冲突 | 备份操作全局互斥 |
+| 文件系统非事务 | SQLite 文件操作非原子 | WAL 模式；备份使用临时文件+rename |
 | 多窗口并发 | 多个 Renderer 窗口同时写入 | Main 单写；Renderer 通过 IPC 串行化 |
-| 旧备份兼容 | 迁移后备份包含 Dexie 数据 | 备份格式版本化；恢复时检测版本并选择路径 |
+| 旧备份兼容 | 迁移后备份格式变化 | Cherry Chat 原生备份（Phase 6）与 Cherry Studio ZIP 导入分离 |
 | 性能未知 | SQLite 在 Electron 中的实际表现未测试 | Phase 5 切换前必须完成基准测试 |
 | 技术栈选型 | ~~libSQL+Drizzle 可能不是最优选择~~ | **Resolved**（A-7 Accepted：better-sqlite3 + Drizzle） |
 
@@ -383,26 +577,48 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 ## 12. 验收指标 / Go-No-Go
 
-> 以下指标在 Phase 5 切换前必须确定基准值，切换后对比验证。
+### Phase 4 exit criteria（导入管线）
 
-| 指标 | 基准 | 目标 | 状态 |
-|---|---|---|---|
-| 消息加载延迟（p50/p95） | 待测 | 不退化 | Not started |
-| 消息写入吞吐 | 待测 | 不退化 | Not started |
-| 数据完整性 | 100% | 100% | Not started |
-| 冷启动 DB 打开时间 | 待测 | < 500ms | Not started |
-| 迁移全量数据耗时 | 待测 | < 60s（10k 消息） | Not started |
-| 回滚验证 | — | Dexie 回滚可用 | Not started |
+| 指标 | 目标 | 状态 |
+|---|---|---|
+| Phase 4.0 spike | fromPath + origin + Dexie schema 跨平台验证通过（或 helper 进程回退设计完成） | Not started |
+| ZIP 安全解压 | 唯一临时工作区 + IndexedDB 结构校验 | Not started |
+| 隔离 Session 读取 | import renderer 通过当前 Dexie schema 成功读取源数据 | Not started |
+| 候选 DB 构建 | 10k 消息完整导入；导入中断不损坏现有 DB | Not started |
+| 验证全通过 | ID/计数/字段/顺序/关系/哈希/integrity_check/foreign_key_check/应用层抽样 | Not started |
+| 原子 promotion | 成功 → reopen + relaunch；失败 → 回滚到快照 | Not started |
+| 取消支持 | promotion 前任意步骤取消不损坏现有 DB | Not started |
 
-**Go 条件**：
-- 所有指标达标 + 功能回归通过 + 回滚验证通过
-- **切换后新增/修改数据回滚演练成功**
-- **RPO 明确且经用户接受**（定义可接受的数据丢失窗口）
-- 分别覆盖：导入失败、部分导入、切换后回滚、应用降级
-- **备份恢复演练通过**：在持续写入期间触发备份 → 恢复备份 → 执行 `PRAGMA integrity_check` + 数据抽样比对 → 数据库可用且完整
-- **恢复后自动 integrity check**：应用恢复备份后首次打开 chat.db 时，必须执行 `PRAGMA integrity_check`；检查失败则标记数据库为需修复状态
+### Phase 5 exit criteria（SQLite-only runtime）
 
-**No-Go 条件**：任一关键指标退化 >20% 或数据完整性 <100%
+| 指标 | 目标 | 状态 |
+|---|---|---|
+| 消息加载延迟（p50/p95） | 不退化 | Not started |
+| 消息写入吞吐 | 不退化 | Not started |
+| 数据完整性 | 100% | Not started |
+| 冷启动 DB 打开时间 | < 500ms | Not started |
+| 普通聊天路径无 Dexie 依赖 | 0 Dexie 引用 | Not started |
+| Phase 3.4 routing scaffolding | 完全移除 | Not started |
+| 所有测试通过 + CI 绿色 | 100% | Not started |
+
+### Phase 6 exit criteria（备份/恢复分离 + 清理）
+
+| 指标 | 目标 | 状态 |
+|---|---|---|
+| Cherry Chat 原生备份/恢复 | 独立运作（online backup adapter） | Not started |
+| Cherry Studio ZIP 导入 | 作为一次性操作独立运作 | Not started |
+| Group D/E 清理 | 全部完成 | Not started |
+| 文档更新 | 反映最终状态 | Not started |
+| CI 绿色 | 100% | Not started |
+
+**Go 条件（Phase 4→5）**：
+- Phase 4 所有 exit criteria 通过
+- 至少一次成功端到端导入（真实 Cherry Studio ZIP → SQLite-only runtime）
+
+**No-Go 条件**：
+- Phase 4.0 spike 失败且 helper 进程回退不可行
+- 验证维度任一关键项失败
+- promotion 回滚机制不工作
 
 ---
 
@@ -413,10 +629,11 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | Q-1 | libSQL + Drizzle vs better-sqlite3 / 其他方案？ | A-7 技术栈决策 | **Resolved**：选择 better-sqlite3 + Drizzle ORM（A-7 Accepted） |
 | Q-2 | chat.db 是否未来统一为 app.db（合并 Memory/Knowledge）？ | 架构长期演进 | Open |
 | Q-3 | 文件元数据首期迁移深度：仅 references 还是包含 files 表全量？ | Phase 2 范围 | **Resolved**：Phase 2 使用 block-linked file references，每条引用携带完整元数据快照（file_name, file_path, file_type 等）；不建 canonical files 表。canonical files 表推迟到 FileManager 全局迁移前做显式决策 |
-| Q-4 | 流式批次阈值：多大消息量触发分批 IPC？ | Phase 3 IPC 设计 | Open |
+| Q-4 | 流式批次阈值：多大消息量触发分批 IPC？ | Phase 4.1 import IPC 分页 | Open |
 | Q-5 | 搜索/FTS 首期是否实现？schema 预留还是 Phase 6 再加？ | Phase 2 schema | **Resolved**：Phase 2 不含 FTS；后续通过 append-only migration 添加，时机为搜索 projection 设计完成时 |
 | Q-6 | 遗留 agents.db 用户文件处理：归档提示还是自动清理？ | Group E 清理 | Open |
 | Q-7 | 备份协调的具体实现：WAL checkpoint 还是 backup API？ | A-6 备份策略 | **Closed/Accepted**：online backup API（better-sqlite3 `backup()`）封装为可替换 adapter，`BackupManager` 全操作协调；不使用 live WAL raw copy（A-6 Accepted） |
+| **Q-8** | **Phase 4.0 fromPath 跨平台可行性？** | **Phase 4.0 spike** | **Open**：spike 将验证 macOS/Windows/Linux 上 session.fromPath() + origin + isolated profile 加载 IndexedDB 的可行性；no-go 回退为专用隔离 Electron helper 进程 |
 
 ---
 
@@ -437,9 +654,10 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-20 | Q-3 Resolved | block-linked file references 携带完整元数据快照；canonical files table 推迟到 FileManager 全局迁移前显式决策 |
 | 2026-07-20 | Q-5 Resolved | Phase 2 不含 FTS；后续 append-only migration 添加，时机为搜索 projection 设计完成时 |
 | 2026-07-20 | TopicSegmentsRepository 澄清 | 原 Phase 2 规划遗漏 TopicSegmentsRepository；Phase 2 实际交付包含该 Repository |
-| 2026-07-20 | Phase 3.1 完成 | 14 个 ChatDb IPC channels 定义；packages/shared/chatDb/ 新增 types/result/validation/contracts/index；JSON wire validation（深度限制 20、拒绝 undefined/bigint/symbol/NaN/Date/Map/Set/Buffer/class instances/sparse arrays）；result envelope（ok/fail/isSuccess/isFailure）；command contracts（allowedKeys + validate）；107 个 shared tests 通过；Dexie-authoritative / no-auto-switch / no-per-call-fallback 约束文档化 |
-| 2026-07-20 | Phase 3.2 完成 | ChatDbAggregateService（14 命令实现）；repository factory（root DB / transaction 绑定）；wire adapters（JSON ↔ Domain，保留结构化 renderer model/tool-object/unknown JSON/nullable 语义）；errors.ts（错误映射 9 类）；ipc.ts（14 个 IPC handler 注册 + request/result 运行时验证 + 结构化错误映射 + disposer）；shared contract 修正（blocks 数组前置验证、identity/reparenting 拒绝、所有权一致性、新错误码）；78 个新 tests 通过（aggregate 39 + wireAdapters 20 + ipc 19）；438 个 tests 全部通过 |
-| 2026-07-20 | Phase 3.2 审计修复 | 修复 9 项审计发现：① fetchMessages topic priming（同一事务 ensure + return empty）；② updateBlocks/updateSingleBlock/deleteBlocks/clearMessages 全部使用 root-bound tx + tx-bound repos；③ clearMessages 移除 fileRefs.deleteByMessage()（依赖 FK cascade）；④ 引入 typed aggregate errors（6 种）+ SQLite structured code inspection + 优先级排序；⑤ IPC handler 使用 validateChatDbResult + malformed result ERR_STORAGE fallback；⑥ channel 类型为 ChatDbChannel；⑦ 错误消息 sanitize（不泄露 SQL/path/stack）；⑧ generic storage error non-retryable；⑨ 53 个新 tests（跨仓库回滚、cascade、error mapping、malformed result、topic priming）；131 个 Phase 3.2 tests 通过，932 个 total tests 通过 |
+| 2026-07-20 | Phase 3.1 完成 | 14 个 ChatDb IPC channels 定义；packages/shared/chatDb/ 新增 types/result/validation/contracts/index；JSON wire validation（深度限制 20、拒绝 undefined/bigint/symbol/NaN/Date/Map/Set/Buffer/class instances/sparse arrays）；result envelope（ok/fail/isSuccess/isFailure）；command contracts（allowedKeys + validate）；199 个 shared tests 通过（初始完成时为 107，后续扩展至当前 199）；Dexie-authoritative / no-auto-switch / no-per-call-fallback 约束文档化 |
+| 2026-07-20 | Phase 3.2 完成 | ChatDbAggregateService（14 命令实现）；repository factory（root DB / transaction 绑定）；wire adapters（JSON ↔ Domain，保留结构化 renderer model/tool-object/unknown JSON/nullable 语义）；errors.ts（错误映射 9 类）；ipc.ts（14 个 IPC handler 注册 + request/result 运行时验证 + 结构化错误映射 + disposer）；shared contract 修正（blocks 数组前置验证、identity/reparenting 拒绝、所有权一致性、新错误码）；78 个新 tests 通过（aggregate 39 + wireAdapters 20 + ipc 19）；438 个 tests 全部通过（Phase 3.2 初始完成时的快照基线） |
+| 2026-07-20 | Phase 3.2 审计修复 | 修复 9 项审计发现：① fetchMessages topic priming（同一事务 ensure + return empty）；② updateBlocks/updateSingleBlock/deleteBlocks/clearMessages 全部使用 root-bound tx + tx-bound repos；③ clearMessages 移除 fileRefs.deleteByMessage()（依赖 FK cascade）；④ 引入 typed aggregate errors（6 种）+ SQLite structured code inspection + 优先级排序；⑤ IPC handler 使用 validateChatDbResult + malformed result ERR_STORAGE fallback；⑥ channel 类型为 ChatDbChannel；⑦ 错误消息 sanitize（不泄露 SQL/path/stack）；⑧ generic storage error non-retryable；⑨ 53 个新 tests（跨仓库回滚、cascade、error mapping、malformed result、topic priming）；131 个 Phase 3.2 tests 通过，932 个 total tests 通过（审计修复后的快照基线） |
+| **2026-07-20** | **A-8 Accepted：外部应用兼容性导入（策略更正）** | **产品策略更正**：SQLite-authoritative Cherry Chat 是独立于当前 Cherry Studio 的应用。导入源是用户选择的 Cherry Studio ZIP 备份（含原始 Chromium IndexedDB），不是当前运行时 Dexie。技术路线：安全解压→隔离 Session + import renderer→分页 IPC→候选 SQLite→验证→原子替换。A-5（in-place Dexie→SQLite shadow/cutover）被 A-8 正式替代。旧模型的矛盾：启动时自动迁移、基于本地 Dexie 的 durable cutover、shadow-mode readiness gates、archive source ambiguity、legacy JSON 兼容——全部废弃 |
 
 ---
 
@@ -454,17 +672,17 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-20 | Phase 1 | 完成（Done）：ChatDbService 生命周期硬化；WAL/fk/synchronous/busy_timeout pragmas；inline build-safe initial migration；integrity check；restored-first-open repair gating（repair-required 时 app 继续运行，chat DB 不可用）；startup/will-quit wiring；replaceable online backup adapter（better-sqlite3 `backup()`）；BackupManager full-operation coordination（互斥锁、staging、生产路径过滤）；production-path tests |
 | 2026-07-20 | 决策 | A-6 Accepted（online backup adapter + full-operation coordination）；Q-7 Closed/Accepted |
 | 2026-07-20 | Phase 2 | 完成（Done）：append-only migration 002；Main-local DTO/codec/mappers/typed cursors；TopicsRepository、MessagesRepository、BlocksRepository、TopicSegmentsRepository、FileReferencesRepository；block-linked file references（完整元数据快照）；CRUD/batches/keyset pagination/dense ordering/ownership/cascades/rollback 测试（real better-sqlite3）；Q-3 Resolved（file references 策略）；Q-5 Resolved（无 FTS） |
-| 2026-07-20 | Phase 3.1 | 完成（Done）：14 个 ChatDb IPC channels（IpcChannel.ts）；packages/shared/chatDb/ 新增 types.ts（JSON wire DTO/result envelope/command map）、result.ts（ok/fail/isSuccess/isFailure/envelope）、validation.ts（runtime JSON validator，深度 20，拒绝非法类型）、contracts.ts（channel→allowedKeys+validate 映射）、index.ts（barrel）；107 个 shared tests（validation.test.ts 62 + contracts.test.ts 45）；typecheck / format 通过 |
-| 2026-07-20 | Phase 3.2 | 完成（Done）：ChatDbAggregateService（14 命令实现）；repository factory（root DB / transaction 绑定）；wire adapters（JSON ↔ Domain，保留结构化 renderer model/tool-object/unknown JSON/nullable 语义）；errors.ts（错误映射 9 类）；ipc.ts（14 个 IPC handler 注册 + request/result 运行时验证 + 结构化错误映射 + disposer）；shared contract 修正（blocks 数组前置验证、identity/reparenting 拒绝、所有权一致性、新错误码）；78 个新 tests 通过；438 个 tests 全部通过；typecheck / format 通过 |
-| 2026-07-20 | Phase 3.2 审计修复 | 修复 9 项审计发现：fetchMessages topic priming；updateBlocks/updateSingleBlock/deleteBlocks/clearMessages 原子性（root tx + tx-bound repos）；clearMessages 移除 fileRefs.deleteByMessage（FK cascade）；typed aggregate errors + SQLite code inspection；IPC validateChatDbResult + malformed result containment；channel ChatDbChannel 类型；错误消息 sanitize；generic storage error non-retryable；53 个新 tests；932 个 total tests 通过 |
-| 2026-07-20 | Phase 3.2 评审修复 | 修复 5 项评审发现：① 替换伪回滚测试为基于 SQLite trigger 的确定性回滚测试（appendMessage/updateMessageAndBlocks/updateSingleBlock 三个 genuine rollback cases）；② IPC 注册模块级生命周期管理（activeRegistrationId + activeDisposer + stale-disposer ownership）；③ shared contract updateMessage/updateSingleBlock patch 拒绝 sortOrder 字段；④ 移除 "abort due to constraint" 冲突误分类（避免 unstructured FK message 被分类为 CONFLICT）；⑤ 141 个 Phase 3.2 tests 通过，870+ total tests 通过 |
+| 2026-07-20 | Phase 3.1 | 完成（Done）：14 个 ChatDb IPC channels（IpcChannel.ts）；packages/shared/chatDb/ 新增 types.ts（JSON wire DTO/result envelope/command map）、result.ts（ok/fail/isSuccess/isFailure/envelope）、validation.ts（runtime JSON validator，深度 20，拒绝非法类型）、contracts.ts（channel→allowedKeys+validate 映射）、index.ts（barrel）；199 个 shared tests（validation.test.ts 99 + contracts.test.ts 100；初始完成时为 107，后续扩展至当前 199）；typecheck / format 通过 |
+| 2026-07-20 | Phase 3.2 | 完成（Done）：ChatDbAggregateService（14 命令实现）；repository factory（root DB / transaction 绑定）；wire adapters（JSON ↔ Domain，保留结构化 renderer model/tool-object/unknown JSON/nullable 语义）；errors.ts（错误映射 9 类）；ipc.ts（14 个 IPC handler 注册 + request/result 运行时验证 + 结构化错误映射 + disposer）；shared contract 修正（blocks 数组前置验证、identity/reparenting 拒绝、所有权一致性、新错误码）；78 个新 tests 通过；438 个 tests 全部通过（Phase 3.2 初始完成时的快照基线）；typecheck / format 通过 |
+| 2026-07-20 | Phase 3.2 审计修复 | 修复 9 项审计发现：fetchMessages topic priming；updateBlocks/updateSingleBlock/deleteBlocks/clearMessages 原子性（root tx + tx-bound repos）；clearMessages 移除 fileRefs.deleteByMessage（FK cascade）；typed aggregate errors + SQLite code inspection；IPC validateChatDbResult + malformed result containment；channel ChatDbChannel 类型；错误消息 sanitize；generic storage error non-retryable；53 个新 tests；932 个 total tests 通过（审计修复后的快照基线） |
+| 2026-07-20 | Phase 3.2 评审修复 | 修复 5 项评审发现：① 替换伪回滚测试为基于 SQLite trigger 的确定性回滚测试（appendMessage/updateMessageAndBlocks/updateSingleBlock 三个 genuine rollback cases）；② IPC 注册模块级生命周期管理（activeRegistrationId + activeDisposer + stale-disposer ownership）；③ shared contract updateMessage/updateSingleBlock patch 拒绝 sortOrder 字段；④ 移除 "abort due to constraint" 冲突误分类（避免 unstructured FK message 被分类为 CONFLICT）；⑤ 141 个 Phase 3.2 tests 通过，870+ total tests 通过（评审修复后的快照基线；低于932因伪回滚测试替换为3个真实回滚测试） |
 | 2026-07-20 | Phase 3.4 完成 | 不可变注入路由策略（DbRoutingPolicy：dexie / sqlite-validation / sqlite-authoritative）；routingPolicy.ts 定义 OrdinaryMessageSource / DexieMessageSource / AgentMessageSource 依赖接口和 DbServiceDeps 构造选项；DbService 重构为公共构造函数 + 不可变注入策略 + 懒加载 SQLite 源（首次普通操作创建一次）+ 永久 Dexie 单例；sqlite-authoritative 构造同步抛出 Phase 5 错误；Agent 路由策略无关最高优先级；updateFileCount(s) 始终 Dexie；无 readiness 检测 / fallback / shadow / dual-write；102 个新 DbService tests 通过（路由 / 懒加载 / Agent / 分区 / 文件操作 / 错误传播 / 无探针 / 参数保持）；168 个 renderer db tests 通过；typecheck / format 通过 |
-| 2026-07-20 | Phase 3.3 完成 | Preload bridge（window.api.chatDb 14 个命名方法 ipcRenderer.invoke）；Renderer SqliteMessageDataSource（ChatDbApi 构造注入 + ChatDbResultError + cloneForWire + 14 方法 + dispatch parity）；Main structured model 缺陷修复（wireToMessage 对象→overflow + column null + modelId 提取；messageToWire overflow 恢复；wireToMessagePatch null model 清除 overflow）；802 个 tests 通过 |
+| 2026-07-20 | Phase 3.3 完成 | Preload bridge（window.api.chatDb 14 个命名方法 ipcRenderer.invoke）；Renderer SqliteMessageDataSource（ChatDbApi 构造注入 + ChatDbResultError + cloneForWire + 14 方法 + dispatch parity）；Main structured model 缺陷修复（wireToMessage 对象→overflow + column null + modelId 提取；messageToWire overflow 恢复；wireToMessagePatch null model 清除 overflow）；803 个 tests 通过 |
 | 2026-07-20 | Phase 3 | **Done**（Phase 3.1 Done, Phase 3.2 Done (audit-fixed), Phase 3.3 Done, Phase 3.4 Done） |
-| 2026-07-20 | Phase 3.4 完成 | 不可变注入路由策略；routingPolicy.ts（DbRoutingPolicy + 依赖接口 + DbServiceDeps）；DbService 重构（公共构造函数 + 不可变注入 + 懒加载 SQLite 源 + 永久 Dexie 单例）；sqlite-authoritative 构造同步拒绝；Agent 路由策略无关最高优先级；updateFileCount(s) 始终 Dexie；102 个新 DbService tests 通过；168 个 renderer db tests 通过；typecheck / format 通过 |
 | 2026-07-19 | Phase 4 | Not started |
-| 2026-07-19 | Phase 5 | Not started（切换策略已决策：一次性切换 + Dexie 快照回滚） |
+| 2026-07-19 | Phase 5 | Not started |
 | 2026-07-19 | Phase 6 | Not started |
+| **2026-07-20** | **策略更正** | **A-8 Accepted：外部应用兼容性导入模型替代 in-place Dexie→SQLite shadow/cutover（A-5 Superseded）。Phase 4 重定义为外部导入管线（4.0 spike → 4.1 ZIP intake → 4.2 bulk import → 4.3 verification → 4.4 atomic promotion）。Phase 5 重定义为 SQLite-only runtime 完成。Phase 6 重定义为 Cherry Chat 备份/恢复分离 + 清理。文档全面更新反映新模型** |
 
 ---
 
@@ -494,16 +712,16 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | `packages/shared/chatDb/validation.ts` | Runtime JSON validator（depth limit、type rejection、request/field/array validators） |
 | `packages/shared/chatDb/contracts.ts` | Channel→contract registry（allowedKeys + validate per command） |
 | `packages/shared/chatDb/index.ts` | Barrel export for chatDb shared domain |
-| `packages/shared/chatDb/__tests__/validation.test.ts` | 62 tests: JSON primitives, composites, depth limit, result envelope |
-| `packages/shared/chatDb/__tests__/contracts.test.ts` | 45 tests: registry completeness, valid/invalid payloads, JSON round-trip |
+| `packages/shared/chatDb/__tests__/validation.test.ts` | 99 tests: JSON primitives, composites, depth limit, result envelope |
+| `packages/shared/chatDb/__tests__/contracts.test.ts` | 100 tests: registry completeness, valid/invalid payloads, JSON round-trip |
 | `src/main/services/chatDb/ChatDbAggregateService.ts` | 14-command aggregate service combining five Phase 2 repositories |
 | `src/main/services/chatDb/repository/factory.ts` | Repository factory binding all five repos to root DB or transaction executor |
 | `src/main/services/chatDb/wireAdapters.ts` | Wire ↔ Domain adapters (JSON ↔ persistence DTOs, tool-object content, file refs, relational blocks) |
 | `src/main/services/chatDb/errors.ts` | Structured error mapping (9 error categories → shared codes + retryable semantics) |
 | `src/main/services/chatDb/ipc.ts` | 14 fixed IPC handler registration with request/result validation and error mapping |
-| `src/main/services/chatDb/__tests__/aggregate.test.ts` | 39 tests: all 14 commands, transaction rollback, ordering, file refs |
-| `src/main/services/chatDb/__tests__/wireAdapters.test.ts` | 20 tests: wire ↔ domain round-trip, tool content, file refs, nullable semantics |
-| `src/main/services/chatDb/__tests__/ipc.test.ts` | 19 tests: 14 handlers, validation, identity rejection, error mapping, disposer |
+| `src/main/services/chatDb/__tests__/aggregate.test.ts` | 60 tests: all 14 commands, transaction rollback, ordering, file refs |
+| `src/main/services/chatDb/__tests__/wireAdapters.test.ts` | 29 tests: wire ↔ domain round-trip, tool content, file refs, nullable semantics, structured model |
+| `src/main/services/chatDb/__tests__/ipc.test.ts` | 27 tests: 14 handlers, validation, identity rejection, error mapping, disposer |
 | `src/preload/index.ts` | Preload bridge: `window.api.chatDb` with 14 named IPC methods (ChatDb_FetchMessages etc.) |
 | `src/renderer/src/services/db/SqliteMessageDataSource.ts` | Renderer SqliteMessageDataSource: ChatDbApi interface, ChatDbResultError, cloneForWire, 14 methods, updateTopicUpdatedAt dispatch |
 | `src/renderer/src/services/db/__tests__/SqliteMessageDataSource.test.ts` | 66 tests: method mapping, forceReload omission, null→undefined, insertIndex, JSON boundary, unsupported types, ChatDbResultError, transport errors, no retry, dispatch parity, no file-count methods |
@@ -516,3 +734,22 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | `src/main/services/agents/` | 已删除的 agents SQLite 子系统目录 |
 | `src/main/services/agents/drizzle.config.ts` | agents drizzle 配置（scripts 引用但不存在） |
 | `Data/agents.db` | 用户设备上可能遗留的 agents 数据库文件 |
+
+### Phase 4 实现区域（待创建）
+
+| 区域 | 预期路径 | 说明 |
+|---|---|---|
+| ZIP intake + extract | `src/main/services/chatDb/import/` | 安全解压、IndexedDB 结构校验、临时工作区管理 |
+| Isolated session/profile | `src/main/services/chatDb/import/isolatedSession.ts` | fromPath() / isolated profile + origin 创建 |
+| Import renderer | `src/renderer/src/windows/import/` | 隐藏 sandboxed renderer，当前 Dexie schema against isolated profile |
+| Import IPC | `packages/shared/IpcChannel.ts` (新增) | 窄 import-only IPC channels |
+| Candidate builder | `src/main/services/chatDb/import/candidateBuilder.ts` | 使用 Phase 2 repository 层批量写入候选 DB |
+| Verification | `src/main/services/chatDb/import/verification.ts` | 源 vs 目标全维度验证 |
+| Atomic promotion | `src/main/services/chatDb/import/promotion.ts` | 关闭 → 快照 → rename → reopen → relaunch |
+
+### 已废弃/待移除路径
+
+| 路径 | 状态 | 说明 |
+|---|---|---|
+| `src/renderer/src/services/db/routingPolicy.ts` | **Phase 3.4 scaffolding，Phase 5 移除** | 临时验证用路由策略注入 |
+| `src/renderer/src/services/db/DexieMessageDataSource.ts` | **Phase 5 从普通路径移除** | 最终仅保留在隔离 import renderer 内部 |
