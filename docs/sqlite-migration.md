@@ -1,6 +1,6 @@
 # Cherry Studio SQLite 迁移文档
 
-> **文档状态**：In progress（Phase 0–2 完成，Phase 3 未开始）
+> **文档状态**：In progress（Phase 0–2 完成，Phase 3.1 完成，Phase 3.2+ 未开始）
 > **分支**：`jorkey/refactor/sqlite-migration`
 > **最后更新**：2026-07-20
 > **Owner**：Personal fork（jorkeyliu）
@@ -243,10 +243,21 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 属性 | 值 |
 |---|---|
-| **状态** | Not started |
+| **状态** | In progress（Phase 3.1 Done） |
 | **目标** | 建立 Renderer→Main 的 command-oriented typed IPC |
 | **主要任务** | 定义 IPC channel + command types（`packages/shared/IpcChannel.ts`）；Main 侧 handler；Renderer 侧 `SqliteMessageDataSource`；收口 DbService 路由 |
 | **退出条件** | IPC 调用链路端到端可用；DbService 可切换到 SQLite 数据源 |
+
+#### Phase 3.1：Shared wire types & contracts
+
+| 属性 | 值 |
+|---|---|
+| **状态** | **Done** |
+| **目标** | 定义 ChatDb IPC channels、JSON wire DTO types、result envelope、runtime validation、command contracts；shared Vitest 测试覆盖 |
+| **交付物** | `packages/shared/IpcChannel.ts` 新增 14 个 ChatDb channels；`packages/shared/chatDb/` 新增 types.ts、result.ts、validation.ts、contracts.ts、index.ts；`packages/shared/chatDb/__tests__/validation.test.ts`（62 tests）、`contracts.test.ts`（45 tests） |
+| **约束** | Dexie 在 Phase 3/4 期间保持 authoritative；不基于 chat.db existence / DB initialized / migration 002 做切换；不实现 per-call SQLite→Dexie fallback；`updateFileCount(s)` 保留在 Dexie/FileManager，不纳入 IPC |
+| **排除项** | 不修改 `src/preload/index.ts`；不添加 Main handler / SqliteMessageDataSource；不修改 DbService 路由；不实现 importer / shadow verification / cutover / FTS / canonical files / fallback |
+| **退出条件** | ✅ 14 个 ChatDb channel 定义完整；✅ JSON wire 类型覆盖所有 MessageDataSource 命令（除 updateFileCount(s)）；✅ runtime validation 拒绝非法 JSON 值（undefined, bigint, symbol, function, NaN/Infinity, Date, Map/Set, Buffer/TypedArray, class instances, sparse arrays, cyclic, depth>20）；✅ 107 个 shared tests 通过；✅ typecheck / format 通过 |
 
 ### Phase 4：Dexie 导入与 Shadow Verification
 
@@ -379,6 +390,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-20 | Q-3 Resolved | block-linked file references 携带完整元数据快照；canonical files table 推迟到 FileManager 全局迁移前显式决策 |
 | 2026-07-20 | Q-5 Resolved | Phase 2 不含 FTS；后续 append-only migration 添加，时机为搜索 projection 设计完成时 |
 | 2026-07-20 | TopicSegmentsRepository 澄清 | 原 Phase 2 规划遗漏 TopicSegmentsRepository；Phase 2 实际交付包含该 Repository |
+| 2026-07-20 | Phase 3.1 完成 | 14 个 ChatDb IPC channels 定义；packages/shared/chatDb/ 新增 types/result/validation/contracts/index；JSON wire validation（深度限制 20、拒绝 undefined/bigint/symbol/NaN/Date/Map/Set/Buffer/class instances/sparse arrays）；result envelope（ok/fail/isSuccess/isFailure）；command contracts（allowedKeys + validate）；107 个 shared tests 通过；Dexie-authoritative / no-auto-switch / no-per-call-fallback 约束文档化 |
 
 ---
 
@@ -393,7 +405,8 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-20 | Phase 1 | 完成（Done）：ChatDbService 生命周期硬化；WAL/fk/synchronous/busy_timeout pragmas；inline build-safe initial migration；integrity check；restored-first-open repair gating（repair-required 时 app 继续运行，chat DB 不可用）；startup/will-quit wiring；replaceable online backup adapter（better-sqlite3 `backup()`）；BackupManager full-operation coordination（互斥锁、staging、生产路径过滤）；production-path tests |
 | 2026-07-20 | 决策 | A-6 Accepted（online backup adapter + full-operation coordination）；Q-7 Closed/Accepted |
 | 2026-07-20 | Phase 2 | 完成（Done）：append-only migration 002；Main-local DTO/codec/mappers/typed cursors；TopicsRepository、MessagesRepository、BlocksRepository、TopicSegmentsRepository、FileReferencesRepository；block-linked file references（完整元数据快照）；CRUD/batches/keyset pagination/dense ordering/ownership/cascades/rollback 测试（real better-sqlite3）；Q-3 Resolved（file references 策略）；Q-5 Resolved（无 FTS） |
-| 2026-07-19 | Phase 3 | Not started |
+| 2026-07-20 | Phase 3.1 | 完成（Done）：14 个 ChatDb IPC channels（IpcChannel.ts）；packages/shared/chatDb/ 新增 types.ts（JSON wire DTO/result envelope/command map）、result.ts（ok/fail/isSuccess/isFailure/envelope）、validation.ts（runtime JSON validator，深度 20，拒绝非法类型）、contracts.ts（channel→allowedKeys+validate 映射）、index.ts（barrel）；107 个 shared tests（validation.test.ts 62 + contracts.test.ts 45）；typecheck / format 通过 |
+| 2026-07-19 | Phase 3 | In progress（Phase 3.1 Done, Phase 3.2+ Not started） |
 | 2026-07-19 | Phase 4 | Not started |
 | 2026-07-19 | Phase 5 | Not started（切换策略已决策：一次性切换 + Dexie 快照回滚） |
 | 2026-07-19 | Phase 6 | Not started |
@@ -419,6 +432,14 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | `src/main/index.ts:240` | `will-quit` handler，未调用 Memory/Knowledge close |
 | `package.json:35-38` | 失效 `agents:*` scripts |
 | `package.json:308-309` | 残留 `drizzle-kit`/`drizzle-orm` 依赖 |
+| `packages/shared/IpcChannel.ts` | ChatDb enum entries（14 channels） |
+| `packages/shared/chatDb/types.ts` | JSON wire primitives、result envelope、request/response DTOs、command map |
+| `packages/shared/chatDb/result.ts` | ok/fail constructors、isSuccess/isFailure type guards、error code constants |
+| `packages/shared/chatDb/validation.ts` | Runtime JSON validator（depth limit、type rejection、request/field/array validators） |
+| `packages/shared/chatDb/contracts.ts` | Channel→contract registry（allowedKeys + validate per command） |
+| `packages/shared/chatDb/index.ts` | Barrel export for chatDb shared domain |
+| `packages/shared/chatDb/__tests__/validation.test.ts` | 62 tests: JSON primitives, composites, depth limit, result envelope |
+| `packages/shared/chatDb/__tests__/contracts.test.ts` | 45 tests: registry completeness, valid/invalid payloads, JSON round-trip |
 
 ### 历史路径（已不存在）
 

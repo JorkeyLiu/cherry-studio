@@ -346,5 +346,23 @@ export enum IpcChannel {
   Cherryai_GetSignature = 'cherryai:get-signature',
 
   // Analytics
-  Analytics_TrackTokenUsage = 'analytics:track-token-usage'
+  Analytics_TrackTokenUsage = 'analytics:track-token-usage',
+
+  // ChatDB — command-oriented IPC for SQLite message persistence
+  // Maps 1:1 to MessageDataSource capabilities (renderer → Main).
+  // updateFileCount(s) excluded — stays in Dexie/FileManager.
+  ChatDb_FetchMessages = 'chatdb:fetch-messages',
+  ChatDb_GetRawTopic = 'chatdb:get-raw-topic',
+  ChatDb_TopicExists = 'chatdb:topic-exists',
+  ChatDb_EnsureTopic = 'chatdb:ensure-topic',
+  ChatDb_AppendMessage = 'chatdb:append-message',
+  ChatDb_UpdateMessage = 'chatdb:update-message',
+  ChatDb_UpdateMessageAndBlocks = 'chatdb:update-message-and-blocks',
+  ChatDb_DeleteMessage = 'chatdb:delete-message',
+  ChatDb_DeleteMessages = 'chatdb:delete-messages',
+  ChatDb_UpdateBlocks = 'chatdb:update-blocks',
+  ChatDb_UpdateSingleBlock = 'chatdb:update-single-block',
+  ChatDb_BulkAddBlocks = 'chatdb:bulk-add-blocks',
+  ChatDb_DeleteBlocks = 'chatdb:delete-blocks',
+  ChatDb_ClearMessages = 'chatdb:clear-messages'
 }
