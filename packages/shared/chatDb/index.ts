@@ -42,11 +42,14 @@ export type {
 
 // Result envelope constructors and type guards
 export {
+  ERR_BUSY,
+  ERR_CONFLICT,
   ERR_FOREIGN_KEY,
   ERR_IDENTITY_VIOLATION,
   ERR_INVALID_STATE,
   ERR_NOT_FOUND,
   ERR_STORAGE,
+  ERR_UNAVAILABLE,
   ERR_VALIDATION,
   fail,
   isFailure,
@@ -65,6 +68,7 @@ export {
   validateJsonObjectArray,
   validateJsonValue,
   validateMessageIdField,
+  validateNoIdentityFields,
   validateNonEmptyString,
   validateRequest,
   validateResultEnvelope,

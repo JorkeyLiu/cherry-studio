@@ -285,6 +285,27 @@ export function validateMessageIdField(obj: JsonObject, path: string): void {
   }
 }
 
+/**
+ * Validate that a JsonObject does NOT contain any of the specified fields.
+ * Used at the shared request boundary to reject identity/reparenting changes
+ * in patch payloads (e.g. reject `id`/`topicId` in message patches).
+ *
+ * @param obj            The patch object to check.
+ * @param rejectedFields Fields that must not be present.
+ * @param path           Dot-separated path for error messages.
+ * @throws {ValidationError} If any rejected field is present.
+ */
+export function validateNoIdentityFields(obj: JsonObject, rejectedFields: ReadonlySet<string>, path: string): void {
+  for (const field of rejectedFields) {
+    if (field in obj) {
+      throw new ValidationError(
+        `${path}.${field}`,
+        `Identity/reparenting field "${field}" must not be present in patch`
+      )
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Result envelope validation
 // ---------------------------------------------------------------------------

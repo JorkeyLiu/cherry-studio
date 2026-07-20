@@ -33,6 +33,15 @@ export const ERR_STORAGE = 'STORAGE_ERROR'
 /** The operation was performed on a topic/message in an invalid state. */
 export const ERR_INVALID_STATE = 'INVALID_STATE'
 
+/** A conflict was detected (e.g. duplicate ID in a bulk insert batch). */
+export const ERR_CONFLICT = 'CONFLICT_ERROR'
+
+/** The database is unavailable (not initialised or in repair-required state). */
+export const ERR_UNAVAILABLE = 'UNAVAILABLE'
+
+/** The database is busy (locked, timeout, or concurrent operation conflict). */
+export const ERR_BUSY = 'BUSY_ERROR'
+
 // ---------------------------------------------------------------------------
 // Constructors
 // ---------------------------------------------------------------------------

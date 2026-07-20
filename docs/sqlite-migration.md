@@ -1,6 +1,6 @@
 # Cherry Studio SQLite 迁移文档
 
-> **文档状态**：In progress（Phase 0–2 完成，Phase 3.1 完成，Phase 3.2+ 未开始）
+> **文档状态**：In progress（Phase 0–2 完成，Phase 3.1 完成，Phase 3.2 完成（审计修复），Phase 3.3+ 未开始）
 > **分支**：`jorkey/refactor/sqlite-migration`
 > **最后更新**：2026-07-20
 > **Owner**：Personal fork（jorkeyliu）
@@ -259,6 +259,21 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **排除项** | 不修改 `src/preload/index.ts`；不添加 Main handler / SqliteMessageDataSource；不修改 DbService 路由；不实现 importer / shadow verification / cutover / FTS / canonical files / fallback |
 | **退出条件** | ✅ 14 个 ChatDb channel 定义完整；✅ JSON wire 类型覆盖所有 MessageDataSource 命令（除 updateFileCount(s)）；✅ runtime validation 拒绝非法 JSON 值（undefined, bigint, symbol, function, NaN/Infinity, Date, Map/Set, Buffer/TypedArray, class instances, sparse arrays, cyclic, depth>20）；✅ 107 个 shared tests 通过；✅ typecheck / format 通过 |
 
+#### Phase 3.2：Main aggregate service & IPC handlers
+
+| 属性 | 值 |
+|---|---|
+| **状态** | **Done**（含审计修复） |
+| **目标** | Main ChatDb aggregate service combining five Phase 2 repositories; transaction-bound repository factory; wire adapters; 14 fixed IPC handlers with validation and error mapping |
+| **交付物** | `src/main/services/chatDb/ChatDbAggregateService.ts`（14 命令实现）；`src/main/services/chatDb/repository/factory.ts`（仓库工厂）；`src/main/services/chatDb/wireAdapters.ts`（JSON ↔ Domain 适配器）；`src/main/services/chatDb/errors.ts`（错误映射 + typed aggregate errors + SQLite code inspection）；`src/main/services/chatDb/ipc.ts`（14 个 IPC handler 注册 + validateChatDbResult + malformed result containment + re-registration safety + stale-disposer ownership）；`src/main/ipc.ts` 调用 `registerChatDbIpc()`；`__tests__/aggregate.test.ts`（55 tests）、`wireAdapters.test.ts`（20 tests）、`ipc.test.ts`（27 tests）、`errors.test.ts`（39 tests） |
+| **审计修复** | ① `fetchMessages` topic priming：absent topic 在同一事务内 ensure/create 并返回空数组；② `updateBlocks`/`updateSingleBlock`/`deleteBlocks`/`clearMessages` 全部使用 root-bound tx + tx-bound repos 实现原子性；③ `clearMessages` 移除语义错误的 `fileRefs.deleteByMessage()` 调用，依赖 FK cascade；④ 引入 typed aggregate errors（ChatDbValidationError 等 6 种）+ SQLite structured code inspection（SQLITE_CONSTRAINT_UNIQUE/FOREIGNKEY/BUSY/LOCKED）+ 优先级排序（typed > SQLite code > message-substring）；⑤ IPC handler 使用 `validateChatDbResult` 验证结果，malformed result 返回 valid ERR_STORAGE fallback；⑥ `handleCommand` channel 类型为 `ChatDbChannel`（通过 cast）；⑦ 错误消息 sanitize（不泄露 SQL/path/stack）；⑧ generic storage error 改为 non-retryable；⑨ 53 个新 tests（跨仓库回滚、cascade、typed error mapping、malformed result containment、topic priming） |
+| **Contract 修正** | ① blocks 数组前置验证（validateJsonObjectArray）防止 TypeError；② 消息/块 patch 拒绝 identity/reparenting/sortOrder 字段（id/topicId/messageId/sortOrder）；③ 所有权一致性校验（block.messageId 匹配 message.id）；④ ERR_CONFLICT/ERR_UNAVAILABLE/ERR_BUSY 错误码；⑤ conflict 优先于 FK 检测（"UNIQUE constraint failed" 不误判为 FK）；⑥ "abort due to constraint" 不再匹配 conflict（避免 FK 误分类） |
+| **约束** | Dexie 在 Phase 3/4 期间保持 authoritative；不基于 chat.db existence / DB initialized / migration 002 做切换；不实现 per-call SQLite→Dexie fallback；`updateFileCount(s)` 保留在 Dexie/FileManager |
+| **排除项** | 不修改 `src/preload/index.ts`；不添加 SqliteMessageDataSource；不修改 DbService 路由；不实现 importer / shadow verification / cutover / FTS / canonical files / fallback |
+| **退出条件** | ✅ ChatDbAggregateService 实现 14 命令；✅ wire adapters 保留结构化 renderer Message.model/tool-object block content/unknown JSON/nullable 语义；✅ repository factory 支持 root DB 和 transaction executor 绑定；✅ 14 个 IPC handler 含 request/result 运行时验证和结构化错误映射；✅ 141 个 Phase 3.2 tests 通过（aggregate 55 + wireAdapters 20 + ipc 27 + errors 39）；✅ 870+ 个 tests 全部通过（含 Phase 2 161 + shared 199 + 2 unflaky renderer timeout failures 被分类为 pre-existing flaky）；✅ typecheck / format 通过 |
+| **事务保证** | ① appendMessage: ensure-topic + message insert + block upsert + file-ref sync in one tx；② updateMessageAndBlocks: message patch + block upsert + file-ref sync in one tx；③ updateBlocks: block upsert + file-ref sync in one tx；④ updateSingleBlock: load/merge/update + file-ref delete/create in one tx；⑤ deleteBlocks: one tx, FK cascade for refs；⑥ clearMessages: one tx, FK cascade for refs + segments；⑦ bulkAddBlocks: duplicate check + insert + file-ref sync in one tx |
+| **非目标** | 无 Renderer/DbService 路由变更；无 preload 变更；无 per-call fallback；无双写；无 file count 迁移 |
+
 ### Phase 4：Dexie 导入与 Shadow Verification
 
 | 属性 | 值 |
@@ -391,6 +406,8 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-20 | Q-5 Resolved | Phase 2 不含 FTS；后续 append-only migration 添加，时机为搜索 projection 设计完成时 |
 | 2026-07-20 | TopicSegmentsRepository 澄清 | 原 Phase 2 规划遗漏 TopicSegmentsRepository；Phase 2 实际交付包含该 Repository |
 | 2026-07-20 | Phase 3.1 完成 | 14 个 ChatDb IPC channels 定义；packages/shared/chatDb/ 新增 types/result/validation/contracts/index；JSON wire validation（深度限制 20、拒绝 undefined/bigint/symbol/NaN/Date/Map/Set/Buffer/class instances/sparse arrays）；result envelope（ok/fail/isSuccess/isFailure）；command contracts（allowedKeys + validate）；107 个 shared tests 通过；Dexie-authoritative / no-auto-switch / no-per-call-fallback 约束文档化 |
+| 2026-07-20 | Phase 3.2 完成 | ChatDbAggregateService（14 命令实现）；repository factory（root DB / transaction 绑定）；wire adapters（JSON ↔ Domain，保留结构化 renderer model/tool-object/unknown JSON/nullable 语义）；errors.ts（错误映射 9 类）；ipc.ts（14 个 IPC handler 注册 + request/result 运行时验证 + 结构化错误映射 + disposer）；shared contract 修正（blocks 数组前置验证、identity/reparenting 拒绝、所有权一致性、新错误码）；78 个新 tests 通过（aggregate 39 + wireAdapters 20 + ipc 19）；438 个 tests 全部通过 |
+| 2026-07-20 | Phase 3.2 审计修复 | 修复 9 项审计发现：① fetchMessages topic priming（同一事务 ensure + return empty）；② updateBlocks/updateSingleBlock/deleteBlocks/clearMessages 全部使用 root-bound tx + tx-bound repos；③ clearMessages 移除 fileRefs.deleteByMessage()（依赖 FK cascade）；④ 引入 typed aggregate errors（6 种）+ SQLite structured code inspection + 优先级排序；⑤ IPC handler 使用 validateChatDbResult + malformed result ERR_STORAGE fallback；⑥ channel 类型为 ChatDbChannel；⑦ 错误消息 sanitize（不泄露 SQL/path/stack）；⑧ generic storage error non-retryable；⑨ 53 个新 tests（跨仓库回滚、cascade、error mapping、malformed result、topic priming）；131 个 Phase 3.2 tests 通过，932 个 total tests 通过 |
 
 ---
 
@@ -406,7 +423,10 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-20 | 决策 | A-6 Accepted（online backup adapter + full-operation coordination）；Q-7 Closed/Accepted |
 | 2026-07-20 | Phase 2 | 完成（Done）：append-only migration 002；Main-local DTO/codec/mappers/typed cursors；TopicsRepository、MessagesRepository、BlocksRepository、TopicSegmentsRepository、FileReferencesRepository；block-linked file references（完整元数据快照）；CRUD/batches/keyset pagination/dense ordering/ownership/cascades/rollback 测试（real better-sqlite3）；Q-3 Resolved（file references 策略）；Q-5 Resolved（无 FTS） |
 | 2026-07-20 | Phase 3.1 | 完成（Done）：14 个 ChatDb IPC channels（IpcChannel.ts）；packages/shared/chatDb/ 新增 types.ts（JSON wire DTO/result envelope/command map）、result.ts（ok/fail/isSuccess/isFailure/envelope）、validation.ts（runtime JSON validator，深度 20，拒绝非法类型）、contracts.ts（channel→allowedKeys+validate 映射）、index.ts（barrel）；107 个 shared tests（validation.test.ts 62 + contracts.test.ts 45）；typecheck / format 通过 |
-| 2026-07-19 | Phase 3 | In progress（Phase 3.1 Done, Phase 3.2+ Not started） |
+| 2026-07-20 | Phase 3.2 | 完成（Done）：ChatDbAggregateService（14 命令实现）；repository factory（root DB / transaction 绑定）；wire adapters（JSON ↔ Domain，保留结构化 renderer model/tool-object/unknown JSON/nullable 语义）；errors.ts（错误映射 9 类）；ipc.ts（14 个 IPC handler 注册 + request/result 运行时验证 + 结构化错误映射 + disposer）；shared contract 修正（blocks 数组前置验证、identity/reparenting 拒绝、所有权一致性、新错误码）；78 个新 tests 通过；438 个 tests 全部通过；typecheck / format 通过 |
+| 2026-07-20 | Phase 3.2 审计修复 | 修复 9 项审计发现：fetchMessages topic priming；updateBlocks/updateSingleBlock/deleteBlocks/clearMessages 原子性（root tx + tx-bound repos）；clearMessages 移除 fileRefs.deleteByMessage（FK cascade）；typed aggregate errors + SQLite code inspection；IPC validateChatDbResult + malformed result containment；channel ChatDbChannel 类型；错误消息 sanitize；generic storage error non-retryable；53 个新 tests；932 个 total tests 通过 |
+| 2026-07-20 | Phase 3.2 评审修复 | 修复 5 项评审发现：① 替换伪回滚测试为基于 SQLite trigger 的确定性回滚测试（appendMessage/updateMessageAndBlocks/updateSingleBlock 三个 genuine rollback cases）；② IPC 注册模块级生命周期管理（activeRegistrationId + activeDisposer + stale-disposer ownership）；③ shared contract updateMessage/updateSingleBlock patch 拒绝 sortOrder 字段；④ 移除 "abort due to constraint" 冲突误分类（避免 unstructured FK message 被分类为 CONFLICT）；⑤ 141 个 Phase 3.2 tests 通过，870+ total tests 通过 |
+| 2026-07-20 | Phase 3 | In progress（Phase 3.1 Done, Phase 3.2 Done (audit-fixed), Phase 3.3+ Not started） |
 | 2026-07-19 | Phase 4 | Not started |
 | 2026-07-19 | Phase 5 | Not started（切换策略已决策：一次性切换 + Dexie 快照回滚） |
 | 2026-07-19 | Phase 6 | Not started |
@@ -440,6 +460,14 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | `packages/shared/chatDb/index.ts` | Barrel export for chatDb shared domain |
 | `packages/shared/chatDb/__tests__/validation.test.ts` | 62 tests: JSON primitives, composites, depth limit, result envelope |
 | `packages/shared/chatDb/__tests__/contracts.test.ts` | 45 tests: registry completeness, valid/invalid payloads, JSON round-trip |
+| `src/main/services/chatDb/ChatDbAggregateService.ts` | 14-command aggregate service combining five Phase 2 repositories |
+| `src/main/services/chatDb/repository/factory.ts` | Repository factory binding all five repos to root DB or transaction executor |
+| `src/main/services/chatDb/wireAdapters.ts` | Wire ↔ Domain adapters (JSON ↔ persistence DTOs, tool-object content, file refs, relational blocks) |
+| `src/main/services/chatDb/errors.ts` | Structured error mapping (9 error categories → shared codes + retryable semantics) |
+| `src/main/services/chatDb/ipc.ts` | 14 fixed IPC handler registration with request/result validation and error mapping |
+| `src/main/services/chatDb/__tests__/aggregate.test.ts` | 39 tests: all 14 commands, transaction rollback, ordering, file refs |
+| `src/main/services/chatDb/__tests__/wireAdapters.test.ts` | 20 tests: wire ↔ domain round-trip, tool content, file refs, nullable semantics |
+| `src/main/services/chatDb/__tests__/ipc.test.ts` | 19 tests: 14 handlers, validation, identity rejection, error mapping, disposer |
 
 ### 历史路径（已不存在）
 

@@ -36,6 +36,7 @@ import {
   validateJsonObject,
   validateJsonObjectArray,
   validateMessageIdField,
+  validateNoIdentityFields,
   validateNonEmptyString,
   validateRequest,
   validateResultEnvelope,
@@ -207,11 +208,19 @@ const appendMessageContract: ChatDbContract = {
     validateNonEmptyString(req.topicId, 'request.topicId')
     validateJsonObject(req.message, 'request.message')
     validateIdField(req.message, 'request.message')
-    // Blocks are full entities: require both id and messageId
-    for (let i = 0; i < req.blocks.length; i++) {
-      validateJsonObject(req.blocks[i], `request.blocks[${i}]`)
-      validateIdField(req.blocks[i], `request.blocks[${i}]`)
-      validateMessageIdField(req.blocks[i], `request.blocks[${i}]`)
+    // Validate blocks is a proper array before iteration (prevents TypeError on malformed payloads)
+    const blocks = validateJsonObjectArray(req.blocks, 'request.blocks')
+    // Validate each block: require id + messageId, check ownership consistency
+    for (let i = 0; i < blocks.length; i++) {
+      validateIdField(blocks[i], `request.blocks[${i}]`)
+      validateMessageIdField(blocks[i], `request.blocks[${i}]`)
+      // Ownership consistency: block.messageId must match message.id
+      if (req.message.id !== undefined && blocks[i].messageId !== req.message.id) {
+        throw new ValidationError(
+          `request.blocks[${i}].messageId`,
+          `Block messageId "${blocks[i].messageId}" does not match message id "${req.message.id}"`
+        )
+      }
     }
     if (req.insertIndex !== undefined) {
       validateIndex(req.insertIndex, 'request.insertIndex')
@@ -228,6 +237,8 @@ const updateMessageContract: ChatDbContract = {
     validateNonEmptyString(req.topicId, 'request.topicId')
     validateNonEmptyString(req.messageId, 'request.messageId')
     validateJsonObject(req.updates, 'request.updates')
+    // Reject identity/reparenting fields at the shared request boundary
+    validateNoIdentityFields(req.updates, new Set(['id', 'topicId', 'sortOrder']), 'request.updates')
   },
   validateResult: voidResult('chatdb:update-message')
 }
@@ -240,11 +251,20 @@ const updateMessageAndBlocksContract: ChatDbContract = {
     validateNonEmptyString(req.topicId, 'request.topicId')
     validateJsonObject(req.messageUpdates, 'request.messageUpdates')
     validateIdField(req.messageUpdates, 'request.messageUpdates')
-    // blocksToUpdate are full block entities: require both id and messageId
-    for (let i = 0; i < req.blocksToUpdate.length; i++) {
-      validateJsonObject(req.blocksToUpdate[i], `request.blocksToUpdate[${i}]`)
-      validateIdField(req.blocksToUpdate[i], `request.blocksToUpdate[${i}]`)
-      validateMessageIdField(req.blocksToUpdate[i], `request.blocksToUpdate[${i}]`)
+    // Reject identity/reparenting fields at the shared request boundary
+    validateNoIdentityFields(req.messageUpdates, new Set(['topicId']), 'request.messageUpdates')
+    // Validate blocksToUpdate is a proper array before iteration
+    const blocks = validateJsonObjectArray(req.blocksToUpdate, 'request.blocksToUpdate')
+    for (let i = 0; i < blocks.length; i++) {
+      validateIdField(blocks[i], `request.blocksToUpdate[${i}]`)
+      validateMessageIdField(blocks[i], `request.blocksToUpdate[${i}]`)
+      // Ownership consistency: block.messageId must match messageUpdates.id
+      if (blocks[i].messageId !== req.messageUpdates.id) {
+        throw new ValidationError(
+          `request.blocksToUpdate[${i}].messageId`,
+          `Block messageId "${blocks[i].messageId}" does not match message id "${req.messageUpdates.id}"`
+        )
+      }
     }
   },
   validateResult: voidResult('chatdb:update-message-and-blocks')
@@ -277,11 +297,12 @@ const updateBlocksContract: ChatDbContract = {
   validate(value: unknown): void {
     validateRequest(value, updateBlocksContract.allowedKeys)
     const req = value as UpdateBlocksRequest
-    // Blocks are full entities: require both id and messageId
-    for (let i = 0; i < req.blocks.length; i++) {
-      validateJsonObject(req.blocks[i], `request.blocks[${i}]`)
-      validateIdField(req.blocks[i], `request.blocks[${i}]`)
-      validateMessageIdField(req.blocks[i], `request.blocks[${i}]`)
+    // Validate blocks is a proper array before iteration
+    const blocks = validateJsonObjectArray(req.blocks, 'request.blocks')
+    // Blocks are full entities: require both id and messageId, reject reparenting
+    for (let i = 0; i < blocks.length; i++) {
+      validateIdField(blocks[i], `request.blocks[${i}]`)
+      validateMessageIdField(blocks[i], `request.blocks[${i}]`)
     }
   },
   validateResult: voidResult('chatdb:update-blocks')
@@ -295,6 +316,8 @@ const updateSingleBlockContract: ChatDbContract = {
     validateNonEmptyString(req.blockId, 'request.blockId')
     // updates is a partial patch, not a full block — no messageId required
     validateJsonObject(req.updates, 'request.updates')
+    // Reject identity/reparenting fields at the shared request boundary
+    validateNoIdentityFields(req.updates, new Set(['id', 'messageId', 'sortOrder']), 'request.updates')
   },
   validateResult: voidResult('chatdb:update-single-block')
 }
@@ -304,11 +327,12 @@ const bulkAddBlocksContract: ChatDbContract = {
   validate(value: unknown): void {
     validateRequest(value, bulkAddBlocksContract.allowedKeys)
     const req = value as BulkAddBlocksRequest
+    // Validate blocks is a proper array before iteration
+    const blocks = validateJsonObjectArray(req.blocks, 'request.blocks')
     // Blocks are full entities: require both id and messageId
-    for (let i = 0; i < req.blocks.length; i++) {
-      validateJsonObject(req.blocks[i], `request.blocks[${i}]`)
-      validateIdField(req.blocks[i], `request.blocks[${i}]`)
-      validateMessageIdField(req.blocks[i], `request.blocks[${i}]`)
+    for (let i = 0; i < blocks.length; i++) {
+      validateIdField(blocks[i], `request.blocks[${i}]`)
+      validateMessageIdField(blocks[i], `request.blocks[${i}]`)
     }
   },
   validateResult: voidResult('chatdb:bulk-add-blocks')
