@@ -34,6 +34,7 @@ import appService from './services/AppService'
 import AppUpdater from './services/AppUpdater'
 import BackupManager from './services/BackupManager'
 import { registerChatDbIpc } from './services/chatDb/ipc'
+import { registerChatImportIpc } from './services/chatDbImport'
 import CherryINOAuthService from './services/CherryINOAuthService'
 import { ConfigKeys, configManager } from './services/ConfigManager'
 import CopilotService from './services/CopilotService'
@@ -875,6 +876,9 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
 
   // ChatDB — 14 command-oriented IPC handlers for SQLite message persistence
   registerChatDbIpc()
+
+  // ChatImport — 6 import-only IPC handlers for Phase 4 source-reader pipeline
+  registerChatImportIpc()
 
   ipcMain.handle(IpcChannel.App_QuoteToMain, (_, text: string) => windowService.quoteToMainWindow(text))
 

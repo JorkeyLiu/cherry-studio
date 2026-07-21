@@ -34,6 +34,7 @@ import { versionService } from './services/VersionService'
 import { windowService } from './services/WindowService'
 import { initWebviewHotkeys } from './services/WebviewService'
 import { chatDbService } from './services/chatDb'
+import { disposeActiveImport, recoverOrphanedTempWorkspaces } from './services/chatDbImport'
 import { runAsyncFunction } from './utils'
 import { extractRtkBinaries } from './utils/rtk'
 
@@ -173,6 +174,13 @@ if (!app.requestSingleInstanceLock()) {
       logger.warn('ChatDbService init skipped due to restore failure — chat DB unavailable this session')
     }
 
+    // Recover orphaned import temp workspaces from prior crashes (R-2)
+    try {
+      await recoverOrphanedTempWorkspaces()
+    } catch (error) {
+      logger.warn('Failed to recover orphaned import workspaces (non-fatal):', error as Error)
+    }
+
     const mainWindow = windowService.createMainWindow()
 
     new TrayService()
@@ -267,6 +275,14 @@ if (!app.requestSingleInstanceLock()) {
   app.on('will-quit', async () => {
     // Clean up resources — each service in its own try/catch so one failure
     // cannot prevent cleanup of subsequent services.
+
+    // Dispose any active import session (non-fatal) — must run BEFORE
+    // chatDbService.close() so the isolated session is torn down first.
+    try {
+      disposeActiveImport()
+    } catch (error) {
+      logger.warn('Error disposing active import session:', error as Error)
+    }
 
     // CRITICAL (Finding 6): close() MUST execute synchronously and BEFORE
     // any await. Electron does not guarantee it will await async will-quit

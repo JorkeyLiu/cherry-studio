@@ -364,5 +364,14 @@ export enum IpcChannel {
   ChatDb_UpdateSingleBlock = 'chatdb:update-single-block',
   ChatDb_BulkAddBlocks = 'chatdb:bulk-add-blocks',
   ChatDb_DeleteBlocks = 'chatdb:delete-blocks',
-  ChatDb_ClearMessages = 'chatdb:clear-messages'
+  ChatDb_ClearMessages = 'chatdb:clear-messages',
+
+  // ChatImport — import-only IPC for Phase 4 source-reader pipeline.
+  // Independent of the 14 ChatDb_* channels. Prefix: chat-import:*
+  ChatImport_Ready = 'chat-import:ready',
+  ChatImport_Discover = 'chat-import:discover',
+  ChatImport_ReadPage = 'chat-import:read-page',
+  ChatImport_Cancel = 'chat-import:cancel',
+  ChatImport_Complete = 'chat-import:complete',
+  ChatImport_Error = 'chat-import:error'
 }

@@ -151,6 +151,9 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 > **Phase 1 前置**：A-7（技术栈）和 A-5（~~authoritative 切换方式~~，已由 A-8 替代）两个 ADR 已关闭（Accepted），Phase 1 可启动。A-5 在 Phase 1 启动时已 Accepted，后因产品策略更正被 A-8 Superseded。
 
+| **A-9** | **Phase 4.1 平台策略：macOS-first + 运行时平台拒绝** | **Accepted (2026-07-21)** | Phase 4.0 spike 只在 macOS arm64 验证 `session.fromPath()` + 退出清理。Windows/Linux 未验证（NTFS 文件锁不能删打开的文件；`session.fromPath` 跨平台锁/缓存语义未知）。**决策**：Phase 4.1 生产代码入口处 `process.platform !== 'darwin'` → 同步抛错并明确提示，非 macOS 不开放导入功能。生产模块的清理分支**预先写好 bounded retry + EBUSY 退避 + crash-recovery scan**——macOS 也用得上（spike 已证明偶尔需要重试），未来开放 Windows 只需删一行平台拒绝 + 跑一轮 Windows spike + 可能调一两个清理退避参数。**为何现在不验 Windows**：① 功能无用户（4.2/4.3/4.4 未完成，整条管线未上线）；② 配 Windows 开发环境成本远超此轮验证价值（Node22 + pnpm + better-sqlite3 原生构建 + Electron 调试链）；③ Phase 4.4 原子替换在 Windows 文件锁下更敏感，未来 4.4 验证会稀释本轮 4.1 验证价值。**Windows Linux 化工作量**≈ 删一行拒绝 + 重跑 Phase 4.0 spike harness + 调清理参数，是确定的增量工作非返工 |
+| **A-10** | **Phase 4.0 spike harness 保留至 Phase 5** | **Accepted (2026-07-21)** | Phase 4.0 的 17 个 harness 文件（packages/shared/phase4*.ts + scripts/phase4-*.sh + src/main/phase4-*.ts + src/preload/phase4-spike-preload.ts + src/renderer/phase4Spike.html + src/renderer/src/windows/phase4Spike/）**全部保留至 Phase 5 SQLite-only runtime 完成时一并删除**（与 Group D 清理合并）。保留期间继续由 `electron.vite.config.ts` 的 `PHASE4_SPIKE=1` 门控，不进入生产构建。**理由**：① spike 已验证的语义（session 隔离、file:// origin、版本映射）在生产模块落地后仍可作回归对照基线；② Phase 4.1 source-reader 侧只是迁移管线上游一段，4.2/4.3/4.4 还未做，spike 重跑价值仍在；③ 未来 Windows/Linux 化时可重跑同一套 harness（spike harness 已证明平台可移植），无需重写脚手架。**Phase 4.1 生产模块独立新增**（`src/main/services/chatDbImport/`、`src/preload/chatImport/`、`src/renderer/src/windows/chatImport/`），**不复用 spike 代码**——harness 中的 `process.argv` 解析、`process.exit`、`generateRunId`、fixture 生成器、c2a/c2b IPC 多路复用、A/B marker 隔离断言、wrong-origin 探测、CLI 入口均为 spike 专属，丢弃；可复用的硬事实（`session.fromPath` + `{cache:false}`、`file://` origin、`indexedDB.databases()` 发现、production Dexie 升级链路、`event.sender.id` sender 校验、`will-navigate` deny、`setWindowOpenHandler` deny）在 spike 注释中标明，由生产模块重新干净实现。**终审遗留的 minor**（C2a/C2b 重复 installIpcListeners/registerCase/createSandboxedWindow、fixture generator 手写 store 声明需同步生产 schema、entry 用 process.exit(2) 处理 pre-Electron 启动失败）随 spike 一并在 Phase 5 删除，不在 Phase 4.1 抽取 |
+
 ---
 
 ## 7. 目标架构简图
@@ -411,14 +414,14 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 属性 | 值 |
 |---|---|
-| **状态** | Not started |
-| **前置** | Phase 4.0 spike 通过（或回退 helper 进程设计完成） |
+| **状态** | **Done** |
+| **前置** | Phase 4.0 spike 通过（或回退 helper 进程设计完成） **Done** |
 | **目标** | 安全解压 Cherry Studio ZIP 到唯一临时工作区；通过隔离 Session + 隐藏 sandboxed import renderer 读取源 IndexedDB |
 | **主要任务** | ZIP 解压 + 路径校验（必须含 Chromium IndexedDB 结构）；唯一临时工作区创建/清理；隔离 Session profile + 正确 origin 创建；隐藏 sandboxed BrowserWindow 加载 import renderer；import renderer 初始化当前 Dexie schema/upgrades against isolated profile；窄 import-only IPC（分页）将逻辑数据传输到 Main |
 | **源数据约束** | 受支持源：Cherry Studio ZIP 备份含原始 Chromium IndexedDB。当前 IndexedDB schema 为主源。旧 IndexedDB 仅在当前 Dexie declaration/upgrades 可防御性识别并升级为当前逻辑形态时才接受 |
 | **缺失值规则** | 缺失值继承当前 Cherry Studio/Dexie upgrade 和 reader 语义。不创建 importer-specific 历史修复。不推断缺失 ID、ownership、timestamp、role、status、model 等字段。结构不可用数据被拒绝 |
 | **排除项** | 不解析 LevelDB（Main 不直接解析）；不恢复源到目标 app 的正常 Dexie profile；不扫描磁盘查找其他应用；不要求共享目录 |
-| **退出条件** | ✅ 安全 ZIP 解压 + IndexedDB 结构校验通过；✅ 隔离 Session 成功加载源数据；✅ import renderer 通过 current Dexie schema 读取数据；✅ 分页 IPC 将逻辑数据传输到 Main；✅ 取消支持：用户可在 promotion 前中断，源数据和现有 SQLite 不受影响 |
+| **退出条件** | ✅ 安全 ZIP 解压 + IndexedDB 结构校验通过（5 层校验 + 通用 IndexedDB 探测）；✅ 隔离 Session 成功加载源数据（`session.fromPath(destDir, {cache:false})` + file:// origin）；✅ import renderer 通过 current Dexie schema 读取数据（`indexedDB.databases()` discovery + production Dexie upgrades v4→v11 + future-version gate ≥120）；✅ 分页 IPC 将逻辑数据传输到 Main（Main 驱动 Discover→ReadPage cursor progression + self-complete ready-for-bulk）；✅ 取消支持：用户可在 promotion 前中断，源数据和现有 SQLite 不受影响；✅ 平台拒绝（A-9 macOS-first）；✅ spike harness 保留（A-10）；✅ 主进程 977/977 测试通过；✅ 2 轮独立审计阻塞修复后最终 Clean |
 
 #### Phase 4.2：Candidate SQLite bulk importer
 
@@ -592,8 +595,8 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 指标 | 目标 | 状态 |
 |---|---|---|
 | Phase 4.0 spike | fromPath + origin + Dexie schema 跨平台验证通过（或 helper 进程回退设计完成） | **Done — Go on macOS arm64** (Windows/Linux open; helper contingency recorded) |
-| ZIP 安全解压 | 唯一临时工作区 + IndexedDB 结构校验 | Not started |
-| 隔离 Session 读取 | import renderer 通过当前 Dexie schema 成功读取源数据 | Not started |
+| ZIP 安全解压 | 唯一临时工作区 + IndexedDB 结构校验 | **Done** |
+| 隔离 Session 读取 | import renderer 通过当前 Dexie schema 成功读取源数据 | **Done** |
 | 候选 DB 构建 | 10k 消息完整导入；导入中断不损坏现有 DB | Not started |
 | 验证全通过 | ID/计数/字段/顺序/关系/哈希/integrity_check/foreign_key_check/应用层抽样 | Not started |
 | 原子 promotion | 成功 → reopen + relaunch；失败 → 回滚到快照 | Not started |
@@ -644,6 +647,10 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | Q-6 | 遗留 agents.db 用户文件处理：归档提示还是自动清理？ | Group E 清理 | Open |
 | Q-7 | 备份协调的具体实现：WAL checkpoint 还是 backup API？ | A-6 备份策略 | **Closed/Accepted**：online backup API（better-sqlite3 `backup()`）封装为可替换 adapter，`BackupManager` 全操作协调；不使用 live WAL raw copy（A-6 Accepted） |
 | **Q-8** | **Phase 4.0 fromPath 跨平台可行性？** | **Phase 4.0 spike** | **Resolved (macOS arm64) / Open (Windows/Linux)**：macOS arm64 上 `session.fromPath()` + file:// origin + isolated profile 成功加载 IndexedDB；v4→v11 升级通过；v12 拒绝通过；session 隔离通过；LS 非必需；10/10 清理稳定。Windows/Linux 未测试。helper 进程回退仍为 contingency |
+| **Q-9** | **Windows/Linux `session.fromPath` + 文件锁 + 清理行为** | **Phase 4.1 production 化（A-9）** | **Deferred 至 macOS-first 完成后**。Phase 4.1 实施期间不验证（A-9 Accepted）。未来开放路径：删 `process.platform !== 'darwin'` 拒绝 + 重跑 Phase 4.0 spike harness 于 Windows/Linux（harness 保留至 Phase 5）+ 调 `tempWorkspace.ts`/`isolatedSession.ts` 清理退避参数。重点未验证项：NTFS 不能删打开文件（EBUSY 重试策略）、Windows `session.fromPath` 锁文件/缓存语义、Linux 不同 filesystem 行为 |
+| **Q-10** | **真实 ZIP snapshot 损坏/不完整检测策略划分** | **Phase 4.1 vs 4.3** | **4.1 最小，4.3 全面**。Phase 4.1 仅做：① ZIP 结构 5 层校验（大小/条目数/单条/总量/加密；zip-slip 用 `path.resolve` 跨平台防护）；② IndexedDB 目录存在性 + 含 `.ldb` 子目录的通用探测（不硬编码 `file__0.indexeddb.leveldb`，spike 观测仅为 file:// origin 下情况）；③ `indexedDB.databases()` discovery 成功。**完整损坏/不完整检测延后至 Phase 4.3** Verification（源 vs 目标 ID/计数/字段/顺序/关系/哈希/integrity_check/foreign_key_check/应用层抽样）。Phase 4.1 不引入 importer-specific 历史修复（继承 A-8 约束） |
+| **Q-11** | **Phase 4.0 17 个 harness 文件去留** | **Phase 4.1 production 化（A-10）** | **Resolved**：保留至 Phase 5（A-10 Accepted）。`PHASE4_SPIKE=1` 门控继续生效，不进生产构建。详见 A-10 |
+| **Q-12** | **Import renderer 用专用独立 HTML 入口还是复用 spike 窗口模式** | **Phase 4.1 构建** | **Resolved**：新增专用 `src/renderer/src/windows/chatImport/chatImport.html` 为永久产物入口。不复用 spike `phase4Spike.html`（污染隔离语义）。需 `electron.vite.config.ts` 加入新 HTML 入口 + 新 preload entry（`src/preload/chatImport/index.ts` → `chat-import-preload.js`）。spike HTML 连同 harness 一并 Phase 5 删除 |
 
 ---
 
@@ -668,6 +675,10 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-20 | Phase 3.2 完成 | ChatDbAggregateService（14 命令实现）；repository factory（root DB / transaction 绑定）；wire adapters（JSON ↔ Domain，保留结构化 renderer model/tool-object/unknown JSON/nullable 语义）；errors.ts（错误映射 9 类）；ipc.ts（14 个 IPC handler 注册 + request/result 运行时验证 + 结构化错误映射 + disposer）；shared contract 修正（blocks 数组前置验证、identity/reparenting 拒绝、所有权一致性、新错误码）；78 个新 tests 通过（aggregate 39 + wireAdapters 20 + ipc 19）；438 个 tests 全部通过（Phase 3.2 初始完成时的快照基线） |
 | 2026-07-20 | Phase 3.2 审计修复 | 修复 9 项审计发现：① fetchMessages topic priming（同一事务 ensure + return empty）；② updateBlocks/updateSingleBlock/deleteBlocks/clearMessages 全部使用 root-bound tx + tx-bound repos；③ clearMessages 移除 fileRefs.deleteByMessage()（依赖 FK cascade）；④ 引入 typed aggregate errors（6 种）+ SQLite structured code inspection + 优先级排序；⑤ IPC handler 使用 validateChatDbResult + malformed result ERR_STORAGE fallback；⑥ channel 类型为 ChatDbChannel；⑦ 错误消息 sanitize（不泄露 SQL/path/stack）；⑧ generic storage error non-retryable；⑨ 53 个新 tests（跨仓库回滚、cascade、error mapping、malformed result、topic priming）；131 个 Phase 3.2 tests 通过，932 个 total tests 通过（审计修复后的快照基线） |
 | **2026-07-20** | **A-8 Accepted：外部应用兼容性导入（策略更正）** | **产品策略更正**：SQLite-authoritative Cherry Chat 是独立于当前 Cherry Studio 的应用。导入源是用户选择的 Cherry Studio ZIP 备份（含原始 Chromium IndexedDB），不是当前运行时 Dexie。技术路线：安全解压→隔离 Session + import renderer→分页 IPC→候选 SQLite→验证→原子替换。A-5（in-place Dexie→SQLite shadow/cutover）被 A-8 正式替代。旧模型的矛盾：启动时自动迁移、基于本地 Dexie 的 durable cutover、shadow-mode readiness gates、archive source ambiguity、legacy JSON 兼容——全部废弃 |
+| **2026-07-21** | **A-9 Accepted：Phase 4.1 macOS-first + 平台拒绝** | Phase 4.0 spike 仅在 macOS arm64 验证。Windows/Linux `session.fromPath` + 文件锁 + 清理未验证，配开发环境成本远超此轮验证价值，且 Phase 4.4 原子替换在 Windows 文件锁下更敏感会稀释本轮价值。生产代码入口 `process.platform !== 'darwin'` → 拒绝。清理分支预先写好 bounded retry + EBUSY 退避 + crash-recovery scan，未来开放 Windows ≈ 删一行拒绝 + 重跑 spike + 调清理参数 |
+| **2026-07-21** | **A-10 Accepted：Phase 4.0 harness 保留至 Phase 5** | 17 个 harness 文件保留至 Phase 5（与 Group D 一并）。`PHASE4_SPIKE=1` 门控不进生产构建。Phase 4.1 生产模块独立新增 `src/main/services/chatDbImport/` + `src/preload/chatImport/` + `src/renderer/src/windows/chatImport/`，不复用 spike 代码。spike 专属（argv/exit/fixture/IPc multiplexer/A-B markers）丢弃，可复用硬事实（fromPath + file:// origin + indexedDB.databases + production Dexie upgrades + sender.id 校验 + will-navigate/setWindowOpenHandler deny）由生产模块重新干净实现 |
+| **2026-07-21** | **Phase 4.1 只读诊断完成** | Fresh Analyzer 产出 Phase 4.1 source-reader 侧生产化方案：① 模块划分（chatDbImport/ 下 zipIntake/isolatedSession/tempWorkspace/importIpc/index + 专用 preload/import renderer HTML）；② ZIP 库复用 node-stream-zip（BackupManager/DxtService 已用，零新依赖），5 层校验（500MB/10k条目/200MB单条/2GB总量/拒加密 + zip-slip path.resolve 跨平台 + IndexedDB 目录通用探测）；③ Import-only IPC 6 channel（ChatImport_Ready/Discover/ReadPage/Cancel/Complete/Error）独立于 14 个 ChatDb_*；envelope `sessionId+phase+version:1`；DTO 复用 Dexie 逻辑形状不引 import-specific；④ 12 条 correctness risks 全部本轮内处理；⑤ 决策待用户拍板项：跨平台策略、spike 去留、import renderer HTML 入口——均已闭环（A-9/A-10/Q-12） |
+| **2026-07-21** | **Phase 4.1 source-reader 生产化完成** | 17 个新文件 + 4 个修改文件：`src/main/services/chatDbImport/`（errors/tempWorkspace/zipIntake/isolatedSession/importIpc/index + 5 tests），`src/preload/chatImport/index.ts`，`src/renderer/src/windows/chatImport/`（chatImport.html + entryPoint.ts），`packages/shared/chatImport/`（types/index/validation.test.ts），`packages/shared/IpcChannel.ts` 6 ChatImport_* entries，`electron.vite.config.ts` chatImport HTML + preload entry，`src/main/ipc.ts` + `src/main/index.ts` 注册/will-quit/app-ready wiring。安全：5 层 ZIP 校验 + `session.fromPath(destDir)` + `location.protocol` origin 校验 + `event.senderFrame` sender 校验 + singleton + R-1..R-12 全部 mitigated。主进程 977/977 测试通过。最终 Auditor Clean。合入 commit `6a1e98e7ef` |
 
 ---
 
@@ -694,6 +705,9 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-19 | Phase 6 | Not started |
 | **2026-07-20** | **策略更正** | **A-8 Accepted：外部应用兼容性导入模型替代 in-place Dexie→SQLite shadow/cutover（A-5 Superseded）。Phase 4 重定义为外部导入管线（4.0 spike → 4.1 ZIP intake → 4.2 bulk import → 4.3 verification → 4.4 atomic promotion）。Phase 5 重定义为 SQLite-only runtime 完成。Phase 6 重定义为 Cherry Chat 备份/恢复分离 + 清理。文档全面更新反映新模型** |
 | **2026-07-21** | **Phase 4.0 Done** | **Isolated-profile feasibility spike 完成 — Go on macOS arm64。**验证：`session.fromPath(absolutePath, { cache: false })` 为正确 Electron API（非 `session.defaultSession.fromPath()`）；file:// origin 正确；`IndexedDB/file__0.indexeddb.leveldb` 为观测到的 profile 映射；Dexie logical 4→native 40, 11→native 110, 12→native 120（×10 乘数）；v4 通过 production upgrades (v5→v7→v8→v11) 升级；v12 被正确拒绝；default session 隔离确认；A/B markers 不跨 session；Local Storage 非 discovery/read 必需；10/10 fresh-root 迭代通过，cleanupAttempts=1，无 leftovers。**未验证**：Windows/Linux、真实 ZIP snapshot 一致性。helper 进程回退为 contingency only，未选用 |
+| **2026-07-21** | 决策 | A-9 Accepted（Phase 4.1 macOS-first + 平台拒绝）；A-10 Accepted（Phase 4.0 harness 保留至 Phase 5）；Q-12 Resolved（import renderer 专用独立 HTML 入口） |
+| **2026-07-21** | Phase 4.1 | 只读诊断完成（In progress）：fresh Analyzer 产出 source-reader 侧生产化方案；3 项 deferred 问题（跨平台/spike/HTML 入口）已闭环并文档化 |
+| **2026-07-21** | Phase 4.1 | **Source-reader 生产化完成（Done）**：17 新文件 + 4 修改文件（chatDbImport/ + chatImport preload + chatImport renderer + shared types/IpcChannel + electron.vite.config + main/ipc/index）。审计 4 blockers 修复 + 复审 2 orchestrators 修复 + 最终 Auditor Clean。主进程 977/977。合入 `6a1e98e7ef` |
 
 ---
 

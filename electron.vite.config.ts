@@ -90,7 +90,22 @@ export default defineConfig({
               }
             }
           }
-        : {}),
+        : {
+            // Production mode: build both the main preload and the chat-import preload
+            lib: {
+              entry: {
+                index: resolve(__dirname, 'src/preload/index.ts'),
+                'chat-import-preload': resolve(__dirname, 'src/preload/chatImport/index.ts')
+              },
+              formats: ['cjs' as const]
+            },
+            rollupOptions: {
+              external: ['electron'],
+              output: {
+                entryFileNames: '[name].js'
+              }
+            }
+          }),
       sourcemap: isDev
     }
   },
@@ -135,7 +150,8 @@ export default defineConfig({
           : {
               index: resolve(__dirname, 'src/renderer/index.html'),
               miniWindow: resolve(__dirname, 'src/renderer/miniWindow.html'),
-              traceWindow: resolve(__dirname, 'src/renderer/traceWindow.html')
+              traceWindow: resolve(__dirname, 'src/renderer/traceWindow.html'),
+              chatImport: resolve(__dirname, 'src/renderer/src/windows/chatImport/chatImport.html')
             },
         onwarn(warning, warn) {
           if (warning.code === 'COMMONJS_VARIABLE_IN_ESM') return
