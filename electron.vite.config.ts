@@ -15,6 +15,7 @@ const visualizerPlugin = (type: 'renderer' | 'main') => {
 
 const isDev = process.env.NODE_ENV === 'development'
 const isProd = process.env.NODE_ENV === 'production'
+const isPhase4Spike = process.env.PHASE4_SPIKE === '1'
 
 export default defineConfig({
   main: {
@@ -38,10 +39,15 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
+        ...(isPhase4Spike ? { input: resolve(__dirname, 'src/main/phase4-spike-entry.ts') } : {}),
         external: ['bufferutil', 'utf-8-validate', 'electron', ...Object.keys(pkg.dependencies)],
         output: {
           manualChunks: undefined, // 彻底禁用代码分割 - 返回 null 强制单文件打包
-          inlineDynamicImports: true // 内联所有动态导入，这是关键配置
+          inlineDynamicImports: true, // 内联所有动态导入，这是关键配置
+          // In spike mode, force output filename to index.js so package.json
+          // main field ("./out/main/index.js") resolves correctly for `electron .`.
+          // Format must be explicitly 'cjs' for Electron main process.
+          ...(isPhase4Spike ? { entryFileNames: 'index.js', format: 'cjs' as const } : {})
         },
         onwarn(warning, warn) {
           if (warning.code === 'COMMONJS_VARIABLE_IN_ESM') return
@@ -68,6 +74,23 @@ export default defineConfig({
       }
     },
     build: {
+      // In spike mode, build only the narrow spike preload instead of the
+      // normal preload. Output filename is forced so the spike main harness
+      // can reference it deterministically.
+      ...(isPhase4Spike
+        ? {
+            lib: {
+              entry: resolve(__dirname, 'src/preload/phase4-spike-preload.ts'),
+              formats: ['cjs' as const]
+            },
+            rollupOptions: {
+              external: ['electron'],
+              output: {
+                entryFileNames: 'phase4-spike-preload.js'
+              }
+            }
+          }
+        : {}),
       sourcemap: isDev
     }
   },
@@ -107,11 +130,13 @@ export default defineConfig({
     build: {
       target: 'esnext', // for build
       rollupOptions: {
-        input: {
-          index: resolve(__dirname, 'src/renderer/index.html'),
-          miniWindow: resolve(__dirname, 'src/renderer/miniWindow.html'),
-          traceWindow: resolve(__dirname, 'src/renderer/traceWindow.html')
-        },
+        input: isPhase4Spike
+          ? { phase4Spike: resolve(__dirname, 'src/renderer/phase4Spike.html') }
+          : {
+              index: resolve(__dirname, 'src/renderer/index.html'),
+              miniWindow: resolve(__dirname, 'src/renderer/miniWindow.html'),
+              traceWindow: resolve(__dirname, 'src/renderer/traceWindow.html')
+            },
         onwarn(warning, warn) {
           if (warning.code === 'COMMONJS_VARIABLE_IN_ESM') return
           warn(warning)

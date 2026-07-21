@@ -1,8 +1,8 @@
 # Cherry Studio SQLite 迁移文档
 
-> **文档状态**：In progress（Phase 0–3 完成；策略更正后 Phase 4+ 未开始）
+> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1+ 未开始）
 > **分支**：`jorkey/refactor/sqlite-migration`
-> **最后更新**：2026-07-20
+> **最后更新**：2026-07-21
 > **Owner**：Personal fork（jorkeyliu）
 >
 > ⚠️ **ADR-8 策略更正（2026-07-20）**：Phase 4+ 的产品策略已更正为**外部应用兼容性导入**模型。原 in-place Dexie→SQLite shadow/cutover 模型已正式废弃。详见 Section 6 A-8。
@@ -147,7 +147,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | A-5 | ~~迁移期一次性切换 + Dexie 快照回滚~~ | **Superseded by A-8** | 原决策基于 in-place 本地 Dexie→SQLite 导入+切换模型。A-8 更正为外部应用兼容性导入模型：源数据来自用户选择的 Cherry Studio ZIP，不是当前运行时 Dexie；导入是 replace-all 而非 merge/shadow；不涉及"切换后新增数据回滚"场景 |
 | A-6 | 备份策略：online backup adapter + full-operation coordination | **Accepted** | better-sqlite3 `backup()` API 封装为可替换 adapter（抽象层），`BackupManager` 协调全操作（互斥锁、staging、生产路径过滤、恢复后 integrity check）；未来可替换为 PowerSync 方案；不使用 live WAL raw copy |
 | A-7 | 技术栈：better-sqlite3 + Drizzle ORM + drizzle-kit | **Accepted** | better-sqlite3 是 Node.js 生态最成熟 SQLite 驱动，同步 API，Drizzle 官方主推组合；与未来 PowerSync 集成兼容（PowerSync 首选 better-sqlite3）。@libsql/client 保留给 Memory/Knowledge 继续使用，不在本阶段统一 |
-| **A-8** | **外部应用兼容性导入：隔离 Session + 候选 SQLite 构建 + 原子替换** | **Accepted (2026-07-20)** | **最终产品行为**：SQLite-authoritative Cherry Chat 是独立于当前 Cherry Studio 的应用。用户在 Cherry Chat 中选择 Cherry Studio ZIP 备份来导入。**技术路线**：安全解压 ZIP 到唯一临时工作区 → 通过 `session.defaultSession.fromPath()` / isolated profile + 正确 origin 创建隔离 Electron Session → 隐藏 sandboxed import renderer 加载当前 Dexie schema/upgrades → 窄 import-only IPC 分页读取逻辑数据 → Main 构建候选 SQLite DB → 验证（源 vs 目标 ID/计数/字段/顺序/关系/哈希/完整性/外键/应用层抽样）→ 原子替换 live `chat.db`（失败时回滚）。**约束**：① 不扫描磁盘查找其他应用；② 不在启动时静默迁移；③ 不要求共享目录；④ 不解析 LevelDB（Main 不直接解析）；⑤ 不恢复源到目标 app 的正常 Dexie profile；⑥ 旧 IndexedDB 仅在当前 Dexie declaration/upgrades 可防御性识别并升级为结构有效的当前逻辑形态时才接受；⑦ 缺失值继承当前 Cherry Studio/Dexie 升级和读取语义，不创建 importer-specific 历史修复；⑧ 结构不可用数据被拒绝；⑨ 导入语义是 replace-all，非 merge；⑩ 在导入过程中现有 SQLite 保持 authoritative；⑪ 取消支持至最终 promotion 之前；⑫ promotion 短时不可取消，保留一个回滚快照，重开/检查 DB，成功后 relaunch。**Phase 4.0 spike** 验证 `fromPath`/profile/origin 跨平台可行性；no-go 回退方案是专用隔离 Electron helper 进程，非破坏性恢复/直接 LevelDB 解析 |
+| **A-8** | **外部应用兼容性导入：隔离 Session + 候选 SQLite 构建 + 原子替换** | **Accepted (2026-07-20)** | **最终产品行为**：SQLite-authoritative Cherry Chat 是独立于当前 Cherry Studio 的应用。用户在 Cherry Chat 中选择 Cherry Studio ZIP 备份来导入。**技术路线**：安全解压 ZIP 到唯一临时工作区 → 通过 `session.fromPath(absolutePath, { cache: false })`（Electron 静态 API，非 `session.defaultSession.fromPath()`）+ 正确 origin 创建隔离 Electron Session → 隐藏 sandboxed import renderer 加载当前 Dexie schema/upgrades → 窄 import-only IPC 分页读取逻辑数据 → Main 构建候选 SQLite DB → 验证（源 vs 目标 ID/计数/字段/顺序/关系/哈希/完整性/外键/应用层抽样）→ 原子替换 live `chat.db`（失败时回滚）。**约束**：① 不扫描磁盘查找其他应用；② 不在启动时静默迁移；③ 不要求共享目录；④ 不解析 LevelDB（Main 不直接解析）；⑤ 不恢复源到目标 app 的正常 Dexie profile；⑥ 旧 IndexedDB 仅在当前 Dexie declaration/upgrades 可防御性识别并升级为结构有效的当前逻辑形态时才接受；⑦ 缺失值继承当前 Cherry Studio/Dexie 升级和读取语义，不创建 importer-specific 历史修复；⑧ 结构不可用数据被拒绝；⑨ 导入语义是 replace-all，非 merge；⑩ 在导入过程中现有 SQLite 保持 authoritative；⑪ 取消支持至最终 promotion 之前；⑫ promotion 短时不可取消，保留一个回滚快照，重开/检查 DB，成功后 relaunch。**Phase 4.0 spike 结果**（macOS arm64）：`session.fromPath()` 可行；file:// origin 为正确 origin；`IndexedDB/file__0.indexeddb.leveldb` 为观测到的 profile 映射；Dexie logical 4→native 40, 11→native 110, 12→native 120；v12 被当前 Dexie upgrades 正确拒绝；default session 隔离确认；Local Storage 非 discovery/read 必需；10/10 fresh-root 迭代通过；helper 进程回退仍为 contingency，未选用。**未验证**：Windows/Linux、真实 ZIP snapshot 一致性 |
 
 > **Phase 1 前置**：A-7（技术栈）和 A-5（~~authoritative 切换方式~~，已由 A-8 替代）两个 ADR 已关闭（Accepted），Phase 1 可启动。A-5 在 Phase 1 启动时已 Accepted，后因产品策略更正被 A-8 Superseded。
 
@@ -391,11 +391,21 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 属性 | 值 |
 |---|---|
-| **状态** | Not started |
-| **目标** | 验证 `session.defaultSession.fromPath()` / isolated profile + 正确 origin 创建隔离 Electron Session 的跨平台可行性 |
-| **方法** | 最小 spike：在 macOS / Windows / Linux 上从临时路径 `fromPath()` 创建 session profile；验证可正确加载 IndexedDB 并通过当前 Dexie declaration + upgrade functions 识别和升级数据 |
-| **No-go 回退** | 专用隔离 Electron helper 进程（非破坏性恢复、非直接 LevelDB 解析） |
-| **退出条件** | ✅ 至少一个平台成功验证 fromPath + origin + Dexie schema 读取；✅ no-go 时记录回退 helper 进程设计；✅ spike 结果记录在本文档 |
+| **状态** | **Done — Go on macOS arm64 (2026-07-21)** |
+| **目标** | 验证 `session.fromPath()` / isolated profile + 正确 origin 创建隔离 Electron Session 的跨平台可行性 |
+| **方法** | 最小 spike：在 macOS 上从临时路径 `session.fromPath(absolutePath, { cache: false })` 创建 session profile；验证可正确加载 IndexedDB 并通过当前 Dexie declaration + upgrade functions 识别和升级数据 |
+| **API 修正** | Electron 41.2.1 API 为静态 `session.fromPath(absolutePath, { cache: false })`；`session.defaultSession.fromPath()` 不存在。代码中已使用正确 API |
+| **Origin 观测** | 正确 origin 为 `file://`（通过 `pathToFileURL` 加载 renderer HTML）；一个不同的 loopback HTTP origin（`http://127.0.0.1:<port>`）不暴露 CherryStudio，不创建空 DB（仅使用 `indexedDB.databases()` 时） |
+| **Profile 映射观测** | 在测试的 file:// origin 下，IndexedDB 数据位于 `IndexedDB/file__0.indexeddb.leveldb/`。此为观测结果，非通用硬编码规则——不同 origin 类型可能产生不同映射 |
+| **Dexie 版本映射** | logical 4 → native 40；logical 11 → native 110；logical 12 → native 120。乘数为 ×10（与 Dexie 1-3 相同）。当前 CherryStudio: logical v11 / native 110 |
+| **升级路径验证** | v4 fixture（native 40）通过 production Dexie upgrades (v5→v7→v8→v11) 成功升级到 logical 11/native 110；验证了 v5 date conversion、v5 tavily→webSearch、v7 referential consistency、v8 language settings；topic_segments 表在升级后存在 |
+| **未来版本拒绝** | v12 fixture（native 120）在 production opener 启动前被正确拒绝（futureVersionRejected=true，productionOpenerStarted=false） |
+| **隔离验证** | default session 在 fresh spike-owned userData 中不含 CherryStudio；A/B markers 不跨 session；sentinel marker 不泄漏到 candidate session；wrong-origin probe 确认 CherryStudio absent at HTTP origin 且不创建空 DB |
+| **Local Storage** | IDB-only profile（无 Local Storage 目录）与 full-profile（IndexedDB + Local Storage）产生完全相同的 CherryStudio discovery 和 read 结果。仅 full-profile 暴露 LS control marker。LS 非 discovery/read 必需 |
+| **清理验证** | 10/10 fresh-root macOS arm64 迭代全部通过；child 正常退出（exit 0）；owned roots 在 exit 后删除，全部首次成功（cleanupAttempts=1）；无 owned leftovers |
+| **No-go 回退** | 专用隔离 Electron helper 进程（非破坏性恢复、非直接 LevelDB 解析）。**状态：contingency only，未选用** — same-process approach 在测试平台上满足 Phase 4.0 Go |
+| **未验证** | Windows/Linux；跨平台 fixture 可移植性；真实 ZIP snapshot 一致性/损坏处理（→ Phase 4.1） |
+| **退出条件** | ✅ macOS arm64 上 fromPath + origin + Dexie schema 读取验证通过；✅ v4→v11 升级验证通过；✅ v12 拒绝验证通过；✅ session 隔离验证通过；✅ LS 非必需验证通过；✅ 清理稳定性验证通过 |
 
 #### Phase 4.1：Secure ZIP intake + isolated IndexedDB source reader
 
@@ -559,7 +569,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| **Phase 4.0 fromPath 跨平台不可行** | 导入管线无法使用隔离 Session 读取源 IndexedDB | **Spike 验证**；no-go 回退为专用隔离 Electron helper 进程（非破坏性恢复、非直接 LevelDB 解析） |
+| **Phase 4.0 fromPath 跨平台不可行** | 导入管线无法使用隔离 Session 读取源 IndexedDB | **macOS arm64: Resolved**（`session.fromPath()` 可行）。**Windows/Linux: Open**（未测试）。no-go 回退为专用隔离 Electron helper 进程（非破坏性恢复、非直接 LevelDB 解析）——contingency only，未选用 |
 | **源 ZIP 结构不可识别** | 导入被拒绝 | 严格的 ZIP 内 IndexedDB 结构校验；明确的错误报告；不影响现有 DB |
 | **旧 IndexedDB schema 不可升级** | 旧版本备份导入被拒 | 仅接受当前 Dexie declaration/upgrades 可防御性识别的版本；版本校验前置 |
 | **导入性能（大型 ZIP）** | 大数据量导入耗时过长 | 分页传输；批量写入；性能基准记录（Phase 4.2） |
@@ -581,7 +591,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 指标 | 目标 | 状态 |
 |---|---|---|
-| Phase 4.0 spike | fromPath + origin + Dexie schema 跨平台验证通过（或 helper 进程回退设计完成） | Not started |
+| Phase 4.0 spike | fromPath + origin + Dexie schema 跨平台验证通过（或 helper 进程回退设计完成） | **Done — Go on macOS arm64** (Windows/Linux open; helper contingency recorded) |
 | ZIP 安全解压 | 唯一临时工作区 + IndexedDB 结构校验 | Not started |
 | 隔离 Session 读取 | import renderer 通过当前 Dexie schema 成功读取源数据 | Not started |
 | 候选 DB 构建 | 10k 消息完整导入；导入中断不损坏现有 DB | Not started |
@@ -633,7 +643,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | Q-5 | 搜索/FTS 首期是否实现？schema 预留还是 Phase 6 再加？ | Phase 2 schema | **Resolved**：Phase 2 不含 FTS；后续通过 append-only migration 添加，时机为搜索 projection 设计完成时 |
 | Q-6 | 遗留 agents.db 用户文件处理：归档提示还是自动清理？ | Group E 清理 | Open |
 | Q-7 | 备份协调的具体实现：WAL checkpoint 还是 backup API？ | A-6 备份策略 | **Closed/Accepted**：online backup API（better-sqlite3 `backup()`）封装为可替换 adapter，`BackupManager` 全操作协调；不使用 live WAL raw copy（A-6 Accepted） |
-| **Q-8** | **Phase 4.0 fromPath 跨平台可行性？** | **Phase 4.0 spike** | **Open**：spike 将验证 macOS/Windows/Linux 上 session.fromPath() + origin + isolated profile 加载 IndexedDB 的可行性；no-go 回退为专用隔离 Electron helper 进程 |
+| **Q-8** | **Phase 4.0 fromPath 跨平台可行性？** | **Phase 4.0 spike** | **Resolved (macOS arm64) / Open (Windows/Linux)**：macOS arm64 上 `session.fromPath()` + file:// origin + isolated profile 成功加载 IndexedDB；v4→v11 升级通过；v12 拒绝通过；session 隔离通过；LS 非必需；10/10 清理稳定。Windows/Linux 未测试。helper 进程回退仍为 contingency |
 
 ---
 
@@ -683,6 +693,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 2026-07-19 | Phase 5 | Not started |
 | 2026-07-19 | Phase 6 | Not started |
 | **2026-07-20** | **策略更正** | **A-8 Accepted：外部应用兼容性导入模型替代 in-place Dexie→SQLite shadow/cutover（A-5 Superseded）。Phase 4 重定义为外部导入管线（4.0 spike → 4.1 ZIP intake → 4.2 bulk import → 4.3 verification → 4.4 atomic promotion）。Phase 5 重定义为 SQLite-only runtime 完成。Phase 6 重定义为 Cherry Chat 备份/恢复分离 + 清理。文档全面更新反映新模型** |
+| **2026-07-21** | **Phase 4.0 Done** | **Isolated-profile feasibility spike 完成 — Go on macOS arm64。**验证：`session.fromPath(absolutePath, { cache: false })` 为正确 Electron API（非 `session.defaultSession.fromPath()`）；file:// origin 正确；`IndexedDB/file__0.indexeddb.leveldb` 为观测到的 profile 映射；Dexie logical 4→native 40, 11→native 110, 12→native 120（×10 乘数）；v4 通过 production upgrades (v5→v7→v8→v11) 升级；v12 被正确拒绝；default session 隔离确认；A/B markers 不跨 session；Local Storage 非 discovery/read 必需；10/10 fresh-root 迭代通过，cleanupAttempts=1，无 leftovers。**未验证**：Windows/Linux、真实 ZIP snapshot 一致性。helper 进程回退为 contingency only，未选用 |
 
 ---
 
@@ -740,7 +751,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 区域 | 预期路径 | 说明 |
 |---|---|---|
 | ZIP intake + extract | `src/main/services/chatDb/import/` | 安全解压、IndexedDB 结构校验、临时工作区管理 |
-| Isolated session/profile | `src/main/services/chatDb/import/isolatedSession.ts` | fromPath() / isolated profile + origin 创建 |
+| Isolated session/profile | `src/main/services/chatDb/import/isolatedSession.ts` | `session.fromPath(absolutePath, { cache: false })` / isolated profile + origin 创建 |
 | Import renderer | `src/renderer/src/windows/import/` | 隐藏 sandboxed renderer，当前 Dexie schema against isolated profile |
 | Import IPC | `packages/shared/IpcChannel.ts` (新增) | 窄 import-only IPC channels |
 | Candidate builder | `src/main/services/chatDb/import/candidateBuilder.ts` | 使用 Phase 2 repository 层批量写入候选 DB |
