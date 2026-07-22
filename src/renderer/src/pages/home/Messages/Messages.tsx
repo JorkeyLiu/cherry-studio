@@ -49,6 +49,7 @@ import {
   reconcileMessageWindow
 } from '@renderer/pages/home/Messages/messageWindow'
 import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
+import { buildGroupList } from '@renderer/services/anchorService'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import {
@@ -766,24 +767,34 @@ const Messages = ({
         if (success) {
           setActiveTopic(newTopic)
           void autoRenameTopic(assistant, newTopic.id)
-          // Inherit fixed context window anchor
+          // Inherit fixed context window anchor (group-key based)
           const assistantSettings = getAssistantSettings(assistant)
           if (assistantSettings.contextWindowMode === 'fixed') {
-            const sourceAnchorId = assistantSettings.fixedWindowAnchor?.[topic.id]
-            if (sourceAnchorId) {
-              const anchorIndex = currentMessages.findIndex((m) => m.id === sourceAnchorId)
-              const clonedCount = branchEndpoint
-              if (anchorIndex >= 0 && anchorIndex < clonedCount) {
-                const newTopicMessageIds = store.getState().messages.messageIdsByTopic[newTopic.id]
-                if (newTopicMessageIds && newTopicMessageIds.length > anchorIndex) {
-                  const newAnchorId = newTopicMessageIds[anchorIndex]
-                  updateAssistantSettings({
-                    fixedWindowAnchor: {
-                      ...assistantSettings.fixedWindowAnchor,
-                      [newTopic.id]: newAnchorId
-                    }
-                  })
+            const sourceAnchor = assistantSettings.fixedWindowAnchor?.[topic.id]
+            if (sourceAnchor?.kind === 'active') {
+              try {
+                const sourceState = store.getState()
+                const sourceMessageIds = sourceState.messages.messageIdsByTopic[topic.id] || []
+                const sourceEntities = sourceState.messages.entities
+                const sourceGroupList = buildGroupList(sourceMessageIds, (id) => sourceEntities[id])
+                const groupIndex = sourceGroupList.indexOf(sourceAnchor.groupKey)
+
+                if (groupIndex >= 0 && sourceGroupList.length > 0) {
+                  const newMessageIds = sourceState.messages.messageIdsByTopic[newTopic.id] || []
+                  const newEntities = sourceState.messages.entities
+                  const newGroupList = buildGroupList(newMessageIds, (id) => newEntities[id])
+
+                  if (groupIndex < newGroupList.length) {
+                    updateAssistantSettings({
+                      fixedWindowAnchor: {
+                        ...assistantSettings.fixedWindowAnchor,
+                        [newTopic.id]: { kind: 'active', groupKey: newGroupList[groupIndex] }
+                      }
+                    })
+                  }
                 }
+              } catch (error) {
+                logger.error('[NEW_BRANCH] Failed to inherit fixed context window anchor', error as Error)
               }
             }
           }

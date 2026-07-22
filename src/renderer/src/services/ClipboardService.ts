@@ -27,6 +27,8 @@ import { MessageBlockType } from '@renderer/types/newMessage'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { v4 as uuidv4 } from 'uuid'
 
+import { buildGroupList, transferAnchorsAfterDeletion } from './anchorService'
+
 const logger = loggerService.withContext('ClipboardService')
 
 /**
@@ -579,6 +581,11 @@ export async function deleteSelectedMessages(
     return 0
   }
 
+  // Snapshot oldGroupList before deletion for anchor transfer
+  const messageIdsBefore = state.messages.messageIdsByTopic[topicId] || []
+  const entitiesBefore = state.messages.entities
+  const oldGroupList = buildGroupList(messageIdsBefore, (id) => entitiesBefore[id])
+
   // Collect all messages and blocks to delete
   const allMessagesToDelete: Message[] = []
   const allBlocksToDelete: MessageBlock[] = []
@@ -635,6 +642,13 @@ export async function deleteSelectedMessages(
     dispatch(removeManyBlocks(allBlockIds))
   }
 
+  // Transfer anchors after deletion
+  const newState = getState()
+  const messageIdsAfter = newState.messages.messageIdsByTopic[topicId] || []
+  const entitiesAfter = newState.messages.entities
+  const newGroupList = buildGroupList(messageIdsAfter, (id) => entitiesAfter[id])
+  transferAnchorsAfterDeletion(dispatch, getState, topicId, oldGroupList, newGroupList)
+
   // Sync segments after message deletion
   await syncSegmentsAfterMessageDeletion(dispatch, getState, topicId, allMessageIds)
 
@@ -667,7 +681,9 @@ export async function deleteSelectedMessages(
 
 /**
  * Delete a single message with undo support.
- * Unlike deleteSelectedMessages which groups by askId, this operates on exactly one message.
+ * If deleting a user message, cascades to all assistant messages with matching askId,
+ * and transfers anchors for all affected assistants.
+ * If deleting an assistant message, only deletes that single message.
  */
 export async function deleteSingleMessage(
   dispatch: AppDispatch,
@@ -679,13 +695,40 @@ export async function deleteSingleMessage(
   const msg = state.messages.entities[message.id]
   if (!msg) return
 
-  // Collect blocks for this message
-  const blockIds = msg.blocks || []
-  const blocksToDelete = blockIds.map((id) => state.messageBlocks.entities[id]).filter(Boolean)
+  // Snapshot oldGroupList before deletion for anchor transfer
+  const messageIdsBefore = state.messages.messageIdsByTopic[topicId] || []
+  const entitiesBefore = state.messages.entities
+  const oldGroupList = buildGroupList(messageIdsBefore, (id) => entitiesBefore[id])
+
+  // Determine cascade: user messages delete their assistant children
+  let allMessageIds: string[]
+  let allMessages: Message[]
+  if (msg.role === 'user') {
+    const topicMessages = selectMessagesForTopic(state, topicId)
+    const groupMessages = topicMessages.filter((m) => m.askId === message.id)
+    allMessageIds = [message.id, ...groupMessages.map((m) => m.id)]
+    allMessages = [msg, ...groupMessages]
+  } else {
+    allMessageIds = [message.id]
+    allMessages = [msg]
+  }
+
+  // Collect blocks for all messages
+  const allBlockIds: string[] = []
+  const allBlocks: MessageBlock[] = []
+  for (const m of allMessages) {
+    for (const blockId of m.blocks || []) {
+      const block = state.messageBlocks.entities[blockId]
+      if (block) {
+        allBlockIds.push(blockId)
+        allBlocks.push(block)
+      }
+    }
+  }
 
   // Collect file reference deltas (for undo restoration)
   const fileReferenceDeltas: Array<{ fileId: string; delta: number }> = []
-  for (const block of blocksToDelete) {
+  for (const block of allBlocks) {
     if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
       const file = block.file
       if (file) {
@@ -700,24 +743,33 @@ export async function deleteSingleMessage(
   const nextMessage = positionIndex >= 0 ? topicMessages[positionIndex + 1] : undefined
 
   // Collect segment snapshots BEFORE deletion (needed for undo)
-  const segmentSnapshots = collectSegmentSnapshots(getState, topicId, [message.id])
+  const segmentSnapshots = collectSegmentSnapshots(getState, topicId, allMessageIds)
 
   // DB-first: delete from DB before dispatching to Redux
   try {
-    await deleteMessagesFromDB(topicId, [message.id])
+    await deleteMessagesFromDB(topicId, allMessageIds)
   } catch (error) {
     logger.error('[deleteSingleMessage] Failed to delete from DB', error as Error)
     return
   }
 
   // Redux: remove from state only after DB delete succeeds
-  dispatch(newMessagesActions.removeMessages({ topicId, messageIds: [message.id] }))
-  if (blockIds.length > 0) {
-    dispatch(removeManyBlocks(blockIds))
+  dispatch(newMessagesActions.removeMessages({ topicId, messageIds: allMessageIds }))
+  if (allBlockIds.length > 0) {
+    dispatch(removeManyBlocks(allBlockIds))
+  }
+
+  // Transfer anchors after deletion (only if user message was deleted)
+  if (msg.role === 'user') {
+    const newState = getState()
+    const messageIdsAfter = newState.messages.messageIdsByTopic[topicId] || []
+    const entitiesAfter = newState.messages.entities
+    const newGroupList = buildGroupList(messageIdsAfter, (id) => entitiesAfter[id])
+    transferAnchorsAfterDeletion(dispatch, getState, topicId, oldGroupList, newGroupList)
   }
 
   // Sync segments after message deletion
-  await syncSegmentsAfterMessageDeletion(dispatch, getState, topicId, [message.id])
+  await syncSegmentsAfterMessageDeletion(dispatch, getState, topicId, allMessageIds)
 
   // Update file reference counts
   for (const { fileId, delta } of fileReferenceDeltas) {
@@ -726,8 +778,8 @@ export async function deleteSingleMessage(
 
   // Build undo data
   const groupAnchor: GroupAnchor = {
-    messages: [structuredClone(msg)],
-    blocks: blocksToDelete.map((b) => structuredClone(b)),
+    messages: allMessages.map((m) => structuredClone(m)),
+    blocks: allBlocks.map((b) => structuredClone(b)),
     positionIndex: positionIndex >= 0 ? positionIndex : 0,
     anchorMessageId: nextMessage?.id ?? null
   }
@@ -737,7 +789,7 @@ export async function deleteSingleMessage(
     type: 'delete',
     timestamp: Date.now(),
     targetTopicId: topicId,
-    insertedMessageIds: [message.id],
+    insertedMessageIds: allMessageIds,
     pastedMessagesSnapshot: [],
     pastedBlocksSnapshot: [],
     fileReferenceDeltas,
@@ -747,5 +799,5 @@ export async function deleteSingleMessage(
 
   dispatch(pushUndoAction(undoAction))
 
-  logger.info(`[deleteSingleMessage] Deleted message ${message.id} from topic ${topicId}`)
+  logger.info(`[deleteSingleMessage] Deleted ${allMessageIds.length} messages from topic ${topicId}`)
 }

@@ -38,6 +38,7 @@ import type {
   Model,
   Provider,
   ProviderApiOptions,
+  TopicAnchor,
   TranslateLanguageCode,
   WebSearchProvider
 } from '@renderer/types'
@@ -3349,6 +3350,45 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 210 error', error as Error)
+      return state
+    }
+  },
+  '211': (state: RootState) => {
+    try {
+      // Migrate fixedWindowAnchor from string form to TopicAnchor form (group-granularity)
+      const migrateAssistant = (assistant: Assistant) => {
+        const anchorMap = assistant?.settings?.fixedWindowAnchor
+        if (!anchorMap) return assistant
+        const newMap: Record<string, TopicAnchor | undefined> = {}
+        for (const [topicId, value] of Object.entries(anchorMap)) {
+          if (value === undefined || value === null) {
+            // 未开 fixed —— 保持 undefined（不存键）
+            continue
+          }
+          if (typeof value === 'string') {
+            if (value === '') {
+              // 旧 sentinel 空字符串 → vacant
+              newMap[topicId] = { kind: 'vacant' }
+            } else {
+              // 旧有效 messageId → active（直接作为 groupKey，因旧 anchor 必指向 user 消息）
+              newMap[topicId] = { kind: 'active', groupKey: value }
+            }
+          } else if (typeof value === 'object' && value !== null && 'kind' in value) {
+            // 已经是新形态（理论上不会出现，但做幂等保护）—— 保留
+            newMap[topicId] = value
+          }
+        }
+        if (assistant.settings) {
+          assistant.settings.fixedWindowAnchor = newMap
+        }
+        return assistant
+      }
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
+      logger.info('migrate 211 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 211 error', error as Error)
       return state
     }
   }

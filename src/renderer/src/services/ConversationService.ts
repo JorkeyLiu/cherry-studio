@@ -1,10 +1,12 @@
 import { loggerService } from '@logger'
 import { convertMessagesToSdkMessages } from '@renderer/aiCore/prepareParams'
-import type { Assistant, ContextWindowMode, Message } from '@renderer/types'
+import type { Assistant, ContextWindowMode, TopicAnchor } from '@renderer/types'
+import type { Message } from '@renderer/types/newMessage'
 import { filterAdjacentUserMessaegs, filterLastAssistantMessage } from '@renderer/utils/messageUtils/filters'
 import type { ModelMessage } from 'ai'
 import { findLast, isEmpty, takeRight } from 'lodash'
 
+import { resolveAnchorSliceStart } from './anchorService'
 import { getAssistantSettings, getDefaultModel } from './AssistantService'
 import {
   filterAfterContextClearMessages,
@@ -25,7 +27,7 @@ export class ConversationService {
     messages: Message[],
     contextCount: number,
     contextWindowMode?: ContextWindowMode,
-    anchorMessageId?: string
+    anchor?: TopicAnchor
   ): Message[] {
     const messagesAfterContextClear = filterAfterContextClearMessages(messages)
     const usefulMessages = filterUsefulMessages(messagesAfterContextClear)
@@ -35,13 +37,19 @@ export class ConversationService {
     const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
 
     let limitedByContext: Message[]
-    if (contextWindowMode === 'fixed' && anchorMessageId) {
-      const anchorIndex = withoutAdjacentUsers.findIndex((m) => m.id === anchorMessageId)
-      if (anchorIndex >= 0) {
-        limitedByContext = withoutAdjacentUsers.slice(anchorIndex)
+    if (contextWindowMode === 'fixed' && anchor !== undefined) {
+      if (anchor.kind === 'vacant') {
+        // vacant: 全量不截断
+        limitedByContext = withoutAdjacentUsers
       } else {
-        // Anchor message not found (deleted?), fallback to sliding
-        limitedByContext = takeRight(withoutAdjacentUsers, contextCount + 2)
+        // active: 从 groupKey 对应的组起点 slice 到尾
+        const sliceStart = resolveAnchorSliceStart(withoutAdjacentUsers, anchor.groupKey)
+        if (sliceStart >= 0) {
+          limitedByContext = withoutAdjacentUsers.slice(sliceStart)
+        } else {
+          // 组被过滤掉了，退化为全量不截断（等同 vacant 行为）
+          limitedByContext = withoutAdjacentUsers
+        }
       }
     } else {
       // Sliding mode: keep the last contextCount + 2 messages
@@ -70,12 +78,12 @@ export class ConversationService {
       }
     }
 
-    const anchorMessageId = topicId ? fixedWindowAnchor?.[topicId] : undefined
+    const anchor = topicId ? fixedWindowAnchor?.[topicId] : undefined
     const uiMessagesFromPipeline = ConversationService.filterMessagesPipeline(
       messages,
       contextCount,
       contextWindowMode,
-      anchorMessageId
+      anchor
     )
     logger.debug('uiMessagesFromPipeline', uiMessagesFromPipeline)
 

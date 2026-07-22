@@ -1,4 +1,5 @@
 import { UNLIMITED_CONTEXT_COUNT } from '@renderer/config/constant'
+import { resolveAnchorSliceStart } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import type { Assistant } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
@@ -9,7 +10,6 @@ import {
   filterLastAssistantMessage,
   filterUsefulMessages
 } from '@renderer/utils/messageUtils/filters'
-import { resolveAnchorMessageId } from '@renderer/utils/messageUtils/resolveAnchor'
 import { takeRight } from 'lodash'
 
 /**
@@ -64,16 +64,23 @@ export const computeContextBoundaryMessageId = (
   if (preFiltered.length === 0) return null
 
   if (settings.contextWindowMode === 'fixed') {
-    const anchorMessageId = settings.fixedWindowAnchor?.[topicId]
-    if (anchorMessageId) {
-      const resolvedAnchorId = resolveAnchorMessageId(preFiltered, anchorMessageId)
-      if (resolvedAnchorId) {
-        const resolvedIndex = preFiltered.findIndex((m) => m.id === resolvedAnchorId)
-        // No boundary needed if resolved anchor is the first message (all in context)
-        if (resolvedIndex === 0) return null
-        return resolvedAnchorId
+    const anchor = settings.fixedWindowAnchor?.[topicId]
+    if (anchor !== undefined) {
+      if (anchor.kind === 'vacant') {
+        // vacant: 全量不截断，无分割线
+        return null
       }
-      // No messages at all — no boundary
+      // active: 用 groupKey 在 preFiltered 找组起点
+      const sliceStart = resolveAnchorSliceStart(preFiltered, anchor.groupKey)
+      if (sliceStart === 0) {
+        // 全在上下文内，无线
+        return null
+      }
+      if (sliceStart > 0) {
+        // 返回起点消息 id 作为分割线
+        return preFiltered[sliceStart].id
+      }
+      // groupKey 找不到（整组被过滤），退化为无分割线
       return null
     }
     // No anchor set — fall through to sliding mode

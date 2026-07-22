@@ -175,6 +175,8 @@ export const EFFORT_RATIO: EffortRatio = {
 
 export type ContextWindowMode = 'sliding' | 'fixed'
 
+export type TopicAnchor = { kind: 'active'; groupKey: string } | { kind: 'vacant' }
+
 export type AssistantSettings = {
   maxTokens?: number
   enableMaxTokens?: boolean
@@ -203,7 +205,7 @@ export type AssistantSettings = {
   maxToolCalls?: number
   enableMaxToolCalls?: boolean
   contextWindowMode?: ContextWindowMode
-  fixedWindowAnchor?: Record<string, string> // { [topicId]: anchorMessageId }
+  fixedWindowAnchor?: Record<string, TopicAnchor | undefined> // { [topicId]: TopicAnchor }
 }
 
 export type AssistantPreset = Omit<Assistant, 'model'> & {

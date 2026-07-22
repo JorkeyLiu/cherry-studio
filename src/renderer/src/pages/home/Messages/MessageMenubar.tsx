@@ -15,6 +15,7 @@ import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
 import { useEnableDeveloperMode, useMessageStyle, useSettings } from '@renderer/hooks/useSettings'
 import { useTemporaryValue } from '@renderer/hooks/useTemporaryValue'
 import useTranslate from '@renderer/hooks/useTranslate'
+import { resolveGroupKey, setAnchorByMessage } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getMessageTitle } from '@renderer/services/MessagesService'
@@ -179,22 +180,28 @@ const MessageMenubar: FC<Props> = (props) => {
   const assistantSettings = getAssistantSettings(assistant)
   const contextWindowMode = assistantSettings.contextWindowMode
   const handleSetContextAnchor = useCallback(() => {
-    const currentAnchor = assistantSettings.fixedWindowAnchor?.[topic.id]
+    const desiredGroupKey = resolveGroupKey(message)
+    if (desiredGroupKey === null) return // assistant without askId, rare
+
+    const current = assistantSettings.fixedWindowAnchor?.[topic.id]
     const newAnchor = { ...assistantSettings.fixedWindowAnchor }
-    if (currentAnchor === message.id) {
-      // Already anchored here, remove anchor
-      delete newAnchor[topic.id]
+
+    if (current?.kind === 'active' && current.groupKey === desiredGroupKey) {
+      // Already anchored here, switch back to vacant
+      newAnchor[topic.id] = { kind: 'vacant' }
     } else {
       // Set new anchor
-      newAnchor[topic.id] = message.id
+      newAnchor[topic.id] = setAnchorByMessage(current, message)
     }
     updateAssistantSettings({ fixedWindowAnchor: newAnchor })
-  }, [assistantSettings, topic.id, message.id, updateAssistantSettings])
+  }, [assistantSettings, topic.id, message, updateAssistantSettings])
 
   const isContextAnchor = useMemo(() => {
     const settings = getAssistantSettings(assistant)
-    return settings.fixedWindowAnchor?.[topic.id] === message.id
-  }, [assistant, topic.id, message.id])
+    const current = settings.fixedWindowAnchor?.[topic.id]
+    if (current?.kind !== 'active') return false
+    return current.groupKey === message.id || (message.role === 'assistant' && current.groupKey === message.askId)
+  }, [assistant, topic.id, message.id, message.role, message.askId])
 
   // const loading = useTopicLoading(topic)
 

@@ -18,6 +18,7 @@ import { loggerService } from '@logger'
 import { AiSdkToChunkAdapter } from '@renderer/aiCore/chunk/AiSdkToChunkAdapter'
 import db from '@renderer/databases'
 import { getModel } from '@renderer/hooks/useModel'
+import { buildGroupList, transferAnchorsAfterDeletion } from '@renderer/services/anchorService'
 import { fetchMessagesSummary, transformMessagesAndFetch } from '@renderer/services/ApiService'
 import { dbService } from '@renderer/services/db'
 import { DbService } from '@renderer/services/db/DbService'
@@ -1063,6 +1064,8 @@ export const sendMessage =
 
 /**
  * Thunk to delete a single message and its associated blocks.
+ * If deleting a user message, cascades to all assistant messages with matching askId,
+ * and transfers anchors for all affected assistants.
  */
 export const deleteSingleMessageThunk =
   (topicId: string, messageId: string) => async (dispatch: AppDispatch, getState: () => RootState) => {
@@ -1073,15 +1076,56 @@ export const deleteSingleMessageThunk =
       return
     }
 
-    const blockIdsToDelete = messageToDelete.blocks || []
+    // Snapshot oldGroupList before deletion for anchor transfer
+    const messageIdsBefore = currentState.messages.messageIdsByTopic[topicId] || []
+    const entitiesBefore = currentState.messages.entities
+    const oldGroupList = buildGroupList(messageIdsBefore, (id) => entitiesBefore[id])
+
+    let idsToDelete: string[]
+
+    if (messageToDelete.role === 'user') {
+      // Cascade: collect all assistant messages that reference this user message
+      const allTopicMessages = selectMessagesForTopic(currentState, topicId)
+      const assistantIds = allTopicMessages.filter((m) => m.askId === messageId).map((m) => m.id)
+      idsToDelete = [messageId, ...assistantIds]
+    } else {
+      // Assistant: only delete the single message, no anchor transfer needed
+      idsToDelete = [messageId]
+    }
+
+    // Collect block IDs for all messages being deleted
+    const allBlockIds: string[] = []
+    for (const id of idsToDelete) {
+      const msg = currentState.messages.entities[id]
+      if (msg?.blocks) {
+        allBlockIds.push(...msg.blocks)
+      }
+    }
 
     try {
-      dispatch(newMessagesActions.removeMessage({ topicId, messageId }))
-      cleanupMultipleBlocks(dispatch, blockIdsToDelete)
-      await dbService.deleteMessage(topicId, messageId)
+      // Remove all messages from Redux
+      dispatch(newMessagesActions.removeMessages({ topicId, messageIds: idsToDelete }))
+      cleanupMultipleBlocks(dispatch, allBlockIds)
 
-      // C2: Remove message from associated topic segments
-      await dispatch(removeMessageFromSegmentsThunk({ topicId, messageId }))
+      // Delete from DB
+      for (const id of idsToDelete) {
+        await dbService.deleteMessage(topicId, id)
+      }
+
+      // C2: Remove messages from associated topic segments
+      for (const id of idsToDelete) {
+        await dispatch(removeMessageFromSegmentsThunk({ topicId, messageId: id }))
+      }
+
+      // Transfer anchors if user message was deleted (cascade)
+      if (messageToDelete.role === 'user') {
+        const newState = getState()
+        const messageIdsAfter = newState.messages.messageIdsByTopic[topicId] || []
+        const entitiesAfter = newState.messages.entities
+        const newGroupList = buildGroupList(messageIdsAfter, (id) => entitiesAfter[id])
+
+        transferAnchorsAfterDeletion(dispatch, getState, topicId, oldGroupList, newGroupList)
+      }
     } catch (error) {
       logger.error(`[deleteSingleMessage] Failed to delete message ${messageId}:`, error as Error)
     }

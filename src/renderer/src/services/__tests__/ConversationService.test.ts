@@ -163,4 +163,109 @@ describe('ConversationService.filterMessagesPipeline', () => {
     expect(filtered[0].role).toBe('user')
     expect(filtered[filtered.length - 1].role).toBe('user')
   })
+
+  describe('anchor modes (TopicAnchor)', () => {
+    // Helper to create a message with a registered text block
+    const makeMsg = (id: string, role: 'user' | 'assistant', topicId: string, assistantId: string, askId?: string) => {
+      const block = createMainTextBlock(id, `content-${id}`, { status: MessageBlockStatus.SUCCESS })
+      mockStore.dispatch(messageBlocksSlice.actions.upsertOneBlock(block))
+      return createMessage(role, topicId, assistantId, {
+        id,
+        askId,
+        blocks: [block.id]
+      })
+    }
+
+    it('undefined anchor → sliding mode (takeRight)', () => {
+      const topicId = 'topic-1'
+      const assistantId = 'assistant-1'
+      const messages: ReturnType<typeof createMessage>[] = []
+      for (let i = 0; i < 20; i++) {
+        const role = i % 2 === 0 ? 'user' : 'assistant'
+        const askId = role === 'assistant' ? `m${i - 1}` : undefined
+        messages.push(makeMsg(`m${i}`, role, topicId, assistantId, askId))
+      }
+
+      const filtered = ConversationService.filterMessagesPipeline(messages, /* contextCount */ 3, 'sliding', undefined)
+
+      // Sliding: takeRight(preFiltered, 3+2=5) — but after pipeline filters
+      expect(filtered.length).toBeLessThanOrEqual(5)
+      expect(filtered.length).toBeGreaterThan(0)
+    })
+
+    it('vacant anchor → full messages, no truncation', () => {
+      const topicId = 'topic-1'
+      const assistantId = 'assistant-1'
+      const messages: ReturnType<typeof createMessage>[] = []
+      for (let i = 0; i < 10; i++) {
+        const role = i % 2 === 0 ? 'user' : 'assistant'
+        const askId = role === 'assistant' ? `m${i - 1}` : undefined
+        messages.push(makeMsg(`m${i}`, role, topicId, assistantId, askId))
+      }
+
+      const filtered = ConversationService.filterMessagesPipeline(messages, /* contextCount */ 3, 'fixed', {
+        kind: 'vacant'
+      })
+
+      // Vacant: all messages (after pipeline filters), no truncation
+      expect(filtered.length).toBeGreaterThan(0)
+    })
+
+    it('active anchor → slice from groupKey user message', () => {
+      const topicId = 'topic-1'
+      const assistantId = 'assistant-1'
+
+      const user1 = makeMsg('u1', 'user', topicId, assistantId)
+      const a1 = makeMsg('a1', 'assistant', topicId, assistantId, 'u1')
+      const user2 = makeMsg('u2', 'user', topicId, assistantId)
+      const a2 = makeMsg('a2', 'assistant', topicId, assistantId, 'u2')
+      const user3 = makeMsg('u3', 'user', topicId, assistantId)
+      const a3 = makeMsg('a3', 'assistant', topicId, assistantId, 'u3')
+
+      const filtered = ConversationService.filterMessagesPipeline(
+        [user1, a1, user2, a2, user3, a3],
+        /* contextCount */ 100,
+        'fixed',
+        { kind: 'active', groupKey: 'u2' }
+      )
+
+      // Should start from u2 and include everything after
+      expect(filtered.find((m) => m.id === 'u1')).toBeUndefined()
+      expect(filtered.find((m) => m.id === 'u2')).toBeDefined()
+    })
+
+    it('active anchor with groupKey at index 0 → all messages', () => {
+      const topicId = 'topic-1'
+      const assistantId = 'assistant-1'
+
+      const user1 = makeMsg('u1', 'user', topicId, assistantId)
+      const a1 = makeMsg('a1', 'assistant', topicId, assistantId, 'u1')
+      const user2 = makeMsg('u2', 'user', topicId, assistantId)
+
+      const filtered = ConversationService.filterMessagesPipeline([user1, a1, user2], /* contextCount */ 100, 'fixed', {
+        kind: 'active',
+        groupKey: 'u1'
+      })
+
+      // All messages from u1 onward
+      expect(filtered.find((m) => m.id === 'u1')).toBeDefined()
+      expect(filtered.find((m) => m.id === 'u2')).toBeDefined()
+    })
+
+    it('active anchor with groupKey not found → full messages (vacant-like fallback)', () => {
+      const topicId = 'topic-1'
+      const assistantId = 'assistant-1'
+
+      const user1 = makeMsg('u1', 'user', topicId, assistantId)
+      const a1 = makeMsg('a1', 'assistant', topicId, assistantId, 'u1')
+
+      const filtered = ConversationService.filterMessagesPipeline([user1, a1], /* contextCount */ 100, 'fixed', {
+        kind: 'active',
+        groupKey: 'nonexistent'
+      })
+
+      // Not found → full messages (vacant-like)
+      expect(filtered.find((m) => m.id === 'u1')).toBeDefined()
+    })
+  })
 })

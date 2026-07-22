@@ -310,24 +310,17 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   const settings = getAssistantSettings(assistant)
   const hasAnchor = settings.contextWindowMode === 'fixed' && settings.fixedWindowAnchor?.[topic.id] !== undefined
 
-  // 自动锚点：小开关开启但无有效锚点时，有消息就自动设定
+  // 自动锚点：vacant 且有 user 消息时，自动设为 active(firstUser)
   useEffect(() => {
     const settings = getAssistantSettings(assistant)
-    const anchorId = settings.fixedWindowAnchor?.[topic.id]
-    // 小开关开启（anchorId !== undefined）且无有效锚点
-    if (
-      settings.contextWindowMode === 'fixed' &&
-      anchorId !== undefined &&
-      (!anchorId || !topicMessages.some((m) => m.id === anchorId)) &&
-      topicMessages.length > 0
-    ) {
-      const anchorIndex = Math.max(0, topicMessages.length - settings.contextCount)
-      const anchorMessage = topicMessages[anchorIndex]
-      if (anchorMessage) {
+    const anchor = settings.fixedWindowAnchor?.[topic.id]
+    if (settings.contextWindowMode === 'fixed' && anchor?.kind === 'vacant') {
+      const firstUser = topicMessages.find((m) => m.role === 'user')
+      if (firstUser) {
         updateAssistantSettings({
           fixedWindowAnchor: {
             ...settings.fixedWindowAnchor,
-            [topic.id]: anchorMessage.id
+            [topic.id]: { kind: 'active', groupKey: firstUser.id }
           }
         })
       }
@@ -337,25 +330,24 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   const onUpdateAnchor = useCallback(() => {
     const settings = getAssistantSettings(assistant)
     const topicMessagesList = topicMessages || []
-    const hasAnchor = settings.contextWindowMode === 'fixed' && settings.fixedWindowAnchor?.[topic.id] !== undefined
+    const current = settings.fixedWindowAnchor?.[topic.id]
 
-    if (hasAnchor && topic.id) {
-      // 1. Has anchor: unanchor (restore sliding)
+    if (current?.kind === 'active') {
+      // active → vacant
       updateAssistantSettings({
         fixedWindowAnchor: {
           ...settings.fixedWindowAnchor,
-          [topic.id]: undefined as unknown as string // Set to undefined to persist as empty
+          [topic.id]: { kind: 'vacant' }
         }
       })
     } else {
-      // 2. No anchor: anchor
-      const anchorIndex = Math.max(0, topicMessagesList.length - settings.contextCount)
-      const anchorMessage = topicMessagesList[anchorIndex]
-      if (anchorMessage && topic.id) {
+      // vacant 或 undefined → active(第一个 user 消息)
+      const firstUser = topicMessagesList.find((m) => m.role === 'user')
+      if (firstUser && topic.id) {
         updateAssistantSettings({
           fixedWindowAnchor: {
             ...settings.fixedWindowAnchor,
-            [topic.id]: anchorMessage.id
+            [topic.id]: { kind: 'active', groupKey: firstUser.id }
           }
         })
       }
@@ -402,7 +394,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
       updateAssistantSettings({
         fixedWindowAnchor: {
           ...settings.fixedWindowAnchor,
-          [newTopic.id]: ''
+          [newTopic.id]: { kind: 'vacant' }
         }
       })
     }

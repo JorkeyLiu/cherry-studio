@@ -27,6 +27,7 @@ import dayjs from 'dayjs'
 import { t } from 'i18next'
 import type { NavigateFunction } from 'react-router'
 
+import { resolveAnchorSliceStart } from './anchorService'
 import { getAssistantById, getAssistantProvider, getDefaultModel } from './AssistantService'
 import { EVENT_NAMES, EventEmitter } from './EventService'
 import FileManager from './FileManager'
@@ -84,15 +85,21 @@ export function getContextCount(assistant: Assistant, messages: Message[], topic
   const actualContextCount = settingContextCount === MAX_CONTEXT_COUNT ? UNLIMITED_CONTEXT_COUNT : settingContextCount
 
   if (settings?.contextWindowMode === 'fixed') {
-    const anchorMessageId = topicId ? settings?.fixedWindowAnchor?.[topicId] : undefined
-    if (anchorMessageId) {
-      const anchorIndex = messages.findIndex((m) => m.id === anchorMessageId)
-      if (anchorIndex >= 0) {
-        const contextMsgs = messages.slice(anchorIndex)
-        return { current: contextMsgs.length, max: settingContextCount }
+    const anchor = topicId ? settings?.fixedWindowAnchor?.[topicId] : undefined
+    if (anchor !== undefined) {
+      if (anchor.kind === 'vacant') {
+        // vacant: 全量
+        return { current: messages.length, max: settingContextCount }
       }
+      // active: 从 groupKey 对应的组起点 slice
+      const sliceStart = resolveAnchorSliceStart(messages, anchor.groupKey)
+      if (sliceStart >= 0) {
+        return { current: messages.slice(sliceStart).length, max: settingContextCount }
+      }
+      // group 被过滤，退化为全量
+      return { current: messages.length, max: settingContextCount }
     }
-    // No anchor set or anchor not found: fall through to sliding mode
+    // No anchor set (undefined): fall through to sliding mode
   }
 
   // Sliding mode: unchanged
