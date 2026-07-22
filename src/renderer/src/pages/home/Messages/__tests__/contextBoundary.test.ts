@@ -165,7 +165,7 @@ describe('computeContextBoundaryMessageId', () => {
       expect(result).toBeNull()
     })
 
-    it('active anchor with deleted groupKey → returns null (vacant-like fallback)', () => {
+    it('active anchor with deleted groupKey → returns null (fallback)', () => {
       const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2')]
 
       const result = computeContextBoundaryMessageId(
@@ -178,54 +178,11 @@ describe('computeContextBoundaryMessageId', () => {
         TOPIC_ID
       )
 
-      // GroupKey not found → no boundary (vacant-like)
+      // GroupKey not found → no boundary (fallback)
       expect(result).toBeNull()
     })
 
-    it('vacant anchor → returns null (no boundary)', () => {
-      const messages = Array.from({ length: 20 }, (_, i) => {
-        const role = i % 2 === 0 ? 'user' : 'assistant'
-        return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
-      })
-
-      const result = computeContextBoundaryMessageId(
-        messages,
-        assistantWith({
-          contextCount: 5,
-          contextWindowMode: 'fixed',
-          fixedWindowAnchor: { [TOPIC_ID]: { kind: 'vacant' } }
-        }),
-        TOPIC_ID
-      )
-
-      // Vacant → all messages, no boundary
-      expect(result).toBeNull()
-    })
-
-    it('does NOT fall through to sliding when anchor is missing (vacant/active)', () => {
-      const messages = Array.from({ length: 20 }, (_, i) => {
-        const role = i % 2 === 0 ? 'user' : 'assistant'
-        return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
-      })
-
-      const slidingResult = computeContextBoundaryMessageId(messages, assistantWith({ contextCount: 5 }), TOPIC_ID)
-      const fixedVacantResult = computeContextBoundaryMessageId(
-        messages,
-        assistantWith({
-          contextCount: 5,
-          contextWindowMode: 'fixed',
-          fixedWindowAnchor: { [TOPIC_ID]: { kind: 'vacant' } }
-        }),
-        TOPIC_ID
-      )
-
-      // Sliding should produce a boundary
-      expect(slidingResult).not.toBeNull()
-      // Fixed with vacant should NOT produce a boundary
-      expect(fixedVacantResult).toBeNull()
-    })
-
-    it('falls through to sliding when no anchor is set (undefined)', () => {
+    it('undefined anchor + fixed mode → returns null (no boundary)', () => {
       const messages = Array.from({ length: 20 }, (_, i) => {
         const role = i % 2 === 0 ? 'user' : 'assistant'
         return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
@@ -236,13 +193,56 @@ describe('computeContextBoundaryMessageId', () => {
         assistantWith({
           contextCount: 5,
           contextWindowMode: 'fixed'
-          // no fixedWindowAnchor → undefined → falls through to sliding
+          // no fixedWindowAnchor → undefined anchor → full messages, no boundary
         }),
         TOPIC_ID
       )
 
-      // Should fall through to sliding mode
-      expect(result).not.toBeNull()
+      // undefined anchor in fixed mode → all messages, no boundary
+      expect(result).toBeNull()
+    })
+
+    it('does NOT fall through to sliding when anchor is missing (undefined)', () => {
+      const messages = Array.from({ length: 20 }, (_, i) => {
+        const role = i % 2 === 0 ? 'user' : 'assistant'
+        return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
+      })
+
+      const slidingResult = computeContextBoundaryMessageId(messages, assistantWith({ contextCount: 5 }), TOPIC_ID)
+      const fixedNoAnchorResult = computeContextBoundaryMessageId(
+        messages,
+        assistantWith({
+          contextCount: 5,
+          contextWindowMode: 'fixed'
+          // no fixedWindowAnchor → undefined
+        }),
+        TOPIC_ID
+      )
+
+      // Sliding should produce a boundary
+      expect(slidingResult).not.toBeNull()
+      // Fixed with undefined anchor should NOT produce a boundary (full messages)
+      expect(fixedNoAnchorResult).toBeNull()
+    })
+
+    it('fixed mode with no anchor set → full messages (no boundary)', () => {
+      const messages = Array.from({ length: 20 }, (_, i) => {
+        const role = i % 2 === 0 ? 'user' : 'assistant'
+        return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
+      })
+
+      const result = computeContextBoundaryMessageId(
+        messages,
+        assistantWith({
+          contextCount: 5,
+          contextWindowMode: 'fixed'
+          // no fixedWindowAnchor → undefined → full messages, no boundary
+        }),
+        TOPIC_ID
+      )
+
+      // fixed + undefined anchor: full messages, no boundary
+      expect(result).toBeNull()
     })
   })
 
@@ -252,7 +252,7 @@ describe('computeContextBoundaryMessageId', () => {
       return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
     })
 
-    it('topicContextWindowMode=fixed + has anchor → fixed behavior (boundary at anchor)', () => {
+    it('topicContextWindowMode=fixed but contextWindowMode=sliding → sliding behavior (assistant is gate)', () => {
       const result = computeContextBoundaryMessageId(
         manyMessages,
         assistantWith({
@@ -263,8 +263,9 @@ describe('computeContextBoundaryMessageId', () => {
         }),
         TOPIC_ID
       )
-      // fixed mode with active anchor at m4 → boundary at m4
-      expect(result).toBe('m4')
+      // assistant level is sliding → topic override is ignored → sliding behavior
+      expect(result).not.toBeNull()
+      expect(typeof result).toBe('string')
     })
 
     it('topicContextWindowMode=sliding (even if contextWindowMode=fixed) → sliding behavior', () => {

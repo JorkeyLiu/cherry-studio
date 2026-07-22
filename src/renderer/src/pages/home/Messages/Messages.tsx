@@ -770,7 +770,9 @@ const Messages = ({
           // Inherit fixed context window anchor (group-key based)
           const assistantSettings = getAssistantSettings(assistant)
           const sourceEffectiveMode =
-            assistantSettings.topicContextWindowMode?.[topic.id] ?? assistantSettings.contextWindowMode
+            assistantSettings.contextWindowMode === 'fixed'
+              ? (assistantSettings.topicContextWindowMode?.[topic.id] ?? assistantSettings.contextWindowMode)
+              : 'sliding'
 
           // Inherit topicContextWindowMode
           const sourceTopicMode = assistantSettings.topicContextWindowMode?.[topic.id]

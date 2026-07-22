@@ -178,7 +178,10 @@ const MessageMenubar: FC<Props> = (props) => {
 
   // Context anchor logic for fixed context window mode
   const assistantSettings = getAssistantSettings(assistant)
-  const effectiveMode = assistantSettings.topicContextWindowMode?.[topic.id] ?? assistantSettings.contextWindowMode
+  const effectiveMode =
+    assistantSettings.contextWindowMode === 'fixed'
+      ? (assistantSettings.topicContextWindowMode?.[topic.id] ?? assistantSettings.contextWindowMode)
+      : 'sliding'
   const contextWindowMode = effectiveMode
   const handleSetContextAnchor = useCallback(() => {
     if (effectiveMode !== 'fixed') return // 非 fixed 模式不操作

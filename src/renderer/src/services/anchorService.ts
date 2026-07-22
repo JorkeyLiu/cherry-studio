@@ -32,14 +32,6 @@ export function resolveGroupKey(message: Pick<Message, 'role' | 'id' | 'askId'>)
 }
 
 /**
- * 状态机：开启 fixed 模式（undefined → vacant）。
- * 若已经是 active 或 vacant，保持不变（幂等）。
- */
-export function enableAnchor(currentAnchor: TopicAnchor | undefined): TopicAnchor {
-  return currentAnchor ?? { kind: 'vacant' }
-}
-
-/**
  * 状态机：关闭 fixed 模式（任意 → undefined）。本函数返回 undefined 给调用方存。
  */
 export function disableAnchor(): undefined {
@@ -47,47 +39,16 @@ export function disableAnchor(): undefined {
 }
 
 /**
- * 状态机：设置/转移锚点到指定消息所属的组。
- * 若 message 不属于任何组（assistant 无 askId），返回原 anchor（保持不变）。
- * vacant/active 均可转入 active(groupKey)。
- */
-export function setAnchorByMessage(
-  currentAnchor: TopicAnchor | undefined,
-  message: Pick<Message, 'role' | 'id' | 'askId'>
-): TopicAnchor {
-  const key = resolveGroupKey(message)
-  if (key === null) {
-    return currentAnchor ?? { kind: 'vacant' }
-  }
-  return { kind: 'active', groupKey: key }
-}
-
-/**
- * 状态机：首条 user 消息进入时，vacant → active(firstGroupKey)。
- * 若 already active 或非 vacant，返回原值。
- * 若 groupList 为空，返回原值（仍 vacant）。
- */
-export function onFirstUserMessage(currentAnchor: TopicAnchor, groupList: string[]): TopicAnchor {
-  if (currentAnchor.kind !== 'vacant') {
-    return currentAnchor
-  }
-  if (groupList.length === 0) {
-    return currentAnchor
-  }
-  return { kind: 'active', groupKey: groupList[0] }
-}
-
-/**
  * 状态机：消息删除后转移锚点。
  * oldGroupList = 删除前的 buildGroupList
  * newGroupList = 删除后的 buildGroupList
  * 规则：
- *   - 若 anchor 不是 active（vacant），返回原值（vacant 不动）
+ *   - 若 anchor 不是 active，返回原值
  *   - 若 anchor.groupKey 仍在 newGroupList 中，返回原 active（不动）
  *   - 若 anchor.groupKey 已被删除：
  *       - oldGroupList 中找不到 groupKey → 返回原 anchor（异常保护）
  *       - newIndex = oldIndex - 1（落到更旧的组）
- *       - newGroupList 为空 → vacant
+ *       - newGroupList 为空 → undefined（等待 useEffect 守卫自动修复）
  *       - newIndex < 0（删首组）且 newGroupList 非空 → active(newGroupList[0])
  *       - newIndex >= 0 → active(newGroupList[newIndex])
  * 本函数不读 redux，纯函数。
@@ -96,7 +57,7 @@ export function transferAnchorOnDeletion(
   oldAnchor: TopicAnchor,
   oldGroupList: string[],
   newGroupList: string[]
-): TopicAnchor {
+): TopicAnchor | undefined {
   if (oldAnchor.kind !== 'active') {
     return oldAnchor
   }
@@ -114,9 +75,9 @@ export function transferAnchorOnDeletion(
     return oldAnchor
   }
 
-  // newGroupList 为空 → vacant
+  // newGroupList 为空 → undefined（等待 useEffect 守卫自动修复）
   if (newGroupList.length === 0) {
-    return { kind: 'vacant' }
+    return undefined
   }
 
   // 落到更旧的组（oldIndex - 1）
@@ -133,7 +94,7 @@ export function transferAnchorOnDeletion(
  * 查找逻辑：
  *   1. 先找 role==='user' && id===groupKey 的消息
  *   2. 若找不到（user 被 filter 剔除），退找 askId===groupKey 的 assistant
- *   3. 都找不到 → 返回 -1（表示"全量不截断"，等同 vacant 行为）
+ *   3. 都找不到 → 返回 -1（表示"全量不截断"）
  */
 export function resolveAnchorSliceStart(messages: Pick<Message, 'id' | 'role' | 'askId'>[], groupKey: string): number {
   // 1. 先找 user 消息
@@ -172,14 +133,18 @@ export function transferAnchorsAfterDeletion(
     const newAnchor = transferAnchorOnDeletion(oldAnchor, oldGroupList, newGroupList)
     if (newAnchor === oldAnchor) continue
 
+    const updatedAnchors = { ...asst.settings?.fixedWindowAnchor }
+    if (newAnchor) {
+      updatedAnchors[topicId] = newAnchor
+    } else {
+      delete updatedAnchors[topicId]
+    }
+
     dispatch(
       updateAssistantSettings({
         assistantId: asst.id,
         settings: {
-          fixedWindowAnchor: {
-            ...asst.settings?.fixedWindowAnchor,
-            [topicId]: newAnchor
-          }
+          fixedWindowAnchor: updatedAnchors
         }
       })
     )

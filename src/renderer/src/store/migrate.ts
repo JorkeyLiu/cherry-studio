@@ -3367,8 +3367,8 @@ const migrateConfig = {
           }
           if (typeof value === 'string') {
             if (value === '') {
-              // 旧 sentinel 空字符串 → vacant
-              newMap[topicId] = { kind: 'vacant' }
+              // 旧 sentinel 空字符串 → vacant (legacy, runtime degrades gracefully)
+              newMap[topicId] = { kind: 'vacant' } as unknown as TopicAnchor
             } else {
               // 尝试查找该 id 对应的消息，判断是 user 还是 assistant
               const message = (state as any).messages?.entities?.[value]

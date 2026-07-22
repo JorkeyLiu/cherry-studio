@@ -309,19 +309,15 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
 
   const topicContextWindowMode = useMemo(() => {
     const s = getAssistantSettings(assistant)
-    return s.topicContextWindowMode?.[topic.id] ?? s.contextWindowMode
+    return s.contextWindowMode === 'fixed' ? (s.topicContextWindowMode?.[topic.id] ?? s.contextWindowMode) : 'sliding'
   }, [assistant, topic.id])
-
-  const settings = getAssistantSettings(assistant)
-  const effectiveMode = settings.topicContextWindowMode?.[topic.id] ?? settings.contextWindowMode
-  const hasAnchor = effectiveMode === 'fixed' && settings.fixedWindowAnchor?.[topic.id] !== undefined
 
   // 自动锚点 + 不变量守卫
   useEffect(() => {
     const settings = getAssistantSettings(assistant)
     const anchor = settings.fixedWindowAnchor?.[topic.id]
     const topicMode = settings.topicContextWindowMode?.[topic.id]
-    const effectiveMode = topicMode ?? settings.contextWindowMode
+    const effectiveMode = settings.contextWindowMode === 'fixed' ? (topicMode ?? settings.contextWindowMode) : 'sliding'
 
     if (effectiveMode !== 'fixed') return
 
@@ -353,7 +349,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
       return
     }
 
-    // anchor 为 undefined 或 vacant：fixed 模式下无有效锚点，自动修复
+    // anchor 为 undefined 或旧数据残留：fixed 模式下无有效锚点，自动修复
     if (topicMessages.length > 0) {
       const firstUser = topicMessages.find((m) => m.role === 'user')
       if (firstUser) {
@@ -366,7 +362,10 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
 
   const onUpdateAnchor = useCallback(() => {
     const settings = getAssistantSettings(assistant)
-    const currentMode = settings.topicContextWindowMode?.[topic.id] ?? settings.contextWindowMode
+    const currentMode =
+      settings.contextWindowMode === 'fixed'
+        ? (settings.topicContextWindowMode?.[topic.id] ?? settings.contextWindowMode)
+        : 'sliding'
     const newMode = currentMode === 'fixed' ? 'sliding' : 'fixed'
     updateAssistantSettings({
       topicContextWindowMode: {
@@ -584,7 +583,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
           contextCount={tokenCountProps.contextCount}
           contextWindowMode={contextWindowMode}
           effectiveMode={topicContextWindowMode}
-          hasAnchor={hasAnchor}
           onUpdateAnchor={onUpdateAnchor}
           onClick={onNewContext}
         />

@@ -64,15 +64,11 @@ export const computeContextBoundaryMessageId = (
   if (preFiltered.length === 0) return null
 
   const topicMode = settings.topicContextWindowMode?.[topicId]
-  const effectiveMode = topicMode ?? settings.contextWindowMode
+  const effectiveMode = settings.contextWindowMode === 'fixed' ? (topicMode ?? settings.contextWindowMode) : 'sliding'
 
   if (effectiveMode === 'fixed') {
     const anchor = settings.fixedWindowAnchor?.[topicId]
-    if (anchor !== undefined) {
-      if (anchor.kind === 'vacant') {
-        // vacant: 全量不截断，无分割线
-        return null
-      }
+    if (anchor?.kind === 'active') {
       // active: 用 groupKey 在 preFiltered 找组起点
       const sliceStart = resolveAnchorSliceStart(preFiltered, anchor.groupKey)
       if (sliceStart === 0) {
@@ -86,7 +82,8 @@ export const computeContextBoundaryMessageId = (
       // groupKey 找不到（整组被过滤），退化为无分割线
       return null
     }
-    // No anchor set — fall through to sliding mode
+    // anchor 为 undefined 或旧数据残留 → 全量不截断，无分割线
+    return null
   }
 
   // Sliding mode: the boundary is the first message kept by takeRight(preFiltered, contextCount + 2).

@@ -2,15 +2,7 @@ import type { TopicAnchor } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { describe, expect, it } from 'vitest'
 
-import {
-  buildGroupList,
-  disableAnchor,
-  enableAnchor,
-  onFirstUserMessage,
-  resolveGroupKey,
-  setAnchorByMessage,
-  transferAnchorOnDeletion
-} from '../anchorService'
+import { buildGroupList, disableAnchor, resolveGroupKey, transferAnchorOnDeletion } from '../anchorService'
 
 // --- Test factories ---
 
@@ -65,73 +57,11 @@ describe('resolveGroupKey', () => {
   })
 })
 
-// --- enableAnchor ---
-
-describe('enableAnchor', () => {
-  it('undefined → vacant', () => {
-    expect(enableAnchor(undefined)).toEqual({ kind: 'vacant' })
-  })
-
-  it('already active → stays active (idempotent)', () => {
-    const active: TopicAnchor = { kind: 'active', groupKey: 'u1' }
-    expect(enableAnchor(active)).toBe(active)
-  })
-
-  it('already vacant → stays vacant (idempotent)', () => {
-    const vacant: TopicAnchor = { kind: 'vacant' }
-    expect(enableAnchor(vacant)).toBe(vacant)
-  })
-})
-
 // --- disableAnchor ---
 
 describe('disableAnchor', () => {
   it('returns undefined', () => {
     expect(disableAnchor()).toBeUndefined()
-  })
-})
-
-// --- setAnchorByMessage ---
-
-describe('setAnchorByMessage', () => {
-  it('vacant + user → active(user.id)', () => {
-    const result = setAnchorByMessage({ kind: 'vacant' }, user('u1'))
-    expect(result).toEqual({ kind: 'active', groupKey: 'u1' })
-  })
-
-  it('active + assistant with askId → active(askId)', () => {
-    const result = setAnchorByMessage({ kind: 'active', groupKey: 'u1' }, assistant('a2', 'u2'))
-    expect(result).toEqual({ kind: 'active', groupKey: 'u2' })
-  })
-
-  it('assistant without askId → original anchor unchanged', () => {
-    const original: TopicAnchor = { kind: 'active', groupKey: 'u1' }
-    const result = setAnchorByMessage(original, assistant('a1'))
-    expect(result).toEqual(original)
-  })
-
-  it('undefined anchor + assistant without askId → vacant', () => {
-    const result = setAnchorByMessage(undefined, assistant('a1'))
-    expect(result).toEqual({ kind: 'vacant' })
-  })
-})
-
-// --- onFirstUserMessage ---
-
-describe('onFirstUserMessage', () => {
-  it('vacant + non-empty groupList → active(first)', () => {
-    const result = onFirstUserMessage({ kind: 'vacant' }, ['u1', 'u2'])
-    expect(result).toEqual({ kind: 'active', groupKey: 'u1' })
-  })
-
-  it('active → unchanged', () => {
-    const active: TopicAnchor = { kind: 'active', groupKey: 'u2' }
-    expect(onFirstUserMessage(active, ['u1', 'u2'])).toBe(active)
-  })
-
-  it('vacant + empty groupList → vacant', () => {
-    const vacant: TopicAnchor = { kind: 'vacant' }
-    expect(onFirstUserMessage(vacant, [])).toEqual({ kind: 'vacant' })
   })
 })
 
@@ -182,18 +112,10 @@ describe('transferAnchorOnDeletion', () => {
     expect(transferAnchorOnDeletion(g('u0'), oldList, newList)).toEqual(g('u1'))
   })
 
-  it('all deleted (newGroupList empty) → vacant', () => {
+  it('all deleted (newGroupList empty) → undefined', () => {
     const oldList = ['u0', 'u1', 'u2']
     const newList: string[] = []
-    expect(transferAnchorOnDeletion(g('u1'), oldList, newList)).toEqual({ kind: 'vacant' })
-  })
-
-  it('vacant → vacant (no transfer on any deletion)', () => {
-    const oldList = ['u0', 'u1']
-    const newList = ['u0']
-    expect(transferAnchorOnDeletion({ kind: 'vacant' }, oldList, newList)).toEqual({
-      kind: 'vacant'
-    })
+    expect(transferAnchorOnDeletion(g('u1'), oldList, newList)).toBeUndefined()
   })
 
   it('oldGroupList does not contain groupKey (anomaly) → original anchor', () => {

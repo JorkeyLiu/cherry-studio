@@ -85,15 +85,11 @@ export function getContextCount(assistant: Assistant, messages: Message[], topic
   const actualContextCount = settingContextCount === MAX_CONTEXT_COUNT ? UNLIMITED_CONTEXT_COUNT : settingContextCount
 
   const topicMode = topicId ? settings?.topicContextWindowMode?.[topicId] : undefined
-  const effectiveMode = topicMode ?? settings?.contextWindowMode
+  const effectiveMode = settings?.contextWindowMode === 'fixed' ? (topicMode ?? settings?.contextWindowMode) : 'sliding'
 
   if (effectiveMode === 'fixed') {
     const anchor = topicId ? settings?.fixedWindowAnchor?.[topicId] : undefined
-    if (anchor !== undefined) {
-      if (anchor.kind === 'vacant') {
-        // vacant: 全量
-        return { current: messages.length, max: settingContextCount }
-      }
+    if (anchor?.kind === 'active') {
       // active: 从 groupKey 对应的组起点 slice
       const sliceStart = resolveAnchorSliceStart(messages, anchor.groupKey)
       if (sliceStart >= 0) {
@@ -102,7 +98,8 @@ export function getContextCount(assistant: Assistant, messages: Message[], topic
       // group 被过滤，退化为全量
       return { current: messages.length, max: settingContextCount }
     }
-    // No anchor set (undefined): fall through to sliding mode
+    // anchor 为 undefined 或旧数据残留 → 全量不截断
+    return { current: messages.length, max: settingContextCount }
   }
 
   // Sliding mode: unchanged

@@ -37,19 +37,19 @@ export class ConversationService {
     const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
 
     let limitedByContext: Message[]
-    if (contextWindowMode === 'fixed' && anchor !== undefined) {
-      if (anchor.kind === 'vacant') {
-        // vacant: 全量不截断
-        limitedByContext = withoutAdjacentUsers
-      } else {
+    if (contextWindowMode === 'fixed') {
+      if (anchor?.kind === 'active') {
         // active: 从 groupKey 对应的组起点 slice 到尾
         const sliceStart = resolveAnchorSliceStart(withoutAdjacentUsers, anchor.groupKey)
         if (sliceStart >= 0) {
           limitedByContext = withoutAdjacentUsers.slice(sliceStart)
         } else {
-          // 组被过滤掉了，退化为全量不截断（等同 vacant 行为）
+          // 组被过滤掉了，退化为全量不截断
           limitedByContext = withoutAdjacentUsers
         }
+      } else {
+        // anchor 为 undefined 或旧数据残留 → 全量不截断
+        limitedByContext = withoutAdjacentUsers
       }
     } else {
       // Sliding mode: keep the last contextCount + 2 messages
@@ -81,7 +81,7 @@ export class ConversationService {
 
     const anchor = topicId ? fixedWindowAnchor?.[topicId] : undefined
     const topicMode = topicId ? topicContextWindowMode?.[topicId] : undefined
-    const effectiveMode = topicMode ?? contextWindowMode
+    const effectiveMode = contextWindowMode === 'fixed' ? (topicMode ?? contextWindowMode) : 'sliding'
     const uiMessagesFromPipeline = ConversationService.filterMessagesPipeline(
       messages,
       contextCount,

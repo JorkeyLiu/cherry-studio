@@ -15,7 +15,6 @@ type Props = {
   contextCount: { current: number; max: number }
   contextWindowMode?: ContextWindowMode
   effectiveMode?: ContextWindowMode
-  hasAnchor?: boolean
   onUpdateAnchor?: () => void
 } & React.HTMLAttributes<HTMLDivElement>
 
@@ -25,7 +24,6 @@ const TokenCount: FC<Props> = ({
   contextCount,
   contextWindowMode,
   effectiveMode,
-  hasAnchor,
   onUpdateAnchor
 }) => {
   const { t } = useTranslation()
@@ -44,9 +42,7 @@ const TokenCount: FC<Props> = ({
             <HStack style={{ alignItems: 'center' }}>
               {contextCount.current}
               <SlashSeparatorSpan>/</SlashSeparatorSpan>
-              <MaxContextCount
-                maxContext={effectiveMode === 'fixed' && hasAnchor ? MAX_CONTEXT_COUNT : contextCount.max}
-              />
+              <MaxContextCount maxContext={effectiveMode === 'fixed' ? MAX_CONTEXT_COUNT : contextCount.max} />
             </HStack>
           </Text>
         </HStack>
@@ -62,8 +58,8 @@ const TokenCount: FC<Props> = ({
   const contextCountBlock = (() => {
     if (contextWindowMode === 'fixed') {
       // Assistant supports fixed mode → always clickable (toggle per-topic mode)
-      if (effectiveMode === 'fixed' && hasAnchor) {
-        // Topic is fixed + anchored: show current / ∞, click to switch to sliding
+      if (effectiveMode === 'fixed') {
+        // Topic is fixed: show current / ∞, click to switch to sliding
         return (
           <HStack style={{ alignItems: 'center', cursor: 'pointer' }} onClick={onUpdateAnchor}>
             <MenuIcon size={12} className="icon" />
@@ -73,7 +69,7 @@ const TokenCount: FC<Props> = ({
           </HStack>
         )
       }
-      // Topic is sliding or fixed without anchor yet: show current / max, click to switch to fixed
+      // Topic is sliding: show current / max, click to switch to fixed
       return (
         <HStack style={{ alignItems: 'center', cursor: 'pointer' }} onClick={onUpdateAnchor}>
           <MenuIcon size={12} className="icon" />

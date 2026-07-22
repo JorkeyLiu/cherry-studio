@@ -175,7 +175,7 @@ export const EFFORT_RATIO: EffortRatio = {
 
 export type ContextWindowMode = 'sliding' | 'fixed'
 
-export type TopicAnchor = { kind: 'active'; groupKey: string } | { kind: 'vacant' }
+export type TopicAnchor = { kind: 'active'; groupKey: string }
 
 export type AssistantSettings = {
   maxTokens?: number

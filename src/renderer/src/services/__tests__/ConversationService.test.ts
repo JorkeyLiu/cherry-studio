@@ -193,7 +193,7 @@ describe('ConversationService.filterMessagesPipeline', () => {
       expect(filtered.length).toBeGreaterThan(0)
     })
 
-    it('vacant anchor → full messages, no truncation', () => {
+    it('undefined anchor + fixed mode → full messages, no truncation', () => {
       const topicId = 'topic-1'
       const assistantId = 'assistant-1'
       const messages: ReturnType<typeof createMessage>[] = []
@@ -203,11 +203,9 @@ describe('ConversationService.filterMessagesPipeline', () => {
         messages.push(makeMsg(`m${i}`, role, topicId, assistantId, askId))
       }
 
-      const filtered = ConversationService.filterMessagesPipeline(messages, /* contextCount */ 3, 'fixed', {
-        kind: 'vacant'
-      })
+      const filtered = ConversationService.filterMessagesPipeline(messages, /* contextCount */ 3, 'fixed', undefined)
 
-      // Vacant: all messages (after pipeline filters), no truncation
+      // undefined anchor in fixed mode: all messages (after pipeline filters), no truncation
       expect(filtered.length).toBeGreaterThan(0)
     })
 
@@ -252,7 +250,7 @@ describe('ConversationService.filterMessagesPipeline', () => {
       expect(filtered.find((m) => m.id === 'u2')).toBeDefined()
     })
 
-    it('active anchor with groupKey not found → full messages (vacant-like fallback)', () => {
+    it('active anchor with groupKey not found → full messages (fallback)', () => {
       const topicId = 'topic-1'
       const assistantId = 'assistant-1'
 
@@ -264,7 +262,7 @@ describe('ConversationService.filterMessagesPipeline', () => {
         groupKey: 'nonexistent'
       })
 
-      // Not found → full messages (vacant-like)
+      // Not found → full messages (fallback)
       expect(filtered.find((m) => m.id === 'u1')).toBeDefined()
     })
   })
