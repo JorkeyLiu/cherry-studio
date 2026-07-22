@@ -1,17 +1,16 @@
 /**
- * Tests for computeContextBoundaryMessageId — the pure helper that determines
- * where the context window boundary falls in the full topic message sequence.
+ * Tests for computeContextInfo — the unified pure function that determines
+ * context boundary, context count, and filtered UI messages in a single pipeline.
  *
  * Uses the same filter pipeline as ConversationService.filterMessagesPipeline.
  */
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
+import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { messageBlocksSlice } from '@renderer/store/messageBlock'
 import type { Assistant, TopicAnchor } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, UserMessageStatus } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-
-import { computeContextBoundaryMessageId } from '../contextBoundary'
 
 // ---------------------------------------------------------------------------
 // Mock store for filter selectors
@@ -90,18 +89,18 @@ const TOPIC_ID = 'topic-1'
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-describe('computeContextBoundaryMessageId', () => {
+describe('computeContextInfo', () => {
   beforeEach(() => {
     mockStore = createMockStore()
     vi.clearAllMocks()
   })
 
-  describe('sliding mode', () => {
+  describe('boundaryMessageId — sliding mode', () => {
     it('returns null when all messages fit within contextCount + 2', () => {
       const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2'), msg('a2', 'assistant', 'u2'), msg('u3')]
       // 5 messages, contextCount=10 → contextCount+2=12 → all fit
-      const result = computeContextBoundaryMessageId(messages, assistantWith({ contextCount: 10 }), TOPIC_ID)
-      expect(result).toBeNull()
+      const result = computeContextInfo(messages, assistantWith({ contextCount: 10 }), TOPIC_ID)
+      expect(result.boundaryMessageId).toBeNull()
     })
 
     it('returns the boundary message when messages exceed contextCount + 2', () => {
@@ -111,21 +110,23 @@ describe('computeContextBoundaryMessageId', () => {
         return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
       })
 
-      const result = computeContextBoundaryMessageId(messages, assistantWith({ contextCount: 5 }), TOPIC_ID)
-      expect(result).not.toBeNull()
-      expect(typeof result).toBe('string')
+      const result = computeContextInfo(messages, assistantWith({ contextCount: 5 }), TOPIC_ID)
+      expect(result.boundaryMessageId).not.toBeNull()
+      expect(typeof result.boundaryMessageId).toBe('string')
     })
 
     it('returns null for empty messages', () => {
-      expect(computeContextBoundaryMessageId([], assistantWith({ contextCount: 5 }), TOPIC_ID)).toBeNull()
+      const result = computeContextInfo([], assistantWith({ contextCount: 5 }), TOPIC_ID)
+      expect(result.boundaryMessageId).toBeNull()
     })
 
     it('returns null when assistant is undefined', () => {
-      expect(computeContextBoundaryMessageId([msg('u1')], undefined, TOPIC_ID)).toBeNull()
+      const result = computeContextInfo([msg('u1')], undefined, TOPIC_ID)
+      expect(result.boundaryMessageId).toBeNull()
     })
   })
 
-  describe('fixed mode', () => {
+  describe('boundaryMessageId — fixed mode', () => {
     it('active anchor → returns boundary at groupKey message', () => {
       const messages = [
         msg('u1'),
@@ -136,7 +137,7 @@ describe('computeContextBoundaryMessageId', () => {
         msg('a3', 'assistant', 'u3')
       ]
 
-      const result = computeContextBoundaryMessageId(
+      const result = computeContextInfo(
         messages,
         assistantWith({
           contextCount: 5,
@@ -146,13 +147,13 @@ describe('computeContextBoundaryMessageId', () => {
         TOPIC_ID
       )
 
-      expect(result).toBe('u2')
+      expect(result.boundaryMessageId).toBe('u2')
     })
 
     it('active anchor with groupKey at index 0 → returns null (all in context)', () => {
       const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2'), msg('a2', 'assistant', 'u2')]
 
-      const result = computeContextBoundaryMessageId(
+      const result = computeContextInfo(
         messages,
         assistantWith({
           contextCount: 5,
@@ -162,13 +163,13 @@ describe('computeContextBoundaryMessageId', () => {
         TOPIC_ID
       )
 
-      expect(result).toBeNull()
+      expect(result.boundaryMessageId).toBeNull()
     })
 
     it('active anchor with deleted groupKey → returns null (fallback)', () => {
       const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2')]
 
-      const result = computeContextBoundaryMessageId(
+      const result = computeContextInfo(
         messages,
         assistantWith({
           contextCount: 5,
@@ -179,7 +180,7 @@ describe('computeContextBoundaryMessageId', () => {
       )
 
       // GroupKey not found → no boundary (fallback)
-      expect(result).toBeNull()
+      expect(result.boundaryMessageId).toBeNull()
     })
 
     it('undefined anchor + fixed mode → returns null (no boundary)', () => {
@@ -188,7 +189,7 @@ describe('computeContextBoundaryMessageId', () => {
         return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
       })
 
-      const result = computeContextBoundaryMessageId(
+      const result = computeContextInfo(
         messages,
         assistantWith({
           contextCount: 5,
@@ -199,7 +200,7 @@ describe('computeContextBoundaryMessageId', () => {
       )
 
       // undefined anchor in fixed mode → all messages, no boundary
-      expect(result).toBeNull()
+      expect(result.boundaryMessageId).toBeNull()
     })
 
     it('does NOT fall through to sliding when anchor is missing (undefined)', () => {
@@ -208,8 +209,8 @@ describe('computeContextBoundaryMessageId', () => {
         return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
       })
 
-      const slidingResult = computeContextBoundaryMessageId(messages, assistantWith({ contextCount: 5 }), TOPIC_ID)
-      const fixedNoAnchorResult = computeContextBoundaryMessageId(
+      const slidingResult = computeContextInfo(messages, assistantWith({ contextCount: 5 }), TOPIC_ID)
+      const fixedNoAnchorResult = computeContextInfo(
         messages,
         assistantWith({
           contextCount: 5,
@@ -220,9 +221,9 @@ describe('computeContextBoundaryMessageId', () => {
       )
 
       // Sliding should produce a boundary
-      expect(slidingResult).not.toBeNull()
+      expect(slidingResult.boundaryMessageId).not.toBeNull()
       // Fixed with undefined anchor should NOT produce a boundary (full messages)
-      expect(fixedNoAnchorResult).toBeNull()
+      expect(fixedNoAnchorResult.boundaryMessageId).toBeNull()
     })
 
     it('fixed mode with no anchor set → full messages (no boundary)', () => {
@@ -231,7 +232,7 @@ describe('computeContextBoundaryMessageId', () => {
         return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
       })
 
-      const result = computeContextBoundaryMessageId(
+      const result = computeContextInfo(
         messages,
         assistantWith({
           contextCount: 5,
@@ -242,18 +243,18 @@ describe('computeContextBoundaryMessageId', () => {
       )
 
       // fixed + undefined anchor: full messages, no boundary
-      expect(result).toBeNull()
+      expect(result.boundaryMessageId).toBeNull()
     })
   })
 
-  describe('topicContextWindowMode (per-topic override)', () => {
+  describe('boundaryMessageId — topicContextWindowMode (per-topic override)', () => {
     const manyMessages = Array.from({ length: 20 }, (_, i) => {
       const role = i % 2 === 0 ? 'user' : 'assistant'
       return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
     })
 
     it('topicContextWindowMode=fixed but contextWindowMode=sliding → sliding behavior (assistant is gate)', () => {
-      const result = computeContextBoundaryMessageId(
+      const result = computeContextInfo(
         manyMessages,
         assistantWith({
           contextCount: 5,
@@ -264,12 +265,12 @@ describe('computeContextBoundaryMessageId', () => {
         TOPIC_ID
       )
       // assistant level is sliding → topic override is ignored → sliding behavior
-      expect(result).not.toBeNull()
-      expect(typeof result).toBe('string')
+      expect(result.boundaryMessageId).not.toBeNull()
+      expect(typeof result.boundaryMessageId).toBe('string')
     })
 
     it('topicContextWindowMode=sliding (even if contextWindowMode=fixed) → sliding behavior', () => {
-      const result = computeContextBoundaryMessageId(
+      const result = computeContextInfo(
         manyMessages,
         assistantWith({
           contextCount: 5,
@@ -280,12 +281,12 @@ describe('computeContextBoundaryMessageId', () => {
         TOPIC_ID
       )
       // sliding mode: takeRight(preFiltered, 5+2=7) → boundary exists
-      expect(result).not.toBeNull()
-      expect(typeof result).toBe('string')
+      expect(result.boundaryMessageId).not.toBeNull()
+      expect(typeof result.boundaryMessageId).toBe('string')
     })
 
     it('topicContextWindowMode=undefined + contextWindowMode=fixed → fallback to fixed', () => {
-      const result = computeContextBoundaryMessageId(
+      const result = computeContextInfo(
         manyMessages,
         assistantWith({
           contextCount: 5,
@@ -295,11 +296,11 @@ describe('computeContextBoundaryMessageId', () => {
         TOPIC_ID
       )
       // falls back to fixed mode → boundary at anchor
-      expect(result).toBe('m4')
+      expect(result.boundaryMessageId).toBe('m4')
     })
 
     it('topicContextWindowMode=undefined + contextWindowMode=sliding → sliding', () => {
-      const result = computeContextBoundaryMessageId(
+      const result = computeContextInfo(
         manyMessages,
         assistantWith({
           contextCount: 5,
@@ -308,17 +309,49 @@ describe('computeContextBoundaryMessageId', () => {
         TOPIC_ID
       )
       // sliding mode: boundary exists
-      expect(result).not.toBeNull()
+      expect(result.boundaryMessageId).not.toBeNull()
     })
   })
 
-  describe('unlimited context', () => {
+  describe('boundaryMessageId — unlimited context', () => {
     it('returns null for unlimited context count', () => {
       const messages = Array.from({ length: 100 }, (_, i) => msg(`m${i}`))
       const UNLIMITED = 999999
 
-      const result = computeContextBoundaryMessageId(messages, assistantWith({ contextCount: UNLIMITED }), TOPIC_ID)
-      expect(result).toBeNull()
+      const result = computeContextInfo(messages, assistantWith({ contextCount: UNLIMITED }), TOPIC_ID)
+      expect(result.boundaryMessageId).toBeNull()
+    })
+  })
+
+  describe('contextCount', () => {
+    it('returns current = uiMessages.length and max = settingContextCount', () => {
+      const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2')]
+      const result = computeContextInfo(messages, assistantWith({ contextCount: 10 }), TOPIC_ID)
+      expect(result.contextCount.current).toBe(result.uiMessages.length)
+      expect(result.contextCount.max).toBe(10)
+    })
+
+    it('returns current=0 for empty messages', () => {
+      const result = computeContextInfo([], assistantWith({ contextCount: 5 }), TOPIC_ID)
+      expect(result.contextCount.current).toBe(0)
+      expect(result.contextCount.max).toBe(5)
+    })
+
+    it('returns current=0 when assistant is undefined', () => {
+      const result = computeContextInfo([msg('u1')], undefined, TOPIC_ID)
+      expect(result.contextCount.current).toBe(0)
+      expect(result.contextCount.max).toBe(0)
+    })
+  })
+
+  describe('uiMessages', () => {
+    it('returns filtered messages starting from first user message', () => {
+      const messages = [msg('a-leading', 'assistant'), msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2')]
+      const result = computeContextInfo(messages, assistantWith({ contextCount: 10 }), TOPIC_ID)
+      // Leading assistant should be filtered; first message should be user
+      if (result.uiMessages.length > 0) {
+        expect(result.uiMessages[0].role).toBe('user')
+      }
     })
   })
 })

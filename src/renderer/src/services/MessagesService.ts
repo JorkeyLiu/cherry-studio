@@ -1,6 +1,5 @@
 import { loggerService } from '@logger'
 import SearchPopup from '@renderer/components/Popups/SearchPopup'
-import { DEFAULT_CONTEXTCOUNT, MAX_CONTEXT_COUNT, UNLIMITED_CONTEXT_COUNT } from '@renderer/config/constant'
 import { getTopicById } from '@renderer/hooks/useTopic'
 import i18n from '@renderer/i18n'
 import { fetchMessagesSummary } from '@renderer/services/ApiService'
@@ -21,13 +20,11 @@ import {
   createMessage,
   resetMessage
 } from '@renderer/utils/messageUtils/create'
-import { filterContextMessages } from '@renderer/utils/messageUtils/filters'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import dayjs from 'dayjs'
 import { t } from 'i18next'
 import type { NavigateFunction } from 'react-router'
 
-import { resolveAnchorSliceStart } from './anchorService'
 import { getAssistantById, getAssistantProvider, getDefaultModel } from './AssistantService'
 import { EVENT_NAMES, EventEmitter } from './EventService'
 import FileManager from './FileManager'
@@ -78,38 +75,6 @@ export {
   filterUserRoleStartMessages,
   getGroupedMessages
 } from '@renderer/utils/messageUtils/filters'
-
-export function getContextCount(assistant: Assistant, messages: Message[], topicId?: string) {
-  const settings = assistant?.settings
-  const settingContextCount = settings?.contextCount ?? DEFAULT_CONTEXTCOUNT
-  const actualContextCount = settingContextCount === MAX_CONTEXT_COUNT ? UNLIMITED_CONTEXT_COUNT : settingContextCount
-
-  const topicMode = topicId ? settings?.topicContextWindowMode?.[topicId] : undefined
-  const effectiveMode = settings?.contextWindowMode === 'fixed' ? (topicMode ?? settings?.contextWindowMode) : 'sliding'
-
-  if (effectiveMode === 'fixed') {
-    const anchor = topicId ? settings?.fixedWindowAnchor?.[topicId] : undefined
-    if (anchor?.kind === 'active') {
-      // active: 从 groupKey 对应的组起点 slice
-      const sliceStart = resolveAnchorSliceStart(messages, anchor.groupKey)
-      if (sliceStart >= 0) {
-        return { current: messages.slice(sliceStart).length, max: settingContextCount }
-      }
-      // group 被过滤，退化为全量
-      return { current: messages.length, max: settingContextCount }
-    }
-    // anchor 为 undefined 或旧数据残留 → 全量不截断
-    return { current: messages.length, max: settingContextCount }
-  }
-
-  // Sliding mode: unchanged
-  const contextMsgs = filterContextMessages(messages, actualContextCount)
-
-  return {
-    current: contextMsgs.length,
-    max: settingContextCount
-  }
-}
 
 /** @deprecated Use safeDeleteFiles instead */
 export async function deleteMessageFiles(message: Message) {

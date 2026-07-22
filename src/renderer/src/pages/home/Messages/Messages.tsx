@@ -15,7 +15,6 @@ import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
-import { computeContextBoundaryMessageId } from '@renderer/pages/home/Messages/contextBoundary'
 import { findFirstVisibleMessage } from '@renderer/pages/home/Messages/domVisibility'
 import { getBranchEndpoint } from '@renderer/pages/home/Messages/messageBranch'
 import { createMessageViewportGroupModel } from '@renderer/pages/home/Messages/messageGroups'
@@ -51,13 +50,9 @@ import {
 import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
 import { buildGroupList } from '@renderer/services/anchorService'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
+import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import {
-  clearPendingNavigate,
-  getContextCount,
-  getPendingNavigate,
-  getUserMessage
-} from '@renderer/services/MessagesService'
+import { clearPendingNavigate, getPendingNavigate, getUserMessage } from '@renderer/services/MessagesService'
 import { estimateHistoryTokens } from '@renderer/services/TokenService'
 import store, { useAppDispatch } from '@renderer/store'
 import { messageBlocksSelectors, updateOneBlock } from '@renderer/store/messageBlock'
@@ -355,12 +350,10 @@ const Messages = ({
   const savedRestoreHandledRef = useRef(false)
   const bootstrapPhaseRef = useRef<BootstrapPhase>('idle')
 
-  // Compute the context boundary message ID from the full topic messages.
-  // This uses the same filter pipeline as ConversationService.filterMessagesPipeline.
-  const contextBoundaryMessageId = useMemo(
-    () => computeContextBoundaryMessageId(messages, assistant, topic.id),
-    [messages, assistant, topic.id]
-  )
+  // Unified context info: boundary message ID and context count from the same pipeline
+  // that ConversationService uses to prepare messages for the model.
+  const contextInfo = useMemo(() => computeContextInfo(messages, assistant, topic.id), [messages, assistant, topic.id])
+  const contextBoundaryMessageId = contextInfo.boundaryMessageId
 
   const viewportDispatch = reduceViewport
 
@@ -917,10 +910,10 @@ const Messages = ({
     void runAsyncFunction(async () => {
       void EventEmitter.emit(EVENT_NAMES.ESTIMATED_TOKEN_COUNT, {
         tokensCount: await estimateHistoryTokens(assistant, messages),
-        contextCount: getContextCount(assistant, messages, topic.id)
+        contextCount: contextInfo.contextCount
       })
     }).then(() => onFirstUpdate?.())
-  }, [assistant, messages, onFirstUpdate, topic.id])
+  }, [assistant, messages, onFirstUpdate, contextInfo.contextCount])
 
   const loadMoreMessages = useCallback(() => {
     const currentState = viewportStateRef.current
