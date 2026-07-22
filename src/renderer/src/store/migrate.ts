@@ -3370,8 +3370,15 @@ const migrateConfig = {
               // 旧 sentinel 空字符串 → vacant
               newMap[topicId] = { kind: 'vacant' }
             } else {
-              // 旧有效 messageId → active（直接作为 groupKey，因旧 anchor 必指向 user 消息）
-              newMap[topicId] = { kind: 'active', groupKey: value }
+              // 尝试查找该 id 对应的消息，判断是 user 还是 assistant
+              const message = (state as any).messages?.entities?.[value]
+              if (message?.role === 'assistant' && message?.askId) {
+                // 旧锚点设在 assistant 消息上，恢复到其所属的 user 消息
+                newMap[topicId] = { kind: 'active', groupKey: message.askId }
+              } else {
+                // 旧锚点是 user 消息 id（或消息已不存在，运行时兜底会处理）
+                newMap[topicId] = { kind: 'active', groupKey: value }
+              }
             }
           } else if (typeof value === 'object' && value !== null && 'kind' in value) {
             // 已经是新形态（理论上不会出现，但做幂等保护）—— 保留
@@ -3389,6 +3396,32 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 211 error', error as Error)
+      return state
+    }
+  },
+  '212': (state: RootState) => {
+    try {
+      const migrateAssistant = (assistant: Assistant) => {
+        const anchorMap = assistant?.settings?.fixedWindowAnchor
+        const modeMap: Record<string, 'fixed' | 'sliding' | undefined> = {}
+        if (anchorMap) {
+          for (const [topicId, anchor] of Object.entries(anchorMap)) {
+            if (anchor !== undefined) {
+              modeMap[topicId] = 'fixed'
+            }
+          }
+        }
+        if (assistant.settings) {
+          assistant.settings.topicContextWindowMode = modeMap
+        }
+        return assistant
+      }
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      state.assistants.assistants = state.assistants.assistants.map((a) => migrateAssistant(a))
+      logger.info('migrate 212 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 212 error', error as Error)
       return state
     }
   }

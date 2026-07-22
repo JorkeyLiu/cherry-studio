@@ -67,7 +67,8 @@ export class ConversationService {
     assistant: Assistant,
     topicId?: string
   ): Promise<{ modelMessages: ModelMessage[]; uiMessages: Message[] }> {
-    const { contextCount, contextWindowMode, fixedWindowAnchor } = getAssistantSettings(assistant)
+    const { contextCount, contextWindowMode, topicContextWindowMode, fixedWindowAnchor } =
+      getAssistantSettings(assistant)
     // This logic is extracted from the original ApiService.fetchChatCompletion
     // const contextMessages = filterContextMessages(messages)
     const lastUserMessage = findLast(messages, (m) => m.role === 'user')
@@ -79,10 +80,12 @@ export class ConversationService {
     }
 
     const anchor = topicId ? fixedWindowAnchor?.[topicId] : undefined
+    const topicMode = topicId ? topicContextWindowMode?.[topicId] : undefined
+    const effectiveMode = topicMode ?? contextWindowMode
     const uiMessagesFromPipeline = ConversationService.filterMessagesPipeline(
       messages,
       contextCount,
-      contextWindowMode,
+      effectiveMode,
       anchor
     )
     logger.debug('uiMessagesFromPipeline', uiMessagesFromPipeline)

@@ -14,6 +14,7 @@ type Props = {
   inputTokenCount: number
   contextCount: { current: number; max: number }
   contextWindowMode?: ContextWindowMode
+  effectiveMode?: ContextWindowMode
   hasAnchor?: boolean
   onUpdateAnchor?: () => void
 } & React.HTMLAttributes<HTMLDivElement>
@@ -23,6 +24,7 @@ const TokenCount: FC<Props> = ({
   inputTokenCount,
   contextCount,
   contextWindowMode,
+  effectiveMode,
   hasAnchor,
   onUpdateAnchor
 }) => {
@@ -43,7 +45,7 @@ const TokenCount: FC<Props> = ({
               {contextCount.current}
               <SlashSeparatorSpan>/</SlashSeparatorSpan>
               <MaxContextCount
-                maxContext={contextWindowMode === 'fixed' && hasAnchor ? MAX_CONTEXT_COUNT : contextCount.max}
+                maxContext={effectiveMode === 'fixed' && hasAnchor ? MAX_CONTEXT_COUNT : contextCount.max}
               />
             </HStack>
           </Text>
@@ -59,8 +61,9 @@ const TokenCount: FC<Props> = ({
 
   const contextCountBlock = (() => {
     if (contextWindowMode === 'fixed') {
-      if (hasAnchor) {
-        // Fixed mode + anchored: show current / ∞, click to unanchor
+      // Assistant supports fixed mode → always clickable (toggle per-topic mode)
+      if (effectiveMode === 'fixed' && hasAnchor) {
+        // Topic is fixed + anchored: show current / ∞, click to switch to sliding
         return (
           <HStack style={{ alignItems: 'center', cursor: 'pointer' }} onClick={onUpdateAnchor}>
             <MenuIcon size={12} className="icon" />
@@ -70,7 +73,7 @@ const TokenCount: FC<Props> = ({
           </HStack>
         )
       }
-      // Fixed mode + no anchor: show current / max, click to anchor
+      // Topic is sliding or fixed without anchor yet: show current / max, click to switch to fixed
       return (
         <HStack style={{ alignItems: 'center', cursor: 'pointer' }} onClick={onUpdateAnchor}>
           <MenuIcon size={12} className="icon" />
@@ -80,7 +83,7 @@ const TokenCount: FC<Props> = ({
         </HStack>
       )
     }
-    // Sliding mode: not clickable
+    // Assistant doesn't support fixed mode: not clickable
     return (
       <HStack style={{ alignItems: 'center' }}>
         <MenuIcon size={12} className="icon" />

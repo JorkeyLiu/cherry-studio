@@ -46,7 +46,7 @@ vi.mock('@renderer/services/AssistantService', () => {
 
   return {
     DEFAULT_ASSISTANT_SETTINGS: defaultAssistantSettings,
-    getAssistantSettings: () => ({ contextCount: 10 }),
+    getAssistantSettings: () => ({ contextCount: 10, topicContextWindowMode: {} }),
     getDefaultModel: () => ({ id: 'default-model' }),
     getDefaultAssistant: () => createDefaultAssistant(),
     getDefaultTopic: () => createDefaultTopic(),

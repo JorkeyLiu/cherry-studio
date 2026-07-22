@@ -59,6 +59,7 @@ export const DEFAULT_ASSISTANT_SETTINGS = {
   maxToolCalls: 20,
   enableMaxToolCalls: true,
   contextWindowMode: 'sliding',
+  topicContextWindowMode: {},
   fixedWindowAnchor: {}
 } as const satisfies AssistantSettings
 
@@ -258,6 +259,8 @@ export const getAssistantSettings = (assistant: Assistant): AssistantSettings =>
     reasoning_effort: assistant?.settings?.reasoning_effort ?? DEFAULT_ASSISTANT_SETTINGS.reasoning_effort,
     customParameters: assistant?.settings?.customParameters ?? DEFAULT_ASSISTANT_SETTINGS.customParameters,
     contextWindowMode: assistant?.settings?.contextWindowMode ?? DEFAULT_ASSISTANT_SETTINGS.contextWindowMode,
+    topicContextWindowMode:
+      assistant?.settings?.topicContextWindowMode ?? DEFAULT_ASSISTANT_SETTINGS.topicContextWindowMode,
     fixedWindowAnchor: assistant?.settings?.fixedWindowAnchor ?? DEFAULT_ASSISTANT_SETTINGS.fixedWindowAnchor
   }
 }

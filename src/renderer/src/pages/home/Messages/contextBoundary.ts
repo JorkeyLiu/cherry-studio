@@ -63,7 +63,10 @@ export const computeContextBoundaryMessageId = (
   const preFiltered = preFilterForBoundary(messages)
   if (preFiltered.length === 0) return null
 
-  if (settings.contextWindowMode === 'fixed') {
+  const topicMode = settings.topicContextWindowMode?.[topicId]
+  const effectiveMode = topicMode ?? settings.contextWindowMode
+
+  if (effectiveMode === 'fixed') {
     const anchor = settings.fixedWindowAnchor?.[topicId]
     if (anchor !== undefined) {
       if (anchor.kind === 'vacant') {

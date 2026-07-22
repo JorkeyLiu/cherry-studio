@@ -769,7 +769,21 @@ const Messages = ({
           void autoRenameTopic(assistant, newTopic.id)
           // Inherit fixed context window anchor (group-key based)
           const assistantSettings = getAssistantSettings(assistant)
-          if (assistantSettings.contextWindowMode === 'fixed') {
+          const sourceEffectiveMode =
+            assistantSettings.topicContextWindowMode?.[topic.id] ?? assistantSettings.contextWindowMode
+
+          // Inherit topicContextWindowMode
+          const sourceTopicMode = assistantSettings.topicContextWindowMode?.[topic.id]
+          if (sourceTopicMode) {
+            updateAssistantSettings({
+              topicContextWindowMode: {
+                ...assistantSettings.topicContextWindowMode,
+                [newTopic.id]: sourceTopicMode
+              }
+            })
+          }
+
+          if (sourceEffectiveMode === 'fixed') {
             const sourceAnchor = assistantSettings.fixedWindowAnchor?.[topic.id]
             if (sourceAnchor?.kind === 'active') {
               try {

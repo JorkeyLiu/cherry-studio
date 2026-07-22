@@ -205,6 +205,7 @@ export type AssistantSettings = {
   maxToolCalls?: number
   enableMaxToolCalls?: boolean
   contextWindowMode?: ContextWindowMode
+  topicContextWindowMode?: Record<string, 'fixed' | 'sliding' | undefined>
   fixedWindowAnchor?: Record<string, TopicAnchor | undefined> // { [topicId]: TopicAnchor }
 }
 

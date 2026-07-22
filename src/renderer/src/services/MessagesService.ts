@@ -84,7 +84,10 @@ export function getContextCount(assistant: Assistant, messages: Message[], topic
   const settingContextCount = settings?.contextCount ?? DEFAULT_CONTEXTCOUNT
   const actualContextCount = settingContextCount === MAX_CONTEXT_COUNT ? UNLIMITED_CONTEXT_COUNT : settingContextCount
 
-  if (settings?.contextWindowMode === 'fixed') {
+  const topicMode = topicId ? settings?.topicContextWindowMode?.[topicId] : undefined
+  const effectiveMode = topicMode ?? settings?.contextWindowMode
+
+  if (effectiveMode === 'fixed') {
     const anchor = topicId ? settings?.fixedWindowAnchor?.[topicId] : undefined
     if (anchor !== undefined) {
       if (anchor.kind === 'vacant') {

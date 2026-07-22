@@ -394,11 +394,7 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
           onChange={(checked) => {
             const mode: ContextWindowMode = checked ? 'fixed' : 'sliding'
             setContextWindowMode(mode)
-            if (mode === 'sliding') {
-              updateAssistantSettings({ contextWindowMode: mode, fixedWindowAnchor: {} })
-            } else {
-              updateAssistantSettings({ contextWindowMode: mode })
-            }
+            updateAssistantSettings({ contextWindowMode: mode })
           }}
         />
       </SettingRow>

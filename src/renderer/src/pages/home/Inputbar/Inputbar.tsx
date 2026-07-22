@@ -307,21 +307,58 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     return getAssistantSettings(assistant).contextWindowMode
   }, [assistant])
 
-  const settings = getAssistantSettings(assistant)
-  const hasAnchor = settings.contextWindowMode === 'fixed' && settings.fixedWindowAnchor?.[topic.id] !== undefined
+  const topicContextWindowMode = useMemo(() => {
+    const s = getAssistantSettings(assistant)
+    return s.topicContextWindowMode?.[topic.id] ?? s.contextWindowMode
+  }, [assistant, topic.id])
 
-  // 自动锚点：vacant 且有 user 消息时，自动设为 active(firstUser)
+  const settings = getAssistantSettings(assistant)
+  const effectiveMode = settings.topicContextWindowMode?.[topic.id] ?? settings.contextWindowMode
+  const hasAnchor = effectiveMode === 'fixed' && settings.fixedWindowAnchor?.[topic.id] !== undefined
+
+  // 自动锚点 + 不变量守卫
   useEffect(() => {
     const settings = getAssistantSettings(assistant)
     const anchor = settings.fixedWindowAnchor?.[topic.id]
-    if (settings.contextWindowMode === 'fixed' && anchor?.kind === 'vacant') {
-      const firstUser = topicMessages.find((m) => m.role === 'user')
-      if (firstUser) {
+    const topicMode = settings.topicContextWindowMode?.[topic.id]
+    const effectiveMode = topicMode ?? settings.contextWindowMode
+
+    if (effectiveMode !== 'fixed') return
+
+    // 不变量守卫：fixed 模式下必须有有效锚点
+    if (anchor?.kind === 'active') {
+      // 检查 groupKey 是否有效
+      const isValid = topicMessages.some((m) => m.id === anchor.groupKey && m.role === 'user')
+      if (isValid) return // 有效，无需处理
+
+      // 旧数据恢复：groupKey 指向 assistant 消息
+      const assistantMsg = topicMessages.find((m) => m.id === anchor.groupKey && m.role === 'assistant')
+      if (assistantMsg?.askId) {
         updateAssistantSettings({
           fixedWindowAnchor: {
             ...settings.fixedWindowAnchor,
-            [topic.id]: { kind: 'active', groupKey: firstUser.id }
+            [topic.id]: { kind: 'active', groupKey: assistantMsg.askId }
           }
+        })
+        return
+      }
+
+      // 都找不到，设到第一条 user 消息
+      const firstUser = topicMessages.find((m) => m.role === 'user')
+      if (firstUser) {
+        updateAssistantSettings({
+          fixedWindowAnchor: { ...settings.fixedWindowAnchor, [topic.id]: { kind: 'active', groupKey: firstUser.id } }
+        })
+      }
+      return
+    }
+
+    // anchor 为 undefined 或 vacant：fixed 模式下无有效锚点，自动修复
+    if (topicMessages.length > 0) {
+      const firstUser = topicMessages.find((m) => m.role === 'user')
+      if (firstUser) {
+        updateAssistantSettings({
+          fixedWindowAnchor: { ...settings.fixedWindowAnchor, [topic.id]: { kind: 'active', groupKey: firstUser.id } }
         })
       }
     }
@@ -329,30 +366,15 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
 
   const onUpdateAnchor = useCallback(() => {
     const settings = getAssistantSettings(assistant)
-    const topicMessagesList = topicMessages || []
-    const current = settings.fixedWindowAnchor?.[topic.id]
-
-    if (current?.kind === 'active') {
-      // active → vacant
-      updateAssistantSettings({
-        fixedWindowAnchor: {
-          ...settings.fixedWindowAnchor,
-          [topic.id]: { kind: 'vacant' }
-        }
-      })
-    } else {
-      // vacant 或 undefined → active(第一个 user 消息)
-      const firstUser = topicMessagesList.find((m) => m.role === 'user')
-      if (firstUser && topic.id) {
-        updateAssistantSettings({
-          fixedWindowAnchor: {
-            ...settings.fixedWindowAnchor,
-            [topic.id]: { kind: 'active', groupKey: firstUser.id }
-          }
-        })
+    const currentMode = settings.topicContextWindowMode?.[topic.id] ?? settings.contextWindowMode
+    const newMode = currentMode === 'fixed' ? 'sliding' : 'fixed'
+    updateAssistantSettings({
+      topicContextWindowMode: {
+        ...settings.topicContextWindowMode,
+        [topic.id]: newMode
       }
-    }
-  }, [assistant, topicMessages, topic.id, updateAssistantSettings])
+    })
+  }, [assistant, topic.id, updateAssistantSettings])
 
   const onPause = useCallback(async () => {
     await pauseMessages()
@@ -388,14 +410,15 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     addTopic(newTopic)
     setActiveTopic(newTopic)
 
-    // 固定模式下，新话题默认开启小开关（待设锚点状态）
+    // 固定模式下，新话题默认开启 fixed 模式
     const settings = getAssistantSettings(assistant)
     if (settings.contextWindowMode === 'fixed') {
       updateAssistantSettings({
-        fixedWindowAnchor: {
-          ...settings.fixedWindowAnchor,
-          [newTopic.id]: { kind: 'vacant' }
+        topicContextWindowMode: {
+          ...settings.topicContextWindowMode,
+          [newTopic.id]: 'fixed'
         }
+        // 不设 fixedWindowAnchor——useEffect 会在首条消息到达时自动补
       })
     }
 
@@ -560,6 +583,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
           inputTokenCount={tokenCountProps.inputTokenCount}
           contextCount={tokenCountProps.contextCount}
           contextWindowMode={contextWindowMode}
+          effectiveMode={topicContextWindowMode}
           hasAnchor={hasAnchor}
           onUpdateAnchor={onUpdateAnchor}
           onClick={onNewContext}

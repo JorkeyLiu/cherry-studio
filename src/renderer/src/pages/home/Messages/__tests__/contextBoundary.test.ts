@@ -40,11 +40,13 @@ vi.mock('@renderer/services/AssistantService', () => ({
     settings?: {
       contextCount?: number
       contextWindowMode?: string
+      topicContextWindowMode?: Record<string, 'fixed' | 'sliding' | undefined>
       fixedWindowAnchor?: Record<string, TopicAnchor>
     }
   }) => ({
     contextCount: assistant.settings?.contextCount ?? 10,
     contextWindowMode: assistant.settings?.contextWindowMode ?? 'sliding',
+    topicContextWindowMode: assistant.settings?.topicContextWindowMode ?? {},
     fixedWindowAnchor: assistant.settings?.fixedWindowAnchor
   }),
   getDefaultAssistant: () => ({
@@ -75,6 +77,7 @@ const msg = (id: string, role: Message['role'] = 'user', askId?: string): Messag
 const assistantWith = (settings: {
   contextCount: number
   contextWindowMode?: 'fixed' | 'sliding'
+  topicContextWindowMode?: Record<string, 'fixed' | 'sliding' | undefined>
   fixedWindowAnchor?: Record<string, TopicAnchor>
 }): Assistant =>
   ({
@@ -239,6 +242,71 @@ describe('computeContextBoundaryMessageId', () => {
       )
 
       // Should fall through to sliding mode
+      expect(result).not.toBeNull()
+    })
+  })
+
+  describe('topicContextWindowMode (per-topic override)', () => {
+    const manyMessages = Array.from({ length: 20 }, (_, i) => {
+      const role = i % 2 === 0 ? 'user' : 'assistant'
+      return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
+    })
+
+    it('topicContextWindowMode=fixed + has anchor → fixed behavior (boundary at anchor)', () => {
+      const result = computeContextBoundaryMessageId(
+        manyMessages,
+        assistantWith({
+          contextCount: 5,
+          contextWindowMode: 'sliding',
+          topicContextWindowMode: { [TOPIC_ID]: 'fixed' },
+          fixedWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm4' } }
+        }),
+        TOPIC_ID
+      )
+      // fixed mode with active anchor at m4 → boundary at m4
+      expect(result).toBe('m4')
+    })
+
+    it('topicContextWindowMode=sliding (even if contextWindowMode=fixed) → sliding behavior', () => {
+      const result = computeContextBoundaryMessageId(
+        manyMessages,
+        assistantWith({
+          contextCount: 5,
+          contextWindowMode: 'fixed',
+          topicContextWindowMode: { [TOPIC_ID]: 'sliding' },
+          fixedWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm0' } }
+        }),
+        TOPIC_ID
+      )
+      // sliding mode: takeRight(preFiltered, 5+2=7) → boundary exists
+      expect(result).not.toBeNull()
+      expect(typeof result).toBe('string')
+    })
+
+    it('topicContextWindowMode=undefined + contextWindowMode=fixed → fallback to fixed', () => {
+      const result = computeContextBoundaryMessageId(
+        manyMessages,
+        assistantWith({
+          contextCount: 5,
+          contextWindowMode: 'fixed',
+          fixedWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm4' } }
+        }),
+        TOPIC_ID
+      )
+      // falls back to fixed mode → boundary at anchor
+      expect(result).toBe('m4')
+    })
+
+    it('topicContextWindowMode=undefined + contextWindowMode=sliding → sliding', () => {
+      const result = computeContextBoundaryMessageId(
+        manyMessages,
+        assistantWith({
+          contextCount: 5,
+          contextWindowMode: 'sliding'
+        }),
+        TOPIC_ID
+      )
+      // sliding mode: boundary exists
       expect(result).not.toBeNull()
     })
   })
