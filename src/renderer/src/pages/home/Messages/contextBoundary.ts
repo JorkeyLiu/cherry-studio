@@ -9,6 +9,7 @@ import {
   filterLastAssistantMessage,
   filterUsefulMessages
 } from '@renderer/utils/messageUtils/filters'
+import { resolveAnchorMessageId } from '@renderer/utils/messageUtils/resolveAnchor'
 import { takeRight } from 'lodash'
 
 /**
@@ -40,6 +41,7 @@ export const preFilterForBoundary = (messages: Message[]): Message[] => {
  *   - contextCount is unlimited
  *   - all messages fit within the context window (no boundary)
  *   - fixed mode: anchor message not found (deleted or never set)
+ *   - fixed mode: anchor is the first pre-filtered message (all messages in context)
  *
  * This is a pure helper (reads store for filter selectors but makes no mutations).
  *
@@ -64,10 +66,14 @@ export const computeContextBoundaryMessageId = (
   if (settings.contextWindowMode === 'fixed') {
     const anchorMessageId = settings.fixedWindowAnchor?.[topicId]
     if (anchorMessageId) {
-      // Verify anchor exists in the pre-filtered stream
-      const anchorIndex = preFiltered.findIndex((m) => m.id === anchorMessageId)
-      if (anchorIndex >= 0) return anchorMessageId
-      // Anchor not found (deleted) — no boundary, don't fall through to sliding
+      const resolvedAnchorId = resolveAnchorMessageId(preFiltered, anchorMessageId)
+      if (resolvedAnchorId) {
+        const resolvedIndex = preFiltered.findIndex((m) => m.id === resolvedAnchorId)
+        // No boundary needed if resolved anchor is the first message (all in context)
+        if (resolvedIndex === 0) return null
+        return resolvedAnchorId
+      }
+      // No messages at all — no boundary
       return null
     }
     // No anchor set — fall through to sliding mode

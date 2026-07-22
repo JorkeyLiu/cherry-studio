@@ -210,13 +210,6 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
 
         return (
           <Fragment key={key}>
-            {key === contextDividerGroupKey && (
-              <ContextWindowDivider data-context-boundary>
-                <ContextWindowDividerLine />
-                <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
-                <ContextWindowDividerLine />
-              </ContextWindowDivider>
-            )}
             <div style={{ position: 'relative' }}>
               {segment && (
                 <TopicSegmentLine
@@ -234,6 +227,13 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
                 onGroupClick={handleGroupClick}
               />
             </div>
+            {key === contextDividerGroupKey && (
+              <ContextWindowDivider data-context-boundary>
+                <ContextWindowDividerLine />
+                <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
+                <ContextWindowDividerLine />
+              </ContextWindowDivider>
+            )}
           </Fragment>
         )
       })
