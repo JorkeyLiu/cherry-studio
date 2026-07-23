@@ -164,7 +164,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   )
   const { sendMessageShortcut, showInputEstimatedTokens, enableQuickPanelTriggers } = useSettings()
   const [estimateTokenCount, setEstimateTokenCount] = useState(0)
-  const [contextCount, setContextCount] = useState({ current: 0, max: 0 })
+  const [contextCount, setContextCount] = useState<{ current: number; max: number | null }>({ current: 0, max: null })
 
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)

@@ -223,6 +223,9 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
                 onGroupClick={handleGroupClick}
               />
             </div>
+            {/* Divider renders after the message group in DOM. Because the parent
+                flex container uses column-reverse, later siblings appear visually
+                above earlier ones — so this divider appears above the boundary group. */}
             {key === contextDividerGroupKey && (
               <ContextWindowDivider data-context-boundary>
                 <ContextWindowDividerLine />

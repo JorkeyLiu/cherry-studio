@@ -1,6 +1,5 @@
 import { HStack, VStack } from '@renderer/components/Layout'
 import MaxContextCount from '@renderer/components/MaxContextCount'
-import { MAX_CONTEXT_COUNT } from '@renderer/config/constant'
 import { useSettings } from '@renderer/hooks/useSettings'
 import type { ContextWindowMode } from '@renderer/types'
 import { Divider, Popover } from 'antd'
@@ -12,7 +11,7 @@ import styled from 'styled-components'
 type Props = {
   estimateTokenCount: number
   inputTokenCount: number
-  contextCount: { current: number; max: number }
+  contextCount: { current: number; max: number | null }
   contextWindowMode?: ContextWindowMode
   effectiveMode?: ContextWindowMode
   onUpdateAnchor?: () => void
@@ -42,7 +41,7 @@ const TokenCount: FC<Props> = ({
             <HStack style={{ alignItems: 'center' }}>
               {contextCount.current}
               <SlashSeparatorSpan>/</SlashSeparatorSpan>
-              <MaxContextCount maxContext={effectiveMode === 'fixed' ? MAX_CONTEXT_COUNT : contextCount.max} />
+              <MaxContextCount maxContext={contextCount.max} />
             </HStack>
           </Text>
         </HStack>
@@ -65,7 +64,7 @@ const TokenCount: FC<Props> = ({
             <MenuIcon size={12} className="icon" />
             {contextCount.current}
             <SlashSeparatorSpan>/</SlashSeparatorSpan>
-            <MaxContextCount maxContext={MAX_CONTEXT_COUNT} style={{ color: 'var(--color-primary)' }} />
+            <MaxContextCount maxContext={contextCount.max} style={{ color: 'var(--color-primary)' }} />
           </HStack>
         )
       }
