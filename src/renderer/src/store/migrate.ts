@@ -3424,6 +3424,26 @@ const migrateConfig = {
       logger.error('migrate 212 error', error as Error)
       return state
     }
+  },
+  '213': (state: RootState) => {
+    try {
+      // Remove 100 = unlimited sentinel: convert persisted contextCount === 100 → null.
+      // All other finite values are left unchanged (they represent conversation turns).
+      const SENTINEL = 100
+      const migrateAssistant = (assistant: Assistant) => {
+        if (assistant.settings && assistant.settings.contextCount === SENTINEL) {
+          assistant.settings.contextCount = null
+        }
+        return assistant
+      }
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      state.assistants.assistants = state.assistants.assistants.map((a) => migrateAssistant(a))
+      logger.info('migrate 213 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 213 error', error as Error)
+      return state
+    }
   }
 }
 

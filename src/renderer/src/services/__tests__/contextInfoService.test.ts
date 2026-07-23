@@ -44,13 +44,13 @@ vi.mock('@renderer/store', () => ({
 vi.mock('@renderer/services/AssistantService', () => ({
   getAssistantSettings: (assistant: {
     settings?: {
-      contextCount?: number
+      contextCount?: number | null
       contextWindowMode?: string
       topicContextWindowMode?: Record<string, 'fixed' | 'sliding' | undefined>
       fixedWindowAnchor?: Record<string, TopicAnchor>
     }
   }) => ({
-    contextCount: assistant.settings?.contextCount ?? 10,
+    contextCount: assistant.settings?.contextCount === undefined ? 10 : assistant.settings.contextCount,
     contextWindowMode: assistant.settings?.contextWindowMode ?? 'sliding',
     topicContextWindowMode: assistant.settings?.topicContextWindowMode ?? {},
     fixedWindowAnchor: assistant.settings?.fixedWindowAnchor
@@ -104,7 +104,7 @@ const msgWithBlock = (
 }
 
 const assistantWith = (settings: {
-  contextCount: number
+  contextCount: number | null
   contextWindowMode?: 'fixed' | 'sliding'
   topicContextWindowMode?: Record<string, 'fixed' | 'sliding' | undefined>
   fixedWindowAnchor?: Record<string, TopicAnchor>
@@ -382,11 +382,10 @@ describe('computeContextInfo', () => {
   })
 
   describe('boundaryMessageId — unlimited context', () => {
-    it('returns null for unlimited context count', () => {
+    it('returns null for unlimited context count (null)', () => {
       const messages = Array.from({ length: 100 }, (_, i) => msg(`m${i}`))
-      const UNLIMITED = 999999
 
-      const result = computeContextInfo(messages, assistantWith({ contextCount: UNLIMITED }), TOPIC_ID)
+      const result = computeContextInfo(messages, assistantWith({ contextCount: null }), TOPIC_ID)
       expect(result.boundaryMessageId).toBeNull()
     })
   })
@@ -442,10 +441,37 @@ describe('computeContextInfo', () => {
       expect(result.contextCount.max).toBe(5)
     })
 
-    it('sliding: 20 msgs (10 turns), contextCount=100 (unlimited sentinel) → current=10, max=null', () => {
-      // 100 is MAX_CONTEXT_COUNT → sentinel for unlimited → max = null
+    it('sliding: contextCount=null → unlimited (current=allTurns, max=null)', () => {
+      const result = computeContextInfo(twentyMessages, assistantWith({ contextCount: null }), TOPIC_ID)
+      expect(result.contextCount.current).toBe(10)
+      expect(result.contextCount.max).toBeNull()
+      expect(result.boundaryMessageId).toBeNull()
+    })
+
+    it('sliding: contextCount=99 is a real finite value (not unlimited)', () => {
+      // 20 msgs → 10 turns. 99 > 10, so all turns fit. max=99 (finite).
+      const result = computeContextInfo(twentyMessages, assistantWith({ contextCount: 99 }), TOPIC_ID)
+      expect(result.contextCount.current).toBe(10)
+      expect(result.contextCount.max).toBe(99)
+      expect(result.boundaryMessageId).toBeNull()
+    })
+
+    it('sliding: contextCount=99 with more than 99 turns → boundary exists, max=99', () => {
+      // Create 200 alternating messages → 100 turns. contextCount=99 → select last 99.
+      const manyMsgs = Array.from({ length: 200 }, (_, i) => {
+        const role = i % 2 === 0 ? 'user' : 'assistant'
+        return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
+      })
+      const result = computeContextInfo(manyMsgs, assistantWith({ contextCount: 99 }), TOPIC_ID)
+      expect(result.contextCount.current).toBe(99)
+      expect(result.contextCount.max).toBe(99)
+      expect(result.boundaryMessageId).not.toBeNull()
+    })
+
+    it('sliding: 20 msgs (10 turns), contextCount=null (unlimited) → current=10, max=null', () => {
+      // null means unlimited → max = null
       // 20 msgs → 10 turns, all selected → current=10
-      const result = computeContextInfo(twentyMessages, assistantWith({ contextCount: 100 }), TOPIC_ID)
+      const result = computeContextInfo(twentyMessages, assistantWith({ contextCount: null }), TOPIC_ID)
       expect(result.contextCount.current).toBe(10)
       expect(result.contextCount.max).toBeNull()
     })
@@ -459,7 +485,7 @@ describe('computeContextInfo', () => {
       const result = computeContextInfo(
         twentyMessages,
         assistantWith({
-          contextCount: 100,
+          contextCount: null,
           contextWindowMode: 'fixed',
           fixedWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm4' } }
         }),
@@ -474,7 +500,7 @@ describe('computeContextInfo', () => {
       const result = computeContextInfo(
         twentyMessages,
         assistantWith({
-          contextCount: 100,
+          contextCount: null,
           contextWindowMode: 'fixed',
           fixedWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm0' } }
         }),
@@ -488,7 +514,7 @@ describe('computeContextInfo', () => {
       const result = computeContextInfo(
         twentyMessages,
         assistantWith({
-          contextCount: 100,
+          contextCount: null,
           contextWindowMode: 'fixed'
           // no fixedWindowAnchor → undefined anchor
         }),
@@ -502,7 +528,7 @@ describe('computeContextInfo', () => {
       const result = computeContextInfo(
         [],
         assistantWith({
-          contextCount: 100,
+          contextCount: null,
           contextWindowMode: 'fixed'
           // no fixedWindowAnchor → undefined anchor
         }),
@@ -623,9 +649,9 @@ describe('computeContextInfo', () => {
       expect(result.contextCount.max).toBe(5)
     })
 
-    it('sliding: sentinel 100 → no boundary, current=turnCount, max=null', () => {
+    it('sliding: sentinel null → no boundary, current=turnCount, max=null', () => {
       // 20 msgs → 10 turns, unlimited → current=10, no boundary
-      const result = computeContextInfo(twentyMessages, assistantWith({ contextCount: 100 }), TOPIC_ID)
+      const result = computeContextInfo(twentyMessages, assistantWith({ contextCount: null }), TOPIC_ID)
       expect(result.boundaryMessageId).toBeNull()
       expect(result.contextCount.current).toBe(10)
       expect(result.contextCount.max).toBeNull()

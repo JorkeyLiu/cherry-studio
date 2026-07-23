@@ -1,11 +1,5 @@
 import { loggerService } from '@logger'
-import {
-  DEFAULT_CONTEXTCOUNT,
-  DEFAULT_MAX_TOKENS,
-  DEFAULT_TEMPERATURE,
-  MAX_CONTEXT_COUNT,
-  UNLIMITED_CONTEXT_COUNT
-} from '@renderer/config/constant'
+import { DEFAULT_CONTEXTCOUNT, DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE } from '@renderer/config/constant'
 import { getModelSupportedReasoningEffortOptions } from '@renderer/config/models'
 import { isQwenMTModel } from '@renderer/config/models/qwen'
 import { UNKNOWN } from '@renderer/config/translate'
@@ -222,7 +216,7 @@ export function getProviderByModelId(modelId?: string) {
  * Retrieves and normalizes assistant settings with special transformation handling.
  *
  * **Special Transformations:**
- * 1. **Context Count**: Converts `MAX_CONTEXT_COUNT` to `UNLIMITED_CONTEXT_COUNT` for internal processing
+ * 1. **Context Count**: `null` means unlimited; `undefined` falls back to `DEFAULT_CONTEXTCOUNT`; finite numbers are preserved as-is
  * 2. **Max Tokens**: Only returns a value when `enableMaxTokens` is true, otherwise returns `undefined`
  * 3. **Max Tokens Validation**: Ensures maxTokens > 0, falls back to `DEFAULT_MAX_TOKENS` if invalid
  * 4. **Fallback Defaults**: Applies system defaults for all undefined/missing settings
@@ -231,7 +225,8 @@ export function getProviderByModelId(modelId?: string) {
  * @returns Normalized assistant settings with all transformations applied
  */
 export const getAssistantSettings = (assistant: Assistant): AssistantSettings => {
-  const contextCount = assistant?.settings?.contextCount ?? DEFAULT_CONTEXTCOUNT
+  const rawContextCount = assistant?.settings?.contextCount
+  const contextCount = rawContextCount === undefined ? DEFAULT_CONTEXTCOUNT : rawContextCount
   const getAssistantMaxTokens = () => {
     if (assistant.settings?.enableMaxTokens) {
       const maxTokens = assistant.settings.maxTokens
@@ -244,7 +239,7 @@ export const getAssistantSettings = (assistant: Assistant): AssistantSettings =>
   }
 
   return {
-    contextCount: contextCount === MAX_CONTEXT_COUNT ? UNLIMITED_CONTEXT_COUNT : contextCount,
+    contextCount,
     temperature: assistant?.settings?.temperature ?? DEFAULT_TEMPERATURE,
     enableTemperature: assistant?.settings?.enableTemperature ?? DEFAULT_ASSISTANT_SETTINGS.enableTemperature,
     topP: assistant?.settings?.topP ?? DEFAULT_ASSISTANT_SETTINGS.topP,

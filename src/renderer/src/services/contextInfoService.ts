@@ -1,4 +1,4 @@
-import { DEFAULT_CONTEXTCOUNT, MAX_CONTEXT_COUNT } from '@renderer/config/constant'
+import { DEFAULT_CONTEXTCOUNT } from '@renderer/config/constant'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import {
   buildContextTurns,
@@ -60,14 +60,13 @@ export function computeContextInfo(
     return { uiMessages: [], boundaryMessageId: null, contextCount: { current: 0, max: null } }
   }
 
-  // Read raw contextCount before getAssistantSettings transforms MAX_CONTEXT_COUNT → UNLIMITED_CONTEXT_COUNT.
+  // Read raw contextCount before getAssistantSettings normalizes it.
   // This raw value is what the UI displays as the window capacity.
-  // When rawContextCount === MAX_CONTEXT_COUNT (100), the persisted sentinel means "unlimited";
-  // downstream max uses null to represent unlimited so MaxContextCount renders ∞.
-  // Persisted numeric values are reinterpreted as turn counts (not message counts).
-  const rawContextCount = assistant.settings?.contextCount ?? DEFAULT_CONTEXTCOUNT
-  // Hoisted predicate: true when stored sentinel (100) means unlimited.
-  const isUnlimited = rawContextCount >= MAX_CONTEXT_COUNT
+  // null means unlimited; finite numeric values are turn counts.
+  const rawContextCount =
+    assistant.settings?.contextCount === undefined ? DEFAULT_CONTEXTCOUNT : assistant.settings.contextCount
+  // Hoisted predicate: null means unlimited.
+  const isUnlimited = rawContextCount === null
 
   const settings = getAssistantSettings(assistant)
 
