@@ -912,11 +912,11 @@ const Messages = ({
   useEffect(() => {
     void runAsyncFunction(async () => {
       void EventEmitter.emit(EVENT_NAMES.ESTIMATED_TOKEN_COUNT, {
-        tokensCount: await estimateHistoryTokens(assistant, messages),
+        tokensCount: await estimateHistoryTokens(assistant, contextInfo.uiMessages),
         contextCount: contextInfo.contextCount
       })
     }).then(() => onFirstUpdate?.())
-  }, [assistant, messages, onFirstUpdate, contextInfo.contextCount])
+  }, [assistant, contextInfo, onFirstUpdate])
 
   const loadMoreMessages = useCallback(() => {
     const currentState = viewportStateRef.current

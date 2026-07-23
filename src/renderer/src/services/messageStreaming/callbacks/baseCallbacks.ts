@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import i18n from '@renderer/i18n'
+import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { NotificationService } from '@renderer/services/NotificationService'
 import { estimateMessagesUsage } from '@renderer/services/TokenService'
@@ -284,11 +285,9 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
       const finalAssistantMsg = finalStateOnComplete.messages.entities[assistantMsgId]
 
       if (status === 'success' && finalAssistantMsg) {
-        const userMsgId = finalAssistantMsg.askId
         const orderedMsgs = selectMessagesForTopic(finalStateOnComplete, topicId)
-        const userMsgIndex = orderedMsgs.findIndex((m) => m.id === userMsgId)
-        const contextForUsage = userMsgIndex !== -1 ? orderedMsgs.slice(0, userMsgIndex + 1) : []
-        const finalContextWithAssistant = [...contextForUsage, finalAssistantMsg]
+        const { uiMessages } = computeContextInfo(orderedMsgs, assistant, topicId)
+        const finalContextWithAssistant = [...uiMessages, finalAssistantMsg]
 
         const possibleBlockId = findBlockIdForCompletion(finalAssistantMsg)
 

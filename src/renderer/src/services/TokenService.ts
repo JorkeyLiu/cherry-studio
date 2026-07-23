@@ -2,11 +2,8 @@ import type { Assistant, FileMetadata, Usage } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { findFileBlocks, getMainTextContent, getThinkingContent } from '@renderer/utils/messageUtils/find'
-import { flatten, takeRight } from 'lodash'
+import { flatten } from 'lodash'
 import { approximateTokenSize } from 'tokenx'
-
-import { getAssistantSettings } from './AssistantService'
-import { filterAfterContextClearMessages, filterMessages } from './MessagesService'
 
 interface MessageItem {
   name?: string
@@ -165,13 +162,21 @@ export async function estimateMessagesUsage({
   } as Usage
 }
 
-export async function estimateHistoryTokens(assistant: Assistant, msgs: Message[]) {
-  const { contextCount } = getAssistantSettings(assistant)
-  const maxContextCount = contextCount
-  const messages = filterMessages(filterAfterContextClearMessages(takeRight(msgs, maxContextCount)))
-
+/**
+ * Estimate token count for the conversation history.
+ *
+ * Accepts already-filtered messages (the canonical `uiMessages` from
+ * `computeContextInfo`) — callers are responsible for context-window
+ * selection, turn grouping, and model-filter passes. This function
+ * does NOT re-window or re-filter; it estimates tokens over the
+ * exact message set it receives.
+ *
+ * @param assistant - Used only for the system prompt token estimate.
+ * @param messages  - Pre-filtered message list (uiMessages).
+ */
+export async function estimateHistoryTokens(assistant: Assistant, messages: Message[]) {
   // 有 usage 数据的消息，快速计算总数
-  const uasageTokens = messages
+  const usageTokens = messages
     .filter((m) => m.usage)
     .reduce((acc, message) => {
       const inputTokens = message.usage?.total_tokens ?? 0
@@ -192,5 +197,5 @@ export async function estimateHistoryTokens(assistant: Assistant, msgs: Message[
     .map((m) => m.content)
     .join('\n')
 
-  return estimateTextTokens(prompt + input) + uasageTokens
+  return estimateTextTokens(prompt + input) + usageTokens
 }
