@@ -90,26 +90,6 @@ export function transferAnchorOnDeletion(
 }
 
 /**
- * 在已 filter 后的 messages（oldest-first）中定位 anchor group 起点索引。
- * 查找逻辑：
- *   1. 先找 role==='user' && id===groupKey 的消息
- *   2. 若找不到（user 被 filter 剔除），退找 askId===groupKey 的 assistant
- *   3. 都找不到 → 返回 -1（表示"全量不截断"）
- */
-export function resolveAnchorSliceStart(messages: Pick<Message, 'id' | 'role' | 'askId'>[], groupKey: string): number {
-  // 1. 先找 user 消息
-  const userIdx = messages.findIndex((m) => m.id === groupKey && m.role === 'user')
-  if (userIdx >= 0) return userIdx
-
-  // 2. 退找 assistant
-  const assistantIdx = messages.findIndex((m) => m.askId === groupKey && m.role === 'assistant')
-  if (assistantIdx >= 0) return assistantIdx
-
-  // 3. 整组被过滤
-  return -1
-}
-
-/**
  * 删除后对所有 assistant 的 active anchor 进行转移（集成胶水函数）。
  * 遍历 assistants.assistants，对每个有 fixedWindowAnchor[topicId]: active 的，
  * 调 transferAnchorOnDeletion，diff 则 dispatch updateAssistantSettings。
