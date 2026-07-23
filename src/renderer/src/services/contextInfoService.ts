@@ -94,8 +94,7 @@ export function computeContextInfo(
 
   if (effectiveMode === 'fixed') {
     if (anchor?.kind === 'active') {
-      // Locate the anchor turn using the pure resolver (preserves old
-      // anchorService.resolveAnchorSliceStart semantics: user-id match
+      // Locate the anchor turn using the pure resolver (user-id match
       // wins over assistant-askId fallback, -1 when neither exists).
       const anchorIndex = resolveAnchorTurnIndex(allTurns, anchor.groupKey)
       if (anchorIndex >= 0) {

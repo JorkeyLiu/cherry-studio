@@ -94,7 +94,7 @@ export function buildContextTurns(messages: Message[]): ContextTurn[] {
 /**
  * Locates the index of the anchor turn in the given ContextTurn array.
  *
- * Semantics (preserving old anchorService.resolveAnchorSliceStart):
+ * Semantics:
  *   1. Prefer a turn containing a user message whose id equals groupKey.
  *   2. If no such user turn exists, fall back to the first turn containing
  *      an assistant message whose askId equals groupKey.
