@@ -1378,7 +1378,7 @@
       "code_wrappable": "Code block wrappable",
       "context_count": {
         "label": "Context",
-        "tip": "The number of previous messages to keep in the context."
+        "tip": "The number of previous conversation turns to keep in the context."
       },
       "context_window_mode": {
         "label": "Fixed Context Window",

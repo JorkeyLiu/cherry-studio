@@ -2,7 +2,14 @@
  * Tests for computeContextInfo — the unified pure function that determines
  * context boundary, context count, and filtered UI messages in a single pipeline.
  *
- * Uses the same filter pipeline as ConversationService.filterMessagesPipeline.
+ * Canonical unit: ContextTurn. contextCount.current and contextCount.max count
+ * turns (not messages). The boundary divider marks the first message of the first
+ * selected turn when older turns exist.
+ *
+ * N+2 compensation is removed: selection is by whole turns, so post-selection
+ * model filters cannot create partial turn boundaries. The model may receive
+ * fewer messages than the expanded turn count after model filters (useful,
+ * error-only, trailing assistant, adjacent users) remove individual messages.
  */
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
@@ -114,15 +121,20 @@ const TOPIC_ID = 'topic-1'
 // ---------------------------------------------------------------------------
 describe('computeContextInfo', () => {
   // Helper: N alternating user/assistant messages (starts with user).
-  // Display source = N (all messages, including any trailing assistant).
-  // Model source (withoutAdjacentUsers) = N for odd N (ends with user), N-1 for even N (trailing assistant removed).
+  // Builds ceil(N/2) turns: each user+assistant pair is one turn; an odd trailing
+  // user is a standalone turn.
+  //
+  // Examples:
+  //   makeMessages(4) → 4 msgs, 2 turns:  [m0,m1], [m2,m3]
+  //   makeMessages(5) → 5 msgs, 3 turns:  [m0,m1], [m2,m3], [m4]
+  //   makeMessages(20) → 20 msgs, 10 turns
   const makeMessages = (n: number) =>
     Array.from({ length: n }, (_, i) => {
       const role = i % 2 === 0 ? 'user' : 'assistant'
       return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
     })
 
-  // 20 alternating messages: last is assistant (index 19) — display source includes all 20
+  // 20 alternating messages: 10 turns. Last turn is [m18, m19].
   const twentyMessages = makeMessages(20)
 
   beforeEach(() => {
@@ -131,15 +143,15 @@ describe('computeContextInfo', () => {
   })
 
   describe('boundaryMessageId — sliding mode', () => {
-    it('returns null when all messages fit within contextCount + 2', () => {
+    it('returns null when all turns fit within contextCount', () => {
       const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2'), msg('a2', 'assistant', 'u2'), msg('u3')]
-      // 5 messages, contextCount=10 → contextCount+2=12 → all fit
+      // 5 msgs → 3 turns. contextCount=10 → all fit → no boundary.
       const result = computeContextInfo(messages, assistantWith({ contextCount: 10 }), TOPIC_ID)
       expect(result.boundaryMessageId).toBeNull()
     })
 
-    it('returns the boundary message when messages exceed contextCount + 2', () => {
-      // 20 messages, contextCount=5 → contextCount+2=7
+    it('returns the boundary message when turns exceed contextCount', () => {
+      // 20 messages → 10 turns, contextCount=5 → last 5 turns selected → boundary exists
       const messages = Array.from({ length: 20 }, (_, i) => {
         const role = i % 2 === 0 ? 'user' : 'assistant'
         return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
@@ -162,7 +174,9 @@ describe('computeContextInfo', () => {
   })
 
   describe('boundaryMessageId — fixed mode', () => {
-    it('active anchor → returns boundary at groupKey message', () => {
+    it('active anchor → returns boundary at anchor turn first message', () => {
+      // Turns: [u1,a1](key=u1), [u2,a2](key=u2), [u3,a3](key=u3)
+      // Anchor groupKey=u2 → turn index 1 → boundary = first message of that turn = u2
       const messages = [
         msg('u1'),
         msg('a1', 'assistant', 'u1'),
@@ -185,7 +199,7 @@ describe('computeContextInfo', () => {
       expect(result.boundaryMessageId).toBe('u2')
     })
 
-    it('active anchor with groupKey at index 0 → returns null (all in context)', () => {
+    it('active anchor with groupKey at first turn → returns null (all in context)', () => {
       const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2'), msg('a2', 'assistant', 'u2')]
 
       const result = computeContextInfo(
@@ -201,8 +215,11 @@ describe('computeContextInfo', () => {
       expect(result.boundaryMessageId).toBeNull()
     })
 
-    it('active anchor with deleted groupKey → returns null (fallback)', () => {
-      const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2')]
+    it('fixed + invalid anchor: display=0 but model gets full history', () => {
+      // Turns: [u1,a1](key=u1), [u2](key=u2). groupKey='nonexistent' → not found.
+      // Display semantics: current=0, no boundary.
+      // Model semantics: all turns go through filters → full history preserved.
+      const messages = [msgWithBlock('u1'), msgWithBlock('a1', 'assistant', 'u1'), msgWithBlock('u2')]
 
       const result = computeContextInfo(
         messages,
@@ -214,14 +231,20 @@ describe('computeContextInfo', () => {
         TOPIC_ID
       )
 
-      // GroupKey not found → no boundary (fallback)
+      // Display: current=0, no boundary, max=null
       expect(result.boundaryMessageId).toBeNull()
+      expect(result.contextCount.current).toBe(0)
+      expect(result.contextCount.max).toBeNull()
+      // Model: full filtered history preserved (not empty)
+      // Expanded: u1, a1, u2 → model filters keep all (starts with user, no trailing assistant)
+      expect(result.uiMessages.length).toBe(3)
+      expect(result.uiMessages.map((m) => m.id)).toEqual(['u1', 'a1', 'u2'])
     })
 
-    it('undefined anchor + fixed mode → returns null (no boundary)', () => {
-      const messages = Array.from({ length: 20 }, (_, i) => {
+    it('fixed + undefined anchor: display=0 but model gets full history', () => {
+      const messages = Array.from({ length: 6 }, (_, i) => {
         const role = i % 2 === 0 ? 'user' : 'assistant'
-        return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
+        return msgWithBlock(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
       })
 
       const result = computeContextInfo(
@@ -229,13 +252,19 @@ describe('computeContextInfo', () => {
         assistantWith({
           contextCount: 5,
           contextWindowMode: 'fixed'
-          // no fixedWindowAnchor → undefined anchor → full messages, no boundary
+          // no fixedWindowAnchor → undefined anchor
         }),
         TOPIC_ID
       )
 
-      // undefined anchor in fixed mode → all messages, no boundary
+      // Display: current=0, no boundary, max=null
       expect(result.boundaryMessageId).toBeNull()
+      expect(result.contextCount.current).toBe(0)
+      expect(result.contextCount.max).toBeNull()
+      // Model: full filtered history preserved (not empty)
+      // 6 msgs → 3 turns, expanded → filterLastAssistant removes m5 → 5 uiMessages
+      expect(result.uiMessages.length).toBe(5)
+      expect(result.uiMessages.map((m) => m.id)).toEqual(['m0', 'm1', 'm2', 'm3', 'm4'])
     })
 
     it('does NOT fall through to sliding when anchor is missing (undefined)', () => {
@@ -257,11 +286,11 @@ describe('computeContextInfo', () => {
 
       // Sliding should produce a boundary
       expect(slidingResult.boundaryMessageId).not.toBeNull()
-      // Fixed with undefined anchor should NOT produce a boundary (full messages)
+      // Fixed with undefined anchor should NOT produce a boundary (safe semantics)
       expect(fixedNoAnchorResult.boundaryMessageId).toBeNull()
     })
 
-    it('fixed mode with no anchor set → full messages (no boundary)', () => {
+    it('fixed mode with no anchor set → safe semantics (empty selection, no boundary)', () => {
       const messages = Array.from({ length: 20 }, (_, i) => {
         const role = i % 2 === 0 ? 'user' : 'assistant'
         return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
@@ -272,13 +301,15 @@ describe('computeContextInfo', () => {
         assistantWith({
           contextCount: 5,
           contextWindowMode: 'fixed'
-          // no fixedWindowAnchor → undefined → full messages, no boundary
+          // no fixedWindowAnchor → undefined → safe semantics
         }),
         TOPIC_ID
       )
 
-      // fixed + undefined anchor: full messages, no boundary
+      // fixed + undefined anchor: safe semantics — no selection, no boundary
       expect(result.boundaryMessageId).toBeNull()
+      expect(result.contextCount.current).toBe(0)
+      expect(result.contextCount.max).toBeNull()
     })
   })
 
@@ -315,12 +346,14 @@ describe('computeContextInfo', () => {
         }),
         TOPIC_ID
       )
-      // sliding mode: takeRight(preFiltered, 5+2=7) → boundary exists
+      // sliding mode: 10 turns, last 5 selected → boundary exists
       expect(result.boundaryMessageId).not.toBeNull()
       expect(typeof result.boundaryMessageId).toBe('string')
     })
 
     it('topicContextWindowMode=undefined + contextWindowMode=fixed → fallback to fixed', () => {
+      // Turns: [m0,m1], [m2,m3], [m4,m5], ...
+      // Anchor groupKey=m4 → turn index 2 → boundary = m4
       const result = computeContextInfo(
         manyMessages,
         assistantWith({
@@ -330,7 +363,7 @@ describe('computeContextInfo', () => {
         }),
         TOPIC_ID
       )
-      // falls back to fixed mode → boundary at anchor
+      // falls back to fixed mode → boundary at anchor turn first message
       expect(result.boundaryMessageId).toBe('m4')
     })
 
@@ -358,13 +391,13 @@ describe('computeContextInfo', () => {
     })
   })
 
-  describe('contextCount', () => {
-    it('returns current based on display source count and max = raw contextCount', () => {
+  describe('contextCount — basic', () => {
+    it('returns current based on turn count (not message count)', () => {
+      // 3 msgs (u1, a1, u2) → 2 turns: [u1,a1], [u2]
+      // contextCount=10 → all 2 turns fit → current=2, max=10
       const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2')]
-      // 3 msgs (u, a, u): no trailing assistant → display source = 3
-      // sliding: Math.min(3, 10) = 3
       const result = computeContextInfo(messages, assistantWith({ contextCount: 10 }), TOPIC_ID)
-      expect(result.contextCount.current).toBe(3)
+      expect(result.contextCount.current).toBe(2) // turns, not messages
       expect(result.contextCount.max).toBe(10)
     })
 
@@ -381,28 +414,25 @@ describe('computeContextInfo', () => {
     })
   })
 
-  describe('contextCount current/max', () => {
-    // --- Sliding mode tests ---
-
-    it('sliding: 20 msgs, contextCount=5 → current=5, max=5', () => {
-      // Display source=20, Math.min(20, 5) = 5
+  describe('contextCount current/max — sliding mode', () => {
+    it('sliding: 20 msgs (10 turns), contextCount=5 → current=5, max=5', () => {
+      // 20 msgs → 10 turns. Select last 5 → current=5
       const result = computeContextInfo(twentyMessages, assistantWith({ contextCount: 5 }), TOPIC_ID)
       expect(result.contextCount.current).toBe(5)
       expect(result.contextCount.max).toBe(5)
     })
 
-    it('sliding: 4 msgs, contextCount=5 → current=4, max=5', () => {
-      // 4 msgs end with assistant → display source=4 (trailing assistant is viewport-visible),
-      // Math.min(4, 5) = 4. Model source (withoutAdjacentUsers) = 3 but display uses slidingDisplaySource.
+    it('sliding: 4 msgs (2 turns), contextCount=5 → current=2, max=5', () => {
+      // 4 msgs → 2 turns. All fit → current=2
       const result = computeContextInfo(makeMessages(4), assistantWith({ contextCount: 5 }), TOPIC_ID)
-      expect(result.contextCount.current).toBe(4)
+      expect(result.contextCount.current).toBe(2)
       expect(result.contextCount.max).toBe(5)
     })
 
-    it('sliding: 5 msgs, contextCount=5 → current=5, max=5', () => {
-      // 5 msgs end with user → display source=5, Math.min(5, 5) = 5
+    it('sliding: 5 msgs (3 turns), contextCount=5 → current=3, max=5', () => {
+      // 5 msgs → 3 turns. All fit → current=3
       const result = computeContextInfo(makeMessages(5), assistantWith({ contextCount: 5 }), TOPIC_ID)
-      expect(result.contextCount.current).toBe(5)
+      expect(result.contextCount.current).toBe(3)
       expect(result.contextCount.max).toBe(5)
     })
 
@@ -412,19 +442,20 @@ describe('computeContextInfo', () => {
       expect(result.contextCount.max).toBe(5)
     })
 
-    it('sliding: 20 msgs, contextCount=100 (unlimited sentinel) → current=displaySourceLength, max=null', () => {
+    it('sliding: 20 msgs (10 turns), contextCount=100 (unlimited sentinel) → current=10, max=null', () => {
       // 100 is MAX_CONTEXT_COUNT → sentinel for unlimited → max = null
-      // Display source = 20 (all messages after context-clear, including trailing assistant)
+      // 20 msgs → 10 turns, all selected → current=10
       const result = computeContextInfo(twentyMessages, assistantWith({ contextCount: 100 }), TOPIC_ID)
-      expect(result.contextCount.current).toBe(twentyMessages.length)
+      expect(result.contextCount.current).toBe(10)
       expect(result.contextCount.max).toBeNull()
     })
+  })
 
-    // --- Fixed mode tests ---
-
-    it('fixed + active anchor at 3rd user group → current=rawCountFromAnchor, max=null', () => {
-      // 20 raw messages (m0..m19), anchor at m4 → raw count = 20 - 4 = 16
-      // Includes m19 (trailing assistant) because fixed current counts RAW messages.
+  describe('contextCount current/max — fixed mode', () => {
+    it('fixed + active anchor at 3rd user group → current=turnsFromAnchor, max=null', () => {
+      // 20 msgs → 10 turns: [m0,m1],[m2,m3],[m4,m5],[m6,m7],[m8,m9],
+      //                       [m10,m11],[m12,m13],[m14,m15],[m16,m17],[m18,m19]
+      // Anchor at m4 → turn index 2 → selected = 8 turns → current=8
       const result = computeContextInfo(
         twentyMessages,
         assistantWith({
@@ -434,12 +465,12 @@ describe('computeContextInfo', () => {
         }),
         TOPIC_ID
       )
-      expect(result.contextCount.current).toBe(16) // 20 raw - 4 offset
+      expect(result.contextCount.current).toBe(8)
       expect(result.contextCount.max).toBeNull()
     })
 
-    it('fixed + active anchor at 1st user group (start) → current=allRaw, max=null', () => {
-      // Anchor at m0 → raw count = 20 - 0 = 20 (includes trailing assistant m19)
+    it('fixed + active anchor at 1st user group (start) → current=totalTurns, max=null', () => {
+      // Anchor at m0 → turn index 0 → selected = 10 turns → current=10
       const result = computeContextInfo(
         twentyMessages,
         assistantWith({
@@ -449,7 +480,7 @@ describe('computeContextInfo', () => {
         }),
         TOPIC_ID
       )
-      expect(result.contextCount.current).toBe(20)
+      expect(result.contextCount.current).toBe(10)
       expect(result.contextCount.max).toBeNull()
     })
 
@@ -481,11 +512,10 @@ describe('computeContextInfo', () => {
       expect(result.contextCount.max).toBeNull()
     })
 
-    // --- Fixed active: completed assistant tail is included ---
-
-    it('fixed + active: trailing assistant is included in raw current count', () => {
-      // [u1, a1, u2, a2]: anchor at u1 → raw count = 4 (includes trailing a2)
-      // RAW counting does not apply filterLastAssistantMessage.
+    it('fixed + active: trailing assistant turn is counted as a whole turn', () => {
+      // [u1, a1, u2, a2]: anchor at u1
+      // Turns: [u1,a1](key=u1), [u2,a2](key=u2) → 2 turns from anchor
+      // The trailing assistant a2 is part of its turn — turn-based counting includes it.
       const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2'), msg('a2', 'assistant', 'u2')]
       const result = computeContextInfo(
         messages,
@@ -496,14 +526,13 @@ describe('computeContextInfo', () => {
         }),
         TOPIC_ID
       )
-      expect(result.contextCount.current).toBe(4) // u1, a1, u2, a2 (raw includes trailing assistant)
+      expect(result.contextCount.current).toBe(2) // 2 turns (not 4 messages)
       expect(result.contextCount.max).toBeNull()
     })
 
-    // --- Fixed active: pending user tail ---
-
-    it('fixed + active: pending user tail, raw count includes all from anchor', () => {
-      // [u1, a1, u2]: no trailing assistant → raw count from u1 = 3
+    it('fixed + active: pending user tail creates its own turn', () => {
+      // [u1, a1, u2]: anchor at u1
+      // Turns: [u1,a1](key=u1), [u2](key=u2) → 2 turns from anchor
       const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2')]
       const result = computeContextInfo(
         messages,
@@ -514,15 +543,14 @@ describe('computeContextInfo', () => {
         }),
         TOPIC_ID
       )
-      expect(result.contextCount.current).toBe(3)
+      expect(result.contextCount.current).toBe(2) // 2 turns (not 3 messages)
       expect(result.contextCount.max).toBeNull()
     })
 
-    // --- Fixed active: multiple assistants in one Q&A group ---
-
-    it('fixed + active: multiple assistant responses in anchored group are all counted', () => {
-      // [u1, a1, a1_retry, u2, a2]: a1 and a1_retry both belong to u1's group (askId='u1')
-      // Anchor at u1 → raw count = 5
+    it('fixed + active: retries count as one turn', () => {
+      // [u1, a1, a1_retry, u2, a2]: anchor at u1
+      // Turns: [u1,a1,a1_retry](key=u1), [u2,a2](key=u2) → 2 turns from anchor
+      // Retries are grouped into the same turn by buildContextTurns.
       const messages = [
         msg('u1'),
         msg('a1', 'assistant', 'u1'),
@@ -539,14 +567,12 @@ describe('computeContextInfo', () => {
         }),
         TOPIC_ID
       )
-      expect(result.contextCount.current).toBe(5) // all 5 raw messages from u1
+      expect(result.contextCount.current).toBe(2) // 2 turns (retries = 1 turn, not 2)
       expect(result.contextCount.max).toBeNull()
     })
 
-    // --- Fixed active: missing anchor (groupKey not in raw messages) ---
-
-    it('fixed + active: missing anchor groupKey → current=0', () => {
-      // groupKey 'nonexistent' doesn't exist in messages
+    it('fixed + active: missing anchor groupKey → current=0, safe semantics', () => {
+      // groupKey 'nonexistent' doesn't exist in any turn
       const messages = [msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2')]
       const result = computeContextInfo(
         messages,
@@ -561,11 +587,9 @@ describe('computeContextInfo', () => {
       expect(result.contextCount.max).toBeNull()
     })
 
-    // --- Fixed active: anchor not at index 0 ---
-
-    it('fixed + active: anchor at non-zero index counts all raw messages from anchor', () => {
-      // [u1, a1, u2, a2, u3, a3]: anchor at u2 (index 2)
-      // Raw from u2: [u2, a2, u3, a3] → 4 messages
+    it('fixed + active: anchor at non-zero index counts turns from anchor', () => {
+      // [u1, a1, u2, a2, u3, a3]: 3 turns
+      // Anchor at u2 → turn index 1 → selected = 2 turns → current=2
       const messages = [
         msg('u1'),
         msg('a1', 'assistant', 'u1'),
@@ -583,54 +607,50 @@ describe('computeContextInfo', () => {
         }),
         TOPIC_ID
       )
-      expect(result.contextCount.current).toBe(4) // u2, a2, u3, a3
+      expect(result.contextCount.current).toBe(2) // 2 turns (not 4 messages)
       expect(result.contextCount.max).toBeNull()
     })
+  })
 
-    // --- Sliding boundary marks start of N-message display window ---
-
-    it('sliding: boundary is at start of last N messages of display source', () => {
-      // 20 alternating msgs → display source = 20 (post-context-clear, including trailing assistant m19)
-      // Display window = last 5 → m15, m16, m17, m18, m19
-      // Boundary should be m15 (start of display window)
-      // Model window = last 7 (N+2) of withoutAdjacentUsers (19) → m12..m18, but boundary is m15
+  describe('boundaryMessageId + contextCount — turn-based boundary placement', () => {
+    it('sliding: boundary at first message of first selected turn', () => {
+      // 20 alternating msgs → 10 turns, contextCount=5
+      // Select last 5 turns: turns[5]..[9]
+      //   turns[5] = [m10, m11] → boundary = m10 (first message of first selected turn)
       const result = computeContextInfo(twentyMessages, assistantWith({ contextCount: 5 }), TOPIC_ID)
-      expect(result.boundaryMessageId).toBe('m15')
+      expect(result.boundaryMessageId).toBe('m10')
       expect(result.contextCount.current).toBe(5)
       expect(result.contextCount.max).toBe(5)
     })
 
-    // --- Sliding sentinel 100: no boundary when unlimited ---
-
-    it('sliding: sentinel 100 → no boundary, current=displaySourceLength, max=null', () => {
+    it('sliding: sentinel 100 → no boundary, current=turnCount, max=null', () => {
+      // 20 msgs → 10 turns, unlimited → current=10, no boundary
       const result = computeContextInfo(twentyMessages, assistantWith({ contextCount: 100 }), TOPIC_ID)
       expect(result.boundaryMessageId).toBeNull()
-      expect(result.contextCount.current).toBe(twentyMessages.length)
+      expect(result.contextCount.current).toBe(10)
       expect(result.contextCount.max).toBeNull()
     })
 
-    // --- Model uiMessages uses N+2 window, display uses N ---
-
-    it('sliding: uiMessages derived from N+2 model window, display current capped at N', () => {
-      // 20 msgs with blocks → display source = 20 (includes trailing assistant m19)
-      // Model source (withoutAdjacentUsers) = 19 (trailing assistant removed by step 4)
-      // Model: takeRight(19, 5+2=7) → m12..m18 (7 msgs)
-      // Post-limit filters: filterEmptyMessages keeps all (blocks exist),
-      // filterUserRoleStartMessages: m12 is user (even index) → no removal → uiMessages = 7
-      // Display current = min(20, 5) = 5 (from slidingDisplaySource, not model source)
+    it('sliding: N+2 removed — model filters may reduce uiMessages below expanded count', () => {
+      // 20 msgs with blocks → 10 turns, contextCount=5 → last 5 turns → 10 expanded msgs
+      // After model filters: trailing assistant m19 removed → 9 uiMessages.
+      // N+2 is removed because selection is by whole turns — no partial turn compensation needed.
       const msgs = Array.from({ length: 20 }, (_, i) => {
         const role = i % 2 === 0 ? 'user' : 'assistant'
         return msgWithBlock(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
       })
       const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
-      expect(result.uiMessages.length).toBe(7) // model window: N+2 (from withoutAdjacentUsers)
-      expect(result.contextCount.current).toBe(5) // display window: N (from slidingDisplaySource)
+      expect(result.uiMessages.length).toBe(9) // 10 expanded - 1 trailing assistant
+      expect(result.contextCount.current).toBe(5) // 5 turns
       expect(result.contextCount.max).toBe(5)
     })
   })
 
-  describe('uiMessages', () => {
+  describe('uiMessages — model filter semantics', () => {
     it('returns filtered messages starting from first user message', () => {
+      // Turns: [a-leading](orphan), [u1,a1](key=u1), [u2](key=u2)
+      // All 3 turns selected (contextCount=10).
+      // filterEmptyMessages removes empty messages; filterUserRoleStartMessages trims leading non-user.
       const messages = [msg('a-leading', 'assistant'), msg('u1'), msg('a1', 'assistant', 'u1'), msg('u2')]
       const result = computeContextInfo(messages, assistantWith({ contextCount: 10 }), TOPIC_ID)
       // Leading assistant should be filtered; first message should be user
@@ -639,15 +659,25 @@ describe('computeContextInfo', () => {
       }
     })
 
-    it('sliding: display current/boundary track N-message window independent of post-limit filters', () => {
-      // 10 messages: some with blocks (kept by filterEmptyMessages), some without (removed).
-      // Pre-filtered=10 (no trailing assistant, no adjacent users, alternation correct).
-      // Model window = takeRight(10, 5+2=7) = [m3..m9] (7 messages).
-      //   m3 is user → filterUserRoleStartMessages keeps all 7 that have blocks.
-      //   But m4 (assistant) and m6 (assistant) have NO blocks → filterEmptyMessages removes them.
-      //   So uiMessages = 5 (m3, m5, m7, m8, m9 — those with blocks).
-      // Display current = min(10, 5) = 5 — unaffected by post-limit filtering.
-      // Boundary = start of last 5 of 10 = m5.
+    it('sliding: contextCount.current tracks turns, independent of post-turn model filters', () => {
+      // 10 messages forming 6 turns:
+      //   [m0(U,block), m1(A,block)] → turn 0 (key=m0)
+      //   [m2(U,block)]             → turn 1 (key=m2, adjacent user starts own turn)
+      //   [m3(U,no), m4(A,no)]     → turn 2 (key=m3)
+      //   [m5(U,block), m6(A,no)]  → turn 3 (key=m5)
+      //   [m7(U,block), m8(A,block)]→ turn 4 (key=m7)
+      //   [m9(U,block)]            → turn 5 (key=m9)
+      // contextCount=5 → select last 5 turns (indices 1..5) → boundary = first msg of turn 1 = m2
+      // current = 5 (turn count), max = 5
+      // Expanded: m2,m3,m4,m5,m6,m7,m8,m9 (8 msgs)
+      // Model filters:
+      //   filterUsefulMessages → 8 (all unique/single)
+      //   filterErrorOnlyMessages → 8
+      //   filterLastAssistantMessage → 8 (m9 is user)
+      //   filterAdjacentUserMessages: m2(U) then m3(U) → m2 removed → 7
+      //   filterEmptyMessages: m3(no block), m4(no block), m6(no block) removed → 4
+      //   filterUserRoleStartMessages: m5 is user → 4
+      // uiMessages = 4
       const msgs = [
         msgWithBlock('m0', 'user'),
         msgWithBlock('m1', 'assistant', 'm0'),
@@ -661,56 +691,51 @@ describe('computeContextInfo', () => {
         msgWithBlock('m9', 'user')
       ]
       const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
-      // Display window is independent of post-limit filters
-      expect(result.contextCount.current).toBe(5) // min(10, 5)
+      // Turn count is independent of post-selection model filters
+      expect(result.contextCount.current).toBe(5) // 5 turns
       expect(result.contextCount.max).toBe(5)
-      expect(result.boundaryMessageId).toBe('m5') // start of last 5 of 10
-      // Model window (N+2) is smaller after post-limit filters remove empty messages
-      expect(result.uiMessages.length).toBeLessThan(7) // some messages filtered as empty
+      expect(result.boundaryMessageId).toBe('m2') // first message of first selected turn
+      // Model filters reduce uiMessages below expanded turn message count
+      expect(result.uiMessages.length).toBeLessThan(8) // some messages filtered as empty
       expect(result.uiMessages.length).toBeGreaterThan(0)
     })
 
-    // --- Sliding: display source vs model source ---
-
-    it('sliding: trailing assistant included in display source but excluded from model source', () => {
-      // 20 alternating msgs ending with assistant m19, all with blocks.
-      // Display source (slidingDisplaySource) = 20 (includes m19).
-      // Model source (withoutAdjacentUsers) = 19 (m19 removed by filterLastAssistantMessage).
-      // current/boundary use display source; uiMessages uses model source via N+2.
+    it('sliding: trailing assistant removed by model filter, not by turn selection', () => {
+      // 20 alternating msgs with blocks → 10 turns, contextCount=5
+      // Last 5 turns → 10 expanded msgs
+      // filterLastAssistantMessage removes trailing m19 → 9 uiMessages
       const msgs = Array.from({ length: 20 }, (_, i) => {
         const role = i % 2 === 0 ? 'user' : 'assistant'
         return msgWithBlock(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
       })
       const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
-      // Display: 20 messages → current = min(20, 5) = 5, boundary at m15
+      // Turn-based: current = 5 turns, boundary at first selected turn's first message
       expect(result.contextCount.current).toBe(5)
-      expect(result.boundaryMessageId).toBe('m15')
-      // Model: 19 messages → takeRight(19, 7) = m12..m18 → uiMessages = 7
-      // (all post-limit filters pass through; m12 is user, no leading-assistant removal)
-      expect(result.uiMessages.length).toBe(7)
+      expect(result.boundaryMessageId).toBe('m10') // first msg of turn[5]
+      // Model filter removes trailing assistant within the selected turns
+      expect(result.uiMessages.length).toBe(9)
     })
 
-    it('sliding: pending user tail — display and model sources align when no trailing assistant', () => {
-      // 19 alternating msgs ending with user m18 (no trailing assistant).
-      // Display source = 19, model source (withoutAdjacentUsers) = 19 (no removal).
-      // Both sources are identical → current and boundary consistent.
+    it('sliding: pending user tail — no trailing assistant to remove', () => {
+      // 19 alternating msgs (ends with user m18) → 10 turns, contextCount=5
+      // Last 5 turns: [m10,m11], [m12,m13], [m14,m15], [m16,m17], [m18]
+      // boundary = m10 (first message of first selected turn)
       const msgs = Array.from({ length: 19 }, (_, i) => {
         const role = i % 2 === 0 ? 'user' : 'assistant'
         return msg(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
       })
       const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
-      // Display: 19 → current = min(19, 5) = 5, boundary at m14
       expect(result.contextCount.current).toBe(5)
-      expect(result.boundaryMessageId).toBe('m14')
+      expect(result.boundaryMessageId).toBe('m10')
       expect(result.contextCount.max).toBe(5)
     })
 
-    it('sliding: adjacent user pair counted in display source, filtered from model source', () => {
-      // Messages: u0, a0, u1, u2, a2, u3, a3, u4, a4, u5, a5 (11 messages)
-      // u1 and u2 are adjacent users → filterAdjacentUserMessaegs removes u1 from model source.
-      // Display source = 11 (post-context-clear only).
-      // Model source = 10 (u1 removed).
-      // With contextCount=5: display current = min(11, 5) = 5, boundary = start of last 5 of 11.
+    it('sliding: adjacent users are separate turns', () => {
+      // Messages: u0,a0,u1,u2,a2,u3,a3,u4,a4,u5,a5 (11 msgs)
+      // Turns: [u0,a0](key=u0), [u1](key=u1), [u2,a2](key=u2), [u3,a3](key=u3),
+      //        [u4,a4](key=u4), [u5,a5](key=u5) = 6 turns
+      // contextCount=5 → select last 5 turns: [u1],[u2,a2],[u3,a3],[u4,a4],[u5,a5]
+      // boundary = u1 (first message of first selected turn)
       const msgs = [
         msg('u0'),
         msg('a0', 'assistant', 'u0'),
@@ -725,17 +750,16 @@ describe('computeContextInfo', () => {
         msg('a5', 'assistant', 'u5')
       ]
       const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
-      expect(result.contextCount.current).toBe(5) // min(11, 5)
-      // indices 0..10, last 5 = indices 6..10 → [a3, u4, a4, u5, a5]
-      // boundary = a3 (index 6)
-      expect(result.boundaryMessageId).toBe('a3')
+      expect(result.contextCount.current).toBe(5) // 5 turns
+      expect(result.boundaryMessageId).toBe('u1') // first message of first selected turn
       expect(result.contextCount.max).toBe(5)
     })
 
-    it('sliding: context-clear source excludes pre-clear history', () => {
+    it('sliding: context-clear → only post-clear turns selected', () => {
       // Messages: u0, a0, u1, [clear], u2, a2, u3, a3, u4, a4 (10 messages)
-      // filterAfterContextClearMessages removes u0, a0, u1 → display source = 7.
-      // current = min(7, 5) = 5, boundary = start of last 5 of 7.
+      // buildContextTurns handles clear → post-clear: u2, a2, u3, a3, u4, a4
+      // Turns: [u2,a2], [u3,a3], [u4,a4] = 3 turns
+      // contextCount=5 → all 3 fit → current=3, no boundary
       const msgs = [
         msg('u0'),
         msg('a0', 'assistant', 'u0'),
@@ -749,11 +773,85 @@ describe('computeContextInfo', () => {
         msg('a4', 'assistant', 'u4')
       ]
       const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
-      // clear is at index 3, so display source = messages after clear = [u2, a2, u3, a3, u4, a4] = 6
-      expect(result.contextCount.current).toBe(Math.min(6, 5)) // 5
+      expect(result.contextCount.current).toBe(3) // 3 turns (not 5 or 6 messages)
       expect(result.contextCount.max).toBe(5)
-      // Last 5 of 6: [a2, u3, a3, u4, a4] → boundary = a2
-      expect(result.boundaryMessageId).toBe('a2')
+      expect(result.boundaryMessageId).toBeNull() // all turns fit
+    })
+  })
+
+  describe('uiMessages — SDK-facing Message[] semantics', () => {
+    it('fixed + active: expanded turns produce correct uiMessages after model filters', () => {
+      // [u1(block), a1(block,u1), u2(block), a2(block,u2)]
+      // Anchor at u1 → 2 turns selected
+      // Expanded: u1, a1, u2, a2
+      // Model filters: all pass (no trailing assistant removal — a2 is last but within a turn)
+      // Wait: filterLastAssistantMessage removes trailing assistant regardless of turns.
+      // a2 is the last message and is assistant → removed.
+      // uiMessages: u1, a1, u2 (3 messages)
+      const msgs = [
+        msgWithBlock('u1', 'user'),
+        msgWithBlock('a1', 'assistant', 'u1'),
+        msgWithBlock('u2', 'user'),
+        msgWithBlock('a2', 'assistant', 'u2')
+      ]
+      const result = computeContextInfo(
+        msgs,
+        assistantWith({
+          contextCount: 5,
+          contextWindowMode: 'fixed',
+          fixedWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u1' } }
+        }),
+        TOPIC_ID
+      )
+      // 2 turns, but model filter removes trailing assistant
+      expect(result.contextCount.current).toBe(2)
+      expect(result.uiMessages.length).toBe(3) // u1, a1, u2 (a2 removed as trailing assistant)
+      expect(result.uiMessages.map((m) => m.id)).toEqual(['u1', 'a1', 'u2'])
+    })
+
+    it('sliding: retries deduplicated by filterUsefulMessages within selected turns', () => {
+      // [u1, a1, a1_retry, a1_retry2, u2, a2]
+      // Turns: [u1,a1,a1_retry,a1_retry2](key=u1), [u2,a2](key=u2) = 2 turns
+      // contextCount=2 → select all 2 turns
+      // Expanded: u1, a1, a1_retry, a1_retry2, u2, a2 (6 msgs)
+      // filterUsefulMessages: none marked useful → keeps first of group → u1, a1, u2, a2 (4 msgs)
+      // filterLastAssistantMessage: a2 is trailing assistant → removed → 3 msgs
+      // uiMessages: u1, a1, u2
+      const msgs = [
+        msgWithBlock('u1', 'user'),
+        msgWithBlock('a1', 'assistant', 'u1'),
+        msgWithBlock('a1_retry', 'assistant', 'u1'),
+        msgWithBlock('a1_retry2', 'assistant', 'u1'),
+        msgWithBlock('u2', 'user'),
+        msgWithBlock('a2', 'assistant', 'u2')
+      ]
+      const result = computeContextInfo(msgs, assistantWith({ contextCount: 2 }), TOPIC_ID)
+      expect(result.contextCount.current).toBe(2) // 2 turns
+      // filterUsefulMessages keeps first of retry group; filterLastAssistantMessage removes trailing
+      expect(result.uiMessages.length).toBe(3) // u1, a1, u2
+      expect(result.uiMessages.map((m) => m.id)).toEqual(['u1', 'a1', 'u2'])
+    })
+
+    it('sliding: orphan assistant turn and system turn produce correct messages', () => {
+      // Orphan assistant (no askId), system message, then a normal Q&A
+      const systemMsg: Message = {
+        ...msg('s1', 'system'),
+        role: 'system'
+      }
+      const msgs = [
+        msgWithBlock('a-orphan', 'assistant'), // orphan, no askId → turn key=a-orphan
+        systemMsg,
+        msgWithBlock('u1', 'user'),
+        msgWithBlock('a1', 'assistant', 'u1')
+      ]
+      const result = computeContextInfo(msgs, assistantWith({ contextCount: 10 }), TOPIC_ID)
+      // 3 turns: [a-orphan], [s1], [u1,a1]
+      expect(result.contextCount.current).toBe(3)
+      // model filters: filterUserRoleStartMessages trims leading non-user
+      // a-orphan is assistant → removed; s1 is system → removed; u1 starts
+      if (result.uiMessages.length > 0) {
+        expect(result.uiMessages[0].role).toBe('user')
+      }
     })
   })
 })

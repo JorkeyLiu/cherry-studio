@@ -1378,7 +1378,7 @@
       "code_wrappable": "程式碼區塊可自動換行",
       "context_count": {
         "label": "上下文",
-        "tip": "在上下文中保留的前幾則訊息"
+        "tip": "在上下文中保留的前幾輪對話"
       },
       "context_window_mode": {
         "label": "固定上下文視窗",
