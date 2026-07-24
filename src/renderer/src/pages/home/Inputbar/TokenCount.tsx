@@ -10,7 +10,6 @@ import styled from 'styled-components'
 
 type Props = {
   estimateTokenCount: number
-  inputTokenCount: number
   contextCount: { current: number; max: number | null }
   contextWindowMode?: ContextWindowMode
   effectiveMode?: ContextWindowMode
@@ -19,7 +18,6 @@ type Props = {
 
 const TokenCount: FC<Props> = ({
   estimateTokenCount,
-  inputTokenCount,
   contextCount,
   contextWindowMode,
   effectiveMode,
@@ -97,8 +95,6 @@ const TokenCount: FC<Props> = ({
           <Divider type="vertical" style={{ marginTop: 3, marginLeft: 5, marginRight: 3 }} />
           <HStack style={{ alignItems: 'center' }}>
             <ArrowUp size={12} className="icon" />
-            {inputTokenCount}
-            <SlashSeparatorSpan>/</SlashSeparatorSpan>
             {estimateTokenCount}
           </HStack>
         </HStack>

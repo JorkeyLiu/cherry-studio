@@ -12,7 +12,7 @@
  * error-only, trailing assistant, adjacent users) remove individual messages.
  */
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
-import { computeContextInfo } from '@renderer/services/contextInfoService'
+import { computeContextInfo, PREVIEW_DRAFT_SENTINEL } from '@renderer/services/contextInfoService'
 import { messageBlocksSlice } from '@renderer/store/messageBlock'
 import type { Assistant, TopicAnchor } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
@@ -878,6 +878,300 @@ describe('computeContextInfo', () => {
       if (result.uiMessages.length > 0) {
         expect(result.uiMessages[0].role).toBe('user')
       }
+    })
+  })
+
+  // ── tokenEstimationMessages — retains trailing assistant ──────────────
+
+  describe('tokenEstimationMessages — trailing assistant retention (LOCK-005)', () => {
+    it('retains trailing assistant that uiMessages strips', () => {
+      // [u1, a1, u2, a2]: 2 turns, contextCount=2
+      // uiMessages: trailing a2 removed → [u1, a1, u2] (3 msgs)
+      // tokenEstimationMessages: a2 retained → [u1, a1, u2, a2] (4 msgs)
+      const msgs = [
+        msgWithBlock('u1', 'user'),
+        msgWithBlock('a1', 'assistant', 'u1'),
+        msgWithBlock('u2', 'user'),
+        msgWithBlock('a2', 'assistant', 'u2')
+      ]
+      const result = computeContextInfo(msgs, assistantWith({ contextCount: 2 }), TOPIC_ID)
+
+      expect(result.uiMessages.length).toBe(3)
+      expect(result.uiMessages.map((m) => m.id)).toEqual(['u1', 'a1', 'u2'])
+
+      expect(result.tokenEstimationMessages.length).toBe(4)
+      expect(result.tokenEstimationMessages.map((m) => m.id)).toEqual(['u1', 'a1', 'u2', 'a2'])
+    })
+
+    it('same length when trailing message is user (no assistant to strip)', () => {
+      // [u1, a1, u2]: 2 turns, ends with user
+      // Both lists should be equal — no trailing assistant to retain/strip
+      const msgs = [msgWithBlock('u1', 'user'), msgWithBlock('a1', 'assistant', 'u1'), msgWithBlock('u2', 'user')]
+      const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
+
+      expect(result.uiMessages.length).toBe(result.tokenEstimationMessages.length)
+      expect(result.tokenEstimationMessages.map((m) => m.id)).toEqual(result.uiMessages.map((m) => m.id))
+    })
+
+    it('20-msg sliding: tokenEstimationMessages has 10 msgs (trailing assistant kept)', () => {
+      // 20 alternating msgs with blocks → 10 turns, contextCount=5
+      // Last 5 turns → 10 expanded msgs
+      // uiMessages: trailing m19 removed → 9
+      // tokenEstimationMessages: m19 retained → 10
+      const msgs = Array.from({ length: 20 }, (_, i) => {
+        const role = i % 2 === 0 ? 'user' : 'assistant'
+        return msgWithBlock(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
+      })
+      const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
+
+      expect(result.uiMessages.length).toBe(9) // trailing assistant stripped
+      expect(result.tokenEstimationMessages.length).toBe(10) // trailing assistant retained
+      // Last message in token-estimation list is m19 (assistant)
+      expect(result.tokenEstimationMessages[result.tokenEstimationMessages.length - 1].id).toBe('m19')
+      expect(result.tokenEstimationMessages[result.tokenEstimationMessages.length - 1].role).toBe('assistant')
+    })
+
+    it('empty messages → both lists empty', () => {
+      const result = computeContextInfo([], assistantWith({ contextCount: 5 }), TOPIC_ID)
+      expect(result.uiMessages.length).toBe(0)
+      expect(result.tokenEstimationMessages.length).toBe(0)
+    })
+
+    it('undefined assistant → both lists empty', () => {
+      const result = computeContextInfo([msg('u1')], undefined, TOPIC_ID)
+      expect(result.uiMessages.length).toBe(0)
+      expect(result.tokenEstimationMessages.length).toBe(0)
+    })
+
+    it('tokenEstimationMessages applies same non-trailing-assistant filters', () => {
+      // Verify that tokenEstimationMessages still applies:
+      //   filterUsefulMessages, filterErrorOnlyMessages, filterAdjacentUserMessages,
+      //   filterAfterContextClearMessages, filterEmptyMessages, filterUserRoleStartMessages
+      // Only filterLastAssistantMessage is skipped.
+      const msgs = [
+        msgWithBlock('u1', 'user'),
+        msgWithBlock('a1', 'assistant', 'u1'),
+        msgWithBlock('a1_retry', 'assistant', 'u1'), // retry → filtered by filterUsefulMessages
+        msgWithBlock('u2', 'user'),
+        msgWithBlock('a2', 'assistant', 'u2')
+      ]
+      const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
+
+      // filterUsefulMessages deduplicates retries → a1_retry removed
+      // uiMessages: a2 stripped as trailing → [u1, a1, u2] (3)
+      expect(result.uiMessages.length).toBe(3)
+      // tokenEstimationMessages: a2 retained, a1_retry still deduped → [u1, a1, u2, a2] (4)
+      expect(result.tokenEstimationMessages.length).toBe(4)
+      expect(result.tokenEstimationMessages.map((m) => m.id)).toEqual(['u1', 'a1', 'u2', 'a2'])
+    })
+  })
+
+  // ── previewDraft — virtual turn for pending nonblank draft (LOCK-004) ──
+
+  describe('previewDraft — virtual turn participates in turn selection', () => {
+    it('sliding at capacity: nonblank draft ejects oldest real turn', () => {
+      // 20 alternating msgs → 10 turns, contextCount=5
+      // Without draft: select last 5 turns → current=5
+      // With draft: totalTurns=11, select last 5 → 4 real + 1 virtual → current=5
+      // Oldest real turn (turn[5]) is ejected.
+      const msgs = Array.from({ length: 20 }, (_, i) => {
+        const role = i % 2 === 0 ? 'user' : 'assistant'
+        return msgWithBlock(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
+      })
+
+      const withoutDraft = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
+      const withDraft = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID, {
+        previewDraft: 'new message'
+      })
+
+      // Without draft: 5 turns, 10 expanded messages (minus trailing assistant = 9 uiMessages)
+      expect(withoutDraft.contextCount.current).toBe(5)
+      expect(withoutDraft.uiMessages.length).toBe(9)
+
+      // With draft: still 5 turns displayed (4 real + 1 virtual), but only 4 real turns expanded
+      expect(withDraft.contextCount.current).toBe(5)
+      expect(withDraft.contextCount.max).toBe(5)
+      // Only 4 real turns → 8 expanded messages, minus trailing assistant → 7 uiMessages
+      expect(withDraft.uiMessages.length).toBe(7)
+      // Boundary shifts: without draft boundary is m10, with draft it's m12
+      // (oldest real turn ejected → first selected turn shifts by 2 messages)
+      expect(withDraft.boundaryMessageId).not.toBeNull()
+    })
+
+    it('sliding below capacity: draft adds to turn count without ejection', () => {
+      // 4 alternating msgs → 2 turns, contextCount=5
+      // With draft: totalTurns=3 ≤ 5 → all real turns kept + virtual → current=3
+      const msgs = [
+        msgWithBlock('u1', 'user'),
+        msgWithBlock('a1', 'assistant', 'u1'),
+        msgWithBlock('u2', 'user'),
+        msgWithBlock('a2', 'assistant', 'u2')
+      ]
+
+      const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID, {
+        previewDraft: 'new message'
+      })
+
+      expect(result.contextCount.current).toBe(3) // 2 real + 1 virtual
+      expect(result.contextCount.max).toBe(5)
+      // All real turns included — uiMessages same as without draft
+      expect(result.uiMessages.length).toBe(3) // trailing a2 removed
+      expect(result.boundaryMessageId).toBeNull() // all turns fit
+    })
+
+    it('blank draft does NOT create virtual turn', () => {
+      // Blank or whitespace-only draft should not affect turn selection
+      const msgs = Array.from({ length: 20 }, (_, i) => {
+        const role = i % 2 === 0 ? 'user' : 'assistant'
+        return msgWithBlock(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
+      })
+
+      const noDraft = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
+      const blankDraft = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID, {
+        previewDraft: '   '
+      })
+      const emptyDraft = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID, {
+        previewDraft: ''
+      })
+
+      // All three should produce identical results
+      expect(blankDraft.contextCount).toEqual(noDraft.contextCount)
+      expect(blankDraft.uiMessages.length).toBe(noDraft.uiMessages.length)
+      expect(blankDraft.boundaryMessageId).toBe(noDraft.boundaryMessageId)
+      expect(emptyDraft.contextCount).toEqual(noDraft.contextCount)
+    })
+
+    it('PREVIEW_DRAFT_SENTINEL (the actual Inputbar sentinel) activates virtual turn', () => {
+      // Regression: Inputbar passes PREVIEW_DRAFT_SENTINEL as previewDraft.
+      // If the sentinel were still whitespace (' '), .trim() would produce ''
+      // and the virtual turn would silently never activate.
+      const msgs = [
+        msgWithBlock('u1', 'user'),
+        msgWithBlock('a1', 'assistant', 'u1'),
+        msgWithBlock('u2', 'user'),
+        msgWithBlock('a2', 'assistant', 'u2')
+      ]
+
+      const withoutDraft = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
+      const withSentinel = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID, {
+        previewDraft: PREVIEW_DRAFT_SENTINEL
+      })
+
+      // Without draft: 2 real turns → current=2
+      expect(withoutDraft.contextCount.current).toBe(2)
+      // With sentinel: 2 real + 1 virtual → current=3
+      expect(withSentinel.contextCount.current).toBe(3)
+      expect(withSentinel.contextCount.max).toBe(5)
+      // Virtual turn should not appear in output messages
+      expect(withSentinel.uiMessages.length).toBe(withoutDraft.uiMessages.length)
+    })
+
+    it('draft virtual turn is NOT in output messages', () => {
+      // The virtual draft turn should never appear in uiMessages or tokenEstimationMessages
+      const msgs = [msgWithBlock('u1', 'user'), msgWithBlock('a1', 'assistant', 'u1')]
+
+      const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID, {
+        previewDraft: 'draft content'
+      })
+
+      // No message should have id '__preview_draft_turn__' or similar
+      const allIds = [...result.uiMessages.map((m) => m.id), ...result.tokenEstimationMessages.map((m) => m.id)]
+      expect(allIds).not.toContain('__preview_draft_turn__')
+      expect(allIds).not.toContain(expect.stringMatching(/draft/i))
+    })
+
+    it('sliding with draft: contextCount=1 means only virtual turn, no real turns', () => {
+      // 6 msgs → 3 turns. contextCount=1 + draft → totalTurns=3+1=4, n=1
+      // totalTurns(4) > n(1): realTurnsToKeep = 1-1 = 0 → no real turns selected
+      const msgs = [
+        msgWithBlock('u1', 'user'),
+        msgWithBlock('a1', 'assistant', 'u1'),
+        msgWithBlock('u2', 'user'),
+        msgWithBlock('a2', 'assistant', 'u2'),
+        msgWithBlock('u3', 'user'),
+        msgWithBlock('a3', 'assistant', 'u3')
+      ]
+
+      const result = computeContextInfo(msgs, assistantWith({ contextCount: 1 }), TOPIC_ID, {
+        previewDraft: 'new message'
+      })
+
+      // Only the virtual turn fits → no real turns selected
+      expect(result.contextCount.current).toBe(1)
+      expect(result.contextCount.max).toBe(1)
+      expect(result.uiMessages.length).toBe(0) // no real turns → no messages
+      expect(result.tokenEstimationMessages.length).toBe(0)
+    })
+
+    it('fixed mode with draft: currentCount includes virtual turn', () => {
+      // 6 msgs → 3 turns, fixed at anchor u1 → 3 real turns selected
+      // With draft: currentCount = 3 + 1 = 4
+      const msgs = [
+        msgWithBlock('u1', 'user'),
+        msgWithBlock('a1', 'assistant', 'u1'),
+        msgWithBlock('u2', 'user'),
+        msgWithBlock('a2', 'assistant', 'u2'),
+        msgWithBlock('u3', 'user'),
+        msgWithBlock('a3', 'assistant', 'u3')
+      ]
+
+      const withoutDraft = computeContextInfo(
+        msgs,
+        assistantWith({
+          contextCount: 5,
+          contextWindowMode: 'fixed',
+          fixedWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u1' } }
+        }),
+        TOPIC_ID
+      )
+
+      const withDraft = computeContextInfo(
+        msgs,
+        assistantWith({
+          contextCount: 5,
+          contextWindowMode: 'fixed',
+          fixedWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u1' } }
+        }),
+        TOPIC_ID,
+        { previewDraft: 'new message' }
+      )
+
+      expect(withoutDraft.contextCount.current).toBe(3) // 3 real turns
+      expect(withDraft.contextCount.current).toBe(4) // 3 real + 1 virtual
+      // Same real messages in output (virtual turn excluded)
+      expect(withDraft.uiMessages.length).toBe(withoutDraft.uiMessages.length)
+    })
+
+    it('unlimited sliding with draft: currentCount includes virtual turn', () => {
+      const msgs = [msgWithBlock('u1', 'user'), msgWithBlock('a1', 'assistant', 'u1')]
+
+      const result = computeContextInfo(msgs, assistantWith({ contextCount: null }), TOPIC_ID, {
+        previewDraft: 'new message'
+      })
+
+      // 1 real turn + 1 virtual = 2
+      expect(result.contextCount.current).toBe(2)
+      expect(result.contextCount.max).toBeNull()
+    })
+
+    it('previewDraft without topicId still works', () => {
+      const msgs = [msgWithBlock('u1', 'user'), msgWithBlock('a1', 'assistant', 'u1')]
+
+      const result = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), undefined, {
+        previewDraft: 'new message'
+      })
+
+      expect(result.contextCount.current).toBe(2) // 1 real + 1 virtual
+    })
+
+    it('undefined assistant with previewDraft returns empty', () => {
+      const result = computeContextInfo([msg('u1')], undefined, TOPIC_ID, {
+        previewDraft: 'new message'
+      })
+
+      expect(result.uiMessages.length).toBe(0)
+      expect(result.tokenEstimationMessages.length).toBe(0)
+      expect(result.contextCount.current).toBe(0)
     })
   })
 })

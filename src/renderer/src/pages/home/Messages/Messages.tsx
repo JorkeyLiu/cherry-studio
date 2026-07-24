@@ -53,7 +53,6 @@ import { getAssistantSettings, getDefaultTopic } from '@renderer/services/Assist
 import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { clearPendingNavigate, getPendingNavigate, getUserMessage } from '@renderer/services/MessagesService'
-import { estimateHistoryTokens } from '@renderer/services/TokenService'
 import store, { useAppDispatch } from '@renderer/store'
 import { messageBlocksSelectors, updateOneBlock } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
@@ -64,8 +63,7 @@ import { type Message, MessageBlockType } from '@renderer/types/newMessage'
 import {
   captureScrollableAsBlob,
   captureScrollableAsDataURL,
-  removeSpecialCharactersForFileName,
-  runAsyncFunction
+  removeSpecialCharactersForFileName
 } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
@@ -909,14 +907,18 @@ const Messages = ({
     void navigate(decision.intent)
   }, [isTopicLoading, messages, navigate, savePosition, topic.id, getSavedPosition])
 
+  // Token estimation is now owned by Inputbar (which has draft text for preview).
+  // Preserve onFirstUpdate: signals that Messages has rendered with valid context.
+  // Guarded with a ref so it fires exactly once per mount (topic key resets on switch).
+  // This preserves the prior intended first-update behavior where the callback
+  // executes once after Messages has valid context, not on every contextInfo change.
+  const onFirstUpdateFiredRef = useRef(false)
   useEffect(() => {
-    void runAsyncFunction(async () => {
-      void EventEmitter.emit(EVENT_NAMES.ESTIMATED_TOKEN_COUNT, {
-        tokensCount: await estimateHistoryTokens(assistant, contextInfo.uiMessages),
-        contextCount: contextInfo.contextCount
-      })
-    }).then(() => onFirstUpdate?.())
-  }, [assistant, contextInfo, onFirstUpdate])
+    if (!onFirstUpdateFiredRef.current) {
+      onFirstUpdateFiredRef.current = true
+      onFirstUpdate?.()
+    }
+  }, [contextInfo, onFirstUpdate])
 
   const loadMoreMessages = useCallback(() => {
     const currentState = viewportStateRef.current

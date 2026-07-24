@@ -2,49 +2,7 @@ import type { Assistant, FileMetadata, Usage } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { findFileBlocks, getMainTextContent, getThinkingContent } from '@renderer/utils/messageUtils/find'
-import { flatten } from 'lodash'
 import { approximateTokenSize } from 'tokenx'
-
-interface MessageItem {
-  name?: string
-  role: 'system' | 'user' | 'assistant'
-  content: string
-}
-
-async function getFileContent(file: FileMetadata) {
-  if (!file) {
-    return ''
-  }
-
-  if (file.type === FILE_TYPE.TEXT) {
-    return await window.api.file.read(file.id + file.ext, true)
-  }
-
-  return ''
-}
-
-async function getMessageParam(message: Message): Promise<MessageItem[]> {
-  const param: MessageItem[] = []
-
-  const content = getMainTextContent(message)
-  const files = findFileBlocks(message)
-
-  param.push({
-    role: message.role,
-    content
-  })
-
-  if (files.length > 0) {
-    for (const file of files) {
-      param.push({
-        role: 'assistant',
-        content: await getFileContent(file.file)
-      })
-    }
-  }
-
-  return param
-}
 
 /**
  * 估算文本内容的 token 数量
@@ -54,6 +12,20 @@ async function getMessageParam(message: Message): Promise<MessageItem[]> {
  */
 export function estimateTextTokens(text: string) {
   return approximateTokenSize(text)
+}
+
+/**
+ * Combines history-context token count with draft token count for display.
+ *
+ * LOCK-001: Displayed token scalar = historyTokenCount + draftTokenCount
+ * LOCK-002: One scalar render; no x/y.
+ *
+ * @param historyTokenCount - Token count from conversation history events
+ * @param draftTokenCount   - Estimated token count of current input draft
+ * @returns Combined scalar token estimate
+ */
+export function combineHistoryAndDraftTokens(historyTokenCount: number, draftTokenCount: number): number {
+  return historyTokenCount + draftTokenCount
 }
 
 /**
@@ -165,37 +137,33 @@ export async function estimateMessagesUsage({
 /**
  * Estimate token count for the conversation history.
  *
- * Accepts already-filtered messages (the canonical `uiMessages` from
- * `computeContextInfo`) — callers are responsible for context-window
+ * Accepts already-filtered messages (the canonical `tokenEstimationMessages`
+ * from `computeContextInfo` or `uiMessages` from callers that don't need
+ * trailing-assistant retention) — callers are responsible for context-window
  * selection, turn grouping, and model-filter passes. This function
  * does NOT re-window or re-filter; it estimates tokens over the
  * exact message set it receives.
  *
- * @param assistant - Used only for the system prompt token estimate.
- * @param messages  - Pre-filtered message list (uiMessages).
+ * LOCK-003: Content-based estimation. Every message is estimated from its
+ * content blocks (text + reasoning + files), not from historical usage fields.
+ * The assistant system prompt is added once. This ensures that two different
+ * context windows with the same latest assistant but different selected earlier
+ * turns yield different estimates.
+ *
+ * @param assistant - Used for the system prompt token estimate.
+ * @param messages  - Pre-filtered message list.
  */
-export async function estimateHistoryTokens(assistant: Assistant, messages: Message[]) {
-  // 有 usage 数据的消息，快速计算总数
-  const usageTokens = messages
-    .filter((m) => m.usage)
-    .reduce((acc, message) => {
-      const inputTokens = message.usage?.total_tokens ?? 0
-      const outputTokens = message.usage!.completion_tokens ?? 0
-      return acc + (message.role === 'user' ? inputTokens : outputTokens)
-    }, 0)
+export async function estimateHistoryTokens(assistant: Assistant, messages: Message[]): Promise<number> {
+  let totalTokens = 0
 
-  // 没有 usage 数据的消息，需要计算每条消息的 token
-  let allMessages: MessageItem[][] = []
-
-  for (const message of messages.filter((m) => !m.usage)) {
-    const items = await getMessageParam(message)
-    allMessages = allMessages.concat(items)
+  // Estimate each message from content (text + reasoning + files).
+  for (const message of messages) {
+    const usage = await estimateMessageUsage(message)
+    totalTokens += usage.total_tokens
   }
 
-  const prompt = assistant.prompt
-  const input = flatten(allMessages)
-    .map((m) => m.content)
-    .join('\n')
+  // Add system prompt tokens.
+  totalTokens += estimateTextTokens(assistant.prompt || '')
 
-  return estimateTextTokens(prompt + input) + usageTokens
+  return totalTokens
 }

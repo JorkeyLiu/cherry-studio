@@ -24,11 +24,17 @@ import {
 } from '@renderer/pages/home/Inputbar/context/InputbarToolsProvider'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { CacheService } from '@renderer/services/CacheService'
+import { computeContextInfo, PREVIEW_DRAFT_SENTINEL } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import FileManager from '@renderer/services/FileManager'
 import { checkRateLimit, getUserMessage } from '@renderer/services/MessagesService'
 import { spanManagerService } from '@renderer/services/SpanManagerService'
-import { estimateTextTokens as estimateTxtTokens, estimateUserPromptUsage } from '@renderer/services/TokenService'
+import {
+  combineHistoryAndDraftTokens,
+  estimateHistoryTokens,
+  estimateTextTokens,
+  estimateUserPromptUsage
+} from '@renderer/services/TokenService'
 import WebSearchService from '@renderer/services/WebSearchService'
 import { useAppDispatch } from '@renderer/store'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
@@ -163,13 +169,71 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     initialAssistant.id
   )
   const { sendMessageShortcut, showInputEstimatedTokens, enableQuickPanelTriggers } = useSettings()
-  const [estimateTokenCount, setEstimateTokenCount] = useState(0)
-  const [contextCount, setContextCount] = useState<{ current: number; max: number | null }>({ current: 0, max: null })
 
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)
   const topicMessages = useTopicMessages(topic.id)
   const loading = useTopicLoading(topic)
+
+  // --- Token estimation (Inputbar-owned, preview-draft-aware) ---
+
+  // Stable boolean: draft presence triggers preview turn only on blank↔nonblank transitions (LOCK-003).
+  // computeContextInfo only checks draft truthiness for turn selection, so full text is not needed here.
+  const hasPreviewDraft = text.trim().length > 0
+
+  // Sync: computeContextInfo with previewDraft so pending text participates in turn selection (LOCK-004).
+  // A nonblank draft occupies a turn slot → a full sliding window ejects the oldest turn.
+  // contextCount reflects the post-draft state; tokenEstimationMessages excludes the virtual draft turn.
+  const previewContextInfo = useMemo(
+    () =>
+      computeContextInfo(
+        topicMessages,
+        assistant,
+        topic.id,
+        hasPreviewDraft ? { previewDraft: PREVIEW_DRAFT_SENTINEL } : undefined
+      ),
+
+    [topicMessages, assistant, topic.id, hasPreviewDraft]
+  )
+
+  const [historyTokenCount, setHistoryTokenCount] = useState(0)
+
+  // Async: estimate history tokens from content (LOCK-003 — no usage baseline).
+  // Debounced and race-safe. Fires only when previewContextInfo identity changes:
+  // topicMessages, assistant, topicId, or blank↔nonblank draft transition.
+  useEffect(() => {
+    let cancelled = false
+    const debouncedEstimate = debounce(
+      async () => {
+        try {
+          const tokens = await estimateHistoryTokens(assistant, previewContextInfo.tokenEstimationMessages)
+          if (!cancelled) {
+            setHistoryTokenCount(tokens)
+          }
+        } catch {
+          // Estimation failure is non-fatal; last known value persists.
+        }
+      },
+      200,
+      { leading: false, trailing: true }
+    )
+
+    void debouncedEstimate()
+
+    return () => {
+      cancelled = true
+      debouncedEstimate.cancel()
+    }
+  }, [assistant, previewContextInfo])
+
+  // Draft token estimation — independent of history, computed from current input text (LOCK-003)
+  const draftTokenCount = useMemo(() => estimateTextTokens(text || ''), [text])
+  // Combined scalar: history-context estimate + current draft estimate (LOCK-001, LOCK-002)
+  const estimateTokenCount = combineHistoryAndDraftTokens(historyTokenCount, draftTokenCount)
+
+  // Sync: contextCount from preview-aware computeContextInfo (includes virtual draft turn).
+  const contextCount = previewContextInfo.contextCount
+
   const dispatch = useAppDispatch()
   const isVisionAssistant = useMemo(() => isVisionModel(model), [model])
   const isGenerateImageAssistant = useMemo(() => isGenerateImageModel(model), [model])
@@ -298,7 +362,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
 
     return {
       estimateTokenCount,
-      inputTokenCount: estimateTokenCount,
       contextCount
     }
   }, [config.showTokenCount, contextCount, estimateTokenCount, showInputEstimatedTokens])
@@ -485,31 +548,12 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   })
 
   useEffect(() => {
-    const _setEstimateTokenCount = debounce(setEstimateTokenCount, 100, { leading: false, trailing: true })
-    const unsubscribes = [
-      EventEmitter.on(EVENT_NAMES.ESTIMATED_TOKEN_COUNT, ({ tokensCount, contextCount }) => {
-        _setEstimateTokenCount(tokensCount)
-        setContextCount({ current: contextCount.current, max: contextCount.max })
-      }),
-      ...[EventEmitter.on(EVENT_NAMES.ADD_NEW_TOPIC, addNewTopic)]
-    ]
+    const unsubscribes = [EventEmitter.on(EVENT_NAMES.ADD_NEW_TOPIC, addNewTopic)]
 
     return () => {
       unsubscribes.forEach((unsubscribe) => unsubscribe())
     }
   }, [addNewTopic])
-
-  useEffect(() => {
-    const debouncedEstimate = debounce((value: string) => {
-      if (showInputEstimatedTokens) {
-        const count = estimateTxtTokens(value) || 0
-        setEstimateTokenCount(count)
-      }
-    }, 500)
-
-    debouncedEstimate(text)
-    return () => debouncedEstimate.cancel()
-  }, [showInputEstimatedTokens, text])
 
   useEffect(() => {
     if (!document.querySelector('.topview-fullscreen-container')) {
@@ -579,7 +623,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
       {tokenCountProps && (
         <TokenCount
           estimateTokenCount={tokenCountProps.estimateTokenCount}
-          inputTokenCount={tokenCountProps.inputTokenCount}
           contextCount={tokenCountProps.contextCount}
           contextWindowMode={contextWindowMode}
           effectiveMode={topicContextWindowMode}

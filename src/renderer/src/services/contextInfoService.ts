@@ -19,10 +19,21 @@ import {
 } from '@renderer/utils/messageUtils/filters'
 
 /**
+ * Sentinel value passed as `previewDraft` when the caller knows a nonblank
+ * draft exists but does not need to transmit the real text. Must be
+ * non-whitespace so that `computeContextInfo`'s `.trim()` check passes.
+ *
+ * Defined here (rather than at the call-site) so that integration tests can
+ * exercise the exact value without coupling to component internals.
+ */
+export const PREVIEW_DRAFT_SENTINEL = 'preview' as const
+
+/**
  * The single unified pipeline for computing all context-related information.
  *
  * This function is the sole source of truth for:
  *   - Which messages the model actually receives (uiMessages)
+ *   - Which messages the token estimator uses (tokenEstimationMessages — retains trailing assistant)
  *   - Where the context window boundary divider should render (boundaryMessageId)
  *   - What TokenCount displays (contextCount)
  *
@@ -43,6 +54,14 @@ import {
  *   9. filterEmptyMessages — removes messages without content blocks
  *  10. filterUserRoleStartMessages — trims leading non-user messages
  *
+ * Preview draft (LOCK-004):
+ *   When `options.previewDraft` is a nonblank string, a virtual user turn is
+ *   appended to the turn list before turn selection. This makes a full sliding
+ *   window eject the oldest real turn to accommodate the pending message.
+ *   The virtual turn is NOT included in output message arrays — draft tokens
+ *   are added exactly once by the caller (Inputbar). The virtual turn does
+ *   affect contextCount.current to reflect the post-send state.
+ *
  * N+2 compensation is removed: selection is by whole turns, so post-selection
  * model filters (steps 4–7) cannot create partial turn boundaries that would
  * need message-level compensation. The model may receive fewer messages than
@@ -54,10 +73,21 @@ import {
 export function computeContextInfo(
   messages: Message[],
   assistant: Assistant | undefined,
-  topicId?: string
-): { uiMessages: Message[]; boundaryMessageId: string | null; contextCount: { current: number; max: number | null } } {
+  topicId?: string,
+  options?: { previewDraft?: string }
+): {
+  uiMessages: Message[]
+  tokenEstimationMessages: Message[]
+  boundaryMessageId: string | null
+  contextCount: { current: number; max: number | null }
+} {
   if (!assistant) {
-    return { uiMessages: [], boundaryMessageId: null, contextCount: { current: 0, max: null } }
+    return {
+      uiMessages: [],
+      tokenEstimationMessages: [],
+      boundaryMessageId: null,
+      contextCount: { current: 0, max: null }
+    }
   }
 
   // Read raw contextCount before getAssistantSettings normalizes it.
@@ -78,82 +108,94 @@ export function computeContextInfo(
   const anchor: TopicAnchor | undefined = topicId ? settings.fixedWindowAnchor?.[topicId] : undefined
 
   // --- Step 1: Build turns from post-context-clear messages ---
-  // buildContextTurns handles clear filtering internally (excludes clear messages
-  // and everything before the last clear). Turn construction rules:
-  //   - user starts a new turn keyed by its own id
-  //   - consecutive assistant with matching askId joins the current turn
-  //   - adjacent users create separate turns
-  //   - orphan/system messages are standalone turns
   const allTurns = buildContextTurns(messages)
 
+  // --- Preview draft: virtual turn affects turn selection only (LOCK-004) ---
+  // A nonblank pending draft occupies a turn slot so that a full sliding window
+  // ejects the oldest real turn. The virtual turn is never expanded to output
+  // messages — draft content tokens are added exactly once by the caller.
+  const hasDraftPreview = !!(options?.previewDraft && options.previewDraft.trim())
+
   // --- Step 2: Turn selection ---
-  let selectedTurns: readonly ContextTurn[]
+  let selectedRealTurns: readonly ContextTurn[]
   let boundaryMessageId: string | null = null
   let currentCount: number
   let maxCount: number | null
 
   if (effectiveMode === 'fixed') {
     if (anchor?.kind === 'active') {
-      // Locate the anchor turn using the pure resolver (user-id match
-      // wins over assistant-askId fallback, -1 when neither exists).
       const anchorIndex = resolveAnchorTurnIndex(allTurns, anchor.groupKey)
       if (anchorIndex >= 0) {
-        selectedTurns = allTurns.slice(anchorIndex)
-        // Boundary: first message of the anchor turn, only when older turns exist.
+        selectedRealTurns = allTurns.slice(anchorIndex)
         if (anchorIndex > 0) {
-          boundaryMessageId = selectedTurns[0].messages[0].id
+          boundaryMessageId = selectedRealTurns[0].messages[0].id
         }
-        currentCount = selectedTurns.length
+        currentCount = selectedRealTurns.length + (hasDraftPreview ? 1 : 0)
       } else {
-        // Anchor groupKey not found — display shows 0, model gets all turns
-        // so ConversationService receives full filtered history (not empty).
-        selectedTurns = allTurns
-        currentCount = 0
+        selectedRealTurns = allTurns
+        currentCount = hasDraftPreview ? 1 : 0
       }
     } else {
-      // No anchor (undefined or legacy data) — display shows 0, model gets
-      // all turns so ConversationService receives full filtered history.
-      selectedTurns = allTurns
+      // No anchor (undefined or legacy data) — display shows 0 regardless of draft,
+      // model gets all turns so ConversationService receives full filtered history.
+      selectedRealTurns = allTurns
       currentCount = 0
     }
-    // Fixed mode: no numeric capacity limit → max = null (unlimited)
     maxCount = null
   } else {
     // Sliding mode: select the last N turns (N = rawContextCount).
     if (isUnlimited) {
-      selectedTurns = allTurns
-      currentCount = allTurns.length
+      selectedRealTurns = allTurns
+      currentCount = allTurns.length + (hasDraftPreview ? 1 : 0)
       maxCount = null
     } else {
       const n = rawContextCount
-      selectedTurns = allTurns.slice(Math.max(0, allTurns.length - n))
-      currentCount = selectedTurns.length
+      // Total turn count includes the virtual draft turn when previewing.
+      const totalTurns = allTurns.length + (hasDraftPreview ? 1 : 0)
+      if (totalTurns <= n) {
+        // All real turns fit alongside the virtual draft turn.
+        selectedRealTurns = allTurns
+        currentCount = totalTurns
+      } else {
+        // At capacity: the virtual draft turn occupies one slot, so keep n-1 real turns.
+        const realTurnsToKeep = hasDraftPreview ? n - 1 : n
+        selectedRealTurns = allTurns.slice(Math.max(0, allTurns.length - realTurnsToKeep))
+        currentCount = n
+      }
       maxCount = rawContextCount
-      // Boundary: first message of the first selected turn, only when older turns exist.
-      if (allTurns.length > n && selectedTurns.length > 0) {
-        boundaryMessageId = selectedTurns[0].messages[0].id
+      // Boundary: first message of the first selected real turn, only when older turns exist.
+      if (allTurns.length > selectedRealTurns.length && selectedRealTurns.length > 0) {
+        boundaryMessageId = selectedRealTurns[0].messages[0].id
       }
     }
   }
 
-  // --- Step 3: Expand selected turns to Message[] ---
-  const expandedMessages = turnsToMessages(selectedTurns)
+  // --- Step 3: Expand selected real turns to Message[] ---
+  // The virtual draft turn is never expanded — draft tokens are added by the caller.
+  const expandedMessages = turnsToMessages(selectedRealTurns)
 
-  // --- Steps 4-7: Model filters (same relative order as old pipeline steps 2-5) ---
-  // These operate on expanded turn messages, NOT on the full pre-selection message list.
-  // Turn selection has already happened; these filters refine the model payload.
+  // --- Steps 4-7: Model filters ---
   const usefulMessages = filterUsefulMessages(expandedMessages)
   const withoutErrorOnlyPairs = filterErrorOnlyMessagesWithRelated(usefulMessages)
+
+  // uiMessages: model-facing — trailing assistant removed
   const withoutTrailingAssistant = filterLastAssistantMessage(withoutErrorOnlyPairs)
   const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
 
-  // --- Steps 8-10: Post-filter cleanup (same relative order as old pipeline steps 7-9) ---
+  // --- Steps 8-10: Post-filter cleanup ---
   const contextClearFiltered = filterAfterContextClearMessages(withoutAdjacentUsers)
   const nonEmptyMessages = filterEmptyMessages(contextClearFiltered)
   const uiMessages = filterUserRoleStartMessages(nonEmptyMessages)
 
+  // tokenEstimationMessages: retains trailing assistant for token estimation.
+  const tokenWithoutAdjacentUsers = filterAdjacentUserMessaegs(withoutErrorOnlyPairs)
+  const tokenContextClearFiltered = filterAfterContextClearMessages(tokenWithoutAdjacentUsers)
+  const tokenNonEmptyMessages = filterEmptyMessages(tokenContextClearFiltered)
+  const tokenEstimationMessages = filterUserRoleStartMessages(tokenNonEmptyMessages)
+
   return {
     uiMessages,
+    tokenEstimationMessages,
     boundaryMessageId,
     contextCount: { current: currentCount, max: maxCount }
   }
