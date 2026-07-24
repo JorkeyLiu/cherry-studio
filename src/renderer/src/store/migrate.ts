@@ -3444,6 +3444,51 @@ const migrateConfig = {
       logger.error('migrate 213 error', error as Error)
       return state
     }
+  },
+  '214': (state: RootState) => {
+    try {
+      if (state.shortcuts) {
+        if (!state.shortcuts.shortcuts.some((s) => s.key === 'toggle_edit_mode')) {
+          state.shortcuts.shortcuts.push({
+            key: 'toggle_edit_mode',
+            shortcut: [isMac ? 'Command' : 'Ctrl', 'E'],
+            editable: true,
+            enabled: true,
+            system: false
+          })
+        }
+      }
+      logger.info('migrate 214 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 214 error', error as Error)
+      return state
+    }
+  },
+  '215': (state: RootState) => {
+    try {
+      if (state.shortcuts) {
+        const removedKeys = new Set(['selection_assistant_toggle', 'selection_assistant_select_text'])
+        const seen = new Set<string>()
+        state.shortcuts.shortcuts = state.shortcuts.shortcuts.filter((s) => {
+          if (removedKeys.has(s.key)) return false
+          if (seen.has(s.key)) return false
+          seen.add(s.key)
+          return true
+        })
+
+        // Disable mini_window if enabled — keybinding collision with toggle_edit_mode (Cmd/Ctrl+E)
+        const miniWindow = state.shortcuts.shortcuts.find((s) => s.key === 'mini_window')
+        if (miniWindow && miniWindow.enabled === true) {
+          miniWindow.enabled = false
+        }
+      }
+      logger.info('migrate 215 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 215 error', error as Error)
+      return state
+    }
   }
 }
 
