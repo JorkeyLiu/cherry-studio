@@ -113,6 +113,13 @@ const Container = styled.div`
   justify-content: center;
   align-items: center;
   padding: 8px 16px;
+  /*
+   * The parent MessagesContainer is a column-reverse flex + scroll container, so this bar
+   * renders at the visual top. Keeping it a direct child lets sticky travel the full scroll
+   * range, while the negative margin collapses the height it would otherwise reserve in the
+   * flow (which showed up as blank space above the Prompt). The bar overlays content instead.
+   */
+  margin-top: -100%;
 `
 
 const ActionBar = styled.div`
