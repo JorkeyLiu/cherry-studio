@@ -85,6 +85,8 @@ class MockImage {
   }
 }
 
+import { resetSendableFileTextCache } from '@renderer/aiCore/prepareParams/sendableFileText'
+
 import {
   estimateDraftTokens,
   estimateFileTokens,
@@ -175,6 +177,7 @@ beforeEach(() => {
   imageProbeResult = null
   imageConstructorCalls = 0
   resetLocalTokenEstimatorCache()
+  resetSendableFileTextCache()
   vi.stubGlobal('api', {
     file: {
       read: readMock,

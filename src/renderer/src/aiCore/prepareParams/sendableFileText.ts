@@ -95,3 +95,65 @@ export async function prepareSendableFileText(file: FileMetadata): Promise<strin
 
   return null
 }
+
+// ---------------------------------------------------------------------------
+// 共享有界可发送文本缓存（估算路径与发送路径复用同一次读取/解析）
+// ---------------------------------------------------------------------------
+
+/**
+ * 文件身份缓存键：`id + ext + size + type`。
+ *
+ * 该身份对入库文件（storageDir 副本，内容不可变）稳定成立；
+ * 对预上传草稿在同一草稿生命周期内成立（磁盘编辑通常改变 size → 键失效）。
+ *
+ * 注意边界：草稿发送时 FileStorage.uploadFile 会为入库副本分配全新 uuid，
+ * 因此「草稿身份」与「入库身份」是两个不同的键，缓存不做跨身份复用
+ * （跨身份需要内容级哈希，超出本模块职责）。
+ */
+export function fileCacheKey(file: FileMetadata): string {
+  return `${file.id}${file.ext}:${file.size}:${file.type}`
+}
+
+/** 文本缓存条目上限：条目可能是完整提取文本（较大），上限比数字缓存更保守 */
+export const MAX_SENDABLE_TEXT_CACHE_ENTRIES = 64
+
+/** 存 Promise 以去重并发读取：估算与发送并发访问同一文件时只触发一次底层读取 */
+const sendableTextCache = new Map<string, Promise<string | null>>()
+
+/**
+ * prepareSendableFileText 的缓存入口 —— 估算器与消息转换器统一从此处取文本，
+ * 同一文件身份在缓存生命周期内只执行一次底层读取/解析。
+ *
+ * 语义与未缓存版本完全一致：
+ * - 非文本可发送类型：直接返回 null，不读取、不占用缓存容量
+ * - 读取失败：缓存条目立即删除（后续调用可重试），拒绝原样传播给调用方
+ *   （转换器保持 DOCUMENT 失败 toast，估算器保持回退语义）
+ * - 容量有界：FIFO 淘汰最旧条目
+ */
+export function getSendableFileText(file: FileMetadata): Promise<string | null> {
+  if (!isTextSendableFile(file)) {
+    return Promise.resolve(null)
+  }
+
+  const key = fileCacheKey(file)
+  let promise = sendableTextCache.get(key)
+  if (!promise) {
+    promise = prepareSendableFileText(file)
+    if (sendableTextCache.size >= MAX_SENDABLE_TEXT_CACHE_ENTRIES) {
+      const oldestKey = sendableTextCache.keys().next().value
+      if (oldestKey !== undefined) {
+        sendableTextCache.delete(oldestKey)
+      }
+    }
+    sendableTextCache.set(key, promise)
+    promise.catch(() => sendableTextCache.delete(key))
+  }
+  return promise
+}
+
+/**
+ * 清空共享可发送文本缓存（仅供测试使用）
+ */
+export function resetSendableFileTextCache(): void {
+  sendableTextCache.clear()
+}

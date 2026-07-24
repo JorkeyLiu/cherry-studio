@@ -37,20 +37,34 @@ vi.mock('i18next', () => {
   return { default: i18nMock }
 })
 
+// LocalTokenEstimator transitively imports the redux store (via messageUtils/find);
+// estimateFileTokens itself never touches it, so a minimal stub suffices.
+vi.mock('@renderer/store', () => ({
+  default: { getState: () => ({}), dispatch: () => {} }
+}))
+
+import { estimateFileTokens, resetLocalTokenEstimatorCache } from '@renderer/services/LocalTokenEstimator'
+
 import { convertFileBlockToFilePart, convertFileBlockToTextPart } from '../fileProcessor'
 import { getFileSizeLimit } from '../modelCapabilities'
 import {
   buildSendableFileText,
+  fileCacheKey,
+  getSendableFileText,
   isPdfFile,
   isStoredFile,
   isTextSendableFile,
+  MAX_SENDABLE_TEXT_CACHE_ENTRIES,
   normalizeFileExtension,
-  prepareSendableFileText
+  prepareSendableFileText,
+  resetSendableFileTextCache
 } from '../sendableFileText'
 
 const readMock = vi.fn()
 const readExternalMock = vi.fn()
 const base64FileMock = vi.fn()
+const pdfInfoMock = vi.fn()
+const pdfInfoExternalMock = vi.fn()
 const toastErrorMock = vi.fn()
 const toastWarningMock = vi.fn()
 
@@ -97,10 +111,22 @@ beforeEach(() => {
   readMock.mockReset()
   readExternalMock.mockReset()
   base64FileMock.mockReset()
+  pdfInfoMock.mockReset()
+  pdfInfoExternalMock.mockReset()
   toastErrorMock.mockReset()
   toastWarningMock.mockReset()
   vi.mocked(getFileSizeLimit).mockReset()
-  vi.stubGlobal('api', { file: { read: readMock, readExternal: readExternalMock, base64File: base64FileMock } })
+  resetSendableFileTextCache()
+  resetLocalTokenEstimatorCache()
+  vi.stubGlobal('api', {
+    file: {
+      read: readMock,
+      readExternal: readExternalMock,
+      base64File: base64FileMock,
+      pdfInfo: pdfInfoMock,
+      pdfInfoExternal: pdfInfoExternalMock
+    }
+  })
   vi.stubGlobal('toast', { error: toastErrorMock, warning: toastWarningMock })
 })
 
@@ -356,5 +382,185 @@ describe('send-path PDF classification (convertFileBlockToFilePart)', () => {
 
     expect(base64FileMock).not.toHaveBeenCalled()
     expect(result).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Shared bounded sendable-text cache (estimator ↔ send path dedupe)
+// ---------------------------------------------------------------------------
+
+describe('fileCacheKey', () => {
+  it('derives the key from id + ext + size + type', () => {
+    const file = createFile({ id: 'abc', ext: '.txt', size: 42, type: FILE_TYPE.TEXT })
+    expect(fileCacheKey(file)).toBe(`abc.txt:42:${FILE_TYPE.TEXT}`)
+  })
+
+  it('changes when size changes (disk edits invalidate the identity)', () => {
+    const before = createFile({ id: 'abc', ext: '.txt', size: 42 })
+    const after = { ...before, size: 43 }
+    expect(fileCacheKey(before)).not.toBe(fileCacheKey(after))
+  })
+})
+
+describe('getSendableFileText — shared cache', () => {
+  it('sequential calls for the same identity perform one underlying read', async () => {
+    readMock.mockResolvedValue('cached body')
+    const file = createFile({ id: 'seq', ext: '.txt', origin_name: 'seq.txt' })
+
+    const first = await getSendableFileText(file)
+    const second = await getSendableFileText(file)
+
+    expect(first).toBe('seq.txt\ncached body')
+    expect(second).toBe(first)
+    expect(readMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('concurrent calls share a single in-flight promise (one read)', async () => {
+    let resolveRead!: (value: string) => void
+    readMock.mockImplementation(() => new Promise<string>((resolve) => (resolveRead = resolve)))
+    const file = createFile({ id: 'conc', ext: '.txt', origin_name: 'conc.txt' })
+
+    const pending = Promise.all([getSendableFileText(file), getSendableFileText(file)])
+    resolveRead('shared body')
+    const [first, second] = await pending
+
+    expect(first).toBe('conc.txt\nshared body')
+    expect(second).toBe(first)
+    expect(readMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('deletes rejected entries — retry after failure re-reads and succeeds', async () => {
+    readMock.mockRejectedValueOnce(new Error('flaky read')).mockResolvedValueOnce('recovered')
+    const file = createFile({ id: 'retry', ext: '.txt', origin_name: 'retry.txt' })
+
+    await expect(getSendableFileText(file)).rejects.toThrow('flaky read')
+    await expect(getSendableFileText(file)).resolves.toBe('retry.txt\nrecovered')
+    expect(readMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('resolves null for unsupported types without any read and without caching', async () => {
+    const file = createFile({ id: 'vid', ext: '.mp4', origin_name: 'clip.mp4', type: FILE_TYPE.VIDEO })
+
+    await expect(getSendableFileText(file)).resolves.toBeNull()
+    await expect(getSendableFileText(file)).resolves.toBeNull()
+    expect(readMock).not.toHaveBeenCalled()
+    expect(readExternalMock).not.toHaveBeenCalled()
+  })
+
+  it('is bounded — oldest entry is evicted and re-read after capacity overflow', async () => {
+    readMock.mockResolvedValue('x')
+    const first = createFile({ id: 'evict-me', ext: '.txt', origin_name: 'first.txt' })
+
+    await getSendableFileText(first)
+    for (let i = 0; i < MAX_SENDABLE_TEXT_CACHE_ENTRIES; i++) {
+      await getSendableFileText(createFile({ id: `filler-${i}`, ext: '.txt', origin_name: `filler-${i}.txt` }))
+    }
+    await getSendableFileText(first)
+
+    const firstReads = readMock.mock.calls.filter(([arg]) => arg === 'evict-me.txt')
+    expect(firstReads).toHaveLength(2)
+  })
+})
+
+describe('estimator ↔ send path read dedupe (shared boundary)', () => {
+  it('estimate then send for the same stored text file performs one read', async () => {
+    readMock.mockResolvedValue('body once')
+    const file = createFile({ id: 'both', ext: '.txt', origin_name: 'both.txt' })
+
+    const tokens = await estimateFileTokens(file)
+    const part = await convertFileBlockToTextPart(createFileBlock(file))
+
+    expect(tokens).toBeGreaterThan(0)
+    expect(part).toEqual({ type: 'text', text: 'both.txt\nbody once' })
+    expect(readMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('send then estimate for the same stored Office document performs one extraction', async () => {
+    readMock.mockResolvedValue('office body')
+    const file = createFile({ id: 'ofc', ext: '.docx', origin_name: 'report.docx', type: FILE_TYPE.DOCUMENT })
+
+    const part = await convertFileBlockToTextPart(createFileBlock(file))
+    const tokens = await estimateFileTokens(file)
+
+    expect(part).toEqual({ type: 'text', text: 'report.docx\noffice body' })
+    expect(tokens).toBeGreaterThan(0)
+    expect(readMock).toHaveBeenCalledTimes(1)
+    expect(readMock).toHaveBeenCalledWith('ofc.docx', true)
+  })
+
+  it('PDF estimate then text-fallback send share one text extraction', async () => {
+    pdfInfoMock.mockResolvedValue(2)
+    readMock.mockResolvedValue('pdf body')
+    const file = createFile({ id: 'pdfb', ext: '.pdf', origin_name: 'doc.pdf', type: FILE_TYPE.DOCUMENT })
+
+    await estimateFileTokens(file)
+    const part = await convertFileBlockToTextPart(createFileBlock(file))
+
+    expect(part).toEqual({ type: 'text', text: 'doc.pdf\npdf body' })
+    // Extraction read happened exactly once; page-count IPC is estimator-only.
+    expect(readMock).toHaveBeenCalledTimes(1)
+    expect(readMock).toHaveBeenCalledWith('pdfb.pdf', true)
+  })
+
+  it('concurrent estimate + send share a single in-flight read', async () => {
+    let resolveRead!: (value: string) => void
+    readMock.mockImplementation(() => new Promise<string>((resolve) => (resolveRead = resolve)))
+    const file = createFile({ id: 'race', ext: '.txt', origin_name: 'race.txt' })
+
+    const pending = Promise.all([estimateFileTokens(file), convertFileBlockToTextPart(createFileBlock(file))])
+    resolveRead('raced body')
+    const [tokens, part] = await pending
+
+    expect(tokens).toBeGreaterThan(0)
+    expect(part).toEqual({ type: 'text', text: 'race.txt\nraced body' })
+    expect(readMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('failure keeps converter toast semantics and allows the send path to retry', async () => {
+    readMock.mockRejectedValueOnce(new Error('extraction failed')).mockResolvedValueOnce('second try')
+    const file = createFile({ id: 'tst', ext: '.docx', origin_name: 'contract.docx', type: FILE_TYPE.DOCUMENT })
+    const block = createFileBlock(file)
+
+    await expect(convertFileBlockToTextPart(block)).resolves.toBeNull()
+    expect(toastErrorMock).toHaveBeenCalledTimes(1)
+
+    // Rejected entry was dropped — the retry re-reads instead of replaying the failure.
+    await expect(convertFileBlockToTextPart(block)).resolves.toEqual({
+      type: 'text',
+      text: 'contract.docx\nsecond try'
+    })
+    expect(readMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('estimator failure fallback does not poison the send path', async () => {
+    readMock.mockRejectedValueOnce(new Error('flaky')).mockResolvedValueOnce('healthy body')
+    const file = createFile({ id: 'poison', ext: '.txt', origin_name: 'p.txt', size: 400 })
+
+    const tokens = await estimateFileTokens(file)
+    const part = await convertFileBlockToTextPart(createFileBlock(file))
+
+    expect(tokens).toBe(100) // bounded byte fallback: 400 / 4
+    expect(part).toEqual({ type: 'text', text: 'p.txt\nhealthy body' })
+    expect(readMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('draft→stored identities are distinct: upload assigns a new uuid, so no cross-identity reuse', async () => {
+    // FileStorage.uploadFile creates the storageDir copy under a fresh uuid.
+    // The pre-upload draft (original path) and the stored message-block copy are
+    // therefore different cache identities by design: estimating the draft cannot
+    // serve the stored send, and must not (draft files remain user-editable).
+    readExternalMock.mockResolvedValue('same content')
+    readMock.mockResolvedValue('same content')
+    const draft = createDraftFile({ id: 'draft-id', ext: '.txt', origin_name: 's.txt', path: '/Users/me/s.txt' })
+    const stored = createFile({ id: 'stored-id', ext: '.txt', origin_name: 's.txt' })
+
+    expect(fileCacheKey(draft)).not.toBe(fileCacheKey(stored))
+
+    await estimateFileTokens(draft)
+    const part = await convertFileBlockToTextPart(createFileBlock(stored))
+
+    expect(part).toEqual({ type: 'text', text: 's.txt\nsame content' })
+    expect(readExternalMock).toHaveBeenCalledTimes(1) // draft estimate → path API
+    expect(readMock).toHaveBeenCalledTimes(1) // stored send → storage-id API
   })
 })

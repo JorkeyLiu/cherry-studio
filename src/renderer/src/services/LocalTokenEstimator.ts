@@ -2,7 +2,7 @@
  * 本地附件/消息 token 估算器
  *
  * 草稿（Inputbar 待发送内容）与历史消息共享的唯一本地估算入口：
- * - 文本/代码/Office：复用 prepareSendableFileText，估算所依据的文本与实际发送文本一致
+ * - 文本/代码/Office：复用 getSendableFileText（共享有界文本缓存），估算所依据的文本与实际发送文本一致
  * - PDF：优先提取文本（可叠加页数开销），失败回退页数估算，最终回退有界字节估算
  * - 图片：基于分辨率的通用启发式（缩放 + 切片），压缩后字节数不参与主公式
  * - 远程 URL 图片：不下载，使用固定回退值
@@ -13,7 +13,12 @@
  */
 
 import { loggerService } from '@logger'
-import { isPdfFile, isStoredFile, prepareSendableFileText } from '@renderer/aiCore/prepareParams/sendableFileText'
+import {
+  fileCacheKey,
+  getSendableFileText,
+  isPdfFile,
+  isStoredFile
+} from '@renderer/aiCore/prepareParams/sendableFileText'
 import type { FileMetadata } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
 import type { ImageMessageBlock, Message } from '@renderer/types/newMessage'
@@ -153,12 +158,11 @@ async function probeImageDimensions(src: string): Promise<{ width: number; heigh
 
 const MAX_CACHE_ENTRIES = 128
 
-/** 以"足够不可变"的文件身份为键的估算结果缓存；存 Promise 以去重并发读取 */
+/**
+ * 以"足够不可变"的文件身份为键的估算结果缓存；存 Promise 以去重并发读取。
+ * 键复用 sendableFileText 的 fileCacheKey，与共享文本缓存保持同一身份定义。
+ */
 const estimateCache = new Map<string, Promise<number>>()
-
-function fileCacheKey(file: FileMetadata): string {
-  return `${file.id}${file.ext}:${file.size}:${file.type}`
-}
 
 /** djb2 字符串哈希（确定、快速、非加密） */
 function djb2(input: string): number {
@@ -246,7 +250,7 @@ async function computePdfTokens(file: FileMetadata): Promise<number> {
   }
 
   try {
-    const text = await prepareSendableFileText(file)
+    const text = await getSendableFileText(file)
     if (text !== null) {
       return estimateTextTokens(text) + (pageCount ?? 0) * PDF_PAGE_OVERHEAD_TOKENS
     }
@@ -261,11 +265,12 @@ async function computePdfTokens(file: FileMetadata): Promise<number> {
 }
 
 /**
- * 文本/代码/Office：复用 prepareSendableFileText，估算文本与实际发送文本一致（LOCK-006）。
+ * 文本/代码/Office：复用 getSendableFileText（共享缓存边界），
+ * 估算文本与实际发送文本一致（LOCK-006），且与发送路径共享同一次读取。
  * 读取失败时回退有界字节估算。
  */
 async function computeTextLikeTokens(file: FileMetadata): Promise<number> {
-  const text = await prepareSendableFileText(file)
+  const text = await getSendableFileText(file)
   if (text !== null) {
     return estimateTextTokens(text)
   }

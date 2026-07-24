@@ -15,7 +15,7 @@ import i18n from 'i18next'
 
 import { getAiSdkProviderId } from '../provider/factory'
 import { getFileSizeLimit, supportsImageInput, supportsLargeFileUpload } from './modelCapabilities'
-import { isPdfFile, prepareSendableFileText } from './sendableFileText'
+import { getSendableFileText, isPdfFile } from './sendableFileText'
 
 const logger = loggerService.withContext('fileProcessor')
 
@@ -50,14 +50,15 @@ export async function extractFileContent(message: Message): Promise<string> {
 /**
  * 将文件块转换为文本部分
  *
- * 文本构造统一走 prepareSendableFileText，确保发送内容与本地估算内容一致
+ * 文本构造统一走 getSendableFileText（prepareSendableFileText 的共享缓存入口），
+ * 确保发送内容与本地估算内容一致，且同一文件身份只读取/解析一次
  */
 export async function convertFileBlockToTextPart(fileBlock: FileMessageBlock): Promise<TextPart | null> {
   const file = fileBlock.file
 
   // 处理文本文件与文档文件（PDF、Word、Excel等）- 提取为文本内容
   try {
-    const text = await prepareSendableFileText(file)
+    const text = await getSendableFileText(file)
     if (text !== null) {
       return { type: 'text', text }
     }
