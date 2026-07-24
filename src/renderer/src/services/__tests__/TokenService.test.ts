@@ -345,6 +345,53 @@ describe('estimateHistoryTokens', () => {
 })
 
 // ---------------------------------------------------------------------------
+// estimateMessagesUsage — non-mutating input contract
+// ---------------------------------------------------------------------------
+describe('estimateMessagesUsage', () => {
+  beforeEach(() => {
+    mockStore = createMockStore()
+    vi.clearAllMocks()
+  })
+
+  it('accepts a frozen messages array without throwing (no pop mutation)', async () => {
+    const { estimateMessagesUsage } = await import('@renderer/services/TokenService')
+    const u1 = makeMsg('u1', 'user', undefined, 'Hello')
+    const a1 = makeMsg('a1', 'assistant', 'u1', 'reply')
+    const messages = Object.freeze([u1, a1]) as unknown as Message[]
+
+    // Original mutated the caller's array via pop(); a frozen array would throw.
+    await expect(estimateMessagesUsage({ assistant: makeAssistant(''), messages })).resolves.toBeDefined()
+  })
+
+  it('does not mutate the caller messages array', async () => {
+    const { estimateMessagesUsage } = await import('@renderer/services/TokenService')
+    const u1 = makeMsg('u1', 'user', undefined, 'Hello')
+    const a1 = makeMsg('a1', 'assistant', 'u1', 'reply')
+    const messages: Message[] = [u1, a1]
+
+    await estimateMessagesUsage({ assistant: makeAssistant(''), messages })
+
+    expect(messages).toHaveLength(2)
+    expect(messages[messages.length - 1]).toBe(a1)
+  })
+
+  it('splits prompt (history) and completion (last message) with preserved behavior', async () => {
+    const { estimateMessagesUsage } = await import('@renderer/services/TokenService')
+    const u1 = makeMsg('u1', 'user', undefined, 'Hello')
+    const a1 = makeMsg('a1', 'assistant', 'u1', 'reply')
+    const messages: Message[] = [u1, a1]
+
+    const usage = await estimateMessagesUsage({ assistant: makeAssistant(''), messages })
+
+    // prompt = history over [u1] with empty system prompt = msgTokens('Hello')
+    expect(usage.prompt_tokens).toBe(msgTokens('Hello'))
+    // completion = last message ('reply') content tokens
+    expect(usage.completion_tokens).toBe(msgTokens('reply'))
+    expect(usage.total_tokens).toBe(usage.prompt_tokens + usage.completion_tokens)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // combineHistoryAndDraftTokens — Inputbar combination boundary
 // ---------------------------------------------------------------------------
 describe('combineHistoryAndDraftTokens', () => {

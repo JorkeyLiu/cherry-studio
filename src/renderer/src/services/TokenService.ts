@@ -76,9 +76,13 @@ export async function estimateMessagesUsage({
   assistant: Assistant
   messages: Message[]
 }): Promise<Usage> {
-  const outputMessage = messages.pop()!
+  // Non-mutating split: the last message is the output to estimate as completion,
+  // the preceding messages form the prompt history. Never call pop() on the
+  // caller's array so a frozen/shared `messages` input is safe to pass.
+  const outputMessage = messages[messages.length - 1]
+  const historyMessages = messages.slice(0, -1)
 
-  const prompt_tokens = await estimateHistoryTokens(assistant, messages)
+  const prompt_tokens = await estimateHistoryTokens(assistant, historyMessages)
   const { completion_tokens } = await estimateMessageUsage(outputMessage)
 
   return {

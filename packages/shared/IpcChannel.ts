@@ -194,6 +194,8 @@ export enum IpcChannel {
   File_Base64File = 'file:base64File',
   File_GetPdfInfo = 'file:getPdfInfo',
   File_GetPdfInfoExternal = 'file:getPdfInfoExternal',
+  File_GetImageSize = 'file:getImageSize',
+  File_GetImageSizeExternal = 'file:getImageSizeExternal',
   Fs_Read = 'fs:read',
   Fs_ReadText = 'fs:readText',
   File_OpenWithRelativePath = 'file:openWithRelativePath',

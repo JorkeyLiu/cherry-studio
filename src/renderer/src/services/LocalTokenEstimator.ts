@@ -13,7 +13,7 @@
  */
 
 import { loggerService } from '@logger'
-import { isStoredFile, prepareSendableFileText } from '@renderer/aiCore/prepareParams/sendableFileText'
+import { isPdfFile, isStoredFile, prepareSendableFileText } from '@renderer/aiCore/prepareParams/sendableFileText'
 import type { FileMetadata } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
 import type { ImageMessageBlock, Message } from '@renderer/types/newMessage'
@@ -216,23 +216,16 @@ export function resetLocalTokenEstimatorCache(): void {
 // 分类型计算
 // ---------------------------------------------------------------------------
 
-function isPdfFile(file: FileMetadata): boolean {
-  return file.type === FILE_TYPE.DOCUMENT && file.ext?.toLowerCase() === '.pdf'
-}
-
 /**
- * 本地图片文件：读取 data URL → 解析分辨率 → 分辨率公式。
- * 分辨率不可得时使用固定回退值（压缩字节数不作为主公式，LOCK-007）。
+ * 本地图片文件：仅经 IPC 获取图片自然尺寸（不传输 base64 图片数据）→ 分辨率公式。
+ * 分辨率不可得时由 estimateImageTokensFromDimensions 返回固定回退值
+ * （压缩字节数不作为主公式，LOCK-007）。
  */
 async function computeImageFileTokens(file: FileMetadata): Promise<number> {
-  const { data } = isStoredFile(file)
-    ? await window.api.file.base64Image(file.id + file.ext)
-    : await window.api.file.base64ImageExternal(file.path)
-  const dimensions = await probeImageDimensions(data)
-  if (!dimensions) {
-    return IMAGE_FALLBACK_TOKENS
-  }
-  return estimateImageTokensFromDimensions(dimensions.width, dimensions.height)
+  const { width, height } = isStoredFile(file)
+    ? await window.api.file.imageSize(file.id + file.ext)
+    : await window.api.file.imageSizeExternal(file.path)
+  return estimateImageTokensFromDimensions(width, height)
 }
 
 /**

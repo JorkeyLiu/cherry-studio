@@ -15,7 +15,7 @@ import i18n from 'i18next'
 
 import { getAiSdkProviderId } from '../provider/factory'
 import { getFileSizeLimit, supportsImageInput, supportsLargeFileUpload } from './modelCapabilities'
-import { prepareSendableFileText } from './sendableFileText'
+import { isPdfFile, prepareSendableFileText } from './sendableFileText'
 
 const logger = loggerService.withContext('fileProcessor')
 
@@ -195,7 +195,8 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
 
   try {
     // 处理PDF文档（始终生成 FilePart，由下游插件处理兼容性）
-    if (file.type === FILE_TYPE.DOCUMENT && file.ext === '.pdf') {
+    // 分类统一走 isPdfFile，扩展名大小写归一，与本地估算路径保持一致。
+    if (isPdfFile(file)) {
       // 检查文件大小限制
       if (file.size > fileSizeLimit) {
         // 如果支持大文件上传（如Gemini File API），尝试上传
@@ -259,7 +260,7 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
     }
 
     // 处理其他文档类型（Word、Excel等）
-    if (file.type === FILE_TYPE.DOCUMENT && file.ext !== '.pdf') {
+    if (file.type === FILE_TYPE.DOCUMENT && !isPdfFile(file)) {
       // 目前大多数提供商不支持Word等格式的原生处理
       // 返回null会触发上层调用convertFileBlockToTextPart进行文本提取
       // 这与Legacy架构中的处理方式一致

@@ -49,12 +49,14 @@ vi.mock('@renderer/store', () => ({
 const readMock = vi.fn()
 const base64ImageMock = vi.fn()
 const pdfInfoMock = vi.fn()
+const imageSizeMock = vi.fn()
 // window.api.file stubs — path-based APIs (pre-upload draft files)
 const readExternalMock = vi.fn()
 const base64ImageExternalMock = vi.fn()
 const pdfInfoExternalMock = vi.fn()
+const imageSizeExternalMock = vi.fn()
 
-// Controllable Image constructor
+// Controllable Image constructor (only data-URL block probing decodes in-renderer)
 let imageProbeResult: { width: number; height: number } | null = null
 let imageConstructorCalls = 0
 
@@ -165,9 +167,11 @@ beforeEach(() => {
   readMock.mockReset()
   base64ImageMock.mockReset()
   pdfInfoMock.mockReset()
+  imageSizeMock.mockReset()
   readExternalMock.mockReset()
   base64ImageExternalMock.mockReset()
   pdfInfoExternalMock.mockReset()
+  imageSizeExternalMock.mockReset()
   imageProbeResult = null
   imageConstructorCalls = 0
   resetLocalTokenEstimatorCache()
@@ -176,9 +180,11 @@ beforeEach(() => {
       read: readMock,
       base64Image: base64ImageMock,
       pdfInfo: pdfInfoMock,
+      imageSize: imageSizeMock,
       readExternal: readExternalMock,
       base64ImageExternal: base64ImageExternalMock,
-      pdfInfoExternal: pdfInfoExternalMock
+      pdfInfoExternal: pdfInfoExternalMock,
+      imageSizeExternal: imageSizeExternalMock
     }
   })
   vi.stubGlobal('Image', MockImage)
@@ -299,6 +305,19 @@ describe('estimateFileTokens — PDF layering', () => {
 
     expect(tokens).toBe(FALLBACK_MAX_TOKENS)
   })
+
+  it('classifies uppercase .PDF through the PDF layering path (case-insensitive)', async () => {
+    pdfInfoMock.mockResolvedValue(3)
+    readMock.mockResolvedValue('pdf text')
+    const file = pdfFile({ id: 'pdf-upper', ext: '.PDF', origin_name: 'DOC.PDF' })
+
+    const tokens = await estimateFileTokens(file)
+
+    // Reaches PDF layering (pdfInfo + text) — not the plain text-like path.
+    expect(pdfInfoMock).toHaveBeenCalledWith('pdf-upper.PDF')
+    // 'DOC.PDF\npdf text' + 3 pages × 8 overhead
+    expect(tokens).toBe('DOC.PDF\npdf text'.length + 3 * 8)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -309,21 +328,32 @@ describe('estimateFileTokens — images', () => {
   const imageFile = (overrides: Partial<FileMetadata> = {}) =>
     createFile({ ext: '.png', origin_name: 'photo.png', type: FILE_TYPE.IMAGE, ...overrides })
 
-  it('estimates local image from resolution (512×512 → 1 tile)', async () => {
-    base64ImageMock.mockResolvedValue({ mime: 'image/png', base64: 'x', data: 'data:image/png;base64,x' })
-    imageProbeResult = { width: 512, height: 512 }
+  it('estimates local image from resolution via dimensions-only IPC (512×512 → 1 tile)', async () => {
+    imageSizeMock.mockResolvedValue({ width: 512, height: 512 })
     const file = imageFile({ id: 'img1' })
 
     const tokens = await estimateFileTokens(file)
 
-    expect(base64ImageMock).toHaveBeenCalledWith('img1.png')
+    expect(imageSizeMock).toHaveBeenCalledWith('img1.png')
     // 85 base + 1 tile × 170 = 255
     expect(tokens).toBe(255)
   })
 
+  it('never transports base64 image data on the estimate path (dimensions IPC only)', async () => {
+    imageSizeMock.mockResolvedValue({ width: 512, height: 512 })
+
+    await estimateFileTokens(imageFile({ id: 'no-b64' }))
+
+    expect(imageSizeMock).toHaveBeenCalledWith('no-b64.png')
+    // The base64 image transport must not be touched during estimation.
+    expect(base64ImageMock).not.toHaveBeenCalled()
+    expect(base64ImageExternalMock).not.toHaveBeenCalled()
+    // No in-renderer decode of a fetched data URL either.
+    expect(imageConstructorCalls).toBe(0)
+  })
+
   it('tile count follows scaled dimensions (800×400 → 2 tiles)', async () => {
-    base64ImageMock.mockResolvedValue({ mime: 'image/png', base64: 'x', data: 'data:image/png;base64,x' })
-    imageProbeResult = { width: 800, height: 400 }
+    imageSizeMock.mockResolvedValue({ width: 800, height: 400 })
     const file = imageFile({ id: 'img2' })
 
     const tokens = await estimateFileTokens(file)
@@ -333,8 +363,7 @@ describe('estimateFileTokens — images', () => {
   })
 
   it('compressed byte size does not drive the estimate — same resolution, same tokens', async () => {
-    base64ImageMock.mockResolvedValue({ mime: 'image/png', base64: 'x', data: 'data:image/png;base64,x' })
-    imageProbeResult = { width: 512, height: 512 }
+    imageSizeMock.mockResolvedValue({ width: 512, height: 512 })
 
     const small = await estimateFileTokens(imageFile({ id: 'small', size: 10_000 }))
     const large = await estimateFileTokens(imageFile({ id: 'large', size: 10_000_000 }))
@@ -345,9 +374,8 @@ describe('estimateFileTokens — images', () => {
     expect(large).not.toBe(100_000)
   })
 
-  it('uses fixed fallback when dimensions cannot be probed', async () => {
-    base64ImageMock.mockResolvedValue({ mime: 'image/png', base64: 'x', data: 'data:image/png;base64,x' })
-    imageProbeResult = null
+  it('uses fixed fallback when dimensions are unavailable (zero/invalid size)', async () => {
+    imageSizeMock.mockResolvedValue({ width: 0, height: 0 })
     const file = imageFile({ id: 'img3', size: 123_456 })
 
     const tokens = await estimateFileTokens(file)
@@ -356,11 +384,12 @@ describe('estimateFileTokens — images', () => {
     expect(tokens).not.toBe(Math.floor(123_456 / 100))
   })
 
-  it('uses fixed fallback when the image file cannot be read', async () => {
-    base64ImageMock.mockRejectedValue(new Error('read failed'))
+  it('uses fixed fallback when the dimensions IPC fails', async () => {
+    imageSizeMock.mockRejectedValue(new Error('read failed'))
     const file = imageFile({ id: 'img4' })
 
     await expect(estimateFileTokens(file)).resolves.toBe(IMAGE_FALLBACK_TOKENS)
+    expect(base64ImageMock).not.toHaveBeenCalled()
   })
 })
 
@@ -424,9 +453,8 @@ describe('estimateFileTokens — pre-upload draft resolution (audit F1)', () => 
     expect(tokens).toBe('draft.pdf\npdf draft text'.length + 4 * 8)
   })
 
-  it('reaches draft image dimension probing through base64ImageExternal', async () => {
-    base64ImageExternalMock.mockResolvedValue({ mime: 'image/png', base64: 'x', data: 'data:image/png;base64,x' })
-    imageProbeResult = { width: 512, height: 512 }
+  it('reaches draft image dimensions through imageSizeExternal (path-based, no base64)', async () => {
+    imageSizeExternalMock.mockResolvedValue({ width: 512, height: 512 })
     const file = createDraftFile({
       id: 'draft-img',
       ext: '.png',
@@ -437,7 +465,9 @@ describe('estimateFileTokens — pre-upload draft resolution (audit F1)', () => 
 
     const tokens = await estimateFileTokens(file)
 
-    expect(base64ImageExternalMock).toHaveBeenCalledWith('/Users/me/shot.png')
+    expect(imageSizeExternalMock).toHaveBeenCalledWith('/Users/me/shot.png')
+    expect(imageSizeMock).not.toHaveBeenCalled()
+    expect(base64ImageExternalMock).not.toHaveBeenCalled()
     expect(base64ImageMock).not.toHaveBeenCalled()
     // dimension-driven, not a fallback: 85 + 1 tile × 170
     expect(tokens).toBe(255)
@@ -462,13 +492,13 @@ describe('estimateFileTokens — pre-upload draft resolution (audit F1)', () => 
 })
 
 describe('estimateImageBlockTokens', () => {
-  it('routes block.file through the file estimator', async () => {
-    base64ImageMock.mockResolvedValue({ mime: 'image/png', base64: 'x', data: 'data:image/png;base64,x' })
-    imageProbeResult = { width: 512, height: 512 }
+  it('routes block.file through the file estimator (dimensions IPC)', async () => {
+    imageSizeMock.mockResolvedValue({ width: 512, height: 512 })
     const block = makeImageBlock({ file: createFile({ id: 'bf1', ext: '.png', type: FILE_TYPE.IMAGE }) })
 
     await expect(estimateImageBlockTokens(block)).resolves.toBe(255)
-    expect(base64ImageMock).toHaveBeenCalledWith('bf1.png')
+    expect(imageSizeMock).toHaveBeenCalledWith('bf1.png')
+    expect(base64ImageMock).not.toHaveBeenCalled()
   })
 
   it('probes data URLs directly without file IPC', async () => {
@@ -477,6 +507,7 @@ describe('estimateImageBlockTokens', () => {
 
     await expect(estimateImageBlockTokens(block)).resolves.toBe(255)
     expect(base64ImageMock).not.toHaveBeenCalled()
+    expect(imageSizeMock).not.toHaveBeenCalled()
   })
 
   it('caches data-URL estimates — repeated identical URLs probe the image only once', async () => {
@@ -509,6 +540,7 @@ describe('estimateImageBlockTokens', () => {
     await expect(estimateImageBlockTokens(block)).resolves.toBe(IMAGE_FALLBACK_TOKENS)
     expect(imageConstructorCalls).toBe(0)
     expect(base64ImageMock).not.toHaveBeenCalled()
+    expect(imageSizeMock).not.toHaveBeenCalled()
   })
 
   it('returns 0 for blocks without file or url', async () => {
@@ -580,8 +612,7 @@ describe('estimation cache', () => {
 describe('estimateDraftTokens', () => {
   it('combines text with mixed attachments into a breakdown', async () => {
     readMock.mockResolvedValue('body')
-    base64ImageMock.mockResolvedValue({ mime: 'image/png', base64: 'x', data: 'data:image/png;base64,x' })
-    imageProbeResult = { width: 512, height: 512 }
+    imageSizeMock.mockResolvedValue({ width: 512, height: 512 })
 
     const estimate = await estimateDraftTokens({
       content: 'hello',
@@ -603,6 +634,7 @@ describe('estimateDraftTokens', () => {
     expect(estimate).toEqual({ textTokens: 11, imageTokens: 0, fileTokens: 0, totalTokens: 11 })
     expect(readMock).not.toHaveBeenCalled()
     expect(base64ImageMock).not.toHaveBeenCalled()
+    expect(imageSizeMock).not.toHaveBeenCalled()
   })
 })
 
@@ -647,8 +679,7 @@ describe('estimateMessageTokens', () => {
 
 describe('TokenService integration', () => {
   it('estimateUserPromptUsage has no magic -7 and stays non-negative for image-only drafts', async () => {
-    base64ImageMock.mockResolvedValue({ mime: 'image/png', base64: 'x', data: 'data:image/png;base64,x' })
-    imageProbeResult = { width: 512, height: 512 }
+    imageSizeMock.mockResolvedValue({ width: 512, height: 512 })
 
     const usage = await estimateUserPromptUsage({
       files: [createFile({ id: 'u1', ext: '.png', origin_name: 'p.png', type: FILE_TYPE.IMAGE })]

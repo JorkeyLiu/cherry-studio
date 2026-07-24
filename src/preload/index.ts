@@ -207,6 +207,10 @@ const api = {
     pdfInfo: (fileId: string) => ipcRenderer.invoke(IpcChannel.File_GetPdfInfo, fileId),
     pdfInfoExternal: (filePath: string): Promise<number> =>
       ipcRenderer.invoke(IpcChannel.File_GetPdfInfoExternal, filePath),
+    imageSize: (fileId: string): Promise<{ width: number; height: number }> =>
+      ipcRenderer.invoke(IpcChannel.File_GetImageSize, fileId),
+    imageSizeExternal: (filePath: string): Promise<{ width: number; height: number }> =>
+      ipcRenderer.invoke(IpcChannel.File_GetImageSizeExternal, filePath),
     getPathForFile: (file: File) => webUtils.getPathForFile(file),
     openFileWithRelativePath: (file: FileMetadata) => ipcRenderer.invoke(IpcChannel.File_OpenWithRelativePath, file),
     isTextFile: (filePath: string): Promise<boolean> => ipcRenderer.invoke(IpcChannel.File_IsTextFile, filePath),

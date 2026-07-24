@@ -17,6 +17,22 @@ export function isTextSendableFile(file: FileMetadata): boolean {
 }
 
 /**
+ * 归一化文件扩展名：小写化，保证 `.pdf` / `.PDF` / `.Pdf` 判定一致。
+ * 缺失扩展名时返回空串。
+ */
+export function normalizeFileExtension(ext?: string): string {
+  return (ext ?? '').toLowerCase()
+}
+
+/**
+ * 唯一的 PDF 判定入口：估算路径与发送路径共用，避免大小写导致的分类分歧
+ * （估算按 PDF 分层、发送按 FilePart，扩展名大小写必须一致对待）。
+ */
+export function isPdfFile(file: FileMetadata): boolean {
+  return file.type === FILE_TYPE.DOCUMENT && normalizeFileExtension(file.ext) === '.pdf'
+}
+
+/**
  * 判断 FileMetadata 是否指向已入库（storageDir）的文件。
  *
  * 入库文件（历史消息、上传后的附件）：`path` 结尾为 `${id}${ext}`，

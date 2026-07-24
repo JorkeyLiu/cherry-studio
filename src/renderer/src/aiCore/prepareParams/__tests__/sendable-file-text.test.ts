@@ -37,11 +37,20 @@ vi.mock('i18next', () => {
   return { default: i18nMock }
 })
 
-import { convertFileBlockToTextPart } from '../fileProcessor'
-import { buildSendableFileText, isStoredFile, isTextSendableFile, prepareSendableFileText } from '../sendableFileText'
+import { convertFileBlockToFilePart, convertFileBlockToTextPart } from '../fileProcessor'
+import { getFileSizeLimit } from '../modelCapabilities'
+import {
+  buildSendableFileText,
+  isPdfFile,
+  isStoredFile,
+  isTextSendableFile,
+  normalizeFileExtension,
+  prepareSendableFileText
+} from '../sendableFileText'
 
 const readMock = vi.fn()
 const readExternalMock = vi.fn()
+const base64FileMock = vi.fn()
 const toastErrorMock = vi.fn()
 const toastWarningMock = vi.fn()
 
@@ -87,9 +96,11 @@ const createFileBlock = (file: FileMetadata): FileMessageBlock => ({
 beforeEach(() => {
   readMock.mockReset()
   readExternalMock.mockReset()
+  base64FileMock.mockReset()
   toastErrorMock.mockReset()
   toastWarningMock.mockReset()
-  vi.stubGlobal('api', { file: { read: readMock, readExternal: readExternalMock } })
+  vi.mocked(getFileSizeLimit).mockReset()
+  vi.stubGlobal('api', { file: { read: readMock, readExternal: readExternalMock, base64File: base64FileMock } })
   vi.stubGlobal('toast', { error: toastErrorMock, warning: toastWarningMock })
 })
 
@@ -278,5 +289,72 @@ describe('convertFileBlockToTextPart', () => {
 
     expect(readExternalMock).toHaveBeenCalledWith('/Users/me/draft.md', false)
     expect(result).toEqual({ type: 'text', text: 'draft.md\ndraft block body' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Shared PDF / extension classification (unified estimate ↔ send path)
+// ---------------------------------------------------------------------------
+
+describe('normalizeFileExtension', () => {
+  it('lowercases the extension so case never changes classification', () => {
+    expect(normalizeFileExtension('.PDF')).toBe('.pdf')
+    expect(normalizeFileExtension('.Pdf')).toBe('.pdf')
+    expect(normalizeFileExtension('.pdf')).toBe('.pdf')
+  })
+
+  it('returns an empty string for a missing extension', () => {
+    expect(normalizeFileExtension(undefined)).toBe('')
+    expect(normalizeFileExtension('')).toBe('')
+  })
+})
+
+describe('isPdfFile', () => {
+  it('recognizes PDFs regardless of extension case', () => {
+    expect(isPdfFile(createFile({ type: FILE_TYPE.DOCUMENT, ext: '.pdf' }))).toBe(true)
+    expect(isPdfFile(createFile({ type: FILE_TYPE.DOCUMENT, ext: '.PDF' }))).toBe(true)
+    expect(isPdfFile(createFile({ type: FILE_TYPE.DOCUMENT, ext: '.Pdf' }))).toBe(true)
+  })
+
+  it('rejects non-PDF documents and non-document types', () => {
+    expect(isPdfFile(createFile({ type: FILE_TYPE.DOCUMENT, ext: '.docx' }))).toBe(false)
+    expect(isPdfFile(createFile({ type: FILE_TYPE.TEXT, ext: '.pdf' }))).toBe(false)
+    expect(isPdfFile(createFile({ type: FILE_TYPE.IMAGE, ext: '.pdf' }))).toBe(false)
+  })
+})
+
+describe('send-path PDF classification (convertFileBlockToFilePart)', () => {
+  const model = { id: 'm', name: 'model' } as any
+
+  it('routes uppercase .PDF into the PDF FilePart branch (matches estimator classification)', async () => {
+    vi.mocked(getFileSizeLimit).mockReturnValue(50 * 1024 * 1024)
+    base64FileMock.mockResolvedValue({ data: 'data:application/pdf;base64,AAAA', mime: 'application/pdf' })
+    const block = createFileBlock(
+      createFile({ id: 'up', ext: '.PDF', origin_name: 'DOC.PDF', type: FILE_TYPE.DOCUMENT })
+    )
+
+    const result = await convertFileBlockToFilePart(block, model)
+
+    // Uppercase .PDF must be treated as a PDF: base64File is read and a file
+    // FilePart is produced, not the Word/Excel text-extraction fallback (null).
+    expect(base64FileMock).toHaveBeenCalledWith('up.PDF')
+    expect(result).toEqual({
+      type: 'file',
+      data: 'data:application/pdf;base64,AAAA',
+      mediaType: 'application/pdf',
+      filename: 'DOC.PDF'
+    })
+  })
+
+  it('routes non-PDF documents to the text-extraction fallback (null)', async () => {
+    vi.mocked(getFileSizeLimit).mockReturnValue(50 * 1024 * 1024)
+    const block = createFileBlock(
+      createFile({ id: 'w', ext: '.docx', origin_name: 'report.docx', type: FILE_TYPE.DOCUMENT })
+    )
+
+    const result = await convertFileBlockToFilePart(block, model)
+
+    expect(base64FileMock).not.toHaveBeenCalled()
+    expect(result).toBeNull()
   })
 })

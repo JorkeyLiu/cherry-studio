@@ -832,6 +832,44 @@ class FileStorage {
     return this.pdfPageCountCore(filePath)
   }
 
+  /**
+   * Reads only the intrinsic pixel dimensions of an image file.
+   *
+   * Uses sharp's header-level metadata (no full decode, no base64 transport) so
+   * token estimation can size images without shipping image bytes over IPC.
+   * Sharp is imported lazily, mirroring {@link file:../../utils/ocr.ts}, to keep
+   * it off the app startup path.
+   */
+  private imageSizeCore = async (filePath: string): Promise<{ width: number; height: number }> => {
+    const sharp = (await import('sharp')).default
+    const metadata = await sharp(filePath).metadata()
+    return {
+      width: metadata.width ?? 0,
+      height: metadata.height ?? 0
+    }
+  }
+
+  public imageSize = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<{ width: number; height: number }> => {
+    return this.imageSizeCore(path.join(this.storageDir, id))
+  }
+
+  /**
+   * Reads the intrinsic dimensions of an external (non-stored) image file.
+   *
+   * Mirrors {@link imageSize} but operates on an absolute path, consistent with
+   * {@link readExternalFile}. Used to estimate pre-upload draft image attachments
+   * whose stored copy does not yet exist under storageDir.
+   */
+  public imageSizeExternal = async (
+    _: Electron.IpcMainInvokeEvent,
+    filePath: string
+  ): Promise<{ width: number; height: number }> => {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File does not exist: ${filePath}`)
+    }
+    return this.imageSizeCore(filePath)
+  }
+
   public binaryImage = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<{ data: Buffer; mime: string }> => {
     const filePath = path.join(this.storageDir, id)
     const data = await fs.promises.readFile(filePath)
