@@ -1520,6 +1520,12 @@
         "title": "Caută"
       },
       "title": "Subiecte",
+      "trash": {
+        "empty": "[to be translated]:Trash is empty",
+        "empty_trash": "[to be translated]:Empty Trash",
+        "label": "[to be translated]:Recycle Bin",
+        "restore": "[to be translated]:Restore"
+      },
       "unpin": "Detașează subiectul"
     },
     "translate": "Tradu",
@@ -5640,11 +5646,10 @@
       "search_message": "Caută mesaj",
       "search_message_in_chat": "Caută mesaj în chat-ul curent",
       "select_model": "Select Model",
-      "selection_assistant_select_text": "Asistent de selecție: Selectează text",
-      "selection_assistant_toggle": "Comută Asistentul de selecție",
       "show_app": "Afișează/Ascunde aplicația",
       "show_settings": "Deschide setările",
       "title": "Comenzi rapide de la tastatură",
+      "toggle_edit_mode": "[to be translated]:Toggle Edit Mode",
       "toggle_new_context": "Șterge contextul",
       "toggle_show_assistants": "Comută asistenții",
       "toggle_show_topics": "Comută subiectele",

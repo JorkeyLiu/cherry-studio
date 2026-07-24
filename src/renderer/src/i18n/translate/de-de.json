@@ -1520,6 +1520,12 @@
         "title": "Suche"
       },
       "title": "Thema",
+      "trash": {
+        "empty": "[to be translated]:Trash is empty",
+        "empty_trash": "[to be translated]:Empty Trash",
+        "label": "[to be translated]:Recycle Bin",
+        "restore": "[to be translated]:Restore"
+      },
       "unpin": "Anheften aufheben"
     },
     "translate": "Übersetzen",
@@ -5640,11 +5646,10 @@
       "search_message": "Nachricht suchen",
       "search_message_in_chat": "In aktuellem Chat suchen",
       "select_model": "Select Model",
-      "selection_assistant_select_text": "Textauswahl-Assistent: Text erfassen",
-      "selection_assistant_toggle": "Textauswahl-Assistent umschalten",
       "show_app": "App anzeigen/ausblenden",
       "show_settings": "Einstellungen öffnen",
       "title": "Shortcut",
+      "toggle_edit_mode": "[to be translated]:Toggle Edit Mode",
       "toggle_new_context": "Kontext löschen",
       "toggle_show_assistants": "Assistentenanzeige umschalten",
       "toggle_show_topics": "Themenanzeige umschalten",
