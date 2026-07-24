@@ -1,4 +1,5 @@
 import NavbarIcon from '@renderer/components/NavbarIcon'
+import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { toggleEditMode } from '@renderer/store/editMode'
 import { Tooltip } from 'antd'
@@ -14,6 +15,14 @@ const EditModeToggle = () => {
   const handleToggle = () => {
     dispatch(toggleEditMode(!isEnabled))
   }
+
+  useShortcut(
+    'toggle_edit_mode',
+    () => {
+      dispatch(toggleEditMode(!isEnabled))
+    },
+    { preventDefault: true }
+  )
 
   return (
     <Tooltip title={isEnabled ? t('chat.edit.exit') : t('chat.edit.enter')} mouseEnterDelay={0.8}>
