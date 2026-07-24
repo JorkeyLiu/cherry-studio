@@ -29,12 +29,7 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import FileManager from '@renderer/services/FileManager'
 import { checkRateLimit, getUserMessage } from '@renderer/services/MessagesService'
 import { spanManagerService } from '@renderer/services/SpanManagerService'
-import {
-  combineHistoryAndDraftTokens,
-  estimateHistoryTokens,
-  estimateTextTokens,
-  estimateUserPromptUsage
-} from '@renderer/services/TokenService'
+import { estimateUserPromptUsage } from '@renderer/services/TokenService'
 import WebSearchService from '@renderer/services/WebSearchService'
 import { useAppDispatch } from '@renderer/store'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
@@ -50,13 +45,13 @@ import type { MessageInputBaseParams } from '@renderer/types/newMessage'
 import { delay } from '@renderer/utils'
 import { getSendMessageShortcutLabel } from '@renderer/utils/input'
 import { documentExts, imageExts, textExts } from '@shared/config/constant'
-import { debounce } from 'lodash'
 import type { FC } from 'react'
 import React, { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import TopicSegmentDrawer from '../Messages/TopicSegmentDrawer'
 import { InputbarCore } from './components/InputbarCore'
+import { usePromptTokenEstimate } from './hooks/usePromptTokenEstimate'
 import InputbarTools from './InputbarTools'
 import KnowledgeBaseInput from './KnowledgeBaseInput'
 import MentionModelsInput from './MentionModelsInput'
@@ -177,13 +172,17 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
 
   // --- Token estimation (Inputbar-owned, preview-draft-aware) ---
 
-  // Stable boolean: draft presence triggers preview turn only on blank↔nonblank transitions (LOCK-003).
-  // computeContextInfo only checks draft truthiness for turn selection, so full text is not needed here.
-  const hasPreviewDraft = text.trim().length > 0
+  // Stable boolean: a pending draft exists when there is nonblank text OR any
+  // attachment. Either occupies the next-request turn slot, so both must drive
+  // the virtual preview turn (LOCK-004). Toggles only on presence transitions.
+  // computeContextInfo only checks draft truthiness for turn selection, so full
+  // text/attachment detail is not needed here.
+  const hasPreviewDraft = text.trim().length > 0 || files.length > 0
 
-  // Sync: computeContextInfo with previewDraft so pending text participates in turn selection (LOCK-004).
-  // A nonblank draft occupies a turn slot → a full sliding window ejects the oldest turn.
-  // contextCount reflects the post-draft state; tokenEstimationMessages excludes the virtual draft turn.
+  // Sync: computeContextInfo with previewDraft so a pending draft participates in
+  // turn selection (LOCK-004). A draft occupies a turn slot → a full sliding
+  // window ejects the oldest turn. contextCount reflects the post-draft state;
+  // tokenEstimationMessages excludes the virtual draft turn.
   const previewContextInfo = useMemo(
     () =>
       computeContextInfo(
@@ -196,40 +195,14 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     [topicMessages, assistant, topic.id, hasPreviewDraft]
   )
 
-  const [historyTokenCount, setHistoryTokenCount] = useState(0)
-
-  // Async: estimate history tokens from content (LOCK-003 — no usage baseline).
-  // Debounced and race-safe. Fires only when previewContextInfo identity changes:
-  // topicMessages, assistant, topicId, or blank↔nonblank draft transition.
-  useEffect(() => {
-    let cancelled = false
-    const debouncedEstimate = debounce(
-      async () => {
-        try {
-          const tokens = await estimateHistoryTokens(assistant, previewContextInfo.tokenEstimationMessages)
-          if (!cancelled) {
-            setHistoryTokenCount(tokens)
-          }
-        } catch {
-          // Estimation failure is non-fatal; last known value persists.
-        }
-      },
-      200,
-      { leading: false, trailing: true }
-    )
-
-    void debouncedEstimate()
-
-    return () => {
-      cancelled = true
-      debouncedEstimate.cancel()
-    }
-  }, [assistant, previewContextInfo])
-
-  // Draft token estimation — independent of history, computed from current input text (LOCK-003)
-  const draftTokenCount = useMemo(() => estimateTextTokens(text || ''), [text])
-  // Combined scalar: history-context estimate + current draft estimate (LOCK-001, LOCK-002)
-  const estimateTokenCount = combineHistoryAndDraftTokens(historyTokenCount, draftTokenCount)
+  // Async, debounced, race-safe estimate: selected history + current draft
+  // (text + attachments) combined into one scalar (LOCK-001, LOCK-005, LOCK-009).
+  const estimateTokenCount = usePromptTokenEstimate({
+    assistant,
+    tokenEstimationMessages: previewContextInfo.tokenEstimationMessages,
+    text,
+    files
+  })
 
   // Sync: contextCount from preview-aware computeContextInfo (includes virtual draft turn).
   const contextCount = previewContextInfo.contextCount

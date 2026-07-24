@@ -39,7 +39,7 @@ vi.mock('@renderer/store', () => ({
 
 // Mock tokenx so tests are deterministic (1 char ≈ 1 token)
 vi.mock('tokenx', () => ({
-  approximateTokenSize: (text: string) => text.length
+  estimateTokenCount: (text: string) => text.length
 }))
 
 // ---------------------------------------------------------------------------

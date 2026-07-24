@@ -646,11 +646,7 @@ class FileStorage {
     }
   }
 
-  public base64Image = async (
-    _: Electron.IpcMainInvokeEvent,
-    id: string
-  ): Promise<{ mime: string; base64: string; data: string }> => {
-    const filePath = path.join(this.storageDir, id)
+  private base64ImageCore = async (filePath: string): Promise<{ mime: string; base64: string; data: string }> => {
     const data = await fs.promises.readFile(filePath)
     const base64 = data.toString('base64')
     const rawExt = path.extname(filePath).slice(1)
@@ -661,6 +657,30 @@ class FileStorage {
       base64,
       data: `data:${mime};base64,${base64}`
     }
+  }
+
+  public base64Image = async (
+    _: Electron.IpcMainInvokeEvent,
+    id: string
+  ): Promise<{ mime: string; base64: string; data: string }> => {
+    return this.base64ImageCore(path.join(this.storageDir, id))
+  }
+
+  /**
+   * Reads an external (non-stored) image file and returns its base64/data-url form.
+   *
+   * Mirrors {@link base64Image} but operates on an absolute path, consistent with
+   * {@link readExternalFile}. Used to estimate pre-upload draft image attachments
+   * whose stored copy does not yet exist under storageDir.
+   */
+  public base64ImageExternal = async (
+    _: Electron.IpcMainInvokeEvent,
+    filePath: string
+  ): Promise<{ mime: string; base64: string; data: string }> => {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File does not exist: ${filePath}`)
+    }
+    return this.base64ImageCore(filePath)
   }
 
   public saveBase64Image = async (_: Electron.IpcMainInvokeEvent, base64Data: string): Promise<FileMetadata> => {
@@ -787,12 +807,29 @@ class FileStorage {
     return { data: base64, mime }
   }
 
-  public pdfPageCount = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<number> => {
-    const filePath = path.join(this.storageDir, id)
+  private pdfPageCountCore = async (filePath: string): Promise<number> => {
     const buffer = await fs.promises.readFile(filePath)
 
     const pdfDoc = await PDFDocument.load(buffer)
     return pdfDoc.getPageCount()
+  }
+
+  public pdfPageCount = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<number> => {
+    return this.pdfPageCountCore(path.join(this.storageDir, id))
+  }
+
+  /**
+   * Reads the page count of an external (non-stored) PDF file.
+   *
+   * Mirrors {@link pdfPageCount} but operates on an absolute path, consistent with
+   * {@link readExternalFile}. Used to estimate pre-upload draft PDF attachments
+   * whose stored copy does not yet exist under storageDir.
+   */
+  public pdfPageCountExternal = async (_: Electron.IpcMainInvokeEvent, filePath: string): Promise<number> => {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File does not exist: ${filePath}`)
+    }
+    return this.pdfPageCountCore(filePath)
   }
 
   public binaryImage = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<{ data: Buffer; mime: string }> => {

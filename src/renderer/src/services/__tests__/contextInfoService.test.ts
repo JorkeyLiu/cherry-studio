@@ -1173,5 +1173,61 @@ describe('computeContextInfo', () => {
       expect(result.tokenEstimationMessages.length).toBe(0)
       expect(result.contextCount.current).toBe(0)
     })
+
+    // ── attachment-only draft (LOCK-004) ──────────────────────────────────
+    // Inputbar derives draft presence from `text.trim().length > 0 || files.length > 0`,
+    // so an attachment-only draft (no text) must still drive the virtual turn via
+    // PREVIEW_DRAFT_SENTINEL. No FileMetadata is ever passed into computeContextInfo.
+
+    it('attachment-only draft (no text) activates the virtual turn', () => {
+      // 2 real turns; without a draft current=2. An attachment-only draft must
+      // push current to 3, exactly like a text draft does.
+      const msgs = [
+        msgWithBlock('u1', 'user'),
+        msgWithBlock('a1', 'assistant', 'u1'),
+        msgWithBlock('u2', 'user'),
+        msgWithBlock('a2', 'assistant', 'u2')
+      ]
+
+      const withoutDraft = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
+      const withAttachmentOnlyDraft = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID, {
+        previewDraft: PREVIEW_DRAFT_SENTINEL
+      })
+
+      expect(withoutDraft.contextCount.current).toBe(2)
+      // Attachment-only draft still occupies a turn slot.
+      expect(withAttachmentOnlyDraft.contextCount.current).toBe(3)
+      expect(withAttachmentOnlyDraft.contextCount.max).toBe(5)
+      // The virtual turn does NOT appear in output message arrays.
+      expect(withAttachmentOnlyDraft.uiMessages.length).toBe(withoutDraft.uiMessages.length)
+      expect(withAttachmentOnlyDraft.tokenEstimationMessages.length).toBe(withoutDraft.tokenEstimationMessages.length)
+    })
+
+    it('sliding at capacity: attachment-only draft evicts the oldest selected real turn', () => {
+      // 20 alternating msgs → 10 turns, contextCount=5.
+      // Without draft: select last 5 turns → boundary at m10.
+      // With attachment-only draft: 4 real + 1 virtual → boundary shifts to m12
+      // (the oldest real turn is ejected to make room for the pending draft).
+      const msgs = Array.from({ length: 20 }, (_, i) => {
+        const role = i % 2 === 0 ? 'user' : 'assistant'
+        return msgWithBlock(`m${i}`, role as Message['role'], role === 'assistant' ? `m${i - 1}` : undefined)
+      })
+
+      const withoutDraft = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID)
+      const withAttachmentOnlyDraft = computeContextInfo(msgs, assistantWith({ contextCount: 5 }), TOPIC_ID, {
+        previewDraft: PREVIEW_DRAFT_SENTINEL
+      })
+
+      expect(withoutDraft.contextCount.current).toBe(5)
+      expect(withoutDraft.boundaryMessageId).toBe('m10')
+
+      // Still displays 5 turns, but the oldest real turn is now ejected.
+      expect(withAttachmentOnlyDraft.contextCount.current).toBe(5)
+      expect(withAttachmentOnlyDraft.contextCount.max).toBe(5)
+      // 4 real turns expanded (8 msgs) minus trailing assistant = 7 uiMessages.
+      expect(withAttachmentOnlyDraft.uiMessages.length).toBe(7)
+      // Boundary moved past the ejected oldest turn.
+      expect(withAttachmentOnlyDraft.boundaryMessageId).toBe('m12')
+    })
   })
 })

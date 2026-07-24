@@ -15,6 +15,7 @@ import i18n from 'i18next'
 
 import { getAiSdkProviderId } from '../provider/factory'
 import { getFileSizeLimit, supportsImageInput, supportsLargeFileUpload } from './modelCapabilities'
+import { prepareSendableFileText } from './sendableFileText'
 
 const logger = loggerService.withContext('fileProcessor')
 
@@ -48,34 +49,24 @@ export async function extractFileContent(message: Message): Promise<string> {
 
 /**
  * 将文件块转换为文本部分
+ *
+ * 文本构造统一走 prepareSendableFileText，确保发送内容与本地估算内容一致
  */
 export async function convertFileBlockToTextPart(fileBlock: FileMessageBlock): Promise<TextPart | null> {
   const file = fileBlock.file
 
-  // 处理文本文件
-  if (file.type === FILE_TYPE.TEXT) {
-    try {
-      const fileContent = await window.api.file.read(file.id + file.ext)
-      return {
-        type: 'text',
-        text: `${file.origin_name}\n${fileContent.trim()}`
-      }
-    } catch (error) {
-      logger.warn('Failed to read text file:', error as Error)
+  // 处理文本文件与文档文件（PDF、Word、Excel等）- 提取为文本内容
+  try {
+    const text = await prepareSendableFileText(file)
+    if (text !== null) {
+      return { type: 'text', text }
     }
-  }
-
-  // 处理文档文件（PDF、Word、Excel等）- 提取为文本内容
-  if (file.type === FILE_TYPE.DOCUMENT) {
-    try {
-      const fileContent = await window.api.file.read(file.id + file.ext, true) // true表示强制文本提取
-      return {
-        type: 'text',
-        text: `${file.origin_name}\n${fileContent.trim()}`
-      }
-    } catch (error) {
+  } catch (error) {
+    if (file.type === FILE_TYPE.DOCUMENT) {
       logger.warn(`Failed to extract text from document ${file.origin_name}:`, error as Error)
       window.toast.error(i18n.t('message.error.file.text_extraction_failed', { name: file.origin_name }))
+    } else {
+      logger.warn('Failed to read text file:', error as Error)
     }
   }
 

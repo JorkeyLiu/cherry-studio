@@ -14,6 +14,7 @@ export { getTimeout } from './modelParameters'
 
 // 文件处理
 export { extractFileContent } from './fileProcessor'
+export { buildSendableFileText, isTextSendableFile, prepareSendableFileText } from './sendableFileText'
 
 // 消息转换
 export { convertMessagesToSdkMessages, convertMessageToSdkParam } from './messageConverter'
