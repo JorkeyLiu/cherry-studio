@@ -26,6 +26,14 @@
  *   - callback throw containment; duplicate start/completion attempts;
  *     stale completions; async dispose + sync will-quit resource ordering
  *   - no filesystem path in the verification completion payload
+ * - Promotion protocol foundations (Phase 4.4.0 — LOCK-4401/4405):
+ *   - claimPromotion is the unique, exact-once entry bounded to
+ *     getVerifiedCandidate; token issued once and never reissued
+ *   - cancel rejected during promoting (no state change, no cleanup)
+ *   - completePromotion settles promoted | promotion-failed exactly once
+ *     against the issued token; result states terminal
+ *   - async dispose + sync will-quit preserve the promotion-owned candidate
+ *   - no live DB / filesystem side effects from claiming or settling
  */
 
 import type { CandidateImportStats, ReadPageResponse, SourceReadStats } from '@shared/chatImport/types'
@@ -124,6 +132,8 @@ vi.mock('@main/services/chatDb', () => ({
 import { ChatImportSessionError, ChatImportUnsupportedPlatformError } from '../errors'
 import {
   cancelImport,
+  claimPromotion,
+  completePromotion,
   DEFAULT_PAGE_SIZE,
   disposeActiveImport,
   getActiveImport,
@@ -1558,5 +1568,281 @@ describe('ChatImport index', () => {
         expect(candidate.discard).not.toHaveBeenCalled()
       }
     )
+  })
+
+  // =========================================================================
+  // Promotion protocol foundations (Phase 4.4.0 — LOCK-4401/4405)
+  // =========================================================================
+
+  describe('promotion protocol (LOCK-4401)', () => {
+    /** Drive a harness to the verified-candidate state. */
+    async function toVerified(session: Awaited<ReturnType<typeof startImport>>) {
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+      expect(session.state).toBe('verified-candidate')
+    }
+
+    it('claimPromotion returns null when no import session is active', () => {
+      expect(claimPromotion()).toBeNull()
+    })
+
+    itOnDarwin('claimPromotion returns null before verified-candidate (verifying gate)', async () => {
+      const { verifier, releaseRun } = makeGatedVerifier()
+      const { session } = await begin({ verifier })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      expect(session.state).toBe('verifying')
+
+      expect(claimPromotion()).toBeNull()
+      expect(session.state).toBe('verifying')
+
+      releaseRun(makeReport('aborted'))
+      await flushVerification()
+      await session.dispose()
+    })
+
+    itOnDarwin('claimPromotion is bounded to getVerifiedCandidate and transitions atomically', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+
+      const verified = getVerifiedCandidate()
+      expect(verified).not.toBeNull()
+
+      const claim = claimPromotion()
+      expect(claim).not.toBeNull()
+      expect(claim!.sessionId).toBe(verified!.sessionId)
+      expect(claim!.candidateId).toBe(verified!.candidateId)
+      expect(claim!.dbPath).toBe(verified!.dbPath)
+      expect(claim!.report).toBe(verified!.report)
+      expect(claim!.token).toMatch(/^promotion-/)
+      expect(claim!.token).not.toContain('/')
+
+      // The unique entry is consumed on the same synchronous frame.
+      expect(session.state).toBe('promoting')
+      expect(getVerifiedCandidate()).toBeNull()
+
+      await session.dispose()
+    })
+
+    itOnDarwin('promotion claim is exact-once: every later claim returns null', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+
+      const first = claimPromotion()
+      expect(first).not.toBeNull()
+      expect(claimPromotion()).toBeNull()
+      expect(claimPromotion()).toBeNull()
+      expect(session.state).toBe('promoting')
+
+      await session.dispose()
+    })
+
+    itOnDarwin('cancel during promoting is rejected: no state change, no cleanup, no renderer cancel', async () => {
+      const { session, candidate } = await begin()
+      await toVerified(session)
+      mockSendCancel.mockClear()
+
+      expect(claimPromotion()).not.toBeNull()
+
+      await session.cancel()
+      await cancelImport(session.id)
+
+      expect(session.state).toBe('promoting')
+      expect(mockSendCancel).not.toHaveBeenCalled()
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect(candidate.discardSync).not.toHaveBeenCalled()
+      expect(getActiveImport()).toBe(session)
+
+      await session.dispose()
+    })
+
+    itOnDarwin('completePromotion settles promoted exactly once against the issued token', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+
+      const claim = claimPromotion()
+      expect(claim).not.toBeNull()
+
+      expect(completePromotion('promotion-wrong-token', 'promoted')).toBe(false)
+      expect(session.state).toBe('promoting')
+
+      expect(completePromotion(claim!.token, 'promoted')).toBe(true)
+      expect(session.state).toBe('promoted')
+
+      // Token consumed — the terminal result can never be settled twice.
+      expect(completePromotion(claim!.token, 'promotion-failed')).toBe(false)
+      expect(completePromotion(claim!.token, 'promoted')).toBe(false)
+      expect(session.state).toBe('promoted')
+
+      await session.dispose()
+    })
+
+    itOnDarwin('completePromotion can settle promotion-failed; both results are terminal for cancel', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+
+      const claim = claimPromotion()
+      expect(completePromotion(claim!.token, 'promotion-failed')).toBe(true)
+      expect(session.state).toBe('promotion-failed')
+
+      // Terminal: cancel is ignored, state unchanged.
+      await session.cancel()
+      expect(session.state).toBe('promotion-failed')
+
+      await session.dispose()
+    })
+
+    itOnDarwin('completePromotion rejects outcomes outside the terminal result states', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+
+      const claim = claimPromotion()
+      expect(completePromotion(claim!.token, 'verified-candidate' as any)).toBe(false)
+      expect(completePromotion(claim!.token, 'error' as any)).toBe(false)
+      expect(session.state).toBe('promoting')
+
+      await session.dispose()
+    })
+
+    itOnDarwin('async dispose preserves the promotion-owned candidate (promoting + results)', async () => {
+      const { session, candidate } = await begin()
+      await toVerified(session)
+
+      expect(claimPromotion()).not.toBeNull()
+      await session.dispose()
+
+      // Ordinary disposal ran (reader/temp cleanup) but the candidate files
+      // were preserved for the promotion executor / startup recovery.
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect(candidate.discardSync).not.toHaveBeenCalled()
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin('async dispose after promoted preserves the candidate too', async () => {
+      const { session, candidate } = await begin()
+      await toVerified(session)
+
+      const claim = claimPromotion()
+      expect(completePromotion(claim!.token, 'promoted')).toBe(true)
+      await session.dispose()
+
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin('sync will-quit during promoting preserves the candidate and recovery assets', async () => {
+      const { session, candidate } = await begin()
+      await toVerified(session)
+
+      expect(claimPromotion()).not.toBeNull()
+      disposeActiveImport()
+
+      // Non-promotion resources torn down; candidate never discarded.
+      const { disposeSync: disposeSessionSyncMock } = (await import('../isolatedSession')) as any
+      expect(disposeSessionSyncMock).toHaveBeenCalled()
+      expect(candidate.discardSync).not.toHaveBeenCalled()
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect((session as any).isDisposed).toBe(true)
+      expect(getActiveImport()).toBeNull()
+
+      await session.dispose()
+      expect(candidate.discard).not.toHaveBeenCalled()
+    })
+
+    itOnDarwin(
+      'failure during promoting settles promotion-failed (never error) and preserves the candidate',
+      async () => {
+        const { session, candidate } = await begin()
+        await toVerified(session)
+
+        expect(claimPromotion()).not.toBeNull()
+
+        // A raced renderer error during the promotion window.
+        await capturedCallbacks.onError(session.id, { code: 'E_LATE', message: 'late renderer error' })
+
+        expect(session.state).toBe('promotion-failed')
+        expect(candidate.discard).not.toHaveBeenCalled()
+        expect(getActiveImport()).toBeNull()
+      }
+    )
+
+    itOnDarwin(
+      'late failure after promoted settlement preserves terminal state and disposes session (LOCK-4401)',
+      async () => {
+        const { session, candidate } = await begin()
+        await toVerified(session)
+
+        const claim = claimPromotion()
+        expect(completePromotion(claim!.token, 'promoted')).toBe(true)
+        expect(session.state).toBe('promoted')
+
+        // Late renderer error arrives after the promoted terminal was settled.
+        await capturedCallbacks.onError(session.id, { code: 'E_LATE', message: 'late renderer error' })
+
+        // Terminal state is immutable: promoted survives the late failure.
+        expect(session.state).toBe('promoted')
+        // Candidate preserved by promotion ownership (LOCK-4401).
+        expect(candidate.discard).not.toHaveBeenCalled()
+        // Session disposed and inactive — the late error still runs dispose().
+        expect((session as any).isDisposed).toBe(true)
+        expect(getActiveImport()).toBeNull()
+      }
+    )
+
+    itOnDarwin('sync will-quit after promoted preserves candidate and disposes session (LOCK-4401)', async () => {
+      const { session, candidate } = await begin()
+      await toVerified(session)
+
+      const claim = claimPromotion()
+      expect(completePromotion(claim!.token, 'promoted')).toBe(true)
+      expect(session.state).toBe('promoted')
+
+      // Simulate the Electron will-quit path (sync).
+      disposeActiveImport()
+
+      // Non-promotion resources torn down synchronously.
+      const { disposeSync: disposeSessionSyncMock } = (await import('../isolatedSession')) as any
+      expect(disposeSessionSyncMock).toHaveBeenCalled()
+      // Promotion-owned candidate preserved: neither sync nor async discard ran.
+      expect(candidate.discardSync).not.toHaveBeenCalled()
+      expect(candidate.discard).not.toHaveBeenCalled()
+      // Session fully inactive.
+      expect((session as any).isDisposed).toBe(true)
+      expect(getActiveImport()).toBeNull()
+
+      await session.dispose()
+      expect(candidate.discard).not.toHaveBeenCalled() // idempotent — still preserved
+    })
+
+    itOnDarwin('claiming performs no side effects: no live DB, no candidate mutation', async () => {
+      const { session, candidate } = await begin()
+      await toVerified(session)
+
+      const sealCallsBefore = candidate.seal.mock.calls.length
+      expect(claimPromotion()).not.toBeNull()
+
+      expect(hoisted.liveChatDbCtor).not.toHaveBeenCalled()
+      expect(candidate.seal.mock.calls.length).toBe(sealCallsBefore)
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect(candidate.discardSync).not.toHaveBeenCalled()
+
+      await session.dispose()
+    })
+
+    itOnDarwin('getSealedCandidate does not expose the candidate once promotion owns it', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+      expect(getSealedCandidate()).not.toBeNull()
+
+      const claim = claimPromotion()
+      expect(claim).not.toBeNull()
+      // After the claim, the ONLY access is the Main-only claim handle.
+      expect(getSealedCandidate()).toBeNull()
+      expect(getVerifiedCandidate()).toBeNull()
+
+      await session.dispose()
+    })
   })
 })

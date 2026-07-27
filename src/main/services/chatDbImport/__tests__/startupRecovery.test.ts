@@ -23,6 +23,8 @@ vi.mock('../candidateDb', () => ({
 
 import { loggerService } from '@logger'
 
+import * as promotionRecovery from '../promotion/recovery'
+import * as startupRecovery from '../startupRecovery'
 import { recoverOrphanedImportArtifacts } from '../startupRecovery'
 
 describe('recoverOrphanedImportArtifacts', () => {
@@ -84,5 +86,20 @@ describe('recoverOrphanedImportArtifacts', () => {
 
     expect(warnSpy).toHaveBeenCalledTimes(2)
     warnSpy.mockRestore()
+  })
+
+  describe('promotion recovery contract seam (Phase 4.4.0, LOCK-4405/4406)', () => {
+    it('re-exports the pure promotion recovery decision contract unchanged', () => {
+      expect(startupRecovery.decidePromotionRecovery).toBe(promotionRecovery.decidePromotionRecovery)
+      expect(startupRecovery.PROMOTION_CRASH_POINT_MATRIX).toBe(promotionRecovery.PROMOTION_CRASH_POINT_MATRIX)
+    })
+
+    it('the seam performs no journal reads or file probing: recovery run touches only the existing cleanups', async () => {
+      // Phase 4.4.0: recoverOrphanedImportArtifacts behavior is unchanged —
+      // it invokes exactly the two existing cleanups and nothing else.
+      await recoverOrphanedImportArtifacts()
+      expect(recoverOrphanedTempWorkspacesMock).toHaveBeenCalledTimes(1)
+      expect(recoverOrphanedCandidatesMock).toHaveBeenCalledTimes(1)
+    })
   })
 })

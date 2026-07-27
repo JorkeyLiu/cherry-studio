@@ -1,6 +1,6 @@
 # SQLite 运行时迁移与 Cherry Studio 兼容导入 — 个人 fork 演进记录（面向未来独立 Cherry Chat）
 
-> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（已提交/已推送至迁移分支 `85603d0fd5`）；集成同步门 Baseline Sync Gate Done（integration `05a401b711` 已集成同步，已验证）；Phase 4.4+ 未开始）
+> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（已提交/已推送至迁移分支 `85603d0fd5`）；集成同步门 Baseline Sync Gate Done（integration `05a401b711` 已集成同步，已验证）；Phase 4.4.0（Promotion 协议基础，纯协议层）Done；Phase 4.4.1+ 未开始）
 >
 > ✅ **集成同步门（Baseline Sync Gate，Done/已合并/已验证）**：integration 分支（`05a401b711`）已集成同步进 migration 分支（pre-merge HEAD `5d50499e80`）；合并自动解决、无兼容性编辑；审计无阻塞/无代码发现，验证全部通过（format 无改动；lint exit 0 / 112 known warnings；typecheck 通过；`pnpm test` 265 文件 / 5664 通过 / 72 跳过 / 0 失败；聚焦测试 201 renderer + 822 chatDb/import）。Phase 4.4 既有架构未改变；合并后统一的 Renderer/context/type/Redux 结构已作为 Phase 5 实施基线。详见 Section 9「集成同步门（Baseline Sync Gate）」与决策日志。
 > **分支**：`jorkey/refactor/sqlite-migration`
@@ -520,6 +520,24 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **约束** | promotion 短时不可取消；保留一个回滚快照；重开/检查 DB；成功后 relaunch |
 | **退出条件** | ✅ 原子替换成功 → reopen → relaunch 流程完成；✅ 失败回滚到快照 DB 流程验证；✅ 一个回滚快照保留 |
 
+##### Phase 4.4.0：Promotion 协议基础（纯协议/state/journal/recovery matrix/coordination contract）
+
+| 属性 | 值 |
+|---|---|
+| **状态** | **Done（实现 + 聚焦验证）** |
+| **范围** | 仅纯协议层（LOCK-4405）：无 live/candidate/snapshot 文件操作、无 ChatDbService close/init、无 rename/replace/restore、无 relaunch、无 promotion IPC；不修改 shared/preload/renderer |
+| **状态机（LOCK-4401）** | `ImportState` 扩展 `promoting`、`promoted`、`promotion-failed`；`verified-candidate → promoting` 为唯一 promotion 入口（`claimPromotion()`，bounded to `getVerifiedCandidate()`，同步原子转换 + 不可复用 token，exact-once）；`completePromotion(token, outcome)` exact-once 结算终态；`promoting` 后 cancel 拒绝（无状态变化、无清理）；两个结果态为终态 |
+| **所有权边界（LOCK-4401）** | promotion-owned 状态（promoting/promoted/promotion-failed）下：异步 `dispose()`、同步 will-quit `disposeActiveImport()` 均保留候选与持久化恢复资产，仅关闭 reader/verifier/IPC 等非 promotion 资源；`promoting` 中失败结算为 `promotion-failed`（绝不 `error`） |
+| **Journal v1（LOCK-4404）** | `promotion/journal.ts`：恰好 `version/sessionId/candidateId/phase`（`snapshot-ready\|candidate-installed\|replacement-verified`）；exact-key 严格 codec（多键/缺键/版本/ID/枚举全部运行时拒绝）；ID 复用候选目录严格 allowlist `^[A-Za-z0-9_-]{1,128}$`（不可携带路径）；固定自有文件名 `chat-import-promotion.journal.json`；纯函数 codec，crash-safe 落盘 writer 属 4.4.1+ |
+| **Rollback snapshot 命名（LOCK-4403，仅契约）** | 固定名 `chat.db.pre-import-backup` + staging `chat.db.pre-import-backup.staging`；单份保留顺序：live 打开时 online backup → staging → 验证 → 原子 rename 覆盖旧快照；不复制 WAL/SHM；replacement 验证后快照仍保留；本阶段无任何快照操作 |
+| **操作顺序契约** | `promotion/protocol.ts` 定义 12 步 canonical 顺序（snapshot 创建/验证/发布 → journal snapshot-ready → close live → install → journal candidate-installed → reopen → verify → journal replacement-verified → cleanup journal → relaunch）；journal 锚点均在对应操作完成之后 |
+| **恢复矩阵（LOCK-4406）** | `promotion/recovery.ts` 纯 `decidePromotionRecovery(input)`：输入 = journal 观察（absent/invalid/valid×3 phase）× live（missing/present-unverified/present-verified）× snapshot（同三态）× candidate（missing/present），共 90 组合全枚举，每组唯一动作 + reason code；动作严格为 `keep-old-live\|accept-verified-replacement\|restore-rollback-snapshot\|repair-required`；无 journal→keep-old-live；journal 无效→repair-required；`candidate-installed` 永不自证——仅 verified snapshot 可 restore，否则 repair-required；`replacement-verified` 仅在 live present-verified 时 accept；不按文件年龄猜测、无空 DB 创建动作；12 个文档化崩溃点由 `PROMOTION_CRASH_POINT_MATRIX` 全覆盖（will-quit 覆盖全部持久化 phase 子窗口） |
+| **Maintenance coordination（LOCK-4402）** | `src/main/services/chatDb/maintenanceCoordination.ts`：统一契约覆盖 `backup\|restore\|promotion\|init\|close` 五操作；冲突矩阵全对（含同类互斥）；单持有者 lease（非阻塞 acquire / owner-checked 幂等 release / 唯一 leaseId）；**本阶段未接线任何现有 mutex/操作**，无第三个独立运行时锁 |
+| **Startup recovery seam** | `startupRecovery.ts` 仅 re-export 纯恢复决策契约；不读 journal、不探测文件、不执行恢复；既有孤儿清理行为不变；已注明未来接线时 journal-referenced candidate 必须排除出按年龄清理 |
+| **实际资产** | `src/main/services/chatDbImport/promotion/{protocol,journal,recovery}.ts` + `promotion/__tests__/{protocol,journal,recovery}.test.ts`；`src/main/services/chatDb/maintenanceCoordination.ts` + `__tests__/maintenanceCoordination.test.ts`；`chatDbImport/index.ts`（状态扩展 + claim/complete + 边界守卫）；`chatDbImport/startupRecovery.ts`（契约 re-export）；`chatDbImport/__tests__/{index,startupRecovery}.test.ts` 扩展 |
+| **验证事实** | 聚焦测试 `chatDb` + `chatDbImport`：29 文件 / 895 通过 / 0 失败（基线 822 + 新增 73）；`typecheck:node` 通过；Phase 4.1–4.3 既有测试与 API 无回归 |
+| **退出条件** | ✅ 唯一 promotion 入口 + exact-once 经测试证明；✅ cancel/dispose/will-quit 边界经测试证明；✅ journal codec 严格有界、无路径；✅ 恢复矩阵 90 组合穷举 + 12 崩溃点覆盖；✅ 五操作互斥契约成立；✅ 4.4.0 模块零副作用 API |
+
 ### Phase 5：Cherry Chat SQLite-only 运行时完成
 
 | 属性 | 值 |
@@ -750,6 +768,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-27** | **Phase 4.2 Done** | Candidate SQLite bulk importer 完成。实际模块：`CandidateDbResource`（per-session 自有候选目录 + 候选 chat.db）、`ChatImportDataPlane`（分页数据面 + `SourceReadStats`）、`ChatImportWriter`（import-only 保序 writer，order-preserving，`candidate-ready` exact-once，`CandidateImportStats`）、`startupRecovery`（取消/错误/孤儿清理）。每页一事务、topic/message 扁平化、block/segment/file-reference 精确映射、replace-all 语义；`SourceReadStats` vs `CandidateImportStats` 分离。10k 基准：25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；两次运行 1016.2ms、978.5ms；`integrity_check` ok、`foreign_key_check` 空、live DB 未改。单元审计 + 最终审计 0 阻塞；聚焦测试通过；全量本地验证通过（2026-07-27）：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（node/web/aicore typecheck 全过、i18n 校验通过、0 errors，仅 pre-existing warnings）；`pnpm test` exit 0，252 文件 / 5325 通过 / 72 跳过；无遗留产物（本地全量验证未涉及 CI） |
 | **2026-07-27** | **Phase 4.3 Done** | Deterministic verification 完成（已提交/已推送；本地全量验证未涉及 CI）。实际模块：`CandidateVerifier`（只读验证器，返回稳定 13 维度结果 + 有界安全诊断，不泄露 SQL/path/stack）、`SourceVerificationManifest`（按页证据清单，仅在 DB 事务提交后落盘，stable canonical SHA-256 framing，manifest ~5,019KiB）、`VerificationReport`（~1.4KiB）；候选 DB 会话状态机 `candidate-ready → verifying → verified-candidate | verification-failed`；取消/退出 `close-before-discard`；通过保留候选 DB 供 4.4、失败报告后清理；corruption matrix 覆盖全部 13 维度。10k 验证证据：25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；13 维度全过；验证耗时 ~250–290ms；现有 live `chat.db` 未改。聚焦测试 271 通过；`pnpm format` exit 0 无改动；`pnpm lint` exit 0（0 errors，109 warnings）；`typecheck:node` 通过；首次 `pnpm test` 5420 通过 / 2 失败（BackupManager 共享临时目录非确定性 flakes，排查否定 Phase 4.3 干扰）/ 72 跳过；复跑 `pnpm test` 258 文件 / 5422 通过 / 72 跳过 / 0 失败；Main 与全量多次复跑干净；最终审计 0 findings（本地全量验证，未涉及 CI） |
 | **2026-07-27** | **集成同步门（Baseline Sync Gate，Done/已合并/已验证）** | **已完成**：integration（`05a401b711`）已集成同步进 migration（pre-merge HEAD `5d50499e80`）；合并自动解决、无兼容性编辑；审计 0 blocker / 0 code finding；验证全过：format 无改动；lint exit 0（112 known warnings）；typecheck 通过；`pnpm test` 265 文件 / 5664 通过 / 72 跳过 / 0 失败；聚焦测试 201 renderer + 822 chatDb/import。合并未改变 Phase 4.4 既有架构；Phase 5 须以合并后的 Renderer/context/type/Redux 结构为实施基线。历史锚点：migration 推送 tip `85603d0fd5`、两分支距 merge base `44e6b1b82b` 分别 15/21 commits（合并前基线事实）。 |
+| **2026-07-27** | **Phase 4.4.0 Done（Promotion 协议基础，纯协议层）** | LOCK-4401…4406 全落地且无副作用（LOCK-4405）。实际模块：`chatDbImport/promotion/{protocol,journal,recovery}.ts`（状态/exact-once/边界纯决策 + journal v1 严格 codec + 90 组合穷举恢复矩阵 + 12 崩溃点映射）、`chatDb/maintenanceCoordination.ts`（backup/restore/promotion/init/close 五操作统一互斥 lease 契约，未接线）、`chatDbImport/index.ts`（`ImportState` + `promoting/promoted/promotion-failed`；`claimPromotion()` 唯一入口 bounded to `getVerifiedCandidate()` + 不可复用 token；`completePromotion()` exact-once 终态结算；cancel 在 promoting 拒绝；async dispose/sync will-quit 保留 promotion-owned 候选）、`startupRecovery.ts`（纯契约 re-export，孤儿清理行为不变）。固定命名：journal `chat-import-promotion.journal.json`、snapshot `chat.db.pre-import-backup`（+`.staging` 单份保留顺序，LOCK-4403）。验证：聚焦 chatDb+chatDbImport 29 文件 / 895 通过 / 0 失败（基线 822 + 新增 73）；`typecheck:node` 通过。资产表旧路径 `chatDb/import/promotion.ts` 已修正为 `chatDbImport/promotion/`。真实文件操作/接线/IPC/relaunch 属 Phase 4.4.1+ |
 
 ---
 
@@ -781,6 +800,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-21** | Phase 4.1 | **Source-reader 生产化完成（Done）**：17 新文件 + 4 修改文件（chatDbImport/ + chatImport preload + chatImport renderer + shared types/IpcChannel + electron.vite.config + main/ipc/index）。审计 4 blockers 修复 + 复审 2 orchestrators 修复 + 最终 Auditor Clean。主进程 977/977。合入 `6a1e98e7ef` |
 | **2026-07-27** | Phase 4.2 | **Candidate bulk importer 完成（Done）**：实际模块 `CandidateDbResource` / `ChatImportDataPlane` / `ChatImportWriter` / `startupRecovery`；每页一事务、import-only 保序 writer、`candidate-ready` exact-once、`SourceReadStats` vs `CandidateImportStats` 分离；10k 基准（25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；两次运行 1016.2ms、978.5ms；`integrity_check` ok、`foreign_key_check` 空；live `chat.db` 未改）；最终审计 0 blockers；聚焦测试通过；全量本地验证通过（2026-07-27）：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（node/web/aicore typecheck 全过、i18n 校验通过、0 errors，仅 pre-existing warnings）；`pnpm test` exit 0，252 文件 / 5325 通过 / 72 跳过；无遗留产物（local-only full validation，未涉及 commit/push/CI） |
 | **2026-07-27** | Phase 4.3 | **Deterministic verification 完成（Done，已提交/已推送）**：实际模块 `CandidateVerifier` / `SourceVerificationManifest` / `VerificationReport`；只读 13 维度验证 + 有界安全诊断；manifest 按页事务后落盘 + stable canonical SHA-256（~5,019KiB）；会话状态机 candidate-ready→verifying→verified-candidate | verification-failed；取消/退出 close-before-discard；通过保留候选供 4.4、失败报告后清理；corruption matrix 覆盖全部维度；10k 验证证据（25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；~250–290ms）；聚焦测试 271 通过；`pnpm format` exit 0 无改动；`pnpm lint` exit 0（0 errors，109 warnings）；`typecheck:node` 通过；首次 `pnpm test` 5420 通过 / 2 失败（BackupManager 共享临时目录非确定性 flakes，排查否定 Phase 4.3 干扰）/ 72 跳过；复跑 `pnpm test` 258 文件 / 5422 通过 / 72 跳过 / 0 失败；Main 与全量多次复跑干净；最终审计 0 findings（本地全量验证，未涉及 CI） |
+| **2026-07-27** | Phase 4.4.0 | **Promotion 协议基础完成（Done，纯协议层）**：`chatDbImport/promotion/{protocol,journal,recovery}` + `chatDb/maintenanceCoordination` + `chatDbImport/index` 状态扩展（`promoting/promoted/promotion-failed`）+ `claimPromotion()`/`completePromotion()` exact-once + cancel/dispose/will-quit 边界 + startupRecovery 纯契约 re-export；journal v1 严格 codec（无路径）；恢复矩阵 90 组合穷举、12 崩溃点覆盖（LOCK-4406）；五操作互斥 lease 契约（LOCK-4402，未接线）；无任何 live/candidate/snapshot 文件操作或 promotion IPC（LOCK-4405）；聚焦 chatDb+chatDbImport 29 文件 / 895 通过（基线 822 + 新增 73）；`typecheck:node` 通过 |
 
 ---
 
@@ -846,7 +866,9 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | Import writer | `src/main/services/chatDbImport/ChatImportWriter`（Phase 4.2 已创建） | import-only 保序 writer（order-preserving），每页一事务，`candidate-ready` exact-once；`CandidateImportStats` |
 | Startup recovery | `src/main/services/chatDbImport/startupRecovery`（Phase 4.2 已创建） | 取消/错误/孤儿候选目录确定性清理 |
 | Verification | `src/main/services/chatDb/import/`（CandidateVerifier / SourceVerificationManifest / VerificationReport，Phase 4.3 已创建） | 只读 13 维度验证；manifest 按页事务后落盘 + stable canonical SHA-256；有界安全诊断；会话状态机 candidate-ready→verifying→verified-candidate\|verification-failed；close-before-discard |
-| Atomic promotion | `src/main/services/chatDb/import/promotion.ts`（Phase 4.4 规划） | 关闭 → 快照 → rename → reopen → relaunch |
+| Promotion protocol foundations | `src/main/services/chatDbImport/promotion/`（protocol/journal/recovery，Phase 4.4.0 已创建） | 纯协议层：promotion 状态/exact-once claim、journal v1 严格 codec、确定性恢复矩阵；无任何文件/DB 副作用 |
+| Maintenance coordination contract | `src/main/services/chatDb/maintenanceCoordination.ts`（Phase 4.4.0 已创建） | backup/restore/promotion/init/close 统一互斥 lease 契约（未接线，LOCK-4402） |
+| Atomic promotion executor | `src/main/services/chatDbImport/promotion/`（Phase 4.4.1+ 规划） | 快照 → 关闭 → install → reopen → 验证 → relaunch（消费 4.4.0 协议） |
 
 ### 已废弃/待移除路径
 

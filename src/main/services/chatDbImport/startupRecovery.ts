@@ -7,12 +7,28 @@
  *
  * Each recovery step is contained in its own try/catch so a failure is logged
  * through loggerService and never prevents normal app startup (LOCK-L3).
+ *
+ * Promotion recovery contract (Phase 4.4.0, LOCK-4405/4406): this seam
+ * re-exports the pure promotion recovery decision surface for the future
+ * Phase 4.4.1+ executor. Phase 4.4.0 does NOT read journals, probe files,
+ * or execute recovery here, and the existing orphan cleanup behavior is
+ * unchanged. When the executor is wired, a journal-referenced candidate
+ * MUST be excluded from the age-based candidate cleanup — a promoting
+ * candidate is never an ordinary import leftover (LOCK-4401).
  */
 
 import { loggerService } from '@logger'
 
 import { recoverOrphanedCandidates } from './candidateDb'
 import { recoverOrphanedTempWorkspaces } from './tempWorkspace'
+
+// Pure promotion recovery decision contract (no side effects, LOCK-4405).
+export {
+  decidePromotionRecovery,
+  PROMOTION_CRASH_POINT_MATRIX,
+  type PromotionRecoveryDecision,
+  type PromotionRecoveryInput
+} from './promotion/recovery'
 
 const logger = loggerService.withContext('chatDbImport')
 

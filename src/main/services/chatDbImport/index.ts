@@ -42,6 +42,21 @@
  * - Phase 4.3 performs NO promotion, live-DB replacement, snapshot,
  *   relaunch, or shared/preload/renderer exposure (LOCK-4305).
  *
+ * Promotion protocol foundations (Phase 4.4.0, LOCK-4401/4405):
+ * - verified-candidate → promoting → promoted | promotion-failed.
+ * - claimPromotion() is the ONLY promotion entry: it is bounded to
+ *   getVerifiedCandidate() and atomically transitions to `promoting`,
+ *   issuing an exact-once, non-reusable token. completePromotion() settles
+ *   the terminal result exactly once against that token.
+ * - Cancel is allowed only BEFORE `promoting`; once promoting, cancel is
+ *   rejected without any state change or cleanup. Ordinary disposal
+ *   (async dispose + sync will-quit) preserves the promoting candidate and
+ *   persisted recovery assets — cleanup belongs to the promotion executor
+ *   and deterministic startup recovery (see ./promotion/*).
+ * - Phase 4.4.0 performs NO live/candidate/snapshot filesystem operations,
+ *   no ChatDbService close/init, no rename/replace/restore, no relaunch,
+ *   and no promotion IPC (LOCK-4405).
+ *
  * A-9: Platform gate — if process.platform !== 'darwin', throw.
  * All imports route through loggerService with context 'chatDbImport'.
  */
@@ -63,6 +78,14 @@ import { ChatImportSessionError, ChatImportUnsupportedPlatformError } from './er
 import { createImportDataPlane } from './importDataPlane'
 import { registerChatImportIpc, sendCancel, sendDiscover, sendReadPage } from './importIpc'
 import { createIsolatedReader, dispose as disposeSession, disposeSync as disposeSessionSync } from './isolatedSession'
+import {
+  canEnterPromoting,
+  decideCandidateDisposal,
+  decidePromotionCancel,
+  decideWillQuit,
+  isPromotionResultState,
+  type PromotionResultState
+} from './promotion/protocol'
 import {
   createTempWorkspace,
   disposeAsync as disposeTempDirAsync,
@@ -106,6 +129,12 @@ export type ImportState =
   | 'verification-failed'
   | 'cancelled'
   | 'error'
+  // Phase 4.4.0 promotion protocol states (LOCK-4401). `promoting` means
+  // candidate ownership is frozen for the promotion executor — no file has
+  // been installed. `promoted` / `promotion-failed` are terminal.
+  | 'promoting'
+  | 'promoted'
+  | 'promotion-failed'
 
 /** States in which the sealed candidate exists on disk and is owned alive. */
 const SEALED_CANDIDATE_STATES: ReadonlySet<ImportState> = new Set([
@@ -298,6 +327,12 @@ class InternalImportSession implements ImportSession {
   /** CandidateReadyResult retained for the verification callback identity/stats. */
   public readyResult: CandidateReadyResult | null = null
 
+  // Promotion ownership (Phase 4.4.0, LOCK-4401): exact-once claim token.
+  /** Opaque non-reusable promotion token; non-null only while `promoting`. */
+  public promotionToken: string | null = null
+  /** Exact-once promotion claim guard: set once, never reset (LOCK-4401). */
+  public promotionClaimed = false
+
   constructor(id: string) {
     this.id = id
   }
@@ -321,13 +356,23 @@ class InternalImportSession implements ImportSession {
   }
 
   async cancel(): Promise<void> {
-    if (this.state === 'cancelled' || this.state === 'error' || this.state === 'verification-failed') {
+    // LOCK-4401 boundary: cancel is decided by the pure promotion protocol.
+    // - 'ignore-terminal'  → terminal state (incl. promoted/promotion-failed)
+    // - 'reject-promoting' → promoting entered; cancel refused with NO state
+    //   change and NO cleanup (the promotion executor owns the candidate)
+    // - 'allow'            → the pre-promotion cancel semantics below
+    const decision = decidePromotionCancel(this.state)
+    if (decision === 'ignore-terminal') {
       logger.info(`Cancel ignored for session ${this.id} in state ${this.state}`)
+      return
+    }
+    if (decision === 'reject-promoting') {
+      logger.warn(`Cancel rejected for session ${this.id}: promotion in progress (LOCK-4401)`)
       return
     }
 
     // LOCK-O5/LOCK-4305: cancel is allowed before AND after candidate-ready,
-    // INCLUDING verifying and verified-candidate (until Phase 4.4 promotion).
+    // INCLUDING verifying and verified-candidate (until the promotion claim).
     // It discards the candidate and all source resources. dispose() aborts
     // and closes the verifier BEFORE the candidate is discarded (LOCK-4303).
     // If a page write is in flight, the post-await state re-check in the
@@ -351,7 +396,19 @@ class InternalImportSession implements ImportSession {
   async fail(context: string, error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : String(error)
     logger.error(`Session ${this.id} failed during ${context}: ${message}`)
-    if (this.state !== 'cancelled' && this.state !== 'error' && this.state !== 'verification-failed') {
+    if (this.state === 'promoting') {
+      // LOCK-4401: `promoting` may only leave to a terminal result state.
+      // A failure during the promotion window settles `promotion-failed`
+      // (consuming the token) — never `error`. dispose() below preserves
+      // the promotion-owned candidate.
+      this.promotionToken = null
+      this.setState('promotion-failed')
+    } else if (
+      this.state !== 'cancelled' &&
+      this.state !== 'error' &&
+      this.state !== 'verification-failed' &&
+      !isPromotionResultState(this.state)
+    ) {
       this.setState('error')
     }
     await this.dispose()
@@ -388,12 +445,19 @@ class InternalImportSession implements ImportSession {
     // Discard candidate (closes DB handle first, then removes the owned
     // directory). Sealed candidates are discarded too: dispose is only
     // reached via cancel/error/verification-failed/manual teardown
-    // (LOCK-O5/O6, LOCK-4304).
+    // (LOCK-O5/O6, LOCK-4304). EXCEPT: once the promotion claim was made
+    // (promoting/promoted/promotion-failed), the candidate belongs to the
+    // promotion executor — ordinary disposal must preserve it on disk
+    // (LOCK-4401; pure decision in ./promotion/protocol).
     if (this.candidate) {
-      try {
-        await this.candidate.discard()
-      } catch (error) {
-        logger.warn(`Error discarding candidate for ${this.id}:`, error as Error)
+      if (decideCandidateDisposal(this.state) === 'preserve') {
+        logger.info(`Preserving promotion-owned candidate for session ${this.id} (state ${this.state})`)
+      } else {
+        try {
+          await this.candidate.discard()
+        } catch (error) {
+          logger.warn(`Error discarding candidate for ${this.id}:`, error as Error)
+        }
       }
       this.candidate = null
     }
@@ -441,13 +505,21 @@ class InternalImportSession implements ImportSession {
     }
   }
 
-  /** Synchronous candidate discard for the will-quit path. */
+  /**
+   * Synchronous candidate discard for the will-quit path. Preserves a
+   * promotion-owned candidate (LOCK-4401): after the claim, only the
+   * promotion executor / startup recovery may remove promotion artifacts.
+   */
   discardCandidateSync(): void {
     if (this.candidate) {
-      try {
-        this.candidate.discardSync()
-      } catch (error) {
-        logger.warn(`Error discarding candidate (sync) for ${this.id}:`, error as Error)
+      if (decideCandidateDisposal(this.state) === 'preserve') {
+        logger.info(`Preserving promotion-owned candidate (sync) for session ${this.id} (state ${this.state})`)
+      } else {
+        try {
+          this.candidate.discardSync()
+        } catch (error) {
+          logger.warn(`Error discarding candidate (sync) for ${this.id}:`, error as Error)
+        }
       }
       this.candidate = null
     }
@@ -784,12 +856,83 @@ export function getVerifiedCandidate(): VerifiedCandidateHandle | null {
 }
 
 /**
+ * Main-only exact-once promotion claim handle (Phase 4.4.0, LOCK-4401).
+ * Extends the verified-candidate handle with the opaque non-reusable token
+ * required by {@link completePromotion}. NEVER cross IPC with this.
+ */
+export interface PromotionClaimHandle extends VerifiedCandidateHandle {
+  /** Opaque exact-once promotion token (not a path, Main-internal). */
+  token: string
+}
+
+/**
+ * Atomically claim the verified candidate for promotion (LOCK-4401).
+ *
+ * This is the ONLY promotion entry. It is bounded to
+ * {@link getVerifiedCandidate}: the claim succeeds exactly when that
+ * accessor yields a handle, transitions `verified-candidate → promoting`
+ * synchronously (no interleaving window), and issues a non-reusable token.
+ * Every later call returns null — the state has left `verified-candidate`
+ * and the per-session claim guard never resets.
+ *
+ * Phase 4.4.0: claiming performs NO filesystem/DB side effects (LOCK-4405);
+ * it only freezes candidate ownership for the future promotion executor.
+ */
+export function claimPromotion(): PromotionClaimHandle | null {
+  const handle = getVerifiedCandidate()
+  if (!handle || !activeSession || activeSession.id !== handle.sessionId) {
+    return null
+  }
+  const session = activeSession
+  // Exact-once (LOCK-4401): the pure entry guard plus the never-reset
+  // claim flag. Both hold on the same synchronous frame — no await between
+  // the read and the transition.
+  if (!canEnterPromoting(session.state) || session.promotionClaimed) {
+    return null
+  }
+  session.promotionClaimed = true
+  session.promotionToken = generatePromotionToken()
+  session.setState('promoting')
+  return { ...handle, token: session.promotionToken }
+}
+
+/**
+ * Settle the promotion result exactly once (LOCK-4401).
+ *
+ * Only the active session in `promoting` with the exact issued token may
+ * settle, and only to a terminal result state. The token is consumed —
+ * a second call (any token) returns false. Pure state transition: no
+ * filesystem/DB side effects in Phase 4.4.0 (LOCK-4405).
+ */
+export function completePromotion(token: string, outcome: PromotionResultState): boolean {
+  if (!isPromotionResultState(outcome)) {
+    return false
+  }
+  const session = activeSession
+  if (!session || session.state !== 'promoting') {
+    return false
+  }
+  if (session.promotionToken === null || session.promotionToken !== token) {
+    return false
+  }
+  session.promotionToken = null
+  session.setState(outcome)
+  return true
+}
+
+/**
  * Dispose the active import session (sync, for will-quit).
  *
  * LOCK-4303 sync order: request verifier close synchronously (closing the
  * current better-sqlite3 handle) → candidate discardSync → reader/session
  * disposal → IPC cleanup. The candidate is never removed while the
  * verifier holds it.
+ *
+ * Promotion boundary (LOCK-4401): when the session is promotion-owned
+ * (promoting/promoted/promotion-failed), the pure will-quit decision
+ * preserves the candidate and persisted recovery assets — only
+ * non-promotion resources (verifier/reader/IPC) are torn down. Startup
+ * recovery then decides deterministically (LOCK-4406).
  */
 export function disposeActiveImport(): void {
   if (!activeSession) return
@@ -797,10 +940,16 @@ export function disposeActiveImport(): void {
   const session = activeSession
   activeSession = null
 
+  const willQuitDecision = decideWillQuit(session.state)
+  if (willQuitDecision === 'preserve-promotion-artifacts') {
+    logger.info(`will-quit during promotion for session ${session.id}: preserving promotion artifacts (LOCK-4401)`)
+  }
+
   // 1. Verifier close (abort + immediate handle closure).
   session.closeVerifierSync()
 
   // 2. Sync candidate discard (closes handle + removes owned directory).
+  // discardCandidateSync() itself preserves a promotion-owned candidate.
   session.discardCandidateSync()
 
   // 3. Sync window/session destruction.
@@ -1143,4 +1292,9 @@ function toError(error: unknown): Error {
 
 function generateSessionId(): string {
   return 'import-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
+}
+
+/** Opaque non-reusable promotion claim token (Main-internal, not a path). */
+function generatePromotionToken(): string {
+  return 'promotion-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
 }
