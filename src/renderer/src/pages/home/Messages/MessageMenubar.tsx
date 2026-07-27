@@ -17,7 +17,6 @@ import { useTemporaryValue } from '@renderer/hooks/useTemporaryValue'
 import useTranslate from '@renderer/hooks/useTranslate'
 import { resolveGroupKey } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
-import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getMessageTitle } from '@renderer/services/MessagesService'
 import { translateText } from '@renderer/services/TranslateService'
 import type { RootState } from '@renderer/store'
@@ -76,6 +75,7 @@ import { useTranslation } from 'react-i18next'
 import { useSelector } from 'react-redux'
 import styled from 'styled-components'
 
+import { emitNewBranch } from './messageBranch'
 import MessageTokens from './MessageTokens'
 
 const createTranslationAbortKey = (messageId: string) => `translation-abort-key:${messageId}`
@@ -89,7 +89,6 @@ interface Props {
   assistant: Assistant
   topic: Topic
   model?: Model
-  index?: number
   isGrouped?: boolean
   isLastMessage: boolean
   isAssistantMessage: boolean
@@ -144,7 +143,6 @@ type MessageMenubarButtonRenderer = (ctx: MessageMenubarButtonContext) => ReactN
 const MessageMenubar: FC<Props> = (props) => {
   const {
     message,
-    index,
     isGrouped,
     isLastMessage,
     isAssistantMessage,
@@ -256,9 +254,10 @@ const MessageMenubar: FC<Props> = (props) => {
   )
 
   const onNewBranch = useCallback(async () => {
-    void EventEmitter.emit(EVENT_NAMES.NEW_BRANCH, index)
-    window.toast.success(t('chat.message.new.branch.created'))
-  }, [index, t])
+    // NEW_BRANCH contract is ID-based; the listener reports success/failure toasts
+    // only after the async branch operation completes.
+    await emitNewBranch(message.id)
+  }, [message.id])
 
   const onInsertMessages = useCallback(async () => {
     await dispatch(insertMessagesThunk(topic.id, message.id, assistant.id))

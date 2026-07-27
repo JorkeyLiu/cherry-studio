@@ -16,7 +16,7 @@ import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { findFirstVisibleMessage } from '@renderer/pages/home/Messages/domVisibility'
-import { getBranchEndpoint } from '@renderer/pages/home/Messages/messageBranch'
+import { branchFromMessage } from '@renderer/pages/home/Messages/messageBranch'
 import { createMessageViewportGroupModel } from '@renderer/pages/home/Messages/messageGroups'
 import {
   applyColumnReverseScroll,
@@ -746,72 +746,73 @@ const Messages = ({
       EventEmitter.on(EVENT_NAMES.NEW_BRANCH, async (messageId: string) => {
         const newTopic = getDefaultTopic(assistant.id)
         newTopic.name = topic.name
-        const currentMessages = messagesRef.current
 
-        const branchEndpoint = getBranchEndpoint(currentMessages, messageId)
-        if (branchEndpoint === null) {
-          logger.error(`[NEW_BRANCH] Message not found: ${messageId}`)
-          return
-        }
+        await branchFromMessage(messagesRef.current, messageId, {
+          createBranch: async (branchEndpoint) => {
+            addTopic(newTopic)
+            return await createTopicBranch(topic.id, branchEndpoint, newTopic)
+          },
+          onMessageNotFound: () => {
+            logger.error(`[NEW_BRANCH] Message not found: ${messageId}`)
+          },
+          onSuccess: () => {
+            setActiveTopic(newTopic)
+            void autoRenameTopic(assistant, newTopic.id)
+            // Inherit fixed context window anchor (group-key based)
+            const assistantSettings = getAssistantSettings(assistant)
+            const sourceEffectiveMode =
+              assistantSettings.contextWindowMode === 'fixed'
+                ? (assistantSettings.topicContextWindowMode?.[topic.id] ?? assistantSettings.contextWindowMode)
+                : 'sliding'
 
-        addTopic(newTopic)
-
-        const success = await createTopicBranch(topic.id, branchEndpoint, newTopic)
-
-        if (success) {
-          setActiveTopic(newTopic)
-          void autoRenameTopic(assistant, newTopic.id)
-          // Inherit fixed context window anchor (group-key based)
-          const assistantSettings = getAssistantSettings(assistant)
-          const sourceEffectiveMode =
-            assistantSettings.contextWindowMode === 'fixed'
-              ? (assistantSettings.topicContextWindowMode?.[topic.id] ?? assistantSettings.contextWindowMode)
-              : 'sliding'
-
-          // Inherit topicContextWindowMode
-          const sourceTopicMode = assistantSettings.topicContextWindowMode?.[topic.id]
-          if (sourceTopicMode) {
-            updateAssistantSettings({
-              topicContextWindowMode: {
-                ...assistantSettings.topicContextWindowMode,
-                [newTopic.id]: sourceTopicMode
-              }
-            })
-          }
-
-          if (sourceEffectiveMode === 'fixed') {
-            const sourceAnchor = assistantSettings.fixedWindowAnchor?.[topic.id]
-            if (sourceAnchor?.kind === 'active') {
-              try {
-                const sourceState = store.getState()
-                const sourceMessageIds = sourceState.messages.messageIdsByTopic[topic.id] || []
-                const sourceEntities = sourceState.messages.entities
-                const sourceGroupList = buildGroupList(sourceMessageIds, (id) => sourceEntities[id])
-                const groupIndex = sourceGroupList.indexOf(sourceAnchor.groupKey)
-
-                if (groupIndex >= 0 && sourceGroupList.length > 0) {
-                  const newMessageIds = sourceState.messages.messageIdsByTopic[newTopic.id] || []
-                  const newEntities = sourceState.messages.entities
-                  const newGroupList = buildGroupList(newMessageIds, (id) => newEntities[id])
-
-                  if (groupIndex < newGroupList.length) {
-                    updateAssistantSettings({
-                      fixedWindowAnchor: {
-                        ...assistantSettings.fixedWindowAnchor,
-                        [newTopic.id]: { kind: 'active', groupKey: newGroupList[groupIndex] }
-                      }
-                    })
-                  }
+            // Inherit topicContextWindowMode
+            const sourceTopicMode = assistantSettings.topicContextWindowMode?.[topic.id]
+            if (sourceTopicMode) {
+              updateAssistantSettings({
+                topicContextWindowMode: {
+                  ...assistantSettings.topicContextWindowMode,
+                  [newTopic.id]: sourceTopicMode
                 }
-              } catch (error) {
-                logger.error('[NEW_BRANCH] Failed to inherit fixed context window anchor', error as Error)
+              })
+            }
+
+            if (sourceEffectiveMode === 'fixed') {
+              const sourceAnchor = assistantSettings.fixedWindowAnchor?.[topic.id]
+              if (sourceAnchor?.kind === 'active') {
+                try {
+                  const sourceState = store.getState()
+                  const sourceMessageIds = sourceState.messages.messageIdsByTopic[topic.id] || []
+                  const sourceEntities = sourceState.messages.entities
+                  const sourceGroupList = buildGroupList(sourceMessageIds, (id) => sourceEntities[id])
+                  const groupIndex = sourceGroupList.indexOf(sourceAnchor.groupKey)
+
+                  if (groupIndex >= 0 && sourceGroupList.length > 0) {
+                    const newMessageIds = sourceState.messages.messageIdsByTopic[newTopic.id] || []
+                    const newEntities = sourceState.messages.entities
+                    const newGroupList = buildGroupList(newMessageIds, (id) => newEntities[id])
+
+                    if (groupIndex < newGroupList.length) {
+                      updateAssistantSettings({
+                        fixedWindowAnchor: {
+                          ...assistantSettings.fixedWindowAnchor,
+                          [newTopic.id]: { kind: 'active', groupKey: newGroupList[groupIndex] }
+                        }
+                      })
+                    }
+                  }
+                } catch (error) {
+                  logger.error('[NEW_BRANCH] Failed to inherit fixed context window anchor', error as Error)
+                }
               }
             }
+
+            window.toast.success(t('chat.message.new.branch.created'))
+          },
+          onFailure: () => {
+            logger.error(`[NEW_BRANCH] Failed to create topic branch for topic ${newTopic.id}`)
+            window.toast.error(t('message.branch.error'))
           }
-        } else {
-          logger.error(`[NEW_BRANCH] Failed to create topic branch for topic ${newTopic.id}`)
-          window.toast.error(t('message.branch.error'))
-        }
+        })
       }),
       EventEmitter.on(
         EVENT_NAMES.EDIT_CODE_BLOCK,
