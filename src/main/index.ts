@@ -34,7 +34,7 @@ import { versionService } from './services/VersionService'
 import { windowService } from './services/WindowService'
 import { initWebviewHotkeys } from './services/WebviewService'
 import { chatDbService } from './services/chatDb'
-import { disposeActiveImport, recoverOrphanedTempWorkspaces } from './services/chatDbImport'
+import { disposeActiveImport, recoverOrphanedImportArtifacts } from './services/chatDbImport'
 import { runAsyncFunction } from './utils'
 import { extractRtkBinaries } from './utils/rtk'
 
@@ -174,12 +174,10 @@ if (!app.requestSingleInstanceLock()) {
       logger.warn('ChatDbService init skipped due to restore failure — chat DB unavailable this session')
     }
 
-    // Recover orphaned import temp workspaces from prior crashes (R-2)
-    try {
-      await recoverOrphanedTempWorkspaces()
-    } catch (error) {
-      logger.warn('Failed to recover orphaned import workspaces (non-fatal):', error as Error)
-    }
+    // Recover orphaned import artifacts from prior crashes: temp workspaces
+    // (R-2) then owned candidate directories (Phase 4.2). Failures are
+    // contained/logged inside the helper and never block startup (LOCK-L3).
+    await recoverOrphanedImportArtifacts()
 
     const mainWindow = windowService.createMainWindow()
 

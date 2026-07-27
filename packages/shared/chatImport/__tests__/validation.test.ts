@@ -6,7 +6,7 @@
  * - JsonObject[] items via reused chatDb validator
  * - DiscoveryResult shape
  * - ReadPageRequest/Response shape
- * - SourceStats shape
+ * - SourceReadStats shape
  *
  * Pattern follows packages/shared/chatDb/__tests__/validation.test.ts
  */
@@ -26,7 +26,7 @@ import type {
   ImportErrorPayload,
   ReadPageRequest,
   ReadPageResponse,
-  SourceStats
+  SourceReadStats
 } from '../types'
 
 // ===========================================================================
@@ -68,19 +68,18 @@ describe('ChatImportEnvelope', () => {
   })
 
   it('accepts a valid envelope with complete phase', () => {
-    const envelope: ChatImportEnvelope<SourceStats> = {
+    const envelope: ChatImportEnvelope<SourceReadStats> = {
       sessionId: 'session-789',
       phase: 'complete',
       version: 1,
       data: {
-        topicCount: 10,
-        messageCount: 100,
-        blockCount: 500,
-        segmentCount: 5,
-        fileRefCount: 20
+        topicRecordCount: 10,
+        blockRecordCount: 500,
+        segmentRecordCount: 5,
+        sourceFileRecordCount: 20
       }
     }
-    expect(envelope.data.topicCount).toBe(10)
+    expect(envelope.data.topicRecordCount).toBe(10)
   })
 
   it('accepts a valid envelope with error phase', () => {
@@ -221,34 +220,31 @@ describe('ReadPageResponse', () => {
 })
 
 // ===========================================================================
-// SourceStats shape
+// SourceReadStats shape
 // ===========================================================================
 
-describe('SourceStats', () => {
-  it('has all required count fields', () => {
-    const stats: SourceStats = {
-      topicCount: 50,
-      messageCount: 1000,
-      blockCount: 5000,
-      segmentCount: 100,
-      fileRefCount: 200
+describe('SourceReadStats', () => {
+  it('has all required record count fields', () => {
+    const stats: SourceReadStats = {
+      topicRecordCount: 50,
+      blockRecordCount: 5000,
+      segmentRecordCount: 100,
+      sourceFileRecordCount: 200
     }
-    expect(stats.topicCount).toBe(50)
-    expect(stats.messageCount).toBe(1000)
-    expect(stats.blockCount).toBe(5000)
-    expect(stats.segmentCount).toBe(100)
-    expect(stats.fileRefCount).toBe(200)
+    expect(stats.topicRecordCount).toBe(50)
+    expect(stats.blockRecordCount).toBe(5000)
+    expect(stats.segmentRecordCount).toBe(100)
+    expect(stats.sourceFileRecordCount).toBe(200)
   })
 
   it('accepts zero counts (empty database)', () => {
-    const stats: SourceStats = {
-      topicCount: 0,
-      messageCount: 0,
-      blockCount: 0,
-      segmentCount: 0,
-      fileRefCount: 0
+    const stats: SourceReadStats = {
+      topicRecordCount: 0,
+      blockRecordCount: 0,
+      segmentRecordCount: 0,
+      sourceFileRecordCount: 0
     }
-    expect(stats.topicCount).toBe(0)
+    expect(stats.topicRecordCount).toBe(0)
   })
 })
 
@@ -312,13 +308,13 @@ describe('Re-exported validators', () => {
 
 describe('Wire compatibility', () => {
   it('envelope round-trips through JSON', () => {
-    const original: ChatImportEnvelope<SourceStats> = {
+    const original: ChatImportEnvelope<SourceReadStats> = {
       sessionId: 'test-session',
       phase: 'complete',
       version: 1,
-      data: { topicCount: 1, messageCount: 2, blockCount: 3, segmentCount: 4, fileRefCount: 5 }
+      data: { topicRecordCount: 1, blockRecordCount: 3, segmentRecordCount: 4, sourceFileRecordCount: 5 }
     }
-    const roundTripped = JSON.parse(JSON.stringify(original)) as ChatImportEnvelope<SourceStats>
+    const roundTripped = JSON.parse(JSON.stringify(original)) as ChatImportEnvelope<SourceReadStats>
     expect(roundTripped).toEqual(original)
   })
 

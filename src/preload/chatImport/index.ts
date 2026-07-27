@@ -23,7 +23,7 @@ import type {
   ImportErrorPayload,
   ReadPageRequest,
   ReadPageResponse,
-  SourceStats
+  SourceReadStats
 } from '@shared/chatImport/types'
 import { IpcChannel } from '@shared/IpcChannel'
 import { contextBridge, ipcRenderer } from 'electron'
@@ -42,7 +42,7 @@ const chatImport = {
     ipcRenderer.invoke(IpcChannel.ChatImport_ReadPage, envelope),
 
   /** Renderer → Main: signal all data has been read (fire-and-forget). */
-  complete: (envelope: ChatImportEnvelope<SourceStats>): void =>
+  complete: (envelope: ChatImportEnvelope<SourceReadStats>): void =>
     ipcRenderer.send(IpcChannel.ChatImport_Complete, envelope),
 
   /** Renderer → Main: report an error (fire-and-forget). */

@@ -385,16 +385,66 @@ describe('ChatImport IPC Registration', () => {
         sessionId: 'test',
         phase: 'complete',
         version: 1,
-        data: { topicCount: 1, messageCount: 2, blockCount: 3, segmentCount: 4, fileRefCount: 5 }
+        data: { topicRecordCount: 1, blockRecordCount: 3, segmentRecordCount: 4, sourceFileRecordCount: 5 }
       })
 
       expect(onComplete).toHaveBeenCalledWith('test', {
-        topicCount: 1,
-        messageCount: 2,
-        blockCount: 3,
-        segmentCount: 4,
-        fileRefCount: 5
+        topicRecordCount: 1,
+        blockRecordCount: 3,
+        segmentRecordCount: 4,
+        sourceFileRecordCount: 5
       })
+    })
+
+    it('Complete rejects legacy SourceStats field names (strict SourceReadStats)', () => {
+      const onComplete = vi.fn()
+      disposer = registerChatImportIpc({ onComplete })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = onListeners.get(IpcChannel.ChatImport_Complete)!
+      handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'complete',
+        version: 1,
+        data: { topicCount: 1, messageCount: 2, blockCount: 3, segmentCount: 4, fileRefCount: 5 }
+      })
+
+      expect(onComplete).not.toHaveBeenCalled()
+    })
+
+    it('Complete rejects stats with a missing field', () => {
+      const onComplete = vi.fn()
+      disposer = registerChatImportIpc({ onComplete })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = onListeners.get(IpcChannel.ChatImport_Complete)!
+      handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'complete',
+        version: 1,
+        data: { topicRecordCount: 1, blockRecordCount: 3, segmentRecordCount: 4 }
+      })
+
+      expect(onComplete).not.toHaveBeenCalled()
+    })
+
+    it('Complete rejects non-integer counts', () => {
+      const onComplete = vi.fn()
+      disposer = registerChatImportIpc({ onComplete })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = onListeners.get(IpcChannel.ChatImport_Complete)!
+      handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'complete',
+        version: 1,
+        data: { topicRecordCount: 1.5, blockRecordCount: 3, segmentRecordCount: 4, sourceFileRecordCount: 5 }
+      })
+
+      expect(onComplete).not.toHaveBeenCalled()
     })
 
     it('Complete rejects wrong phase', () => {
@@ -550,6 +600,180 @@ describe('ChatImport IPC Registration', () => {
         cursor: '1',
         hasMore: true
       })
+    })
+  })
+
+  // =========================================================================
+  // Async callback transport contract (Phase 4.2 — LOCK-T2/T3/T4)
+  // =========================================================================
+
+  describe('async callback awaiting and containment', () => {
+    function makeReadPageEnvelope() {
+      return {
+        sessionId: 'test',
+        phase: 'reading',
+        version: 1,
+        data: { tableName: 'topics', items: [{ id: '1' }], cursor: '1', hasMore: true }
+      }
+    }
+
+    it('ReadPage ack resolves only AFTER an async onReadPage callback resolves (backpressure)', async () => {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      let callbackSettled = false
+      const onReadPage = vi.fn(async () => {
+        await gate
+        callbackSettled = true
+      })
+
+      disposer = registerChatImportIpc({ onReadPage })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = handlers.get(IpcChannel.ChatImport_ReadPage)!
+      let ackSettled = false
+      const ackPromise = handler(makeEvent(reader.mainFrame), makeReadPageEnvelope()).then((r: any) => {
+        ackSettled = true
+        return r
+      })
+
+      // Flush microtasks: the ack must still be pending while the callback is
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(onReadPage).toHaveBeenCalled()
+      expect(ackSettled).toBe(false)
+
+      release()
+      const result = await ackPromise
+      expect(callbackSettled).toBe(true)
+      expect(result).toEqual({ ok: true })
+    })
+
+    it('ReadPage converts an async onReadPage rejection into a structured failure ack', async () => {
+      const onReadPage = vi.fn(async () => {
+        throw new Error('candidate write failed')
+      })
+      disposer = registerChatImportIpc({ onReadPage })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = handlers.get(IpcChannel.ChatImport_ReadPage)!
+      const result = await handler(makeEvent(reader.mainFrame), makeReadPageEnvelope())
+
+      expect(result.ok).toBe(false)
+      expect(result.error).toContain('CALLBACK_FAILED')
+      expect(result.error).toContain('candidate write failed')
+    })
+
+    it('ReadPage converts a synchronous onReadPage throw into a structured failure ack', async () => {
+      const onReadPage = vi.fn(() => {
+        throw new Error('sync boom')
+      })
+      disposer = registerChatImportIpc({ onReadPage })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = handlers.get(IpcChannel.ChatImport_ReadPage)!
+      const result = await handler(makeEvent(reader.mainFrame), makeReadPageEnvelope())
+
+      expect(result.ok).toBe(false)
+      expect(result.error).toContain('CALLBACK_FAILED')
+      expect(result.error).toContain('sync boom')
+    })
+
+    it('Ready converts an async onReady rejection into a structured failure ack', async () => {
+      const onReady = vi.fn(async () => {
+        throw new Error('ready hook failed')
+      })
+      disposer = registerChatImportIpc({ onReady })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = handlers.get(IpcChannel.ChatImport_Ready)!
+      const result = await handler(makeEvent(reader.mainFrame), 'session-123')
+
+      expect(result.ok).toBe(false)
+      expect(result.error).toContain('CALLBACK_FAILED')
+    })
+
+    it('Discover converts an async onDiscover rejection into a structured failure ack', async () => {
+      const onDiscover = vi.fn(async () => {
+        throw new Error('discover hook failed')
+      })
+      disposer = registerChatImportIpc({ onDiscover })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = handlers.get(IpcChannel.ChatImport_Discover)!
+      const result = await handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'discovery',
+        version: 1,
+        data: { databaseName: 'CherryStudio', nativeVersion: 110, logicalVersion: 11, tableNames: ['topics'] }
+      })
+
+      expect(result.ok).toBe(false)
+      expect(result.error).toContain('CALLBACK_FAILED')
+    })
+
+    it('Complete contains an async onComplete rejection (no unhandled rejection)', async () => {
+      const onUnhandled = vi.fn()
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        const onComplete = vi.fn(async () => {
+          throw new Error('complete hook failed')
+        })
+        disposer = registerChatImportIpc({ onComplete })
+        const reader = makeReader()
+        mockGetActiveReader.mockReturnValue(reader)
+
+        const handler = onListeners.get(IpcChannel.ChatImport_Complete)!
+        handler(makeEvent(reader.mainFrame), {
+          sessionId: 'test',
+          phase: 'complete',
+          version: 1,
+          data: { topicRecordCount: 1, blockRecordCount: 2, segmentRecordCount: 3, sourceFileRecordCount: 4 }
+        })
+
+        // Let the contained promise settle plus a macrotask for the
+        // unhandledRejection event to fire if containment were broken.
+        await new Promise((resolve) => setTimeout(resolve, 10))
+
+        expect(onComplete).toHaveBeenCalled()
+        expect(onUnhandled).not.toHaveBeenCalled()
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled)
+      }
+    })
+
+    it('Error contains an async onError rejection (no unhandled rejection)', async () => {
+      const onUnhandled = vi.fn()
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        const onError = vi.fn(async () => {
+          throw new Error('error hook failed')
+        })
+        disposer = registerChatImportIpc({ onError })
+        const reader = makeReader()
+        mockGetActiveReader.mockReturnValue(reader)
+
+        const handler = onListeners.get(IpcChannel.ChatImport_Error)!
+        handler(makeEvent(reader.mainFrame), {
+          sessionId: 'test',
+          phase: 'error',
+          version: 1,
+          data: { code: 'X', message: 'y' }
+        })
+
+        await new Promise((resolve) => setTimeout(resolve, 10))
+
+        expect(onError).toHaveBeenCalled()
+        expect(onUnhandled).not.toHaveBeenCalled()
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled)
+      }
     })
   })
 })

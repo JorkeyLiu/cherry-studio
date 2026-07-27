@@ -7,13 +7,27 @@
 
 // Types — wire DTOs and envelope
 export type {
+  CandidateImportStats,
+  CandidateReadyResult,
   ChatImportEnvelope,
   DiscoveryResult,
   ImportErrorPayload,
   ReadPageRequest,
   ReadPageResponse,
-  SourceStats
+  SourceReadStats
 } from './types'
+
+// Stats/result runtime validators, guards, and version constant (Phase 4.2)
+export {
+  CHAT_IMPORT_WIRE_VERSION,
+  isCandidateImportStats,
+  isCandidateReadyResult,
+  isSourceReadStats,
+  validateCandidateImportStats,
+  validateCandidateReadyResult,
+  validateChatImportEnvelope,
+  validateSourceReadStats
+} from './validation'
 
 // Re-export result envelope from chatDb (no duplication)
 export { ERR_VALIDATION, fail, isFailure, isSuccess, ok } from '../chatDb/result'

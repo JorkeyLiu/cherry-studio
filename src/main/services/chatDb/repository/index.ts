@@ -8,6 +8,7 @@
 export { BlocksRepository } from './BlocksRepository'
 export { FileReferencesRepository } from './FileReferencesRepository'
 export type { AffectedCount, GetResult } from './helpers'
+export { ChatImportWriter, createImportWriter } from './ImportWriter'
 export { MessagesRepository } from './MessagesRepository'
 export { TopicSegmentsRepository } from './TopicSegmentsRepository'
 export { TopicsRepository } from './TopicsRepository'

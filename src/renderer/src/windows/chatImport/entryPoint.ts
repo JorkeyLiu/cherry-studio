@@ -21,7 +21,7 @@
  */
 
 import type { JsonObject } from '@shared/chatDb/types'
-import type { ChatImportEnvelope, DiscoveryResult, ReadPageResponse, SourceStats } from '@shared/chatImport/types'
+import type { ChatImportEnvelope, DiscoveryResult, ReadPageResponse, SourceReadStats } from '@shared/chatImport/types'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -54,7 +54,7 @@ declare global {
       ready: (sessionId: string) => Promise<{ ok: boolean; error?: string }>
       discoverResult: (envelope: ChatImportEnvelope<DiscoveryResult>) => Promise<{ ok: boolean; error?: string }>
       readPageResult: (envelope: ChatImportEnvelope<ReadPageResponse>) => Promise<{ ok: boolean; error?: string }>
-      complete: (envelope: ChatImportEnvelope<SourceStats>) => void
+      complete: (envelope: ChatImportEnvelope<SourceReadStats>) => void
       error: (envelope: ChatImportEnvelope<{ code: string; message: string }>) => void
       onDiscover: (callback: (sessionId: string) => void) => () => void
       onReadPage: (
@@ -89,10 +89,31 @@ export function computeNextCursor(items: JsonObject[]): string | null {
 }
 
 /**
- * Sleep helper for timeouts.
+ * Race an operation against a timeout with deterministic timer cleanup.
+ *
+ * Unlike a `sleep(...).then(() => { throw ... })` pattern in `Promise.race`,
+ * the timeout timer here is always cleared once the race settles. This
+ * guarantees:
+ *  - on operation success: the timer is cleared before returning, so the
+ *    losing timeout never fires and cannot leak an unhandled rejection;
+ *  - on operation failure: the timer is cleared, so no timer/rejection leaks;
+ *  - on timeout: the timeout promise rejects exactly once with `message`.
+ *
+ * The timeout promise only rejects from inside the `setTimeout` callback, which
+ * is cleared on every settle path, so the losing timeout can never produce an
+ * unhandled rejection or a pending timer.
  */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+export function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+  return Promise.race([operation, timeoutPromise]).finally(() => {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId)
+      timeoutId = undefined
+    }
+  })
 }
 
 /**
@@ -247,11 +268,6 @@ async function handleReadPage(tableName: string, cursor: string | null, pageSize
 
   const effectivePageSize = pageSize || DEFAULT_PAGE_SIZE
 
-  // Set up a timeout for the page read
-  const timeoutPromise = sleep(DEFAULT_PAGE_TIMEOUT_MS).then(() => {
-    throw new Error(`Page read timed out after ${DEFAULT_PAGE_TIMEOUT_MS}ms`)
-  })
-
   const readPromise = async (): Promise<ReadPageResponse> => {
     let collection
 
@@ -278,8 +294,12 @@ async function handleReadPage(tableName: string, cursor: string | null, pageSize
     }
   }
 
-  // Race against timeout
-  const response = await Promise.race([readPromise(), timeoutPromise])
+  // Race against timeout with deterministic timer cleanup (no leaked timer/rejection)
+  const response = await withTimeout(
+    readPromise(),
+    DEFAULT_PAGE_TIMEOUT_MS,
+    `Page read timed out after ${DEFAULT_PAGE_TIMEOUT_MS}ms`
+  )
 
   // Close DB after each page to release LevelDB locks (R-11)
   await closeDb()
@@ -297,15 +317,18 @@ async function handleReadPage(tableName: string, cursor: string | null, pageSize
 }
 
 /**
- * Build SourceStats from accumulated table read counts.
+ * Build SourceReadStats from accumulated table read counts.
+ * Counts are source records actually paged — nothing else. Messages are
+ * embedded in topics and never paged as their own table, so there is no
+ * message counter; `files` rows are counted as source file records, not
+ * target file references.
  */
-export function buildSourceStats(): SourceStats {
+export function buildSourceReadStats(): SourceReadStats {
   return {
-    topicCount: tableReadCounts['topics'] || 0,
-    messageCount: tableReadCounts['messages'] || 0,
-    blockCount: tableReadCounts['message_blocks'] || 0,
-    segmentCount: tableReadCounts['topic_segments'] || 0,
-    fileRefCount: tableReadCounts['files'] || 0
+    topicRecordCount: tableReadCounts['topics'] || 0,
+    blockRecordCount: tableReadCounts['message_blocks'] || 0,
+    segmentRecordCount: tableReadCounts['topic_segments'] || 0,
+    sourceFileRecordCount: tableReadCounts['files'] || 0
   }
 }
 

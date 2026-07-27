@@ -84,15 +84,75 @@ export interface ReadPageResponse {
 // ---------------------------------------------------------------------------
 
 /**
- * Aggregate row counts reported after the renderer has streamed all pages.
- * Used by Phase 4.2 for verification heuristics.
+ * Source-read accounting (LOCK-4211A).
+ *
+ * Describes the source entities that were *actually paged* out of the source
+ * IndexedDB during the read phase. Every field is a count of source records
+ * streamed for that table — nothing more. It deliberately does NOT claim:
+ * - embedded message counts (messages are not a paged source table), or
+ * - target file-reference counts (those belong to {@link CandidateImportStats}).
+ *
+ * All counts are safe, non-negative integers.
  */
-export interface SourceStats {
+export interface SourceReadStats {
+  /** Source `topics` records paged. */
+  topicRecordCount: number
+  /** Source `message_blocks` records paged. */
+  blockRecordCount: number
+  /** Source `topic_segments` records paged. */
+  segmentRecordCount: number
+  /** Source `files` records paged (source file rows, not target references). */
+  sourceFileRecordCount: number
+}
+
+/**
+ * Candidate construction accounting (LOCK-4211B).
+ *
+ * Describes what the downstream candidate builder produced for the import
+ * target. These are *target* counts, distinct from the source-read counts in
+ * {@link SourceReadStats}.
+ *
+ * All `*Count` and `pageCount` fields are safe, non-negative integers.
+ * `elapsedMs` is a non-negative finite number (fractional values allowed to
+ * accommodate high-resolution timers).
+ */
+export interface CandidateImportStats {
+  /** Topics written to the candidate. */
   topicCount: number
+  /** Messages reconstructed into the candidate. */
   messageCount: number
+  /** Message blocks written to the candidate. */
   blockCount: number
+  /** Topic segments written to the candidate. */
   segmentCount: number
-  fileRefCount: number
+  /** Segment membership links written to the candidate. */
+  segmentMembershipCount: number
+  /** File references written to the candidate. */
+  fileReferenceCount: number
+  /** Number of source pages consumed while building the candidate. */
+  pageCount: number
+  /** Wall-clock duration of candidate construction, in milliseconds. */
+  elapsedMs: number
+}
+
+/**
+ * Candidate-ready result (LOCK-4211C).
+ *
+ * Minimal shared contract the downstream Main code needs to hand a completed
+ * candidate back for later integration. It identifies the session and the
+ * candidate, and carries the {@link CandidateImportStats}.
+ *
+ * It deliberately exposes NO filesystem paths and NO SQL — those remain
+ * internal to Main. If a future phase requires the renderer to know a path,
+ * that must be added via an explicit, reviewed contract change, not here.
+ */
+export interface CandidateReadyResult {
+  /** Import session identifier (UUIDv4), matching the envelope `sessionId`. */
+  sessionId: string
+  /** Opaque candidate identifier assigned by Main. Not a path. */
+  candidateId: string
+  /** Candidate construction accounting. */
+  stats: CandidateImportStats
 }
 
 // ---------------------------------------------------------------------------

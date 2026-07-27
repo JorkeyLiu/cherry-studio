@@ -26,8 +26,9 @@ import type {
   ImportErrorPayload,
   ReadPageRequest,
   ReadPageResponse,
-  SourceStats
+  SourceReadStats
 } from '@shared/chatImport/types'
+import { validateSourceReadStats } from '@shared/chatImport/validation'
 import { IpcChannel } from '@shared/IpcChannel'
 import { ipcMain } from 'electron'
 
@@ -39,13 +40,22 @@ const logger = loggerService.withContext('chatDbImport')
 // Types
 // ---------------------------------------------------------------------------
 
-/** Consumer callbacks passed by the orchestrator (index.ts). */
+/**
+ * Consumer callbacks passed by the orchestrator (index.ts).
+ *
+ * Phase 4.2 transport contract: every callback may return a Promise. The IPC
+ * handlers await the callback before returning the ack envelope, so a slow
+ * consumer (e.g. a downstream page writer) exerts backpressure on the
+ * renderer, which awaits the invoke result before doing anything else.
+ * Callback rejections are caught at the IPC boundary and converted into a
+ * structured `{ ok: false, error }` ack — never an unhandled rejection.
+ */
 export interface ChatImportIpcCallbacks {
-  onReady?: (sessionId: string) => void
-  onDiscover?: (sessionId: string, result: DiscoveryResult) => void
-  onReadPage?: (sessionId: string, response: ReadPageResponse) => void
-  onComplete?: (sessionId: string, stats: SourceStats) => void
-  onError?: (sessionId: string, error: ImportErrorPayload) => void
+  onReady?: (sessionId: string) => void | Promise<void>
+  onDiscover?: (sessionId: string, result: DiscoveryResult) => void | Promise<void>
+  onReadPage?: (sessionId: string, response: ReadPageResponse) => void | Promise<void>
+  onComplete?: (sessionId: string, stats: SourceReadStats) => void | Promise<void>
+  onError?: (sessionId: string, error: ImportErrorPayload) => void | Promise<void>
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +115,11 @@ export function registerChatImportIpc(callbacks?: ChatImportIpcCallbacks): () =>
         return { ok: false, error: 'Invalid sessionId' }
       }
       logger.info(`Import renderer ready for session ${sessionId}`)
-      callbacks?.onReady?.(sessionId)
+      try {
+        await callbacks?.onReady?.(sessionId)
+      } catch (error) {
+        return callbackFailure(channel, sessionId, error)
+      }
       return { ok: true }
     }
     ipcMain.handle(channel, handler)
@@ -150,7 +164,11 @@ export function registerChatImportIpc(callbacks?: ChatImportIpcCallbacks): () =>
       logger.info(
         `Discovery result for session ${typed.sessionId}: native=${typed.data.nativeVersion}, logical=${typed.data.logicalVersion}, tables=${typed.data.tableNames.join(',')}`
       )
-      callbacks?.onDiscover?.(typed.sessionId, typed.data)
+      try {
+        await callbacks?.onDiscover?.(typed.sessionId, typed.data)
+      } catch (error) {
+        return callbackFailure(channel, typed.sessionId, error)
+      }
       return { ok: true }
     }
     ipcMain.handle(channel, handler)
@@ -188,7 +206,13 @@ export function registerChatImportIpc(callbacks?: ChatImportIpcCallbacks): () =>
       logger.info(
         `Read page for session ${typed.sessionId}: table=${typed.data.tableName}, items=${typed.data.items.length}, hasMore=${typed.data.hasMore}`
       )
-      callbacks?.onReadPage?.(typed.sessionId, typed.data)
+      // Backpressure (LOCK-T2/T4): await the consumer before acking, so the
+      // renderer cannot observe success until downstream processing finished.
+      try {
+        await callbacks?.onReadPage?.(typed.sessionId, typed.data)
+      } catch (error) {
+        return callbackFailure(channel, typed.sessionId, error)
+      }
       return { ok: true }
     }
     ipcMain.handle(channel, handler)
@@ -210,9 +234,22 @@ export function registerChatImportIpc(callbacks?: ChatImportIpcCallbacks): () =>
         logger.warn(`[${channel}] Invalid envelope: ${err}`)
         return
       }
-      const typed = envelope as ChatImportEnvelope<SourceStats>
-      logger.info(`Import complete for session ${typed.sessionId}: ${JSON.stringify(typed.data)}`)
-      callbacks?.onComplete?.(typed.sessionId, typed.data)
+      const typed = envelope as ChatImportEnvelope<unknown>
+
+      // Strict SourceReadStats validation (LOCK-T1/T6): exact key set,
+      // safe non-negative integer counts. Reject anything else.
+      let stats: SourceReadStats
+      try {
+        stats = validateSourceReadStats(typed.data, 'complete.data')
+      } catch (error) {
+        logger.warn(`[${channel}] Invalid source read stats: ${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
+
+      logger.info(`Import complete for session ${typed.sessionId}: ${JSON.stringify(stats)}`)
+      // Fire-and-forget channel: contain async callback rejections locally
+      // so they can never surface as unhandled rejections (LOCK-T3).
+      void invokeContained(channel, typed.sessionId, () => callbacks?.onComplete?.(typed.sessionId, stats))
     }
     ipcMain.on(channel, handler)
     handlers.push({ channel, handler, type: 'on' })
@@ -235,7 +272,7 @@ export function registerChatImportIpc(callbacks?: ChatImportIpcCallbacks): () =>
       }
       const typed = envelope as ChatImportEnvelope<ImportErrorPayload>
       logger.error(`Import error for session ${typed.sessionId}: [${typed.data.code}] ${typed.data.message}`)
-      callbacks?.onError?.(typed.sessionId, typed.data)
+      void invokeContained(channel, typed.sessionId, () => callbacks?.onError?.(typed.sessionId, typed.data))
     }
     ipcMain.on(channel, handler)
     handlers.push({ channel, handler, type: 'on' })
@@ -306,6 +343,33 @@ export function sendCancel(sessionId: string): void {
     return
   }
   reader.window.webContents.send(IpcChannel.ChatImport_Cancel, { sessionId })
+}
+
+// ---------------------------------------------------------------------------
+// Internal callback containment (LOCK-T3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert a rejected consumer callback into a structured failure ack.
+ * Sanitised: only the Error message (no stack) crosses the IPC boundary.
+ */
+function callbackFailure(channel: string, sessionId: string, error: unknown): { ok: false; error: string } {
+  const message = error instanceof Error ? error.message : String(error)
+  logger.error(`[${channel}] Consumer callback failed for session ${sessionId}: ${message}`)
+  return { ok: false, error: `CALLBACK_FAILED: ${message}` }
+}
+
+/**
+ * Invoke a possibly-async callback on a fire-and-forget channel, containing
+ * both synchronous throws and promise rejections. Never rethrows.
+ */
+async function invokeContained(channel: string, sessionId: string, fn: () => void | Promise<void>): Promise<void> {
+  try {
+    await fn()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    logger.error(`[${channel}] Consumer callback failed for session ${sessionId}: ${message}`)
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 # Cherry Studio SQLite 迁移文档
 
-> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1+ 未开始）
+> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3+ 未开始）
 > **分支**：`jorkey/refactor/sqlite-migration`
-> **最后更新**：2026-07-21
+> **最后更新**：2026-07-27
 > **Owner**：Personal fork（jorkeyliu）
 >
 > ⚠️ **ADR-8 策略更正（2026-07-20）**：Phase 4+ 的产品策略已更正为**外部应用兼容性导入**模型。原 in-place Dexie→SQLite shadow/cutover 模型已正式废弃。详见 Section 6 A-8。
@@ -421,18 +421,28 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **源数据约束** | 受支持源：Cherry Studio ZIP 备份含原始 Chromium IndexedDB。当前 IndexedDB schema 为主源。旧 IndexedDB 仅在当前 Dexie declaration/upgrades 可防御性识别并升级为当前逻辑形态时才接受 |
 | **缺失值规则** | 缺失值继承当前 Cherry Studio/Dexie upgrade 和 reader 语义。不创建 importer-specific 历史修复。不推断缺失 ID、ownership、timestamp、role、status、model 等字段。结构不可用数据被拒绝 |
 | **排除项** | 不解析 LevelDB（Main 不直接解析）；不恢复源到目标 app 的正常 Dexie profile；不扫描磁盘查找其他应用；不要求共享目录 |
-| **退出条件** | ✅ 安全 ZIP 解压 + IndexedDB 结构校验通过（5 层校验 + 通用 IndexedDB 探测）；✅ 隔离 Session 成功加载源数据（`session.fromPath(destDir, {cache:false})` + file:// origin）；✅ import renderer 通过 current Dexie schema 读取数据（`indexedDB.databases()` discovery + production Dexie upgrades v4→v11 + future-version gate ≥120）；✅ 分页 IPC 将逻辑数据传输到 Main（Main 驱动 Discover→ReadPage cursor progression + self-complete ready-for-bulk）；✅ 取消支持：用户可在 promotion 前中断，源数据和现有 SQLite 不受影响；✅ 平台拒绝（A-9 macOS-first）；✅ spike harness 保留（A-10）；✅ 主进程 977/977 测试通过；✅ 2 轮独立审计阻塞修复后最终 Clean |
+| **退出条件** | ✅ 安全 ZIP 解压 + IndexedDB 结构校验通过（5 层校验 + 通用 IndexedDB 探测）；✅ 隔离 Session 成功加载源数据（`session.fromPath(destDir, {cache:false})` + file:// origin）；✅ import renderer 通过 current Dexie schema 读取数据（`indexedDB.databases()` discovery + production Dexie upgrades v4→v11 + future-version gate ≥120）；✅ 分页 IPC 将逻辑数据传输到 Main（Main 驱动 Discover→ReadPage cursor progression；源 reader 分页读完后 self-complete 并精确一次（exact-once）发送 `candidate-ready` 信号；Phase 4.2 接收该信号后启动候选 DB 批量写入，非由 Phase 4.1 内 onReadyForBulk 启动 bulk）；✅ 取消支持：用户可在 promotion 前中断，源数据和现有 SQLite 不受影响；✅ 平台拒绝（A-9 macOS-first）；✅ spike harness 保留（A-10）；✅ 主进程 977/977 测试通过；✅ 2 轮独立审计阻塞修复后最终 Clean |
 
 #### Phase 4.2：Candidate SQLite bulk importer
 
 | 属性 | 值 |
 |---|---|
-| **状态** | Not started |
-| **前置** | Phase 4.1 完成 |
+| **状态** | **Done** (2026-07-27) |
+| **前置** | Phase 4.1 完成（Done） |
 | **目标** | 从分页逻辑数据构建完整候选 SQLite 数据库 |
-| **主要任务** | 分页接收 import-only IPC 数据；使用 Phase 2 repository 层（TopicsRepository 等）批量写入独立候选 DB 文件；事务包裹每批导入；replace-all 语义（非 merge） |
-| **数据流** | import renderer（源 IndexedDB → 逻辑 DTO）→ IPC 分页 → Main（候选 chat.db 批量写入） |
-| **退出条件** | ✅ 10k 消息完整导入到候选 DB；✅ 导入中断后候选 DB 可安全丢弃，现有 SQLite 不受影响；✅ 导入耗时有记录 |
+| **实际交付范围** | `CandidateDbResource`（per-session 自有候选目录，内含独立 `chat.db`）；`ChatImportDataPlane`（Main 侧分页数据面，承载 `SourceReadStats`）；`ChatImportWriter`（import-only 保序 writer，order-preserving，`candidate-ready` exact-once）；`startupRecovery`（启动清理：取消/错误/孤儿候选目录清理） |
+| **候选布局** | 每个导入会话拥有独立临时目录，目录内持有候选 `chat.db`；会话结束（promotion 成功或取消/失败）后目录被清理，不污染 live `Data/chat.db` |
+| **主要任务** | 分页接收 import-only IPC 数据（Main page 背压：Main 驱动 Discover→ReadPage，源 reader 按页就绪后精确一次发送 `candidate-ready`）；通过 Phase 2 repository 层（TopicsRepository 等）批量写入候选 DB；每页一个事务（one transaction/page）；import-only 保序写入（order-preserving，不重排源顺序）；topic/message 扁平化后写入；block/segment/file-reference 精确映射；replace-all 语义（非 merge） |
+| **统计语义** | `SourceReadStats`（源读取侧：从源 IndexedDB 读取的待导入逻辑计数）与 `CandidateImportStats`（候选 DB 写入侧：实际写入候选 DB 的计数）分离，验证阶段对照，不混用 |
+| **数据流** | import renderer（源 IndexedDB → 逻辑 DTO）→ IPC 分页（Main page 背压）→ Main `ChatImportDataPlane`/`ChatImportWriter`（候选 chat.db 批量写入，每页一事务，保序）→ `candidate-ready`（exact-once）→ Phase 4.3 验证 |
+| **失败/清理** | 取消/错误/孤儿候选目录由 `startupRecovery` 在下次启动确定性清理；现有 live SQLite 不受影响；候选 DB 可安全丢弃 |
+| **退出条件** | ✅ 10k 消息完整导入到候选 DB；✅ 导入中断后候选 DB 可安全丢弃，现有 SQLite 不受影响；✅ 导入耗时记录（10k 基准见下）；✅ 单元审计 + 最终审计 0 阻塞（final audit 0 blockers）；✅ 聚焦测试证据通过（focused test evidence）；✅ 全量本地验证通过（2026-07-27）：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（node/web/aicore typecheck 全过、i18n 校验通过、0 errors，仅 pre-existing warnings）；`pnpm test` exit 0，252 文件 / 5325 通过 / 72 跳过；无遗留产物（local-only full validation，未涉及 commit/push/CI） |
+
+**10k 基准证据（真实运行）**：
+- 数据集：25 个 topics、10,000 条 messages、11,000 个 blocks、26 个 segments、250 条 topic_segment_memberships、667 条 file references、19 页分页
+- 两次独立运行耗时：约 1016.2ms 与 978.5ms
+- 完整性：`PRAGMA integrity_check` 通过（ok）；`PRAGMA foreign_key_check` 结果为空（无外键违例）
+- 不变量：现有 live `chat.db` 未被改动（import 仅写候选 DB）
 
 #### Phase 4.3：Deterministic verification
 
@@ -597,7 +607,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | Phase 4.0 spike | fromPath + origin + Dexie schema 跨平台验证通过（或 helper 进程回退设计完成） | **Done — Go on macOS arm64** (Windows/Linux open; helper contingency recorded) |
 | ZIP 安全解压 | 唯一临时工作区 + IndexedDB 结构校验 | **Done** |
 | 隔离 Session 读取 | import renderer 通过当前 Dexie schema 成功读取源数据 | **Done** |
-| 候选 DB 构建 | 10k 消息完整导入；导入中断不损坏现有 DB | Not started |
+| 候选 DB 构建 | 10k 消息完整导入；导入中断不损坏现有 DB | **Done** |
 | 验证全通过 | ID/计数/字段/顺序/关系/哈希/integrity_check/foreign_key_check/应用层抽样 | Not started |
 | 原子 promotion | 成功 → reopen + relaunch；失败 → 回滚到快照 | Not started |
 | 取消支持 | promotion 前任意步骤取消不损坏现有 DB | Not started |
@@ -679,6 +689,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-21** | **A-10 Accepted：Phase 4.0 harness 保留至 Phase 5** | 17 个 harness 文件保留至 Phase 5（与 Group D 一并）。`PHASE4_SPIKE=1` 门控不进生产构建。Phase 4.1 生产模块独立新增 `src/main/services/chatDbImport/` + `src/preload/chatImport/` + `src/renderer/src/windows/chatImport/`，不复用 spike 代码。spike 专属（argv/exit/fixture/IPc multiplexer/A-B markers）丢弃，可复用硬事实（fromPath + file:// origin + indexedDB.databases + production Dexie upgrades + sender.id 校验 + will-navigate/setWindowOpenHandler deny）由生产模块重新干净实现 |
 | **2026-07-21** | **Phase 4.1 只读诊断完成** | Fresh Analyzer 产出 Phase 4.1 source-reader 侧生产化方案：① 模块划分（chatDbImport/ 下 zipIntake/isolatedSession/tempWorkspace/importIpc/index + 专用 preload/import renderer HTML）；② ZIP 库复用 node-stream-zip（BackupManager/DxtService 已用，零新依赖），5 层校验（500MB/10k条目/200MB单条/2GB总量/拒加密 + zip-slip path.resolve 跨平台 + IndexedDB 目录通用探测）；③ Import-only IPC 6 channel（ChatImport_Ready/Discover/ReadPage/Cancel/Complete/Error）独立于 14 个 ChatDb_*；envelope `sessionId+phase+version:1`；DTO 复用 Dexie 逻辑形状不引 import-specific；④ 12 条 correctness risks 全部本轮内处理；⑤ 决策待用户拍板项：跨平台策略、spike 去留、import renderer HTML 入口——均已闭环（A-9/A-10/Q-12） |
 | **2026-07-21** | **Phase 4.1 source-reader 生产化完成** | 17 个新文件 + 4 个修改文件：`src/main/services/chatDbImport/`（errors/tempWorkspace/zipIntake/isolatedSession/importIpc/index + 5 tests），`src/preload/chatImport/index.ts`，`src/renderer/src/windows/chatImport/`（chatImport.html + entryPoint.ts），`packages/shared/chatImport/`（types/index/validation.test.ts），`packages/shared/IpcChannel.ts` 6 ChatImport_* entries，`electron.vite.config.ts` chatImport HTML + preload entry，`src/main/ipc.ts` + `src/main/index.ts` 注册/will-quit/app-ready wiring。安全：5 层 ZIP 校验 + `session.fromPath(destDir)` + `location.protocol` origin 校验 + `event.senderFrame` sender 校验 + singleton + R-1..R-12 全部 mitigated。主进程 977/977 测试通过。最终 Auditor Clean。合入 commit `6a1e98e7ef` |
+| **2026-07-27** | **Phase 4.2 Done** | Candidate SQLite bulk importer 完成。实际模块：`CandidateDbResource`（per-session 自有候选目录 + 候选 chat.db）、`ChatImportDataPlane`（分页数据面 + `SourceReadStats`）、`ChatImportWriter`（import-only 保序 writer，order-preserving，`candidate-ready` exact-once，`CandidateImportStats`）、`startupRecovery`（取消/错误/孤儿清理）。每页一事务、topic/message 扁平化、block/segment/file-reference 精确映射、replace-all 语义；`SourceReadStats` vs `CandidateImportStats` 分离。10k 基准：25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；两次运行 1016.2ms、978.5ms；`integrity_check` ok、`foreign_key_check` 空、live DB 未改。单元审计 + 最终审计 0 阻塞；聚焦测试通过；全量本地验证通过（2026-07-27）：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（node/web/aicore typecheck 全过、i18n 校验通过、0 errors，仅 pre-existing warnings）；`pnpm test` exit 0，252 文件 / 5325 通过 / 72 跳过；无遗留产物（local-only full validation，未涉及 commit/push/CI） |
 
 ---
 
@@ -708,6 +719,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-21** | 决策 | A-9 Accepted（Phase 4.1 macOS-first + 平台拒绝）；A-10 Accepted（Phase 4.0 harness 保留至 Phase 5）；Q-12 Resolved（import renderer 专用独立 HTML 入口） |
 | **2026-07-21** | Phase 4.1 | 只读诊断完成（In progress）：fresh Analyzer 产出 source-reader 侧生产化方案；3 项 deferred 问题（跨平台/spike/HTML 入口）已闭环并文档化 |
 | **2026-07-21** | Phase 4.1 | **Source-reader 生产化完成（Done）**：17 新文件 + 4 修改文件（chatDbImport/ + chatImport preload + chatImport renderer + shared types/IpcChannel + electron.vite.config + main/ipc/index）。审计 4 blockers 修复 + 复审 2 orchestrators 修复 + 最终 Auditor Clean。主进程 977/977。合入 `6a1e98e7ef` |
+| **2026-07-27** | Phase 4.2 | **Candidate bulk importer 完成（Done）**：实际模块 `CandidateDbResource` / `ChatImportDataPlane` / `ChatImportWriter` / `startupRecovery`；每页一事务、import-only 保序 writer、`candidate-ready` exact-once、`SourceReadStats` vs `CandidateImportStats` 分离；10k 基准（25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；两次运行 1016.2ms、978.5ms；`integrity_check` ok、`foreign_key_check` 空；live `chat.db` 未改）；最终审计 0 blockers；聚焦测试通过；全量本地验证通过（2026-07-27）：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（node/web/aicore typecheck 全过、i18n 校验通过、0 errors，仅 pre-existing warnings）；`pnpm test` exit 0，252 文件 / 5325 通过 / 72 跳过；无遗留产物（local-only full validation，未涉及 commit/push/CI） |
 
 ---
 
@@ -760,17 +772,20 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | `src/main/services/agents/drizzle.config.ts` | agents drizzle 配置（scripts 引用但不存在） |
 | `Data/agents.db` | 用户设备上可能遗留的 agents 数据库文件 |
 
-### Phase 4 实现区域（待创建）
+### Phase 4 实现区域（实际已创建 / 规划）
 
-| 区域 | 预期路径 | 说明 |
+| 区域 | 实际/预期路径 | 说明 |
 |---|---|---|
-| ZIP intake + extract | `src/main/services/chatDb/import/` | 安全解压、IndexedDB 结构校验、临时工作区管理 |
-| Isolated session/profile | `src/main/services/chatDb/import/isolatedSession.ts` | `session.fromPath(absolutePath, { cache: false })` / isolated profile + origin 创建 |
-| Import renderer | `src/renderer/src/windows/import/` | 隐藏 sandboxed renderer，当前 Dexie schema against isolated profile |
-| Import IPC | `packages/shared/IpcChannel.ts` (新增) | 窄 import-only IPC channels |
-| Candidate builder | `src/main/services/chatDb/import/candidateBuilder.ts` | 使用 Phase 2 repository 层批量写入候选 DB |
-| Verification | `src/main/services/chatDb/import/verification.ts` | 源 vs 目标全维度验证 |
-| Atomic promotion | `src/main/services/chatDb/import/promotion.ts` | 关闭 → 快照 → rename → reopen → relaunch |
+| ZIP intake + extract | `src/main/services/chatDbImport/`（zipIntake/tempWorkspace，Phase 4.1 已创建） | 安全解压、IndexedDB 结构校验、临时工作区管理 |
+| Isolated session/profile | `src/main/services/chatDbImport/isolatedSession.ts`（Phase 4.1 已创建） | `session.fromPath(absolutePath, { cache: false })` / isolated profile + origin 创建 |
+| Import renderer | `src/renderer/src/windows/chatImport/`（Phase 4.1 已创建） | 隐藏 sandboxed renderer，当前 Dexie schema against isolated profile |
+| Import IPC | `packages/shared/chatImport/`（Phase 4.1 已创建，ChatImport_* 6 channels） | 窄 import-only IPC channels；`packages/shared/IpcChannel.ts` 已登记 |
+| Candidate DB resource | `src/main/services/chatDbImport/CandidateDbResource`（Phase 4.2 已创建） | per-session 自有候选目录，内含独立候选 `chat.db` |
+| Import data plane | `src/main/services/chatDbImport/ChatImportDataPlane`（Phase 4.2 已创建） | Main 侧分页数据面，承载 `SourceReadStats`；Main page 背压驱动 |
+| Import writer | `src/main/services/chatDbImport/ChatImportWriter`（Phase 4.2 已创建） | import-only 保序 writer（order-preserving），每页一事务，`candidate-ready` exact-once；`CandidateImportStats` |
+| Startup recovery | `src/main/services/chatDbImport/startupRecovery`（Phase 4.2 已创建） | 取消/错误/孤儿候选目录确定性清理 |
+| Verification | `src/main/services/chatDb/import/verification.ts`（Phase 4.3 规划） | 源 vs 目标全维度验证 |
+| Atomic promotion | `src/main/services/chatDb/import/promotion.ts`（Phase 4.4 规划） | 关闭 → 快照 → rename → reopen → relaunch |
 
 ### 已废弃/待移除路径
 
