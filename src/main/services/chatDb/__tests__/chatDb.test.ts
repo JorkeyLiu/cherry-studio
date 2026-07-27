@@ -177,7 +177,13 @@ vi.mock('node:fs', () => ({
 // ---------------------------------------------------------------------------
 
 import { BetterSqlite3BackupAdapter, ChatDbBackup } from '../backup'
-import { chatDbService } from '../index'
+import { ChatDbService, chatDbService } from '../index'
+import {
+  createMaintenanceCoordinator,
+  getSharedMaintenanceCoordinator,
+  isMaintenanceBusyError,
+  MaintenanceBusyError
+} from '../maintenanceCoordination'
 import { MIGRATIONS, runMigrations } from '../migration'
 
 // ---------------------------------------------------------------------------
@@ -783,5 +789,172 @@ describe('Integration: full lifecycle', () => {
     // isInitialised() returns true because the handle is still live.
     // This allows a subsequent close() to retry.
     expect(chatDbService.isInitialised()).toBe(true)
+  })
+})
+
+// ===========================================================================
+// Maintenance coordination wiring (Phase 4.4.1, LOCK-4416)
+// ===========================================================================
+
+describe('ChatDbService maintenance coordination wiring (LOCK-4416)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockSqliteInstances.length = 0
+    appliedMigrationKeys.length = 0
+    clearMemfs()
+  })
+
+  it('live init is refused with a structured busy error while backup holds the lease', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    coordinator.acquire('backup', 'backup-manager')
+
+    const svc = new ChatDbService('/mock/coord', coordinator)
+    let caught: unknown
+    try {
+      await svc.init()
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(MaintenanceBusyError)
+    expect(isMaintenanceBusyError(caught)).toBe(true)
+    const busy = caught as MaintenanceBusyError
+    expect(busy.requestedKind).toBe('init')
+    expect(busy.conflictingKind).toBe('backup')
+    expect(busy.conflictingOwnerId).toBe('backup-manager')
+    expect(svc.isInitialised()).toBe(false)
+    // The foreign holder is undisturbed.
+    expect(coordinator.currentHolder()).toEqual({ kind: 'backup', ownerId: 'backup-manager' })
+  })
+
+  it('init holds the init lease while in flight and releases it on completion', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+
+    const initPromise = svc.init()
+    // Lease is held while init has not settled.
+    expect(coordinator.currentHolder()).toEqual({ kind: 'init', ownerId: 'chat-db-live' })
+
+    await initPromise
+    expect(svc.isInitialised()).toBe(true)
+    expect(coordinator.currentHolder()).toBeNull()
+
+    // The slot is free for the next maintenance operation.
+    const next = coordinator.acquire('backup', 'next')
+    expect(next.granted).toBe(true)
+    if (next.granted) {
+      coordinator.release(next.lease)
+    }
+    svc.close()
+  })
+
+  it('init releases the lease on failure so a retry can acquire it again', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+
+    MockDatabase.mockImplementationOnce(() => {
+      throw new Error('Simulated DB open failure')
+    })
+
+    await expect(svc.init()).rejects.toThrow('Simulated DB open failure')
+    expect(coordinator.currentHolder()).toBeNull()
+
+    // Retry succeeds and coordinates normally.
+    await svc.init()
+    expect(svc.isInitialised()).toBe(true)
+    expect(coordinator.currentHolder()).toBeNull()
+    svc.close()
+  })
+
+  it('close acquires and releases the close lease when the slot is free', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+    await svc.init()
+
+    svc.close()
+    expect(svc.isInitialised()).toBe(false)
+    expect(coordinator.currentHolder()).toBeNull()
+    expect(mockLogger.warn).not.toHaveBeenCalledWith(expect.stringContaining('without maintenance lease'))
+  })
+
+  it('close returns false (busy) when a foreign operation holds the lease — LOCK-4416 compliance', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+    await svc.init()
+
+    // A foreign backup operation holds the lease at close time.
+    const grant = coordinator.acquire('backup', 'backup-manager')
+    expect(grant.granted).toBe(true)
+
+    // LOCK-4416: close() MUST NOT bypass the foreign lease. It returns false
+    // (close-busy) and does NOT close the handle. Process termination
+    // (Electron will-quit) terminates the process and releases handles.
+    const closeResult = svc.close()
+    expect(closeResult).toBe(false)
+    // The handle is NOT closed — sqlite is still alive for the same process.
+    expect(svc.isInitialised()).toBe(true)
+    // The foreign holder is undisturbed.
+    expect(coordinator.currentHolder()).toEqual({ kind: 'backup', ownerId: 'backup-manager' })
+    expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('holds the maintenance lease'))
+  })
+
+  it('close during in-flight init supersedes owner-safely; stale init release cannot free a newer holder', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+
+    const initPromise = svc.init()
+    expect(coordinator.currentHolder()).toEqual({ kind: 'init', ownerId: 'chat-db-live' })
+
+    // close() releases the instance's OWN init lease (owner-safe), takes the
+    // close lease, closes, and frees the slot — all synchronously.
+    svc.close()
+    expect(coordinator.currentHolder()).toBeNull()
+
+    // A newer foreign holder takes the slot before init's finally runs.
+    coordinator.acquire('restore', 'restore-owner')
+
+    await initPromise.catch(() => {
+      // Superseded init may reject — either outcome must not disturb the slot.
+    })
+
+    // The stale init lease release was refused: the newer holder is intact.
+    expect(coordinator.currentHolder()).toEqual({ kind: 'restore', ownerId: 'restore-owner' })
+    expect(svc.isInitialised()).toBe(false)
+  })
+
+  it('candidate ChatDbService instances stay uncoordinated (not live maintenance)', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    // Foreign lease held — a coordinated instance would be refused.
+    coordinator.acquire('promotion', 'import-session-1')
+
+    // Candidate construction passes NO coordinator (matches candidateDb factory).
+    const candidate = new ChatDbService('/mock/candidate')
+    await candidate.init()
+    expect(candidate.isInitialised()).toBe(true)
+    candidate.close()
+    expect(candidate.isInitialised()).toBe(false)
+
+    // The coordinator never saw the candidate lifecycle.
+    expect(coordinator.currentHolder()).toEqual({ kind: 'promotion', ownerId: 'import-session-1' })
+  })
+
+  it('the live singleton is joined to the shared coordinator', async () => {
+    const shared = getSharedMaintenanceCoordinator()
+    const grant = shared.acquire('backup', 'backup-manager')
+    expect(grant.granted).toBe(true)
+    if (!grant.granted) return
+
+    try {
+      await expect(chatDbService.init()).rejects.toSatisfy((e: unknown) => isMaintenanceBusyError(e))
+    } finally {
+      shared.release(grant.lease)
+    }
+
+    // After release, the singleton initialises and coordinates normally.
+    await chatDbService.init()
+    expect(chatDbService.isInitialised()).toBe(true)
+    expect(shared.currentHolder()).toBeNull()
+    chatDbService.close()
+    expect(shared.currentHolder()).toBeNull()
   })
 })

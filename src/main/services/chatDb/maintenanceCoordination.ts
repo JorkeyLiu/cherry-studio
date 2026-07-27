@@ -6,14 +6,17 @@
  *
  *   backup | restore | promotion | init | close
  *
- * Today, `BackupManager` and `ChatDbBackup` each hold an independent async
- * mutex and `ChatDbService.init()/close()` rely on a generation counter.
- * LOCK-4402 forbids adding a third independent runtime mutex; instead this
- * module is the single contract those callers will adopt in a later
- * execution unit. Phase 4.4.0 does NOT wire any existing operation to it —
- * no runtime behavior changes here (LOCK-4405). Promotion exact-once is
- * additionally enforced by the promotion protocol itself; this contract
- * only serializes maintenance operations.
+ * Phase 4.4.1 (LOCK-4416) adopts this contract at runtime: the outer
+ * complete backup operations (`BackupManager`), restore staging/activation,
+ * and the live `ChatDbService` singleton init/close all coordinate through
+ * ONE shared coordinator instance (`getSharedMaintenanceCoordinator`).
+ * `BackupManager`/`ChatDbBackup` keep their internal fine-grained mutexes
+ * for serialisation; the shared coordinator adds cross-category mutual
+ * exclusion. Candidate ChatDbService instances (import candidate DBs) are
+ * NOT live maintenance and never join the shared coordinator. Promotion
+ * exact-once is additionally enforced by the promotion protocol itself;
+ * this contract only serializes maintenance operations (the promotion
+ * lease seam below is consumed by later orchestration).
  *
  * Contract semantics:
  * - Single-holder lease: at most one maintenance operation holds the lease
@@ -83,9 +86,8 @@ export type MaintenanceAcquireResult =
     }
 
 /**
- * Single-holder maintenance coordinator (contract reference
- * implementation). Pure in-memory state; the later execution unit adopts
- * this in place of the independent mutexes — Phase 4.4.0 wires nothing.
+ * Single-holder maintenance coordinator. Pure in-memory state; adopted at
+ * runtime in Phase 4.4.1 via `getSharedMaintenanceCoordinator()`.
  */
 export interface MaintenanceCoordinator {
   /** Attempt to acquire the exclusive maintenance lease. Non-blocking. */
@@ -137,6 +139,174 @@ export function createMaintenanceCoordinator(): MaintenanceCoordinator {
 
     currentHolder(): { kind: MaintenanceOperationKind; ownerId: string } | null {
       return holder === null ? null : { kind: holder.kind, ownerId: holder.ownerId }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Structured busy error (Phase 4.4.1, LOCK-4416)
+// ---------------------------------------------------------------------------
+
+/** Stable, classifiable code for maintenance-lease contention. */
+export const ERR_CHAT_DB_MAINTENANCE_BUSY = 'ERR_CHAT_DB_MAINTENANCE_BUSY'
+
+/**
+ * Thrown when a maintenance operation is refused because another operation
+ * holds the shared lease. Structured and classifiable: carries the
+ * requested/conflicting kinds and bounded owner labels (never paths).
+ *
+ * The message intentionally contains the word "busy" so the existing
+ * chatDb IPC error mapper classifies it as ERR_BUSY (retryable) without
+ * requiring changes to errors.ts.
+ */
+export class MaintenanceBusyError extends Error {
+  readonly code = ERR_CHAT_DB_MAINTENANCE_BUSY
+  readonly requestedKind: MaintenanceOperationKind
+  readonly requestedOwnerId: string
+  readonly conflictingKind: MaintenanceOperationKind
+  readonly conflictingOwnerId: string
+
+  constructor(
+    requestedKind: MaintenanceOperationKind,
+    requestedOwnerId: string,
+    conflictingKind: MaintenanceOperationKind,
+    conflictingOwnerId: string
+  ) {
+    super(
+      `Chat DB maintenance is busy: '${requestedKind}' (owner '${requestedOwnerId}') refused because ` +
+        `'${conflictingKind}' (owner '${conflictingOwnerId}') currently holds the maintenance lease.`
+    )
+    this.name = 'MaintenanceBusyError'
+    this.requestedKind = requestedKind
+    this.requestedOwnerId = requestedOwnerId
+    this.conflictingKind = conflictingKind
+    this.conflictingOwnerId = conflictingOwnerId
+  }
+}
+
+/** Classify an unknown error as a maintenance busy refusal. */
+export function isMaintenanceBusyError(error: unknown): error is MaintenanceBusyError {
+  return (
+    error instanceof MaintenanceBusyError ||
+    (error instanceof Error && (error as { code?: unknown }).code === ERR_CHAT_DB_MAINTENANCE_BUSY)
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Shared runtime coordinator (Phase 4.4.1, LOCK-4416)
+// ---------------------------------------------------------------------------
+
+let sharedCoordinator: MaintenanceCoordinator | null = null
+
+/**
+ * The single process-wide coordinator adopted by live maintenance callers:
+ * BackupManager (backup + restore staging/activation), the live
+ * ChatDbService singleton (init/close), and promotion orchestration (via
+ * `acquirePromotionLease`). Candidate ChatDbService instances must NOT use
+ * this coordinator — candidate init/close are not live maintenance.
+ */
+export function getSharedMaintenanceCoordinator(): MaintenanceCoordinator {
+  if (sharedCoordinator === null) {
+    sharedCoordinator = createMaintenanceCoordinator()
+  }
+  return sharedCoordinator
+}
+
+/**
+ * Test-only: discard the shared coordinator so each test starts from a
+ * free slot. Never call from production code.
+ */
+export function resetSharedMaintenanceCoordinatorForTests(): void {
+  sharedCoordinator = null
+}
+
+// ---------------------------------------------------------------------------
+// Lease helpers (owner-safe, try/finally friendly)
+// ---------------------------------------------------------------------------
+
+/**
+ * Acquire a lease or throw a structured `MaintenanceBusyError`.
+ * Non-blocking, like the underlying contract.
+ */
+export function acquireMaintenanceLeaseOrThrow(
+  coordinator: MaintenanceCoordinator,
+  kind: MaintenanceOperationKind,
+  ownerId: string
+): MaintenanceLease {
+  const result = coordinator.acquire(kind, ownerId)
+  if (!result.granted) {
+    throw new MaintenanceBusyError(kind, ownerId, result.conflictingKind, result.conflictingOwnerId)
+  }
+  return result.lease
+}
+
+/**
+ * Run `fn` while holding the maintenance lease for `kind`.
+ * Throws `MaintenanceBusyError` when the slot is held; always releases the
+ * exact granted lease in `finally` (owner-safe — a stale/foreign lease can
+ * never release another holder because release is lease-ID checked).
+ */
+export async function withMaintenanceLease<T>(
+  coordinator: MaintenanceCoordinator,
+  kind: MaintenanceOperationKind,
+  ownerId: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const lease = acquireMaintenanceLeaseOrThrow(coordinator, kind, ownerId)
+  try {
+    return await fn()
+  } finally {
+    coordinator.release(lease)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Promotion lease seam (Phase 4.4.1, LOCK-4416 — no promotion-only mutex)
+// ---------------------------------------------------------------------------
+
+/**
+ * Bounded handle over a granted promotion lease. Later promotion
+ * orchestration acquires this seam instead of introducing its own mutex.
+ * `release()` is idempotent and owner-safe: it releases only the exact
+ * granted lease, exactly once, and can never disturb a newer holder.
+ */
+export interface PromotionLeaseHandle {
+  /** Bounded owner label the lease was granted to. */
+  readonly ownerId: string
+  /** True once this handle released (or failed to release) its lease. */
+  isReleased(): boolean
+  /**
+   * Release the promotion lease. Returns true on the first successful
+   * release; false on duplicate calls or if the slot moved on.
+   */
+  release(): boolean
+}
+
+/**
+ * Acquire the exclusive promotion lease on the shared coordinator.
+ * Throws `MaintenanceBusyError` while backup, restore, live init/close,
+ * or another promotion holds the slot. The live DB stays open and
+ * authoritative during preparation (LOCK-4411) — holding this lease closes
+ * nothing.
+ */
+export function acquirePromotionLease(
+  ownerId: string,
+  coordinator: MaintenanceCoordinator = getSharedMaintenanceCoordinator()
+): PromotionLeaseHandle {
+  const lease = acquireMaintenanceLeaseOrThrow(coordinator, 'promotion', ownerId)
+  let released = false
+
+  return {
+    ownerId,
+    isReleased(): boolean {
+      return released
+    },
+    release(): boolean {
+      if (released) {
+        return false
+      }
+      released = true
+      return coordinator.release(lease)
     }
   }
 }

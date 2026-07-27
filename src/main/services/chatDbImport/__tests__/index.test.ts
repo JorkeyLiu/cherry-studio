@@ -57,6 +57,10 @@ vi.mock('electron', () => ({
   }
 }))
 
+// Mock @main/config so importing the promotion preparation module (via the
+// index service entry) never touches a live Data path (house pattern).
+vi.mock('@main/config', () => ({ DATA_PATH: '/mock/data' }))
+
 vi.mock('../tempWorkspace', () => ({
   createTempWorkspace: vi.fn().mockResolvedValue('/tmp/cherry-import-test'),
   dispose: vi.fn(),
@@ -130,6 +134,7 @@ vi.mock('@main/services/chatDb', () => ({
 }))
 
 import { ChatImportSessionError, ChatImportUnsupportedPlatformError } from '../errors'
+import type { PreparedPromotionHandle, PromotionPreparationResult } from '../index'
 import {
   cancelImport,
   claimPromotion,
@@ -139,7 +144,8 @@ import {
   getActiveImport,
   getSealedCandidate,
   getVerifiedCandidate,
-  startImport
+  startImport,
+  startPromotionPreparation
 } from '../index'
 
 // ---------------------------------------------------------------------------
@@ -1844,5 +1850,262 @@ describe('ChatImport index', () => {
 
       await session.dispose()
     })
+  })
+
+  // =========================================================================
+  // Promotion preparation integration (Phase 4.4.1 — LOCK-4411..4417)
+  // =========================================================================
+
+  describe('startPromotionPreparation (Phase 4.4.1 integration)', () => {
+    /** Drive a harness to the verified-candidate state. */
+    async function toVerified(session: Awaited<ReturnType<typeof startImport>>) {
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+      expect(session.state).toBe('verified-candidate')
+    }
+
+    /** Prepared-handle double matching the claim (LOCK-O8 injection). */
+    function makePreparedHandle(claim: {
+      token: string
+      sessionId: string
+      candidateId: string
+      dbPath: string
+    }): PreparedPromotionHandle & { dispose: ReturnType<typeof vi.fn> } {
+      let disposed = false
+      return {
+        token: claim.token,
+        sessionId: claim.sessionId,
+        candidateId: claim.candidateId,
+        retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
+        candidateDbPath: claim.dbPath,
+        dispose: vi.fn(() => {
+          disposed = true
+        }),
+        isDisposed: () => disposed
+      }
+    }
+
+    const PREPARE_OPTIONS = {
+      dbDir: '/mock/data-root',
+      getLiveSqlite: () => ({ mock: 'live-sqlite' })
+    }
+
+    /** Injected preparation double resolving ok with a matching handle. */
+    function makePrepareOk() {
+      const handles: Array<ReturnType<typeof makePreparedHandle>> = []
+      const prepare = vi.fn(
+        async (claim: any, _dbDir: string, _getLiveSqlite: () => unknown): Promise<PromotionPreparationResult> => {
+          const handle = makePreparedHandle(claim)
+          handles.push(handle)
+          return { ok: true, handle }
+        }
+      )
+      return { prepare, handles }
+    }
+
+    const PREPARE_FAILURE = {
+      phase: 'create-snapshot',
+      code: 'SNAPSHOT_FAILED',
+      safeCode: 'ONLINE_BACKUP_FAILED'
+    } as const
+
+    it('returns not-claimable when no import session is active', async () => {
+      const { prepare } = makePrepareOk()
+      const outcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+
+      expect(outcome.status).toBe('not-claimable')
+      expect(prepare).not.toHaveBeenCalled()
+    })
+
+    itOnDarwin('returns not-claimable before verified-candidate without side effects', async () => {
+      const { verifier, releaseRun } = makeGatedVerifier()
+      const { session } = await begin({ verifier })
+      await discover(session.id)
+      await runAllPages(session.id)
+      expect(session.state).toBe('verifying')
+
+      const { prepare } = makePrepareOk()
+      const outcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+
+      expect(outcome.status).toBe('not-claimable')
+      expect(prepare).not.toHaveBeenCalled()
+      expect(session.state).toBe('verifying')
+
+      releaseRun(makeReport('aborted'))
+      await flushVerification()
+      await session.dispose()
+    })
+
+    itOnDarwin('one call claims and prepares exactly once: handle stored, state stays promoting', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+
+      const { prepare } = makePrepareOk()
+      const outcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+
+      expect(outcome.status).toBe('prepared')
+      if (outcome.status !== 'prepared') return
+
+      // Exactly one preparation run, bound to the exact-once claim: the
+      // claim carries the session identity, opaque candidate ID, and token.
+      expect(prepare).toHaveBeenCalledTimes(1)
+      const claimArg = prepare.mock.calls[0][0]
+      expect(claimArg.sessionId).toBe(session.id)
+      expect(claimArg.candidateId).toBe(`candidate-${session.id}`)
+      expect(claimArg.token).toMatch(/^promotion-/)
+      expect(prepare.mock.calls[0][1]).toBe(PREPARE_OPTIONS.dbDir)
+
+      // The prepared handle is retained on the session, aligned with the
+      // claim token, and the session stays promoting for Phase 4.4.2.
+      expect(outcome.handle.token).toBe(claimArg.token)
+      expect((session as any).preparedHandle).toBe(outcome.handle)
+      expect(session.state).toBe('promoting')
+      expect(outcome.handle.isDisposed()).toBe(false)
+
+      await session.dispose()
+    })
+
+    itOnDarwin('duplicate calls do not re-prepare: the second call is not-claimable (exact-once)', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+
+      const { prepare } = makePrepareOk()
+      const first = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+      expect(first.status).toBe('prepared')
+
+      const second = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+      const third = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+
+      // No second snapshot/journal/lease side effect can ever run.
+      expect(second.status).toBe('not-claimable')
+      expect(third.status).toBe('not-claimable')
+      expect(prepare).toHaveBeenCalledTimes(1)
+      expect(session.state).toBe('promoting')
+      if (first.status === 'prepared') {
+        expect((session as any).preparedHandle).toBe(first.handle)
+      }
+
+      await session.dispose()
+    })
+
+    itOnDarwin('preparation failure settles promotion-failed via the token protocol', async () => {
+      const { session, candidate } = await begin()
+      await toVerified(session)
+
+      const prepare = vi.fn(
+        async (_claim: any): Promise<PromotionPreparationResult> => ({ ok: false, failure: PREPARE_FAILURE })
+      )
+      const outcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+
+      expect(outcome.status).toBe('preparation-failed')
+      if (outcome.status === 'preparation-failed') {
+        expect(outcome.failure).toBe(PREPARE_FAILURE)
+      }
+      // Unique transition to the terminal result state; token consumed.
+      expect(session.state).toBe('promotion-failed')
+      expect((session as any).preparedHandle).toBeNull()
+      expect((session as any).promotionToken).toBeNull()
+      const claimToken = prepare.mock.calls[0][0].token
+      expect(completePromotion(claimToken, 'promoted')).toBe(false)
+      // Promotion-owned candidate preserved for startup recovery.
+      expect(candidate.discard).not.toHaveBeenCalled()
+
+      await session.dispose()
+    })
+
+    itOnDarwin('async dispose releases the stored prepared handle exactly once', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+
+      const { prepare, handles } = makePrepareOk()
+      const outcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+      expect(outcome.status).toBe('prepared')
+
+      await session.dispose()
+
+      expect(handles[0].dispose).toHaveBeenCalledTimes(1)
+      expect((session as any).preparedHandle).toBeNull()
+
+      // Idempotent: a second dispose never re-releases.
+      await session.dispose()
+      expect(handles[0].dispose).toHaveBeenCalledTimes(1)
+    })
+
+    itOnDarwin('sync will-quit releases the stored prepared handle and preserves the candidate', async () => {
+      const { session, candidate } = await begin()
+      await toVerified(session)
+
+      const { prepare, handles } = makePrepareOk()
+      const outcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+      expect(outcome.status).toBe('prepared')
+
+      disposeActiveImport()
+
+      expect(handles[0].dispose).toHaveBeenCalledTimes(1)
+      expect((session as any).preparedHandle).toBeNull()
+      // Promotion-owned candidate preserved (LOCK-4401).
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect(candidate.discardSync).not.toHaveBeenCalled()
+      expect(getActiveImport()).toBeNull()
+
+      await session.dispose()
+      expect(handles[0].dispose).toHaveBeenCalledTimes(1)
+    })
+
+    itOnDarwin('failure during promoting releases the stored handle once and settles promotion-failed', async () => {
+      const { session, candidate } = await begin()
+      await toVerified(session)
+
+      const { prepare, handles } = makePrepareOk()
+      const outcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+      expect(outcome.status).toBe('prepared')
+
+      // A raced renderer error during the promotion window.
+      await capturedCallbacks.onError(session.id, { code: 'E_LATE', message: 'late renderer error' })
+
+      expect(session.state).toBe('promotion-failed')
+      expect(handles[0].dispose).toHaveBeenCalledTimes(1)
+      expect((session as any).preparedHandle).toBeNull()
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin(
+      'raced failure during preparation: late success is stale, handle disposed and never stored',
+      async () => {
+        const { session } = await begin()
+        await toVerified(session)
+
+        let releasePrepare!: (result: PromotionPreparationResult) => void
+        const gate = new Promise<PromotionPreparationResult>((resolve) => {
+          releasePrepare = resolve
+        })
+        let capturedClaim: any = null
+        const prepare = vi.fn(async (claim: any) => {
+          capturedClaim = claim
+          return gate
+        })
+
+        const outcomePromise = startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(session.state).toBe('promoting')
+
+        // The session fails while preparation is in flight (owner settles).
+        await capturedCallbacks.onError(session.id, { code: 'E_LATE', message: 'late renderer error' })
+        expect(session.state).toBe('promotion-failed')
+
+        // The preparation then resolves ok — but the claim is stale.
+        const handle = makePreparedHandle(capturedClaim)
+        releasePrepare({ ok: true, handle })
+        const outcome = await outcomePromise
+
+        expect(outcome.status).toBe('stale-claim')
+        // The stale handle was disposed (lease released), never stored.
+        expect(handle.dispose).toHaveBeenCalledTimes(1)
+        expect((session as any).preparedHandle).toBeNull()
+        expect(session.state).toBe('promotion-failed')
+      }
+    )
   })
 })

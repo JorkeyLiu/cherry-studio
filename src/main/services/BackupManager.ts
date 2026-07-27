@@ -30,6 +30,7 @@ import type { CreateDirectoryOptions, FileStat } from 'webdav'
 import { getDataPath } from '../utils'
 import { isPathInside, resolveAndValidatePath } from '../utils/file'
 import { chatDbService } from './chatDb'
+import { getSharedMaintenanceCoordinator, withMaintenanceLease } from './chatDb/maintenanceCoordination'
 import S3Storage from './S3Storage'
 import WebDav from './WebDav'
 import { windowService } from './WindowService'
@@ -115,6 +116,15 @@ class BackupManager {
    *   silently usable.
    */
   static async handleStartupRestore(): Promise<void> {
+    // Phase 4.4.1 (LOCK-4416): restore activation holds the shared chat DB
+    // maintenance lease ('restore') so the live-Data swap can never overlap
+    // backup, promotion, or live ChatDbService init/close.
+    return withMaintenanceLease(getSharedMaintenanceCoordinator(), 'restore', 'startup-restore-activation', async () =>
+      BackupManager.doHandleStartupRestore()
+    )
+  }
+
+  private static async doHandleStartupRestore(): Promise<void> {
     const userDataPath = app.getPath('userData')
 
     // Define restore paths
@@ -414,11 +424,22 @@ class BackupManager {
   /**
    * Process-wide async mutex for backup operations.
    * Ensures only one backup runs at a time across all entry points.
+   *
+   * Phase 4.4.1 (LOCK-4416): each outer complete backup operation also
+   * holds the shared chat DB maintenance lease ('backup') for its full
+   * duration, making it mutually exclusive with restore, promotion, and
+   * live ChatDbService init/close. Acquisition is non-blocking: if another
+   * maintenance operation holds the lease, the backup fails with a
+   * structured MaintenanceBusyError. The lease wraps fn() inside the
+   * internal mutex, so ChatDbBackup's fine-grained snapshot mutex (called
+   * within fn) never nests a second shared-lease acquisition — no implicit
+   * nested live lock.
    */
   private static async withBackupMutex<T>(fn: () => Promise<T>): Promise<T> {
+    const run = () => withMaintenanceLease(getSharedMaintenanceCoordinator(), 'backup', 'backup-manager', fn)
     const result = BackupManager.backupMutex.then(
-      () => fn(),
-      () => fn()
+      () => run(),
+      () => run()
     )
     BackupManager.backupMutex = result.then(
       () => {},
@@ -739,44 +760,52 @@ class BackupManager {
    * @returns For legacy backup: the data string from data.json. For direct backup: void (app will relaunch)
    */
   async restore(_: Electron.IpcMainInvokeEvent, backupPath: string): Promise<string | void> {
-    const onProgress = this.onProgress(IpcChannel.RestoreProgress, true)
+    // Phase 4.4.1 (LOCK-4416): restore staging holds the shared chat DB
+    // maintenance lease ('restore') for its full duration — mutually
+    // exclusive with backup, promotion, and live init/close. Fails with a
+    // structured MaintenanceBusyError when another operation holds the
+    // lease. The lease is released in withMaintenanceLease's finally, even
+    // on failure (owner-safe).
+    return withMaintenanceLease(getSharedMaintenanceCoordinator(), 'restore', 'backup-manager-restore', async () => {
+      const onProgress = this.onProgress(IpcChannel.RestoreProgress, true)
 
-    try {
-      // Create temp directory
-      await fs.ensureDir(this.tempDir)
-      onProgress({ stage: 'preparing', progress: 0, total: 100 })
+      try {
+        // Create temp directory
+        await fs.ensureDir(this.tempDir)
+        onProgress({ stage: 'preparing', progress: 0, total: 100 })
 
-      logger.debug(`step 1: unzip backup file: ${this.tempDir}`)
+        logger.debug(`step 1: unzip backup file: ${this.tempDir}`)
 
-      const zip = new StreamZip.async({ file: backupPath })
-      onProgress({ stage: 'extracting', progress: 15, total: 100 })
-      await zip.extract(null, this.tempDir)
-      onProgress({ stage: 'extracted', progress: 20, total: 100 })
+        const zip = new StreamZip.async({ file: backupPath })
+        onProgress({ stage: 'extracting', progress: 15, total: 100 })
+        await zip.extract(null, this.tempDir)
+        onProgress({ stage: 'extracted', progress: 20, total: 100 })
 
-      // Check for backup type: direct (version 6+) or legacy (version <= 5)
-      const metadataPath = path.join(this.tempDir, 'metadata.json')
-      const isDirectBackup = await fs.pathExists(metadataPath)
+        // Check for backup type: direct (version 6+) or legacy (version <= 5)
+        const metadataPath = path.join(this.tempDir, 'metadata.json')
+        const isDirectBackup = await fs.pathExists(metadataPath)
 
-      if (isDirectBackup) {
-        // Direct backup format (version 6+)
-        logger.debug('Detected direct backup format (version 6+)')
-        // Note: tempDir is NOT cleaned up here - restoreDirect will use and clean it
-        await this.restoreDirect()
-        // Direct restore doesn't return data - app needs to relaunch
-        return
+        if (isDirectBackup) {
+          // Direct backup format (version 6+)
+          logger.debug('Detected direct backup format (version 6+)')
+          // Note: tempDir is NOT cleaned up here - restoreDirect will use and clean it
+          await this.restoreDirect()
+          // Direct restore doesn't return data - app needs to relaunch
+          return
+        }
+
+        // Legacy backup format (version <= 5)
+        logger.debug('Detected legacy backup format (version <= 5)')
+
+        const data = await this.restoreLegacy()
+
+        return data
+      } catch (error) {
+        logger.error('Restore failed:', error as Error)
+        await fs.remove(this.tempDir).catch(() => {})
+        throw error
       }
-
-      // Legacy backup format (version <= 5)
-      logger.debug('Detected legacy backup format (version <= 5)')
-
-      const data = await this.restoreLegacy()
-
-      return data
-    } catch (error) {
-      logger.error('Restore failed:', error as Error)
-      await fs.remove(this.tempDir).catch(() => {})
-      throw error
-    }
+    })
   }
 
   /**

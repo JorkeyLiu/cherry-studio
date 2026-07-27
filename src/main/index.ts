@@ -35,6 +35,8 @@ import { windowService } from './services/WindowService'
 import { initWebviewHotkeys } from './services/WebviewService'
 import { chatDbService } from './services/chatDb'
 import { disposeActiveImport, recoverOrphanedImportArtifacts } from './services/chatDbImport'
+import { readPromotionJournal } from './services/chatDbImport/promotion/journalStore'
+import type { PromotionJournalObservation } from './services/chatDbImport/promotion/recovery'
 import { runAsyncFunction } from './utils'
 import { extractRtkBinaries } from './utils/rtk'
 
@@ -177,7 +179,33 @@ if (!app.requestSingleInstanceLock()) {
     // Recover orphaned import artifacts from prior crashes: temp workspaces
     // (R-2) then owned candidate directories (Phase 4.2). Failures are
     // contained/logged inside the helper and never block startup (LOCK-L3).
-    await recoverOrphanedImportArtifacts()
+    //
+    // Phase 4.4.1 (LOCK-4413/4414): read the promotion journal to determine
+    // whether a promoting candidate must be protected from age-based cleanup.
+    // Invalid/I/O-failed journal reads are classified as repair/block per
+    // existing app repair conventions — they do NOT silently continue.
+    let journalObservation: PromotionJournalObservation = { status: 'absent' }
+    try {
+      const journalResult = await readPromotionJournal()
+      if (journalResult.status === 'absent') {
+        journalObservation = { status: 'absent' }
+      } else if (journalResult.status === 'invalid') {
+        journalObservation = { status: 'invalid' }
+        logger.warn(`Promotion journal is invalid (${journalResult.code}): candidate cleanup blocked until repair`)
+      } else {
+        journalObservation = journalResult
+      }
+    } catch (error) {
+      // I/O failure reading the journal: treat as invalid (repair-block path).
+      // LOCK-4414: an unreadable journal is NOT absent — promotion may have
+      // begun and its progress is unknowable.
+      journalObservation = { status: 'invalid' }
+      logger.warn(
+        'Failed to read promotion journal (I/O failure): candidate cleanup blocked until repair',
+        error as Error
+      )
+    }
+    await recoverOrphanedImportArtifacts(journalObservation)
 
     const mainWindow = windowService.createMainWindow()
 

@@ -41,6 +41,9 @@ import {
   CANDIDATE_ROOT_DIRNAME,
   CandidateDbResource,
   getCandidateRoot,
+  getOwnedCandidateDirName,
+  isValidCandidateId,
+  isValidOwnedCandidateId,
   recoverOrphanedCandidates
 } from '../candidateDb'
 
@@ -332,6 +335,167 @@ describe('candidateDb — lifecycle primitives', () => {
     it('is a no-op when the candidate root does not exist', async () => {
       // Fresh dataRoot with no candidate root yet.
       await expect(recoverOrphanedCandidates(dataRoot)).resolves.not.toThrow()
+    })
+
+    // -----------------------------------------------------------------------
+    // Journal-aware protection (Phase 4.4.1, LOCK-4413/4414/4415)
+    // -----------------------------------------------------------------------
+
+    describe('protected candidate IDs', () => {
+      it('preserves an aged candidate named by a protected ID while cleaning other aged candidates (LOCK-4413)', async () => {
+        // The protected ID is the opaque candidate directory ID exactly as
+        // the import session emits it and the journal records it — i.e. the
+        // full owned leaf name, mapped exactly once (no re-prefixing).
+        const protectedDir = makeDir(`${CANDIDATE_DIR_PREFIX}promoting-session`, true)
+        const unprotectedDir = makeDir(`${CANDIDATE_DIR_PREFIX}stale-session`, true)
+
+        await recoverOrphanedCandidates(dataRoot, {
+          protectedCandidateIds: [`${CANDIDATE_DIR_PREFIX}promoting-session`]
+        })
+
+        // Journal-named candidate survives despite exceeding the age policy.
+        expect(fs.existsSync(protectedDir)).toBe(true)
+        // Ordinary aged orphan is still cleaned.
+        expect(fs.existsSync(unprotectedDir)).toBe(false)
+      })
+
+      it('a real journal candidateId protects the real aged candidate directory (accepted 4.4.1 audit blocker)', async () => {
+        // End-to-end realistic shapes: CandidateDbResource creates the
+        // on-disk leaf for an import session ID, and the import session /
+        // promotion journal emit candidateId = `candidate-<sessionId>`.
+        const sessionId = 'import-m3k9zq1-a1b2c3d4'
+        const journalCandidateId = `${CANDIDATE_DIR_PREFIX}${sessionId}` // InternalImportSession.candidateId shape
+
+        const resource = new CandidateDbResource({
+          sessionId,
+          dataRoot,
+          chatDbServiceFactory: makeFakeService
+        })
+        await resource.initialize()
+        resource.seal()
+        // The on-disk leaf equals the journal candidateId byte-for-byte.
+        expect(path.basename(resource.getCandidateDir())).toBe(journalCandidateId)
+
+        // Age the real candidate past the orphan policy.
+        const TWO_HOURS_AGO = new Date(Date.now() - 2 * 60 * 60 * 1000)
+        fs.utimesSync(resource.getCandidateDir(), TWO_HOURS_AGO, TWO_HOURS_AGO)
+        const staleDir = makeDir(`${CANDIDATE_DIR_PREFIX}import-other-session`, true)
+
+        await recoverOrphanedCandidates(dataRoot, { protectedCandidateIds: [journalCandidateId] })
+
+        // The journal-referenced promoting candidate survives (LOCK-4413/4415)…
+        expect(fs.existsSync(resource.getCandidateDir())).toBe(true)
+        expect(fs.existsSync(resource.getDbPath())).toBe(true)
+        // …while an ordinary aged orphan is still cleaned.
+        expect(fs.existsSync(staleDir)).toBe(false)
+      })
+
+      it('protection does not change young / non-owned candidate behavior', async () => {
+        const young = makeDir(`${CANDIDATE_DIR_PREFIX}young-session`, false)
+        const unrelated = makeDir('unrelated-dir', true)
+
+        await recoverOrphanedCandidates(dataRoot, {
+          protectedCandidateIds: [`${CANDIDATE_DIR_PREFIX}promoting-session`]
+        })
+
+        expect(fs.existsSync(young)).toBe(true)
+        expect(fs.existsSync(unrelated)).toBe(true)
+      })
+
+      it.each(['../escape', '..', 'a/b', 'a\\b', 'foo.bar', '', 'candidate-x/../../etc'])(
+        'rejects unsafe protected ID %j before deleting anything (LOCK-4415)',
+        async (badId) => {
+          const aged = makeDir(`${CANDIDATE_DIR_PREFIX}stale-session`, true)
+
+          await expect(recoverOrphanedCandidates(dataRoot, { protectedCandidateIds: [badId] })).rejects.toThrow(
+            /path safety/
+          )
+
+          // Validation happens BEFORE any filesystem access: nothing deleted.
+          expect(fs.existsSync(aged)).toBe(true)
+        }
+      )
+
+      it.each(['promoting-session', 'candidate-', 'candidatex'])(
+        'rejects a protected ID without the exact owned prefix %j (cannot map to an owned leaf)',
+        async (badId) => {
+          const aged = makeDir(`${CANDIDATE_DIR_PREFIX}stale-session`, true)
+
+          await expect(recoverOrphanedCandidates(dataRoot, { protectedCandidateIds: [badId] })).rejects.toThrow(
+            /path safety/
+          )
+          expect(fs.existsSync(aged)).toBe(true)
+        }
+      )
+
+      it('an absolute path cannot protect anything and aborts cleanup (no path input accepted)', async () => {
+        const aged = makeDir(`${CANDIDATE_DIR_PREFIX}stale-session`, true)
+        const absolute = path.join(getCandidateRoot(dataRoot), `${CANDIDATE_DIR_PREFIX}stale-session`)
+
+        await expect(recoverOrphanedCandidates(dataRoot, { protectedCandidateIds: [absolute] })).rejects.toThrow(
+          /path safety/
+        )
+        expect(fs.existsSync(aged)).toBe(true)
+      })
+
+      it('empty protection list behaves exactly like the unprotected call (absent journal path)', async () => {
+        const old = makeDir(`${CANDIDATE_DIR_PREFIX}old-session`, true)
+
+        await recoverOrphanedCandidates(dataRoot, { protectedCandidateIds: [] })
+
+        expect(fs.existsSync(old)).toBe(false)
+      })
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // ID validation + owned leaf mapping (LOCK-4415)
+  // -------------------------------------------------------------------------
+
+  describe('candidate ID validation & owned leaf mapping', () => {
+    it('isValidCandidateId matches the strict allowlist', () => {
+      expect(isValidCandidateId(VALID_SESSION_ID)).toBe(true)
+      expect(isValidCandidateId('abc_DEF-123')).toBe(true)
+      expect(isValidCandidateId('../escape')).toBe(false)
+      expect(isValidCandidateId('a/b')).toBe(false)
+      expect(isValidCandidateId('foo.bar')).toBe(false)
+      expect(isValidCandidateId('')).toBe(false)
+      expect(isValidCandidateId('a'.repeat(200))).toBe(false)
+      expect(isValidCandidateId(42)).toBe(false)
+      expect(isValidCandidateId(null)).toBe(false)
+    })
+
+    it('isValidOwnedCandidateId requires the strict allowlist AND the owned prefix', () => {
+      expect(isValidOwnedCandidateId(`${CANDIDATE_DIR_PREFIX}import-abc123`)).toBe(true)
+      expect(isValidOwnedCandidateId(`${CANDIDATE_DIR_PREFIX}${VALID_SESSION_ID}`)).toBe(true)
+      // No prefix / empty remainder cannot map to an owned leaf.
+      expect(isValidOwnedCandidateId('import-abc123')).toBe(false)
+      expect(isValidOwnedCandidateId(CANDIDATE_DIR_PREFIX)).toBe(false)
+      expect(isValidOwnedCandidateId('candidate-x/../../etc')).toBe(false)
+      expect(isValidOwnedCandidateId('../escape')).toBe(false)
+      expect(isValidOwnedCandidateId('')).toBe(false)
+      expect(isValidOwnedCandidateId(42)).toBe(false)
+      expect(isValidOwnedCandidateId(null)).toBe(false)
+    })
+
+    it('getOwnedCandidateDirName maps a validated opaque candidate ID to the owned leaf exactly once', () => {
+      // The candidate ID IS the leaf name — identity after validation,
+      // never a second prefixing (accepted 4.4.1 audit blocker).
+      expect(getOwnedCandidateDirName(`${CANDIDATE_DIR_PREFIX}abc-123`)).toBe(`${CANDIDATE_DIR_PREFIX}abc-123`)
+      expect(getOwnedCandidateDirName(`${CANDIDATE_DIR_PREFIX}abc-123`)).not.toContain(path.sep)
+      expect(getOwnedCandidateDirName(`${CANDIDATE_DIR_PREFIX}abc-123`)).not.toBe(
+        `${CANDIDATE_DIR_PREFIX}${CANDIDATE_DIR_PREFIX}abc-123`
+      )
+    })
+
+    it('getOwnedCandidateDirName throws for IDs that could smuggle a path or cannot map to an owned leaf', () => {
+      expect(() => getOwnedCandidateDirName('../escape')).toThrow(/path safety/)
+      expect(() => getOwnedCandidateDirName('a/b')).toThrow(/path safety/)
+      expect(() => getOwnedCandidateDirName('')).toThrow(/path safety/)
+      // Prefix-less IDs are refused: an ID that is not the owned leaf name
+      // would silently protect nothing (LOCK-4415).
+      expect(() => getOwnedCandidateDirName('abc-123')).toThrow(/path safety/)
+      expect(() => getOwnedCandidateDirName(CANDIDATE_DIR_PREFIX)).toThrow(/path safety/)
     })
   })
 })

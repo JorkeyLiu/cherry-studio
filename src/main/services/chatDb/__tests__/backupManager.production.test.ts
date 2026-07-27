@@ -113,6 +113,7 @@ import StreamZip from 'node-stream-zip'
 
 import { BackupManager } from '../../BackupManager'
 import { BetterSqlite3BackupAdapter, ChatDbBackup } from '../backup'
+import { getSharedMaintenanceCoordinator, isMaintenanceBusyError } from '../maintenanceCoordination'
 import { runMigrations } from '../migration'
 import * as schema from '../schema'
 
@@ -648,6 +649,117 @@ describe('BackupManager Production-Path Integration', () => {
       snapDb.close()
 
       mutexSqlite.close()
+    })
+  })
+
+  // =========================================================================
+  // 6. Maintenance coordination wiring (Phase 4.4.1, LOCK-4416)
+  //    Backup and restore entry points share the ONE process-wide
+  //    maintenance coordinator with live ChatDbService init/close and
+  //    promotion. These tests exercise the real BackupManager wiring.
+  // =========================================================================
+
+  describe('maintenance coordination wiring (LOCK-4416)', () => {
+    it('backup holds the shared backup lease for the full operation and releases it', async () => {
+      const coordinator = getSharedMaintenanceCoordinator()
+      expect(coordinator.currentHolder()).toBeNull()
+
+      // Capture the holder at snapshot time — deep inside the backup operation.
+      let holderDuringBackup: { kind: string; ownerId: string } | null = null
+      const adapter = new BetterSqlite3BackupAdapter(() => sqlite)
+      const chatDbBackup = new ChatDbBackup(adapter, realPath.join(tempDir, 'Data'))
+      mockChatDbService.getBackup.mockImplementation(() => {
+        holderDuringBackup = coordinator.currentHolder()
+        return chatDbBackup
+      })
+
+      const bm = new BackupManager()
+      const destDir = realPath.join(tempDir, 'coord-backups')
+      realFs.mkdirSync(destDir, { recursive: true })
+      const archivePath = await bm.backup(null as any, 'coord-backup.zip', destDir)
+      expect(realFs.existsSync(archivePath)).toBe(true)
+
+      expect(holderDuringBackup).toEqual({ kind: 'backup', ownerId: 'backup-manager' })
+      // Lease released after the outer operation completes.
+      expect(coordinator.currentHolder()).toBeNull()
+    })
+
+    it('backup is refused with a structured busy error while restore holds the lease', async () => {
+      const coordinator = getSharedMaintenanceCoordinator()
+      const grant = coordinator.acquire('restore', 'restore-owner')
+      expect(grant.granted).toBe(true)
+      if (!grant.granted) return
+
+      const bm = new BackupManager()
+      const destDir = realPath.join(tempDir, 'busy-backups')
+      realFs.mkdirSync(destDir, { recursive: true })
+
+      try {
+        let caught: unknown
+        try {
+          await bm.backup(null as any, 'busy-backup.zip', destDir)
+        } catch (error) {
+          caught = error
+        }
+        expect(isMaintenanceBusyError(caught)).toBe(true)
+        // The foreign restore holder is undisturbed (owner-safe refusal).
+        expect(coordinator.currentHolder()).toEqual({ kind: 'restore', ownerId: 'restore-owner' })
+      } finally {
+        coordinator.release(grant.lease)
+      }
+
+      // After release, backup proceeds normally.
+      const archivePath = await bm.backup(null as any, 'after-busy.zip', destDir)
+      expect(realFs.existsSync(archivePath)).toBe(true)
+      expect(coordinator.currentHolder()).toBeNull()
+    })
+
+    it('restore() is refused while backup holds the lease and releases its own lease on failure', async () => {
+      const coordinator = getSharedMaintenanceCoordinator()
+      const bm = new BackupManager()
+
+      // Refused while a backup lease is held.
+      const grant = coordinator.acquire('backup', 'backup-manager')
+      expect(grant.granted).toBe(true)
+      if (!grant.granted) return
+      try {
+        let caught: unknown
+        try {
+          await bm.restore(null as any, realPath.join(tempDir, 'whatever.zip'))
+        } catch (error) {
+          caught = error
+        }
+        expect(isMaintenanceBusyError(caught)).toBe(true)
+      } finally {
+        coordinator.release(grant.lease)
+      }
+
+      // A failing restore (nonexistent archive) still releases the lease.
+      await expect(bm.restore(null as any, realPath.join(tempDir, 'missing-backup.zip'))).rejects.toThrow()
+      expect(coordinator.currentHolder()).toBeNull()
+    })
+
+    it('handleStartupRestore is refused while another operation holds the lease and releases after success', async () => {
+      const coordinator = getSharedMaintenanceCoordinator()
+      const grant = coordinator.acquire('backup', 'backup-manager')
+      expect(grant.granted).toBe(true)
+      if (!grant.granted) return
+
+      try {
+        let caught: unknown
+        try {
+          await BackupManager.handleStartupRestore()
+        } catch (error) {
+          caught = error
+        }
+        expect(isMaintenanceBusyError(caught)).toBe(true)
+      } finally {
+        coordinator.release(grant.lease)
+      }
+
+      // No-op activation (no .restore directories) acquires and releases.
+      await BackupManager.handleStartupRestore()
+      expect(coordinator.currentHolder()).toBeNull()
     })
   })
 })

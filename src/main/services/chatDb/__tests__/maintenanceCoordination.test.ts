@@ -12,13 +12,21 @@
  * - Pure in-memory contract: no wiring of existing mutexes in 4.4.0.
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import {
+  acquireMaintenanceLeaseOrThrow,
+  acquirePromotionLease,
   createMaintenanceCoordinator,
+  ERR_CHAT_DB_MAINTENANCE_BUSY,
+  getSharedMaintenanceCoordinator,
+  isMaintenanceBusyError,
   MAINTENANCE_OPERATIONS,
+  MaintenanceBusyError,
   type MaintenanceOperationKind,
-  maintenanceOperationsConflict
+  maintenanceOperationsConflict,
+  resetSharedMaintenanceCoordinatorForTests,
+  withMaintenanceLease
 } from '../maintenanceCoordination'
 
 describe('maintenance coordination contract (LOCK-4402)', () => {
@@ -144,6 +152,124 @@ describe('maintenance coordination contract (LOCK-4402)', () => {
       const second = createMaintenanceCoordinator()
       expect(first.acquire('promotion', 'a').granted).toBe(true)
       expect(second.acquire('backup', 'b').granted).toBe(true)
+    })
+  })
+})
+
+describe('maintenance coordination runtime (Phase 4.4.1, LOCK-4416)', () => {
+  afterEach(() => {
+    resetSharedMaintenanceCoordinatorForTests()
+  })
+
+  describe('structured busy error', () => {
+    it('acquireMaintenanceLeaseOrThrow throws a classifiable MaintenanceBusyError with full context', () => {
+      const coordinator = createMaintenanceCoordinator()
+      coordinator.acquire('restore', 'restore-owner')
+
+      let caught: unknown
+      try {
+        acquireMaintenanceLeaseOrThrow(coordinator, 'backup', 'backup-owner')
+      } catch (error) {
+        caught = error
+      }
+
+      expect(caught).toBeInstanceOf(MaintenanceBusyError)
+      expect(isMaintenanceBusyError(caught)).toBe(true)
+      const busy = caught as MaintenanceBusyError
+      expect(busy.code).toBe(ERR_CHAT_DB_MAINTENANCE_BUSY)
+      expect(busy.name).toBe('MaintenanceBusyError')
+      expect(busy.requestedKind).toBe('backup')
+      expect(busy.requestedOwnerId).toBe('backup-owner')
+      expect(busy.conflictingKind).toBe('restore')
+      expect(busy.conflictingOwnerId).toBe('restore-owner')
+      // Message stays classifiable by the existing IPC busy fallback.
+      expect(busy.message.toLowerCase()).toContain('busy')
+    })
+
+    it('isMaintenanceBusyError refuses unrelated errors and accepts code-tagged errors', () => {
+      expect(isMaintenanceBusyError(new Error('busy'))).toBe(false)
+      expect(isMaintenanceBusyError(null)).toBe(false)
+      const tagged = Object.assign(new Error('x'), { code: ERR_CHAT_DB_MAINTENANCE_BUSY })
+      expect(isMaintenanceBusyError(tagged)).toBe(true)
+    })
+  })
+
+  describe('shared runtime coordinator', () => {
+    it('returns one stable process-wide instance', () => {
+      const a = getSharedMaintenanceCoordinator()
+      const b = getSharedMaintenanceCoordinator()
+      expect(a).toBe(b)
+
+      const grant = a.acquire('backup', 'o1')
+      expect(grant.granted).toBe(true)
+      expect(b.currentHolder()).toEqual({ kind: 'backup', ownerId: 'o1' })
+    })
+  })
+
+  describe('withMaintenanceLease', () => {
+    it('holds the lease during fn and releases on success', async () => {
+      const coordinator = createMaintenanceCoordinator()
+      await withMaintenanceLease(coordinator, 'backup', 'owner', async () => {
+        expect(coordinator.currentHolder()).toEqual({ kind: 'backup', ownerId: 'owner' })
+      })
+      expect(coordinator.currentHolder()).toBeNull()
+    })
+
+    it('releases the lease when fn throws (try/finally)', async () => {
+      const coordinator = createMaintenanceCoordinator()
+      await expect(
+        withMaintenanceLease(coordinator, 'restore', 'owner', async () => {
+          throw new Error('staging failed')
+        })
+      ).rejects.toThrow('staging failed')
+      expect(coordinator.currentHolder()).toBeNull()
+      expect(coordinator.acquire('backup', 'next').granted).toBe(true)
+    })
+
+    it('propagates MaintenanceBusyError without disturbing the current holder', async () => {
+      const coordinator = createMaintenanceCoordinator()
+      coordinator.acquire('promotion', 'import-1')
+      await expect(withMaintenanceLease(coordinator, 'backup', 'owner', async () => 'never')).rejects.toSatisfy(
+        (e: unknown) => isMaintenanceBusyError(e)
+      )
+      expect(coordinator.currentHolder()).toEqual({ kind: 'promotion', ownerId: 'import-1' })
+    })
+  })
+
+  describe('promotion lease seam (no promotion-only mutex)', () => {
+    it('grants an exclusive promotion lease on the shared coordinator by default', () => {
+      const handle = acquirePromotionLease('import-session-1')
+      const shared = getSharedMaintenanceCoordinator()
+      expect(shared.currentHolder()).toEqual({ kind: 'promotion', ownerId: 'import-session-1' })
+
+      // Every live category is refused while promotion holds the slot.
+      for (const kind of MAINTENANCE_OPERATIONS) {
+        expect(() => acquireMaintenanceLeaseOrThrow(shared, kind, 'other')).toThrow(MaintenanceBusyError)
+      }
+
+      expect(handle.release()).toBe(true)
+      expect(shared.currentHolder()).toBeNull()
+    })
+
+    it('is busy-refused while another maintenance operation holds the lease', () => {
+      const coordinator = createMaintenanceCoordinator()
+      coordinator.acquire('backup', 'backup-owner')
+      expect(() => acquirePromotionLease('import-session-1', coordinator)).toThrow(MaintenanceBusyError)
+    })
+
+    it('release is bounded: idempotent, and a stale handle cannot release a newer holder', () => {
+      const coordinator = createMaintenanceCoordinator()
+      const first = acquirePromotionLease('session-a', coordinator)
+      expect(first.release()).toBe(true)
+      expect(first.isReleased()).toBe(true)
+      // Duplicate release refused.
+      expect(first.release()).toBe(false)
+
+      // A newer holder takes the slot; the stale handle cannot disturb it.
+      const grant = coordinator.acquire('init', 'live')
+      expect(grant.granted).toBe(true)
+      expect(first.release()).toBe(false)
+      expect(coordinator.currentHolder()).toEqual({ kind: 'init', ownerId: 'live' })
     })
   })
 })

@@ -329,12 +329,90 @@ export class CandidateDbResource {
 // ---------------------------------------------------------------------------
 
 /**
+ * True when `value` is a candidate/session ID under the strict allowlist
+ * (identical policy to the promotion journal ID allowlist, LOCK-4415).
+ */
+export function isValidCandidateId(value: unknown): value is string {
+  return typeof value === 'string' && SESSION_ID_PATTERN.test(value)
+}
+
+/**
+ * True when `value` is an opaque owned candidate directory ID as emitted by
+ * the import session and recorded in the promotion journal
+ * (`candidate-<sessionId>`): strict allowlist PLUS the owned prefix with a
+ * non-empty remainder. The candidate ID contract is exactly one shape — the
+ * ID IS the owned directory leaf name (LOCK-4415).
+ */
+export function isValidOwnedCandidateId(value: unknown): value is string {
+  return (
+    isValidCandidateId(value) && value.startsWith(CANDIDATE_DIR_PREFIX) && value.length > CANDIDATE_DIR_PREFIX.length
+  )
+}
+
+/**
+ * Map a validated opaque candidate ID to its owned directory leaf name.
+ *
+ * Contract (LOCK-4415, accepted 4.4.1 audit correction): the candidate ID
+ * emitted by the import session (`InternalImportSession.candidateId`) and
+ * carried by the promotion journal is `candidate-<sessionId>` — which is
+ * byte-for-byte the owned directory leaf created by CandidateDbResource.
+ * The mapping is therefore applied exactly once: strict validation, then
+ * identity. The prefix is NEVER prepended again (double-prefixing would
+ * "protect" a directory that does not exist and leave the real promoting
+ * candidate exposed to age-based deletion).
+ *
+ * Pure name mapping — never builds an absolute path from caller input, so
+ * an ID can never smuggle a path.
+ *
+ * @throws {Error} if the ID fails the strict allowlist or does not carry
+ *   the owned `candidate-` prefix with a non-empty remainder.
+ */
+export function getOwnedCandidateDirName(candidateId: string): string {
+  assertValidSessionId(candidateId)
+  if (!candidateId.startsWith(CANDIDATE_DIR_PREFIX) || candidateId.length <= CANDIDATE_DIR_PREFIX.length) {
+    throw new Error(
+      `Invalid owned candidate ID: refused for path safety. ` +
+        `Candidate IDs must be the exact owned directory leaf name ("${CANDIDATE_DIR_PREFIX}<sessionId>").`
+    )
+  }
+  return candidateId
+}
+
+export interface RecoverOrphanedCandidatesOptions {
+  /**
+   * Candidate IDs (NOT paths) to protect from age-based cleanup. Every ID is
+   * validated against the strict allowlist BEFORE any deletion occurs; an
+   * invalid ID aborts the entire cleanup by throwing (an unvalidated ID must
+   * never influence — or fail to influence — what gets deleted, LOCK-4415).
+   * Protection is matched by owned directory leaf name equality only.
+   */
+  protectedCandidateIds?: readonly string[]
+}
+
+/**
  * Scan the owned candidate root for `candidate-*` directories older than the
  * age policy and remove them. Only touches directories under the owned root
  * whose names match the owned prefix (LOCK-4213A). Non-fatal: individual
  * removal failures are logged and skipped.
+ *
+ * Directories named by `options.protectedCandidateIds` are excluded from
+ * age-based deletion regardless of mtime — a journal-referenced promoting
+ * candidate is never an ordinary import leftover (LOCK-4401/4413).
+ *
+ * @throws {Error} if any protected candidate ID fails the strict allowlist
+ *   (thrown before any directory is inspected or removed).
  */
-export async function recoverOrphanedCandidates(dataRoot: string = DATA_PATH): Promise<void> {
+export async function recoverOrphanedCandidates(
+  dataRoot: string = DATA_PATH,
+  options: RecoverOrphanedCandidatesOptions = {}
+): Promise<void> {
+  // Validate ALL protection input up front — before any filesystem access —
+  // so an invalid ID can never partially protect or partially delete.
+  const protectedLeafNames = new Set<string>()
+  for (const id of options.protectedCandidateIds ?? []) {
+    protectedLeafNames.add(getOwnedCandidateDirName(id))
+  }
+
   const candidateRoot = getCandidateRoot(dataRoot)
 
   let entries: string[]
@@ -354,6 +432,12 @@ export async function recoverOrphanedCandidates(dataRoot: string = DATA_PATH): P
 
   for (const entry of entries) {
     if (!entry.startsWith(CANDIDATE_DIR_PREFIX)) continue
+
+    if (protectedLeafNames.has(entry)) {
+      // Journal-protected candidate: never age-deleted (LOCK-4413).
+      logger.info(`Preserving journal-protected candidate: ${entry}`)
+      continue
+    }
 
     const fullPath = path.join(candidateRoot, entry)
     try {

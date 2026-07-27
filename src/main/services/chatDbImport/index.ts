@@ -57,6 +57,16 @@
  *   no ChatDbService close/init, no rename/replace/restore, no relaunch,
  *   and no promotion IPC (LOCK-4405).
  *
+ * Promotion preparation (Phase 4.4.1, LOCK-4411..4417):
+ * - startPromotionPreparation() is the unique claim→prepare entry: it
+ *   consumes the exact-once claim, runs the durable preparation gate
+ *   (lease → rollback snapshot create/validate/publish → snapshot-ready
+ *   journal), and stores the prepared handle on the session aligned with
+ *   the claim token. Failure settles `promotion-failed` via the token
+ *   protocol. fail/dispose/will-quit release the stored handle exactly
+ *   once. The live DB stays open and authoritative (LOCK-4411); close/
+ *   install/verify belong to Phase 4.4.2.
+ *
  * A-9: Platform gate — if process.platform !== 'darwin', throw.
  * All imports route through loggerService with context 'chatDbImport'.
  */
@@ -64,6 +74,7 @@
 import path from 'node:path'
 
 import { loggerService } from '@logger'
+import type { MaintenanceCoordinator } from '@main/services/chatDb/maintenanceCoordination'
 import type {
   CandidateImportStats,
   CandidateReadyResult,
@@ -78,6 +89,12 @@ import { ChatImportSessionError, ChatImportUnsupportedPlatformError } from './er
 import { createImportDataPlane } from './importDataPlane'
 import { registerChatImportIpc, sendCancel, sendDiscover, sendReadPage } from './importIpc'
 import { createIsolatedReader, dispose as disposeSession, disposeSync as disposeSessionSync } from './isolatedSession'
+import type {
+  PreparedPromotionHandle,
+  PromotionPreparationFailure,
+  PromotionPreparationResult
+} from './promotion/preparation'
+import { preparePromotion } from './promotion/preparation'
 import {
   canEnterPromoting,
   decideCandidateDisposal,
@@ -332,6 +349,8 @@ class InternalImportSession implements ImportSession {
   public promotionToken: string | null = null
   /** Exact-once promotion claim guard: set once, never reset (LOCK-4401). */
   public promotionClaimed = false
+  /** Prepared promotion handle (Phase 4.4.1). Non-null after preparation. */
+  public preparedHandle: PreparedPromotionHandle | null = null
 
   constructor(id: string) {
     this.id = id
@@ -402,6 +421,16 @@ class InternalImportSession implements ImportSession {
       // (consuming the token) — never `error`. dispose() below preserves
       // the promotion-owned candidate.
       this.promotionToken = null
+      // Phase 4.4.1: dispose the prepared handle (releases the lease) on
+      // promotion failure.
+      if (this.preparedHandle) {
+        try {
+          this.preparedHandle.dispose()
+        } catch {
+          // Best-effort disposal during failure path
+        }
+        this.preparedHandle = null
+      }
       this.setState('promotion-failed')
     } else if (
       this.state !== 'cancelled' &&
@@ -441,6 +470,18 @@ class InternalImportSession implements ImportSession {
       this.verificationPromise = null
     }
     this.verifier = null
+
+    // Phase 4.4.1: dispose the prepared promotion handle (releases the
+    // maintenance lease). Must run before candidate discard to ensure the
+    // lease is released before any further lifecycle transitions.
+    if (this.preparedHandle) {
+      try {
+        this.preparedHandle.dispose()
+      } catch (error) {
+        logger.warn(`Error disposing prepared promotion handle for ${this.id}:`, error as Error)
+      }
+      this.preparedHandle = null
+    }
 
     // Discard candidate (closes DB handle first, then removes the owned
     // directory). Sealed candidates are discarded too: dispose is only
@@ -945,6 +986,18 @@ export function disposeActiveImport(): void {
     logger.info(`will-quit during promotion for session ${session.id}: preserving promotion artifacts (LOCK-4401)`)
   }
 
+  // 0. Dispose the prepared promotion handle (releases the maintenance lease).
+  //    Must be synchronous and idempotent. The foreign lease holder is NOT
+  //    touched (owner-safe release only).
+  if (session.preparedHandle) {
+    try {
+      session.preparedHandle.dispose()
+    } catch (error) {
+      logger.warn(`Error disposing prepared promotion handle (sync) for ${session.id}:`, error as Error)
+    }
+    session.preparedHandle = null
+  }
+
   // 1. Verifier close (abort + immediate handle closure).
   session.closeVerifierSync()
 
@@ -983,6 +1036,124 @@ export { recoverOrphanedImportArtifacts } from './startupRecovery'
  * Register import IPC handlers. Called once at app-ready.
  */
 export { registerChatImportIpc }
+
+/**
+ * Promotion preparation API (Phase 4.4.1, LOCK-4411..4417).
+ */
+export type {
+  PreparedPromotionHandle,
+  PromotionPreparationFailure,
+  PromotionPreparationFailureCode,
+  PromotionPreparationPhase,
+  PromotionPreparationResult
+} from './promotion/preparation'
+
+/**
+ * Main-local inputs for {@link startPromotionPreparation}. The live-DB
+ * specifics stay caller-supplied (Main-internal): nothing here ever crosses
+ * IPC, and this module never constructs/looks up the live chatDbService
+ * itself (LOCK-O1 isolation sentinel stays intact).
+ */
+export interface StartPromotionPreparationOptions {
+  /** Directory containing the live chat.db (the Data root). */
+  dbDir: string
+  /** Returns the OPEN live better-sqlite3 handle (borrowed, never closed). */
+  getLiveSqlite: () => unknown
+  /** Optional coordinator override (default: shared coordinator). */
+  coordinator?: MaintenanceCoordinator
+  /**
+   * Test injection (LOCK-O8): preparation function. Production default is
+   * the promotion preparation gate (`preparePromotion`).
+   */
+  prepare?: (
+    claim: PromotionClaimHandle,
+    dbDir: string,
+    getLiveSqlite: () => unknown,
+    coordinator?: MaintenanceCoordinator
+  ) => Promise<PromotionPreparationResult>
+}
+
+/**
+ * Main-local outcome of {@link startPromotionPreparation}. Never crosses
+ * IPC. `not-claimable` covers both "no verified candidate" and every
+ * duplicate call (the exact-once claim guard never resets), so duplicate
+ * calls can never re-snapshot. `stale-claim` means preparation succeeded
+ * but the session left `promoting` during the await (raced failure /
+ * will-quit); the prepared handle was disposed (lease released) and the
+ * durable artifacts are left to startup recovery.
+ */
+export type PromotionPreparationStartOutcome =
+  | { readonly status: 'prepared'; readonly handle: PreparedPromotionHandle }
+  | { readonly status: 'not-claimable' }
+  | { readonly status: 'stale-claim' }
+  | { readonly status: 'preparation-failed'; readonly failure: PromotionPreparationFailure }
+
+/**
+ * The unique import-service promotion preparation entry (Phase 4.4.1,
+ * LOCK-4411..4417): claim → prepare, exactly once.
+ *
+ * - Claims the verified candidate through {@link claimPromotion} (the ONLY
+ *   promotion entry, LOCK-4401). When the claim is refused — no verified
+ *   candidate, or any duplicate call — no preparation side effect runs.
+ * - Runs the exact-once preparation gate (lease → snapshot create/validate/
+ *   publish → snapshot-ready journal, LOCK-4412/4416/4417) against the
+ *   claim, aligned with the issued token.
+ * - Success stores the prepared handle on the session
+ *   (`session.preparedHandle`); the session stays `promoting` and the
+ *   fail/dispose/will-quit paths release the handle (lease) exactly once.
+ * - Failure settles `promotion-failed` through the existing exact-once
+ *   token protocol ({@link completePromotion}); the preparation gate has
+ *   already released the lease.
+ *
+ * Phase boundary: NO close/install/verify/relaunch here (Phase 4.4.2); the
+ * live DB stays open and authoritative on every outcome (LOCK-4411).
+ */
+export async function startPromotionPreparation(
+  options: StartPromotionPreparationOptions
+): Promise<PromotionPreparationStartOutcome> {
+  const prepare = options.prepare ?? preparePromotion
+
+  // Exact-once entry: bounded to claimPromotion. Duplicate calls (and calls
+  // outside verified-candidate) are refused here, BEFORE any side effect.
+  const claim = claimPromotion()
+  if (!claim) {
+    return { status: 'not-claimable' }
+  }
+  const session = activeSession
+  if (!session || session.id !== claim.sessionId) {
+    // Defensive: the claim transitions on the same synchronous frame, so
+    // this cannot happen; refuse without side effects if it ever does.
+    return { status: 'not-claimable' }
+  }
+
+  const result = await prepare(claim, options.dbDir, options.getLiveSqlite, options.coordinator)
+
+  if (!result.ok) {
+    // Exact-once terminal settle via the existing token/state protocol.
+    // The preparation gate already released the maintenance lease
+    // (LOCK-4416); a raced settle (fail()/will-quit) makes this a no-op.
+    completePromotion(claim.token, 'promotion-failed')
+    return { status: 'preparation-failed', failure: result.failure }
+  }
+
+  // Re-check after the await: a raced failure or will-quit may have settled
+  // the token / left `promoting`. The stale handle must not be stored — the
+  // owner already ran its release path — so dispose it here (idempotent,
+  // owner-safe lease release).
+  if (activeSession?.id !== session.id || session.state !== 'promoting' || session.promotionToken !== claim.token) {
+    try {
+      result.handle.dispose()
+    } catch (error) {
+      logger.warn(`Error disposing stale prepared promotion handle for ${session.id}:`, error as Error)
+    }
+    return { status: 'stale-claim' }
+  }
+
+  // Exact-once handle ownership: the session retains the prepared handle
+  // for Phase 4.4.2 and for the fail/dispose/will-quit release paths.
+  session.preparedHandle = result.handle
+  return { status: 'prepared', handle: result.handle }
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers

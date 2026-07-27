@@ -7,6 +7,12 @@ import Database from 'better-sqlite3'
 import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
 
 import { BetterSqlite3BackupAdapter, ChatDbBackup } from './backup'
+import {
+  acquireMaintenanceLeaseOrThrow,
+  getSharedMaintenanceCoordinator,
+  type MaintenanceCoordinator,
+  type MaintenanceLease
+} from './maintenanceCoordination'
 import { runMigrations } from './migration'
 import * as schema from './schema'
 
@@ -15,6 +21,9 @@ const logger = loggerService.withContext('ChatDbService')
 const DB_FILENAME = 'chat.db'
 const RESTORE_MARKER_FILENAME = 'chat.db.restore'
 const REPAIR_MARKER_FILENAME = 'chat.db.repair'
+
+/** Bounded owner label used by the live singleton on the shared coordinator. */
+const LIVE_MAINTENANCE_OWNER_ID = 'chat-db-live'
 
 // ---------------------------------------------------------------------------
 // ChatDbService — singleton wrapper around better-sqlite3 + Drizzle ORM
@@ -54,9 +63,26 @@ class ChatDbService {
    */
   private generation = 0
 
-  constructor(dbDir?: string) {
+  /**
+   * Shared maintenance coordinator (Phase 4.4.1, LOCK-4416). ONLY the live
+   * singleton receives one — init/close then coordinate with backup,
+   * restore, and promotion. Candidate ChatDbService instances (import
+   * candidate DBs, tests) pass no coordinator and stay uncoordinated
+   * because candidate init/close are not live maintenance.
+   */
+  private readonly coordinator: MaintenanceCoordinator | null
+
+  /**
+   * The init lease currently held by this instance's in-flight init(), if
+   * any. Tracked so close() can perform an owner-safe release of OUR OWN
+   * lease when it supersedes an in-flight init. Never holds foreign leases.
+   */
+  private activeInitLease: MaintenanceLease | null = null
+
+  constructor(dbDir?: string, coordinator: MaintenanceCoordinator | null = null) {
     this.dbDir = dbDir ?? DATA_PATH
     this.dbPath = path.join(this.dbDir, DB_FILENAME)
+    this.coordinator = coordinator
   }
 
   // ---------------------------------------------------------------------------
@@ -110,6 +136,16 @@ class ChatDbService {
     // If init is in progress, wait for it
     if (this.initPromise) return this.initPromise
 
+    // Live maintenance coordination (LOCK-4416): the live singleton's init
+    // must not overlap backup, restore, promotion, or close. Throws a
+    // structured MaintenanceBusyError when the slot is held. Candidate
+    // instances have no coordinator and skip this entirely.
+    let lease: MaintenanceLease | null = null
+    if (this.coordinator) {
+      lease = acquireMaintenanceLeaseOrThrow(this.coordinator, 'init', LIVE_MAINTENANCE_OWNER_ID)
+      this.activeInitLease = lease
+    }
+
     this.initPromise = this.doInit()
 
     try {
@@ -118,6 +154,16 @@ class ChatDbService {
       // Clean up on failure so next call can retry
       this.cleanupOnFailure()
       throw error
+    } finally {
+      if (this.coordinator && lease) {
+        // Owner-safe: releases only the exact granted lease. If close()
+        // already released it while superseding this init, this refusal
+        // is a safe no-op and cannot disturb a newer holder.
+        this.coordinator.release(lease)
+        if (this.activeInitLease === lease) {
+          this.activeInitLease = null
+        }
+      }
     }
   }
 
@@ -328,33 +374,74 @@ class ChatDbService {
    * state: if close throws, the caller knows the handle is still live
    * and can handle accordingly.
    *
+   * LOCK-4416 compliance: close() MUST hold the exclusive maintenance
+   * lease. When another maintenance operation (backup, restore, promotion,
+   * init) holds the slot, close() MUST NOT proceed — foreign lease bypass
+   * violates LOCK-4416. The function returns without closing the handle;
+   * the process teardown (Electron will-quit) terminates the process.
+   *
    * WARNING: Do NOT put any `await` before this call in will-quit.
    * Electron does not await async will-quit listeners; close() must
    * run synchronously and immediately.
    */
-  close(): void {
+  close(): boolean {
     // Invalidate any in-flight init before touching handles.
     // This ensures doInit's generation check will detect the supersede.
     this.generation++
 
-    if (!this.sqlite) {
-      return
+    // Live maintenance coordination (LOCK-4416). Synchronous by design.
+    let closeLease: MaintenanceLease | null = null
+    if (this.coordinator) {
+      // If OUR OWN init is in flight, we are superseding it: release the
+      // instance's own init lease (owner-safe — we hold it) so close can
+      // take the slot. init()'s finally will then be a safe stale no-op.
+      if (this.activeInitLease) {
+        this.coordinator.release(this.activeInitLease)
+        this.activeInitLease = null
+      }
+
+      const attempt = this.coordinator.acquire('close', LIVE_MAINTENANCE_OWNER_ID)
+      if (attempt.granted) {
+        closeLease = attempt.lease
+      } else {
+        // LOCK-4416: a foreign maintenance operation holds the lease. close()
+        // MUST NOT bypass the foreign lease. Return false (close-busy) and
+        // let Electron's process termination handle the open handle. The
+        // foreign lease holder will be terminated along with the process.
+        logger.warn(
+          `close() refused — '${attempt.conflictingKind}' ` +
+            `(owner '${attempt.conflictingOwnerId}') holds the maintenance lease. ` +
+            `Process termination will release the handles.`
+        )
+        return false
+      }
     }
 
     try {
-      this.sqlite.close()
-      logger.info('ChatDbService closed')
-    } catch (error) {
-      logger.error('Error closing ChatDbService', error as Error)
-      // Do NOT discard the handle on close failure — preserve it for retry.
-      // The caller can call close() again to retry.
-      return
-    }
+      if (!this.sqlite) {
+        return true
+      }
 
-    // Only null out handles on SUCCESS
-    this.sqlite = null
-    this.db = null
-    this.initPromise = null
+      try {
+        this.sqlite.close()
+        logger.info('ChatDbService closed')
+      } catch (error) {
+        logger.error('Error closing ChatDbService', error as Error)
+        // Do NOT discard the handle on close failure — preserve it for retry.
+        // The caller can call close() again to retry.
+        return false
+      }
+
+      // Only null out handles on SUCCESS
+      this.sqlite = null
+      this.db = null
+      this.initPromise = null
+      return true
+    } finally {
+      if (this.coordinator && closeLease) {
+        this.coordinator.release(closeLease)
+      }
+    }
   }
 
   /**
@@ -474,8 +561,12 @@ class ChatDbService {
   }
 }
 
-/** Singleton instance */
-export const chatDbService = new ChatDbService()
+/**
+ * Singleton instance — the ONLY ChatDbService joined to the shared
+ * maintenance coordinator (LOCK-4416). Candidate instances are constructed
+ * elsewhere without a coordinator and remain uncoordinated.
+ */
+export const chatDbService = new ChatDbService(undefined, getSharedMaintenanceCoordinator())
 
 // Named class export for testing with explicit dbDir.
 // Production code should use the chatDbService singleton.
