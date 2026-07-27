@@ -19,6 +19,10 @@
  * - Stats accounting for committed rows/pages only (LOCK-D9).
  * - finalize() rejection of referenced-but-missing blocks and
  *   non-aliased stats snapshots (LOCK-D10).
+ * - Source verification evidence (Phase 4.3.1, LOCK-4301): manifest deltas
+ *   staged from the target-equivalent StagedPage projections and committed
+ *   only after the page transaction succeeds; the deep-frozen manifest is
+ *   exposed Main-only via getSourceVerificationManifest() after finalize().
  *
  * Boundaries (LOCK-D11):
  * - Main-only. Receives an already initialized Drizzle candidate DB.
@@ -41,6 +45,9 @@ import { validateJsonObject, ValidationError } from '@shared/chatDb/validation'
 import type { CandidateImportStats, ReadPageResponse, SourceReadStats } from '@shared/chatImport/types'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
+import type { SourceVerificationManifest } from './verification/sourceManifest'
+import { SourceVerificationManifestBuilder } from './verification/sourceManifest'
+
 // ---------------------------------------------------------------------------
 // Entity order contract (LOCK-D1)
 // ---------------------------------------------------------------------------
@@ -62,6 +69,7 @@ export type ImportDataPlaneErrorCode =
   | 'OWNERSHIP_MISMATCH'
   | 'MISSING_BLOCKS'
   | 'FINALIZED'
+  | 'NOT_FINALIZED'
 
 /**
  * Rejection raised by the data plane. Carries a machine-readable code plus
@@ -259,6 +267,14 @@ export class ChatImportDataPlane {
   private entityCursor = 0
   private finalized = false
 
+  /**
+   * Source verification evidence (LOCK-4301). Deltas are staged from the
+   * target-equivalent StagedPage projections and committed ONLY after the
+   * page's DB transaction succeeds. Frozen snapshot cached at finalize().
+   */
+  private readonly manifestBuilder = new SourceVerificationManifestBuilder()
+  private sourceManifest: SourceVerificationManifest | null = null
+
   // Stats accumulators — mutated only after successful page commit (LOCK-D9).
   private readonly sourceStats: SourceReadStats = {
     topicRecordCount: 0,
@@ -314,6 +330,20 @@ export class ChatImportDataPlane {
     // completes, so any rejection leaves the candidate DB untouched.
     const staged = this.projectPage(entity, response.items)
 
+    // Phase 1b — stage the source-evidence delta from the target-equivalent
+    // projections (LOCK-4301). Pure: builder state is untouched, so a
+    // failing transaction below simply drops the delta.
+    const manifestDelta = this.manifestBuilder.stagePageDelta({
+      entity,
+      topics: staged.topics,
+      messages: staged.messages,
+      blocks: staged.blocks,
+      fileReferences: staged.fileReferences,
+      segments: staged.segments,
+      memberships: staged.memberships,
+      sourceRowCount: response.items.length
+    })
+
     // Phase 2 — one outer transaction per page (LOCK-D8). No nested
     // transactions; the writer runs directly on the provided executor.
     this.db.transaction((tx) => {
@@ -328,8 +358,10 @@ export class ChatImportDataPlane {
       }
     })
 
-    // Phase 3 — merge index deltas + stats only after a successful commit.
+    // Phase 3 — merge index deltas + stats + evidence only after a
+    // successful commit (LOCK-D9, LOCK-4301).
     this.commitStaged(entity, staged, response.items.length)
+    this.manifestBuilder.commitPageDelta(manifestDelta)
     this.entityCursor = entityIndex
   }
 
@@ -356,10 +388,32 @@ export class ChatImportDataPlane {
       )
     }
     this.finalized = true
+    // Freeze the source evidence exactly once (LOCK-4301). The builder's
+    // own exact-once guard makes double finalization impossible.
+    if (this.sourceManifest === null) {
+      this.sourceManifest = this.manifestBuilder.finalize()
+    }
     return {
       sourceReadStats: this.getSourceReadStats(),
       candidateImportStats: this.getCandidateImportStats()
     }
+  }
+
+  /**
+   * Deep-frozen source verification manifest (LOCK-4301). Main-only —
+   * never expose over IPC. Available only after a successful finalize();
+   * repeated calls return the same frozen snapshot.
+   *
+   * @throws {ChatImportDataPlaneError} code NOT_FINALIZED before finalize().
+   */
+  getSourceVerificationManifest(): SourceVerificationManifest {
+    if (this.sourceManifest === null) {
+      throw new ChatImportDataPlaneError(
+        'NOT_FINALIZED',
+        'getSourceVerificationManifest called before a successful finalize()'
+      )
+    }
+    return this.sourceManifest
   }
 
   /** Snapshot of source-read accounting. New object per call (no aliasing). */

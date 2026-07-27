@@ -1,6 +1,6 @@
 # Cherry Studio SQLite 迁移文档
 
-> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3+ 未开始）
+> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（本地完成，未提交/未推送）；Phase 4.4+ 未开始）
 > **分支**：`jorkey/refactor/sqlite-migration`
 > **最后更新**：2026-07-27
 > **Owner**：Personal fork（jorkeyliu）
@@ -448,11 +448,24 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 属性 | 值 |
 |---|---|
-| **状态** | Not started |
-| **前置** | Phase 4.2 完成 |
-| **目标** | 对候选 SQLite DB 执行全面验证，确保数据完整且结构正确 |
-| **验证维度** | ① 源 vs 目标 ID 集合匹配；② 每表记录数一致；③ 关键字段内容哈希比对；④ 消息 sort_order 与源顺序一致；⑤ 外键引用完整性；⑥ 关系正确性（topic→message→block、segment→message）；⑦ file-reference 快照完整性；⑧ segment 完整性；⑨ 结构化 model/tool object 完整性；⑩ overflow 数据；⑪ `PRAGMA integrity_check`；⑫ `PRAGMA foreign_key_check`；⑬ 应用层抽样读取（通过 repository 查询典型数据路径） |
-| **退出条件** | ✅ 所有验证维度通过；✅ 验证失败有明确的错误报告和诊断信息 |
+| **状态** | **Done（本地完成，未提交/未推送，2026-07-27）** |
+| **前置** | Phase 4.2 完成（Done） |
+| **目标** | 对候选 SQLite DB 执行确定性的全维度验证，确保数据完整且结构正确；验证失败有明确报告与诊断；取消/退出安全 |
+| **实际交付范围** | `CandidateVerifier`（只读验证器，返回稳定 13 维度结果 + 有界安全诊断）；`SourceVerificationManifest`（按页证据清单，仅在 DB 事务提交后落盘，stable canonical SHA-256 framing）；`VerificationReport`（紧凑诊断输出 ~1.4KiB）；候选 DB 会话状态机 `candidate-ready → verifying → verified-candidate \| verification-failed`；取消/退出 `close-before-discard` 语义 |
+| **Canonicalization 语义** | 验证使用稳定的 canonical SHA-256 framing：同一候选 DB 在同一证据集下产生稳定、可复现的 manifest 哈希（manifest ~5,019KiB），不随运行次序/线程调度抖动；manifest 仅在每页 DB 事务提交后写入，保证证据与已落盘数据强一致 |
+| **验证器生命周期 / 状态** | 候选 DB 写入完成发送 `candidate-ready`（exact-once）→ 进入 `verifying`；验证全维度通过 → `verified-candidate`（保留候选 DB 供 Phase 4.4 promotion）；任一维度失败 → `verification-failed`（生成诊断报告后清理候选 DB）；用户在 promotion 前取消或 app 退出 → `close-before-discard`（先关闭候选 DB 句柄，再安全丢弃目录） |
+| **13 验证维度** | ① 源 vs 目标 ID 集合匹配；② 每表记录数一致；③ 关键字段内容哈希比对；④ 消息 sort_order 与源顺序一致；⑤ 外键引用完整性；⑥ 关系正确性（topic→message→block、segment→message）；⑦ file-reference 快照完整性；⑧ segment 完整性；⑨ 结构化 model/tool object 完整性；⑩ overflow 数据；⑪ `PRAGMA integrity_check`；⑫ `PRAGMA foreign_key_check`；⑬ 应用层抽样读取（通过 repository 查询典型数据路径） |
+| **诊断 / 隐私** | 验证器严格只读（readonly），不修改候选 DB；诊断信息有界（bounded safe diagnostics），仅暴露维度名、计数/哈希差异摘要、失败维度索引；不泄露 SQL、文件路径、堆栈、源内容明细 |
+| **失败 / 通过行为** | 通过：保留候选 DB 于自有临时目录，等待 Phase 4.4 原子替换；现有 live `chat.db` 不受影响。失败：生成 `VerificationReport`（~1.4KiB，含失败维度与有界诊断）后清理候选 DB 与临时目录。取消/退出：`close-before-discard`，live SQLite 不受影响。corruption matrix 覆盖全部 13 维度（每个维度可独立检测失效） |
+| **测试与基准** | 聚焦验证测试 271 个通过；`pnpm format` exit 0 无改动；`pnpm lint` exit 0（0 errors，109 warnings）；`typecheck:node` 通过；首次全量 `pnpm test` 5420 通过 / 2 失败 / 72 跳过（BackupManager 共享临时目录两例非确定性环境 flakes，与 Phase 4.3 无关）；复跑全量 `pnpm test` 258 文件 / 5422 通过 / 72 跳过 / 0 失败；Main 与全量多次复跑均干净；最终审计 0 findings（本地全量验证，未涉及 commit/push/CI）；10k 数据集验证耗时 ~250–290ms |
+| **退出条件** | ✅ 所有 13 维度验证通过；✅ 验证失败有明确错误报告与有界诊断；✅ 取消/退出安全（close-before-discard）；✅ 通过时候选 DB 安全保留供 4.4；✅ manifest 稳定可复现 |
+
+**10k 验证证据（真实运行）**：
+- 数据集：25 个 topics、10,000 条 messages、11,000 个 blocks、26 个 segments、250 条 topic_segment_memberships、667 条 file references、19 页分页
+- 13 维度全部通过；corruption matrix 覆盖全部维度（构造性注入验证每个维度可独立检测失效）
+- 验证耗时：约 250–290ms（两次独立运行）
+- `SourceVerificationManifest`：~5,019KiB；`VerificationReport`：~1.4KiB
+- 不变量：现有 live `chat.db` 未被改动（验证仅读候选 DB）
 
 #### Phase 4.4：Atomic replace-all promotion
 
@@ -527,6 +540,9 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 │ · PRAGMA integrity_check                 │
 │ · PRAGMA foreign_key_check               │
 │ · 应用层抽样读取                          │
+│ · 状态机：candidate-ready→verifying→     │
+│   verified-candidate | verification-failed│
+│ · 取消/退出：close-before-discard         │
 └──────────┬──────────────────────────────┘
            │
            ▼
@@ -608,9 +624,9 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | ZIP 安全解压 | 唯一临时工作区 + IndexedDB 结构校验 | **Done** |
 | 隔离 Session 读取 | import renderer 通过当前 Dexie schema 成功读取源数据 | **Done** |
 | 候选 DB 构建 | 10k 消息完整导入；导入中断不损坏现有 DB | **Done** |
-| 验证全通过 | ID/计数/字段/顺序/关系/哈希/integrity_check/foreign_key_check/应用层抽样 | Not started |
+| 验证全通过 | ID/计数/字段/顺序/关系/哈希/integrity_check/foreign_key_check/应用层抽样 | **Done**（Phase 4.3，本地未提交） |
 | 原子 promotion | 成功 → reopen + relaunch；失败 → 回滚到快照 | Not started |
-| 取消支持 | promotion 前任意步骤取消不损坏现有 DB | Not started |
+| 取消支持 | promotion 前任意步骤取消不损坏现有 DB（含 4.3 close-before-discard） | **Done** |
 
 ### Phase 5 exit criteria（SQLite-only runtime）
 
@@ -690,6 +706,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-21** | **Phase 4.1 只读诊断完成** | Fresh Analyzer 产出 Phase 4.1 source-reader 侧生产化方案：① 模块划分（chatDbImport/ 下 zipIntake/isolatedSession/tempWorkspace/importIpc/index + 专用 preload/import renderer HTML）；② ZIP 库复用 node-stream-zip（BackupManager/DxtService 已用，零新依赖），5 层校验（500MB/10k条目/200MB单条/2GB总量/拒加密 + zip-slip path.resolve 跨平台 + IndexedDB 目录通用探测）；③ Import-only IPC 6 channel（ChatImport_Ready/Discover/ReadPage/Cancel/Complete/Error）独立于 14 个 ChatDb_*；envelope `sessionId+phase+version:1`；DTO 复用 Dexie 逻辑形状不引 import-specific；④ 12 条 correctness risks 全部本轮内处理；⑤ 决策待用户拍板项：跨平台策略、spike 去留、import renderer HTML 入口——均已闭环（A-9/A-10/Q-12） |
 | **2026-07-21** | **Phase 4.1 source-reader 生产化完成** | 17 个新文件 + 4 个修改文件：`src/main/services/chatDbImport/`（errors/tempWorkspace/zipIntake/isolatedSession/importIpc/index + 5 tests），`src/preload/chatImport/index.ts`，`src/renderer/src/windows/chatImport/`（chatImport.html + entryPoint.ts），`packages/shared/chatImport/`（types/index/validation.test.ts），`packages/shared/IpcChannel.ts` 6 ChatImport_* entries，`electron.vite.config.ts` chatImport HTML + preload entry，`src/main/ipc.ts` + `src/main/index.ts` 注册/will-quit/app-ready wiring。安全：5 层 ZIP 校验 + `session.fromPath(destDir)` + `location.protocol` origin 校验 + `event.senderFrame` sender 校验 + singleton + R-1..R-12 全部 mitigated。主进程 977/977 测试通过。最终 Auditor Clean。合入 commit `6a1e98e7ef` |
 | **2026-07-27** | **Phase 4.2 Done** | Candidate SQLite bulk importer 完成。实际模块：`CandidateDbResource`（per-session 自有候选目录 + 候选 chat.db）、`ChatImportDataPlane`（分页数据面 + `SourceReadStats`）、`ChatImportWriter`（import-only 保序 writer，order-preserving，`candidate-ready` exact-once，`CandidateImportStats`）、`startupRecovery`（取消/错误/孤儿清理）。每页一事务、topic/message 扁平化、block/segment/file-reference 精确映射、replace-all 语义；`SourceReadStats` vs `CandidateImportStats` 分离。10k 基准：25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；两次运行 1016.2ms、978.5ms；`integrity_check` ok、`foreign_key_check` 空、live DB 未改。单元审计 + 最终审计 0 阻塞；聚焦测试通过；全量本地验证通过（2026-07-27）：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（node/web/aicore typecheck 全过、i18n 校验通过、0 errors，仅 pre-existing warnings）；`pnpm test` exit 0，252 文件 / 5325 通过 / 72 跳过；无遗留产物（local-only full validation，未涉及 commit/push/CI） |
+| **2026-07-27** | **Phase 4.3 Done** | Deterministic verification 完成（本地未提交，未涉及 commit/push/CI）。实际模块：`CandidateVerifier`（只读验证器，返回稳定 13 维度结果 + 有界安全诊断，不泄露 SQL/path/stack）、`SourceVerificationManifest`（按页证据清单，仅在 DB 事务提交后落盘，stable canonical SHA-256 framing，manifest ~5,019KiB）、`VerificationReport`（~1.4KiB）；候选 DB 会话状态机 `candidate-ready → verifying → verified-candidate | verification-failed`；取消/退出 `close-before-discard`；通过保留候选 DB 供 4.4、失败报告后清理；corruption matrix 覆盖全部 13 维度。10k 验证证据：25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；13 维度全过；验证耗时 ~250–290ms；现有 live `chat.db` 未改。聚焦测试 271 通过；`pnpm format` exit 0 无改动；`pnpm lint` exit 0（0 errors，109 warnings）；`typecheck:node` 通过；首次 `pnpm test` 5420 通过 / 2 失败（BackupManager 共享临时目录非确定性 flakes，排查否定 Phase 4.3 干扰）/ 72 跳过；复跑 `pnpm test` 258 文件 / 5422 通过 / 72 跳过 / 0 失败；Main 与全量多次复跑干净；最终审计 0 findings（local-only 全量验证，未涉及 commit/push/CI） |
 
 ---
 
@@ -720,6 +737,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-21** | Phase 4.1 | 只读诊断完成（In progress）：fresh Analyzer 产出 source-reader 侧生产化方案；3 项 deferred 问题（跨平台/spike/HTML 入口）已闭环并文档化 |
 | **2026-07-21** | Phase 4.1 | **Source-reader 生产化完成（Done）**：17 新文件 + 4 修改文件（chatDbImport/ + chatImport preload + chatImport renderer + shared types/IpcChannel + electron.vite.config + main/ipc/index）。审计 4 blockers 修复 + 复审 2 orchestrators 修复 + 最终 Auditor Clean。主进程 977/977。合入 `6a1e98e7ef` |
 | **2026-07-27** | Phase 4.2 | **Candidate bulk importer 完成（Done）**：实际模块 `CandidateDbResource` / `ChatImportDataPlane` / `ChatImportWriter` / `startupRecovery`；每页一事务、import-only 保序 writer、`candidate-ready` exact-once、`SourceReadStats` vs `CandidateImportStats` 分离；10k 基准（25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；两次运行 1016.2ms、978.5ms；`integrity_check` ok、`foreign_key_check` 空；live `chat.db` 未改）；最终审计 0 blockers；聚焦测试通过；全量本地验证通过（2026-07-27）：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（node/web/aicore typecheck 全过、i18n 校验通过、0 errors，仅 pre-existing warnings）；`pnpm test` exit 0，252 文件 / 5325 通过 / 72 跳过；无遗留产物（local-only full validation，未涉及 commit/push/CI） |
+| **2026-07-27** | Phase 4.3 | **Deterministic verification 完成（Done，本地未提交）**：实际模块 `CandidateVerifier` / `SourceVerificationManifest` / `VerificationReport`；只读 13 维度验证 + 有界安全诊断；manifest 按页事务后落盘 + stable canonical SHA-256（~5,019KiB）；会话状态机 candidate-ready→verifying→verified-candidate | verification-failed；取消/退出 close-before-discard；通过保留候选供 4.4、失败报告后清理；corruption matrix 覆盖全部维度；10k 验证证据（25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；~250–290ms）；聚焦测试 271 通过；`pnpm format` exit 0 无改动；`pnpm lint` exit 0（0 errors，109 warnings）；`typecheck:node` 通过；首次 `pnpm test` 5420 通过 / 2 失败（BackupManager 共享临时目录非确定性 flakes，排查否定 Phase 4.3 干扰）/ 72 跳过；复跑 `pnpm test` 258 文件 / 5422 通过 / 72 跳过 / 0 失败；Main 与全量多次复跑干净；最终审计 0 findings（local-only 全量验证，未涉及 commit/push/CI） |
 
 ---
 
@@ -784,7 +802,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | Import data plane | `src/main/services/chatDbImport/ChatImportDataPlane`（Phase 4.2 已创建） | Main 侧分页数据面，承载 `SourceReadStats`；Main page 背压驱动 |
 | Import writer | `src/main/services/chatDbImport/ChatImportWriter`（Phase 4.2 已创建） | import-only 保序 writer（order-preserving），每页一事务，`candidate-ready` exact-once；`CandidateImportStats` |
 | Startup recovery | `src/main/services/chatDbImport/startupRecovery`（Phase 4.2 已创建） | 取消/错误/孤儿候选目录确定性清理 |
-| Verification | `src/main/services/chatDb/import/verification.ts`（Phase 4.3 规划） | 源 vs 目标全维度验证 |
+| Verification | `src/main/services/chatDb/import/`（CandidateVerifier / SourceVerificationManifest / VerificationReport，Phase 4.3 已创建） | 只读 13 维度验证；manifest 按页事务后落盘 + stable canonical SHA-256；有界安全诊断；会话状态机 candidate-ready→verifying→verified-candidate\|verification-failed；close-before-discard |
 | Atomic promotion | `src/main/services/chatDb/import/promotion.ts`（Phase 4.4 规划） | 关闭 → 快照 → rename → reopen → relaunch |
 
 ### 已废弃/待移除路径

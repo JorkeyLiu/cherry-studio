@@ -8,10 +8,12 @@
  *   per-page transactional candidate writes → sealed candidate ready for
  *   Phase 4.3 (verification/promotion, NOT this round).
  *
- * State machine: intake → discovering → reading → candidate-ready
+ * State machine: intake → discovering → reading → candidate-ready →
+ * verifying → verified-candidate | verification-failed (LOCK-4305).
  * Cancellation supported at every non-terminal state, INCLUDING
- * candidate-ready (until a future promotion phase) — cancel discards the
- * candidate and all source resources (LOCK-O5).
+ * candidate-ready / verifying / verified-candidate (until the future
+ * Phase 4.4 promotion) — cancel discards the candidate and all source
+ * resources (LOCK-O5).
  *
  * Candidate lifecycle (LOCK-O1/O3/O6):
  * - The candidate initializes after successful discovery and BEFORE the
@@ -23,6 +25,22 @@
  *   candidate-ready, and emits one Main-only CandidateReadyResult.
  * - Any failure enters error, discards the candidate, disposes all isolated
  *   source resources, and resets the singleton.
+ *
+ * Verification lifecycle (Phase 4.3.3, LOCK-4301…4305):
+ * - After the exact-once candidate-ready callback resolves, exactly one
+ *   CandidateVerifier is started against the sealed candidate using the
+ *   finalized manifest from the SAME data plane (LOCK-4301/4302).
+ * - The session owns the AbortController, verifier instance, in-flight
+ *   verification promise, and report (LOCK-4303).
+ * - Verification completes exactly once (LOCK-4304): pass retains the
+ *   sealed candidate in `verified-candidate`; a failing report transitions
+ *   to `verification-failed`, delivers the sanitized report exactly once,
+ *   then closes the verifier BEFORE discarding candidate/source resources.
+ * - Cancel/failure/async dispose order: signal abort → await verifier
+ *   completion/close → discard candidate → dispose source reader/workspace.
+ *   The candidate is never removed while the verifier holds it.
+ * - Phase 4.3 performs NO promotion, live-DB replacement, snapshot,
+ *   relaunch, or shared/preload/renderer exposure (LOCK-4305).
  *
  * A-9: Platform gate — if process.platform !== 'darwin', throw.
  * All imports route through loggerService with context 'chatDbImport'.
@@ -50,6 +68,10 @@ import {
   disposeAsync as disposeTempDirAsync,
   recoverOrphanedTempWorkspaces
 } from './tempWorkspace'
+import type { CandidateVerifierOptions } from './verification/candidateVerifier'
+import { createCandidateVerifier } from './verification/candidateVerifier'
+import type { SourceVerificationManifest } from './verification/sourceManifest'
+import type { CandidateVerificationReport } from './verification/verificationContracts'
 import { extractZip } from './zipIntake'
 
 const logger = loggerService.withContext('chatDbImport')
@@ -74,7 +96,23 @@ const IMPORT_ENTITIES = ['topics', 'message_blocks', 'topic_segments', 'files'] 
 // Types
 // ---------------------------------------------------------------------------
 
-export type ImportState = 'intake' | 'discovering' | 'reading' | 'candidate-ready' | 'cancelled' | 'error'
+export type ImportState =
+  | 'intake'
+  | 'discovering'
+  | 'reading'
+  | 'candidate-ready'
+  | 'verifying'
+  | 'verified-candidate'
+  | 'verification-failed'
+  | 'cancelled'
+  | 'error'
+
+/** States in which the sealed candidate exists on disk and is owned alive. */
+const SEALED_CANDIDATE_STATES: ReadonlySet<ImportState> = new Set([
+  'candidate-ready',
+  'verifying',
+  'verified-candidate'
+])
 
 export interface ImportSession {
   /** Unique session identifier. */
@@ -108,6 +146,39 @@ export interface CandidateResourceLike {
 export interface ImportDataPlaneLike {
   processPage(response: ReadPageResponse): void | Promise<void>
   finalize(): { sourceReadStats: SourceReadStats; candidateImportStats: CandidateImportStats }
+  /**
+   * Finalized source verification manifest (LOCK-4301). Only callable after
+   * a successful finalize(); the orchestrator uses it to start the verifier.
+   */
+  getSourceVerificationManifest(): SourceVerificationManifest
+}
+
+/**
+ * Narrow verifier surface owned by a session (LOCK-4303). CandidateVerifier
+ * satisfies this structurally; tests may inject a double (LOCK-O8).
+ * Production always uses createCandidateVerifier.
+ */
+export interface CandidateVerifierLike {
+  /** Exact-once run resolving to a sanitized report (never rejects for verification outcomes). */
+  run(): Promise<CandidateVerificationReport>
+  /** Idempotent close; cooperative cancellation when a run is in flight. */
+  close(): void
+}
+
+/**
+ * Main-only verification completion payload (LOCK-4304). Carries the
+ * sanitized report plus the CandidateReadyResult identity/stats — NEVER
+ * dbPath, manifests, or SQL.
+ */
+export interface VerificationCompletedResult {
+  /** Import session identifier. */
+  sessionId: string
+  /** Opaque candidate identifier (not a path). */
+  candidateId: string
+  /** Candidate construction accounting (from the CandidateReadyResult). */
+  stats: CandidateImportStats
+  /** Sanitized 13-dimension verification report. */
+  report: CandidateVerificationReport
 }
 
 export interface StartImportOptions {
@@ -119,10 +190,26 @@ export interface StartImportOptions {
    */
   onCandidateReady?: (result: CandidateReadyResult) => void | Promise<void>
   /**
+   * Main-only callback invoked exactly once when verification completes
+   * with a pass or fail report (LOCK-4304). Never invoked for cancelled/
+   * aborted runs. Callback errors are contained: they cannot leak
+   * resources, change verification state, or duplicate completion.
+   * The payload carries NO filesystem paths — Main-internal consumers
+   * needing the verified candidate location must use
+   * {@link getVerifiedCandidate}.
+   */
+  onVerificationComplete?: (result: VerificationCompletedResult) => void | Promise<void>
+  /**
    * Test injection (LOCK-O8): candidate resource factory. Production default
    * is `new CandidateDbResource({ sessionId })`.
    */
   candidateFactory?: (sessionId: string) => CandidateResourceLike
+  /**
+   * Test injection (LOCK-O8): verifier factory. Production default is
+   * `createCandidateVerifier(options)` (LOCK-4302 — the existing verifier,
+   * semantically unchanged).
+   */
+  verifierFactory?: (options: CandidateVerifierOptions) => CandidateVerifierLike
   /**
    * Test injection (LOCK-O8): data-plane factory bound to the candidate DB.
    * Production default is `createImportDataPlane(candidate.getDatabase())`.
@@ -144,6 +231,20 @@ export interface SealedCandidateHandle {
   candidateId: string
   /** Main-internal absolute path to the sealed candidate chat.db. */
   dbPath: string
+}
+
+/**
+ * Main-only handle to the verified candidate of the active session
+ * (future Phase 4.4 promotion consumer). Exposes the filesystem path and
+ * the retained verification report. NEVER cross IPC with this.
+ */
+export interface VerifiedCandidateHandle {
+  sessionId: string
+  candidateId: string
+  /** Main-internal absolute path to the verified sealed candidate chat.db. */
+  dbPath: string
+  /** Sanitized verification report retained from the passing run. */
+  report: CandidateVerificationReport
 }
 
 // ---------------------------------------------------------------------------
@@ -180,8 +281,29 @@ class InternalImportSession implements ImportSession {
   /** Exact-once guard for finalize + candidate-ready emission (LOCK-O3/O4). */
   public readyEmitted = false
 
+  // Verification ownership (LOCK-4303): the session is the unique owner of
+  // the AbortController, verifier instance, in-flight promise, and report.
+  /** Abort controller for the verification run. */
+  public abortController: AbortController | null = null
+  /** Verifier instance — exactly one per session (LOCK-4304). */
+  public verifier: CandidateVerifierLike | null = null
+  /** In-flight verification promise. Never rejects (settle contains all outcomes). */
+  public verificationPromise: Promise<void> | null = null
+  /** Retained verification report (pass AND fail — preserved for callbacks/4.4). */
+  public verificationReport: CandidateVerificationReport | null = null
+  /** Exact-once verification start guard (LOCK-4304). */
+  public verificationStarted = false
+  /** Exact-once verification completion guard (LOCK-4304). */
+  public verificationCompleted = false
+  /** CandidateReadyResult retained for the verification callback identity/stats. */
+  public readyResult: CandidateReadyResult | null = null
+
   constructor(id: string) {
     this.id = id
+  }
+
+  get isDisposed(): boolean {
+    return this.disposed
   }
 
   /** Opaque candidate identifier (Main-assigned; not a path). */
@@ -199,29 +321,37 @@ class InternalImportSession implements ImportSession {
   }
 
   async cancel(): Promise<void> {
-    if (this.state === 'cancelled' || this.state === 'error') {
+    if (this.state === 'cancelled' || this.state === 'error' || this.state === 'verification-failed') {
       logger.info(`Cancel ignored for session ${this.id} in state ${this.state}`)
       return
     }
 
-    // LOCK-O5: cancel is allowed before AND after candidate-ready (until a
-    // future promotion phase). It discards the candidate and all source
-    // resources. If a page write is in flight, the post-await state re-check
-    // in the orchestrator prevents any next page or ready callback.
+    // LOCK-O5/LOCK-4305: cancel is allowed before AND after candidate-ready,
+    // INCLUDING verifying and verified-candidate (until Phase 4.4 promotion).
+    // It discards the candidate and all source resources. dispose() aborts
+    // and closes the verifier BEFORE the candidate is discarded (LOCK-4303).
+    // If a page write is in flight, the post-await state re-check in the
+    // orchestrator prevents any next page or ready callback.
     this.setState('cancelled')
     sendCancel(this.id)
     await this.dispose()
   }
 
   /**
-   * Enter the error lifecycle (LOCK-O6): mark error (unless already
-   * cancelled), discard the candidate, dispose all isolated resources, and
-   * reset the singleton. Never rejects.
+   * Enter the error lifecycle (LOCK-O6): mark error (unless already in a
+   * terminal state), discard the candidate, dispose all isolated resources,
+   * and reset the singleton. Never rejects.
+   *
+   * Terminal-state guard (accepted 4.3.3 audit correction): `cancelled`,
+   * `error`, AND `verification-failed` are terminal. A fail() raced during
+   * the verification-failed callback await must preserve
+   * `verification-failed` — the sanitized failing report remains the
+   * authoritative outcome (LOCK-4304); cleanup is idempotent via dispose().
    */
   async fail(context: string, error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : String(error)
     logger.error(`Session ${this.id} failed during ${context}: ${message}`)
-    if (this.state !== 'cancelled' && this.state !== 'error') {
+    if (this.state !== 'cancelled' && this.state !== 'error' && this.state !== 'verification-failed') {
       this.setState('error')
     }
     await this.dispose()
@@ -233,9 +363,32 @@ class InternalImportSession implements ImportSession {
 
     logger.info(`Disposing session ${this.id}`)
 
+    // LOCK-4303 async order: signal abort → await verifier completion/close
+    // → discard candidate → dispose source reader/workspace. The candidate
+    // is NEVER removed while the verifier still holds it.
+    if (this.abortController) {
+      this.abortController.abort()
+      this.abortController = null
+    }
+    if (this.verifier) {
+      try {
+        this.verifier.close()
+      } catch (error) {
+        logger.warn(`Error closing verifier for ${this.id}:`, error as Error)
+      }
+    }
+    const inFlight = this.verificationPromise
+    if (inFlight) {
+      // Never rejects: settleVerification contains every outcome.
+      await inFlight
+      this.verificationPromise = null
+    }
+    this.verifier = null
+
     // Discard candidate (closes DB handle first, then removes the owned
     // directory). Sealed candidates are discarded too: dispose is only
-    // reached via cancel/error/manual teardown (LOCK-O5/O6).
+    // reached via cancel/error/verification-failed/manual teardown
+    // (LOCK-O5/O6, LOCK-4304).
     if (this.candidate) {
       try {
         await this.candidate.discard()
@@ -268,6 +421,26 @@ class InternalImportSession implements ImportSession {
     }
   }
 
+  /**
+   * Synchronous verifier close for the will-quit path (LOCK-4303): aborts
+   * the run and requests handle closure immediately. Must run BEFORE the
+   * candidate is discarded synchronously.
+   */
+  closeVerifierSync(): void {
+    if (this.abortController) {
+      this.abortController.abort()
+      this.abortController = null
+    }
+    if (this.verifier) {
+      try {
+        this.verifier.close()
+      } catch (error) {
+        logger.warn(`Error closing verifier (sync) for ${this.id}:`, error as Error)
+      }
+      this.verifier = null
+    }
+  }
+
   /** Synchronous candidate discard for the will-quit path. */
   discardCandidateSync(): void {
     if (this.candidate) {
@@ -279,6 +452,28 @@ class InternalImportSession implements ImportSession {
       this.candidate = null
     }
     this.dataPlane = null
+  }
+
+  /**
+   * Idempotent sync-disposed transition (accepted 4.3.3 audit correction).
+   *
+   * Called by disposeActiveImport() AFTER the ordered sync cleanup
+   * (verifier close → candidate discardSync → reader/session destruction,
+   * LOCK-4303). From here the session accurately reports disposed and
+   * dispose() can never re-enter the async resource cleanup: sync-owned
+   * resources are already released, a still-settling verification promise
+   * is stale by the completion guard, and the temp workspace is left to
+   * startup recovery (LOCK-L3) — will-quit must not await async disposal.
+   */
+  markDisposedSync(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.verificationPromise = null
+    this.tempDir = null
+    if (activeSession?.id === this.id) {
+      activeSession = null
+    }
+    logger.info(`Session ${this.id} marked disposed (sync)`)
   }
 }
 
@@ -550,11 +745,12 @@ export function getActiveImport(): ImportSession | null {
 
 /**
  * Main-only accessor for the sealed candidate of the active session
- * (Phase 4.3 consumer). Returns null unless the session is candidate-ready.
+ * (Phase 4.3 consumer). Returns null unless the session holds a live sealed
+ * candidate (candidate-ready, verifying, or verified-candidate).
  * The filesystem path stays Main-internal — never send it over IPC.
  */
 export function getSealedCandidate(): SealedCandidateHandle | null {
-  if (!activeSession || activeSession.state !== 'candidate-ready' || !activeSession.candidate) {
+  if (!activeSession || !SEALED_CANDIDATE_STATES.has(activeSession.state) || !activeSession.candidate) {
     return null
   }
   return {
@@ -565,20 +761,56 @@ export function getSealedCandidate(): SealedCandidateHandle | null {
 }
 
 /**
+ * Main-only accessor for the verified candidate + retained report of the
+ * active session (future Phase 4.4 promotion consumer). Returns null unless
+ * the session is in `verified-candidate`. The filesystem path stays
+ * Main-internal — never send it over IPC.
+ */
+export function getVerifiedCandidate(): VerifiedCandidateHandle | null {
+  if (
+    !activeSession ||
+    activeSession.state !== 'verified-candidate' ||
+    !activeSession.candidate ||
+    !activeSession.verificationReport
+  ) {
+    return null
+  }
+  return {
+    sessionId: activeSession.id,
+    candidateId: activeSession.candidateId,
+    dbPath: activeSession.candidate.getDbPath(),
+    report: activeSession.verificationReport
+  }
+}
+
+/**
  * Dispose the active import session (sync, for will-quit).
+ *
+ * LOCK-4303 sync order: request verifier close synchronously (closing the
+ * current better-sqlite3 handle) → candidate discardSync → reader/session
+ * disposal → IPC cleanup. The candidate is never removed while the
+ * verifier holds it.
  */
 export function disposeActiveImport(): void {
   if (!activeSession) return
 
-  // Sync window destruction
-  disposeSessionSync()
-
-  // Sync candidate discard (closes handle + removes owned directory)
   const session = activeSession
   activeSession = null
+
+  // 1. Verifier close (abort + immediate handle closure).
+  session.closeVerifierSync()
+
+  // 2. Sync candidate discard (closes handle + removes owned directory).
   session.discardCandidateSync()
 
-  // Dispose IPC
+  // 3. Sync window/session destruction.
+  disposeSessionSync()
+
+  // 4. The session now accurately reports disposed and never re-enters
+  // async resource cleanup (accepted 4.3.3 audit correction).
+  session.markDisposedSync()
+
+  // 5. Dispose IPC.
   if (ipcDisposer) {
     ipcDisposer()
     ipcDisposer = null
@@ -671,14 +903,217 @@ async function completeCandidate(
     candidateId: session.candidateId,
     stats
   }
+  session.readyResult = result
   try {
     await options?.onCandidateReady?.(result)
   } catch (error) {
     // LOCK-O6: callback failure enters error, discards the candidate, and
     // resets the singleton. No unhandled rejection: rethrow is contained at
-    // the IPC boundary as a structured failure ack.
+    // the IPC boundary as a structured failure ack. Verification never
+    // starts after a failed ready callback (LOCK-4304).
     await session.fail('candidate-ready callback', error)
     throw toError(error)
+  }
+
+  // Re-check after await: cancel/dispose may have raced the ready callback
+  // (LOCK-O5) — verification must not start on a discarded candidate.
+  // (Cast: TS narrowed `state` to 'reading' from the entry guard, but
+  // setState() mutated it and cancel may have raced the awaited callback.)
+  if (activeSession?.id !== session.id || (session.state as ImportState) !== 'candidate-ready') {
+    logger.info(`Session ${session.id} left candidate-ready during the ready callback; verification not started`)
+    return
+  }
+
+  // 6. Phase 4.3.3: start exactly one verification run (LOCK-4304).
+  await startVerification(session, options)
+}
+
+/**
+ * Start exactly one verification run against the sealed candidate
+ * (LOCK-4301/4303/4304). Uses the finalized manifest from the SAME data
+ * plane that built the candidate. Transitions to `verifying` and stores
+ * the AbortController, verifier, and in-flight promise on the session.
+ * The run itself is fire-and-tracked: it is never awaited here, and
+ * settleVerification contains every outcome so the tracked promise can
+ * never reject (no unhandled rejection).
+ */
+async function startVerification(
+  session: InternalImportSession,
+  options: StartImportOptions | undefined
+): Promise<void> {
+  // Exact-once start guard (LOCK-4304).
+  if (session.verificationStarted) {
+    logger.warn(`Duplicate verification start attempt for session ${session.id} ignored`)
+    return
+  }
+  session.verificationStarted = true
+
+  const candidate = session.candidate
+  const plane = session.dataPlane
+  if (!candidate || !plane) {
+    const error = new Error(`Verification start reached without candidate/data plane for session ${session.id}`)
+    await session.fail('verification start', error)
+    throw error
+  }
+
+  const verifierFactory = options?.verifierFactory ?? createCandidateVerifier
+  const controller = new AbortController()
+  let verifier: CandidateVerifierLike
+  try {
+    // LOCK-4301: finalized manifest from the SAME data plane — never a
+    // second framing or a target-only weakening.
+    const manifest = plane.getSourceVerificationManifest()
+    verifier = verifierFactory({
+      dbPath: candidate.getDbPath(),
+      manifest,
+      signal: controller.signal
+    })
+  } catch (error) {
+    await session.fail('verification start', error)
+    throw toError(error)
+  }
+
+  // LOCK-4303: the session is the unique owner of controller + verifier +
+  // in-flight promise. State transition is deterministic before run start.
+  session.abortController = controller
+  session.verifier = verifier
+  session.setState('verifying')
+  session.verificationPromise = runVerification(session, verifier, options)
+}
+
+/**
+ * Await the verifier run and settle exactly once. Never rejects: run()
+ * only throws for lifecycle misuse, which is contained into the error
+ * lifecycle by settleVerification.
+ */
+async function runVerification(
+  session: InternalImportSession,
+  verifier: CandidateVerifierLike,
+  options: StartImportOptions | undefined
+): Promise<void> {
+  let report: CandidateVerificationReport | null = null
+  let runError: unknown = null
+  try {
+    report = await verifier.run()
+  } catch (error) {
+    runError = error
+  }
+  await settleVerification(session, report, runError, options)
+}
+
+/**
+ * Exact-once verification completion (LOCK-4304).
+ *
+ * - Stale/raced completions (cancel, quit, failure, manual dispose already
+ *   own cleanup) close the verifier and return without callbacks or state
+ *   transitions.
+ * - pass   → `verified-candidate`: sealed candidate + report retained for
+ *   Phase 4.4; the session stays active.
+ * - fail   → `verification-failed`: sanitized report delivered exactly once,
+ *   then verifier close → candidate discard → source reader/workspace
+ *   disposal → singleton reset. The report stays retained on the session.
+ * - Callback errors are contained (LOCK-4304): logged, never rethrown,
+ *   never leak resources or duplicate completion.
+ */
+async function settleVerification(
+  session: InternalImportSession,
+  report: CandidateVerificationReport | null,
+  runError: unknown,
+  options: StartImportOptions | undefined
+): Promise<void> {
+  // Exact-once completion guard (LOCK-4304).
+  if (session.verificationCompleted) {
+    logger.warn(`Duplicate verification completion attempt for session ${session.id} ignored`)
+    return
+  }
+  session.verificationCompleted = true
+
+  // The in-flight promise is settled from here on. Clearing it now keeps
+  // dispose() from awaiting a promise whose continuation may itself invoke
+  // cancel/dispose (callback re-entrancy safety).
+  session.verificationPromise = null
+
+  // The verifier's run() already closed the readonly handle in its finally;
+  // close() is idempotent and guarantees closure for injected doubles too.
+  if (session.verifier) {
+    try {
+      session.verifier.close()
+    } catch (error) {
+      logger.warn(`Error closing verifier after completion for ${session.id}:`, error as Error)
+    }
+  }
+
+  if (report !== null) {
+    session.verificationReport = report
+  }
+
+  // Stale/raced completion: cancel, quit, failure, or manual dispose won the
+  // race and owns resource cleanup — never deliver callbacks or transition
+  // states from a stale completion.
+  if (activeSession?.id !== session.id || session.state !== 'verifying' || session.isDisposed) {
+    logger.info(`Verification completion for session ${session.id} is stale (state ${session.state}); ignoring`)
+    return
+  }
+
+  if (runError !== null || report === null) {
+    // run() rejected (lifecycle misuse — unexpected). Contained into the
+    // error lifecycle; fail() never rejects.
+    await session.fail('verification run', runError ?? new Error('verifier resolved without a report'))
+    return
+  }
+
+  if (report.status === 'aborted') {
+    // Defensive: an abort/close raced ahead of its owner's state change.
+    // No callback for an aborted run; cleanup via the error lifecycle.
+    await session.fail('verification aborted', new Error('verifier aborted without owner state transition'))
+    return
+  }
+
+  const ready = session.readyResult
+  if (ready === null) {
+    const error = new Error(`Verification completed without a retained CandidateReadyResult for ${session.id}`)
+    await session.fail('verification completion', error)
+    return
+  }
+
+  // Sanitized Main-only payload (LOCK-4304): report + ready identity/stats.
+  // NEVER dbPath, manifest, or SQL.
+  const payload: VerificationCompletedResult = {
+    sessionId: ready.sessionId,
+    candidateId: ready.candidateId,
+    stats: ready.stats,
+    report
+  }
+
+  if (report.status === 'pass') {
+    // LOCK-4305: pass retains the sealed candidate + report; NO promotion,
+    // live-DB replacement, snapshot, or relaunch in Phase 4.3.
+    session.setState('verified-candidate')
+    await invokeVerificationCallback(session, options, payload)
+    return
+  }
+
+  // report.status === 'fail' — deliver the report exactly once, then clean
+  // up: verifier already closed → discard candidate → dispose source
+  // reader/workspace → reset singleton. The report stays retained on the
+  // session for the callback's consumers (LOCK-4304).
+  session.setState('verification-failed')
+  await invokeVerificationCallback(session, options, payload)
+  await session.dispose()
+}
+
+/** Contained Main-only verification callback invocation (LOCK-4304). */
+async function invokeVerificationCallback(
+  session: InternalImportSession,
+  options: StartImportOptions | undefined,
+  payload: VerificationCompletedResult
+): Promise<void> {
+  try {
+    await options?.onVerificationComplete?.(payload)
+  } catch (error) {
+    // Contained: callback errors cannot leak resources, change verification
+    // state, or cause duplicate verification (LOCK-4304).
+    logger.warn(`onVerificationComplete callback failed for session ${session.id}:`, toError(error))
   }
 }
 

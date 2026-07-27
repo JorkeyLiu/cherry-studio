@@ -35,7 +35,9 @@ import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
 import { runMigrations } from '../../chatDb/migration'
 import { createImportWriter } from '../../chatDb/repository/ImportWriter'
 import * as schema from '../../chatDb/schema'
+import { projectFileReferences, wireToBlock, wireToMessage } from '../../chatDb/wireAdapters'
 import { ChatImportDataPlaneError, createImportDataPlane } from '../importDataPlane'
+import { canonicalDigest } from '../verification/canonicalJson'
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -674,5 +676,194 @@ describe('ChatImportDataPlane', () => {
 
     const unsafe = srcMessage('m-1', 't-1', [], { when: new Date() as unknown as string })
     expect(() => plane.processPage(page('topics', [srcTopic('t-1', [unsafe])]))).toThrowError(/not JSON-safe/)
+  })
+
+  // -------------------------------------------------------------------------
+  // Source verification manifest (Phase 4.3.1, LOCK-4301/4302)
+  // -------------------------------------------------------------------------
+
+  it('rejects manifest access before a successful finalize (LOCK-4301)', () => {
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [])]))
+
+    let caught: ChatImportDataPlaneError | null = null
+    try {
+      plane.getSourceVerificationManifest()
+    } catch (e) {
+      caught = e as ChatImportDataPlaneError
+    }
+    expect(caught).toBeInstanceOf(ChatImportDataPlaneError)
+    expect(caught!.code).toBe('NOT_FINALIZED')
+  })
+
+  it('captures complete target-equivalent evidence from committed pages (LOCK-4301/4302)', () => {
+    const plane = createImportDataPlane(db)
+    const structuredModel = { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'GPT-4o' }
+    const msg1 = srcMessage('m-1', 't-1', ['b-file', 'b-tool'], {
+      model: structuredModel,
+      unknownMessageKey: { nested: [1, 2, 3] }
+    })
+    const msg2 = srcMessage('m-2', 't-1', [])
+    const fileBlock = srcBlock('b-file', 'm-1', {
+      type: 'file',
+      content: null,
+      file: { id: 'file-1', name: 'doc.pdf', path: '/files/doc.pdf', type: 'file', size: 2048 }
+    })
+    const toolBlock = srcBlock('b-tool', 'm-1', {
+      type: 'tool',
+      content: { toolName: 'search', result: { hits: 2 } }
+    })
+
+    plane.processPage(page('topics', [srcTopic('t-1', [msg1, msg2], { deletedAt: '2021-06-01T00:00:00.000Z' })]))
+    plane.processPage(page('message_blocks', [fileBlock, toolBlock]))
+    plane.processPage(page('topic_segments', [srcSegment('s-1', 't-1', ['m-2', 'm-1'], { color: '#ff0000' })]))
+    plane.processPage(page('files', [{ id: 'file-1' }, { id: 'file-orphan' }]))
+    plane.finalize()
+
+    const manifest = plane.getSourceVerificationManifest()
+
+    // Counts + complete ID coverage across every dimension.
+    expect(manifest.topics.count).toBe(1)
+    expect(manifest.messages.count).toBe(2)
+    expect(manifest.blocks.count).toBe(2)
+    expect(manifest.fileReferences.count).toBe(1)
+    expect(manifest.segments.count).toBe(1)
+    expect(manifest.memberships.rowCount).toBe(2)
+    expect(manifest.committedPageCount).toBe(4)
+    expect(Object.keys(manifest.messages.entries).sort()).toEqual(['m-1', 'm-2'])
+    expect(Object.keys(manifest.blocks.entries).sort()).toEqual(['b-file', 'b-tool'])
+
+    // Topic digest: target-equivalent projection — canonical columns null,
+    // deletedAt preserved, empty overflow. Never the raw Dexie topic.
+    expect(manifest.topics.entries['t-1'].digest).toBe(
+      canonicalDigest({
+        id: 't-1',
+        assistantId: null,
+        name: null,
+        createdAt: null,
+        updatedAt: null,
+        deletedAt: '2021-06-01T00:00:00.000Z',
+        overflow: {}
+      })
+    )
+
+    // Message digests match the exact wire projection (structured model in
+    // overflow, sortOrder from the embedded array index).
+    const expectedMsg1 = wireToMessage(msg1)
+    expectedMsg1.sortOrder = 0
+    expect(manifest.messages.entries['m-1']).toEqual({
+      topicId: 't-1',
+      sortOrder: 0,
+      digest: canonicalDigest({ ...expectedMsg1 }),
+      overflowDigest: canonicalDigest(expectedMsg1.overflow),
+      structuredModelDigest: canonicalDigest(structuredModel)
+    })
+    const expectedMsg2 = wireToMessage(msg2)
+    expectedMsg2.sortOrder = 1
+    expect(manifest.messages.entries['m-2']).toEqual({
+      topicId: 't-1',
+      sortOrder: 1,
+      digest: canonicalDigest({ ...expectedMsg2 }),
+      overflowDigest: canonicalDigest(expectedMsg2.overflow),
+      structuredModelDigest: null
+    })
+
+    // Block digests match the wire projection (tool object content moved to
+    // overflow) with parent-index sortOrder; ownership evidence recorded.
+    const expectedFileBlock = wireToBlock(fileBlock)
+    expectedFileBlock.sortOrder = 0
+    expect(manifest.blocks.entries['b-file']).toEqual({
+      messageId: 'm-1',
+      sortOrder: 0,
+      digest: canonicalDigest({ ...expectedFileBlock }),
+      overflowDigest: canonicalDigest(expectedFileBlock.overflow),
+      structuredContentDigest: null
+    })
+    const expectedToolBlock = wireToBlock(toolBlock)
+    expectedToolBlock.sortOrder = 1
+    expect(manifest.blocks.entries['b-tool']).toEqual({
+      messageId: 'm-1',
+      sortOrder: 1,
+      digest: canonicalDigest({ ...expectedToolBlock }),
+      overflowDigest: canonicalDigest(expectedToolBlock.overflow),
+      structuredContentDigest: canonicalDigest({ toolName: 'search', result: { hits: 2 } })
+    })
+
+    // Derived file reference evidence (projection-derived, not source files).
+    const expectedRef = projectFileReferences(expectedFileBlock)[0]
+    expect(manifest.fileReferences.entries[expectedRef.id]).toEqual({
+      blockId: 'b-file',
+      digest: canonicalDigest({ ...expectedRef }),
+      overflowDigest: canonicalDigest({})
+    })
+
+    // Segment digest (overflow keeps color, excludes messageIds) + membership
+    // order exactly as the source array (m-2 before m-1).
+    expect(manifest.segments.entries['s-1']).toEqual({
+      topicId: 't-1',
+      digest: canonicalDigest({
+        id: 's-1',
+        topicId: 't-1',
+        name: 'Segment s-1',
+        createdAt: '2020-01-02T00:00:00.000Z',
+        updatedAt: '2020-01-02T00:00:00.000Z',
+        sortOrder: 0,
+        overflow: { color: '#ff0000' }
+      }),
+      overflowDigest: canonicalDigest({ color: '#ff0000' })
+    })
+    expect(manifest.memberships.bySegment['s-1']).toEqual(['m-2', 'm-1'])
+
+    // Source files stay count-diagnostic only (LOCK-D7): no evidence rows.
+    expect(manifest.sourceFiles.recordCount).toBe(2)
+    expect(Object.keys(manifest.fileReferences.entries)).toEqual([expectedRef.id])
+  })
+
+  it('keeps manifest evidence free of failed pages (LOCK-4301)', () => {
+    // Pre-seed a topic to force a PRIMARY KEY violation inside the page tx.
+    createImportWriter(db).insertTopics([
+      { id: 't-dup', assistantId: null, name: null, createdAt: null, updatedAt: null, deletedAt: null, overflow: {} }
+    ])
+
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', [])])]))
+
+    // Validation failure: rejected before any staging is committed.
+    expect(() => plane.processPage(page('topics', [srcTopic('t-bad', [{ id: 'm-x' } as JsonObject])]))).toThrow()
+    // DB constraint failure: staged delta must be dropped with the rollback.
+    expect(() =>
+      plane.processPage(page('topics', [srcTopic('t-new', [srcMessage('m-new', 't-new', [])]), srcTopic('t-dup', [])]))
+    ).toThrow()
+
+    plane.finalize()
+    const manifest = plane.getSourceVerificationManifest()
+    expect(manifest.topics.count).toBe(1)
+    expect(Object.keys(manifest.topics.entries)).toEqual(['t-1'])
+    expect(manifest.messages.count).toBe(1)
+    expect(Object.keys(manifest.messages.entries)).toEqual(['m-1'])
+    expect(manifest.committedPageCount).toBe(1)
+  })
+
+  it('returns the same deep-frozen manifest snapshot on every access (LOCK-4301)', () => {
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', [])])]))
+    plane.finalize()
+
+    const first = plane.getSourceVerificationManifest()
+    expect(plane.getSourceVerificationManifest()).toBe(first)
+
+    expect(Object.isFrozen(first)).toBe(true)
+    expect(Object.isFrozen(first.topics)).toBe(true)
+    expect(Object.isFrozen(first.topics.entries)).toBe(true)
+    expect(Object.isFrozen(first.topics.entries['t-1'])).toBe(true)
+    expect(Object.isFrozen(first.messages.entries['m-1'])).toBe(true)
+    expect(() => {
+      ;(first.topics.entries['t-1'] as { digest: string }).digest = 'tampered'
+    }).toThrowError(TypeError)
+
+    // A second finalize() keeps Phase 4.2 semantics and the same evidence.
+    const stats = plane.finalize()
+    expect(stats.candidateImportStats.topicCount).toBe(1)
+    expect(plane.getSourceVerificationManifest()).toBe(first)
   })
 })

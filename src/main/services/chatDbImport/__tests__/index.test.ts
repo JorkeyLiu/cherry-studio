@@ -16,6 +16,16 @@
  * - No filesystem path in the shared CandidateReadyResult; Main-only
  *   getSealedCandidate() handle
  * - Live DB isolation: the live chatDbService is never constructed
+ * - Verification orchestration (Phase 4.3.3 — LOCK-4301…4305):
+ *   - exactly one verifier starts after the exact-once candidate-ready
+ *     callback, bound to the same-data-plane manifest + candidate dbPath
+ *   - pass retains the sealed candidate + report (verified-candidate)
+ *   - fail delivers the sanitized report exactly once, then verifier close
+ *     → candidate discard → source disposal → singleton reset
+ *   - cancel before start / during verification / after verified
+ *   - callback throw containment; duplicate start/completion attempts;
+ *     stale completions; async dispose + sync will-quit resource ordering
+ *   - no filesystem path in the verification completion payload
  */
 
 import type { CandidateImportStats, ReadPageResponse, SourceReadStats } from '@shared/chatImport/types'
@@ -87,6 +97,7 @@ vi.mock('../importIpc', () => ({
 const hoisted = vi.hoisted(() => ({
   candidateCtor: vi.fn(),
   createPlane: vi.fn(),
+  createVerifier: vi.fn(),
   liveChatDbCtor: vi.fn()
 }))
 
@@ -96,6 +107,12 @@ vi.mock('../candidateDb', () => ({
 
 vi.mock('../importDataPlane', () => ({
   createImportDataPlane: hoisted.createPlane
+}))
+
+// Production-default verifier (LOCK-O8): mocked so no real better-sqlite3 /
+// chatDb read path is ever touched by this suite.
+vi.mock('../verification/candidateVerifier', () => ({
+  createCandidateVerifier: hoisted.createVerifier
 }))
 
 // Live DB isolation sentinel: the orchestrator must never construct the live
@@ -111,6 +128,7 @@ import {
   disposeActiveImport,
   getActiveImport,
   getSealedCandidate,
+  getVerifiedCandidate,
   startImport
 } from '../index'
 
@@ -119,6 +137,9 @@ import {
 // ---------------------------------------------------------------------------
 
 const MOCK_DB_PATH = '/mock/candidates/candidate-x/chat.db'
+
+/** Opaque manifest sentinel returned by the plane double (LOCK-4301 identity check). */
+const MOCK_MANIFEST: any = { mock: 'source-verification-manifest' }
 
 function makeCandidate(overrides: Partial<Record<string, any>> = {}) {
   const candidate: any = {
@@ -172,36 +193,102 @@ function makePlane(overrides: Partial<Record<string, any>> = {}) {
     finalize: vi.fn(() => ({
       sourceReadStats: computeSourceStats(pages),
       candidateImportStats: makeCandidateStats(pages.length)
-    }))
+    })),
+    getSourceVerificationManifest: vi.fn(() => MOCK_MANIFEST)
   }
   return Object.assign(plane, overrides)
+}
+
+const REPORT_DIMENSIONS = [
+  'id_sets',
+  'table_counts',
+  'field_digests',
+  'order',
+  'fk_references',
+  'relations',
+  'file_references',
+  'segments',
+  'structured_json',
+  'overflow',
+  'integrity_check',
+  'foreign_key_check',
+  'sample_reads'
+] as const
+
+/** Sanitized 13-dimension report double (LOCK-4304 shape). */
+function makeReport(status: 'pass' | 'fail' | 'aborted' = 'pass', fatal: any = null) {
+  return {
+    status,
+    dimensions: REPORT_DIMENSIONS.map((dimension) => ({
+      dimension,
+      status: status === 'pass' ? 'pass' : 'skipped',
+      checkedCount: 0,
+      diagnostics: [],
+      truncatedDiagnosticCount: 0
+    })),
+    fatal
+  }
+}
+
+function makeVerifier(report: any = makeReport('pass'), overrides: Partial<Record<string, any>> = {}) {
+  const verifier: any = {
+    run: vi.fn(async () => report),
+    close: vi.fn()
+  }
+  return Object.assign(verifier, overrides)
+}
+
+/** Flush the in-flight verification settle (microtasks + one macrotask). */
+async function flushVerification() {
+  await new Promise<void>((resolve) => setImmediate(resolve))
+}
+
+/** Verifier double whose run() blocks until the test releases it. */
+function makeGatedVerifier() {
+  let releaseRun!: (report: any) => void
+  const runGate = new Promise<any>((resolve) => {
+    releaseRun = resolve
+  })
+  const verifier = makeVerifier(undefined, { run: vi.fn(() => runGate) })
+  return { verifier, releaseRun }
 }
 
 interface Harness {
   session: Awaited<ReturnType<typeof startImport>>
   candidate: ReturnType<typeof makeCandidate>
   plane: ReturnType<typeof makePlane>
+  verifier: ReturnType<typeof makeVerifier>
+  verifierFactory: ReturnType<typeof vi.fn>
   onCandidateReady: ReturnType<typeof vi.fn>
+  onVerificationComplete: ReturnType<typeof vi.fn>
 }
 
 async function begin(
   opts: {
     candidate?: ReturnType<typeof makeCandidate>
     plane?: ReturnType<typeof makePlane>
+    verifier?: ReturnType<typeof makeVerifier>
+    verifierFactory?: ReturnType<typeof vi.fn>
     onCandidateReady?: ReturnType<typeof vi.fn>
+    onVerificationComplete?: ReturnType<typeof vi.fn>
     now?: () => number
   } = {}
 ): Promise<Harness> {
   const candidate = opts.candidate ?? makeCandidate()
   const plane = opts.plane ?? makePlane()
+  const verifier = opts.verifier ?? makeVerifier()
+  const verifierFactory = opts.verifierFactory ?? vi.fn((_options: any) => verifier)
   const onCandidateReady = opts.onCandidateReady ?? vi.fn()
+  const onVerificationComplete = opts.onVerificationComplete ?? vi.fn()
   const session = await startImport('/tmp/test.zip', {
     onCandidateReady,
+    onVerificationComplete,
     candidateFactory: () => candidate,
     dataPlaneFactory: () => plane,
+    verifierFactory,
     now: opts.now
   })
-  return { session, candidate, plane, onCandidateReady }
+  return { session, candidate, plane, verifier, verifierFactory, onCandidateReady, onVerificationComplete }
 }
 
 const DISCOVERY = {
@@ -246,6 +333,7 @@ describe('ChatImport index', () => {
     // Production defaults delegate to the doubles (never real SQLite here).
     hoisted.candidateCtor.mockImplementation((_opts: any) => makeCandidate())
     hoisted.createPlane.mockImplementation((_db: unknown) => makePlane())
+    hoisted.createVerifier.mockImplementation((_options: any) => makeVerifier())
     // Dispose any active session
     disposeActiveImport()
   })
@@ -480,14 +568,18 @@ describe('ChatImport index', () => {
       async () => {
         const nowValues = [1000, 3500]
         const now = vi.fn(() => nowValues.shift() ?? 3500)
-        const { session, candidate, plane, onCandidateReady } = await begin({ now })
+        const { verifier, releaseRun } = makeGatedVerifier()
+        const { session, candidate, plane, onCandidateReady } = await begin({ now, verifier })
 
         await discover(session.id)
         await runAllPages(session.id)
 
-        // No further page requested after the last entity
+        // No further page requested after the last entity; verification
+        // auto-starts after the exact-once ready emission (Phase 4.3.3).
         expect(mockSendReadPage).toHaveBeenCalledTimes(3) // entity advances only
-        expect(session.state).toBe('candidate-ready')
+        expect(session.state).toBe('verifying')
+        releaseRun(makeReport('pass'))
+        await flushVerification()
 
         // Exactly-once finalize + seal, candidate NOT discarded on success
         expect(plane.finalize).toHaveBeenCalledTimes(1)
@@ -517,7 +609,8 @@ describe('ChatImport index', () => {
 
       expect(plane.processPage).toHaveBeenCalledTimes(4)
       expect(computeSourceStats(plane.pages)).toEqual(EXPECTED_SOURCE_STATS)
-      expect(session.state).toBe('candidate-ready')
+      await flushVerification()
+      expect(session.state).toBe('verified-candidate')
 
       await session.dispose()
     })
@@ -536,8 +629,9 @@ describe('ChatImport index', () => {
       await session.dispose()
     })
 
-    itOnDarwin('getSealedCandidate exposes the Main-only path only when candidate-ready', async () => {
-      const { session, candidate } = await begin()
+    itOnDarwin('getSealedCandidate exposes the Main-only path only while a sealed candidate is alive', async () => {
+      const { verifier, releaseRun } = makeGatedVerifier()
+      const { session, candidate } = await begin({ verifier })
 
       expect(getSealedCandidate()).toBeNull()
 
@@ -545,12 +639,19 @@ describe('ChatImport index', () => {
       expect(getSealedCandidate()).toBeNull() // still reading
 
       await runAllPages(session.id)
+      // Sealed candidate alive across candidate-ready → verifying → verified.
+      expect(session.state).toBe('verifying')
       expect(getSealedCandidate()).toEqual({
         sessionId: session.id,
         candidateId: `candidate-${session.id}`,
         dbPath: MOCK_DB_PATH
       })
       expect(candidate.getDbPath).toHaveBeenCalled()
+
+      releaseRun(makeReport('pass'))
+      await flushVerification()
+      expect(session.state).toBe('verified-candidate')
+      expect(getSealedCandidate()).not.toBeNull()
 
       await session.dispose()
       expect(getSealedCandidate()).toBeNull()
@@ -588,8 +689,9 @@ describe('ChatImport index', () => {
       await discover(session.id)
       await runAllPages(session.id)
 
+      await flushVerification()
       expect(hoisted.liveChatDbCtor).not.toHaveBeenCalled()
-      expect(session.state).toBe('candidate-ready')
+      expect(session.state).toBe('verified-candidate')
 
       await session.dispose()
     })
@@ -601,19 +703,23 @@ describe('ChatImport index', () => {
 
   describe('duplicate/late renderer complete (LOCK-O4)', () => {
     itOnDarwin('onComplete after candidate-ready cannot re-finalize or duplicate the result', async () => {
-      const { session, candidate, plane, onCandidateReady } = await begin()
+      const { session, candidate, plane, verifierFactory, onCandidateReady } = await begin()
 
       await discover(session.id)
       await runAllPages(session.id)
+      await flushVerification()
       expect(onCandidateReady).toHaveBeenCalledTimes(1)
+      expect(session.state).toBe('verified-candidate')
 
       // Late renderer complete — must be a no-op.
       capturedCallbacks.onComplete(session.id, EXPECTED_SOURCE_STATS)
+      await flushVerification()
 
-      expect(session.state).toBe('candidate-ready')
+      expect(session.state).toBe('verified-candidate')
       expect(plane.finalize).toHaveBeenCalledTimes(1)
       expect(candidate.seal).toHaveBeenCalledTimes(1)
       expect(onCandidateReady).toHaveBeenCalledTimes(1)
+      expect(verifierFactory).toHaveBeenCalledTimes(1) // no second verification
 
       await session.dispose()
     })
@@ -778,6 +884,22 @@ describe('ChatImport index', () => {
       expect(candidate.discard).toHaveBeenCalled()
       expect(getActiveImport()).toBeNull()
     })
+
+    itOnDarwin('candidate-ready callback failure never starts verification (LOCK-4304)', async () => {
+      const onCandidateReady = vi.fn(() => {
+        throw new Error('callback boom')
+      })
+      const { session, verifierFactory, onVerificationComplete } = await begin({ onCandidateReady })
+
+      await discover(session.id)
+      await capturedCallbacks.onReadPage(session.id, page('topics', []))
+      await capturedCallbacks.onReadPage(session.id, page('message_blocks', []))
+      await capturedCallbacks.onReadPage(session.id, page('topic_segments', []))
+      await expect(capturedCallbacks.onReadPage(session.id, page('files', []))).rejects.toThrow('callback boom')
+
+      expect(verifierFactory).not.toHaveBeenCalled()
+      expect(onVerificationComplete).not.toHaveBeenCalled()
+    })
   })
 
   // =========================================================================
@@ -837,12 +959,13 @@ describe('ChatImport index', () => {
       expect(getActiveImport()).toBeNull()
     })
 
-    itOnDarwin('cancel AFTER candidate-ready discards the sealed candidate (until future promotion)', async () => {
+    itOnDarwin('cancel AFTER candidate sealing discards the sealed candidate (until future promotion)', async () => {
       const { session, candidate, onCandidateReady } = await begin()
 
       await discover(session.id)
       await runAllPages(session.id)
-      expect(session.state).toBe('candidate-ready')
+      await flushVerification()
+      expect(session.state).toBe('verified-candidate')
       expect(getSealedCandidate()).not.toBeNull()
 
       await session.cancel()
@@ -866,6 +989,455 @@ describe('ChatImport index', () => {
       await session.cancel()
       expect(mockSendCancel).not.toHaveBeenCalled()
       expect(candidate.discard).not.toHaveBeenCalled()
+    })
+  })
+
+  // =========================================================================
+  // Verification orchestration (Phase 4.3.3 — LOCK-4301…4305)
+  // =========================================================================
+
+  describe('verification (Phase 4.3.3)', () => {
+    itOnDarwin('starts exactly one verifier with dbPath + same-data-plane manifest + abort signal', async () => {
+      const { verifier, releaseRun } = makeGatedVerifier()
+      const { session, plane, verifierFactory, onCandidateReady } = await begin({ verifier })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+
+      // Exactly one verifier, created only AFTER the exact-once ready callback.
+      expect(verifierFactory).toHaveBeenCalledTimes(1)
+      expect(onCandidateReady.mock.invocationCallOrder[0]).toBeLessThan(verifierFactory.mock.invocationCallOrder[0])
+
+      // LOCK-4301: the manifest is the SAME object the data plane finalized.
+      expect(plane.getSourceVerificationManifest).toHaveBeenCalledTimes(1)
+      const verifierOptions = verifierFactory.mock.calls[0][0]
+      expect(verifierOptions.dbPath).toBe(MOCK_DB_PATH)
+      expect(verifierOptions.manifest).toBe(MOCK_MANIFEST)
+      expect(verifierOptions.signal).toBeInstanceOf(AbortSignal)
+      expect(verifierOptions.signal.aborted).toBe(false)
+
+      expect(session.state).toBe('verifying')
+
+      releaseRun(makeReport('pass'))
+      await flushVerification()
+      await session.dispose()
+    })
+
+    itOnDarwin('happy pass retains the sealed candidate + report and emits exactly one completion', async () => {
+      const report = makeReport('pass')
+      const { verifier, releaseRun } = makeGatedVerifier()
+      const { session, candidate, onVerificationComplete } = await begin({ verifier })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      expect(session.state).toBe('verifying')
+
+      releaseRun(report)
+      await flushVerification()
+
+      expect(session.state).toBe('verified-candidate')
+      expect(verifier.run).toHaveBeenCalledTimes(1)
+      expect(verifier.close).toHaveBeenCalled()
+      // Pass retains the sealed candidate for Phase 4.4 (LOCK-4305).
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect(candidate.discardSync).not.toHaveBeenCalled()
+      expect(getActiveImport()).toBe(session)
+
+      // Exactly-once Main-only completion with report + ready identity/stats.
+      expect(onVerificationComplete).toHaveBeenCalledTimes(1)
+      expect(onVerificationComplete).toHaveBeenCalledWith({
+        sessionId: session.id,
+        candidateId: `candidate-${session.id}`,
+        stats: { ...makeCandidateStats(4), elapsedMs: expect.any(Number) },
+        report
+      })
+
+      // Main-only accessor for the future 4.4 consumer.
+      expect(getVerifiedCandidate()).toEqual({
+        sessionId: session.id,
+        candidateId: `candidate-${session.id}`,
+        dbPath: MOCK_DB_PATH,
+        report
+      })
+
+      await session.dispose()
+      expect(getVerifiedCandidate()).toBeNull()
+    })
+
+    itOnDarwin('the verification completion payload contains no filesystem path (LOCK-4304)', async () => {
+      const { session, onVerificationComplete } = await begin()
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+
+      const payload = onVerificationComplete.mock.calls[0][0]
+      expect(Object.keys(payload).sort()).toEqual(['candidateId', 'report', 'sessionId', 'stats'])
+      expect(JSON.stringify(payload)).not.toContain(MOCK_DB_PATH)
+      expect(JSON.stringify(payload)).not.toContain('/mock')
+      expect(payload.candidateId).not.toContain('/')
+
+      await session.dispose()
+    })
+
+    itOnDarwin(
+      'failing report: exact-once sanitized report, then verifier close → candidate discard → source disposal',
+      async () => {
+        const report = makeReport('fail')
+        const verifier = makeVerifier(report)
+        const { session, candidate, onVerificationComplete } = await begin({ verifier })
+
+        await discover(session.id)
+        await runAllPages(session.id)
+        await flushVerification()
+
+        expect(session.state).toBe('verification-failed')
+        // Report delivered exactly once, BEFORE resource cleanup.
+        expect(onVerificationComplete).toHaveBeenCalledTimes(1)
+        expect(onVerificationComplete.mock.calls[0][0].report).toBe(report)
+        expect(onVerificationComplete.mock.invocationCallOrder[0]).toBeLessThan(
+          candidate.discard.mock.invocationCallOrder[0]
+        )
+
+        // LOCK-4303 order: verifier close → candidate discard → reader →
+        // temp workspace. The candidate is never removed while held.
+        const { dispose: disposeSessionMock } = (await import('../isolatedSession')) as any
+        const { disposeAsync: disposeTempMock } = (await import('../tempWorkspace')) as any
+        expect(candidate.discard).toHaveBeenCalledTimes(1)
+        expect(verifier.close.mock.invocationCallOrder[0]).toBeLessThan(candidate.discard.mock.invocationCallOrder[0])
+        expect(candidate.discard.mock.invocationCallOrder[0]).toBeLessThan(
+          disposeSessionMock.mock.invocationCallOrder[0]
+        )
+        expect(disposeSessionMock.mock.invocationCallOrder[0]).toBeLessThan(disposeTempMock.mock.invocationCallOrder[0])
+
+        // Singleton reset; no verified handle.
+        expect(getActiveImport()).toBeNull()
+        expect(getVerifiedCandidate()).toBeNull()
+        expect(getSealedCandidate()).toBeNull()
+      }
+    )
+
+    itOnDarwin('open fatal surfaces as a sanitized failing report and cleans up', async () => {
+      const report = makeReport('fail', {
+        code: 'CANDIDATE_OPEN_FAILED',
+        errorCode: 'SQLITE_CANTOPEN',
+        fieldPath: null,
+        message: 'CANDIDATE_OPEN_FAILED: SQLITE_CANTOPEN'
+      })
+      const verifier = makeVerifier(report)
+      const { session, candidate, onVerificationComplete } = await begin({ verifier })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+
+      expect(session.state).toBe('verification-failed')
+      expect(onVerificationComplete).toHaveBeenCalledTimes(1)
+      const payload = onVerificationComplete.mock.calls[0][0]
+      expect(payload.report.fatal.code).toBe('CANDIDATE_OPEN_FAILED')
+      expect(JSON.stringify(payload)).not.toContain(MOCK_DB_PATH)
+      expect(candidate.discard).toHaveBeenCalledTimes(1)
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin('verifier run() rejection enters the error lifecycle without a completion callback', async () => {
+      const verifier = makeVerifier(undefined, {
+        run: vi.fn(async () => {
+          throw new Error('lifecycle misuse')
+        })
+      })
+      const { session, candidate, onVerificationComplete } = await begin({ verifier })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+
+      expect(session.state).toBe('error')
+      expect(onVerificationComplete).not.toHaveBeenCalled()
+      expect(candidate.discard).toHaveBeenCalledTimes(1)
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin('manifest retrieval failure enters the error lifecycle before any verifier exists', async () => {
+      const plane = makePlane({
+        getSourceVerificationManifest: vi.fn(() => {
+          throw new Error('NOT_FINALIZED boom')
+        })
+      })
+      const { session, candidate, verifierFactory, onVerificationComplete, onCandidateReady } = await begin({ plane })
+
+      await discover(session.id)
+      await capturedCallbacks.onReadPage(session.id, page('topics', []))
+      await capturedCallbacks.onReadPage(session.id, page('message_blocks', []))
+      await capturedCallbacks.onReadPage(session.id, page('topic_segments', []))
+      await expect(capturedCallbacks.onReadPage(session.id, page('files', []))).rejects.toThrow('NOT_FINALIZED boom')
+
+      expect(onCandidateReady).toHaveBeenCalledTimes(1) // ready stayed exact-once
+      expect(verifierFactory).not.toHaveBeenCalled()
+      expect(onVerificationComplete).not.toHaveBeenCalled()
+      expect(session.state).toBe('error')
+      expect(candidate.discard).toHaveBeenCalledTimes(1)
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin('cancel inside the ready callback prevents verification from starting', async () => {
+      const onCandidateReady = vi.fn(async (result: any) => {
+        await cancelImport(result.sessionId)
+      })
+      const { session, candidate, verifierFactory, onVerificationComplete } = await begin({ onCandidateReady })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+
+      expect(session.state).toBe('cancelled')
+      expect(verifierFactory).not.toHaveBeenCalled()
+      expect(onVerificationComplete).not.toHaveBeenCalled()
+      expect(candidate.discard).toHaveBeenCalledTimes(1)
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin(
+      'cancel during verification: abort → verifier close → await run → candidate discard; no completion',
+      async () => {
+        let releaseRun!: (report: any) => void
+        const runGate = new Promise<any>((resolve) => {
+          releaseRun = resolve
+        })
+        let signalAbortedAtClose: boolean | null = null
+        let capturedSignal: AbortSignal | null = null
+        const verifier = makeVerifier(undefined, {
+          run: vi.fn(() => runGate),
+          close: vi.fn(() => {
+            signalAbortedAtClose = capturedSignal?.aborted ?? null
+          })
+        })
+        const verifierFactory = vi.fn((options: any) => {
+          capturedSignal = options.signal
+          return verifier
+        })
+        const { session, candidate, onVerificationComplete } = await begin({ verifier, verifierFactory })
+
+        await discover(session.id)
+        await runAllPages(session.id)
+        expect(session.state).toBe('verifying')
+
+        const cancelPromise = session.cancel()
+
+        // The candidate must NOT be discarded while the verifier holds it:
+        // dispose is parked awaiting the in-flight run (LOCK-4303).
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(session.state).toBe('cancelled')
+        expect(verifier.close).toHaveBeenCalled()
+        expect(signalAbortedAtClose).toBe(true) // abort signaled BEFORE close
+        expect(candidate.discard).not.toHaveBeenCalled()
+
+        releaseRun(makeReport('aborted'))
+        await cancelPromise
+
+        // Verifier completion awaited, THEN candidate discarded.
+        expect(candidate.discard).toHaveBeenCalledTimes(1)
+        expect(onVerificationComplete).not.toHaveBeenCalled()
+        expect(getActiveImport()).toBeNull()
+        expect(getVerifiedCandidate()).toBeNull()
+      }
+    )
+
+    itOnDarwin('cancel after verified-candidate discards the candidate; completion stays exactly-once', async () => {
+      const { session, candidate, onVerificationComplete } = await begin()
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+      expect(session.state).toBe('verified-candidate')
+      expect(onVerificationComplete).toHaveBeenCalledTimes(1)
+
+      await session.cancel()
+
+      expect(session.state).toBe('cancelled')
+      expect(candidate.discard).toHaveBeenCalledTimes(1)
+      expect(onVerificationComplete).toHaveBeenCalledTimes(1) // still exactly once
+      expect(getActiveImport()).toBeNull()
+      expect(getVerifiedCandidate()).toBeNull()
+    })
+
+    itOnDarwin('completion callback throw on pass is contained: state and candidate retained', async () => {
+      const onVerificationComplete = vi.fn(() => {
+        throw new Error('verification callback boom')
+      })
+      const { session, candidate } = await begin({ onVerificationComplete })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+
+      expect(onVerificationComplete).toHaveBeenCalledTimes(1)
+      expect(session.state).toBe('verified-candidate')
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect(getActiveImport()).toBe(session)
+      expect(getVerifiedCandidate()).not.toBeNull()
+
+      await session.dispose()
+    })
+
+    itOnDarwin('completion callback throw on fail is contained: cleanup still runs', async () => {
+      const onVerificationComplete = vi.fn(() => {
+        throw new Error('verification callback boom')
+      })
+      const verifier = makeVerifier(makeReport('fail'))
+      const { session, candidate } = await begin({ verifier, onVerificationComplete })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+
+      expect(onVerificationComplete).toHaveBeenCalledTimes(1)
+      expect(session.state).toBe('verification-failed')
+      expect(candidate.discard).toHaveBeenCalledTimes(1)
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin('cancel from inside the pass completion callback cannot deadlock or double-clean', async () => {
+      const onVerificationComplete = vi.fn(async (result: any) => {
+        await cancelImport(result.sessionId)
+      })
+      const { session, candidate, verifier } = await begin({ onVerificationComplete })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+
+      expect(onVerificationComplete).toHaveBeenCalledTimes(1)
+      expect(session.state).toBe('cancelled')
+      expect(candidate.discard).toHaveBeenCalledTimes(1)
+      expect(verifier.run).toHaveBeenCalledTimes(1)
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin(
+      'duplicate start attempts: late renderer complete/pages cannot start a second verification',
+      async () => {
+        const { session, verifier, verifierFactory, onVerificationComplete } = await begin()
+
+        await discover(session.id)
+        await runAllPages(session.id)
+
+        // Late renderer signals while verifying — all ignored.
+        capturedCallbacks.onComplete(session.id, EXPECTED_SOURCE_STATS)
+        await capturedCallbacks.onReadPage(session.id, page('files', []))
+        await flushVerification()
+        capturedCallbacks.onComplete(session.id, EXPECTED_SOURCE_STATS)
+        await flushVerification()
+
+        expect(verifierFactory).toHaveBeenCalledTimes(1)
+        expect(verifier.run).toHaveBeenCalledTimes(1)
+        expect(onVerificationComplete).toHaveBeenCalledTimes(1)
+        expect(session.state).toBe('verified-candidate')
+
+        await session.dispose()
+      }
+    )
+
+    itOnDarwin('stale completion after sync will-quit delivers nothing and leaks nothing', async () => {
+      const { verifier, releaseRun } = makeGatedVerifier()
+      const { session, candidate, onVerificationComplete } = await begin({ verifier })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      expect(session.state).toBe('verifying')
+
+      // Sync quit while the run is in flight.
+      disposeActiveImport()
+      expect(getActiveImport()).toBeNull()
+      expect(candidate.discardSync).toHaveBeenCalledTimes(1)
+
+      // The run settles later — stale: no callback, no state transition.
+      releaseRun(makeReport('pass'))
+      await flushVerification()
+
+      expect(onVerificationComplete).not.toHaveBeenCalled()
+      expect(getVerifiedCandidate()).toBeNull()
+      expect(candidate.discard).not.toHaveBeenCalled() // async discard never ran
+
+      await session.dispose()
+    })
+
+    itOnDarwin('sync will-quit ordering: verifier close → candidate discardSync → reader disposal', async () => {
+      const { verifier, releaseRun } = makeGatedVerifier()
+      const { session, candidate } = await begin({ verifier })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      expect(session.state).toBe('verifying')
+
+      disposeActiveImport()
+
+      const { disposeSync: disposeSessionSyncMock } = (await import('../isolatedSession')) as any
+      expect(verifier.close).toHaveBeenCalled()
+      expect(candidate.discardSync).toHaveBeenCalledTimes(1)
+      // LOCK-4303 sync order: verifier close → candidate discardSync → reader.
+      expect(verifier.close.mock.invocationCallOrder[0]).toBeLessThan(candidate.discardSync.mock.invocationCallOrder[0])
+      expect(candidate.discardSync.mock.invocationCallOrder[0]).toBeLessThan(
+        disposeSessionSyncMock.mock.invocationCallOrder[0]
+      )
+
+      releaseRun(makeReport('aborted'))
+      await flushVerification()
+      await session.dispose()
+    })
+
+    itOnDarwin('fail() raced during the verification-failed callback await preserves the terminal state', async () => {
+      // Accepted 4.3.3 audit correction: `verification-failed` is terminal.
+      // A renderer error arriving while the fail-report callback is being
+      // awaited must NOT flip the state to `error` or duplicate cleanup.
+      const report = makeReport('fail')
+      const verifier = makeVerifier(report)
+      let stateInsideCallback: string | null = null
+      let stateAfterRacedFail: string | null = null
+      const onVerificationComplete = vi.fn(async (result: any) => {
+        stateInsideCallback = getActiveImport()?.state ?? null
+        // Raced failure while the callback is awaited (state: verification-failed).
+        await capturedCallbacks.onError(result.sessionId, { code: 'E_LATE', message: 'late renderer error' })
+        stateAfterRacedFail = harness.session.state
+      })
+      const harness = await begin({ verifier, onVerificationComplete })
+      const { session, candidate } = harness
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+
+      expect(onVerificationComplete).toHaveBeenCalledTimes(1)
+      expect(stateInsideCallback).toBe('verification-failed')
+      // The raced fail() preserved the terminal state (never `error`).
+      expect(stateAfterRacedFail).toBe('verification-failed')
+      expect(session.state).toBe('verification-failed')
+      // Cleanup stayed exact-once (dispose is idempotent).
+      expect(candidate.discard).toHaveBeenCalledTimes(1)
+      expect(verifier.close).toHaveBeenCalled()
+      expect(getActiveImport()).toBeNull()
+      expect(getVerifiedCandidate()).toBeNull()
+    })
+
+    itOnDarwin('async dispose during verifying follows abort → close → run completion → discard', async () => {
+      const { verifier, releaseRun } = makeGatedVerifier()
+      const { session, candidate } = await begin({ verifier })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+
+      const disposePromise = session.dispose()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      // Parked awaiting the in-flight run; candidate untouched (LOCK-4303).
+      expect(verifier.close).toHaveBeenCalled()
+      expect(candidate.discard).not.toHaveBeenCalled()
+
+      releaseRun(makeReport('aborted'))
+      await disposePromise
+
+      expect(candidate.discard).toHaveBeenCalledTimes(1)
+      expect(verifier.close.mock.invocationCallOrder[0]).toBeLessThan(candidate.discard.mock.invocationCallOrder[0])
+      expect(getActiveImport()).toBeNull()
     })
   })
 
@@ -928,5 +1500,63 @@ describe('ChatImport index', () => {
       // Keep afterEach happy: async dispose is idempotent.
       await session.dispose()
     })
+
+    itOnDarwin('marks the session disposed after sync cleanup; dispose() never re-enters async cleanup', async () => {
+      // Accepted 4.3.3 audit correction: after disposeActiveImport()'s
+      // ordered sync cleanup the session must report disposed and a later
+      // dispose() must not re-run async resource cleanup.
+      const { session, candidate } = await begin()
+      await discover(session.id)
+
+      const { dispose: disposeSessionMock } = (await import('../isolatedSession')) as any
+      const { disposeAsync: disposeTempMock } = (await import('../tempWorkspace')) as any
+      const asyncReaderCallsBefore = disposeSessionMock.mock.calls.length
+      const asyncTempCallsBefore = disposeTempMock.mock.calls.length
+
+      disposeActiveImport()
+
+      expect((session as any).isDisposed).toBe(true)
+      expect(candidate.discardSync).toHaveBeenCalledTimes(1)
+
+      // A later async dispose() is a strict no-op: no async reader/session
+      // disposal, no temp workspace disposal, no second candidate discard.
+      await session.dispose()
+      await session.dispose() // idempotent twice over
+
+      expect(disposeSessionMock.mock.calls.length).toBe(asyncReaderCallsBefore)
+      expect(disposeTempMock.mock.calls.length).toBe(asyncTempCallsBefore)
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect(candidate.discardSync).toHaveBeenCalledTimes(1)
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin(
+      'sync cleanup during verifying: disposed session ignores the late settle without async re-entry',
+      async () => {
+        const { verifier, releaseRun } = makeGatedVerifier()
+        const { session, candidate, onVerificationComplete } = await begin({ verifier })
+
+        await discover(session.id)
+        await runAllPages(session.id)
+        expect(session.state).toBe('verifying')
+
+        disposeActiveImport()
+        expect((session as any).isDisposed).toBe(true)
+
+        // Verifier-close-before-candidate-discard ordering preserved.
+        expect(verifier.close.mock.invocationCallOrder[0]).toBeLessThan(
+          candidate.discardSync.mock.invocationCallOrder[0]
+        )
+
+        // Late settle is stale: no callback, no state change, no async cleanup.
+        releaseRun(makeReport('pass'))
+        await flushVerification()
+        expect(onVerificationComplete).not.toHaveBeenCalled()
+        expect(session.state).toBe('verifying') // no transition after disposal
+
+        await session.dispose()
+        expect(candidate.discard).not.toHaveBeenCalled()
+      }
+    )
   })
 })
