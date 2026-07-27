@@ -1,8 +1,8 @@
 # SQLite 运行时迁移与 Cherry Studio 兼容导入 — 个人 fork 演进记录（面向未来独立 Cherry Chat）
 
-> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（已提交/已推送至迁移分支 `85603d0fd5`）；Phase 4.4+ 未开始）
+> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（已提交/已推送至迁移分支 `85603d0fd5`）；集成同步门 Baseline Sync Gate Done（integration `05a401b711` 已集成同步，已验证）；Phase 4.4+ 未开始）
 >
-> ⚠️ **集成同步门（Baseline Sync Gate，规划中/未合并）**：Phase 4.4 实现前须先将 integration 分支（`05a401b711`）集成同步进 migration 分支（`85603d0fd5`）；该同步**尚未合并**，且不得改变 Phase 4.4 既有架构，也作为 Phase 5 合并后 Renderer/context/type/Redux 结构的实施基线。详见 Section 9「集成同步门（Baseline Sync Gate）」与决策日志规划条目。
+> ✅ **集成同步门（Baseline Sync Gate，Done/已合并/已验证）**：integration 分支（`05a401b711`）已集成同步进 migration 分支（pre-merge HEAD `5d50499e80`）；合并自动解决、无兼容性编辑；审计无阻塞/无代码发现，验证全部通过（format 无改动；lint exit 0 / 112 known warnings；typecheck 通过；`pnpm test` 265 文件 / 5664 通过 / 72 跳过 / 0 失败；聚焦测试 201 renderer + 822 chatDb/import）。Phase 4.4 既有架构未改变；合并后统一的 Renderer/context/type/Redux 结构已作为 Phase 5 实施基线。详见 Section 9「集成同步门（Baseline Sync Gate）」与决策日志。
 > **分支**：`jorkey/refactor/sqlite-migration`
 > **最后更新**：2026-07-27
 > **Owner**：Personal fork（jorkeyliu）
@@ -490,18 +490,19 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 - `SourceVerificationManifest`：~5,019KiB；`VerificationReport`：~1.4KiB
 - 不变量：现有 live `chat.db` 未被改动（验证仅读候选 DB）
 
-#### 集成同步门（Baseline Sync Gate，Phase 4.4 前置，规划中/未合并）
+#### 集成同步门（Baseline Sync Gate，Phase 4.4 前置，Done/已合并/已验证）
 
-> ⚠️ **规划中，尚未执行**：以下为计划，非已完成事实。集成**尚未合并**，不得记录为已合并或已测试成功。
+> ✅ **已合并并验证完成（2026-07-27）**：integration 分支（`05a401b711`）已集成同步进 migration 分支（pre-merge HEAD `5d50499e80`）。合并自动解决（auto-resolved），无兼容性编辑。审计无阻塞/无代码发现；验证全部通过（见下方验证事实）。
 
 | 属性 | 值 |
 |---|---|
-| **状态** | **Pending / 规划中（未合并）** |
-| **基线事实** | migration `85603d0fd5`、integration `05a401b711` 均已推送且稳定；两分支距 merge base `44e6b1b82b` 分别为 15/21 commits（当前基线事实，非合并结果） |
+| **状态** | **Done（已合并 / 已验证）** |
+| **基线事实（历史锚点）** | integration `05a401b711`、migration 历史推送 tip `85603d0fd5` 均已稳定；两分支距 merge base `44e6b1b82b` 分别为 15/21 commits（合并前基线事实）。本次合并：migration pre-merge HEAD `5d50499e80` ↔ integration `05a401b711` |
 | **目标** | 将 integration 分支集成同步进 migration 分支，使后续 Phase 4.4 与 Phase 5 基于统一的 Renderer/context/type/Redux 结构 |
-| **前置依赖** | 无（可独立执行），但为 Phase 4.4 实现的前置条件 |
-| **约束** | 集成**尚未合并**；同步后不得改变 Phase 4.4 既有架构；Phase 5 须以合并后的结构为实施基线；不记录为已完成进度事件 |
-| **退出条件** | ✅ integration 已合并入 migration 分支；✅ 合并后 Renderer/context/type/Redux 结构统一且可编译；✅ 不引入 Phase 4.4 架构变更 |
+| **前置依赖** | 已完成 |
+| **约束** | 合并**未改变** Phase 4.4 既有架构；Phase 5 须以合并后的结构为实施基线；本门作为 Phase 4.4 实现前置已完成 |
+| **验证事实** | format 无改动（exit 0）；lint exit 0（112 known warnings，无错误）；typecheck 通过；`pnpm test` exit 0，265 文件 / 5664 通过 / 72 跳过 / 0 失败；聚焦测试 201 renderer + 822 chatDb/import 通过；审计 0 blocker / 0 code finding |
+| **退出条件** | ✅ integration 已合并入 migration 分支；✅ 合并后 Renderer/context/type/Redux 结构统一且可编译；✅ 未引入 Phase 4.4 架构变更 |
 
 **后续影响**：
 - Phase 4.4（原子替换 promotion）架构不变，仅需在合并后的统一结构上实现
@@ -512,7 +513,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 属性 | 值 |
 |---|---|
 | **状态** | Not started |
-| **前置** | Phase 4.3 验证通过；**集成同步门须先完成（详见 Section 9「集成同步门（Baseline Sync Gate）」；migration `85603d0fd5` ↔ integration `05a401b711` 合并，当前规划中/未合并）** |
+| **前置** | Phase 4.3 验证通过；**集成同步门已完成（详见 Section 9「集成同步门（Baseline Sync Gate）」；migration pre-merge HEAD `5d50499e80` ↔ integration `05a401b711` 已合并/已验证，架构未变更）** |
 | **目标** | 将验证通过的候选 SQLite DB 原子替换为 live `chat.db` |
 | **主要任务** | 关闭现有 chat.db 连接；保留一个 rollback 快照（当前 live chat.db）；原子 rename 候选 DB → `Data/chat.db`；重新打开并验证新 DB（`PRAGMA integrity_check` + `PRAGMA foreign_key_check`）；成功 → relaunch app；失败 → 回滚到快照 DB 并报告错误 |
 | **崩溃恢复** | 如果在快照创建和候选 rename 之间发生崩溃：原始 `chat.db` 保持完整（快照是副本，rename 未执行）。启动时检测孤立的快照/临时工作区文件（例如 `chat.db.pre-import-backup`、候选 DB 临时路径），通过确定性启动清理安全删除或保留（保留用于诊断，下次启动清理）。不影响正常启动路径 |
@@ -651,7 +652,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 旧备份兼容 | 迁移后备份格式变化 | Cherry Chat 备份/恢复沿用现有 Cherry Studio 产品流程并适配 chat.db（L3），与 Cherry Studio ZIP 导入（L2）语义分离 |
 | 性能未知 | SQLite 在 Electron 中的实际表现未测试 | Phase 5 切换前必须完成基准测试 |
 | 技术栈选型 | ~~libSQL+Drizzle 可能不是最优选择~~ | **Resolved**（A-7 Accepted：better-sqlite3 + Drizzle） |
-| **集成同步门未执行（migration 与 integration 未合并）** | Phase 4.4 基于过期 Renderer/context/type/Redux 结构实现，合并后需返工 | **规划中/缓解**：Phase 4.4 前必须先完成集成同步门（migration `85603d0fd5` ↔ integration `05a401b711` 合并）；当前**未合并**，不得开始 Phase 4.4 实现 |
+| **集成同步门已完成（migration pre-merge HEAD `5d50499e80` ↔ integration `05a401b711` 已合并/已验证）** | 原风险（合并前基于过期结构实现导致返工）已消除；合并自动解决、无兼容性编辑、验证全过 | **Resolved（已合并/已验证）**：migration 与 integration 已合并，统一 Renderer/context/type/Redux 结构已建立；Phase 4.4 架构未变，可在合并后结构上实现 |
 
 ---
 
@@ -748,7 +749,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-21** | **Phase 4.1 source-reader 生产化完成** | 17 个新文件 + 4 个修改文件：`src/main/services/chatDbImport/`（errors/tempWorkspace/zipIntake/isolatedSession/importIpc/index + 5 tests），`src/preload/chatImport/index.ts`，`src/renderer/src/windows/chatImport/`（chatImport.html + entryPoint.ts），`packages/shared/chatImport/`（types/index/validation.test.ts），`packages/shared/IpcChannel.ts` 6 ChatImport_* entries，`electron.vite.config.ts` chatImport HTML + preload entry，`src/main/ipc.ts` + `src/main/index.ts` 注册/will-quit/app-ready wiring。安全：5 层 ZIP 校验 + `session.fromPath(destDir)` + `location.protocol` origin 校验 + `event.senderFrame` sender 校验 + singleton + R-1..R-12 全部 mitigated。主进程 977/977 测试通过。最终 Auditor Clean。合入 commit `6a1e98e7ef` |
 | **2026-07-27** | **Phase 4.2 Done** | Candidate SQLite bulk importer 完成。实际模块：`CandidateDbResource`（per-session 自有候选目录 + 候选 chat.db）、`ChatImportDataPlane`（分页数据面 + `SourceReadStats`）、`ChatImportWriter`（import-only 保序 writer，order-preserving，`candidate-ready` exact-once，`CandidateImportStats`）、`startupRecovery`（取消/错误/孤儿清理）。每页一事务、topic/message 扁平化、block/segment/file-reference 精确映射、replace-all 语义；`SourceReadStats` vs `CandidateImportStats` 分离。10k 基准：25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；两次运行 1016.2ms、978.5ms；`integrity_check` ok、`foreign_key_check` 空、live DB 未改。单元审计 + 最终审计 0 阻塞；聚焦测试通过；全量本地验证通过（2026-07-27）：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（node/web/aicore typecheck 全过、i18n 校验通过、0 errors，仅 pre-existing warnings）；`pnpm test` exit 0，252 文件 / 5325 通过 / 72 跳过；无遗留产物（本地全量验证未涉及 CI） |
 | **2026-07-27** | **Phase 4.3 Done** | Deterministic verification 完成（已提交/已推送；本地全量验证未涉及 CI）。实际模块：`CandidateVerifier`（只读验证器，返回稳定 13 维度结果 + 有界安全诊断，不泄露 SQL/path/stack）、`SourceVerificationManifest`（按页证据清单，仅在 DB 事务提交后落盘，stable canonical SHA-256 framing，manifest ~5,019KiB）、`VerificationReport`（~1.4KiB）；候选 DB 会话状态机 `candidate-ready → verifying → verified-candidate | verification-failed`；取消/退出 `close-before-discard`；通过保留候选 DB 供 4.4、失败报告后清理；corruption matrix 覆盖全部 13 维度。10k 验证证据：25 topics / 10,000 messages / 11,000 blocks / 26 segments / 250 memberships / 667 file refs / 19 pages；13 维度全过；验证耗时 ~250–290ms；现有 live `chat.db` 未改。聚焦测试 271 通过；`pnpm format` exit 0 无改动；`pnpm lint` exit 0（0 errors，109 warnings）；`typecheck:node` 通过；首次 `pnpm test` 5420 通过 / 2 失败（BackupManager 共享临时目录非确定性 flakes，排查否定 Phase 4.3 干扰）/ 72 跳过；复跑 `pnpm test` 258 文件 / 5422 通过 / 72 跳过 / 0 失败；Main 与全量多次复跑干净；最终审计 0 findings（本地全量验证，未涉及 CI） |
-| **2026-07-27** | **集成同步门（Baseline Sync Gate，规划中/未合并）** | **决策/规划（pending）**：Phase 4.4 实现前须先将 integration（`05a401b711`）集成同步进 migration（`85603d0fd5`）；该同步**尚未合并**，非已完成事实，也不得记录为已测试成功。同步后 Phase 4.4 架构不变，且 Phase 5 须以合并后的 Renderer/context/type/Redux 结构为实施基线。当前基线事实：两分支距 merge base `44e6b1b82b` 分别 15/21 commits（非合并结果）。 |
+| **2026-07-27** | **集成同步门（Baseline Sync Gate，Done/已合并/已验证）** | **已完成**：integration（`05a401b711`）已集成同步进 migration（pre-merge HEAD `5d50499e80`）；合并自动解决、无兼容性编辑；审计 0 blocker / 0 code finding；验证全过：format 无改动；lint exit 0（112 known warnings）；typecheck 通过；`pnpm test` 265 文件 / 5664 通过 / 72 跳过 / 0 失败；聚焦测试 201 renderer + 822 chatDb/import。合并未改变 Phase 4.4 既有架构；Phase 5 须以合并后的 Renderer/context/type/Redux 结构为实施基线。历史锚点：migration 推送 tip `85603d0fd5`、两分支距 merge base `44e6b1b82b` 分别 15/21 commits（合并前基线事实）。 |
 
 ---
 

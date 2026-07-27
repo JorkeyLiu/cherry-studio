@@ -15,8 +15,8 @@ import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
 import { useEnableDeveloperMode, useMessageStyle, useSettings } from '@renderer/hooks/useSettings'
 import { useTemporaryValue } from '@renderer/hooks/useTemporaryValue'
 import useTranslate from '@renderer/hooks/useTranslate'
+import { resolveGroupKey } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
-import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getMessageTitle } from '@renderer/services/MessagesService'
 import { translateText } from '@renderer/services/TranslateService'
 import type { RootState } from '@renderer/store'
@@ -75,6 +75,7 @@ import { useTranslation } from 'react-i18next'
 import { useSelector } from 'react-redux'
 import styled from 'styled-components'
 
+import { emitNewBranch } from './messageBranch'
 import MessageTokens from './MessageTokens'
 
 const createTranslationAbortKey = (messageId: string) => `translation-abort-key:${messageId}`
@@ -88,7 +89,6 @@ interface Props {
   assistant: Assistant
   topic: Topic
   model?: Model
-  index?: number
   isGrouped?: boolean
   isLastMessage: boolean
   isAssistantMessage: boolean
@@ -143,7 +143,6 @@ type MessageMenubarButtonRenderer = (ctx: MessageMenubarButtonContext) => ReactN
 const MessageMenubar: FC<Props> = (props) => {
   const {
     message,
-    index,
     isGrouped,
     isLastMessage,
     isAssistantMessage,
@@ -177,24 +176,41 @@ const MessageMenubar: FC<Props> = (props) => {
 
   // Context anchor logic for fixed context window mode
   const assistantSettings = getAssistantSettings(assistant)
-  const contextWindowMode = assistantSettings.contextWindowMode
+  const effectiveMode =
+    assistantSettings.contextWindowMode === 'fixed'
+      ? (assistantSettings.topicContextWindowMode?.[topic.id] ?? assistantSettings.contextWindowMode)
+      : 'sliding'
+  const contextWindowMode = effectiveMode
   const handleSetContextAnchor = useCallback(() => {
-    const currentAnchor = assistantSettings.fixedWindowAnchor?.[topic.id]
-    const newAnchor = { ...assistantSettings.fixedWindowAnchor }
-    if (currentAnchor === message.id) {
-      // Already anchored here, remove anchor
+    if (effectiveMode !== 'fixed') return // 非 fixed 模式不操作
+
+    const desiredGroupKey = resolveGroupKey(message)
+    if (!desiredGroupKey) return
+
+    const current = assistantSettings.fixedWindowAnchor?.[topic.id]
+    if (current?.kind === 'active' && current.groupKey === desiredGroupKey) {
+      // 已经是这个锚点 → 删除锚点，useEffect 不变量守卫会自动回落到首条 user 消息
+      const newAnchor = { ...assistantSettings.fixedWindowAnchor }
       delete newAnchor[topic.id]
-    } else {
-      // Set new anchor
-      newAnchor[topic.id] = message.id
+      updateAssistantSettings({ fixedWindowAnchor: newAnchor })
+      return
     }
-    updateAssistantSettings({ fixedWindowAnchor: newAnchor })
-  }, [assistantSettings, topic.id, message.id, updateAssistantSettings])
+
+    // 设置新锚点
+    updateAssistantSettings({
+      fixedWindowAnchor: {
+        ...assistantSettings.fixedWindowAnchor,
+        [topic.id]: { kind: 'active', groupKey: desiredGroupKey }
+      }
+    })
+  }, [effectiveMode, assistantSettings, topic.id, message, updateAssistantSettings])
 
   const isContextAnchor = useMemo(() => {
     const settings = getAssistantSettings(assistant)
-    return settings.fixedWindowAnchor?.[topic.id] === message.id
-  }, [assistant, topic.id, message.id])
+    const current = settings.fixedWindowAnchor?.[topic.id]
+    if (current?.kind !== 'active') return false
+    return current.groupKey === message.id || (message.role === 'assistant' && current.groupKey === message.askId)
+  }, [assistant, topic.id, message.id, message.role, message.askId])
 
   // const loading = useTopicLoading(topic)
 
@@ -238,9 +254,10 @@ const MessageMenubar: FC<Props> = (props) => {
   )
 
   const onNewBranch = useCallback(async () => {
-    void EventEmitter.emit(EVENT_NAMES.NEW_BRANCH, index)
-    window.toast.success(t('chat.message.new.branch.created'))
-  }, [index, t])
+    // NEW_BRANCH contract is ID-based; the listener reports success/failure toasts
+    // only after the async branch operation completes.
+    await emitNewBranch(message.id)
+  }, [message.id])
 
   const onInsertMessages = useCallback(async () => {
     await dispatch(insertMessagesThunk(topic.id, message.id, assistant.id))
@@ -1043,8 +1060,8 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       </Tooltip>
     )
   },
-  'context-anchor': ({ contextWindowMode, isContextAnchor, handleSetContextAnchor, softHoverBg, t }) => {
-    if (contextWindowMode !== 'fixed') {
+  'context-anchor': ({ contextWindowMode, isContextAnchor, isUserMessage, handleSetContextAnchor, softHoverBg, t }) => {
+    if (contextWindowMode !== 'fixed' || !isUserMessage) {
       return null
     }
 

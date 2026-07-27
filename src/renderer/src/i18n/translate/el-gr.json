@@ -1520,6 +1520,12 @@
         "title": "Αναζήτηση"
       },
       "title": "Θέματα",
+      "trash": {
+        "empty": "[to be translated]:Trash is empty",
+        "empty_trash": "[to be translated]:Empty Trash",
+        "label": "[to be translated]:Recycle Bin",
+        "restore": "[to be translated]:Restore"
+      },
       "unpin": "Ξεκαρφίτσωμα"
     },
     "translate": "Μετάφραση",
@@ -5640,11 +5646,10 @@
       "search_message": "Αναζήτηση μηνυμάτων",
       "search_message_in_chat": "Αναζήτηση μηνύματος στην τρέχουσα συνομιλία",
       "select_model": "Select Model",
-      "selection_assistant_select_text": "Βοηθός επιλογής κειμένου: επιλογή λέξης",
-      "selection_assistant_toggle": "Εναλλαγή βοηθού επιλογής κειμένου",
       "show_app": "Εμφάνιση εφαρμογής",
       "show_settings": "Άνοιγμα των ρυθμίσεων",
       "title": "Συντομοί δρομολόγια",
+      "toggle_edit_mode": "[to be translated]:Toggle Edit Mode",
       "toggle_new_context": "Άδειασμα σενάριων",
       "toggle_show_assistants": "Εναλλαγή εμφάνισης βοηθών",
       "toggle_show_topics": "Εναλλαγή εμφάνισης θεμάτων",

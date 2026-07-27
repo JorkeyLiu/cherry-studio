@@ -24,11 +24,12 @@ import {
 } from '@renderer/pages/home/Inputbar/context/InputbarToolsProvider'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { CacheService } from '@renderer/services/CacheService'
+import { computeContextInfo, PREVIEW_DRAFT_SENTINEL } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import FileManager from '@renderer/services/FileManager'
 import { checkRateLimit, getUserMessage } from '@renderer/services/MessagesService'
 import { spanManagerService } from '@renderer/services/SpanManagerService'
-import { estimateTextTokens as estimateTxtTokens, estimateUserPromptUsage } from '@renderer/services/TokenService'
+import { estimateUserPromptUsage } from '@renderer/services/TokenService'
 import WebSearchService from '@renderer/services/WebSearchService'
 import { useAppDispatch } from '@renderer/store'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
@@ -44,13 +45,13 @@ import type { MessageInputBaseParams } from '@renderer/types/newMessage'
 import { delay } from '@renderer/utils'
 import { getSendMessageShortcutLabel } from '@renderer/utils/input'
 import { documentExts, imageExts, textExts } from '@shared/config/constant'
-import { debounce } from 'lodash'
 import type { FC } from 'react'
 import React, { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import TopicSegmentDrawer from '../Messages/TopicSegmentDrawer'
 import { InputbarCore } from './components/InputbarCore'
+import { usePromptTokenEstimate } from './hooks/usePromptTokenEstimate'
 import InputbarTools from './InputbarTools'
 import KnowledgeBaseInput from './KnowledgeBaseInput'
 import MentionModelsInput from './MentionModelsInput'
@@ -163,13 +164,49 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     initialAssistant.id
   )
   const { sendMessageShortcut, showInputEstimatedTokens, enableQuickPanelTriggers } = useSettings()
-  const [estimateTokenCount, setEstimateTokenCount] = useState(0)
-  const [contextCount, setContextCount] = useState({ current: 0, max: 0 })
 
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)
   const topicMessages = useTopicMessages(topic.id)
   const loading = useTopicLoading(topic)
+
+  // --- Token estimation (Inputbar-owned, preview-draft-aware) ---
+
+  // Stable boolean: a pending draft exists when there is nonblank text OR any
+  // attachment. Either occupies the next-request turn slot, so both must drive
+  // the virtual preview turn (LOCK-004). Toggles only on presence transitions.
+  // computeContextInfo only checks draft truthiness for turn selection, so full
+  // text/attachment detail is not needed here.
+  const hasPreviewDraft = text.trim().length > 0 || files.length > 0
+
+  // Sync: computeContextInfo with previewDraft so a pending draft participates in
+  // turn selection (LOCK-004). A draft occupies a turn slot → a full sliding
+  // window ejects the oldest turn. contextCount reflects the post-draft state;
+  // tokenEstimationMessages excludes the virtual draft turn.
+  const previewContextInfo = useMemo(
+    () =>
+      computeContextInfo(
+        topicMessages,
+        assistant,
+        topic.id,
+        hasPreviewDraft ? { previewDraft: PREVIEW_DRAFT_SENTINEL } : undefined
+      ),
+
+    [topicMessages, assistant, topic.id, hasPreviewDraft]
+  )
+
+  // Async, debounced, race-safe estimate: selected history + current draft
+  // (text + attachments) combined into one scalar (LOCK-001, LOCK-005, LOCK-009).
+  const estimateTokenCount = usePromptTokenEstimate({
+    assistant,
+    tokenEstimationMessages: previewContextInfo.tokenEstimationMessages,
+    text,
+    files
+  })
+
+  // Sync: contextCount from preview-aware computeContextInfo (includes virtual draft turn).
+  const contextCount = previewContextInfo.contextCount
+
   const dispatch = useAppDispatch()
   const isVisionAssistant = useMemo(() => isVisionModel(model), [model])
   const isGenerateImageAssistant = useMemo(() => isGenerateImageModel(model), [model])
@@ -298,7 +335,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
 
     return {
       estimateTokenCount,
-      inputTokenCount: estimateTokenCount,
       contextCount
     }
   }, [config.showTokenCount, contextCount, estimateTokenCount, showInputEstimatedTokens])
@@ -307,28 +343,54 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     return getAssistantSettings(assistant).contextWindowMode
   }, [assistant])
 
-  const settings = getAssistantSettings(assistant)
-  const hasAnchor = settings.contextWindowMode === 'fixed' && settings.fixedWindowAnchor?.[topic.id] !== undefined
+  const topicContextWindowMode = useMemo(() => {
+    const s = getAssistantSettings(assistant)
+    return s.contextWindowMode === 'fixed' ? (s.topicContextWindowMode?.[topic.id] ?? s.contextWindowMode) : 'sliding'
+  }, [assistant, topic.id])
 
-  // 自动锚点：小开关开启但无有效锚点时，有消息就自动设定
+  // 自动锚点 + 不变量守卫
   useEffect(() => {
     const settings = getAssistantSettings(assistant)
-    const anchorId = settings.fixedWindowAnchor?.[topic.id]
-    // 小开关开启（anchorId !== undefined）且无有效锚点
-    if (
-      settings.contextWindowMode === 'fixed' &&
-      anchorId !== undefined &&
-      (!anchorId || !topicMessages.some((m) => m.id === anchorId)) &&
-      topicMessages.length > 0
-    ) {
-      const anchorIndex = Math.max(0, topicMessages.length - settings.contextCount)
-      const anchorMessage = topicMessages[anchorIndex]
-      if (anchorMessage) {
+    const anchor = settings.fixedWindowAnchor?.[topic.id]
+    const topicMode = settings.topicContextWindowMode?.[topic.id]
+    const effectiveMode = settings.contextWindowMode === 'fixed' ? (topicMode ?? settings.contextWindowMode) : 'sliding'
+
+    if (effectiveMode !== 'fixed') return
+
+    // 不变量守卫：fixed 模式下必须有有效锚点
+    if (anchor?.kind === 'active') {
+      // 检查 groupKey 是否有效
+      const isValid = topicMessages.some((m) => m.id === anchor.groupKey && m.role === 'user')
+      if (isValid) return // 有效，无需处理
+
+      // 旧数据恢复：groupKey 指向 assistant 消息
+      const assistantMsg = topicMessages.find((m) => m.id === anchor.groupKey && m.role === 'assistant')
+      if (assistantMsg?.askId) {
         updateAssistantSettings({
           fixedWindowAnchor: {
             ...settings.fixedWindowAnchor,
-            [topic.id]: anchorMessage.id
+            [topic.id]: { kind: 'active', groupKey: assistantMsg.askId }
           }
+        })
+        return
+      }
+
+      // 都找不到，设到第一条 user 消息
+      const firstUser = topicMessages.find((m) => m.role === 'user')
+      if (firstUser) {
+        updateAssistantSettings({
+          fixedWindowAnchor: { ...settings.fixedWindowAnchor, [topic.id]: { kind: 'active', groupKey: firstUser.id } }
+        })
+      }
+      return
+    }
+
+    // anchor 为 undefined 或旧数据残留：fixed 模式下无有效锚点，自动修复
+    if (topicMessages.length > 0) {
+      const firstUser = topicMessages.find((m) => m.role === 'user')
+      if (firstUser) {
+        updateAssistantSettings({
+          fixedWindowAnchor: { ...settings.fixedWindowAnchor, [topic.id]: { kind: 'active', groupKey: firstUser.id } }
         })
       }
     }
@@ -336,31 +398,18 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
 
   const onUpdateAnchor = useCallback(() => {
     const settings = getAssistantSettings(assistant)
-    const topicMessagesList = topicMessages || []
-    const hasAnchor = settings.contextWindowMode === 'fixed' && settings.fixedWindowAnchor?.[topic.id] !== undefined
-
-    if (hasAnchor && topic.id) {
-      // 1. Has anchor: unanchor (restore sliding)
-      updateAssistantSettings({
-        fixedWindowAnchor: {
-          ...settings.fixedWindowAnchor,
-          [topic.id]: undefined as unknown as string // Set to undefined to persist as empty
-        }
-      })
-    } else {
-      // 2. No anchor: anchor
-      const anchorIndex = Math.max(0, topicMessagesList.length - settings.contextCount)
-      const anchorMessage = topicMessagesList[anchorIndex]
-      if (anchorMessage && topic.id) {
-        updateAssistantSettings({
-          fixedWindowAnchor: {
-            ...settings.fixedWindowAnchor,
-            [topic.id]: anchorMessage.id
-          }
-        })
+    const currentMode =
+      settings.contextWindowMode === 'fixed'
+        ? (settings.topicContextWindowMode?.[topic.id] ?? settings.contextWindowMode)
+        : 'sliding'
+    const newMode = currentMode === 'fixed' ? 'sliding' : 'fixed'
+    updateAssistantSettings({
+      topicContextWindowMode: {
+        ...settings.topicContextWindowMode,
+        [topic.id]: newMode
       }
-    }
-  }, [assistant, topicMessages, topic.id, updateAssistantSettings])
+    })
+  }, [assistant, topic.id, updateAssistantSettings])
 
   const onPause = useCallback(async () => {
     await pauseMessages()
@@ -396,14 +445,15 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     addTopic(newTopic)
     setActiveTopic(newTopic)
 
-    // 固定模式下，新话题默认开启小开关（待设锚点状态）
+    // 固定模式下，新话题默认开启 fixed 模式
     const settings = getAssistantSettings(assistant)
     if (settings.contextWindowMode === 'fixed') {
       updateAssistantSettings({
-        fixedWindowAnchor: {
-          ...settings.fixedWindowAnchor,
-          [newTopic.id]: ''
+        topicContextWindowMode: {
+          ...settings.topicContextWindowMode,
+          [newTopic.id]: 'fixed'
         }
+        // 不设 fixedWindowAnchor——useEffect 会在首条消息到达时自动补
       })
     }
 
@@ -471,31 +521,12 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   })
 
   useEffect(() => {
-    const _setEstimateTokenCount = debounce(setEstimateTokenCount, 100, { leading: false, trailing: true })
-    const unsubscribes = [
-      EventEmitter.on(EVENT_NAMES.ESTIMATED_TOKEN_COUNT, ({ tokensCount, contextCount }) => {
-        _setEstimateTokenCount(tokensCount)
-        setContextCount({ current: contextCount.current, max: contextCount.max })
-      }),
-      ...[EventEmitter.on(EVENT_NAMES.ADD_NEW_TOPIC, addNewTopic)]
-    ]
+    const unsubscribes = [EventEmitter.on(EVENT_NAMES.ADD_NEW_TOPIC, addNewTopic)]
 
     return () => {
       unsubscribes.forEach((unsubscribe) => unsubscribe())
     }
   }, [addNewTopic])
-
-  useEffect(() => {
-    const debouncedEstimate = debounce((value: string) => {
-      if (showInputEstimatedTokens) {
-        const count = estimateTxtTokens(value) || 0
-        setEstimateTokenCount(count)
-      }
-    }, 500)
-
-    debouncedEstimate(text)
-    return () => debouncedEstimate.cancel()
-  }, [showInputEstimatedTokens, text])
 
   useEffect(() => {
     if (!document.querySelector('.topview-fullscreen-container')) {
@@ -565,10 +596,9 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
       {tokenCountProps && (
         <TokenCount
           estimateTokenCount={tokenCountProps.estimateTokenCount}
-          inputTokenCount={tokenCountProps.inputTokenCount}
           contextCount={tokenCountProps.contextCount}
           contextWindowMode={contextWindowMode}
-          hasAnchor={hasAnchor}
+          effectiveMode={topicContextWindowMode}
           onUpdateAnchor={onUpdateAnchor}
           onClick={onNewContext}
         />

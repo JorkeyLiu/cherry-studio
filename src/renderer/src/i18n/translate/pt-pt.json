@@ -1520,6 +1520,12 @@
         "title": "Pesquisar"
       },
       "title": "Tópicos",
+      "trash": {
+        "empty": "[to be translated]:Trash is empty",
+        "empty_trash": "[to be translated]:Empty Trash",
+        "label": "[to be translated]:Recycle Bin",
+        "restore": "[to be translated]:Restore"
+      },
       "unpin": "Desfixar"
     },
     "translate": "Traduzir",
@@ -5640,11 +5646,10 @@
       "search_message": "Pesquisar mensagem",
       "search_message_in_chat": "Pesquisar mensagens nesta conversa",
       "select_model": "Select Model",
-      "selection_assistant_select_text": "Assistente de seleção de texto: selecionar texto",
-      "selection_assistant_toggle": "Ativar/desativar assistente de seleção de texto",
       "show_app": "Exibir aplicativo",
       "show_settings": "Abrir configurações",
       "title": "Atalhos",
+      "toggle_edit_mode": "[to be translated]:Toggle Edit Mode",
       "toggle_new_context": "Limpar contexto",
       "toggle_show_assistants": "Alternar exibição de assistentes",
       "toggle_show_topics": "Alternar exibição de tópicos",

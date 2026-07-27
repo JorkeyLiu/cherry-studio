@@ -15,9 +15,8 @@ import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
-import { computeContextBoundaryMessageId } from '@renderer/pages/home/Messages/contextBoundary'
 import { findFirstVisibleMessage } from '@renderer/pages/home/Messages/domVisibility'
-import { getBranchEndpoint } from '@renderer/pages/home/Messages/messageBranch'
+import { branchFromMessage } from '@renderer/pages/home/Messages/messageBranch'
 import { createMessageViewportGroupModel } from '@renderer/pages/home/Messages/messageGroups'
 import {
   applyColumnReverseScroll,
@@ -49,15 +48,11 @@ import {
   reconcileMessageWindow
 } from '@renderer/pages/home/Messages/messageWindow'
 import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
+import { buildGroupList } from '@renderer/services/anchorService'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
+import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import {
-  clearPendingNavigate,
-  getContextCount,
-  getPendingNavigate,
-  getUserMessage
-} from '@renderer/services/MessagesService'
-import { estimateHistoryTokens } from '@renderer/services/TokenService'
+import { clearPendingNavigate, getPendingNavigate, getUserMessage } from '@renderer/services/MessagesService'
 import store, { useAppDispatch } from '@renderer/store'
 import { messageBlocksSelectors, updateOneBlock } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
@@ -68,8 +63,7 @@ import { type Message, MessageBlockType } from '@renderer/types/newMessage'
 import {
   captureScrollableAsBlob,
   captureScrollableAsDataURL,
-  removeSpecialCharactersForFileName,
-  runAsyncFunction
+  removeSpecialCharactersForFileName
 } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
@@ -210,13 +204,6 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
 
         return (
           <Fragment key={key}>
-            {key === contextDividerGroupKey && (
-              <ContextWindowDivider data-context-boundary>
-                <ContextWindowDividerLine />
-                <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
-                <ContextWindowDividerLine />
-              </ContextWindowDivider>
-            )}
             <div style={{ position: 'relative' }}>
               {segment && (
                 <TopicSegmentLine
@@ -234,6 +221,16 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
                 onGroupClick={handleGroupClick}
               />
             </div>
+            {/* Divider renders after the message group in DOM. Because the parent
+                flex container uses column-reverse, later siblings appear visually
+                above earlier ones — so this divider appears above the boundary group. */}
+            {key === contextDividerGroupKey && (
+              <ContextWindowDivider data-context-boundary>
+                <ContextWindowDividerLine />
+                <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
+                <ContextWindowDividerLine />
+              </ContextWindowDivider>
+            )}
           </Fragment>
         )
       })
@@ -354,12 +351,10 @@ const Messages = ({
   const savedRestoreHandledRef = useRef(false)
   const bootstrapPhaseRef = useRef<BootstrapPhase>('idle')
 
-  // Compute the context boundary message ID from the full topic messages.
-  // This uses the same filter pipeline as ConversationService.filterMessagesPipeline.
-  const contextBoundaryMessageId = useMemo(
-    () => computeContextBoundaryMessageId(messages, assistant, topic.id),
-    [messages, assistant, topic.id]
-  )
+  // Unified context info: boundary message ID and context count from the same pipeline
+  // that ConversationService uses to prepare messages for the model.
+  const contextInfo = useMemo(() => computeContextInfo(messages, assistant, topic.id), [messages, assistant, topic.id])
+  const contextBoundaryMessageId = contextInfo.boundaryMessageId
 
   const viewportDispatch = reduceViewport
 
@@ -751,46 +746,73 @@ const Messages = ({
       EventEmitter.on(EVENT_NAMES.NEW_BRANCH, async (messageId: string) => {
         const newTopic = getDefaultTopic(assistant.id)
         newTopic.name = topic.name
-        const currentMessages = messagesRef.current
 
-        const branchEndpoint = getBranchEndpoint(currentMessages, messageId)
-        if (branchEndpoint === null) {
-          logger.error(`[NEW_BRANCH] Message not found: ${messageId}`)
-          return
-        }
+        await branchFromMessage(messagesRef.current, messageId, {
+          createBranch: async (branchEndpoint) => {
+            addTopic(newTopic)
+            return await createTopicBranch(topic.id, branchEndpoint, newTopic)
+          },
+          onMessageNotFound: () => {
+            logger.error(`[NEW_BRANCH] Message not found: ${messageId}`)
+          },
+          onSuccess: () => {
+            setActiveTopic(newTopic)
+            void autoRenameTopic(assistant, newTopic.id)
+            // Inherit fixed context window anchor (group-key based)
+            const assistantSettings = getAssistantSettings(assistant)
+            const sourceEffectiveMode =
+              assistantSettings.contextWindowMode === 'fixed'
+                ? (assistantSettings.topicContextWindowMode?.[topic.id] ?? assistantSettings.contextWindowMode)
+                : 'sliding'
 
-        addTopic(newTopic)
+            // Inherit topicContextWindowMode
+            const sourceTopicMode = assistantSettings.topicContextWindowMode?.[topic.id]
+            if (sourceTopicMode) {
+              updateAssistantSettings({
+                topicContextWindowMode: {
+                  ...assistantSettings.topicContextWindowMode,
+                  [newTopic.id]: sourceTopicMode
+                }
+              })
+            }
 
-        const success = await createTopicBranch(topic.id, branchEndpoint, newTopic)
+            if (sourceEffectiveMode === 'fixed') {
+              const sourceAnchor = assistantSettings.fixedWindowAnchor?.[topic.id]
+              if (sourceAnchor?.kind === 'active') {
+                try {
+                  const sourceState = store.getState()
+                  const sourceMessageIds = sourceState.messages.messageIdsByTopic[topic.id] || []
+                  const sourceEntities = sourceState.messages.entities
+                  const sourceGroupList = buildGroupList(sourceMessageIds, (id) => sourceEntities[id])
+                  const groupIndex = sourceGroupList.indexOf(sourceAnchor.groupKey)
 
-        if (success) {
-          setActiveTopic(newTopic)
-          void autoRenameTopic(assistant, newTopic.id)
-          // Inherit fixed context window anchor
-          const assistantSettings = getAssistantSettings(assistant)
-          if (assistantSettings.contextWindowMode === 'fixed') {
-            const sourceAnchorId = assistantSettings.fixedWindowAnchor?.[topic.id]
-            if (sourceAnchorId) {
-              const anchorIndex = currentMessages.findIndex((m) => m.id === sourceAnchorId)
-              const clonedCount = branchEndpoint
-              if (anchorIndex >= 0 && anchorIndex < clonedCount) {
-                const newTopicMessageIds = store.getState().messages.messageIdsByTopic[newTopic.id]
-                if (newTopicMessageIds && newTopicMessageIds.length > anchorIndex) {
-                  const newAnchorId = newTopicMessageIds[anchorIndex]
-                  updateAssistantSettings({
-                    fixedWindowAnchor: {
-                      ...assistantSettings.fixedWindowAnchor,
-                      [newTopic.id]: newAnchorId
+                  if (groupIndex >= 0 && sourceGroupList.length > 0) {
+                    const newMessageIds = sourceState.messages.messageIdsByTopic[newTopic.id] || []
+                    const newEntities = sourceState.messages.entities
+                    const newGroupList = buildGroupList(newMessageIds, (id) => newEntities[id])
+
+                    if (groupIndex < newGroupList.length) {
+                      updateAssistantSettings({
+                        fixedWindowAnchor: {
+                          ...assistantSettings.fixedWindowAnchor,
+                          [newTopic.id]: { kind: 'active', groupKey: newGroupList[groupIndex] }
+                        }
+                      })
                     }
-                  })
+                  }
+                } catch (error) {
+                  logger.error('[NEW_BRANCH] Failed to inherit fixed context window anchor', error as Error)
                 }
               }
             }
+
+            window.toast.success(t('chat.message.new.branch.created'))
+          },
+          onFailure: () => {
+            logger.error(`[NEW_BRANCH] Failed to create topic branch for topic ${newTopic.id}`)
+            window.toast.error(t('message.branch.error'))
           }
-        } else {
-          logger.error(`[NEW_BRANCH] Failed to create topic branch for topic ${newTopic.id}`)
-          window.toast.error(t('message.branch.error'))
-        }
+        })
       }),
       EventEmitter.on(
         EVENT_NAMES.EDIT_CODE_BLOCK,
@@ -886,14 +908,18 @@ const Messages = ({
     void navigate(decision.intent)
   }, [isTopicLoading, messages, navigate, savePosition, topic.id, getSavedPosition])
 
+  // Token estimation is now owned by Inputbar (which has draft text for preview).
+  // Preserve onFirstUpdate: signals that Messages has rendered with valid context.
+  // Guarded with a ref so it fires exactly once per mount (topic key resets on switch).
+  // This preserves the prior intended first-update behavior where the callback
+  // executes once after Messages has valid context, not on every contextInfo change.
+  const onFirstUpdateFiredRef = useRef(false)
   useEffect(() => {
-    void runAsyncFunction(async () => {
-      void EventEmitter.emit(EVENT_NAMES.ESTIMATED_TOKEN_COUNT, {
-        tokensCount: await estimateHistoryTokens(assistant, messages),
-        contextCount: getContextCount(assistant, messages, topic.id)
-      })
-    }).then(() => onFirstUpdate?.())
-  }, [assistant, messages, onFirstUpdate, topic.id])
+    if (!onFirstUpdateFiredRef.current) {
+      onFirstUpdateFiredRef.current = true
+      onFirstUpdate?.()
+    }
+  }, [contextInfo, onFirstUpdate])
 
   const loadMoreMessages = useCallback(() => {
     const currentState = viewportStateRef.current

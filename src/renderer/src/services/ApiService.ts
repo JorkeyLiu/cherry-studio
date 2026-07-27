@@ -41,14 +41,6 @@ import { ConversationService } from './ConversationService'
 import { injectUserMessageWithKnowledgeSearchPrompt } from './KnowledgeService'
 import type { BlockManager } from './messageStreaming'
 import type { StreamProcessorCallbacks } from './StreamProcessingService'
-// import { processKnowledgeSearch } from './KnowledgeService'
-// import {
-//   filterContextMessages,
-//   filterEmptyMessages,
-//   filterUsefulMessages,
-//   filterUserRoleStartMessages
-// } from './MessagesService'
-// import WebSearchService from './WebSearchService'
 
 // FIXME: 这里太多重复逻辑，需要重构
 

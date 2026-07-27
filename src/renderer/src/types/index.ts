@@ -175,6 +175,8 @@ export const EFFORT_RATIO: EffortRatio = {
 
 export type ContextWindowMode = 'sliding' | 'fixed'
 
+export type TopicAnchor = { kind: 'active'; groupKey: string }
+
 export type AssistantSettings = {
   maxTokens?: number
   enableMaxTokens?: boolean
@@ -182,7 +184,7 @@ export type AssistantSettings = {
   enableTemperature?: boolean
   topP: number
   enableTopP?: boolean
-  contextCount: number
+  contextCount: number | null
   streamOutput: boolean
   defaultModel?: Model
   customParameters?: AssistantSettingCustomParameters[]
@@ -203,7 +205,8 @@ export type AssistantSettings = {
   maxToolCalls?: number
   enableMaxToolCalls?: boolean
   contextWindowMode?: ContextWindowMode
-  fixedWindowAnchor?: Record<string, string> // { [topicId]: anchorMessageId }
+  topicContextWindowMode?: Record<string, 'fixed' | 'sliding' | undefined>
+  fixedWindowAnchor?: Record<string, TopicAnchor | undefined> // { [topicId]: TopicAnchor }
 }
 
 export type AssistantPreset = Omit<Assistant, 'model'> & {

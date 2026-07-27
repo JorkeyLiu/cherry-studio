@@ -1520,6 +1520,12 @@
         "title": "Поиск"
       },
       "title": "Топики",
+      "trash": {
+        "empty": "[to be translated]:Trash is empty",
+        "empty_trash": "[to be translated]:Empty Trash",
+        "label": "[to be translated]:Recycle Bin",
+        "restore": "[to be translated]:Restore"
+      },
       "unpin": "Открепленные темы"
     },
     "translate": "Перевести",
@@ -5640,11 +5646,10 @@
       "search_message": "Поиск сообщения",
       "search_message_in_chat": "Поиск сообщения в текущем диалоге",
       "select_model": "Select Model",
-      "selection_assistant_select_text": "Помощник выделения: выделить текст",
-      "selection_assistant_toggle": "Переключить помощник выделения",
       "show_app": "Показать/скрыть приложение",
       "show_settings": "Открыть настройки",
       "title": "Горячие клавиши",
+      "toggle_edit_mode": "[to be translated]:Toggle Edit Mode",
       "toggle_new_context": "Очистить контекст",
       "toggle_show_assistants": "Переключить отображение ассистентов",
       "toggle_show_topics": "Переключить отображение топиков",

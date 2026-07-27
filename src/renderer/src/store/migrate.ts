@@ -38,6 +38,7 @@ import type {
   Model,
   Provider,
   ProviderApiOptions,
+  TopicAnchor,
   TranslateLanguageCode,
   WebSearchProvider
 } from '@renderer/types'
@@ -3349,6 +3350,143 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 210 error', error as Error)
+      return state
+    }
+  },
+  '211': (state: RootState) => {
+    try {
+      // Migrate fixedWindowAnchor from string form to TopicAnchor form (group-granularity)
+      const migrateAssistant = (assistant: Assistant) => {
+        const anchorMap = assistant?.settings?.fixedWindowAnchor
+        if (!anchorMap) return assistant
+        const newMap: Record<string, TopicAnchor | undefined> = {}
+        for (const [topicId, value] of Object.entries(anchorMap)) {
+          if (value === undefined || value === null) {
+            // 未开 fixed —— 保持 undefined（不存键）
+            continue
+          }
+          if (typeof value === 'string') {
+            if (value === '') {
+              // 旧 sentinel 空字符串 → vacant (legacy, runtime degrades gracefully)
+              newMap[topicId] = { kind: 'vacant' } as unknown as TopicAnchor
+            } else {
+              // 尝试查找该 id 对应的消息，判断是 user 还是 assistant
+              const message = (state as any).messages?.entities?.[value]
+              if (message?.role === 'assistant' && message?.askId) {
+                // 旧锚点设在 assistant 消息上，恢复到其所属的 user 消息
+                newMap[topicId] = { kind: 'active', groupKey: message.askId }
+              } else {
+                // 旧锚点是 user 消息 id（或消息已不存在，运行时兜底会处理）
+                newMap[topicId] = { kind: 'active', groupKey: value }
+              }
+            }
+          } else if (typeof value === 'object' && value !== null && 'kind' in value) {
+            // 已经是新形态（理论上不会出现，但做幂等保护）—— 保留
+            newMap[topicId] = value
+          }
+        }
+        if (assistant.settings) {
+          assistant.settings.fixedWindowAnchor = newMap
+        }
+        return assistant
+      }
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
+      logger.info('migrate 211 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 211 error', error as Error)
+      return state
+    }
+  },
+  '212': (state: RootState) => {
+    try {
+      const migrateAssistant = (assistant: Assistant) => {
+        const anchorMap = assistant?.settings?.fixedWindowAnchor
+        const modeMap: Record<string, 'fixed' | 'sliding' | undefined> = {}
+        if (anchorMap) {
+          for (const [topicId, anchor] of Object.entries(anchorMap)) {
+            if (anchor !== undefined) {
+              modeMap[topicId] = 'fixed'
+            }
+          }
+        }
+        if (assistant.settings) {
+          assistant.settings.topicContextWindowMode = modeMap
+        }
+        return assistant
+      }
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      state.assistants.assistants = state.assistants.assistants.map((a) => migrateAssistant(a))
+      logger.info('migrate 212 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 212 error', error as Error)
+      return state
+    }
+  },
+  '213': (state: RootState) => {
+    try {
+      // Remove 100 = unlimited sentinel: convert persisted contextCount === 100 → null.
+      // All other finite values are left unchanged (they represent conversation turns).
+      const SENTINEL = 100
+      const migrateAssistant = (assistant: Assistant) => {
+        if (assistant.settings && assistant.settings.contextCount === SENTINEL) {
+          assistant.settings.contextCount = null
+        }
+        return assistant
+      }
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      state.assistants.assistants = state.assistants.assistants.map((a) => migrateAssistant(a))
+      logger.info('migrate 213 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 213 error', error as Error)
+      return state
+    }
+  },
+  '214': (state: RootState) => {
+    try {
+      if (state.shortcuts) {
+        if (!state.shortcuts.shortcuts.some((s) => s.key === 'toggle_edit_mode')) {
+          state.shortcuts.shortcuts.push({
+            key: 'toggle_edit_mode',
+            shortcut: [isMac ? 'Command' : 'Ctrl', 'E'],
+            editable: true,
+            enabled: true,
+            system: false
+          })
+        }
+      }
+      logger.info('migrate 214 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 214 error', error as Error)
+      return state
+    }
+  },
+  '215': (state: RootState) => {
+    try {
+      if (state.shortcuts) {
+        const removedKeys = new Set(['selection_assistant_toggle', 'selection_assistant_select_text'])
+        const seen = new Set<string>()
+        state.shortcuts.shortcuts = state.shortcuts.shortcuts.filter((s) => {
+          if (removedKeys.has(s.key)) return false
+          if (seen.has(s.key)) return false
+          seen.add(s.key)
+          return true
+        })
+
+        // Disable mini_window if enabled — keybinding collision with toggle_edit_mode (Cmd/Ctrl+E)
+        const miniWindow = state.shortcuts.shortcuts.find((s) => s.key === 'mini_window')
+        if (miniWindow && miniWindow.enabled === true) {
+          miniWindow.enabled = false
+        }
+      }
+      logger.info('migrate 215 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 215 error', error as Error)
       return state
     }
   }

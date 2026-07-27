@@ -1,6 +1,5 @@
 import { loggerService } from '@logger'
 import SearchPopup from '@renderer/components/Popups/SearchPopup'
-import { DEFAULT_CONTEXTCOUNT, MAX_CONTEXT_COUNT, UNLIMITED_CONTEXT_COUNT } from '@renderer/config/constant'
 import { getTopicById } from '@renderer/hooks/useTopic'
 import i18n from '@renderer/i18n'
 import { fetchMessagesSummary } from '@renderer/services/ApiService'
@@ -21,7 +20,6 @@ import {
   createMessage,
   resetMessage
 } from '@renderer/utils/messageUtils/create'
-import { filterContextMessages } from '@renderer/utils/messageUtils/filters'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import dayjs from 'dayjs'
 import { t } from 'i18next'
@@ -77,32 +75,6 @@ export {
   filterUserRoleStartMessages,
   getGroupedMessages
 } from '@renderer/utils/messageUtils/filters'
-
-export function getContextCount(assistant: Assistant, messages: Message[], topicId?: string) {
-  const settings = assistant?.settings
-  const settingContextCount = settings?.contextCount ?? DEFAULT_CONTEXTCOUNT
-  const actualContextCount = settingContextCount === MAX_CONTEXT_COUNT ? UNLIMITED_CONTEXT_COUNT : settingContextCount
-
-  if (settings?.contextWindowMode === 'fixed') {
-    const anchorMessageId = topicId ? settings?.fixedWindowAnchor?.[topicId] : undefined
-    if (anchorMessageId) {
-      const anchorIndex = messages.findIndex((m) => m.id === anchorMessageId)
-      if (anchorIndex >= 0) {
-        const contextMsgs = messages.slice(anchorIndex)
-        return { current: contextMsgs.length, max: settingContextCount }
-      }
-    }
-    // No anchor set or anchor not found: fall through to sliding mode
-  }
-
-  // Sliding mode: unchanged
-  const contextMsgs = filterContextMessages(messages, actualContextCount)
-
-  return {
-    current: contextMsgs.length,
-    max: settingContextCount
-  }
-}
 
 /** @deprecated Use safeDeleteFiles instead */
 export async function deleteMessageFiles(message: Message) {

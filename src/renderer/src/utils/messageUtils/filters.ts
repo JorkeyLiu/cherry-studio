@@ -4,7 +4,7 @@ import type { Message } from '@renderer/types/newMessage' // Assuming correct Me
 import { MessageBlockType } from '@renderer/types/newMessage'
 // May need Block types if refactoring to use them
 // import type { MessageBlock, MainTextMessageBlock } from '@renderer/types/newMessageTypes';
-import { remove, takeRight } from 'lodash'
+import { remove } from 'lodash'
 import { isEmpty } from 'lodash'
 // Assuming getGroupedMessages is also moved here or imported
 // import { getGroupedMessages } from './path/to/getGroupedMessages';
@@ -210,42 +210,4 @@ export function filterErrorOnlyMessagesWithRelated(messages: Message[]): Message
 
     return true
   })
-}
-
-// Note: getGroupedMessages might also need to be moved or imported.
-// It depends on message.askId which should still exist on the Message type.
-// export function getGroupedMessages(messages: Message[]): { [key: string]: (Message & { index: number })[] } {
-//   const groups: { [key: string]: (Message & { index: number })[] } = {}
-//   messages.forEach((message, index) => {
-//     const key = message.askId ? 'assistant' + message.askId : 'user' + message.id
-//     if (key && !groups[key]) {
-//       groups[key] = []
-//     }
-//     groups[key].unshift({ ...message, index }) // Keep unshift if order matters for useful filter
-//   })
-//   return groups
-// }
-
-/**
- * Filters and processes messages based on context requirements
- * @param messages - Array of messages to be filtered
- * @param contextCount - Number of messages to keep in context (excluding new user and assistant messages)
- * @returns Filtered array of messages that:
- * 1. Only includes messages after the last context clear
- * 2. Only includes useful message in a group (based on useful flag)
- * 3. Limited to contextCount + 2 messages (including space for new user/assistant messages)
- * 4. Starts from first user message
- * 5. Excludes empty messages
- */
-export function filterContextMessages(messages: Message[], contextCount: number): Message[] {
-  // NOTE: 和 fetchCompletions 中过滤消息的逻辑相同。
-  // 按理说 fetchCompletions 也可以复用这个函数，不过 fetchCompletions 不敢随便乱改，后面再考虑重构吧
-  const afterContextClearMsgs = filterAfterContextClearMessages(messages)
-  const usefulMsgs = filterUsefulMessages(afterContextClearMsgs)
-  const adjacentRemovedMsgs = filterAdjacentUserMessaegs(usefulMsgs)
-  const filteredMessages = filterUserRoleStartMessages(
-    filterEmptyMessages(takeRight(adjacentRemovedMsgs, contextCount))
-  )
-
-  return filteredMessages
 }

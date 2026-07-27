@@ -15,6 +15,7 @@ import i18n from 'i18next'
 
 import { getAiSdkProviderId } from '../provider/factory'
 import { getFileSizeLimit, supportsImageInput, supportsLargeFileUpload } from './modelCapabilities'
+import { getSendableFileText, isPdfFile } from './sendableFileText'
 
 const logger = loggerService.withContext('fileProcessor')
 
@@ -48,34 +49,25 @@ export async function extractFileContent(message: Message): Promise<string> {
 
 /**
  * 将文件块转换为文本部分
+ *
+ * 文本构造统一走 getSendableFileText（prepareSendableFileText 的共享缓存入口），
+ * 确保发送内容与本地估算内容一致，且同一文件身份只读取/解析一次
  */
 export async function convertFileBlockToTextPart(fileBlock: FileMessageBlock): Promise<TextPart | null> {
   const file = fileBlock.file
 
-  // 处理文本文件
-  if (file.type === FILE_TYPE.TEXT) {
-    try {
-      const fileContent = await window.api.file.read(file.id + file.ext)
-      return {
-        type: 'text',
-        text: `${file.origin_name}\n${fileContent.trim()}`
-      }
-    } catch (error) {
-      logger.warn('Failed to read text file:', error as Error)
+  // 处理文本文件与文档文件（PDF、Word、Excel等）- 提取为文本内容
+  try {
+    const text = await getSendableFileText(file)
+    if (text !== null) {
+      return { type: 'text', text }
     }
-  }
-
-  // 处理文档文件（PDF、Word、Excel等）- 提取为文本内容
-  if (file.type === FILE_TYPE.DOCUMENT) {
-    try {
-      const fileContent = await window.api.file.read(file.id + file.ext, true) // true表示强制文本提取
-      return {
-        type: 'text',
-        text: `${file.origin_name}\n${fileContent.trim()}`
-      }
-    } catch (error) {
+  } catch (error) {
+    if (file.type === FILE_TYPE.DOCUMENT) {
       logger.warn(`Failed to extract text from document ${file.origin_name}:`, error as Error)
       window.toast.error(i18n.t('message.error.file.text_extraction_failed', { name: file.origin_name }))
+    } else {
+      logger.warn('Failed to read text file:', error as Error)
     }
   }
 
@@ -204,7 +196,8 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
 
   try {
     // 处理PDF文档（始终生成 FilePart，由下游插件处理兼容性）
-    if (file.type === FILE_TYPE.DOCUMENT && file.ext === '.pdf') {
+    // 分类统一走 isPdfFile，扩展名大小写归一，与本地估算路径保持一致。
+    if (isPdfFile(file)) {
       // 检查文件大小限制
       if (file.size > fileSizeLimit) {
         // 如果支持大文件上传（如Gemini File API），尝试上传
@@ -268,7 +261,7 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
     }
 
     // 处理其他文档类型（Word、Excel等）
-    if (file.type === FILE_TYPE.DOCUMENT && file.ext !== '.pdf') {
+    if (file.type === FILE_TYPE.DOCUMENT && !isPdfFile(file)) {
       // 目前大多数提供商不支持Word等格式的原生处理
       // 返回null会触发上层调用convertFileBlockToTextPart进行文本提取
       // 这与Legacy架构中的处理方式一致

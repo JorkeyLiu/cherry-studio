@@ -646,11 +646,7 @@ class FileStorage {
     }
   }
 
-  public base64Image = async (
-    _: Electron.IpcMainInvokeEvent,
-    id: string
-  ): Promise<{ mime: string; base64: string; data: string }> => {
-    const filePath = path.join(this.storageDir, id)
+  private base64ImageCore = async (filePath: string): Promise<{ mime: string; base64: string; data: string }> => {
     const data = await fs.promises.readFile(filePath)
     const base64 = data.toString('base64')
     const rawExt = path.extname(filePath).slice(1)
@@ -661,6 +657,30 @@ class FileStorage {
       base64,
       data: `data:${mime};base64,${base64}`
     }
+  }
+
+  public base64Image = async (
+    _: Electron.IpcMainInvokeEvent,
+    id: string
+  ): Promise<{ mime: string; base64: string; data: string }> => {
+    return this.base64ImageCore(path.join(this.storageDir, id))
+  }
+
+  /**
+   * Reads an external (non-stored) image file and returns its base64/data-url form.
+   *
+   * Mirrors {@link base64Image} but operates on an absolute path, consistent with
+   * {@link readExternalFile}. Used to estimate pre-upload draft image attachments
+   * whose stored copy does not yet exist under storageDir.
+   */
+  public base64ImageExternal = async (
+    _: Electron.IpcMainInvokeEvent,
+    filePath: string
+  ): Promise<{ mime: string; base64: string; data: string }> => {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File does not exist: ${filePath}`)
+    }
+    return this.base64ImageCore(filePath)
   }
 
   public saveBase64Image = async (_: Electron.IpcMainInvokeEvent, base64Data: string): Promise<FileMetadata> => {
@@ -787,12 +807,67 @@ class FileStorage {
     return { data: base64, mime }
   }
 
-  public pdfPageCount = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<number> => {
-    const filePath = path.join(this.storageDir, id)
+  private pdfPageCountCore = async (filePath: string): Promise<number> => {
     const buffer = await fs.promises.readFile(filePath)
 
     const pdfDoc = await PDFDocument.load(buffer)
     return pdfDoc.getPageCount()
+  }
+
+  public pdfPageCount = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<number> => {
+    return this.pdfPageCountCore(path.join(this.storageDir, id))
+  }
+
+  /**
+   * Reads the page count of an external (non-stored) PDF file.
+   *
+   * Mirrors {@link pdfPageCount} but operates on an absolute path, consistent with
+   * {@link readExternalFile}. Used to estimate pre-upload draft PDF attachments
+   * whose stored copy does not yet exist under storageDir.
+   */
+  public pdfPageCountExternal = async (_: Electron.IpcMainInvokeEvent, filePath: string): Promise<number> => {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File does not exist: ${filePath}`)
+    }
+    return this.pdfPageCountCore(filePath)
+  }
+
+  /**
+   * Reads only the intrinsic pixel dimensions of an image file.
+   *
+   * Uses sharp's header-level metadata (no full decode, no base64 transport) so
+   * token estimation can size images without shipping image bytes over IPC.
+   * Sharp is imported lazily, mirroring {@link file:../../utils/ocr.ts}, to keep
+   * it off the app startup path.
+   */
+  private imageSizeCore = async (filePath: string): Promise<{ width: number; height: number }> => {
+    const sharp = (await import('sharp')).default
+    const metadata = await sharp(filePath).metadata()
+    return {
+      width: metadata.width ?? 0,
+      height: metadata.height ?? 0
+    }
+  }
+
+  public imageSize = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<{ width: number; height: number }> => {
+    return this.imageSizeCore(path.join(this.storageDir, id))
+  }
+
+  /**
+   * Reads the intrinsic dimensions of an external (non-stored) image file.
+   *
+   * Mirrors {@link imageSize} but operates on an absolute path, consistent with
+   * {@link readExternalFile}. Used to estimate pre-upload draft image attachments
+   * whose stored copy does not yet exist under storageDir.
+   */
+  public imageSizeExternal = async (
+    _: Electron.IpcMainInvokeEvent,
+    filePath: string
+  ): Promise<{ width: number; height: number }> => {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File does not exist: ${filePath}`)
+    }
+    return this.imageSizeCore(filePath)
   }
 
   public binaryImage = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<{ data: Buffer; mime: string }> => {

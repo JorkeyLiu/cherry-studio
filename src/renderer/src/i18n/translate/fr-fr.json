@@ -1520,6 +1520,12 @@
         "title": "Rechercher"
       },
       "title": "Sujet",
+      "trash": {
+        "empty": "[to be translated]:Trash is empty",
+        "empty_trash": "[to be translated]:Empty Trash",
+        "label": "[to be translated]:Recycle Bin",
+        "restore": "[to be translated]:Restore"
+      },
       "unpin": "Annuler le fixage"
     },
     "translate": "Traduire",
@@ -5640,11 +5646,10 @@
       "search_message": "Rechercher un message",
       "search_message_in_chat": "Rechercher un message dans la conversation actuelle",
       "select_model": "Select Model",
-      "selection_assistant_select_text": "Assistant de sélection de texte : extraire le texte",
-      "selection_assistant_toggle": "Activer/désactiver l'assistant de sélection de texte",
       "show_app": "Afficher l'application",
       "show_settings": "Ouvrir les paramètres",
       "title": "Raccourcis",
+      "toggle_edit_mode": "[to be translated]:Toggle Edit Mode",
       "toggle_new_context": "Effacer le contexte",
       "toggle_show_assistants": "Basculer l'affichage des assistants",
       "toggle_show_topics": "Basculer l'affichage des sujets",

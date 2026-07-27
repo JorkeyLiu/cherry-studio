@@ -331,7 +331,6 @@ const MessageItem: FC<Props> = ({
                     message={message}
                     assistant={assistant}
                     model={model}
-                    index={index}
                     topic={topic}
                     isLastMessage={isLastMessage}
                     isAssistantMessage={isAssistantMessage}

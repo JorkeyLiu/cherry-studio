@@ -7,13 +7,7 @@ import { HStack } from '@renderer/components/Layout'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
 import Selector from '@renderer/components/Selector'
 import { HelpTooltip } from '@renderer/components/TooltipIcons'
-import {
-  DEFAULT_CONTEXTCOUNT,
-  DEFAULT_TEMPERATURE,
-  MAX_CONTEXT_COUNT,
-  MAX_TOOL_CALLS,
-  MIN_TOOL_CALLS
-} from '@renderer/config/constant'
+import { DEFAULT_CONTEXTCOUNT, DEFAULT_TEMPERATURE, MAX_TOOL_CALLS, MIN_TOOL_CALLS } from '@renderer/config/constant'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { SettingRow } from '@renderer/pages/settings'
@@ -42,7 +36,10 @@ interface Props {
 
 const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateAssistantSettings }) => {
   const [temperature, setTemperature] = useState(assistant?.settings?.temperature ?? DEFAULT_TEMPERATURE)
-  const [contextCount, setContextCount] = useState(assistant?.settings?.contextCount ?? DEFAULT_CONTEXTCOUNT)
+  const rawContextCount = assistant?.settings?.contextCount
+  const [contextCount, setContextCount] = useState<number | null>(
+    rawContextCount === undefined ? DEFAULT_CONTEXTCOUNT : rawContextCount
+  )
   const enableMaxTokens = useMemo(
     () => assistant?.settings?.enableMaxTokens ?? DEFAULT_ASSISTANT_SETTINGS.enableMaxTokens,
     [assistant?.settings?.enableMaxTokens]
@@ -394,18 +391,14 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
           onChange={(checked) => {
             const mode: ContextWindowMode = checked ? 'fixed' : 'sliding'
             setContextWindowMode(mode)
-            if (mode === 'sliding') {
-              updateAssistantSettings({ contextWindowMode: mode, fixedWindowAnchor: {} })
-            } else {
-              updateAssistantSettings({ contextWindowMode: mode })
-            }
+            updateAssistantSettings({ contextWindowMode: mode })
           }}
         />
       </SettingRow>
       <Divider style={{ margin: '10px 0' }} />
 
       <Row align="middle">
-        <Col span={20}>
+        <Col span={16}>
           <Label>
             {t('chat.settings.context_count.label')}{' '}
             <Tooltip title={t('chat.settings.context_count.tip')}>
@@ -413,46 +406,45 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
             </Tooltip>
           </Label>
         </Col>
-        <Col span={4}>
-          <EditableNumber
-            min={0}
-            max={MAX_CONTEXT_COUNT}
-            step={1}
-            value={contextCount}
-            changeOnBlur
-            onChange={(value) => {
-              if (!isNull(value)) {
-                setContextCount(value)
-                setTimeoutTimer('contextCount_onChange', () => updateAssistantSettings({ contextCount: value }), 500)
-              }
+        <Col span={4} style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+          <Label style={{ margin: 0, fontSize: 12, whiteSpace: 'nowrap' }}>{t('chat.settings.max')}</Label>
+        </Col>
+        <Col span={4} style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <Switch
+            checked={contextCount === null}
+            size="small"
+            onChange={(checked) => {
+              const newValue: number | null = checked ? null : DEFAULT_CONTEXTCOUNT
+              setContextCount(newValue)
+              updateAssistantSettings({ contextCount: newValue })
             }}
-            formatter={(value) => (value === MAX_CONTEXT_COUNT ? t('chat.settings.max') : (value ?? ''))}
-            style={{ width: '100%' }}
           />
         </Col>
       </Row>
-      <Row align="middle" gutter={24}>
-        <Col span={24}>
-          <ContextSliderWrapper>
-            <Slider
-              min={0}
-              max={MAX_CONTEXT_COUNT}
-              onChange={setContextCount}
-              onChangeComplete={onContextCountChange}
-              value={typeof contextCount === 'number' ? contextCount : 0}
-              marks={{
-                0: '0',
-                25: '25',
-                50: '50',
-                75: '75',
-                100: <span style={{ position: 'absolute', right: -2 }}>{t('chat.settings.max')}</span>
-              }}
-              step={1}
-              tooltip={{ formatter: formatSliderTooltip, open: false }}
-            />
-          </ContextSliderWrapper>
-        </Col>
-      </Row>
+      {contextCount !== null && (
+        <Row align="middle" gutter={24}>
+          <Col span={24}>
+            <ContextSliderWrapper>
+              <Slider
+                min={0}
+                max={99}
+                onChange={setContextCount}
+                onChangeComplete={onContextCountChange}
+                value={typeof contextCount === 'number' ? contextCount : 0}
+                marks={{
+                  0: '0',
+                  25: '25',
+                  50: '50',
+                  75: '75',
+                  99: '99'
+                }}
+                step={1}
+                tooltip={{ formatter: formatSliderTooltip, open: false }}
+              />
+            </ContextSliderWrapper>
+          </Col>
+        </Row>
+      )}
       <Divider style={{ margin: '10px 0' }} />
       <SettingRow style={{ minHeight: 30 }}>
         <HStack alignItems="center">

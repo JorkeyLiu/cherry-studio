@@ -1378,7 +1378,7 @@
       "code_wrappable": "代码块可换行",
       "context_count": {
         "label": "上下文数",
-        "tip": "要保留在上下文中的消息数量，数值越大，上下文越长，消耗的 Token 越多。普通聊天建议 5-10"
+        "tip": "要保留在上下文中的对话轮次数，数值越大，上下文越长，消耗的 Token 越多。普通聊天建议 5-10"
       },
       "context_window_mode": {
         "label": "固定上下文窗口",
@@ -5646,11 +5646,10 @@
       "search_message": "搜索消息",
       "search_message_in_chat": "在当前对话中搜索消息",
       "select_model": "选择模型",
-      "selection_assistant_select_text": "划词助手：取词",
-      "selection_assistant_toggle": "开关划词助手",
       "show_app": "显示 / 隐藏应用",
       "show_settings": "打开设置",
       "title": "快捷键",
+      "toggle_edit_mode": "切换编辑模式",
       "toggle_new_context": "清除上下文",
       "toggle_show_assistants": "切换助手显示",
       "toggle_show_topics": "切换话题显示",

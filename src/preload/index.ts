@@ -211,6 +211,8 @@ const api = {
     binaryImage: (fileId: string) => ipcRenderer.invoke(IpcChannel.File_BinaryImage, fileId),
     base64Image: (fileId: string): Promise<{ mime: string; base64: string; data: string }> =>
       ipcRenderer.invoke(IpcChannel.File_Base64Image, fileId),
+    base64ImageExternal: (filePath: string): Promise<{ mime: string; base64: string; data: string }> =>
+      ipcRenderer.invoke(IpcChannel.File_Base64ImageExternal, filePath),
     saveBase64Image: (data: string) => ipcRenderer.invoke(IpcChannel.File_SaveBase64Image, data),
     savePastedImage: (imageData: Uint8Array, extension?: string) =>
       ipcRenderer.invoke(IpcChannel.File_SavePastedImage, imageData, extension),
@@ -219,6 +221,12 @@ const api = {
     copy: (fileId: string, destPath: string) => ipcRenderer.invoke(IpcChannel.File_Copy, fileId, destPath),
     base64File: (fileId: string) => ipcRenderer.invoke(IpcChannel.File_Base64File, fileId),
     pdfInfo: (fileId: string) => ipcRenderer.invoke(IpcChannel.File_GetPdfInfo, fileId),
+    pdfInfoExternal: (filePath: string): Promise<number> =>
+      ipcRenderer.invoke(IpcChannel.File_GetPdfInfoExternal, filePath),
+    imageSize: (fileId: string): Promise<{ width: number; height: number }> =>
+      ipcRenderer.invoke(IpcChannel.File_GetImageSize, fileId),
+    imageSizeExternal: (filePath: string): Promise<{ width: number; height: number }> =>
+      ipcRenderer.invoke(IpcChannel.File_GetImageSizeExternal, filePath),
     getPathForFile: (file: File) => webUtils.getPathForFile(file),
     openFileWithRelativePath: (file: FileMetadata) => ipcRenderer.invoke(IpcChannel.File_OpenWithRelativePath, file),
     isTextFile: (filePath: string): Promise<boolean> => ipcRenderer.invoke(IpcChannel.File_IsTextFile, filePath),

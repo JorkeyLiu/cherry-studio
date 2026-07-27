@@ -1,13 +1,13 @@
-import { MAX_CONTEXT_COUNT } from '@renderer/config/constant'
 import type { CSSProperties } from 'react'
 
 type Props = {
-  maxContext: number
+  /** Numeric capacity, or null for unlimited (∞). Numeric 100 renders as "100". */
+  maxContext: number | null
   style?: CSSProperties
 }
 
 export default function MaxContextCount({ maxContext, style }: Props) {
-  return maxContext === MAX_CONTEXT_COUNT ? (
+  return maxContext === null ? (
     <span style={{ fontSize: '16px', ...style }}>∞</span>
   ) : (
     <span style={style}>{maxContext.toString()}</span>

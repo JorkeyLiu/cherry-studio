@@ -1,6 +1,5 @@
 import { HStack, VStack } from '@renderer/components/Layout'
 import MaxContextCount from '@renderer/components/MaxContextCount'
-import { MAX_CONTEXT_COUNT } from '@renderer/config/constant'
 import { useSettings } from '@renderer/hooks/useSettings'
 import type { ContextWindowMode } from '@renderer/types'
 import { Divider, Popover } from 'antd'
@@ -11,19 +10,17 @@ import styled from 'styled-components'
 
 type Props = {
   estimateTokenCount: number
-  inputTokenCount: number
-  contextCount: { current: number; max: number }
+  contextCount: { current: number; max: number | null }
   contextWindowMode?: ContextWindowMode
-  hasAnchor?: boolean
+  effectiveMode?: ContextWindowMode
   onUpdateAnchor?: () => void
 } & React.HTMLAttributes<HTMLDivElement>
 
 const TokenCount: FC<Props> = ({
   estimateTokenCount,
-  inputTokenCount,
   contextCount,
   contextWindowMode,
-  hasAnchor,
+  effectiveMode,
   onUpdateAnchor
 }) => {
   const { t } = useTranslation()
@@ -42,9 +39,7 @@ const TokenCount: FC<Props> = ({
             <HStack style={{ alignItems: 'center' }}>
               {contextCount.current}
               <SlashSeparatorSpan>/</SlashSeparatorSpan>
-              <MaxContextCount
-                maxContext={contextWindowMode === 'fixed' && hasAnchor ? MAX_CONTEXT_COUNT : contextCount.max}
-              />
+              <MaxContextCount maxContext={contextCount.max} />
             </HStack>
           </Text>
         </HStack>
@@ -59,18 +54,19 @@ const TokenCount: FC<Props> = ({
 
   const contextCountBlock = (() => {
     if (contextWindowMode === 'fixed') {
-      if (hasAnchor) {
-        // Fixed mode + anchored: show current / ∞, click to unanchor
+      // Assistant supports fixed mode → always clickable (toggle per-topic mode)
+      if (effectiveMode === 'fixed') {
+        // Topic is fixed: show current / ∞, click to switch to sliding
         return (
           <HStack style={{ alignItems: 'center', cursor: 'pointer' }} onClick={onUpdateAnchor}>
             <MenuIcon size={12} className="icon" />
             {contextCount.current}
             <SlashSeparatorSpan>/</SlashSeparatorSpan>
-            <MaxContextCount maxContext={MAX_CONTEXT_COUNT} style={{ color: 'var(--color-primary)' }} />
+            <MaxContextCount maxContext={contextCount.max} style={{ color: 'var(--color-primary)' }} />
           </HStack>
         )
       }
-      // Fixed mode + no anchor: show current / max, click to anchor
+      // Topic is sliding: show current / max, click to switch to fixed
       return (
         <HStack style={{ alignItems: 'center', cursor: 'pointer' }} onClick={onUpdateAnchor}>
           <MenuIcon size={12} className="icon" />
@@ -80,7 +76,7 @@ const TokenCount: FC<Props> = ({
         </HStack>
       )
     }
-    // Sliding mode: not clickable
+    // Assistant doesn't support fixed mode: not clickable
     return (
       <HStack style={{ alignItems: 'center' }}>
         <MenuIcon size={12} className="icon" />
@@ -99,8 +95,6 @@ const TokenCount: FC<Props> = ({
           <Divider type="vertical" style={{ marginTop: 3, marginLeft: 5, marginRight: 3 }} />
           <HStack style={{ alignItems: 'center' }}>
             <ArrowUp size={12} className="icon" />
-            {inputTokenCount}
-            <SlashSeparatorSpan>/</SlashSeparatorSpan>
             {estimateTokenCount}
           </HStack>
         </HStack>
