@@ -27,6 +27,11 @@
  *   (LOCK-4414: invalid != absent, never silently deleted/continued).
  *   Startup itself still proceeds (LOCK-L3); acting on the blocked state
  *   (repair flow, user surfacing) is later-phase product scope.
+ *
+ * Phase 4.4.3 promotion recovery gate (LOCK-4431..LOCK-4439):
+ * re-exports the startup recovery gate API for integration into the
+ * app-ready lifecycle. The gate runs BEFORE chatDbService.init() and
+ * executes the determined recovery action deterministically.
  */
 
 import { loggerService } from '@logger'
@@ -43,6 +48,9 @@ export {
   type PromotionRecoveryDecision,
   type PromotionRecoveryInput
 } from './promotion/recovery'
+
+// Phase 4.4.3 startup recovery gate (LOCK-4431..LOCK-4439).
+export { runStartupRecoveryGate, type StartupRecoveryGateResult } from './promotion/gate'
 
 const logger = loggerService.withContext('chatDbImport')
 

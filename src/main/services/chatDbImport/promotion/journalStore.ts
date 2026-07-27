@@ -1,10 +1,11 @@
 /**
  * Promotion journal store — crash-safe fixed-path persistence
- * (Phase 4.4.1, LOCK-4411..LOCK-4417; Phase 4.4.2, LOCK-4423..LOCK-4425).
+ * (Phase 4.4.1, LOCK-4411..LOCK-4417; Phase 4.4.2, LOCK-4423..LOCK-4425;
+ * Phase 4.4.3, LOCK-4435..LOCK-4438).
  *
- * This module is the ONLY writer/reader of the on-disk promotion journal.
- * It owns exactly one fixed path under a provided controlled Data root:
- * `<dataRoot>/chat-import-promotion.journal.json` (the fixed
+ * This module is the ONLY writer/reader/cleaner of the on-disk promotion
+ * journal. It owns exactly one fixed path under a provided controlled Data
+ * root: `<dataRoot>/chat-import-promotion.journal.json` (the fixed
  * {@link PROMOTION_JOURNAL_FILENAME} from the pure codec). Callers can never
  * supply a journal path — the API accepts only the controlled Data root
  * (identical to the candidateDb `dataRoot` injection pattern) and every
@@ -58,6 +59,21 @@
  * {@link PromotionJournalStoreError} with code `READ_IO_FAILED` — an I/O
  * failure is NEVER reported as `absent` (and never as `invalid` either,
  * because unreadable is not the same evidence as readable-but-rejected).
+ *
+ * Cleanup semantics (Phase 4.4.3, LOCK-4435..LOCK-4438):
+ * - {@link cleanupPromotionJournal} is the idempotent fixed-path cleanup
+ *   primitive. It removes the promotion journal and any stale staging file,
+ *   then fsyncs the parent directory for durability.
+ * - Guard-read validates the current journal: absent journals are idempotent
+ *   success (already clean); valid journals must match the caller's expected
+ *   phase and identity (sessionId/candidateId) before unlink.
+ * - The rollback snapshot (`ROLLBACK_SNAPSHOT_FILENAME`) is NEVER touched.
+ * - ENOENT during the unlink step is idempotent only when the guard read
+ *   observed the journal as absent (immediate return) or the file was
+ *   concurrently removed after the guard read confirmed its presence. In
+ *   both cases the cleanup goal is achieved and parent dir sync follows.
+ * - A successful or absent return means the journal is absent from disk
+ *   with parent directory sync completed (where deletion occurred).
  *
  * Directory-sync platform note (decision under Phase 4.4.1 decision
  * rights): on win32 directory handles cannot be fsynced, so step 6 is
@@ -119,6 +135,15 @@ export type PromotionJournalStoreErrorCode =
   | 'TRANSITION_JOURNAL_INVALID'
   | 'TRANSITION_PHASE_MISMATCH'
   | 'TRANSITION_IDENTITY_MISMATCH'
+  // Phase 4.4.3 cleanup rejections and failures:
+  | 'CLEANUP_JOURNAL_ABSENT'
+  | 'CLEANUP_JOURNAL_INVALID'
+  | 'CLEANUP_PHASE_MISMATCH'
+  | 'CLEANUP_IDENTITY_MISMATCH'
+  | 'CLEANUP_UNLINK_FAILED'
+  | 'CLEANUP_PARENT_DIR_SYNC_FAILED'
+  | 'CLEANUP_PARENT_DIR_SYNC_UNSUPPORTED'
+  | 'CLEANUP_STAGING_UNLINK_FAILED'
 
 /**
  * Structured store error. `code` is the bounded machine-readable category;
@@ -470,6 +495,241 @@ export async function advancePromotionJournalToReplacementVerified(
 
   await assertTransitionPrecondition(journal, 'candidate-installed', dataRoot)
   await writePromotionJournalDurably(journal, dataRoot)
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup — Phase 4.4.3 idempotent fixed-path removal (LOCK-4435..LOCK-4438)
+// ---------------------------------------------------------------------------
+
+/**
+ * Identity bound for cleanup authorization. The caller supplies the
+ * sessionId and candidateId the cleanup is finalizing; the store verifies
+ * these match the durable journal before any unlink.
+ */
+export interface PromotionJournalCleanupIdentity {
+  readonly sessionId: string
+  readonly candidateId: string
+}
+
+/**
+ * Result of {@link cleanupPromotionJournal}. Never throws for operational
+ * failures — bounded machine-readable result. A successful or absent return
+ * means the journal is absent from disk with parent directory sync completed
+ * where deletion occurred (LOCK-4438).
+ */
+export type PromotionJournalCleanupResult =
+  | {
+      /** Journal was present and durably removed (unlink + parent dir sync). */
+      readonly deleted: true
+    }
+  | {
+      /** Journal was already absent; no unlink or sync needed. Idempotent. */
+      readonly deleted: false
+      readonly reason: 'already-absent'
+    }
+
+/**
+ * Private cleanup body — the single implementation shared by all cleanup
+ * APIs. Not exported: an unrestricted generic cleanup must never be public
+ * (phase gating is the public surface).
+ *
+ * Operation:
+ *   1. Guard-read the current durable journal.
+ *   2. Absent → return idempotent success (already-absent, no sync needed).
+ *   3. Invalid → reject CLEANUP_JOURNAL_INVALID (no unlink).
+ *   4. Valid but wrong phase → reject CLEANUP_PHASE_MISMATCH (no unlink).
+ *   5. Valid but wrong identity → reject CLEANUP_IDENTITY_MISMATCH (no
+ *      unlink).
+ *   6. Valid and matches → unlink the fixed journal (ENOENT race is
+ *      idempotent after confirmed presence).
+ *   7. Best-effort unlink stale staging file (never a failure).
+ *   8. Fsync parent directory for durability (LOCK-4438).
+ *
+ * LOCK-4436: only the fixed promotion journal and stale staging are
+ * candidates for deletion. The rollback snapshot, candidate files, and live
+ * chat.db are NEVER touched.
+ *
+ * LOCK-4435: caller must have the authoritative live fact (the replacement
+ * is verified and installed) — this API only checks the journal identity
+ * and phase; the caller owns the broader precondition.
+ */
+async function cleanupPromotionJournalBody(
+  expectedPhase: PromotionJournalPhase,
+  expectedIdentity: PromotionJournalCleanupIdentity,
+  dataRoot: string
+): Promise<PromotionJournalCleanupResult> {
+  const journalPath = getPromotionJournalPath(dataRoot)
+  const stagingPath = getPromotionJournalStagingPath(dataRoot)
+
+  // 1. Guard-read the current durable journal.
+  const current = await readPromotionJournal(dataRoot)
+
+  // 2. Absent → idempotent success (LOCK-4436).
+  if (current.status === 'absent') {
+    return { deleted: false, reason: 'already-absent' }
+  }
+
+  // 3. Invalid → reject (no unlink, no mutation).
+  if (current.status === 'invalid') {
+    throw storeError(
+      'CLEANUP_JOURNAL_INVALID',
+      `Cannot clean up the promotion journal: the current durable journal failed strict decoding (${current.code}).`
+    )
+  }
+
+  // 4. Phase mismatch → reject.
+  if (current.journal.phase !== expectedPhase) {
+    throw storeError(
+      'CLEANUP_PHASE_MISMATCH',
+      `Cannot clean up the promotion journal: current phase is "${current.journal.phase}" ` +
+        `but exactly "${expectedPhase}" is required for cleanup.`
+    )
+  }
+
+  // 5. Identity mismatch → reject.
+  if (
+    current.journal.sessionId !== expectedIdentity.sessionId ||
+    current.journal.candidateId !== expectedIdentity.candidateId
+  ) {
+    throw storeError(
+      'CLEANUP_IDENTITY_MISMATCH',
+      'Cannot clean up the promotion journal: sessionId/candidateId do not match the expected identity.'
+    )
+  }
+
+  // 6. Unlink the fixed journal (guard confirmed presence).
+  try {
+    await fs.unlink(journalPath)
+  } catch (error) {
+    if (errnoCode(error) === 'ENOENT') {
+      // Concurrent removal after guard read confirmed presence — idempotent
+      // for the cleanup goal (LOCK-4436). Proceed to dir sync.
+    } else {
+      throw storeError('CLEANUP_UNLINK_FAILED', 'Failed to unlink the promotion journal during cleanup.', error)
+    }
+  }
+
+  // 7. Best-effort unlink of stale staging file (never a failure).
+  try {
+    await fs.unlink(stagingPath)
+  } catch (error) {
+    if (errnoCode(error) !== 'ENOENT') {
+      logger.warn('Failed to clean promotion journal staging file during cleanup', {
+        code: errnoCode(error)
+      })
+    }
+  }
+
+  // 8. Fsync parent directory for durability (LOCK-4438).
+  await syncParentDirectoryForCleanup(dataRoot)
+
+  return { deleted: true }
+}
+
+/**
+ * Cleanup after replacement-verified — the primary Phase 4.4.3 cleanup
+ * entry point. The caller (future recovery executor) must have the
+ * authoritative live fact: the replacement is installed and verified. This
+ * API only verifies the journal matches the expected phase and identity
+ * before unlink.
+ *
+ * LOCK-4435: caller precondition — the replacement must be verified.
+ * LOCK-4436: only the fixed journal and stale staging are deleted; snapshot
+ * retained.
+ * LOCK-4438: a successful return means the journal is absent with parent
+ * directory sync completed; relaunch may proceed only then.
+ */
+export async function cleanupPromotionJournalAfterReplacementVerified(
+  expectedIdentity: PromotionJournalCleanupIdentity,
+  dataRoot: string = DATA_PATH
+): Promise<PromotionJournalCleanupResult> {
+  assertControlledDataRoot(dataRoot)
+  return cleanupPromotionJournalBody('replacement-verified', expectedIdentity, dataRoot)
+}
+
+/**
+ * Cleanup after snapshot-ready — used during rollback-authorized recovery
+ * when the snapshot-ready journal must be cleaned before restoring the
+ * rollback snapshot. The caller must have the authoritative live fact: the
+ * rollback is authorized and the snapshot is retained.
+ *
+ * LOCK-4435: caller precondition — rollback must be authorized.
+ * LOCK-4436: only the fixed journal and stale staging are deleted; snapshot
+ * retained.
+ * LOCK-4438: a successful return means the journal is absent with parent
+ * directory sync completed.
+ */
+export async function cleanupPromotionJournalAfterSnapshotReady(
+  expectedIdentity: PromotionJournalCleanupIdentity,
+  dataRoot: string = DATA_PATH
+): Promise<PromotionJournalCleanupResult> {
+  assertControlledDataRoot(dataRoot)
+  return cleanupPromotionJournalBody('snapshot-ready', expectedIdentity, dataRoot)
+}
+
+/**
+ * Cleanup after candidate-installed — used during keep-old-live recovery
+ * when the snapshot-ready journal must be cleaned while the live DB is
+ * still intact and no destructive install occurred. The caller must have
+ * the authoritative live fact: the live DB is the correct current state.
+ *
+ * LOCK-4435: caller precondition — the live DB is the authoritative state.
+ * LOCK-4436: only the fixed journal and stale staging are deleted; snapshot
+ * retained.
+ * LOCK-4438: a successful return means the journal is absent with parent
+ * directory sync completed.
+ */
+export async function cleanupPromotionJournalAfterCandidateInstalled(
+  expectedIdentity: PromotionJournalCleanupIdentity,
+  dataRoot: string = DATA_PATH
+): Promise<PromotionJournalCleanupResult> {
+  assertControlledDataRoot(dataRoot)
+  return cleanupPromotionJournalBody('candidate-installed', expectedIdentity, dataRoot)
+}
+
+/**
+ * fsync the journal's parent directory so the cleanup unlink survives a
+ * crash/power loss (required and supported on darwin). Skipped on win32
+ * where directory handles cannot be fsynced. On POSIX, EINVAL/ENOTSUP/EPERM
+ * map to `PARENT_DIR_SYNC_UNSUPPORTED`; everything else maps to
+ * `PARENT_DIR_SYNC_FAILED`.
+ *
+ * This is a separate function from the write-path `syncParentDirectory`
+ * because the cleanup context has different error semantics: the unlink
+ * already happened and the caller needs to know durability is unproven.
+ */
+async function syncParentDirectoryForCleanup(dir: string): Promise<void> {
+  if (process.platform === 'win32') {
+    return
+  }
+
+  let dirHandle: FileHandle | null = null
+  try {
+    dirHandle = await fs.open(dir, 'r')
+    await dirHandle.sync()
+  } catch (error) {
+    const code = errnoCode(error)
+    if (code === 'EINVAL' || code === 'ENOTSUP' || code === 'EPERM') {
+      throw storeError(
+        'CLEANUP_PARENT_DIR_SYNC_UNSUPPORTED',
+        'This filesystem does not support directory fsync; the promotion journal cleanup is not proven durable.',
+        error
+      )
+    }
+    throw storeError(
+      'CLEANUP_PARENT_DIR_SYNC_FAILED',
+      'Failed to fsync the promotion journal parent directory during cleanup; the deletion is not proven durable.',
+      error
+    )
+  } finally {
+    if (dirHandle !== null) {
+      try {
+        await dirHandle.close()
+      } catch {
+        // best-effort close
+      }
+    }
+  }
 }
 
 /**

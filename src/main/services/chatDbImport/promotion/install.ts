@@ -157,6 +157,98 @@ export function mintClosedLiveProof(options: MintClosedLiveProofOptions): MintCl
 }
 
 // ---------------------------------------------------------------------------
+// Closed-live proof validation — narrowly reusable (Phase 4.4.3)
+// ---------------------------------------------------------------------------
+
+/** Bounded reasons a proof validation can reject without consuming. */
+export type ClosedLiveProofRejectionReason =
+  | 'unrecognized'
+  | 'consumed'
+  | 'authorization-invalid'
+  | 'authorization-released'
+  | 'authorization-foreign-coordinator'
+  | 'authorization-not-current-holder'
+  | 'live-not-closed'
+
+/** Result of {@link validateClosedLiveProof}. Never throws. */
+export type ValidateClosedLiveProofResult =
+  | { readonly ok: true; readonly validation: ClosedLiveProofValidation }
+  | { readonly ok: false; readonly reason: ClosedLiveProofRejectionReason }
+
+/**
+ * Validated closed-live proof handle. The caller may perform additional
+ * binding checks (e.g., owner-to-candidate binding for install) and MUST
+ * call {@link consume} exactly once before opening the destructive window.
+ */
+export interface ClosedLiveProofValidation {
+  /** The currently valid promotion lease handle. */
+  readonly authorization: PromotionLeaseHandle
+  /** The coordinator the authorization was validated against. */
+  readonly coordinator: MaintenanceCoordinator
+  /** Consume the proof — must be called exactly once before destructive ops. */
+  consume(): void
+}
+
+/**
+ * Validate a closed-live proof without consuming it (Phase 4.4.3,
+ * LOCK-4427). Checks: module brand, unconsumed state, currently valid
+ * promotion authorization, and live-closed witness. Does NOT consume —
+ * the caller must call `validation.consume()` after any additional
+ * binding checks pass and immediately before the destructive window.
+ *
+ * Narrowly reusable: `installCandidate` performs owner binding ON TOP of
+ * this validation; `rollbackInstall` uses it directly (no candidate
+ * owner binding needed — the proof is bound to the promotion session
+ * via the authorization lease).
+ */
+export function validateClosedLiveProof(
+  proof: ClosedLiveProof,
+  coordinator?: MaintenanceCoordinator
+): ValidateClosedLiveProofResult {
+  const record = closedLiveProofRecords.get(proof)
+  if (record === undefined) {
+    return { ok: false, reason: 'unrecognized' }
+  }
+  if (record.consumed) {
+    return { ok: false, reason: 'consumed' }
+  }
+  // Validate authorization against the coordinator the proof was minted
+  // against (record.coordinator). When an explicit coordinator is provided
+  // for defense-in-depth, verify it matches.
+  if (coordinator !== undefined && coordinator !== record.coordinator) {
+    return { ok: false, reason: 'authorization-invalid' }
+  }
+  const verdict = validatePromotionAuthorization(record.authorization, record.coordinator)
+  if (!verdict.authorized) {
+    // Map the authorization refusal reason to a specific proof rejection
+    // reason for granular safe-code reporting.
+    switch (verdict.reason) {
+      case 'released':
+        return { ok: false, reason: 'authorization-released' }
+      case 'foreign-coordinator':
+        return { ok: false, reason: 'authorization-foreign-coordinator' }
+      case 'not-current-holder':
+        return { ok: false, reason: 'authorization-not-current-holder' }
+      default:
+        return { ok: false, reason: 'authorization-invalid' }
+    }
+  }
+  if (record.witness.isLiveClosed() !== true) {
+    return { ok: false, reason: 'live-not-closed' }
+  }
+  return {
+    ok: true,
+    validation: {
+      authorization: record.authorization,
+      coordinator: record.coordinator,
+      consume() {
+        record.consumed = true
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Install receipt — binds source identity to the live path
 // ---------------------------------------------------------------------------
 
@@ -319,26 +411,29 @@ export function installCandidate(options: InstallCandidateOptions): CandidateIns
   // --- Closed-live proof validation (LOCK-4427) — BEFORE anything else
   //     destructive; re-validated as one atomic synchronous block with the
   //     consumption + sidecar deletion below. -----------------------------
-  const record = closedLiveProofRecords.get(options.proof)
-  if (record === undefined) {
-    return preFailure('CLOSED_LIVE_PROOF_INVALID', 'UNRECOGNIZED')
-  }
-  if (record.consumed) {
-    return preFailure('CLOSED_LIVE_PROOF_INVALID', 'CONSUMED')
-  }
-  const verdict = validatePromotionAuthorization(record.authorization, record.coordinator)
-  if (!verdict.authorized) {
-    return preFailure('CLOSED_LIVE_PROOF_INVALID', `AUTHORIZATION_${verdict.reason.replace(/-/g, '_').toUpperCase()}`)
+  const proofVal = validateClosedLiveProof(options.proof)
+  if (!proofVal.ok) {
+    // Map the rejection reason to the backward-compatible safe code format.
+    const safeCode =
+      proofVal.reason === 'live-not-closed'
+        ? 'LIVE_NOT_CLOSED'
+        : proofVal.reason === 'unrecognized'
+          ? 'UNRECOGNIZED'
+          : proofVal.reason === 'consumed'
+            ? 'CONSUMED'
+            : proofVal.reason.startsWith('authorization-')
+              ? `AUTHORIZATION_${proofVal.reason.replace('authorization-', '').replace(/-/g, '_').toUpperCase()}`
+              : proofVal.reason.toUpperCase()
+    return preFailure('CLOSED_LIVE_PROOF_INVALID', safeCode)
   }
   // Bind the proof to THIS candidate: the promotion lease is acquired with
   // ownerId === candidateId (preparation contract), so a proof minted for a
   // different promotion can never install this candidate.
-  if (options.proof.ownerId !== options.candidateId || verdict.ownerId !== options.candidateId) {
+  if (
+    options.proof.ownerId !== options.candidateId ||
+    proofVal.validation.authorization.ownerId !== options.candidateId
+  ) {
     return preFailure('CLOSED_LIVE_PROOF_INVALID', 'OWNER_MISMATCH')
-  }
-  // TOCTOU re-check: the witness must STILL report closed handles.
-  if (record.witness.isLiveClosed() !== true) {
-    return preFailure('CLOSED_LIVE_PROOF_INVALID', 'LIVE_NOT_CLOSED')
   }
 
   // --- Candidate existence -------------------------------------------------
@@ -362,7 +457,7 @@ export function installCandidate(options: InstallCandidateOptions): CandidateIns
 
   // --- Destructive window opens: consume the proof (single-use), then
   //     remove live sidecars (LOCK-4427). ---------------------------------
-  record.consumed = true
+  proofVal.validation.consume()
 
   for (const sidecar of [`${livePath}-wal`, `${livePath}-shm`]) {
     try {

@@ -46,7 +46,7 @@ import { runMigrations } from '../../../chatDb/migration'
 import * as schema from '../../../chatDb/schema'
 import { CANDIDATE_DB_FILENAME, CANDIDATE_ROOT_DIRNAME } from '../../candidateDb'
 import type { CandidateInstallResult, ClosedLiveProof } from '../install'
-import { installCandidate, isInstallReceipt, mintClosedLiveProof } from '../install'
+import { installCandidate, isInstallReceipt, mintClosedLiveProof, validateClosedLiveProof } from '../install'
 import { ROLLBACK_SNAPSHOT_FILENAME } from '../journal'
 
 // ---------------------------------------------------------------------------
@@ -460,5 +460,122 @@ describe('installCandidate', () => {
     })
     expect(result.ok).toBe(false)
     expect(isInstallReceipt({ candidateId: CANDIDATE_ID, livePath })).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// validateClosedLiveProof — narrowly reusable validation (Phase 4.4.3)
+// ---------------------------------------------------------------------------
+
+describe('validateClosedLiveProof', () => {
+  let dataRoot: string
+  let coordinator: MaintenanceCoordinator
+  let authorization: PromotionLeaseHandle
+  let liveClosed: boolean
+
+  beforeEach(() => {
+    dataRoot = makeTempDir()
+    const livePath = realPath.join(dataRoot, 'chat.db')
+    makeSealedDb(livePath, 1)
+    coordinator = createMaintenanceCoordinator()
+    authorization = acquirePromotionLease(CANDIDATE_ID, coordinator)
+    liveClosed = true
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    realFs.rmSync(dataRoot, { recursive: true, force: true })
+  })
+
+  function mintProof(): ClosedLiveProof {
+    const minted = mintClosedLiveProof({
+      authorization,
+      witness: { isLiveClosed: () => liveClosed },
+      coordinator
+    })
+    expect(minted.ok).toBe(true)
+    if (!minted.ok) throw new Error('unreachable')
+    return minted.proof
+  }
+
+  it('validates a freshly minted proof and returns authorization', () => {
+    const proof = mintProof()
+    const result = validateClosedLiveProof(proof, coordinator)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.validation.authorization).toBe(authorization)
+    expect(result.validation.coordinator).toBe(coordinator)
+  })
+
+  it('rejects a forged proof object (unrecognized brand)', () => {
+    const forged = Object.freeze({ ownerId: CANDIDATE_ID }) as ClosedLiveProof
+    const result = validateClosedLiveProof(forged, coordinator)
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('unrecognized')
+  })
+
+  it('rejects a consumed proof', () => {
+    const proof = mintProof()
+    const result1 = validateClosedLiveProof(proof, coordinator)
+    expect(result1.ok).toBe(true)
+    if (!result1.ok) return
+    result1.validation.consume()
+
+    const result2 = validateClosedLiveProof(proof, coordinator)
+    expect(result2.ok).toBe(false)
+    if (result2.ok) return
+    expect(result2.reason).toBe('consumed')
+  })
+
+  it('rejects a proof with released authorization', () => {
+    const proof = mintProof()
+    authorization.release()
+
+    const result = validateClosedLiveProof(proof, coordinator)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('authorization-released')
+  })
+
+  it('rejects a proof when the witness reports live DB open', () => {
+    const proof = mintProof()
+    liveClosed = false
+
+    const result = validateClosedLiveProof(proof, coordinator)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('live-not-closed')
+  })
+
+  it('consume() marks the proof as consumed (single-use)', () => {
+    const proof = mintProof()
+    const result = validateClosedLiveProof(proof, coordinator)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    result.validation.consume()
+
+    // After consumption, the same proof is rejected.
+    const again = validateClosedLiveProof(proof, coordinator)
+    expect(again.ok).toBe(false)
+    if (again.ok) return
+    expect(again.reason).toBe('consumed')
+  })
+
+  it('does not consume the proof on validation failure', () => {
+    const proof = mintProof()
+    liveClosed = false
+
+    const result = validateClosedLiveProof(proof, coordinator)
+    expect(result.ok).toBe(false)
+
+    // Restore witness and try again — proof should still be valid.
+    liveClosed = false // still closed
+    liveClosed = true
+    const retry = validateClosedLiveProof(proof, coordinator)
+    expect(retry.ok).toBe(true)
   })
 })

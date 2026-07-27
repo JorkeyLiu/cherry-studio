@@ -139,6 +139,9 @@ vi.mock('node:fs', () => ({
     unlinkSync: vi.fn((p: string) => {
       delete memfs[p]
     }),
+    openSync: vi.fn((_p: string, _flags: string) => 1),
+    fsyncSync: vi.fn((_fd: number) => {}),
+    closeSync: vi.fn((_fd: number) => {}),
     createReadStream: vi.fn(),
     createWriteStream: vi.fn()
   },
@@ -153,6 +156,9 @@ vi.mock('node:fs', () => ({
   unlinkSync: vi.fn((p: string) => {
     delete memfs[p]
   }),
+  openSync: vi.fn((_p: string, _flags: string) => 1),
+  fsyncSync: vi.fn((_fd: number) => {}),
+  closeSync: vi.fn((_fd: number) => {}),
   promises: {
     mkdir: vi.fn(async (p: string) => {
       memfs[p] = memfs[p] || ''
@@ -1124,5 +1130,140 @@ describe('ChatDbService promotion-owned live lifecycle (LOCK-4422)', () => {
     delete memfs['/mock/coord/chat.db.repair']
 
     promotion.release()
+  })
+
+  // =========================================================================
+  // Phase 4.4.3 — markRepairRequiredBeforeInit (LOCK-4437)
+  // =========================================================================
+
+  describe('markRepairRequiredBeforeInit (Phase 4.4.3)', () => {
+    it('writes repair marker and blocks subsequent init', async () => {
+      clearMemfs()
+      const svc = new ChatDbService('/mock/phase443')
+
+      // Precondition: no repair marker, init should succeed.
+      expect(svc.isRepairRequired()).toBe(false)
+      await svc.init()
+      expect(svc.isInitialised()).toBe(true)
+      svc.close()
+
+      // Mark repair-required before init.
+      svc.markRepairRequiredBeforeInit()
+      expect(svc.isRepairRequired()).toBe(true)
+
+      // Subsequent init refuses.
+      await expect(svc.init()).rejects.toThrow(/repair-required/)
+      expect(svc.isInitialised()).toBe(false)
+    })
+
+    it('is idempotent — no-op when marker already exists', () => {
+      clearMemfs()
+      const svc = new ChatDbService('/mock/phase443-idempotent')
+
+      // First call writes the marker.
+      svc.markRepairRequiredBeforeInit()
+      expect(svc.isRepairRequired()).toBe(true)
+
+      // Second call is a no-op (idempotent).
+      svc.markRepairRequiredBeforeInit()
+      expect(svc.isRepairRequired()).toBe(true)
+    })
+
+    it('refuses to write marker if service is already initialized', async () => {
+      clearMemfs()
+      const svc = new ChatDbService('/mock/phase443-refuse')
+      await svc.init()
+
+      // Cannot mark repair-required while DB is open.
+      expect(() => svc.markRepairRequiredBeforeInit()).toThrow(
+        /Cannot mark repair-required: ChatDbService is already initialized/
+      )
+      expect(svc.isRepairRequired()).toBe(false)
+
+      svc.close()
+    })
+
+    it('creates parent directory if it does not exist', () => {
+      clearMemfs()
+      const svc = new ChatDbService('/mock/phase443-newdir')
+
+      // Parent directory does not exist yet.
+      expect(memfs['/mock/phase443-newdir']).toBeUndefined()
+
+      svc.markRepairRequiredBeforeInit()
+
+      // Marker written and parent directory created.
+      expect(svc.isRepairRequired()).toBe(true)
+      expect(memfs['/mock/phase443-newdir']).toBeDefined()
+    })
+
+    it('blocks getDatabase() and getSqlite() when repair marker exists', async () => {
+      clearMemfs()
+      const svc = new ChatDbService('/mock/phase443-blockers')
+      await svc.init()
+      svc.close()
+
+      svc.markRepairRequiredBeforeInit()
+
+      // Public getters refuse operation while repair is pending.
+      expect(() => svc.getDatabase()).toThrow(/repair-required/)
+      expect(() => svc.getSqlite()).toThrow(/repair-required/)
+      expect(() => svc.getBackup()).toThrow(/repair-required/)
+
+      // isInitialised returns false even though handles exist.
+      expect(svc.isInitialised()).toBe(false)
+    })
+
+    it('maintenance coordination interaction — repair marker does not affect coordinator', async () => {
+      clearMemfs()
+      const coordinator = createMaintenanceCoordinator()
+      const svc = new ChatDbService('/mock/phase443-coord', coordinator)
+
+      // Init acquires its own lease on the coordinator.
+      await svc.init()
+      expect(svc.isInitialised()).toBe(true)
+
+      // Close acquires its own lease.
+      expect(svc.close()).toBe(true)
+
+      // Mark repair-required — coordinator is unaffected.
+      svc.markRepairRequiredBeforeInit()
+      expect(svc.isRepairRequired()).toBe(true)
+
+      // Init still refuses due to repair marker.
+      expect(svc.isRepairRequired()).toBe(true)
+      await expect(svc.init()).rejects.toThrow(/repair-required/)
+    })
+
+    it('marker write failure propagates (does not swallow)', () => {
+      clearMemfs()
+      const svc = new ChatDbService('/mock/phase443-fail')
+
+      // Override writeFileSync to throw on the repair marker path.
+      const originalWriteFileSync = (fs as any).writeFileSync
+      ;(fs as any).writeFileSync = vi.fn((p: string, _data: string) => {
+        if (p.includes('chat.db.repair')) {
+          throw new Error('ENOSPC: no space left on device')
+        }
+        return originalWriteFileSync(p, _data)
+      })
+
+      expect(() => svc.markRepairRequiredBeforeInit()).toThrow(/Failed to write durable repair marker/)
+      expect(svc.isRepairRequired()).toBe(false)
+
+      // Restore.
+      ;(fs as any).writeFileSync = originalWriteFileSync
+    })
+
+    it('marker does not allow arbitrary path — only dbDir is used', () => {
+      clearMemfs()
+      const svc = new ChatDbService('/mock/phase443-fixedpath')
+
+      svc.markRepairRequiredBeforeInit()
+
+      // Marker is always at dbDir/chat.db.repair — never at an arbitrary path.
+      expect(memfs['/mock/phase443-fixedpath/chat.db.repair']).toBeDefined()
+      expect(memfs['/arbitrary/path/chat.db.repair']).toBeUndefined()
+    })
   })
 })

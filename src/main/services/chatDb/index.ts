@@ -659,6 +659,78 @@ class ChatDbService {
   }
 
   /**
+   * Main-internal durable repair-required marker write (Phase 4.4.3,
+   * LOCK-4437).
+   *
+   * Writes the repair marker file with durable sync (file sync + parent
+   * dir sync) so the marker survives process crashes. Idempotent: if the
+   * marker already exists, this is a no-op. After this call, subsequent
+   * `init()` calls refuse with a descriptive error until the marker is
+   * explicitly cleared.
+   *
+   * Refuses to write the marker if the service is already initialized
+   * (unsafe state — the live DB handle is open and must be closed first
+   * by the promotion executor or recovery path). This prevents accidental
+   * repair-marker writes while the DB is in use.
+   *
+   * Main-internal only: never exposed over IPC/preload/renderer. The
+   * caller is responsible for ensuring this is called at the right point
+   * in the promotion/recovery lifecycle (before init, after close).
+   *
+   * @throws Error if the service is already initialized.
+   * @throws Error if the marker file write or sync fails.
+   */
+  markRepairRequiredBeforeInit(): void {
+    // Refuse if already initialized — the live DB handle is open and must
+    // be closed first. Writing a repair marker while the DB is in use
+    // would create an inconsistent state (LOCK-4437).
+    if (this.db !== null) {
+      throw new Error(
+        'Cannot mark repair-required: ChatDbService is already initialized. ' +
+          'Close the database first before marking repair-required.'
+      )
+    }
+
+    const markerPath = path.join(this.dbDir, REPAIR_MARKER_FILENAME)
+
+    // Idempotent: if marker already exists, no-op.
+    if (fs.existsSync(markerPath)) {
+      logger.info('Repair marker already exists — idempotent no-op')
+      return
+    }
+
+    // Ensure parent directory exists (durable write contract).
+    if (!fs.existsSync(this.dbDir)) {
+      fs.mkdirSync(this.dbDir, { recursive: true })
+    }
+
+    // Write the marker with durable sync.
+    try {
+      fs.writeFileSync(markerPath, new Date().toISOString(), 'utf-8')
+      // Durable sync: flush the file to disk.
+      const fd = fs.openSync(markerPath, 'r')
+      try {
+        fs.fsyncSync(fd)
+      } finally {
+        fs.closeSync(fd)
+      }
+      // Sync the parent directory to ensure the directory entry is durable.
+      const dirFd = fs.openSync(this.dbDir, 'r')
+      try {
+        fs.fsyncSync(dirFd)
+      } finally {
+        fs.closeSync(dirFd)
+      }
+      logger.warn('Chat DB marked as repair-required (durable, before init)')
+    } catch (error) {
+      // Propagate — do NOT swallow marker write/sync failures.
+      throw new Error(
+        `Failed to write durable repair marker: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+  }
+
+  /**
    * Get a ChatDbBackup instance for backup coordination.
    * Throws if not initialised or if repair state is active.
    */

@@ -156,6 +156,7 @@ import {
   startImport,
   startPromotionExecution,
   startPromotionPreparation,
+  takeTerminalPromotionOwnership,
   transferPromotionExecution
 } from '../index'
 
@@ -2971,6 +2972,195 @@ describe('ChatImport index', () => {
 
       // Pre-install failure released the lease after quiesce: the live
       // bytes were never replaced, ordinary maintenance may proceed.
+      expect(coordinator.acquire('init', 'maintenance-probe').granted).toBe(true)
+    })
+
+    // -----------------------------------------------------------------------
+    // Phase 4.4.3 — takeTerminalPromotionOwnership (LOCK-4433)
+    // -----------------------------------------------------------------------
+
+    itOnDarwin('T1: takeTerminalPromotionOwnership returns not-available when no record exists', () => {
+      const result = takeTerminalPromotionOwnership()
+      expect(result.status).toBe('not-available')
+    })
+
+    itOnDarwin('T2: promoted handoff is atomically taken and cleared', async () => {
+      const { session, handle } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({
+        ok: true,
+        handoff: {
+          sessionId: session.id,
+          candidateId: handle.capabilities[0].candidateId,
+          token: handle.capabilities[0].token,
+          receipt: { mock: 'receipt' },
+          retainedSnapshotPath: handle.capabilities[0].retainedSnapshotPath,
+          capability: handle.capabilities[0]
+        }
+      })
+      const outcome = await outcomePromise
+      expect(outcome.status).toBe('promoted')
+      if (outcome.status !== 'promoted') return
+
+      // Peek shows the record exists.
+      expect(getTerminalPromotionOwnership()?.kind).toBe('promoted')
+
+      // Take it.
+      const taken = takeTerminalPromotionOwnership()
+      expect(taken.status).toBe('taken')
+      if (taken.status !== 'taken') return
+      expect(taken.ownership.kind).toBe('promoted')
+      expect(taken.ownership.handoff).toBe(outcome.handoff)
+
+      // Cleared after take.
+      expect(getTerminalPromotionOwnership()).toBeNull()
+
+      // Double take returns not-available.
+      const doubleTake = takeTerminalPromotionOwnership()
+      expect(doubleTake.status).toBe('not-available')
+    })
+
+    itOnDarwin('T3: recovery-required handoff is atomically taken and cleared', async () => {
+      await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({ ok: false, failure: POST_INSTALL_FAILURE })
+      const outcome = await outcomePromise
+      expect(outcome.status).toBe('promotion-failed')
+      if (outcome.status !== 'promotion-failed') return
+      expect(outcome.recoveryHandoff).not.toBeNull()
+
+      // Peek shows the record.
+      expect(getTerminalPromotionOwnership()?.kind).toBe('recovery-required')
+
+      // Take it.
+      const taken = takeTerminalPromotionOwnership()
+      expect(taken.status).toBe('taken')
+      if (taken.status !== 'taken') return
+      expect(taken.ownership.kind).toBe('recovery-required')
+      expect(taken.ownership.handoff).toBe(outcome.recoveryHandoff)
+
+      // Cleared after take.
+      expect(getTerminalPromotionOwnership()).toBeNull()
+    })
+
+    itOnDarwin('T4: concurrent sequential callers — only first gets the record', async () => {
+      const { session, handle } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({
+        ok: true,
+        handoff: {
+          sessionId: session.id,
+          candidateId: handle.capabilities[0].candidateId,
+          token: handle.capabilities[0].token,
+          receipt: { mock: 'receipt' },
+          retainedSnapshotPath: handle.capabilities[0].retainedSnapshotPath,
+          capability: handle.capabilities[0]
+        }
+      })
+      await outcomePromise
+
+      // Sequential calls: first wins, second gets not-available.
+      const first = takeTerminalPromotionOwnership()
+      expect(first.status).toBe('taken')
+      const second = takeTerminalPromotionOwnership()
+      expect(second.status).toBe('not-available')
+      const third = takeTerminalPromotionOwnership()
+      expect(third.status).toBe('not-available')
+    })
+
+    itOnDarwin('T5: taken capability remains owned by caller until explicit release', async () => {
+      const { session, handle } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({
+        ok: true,
+        handoff: {
+          sessionId: session.id,
+          candidateId: handle.capabilities[0].candidateId,
+          token: handle.capabilities[0].token,
+          receipt: { mock: 'receipt' },
+          retainedSnapshotPath: handle.capabilities[0].retainedSnapshotPath,
+          capability: handle.capabilities[0]
+        }
+      })
+      await outcomePromise
+
+      const taken = takeTerminalPromotionOwnership()
+      expect(taken.status).toBe('taken')
+      if (taken.status !== 'taken') return
+
+      // Capability not released yet.
+      expect(handle.capabilities[0].release).not.toHaveBeenCalled()
+
+      // Stale fail/dispose/will-quit cannot release it.
+      await session.dispose()
+      disposeActiveImport()
+      expect(handle.capabilities[0].release).not.toHaveBeenCalled()
+
+      // Caller explicitly releases.
+      taken.ownership.handoff.capability.release()
+      expect(handle.capabilities[0].release).toHaveBeenCalledTimes(1)
+    })
+
+    itOnDarwin('T6: stale session/will-quit immunity after take — handoff retained', async () => {
+      const { session, handle } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({ ok: false, failure: POST_INSTALL_FAILURE })
+      await outcomePromise
+
+      const taken = takeTerminalPromotionOwnership()
+      expect(taken.status).toBe('taken')
+      if (taken.status !== 'taken') return
+
+      // Session dispose + will-quit cannot invalidate the taken handoff.
+      await session.dispose()
+      disposeActiveImport()
+      expect(handle.capabilities[0].release).not.toHaveBeenCalled()
+
+      // Handoff is still valid and can be released by the taker.
+      taken.ownership.handoff.capability.release()
+      expect(handle.capabilities[0].release).toHaveBeenCalledTimes(1)
+    })
+
+    itOnDarwin('T7: taken capability blocks all maintenance until explicit release (real coordinator)', async () => {
+      const coordinator = createMaintenanceCoordinator()
+      await toPreparedWithRealLease(coordinator)
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({ ok: false, failure: POST_INSTALL_FAILURE })
+      const outcome = await outcomePromise
+      expect(outcome.status).toBe('promotion-failed')
+      if (outcome.status !== 'promotion-failed') return
+
+      // Take the terminal ownership.
+      const taken = takeTerminalPromotionOwnership()
+      expect(taken.status).toBe('taken')
+      if (taken.status !== 'taken') return
+
+      // All maintenance acquisitions remain blocked (the taken handoff
+      // still holds the promotion lease).
+      for (const kind of ['init', 'close', 'backup', 'restore', 'promotion'] as const) {
+        expect(coordinator.acquire(kind, 'maintenance-probe').granted).toBe(false)
+      }
+
+      // Explicit release frees the slot.
+      taken.ownership.handoff.capability.release()
       expect(coordinator.acquire('init', 'maintenance-probe').granted).toBe(true)
     })
   })

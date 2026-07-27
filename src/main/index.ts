@@ -35,6 +35,7 @@ import { windowService } from './services/WindowService'
 import { initWebviewHotkeys } from './services/WebviewService'
 import { chatDbService } from './services/chatDb'
 import { disposeActiveImport, recoverOrphanedImportArtifacts } from './services/chatDbImport'
+import { runStartupRecoveryGate } from './services/chatDbImport/promotion/gate'
 import { readPromotionJournal } from './services/chatDbImport/promotion/journalStore'
 import type { PromotionJournalObservation } from './services/chatDbImport/promotion/recovery'
 import { runAsyncFunction } from './utils'
@@ -161,17 +162,54 @@ if (!app.requestSingleInstanceLock()) {
       )
     }
 
-    // Initialise chat database after restore, before normal app availability.
-    // If init fails (e.g., integrity check after restore), the app continues
-    // but chat DB is marked unavailable for normal operations.
-    // If restore failed, skip init entirely to prevent opening an unchecked
-    // database (Data replacement state may be uncertain).
-    if (restoreSucceeded) {
+    // Phase 4.4.3 (LOCK-4431): promotion recovery gate runs AFTER restore
+    // and BEFORE chatDbService.init(). Disk journal/artifacts decide the
+    // action for both in-process continuation and restart after crash.
+    //
+    // Startup ordering:
+    //   1. BackupManager.handleStartupRestore() [completed above]
+    //   2. Promotion recovery gate (this block)
+    //   3. chatDbService.init()
+    //   4. Ordinary orphan cleanup / window startup
+    let promotionGateRepairRequired = false
+    try {
+      const gateResult = await runStartupRecoveryGate(false)
+      if (gateResult.repairRequired) {
+        promotionGateRepairRequired = true
+        logger.warn(
+          `Promotion recovery gate: repair required (${gateResult.decision.reason}) — ` +
+            'chatDbService init will be skipped until repair is completed'
+        )
+      }
+      if (gateResult.relaunchPending) {
+        // Relaunch was triggered — the process is exiting.
+        // Return early; no further init should proceed.
+        logger.info('Promotion recovery gate: relaunch pending — process will exit')
+        return
+      }
+    } catch (error) {
+      // LOCK-4431: unexpected gate failures must fail closed — no unverified
+      // DB init. Set repair-required so chatDbService.init() is skipped.
+      promotionGateRepairRequired = true
+      logger.error(
+        'Promotion recovery gate failed unexpectedly — failing closed (LOCK-4431): ' +
+          'chatDbService init will be skipped. Error:',
+        error as Error
+      )
+    }
+
+    // Initialise chat database after restore and recovery gate, before normal
+    // app availability. If init fails (e.g., integrity check after restore),
+    // the app continues but chat DB is marked unavailable for normal operations.
+    // If restore failed or repair is required, skip init entirely.
+    if (restoreSucceeded && !promotionGateRepairRequired) {
       try {
         await chatDbService.init()
       } catch (error) {
         logger.error('ChatDbService initialisation failed (app continues, chat DB unavailable):', error as Error)
       }
+    } else if (promotionGateRepairRequired) {
+      logger.warn('ChatDbService init skipped due to promotion repair requirement — chat DB unavailable this session')
     } else {
       logger.warn('ChatDbService init skipped due to restore failure — chat DB unavailable this session')
     }

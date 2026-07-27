@@ -1177,6 +1177,35 @@ export type {
 } from './promotion/preparation'
 
 /**
+ * Promotion relaunch API (Phase 4.4.3, LOCK-4438).
+ */
+export type { RelaunchApp, RelaunchReceipt, RelaunchResult } from './promotion/relaunch'
+export { isRelaunchReceipt, mintRelaunchReceipt, relaunchApp, resetRelaunchGuardForTests } from './promotion/relaunch'
+
+/**
+ * Promotion recovery executor API (Phase 4.4.3, LOCK-4431..4439).
+ */
+export type {
+  RecoveryActionResult,
+  RecoveryAuthorization,
+  RecoveryExecutionLiveDb,
+  RecoveryExecutionPrimitives,
+  RecoveryExecutor,
+  RecoveryExecutorFailure,
+  RecoveryExecutorFailureCode,
+  RecoveryExecutorOptions,
+  RecoveryExecutorResult,
+  RecoveryExecutorSubphase
+} from './promotion/recoveryExecutor'
+export { createRecoveryExecutor, RECOVERY_EXECUTOR_SUBPHASES } from './promotion/recoveryExecutor'
+
+/**
+ * Startup recovery gate API (Phase 4.4.3, LOCK-4431..4439).
+ */
+export type { StartupRecoveryGateResult } from './promotion/gate'
+export { runStartupRecoveryGate } from './promotion/gate'
+
+/**
  * Main-local inputs for {@link startPromotionPreparation}. The live-DB
  * specifics stay caller-supplied (Main-internal): nothing here ever crosses
  * IPC, and this module never constructs/looks up the live chatDbService
@@ -1439,6 +1468,87 @@ export function resetTerminalPromotionOwnershipForTests(): void {
 }
 
 /**
+ * Result of {@link takeTerminalPromotionOwnership}. Never crosses IPC.
+ *
+ * `taken` — the terminal ownership record was atomically returned and
+ *   cleared. The caller now owns the retained capability/lease and is
+ *   responsible for its lifecycle until process exit or explicit release.
+ * `not-available` — no terminal ownership record exists (double take,
+ *   stale session, or no promotion has settled).
+ * `not-consumable` — a terminal ownership record exists but is guarded:
+ *   the caller attempted to overwrite an unconsumed record. This is a
+ *   production-safety guard (LOCK-4433): a new terminal assignment must
+ *   not silently replace an owned handoff. The caller must release or
+ *   explicitly discard the existing handoff before a new one can be taken.
+ */
+export type TakeTerminalOwnershipOutcome =
+  | { readonly status: 'taken'; readonly ownership: TerminalPromotionOwnership }
+  | { readonly status: 'not-available' }
+  | { readonly status: 'not-consumable' }
+
+/**
+ * Atomically take the terminal promotion ownership record (LOCK-4433).
+ *
+ * Returns the current record and clears module state in one synchronous
+ * operation. The caller becomes the sole owner of the retained
+ * capability/lease — the lease remains owned until the caller explicitly
+ * releases it or the process exits. Taking does NOT release; the taken
+ * capability stays owned by the caller.
+ *
+ * Exact-once semantics:
+ * - First caller after a terminal settlement gets the record (`taken`).
+ * - Subsequent callers get `not-available` (double-take protection).
+ * - The peek function {@link getTerminalPromotionOwnership} is
+ *   unaffected — it remains diagnostic and never consumes.
+ *
+ * Production-safety guard (LOCK-4433):
+ * - If a terminal ownership record already exists and has NOT been taken,
+ *   a new assignment via {@link setTerminalPromotionOwnership} is refused
+ *   with a structured error. This prevents a second promotion settlement
+ *   from silently replacing an owned handoff.
+ *
+ * Phase 4.4.3 foundation: the future recovery executor calls this to
+ * take over the retained capability. Nothing else may release it.
+ */
+export function takeTerminalPromotionOwnership(): TakeTerminalOwnershipOutcome {
+  const current = terminalPromotionOwnership
+  if (current === null) {
+    return { status: 'not-available' }
+  }
+  // Atomic take-and-clear: the caller now owns the record.
+  terminalPromotionOwnership = null
+  logger.info(`Terminal promotion ownership taken (kind: ${current.kind})`)
+  return { status: 'taken', ownership: current }
+}
+
+/**
+ * Internal: set the terminal promotion ownership record. Refuses to
+ * overwrite an unconsumed record (production-safety guard, LOCK-4433).
+ *
+ * Called by {@link startPromotionExecution} when an execution settles
+ * `promoted` or post-install `recovery-required`. A second terminal
+ * settlement while the first is still owned (not taken) is a production
+ * invariant violation — the caller must handle this as a structured error.
+ *
+ * @throws Error when an unconsumed record already exists.
+ * @internal Never called from outside this module.
+ */
+function setTerminalPromotionOwnership(ownership: TerminalPromotionOwnership): void {
+  if (terminalPromotionOwnership !== null) {
+    // Production-safety guard: refuse to overwrite an unconsumed record.
+    // The existing handoff is still owned — a new assignment would silently
+    // release or replace the retained capability, opening a maintenance
+    // isolation window (LOCK-4433).
+    throw new Error(
+      `Cannot set terminal promotion ownership: a ${terminalPromotionOwnership.kind} record already exists and has not been taken. ` +
+        'Call takeTerminalPromotionOwnership() first to consume the existing record before a new settlement.'
+    )
+  }
+  terminalPromotionOwnership = Object.freeze(ownership)
+  logger.info(`Terminal promotion ownership set (kind: ${ownership.kind})`)
+}
+
+/**
  * Main-local outcome of {@link startPromotionExecution}. Never crosses IPC.
  * - `promoted`         — durable replacement-verified reached; the session
  *                        settled `promoted`; capability ownership was
@@ -1555,7 +1665,7 @@ export async function startPromotionExecution(
     // it. Released only by the future Phase 4.4.3 executor or process
     // exit. No cleanup, no relaunch.
     session.takeExecutingCapability()
-    terminalPromotionOwnership = Object.freeze({ kind: 'promoted' as const, handoff: result.handoff })
+    setTerminalPromotionOwnership({ kind: 'promoted' as const, handoff: result.handoff })
     logger.info(
       `Promotion execution promoted session ${session.id} ` +
         '(durable replacement-verified handoff; capability ownership transferred to the handoff)'
@@ -1584,7 +1694,7 @@ export async function startPromotionExecution(
         failure: result.failure,
         capability
       })
-      terminalPromotionOwnership = Object.freeze({ kind: 'recovery-required' as const, handoff: recoveryHandoff })
+      setTerminalPromotionOwnership({ kind: 'recovery-required' as const, handoff: recoveryHandoff })
       logger.warn(
         `Promotion execution for session ${session.id} failed post-install (recovery-required): ` +
           'capability retained by the recovery handoff — ordinary maintenance stays blocked until Phase 4.4.3'

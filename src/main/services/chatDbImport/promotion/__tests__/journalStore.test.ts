@@ -40,9 +40,13 @@ vi.mock('@main/config', () => ({
 }))
 
 import { encodePromotionJournal, PROMOTION_JOURNAL_FILENAME, type PromotionJournalV1 } from '../journal'
+import type { PromotionJournalCleanupIdentity } from '../journalStore'
 import {
   advancePromotionJournalToCandidateInstalled,
   advancePromotionJournalToReplacementVerified,
+  cleanupPromotionJournalAfterCandidateInstalled,
+  cleanupPromotionJournalAfterReplacementVerified,
+  cleanupPromotionJournalAfterSnapshotReady,
   getPromotionJournalPath,
   getPromotionJournalStagingPath,
   PROMOTION_JOURNAL_STAGING_FILENAME,
@@ -757,5 +761,706 @@ describe('promotion journal store (LOCK-4411..4417)', () => {
         expectDurableState(doc)
       }
     )
+  })
+})
+
+// -------------------------------------------------------------------------
+// Phase 4.4.3 — Cleanup (LOCK-4435..LOCK-4438)
+// -------------------------------------------------------------------------
+
+describe('promotion journal cleanup (LOCK-4435..4438)', () => {
+  let dataRoot: string
+  let journalPath: string
+  let stagingPath: string
+  let retainedSnapshotPath: string
+
+  const VALID_IDENTITY: PromotionJournalCleanupIdentity = {
+    sessionId: VALID.sessionId,
+    candidateId: VALID.candidateId
+  }
+
+  function seedJournal(doc: PromotionJournalV1): void {
+    realFs.writeFileSync(journalPath, encodePromotionJournal(doc), 'utf8')
+  }
+
+  function expectJournalAbsent(): void {
+    expect(realFs.existsSync(journalPath)).toBe(false)
+  }
+
+  function expectJournalPresent(doc: PromotionJournalV1): void {
+    expect(realFs.existsSync(journalPath)).toBe(true)
+    expect(realFs.readFileSync(journalPath, 'utf8')).toBe(encodePromotionJournal(doc))
+  }
+
+  function expectRetainedUntouched(): void {
+    expect(realFs.existsSync(retainedSnapshotPath)).toBe(true)
+  }
+
+  beforeEach(() => {
+    dataRoot = realFs.mkdtempSync(path.join(os.tmpdir(), 'cherry-journal-cleanup-test-'))
+    journalPath = path.join(dataRoot, PROMOTION_JOURNAL_FILENAME)
+    stagingPath = path.join(dataRoot, PROMOTION_JOURNAL_STAGING_FILENAME)
+    retainedSnapshotPath = path.join(dataRoot, 'chat.db.pre-import-backup')
+    // Seed a retained snapshot to verify it is never touched.
+    realFs.writeFileSync(retainedSnapshotPath, 'retained-snapshot-sentinel')
+  })
+
+  afterEach(() => {
+    try {
+      realFs.rmSync(dataRoot, { recursive: true, force: true })
+    } catch {
+      // ignore
+    }
+    vi.restoreAllMocks()
+  })
+
+  // -- Success paths --------------------------------------------------------
+
+  describe('replacement-verified cleanup', () => {
+    it('removes a replacement-verified journal and syncs parent dir; snapshot retained', async () => {
+      const doc: PromotionJournalV1 = { ...VALID, phase: 'replacement-verified' }
+      seedJournal(doc)
+
+      const result = await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: true })
+      expectJournalAbsent()
+      expect(realFs.existsSync(stagingPath)).toBe(false)
+      expectRetainedUntouched()
+    })
+
+    it('returns already-absent when no journal exists; idempotent', async () => {
+      const result = await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: false, reason: 'already-absent' })
+      expectJournalAbsent()
+      expectRetainedUntouched()
+    })
+  })
+
+  describe('snapshot-ready cleanup', () => {
+    it('removes a snapshot-ready journal; snapshot retained', async () => {
+      seedJournal(VALID)
+
+      const result = await cleanupPromotionJournalAfterSnapshotReady(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: true })
+      expectJournalAbsent()
+      expectRetainedUntouched()
+    })
+
+    it('returns already-absent when no journal exists', async () => {
+      const result = await cleanupPromotionJournalAfterSnapshotReady(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: false, reason: 'already-absent' })
+    })
+  })
+
+  // -- Staging cleanup behavior ---------------------------------------------
+
+  describe('staging cleanup', () => {
+    it('best-effort removes stale staging file without affecting success', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      realFs.writeFileSync(stagingPath, 'stale-staging')
+
+      const result = await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: true })
+      expectJournalAbsent()
+      expect(realFs.existsSync(stagingPath)).toBe(false)
+    })
+
+    it('staging absence is not a failure', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      // No staging file exists.
+      const result = await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: true })
+    })
+
+    it('staging unlink failure does not mask the primary cleanup', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      realFs.writeFileSync(stagingPath, 'stale-staging')
+
+      const realUnlink = fsp.unlink
+      const unlinkSpy = vi.spyOn(fsp, 'unlink')
+      let stagingUnlinkCallCount = 0
+      unlinkSpy.mockImplementation(async (target: realFs.PathLike) => {
+        if (String(target).endsWith(PROMOTION_JOURNAL_STAGING_FILENAME)) {
+          stagingUnlinkCallCount++
+          const err = new Error('injected staging unlink') as NodeJS.ErrnoException
+          err.code = 'EIO'
+          throw err
+        }
+        // Delegate other unlink calls (the journal) to the real implementation.
+        return realUnlink.call(fsp, target)
+      })
+
+      const result = await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: true })
+      expectJournalAbsent()
+      expect(stagingUnlinkCallCount).toBe(1)
+      // Staging file still on disk (unlink failed), but cleanup succeeded.
+      expect(realFs.existsSync(stagingPath)).toBe(true)
+    })
+  })
+
+  // -- Guard rejections (all pre-mutation) -----------------------------------
+
+  describe('guard rejections', () => {
+    it('invalid journal → CLEANUP_JOURNAL_INVALID; invalid bytes preserved', async () => {
+      realFs.writeFileSync(journalPath, 'not json {', 'utf8')
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'CLEANUP_JOURNAL_INVALID'
+      )
+      expect(realFs.readFileSync(journalPath, 'utf8')).toBe('not json {')
+      expectRetainedUntouched()
+    })
+
+    it('phase mismatch (snapshot-ready journal, replacement-verified cleanup) → CLEANUP_PHASE_MISMATCH', async () => {
+      seedJournal(VALID) // snapshot-ready
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PHASE_MISMATCH'
+      )
+      expectJournalPresent(VALID)
+      expectRetainedUntouched()
+    })
+
+    it('phase mismatch (replacement-verified journal, snapshot-ready cleanup) → CLEANUP_PHASE_MISMATCH', async () => {
+      const doc: PromotionJournalV1 = { ...VALID, phase: 'replacement-verified' }
+      seedJournal(doc)
+      await expectStoreError(
+        cleanupPromotionJournalAfterSnapshotReady(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PHASE_MISMATCH'
+      )
+      expectJournalPresent(doc)
+      expectRetainedUntouched()
+    })
+
+    it('identity mismatch (sessionId) → CLEANUP_IDENTITY_MISMATCH; journal preserved', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(
+          { sessionId: 'import-other-session', candidateId: VALID.candidateId },
+          dataRoot
+        ),
+        'CLEANUP_IDENTITY_MISMATCH'
+      )
+      expectJournalPresent({ ...VALID, phase: 'replacement-verified' })
+      expectRetainedUntouched()
+    })
+
+    it('identity mismatch (candidateId) → CLEANUP_IDENTITY_MISMATCH; journal preserved', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(
+          { sessionId: VALID.sessionId, candidateId: 'candidate-import-other' },
+          dataRoot
+        ),
+        'CLEANUP_IDENTITY_MISMATCH'
+      )
+      expectJournalPresent({ ...VALID, phase: 'replacement-verified' })
+      expectRetainedUntouched()
+    })
+
+    it('identity mismatch (both fields) → CLEANUP_IDENTITY_MISMATCH', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(
+          { sessionId: 'import-other', candidateId: 'candidate-import-other' },
+          dataRoot
+        ),
+        'CLEANUP_IDENTITY_MISMATCH'
+      )
+    })
+
+    it('guard-read I/O failure → READ_IO_FAILED (propagated; never absent)', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      vi.spyOn(fsp, 'readFile').mockRejectedValueOnce(errnoError('EACCES'))
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'READ_IO_FAILED'
+      )
+      expectJournalPresent({ ...VALID, phase: 'replacement-verified' })
+      expectRetainedUntouched()
+    })
+
+    it('rejected guard performs no unlink or sync (no fs.open/rename after guard)', async () => {
+      seedJournal(VALID) // snapshot-ready — wrong phase for replacement-verified cleanup
+      const openSpy = vi.spyOn(fsp, 'open')
+      const unlinkSpy = vi.spyOn(fsp, 'unlink')
+
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PHASE_MISMATCH'
+      )
+
+      // Only the guard read touched fs; no unlink or dir-open for sync.
+      expect(unlinkSpy).not.toHaveBeenCalled()
+      expect(openSpy).not.toHaveBeenCalled()
+      expectJournalPresent(VALID)
+    })
+  })
+
+  // -- Exact path confinement ------------------------------------------------
+
+  describe('exact path confinement', () => {
+    it('cleanup only touches the fixed journal and staging paths; never the snapshot or candidate', async () => {
+      const doc: PromotionJournalV1 = { ...VALID, phase: 'replacement-verified' }
+      seedJournal(doc)
+      realFs.writeFileSync(stagingPath, 'stale-staging')
+
+      // Create files that must NOT be touched.
+      const snapshotPath = path.join(dataRoot, 'chat.db.pre-import-backup')
+      const candidateDir = path.join(dataRoot, 'candidates', VALID.candidateId)
+      const candidateDb = path.join(candidateDir, 'chat.db')
+      realFs.mkdirSync(candidateDir, { recursive: true })
+      realFs.writeFileSync(candidateDb, 'candidate-bytes')
+      realFs.writeFileSync(snapshotPath, 'snapshot-bytes')
+
+      await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+
+      expectJournalAbsent()
+      expect(realFs.existsSync(stagingPath)).toBe(false)
+      expect(realFs.readFileSync(snapshotPath, 'utf8')).toBe('snapshot-bytes')
+      expect(realFs.readFileSync(candidateDb, 'utf8')).toBe('candidate-bytes')
+    })
+
+    it('cleanup never creates or modifies any file', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      const filesBefore = realFs.readdirSync(dataRoot).sort()
+
+      await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+
+      const filesAfter = realFs.readdirSync(dataRoot).sort()
+      // Only the journal should be removed; nothing created.
+      expect(filesAfter).toEqual(filesBefore.filter((f) => f !== PROMOTION_JOURNAL_FILENAME))
+    })
+  })
+
+  // -- Unlink failure --------------------------------------------------------
+
+  describe('unlink failure', () => {
+    it('journal unlink EIO → CLEANUP_UNLINK_FAILED; journal preserved, no dir sync', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      const realUnlink = fsp.unlink
+      const unlinkSpy = vi.spyOn(fsp, 'unlink')
+      unlinkSpy.mockImplementation(async (target: realFs.PathLike) => {
+        if (String(target).endsWith(PROMOTION_JOURNAL_FILENAME)) {
+          throw errnoError('EIO')
+        }
+        return realUnlink.call(fsp, target)
+      })
+
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'CLEANUP_UNLINK_FAILED'
+      )
+      expectJournalPresent({ ...VALID, phase: 'replacement-verified' })
+      expectRetainedUntouched()
+    })
+
+    it('journal unlink EACCES → CLEANUP_UNLINK_FAILED with cause', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      const realUnlink = fsp.unlink
+      const unlinkSpy = vi.spyOn(fsp, 'unlink')
+      unlinkSpy.mockImplementation(async (target: realFs.PathLike) => {
+        if (String(target).endsWith(PROMOTION_JOURNAL_FILENAME)) {
+          throw errnoError('EACCES')
+        }
+        return realUnlink.call(fsp, target)
+      })
+
+      const error = await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'CLEANUP_UNLINK_FAILED'
+      )
+      expect((error.cause as NodeJS.ErrnoException).code).toBe('EACCES')
+    })
+
+    it('journal unlink ENOENT after confirmed presence → proceeds to dir sync (concurrent removal)', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      const realUnlink = fsp.unlink
+      const unlinkSpy = vi.spyOn(fsp, 'unlink')
+      unlinkSpy.mockImplementation(async (target: realFs.PathLike) => {
+        if (String(target).endsWith(PROMOTION_JOURNAL_FILENAME)) {
+          // Simulate concurrent removal: guard read saw present, but unlink sees ENOENT.
+          throw errnoError('ENOENT')
+        }
+        return realUnlink.call(fsp, target)
+      })
+
+      const result = await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+      // ENOENT after guard confirmed presence is idempotent — goal achieved.
+      expect(result).toEqual({ deleted: true })
+      expectRetainedUntouched()
+      // Note: the journal file may still exist on disk because the mock
+      // prevented the real unlink. The important assertion is the return
+      // value — the code path correctly treated ENOENT as idempotent.
+    })
+  })
+
+  // -- Dir sync failure ------------------------------------------------------
+
+  describe('dir sync failure', () => {
+    it('parent dir fsync failure → CLEANUP_PARENT_DIR_SYNC_FAILED; journal already unlinked', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+
+      const realOpen = fsp.open
+      vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+        const isDir = String(args[0]) === dataRoot
+        const handle = await realOpen.apply(fsp, args)
+        if (isDir) {
+          handle.sync = async () => {
+            throw errnoError('EIO')
+          }
+        }
+        return handle
+      })
+
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PARENT_DIR_SYNC_FAILED'
+      )
+      // Journal was already unlinked before dir sync — unlink is not rolled back.
+      expectJournalAbsent()
+      expectRetainedUntouched()
+    })
+
+    it.each(['EINVAL', 'ENOTSUP', 'EPERM'] as const)(
+      'parent dir fsync %s → CLEANUP_PARENT_DIR_SYNC_UNSUPPORTED',
+      async (code) => {
+        seedJournal({ ...VALID, phase: 'replacement-verified' })
+
+        const realOpen = fsp.open
+        vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+          const isDir = String(args[0]) === dataRoot
+          const handle = await realOpen.apply(fsp, args)
+          if (isDir) {
+            handle.sync = async () => {
+              throw errnoError(code)
+            }
+          }
+          return handle
+        })
+
+        await expectStoreError(
+          cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+          'CLEANUP_PARENT_DIR_SYNC_UNSUPPORTED'
+        )
+        expectJournalAbsent()
+      }
+    )
+
+    it('parent dir open failure → CLEANUP_PARENT_DIR_SYNC_FAILED', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+
+      const realOpen = fsp.open
+      vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+        if (String(args[0]) === dataRoot) {
+          throw errnoError('EIO')
+        }
+        return realOpen.apply(fsp, args)
+      })
+
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PARENT_DIR_SYNC_FAILED'
+      )
+      expectJournalAbsent()
+    })
+  })
+
+  // -- Crash state: unlink-before-dir-sync -----------------------------------
+
+  describe('crash state after unlink-before-dir-sync', () => {
+    it('journal absent after failed dir sync → next cleanup call is idempotent (already-absent)', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+
+      // First call: unlink succeeds, dir sync fails.
+      const realOpen = fsp.open
+      vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+        const isDir = String(args[0]) === dataRoot
+        const handle = await realOpen.apply(fsp, args)
+        if (isDir) {
+          handle.sync = async () => {
+            throw errnoError('EIO')
+          }
+        }
+        return handle
+      })
+
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PARENT_DIR_SYNC_FAILED'
+      )
+      // Journal is gone from disk (unlink happened before dir sync failure).
+      expectJournalAbsent()
+
+      // Second call: journal already absent → idempotent success.
+      vi.restoreAllMocks()
+      const result = await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: false, reason: 'already-absent' })
+      expectJournalAbsent()
+      expectRetainedUntouched()
+    })
+  })
+
+  // -- Rollback-authorized cleanup contract -----------------------------------
+
+  describe('rollback-authorized cleanup contract', () => {
+    it('snapshot-ready cleanup accepts snapshot-ready phase with matching identity', async () => {
+      seedJournal(VALID)
+      const result = await cleanupPromotionJournalAfterSnapshotReady(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: true })
+      expectJournalAbsent()
+      expectRetainedUntouched()
+    })
+
+    it('snapshot-ready cleanup rejects replacement-verified phase', async () => {
+      const doc: PromotionJournalV1 = { ...VALID, phase: 'replacement-verified' }
+      seedJournal(doc)
+      await expectStoreError(
+        cleanupPromotionJournalAfterSnapshotReady(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PHASE_MISMATCH'
+      )
+      expectJournalPresent(doc)
+    })
+
+    it('replacement-verified cleanup rejects candidate-installed phase', async () => {
+      const doc: PromotionJournalV1 = { ...VALID, phase: 'candidate-installed' }
+      seedJournal(doc)
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PHASE_MISMATCH'
+      )
+      expectJournalPresent(doc)
+    })
+
+    it('replacement-verified cleanup accepts replacement-verified phase', async () => {
+      const doc: PromotionJournalV1 = { ...VALID, phase: 'replacement-verified' }
+      seedJournal(doc)
+      const result = await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: true })
+    })
+
+    it('both APIs are idempotent on already-absent journal', async () => {
+      expect((await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)).deleted).toBe(false)
+      expect((await cleanupPromotionJournalAfterSnapshotReady(VALID_IDENTITY, dataRoot)).deleted).toBe(false)
+    })
+  })
+
+  // -- Data root rejection ---------------------------------------------------
+
+  describe('data root rejection', () => {
+    it('rejects empty data root with DATA_ROOT_REJECTED', async () => {
+      await expectStoreError(cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, ''), 'DATA_ROOT_REJECTED')
+      await expectStoreError(cleanupPromotionJournalAfterSnapshotReady(VALID_IDENTITY, ''), 'DATA_ROOT_REJECTED')
+    })
+  })
+
+  // -- Durable ordering (unlink → dir-sync) -----------------------------------
+
+  describe('durable cleanup ordering', () => {
+    it('executes guard-read → unlink-journal → unlink-staging(best-effort) → dir-open → dir-sync → dir-close', async () => {
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      realFs.writeFileSync(stagingPath, 'stale-staging')
+
+      const events: string[] = []
+      const realRead = fsp.readFile
+      const realUnlink = fsp.unlink
+      const realOpen = fsp.open
+
+      vi.spyOn(fsp, 'readFile').mockImplementation(async (...args: Parameters<typeof fsp.readFile>) => {
+        events.push('guard-read')
+        return realRead.apply(fsp, args)
+      })
+      vi.spyOn(fsp, 'unlink').mockImplementation(async (...args: Parameters<typeof fsp.unlink>) => {
+        const target = String(args[0])
+        if (target.endsWith(PROMOTION_JOURNAL_FILENAME)) {
+          events.push('unlink-journal')
+        } else if (target.endsWith(PROMOTION_JOURNAL_STAGING_FILENAME)) {
+          events.push('unlink-staging')
+        }
+        return realUnlink.apply(fsp, args)
+      })
+      vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+        const target = String(args[0])
+        const isDir = target === dataRoot
+        const handle = await realOpen.apply(fsp, args)
+        if (isDir) {
+          events.push('dir-open')
+          const realSync = handle.sync.bind(handle)
+          handle.sync = async () => {
+            events.push('dir-sync')
+            return realSync()
+          }
+          const realClose = handle.close.bind(handle)
+          handle.close = async () => {
+            events.push('dir-close')
+            return realClose()
+          }
+        }
+        return handle
+      })
+
+      const result = await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: true })
+
+      expect(events).toEqual(['guard-read', 'unlink-journal', 'unlink-staging', 'dir-open', 'dir-sync', 'dir-close'])
+      expectJournalAbsent()
+      expect(realFs.existsSync(stagingPath)).toBe(false)
+    })
+
+    it('absent journal: guard-read only, no unlink or dir-sync', async () => {
+      const events: string[] = []
+      const realRead = fsp.readFile
+      vi.spyOn(fsp, 'readFile').mockImplementation(async (...args: Parameters<typeof fsp.readFile>) => {
+        events.push('guard-read')
+        return realRead.apply(fsp, args)
+      })
+      const unlinkSpy = vi.spyOn(fsp, 'unlink')
+      const openSpy = vi.spyOn(fsp, 'open')
+
+      const result = await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: false, reason: 'already-absent' })
+
+      expect(events).toEqual(['guard-read'])
+      expect(unlinkSpy).not.toHaveBeenCalled()
+      expect(openSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  // -- Snapshot byte retention -----------------------------------------------
+
+  describe('snapshot byte retention', () => {
+    it('retained snapshot bytes are identical before and after cleanup', async () => {
+      const sentinel = Buffer.from('retained-snapshot-bytes-for-retention-check')
+      realFs.writeFileSync(retainedSnapshotPath, sentinel)
+
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+      await cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot)
+
+      expect(realFs.readFileSync(retainedSnapshotPath).equals(sentinel)).toBe(true)
+    })
+
+    it('retained snapshot is preserved even when cleanup fails (dir sync failure)', async () => {
+      const sentinel = Buffer.from('retained-snapshot-survives-failure')
+      realFs.writeFileSync(retainedSnapshotPath, sentinel)
+
+      seedJournal({ ...VALID, phase: 'replacement-verified' })
+
+      const realOpen = fsp.open
+      vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+        if (String(args[0]) === dataRoot) {
+          const handle = await realOpen.apply(fsp, args)
+          handle.sync = async () => {
+            throw errnoError('EIO')
+          }
+          return handle
+        }
+        return realOpen.apply(fsp, args)
+      })
+
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PARENT_DIR_SYNC_FAILED'
+      )
+      expect(realFs.readFileSync(retainedSnapshotPath).equals(sentinel)).toBe(true)
+    })
+  })
+
+  // -- candidate-installed cleanup (LOCK-4436) -----------------------------
+
+  describe('candidate-installed cleanup (LOCK-4436)', () => {
+    it('removes a candidate-installed journal and syncs parent dir; snapshot retained', async () => {
+      const doc: PromotionJournalV1 = { ...VALID, phase: 'candidate-installed' }
+      seedJournal(doc)
+
+      const result = await cleanupPromotionJournalAfterCandidateInstalled(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: true })
+      expectJournalAbsent()
+      expect(realFs.existsSync(stagingPath)).toBe(false)
+      expectRetainedUntouched()
+    })
+
+    it('returns already-absent when no journal exists; idempotent', async () => {
+      const result = await cleanupPromotionJournalAfterCandidateInstalled(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: false, reason: 'already-absent' })
+      expectJournalAbsent()
+      expectRetainedUntouched()
+    })
+
+    it('rejects snapshot-ready phase with CLEANUP_PHASE_MISMATCH', async () => {
+      seedJournal(VALID) // snapshot-ready
+      await expectStoreError(
+        cleanupPromotionJournalAfterCandidateInstalled(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PHASE_MISMATCH'
+      )
+      expectJournalPresent(VALID)
+      expectRetainedUntouched()
+    })
+
+    it('rejects replacement-verified phase with CLEANUP_PHASE_MISMATCH', async () => {
+      const doc: PromotionJournalV1 = { ...VALID, phase: 'replacement-verified' }
+      seedJournal(doc)
+      await expectStoreError(
+        cleanupPromotionJournalAfterCandidateInstalled(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PHASE_MISMATCH'
+      )
+      expectJournalPresent(doc)
+      expectRetainedUntouched()
+    })
+
+    it('rejects identity mismatch (sessionId) with CLEANUP_IDENTITY_MISMATCH', async () => {
+      seedJournal({ ...VALID, phase: 'candidate-installed' })
+      await expectStoreError(
+        cleanupPromotionJournalAfterCandidateInstalled(
+          { sessionId: 'import-other-session', candidateId: VALID.candidateId },
+          dataRoot
+        ),
+        'CLEANUP_IDENTITY_MISMATCH'
+      )
+      expectJournalPresent({ ...VALID, phase: 'candidate-installed' })
+      expectRetainedUntouched()
+    })
+
+    it('rejects identity mismatch (candidateId) with CLEANUP_IDENTITY_MISMATCH', async () => {
+      seedJournal({ ...VALID, phase: 'candidate-installed' })
+      await expectStoreError(
+        cleanupPromotionJournalAfterCandidateInstalled(
+          { sessionId: VALID.sessionId, candidateId: 'candidate-import-other' },
+          dataRoot
+        ),
+        'CLEANUP_IDENTITY_MISMATCH'
+      )
+      expectJournalPresent({ ...VALID, phase: 'candidate-installed' })
+      expectRetainedUntouched()
+    })
+
+    it('accepts candidate-installed phase with matching identity', async () => {
+      seedJournal({ ...VALID, phase: 'candidate-installed' })
+      const result = await cleanupPromotionJournalAfterCandidateInstalled(VALID_IDENTITY, dataRoot)
+      expect(result).toEqual({ deleted: true })
+      expectJournalAbsent()
+      expectRetainedUntouched()
+    })
+
+    it('candidate-installed cleanup only touches the fixed journal and staging paths', async () => {
+      const doc: PromotionJournalV1 = { ...VALID, phase: 'candidate-installed' }
+      seedJournal(doc)
+      realFs.writeFileSync(stagingPath, 'stale-staging')
+
+      // Create files that must NOT be touched.
+      const snapshotPath = path.join(dataRoot, 'chat.db.pre-import-backup')
+      const candidateDir = path.join(dataRoot, 'candidates', VALID.candidateId)
+      const candidateDb = path.join(candidateDir, 'chat.db')
+      realFs.mkdirSync(candidateDir, { recursive: true })
+      realFs.writeFileSync(candidateDb, 'candidate-bytes')
+      realFs.writeFileSync(snapshotPath, 'snapshot-bytes')
+
+      await cleanupPromotionJournalAfterCandidateInstalled(VALID_IDENTITY, dataRoot)
+
+      expectJournalAbsent()
+      expect(realFs.existsSync(stagingPath)).toBe(false)
+      expect(realFs.readFileSync(snapshotPath, 'utf8')).toBe('snapshot-bytes')
+      expect(realFs.readFileSync(candidateDb, 'utf8')).toBe('candidate-bytes')
+    })
   })
 })
