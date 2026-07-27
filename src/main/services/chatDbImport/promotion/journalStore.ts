@@ -1,6 +1,6 @@
 /**
  * Promotion journal store — crash-safe fixed-path persistence
- * (Phase 4.4.1, LOCK-4411..LOCK-4417).
+ * (Phase 4.4.1, LOCK-4411..LOCK-4417; Phase 4.4.2, LOCK-4423..LOCK-4425).
  *
  * This module is the ONLY writer/reader of the on-disk promotion journal.
  * It owns exactly one fixed path under a provided controlled Data root:
@@ -11,13 +11,28 @@
  * artifact location is derived from fixed owned filenames.
  *
  * Storage-only bound (LOCK-4412): this unit provides durable storage. It
- * does NOT create snapshots, verify anything, or decide when a write is
- * allowed beyond the phase gate below — the caller must have proven the
- * retained rollback snapshot before invoking the write.
+ * does NOT create snapshots, install candidates, verify anything, or decide
+ * when a write is allowed beyond the gates below — the caller must have
+ * proven the phase-entry precondition (retained snapshot, durable install,
+ * successful verification) before invoking the corresponding write.
  *
- * Phase gate (LOCK-4417): the maximum phase this unit will ever persist is
- * `snapshot-ready`. Writes of `candidate-installed` / `replacement-verified`
- * are rejected before any filesystem effect.
+ * Phase gates (LOCK-4417 initial write; LOCK-4423/LOCK-4424 transitions):
+ * - `snapshot-ready` is the ONLY phase writable without a prior journal,
+ *   via {@link writeSnapshotReadyPromotionJournal} (unchanged 4.4.1 API).
+ * - `candidate-installed` is writable ONLY via
+ *   {@link advancePromotionJournalToCandidateInstalled}, which requires the
+ *   current durable journal to be valid, in phase `snapshot-ready`, with the
+ *   identical version/sessionId/candidateId. The caller must have completed
+ *   the durable candidate install first (LOCK-4423) — the store cannot
+ *   perform or check the install itself.
+ * - `replacement-verified` is writable ONLY via
+ *   {@link advancePromotionJournalToReplacementVerified}, which requires the
+ *   current durable journal to be valid, in phase `candidate-installed`,
+ *   with the identical identity. The caller must have completed successful
+ *   post-install verification first (LOCK-4424).
+ * Any absent/invalid/mismatching prior journal rejects the transition
+ * BEFORE any staging or publish mutation, and the current durable journal
+ * is never deleted or cleared on failure (LOCK-4425).
  *
  * Durable replacement ordering (LOCK-4413 — the journal is the durable
  * truth source; no mtime inference anywhere):
@@ -64,7 +79,7 @@ import path from 'node:path'
 import { loggerService } from '@logger'
 import { DATA_PATH } from '@main/config'
 
-import type { PromotionJournalDecodeErrorCode, PromotionJournalV1 } from './journal'
+import type { PromotionJournalDecodeErrorCode, PromotionJournalPhase, PromotionJournalV1 } from './journal'
 import { decodePromotionJournal, encodePromotionJournal, PROMOTION_JOURNAL_FILENAME } from './journal'
 
 const logger = loggerService.withContext('chatDbImportPromotionJournalStore')
@@ -80,8 +95,8 @@ const logger = loggerService.withContext('chatDbImportPromotionJournalStore')
  */
 export const PROMOTION_JOURNAL_STAGING_FILENAME = `${PROMOTION_JOURNAL_FILENAME}.staging`
 
-/** The single phase this store is allowed to persist (LOCK-4417). */
-const MAX_WRITABLE_PHASE = 'snapshot-ready' as const
+/** The single phase writable without a prior journal (LOCK-4417). */
+const INITIAL_WRITABLE_PHASE = 'snapshot-ready' as const
 
 // ---------------------------------------------------------------------------
 // Structured errors
@@ -99,6 +114,11 @@ export type PromotionJournalStoreErrorCode =
   | 'PARENT_DIR_SYNC_FAILED'
   | 'PARENT_DIR_SYNC_UNSUPPORTED'
   | 'READ_IO_FAILED'
+  // Phase 4.4.2 transition guard rejections (all pre-mutation):
+  | 'TRANSITION_JOURNAL_ABSENT'
+  | 'TRANSITION_JOURNAL_INVALID'
+  | 'TRANSITION_PHASE_MISMATCH'
+  | 'TRANSITION_IDENTITY_MISMATCH'
 
 /**
  * Structured store error. `code` is the bounded machine-readable category;
@@ -203,39 +223,27 @@ export async function readPromotionJournal(dataRoot: string = DATA_PATH): Promis
 }
 
 // ---------------------------------------------------------------------------
-// Write — snapshot-ready only, durable replacement ordering
+// Write — private durable writer + phase-gated public APIs
 // ---------------------------------------------------------------------------
 
 /**
- * Durably persist a `snapshot-ready` v1 journal at the fixed owned path.
+ * Private durable writer — the six-step crash-safe replacement body shared
+ * by every public write API. NOT exported: an unrestricted generic journal
+ * writer must never be public (phase gating is the public surface).
  *
- * Ordering: sibling staging write via FileHandle → file fsync → close →
- * atomic rename → parent directory fsync (darwin/POSIX; skipped on win32).
+ * Ordering: sibling staging open → write → file fsync → close → atomic
+ * same-directory rename → parent directory fsync (darwin/POSIX; skipped on
+ * win32).
  *
- * Phase gate (LOCK-4417): any phase other than `snapshot-ready` is rejected
- * with `PHASE_NOT_WRITABLE` before any filesystem effect. The caller must
- * already hold a retained, verified rollback snapshot (LOCK-4412) — this
- * unit is storage only and cannot check that precondition.
- *
- * Failure behavior (LOCK-4411): on any ordinary failure before the publish
- * rename completes, this write's staging artifact is removed best-effort and
- * a structured {@link PromotionJournalStoreError} is thrown. A previously
- * published journal is never modified by a failed write.
+ * Failure behavior (LOCK-4411/LOCK-4425): on any ordinary failure before
+ * the publish rename completes, this write's staging artifact is removed
+ * best-effort and a structured {@link PromotionJournalStoreError} is thrown.
+ * A previously published journal is never modified, deleted, or cleared by
+ * a failed write.
  */
-export async function writeSnapshotReadyPromotionJournal(
-  journal: PromotionJournalV1,
-  dataRoot: string = DATA_PATH
-): Promise<void> {
+async function writePromotionJournalDurably(journal: PromotionJournalV1, dataRoot: string): Promise<void> {
   const journalPath = getPromotionJournalPath(dataRoot)
   const stagingPath = getPromotionJournalStagingPath(dataRoot)
-
-  if (journal.phase !== MAX_WRITABLE_PHASE) {
-    throw storeError(
-      'PHASE_NOT_WRITABLE',
-      `Promotion journal store refuses phase "${String(journal.phase)}": ` +
-        `only "${MAX_WRITABLE_PHASE}" may be persisted by this unit (LOCK-4417).`
-    )
-  }
 
   let encoded: string
   try {
@@ -310,6 +318,158 @@ export async function writeSnapshotReadyPromotionJournal(
 
   // 6. Make the rename itself durable by fsyncing the parent directory.
   await syncParentDirectory(dataRoot)
+}
+
+/**
+ * Durably persist a `snapshot-ready` v1 journal at the fixed owned path.
+ * This is the ONLY write that does not require a prior journal.
+ *
+ * Phase gate (LOCK-4417): any phase other than `snapshot-ready` is rejected
+ * with `PHASE_NOT_WRITABLE` before any filesystem effect. Later phases must
+ * go through the explicit transition APIs below. The caller must already
+ * hold a retained, verified rollback snapshot (LOCK-4412) — this unit is
+ * storage only and cannot check that precondition.
+ */
+export async function writeSnapshotReadyPromotionJournal(
+  journal: PromotionJournalV1,
+  dataRoot: string = DATA_PATH
+): Promise<void> {
+  assertControlledDataRoot(dataRoot)
+
+  if (journal.phase !== INITIAL_WRITABLE_PHASE) {
+    throw storeError(
+      'PHASE_NOT_WRITABLE',
+      `Promotion journal store refuses phase "${String(journal.phase)}": ` +
+        `only "${INITIAL_WRITABLE_PHASE}" may be persisted without a prior journal (LOCK-4417); ` +
+        'later phases require the explicit transition APIs.'
+    )
+  }
+
+  await writePromotionJournalDurably(journal, dataRoot)
+}
+
+// ---------------------------------------------------------------------------
+// Guarded phase transitions (Phase 4.4.2, LOCK-4423..LOCK-4425)
+// ---------------------------------------------------------------------------
+
+/**
+ * Guard shared by both transition APIs: read the current durable journal
+ * and require it to be `valid`, in exactly `expectedPriorPhase`, with the
+ * identical version/sessionId/candidateId as the requested `next` document.
+ *
+ * Every rejection here happens BEFORE any staging or publish mutation:
+ * - absent journal            → TRANSITION_JOURNAL_ABSENT
+ * - codec-invalid journal     → TRANSITION_JOURNAL_INVALID
+ * - read I/O failure          → READ_IO_FAILED (propagated; never absent)
+ * - wrong prior phase (skip,
+ *   regression, or repeat)    → TRANSITION_PHASE_MISMATCH
+ * - different sessionId /
+ *   candidateId / version     → TRANSITION_IDENTITY_MISMATCH
+ *
+ * The current durable journal is never modified by a rejection
+ * (LOCK-4425): rejecting is observation-only.
+ */
+async function assertTransitionPrecondition(
+  next: PromotionJournalV1,
+  expectedPriorPhase: PromotionJournalPhase,
+  dataRoot: string
+): Promise<void> {
+  const current = await readPromotionJournal(dataRoot)
+
+  if (current.status === 'absent') {
+    throw storeError(
+      'TRANSITION_JOURNAL_ABSENT',
+      `Cannot advance the promotion journal to "${next.phase}": no durable journal exists at the fixed path.`
+    )
+  }
+  if (current.status === 'invalid') {
+    throw storeError(
+      'TRANSITION_JOURNAL_INVALID',
+      `Cannot advance the promotion journal to "${next.phase}": ` +
+        `the current durable journal failed strict decoding (${current.code}).`
+    )
+  }
+
+  const prior = current.journal
+  if (prior.phase !== expectedPriorPhase) {
+    throw storeError(
+      'TRANSITION_PHASE_MISMATCH',
+      `Cannot advance the promotion journal to "${next.phase}": ` +
+        `current phase is "${prior.phase}" but exactly "${expectedPriorPhase}" is required ` +
+        '(no skips, regressions, or repeats).'
+    )
+  }
+  if (prior.version !== next.version || prior.sessionId !== next.sessionId || prior.candidateId !== next.candidateId) {
+    throw storeError(
+      'TRANSITION_IDENTITY_MISMATCH',
+      `Cannot advance the promotion journal to "${next.phase}": ` +
+        'version/sessionId/candidateId must be identical to the current durable journal ' +
+        '(cross-session or cross-candidate replacement is forbidden).'
+    )
+  }
+}
+
+/**
+ * Advance the durable journal `snapshot-ready` → `candidate-installed`.
+ *
+ * LOCK-4423: this write must follow the durable candidate install. The
+ * expected prior phase (`snapshot-ready`) is explicit in this API's guard,
+ * but the store cannot itself perform or verify the install — the caller
+ * owns that precondition.
+ *
+ * The requested document must carry phase `candidate-installed` (anything
+ * else is `PHASE_NOT_WRITABLE`) and the identical identity as the current
+ * durable `snapshot-ready` journal. A rejected transition performs no
+ * staging or publish mutation, and the current durable journal is preserved
+ * on every failure (LOCK-4425).
+ */
+export async function advancePromotionJournalToCandidateInstalled(
+  journal: PromotionJournalV1,
+  dataRoot: string = DATA_PATH
+): Promise<void> {
+  assertControlledDataRoot(dataRoot)
+
+  if (journal.phase !== 'candidate-installed') {
+    throw storeError(
+      'PHASE_NOT_WRITABLE',
+      `advancePromotionJournalToCandidateInstalled refuses phase "${String(journal.phase)}": ` +
+        'this API persists exactly "candidate-installed" (LOCK-4423).'
+    )
+  }
+
+  await assertTransitionPrecondition(journal, 'snapshot-ready', dataRoot)
+  await writePromotionJournalDurably(journal, dataRoot)
+}
+
+/**
+ * Advance the durable journal `candidate-installed` → `replacement-verified`.
+ *
+ * LOCK-4424: this write must follow successful post-install verification;
+ * it is a distinct explicit transition API. The store cannot itself perform
+ * or check the verification — the caller owns that precondition.
+ *
+ * The requested document must carry phase `replacement-verified` (anything
+ * else is `PHASE_NOT_WRITABLE`) and the identical identity as the current
+ * durable `candidate-installed` journal. A rejected transition performs no
+ * staging or publish mutation, and the current durable journal is preserved
+ * on every failure (LOCK-4425).
+ */
+export async function advancePromotionJournalToReplacementVerified(
+  journal: PromotionJournalV1,
+  dataRoot: string = DATA_PATH
+): Promise<void> {
+  assertControlledDataRoot(dataRoot)
+
+  if (journal.phase !== 'replacement-verified') {
+    throw storeError(
+      'PHASE_NOT_WRITABLE',
+      `advancePromotionJournalToReplacementVerified refuses phase "${String(journal.phase)}": ` +
+        'this API persists exactly "replacement-verified" (LOCK-4424).'
+    )
+  }
+
+  await assertTransitionPrecondition(journal, 'candidate-installed', dataRoot)
+  await writePromotionJournalDurably(journal, dataRoot)
 }
 
 /**

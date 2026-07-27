@@ -90,6 +90,17 @@ import { createImportDataPlane } from './importDataPlane'
 import { registerChatImportIpc, sendCancel, sendDiscover, sendReadPage } from './importIpc'
 import { createIsolatedReader, dispose as disposeSession, disposeSync as disposeSessionSync } from './isolatedSession'
 import type {
+  PromotionExecutionFailure,
+  PromotionExecutionHandoff,
+  PromotionExecutionLiveDb,
+  PromotionExecutionPrimitives,
+  PromotionExecutionResult,
+  PromotionExecutor,
+  PromotionExecutorOptions
+} from './promotion/execution'
+import { createPromotionExecutor } from './promotion/execution'
+import type {
+  ExecutingPromotionCapability,
   PreparedPromotionHandle,
   PromotionPreparationFailure,
   PromotionPreparationResult
@@ -300,6 +311,25 @@ export interface VerifiedCandidateHandle {
 let activeSession: InternalImportSession | null = null
 let ipcDisposer: (() => void) | null = null
 
+/**
+ * Main-local terminal promotion ownership record (hardened 4.4.2 audit
+ * correction, LOCK-4422/4425/4428). Set exactly when an execution settles
+ * `promoted` (successful replacement-verified handoff) or post-install
+ * recovery-required — the two terminal outcomes whose capability/lease must
+ * stay owned so ordinary maintenance (public init/close/backup/restore)
+ * remains blocked. This module-level record is THE logical owner even when
+ * the startPromotionExecution caller drops the returned handoff; the
+ * session never aliases the capability after transfer.
+ *
+ * Release contract: the retained lease is released ONLY by the future
+ * Phase 4.4.3 recovery/finalization executor (through the stored handoff's
+ * capability, exact-once) or implicitly by process exit — never by stale
+ * session fail/dispose/will-quit cleanup. This is deliberate: holding the
+ * in-memory lease for the rest of the process lifetime is the isolation
+ * guarantee, not a leak.
+ */
+let terminalPromotionOwnership: TerminalPromotionOwnership | null = null
+
 class InternalImportSession implements ImportSession {
   public id: string
   public state: ImportState = 'intake'
@@ -351,6 +381,22 @@ class InternalImportSession implements ImportSession {
   public promotionClaimed = false
   /** Prepared promotion handle (Phase 4.4.1). Non-null after preparation. */
   public preparedHandle: PreparedPromotionHandle | null = null
+  /**
+   * Executing promotion capability (Phase 4.4.2, LOCK-4421/4422). Non-null
+   * only after the exact-once prepared→executing transfer; owns the SAME
+   * promotion lease held since preparation. Released exactly once by the
+   * fail/dispose/will-quit paths.
+   */
+  public executingCapability: ExecutingPromotionCapability | null = null
+  /**
+   * Destructive promotion executor (Phase 4.4.2). Non-null only while a
+   * startPromotionExecution run is in flight. While it is unsettled the
+   * executor owns finalization: release paths request abort and ownership
+   * is released only after the executor quiesces (LOCK-4422/4425).
+   */
+  public promotionExecutor: PromotionExecutor | null = null
+  /** Exact-once execution start guard: set once, never reset. */
+  public promotionExecutionStarted = false
 
   constructor(id: string) {
     this.id = id
@@ -421,16 +467,10 @@ class InternalImportSession implements ImportSession {
       // (consuming the token) — never `error`. dispose() below preserves
       // the promotion-owned candidate.
       this.promotionToken = null
-      // Phase 4.4.1: dispose the prepared handle (releases the lease) on
-      // promotion failure.
-      if (this.preparedHandle) {
-        try {
-          this.preparedHandle.dispose()
-        } catch {
-          // Best-effort disposal during failure path
-        }
-        this.preparedHandle = null
-      }
+      // Phase 4.4.1/4.4.2: release promotion ownership (prepared handle
+      // dispose is stale-safe after consume; the executing capability owns
+      // the lease release exactly once) on promotion failure.
+      this.releasePromotionOwnership()
       this.setState('promotion-failed')
     } else if (
       this.state !== 'cancelled' &&
@@ -471,17 +511,29 @@ class InternalImportSession implements ImportSession {
     }
     this.verifier = null
 
-    // Phase 4.4.1: dispose the prepared promotion handle (releases the
-    // maintenance lease). Must run before candidate discard to ensure the
-    // lease is released before any further lifecycle transitions.
-    if (this.preparedHandle) {
-      try {
-        this.preparedHandle.dispose()
-      } catch (error) {
-        logger.warn(`Error disposing prepared promotion handle for ${this.id}:`, error as Error)
-      }
-      this.preparedHandle = null
+    // Phase 4.4.2 (LOCK-4425): executor-owned finalization. Request abort
+    // and await quiesce BEFORE any ownership release or resource teardown —
+    // no async race may release the lease or discard promotion resources
+    // while the executor is inside the destructive window. The executor
+    // reference is deliberately NOT cleared here (accepted 4.4.2 audit
+    // correction): terminal ownership settlement (release vs transfer to
+    // the terminal handoff owner) belongs EXCLUSIVELY to the
+    // startPromotionExecution continuation, which clears the reference.
+    // Its microtask may run after this whenSettled() continuation — a
+    // release here could pull a success/recovery-required lease out from
+    // under the terminal handoff.
+    const executor = this.promotionExecutor
+    if (executor) {
+      executor.requestAbort()
+      await executor.whenSettled()
     }
+
+    // Phase 4.4.1/4.4.2: release promotion ownership (prepared handle +
+    // executing capability → maintenance lease). Must run before candidate
+    // discard to ensure the lease is released before any further lifecycle
+    // transitions. While the executor reference is still set this defers
+    // to the execution continuation (see releasePromotionOwnership).
+    this.releasePromotionOwnership()
 
     // Discard candidate (closes DB handle first, then removes the owned
     // directory). Sealed candidates are discarded too: dispose is only
@@ -565,6 +617,83 @@ class InternalImportSession implements ImportSession {
       this.candidate = null
     }
     this.dataPlane = null
+  }
+
+  /**
+   * Dispose the prepared promotion handle exactly once (stale-safe after
+   * consume — it never releases a transferred lease). Idempotent;
+   * deduplicated helper for every release path (accepted 4.4.2 audit
+   * cleanup).
+   */
+  private disposePreparedHandle(): void {
+    if (!this.preparedHandle) return
+    try {
+      this.preparedHandle.dispose()
+    } catch (error) {
+      logger.warn(`Error disposing prepared promotion handle for ${this.id}:`, error as Error)
+    }
+    this.preparedHandle = null
+  }
+
+  /**
+   * Explicit ownership transfer OUT of this session (accepted 4.4.2 audit
+   * correction — hardened LOCK-4422/4425/4428): moves the executing
+   * capability to the terminal handoff owner and clears the session field,
+   * so stale session fail/dispose/will-quit cleanup can never release a
+   * lease the terminal handoff still owns. Returns null when the session
+   * no longer owns a capability.
+   */
+  takeExecutingCapability(): ExecutingPromotionCapability | null {
+    const capability = this.executingCapability
+    this.executingCapability = null
+    return capability
+  }
+
+  /**
+   * Release promotion ownership exactly once (Phase 4.4.1/4.4.2,
+   * LOCK-4421/4422): dispose the prepared handle (stale-safe after
+   * consume — it never releases a transferred lease) and release the
+   * executing capability (the single lease-release duty after transfer).
+   * Synchronous and idempotent; safe on the fail/dispose/will-quit paths.
+   *
+   * Executor deferral (hardened 4.4.2 audit correction): once an executor
+   * was started, terminal ownership settlement — release for pre-install
+   * failures vs transfer to the terminal handoff owner for success /
+   * post-install recovery-required — belongs EXCLUSIVELY to the
+   * startPromotionExecution continuation, which clears `promotionExecutor`
+   * once settlement is decided. While that reference is set (unsettled OR
+   * settled-but-not-yet-settled-by-the-continuation) this method never
+   * releases the capability: releasing in the settled-pending window would
+   * let a stale fail/dispose free a lease that a promoted or
+   * recovery-required handoff must keep owning (LOCK-4425/4428).
+   */
+  releasePromotionOwnership(): void {
+    const executor = this.promotionExecutor
+    if (executor) {
+      // Cooperative abort while the executor is inside the destructive
+      // window (checked at every subphase boundary). NEVER release the
+      // lease here — a released lease would let a competing maintenance
+      // operation act inside the destructive window or on an unverified
+      // replacement.
+      if (!executor.isSettled()) {
+        executor.requestAbort()
+      }
+      this.disposePreparedHandle()
+      logger.info(
+        `Promotion ownership release deferred for session ${this.id}: ` +
+          'terminal settlement owned by the execution continuation (lease retained)'
+      )
+      return
+    }
+    this.disposePreparedHandle()
+    if (this.executingCapability) {
+      try {
+        this.executingCapability.release()
+      } catch (error) {
+        logger.warn(`Error releasing executing promotion capability for ${this.id}:`, error as Error)
+      }
+      this.executingCapability = null
+    }
   }
 
   /**
@@ -986,17 +1115,14 @@ export function disposeActiveImport(): void {
     logger.info(`will-quit during promotion for session ${session.id}: preserving promotion artifacts (LOCK-4401)`)
   }
 
-  // 0. Dispose the prepared promotion handle (releases the maintenance lease).
-  //    Must be synchronous and idempotent. The foreign lease holder is NOT
-  //    touched (owner-safe release only).
-  if (session.preparedHandle) {
-    try {
-      session.preparedHandle.dispose()
-    } catch (error) {
-      logger.warn(`Error disposing prepared promotion handle (sync) for ${session.id}:`, error as Error)
-    }
-    session.preparedHandle = null
-  }
+  // 0. Release promotion ownership (prepared handle + executing capability
+  //    → maintenance lease). Must be synchronous and idempotent. The foreign
+  //    lease holder is NOT touched (owner-safe release only). Terminal
+  //    ownership already transferred to a promoted / recovery-required
+  //    handoff is NOT released here (the handoff retains the lease until
+  //    Phase 4.4.3 or process exit); an unsettled executor defers release
+  //    to the execution continuation.
+  session.releasePromotionOwnership()
 
   // 1. Verifier close (abort + immediate handle closure).
   session.closeVerifierSync()
@@ -1041,6 +1167,8 @@ export { registerChatImportIpc }
  * Promotion preparation API (Phase 4.4.1, LOCK-4411..4417).
  */
 export type {
+  ExecutingPromotionCapability,
+  PreparedPromotionConsumeResult,
   PreparedPromotionHandle,
   PromotionPreparationFailure,
   PromotionPreparationFailureCode,
@@ -1153,6 +1281,332 @@ export async function startPromotionPreparation(
   // for Phase 4.4.2 and for the fail/dispose/will-quit release paths.
   session.preparedHandle = result.handle
   return { status: 'prepared', handle: result.handle }
+}
+
+/**
+ * Main-local outcome of {@link transferPromotionExecution}. Never crosses
+ * IPC. `not-transferable` covers every session-currency refusal: no active
+ * session, session not `promoting`, no prepared handle, token misalignment,
+ * or a disposed (stale) handle. `already-consumed` is the exact-once
+ * refusal for duplicate transfer attempts.
+ */
+export type PromotionExecutionTransferOutcome =
+  | { readonly status: 'transferred'; readonly capability: ExecutingPromotionCapability }
+  | { readonly status: 'already-consumed' }
+  | { readonly status: 'not-transferable' }
+
+/**
+ * Exact-once prepared→executing capability transfer (Phase 4.4.2,
+ * LOCK-4421/LOCK-4422).
+ *
+ * Only the CURRENT active session's unconsumed prepared handle — aligned
+ * with the live promotion token while the session is `promoting` — may
+ * yield the destructive executing capability, exactly once. Stale handles
+ * (disposed, superseded session, settled token) and duplicate calls are
+ * refused with no side effect.
+ *
+ * The returned capability retains the SAME promotion lease held since
+ * preparation (no release/reacquire, no second mutex) and is stored on the
+ * session as the INTERIM owner: while no execution has settled, the
+ * fail/dispose/will-quit paths release it exactly once. Once an execution
+ * settles, terminal ownership is decided by the startPromotionExecution
+ * continuation — a settled success or post-install recovery-required
+ * outcome TRANSFERS the capability to the terminal handoff owner (see
+ * {@link TerminalPromotionOwnership}); pre-install failures release it.
+ * The capability object is never duplicated: exactly one owner at a time
+ * (session → executor window → terminal handoff | released).
+ *
+ * Phase boundary: this transfers authority only — NO candidate install,
+ * journal advancement, replacement verification, or relaunch here.
+ */
+export function transferPromotionExecution(): PromotionExecutionTransferOutcome {
+  const session = activeSession
+  // Session currency (LOCK-4421): only the current active session in
+  // `promoting` with a live token may transfer.
+  if (!session || session.state !== 'promoting' || session.promotionToken === null) {
+    return { status: 'not-transferable' }
+  }
+  const handle = session.preparedHandle
+  if (!handle || handle.token !== session.promotionToken) {
+    return { status: 'not-transferable' }
+  }
+
+  const result = handle.consume()
+  if (!result.ok) {
+    return result.reason === 'already-consumed' ? { status: 'already-consumed' } : { status: 'not-transferable' }
+  }
+
+  // Exact-once capability ownership: the session retains the executing
+  // capability; releasePromotionOwnership() releases the lease exactly once.
+  session.executingCapability = result.capability
+  logger.info(`Promotion execution capability transferred for session ${session.id} (LOCK-4421)`)
+  return { status: 'transferred', capability: result.capability }
+}
+
+/**
+ * Destructive promotion execution API (Phase 4.4.2, LOCK-4421..4428).
+ */
+export type {
+  PromotionExecutionClassification,
+  PromotionExecutionFailure,
+  PromotionExecutionFailureCode,
+  PromotionExecutionHandoff,
+  PromotionExecutionLiveDb,
+  PromotionExecutionLiveDisposition,
+  PromotionExecutionPrimitives,
+  PromotionExecutionResult,
+  PromotionExecutionSubphase,
+  PromotionExecutor,
+  PromotionExecutorOptions
+} from './promotion/execution'
+export { createPromotionExecutor } from './promotion/execution'
+
+/**
+ * Main-local inputs for {@link startPromotionExecution}. The live-DB
+ * surface stays caller-supplied (Main-internal): this module never
+ * constructs/looks up the live chatDbService itself (LOCK-O1 isolation
+ * sentinel stays intact) and nothing here ever crosses IPC.
+ */
+export interface StartPromotionExecutionOptions {
+  /** Controlled Data root containing the live chat.db. */
+  dataRoot: string
+  /** Live ChatDbService surface (promotion-owned lifecycle only). */
+  liveDb: PromotionExecutionLiveDb
+  /** Optional coordinator override (default: shared coordinator). */
+  coordinator?: MaintenanceCoordinator
+  /**
+   * Test injection (LOCK-O8): executor factory. Production default is
+   * {@link createPromotionExecutor}.
+   */
+  executorFactory?: (options: PromotionExecutorOptions) => PromotionExecutor
+  /** Test injection (LOCK-O8): primitive overrides passed to the executor. */
+  primitives?: Partial<PromotionExecutionPrimitives>
+}
+
+/**
+ * Main-local post-install recovery-required handoff (hardened 4.4.2 audit
+ * correction, LOCK-4425). Produced exactly when the executor settled a
+ * post-install failure: the atomic rename already happened, every artifact
+ * is retained, and deterministic startup recovery (Phase 4.4.3) owns every
+ * further decision. The handoff DELIBERATELY still owns the executing
+ * capability (the same continuously held lease): releasing it would let
+ * ordinary maintenance (public init/close/backup/restore) open or mutate
+ * the unverified installed replacement before Phase 4.4.3 or process exit.
+ * NEVER cross IPC with this.
+ */
+export interface PromotionRecoveryRequiredHandoff {
+  readonly sessionId: string
+  readonly candidateId: string
+  /** Exact-once claim token this execution settled against. */
+  readonly token: string
+  /** The structured post-install failure (recoveryRequired === true). */
+  readonly failure: PromotionExecutionFailure
+  /** The still-owned executing capability (same lease, LOCK-4422). */
+  readonly capability: ExecutingPromotionCapability
+}
+
+/**
+ * The single logical owner of a terminally retained promotion capability
+ * (hardened 4.4.2 audit correction). Exactly one of:
+ * - `promoted`          — successful replacement-verified handoff
+ *                         (LOCK-4428 boundary).
+ * - `recovery-required` — post-install failure handoff (LOCK-4425
+ *                         strengthened invariant: maintenance isolation is
+ *                         retained until Phase 4.4.3 or process exit).
+ */
+export type TerminalPromotionOwnership =
+  | { readonly kind: 'promoted'; readonly handoff: PromotionExecutionHandoff }
+  | { readonly kind: 'recovery-required'; readonly handoff: PromotionRecoveryRequiredHandoff }
+
+/**
+ * Main-local peek at the terminal promotion ownership record (never crosses
+ * IPC). Null until an execution settles promoted or post-install
+ * recovery-required. The future Phase 4.4.3 executor consumes this to take
+ * over the retained capability; nothing else may release it.
+ */
+export function getTerminalPromotionOwnership(): TerminalPromotionOwnership | null {
+  return terminalPromotionOwnership
+}
+
+/**
+ * Test-only: drop the terminal ownership record so each test starts clean.
+ * Deliberately does NOT release the retained lease (release stays
+ * exact-once through the stored handoff's capability — the production
+ * contract is Phase 4.4.3 or process exit). Never call from production.
+ */
+export function resetTerminalPromotionOwnershipForTests(): void {
+  terminalPromotionOwnership = null
+}
+
+/**
+ * Main-local outcome of {@link startPromotionExecution}. Never crosses IPC.
+ * - `promoted`         — durable replacement-verified reached; the session
+ *                        settled `promoted`; capability ownership was
+ *                        TRANSFERRED to the handoff (LOCK-4428 boundary) —
+ *                        stale session cleanup can never release it.
+ * - `promotion-failed` — the executor settled a structured failure; the
+ *                        session settled `promotion-failed` (a raced owner
+ *                        settle keeps that terminal state). Pre-install:
+ *                        ownership released after quiesce. Post-install:
+ *                        `recoveryHandoff` retains the capability/lease so
+ *                        ordinary maintenance stays blocked until Phase
+ *                        4.4.3 or process exit (LOCK-4425).
+ * - `stale-settle`     — the executor succeeded but the session had already
+ *                        settled/superseded during the await (raced failure /
+ *                        will-quit). Durable artifacts are left to startup
+ *                        recovery; ownership was released after quiesce.
+ * - `already-started`  — exact-once refusal for repeated/concurrent starts.
+ * - `not-executable`   — no active promoting session with a prepared handle.
+ */
+export type PromotionExecutionStartOutcome =
+  | { readonly status: 'promoted'; readonly handoff: PromotionExecutionHandoff }
+  | {
+      readonly status: 'promotion-failed'
+      readonly failure: PromotionExecutionFailure
+      /** Non-null exactly for post-install recovery-required failures. */
+      readonly recoveryHandoff: PromotionRecoveryRequiredHandoff | null
+    }
+  | { readonly status: 'stale-settle'; readonly result: PromotionExecutionResult }
+  | { readonly status: 'already-started' }
+  | { readonly status: 'not-executable' }
+
+/**
+ * The unique Main-local destructive promotion execution entry (Phase
+ * 4.4.2, LOCK-4421..4428): consume the prepared handle exactly once and
+ * run the non-reorderable sequence
+ *
+ *   authorized close → closed-live proof → sidecars + atomic install →
+ *   durable candidate-installed → authorized reopen → identity-bound
+ *   verification → durable replacement-verified → Phase 4.4.3 handoff.
+ *
+ * Exact-once (LOCK-4421): entry is bounded to the session-currency checks
+ * of {@link transferPromotionExecution} plus a never-reset per-session
+ * start guard, both on the same synchronous frame — concurrent or repeated
+ * starts can never duplicate destructive work.
+ *
+ * Settlement: `promoted` is settled ONLY after the durable
+ * replacement-verified journal advancement; every executor failure settles
+ * `promotion-failed` via the exact-once token protocol. Ownership release
+ * always happens AFTER the executor quiesced; on success the handoff
+ * deliberately keeps owning the capability (same lease) so no competition
+ * window opens before Phase 4.4.3 (LOCK-4422/4428).
+ */
+export async function startPromotionExecution(
+  options: StartPromotionExecutionOptions
+): Promise<PromotionExecutionStartOutcome> {
+  const session = activeSession
+  if (!session) {
+    return { status: 'not-executable' }
+  }
+  // Exact-once repeated-start refusal first: once this session started an
+  // execution (even after it settled), a later start can never re-run.
+  if (session.promotionExecutionStarted) {
+    return { status: 'already-started' }
+  }
+  if (session.state !== 'promoting' || session.promotionToken === null) {
+    return { status: 'not-executable' }
+  }
+
+  // Exact-once consume (LOCK-4421): the transfer validates session currency
+  // (active session, promoting, live token, aligned unconsumed handle) and
+  // consumes the prepared handle on this same synchronous frame. The start
+  // guard is set before any await so concurrent starts are refused.
+  const transfer = transferPromotionExecution()
+  if (transfer.status !== 'transferred') {
+    return transfer.status === 'already-consumed' ? { status: 'already-started' } : { status: 'not-executable' }
+  }
+  session.promotionExecutionStarted = true
+  const capability = transfer.capability
+  const token = capability.token
+
+  const executorFactory = options.executorFactory ?? createPromotionExecutor
+  const executor = executorFactory({
+    capability,
+    dataRoot: options.dataRoot,
+    liveDb: options.liveDb,
+    coordinator: options.coordinator,
+    primitives: options.primitives
+  })
+  session.promotionExecutor = executor
+
+  // run() never rejects (the executor contains every operational failure).
+  // NOTE (hardened 4.4.2 audit correction): while `session.promotionExecutor`
+  // was set, every stale fail/dispose/will-quit release path deferred to
+  // THIS continuation — it is the single terminal ownership settlement
+  // authority (release vs transfer). Clearing the reference below hands
+  // subsequent (post-settlement) release calls their normal semantics.
+  const result = await executor.run()
+  session.promotionExecutor = null
+
+  if (result.ok) {
+    // Settle `promoted` ONLY after durable replacement-verified (LOCK-4424).
+    if (!completePromotion(token, 'promoted')) {
+      // Raced owner settle (failure / will-quit) during the await: the
+      // racing owner deferred its release (abort contract); release here
+      // is the exact-once deferred release after quiesce. The durable
+      // replacement-verified artifacts are left to startup recovery.
+      logger.warn(`Promotion execution for session ${session.id} settled after the session was superseded (stale)`)
+      session.releasePromotionOwnership()
+      return { status: 'stale-settle', result }
+    }
+    // LOCK-4428: STOP at the replacement-verified handoff. Capability
+    // ownership is TRANSFERRED (not aliased) out of the session to the
+    // terminal handoff owner: stale session fail/dispose can never release
+    // it. Released only by the future Phase 4.4.3 executor or process
+    // exit. No cleanup, no relaunch.
+    session.takeExecutingCapability()
+    terminalPromotionOwnership = Object.freeze({ kind: 'promoted' as const, handoff: result.handoff })
+    logger.info(
+      `Promotion execution promoted session ${session.id} ` +
+        '(durable replacement-verified handoff; capability ownership transferred to the handoff)'
+    )
+    return { status: 'promoted', handoff: result.handoff }
+  }
+
+  // Executor failure: settle `promotion-failed` exactly once via the token
+  // protocol (a raced owner settle already decided the same terminal
+  // state). The executor has quiesced — terminal ownership is decided here.
+  completePromotion(token, 'promotion-failed')
+
+  if (result.failure.recoveryRequired) {
+    // Post-install recovery-required (LOCK-4425 strengthened invariant):
+    // the rename already happened and the installed replacement is
+    // UNVERIFIED. Transfer the capability to the recovery-required handoff
+    // so the same lease keeps blocking public init/close/backup/restore
+    // until Phase 4.4.3 or process exit — releasing it here would permit
+    // an in-process public init of the unverified installed DB.
+    const capability = session.takeExecutingCapability()
+    if (capability) {
+      const recoveryHandoff: PromotionRecoveryRequiredHandoff = Object.freeze({
+        sessionId: capability.sessionId,
+        candidateId: capability.candidateId,
+        token,
+        failure: result.failure,
+        capability
+      })
+      terminalPromotionOwnership = Object.freeze({ kind: 'recovery-required' as const, handoff: recoveryHandoff })
+      logger.warn(
+        `Promotion execution for session ${session.id} failed post-install (recovery-required): ` +
+          'capability retained by the recovery handoff — ordinary maintenance stays blocked until Phase 4.4.3'
+      )
+      return { status: 'promotion-failed', failure: result.failure, recoveryHandoff }
+    }
+    // Defensive: the deferral contract makes a missing capability
+    // unreachable (no release path runs while the executor reference is
+    // set). If it ever happens, isolation cannot be constructed — report
+    // the failure without a handoff; artifacts stay durable for recovery.
+    logger.error(
+      `Promotion execution for session ${session.id} failed post-install but the session no longer ` +
+        'owns the executing capability; recovery-required handoff unavailable'
+    )
+    return { status: 'promotion-failed', failure: result.failure, recoveryHandoff: null }
+  }
+
+  // Pre-install failure: the live bytes were never replaced and the
+  // executor restored availability where possible. Release ownership
+  // exactly once after quiesce (existing behavior).
+  session.releasePromotionOwnership()
+  return { status: 'promotion-failed', failure: result.failure, recoveryHandoff: null }
 }
 
 // ---------------------------------------------------------------------------

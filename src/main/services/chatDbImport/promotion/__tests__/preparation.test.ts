@@ -40,7 +40,8 @@ import {
   acquirePromotionLease,
   createMaintenanceCoordinator,
   type MaintenanceCoordinator,
-  resetSharedMaintenanceCoordinatorForTests
+  resetSharedMaintenanceCoordinatorForTests,
+  validatePromotionAuthorization
 } from '../../../chatDb/maintenanceCoordination'
 import { runMigrations } from '../../../chatDb/migration'
 import * as schema from '../../../chatDb/schema'
@@ -403,6 +404,121 @@ describe('preparePromotion (Phase 4.4.1, LOCK-4411..4417)', () => {
       // Another promotion can now proceed.
       const next = coordinator.acquire('promotion', 'next-session')
       expect(next.granted).toBe(true)
+      if (next.granted) coordinator.release(next.lease)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Exact-once consume / executing capability transfer (Phase 4.4.2,
+  // LOCK-4421/LOCK-4422)
+  // -------------------------------------------------------------------------
+
+  describe('exact-once consume (LOCK-4421/4422)', () => {
+    it('consume transfers the SAME lease to an executing capability carrying all fields', async () => {
+      const claim = makeClaim()
+      const result = await preparePromotion(claim, tempDir, () => live.sqlite, coordinator)
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+
+      const consumeResult = result.handle.consume()
+      expect(consumeResult.ok).toBe(true)
+      if (!consumeResult.ok) return
+
+      const { capability } = consumeResult
+      expect(capability.token).toBe(claim.token)
+      expect(capability.sessionId).toBe(claim.sessionId)
+      expect(capability.candidateId).toBe(claim.candidateId)
+      expect(capability.retainedSnapshotPath).toBe(retainedPath)
+      expect(capability.candidateDbPath).toBe(claim.dbPath)
+      expect(capability.isReleased()).toBe(false)
+      expect(result.handle.isConsumed()).toBe(true)
+
+      // The SAME promotion lease is still continuously held (no
+      // release/reacquire): the slot never moved.
+      expect(coordinator.currentHolder()).toEqual({ kind: 'promotion', ownerId: claim.candidateId })
+      // The capability's authorization proves the currently held lease.
+      expect(validatePromotionAuthorization(capability.authorization, coordinator)).toEqual({
+        authorized: true,
+        ownerId: claim.candidateId
+      })
+
+      capability.release()
+      expect(coordinator.currentHolder()).toBeNull()
+    })
+
+    it('consume is exact-once: a second consume is refused with already-consumed', async () => {
+      const result = await preparePromotion(makeClaim(), tempDir, () => live.sqlite, coordinator)
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+
+      const first = result.handle.consume()
+      expect(first.ok).toBe(true)
+
+      const second = result.handle.consume()
+      expect(second).toEqual({ ok: false, reason: 'already-consumed' })
+      // The transferred lease is untouched by the refused attempt.
+      expect(coordinator.currentHolder()).not.toBeNull()
+
+      if (first.ok) first.capability.release()
+    })
+
+    it('a disposed handle can never yield the destructive capability', async () => {
+      const result = await preparePromotion(makeClaim(), tempDir, () => live.sqlite, coordinator)
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+
+      result.handle.dispose()
+      expect(coordinator.currentHolder()).toBeNull()
+
+      const consumeResult = result.handle.consume()
+      expect(consumeResult).toEqual({ ok: false, reason: 'disposed' })
+    })
+
+    it('stale disposer after consume does NOT release the transferred lease', async () => {
+      const result = await preparePromotion(makeClaim(), tempDir, () => live.sqlite, coordinator)
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+
+      const consumeResult = result.handle.consume()
+      expect(consumeResult.ok).toBe(true)
+      if (!consumeResult.ok) return
+
+      // The old prepared-handle disposer is now stale: dispose must be a
+      // lease-preserving no-op (the executing capability owns the release).
+      result.handle.dispose()
+      expect(result.handle.isDisposed()).toBe(true)
+      expect(coordinator.currentHolder()).not.toBeNull()
+      expect(consumeResult.capability.isReleased()).toBe(false)
+      expect(validatePromotionAuthorization(consumeResult.capability.authorization, coordinator).authorized).toBe(true)
+
+      // Only the capability releases — exactly once, idempotently.
+      consumeResult.capability.release()
+      expect(consumeResult.capability.isReleased()).toBe(true)
+      expect(coordinator.currentHolder()).toBeNull()
+      consumeResult.capability.release()
+      expect(coordinator.currentHolder()).toBeNull()
+    })
+
+    it('released capability authorization is stale and can no longer act', async () => {
+      const result = await preparePromotion(makeClaim(), tempDir, () => live.sqlite, coordinator)
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+
+      const consumeResult = result.handle.consume()
+      expect(consumeResult.ok).toBe(true)
+      if (!consumeResult.ok) return
+
+      consumeResult.capability.release()
+      expect(validatePromotionAuthorization(consumeResult.capability.authorization, coordinator)).toEqual({
+        authorized: false,
+        reason: 'released'
+      })
+
+      // The freed slot is available to the next maintenance operation; the
+      // stale authorization cannot disturb the new holder.
+      const next = coordinator.acquire('backup', 'backup-manager')
+      expect(next.granted).toBe(true)
+      expect(validatePromotionAuthorization(consumeResult.capability.authorization, coordinator).authorized).toBe(false)
       if (next.granted) coordinator.release(next.lease)
     })
   })

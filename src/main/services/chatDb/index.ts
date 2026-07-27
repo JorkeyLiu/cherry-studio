@@ -11,7 +11,9 @@ import {
   acquireMaintenanceLeaseOrThrow,
   getSharedMaintenanceCoordinator,
   type MaintenanceCoordinator,
-  type MaintenanceLease
+  type MaintenanceLease,
+  type PromotionLeaseHandle,
+  validatePromotionAuthorization
 } from './maintenanceCoordination'
 import { runMigrations } from './migration'
 import * as schema from './schema'
@@ -146,14 +148,8 @@ class ChatDbService {
       this.activeInitLease = lease
     }
 
-    this.initPromise = this.doInit()
-
     try {
-      await this.initPromise
-    } catch (error) {
-      // Clean up on failure so next call can retry
-      this.cleanupOnFailure()
-      throw error
+      await this.runInitCore()
     } finally {
       if (this.coordinator && lease) {
         // Owner-safe: releases only the exact granted lease. If close()
@@ -164,6 +160,24 @@ class ChatDbService {
           this.activeInitLease = null
         }
       }
+    }
+  }
+
+  /**
+   * Lifecycle init core — runs doInit with the shared-promise and
+   * failure-cleanup semantics, WITHOUT any lease acquisition. Callers must
+   * already be authorized: public init() holds the init lease; promotion-
+   * owned reopen (Phase 4.4.2, LOCK-4422) validated the currently held
+   * promotion lease and must NOT nest a second acquisition.
+   */
+  private async runInitCore(): Promise<void> {
+    this.initPromise = this.doInit()
+    try {
+      await this.initPromise
+    } catch (error) {
+      // Clean up on failure so next call can retry
+      this.cleanupOnFailure()
+      throw error
     }
   }
 
@@ -418,30 +432,127 @@ class ChatDbService {
     }
 
     try {
-      if (!this.sqlite) {
-        return true
-      }
-
-      try {
-        this.sqlite.close()
-        logger.info('ChatDbService closed')
-      } catch (error) {
-        logger.error('Error closing ChatDbService', error as Error)
-        // Do NOT discard the handle on close failure — preserve it for retry.
-        // The caller can call close() again to retry.
-        return false
-      }
-
-      // Only null out handles on SUCCESS
-      this.sqlite = null
-      this.db = null
-      this.initPromise = null
-      return true
+      return this.closeCore()
     } finally {
       if (this.coordinator && closeLease) {
         this.coordinator.release(closeLease)
       }
     }
+  }
+
+  /**
+   * Lifecycle close core — closes the handle with the retry-preserving
+   * failure semantics, WITHOUT any lease acquisition. Callers must already
+   * be authorized: public close() holds the close lease; promotion-owned
+   * close (Phase 4.4.2, LOCK-4422) validated the currently held promotion
+   * lease and must NOT nest a second acquisition.
+   */
+  private closeCore(): boolean {
+    if (!this.sqlite) {
+      return true
+    }
+
+    try {
+      this.sqlite.close()
+      logger.info('ChatDbService closed')
+    } catch (error) {
+      logger.error('Error closing ChatDbService', error as Error)
+      // Do NOT discard the handle on close failure — preserve it for retry.
+      // The caller can call close() again to retry.
+      return false
+    }
+
+    // Only null out handles on SUCCESS
+    this.sqlite = null
+    this.db = null
+    this.initPromise = null
+    return true
+  }
+
+  // ---------------------------------------------------------------------------
+  // Promotion-owned live lifecycle (Phase 4.4.2, LOCK-4422)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Assert that `authorization` is the CURRENTLY HELD promotion lease on
+   * THIS instance's coordinator (LOCK-4422). Refuses candidate instances
+   * (no coordinator — never promotion-owned), forged/foreign handles,
+   * released/stale authorization, and superseded holders — always BEFORE
+   * any lifecycle mutation. An ownerId string alone is never accepted.
+   */
+  private assertPromotionAuthorized(authorization: PromotionLeaseHandle, action: string): void {
+    if (!this.coordinator) {
+      throw new Error(
+        `ChatDbService.${action} refused: this instance is not joined to a maintenance coordinator ` +
+          '(candidate instances are never promotion-owned).'
+      )
+    }
+    const verdict = validatePromotionAuthorization(authorization, this.coordinator)
+    if (!verdict.authorized) {
+      throw new Error(
+        `ChatDbService.${action} refused: promotion authorization invalid (${verdict.reason}). ` +
+          'Only the currently held promotion lease may close/reopen the live chat DB (LOCK-4422).'
+      )
+    }
+  }
+
+  /**
+   * Main-internal, promotion-owned close (Phase 4.4.2, LOCK-4422).
+   *
+   * Validates that `authorization` is the currently held promotion lease,
+   * then runs the lifecycle close core WITHOUT acquiring the close lease —
+   * the promotion lease itself is the exclusive maintenance authorization
+   * and stays continuously held (no release/reacquire, no second mutex).
+   * Public close() semantics are unchanged: it still refuses (close-busy)
+   * while the promotion lease is held.
+   *
+   * Throws before any lifecycle mutation when authorization is stale,
+   * released, forged, or foreign. Returns the close-core result (false when
+   * the underlying handle close failed; handles preserved for retry).
+   *
+   * @internal Never exposed over IPC/preload/renderer.
+   */
+  closeForPromotion(authorization: PromotionLeaseHandle): boolean {
+    this.assertPromotionAuthorized(authorization, 'closeForPromotion')
+
+    // Supersede any in-flight init before touching handles (same generation
+    // contract as public close()). While the promotion lease is held, a
+    // coordinated init cannot be in flight (its lease acquisition would have
+    // been refused), so no init-lease handoff is needed here.
+    this.generation++
+    return this.closeCore()
+  }
+
+  /**
+   * Main-internal, promotion-owned reopen (Phase 4.4.2, LOCK-4422).
+   *
+   * Validates that `authorization` is the currently held promotion lease,
+   * then runs the lifecycle init core WITHOUT acquiring the init lease —
+   * the same continuously held promotion lease authorizes the whole
+   * close→reopen window. Repair gating and idempotent fast paths match
+   * public init(). Public init() semantics are unchanged: it still refuses
+   * (busy) while the promotion lease is held.
+   *
+   * @internal Never exposed over IPC/preload/renderer.
+   */
+  async reopenForPromotion(authorization: PromotionLeaseHandle): Promise<void> {
+    this.assertPromotionAuthorized(authorization, 'reopenForPromotion')
+
+    // Refuse reopen while repair marker exists (same gate as public init()).
+    if (this.isRepairRequired()) {
+      throw new Error(
+        'ChatDbService is in repair-required state. ' +
+          'Clear the repair marker (chat.db.repair) and fix the database before initialising.'
+      )
+    }
+
+    // Fast path: already initialised
+    if (this.db) return
+
+    // If init is in progress, wait for it
+    if (this.initPromise) return this.initPromise
+
+    await this.runInitCore()
   }
 
   /**

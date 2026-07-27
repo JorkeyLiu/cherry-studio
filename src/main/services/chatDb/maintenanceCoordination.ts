@@ -105,12 +105,21 @@ export interface MaintenanceCoordinator {
 /** Strict owner label allowlist — bounded, path-free diagnostics only. */
 const OWNER_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
 
+/**
+ * Module-private holder peek per factory-created coordinator (Phase 4.4.2,
+ * LOCK-4422). Lets {@link validatePromotionAuthorization} compare the exact
+ * held lease (by lease ID) WITHOUT exposing the lease ID publicly — an
+ * exposed lease ID would let callers forge a `MaintenanceLease` and release
+ * a foreign holder, which is exactly the generic bypass this seam refuses.
+ */
+const coordinatorHolderPeeks = new WeakMap<MaintenanceCoordinator, () => MaintenanceLease | null>()
+
 /** Create an independent coordinator instance (pure in-memory state). */
 export function createMaintenanceCoordinator(): MaintenanceCoordinator {
   let holder: MaintenanceLease | null = null
   let leaseCounter = 0
 
-  return {
+  const coordinator: MaintenanceCoordinator = {
     acquire(kind: MaintenanceOperationKind, ownerId: string): MaintenanceAcquireResult {
       assertKnownOperation(kind)
       if (!OWNER_ID_PATTERN.test(ownerId)) {
@@ -141,6 +150,9 @@ export function createMaintenanceCoordinator(): MaintenanceCoordinator {
       return holder === null ? null : { kind: holder.kind, ownerId: holder.ownerId }
     }
   }
+
+  coordinatorHolderPeeks.set(coordinator, () => holder)
+  return coordinator
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +295,18 @@ export interface PromotionLeaseHandle {
 }
 
 /**
+ * Module-private registry proving a {@link PromotionLeaseHandle} was minted
+ * by {@link acquirePromotionLease} (Phase 4.4.2, LOCK-4422). A structurally
+ * identical object forged elsewhere is never registered and can therefore
+ * never validate as promotion authorization. The granted lease and its
+ * coordinator stay private to this module.
+ */
+const promotionHandleGrants = new WeakMap<
+  PromotionLeaseHandle,
+  { readonly coordinator: MaintenanceCoordinator; readonly lease: MaintenanceLease }
+>()
+
+/**
  * Acquire the exclusive promotion lease on the shared coordinator.
  * Throws `MaintenanceBusyError` while backup, restore, live init/close,
  * or another promotion holds the slot. The live DB stays open and
@@ -296,7 +320,7 @@ export function acquirePromotionLease(
   const lease = acquireMaintenanceLeaseOrThrow(coordinator, 'promotion', ownerId)
   let released = false
 
-  return {
+  const handle: PromotionLeaseHandle = {
     ownerId,
     isReleased(): boolean {
       return released
@@ -309,4 +333,69 @@ export function acquirePromotionLease(
       return coordinator.release(lease)
     }
   }
+
+  promotionHandleGrants.set(handle, { coordinator, lease })
+  return handle
+}
+
+// ---------------------------------------------------------------------------
+// Promotion authorization validation seam (Phase 4.4.2, LOCK-4422)
+// ---------------------------------------------------------------------------
+
+/** Bounded reasons a promotion authorization check can be refused. */
+export type PromotionAuthorizationRefusalReason =
+  /** The handle was not minted by `acquirePromotionLease` (forged/foreign object). */
+  | 'unrecognized-handle'
+  /** The handle already released its lease (stale authorization). */
+  | 'released'
+  /** The handle was granted on a different coordinator than the one being validated against. */
+  | 'foreign-coordinator'
+  /** The coordinator's current holder is not this exact lease (superseded slot). */
+  | 'not-current-holder'
+
+/** Verdict of {@link validatePromotionAuthorization}. */
+export type PromotionAuthorizationResult =
+  | { readonly authorized: true; readonly ownerId: string }
+  | { readonly authorized: false; readonly reason: PromotionAuthorizationRefusalReason }
+
+/**
+ * Prove that `handle` is the CURRENTLY HELD promotion lease on
+ * `coordinator` (Phase 4.4.2, LOCK-4422). The proof is exact: the handle
+ * must have been minted by {@link acquirePromotionLease} on this exact
+ * coordinator, must not be released, and the coordinator's current holder
+ * must be the exact granted lease (lease ID + owner + `promotion` kind
+ * compared internally — never exposed).
+ *
+ * This seam is deliberately NOT a generic bypass:
+ * - It validates only `promotion` authorization; it can never authorize
+ *   backup/restore/init/close callers.
+ * - It grants nothing and releases nothing — a verdict only.
+ * - An ownerId string alone is never accepted; only the module-minted
+ *   handle object with the live lease identity validates.
+ */
+export function validatePromotionAuthorization(
+  handle: PromotionLeaseHandle,
+  coordinator: MaintenanceCoordinator = getSharedMaintenanceCoordinator()
+): PromotionAuthorizationResult {
+  const grant = promotionHandleGrants.get(handle)
+  if (!grant) {
+    return { authorized: false, reason: 'unrecognized-handle' }
+  }
+  if (grant.coordinator !== coordinator) {
+    return { authorized: false, reason: 'foreign-coordinator' }
+  }
+  if (handle.isReleased()) {
+    return { authorized: false, reason: 'released' }
+  }
+  const peekHolder = coordinatorHolderPeeks.get(coordinator)
+  const holder = peekHolder ? peekHolder() : null
+  if (
+    holder === null ||
+    holder.leaseId !== grant.lease.leaseId ||
+    holder.kind !== 'promotion' ||
+    holder.ownerId !== grant.lease.ownerId
+  ) {
+    return { authorized: false, reason: 'not-current-holder' }
+  }
+  return { authorized: true, ownerId: grant.lease.ownerId }
 }

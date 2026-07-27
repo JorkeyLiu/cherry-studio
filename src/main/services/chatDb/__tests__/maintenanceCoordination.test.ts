@@ -25,7 +25,9 @@ import {
   MaintenanceBusyError,
   type MaintenanceOperationKind,
   maintenanceOperationsConflict,
+  type PromotionLeaseHandle,
   resetSharedMaintenanceCoordinatorForTests,
+  validatePromotionAuthorization,
   withMaintenanceLease
 } from '../maintenanceCoordination'
 
@@ -270,6 +272,80 @@ describe('maintenance coordination runtime (Phase 4.4.1, LOCK-4416)', () => {
       expect(grant.granted).toBe(true)
       expect(first.release()).toBe(false)
       expect(coordinator.currentHolder()).toEqual({ kind: 'init', ownerId: 'live' })
+    })
+  })
+
+  describe('promotion authorization validation seam (Phase 4.4.2, LOCK-4422)', () => {
+    it('authorizes the currently held promotion lease handle on its coordinator', () => {
+      const coordinator = createMaintenanceCoordinator()
+      const handle = acquirePromotionLease('import-session-1', coordinator)
+
+      const verdict = validatePromotionAuthorization(handle, coordinator)
+      expect(verdict).toEqual({ authorized: true, ownerId: 'import-session-1' })
+
+      // Validation grants and releases nothing — the holder is undisturbed.
+      expect(coordinator.currentHolder()).toEqual({ kind: 'promotion', ownerId: 'import-session-1' })
+      handle.release()
+    })
+
+    it('defaults to the shared coordinator', () => {
+      const handle = acquirePromotionLease('import-session-1')
+      expect(validatePromotionAuthorization(handle).authorized).toBe(true)
+      handle.release()
+      expect(validatePromotionAuthorization(handle).authorized).toBe(false)
+    })
+
+    it('refuses a released (stale) handle with reason released', () => {
+      const coordinator = createMaintenanceCoordinator()
+      const handle = acquirePromotionLease('import-session-1', coordinator)
+      handle.release()
+
+      const verdict = validatePromotionAuthorization(handle, coordinator)
+      expect(verdict).toEqual({ authorized: false, reason: 'released' })
+    })
+
+    it('refuses a forged structural handle: an ownerId alone is never authorization', () => {
+      const coordinator = createMaintenanceCoordinator()
+      const genuine = acquirePromotionLease('import-session-1', coordinator)
+
+      // Structurally identical, same ownerId — but never minted by
+      // acquirePromotionLease: no generic bypass.
+      const forged: PromotionLeaseHandle = {
+        ownerId: 'import-session-1',
+        isReleased: () => false,
+        release: () => true
+      }
+      const verdict = validatePromotionAuthorization(forged, coordinator)
+      expect(verdict).toEqual({ authorized: false, reason: 'unrecognized-handle' })
+
+      // The genuine holder is unaffected.
+      expect(validatePromotionAuthorization(genuine, coordinator).authorized).toBe(true)
+      genuine.release()
+    })
+
+    it('refuses a handle granted on a different coordinator with reason foreign-coordinator', () => {
+      const granting = createMaintenanceCoordinator()
+      const other = createMaintenanceCoordinator()
+      const handle = acquirePromotionLease('import-session-1', granting)
+
+      const verdict = validatePromotionAuthorization(handle, other)
+      expect(verdict).toEqual({ authorized: false, reason: 'foreign-coordinator' })
+
+      // Still authorized on its own coordinator.
+      expect(validatePromotionAuthorization(handle, granting).authorized).toBe(true)
+      handle.release()
+    })
+
+    it('a stale shared-coordinator handle cannot authorize against a fresh shared coordinator', () => {
+      const handle = acquirePromotionLease('import-session-1')
+      expect(validatePromotionAuthorization(handle).authorized).toBe(true)
+
+      // The shared coordinator is replaced (test seam): the old grant is
+      // foreign to the new instance and must not authorize anything on it.
+      resetSharedMaintenanceCoordinatorForTests()
+      const verdict = validatePromotionAuthorization(handle)
+      expect(verdict).toEqual({ authorized: false, reason: 'foreign-coordinator' })
+      handle.release()
     })
   })
 })

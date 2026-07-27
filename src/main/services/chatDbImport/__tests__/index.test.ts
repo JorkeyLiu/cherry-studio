@@ -133,8 +133,15 @@ vi.mock('@main/services/chatDb', () => ({
   ChatDbService: hoisted.liveChatDbCtor
 }))
 
+import { acquirePromotionLease, createMaintenanceCoordinator } from '@main/services/chatDb/maintenanceCoordination'
+
 import { ChatImportSessionError, ChatImportUnsupportedPlatformError } from '../errors'
-import type { PreparedPromotionHandle, PromotionPreparationResult } from '../index'
+import type {
+  ExecutingPromotionCapability,
+  PreparedPromotionConsumeResult,
+  PreparedPromotionHandle,
+  PromotionPreparationResult
+} from '../index'
 import {
   cancelImport,
   claimPromotion,
@@ -143,9 +150,13 @@ import {
   disposeActiveImport,
   getActiveImport,
   getSealedCandidate,
+  getTerminalPromotionOwnership,
   getVerifiedCandidate,
+  resetTerminalPromotionOwnershipForTests,
   startImport,
-  startPromotionPreparation
+  startPromotionExecution,
+  startPromotionPreparation,
+  transferPromotionExecution
 } from '../index'
 
 // ---------------------------------------------------------------------------
@@ -352,10 +363,15 @@ describe('ChatImport index', () => {
     hoisted.createVerifier.mockImplementation((_options: any) => makeVerifier())
     // Dispose any active session
     disposeActiveImport()
+    // Drop any terminally retained ownership record from a prior test
+    // (test-only reset — production retention lasts until Phase 4.4.3 or
+    // process exit).
+    resetTerminalPromotionOwnershipForTests()
   })
 
   afterEach(() => {
     disposeActiveImport()
+    resetTerminalPromotionOwnershipForTests()
   })
 
   const itOnDarwin = process.platform === 'darwin' ? it : it.skip
@@ -1871,14 +1887,49 @@ describe('ChatImport index', () => {
       sessionId: string
       candidateId: string
       dbPath: string
-    }): PreparedPromotionHandle & { dispose: ReturnType<typeof vi.fn> } {
+    }): PreparedPromotionHandle & {
+      dispose: ReturnType<typeof vi.fn>
+      capabilities: Array<ExecutingPromotionCapability & { release: ReturnType<typeof vi.fn> }>
+    } {
       let disposed = false
+      let consumed = false
+      const capabilities: Array<ExecutingPromotionCapability & { release: ReturnType<typeof vi.fn> }> = []
       return {
         token: claim.token,
         sessionId: claim.sessionId,
         candidateId: claim.candidateId,
         retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
         candidateDbPath: claim.dbPath,
+        capabilities,
+        consume: vi.fn((): PreparedPromotionConsumeResult => {
+          if (disposed) return { ok: false, reason: 'disposed' }
+          if (consumed) return { ok: false, reason: 'already-consumed' }
+          consumed = true
+          let released = false
+          const capability: ExecutingPromotionCapability & { release: ReturnType<typeof vi.fn> } = {
+            token: claim.token,
+            sessionId: claim.sessionId,
+            candidateId: claim.candidateId,
+            retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
+            candidateDbPath: claim.dbPath,
+            authorization: {
+              ownerId: claim.candidateId,
+              isReleased: () => released,
+              release: () => {
+                if (released) return false
+                released = true
+                return true
+              }
+            },
+            release: vi.fn(() => {
+              released = true
+            }),
+            isReleased: () => released
+          }
+          capabilities.push(capability)
+          return { ok: true, capability }
+        }),
+        isConsumed: () => consumed,
         dispose: vi.fn(() => {
           disposed = true
         }),
@@ -2107,5 +2158,820 @@ describe('ChatImport index', () => {
         expect(session.state).toBe('promotion-failed')
       }
     )
+  })
+
+  // =========================================================================
+  // Prepared→executing capability transfer (Phase 4.4.2 — LOCK-4421/4422)
+  // =========================================================================
+
+  describe('transferPromotionExecution (Phase 4.4.2, LOCK-4421/4422)', () => {
+    /** Drive a harness to the verified-candidate state. */
+    async function toVerified(session: Awaited<ReturnType<typeof startImport>>) {
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+      expect(session.state).toBe('verified-candidate')
+    }
+
+    /** Prepared-handle double matching the claim (LOCK-O8 injection). */
+    function makePreparedHandle(claim: {
+      token: string
+      sessionId: string
+      candidateId: string
+      dbPath: string
+    }): PreparedPromotionHandle & {
+      dispose: ReturnType<typeof vi.fn>
+      capabilities: Array<ExecutingPromotionCapability & { release: ReturnType<typeof vi.fn> }>
+    } {
+      let disposed = false
+      let consumed = false
+      const capabilities: Array<ExecutingPromotionCapability & { release: ReturnType<typeof vi.fn> }> = []
+      return {
+        token: claim.token,
+        sessionId: claim.sessionId,
+        candidateId: claim.candidateId,
+        retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
+        candidateDbPath: claim.dbPath,
+        capabilities,
+        consume: vi.fn((): PreparedPromotionConsumeResult => {
+          if (disposed) return { ok: false, reason: 'disposed' }
+          if (consumed) return { ok: false, reason: 'already-consumed' }
+          consumed = true
+          let released = false
+          const capability: ExecutingPromotionCapability & { release: ReturnType<typeof vi.fn> } = {
+            token: claim.token,
+            sessionId: claim.sessionId,
+            candidateId: claim.candidateId,
+            retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
+            candidateDbPath: claim.dbPath,
+            authorization: {
+              ownerId: claim.candidateId,
+              isReleased: () => released,
+              release: () => {
+                if (released) return false
+                released = true
+                return true
+              }
+            },
+            release: vi.fn(() => {
+              released = true
+            }),
+            isReleased: () => released
+          }
+          capabilities.push(capability)
+          return { ok: true, capability }
+        }),
+        isConsumed: () => consumed,
+        dispose: vi.fn(() => {
+          disposed = true
+        }),
+        isDisposed: () => disposed
+      }
+    }
+
+    const PREPARE_OPTIONS = {
+      dbDir: '/mock/data-root',
+      getLiveSqlite: () => ({ mock: 'live-sqlite' })
+    }
+
+    /** Injected preparation double resolving ok with a matching handle. */
+    function makePrepareOk() {
+      const handles: Array<ReturnType<typeof makePreparedHandle>> = []
+      const prepare = vi.fn(
+        async (claim: any, _dbDir: string, _getLiveSqlite: () => unknown): Promise<PromotionPreparationResult> => {
+          const handle = makePreparedHandle(claim)
+          handles.push(handle)
+          return { ok: true, handle }
+        }
+      )
+      return { prepare, handles }
+    }
+
+    /** Drive to `promoting` with a stored prepared-handle double. */
+    async function toPrepared() {
+      const { session } = await begin()
+      await toVerified(session)
+      const { prepare, handles } = makePrepareOk()
+      const outcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+      expect(outcome.status).toBe('prepared')
+      return { session, handle: handles[0] }
+    }
+
+    it('returns not-transferable when no import session is active', () => {
+      expect(transferPromotionExecution()).toEqual({ status: 'not-transferable' })
+    })
+
+    itOnDarwin('returns not-transferable before preparation stored a handle', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+
+      // Claimed (promoting) but never prepared: no handle to consume.
+      expect(claimPromotion()).not.toBeNull()
+      expect(transferPromotionExecution()).toEqual({ status: 'not-transferable' })
+
+      await session.dispose()
+    })
+
+    itOnDarwin('transfers exactly once: capability stored on the session, same identity fields', async () => {
+      const { session, handle } = await toPrepared()
+
+      const outcome = transferPromotionExecution()
+      expect(outcome.status).toBe('transferred')
+      if (outcome.status !== 'transferred') return
+
+      expect(handle.consume).toHaveBeenCalledTimes(1)
+      expect(handle.isConsumed()).toBe(true)
+      expect(outcome.capability.token).toBe(handle.token)
+      expect(outcome.capability.sessionId).toBe(session.id)
+      expect(outcome.capability.candidateId).toBe(`candidate-${session.id}`)
+      expect((session as any).executingCapability).toBe(outcome.capability)
+      // Transfer moves authority only — the session stays promoting and the
+      // prepared handle stays stored (stale-safe disposer).
+      expect(session.state).toBe('promoting')
+      expect((session as any).preparedHandle).toBe(handle)
+
+      await session.dispose()
+    })
+
+    itOnDarwin('duplicate transfer is refused with already-consumed (exact-once, LOCK-4421)', async () => {
+      const { session, handle } = await toPrepared()
+
+      const first = transferPromotionExecution()
+      expect(first.status).toBe('transferred')
+
+      const second = transferPromotionExecution()
+      const third = transferPromotionExecution()
+      expect(second).toEqual({ status: 'already-consumed' })
+      expect(third).toEqual({ status: 'already-consumed' })
+
+      // The stored capability is the first one; no new capability was minted.
+      expect(handle.capabilities).toHaveLength(1)
+      if (first.status === 'transferred') {
+        expect((session as any).executingCapability).toBe(first.capability)
+      }
+
+      await session.dispose()
+    })
+
+    itOnDarwin('a settled session cannot transfer: stale prepared handles cannot act', async () => {
+      const { session } = await toPrepared()
+
+      // The session fails during the promotion window (token consumed,
+      // promotion-failed settled, ownership released).
+      await capturedCallbacks.onError(session.id, { code: 'E_LATE', message: 'late renderer error' })
+      expect(session.state).toBe('promotion-failed')
+
+      expect(transferPromotionExecution()).toEqual({ status: 'not-transferable' })
+    })
+
+    itOnDarwin('async dispose releases the transferred capability exactly once', async () => {
+      const { session, handle } = await toPrepared()
+
+      const outcome = transferPromotionExecution()
+      expect(outcome.status).toBe('transferred')
+
+      await session.dispose()
+
+      // The stale prepared disposer ran (lease-preserving no-op in
+      // production) and the capability released the lease exactly once.
+      expect(handle.dispose).toHaveBeenCalledTimes(1)
+      expect(handle.capabilities[0].release).toHaveBeenCalledTimes(1)
+      expect((session as any).preparedHandle).toBeNull()
+      expect((session as any).executingCapability).toBeNull()
+
+      // Idempotent: a second dispose never re-releases.
+      await session.dispose()
+      expect(handle.capabilities[0].release).toHaveBeenCalledTimes(1)
+    })
+
+    itOnDarwin(
+      'failure during promoting releases the transferred capability and settles promotion-failed',
+      async () => {
+        const { session, handle } = await toPrepared()
+
+        const outcome = transferPromotionExecution()
+        expect(outcome.status).toBe('transferred')
+
+        await capturedCallbacks.onError(session.id, { code: 'E_LATE', message: 'late renderer error' })
+
+        expect(session.state).toBe('promotion-failed')
+        expect(handle.capabilities[0].release).toHaveBeenCalledTimes(1)
+        expect((session as any).executingCapability).toBeNull()
+        expect((session as any).preparedHandle).toBeNull()
+        expect(getActiveImport()).toBeNull()
+      }
+    )
+
+    itOnDarwin('sync will-quit releases the transferred capability and preserves the candidate', async () => {
+      const { session, handle } = await toPrepared()
+      const outcome = transferPromotionExecution()
+      expect(outcome.status).toBe('transferred')
+
+      disposeActiveImport()
+
+      expect(handle.capabilities[0].release).toHaveBeenCalledTimes(1)
+      expect((session as any).executingCapability).toBeNull()
+      expect((session as any).preparedHandle).toBeNull()
+      expect(getActiveImport()).toBeNull()
+    })
+  })
+
+  // =========================================================================
+  // Destructive promotion execution (Phase 4.4.2 — LOCK-4421..4428)
+  // =========================================================================
+
+  describe('startPromotionExecution (Phase 4.4.2, LOCK-4421..4428)', () => {
+    /** Drive a harness to the verified-candidate state. */
+    async function toVerified(session: Awaited<ReturnType<typeof startImport>>) {
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+      expect(session.state).toBe('verified-candidate')
+    }
+
+    /** Prepared-handle double matching the claim (LOCK-O8 injection). */
+    function makePreparedHandle(claim: {
+      token: string
+      sessionId: string
+      candidateId: string
+      dbPath: string
+    }): PreparedPromotionHandle & {
+      dispose: ReturnType<typeof vi.fn>
+      capabilities: Array<ExecutingPromotionCapability & { release: ReturnType<typeof vi.fn> }>
+    } {
+      let disposed = false
+      let consumed = false
+      const capabilities: Array<ExecutingPromotionCapability & { release: ReturnType<typeof vi.fn> }> = []
+      return {
+        token: claim.token,
+        sessionId: claim.sessionId,
+        candidateId: claim.candidateId,
+        retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
+        candidateDbPath: claim.dbPath,
+        capabilities,
+        consume: vi.fn((): PreparedPromotionConsumeResult => {
+          if (disposed) return { ok: false, reason: 'disposed' }
+          if (consumed) return { ok: false, reason: 'already-consumed' }
+          consumed = true
+          let released = false
+          const capability: ExecutingPromotionCapability & { release: ReturnType<typeof vi.fn> } = {
+            token: claim.token,
+            sessionId: claim.sessionId,
+            candidateId: claim.candidateId,
+            retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
+            candidateDbPath: claim.dbPath,
+            authorization: {
+              ownerId: claim.candidateId,
+              isReleased: () => released,
+              release: () => {
+                if (released) return false
+                released = true
+                return true
+              }
+            },
+            release: vi.fn(() => {
+              released = true
+            }),
+            isReleased: () => released
+          }
+          capabilities.push(capability)
+          return { ok: true, capability }
+        }),
+        isConsumed: () => consumed,
+        dispose: vi.fn(() => {
+          disposed = true
+        }),
+        isDisposed: () => disposed
+      }
+    }
+
+    const PREPARE_OPTIONS = {
+      dbDir: '/mock/data-root',
+      getLiveSqlite: () => ({ mock: 'live-sqlite' })
+    }
+
+    /** Injected preparation double resolving ok with a matching handle. */
+    function makePrepareOk() {
+      const handles: Array<ReturnType<typeof makePreparedHandle>> = []
+      const prepare = vi.fn(
+        async (claim: any, _dbDir: string, _getLiveSqlite: () => unknown): Promise<PromotionPreparationResult> => {
+          const handle = makePreparedHandle(claim)
+          handles.push(handle)
+          return { ok: true, handle }
+        }
+      )
+      return { prepare, handles }
+    }
+
+    /** Drive to `promoting` with a stored prepared-handle double. */
+    async function toPrepared() {
+      const { session, candidate } = await begin()
+      await toVerified(session)
+      const { prepare, handles } = makePrepareOk()
+      const outcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+      expect(outcome.status).toBe('prepared')
+      return { session, candidate, handle: handles[0] }
+    }
+
+    /** Minimal live-DB surface double (never touched by executor doubles). */
+    function makeLiveDbDouble() {
+      return {
+        closeForPromotion: vi.fn(() => true),
+        reopenForPromotion: vi.fn(async () => {}),
+        isInitialised: vi.fn(() => true)
+      }
+    }
+
+    /** Gated executor double implementing the quiesce contract. */
+    function makeExecutorDouble() {
+      let resolveRun!: (result: any) => void
+      const runGate = new Promise<any>((resolve) => {
+        resolveRun = resolve
+      })
+      let settled = false
+      let resolveSettled!: () => void
+      const settledPromise = new Promise<void>((resolve) => {
+        resolveSettled = resolve
+      })
+      const executor = {
+        run: vi.fn(async () => {
+          const result = await runGate
+          settled = true
+          resolveSettled()
+          return result
+        }),
+        requestAbort: vi.fn(),
+        subphase: vi.fn(() => 'not-started' as const),
+        isSettled: () => settled,
+        whenSettled: () => settledPromise
+      }
+      return { executor, resolveRun }
+    }
+
+    const EXEC_FAILURE = {
+      subphase: 'installing',
+      classification: 'pre-install',
+      recoveryRequired: false,
+      code: 'INSTALL_FAILED',
+      safeCode: 'CANDIDATE_MISSING:ENOENT',
+      liveDisposition: 'open'
+    } as const
+
+    function makeExecOptions(executor: ReturnType<typeof makeExecutorDouble>['executor']) {
+      const executorFactory = vi.fn((_options: any) => executor)
+      return {
+        options: { dataRoot: '/mock/data-root', liveDb: makeLiveDbDouble(), executorFactory },
+        executorFactory
+      }
+    }
+
+    it('C1: returns not-executable when no import session is active', async () => {
+      const { executor } = makeExecutorDouble()
+      const { options, executorFactory } = makeExecOptions(executor)
+      const outcome = await startPromotionExecution(options)
+      expect(outcome).toEqual({ status: 'not-executable' })
+      expect(executorFactory).not.toHaveBeenCalled()
+    })
+
+    itOnDarwin('C2: returns not-executable before promoting / without a prepared handle', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+
+      const { executor } = makeExecutorDouble()
+      const { options, executorFactory } = makeExecOptions(executor)
+
+      // Not promoting yet.
+      expect(await startPromotionExecution(options)).toEqual({ status: 'not-executable' })
+
+      // Promoting but never prepared: no handle to consume.
+      expect(claimPromotion()).not.toBeNull()
+      expect(await startPromotionExecution(options)).toEqual({ status: 'not-executable' })
+      expect(executorFactory).not.toHaveBeenCalled()
+      expect(session.state).toBe('promoting')
+
+      await session.dispose()
+    })
+
+    itOnDarwin('C18: success settles promoted ONLY after the executor result; capability stays owned', async () => {
+      const { session, handle, candidate } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options, executorFactory } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      // The transfer consumed the prepared handle exactly once and the
+      // executor received the exact session-owned capability.
+      expect(handle.consume).toHaveBeenCalledTimes(1)
+      expect(executorFactory).toHaveBeenCalledTimes(1)
+      const factoryOptions = executorFactory.mock.calls[0][0]
+      expect(factoryOptions.capability).toBe(handle.capabilities[0])
+      expect(factoryOptions.dataRoot).toBe('/mock/data-root')
+      expect((session as any).executingCapability).toBe(handle.capabilities[0])
+      // Not settled while the executor runs.
+      expect(session.state).toBe('promoting')
+
+      const capability = handle.capabilities[0]
+      resolveRun({
+        ok: true,
+        handoff: {
+          sessionId: session.id,
+          candidateId: capability.candidateId,
+          token: capability.token,
+          receipt: { mock: 'receipt' },
+          retainedSnapshotPath: capability.retainedSnapshotPath,
+          capability
+        }
+      })
+      const outcome = await outcomePromise
+
+      expect(outcome.status).toBe('promoted')
+      if (outcome.status !== 'promoted') return
+      expect(outcome.handoff.capability).toBe(capability)
+      expect(session.state).toBe('promoted')
+      // LOCK-4428: the handoff still owns the capability — never released
+      // on success, no competition window.
+      expect(capability.release).not.toHaveBeenCalled()
+      // Hardened terminal ownership (accepted 4.4.2 audit correction):
+      // TRANSFERRED to the handoff, not aliased on the session.
+      expect((session as any).executingCapability).toBeNull()
+      const terminal = getTerminalPromotionOwnership()
+      expect(terminal?.kind).toBe('promoted')
+      if (terminal?.kind === 'promoted') {
+        expect(terminal.handoff).toBe(outcome.handoff)
+      }
+      // Promotion-owned candidate preserved.
+      expect(candidate.discard).not.toHaveBeenCalled()
+
+      // Stale fail after promoted cannot invalidate the success handoff.
+      await capturedCallbacks.onError(session.id, { code: 'E_LATE', message: 'late renderer error' })
+      expect(session.state).toBe('promoted')
+      expect(capability.release).not.toHaveBeenCalled()
+
+      // Stale async dispose + sync will-quit cannot release it either:
+      // the handoff retains the lease until Phase 4.4.3 or process exit.
+      await session.dispose()
+      disposeActiveImport()
+      expect(capability.release).not.toHaveBeenCalled()
+
+      // Exact-once release stays possible through the handoff owner.
+      outcome.handoff.capability.release()
+      expect(capability.release).toHaveBeenCalledTimes(1)
+    })
+
+    itOnDarwin('C3/C4: repeated and concurrent starts can never duplicate destructive work', async () => {
+      const { session, handle } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const first = startPromotionExecution(options)
+      // Concurrent second/third start while the first is mid-flight.
+      const concurrent = await startPromotionExecution(options)
+      const concurrent2 = await startPromotionExecution(options)
+      expect(concurrent).toEqual({ status: 'already-started' })
+      expect(concurrent2).toEqual({ status: 'already-started' })
+
+      const capability = handle.capabilities[0]
+      resolveRun({
+        ok: true,
+        handoff: {
+          sessionId: session.id,
+          candidateId: capability.candidateId,
+          token: capability.token,
+          receipt: { mock: 'receipt' },
+          retainedSnapshotPath: capability.retainedSnapshotPath,
+          capability
+        }
+      })
+      expect((await first).status).toBe('promoted')
+
+      // Repeated start after settle is refused too; exactly one consume/run.
+      expect(await startPromotionExecution(options)).toEqual({ status: 'already-started' })
+      expect(handle.consume).toHaveBeenCalledTimes(1)
+      expect(executor.run).toHaveBeenCalledTimes(1)
+
+      await session.dispose()
+    })
+
+    itOnDarwin('C5–C17 settle: executor failure settles promotion-failed and releases after quiesce', async () => {
+      const { session, handle, candidate } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({ ok: false, failure: EXEC_FAILURE })
+      const outcome = await outcomePromise
+
+      expect(outcome.status).toBe('promotion-failed')
+      if (outcome.status !== 'promotion-failed') return
+      expect(outcome.failure).toBe(EXEC_FAILURE)
+      // Pre-install failure: no recovery-required handoff, no terminal
+      // ownership retention — the lease is released after quiesce.
+      expect(outcome.recoveryHandoff).toBeNull()
+      expect(getTerminalPromotionOwnership()).toBeNull()
+      expect(session.state).toBe('promotion-failed')
+      // Ownership released exactly once, only after the executor settled.
+      expect(handle.capabilities[0].release).toHaveBeenCalledTimes(1)
+      expect((session as any).executingCapability).toBeNull()
+      // Token consumed: no later settle can flip the terminal state.
+      expect(completePromotion(handle.token, 'promoted')).toBe(false)
+      expect(session.state).toBe('promotion-failed')
+      // Artifacts preserved for startup recovery (LOCK-4425).
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect(candidate.discardSync).not.toHaveBeenCalled()
+    })
+
+    itOnDarwin(
+      'C19/C21: async dispose during execution aborts, awaits quiesce, and never releases mid-window',
+      async () => {
+        const { session, handle, candidate } = await toPrepared()
+        const { executor, resolveRun } = makeExecutorDouble()
+        const { options } = makeExecOptions(executor)
+
+        const outcomePromise = startPromotionExecution(options)
+        await new Promise<void>((resolve) => setImmediate(resolve))
+
+        const disposePromise = session.dispose()
+        await new Promise<void>((resolve) => setImmediate(resolve))
+
+        // Abort requested; the lease/capability is NOT released while the
+        // executor is unsettled, and the candidate is never discarded.
+        expect(executor.requestAbort).toHaveBeenCalled()
+        expect(handle.capabilities[0].release).not.toHaveBeenCalled()
+        expect(candidate.discard).not.toHaveBeenCalled()
+
+        // The executor finalizes (abort surfaced as a pre-install failure).
+        resolveRun({
+          ok: false,
+          failure: { ...EXEC_FAILURE, code: 'ABORT_REQUESTED', safeCode: 'BEFORE_INSTALL' }
+        })
+        await disposePromise
+        await outcomePromise
+
+        // Ownership released exactly once, only after quiesce.
+        expect(handle.capabilities[0].release).toHaveBeenCalledTimes(1)
+        expect(candidate.discard).not.toHaveBeenCalled()
+        expect(getActiveImport()).toBeNull()
+      }
+    )
+
+    itOnDarwin('C22: sync will-quit during execution requests abort and never releases the lease early', async () => {
+      const { session, handle, candidate } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      disposeActiveImport()
+
+      // will-quit is synchronous: abort requested, prepared disposer ran
+      // (stale-safe), but the capability/lease was NOT released early.
+      expect(executor.requestAbort).toHaveBeenCalled()
+      expect(handle.dispose).toHaveBeenCalledTimes(1)
+      expect(handle.capabilities[0].release).not.toHaveBeenCalled()
+      // Promotion-owned candidate + recovery assets preserved.
+      expect(candidate.discardSync).not.toHaveBeenCalled()
+      expect(candidate.discard).not.toHaveBeenCalled()
+      expect(getActiveImport()).toBeNull()
+
+      // The executor-owned finalization completes after will-quit; only
+      // then is ownership released (executor quiesced).
+      resolveRun({ ok: false, failure: { ...EXEC_FAILURE, code: 'ABORT_REQUESTED', safeCode: 'BEFORE_INSTALL' } })
+      const outcome = await outcomePromise
+      expect(outcome.status).toBe('promotion-failed')
+      expect(handle.capabilities[0].release).toHaveBeenCalledTimes(1)
+      expect(session.state).toBe('promoting') // no owner settled a terminal state post-quit
+    })
+
+    itOnDarwin(
+      'C23: raced session failure — a late success is a stale settle with no duplicate transition',
+      async () => {
+        const { session, handle, candidate } = await toPrepared()
+        const { executor, resolveRun } = makeExecutorDouble()
+        const { options } = makeExecOptions(executor)
+
+        const outcomePromise = startPromotionExecution(options)
+        await new Promise<void>((resolve) => setImmediate(resolve))
+
+        // The session fails while the executor is mid-flight: the terminal
+        // state settles promotion-failed and disposal awaits the executor.
+        const failPromise = capturedCallbacks.onError(session.id, { code: 'E_LATE', message: 'late renderer error' })
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(session.state).toBe('promotion-failed')
+        expect(executor.requestAbort).toHaveBeenCalled()
+        // No release while the executor is unsettled (stale disposer safety).
+        expect(handle.capabilities[0].release).not.toHaveBeenCalled()
+
+        // The executor then resolves ok — but the session already settled.
+        const capability = handle.capabilities[0]
+        resolveRun({
+          ok: true,
+          handoff: {
+            sessionId: session.id,
+            candidateId: capability.candidateId,
+            token: capability.token,
+            receipt: { mock: 'receipt' },
+            retainedSnapshotPath: capability.retainedSnapshotPath,
+            capability
+          }
+        })
+        await failPromise
+        const outcome = await outcomePromise
+
+        expect(outcome.status).toBe('stale-settle')
+        // Terminal state never flips; ownership released exactly once.
+        expect(session.state).toBe('promotion-failed')
+        expect(handle.capabilities[0].release).toHaveBeenCalledTimes(1)
+        expect(candidate.discard).not.toHaveBeenCalled()
+        expect(getActiveImport()).toBeNull()
+        // A stale settle retains nothing: no terminal ownership record.
+        expect(getTerminalPromotionOwnership()).toBeNull()
+      }
+    )
+
+    /** Post-install recovery-required failure double (LOCK-4425). */
+    const POST_INSTALL_FAILURE = {
+      subphase: 'reopening-live',
+      classification: 'post-install',
+      recoveryRequired: true,
+      code: 'LIVE_REOPEN_FAILED',
+      safeCode: 'EIO',
+      liveDisposition: 'closed'
+    } as const
+
+    itOnDarwin(
+      'C24: post-install recovery-required retains the capability; stale fail/dispose/will-quit cannot release it',
+      async () => {
+        const { session, handle, candidate } = await toPrepared()
+        const { executor, resolveRun } = makeExecutorDouble()
+        const { options } = makeExecOptions(executor)
+
+        const outcomePromise = startPromotionExecution(options)
+        resolveRun({ ok: false, failure: POST_INSTALL_FAILURE })
+        const outcome = await outcomePromise
+
+        expect(outcome.status).toBe('promotion-failed')
+        if (outcome.status !== 'promotion-failed') return
+        expect(outcome.failure).toBe(POST_INSTALL_FAILURE)
+        expect(session.state).toBe('promotion-failed')
+
+        // LOCK-4425 strengthened invariant: the capability/lease is retained
+        // by the recovery-required handoff — never released post-install.
+        const capability = handle.capabilities[0]
+        expect(capability.release).not.toHaveBeenCalled()
+        expect(outcome.recoveryHandoff).not.toBeNull()
+        expect(outcome.recoveryHandoff!.capability).toBe(capability)
+        expect(outcome.recoveryHandoff!.failure).toBe(POST_INSTALL_FAILURE)
+        expect(outcome.recoveryHandoff!.token).toBe(handle.token)
+        expect(outcome.recoveryHandoff!.sessionId).toBe(session.id)
+        // Transferred, not aliased: the session no longer owns it.
+        expect((session as any).executingCapability).toBeNull()
+        const terminal = getTerminalPromotionOwnership()
+        expect(terminal?.kind).toBe('recovery-required')
+        if (terminal?.kind === 'recovery-required') {
+          expect(terminal.handoff).toBe(outcome.recoveryHandoff)
+        }
+
+        // Artifacts preserved for startup recovery (LOCK-4425).
+        expect(candidate.discard).not.toHaveBeenCalled()
+        expect(candidate.discardSync).not.toHaveBeenCalled()
+
+        // Stale fail after recovery-required cannot release its handoff.
+        await capturedCallbacks.onError(session.id, { code: 'E_LATE', message: 'late renderer error' })
+        expect(session.state).toBe('promotion-failed')
+        expect(capability.release).not.toHaveBeenCalled()
+
+        // Stale async dispose + sync will-quit cannot release it either:
+        // the handoff retains the lease until Phase 4.4.3 or process exit.
+        await session.dispose()
+        disposeActiveImport()
+        expect(capability.release).not.toHaveBeenCalled()
+
+        // Exact-once release stays possible through the handoff owner (the
+        // future Phase 4.4.3 executor's contract).
+        outcome.recoveryHandoff!.capability.release()
+        expect(capability.release).toHaveBeenCalledTimes(1)
+      }
+    )
+
+    /**
+     * Prepared-handle double whose capability owns a REAL promotion lease
+     * on a real coordinator, so maintenance blocking is proven end-to-end
+     * against the actual conflict matrix (LOCK-4402/4422/4425).
+     */
+    function makePreparedHandleWithRealLease(
+      claim: { token: string; sessionId: string; candidateId: string; dbPath: string },
+      coordinator: ReturnType<typeof createMaintenanceCoordinator>
+    ): PreparedPromotionHandle {
+      const authorization = acquirePromotionLease('import-promotion-test', coordinator)
+      let disposed = false
+      let consumed = false
+      return {
+        token: claim.token,
+        sessionId: claim.sessionId,
+        candidateId: claim.candidateId,
+        retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
+        candidateDbPath: claim.dbPath,
+        consume(): PreparedPromotionConsumeResult {
+          if (disposed) return { ok: false, reason: 'disposed' }
+          if (consumed) return { ok: false, reason: 'already-consumed' }
+          consumed = true
+          const capability: ExecutingPromotionCapability = {
+            token: claim.token,
+            sessionId: claim.sessionId,
+            candidateId: claim.candidateId,
+            retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
+            candidateDbPath: claim.dbPath,
+            authorization,
+            release: () => {
+              authorization.release()
+            },
+            isReleased: () => authorization.isReleased()
+          }
+          return { ok: true, capability }
+        },
+        isConsumed: () => consumed,
+        dispose: () => {
+          const wasConsumed = consumed
+          disposed = true
+          // Stale-safe: after consume, dispose never pulls the lease.
+          if (!wasConsumed) authorization.release()
+        },
+        isDisposed: () => disposed
+      }
+    }
+
+    /** Drive to `promoting` with a real-lease prepared handle. */
+    async function toPreparedWithRealLease(coordinator: ReturnType<typeof createMaintenanceCoordinator>) {
+      const { session } = await begin()
+      await toVerified(session)
+      const prepare = vi.fn(
+        async (claim: any): Promise<PromotionPreparationResult> => ({
+          ok: true,
+          handle: makePreparedHandleWithRealLease(claim, coordinator)
+        })
+      )
+      const outcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+      expect(outcome.status).toBe('prepared')
+      return { session }
+    }
+
+    itOnDarwin(
+      'C25: recovery-required keeps EVERY ordinary maintenance acquisition blocked on the real coordinator',
+      async () => {
+        const coordinator = createMaintenanceCoordinator()
+        const { session } = await toPreparedWithRealLease(coordinator)
+        const { executor, resolveRun } = makeExecutorDouble()
+        const { options } = makeExecOptions(executor)
+
+        const outcomePromise = startPromotionExecution(options)
+        resolveRun({ ok: false, failure: POST_INSTALL_FAILURE })
+        const outcome = await outcomePromise
+        expect(outcome.status).toBe('promotion-failed')
+        if (outcome.status !== 'promotion-failed') return
+        expect(outcome.recoveryHandoff).not.toBeNull()
+
+        // Public init/close and every other coordinator acquisition stay
+        // refused: the unverified installed replacement cannot be opened
+        // or mutated in-process before Phase 4.4.3 (LOCK-4425).
+        for (const kind of ['init', 'close', 'backup', 'restore', 'promotion'] as const) {
+          expect(coordinator.acquire(kind, 'maintenance-probe').granted).toBe(false)
+        }
+
+        // Stale teardown does not free the slot.
+        await session.dispose()
+        disposeActiveImport()
+        expect(coordinator.acquire('init', 'maintenance-probe').granted).toBe(false)
+
+        // Exact-once release through the handoff owner frees the slot
+        // (Phase 4.4.3 contract; process exit is the other release path).
+        outcome.recoveryHandoff!.capability.release()
+        expect(coordinator.acquire('init', 'maintenance-probe').granted).toBe(true)
+      }
+    )
+
+    itOnDarwin('C26: pre-install failure releases the real lease so maintenance can proceed', async () => {
+      const coordinator = createMaintenanceCoordinator()
+      const { session } = await toPreparedWithRealLease(coordinator)
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      // While promoting, the lease blocks maintenance.
+      expect(coordinator.acquire('init', 'maintenance-probe').granted).toBe(false)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({ ok: false, failure: EXEC_FAILURE })
+      const outcome = await outcomePromise
+      expect(outcome.status).toBe('promotion-failed')
+      if (outcome.status !== 'promotion-failed') return
+      expect(outcome.recoveryHandoff).toBeNull()
+      expect(getTerminalPromotionOwnership()).toBeNull()
+      expect(session.state).toBe('promotion-failed')
+
+      // Pre-install failure released the lease after quiesce: the live
+      // bytes were never replaced, ordinary maintenance may proceed.
+      expect(coordinator.acquire('init', 'maintenance-probe').granted).toBe(true)
+    })
   })
 })

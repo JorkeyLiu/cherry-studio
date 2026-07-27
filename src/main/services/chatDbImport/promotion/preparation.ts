@@ -34,7 +34,11 @@
  */
 
 import { loggerService } from '@logger'
-import { acquirePromotionLease, type MaintenanceCoordinator } from '@main/services/chatDb/maintenanceCoordination'
+import {
+  acquirePromotionLease,
+  type MaintenanceCoordinator,
+  type PromotionLeaseHandle
+} from '@main/services/chatDb/maintenanceCoordination'
 import type Database from 'better-sqlite3'
 
 import type { PromotionJournalV1 } from './journal'
@@ -110,10 +114,16 @@ export type PromotionPreparationResult =
  * Phase 4.4.2 consumes this for installation, verification, and journal
  * advancement. NEVER cross IPC with this.
  *
- * Ownership:
- * - The handle owns the promotion maintenance lease until {@link dispose}
- *   is called. Disposing the handle releases the lease (owner-safe,
- *   idempotent).
+ * Ownership (Phase 4.4.2, LOCK-4421/LOCK-4422):
+ * - The handle owns the promotion maintenance lease until it is either
+ *   disposed OR consumed — whichever happens first, exactly once.
+ * - {@link consume} transfers lease ownership to the returned executing
+ *   capability (the SAME lease — never released and reacquired). After a
+ *   successful consume, this handle is stale: it can never consume again,
+ *   and {@link dispose} becomes a lease-preserving no-op (stale disposers
+ *   must not pull the lease out from under the executing capability).
+ * - {@link dispose} before consume releases the lease (owner-safe,
+ *   idempotent) and permanently refuses any later consume.
  * - The exact-once claim token is embedded for alignment with
  *   {@link completePromotion}.
  */
@@ -130,14 +140,76 @@ export interface PreparedPromotionHandle {
   readonly candidateDbPath: string
 
   /**
-   * Release the promotion maintenance lease. Idempotent and owner-safe:
-   * releases only the exact granted lease. After dispose, the handle is
-   * consumed and must not be used for promotion operations.
+   * Exact-once destructive-capability transfer (LOCK-4421). The first call
+   * on an undisposed handle returns the executing capability owning the
+   * SAME promotion lease (LOCK-4422). Every later call — and any call
+   * after dispose — is refused with a bounded reason and has no effect.
+   */
+  consume(): PreparedPromotionConsumeResult
+
+  /** True once {@link consume} succeeded (ownership transferred). */
+  isConsumed(): boolean
+
+  /**
+   * Release the promotion maintenance lease. Idempotent and stale-safe:
+   * before consume it releases only the exact granted lease; after consume
+   * it is a no-op — the executing capability owns the release.
    */
   dispose(): void
 
   /** True once this handle has been disposed. */
   isDisposed(): boolean
+}
+
+/**
+ * Result of {@link PreparedPromotionHandle.consume}. Refusals are bounded:
+ * `already-consumed` (exact-once violated) or `disposed` (stale handle).
+ */
+export type PreparedPromotionConsumeResult =
+  | { readonly ok: true; readonly capability: ExecutingPromotionCapability }
+  | { readonly ok: false; readonly reason: 'already-consumed' | 'disposed' }
+
+/**
+ * Main-local executing capability produced by exact-once consumption of a
+ * {@link PreparedPromotionHandle} (Phase 4.4.2, LOCK-4421/LOCK-4422).
+ * NEVER cross IPC with this.
+ *
+ * Ownership:
+ * - Owns the SAME promotion maintenance lease held since preparation —
+ *   continuously, with no release/reacquire and no second mutex
+ *   (LOCK-4422). {@link release} is the single release duty.
+ * - {@link authorization} is the opaque promotion authorization presented
+ *   to promotion-owned live lifecycle entries (ChatDbService
+ *   closeForPromotion/reopenForPromotion), which validate it against the
+ *   coordinator before any lifecycle mutation. Once released, the
+ *   authorization is stale and can no longer act.
+ */
+export interface ExecutingPromotionCapability {
+  /** Exact-once claim token from {@link claimPromotion} (not reusable). */
+  readonly token: string
+  /** Import session identifier. */
+  readonly sessionId: string
+  /** Opaque candidate identifier (not a path). */
+  readonly candidateId: string
+  /** Absolute path to the confirmed retained rollback snapshot. */
+  readonly retainedSnapshotPath: string
+  /** Absolute path to the sealed candidate chat.db. */
+  readonly candidateDbPath: string
+
+  /**
+   * The continuously held promotion lease authorization (LOCK-4422).
+   * Presented for validation only — release goes through {@link release}.
+   */
+  readonly authorization: PromotionLeaseHandle
+
+  /**
+   * Release the promotion maintenance lease exactly once. Idempotent and
+   * owner-safe (a stale release can never disturb a newer holder).
+   */
+  release(): void
+
+  /** True once this capability released its lease. */
+  isReleased(): boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -319,9 +391,10 @@ function createPreparedHandle(
   candidateId: string,
   retainedSnapshotPath: string,
   candidateDbPath: string,
-  leaseHandle: ReturnType<typeof acquirePromotionLease>
+  leaseHandle: PromotionLeaseHandle
 ): PreparedPromotionHandle {
   let disposed = false
+  let consumed = false
 
   return {
     token,
@@ -330,9 +403,64 @@ function createPreparedHandle(
     retainedSnapshotPath,
     candidateDbPath,
 
+    consume(): PreparedPromotionConsumeResult {
+      // Exact-once (LOCK-4421): a disposed or already-consumed handle can
+      // never yield the destructive capability.
+      if (disposed) {
+        return { ok: false, reason: 'disposed' }
+      }
+      if (consumed) {
+        return { ok: false, reason: 'already-consumed' }
+      }
+      consumed = true
+
+      // Ownership transfer (LOCK-4422): the capability retains the SAME
+      // lease handle — no release/reacquire, no second mutex.
+      let released = false
+      const capability: ExecutingPromotionCapability = {
+        token,
+        sessionId,
+        candidateId,
+        retainedSnapshotPath,
+        candidateDbPath,
+        authorization: leaseHandle,
+
+        release(): void {
+          if (released) return
+          released = true
+          leaseHandle.release()
+          logger.info(`Executing promotion capability released for session ${sessionId} (lease released)`)
+        },
+
+        isReleased(): boolean {
+          return released
+        }
+      }
+
+      logger.info(
+        `Prepared promotion handle consumed for session ${sessionId} ` +
+          '(lease ownership transferred to the executing capability)'
+      )
+      return { ok: true, capability }
+    },
+
+    isConsumed(): boolean {
+      return consumed
+    },
+
     dispose(): void {
       if (disposed) return
       disposed = true
+      if (consumed) {
+        // Stale disposer (LOCK-4421): ownership already transferred — the
+        // executing capability owns the release. Never pull the lease out
+        // from under it.
+        logger.info(
+          `Prepared promotion handle disposed after consume for session ${sessionId} ` +
+            '(lease retained by the executing capability)'
+        )
+        return
+      }
       leaseHandle.release()
       logger.info(`Prepared promotion handle disposed for session ${sessionId} (lease released)`)
     },

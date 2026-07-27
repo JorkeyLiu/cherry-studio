@@ -179,10 +179,12 @@ vi.mock('node:fs', () => ({
 import { BetterSqlite3BackupAdapter, ChatDbBackup } from '../backup'
 import { ChatDbService, chatDbService } from '../index'
 import {
+  acquirePromotionLease,
   createMaintenanceCoordinator,
   getSharedMaintenanceCoordinator,
   isMaintenanceBusyError,
-  MaintenanceBusyError
+  MaintenanceBusyError,
+  type PromotionLeaseHandle
 } from '../maintenanceCoordination'
 import { MIGRATIONS, runMigrations } from '../migration'
 
@@ -956,5 +958,171 @@ describe('ChatDbService maintenance coordination wiring (LOCK-4416)', () => {
     expect(shared.currentHolder()).toBeNull()
     chatDbService.close()
     expect(shared.currentHolder()).toBeNull()
+  })
+})
+
+// ===========================================================================
+// Promotion-owned live lifecycle (Phase 4.4.2, LOCK-4422)
+// ===========================================================================
+
+describe('ChatDbService promotion-owned live lifecycle (LOCK-4422)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockSqliteInstances.length = 0
+    appliedMigrationKeys.length = 0
+    clearMemfs()
+  })
+
+  it('the same continuously held promotion lease authorizes internal close AND reopen', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+    await svc.init()
+
+    const promotion = acquirePromotionLease('import-session-1', coordinator)
+    expect(coordinator.currentHolder()).toEqual({ kind: 'promotion', ownerId: 'import-session-1' })
+
+    // Internal close: no nested lease acquisition — the promotion lease
+    // stays the holder throughout (no release/reacquire, no second mutex).
+    expect(svc.closeForPromotion(promotion)).toBe(true)
+    expect(svc.isInitialised()).toBe(false)
+    expect(coordinator.currentHolder()).toEqual({ kind: 'promotion', ownerId: 'import-session-1' })
+
+    // Internal reopen under the SAME lease.
+    await svc.reopenForPromotion(promotion)
+    expect(svc.isInitialised()).toBe(true)
+    expect(coordinator.currentHolder()).toEqual({ kind: 'promotion', ownerId: 'import-session-1' })
+
+    // Only the owner's release frees the slot.
+    expect(promotion.release()).toBe(true)
+    expect(coordinator.currentHolder()).toBeNull()
+    svc.close()
+  })
+
+  it('public init/close mutual exclusion is unchanged while promotion holds the lease', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+    await svc.init()
+
+    const promotion = acquirePromotionLease('import-session-1', coordinator)
+
+    // Public close() must NOT bypass the promotion lease (close-busy).
+    expect(svc.close()).toBe(false)
+    expect(svc.isInitialised()).toBe(true)
+
+    // Internal promotion-owned close works, then public init() is still
+    // refused with a structured busy error while promotion holds the slot.
+    expect(svc.closeForPromotion(promotion)).toBe(true)
+    await expect(svc.init()).rejects.toSatisfy((e: unknown) => isMaintenanceBusyError(e))
+    expect(svc.isInitialised()).toBe(false)
+
+    promotion.release()
+    // With the slot free, public init/close coordinate normally again.
+    await svc.init()
+    expect(svc.isInitialised()).toBe(true)
+    expect(svc.close()).toBe(true)
+    expect(coordinator.currentHolder()).toBeNull()
+  })
+
+  it('released (stale) promotion authorization cannot close the live DB', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+    await svc.init()
+
+    const promotion = acquirePromotionLease('import-session-1', coordinator)
+    promotion.release()
+
+    expect(() => svc.closeForPromotion(promotion)).toThrow(/promotion authorization invalid \(released\)/)
+    // Refused BEFORE lifecycle mutation: the live DB stays open.
+    expect(svc.isInitialised()).toBe(true)
+    svc.close()
+  })
+
+  it('released (stale) promotion authorization cannot reopen the live DB', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+    await svc.init()
+
+    const promotion = acquirePromotionLease('import-session-1', coordinator)
+    expect(svc.closeForPromotion(promotion)).toBe(true)
+    promotion.release()
+
+    await expect(svc.reopenForPromotion(promotion)).rejects.toThrow(/promotion authorization invalid \(released\)/)
+    expect(svc.isInitialised()).toBe(false)
+  })
+
+  it('a forged handle is refused: an ownerId string alone is never authorization', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+    await svc.init()
+
+    // A REAL promotion lease is held by someone else…
+    const genuine = acquirePromotionLease('import-session-1', coordinator)
+    // …and a forged structural handle claims the same ownerId.
+    const forged: PromotionLeaseHandle = {
+      ownerId: 'import-session-1',
+      isReleased: () => false,
+      release: () => true
+    }
+
+    expect(() => svc.closeForPromotion(forged)).toThrow(/promotion authorization invalid \(unrecognized-handle\)/)
+    await expect(svc.reopenForPromotion(forged)).rejects.toThrow(
+      /promotion authorization invalid \(unrecognized-handle\)/
+    )
+    expect(svc.isInitialised()).toBe(true)
+
+    genuine.release()
+    svc.close()
+  })
+
+  it('authorization granted on a foreign coordinator is refused', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const foreign = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+    await svc.init()
+
+    const foreignPromotion = acquirePromotionLease('import-session-1', foreign)
+    expect(() => svc.closeForPromotion(foreignPromotion)).toThrow(
+      /promotion authorization invalid \(foreign-coordinator\)/
+    )
+    expect(svc.isInitialised()).toBe(true)
+
+    foreignPromotion.release()
+    svc.close()
+  })
+
+  it('uncoordinated (candidate) instances refuse promotion-owned lifecycle entirely', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const promotion = acquirePromotionLease('import-session-1', coordinator)
+
+    const candidate = new ChatDbService('/mock/candidate')
+    await candidate.init()
+
+    expect(() => candidate.closeForPromotion(promotion)).toThrow(/not joined to a maintenance coordinator/)
+    await expect(candidate.reopenForPromotion(promotion)).rejects.toThrow(/not joined to a maintenance coordinator/)
+    expect(candidate.isInitialised()).toBe(true)
+
+    candidate.close()
+    promotion.release()
+  })
+
+  it('reopenForPromotion is idempotent while already open and refuses under the repair marker', async () => {
+    const coordinator = createMaintenanceCoordinator()
+    const svc = new ChatDbService('/mock/coord', coordinator)
+    await svc.init()
+
+    const promotion = acquirePromotionLease('import-session-1', coordinator)
+
+    // Already open: fast path, no second sqlite handle constructed.
+    const constructedBefore = MockDatabase.mock.calls.length
+    await svc.reopenForPromotion(promotion)
+    expect(MockDatabase.mock.calls.length).toBe(constructedBefore)
+
+    // Repair marker gates reopen exactly like public init().
+    expect(svc.closeForPromotion(promotion)).toBe(true)
+    memfs['/mock/coord/chat.db.repair'] = 'marker'
+    await expect(svc.reopenForPromotion(promotion)).rejects.toThrow(/repair-required/)
+    delete memfs['/mock/coord/chat.db.repair']
+
+    promotion.release()
   })
 })

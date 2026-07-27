@@ -41,6 +41,8 @@ vi.mock('@main/config', () => ({
 
 import { encodePromotionJournal, PROMOTION_JOURNAL_FILENAME, type PromotionJournalV1 } from '../journal'
 import {
+  advancePromotionJournalToCandidateInstalled,
+  advancePromotionJournalToReplacementVerified,
   getPromotionJournalPath,
   getPromotionJournalStagingPath,
   PROMOTION_JOURNAL_STAGING_FILENAME,
@@ -441,5 +443,319 @@ describe('promotion journal store (LOCK-4411..4417)', () => {
       realFs.mkdirSync(journalPath)
       await expectStoreError(readPromotionJournal(dataRoot), 'READ_IO_FAILED')
     })
+  })
+
+  // -------------------------------------------------------------------------
+  // Phase 4.4.2 — guarded phase transitions (LOCK-4423..LOCK-4425)
+  // -------------------------------------------------------------------------
+
+  describe('guarded phase transitions (LOCK-4423..4425)', () => {
+    const INSTALLED: PromotionJournalV1 = { ...VALID, phase: 'candidate-installed' }
+    const VERIFIED: PromotionJournalV1 = { ...VALID, phase: 'replacement-verified' }
+
+    /** Publish a journal document directly (setup only — canonical bytes). */
+    function seedJournal(doc: PromotionJournalV1): void {
+      realFs.writeFileSync(journalPath, encodePromotionJournal(doc), 'utf8')
+    }
+
+    /** Assert the durable journal bytes and the absence of staging leftovers. */
+    function expectDurableState(doc: PromotionJournalV1): void {
+      expect(realFs.readFileSync(journalPath, 'utf8')).toBe(encodePromotionJournal(doc))
+      expect(realFs.existsSync(stagingPath)).toBe(false)
+    }
+
+    /** Wrap fsp.open so a named FileHandle method rejects once (staging or dir). */
+    function injectHandleFault(method: 'writeFile' | 'sync' | 'close', forDir: boolean): void {
+      const realOpen = fsp.open
+      vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+        const isDir = String(args[0]) === dataRoot
+        const handle = await realOpen.apply(fsp, args)
+        if (isDir === forDir) {
+          const original = handle[method].bind(handle)
+          let injected = false
+          ;(handle as unknown as Record<string, unknown>)[method] = async (...callArgs: unknown[]) => {
+            if (!injected) {
+              injected = true
+              throw errnoError('EIO')
+            }
+            return (original as (...a: unknown[]) => Promise<unknown>)(...callArgs)
+          }
+        }
+        return handle
+      })
+    }
+
+    // -- success ordering ----------------------------------------------------
+
+    it('advances snapshot-ready → candidate-installed → replacement-verified with exact bytes', async () => {
+      await writeSnapshotReadyPromotionJournal(VALID, dataRoot)
+      expectDurableState(VALID)
+
+      await advancePromotionJournalToCandidateInstalled(INSTALLED, dataRoot)
+      expectDurableState(INSTALLED)
+      expect(await readPromotionJournal(dataRoot)).toEqual({ status: 'valid', journal: INSTALLED })
+
+      await advancePromotionJournalToReplacementVerified(VERIFIED, dataRoot)
+      expectDurableState(VERIFIED)
+      expect(await readPromotionJournal(dataRoot)).toEqual({ status: 'valid', journal: VERIFIED })
+    })
+
+    it.each([
+      ['candidate-installed', () => seedJournal(VALID), INSTALLED, advancePromotionJournalToCandidateInstalled],
+      ['replacement-verified', () => seedJournal(INSTALLED), VERIFIED, advancePromotionJournalToReplacementVerified]
+    ] as const)(
+      'transition to %s runs guard-read → staging-open → write → file-sync → close → rename → dir-sync',
+      async (_phase, seed, doc, api) => {
+        seed()
+
+        const events: string[] = []
+        const realRead = fsp.readFile
+        const realOpen = fsp.open
+        const realRename = fsp.rename
+
+        vi.spyOn(fsp, 'readFile').mockImplementation(async (...args: Parameters<typeof fsp.readFile>) => {
+          events.push('guard-read')
+          return realRead.apply(fsp, args)
+        })
+        vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+          const target = String(args[0])
+          const isDir = target === dataRoot
+          const handle = await realOpen.apply(fsp, args)
+          events.push(isDir ? 'dir-open' : `staging-open:${path.basename(target)}`)
+
+          const realWriteFile = handle.writeFile.bind(handle)
+          const realSync = handle.sync.bind(handle)
+          const realClose = handle.close.bind(handle)
+          handle.writeFile = async (...writeArgs: Parameters<typeof realWriteFile>) => {
+            events.push('write')
+            return realWriteFile(...writeArgs)
+          }
+          handle.sync = async () => {
+            events.push(isDir ? 'dir-sync' : 'file-sync')
+            return realSync()
+          }
+          handle.close = async () => {
+            events.push(isDir ? 'dir-close' : 'file-close')
+            return realClose()
+          }
+          return handle
+        })
+        vi.spyOn(fsp, 'rename').mockImplementation(async (...args: Parameters<typeof fsp.rename>) => {
+          events.push('rename')
+          return realRename.apply(fsp, args)
+        })
+
+        await api(doc, dataRoot)
+
+        expect(events).toEqual([
+          'guard-read',
+          `staging-open:${PROMOTION_JOURNAL_STAGING_FILENAME}`,
+          'write',
+          'file-sync',
+          'file-close',
+          'rename',
+          'dir-open',
+          'dir-sync',
+          'dir-close'
+        ])
+        expectDurableState(doc)
+      }
+    )
+
+    // -- API document gate (wrong phase handed to the API) ---------------------
+
+    it.each([
+      ['snapshot-ready', advancePromotionJournalToCandidateInstalled],
+      ['replacement-verified', advancePromotionJournalToCandidateInstalled],
+      ['snapshot-ready', advancePromotionJournalToReplacementVerified],
+      ['candidate-installed', advancePromotionJournalToReplacementVerified]
+    ] as const)(
+      'a document with phase %s handed to the wrong transition API → PHASE_NOT_WRITABLE, no read/mutation',
+      async (phase, api) => {
+        seedJournal(VALID)
+        const readSpy = vi.spyOn(fsp, 'readFile')
+        const openSpy = vi.spyOn(fsp, 'open')
+
+        const doc: PromotionJournalV1 = { ...VALID, phase }
+        await expectStoreError(api(doc, dataRoot), 'PHASE_NOT_WRITABLE')
+
+        expect(readSpy).not.toHaveBeenCalled()
+        expect(openSpy).not.toHaveBeenCalled()
+        expectDurableState(VALID)
+      }
+    )
+
+    it('rejects empty data roots with DATA_ROOT_REJECTED before any effect', async () => {
+      await expectStoreError(advancePromotionJournalToCandidateInstalled(INSTALLED, ''), 'DATA_ROOT_REJECTED')
+      await expectStoreError(advancePromotionJournalToReplacementVerified(VERIFIED, ''), 'DATA_ROOT_REJECTED')
+    })
+
+    // -- guard rejection classes (all pre-mutation) ----------------------------
+
+    it.each([
+      ['candidate-installed', INSTALLED, advancePromotionJournalToCandidateInstalled],
+      ['replacement-verified', VERIFIED, advancePromotionJournalToReplacementVerified]
+    ] as const)('absent journal → TRANSITION_JOURNAL_ABSENT for %s; nothing created', async (_phase, doc, api) => {
+      await expectStoreError(api(doc, dataRoot), 'TRANSITION_JOURNAL_ABSENT')
+      expect(realFs.existsSync(journalPath)).toBe(false)
+      expect(realFs.existsSync(stagingPath)).toBe(false)
+    })
+
+    it.each([
+      ['candidate-installed', INSTALLED, advancePromotionJournalToCandidateInstalled],
+      ['replacement-verified', VERIFIED, advancePromotionJournalToReplacementVerified]
+    ] as const)(
+      'invalid journal → TRANSITION_JOURNAL_INVALID for %s; invalid bytes preserved (LOCK-4425)',
+      async (_phase, doc, api) => {
+        realFs.writeFileSync(journalPath, 'not json {', 'utf8')
+        await expectStoreError(api(doc, dataRoot), 'TRANSITION_JOURNAL_INVALID')
+        expect(realFs.readFileSync(journalPath, 'utf8')).toBe('not json {')
+        expect(realFs.existsSync(stagingPath)).toBe(false)
+      }
+    )
+
+    it.each([
+      ['candidate-installed', INSTALLED, advancePromotionJournalToCandidateInstalled],
+      ['replacement-verified', VERIFIED, advancePromotionJournalToReplacementVerified]
+    ] as const)(
+      'guard-read I/O failure → READ_IO_FAILED for %s (never absent); no mutation',
+      async (_phase, doc, api) => {
+        seedJournal(VALID)
+        vi.spyOn(fsp, 'readFile').mockRejectedValueOnce(errnoError('EACCES'))
+        await expectStoreError(api(doc, dataRoot), 'READ_IO_FAILED')
+        expectDurableState(VALID)
+      }
+    )
+
+    it('phase skip snapshot-ready → replacement-verified → TRANSITION_PHASE_MISMATCH; journal preserved', async () => {
+      seedJournal(VALID)
+      await expectStoreError(
+        advancePromotionJournalToReplacementVerified(VERIFIED, dataRoot),
+        'TRANSITION_PHASE_MISMATCH'
+      )
+      expectDurableState(VALID)
+    })
+
+    it.each([
+      ['candidate-installed', INSTALLED, advancePromotionJournalToCandidateInstalled],
+      ['replacement-verified', VERIFIED, advancePromotionJournalToCandidateInstalled]
+    ] as const)(
+      'phase regression/repeat from %s to candidate-installed → TRANSITION_PHASE_MISMATCH; journal preserved',
+      async (_priorPhase, prior, api) => {
+        seedJournal(prior)
+        await expectStoreError(api(INSTALLED, dataRoot), 'TRANSITION_PHASE_MISMATCH')
+        expectDurableState(prior)
+      }
+    )
+
+    it('repeat replacement-verified transition → TRANSITION_PHASE_MISMATCH; journal preserved', async () => {
+      seedJournal(INSTALLED)
+      await advancePromotionJournalToReplacementVerified(VERIFIED, dataRoot)
+      await expectStoreError(
+        advancePromotionJournalToReplacementVerified(VERIFIED, dataRoot),
+        'TRANSITION_PHASE_MISMATCH'
+      )
+      expectDurableState(VERIFIED)
+    })
+
+    it.each([
+      ['sessionId', { sessionId: 'import-other-session' }],
+      ['candidateId', { candidateId: 'candidate-import-other' }]
+    ] as const)(
+      'cross-%s replacement → TRANSITION_IDENTITY_MISMATCH for both transitions; journal preserved',
+      async (_field, overrides) => {
+        seedJournal(VALID)
+        await expectStoreError(
+          advancePromotionJournalToCandidateInstalled({ ...INSTALLED, ...overrides }, dataRoot),
+          'TRANSITION_IDENTITY_MISMATCH'
+        )
+        expectDurableState(VALID)
+
+        seedJournal(INSTALLED)
+        await expectStoreError(
+          advancePromotionJournalToReplacementVerified({ ...VERIFIED, ...overrides }, dataRoot),
+          'TRANSITION_IDENTITY_MISMATCH'
+        )
+        expectDurableState(INSTALLED)
+      }
+    )
+
+    it('a rejected transition performs no staging or publish mutation (no fs.open/rename after guard)', async () => {
+      seedJournal(VALID)
+      const openSpy = vi.spyOn(fsp, 'open')
+      const renameSpy = vi.spyOn(fsp, 'rename')
+
+      await expectStoreError(
+        advancePromotionJournalToReplacementVerified(VERIFIED, dataRoot),
+        'TRANSITION_PHASE_MISMATCH'
+      )
+      await expectStoreError(
+        advancePromotionJournalToCandidateInstalled({ ...INSTALLED, sessionId: 'import-other-session' }, dataRoot),
+        'TRANSITION_IDENTITY_MISMATCH'
+      )
+
+      expect(openSpy).not.toHaveBeenCalled()
+      expect(renameSpy).not.toHaveBeenCalled()
+      expectDurableState(VALID)
+    })
+
+    // -- fault injection at every durability step for later phases -------------
+
+    const transitionCases = [
+      ['candidate-installed', VALID, INSTALLED, advancePromotionJournalToCandidateInstalled],
+      ['replacement-verified', INSTALLED, VERIFIED, advancePromotionJournalToReplacementVerified]
+    ] as const
+
+    it.each(transitionCases)(
+      '%s: staging write failure → STAGING_WRITE_FAILED; prior journal remains authoritative (LOCK-4425)',
+      async (_phase, prior, doc, api) => {
+        seedJournal(prior)
+        injectHandleFault('writeFile', false)
+        await expectStoreError(api(doc, dataRoot), 'STAGING_WRITE_FAILED')
+        expectDurableState(prior)
+      }
+    )
+
+    it.each(transitionCases)(
+      '%s: staging fsync failure → STAGING_SYNC_FAILED; prior journal remains authoritative',
+      async (_phase, prior, doc, api) => {
+        seedJournal(prior)
+        injectHandleFault('sync', false)
+        await expectStoreError(api(doc, dataRoot), 'STAGING_SYNC_FAILED')
+        expectDurableState(prior)
+      }
+    )
+
+    it.each(transitionCases)(
+      '%s: staging close failure → STAGING_CLOSE_FAILED; prior journal remains authoritative',
+      async (_phase, prior, doc, api) => {
+        seedJournal(prior)
+        injectHandleFault('close', false)
+        await expectStoreError(api(doc, dataRoot), 'STAGING_CLOSE_FAILED')
+        expectDurableState(prior)
+      }
+    )
+
+    it.each(transitionCases)(
+      '%s: publish rename failure → PUBLISH_RENAME_FAILED; prior journal remains authoritative',
+      async (_phase, prior, doc, api) => {
+        seedJournal(prior)
+        vi.spyOn(fsp, 'rename').mockRejectedValueOnce(errnoError('EIO'))
+        await expectStoreError(api(doc, dataRoot), 'PUBLISH_RENAME_FAILED')
+        expectDurableState(prior)
+      }
+    )
+
+    it.each(transitionCases)(
+      '%s: parent dir fsync failure → PARENT_DIR_SYNC_FAILED; new bytes published, durability unproven',
+      async (_phase, _prior, doc, api) => {
+        seedJournal(_prior)
+        injectHandleFault('sync', true)
+        await expectStoreError(api(doc, dataRoot), 'PARENT_DIR_SYNC_FAILED')
+        // The rename already happened — the new phase is on disk, but the
+        // caller was told the publish is not proven durable. No staging left.
+        expectDurableState(doc)
+      }
+    )
   })
 })
