@@ -1,4 +1,4 @@
-# Cherry Studio SQLite 迁移文档
+# SQLite 运行时迁移与 Cherry Studio 兼容导入 — 个人 fork 演进记录（面向未来独立 Cherry Chat）
 
 > **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（本地完成，未提交/未推送）；Phase 4.4+ 未开始）
 > **分支**：`jorkey/refactor/sqlite-migration`
@@ -8,6 +8,17 @@
 > ⚠️ **ADR-8 策略更正（2026-07-20）**：Phase 4+ 的产品策略已更正为**外部应用兼容性导入**模型。原 in-place Dexie→SQLite shadow/cutover 模型已正式废弃。详见 Section 6 A-8。
 
 ---
+
+> ## 顶层定位（阅读前必读）
+>
+> 本文档是个人 fork（jorkeyliu）的**演进记录**，该 fork 是通往**未来独立 Cherry Chat 应用 / 新仓库**的**开发载体**。当前每个阶段（自 Phase 0 起）都服务于这个独立目标，而**不是**把现有 Cherry Studio 本体就地升级为 SQLite 版本后发布。
+>
+> 全文中存在三条必须区分的**生命周期 / 范围**（详细边界见 Section 2「三条生命周期」）：
+> - **L1 内部 SQLite 运行时演进**：个人 fork 内演进的 SQLite-authoritative 运行时（连接管理、schema migration、integrity 校验、备份协调，最终 SQLite-only runtime）。
+> - **L2 Cherry Studio ZIP 兼容导入**：一次性、用户主动选择的兼容导入——用户在 Cherry Chat 中选定一个 Cherry Studio ZIP 备份导入其数据。
+> - **L3 Cherry Chat 备份/恢复**：沿用现有 Cherry Studio 已有的用户侧本地/WebDAV/S3 备份与恢复产品行为，并适配 SQLite-authoritative 的 chat.db；与 L2 是不同产品语义（L2 为跨应用 ZIP 兼容导入，L3 为同应用备份/恢复），二者 UX 可复用既有组件/基础设施但不改变其独立性。底层一致性快照由 Phase 1 已集成的 better-sqlite3 online backup 机制提供，属存储层能力而非新的产品操作。
+>
+> **关键边界**：最终 Cherry Chat 以自身空数据启动，显式导入用户选定的 Cherry Studio ZIP；不扫描磁盘、不共享目录、不在启动时静默迁移、无就地升级语义。L2 与 L3 虽未来 UI 组件可能复用，但产品语义相互独立。
 
 ## 1. 背景与目标
 
@@ -30,6 +41,16 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 ## 2. 范围与非目标
 
+### 三条生命周期（范围边界）
+
+| 生命周期 | 含义 | 对应阶段 | 产品语义 |
+|---|---|---|---|
+| **L1 · 内部 SQLite 运行时演进** | 个人 fork 内演进的 SQLite-authoritative 运行时：连接管理、schema migration、integrity 校验、备份协调，最终 SQLite-only runtime（Dexie 路由移除） | Phase 0–3、Phase 5 | fork 内部能力演进，为独立 Cherry Chat 提供目标数据库与写入通道 |
+| **L2 · Cherry Studio ZIP 兼容导入** | 一次性、用户主动选择的兼容导入操作：用户在 Cherry Chat 中选定 Cherry Studio ZIP 备份，导入其数据 | Phase 4（4.0–4.4） | 跨应用兼容导入；replace-all 语义；非 in-place 升级 |
+| **L3 · Cherry Chat 备份/恢复** | 沿用现有 Cherry Studio 本地/WebDAV/S3 备份与恢复产品流程，并适配 SQLite-authoritative 的 chat.db | Phase 6 | 同应用备份/恢复，产品语义独立于 L2（跨应用 ZIP 导入）；底层快照为 Phase 1 的 better-sqlite3 online backup 存储层机制 |
+
+**边界约束（LOCK-003/004）**：最终 Cherry Chat 以自身空数据启动，显式导入用户选定的 Cherry Studio ZIP；不扫描磁盘查找其他应用、不要求共享目录、不在启动时静默迁移、无就地升级语义。L2（Cherry Studio 跨应用 ZIP 兼容导入）与 L3（Cherry Chat 备份/恢复，沿用现有产品流程并适配 chat.db）是不同产品语义，未来 UI 组件/基础设施可复用但不改变其独立性。
+
 ### 当前范围（Phase 0–3：基础设施）
 
 - `topics`、`messages`、`message_blocks`、`topic_segments` 及必要的 file references
@@ -37,14 +58,14 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 - 连接生命周期、migration 框架、integrity 校验、backup coordination
 - Renderer→Main 的 command-oriented typed IPC 收口
 
-### 最终范围（Phase 4–6：外部导入与 SQLite-only runtime）
+### 最终范围（Phase 4–6：L2 Cherry Studio ZIP 兼容导入 + L1 Cherry Chat SQLite-only 运行时）
 
 - 安全解压 Cherry Studio ZIP 到隔离临时工作区
 - 通过隔离 Electron Session/Profile + 隐藏 sandboxed import renderer 读取源 IndexedDB
 - 分页逻辑数据通过窄 IPC 通道传输
 - 构建候选 SQLite 数据库、验证、原子替换
-- SQLite-only 运行时完成，Dexie 路由移除
-- Cherry Chat 自身备份/恢复与 Cherry Studio ZIP 导入的 UX 分离
+- Cherry Chat SQLite-only 运行时完成，Dexie 路由移除
+- 沿用现有 Cherry Studio 备份/恢复产品流程（适配 chat.db）的 Cherry Chat 同应用备份/恢复，与 Cherry Studio ZIP 导入的 UX 分离
 
 ### 非目标（明确排除）
 
@@ -119,7 +140,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | C-2 | `package.json` 中 `drizzle-kit` devDependency | A-7 已 Accepted：**保留，配置指向 chat.db schema** |
 | C-3 | `package.json` 中 `drizzle-orm` dependency | A-7 已 Accepted：**保留，配置指向 chat.db schema** |
 
-### Group D：SQLite-only 运行时完成后处理（依赖 Phase 5 SQLite-only runtime 完成）
+### Group D：Cherry Chat SQLite-only 运行时完成后处理（依赖 Phase 5 SQLite-only runtime 完成）
 
 | # | 项目 | 条件 |
 |---|---|---|
@@ -479,7 +500,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **约束** | promotion 短时不可取消；保留一个回滚快照；重开/检查 DB；成功后 relaunch |
 | **退出条件** | ✅ 原子替换成功 → reopen → relaunch 流程完成；✅ 失败回滚到快照 DB 流程验证；✅ 一个回滚快照保留 |
 
-### Phase 5：SQLite-only 运行时完成
+### Phase 5：Cherry Chat SQLite-only 运行时完成
 
 | 属性 | 值 |
 |---|---|
@@ -489,15 +510,15 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **主要任务** | DbService 默认路由直连 SQLite（无 Dexie 路由、无 routingPolicy 注入策略）；移除 Phase 3.4 路由策略代码（C-13）；Dexie 仅保留在隔离 import renderer 内部；从普通聊天路径移除 DexieMessageDataSource（C-11）；清理 Renderer 直接 Dexie 访问（C-10）；性能基准验证（不低于 Dexie 基线） |
 | **退出条件** | ✅ 普通聊天路径无 Dexie 依赖；✅ Phase 3.4 routing scaffolding 完全移除；✅ 性能不低于 Dexie 基线；✅ 所有现有测试通过；✅ CI 绿色 |
 
-### Phase 6：Cherry Chat 备份/恢复分离、UX 硬化、清理
+### Phase 6：Cherry Chat 备份/恢复适配、L2/L3 UX 语义分离、清理
 
 | 属性 | 值 |
 |---|---|
 | **状态** | Not started |
 | **前置** | Phase 5 完成 |
-| **目标** | Cherry Chat 自身备份/恢复与 Cherry Studio ZIP 导入的 UX 完全分离；清理所有遗留 |
-| **主要任务** | Cherry Chat 原生备份/恢复（SQLite online backup）独立于 Cherry Studio ZIP 导入 UX；清理 Group D + Group E 遗留项；更新文档；确认备份协调完整；移除不再需要的隔离 import renderer 代码（如果已完成导入且不再需要） |
-| **退出条件** | ✅ Cherry Chat 备份/恢复独立运作；✅ Cherry Studio ZIP 导入作为一次性操作独立运作；✅ Group D/E 清理完成；✅ 文档更新；✅ CI 绿色 |
+| **目标** | 在 SQLite-authoritative 的 Cherry Chat 上，沿用并适配现有 Cherry Studio 本地/WebDAV/S3 备份与恢复产品流程以对接 chat.db；并将该同应用备份/恢复（L3）与 Cherry Studio ZIP 跨应用兼容导入（L2）的 UX 语义清晰分离；清理所有遗留 |
+| **主要任务** | 沿用现有 Cherry Studio 备份/恢复产品行为并适配 chat.db（底层一致性快照由 Phase 1 集成的 better-sqlite3 online backup 机制提供，存储层已就绪，Phase 6 完成产品侧对接与硬化），与 Cherry Studio ZIP 导入 UX 在语义上分离；清理 Group D + Group E 遗留项；更新文档；确认备份协调完整；移除不再需要的隔离 import renderer 代码（如果已完成导入且不再需要） |
+| **退出条件** | ✅ Cherry Chat 备份/恢复（沿用现有产品流程、适配 chat.db）独立运作；✅ Cherry Studio ZIP 导入作为一次性操作独立运作；✅ L2/L3 产品语义清晰分离；✅ Group D/E 清理完成；✅ 文档更新；✅ CI 绿色 |
 
 ---
 
@@ -608,7 +629,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 备份并发 | 多来源同时触发备份导致冲突 | 备份操作全局互斥 |
 | 文件系统非事务 | SQLite 文件操作非原子 | WAL 模式；备份使用临时文件+rename |
 | 多窗口并发 | 多个 Renderer 窗口同时写入 | Main 单写；Renderer 通过 IPC 串行化 |
-| 旧备份兼容 | 迁移后备份格式变化 | Cherry Chat 原生备份（Phase 6）与 Cherry Studio ZIP 导入分离 |
+| 旧备份兼容 | 迁移后备份格式变化 | Cherry Chat 备份/恢复沿用现有 Cherry Studio 产品流程并适配 chat.db（L3），与 Cherry Studio ZIP 导入（L2）语义分离 |
 | 性能未知 | SQLite 在 Electron 中的实际表现未测试 | Phase 5 切换前必须完成基准测试 |
 | 技术栈选型 | ~~libSQL+Drizzle 可能不是最优选择~~ | **Resolved**（A-7 Accepted：better-sqlite3 + Drizzle） |
 
@@ -628,7 +649,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 原子 promotion | 成功 → reopen + relaunch；失败 → 回滚到快照 | Not started |
 | 取消支持 | promotion 前任意步骤取消不损坏现有 DB（含 4.3 close-before-discard） | **Done** |
 
-### Phase 5 exit criteria（SQLite-only runtime）
+### Phase 5 exit criteria（Cherry Chat SQLite-only runtime）
 
 | 指标 | 目标 | 状态 |
 |---|---|---|
@@ -640,11 +661,11 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | Phase 3.4 routing scaffolding | 完全移除 | Not started |
 | 所有测试通过 + CI 绿色 | 100% | Not started |
 
-### Phase 6 exit criteria（备份/恢复分离 + 清理）
+### Phase 6 exit criteria（备份/恢复适配 + L2/L3 语义分离 + 清理）
 
 | 指标 | 目标 | 状态 |
 |---|---|---|
-| Cherry Chat 原生备份/恢复 | 独立运作（online backup adapter） | Not started |
+| Cherry Chat 备份/恢复 | 沿用现有产品流程并适配 chat.db，独立运作（底层 better-sqlite3 online backup 为 Phase 1 存储层机制） | Not started |
 | Cherry Studio ZIP 导入 | 作为一次性操作独立运作 | Not started |
 | Group D/E 清理 | 全部完成 | Not started |
 | 文档更新 | 反映最终状态 | Not started |
@@ -652,7 +673,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 **Go 条件（Phase 4→5）**：
 - Phase 4 所有 exit criteria 通过
-- 至少一次成功端到端导入（真实 Cherry Studio ZIP → SQLite-only runtime）
+- 至少一次成功端到端导入（真实 Cherry Studio ZIP → Cherry Chat SQLite-only runtime）
 
 **No-Go 条件**：
 - Phase 4.0 spike 失败且 helper 进程回退不可行
