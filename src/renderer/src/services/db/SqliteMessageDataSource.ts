@@ -36,6 +36,8 @@ import type {
   DeleteMessagesWithSegmentsRequest,
   DeleteMessagesWithSegmentsResponse,
   DeleteSegmentRequest,
+  EmptyTrashTopicsRequest,
+  EmptyTrashTopicsResponse,
   EnsureTopicRequest,
   FetchMessagesRequest,
   FetchMessagesResponse,
@@ -64,6 +66,7 @@ import type {
   ResetMessagesForResendRequest,
   ResetMessagesForResendResponse,
   RestoreTopicRequest,
+  RestoreTopicResponse,
   SearchMessagesRequest,
   SearchMessagesResponse,
   SoftDeleteTopicRequest,
@@ -122,10 +125,12 @@ export interface ChatDbApi {
   // Phase 5.1B: topic lifecycle
   updateTopicMetadata(request: UpdateTopicMetadataRequest): Promise<ChatDbResult<UpdateTopicMetadataResponse>>
   softDeleteTopic(request: SoftDeleteTopicRequest): Promise<ChatDbResult<null>>
-  restoreTopic(request: RestoreTopicRequest): Promise<ChatDbResult<null>>
+  restoreTopic(request: RestoreTopicRequest): Promise<ChatDbResult<RestoreTopicResponse>>
   listTrashTopics(request: ListTrashTopicsRequest): Promise<ChatDbResult<ListTrashTopicsResponse>>
   hardDeleteTopic(request: HardDeleteTopicRequest): Promise<ChatDbResult<HardDeleteTopicResponse>>
   purgeExpiredTopics(request: PurgeExpiredTopicsRequest): Promise<ChatDbResult<PurgeExpiredTopicsResponse>>
+  // Phase 5.2B: atomic assistant empty-trash (LOCK-531)
+  emptyTrashTopics(request: EmptyTrashTopicsRequest): Promise<ChatDbResult<EmptyTrashTopicsResponse>>
   // Phase 5.1B: compound mutations
   cloneMessagesToTopic(request: CloneMessagesToTopicRequest): Promise<ChatDbResult<CloneMessagesToTopicResponse>>
   resetMessagesForResend(request: ResetMessagesForResendRequest): Promise<ChatDbResult<ResetMessagesForResendResponse>>
@@ -477,8 +482,11 @@ export class SqliteMessageDataSource implements MessageDataSource {
     return unwrap(await this.api.topicExists(request))
   }
 
-  async ensureTopic(topicId: string): Promise<void> {
-    const request: EnsureTopicRequest = cloneForWire({ topicId })
+  async ensureTopic(topicId: string, assistantId?: string): Promise<void> {
+    // LOCK-533: creation paths pass assistantId so ordinary topics exist in
+    // SQLite with their assistant ownership before Redux exposure. ensure is
+    // create-only on Main: an existing topic's binding is never overwritten.
+    const request: EnsureTopicRequest = cloneForWire({ topicId, assistantId })
     unwrap(await this.api.ensureTopic(request))
     // No topicUpdatedAt dispatch — create-only, doesn't update existing
   }
@@ -563,10 +571,15 @@ export class SqliteMessageDataSource implements MessageDataSource {
     dispatchTopicUpdatedAt(topicId)
   }
 
-  async restoreTopic(topicId: string): Promise<void> {
+  async restoreTopic(topicId: string): Promise<RestoreTopicResponse> {
+    // LOCK-532: one Main command that atomically restores and returns the
+    // restored TopicWire, or null when no soft-deleted row was restored.
     const request: RestoreTopicRequest = cloneForWire({ topicId })
-    unwrap(await this.api.restoreTopic(request))
-    dispatchTopicUpdatedAt(topicId)
+    const restored = unwrap(await this.api.restoreTopic(request))
+    if (restored !== null) {
+      dispatchTopicUpdatedAt(topicId)
+    }
+    return restored
   }
 
   async listTrashTopics(assistantId?: string, limit?: number, cursor?: string): Promise<ListTrashTopicsResponse> {
@@ -584,6 +597,15 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async purgeExpiredTopics(cutoffTimestamp: string): Promise<FileCleanupResult> {
     const request: PurgeExpiredTopicsRequest = cloneForWire({ cutoffTimestamp })
     return unwrap(await this.api.purgeExpiredTopics(request))
+  }
+
+  /**
+   * Empty an assistant's trash in ONE atomic Main transaction (LOCK-531).
+   * Returns the single aggregate FileCleanupResult of the transaction.
+   */
+  async emptyTrashTopics(assistantId: string): Promise<FileCleanupResult> {
+    const request: EmptyTrashTopicsRequest = cloneForWire({ assistantId })
+    return unwrap(await this.api.emptyTrashTopics(request))
   }
 
   // ============ Compound Mutations (Phase 5.1B) ============

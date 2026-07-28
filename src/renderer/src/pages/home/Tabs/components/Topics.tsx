@@ -17,6 +17,13 @@ import { useSettings } from '@renderer/hooks/useSettings'
 import { finishTopicRenaming, startTopicRenaming, TopicManager } from '@renderer/hooks/useTopic'
 import { fetchMessagesSummary } from '@renderer/services/ApiService'
 import { getDefaultTopic } from '@renderer/services/AssistantService'
+import {
+  emptyOrdinaryTrash,
+  ensureOrdinaryTopicOwnership,
+  hardDeleteOrdinaryTopic,
+  purgeExpiredOrdinaryTopics,
+  restoreOrdinaryTopic
+} from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
 import store from '@renderer/store'
@@ -24,6 +31,7 @@ import { newMessagesActions } from '@renderer/store/newMessage'
 import { setGenerating } from '@renderer/store/runtime'
 import type { Assistant, Topic } from '@renderer/types'
 import { classNames, removeSpecialCharactersForFileName } from '@renderer/utils'
+import { isAgentSessionTopicId } from '@renderer/utils/agentSession'
 import { copyTopicAsMarkdown, copyTopicAsPlainText } from '@renderer/utils/copy'
 import {
   exportMarkdownToJoplin,
@@ -61,6 +69,7 @@ import { useTranslation } from 'react-i18next'
 import { useDispatch, useSelector } from 'react-redux'
 import styled from 'styled-components'
 
+import { deleteTopicFlow } from './topicDeletionFlow'
 import { TopicManagePanel, useTopicManageMode } from './TopicManageMode'
 import { TopicTrashPanel } from './TopicTrashPanel'
 
@@ -98,12 +107,18 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   const { isManageMode, selectedIds, searchText, enterManageMode, exitManageMode, toggleSelectTopic } = manageState
 
   const { startEdit, isEditing, inputProps } = useInPlaceEdit({
-    onSave: (name: string) => {
+    onSave: async (name: string) => {
       const topic = assistant.topics.find((t) => t.id === editingTopicId)
       if (topic && name !== topic.name) {
         const updatedTopic = { ...topic, name, isNameManuallyEdited: true }
-        updateTopic(updatedTopic)
-        window.toast.success(t('common.saved'))
+        try {
+          // Phase 5.2B: SQLite persists before Redux (LOCK-528). On failure the
+          // optimistic edit is dropped and Redux is left unchanged.
+          await updateTopic(updatedTopic)
+          window.toast.success(t('common.saved'))
+        } catch (error) {
+          logger.error('Failed to persist topic rename', error as Error)
+        }
       }
       setEditingTopicId(null)
     },
@@ -125,6 +140,10 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
 
   // Purge expired trash topics on first mount
   useEffect(() => {
+    // Phase 5.2B: ordinary-chat purge runs against SQLite with a renderer
+    // generated strict ISO cutoff (LOCK-523). The Dexie purge below is kept
+    // only for agent-session topics and pre-migration Dexie rows (LOCK-521).
+    purgeExpiredOrdinaryTopics().catch((err) => logger.error('Failed to purge expired ordinary topics:', err))
     TopicManager.purgeExpiredTopics().catch((err) => logger.error('Failed to purge expired topics:', err))
   }, [logger])
 
@@ -156,12 +175,23 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
 
   const handleRestoreTopic = useCallback(
     async (topicId: string) => {
-      await TopicManager.restoreTopic(topicId)
-      const topic = await TopicManager.getTopic(topicId)
-      if (topic) {
-        const restoredTopic = { ...(topic as Topic) }
-        delete restoredTopic.deletedAt
-        addTopic(restoredTopic)
+      // Phase 5.2B: classify at the boundary (LOCK-521). Ordinary restore is
+      // SQLite; agent-session restore keeps its Dexie behavior.
+      if (isAgentSessionTopicId(topicId)) {
+        await TopicManager.restoreTopic(topicId)
+        const topic = await TopicManager.getTopic(topicId)
+        if (topic) {
+          const restoredTopic = { ...(topic as Topic) }
+          delete restoredTopic.deletedAt
+          addTopic(restoredTopic)
+        }
+      } else {
+        // LOCK-532: one atomic Main command returns the restored row; only
+        // that returned row is exposed to Redux (never a stale snapshot).
+        const restoredTopic = await restoreOrdinaryTopic(topicId)
+        if (restoredTopic) {
+          addTopic(restoredTopic)
+        }
       }
       refreshTrashTopics()
     },
@@ -174,51 +204,88 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     void EventEmitter.emit(EVENT_NAMES.CLEAR_MESSAGES, topic)
   }, [])
 
+  const createPersistedReplacement = useCallback(async () => {
+    const newTopic = getDefaultTopic(assistant.id)
+    // LOCK-533: SQLite assistant ownership first, then the Dexie
+    // message-store row. Redux exposure happens only after the delete
+    // committed (inside deleteTopicFlow).
+    await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id)
+    await db.topics.add({ id: newTopic.id, messages: [] })
+    return newTopic
+  }, [assistant.id])
+
   const handleConfirmDelete = useCallback(
     async (topic: Topic, e: React.MouseEvent) => {
       e.stopPropagation()
-      if (assistant.topics.length === 1) {
-        const newTopic = getDefaultTopic(assistant.id)
-        await db.topics.add({ id: newTopic.id, messages: [] })
-        addTopic(newTopic)
-        setActiveTopic(newTopic)
-      } else {
-        const index = findIndex(assistant.topics, (t) => t.id === topic.id)
-        if (topic.id === activeTopic.id) {
-          setActiveTopic(assistant.topics[index + 1 === assistant.topics.length ? index - 1 : index + 1])
-        }
+      try {
+        // Phase 5.2B: soft delete persists BEFORE the active-topic switch or
+        // replacement exposure (LOCK-528). A failed delete leaves the UI as-is.
+        await deleteTopicFlow({
+          topic,
+          topics: assistant.topics,
+          activeTopicId: activeTopic.id,
+          deps: {
+            modelGenerating,
+            removeTopic,
+            addTopic,
+            setActiveTopic,
+            createPersistedReplacement
+          }
+        })
+        refreshTrashTopics()
+      } catch (error) {
+        logger.error('Failed to delete topic', error as Error)
+      } finally {
+        setDeletingTopicId(null)
       }
-      await modelGenerating()
-      await removeTopic(topic)
-      refreshTrashTopics()
-      setDeletingTopicId(null)
     },
-    [activeTopic.id, addTopic, assistant.id, assistant.topics, removeTopic, setActiveTopic, refreshTrashTopics]
+    [
+      activeTopic.id,
+      addTopic,
+      assistant.topics,
+      createPersistedReplacement,
+      logger,
+      removeTopic,
+      setActiveTopic,
+      refreshTrashTopics
+    ]
   )
 
   const onPinTopic = useCallback(
-    (topic: Topic) => {
-      // 只有当 pinTopicsToTop 开启时才重新排序话题
+    async (topic: Topic) => {
+      const updatedTopic = { ...topic, pinned: !topic.pinned }
+
+      // Phase 5.2B: persist metadata to SQLite before Redux mutation (LOCK-528).
+      // On failure the optimistic pin is dropped and Redux is left unchanged.
+      try {
+        await updateTopic(updatedTopic)
+      } catch (error) {
+        logger.error('Failed to persist topic pin', error as Error)
+        return
+      }
+
+      // 只有当 pinTopicsToTop 开启时才重新排序话题。Reorder uses the already
+      // updated topic so the Redux state stays convergent with the pin.
       if (pinTopicsToTop) {
         let newIndex = 0
 
-        if (topic.pinned) {
-          // 取消固定：将话题移到未固定话题的顶部
-          const pinnedTopics = assistant.topics.filter((t) => t.pinned)
-          const unpinnedTopics = assistant.topics.filter((t) => !t.pinned)
-
-          const reorderedTopics = [...pinnedTopics.filter((t) => t.id !== topic.id), topic, ...unpinnedTopics]
-
-          newIndex = pinnedTopics.length - 1
-          updateTopics(reorderedTopics)
-        } else {
+        if (updatedTopic.pinned) {
           // 固定话题：移到固定区域顶部
-          const pinnedTopics = assistant.topics.filter((t) => t.pinned)
+          const pinnedTopics = assistant.topics.filter((t) => t.pinned && t.id !== updatedTopic.id)
           const unpinnedTopics = assistant.topics.filter((t) => !t.pinned)
 
-          const reorderedTopics = [topic, ...pinnedTopics, ...unpinnedTopics.filter((t) => t.id !== topic.id)]
+          const reorderedTopics = [updatedTopic, ...pinnedTopics, ...unpinnedTopics]
 
           newIndex = 0
+          updateTopics(reorderedTopics)
+        } else {
+          // 取消固定：将话题移到未固定话题的顶部
+          const pinnedTopics = assistant.topics.filter((t) => t.pinned)
+          const unpinnedTopics = assistant.topics.filter((t) => !t.pinned && t.id !== updatedTopic.id)
+
+          const reorderedTopics = [...pinnedTopics, updatedTopic, ...unpinnedTopics]
+
+          newIndex = pinnedTopics.length
           updateTopics(reorderedTopics)
         }
 
@@ -227,24 +294,42 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
           listRef.current?.scrollToIndex(newIndex, { align: 'auto' })
         }, 50)
       }
-
-      const updatedTopic = { ...topic, pinned: !topic.pinned }
-      updateTopic(updatedTopic)
     },
-    [assistant.topics, updateTopic, updateTopics, pinTopicsToTop]
+    [assistant.topics, logger, updateTopic, updateTopics, pinTopicsToTop]
   )
 
   const onDeleteTopic = useCallback(
     async (topic: Topic) => {
-      await modelGenerating()
-      if (topic.id === activeTopic?.id) {
-        const index = findIndex(assistant.topics, (t) => t.id === topic.id)
-        setActiveTopic(assistant.topics[index + 1 === assistant.topics.length ? index - 1 : index + 1])
+      try {
+        // Phase 5.2B: soft delete persists BEFORE the active-topic switch
+        // (LOCK-528). A failed delete leaves the UI as-is.
+        await deleteTopicFlow({
+          topic,
+          topics: assistant.topics,
+          activeTopicId: activeTopic?.id,
+          deps: {
+            modelGenerating,
+            removeTopic,
+            addTopic,
+            setActiveTopic,
+            createPersistedReplacement
+          }
+        })
+        refreshTrashTopics()
+      } catch (error) {
+        logger.error('Failed to delete topic', error as Error)
       }
-      await removeTopic(topic)
-      refreshTrashTopics()
     },
-    [assistant.topics, removeTopic, setActiveTopic, activeTopic, refreshTrashTopics]
+    [
+      addTopic,
+      assistant.topics,
+      createPersistedReplacement,
+      logger,
+      removeTopic,
+      setActiveTopic,
+      activeTopic,
+      refreshTrashTopics
+    ]
   )
 
   const onMoveTopic = useCallback(
@@ -287,7 +372,13 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
               const { text: summaryText, error } = await fetchMessagesSummary({ messages })
               if (summaryText) {
                 const updatedTopic = { ...topic, name: summaryText, isNameManuallyEdited: false }
-                updateTopic(updatedTopic)
+                try {
+                  // Phase 5.2B: SQLite persists before Redux (LOCK-528); on
+                  // failure Redux is left unchanged and the toast stays unrenameed.
+                  await updateTopic(updatedTopic)
+                } catch (err) {
+                  logger.error('Failed to persist auto-renamed topic', err as Error)
+                }
               } else if (error) {
                 window.toast?.error(`${t('message.error.fetchTopicName')}: ${error}`)
               }
@@ -313,7 +404,12 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
           })
           if (name && topic?.name !== name) {
             const updatedTopic = { ...topic, name, isNameManuallyEdited: true }
-            updateTopic(updatedTopic)
+            try {
+              // Phase 5.2B: SQLite persists before Redux (LOCK-528).
+              await updateTopic(updatedTopic)
+            } catch (err) {
+              logger.error('Failed to persist renamed topic', err as Error)
+            }
           }
         }
       },
@@ -337,12 +433,20 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
             }
           })
 
-          prompt !== null &&
-            (() => {
+          if (prompt !== null) {
+            void (async () => {
               const updatedTopic = { ...topic, prompt: prompt.trim() }
-              updateTopic(updatedTopic)
-              topic.id === activeTopic.id && setActiveTopic(updatedTopic)
+              try {
+                // Phase 5.2B: SQLite persists before Redux (LOCK-528).
+                await updateTopic(updatedTopic)
+                if (topic.id === activeTopic.id) {
+                  setActiveTopic(updatedTopic)
+                }
+              } catch (err) {
+                logger.error('Failed to persist topic prompt', err as Error)
+              }
             })()
+          }
         }
       },
       {
@@ -529,6 +633,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   }, [
     targetTopic,
     t,
+    logger,
     isRenaming,
     exportMenuOptions.image,
     exportMenuOptions.markdown,
@@ -759,15 +864,33 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         refreshVersion={trashRefreshVersion}
         onRestore={handleRestoreTopic}
         onPermanentDelete={async (topicId) => {
-          await TopicManager.removeTopic(topicId)
+          // Phase 5.2B: ordinary hard delete commits in SQLite first, then the
+          // cleanup result is consumed (LOCK-525). Agent-session stays Dexie.
+          if (isAgentSessionTopicId(topicId)) {
+            await TopicManager.removeTopic(topicId)
+          } else {
+            await hardDeleteOrdinaryTopic(topicId)
+          }
           refreshTrashTopics()
         }}
         onEmptyTrash={async () => {
-          const trashTopics = await TopicManager.getTrashTopics(assistant.id)
-          for (const topic of trashTopics) {
-            await TopicManager.removeTopic(topic.id)
+          try {
+            // Phase 5.2B: ordinary trash is emptied in ONE atomic Main SQLite
+            // transaction with one aggregate cleanup result (LOCK-531).
+            await emptyOrdinaryTrash(assistant.id)
+            // Agent-session trash keeps its Dexie lifecycle (LOCK-521) and is
+            // emptied through the existing per-topic Dexie removal.
+            const dexieTrash = await TopicManager.getTrashTopics(assistant.id)
+            for (const trashed of dexieTrash) {
+              if (isAgentSessionTopicId(trashed.id)) {
+                await TopicManager.removeTopic(trashed.id)
+              }
+            }
+          } finally {
+            // Reconcile the panel with the persisted state even when a
+            // mutation failed part-way (LOCK-528).
+            refreshTrashTopics()
           }
-          refreshTrashTopics()
         }}
       />
     </div>

@@ -25,6 +25,7 @@ import {
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { CacheService } from '@renderer/services/CacheService'
 import { computeContextInfo, PREVIEW_DRAFT_SENTINEL } from '@renderer/services/contextInfoService'
+import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import FileManager from '@renderer/services/FileManager'
 import { checkRateLimit, getUserMessage } from '@renderer/services/MessagesService'
@@ -435,6 +436,15 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
 
   const addNewTopic = useCallback(async () => {
     const newTopic = getDefaultTopic(assistant.id)
+
+    try {
+      // LOCK-533: the ordinary topic must exist in SQLite with its
+      // assistantId before any Redux exposure (LOCK-528: persistence first).
+      await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id)
+    } catch (error) {
+      logger.error('Failed to establish SQLite ownership for new topic', error as Error)
+      return
+    }
 
     await db.topics.add({ id: newTopic.id, messages: [] })
 

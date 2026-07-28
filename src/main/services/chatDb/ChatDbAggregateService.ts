@@ -800,14 +800,31 @@ export class ChatDbAggregateService {
   }
 
   /**
-   * Restore a soft-deleted topic by clearing deletedAt.
-   * Missing topic: no-op (returns success).
+   * Atomically restore a soft-deleted topic and return the restored wire
+   * entity (LOCK-532). Returns null when no soft-deleted row exists for the
+   * ID at command time (missing topic, or topic not in trash) — in that
+   * case NO mutation occurs. Callers must dispatch only the returned row,
+   * never a separately listed snapshot.
    */
-  restoreTopic(topicId: string): ChatDbResult<null> {
+  restoreTopic(topicId: string): ChatDbResult<JsonObject | null> {
     return wrapResult(() => {
-      const { topics } = this.repos()
-      topics.restore(topicId)
-      return null
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        const existing = repos.topics.getById(topicId)
+        if (!existing.found || existing.data.deletedAt == null) {
+          // No deleted row was restored — explicit null, no mutation.
+          return null
+        }
+
+        repos.topics.restore(topicId)
+
+        const restored = repos.topics.getById(topicId)
+        if (!restored.found) {
+          throw new ChatDbNotFoundError(`Topic ${topicId} disappeared during restore`)
+        }
+        return topicToWireFull(restored.data)
+      })
     }, `restoreTopic(${topicId})`)
   }
 
@@ -829,7 +846,9 @@ export class ChatDbAggregateService {
       )
       return {
         items: page.items.map(topicToWireFull),
-        nextCursor: page.nextCursor,
+        // Omit nextCursor entirely on the last page: `undefined` is not a
+        // valid JSON wire value and fails result envelope validation.
+        ...(page.nextCursor !== undefined && { nextCursor: page.nextCursor }),
         hasMore: page.hasMore
       }
     }, `listTrashTopics()`)
@@ -914,6 +933,52 @@ export class ChatDbAggregateService {
         return buildFileCleanupResult(repos, uniqueAffectedIds)
       })
     }, `purgeExpiredTopics(${cutoffTimestamp})`)
+  }
+
+  /**
+   * Empty an assistant's trash atomically (LOCK-531).
+   *
+   * ONE root SQLite transaction hard-deletes every topic of the assistant
+   * that is still soft-deleted at transaction time (FK cascade: messages →
+   * blocks → file_references, segments → memberships) and returns one
+   * aggregate FileCleanupResult. Any mid-operation failure rolls back the
+   * entire transaction — no partial commit.
+   */
+  emptyTrashTopics(assistantId: string): ChatDbResult<FileCleanupResult> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        const allAffectedFileIds: string[] = []
+        let cursor: string | undefined
+        let hasMore = true
+
+        // Drain the assistant's trash pages inside the transaction. Deleting
+        // listed rows is safe with keyset pagination: the next page is
+        // selected relative to the cursor tuple, not to row offsets.
+        while (hasMore) {
+          const page = repos.topics.listTrashPage({ limit: 100, direction: 'desc', cursor }, { assistantId })
+
+          for (const topic of page.items) {
+            // Collect affected file IDs before cascade
+            const messages = repos.messages.listByTopic(topic.id)
+            const messageIds = messages.map((m) => m.id)
+            const refs = repos.fileRefs.listByMessages(messageIds)
+            allAffectedFileIds.push(...collectAffectedFileIds(refs))
+
+            // FK cascade: hard delete
+            repos.topics.hardDelete(topic.id)
+          }
+
+          cursor = page.nextCursor
+          hasMore = page.hasMore && page.items.length > 0
+        }
+
+        // Deduplicate affected file IDs and compute remaining counts
+        const uniqueAffectedIds = [...new Set(allAffectedFileIds)]
+        return buildFileCleanupResult(repos, uniqueAffectedIds)
+      })
+    }, `emptyTrashTopics(${assistantId})`)
   }
 
   // =========================================================================

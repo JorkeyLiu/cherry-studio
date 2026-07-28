@@ -1,8 +1,9 @@
+import { loggerService } from '@logger'
 import { TopView } from '@renderer/components/TopView'
 import { useAssistants, useDefaultAssistant } from '@renderer/hooks/useAssistant'
 import { useAssistantPresets } from '@renderer/hooks/useAssistantPresets'
 import { useTimer } from '@renderer/hooks/useTimer'
-import { createAssistantFromAgent } from '@renderer/services/AssistantService'
+import { createAssistantFromAgent, getDefaultTopic } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { Assistant, AssistantPreset } from '@renderer/types'
 import { uuid } from '@renderer/utils'
@@ -17,6 +18,8 @@ import styled from 'styled-components'
 import EmojiIcon from '../EmojiIcon'
 import { HStack } from '../Layout'
 import Scrollbar from '../Scrollbar'
+
+const logger = loggerService.withContext('AddAssistantPopup')
 
 interface Props {
   resolve: (value: Assistant | undefined) => void
@@ -74,11 +77,21 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
       loadingRef.current = true
       let assistant: Assistant
 
-      if (preset.id === 'default') {
-        assistant = { ...preset, id: uuid() }
-        addAssistant(assistant)
-      } else {
-        assistant = await createAssistantFromAgent(preset)
+      try {
+        if (preset.id === 'default') {
+          const newId = uuid()
+          assistant = { ...preset, id: newId, topics: [getDefaultTopic(newId)] }
+          // LOCK-533: topic ownership persists in SQLite before Redux exposure.
+          await addAssistant(assistant)
+        } else {
+          assistant = await createAssistantFromAgent(preset)
+        }
+      } catch (error) {
+        // Persistence failed: no Redux exposure happened (LOCK-528). Keep the
+        // popup usable instead of leaving a stuck loading state.
+        logger.error('Failed to create assistant', error as Error)
+        loadingRef.current = false
+        return
       }
 
       setTimeoutTimer('onCreateAssistant', () => EventEmitter.emit(EVENT_NAMES.SHOW_ASSISTANTS), 0)

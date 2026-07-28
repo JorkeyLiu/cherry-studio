@@ -8,6 +8,12 @@ import {
 } from '@renderer/config/models'
 import { db } from '@renderer/databases'
 import { getDefaultTopic } from '@renderer/services/AssistantService'
+import { persistTopicMetadata } from '@renderer/services/db/topicMetadataPersist'
+import {
+  ensureOrdinaryTopicOwnership,
+  restoreOrdinaryTopic,
+  softDeleteOrdinaryTopic
+} from '@renderer/services/db/topicTrashLifecycle'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import {
   addAssistant,
@@ -29,10 +35,22 @@ import { setDefaultModel, setQuickModel, setTranslateModel } from '@renderer/sto
 import type { Assistant, AssistantSettings, Model, ThinkingOption, Topic } from '@renderer/types'
 import { getModelReasoningEffortKey } from '@renderer/types'
 import { uuid } from '@renderer/utils'
+import { isAgentSessionTopicId } from '@renderer/utils/agentSession'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { TopicManager } from './useTopic'
+
+/**
+ * Establish SQLite ownership for every ordinary topic of a new assistant
+ * BEFORE the assistant (and its topics) is exposed in Redux (LOCK-533).
+ * Agent-session topics are bypassed inside the helper (LOCK-521).
+ */
+async function ensureAssistantTopicsOwnership(assistant: Assistant): Promise<void> {
+  for (const topic of assistant.topics ?? []) {
+    await ensureOrdinaryTopicOwnership(topic.id, assistant.id)
+  }
+}
 
 export function useAssistants() {
   const { t } = useTranslation()
@@ -43,15 +61,26 @@ export function useAssistants() {
   return {
     assistants,
     updateAssistants: (assistants: Assistant[]) => dispatch(updateAssistants(assistants)),
-    addAssistant: (assistant: Assistant) => dispatch(addAssistant(assistant)),
-    insertAssistant: (index: number, assistant: Assistant) => dispatch(insertAssistant({ index, assistant })),
-    copyAssistant: (assistant: Assistant): Assistant | undefined => {
+    addAssistant: async (assistant: Assistant) => {
+      // LOCK-533/528: SQLite topic ownership persists before Redux exposure.
+      await ensureAssistantTopicsOwnership(assistant)
+      dispatch(addAssistant(assistant))
+    },
+    insertAssistant: async (index: number, assistant: Assistant) => {
+      // LOCK-533/528: SQLite topic ownership persists before Redux exposure.
+      await ensureAssistantTopicsOwnership(assistant)
+      dispatch(insertAssistant({ index, assistant }))
+    },
+    copyAssistant: async (assistant: Assistant): Promise<Assistant | undefined> => {
       if (!assistant) {
         logger.error("assistant doesn't exists.")
         return
       }
       const index = assistants.findIndex((_assistant) => _assistant.id === assistant.id)
-      const _assistant: Assistant = { ...assistant, id: uuid(), topics: [getDefaultTopic(assistant.id)] }
+      const newId = uuid()
+      const _assistant: Assistant = { ...assistant, id: newId, topics: [getDefaultTopic(newId)] }
+      // LOCK-533/528: SQLite topic ownership persists before Redux exposure.
+      await ensureAssistantTopicsOwnership(_assistant)
       if (index === -1) {
         logger.warn("Origin assistant's id not found. Fallback to addAssistant.")
         dispatch(addAssistant(_assistant))
@@ -205,15 +234,33 @@ export function useAssistant(id: string) {
     model,
     addTopic: (topic: Topic) => dispatch(addTopic({ assistantId: assistant.id, topic })),
     removeTopic: async (topic: Topic) => {
-      await TopicManager.softRemoveTopic(topic)
+      // Phase 5.2B: ordinary-chat soft delete goes through SQLite (LOCK-521/524);
+      // agent-session topics keep their existing Dexie behavior. The mutation
+      // must succeed before the Redux mutation runs (LOCK-528).
+      if (isAgentSessionTopicId(topic.id)) {
+        await TopicManager.softRemoveTopic(topic)
+      } else {
+        await softDeleteOrdinaryTopic(topic.id)
+      }
       dispatch(removeTopic({ assistantId: assistant.id, topic }))
     },
     restoreTopic: async (topicId: string) => {
-      const topic = (await TopicManager.getTopic(topicId)) as Topic | undefined
-      if (topic) {
-        await TopicManager.restoreTopic(topicId)
-        const restoredTopic = { ...topic }
-        delete restoredTopic.deletedAt
+      // Phase 5.2B: agent-session restore stays on Dexie (LOCK-521).
+      if (isAgentSessionTopicId(topicId)) {
+        const topic = (await TopicManager.getTopic(topicId)) as Topic | undefined
+        if (topic) {
+          await TopicManager.restoreTopic(topicId)
+          const restoredTopic = { ...topic }
+          delete restoredTopic.deletedAt
+          dispatch(addTopicFromTrash({ assistantId: assistant.id, topic: restoredTopic }))
+        }
+        return
+      }
+      // Ordinary restore is ONE atomic Main command that returns the
+      // restored row (LOCK-532); Redux is updated only with that returned
+      // row after the mutation succeeded (LOCK-528).
+      const restoredTopic = await restoreOrdinaryTopic(topicId)
+      if (restoredTopic) {
         dispatch(addTopicFromTrash({ assistantId: assistant.id, topic: restoredTopic }))
       }
     },
@@ -233,7 +280,13 @@ export function useAssistant(id: string) {
           }
         })
     },
-    updateTopic: (topic: Topic) => dispatch(updateTopic({ assistantId: assistant.id, topic })),
+    updateTopic: async (topic: Topic) => {
+      // Phase 5.2B: persist metadata to SQLite before Redux mutation.
+      // SQLite must succeed first (LOCK-528); a failed call throws and leaves
+      // Redux unchanged. Agent-session topics bypass SQLite internally.
+      await persistTopicMetadata(topic)
+      dispatch(updateTopic({ assistantId: assistant.id, topic }))
+    },
     updateTopics: (topics: Topic[]) => dispatch(updateTopics({ assistantId: assistant.id, topics })),
     removeAllTopics: () => dispatch(removeAllTopics({ assistantId: assistant.id })),
     setModel: useCallback(

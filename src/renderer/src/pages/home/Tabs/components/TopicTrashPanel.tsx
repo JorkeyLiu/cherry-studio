@@ -1,6 +1,8 @@
 import { TopicManager } from '@renderer/hooks/useTopic'
+import { compareTrashTopicsForDisplay, listOrdinaryTrashTopics } from '@renderer/services/db/topicTrashLifecycle'
 import type { Topic } from '@renderer/types'
 import { cn } from '@renderer/utils'
+import { isAgentSessionTopicId } from '@renderer/utils/agentSession'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { RotateCcw, Trash2 } from 'lucide-react'
@@ -13,9 +15,9 @@ dayjs.extend(relativeTime)
 export interface TopicTrashPanelProps {
   assistantId: string
   refreshVersion: number
-  onRestore: (topicId: string) => void
-  onPermanentDelete: (topicId: string) => void
-  onEmptyTrash: () => void
+  onRestore: (topicId: string) => void | Promise<void>
+  onPermanentDelete: (topicId: string) => void | Promise<void>
+  onEmptyTrash: () => void | Promise<void>
 }
 
 export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
@@ -35,8 +37,18 @@ export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
     if (!assistantId) return
     setLoading(true)
     try {
-      const topics = await TopicManager.getTrashTopics(assistantId)
-      setTrashTopics(topics)
+      // Phase 5.2B: ordinary trash listing is SQLite-backed and complete
+      // (cursor pages are drained inside the read, LOCK-530). Agent-session
+      // trash stays Dexie-backed (LOCK-521) and remains visible here:
+      // strictly filter the Dexie rows to agent-session IDs so ordinary
+      // Dexie leftovers never resurface next to their SQLite counterparts.
+      const [ordinaryTopics, dexieTrash] = await Promise.all([
+        listOrdinaryTrashTopics(assistantId),
+        TopicManager.getTrashTopics(assistantId)
+      ])
+      const agentTopics = dexieTrash.filter((topic) => isAgentSessionTopicId(topic.id))
+      // Deterministic merged order: deletedAt DESC, id DESC (LOCK-523).
+      setTrashTopics([...ordinaryTopics, ...agentTopics].sort(compareTrashTopicsForDisplay))
     } catch {
       // silently fail, keep current state
     } finally {
@@ -49,26 +61,41 @@ export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
   }, [fetchTrashTopics, refreshVersion])
 
   const handleRestore = useCallback(
-    (e: React.MouseEvent, topicId: string) => {
+    async (e: React.MouseEvent, topicId: string) => {
       e.stopPropagation()
-      onRestore(topicId)
-      // Optimistically remove from local list
+      try {
+        await onRestore(topicId)
+      } catch {
+        // Mutation failed: keep the row so the UI stays convergent with
+        // the persisted trash state (LOCK-528).
+        return
+      }
       setTrashTopics((prev) => prev.filter((t) => t.id !== topicId))
     },
     [onRestore]
   )
 
   const handlePermanentDelete = useCallback(
-    (e: React.MouseEvent, topicId: string) => {
+    async (e: React.MouseEvent, topicId: string) => {
       e.stopPropagation()
-      onPermanentDelete(topicId)
+      try {
+        await onPermanentDelete(topicId)
+      } catch {
+        // Mutation failed: keep the row (LOCK-528).
+        return
+      }
       setTrashTopics((prev) => prev.filter((t) => t.id !== topicId))
     },
     [onPermanentDelete]
   )
 
-  const handleEmptyTrash = useCallback(() => {
-    onEmptyTrash()
+  const handleEmptyTrash = useCallback(async () => {
+    try {
+      await onEmptyTrash()
+    } catch {
+      // Mutation failed: keep the rows (LOCK-528).
+      return
+    }
     setTrashTopics([])
   }, [onEmptyTrash])
 
@@ -128,10 +155,13 @@ export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
                   <TrashItemTime>{topic.deletedAt ? dayjs(topic.deletedAt).fromNow() : ''}</TrashItemTime>
                 </TrashItemInfo>
                 <TrashItemActions>
-                  <IconButton title={t('chat.topics.trash.restore')} onClick={(e) => handleRestore(e, topic.id)}>
+                  <IconButton title={t('chat.topics.trash.restore')} onClick={(e) => void handleRestore(e, topic.id)}>
                     <RotateCcw size={14} />
                   </IconButton>
-                  <IconButton danger title={t('common.delete')} onClick={(e) => handlePermanentDelete(e, topic.id)}>
+                  <IconButton
+                    danger
+                    title={t('common.delete')}
+                    onClick={(e) => void handlePermanentDelete(e, topic.id)}>
                     <Trash2 size={14} />
                   </IconButton>
                 </TrashItemActions>
@@ -142,7 +172,7 @@ export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
         {/* Footer actions */}
         {!loading && count > 0 && (
           <PanelFooter>
-            <EmptyTrashButton onClick={handleEmptyTrash}>
+            <EmptyTrashButton onClick={() => void handleEmptyTrash()}>
               <Trash2 size={14} />
               <span>{t('chat.topics.trash.empty_trash')}</span>
             </EmptyTrashButton>

@@ -83,7 +83,12 @@ const Chat: FC<Props> = (props) => {
     })
     if (name && topic.name !== name) {
       const updatedTopic = { ...topic, name, isNameManuallyEdited: true }
-      updateTopic(updatedTopic as Topic)
+      try {
+        // Phase 5.2B: SQLite persists before Redux (LOCK-528).
+        await updateTopic(updatedTopic as Topic)
+      } catch (error) {
+        logger.error('Failed to persist renamed topic', error as Error)
+      }
     }
   })
 

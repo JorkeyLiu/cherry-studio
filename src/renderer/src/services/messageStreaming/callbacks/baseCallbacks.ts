@@ -317,7 +317,9 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         }
 
         // 更新topic的name
-        void autoRenameTopic(assistant, topicId)
+        void Promise.resolve(autoRenameTopic(assistant, topicId)).catch((error: unknown) =>
+          logger.error('autoRenameTopic failed', error as Error)
+        )
 
         // 处理usage估算
         // For OpenRouter, always use the accurate usage data from API, don't estimate

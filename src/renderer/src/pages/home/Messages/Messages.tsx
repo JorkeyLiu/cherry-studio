@@ -51,6 +51,7 @@ import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
 import { buildGroupList } from '@renderer/services/anchorService'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
+import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { clearPendingNavigate, getPendingNavigate, getUserMessage } from '@renderer/services/MessagesService'
 import store, { useAppDispatch } from '@renderer/store'
@@ -747,6 +748,15 @@ const Messages = ({
         const newTopic = getDefaultTopic(assistant.id)
         newTopic.name = topic.name
 
+        try {
+          // LOCK-533: the branch topic must exist in SQLite with its
+          // assistantId before it is exposed to Redux via addTopic below.
+          await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id)
+        } catch (error) {
+          logger.error('Failed to establish SQLite ownership for branch topic', error as Error)
+          return
+        }
+
         await branchFromMessage(messagesRef.current, messageId, {
           createBranch: async (branchEndpoint) => {
             addTopic(newTopic)
@@ -757,7 +767,9 @@ const Messages = ({
           },
           onSuccess: () => {
             setActiveTopic(newTopic)
-            void autoRenameTopic(assistant, newTopic.id)
+            void Promise.resolve(autoRenameTopic(assistant, newTopic.id)).catch((error: unknown) =>
+              logger.error('autoRenameTopic failed', error as Error)
+            )
             // Inherit fixed context window anchor (group-key based)
             const assistantSettings = getAssistantSettings(assistant)
             const sourceEffectiveMode =

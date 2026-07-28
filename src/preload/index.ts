@@ -14,6 +14,7 @@ import type {
   DeleteMessagesRequest,
   DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
+  EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   GetRawTopicRequest,
@@ -627,6 +628,9 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_HardDeleteTopic, request),
     purgeExpiredTopics: (request: PurgeExpiredTopicsRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_PurgeExpiredTopics, request),
+    // Phase 5.2B: atomic assistant empty-trash (LOCK-531)
+    emptyTrashTopics: (request: EmptyTrashTopicsRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_EmptyTrashTopics, request),
     // Phase 5.1B: compound mutations
     cloneMessagesToTopic: (request: CloneMessagesToTopicRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_CloneMessagesToTopic, request),

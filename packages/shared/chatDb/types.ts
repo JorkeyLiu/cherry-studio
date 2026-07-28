@@ -367,6 +367,15 @@ export interface RestoreTopicRequest {
   topicId: string
 }
 
+/**
+ * @see IpcChannel.ChatDb_RestoreTopic
+ *
+ * The atomically restored topic, or null when no soft-deleted row existed
+ * for the ID at command time (missing topic or not in trash). Callers must
+ * dispatch only a returned row — never a separately listed one (LOCK-532).
+ */
+export type RestoreTopicResponse = TopicWire | null
+
 /** @see IpcChannel.ChatDb_ListTrashTopics */
 export interface ListTrashTopicsRequest {
   assistantId?: string
@@ -400,6 +409,20 @@ export interface PurgeExpiredTopicsRequest {
 
 /** @see IpcChannel.ChatDb_PurgeExpiredTopics */
 export type PurgeExpiredTopicsResponse = FileCleanupResult
+
+/**
+ * @see IpcChannel.ChatDb_EmptyTrashTopics
+ *
+ * Empty an assistant's trash in ONE Main SQLite transaction over the topics
+ * that are still soft-deleted at transaction time (LOCK-531). Never a
+ * renderer-side list+loop of hard deletes.
+ */
+export interface EmptyTrashTopicsRequest {
+  assistantId: string
+}
+
+/** @see IpcChannel.ChatDb_EmptyTrashTopics */
+export type EmptyTrashTopicsResponse = FileCleanupResult
 
 // ---------------------------------------------------------------------------
 // Compound mutation DTOs (Phase 5.1B)
@@ -562,10 +585,11 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   // Phase 5.1B: topic lifecycle
   'chatdb:update-topic-metadata': { request: UpdateTopicMetadataRequest; response: UpdateTopicMetadataResponse }
   'chatdb:soft-delete-topic': { request: SoftDeleteTopicRequest; response: null }
-  'chatdb:restore-topic': { request: RestoreTopicRequest; response: null }
+  'chatdb:restore-topic': { request: RestoreTopicRequest; response: RestoreTopicResponse }
   'chatdb:list-trash-topics': { request: ListTrashTopicsRequest; response: ListTrashTopicsResponse }
   'chatdb:hard-delete-topic': { request: HardDeleteTopicRequest; response: HardDeleteTopicResponse }
   'chatdb:purge-expired-topics': { request: PurgeExpiredTopicsRequest; response: PurgeExpiredTopicsResponse }
+  'chatdb:empty-trash-topics': { request: EmptyTrashTopicsRequest; response: EmptyTrashTopicsResponse }
   // Phase 5.1B: compound mutations
   'chatdb:clone-messages-to-topic': {
     request: CloneMessagesToTopicRequest

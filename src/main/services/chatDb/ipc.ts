@@ -1,7 +1,7 @@
 /**
  * ChatDb IPC handler registration.
  *
- * Registers exactly 34 fixed IPC handlers matching the ChatDb IpcChannel entries.
+ * Registers exactly 36 fixed IPC handlers matching the ChatDb IpcChannel entries.
  * Each handler:
  * 1. Validates the request using the shared contract validators.
  * 2. Delegates to ChatDbAggregateService.
@@ -38,6 +38,7 @@ import type {
   DeleteMessagesRequest,
   DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
+  EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   GetRawTopicRequest,
@@ -92,7 +93,7 @@ let activeDisposer: (() => void) | null = null
 // ---------------------------------------------------------------------------
 
 /**
- * Register all 23 ChatDb IPC handlers.
+ * Register all 36 ChatDb IPC handlers.
  *
  * Re-registration safety:
  * - If a prior registration exists, it is disposed before installing new
@@ -189,7 +190,8 @@ export function registerChatDbIpc(): () => void {
   }
 
   // =========================================================================
-  // Register exactly 34 handlers (23 Phase 5.1A + 11 Phase 5.1B)
+  // Register exactly 36 handlers (23 Phase 5.1A + 11 Phase 5.1B + search +
+  // Phase 5.2B empty-trash)
   // =========================================================================
 
   // 1. fetch-messages
@@ -365,6 +367,11 @@ export function registerChatDbIpc(): () => void {
   // 35. search-messages (Phase 5.1B-2)
   handleCommand(IpcChannel.ChatDb_SearchMessages, (agg, req: SearchMessagesRequest) => {
     return agg.searchMessages(req)
+  })
+
+  // 36. empty-trash-topics (Phase 5.2B, LOCK-531)
+  handleCommand(IpcChannel.ChatDb_EmptyTrashTopics, (agg, req: EmptyTrashTopicsRequest) => {
+    return agg.emptyTrashTopics(req.assistantId)
   })
 
   logger.info(`Registered ${handlers.length} ChatDb IPC handlers (registration #${registrationId})`)

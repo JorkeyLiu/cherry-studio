@@ -26,6 +26,7 @@ import type {
   DeleteMessagesRequest,
   DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
+  EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   GetRawTopicRequest,
@@ -656,6 +657,35 @@ const softDeleteTopicContract: ChatDbContract = {
   validateResult: voidResult('chatdb:soft-delete-topic')
 }
 
+/**
+ * Validate the four mutable TopicWire metadata field types plus id on a
+ * result value object. Shared by TopicWire-shaped result validators.
+ */
+function validateTopicWireValueFields(v: Record<string, unknown>, channel: string): void {
+  if (typeof v.id !== 'string' || v.id.length === 0) {
+    throw new ValidationError('result.value.id', `[${channel}] Expected non-empty string id`)
+  }
+  if (v.name !== undefined && v.name !== null && typeof v.name !== 'string') {
+    throw new ValidationError('result.value.name', `[${channel}] Expected string|null for name`)
+  }
+  if (v.pinned !== undefined && v.pinned !== null && typeof v.pinned !== 'boolean') {
+    throw new ValidationError('result.value.pinned', `[${channel}] Expected boolean|null for pinned`)
+  }
+  if (v.prompt !== undefined && v.prompt !== null && typeof v.prompt !== 'string') {
+    throw new ValidationError('result.value.prompt', `[${channel}] Expected string|null for prompt`)
+  }
+  if (
+    v.isNameManuallyEdited !== undefined &&
+    v.isNameManuallyEdited !== null &&
+    typeof v.isNameManuallyEdited !== 'boolean'
+  ) {
+    throw new ValidationError(
+      'result.value.isNameManuallyEdited',
+      `[${channel}] Expected boolean|null for isNameManuallyEdited`
+    )
+  }
+}
+
 const restoreTopicContract: ChatDbContract = {
   allowedKeys: keySet('topicId'),
   validate(value: unknown): void {
@@ -663,7 +693,18 @@ const restoreTopicContract: ChatDbContract = {
     const req = value as RestoreTopicRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
   },
-  validateResult: voidResult('chatdb:restore-topic')
+  // LOCK-532: restore returns the atomically restored TopicWire, or null
+  // when no soft-deleted row was restored.
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:restore-topic')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true && obj.value !== null) {
+      if (typeof obj.value !== 'object' || Array.isArray(obj.value)) {
+        throw new ValidationError('result.value', '[chatdb:restore-topic] Expected TopicWire object or null')
+      }
+      validateTopicWireValueFields(obj.value as Record<string, unknown>, 'chatdb:restore-topic')
+    }
+  }
 }
 
 const listTrashTopicsContract: ChatDbContract = {
@@ -785,6 +826,17 @@ const purgeExpiredTopicsContract: ChatDbContract = {
     validateIso8601Timestamp(req.cutoffTimestamp, 'request.cutoffTimestamp')
   },
   validateResult: fileCleanupResultValidator('chatdb:purge-expired-topics')
+}
+
+const emptyTrashTopicsContract: ChatDbContract = {
+  allowedKeys: keySet('assistantId'),
+  validate(value: unknown): void {
+    validateRequest(value, emptyTrashTopicsContract.allowedKeys)
+    const req = value as EmptyTrashTopicsRequest
+    validateNonEmptyString(req.assistantId, 'request.assistantId')
+  },
+  // LOCK-531: one aggregate FileCleanupResult for the whole transaction.
+  validateResult: fileCleanupResultValidator('chatdb:empty-trash-topics')
 }
 
 // ---------------------------------------------------------------------------
@@ -1084,6 +1136,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:list-trash-topics': listTrashTopicsContract,
   'chatdb:hard-delete-topic': hardDeleteTopicContract,
   'chatdb:purge-expired-topics': purgeExpiredTopicsContract,
+  // Phase 5.2B: atomic assistant empty-trash
+  'chatdb:empty-trash-topics': emptyTrashTopicsContract,
   // Phase 5.1B: compound mutations
   'chatdb:clone-messages-to-topic': cloneMessagesToTopicContract,
   'chatdb:reset-messages-for-resend': resetMessagesForResendContract,

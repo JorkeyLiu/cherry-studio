@@ -33,6 +33,8 @@ import type {
   DeleteMessagesWithSegmentsRequest,
   DeleteMessagesWithSegmentsResponse,
   DeleteSegmentRequest,
+  EmptyTrashTopicsRequest,
+  EmptyTrashTopicsResponse,
   EnsureTopicRequest,
   FetchMessagesRequest,
   FetchMessagesResponse,
@@ -58,6 +60,7 @@ import type {
   ResetMessagesForResendRequest,
   ResetMessagesForResendResponse,
   RestoreTopicRequest,
+  RestoreTopicResponse,
   SearchMessagesRequest,
   SearchMessagesResponse,
   SoftDeleteTopicRequest,
@@ -135,11 +138,13 @@ function makeApiSpy() {
     updateTopicMetadata:
       vi.fn<(request: UpdateTopicMetadataRequest) => Promise<ChatDbResult<UpdateTopicMetadataResponse>>>(),
     softDeleteTopic: vi.fn<(request: SoftDeleteTopicRequest) => Promise<ChatDbResult<null>>>(),
-    restoreTopic: vi.fn<(request: RestoreTopicRequest) => Promise<ChatDbResult<null>>>(),
+    restoreTopic: vi.fn<(request: RestoreTopicRequest) => Promise<ChatDbResult<RestoreTopicResponse>>>(),
     listTrashTopics: vi.fn<(request: ListTrashTopicsRequest) => Promise<ChatDbResult<ListTrashTopicsResponse>>>(),
     hardDeleteTopic: vi.fn<(request: HardDeleteTopicRequest) => Promise<ChatDbResult<HardDeleteTopicResponse>>>(),
     purgeExpiredTopics:
       vi.fn<(request: PurgeExpiredTopicsRequest) => Promise<ChatDbResult<PurgeExpiredTopicsResponse>>>(),
+    // Phase 5.2B: atomic assistant empty-trash (LOCK-531)
+    emptyTrashTopics: vi.fn<(request: EmptyTrashTopicsRequest) => Promise<ChatDbResult<EmptyTrashTopicsResponse>>>(),
     // Phase 5.1B: compound mutations
     cloneMessagesToTopic:
       vi.fn<(request: CloneMessagesToTopicRequest) => Promise<ChatDbResult<CloneMessagesToTopicResponse>>>(),
@@ -721,11 +726,21 @@ describe('SqliteMessageDataSource', () => {
       expect(mockDispatch).toHaveBeenCalledOnce()
     })
 
-    it('restoreTopic calls api and dispatches', async () => {
-      api.restoreTopic.mockResolvedValue(successResult(null))
-      await ds.restoreTopic('t-1')
+    it('restoreTopic returns the restored wire and dispatches (LOCK-532)', async () => {
+      const wire = { id: 't-1', assistantId: 'a-1', name: 'Restored' }
+      api.restoreTopic.mockResolvedValue(successResult(wire))
+      const result = await ds.restoreTopic('t-1')
       expect(api.restoreTopic).toHaveBeenCalledOnce()
+      expect(api.restoreTopic).toHaveBeenCalledWith({ topicId: 't-1' })
+      expect(result).toEqual(wire)
       expect(mockDispatch).toHaveBeenCalledOnce()
+    })
+
+    it('restoreTopic returns null without dispatching when nothing was restored', async () => {
+      api.restoreTopic.mockResolvedValue(successResult(null))
+      const result = await ds.restoreTopic('t-1')
+      expect(result).toBeNull()
+      expect(mockDispatch).not.toHaveBeenCalled()
     })
 
     it('listTrashTopics calls api with correct request', async () => {
@@ -750,6 +765,31 @@ describe('SqliteMessageDataSource', () => {
       const result = await ds.purgeExpiredTopics('2025-01-01T00:00:00.000Z')
       expect(api.purgeExpiredTopics).toHaveBeenCalledOnce()
       expect(result.affectedFileIds).toEqual([])
+    })
+
+    it('emptyTrashTopics is ONE api call returning the aggregate cleanup (LOCK-531)', async () => {
+      api.emptyTrashTopics.mockResolvedValue(
+        successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } })
+      )
+      const result = await ds.emptyTrashTopics('a-1')
+      expect(api.emptyTrashTopics).toHaveBeenCalledOnce()
+      expect(api.emptyTrashTopics).toHaveBeenCalledWith({ assistantId: 'a-1' })
+      // No list+loop: no other lifecycle command is issued.
+      expect(api.listTrashTopics).not.toHaveBeenCalled()
+      expect(api.hardDeleteTopic).not.toHaveBeenCalled()
+      expect(result.affectedFileIds).toEqual(['f1'])
+    })
+
+    it('ensureTopic forwards assistantId for creation ownership (LOCK-533)', async () => {
+      api.ensureTopic.mockResolvedValue(successResult(null))
+      await ds.ensureTopic('t-1', 'a-1')
+      expect(api.ensureTopic).toHaveBeenCalledWith({ topicId: 't-1', assistantId: 'a-1' })
+    })
+
+    it('ensureTopic omits assistantId when not provided', async () => {
+      api.ensureTopic.mockResolvedValue(successResult(null))
+      await ds.ensureTopic('t-1')
+      expect(api.ensureTopic).toHaveBeenCalledWith({ topicId: 't-1' })
     })
   })
 

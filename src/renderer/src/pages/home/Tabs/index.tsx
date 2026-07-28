@@ -2,6 +2,7 @@ import AddAssistantPopup from '@renderer/components/Popups/AddAssistantPopup'
 import { useAssistants, useDefaultAssistant } from '@renderer/hooks/useAssistant'
 import { useNavbarPosition, useSettings } from '@renderer/hooks/useSettings'
 import { useShowTopics } from '@renderer/hooks/useStore'
+import { getDefaultTopic } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { Assistant, Topic } from '@renderer/types'
 import type { Tab } from '@renderer/types/chat'
@@ -65,9 +66,11 @@ const HomeTabs: FC<Props> = ({
     }
   }
 
-  const onCreateDefaultAssistant = () => {
-    const assistant = { ...defaultAssistant, id: uuid() }
-    addAssistant(assistant)
+  const onCreateDefaultAssistant = async () => {
+    const newId = uuid()
+    const assistant = { ...defaultAssistant, id: newId, topics: [getDefaultTopic(newId)] }
+    // LOCK-533: topic ownership persists in SQLite before Redux exposure.
+    await addAssistant(assistant)
     setActiveAssistant(assistant)
   }
 

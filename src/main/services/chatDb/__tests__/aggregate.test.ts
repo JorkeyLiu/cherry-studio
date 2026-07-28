@@ -1637,14 +1637,56 @@ describe('ChatDbAggregateService', () => {
       expect(result.ok).toBe(true)
     })
 
-    it('restoreTopic: clears deletedAt', () => {
+    it('restoreTopic: clears deletedAt and returns the restored wire (LOCK-532)', () => {
       const topicId = `t-${uid()}`
-      agg.ensureTopic(topicId)
+      agg.ensureTopic(topicId, 'assistant-1')
+      agg.updateTopicMetadata(topicId, 'Named', true, 'prompt', true)
       agg.softDeleteTopic(topicId)
+
       const result = agg.restoreTopic(topicId)
       expect(result.ok).toBe(true)
-      const exists = agg.topicExists(topicId)
-      expect(okValue(exists)).toBe(true)
+      const wire = okValue(result) as any
+      expect(wire).not.toBeNull()
+      expect(wire.id).toBe(topicId)
+      expect(wire.assistantId).toBe('assistant-1')
+      expect(wire.name).toBe('Named')
+      expect(wire.pinned).toBe(true)
+      expect(wire.prompt).toBe('prompt')
+      expect(wire.isNameManuallyEdited).toBe(true)
+      // deletedAt cleared
+      expect(wire.deletedAt ?? null).toBeNull()
+      // No longer in trash
+      const trash = agg.listTrashTopics('assistant-1')
+      expect(okValue(trash).items.some((i: any) => i.id === topicId)).toBe(false)
+    })
+
+    it('restoreTopic: returns null for a missing topic (LOCK-532)', () => {
+      const result = agg.restoreTopic('nonexistent')
+      expect(result.ok).toBe(true)
+      expect(okValue(result)).toBeNull()
+    })
+
+    it('restoreTopic: returns null when the topic is not in trash — no mutation', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId, 'assistant-1')
+
+      const result = agg.restoreTopic(topicId)
+      expect(result.ok).toBe(true)
+      expect(okValue(result)).toBeNull()
+      // Topic untouched
+      expect(okValue(agg.topicExists(topicId))).toBe(true)
+    })
+
+    it('restoreTopic: second restore of the same topic returns null (stale UI race)', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId, 'assistant-1')
+      agg.softDeleteTopic(topicId)
+
+      const first = agg.restoreTopic(topicId)
+      expect((okValue(first) as any)?.id).toBe(topicId)
+      // A second (stale) restore must not fabricate a restored row.
+      const second = agg.restoreTopic(topicId)
+      expect(okValue(second)).toBeNull()
     })
 
     it('listTrashTopics: returns deleted topics', () => {
@@ -1714,6 +1756,116 @@ describe('ChatDbAggregateService', () => {
       expect(result.ok).toBe(true)
       expect(okValue(agg.topicExists(t1))).toBe(false)
       expect(okValue(agg.topicExists(t2))).toBe(false)
+    })
+
+    it('appendMessage: preserves existing assistant binding on topic ensure (LOCK-533)', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId, 'assistant-1')
+
+      const msg = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg as any, [])
+
+      agg.softDeleteTopic(topicId)
+      // Still owned by assistant-1: visible in the assistant-filtered trash.
+      const trash = agg.listTrashTopics('assistant-1')
+      expect(okValue(trash).items.some((i: any) => i.id === topicId)).toBe(true)
+    })
+
+    // Phase 5.2B: atomic assistant empty-trash (LOCK-531)
+    it('emptyTrashTopics: hard-deletes only the assistant trashed topics, one aggregate cleanup', () => {
+      const trashedA1 = `t-${uid()}`
+      const trashedA2 = `t-${uid()}`
+      const activeA1 = `t-${uid()}`
+
+      // trashedA1: assistant-1 topic with a file reference
+      const msg1 = makeMessageJson(trashedA1)
+      const fileBlock1 = makeBlockJson(msg1.id as string, 'file', {
+        file: { id: 'file-a1', name: 'a1.pdf', path: '/a1.pdf', type: 'application/pdf' }
+      })
+      agg.ensureTopic(trashedA1, 'assistant-1')
+      agg.appendMessage(trashedA1, msg1 as any, [fileBlock1 as any])
+      agg.softDeleteTopic(trashedA1)
+
+      // trashedA2: another assistant's trash — must survive
+      agg.ensureTopic(trashedA2, 'assistant-2')
+      agg.softDeleteTopic(trashedA2)
+
+      // activeA1: assistant-1 topic NOT in trash — must survive
+      agg.ensureTopic(activeA1, 'assistant-1')
+
+      const result = agg.emptyTrashTopics('assistant-1')
+      expect(result.ok).toBe(true)
+      const cleanup = okValue(result)
+      expect(cleanup.affectedFileIds).toContain('file-a1')
+      expect(cleanup.remainingReferenceCounts['file-a1']).toBe(0)
+
+      expect(okValue(agg.topicExists(trashedA1))).toBe(false)
+      expect(okValue(agg.topicExists(trashedA2))).toBe(true)
+      expect(okValue(agg.topicExists(activeA1))).toBe(true)
+    })
+
+    it('emptyTrashTopics: aggregates cleanup facts across multiple trashed topics', () => {
+      const t1 = `t-${uid()}`
+      const t2 = `t-${uid()}`
+      const msg1 = makeMessageJson(t1)
+      const msg2 = makeMessageJson(t2)
+      const sharedFile = { id: 'file-shared', name: 's.pdf', path: '/s.pdf', type: 'application/pdf' }
+      agg.ensureTopic(t1, 'assistant-1')
+      agg.ensureTopic(t2, 'assistant-1')
+      agg.appendMessage(t1, msg1 as any, [makeBlockJson(msg1.id as string, 'file', { file: sharedFile }) as any])
+      agg.appendMessage(t2, msg2 as any, [makeBlockJson(msg2.id as string, 'file', { file: sharedFile }) as any])
+      agg.softDeleteTopic(t1)
+      agg.softDeleteTopic(t2)
+
+      const result = agg.emptyTrashTopics('assistant-1')
+      const cleanup = okValue(result)
+      // One aggregate result: deduplicated file IDs across topics.
+      expect(cleanup.affectedFileIds).toEqual(['file-shared'])
+      expect(cleanup.remainingReferenceCounts['file-shared']).toBe(0)
+    })
+
+    it('emptyTrashTopics: empty cleanup when the assistant has no trash', () => {
+      const result = agg.emptyTrashTopics('assistant-without-trash')
+      expect(result.ok).toBe(true)
+      expect(okValue(result)).toEqual({ affectedFileIds: [], remainingReferenceCounts: {} })
+    })
+
+    it('genuine rollback: emptyTrashTopics reverts ALL deletions on trigger failure (LOCK-531)', () => {
+      // Deletion order is (deletedAt DESC, id DESC). Soft-delete the guard
+      // first and give it the smaller ID so it is hard-deleted SECOND —
+      // the abort then fires after t1 was already deleted inside the tx.
+      const t1 = `t-zz-${uid()}`
+      const t2 = `t-aa-${uid()}`
+      agg.ensureTopic(t1, 'assistant-r')
+      agg.ensureTopic(t2, 'assistant-r')
+      agg.softDeleteTopic(t2)
+      agg.softDeleteTopic(t1)
+
+      // Abort the transaction when the guard topic row is deleted. The other
+      // topic's deletion must roll back too — no partial commit.
+      sqlite.exec(`
+        CREATE TEMP TRIGGER IF NOT EXISTS abort_empty_trash_rollback_test
+        BEFORE DELETE ON topics
+        WHEN OLD.id = '${t2}'
+        BEGIN
+          SELECT RAISE(ABORT, 'trigger-forced abort for empty-trash rollback test');
+        END;
+      `)
+
+      try {
+        const result = agg.emptyTrashTopics('assistant-r')
+        expect(result.ok).toBe(false)
+
+        // Both topics still exist and are still in trash.
+        expect(okValue(agg.topicExists(t1))).toBe(true)
+        expect(okValue(agg.topicExists(t2))).toBe(true)
+        const trash = agg.listTrashTopics('assistant-r')
+        const ids = okValue(trash).items.map((i: any) => i.id)
+        expect(ids).toContain(t1)
+        expect(ids).toContain(t2)
+      } finally {
+        sqlite.exec('DROP TRIGGER IF EXISTS TEMP.abort_empty_trash_rollback_test')
+      }
     })
 
     it('purgeExpiredTopics: does not purge non-expired topics', () => {

@@ -5,6 +5,7 @@ import { isQwenMTModel } from '@renderer/config/models/qwen'
 import { UNKNOWN } from '@renderer/config/translate'
 import { getStoreProviders } from '@renderer/hooks/useStore'
 import i18n from '@renderer/i18n'
+import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import store from '@renderer/store'
 import { addAssistant } from '@renderer/store/assistants'
 import type {
@@ -280,6 +281,10 @@ export async function createAssistantFromAgent(agent: AssistantPreset) {
     regularPhrases: agent.regularPhrases || [], // Ensured regularPhrases
     settings: agent.settings || DEFAULT_ASSISTANT_SETTINGS
   }
+
+  // LOCK-533/528: the default topic must exist in SQLite with its
+  // assistantId before the assistant (and topic) is exposed in Redux.
+  await ensureOrdinaryTopicOwnership(topic.id, assistantId)
 
   store.dispatch(addAssistant(assistant))
 

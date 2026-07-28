@@ -46,7 +46,9 @@ describe('chatDbContracts', () => {
     'chatdb:paste-messages-to-topic',
     'chatdb:clear-topic-with-segments',
     // Phase 5.1B-2: search
-    'chatdb:search-messages'
+    'chatdb:search-messages',
+    // Phase 5.2B: atomic assistant empty-trash
+    'chatdb:empty-trash-topics'
   ]
 
   it('has entries for all expected channels', () => {
@@ -377,6 +379,11 @@ describe('validateChatDbRequest — valid payloads', () => {
     ).not.toThrow()
   })
 
+  // Phase 5.2B: atomic assistant empty-trash (LOCK-531)
+  it('empty-trash-topics: { assistantId }', () => {
+    expect(() => validateChatDbRequest('chatdb:empty-trash-topics', { assistantId: 'a1' })).not.toThrow()
+  })
+
   // Phase 5.1B: compound mutations
   it('clone-messages-to-topic: { targetTopicId, entries }', () => {
     expect(() =>
@@ -689,6 +696,21 @@ describe('validateChatDbRequest — invalid payloads', () => {
 
   it('purge-expired-topics: rejects missing cutoffTimestamp', () => {
     expect(() => validateChatDbRequest('chatdb:purge-expired-topics', {})).toThrow(ValidationError)
+  })
+
+  // Phase 5.2B: atomic assistant empty-trash (LOCK-531)
+  it('empty-trash-topics: rejects missing assistantId', () => {
+    expect(() => validateChatDbRequest('chatdb:empty-trash-topics', {})).toThrow(ValidationError)
+  })
+
+  it('empty-trash-topics: rejects empty assistantId', () => {
+    expect(() => validateChatDbRequest('chatdb:empty-trash-topics', { assistantId: '' })).toThrow(ValidationError)
+  })
+
+  it('empty-trash-topics: rejects unknown keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:empty-trash-topics', { assistantId: 'a1', cutoffTimestamp: 'x' })
+    ).toThrow(ValidationError)
   })
 
   // Phase 5.1B: compound mutation invalid payloads
@@ -1150,8 +1172,59 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() => validateChatDbResult('chatdb:soft-delete-topic', { ok: true, value: null })).not.toThrow()
   })
 
-  it('restore-topic: void result', () => {
+  // LOCK-532: restore returns the atomically restored TopicWire or null.
+  it('restore-topic: null result (no deleted row restored)', () => {
     expect(() => validateChatDbResult('chatdb:restore-topic', { ok: true, value: null })).not.toThrow()
+  })
+
+  it('restore-topic: returns restored topic wire', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:restore-topic', {
+        ok: true,
+        value: {
+          id: 't1',
+          assistantId: 'a1',
+          name: 'Restored',
+          pinned: false,
+          prompt: 'p',
+          isNameManuallyEdited: true,
+          deletedAt: null
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('restore-topic: rejects non-object non-null value', () => {
+    expect(() => validateChatDbResult('chatdb:restore-topic', { ok: true, value: 't1' })).toThrow(ValidationError)
+    expect(() => validateChatDbResult('chatdb:restore-topic', { ok: true, value: ['t1'] })).toThrow(ValidationError)
+  })
+
+  it('restore-topic: rejects wire with missing id or bad field types', () => {
+    expect(() => validateChatDbResult('chatdb:restore-topic', { ok: true, value: { name: 'x' } })).toThrow(
+      ValidationError
+    )
+    expect(() =>
+      validateChatDbResult('chatdb:restore-topic', { ok: true, value: { id: 't1', pinned: 'yes' } })
+    ).toThrow(ValidationError)
+  })
+
+  // Phase 5.2B: atomic assistant empty-trash (LOCK-531)
+  it('empty-trash-topics: returns aggregate file cleanup result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:empty-trash-topics', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } }
+      })
+    ).not.toThrow()
+  })
+
+  it('empty-trash-topics: rejects malformed cleanup result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:empty-trash-topics', {
+        ok: true,
+        value: { affectedFileIds: 'f1', remainingReferenceCounts: {} }
+      })
+    ).toThrow(ValidationError)
   })
 
   it('list-trash-topics: returns paginated items', () => {
@@ -1479,7 +1552,9 @@ describe('coverage consistency', () => {
     'chatdb:paste-messages-to-topic',
     'chatdb:clear-topic-with-segments',
     // Phase 5.1B-2: search
-    'chatdb:search-messages'
+    'chatdb:search-messages',
+    // Phase 5.2B: atomic assistant empty-trash
+    'chatdb:empty-trash-topics'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {

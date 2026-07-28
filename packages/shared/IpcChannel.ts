@@ -389,6 +389,9 @@ export enum IpcChannel {
   ChatDb_HardDeleteTopic = 'chatdb:hard-delete-topic',
   ChatDb_PurgeExpiredTopics = 'chatdb:purge-expired-topics',
 
+  // Phase 5.2B — atomic assistant empty-trash (LOCK-531)
+  ChatDb_EmptyTrashTopics = 'chatdb:empty-trash-topics',
+
   // Phase 5.1B — compound mutations
   ChatDb_CloneMessagesToTopic = 'chatdb:clone-messages-to-topic',
   ChatDb_ResetMessagesForResend = 'chatdb:reset-messages-for-resend',

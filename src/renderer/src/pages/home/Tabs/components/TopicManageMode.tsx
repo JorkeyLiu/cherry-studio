@@ -1,8 +1,10 @@
 import AssistantAvatar from '@renderer/components/Avatar/AssistantAvatar'
 import { modelGenerating } from '@renderer/hooks/useRuntime'
 import { TopicManager } from '@renderer/hooks/useTopic'
+import { softDeleteOrdinaryTopic } from '@renderer/services/db/topicTrashLifecycle'
 import type { Assistant, Topic } from '@renderer/types'
 import { cn } from '@renderer/utils'
+import { isAgentSessionTopicId } from '@renderer/utils/agentSession'
 import { Dropdown, Tooltip } from 'antd'
 import { CheckSquare, FolderOpen, Search, Square, Trash2, XIcon } from 'lucide-react'
 import type { FC, PropsWithChildren, Ref } from 'react'
@@ -146,9 +148,16 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
 
     const topicsToDelete = assistant.topics.filter((topic) => selectedIds.has(topic.id))
 
-    // Soft-delete topics (move to trash)
+    // Soft-delete topics (move to trash). Phase 5.2B: ordinary topics go
+    // through SQLite (LOCK-521); agent-session topics keep Dexie behavior.
+    // Redux below only removes topics whose mutation succeeded (LOCK-528).
     const results = await Promise.allSettled(
-      topicsToDelete.map((topic) => TopicManager.softRemoveTopic(topic).then(() => topic.id))
+      topicsToDelete.map((topic) =>
+        (isAgentSessionTopicId(topic.id)
+          ? TopicManager.softRemoveTopic(topic)
+          : softDeleteOrdinaryTopic(topic.id)
+        ).then(() => topic.id)
+      )
     )
 
     // Filter successful ids

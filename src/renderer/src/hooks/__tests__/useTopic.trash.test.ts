@@ -33,10 +33,17 @@ vi.mock('@renderer/databases', () => ({
         topicRows.delete(id)
         return Promise.resolve()
       }),
-      filter: vi.fn()
+      filter: vi.fn((predicate: (t: unknown) => boolean) => ({
+        toArray: () => Promise.resolve(Array.from(topicRows.values()).filter(predicate))
+      }))
     },
     message_blocks: {}
   }
+}))
+
+vi.mock('@renderer/services/db/topicMetadataPersist', () => ({ persistTopicMetadata: vi.fn() }))
+vi.mock('@renderer/utils/agentSession', () => ({
+  isAgentSessionTopicId: (id: string) => id.startsWith('agent-session:')
 }))
 
 vi.mock('@renderer/services/ApiService', () => ({ fetchMessagesSummary: vi.fn() }))
@@ -85,5 +92,40 @@ describe('TopicManager trash handling', () => {
     })
     expect(trashedTopics[0].deletedAt).toEqual(expect.any(String))
     expect(trashedTopics[0].messages).toBe(storedMessages)
+  })
+
+  describe('purgeExpiredTopics (Phase 5.2B, agent-session only)', () => {
+    const expiredAt = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString()
+
+    it('purges only expired AGENT-SESSION rows and never touches ordinary Dexie rows (LOCK-521)', async () => {
+      topicRows.set('agent-session:s-1', { id: 'agent-session:s-1', messages: [], deletedAt: expiredAt })
+      topicRows.set('ordinary-expired', { id: 'ordinary-expired', messages: [], deletedAt: expiredAt })
+
+      const removeTopicSpy = vi.spyOn(TopicManager, 'removeTopic').mockResolvedValue(undefined)
+      try {
+        const count = await TopicManager.purgeExpiredTopics()
+
+        expect(count).toBe(1)
+        expect(removeTopicSpy).toHaveBeenCalledExactlyOnceWith('agent-session:s-1')
+        expect(removeTopicSpy).not.toHaveBeenCalledWith('ordinary-expired')
+      } finally {
+        removeTopicSpy.mockRestore()
+      }
+    })
+
+    it('does not purge agent-session rows inside the retention window', async () => {
+      const recentAt = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString()
+      topicRows.set('agent-session:s-recent', { id: 'agent-session:s-recent', messages: [], deletedAt: recentAt })
+
+      const removeTopicSpy = vi.spyOn(TopicManager, 'removeTopic').mockResolvedValue(undefined)
+      try {
+        const count = await TopicManager.purgeExpiredTopics()
+
+        expect(count).toBe(0)
+        expect(removeTopicSpy).not.toHaveBeenCalled()
+      } finally {
+        removeTopicSpy.mockRestore()
+      }
+    })
   })
 })

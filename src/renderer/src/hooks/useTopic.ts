@@ -2,6 +2,7 @@ import { loggerService } from '@logger'
 import db from '@renderer/databases'
 import i18n from '@renderer/i18n'
 import { fetchMessagesSummary } from '@renderer/services/ApiService'
+import { persistTopicMetadata } from '@renderer/services/db/topicMetadataPersist'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { safeDeleteFiles } from '@renderer/services/MessagesService'
 import store from '@renderer/store'
@@ -11,6 +12,7 @@ import { loadTopicMessagesThunk } from '@renderer/store/thunk/messageThunk'
 import type { Assistant, FileMetadata, Topic } from '@renderer/types'
 import type { FileMessageBlock, ImageMessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
+import { isAgentSessionTopicId } from '@renderer/utils/agentSession'
 import { findMainTextBlocks } from '@renderer/utils/messageUtils/find'
 import { truncateText } from '@renderer/utils/naming'
 import dayjs from 'dayjs'
@@ -135,8 +137,11 @@ export const autoRenameTopic = async (assistant: Assistant, topicId: string) => 
       return
     }
 
-    const applyTopicName = (name: string) => {
+    const applyTopicName = async (name: string) => {
       const data = { ...topic, name } as Topic
+      // Phase 5.2B: persist metadata to SQLite before Redux mutation (LOCK-528).
+      // Agent-session topics bypass SQLite within persistTopicMetadata.
+      await persistTopicMetadata(data)
       if (topic.id === _activeTopic.id) {
         _setActiveTopic(data)
       }
@@ -159,7 +164,7 @@ export const autoRenameTopic = async (assistant: Assistant, topicId: string) => 
       if (topicName) {
         try {
           startTopicRenaming(topicId)
-          applyTopicName(topicName)
+          await applyTopicName(topicName)
         } finally {
           finishTopicRenaming(topicId)
         }
@@ -172,14 +177,14 @@ export const autoRenameTopic = async (assistant: Assistant, topicId: string) => 
       try {
         const { text: summaryText, error } = await fetchMessagesSummary({ messages: topic.messages })
         if (summaryText) {
-          applyTopicName(summaryText)
+          await applyTopicName(summaryText)
         } else {
           if (error) {
             window.toast?.error(`${i18n.t('message.error.fetchTopicName')}: ${error}`)
           }
           const fallbackName = getFirstMessageName()
           if (fallbackName) {
-            applyTopicName(fallbackName)
+            await applyTopicName(fallbackName)
           }
         }
       } finally {
@@ -295,11 +300,13 @@ export const TopicManager = {
       .sort((a, b) => new Date(b.deletedAt!).getTime() - new Date(a.deletedAt!).getTime()) as Topic[]
   },
 
-  // Permanently delete topics that have been in trash for >= 5 days
+  // Permanently delete AGENT-SESSION topics that have been in trash >= 5 days.
+  // Phase 5.2B: the ordinary-chat expired purge is SQLite-owned (LOCK-521/523);
+  // this retained Dexie purge must only ever touch agent-session rows.
   // Uses the existing removeTopic which clears messages+files
   async purgeExpiredTopics(): Promise<number> {
     const now = dayjs()
-    const trashTopics = await db.topics.filter((t) => !!t.deletedAt).toArray()
+    const trashTopics = await db.topics.filter((t) => !!t.deletedAt && isAgentSessionTopicId(t.id)).toArray()
     let count = 0
     for (const topic of trashTopics) {
       if (now.diff(dayjs(topic.deletedAt), 'day') >= 5) {
