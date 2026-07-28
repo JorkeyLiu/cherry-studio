@@ -58,6 +58,8 @@ import type {
   ResetMessagesForResendRequest,
   ResetMessagesForResendResponse,
   RestoreTopicRequest,
+  SearchMessagesRequest,
+  SearchMessagesResponse,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   UpdateBlocksRequest,
@@ -150,7 +152,9 @@ function makeApiSpy() {
     pasteMessagesToTopic:
       vi.fn<(request: PasteMessagesToTopicRequest) => Promise<ChatDbResult<PasteMessagesToTopicResponse>>>(),
     clearTopicWithSegments:
-      vi.fn<(request: ClearTopicWithSegmentsRequest) => Promise<ChatDbResult<ClearTopicWithSegmentsResponse>>>()
+      vi.fn<(request: ClearTopicWithSegmentsRequest) => Promise<ChatDbResult<ClearTopicWithSegmentsResponse>>>(),
+    // Phase 5.2A: search
+    searchMessages: vi.fn<(request: SearchMessagesRequest) => Promise<ChatDbResult<SearchMessagesResponse>>>()
   }
 }
 
@@ -793,6 +797,99 @@ describe('SqliteMessageDataSource', () => {
       expect(api.clearTopicWithSegments).toHaveBeenCalledOnce()
       expect(mockDispatch).toHaveBeenCalledOnce()
       expect(result.affectedFileIds).toEqual(['f1'])
+    })
+  })
+
+  // =========================================================================
+  // Phase 5.2A: search
+  // =========================================================================
+
+  describe('Phase 5.2A: searchMessages', () => {
+    const emptyResponse: SearchMessagesResponse = { items: [], hasMore: false, totalCount: 0 }
+
+    it('calls api.searchMessages with exact request (no cursor on first page)', async () => {
+      api.searchMessages.mockResolvedValue(successResult(emptyResponse))
+      await ds.searchMessages({ keywords: 'hello world', matchMode: 'whole-word', sortOrder: 'newest', pageSize: 10 })
+      expect(api.searchMessages).toHaveBeenCalledOnce()
+      expect(api.searchMessages).toHaveBeenCalledWith({
+        keywords: 'hello world',
+        matchMode: 'whole-word',
+        sortOrder: 'newest',
+        pageSize: 10
+      })
+      const req = api.searchMessages.mock.calls[0][0]
+      expect('cursor' in req).toBe(false)
+    })
+
+    it('passes the opaque cursor through unchanged', async () => {
+      api.searchMessages.mockResolvedValue(successResult(emptyResponse))
+      await ds.searchMessages({
+        keywords: 'foo',
+        matchMode: 'substring',
+        sortOrder: 'oldest',
+        pageSize: 10,
+        cursor: 'b3BhcXVl'
+      })
+      expect(api.searchMessages).toHaveBeenCalledWith({
+        keywords: 'foo',
+        matchMode: 'substring',
+        sortOrder: 'oldest',
+        pageSize: 10,
+        cursor: 'b3BhcXVl'
+      })
+    })
+
+    it('returns the unwrapped response value', async () => {
+      const response: SearchMessagesResponse = {
+        items: [
+          {
+            blockId: 'b1',
+            messageId: 'm1',
+            topicId: 't1',
+            topicName: 'Topic 1',
+            rawContent: 'hello world',
+            messageCreatedAt: '2026-01-01T00:00:00.000Z'
+          }
+        ],
+        nextCursor: 'bmV4dA',
+        hasMore: true,
+        totalCount: 11
+      }
+      api.searchMessages.mockResolvedValue(successResult(response))
+      const result = await ds.searchMessages({
+        keywords: 'hello',
+        matchMode: 'whole-word',
+        sortOrder: 'newest',
+        pageSize: 10
+      })
+      expect(result).toEqual(response)
+    })
+
+    it('structured failure throws ChatDbResultError without retry or fallback', async () => {
+      api.searchMessages.mockResolvedValue(failureResult('SEARCH_ERROR', 'search failed'))
+      try {
+        await ds.searchMessages({ keywords: 'x', matchMode: 'whole-word', sortOrder: 'newest', pageSize: 10 })
+        expect.fail('Should have thrown')
+      } catch (e) {
+        expect(e).toBeInstanceOf(ChatDbResultError)
+        expect((e as ChatDbResultError).code).toBe('SEARCH_ERROR')
+      }
+      expect(api.searchMessages).toHaveBeenCalledOnce()
+      expect(api.fetchMessages).not.toHaveBeenCalled()
+    })
+
+    it('transport rejection propagates unchanged', async () => {
+      api.searchMessages.mockRejectedValue(new Error('IPC transport failed'))
+      await expect(
+        ds.searchMessages({ keywords: 'x', matchMode: 'whole-word', sortOrder: 'newest', pageSize: 10 })
+      ).rejects.toThrow('IPC transport failed')
+    })
+
+    it('does NOT dispatch topic timestamp update (read-only)', async () => {
+      mockDispatch.mockClear()
+      api.searchMessages.mockResolvedValue(successResult(emptyResponse))
+      await ds.searchMessages({ keywords: 'x', matchMode: 'whole-word', sortOrder: 'newest', pageSize: 10 })
+      expect(mockDispatch).not.toHaveBeenCalled()
     })
   })
 

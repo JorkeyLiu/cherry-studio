@@ -1957,12 +1957,14 @@
   "history": {
     "continue_chat": "Συνεχίστε το συνομιλημένο",
     "error": {
+      "message_not_found": "Το μήνυμα δεν βρέθηκε",
       "topic_not_found": "Το θέμα δεν υπάρχει"
     },
     "locate": {
       "message": "Εφαρμογή στο μήνυμα"
     },
     "search": {
+      "error": "Η αναζήτηση μηνυμάτων απέτυχε",
       "match": {
         "substring": "Περιέχει",
         "whole_word": "Ολόκληρη λέξη"

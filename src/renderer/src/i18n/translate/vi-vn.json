@@ -1957,12 +1957,14 @@
   "history": {
     "continue_chat": "Tiếp tục trò chuyện",
     "error": {
+      "message_not_found": "Không tìm thấy tin nhắn",
       "topic_not_found": "Không tìm thấy chủ đề"
     },
     "locate": {
       "message": "Tìm tin nhắn"
     },
     "search": {
+      "error": "Tìm kiếm tin nhắn thất bại",
       "match": {
         "substring": "Chứa",
         "whole_word": "Nguyên từ"

@@ -2,7 +2,7 @@
  * SqliteMessageDataSource — SQLite-backed implementation of MessageDataSource.
  *
  * Routes all operations through the preload `window.api.chatDb` bridge
- * to Main-side ChatDbAggregateService via 23 named IPC methods.
+ * to Main-side ChatDbAggregateService via named IPC methods.
  *
  * Design:
  * - Constructor injection of a narrow typed ChatDbApi; defaults to window.api.chatDb.
@@ -64,6 +64,8 @@ import type {
   ResetMessagesForResendRequest,
   ResetMessagesForResendResponse,
   RestoreTopicRequest,
+  SearchMessagesRequest,
+  SearchMessagesResponse,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   TopicWire,
@@ -132,6 +134,8 @@ export interface ChatDbApi {
   ): Promise<ChatDbResult<DeleteMessagesWithSegmentsResponse>>
   pasteMessagesToTopic(request: PasteMessagesToTopicRequest): Promise<ChatDbResult<PasteMessagesToTopicResponse>>
   clearTopicWithSegments(request: ClearTopicWithSegmentsRequest): Promise<ChatDbResult<ClearTopicWithSegmentsResponse>>
+  // Phase 5.2A: search (read-only)
+  searchMessages(request: SearchMessagesRequest): Promise<ChatDbResult<SearchMessagesResponse>>
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +628,20 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const result = unwrap(await this.api.clearTopicWithSegments(request))
     dispatchTopicUpdatedAt(topicId)
     return result
+  }
+
+  // ============ Search (Phase 5.2A, read-only) ============
+
+  /**
+   * Search message blocks via the Main-side SQLite search surface.
+   *
+   * Follows the standard pattern: one named bridge call, ChatDbResult
+   * unwrapping, structured failure throws ChatDbResultError, transport
+   * rejection propagates unchanged. No retry, no fallback.
+   */
+  async searchMessages(request: SearchMessagesRequest): Promise<SearchMessagesResponse> {
+    const wireRequest: SearchMessagesRequest = cloneForWire(request)
+    return unwrap(await this.api.searchMessages(wireRequest))
   }
 
   // ============ File Operations ============

@@ -1957,12 +1957,14 @@
   "history": {
     "continue_chat": "Continuă conversația",
     "error": {
+      "message_not_found": "Mesajul nu a fost găsit",
       "topic_not_found": "Subiectul nu a fost găsit"
     },
     "locate": {
       "message": "Localizează mesajul"
     },
     "search": {
+      "error": "Căutarea mesajelor a eșuat",
       "match": {
         "substring": "Conține",
         "whole_word": "Cuvânt întreg"

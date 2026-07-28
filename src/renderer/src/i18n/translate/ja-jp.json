@@ -1957,12 +1957,14 @@
   "history": {
     "continue_chat": "チャットを続ける",
     "error": {
+      "message_not_found": "メッセージが見つかりません",
       "topic_not_found": "トピックが見つかりません"
     },
     "locate": {
       "message": "メッセージを探す"
     },
     "search": {
+      "error": "メッセージの検索に失敗しました",
       "match": {
         "substring": "含む",
         "whole_word": "単語全体"

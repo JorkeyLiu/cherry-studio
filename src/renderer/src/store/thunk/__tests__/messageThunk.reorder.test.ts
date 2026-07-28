@@ -29,6 +29,16 @@ vi.mock('@renderer/store', () => ({
   }
 }))
 
+// Mock the direct assistants import so the test does not load the heavy
+// assistants -> useTopic -> messageThunk module graph. The mock mirrors the
+// real Redux Toolkit action creator shape used by reorderMessageGroupThunk.
+vi.mock('@renderer/store/assistants', () => ({
+  updateTopicUpdatedAt: (payload: { topicId: string }) => ({
+    type: 'assistants/updateTopicUpdatedAt',
+    payload
+  })
+}))
+
 vi.mock('@renderer/services/db/DbService', () => ({
   DbService: {
     getInstance: () => ({})

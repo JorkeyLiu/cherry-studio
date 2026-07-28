@@ -1,32 +1,29 @@
+import { loggerService } from '@logger'
 import { LoadingIcon } from '@renderer/components/Icons'
 import db from '@renderer/databases'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
+import { ChatDbResultError, SqliteMessageDataSource } from '@renderer/services/db/SqliteMessageDataSource'
 import { selectTopicsMap } from '@renderer/store/assistants'
 import type { Topic } from '@renderer/types'
-import { type Message, MessageBlockType } from '@renderer/types/newMessage'
+import type { Message } from '@renderer/types/newMessage'
 import {
   buildKeywordRegexes,
   buildKeywordUnionRegex,
   type KeywordMatchMode,
   splitKeywordsToTerms
 } from '@renderer/utils/keywordSearch'
+import type { SearchResultItem } from '@shared/chatDb'
 import { normalizeText, stripMarkdownFormatting } from '@shared/searchTextNormalization'
-import { List, Segmented, Spin, Typography } from 'antd'
-import { useLiveQuery } from 'dexie-react-hooks'
+import { List, Pagination, Segmented, Spin, Typography } from 'antd'
 import type { FC } from 'react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSelector } from 'react-redux'
 import styled from 'styled-components'
 
-const { Text, Title } = Typography
+const logger = loggerService.withContext('SearchResults')
 
-type SearchResult = {
-  message: Message
-  topic: Topic
-  content: string
-  snippet: string
-}
+const { Text, Title } = Typography
 
 interface Props extends React.HTMLAttributes<HTMLDivElement> {
   keywords: string
@@ -40,7 +37,20 @@ const SEARCH_SNIPPET_MAX_LINE_LENGTH = 160
 const SEARCH_SNIPPET_LINE_FRAGMENT_RADIUS = 40
 const SEARCH_SNIPPET_MAX_LINE_FRAGMENTS = 3
 
+const SEARCH_PAGE_SIZE = 10
+
 type ResultSortOrder = 'newest' | 'oldest'
+
+/** A result item paired with its precomputed display snippet. */
+type DisplayResult = {
+  item: SearchResultItem
+  snippet: string
+}
+
+type SearchFailure = {
+  message: string
+  code?: string
+}
 
 // stripMarkdownFormatting and normalizeText are now imported from @shared/searchTextNormalization
 // Re-export for any other consumers within this module
@@ -185,78 +195,210 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
   const [sortOrder, setSortOrder] = useState<ResultSortOrder>('newest')
   const [searchTerms, setSearchTerms] = useState<string[]>(splitKeywordsToTerms(keywords))
 
-  const topics = useLiveQuery(() => db.topics.toArray(), [])
   // FIXME: db 中没有 topic.name 等信息，只能从 store 获取
+  // Store topics are only resolved for the onTopicClick navigation callback
+  // (LOCK-004) — never used to search or filter blocks.
   const storeTopicsMap = useSelector(selectTopicsMap)
 
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([])
-  const [searchStats, setSearchStats] = useState({ count: 0, time: 0 })
-  const [isLoading, setIsLoading] = useState(false)
+  const dataSource = useMemo(() => new SqliteMessageDataSource(), [])
 
-  const onSearch = useCallback(async () => {
-    setSearchResults([])
-    setIsLoading(true)
+  const [pages, setPages] = useState<DisplayResult[][]>([])
+  const [currentPage, setCurrentPage] = useState(1)
+  const [totalCount, setTotalCount] = useState(0)
+  // Whether the last fetched page returned a usable cursor for the next page.
+  // Drives the LOCK-004 pagination fallback when totalCount is best-effort 0.
+  const [hasNextCursor, setHasNextCursor] = useState(false)
+  const [searchTime, setSearchTime] = useState(0)
+  const [isLoading, setIsLoading] = useState(false)
+  const [searchError, setSearchError] = useState<SearchFailure | null>(null)
+
+  // Request generation. Incremented on every keywords/matchMode/sortOrder
+  // change so responses of an older search session can never overwrite
+  // the current state.
+  const generationRef = useRef(0)
+  // Fetched pages for the current search session (index = zero-based page).
+  const pagesRef = useRef<DisplayResult[][]>([])
+  // cursorsRef.current[i] = opaque SQLite cursor needed to request page i.
+  // Index 0 is always undefined (first page). For i > 0, undefined means
+  // the end of results was reached before page i.
+  const cursorsRef = useRef<Array<string | undefined>>([undefined])
+  // Serializes fetches within one generation so concurrent page navigations
+  // cannot duplicate or race cursor pages (LOCK-002). The chain is replaced
+  // (not appended to) whenever a new generation starts, so a new search never
+  // waits behind an obsolete generation's pending IPC (LOCK-001).
+  const fetchChainRef = useRef<Promise<void>>(Promise.resolve())
+
+  /**
+   * Fetch pages sequentially (forward-only opaque cursors) until the target
+   * page index is cached or the end of results is reached. Never re-fetches
+   * a cached page and never synthesizes cursors, so pages can neither omit
+   * nor duplicate blocks.
+   */
+  const fetchPagesThrough = useCallback(
+    async (params: {
+      generation: number
+      targetPageIndex: number
+      keywords: string
+      matchMode: KeywordMatchMode
+      sortOrder: ResultSortOrder
+      terms: string[]
+    }) => {
+      const { generation, targetPageIndex } = params
+      while (generation === generationRef.current && pagesRef.current.length <= targetPageIndex) {
+        const pageIndex = pagesRef.current.length
+        const cursor = cursorsRef.current[pageIndex]
+        if (pageIndex > 0 && cursor === undefined) {
+          // End of results — no further cursor available.
+          return
+        }
+        const response = await dataSource.searchMessages({
+          keywords: params.keywords,
+          matchMode: params.matchMode,
+          sortOrder: params.sortOrder,
+          pageSize: SEARCH_PAGE_SIZE,
+          ...(cursor !== undefined && { cursor })
+        })
+        if (generation !== generationRef.current) {
+          // Stale response — a newer search session started; discard.
+          return
+        }
+        const displayItems: DisplayResult[] = response.items.map((item) => ({
+          item,
+          snippet: buildSearchSnippet(item.rawContent, params.terms, params.matchMode)
+        }))
+        pagesRef.current = [...pagesRef.current, displayItems]
+        const nextCursor = response.hasMore ? response.nextCursor : undefined
+        cursorsRef.current[pageIndex + 1] = nextCursor
+        setPages(pagesRef.current)
+        setTotalCount(response.totalCount)
+        setHasNextCursor(nextCursor !== undefined)
+        // A successful active-generation response supersedes any stale
+        // pagination error (e.g. a failed next-page fetch that was later
+        // retried successfully). The generation guard above ensures a stale
+        // generation's completion can never clear the active error.
+        setSearchError(null)
+      }
+    },
+    [dataSource]
+  )
+
+  const toSearchFailure = useCallback((error: unknown): SearchFailure => {
+    if (error instanceof ChatDbResultError) {
+      return { message: error.message, code: error.code }
+    }
+    return { message: error instanceof Error ? error.message : String(error) }
+  }, [])
+
+  // New search session on keywords/matchMode/sortOrder change:
+  // reset paging state, invalidate in-flight requests, fetch first page.
+  useEffect(() => {
+    const generation = ++generationRef.current
+    pagesRef.current = []
+    cursorsRef.current = [undefined]
+    setPages([])
+    setCurrentPage(1)
+    setTotalCount(0)
+    setHasNextCursor(false)
+    setSearchError(null)
+
+    const terms = splitKeywordsToTerms(keywords)
+    setSearchTerms(terms)
 
     if (keywords.length === 0) {
-      setSearchStats({ count: 0, time: 0 })
-      setSearchTerms([])
+      setSearchTime(0)
       setIsLoading(false)
       return
     }
 
+    setIsLoading(true)
     const startTime = performance.now()
-    const newSearchTerms = splitKeywordsToTerms(keywords)
-    const searchRegexes = buildKeywordRegexes(newSearchTerms, { matchMode, flags: 'i' })
-
-    const blocks = (await db.message_blocks.toArray())
-      .filter((block) => block.type === MessageBlockType.MAIN_TEXT)
-      .filter((block) => {
-        const searchableContent = stripMarkdownFormatting(block.content)
-        return searchRegexes.every((regex) => regex.test(searchableContent))
+    // LOCK-001: start a fresh chain for the new generation instead of
+    // appending to the old one, so the first-page request fires immediately
+    // even if an obsolete generation still has a pending IPC. Generation
+    // guards inside fetchPagesThrough keep the obsolete completion from
+    // mutating pagesRef/cursorsRef or state.
+    fetchChainRef.current = fetchPagesThrough({ generation, targetPageIndex: 0, keywords, matchMode, sortOrder, terms })
+      .then(() => {
+        if (generation !== generationRef.current) return
+        setSearchTime((performance.now() - startTime) / 1000)
+        setIsLoading(false)
       })
-
-    const messages = topics?.flatMap((topic) => topic.messages)
-
-    const results = await Promise.all(
-      blocks.map(async (block) => {
-        const message = messages?.find((message) => message.id === block.messageId)
-        if (message) {
-          const topic = storeTopicsMap.get(message.topicId)
-          if (topic) {
-            return {
-              message,
-              topic,
-              content: block.content,
-              snippet: buildSearchSnippet(block.content, newSearchTerms, matchMode)
-            }
-          }
-        }
-        return null
+      .catch((error) => {
+        if (generation !== generationRef.current) return
+        logger.error('searchMessages failed', error as Error)
+        setSearchError(toSearchFailure(error))
+        setIsLoading(false)
       })
-    ).then((results) => results.filter(Boolean) as SearchResult[])
+  }, [keywords, matchMode, sortOrder, fetchPagesThrough, toSearchFailure])
 
-    const endTime = performance.now()
-    setSearchResults(results)
-    setSearchStats({
-      count: results.length,
-      time: (endTime - startTime) / 1000
-    })
-    setSearchTerms(newSearchTerms)
-    setIsLoading(false)
-  }, [keywords, matchMode, storeTopicsMap, topics])
-
-  const sortedSearchResults = useMemo(() => {
-    const results = [...searchResults]
-    results.sort((a, b) => {
-      const timeA = Date.parse(a.message.createdAt) || 0
-      const timeB = Date.parse(b.message.createdAt) || 0
-      if (timeA !== timeB) {
-        return sortOrder === 'newest' ? timeB - timeA : timeA - timeB
+  const handlePageChange = useCallback(
+    (page: number) => {
+      const targetPageIndex = page - 1
+      if (targetPageIndex < 0) {
+        return
       }
-      return a.message.id.localeCompare(b.message.id)
-    })
-    return results
-  }, [searchResults, sortOrder])
+      if (pagesRef.current.length > targetPageIndex) {
+        // Cached page — navigate with no request.
+        setCurrentPage(page)
+        return
+      }
+      // LOCK-003: cursors are forward-only, so the only fetchable uncached
+      // page is the single next one reached via the last server-returned
+      // cursor. Any farther target would require fetching multiple uncached
+      // intermediate pages — reject it (normal UI never offers such a page;
+      // this also keeps programmatic calls safe).
+      const isNextCursorReachablePage =
+        targetPageIndex === pagesRef.current.length && cursorsRef.current[targetPageIndex] !== undefined
+      if (!isNextCursorReachablePage) {
+        return
+      }
+      setCurrentPage(page)
+      const generation = generationRef.current
+      setIsLoading(true)
+      fetchChainRef.current = fetchChainRef.current
+        .then(() =>
+          fetchPagesThrough({ generation, targetPageIndex, keywords, matchMode, sortOrder, terms: searchTerms })
+        )
+        .then(() => {
+          if (generation !== generationRef.current) return
+          setIsLoading(false)
+        })
+        .catch((error) => {
+          if (generation !== generationRef.current) return
+          logger.error('searchMessages page fetch failed', error as Error)
+          setSearchError(toSearchFailure(error))
+          setIsLoading(false)
+        })
+    },
+    [keywords, matchMode, sortOrder, searchTerms, fetchPagesThrough, toSearchFailure]
+  )
+
+  const handleTopicClick = useCallback(
+    (topicId: string) => {
+      const topic = storeTopicsMap.get(topicId)
+      if (!topic) {
+        window.toast.error(t('history.error.topic_not_found'))
+        return
+      }
+      onTopicClick(topic)
+    },
+    [storeTopicsMap, onTopicClick, t]
+  )
+
+  const handleMessageClick = useCallback(
+    async (item: SearchResultItem) => {
+      // Resolve the full Message object from the existing Dexie topic record
+      // solely for navigation callback compatibility (LOCK-004).
+      const topic = await db.topics.get(item.topicId)
+      const message = topic?.messages?.find((m) => m.id === item.messageId)
+      if (!message) {
+        window.toast.error(t('history.error.message_not_found'))
+        return
+      }
+      onMessageClick(message)
+    },
+    [onMessageClick, t]
+  )
 
   const highlightText = (text: string) => {
     // Escape HTML entities to prevent XSS from LLM response content
@@ -272,10 +414,6 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
   }
 
   useEffect(() => {
-    void onSearch()
-  }, [onSearch])
-
-  useEffect(() => {
     if (!containerRef.current) return
 
     observerRef.current = new MutationObserver(() => {
@@ -289,6 +427,18 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
 
     return () => observerRef.current?.disconnect()
   }, [containerRef])
+
+  const currentItems = pages[currentPage - 1] ?? []
+
+  // LOCK-003 + LOCK-004: pagination exposes exactly the cached pages plus at
+  // most one extra slot when a server cursor for the next page is known, so
+  // the next page stays reachable even when the best-effort totalCount is 0.
+  // The server totalCount is used only for the stats line — it must not mint
+  // distant page buttons, because cursors are forward-only and a distant
+  // jump would fan out N-1 serial IPC calls. No cursors are synthesized —
+  // navigation still forwards the exact server-returned cursor.
+  const cachedItemCount = useMemo(() => pages.reduce((count, page) => count + page.length, 0), [pages])
+  const paginationTotal = cachedItemCount + (hasNextCursor ? 1 : 0)
 
   return (
     <Container ref={containerRef} {...props} onScroll={handleScroll}>
@@ -315,36 +465,54 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
             ]}
           />
         </SearchToolbar>
-        {sortedSearchResults.length > 0 && (
+        {searchError && (
+          <SearchErrorContainer role="alert">
+            <Text type="danger">{t('history.search.error')}</Text>
+            <Text type="secondary">
+              {searchError.code ? `[${searchError.code}] ` : ''}
+              {searchError.message}
+            </Text>
+          </SearchErrorContainer>
+        )}
+        {!searchError && totalCount > 0 && (
           <SearchStats>
-            Found {searchStats.count} results in {searchStats.time.toFixed(3)} seconds
+            Found {totalCount} results in {searchTime.toFixed(3)} seconds
           </SearchStats>
         )}
         <List
           itemLayout="vertical"
-          dataSource={sortedSearchResults}
-          pagination={{
-            pageSize: 10,
-            hideOnSinglePage: true
-          }}
+          dataSource={currentItems}
+          pagination={false}
           style={{ opacity: isLoading ? 0 : 1 }}
-          renderItem={({ message, topic, snippet }) => (
+          renderItem={({ item, snippet }) => (
             <List.Item>
               <Title
                 level={5}
                 style={{ color: 'var(--color-primary)', cursor: 'pointer' }}
-                onClick={() => onTopicClick(topic)}>
-                {topic.name}
+                onClick={() => handleTopicClick(item.topicId)}>
+                {item.topicName ?? ''}
               </Title>
-              <div style={{ cursor: 'pointer' }} onClick={() => onMessageClick(message)}>
+              <div style={{ cursor: 'pointer' }} onClick={() => void handleMessageClick(item)}>
                 <Text style={{ whiteSpace: 'pre-line' }}>{highlightText(snippet)}</Text>
               </div>
               <SearchResultTime>
-                <Text type="secondary">{new Date(message.createdAt).toLocaleString()}</Text>
+                <Text type="secondary">
+                  {item.messageCreatedAt ? new Date(item.messageCreatedAt).toLocaleString() : ''}
+                </Text>
               </SearchResultTime>
             </List.Item>
           )}
         />
+        <PaginationContainer style={{ opacity: isLoading ? 0 : 1 }}>
+          <Pagination
+            current={currentPage}
+            pageSize={SEARCH_PAGE_SIZE}
+            total={paginationTotal}
+            onChange={handlePageChange}
+            showSizeChanger={false}
+            hideOnSinglePage
+          />
+        </PaginationContainer>
         <div style={{ minHeight: 30 }}></div>
       </Spin>
     </Container>
@@ -365,6 +533,16 @@ const SearchStats = styled.div`
   color: var(--color-text-3);
 `
 
+const SearchErrorContainer = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--color-error, #ff4d4f);
+  border-radius: 8px;
+`
+
 const SearchToolbar = styled.div`
   width: 100%;
   display: flex;
@@ -373,6 +551,13 @@ const SearchToolbar = styled.div`
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
+`
+
+const PaginationContainer = styled.div`
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  margin-top: 12px;
 `
 
 const SearchResultTime = styled.div`

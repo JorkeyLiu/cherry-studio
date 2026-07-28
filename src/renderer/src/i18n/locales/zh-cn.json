@@ -1957,12 +1957,14 @@
   "history": {
     "continue_chat": "继续聊天",
     "error": {
+      "message_not_found": "消息不存在",
       "topic_not_found": "话题不存在"
     },
     "locate": {
       "message": "定位到消息"
     },
     "search": {
+      "error": "搜索消息失败",
       "match": {
         "substring": "包含",
         "whole_word": "整词"

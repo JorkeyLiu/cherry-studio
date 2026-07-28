@@ -1957,12 +1957,14 @@
   "history": {
     "continue_chat": "Chat fortsetzen",
     "error": {
+      "message_not_found": "Nachricht nicht gefunden",
       "topic_not_found": "Thema existiert nicht"
     },
     "locate": {
       "message": "Zu Nachricht navigieren"
     },
     "search": {
+      "error": "Nachrichtensuche fehlgeschlagen",
       "match": {
         "substring": "Enthält",
         "whole_word": "Ganzes Wort"

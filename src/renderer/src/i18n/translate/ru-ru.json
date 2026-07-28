@@ -1957,12 +1957,14 @@
   "history": {
     "continue_chat": "Продолжить чат",
     "error": {
+      "message_not_found": "Сообщение не найдено",
       "topic_not_found": "Топик не найден"
     },
     "locate": {
       "message": "Найти сообщение"
     },
     "search": {
+      "error": "Не удалось выполнить поиск сообщений",
       "match": {
         "substring": "Содержит",
         "whole_word": "Целое слово"
