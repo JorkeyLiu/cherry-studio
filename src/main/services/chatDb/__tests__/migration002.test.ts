@@ -359,7 +359,7 @@ describe('Migration 002', () => {
       const db = wrapDrizzle(sqlite)
 
       const count = runMigrations(db, sqlite)
-      expect(count).toBe(2)
+      expect(count).toBe(3)
 
       const tables = getTableNames(sqlite)
       expect(tables).toContain('migration_state')
@@ -497,7 +497,7 @@ describe('Migration 002', () => {
       // Apply 002
       const db2 = wrapDrizzle(sqlite)
       const count = runMigrations(db2, sqlite)
-      expect(count).toBe(1)
+      expect(count).toBe(2)
 
       // Verify topic data survived
       const topic = sqlite.prepare('SELECT * FROM topics WHERE id = ?').get('topic-1') as Record<string, unknown>
@@ -879,7 +879,7 @@ describe('Migration 002', () => {
       const db = wrapDrizzle(sqlite)
 
       const first = runMigrations(db, sqlite)
-      expect(first).toBe(2)
+      expect(first).toBe(3)
 
       const second = runMigrations(db, sqlite)
       expect(second).toBe(0)
@@ -957,10 +957,11 @@ describe('Migration 002', () => {
   // =========================================================================
 
   describe('Migration registry', () => {
-    it('should have exactly two migrations', () => {
-      expect(MIGRATIONS).toHaveLength(2)
+    it('should have exactly three migrations', () => {
+      expect(MIGRATIONS).toHaveLength(3)
       expect(MIGRATIONS[0].key).toBe('001_initial_schema')
       expect(MIGRATIONS[1].key).toBe('002_corrective_schema')
+      expect(MIGRATIONS[2].key).toBe('003_fts5_normalized_search')
     })
 
     it('002 should have SQL statements', () => {
@@ -1788,7 +1789,7 @@ describe('Migration 002 — duplicate file_references collapse', () => {
     // Apply 002
     const db = drizzle(sqlite, { schema })
     const count = runMigrations(db, sqlite)
-    expect(count).toBe(1)
+    expect(count).toBe(2)
 
     // Only one row should survive (ref-a has lower id lexicographically)
     const refs = sqlite.prepare('SELECT * FROM file_references').all() as Array<Record<string, unknown>>
@@ -1945,7 +1946,7 @@ describe('Migration 002 — multi-block file reference resolution', () => {
     // Apply 002
     const db = drizzle(sqlite, { schema })
     const count = runMigrations(db, sqlite)
-    expect(count).toBe(1)
+    expect(count).toBe(2)
 
     // Exactly one reference should survive
     const refs = sqlite.prepare('SELECT * FROM file_references').all() as Array<Record<string, unknown>>

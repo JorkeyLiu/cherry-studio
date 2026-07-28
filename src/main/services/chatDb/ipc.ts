@@ -1,7 +1,7 @@
 /**
  * ChatDb IPC handler registration.
  *
- * Registers exactly 23 fixed IPC handlers matching the ChatDb IpcChannel entries.
+ * Registers exactly 34 fixed IPC handlers matching the ChatDb IpcChannel entries.
  * Each handler:
  * 1. Validates the request using the shared contract validators.
  * 2. Delegates to ChatDbAggregateService.
@@ -30,25 +30,37 @@ import type {
   ChatDbChannel,
   ChatDbResult,
   ClearMessagesRequest,
+  ClearTopicWithSegmentsRequest,
+  CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   GetRawTopicRequest,
+  HardDeleteTopicRequest,
   ListBlocksByFileRequest,
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
+  ListTrashTopicsRequest,
+  PasteMessagesToTopicRequest,
+  PurgeExpiredTopicsRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ResetMessagesForResendRequest,
+  RestoreTopicRequest,
+  SearchMessagesRequest,
+  SoftDeleteTopicRequest,
   TopicExistsRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
   UpdateSegmentMetadataRequest,
   UpdateSingleBlockRequest,
+  UpdateTopicMetadataRequest,
   UpsertSegmentRequest
 } from '@shared/chatDb'
 import { ERR_VALIDATION, fail, validateChatDbRequest, validateChatDbResult } from '@shared/chatDb'
@@ -110,7 +122,7 @@ export function registerChatDbIpc(): () => void {
     if (!chatDbService.isInitialised()) {
       throw new Error('ChatDbService has not been initialised')
     }
-    return new ChatDbAggregateService(chatDbService.getDatabase())
+    return new ChatDbAggregateService(chatDbService.getDatabase(), chatDbService.getSqlite())
   }
 
   /**
@@ -123,7 +135,7 @@ export function registerChatDbIpc(): () => void {
     channel: string,
     execute: (aggregate: ChatDbAggregateService, request: any) => ChatDbResult<any>
   ): void {
-    // All 23 ChatDb channels are valid ChatDbChannel values.
+    // All 34 ChatDb channels are valid ChatDbChannel values.
     // Cast once for shared validator calls.
     const chatDbChannel = channel as ChatDbChannel
 
@@ -176,9 +188,9 @@ export function registerChatDbIpc(): () => void {
     handlers.push({ channel, handler })
   }
 
-  // -------------------------------------------------------------------------
-  // Register exactly 23 handlers
-  // -------------------------------------------------------------------------
+  // =========================================================================
+  // Register exactly 34 handlers (23 Phase 5.1A + 11 Phase 5.1B)
+  // =========================================================================
 
   // 1. fetch-messages
   handleCommand(IpcChannel.ChatDb_FetchMessages, (agg, req: FetchMessagesRequest) => {
@@ -293,6 +305,66 @@ export function registerChatDbIpc(): () => void {
   // 23. list-blocks-by-file (Phase 5.1A, read-only)
   handleCommand(IpcChannel.ChatDb_ListBlocksByFile, (agg, req: ListBlocksByFileRequest) => {
     return agg.listBlocksByFile(req.fileId)
+  })
+
+  // 24. update-topic-metadata (Phase 5.1B)
+  handleCommand(IpcChannel.ChatDb_UpdateTopicMetadata, (agg, req: UpdateTopicMetadataRequest) => {
+    return agg.updateTopicMetadata(req.topicId, req.name, req.pinned, req.prompt, req.isNameManuallyEdited)
+  })
+
+  // 25. soft-delete-topic (Phase 5.1B)
+  handleCommand(IpcChannel.ChatDb_SoftDeleteTopic, (agg, req: SoftDeleteTopicRequest) => {
+    return agg.softDeleteTopic(req.topicId)
+  })
+
+  // 26. restore-topic (Phase 5.1B)
+  handleCommand(IpcChannel.ChatDb_RestoreTopic, (agg, req: RestoreTopicRequest) => {
+    return agg.restoreTopic(req.topicId)
+  })
+
+  // 27. list-trash-topics (Phase 5.1B)
+  handleCommand(IpcChannel.ChatDb_ListTrashTopics, (agg, req: ListTrashTopicsRequest) => {
+    return agg.listTrashTopics(req.assistantId, req.limit, req.cursor)
+  })
+
+  // 28. hard-delete-topic (Phase 5.1B)
+  handleCommand(IpcChannel.ChatDb_HardDeleteTopic, (agg, req: HardDeleteTopicRequest) => {
+    return agg.hardDeleteTopic(req.topicId)
+  })
+
+  // 29. purge-expired-topics (Phase 5.1B)
+  handleCommand(IpcChannel.ChatDb_PurgeExpiredTopics, (agg, req: PurgeExpiredTopicsRequest) => {
+    return agg.purgeExpiredTopics(req.cutoffTimestamp)
+  })
+
+  // 30. clone-messages-to-topic (Phase 5.1B)
+  handleCommand(IpcChannel.ChatDb_CloneMessagesToTopic, (agg, req: CloneMessagesToTopicRequest) => {
+    return agg.cloneMessagesToTopic(req.targetTopicId, req.entries, req.assistantId)
+  })
+
+  // 31. reset-messages-for-resend (Phase 5.1B)
+  handleCommand(IpcChannel.ChatDb_ResetMessagesForResend, (agg, req: ResetMessagesForResendRequest) => {
+    return agg.resetMessagesForResend(req.topicId, req.messageIds, req.blockIdsToDelete)
+  })
+
+  // 32. delete-messages-with-segments (Phase 5.1B)
+  handleCommand(IpcChannel.ChatDb_DeleteMessagesWithSegments, (agg, req: DeleteMessagesWithSegmentsRequest) => {
+    return agg.deleteMessagesWithSegments(req.topicId, req.messageIds)
+  })
+
+  // 33. paste-messages-to-topic (Phase 5.1B)
+  handleCommand(IpcChannel.ChatDb_PasteMessagesToTopic, (agg, req: PasteMessagesToTopicRequest) => {
+    return agg.pasteMessagesToTopic(req.topicId, req.entries, req.insertIndex)
+  })
+
+  // 34. clear-topic-with-segments (Phase 5.1B)
+  handleCommand(IpcChannel.ChatDb_ClearTopicWithSegments, (agg, req: ClearTopicWithSegmentsRequest) => {
+    return agg.clearTopicWithSegments(req.topicId)
+  })
+
+  // 35. search-messages (Phase 5.1B-2)
+  handleCommand(IpcChannel.ChatDb_SearchMessages, (agg, req: SearchMessagesRequest) => {
+    return agg.searchMessages(req)
   })
 
   logger.info(`Registered ${handlers.length} ChatDb IPC handlers (registration #${registrationId})`)

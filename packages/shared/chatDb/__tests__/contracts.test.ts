@@ -32,7 +32,21 @@ describe('chatDbContracts', () => {
     'chatdb:reorder-messages',
     'chatdb:list-file-refs-by-file',
     'chatdb:count-file-refs-by-file',
-    'chatdb:list-blocks-by-file'
+    'chatdb:list-blocks-by-file',
+    // Phase 5.1B: topic lifecycle + compound mutations
+    'chatdb:update-topic-metadata',
+    'chatdb:soft-delete-topic',
+    'chatdb:restore-topic',
+    'chatdb:list-trash-topics',
+    'chatdb:hard-delete-topic',
+    'chatdb:purge-expired-topics',
+    'chatdb:clone-messages-to-topic',
+    'chatdb:reset-messages-for-resend',
+    'chatdb:delete-messages-with-segments',
+    'chatdb:paste-messages-to-topic',
+    'chatdb:clear-topic-with-segments',
+    // Phase 5.1B-2: search
+    'chatdb:search-messages'
   ]
 
   it('has entries for all expected channels', () => {
@@ -309,6 +323,111 @@ describe('validateChatDbRequest — valid payloads', () => {
   it('list-blocks-by-file: { fileId }', () => {
     expect(() => validateChatDbRequest('chatdb:list-blocks-by-file', { fileId: 'file-1' })).not.toThrow()
   })
+
+  // Phase 5.1B: topic lifecycle
+  it('update-topic-metadata: { topicId }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', name: 'New Name' })
+    ).not.toThrow()
+  })
+
+  it('update-topic-metadata: { topicId, pinned }', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', pinned: true })).not.toThrow()
+  })
+
+  it('update-topic-metadata: { topicId, prompt, isNameManuallyEdited }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-topic-metadata', {
+        topicId: 't1',
+        prompt: 'Hello',
+        isNameManuallyEdited: true
+      })
+    ).not.toThrow()
+  })
+
+  it('soft-delete-topic: { topicId }', () => {
+    expect(() => validateChatDbRequest('chatdb:soft-delete-topic', { topicId: 't1' })).not.toThrow()
+  })
+
+  it('restore-topic: { topicId }', () => {
+    expect(() => validateChatDbRequest('chatdb:restore-topic', { topicId: 't1' })).not.toThrow()
+  })
+
+  it('list-trash-topics: {}', () => {
+    expect(() => validateChatDbRequest('chatdb:list-trash-topics', {})).not.toThrow()
+  })
+
+  it('list-trash-topics: { assistantId, limit, cursor }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:list-trash-topics', {
+        assistantId: 'a1',
+        limit: 10,
+        cursor: 'abc'
+      })
+    ).not.toThrow()
+  })
+
+  it('hard-delete-topic: { topicId }', () => {
+    expect(() => validateChatDbRequest('chatdb:hard-delete-topic', { topicId: 't1' })).not.toThrow()
+  })
+
+  it('purge-expired-topics: { cutoffTimestamp }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: '2025-01-01T00:00:00.000Z' })
+    ).not.toThrow()
+  })
+
+  // Phase 5.1B: compound mutations
+  it('clone-messages-to-topic: { targetTopicId, entries }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:clone-messages-to-topic', {
+        targetTopicId: 't1',
+        entries: [{ message: { id: 'm1' }, blocks: [{ id: 'b1', messageId: 'm1' }] }]
+      })
+    ).not.toThrow()
+  })
+
+  it('reset-messages-for-resend: { topicId, messageIds, blockIdsToDelete }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reset-messages-for-resend', {
+        topicId: 't1',
+        messageIds: ['m1'],
+        blockIdsToDelete: ['b1']
+      })
+    ).not.toThrow()
+  })
+
+  it('delete-messages-with-segments: { topicId, messageIds }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:delete-messages-with-segments', {
+        topicId: 't1',
+        messageIds: ['m1']
+      })
+    ).not.toThrow()
+  })
+
+  it('paste-messages-to-topic: { topicId, entries }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:paste-messages-to-topic', {
+        topicId: 't1',
+        entries: [{ message: { id: 'm1' }, blocks: [{ id: 'b1', messageId: 'm1' }] }]
+      })
+    ).not.toThrow()
+  })
+
+  it('paste-messages-to-topic: { topicId, entries, insertIndex }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:paste-messages-to-topic', {
+        topicId: 't1',
+        entries: [],
+        insertIndex: 0
+      })
+    ).not.toThrow()
+  })
+
+  it('clear-topic-with-segments: { topicId }', () => {
+    expect(() => validateChatDbRequest('chatdb:clear-topic-with-segments', { topicId: 't1' })).not.toThrow()
+  })
 })
 
 // ===========================================================================
@@ -533,6 +652,102 @@ describe('validateChatDbRequest — invalid payloads', () => {
 
   it('list-blocks-by-file: rejects missing fileId', () => {
     expect(() => validateChatDbRequest('chatdb:list-blocks-by-file', {})).toThrow(ValidationError)
+  })
+
+  // Phase 5.1B: topic lifecycle invalid payloads
+  it('update-topic-metadata: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', {})).toThrow(ValidationError)
+  })
+
+  it('update-topic-metadata: rejects identity field (id)', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', id: 't1' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('update-topic-metadata: rejects identity field (assistantId)', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', assistantId: 'a1' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('soft-delete-topic: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:soft-delete-topic', {})).toThrow(ValidationError)
+  })
+
+  it('restore-topic: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:restore-topic', {})).toThrow(ValidationError)
+  })
+
+  it('list-trash-topics: rejects invalid limit', () => {
+    expect(() => validateChatDbRequest('chatdb:list-trash-topics', { limit: -1 })).toThrow(ValidationError)
+  })
+
+  it('hard-delete-topic: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:hard-delete-topic', {})).toThrow(ValidationError)
+  })
+
+  it('purge-expired-topics: rejects missing cutoffTimestamp', () => {
+    expect(() => validateChatDbRequest('chatdb:purge-expired-topics', {})).toThrow(ValidationError)
+  })
+
+  // Phase 5.1B: compound mutation invalid payloads
+  it('clone-messages-to-topic: rejects missing targetTopicId', () => {
+    expect(() => validateChatDbRequest('chatdb:clone-messages-to-topic', { entries: [] })).toThrow(ValidationError)
+  })
+
+  it('clone-messages-to-topic: rejects entry with missing message.id', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:clone-messages-to-topic', {
+        targetTopicId: 't1',
+        entries: [{ message: {}, blocks: [] }]
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('clone-messages-to-topic: rejects block without messageId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:clone-messages-to-topic', {
+        targetTopicId: 't1',
+        entries: [{ message: { id: 'm1' }, blocks: [{ id: 'b1' }] }]
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reset-messages-for-resend: rejects missing topicId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reset-messages-for-resend', { messageIds: [], blockIdsToDelete: [] })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-segments: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:delete-messages-with-segments', { messageIds: [] })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('delete-messages-with-segments: rejects non-array messageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:delete-messages-with-segments', { topicId: 't1', messageIds: 'bad' })
+    ).toThrow(ValidationError)
+  })
+
+  it('paste-messages-to-topic: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:paste-messages-to-topic', { entries: [] })).toThrow(ValidationError)
+  })
+
+  it('paste-messages-to-topic: rejects negative insertIndex', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:paste-messages-to-topic', {
+        topicId: 't1',
+        entries: [],
+        insertIndex: -1
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('clear-topic-with-segments: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:clear-topic-with-segments', {})).toThrow(ValidationError)
   })
 })
 
@@ -920,6 +1135,110 @@ describe('validateChatDbResult — valid success envelopes', () => {
       })
     ).not.toThrow()
   })
+
+  // Phase 5.1B: topic lifecycle result validation
+  it('update-topic-metadata: returns topic wire', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-topic-metadata', {
+        ok: true,
+        value: { id: 't1', name: 'New Name' }
+      })
+    ).not.toThrow()
+  })
+
+  it('soft-delete-topic: void result', () => {
+    expect(() => validateChatDbResult('chatdb:soft-delete-topic', { ok: true, value: null })).not.toThrow()
+  })
+
+  it('restore-topic: void result', () => {
+    expect(() => validateChatDbResult('chatdb:restore-topic', { ok: true, value: null })).not.toThrow()
+  })
+
+  it('list-trash-topics: returns paginated items', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-trash-topics', {
+        ok: true,
+        value: { items: [{ id: 't1' }], hasMore: false }
+      })
+    ).not.toThrow()
+  })
+
+  it('list-trash-topics: returns items with cursor', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-trash-topics', {
+        ok: true,
+        value: { items: [{ id: 't1' }], nextCursor: 'abc', hasMore: true }
+      })
+    ).not.toThrow()
+  })
+
+  it('hard-delete-topic: returns file cleanup result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['f1', 'f2'], remainingReferenceCounts: { f1: 0, f2: 1 } }
+      })
+    ).not.toThrow()
+  })
+
+  it('hard-delete-topic: returns empty cleanup', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).not.toThrow()
+  })
+
+  it('purge-expired-topics: returns file cleanup result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:purge-expired-topics', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).not.toThrow()
+  })
+
+  // Phase 5.1B: compound mutation result validation
+  it('clone-messages-to-topic: void result', () => {
+    expect(() => validateChatDbResult('chatdb:clone-messages-to-topic', { ok: true, value: null })).not.toThrow()
+  })
+
+  it('reset-messages-for-resend: returns file cleanup result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reset-messages-for-resend', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } }
+      })
+    ).not.toThrow()
+  })
+
+  it('delete-messages-with-segments: returns file cleanup result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-segments', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).not.toThrow()
+  })
+
+  it('paste-messages-to-topic: returns file cleanup result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:paste-messages-to-topic', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).not.toThrow()
+  })
+
+  it('clear-topic-with-segments: returns file cleanup result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:clear-topic-with-segments', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } }
+      })
+    ).not.toThrow()
+  })
 })
 
 // ===========================================================================
@@ -1145,7 +1464,22 @@ describe('coverage consistency', () => {
     'chatdb:reorder-messages',
     'chatdb:list-file-refs-by-file',
     'chatdb:count-file-refs-by-file',
-    'chatdb:list-blocks-by-file'
+    'chatdb:list-blocks-by-file',
+    // Phase 5.1B: topic lifecycle
+    'chatdb:update-topic-metadata',
+    'chatdb:soft-delete-topic',
+    'chatdb:restore-topic',
+    'chatdb:list-trash-topics',
+    'chatdb:hard-delete-topic',
+    'chatdb:purge-expired-topics',
+    // Phase 5.1B: compound mutations
+    'chatdb:clone-messages-to-topic',
+    'chatdb:reset-messages-for-resend',
+    'chatdb:delete-messages-with-segments',
+    'chatdb:paste-messages-to-topic',
+    'chatdb:clear-topic-with-segments',
+    // Phase 5.1B-2: search
+    'chatdb:search-messages'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {
@@ -1173,5 +1507,652 @@ describe('coverage consistency', () => {
     for (const channel of Object.keys(chatDbContracts)) {
       expect(testedChannels.has(channel as (typeof allChannels)[number])).toBe(true)
     }
+  })
+})
+
+// ===========================================================================
+// Phase 5.1B-1 Audit Finding 1: Purge cutoff ISO 8601 validation
+// ===========================================================================
+
+describe('purge-expired-topics: cutoffTimestamp validation', () => {
+  it('accepts canonical ISO 8601 timestamp', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: '2025-01-01T00:00:00.000Z' })
+    ).not.toThrow()
+  })
+
+  it('rejects timestamp without Z suffix', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: '2025-01-01T00:00:00.000+00:00' })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects timestamp without milliseconds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: '2025-01-01T00:00:00Z' })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects non-ISO format', () => {
+    expect(() => validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: '2025-01-01' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('rejects date-only format', () => {
+    expect(() => validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: '01/01/2025' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('rejects non-string cutoffTimestamp', () => {
+    expect(() => validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: 12345 })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('rejects invalid date string', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: '2025-13-01T00:00:00.000Z' })
+    ).toThrow(ValidationError)
+  })
+})
+
+// ===========================================================================
+// Phase 5.1B-1 Audit Finding 7: Metadata type validation
+// ===========================================================================
+
+describe('update-topic-metadata: field type validation', () => {
+  it('accepts valid string name', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', name: 'New Name' })
+    ).not.toThrow()
+  })
+
+  it('accepts null name', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', name: null })).not.toThrow()
+  })
+
+  it('rejects numeric name', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', name: 42 })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('rejects boolean name', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', name: true })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('rejects object name', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', name: { key: 'value' } })
+    ).toThrow(ValidationError)
+  })
+
+  it('accepts valid boolean pinned', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', pinned: true })).not.toThrow()
+  })
+
+  it('accepts null pinned', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', pinned: null })).not.toThrow()
+  })
+
+  it('rejects string pinned', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', pinned: 'yes' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('rejects numeric pinned', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', pinned: 1 })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('accepts valid string prompt', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', prompt: 'Hello' })
+    ).not.toThrow()
+  })
+
+  it('accepts null prompt', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', prompt: null })).not.toThrow()
+  })
+
+  it('rejects numeric prompt', () => {
+    expect(() => validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', prompt: 42 })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('accepts valid boolean isNameManuallyEdited', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', isNameManuallyEdited: true })
+    ).not.toThrow()
+  })
+
+  it('accepts null isNameManuallyEdited', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', isNameManuallyEdited: null })
+    ).not.toThrow()
+  })
+
+  it('rejects string isNameManuallyEdited', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', isNameManuallyEdited: 'yes' })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects numeric isNameManuallyEdited', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-topic-metadata', { topicId: 't1', isNameManuallyEdited: 1 })
+    ).toThrow(ValidationError)
+  })
+})
+
+// ===========================================================================
+// Phase 5.1B-1 Audit Finding 7: TopicWire result field validation
+// ===========================================================================
+
+describe('update-topic-metadata result: TopicWire field type validation', () => {
+  it('rejects result with numeric name', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-topic-metadata', {
+        ok: true,
+        value: { id: 't1', name: 42 }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects result with string pinned', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-topic-metadata', {
+        ok: true,
+        value: { id: 't1', pinned: 'yes' }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects result with numeric prompt', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-topic-metadata', {
+        ok: true,
+        value: { id: 't1', prompt: 42 }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects result with string isNameManuallyEdited', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-topic-metadata', {
+        ok: true,
+        value: { id: 't1', isNameManuallyEdited: 'yes' }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('accepts result with valid TopicWire fields', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-topic-metadata', {
+        ok: true,
+        value: { id: 't1', name: 'Name', pinned: true, prompt: 'prompt', isNameManuallyEdited: false }
+      })
+    ).not.toThrow()
+  })
+
+  it('accepts result with null TopicWire fields', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-topic-metadata', {
+        ok: true,
+        value: { id: 't1', name: null, pinned: null, prompt: null, isNameManuallyEdited: null }
+      })
+    ).not.toThrow()
+  })
+})
+
+// ===========================================================================
+// Phase 5.1B-1 Audit Finding 7: list-trash-topics TopicWire field validation
+// ===========================================================================
+
+describe('list-trash-topics result: TopicWire field type validation', () => {
+  it('rejects item with numeric name', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-trash-topics', {
+        ok: true,
+        value: { items: [{ id: 't1', name: 42 }], hasMore: false }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects item with string pinned', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-trash-topics', {
+        ok: true,
+        value: { items: [{ id: 't1', pinned: 'yes' }], hasMore: false }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects item with numeric prompt', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-trash-topics', {
+        ok: true,
+        value: { items: [{ id: 't1', prompt: 42 }], hasMore: false }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects item with string isNameManuallyEdited', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-trash-topics', {
+        ok: true,
+        value: { items: [{ id: 't1', isNameManuallyEdited: 'yes' }], hasMore: false }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('accepts items with valid TopicWire fields', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-trash-topics', {
+        ok: true,
+        value: {
+          items: [{ id: 't1', name: 'Name', pinned: true, prompt: 'p', isNameManuallyEdited: false }],
+          hasMore: false
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('accepts items with null TopicWire fields', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-trash-topics', {
+        ok: true,
+        value: {
+          items: [{ id: 't1', name: null, pinned: null, prompt: null, isNameManuallyEdited: null }],
+          hasMore: false
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('rejects item without id', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-trash-topics', {
+        ok: true,
+        value: { items: [{ name: 'Name' }], hasMore: false }
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
+// ===========================================================================
+// Phase 5.1B-1 Audit Finding (accepted-risk gap): FileCleanupResult validation
+// ===========================================================================
+
+describe('FileCleanupResult — affectedFileIds element validation', () => {
+  it('accepts valid string IDs', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['file-1', 'file-2'], remainingReferenceCounts: { 'file-1': 0, 'file-2': 1 } }
+      })
+    ).not.toThrow()
+  })
+
+  it('accepts empty affectedFileIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).not.toThrow()
+  })
+
+  it('rejects affectedFileIds with number element', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: [42], remainingReferenceCounts: {} }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects affectedFileIds with boolean element', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: [true], remainingReferenceCounts: {} }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects affectedFileIds with null element', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: [null], remainingReferenceCounts: {} }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects affectedFileIds with empty string element', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: [''], remainingReferenceCounts: {} }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects affectedFileIds with object element', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: [{ id: 'f1' }], remainingReferenceCounts: {} }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects non-array affectedFileIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: 'not-array', remainingReferenceCounts: {} }
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
+describe('FileCleanupResult — remainingReferenceCounts validation', () => {
+  it('accepts valid counts with zero', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } }
+      })
+    ).not.toThrow()
+  })
+
+  it('accepts valid counts with positive integers', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['f1', 'f2'], remainingReferenceCounts: { f1: 5, f2: 100 } }
+      })
+    ).not.toThrow()
+  })
+
+  it('accepts empty remainingReferenceCounts', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).not.toThrow()
+  })
+
+  it('rejects remainingReferenceCounts as array', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: [] }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects remainingReferenceCounts as null', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: null }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects remainingReferenceCounts as string', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: 'bad' }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects remainingReferenceCounts with negative value', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: -1 } }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects remainingReferenceCounts with fractional value', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 1.5 } }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects remainingReferenceCounts with NaN value', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: NaN } }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects remainingReferenceCounts with Infinity value', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: Infinity } }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects remainingReferenceCounts with string value', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 'zero' } }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects remainingReferenceCounts with boolean value', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: true } }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects remainingReferenceCounts with null value', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: null } }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects remainingReferenceCounts with empty key', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:hard-delete-topic', {
+        ok: true,
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { '': 0 } }
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 5.1B-2: search-messages strict wire validation
+// ---------------------------------------------------------------------------
+
+describe('search-messages: strict request/cursor/response validation', () => {
+  const validRequest = { keywords: 'hello', matchMode: 'substring', sortOrder: 'newest' }
+
+  const validItem = {
+    blockId: 'b1',
+    messageId: 'm1',
+    topicId: 't1',
+    topicName: null,
+    rawContent: 'hello world',
+    messageCreatedAt: '2026-01-01T00:00:00.000Z'
+  }
+
+  const validResponse = { items: [validItem], hasMore: false, totalCount: 1 }
+
+  // --- request cursor format ---
+
+  it('accepts request without cursor', () => {
+    expect(() => validateChatDbRequest('chatdb:search-messages', validRequest)).not.toThrow()
+  })
+
+  it('accepts canonical base64url cursor', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:search-messages', { ...validRequest, cursor: 'MjAyNi0wMS0wMVQwMDowMA' })
+    ).not.toThrow()
+  })
+
+  it('rejects empty-string cursor', () => {
+    expect(() => validateChatDbRequest('chatdb:search-messages', { ...validRequest, cursor: '' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('rejects non-base64url cursor (spaces / punctuation)', () => {
+    expect(() => validateChatDbRequest('chatdb:search-messages', { ...validRequest, cursor: 'not a cursor!' })).toThrow(
+      ValidationError
+    )
+    expect(() => validateChatDbRequest('chatdb:search-messages', { ...validRequest, cursor: 'a+b/c=' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('rejects non-string cursor', () => {
+    expect(() => validateChatDbRequest('chatdb:search-messages', { ...validRequest, cursor: 42 })).toThrow(
+      ValidationError
+    )
+  })
+
+  // --- response shape ---
+
+  it('accepts a valid response', () => {
+    expect(() => validateChatDbResult('chatdb:search-messages', { ok: true, value: validResponse })).not.toThrow()
+  })
+
+  it('accepts response with canonical nextCursor', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:search-messages', {
+        ok: true,
+        value: { ...validResponse, hasMore: true, nextCursor: 'YWJjZGVm' }
+      })
+    ).not.toThrow()
+  })
+
+  it('rejects non-canonical nextCursor', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:search-messages', {
+        ok: true,
+        value: { ...validResponse, nextCursor: 'has spaces' }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:search-messages', {
+        ok: true,
+        value: { ...validResponse, nextCursor: '' }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects unknown keys in response value', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:search-messages', {
+        ok: true,
+        value: { ...validResponse, extraField: true }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects non-boolean hasMore', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:search-messages', {
+        ok: true,
+        value: { ...validResponse, hasMore: 'yes' }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects non-finite / negative / fractional totalCount', () => {
+    for (const bad of [-1, 1.5, 'many']) {
+      expect(() =>
+        validateChatDbResult('chatdb:search-messages', {
+          ok: true,
+          value: { ...validResponse, totalCount: bad }
+        })
+      ).toThrow(ValidationError)
+    }
+  })
+
+  it('rejects item with missing/empty IDs', () => {
+    for (const patch of [{ blockId: '' }, { messageId: '' }, { topicId: 7 }]) {
+      expect(() =>
+        validateChatDbResult('chatdb:search-messages', {
+          ok: true,
+          value: { ...validResponse, items: [{ ...validItem, ...patch }] }
+        })
+      ).toThrow(ValidationError)
+    }
+  })
+
+  it('rejects item with non-nullable-conformant topicName / messageCreatedAt', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:search-messages', {
+        ok: true,
+        value: { ...validResponse, items: [{ ...validItem, topicName: 42 }] }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:search-messages', {
+        ok: true,
+        value: { ...validResponse, items: [{ ...validItem, messageCreatedAt: false }] }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('accepts item with null topicName and null messageCreatedAt', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:search-messages', {
+        ok: true,
+        value: { ...validResponse, items: [{ ...validItem, topicName: null, messageCreatedAt: null }] }
+      })
+    ).not.toThrow()
+  })
+
+  it('rejects item with non-string rawContent', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:search-messages', {
+        ok: true,
+        value: { ...validResponse, items: [{ ...validItem, rawContent: null }] }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects item with unknown keys', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:search-messages', {
+        ok: true,
+        value: { ...validResponse, items: [{ ...validItem, snippet: 'x' }] }
+      })
+    ).toThrow(ValidationError)
   })
 })

@@ -21,26 +21,44 @@ import type {
   BulkAddBlocksRequest,
   ChatDbResult,
   ClearMessagesRequest,
+  ClearTopicWithSegmentsRequest,
+  ClearTopicWithSegmentsResponse,
+  CloneMessagesToTopicRequest,
+  CloneMessagesToTopicResponse,
   CountFileRefsByFileRequest,
   CountFileRefsByFileResponse,
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteMessagesWithSegmentsRequest,
+  DeleteMessagesWithSegmentsResponse,
   DeleteSegmentRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   FetchMessagesResponse,
   GetRawTopicRequest,
   GetRawTopicResponse,
+  HardDeleteTopicRequest,
+  HardDeleteTopicResponse,
   ListBlocksByFileRequest,
   ListBlocksByFileResponse,
   ListFileRefsByFileRequest,
   ListFileRefsByFileResponse,
   ListSegmentsRequest,
   ListSegmentsResponse,
+  ListTrashTopicsRequest,
+  ListTrashTopicsResponse,
+  PasteMessagesToTopicRequest,
+  PasteMessagesToTopicResponse,
+  PurgeExpiredTopicsRequest,
+  PurgeExpiredTopicsResponse,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplaceSegmentMembershipResponse,
+  ResetMessagesForResendRequest,
+  ResetMessagesForResendResponse,
+  RestoreTopicRequest,
+  SoftDeleteTopicRequest,
   TopicExistsRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
@@ -48,6 +66,8 @@ import type {
   UpdateSegmentMetadataRequest,
   UpdateSegmentMetadataResponse,
   UpdateSingleBlockRequest,
+  UpdateTopicMetadataRequest,
+  UpdateTopicMetadataResponse,
   UpsertSegmentRequest,
   UpsertSegmentResponse
 } from '@shared/chatDb'
@@ -108,7 +128,29 @@ function makeApiSpy() {
       vi.fn<(request: ListFileRefsByFileRequest) => Promise<ChatDbResult<ListFileRefsByFileResponse>>>(),
     countFileRefsByFile:
       vi.fn<(request: CountFileRefsByFileRequest) => Promise<ChatDbResult<CountFileRefsByFileResponse>>>(),
-    listBlocksByFile: vi.fn<(request: ListBlocksByFileRequest) => Promise<ChatDbResult<ListBlocksByFileResponse>>>()
+    listBlocksByFile: vi.fn<(request: ListBlocksByFileRequest) => Promise<ChatDbResult<ListBlocksByFileResponse>>>(),
+    // Phase 5.1B: topic lifecycle
+    updateTopicMetadata:
+      vi.fn<(request: UpdateTopicMetadataRequest) => Promise<ChatDbResult<UpdateTopicMetadataResponse>>>(),
+    softDeleteTopic: vi.fn<(request: SoftDeleteTopicRequest) => Promise<ChatDbResult<null>>>(),
+    restoreTopic: vi.fn<(request: RestoreTopicRequest) => Promise<ChatDbResult<null>>>(),
+    listTrashTopics: vi.fn<(request: ListTrashTopicsRequest) => Promise<ChatDbResult<ListTrashTopicsResponse>>>(),
+    hardDeleteTopic: vi.fn<(request: HardDeleteTopicRequest) => Promise<ChatDbResult<HardDeleteTopicResponse>>>(),
+    purgeExpiredTopics:
+      vi.fn<(request: PurgeExpiredTopicsRequest) => Promise<ChatDbResult<PurgeExpiredTopicsResponse>>>(),
+    // Phase 5.1B: compound mutations
+    cloneMessagesToTopic:
+      vi.fn<(request: CloneMessagesToTopicRequest) => Promise<ChatDbResult<CloneMessagesToTopicResponse>>>(),
+    resetMessagesForResend:
+      vi.fn<(request: ResetMessagesForResendRequest) => Promise<ChatDbResult<ResetMessagesForResendResponse>>>(),
+    deleteMessagesWithSegments:
+      vi.fn<
+        (request: DeleteMessagesWithSegmentsRequest) => Promise<ChatDbResult<DeleteMessagesWithSegmentsResponse>>
+      >(),
+    pasteMessagesToTopic:
+      vi.fn<(request: PasteMessagesToTopicRequest) => Promise<ChatDbResult<PasteMessagesToTopicResponse>>>(),
+    clearTopicWithSegments:
+      vi.fn<(request: ClearTopicWithSegmentsRequest) => Promise<ChatDbResult<ClearTopicWithSegmentsResponse>>>()
   }
 }
 
@@ -527,7 +569,11 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('rejects sparse arrays', () => {
-      const sparse = [1, , 3]
+      // Build a sparse array without literal holes: index 1 is a hole.
+      const sparse: number[] = []
+      sparse[0] = 1
+      sparse[2] = 3
+      expect(1 in sparse).toBe(false)
       expect(() => SqliteMessageDataSource._cloneForWire(sparse)).toThrow(TypeError)
     })
 
@@ -647,6 +693,106 @@ describe('SqliteMessageDataSource', () => {
       expect(api.appendMessage).toHaveBeenCalledOnce()
       expect(api.updateMessage).not.toHaveBeenCalled()
       expect(api.updateMessageAndBlocks).not.toHaveBeenCalled()
+    })
+  })
+
+  // =========================================================================
+  // Phase 5.1B: topic lifecycle + compound mutations
+  // =========================================================================
+
+  describe('Phase 5.1B: topic lifecycle', () => {
+    it('updateTopicMetadata calls api with correct request', async () => {
+      const wire = { id: 't-1', name: 'New', pinned: true }
+      api.updateTopicMetadata.mockResolvedValue(successResult(wire))
+      const result = await ds.updateTopicMetadata('t-1', 'New', true, undefined, undefined)
+      expect(api.updateTopicMetadata).toHaveBeenCalledOnce()
+      expect(result).toEqual(wire)
+    })
+
+    it('softDeleteTopic calls api and dispatches', async () => {
+      api.softDeleteTopic.mockResolvedValue(successResult(null))
+      await ds.softDeleteTopic('t-1')
+      expect(api.softDeleteTopic).toHaveBeenCalledOnce()
+      expect(api.softDeleteTopic).toHaveBeenCalledWith({ topicId: 't-1' })
+      expect(mockDispatch).toHaveBeenCalledOnce()
+    })
+
+    it('restoreTopic calls api and dispatches', async () => {
+      api.restoreTopic.mockResolvedValue(successResult(null))
+      await ds.restoreTopic('t-1')
+      expect(api.restoreTopic).toHaveBeenCalledOnce()
+      expect(mockDispatch).toHaveBeenCalledOnce()
+    })
+
+    it('listTrashTopics calls api with correct request', async () => {
+      api.listTrashTopics.mockResolvedValue(successResult({ items: [{ id: 't-1' }], hasMore: false }))
+      const result = await ds.listTrashTopics('a-1', 10, 'cursor')
+      expect(api.listTrashTopics).toHaveBeenCalledOnce()
+      expect(result.items.length).toBe(1)
+    })
+
+    it('hardDeleteTopic calls api and dispatches', async () => {
+      api.hardDeleteTopic.mockResolvedValue(
+        successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } })
+      )
+      const result = await ds.hardDeleteTopic('t-1')
+      expect(api.hardDeleteTopic).toHaveBeenCalledOnce()
+      expect(mockDispatch).toHaveBeenCalledOnce()
+      expect(result.affectedFileIds).toEqual(['f1'])
+    })
+
+    it('purgeExpiredTopics calls api', async () => {
+      api.purgeExpiredTopics.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
+      const result = await ds.purgeExpiredTopics('2025-01-01T00:00:00.000Z')
+      expect(api.purgeExpiredTopics).toHaveBeenCalledOnce()
+      expect(result.affectedFileIds).toEqual([])
+    })
+  })
+
+  describe('Phase 5.1B: compound mutations', () => {
+    it('cloneMessagesToTopic calls api and dispatches', async () => {
+      api.cloneMessagesToTopic.mockResolvedValue(successResult(null))
+      await ds.cloneMessagesToTopic('t-1', [{ message: { id: 'm1' }, blocks: [{ id: 'b1', messageId: 'm1' }] }], 'a1')
+      expect(api.cloneMessagesToTopic).toHaveBeenCalledOnce()
+      expect(mockDispatch).toHaveBeenCalledOnce()
+    })
+
+    it('resetMessagesForResend calls api and dispatches', async () => {
+      api.resetMessagesForResend.mockResolvedValue(
+        successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } })
+      )
+      const result = await ds.resetMessagesForResend('t-1', ['m1'], ['b1'])
+      expect(api.resetMessagesForResend).toHaveBeenCalledOnce()
+      expect(mockDispatch).toHaveBeenCalledOnce()
+      expect(result.affectedFileIds).toEqual(['f1'])
+    })
+
+    it('deleteMessagesWithSegments calls api and dispatches', async () => {
+      api.deleteMessagesWithSegments.mockResolvedValue(
+        successResult({ affectedFileIds: [], remainingReferenceCounts: {} })
+      )
+      const result = await ds.deleteMessagesWithSegments('t-1', ['m1'])
+      expect(api.deleteMessagesWithSegments).toHaveBeenCalledOnce()
+      expect(mockDispatch).toHaveBeenCalledOnce()
+      expect(result.affectedFileIds).toEqual([])
+    })
+
+    it('pasteMessagesToTopic calls api and dispatches', async () => {
+      api.pasteMessagesToTopic.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
+      const result = await ds.pasteMessagesToTopic('t-1', [], 0)
+      expect(api.pasteMessagesToTopic).toHaveBeenCalledOnce()
+      expect(mockDispatch).toHaveBeenCalledOnce()
+      expect(result.affectedFileIds).toEqual([])
+    })
+
+    it('clearTopicWithSegments calls api and dispatches', async () => {
+      api.clearTopicWithSegments.mockResolvedValue(
+        successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } })
+      )
+      const result = await ds.clearTopicWithSegments('t-1')
+      expect(api.clearTopicWithSegments).toHaveBeenCalledOnce()
+      expect(mockDispatch).toHaveBeenCalledOnce()
+      expect(result.affectedFileIds).toEqual(['f1'])
     })
   })
 

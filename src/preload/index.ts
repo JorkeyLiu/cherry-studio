@@ -6,25 +6,37 @@ import type {
   AppendMessageRequest,
   BulkAddBlocksRequest,
   ClearMessagesRequest,
+  ClearTopicWithSegmentsRequest,
+  CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   GetRawTopicRequest,
+  HardDeleteTopicRequest,
   ListBlocksByFileRequest,
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
+  ListTrashTopicsRequest,
+  PasteMessagesToTopicRequest,
+  PurgeExpiredTopicsRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ResetMessagesForResendRequest,
+  RestoreTopicRequest,
+  SearchMessagesRequest,
+  SoftDeleteTopicRequest,
   TopicExistsRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
   UpdateSegmentMetadataRequest,
   UpdateSingleBlockRequest,
+  UpdateTopicMetadataRequest,
   UpsertSegmentRequest
 } from '@shared/chatDb'
 import type { GitBashPathInfo, UpgradeChannel } from '@shared/config/constant'
@@ -602,7 +614,32 @@ const api = {
     countFileRefsByFile: (request: CountFileRefsByFileRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_CountFileRefsByFile, request),
     listBlocksByFile: (request: ListBlocksByFileRequest) =>
-      ipcRenderer.invoke(IpcChannel.ChatDb_ListBlocksByFile, request)
+      ipcRenderer.invoke(IpcChannel.ChatDb_ListBlocksByFile, request),
+    // Phase 5.1B: topic lifecycle
+    updateTopicMetadata: (request: UpdateTopicMetadataRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_UpdateTopicMetadata, request),
+    softDeleteTopic: (request: SoftDeleteTopicRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_SoftDeleteTopic, request),
+    restoreTopic: (request: RestoreTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_RestoreTopic, request),
+    listTrashTopics: (request: ListTrashTopicsRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ListTrashTopics, request),
+    hardDeleteTopic: (request: HardDeleteTopicRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_HardDeleteTopic, request),
+    purgeExpiredTopics: (request: PurgeExpiredTopicsRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_PurgeExpiredTopics, request),
+    // Phase 5.1B: compound mutations
+    cloneMessagesToTopic: (request: CloneMessagesToTopicRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_CloneMessagesToTopic, request),
+    resetMessagesForResend: (request: ResetMessagesForResendRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ResetMessagesForResend, request),
+    deleteMessagesWithSegments: (request: DeleteMessagesWithSegmentsRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessagesWithSegments, request),
+    pasteMessagesToTopic: (request: PasteMessagesToTopicRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_PasteMessagesToTopic, request),
+    clearTopicWithSegments: (request: ClearTopicWithSegmentsRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ClearTopicWithSegments, request),
+    // Phase 5.1B-2: search
+    searchMessages: (request: SearchMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_SearchMessages, request)
   }
 }
 

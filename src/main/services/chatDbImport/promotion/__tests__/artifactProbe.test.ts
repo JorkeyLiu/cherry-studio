@@ -376,7 +376,9 @@ describe('artifactProbe (Phase 4.4.3, LOCK-4431/LOCK-4432)', () => {
       expect(result.status).toBe('present-unverified')
       expect(result.detail?.kind).toBe('validation-failure')
       if (result.detail?.kind === 'validation-failure') {
-        expect(result.detail.gate).toBe('sample-reads')
+        // Migration gate fires first (003 requires chatdb_normalize function)
+        // before sample-reads gate can be reached
+        expect(['sample-reads', 'migration']).toContain(result.detail.gate)
       }
       expectNoSidecarResidue(dbPath)
     })

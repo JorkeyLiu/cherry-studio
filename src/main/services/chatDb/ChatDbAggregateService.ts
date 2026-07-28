@@ -17,22 +17,28 @@
  * updateFileCount(s) stays in Dexie/FileManager; not called here.
  */
 
-import type { FileReferenceWire, JsonObject, SegmentWire } from '@shared/chatDb'
+import type { FileCleanupResult, FileReferenceWire, JsonObject, SegmentWire } from '@shared/chatDb'
 import type { ChatDbResult } from '@shared/chatDb'
+import type { SearchMessagesRequest, SearchMessagesResponse } from '@shared/chatDb'
+import type Database from 'better-sqlite3'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
-import type { MessageBlockData } from './domain/types'
+import type { FileReferenceData, MessageBlockData } from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, wrapResult } from './errors'
 import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
+import { SearchRepository } from './repository/SearchRepository'
 import type * as schema from './schema'
 import {
   blocksToWire,
+  buildFileCleanupResult,
+  collectAffectedFileIds,
   fileReferenceToWire,
   messagesToWire,
   projectFileReferences,
   reconstructMessageBlockRelations,
   segmentToWire,
+  topicToWireFull,
   wireToBlock,
   wireToBlockPatch,
   wireToMessage,
@@ -51,7 +57,10 @@ export type GetRawTopicResult = { id: string; messages: JsonObject[] } | null
 // ---------------------------------------------------------------------------
 
 export class ChatDbAggregateService {
-  constructor(private db: BetterSQLite3Database<typeof schema>) {}
+  constructor(
+    private db: BetterSQLite3Database<typeof schema>,
+    private sqlite?: Database.Database
+  ) {}
 
   /**
    * Create repositories bound to the root database.
@@ -699,6 +708,558 @@ export class ChatDbAggregateService {
       const blocks = repos.blocks.findByFileId(fileId)
       return blocksToWire(blocks)
     }, `listBlocksByFile(${fileId})`)
+  }
+
+  // =========================================================================
+  // Phase 5.1B: Topic lifecycle
+  // =========================================================================
+
+  /**
+   * Update topic metadata. Mutable fields: name (column), pinned/prompt/
+   * isNameManuallyEdited (overflow). updatedAt is maintained consistently.
+   * Identity fields (id, assistantId, createdAt, deletedAt, messages) are
+   * NOT mutable through this path.
+   *
+   * Returns ERR_NOT_FOUND if topic does not exist.
+   */
+  updateTopicMetadata(
+    topicId: string,
+    name?: string | null,
+    pinned?: boolean | null,
+    prompt?: string | null,
+    isNameManuallyEdited?: boolean | null
+  ): ChatDbResult<JsonObject> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        const existing = repos.topics.getById(topicId)
+        if (!existing.found) {
+          throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+        }
+
+        // Build patch from allowed fields
+        const patch: Record<string, unknown> = {}
+        if (name !== undefined) patch.name = name
+        if (pinned !== undefined) patch.pinned = pinned
+        if (prompt !== undefined) patch.prompt = prompt
+        if (isNameManuallyEdited !== undefined) patch.isNameManuallyEdited = isNameManuallyEdited
+
+        if (Object.keys(patch).length === 0) {
+          // No-op: return current state
+          return topicToWireFull(existing.data)
+        }
+
+        // Maintain updatedAt consistently
+        patch.updatedAt = new Date().toISOString()
+
+        // Split into columns vs overflow
+        const domainPatch: Record<string, unknown> = {}
+        const overflowDelta: Record<string, unknown> = {}
+
+        if ('name' in patch || 'updatedAt' in patch) {
+          if ('name' in patch) domainPatch.name = patch.name
+          domainPatch.updatedAt = patch.updatedAt
+        }
+        if ('pinned' in patch) overflowDelta.pinned = patch.pinned
+        if ('prompt' in patch) overflowDelta.prompt = patch.prompt
+        if ('isNameManuallyEdited' in patch) overflowDelta.isNameManuallyEdited = patch.isNameManuallyEdited
+
+        // Merge overflow into existing topic
+        const mergedOverflow = { ...existing.data.overflow, ...overflowDelta }
+        // Remove keys with OVERFLOW_REMOVE sentinel
+        for (const [k, v] of Object.entries(overflowDelta)) {
+          if (v === undefined) delete mergedOverflow[k]
+        }
+
+        repos.topics.updatePatch(topicId, {
+          ...domainPatch,
+          overflow: mergedOverflow
+        } as any)
+
+        // Read back
+        const updated = repos.topics.getById(topicId)
+        if (!updated.found) {
+          throw new ChatDbNotFoundError(`Topic ${topicId} was deleted during update`)
+        }
+        return topicToWireFull(updated.data)
+      })
+    }, `updateTopicMetadata(${topicId})`)
+  }
+
+  /**
+   * Soft-delete a topic by setting deletedAt.
+   * Missing topic: no-op (returns success).
+   */
+  softDeleteTopic(topicId: string): ChatDbResult<null> {
+    return wrapResult(() => {
+      const { topics } = this.repos()
+      topics.softDelete(topicId)
+      return null
+    }, `softDeleteTopic(${topicId})`)
+  }
+
+  /**
+   * Restore a soft-deleted topic by clearing deletedAt.
+   * Missing topic: no-op (returns success).
+   */
+  restoreTopic(topicId: string): ChatDbResult<null> {
+    return wrapResult(() => {
+      const { topics } = this.repos()
+      topics.restore(topicId)
+      return null
+    }, `restoreTopic(${topicId})`)
+  }
+
+  /**
+   * List soft-deleted topics with optional assistant filter.
+   * DeletedAt descending with deterministic tie-break (id ascending).
+   * Returns paginated result.
+   */
+  listTrashTopics(
+    assistantId?: string,
+    limit?: number,
+    cursor?: string
+  ): ChatDbResult<{ items: JsonObject[]; nextCursor?: string; hasMore: boolean }> {
+    return wrapResult(() => {
+      const { topics } = this.repos()
+      const page = topics.listTrashPage(
+        { limit: limit ?? 20, direction: 'desc', cursor },
+        assistantId ? { assistantId } : undefined
+      )
+      return {
+        items: page.items.map(topicToWireFull),
+        nextCursor: page.nextCursor,
+        hasMore: page.hasMore
+      }
+    }, `listTrashTopics()`)
+  }
+
+  /**
+   * Hard-delete a topic with full FK cascade (messages → blocks →
+   * file_references, segments → memberships). Returns file cleanup facts.
+   *
+   * Uses root transaction: collect affected file IDs before cascade,
+   * then delete topic, then compute remaining counts.
+   *
+   * Missing topic: no-op with empty cleanup result.
+   */
+  hardDeleteTopic(topicId: string): ChatDbResult<FileCleanupResult> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        // Check topic exists
+        const existing = repos.topics.getById(topicId)
+        if (!existing.found) {
+          return { affectedFileIds: [], remainingReferenceCounts: {} }
+        }
+
+        // Collect affected file IDs before cascade deletion
+        const messages = repos.messages.listByTopic(topicId)
+        const messageIds = messages.map((m) => m.id)
+        const refsBeforeDelete = repos.fileRefs.listByMessages(messageIds)
+        const affectedFileIds = collectAffectedFileIds(refsBeforeDelete)
+
+        // FK cascade: topic → messages → blocks → file_references
+        // Also topic → topic_segments → topic_segment_messages
+        repos.topics.hardDelete(topicId)
+
+        // Compute remaining counts after cascade
+        return buildFileCleanupResult(repos, affectedFileIds)
+      })
+    }, `hardDeleteTopic(${topicId})`)
+  }
+
+  /**
+   * Purge all soft-deleted topics with deletedAt < cutoffTimestamp.
+   * All eligible topics are purged atomically in one transaction.
+   * Returns aggregated file cleanup facts across all purged topics.
+   *
+   * Per LOCK-5113: the cutoff is generated by the caller. No Main timer.
+   */
+  purgeExpiredTopics(cutoffTimestamp: string): ChatDbResult<FileCleanupResult> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        // List ALL deleted topics with deletedAt < cutoff (paginate internally)
+        const allAffectedFileIds: string[] = []
+        let cursor: string | undefined
+        let hasMore = true
+
+        while (hasMore) {
+          const page = repos.topics.listTrashPage({ limit: 100, direction: 'desc', cursor })
+
+          for (const topic of page.items) {
+            if (topic.deletedAt && topic.deletedAt < cutoffTimestamp) {
+              // Collect affected file IDs before cascade
+              const messages = repos.messages.listByTopic(topic.id)
+              const messageIds = messages.map((m) => m.id)
+              const refs = repos.fileRefs.listByMessages(messageIds)
+              const ids = collectAffectedFileIds(refs)
+              allAffectedFileIds.push(...ids)
+
+              // FK cascade: hard delete
+              repos.topics.hardDelete(topic.id)
+            }
+          }
+
+          cursor = page.nextCursor
+          hasMore = page.hasMore && page.items.length > 0
+        }
+
+        // Deduplicate affected file IDs and compute remaining counts
+        const uniqueAffectedIds = [...new Set(allAffectedFileIds)]
+        return buildFileCleanupResult(repos, uniqueAffectedIds)
+      })
+    }, `purgeExpiredTopics(${cutoffTimestamp})`)
+  }
+
+  // =========================================================================
+  // Phase 5.1B: Compound mutations
+  // =========================================================================
+
+  /**
+   * Atomically ensure/create a target topic and insert ordered
+   * messages+blocks. Each entry is a message with its blocks, appended
+   * in array order. File references are synced for all file/image blocks.
+   *
+   * Rejects any existing message ID that is owned by a different topic.
+   *
+   * Atomicity: one root SQLite transaction (LOCK-5106).
+   */
+  cloneMessagesToTopic(
+    targetTopicId: string,
+    entries: Array<{ message: JsonObject; blocks: JsonObject[] }>,
+    assistantId?: string
+  ): ChatDbResult<null> {
+    return wrapResult(() => {
+      this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        // Ensure target topic exists
+        repos.topics.ensure(targetTopicId, assistantId)
+
+        for (const entry of entries) {
+          const messageData = wireToMessage(entry.message)
+          messageData.topicId = targetTopicId
+          const blockDataList = entry.blocks.map(wireToBlock)
+
+          // Enforce block ownership
+          for (const block of blockDataList) {
+            block.messageId = messageData.id
+          }
+
+          // Check if message already exists
+          const existing = repos.messages.getById(messageData.id)
+
+          if (existing.found) {
+            // Reject cross-topic ownership: message must belong to target topic
+            if (existing.data.topicId !== targetTopicId) {
+              throw new ChatDbConflictError(
+                `Message ${messageData.id} belongs to topic ${existing.data.topicId}, ` +
+                  `cannot clone into topic ${targetTopicId}`
+              )
+            }
+            // Same topic: preserve position, update metadata only
+            const patch = wireToMessagePatch(entry.message)
+            delete patch.id
+            delete patch.topicId
+            delete patch.sortOrder
+            if (Object.keys(patch).length > 0) {
+              repos.messages.update(targetTopicId, messageData.id, patch)
+            }
+          } else {
+            // New: append at end
+            repos.messages.append(messageData)
+          }
+
+          // Upsert blocks + sync file references
+          if (blockDataList.length > 0) {
+            repos.blocks.upsertMany(blockDataList)
+            this.syncFileReferences(repos, blockDataList)
+          }
+        }
+      })
+
+      return null
+    }, `cloneMessagesToTopic(${targetTopicId}, ${entries.length} entries)`)
+  }
+
+  /**
+   * Atomically reset message state for resend and delete designated blocks.
+   *
+   * - Resolves every block ID through its parent message to verify topic ownership.
+   * - Rejects any block ID whose parent message does not belong to request topic.
+   * - Deletes owned blocks and resets each message's status, sortOrder, and clears model.
+   * - Returns file cleanup facts for deleted blocks.
+   *
+   * Atomicity: one root SQLite transaction.
+   */
+  resetMessagesForResend(
+    topicId: string,
+    messageIds: string[],
+    blockIdsToDelete: string[]
+  ): ChatDbResult<FileCleanupResult> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        // Phase 1: Resolve every block through its parent message and verify ownership.
+        // Reject any block whose parent message does not belong to request topic.
+        const ownedBlockIds: string[] = []
+        if (blockIdsToDelete.length > 0) {
+          for (const blockId of blockIdsToDelete) {
+            const block = repos.blocks.getById(blockId)
+            if (!block.found) {
+              throw new ChatDbConflictError(`Block ${blockId} does not exist`)
+            }
+            // Resolve block → message → topic ownership
+            const msg = repos.messages.getInTopic(block.data.messageId, topicId)
+            if (!msg.found) {
+              throw new ChatDbConflictError(
+                `Block ${blockId} belongs to message ${block.data.messageId} which is not in topic ${topicId}`
+              )
+            }
+            ownedBlockIds.push(blockId)
+          }
+        }
+
+        // Phase 2: Collect affected file IDs from owned blocks only
+        let affectedFileIds: string[] = []
+        if (ownedBlockIds.length > 0) {
+          const allRefs: FileReferenceData[] = []
+          for (const blockId of ownedBlockIds) {
+            const refs = repos.fileRefs.listByBlock(blockId)
+            allRefs.push(...refs)
+          }
+          affectedFileIds = collectAffectedFileIds(allRefs)
+
+          // Delete owned blocks (FK cascade removes file_references)
+          repos.blocks.deleteMany(ownedBlockIds)
+        }
+
+        // Phase 3: Reset message state for messages owned by this topic
+        for (const messageId of messageIds) {
+          const msg = repos.messages.getInTopic(messageId, topicId)
+          if (msg.found) {
+            repos.messages.update(topicId, messageId, {
+              status: null,
+              model: null,
+              overflow: { model: null }
+            } as any)
+          }
+        }
+
+        // Phase 4: Normalize message orders after changes
+        repos.messages.replaceOrder(
+          topicId,
+          repos.messages.listByTopic(topicId).map((m) => m.id)
+        )
+
+        return buildFileCleanupResult(repos, affectedFileIds)
+      })
+    }, `resetMessagesForResend(${topicId}, ${messageIds.length} msgs)`)
+  }
+
+  /**
+   * Delete a batch of messages with segment membership cleanup in the
+   * same transaction. Segment memberships are removed; empty segments
+   * are deleted per existing repository semantics.
+   *
+   * Ownership enforcement: only messages owned by the request topic are
+   * processed. Foreign/missing IDs are silently skipped (consistent with
+   * deleteMessages semantics). File refs are collected from owned IDs
+   * only, so foreign IDs never appear in the cleanup result.
+   *
+   * Returns file cleanup facts for blocks whose file_references cascade.
+   *
+   * Atomicity: one root SQLite transaction.
+   */
+  deleteMessagesWithSegments(topicId: string, messageIds: string[]): ChatDbResult<FileCleanupResult> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        // Phase 1: Filter to owned messages BEFORE collecting refs
+        const ownedIds: string[] = []
+        for (const id of messageIds) {
+          const existing = repos.messages.getInTopic(id, topicId)
+          if (existing.found) ownedIds.push(id)
+        }
+
+        // Phase 2: Collect affected file IDs from owned messages only
+        const refs = repos.fileRefs.listByMessages(ownedIds)
+        const affectedFileIds = collectAffectedFileIds(refs)
+
+        // Phase 3: Remove segment memberships for owned messages
+        for (const seg of repos.segments.listByTopic(topicId)) {
+          const segMsgIds = repos.segments.getMessageIds(seg.id)
+          const toRemove = ownedIds.filter((id) => segMsgIds.includes(id))
+          if (toRemove.length > 0) {
+            repos.segments.removeMessages(seg.id, toRemove)
+          }
+        }
+
+        // Phase 4: Delete owned messages (FK cascade: blocks → file_references)
+        if (ownedIds.length > 0) {
+          repos.messages.deleteMany(ownedIds)
+        }
+
+        return buildFileCleanupResult(repos, affectedFileIds)
+      })
+    }, `deleteMessagesWithSegments(${topicId}, ${messageIds.length} msgs)`)
+  }
+
+  /**
+   * Atomically insert an ordered batch of messages+blocks at a specified
+   * position, preserving dense sort order.
+   *
+   * Each entry is a message with its blocks. Entries are inserted at
+   * insertIndex in array order. Existing messages preserve their position.
+   *
+   * For existing messages that already have blocks, harvests prior file
+   * references before syncFileReferences to produce accurate cleanup facts.
+   * Insert-only entries return no cleanup (empty arrays).
+   *
+   * Rejects any existing message ID that is owned by a different topic.
+   *
+   * Returns file cleanup facts: affectedFileIds (from prior refs on
+   * existing blocks that were replaced) and remainingReferenceCounts.
+   *
+   * Atomicity: one root SQLite transaction.
+   */
+  pasteMessagesToTopic(
+    topicId: string,
+    entries: Array<{ message: JsonObject; blocks: JsonObject[] }>,
+    insertIndex?: number
+  ): ChatDbResult<FileCleanupResult> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        // Ensure topic exists
+        repos.topics.ensure(topicId)
+
+        const allAffectedFileIds: string[] = []
+
+        // Compute the starting insert position
+        let nextIndex = insertIndex !== undefined ? insertIndex : repos.messages.listByTopic(topicId).length
+
+        for (const entry of entries) {
+          const messageData = wireToMessage(entry.message)
+          messageData.topicId = topicId
+          const blockDataList = entry.blocks.map(wireToBlock)
+
+          // Enforce block ownership
+          for (const block of blockDataList) {
+            block.messageId = messageData.id
+          }
+
+          // Check if message already exists
+          const existing = repos.messages.getById(messageData.id)
+
+          if (existing.found) {
+            // Reject cross-topic ownership
+            if (existing.data.topicId !== topicId) {
+              throw new ChatDbConflictError(
+                `Message ${messageData.id} belongs to topic ${existing.data.topicId}, ` +
+                  `cannot paste into topic ${topicId}`
+              )
+            }
+            // Existing: preserve position, update metadata
+            const patch = wireToMessagePatch(entry.message)
+            delete patch.id
+            delete patch.topicId
+            delete patch.sortOrder
+            if (Object.keys(patch).length > 0) {
+              repos.messages.update(topicId, messageData.id, patch)
+            }
+
+            // Harvest prior file references for existing blocks before sync
+            for (const block of blockDataList) {
+              const priorRefs = repos.fileRefs.listByBlock(block.id)
+              const priorFileIds = collectAffectedFileIds(priorRefs)
+              allAffectedFileIds.push(...priorFileIds)
+            }
+          } else {
+            // New: insert at position
+            repos.messages.insertAt(messageData, nextIndex)
+            nextIndex++
+          }
+
+          // Upsert blocks + sync file references
+          if (blockDataList.length > 0) {
+            repos.blocks.upsertMany(blockDataList)
+            this.syncFileReferences(repos, blockDataList)
+          }
+        }
+
+        // Deduplicate affected IDs and compute remaining counts
+        const uniqueAffectedIds = [...new Set(allAffectedFileIds)].sort()
+        return buildFileCleanupResult(repos, uniqueAffectedIds)
+      })
+    }, `pasteMessagesToTopic(${topicId}, ${entries.length} entries)`)
+  }
+
+  /**
+   * Clear all messages, blocks/file_refs, memberships, and segments
+   * for a topic atomically. Returns file cleanup facts.
+   *
+   * This is an enhanced clearMessages that returns structured
+   * file cleanup information for caller-side deletion decisions.
+   *
+   * Atomicity: one root SQLite transaction.
+   */
+  clearTopicWithSegments(topicId: string): ChatDbResult<FileCleanupResult> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        // Check topic exists
+        const topic = repos.topics.getById(topicId)
+        if (!topic.found) {
+          return { affectedFileIds: [], remainingReferenceCounts: {} }
+        }
+
+        // Collect affected file IDs before cascade
+        const messages = repos.messages.listByTopic(topicId)
+        const messageIds = messages.map((m) => m.id)
+        const refs = repos.fileRefs.listByMessages(messageIds)
+        const affectedFileIds = collectAffectedFileIds(refs)
+
+        // clearTopic cascades: messages → blocks → file_references,
+        // and also deletes topic_segments + topic_segment_messages
+        repos.messages.clearTopic(topicId)
+
+        return buildFileCleanupResult(repos, affectedFileIds)
+      })
+    }, `clearTopicWithSegments(${topicId})`)
+  }
+
+  // =========================================================================
+  // Phase 5.1B-2: Search
+  // =========================================================================
+
+  /**
+   * Search message blocks using FTS5 normalized projection with exact
+   * regex filtering (LOCK-5125).
+   *
+   * Returns minimal JSON-safe result data (LOCK-5128).
+   * Deleted topics are NOT filtered — matching existing behavior.
+   */
+  searchMessages(request: SearchMessagesRequest): ChatDbResult<SearchMessagesResponse> {
+    return wrapResult(
+      () => {
+        if (!this.sqlite) {
+          throw new Error('Search requires raw SQLite handle')
+        }
+        const searchRepo = new SearchRepository(this.sqlite)
+        return searchRepo.search(request)
+      },
+      `searchMessages(${request.keywords.substring(0, 50)})`
+    )
   }
 
   // =========================================================================

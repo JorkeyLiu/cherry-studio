@@ -1,6 +1,6 @@
 # SQLite 运行时迁移与 Cherry Studio 兼容导入 — 个人 fork 演进记录（面向未来独立 Cherry Chat）
 
-> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（已提交/已推送至迁移分支 `85603d0fd5`）；集成同步门 Baseline Sync Gate Done（integration `05a401b711` 已集成同步，已验证）；Phase 4.4.0（Promotion 协议基础，纯协议层）Done；Phase 4.4.1（Durable Preparation Gate，快照就绪准备门）Done；Phase 4.4.2（Destructive Promotion Executor，破坏性替换执行，止于 durable replacement-verified）Done（已提交 `3a81557ac6`）；Phase 4.4.3（Recovery/Finalization：artifact probes、rollback、journal cleanup、terminal take、repair marker、recovery executor/gate、startup reorder）Done（实现 + 独立审计 pass（两项 accepted fixes：real durable repair marker、startup gate fail-closed）+ 全量验证通过：focus 71/1709/72 skipped；format 无改动；lint 0 errors/97 warnings；test 281/6205/72 skipped；typecheck:node pass；两次 ENOENT failures 非复现；未提交/未推送）；Phase 5 Not started）
+> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（已提交/已推送至迁移分支 `85603d0fd5`）；集成同步门 Baseline Sync Gate Done（integration `05a401b711` 已集成同步，已验证）；Phase 4.4.0（Promotion 协议基础，纯协议层）Done；Phase 4.4.1（Durable Preparation Gate，快照就绪准备门）Done；Phase 4.4.2（Destructive Promotion Executor，破坏性替换执行，止于 durable replacement-verified）Done（已提交 `3a81557ac6`）；Phase 4.4.3（Recovery/Finalization：artifact probes、rollback、journal cleanup、terminal take、repair marker、recovery executor/gate、startup reorder）Done（实现 + 独立审计 pass（两项 accepted fixes：real durable repair marker、startup gate fail-closed）+ 全量验证通过：focus 71/1709/72 skipped；format 无改动；lint 0 errors/97 warnings；test 281/6205/72 skipped；typecheck:node pass；两次 ENOENT failures 非复现；未提交/未推送）；Phase 5 In progress（Phase 5.0 Done；Phase 5.1A Done（已提交 `6fa5ff5ef9`）；Phase 5.1B 实现 + 独立审计 + 最终全量验证完成（未提交/未推送）；Phase 5.2 Not started（SearchResults 调用方仍 Dexie，显式延后）；Phase 5.3 Not started；Phase 5.4 Not started））
 >
 > ✅ **集成同步门（Baseline Sync Gate，Done/已合并/已验证）**：integration 分支（`05a401b711`）已集成同步进 migration 分支（pre-merge HEAD `5d50499e80`）；合并自动解决、无兼容性编辑；审计无阻塞/无代码发现，验证全部通过（format 无改动；lint exit 0 / 112 known warnings；typecheck 通过；`pnpm test` 265 文件 / 5664 通过 / 72 跳过 / 0 失败；聚焦测试 201 renderer + 822 chatDb/import）。Phase 4.4 既有架构未改变；合并后统一的 Renderer/context/type/Redux 结构已作为 Phase 5 实施基线。详见 Section 9「集成同步门（Baseline Sync Gate）」与决策日志。
 > **分支**：`jorkey/refactor/sqlite-migration`
@@ -610,11 +610,108 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 属性 | 值 |
 |---|---|
-| **状态** | Not started |
+| **状态** | In progress（Phase 5.0 Done；Phase 5.1A Done（已提交 `6fa5ff5ef9`）；Phase 5.1B 实现 + 独立审计 + 最终全量验证完成（未提交/未推送）；Phase 5.2 Not started；Phase 5.3 Not started；Phase 5.4 Not started） |
 | **前置** | Phase 4 完成（至少一次成功端到端导入）；**以合并后的 Renderer/context/type/Redux 结构为实施基线（集成同步门见 Section 9「集成同步门（Baseline Sync Gate）」）** |
 | **目标** | Cherry Chat 普通聊天路径完全使用 SQLite，移除 Dexie 路由和临时验证 scaffolding |
 | **主要任务** | DbService 默认路由直连 SQLite（无 Dexie 路由、无 routingPolicy 注入策略）；移除 Phase 3.4 路由策略代码（C-13）；Dexie 仅保留在隔离 import renderer 内部；从普通聊天路径移除 DexieMessageDataSource（C-11）；清理 Renderer 直接 Dexie 访问（C-10）；性能基准验证（不低于 Dexie 基线） |
 | **退出条件** | ✅ 普通聊天路径无 Dexie 依赖；✅ Phase 3.4 routing scaffolding 完全移除；✅ 性能不低于 Dexie 基线；✅ 所有现有测试通过；✅ CI 绿色 |
+
+> **Phase 5 子阶段边界（本 session 确立）**：Phase 5 拆为 5.0（基线就绪与子阶段划分，Done）、5.1A（SQLite 命令面补全：segments / file-ref / reorder，已提交 `6fa5ff5ef9`）、5.1B（主题生命周期 + 复合命令 + 搜索，实现 + 独立审计 + 最终全量验证完成、未提交/未推送）、5.2（调用方迁移，SearchResults 等仍 Dexie、显式延后）、5.3（权威切换与 scaffolding 移除）、5.4（E2E/性能/清理门）。Phase 4 全部 LOCK-44xx 与历史决策继续有效，不重复声明。Phase 5 全部 LOCK-51xx 见本节末尾「Phase 5 Decision Locks」。
+
+#### Phase 5.0：基线就绪与子阶段划分
+
+| 属性 | 值 |
+|---|---|
+| **状态** | **Done** |
+| **目标** | 在合并后 Renderer/context/type/Redux 基线上确立 Phase 5 子阶段边界、命令面清单与 Decision Lock 框架 |
+| **范围** | 不新增代码；确立 5.0–5.4 拆分、Phase 5 命令面总计（Phase 3.2 的 14 + 5.1A 的 9 + 5.1B 的 12 = 35 个 ChatDb_* 命令）、以及 LOCK-5101…5113 / LOCK-5121…5129 的持久化形式 |
+| **退出条件** | ✅ Phase 5 子阶段边界文档化；✅ 命令面清单与 Decision Lock 框架确立；✅ 与 Phase 4 基线一致 |
+
+#### Phase 5.1A：SQLite 命令面补全（segments / file-ref / reorder）
+
+| 属性 | 值 |
+|---|---|
+| **状态** | **Done（已提交 `6fa5ff5ef9`）** |
+| **目标** | 在 Phase 3.2 的 14 命令之上补全 segment 生命周期、file-reference 反向查询、消息重排 |
+| **9 个命令（ChatDb_*）** | `ListSegments`、`UpsertSegment`、`UpdateSegmentMetadata`、`DeleteSegment`、`ReplaceSegmentMembership`、`ReorderMessages`、`ListFileRefsByFile`、`CountFileRefsByFile`、`ListBlocksByFile` |
+| **约束** | 经 `ChatDbAggregateService` + 新增 typed IPC + `window.api.chatDb` 命名方法 + `SqliteMessageDataSource` 实现（与 Phase 3 模式一致）；segment 操作为全量替换语义（`ReplaceSegmentMembership` 非 merge）；file-ref 查询为只读投影；`ReorderMessages` 仅在 topic 内重写 `sort_order`、不跨 topic 移动 |
+| **退出条件** | ✅ 9 命令经 shared contract + aggregate + IPC + preload + renderer datasource 全链路落地；✅ 类型检查 / 聚焦测试通过；✅ 已提交 `6fa5ff5ef9`（未推送） |
+
+#### Phase 5.1B：主题生命周期 + 复合命令 + 搜索
+
+| 属性 | 值 |
+|---|---|
+| **状态** | **实现 + 独立审计 + 最终全量验证完成（未提交 / 未推送）** |
+| **目标** | 补全主题生命周期（metadata / 软删除 / 恢复 / 回收站 / 硬删除 / 过期清理）、复合消息命令（clone / paste / reset / 带 segment 删除 / 带 segment 清空）、以及 FTS5 归一化搜索 |
+| **12 个命令 / 表面（ChatDb_*）** | 主题生命周期 6：`UpdateTopicMetadata`、`SoftDeleteTopic`、`RestoreTopic`、`ListTrashTopics`、`HardDeleteTopic`、`PurgeExpiredTopics`；复合命令 5：`CloneMessagesToTopic`、`ResetMessagesForResend`、`DeleteMessagesWithSegments`、`PasteMessagesToTopic`、`ClearTopicWithSegments`；搜索 1：`SearchMessages` |
+| **FileCleanupResult 语义（LOCK-5108 / LOCK-5109）** | 复合 / 生命周期命令在 root 事务内执行 FK cascade（topic → messages → blocks → file_references → topic_segment_memberships）后，返回 `{ affectedFileIds, remainingReferenceCounts }`：**仅为数据报告，DB 事务内无任何文件系统副作用**；是否物理删除文件由调用方依据 `remainingReferenceCounts===0` 决定。事务内绝不改动 Dexie 文件计数 |
+| **主题 metadata / trash / purge 语义（LOCK-5103 / 5104 / 5105 / 5113）** | `UpdateTopicMetadata`：name 为 null 清除、absent 不变，pinned 等扩展存于 `extra` JSON，单 root 事务。`SoftDeleteTopic` 置 `deleted_at`，仍可被 `ListTrashTopics` 查询。`RestoreTopic` 清除 `deleted_at`，不复活数据。`HardDeleteTopic` 经 FK cascade 彻底删除。`PurgeExpiredTopics(cutoffTimestamp)` 在单事务内原子清除所有 `deleted_at < cutoff` 的主题；**cutoff 由调用方提供，Main 聚合层不启动计时器、不自算 cutoff（LOCK-5113）** |
+| **复合事务 / 所有权规则（LOCK-5106 / 5107）** | 每个多表变更在**一个 root SQLite 事务**内完成（clone / paste / reset / delete-with-segments / clear-with-segments / 生命周期 cascade 均如此）。所有权强制：block/message ID 经「block → message → topic」解析，跨 topic 所有权被拒（例如 paste/reset 拒绝不属于目标 topic 的消息） |
+| **migration 003（FTS5 归一化投影，LOCK-5121 / 5126 / 5127）** | append-only `003_fts5_normalized_search`：① `message_blocks_normalized`（block_id PK、message_id、normalized_content，仅 MAIN_TEXT 块）；② `message_blocks_fts`（FTS5 trigram 虚表）；③ 回填现有 MAIN_TEXT 块；④ 三个触发器 `message_blocks_normalized_insert/update/delete`，在 `message_blocks` 写时同步投影（非 MAIN_TEXT 或内容变更时清除投影行）。`chatdb_normalize()` 标量函数在任何触发器触发前注册于原始 better-sqlite3 连接，其实现 = `normalizeSearchText`（stripMarkdown → CRLF→LF → lowercase），为单一事实源（LOCK-5126） |
+| **搜索路由与精确匹配（LOCK-5122 / 5123 / 5124 / 5125 / 5128）** | `SearchRepository` 复用 `searchTextNormalization`（共享、与仍 Dexie 的 SearchResults 同一归一化顺序，LOCK-5122）。候选生成：**term ≥ 3 Unicode 码点 → FTS5 trigram；< 3 → 归一化 SQL LIKE**；多 term 取各 term 候选集交集（AND，绝不为可表示 term union LIKE，LOCK-5124）。**FTS 仅为候选加速器，非语义权威（LOCK-5125）**：每个候选必须过共享精确 regex 匹配（whole-word 用 Unicode 边界、CJK 走子串、substring 不包围）；FTS 运行时错误经 `wrapResult → mapErrorToResult` 传播为结构化 `ChatDbFailure`，**绝不 catch 成空结果（LOCK-5101）**。结果仅含最小化 JSON 安全字段（blockId/messageId/topicId/topicName/rawContent/messageCreatedAt，LOCK-5128）。块级游标：`(created_at, message_id, block_id)` 三级排序游标，保证同消息内块级完整分页；**不额外引入 deleted-topic 过滤（与既有 SearchResults 语义一致，LOCK-5123）** |
+| **调用方迁移显式延后（Phase 5.2 边界）** | `SearchMessages` 命令面已实现并通过搜索套件，但 `src/renderer/src/pages/history/components/SearchResults.tsx` 调用方**仍为 Dexie**，仅将 `stripMarkdownFormatting`/`normalizeText` 改为从 `@shared/searchTextNormalization` 复用。**调用方切换到 `chatDb.searchMessages` 属 Phase 5.2，本阶段不声称已迁移** |
+| **10k 基准证据（LOCK-5129，真实运行）** | 载体：`search.bench.ts`（仓库 `*.bench.ts` 约定，仅由 `npx vitest bench --run --project main src/main/services/chatDb/__tests__/search.bench.ts` 收集，普通 `pnpm test` 不执行计时循环）。方法学：确定性 10,000 条 MAIN_TEXT 块（ASCII/CJK/markdown/mixed），10 个代表性 query fixtures；**计时前强制跨全部游标页 / 10 个 query 的直接有序 block-ID 完全 parity 断言**；**3 轮 warmup + 10 轮 measured × 10 query**（每方法 100 样本）；报告 LIKE 基线（全表扫描 + 相同 regex 过滤、按 `(messageCreatedAt, messageId, blockId)` 排序）与 FTS（hybrid，FTS+LIKE）的 p50/p95/mean；无不稳定绝对阈值。产品语义 parity 另由普通套件 `search.test.ts` 的小型确定性语料（300 块、pageSize 20 全游标页）持续守护，不依赖 bench 执行。最新数值（独立 bench 运行）：确定性 10k 直接有序 block-ID parity 10/10；LIKE p50 `6.96ms` / p95 `9.35ms` / mean `6.97ms`；FTS（hybrid）p50 `2.36ms` / p95 `5.20ms` / mean `2.77ms`；加速 p50 `2.95x` / p95 `1.80x` |
+| **最终全量验证（独立审计 + 全量门完成，未提交/未推送）** | 独立审计 pass（含修复后复验）。全量门（未涉及 CI / 未提交 / 未推送）：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（oxlint 95 warnings / 0 errors；ESLint 33 warnings / 0 errors；current-diff warnings 0；i18n 通过）；`pnpm test` exit 0，283 文件 / 6514 通过 / 72 跳过 / 0 失败 / 181.42s（`search.bench.ts` 排除于普通测试门、单独 bench 运行）；`pnpm typecheck` exit 0 全目标；`git diff --check` exit 0。Phase 5.1B 聚焦套件（`search.test.ts`、`search.bench.ts`、`migration003.test.ts`、aggregate/ipc 扩展）与 `typecheck:node` 通过 |
+| **退出条件（实现侧）** | ✅ 12 命令经 aggregate + IPC + preload + renderer datasource 落地；✅ migration 003 可幂等应用、触发器维持投影 parity；✅ 搜索正确性 parity 与基准证据成立；✅ 聚焦测试与 typecheck 通过；✅ 最终全量 `pnpm format` / `pnpm lint` / `pnpm test` / `pnpm typecheck` / `git diff --check` 通过（未提交/未推送）。**提交/推送属待办，不声称已完成** |
+
+#### Phase 5.2：调用方迁移（SearchResults 等）
+
+| 属性 | 值 |
+|---|---|
+| **状态** | Not started |
+| **目标** | 将普通聊天路径的剩余 Dexie 调用方切到 `chatDb.*` 命令面；首要为 `SearchResults.tsx` 从 Dexie 搜索切到 `SearchMessages` |
+| **前置** | Phase 5.1B 搜索命令面 + 基准完成 |
+| **主要任务** | `SearchResults` 调用方切换到 `chatDb.searchMessages`（复用已迁移的归一化函数）；核对结果映射与现有 UI 行为一致；其他仍 Dexie 的渲染路径逐步收口 |
+| **退出条件** | ✅ SearchResults 走 SQLite 搜索且行为 parity；✅ 无回归 |
+
+#### Phase 5.3：权威切换与 scaffolding 移除
+
+| 属性 | 值 |
+|---|---|
+| **状态** | Not started |
+| **目标** | DbService 默认路由直连 SQLite；移除 Phase 3.4 `routingPolicy.ts`（C-13）；从普通路径移除 `DexieMessageDataSource`（C-11）；清理 Renderer 直接 Dexie 访问（C-10）；Dexie 仅保留于隔离 import renderer |
+| **前置** | Phase 5.2 调用方迁移完成 |
+| **主要任务** | 翻转默认数据源为 SQLite；删除路由策略注入与 sqlite-authoritative 拒绝路径；Dexie 路由仅留 import renderer 内部 |
+| **退出条件** | ✅ 普通聊天路径无 Dexie 依赖；✅ Phase 3.4 scaffolding 完全移除；✅ 全部现有测试通过 |
+
+#### Phase 5.4：E2E / 性能 / 清理门
+
+| 属性 | 值 |
+|---|---|
+| **状态** | Not started |
+| **目标** | 端到端验证、性能不低于 Dexie 基线、Group D/E 清理与文档收尾 |
+| **前置** | Phase 5.3 完成 |
+| **主要任务** | Playwright E2E 覆盖普通聊天路径；性能基准（消息加载 p50/p95、写入吞吐、冷启动 DB 打开 < 500ms）不低于 Dexie 基线；执行 Group D/E 清理；更新文档反映最终态 |
+| **退出条件** | ✅ E2E 通过；✅ 性能不低于 Dexie 基线；✅ Group D/E 清理完成；✅ CI 绿色 |
+
+#### Phase 5 Decision Locks（LOCK-5101…5113, LOCK-5121…5129）
+
+> 全部 LOCK-51xx 在本 session 确立且**保持 active**；Phase 4 全部 LOCK-44xx 与历史 ADR/决策继续有效。下表为合并相关锁的持久化形式，保留 lock ID 与后续阶段必需的精确不变量；不重复本 session 的冗长 prompt。
+
+| Lock | 精确不变量（后续阶段必需） |
+|---|---|
+| **LOCK-5101** | 搜索 / 聚合运行时错误经 `wrapResult → mapErrorToResult` 传播为结构化 `ChatDbFailure`；**绝不 catch-to-empty（失败返回零结果）** |
+| **LOCK-5102** | Phase 5 SQLite 命令面完整性：所有普通聊天路径命令经 `ChatDbAggregateService` + typed IPC 实现（14 + 9 + 12 = 35 个 `ChatDb_*`）；Dexie 路由移除属 5.3 独立关切 |
+| **LOCK-5103** | `UpdateTopicMetadata`：name 为 null 清除、absent 不变；pinned 等扩展存 `extra` JSON；单 root 事务 |
+| **LOCK-5104** | `SoftDeleteTopic` 置 `deleted_at`，仍可被 `ListTrashTopics` 查询；普通列表排除 trash |
+| **LOCK-5105** | `RestoreTopic` 清除 `deleted_at`，仅恢复可见性、不复活数据 |
+| **LOCK-5106** | 复合 / 生命周期命令原子性：每个多表变更在**一个 root SQLite 事务**内完成；FK cascade 处理 blocks→file_references→segments |
+| **LOCK-5107** | 所有权强制：block/message ID 经「block → message → topic」解析；跨 topic 所有权被拒 |
+| **LOCK-5108** | `FileCleanupResult`：命令仅返回 `{ affectedFileIds, remainingReferenceCounts }`；**DB 事务内无文件系统副作用**；物理删除由调用方据 `remainingReferenceCounts===0` 决定 |
+| **LOCK-5109** | `HardDeleteTopic` / `PurgeExpiredTopics`：topic→messages→blocks→file_references 经 FK cascade 在单事务删除；`buildFileCleanupResult` 聚合受影响 file ID；事务内不改 Dexie 文件计数 |
+| **LOCK-5110** | `ReorderMessages` 仅在 topic 内重写 `sort_order`，不跨 topic 移动 |
+| **LOCK-5111** | Segment 生命周期（5.1A）：upsert/update-metadata/delete/replace-membership/list；`ReplaceSegmentMembership` 为全量替换（非 merge） |
+| **LOCK-5112** | file-ref 反向查询（5.1A）：`ListFileRefsByFile` / `CountFileRefsByFile` / `ListBlocksByFile` 为只读投影，无变更 |
+| **LOCK-5113** | `PurgeExpiredTopics(cutoffTimestamp)` 的 cutoff **由调用方提供**；Main 聚合层不启动计时器、不自算 cutoff |
+| **LOCK-5121** | migration 003 append-only 且幂等；在任何触发器触发前于原始 better-sqlite3 连接注册 `chatdb_normalize()`；可安全应用于既有 DB |
+| **LOCK-5122** | 搜索文本归一化单一顺序：`normalizeSearchText = normalizeText(stripMarkdownFormatting(content)).toLowerCase()`（先 stripMarkdown，后 CRLF→LF，后 lowercase）；`searchTextNormalization` 为共享单一事实源，Main / renderer / 仍 Dexie 的 SearchResults 共用 |
+| **LOCK-5123** | 搜索必须保留既有 SearchResults 语义（归一化、term 解析、whole-word/substring、CJK 子串、`(created_at, message_id, block_id)` 排序）；SQLite 实现**不额外引入 deleted-topic 过滤**以匹配原调用方数据范围 |
+| **LOCK-5124** | FTS 候选路由：term ≥ 3 Unicode 码点 → FTS5 trigram 候选；< 3 → 归一化 SQL LIKE；多 term 取各 term 候选集**交集（AND，绝不为可表示 term union LIKE）** |
+| **LOCK-5125** | **FTS 仅为候选加速器，非语义权威**：每个候选必须过共享精确 regex 匹配；FTS 运行时错误传播（绝不 catch-to-empty） |
+| **LOCK-5126** | `chatdb_normalize()` 与 `searchTextNormalization` 为归一化单一事实源；触发器与 FTS 填充均调用 `chatdb_normalize()`，无分歧归一器 |
+| **LOCK-5127** | migration 003 触发器维持投影 parity：对 MAIN_TEXT 块的 INSERT/UPDATE/DELETE 反映进 `message_blocks_normalized` + `message_blocks_fts`；投影为派生，永不作为权威 |
+| **LOCK-5128** | 搜索结果契约仅含最小化 JSON 安全字段（blockId/messageId/topicId/topicName/rawContent/messageCreatedAt），不返回结构化/overflow model 对象 |
+| **LOCK-5129** | 基准方法学：确定性 10,000 MAIN_TEXT 块；3 warmup + 10 measured × 10 query；报告 LIKE 与 hybrid 的 p50/p95/mean；**强制跨全部游标页 / 10 query 的有序 block-ID parity**；无不稳定绝对阈值 |
 
 ### Phase 6：Cherry Chat 备份/恢复适配、L2/L3 UX 语义分离、清理
 
@@ -758,15 +855,17 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 ### Phase 5 exit criteria（Cherry Chat SQLite-only runtime）
 
+> 顶层退出指标保留；子阶段进度见 Section 9 Phase 5 及「Phase 5 Decision Locks」。Phase 5.1A 已提交、5.1B 实现 + 独立审计 + 最终全量验证完成（未提交/未推送）；5.2/5.3/5.4 仍 Not started。
+
 | 指标 | 目标 | 状态 |
 |---|---|---|
-| 消息加载延迟（p50/p95） | 不退化 | Not started |
-| 消息写入吞吐 | 不退化 | Not started |
-| 数据完整性 | 100% | Not started |
-| 冷启动 DB 打开时间 | < 500ms | Not started |
-| 普通聊天路径无 Dexie 依赖 | 0 Dexie 引用 | Not started |
-| Phase 3.4 routing scaffolding | 完全移除 | Not started |
-| 所有测试通过 + CI 绿色 | 100% | Not started |
+| 消息加载延迟（p50/p95） | 不退化 | Not started（5.4 门） |
+| 消息写入吞吐 | 不退化 | Not started（5.4 门） |
+| 数据完整性 | 100% | In progress（5.1A/5.1B 命令面 + migration 003 实现 + 最终全量验证完成，未提交/未推送；5.3/5.4 待办） |
+| 冷启动 DB 打开时间 | < 500ms | Not started（5.4 门） |
+| 普通聊天路径无 Dexie 依赖 | 0 Dexie 引用 | Not started（5.3 移除 scaffolding；SearchResults 调用方仍 Dexie，显式延后至 5.2） |
+| Phase 3.4 routing scaffolding | 完全移除 | Not started（5.3） |
+| 所有测试通过 + CI 绿色 | 100% | In progress（最终全量：`pnpm test` 283 文件 / 6514 通过 / 72 跳过 / 0 失败；`pnpm lint` exit 0 / `pnpm typecheck` exit 0 / `git diff --check` exit 0；未提交/未推送；CI 待办） |
 
 ### Phase 6 exit criteria（备份/恢复适配 + L2/L3 语义分离 + 清理）
 
@@ -842,6 +941,9 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-27** | **Phase 4.4.2 独立审计修正落地（终局 ownership 硬化）** | 独立审计结论 pass-with-findings（无阻塞）；两项 findings 接受为 correctness hardening 并已落地：① 成功 promoted 后 `session.executingCapability` 保留别名 → stale session fail/dispose 可释放成功 handoff 的授权；修正为显式 transfer（非 alias）：`takeExecutingCapability()` 将 capability 移出 session，终局记录 `TerminalPromotionOwnership { kind:'promoted' }` 成为唯一逻辑 owner。② post-install 失败在 executor quiesce 后释放 capability → 允许进程内公共 init 打开未验证的 installed DB；修正为 `PromotionRecoveryRequiredHandoff` 保留 capability/同一 lease（LOCK-4425 强化不变量：recovery-required handoff 保留 lease 阻断一切 ordinary maintenance 直至 Phase 4.4.3 或进程退出；pre-install 失败仍在 quiesce 后正常释放）。终局 ownership 结算唯一归属 `startPromotionExecution` continuation（executor 引用存在期间 fail/dispose/will-quit 一律延迟）；附带：prepared-handle disposal 去重 helper、`transferPromotionExecution` interim-owner 契约 JSDoc、`getTerminalPromotionOwnership()` Main-local peek。改动仅 `chatDbImport/index.ts` + `promotion/execution.ts`（doc-only）+ `chatDbImport/__tests__/index.test.ts`（C18 更新、C24–C26 新增）。复验：聚焦 35 文件 / 1141 通过 / 0 失败；`typecheck:node` 通过；changed-files biome/eslint 干净；未提交/未推送 |
 | **2026-07-27** | **Phase 4.4.2 已提交 `3a81557ac6`** | Phase 4.4.0（`7768b7e30c`）+ Phase 4.4.1（`006615aff6`）+ Phase 4.4.2 一并提交至 `3a81557ac6`（`feat(chat-db): execute durable candidate promotion`），未推送 |
 | **2026-07-28** | **Phase 4.4.3 Done（Recovery/Finalization）** | LOCK-4431…4439 全落地（实现 + 独立审计 pass（两项 accepted fixes：real durable repair marker、startup gate fail-closed）+ 全量验证通过；未提交/未推送）。在 Phase 4.4.2 终点（durable `replacement-verified` handoff）之上落地恢复/终结管线全部执行侧：① **artifact probes**（`artifactProbe.ts`）——只读磁盘 truth 等价探测（live/retained snapshot/candidate 三 artifact 状态：missing/present-unverified/present-verified），路径由 Data root 严格派生（LOCK-4434），candidateId strict allowlist 校验，sidecar-free invariant（controlled no-residue strategy），before/after directory snapshots 证明零净文件系统变更；② **rollback**（`rollback.ts`）——bounded primitive：staging clone（`fs.copyFileSync` from retained snapshot，closed self-contained source）→ fsync → full readonly validation gate → consume closed-live proof → delete live sidecars → capture staging identity → atomic rename staging→live（同文件系统 ONLY，EXDEV=structured failure 无 copy fallback，LOCK-4426）→ fsync live parent dir → confirm destination identity → full readonly validation of restored live。LOCK-4434：retained snapshot **从不被消费或删除**；LOCK-4437：任何 failure 保留全部 artifacts；Clone decision：`fs.copyFileSync` chosen over SQLite backup API（source closed，re-opening 仅为 backup facility 无安全增益）；③ **journal cleanup**（`journalStore.ts` 扩展）——idempotent fixed-path cleanup primitive（`cleanupPromotionJournalBody`），三个 phase-gated API（`cleanupPromotionJournalAfterReplacementVerified` / `AfterSnapshotReady` / `AfterCandidateInstalled`）；guard-read validates journal → absent = idempotent success；invalid/phase mismatch/identity mismatch = reject pre-mutation；unlink → best-effort staging unlink → fsync parent dir（LOCK-4438）；仅 fixed journal + stale staging 为 deletion candidates（LOCK-4436），rollback snapshot / candidate / live 永不触碰；unlink failure → `CLEANUP_UNLINK_FAILED`（journal preserved）；dir sync failure → `CLEANUP_PARENT_DIR_SYNC_FAILED`（journal already unlinked）；④ **terminal ownership take**（`chatDbImport/index.ts`）——`takeTerminalPromotionOwnership()` atomically take-and-clear `TerminalPromotionOwnership`（LOCK-4433）；`setTerminalPromotionOwnership()` refuse overwrite unconsumed record；⑤ **repair marker**（`chatDb/index.ts`）——`markRepairRequiredBeforeInit()` durable repair-required marker write（file sync + parent dir sync），idempotent，refuses if service already initialized；⑥ **recovery executor**（`recoveryExecutor.ts`）——`createRecoveryExecutor()` 7 subphases（probing→deciding→authorizing→executing-action→cleanup-journal→relaunching→settled）；four actions（keep-old-live / accept-verified-replacement / restore-rollback-snapshot / repair-required）；authorization resolution（terminal ownership first，fresh lease fallback）；cooperative abort；injectable primitives；⑦ **relaunch**（`relaunch.ts`）——exact-once receipt-gated（WeakSet brand）`app.relaunch() + app.exit(0)`；⑧ **startup gate**（`gate.ts`）——`runStartupRecoveryGate()` absent-journal fast path（common case）+ valid journal → probe → decide → execute；⑨ **startup reorder**（`src/main/index.ts`）——startup order：BackupManager restore → **gate** → chatDbService.init() → orphan cleanup/window startup；repairRequired → skip init；relaunchPending → return early。Phase 4.4.2 非目标已全部落地。独立审计 pass（两项 accepted fixes：real durable repair marker、startup gate fail-closed）；聚焦测试 71 文件 / 1709 通过 / 72 跳过 / 0 失败；全量验证通过：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（0 errors / 97 warnings）；`pnpm test` exit 0，281 文件 / 6205 通过 / 72 跳过；`pnpm typecheck:node` 通过；prior two ENOENT failures non-reproducible；未提交/未推送 |
+| **2026-07-28** | **Phase 5.0 Done + 5.1A 已提交 + 5.1B 实现完成** | Phase 5 拆为 5.0（基线就绪与子阶段划分）、5.1A（SQLite 命令面补全，已提交 `6fa5ff5ef9`）、5.1B（主题生命周期 + 复合命令 + 搜索，实现 + 聚焦审计完成、未提交）、5.2（调用方迁移，SearchResults 仍 Dexie 显式延后）、5.3（权威切换与 scaffolding 移除）、5.4（E2E/性能/清理门）。Phase 5 命令面总计 35 个 `ChatDb_*`（Phase 3.2 的 14 + 5.1A 的 9 + 5.1B 的 12）。本 session 确立并激活 LOCK-5101…5113（命令面 / 主题生命周期 / 复合事务所有权 / FileCleanupResult / purge cutoff 所有权）与 LOCK-5121…5129（migration 003 FTS 归一化投影 / 共享归一化单一事实源 / FTS 候选加速器非权威 / 块级游标 / 基准方法学）。Phase 4 全部 LOCK-44xx 与历史 ADR 继续有效 |
+| **2026-07-28** | **Phase 5.1A Done（已提交 `6fa5ff5ef9`）** | 9 个命令经 `ChatDbAggregateService` + typed IPC + `window.api.chatDb` + `SqliteMessageDataSource` 全链路落地：`ListSegments` / `UpsertSegment` / `UpdateSegmentMetadata` / `DeleteSegment` / `ReplaceSegmentMembership` / `ReorderMessages` / `ListFileRefsByFile` / `CountFileRefsByFile` / `ListBlocksByFile`。segment 全量替换语义；file-ref 查询只读；reorder 仅 topic 内。已提交 `6fa5ff5ef9`（未推送） |
+| **2026-07-28** | **Phase 5.1B 实现 + 聚焦审计完成（未提交/未推送）** | 12 命令/表面：主题生命周期 6（`UpdateTopicMetadata` / `SoftDeleteTopic` / `RestoreTopic` / `ListTrashTopics` / `HardDeleteTopic` / `PurgeExpiredTopics`）+ 复合 5（`CloneMessagesToTopic` / `ResetMessagesForResend` / `DeleteMessagesWithSegments` / `PasteMessagesToTopic` / `ClearTopicWithSegments`）+ 搜索 1（`SearchMessages`）。`FileCleanupResult` 仅返回 `{affectedFileIds, remainingReferenceCounts}`，DB 事务内无文件系统副作用（LOCK-5108/5109）；复合命令单 root 事务 + 所有权强制（LOCK-5106/5107）；purge cutoff 由调用方提供（LOCK-5113）。migration 003（`003_fts5_normalized_search`）append-only 幂等：`message_blocks_normalized` + `message_blocks_fts`（trigram）+ 三触发器，`chatdb_normalize()` 在触发前注册（LOCK-5121/5126/5127）。`SearchRepository`：term≥3 码点走 FTS5、<3 走 LIKE、多 term 交集（LOCK-5124）；FTS 仅候选加速器、过共享精确 regex、错误传播非 catch-to-empty（LOCK-5101/5125）；块级 `(created_at, message_id, block_id)` 游标、不额外 deleted-topic 过滤（LOCK-5123/5128）。`SearchResults.tsx` 调用方仍为 Dexie（仅复用共享归一化函数），切到 `SearchMessages` 属 Phase 5.2。10k 基准（确定性 10,000 MAIN_TEXT 块、3 warmup + 10 measured × 10 query、强制有序 parity）：LIKE p50 8.96 / p95 10.28 / mean 8.83ms；hybrid p50 2.90 / p95 6.51 / mean 3.40ms；加速 p50 3.09x / p95 1.58x（LOCK-5129）。聚焦验证：Main 1838 passed / 72 skipped / 0 failed；Phase 5.1B 聚焦套件与 typecheck 通过；**最终全量 format/lint/test/typecheck 门未运行，不声称已通过；未提交/未推送** |
 
 ---
 
@@ -878,6 +980,10 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-27** | Phase 4.4.2 | **Destructive Promotion Executor 完成（Done，实现 + 聚焦验证 + 独立审计 pass-with-findings、两项接受的 ownership/isolation 硬化修正已落地复验（成功 handoff 独占 capability 转移；post-install recovery-required 保留 lease 阻断 ordinary maintenance 至 Phase 4.4.3 或进程退出）；未提交/未推送）**：exact-once prepared→executing capability 转移（`preparation.ts` consume，LOCK-4421）；owner-aware live 生命周期（`chatDb/index.ts` closeForPromotion/reopenForPromotion + `maintenanceCoordination.ts` validatePromotionAuthorization，同一持续持有 lease 授权全窗口，LOCK-4422）；原子 rename-only install + sidecar 处理 + fsync + identity receipt + closed-live proof（`install.ts`，EXDEV 无 copy fallback，LOCK-4423/4426/4427）；严格 journal 递进 transition API（`journalStore.ts`，snapshot-ready→candidate-installed→replacement-verified，LOCK-4423/4424/4425）；identity-bound replacement 验证（`replacementVerifier.ts` + `readonlyDbValidation.ts` 共享只读门，LOCK-4424）；执行编排 8 subphase + pre/post-install 失败分类 + 协作式 abort + `startPromotionExecution()` 唯一入口（`execution.ts` + `chatDbImport/index.ts`，LOCK-4425/4428）；执行止于 durable `replacement-verified` handoff——无 restore/relaunch/清理；审计硬化后终局 ownership 结算唯一归属 `startPromotionExecution` continuation（成功/post-install → `TerminalPromotionOwnership` 终局记录持有 capability，stale session 清理不可释放；pre-install → quiesce 后释放）。验证：聚焦受影响区域（chatDb + chatDbImport）35 文件 / 1141 测试通过 / 0 失败（修正前基线 1138，保留为聚焦验证证据）；`typecheck:node` 通过；changed-files biome/eslint 干净；**最终全量验证通过（未涉及 CI / 未提交 / 未推送）**：`pnpm format` 通过（无文件改动）；`pnpm lint` 通过（0 errors / 87 warnings）；`pnpm test` 通过，275 文件 / 5983 通过 / 72 跳过；`pnpm typecheck:node` 通过；独立审计与复验均 pass。Phase 4.4.3（rollback restore 执行/relaunch/启动恢复动作执行）Not started |
 | **2026-07-27** | Phase 4.4.2 已提交 | Phase 4.4.0+4.4.1+4.4.2 一并提交至 `3a81557ac6`（`feat(chat-db): execute durable candidate promotion`），未推送 |
 | **2026-07-28** | Phase 4.4.3 | **Recovery/Finalization 完成（Done，实现 + 独立审计 pass + 全量验证通过，未提交/未推送）**：LOCK-4431…4439 全落地。5 个新文件 + 5 个修改文件 + 4 个测试文件扩展。① artifact probes（`artifactProbe.ts`）：只读磁盘 truth 等价探测，路径 strict derive + candidateId allowlist，sidecar-free invariant + before/after dir snapshots；② rollback（`rollback.ts`）：staging clone（`fs.copyFileSync`）+ fsync + readonly validation + consume proof + atomic rename → fsync + identity confirm + restored live validation；retained snapshot never consumed（LOCK-4434）；③ journal cleanup（`journalStore.ts` 扩展）：idempotent fixed-path cleanup + phase-gated API + guard-read + unlink + best-effort staging + fsync parent dir（LOCK-4438）；④ terminal ownership take（`chatDbImport/index.ts`）：`takeTerminalPromotionOwnership()` atomic take-and-clear（LOCK-4433）；⑤ repair marker（`chatDb/index.ts`）：`markRepairRequiredBeforeInit()` durable write，idempotent，refuse when initialized（LOCK-4437）；⑥ recovery executor（`recoveryExecutor.ts`）：7 subphases + four actions + authorization resolution + cooperative abort；⑦ relaunch（`relaunch.ts`）：exact-once receipt-gated `app.relaunch()+exit(0)`（LOCK-4438）；⑧ startup gate（`gate.ts`）：absent-journal fast path + valid journal → probe → decide → execute；⑨ startup reorder（`src/main/index.ts`）：BackupManager restore → gate → chatDbService.init() → orphan cleanup/window。独立审计 pass（两项 accepted fixes：real durable repair marker、startup gate fail-closed）；聚焦测试 71 文件 / 1709 通过 / 72 跳过；全量验证通过：format 无改动；lint 0 errors/97 warnings；test 281/6205/72 skipped；typecheck:node pass；prior two ENOENT failures non-reproducible |
+| **2026-07-28** | Phase 5.0 | **基线就绪与子阶段划分完成（Done）**：在合并后基线上确立 Phase 5 拆为 5.0/5.1A/5.1B/5.2/5.3/5.4；命令面清单（14 + 9 + 12 = 35）；LOCK-5101…5113 / LOCK-5121…5129 持久化框架。不新增代码 |
+| **2026-07-28** | Phase 5.1A | **SQLite 命令面补全完成（Done，已提交 `6fa5ff5ef9`，未推送）**：9 命令（segments / file-ref / reorder）经 aggregate + IPC + preload + renderer datasource 全链路；segment 全量替换、file-ref 只读、reorder 仅 topic 内；类型检查与聚焦测试通过 |
+| **2026-07-28** | Phase 5.1B | **主题生命周期 + 复合命令 + 搜索实现完成（Done 实现 + 聚焦审计，未提交/未推送）**：12 命令/表面（主题生命周期 6 + 复合 5 + 搜索 1）；`FileCleanupResult` 无文件系统副作用（LOCK-5108/5109）；复合单 root 事务 + 所有权强制（LOCK-5106/5107）；purge cutoff 调用方提供（LOCK-5113）；migration 003 FTS 归一化投影 append-only 幂等（LOCK-5121/5126/5127）；搜索 FTS 候选加速器 + 精确 regex + 错误传播（LOCK-5101/5123/5124/5125/5128）；块级游标；SearchResults 调用方仍 Dexie（Phase 5.2 边界）。10k 基准：LIKE p50 8.96/p95 10.28/mean 8.83ms；hybrid p50 2.90/p95 6.51/mean 3.40ms；加速 p50 3.09x/p95 1.58x（LOCK-5129）。聚焦验证：Main 1838 passed / 72 skipped / 0 failed；Phase 5.1B 聚焦套件 + typecheck 通过；**最终全量 format/lint/test/typecheck 门未运行；未提交/未推送** |
+| **2026-07-28** | Phase 5.2 / 5.3 / 5.4 | **Not started**：5.2 调用方迁移（SearchResults 切 `SearchMessages`）；5.3 权威切换 + routingPolicy scaffolding 移除（C-13/C-11/C-10）；5.4 E2E/性能/清理门。Phase 5 未完成，未声称提交/推送/CI 绿色 |
 
 ---
 

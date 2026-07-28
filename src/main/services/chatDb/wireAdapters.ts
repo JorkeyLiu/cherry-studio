@@ -13,10 +13,11 @@
  * - Unknown JSON extension keys round-trip through overflow.
  */
 
-import type { FileReferenceWire, JsonObject, SegmentWire } from '@shared/chatDb'
+import type { FileCleanupResult, FileReferenceWire, JsonObject, SegmentWire } from '@shared/chatDb'
 
 import { OVERFLOW_REMOVE, reconstruct, reconstructBlock } from './domain/codec'
 import type { FileReferenceData, MessageBlockData, MessageData, TopicData } from './domain/types'
+import type { ChatDbRepositories } from './repository/factory'
 
 // ---------------------------------------------------------------------------
 // Known field sets for mapping
@@ -524,4 +525,87 @@ export function wireToBlockPatch(json: JsonObject): Partial<MessageBlockData> & 
   }
 
   return patch as Partial<MessageBlockData> & { overflow?: Record<string, unknown> }
+}
+
+// ---------------------------------------------------------------------------
+// Topic metadata patch adapter (Phase 5.1B)
+// ---------------------------------------------------------------------------
+
+/**
+ * Mutable topic metadata field names that round-trip through overflow.
+ * These are stored in the extra JSON column, not as dedicated columns.
+ */
+const TOPIC_OVERFLOW_MUTABLE = new Set(['pinned', 'prompt', 'isNameManuallyEdited'])
+
+/**
+ * Convert a topic metadata update wire request to a domain patch.
+ *
+ * Only allows: name (column), pinned/prompt/isNameManuallyEdited (overflow).
+ * Identity fields (id, assistantId, createdAt, deletedAt, updatedAt) are
+ * rejected by the contract validator.
+ *
+ * @param json  The wire patch (JsonObject with allowed keys only).
+ * @returns     Domain patch for TopicsRepository.updatePatch().
+ */
+export function wireToTopicMetadataPatch(json: JsonObject): {
+  columns: Partial<TopicData>
+  overflow: Record<string, unknown>
+} {
+  const columns: Partial<TopicData> = {}
+  const overflow: Record<string, unknown> = {}
+
+  for (const [key, value] of Object.entries(json)) {
+    if (key === 'topicId') continue
+    if (key === 'name') {
+      columns.name = value as string | null
+    } else if (TOPIC_OVERFLOW_MUTABLE.has(key)) {
+      overflow[key] = value
+    }
+  }
+
+  return { columns, overflow }
+}
+
+/**
+ * Convert a TopicData domain DTO to a TopicWire.
+ * Includes overflow fields (pinned, prompt, isNameManuallyEdited).
+ */
+export function topicToWireFull(topic: TopicData): JsonObject {
+  const base = reconstruct(topic) as JsonObject
+  // Overflow fields are already included by reconstruct().
+  return base
+}
+
+// ---------------------------------------------------------------------------
+// File cleanup result helpers (Phase 5.1B)
+// ---------------------------------------------------------------------------
+
+/**
+ * Collect unique file IDs from a set of file references.
+ * Deterministic: returns sorted unique array.
+ */
+export function collectAffectedFileIds(refs: FileReferenceData[]): string[] {
+  const ids = new Set<string>()
+  for (const ref of refs) {
+    ids.add(ref.fileId)
+  }
+  return [...ids].sort()
+}
+
+/**
+ * Build a FileCleanupResult from affected file IDs.
+ * Queries remaining reference counts for each file after the mutation.
+ *
+ * Must be called AFTER the destructive mutation within the same transaction,
+ * so remaining counts reflect post-mutation state.
+ */
+export function buildFileCleanupResult(repos: ChatDbRepositories, affectedFileIds: string[]): FileCleanupResult {
+  const remainingReferenceCounts: Record<string, number> = {}
+  for (const fileId of affectedFileIds) {
+    remainingReferenceCounts[fileId] = repos.fileRefs.countByFile(fileId)
+  }
+  return {
+    affectedFileIds: [...affectedFileIds].sort(),
+    remainingReferenceCounts
+  }
 }

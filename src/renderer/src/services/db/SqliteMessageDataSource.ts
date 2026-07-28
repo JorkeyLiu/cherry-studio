@@ -24,17 +24,26 @@ import type {
   ChatDbError,
   ChatDbResult,
   ClearMessagesRequest,
+  ClearTopicWithSegmentsRequest,
+  ClearTopicWithSegmentsResponse,
+  CloneMessagesToTopicRequest,
+  CloneMessagesToTopicResponse,
   CountFileRefsByFileRequest,
   CountFileRefsByFileResponse,
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteMessagesWithSegmentsRequest,
+  DeleteMessagesWithSegmentsResponse,
   DeleteSegmentRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   FetchMessagesResponse,
+  FileCleanupResult,
   GetRawTopicRequest,
   GetRawTopicResponse,
+  HardDeleteTopicRequest,
+  HardDeleteTopicResponse,
   JsonObject,
   ListBlocksByFileRequest,
   ListBlocksByFileResponse,
@@ -42,16 +51,30 @@ import type {
   ListFileRefsByFileResponse,
   ListSegmentsRequest,
   ListSegmentsResponse,
+  ListTrashTopicsRequest,
+  ListTrashTopicsResponse,
+  MessageBlockEntry,
+  PasteMessagesToTopicRequest,
+  PasteMessagesToTopicResponse,
+  PurgeExpiredTopicsRequest,
+  PurgeExpiredTopicsResponse,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplaceSegmentMembershipResponse,
+  ResetMessagesForResendRequest,
+  ResetMessagesForResendResponse,
+  RestoreTopicRequest,
+  SoftDeleteTopicRequest,
   TopicExistsRequest,
+  TopicWire,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
   UpdateSegmentMetadataRequest,
   UpdateSegmentMetadataResponse,
   UpdateSingleBlockRequest,
+  UpdateTopicMetadataRequest,
+  UpdateTopicMetadataResponse,
   UpsertSegmentRequest,
   UpsertSegmentResponse
 } from '@shared/chatDb'
@@ -94,6 +117,21 @@ export interface ChatDbApi {
   listFileRefsByFile(request: ListFileRefsByFileRequest): Promise<ChatDbResult<ListFileRefsByFileResponse>>
   countFileRefsByFile(request: CountFileRefsByFileRequest): Promise<ChatDbResult<CountFileRefsByFileResponse>>
   listBlocksByFile(request: ListBlocksByFileRequest): Promise<ChatDbResult<ListBlocksByFileResponse>>
+  // Phase 5.1B: topic lifecycle
+  updateTopicMetadata(request: UpdateTopicMetadataRequest): Promise<ChatDbResult<UpdateTopicMetadataResponse>>
+  softDeleteTopic(request: SoftDeleteTopicRequest): Promise<ChatDbResult<null>>
+  restoreTopic(request: RestoreTopicRequest): Promise<ChatDbResult<null>>
+  listTrashTopics(request: ListTrashTopicsRequest): Promise<ChatDbResult<ListTrashTopicsResponse>>
+  hardDeleteTopic(request: HardDeleteTopicRequest): Promise<ChatDbResult<HardDeleteTopicResponse>>
+  purgeExpiredTopics(request: PurgeExpiredTopicsRequest): Promise<ChatDbResult<PurgeExpiredTopicsResponse>>
+  // Phase 5.1B: compound mutations
+  cloneMessagesToTopic(request: CloneMessagesToTopicRequest): Promise<ChatDbResult<CloneMessagesToTopicResponse>>
+  resetMessagesForResend(request: ResetMessagesForResendRequest): Promise<ChatDbResult<ResetMessagesForResendResponse>>
+  deleteMessagesWithSegments(
+    request: DeleteMessagesWithSegmentsRequest
+  ): Promise<ChatDbResult<DeleteMessagesWithSegmentsResponse>>
+  pasteMessagesToTopic(request: PasteMessagesToTopicRequest): Promise<ChatDbResult<PasteMessagesToTopicResponse>>
+  clearTopicWithSegments(request: ClearTopicWithSegmentsRequest): Promise<ChatDbResult<ClearTopicWithSegmentsResponse>>
 }
 
 // ---------------------------------------------------------------------------
@@ -310,8 +348,11 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   async fetchMessages(
     topicId: string,
-    _forceReload?: boolean // accepted per interface, never sent over wire
+    forceReload?: boolean
   ): Promise<{ messages: Message[]; blocks: MessageBlock[] }> {
+    // forceReload is accepted per the MessageDataSource interface but never
+    // sent over the wire — SQLite reads are always fresh (no renderer cache).
+    void forceReload
     const request: FetchMessagesRequest = cloneForWire({ topicId })
     const result = unwrap(await this.api.fetchMessages(request))
     return {
@@ -497,6 +538,92 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async listBlocksByFile(fileId: string): Promise<ListBlocksByFileResponse> {
     const request: ListBlocksByFileRequest = cloneForWire({ fileId })
     return unwrap(await this.api.listBlocksByFile(request))
+  }
+
+  // ============ Topic Lifecycle (Phase 5.1B) ============
+
+  async updateTopicMetadata(
+    topicId: string,
+    name?: string | null,
+    pinned?: boolean | null,
+    prompt?: string | null,
+    isNameManuallyEdited?: boolean | null
+  ): Promise<TopicWire> {
+    const request: UpdateTopicMetadataRequest = cloneForWire({ topicId, name, pinned, prompt, isNameManuallyEdited })
+    return unwrap(await this.api.updateTopicMetadata(request))
+  }
+
+  async softDeleteTopic(topicId: string): Promise<void> {
+    const request: SoftDeleteTopicRequest = cloneForWire({ topicId })
+    unwrap(await this.api.softDeleteTopic(request))
+    dispatchTopicUpdatedAt(topicId)
+  }
+
+  async restoreTopic(topicId: string): Promise<void> {
+    const request: RestoreTopicRequest = cloneForWire({ topicId })
+    unwrap(await this.api.restoreTopic(request))
+    dispatchTopicUpdatedAt(topicId)
+  }
+
+  async listTrashTopics(assistantId?: string, limit?: number, cursor?: string): Promise<ListTrashTopicsResponse> {
+    const request: ListTrashTopicsRequest = cloneForWire({ assistantId, limit, cursor })
+    return unwrap(await this.api.listTrashTopics(request))
+  }
+
+  async hardDeleteTopic(topicId: string): Promise<FileCleanupResult> {
+    const request: HardDeleteTopicRequest = cloneForWire({ topicId })
+    const result = unwrap(await this.api.hardDeleteTopic(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
+  }
+
+  async purgeExpiredTopics(cutoffTimestamp: string): Promise<FileCleanupResult> {
+    const request: PurgeExpiredTopicsRequest = cloneForWire({ cutoffTimestamp })
+    return unwrap(await this.api.purgeExpiredTopics(request))
+  }
+
+  // ============ Compound Mutations (Phase 5.1B) ============
+
+  async cloneMessagesToTopic(targetTopicId: string, entries: MessageBlockEntry[], assistantId?: string): Promise<void> {
+    const request: CloneMessagesToTopicRequest = cloneForWire({ targetTopicId, entries, assistantId })
+    unwrap(await this.api.cloneMessagesToTopic(request))
+    dispatchTopicUpdatedAt(targetTopicId)
+  }
+
+  async resetMessagesForResend(
+    topicId: string,
+    messageIds: string[],
+    blockIdsToDelete: string[]
+  ): Promise<FileCleanupResult> {
+    const request: ResetMessagesForResendRequest = cloneForWire({ topicId, messageIds, blockIdsToDelete })
+    const result = unwrap(await this.api.resetMessagesForResend(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
+  }
+
+  async deleteMessagesWithSegments(topicId: string, messageIds: string[]): Promise<FileCleanupResult> {
+    const request: DeleteMessagesWithSegmentsRequest = cloneForWire({ topicId, messageIds })
+    const result = unwrap(await this.api.deleteMessagesWithSegments(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
+  }
+
+  async pasteMessagesToTopic(
+    topicId: string,
+    entries: MessageBlockEntry[],
+    insertIndex?: number
+  ): Promise<FileCleanupResult> {
+    const request: PasteMessagesToTopicRequest = cloneForWire({ topicId, entries, insertIndex })
+    const result = unwrap(await this.api.pasteMessagesToTopic(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
+  }
+
+  async clearTopicWithSegments(topicId: string): Promise<FileCleanupResult> {
+    const request: ClearTopicWithSegmentsRequest = cloneForWire({ topicId })
+    const result = unwrap(await this.api.clearTopicWithSegments(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
   }
 
   // ============ File Operations ============

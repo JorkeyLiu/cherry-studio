@@ -242,9 +242,12 @@ export class TopicsRepository {
   }
 
   /**
-   * List soft-deleted topics with cursor-based pagination (descending by default).
+   * List soft-deleted topics with cursor-based pagination.
    *
-   * Phase 2: uses typed topic-timestamp cursor, COALESCE for null createdAt.
+   * Ordering: (deletedAt DESC, id DESC) for deterministic pagination
+   * compatible with tuple cursor comparison. The cursor encodes
+   * (deletedAt, id) from the last item in the page.
+   * Topics with identical deletedAt are tie-broken by id descending.
    */
   listTrashPage(page: PageCursor, options?: { assistantId?: string }): PageResult<TopicData> {
     const limit = validatePageLimit(page.limit)
@@ -254,14 +257,16 @@ export class TopicsRepository {
       const decoded = decodeTopicTimestampCursor(page.cursor)
       const ts = decoded.sortOrder
       if (page.direction === 'asc') {
-        conditions.push(sql`(COALESCE(${topics.createdAt}, ''), ${topics.id}) > (${ts}, ${decoded.id})`)
+        // Forward: (deletedAt, id) > (cursor_deletedAt, cursor_id)
+        conditions.push(sql`(${topics.deletedAt}, ${topics.id}) > (${ts}, ${decoded.id})`)
       } else {
-        conditions.push(sql`(COALESCE(${topics.createdAt}, ''), ${topics.id}) < (${ts}, ${decoded.id})`)
+        // Backward: (deletedAt, id) < (cursor_deletedAt, cursor_id)
+        conditions.push(sql`(${topics.deletedAt}, ${topics.id}) < (${ts}, ${decoded.id})`)
       }
     }
     const where = and(...conditions)
     const orderBy =
-      page.direction === 'asc' ? [asc(topics.createdAt), asc(topics.id)] : [desc(topics.createdAt), desc(topics.id)]
+      page.direction === 'asc' ? [asc(topics.deletedAt), asc(topics.id)] : [desc(topics.deletedAt), desc(topics.id)]
     const items = this.db
       .select()
       .from(topics)
@@ -274,7 +279,7 @@ export class TopicsRepository {
     let nextCursor: string | undefined
     if (hasMore && pageItems.length > 0) {
       const last = pageItems[pageItems.length - 1] as any
-      nextCursor = encodeTopicTimestampCursor(last.createdAt ?? '', last.id)
+      nextCursor = encodeTopicTimestampCursor(last.deletedAt ?? '', last.id)
     }
     return {
       items: pageItems.map((r) => fromDrizzleResult<TopicData>(r, 'topics', (r as any).id)),

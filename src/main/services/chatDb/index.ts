@@ -15,7 +15,7 @@ import {
   type PromotionLeaseHandle,
   validatePromotionAuthorization
 } from './maintenanceCoordination'
-import { runMigrations } from './migration'
+import { registerChatDbNormalize, runMigrations } from './migration'
 import * as schema from './schema'
 
 const logger = loggerService.withContext('ChatDbService')
@@ -289,6 +289,12 @@ class ChatDbService {
     // --- Publish handles (atomic from this point) ---
     this.sqlite = sqlite
     this.db = db
+
+    // --- Register chatdb_normalize scalar function for FTS5 triggers ---
+    // This must run BEFORE migrations so that migration 003's backfill
+    // and triggers can use it. Uses the shared helper (LOCK-5126).
+    // Safe to skip if the raw handle doesn't support function() (mocked envs).
+    registerChatDbNormalize(sqlite)
 
     // --- Run pending migrations ---
     const appliedCount = runMigrations(this.db, sqlite)

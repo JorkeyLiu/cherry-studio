@@ -209,6 +209,34 @@ export function validateNonEmptyString(value: unknown, path: string): void {
 }
 
 /**
+ * Validate that a string is a canonical ISO 8601 / RFC 3339 timestamp.
+ *
+ * Accepted format: `YYYY-MM-DDTHH:mm:ss.sssZ` (UTC, Z suffix, millisecond
+ * precision). This ensures lexicographic comparison matches chronological
+ * ordering for purge cutoff comparisons.
+ *
+ * @param value  The string value to validate.
+ * @param path   Dot-separated path for error messages.
+ * @throws {ValidationError} If the value is not a valid ISO 8601 timestamp.
+ */
+export function validateIso8601Timestamp(value: unknown, path: string): void {
+  if (typeof value !== 'string') {
+    throw new ValidationError(path, `Expected a string, got ${typeof value}`)
+  }
+  // Canonical form: YYYY-MM-DDTHH:mm:ss.sssZ
+  // Rejects: missing Z, timezone offsets (+HH:mm), missing milliseconds,
+  // non-UTC timezones, and non-ISO formats.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
+    throw new ValidationError(path, `Expected canonical ISO 8601 timestamp (YYYY-MM-DDTHH:mm:ss.sssZ), got "${value}"`)
+  }
+  // Verify the date is actually valid
+  const parsed = Date.parse(value)
+  if (Number.isNaN(parsed)) {
+    throw new ValidationError(path, `Invalid date: "${value}"`)
+  }
+}
+
+/**
  * Validate that a value is an array of non-empty strings.
  *
  * @param value  The value to validate.
@@ -251,6 +279,21 @@ export function validateJsonObjectArray(value: unknown, path: string): JsonObjec
  * @throws {ValidationError} If the value is not a valid index.
  */
 export function validateIndex(value: unknown, path: string): void {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    throw new ValidationError(path, `Expected a non-negative integer, got ${JSON.stringify(value)}`)
+  }
+}
+
+/**
+ * Validate that a value is a finite non-negative integer.
+ * Alias for validateIndex semantics, used for reference counts
+ * and other non-negative integer domains.
+ *
+ * @param value  The value to validate.
+ * @param path   Dot-separated path for error messages.
+ * @throws {ValidationError} If the value is not a non-negative integer.
+ */
+export function validateNonNegativeInteger(value: unknown, path: string): void {
   if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
     throw new ValidationError(path, `Expected a non-negative integer, got ${JSON.stringify(value)}`)
   }

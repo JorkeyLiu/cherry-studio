@@ -10,6 +10,7 @@ import {
   type KeywordMatchMode,
   splitKeywordsToTerms
 } from '@renderer/utils/keywordSearch'
+import { normalizeText, stripMarkdownFormatting } from '@shared/searchTextNormalization'
 import { List, Segmented, Spin, Typography } from 'antd'
 import { useLiveQuery } from 'dexie-react-hooks'
 import type { FC } from 'react'
@@ -41,19 +42,9 @@ const SEARCH_SNIPPET_MAX_LINE_FRAGMENTS = 3
 
 type ResultSortOrder = 'newest' | 'oldest'
 
-const stripMarkdownFormatting = (text: string) => {
-  return text
-    .replace(/```(?:[^\n]*\n)?([\s\S]*?)```/g, '$1')
-    .replace(/!\[(.*?)\]\((.*?)\)/g, '$1')
-    .replace(/\[(.*?)\]\((.*?)\)/g, '$1')
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/\*(.*?)\*/g, '$1')
-    .replace(/`(.*?)`/g, '$1')
-    .replace(/#+\s/g, '')
-    .replace(/<[^>]*>/g, '')
-}
-
-const normalizeText = (text: string) => text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+// stripMarkdownFormatting and normalizeText are now imported from @shared/searchTextNormalization
+// Re-export for any other consumers within this module
+export { normalizeText, stripMarkdownFormatting }
 
 const mergeRanges = (ranges: Array<[number, number]>) => {
   const sorted = ranges.slice().sort((a, b) => a[0] - b[0])

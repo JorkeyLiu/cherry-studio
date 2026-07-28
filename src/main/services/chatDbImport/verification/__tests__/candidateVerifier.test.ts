@@ -33,7 +33,7 @@ import type { ReadPageResponse } from '@shared/chatImport/types'
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 
-import { runMigrations } from '../../../chatDb/migration'
+import { registerChatDbNormalize, runMigrations } from '../../../chatDb/migration'
 import * as schema from '../../../chatDb/schema'
 import { createImportDataPlane } from '../../importDataPlane'
 import type { CandidateVerifierOptions } from '../candidateVerifier'
@@ -150,10 +150,13 @@ function buildSealedCandidate(dir: string): { dbPath: string; manifest: SourceVe
   return { dbPath, manifest }
 }
 
-/** Open a writable connection with FKs off, corrupt, close. */
+/** Open a writable connection with FKs off, register scalar functions, corrupt, close. */
 function corrupt(dbPath: string, fn: (db: Database.Database) => void): void {
   const db = new Database(dbPath)
   db.pragma('foreign_keys = OFF')
+  // LOCK-5126: any writable connection that may mutate message_blocks
+  // must have chatdb_normalize() registered before triggers can fire.
+  registerChatDbNormalize(db)
   fn(db)
   db.close()
 }

@@ -1,10 +1,41 @@
 import { loggerService } from '@logger'
+import { normalizeSearchText } from '@shared/searchTextNormalization'
 import type Database from 'better-sqlite3'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { migrationState } from './schema'
 
 const logger = loggerService.withContext('ChatDbMigration')
+
+// ---------------------------------------------------------------------------
+// Shared scalar function registration — LOCK-5126
+//
+// Every writable connection that may mutate `message_blocks` must have
+// `chatdb_normalize()` registered before any trigger can fire. This
+// helper is the single source of truth for registration. It is safe to
+// call multiple times on the same handle (re-registration overwrites).
+//
+// Exported for use by callers that open standalone writable connections
+// (e.g. test helpers, backup/restore) without duplicating the
+// normalization lambda.
+// ---------------------------------------------------------------------------
+
+/**
+ * Register the `chatdb_normalize()` scalar function on a raw better-sqlite3
+ * connection. Required before migration 003 and by any writable connection
+ * whose triggers may call the function. Idempotent — safe to call multiple
+ * times on the same handle.
+ *
+ * @param rawSqlite  Raw better-sqlite3 Database handle.
+ */
+export function registerChatDbNormalize(rawSqlite: Database.Database): void {
+  if (typeof rawSqlite.function === 'function') {
+    rawSqlite.function('chatdb_normalize', (content: string | null) => {
+      if (content === null || content === undefined) return ''
+      return normalizeSearchText(String(content))
+    })
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Migration definition — each entry maps a version key to its SQL.
@@ -318,6 +349,110 @@ export const MIGRATIONS: MigrationEntry[] = [
       'CREATE INDEX IF NOT EXISTS file_references_file_id_idx ON file_references(file_id)',
       'CREATE UNIQUE INDEX IF NOT EXISTS file_references_block_id_file_id_uniq ON file_references(block_id, file_id)'
     ]
+  },
+
+  // =========================================================================
+  // 003 — FTS5 normalized search projection (Phase 5.1B-2)
+  // =========================================================================
+  //
+  // Adds an append-only normalized content projection for FTS5 trigram search.
+  //
+  // Tables:
+  // - message_blocks_normalized: stores normalized (markdown-stripped, CRLF→LF)
+  //   content for each MAIN_TEXT block. Contains block_id, message_id, and
+  //   normalized_content columns.
+  // - message_blocks_fts: FTS5 trigram virtual table over normalized_content.
+  //
+  // Triggers:
+  // - message_blocks_normalized_insert: fires on INSERT into message_blocks.
+  //   For MAIN_TEXT blocks, calls chatdb_normalize() to populate normalized_content.
+  // - message_blocks_normalized_update: fires on UPDATE of content/type in message_blocks.
+  //   For MAIN_TEXT blocks, calls chatdb_normalize() to refresh normalized_content.
+  //   For non-MAIN_TEXT or type transitions, deletes the projection row.
+  // - message_blocks_normalized_delete: fires on DELETE from message_blocks.
+  //   Removes the projection row.
+  //
+  // The chatdb_normalize() scalar function must be registered on the raw
+  // better-sqlite3 connection before this migration runs. It reproduces
+  // normalizeText(stripMarkdownFormatting(content)).
+  //
+  // LOCK-5125: FTS is a candidate accelerator, not semantic authority.
+  // Every result must pass the shared exact regex matcher.
+  // =========================================================================
+  {
+    key: '003_fts5_normalized_search',
+    description: 'FTS5 normalized search projection: block_normalized table, trigram FTS, and synchronization triggers',
+    sql: [
+      // 1. Create projection table for normalized content
+      `CREATE TABLE IF NOT EXISTS message_blocks_normalized (
+        block_id TEXT PRIMARY KEY REFERENCES message_blocks(id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL,
+        normalized_content TEXT NOT NULL
+      )`,
+
+      // 2. Create index on message_id for joins
+      `CREATE INDEX IF NOT EXISTS message_blocks_normalized_message_id_idx ON message_blocks_normalized(message_id)`,
+
+      // 3. Create FTS5 trigram virtual table (standalone, not content-linked)
+      `CREATE VIRTUAL TABLE IF NOT EXISTS message_blocks_fts USING fts5(
+        block_id UNINDEXED,
+        normalized_content,
+        tokenize='trigram'
+      )`,
+
+      // 4. Backfill existing MAIN_TEXT blocks transactionally
+      `INSERT INTO message_blocks_normalized (block_id, message_id, normalized_content)
+       SELECT
+         mb.id,
+         mb.message_id,
+         chatdb_normalize(mb.content)
+       FROM message_blocks mb
+       WHERE mb.type = 'main_text' AND mb.content IS NOT NULL`,
+
+      // 4b. Backfill FTS index
+      `INSERT INTO message_blocks_fts (block_id, normalized_content)
+       SELECT
+         mb.id,
+         chatdb_normalize(mb.content)
+       FROM message_blocks mb
+       WHERE mb.type = 'main_text' AND mb.content IS NOT NULL`,
+
+      // 5. Trigger: INSERT into message_blocks
+      `CREATE TRIGGER IF NOT EXISTS message_blocks_normalized_insert
+       AFTER INSERT ON message_blocks
+       BEGIN
+         DELETE FROM message_blocks_normalized WHERE block_id = NEW.id;
+         DELETE FROM message_blocks_fts WHERE block_id = NEW.id;
+         INSERT INTO message_blocks_normalized (block_id, message_id, normalized_content)
+         SELECT NEW.id, NEW.message_id, chatdb_normalize(NEW.content)
+         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
+         INSERT INTO message_blocks_fts (block_id, normalized_content)
+         SELECT NEW.id, chatdb_normalize(NEW.content)
+         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
+       END`,
+
+      // 6. Trigger: UPDATE of content, type, or message_id on message_blocks
+      `CREATE TRIGGER IF NOT EXISTS message_blocks_normalized_update
+       AFTER UPDATE OF content, type, message_id ON message_blocks
+       BEGIN
+         DELETE FROM message_blocks_normalized WHERE block_id = NEW.id;
+         DELETE FROM message_blocks_fts WHERE block_id = NEW.id;
+         INSERT INTO message_blocks_normalized (block_id, message_id, normalized_content)
+         SELECT NEW.id, NEW.message_id, chatdb_normalize(NEW.content)
+         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
+         INSERT INTO message_blocks_fts (block_id, normalized_content)
+         SELECT NEW.id, chatdb_normalize(NEW.content)
+         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
+       END`,
+
+      // 7. Trigger: DELETE from message_blocks
+      `CREATE TRIGGER IF NOT EXISTS message_blocks_normalized_delete
+       AFTER DELETE ON message_blocks
+       BEGIN
+         DELETE FROM message_blocks_normalized WHERE block_id = OLD.id;
+         DELETE FROM message_blocks_fts WHERE block_id = OLD.id;
+       END`
+    ]
   }
 ]
 
@@ -359,6 +494,10 @@ export function runMigrations(db: BetterSQLite3Database<any>, rawSqlite: Databas
   const applied = new Set(rows.map((r) => r.key))
 
   let appliedCount = 0
+
+  // Register chatdb_normalize scalar function for FTS5 triggers.
+  // Uses the shared helper (LOCK-5126) — single source of truth.
+  registerChatDbNormalize(rawSqlite)
 
   for (const migration of MIGRATIONS) {
     if (applied.has(migration.key)) {

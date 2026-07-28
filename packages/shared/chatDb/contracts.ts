@@ -18,35 +18,49 @@ import type {
   BulkAddBlocksRequest,
   ChatDbChannel,
   ClearMessagesRequest,
+  ClearTopicWithSegmentsRequest,
+  CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   GetRawTopicRequest,
+  HardDeleteTopicRequest,
   ListBlocksByFileRequest,
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
+  ListTrashTopicsRequest,
+  PasteMessagesToTopicRequest,
+  PurgeExpiredTopicsRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ResetMessagesForResendRequest,
+  RestoreTopicRequest,
+  SearchMessagesRequest,
+  SoftDeleteTopicRequest,
   TopicExistsRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
   UpdateSegmentMetadataRequest,
   UpdateSingleBlockRequest,
+  UpdateTopicMetadataRequest,
   UpsertSegmentRequest
 } from './types'
 import {
   validateIdField,
   validateIndex,
+  validateIso8601Timestamp,
   validateJsonObject,
   validateJsonObjectArray,
   validateMessageIdField,
   validateNoIdentityFields,
   validateNonEmptyString,
+  validateNonNegativeInteger,
   validateRequest,
   validateResultEnvelope,
   validateStringArray,
@@ -556,6 +570,478 @@ const listBlocksByFileContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 5.1B: Topic lifecycle contracts
+// ---------------------------------------------------------------------------
+
+const updateTopicMetadataContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'name', 'pinned', 'prompt', 'isNameManuallyEdited'),
+  validate(value: unknown): void {
+    validateRequest(value, updateTopicMetadataContract.allowedKeys)
+    const req = value as UpdateTopicMetadataRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    // Reject identity fields in the patch
+    if ('id' in req || 'assistantId' in req || 'createdAt' in req || 'deletedAt' in req) {
+      throw new ValidationError(
+        'request',
+        'Identity fields (id, assistantId, createdAt, deletedAt) must not be present'
+      )
+    }
+    // Validate field types: name must be string|null, prompt must be string|null
+    if (req.name !== undefined && req.name !== null && typeof req.name !== 'string') {
+      throw new ValidationError('request.name', `Expected string|null, got ${typeof req.name}`)
+    }
+    if (req.prompt !== undefined && req.prompt !== null && typeof req.prompt !== 'string') {
+      throw new ValidationError('request.prompt', `Expected string|null, got ${typeof req.prompt}`)
+    }
+    // Validate field types: pinned must be boolean|null, isNameManuallyEdited must be boolean|null
+    if (req.pinned !== undefined && req.pinned !== null && typeof req.pinned !== 'boolean') {
+      throw new ValidationError('request.pinned', `Expected boolean|null, got ${typeof req.pinned}`)
+    }
+    if (
+      req.isNameManuallyEdited !== undefined &&
+      req.isNameManuallyEdited !== null &&
+      typeof req.isNameManuallyEdited !== 'boolean'
+    ) {
+      throw new ValidationError(
+        'request.isNameManuallyEdited',
+        `Expected boolean|null, got ${typeof req.isNameManuallyEdited}`
+      )
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:update-topic-metadata')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true && obj.value !== null && typeof obj.value === 'object' && !Array.isArray(obj.value)) {
+      const v = obj.value as Record<string, unknown>
+      if (typeof v.id !== 'string' || v.id.length === 0) {
+        throw new ValidationError('result.value.id', '[chatdb:update-topic-metadata] Expected non-empty string id')
+      }
+      // Validate TopicWire result field types
+      if (v.name !== undefined && v.name !== null && typeof v.name !== 'string') {
+        throw new ValidationError('result.value.name', '[chatdb:update-topic-metadata] Expected string|null for name')
+      }
+      if (v.pinned !== undefined && v.pinned !== null && typeof v.pinned !== 'boolean') {
+        throw new ValidationError(
+          'result.value.pinned',
+          '[chatdb:update-topic-metadata] Expected boolean|null for pinned'
+        )
+      }
+      if (v.prompt !== undefined && v.prompt !== null && typeof v.prompt !== 'string') {
+        throw new ValidationError(
+          'result.value.prompt',
+          '[chatdb:update-topic-metadata] Expected string|null for prompt'
+        )
+      }
+      if (
+        v.isNameManuallyEdited !== undefined &&
+        v.isNameManuallyEdited !== null &&
+        typeof v.isNameManuallyEdited !== 'boolean'
+      ) {
+        throw new ValidationError(
+          'result.value.isNameManuallyEdited',
+          '[chatdb:update-topic-metadata] Expected boolean|null for isNameManuallyEdited'
+        )
+      }
+    }
+  }
+}
+
+const softDeleteTopicContract: ChatDbContract = {
+  allowedKeys: keySet('topicId'),
+  validate(value: unknown): void {
+    validateRequest(value, softDeleteTopicContract.allowedKeys)
+    const req = value as SoftDeleteTopicRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+  },
+  validateResult: voidResult('chatdb:soft-delete-topic')
+}
+
+const restoreTopicContract: ChatDbContract = {
+  allowedKeys: keySet('topicId'),
+  validate(value: unknown): void {
+    validateRequest(value, restoreTopicContract.allowedKeys)
+    const req = value as RestoreTopicRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+  },
+  validateResult: voidResult('chatdb:restore-topic')
+}
+
+const listTrashTopicsContract: ChatDbContract = {
+  allowedKeys: keySet('assistantId', 'limit', 'cursor'),
+  validate(value: unknown): void {
+    validateRequest(value, listTrashTopicsContract.allowedKeys)
+    const req = value as ListTrashTopicsRequest
+    if (req.assistantId !== undefined && req.assistantId !== null) {
+      validateNonEmptyString(req.assistantId, 'request.assistantId')
+    }
+    if (req.limit !== undefined && req.limit !== null) {
+      if (
+        typeof req.limit !== 'number' ||
+        !Number.isFinite(req.limit) ||
+        !Number.isInteger(req.limit) ||
+        req.limit < 1
+      ) {
+        throw new ValidationError('request.limit', 'Expected a positive integer')
+      }
+    }
+    if (req.cursor !== undefined && req.cursor !== null) {
+      validateNonEmptyString(req.cursor, 'request.cursor')
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:list-trash-topics')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const v = obj.value as Record<string, unknown>
+      if (!Array.isArray(v.items)) {
+        throw new ValidationError('result.value.items', '[chatdb:list-trash-topics] Expected items array')
+      }
+      if (typeof v.hasMore !== 'boolean') {
+        throw new ValidationError('result.value.hasMore', '[chatdb:list-trash-topics] Expected boolean hasMore')
+      }
+      // Validate TopicWire fields in each item
+      for (let i = 0; i < v.items.length; i++) {
+        const item = v.items[i] as Record<string, unknown>
+        if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+          throw new ValidationError(`result.value.items[${i}]`, '[chatdb:list-trash-topics] Expected TopicWire object')
+        }
+        if (typeof item.id !== 'string' || item.id.length === 0) {
+          throw new ValidationError(
+            `result.value.items[${i}].id`,
+            '[chatdb:list-trash-topics] Expected non-empty string id'
+          )
+        }
+        if (item.name !== undefined && item.name !== null && typeof item.name !== 'string') {
+          throw new ValidationError(
+            `result.value.items[${i}].name`,
+            '[chatdb:list-trash-topics] Expected string|null for name'
+          )
+        }
+        if (item.pinned !== undefined && item.pinned !== null && typeof item.pinned !== 'boolean') {
+          throw new ValidationError(
+            `result.value.items[${i}].pinned`,
+            '[chatdb:list-trash-topics] Expected boolean|null for pinned'
+          )
+        }
+        if (item.prompt !== undefined && item.prompt !== null && typeof item.prompt !== 'string') {
+          throw new ValidationError(
+            `result.value.items[${i}].prompt`,
+            '[chatdb:list-trash-topics] Expected string|null for prompt'
+          )
+        }
+        if (
+          item.isNameManuallyEdited !== undefined &&
+          item.isNameManuallyEdited !== null &&
+          typeof item.isNameManuallyEdited !== 'boolean'
+        ) {
+          throw new ValidationError(
+            `result.value.items[${i}].isNameManuallyEdited`,
+            '[chatdb:list-trash-topics] Expected boolean|null for isNameManuallyEdited'
+          )
+        }
+      }
+    }
+  }
+}
+
+/** Result validator for FileCleanupResult-shaped responses. */
+function fileCleanupResultValidator(channel: string): (result: unknown) => void {
+  return (result: unknown): void => {
+    validateResultEnvelope(result, channel)
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const v = obj.value as Record<string, unknown>
+      validateStringArray(v.affectedFileIds, `result.value.affectedFileIds`)
+      validateJsonObject(v.remainingReferenceCounts, `result.value.remainingReferenceCounts`)
+      const counts = v.remainingReferenceCounts as Record<string, unknown>
+      for (const key of Object.keys(counts)) {
+        if (key.length === 0) {
+          throw new ValidationError(
+            `result.value.remainingReferenceCounts`,
+            `[${channel}] remainingReferenceCounts key must be a non-empty string`
+          )
+        }
+        validateNonNegativeInteger(counts[key], `result.value.remainingReferenceCounts.${key}`)
+      }
+    }
+  }
+}
+
+const hardDeleteTopicContract: ChatDbContract = {
+  allowedKeys: keySet('topicId'),
+  validate(value: unknown): void {
+    validateRequest(value, hardDeleteTopicContract.allowedKeys)
+    const req = value as HardDeleteTopicRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+  },
+  validateResult: fileCleanupResultValidator('chatdb:hard-delete-topic')
+}
+
+const purgeExpiredTopicsContract: ChatDbContract = {
+  allowedKeys: keySet('cutoffTimestamp'),
+  validate(value: unknown): void {
+    validateRequest(value, purgeExpiredTopicsContract.allowedKeys)
+    const req = value as PurgeExpiredTopicsRequest
+    validateIso8601Timestamp(req.cutoffTimestamp, 'request.cutoffTimestamp')
+  },
+  validateResult: fileCleanupResultValidator('chatdb:purge-expired-topics')
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.1B: Compound mutation contracts
+// ---------------------------------------------------------------------------
+
+/** Validate a MessageBlockEntry array in a compound request. */
+function validateEntries(entries: unknown, path: string): void {
+  if (!Array.isArray(entries)) {
+    throw new ValidationError(path, 'Expected an array')
+  }
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i] as Record<string, unknown>
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new ValidationError(`${path}[${i}]`, 'Expected an object with message and blocks')
+    }
+    validateJsonObject(entry.message, `${path}[${i}].message`)
+    validateIdField(entry.message as any, `${path}[${i}].message`)
+    const blocks = validateJsonObjectArray(entry.blocks, `${path}[${i}].blocks`)
+    for (let j = 0; j < blocks.length; j++) {
+      validateIdField(blocks[j], `${path}[${i}].blocks[${j}]`)
+      validateMessageIdField(blocks[j], `${path}[${i}].blocks[${j}]`)
+    }
+  }
+}
+
+const cloneMessagesToTopicContract: ChatDbContract = {
+  allowedKeys: keySet('targetTopicId', 'assistantId', 'entries'),
+  validate(value: unknown): void {
+    validateRequest(value, cloneMessagesToTopicContract.allowedKeys)
+    const req = value as CloneMessagesToTopicRequest
+    validateNonEmptyString(req.targetTopicId, 'request.targetTopicId')
+    if (req.assistantId !== undefined) {
+      validateNonEmptyString(req.assistantId, 'request.assistantId')
+    }
+    validateEntries(req.entries, 'request.entries')
+  },
+  validateResult: voidResult('chatdb:clone-messages-to-topic')
+}
+
+const resetMessagesForResendContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'messageIds', 'blockIdsToDelete'),
+  validate(value: unknown): void {
+    validateRequest(value, resetMessagesForResendContract.allowedKeys)
+    const req = value as ResetMessagesForResendRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateStringArray(req.messageIds, 'request.messageIds')
+    validateStringArray(req.blockIdsToDelete, 'request.blockIdsToDelete')
+  },
+  validateResult: fileCleanupResultValidator('chatdb:reset-messages-for-resend')
+}
+
+const deleteMessagesWithSegmentsContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'messageIds'),
+  validate(value: unknown): void {
+    validateRequest(value, deleteMessagesWithSegmentsContract.allowedKeys)
+    const req = value as DeleteMessagesWithSegmentsRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateStringArray(req.messageIds, 'request.messageIds')
+  },
+  validateResult: fileCleanupResultValidator('chatdb:delete-messages-with-segments')
+}
+
+const pasteMessagesToTopicContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'entries', 'insertIndex'),
+  validate(value: unknown): void {
+    validateRequest(value, pasteMessagesToTopicContract.allowedKeys)
+    const req = value as PasteMessagesToTopicRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateEntries(req.entries, 'request.entries')
+    if (req.insertIndex !== undefined) {
+      validateIndex(req.insertIndex, 'request.insertIndex')
+    }
+  },
+  validateResult: fileCleanupResultValidator('chatdb:paste-messages-to-topic')
+}
+
+const clearTopicWithSegmentsContract: ChatDbContract = {
+  allowedKeys: keySet('topicId'),
+  validate(value: unknown): void {
+    validateRequest(value, clearTopicWithSegmentsContract.allowedKeys)
+    const req = value as ClearTopicWithSegmentsRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+  },
+  validateResult: fileCleanupResultValidator('chatdb:clear-topic-with-segments')
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.1B-2: Search contract
+// ---------------------------------------------------------------------------
+
+/** Allowed keys for SearchMessagesResponse success value. */
+const SEARCH_RESPONSE_VALUE_KEYS = new Set(['items', 'nextCursor', 'hasMore', 'totalCount'])
+
+/** Allowed keys for each SearchResultItem. */
+const SEARCH_RESULT_ITEM_KEYS = new Set([
+  'blockId',
+  'messageId',
+  'topicId',
+  'topicName',
+  'rawContent',
+  'messageCreatedAt'
+])
+
+const searchMessagesContract: ChatDbContract = {
+  allowedKeys: keySet('keywords', 'matchMode', 'sortOrder', 'pageSize', 'cursor'),
+  validate(value: unknown): void {
+    validateRequest(value, searchMessagesContract.allowedKeys)
+    const req = value as SearchMessagesRequest
+    // keywords: must be a string (can be empty for no-op, but must be string)
+    if (typeof req.keywords !== 'string') {
+      throw new ValidationError('request.keywords', 'Expected string')
+    }
+    if (req.keywords.length > 1000) {
+      throw new ValidationError('request.keywords', 'Keywords too long (max 1000 chars)')
+    }
+    // matchMode: must be one of the allowed values
+    if (req.matchMode !== 'whole-word' && req.matchMode !== 'substring') {
+      throw new ValidationError('request.matchMode', 'Expected "whole-word" or "substring"')
+    }
+    // sortOrder: must be one of the allowed values
+    if (req.sortOrder !== 'newest' && req.sortOrder !== 'oldest') {
+      throw new ValidationError('request.sortOrder', 'Expected "newest" or "oldest"')
+    }
+    // pageSize: optional, must be positive integer if provided
+    if (req.pageSize !== undefined && req.pageSize !== null) {
+      if (
+        typeof req.pageSize !== 'number' ||
+        !Number.isFinite(req.pageSize) ||
+        !Number.isInteger(req.pageSize) ||
+        req.pageSize < 1
+      ) {
+        throw new ValidationError('request.pageSize', 'Expected a positive integer')
+      }
+      if (req.pageSize > 100) {
+        throw new ValidationError('request.pageSize', 'Page size must be at most 100')
+      }
+    }
+    // cursor: optional non-empty base64url string (canonical opaque format).
+    // Malformed cursors are rejected here; deeper decode validation happens
+    // in the repository and also fails with a validation error (never resets).
+    if (req.cursor !== undefined && req.cursor !== null) {
+      if (typeof req.cursor !== 'string' || req.cursor.length === 0) {
+        throw new ValidationError('request.cursor', 'Expected non-empty string cursor')
+      }
+      if (!/^[A-Za-z0-9_-]+$/.test(req.cursor)) {
+        throw new ValidationError('request.cursor', 'Cursor must be canonical base64url format')
+      }
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:search-messages')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError('result.value', '[chatdb:search-messages] Expected response object')
+      }
+      const v = value as Record<string, unknown>
+      // Reject unknown keys in the response value
+      for (const key of Object.keys(v)) {
+        if (!SEARCH_RESPONSE_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:search-messages] Unknown key in response value: "${key}"`
+          )
+        }
+      }
+      if (!Array.isArray(v.items)) {
+        throw new ValidationError('result.value.items', '[chatdb:search-messages] Expected items array')
+      }
+      if (typeof v.hasMore !== 'boolean') {
+        throw new ValidationError('result.value.hasMore', '[chatdb:search-messages] Expected boolean hasMore')
+      }
+      // totalCount: finite non-negative integer
+      if (
+        typeof v.totalCount !== 'number' ||
+        !Number.isFinite(v.totalCount) ||
+        !Number.isInteger(v.totalCount) ||
+        v.totalCount < 0
+      ) {
+        throw new ValidationError(
+          'result.value.totalCount',
+          '[chatdb:search-messages] Expected finite non-negative integer totalCount'
+        )
+      }
+      // nextCursor: optional canonical opaque cursor (non-empty base64url string)
+      if (v.nextCursor !== undefined) {
+        if (typeof v.nextCursor !== 'string' || v.nextCursor.length === 0 || !/^[A-Za-z0-9_-]+$/.test(v.nextCursor)) {
+          throw new ValidationError(
+            'result.value.nextCursor',
+            '[chatdb:search-messages] Expected canonical non-empty base64url nextCursor'
+          )
+        }
+      }
+      // Validate each SearchResultItem (full shape, unknown keys rejected)
+      for (let i = 0; i < v.items.length; i++) {
+        const item = v.items[i] as Record<string, unknown>
+        if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+          throw new ValidationError(
+            `result.value.items[${i}]`,
+            '[chatdb:search-messages] Expected SearchResultItem object'
+          )
+        }
+        for (const key of Object.keys(item)) {
+          if (!SEARCH_RESULT_ITEM_KEYS.has(key)) {
+            throw new ValidationError(
+              `result.value.items[${i}].${key}`,
+              `[chatdb:search-messages] Unknown key in SearchResultItem: "${key}"`
+            )
+          }
+        }
+        if (typeof item.blockId !== 'string' || item.blockId.length === 0) {
+          throw new ValidationError(
+            `result.value.items[${i}].blockId`,
+            '[chatdb:search-messages] Expected non-empty string blockId'
+          )
+        }
+        if (typeof item.messageId !== 'string' || item.messageId.length === 0) {
+          throw new ValidationError(
+            `result.value.items[${i}].messageId`,
+            '[chatdb:search-messages] Expected non-empty string messageId'
+          )
+        }
+        if (typeof item.topicId !== 'string' || item.topicId.length === 0) {
+          throw new ValidationError(
+            `result.value.items[${i}].topicId`,
+            '[chatdb:search-messages] Expected non-empty string topicId'
+          )
+        }
+        // topicName: string | null
+        if (item.topicName !== null && typeof item.topicName !== 'string') {
+          throw new ValidationError(
+            `result.value.items[${i}].topicName`,
+            '[chatdb:search-messages] Expected string|null topicName'
+          )
+        }
+        // rawContent: string
+        if (typeof item.rawContent !== 'string') {
+          throw new ValidationError(
+            `result.value.items[${i}].rawContent`,
+            '[chatdb:search-messages] Expected string rawContent'
+          )
+        }
+        // messageCreatedAt: string | null
+        if (item.messageCreatedAt !== null && typeof item.messageCreatedAt !== 'string') {
+          throw new ValidationError(
+            `result.value.items[${i}].messageCreatedAt`,
+            '[chatdb:search-messages] Expected string|null messageCreatedAt'
+          )
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Contract registry — exact channel → contract mapping
 // ---------------------------------------------------------------------------
 
@@ -590,7 +1076,22 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   // Phase 5.1A: file reference queries (read-only)
   'chatdb:list-file-refs-by-file': listFileRefsByFileContract,
   'chatdb:count-file-refs-by-file': countFileRefsByFileContract,
-  'chatdb:list-blocks-by-file': listBlocksByFileContract
+  'chatdb:list-blocks-by-file': listBlocksByFileContract,
+  // Phase 5.1B: topic lifecycle
+  'chatdb:update-topic-metadata': updateTopicMetadataContract,
+  'chatdb:soft-delete-topic': softDeleteTopicContract,
+  'chatdb:restore-topic': restoreTopicContract,
+  'chatdb:list-trash-topics': listTrashTopicsContract,
+  'chatdb:hard-delete-topic': hardDeleteTopicContract,
+  'chatdb:purge-expired-topics': purgeExpiredTopicsContract,
+  // Phase 5.1B: compound mutations
+  'chatdb:clone-messages-to-topic': cloneMessagesToTopicContract,
+  'chatdb:reset-messages-for-resend': resetMessagesForResendContract,
+  'chatdb:delete-messages-with-segments': deleteMessagesWithSegmentsContract,
+  'chatdb:paste-messages-to-topic': pasteMessagesToTopicContract,
+  'chatdb:clear-topic-with-segments': clearTopicWithSegmentsContract,
+  // Phase 5.1B-2: search
+  'chatdb:search-messages': searchMessagesContract
 })
 
 /**

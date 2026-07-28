@@ -381,6 +381,24 @@ export enum IpcChannel {
   ChatDb_CountFileRefsByFile = 'chatdb:count-file-refs-by-file',
   ChatDb_ListBlocksByFile = 'chatdb:list-blocks-by-file',
 
+  // Phase 5.1B — topic lifecycle
+  ChatDb_UpdateTopicMetadata = 'chatdb:update-topic-metadata',
+  ChatDb_SoftDeleteTopic = 'chatdb:soft-delete-topic',
+  ChatDb_RestoreTopic = 'chatdb:restore-topic',
+  ChatDb_ListTrashTopics = 'chatdb:list-trash-topics',
+  ChatDb_HardDeleteTopic = 'chatdb:hard-delete-topic',
+  ChatDb_PurgeExpiredTopics = 'chatdb:purge-expired-topics',
+
+  // Phase 5.1B — compound mutations
+  ChatDb_CloneMessagesToTopic = 'chatdb:clone-messages-to-topic',
+  ChatDb_ResetMessagesForResend = 'chatdb:reset-messages-for-resend',
+  ChatDb_DeleteMessagesWithSegments = 'chatdb:delete-messages-with-segments',
+  ChatDb_PasteMessagesToTopic = 'chatdb:paste-messages-to-topic',
+  ChatDb_ClearTopicWithSegments = 'chatdb:clear-topic-with-segments',
+
+  // Phase 5.1B-2 — search
+  ChatDb_SearchMessages = 'chatdb:search-messages',
+
   // ChatImport — import-only IPC for Phase 4 source-reader pipeline.
   // Independent of the 23 ChatDb_* channels. Prefix: chat-import:*
   ChatImport_Ready = 'chat-import:ready',

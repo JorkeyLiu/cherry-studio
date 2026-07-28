@@ -40,7 +40,8 @@ const { mockLogger, mockSqliteInstances, MockDatabase, appliedMigrationKeys } = 
           return null
         }),
         close: vi.fn(),
-        backup: vi.fn(() => ({ run: vi.fn() }))
+        backup: vi.fn(() => ({ run: vi.fn() })),
+        function: vi.fn()
       }
       return instance
     })
@@ -683,10 +684,11 @@ describe('BetterSqlite3BackupAdapter', () => {
 // ---------------------------------------------------------------------------
 
 describe('Migration registry', () => {
-  it('should have exactly two migrations (001 + 002)', () => {
-    expect(MIGRATIONS).toHaveLength(2)
+  it('should have exactly three migrations (001 + 002 + 003)', () => {
+    expect(MIGRATIONS).toHaveLength(3)
     expect(MIGRATIONS[0].key).toBe('001_initial_schema')
     expect(MIGRATIONS[1].key).toBe('002_corrective_schema')
+    expect(MIGRATIONS[2].key).toBe('003_fts5_normalized_search')
   })
 
   it('001_initial_schema should have SQL statements', () => {
