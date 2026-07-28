@@ -2,7 +2,7 @@
  * SqliteMessageDataSource — SQLite-backed implementation of MessageDataSource.
  *
  * Routes all operations through the preload `window.api.chatDb` bridge
- * to Main-side ChatDbAggregateService via 14 named IPC methods.
+ * to Main-side ChatDbAggregateService via 23 named IPC methods.
  *
  * Design:
  * - Constructor injection of a narrow typed ChatDbApi; defaults to window.api.chatDb.
@@ -24,20 +24,36 @@ import type {
   ChatDbError,
   ChatDbResult,
   ClearMessagesRequest,
+  CountFileRefsByFileRequest,
+  CountFileRefsByFileResponse,
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteSegmentRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   FetchMessagesResponse,
   GetRawTopicRequest,
   GetRawTopicResponse,
   JsonObject,
+  ListBlocksByFileRequest,
+  ListBlocksByFileResponse,
+  ListFileRefsByFileRequest,
+  ListFileRefsByFileResponse,
+  ListSegmentsRequest,
+  ListSegmentsResponse,
+  ReorderMessagesRequest,
+  ReplaceSegmentMembershipRequest,
+  ReplaceSegmentMembershipResponse,
   TopicExistsRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
-  UpdateSingleBlockRequest
+  UpdateSegmentMetadataRequest,
+  UpdateSegmentMetadataResponse,
+  UpdateSingleBlockRequest,
+  UpsertSegmentRequest,
+  UpsertSegmentResponse
 } from '@shared/chatDb'
 
 import type { MessageDataSource } from './types'
@@ -64,6 +80,20 @@ export interface ChatDbApi {
   bulkAddBlocks(request: BulkAddBlocksRequest): Promise<ChatDbResult<null>>
   deleteBlocks(request: DeleteBlocksRequest): Promise<ChatDbResult<null>>
   clearMessages(request: ClearMessagesRequest): Promise<ChatDbResult<null>>
+  // Phase 5.1A: segment commands
+  listSegments(request: ListSegmentsRequest): Promise<ChatDbResult<ListSegmentsResponse>>
+  upsertSegment(request: UpsertSegmentRequest): Promise<ChatDbResult<UpsertSegmentResponse>>
+  updateSegmentMetadata(request: UpdateSegmentMetadataRequest): Promise<ChatDbResult<UpdateSegmentMetadataResponse>>
+  deleteSegment(request: DeleteSegmentRequest): Promise<ChatDbResult<null>>
+  replaceSegmentMembership(
+    request: ReplaceSegmentMembershipRequest
+  ): Promise<ChatDbResult<ReplaceSegmentMembershipResponse>>
+  // Phase 5.1A: message reorder
+  reorderMessages(request: ReorderMessagesRequest): Promise<ChatDbResult<null>>
+  // Phase 5.1A: file reference queries (read-only)
+  listFileRefsByFile(request: ListFileRefsByFileRequest): Promise<ChatDbResult<ListFileRefsByFileResponse>>
+  countFileRefsByFile(request: CountFileRefsByFileRequest): Promise<ChatDbResult<CountFileRefsByFileResponse>>
+  listBlocksByFile(request: ListBlocksByFileRequest): Promise<ChatDbResult<ListBlocksByFileResponse>>
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +436,67 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const request: EnsureTopicRequest = cloneForWire({ topicId })
     unwrap(await this.api.ensureTopic(request))
     // No topicUpdatedAt dispatch — create-only, doesn't update existing
+  }
+
+  // ============ Segment Operations (Phase 5.1A) ============
+
+  async listSegments(topicId: string): Promise<ListSegmentsResponse> {
+    const request: ListSegmentsRequest = cloneForWire({ topicId })
+    return unwrap(await this.api.listSegments(request))
+  }
+
+  async upsertSegment(
+    segmentId: string,
+    topicId: string,
+    name: string | null | undefined,
+    messageIds: string[],
+    color?: string | null
+  ): Promise<UpsertSegmentResponse> {
+    const request: UpsertSegmentRequest = cloneForWire({ segmentId, topicId, name, messageIds, color })
+    return unwrap(await this.api.upsertSegment(request))
+  }
+
+  async updateSegmentMetadata(
+    segmentId: string,
+    name: string | null | undefined,
+    color?: string | null
+  ): Promise<UpdateSegmentMetadataResponse> {
+    const request: UpdateSegmentMetadataRequest = cloneForWire({ segmentId, name, color })
+    return unwrap(await this.api.updateSegmentMetadata(request))
+  }
+
+  async deleteSegment(segmentId: string): Promise<void> {
+    const request: DeleteSegmentRequest = cloneForWire({ segmentId })
+    unwrap(await this.api.deleteSegment(request))
+  }
+
+  async replaceSegmentMembership(segmentId: string, messageIds: string[]): Promise<ReplaceSegmentMembershipResponse> {
+    const request: ReplaceSegmentMembershipRequest = cloneForWire({ segmentId, messageIds })
+    return unwrap(await this.api.replaceSegmentMembership(request))
+  }
+
+  // ============ Message Reorder (Phase 5.1A) ============
+
+  async reorderMessages(topicId: string, messageIds: string[]): Promise<void> {
+    const request: ReorderMessagesRequest = cloneForWire({ topicId, messageIds })
+    unwrap(await this.api.reorderMessages(request))
+  }
+
+  // ============ File Reference Queries (Phase 5.1A, read-only) ============
+
+  async listFileRefsByFile(fileId: string): Promise<ListFileRefsByFileResponse> {
+    const request: ListFileRefsByFileRequest = cloneForWire({ fileId })
+    return unwrap(await this.api.listFileRefsByFile(request))
+  }
+
+  async countFileRefsByFile(fileId: string): Promise<number> {
+    const request: CountFileRefsByFileRequest = cloneForWire({ fileId })
+    return unwrap(await this.api.countFileRefsByFile(request))
+  }
+
+  async listBlocksByFile(fileId: string): Promise<ListBlocksByFileResponse> {
+    const request: ListBlocksByFileRequest = cloneForWire({ fileId })
+    return unwrap(await this.api.listBlocksByFile(request))
   }
 
   // ============ File Operations ============

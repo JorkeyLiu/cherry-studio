@@ -353,7 +353,7 @@ export enum IpcChannel {
   Analytics_TrackTokenUsage = 'analytics:track-token-usage',
 
   // ChatDB — command-oriented IPC for SQLite message persistence
-  // Maps 1:1 to MessageDataSource capabilities (renderer → Main).
+  // Maps 1:1 to ChatDbAggregateService capabilities (renderer → Main).
   // updateFileCount(s) excluded — stays in Dexie/FileManager.
   ChatDb_FetchMessages = 'chatdb:fetch-messages',
   ChatDb_GetRawTopic = 'chatdb:get-raw-topic',
@@ -370,8 +370,19 @@ export enum IpcChannel {
   ChatDb_DeleteBlocks = 'chatdb:delete-blocks',
   ChatDb_ClearMessages = 'chatdb:clear-messages',
 
+  // Phase 5.1A — segment, reorder, and file-reference relationship queries
+  ChatDb_ListSegments = 'chatdb:list-segments',
+  ChatDb_UpsertSegment = 'chatdb:upsert-segment',
+  ChatDb_UpdateSegmentMetadata = 'chatdb:update-segment-metadata',
+  ChatDb_DeleteSegment = 'chatdb:delete-segment',
+  ChatDb_ReplaceSegmentMembership = 'chatdb:replace-segment-membership',
+  ChatDb_ReorderMessages = 'chatdb:reorder-messages',
+  ChatDb_ListFileRefsByFile = 'chatdb:list-file-refs-by-file',
+  ChatDb_CountFileRefsByFile = 'chatdb:count-file-refs-by-file',
+  ChatDb_ListBlocksByFile = 'chatdb:list-blocks-by-file',
+
   // ChatImport — import-only IPC for Phase 4 source-reader pipeline.
-  // Independent of the 14 ChatDb_* channels. Prefix: chat-import:*
+  // Independent of the 23 ChatDb_* channels. Prefix: chat-import:*
   ChatImport_Ready = 'chat-import:ready',
   ChatImport_Discover = 'chat-import:discover',
   ChatImport_ReadPage = 'chat-import:read-page',

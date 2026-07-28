@@ -1,7 +1,7 @@
 /**
  * ChatDb IPC handler registration.
  *
- * Registers exactly 14 fixed IPC handlers matching the ChatDb IpcChannel entries.
+ * Registers exactly 23 fixed IPC handlers matching the ChatDb IpcChannel entries.
  * Each handler:
  * 1. Validates the request using the shared contract validators.
  * 2. Delegates to ChatDbAggregateService.
@@ -13,7 +13,7 @@
  *
  * Design:
  * - Dedicated module invoked from central src/main/ipc.ts.
- * - Exactly 14 channels; no execute/query/repository CRUD.
+ * - Exactly 23 channels; no execute/query/repository CRUD.
  * - No implicit init and no fallback.
  * - Returns disposer/removeHandler for lifecycle management.
  * - Re-registration is safe: a new call disposes the prior registration
@@ -30,17 +30,26 @@ import type {
   ChatDbChannel,
   ChatDbResult,
   ClearMessagesRequest,
+  CountFileRefsByFileRequest,
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteSegmentRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   GetRawTopicRequest,
+  ListBlocksByFileRequest,
+  ListFileRefsByFileRequest,
+  ListSegmentsRequest,
+  ReorderMessagesRequest,
+  ReplaceSegmentMembershipRequest,
   TopicExistsRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
-  UpdateSingleBlockRequest
+  UpdateSegmentMetadataRequest,
+  UpdateSingleBlockRequest,
+  UpsertSegmentRequest
 } from '@shared/chatDb'
 import { ERR_VALIDATION, fail, validateChatDbRequest, validateChatDbResult } from '@shared/chatDb'
 import { IpcChannel } from '@shared/IpcChannel'
@@ -71,7 +80,7 @@ let activeDisposer: (() => void) | null = null
 // ---------------------------------------------------------------------------
 
 /**
- * Register all 14 ChatDb IPC handlers.
+ * Register all 23 ChatDb IPC handlers.
  *
  * Re-registration safety:
  * - If a prior registration exists, it is disposed before installing new
@@ -114,7 +123,7 @@ export function registerChatDbIpc(): () => void {
     channel: string,
     execute: (aggregate: ChatDbAggregateService, request: any) => ChatDbResult<any>
   ): void {
-    // All 14 ChatDb channels are valid ChatDbChannel values.
+    // All 23 ChatDb channels are valid ChatDbChannel values.
     // Cast once for shared validator calls.
     const chatDbChannel = channel as ChatDbChannel
 
@@ -168,7 +177,7 @@ export function registerChatDbIpc(): () => void {
   }
 
   // -------------------------------------------------------------------------
-  // Register exactly 14 handlers
+  // Register exactly 23 handlers
   // -------------------------------------------------------------------------
 
   // 1. fetch-messages
@@ -239,6 +248,51 @@ export function registerChatDbIpc(): () => void {
   // 14. clear-messages
   handleCommand(IpcChannel.ChatDb_ClearMessages, (agg, req: ClearMessagesRequest) => {
     return agg.clearMessages(req.topicId)
+  })
+
+  // 15. list-segments (Phase 5.1A)
+  handleCommand(IpcChannel.ChatDb_ListSegments, (agg, req: ListSegmentsRequest) => {
+    return agg.listSegments(req.topicId)
+  })
+
+  // 16. upsert-segment (Phase 5.1A)
+  handleCommand(IpcChannel.ChatDb_UpsertSegment, (agg, req: UpsertSegmentRequest) => {
+    return agg.upsertSegment(req.segmentId, req.topicId, req.name, req.messageIds, req.color)
+  })
+
+  // 17. update-segment-metadata (Phase 5.1A)
+  handleCommand(IpcChannel.ChatDb_UpdateSegmentMetadata, (agg, req: UpdateSegmentMetadataRequest) => {
+    return agg.updateSegmentMetadata(req.segmentId, req.name, req.color)
+  })
+
+  // 18. delete-segment (Phase 5.1A)
+  handleCommand(IpcChannel.ChatDb_DeleteSegment, (agg, req: DeleteSegmentRequest) => {
+    return agg.deleteSegment(req.segmentId)
+  })
+
+  // 19. replace-segment-membership (Phase 5.1A)
+  handleCommand(IpcChannel.ChatDb_ReplaceSegmentMembership, (agg, req: ReplaceSegmentMembershipRequest) => {
+    return agg.replaceSegmentMembership(req.segmentId, req.messageIds)
+  })
+
+  // 20. reorder-messages (Phase 5.1A)
+  handleCommand(IpcChannel.ChatDb_ReorderMessages, (agg, req: ReorderMessagesRequest) => {
+    return agg.reorderMessages(req.topicId, req.messageIds)
+  })
+
+  // 21. list-file-refs-by-file (Phase 5.1A, read-only)
+  handleCommand(IpcChannel.ChatDb_ListFileRefsByFile, (agg, req: ListFileRefsByFileRequest) => {
+    return agg.listFileRefsByFile(req.fileId)
+  })
+
+  // 22. count-file-refs-by-file (Phase 5.1A, read-only)
+  handleCommand(IpcChannel.ChatDb_CountFileRefsByFile, (agg, req: CountFileRefsByFileRequest) => {
+    return agg.countFileRefsByFile(req.fileId)
+  })
+
+  // 23. list-blocks-by-file (Phase 5.1A, read-only)
+  handleCommand(IpcChannel.ChatDb_ListBlocksByFile, (agg, req: ListBlocksByFileRequest) => {
+    return agg.listBlocksByFile(req.fileId)
   })
 
   logger.info(`Registered ${handlers.length} ChatDb IPC handlers (registration #${registrationId})`)

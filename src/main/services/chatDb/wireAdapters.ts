@@ -13,7 +13,7 @@
  * - Unknown JSON extension keys round-trip through overflow.
  */
 
-import type { JsonObject } from '@shared/chatDb'
+import type { FileReferenceWire, JsonObject, SegmentWire } from '@shared/chatDb'
 
 import { OVERFLOW_REMOVE, reconstruct, reconstructBlock } from './domain/codec'
 import type { FileReferenceData, MessageBlockData, MessageData, TopicData } from './domain/types'
@@ -367,6 +367,55 @@ function extractFileMetadata(block: MessageBlockData): FileMetadata | null {
   }
 
   return null
+}
+
+// ---------------------------------------------------------------------------
+// Segment wire adapters (Phase 5.1A)
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert a TopicSegmentData + ordered messageIds to a SegmentWire.
+ * Color is bridged from/to overflow.
+ */
+export function segmentToWire(
+  segment: {
+    id: string
+    topicId: string
+    name: string | null
+    createdAt: string | null
+    updatedAt: string | null
+    overflow: Record<string, unknown>
+  },
+  messageIds: string[]
+): SegmentWire {
+  return {
+    id: segment.id,
+    topicId: segment.topicId,
+    name: segment.name,
+    messageIds,
+    color: (segment.overflow.color as string | null) ?? undefined,
+    createdAt: segment.createdAt,
+    updatedAt: segment.updatedAt
+  }
+}
+
+// ---------------------------------------------------------------------------
+// File reference wire adapters (Phase 5.1A)
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert FileReferenceData to a wire FileReferenceWire.
+ */
+export function fileReferenceToWire(ref: FileReferenceData): FileReferenceWire {
+  return {
+    id: ref.id,
+    blockId: ref.blockId,
+    fileId: ref.fileId,
+    fileName: ref.fileName,
+    filePath: ref.filePath,
+    fileType: ref.fileType,
+    count: ref.count
+  }
 }
 
 // ---------------------------------------------------------------------------

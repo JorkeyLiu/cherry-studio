@@ -8,6 +8,7 @@ import { chatDbContracts, getContract, validateChatDbRequest, validateChatDbResu
 
 describe('chatDbContracts', () => {
   const expectedChannels = [
+    // Original 14 commands
     'chatdb:fetch-messages',
     'chatdb:get-raw-topic',
     'chatdb:topic-exists',
@@ -21,7 +22,17 @@ describe('chatDbContracts', () => {
     'chatdb:update-single-block',
     'chatdb:bulk-add-blocks',
     'chatdb:delete-blocks',
-    'chatdb:clear-messages'
+    'chatdb:clear-messages',
+    // Phase 5.1A: segment + reorder + file-reference commands
+    'chatdb:list-segments',
+    'chatdb:upsert-segment',
+    'chatdb:update-segment-metadata',
+    'chatdb:delete-segment',
+    'chatdb:replace-segment-membership',
+    'chatdb:reorder-messages',
+    'chatdb:list-file-refs-by-file',
+    'chatdb:count-file-refs-by-file',
+    'chatdb:list-blocks-by-file'
   ]
 
   it('has entries for all expected channels', () => {
@@ -208,6 +219,96 @@ describe('validateChatDbRequest — valid payloads', () => {
       })
     ).not.toThrow()
   })
+
+  // Phase 5.1A: segment commands
+  it('list-segments: { topicId }', () => {
+    expect(() => validateChatDbRequest('chatdb:list-segments', { topicId: 'topic-1' })).not.toThrow()
+  })
+
+  it('upsert-segment: minimal', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:upsert-segment', {
+        segmentId: 'seg-1',
+        topicId: 'topic-1',
+        messageIds: []
+      })
+    ).not.toThrow()
+  })
+
+  it('upsert-segment: with name, messageIds, color', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:upsert-segment', {
+        segmentId: 'seg-1',
+        topicId: 'topic-1',
+        name: 'My Segment',
+        messageIds: ['msg-1', 'msg-2'],
+        color: '#ff0000'
+      })
+    ).not.toThrow()
+  })
+
+  it('update-segment-metadata: { segmentId }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-segment-metadata', {
+        segmentId: 'seg-1'
+      })
+    ).not.toThrow()
+  })
+
+  it('update-segment-metadata: with name and color', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-segment-metadata', {
+        segmentId: 'seg-1',
+        name: 'Updated Name',
+        color: '#00ff00'
+      })
+    ).not.toThrow()
+  })
+
+  it('delete-segment: { segmentId }', () => {
+    expect(() => validateChatDbRequest('chatdb:delete-segment', { segmentId: 'seg-1' })).not.toThrow()
+  })
+
+  it('replace-segment-membership: { segmentId, messageIds }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:replace-segment-membership', {
+        segmentId: 'seg-1',
+        messageIds: ['msg-1', 'msg-2', 'msg-3']
+      })
+    ).not.toThrow()
+  })
+
+  it('replace-segment-membership: empty messageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:replace-segment-membership', {
+        segmentId: 'seg-1',
+        messageIds: []
+      })
+    ).not.toThrow()
+  })
+
+  // Phase 5.1A: message reorder
+  it('reorder-messages: { topicId, messageIds }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reorder-messages', {
+        topicId: 'topic-1',
+        messageIds: ['msg-3', 'msg-1', 'msg-2']
+      })
+    ).not.toThrow()
+  })
+
+  // Phase 5.1A: file reference queries
+  it('list-file-refs-by-file: { fileId }', () => {
+    expect(() => validateChatDbRequest('chatdb:list-file-refs-by-file', { fileId: 'file-1' })).not.toThrow()
+  })
+
+  it('count-file-refs-by-file: { fileId }', () => {
+    expect(() => validateChatDbRequest('chatdb:count-file-refs-by-file', { fileId: 'file-1' })).not.toThrow()
+  })
+
+  it('list-blocks-by-file: { fileId }', () => {
+    expect(() => validateChatDbRequest('chatdb:list-blocks-by-file', { fileId: 'file-1' })).not.toThrow()
+  })
 })
 
 // ===========================================================================
@@ -335,6 +436,103 @@ describe('validateChatDbRequest — invalid payloads', () => {
         updates: { content: undefined }
       })
     ).toThrow(ValidationError)
+  })
+
+  // Phase 5.1A: segment command invalid payloads
+  it('list-segments: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:list-segments', {})).toThrow(ValidationError)
+  })
+
+  it('upsert-segment: rejects missing segmentId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:upsert-segment', {
+        topicId: 't1',
+        messageIds: []
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('upsert-segment: rejects missing topicId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:upsert-segment', {
+        segmentId: 'seg-1',
+        messageIds: []
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('upsert-segment: rejects non-array messageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:upsert-segment', {
+        segmentId: 'seg-1',
+        topicId: 't1',
+        messageIds: 'not-array'
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('upsert-segment: rejects non-string in messageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:upsert-segment', {
+        segmentId: 'seg-1',
+        topicId: 't1',
+        messageIds: [42]
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('update-segment-metadata: rejects missing segmentId', () => {
+    expect(() => validateChatDbRequest('chatdb:update-segment-metadata', {})).toThrow(ValidationError)
+  })
+
+  it('delete-segment: rejects missing segmentId', () => {
+    expect(() => validateChatDbRequest('chatdb:delete-segment', {})).toThrow(ValidationError)
+  })
+
+  it('replace-segment-membership: rejects missing segmentId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:replace-segment-membership', {
+        messageIds: []
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('replace-segment-membership: rejects non-array messageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:replace-segment-membership', {
+        segmentId: 'seg-1',
+        messageIds: 'not-array'
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reorder-messages: rejects missing topicId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reorder-messages', {
+        messageIds: []
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reorder-messages: rejects non-array messageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reorder-messages', {
+        topicId: 't1',
+        messageIds: 'not-array'
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('list-file-refs-by-file: rejects missing fileId', () => {
+    expect(() => validateChatDbRequest('chatdb:list-file-refs-by-file', {})).toThrow(ValidationError)
+  })
+
+  it('count-file-refs-by-file: rejects missing fileId', () => {
+    expect(() => validateChatDbRequest('chatdb:count-file-refs-by-file', {})).toThrow(ValidationError)
+  })
+
+  it('list-blocks-by-file: rejects missing fileId', () => {
+    expect(() => validateChatDbRequest('chatdb:list-blocks-by-file', {})).toThrow(ValidationError)
   })
 })
 
@@ -623,6 +821,105 @@ describe('validateChatDbResult — valid success envelopes', () => {
   it('clear-messages: null value', () => {
     expect(() => validateChatDbResult('chatdb:clear-messages', { ok: true, value: null })).not.toThrow()
   })
+
+  // Phase 5.1A: segment commands
+  it('list-segments: empty array', () => {
+    expect(() => validateChatDbResult('chatdb:list-segments', { ok: true, value: [] })).not.toThrow()
+  })
+
+  it('list-segments: array with segments', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-segments', {
+        ok: true,
+        value: [{ id: 'seg-1', topicId: 't1', name: 'Seg', messageIds: ['m1', 'm2'], createdAt: null, updatedAt: null }]
+      })
+    ).not.toThrow()
+  })
+
+  it('upsert-segment: segment wire value', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:upsert-segment', {
+        ok: true,
+        value: {
+          id: 'seg-1',
+          topicId: 't1',
+          name: 'Seg',
+          messageIds: ['m1'],
+          color: '#ff0000',
+          createdAt: null,
+          updatedAt: null
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('update-segment-metadata: segment wire value', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-segment-metadata', {
+        ok: true,
+        value: { id: 'seg-1', topicId: 't1', name: 'Updated', messageIds: [], createdAt: null, updatedAt: null }
+      })
+    ).not.toThrow()
+  })
+
+  it('delete-segment: null value', () => {
+    expect(() => validateChatDbResult('chatdb:delete-segment', { ok: true, value: null })).not.toThrow()
+  })
+
+  it('replace-segment-membership: segment wire value', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:replace-segment-membership', {
+        ok: true,
+        value: { id: 'seg-1', topicId: 't1', name: 'Seg', messageIds: ['m1'], createdAt: null, updatedAt: null }
+      })
+    ).not.toThrow()
+  })
+
+  it('replace-segment-membership: null (deleted)', () => {
+    expect(() => validateChatDbResult('chatdb:replace-segment-membership', { ok: true, value: null })).not.toThrow()
+  })
+
+  // Phase 5.1A: message reorder
+  it('reorder-messages: null value', () => {
+    expect(() => validateChatDbResult('chatdb:reorder-messages', { ok: true, value: null })).not.toThrow()
+  })
+
+  // Phase 5.1A: file reference queries
+  it('list-file-refs-by-file: empty array', () => {
+    expect(() => validateChatDbResult('chatdb:list-file-refs-by-file', { ok: true, value: [] })).not.toThrow()
+  })
+
+  it('list-file-refs-by-file: array with refs', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-file-refs-by-file', {
+        ok: true,
+        value: [
+          { id: 'fr-1', blockId: 'b1', fileId: 'f1', fileName: 'test.pdf', filePath: null, fileType: null, count: 1 }
+        ]
+      })
+    ).not.toThrow()
+  })
+
+  it('count-file-refs-by-file: number value', () => {
+    expect(() => validateChatDbResult('chatdb:count-file-refs-by-file', { ok: true, value: 5 })).not.toThrow()
+  })
+
+  it('count-file-refs-by-file: zero', () => {
+    expect(() => validateChatDbResult('chatdb:count-file-refs-by-file', { ok: true, value: 0 })).not.toThrow()
+  })
+
+  it('list-blocks-by-file: empty array', () => {
+    expect(() => validateChatDbResult('chatdb:list-blocks-by-file', { ok: true, value: [] })).not.toThrow()
+  })
+
+  it('list-blocks-by-file: array with blocks', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-blocks-by-file', {
+        ok: true,
+        value: [{ id: 'b1', messageId: 'm1', type: 'file' }]
+      })
+    ).not.toThrow()
+  })
 })
 
 // ===========================================================================
@@ -824,6 +1121,7 @@ describe('validateChatDbResult — invalid envelopes', () => {
 
 describe('coverage consistency', () => {
   const allChannels = [
+    // Original 14 commands
     'chatdb:fetch-messages',
     'chatdb:get-raw-topic',
     'chatdb:topic-exists',
@@ -837,7 +1135,17 @@ describe('coverage consistency', () => {
     'chatdb:update-single-block',
     'chatdb:bulk-add-blocks',
     'chatdb:delete-blocks',
-    'chatdb:clear-messages'
+    'chatdb:clear-messages',
+    // Phase 5.1A: segment + reorder + file-reference commands
+    'chatdb:list-segments',
+    'chatdb:upsert-segment',
+    'chatdb:update-segment-metadata',
+    'chatdb:delete-segment',
+    'chatdb:replace-segment-membership',
+    'chatdb:reorder-messages',
+    'chatdb:list-file-refs-by-file',
+    'chatdb:count-file-refs-by-file',
+    'chatdb:list-blocks-by-file'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {
@@ -859,7 +1167,7 @@ describe('coverage consistency', () => {
   })
 
   it('all channels are tested for result validation (positive)', () => {
-    // This test documents that all 14 channels have result validation tests above.
+    // This test documents that all 23 channels have result validation tests above.
     // If a new channel is added, this list must be updated.
     const testedChannels = new Set(allChannels)
     for (const channel of Object.keys(chatDbContracts)) {

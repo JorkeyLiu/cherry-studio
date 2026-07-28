@@ -1,7 +1,7 @@
 /**
  * ChatDbAggregateService Tests — real better-sqlite3, no mocks.
  *
- * Covers all 14 commands plus transaction rollback across
+ * Covers all 23 commands plus transaction rollback across
  * messages/blocks/references/segments.
  */
 
@@ -1147,6 +1147,372 @@ describe('ChatDbAggregateService', () => {
 
       // This should NOT throw "cannot bind object to TEXT column"
       expect(() => agg.appendMessage(topicId, msgJson as any, [])).not.toThrow()
+    })
+  })
+
+  // =========================================================================
+  // Phase 5.1A: listSegments
+  // =========================================================================
+
+  describe('listSegments', () => {
+    it('returns empty array for topic with no segments', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+      const result = agg.listSegments(topicId)
+      expect(result.ok).toBe(true)
+      expect(okValue(result)).toEqual([])
+    })
+
+    it('lists segments in deterministic sortOrder order with messageIds', () => {
+      const topicId = `t-${uid()}`
+      const msg1 = makeMessageJson(topicId)
+      const msg2 = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg1 as any, [])
+      agg.appendMessage(topicId, msg2 as any, [])
+
+      agg.upsertSegment('seg-1', topicId, 'Seg1', [msg1.id as string], null)
+      agg.upsertSegment('seg-2', topicId, 'Seg2', [msg2.id as string], null)
+
+      const result = agg.listSegments(topicId)
+      expect(result.ok).toBe(true)
+      const segs = okValue(result)
+      expect(segs).toHaveLength(2)
+      // sortOrder deterministic
+      expect(segs[0].id).toBe('seg-1')
+      expect(segs[1].id).toBe('seg-2')
+      expect(segs[0].messageIds).toEqual([msg1.id])
+    })
+
+    it('preserves color from overflow', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg as any, [])
+      agg.upsertSegment('seg-1', topicId, 'Seg1', [msg.id as string], '#ff0000')
+
+      const result = agg.listSegments(topicId)
+      expect(result.ok).toBe(true)
+      expect(okValue(result)[0].color).toBe('#ff0000')
+    })
+  })
+
+  // =========================================================================
+  // Phase 5.1A: upsertSegment
+  // =========================================================================
+
+  describe('upsertSegment', () => {
+    it('creates a new segment with metadata and membership', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg as any, [])
+
+      const result = agg.upsertSegment('seg-1', topicId, 'My Segment', [msg.id as string], '#00ff00')
+      expect(result.ok).toBe(true)
+      const wire = okValue(result)
+      expect(wire.id).toBe('seg-1')
+      expect(wire.topicId).toBe(topicId)
+      expect(wire.name).toBe('My Segment')
+      expect(wire.messageIds).toEqual([msg.id])
+      expect(wire.color).toBe('#00ff00')
+    })
+
+    it('updates metadata on existing segment', () => {
+      const topicId = `t-${uid()}`
+      agg.upsertSegment('seg-1', topicId, 'Original', [], null)
+
+      const result = agg.upsertSegment('seg-1', topicId, 'Updated', [], '#aabbcc')
+      expect(result.ok).toBe(true)
+      expect(okValue(result).name).toBe('Updated')
+      expect(okValue(result).color).toBe('#aabbcc')
+    })
+
+    it('replaces message membership atomically', () => {
+      const topicId = `t-${uid()}`
+      const msg1 = makeMessageJson(topicId)
+      const msg2 = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg1 as any, [])
+      agg.appendMessage(topicId, msg2 as any, [])
+
+      agg.upsertSegment('seg-1', topicId, 'Seg', [msg1.id as string], null)
+      const result = agg.upsertSegment('seg-1', topicId, 'Seg', [msg2.id as string, msg1.id as string], null)
+      expect(result.ok).toBe(true)
+      expect(okValue(result).messageIds).toEqual([msg2.id, msg1.id])
+    })
+
+    it('empty membership deletes the segment per repository semantics', () => {
+      const topicId = `t-${uid()}`
+      agg.upsertSegment('seg-1', topicId, 'Seg', [], null)
+
+      const result = agg.upsertSegment('seg-1', topicId, 'Seg', [], null)
+      expect(result.ok).toBe(true)
+      // Segment deleted — wire shows empty
+      expect(okValue(result).messageIds).toEqual([])
+      expect(okValue(result).createdAt).toBeNull()
+    })
+
+    it('ensures topic exists', () => {
+      const topicId = `t-${uid()}`
+      const result = agg.upsertSegment('seg-1', topicId, 'Seg', [], null)
+      expect(result.ok).toBe(true)
+      expect(okValue(agg.topicExists(topicId))).toBe(true)
+    })
+
+    it('unknown extra fields preserved in overflow round-trip', () => {
+      const topicId = `t-${uid()}`
+      const result = agg.upsertSegment('seg-1', topicId, 'Seg', [], '#ff0000')
+      expect(result.ok).toBe(true)
+      expect(okValue(result).color).toBe('#ff0000')
+    })
+  })
+
+  // =========================================================================
+  // Phase 5.1A: updateSegmentMetadata
+  // =========================================================================
+
+  describe('updateSegmentMetadata', () => {
+    it('updates name and color on existing segment', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg as any, [])
+      agg.upsertSegment('seg-1', topicId, 'Original', [msg.id as string], null)
+
+      const result = agg.updateSegmentMetadata('seg-1', 'New Name', '#aabbcc')
+      expect(result.ok).toBe(true)
+      const wire = okValue(result)
+      expect(wire.name).toBe('New Name')
+      expect(wire.color).toBe('#aabbcc')
+    })
+
+    it('returns ERR_NOT_FOUND for missing segment', () => {
+      const result = agg.updateSegmentMetadata('nonexistent', 'name', null)
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.error.code).toBe('NOT_FOUND')
+      }
+    })
+
+    it('partial update — only name', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg as any, [])
+      agg.upsertSegment('seg-1', topicId, 'Original', [msg.id as string], '#ff0000')
+
+      const result = agg.updateSegmentMetadata('seg-1', 'Updated', undefined)
+      expect(result.ok).toBe(true)
+      expect(okValue(result).name).toBe('Updated')
+      expect(okValue(result).color).toBe('#ff0000') // unchanged
+    })
+
+    it('partial update — only color', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg as any, [])
+      agg.upsertSegment('seg-1', topicId, 'Original', [msg.id as string], null)
+
+      const result = agg.updateSegmentMetadata('seg-1', undefined, '#00ff00')
+      expect(result.ok).toBe(true)
+      expect(okValue(result).name).toBe('Original') // unchanged
+      expect(okValue(result).color).toBe('#00ff00')
+    })
+  })
+
+  // =========================================================================
+  // Phase 5.1A: deleteSegment
+  // =========================================================================
+
+  describe('deleteSegment', () => {
+    it('deletes an existing segment', () => {
+      const topicId = `t-${uid()}`
+      agg.upsertSegment('seg-1', topicId, 'Seg', [], null)
+
+      const result = agg.deleteSegment('seg-1')
+      expect(result.ok).toBe(true)
+
+      const listed = agg.listSegments(topicId)
+      expect(okValue(listed)).toHaveLength(0)
+    })
+
+    it('no-op for missing segment', () => {
+      const result = agg.deleteSegment('nonexistent')
+      expect(result.ok).toBe(true)
+    })
+  })
+
+  // =========================================================================
+  // Phase 5.1A: replaceSegmentMembership
+  // =========================================================================
+
+  describe('replaceSegmentMembership', () => {
+    it('replaces membership and returns updated wire', () => {
+      const topicId = `t-${uid()}`
+      const msg1 = makeMessageJson(topicId)
+      const msg2 = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg1 as any, [])
+      agg.appendMessage(topicId, msg2 as any, [])
+      agg.upsertSegment('seg-1', topicId, 'Seg', [msg1.id as string], null)
+
+      const result = agg.replaceSegmentMembership('seg-1', [msg2.id as string, msg1.id as string])
+      expect(result.ok).toBe(true)
+      expect(okValue(result)!.messageIds).toEqual([msg2.id, msg1.id])
+    })
+
+    it('empty membership deletes the segment, returns null', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg as any, [])
+      agg.upsertSegment('seg-1', topicId, 'Seg', [msg.id as string], null)
+
+      const result = agg.replaceSegmentMembership('seg-1', [])
+      expect(result.ok).toBe(true)
+      expect(okValue(result)).toBeNull()
+    })
+
+    it('rollback on error preserves original membership', () => {
+      const topicId = `t-${uid()}`
+      const msg1 = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg1 as any, [])
+      agg.upsertSegment('seg-1', topicId, 'Seg', [msg1.id as string], null)
+
+      // Try to add a message that doesn't belong to the topic — should throw
+      const result = agg.replaceSegmentMembership('seg-1', ['nonexistent-msg'])
+      expect(result.ok).toBe(false)
+
+      // Original membership preserved
+      const listResult = agg.listSegments(topicId)
+      expect(okValue(listResult)[0].messageIds).toEqual([msg1.id])
+    })
+  })
+
+  // =========================================================================
+  // Phase 5.1A: reorderMessages
+  // =========================================================================
+
+  describe('reorderMessages', () => {
+    it('reorders messages in specified dense order', () => {
+      const topicId = `t-${uid()}`
+      const msg1 = makeMessageJson(topicId)
+      const msg2 = makeMessageJson(topicId)
+      const msg3 = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg1 as any, [])
+      agg.appendMessage(topicId, msg2 as any, [])
+      agg.appendMessage(topicId, msg3 as any, [])
+
+      const result = agg.reorderMessages(topicId, [msg3.id as string, msg1.id as string, msg2.id as string])
+      expect(result.ok).toBe(true)
+
+      const fetched = agg.fetchMessages(topicId)
+      expect(okValue(fetched).messages.map((m) => m.id)).toEqual([msg3.id, msg1.id, msg2.id])
+    })
+
+    it('rejects exact membership + dense order violation', () => {
+      const topicId = `t-${uid()}`
+      const msg1 = makeMessageJson(topicId)
+      const msg2 = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg1 as any, [])
+      agg.appendMessage(topicId, msg2 as any, [])
+
+      // Missing msg2 — not exact membership
+      const result = agg.reorderMessages(topicId, [msg1.id as string])
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.error.code).toMatch(/CONFLICT|IDENTITY|STORAGE/)
+      }
+    })
+
+    it('read queries do not mutate state', () => {
+      const topicId = `t-${uid()}`
+      const msg1 = makeMessageJson(topicId)
+      const msg2 = makeMessageJson(topicId)
+      agg.appendMessage(topicId, msg1 as any, [])
+      agg.appendMessage(topicId, msg2 as any, [])
+
+      // listSegments is read-only, should not change message order
+      agg.listSegments(topicId)
+      const fetched = agg.fetchMessages(topicId)
+      expect(okValue(fetched).messages.map((m) => m.id)).toEqual([msg1.id, msg2.id])
+    })
+  })
+
+  // =========================================================================
+  // Phase 5.1A: file reference queries (read-only)
+  // =========================================================================
+
+  describe('file reference queries (read-only)', () => {
+    it('listFileRefsByFile returns refs after seeded writes', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      const fileBlock = makeBlockJson(msg.id as string, 'file', {
+        file: { id: 'file-1', name: 'test.pdf', path: '/test.pdf', type: 'application/pdf' }
+      })
+      agg.appendMessage(topicId, msg as any, [fileBlock as any])
+
+      const result = agg.listFileRefsByFile('file-1')
+      expect(result.ok).toBe(true)
+      const refs = okValue(result)
+      expect(refs.length).toBeGreaterThanOrEqual(1)
+      expect(refs[0].fileId).toBe('file-1')
+    })
+
+    it('listFileRefsByFile returns empty for unknown fileId', () => {
+      const result = agg.listFileRefsByFile('nonexistent')
+      expect(result.ok).toBe(true)
+      expect(okValue(result)).toEqual([])
+    })
+
+    it('countFileRefsByFile returns correct count', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      const fileBlock = makeBlockJson(msg.id as string, 'file', {
+        file: { id: 'file-1', name: 'test.pdf', path: '/test.pdf', type: 'application/pdf' }
+      })
+      agg.appendMessage(topicId, msg as any, [fileBlock as any])
+
+      const result = agg.countFileRefsByFile('file-1')
+      expect(result.ok).toBe(true)
+      expect(okValue(result)).toBeGreaterThanOrEqual(1)
+    })
+
+    it('countFileRefsByFile returns 0 for unknown fileId', () => {
+      const result = agg.countFileRefsByFile('nonexistent')
+      expect(result.ok).toBe(true)
+      expect(okValue(result)).toBe(0)
+    })
+
+    it('listBlocksByFile returns blocks after seeded writes', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      const fileBlock = makeBlockJson(msg.id as string, 'file', {
+        file: { id: 'file-1', name: 'test.pdf', path: '/test.pdf', type: 'application/pdf' }
+      })
+      agg.appendMessage(topicId, msg as any, [fileBlock as any])
+
+      const result = agg.listBlocksByFile('file-1')
+      expect(result.ok).toBe(true)
+      const blocks = okValue(result)
+      expect(blocks.length).toBeGreaterThanOrEqual(1)
+    })
+
+    it('listBlocksByFile returns empty for unknown fileId', () => {
+      const result = agg.listBlocksByFile('nonexistent')
+      expect(result.ok).toBe(true)
+      expect(okValue(result)).toEqual([])
+    })
+
+    it('file refs cleaned after FK cascade (block delete)', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      const fileBlock = makeBlockJson(msg.id as string, 'file', {
+        file: { id: 'file-1', name: 'test.pdf', path: '/test.pdf', type: 'application/pdf' }
+      })
+      agg.appendMessage(topicId, msg as any, [fileBlock as any])
+
+      // Verify refs exist
+      expect(okValue(agg.countFileRefsByFile('file-1'))).toBeGreaterThanOrEqual(1)
+
+      // Delete block — FK cascade removes refs
+      agg.deleteBlocks([fileBlock.id as string])
+
+      expect(okValue(agg.countFileRefsByFile('file-1'))).toBe(0)
+      expect(okValue(agg.listBlocksByFile('file-1'))).toEqual([])
     })
   })
 

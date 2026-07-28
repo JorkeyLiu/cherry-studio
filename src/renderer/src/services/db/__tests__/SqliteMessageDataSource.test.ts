@@ -2,7 +2,7 @@
  * SqliteMessageDataSource Tests — using injected API spies.
  *
  * Covers:
- * - All 14 methods map to the intended named method/request
+ * - All 23 methods map to the intended named method/request
  * - fetch forceReload omitted
  * - raw null→undefined
  * - append -1 omitted, valid index included
@@ -21,19 +21,35 @@ import type {
   BulkAddBlocksRequest,
   ChatDbResult,
   ClearMessagesRequest,
+  CountFileRefsByFileRequest,
+  CountFileRefsByFileResponse,
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteSegmentRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   FetchMessagesResponse,
   GetRawTopicRequest,
   GetRawTopicResponse,
+  ListBlocksByFileRequest,
+  ListBlocksByFileResponse,
+  ListFileRefsByFileRequest,
+  ListFileRefsByFileResponse,
+  ListSegmentsRequest,
+  ListSegmentsResponse,
+  ReorderMessagesRequest,
+  ReplaceSegmentMembershipRequest,
+  ReplaceSegmentMembershipResponse,
   TopicExistsRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
-  UpdateSingleBlockRequest
+  UpdateSegmentMetadataRequest,
+  UpdateSegmentMetadataResponse,
+  UpdateSingleBlockRequest,
+  UpsertSegmentRequest,
+  UpsertSegmentResponse
 } from '@shared/chatDb'
 import { fail, ok } from '@shared/chatDb'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -78,7 +94,21 @@ function makeApiSpy() {
     updateSingleBlock: vi.fn<(request: UpdateSingleBlockRequest) => Promise<ChatDbResult<null>>>(),
     bulkAddBlocks: vi.fn<(request: BulkAddBlocksRequest) => Promise<ChatDbResult<null>>>(),
     deleteBlocks: vi.fn<(request: DeleteBlocksRequest) => Promise<ChatDbResult<null>>>(),
-    clearMessages: vi.fn<(request: ClearMessagesRequest) => Promise<ChatDbResult<null>>>()
+    clearMessages: vi.fn<(request: ClearMessagesRequest) => Promise<ChatDbResult<null>>>(),
+    // Phase 5.1A
+    listSegments: vi.fn<(request: ListSegmentsRequest) => Promise<ChatDbResult<ListSegmentsResponse>>>(),
+    upsertSegment: vi.fn<(request: UpsertSegmentRequest) => Promise<ChatDbResult<UpsertSegmentResponse>>>(),
+    updateSegmentMetadata:
+      vi.fn<(request: UpdateSegmentMetadataRequest) => Promise<ChatDbResult<UpdateSegmentMetadataResponse>>>(),
+    deleteSegment: vi.fn<(request: DeleteSegmentRequest) => Promise<ChatDbResult<null>>>(),
+    replaceSegmentMembership:
+      vi.fn<(request: ReplaceSegmentMembershipRequest) => Promise<ChatDbResult<ReplaceSegmentMembershipResponse>>>(),
+    reorderMessages: vi.fn<(request: ReorderMessagesRequest) => Promise<ChatDbResult<null>>>(),
+    listFileRefsByFile:
+      vi.fn<(request: ListFileRefsByFileRequest) => Promise<ChatDbResult<ListFileRefsByFileResponse>>>(),
+    countFileRefsByFile:
+      vi.fn<(request: CountFileRefsByFileRequest) => Promise<ChatDbResult<CountFileRefsByFileResponse>>>(),
+    listBlocksByFile: vi.fn<(request: ListBlocksByFileRequest) => Promise<ChatDbResult<ListBlocksByFileResponse>>>()
   }
 }
 
@@ -218,6 +248,112 @@ describe('SqliteMessageDataSource', () => {
       api.clearMessages.mockResolvedValue(successResult(null))
       await ds.clearMessages('topic-1')
       expect(api.clearMessages).toHaveBeenCalledWith({ topicId: 'topic-1' })
+    })
+
+    // ---- Phase 5.1A: segment commands ----
+
+    it('listSegments calls api.listSegments with topicId', async () => {
+      api.listSegments.mockResolvedValue(successResult([]))
+      await ds.listSegments('topic-1')
+      expect(api.listSegments).toHaveBeenCalledOnce()
+      expect(api.listSegments).toHaveBeenCalledWith({ topicId: 'topic-1' })
+    })
+
+    it('upsertSegment calls api.upsertSegment with full request', async () => {
+      const segWire = {
+        id: 'seg-1',
+        topicId: 't1',
+        name: 'Seg',
+        messageIds: ['m1'],
+        color: '#ff0000',
+        createdAt: null,
+        updatedAt: null
+      }
+      api.upsertSegment.mockResolvedValue(successResult(segWire))
+      await ds.upsertSegment('seg-1', 't1', 'Seg', ['m1'], '#ff0000')
+      expect(api.upsertSegment).toHaveBeenCalledOnce()
+      const req = api.upsertSegment.mock.calls[0][0]
+      expect(req.segmentId).toBe('seg-1')
+      expect(req.topicId).toBe('t1')
+      expect(req.name).toBe('Seg')
+      expect(req.messageIds).toEqual(['m1'])
+      expect(req.color).toBe('#ff0000')
+    })
+
+    it('updateSegmentMetadata calls api.updateSegmentMetadata', async () => {
+      const segWire = { id: 'seg-1', topicId: 't1', name: 'Updated', messageIds: [], createdAt: null, updatedAt: null }
+      api.updateSegmentMetadata.mockResolvedValue(successResult(segWire))
+      await ds.updateSegmentMetadata('seg-1', 'Updated', '#00ff00')
+      expect(api.updateSegmentMetadata).toHaveBeenCalledOnce()
+      const req = api.updateSegmentMetadata.mock.calls[0][0]
+      expect(req.segmentId).toBe('seg-1')
+      expect(req.name).toBe('Updated')
+      expect(req.color).toBe('#00ff00')
+    })
+
+    it('deleteSegment calls api.deleteSegment with segmentId', async () => {
+      api.deleteSegment.mockResolvedValue(successResult(null))
+      await ds.deleteSegment('seg-1')
+      expect(api.deleteSegment).toHaveBeenCalledOnce()
+      expect(api.deleteSegment).toHaveBeenCalledWith({ segmentId: 'seg-1' })
+    })
+
+    it('replaceSegmentMembership calls api.replaceSegmentMembership', async () => {
+      const segWire = {
+        id: 'seg-1',
+        topicId: 't1',
+        name: 'Seg',
+        messageIds: ['m1', 'm2'],
+        createdAt: null,
+        updatedAt: null
+      }
+      api.replaceSegmentMembership.mockResolvedValue(successResult(segWire))
+      await ds.replaceSegmentMembership('seg-1', ['m1', 'm2'])
+      expect(api.replaceSegmentMembership).toHaveBeenCalledOnce()
+      const req = api.replaceSegmentMembership.mock.calls[0][0]
+      expect(req.segmentId).toBe('seg-1')
+      expect(req.messageIds).toEqual(['m1', 'm2'])
+    })
+
+    it('replaceSegmentMembership handles null result (segment deleted)', async () => {
+      api.replaceSegmentMembership.mockResolvedValue(successResult(null))
+      const result = await ds.replaceSegmentMembership('seg-1', [])
+      expect(result).toBeNull()
+    })
+
+    // ---- Phase 5.1A: message reorder ----
+
+    it('reorderMessages calls api.reorderMessages', async () => {
+      api.reorderMessages.mockResolvedValue(successResult(null))
+      await ds.reorderMessages('topic-1', ['m3', 'm1', 'm2'])
+      expect(api.reorderMessages).toHaveBeenCalledOnce()
+      const req = api.reorderMessages.mock.calls[0][0]
+      expect(req.topicId).toBe('topic-1')
+      expect(req.messageIds).toEqual(['m3', 'm1', 'm2'])
+    })
+
+    // ---- Phase 5.1A: file reference queries ----
+
+    it('listFileRefsByFile calls api.listFileRefsByFile with fileId', async () => {
+      api.listFileRefsByFile.mockResolvedValue(successResult([]))
+      await ds.listFileRefsByFile('file-1')
+      expect(api.listFileRefsByFile).toHaveBeenCalledOnce()
+      expect(api.listFileRefsByFile).toHaveBeenCalledWith({ fileId: 'file-1' })
+    })
+
+    it('countFileRefsByFile calls api.countFileRefsByFile with fileId', async () => {
+      api.countFileRefsByFile.mockResolvedValue(successResult(3))
+      const count = await ds.countFileRefsByFile('file-1')
+      expect(api.countFileRefsByFile).toHaveBeenCalledOnce()
+      expect(api.countFileRefsByFile).toHaveBeenCalledWith({ fileId: 'file-1' })
+      expect(count).toBe(3)
+    })
+
+    it('listBlocksByFile calls api.listBlocksByFile with fileId', async () => {
+      api.listBlocksByFile.mockResolvedValue(successResult([]))
+      await ds.listBlocksByFile('file-1')
+      expect(api.listBlocksByFile).toHaveBeenCalledOnce()
+      expect(api.listBlocksByFile).toHaveBeenCalledWith({ fileId: 'file-1' })
     })
   })
 

@@ -6,17 +6,26 @@ import type {
   AppendMessageRequest,
   BulkAddBlocksRequest,
   ClearMessagesRequest,
+  CountFileRefsByFileRequest,
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteSegmentRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   GetRawTopicRequest,
+  ListBlocksByFileRequest,
+  ListFileRefsByFileRequest,
+  ListSegmentsRequest,
+  ReorderMessagesRequest,
+  ReplaceSegmentMembershipRequest,
   TopicExistsRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
-  UpdateSingleBlockRequest
+  UpdateSegmentMetadataRequest,
+  UpdateSingleBlockRequest,
+  UpsertSegmentRequest
 } from '@shared/chatDb'
 import type { GitBashPathInfo, UpgradeChannel } from '@shared/config/constant'
 import type { LogLevel, LogSourceWithContext } from '@shared/config/logger'
@@ -575,7 +584,25 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_UpdateSingleBlock, request),
     bulkAddBlocks: (request: BulkAddBlocksRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_BulkAddBlocks, request),
     deleteBlocks: (request: DeleteBlocksRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteBlocks, request),
-    clearMessages: (request: ClearMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_ClearMessages, request)
+    clearMessages: (request: ClearMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_ClearMessages, request),
+    // Phase 5.1A: segment commands
+    listSegments: (request: ListSegmentsRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_ListSegments, request),
+    upsertSegment: (request: UpsertSegmentRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_UpsertSegment, request),
+    updateSegmentMetadata: (request: UpdateSegmentMetadataRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_UpdateSegmentMetadata, request),
+    deleteSegment: (request: DeleteSegmentRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteSegment, request),
+    replaceSegmentMembership: (request: ReplaceSegmentMembershipRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ReplaceSegmentMembership, request),
+    // Phase 5.1A: message reorder
+    reorderMessages: (request: ReorderMessagesRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ReorderMessages, request),
+    // Phase 5.1A: file reference queries (read-only)
+    listFileRefsByFile: (request: ListFileRefsByFileRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ListFileRefsByFile, request),
+    countFileRefsByFile: (request: CountFileRefsByFileRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_CountFileRefsByFile, request),
+    listBlocksByFile: (request: ListBlocksByFileRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ListBlocksByFile, request)
   }
 }
 

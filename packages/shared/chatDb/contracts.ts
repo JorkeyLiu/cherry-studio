@@ -18,17 +18,26 @@ import type {
   BulkAddBlocksRequest,
   ChatDbChannel,
   ClearMessagesRequest,
+  CountFileRefsByFileRequest,
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteSegmentRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
   GetRawTopicRequest,
+  ListBlocksByFileRequest,
+  ListFileRefsByFileRequest,
+  ListSegmentsRequest,
+  ReorderMessagesRequest,
+  ReplaceSegmentMembershipRequest,
   TopicExistsRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
-  UpdateSingleBlockRequest
+  UpdateSegmentMetadataRequest,
+  UpdateSingleBlockRequest,
+  UpsertSegmentRequest
 } from './types'
 import {
   validateIdField,
@@ -359,6 +368,194 @@ const clearMessagesContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 5.1A: Segment contracts
+// ---------------------------------------------------------------------------
+
+const listSegmentsContract: ChatDbContract = {
+  allowedKeys: keySet('topicId'),
+  validate(value: unknown): void {
+    validateRequest(value, listSegmentsContract.allowedKeys)
+    const req = value as ListSegmentsRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:list-segments')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      if (!Array.isArray(obj.value)) {
+        throw new ValidationError('result.value', '[chatdb:list-segments] Expected array of segments')
+      }
+    }
+  }
+}
+
+const SEGMENT_VALUE_KEYS = new Set(['id', 'topicId', 'name', 'messageIds', 'color', 'createdAt', 'updatedAt'])
+
+function validateSegmentResult(channel: string): (result: unknown) => void {
+  return (result: unknown): void => {
+    validateResultEnvelope(result, channel)
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true && obj.value !== null && typeof obj.value === 'object' && !Array.isArray(obj.value)) {
+      const v = obj.value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!SEGMENT_VALUE_KEYS.has(key)) {
+          throw new ValidationError(`result.value.${key}`, `[${channel}] Unknown key in segment value: "${key}"`)
+        }
+      }
+      validateNonEmptyString(v.id, 'result.value.id')
+      validateNonEmptyString(v.topicId, 'result.value.topicId')
+      if (!Array.isArray(v.messageIds)) {
+        throw new ValidationError('result.value.messageIds', `[${channel}] Expected array of message IDs`)
+      }
+    }
+  }
+}
+
+const upsertSegmentContract: ChatDbContract = {
+  allowedKeys: keySet('segmentId', 'topicId', 'name', 'messageIds', 'color'),
+  validate(value: unknown): void {
+    validateRequest(value, upsertSegmentContract.allowedKeys)
+    const req = value as UpsertSegmentRequest
+    validateNonEmptyString(req.segmentId, 'request.segmentId')
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    if (req.name !== undefined && req.name !== null) {
+      validateNonEmptyString(req.name, 'request.name')
+    }
+    if (!Array.isArray(req.messageIds)) {
+      throw new ValidationError('request.messageIds', 'Expected an array of message IDs')
+    }
+    for (let i = 0; i < req.messageIds.length; i++) {
+      if (typeof req.messageIds[i] !== 'string' || req.messageIds[i].length === 0) {
+        throw new ValidationError(`request.messageIds[${i}]`, 'Expected a non-empty string')
+      }
+    }
+  },
+  validateResult: validateSegmentResult('chatdb:upsert-segment')
+}
+
+const updateSegmentMetadataContract: ChatDbContract = {
+  allowedKeys: keySet('segmentId', 'name', 'color'),
+  validate(value: unknown): void {
+    validateRequest(value, updateSegmentMetadataContract.allowedKeys)
+    const req = value as UpdateSegmentMetadataRequest
+    validateNonEmptyString(req.segmentId, 'request.segmentId')
+  },
+  validateResult: validateSegmentResult('chatdb:update-segment-metadata')
+}
+
+const deleteSegmentContract: ChatDbContract = {
+  allowedKeys: keySet('segmentId'),
+  validate(value: unknown): void {
+    validateRequest(value, deleteSegmentContract.allowedKeys)
+    const req = value as DeleteSegmentRequest
+    validateNonEmptyString(req.segmentId, 'request.segmentId')
+  },
+  validateResult: voidResult('chatdb:delete-segment')
+}
+
+const replaceSegmentMembershipContract: ChatDbContract = {
+  allowedKeys: keySet('segmentId', 'messageIds'),
+  validate(value: unknown): void {
+    validateRequest(value, replaceSegmentMembershipContract.allowedKeys)
+    const req = value as ReplaceSegmentMembershipRequest
+    validateNonEmptyString(req.segmentId, 'request.segmentId')
+    if (!Array.isArray(req.messageIds)) {
+      throw new ValidationError('request.messageIds', 'Expected an array of message IDs')
+    }
+    for (let i = 0; i < req.messageIds.length; i++) {
+      if (typeof req.messageIds[i] !== 'string' || req.messageIds[i].length === 0) {
+        throw new ValidationError(`request.messageIds[${i}]`, 'Expected a non-empty string')
+      }
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:replace-segment-membership')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true && obj.value !== null) {
+      validateSegmentResult('chatdb:replace-segment-membership')(result)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.1A: Message reorder contract
+// ---------------------------------------------------------------------------
+
+const reorderMessagesContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'messageIds'),
+  validate(value: unknown): void {
+    validateRequest(value, reorderMessagesContract.allowedKeys)
+    const req = value as ReorderMessagesRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    if (!Array.isArray(req.messageIds)) {
+      throw new ValidationError('request.messageIds', 'Expected an array of message IDs')
+    }
+    for (let i = 0; i < req.messageIds.length; i++) {
+      if (typeof req.messageIds[i] !== 'string' || req.messageIds[i].length === 0) {
+        throw new ValidationError(`request.messageIds[${i}]`, 'Expected a non-empty string')
+      }
+    }
+  },
+  validateResult: voidResult('chatdb:reorder-messages')
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.1A: File reference query contracts (read-only)
+// ---------------------------------------------------------------------------
+
+const listFileRefsByFileContract: ChatDbContract = {
+  allowedKeys: keySet('fileId'),
+  validate(value: unknown): void {
+    validateRequest(value, listFileRefsByFileContract.allowedKeys)
+    const req = value as ListFileRefsByFileRequest
+    validateNonEmptyString(req.fileId, 'request.fileId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:list-file-refs-by-file')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      if (!Array.isArray(obj.value)) {
+        throw new ValidationError('result.value', '[chatdb:list-file-refs-by-file] Expected array of file references')
+      }
+    }
+  }
+}
+
+const countFileRefsByFileContract: ChatDbContract = {
+  allowedKeys: keySet('fileId'),
+  validate(value: unknown): void {
+    validateRequest(value, countFileRefsByFileContract.allowedKeys)
+    const req = value as CountFileRefsByFileRequest
+    validateNonEmptyString(req.fileId, 'request.fileId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:count-file-refs-by-file')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true && typeof obj.value !== 'number') {
+      throw new ValidationError('result.value', '[chatdb:count-file-refs-by-file] Expected number value')
+    }
+  }
+}
+
+const listBlocksByFileContract: ChatDbContract = {
+  allowedKeys: keySet('fileId'),
+  validate(value: unknown): void {
+    validateRequest(value, listBlocksByFileContract.allowedKeys)
+    const req = value as ListBlocksByFileRequest
+    validateNonEmptyString(req.fileId, 'request.fileId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:list-blocks-by-file')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      if (!Array.isArray(obj.value)) {
+        throw new ValidationError('result.value', '[chatdb:list-blocks-by-file] Expected array of blocks')
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Contract registry — exact channel → contract mapping
 // ---------------------------------------------------------------------------
 
@@ -367,6 +564,7 @@ const clearMessagesContract: ChatDbContract = {
  * Keys match ChatDbChannel / IpcChannel enum values exactly.
  */
 export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = Object.freeze({
+  // Original 14 commands
   'chatdb:fetch-messages': fetchMessagesContract,
   'chatdb:get-raw-topic': getRawTopicContract,
   'chatdb:topic-exists': topicExistsContract,
@@ -380,7 +578,19 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:update-single-block': updateSingleBlockContract,
   'chatdb:bulk-add-blocks': bulkAddBlocksContract,
   'chatdb:delete-blocks': deleteBlocksContract,
-  'chatdb:clear-messages': clearMessagesContract
+  'chatdb:clear-messages': clearMessagesContract,
+  // Phase 5.1A: segment commands
+  'chatdb:list-segments': listSegmentsContract,
+  'chatdb:upsert-segment': upsertSegmentContract,
+  'chatdb:update-segment-metadata': updateSegmentMetadataContract,
+  'chatdb:delete-segment': deleteSegmentContract,
+  'chatdb:replace-segment-membership': replaceSegmentMembershipContract,
+  // Phase 5.1A: message reorder
+  'chatdb:reorder-messages': reorderMessagesContract,
+  // Phase 5.1A: file reference queries (read-only)
+  'chatdb:list-file-refs-by-file': listFileRefsByFileContract,
+  'chatdb:count-file-refs-by-file': countFileRefsByFileContract,
+  'chatdb:list-blocks-by-file': listBlocksByFileContract
 })
 
 /**

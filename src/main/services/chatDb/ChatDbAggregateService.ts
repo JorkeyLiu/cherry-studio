@@ -1,5 +1,5 @@
 /**
- * ChatDbAggregateService — implements all 14 ChatDb commands.
+ * ChatDbAggregateService — implements all 23 ChatDb commands.
  *
  * Combines the five Phase 2 repositories (topics, messages, blocks,
  * topic_segments, file_references) into a single service that the IPC
@@ -17,20 +17,22 @@
  * updateFileCount(s) stays in Dexie/FileManager; not called here.
  */
 
-import type { JsonObject } from '@shared/chatDb'
+import type { FileReferenceWire, JsonObject, SegmentWire } from '@shared/chatDb'
 import type { ChatDbResult } from '@shared/chatDb'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import type { MessageBlockData } from './domain/types'
-import { ChatDbConflictError, wrapResult } from './errors'
+import { ChatDbConflictError, ChatDbNotFoundError, wrapResult } from './errors'
 import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
 import type * as schema from './schema'
 import {
   blocksToWire,
+  fileReferenceToWire,
   messagesToWire,
   projectFileReferences,
   reconstructMessageBlockRelations,
+  segmentToWire,
   wireToBlock,
   wireToBlockPatch,
   wireToMessage,
@@ -485,6 +487,218 @@ export class ChatDbAggregateService {
 
       return null
     }, `clearMessages(${topicId})`)
+  }
+
+  // =========================================================================
+  // Phase 5.1A: Segment commands
+  // =========================================================================
+
+  /**
+   * List all segments for a topic with ordered messageIds.
+   * Each segment's messageIds are reconstructed from topic_segment_messages sort_order.
+   */
+  listSegments(topicId: string): ChatDbResult<SegmentWire[]> {
+    return wrapResult(() => {
+      const repos = this.repos()
+      const segments = repos.segments.listByTopic(topicId)
+      return segments.map((seg) => {
+        const messageIds = repos.segments.getMessageIds(seg.id)
+        return segmentToWire(seg, messageIds)
+      })
+    }, `listSegments(${topicId})`)
+  }
+
+  /**
+   * Atomically upsert a segment with metadata and ordered membership.
+   * - Creates segment if absent, updates metadata if present.
+   * - Replaces message membership atomically in one transaction.
+   * - Empty membership deletes the segment per repository semantics.
+   */
+  upsertSegment(
+    segmentId: string,
+    topicId: string,
+    name: string | null | undefined,
+    messageIds: string[],
+    color: string | null | undefined
+  ): ChatDbResult<SegmentWire> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        // Ensure topic exists
+        repos.topics.ensure(topicId)
+
+        // Build segment data
+        const overflow: Record<string, unknown> = {}
+        if (color !== undefined && color !== null) {
+          overflow.color = color
+        }
+
+        const existing = repos.segments.getById(segmentId)
+        if (existing.found) {
+          // Update metadata
+          const patch: Record<string, unknown> = {}
+          if (name !== undefined) patch.name = name
+          if (color !== undefined) patch.overflow = overflow
+          if (Object.keys(patch).length > 0) {
+            repos.segments.updateMetadata(segmentId, patch as any)
+          }
+        } else {
+          // Create new segment
+          repos.segments.create({
+            id: segmentId,
+            topicId,
+            name: name ?? null,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            sortOrder: 0,
+            overflow
+          })
+        }
+
+        // Replace membership atomically
+        repos.segments.replaceMessageIds(segmentId, messageIds)
+
+        // Read back the result
+        const segment = repos.segments.getById(segmentId)
+        if (!segment.found) {
+          // Segment was deleted (empty membership) — return empty wire
+          return {
+            id: segmentId,
+            topicId,
+            name: name ?? null,
+            messageIds: [],
+            color: color ?? undefined,
+            createdAt: null,
+            updatedAt: null
+          }
+        }
+
+        const finalMessageIds = repos.segments.getMessageIds(segmentId)
+        return segmentToWire(segment.data, finalMessageIds)
+      })
+    }, `upsertSegment(${segmentId}, ${topicId})`)
+  }
+
+  /**
+   * Update segment metadata (name, color). No membership change.
+   * Missing segment: throws ChatDbNotFoundError → ERR_NOT_FOUND.
+   * Returns the updated segment wire.
+   */
+  updateSegmentMetadata(
+    segmentId: string,
+    name: string | null | undefined,
+    color: string | null | undefined
+  ): ChatDbResult<SegmentWire> {
+    return wrapResult(() => {
+      const repos = this.repos()
+      const existing = repos.segments.getById(segmentId)
+      if (!existing.found) {
+        throw new ChatDbNotFoundError(`Segment ${segmentId} does not exist`)
+      }
+
+      const patch: Record<string, unknown> = {}
+      if (name !== undefined) patch.name = name
+      if (color !== undefined) {
+        patch.overflow = { ...existing.data.overflow, color }
+      }
+      if (Object.keys(patch).length > 0) {
+        repos.segments.updateMetadata(segmentId, patch as any)
+      }
+
+      // Read back
+      const updated = repos.segments.getById(segmentId)
+      if (!updated.found) {
+        // Defensive: segment was deleted between getById and updateMetadata
+        // within the same operation. Should not happen in practice.
+        throw new ChatDbNotFoundError(`Segment ${segmentId} was deleted during update`)
+      }
+      const messageIds = repos.segments.getMessageIds(segmentId)
+      return segmentToWire(updated.data, messageIds)
+    }, `updateSegmentMetadata(${segmentId})`)
+  }
+
+  /**
+   * Delete a segment. Missing: no-op.
+   */
+  deleteSegment(segmentId: string): ChatDbResult<null> {
+    return wrapResult(() => {
+      const { segments } = this.repos()
+      segments.delete(segmentId)
+      return null
+    }, `deleteSegment(${segmentId})`)
+  }
+
+  /**
+   * Replace segment message IDs atomically.
+   * Empty membership deletes the segment per repository semantics.
+   * Returns the updated segment wire, or null if segment was deleted.
+   */
+  replaceSegmentMembership(segmentId: string, messageIds: string[]): ChatDbResult<SegmentWire | null> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        repos.segments.replaceMessageIds(segmentId, messageIds)
+
+        const segment = repos.segments.getById(segmentId)
+        if (!segment.found) return null
+
+        const finalMessageIds = repos.segments.getMessageIds(segmentId)
+        return segmentToWire(segment.data, finalMessageIds)
+      })
+    }, `replaceSegmentMembership(${segmentId})`)
+  }
+
+  // =========================================================================
+  // Phase 5.1A: Message reorder
+  // =========================================================================
+
+  /**
+   * Reorder all messages in a topic atomically.
+   * Validates exact membership and dense order via repository.
+   */
+  reorderMessages(topicId: string, messageIds: string[]): ChatDbResult<null> {
+    return wrapResult(() => {
+      const { messages } = this.repos()
+      messages.replaceOrder(topicId, messageIds)
+      return null
+    }, `reorderMessages(${topicId})`)
+  }
+
+  // =========================================================================
+  // Phase 5.1A: File reference queries (read-only)
+  // =========================================================================
+
+  /**
+   * List file references by file ID. Read-only.
+   */
+  listFileRefsByFile(fileId: string): ChatDbResult<FileReferenceWire[]> {
+    return wrapResult(() => {
+      const { fileRefs } = this.repos()
+      const refs = fileRefs.listByFile(fileId)
+      return refs.map(fileReferenceToWire)
+    }, `listFileRefsByFile(${fileId})`)
+  }
+
+  /**
+   * Count file references by file ID. Read-only.
+   */
+  countFileRefsByFile(fileId: string): ChatDbResult<number> {
+    return wrapResult(() => {
+      const { fileRefs } = this.repos()
+      return fileRefs.countByFile(fileId)
+    }, `countFileRefsByFile(${fileId})`)
+  }
+
+  /**
+   * List blocks associated with a file via file_references. Read-only.
+   */
+  listBlocksByFile(fileId: string): ChatDbResult<JsonObject[]> {
+    return wrapResult(() => {
+      const repos = this.repos()
+      const blocks = repos.blocks.findByFileId(fileId)
+      return blocksToWire(blocks)
+    }, `listBlocksByFile(${fileId})`)
   }
 
   // =========================================================================

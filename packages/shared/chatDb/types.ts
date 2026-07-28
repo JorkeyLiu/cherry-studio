@@ -197,6 +197,120 @@ export interface FetchMessagesResponse {
 export type GetRawTopicResponse = { id: string; messages: JsonObject[] } | null
 
 // ---------------------------------------------------------------------------
+// Segment command DTOs (Phase 5.1A)
+// ---------------------------------------------------------------------------
+
+/** @see IpcChannel.ChatDb_ListSegments */
+export interface ListSegmentsRequest {
+  topicId: string
+}
+
+/** Wire shape for a segment with ordered messageIds. */
+export interface SegmentWire {
+  id: string
+  topicId: string
+  name: string | null
+  messageIds: string[]
+  /** Optional color bridged through SQLite extra overflow. */
+  color?: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/** @see IpcChannel.ChatDb_ListSegments */
+export type ListSegmentsResponse = SegmentWire[]
+
+/** @see IpcChannel.ChatDb_UpsertSegment */
+export interface UpsertSegmentRequest {
+  segmentId: string
+  topicId: string
+  name?: string | null
+  /** Ordered message IDs for this segment. */
+  messageIds: string[]
+  /** Optional color stored in extra overflow. */
+  color?: string | null
+}
+
+/** @see IpcChannel.ChatDb_UpsertSegment */
+export type UpsertSegmentResponse = SegmentWire
+
+/** @see IpcChannel.ChatDb_UpdateSegmentMetadata */
+export interface UpdateSegmentMetadataRequest {
+  segmentId: string
+  /** Partial metadata patch. Absent keys unchanged, null clears field. */
+  name?: string | null
+  color?: string | null
+}
+
+/** @see IpcChannel.ChatDb_UpdateSegmentMetadata */
+export type UpdateSegmentMetadataResponse = SegmentWire
+
+/** @see IpcChannel.ChatDb_DeleteSegment */
+export interface DeleteSegmentRequest {
+  segmentId: string
+}
+
+/** @see IpcChannel.ChatDb_ReplaceSegmentMembership */
+export interface ReplaceSegmentMembershipRequest {
+  segmentId: string
+  /** Complete ordered message ID list. Empty deletes the segment per repo semantics. */
+  messageIds: string[]
+}
+
+/** @see IpcChannel.ChatDb_ReplaceSegmentMembership */
+export type ReplaceSegmentMembershipResponse = SegmentWire | null
+
+// ---------------------------------------------------------------------------
+// Message reorder command DTOs (Phase 5.1A)
+// ---------------------------------------------------------------------------
+
+/** @see IpcChannel.ChatDb_ReorderMessages */
+export interface ReorderMessagesRequest {
+  topicId: string
+  /** Complete ordered message ID list for the topic. */
+  messageIds: string[]
+}
+
+// ---------------------------------------------------------------------------
+// File reference query DTOs (Phase 5.1A, read-only)
+// ---------------------------------------------------------------------------
+
+/** Wire shape for a file reference entry. */
+export interface FileReferenceWire {
+  id: string
+  blockId: string
+  fileId: string
+  fileName: string | null
+  filePath: string | null
+  fileType: string | null
+  count: number | null
+}
+
+/** @see IpcChannel.ChatDb_ListFileRefsByFile */
+export interface ListFileRefsByFileRequest {
+  fileId: string
+}
+
+/** @see IpcChannel.ChatDb_ListFileRefsByFile */
+export type ListFileRefsByFileResponse = FileReferenceWire[]
+
+/** @see IpcChannel.ChatDb_CountFileRefsByFile */
+export interface CountFileRefsByFileRequest {
+  fileId: string
+}
+
+/** @see IpcChannel.ChatDb_CountFileRefsByFile */
+export type CountFileRefsByFileResponse = number
+
+/** @see IpcChannel.ChatDb_ListBlocksByFile */
+export interface ListBlocksByFileRequest {
+  fileId: string
+}
+
+/** @see IpcChannel.ChatDb_ListBlocksByFile */
+export type ListBlocksByFileResponse = JsonObject[]
+
+// ---------------------------------------------------------------------------
 // Command-to-request/response mapping
 //
 // Enforces compile-time linkage between IPC channel, request type,
@@ -214,6 +328,7 @@ export interface ChatDbCommandMap {
  * and their wire contracts.
  */
 export interface ChatDbCommands extends ChatDbCommandMap {
+  // Original 14 commands
   'chatdb:fetch-messages': { request: FetchMessagesRequest; response: FetchMessagesResponse }
   'chatdb:get-raw-topic': { request: GetRawTopicRequest; response: GetRawTopicResponse }
   'chatdb:topic-exists': { request: TopicExistsRequest; response: boolean }
@@ -228,6 +343,21 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:bulk-add-blocks': { request: BulkAddBlocksRequest; response: null }
   'chatdb:delete-blocks': { request: DeleteBlocksRequest; response: null }
   'chatdb:clear-messages': { request: ClearMessagesRequest; response: null }
+  // Phase 5.1A: segment commands
+  'chatdb:list-segments': { request: ListSegmentsRequest; response: ListSegmentsResponse }
+  'chatdb:upsert-segment': { request: UpsertSegmentRequest; response: UpsertSegmentResponse }
+  'chatdb:update-segment-metadata': { request: UpdateSegmentMetadataRequest; response: UpdateSegmentMetadataResponse }
+  'chatdb:delete-segment': { request: DeleteSegmentRequest; response: null }
+  'chatdb:replace-segment-membership': {
+    request: ReplaceSegmentMembershipRequest
+    response: ReplaceSegmentMembershipResponse
+  }
+  // Phase 5.1A: message reorder
+  'chatdb:reorder-messages': { request: ReorderMessagesRequest; response: null }
+  // Phase 5.1A: file reference queries (read-only)
+  'chatdb:list-file-refs-by-file': { request: ListFileRefsByFileRequest; response: ListFileRefsByFileResponse }
+  'chatdb:count-file-refs-by-file': { request: CountFileRefsByFileRequest; response: CountFileRefsByFileResponse }
+  'chatdb:list-blocks-by-file': { request: ListBlocksByFileRequest; response: ListBlocksByFileResponse }
 }
 
 /** All valid ChatDb command channel strings. */

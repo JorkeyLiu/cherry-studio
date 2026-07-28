@@ -878,7 +878,7 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   // store sync
   storeSyncService.registerIpcHandler()
 
-  // ChatDB — 14 command-oriented IPC handlers for SQLite message persistence
+  // ChatDB — 23 command-oriented IPC handlers for SQLite message persistence
   registerChatDbIpc()
 
   // ChatImport — 6 import-only IPC handlers for Phase 4 source-reader pipeline
