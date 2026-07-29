@@ -20,9 +20,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────────
 
-const { searchMessagesMock, topicsGetMock, toastErrorMock, storeTopicsMap } = vi.hoisted(() => ({
+const { searchMessagesMock, dbServiceFetchMock, toastErrorMock, storeTopicsMap } = vi.hoisted(() => ({
   searchMessagesMock: vi.fn<(request: SearchMessagesRequest) => Promise<SearchMessagesResponse>>(),
-  topicsGetMock: vi.fn(),
+  dbServiceFetchMock: vi.fn(),
   toastErrorMock: vi.fn(),
   storeTopicsMap: new Map<string, { id: string; name: string }>()
 }))
@@ -44,8 +44,25 @@ vi.mock('@renderer/services/db/SqliteMessageDataSource', () => {
   return { ChatDbResultError, SqliteMessageDataSource }
 })
 
+vi.mock('@renderer/services/db', () => ({
+  dbService: {
+    fetchMessages: dbServiceFetchMock
+  },
+  ChatDbResultError: class ChatDbResultError extends Error {
+    readonly code: string
+    readonly retryable: boolean
+    constructor(error: { code: string; message: string; retryable: boolean }) {
+      super(error.message)
+      this.name = 'ChatDbResultError'
+      this.code = error.code
+      this.retryable = error.retryable
+    }
+  },
+  SqliteMessageDataSource: class SqliteMessageDataSource {}
+}))
+
 vi.mock('@renderer/databases', () => ({
-  default: { topics: { get: topicsGetMock } }
+  default: {}
 }))
 
 vi.mock('@renderer/hooks/useScrollPosition', () => ({
@@ -272,7 +289,7 @@ describe('SearchResults (SQLite search)', () => {
 
       await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
       expect(searchMessagesMock).toHaveBeenCalledOnce()
-      expect(topicsGetMock).not.toHaveBeenCalled()
+      expect(dbServiceFetchMock).not.toHaveBeenCalled()
       expect(screen.queryAllByTestId('result-item')).toHaveLength(0)
     })
 
@@ -592,9 +609,9 @@ describe('SearchResults (SQLite search)', () => {
       expect(toastErrorMock).toHaveBeenCalledWith('history.error.topic_not_found')
     })
 
-    it('message click resolves the Message object from the Dexie topic record', async () => {
+    it('message click resolves the Message object from dbService.fetchMessages', async () => {
       const message = { id: 'message-1', topicId: 'topic-1', createdAt: '2026-01-01T00:00:00.000Z' }
-      topicsGetMock.mockResolvedValue({ id: 'topic-1', messages: [message] })
+      dbServiceFetchMock.mockResolvedValue({ messages: [message], blocks: [] })
       searchMessagesMock.mockResolvedValue(makeResponse([makeItem(1)]))
       const { onMessageClick } = renderComponent('hello')
 
@@ -602,11 +619,11 @@ describe('SearchResults (SQLite search)', () => {
       fireEvent.click(screen.getByText('hello'))
 
       await waitFor(() => expect(onMessageClick).toHaveBeenCalledWith(message))
-      expect(topicsGetMock).toHaveBeenCalledWith('topic-1')
+      expect(dbServiceFetchMock).toHaveBeenCalledWith('topic-1')
     })
 
     it('message click shows an error toast when the message cannot be resolved', async () => {
-      topicsGetMock.mockResolvedValue(undefined)
+      dbServiceFetchMock.mockResolvedValue({ messages: [], blocks: [] })
       searchMessagesMock.mockResolvedValue(makeResponse([makeItem(1)]))
       const { onMessageClick } = renderComponent('hello')
 

@@ -48,7 +48,10 @@ describe('chatDbContracts', () => {
     // Phase 5.1B-2: search
     'chatdb:search-messages',
     // Phase 5.2B: atomic assistant empty-trash
-    'chatdb:empty-trash-topics'
+    'chatdb:empty-trash-topics',
+    // Phase 5.3: ownership transfer + assistant reset
+    'chatdb:transfer-topic-ownership',
+    'chatdb:reset-assistant-topics'
   ]
 
   it('has entries for all expected channels', () => {
@@ -394,11 +397,11 @@ describe('validateChatDbRequest — valid payloads', () => {
     ).not.toThrow()
   })
 
-  it('reset-messages-for-resend: { topicId, messageIds, blockIdsToDelete }', () => {
+  it('reset-messages-for-resend: { topicId, messages, blockIdsToDelete }', () => {
     expect(() =>
       validateChatDbRequest('chatdb:reset-messages-for-resend', {
         topicId: 't1',
-        messageIds: ['m1'],
+        messages: [{ message: { id: 'm1' }, blocks: [] }],
         blockIdsToDelete: ['b1']
       })
     ).not.toThrow()
@@ -434,6 +437,19 @@ describe('validateChatDbRequest — valid payloads', () => {
 
   it('clear-topic-with-segments: { topicId }', () => {
     expect(() => validateChatDbRequest('chatdb:clear-topic-with-segments', { topicId: 't1' })).not.toThrow()
+  })
+
+  // Phase 5.3: ownership transfer + assistant reset
+  it('transfer-topic-ownership: { topicId, assistantId }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:transfer-topic-ownership', { topicId: 't1', assistantId: 'a1' })
+    ).not.toThrow()
+  })
+
+  it('reset-assistant-topics: { assistantId, replacementTopicId }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reset-assistant-topics', { assistantId: 'a1', replacementTopicId: 't2' })
+    ).not.toThrow()
   })
 })
 
@@ -738,7 +754,7 @@ describe('validateChatDbRequest — invalid payloads', () => {
 
   it('reset-messages-for-resend: rejects missing topicId', () => {
     expect(() =>
-      validateChatDbRequest('chatdb:reset-messages-for-resend', { messageIds: [], blockIdsToDelete: [] })
+      validateChatDbRequest('chatdb:reset-messages-for-resend', { messages: [], blockIdsToDelete: [] })
     ).toThrow(ValidationError)
   })
 
@@ -770,6 +786,27 @@ describe('validateChatDbRequest — invalid payloads', () => {
 
   it('clear-topic-with-segments: rejects missing topicId', () => {
     expect(() => validateChatDbRequest('chatdb:clear-topic-with-segments', {})).toThrow(ValidationError)
+  })
+
+  // Phase 5.3: ownership transfer + assistant reset invalid payloads
+  it('transfer-topic-ownership: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:transfer-topic-ownership', { assistantId: 'a1' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('transfer-topic-ownership: rejects missing assistantId', () => {
+    expect(() => validateChatDbRequest('chatdb:transfer-topic-ownership', { topicId: 't1' })).toThrow(ValidationError)
+  })
+
+  it('reset-assistant-topics: rejects missing assistantId', () => {
+    expect(() => validateChatDbRequest('chatdb:reset-assistant-topics', { replacementTopicId: 't2' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('reset-assistant-topics: rejects missing replacementTopicId', () => {
+    expect(() => validateChatDbRequest('chatdb:reset-assistant-topics', { assistantId: 'a1' })).toThrow(ValidationError)
   })
 })
 
@@ -859,9 +896,9 @@ describe('contract allowedKeys', () => {
     expect(keys).toEqual(new Set(['topicId', 'message', 'blocks', 'insertIndex']))
   })
 
-  it('update-message-and-blocks has exactly topicId, messageUpdates, blocksToUpdate', () => {
+  it('update-message-and-blocks has exactly topicId, messageUpdates, blocksToUpdate, blockIdsToDelete', () => {
     const keys = getContract('chatdb:update-message-and-blocks').allowedKeys
-    expect(keys).toEqual(new Set(['topicId', 'messageUpdates', 'blocksToUpdate']))
+    expect(keys).toEqual(new Set(['topicId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete']))
   })
 
   it('ensure-topic has exactly topicId, assistantId', () => {
@@ -1027,8 +1064,19 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() => validateChatDbResult('chatdb:update-message', { ok: true, value: null })).not.toThrow()
   })
 
-  it('update-message-and-blocks: null value', () => {
-    expect(() => validateChatDbResult('chatdb:update-message-and-blocks', { ok: true, value: null })).not.toThrow()
+  it('update-message-and-blocks: valid FileCleanupResult', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:update-message-and-blocks', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).not.toThrow()
+  })
+
+  it('update-message-and-blocks: rejects null value (FileCleanupResult required)', () => {
+    expect(() => validateChatDbResult('chatdb:update-message-and-blocks', { ok: true, value: null })).toThrow(
+      ValidationError
+    )
   })
 
   it('delete-message: null value', () => {
@@ -1051,12 +1099,30 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() => validateChatDbResult('chatdb:bulk-add-blocks', { ok: true, value: null })).not.toThrow()
   })
 
-  it('delete-blocks: null value', () => {
-    expect(() => validateChatDbResult('chatdb:delete-blocks', { ok: true, value: null })).not.toThrow()
+  it('delete-blocks: valid FileCleanupResult', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:delete-blocks', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).not.toThrow()
   })
 
-  it('clear-messages: null value', () => {
-    expect(() => validateChatDbResult('chatdb:clear-messages', { ok: true, value: null })).not.toThrow()
+  it('delete-blocks: rejects null value (FileCleanupResult required)', () => {
+    expect(() => validateChatDbResult('chatdb:delete-blocks', { ok: true, value: null })).toThrow(ValidationError)
+  })
+
+  it('clear-messages: valid FileCleanupResult', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:clear-messages', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).not.toThrow()
+  })
+
+  it('clear-messages: rejects null value (FileCleanupResult required)', () => {
+    expect(() => validateChatDbResult('chatdb:clear-messages', { ok: true, value: null })).toThrow(ValidationError)
   })
 
   // Phase 5.1A: segment commands
@@ -1270,6 +1336,41 @@ describe('validateChatDbResult — valid success envelopes', () => {
         value: { affectedFileIds: [], remainingReferenceCounts: {} }
       })
     ).not.toThrow()
+  })
+
+  // Phase 5.3: ownership transfer + assistant reset
+  it('transfer-topic-ownership: void result', () => {
+    expect(() => validateChatDbResult('chatdb:transfer-topic-ownership', { ok: true, value: null })).not.toThrow()
+  })
+
+  it('reset-assistant-topics: valid result with cleanup and replacementTopic', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reset-assistant-topics', {
+        ok: true,
+        value: {
+          cleanup: { affectedFileIds: [], remainingReferenceCounts: {} },
+          replacementTopic: { id: 't1', name: 'New' }
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('reset-assistant-topics: rejects null cleanup', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reset-assistant-topics', {
+        ok: true,
+        value: { cleanup: null, replacementTopic: { id: 't1', name: 'New' } }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reset-assistant-topics: rejects null replacementTopic', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reset-assistant-topics', {
+        ok: true,
+        value: { cleanup: { affectedFileIds: [], remainingReferenceCounts: {} }, replacementTopic: null }
+      })
+    ).toThrow(ValidationError)
   })
 
   // Phase 5.1B: compound mutation result validation
@@ -1545,6 +1646,11 @@ describe('coverage consistency', () => {
     'chatdb:list-trash-topics',
     'chatdb:hard-delete-topic',
     'chatdb:purge-expired-topics',
+    // Phase 5.2B: atomic assistant empty-trash
+    'chatdb:empty-trash-topics',
+    // Phase 5.3: ownership transfer + assistant reset
+    'chatdb:transfer-topic-ownership',
+    'chatdb:reset-assistant-topics',
     // Phase 5.1B: compound mutations
     'chatdb:clone-messages-to-topic',
     'chatdb:reset-messages-for-resend',
@@ -1552,9 +1658,7 @@ describe('coverage consistency', () => {
     'chatdb:paste-messages-to-topic',
     'chatdb:clear-topic-with-segments',
     // Phase 5.1B-2: search
-    'chatdb:search-messages',
-    // Phase 5.2B: atomic assistant empty-trash
-    'chatdb:empty-trash-topics'
+    'chatdb:search-messages'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {

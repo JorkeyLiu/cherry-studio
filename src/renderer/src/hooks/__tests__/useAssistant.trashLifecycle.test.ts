@@ -16,7 +16,8 @@ const { mocks } = vi.hoisted(() => ({
     softRemoveTopic: vi.fn(),
     restoreTopic: vi.fn(),
     getTopic: vi.fn(),
-    getDefaultTopic: vi.fn()
+    getDefaultTopic: vi.fn(),
+    resetOrdinaryAssistantTopics: vi.fn()
   }
 }))
 
@@ -81,7 +82,8 @@ vi.mock('@renderer/services/db/topicMetadataPersist', () => ({
 vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
   ensureOrdinaryTopicOwnership: mocks.ensureOrdinaryTopicOwnership,
   softDeleteOrdinaryTopic: mocks.softDeleteOrdinaryTopic,
-  restoreOrdinaryTopic: mocks.restoreOrdinaryTopic
+  restoreOrdinaryTopic: mocks.restoreOrdinaryTopic,
+  resetOrdinaryAssistantTopics: mocks.resetOrdinaryAssistantTopics
 }))
 
 vi.mock('@renderer/utils/agentSession', () => ({
@@ -139,6 +141,10 @@ describe('useAssistant trash lifecycle (Phase 5.2B)', () => {
       name: 'Default',
       messages: []
     }))
+    mocks.resetOrdinaryAssistantTopics.mockResolvedValue({
+      replacementTopic: makeTopic({ id: 'topic-a-1', name: 'Persisted default' }),
+      cleanup: { affectedFileIds: [], remainingReferenceCounts: {} }
+    })
   })
 
   describe('removeTopic (soft delete)', () => {
@@ -219,7 +225,8 @@ describe('useAssistant trash lifecycle (Phase 5.2B)', () => {
     it('keeps agent-session restore on Dexie (LOCK-521)', async () => {
       const agentTopic = makeTopic({ id: 'agent-session:s-1', deletedAt: '2026-01-03T00:00:00.000Z' })
       mocks.getTopic.mockResolvedValue(agentTopic)
-      mocks.restoreTopic.mockResolvedValue(undefined)
+      // restoreTopic now returns the restored topic directly (LOCK-003)
+      mocks.restoreTopic.mockResolvedValue({ ...agentTopic, deletedAt: undefined })
       const { result } = renderHook(() => useAssistant('a-1'))
 
       await result.current.restoreTopic('agent-session:s-1')

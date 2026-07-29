@@ -1,4 +1,5 @@
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
+import type { FileCleanupResult } from '@shared/chatDb'
 
 /**
  * Message exchange data structure for persisting user-assistant conversations
@@ -50,13 +51,16 @@ export interface MessageDataSource {
   updateMessage(topicId: string, messageId: string, updates: Partial<Message>): Promise<void>
 
   /**
-   * Update existing message and its blocks
+   * Update existing message and its blocks.
+   * Returns FileCleanupResult when blocks are deleted, for post-commit
+   * consumption by the caller.
    */
   updateMessageAndBlocks(
     topicId: string,
     messageUpdates: Partial<Message> & Pick<Message, 'id'>,
-    blocksToUpdate: MessageBlock[]
-  ): Promise<void>
+    blocksToUpdate: MessageBlock[],
+    blockIdsToDelete?: string[]
+  ): Promise<FileCleanupResult>
 
   /**
    * Delete a single message and its blocks
@@ -87,13 +91,13 @@ export interface MessageDataSource {
   /**
    * Delete multiple blocks
    */
-  deleteBlocks(blockIds: string[]): Promise<void>
+  deleteBlocks(blockIds: string[]): Promise<FileCleanupResult>
 
   // ============ Batch Operations ============
   /**
    * Clear all messages in a topic
    */
-  clearMessages(topicId: string): Promise<void>
+  clearMessages(topicId: string): Promise<FileCleanupResult>
 
   /**
    * Check if topic exists

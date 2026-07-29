@@ -21,6 +21,7 @@ import type {
   BulkAddBlocksRequest,
   ChatDbResult,
   ClearMessagesRequest,
+  ClearMessagesResponse,
   ClearTopicWithSegmentsRequest,
   ClearTopicWithSegmentsResponse,
   CloneMessagesToTopicRequest,
@@ -28,6 +29,7 @@ import type {
   CountFileRefsByFileRequest,
   CountFileRefsByFileResponse,
   DeleteBlocksRequest,
+  DeleteBlocksResponse,
   DeleteMessageRequest,
   DeleteMessagesRequest,
   DeleteMessagesWithSegmentsRequest,
@@ -38,6 +40,7 @@ import type {
   EnsureTopicRequest,
   FetchMessagesRequest,
   FetchMessagesResponse,
+  FileCleanupResult,
   GetRawTopicRequest,
   GetRawTopicResponse,
   HardDeleteTopicRequest,
@@ -112,14 +115,13 @@ function makeApiSpy() {
     ensureTopic: vi.fn<(request: EnsureTopicRequest) => Promise<ChatDbResult<null>>>(),
     appendMessage: vi.fn<(request: AppendMessageRequest) => Promise<ChatDbResult<null>>>(),
     updateMessage: vi.fn<(request: UpdateMessageRequest) => Promise<ChatDbResult<null>>>(),
-    updateMessageAndBlocks: vi.fn<(request: UpdateMessageAndBlocksRequest) => Promise<ChatDbResult<null>>>(),
+    updateMessageAndBlocks:
+      vi.fn<(request: UpdateMessageAndBlocksRequest) => Promise<ChatDbResult<FileCleanupResult>>>(),
     deleteMessage: vi.fn<(request: DeleteMessageRequest) => Promise<ChatDbResult<null>>>(),
     deleteMessages: vi.fn<(request: DeleteMessagesRequest) => Promise<ChatDbResult<null>>>(),
     updateBlocks: vi.fn<(request: UpdateBlocksRequest) => Promise<ChatDbResult<null>>>(),
     updateSingleBlock: vi.fn<(request: UpdateSingleBlockRequest) => Promise<ChatDbResult<null>>>(),
     bulkAddBlocks: vi.fn<(request: BulkAddBlocksRequest) => Promise<ChatDbResult<null>>>(),
-    deleteBlocks: vi.fn<(request: DeleteBlocksRequest) => Promise<ChatDbResult<null>>>(),
-    clearMessages: vi.fn<(request: ClearMessagesRequest) => Promise<ChatDbResult<null>>>(),
     // Phase 5.1A
     listSegments: vi.fn<(request: ListSegmentsRequest) => Promise<ChatDbResult<ListSegmentsResponse>>>(),
     upsertSegment: vi.fn<(request: UpsertSegmentRequest) => Promise<ChatDbResult<UpsertSegmentResponse>>>(),
@@ -150,6 +152,8 @@ function makeApiSpy() {
       vi.fn<(request: CloneMessagesToTopicRequest) => Promise<ChatDbResult<CloneMessagesToTopicResponse>>>(),
     resetMessagesForResend:
       vi.fn<(request: ResetMessagesForResendRequest) => Promise<ChatDbResult<ResetMessagesForResendResponse>>>(),
+    deleteBlocks: vi.fn<(request: DeleteBlocksRequest) => Promise<ChatDbResult<DeleteBlocksResponse>>>(),
+    clearMessages: vi.fn<(request: ClearMessagesRequest) => Promise<ChatDbResult<ClearMessagesResponse>>>(),
     deleteMessagesWithSegments:
       vi.fn<
         (request: DeleteMessagesWithSegmentsRequest) => Promise<ChatDbResult<DeleteMessagesWithSegmentsResponse>>
@@ -242,7 +246,7 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('updateMessageAndBlocks calls api.updateMessageAndBlocks (strips topicId/sortOrder)', async () => {
-      api.updateMessageAndBlocks.mockResolvedValue(successResult(null))
+      api.updateMessageAndBlocks.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
       const msgUpdates = { id: 'm-1', topicId: 't-1', sortOrder: 5, content: 'updated' } as any
       await ds.updateMessageAndBlocks('topic-1', msgUpdates, [])
       const req = api.updateMessageAndBlocks.mock.calls[0][0]
@@ -290,13 +294,13 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('deleteBlocks calls api.deleteBlocks', async () => {
-      api.deleteBlocks.mockResolvedValue(successResult(null))
+      api.deleteBlocks.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
       await ds.deleteBlocks(['b-1', 'b-2'])
       expect(api.deleteBlocks).toHaveBeenCalledWith({ blockIds: ['b-1', 'b-2'] })
     })
 
     it('clearMessages calls api.clearMessages', async () => {
-      api.clearMessages.mockResolvedValue(successResult(null))
+      api.clearMessages.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
       await ds.clearMessages('topic-1')
       expect(api.clearMessages).toHaveBeenCalledWith({ topicId: 'topic-1' })
     })
@@ -805,7 +809,7 @@ describe('SqliteMessageDataSource', () => {
       api.resetMessagesForResend.mockResolvedValue(
         successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } })
       )
-      const result = await ds.resetMessagesForResend('t-1', ['m1'], ['b1'])
+      const result = await ds.resetMessagesForResend('t-1', [{ message: { id: 'm1' }, blocks: [] }], ['b1'])
       expect(api.resetMessagesForResend).toHaveBeenCalledOnce()
       expect(mockDispatch).toHaveBeenCalledOnce()
       expect(result.affectedFileIds).toEqual(['f1'])
@@ -961,7 +965,7 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('dispatches after updateMessageAndBlocks', async () => {
-      api.updateMessageAndBlocks.mockResolvedValue(successResult(null))
+      api.updateMessageAndBlocks.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
       await dispatchesAfter(() => ds.updateMessageAndBlocks('t-1', { id: 'm-1' } as any, []))
     })
 
@@ -976,7 +980,7 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('dispatches after clearMessages', async () => {
-      api.clearMessages.mockResolvedValue(successResult(null))
+      api.clearMessages.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
       await dispatchesAfter(() => ds.clearMessages('t-1'))
     })
 
@@ -1016,7 +1020,7 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('does NOT dispatch after deleteBlocks', async () => {
-      api.deleteBlocks.mockResolvedValue(successResult(null))
+      api.deleteBlocks.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
       await doesNotDispatchAfter(() => ds.deleteBlocks(['b-1']))
     })
 

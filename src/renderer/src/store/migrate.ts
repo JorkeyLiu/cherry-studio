@@ -27,7 +27,6 @@ import { BUILTIN_OCR_PROVIDERS, BUILTIN_OCR_PROVIDERS_MAP, DEFAULT_OCR_PROVIDER 
 import { TRANSLATE_PROMPT } from '@renderer/config/prompts'
 import { SYSTEM_PROVIDERS } from '@renderer/config/providers'
 import { DEFAULT_SIDEBAR_ICONS } from '@renderer/config/sidebar'
-import db from '@renderer/databases'
 import { getModel } from '@renderer/hooks/useModel'
 import i18n from '@renderer/i18n'
 import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/AssistantService'
@@ -43,7 +42,7 @@ import type {
   WebSearchProvider
 } from '@renderer/types'
 import { isBuiltinMCPServer, isSystemProvider, SystemProviderIds } from '@renderer/types'
-import { getDefaultGroupName, getLeadingEmoji, runAsyncFunction, uuid } from '@renderer/utils'
+import { getDefaultGroupName, getLeadingEmoji, uuid } from '@renderer/utils'
 import {
   isSupportArrayContentProvider,
   isSupportDeveloperRoleProvider,
@@ -577,16 +576,6 @@ const migrateConfig = {
       state.assistants.assistants.forEach((assistant) => {
         assistant.topics.forEach((topic) => {
           topic.assistantId = assistant.id
-          void runAsyncFunction(async () => {
-            const _topic = await db.topics.get(topic.id)
-            if (_topic) {
-              const messages = (_topic?.messages || []).map((message) => ({
-                ...message,
-                assistantId: assistant.id
-              }))
-              void db.topics.put({ ..._topic, messages }, topic.id)
-            }
-          })
         })
       })
       return state

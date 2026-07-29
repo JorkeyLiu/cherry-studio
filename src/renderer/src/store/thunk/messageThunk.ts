@@ -16,12 +16,12 @@
  */
 import { loggerService } from '@logger'
 import { AiSdkToChunkAdapter } from '@renderer/aiCore/chunk/AiSdkToChunkAdapter'
-import db from '@renderer/databases'
 import { getModel } from '@renderer/hooks/useModel'
 import { buildGroupList, transferAnchorsAfterDeletion } from '@renderer/services/anchorService'
 import { fetchMessagesSummary, transformMessagesAndFetch } from '@renderer/services/ApiService'
 import { dbService } from '@renderer/services/db'
 import { DbService } from '@renderer/services/db/DbService'
+import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import FileManager from '@renderer/services/FileManager'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
@@ -30,6 +30,7 @@ import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
 import { type ApiServerConfig, type Assistant, type FileMetadata, type Model, type Topic } from '@renderer/types'
+import type { FileCleanupResult } from '@shared/chatDb'
 // Agent types inlined (agent.ts removed)
 type AgentEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 type AgentThinkingConfig =
@@ -574,7 +575,9 @@ export const cleanupMultipleBlocks = (dispatch: AppDispatch, blockIds: string[])
   })
 
   const getBlocksFiles = async (blockIds: string[]) => {
-    const blocks = await db.message_blocks.where('id').anyOf(blockIds).toArray()
+    const blocks = blockIds
+      .map((id) => store.getState().messageBlocks.entities[id])
+      .filter((block): block is MessageBlock => !!block)
     const files = blocks
       .filter((block) => block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE)
       .map((block) => block.file)
@@ -818,7 +821,6 @@ const dispatchMultiModelResponses = async (
       modelId: mentionedModel.id,
       traceId: triggeringMessage.traceId
     })
-    dispatch(newMessagesActions.addMessage({ topicId, message: assistantMessage }))
     assistantMessageStubs.push(assistantMessage)
     tasksToQueue.push({
       assistantConfig: assistantForThisMention,
@@ -826,15 +828,15 @@ const dispatchMultiModelResponses = async (
     })
   }
 
-  const topicFromDB = await db.topics.get(topicId)
-  if (topicFromDB) {
-    const currentTopicMessageIds = getState().messages.messageIdsByTopic[topicId] || []
-    const currentEntities = getState().messages.entities
-    const messagesToSaveInDB = currentTopicMessageIds.map((id) => currentEntities[id]).filter((m): m is Message => !!m)
-    await db.topics.update(topicId, { messages: messagesToSaveInDB })
-  } else {
-    logger.error(`[dispatchMultiModelResponses] Topic ${topicId} not found in DB during multi-model save.`)
-    throw new Error(`Topic ${topicId} not found in DB.`)
+  // LOCK-005: Persist all stubs via appendMessage BEFORE Redux dispatch
+  // and queueing. Failures must not expose unpersisted stubs.
+  for (const stub of assistantMessageStubs) {
+    await saveMessageAndBlocksToDB(topicId, stub, [])
+  }
+
+  // Now safe to dispatch to Redux
+  for (const stub of assistantMessageStubs) {
+    dispatch(newMessagesActions.addMessage({ topicId, message: stub }))
   }
 
   const queue = getTopicQueue(topicId)
@@ -1103,18 +1105,33 @@ export const deleteSingleMessageThunk =
     }
 
     try {
-      // Remove all messages from Redux
-      dispatch(newMessagesActions.removeMessages({ topicId, messageIds: idsToDelete }))
-      cleanupMultipleBlocks(dispatch, allBlockIds)
+      if (isAgentSessionTopicId(topicId)) {
+        // Agent topic: preserve existing behavior (no Main FileCleanupResult).
+        dispatch(newMessagesActions.removeMessages({ topicId, messageIds: idsToDelete }))
+        cleanupMultipleBlocks(dispatch, allBlockIds)
 
-      // Delete from DB
-      for (const id of idsToDelete) {
-        await dbService.deleteMessage(topicId, id)
-      }
+        for (const id of idsToDelete) {
+          await dbService.deleteMessage(topicId, id)
+        }
+        for (const id of idsToDelete) {
+          await dispatch(removeMessageFromSegmentsThunk({ topicId, messageId: id }))
+        }
+      } else {
+        // Ordinary topic: DB commit first (LOCK-001), consume cleanup once, then Redux.
+        // deleteMessagesWithSegments is atomic and returns FileCleanupResult.
+        const cleanup = await dbService.deleteMessagesWithSegments(topicId, idsToDelete)
 
-      // C2: Remove messages from associated topic segments
-      for (const id of idsToDelete) {
-        await dispatch(removeMessageFromSegmentsThunk({ topicId, messageId: id }))
+        // Cancel throttled block updates (file cleanup handled post-commit)
+        allBlockIds.forEach((id) => cancelThrottledBlockUpdate(id))
+
+        // Consume file cleanup exactly once after commit
+        await consumeFileCleanupResult(cleanup)
+
+        // Redux mutations AFTER successful SQLite commit
+        dispatch(newMessagesActions.removeMessages({ topicId, messageIds: idsToDelete }))
+        if (allBlockIds.length > 0) {
+          dispatch(removeManyBlocks(allBlockIds))
+        }
       }
 
       // Transfer anchors if user message was deleted (cascade)
@@ -1133,6 +1150,16 @@ export const deleteSingleMessageThunk =
 
 /**
  * Thunk to clear all messages and associated blocks for a topic.
+ *
+ * LOCK-001: For agent-session topics, route through the transactional
+ * TopicManager.clearTopicMessages (Dexie transaction + post-commit file
+ * cleanup) before Redux cleanup.  On failure, Redux remains unchanged.
+ *
+ * LOCK-002: Ordinary topics keep the current SQLite clearMessagesFromDB
+ * path.  SQLite clear commits first, returned cleanup is consumed
+ * post-commit, then Redux block/message state mutates.
+ *
+ * LOCK-003: No other changes beyond the agent branch.
  */
 export const clearTopicMessagesThunk =
   (topicId: string) => async (dispatch: AppDispatch, getState: () => RootState) => {
@@ -1148,13 +1175,33 @@ export const clearTopicMessagesThunk =
 
       const blockIdsToDelete = Array.from(blockIdsToDeleteSet)
 
-      dispatch(newMessagesActions.clearTopicMessages(topicId))
-      cleanupMultipleBlocks(dispatch, blockIdsToDelete)
-      await clearMessagesFromDB(topicId)
+      if (isAgentSessionTopicId(topicId)) {
+        // LOCK-001: Agent session — transactional Dexie clear + file cleanup.
+        // Dynamic import avoids circular dep (useTopic imports messageThunk).
+        const { TopicManager } = await import('@renderer/hooks/useTopic')
+        await TopicManager.clearTopicMessages(topicId)
+      } else {
+        // LOCK-002: Ordinary topic — SQLite commit first, atomic clear
+        // returns cleanup facts consumed post-commit.
+        await clearMessagesFromDB(topicId)
+      }
 
-      // C1: Also clear topic segments when clearing messages
-      dispatch(clearSegmentsForTopic(topicId))
+      // LOCK-001: Segment persistence BEFORE any Redux mutation.
+      // If segment DB write fails the catch block fires and Redux
+      // remains unchanged (LOCK-002).
       await clearTopicSegmentsFromDB(topicId)
+
+      // Cancel throttled block updates (no file cleanup — that's post-commit)
+      blockIdsToDelete.forEach((id) => {
+        cancelThrottledBlockUpdate(id)
+      })
+
+      // Redux mutations AFTER all DB persistence (messages + segments)
+      dispatch(newMessagesActions.clearTopicMessages(topicId))
+      if (blockIdsToDelete.length > 0) {
+        dispatch(removeManyBlocks(blockIdsToDelete))
+      }
+      dispatch(clearSegmentsForTopic(topicId))
     } catch (error) {
       logger.error(`[clearTopicMessagesThunk] Failed to clear messages for topic ${topicId}:`, error as Error)
     }
@@ -1198,20 +1245,10 @@ export const resendMessageThunk =
         })
         assistantMessage.traceId = userMessageToResend.traceId
         resetDataList.push(assistantMessage)
-
-        resetDataList.forEach((message) => {
-          dispatch(newMessagesActions.addMessage({ topicId, message }))
-        })
       }
 
       // 处理存在相关的助手消息的情况
       const allBlockIdsToDelete: string[] = []
-      const messagesToUpdateInRedux: {
-        topicId: string
-        messageId: string
-        updates: Partial<Message>
-      }[] = []
-
       // 先处理已有的重传
       for (const originalMsg of assistantMessagesToReset) {
         const modelToSet =
@@ -1227,11 +1264,6 @@ export const resendMessageThunk =
 
         resetDataList.push(resetMsg)
         allBlockIdsToDelete.push(...blockIdsToDelete)
-        messagesToUpdateInRedux.push({
-          topicId,
-          messageId: resetMsg.id,
-          updates: resetMsg
-        })
       }
 
       // 再处理新的重传（用户消息提及，但是现有助手消息中不存在提及的模型）
@@ -1245,20 +1277,34 @@ export const resendMessageThunk =
           modelId: model.id
         })
         resetDataList.push(assistantMessage)
-        dispatch(newMessagesActions.addMessage({ topicId, message: assistantMessage }))
       }
 
-      messagesToUpdateInRedux.forEach((update) => dispatch(newMessagesActions.updateMessage(update)))
-      cleanupMultipleBlocks(dispatch, allBlockIdsToDelete)
-
       try {
-        if (allBlockIdsToDelete.length > 0) {
-          await db.message_blocks.bulkDelete(allBlockIdsToDelete)
+        const cleanup = await dbService.resetMessagesForResend(
+          topicId,
+          resetDataList.map((message) => ({ message, blocks: [] })),
+          allBlockIdsToDelete
+        )
+        const currentMessages = selectMessagesForTopic(getState(), topicId)
+        for (const message of resetDataList) {
+          if (currentMessages.some((existing) => existing.id === message.id)) {
+            dispatch(newMessagesActions.updateMessage({ topicId, messageId: message.id, updates: message }))
+          }
         }
-        const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
-        await db.topics.update(topicId, { messages: finalMessagesToSave })
+        for (const message of resetDataList) {
+          if (!currentMessages.some((existing) => existing.id === message.id)) {
+            dispatch(newMessagesActions.addMessage({ topicId, message }))
+          }
+        }
+        // Cancel throttled block updates (file cleanup handled by consumeFileCleanupResult)
+        allBlockIdsToDelete.forEach((id) => cancelThrottledBlockUpdate(id))
+        if (allBlockIdsToDelete.length > 0) {
+          dispatch(removeManyBlocks(allBlockIdsToDelete))
+        }
+        await consumeFileCleanupResult(cleanup)
       } catch (dbError) {
         logger.error('[resendMessageThunk] Error updating database:', dbError as Error)
+        return
       }
 
       const queue = getTopicQueue(topicId)
@@ -1343,7 +1389,7 @@ export const regenerateAssistantResponseThunk =
       // 4. Get Block IDs to delete
       const blockIdsToDelete = [...(messageToResetEntity.blocks || [])]
 
-      // 5. Reset the message entity in Redux
+      // 5. Persist the reset and block deletion before mutating Redux.
       const resetAssistantMsg = resetAssistantMessage(
         messageToResetEntity,
         // Grouped message (mentioned model message) should not reset model and modelId, always use the original model
@@ -1359,29 +1405,20 @@ export const regenerateAssistantResponseThunk =
             }
       )
 
-      dispatch(
-        newMessagesActions.updateMessage({
-          topicId,
-          messageId: resetAssistantMsg.id,
-          updates: resetAssistantMsg
-        })
+      const cleanup = await dbService.resetMessagesForResend(
+        topicId,
+        [{ message: resetAssistantMsg, blocks: [] }],
+        blockIdsToDelete
       )
-
-      // 6. Remove old blocks from Redux
-      cleanupMultipleBlocks(dispatch, blockIdsToDelete)
-
-      // 7. Update DB: Save the reset message state within the topic and delete old blocks
-      // Fetch the current state *after* Redux updates to get the latest message list
-      // Use the selector to get the final ordered list of messages for the topic
-      const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
-
-      await db.transaction('rw', db.topics, db.message_blocks, async () => {
-        // Use the result from the selector to update the DB
-        await db.topics.update(topicId, { messages: finalMessagesToSave })
-        if (blockIdsToDelete.length > 0) {
-          await db.message_blocks.bulkDelete(blockIdsToDelete)
-        }
-      })
+      await consumeFileCleanupResult(cleanup)
+      // Cancel throttled block updates (file cleanup handled by consumeFileCleanupResult)
+      blockIdsToDelete.forEach((id) => cancelThrottledBlockUpdate(id))
+      dispatch(
+        newMessagesActions.updateMessage({ topicId, messageId: resetAssistantMsg.id, updates: resetAssistantMsg })
+      )
+      if (blockIdsToDelete.length > 0) {
+        dispatch(removeManyBlocks(blockIdsToDelete))
+      }
 
       // 8. Add fetch/process call to the queue
       const queue = getTopicQueue(topicId)
@@ -1454,12 +1491,7 @@ export const initiateTranslationThunk =
 
       // 3. Update Database
       // Get the final message list from Redux state *after* updates
-      const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
-
-      await db.transaction('rw', db.topics, db.message_blocks, async () => {
-        await db.message_blocks.put(newBlock) // Save the initial block
-        await db.topics.update(topicId, { messages: finalMessagesToSave }) // Save updated message list
-      })
+      await dbService.updateMessageAndBlocks(topicId, { id: messageId, blocks: updatedBlockIds }, [newBlock])
       return newBlock.id // Return the ID
     } catch (error) {
       logger.error(`[initiateTranslationThunk] Failed for message ${messageId}:`, error as Error)
@@ -1818,21 +1850,21 @@ export const cloneMessagesToNewTopicThunk =
       }
 
       // 5. Update Database (Atomic Transaction)
-      await db.transaction('rw', db.topics, db.message_blocks, db.files, async () => {
-        // Update the NEW topic with the cloned messages
-        // Assumes topic entry was added by caller, so we UPDATE.
-        await db.topics.put({ id: newTopic.id, messages: clonedMessages })
-
-        // Add the NEW blocks
-        if (clonedBlocks.length > 0) {
-          await bulkAddBlocks(clonedBlocks)
-        }
+      await dbService.cloneMessagesToTopic(
+        newTopic.id,
+        clonedMessages.map((message) => ({
+          message,
+          blocks: clonedBlocks.filter((block) => block.messageId === message.id)
+        })),
+        newTopic.assistantId
+      )
+      {
         // Update file counts
         const uniqueFiles = [...new Map(filesToUpdateCount.map((f) => [f.id, f])).values()]
         for (const file of uniqueFiles) {
           await updateFileCount(file.id, 1, false)
         }
-      })
+      }
 
       // --- Update Redux State ---
       dispatch(
@@ -1928,31 +1960,34 @@ export const removeBlocksThunk =
 
       const updatedBlockIds = (message.blocks || []).filter((id) => !blockIdsToRemoveSet.has(id))
 
-      // 1. Update Redux state
-      dispatch(
-        newMessagesActions.updateMessage({
-          topicId,
-          messageId,
-          updates: { blocks: updatedBlockIds }
-        })
-      )
-      cleanupMultipleBlocks(dispatch, blockIdsToRemove)
-
-      // 2. Update database - different handling for agent vs Dexie topics
+      // Persist ordinary chat changes before Redux; agent sessions retain their
+      // existing source-specific update behavior.
       if (isAgentSessionTopicId(topicId)) {
         // For agent topics: dbService.updateMessage routes to AgentMessageDataSource
         await dbService.updateMessage(topicId, messageId, {
           blocks: updatedBlockIds
         })
       } else {
-        // For Dexie topics: use transaction for atomicity
-        const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
-        await db.transaction('rw', db.topics, db.message_blocks, async () => {
-          await db.topics.update(topicId, { messages: finalMessagesToSave })
-          if (blockIdsToRemove.length > 0) {
-            await db.message_blocks.bulkDelete(blockIdsToRemove)
-          }
-        })
+        const cleanup = await dbService.updateMessageAndBlocks(
+          topicId,
+          { ...message, blocks: updatedBlockIds },
+          [],
+          blockIdsToRemove
+        )
+        await consumeFileCleanupResult(cleanup)
+        // Cancel throttled block updates (file cleanup handled by consumeFileCleanupResult)
+        blockIdsToRemove.forEach((id) => cancelThrottledBlockUpdate(id))
+      }
+
+      dispatch(newMessagesActions.updateMessage({ topicId, messageId, updates: { blocks: updatedBlockIds } }))
+      if (isAgentSessionTopicId(topicId)) {
+        // Agent topic: preserve existing cleanup behavior (no Main FileCleanupResult)
+        cleanupMultipleBlocks(dispatch, blockIdsToRemove)
+      } else {
+        // Ordinary topic: file cleanup already consumed; Redux-only block removal
+        if (blockIdsToRemove.length > 0) {
+          dispatch(removeManyBlocks(blockIdsToRemove))
+        }
       }
 
       dispatch(updateTopicUpdatedAt({ topicId }))
@@ -2043,15 +2078,30 @@ export const updateFileCount = async (fileId: string, delta: number, deleteIfZer
 }
 
 /**
- * Delete multiple messages from database
+ * Delete multiple messages from database.
+ * For ordinary topics: uses atomic deleteMessagesWithSegments returning FileCleanupResult.
+ * For agent topics: uses deleteMessages (no cleanup), returns empty FileCleanupResult.
+ * LOCK-001: caller must consume FileCleanupResult exactly once post-commit before Redux changes.
  */
-export const deleteMessagesFromDB = async (topicId: string, messageIds: string[]): Promise<void> => {
+export const deleteMessagesFromDB = async (topicId: string, messageIds: string[]): Promise<FileCleanupResult> => {
   try {
-    await dbService.deleteMessages(topicId, messageIds)
-    logger.silly('Deleted messages via DbService', {
+    if (isAgentSessionTopicId(topicId)) {
+      // Agent topic: preserve existing behavior (no Main FileCleanupResult).
+      await dbService.deleteMessages(topicId, messageIds)
+      logger.silly('Deleted agent messages via DbService', {
+        topicId,
+        count: messageIds.length
+      })
+      return { affectedFileIds: [], remainingReferenceCounts: {} }
+    }
+    // Ordinary topic: atomic compound deletion returns FileCleanupResult.
+    const cleanup = await dbService.deleteMessagesWithSegments(topicId, messageIds)
+    logger.silly('Deleted messages via deleteMessagesWithSegments', {
       topicId,
-      count: messageIds.length
+      count: messageIds.length,
+      affectedFileCount: cleanup.affectedFileIds.length
     })
+    return cleanup
   } catch (error) {
     logger.error('Failed to delete messages:', { topicId, messageIds, error })
     throw error
@@ -2061,10 +2111,12 @@ export const deleteMessagesFromDB = async (topicId: string, messageIds: string[]
 /**
  * Clear all messages from a topic
  */
-export const clearMessagesFromDB = async (topicId: string): Promise<void> => {
+export const clearMessagesFromDB = async (topicId: string): Promise<FileCleanupResult> => {
   try {
-    await dbService.clearMessages(topicId)
+    const cleanup = await dbService.clearMessages(topicId)
+    await consumeFileCleanupResult(cleanup)
     logger.silly('Cleared all messages via DbService', { topicId })
+    return cleanup
   } catch (error) {
     logger.error('Failed to clear messages:', { topicId, error })
     throw error

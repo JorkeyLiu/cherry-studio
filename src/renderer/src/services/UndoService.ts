@@ -1,5 +1,6 @@
 import { loggerService } from '@logger'
 import { dbService } from '@renderer/services/db'
+import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
@@ -233,7 +234,7 @@ async function undoPaste(
   getState: () => RootState,
   action: PasteUndoAction | CutPasteUndoAction
 ): Promise<void> {
-  const { targetTopicId, insertedMessageIds = [], fileReferenceDeltas = [], targetSegmentSnapshots = [] } = action
+  const { targetTopicId, insertedMessageIds = [], targetSegmentSnapshots = [] } = action
 
   if (insertedMessageIds.length === 0) {
     logger.warn('[undoPaste] No message IDs to remove')
@@ -250,13 +251,17 @@ async function undoPaste(
     }
   }
 
-  // DB-first: delete from DB before dispatching to Redux
+  // DB-first: delete from DB before dispatching to Redux (LOCK-001)
+  let cleanup
   try {
-    await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
+    cleanup = await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
   } catch (error) {
     logger.error('[undoPaste] Failed to delete from DB', error as Error)
     throw error
   }
+
+  // Consume file cleanup exactly once after commit
+  await consumeFileCleanupResult(cleanup)
 
   // Remove messages from Redux only after DB delete succeeds
   dispatch(newMessagesActions.removeMessages({ topicId: targetTopicId, messageIds: insertedMessageIds }))
@@ -275,10 +280,10 @@ async function undoPaste(
   // Sync segments after message deletion (only non-target segments remain)
   await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds)
 
-  // Decrement file reference counts
-  if (fileReferenceDeltas.length > 0) {
-    await updateFileReferenceCounts(fileReferenceDeltas, false)
-  }
+  // LOCK-P5.3-1: No separate updateFileReferenceCounts here.
+  // consumeFileCleanupResult above already handled physical file cleanup
+  // via FileManager.deleteFile which decrements Dexie files.count. A second
+  // dbService.updateFileCount would double-decrement the same references.
 
   logger.info(
     `[undoPaste] Removed ${insertedMessageIds.length} pasted messages, ${targetSegmentSnapshots.length} target segments`
@@ -337,7 +342,7 @@ async function undoCutPaste(
  * Redo delete = re-delete the messages again
  */
 async function redoDelete(dispatch: AppDispatch, getState: () => RootState, action: DeleteUndoAction): Promise<void> {
-  const { targetTopicId, insertedMessageIds = [], fileReferenceDeltas = [] } = action
+  const { targetTopicId, insertedMessageIds = [] } = action
 
   if (insertedMessageIds.length === 0) {
     return
@@ -353,13 +358,17 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
     }
   }
 
-  // DB-first: delete from DB before dispatching to Redux
+  // DB-first: delete from DB before dispatching to Redux (LOCK-001)
+  let cleanup
   try {
-    await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
+    cleanup = await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
   } catch (error) {
     logger.error('[redoDelete] Failed to delete from DB', error as Error)
     throw error
   }
+
+  // Consume file cleanup exactly once after commit
+  await consumeFileCleanupResult(cleanup)
 
   // Remove messages from Redux only after DB delete succeeds
   dispatch(newMessagesActions.removeMessages({ topicId: targetTopicId, messageIds: insertedMessageIds }))
@@ -372,10 +381,9 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
   // Sync segments after message deletion
   await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds)
 
-  // Re-decrement file reference counts (redo delete → need -1, deltas are -1 so use true to keep -1)
-  if (fileReferenceDeltas.length > 0) {
-    await updateFileReferenceCounts(fileReferenceDeltas, true)
-  }
+  // LOCK-P5.3-1: No separate updateFileReferenceCounts here.
+  // consumeFileCleanupResult above already handled physical file cleanup
+  // via FileManager.deleteFile which decrements Dexie files.count.
 
   logger.info(`[redoDelete] Re-deleted ${insertedMessageIds.length} messages`)
 }
@@ -479,13 +487,17 @@ async function redoCutPaste(
       }
     }
 
-    // DB-first: delete from DB before dispatching to Redux
+    // DB-first: delete from DB before dispatching to Redux (LOCK-001)
+    let cleanup
     try {
-      await deleteMessagesFromDB(sourceTopicId, sourceMsgIds)
+      cleanup = await deleteMessagesFromDB(sourceTopicId, sourceMsgIds)
     } catch (error) {
       logger.error('[redoCutPaste] Failed to delete source messages from DB', error as Error)
       throw error
     }
+
+    // Consume file cleanup exactly once after commit
+    await consumeFileCleanupResult(cleanup)
 
     dispatch(newMessagesActions.removeMessages({ topicId: sourceTopicId, messageIds: sourceMsgIds }))
     if (blockIdsToRemove.length > 0) {
@@ -495,21 +507,9 @@ async function redoCutPaste(
     // Sync segments after source message deletion
     await syncSegmentsAfterMessageDeletion(dispatch, getState, sourceTopicId, sourceMsgIds)
 
-    // Decrement file reference counts for source blocks
-    const sourceFileDeltas: Array<{ fileId: string; delta: number }> = []
-    for (const anchor of sourceGroupAnchors) {
-      for (const block of anchor.blocks) {
-        if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
-          const file = (block as any).file
-          if (file) {
-            sourceFileDeltas.push({ fileId: file.id, delta: -1 })
-          }
-        }
-      }
-    }
-    if (sourceFileDeltas.length > 0) {
-      await updateFileReferenceCounts(sourceFileDeltas, true)
-    }
+    // LOCK-P5.3-1: No separate updateFileReferenceCounts for source blocks here.
+    // consumeFileCleanupResult above already handled physical file cleanup
+    // via FileManager.deleteFile which decrements Dexie files.count.
   }
 
   // Step 2: Re-insert pasted messages to target topic (DB-first)

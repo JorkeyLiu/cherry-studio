@@ -391,6 +391,8 @@ export enum IpcChannel {
 
   // Phase 5.2B — atomic assistant empty-trash (LOCK-531)
   ChatDb_EmptyTrashTopics = 'chatdb:empty-trash-topics',
+  ChatDb_TransferTopicOwnership = 'chatdb:transfer-topic-ownership',
+  ChatDb_ResetAssistantTopics = 'chatdb:reset-assistant-topics',
 
   // Phase 5.1B — compound mutations
   ChatDb_CloneMessagesToTopic = 'chatdb:clone-messages-to-topic',

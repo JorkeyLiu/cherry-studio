@@ -24,6 +24,7 @@ import type {
   ChatDbError,
   ChatDbResult,
   ClearMessagesRequest,
+  ClearMessagesResponse,
   ClearTopicWithSegmentsRequest,
   ClearTopicWithSegmentsResponse,
   CloneMessagesToTopicRequest,
@@ -31,6 +32,7 @@ import type {
   CountFileRefsByFileRequest,
   CountFileRefsByFileResponse,
   DeleteBlocksRequest,
+  DeleteBlocksResponse,
   DeleteMessageRequest,
   DeleteMessagesRequest,
   DeleteMessagesWithSegmentsRequest,
@@ -63,6 +65,7 @@ import type {
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplaceSegmentMembershipResponse,
+  ResetAssistantTopicsResponse,
   ResetMessagesForResendRequest,
   ResetMessagesForResendResponse,
   RestoreTopicRequest,
@@ -100,14 +103,14 @@ export interface ChatDbApi {
   ensureTopic(request: EnsureTopicRequest): Promise<ChatDbResult<null>>
   appendMessage(request: AppendMessageRequest): Promise<ChatDbResult<null>>
   updateMessage(request: UpdateMessageRequest): Promise<ChatDbResult<null>>
-  updateMessageAndBlocks(request: UpdateMessageAndBlocksRequest): Promise<ChatDbResult<null>>
+  updateMessageAndBlocks(request: UpdateMessageAndBlocksRequest): Promise<ChatDbResult<FileCleanupResult>>
   deleteMessage(request: DeleteMessageRequest): Promise<ChatDbResult<null>>
   deleteMessages(request: DeleteMessagesRequest): Promise<ChatDbResult<null>>
   updateBlocks(request: UpdateBlocksRequest): Promise<ChatDbResult<null>>
   updateSingleBlock(request: UpdateSingleBlockRequest): Promise<ChatDbResult<null>>
   bulkAddBlocks(request: BulkAddBlocksRequest): Promise<ChatDbResult<null>>
-  deleteBlocks(request: DeleteBlocksRequest): Promise<ChatDbResult<null>>
-  clearMessages(request: ClearMessagesRequest): Promise<ChatDbResult<null>>
+  deleteBlocks(request: DeleteBlocksRequest): Promise<ChatDbResult<DeleteBlocksResponse>>
+  clearMessages(request: ClearMessagesRequest): Promise<ChatDbResult<ClearMessagesResponse>>
   // Phase 5.1A: segment commands
   listSegments(request: ListSegmentsRequest): Promise<ChatDbResult<ListSegmentsResponse>>
   upsertSegment(request: UpsertSegmentRequest): Promise<ChatDbResult<UpsertSegmentResponse>>
@@ -131,6 +134,11 @@ export interface ChatDbApi {
   purgeExpiredTopics(request: PurgeExpiredTopicsRequest): Promise<ChatDbResult<PurgeExpiredTopicsResponse>>
   // Phase 5.2B: atomic assistant empty-trash (LOCK-531)
   emptyTrashTopics(request: EmptyTrashTopicsRequest): Promise<ChatDbResult<EmptyTrashTopicsResponse>>
+  transferTopicOwnership?(request: { topicId: string; assistantId: string }): Promise<ChatDbResult<null>>
+  resetAssistantTopics?(request: {
+    assistantId: string
+    replacementTopicId: string
+  }): Promise<ChatDbResult<ResetAssistantTopicsResponse>>
   // Phase 5.1B: compound mutations
   cloneMessagesToTopic(request: CloneMessagesToTopicRequest): Promise<ChatDbResult<CloneMessagesToTopicResponse>>
   resetMessagesForResend(request: ResetMessagesForResendRequest): Promise<ChatDbResult<ResetMessagesForResendResponse>>
@@ -317,7 +325,7 @@ function sanitizeInsertIndex(index: number | undefined): number | undefined {
 // ---------------------------------------------------------------------------
 // updateTopicUpdatedAt dispatch
 //
-// Matches DexieMessageDataSource behavior: dispatch after successful
+// Preserve the existing Redux timestamp behavior after successful
 // message/topic mutations only.
 // ---------------------------------------------------------------------------
 
@@ -408,8 +416,9 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async updateMessageAndBlocks(
     topicId: string,
     messageUpdates: Partial<Message> & Pick<Message, 'id'>,
-    blocksToUpdate: MessageBlock[]
-  ): Promise<void> {
+    blocksToUpdate: MessageBlock[],
+    blockIdsToDelete: string[] = []
+  ): Promise<FileCleanupResult> {
     // Clone and strip redundant identity/order fields for Dexie-compatible semantics
     const clonedUpdates = cloneForWire(messageUpdates as unknown as JsonObject) as Record<string, unknown>
     delete clonedUpdates.topicId
@@ -418,10 +427,12 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const request: UpdateMessageAndBlocksRequest = {
       topicId,
       messageUpdates: clonedUpdates as JsonObject,
-      blocksToUpdate: cloneForWire(blocksToUpdate as unknown as JsonObject[])
+      blocksToUpdate: cloneForWire(blocksToUpdate as unknown as JsonObject[]),
+      blockIdsToDelete: cloneForWire(blockIdsToDelete)
     }
-    unwrap(await this.api.updateMessageAndBlocks(request))
+    const result = unwrap(await this.api.updateMessageAndBlocks(request))
     dispatchTopicUpdatedAt(topicId)
+    return result
   }
 
   async deleteMessage(topicId: string, messageId: string): Promise<void> {
@@ -463,18 +474,19 @@ export class SqliteMessageDataSource implements MessageDataSource {
     // No topicUpdatedAt dispatch — block-only operation
   }
 
-  async deleteBlocks(blockIds: string[]): Promise<void> {
+  async deleteBlocks(blockIds: string[]): Promise<FileCleanupResult> {
     const request: DeleteBlocksRequest = cloneForWire({ blockIds })
-    unwrap(await this.api.deleteBlocks(request))
+    return unwrap(await this.api.deleteBlocks(request))
     // No topicUpdatedAt dispatch — block-only operation
   }
 
   // ============ Batch Operations ============
 
-  async clearMessages(topicId: string): Promise<void> {
+  async clearMessages(topicId: string): Promise<FileCleanupResult> {
     const request: ClearMessagesRequest = cloneForWire({ topicId })
-    unwrap(await this.api.clearMessages(request))
+    const result = unwrap(await this.api.clearMessages(request))
     dispatchTopicUpdatedAt(topicId)
+    return result
   }
 
   async topicExists(topicId: string): Promise<boolean> {
@@ -608,6 +620,16 @@ export class SqliteMessageDataSource implements MessageDataSource {
     return unwrap(await this.api.emptyTrashTopics(request))
   }
 
+  async transferTopicOwnership(topicId: string, assistantId: string): Promise<void> {
+    if (!this.api.transferTopicOwnership) throw new Error('transferTopicOwnership is unavailable')
+    unwrap(await this.api.transferTopicOwnership(cloneForWire({ topicId, assistantId })))
+  }
+
+  async resetAssistantTopics(assistantId: string, replacementTopicId: string): Promise<ResetAssistantTopicsResponse> {
+    if (!this.api.resetAssistantTopics) throw new Error('resetAssistantTopics is unavailable')
+    return unwrap(await this.api.resetAssistantTopics(cloneForWire({ assistantId, replacementTopicId })))
+  }
+
   // ============ Compound Mutations (Phase 5.1B) ============
 
   async cloneMessagesToTopic(targetTopicId: string, entries: MessageBlockEntry[], assistantId?: string): Promise<void> {
@@ -618,10 +640,10 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   async resetMessagesForResend(
     topicId: string,
-    messageIds: string[],
+    messages: MessageBlockEntry[],
     blockIdsToDelete: string[]
   ): Promise<FileCleanupResult> {
-    const request: ResetMessagesForResendRequest = cloneForWire({ topicId, messageIds, blockIdsToDelete })
+    const request: ResetMessagesForResendRequest = cloneForWire({ topicId, messages, blockIdsToDelete })
     const result = unwrap(await this.api.resetMessagesForResend(request))
     dispatchTopicUpdatedAt(topicId)
     return result

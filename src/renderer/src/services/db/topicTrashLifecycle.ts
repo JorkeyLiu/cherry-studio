@@ -190,6 +190,15 @@ export async function emptyOrdinaryTrash(assistantId: string): Promise<void> {
   await consumeFileCleanupResult(cleanup)
 }
 
+export async function resetOrdinaryAssistantTopics(
+  assistantId: string,
+  replacementTopicId: string
+): Promise<{ replacementTopic: Topic; cleanup: FileCleanupResult }> {
+  const result = await sqliteSource.resetAssistantTopics(assistantId, replacementTopicId)
+  await consumeFileCleanupResult(result.cleanup)
+  return { replacementTopic: topicWireToTopic(result.replacementTopic), cleanup: result.cleanup }
+}
+
 /**
  * Purge expired ordinary-chat trash topics in SQLite using a renderer
  * generated strict ISO cutoff (LOCK-523), then consume the cleanup result.

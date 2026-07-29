@@ -8,7 +8,6 @@ import {
   isVisionModels,
   isWebSearchModel
 } from '@renderer/config/models'
-import db from '@renderer/databases'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useInputText } from '@renderer/hooks/useInputText'
 import { useMessageOperations, useTopicLoading, useTopicMessages } from '@renderer/hooks/useMessageOperations'
@@ -445,8 +444,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
       logger.error('Failed to establish SQLite ownership for new topic', error as Error)
       return
     }
-
-    await db.topics.add({ id: newTopic.id, messages: [] })
 
     if (assistant.defaultModel) {
       setModel(assistant.defaultModel)

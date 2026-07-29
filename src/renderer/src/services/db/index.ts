@@ -32,17 +32,7 @@ export {
   isAgentSessionTopicId
 } from './types'
 
-// Export routing policy types (Phase 3.4)
-export type {
-  AgentMessageSource,
-  DbRoutingPolicy,
-  DbServiceDeps,
-  DexieMessageSource,
-  OrdinaryMessageSource
-} from './routingPolicy'
-
 // Export implementations (for testing or direct access if needed)
 export { AgentMessageDataSource } from './AgentMessageDataSource'
-export { DexieMessageDataSource } from './DexieMessageDataSource'
 export type { ChatDbApi } from './SqliteMessageDataSource'
 export { ChatDbResultError, SqliteMessageDataSource } from './SqliteMessageDataSource'

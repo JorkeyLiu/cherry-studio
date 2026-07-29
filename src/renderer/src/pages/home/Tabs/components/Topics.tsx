@@ -8,7 +8,6 @@ import ObsidianExportPopup from '@renderer/components/Popups/ObsidianExportPopup
 import PromptPopup from '@renderer/components/Popups/PromptPopup'
 import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePopup'
 import { isMac } from '@renderer/config/constant'
-import { db } from '@renderer/databases'
 import { useAssistant, useAssistants } from '@renderer/hooks/useAssistant'
 import { useInPlaceEdit } from '@renderer/hooks/useInPlaceEdit'
 import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
@@ -178,11 +177,9 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
       // Phase 5.2B: classify at the boundary (LOCK-521). Ordinary restore is
       // SQLite; agent-session restore keeps its Dexie behavior.
       if (isAgentSessionTopicId(topicId)) {
-        await TopicManager.restoreTopic(topicId)
-        const topic = await TopicManager.getTopic(topicId)
-        if (topic) {
-          const restoredTopic = { ...(topic as Topic) }
-          delete restoredTopic.deletedAt
+        // LOCK-003: use restored Dexie row directly; no second Redux lookup.
+        const restoredTopic = await TopicManager.restoreTopic(topicId)
+        if (restoredTopic) {
           addTopic(restoredTopic)
         }
       } else {
@@ -206,11 +203,8 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
 
   const createPersistedReplacement = useCallback(async () => {
     const newTopic = getDefaultTopic(assistant.id)
-    // LOCK-533: SQLite assistant ownership first, then the Dexie
-    // message-store row. Redux exposure happens only after the delete
-    // committed (inside deleteTopicFlow).
+    // LOCK-533: SQLite assistant ownership first.
     await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id)
-    await db.topics.add({ id: newTopic.id, messages: [] })
     return newTopic
   }, [assistant.id])
 
@@ -337,7 +331,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
       await modelGenerating()
       const index = findIndex(assistant.topics, (t) => t.id === topic.id)
       setActiveTopic(assistant.topics[index + 1 === assistant.topics.length ? 0 : index + 1])
-      moveTopic(topic, toAssistant)
+      await moveTopic(topic, toAssistant)
     },
     [assistant.topics, moveTopic, setActiveTopic]
   )

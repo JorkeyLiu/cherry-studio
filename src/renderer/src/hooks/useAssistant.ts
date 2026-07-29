@@ -6,11 +6,12 @@ import {
   MODEL_SUPPORTED_OPTIONS,
   MODEL_SUPPORTED_REASONING_EFFORT
 } from '@renderer/config/models'
-import { db } from '@renderer/databases'
 import { getDefaultTopic } from '@renderer/services/AssistantService'
+import { dbService } from '@renderer/services/db'
 import { persistTopicMetadata } from '@renderer/services/db/topicMetadataPersist'
 import {
   ensureOrdinaryTopicOwnership,
+  resetOrdinaryAssistantTopics,
   restoreOrdinaryTopic,
   softDeleteOrdinaryTopic
 } from '@renderer/services/db/topicTrashLifecycle'
@@ -20,7 +21,6 @@ import {
   addTopic,
   addTopicFromTrash,
   insertAssistant,
-  removeAllTopics,
   removeAssistant,
   removeTopic,
   setModel,
@@ -245,13 +245,12 @@ export function useAssistant(id: string) {
       dispatch(removeTopic({ assistantId: assistant.id, topic }))
     },
     restoreTopic: async (topicId: string) => {
-      // Phase 5.2B: agent-session restore stays on Dexie (LOCK-521).
+      // Phase 5.2B: agent-session restore stays on Dexie (LOCK-521/003).
+      // TopicManager.restoreTopic now returns the restored topic from Dexie
+      // even when absent from Redux.
       if (isAgentSessionTopicId(topicId)) {
-        const topic = (await TopicManager.getTopic(topicId)) as Topic | undefined
-        if (topic) {
-          await TopicManager.restoreTopic(topicId)
-          const restoredTopic = { ...topic }
-          delete restoredTopic.deletedAt
+        const restoredTopic = await TopicManager.restoreTopic(topicId)
+        if (restoredTopic) {
           dispatch(addTopicFromTrash({ assistantId: assistant.id, topic: restoredTopic }))
         }
         return
@@ -264,21 +263,15 @@ export function useAssistant(id: string) {
         dispatch(addTopicFromTrash({ assistantId: assistant.id, topic: restoredTopic }))
       }
     },
-    moveTopic: (topic: Topic, toAssistant: Assistant) => {
+    moveTopic: async (topic: Topic, toAssistant: Assistant) => {
+      if (isAgentSessionTopicId(topic.id)) {
+        dispatch(addTopic({ assistantId: toAssistant.id, topic: { ...topic, assistantId: toAssistant.id } }))
+        dispatch(removeTopic({ assistantId: assistant.id, topic }))
+        return
+      }
+      await dbService.transferTopicOwnership(topic.id, toAssistant.id)
       dispatch(addTopic({ assistantId: toAssistant.id, topic: { ...topic, assistantId: toAssistant.id } }))
       dispatch(removeTopic({ assistantId: assistant.id, topic }))
-      // update topic messages in database
-      void db.topics
-        .where('id')
-        .equals(topic.id)
-        .modify((dbTopic) => {
-          if (dbTopic.messages) {
-            dbTopic.messages = dbTopic.messages.map((message) => ({
-              ...message,
-              assistantId: toAssistant.id
-            }))
-          }
-        })
     },
     updateTopic: async (topic: Topic) => {
       // Phase 5.2B: persist metadata to SQLite before Redux mutation.
@@ -288,7 +281,16 @@ export function useAssistant(id: string) {
       dispatch(updateTopic({ assistantId: assistant.id, topic }))
     },
     updateTopics: (topics: Topic[]) => dispatch(updateTopics({ assistantId: assistant.id, topics })),
-    removeAllTopics: () => dispatch(removeAllTopics({ assistantId: assistant.id })),
+    removeAllTopics: async () => {
+      const requestedReplacement = getDefaultTopic(assistant.id)
+      const { replacementTopic } = await resetOrdinaryAssistantTopics(assistant.id, requestedReplacement.id)
+      for (const topic of assistant.topics) {
+        if (isAgentSessionTopicId(topic.id)) {
+          await TopicManager.removeTopic(topic.id)
+        }
+      }
+      dispatch(updateTopics({ assistantId: assistant.id, topics: [replacementTopic] }))
+    },
     setModel: useCallback(
       (model: Model) => assistant && dispatch(setModel({ assistantId: assistant?.id, model })),
       [assistant, dispatch]

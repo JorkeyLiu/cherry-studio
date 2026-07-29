@@ -1,10 +1,10 @@
 # SQLite 运行时迁移与 Cherry Studio 兼容导入 — 个人 fork 演进记录（面向未来独立 Cherry Chat）
 
-> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（已提交/已推送至迁移分支 `85603d0fd5`）；集成同步门 Baseline Sync Gate Done（integration `05a401b711` 已集成同步，已验证）；Phase 4.4.0（Promotion 协议基础，纯协议层）Done；Phase 4.4.1（Durable Preparation Gate，快照就绪准备门）Done；Phase 4.4.2（Destructive Promotion Executor，破坏性替换执行，止于 durable replacement-verified）Done（已提交 `3a81557ac6`）；Phase 4.4.3（Recovery/Finalization：artifact probes、rollback、journal cleanup、terminal take、repair marker、recovery executor/gate、startup reorder）Done（实现 + 独立审计 pass（两项 accepted fixes：real durable repair marker、startup gate fail-closed）+ 全量验证通过：focus 71/1709/72 skipped；format 无改动；lint 0 errors/97 warnings；test 281/6205/72 skipped；typecheck:node pass；两次 ENOENT failures 非复现；未提交/未推送）；Phase 5 In progress（Phase 5.0 Done；Phase 5.1A Done（已提交 `6fa5ff5ef9`）；Phase 5.1B Done（已提交 `e44e413f30`，未推送）；Phase 5.2A Done（已提交 `e9de29ff97`，未推送）；Phase 5.2B 实现 + 独立审计 + 全量验证完成（未提交/未推送；Electron 运行时 UI 验证受 better-sqlite3 ABI 阻塞）；Phase 5.3 Not started；Phase 5.4 Not started））
+> **文档状态**：In progress（Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（已提交/已推送至迁移分支 `85603d0fd5`）；集成同步门 Baseline Sync Gate Done（integration `05a401b711` 已集成同步，已验证）；Phase 4.4.0（Promotion 协议基础，纯协议层）Done；Phase 4.4.1（Durable Preparation Gate，快照就绪准备门）Done；Phase 4.4.2（Destructive Promotion Executor，破坏性替换执行，止于 durable replacement-verified）Done（已提交 `3a81557ac6`）；Phase 4.4.3（Recovery/Finalization：artifact probes、rollback、journal cleanup、terminal take、repair marker、recovery executor/gate、startup reorder）Done（实现 + 独立审计 pass（两项 accepted fixes：real durable repair marker、startup gate fail-closed）+ 全量验证通过：focus 71/1709/72 skipped；format 无改动；lint 0 errors/97 warnings；test 281/6205/72 skipped；typecheck:node pass；两次 ENOENT failures 非复现；未提交/未推送）；Phase 5 In progress（Phase 5.0 Done；Phase 5.1A Done（已提交 `6fa5ff5ef9`）；Phase 5.1B Done（已提交 `e44e413f30`，未推送）；Phase 5.2A Done（已提交 `e9de29ff97`，未推送）；Phase 5.2B 实现 + 独立审计 + 全量验证完成（未提交/未推送；Electron 运行时 UI 验证受 better-sqlite3 ABI 阻塞）；Phase 5.3 Done（实现 + 独立审计 + 全量验证完成；待提交/未推送；Electron 运行时 UI 验证受 better-sqlite3 ABI 阻塞）；Phase 5.4 Not started））
 >
 > ✅ **集成同步门（Baseline Sync Gate，Done/已合并/已验证）**：integration 分支（`05a401b711`）已集成同步进 migration 分支（pre-merge HEAD `5d50499e80`）；合并自动解决、无兼容性编辑；审计无阻塞/无代码发现，验证全部通过（format 无改动；lint exit 0 / 112 known warnings；typecheck 通过；`pnpm test` 265 文件 / 5664 通过 / 72 跳过 / 0 失败；聚焦测试 201 renderer + 822 chatDb/import）。Phase 4.4 既有架构未改变；合并后统一的 Renderer/context/type/Redux 结构已作为 Phase 5 实施基线。详见 Section 9「集成同步门（Baseline Sync Gate）」与决策日志。
 > **分支**：`jorkey/refactor/sqlite-migration`
-> **最后更新**：2026-07-28
+> **最后更新**：2026-07-29
 > **Owner**：Personal fork（jorkeyliu）
 >
 > ⚠️ **ADR-8 策略更正（2026-07-20）**：Phase 4+ 的产品策略已更正为**外部应用兼容性导入**模型。原 in-place Dexie→SQLite shadow/cutover 模型已正式废弃。详见 Section 6 A-8。
@@ -610,13 +610,13 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 属性 | 值 |
 |---|---|
-| **状态** | In progress（Phase 5.0 Done；Phase 5.1A Done（已提交 `6fa5ff5ef9`）；Phase 5.1B Done（已提交 `e44e413f30`，未推送）；Phase 5.2A Done（已提交 `e9de29ff97`，未推送）；Phase 5.2B 实现 + 独立审计 + 全量验证完成（未提交/未推送；Electron 运行时 UI 验证受 better-sqlite3 ABI 阻塞）；Phase 5.3 Not started；Phase 5.4 Not started） |
+| **状态** | In progress（Phase 5.0 Done；Phase 5.1A Done（已提交 `6fa5ff5ef9`）；Phase 5.1B Done（已提交 `e44e413f30`，未推送）；Phase 5.2A Done（已提交 `e9de29ff97`，未推送）；Phase 5.2B 实现 + 独立审计 + 全量验证完成（未提交/未推送；Electron 运行时 UI 验证受 better-sqlite3 ABI 阻塞）；Phase 5.3 Done（实现 + 独立审计 + 全量验证完成；待提交/未推送；Electron 运行时 UI 验证受 better-sqlite3 ABI 阻塞）；Phase 5.4 Not started） |
 | **前置** | Phase 4 完成（至少一次成功端到端导入）；**以合并后的 Renderer/context/type/Redux 结构为实施基线（集成同步门见 Section 9「集成同步门（Baseline Sync Gate）」）** |
 | **目标** | Cherry Chat 普通聊天路径完全使用 SQLite，移除 Dexie 路由和临时验证 scaffolding |
 | **主要任务** | DbService 默认路由直连 SQLite（无 Dexie 路由、无 routingPolicy 注入策略）；移除 Phase 3.4 路由策略代码（C-13）；Dexie 仅保留在隔离 import renderer 内部；从普通聊天路径移除 DexieMessageDataSource（C-11）；清理 Renderer 直接 Dexie 访问（C-10）；性能基准验证（不低于 Dexie 基线） |
 | **退出条件** | ✅ 普通聊天路径无 Dexie 依赖；✅ Phase 3.4 routing scaffolding 完全移除；✅ 性能不低于 Dexie 基线；✅ 所有现有测试通过；✅ CI 绿色 |
 
-> **Phase 5 子阶段边界（本 session 确立）**：Phase 5 拆为 5.0（基线就绪与子阶段划分，Done）、5.1A（SQLite 命令面补全：segments / file-ref / reorder，已提交 `6fa5ff5ef9`）、5.1B（主题生命周期 + 复合命令 + 搜索，已提交 `e44e413f30`，未推送）、5.2A（SearchResults 调用方迁移：Dexie → SQLite 搜索，已提交 `e9de29ff97`，未推送）、5.2B（主题生命周期调用方集成 + 复合操作增强，实现 + 独立审计 + 全量验证完成，未提交/未推送）、5.3（权威切换与 scaffolding 移除）、5.4（E2E/性能/清理门）。Phase 4 全部 LOCK-44xx 与历史决策继续有效，不重复声明。Phase 5 全部 LOCK-51xx 见本节末尾「Phase 5 Decision Locks」。
+> **Phase 5 子阶段边界（本 session 确立）**：Phase 5 拆为 5.0（基线就绪与子阶段划分，Done）、5.1A（SQLite 命令面补全：segments / file-ref / reorder，已提交 `6fa5ff5ef9`）、5.1B（主题生命周期 + 复合命令 + 搜索，已提交 `e44e413f30`，未推送）、5.2A（SearchResults 调用方迁移：Dexie → SQLite 搜索，已提交 `e9de29ff97`，未推送）、5.2B（主题生命周期调用方集成 + 复合操作增强，实现 + 独立审计 + 全量验证完成，未提交/未推送）、5.3（权威切换与 scaffolding 移除，实现 + 独立审计 + 全量验证完成，未提交/未推送）、5.4（E2E/性能/清理门）。Phase 4 全部 LOCK-44xx 与历史决策继续有效，不重复声明。Phase 5 全部 LOCK-51xx 见本节末尾「Phase 5 Decision Locks」。
 
 #### Phase 5.0：基线就绪与子阶段划分
 
@@ -684,11 +684,16 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 | 属性 | 值 |
 |---|---|
-| **状态** | Not started |
+| **状态** | **Done（实现 + 独立审计 + 全量验证完成；未提交/未推送；Electron 运行时 UI 验证受 better-sqlite3 ABI 阻塞）** |
 | **目标** | DbService 默认路由直连 SQLite；移除 Phase 3.4 `routingPolicy.ts`（C-13）；从普通路径移除 `DexieMessageDataSource`（C-11）；清理 Renderer 直接 Dexie 访问（C-10）；Dexie 仅保留于隔离 import renderer |
 | **前置** | Phase 5.2A + 5.2B 调用方迁移完成 |
 | **主要任务** | 翻转默认数据源为 SQLite；删除路由策略注入与 sqlite-authoritative 拒绝路径；Dexie 路由仅留 import renderer 内部 |
-| **退出条件** | ✅ 普通聊天路径无 Dexie 依赖；✅ Phase 3.4 scaffolding 完全移除；✅ 全部现有测试通过 |
+| **实际交付范围** | **普通聊天路径直连 SQLite**：`DbService` 默认数据源从 Dexie 切换为 SQLite，所有普通聊天操作经 `SqliteMessageDataSource` → IPC → `ChatDbAggregateService` → `chat.db`。**routingPolicy scaffolding 移除（C-13）**：删除 `src/renderer/src/services/db/routingPolicy.ts`（`DbRoutingPolicy` 类型、`OrdinaryMessageSource`/`DexieMessageSource`/`AgentMessageSource` 依赖接口、`DbServiceDeps` 构造选项、`'dexie'`/`'sqlite-validation'`/`'sqlite-authoritative'` 策略路由）；`DbService` 重构为无注入直连 SQLite（移除构造注入策略、懒加载切换、永久 Dexie 单例）。**DexieMessageDataSource 从普通路径移除（C-11）**：`src/renderer/src/services/db/DexieMessageDataSource.ts` 从普通聊天路径删除（C-10），仅保留于隔离 import renderer 内部。**Agent 边界保留**：agent session 操作仍经 `AgentMessageDataSource` stub（no-op），与 Phase 5.2B agent Dexie 边界一致。**FileCleanupResult / topic 所有权 / composite 事务语义**：Phase 5.1B/5.2B 已实现的 LOCK-5106…5113 不变量在直连 SQLite 路径上继续有效 |
+| **Atomic ownership / reset / resend / destructive cleanup** | 原子 ownership 解析（block → message → topic 路径，LOCK-5107）在直连 SQLite 路径上完整保留；reset / resend 操作（`ResetMessagesForResend` / `DeleteMessagesWithSegments` / `ClearTopicWithSegments`）在单 root 事务内执行 FK cascade（LOCK-5106），`FileCleanupResult` 消费语义不变（LOCK-5108/5109） |
+| **Agent / import exceptions** | Agent session 操作保持 `AgentMessageDataSource` stub 路由（策略无关最高优先级）；import renderer 内部仍使用 Dexie（Phase 4 隔离 import 架构不变） |
+| **Electron 运行时验证限制（LOCK-DOC5）** | 成功路径 runtime UI 验证受 better-sqlite3 ABI 127 vs Electron ABI 145 阻塞；失败路径 runtime 检查已通过 |
+| **验证事实** | 标准本地全量验证通过（2026-07-29）：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（97 oxlint warnings + 34 ESLint warnings / 0 errors）；`pnpm test` exit 0，295 文件 / 6577 通过 / 72 跳过 / 0 失败；`pnpm typecheck` pass；`git diff --check` pass。独立审计 pass（0 blockers）。工作区待提交/未推送 |
+| **退出条件** | ✅ 普通聊天路径无 Dexie 依赖；✅ Phase 3.4 scaffolding 完全移除（routingPolicy.ts 删除）；✅ DexieMessageDataSource 从普通路径移除（C-11）；✅ 直连 SQLite 路径原子 ownership / reset / resend / destructive cleanup 语义完整；✅ agent / import 边界保留；✅ 全部现有测试通过（295 文件 / 6577 通过 / 72 跳过 / 0 失败）；✅ 独立审计 pass；✅ `pnpm format` / `pnpm lint` / `pnpm typecheck` / `git diff --check` 全通过 |
 
 #### Phase 5.4：E2E / 性能 / 清理门
 
@@ -871,17 +876,17 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 ### Phase 5 exit criteria（Cherry Chat SQLite-only runtime）
 
-> 顶层退出指标保留；子阶段进度见 Section 9 Phase 5 及「Phase 5 Decision Locks」。Phase 5.1A 已提交、5.1B 已提交（`e44e413f30`，未推送）；5.2A 已提交（`e9de29ff97`，未推送）、5.2B 实现 + 独立审计 + 全量验证完成（未提交/未推送）；5.3/5.4 仍 Not started。
+> 顶层退出指标保留；子阶段进度见 Section 9 Phase 5 及「Phase 5 Decision Locks」。Phase 5.1A 已提交、5.1B 已提交（`e44e413f30`，未推送）；5.2A 已提交（`e9de29ff97`，未推送）、5.2B 实现 + 独立审计 + 全量验证完成（未提交/未推送）；5.3 实现 + 独立审计 + 全量验证完成（待提交/未推送；Electron 运行时 UI 验证受 better-sqlite3 ABI 阻塞）；5.4 仍 Not started。
 
 | 指标 | 目标 | 状态 |
 |---|---|---|
 | 消息加载延迟（p50/p95） | 不退化 | Not started（5.4 门） |
 | 消息写入吞吐 | 不退化 | Not started（5.4 门） |
-| 数据完整性 | 100% | In progress（5.1A/5.1B 命令面 + migration 003 实现已提交；5.2A 搜索迁移已提交；5.2B 调用方集成 + 全量验证完成，未提交/未推送；5.3/5.4 待办） |
+| 数据完整性 | 100% | In progress（5.1A/5.1B 命令面 + migration 003 实现已提交；5.2A 搜索迁移已提交；5.2B 调用方集成 + 全量验证完成，未提交/未推送；5.3 权威切换 + scaffolding 移除完成，待提交/未推送；5.4 待办） |
 | 冷启动 DB 打开时间 | < 500ms | Not started（5.4 门） |
-| 普通聊天路径无 Dexie 依赖 | 0 Dexie 引用 | In progress（5.2A 已迁移 SearchResults 至 SQLite；5.2B 集成主题生命周期调用方；5.3 移除 scaffolding 待办） |
-| Phase 3.4 routing scaffolding | 完全移除 | Not started（5.3） |
-| 所有测试通过 + CI 绿色 | 100% | In progress（标准本地全量通过：`pnpm test` 289 文件 / 6629 通过 / 72 跳过 / 0 失败；focused/shared/Main/renderer checks 通过；`pnpm format` 无改动；`pnpm lint` exit 0 / 33 warnings / 0 errors；`pnpm typecheck` pass；`git diff --check` pass。CI 待办——`CI=true` 下 30 个 pre-existing no-console errors 为 baseline 环境行为，非 Phase 5.2B 回归） |
+| 普通聊天路径无 Dexie 依赖 | 0 Dexie 引用 | **Done（5.3）**（5.2A 已迁移 SearchResults 至 SQLite；5.2B 集成主题生命周期调用方；5.3 完成权威切换 + scaffolding 移除，普通聊天路径直连 SQLite） |
+| Phase 3.4 routing scaffolding | 完全移除 | **Done（5.3）** |
+| 所有测试通过 + CI 绿色 | 100% | In progress（标准本地全量通过：`pnpm test` 295 文件 / 6577 通过 / 72 跳过 / 0 失败；focused/shared/Main/renderer checks 通过；`pnpm format` 无改动；`pnpm lint` exit 0 / 97 oxlint + 34 ESLint warnings / 0 errors；`pnpm typecheck` pass；`git diff --check` pass。CI 待办——`CI=true` 下 30 个 pre-existing no-console errors 为 baseline 环境行为，非 Phase 5 回归） |
 
 ### Phase 6 exit criteria（备份/恢复适配 + L2/L3 语义分离 + 清理）
 
@@ -1004,7 +1009,8 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-28** | Phase 5.1B | **Done（已提交 `e44e413f30`，未推送）**：主题生命周期 + 复合命令 + 搜索实现完成。12 命令/表面；`FileCleanupResult` 无文件系统副作用（LOCK-5108/5109）；复合单 root 事务 + 所有权强制（LOCK-5106/5107）；purge cutoff 调用方提供（LOCK-5113）；migration 003 FTS 归一化投影 append-only 幂等（LOCK-5121/5126/5127）；搜索 FTS 候选加速器 + 精确 regex + 错误传播（LOCK-5101/5123/5124/5125/5128）；块级游标；SearchResults 调用方仍 Dexie（Phase 5.2A 边界）。10k 基准：LIKE p50 8.96/p95 10.28/mean 8.83ms；hybrid p50 2.90/p95 6.51/mean 3.40ms；加速 p50 3.09x/p95 1.58x（LOCK-5129）。聚焦验证通过；全量 format/lint/test/typecheck 通过 |
 | **2026-07-28** | Phase 5.2A | **Done（已提交 `e9de29ff97`，未推送）**：SearchResults 调用方迁移（Dexie → SQLite 搜索）。`SearchResults.tsx` 切到 `chatDb.searchMessages`；新增测试套件（620 行）；i18n 字段更新；`SqliteMessageDataSource` 适配 |
 | **2026-07-28** | Phase 5.2B | **实现 + 独立审计 + 全量验证完成（未提交/未推送）**：主题生命周期调用方集成（`topicMetadataPersist.ts` / `topicTrashLifecycle.ts` / `topicDeletionFlow.ts`）+ 助手空 trash 原子操作 + FileCleanupResult 消费 + 普通 topic 所有权保障 + agent Dexie 边界 + 确定性分页。已知延后（LOCK-DOC4）：MoveTopic ownership / legacy ImportService / assistant-removal。Electron 运行时验证限制（LOCK-DOC5）：成功路径受 better-sqlite3 ABI 阻塞。全量验证：289 文件 / 6629 通过 / 72 跳过；focused/shared/Main/renderer checks 通过；`pnpm format` 无改动；`pnpm lint` exit 0 / 33 warnings / 0 errors；`pnpm typecheck` pass；`git diff --check` pass。CI 环境 `CI=true` 下 30 个 pre-existing no-console errors 为 baseline 行为（非 Phase 5.2B 回归）。未提交/未推送 |
-| **2026-07-28** | Phase 5.3 / 5.4 | **Not started**：5.3 权威切换 + routingPolicy scaffolding 移除（C-13/C-11/C-10）；5.4 E2E/性能/清理门。Phase 5 未完成，未声称提交/推送/CI 绿色 |
+| **2026-07-29** | Phase 5.3 | **Done（实现 + 独立审计 + 全量验证完成，待提交/未推送）**：DbService 默认路由直连 SQLite；routingPolicy scaffolding 移除（C-13：`routingPolicy.ts` 删除、构造注入策略 / 懒加载切换 / 永久 Dexie 单例 / `sqlite-authoritative` 拒绝路径全部移除）；DexieMessageDataSource 从普通聊天路径移除（C-11）；agent session 操作保持 `AgentMessageDataSource` stub 路由（策略无关最高优先级）；import renderer 内部仍使用 Dexie（Phase 4 隔离 import 架构不变）。原子 ownership / reset / resend / destructive cleanup 语义在直连 SQLite 路径上完整保留（LOCK-5106…5109）。**全量验证**：`pnpm format` exit 0 无改动；`pnpm lint` exit 0（97 oxlint + 34 ESLint warnings / 0 errors）；`pnpm test` 295 文件 / 6577 通过 / 72 跳过 / 0 失败；`pnpm typecheck` pass；`git diff --check` pass。独立审计 pass（0 blockers）。Electron 运行时 UI 验证受 better-sqlite3 ABI 127 vs Electron ABI 145 阻塞（LOCK-DOC5）。未提交/未推送 |
+| **2026-07-28** | Phase 5.3 / 5.4 | ~~Not started~~ → Phase 5.3 Done（2026-07-29）；5.4 仍 Not started |
 
 ---
 

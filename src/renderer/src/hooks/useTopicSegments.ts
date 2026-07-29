@@ -1,5 +1,5 @@
 import { loggerService } from '@logger'
-import db from '@renderer/databases'
+import { dbService } from '@renderer/services/db'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { addSegment, removeSegment, updateSegment } from '@renderer/store/topicSegment'
 import type { TopicSegment } from '@renderer/types/topicSegment'
@@ -71,7 +71,7 @@ export function useTopicSegments(topicId: string) {
         updatedAt: now
       }
       // DB-first: write to DB before updating Redux
-      await db.topic_segments.put(segment)
+      await dbService.upsertSegment(segment.id, segment.topicId, segment.name, segment.messageIds, segment.color)
       dispatch(addSegment(segment))
       logger.info(`Created segment "${name}" with ${messageIds.length} messages`)
       return segment
@@ -83,7 +83,7 @@ export function useTopicSegments(topicId: string) {
     async (segmentId: string, name: string) => {
       const now = new Date().toISOString()
       // DB-first
-      await db.topic_segments.update(segmentId, { name, updatedAt: now })
+      await dbService.updateSegmentMetadata(segmentId, name)
       dispatch(updateSegment({ id: segmentId, changes: { name, updatedAt: now } }))
     },
     [dispatch]
@@ -93,7 +93,7 @@ export function useTopicSegments(topicId: string) {
     async (segmentId: string, newMessageIds: string[]) => {
       const now = new Date().toISOString()
       // DB-first
-      await db.topic_segments.update(segmentId, { messageIds: newMessageIds, updatedAt: now })
+      await dbService.replaceSegmentMembership(segmentId, newMessageIds)
       dispatch(updateSegment({ id: segmentId, changes: { messageIds: newMessageIds, updatedAt: now } }))
     },
     [dispatch]
@@ -102,7 +102,7 @@ export function useTopicSegments(topicId: string) {
   const deleteSegment = useCallback(
     async (segmentId: string) => {
       // DB-first
-      await db.topic_segments.delete(segmentId)
+      await dbService.deleteSegment(segmentId)
       dispatch(removeSegment(segmentId))
       logger.info(`Deleted segment ${segmentId}`)
     },

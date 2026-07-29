@@ -1,6 +1,6 @@
 import { loggerService } from '@logger'
-import db from '@renderer/databases'
 import { dbService } from '@renderer/services/db'
+import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { clearClipboard, setClipboard } from '@renderer/store/clipboard'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
@@ -477,7 +477,13 @@ export async function pasteMessages(
       }
 
       // Persist to DB + Redux
-      await db.topic_segments.put(newSegment)
+      await dbService.upsertSegment(
+        newSegment.id,
+        newSegment.topicId,
+        newSegment.name,
+        newSegment.messageIds,
+        newSegment.color
+      )
       dispatch(addSegment(newSegment))
       targetSegmentSnapshots.push(newSegment)
     }
@@ -492,10 +498,13 @@ export async function pasteMessages(
     // Collect segment snapshots BEFORE deletion (needed for undo)
     sourceSegmentSnapshots = collectSegmentSnapshots(getState, sourceTopicId, sourceMessageIdsToDelete)
 
-    // DB-first: delete from DB before dispatching to Redux
+    // DB-first: delete from DB before dispatching to Redux (LOCK-001)
     if (sourceMessageIdsToDelete.length > 0) {
       try {
-        await deleteMessagesFromDB(sourceTopicId, sourceMessageIdsToDelete)
+        const cleanup = await deleteMessagesFromDB(sourceTopicId, sourceMessageIdsToDelete)
+
+        // Consume file cleanup exactly once after commit
+        await consumeFileCleanupResult(cleanup)
 
         // Dispatch to Redux only after DB delete succeeds
         dispatch(newMessagesActions.removeMessages({ topicId: sourceTopicId, messageIds: sourceMessageIdsToDelete }))
@@ -510,10 +519,9 @@ export async function pasteMessages(
       }
     }
 
-    // Decrement file references for source blocks
-    for (const { fileId, delta } of fileReferenceDeltas) {
-      await dbService.updateFileCount(fileId, -delta, false)
-    }
+    // LOCK-P5.3-1: No separate updateFileCount for source blocks here.
+    // consumeFileCleanupResult above already handled physical file cleanup
+    // via FileManager.deleteFile which decrements Dexie files.count.
 
     dispatch(clearClipboard())
   }
@@ -628,13 +636,17 @@ export async function deleteSelectedMessages(
   // Collect segment snapshots BEFORE deletion (needed for undo)
   const segmentSnapshots = collectSegmentSnapshots(getState, topicId, allMessageIds)
 
-  // DB-first: delete from DB before dispatching to Redux
+  // DB-first: delete from DB before dispatching to Redux (LOCK-001)
+  let cleanup
   try {
-    await deleteMessagesFromDB(topicId, allMessageIds)
+    cleanup = await deleteMessagesFromDB(topicId, allMessageIds)
   } catch (error) {
     logger.error('[deleteSelectedMessages] Failed to delete from DB', error as Error)
     return 0
   }
+
+  // Consume file cleanup exactly once after commit, before Redux/file changes
+  await consumeFileCleanupResult(cleanup)
 
   // Remove from Redux only after DB delete succeeds
   dispatch(newMessagesActions.removeMessages({ topicId, messageIds: allMessageIds }))
@@ -652,10 +664,10 @@ export async function deleteSelectedMessages(
   // Sync segments after message deletion
   await syncSegmentsAfterMessageDeletion(dispatch, getState, topicId, allMessageIds)
 
-  // Update file reference counts
-  for (const { fileId, delta } of fileReferenceDeltas) {
-    await dbService.updateFileCount(fileId, delta, false)
-  }
+  // LOCK-P5.3-1: No separate updateFileCount here. consumeFileCleanupResult
+  // above already handled physical file cleanup via FileManager.deleteFile
+  // which decrements Dexie files.count. A second dbService.updateFileCount
+  // would double-decrement the same references.
 
   // Create undo action
   const undoAction: DeleteUndoAction = {
@@ -745,13 +757,17 @@ export async function deleteSingleMessage(
   // Collect segment snapshots BEFORE deletion (needed for undo)
   const segmentSnapshots = collectSegmentSnapshots(getState, topicId, allMessageIds)
 
-  // DB-first: delete from DB before dispatching to Redux
+  // DB-first: delete from DB before dispatching to Redux (LOCK-001)
+  let cleanup
   try {
-    await deleteMessagesFromDB(topicId, allMessageIds)
+    cleanup = await deleteMessagesFromDB(topicId, allMessageIds)
   } catch (error) {
     logger.error('[deleteSingleMessage] Failed to delete from DB', error as Error)
     return
   }
+
+  // Consume file cleanup exactly once after commit, before Redux/file changes
+  await consumeFileCleanupResult(cleanup)
 
   // Redux: remove from state only after DB delete succeeds
   dispatch(newMessagesActions.removeMessages({ topicId, messageIds: allMessageIds }))
@@ -771,10 +787,10 @@ export async function deleteSingleMessage(
   // Sync segments after message deletion
   await syncSegmentsAfterMessageDeletion(dispatch, getState, topicId, allMessageIds)
 
-  // Update file reference counts
-  for (const { fileId, delta } of fileReferenceDeltas) {
-    await dbService.updateFileCount(fileId, delta, false)
-  }
+  // LOCK-P5.3-1: No separate updateFileCount here. consumeFileCleanupResult
+  // above already handled physical file cleanup via FileManager.deleteFile
+  // which decrements Dexie files.count. A second dbService.updateFileCount
+  // would double-decrement the same references.
 
   // Build undo data
   const groupAnchor: GroupAnchor = {

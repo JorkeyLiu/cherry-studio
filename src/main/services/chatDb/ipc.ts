@@ -51,11 +51,13 @@ import type {
   PurgeExpiredTopicsRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
   RestoreTopicRequest,
   SearchMessagesRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
+  TransferTopicOwnershipRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
@@ -226,7 +228,7 @@ export function registerChatDbIpc(): () => void {
 
   // 7. update-message-and-blocks
   handleCommand(IpcChannel.ChatDb_UpdateMessageAndBlocks, (agg, req: UpdateMessageAndBlocksRequest) => {
-    return agg.updateMessageAndBlocks(req.topicId, req.messageUpdates, req.blocksToUpdate)
+    return agg.updateMessageAndBlocks(req.topicId, req.messageUpdates, req.blocksToUpdate, req.blockIdsToDelete)
   })
 
   // 8. delete-message
@@ -346,7 +348,7 @@ export function registerChatDbIpc(): () => void {
 
   // 31. reset-messages-for-resend (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_ResetMessagesForResend, (agg, req: ResetMessagesForResendRequest) => {
-    return agg.resetMessagesForResend(req.topicId, req.messageIds, req.blockIdsToDelete)
+    return agg.resetMessagesForResend(req.topicId, req.messages, req.blockIdsToDelete)
   })
 
   // 32. delete-messages-with-segments (Phase 5.1B)
@@ -372,6 +374,14 @@ export function registerChatDbIpc(): () => void {
   // 36. empty-trash-topics (Phase 5.2B, LOCK-531)
   handleCommand(IpcChannel.ChatDb_EmptyTrashTopics, (agg, req: EmptyTrashTopicsRequest) => {
     return agg.emptyTrashTopics(req.assistantId)
+  })
+
+  handleCommand(IpcChannel.ChatDb_TransferTopicOwnership, (agg, req: TransferTopicOwnershipRequest) => {
+    return agg.transferTopicOwnership(req.topicId, req.assistantId)
+  })
+
+  handleCommand(IpcChannel.ChatDb_ResetAssistantTopics, (agg, req: ResetAssistantTopicsRequest) => {
+    return agg.resetAssistantTopics(req.assistantId, req.replacementTopicId)
   })
 
   logger.info(`Registered ${handlers.length} ChatDb IPC handlers (registration #${registrationId})`)

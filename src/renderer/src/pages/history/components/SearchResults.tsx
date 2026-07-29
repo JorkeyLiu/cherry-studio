@@ -1,7 +1,7 @@
 import { loggerService } from '@logger'
 import { LoadingIcon } from '@renderer/components/Icons'
-import db from '@renderer/databases'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
+import { dbService } from '@renderer/services/db'
 import { ChatDbResultError, SqliteMessageDataSource } from '@renderer/services/db/SqliteMessageDataSource'
 import { selectTopicsMap } from '@renderer/store/assistants'
 import type { Topic } from '@renderer/types'
@@ -387,10 +387,8 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
 
   const handleMessageClick = useCallback(
     async (item: SearchResultItem) => {
-      // Resolve the full Message object from the existing Dexie topic record
-      // solely for navigation callback compatibility (LOCK-004).
-      const topic = await db.topics.get(item.topicId)
-      const message = topic?.messages?.find((m) => m.id === item.messageId)
+      const { messages } = await dbService.fetchMessages(item.topicId)
+      const message = messages.find((m) => m.id === item.messageId)
       if (!message) {
         window.toast.error(t('history.error.message_not_found'))
         return

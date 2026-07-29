@@ -5,8 +5,9 @@ import type { SpanEntity, TokenUsage } from '@mcp-trace/trace-core'
 import { cleanContext, endContext, getContext, startContext } from '@mcp-trace/trace-web'
 import type { Context, Span } from '@opentelemetry/api'
 import { context, SpanStatusCode, trace } from '@opentelemetry/api'
-import { db } from '@renderer/databases'
 import { getEnableDeveloperMode } from '@renderer/hooks/useSettings'
+import { TopicManager } from '@renderer/hooks/useTopic'
+import { dbService } from '@renderer/services/db'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { handleResult } from '@renderer/trace/dataHandler/CommonResultHandler'
 import { handleMessageStream } from '@renderer/trace/dataHandler/MessageStreamHandler'
@@ -79,7 +80,7 @@ class SpanManagerService {
     if (message.role === 'user') {
       await window.api.trace.cleanHistory(message.topicId, message.traceId)
 
-      const topic = await db.topics.get(message.topicId)
+      const topic = await TopicManager.getTopic(message.topicId)
       _models = topic?.messages.filter((m) => m.role === 'assistant' && m.askId === message.id).map((m) => m.model)
     } else {
       _models = [message.model]
@@ -138,12 +139,10 @@ class SpanManagerService {
   private async _getContentFromMessage(message: Message, content?: string): Promise<StartSpanParams> {
     let _content = content
     if (!_content) {
-      const blocks = await Promise.all(
-        message.blocks.map(async (blockId) => {
-          return await db.message_blocks.get(blockId)
-        })
-      )
-      _content = blocks.find((data) => data?.type === MessageBlockType.MAIN_TEXT)?.content
+      const { blocks } = await dbService.fetchMessages(message.topicId)
+      const blockIds = new Set(message.blocks)
+      const matchingBlocks = blocks.filter((block) => blockIds.has(block.id))
+      _content = matchingBlocks.find((data) => data?.type === MessageBlockType.MAIN_TEXT)?.content
     }
     return {
       topicId: message.topicId,

@@ -137,6 +137,7 @@ export interface UpdateMessageAndBlocksRequest {
   messageUpdates: JsonObject
   /** Block entities to upsert. Each must contain `id` and `messageId`. */
   blocksToUpdate: JsonObject[]
+  blockIdsToDelete?: string[]
 }
 
 /** @see IpcChannel.ChatDb_DeleteMessage */
@@ -177,11 +178,13 @@ export interface BulkAddBlocksRequest {
 export interface DeleteBlocksRequest {
   blockIds: string[]
 }
+export type DeleteBlocksResponse = FileCleanupResult
 
 /** @see IpcChannel.ChatDb_ClearMessages */
 export interface ClearMessagesRequest {
   topicId: string
 }
+export type ClearMessagesResponse = FileCleanupResult
 
 // ---------------------------------------------------------------------------
 // Command response DTOs
@@ -424,6 +427,23 @@ export interface EmptyTrashTopicsRequest {
 /** @see IpcChannel.ChatDb_EmptyTrashTopics */
 export type EmptyTrashTopicsResponse = FileCleanupResult
 
+export interface TransferTopicOwnershipRequest {
+  topicId: string
+  assistantId: string
+}
+
+export type TransferTopicOwnershipResponse = null
+
+export interface ResetAssistantTopicsRequest {
+  assistantId: string
+  replacementTopicId: string
+}
+
+export interface ResetAssistantTopicsResponse {
+  cleanup: FileCleanupResult
+  replacementTopic: TopicWire
+}
+
 // ---------------------------------------------------------------------------
 // Compound mutation DTOs (Phase 5.1B)
 // ---------------------------------------------------------------------------
@@ -450,8 +470,8 @@ export type CloneMessagesToTopicResponse = null
 /** @see IpcChannel.ChatDb_ResetMessagesForResend */
 export interface ResetMessagesForResendRequest {
   topicId: string
-  /** Message IDs to reset. Each must belong to topicId. */
-  messageIds: string[]
+  /** Complete message payloads to reset or insert. */
+  messages: MessageBlockEntry[]
   /** Block IDs to delete as part of the reset. */
   blockIdsToDelete: string[]
 }
@@ -559,7 +579,7 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:ensure-topic': { request: EnsureTopicRequest; response: null }
   'chatdb:append-message': { request: AppendMessageRequest; response: null }
   'chatdb:update-message': { request: UpdateMessageRequest; response: null }
-  'chatdb:update-message-and-blocks': { request: UpdateMessageAndBlocksRequest; response: null }
+  'chatdb:update-message-and-blocks': { request: UpdateMessageAndBlocksRequest; response: FileCleanupResult }
   'chatdb:delete-message': { request: DeleteMessageRequest; response: null }
   'chatdb:delete-messages': { request: DeleteMessagesRequest; response: null }
   'chatdb:update-blocks': { request: UpdateBlocksRequest; response: null }
@@ -590,6 +610,11 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:hard-delete-topic': { request: HardDeleteTopicRequest; response: HardDeleteTopicResponse }
   'chatdb:purge-expired-topics': { request: PurgeExpiredTopicsRequest; response: PurgeExpiredTopicsResponse }
   'chatdb:empty-trash-topics': { request: EmptyTrashTopicsRequest; response: EmptyTrashTopicsResponse }
+  'chatdb:transfer-topic-ownership': {
+    request: TransferTopicOwnershipRequest
+    response: TransferTopicOwnershipResponse
+  }
+  'chatdb:reset-assistant-topics': { request: ResetAssistantTopicsRequest; response: ResetAssistantTopicsResponse }
   // Phase 5.1B: compound mutations
   'chatdb:clone-messages-to-topic': {
     request: CloneMessagesToTopicRequest

@@ -27,11 +27,13 @@ import type {
   PurgeExpiredTopicsRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
   RestoreTopicRequest,
   SearchMessagesRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
+  TransferTopicOwnershipRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
@@ -631,6 +633,10 @@ const api = {
     // Phase 5.2B: atomic assistant empty-trash (LOCK-531)
     emptyTrashTopics: (request: EmptyTrashTopicsRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_EmptyTrashTopics, request),
+    transferTopicOwnership: (request: TransferTopicOwnershipRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_TransferTopicOwnership, request),
+    resetAssistantTopics: (request: ResetAssistantTopicsRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ResetAssistantTopics, request),
     // Phase 5.1B: compound mutations
     cloneMessagesToTopic: (request: CloneMessagesToTopicRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_CloneMessagesToTopic, request),

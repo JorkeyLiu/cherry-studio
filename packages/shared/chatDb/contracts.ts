@@ -39,11 +39,13 @@ import type {
   PurgeExpiredTopicsRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
   RestoreTopicRequest,
   SearchMessagesRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
+  TransferTopicOwnershipRequest,
   UpdateBlocksRequest,
   UpdateMessageAndBlocksRequest,
   UpdateMessageRequest,
@@ -268,11 +270,12 @@ const updateMessageContract: ChatDbContract = {
 }
 
 const updateMessageAndBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messageUpdates', 'blocksToUpdate'),
+  allowedKeys: keySet('topicId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete'),
   validate(value: unknown): void {
     validateRequest(value, updateMessageAndBlocksContract.allowedKeys)
     const req = value as UpdateMessageAndBlocksRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    if (req.blockIdsToDelete !== undefined) validateStringArray(req.blockIdsToDelete, 'request.blockIdsToDelete')
     validateJsonObject(req.messageUpdates, 'request.messageUpdates')
     validateIdField(req.messageUpdates, 'request.messageUpdates')
     // Reject identity/reparenting fields at the shared request boundary
@@ -291,7 +294,7 @@ const updateMessageAndBlocksContract: ChatDbContract = {
       }
     }
   },
-  validateResult: voidResult('chatdb:update-message-and-blocks')
+  validateResult: fileCleanupResultValidator('chatdb:update-message-and-blocks')
 }
 
 const deleteMessageContract: ChatDbContract = {
@@ -369,7 +372,7 @@ const deleteBlocksContract: ChatDbContract = {
     const req = value as DeleteBlocksRequest
     validateStringArray(req.blockIds, 'request.blockIds')
   },
-  validateResult: voidResult('chatdb:delete-blocks')
+  validateResult: fileCleanupResultValidator('chatdb:delete-blocks')
 }
 
 const clearMessagesContract: ChatDbContract = {
@@ -379,7 +382,7 @@ const clearMessagesContract: ChatDbContract = {
     const req = value as ClearMessagesRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
   },
-  validateResult: voidResult('chatdb:clear-messages')
+  validateResult: fileCleanupResultValidator('chatdb:clear-messages')
 }
 
 // ---------------------------------------------------------------------------
@@ -791,6 +794,12 @@ function fileCleanupResultValidator(channel: string): (result: unknown) => void 
     validateResultEnvelope(result, channel)
     const obj = result as Record<string, unknown>
     if (obj.ok === true) {
+      if (obj.value === null || typeof obj.value !== 'object' || Array.isArray(obj.value)) {
+        throw new ValidationError(
+          'result.value',
+          `[${channel}] Expected FileCleanupResult object, got ${obj.value === null ? 'null' : typeof obj.value}`
+        )
+      }
       const v = obj.value as Record<string, unknown>
       validateStringArray(v.affectedFileIds, `result.value.affectedFileIds`)
       validateJsonObject(v.remainingReferenceCounts, `result.value.remainingReferenceCounts`)
@@ -839,6 +848,50 @@ const emptyTrashTopicsContract: ChatDbContract = {
   validateResult: fileCleanupResultValidator('chatdb:empty-trash-topics')
 }
 
+const transferTopicOwnershipContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'assistantId'),
+  validate(value: unknown): void {
+    validateRequest(value, transferTopicOwnershipContract.allowedKeys)
+    const req = value as TransferTopicOwnershipRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateNonEmptyString(req.assistantId, 'request.assistantId')
+  },
+  validateResult: voidResult('chatdb:transfer-topic-ownership')
+}
+
+const resetAssistantTopicsContract: ChatDbContract = {
+  allowedKeys: keySet('assistantId', 'replacementTopicId'),
+  validate(value: unknown): void {
+    validateRequest(value, resetAssistantTopicsContract.allowedKeys)
+    const req = value as ResetAssistantTopicsRequest
+    validateNonEmptyString(req.assistantId, 'request.assistantId')
+    validateNonEmptyString(req.replacementTopicId, 'request.replacementTopicId')
+  },
+  validateResult(value: unknown): void {
+    validateResultEnvelope(value, 'chatdb:reset-assistant-topics')
+    const envelope = value as Record<string, unknown>
+    if (
+      envelope.ok !== true ||
+      envelope.value === null ||
+      typeof envelope.value !== 'object' ||
+      Array.isArray(envelope.value)
+    ) {
+      return
+    }
+    const result = envelope.value as Record<string, unknown>
+    const cleanup = result.cleanup
+    if (cleanup === null || typeof cleanup !== 'object' || Array.isArray(cleanup)) {
+      throw new ValidationError('result.value.cleanup', '[chatdb:reset-assistant-topics] Expected cleanup object')
+    }
+    fileCleanupResultValidator('chatdb:reset-assistant-topics')({ ok: true, value: cleanup })
+    const replacement = result.replacementTopic
+    if (replacement === null || typeof replacement !== 'object' || Array.isArray(replacement)) {
+      throw new ValidationError('result.replacementTopic', '[chatdb:reset-assistant-topics] Expected TopicWire object')
+    }
+    validateTopicWireValueFields(replacement as Record<string, unknown>, 'chatdb:reset-assistant-topics')
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Phase 5.1B: Compound mutation contracts
 // ---------------------------------------------------------------------------
@@ -878,12 +931,12 @@ const cloneMessagesToTopicContract: ChatDbContract = {
 }
 
 const resetMessagesForResendContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messageIds', 'blockIdsToDelete'),
+  allowedKeys: keySet('topicId', 'messages', 'blockIdsToDelete'),
   validate(value: unknown): void {
     validateRequest(value, resetMessagesForResendContract.allowedKeys)
     const req = value as ResetMessagesForResendRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
-    validateStringArray(req.messageIds, 'request.messageIds')
+    validateEntries(req.messages, 'request.messages')
     validateStringArray(req.blockIdsToDelete, 'request.blockIdsToDelete')
   },
   validateResult: fileCleanupResultValidator('chatdb:reset-messages-for-resend')
@@ -1138,6 +1191,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:purge-expired-topics': purgeExpiredTopicsContract,
   // Phase 5.2B: atomic assistant empty-trash
   'chatdb:empty-trash-topics': emptyTrashTopicsContract,
+  'chatdb:transfer-topic-ownership': transferTopicOwnershipContract,
+  'chatdb:reset-assistant-topics': resetAssistantTopicsContract,
   // Phase 5.1B: compound mutations
   'chatdb:clone-messages-to-topic': cloneMessagesToTopicContract,
   'chatdb:reset-messages-for-resend': resetMessagesForResendContract,

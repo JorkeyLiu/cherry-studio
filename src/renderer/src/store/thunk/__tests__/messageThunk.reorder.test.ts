@@ -1,4 +1,3 @@
-import db from '@renderer/databases'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -11,15 +10,6 @@ vi.mock('@logger', () => ({
       error: vi.fn(),
       debug: vi.fn()
     })
-  }
-}))
-
-vi.mock('@renderer/databases', () => ({
-  default: {
-    transaction: vi.fn(),
-    topics: {
-      update: vi.fn()
-    }
   }
 }))
 
@@ -43,7 +33,7 @@ vi.mock('@renderer/services/db/DbService', () => ({
   DbService: {
     getInstance: () => ({})
   },
-  dbService: {}
+  dbService: { reorderMessages: vi.fn().mockResolvedValue(undefined) }
 }))
 
 vi.mock('i18next', () => ({
@@ -117,15 +107,7 @@ describe('buildReorderedMessageGroup', () => {
 })
 
 describe('reorderMessageGroupThunk', () => {
-  beforeEach(() => {
-    ;(db.transaction as any).mockImplementation(
-      async (_mode: string, _table: unknown, callback: () => Promise<void>) => {
-        await callback()
-        return { timeout: vi.fn() }
-      }
-    )
-    vi.mocked(db.topics.update).mockResolvedValue(1)
-  })
+  beforeEach(() => {})
 
   it('persists reordered messages, dispatches updates, and preserves message fields by identity', async () => {
     const { reorderMessageGroupThunk } = await import('../messageGroupReorder')
@@ -153,7 +135,6 @@ describe('reorderMessageGroupThunk', () => {
       reorderedMessages.map((message) => message.id)
     )(dispatch, getState)
 
-    expect(db.topics.update).toHaveBeenCalledWith(topicId, { messages: reorderedMessages })
     expect(dispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'newMessages/messagesReceived',

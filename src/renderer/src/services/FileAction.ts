@@ -1,9 +1,9 @@
 import { loggerService } from '@logger'
 import TextEditPopup from '@renderer/components/Popups/TextEditPopup'
-import db from '@renderer/databases'
+import { dbService } from '@renderer/services/db'
+import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import FileManager from '@renderer/services/FileManager'
 import type { FileMetadata } from '@renderer/types'
-import type { Message } from '@renderer/types/newMessage'
 import dayjs from 'dayjs'
 
 // 排序相关
@@ -45,36 +45,23 @@ export async function handleDelete(fileId: string, t: (key: string) => string) {
   const file = await FileManager.getFile(fileId)
   if (!file) return
 
-  await FileManager.deleteFile(fileId, true)
-
-  const relatedBlocks = await db.message_blocks.where('file.id').equals(fileId).toArray()
-  const blockIdsToDelete = relatedBlocks.map((b) => b.id)
-  const affectedMessageIds = [...new Set(relatedBlocks.map((b) => b.messageId))]
+  const relatedBlocks = await dbService.listBlocksByFile(fileId)
 
   try {
-    await db.transaction('rw', db.topics, db.message_blocks, async () => {
-      const allTopics = await db.topics.toArray()
-      const topicsToUpdate: Record<string, { messages: Message[] }> = {}
-
-      for (const topic of allTopics) {
-        let modified = false
-        const newMessages = (topic.messages || []).map((msg) => {
-          if (affectedMessageIds.includes(msg.id)) {
-            const filtered = (msg.blocks || []).filter((blk) => !blockIdsToDelete.includes(blk))
-            if (filtered.length < (msg.blocks || []).length) {
-              modified = true
-              return { ...msg, blocks: filtered }
-            }
-          }
-          return msg
-        })
-        if (modified) topicsToUpdate[topic.id] = { messages: newMessages }
-      }
-
-      await Promise.all(Object.entries(topicsToUpdate).map(([id, data]) => db.topics.update(id, data)))
-      await db.message_blocks.bulkDelete(blockIdsToDelete)
-    })
-    logger.info(`Deleted ${blockIdsToDelete.length} blocks for file ${fileId}`)
+    if (relatedBlocks.length === 0) {
+      // LOCK-002: No blocks reference this file — delete directly with
+      // default non-force FileManager policy.
+      await FileManager.deleteFile(fileId)
+      logger.info(`Deleted file ${fileId} (no referencing blocks)`)
+    } else {
+      // Blocks reference this file — atomic delete via Main cleanup result.
+      const blockIdsToDelete = relatedBlocks.map((b) => b.id as string)
+      const cleanup = await dbService.deleteBlocks(blockIdsToDelete)
+      await consumeFileCleanupResult(cleanup)
+      // Physical file cleanup is handled exclusively by consumeFileCleanupResult
+      // using non-force FileManager policy (LOCK-002, LOCK-003).
+      logger.info(`Deleted ${blockIdsToDelete.length} blocks for file ${fileId}`)
+    }
   } catch (err) {
     logger.error(`Error removing file blocks for ${fileId}:`, err as Error)
     window.modal.error({ content: t('files.delete.db_error'), centered: true })

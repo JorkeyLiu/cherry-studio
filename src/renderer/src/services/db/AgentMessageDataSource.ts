@@ -17,6 +17,7 @@
 import { loggerService } from '@logger'
 import store from '@renderer/store'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
+import type { FileCleanupResult } from '@shared/chatDb'
 
 import type { MessageDataSource } from './types'
 import { extractSessionId } from './types'
@@ -58,9 +59,11 @@ export class AgentMessageDataSource implements MessageDataSource {
   async updateMessageAndBlocks(
     topicId: string,
     messageUpdates: Partial<Message> & Pick<Message, 'id'>,
-    _blocksToUpdate: MessageBlock[]
-  ): Promise<void> {
+    _blocksToUpdate: MessageBlock[],
+    _blockIdsToDelete?: string[]
+  ): Promise<FileCleanupResult> {
     logger.warn(`updateMessageAndBlocks: agent IPC removed, skipping for ${topicId}/${messageUpdates.id}`)
+    return { affectedFileIds: [], remainingReferenceCounts: {} }
   }
 
   // oxlint-disable-next-line no-unused-vars
@@ -97,24 +100,26 @@ export class AgentMessageDataSource implements MessageDataSource {
   }
 
   // oxlint-disable-next-line no-unused-vars
-  async deleteBlocks(_blockIds: string[]): Promise<void> {
+  async deleteBlocks(_blockIds: string[]): Promise<FileCleanupResult> {
     // Blocks cannot be deleted individually for agent sessions
     logger.warn('deleteBlocks called for agent session, operation not supported')
+    return { affectedFileIds: [], remainingReferenceCounts: {} }
   }
 
   // ============ Batch Operations ============
 
-  async clearMessages(topicId: string): Promise<void> {
+  async clearMessages(topicId: string): Promise<FileCleanupResult> {
     const sessionId = extractSessionId(topicId)
 
     if (!window.electron?.ipcRenderer) {
       logger.warn('IPC renderer not available for clear messages')
-      return
+      return { affectedFileIds: [], remainingReferenceCounts: {} }
     }
 
     // In a full implementation, you would call a backend endpoint to clear session
     // For now, we'll just log the attempt
     logger.info(`Clear messages requested for agent session ${sessionId}`)
+    return { affectedFileIds: [], remainingReferenceCounts: {} }
 
     // You might want to implement:
     // await window.electron.ipcRenderer.invoke(

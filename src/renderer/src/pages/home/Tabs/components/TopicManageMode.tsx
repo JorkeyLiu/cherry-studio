@@ -1,3 +1,4 @@
+import { loggerService } from '@logger'
 import AssistantAvatar from '@renderer/components/Avatar/AssistantAvatar'
 import { modelGenerating } from '@renderer/hooks/useRuntime'
 import { TopicManager } from '@renderer/hooks/useTopic'
@@ -72,7 +73,7 @@ interface TopicManagePanelProps {
   activeTopic: Topic
   setActiveTopic: (topic: Topic) => void
   updateTopics: (topics: Topic[]) => void
-  moveTopic: (topic: Topic, toAssistant: Assistant) => void
+  moveTopic: (topic: Topic, toAssistant: Assistant) => Promise<void>
   manageState: TopicManageModeState
   filteredTopics: Topic[]
   onTrashChanged?: () => void
@@ -93,6 +94,7 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
   onTrashChanged
 }) => {
   const { t } = useTranslation()
+  const logger = useMemo(() => loggerService.withContext('TopicManageMode'), [])
   const { isManageMode, selectedIds, searchText, exitManageMode, setSelectedIds, setSearchText } = manageState
   const [isSearchMode, setIsSearchMode] = useState(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
@@ -207,20 +209,32 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
 
       await modelGenerating()
 
-      const movedCount = selectedIds.size
-      for (const id of selectedIds) {
-        const topic = assistant.topics.find((t) => t.id === id)
-        if (topic) {
-          moveTopic(topic, targetAssistant)
+      const movedTopics = [...selectedIds]
+        .map((id) => assistant.topics.find((topic) => topic.id === id))
+        .filter((topic): topic is Topic => topic !== undefined)
+      const results = await Promise.allSettled(movedTopics.map((topic) => moveTopic(topic, targetAssistant)))
+      const movedCount = results.filter((result) => result.status === 'fulfilled').length
+      for (const [index, result] of results.entries()) {
+        if (result.status === 'rejected') {
+          logger.error(`Failed to move topic ${movedTopics[index].id}`, result.reason as Error)
         }
       }
 
-      // Switch to first remaining topic if current topic was moved
-      if (selectedIds.has(activeTopic.id)) {
+      const movedIds = new Set(
+        results.flatMap((result, index) => (result.status === 'fulfilled' ? [movedTopics[index].id] : []))
+      )
+      if (movedCount > 0 && movedIds.has(activeTopic.id)) {
         setActiveTopic(remainingTopics[0])
       }
 
-      window.toast.success(t('chat.topics.manage.move.success', { count: movedCount }))
+      if (movedCount === movedTopics.length) {
+        window.toast.success(t('chat.topics.manage.move.success', { count: movedCount }))
+      } else if (movedCount > 0) {
+        window.toast.warning(t('chat.topics.manage.move.partial_success', { count: movedCount }))
+      } else {
+        window.toast.error(t('chat.topics.manage.move.error'))
+      }
+      if (movedCount === 0) return
       exitManageMode()
     },
     [selectedIds, assistant.topics, assistants, moveTopic, activeTopic.id, setActiveTopic, t, exitManageMode]

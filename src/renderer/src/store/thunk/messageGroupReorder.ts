@@ -1,4 +1,4 @@
-import db from '@renderer/databases'
+import { dbService } from '@renderer/services/db'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
 import type { Message } from '@renderer/types/newMessage'
 
@@ -74,9 +74,10 @@ export const reorderMessageGroupThunk =
       return
     }
 
-    await db.transaction('rw', db.topics, async () => {
-      await db.topics.update(topicId, { messages: reorderedMessages })
-    })
+    await dbService.reorderMessages(
+      topicId,
+      reorderedMessages.map((message) => message.id)
+    )
 
     dispatch(newMessagesActions.messagesReceived({ topicId, messages: reorderedMessages }))
     dispatch(updateTopicUpdatedAt({ topicId }))

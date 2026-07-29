@@ -1,5 +1,5 @@
 import { createAsyncThunk } from '@reduxjs/toolkit'
-import db from '@renderer/databases'
+import { dbService } from '@renderer/services/db'
 import {
   addSegment,
   clearSegmentsForTopic,
@@ -26,11 +26,11 @@ export const syncSegmentsAfterMessageDeletion = async (
     if (!segment) continue
     const newMessageIds = segment.messageIds.filter((id) => !messageIds.includes(id))
     if (newMessageIds.length === 0) {
-      await db.topic_segments.delete(segId)
+      await dbService.deleteSegment(segId)
       dispatch(removeSegment(segId))
     } else if (newMessageIds.length !== segment.messageIds.length) {
       const now = new Date().toISOString()
-      await db.topic_segments.update(segId, { messageIds: newMessageIds, updatedAt: now })
+      await dbService.replaceSegmentMembership(segId, newMessageIds)
       dispatch(updateSegment({ id: segId, changes: { messageIds: newMessageIds, updatedAt: now } }))
     }
   }
@@ -41,27 +41,36 @@ export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch:
   async (topicId: string, { dispatch }) => {
     // Clear stale segment IDs for this topic before loading fresh data
     dispatch(clearSegmentsForTopic(topicId))
-    dispatch(loadSegments(await db.topic_segments.where('topicId').equals(topicId).toArray()))
+    dispatch(
+      loadSegments(
+        (await dbService.listSegments(topicId)).map((segment) => ({
+          ...segment,
+          name: segment.name ?? '',
+          color: segment.color ?? undefined,
+          createdAt: segment.createdAt ?? new Date().toISOString(),
+          updatedAt: segment.updatedAt ?? new Date().toISOString()
+        }))
+      )
+    )
   }
 )
 
 export const saveTopicSegmentThunk = createAsyncThunk<void, TopicSegment>(
   'topicSegments/save',
   async (segment: TopicSegment) => {
-    await db.topic_segments.put(segment)
+    await dbService.upsertSegment(segment.id, segment.topicId, segment.name, segment.messageIds, segment.color)
   }
 )
 
 export const deleteTopicSegmentThunk = createAsyncThunk<void, string>(
   'topicSegments/delete',
   async (segmentId: string) => {
-    await db.topic_segments.delete(segmentId)
+    await dbService.deleteSegment(segmentId)
   }
 )
 
 export const clearTopicSegmentsFromDB = async (topicId: string): Promise<void> => {
-  const ids = await db.topic_segments.where('topicId').equals(topicId).primaryKeys()
-  await db.topic_segments.bulkDelete(ids)
+  for (const segment of await dbService.listSegments(topicId)) await dbService.deleteSegment(segment.id)
 }
 
 export const removeMessageFromSegmentsThunk = createAsyncThunk<
@@ -76,11 +85,11 @@ export const removeMessageFromSegmentsThunk = createAsyncThunk<
     if (segment && segment.messageIds.includes(messageId)) {
       const newMessageIds = segment.messageIds.filter((id: string) => id !== messageId)
       if (newMessageIds.length === 0) {
-        await db.topic_segments.delete(segId)
+        await dbService.deleteSegment(segId)
         dispatch(removeSegment(segId))
       } else {
         const now = new Date().toISOString()
-        await db.topic_segments.update(segId, { messageIds: newMessageIds, updatedAt: now })
+        await dbService.replaceSegmentMembership(segId, newMessageIds)
         dispatch(updateSegment({ id: segId, changes: { messageIds: newMessageIds, updatedAt: now } }))
       }
     }
@@ -130,7 +139,7 @@ export const restoreSegmentsAfterUndo = async (
     if (existingSegment) {
       // Segment still exists — restore original messageIds
       const now = new Date().toISOString()
-      await db.topic_segments.update(snap.id, { messageIds: snap.messageIds, updatedAt: now })
+      await dbService.replaceSegmentMembership(snap.id, snap.messageIds)
       dispatch(updateSegment({ id: snap.id, changes: { messageIds: snap.messageIds, updatedAt: now } }))
     } else {
       // Segment was removed (all messages were deleted) — recreate from snapshot
@@ -138,7 +147,13 @@ export const restoreSegmentsAfterUndo = async (
         ...snap,
         updatedAt: new Date().toISOString()
       }
-      await db.topic_segments.put(restoredSegment)
+      await dbService.upsertSegment(
+        restoredSegment.id,
+        restoredSegment.topicId,
+        restoredSegment.name,
+        restoredSegment.messageIds,
+        restoredSegment.color
+      )
       dispatch(addSegment(restoredSegment))
     }
   }
@@ -184,7 +199,7 @@ export const collectWholeSelectedSegmentsForClipboard = (
  */
 export const deleteSegmentsBySnapshots = async (dispatch: AppDispatch, snapshots: TopicSegment[]): Promise<void> => {
   for (const snap of snapshots) {
-    await db.topic_segments.delete(snap.id)
+    await dbService.deleteSegment(snap.id)
     dispatch(removeSegment(snap.id))
   }
 }
@@ -195,7 +210,7 @@ export const deleteSegmentsBySnapshots = async (dispatch: AppDispatch, snapshots
  */
 export const restoreTargetSegments = async (dispatch: AppDispatch, snapshots: TopicSegment[]): Promise<void> => {
   for (const snap of snapshots) {
-    await db.topic_segments.put(snap)
+    await dbService.upsertSegment(snap.id, snap.topicId, snap.name, snap.messageIds, snap.color)
     dispatch(addSegment(snap))
   }
 }

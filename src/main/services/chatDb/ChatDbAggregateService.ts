@@ -192,7 +192,7 @@ export class ChatDbAggregateService {
         block.messageId = messageData.id // Enforce consistency
       }
 
-      this.db.transaction((tx) => {
+      return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
         // Ensure topic exists
@@ -226,9 +226,8 @@ export class ChatDbAggregateService {
           // Sync file references for file/image blocks
           this.syncFileReferences(repos, blockDataList)
         }
+        return null
       })
-
-      return null
     }, `appendMessage(${topicId}, ${messageJson.id})`)
   }
 
@@ -254,12 +253,20 @@ export class ChatDbAggregateService {
   /**
    * Atomic message patch + full block upserts + references/order.
    * Missing message: follows Dexie-compatible no-op without weakening FK.
+   *
+   * When blockIdsToDelete is provided:
+   * - Each block ID is resolved through its parent message to verify
+   *   topic ownership (LOCK-004). Blocks whose parent message does not
+   *   belong to the requested topic are rejected atomically.
+   * - File references are collected from owned blocks only before cascade.
+   * - Returns FileCleanupResult for caller-side post-commit consumption.
    */
   updateMessageAndBlocks(
     topicId: string,
     messageUpdatesJson: JsonObject,
-    blocksToUpdateJson: JsonObject[]
-  ): ChatDbResult<null> {
+    blocksToUpdateJson: JsonObject[],
+    blockIdsToDelete: string[] = []
+  ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
       const messageId = messageUpdatesJson.id as string
       const messagePatch = wireToMessagePatch(messageUpdatesJson)
@@ -269,14 +276,49 @@ export class ChatDbAggregateService {
 
       const blockDataList = blocksToUpdateJson.map(wireToBlock)
 
-      this.db.transaction((tx) => {
+      return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
         // Check message exists
         const existing = repos.messages.getInTopic(messageId, topicId)
         if (!existing.found) {
-          // No-op: follow Dexie-compatible semantics
-          return
+          // No-op: follow Dexie-compatible semantics — empty cleanup
+          return { affectedFileIds: [], remainingReferenceCounts: {} }
+        }
+
+        // Phase 1: Resolve every block through its parent message and verify ownership.
+        // Reject any block whose parent message does not belong to request topic.
+        let affectedFileIds: string[] = []
+        if (blockIdsToDelete.length > 0) {
+          const ownedBlockIds: string[] = []
+          for (const blockId of blockIdsToDelete) {
+            const block = repos.blocks.getById(blockId)
+            if (!block.found) {
+              // Missing block: skip (consistent with no-op semantics)
+              continue
+            }
+            // Resolve block → message → topic ownership
+            const msg = repos.messages.getInTopic(block.data.messageId, topicId)
+            if (!msg.found) {
+              throw new ChatDbConflictError(
+                `Block ${blockId} belongs to message ${block.data.messageId} which is not in topic ${topicId}`
+              )
+            }
+            ownedBlockIds.push(blockId)
+          }
+
+          // Collect affected file IDs from owned blocks only
+          if (ownedBlockIds.length > 0) {
+            const allRefs: FileReferenceData[] = []
+            for (const blockId of ownedBlockIds) {
+              const refs = repos.fileRefs.listByBlock(blockId)
+              allRefs.push(...refs)
+            }
+            affectedFileIds = collectAffectedFileIds(allRefs)
+
+            // Delete owned blocks (FK cascade removes file_references)
+            repos.blocks.deleteMany(ownedBlockIds)
+          }
         }
 
         // Apply message patch
@@ -291,9 +333,8 @@ export class ChatDbAggregateService {
           // Sync file references
           this.syncFileReferences(repos, blockDataList)
         }
+        return buildFileCleanupResult(repos, affectedFileIds)
       })
-
-      return null
     }, `updateMessageAndBlocks(${topicId}, ${messageUpdatesJson.id})`)
   }
 
@@ -452,15 +493,18 @@ export class ChatDbAggregateService {
    * No pre-transaction destructive reference deletes.
    * Normalize affected message block order via repository.
    */
-  deleteBlocks(blockIds: string[]): ChatDbResult<null> {
+  deleteBlocks(blockIds: string[]): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      this.db.transaction((tx) => {
+      return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
+        const affectedFileIds = collectAffectedFileIds(
+          blockIds.flatMap((blockId) => repos.fileRefs.listByBlock(blockId))
+        )
         // blocks.deleteMany handles order normalization within its own
         // savepoint transaction. FK cascade removes file_references.
         repos.blocks.deleteMany(blockIds)
+        return buildFileCleanupResult(repos, affectedFileIds)
       })
-      return null
     }, `deleteBlocks(${blockIds.length} blocks)`)
   }
 
@@ -479,22 +523,23 @@ export class ChatDbAggregateService {
    * by the time it executed, messages/blocks were already deleted by
    * clearTopic, so the subquery-based delete was targeting already-cascaded rows.
    */
-  clearMessages(topicId: string): ChatDbResult<null> {
+  clearMessages(topicId: string): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      this.db.transaction((tx) => {
+      return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
         // Check topic exists
         const topic = repos.topics.getById(topicId)
-        if (!topic.found) return // no-op for missing topic
+        if (!topic.found) return { affectedFileIds: [], remainingReferenceCounts: {} }
+        const messages = repos.messages.listByTopic(topicId)
+        const affectedFileIds = collectAffectedFileIds(repos.fileRefs.listByMessages(messages.map((m) => m.id)))
 
         // clearTopic cascades: deletes messages (→ blocks cascade via FK,
         // → file_references cascade via FK, → topic_segment_messages cascade
         // via message FK), and topic_segments + topic_segment_messages.
         repos.messages.clearTopic(topicId)
+        return buildFileCleanupResult(repos, affectedFileIds)
       })
-
-      return null
     }, `clearMessages(${topicId})`)
   }
 
@@ -981,6 +1026,60 @@ export class ChatDbAggregateService {
     }, `emptyTrashTopics(${assistantId})`)
   }
 
+  transferTopicOwnership(topicId: string, assistantId: string): ChatDbResult<null> {
+    return wrapResult(() => {
+      this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(topicId)
+        if (!topic.found) throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+        repos.topics.updatePatch(topicId, { assistantId } as any)
+        for (const message of repos.messages.listByTopic(topicId)) {
+          repos.messages.update(topicId, message.id, { assistantId } as any)
+        }
+      })
+      return null
+    }, `transferTopicOwnership(${topicId}, ${assistantId})`)
+  }
+
+  resetAssistantTopics(
+    assistantId: string,
+    replacementTopicId: string
+  ): ChatDbResult<{ cleanup: FileCleanupResult; replacementTopic: JsonObject }> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const affectedFileIds: string[] = []
+        let activeCursor: string | undefined
+        let trashCursor: string | undefined
+        let hasMoreActive = true
+        let hasMoreTrash = true
+        while (hasMoreActive || hasMoreTrash) {
+          const activePage = hasMoreActive
+            ? repos.topics.listPage({ limit: 100, direction: 'asc', cursor: activeCursor })
+            : { items: [], nextCursor: undefined, hasMore: false }
+          const trashPage = hasMoreTrash
+            ? repos.topics.listTrashPage({ limit: 100, direction: 'asc', cursor: trashCursor })
+            : { items: [], nextCursor: undefined, hasMore: false }
+          for (const topic of [...activePage.items, ...trashPage.items]) {
+            if (topic.assistantId !== assistantId || topic.id === replacementTopicId) continue
+            const messageIds = repos.messages.listByTopic(topic.id).map((message) => message.id)
+            affectedFileIds.push(...collectAffectedFileIds(repos.fileRefs.listByMessages(messageIds)))
+            repos.topics.hardDelete(topic.id)
+          }
+          activeCursor = activePage.nextCursor
+          trashCursor = trashPage.nextCursor
+          hasMoreActive = activePage.hasMore && activePage.items.length > 0
+          hasMoreTrash = trashPage.hasMore && trashPage.items.length > 0
+        }
+        const replacementTopic = repos.topics.ensure(replacementTopicId, assistantId)
+        return {
+          cleanup: buildFileCleanupResult(repos, [...new Set(affectedFileIds)]),
+          replacementTopic: topicToWireFull(replacementTopic)
+        }
+      })
+    }, `resetAssistantTopics(${assistantId})`)
+  }
+
   // =========================================================================
   // Phase 5.1B: Compound mutations
   // =========================================================================
@@ -1064,7 +1163,7 @@ export class ChatDbAggregateService {
    */
   resetMessagesForResend(
     topicId: string,
-    messageIds: string[],
+    messages: Array<{ message: JsonObject; blocks: JsonObject[] }> | string[],
     blockIdsToDelete: string[]
   ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
@@ -1105,15 +1204,27 @@ export class ChatDbAggregateService {
           repos.blocks.deleteMany(ownedBlockIds)
         }
 
-        // Phase 3: Reset message state for messages owned by this topic
-        for (const messageId of messageIds) {
-          const msg = repos.messages.getInTopic(messageId, topicId)
-          if (msg.found) {
-            repos.messages.update(topicId, messageId, {
-              status: null,
-              model: null,
-              overflow: { model: null }
-            } as any)
+        // Phase 3: Persist complete reset payloads, preserving existing identity.
+        for (const item of messages) {
+          const entry =
+            typeof item === 'string' ? { message: { id: item, status: null, blocks: [] }, blocks: [] } : item
+          const messageData = wireToMessage(entry.message)
+          messageData.topicId = topicId
+          const blockDataList = entry.blocks.map(wireToBlock)
+          for (const block of blockDataList) block.messageId = messageData.id
+          const existing = repos.messages.getInTopic(messageData.id, topicId)
+          if (!existing.found) {
+            repos.messages.append(messageData)
+          } else {
+            const patch = wireToMessagePatch(entry.message)
+            delete patch.id
+            delete patch.topicId
+            delete patch.sortOrder
+            repos.messages.update(topicId, messageData.id, patch)
+          }
+          if (blockDataList.length > 0) {
+            repos.blocks.upsertMany(blockDataList)
+            this.syncFileReferences(repos, blockDataList)
           }
         }
 
@@ -1125,7 +1236,7 @@ export class ChatDbAggregateService {
 
         return buildFileCleanupResult(repos, affectedFileIds)
       })
-    }, `resetMessagesForResend(${topicId}, ${messageIds.length} msgs)`)
+    }, `resetMessagesForResend(${topicId}, ${messages.length} msgs)`)
   }
 
   /**
