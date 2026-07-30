@@ -419,6 +419,7 @@ const SelectModelPopupView: React.FC<Props> = ({
             focused: isFocused,
             selected: item.isSelected
           })}
+          data-testid={`chat-model-option-${item.model.id}`}
           onClick={() => handleItemClick(item)}
           onMouseOver={() => !isFocused && setFocusedItemKey(item.key)}>
           <ModelItemLeft>

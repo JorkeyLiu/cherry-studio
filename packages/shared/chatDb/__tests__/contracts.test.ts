@@ -115,6 +115,18 @@ describe('validateChatDbRequest — valid payloads', () => {
     ).not.toThrow()
   })
 
+  it('ensure-topic accepts an initial name', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:ensure-topic', { topicId: 'topic-1', assistantId: 'asst-1', name: 'Named topic' })
+    ).not.toThrow()
+  })
+
+  it('ensure-topic rejects a non-string name', () => {
+    expect(() => validateChatDbRequest('chatdb:ensure-topic', { topicId: 'topic-1', name: 42 })).toThrow(
+      ValidationError
+    )
+  })
+
   it('append-message: minimal', () => {
     expect(() =>
       validateChatDbRequest('chatdb:append-message', {
@@ -352,6 +364,18 @@ describe('validateChatDbRequest — valid payloads', () => {
 
   it('soft-delete-topic: { topicId }', () => {
     expect(() => validateChatDbRequest('chatdb:soft-delete-topic', { topicId: 't1' })).not.toThrow()
+  })
+
+  it('soft-delete-topic accepts the current topic name', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:soft-delete-topic', { topicId: 't1', name: 'Named topic' })
+    ).not.toThrow()
+  })
+
+  it('soft-delete-topic rejects a non-string name', () => {
+    expect(() => validateChatDbRequest('chatdb:soft-delete-topic', { topicId: 't1', name: false })).toThrow(
+      ValidationError
+    )
   })
 
   it('restore-topic: { topicId }', () => {
@@ -901,9 +925,9 @@ describe('contract allowedKeys', () => {
     expect(keys).toEqual(new Set(['topicId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete']))
   })
 
-  it('ensure-topic has exactly topicId, assistantId', () => {
+  it('ensure-topic has topicId, assistantId, and name keys', () => {
     const keys = getContract('chatdb:ensure-topic').allowedKeys
-    expect(keys).toEqual(new Set(['topicId', 'assistantId']))
+    expect(keys).toEqual(new Set(['topicId', 'assistantId', 'name']))
   })
 })
 

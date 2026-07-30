@@ -214,13 +214,16 @@ const topicExistsContract: ChatDbContract = {
 }
 
 const ensureTopicContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'assistantId'),
+  allowedKeys: keySet('topicId', 'assistantId', 'name'),
   validate(value: unknown): void {
     validateRequest(value, ensureTopicContract.allowedKeys)
     const req = value as EnsureTopicRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
     if (req.assistantId !== undefined) {
       validateNonEmptyString(req.assistantId, 'request.assistantId')
+    }
+    if (req.name !== undefined && req.name !== null && typeof req.name !== 'string') {
+      throw new ValidationError('request.name', `Expected string|null, got ${typeof req.name}`)
     }
   },
   validateResult: voidResult('chatdb:ensure-topic')
@@ -651,11 +654,14 @@ const updateTopicMetadataContract: ChatDbContract = {
 }
 
 const softDeleteTopicContract: ChatDbContract = {
-  allowedKeys: keySet('topicId'),
+  allowedKeys: keySet('topicId', 'name'),
   validate(value: unknown): void {
     validateRequest(value, softDeleteTopicContract.allowedKeys)
     const req = value as SoftDeleteTopicRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    if (req.name !== undefined && req.name !== null && typeof req.name !== 'string') {
+      throw new ValidationError('request.name', `Expected string|null, got ${typeof req.name}`)
+    }
   },
   validateResult: voidResult('chatdb:soft-delete-topic')
 }

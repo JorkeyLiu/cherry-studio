@@ -26,7 +26,7 @@ const EditModeToggle = () => {
 
   return (
     <Tooltip title={isEnabled ? t('chat.edit.exit') : t('chat.edit.enter')} mouseEnterDelay={0.8}>
-      <StyledNavbarIcon onClick={handleToggle} $active={isEnabled}>
+      <StyledNavbarIcon data-testid="edit-mode-toggle" onClick={handleToggle} $active={isEnabled}>
         <Edit3 size={18} />
       </StyledNavbarIcon>
     </Tooltip>

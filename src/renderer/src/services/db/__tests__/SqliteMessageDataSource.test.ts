@@ -724,9 +724,9 @@ describe('SqliteMessageDataSource', () => {
 
     it('softDeleteTopic calls api and dispatches', async () => {
       api.softDeleteTopic.mockResolvedValue(successResult(null))
-      await ds.softDeleteTopic('t-1')
+      await ds.softDeleteTopic('t-1', 'Named topic')
       expect(api.softDeleteTopic).toHaveBeenCalledOnce()
-      expect(api.softDeleteTopic).toHaveBeenCalledWith({ topicId: 't-1' })
+      expect(api.softDeleteTopic).toHaveBeenCalledWith({ topicId: 't-1', name: 'Named topic' })
       expect(mockDispatch).toHaveBeenCalledOnce()
     })
 
@@ -786,8 +786,8 @@ describe('SqliteMessageDataSource', () => {
 
     it('ensureTopic forwards assistantId for creation ownership (LOCK-533)', async () => {
       api.ensureTopic.mockResolvedValue(successResult(null))
-      await ds.ensureTopic('t-1', 'a-1')
-      expect(api.ensureTopic).toHaveBeenCalledWith({ topicId: 't-1', assistantId: 'a-1' })
+      await ds.ensureTopic('t-1', 'a-1', 'Named topic')
+      expect(api.ensureTopic).toHaveBeenCalledWith({ topicId: 't-1', assistantId: 'a-1', name: 'Named topic' })
     })
 
     it('ensureTopic omits assistantId when not provided', async () => {

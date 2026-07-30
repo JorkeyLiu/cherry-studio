@@ -494,11 +494,11 @@ export class SqliteMessageDataSource implements MessageDataSource {
     return unwrap(await this.api.topicExists(request))
   }
 
-  async ensureTopic(topicId: string, assistantId?: string): Promise<void> {
+  async ensureTopic(topicId: string, assistantId?: string, name?: string | null): Promise<void> {
     // LOCK-533: creation paths pass assistantId so ordinary topics exist in
     // SQLite with their assistant ownership before Redux exposure. ensure is
     // create-only on Main: an existing topic's binding is never overwritten.
-    const request: EnsureTopicRequest = cloneForWire({ topicId, assistantId })
+    const request: EnsureTopicRequest = cloneForWire({ topicId, assistantId, name })
     unwrap(await this.api.ensureTopic(request))
     // No topicUpdatedAt dispatch — create-only, doesn't update existing
   }
@@ -577,8 +577,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     return unwrap(await this.api.updateTopicMetadata(request))
   }
 
-  async softDeleteTopic(topicId: string): Promise<void> {
-    const request: SoftDeleteTopicRequest = cloneForWire({ topicId })
+  async softDeleteTopic(topicId: string, name?: string | null): Promise<void> {
+    const request: SoftDeleteTopicRequest = cloneForWire({ topicId, name })
     unwrap(await this.api.softDeleteTopic(request))
     dispatchTopicUpdatedAt(topicId)
   }

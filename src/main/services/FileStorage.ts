@@ -10,6 +10,7 @@ import {
   readTextFileWithAutoEncoding,
   scanDir
 } from '@main/utils/file'
+import { validateStoredFilePath } from '@main/utils/fileValidator'
 import { t } from '@main/utils/locales'
 import { documentExts, imageExts, KB, MB } from '@shared/config/constant'
 import { parseDataUrl } from '@shared/utils'
@@ -362,12 +363,35 @@ class FileStorage {
     }
   }
 
-  // @TraceProperty({ spanName: 'deleteFile', tag: 'FileStorage' })
+  /**
+   * LOCK-003: Shared production stored-file path validator/resolver.
+   * Delegates to the module-level validateStoredFilePath function.
+   */
+  private validateStoredFilePath = async (storedFileName: string): Promise<string | null> => {
+    return validateStoredFilePath(this.storageDir, storedFileName)
+  }
+
+  /**
+   * LOCK-003: Secure deleteFile — validates stored file name using the shared
+   * production validator before any filesystem mutation. Missing valid file is
+   * success (returns void without error), consistent with prior behavior.
+   */
   public deleteFile = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<void> => {
-    if (!fs.existsSync(path.join(this.storageDir, id))) {
+    const resolved = await this.validateStoredFilePath(id)
+    if (!resolved) {
       return
     }
-    await fs.promises.unlink(path.join(this.storageDir, id))
+    await fs.promises.unlink(resolved)
+  }
+
+  /**
+   * LOCK-003: Typed existence probe for a stored file by its stored file name
+   * (id + ext). Returns true if the physical file exists in the storage directory.
+   *
+   * Uses the shared validateStoredFilePath helper for all path/security checks.
+   */
+  public fileExists = async (_: Electron.IpcMainInvokeEvent, storedFileName: string): Promise<boolean> => {
+    return (await this.validateStoredFilePath(storedFileName)) !== null
   }
 
   public deleteDir = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<void> => {

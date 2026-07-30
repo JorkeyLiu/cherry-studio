@@ -155,8 +155,15 @@ vi.mock('node:fs', () => {
       mkdir: vi.fn(),
       readdir: vi.fn(),
       stat: vi.fn(),
+      lstat: vi.fn(),
       unlink: vi.fn(),
-      rmdir: vi.fn()
+      rmdir: vi.fn(),
+      rm: vi.fn(),
+      copyFile: vi.fn(),
+      rename: vi.fn(),
+      symlink: vi.fn(),
+      readlink: vi.fn(),
+      realpath: vi.fn()
     },
     existsSync: vi.fn(),
     readFileSync: vi.fn(),

@@ -251,3 +251,46 @@ describe('regenerateAssistantResponseThunk — no legacy double cleanup (LOCK-00
     expect(mocks.cleanupMultipleBlocks).not.toHaveBeenCalled()
   })
 })
+
+// --- LOCK-005: resendUserMessageWithEditThunk failure propagation ---
+
+describe('resendUserMessageWithEditThunk — failure propagation (LOCK-005)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    storeState = {
+      messages: {
+        entities: {},
+        messageIdsByTopic: {}
+      }
+    }
+  })
+
+  it('rethrows resendMessageThunk failure so caller (MessageEditor) can retry', { timeout: 60_000 }, async () => {
+    const userMsg = createUserMessage()
+    const asstMsg = createMessage()
+
+    storeState.messages.entities = {
+      'user-msg-1': userMsg,
+      'msg-1': asstMsg
+    }
+    storeState.messages.messageIdsByTopic = {
+      'topic-1': ['user-msg-1', 'msg-1']
+    }
+    mocks.selectMessagesForTopic.mockReturnValue([userMsg, asstMsg])
+    mocks.resetMessagesForResend.mockRejectedValue(new Error('DB write failed'))
+
+    const { resendUserMessageWithEditThunk } = await import('../messageThunk')
+    // LOCK-005: dispatch mock must execute thunks to propagate rejection
+    const dispatch = vi.fn((action: any) => {
+      if (typeof action === 'function') {
+        return action(dispatch, () => storeState as any)
+      }
+      return action
+    })
+
+    // LOCK-005: Error must propagate — caller catches and keeps editor open
+    await expect(
+      resendUserMessageWithEditThunk('topic-1', userMsg, { id: 'assistant-1', model: { id: 'm1' } } as any)(dispatch)
+    ).rejects.toThrow('DB write failed')
+  })
+})

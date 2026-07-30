@@ -745,7 +745,10 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
           onConfirm={() => handleResendUserMessage()}
           onOpenChange={(open) => open && setShowDeleteTooltip(false)}>
           <Tooltip title={t('common.regenerate')} mouseEnterDelay={0.8}>
-            <ActionButton className="message-action-button" $softHoverBg={isBubbleStyle}>
+            <ActionButton
+              className="message-action-button"
+              data-testid="msg-regenerate-btn"
+              $softHoverBg={isBubbleStyle}>
               <RefreshIcon size={15} />
             </ActionButton>
           </Tooltip>
@@ -757,6 +760,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       <Tooltip title={t('common.regenerate')} mouseEnterDelay={0.8}>
         <ActionButton
           className="message-action-button"
+          data-testid="msg-regenerate-btn"
           onClick={() => handleResendUserMessage()}
           $softHoverBg={isBubbleStyle}>
           <RefreshIcon size={15} />
@@ -771,7 +775,11 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
 
     return (
       <Tooltip title={t('common.edit')} mouseEnterDelay={0.8}>
-        <ActionButton className="message-action-button" onClick={onEdit} $softHoverBg={softHoverBg}>
+        <ActionButton
+          className="message-action-button"
+          data-testid="msg-edit-btn"
+          onClick={onEdit}
+          $softHoverBg={softHoverBg}>
           <EditIcon size={15} />
         </ActionButton>
       </Tooltip>
@@ -779,7 +787,11 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
   },
   copy: ({ onCopy, softHoverBg, copied, t }) => (
     <Tooltip title={t('common.copy')} mouseEnterDelay={0.8}>
-      <ActionButton className="message-action-button" onClick={onCopy} $softHoverBg={softHoverBg}>
+      <ActionButton
+        className="message-action-button"
+        data-testid="msg-copy-btn"
+        onClick={onCopy}
+        $softHoverBg={softHoverBg}>
         {!copied && <CopyIcon size={15} />}
         {copied && <Check size={15} color="var(--color-primary)" />}
       </ActionButton>
@@ -805,7 +817,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
           onConfirm={() => onRegenerate()}
           onOpenChange={(open) => open && setShowDeleteTooltip(false)}>
           <Tooltip title={t('common.regenerate')} mouseEnterDelay={0.8}>
-            <ActionButton className="message-action-button" $softHoverBg={softHoverBg}>
+            <ActionButton className="message-action-button" data-testid="msg-regenerate-btn" $softHoverBg={softHoverBg}>
               <RefreshIcon size={15} />
             </ActionButton>
           </Tooltip>
@@ -815,7 +827,11 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
 
     return (
       <Tooltip title={t('common.regenerate')} mouseEnterDelay={0.8}>
-        <ActionButton className="message-action-button" onClick={onRegenerate} $softHoverBg={softHoverBg}>
+        <ActionButton
+          className="message-action-button"
+          data-testid="msg-regenerate-btn"
+          onClick={onRegenerate}
+          $softHoverBg={softHoverBg}>
           <RefreshIcon size={15} />
         </ActionButton>
       </Tooltip>
@@ -828,7 +844,11 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
 
     return (
       <Tooltip title={t('message.mention.title')} mouseEnterDelay={0.8}>
-        <ActionButton className="message-action-button" onClick={onMentionModel} $softHoverBg={softHoverBg}>
+        <ActionButton
+          className="message-action-button"
+          data-testid="assistant-mention-model"
+          onClick={onMentionModel}
+          $softHoverBg={softHoverBg}>
           <AtSign size={15} />
         </ActionButton>
       </Tooltip>

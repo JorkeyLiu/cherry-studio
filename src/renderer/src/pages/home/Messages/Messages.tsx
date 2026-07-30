@@ -52,6 +52,7 @@ import { buildGroupList } from '@renderer/services/anchorService'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
+import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { clearPendingNavigate, getPendingNavigate, getUserMessage } from '@renderer/services/MessagesService'
 import store, { useAppDispatch } from '@renderer/store'
@@ -751,7 +752,7 @@ const Messages = ({
         try {
           // LOCK-533: the branch topic must exist in SQLite with its
           // assistantId before it is exposed to Redux via addTopic below.
-          await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id)
+          await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id, newTopic.name)
         } catch (error) {
           logger.error('Failed to establish SQLite ownership for branch topic', error as Error)
           return
@@ -842,8 +843,19 @@ const Messages = ({
                 updatedAt: new Date().toISOString()
               }
 
+              // LOCK-002: Persist FIRST (SQLite via atomic thunk), THEN update Redux.
+              // If persistence fails, Redux is untouched — editor can retry.
+              // consumeFileCleanupResult is consumed inside updateMessageAndBlocksThunk
+              // when blockIdsToDelete are non-empty; for block-only upserts the cleanup
+              // result is empty and consumed trivially.
+              const cleanup = await dispatch(
+                updateMessageAndBlocksThunk(topic.id, { id: msgBlock.messageId }, [updatedBlock])
+              )
+              // LOCK-001: Consume FileCleanupResult exactly once at the caller.
+              await consumeFileCleanupResult(cleanup)
+
+              // Redux AFTER successful SQLite persistence
               dispatch(updateOneBlock({ id: msgBlockId, changes: { content: updatedRaw } }))
-              await dispatch(updateMessageAndBlocksThunk(topic.id, null, [updatedBlock]))
 
               window.toast.success(t('code_block.edit.save.success'))
             } catch (error) {

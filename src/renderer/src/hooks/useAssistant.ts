@@ -48,7 +48,7 @@ import { TopicManager } from './useTopic'
  */
 async function ensureAssistantTopicsOwnership(assistant: Assistant): Promise<void> {
   for (const topic of assistant.topics ?? []) {
-    await ensureOrdinaryTopicOwnership(topic.id, assistant.id)
+    await ensureOrdinaryTopicOwnership(topic.id, assistant.id, topic.name)
   }
 }
 
@@ -240,7 +240,7 @@ export function useAssistant(id: string) {
       if (isAgentSessionTopicId(topic.id)) {
         await TopicManager.softRemoveTopic(topic)
       } else {
-        await softDeleteOrdinaryTopic(topic.id)
+        await softDeleteOrdinaryTopic(topic.id, topic.name)
       }
       dispatch(removeTopic({ assistantId: assistant.id, topic }))
     },

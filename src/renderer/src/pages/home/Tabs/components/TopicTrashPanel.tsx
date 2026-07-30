@@ -113,6 +113,7 @@ export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
     return (
       <PanelWrapper>
         <CollapsedBar
+          data-testid="trash-collapsed-bar"
           onClick={handleToggle}
           role="button"
           tabIndex={0}
@@ -132,6 +133,7 @@ export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
       <ExpandedPanel>
         {/* Header */}
         <PanelHeader
+          data-testid="trash-expanded-header"
           onClick={handleToggle}
           role="button"
           tabIndex={0}
@@ -148,31 +150,40 @@ export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
           {!loading && count === 0 && <EmptyState>{t('chat.topics.trash.empty')}</EmptyState>}
 
           {!loading &&
-            trashTopics.map((topic) => (
-              <TrashItem key={topic.id}>
-                <TrashItemInfo>
-                  <TrashItemName title={topic.name}>{topic.name}</TrashItemName>
-                  <TrashItemTime>{topic.deletedAt ? dayjs(topic.deletedAt).fromNow() : ''}</TrashItemTime>
-                </TrashItemInfo>
-                <TrashItemActions>
-                  <IconButton title={t('chat.topics.trash.restore')} onClick={(e) => void handleRestore(e, topic.id)}>
-                    <RotateCcw size={14} />
-                  </IconButton>
-                  <IconButton
-                    danger
-                    title={t('common.delete')}
-                    onClick={(e) => void handlePermanentDelete(e, topic.id)}>
-                    <Trash2 size={14} />
-                  </IconButton>
-                </TrashItemActions>
-              </TrashItem>
-            ))}
+            trashTopics.map((topic) => {
+              const displayName = topic.name.trim() || t('common.unnamed')
+              return (
+                <TrashItem key={topic.id} data-testid="trash-item" data-topic-id={topic.id}>
+                  <TrashItemInfo>
+                    <TrashItemName title={displayName}>{displayName}</TrashItemName>
+                    <TrashItemTime>{topic.deletedAt ? dayjs(topic.deletedAt).fromNow() : ''}</TrashItemTime>
+                  </TrashItemInfo>
+                  <TrashItemActions>
+                    <IconButton
+                      data-testid="trash-restore-btn"
+                      data-topic-id={topic.id}
+                      title={t('chat.topics.trash.restore')}
+                      onClick={(e) => void handleRestore(e, topic.id)}>
+                      <RotateCcw size={14} />
+                    </IconButton>
+                    <IconButton
+                      data-testid="trash-hard-delete-btn"
+                      data-topic-id={topic.id}
+                      danger
+                      title={t('common.delete')}
+                      onClick={(e) => void handlePermanentDelete(e, topic.id)}>
+                      <Trash2 size={14} />
+                    </IconButton>
+                  </TrashItemActions>
+                </TrashItem>
+              )
+            })}
         </PanelContent>
 
         {/* Footer actions */}
         {!loading && count > 0 && (
           <PanelFooter>
-            <EmptyTrashButton onClick={() => void handleEmptyTrash()}>
+            <EmptyTrashButton data-testid="trash-empty-btn" onClick={() => void handleEmptyTrash()}>
               <Trash2 size={14} />
               <span>{t('chat.topics.trash.empty_trash')}</span>
             </EmptyTrashButton>
@@ -255,8 +266,13 @@ const EmptyState: FC<PropsWithChildren> = ({ children }) => (
   <div className="flex items-center justify-center px-4 py-6 text-[13px] text-[var(--color-text-3)]">{children}</div>
 )
 
-const TrashItem: FC<PropsWithChildren> = ({ children }) => (
-  <div className="flex flex-row items-center gap-2 px-4 py-2.5 transition-colors duration-150 hover:bg-[var(--color-background-mute)]">
+const TrashItem: FC<PropsWithChildren<React.HTMLAttributes<HTMLDivElement>>> = ({ children, className, ...props }) => (
+  <div
+    {...props}
+    className={cn(
+      'flex flex-row items-center gap-2 px-4 py-2.5 transition-colors duration-150 hover:bg-[var(--color-background-mute)]',
+      className
+    )}>
     {children}
   </div>
 )

@@ -241,4 +241,45 @@ describe('TopicTrashPanel', () => {
     await waitFor(() => expect(onEmptyTrash).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(screen.queryByText('Deleted topic topic-1')).not.toBeInTheDocument())
   })
+
+  it('renders a localized fallback for historical blank names with a tooltip', async () => {
+    mocks.listOrdinaryTrashTopics.mockResolvedValue([{ ...trashTopic('historical-null'), name: '' }])
+
+    render(
+      <TopicTrashPanel
+        assistantId="assistant-1"
+        refreshVersion={0}
+        onRestore={vi.fn()}
+        onPermanentDelete={vi.fn()}
+        onEmptyTrash={vi.fn()}
+      />
+    )
+
+    await waitFor(() => expect(screen.getByText('chat.topics.trash.label:1')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('chat.topics.trash.label:1'))
+
+    await waitFor(() => expect(screen.getByText('common.unnamed')).toBeInTheDocument())
+    expect(screen.getByText('common.unnamed')).toHaveAttribute('title', 'common.unnamed')
+  })
+
+  it('preserves the full long topic name in the title while rendering the row', async () => {
+    const longName = 'A'.repeat(300)
+    mocks.listOrdinaryTrashTopics.mockResolvedValue([{ ...trashTopic('long-topic'), name: longName }])
+
+    render(
+      <TopicTrashPanel
+        assistantId="assistant-1"
+        refreshVersion={0}
+        onRestore={vi.fn()}
+        onPermanentDelete={vi.fn()}
+        onEmptyTrash={vi.fn()}
+      />
+    )
+
+    await waitFor(() => expect(screen.getByText('chat.topics.trash.label:1')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('chat.topics.trash.label:1'))
+
+    await waitFor(() => expect(screen.getByText(longName)).toBeInTheDocument())
+    expect(screen.getByText(longName)).toHaveAttribute('title', longName)
+  })
 })

@@ -4,6 +4,7 @@ import store from '@renderer/store'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type { FileCleanupResult } from '@shared/chatDb'
 
+import { fileLock } from '../FileLock'
 import { AgentMessageDataSource } from './AgentMessageDataSource'
 import { SqliteMessageDataSource } from './SqliteMessageDataSource'
 import type { MessageDataSource } from './types'
@@ -18,14 +19,21 @@ interface FileCountSource {
   updateFileCounts(files: Array<{ id: string; delta: number; deleteIfZero?: boolean }>): Promise<void>
 }
 
+/**
+ * LOCK-001: fileCountSource routes every read-modify-write through fileLock
+ * so that concurrent delete/orphan/add operations on the same file ID are
+ * serialized. updateFileCounts delegates per-ID safely.
+ */
 const fileCountSource: FileCountSource = {
   async updateFileCount(fileId, delta, deleteIfZero = false) {
-    await db.transaction('rw', db.files, async () => {
-      const file = await db.files.get(fileId)
-      if (!file) return
-      const count = Math.max(0, file.count + delta)
-      if (deleteIfZero && count === 0) await db.files.delete(fileId)
-      else await db.files.update(fileId, { count })
+    await fileLock.run(fileId, async () => {
+      await db.transaction('rw', db.files, async () => {
+        const file = await db.files.get(fileId)
+        if (!file) return
+        const count = Math.max(0, file.count + delta)
+        if (deleteIfZero && count === 0) await db.files.delete(fileId)
+        else await db.files.update(fileId, { count })
+      })
     })
   },
   async updateFileCounts(files) {
@@ -90,8 +98,8 @@ class DbService implements MessageDataSource {
   topicExists(topicId: string) {
     return this.source(topicId).topicExists(topicId)
   }
-  ensureTopic(topicId: string, assistantId?: string) {
-    return this.ordinarySource.ensureTopic(topicId, assistantId)
+  ensureTopic(topicId: string, assistantId?: string, name?: string | null) {
+    return this.ordinarySource.ensureTopic(topicId, assistantId, name)
   }
 
   async updateBlocks(blocks: MessageBlock[]): Promise<void> {
@@ -128,8 +136,8 @@ class DbService implements MessageDataSource {
   ) {
     return this.ordinarySource.updateTopicMetadata(topicId, name, pinned, prompt, isNameManuallyEdited)
   }
-  softDeleteTopic(topicId: string) {
-    return this.ordinarySource.softDeleteTopic(topicId)
+  softDeleteTopic(topicId: string, name?: string | null) {
+    return this.ordinarySource.softDeleteTopic(topicId, name)
   }
   restoreTopic(topicId: string) {
     return this.ordinarySource.restoreTopic(topicId)

@@ -407,6 +407,31 @@ describe('ChatDb IPC Registration', () => {
     }
   })
 
+  it('accepts name-bearing ensure and soft-delete requests at the IPC boundary', async () => {
+    disposer = registerChatDbIpc()
+
+    const ensureResult = await handlers.get(IpcChannel.ChatDb_EnsureTopic)!(
+      {},
+      {
+        topicId: 't-1',
+        assistantId: 'a-1',
+        name: 'Named topic'
+      }
+    )
+    const softDeleteResult = await handlers.get(IpcChannel.ChatDb_SoftDeleteTopic)!(
+      {},
+      {
+        topicId: 't-1',
+        name: 'Named topic'
+      }
+    )
+
+    expect(ensureResult).toHaveProperty('ok')
+    expect(softDeleteResult).toHaveProperty('ok')
+    expect(ensureResult).not.toMatchObject({ ok: false, error: { code: 'VALIDATION_ERROR' } })
+    expect(softDeleteResult).not.toMatchObject({ ok: false, error: { code: 'VALIDATION_ERROR' } })
+  })
+
   // =========================================================================
   // Non-retryable vs retryable errors
   // =========================================================================

@@ -354,7 +354,7 @@ export const TopicManager = {
       })
       return
     }
-    await dbService.softDeleteTopic(topic.id)
+    await dbService.softDeleteTopic(topic.id, topic.name)
   },
 
   // Restore: clear deletedAt in DB

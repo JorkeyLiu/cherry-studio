@@ -155,7 +155,7 @@ describe('useAssistant trash lifecycle (Phase 5.2B)', () => {
 
       await result.current.removeTopic(topic)
 
-      expect(mocks.softDeleteOrdinaryTopic).toHaveBeenCalledExactlyOnceWith('t-1')
+      expect(mocks.softDeleteOrdinaryTopic).toHaveBeenCalledExactlyOnceWith('t-1', 'Topic')
       expect(mocks.softRemoveTopic).not.toHaveBeenCalled()
       expect(mockDispatch).toHaveBeenCalledWith({
         type: 'removeTopic',
@@ -253,7 +253,7 @@ describe('useAssistant trash lifecycle (Phase 5.2B)', () => {
 
       await result.current.addAssistant(newAssistant)
 
-      expect(mocks.ensureOrdinaryTopicOwnership).toHaveBeenCalledExactlyOnceWith('t-new', 'a-2')
+      expect(mocks.ensureOrdinaryTopicOwnership).toHaveBeenCalledExactlyOnceWith('t-new', 'a-2', 'Topic')
       expect(order).toEqual(['sqlite', 'redux'])
       expect(mockDispatch).toHaveBeenCalledWith({ type: 'addAssistant', p: newAssistant })
     })
@@ -276,7 +276,7 @@ describe('useAssistant trash lifecycle (Phase 5.2B)', () => {
       expect(copied).toBeDefined()
       // getDefaultTopic receives the NEW assistant ID, not the original 'a-1'
       expect(mocks.getDefaultTopic).toHaveBeenCalledWith('uuid-1')
-      expect(mocks.ensureOrdinaryTopicOwnership).toHaveBeenCalledExactlyOnceWith('topic-uuid-1', 'uuid-1')
+      expect(mocks.ensureOrdinaryTopicOwnership).toHaveBeenCalledExactlyOnceWith('topic-uuid-1', 'uuid-1', 'Default')
       const dispatched = mockDispatch.mock.calls.at(-1)?.[0]
       expect(dispatched.type).toBe('insertAssistant')
     })

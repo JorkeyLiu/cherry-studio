@@ -11,12 +11,11 @@ import PasteService from '@renderer/services/PasteService'
 import { useAppSelector } from '@renderer/store'
 import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import type { FileMetadata } from '@renderer/types'
-import { FILE_TYPE } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { classNames } from '@renderer/utils'
 import { getFilesFromDropEvent, isSendMessageKeyPressed } from '@renderer/utils/input'
-import { createFileBlock, createImageBlock, createMainTextBlock } from '@renderer/utils/messageUtils/create'
+import { createMainTextBlock } from '@renderer/utils/messageUtils/create'
 import { findAllBlocks, isAssistantInterruptedThinkingOnlyMessage } from '@renderer/utils/messageUtils/find'
 import { documentExts, imageExts, textExts } from '@shared/config/constant'
 import { Tooltip } from 'antd'
@@ -30,13 +29,30 @@ import styled from 'styled-components'
 
 import { FileNameRender, getFileIcon } from '../Inputbar/AttachmentPreview'
 import AttachmentButton from '../Inputbar/tools/components/AttachmentButton'
+import { releaseStagedAttachmentUploads, stageAttachmentUploads } from './MessageEditorAttachmentUpload'
 
 interface Props {
   message: Message
   topicId: string
-  onSave: (blocks: MessageBlock[]) => void
-  onResend: (blocks: MessageBlock[]) => void
+  onSave: (blocks: MessageBlock[], onCommit: (blockIds: readonly string[]) => void) => void | Promise<void>
+  onResend: (blocks: MessageBlock[], onCommit: (blockIds: readonly string[]) => void) => void | Promise<void>
   onCancel: () => void
+}
+
+type AttachmentOwnershipState = 'staged' | 'inFlight' | 'committed' | 'removing'
+
+const MAX_RELEASE_RETRIES = 3
+
+interface OwnedAttachment {
+  file: FileMetadata
+  state: AttachmentOwnershipState
+  operationId?: number
+}
+
+interface PersistenceOperation {
+  id: number
+  blockIds: Set<string>
+  settled: boolean
 }
 
 const logger = loggerService.withContext('MessageBlockEditor')
@@ -64,7 +80,17 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
   const [editedBlocks, setEditedBlocks] = useState<MessageBlock[]>(() => getInitialEditableBlocks(message))
   const [files, setFiles] = useState<FileMetadata[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
+  const [isRemoving, setIsRemoving] = useState(false)
   const [isFileDragging, setIsFileDragging] = useState(false)
+  const editedBlocksRef = useRef(editedBlocks)
+  const attachmentsRef = useRef(new Map<string, OwnedAttachment>())
+  const persistenceOperationIdRef = useRef(0)
+  const persistenceOperationsRef = useRef(new Map<number, PersistenceOperation>())
+  const isProcessingRef = useRef(false)
+  const isRemovingRef = useRef(false)
+  const isMountedRef = useRef(true)
+  const isCancelledRef = useRef(false)
+  const releaseEditorOwnedAttachmentsRef = useRef<() => void>(() => {})
   const { assistant } = useAssistant(message.assistantId)
   const model = assistant.model || assistant.defaultModel
   const { pasteLongTextAsFile, pasteLongTextThreshold, fontSize, sendMessageShortcut, enableSpellCheck } = useSettings()
@@ -136,6 +162,14 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
     return () => clearTimeout(timer)
   }, [])
 
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false
+      isCancelledRef.current = true
+      releaseEditorOwnedAttachmentsRef.current()
+    }
+  }, [])
+
   // 仅在打开时执行一次
   useEffect(() => {
     if (textareaRef.current) {
@@ -175,7 +209,8 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
   }, [onPaste])
 
   const handleTextChange = (blockId: string, content: string) => {
-    setEditedBlocks((prev) => prev.map((block) => (block.id === blockId ? { ...block, content } : block)))
+    const nextBlocks = editedBlocksRef.current.map((block) => (block.id === blockId ? { ...block, content } : block))
+    setEditedBlocksSynchronously(nextBlocks)
   }
 
   const onTranslated = (translatedText: string) => {
@@ -185,9 +220,203 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
     }
   }
 
+  const setEditedBlocksSynchronously = (nextBlocks: MessageBlock[]) => {
+    editedBlocksRef.current = nextBlocks
+    setEditedBlocks(nextBlocks)
+  }
+
+  const releaseAttachments = (attachments: Map<string, OwnedAttachment>, attempt = 0) => {
+    if (attachments.size === 0) return
+
+    attachments.forEach((attachment, blockId) => {
+      attachment.state = 'removing'
+      attachment.operationId = undefined
+      attachmentsRef.current.set(blockId, attachment)
+    })
+
+    const files = new Map([...attachments].map(([blockId, attachment]) => [blockId, attachment.file]))
+    void releaseStagedAttachmentUploads(files)
+      .then(() => {
+        attachments.forEach((_attachment, blockId) => {
+          const currentAttachment = attachmentsRef.current.get(blockId)
+          if (currentAttachment?.state === 'removing') {
+            attachmentsRef.current.delete(blockId)
+          }
+        })
+      })
+      .catch((error) => {
+        logger.error('Failed to release message editor attachments:', error as Error)
+
+        // After releaseStagedAttachmentUploads rejects, `files` retains only
+        // entries whose FileManager.deleteFile failed — successful entries were
+        // removed from the map inside releaseStagedAttachmentUploads.
+        const failed = new Map<string, OwnedAttachment>()
+        attachments.forEach((_attachment, blockId) => {
+          const currentAttachment = attachmentsRef.current.get(blockId)
+          if (!currentAttachment || currentAttachment.state !== 'removing') return
+
+          if (files.has(blockId)) {
+            // Deletion failed — restore to staged for retry (LOCK-001)
+            currentAttachment.state = 'staged'
+            failed.set(blockId, currentAttachment)
+          } else {
+            // Deletion succeeded — clean orphan from attachmentsRef.current
+            attachmentsRef.current.delete(blockId)
+          }
+        })
+
+        // Bounded retry (LOCK-002/LOCK-003)
+        if (failed.size > 0 && attempt < MAX_RELEASE_RETRIES) {
+          const delay = 500 * (attempt + 1)
+          setTimeout(() => releaseAttachments(failed, attempt + 1), delay)
+        } else if (failed.size > 0) {
+          logger.error(
+            `Attachment ownership retained after ${attempt + 1} release attempts for: [${[...failed.keys()].join(', ')}]`
+          )
+        }
+      })
+  }
+
+  const releaseEditorOwnedAttachments = () => {
+    const releasableAttachments = new Map(
+      [...attachmentsRef.current].filter(([, attachment]) => attachment.state === 'staged')
+    )
+    releaseAttachments(releasableAttachments)
+  }
+  releaseEditorOwnedAttachmentsRef.current = releaseEditorOwnedAttachments
+
+  const beginPersistence = (blocks: MessageBlock[]): PersistenceOperation => {
+    const operation: PersistenceOperation = {
+      id: ++persistenceOperationIdRef.current,
+      blockIds: new Set(),
+      settled: false
+    }
+
+    const blockIds = new Set(blocks.map((block) => block.id))
+    attachmentsRef.current.forEach((attachment, blockId) => {
+      if (attachment.state === 'staged' && blockIds.has(blockId)) {
+        attachment.state = 'inFlight'
+        attachment.operationId = operation.id
+        operation.blockIds.add(blockId)
+      }
+    })
+
+    persistenceOperationsRef.current.set(operation.id, operation)
+    return operation
+  }
+
+  const commitPersistence = (operation: PersistenceOperation, blockIds: readonly string[]) => {
+    if (operation.settled) return
+
+    blockIds.forEach((blockId) => {
+      if (!operation.blockIds.has(blockId)) return
+      const attachment = attachmentsRef.current.get(blockId)
+      if (attachment?.state === 'inFlight' && attachment.operationId === operation.id) {
+        attachment.state = 'committed'
+        attachment.operationId = undefined
+      }
+    })
+  }
+
+  const settlePersistence = (operation: PersistenceOperation) => {
+    if (operation.settled) return
+    operation.settled = true
+    persistenceOperationsRef.current.delete(operation.id)
+
+    const releasableAttachments = new Map<string, OwnedAttachment>()
+    operation.blockIds.forEach((blockId) => {
+      const attachment = attachmentsRef.current.get(blockId)
+      if (!attachment || attachment.state !== 'inFlight' || attachment.operationId !== operation.id) return
+
+      attachment.operationId = undefined
+      if (isMountedRef.current && !isCancelledRef.current) {
+        attachment.state = 'staged'
+      } else {
+        releasableAttachments.set(blockId, attachment)
+      }
+    })
+
+    releaseAttachments(releasableAttachments)
+  }
+
   // 处理文件删除
   const handleFileRemove = async (blockId: string) => {
-    setEditedBlocks((prev) => prev.filter((block) => block.id !== blockId))
+    if (isProcessingRef.current || isRemovingRef.current) return
+
+    const blockIndex = editedBlocksRef.current.findIndex((block) => block.id === blockId)
+    if (blockIndex < 0) return
+
+    const block = editedBlocksRef.current[blockIndex]
+    const attachment = attachmentsRef.current.get(blockId)
+    if (attachment?.state === 'inFlight' || attachment?.state === 'removing') return
+
+    const nextBlocks = editedBlocksRef.current.filter((candidate) => candidate.id !== blockId)
+    setEditedBlocksSynchronously(nextBlocks)
+    isRemovingRef.current = true
+    setIsRemoving(true)
+
+    if (!attachment) {
+      isRemovingRef.current = false
+      setIsRemoving(false)
+      return
+    }
+
+    if (attachment.state !== 'staged') {
+      isRemovingRef.current = false
+      setIsRemoving(false)
+      return
+    }
+
+    const previousState = attachment.state
+    attachment.state = 'removing'
+    attachment.operationId = undefined
+
+    try {
+      await FileManager.deleteFile(attachment.file.id)
+      if (attachmentsRef.current.get(blockId) === attachment) {
+        attachmentsRef.current.delete(blockId)
+      }
+    } catch (error) {
+      if (isMountedRef.current && !isCancelledRef.current) {
+        // Mounted: restore retryable staged ownership + UI (LOCK-001)
+        attachment.state = previousState
+        const restoredBlocks = [...editedBlocksRef.current]
+        restoredBlocks.splice(Math.min(blockIndex, restoredBlocks.length), 0, block)
+        setEditedBlocksSynchronously(restoredBlocks)
+        window.toast?.error(t('common.delete_failed'))
+      } else {
+        // After unmount: don't restore editor state; keep ownership, schedule bounded retry (LOCK-002)
+        const retryRelease = (attempt: number) => {
+          if (attempt >= MAX_RELEASE_RETRIES) {
+            logger.error(
+              `Attachment ownership retained after ${attempt} removal attempts for file: ${attachment.file.id}`
+            )
+            return
+          }
+          const currentAttachment = attachmentsRef.current.get(blockId)
+          if (!currentAttachment || currentAttachment !== attachment) return
+          if (currentAttachment.state !== 'removing') return
+
+          const delay = 500 * (attempt + 1)
+          setTimeout(() => {
+            FileManager.deleteFile(attachment.file.id)
+              .then(() => {
+                if (attachmentsRef.current.get(blockId) === attachment) {
+                  attachmentsRef.current.delete(blockId)
+                }
+              })
+              .catch(() => {
+                retryRelease(attempt + 1)
+              })
+          }, delay)
+        }
+        retryRelease(0)
+      }
+      logger.error('Failed to remove message editor attachment:', error as Error)
+    } finally {
+      isRemovingRef.current = false
+      if (isMountedRef.current) setIsRemoving(false)
+    }
   }
 
   // 处理拖拽上传
@@ -218,44 +447,87 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
 
   // 处理编辑区块并上传文件
   const processEditedBlocks = async () => {
-    const updatedBlocks = [...editedBlocks]
-    if (files && files.length) {
-      const uploadedFiles = await FileManager.uploadFiles(files)
-      uploadedFiles.forEach((file) => {
-        if (file.type === FILE_TYPE.IMAGE) {
-          const imgBlock = createImageBlock(message.id, { file, status: MessageBlockStatus.SUCCESS })
-          updatedBlocks.push(imgBlock)
-        } else {
-          const fileBlock = createFileBlock(message.id, file, { status: MessageBlockStatus.SUCCESS })
-          updatedBlocks.push(fileBlock)
-        }
-      })
+    const result = await stageAttachmentUploads(message.id, editedBlocksRef.current, files)
+
+    if (isCancelledRef.current) {
+      const cancelledUploads = new Map(
+        result.stagedUploads.map(({ block, file }) => [block.id, { file, state: 'staged' as const }])
+      )
+      cancelledUploads.forEach((attachment, blockId) => attachmentsRef.current.set(blockId, attachment))
+      releaseAttachments(cancelledUploads)
+      throw new Error('Message editor attachment upload cancelled')
     }
-    return updatedBlocks
+
+    if (result.stagedUploads.length > 0) {
+      result.stagedUploads.forEach(({ block, file }) => {
+        attachmentsRef.current.set(block.id, { file, state: 'staged' })
+      })
+      setEditedBlocksSynchronously(result.blocks)
+      const remainingFileIds = new Set(result.remainingFiles.map((file) => file.id))
+      setFiles((pendingFiles) => pendingFiles.filter((file) => remainingFileIds.has(file.id)))
+    }
+
+    if (result.error) {
+      logger.error('Failed to upload one or more message attachments:', result.error as Error)
+      throw result.error
+    }
+
+    return result.blocks
   }
 
   const handleSave = async () => {
-    if (isProcessing) return
+    if (isProcessingRef.current || isRemovingRef.current) return
+    isProcessingRef.current = true
     setIsProcessing(true)
-    const updatedBlocks = await processEditedBlocks()
-    onSave(updatedBlocks)
+    try {
+      const updatedBlocks = await processEditedBlocks()
+      const operation = beginPersistence(updatedBlocks)
+      try {
+        await onSave(updatedBlocks, (blockIds) => commitPersistence(operation, blockIds))
+      } finally {
+        settlePersistence(operation)
+      }
+    } catch {
+      // Persistence failed — keep editor open, reset processing state so user can retry
+      isProcessingRef.current = false
+      setIsProcessing(false)
+    }
   }
 
   const handleResend = async () => {
-    if (isProcessing) return
+    if (isProcessingRef.current || isRemovingRef.current) return
+    isProcessingRef.current = true
     setIsProcessing(true)
-    const updatedBlocks = await processEditedBlocks()
-    onResend(updatedBlocks)
+    try {
+      const updatedBlocks = await processEditedBlocks()
+      const operation = beginPersistence(updatedBlocks)
+      try {
+        await onResend(updatedBlocks, (blockIds) => commitPersistence(operation, blockIds))
+      } finally {
+        settlePersistence(operation)
+      }
+    } catch {
+      // Persistence failed — keep editor open, reset processing state so user can retry
+      isProcessingRef.current = false
+      setIsProcessing(false)
+    }
+  }
+
+  const handleCancel = () => {
+    if (isProcessingRef.current || isRemovingRef.current) return
+    isCancelledRef.current = true
+    releaseEditorOwnedAttachments()
+    onCancel()
   }
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (message.role !== 'user') {
+    if (message.role !== 'user' || isProcessingRef.current || isRemovingRef.current) {
       return
     }
 
     if (event.key === 'Escape') {
       event.preventDefault()
-      onCancel()
+      handleCancel()
       return
     }
 
@@ -332,6 +604,7 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
                           icon={getFileIcon(block.file.ext)}
                           color="#37a5aa"
                           closable
+                          disabled={isProcessing || isRemoving}
                           onClose={() => handleFileRemove(block.id)}>
                           <FileNameRender file={block.file} />
                         </CustomTag>
@@ -366,21 +639,28 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
             </ActionBarLeft>
             <ActionBarRight>
               <Tooltip title={t('common.cancel')}>
-                <ActionIconButton onClick={onCancel} disabled={isProcessing} aria-label={t('common.cancel')}>
+                <ActionIconButton
+                  onClick={handleCancel}
+                  disabled={isProcessing || isRemoving}
+                  aria-label={t('common.cancel')}>
                   <X size={16} />
                 </ActionIconButton>
               </Tooltip>
               <Tooltip title={t('common.save')}>
-                <ActionIconButton onClick={handleSave} disabled={isProcessing} aria-label={t('common.save')}>
+                <ActionIconButton
+                  className="message-editor-save-btn"
+                  onClick={handleSave}
+                  disabled={isProcessing || isRemoving}
+                  aria-label={t('common.save')}>
                   <Save size={16} />
                 </ActionIconButton>
               </Tooltip>
               {message.role === 'user' && (
                 <Tooltip title={t('chat.resend')}>
                   <ActionIconButton
-                    className="primary-action"
+                    className="primary-action message-editor-resend-btn"
                     onClick={handleResend}
-                    disabled={isProcessing}
+                    disabled={isProcessing || isRemoving}
                     aria-label={t('chat.resend')}>
                     <Send size={16} />
                   </ActionIconButton>

@@ -107,7 +107,7 @@ export interface MessageDataSource {
   /**
    * Create or ensure topic exists
    */
-  ensureTopic(topicId: string): Promise<void>
+  ensureTopic(topicId: string, assistantId?: string, name?: string | null): Promise<void>
 
   // ============ File Operations (Optional) ============
 

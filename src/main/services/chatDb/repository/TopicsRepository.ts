@@ -72,13 +72,13 @@ export class TopicsRepository {
     return (this.getById(data.id) as any).data
   }
 
-  ensure(id: string, assistantId?: string): TopicData {
+  ensure(id: string, assistantId?: string, name?: string | null): TopicData {
     const existing = this.getById(id)
     if (existing.found) return existing.data
     return this.create({
       id,
       assistantId: assistantId ?? null,
-      name: null,
+      name: name ?? null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       deletedAt: null,
@@ -112,8 +112,8 @@ export class TopicsRepository {
     return { affected: 1 }
   }
 
-  softDelete(id: string): AffectedCount {
-    return this.updatePatch(id, { deletedAt: new Date().toISOString() })
+  softDelete(id: string, name?: string | null): AffectedCount {
+    return this.updatePatch(id, { ...(name !== undefined && { name }), deletedAt: new Date().toISOString() })
   }
 
   restore(id: string): AffectedCount {

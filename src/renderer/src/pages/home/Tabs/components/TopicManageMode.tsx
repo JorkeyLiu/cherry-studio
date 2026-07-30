@@ -157,7 +157,7 @@ export const TopicManagePanel: React.FC<TopicManagePanelProps> = ({
       topicsToDelete.map((topic) =>
         (isAgentSessionTopicId(topic.id)
           ? TopicManager.softRemoveTopic(topic)
-          : softDeleteOrdinaryTopic(topic.id)
+          : softDeleteOrdinaryTopic(topic.id, topic.name)
         ).then(() => topic.id)
       )
     )

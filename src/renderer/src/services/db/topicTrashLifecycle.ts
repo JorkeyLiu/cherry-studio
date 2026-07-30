@@ -113,16 +113,20 @@ export async function consumeFileCleanupResult(result: FileCleanupResult): Promi
  * Agent-session topic IDs are bypassed: agent creation keeps its existing
  * Dexie/backend path unchanged (LOCK-521).
  */
-export async function ensureOrdinaryTopicOwnership(topicId: string, assistantId: string): Promise<void> {
+export async function ensureOrdinaryTopicOwnership(
+  topicId: string,
+  assistantId: string,
+  name?: string | null
+): Promise<void> {
   if (isAgentSessionTopicId(topicId)) {
     return
   }
-  await sqliteSource.ensureTopic(topicId, assistantId)
+  await sqliteSource.ensureTopic(topicId, assistantId, name)
 }
 
 /** Soft-delete an ordinary-chat topic in SQLite. No Dexie writes. */
-export async function softDeleteOrdinaryTopic(topicId: string): Promise<void> {
-  await sqliteSource.softDeleteTopic(topicId)
+export async function softDeleteOrdinaryTopic(topicId: string, name?: string | null): Promise<void> {
+  await sqliteSource.softDeleteTopic(topicId, name)
 }
 
 /**

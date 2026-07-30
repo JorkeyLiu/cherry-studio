@@ -116,6 +116,12 @@ describe('markdown', () => {
   })
 
   describe('removeTrailingDoubleSpaces', () => {
+    it('matches the copy-button normalization when combined with trimStart', () => {
+      const input = '  Intro  \nBody  '
+
+      expect(removeTrailingDoubleSpaces(input.trimStart())).toBe('Intro\nBody')
+    })
+
     it('should remove trailing double spaces from each line', () => {
       // 验证移除每行末尾的两个空格
       const input = 'Line one  \nLine two  \nLine three'

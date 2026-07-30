@@ -102,6 +102,8 @@ export interface TopicExistsRequest {
 export interface EnsureTopicRequest {
   topicId: string
   assistantId?: string
+  /** Initial topic name, persisted only when the topic is created. */
+  name?: string | null
 }
 
 /** @see IpcChannel.ChatDb_AppendMessage */
@@ -363,6 +365,8 @@ export type UpdateTopicMetadataResponse = TopicWire
 /** @see IpcChannel.ChatDb_SoftDeleteTopic */
 export interface SoftDeleteTopicRequest {
   topicId: string
+  /** Current renderer topic name, persisted atomically with deletedAt. */
+  name?: string | null
 }
 
 /** @see IpcChannel.ChatDb_RestoreTopic */

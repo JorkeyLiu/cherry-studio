@@ -204,7 +204,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   const createPersistedReplacement = useCallback(async () => {
     const newTopic = getDefaultTopic(assistant.id)
     // LOCK-533: SQLite assistant ownership first.
-    await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id)
+    await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id, newTopic.name)
     return newTopic
   }, [assistant.id])
 
@@ -744,6 +744,8 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
           return (
             <Dropdown menu={{ items: getTopicMenuItems }} trigger={['contextMenu']} disabled={isManageMode}>
               <TopicListItem
+                data-testid="topic-item"
+                data-topic-id={topic.id}
                 onContextMenu={() => setTargetTopic(topic)}
                 className={classNames(
                   isActive && !isManageMode ? 'active' : '',
@@ -801,6 +803,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
                         </div>
                       }>
                       <MenuButton
+                        data-testid="topic-delete-btn"
                         className="menu"
                         onClick={(e) => {
                           if (e.ctrlKey || e.metaKey) {

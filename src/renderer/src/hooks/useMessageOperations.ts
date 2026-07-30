@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 import { createSelector } from '@reduxjs/toolkit'
 import { deleteSingleMessage } from '@renderer/services/ClipboardService'
+import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { appendMessageTrace, pauseTrace, restartTrace } from '@renderer/services/SpanManagerService'
 import { estimateUserPromptUsage } from '@renderer/services/TokenService'
@@ -14,16 +15,16 @@ import {
   deleteSingleMessageThunk,
   initiateTranslationThunk,
   regenerateAssistantResponseThunk,
-  removeBlocksThunk,
   resendMessageThunk,
   resendUserMessageWithEditThunk,
   updateMessageAndBlocksThunk,
   updateTranslationBlockThunk
 } from '@renderer/store/thunk/messageThunk'
 import { type Assistant, type Model, objectKeys, type Topic, type TranslateLanguageCode } from '@renderer/types'
-import type { Message, MessageBlock } from '@renderer/types/newMessage'
+import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { abortCompletion } from '@renderer/utils/abortController'
+import { estimateMessageBlocksUsage } from '@renderer/utils/messageUtils/usage'
 import { difference, throttle } from 'lodash'
 import { useCallback } from 'react'
 
@@ -64,6 +65,10 @@ export function useMessageOperations(topic: Topic) {
   /**
    * 编辑消息。 / Edits a message.
    * 使用 newMessagesActions.updateMessage.
+   *
+   * LOCK-001: Consumes FileCleanupResult exactly once when returned.
+   * LOCK-003: Includes file/image attachment usage in the same atomic patch
+   * when the caller edits a message with file/image blocks.
    */
   const editMessage = useCallback(
     async (messageId: string, updates: Partial<Omit<Message, 'id' | 'topicId' | 'blocks'>>) => {
@@ -80,8 +85,38 @@ export function useMessageOperations(topic: Topic) {
         ...updates
       }
 
+      // LOCK-003: Compute file/image usage for the atomic patch when the
+      // message has file/image blocks, so usage is persisted in the same
+      // transaction as the text edit — no separate fire-and-forget write.
+      if (!isUiUpdateOnly) {
+        const state = store.getState()
+        const msg = state.messages.entities[messageId]
+        if (msg?.blocks && msg.blocks.length > 0) {
+          const fileBlocks = msg.blocks
+            .map((bid) => state.messageBlocks.entities[bid])
+            .filter(
+              (b): b is MessageBlock => !!b && (b.type === MessageBlockType.FILE || b.type === MessageBlockType.IMAGE)
+            )
+          if (fileBlocks.length > 0) {
+            const files = fileBlocks
+              .map((b) => (b as FileMessageBlock | ImageMessageBlock).file)
+              .filter((f) => f !== undefined)
+            const mainTextBlock = msg.blocks
+              .map((bid) => state.messageBlocks.entities[bid])
+              .find((b) => b?.type === MessageBlockType.MAIN_TEXT)
+            const content = mainTextBlock?.content || (updates as any).content || ''
+            const usage = await estimateUserPromptUsage({ content, files })
+            ;(messageUpdates as any).usage = usage
+          }
+        }
+      }
+
       // Call the thunk with topic.id and only message updates
-      await dispatch(updateMessageAndBlocksThunk(topic.id, messageUpdates, []))
+      const cleanup = await dispatch(updateMessageAndBlocksThunk(topic.id, messageUpdates, []))
+      // LOCK-001: Consume FileCleanupResult exactly once at the caller.
+      // For block-only upserts (no blockIdsToDelete), the result is empty
+      // and consumed trivially.
+      await consumeFileCleanupResult(cleanup)
     },
     [dispatch, topic.id]
   )
@@ -280,123 +315,148 @@ export function useMessageOperations(topic: Topic) {
 
   /**
    * Updates message blocks by comparing original and edited blocks.
-   * Handles adding, updating, and removing blocks in a single operation.
+   * Handles adding, updating, and removing blocks in a SINGLE atomic SQLite
+   * transaction via updateMessageAndBlocksThunk with blockIdsToDelete.
+   *
+   * LOCK-001: One atomic persistence before any Redux commit.
+   * LOCK-003: Failure propagates — editor remains open, processing resets.
+   * LOCK-005: Accepts optional extraMessageUpdates (e.g. usage) to include
+   * in the same atomic patch — no separate fire-and-forget write.
    * @param messageId The ID of the message to update
    * @param editedBlocks The complete set of blocks after editing
+   * @param extraMessageUpdates Optional additional message fields to patch atomically
    */
   const editMessageBlocks = useCallback(
-    async (messageId: string, editedBlocks: MessageBlock[]) => {
+    async (
+      messageId: string,
+      editedBlocks: MessageBlock[],
+      extraMessageUpdates?: Partial<Message> & Pick<Message, 'id'>,
+      onCommit?: (blockIds: readonly string[]) => void
+    ) => {
       if (!topic?.id) {
         logger.error('[editMessageBlocks] Topic prop is not valid.')
         return
       }
 
-      try {
-        // 1. Get the current state of the message and its blocks
-        const state = store.getState()
-        const message = state.messages.entities[messageId]
-        if (!message) {
-          logger.error(`[editMessageBlocks] Message not found: ${messageId}`)
-          return
+      // 1. Get the current state of the message and its blocks
+      const state = store.getState()
+      const message = state.messages.entities[messageId]
+      if (!message) {
+        logger.error(`[editMessageBlocks] Message not found: ${messageId}`)
+        return
+      }
+
+      // 2. Get all original blocks
+      const originalBlocks = message.blocks
+        ? message.blocks.map((blockId) => state.messageBlocks.entities[blockId]).filter((block) => block !== undefined)
+        : []
+
+      // 3. Create sets for efficient comparison
+      const originalBlockIds = new Set(originalBlocks.map((block) => block.id))
+      const editedBlockIds = new Set(editedBlocks.map((block) => block.id))
+
+      // 4. Identify blocks to remove, update, and add
+      const blockIdsToRemove = originalBlocks.filter((block) => !editedBlockIds.has(block.id)).map((block) => block.id)
+
+      const blocksToUpdate = editedBlocks
+        .filter((block) => originalBlockIds.has(block.id))
+        .map((block) => ({
+          ...block,
+          updatedAt: new Date().toISOString()
+        }))
+
+      const blocksToAdd = editedBlocks
+        .filter((block) => !originalBlockIds.has(block.id))
+        .map((block) => ({
+          ...block,
+          updatedAt: new Date().toISOString()
+        }))
+
+      // 5. Prepare message update with new block IDs (LOCK-002: strip identity/order fields)
+      const updatedBlockIds = editedBlocks.map((block) => block.id)
+      const messageUpdates: Partial<Message> & Pick<Message, 'id'> = {
+        id: messageId,
+        updatedAt: new Date().toISOString(),
+        blocks: updatedBlockIds,
+        // LOCK-005: Merge caller-supplied extra fields (e.g. usage) into the same patch
+        ...(extraMessageUpdates && extraMessageUpdates.id === messageId
+          ? Object.fromEntries(
+              Object.entries(extraMessageUpdates).filter(([k]) => k !== 'id' && k !== 'topicId' && k !== 'sortOrder')
+            )
+          : {})
+      }
+
+      // 6. ONE atomic SQLite transaction for all operations (LOCK-001)
+      // Combines message patch + block upserts (add+update) + block deletions
+      // into a single IPC command → single SQLite transaction.
+      const allBlocksToPersist = [...blocksToAdd, ...blocksToUpdate]
+
+      if (allBlocksToPersist.length > 0 || blockIdsToRemove.length > 0 || Object.keys(messageUpdates).length > 1) {
+        // Dispatch the atomic thunk — on failure, error propagates and Redux is untouched.
+        // LOCK-003: Error will be caught by Message.tsx's handleEditSave → MessageEditor resets processing.
+        const cleanup = await dispatch(
+          updateMessageAndBlocksThunk(topic.id, messageUpdates, allBlocksToPersist, blockIdsToRemove)
+        )
+        // Notify the editor at the transaction boundary. Later cleanup or resend
+        // failures must not retain ownership of files already referenced by SQLite.
+        let postCommitError: unknown
+        try {
+          onCommit?.(editedBlocks.map((block) => block.id))
+        } catch (error) {
+          postCommitError = error
+          logger.error('[editMessageBlocks] Commit notification failed after persistence:', error as Error)
         }
 
-        // 2. Get all original blocks
-        const originalBlocks = message.blocks
-          ? message.blocks
-              .map((blockId) => state.messageBlocks.entities[blockId])
-              .filter((block) => block !== undefined)
-          : []
-
-        // 3. Create sets for efficient comparison
-        const originalBlockIds = new Set(originalBlocks.map((block) => block.id))
-        const editedBlockIds = new Set(editedBlocks.map((block) => block.id))
-
-        // 4. Identify blocks to remove, update, and add
-        const blockIdsToRemove = originalBlocks
-          .filter((block) => !editedBlockIds.has(block.id))
-          .map((block) => block.id)
-
-        const blocksToUpdate = editedBlocks
-          .filter((block) => originalBlockIds.has(block.id))
-          .map((block) => ({
-            ...block,
-            updatedAt: new Date().toISOString()
-          }))
-
-        const blocksToAdd = editedBlocks
-          .filter((block) => !originalBlockIds.has(block.id))
-          .map((block) => ({
-            ...block,
-            updatedAt: new Date().toISOString()
-          }))
-
-        // 5. Prepare message update with new block IDs
-        const updatedBlockIds = editedBlocks.map((block) => block.id)
-        const messageUpdates: Partial<Message> & Pick<Message, 'id'> = {
-          id: messageId,
-          updatedAt: new Date().toISOString(),
-          blocks: updatedBlockIds
+        try {
+          // LOCK-001: Consume FileCleanupResult exactly once after successful persistence.
+          await consumeFileCleanupResult(cleanup)
+        } catch (error) {
+          postCommitError ??= error
+          logger.error('[editMessageBlocks] Post-commit file cleanup failed:', error as Error)
         }
 
-        // 6. Log operations for debugging
-        // console.log('[editMessageBlocks] Operations:', {
-        //   blocksToRemove: blockIdsToRemove.length,
-        //   blocksToUpdate: blocksToUpdate.length,
-        //   blocksToAdd: blocksToAdd.length
-        // })
-
-        // 7. Update Redux state and database
-        // First update message and add/update blocks
-        if (blocksToAdd.length > 0) {
-          await dispatch(updateMessageAndBlocksThunk(topic.id, messageUpdates, blocksToAdd))
+        if (postCommitError) {
+          throw postCommitError
         }
-
-        if (blocksToUpdate.length > 0) {
-          await dispatch(updateMessageAndBlocksThunk(topic.id, messageUpdates, blocksToUpdate))
-        }
-
-        // Then remove blocks if needed
-        if (blockIdsToRemove.length > 0) {
-          await dispatch(removeBlocksThunk(topic.id, messageId, blockIdsToRemove))
-        }
-      } catch (error) {
-        logger.error('[editMessageBlocks] Failed to update message blocks:', error as Error)
       }
     },
     [dispatch, topic?.id]
   )
 
   /**
-   * 在用户消息的主文本块被编辑后重新发送该消息。 / Resends a user message after its main text block has been edited.
+   * Resends a user message after its main text block has been edited.
    * Dispatches resendUserMessageWithEditThunk.
+   * LOCK-005: Computes usage from edited blocks and includes it in the same
+   * atomic patch via editMessageBlocks extraMessageUpdates — no separate
+   * fire-and-forget usage write.
    */
   const resendUserMessageWithEdit = useCallback(
-    async (message: Message, editedBlocks: MessageBlock[], assistant: Assistant) => {
-      await editMessageBlocks(message.id, editedBlocks)
-
+    async (
+      message: Message,
+      editedBlocks: MessageBlock[],
+      assistant: Assistant,
+      onCommit?: (blockIds: readonly string[]) => void
+    ) => {
       const mainTextBlock = editedBlocks.find((block) => block.type === MessageBlockType.MAIN_TEXT)
       if (!mainTextBlock) {
         logger.error('[resendUserMessageWithEdit] Main text block not found in edited blocks')
         return
       }
 
-      await restartTrace(message, mainTextBlock.content)
+      // LOCK-005: Compute usage from edited blocks BEFORE editMessageBlocks
+      // so it can be included in the same atomic persistence.
+      const usage = await estimateMessageBlocksUsage(editedBlocks)
 
-      const fileBlocks = editedBlocks.filter(
-        (block) => block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE
-      )
-
-      const files = fileBlocks.map((block) => block.file).filter((file) => file !== undefined)
-
-      const usage = await estimateUserPromptUsage({ content: mainTextBlock.content, files })
-      const messageUpdates: Partial<Message> & Pick<Message, 'id'> = {
+      // Include usage in the same atomic patch — no separate void editMessage write.
+      const extraUpdates: Partial<Message> & Pick<Message, 'id'> = {
         id: message.id,
-        updatedAt: new Date().toISOString(),
         usage
       }
+      await editMessageBlocks(message.id, editedBlocks, extraUpdates, onCommit)
 
-      dispatch(newMessagesActions.updateMessage({ topicId: topic.id, messageId: message.id, updates: messageUpdates }))
-      // 对于message的修改会在下面的thunk中保存
+      await restartTrace(message, mainTextBlock.content)
+
+      // LOCK-005: Await resend thunk — rethrow on failure so caller can retry.
       await dispatch(resendUserMessageWithEditThunk(topic.id, message, assistant))
     },
     [dispatch, editMessageBlocks, topic.id]
@@ -404,6 +464,7 @@ export function useMessageOperations(topic: Topic) {
 
   /**
    * Removes a specific block from a message.
+   * LOCK-001: Consumes FileCleanupResult exactly once after atomic persistence.
    */
   const removeMessageBlock = useCallback(
     async (messageId: string, blockIdToRemove: string) => {
@@ -427,7 +488,11 @@ export function useMessageOperations(topic: Topic) {
         blocks: updatedBlocks
       }
 
-      await dispatch(updateMessageAndBlocksThunk(topic.id, messageUpdates, []))
+      // LOCK-001: Pass blockIdsToDelete so the block is removed from SQLite
+      // in the same atomic transaction as the message patch.
+      const cleanup = await dispatch(updateMessageAndBlocksThunk(topic.id, messageUpdates, [], [blockIdToRemove]))
+      // LOCK-001: Consume FileCleanupResult exactly once at the caller.
+      await consumeFileCleanupResult(cleanup)
     },
     [dispatch, topic?.id]
   )

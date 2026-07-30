@@ -113,11 +113,13 @@ describe('ChatDbAggregateService', () => {
 
   describe('ensureTopic', () => {
     it('creates a new topic', () => {
-      const result = agg.ensureTopic('topic-1', 'asst-1')
+      const result = agg.ensureTopic('topic-1', 'asst-1', 'Created topic')
       expect(result.ok).toBe(true)
       const exists = agg.topicExists('topic-1')
       expect(exists.ok).toBe(true)
       expect(okValue(exists)).toBe(true)
+      const metadata = agg.updateTopicMetadata('topic-1')
+      expect(okValue(metadata).name).toBe('Created topic')
     })
 
     it('is idempotent — does not overwrite existing', () => {
@@ -389,6 +391,94 @@ describe('ChatDbAggregateService', () => {
     it('no-op for missing message (Dexie-compatible)', () => {
       const result = agg.updateMessageAndBlocks('nonexistent', { id: 'nonexistent-msg' } as any, [])
       expect(result.ok).toBe(true)
+    })
+
+    it('rejects deleting a block from another message in the same topic without mutation', () => {
+      const topicId = `t-${uid()}`
+      const messageA = makeMessageJson(topicId, { content: 'Message A' })
+      const messageB = makeMessageJson(topicId, { content: 'Message B' })
+      const blockA = makeBlockJson(messageA.id as string, 'file', {
+        file: { id: 'file-a', name: 'a.pdf', path: '/a.pdf', type: 'application/pdf' }
+      })
+      const blockB = makeBlockJson(messageB.id as string, 'file', {
+        file: { id: 'file-b', name: 'b.pdf', path: '/b.pdf', type: 'application/pdf' }
+      })
+      agg.appendMessage(topicId, messageA as any, [blockA as any])
+      agg.appendMessage(topicId, messageB as any, [blockB as any])
+
+      const result = agg.updateMessageAndBlocks(
+        topicId,
+        { ...messageA, content: 'Should not change' } as any,
+        [],
+        [blockB.id as string]
+      )
+
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('CONFLICT_ERROR')
+
+      const fetched = okValue(agg.fetchMessages(topicId))
+      expect(fetched.messages.find((message) => message.id === messageA.id)?.content).toBe('Message A')
+      expect(fetched.blocks.map((block) => block.id)).toEqual([blockA.id, blockB.id])
+      expect(sqlite.prepare('SELECT file_id FROM file_references ORDER BY file_id').all()).toEqual([
+        { file_id: 'file-a' },
+        { file_id: 'file-b' }
+      ])
+    })
+
+    it('rejects a mixed valid and foreign delete list before any mutation', () => {
+      const topicId = `t-${uid()}`
+      const messageA = makeMessageJson(topicId, { content: 'Original' })
+      const messageB = makeMessageJson(topicId)
+      const blockA = makeBlockJson(messageA.id as string, 'file', {
+        file: { id: 'file-mixed-a', name: 'a.pdf', path: '/a.pdf', type: 'application/pdf' }
+      })
+      const blockB = makeBlockJson(messageB.id as string, 'file', {
+        file: { id: 'file-mixed-b', name: 'b.pdf', path: '/b.pdf', type: 'application/pdf' }
+      })
+      agg.appendMessage(topicId, messageA as any, [blockA as any])
+      agg.appendMessage(topicId, messageB as any, [blockB as any])
+
+      const result = agg.updateMessageAndBlocks(
+        topicId,
+        { ...messageA, content: 'Should roll back' } as any,
+        [],
+        [blockA.id as string, blockB.id as string]
+      )
+
+      expect(result.ok).toBe(false)
+      const fetched = okValue(agg.fetchMessages(topicId))
+      expect(fetched.messages.find((message) => message.id === messageA.id)?.content).toBe('Original')
+      expect(fetched.blocks.map((block) => block.id)).toEqual([blockA.id, blockB.id])
+      expect(sqlite.prepare('SELECT file_id FROM file_references ORDER BY file_id').all()).toEqual([
+        { file_id: 'file-mixed-a' },
+        { file_id: 'file-mixed-b' }
+      ])
+    })
+
+    it('deletes same-message blocks and returns file cleanup facts', () => {
+      const topicId = `t-${uid()}`
+      const message = makeMessageJson(topicId)
+      const block = makeBlockJson(message.id as string, 'file', {
+        file: { id: 'file-same-message', name: 'same.pdf', path: '/same.pdf', type: 'application/pdf' }
+      })
+      agg.appendMessage(topicId, message as any, [block as any])
+
+      const result = agg.updateMessageAndBlocks(
+        topicId,
+        { ...message, content: 'Updated' } as any,
+        [],
+        [block.id as string]
+      )
+
+      expect(result.ok).toBe(true)
+      expect(okValue(result)).toEqual({
+        affectedFileIds: ['file-same-message'],
+        remainingReferenceCounts: { 'file-same-message': 0 }
+      })
+      const fetched = okValue(agg.fetchMessages(topicId))
+      expect(fetched.messages[0].content).toBe('Updated')
+      expect(fetched.blocks).toEqual([])
+      expect(sqlite.prepare('SELECT * FROM file_references').all()).toEqual([])
     })
   })
 
@@ -1621,7 +1711,7 @@ describe('ChatDbAggregateService', () => {
     it('softDeleteTopic: sets deletedAt', () => {
       const topicId = `t-${uid()}`
       agg.ensureTopic(topicId)
-      const result = agg.softDeleteTopic(topicId)
+      const result = agg.softDeleteTopic(topicId, 'Soft-deleted topic')
       expect(result.ok).toBe(true)
       // Topic row still exists (topicExists checks row, not soft-delete status)
       const exists = agg.topicExists(topicId)
@@ -1629,7 +1719,19 @@ describe('ChatDbAggregateService', () => {
       // But not in trash listing — wait, we need to check deletedAt via getRawTopic or the topic's internal state
       // Use the trash listing to verify it IS in trash
       const trash = agg.listTrashTopics()
-      expect(okValue(trash).items.some((i: any) => i.id === topicId)).toBe(true)
+      const deleted = okValue(trash).items.find((i: any) => i.id === topicId) as any
+      expect(deleted.name).toBe('Soft-deleted topic')
+    })
+
+    it('softDeleteTopic repairs an active legacy null name atomically with deletedAt', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+      const result = agg.softDeleteTopic(topicId, 'Recovered legacy topic')
+      expect(result.ok).toBe(true)
+
+      const trash = okValue(agg.listTrashTopics()).items.find((item: any) => item.id === topicId) as any
+      expect(trash.name).toBe('Recovered legacy topic')
+      expect(trash.deletedAt).not.toBeNull()
     })
 
     it('softDeleteTopic: no-op for absent topic', () => {
@@ -1740,6 +1842,40 @@ describe('ChatDbAggregateService', () => {
       expect(result.ok).toBe(true)
       const cleanup = okValue(result)
       expect(cleanup.affectedFileIds).toEqual([])
+    })
+
+    it('hardDeleteTopic: rolls back the topic cascade when SQLite aborts', () => {
+      const topicId = `t-${uid()}`
+      const message = makeMessageJson(topicId)
+      const block = makeBlockJson(message.id as string)
+      agg.appendMessage(topicId, message as any, [block as any])
+      agg.softDeleteTopic(topicId)
+
+      sqlite.exec(`
+        CREATE TEMP TRIGGER abort_hard_delete_test
+        BEFORE DELETE ON topics
+        WHEN OLD.id = '${topicId}'
+        BEGIN
+          SELECT RAISE(ABORT, 'trigger-forced abort for hard-delete rollback test');
+        END;
+      `)
+
+      try {
+        const result = agg.hardDeleteTopic(topicId)
+        expect(result.ok).toBe(false)
+        expect(okValue(agg.topicExists(topicId))).toBe(true)
+
+        const messageRows = sqlite.prepare('SELECT id FROM messages WHERE id = ?').all(message.id) as Array<{
+          id: string
+        }>
+        const blockRows = sqlite.prepare('SELECT id FROM message_blocks WHERE id = ?').all(block.id) as Array<{
+          id: string
+        }>
+        expect(messageRows.map(({ id }) => id)).toEqual([message.id])
+        expect(blockRows.map(({ id }) => id)).toEqual([block.id])
+      } finally {
+        sqlite.exec('DROP TRIGGER IF EXISTS abort_hard_delete_test')
+      }
     })
 
     it('purgeExpiredTopics: purges expired trash topics', () => {

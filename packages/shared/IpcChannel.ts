@@ -211,6 +211,7 @@ export enum IpcChannel {
   File_ResumeWatcher = 'file:resumeWatcher',
   File_BatchUploadMarkdown = 'file:batchUploadMarkdown',
   File_ShowInFolder = 'file:showInFolder',
+  File_Exists = 'file:exists',
 
   // PDF
   Pdf_ExtractText = 'pdf:extractText',

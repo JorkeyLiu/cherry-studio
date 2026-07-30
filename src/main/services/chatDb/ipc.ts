@@ -213,7 +213,7 @@ export function registerChatDbIpc(): () => void {
 
   // 4. ensure-topic
   handleCommand(IpcChannel.ChatDb_EnsureTopic, (agg, req: EnsureTopicRequest) => {
-    return agg.ensureTopic(req.topicId, req.assistantId)
+    return agg.ensureTopic(req.topicId, req.assistantId, req.name)
   })
 
   // 5. append-message
@@ -318,7 +318,7 @@ export function registerChatDbIpc(): () => void {
 
   // 25. soft-delete-topic (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_SoftDeleteTopic, (agg, req: SoftDeleteTopicRequest) => {
-    return agg.softDeleteTopic(req.topicId)
+    return agg.softDeleteTopic(req.topicId, req.name)
   })
 
   // 26. restore-topic (Phase 5.1B)

@@ -1,4 +1,3 @@
-import { loggerService } from '@logger'
 import HorizontalScrollContainer from '@renderer/components/HorizontalScrollContainer'
 import Scrollbar from '@renderer/components/Scrollbar'
 import { useOptionalEditMode } from '@renderer/context/EditModeContext'
@@ -12,12 +11,12 @@ import { useTimer } from '@renderer/hooks/useTimer'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { getMessageModelId } from '@renderer/services/MessagesService'
 import { getModelUniqId } from '@renderer/services/ModelService'
-import { estimateMessageUsage } from '@renderer/services/TokenService'
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { classNames, cn } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { isMessageProcessing } from '@renderer/utils/messageUtils/is'
+import { estimateMessageBlocksUsage } from '@renderer/utils/messageUtils/usage'
 import { Divider } from 'antd'
 import type { Dispatch, FC, SetStateAction } from 'react'
 import React, { memo, useCallback, useEffect, useRef } from 'react'
@@ -48,8 +47,6 @@ interface Props {
   isEditMode?: boolean
   onGroupClick?: (askId: string, isCtrl: boolean, isShift: boolean) => void
 }
-
-const logger = loggerService.withContext('MessageItem')
 
 /** Module-level stable reference — avoids creating a new [] on every render when editMode is null. */
 const EMPTY_SELECTED_GROUP_IDS: readonly string[] = []
@@ -82,7 +79,7 @@ const MessageItem: FC<Props> = ({
   const { isMultiSelectMode } = useChatContext(topic)
   const model = useModel(getMessageModelId(message), message.model?.provider) || message.model
   const { messageFont, fontSize, messageStyle, showMessageOutline } = useSettings()
-  const { editMessageBlocks, resendUserMessageWithEdit, editMessage } = useMessageOperations(topic)
+  const { editMessageBlocks, resendUserMessageWithEdit } = useMessageOperations(topic)
   const messageContainerRef = useRef<HTMLDivElement>(null)
   const { editingMessageId, startEditing, stopEditing } = useMessageEditing()
   const { setTimeoutTimer } = useTimer()
@@ -101,27 +98,28 @@ const MessageItem: FC<Props> = ({
   }, [isEditing])
 
   const handleEditSave = useCallback(
-    async (blocks: MessageBlock[]) => {
-      try {
-        await editMessageBlocks(message.id, blocks)
-        const usage = await estimateMessageUsage(message)
-        void editMessage(message.id, { usage: usage })
-        stopEditing()
-      } catch (error) {
-        logger.error('Failed to save message blocks:', error as Error)
-      }
+    async (blocks: MessageBlock[], onCommit: (blockIds: readonly string[]) => void) => {
+      // LOCK-003: Rethrow on failure so MessageEditor can reset isProcessing
+      // and keep the editor open for retry. No catch here — error propagates
+      // to MessageEditor.handleSave's catch block.
+      // LOCK-002: Compute usage from ALL edited blocks including file/image
+      // metadata in the same atomic patch — no separate void editMessage.
+      const editedUsage = await estimateMessageBlocksUsage(blocks)
+      const extraUpdates: Partial<Message> & Pick<Message, 'id'> = editedUsage
+        ? { id: message.id, usage: editedUsage }
+        : { id: message.id }
+      await editMessageBlocks(message.id, blocks, extraUpdates, onCommit)
+      stopEditing()
     },
-    [message, editMessageBlocks, stopEditing, editMessage]
+    [message, editMessageBlocks, stopEditing]
   )
 
   const handleEditResend = useCallback(
-    async (blocks: MessageBlock[]) => {
-      try {
-        await resendUserMessageWithEdit(message, blocks, assistant)
-        stopEditing()
-      } catch (error) {
-        logger.error('Failed to resend message:', error as Error)
-      }
+    async (blocks: MessageBlock[], onCommit: (blockIds: readonly string[]) => void) => {
+      // LOCK-003: Rethrow on failure so MessageEditor can reset isProcessing
+      // and keep the editor open for retry.
+      await resendUserMessageWithEdit(message, blocks, assistant, onCommit)
+      stopEditing()
     },
     [message, resendUserMessageWithEdit, assistant, stopEditing]
   )

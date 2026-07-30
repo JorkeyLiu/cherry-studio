@@ -284,7 +284,7 @@ export async function createAssistantFromAgent(agent: AssistantPreset) {
 
   // LOCK-533/528: the default topic must exist in SQLite with its
   // assistantId before the assistant (and topic) is exposed in Redux.
-  await ensureOrdinaryTopicOwnership(topic.id, assistantId)
+  await ensureOrdinaryTopicOwnership(topic.id, assistantId, topic.name)
 
   store.dispatch(addAssistant(assistant))
 

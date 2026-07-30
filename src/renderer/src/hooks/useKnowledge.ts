@@ -1,5 +1,6 @@
 import { db } from '@renderer/databases'
 import KnowledgeQueue from '@renderer/queue/KnowledgeQueue'
+import FileManager from '@renderer/services/FileManager'
 import { getKnowledgeBaseParams } from '@renderer/services/KnowledgeService'
 import type { RootState } from '@renderer/store'
 import { useAppDispatch } from '@renderer/store'
@@ -130,12 +131,14 @@ export const useKnowledge = (baseId: string) => {
 
     if (isKnowledgeFileItem(item) && typeof item.content === 'object' && !Array.isArray(item.content)) {
       const file = item.content
-      // name: eg. text.pdf
-      await window.api.file.delete(file.name)
+      // LOCK-003: Route through FileManager.deleteFile by file ID to respect
+      // Dexie count/coordinator. Preserve knowledge-domain removal sequencing.
+      await FileManager.deleteFile(file.id)
     } else if (isKnowledgeVideoItem(item)) {
       // video item has srt and video files
       const files = item.content
-      const deletePromises = files.map((file) => window.api.file.delete(file.name))
+      // LOCK-003: Route through FileManager.deleteFile by file ID for each file.
+      const deletePromises = files.map((file) => FileManager.deleteFile(file.id))
 
       await Promise.allSettled(deletePromises)
     }

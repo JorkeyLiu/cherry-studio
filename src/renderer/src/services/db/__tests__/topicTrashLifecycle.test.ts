@@ -93,16 +93,16 @@ describe('topicTrashLifecycle (Phase 5.2B)', () => {
     it('routes soft delete through SQLite only', async () => {
       mocks.softDeleteTopic.mockResolvedValue(undefined)
 
-      await softDeleteOrdinaryTopic('t-1')
+      await softDeleteOrdinaryTopic('t-1', 'Named topic')
 
-      expect(mocks.softDeleteTopic).toHaveBeenCalledExactlyOnceWith('t-1')
+      expect(mocks.softDeleteTopic).toHaveBeenCalledExactlyOnceWith('t-1', 'Named topic')
     })
 
     it('propagates SQLite failure with no fallback and no cleanup (LOCK-524)', async () => {
       const err = new Error('SQLITE_FAILURE')
       mocks.softDeleteTopic.mockRejectedValue(err)
 
-      await expect(softDeleteOrdinaryTopic('t-1')).rejects.toBe(err)
+      await expect(softDeleteOrdinaryTopic('t-1', 'Named topic')).rejects.toBe(err)
       // No fallback path: no other SQLite command, no file cleanup.
       expect(mocks.restoreTopic).not.toHaveBeenCalled()
       expect(mocks.hardDeleteTopic).not.toHaveBeenCalled()
@@ -144,9 +144,9 @@ describe('topicTrashLifecycle (Phase 5.2B)', () => {
     it('creates the SQLite topic row with its assistantId', async () => {
       mocks.ensureTopic.mockResolvedValue(undefined)
 
-      await ensureOrdinaryTopicOwnership('t-1', 'a-1')
+      await ensureOrdinaryTopicOwnership('t-1', 'a-1', 'Named topic')
 
-      expect(mocks.ensureTopic).toHaveBeenCalledExactlyOnceWith('t-1', 'a-1')
+      expect(mocks.ensureTopic).toHaveBeenCalledExactlyOnceWith('t-1', 'a-1', 'Named topic')
     })
 
     it('bypasses agent-session topic IDs entirely (LOCK-521)', async () => {
@@ -159,7 +159,7 @@ describe('topicTrashLifecycle (Phase 5.2B)', () => {
       const err = new Error('SQLITE_FAILURE')
       mocks.ensureTopic.mockRejectedValue(err)
 
-      await expect(ensureOrdinaryTopicOwnership('t-1', 'a-1')).rejects.toBe(err)
+      await expect(ensureOrdinaryTopicOwnership('t-1', 'a-1', 'Named topic')).rejects.toBe(err)
     })
   })
 

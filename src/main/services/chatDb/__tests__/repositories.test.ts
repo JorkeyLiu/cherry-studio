@@ -197,6 +197,25 @@ describe('Repository Tests', () => {
       if (r2.found) expect(r2.data.deletedAt).toBeNull()
     })
 
+    it('ensure persists the initial name without overwriting an existing row', () => {
+      const created = topicsRepo.ensure('tp-named', 'asst-1', 'Created name')
+      expect(created.name).toBe('Created name')
+
+      const existing = topicsRepo.ensure('tp-named', 'asst-2', 'Ignored name')
+      expect(existing.name).toBe('Created name')
+    })
+
+    it('softDelete updates the name and deletedAt in one repository mutation', () => {
+      topicsRepo.updatePatch('topic-1', { name: null })
+      topicsRepo.softDelete('topic-1', 'Recovered name')
+      const result = topicsRepo.getById('topic-1')
+      expect(result.found).toBe(true)
+      if (result.found) {
+        expect(result.data.name).toBe('Recovered name')
+        expect(result.data.deletedAt).not.toBeNull()
+      }
+    })
+
     it('hardDelete', () => {
       topicsRepo.hardDelete('topic-1')
       expect(topicsRepo.exists('topic-1')).toBe(false)

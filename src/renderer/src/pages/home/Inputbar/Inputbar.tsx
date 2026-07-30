@@ -439,7 +439,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     try {
       // LOCK-533: the ordinary topic must exist in SQLite with its
       // assistantId before any Redux exposure (LOCK-528: persistence first).
-      await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id)
+      await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id, newTopic.name)
     } catch (error) {
       logger.error('Failed to establish SQLite ownership for new topic', error as Error)
       return

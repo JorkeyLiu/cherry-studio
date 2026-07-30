@@ -159,10 +159,10 @@ export class ChatDbAggregateService {
    * Ensure a topic exists. Create-only: only sets assistantId on creation.
    * Does not overwrite existing topic's assistantId.
    */
-  ensureTopic(topicId: string, assistantId?: string): ChatDbResult<null> {
+  ensureTopic(topicId: string, assistantId?: string, name?: string | null): ChatDbResult<null> {
     return wrapResult(() => {
       const { topics } = this.repos()
-      topics.ensure(topicId, assistantId)
+      topics.ensure(topicId, assistantId, name)
       return null
     }, `ensureTopic(${topicId})`)
   }
@@ -287,7 +287,8 @@ export class ChatDbAggregateService {
         }
 
         // Phase 1: Resolve every block through its parent message and verify ownership.
-        // Reject any block whose parent message does not belong to request topic.
+        // Missing blocks follow delete no-op semantics. Existing blocks must belong
+        // to the message being updated, not merely to the requested topic.
         let affectedFileIds: string[] = []
         if (blockIdsToDelete.length > 0) {
           const ownedBlockIds: string[] = []
@@ -296,6 +297,11 @@ export class ChatDbAggregateService {
             if (!block.found) {
               // Missing block: skip (consistent with no-op semantics)
               continue
+            }
+            if (block.data.messageId !== messageId) {
+              throw new ChatDbConflictError(
+                `Block ${blockId} belongs to message ${block.data.messageId}, cannot delete from message ${messageId}`
+              )
             }
             // Resolve block → message → topic ownership
             const msg = repos.messages.getInTopic(block.data.messageId, topicId)
@@ -836,10 +842,12 @@ export class ChatDbAggregateService {
    * Soft-delete a topic by setting deletedAt.
    * Missing topic: no-op (returns success).
    */
-  softDeleteTopic(topicId: string): ChatDbResult<null> {
+  softDeleteTopic(topicId: string, name?: string | null): ChatDbResult<null> {
     return wrapResult(() => {
-      const { topics } = this.repos()
-      topics.softDelete(topicId)
+      this.db.transaction((tx) => {
+        const { topics } = createRepositories(tx)
+        topics.softDelete(topicId, name)
+      })
       return null
     }, `softDeleteTopic(${topicId})`)
   }

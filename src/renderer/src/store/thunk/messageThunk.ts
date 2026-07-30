@@ -1304,7 +1304,9 @@ export const resendMessageThunk =
         await consumeFileCleanupResult(cleanup)
       } catch (dbError) {
         logger.error('[resendMessageThunk] Error updating database:', dbError as Error)
-        return
+        // LOCK-005: Rethrow DB persistence failure so callers (MessageEditor)
+        // can keep the editor open for retry. Redux is never mutated on this path.
+        throw dbError
       }
 
       const queue = getTopicQueue(topicId)
@@ -1319,6 +1321,8 @@ export const resendMessageThunk =
       }
     } catch (error) {
       logger.error(`[resendMessageThunk] Error resending user message ${userMessageToResend.id}:`, error as Error)
+      // LOCK-005: Rethrow so callers (MessageEditor) can keep the editor open for retry.
+      throw error
     } finally {
       void finishTopicLoading(topicId)
     }
@@ -1328,11 +1332,15 @@ export const resendMessageThunk =
  * Thunk to resend a user message after its content has been edited.
  * Updates the user message's text block and then triggers the regeneration
  * of its associated assistant responses using resendMessageThunk.
+ *
+ * LOCK-005: Awaits resendMessageThunk and rethrows failures so callers
+ * (MessageEditor) can keep the editor open for retry.
  */
 export const resendUserMessageWithEditThunk =
   (topicId: Topic['id'], originalMessage: Message, assistant: Assistant) => async (dispatch: AppDispatch) => {
     // Trigger the regeneration logic for associated assistant messages
-    void dispatch(resendMessageThunk(topicId, originalMessage, assistant))
+    // LOCK-005: Await and rethrow — no fire-and-forget.
+    await dispatch(resendMessageThunk(topicId, originalMessage, assistant))
   }
 
 /**
@@ -1886,58 +1894,76 @@ export const cloneMessagesToNewTopicThunk =
 
 /**
  * Thunk to edit properties of a message and/or its associated blocks.
- * Updates Redux state and persists changes to the database within a transaction.
- * Message updates are optional if only blocks need updating.
+ * Persists ALL changes in a SINGLE atomic SQLite transaction FIRST,
+ * then commits Redux state on success.
+ *
+ * LOCK-001: SQLite-authoritative ordering — one atomic persistence
+ * precedes committed Redux edit state; failure propagates so callers
+ * (editor) can keep the editing surface open and avoid divergent state.
+ *
+ * Accepts optional blockIdsToDelete for blocks that should be removed
+ * atomically in the same transaction as message patch and block upserts.
  */
 export const updateMessageAndBlocksThunk =
   (
     topicId: string,
     // Allow messageUpdates to be optional or just contain the ID if only blocks are updated
     messageUpdates: (Partial<Message> & Pick<Message, 'id'>) | null, // ID is always required for context
-    blockUpdatesList: MessageBlock[] // Block updates remain required for this thunk's purpose
+    blockUpdatesList: MessageBlock[], // Block updates to upsert
+    blockIdsToDelete: string[] = [] // Block IDs to delete atomically in the same transaction
   ) =>
-  async (dispatch: AppDispatch): Promise<void> => {
+  async (dispatch: AppDispatch): Promise<FileCleanupResult> => {
     const messageId = messageUpdates?.id
 
     if (messageUpdates && !messageId) {
-      logger.error('[updateMessageAndUpdateBlocksThunk] Message ID is required.')
-      return
+      logger.error('[updateMessageAndBlocksThunk] Message ID is required.')
+      return { affectedFileIds: [], remainingReferenceCounts: {} }
     }
 
-    try {
-      // 1. 更新 Redux Store
-      if (messageUpdates && messageId) {
-        // oxlint-disable-next-line @typescript-eslint/no-unused-vars
-        const { id: msgId, ...actualMessageChanges } = messageUpdates // Separate ID from actual changes
+    // 1. Atomic SQLite persistence (LOCK-001)
+    // One IPC command: message patch + block upserts + block deletions in a single transaction.
+    // If this fails, the error propagates and Redux is never touched.
+    const cleanup = await dbService.updateMessageAndBlocks(
+      topicId,
+      messageUpdates ?? { id: messageId! },
+      blockUpdatesList,
+      blockIdsToDelete
+    )
 
-        // Only dispatch message update if there are actual changes beyond the ID
-        if (Object.keys(actualMessageChanges).length > 0) {
-          dispatch(
-            newMessagesActions.updateMessage({
-              topicId,
-              messageId,
-              updates: actualMessageChanges
-            })
-          )
-        }
-      }
+    // 2. Commit to Redux AFTER successful SQLite persistence
+    if (messageUpdates && messageId) {
+      // Strip identity fields for Redux patch (LOCK-002: id, topicId, sortOrder must not be in changes)
+      // oxlint-disable-next-line @typescript-eslint/no-unused-vars
+      const {
+        id: _id,
+        topicId: _tid,
+        sortOrder: _so,
+        ...actualMessageChanges
+      } = messageUpdates as Record<string, unknown>
 
-      if (blockUpdatesList.length > 0) {
-        dispatch(upsertManyBlocks(blockUpdatesList))
+      // Only dispatch message update if there are actual changes beyond identity fields
+      if (Object.keys(actualMessageChanges).length > 0) {
+        dispatch(
+          newMessagesActions.updateMessage({
+            topicId,
+            messageId,
+            updates: actualMessageChanges
+          })
+        )
       }
-      // Update message properties if provided
-      if (messageUpdates && Object.keys(messageUpdates).length > 0 && messageId) {
-        await updateMessage(topicId, messageId, messageUpdates)
-      }
-      // Update blocks if provided
-      if (blockUpdatesList.length > 0) {
-        await updateBlocks(blockUpdatesList)
-      }
-
-      dispatch(updateTopicUpdatedAt({ topicId }))
-    } catch (error) {
-      logger.error(`[updateMessageAndBlocksThunk] Failed to process updates for message ${messageId}:`, error as Error)
     }
+
+    if (blockUpdatesList.length > 0) {
+      dispatch(upsertManyBlocks(blockUpdatesList))
+    }
+
+    if (blockIdsToDelete.length > 0) {
+      dispatch(removeManyBlocks(blockIdsToDelete))
+    }
+
+    dispatch(updateTopicUpdatedAt({ topicId }))
+
+    return cleanup
   }
 
 export const removeBlocksThunk =
@@ -1960,6 +1986,10 @@ export const removeBlocksThunk =
 
       const updatedBlockIds = (message.blocks || []).filter((id) => !blockIdsToRemoveSet.has(id))
 
+      // LOCK-002: Only send minimal identity + changed field to SQLite.
+      // Strip all contract-forbidden identity/order fields (id, topicId, sortOrder).
+      const messagePatch = { id: messageId, blocks: updatedBlockIds }
+
       // Persist ordinary chat changes before Redux; agent sessions retain their
       // existing source-specific update behavior.
       if (isAgentSessionTopicId(topicId)) {
@@ -1968,12 +1998,7 @@ export const removeBlocksThunk =
           blocks: updatedBlockIds
         })
       } else {
-        const cleanup = await dbService.updateMessageAndBlocks(
-          topicId,
-          { ...message, blocks: updatedBlockIds },
-          [],
-          blockIdsToRemove
-        )
+        const cleanup = await dbService.updateMessageAndBlocks(topicId, messagePatch, [], blockIdsToRemove)
         await consumeFileCleanupResult(cleanup)
         // Cancel throttled block updates (file cleanup handled by consumeFileCleanupResult)
         blockIdsToRemove.forEach((id) => cancelThrottledBlockUpdate(id))
