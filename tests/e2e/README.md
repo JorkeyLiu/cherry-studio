@@ -1,310 +1,427 @@
-# E2E Testing Guide
+# E2E Testing Guide (Playwright + Electron)
 
-本目录包含 Cherry Studio 的端到端 (E2E) 测试，使用 Playwright 测试 Electron 应用。
+This README is the **single source of truth** for the repository's Playwright/Electron
+end-to-end (E2E) operations and authoring. It is maintained in sync with the committed
+harness in `tests/e2e/` and `playwright.config.ts`. If the harness changes, update this
+document in the same change.
 
-## 目录结构
-
-```
-tests/e2e/
-├── README.md                 # 本文档
-├── global-setup.ts           # 全局测试初始化
-├── global-teardown.ts        # 全局测试清理
-├── fixtures/
-│   └── electron.fixture.ts   # Electron 应用启动 fixture
-├── utils/
-│   ├── wait-helpers.ts       # 等待辅助函数
-│   └── index.ts              # 工具导出
-├── pages/                    # Page Object Model
-│   ├── base.page.ts          # 基础页面对象类
-│   ├── sidebar.page.ts       # 侧边栏导航
-│   ├── home.page.ts          # 首页/聊天页
-│   ├── settings.page.ts      # 设置页
-│   ├── chat.page.ts          # 聊天交互
-│   └── index.ts              # 页面对象导出
-└── specs/                    # 测试用例
-    ├── app-launch.spec.ts    # 应用启动测试
-    ├── navigation.spec.ts    # 页面导航测试
-    ├── settings/             # 设置相关测试
-    │   └── general.spec.ts
-    └── conversation/         # 对话相关测试
-        └── basic-chat.spec.ts
-```
+**CI status (factual):** E2E is **not** part of standard CI today. `.github/workflows/ci.yml`
+contains no `test:e2e` / Playwright step, and `ci:test-check` covers only the Vitest projects
+(main, renderer, aiCore, shared, scripts). E2E currently runs **locally/manually**. Do not
+report CI E2E results.
 
 ---
 
-## 运行测试
+## 1. When to write E2E vs. unit/component tests
 
-### 前置条件
+E2E is expensive: it boots the real Electron app, exercises real IPC, real persistence and
+real rendering. Use it deliberately.
 
-1. 安装依赖：`pnpm install`
-2. 构建应用：`pnpm build`
+| Concern | Prefer |
+|---|---|
+| Isolated logic, reducers, selectors, pure utils, component behavior | Vitest unit/component tests (`src/main/**`, `src/renderer/**`, `packages/**`, `scripts/**` — see `vitest.config.ts`) |
+| Full app boot, real IPC round-trips, main-process behavior | E2E |
+| Filesystem / database persistence (Dexie, SQLite via ChatDb), relaunch survival | E2E |
+| Native integrations, multiple windows, app lifecycle | E2E |
+| Long user journeys spanning real UI | E2E |
 
-### 运行命令
+Write an E2E spec only when the behavior cannot be proven at a lower level. Features
+without tests are not complete — but the cheapest sufficient test level wins.
+
+## 2. Repository layout (committed harness)
+
+The harness follows a stable top-level pattern; the exact file set under `pages/`,
+`specs/` and `utils/` grows as the suite evolves, so this document does **not** keep an
+exhaustive file-by-file tree:
+
+```text
+tests/e2e/
+├── README.md                   # this document
+├── global-setup.ts             # run token + registry init, artifact dirs
+├── global-teardown.ts          # per-token registry cleanup (safety net)
+├── fixtures/
+│   ├── electron.fixture.ts     # shared test/expect + app lifecycle (use this!)
+│   └── mock-openai-server.ts   # deterministic OpenAI-compatible mock endpoint
+├── pages/                      # Page Object Model — BasePage + one file per page, re-exported via index.ts
+├── specs/                      # test files (testDir root); feature subdirectories allowed
+└── utils/                      # helpers — wait-helpers.ts, run-ownership.ts + its Vitest coverage
+```
+
+The canonical, always-current listing of what is actually committed is generated, not
+hand-maintained:
 
 ```bash
-# 运行所有 e2e 测试
-pnpm test:e2e
+git ls-tree -r HEAD --name-only tests/e2e
+```
 
-# 带可视化窗口运行（可以看到测试过程）
-pnpm test:e2e --headed
+Layout claims must be derived from that command — i.e. from `HEAD`, the committed state —
+never from working-tree files, which may include uncommitted or throwaway artifacts.
 
-# 运行特定测试文件
+## 3. Prerequisites and running
+
+### Prerequisites
+
+1. `pnpm install` — install dependencies (Node ≥24.11.1, pnpm 10.27.0).
+2. **`pnpm build` — mandatory fresh build.** E2E launches the built Electron app
+   (`electron .` against `electron-vite` output). A stale or absent build makes tests
+   validate old code — never run E2E against a build you did not just produce.
+   `pnpm build` = `npm run generate:openapi && npm run typecheck && electron-vite build`.
+
+### Running (canonical commands via package scripts)
+
+```bash
+# Full E2E suite
+pnpm test:e2e                     # == pnpm playwright test
+
+# A single spec file
 pnpm playwright test tests/e2e/specs/app-launch.spec.ts
 
-# 运行匹配名称的测试
+# Tests matching a name/title
 pnpm playwright test -g "should launch"
 
-# 调试模式（会暂停并打开调试器）
-pnpm playwright test --debug
+# A directory (e.g. conversation specs)
+pnpm playwright test tests/e2e/specs/conversation
 
-# 使用 Playwright UI 模式
-pnpm playwright test --ui
-
-# 查看测试报告
+# HTML report from the last run
 pnpm playwright show-report
 ```
 
-### 常见问题
+Debugging-oriented invocations (diagnostic only — see §12):
 
-**Q: 测试时看不到窗口？**
-A: 默认是 headless 模式，使用 `--headed` 参数可看到窗口。
-
-**Q: 测试失败，提示找不到元素？**
-A:
-1. 确保已运行 `pnpm build` 构建最新代码
-2. 检查选择器是否正确，UI 可能已更新
-
-**Q: 测试超时？**
-A: Electron 应用启动较慢，可在测试中增加超时时间：
-```typescript
-test.setTimeout(60000) // 60秒
+```bash
+pnpm playwright test --debug      # open inspector, pause at start
+pnpm playwright test --trace on   # force trace collection for every test
+pnpm playwright test --ui         # Playwright UI mode
 ```
 
----
+Notes on running:
 
-## AI 助手指南：创建新测试用例
+- The suite runs **serially**: `workers: 1`, `fullyParallel: false` (Electron apps must not
+  run concurrently). Do not override with `--workers`.
+- **Headed/headless does not apply to Electron.** The fixture launches the real app and its
+  window appears on screen. The old guidance to use `--headed` is wrong for Electron and was
+  removed.
+- Each test launches its own disposable app instance (see §4/§5). Long-running suites are
+  expected; raise `test.setTimeout(...)` inside a test only when its flow legitimately
+  exceeds the 60s default.
 
-以下内容供 AI 助手（如 Claude、GPT）在创建新测试用例时参考。
+## 4. The shared fixture — always use it
 
-### 基本原则
-
-1. **使用 Page Object Model (POM)**：所有页面交互应通过 `pages/` 目录下的页面对象进行
-2. **使用自定义 fixture**：从 `../fixtures/electron.fixture` 导入 `test` 和 `expect`
-3. **等待策略**：使用 `utils/wait-helpers.ts` 中的等待函数，避免硬编码 `waitForTimeout`
-4. **测试独立性**：每个测试应该独立运行，不依赖其他测试的状态
-
-### 创建新测试文件
+Import `test` and `expect` from the shared fixture. Never hand-roll an Electron launch in a
+spec, and never point an app at a real/live profile.
 
 ```typescript
-// tests/e2e/specs/[feature]/[feature].spec.ts
+import { expect, test } from '../../fixtures/electron.fixture'
+```
 
-import { test, expect } from '../../fixtures/electron.fixture'
-import { SomePageObject } from '../../pages/some.page'
+The fixture extends `@playwright/test` with:
+
+| Fixture | Provides |
+|---|---|
+| `userDataDir` | A unique disposable profile dir `$TMPDIR/cherry-e2e-<token>-<pid>-<ts>-<rand>`, registered with the run ownership registry; removed (base + `<base>Dev`) and verified gone after the test, throwing on cleanup failure |
+| `mockPort` | An ephemeral in-process mock OpenAI-compatible HTTP server (see §6) |
+| `electronApp` | `_electron.launch({ args: ['.', '--user-data-dir=<userDataDir>', '--no-sandbox', '--disable-gpu'], ... })`; closed after the test with a WAL-flush wait; request log cleared |
+| `mainWindow` | The main `Cherry Studio` window, ready for interaction |
+
+`mainWindow` is fully prepared before your test body runs:
+
+1. **Runtime appData assertion** — probes `window.api.getAppInfo()` and asserts the actual
+   runtime `appDataPath` resolves to the expected disposable `<userDataDir>Dev` path. If a
+   `config.json` redirect ever pointed the app at live user data, the fixture throws a
+   `LOCK-002 VIOLATION` before any mutation.
+2. **Onboarding bypass** — clicks Skip and marks onboarding complete.
+3. **Mock provider seed** — dispatches `llm/addProvider` (`mock-openai`) and sets
+   `mock-model` as default/quick/translate model, then verifies the store state.
+4. **Home readiness, ChatDb IPC readiness, textarea readiness** — verified before the test
+   starts; failures are fail-fast.
+
+Exported helpers (import them from the fixture):
+
+```typescript
+import {
+  getChatDbPath,            // runtime chat.db path (derived from runtime appDataPath)
+  getRuntimeAppDataPath,    // appDataPath captured from the running app
+  getUserDataDir,           // the disposable profile dir passed via --user-data-dir
+  queryChatDbViaElectron,   // read-only SQLite query via the Electron binary (ABI-safe)
+  getRequestLog,            // all mock server requests
+  clearRequestLog,          // clear log (sequence counter stays monotonic)
+  findProductRequest,       // first POST chat/completions request
+  findProductRequestAfter,  // first POST chat/completions request with sequence >= N
+  getRequestSequence        // current mock request sequence counter
+} from '../../fixtures/electron.fixture'
+```
+
+## 5. Disposable profiles and run ownership
+
+Non-negotiable rules:
+
+- **Every test uses a unique disposable profile** created by the fixture under the OS temp
+  dir (`cherry-e2e-*`). Real user data must never be opened, seeded, or asserted.
+- **Run ownership registry.** Global setup creates one unique invocation token
+  (`CHERRY_E2E_RUN_TOKEN`) and a per-token registry file
+  (`$TMPDIR/cherry-e2e-run-registry-<token>.json`). Each fixture registers exactly the
+  profiles it owns. Global teardown processes **only that token's registry**, removing only
+  paths that are verifiably disposable, then unlinks the registry.
+- **No broad process killing and no glob deletion.** Never `pkill`, `killall`, kill-by-PID
+  guesswork, or `rm`/glob patterns over `cherry-e2e-*`. If a **spawned, relaunched, or
+  external child process** (one not owned by the fixture's `electronApp`) must be
+  terminated, target it **only by its exact unique `--user-data-dir=<profile>` token** and
+  verify it exited. This token rule does **not** apply to the fixture-owned app itself:
+  that instance is closed normally with `electronApp.close()` plus the fixture teardown
+  (§4, §10). Cleanup is ownership-scoped: your run never touches another run's profiles,
+  registries, or processes.
+- **Cleanup ownership.** Fixture-owned cleanup is primary and verifies each exact owned
+  path (base + `Dev`) is gone, propagating aggregate errors. Global teardown is a
+  per-token safety net for crashed runs.
+
+If a manual investigation of leftover temp dirs is ever needed: look in `$TMPDIR` for
+`cherry-e2e-*` entries and their owning registry file `cherry-e2e-run-registry-<token>.json`;
+remove them by exact path only.
+
+## 6. Mock provider — no live APIs
+
+All E2E traffic goes through the **in-process mock OpenAI-compatible server**
+(`fixtures/mock-openai-server.ts`), bound to `127.0.0.1` on an ephemeral port and seeded
+into the app as the `mock-openai` provider with model `mock-model`.
+
+- **Never** configure a real/paid/live API key or endpoint in a test.
+- The mock validates request shape (`messages` array with at least one user message) and
+  returns **deterministic** responses — streaming (SSE) and non-streaming — of the form
+  `[Mock <model>] You said: "<last user message>"`.
+- Every request is logged with a **monotonic sequence counter**. Capture
+  `getRequestSequence()` before an operation, then assert on
+  `findProductRequestAfter(seq)` to prove a specific product-originated request was sent —
+  this is request-path evidence, independent of the UI.
+
+## 7. Deterministic assertions (evidence classes)
+
+Evidence expectations scale with **workflow risk**:
+
+- **Low-risk smoke checks** — simple launch/navigation specs may rely on direct UI
+  assertions (window ready, expected page rendered, navigation occurred). They need not
+  assert persistence.
+- **Durable-workflow checks** — persistence, IPC round-trip, filesystem, and relaunch
+  specs must assert the **authoritative final state** (e.g. post-exit SQLite queries via
+  `queryChatDbViaElectron` — §11; mock request logs — §6; filesystem state), not just UI
+  or Redux appearance. Redux dispatches alone are NOT persistence evidence.
+
+For claims that must be durable, prefer several independent, deterministic evidence classes
+over visual impressions:
+
+1. **Real UI gestures** — the action is performed through the rendered UI (clicks, typing,
+   real drag). No Redux response fabrication.
+2. **Mock request log** — the AI SDK actually made the HTTP request with the expected
+   `model`/`messages` (see §6).
+3. **Redux state snapshots** — read `window.store.getState()` for the *expected* message
+   blocks, IDs, topic ordering, etc. Redux reads are an independent oracle, but **Redux
+   dispatches alone are NOT persistence evidence**.
+4. **SQLite (post-exit) queries** — the durable proof. Query `chat.db` read-only through
+   `queryChatDbViaElectron()` at the runtime path (see §11).
+
+Assert exact IDs before/after destructive operations (capture IDs, then assert exact
+presence → exact absence). Use Playwright's auto-retrying assertions (`expect(...).toBeVisible()`,
+`toHaveText`, `toHaveCount`) instead of raw booleans where possible; use
+`page.waitForFunction(...)` for Redux-state transitions.
+
+## 8. Selectors, waits, and Page Objects
+
+### Page Object Model
+
+- **Prefer** `pages/` classes extending `BasePage` for **reusable page-level workflows**
+  (navigation, settings, sidebar). Register new page objects in `pages/index.ts` and
+  import them from there.
+- Feature-specific interactions may use **local locators directly in a spec** when they are
+  scoped to that workflow, as long as they follow the selector conventions below. Do not
+  force a one-off interaction into a POM class just to satisfy a rule.
+- Construct page objects with the `mainWindow` fixture in `beforeEach`.
+
+### Selector priority (most stable first)
+
+1. **Semantic/stable attributes the app already renders** — e.g. `data-topic-id`, `data-testid`
+   (the app renders `data-testid="topic-item"`, `trash-restore-btn`, etc.). Prefer these
+   over class fragments.
+2. **Accessible roles / labels** — `getByRole('button', { name: ... })`, `getByText(...)`.
+3. **Class fragments** that survive style changes — `[class*="Inputbar"]` (for
+   styled-components/CSS Modules).
+4. **Combined fallbacks** — `['#chat', '.inputbar-container', '[class*="Inputbar"]'].join(', ')`.
+
+**Avoid:** exact generated class names, deep chains, and positional index selectors
+(`nth()`) unless there is no alternative.
+
+### Wait strategy
+
+- Prefer **state-based waits** and auto-retrying `expect` — never hard-coded sleep to
+  satisfy a race.
+- Use the shared helpers in `utils/wait-helpers.ts`:
+  `waitForAppReady`, `waitForNavigation`, `waitForChatReady`, `waitForSettingsLoad`,
+  `waitForModal`, `waitForModalClose`, `waitForLoadingComplete`, `waitForNotification`.
+- `waitForTimeout` is acceptable only where the app has a known non-observable delay (the
+  fixture itself uses it sparingly for Redux settle/flush). Do not sprinkle sleeps.
+
+### Minimal example
+
+```typescript
+// tests/e2e/specs/<feature>/<feature>.spec.ts
+import { expect, test } from '../../fixtures/electron.fixture'
+import { SomePage } from '../../pages/some.page'
 import { waitForAppReady } from '../../utils/wait-helpers'
 
 test.describe('Feature Name', () => {
-  let pageObject: SomePageObject
+  let somePage: SomePage
 
   test.beforeEach(async ({ mainWindow }) => {
     await waitForAppReady(mainWindow)
-    pageObject = new SomePageObject(mainWindow)
+    somePage = new SomePage(mainWindow)
   })
 
-  test('should do something', async ({ mainWindow }) => {
-    // 测试逻辑
+  test('should do the thing', async ({ mainWindow }) => {
+    await somePage.doSomething()
+    await expect(somePage.result).toHaveText('expected')
   })
 })
 ```
 
-### 创建新页面对象
+## 9. Platform-specific behavior
+
+- Tests that depend on OS-specific behavior **must** gate with an explicit skip at the top
+  of the `describe`/`test` — never silently pass on unsupported platforms:
 
 ```typescript
-// tests/e2e/pages/[feature].page.ts
-
-import { Page, Locator } from '@playwright/test'
-import { BasePage } from './base.page'
-
-export class FeaturePage extends BasePage {
-  // 定义页面元素定位器
-  readonly someButton: Locator
-  readonly someInput: Locator
-
-  constructor(page: Page) {
-    super(page)
-    // 使用多种选择器策略，提高稳定性
-    this.someButton = page.locator('[class*="SomeButton"], button:has-text("Some Text")')
-    this.someInput = page.locator('input[placeholder*="placeholder"]')
-  }
-
-  // 页面操作方法
-  async doSomething(): Promise<void> {
-    await this.someButton.click()
-  }
-
-  // 状态检查方法
-  async isSomethingVisible(): Promise<boolean> {
-    return this.someButton.isVisible()
-  }
-}
-```
-
-### 选择器最佳实践
-
-```typescript
-// 优先级从高到低：
-
-// 1. data-testid（最稳定，但需要在源码中添加）
-page.locator('[data-testid="submit-button"]')
-
-// 2. 语义化角色
-page.locator('button[role="submit"]')
-page.locator('[aria-label="Send message"]')
-
-// 3. 类名模糊匹配（适应 CSS Modules / styled-components）
-page.locator('[class*="SendButton"]')
-page.locator('[class*="send-button"]')
-
-// 4. 文本内容
-page.locator('button:has-text("发送")')
-page.locator('text=Submit')
-
-// 5. 组合选择器（提高稳定性）
-page.locator('[class*="ChatInput"] textarea, [class*="InputBar"] textarea')
-
-// 避免使用：
-// - 精确类名（容易因构建变化而失效）
-// - 层级过深的选择器
-// - 索引选择器（如 nth-child）除非必要
-```
-
-### 等待策略
-
-```typescript
-import { waitForAppReady, waitForNavigation, waitForModal } from '../../utils/wait-helpers'
-
-// 等待应用就绪
-await waitForAppReady(mainWindow)
-
-// 等待导航完成（HashRouter）
-await waitForNavigation(mainWindow, '/settings')
-
-// 等待模态框出现
-await waitForModal(mainWindow)
-
-// 等待元素可见
-await page.locator('.some-element').waitFor({ state: 'visible', timeout: 10000 })
-
-// 等待元素消失
-await page.locator('.loading').waitFor({ state: 'hidden' })
-
-// 避免使用固定等待时间
-// BAD: await page.waitForTimeout(3000)
-// GOOD: await page.waitForSelector('.element', { state: 'visible' })
-```
-
-### 断言模式
-
-```typescript
-// 使用 Playwright 的自动重试断言
-await expect(page.locator('.element')).toBeVisible()
-await expect(page.locator('.element')).toHaveText('expected text')
-await expect(page.locator('.element')).toHaveCount(3)
-
-// 检查 URL（HashRouter）
-await expect(page).toHaveURL(/.*#\/settings.*/)
-
-// 软断言（不会立即失败）
-await expect.soft(page.locator('.element')).toBeVisible()
-
-// 自定义超时
-await expect(page.locator('.slow-element')).toBeVisible({ timeout: 30000 })
-```
-
-### 处理 Electron 特性
-
-```typescript
-// 访问 Electron 主进程
-const bounds = await electronApp.evaluate(({ BrowserWindow }) => {
-  const win = BrowserWindow.getAllWindows()[0]
-  return win?.getBounds()
-})
-
-// 检查窗口状态
-const isMaximized = await electronApp.evaluate(({ BrowserWindow }) => {
-  const win = BrowserWindow.getAllWindows()[0]
-  return win?.isMaximized()
-})
-
-// 调用 IPC（通过 preload 暴露的 API）
-const result = await mainWindow.evaluate(() => {
-  return (window as any).api.someMethod()
+test.describe('macOS-only flow', () => {
+  test.skip(process.platform !== 'darwin', 'requires macOS')
+  test('...', async ({ mainWindow }) => { /* ... */ })
 })
 ```
 
-### 测试文件命名规范
+- The fixture already handles macOS path resolution (`/var` → `/private/var` symlink) when
+  asserting the runtime appData path; keep that in mind when writing path assertions.
 
-```
-specs/
-├── [feature].spec.ts           # 单文件测试
-├── [feature]/
-│   ├── [sub-feature].spec.ts   # 子功能测试
-│   └── [another].spec.ts
-```
+## 10. App lifecycle: close, relaunch, multiple windows
 
-示例：
-- `app-launch.spec.ts` - 应用启动
-- `navigation.spec.ts` - 页面导航
-- `settings/general.spec.ts` - 通用设置
-- `conversation/basic-chat.spec.ts` - 基础聊天
+- **Close:** `await electronApp.close()`. The fixture waits ~3s afterwards for SQLite WAL
+  flush — keep that settle window before post-exit verification (§11).
+- **Relaunch:** if a test needs to relaunch the app, relaunch with the **same owned
+  disposable profile** (`getUserDataDir()`) and close the new instance before the test ends.
+- **Multiple windows:** obtain additional windows from the app via
+  `electronApp.waitForEvent('window', { predicate: ... })`. All windows are owned by the
+  fixture's `electronApp`; close the app (not individual windows) for teardown.
+- The fixture-owned `electronApp` is always terminated normally — `electronApp.close()`
+  plus fixture teardown. The exact `--user-data-dir=` token rule (§5) applies only to
+  **spawned, relaunched, or external child processes** the test must stop itself — never
+  by broad process matching.
 
-### 添加新页面对象后的清单
+## 11. Post-exit persistence verification
 
-1. 在 `pages/` 目录创建 `[feature].page.ts`
-2. 继承 `BasePage` 类
-3. 在 `pages/index.ts` 中导出
-4. 在对应的 spec 文件中导入使用
-
-### 测试用例编写清单
-
-- [ ] 使用自定义 fixture (`test`, `expect`)
-- [ ] 在 `beforeEach` 中调用 `waitForAppReady`
-- [ ] 使用 Page Object 进行页面交互
-- [ ] 使用描述性的测试名称
-- [ ] 添加适当的断言
-- [ ] 处理可能的异步操作
-- [ ] 考虑测试失败时的清理
-
-### 调试技巧
+The committed specs (e.g. `conversation/topic-trash-lifecycle.spec.ts`) establish the
+canonical pattern for proving durability:
 
 ```typescript
-// 截图调试
-await mainWindow.screenshot({ path: 'debug.png' })
+import * as fs from 'fs'
 
-// 打印页面 HTML
-console.log(await mainWindow.content())
+// 1. Close the app and let SQLite flush its WAL
+await electronApp.close()
+await new Promise((resolve) => setTimeout(resolve, 3000))
 
-// 暂停测试进行调试
-await mainWindow.pause()
+// 2. chat.db must exist at the RUNTIME path (not a predicted one)
+const chatDbPath = getChatDbPath()          // <runtime appDataPath>/Data/chat.db
+expect(chatDbPath).not.toBeNull()
+expect(fs.existsSync(chatDbPath!)).toBe(true)
 
-// 打印元素数量
-console.log(await page.locator('.element').count())
+// 3. Query read-only via the Electron binary (ABI-safe native module).
+//    queryChatDbViaElectron takes a SQL string; escape substituted values as the
+//    committed specs do (no unescaped string concatenation, no positional indexing).
+const topicId = 'captured-topic-id'        // exact ID captured from the UI/Redux
+const esc = (value: string) => value.replace(/'/g, "''")
+const result = queryChatDbViaElectron(
+  chatDbPath!,
+  `SELECT id, deleted_at FROM topics WHERE id = '${esc(topicId)}'`
+)
+expect(result?.ok).toBe(true)
 ```
 
----
+Use the runtime path from `getChatDbPath()`/`getRuntimeAppDataPath()` — never a path
+predicted from `getUserDataDir()` — because Electron may resolve `/var` differently.
 
-## 配置文件
+## 12. Debugging vs. evidence
 
-主要配置在项目根目录的 `playwright.config.ts`：
+Diagnostics are for **finding bugs, never for proving behavior**:
 
-- `testDir`: 测试目录 (`./tests/e2e/specs`)
-- `timeout`: 测试超时 (60秒)
-- `workers`: 并发数 (1，Electron 需要串行)
-- `retries`: 重试次数 (CI 环境下为 2)
+- `mainWindow.screenshot(...)` / `page.screenshot(...)` — diagnostic images only.
+- `console.log`/`console.error` with an `[E2E]` prefix — diagnostic output (the fixture and
+  committed specs use it for fail-fast context).
+- `--debug`, Playwright UI mode, manual CDP sessions, dev-mode (`pnpm dev`) runs —
+  diagnostic only; never sufficient regression evidence.
+- Playwright's failure artifacts — trace/screenshot/video (retained on failure by config)
+  under `test-results/` — **diagnose why a deterministic test failed** (e.g. the DOM
+  state at the moment of failure). They are investigation aids for failed tests and are
+  **never standalone regression evidence**: they cannot independently establish that a
+  behavior passed. A pass is proven only by deterministic assertions (§7) on the fresh
+  build.
 
----
+Regression evidence is what CI-grade suites are judged on:
 
-## 相关文档
+- **Fresh production build** (`pnpm build`) immediately before the run.
+- **The standard fixture** (`electron.fixture`) with a unique disposable profile.
+- **Mocked providers** — no live API access.
+- **Deterministic assertions** (§7), including post-exit persistence (§11).
 
-- [Playwright 官方文档](https://playwright.dev/docs/intro)
-- [Playwright Electron 测试](https://playwright.dev/docs/api/class-electron)
+## 13. Cleanup and failure artifacts
+
+**Cleanup**
+
+- The `userDataDir` fixture removes its exact owned base + `Dev` dirs after each test and
+  **verifies removal**, throwing an aggregate error on any failure (never swallowed).
+- Global teardown safety-net cleans the current invocation token's registry (§5).
+- No broad `pkill`/`killall`/glob deletion anywhere in the flow.
+
+**Failure artifacts** (from `playwright.config.ts`)
+
+| Path | Contents |
+|---|---|
+| `test-results/` | `outputDir` — traces, videos, screenshots (retain-on-failure), plus `screenshots/` created by global setup |
+| `playwright-report/` | HTML report — view with `pnpm playwright show-report` |
+
+After a failed run, read the trace (`show-report` → trace viewer) to diagnose why the test
+failed before re-running. Failure artifacts support the failed-test investigation (see
+§12); they never independently establish pass evidence.
+
+## 14. Playwright configuration reference
+
+From `playwright.config.ts` (root):
+
+| Setting | Value | Meaning |
+|---|---|---|
+| `testDir` | `./tests/e2e/specs` | Test discovery root |
+| `timeout` | 60 000 ms | Per-test timeout |
+| `expect.timeout` | 10 000 ms | Auto-retry assertion timeout |
+| `fullyParallel` / `workers` | `false` / `1` | Serial Electron execution |
+| `forbidOnly` | `!!process.env.CI` | Fails on stray `test.only` under CI env |
+| `retries` | `process.env.CI ? 2 : 0` | Retries only when a CI env var is set |
+| `reporter` | html (`playwright-report`) + list | Local report |
+| `globalSetup` / `globalTeardown` | `./tests/e2e/global-setup.ts` / `global-teardown.ts` | Run ownership init/cleanup |
+| `outputDir` | `./test-results` | Artifact output |
+| `use.trace/screenshot/video` | `retain-on-failure` / `only-on-failure` | Failure artifacts (diagnostic only — see §12) |
+| `use.actionTimeout` / `navigationTimeout` | 15 000 / 30 000 ms | Action/navigation timeouts |
+
+## 15. Authoring checklist
+
+When adding or modifying an E2E spec:
+
+- [ ] Reused the shared fixture (`import { test, expect } from '../../fixtures/electron.fixture'`) — no custom `_electron.launch`, no live profile.
+- [ ] Ran `pnpm build` before `pnpm test:e2e` (fresh output).
+- [ ] Reusable page-level workflows go through a `pages/` POM (registered in `pages/index.ts`); feature-specific spec locators follow the selector conventions (§8).
+- [ ] Provider traffic is the mock endpoint only; no real API keys.
+- [ ] Evidence depth matches workflow risk: simple launch/navigation smoke may rely on direct UI assertions; persistence/IPC/filesystem/relaunch flows assert authoritative final state (§7).
+- [ ] Deterministic assertions from ≥2 evidence classes for durable claims; Redux-only dispatches are not treated as persistence proof.
+- [ ] Persistence claims verified post-exit via `queryChatDbViaElectron` at the runtime path.
+- [ ] Exact-ID before/after asserts for destructive operations.
+- [ ] State-based waits, no sleep-to-race; platform-specific behavior explicitly skipped.
+- [ ] Test runs serially; cleanup is fixture-owned and verified.
+- [ ] No `pkill`/`killall`/glob deletion; spawned/relaunched/external child processes terminated only by exact profile token (fixture-owned app uses `electronApp.close()`).
+
+## 16. Related documentation
+
+- [Playwright test runner docs](https://playwright.dev/docs/test-intro)
+- [Playwright Electron support](https://playwright.dev/docs/api/class-electron)
 - [Page Object Model](https://playwright.dev/docs/pom)
+- Repository conventions: `AGENTS.md` (top-level), `vitest.config.ts`, `playwright.config.ts`

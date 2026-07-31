@@ -37,7 +37,7 @@ If the skill is unavailable, directly read `.agents/skills/gh-create-issue/SKILL
 
 ## Development Commands
 
-- **Install**: `pnpm install` — Install all project dependencies (requires Node ≥22, pnpm 10.27.0)
+- **Install**: `pnpm install` — Install all project dependencies (requires Node ≥24.11.1, pnpm 10.27.0)
 - **Development**: `pnpm dev` — Runs Electron app in development mode with hot reload
 - **Debug**: `pnpm debug` — Starts with debugging; attach via `chrome://inspect` on port 9222
 - **Build Check**: `pnpm build:check` — **REQUIRED** before commits (`pnpm lint && pnpm test`)
@@ -214,7 +214,7 @@ logger.error("message", error);
 
 | Layer | Technologies |
 |---|---|
-| Runtime | Electron 38, Node ≥22 |
+| Runtime | Electron 38, Node ≥24.11.1 |
 | Frontend | React 19, TypeScript ~5.8 |
 | UI | Ant Design 5.27, styled-components 6, TailwindCSS v4 |
 | State | Redux Toolkit, redux-persist, Dexie (IndexedDB) |
@@ -273,6 +273,16 @@ Several dependencies have patches in `patches/` — be careful when upgrading:
 - All tests run without CI dependency (fully local)
 - Coverage via v8 provider (`pnpm test:coverage`)
 - **Features without tests are not considered complete**
+
+### E2E Testing (Playwright/Electron)
+
+- Use Vitest/Testing Library for isolated component behavior; Electron, preload, main-process IPC, filesystem/persistence, native, multi-window, and relaunch workflows require Playwright Electron E2E
+- E2E evidence comes from a fresh production build (`pnpm build`), the standard `tests/e2e` fixture, a unique disposable user profile, mocked external providers, and deterministic assertions
+- Screenshots, manual CDP sessions, agent-driven browsers, and dev-mode runs are diagnostic only — never sufficient regression evidence
+- Playwright E2E specs/fixtures may emit `[E2E]`-prefixed console output for diagnostics; application code remains `loggerService`-only, and diagnostic output is not regression evidence
+- Cleanup is ownership-scoped; never kill broad process trees
+- Use explicit platform skips for OS-specific behavior
+- See `tests/e2e/README.md` for details
 
 ## Important Notes
 
