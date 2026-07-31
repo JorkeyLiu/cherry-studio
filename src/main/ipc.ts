@@ -35,6 +35,7 @@ import AppUpdater from './services/AppUpdater'
 import BackupManager from './services/BackupManager'
 import { registerChatDbIpc } from './services/chatDb/ipc'
 import { registerChatImportIpc } from './services/chatDbImport'
+import { registerCherryImportControlIpc } from './services/chatDbImport/importControlIpc'
 import CherryINOAuthService from './services/CherryINOAuthService'
 import { ConfigKeys, configManager } from './services/ConfigManager'
 import CopilotService from './services/CopilotService'
@@ -884,6 +885,9 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
 
   // ChatImport — 6 import-only IPC handlers for Phase 4 source-reader pipeline
   registerChatImportIpc()
+
+  // CherryImport — L2 Cherry Studio ZIP import control (Phase 6.3)
+  registerCherryImportControlIpc(mainWindow.webContents)
 
   ipcMain.handle(IpcChannel.App_QuoteToMain, (_, text: string) => windowService.quoteToMainWindow(text))
 

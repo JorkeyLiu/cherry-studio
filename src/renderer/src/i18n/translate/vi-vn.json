@@ -2016,6 +2016,54 @@
       "title": "Nhập các cuộc trò chuyện từ ChatGPT",
       "untitled_conversation": "Cuộc trò chuyện chưa có tiêu đề"
     },
+    "cherrystudio": {
+      "cancelled": {
+        "description": "Nhập dữ liệu đã bị hủy. Không có thay đổi nào được thực hiện đối với dữ liệu của bạn.",
+        "title": "Nhập dữ liệu đã bị hủy"
+      },
+      "confirm_button": "Bắt đầu nhập dữ liệu",
+      "confirm_description": "Thao tác này sẽ thay thế tất cả dữ liệu trò chuyện hiện có bằng dữ liệu từ bản sao lưu Cherry Studio. Hành động này không thể hoàn tác.",
+      "confirm_title": "Xác nhận nhập dữ liệu",
+      "confirm_warning": "Cảnh báo: Tất cả các cuộc trò chuyện và tin nhắn hiện tại sẽ bị thay thế.",
+      "description": "Nhập cuộc trò chuyện, tin nhắn và tệp đính kèm từ tệp sao lưu ZIP Cherry Studio. Thao tác này sẽ thay thế tất cả dữ liệu trò chuyện hiện có.",
+      "error": {
+        "title": "Lỗi nhập dữ liệu",
+        "unknown": "Nhập dữ liệu thất bại. Vui lòng kiểm tra định dạng tệp ZIP và thử lại."
+      },
+      "phase": {
+        "cancelled": "Nhập dữ liệu đã bị hủy",
+        "discovering": "Đang phát hiện cấu trúc cơ sở dữ liệu...",
+        "error": "Nhập dữ liệu thất bại",
+        "extracting": "Đang giải nén kho lưu trữ ZIP...",
+        "idle": "Sẵn sàng nhập dữ liệu",
+        "processing": "Đang xử lý và xác thực dữ liệu...",
+        "promoting": "Đang áp dụng nhập dữ liệu (thay thế dữ liệu)...",
+        "reading": "Đang đọc dữ liệu trò chuyện...",
+        "success": "Nhập dữ liệu thành công! Ứng dụng sẽ khởi động lại.",
+        "unsupported": "Nền tảng không được hỗ trợ"
+      },
+      "select_button": "Chọn tệp",
+      "select_file": "Chọn bản sao lưu ZIP Cherry Studio",
+      "steps": {
+        "confirm": "Xác nhận",
+        "import": "Nhập dữ liệu",
+        "promote": "Áp dụng",
+        "select": "Chọn tệp"
+      },
+      "success": {
+        "description": "Bản sao lưu Cherry Studio đã được nhập. Ứng dụng sẽ khởi động lại để áp dụng các thay đổi.",
+        "title": "Nhập dữ liệu thành công"
+      },
+      "title": "Nhập bản sao lưu ZIP Cherry Studio",
+      "unsupported": {
+        "description": "Nhập dữ liệu ZIP Cherry Studio hiện chỉ được hỗ trợ trên macOS. Nền tảng hiện tại của bạn chưa được hỗ trợ.",
+        "title": "Nền tảng không được hỗ trợ"
+      },
+      "warning": {
+        "description": "Thao tác nhập này sẽ thay thế tất cả dữ liệu trò chuyện hiện có. Đảm bảo bạn có bản sao lưu dữ liệu hiện tại nếu cần.",
+        "title": "Thay thế tất cả"
+      }
+    },
     "confirm": {
       "button": "Chọn Tập tin Nhập",
       "label": "Bạn có chắc chắn muốn nhập dữ liệu từ bên ngoài không?"
@@ -4182,6 +4230,8 @@
       "import_settings": {
         "button": "Nhập tệp Json",
         "chatgpt": "Nhập từ ChatGPT",
+        "cherrystudio": "Nhập từ ZIP Cherry Studio",
+        "cherrystudio_button": "Nhập bản sao lưu ZIP",
         "title": "Nhập dữ liệu ứng dụng từ bên ngoài"
       },
       "joplin": {

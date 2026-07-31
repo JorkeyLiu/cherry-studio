@@ -41,6 +41,8 @@ export type ChatImportZipErrorCode =
   | 'EXTRACT_FAILED'
   | 'FILE_NOT_FOUND'
   | 'NOT_A_FILE'
+  | 'DUPLICATE_ENTRIES'
+  | 'INVALID_ENTRY_SIZE'
 
 /**
  * Thrown during ZIP intake validation or extraction.

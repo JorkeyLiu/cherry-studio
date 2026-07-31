@@ -2016,6 +2016,54 @@
       "title": "Importă conversații ChatGPT",
       "untitled_conversation": "Conversație fără titlu"
     },
+    "cherrystudio": {
+      "cancelled": {
+        "description": "Importul a fost anulat. Nu s-au efectuat modificări asupra datelor dvs.",
+        "title": "Import anulat"
+      },
+      "confirm_button": "Pornire import",
+      "confirm_description": "Acesta va înlocui toate datele de conversație existente cu datele din backupul Cherry Studio. Această acțiune nu poate fi anulată.",
+      "confirm_title": "Confirmare import",
+      "confirm_warning": "Atenție: Toate conversațiile și mesajele curente vor fi înlocuite.",
+      "description": "Importați conversații, mesaje și atașamente dintr-un fișier de backup ZIP Cherry Studio. Aceasta va înlocui toate datele de conversație existente.",
+      "error": {
+        "title": "Eroare de import",
+        "unknown": "Importul a eșuat. Verificați formatul fișierului ZIP și încercați din nou."
+      },
+      "phase": {
+        "cancelled": "Importul a fost anulat",
+        "discovering": "Se descoperă structura bazei de date...",
+        "error": "Importul a eșuat",
+        "extracting": "Se extrage arhiva ZIP...",
+        "idle": "Gata de import",
+        "processing": "Se procesează și validează datele...",
+        "promoting": "Se aplică importul (se înlocuiesc datele)...",
+        "reading": "Se citesc datele de conversație...",
+        "success": "Importul s-a finalizat cu succes! Aplicația va reporni.",
+        "unsupported": "Platformă neacceptată"
+      },
+      "select_button": "Selectare fișier",
+      "select_file": "Selectare backup ZIP Cherry Studio",
+      "steps": {
+        "confirm": "Confirmare",
+        "import": "Import",
+        "promote": "Aplicare",
+        "select": "Selectare fișier"
+      },
+      "success": {
+        "description": "Backupul Cherry Studio a fost importat. Aplicația va reporni pentru a aplica modificările.",
+        "title": "Import reușit"
+      },
+      "title": "Importare backup ZIP Cherry Studio",
+      "unsupported": {
+        "description": "Importul ZIP Cherry Studio este momentan acceptat doar pe macOS. Platforma dvs. curentă nu este încă acceptată.",
+        "title": "Platformă neacceptată"
+      },
+      "warning": {
+        "description": "Acest import va înlocui toate datele de conversație existente. Asigurați-vă că aveți un backup al datelor curente dacă este necesar.",
+        "title": "Înlocuiește tot"
+      }
+    },
     "confirm": {
       "button": "Selectează fișierul de import",
       "label": "Ești sigur că vrei să imporți date externe?"
@@ -4182,6 +4230,8 @@
       "import_settings": {
         "button": "Importă fișier Json",
         "chatgpt": "Importă din ChatGPT",
+        "cherrystudio": "Import din ZIP Cherry Studio",
+        "cherrystudio_button": "Import backup ZIP",
         "title": "Importă date din aplicație externă"
       },
       "joplin": {

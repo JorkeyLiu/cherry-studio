@@ -146,6 +146,17 @@ export async function validateFileStat(zipPath: string): Promise<void> {
 /**
  * Layer 2: Enumerate entries and validate counts, sizes, and encryption.
  * Returns entryCount and totalUncompressedBytes for the caller.
+ *
+ * LOCK-6031: Uses the raw central-directory entry count (via entriesCount)
+ * rather than the name-keyed Object.values().length. node-stream-zip's
+ * entries() returns a Record<string, ZipEntry> keyed by entry name, which
+ * collapses duplicate CEN entries with the same name. The raw entriesCount
+ * preserves the actual number of central-directory records, preventing
+ * undercounting of duplicate entries.
+ *
+ * LOCK-6031: Rejects ZIPs with duplicate central-directory entry names,
+ * validates entry sizes are finite non-negative safe integers, and
+ * performs safe aggregate addition to prevent overflow.
  */
 export async function validateEntries(
   zip: StreamZip.StreamZipAsync
@@ -153,9 +164,32 @@ export async function validateEntries(
   const entries = await zip.entries()
   const entryList = Object.values(entries)
 
-  const entryCount = entryList.length
-  if (entryCount > MAX_ENTRY_COUNT) {
-    throw new ChatImportZipError('TOO_MANY_ENTRIES', `Entry count (${entryCount}) exceeds maximum (${MAX_ENTRY_COUNT})`)
+  // LOCK-6031: Use the raw central-directory entry count from node-stream-zip
+  // (via entriesCount) rather than the name-keyed Object.values().length.
+  // node-stream-zip's entries() returns a Record<string, ZipEntry> keyed by
+  // entry name, which collapses duplicate CEN entries with the same name.
+  // The raw entriesCount preserves the actual number of central-directory
+  // records, preventing undercounting of duplicate entries.
+  const rawEntryCount = await zip.entriesCount
+  const dedupedCount = entryList.length
+
+  // LOCK-6031: Reject ZIPs with duplicate central-directory entries.
+  // Duplicate names indicate either corruption or a zip bomb variant
+  // designed to undercount via the name-keyed entries() map.
+  if (rawEntryCount > dedupedCount) {
+    throw new ChatImportZipError(
+      'DUPLICATE_ENTRIES',
+      `ZIP has ${rawEntryCount} raw central-directory entries but only ${dedupedCount} unique names. ` +
+        'Duplicate central-directory entries detected — possible corruption or zip bomb.'
+    )
+  }
+
+  // LOCK-6031: Enforce entry count limit using the raw CEN count.
+  if (rawEntryCount > MAX_ENTRY_COUNT) {
+    throw new ChatImportZipError(
+      'TOO_MANY_ENTRIES',
+      `Entry count (${rawEntryCount}) exceeds maximum (${MAX_ENTRY_COUNT})`
+    )
   }
 
   let totalUncompressedBytes = 0
@@ -164,15 +198,37 @@ export async function validateEntries(
     // Skip directories
     if (entry.isDirectory) continue
 
-    // Single entry size check
-    if (entry.size > MAX_SINGLE_ENTRY_BYTES) {
+    // LOCK-6031: Validate entry size is a finite non-negative safe integer.
+    // node-stream-zip provides `size` (uncompressed) on each entry.
+    const entryAny = entry as { size?: number }
+    const uncompressedSize = entryAny.size ?? 0
+
+    if (!Number.isFinite(uncompressedSize) || !Number.isInteger(uncompressedSize) || uncompressedSize < 0) {
       throw new ChatImportZipError(
-        'SINGLE_ENTRY_TOO_LARGE',
-        `Entry "${sanitizeEntryNameForMessage(entry.name)}" size (${entry.size} bytes) exceeds maximum (${MAX_SINGLE_ENTRY_BYTES} bytes)`
+        'INVALID_ENTRY_SIZE',
+        `Entry "${sanitizeEntryNameForMessage(entry.name)}" has invalid uncompressed size: ${uncompressedSize}. ` +
+          'Size must be a finite non-negative integer.'
       )
     }
 
-    totalUncompressedBytes += entry.size
+    // Single entry size check
+    if (uncompressedSize > MAX_SINGLE_ENTRY_BYTES) {
+      throw new ChatImportZipError(
+        'SINGLE_ENTRY_TOO_LARGE',
+        `Entry "${sanitizeEntryNameForMessage(entry.name)}" size (${uncompressedSize} bytes) exceeds maximum (${MAX_SINGLE_ENTRY_BYTES} bytes)`
+      )
+    }
+
+    // LOCK-6031: Safe aggregate addition — prevent overflow before accumulation.
+    const newTotal = totalUncompressedBytes + uncompressedSize
+    if (!Number.isFinite(newTotal) || newTotal > Number.MAX_SAFE_INTEGER) {
+      throw new ChatImportZipError(
+        'INVALID_ENTRY_SIZE',
+        `Total uncompressed size would overflow safe integer range after adding entry "${sanitizeEntryNameForMessage(entry.name)}" ` +
+          `(${totalUncompressedBytes} + ${uncompressedSize}). Aggregate size overflow — possible corrupted ZIP.`
+      )
+    }
+    totalUncompressedBytes = newTotal
 
     // Encrypted entry check (bit 0 of general purpose bit flag)
     if (entry.flags !== undefined && (entry.flags & 1) !== 0) {
@@ -187,7 +243,7 @@ export async function validateEntries(
     )
   }
 
-  return { entryCount, totalUncompressedBytes }
+  return { entryCount: rawEntryCount, totalUncompressedBytes }
 }
 
 /**

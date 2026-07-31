@@ -42,6 +42,12 @@ import type {
   UpdateTopicMetadataRequest,
   UpsertSegmentRequest
 } from '@shared/chatDb'
+import type {
+  CherryImportCancelResult,
+  CherryImportPlatformSupport,
+  CherryImportStartResult,
+  CherryImportStatusEvent
+} from '@shared/chatImport/types'
 import type { GitBashPathInfo, UpgradeChannel } from '@shared/config/constant'
 import type { LogLevel, LogSourceWithContext } from '@shared/config/logger'
 import type { FileChangeEvent, WebviewKeyEvent } from '@shared/config/types'
@@ -175,7 +181,8 @@ const api = {
     backup: (fileName: string, destinationPath: string, skipBackupFile: boolean) =>
       ipcRenderer.invoke(IpcChannel.Backup_Backup, fileName, destinationPath, skipBackupFile),
     backupToWebdav: (webdavConfig: WebDavConfig) => ipcRenderer.invoke(IpcChannel.Backup_BackupToWebdav, webdavConfig),
-    restoreFromWebdav: (webdavConfig: WebDavConfig) =>
+    // LOCK-6006/6009: Promise<void> — resolves on direct success, throws on failure.
+    restoreFromWebdav: (webdavConfig: WebDavConfig): Promise<void> =>
       ipcRenderer.invoke(IpcChannel.Backup_RestoreFromWebdav, webdavConfig),
     listWebdavFiles: (webdavConfig: WebDavConfig) =>
       ipcRenderer.invoke(IpcChannel.Backup_ListWebdavFiles, webdavConfig),
@@ -187,7 +194,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.Backup_DeleteWebdavFile, fileName, webdavConfig),
     backupToLocalDir: (fileName: string, localConfig: { localBackupDir?: string; skipBackupFile?: boolean }) =>
       ipcRenderer.invoke(IpcChannel.Backup_BackupToLocalDir, fileName, localConfig),
-    restoreFromLocalBackup: (fileName: string, localBackupDir?: string) =>
+    // LOCK-6006/6009: Promise<void> — resolves on direct success, throws on failure.
+    restoreFromLocalBackup: (fileName: string, localBackupDir?: string): Promise<void> =>
       ipcRenderer.invoke(IpcChannel.Backup_RestoreFromLocalBackup, fileName, localBackupDir),
     listLocalBackupFiles: (localBackupDir?: string) =>
       ipcRenderer.invoke(IpcChannel.Backup_ListLocalBackupFiles, localBackupDir),
@@ -196,7 +204,8 @@ const api = {
     checkWebdavConnection: (webdavConfig: WebDavConfig) =>
       ipcRenderer.invoke(IpcChannel.Backup_CheckConnection, webdavConfig),
     backupToS3: (s3Config: S3Config) => ipcRenderer.invoke(IpcChannel.Backup_BackupToS3, s3Config),
-    restoreFromS3: (s3Config: S3Config) => ipcRenderer.invoke(IpcChannel.Backup_RestoreFromS3, s3Config),
+    // LOCK-6006/6009: Promise<void> — resolves on direct success, throws on failure.
+    restoreFromS3: (s3Config: S3Config): Promise<void> => ipcRenderer.invoke(IpcChannel.Backup_RestoreFromS3, s3Config),
     listS3Files: (s3Config: S3Config) => ipcRenderer.invoke(IpcChannel.Backup_ListS3Files, s3Config),
     deleteS3File: (fileName: string, s3Config: S3Config) =>
       ipcRenderer.invoke(IpcChannel.Backup_DeleteS3File, fileName, s3Config),
@@ -533,6 +542,25 @@ const api = {
     cleanLocalData: () => ipcRenderer.invoke(IpcChannel.TRACE_CLEAN_LOCAL_DATA),
     addStreamMessage: (spanId: string, modelName: string, context: string, message: any) =>
       ipcRenderer.invoke(IpcChannel.TRACE_ADD_STREAM_MESSAGE, spanId, modelName, context, message)
+  },
+  cherryImport: {
+    getPlatformSupport: (): Promise<CherryImportPlatformSupport> =>
+      ipcRenderer.invoke(IpcChannel.CherryImport_GetPlatformSupport),
+    start: (zipPath: string): Promise<CherryImportStartResult> =>
+      ipcRenderer.invoke(IpcChannel.CherryImport_Start, zipPath),
+    cancel: (sessionId: string): Promise<CherryImportCancelResult> =>
+      ipcRenderer.invoke(IpcChannel.CherryImport_Cancel, sessionId),
+    getStatus: (sessionId: string): Promise<CherryImportStatusEvent | null> =>
+      ipcRenderer.invoke(IpcChannel.CherryImport_GetStatus, sessionId),
+    onStatusChanged: (callback: (event: CherryImportStatusEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: CherryImportStatusEvent) => {
+        callback(data)
+      }
+      ipcRenderer.on(IpcChannel.CherryImport_StatusChanged, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.CherryImport_StatusChanged, listener)
+      }
+    }
   },
   anthropic_oauth: {
     startOAuthFlow: () => ipcRenderer.invoke(IpcChannel.Anthropic_StartOAuthFlow),

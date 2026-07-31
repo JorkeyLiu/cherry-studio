@@ -1522,6 +1522,60 @@ export function takeTerminalPromotionOwnership(): TakeTerminalOwnershipOutcome {
 }
 
 /**
+ * Result of {@link takeTerminalPromotionOwnershipIfMatches}. Never crosses IPC.
+ *
+ * `taken` — the terminal ownership record matched the expected identity token
+ *   and was atomically returned and cleared. The caller now owns the retained
+ *   capability/lease.
+ * `not-available` — no terminal ownership record exists (already consumed,
+ *   no promotion has settled).
+ * `mismatch` — a terminal ownership record exists but its identity does not
+ *   match the expected token. The record is NOT consumed (LOCK-6015): this
+ *   prevents a stale continuation from consuming a newer session's ownership.
+ */
+export type TakeIfMatchesTerminalOwnershipOutcome =
+  | { readonly status: 'taken'; readonly ownership: TerminalPromotionOwnership }
+  | { readonly status: 'not-available' }
+  | { readonly status: 'mismatch' }
+
+/**
+ * Atomically take the terminal promotion ownership record ONLY if it matches
+ * the given identity token (LOCK-6015/6018). Used by stale recovery settlement
+ * to ensure a stale continuation never consumes a newer session's ownership.
+ *
+ * Identity is compared by the handoff's `token` field — the exact-once claim
+ * token from the originating execution. This is the narrowest identity check:
+ * the token is unique per execution and never reused across sessions.
+ *
+ * Exact-once semantics (same as {@link takeTerminalPromotionOwnership}):
+ * - Match + take: the record is cleared; caller owns the capability.
+ * - No record: returns `not-available` (already consumed by recovery or
+ *   no promotion has settled).
+ * - Mismatch: returns `mismatch`; the record is untouched. The caller must
+ *   NOT release or mutate the record — it belongs to a different session.
+ *
+ * @param expectedToken - The originating handoff's token to match against.
+ */
+export function takeTerminalPromotionOwnershipIfMatches(expectedToken: string): TakeIfMatchesTerminalOwnershipOutcome {
+  const current = terminalPromotionOwnership
+  if (current === null) {
+    return { status: 'not-available' }
+  }
+  // Identity check: the handoff's token must match the expected origin.
+  if (current.handoff.token !== expectedToken) {
+    logger.warn(
+      `Terminal promotion ownership identity mismatch: expected token ${expectedToken}, ` +
+        `found ${current.handoff.token} (kind: ${current.kind}) — refusing take (LOCK-6015)`
+    )
+    return { status: 'mismatch' }
+  }
+  // Atomic take-and-clear: the caller now owns the record.
+  terminalPromotionOwnership = null
+  logger.info(`Terminal promotion ownership taken (kind: ${current.kind}, identity-matched)`)
+  return { status: 'taken', ownership: current }
+}
+
+/**
  * Internal: set the terminal promotion ownership record. Refuses to
  * overwrite an unconsumed record (production-safety guard, LOCK-4433).
  *

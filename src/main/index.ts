@@ -35,6 +35,7 @@ import { windowService } from './services/WindowService'
 import { initWebviewHotkeys } from './services/WebviewService'
 import { chatDbService } from './services/chatDb'
 import { disposeActiveImport, recoverOrphanedImportArtifacts } from './services/chatDbImport'
+import { disposeCherryImportControl } from './services/chatDbImport/importControlIpc'
 import { runStartupRecoveryGate } from './services/chatDbImport/promotion/gate'
 import { readPromotionJournal } from './services/chatDbImport/promotion/journalStore'
 import type { PromotionJournalObservation } from './services/chatDbImport/promotion/recovery'
@@ -160,6 +161,15 @@ if (!app.requestSingleInstanceLock()) {
           'Chat DB will not be initialised this session to prevent unchecked use.',
         error as Error
       )
+    }
+
+    // LOCK-6013: Clean up orphaned extraction directories from crashed restores.
+    // Must run AFTER handleStartupRestore (which may leave .restore dirs for retry)
+    // and BEFORE chatDbService.init().
+    try {
+      await BackupManager.cleanupOrphanedExtractions()
+    } catch {
+      // Non-fatal — orphan cleanup is best-effort
     }
 
     // Phase 4.4.3 (LOCK-4431): promotion recovery gate runs AFTER restore
@@ -339,6 +349,17 @@ if (!app.requestSingleInstanceLock()) {
   app.on('will-quit', async () => {
     // Clean up resources — each service in its own try/catch so one failure
     // cannot prevent cleanup of subsequent services.
+
+    // L2 control layer (poller, terminal ownership, webContents ref) must be
+    // settled BEFORE the underlying import session is torn down. This stops
+    // the state poller and releases any unclaimed terminal promotion ownership
+    // (LOCK-6015/6018) so the session disposal below cannot race a stale poller
+    // callback or leave terminal capability unreleased.
+    try {
+      disposeCherryImportControl()
+    } catch (error) {
+      logger.warn('Error disposing import control:', error as Error)
+    }
 
     // Dispose any active import session (non-fatal) — must run BEFORE
     // chatDbService.close() so the isolated session is torn down first.

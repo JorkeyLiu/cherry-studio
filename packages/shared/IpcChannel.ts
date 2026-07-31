@@ -412,5 +412,16 @@ export enum IpcChannel {
   ChatImport_ReadPage = 'chat-import:read-page',
   ChatImport_Cancel = 'chat-import:cancel',
   ChatImport_Complete = 'chat-import:complete',
-  ChatImport_Error = 'chat-import:error'
+  ChatImport_Error = 'chat-import:error',
+
+  // CherryImport — L2 Cherry Studio ZIP compatibility-import control IPC.
+  // Command-oriented bridge from the main renderer to the Phase 4 import
+  // service. Independent of the 6 ChatImport_* channels (source-reader
+  // pipeline) and the Backup_* channels (L3 backup/restore). Prefix:
+  // cherry-import:*
+  CherryImport_GetPlatformSupport = 'cherry-import:get-platform-support',
+  CherryImport_Start = 'cherry-import:start',
+  CherryImport_Cancel = 'cherry-import:cancel',
+  CherryImport_GetStatus = 'cherry-import:get-status',
+  CherryImport_StatusChanged = 'cherry-import:status-changed'
 }

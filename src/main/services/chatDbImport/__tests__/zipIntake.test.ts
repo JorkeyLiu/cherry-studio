@@ -26,6 +26,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+import StreamZip from 'node-stream-zip'
+
 import { ChatImportZipError } from '../errors'
 import {
   MAX_ENTRY_COUNT,
@@ -33,8 +35,10 @@ import {
   MAX_TOTAL_UNCOMPRESSED_BYTES,
   MAX_ZIP_SIZE_BYTES,
   sanitizeEntryNameForMessage,
+  validateEntries,
   validateFileStat,
-  validateIndexedDbStructure
+  validateIndexedDbStructure,
+  validateNoZipSlip
 } from '../zipIntake'
 
 describe('zipIntake', () => {
@@ -171,12 +175,282 @@ describe('zipIntake', () => {
         'NO_INDEXED_DB',
         'EXTRACT_FAILED',
         'FILE_NOT_FOUND',
-        'NOT_A_FILE'
+        'NOT_A_FILE',
+        'DUPLICATE_ENTRIES',
+        'INVALID_ENTRY_SIZE'
       ] as const
       for (const code of codes) {
         const error = new ChatImportZipError(code, 'test')
         expect(error.code).toBe(code)
       }
+    })
+  })
+
+  describe('validateEntries (LOCK-6031)', () => {
+    function buildRawZip(entryNames: string[]): Buffer {
+      const localParts: Buffer[] = []
+      const centralParts: Buffer[] = []
+      let localOffset = 0
+
+      for (const entryName of entryNames) {
+        const name = Buffer.from(entryName)
+        const localHeader = Buffer.alloc(30)
+        localHeader.writeUInt32LE(0x04034b50, 0)
+        localHeader.writeUInt16LE(20, 4)
+        localHeader.writeUInt16LE(name.length, 26)
+        localParts.push(Buffer.concat([localHeader, name]))
+
+        const centralHeader = Buffer.alloc(46)
+        centralHeader.writeUInt32LE(0x02014b50, 0)
+        centralHeader.writeUInt16LE(20, 4)
+        centralHeader.writeUInt16LE(20, 6)
+        centralHeader.writeUInt16LE(name.length, 28)
+        centralHeader.writeUInt32LE(localOffset, 42)
+        centralParts.push(Buffer.concat([centralHeader, name]))
+
+        localOffset += localHeader.length + name.length
+      }
+
+      const centralDirectory = Buffer.concat(centralParts)
+      const endOfCentralDirectory = Buffer.alloc(22)
+      endOfCentralDirectory.writeUInt32LE(0x06054b50, 0)
+      endOfCentralDirectory.writeUInt16LE(entryNames.length, 8)
+      endOfCentralDirectory.writeUInt16LE(entryNames.length, 10)
+      endOfCentralDirectory.writeUInt32LE(centralDirectory.length, 12)
+      endOfCentralDirectory.writeUInt32LE(localOffset, 16)
+
+      return Buffer.concat([...localParts, centralDirectory, endOfCentralDirectory])
+    }
+
+    /**
+     * Create a mock StreamZip async object with controlled entries.
+     * Simulates node-stream-zip's entries() (name-keyed dedup map) and
+     * entriesCount (raw central-directory count).
+     */
+    function createMockZip(
+      rawEntries: Array<{ name: string; isDirectory?: boolean; flags?: number; size?: number }>,
+      rawCount?: number
+    ): { entries: () => Promise<Record<string, any>>; entriesCount: Promise<number> } {
+      const entryMap: Record<string, any> = {}
+      for (const entry of rawEntries) {
+        entryMap[entry.name] = {
+          name: entry.name,
+          isDirectory: entry.isDirectory ?? false,
+          flags: entry.flags,
+          size: entry.size
+        }
+      }
+      // Default: rawCount = number of items passed (no duplicates)
+      return {
+        entries: async () => entryMap,
+        entriesCount: Promise.resolve(rawCount ?? rawEntries.length)
+      }
+    }
+
+    it('accepts a ZIP with valid entries', async () => {
+      const mockZip = createMockZip([
+        { name: 'metadata.json', size: 100 },
+        { name: 'Data/chat.db', size: 200 }
+      ])
+      const result = await validateEntries(mockZip as any)
+      expect(result.entryCount).toBe(2)
+      expect(result.totalUncompressedBytes).toBe(300)
+    })
+
+    it('accepts empty ZIP', async () => {
+      const mockZip = createMockZip([])
+      const result = await validateEntries(mockZip as any)
+      expect(result.entryCount).toBe(0)
+      expect(result.totalUncompressedBytes).toBe(0)
+    })
+
+    it('skips directory entries in size calculation', async () => {
+      const mockZip = createMockZip([
+        { name: 'Data/', isDirectory: true, size: 0 },
+        { name: 'Data/file.txt', size: 50 }
+      ])
+      const result = await validateEntries(mockZip as any)
+      expect(result.entryCount).toBe(2)
+      expect(result.totalUncompressedBytes).toBe(50)
+    })
+
+    it('REJECTS duplicate names parsed from raw central-directory entries', async () => {
+      const zipPath = path.join(tempDir, 'duplicate-central-directory-names.zip')
+      fs.writeFileSync(zipPath, buildRawZip(['duplicate.txt', 'unique.txt', 'duplicate.txt']))
+      const zip = new StreamZip.async({ file: zipPath })
+
+      try {
+        const rawEntryCount = await zip.entriesCount
+        const entries = await zip.entries()
+
+        expect(rawEntryCount).toBe(3)
+        expect(Object.keys(entries)).toEqual(['duplicate.txt', 'unique.txt'])
+        expect(rawEntryCount).toBeGreaterThan(Object.keys(entries).length)
+        await expect(validateEntries(zip)).rejects.toMatchObject({
+          code: 'DUPLICATE_ENTRIES'
+        })
+      } finally {
+        await zip.close()
+      }
+    })
+
+    it('REJECTS >10k raw entries (no duplicates, raw count exceeds limit)', async () => {
+      // 10,001 unique entries — raw count exceeds MAX_ENTRY_COUNT, no duplicates
+      const entries = Array.from({ length: MAX_ENTRY_COUNT + 1 }, (_, i) => ({
+        name: `file-${i}.txt`,
+        size: 1
+      }))
+      const mockZip = createMockZip(entries)
+      await expect(validateEntries(mockZip as any)).rejects.toThrow(ChatImportZipError)
+      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
+        code: 'TOO_MANY_ENTRIES'
+      })
+    })
+
+    it('accepts ZIP at exact 10k entry boundary', async () => {
+      const entries = Array.from({ length: MAX_ENTRY_COUNT }, (_, i) => ({
+        name: `file-${i}.txt`,
+        size: 1
+      }))
+      const mockZip = createMockZip(entries)
+      const result = await validateEntries(mockZip as any)
+      expect(result.entryCount).toBe(MAX_ENTRY_COUNT)
+    })
+
+    it('REJECTS entry with NaN size', async () => {
+      const mockZip = createMockZip([{ name: 'bad.txt', size: Number.NaN }])
+      await expect(validateEntries(mockZip as any)).rejects.toThrow(ChatImportZipError)
+      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
+        code: 'INVALID_ENTRY_SIZE'
+      })
+    })
+
+    it('REJECTS entry with Infinity size', async () => {
+      const mockZip = createMockZip([{ name: 'huge.txt', size: Number.POSITIVE_INFINITY }])
+      await expect(validateEntries(mockZip as any)).rejects.toThrow(ChatImportZipError)
+      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
+        code: 'INVALID_ENTRY_SIZE'
+      })
+    })
+
+    it('REJECTS entry with negative size', async () => {
+      const mockZip = createMockZip([{ name: 'negative.txt', size: -1 }])
+      await expect(validateEntries(mockZip as any)).rejects.toThrow(ChatImportZipError)
+      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
+        code: 'INVALID_ENTRY_SIZE'
+      })
+    })
+
+    it('REJECTS entry with fractional size', async () => {
+      const mockZip = createMockZip([{ name: 'fractional.txt', size: 1.5 }])
+      await expect(validateEntries(mockZip as any)).rejects.toThrow(ChatImportZipError)
+      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
+        code: 'INVALID_ENTRY_SIZE'
+      })
+    })
+
+    it('REJECTS total uncompressed size one byte over the 2 GiB limit', async () => {
+      const entries = [
+        ...Array.from({ length: 10 }, (_, i) => ({
+          name: `file${i}.bin`,
+          size: MAX_SINGLE_ENTRY_BYTES
+        })),
+        { name: 'remainder.bin', size: 48 * 1024 * 1024 + 1 }
+      ]
+      const mockZip = createMockZip(entries)
+      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
+        code: 'TOTAL_UNCOMPRESSED_TOO_LARGE'
+      })
+    })
+
+    it('accepts ZIP at exact 2 GiB total boundary', async () => {
+      const entries = [
+        ...Array.from({ length: 10 }, (_, i) => ({
+          name: `file${i}.bin`,
+          size: MAX_SINGLE_ENTRY_BYTES
+        })),
+        { name: 'remainder.bin', size: 48 * 1024 * 1024 }
+      ]
+      const mockZip = createMockZip(entries)
+      const result = await validateEntries(mockZip as any)
+      expect(result.entryCount).toBe(11)
+      expect(result.totalUncompressedBytes).toBe(MAX_TOTAL_UNCOMPRESSED_BYTES)
+    })
+
+    it('REJECTS entry exceeding per-entry 200 MiB limit', async () => {
+      const overLimit = MAX_SINGLE_ENTRY_BYTES + 1
+      const mockZip = createMockZip([{ name: 'huge.bin', size: overLimit }])
+      await expect(validateEntries(mockZip as any)).rejects.toThrow(ChatImportZipError)
+      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
+        code: 'SINGLE_ENTRY_TOO_LARGE'
+      })
+    })
+
+    it('accepts entry at exact 200 MiB per-entry limit', async () => {
+      const mockZip = createMockZip([{ name: 'max.bin', size: MAX_SINGLE_ENTRY_BYTES }])
+      const result = await validateEntries(mockZip as any)
+      expect(result.entryCount).toBe(1)
+      expect(result.totalUncompressedBytes).toBe(MAX_SINGLE_ENTRY_BYTES)
+    })
+
+    it('REJECTS encrypted entries', async () => {
+      const mockZip = createMockZip([{ name: 'encrypted.txt', size: 10, flags: 1 }])
+      await expect(validateEntries(mockZip as any)).rejects.toThrow(ChatImportZipError)
+      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
+        code: 'ENCRYPTED'
+      })
+    })
+
+    it('duplicate check fires before count check when both apply', async () => {
+      // 5 unique names, raw count 10,005 — both duplicate AND exceeds limit,
+      // but duplicate check fires first (LOCK-6031 ordering).
+      const entries = Array.from({ length: 5 }, (_, i) => ({
+        name: `file-${i}.txt`,
+        size: 1
+      }))
+      const mockZip = createMockZip(entries, MAX_ENTRY_COUNT + 5)
+      await expect(validateEntries(mockZip as any)).rejects.toThrow(ChatImportZipError)
+      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
+        code: 'DUPLICATE_ENTRIES'
+      })
+    })
+
+    it('treats entries without size as 0 bytes (no false rejections)', async () => {
+      const mockZip = createMockZip([{ name: 'no-size.txt' }, { name: 'Data/file.txt', size: 10 }])
+      const result = await validateEntries(mockZip as any)
+      expect(result.entryCount).toBe(2)
+      expect(result.totalUncompressedBytes).toBe(10)
+    })
+  })
+
+  describe('validateNoZipSlip', () => {
+    const destDir = '/mock/dest'
+
+    it('accepts valid relative paths', async () => {
+      const entryMap = {
+        'file.txt': { name: 'file.txt', isDirectory: false },
+        'Data/sub/file.txt': { name: 'Data/sub/file.txt', isDirectory: false }
+      }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).resolves.not.toThrow()
+    })
+
+    it('rejects absolute path entries', async () => {
+      const entryMap = { '/etc/passwd': { name: '/etc/passwd', isDirectory: false } }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toThrow(ChatImportZipError)
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toMatchObject({
+        code: 'PATH_TRAVERSAL'
+      })
+    })
+
+    it('rejects entries with ".." components', async () => {
+      const entryMap = { '../../etc/passwd': { name: '../../etc/passwd', isDirectory: false } }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toThrow(ChatImportZipError)
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toMatchObject({
+        code: 'PATH_TRAVERSAL'
+      })
     })
   })
 

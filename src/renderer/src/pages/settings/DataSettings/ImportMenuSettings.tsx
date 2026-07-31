@@ -1,4 +1,5 @@
 import { HStack } from '@renderer/components/Layout'
+import CherryStudioImportPopup from '@renderer/components/Popups/CherryStudioImportPopup'
 import ImportPopup from '@renderer/components/Popups/ImportPopup'
 import { useTheme } from '@renderer/context/ThemeProvider'
 import { Button } from 'antd'
@@ -14,6 +15,15 @@ const ImportMenuOptions: FC = () => {
     <SettingGroup theme={theme}>
       <SettingRow>
         <SettingTitle>{t('settings.data.import_settings.title')}</SettingTitle>
+      </SettingRow>
+      <SettingDivider />
+      <SettingRow>
+        <SettingRowTitle>{t('settings.data.import_settings.cherrystudio')}</SettingRowTitle>
+        <HStack gap="5px" justifyContent="space-between">
+          <Button onClick={CherryStudioImportPopup.show}>
+            {t('settings.data.import_settings.cherrystudio_button')}
+          </Button>
+        </HStack>
       </SettingRow>
       <SettingDivider />
       <SettingRow>

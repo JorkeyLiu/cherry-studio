@@ -2016,6 +2016,54 @@
       "title": "ChatGPTの会話をインポート",
       "untitled_conversation": "無題の会話"
     },
+    "cherrystudio": {
+      "cancelled": {
+        "description": "インポートがキャンセルされました。データに変更は加えられませんでした。",
+        "title": "インポートキャンセル"
+      },
+      "confirm_button": "インポート開始",
+      "confirm_description": "これにより、既存のすべてのチャットデータがCherry Studioバックアップのデータに置き換えられます。この操作は元に戻せません。",
+      "confirm_title": "インポートの確認",
+      "confirm_warning": "警告：現在のすべての会話とメッセージが置き換えられます。",
+      "description": "Cherry Studio ZIPバックアップファイルから会話、メッセージ、添付ファイルをインポートします。これにより、既存のすべてのチャットデータが置き換えられます。",
+      "error": {
+        "title": "インポートエラー",
+        "unknown": "インポートに失敗しました。ZIPファイルの形式を確認して、もう一度お試しください。"
+      },
+      "phase": {
+        "cancelled": "インポートがキャンセルされました",
+        "discovering": "データベース構造を検出中...",
+        "error": "インポートに失敗しました",
+        "extracting": "ZIPアーカイブを展開中...",
+        "idle": "インポート準備完了",
+        "processing": "データを処理・検証中...",
+        "promoting": "インポートを適用中（データを置き換え中）...",
+        "reading": "チャットデータを読み込み中...",
+        "success": "インポートが正常に完了しました！アプリケーションが再起動されます。",
+        "unsupported": "サポートされていないプラットフォーム"
+      },
+      "select_button": "ファイルを選択",
+      "select_file": "Cherry Studio ZIPバックアップを選択",
+      "steps": {
+        "confirm": "確認",
+        "import": "インポート",
+        "promote": "適用",
+        "select": "ファイルを選択"
+      },
+      "success": {
+        "description": "Cherry Studioのバックアップがインポートされました。変更を適用するためにアプリケーションが再起動されます。",
+        "title": "インポート成功"
+      },
+      "title": "Cherry Studio ZIPバックアップをインポート",
+      "unsupported": {
+        "description": "Cherry Studio ZIPインポートは現在macOSのみサポートされています。現在のプラットフォームはまだサポートされていません。",
+        "title": "サポートされていないプラットフォーム"
+      },
+      "warning": {
+        "description": "このインポートにより、既存のすべてのチャットデータが置き換えられます。必要に応じて、現在のデータのバックアップを取ってください。",
+        "title": "すべて置き換え"
+      }
+    },
     "confirm": {
       "button": "ファイルのインポートを選択",
       "label": "外部データをインポートしてもよろしいですか？"
@@ -4182,6 +4230,8 @@
       "import_settings": {
         "button": "JSONファイルをインポート",
         "chatgpt": "ChatGPTからインポート",
+        "cherrystudio": "Cherry Studio ZIPからインポート",
+        "cherrystudio_button": "ZIPバックアップをインポート",
         "title": "外部アプリケーションデータをインポート"
       },
       "joplin": {

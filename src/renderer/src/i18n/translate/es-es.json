@@ -2016,6 +2016,54 @@
       "title": "Importar conversaciones de ChatGPT",
       "untitled_conversation": "Conversación Sin Título"
     },
+    "cherrystudio": {
+      "cancelled": {
+        "description": "La importación fue cancelada. No se realizaron cambios en sus datos.",
+        "title": "Importación cancelada"
+      },
+      "confirm_button": "Iniciar importación",
+      "confirm_description": "Esto reemplazará todos los datos de chat existentes con los datos de la copia de seguridad de Cherry Studio. Esta acción no se puede deshacer.",
+      "confirm_title": "Confirmar importación",
+      "confirm_warning": "Advertencia: Todas las conversaciones y mensajes actuales serán reemplazados.",
+      "description": "Importar conversaciones, mensajes y archivos adjuntos desde un archivo de copia de seguridad ZIP de Cherry Studio. Esto reemplazará todos los datos de chat existentes.",
+      "error": {
+        "title": "Error de importación",
+        "unknown": "La importación falló. Verifique el formato del archivo ZIP e intente de nuevo."
+      },
+      "phase": {
+        "cancelled": "La importación fue cancelada",
+        "discovering": "Descubriendo estructura de la base de datos...",
+        "error": "La importación falló",
+        "extracting": "Extrayendo archivo ZIP...",
+        "idle": "Listo para importar",
+        "processing": "Procesando y validando datos...",
+        "promoting": "Aplicando importación (reemplazando datos)...",
+        "reading": "Leyendo datos de chat...",
+        "success": "¡Importación completada exitosamente! La aplicación se reiniciará.",
+        "unsupported": "Plataforma no compatible"
+      },
+      "select_button": "Seleccionar archivo",
+      "select_file": "Seleccionar copia de seguridad ZIP de Cherry Studio",
+      "steps": {
+        "confirm": "Confirmar",
+        "import": "Importar",
+        "promote": "Aplicar",
+        "select": "Seleccionar archivo"
+      },
+      "success": {
+        "description": "Su copia de seguridad de Cherry Studio ha sido importada. La aplicación se reiniciará para aplicar los cambios.",
+        "title": "Importación exitosa"
+      },
+      "title": "Importar copia de seguridad ZIP de Cherry Studio",
+      "unsupported": {
+        "description": "La importación ZIP de Cherry Studio actualmente solo es compatible con macOS. Su plataforma actual aún no es compatible.",
+        "title": "Plataforma no compatible"
+      },
+      "warning": {
+        "description": "Esta importación reemplazará todos los datos de chat existentes. Asegúrese de tener una copia de seguridad de sus datos actuales si es necesario.",
+        "title": "Reemplazar todo"
+      }
+    },
     "confirm": {
       "button": "Seleccionar Archivo de Importación",
       "label": "¿Estás seguro de que quieres importar datos externos?"
@@ -4182,6 +4230,8 @@
       "import_settings": {
         "button": "Importar archivo Json",
         "chatgpt": "Importar desde ChatGPT",
+        "cherrystudio": "Importar desde ZIP de Cherry Studio",
+        "cherrystudio_button": "Importar copia de seguridad ZIP",
         "title": "Importar datos de aplicaciones externas"
       },
       "joplin": {

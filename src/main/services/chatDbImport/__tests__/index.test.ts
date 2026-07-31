@@ -157,6 +157,7 @@ import {
   startPromotionExecution,
   startPromotionPreparation,
   takeTerminalPromotionOwnership,
+  takeTerminalPromotionOwnershipIfMatches,
   transferPromotionExecution
 } from '../index'
 
@@ -3162,6 +3163,204 @@ describe('ChatImport index', () => {
       // Explicit release frees the slot.
       taken.ownership.handoff.capability.release()
       expect(coordinator.acquire('init', 'maintenance-probe').granted).toBe(true)
+    })
+
+    // -----------------------------------------------------------------------
+    // Phase 4.4.3 — takeTerminalPromotionOwnershipIfMatches (LOCK-6015/6018)
+    // -----------------------------------------------------------------------
+
+    itOnDarwin('TM1: returns not-available when no record exists', () => {
+      const result = takeTerminalPromotionOwnershipIfMatches('any-token')
+      expect(result.status).toBe('not-available')
+    })
+
+    itOnDarwin('TM2: match — promoted handoff is atomically taken and cleared', async () => {
+      const { session, handle } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({
+        ok: true,
+        handoff: {
+          sessionId: session.id,
+          candidateId: handle.capabilities[0].candidateId,
+          token: handle.capabilities[0].token,
+          receipt: { mock: 'receipt' },
+          retainedSnapshotPath: handle.capabilities[0].retainedSnapshotPath,
+          capability: handle.capabilities[0]
+        }
+      })
+      const outcome = await outcomePromise
+      expect(outcome.status).toBe('promoted')
+      if (outcome.status !== 'promoted') return
+
+      // Peek shows the record exists.
+      expect(getTerminalPromotionOwnership()?.kind).toBe('promoted')
+
+      // Identity-matched take succeeds.
+      const taken = takeTerminalPromotionOwnershipIfMatches(handle.capabilities[0].token)
+      expect(taken.status).toBe('taken')
+      if (taken.status !== 'taken') return
+      expect(taken.ownership.kind).toBe('promoted')
+      expect(taken.ownership.handoff).toBe(outcome.handoff)
+
+      // Cleared after take.
+      expect(getTerminalPromotionOwnership()).toBeNull()
+    })
+
+    itOnDarwin('TM3: mismatch — record belongs to different token, not consumed', async () => {
+      const { session, handle } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({
+        ok: true,
+        handoff: {
+          sessionId: session.id,
+          candidateId: handle.capabilities[0].candidateId,
+          token: handle.capabilities[0].token,
+          receipt: { mock: 'receipt' },
+          retainedSnapshotPath: handle.capabilities[0].retainedSnapshotPath,
+          capability: handle.capabilities[0]
+        }
+      })
+      await outcomePromise
+
+      // Peek shows the record exists.
+      expect(getTerminalPromotionOwnership()?.kind).toBe('promoted')
+
+      // Mismatched token returns 'mismatch' — record NOT consumed.
+      const mismatch = takeTerminalPromotionOwnershipIfMatches('wrong-token')
+      expect(mismatch.status).toBe('mismatch')
+
+      // Record still exists (not consumed).
+      expect(getTerminalPromotionOwnership()?.kind).toBe('promoted')
+    })
+
+    itOnDarwin('TM4: exact-once — second match returns not-available', async () => {
+      const { session, handle } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({
+        ok: true,
+        handoff: {
+          sessionId: session.id,
+          candidateId: handle.capabilities[0].candidateId,
+          token: handle.capabilities[0].token,
+          receipt: { mock: 'receipt' },
+          retainedSnapshotPath: handle.capabilities[0].retainedSnapshotPath,
+          capability: handle.capabilities[0]
+        }
+      })
+      await outcomePromise
+
+      // First match takes.
+      const first = takeTerminalPromotionOwnershipIfMatches(handle.capabilities[0].token)
+      expect(first.status).toBe('taken')
+
+      // Second match returns not-available (exact-once).
+      const second = takeTerminalPromotionOwnershipIfMatches(handle.capabilities[0].token)
+      expect(second.status).toBe('not-available')
+    })
+
+    itOnDarwin('TM5: recovery-required handoff identity match', async () => {
+      await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({ ok: false, failure: POST_INSTALL_FAILURE })
+      const outcome = await outcomePromise
+      expect(outcome.status).toBe('promotion-failed')
+      if (outcome.status !== 'promotion-failed') return
+      expect(outcome.recoveryHandoff).not.toBeNull()
+
+      // Peek shows the record.
+      expect(getTerminalPromotionOwnership()?.kind).toBe('recovery-required')
+
+      // Identity-matched take succeeds.
+      const taken = takeTerminalPromotionOwnershipIfMatches(outcome.recoveryHandoff!.token)
+      expect(taken.status).toBe('taken')
+      if (taken.status !== 'taken') return
+      expect(taken.ownership.kind).toBe('recovery-required')
+      expect(taken.ownership.handoff).toBe(outcome.recoveryHandoff)
+
+      // Cleared after take.
+      expect(getTerminalPromotionOwnership()).toBeNull()
+    })
+
+    itOnDarwin('TM6: recovery-required identity mismatch — B record untouched', async () => {
+      // Session A: post-install failure sets recovery-required ownership.
+      const { session: sessionA } = await toPrepared()
+      const { executor: execA, resolveRun: resolveA } = makeExecutorDouble()
+      const { options: optionsA } = makeExecOptions(execA)
+
+      const outcomeA = startPromotionExecution(optionsA)
+      resolveA({ ok: false, failure: POST_INSTALL_FAILURE })
+      const resultA = await outcomeA
+      expect(resultA.status).toBe('promotion-failed')
+      if (resultA.status !== 'promotion-failed') return
+
+      const tokenA = resultA.recoveryHandoff!.token
+
+      // Simulate: A's ownership was consumed (e.g., by recovery executor).
+      const taken = takeTerminalPromotionOwnership()
+      expect(taken.status).toBe('taken')
+
+      // Dispose session A so a new session can start.
+      await sessionA.dispose()
+      disposeActiveImport()
+      resetTerminalPromotionOwnershipForTests()
+
+      // Session B: promoted sets new ownership.
+      const { session: sessionB, handle: handleB } = await toPrepared()
+      const { executor: execB, resolveRun: resolveB } = makeExecutorDouble()
+      const { options: optionsB } = makeExecOptions(execB)
+
+      const outcomeB = startPromotionExecution(optionsB)
+      resolveB({
+        ok: true,
+        handoff: {
+          sessionId: sessionB.id,
+          candidateId: handleB.capabilities[0].candidateId,
+          token: handleB.capabilities[0].token,
+          receipt: { mock: 'receipt' },
+          retainedSnapshotPath: handleB.capabilities[0].retainedSnapshotPath,
+          capability: handleB.capabilities[0]
+        }
+      })
+      const resultB = await outcomeB
+      expect(resultB.status).toBe('promoted')
+      if (resultB.status !== 'promoted') return
+
+      // A tries to take with its own token — mismatch (B's record).
+      const mismatchResult = takeTerminalPromotionOwnershipIfMatches(tokenA)
+      expect(mismatchResult.status).toBe('mismatch')
+
+      // B's record is still intact.
+      expect(getTerminalPromotionOwnership()?.kind).toBe('promoted')
+    })
+
+    itOnDarwin('TM7: not-available after consumption by takeTerminalPromotionOwnership', async () => {
+      const { handle } = await toPrepared()
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+
+      const outcomePromise = startPromotionExecution(options)
+      resolveRun({ ok: false, failure: POST_INSTALL_FAILURE })
+      await outcomePromise
+
+      // Consume via the global take API (simulates recovery executor).
+      const consumed = takeTerminalPromotionOwnership()
+      expect(consumed.status).toBe('taken')
+
+      // Identity-matched take returns not-available (already consumed).
+      const result = takeTerminalPromotionOwnershipIfMatches(handle.capabilities[0].token)
+      expect(result.status).toBe('not-available')
     })
   })
 })

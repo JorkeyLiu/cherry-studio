@@ -169,3 +169,80 @@ export interface ImportErrorPayload {
   /** Human-readable message (sanitised). */
   message: string
 }
+
+// ---------------------------------------------------------------------------
+// L2 Cherry Studio ZIP import control (Phase 6.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Platform support result for the L2 import control IPC.
+ */
+export interface CherryImportPlatformSupport {
+  /** True if the current platform supports import (macOS only). */
+  supported: boolean
+  /** The current process.platform value. */
+  platform: string
+}
+
+/**
+ * L2 import state — semantic superset of the Phase 4 ImportState,
+ * mapped for renderer consumption. No filesystem paths.
+ */
+export type CherryImportUIState =
+  | 'idle'
+  | 'intake'
+  | 'discovering'
+  | 'reading'
+  | 'candidate-ready'
+  | 'verifying'
+  | 'verified-candidate'
+  | 'verification-failed'
+  | 'promoting'
+  | 'finalizing'
+  | 'promoted'
+  | 'promotion-failed'
+  | 'cancelled'
+  | 'error'
+
+/**
+ * Status event emitted from Main → renderer when the L2 import
+ * state changes. Carries no filesystem paths or SQL.
+ */
+export interface CherryImportStatusEvent {
+  /** Import session identifier. */
+  sessionId: string
+  /** Current UI-mapped import state. */
+  state: CherryImportUIState
+  /** Sanitised error message for terminal failure states. */
+  error?: string
+  /** Candidate construction stats (available after candidate-ready). */
+  stats?: CandidateImportStats
+}
+
+// ---------------------------------------------------------------------------
+// Shared typed IPC command results (LOCK-6005)
+// ---------------------------------------------------------------------------
+
+/**
+ * Bounded start command result crossing the IPC boundary.
+ * Typed — not an anonymous object literal.
+ */
+export interface CherryImportStartResult {
+  /** Whether the start command succeeded. */
+  readonly ok: boolean
+  /** Sanitised error message (never raw error.message). */
+  readonly error?: string
+  /** Session identifier — present only on success. */
+  readonly sessionId?: string
+}
+
+/**
+ * Bounded cancel command result crossing the IPC boundary.
+ * Typed — not an anonymous object literal.
+ */
+export interface CherryImportCancelResult {
+  /** Whether the cancel command succeeded. */
+  readonly ok: boolean
+  /** Sanitised error message (never raw error.message). */
+  readonly error?: string
+}

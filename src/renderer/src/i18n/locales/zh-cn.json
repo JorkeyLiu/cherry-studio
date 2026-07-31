@@ -2016,6 +2016,54 @@
       "title": "导入 ChatGPT 对话",
       "untitled_conversation": "未命名对话"
     },
+    "cherrystudio": {
+      "cancelled": {
+        "description": "导入已取消。未对您的数据进行任何更改。",
+        "title": "导入已取消"
+      },
+      "confirm_button": "开始导入",
+      "confirm_description": "这将用 Cherry Studio 备份中的数据替换所有现有聊天数据。此操作无法撤销。",
+      "confirm_title": "确认导入",
+      "confirm_warning": "警告：所有当前对话和消息将被替换。",
+      "description": "从 Cherry Studio ZIP 备份文件导入对话、消息和附件。这将替换所有现有聊天数据。",
+      "error": {
+        "title": "导入错误",
+        "unknown": "导入失败。请检查 ZIP 文件格式后重试。"
+      },
+      "phase": {
+        "cancelled": "导入已取消",
+        "discovering": "正在发现数据库结构...",
+        "error": "导入失败",
+        "extracting": "正在解压 ZIP 文件...",
+        "idle": "准备导入",
+        "processing": "正在处理和验证数据...",
+        "promoting": "正在应用导入（替换数据）...",
+        "reading": "正在读取聊天数据...",
+        "success": "导入成功完成！应用将重启。",
+        "unsupported": "平台不支持"
+      },
+      "select_button": "选择文件",
+      "select_file": "选择 Cherry Studio ZIP 备份",
+      "steps": {
+        "confirm": "确认",
+        "import": "导入",
+        "promote": "应用",
+        "select": "选择文件"
+      },
+      "success": {
+        "description": "您的 Cherry Studio 备份已导入。应用将重启以应用更改。",
+        "title": "导入成功"
+      },
+      "title": "导入 Cherry Studio ZIP 备份",
+      "unsupported": {
+        "description": "Cherry Studio ZIP 导入目前仅在 macOS 上支持。您当前的平台暂不支持。",
+        "title": "平台不支持"
+      },
+      "warning": {
+        "description": "此导入将替换所有现有聊天数据。如果需要，请确保已备份当前数据。",
+        "title": "全部替换"
+      }
+    },
     "confirm": {
       "button": "选择导入文件",
       "label": "确定要导入外部数据吗？"
@@ -4182,6 +4230,8 @@
       "import_settings": {
         "button": "导入文件",
         "chatgpt": "导入 ChatGPT 数据",
+        "cherrystudio": "从 Cherry Studio ZIP 导入",
+        "cherrystudio_button": "导入 ZIP 备份",
         "title": "导入外部应用数据"
       },
       "joplin": {
