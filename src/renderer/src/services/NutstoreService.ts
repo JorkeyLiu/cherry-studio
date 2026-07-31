@@ -7,8 +7,6 @@ import { NUTSTORE_HOST } from '@shared/config/nutstore'
 import dayjs from 'dayjs'
 import { type CreateDirectoryOptions } from 'webdav'
 
-import { handleData } from './BackupService'
-
 const logger = loggerService.withContext('NutstoreService')
 
 function getNutstoreToken() {
@@ -173,7 +171,7 @@ export async function backupToNutstore({
   }
 }
 
-export async function restoreFromNutstore(fileName?: string) {
+export async function restoreFromNutstore(fileName?: string): Promise<void> {
   const nutstoreToken = getNutstoreToken()
   if (!nutstoreToken) {
     return
@@ -184,24 +182,11 @@ export async function restoreFromNutstore(fileName?: string) {
     return
   }
 
-  let data = ''
-
-  try {
-    data = await window.api.backup.restoreFromWebdav({ ...config, fileName })
-  } catch (error: any) {
-    logger.error('[backup] restoreFromWebdav: Error downloading file from WebDAV:', error as Error)
-    window.modal.error({
-      title: i18n.t('message.restore.failed'),
-      content: error.message
-    })
-  }
-
-  try {
-    await handleData(JSON.parse(data))
-  } catch (error) {
-    logger.error('[backup] Error downloading file from WebDAV:', error as Error)
-    window.toast.error(i18n.t('error.backup.file_format'))
-  }
+  // LOCK-6006/6009: All L3 restore is void direct archive restore.
+  // restoreFromWebdav returns void for direct L3 backups (app relaunches)
+  // or throws for errors. No data.json/.bak logical payload.
+  // LOCK-6027: Failures propagate — callers must not see success-after-error.
+  await window.api.backup.restoreFromWebdav({ ...config, fileName })
 }
 
 export async function startNutstoreAutoSync() {

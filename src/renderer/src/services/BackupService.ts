@@ -1,6 +1,5 @@
 import { loggerService } from '@logger'
 import db from '@renderer/databases'
-import { upgradeToV7, upgradeToV8 } from '@renderer/databases/upgrades'
 import i18n from '@renderer/i18n'
 import store from '@renderer/store'
 import { setLocalBackupSyncState, setS3SyncState, setWebDAVSyncState } from '@renderer/store/backup'
@@ -74,40 +73,19 @@ export async function backup(skipBackupFile: boolean) {
 
 export async function restore() {
   const notificationService = NotificationService.getInstance()
-  const file = await window.api.file.open({ filters: [{ name: '备份文件', extensions: ['bak', 'zip'] }] })
+  // LOCK-6009: Only accept .zip L3 archives. .bak logical restore is no
+  // longer supported from any user-facing restore path.
+  const file = await window.api.file.open({ filters: [{ name: '备份文件', extensions: ['zip'] }] })
 
   if (file) {
     try {
-      // zip backup file
-      if (file?.fileName.endsWith('.zip')) {
-        const restoreData = await window.api.backup.restore(file.filePath)
+      // LOCK-6009/6006: All L3 restore is void direct archive restore.
+      // BackupManager.restore() returns void on success (app relaunches)
+      // or throws on failure. No data.json/.bak logical payload.
+      await window.api.backup.restore(file.filePath)
 
-        // Direct backup format returns void (app needs to relaunch)
-        // Legacy format returns JSON string that needs to be processed
-        if (restoreData !== undefined && restoreData !== null) {
-          const data = JSON.parse(restoreData)
-          await handleData(data)
-        } else {
-          // Direct backup was restored, app will relaunch
-          void notificationService.send({
-            id: uuid(),
-            type: 'success',
-            title: i18n.t('common.success'),
-            message: i18n.t('message.restore.success'),
-            silent: false,
-            timestamp: Date.now(),
-            source: 'backup',
-            channel: 'system'
-          })
-          // App will relaunch automatically
-          return
-        }
-      } else {
-        // Legacy .bak format
-        const data = JSON.parse(await window.api.zip.decompress(file.content))
-        await handleData(data)
-      }
-
+      // Direct backup was restored — app will relaunch automatically.
+      // Notify on success before relaunch.
       void notificationService.send({
         id: uuid(),
         type: 'success',
@@ -320,34 +298,14 @@ export async function backupToWebdav({
 }
 
 // 从 webdav 恢复
-export async function restoreFromWebdav(fileName?: string) {
+export async function restoreFromWebdav(fileName?: string): Promise<void> {
   const { webdavHost, webdavUser, webdavPass, webdavPath } = store.getState().settings
-  let data = ''
 
-  try {
-    data = await window.api.backup.restoreFromWebdav({ webdavHost, webdavUser, webdavPass, webdavPath, fileName })
-  } catch (error: any) {
-    logger.error('[Backup] restoreFromWebdav: Error downloading file from WebDAV:', error)
-    window.modal.error({
-      title: i18n.t('message.restore.failed'),
-      content: error.message
-    })
-    return
-  }
-
-  // Direct backup format (version 6+) returns undefined - app needs to relaunch
-  if (!data) {
-    logger.info('[WebDAVBackup] Direct backup restored, app will restart')
-    return
-  }
-
-  // Legacy backup format (version <= 5) returns JSON string
-  try {
-    await handleData(JSON.parse(data))
-  } catch (error) {
-    logger.error('[Backup] Error downloading file from WebDAV:', error as Error)
-    window.toast.error(i18n.t('error.backup.file_format'))
-  }
+  // LOCK-6009/6006: All L3 restore is void direct archive restore.
+  // restoreFromWebdav returns void for direct L3 backups (app relaunches)
+  // or throws for errors. No data.json/.bak logical payload.
+  // LOCK-6027: Failures propagate — callers must not see success-after-error.
+  await window.api.backup.restoreFromWebdav({ webdavHost, webdavUser, webdavPass, webdavPath, fileName })
 }
 
 export async function backupToS3({
@@ -483,7 +441,7 @@ export async function backupToS3({
 }
 
 // 从 S3 恢复
-export async function restoreFromS3(fileName?: string) {
+export async function restoreFromS3(fileName?: string): Promise<void> {
   const s3Config = store.getState().settings.s3
 
   if (!fileName) {
@@ -494,20 +452,14 @@ export async function restoreFromS3(fileName?: string) {
   }
 
   if (fileName) {
-    const restoreData = await window.api.backup.restoreFromS3({
+    // LOCK-6009/6006: All L3 restore is void direct archive restore.
+    // restoreFromS3 returns void for direct L3 backups (app relaunches)
+    // or throws for errors. No data.json/.bak logical payload.
+    // LOCK-6027: Failures propagate — callers must not see success-after-error.
+    await window.api.backup.restoreFromS3({
       ...s3Config,
       fileName
     })
-
-    // Direct backup format (version 6+) returns undefined - app needs to relaunch
-    if (!restoreData) {
-      logger.info('[S3Backup] Direct backup restored, app will restart')
-      return
-    }
-
-    // Legacy backup format (version <= 5) returns JSON string
-    const data = JSON.parse(restoreData)
-    await handleData(data)
   }
 }
 
@@ -868,86 +820,7 @@ export function stopAutoSync(type?: BackupType) {
   }
 }
 
-export async function getBackupData() {
-  return JSON.stringify({
-    time: new Date().getTime(),
-    version: 5,
-    localStorage,
-    indexedDB: await backupDatabase()
-  })
-}
-
 /************************************* Backup Utils ************************************** */
-export async function handleData(data: Record<string, any>) {
-  if (data.version === 1) {
-    await clearDatabase()
-
-    for (const { key, value } of data.indexedDB) {
-      if (key.startsWith('topic:')) {
-        await db.table('topics').add({ id: value.id, messages: value.messages })
-      }
-      if (key === 'image://avatar') {
-        await db.table('settings').add({ id: key, value })
-      }
-    }
-
-    localStorage.setItem('persist:cherry-studio', data.localStorage['persist:cherry-studio'])
-    window.toast.success(i18n.t('message.restore.success'))
-    setTimeout(() => window.api.relaunchApp(), 1000)
-    return
-  }
-
-  if (data.version >= 2) {
-    localStorage.setItem('persist:cherry-studio', data.localStorage['persist:cherry-studio'])
-
-    // remove notes_tree from indexedDB
-    if (data.indexedDB['notes_tree']) {
-      delete data.indexedDB['notes_tree']
-    }
-
-    await restoreDatabase(data.indexedDB)
-
-    if (data.version === 3) {
-      await db.transaction('rw', db.tables, async (tx) => {
-        await db.table('message_blocks').clear()
-        await upgradeToV7(tx)
-      })
-    }
-
-    if (data.version === 4) {
-      await db.transaction('rw', db.tables, async (tx) => {
-        await upgradeToV8(tx)
-      })
-    }
-
-    window.toast.success(i18n.t('message.restore.success'))
-    setTimeout(() => window.api.relaunchApp(), 1000)
-    return
-  }
-
-  window.toast.error(i18n.t('error.backup.file_format'))
-}
-
-async function backupDatabase() {
-  const tables = db.tables
-  const backup = {}
-
-  for (const table of tables) {
-    backup[table.name] = await table.toArray()
-  }
-
-  return backup
-}
-
-async function restoreDatabase(backup: Record<string, any>) {
-  await db.transaction('rw', db.tables, async () => {
-    for (const tableName in backup) {
-      await db.table(tableName).clear()
-      await db.table(tableName).bulkAdd(backup[tableName])
-    }
-  })
-}
-
 async function clearDatabase() {
   const storeNames = db.tables.map((table) => table.name)
 
@@ -1110,26 +983,12 @@ export async function backupToLocal({
   }
 }
 
-export async function restoreFromLocal(fileName: string) {
-  try {
-    const { localBackupDir: localBackupDirSetting } = store.getState().settings
-    const localBackupDir = await window.api.resolvePath(localBackupDirSetting)
-    const restoreData = await window.api.backup.restoreFromLocalBackup(fileName, localBackupDir)
-
-    // Direct backup format (version 6+) returns undefined - app needs to relaunch
-    if (!restoreData) {
-      logger.info('[LocalBackup] Direct backup restored, app will restart')
-      return true
-    }
-
-    // Legacy backup format (version <= 5) returns JSON string
-    const data = JSON.parse(restoreData)
-    await handleData(data)
-
-    return true
-  } catch (error) {
-    logger.error('[LocalBackup] Restore failed:', error as Error)
-    window.toast.error(i18n.t('error.backup.file_format'))
-    throw error
-  }
+export async function restoreFromLocal(fileName: string): Promise<void> {
+  const { localBackupDir: localBackupDirSetting } = store.getState().settings
+  const localBackupDir = await window.api.resolvePath(localBackupDirSetting)
+  // LOCK-6009/6006: All L3 restore is void direct archive restore.
+  // restoreFromLocalBackup returns void for direct L3 backups (app relaunches)
+  // or throws for errors. No data.json/.bak logical payload.
+  // LOCK-6027: Failures propagate — callers must not see success-after-error.
+  await window.api.backup.restoreFromLocalBackup(fileName, localBackupDir)
 }

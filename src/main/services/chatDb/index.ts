@@ -746,7 +746,7 @@ class ChatDbService {
       throw new Error('ChatDbService has not been initialised. Call init() first.')
     }
     const adapter = new BetterSqlite3BackupAdapter(() => this.getSqlite())
-    return new ChatDbBackup(adapter, this.dbDir)
+    return new ChatDbBackup(adapter)
   }
 }
 

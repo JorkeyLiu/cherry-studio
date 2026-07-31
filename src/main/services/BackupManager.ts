@@ -14,7 +14,9 @@
  * - v2 Refactor PR   : https://github.com/CherryHQ/cherry-studio/pull/10162
  * --------------------------------------------------------------------------
  */
-import type { Stats } from 'node:fs'
+import { type Stats } from 'node:fs'
+import { createWriteStream } from 'node:fs'
+import { finished } from 'node:stream/promises'
 
 import { loggerService } from '@logger'
 import { IpcChannel } from '@shared/IpcChannel'
@@ -30,12 +32,392 @@ import type { CreateDirectoryOptions, FileStat } from 'webdav'
 import { getDataPath } from '../utils'
 import { isPathInside, resolveAndValidatePath } from '../utils/file'
 import { chatDbService } from './chatDb'
+import { createL3ArchiveMetadata, type L3ArchiveMetadata, validateL3ArchiveMetadata } from './chatDb/l3ArchiveMetadata'
 import { getSharedMaintenanceCoordinator, withMaintenanceLease } from './chatDb/maintenanceCoordination'
+import { validateReadonlyChatDb } from './chatDbImport/promotion/readonlyDbValidation'
 import S3Storage from './S3Storage'
 import WebDav from './WebDav'
 import { windowService } from './WindowService'
+import { sanitizeProviderFilename, validateRestoreZipEntries } from './zipSecurityValidation'
 
 const logger = loggerService.withContext('BackupManager')
+
+// ---------------------------------------------------------------------------
+// LOCK-6012: Local backup fileName validation
+//
+// User-selected local backup fileName is untrusted. It must be a single
+// safe basename — no path separators, no traversal, no symlinks, and the
+// final output path must resolve canonically under the destination.
+// ---------------------------------------------------------------------------
+
+/** Maximum length for a local backup file name (reasonable filesystem limit). */
+const MAX_BACKUP_FILENAME_LENGTH = 255
+
+/**
+ * Validate that a user-selected local backup fileName is a single safe
+ * basename suitable for use with path.join(destination, fileName).
+ *
+ * LOCK-6012: Rejects traversal (../), absolute paths, path separators,
+ * NUL bytes, and other dangerous characters.
+ *
+ * @param fileName  User-selected backup file name.
+ * @param destDir   The destination directory (for containment check).
+ * @returns         The validated basename (may differ from input after trimming).
+ * @throws          Error if the fileName is unsafe.
+ */
+function validateLocalBackupFileName(fileName: string, destDir: string): string {
+  if (!fileName || typeof fileName !== 'string') {
+    throw new Error(
+      '[backup] Backup file name is empty or invalid. ' +
+        'LOCK-6012: A valid file name is required for safe output containment.'
+    )
+  }
+
+  // Strip any directory components — we only want the basename
+  let safeName = path.basename(fileName)
+
+  // Remove NUL bytes
+  // oxlint-disable-next-line no-control-regex -- Intentional: sanitizing NUL bytes from filenames
+  safeName = safeName.replace(/\x00/g, '')
+
+  // Trim leading/trailing dots and spaces (Windows reserved)
+  safeName = safeName.replace(/^[.\s]+|[.\s]+$/g, '')
+
+  // Collapse any ".." sequences that might have survived basename extraction
+  safeName = safeName.replace(/\.\./g, '__')
+
+  // Remove characters that are problematic across platforms
+  // oxlint-disable-next-line no-control-regex -- Intentional: sanitizing control chars from filenames
+  safeName = safeName.replace(/[<>:"|?*\x00-\x1f]/g, '_')
+
+  // Fallback if everything was stripped
+  if (!safeName || safeName.length === 0) {
+    safeName = `cherry-studio-backup-${Date.now()}.zip`
+  }
+
+  // Enforce length limit
+  if (safeName.length > MAX_BACKUP_FILENAME_LENGTH) {
+    safeName = safeName.slice(0, MAX_BACKUP_FILENAME_LENGTH)
+  }
+
+  // Final containment check: must be a single path segment
+  if (safeName.includes('/') || safeName.includes('\\') || safeName === '..' || safeName === '.') {
+    throw new Error(
+      `[backup] Backup file name cannot be safely sanitized: "${fileName}". ` +
+        `Owned destination: "${destDir}". Use a generated file name instead.`
+    )
+  }
+
+  return safeName
+}
+
+// ---------------------------------------------------------------------------
+// LOCK-6012/6028: Local backup directory canonical/symlink validation
+//
+// User-selected local backup directories are untrusted. Every component of
+// the path must be validated without following symlinks. Symlinks are
+// REJECTED unless they match an exact, evidence-backed macOS system alias.
+// After validation, the canonical (realpath-resolved) path is returned for
+// safe use.
+//
+// This prevents:
+// - Symlinked parent directories redirecting writes to attacker-controlled
+//   locations
+// - Canonical escape via symlink chains
+// - TOCTOU races via immediate revalidation before critical operations
+// ---------------------------------------------------------------------------
+
+// LOCK-6028: Only exact OS-owned aliases needed for normal paths are permitted.
+// Arbitrary symlinks are always rejected. These are the APFS boot-level symlinks
+// that macOS creates at startup. The mapping is exact: source must be the full
+// path (e.g. "/var") and target must be the full canonical path (e.g. "/private/var").
+// On non-macOS platforms this map is empty — no symlinks are ever permitted.
+const KNOWN_SYSTEM_ALIASES: ReadonlyMap<string, string> =
+  process.platform === 'darwin'
+    ? new Map([
+        ['/var', '/private/var'],
+        ['/tmp', '/private/tmp'],
+        ['/etc', '/private/etc'],
+        ['/usr', '/private/usr']
+      ])
+    : new Map()
+
+interface LocalBackupDestinationIdentity {
+  readonly inputPath: string
+  readonly canonicalPath: string
+  readonly dev: number
+  readonly ino: number
+  readonly components: readonly LocalBackupComponentIdentity[]
+}
+
+interface LocalBackupComponentIdentity {
+  readonly path: string
+  readonly dev: number
+  readonly ino: number
+}
+
+interface LocalBackupDirectoryWalk {
+  readonly resolvedPath: string
+  readonly canonicalPath: string
+  readonly exists: boolean
+  readonly components: readonly LocalBackupComponentIdentity[]
+}
+
+// ---------------------------------------------------------------------------
+// LOCK-6034/6035/6036: Workspace identity tracking and safe cleanup
+//
+// After mkdtemp creates a publication workspace, we record its dev/ino
+// identity. Before cleanup, we revalidate both the full destination chain
+// AND the workspace identity. Cleanup only proceeds if both still match.
+// This prevents fs.remove(publicationWorkspace) from recursively deleting
+// a replacement pathname after an ancestor/workspace swap.
+//
+// LOCK-6036: The residual TOCTOU between final validation and the actual
+// syscall (fs.remove) is documented and accepted because Node lacks
+// openat/linkat descriptor-relative APIs. We do not claim complete
+// elimination of this race.
+// ---------------------------------------------------------------------------
+
+interface WorkspaceIdentity {
+  readonly workspacePath: string
+  readonly dev: number
+  readonly ino: number
+}
+
+/**
+ * LOCK-6034: Capture workspace identity (dev/ino) immediately after mkdtemp.
+ * Uses no-follow lstat to record the actual directory inode, not a symlink target.
+ */
+async function captureWorkspaceIdentity(workspacePath: string): Promise<WorkspaceIdentity> {
+  const stat = await fs.lstat(workspacePath)
+  if (!stat.isDirectory()) {
+    throw new Error(
+      `[backup] Workspace path "${workspacePath}" is not a directory. ` +
+        'LOCK-6034: Publication workspace must be a real directory.'
+    )
+  }
+  return { workspacePath, dev: stat.dev, ino: stat.ino }
+}
+
+/**
+ * LOCK-6034: Identity-checked workspace cleanup.
+ *
+ * Before recursive removal, rewalks the full accepted destination identity
+ * and lstat's the workspace. Only removes if BOTH:
+ *   1. The destination chain still matches the accepted identity (no ancestor swap)
+ *   2. The workspace dev/ino still match (no replacement by file/dir/symlink)
+ *
+ * On mismatch: skips cleanup, logs a safe path-free warning, leaves orphan.
+ *
+ * LOCK-6036: The TOCTOU between this validation and the fs.remove syscall
+ * is acknowledged and accepted — Node lacks descriptor-relative APIs
+ * (openat/linkat) that would eliminate it.
+ */
+async function safeCleanupWorkspace(
+  workspaceIdentity: WorkspaceIdentity,
+  acceptedDestination: LocalBackupDestinationIdentity,
+  context: string
+): Promise<void> {
+  try {
+    // Step 1: Revalidate the full destination chain identity
+    await revalidateLocalBackupDestination(acceptedDestination, `${context}/cleanup-destination`)
+
+    // Step 2: Revalidate workspace identity (dev/ino + still a directory)
+    const currentStat = await fs.lstat(workspaceIdentity.workspacePath)
+    if (
+      !currentStat.isDirectory() ||
+      currentStat.dev !== workspaceIdentity.dev ||
+      currentStat.ino !== workspaceIdentity.ino
+    ) {
+      // Workspace was replaced by file/dir/symlink or moved to different device
+      logger.warn(
+        `[safeCleanupWorkspace] Workspace identity changed — skipping cleanup to avoid deleting a ` +
+          'replacement object. Orphan left at workspace path. ' +
+          'LOCK-6034: This prevents deletion of a replacement file/dir/symlink.'
+      )
+      return
+    }
+
+    // Step 3: Identity matches — safe to remove
+    // LOCK-6036: Residual TOCTOU acknowledged — between this point and
+    // the fs.remove syscall, a race could theoretically swap the workspace.
+    // Node lacks openat/linkat to eliminate this.
+    await fs.remove(workspaceIdentity.workspacePath)
+  } catch (error) {
+    // Any error during identity validation: skip cleanup, leave orphan
+    logger.warn(
+      `[safeCleanupWorkspace] ${context}: Identity check failed — skipping cleanup. ` +
+        'Orphan left at workspace path. ' +
+        'LOCK-6034: Identity mismatch prevents deletion. ' +
+        `Error: ${error instanceof Error ? error.message : String(error)}`
+    )
+  }
+}
+
+/** Walk every destination component with lstat, accepting only exact OS aliases. */
+async function walkLocalBackupDir(localBackupDir: string, allowMissing: boolean): Promise<LocalBackupDirectoryWalk> {
+  if (!localBackupDir || typeof localBackupDir !== 'string') {
+    throw new Error(
+      '[backup] Local backup directory is empty or invalid. ' +
+        'LOCK-6012: A valid directory path is required for safe local backup.'
+    )
+  }
+
+  const resolved = path.resolve(localBackupDir)
+
+  const root = path.parse(resolved).root
+  const parts = resolved.slice(root.length).split(path.sep).filter(Boolean)
+  let canonicalBase = root
+  const components: LocalBackupComponentIdentity[] = []
+
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index]
+    const current = path.join(canonicalBase, part)
+
+    try {
+      const lstatResult = await fs.lstat(current)
+      if (lstatResult.isSymbolicLink()) {
+        const target = await fs.realpath(current).catch(() => null)
+        if (!target) {
+          throw new Error(
+            `[backup] Path component "${current}" is a symlink that cannot be resolved. ` +
+              'LOCK-6012: Local backup directory must contain only resolvable paths.'
+          )
+        }
+
+        // LOCK-6028: Only accept if this exact source→target is a known OS alias.
+        const expectedTarget = KNOWN_SYSTEM_ALIASES.get(current)
+        if (expectedTarget === undefined || path.resolve(target) !== path.resolve(expectedTarget)) {
+          throw new Error(
+            `[backup] Path component "${current}" is a symlink pointing to "${target}". ` +
+              'LOCK-6028: Arbitrary symlinks are rejected. Only known OS system aliases ' +
+              '(e.g., /var→/private/var on macOS) are permitted. ' +
+              'Replace the symlink with a real directory.'
+          )
+        }
+
+        canonicalBase = path.resolve(target)
+      } else if (!lstatResult.isDirectory()) {
+        throw new Error(
+          `[backup] Path component "${current}" is not a directory (type: ${lstatResult.isFile() ? 'file' : 'other'}). ` +
+            'LOCK-6012: Every component of the local backup directory must be a real directory.'
+        )
+      } else {
+        canonicalBase = current
+      }
+      components.push({ path: current, dev: lstatResult.dev, ino: lstatResult.ino })
+    } catch (err) {
+      if (err instanceof Error && (err.message.includes('LOCK-6012') || err.message.includes('LOCK-6028'))) {
+        throw err
+      }
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT' && allowMissing) {
+        return {
+          resolvedPath: resolved,
+          canonicalPath: path.join(canonicalBase, ...parts.slice(index)),
+          exists: false,
+          components
+        }
+      }
+      throw new Error(
+        `[backup] Failed to inspect local backup path component "${current}": ${err instanceof Error ? err.message : String(err)}. ` +
+          'LOCK-6028: Every destination component must be revalidated without following symlinks.'
+      )
+    }
+  }
+
+  const realPath = path.resolve(await fs.realpath(resolved))
+  if (realPath !== path.resolve(canonicalBase)) {
+    throw new Error(
+      `[backup] Local backup directory "${localBackupDir}" resolves to "${realPath}", ` +
+        `but the no-follow component walk resolved to "${canonicalBase}". ` +
+        'LOCK-6012: Destination identity changed during validation.'
+    )
+  }
+
+  return { resolvedPath: resolved, canonicalPath: realPath, exists: true, components }
+}
+
+async function validateLocalBackupDir(localBackupDir: string): Promise<string> {
+  return (await walkLocalBackupDir(localBackupDir, true)).resolvedPath
+}
+
+async function captureLocalBackupDestination(localBackupDir: string): Promise<LocalBackupDestinationIdentity> {
+  const walked = await walkLocalBackupDir(localBackupDir, false)
+  const destinationStat = await fs.lstat(walked.canonicalPath)
+  if (destinationStat.isSymbolicLink() || !destinationStat.isDirectory()) {
+    throw new Error(
+      `[backup] Local backup destination "${walked.canonicalPath}" is not a real directory. ` +
+        'LOCK-6028: Refusing to capture an unstable destination identity.'
+    )
+  }
+  return {
+    inputPath: walked.resolvedPath,
+    canonicalPath: walked.canonicalPath,
+    dev: destinationStat.dev,
+    ino: destinationStat.ino,
+    components: walked.components
+  }
+}
+
+async function revalidateLocalBackupDestination(
+  accepted: LocalBackupDestinationIdentity,
+  context: string
+): Promise<void> {
+  const current = await captureLocalBackupDestination(accepted.inputPath)
+  const componentsMatch =
+    current.components.length === accepted.components.length &&
+    current.components.every(
+      (component, index) =>
+        component.path === accepted.components[index].path &&
+        component.dev === accepted.components[index].dev &&
+        component.ino === accepted.components[index].ino
+    )
+  if (
+    current.canonicalPath !== accepted.canonicalPath ||
+    current.dev !== accepted.dev ||
+    current.ino !== accepted.ino ||
+    !componentsMatch
+  ) {
+    throw new Error(
+      `[backup] ${context}: Local backup destination identity changed from ` +
+        `"${accepted.canonicalPath}" (${accepted.dev}:${accepted.ino}) to ` +
+        `"${current.canonicalPath}" (${current.dev}:${current.ino}). ` +
+        'LOCK-6012: Refusing publication after a destination or ancestor swap.'
+    )
+  }
+}
+
+async function revalidateParentDir(dirPath: string, context: string): Promise<void> {
+  const parentDir = path.dirname(dirPath)
+  try {
+    await walkLocalBackupDir(parentDir, false)
+  } catch (err) {
+    throw new Error(
+      `[backup] ${context}: Parent path "${parentDir}" failed full component revalidation. ` +
+        `LOCK-6012: ${err instanceof Error ? err.message : String(err)}${
+          err instanceof Error && err.message.includes('is a symlink') ? ' (became a symlink)' : ''
+        }`
+    )
+  }
+}
+
+/**
+ * Atomically publish a complete archive without clobbering a final file or
+ * symlink. The staged file is in the destination filesystem, so `link` is a
+ * same-filesystem atomic no-clobber operation. Unsupported filesystems fail
+ * publication without exposing a partial archive at the final path.
+ */
+async function publishLocalBackupArchive(
+  stagedArchivePath: string,
+  finalArchivePath: string,
+  acceptedDestination: LocalBackupDestinationIdentity
+): Promise<void> {
+  await revalidateLocalBackupDestination(acceptedDestination, 'publishLocalBackupArchive')
+  await fs.link(stagedArchivePath, finalArchivePath)
+  await fs.unlink(stagedArchivePath).catch((error) => {
+    logger.warn('[publishLocalBackupArchive] Published archive but could not unlink staging file', error as Error)
+  })
+}
 
 interface CopyDirOptions {
   dereferenceSymlinks: boolean
@@ -54,7 +436,6 @@ interface ProgressData {
 }
 
 class BackupManager {
-  private tempDir = path.join(app.getPath('temp'), 'cherry-studio', 'backup', 'temp')
   private backupDir = path.join(app.getPath('temp'), 'cherry-studio', 'backup')
 
   // Process-wide async mutex — serialises full backup operations across
@@ -151,6 +532,51 @@ class BackupManager {
         return
       }
 
+      // --- LOCK-6010: Phase 1 — Validate Data.chat.db preconditions BEFORE ---
+      // --- consuming any IndexedDB/Local Storage staging.                   ---
+      // If Data.restore exists but has no chat.db, the entire restore is
+      // aborted before any staging directory is consumed. This prevents
+      // stale .restore dirs from being accidentally consumed on a rejected
+      // restore and ensures retriable startup failures leave a safe state.
+      if (hasDataRestore) {
+        const restoredChatDbPath = path.join(dataRestore, DB_FILENAME)
+        const hasChatDb = await fs.pathExists(restoredChatDbPath)
+
+        if (!hasChatDb) {
+          // Data.restore exists but has no chat.db — abort before consuming any staging.
+          logger.error(
+            '[handleStartupRestore] Data.restore exists but chat.db is missing — aborting restore. ' +
+              'No staging directories consumed.'
+          )
+          throw new Error(
+            '[handleStartupRestore] Data.restore exists but does not contain chat.db. ' +
+              'LOCK-6008 requires every restore to include authoritative Data/chat.db. ' +
+              'No staging directories consumed — all .restore dirs retained for retry.'
+          )
+        }
+
+        // Create restore marker INSIDE Data.restore BEFORE replacing live Data.
+        // This ensures the marker is atomically present when the rename completes.
+        logger.info('[handleStartupRestore] Restored chat.db found — creating restore marker inside Data.restore')
+        const markerPath = path.join(dataRestore, RESTORE_MARKER_FILENAME)
+        try {
+          await fs.writeFile(markerPath, new Date().toISOString(), 'utf-8')
+        } catch (error) {
+          // Marker creation failure — abort before touching live Data.
+          // Do NOT swallow as a successful restore.
+          logger.error('[handleStartupRestore] Failed to create restore marker inside Data.restore:', error as Error)
+          throw new Error(
+            `Failed to create restore marker in Data.restore: ${error instanceof Error ? error.message : String(error)}. ` +
+              'Aborting restore — no staging directories consumed.'
+          )
+        }
+        logger.info('[handleStartupRestore] Restore marker created inside Data.restore')
+      }
+
+      // --- LOCK-6010: Phase 2 — Consume staging (only after Data.chat.db ---
+      // --- preconditions succeed). If Data.restore was absent, no Data     ---
+      // --- marker preconditions applied and staging can proceed.           ---
+
       // Restore IndexedDB
       if (hasIndexedDBRestore) {
         logger.info('[handleStartupRestore] Found IndexedDB.restore directories, completing restoration...')
@@ -165,36 +591,9 @@ class BackupManager {
         await fs.rename(localStorageRestore, localStorageDest)
       }
 
-      // Restore Data — Finding 1: staged marker creation
+      // Restore Data — marker already created inside Data.restore (Phase 1) if needed
       if (hasDataRestore) {
         logger.info('[handleStartupRestore] Found Data.restore directory, completing restoration...')
-
-        // --- Inspect Data.restore/chat.db BEFORE touching live Data ---
-        const restoredChatDbPath = path.join(dataRestore, DB_FILENAME)
-        const hasChatDb = await fs.pathExists(restoredChatDbPath)
-
-        if (hasChatDb) {
-          // Create restore marker INSIDE Data.restore BEFORE replacing live Data.
-          // This ensures the marker is atomically present when the rename completes.
-          logger.info('[handleStartupRestore] Restored chat.db found — creating restore marker inside Data.restore')
-          const markerPath = path.join(dataRestore, RESTORE_MARKER_FILENAME)
-          try {
-            await fs.writeFile(markerPath, new Date().toISOString(), 'utf-8')
-          } catch (error) {
-            // Marker creation failure — abort before touching live Data.
-            // Do NOT swallow as a successful restore.
-            logger.error('[handleStartupRestore] Failed to create restore marker inside Data.restore:', error as Error)
-            throw new Error(
-              `Failed to create restore marker in Data.restore: ${error instanceof Error ? error.message : String(error)}. ` +
-                'Aborting restore — live Data is not modified.'
-            )
-          }
-          logger.info('[handleStartupRestore] Restore marker created inside Data.restore')
-        } else {
-          logger.info('[handleStartupRestore] No chat.db in Data.restore — skipping restore marker')
-        }
-
-        // --- Replace live Data with staged Data (marker already inside if needed) ---
         await fs.remove(dataDest).catch(() => {})
         await fs.rename(dataRestore, dataDest)
       }
@@ -203,34 +602,17 @@ class BackupManager {
     } catch (error) {
       logger.error('[handleStartupRestore] Failed to complete restoration:', error as Error)
       // Do NOT delete staged restore directories on failure.
-      // dataRestore is retained for retry/diagnosis on next startup.
-      // indexedDBRestore/localStorageRestore may hold the only remaining
-      // copy of the user's data if their rename did not complete.
-      // Only narrow transient artifacts (none exist in this flow) would
-      // be safe to remove.
+      // All .restore dirs are retained for retry/diagnosis on next startup.
       throw error
     }
   }
 
   /**
-   * Backup metadata for direct backup format (version 6+)
+   * Backup metadata for direct backup format (version 7+ L3).
+   * LOCK-6004: New archives use a versioned discriminator with product/purpose.
    */
-  private createDirectBackupMetadata(): {
-    version: number
-    timestamp: number
-    appName: string
-    appVersion: string
-    platform: string
-    arch: string
-  } {
-    return {
-      version: 6,
-      timestamp: Date.now(),
-      appName: 'Cherry Studio',
-      appVersion: app.getVersion(),
-      platform: process.platform,
-      arch: process.arch
-    }
+  private createDirectBackupMetadata(): L3ArchiveMetadata {
+    return createL3ArchiveMetadata()
   }
 
   // Transient files that must NEVER appear in backup archives.
@@ -238,6 +620,95 @@ class BackupManager {
   // artifacts that are meaningless outside a running DB; .backup is a
   // transient snapshot staging file.
   private static readonly EXCLUDED_DATA_ENTRIES = new Set(['chat.db', 'chat.db-wal', 'chat.db-shm', 'chat.db.backup'])
+
+  // ---------------------------------------------------------------------------
+  // LOCK-6012/6013/6019: Stream lifecycle helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Await a Node.js stream's completion using `stream.finished`.
+   * Resolves when the stream has successfully finished (emitted 'finish' or 'end'),
+   * and rejects on error or premature close.
+   *
+   * LOCK-6013: Stream success/error paths settle closure before cleanup.
+   * LOCK-6019: Read streams must complete before upload source cleanup.
+   */
+  static async awaitStreamFinished(stream: NodeJS.ReadableStream | NodeJS.WritableStream): Promise<void> {
+    await finished(stream)
+  }
+
+  // ---------------------------------------------------------------------------
+  // LOCK-6012/6013: Exclusive temp root/file ownership helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Ensure the cherry-studio temp base directory exists before mkdtemp.
+   * LOCK-6013: Provider operation roots must exist before mkdtemp to
+   * prevent ENOENT on fresh installs.
+   *
+   * LOCK-6013/6012: After creation, verify the cherry-studio directory
+   * is NOT a symlink and resolves canonically under the OS temp root.
+   * A symlinked base could redirect extraction to an attacker-controlled
+   * directory. If the cherry-studio path is a symlink (race condition:
+   * attacker creates symlink between ensureDir calls), we REJECT it
+   * rather than removing it — removing a raced symlink could delete a
+   * legitimate directory that replaced it in the race window.
+   */
+  private static async ensureTempBase(): Promise<string> {
+    // LOCK-6012: Canonicalize the OS temp directory to resolve legitimate
+    // canonical aliases (e.g. /var → /private/var on macOS) while preserving
+    // symlink-escape defense.  fs.realpath on the parent gives us the true
+    // canonical root; we then build cherry-studio under it.
+    const rawTemp = app.getPath('temp')
+    await fs.ensureDir(rawTemp)
+    const canonicalTemp = await fs.realpath(rawTemp)
+    const basePath = path.join(canonicalTemp, 'cherry-studio')
+    await fs.ensureDir(basePath)
+
+    // LOCK-6013: Verify the cherry-studio directory is a real directory,
+    // not a symlink. An attacker could race-create a symlink at this path
+    // between ensureDir and our check.  We REJECT rather than remove —
+    // removing a symlink that was swapped for a real directory by a
+    // concurrent operation would delete the legitimate directory.
+    const baseLstat = await fs.lstat(basePath)
+    if (baseLstat.isSymbolicLink()) {
+      const target = await fs.realpath(basePath).catch(() => 'unknown')
+      throw new Error(
+        `[ensureTempBase] cherry-studio temp base "${basePath}" is a symlink pointing to "${target}". ` +
+          'LOCK-6013: Refusing to use a symlinked temp base. Remove the symlink manually if ' +
+          'it was created by a race condition.'
+      )
+    }
+
+    // Defense-in-depth: verify canonical containment
+    const realBasePath = await fs.realpath(basePath)
+    if (!realBasePath.startsWith(canonicalTemp + path.sep) && realBasePath !== canonicalTemp) {
+      throw new Error(
+        `[ensureTempBase] Temp base "${basePath}" resolves to "${realBasePath}" ` +
+          `which escapes canonical temp root "${canonicalTemp}". LOCK-6012: Refusing to use.`
+      )
+    }
+
+    return realBasePath
+  }
+
+  /**
+   * Create a WriteStream that atomically claims a file via O_CREAT|O_EXCL.
+   * LOCK-6012: Existing files/symlinks are never followed or truncated.
+   * On macOS/Linux, O_CREAT|O_EXCL fails with EEXIST if the path already
+   * exists or is a symlink — this prevents both truncation and symlink
+   * following. On Windows, the 'wx' flag achieves the same via
+   * CREATE_NEW disposition.
+   *
+   * Portability note: O_NOFOLLOW is not exposed as a Node.js flag constant.
+   * On macOS, O_EXCL alone rejects symlinks (POSIX semantics). On Linux,
+   * O_EXCL|O_CREAT also rejects symlinks. Windows CREATE_NEW does not
+   * follow symlinks for the final component. This is sufficient for all
+   * three platforms.
+   */
+  private static createExclusiveWriteStream(filePath: string): ReturnType<typeof createWriteStream> {
+    return createWriteStream(filePath, { flags: 'wx' })
+  }
 
   /**
    * Direct backup method — copies IndexedDB, Local Storage, and Data
@@ -272,18 +743,45 @@ class BackupManager {
   ): Promise<string> {
     // Serialise the entire backup operation across all entry points
     return BackupManager.withBackupMutex(async () => {
-      // Unique staging directory per backup operation — eliminates races
-      const stagingDir = path.join(
-        app.getPath('temp'),
-        'cherry-studio',
-        'backup',
-        `staging-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      )
+      // LOCK-6012: Validate destination directory for symlink-free path
+      // integrity. Every user-controlled local destination uses the same
+      // canonical validation and immediate revalidation (LOCK-6028).
+      const validatedDestDir = await validateLocalBackupDir(destinationPath)
+      await fs.ensureDir(validatedDestDir)
+      const acceptedDestination = await captureLocalBackupDestination(validatedDestDir)
+
+      // LOCK-6012: Validate fileName as a single safe basename before
+      // using it in path.join. Prevents traversal, absolute paths, and
+      // other dangerous characters from escaping the destination.
+      const validatedFileName = validateLocalBackupFileName(fileName, acceptedDestination.canonicalPath)
+
+      let stagingDir: string | undefined
+      let publicationWorkspace: string | undefined
+      let capturedWorkspaceIdentity: WorkspaceIdentity | undefined
 
       const onProgress = this.onProgress(IpcChannel.BackupProgress, true)
 
       try {
-        await fs.ensureDir(stagingDir)
+        // LOCK-6035: Revalidate full destination chain identity immediately
+        // before workspace creation (boundary 1 of 3). Prevents using a
+        // stale destination after an ancestor swap.
+        await revalidateLocalBackupDestination(acceptedDestination, 'backup-before-workspace-creation')
+
+        // LOCK-6029: Stream only to an exclusive operation workspace inside
+        // the accepted destination filesystem. The final name remains absent
+        // until complete stream close and atomic publication.
+        publicationWorkspace = await fs.mkdtemp(path.join(acceptedDestination.canonicalPath, '.cherry-studio-backup-'))
+
+        // LOCK-6034: Capture workspace identity (dev/ino) immediately after
+        // creation. Used by safeCleanupWorkspace to verify the workspace is
+        // still the same object before cleanup.
+        capturedWorkspaceIdentity = await captureWorkspaceIdentity(publicationWorkspace)
+
+        const stagedArchivePath = path.join(publicationWorkspace, 'archive.tmp')
+
+        const stagingBase = path.join(await BackupManager.ensureTempBase(), 'backup')
+        await fs.ensureDir(stagingBase)
+        stagingDir = await fs.mkdtemp(path.join(stagingBase, 'staging-'))
         onProgress({ stage: 'preparing', progress: 0, total: 100 })
 
         const userDataPath = app.getPath('userData')
@@ -316,70 +814,91 @@ class BackupManager {
         onProgress({ stage: 'copying_database', progress: 52, total: 100 })
 
         // Step 3: Create consistent chat.db snapshot and copy Data directory
+        // LOCK-6008: Every emitted L3 archive must contain authoritative
+        // Data/chat.db. Absent/unavailable DB makes backup fail before
+        // archive publication/upload.
+        const sourcePath = path.join(userDataPath, 'Data')
+        const liveDbPath = path.join(sourcePath, 'chat.db')
+
+        // LOCK-6008: Pre-flight — chat.db must exist for a valid L3 archive
+        const liveDbExists = await fs.pathExists(liveDbPath)
+        if (!liveDbExists) {
+          throw new Error(
+            '[backupDirect] Data/chat.db not found. ' +
+              'LOCK-6008 requires every L3 archive to contain authoritative Data/chat.db. ' +
+              'Backup aborted.'
+          )
+        }
+
+        // Data dir must exist (since chat.db exists inside it)
+        const stagedDataDir = path.join(stagingDir, 'Data')
+
+        // 3a: Create validated snapshot and stage it
+        if (!chatDbService.isInitialised()) {
+          throw new Error(
+            '[backupDirect] Live chat.db exists but ChatDbService is not initialised. ' +
+              'Cannot create consistent snapshot — backup aborted.'
+          )
+        }
+
+        logger.debug('[backupDirect] Creating validated chat.db snapshot...')
+        const chatDbBackup = chatDbService.getBackup()
+        const stagedDbPath = path.join(stagedDataDir, 'chat.db')
+
+        // Ensure staged Data/ exists before snapshot creation
+        await fs.ensureDir(stagedDataDir)
+
+        try {
+          await chatDbBackup.createSnapshot(stagedDbPath)
+          logger.debug('[backupDirect] Validated chat.db snapshot staged')
+        } catch (snapshotError) {
+          // Snapshot failure is FATAL — no raw-copy fallback
+          logger.error('[backupDirect] Chat DB snapshot creation FAILED', snapshotError as Error)
+          throw new Error(
+            `[backupDirect] chat.db snapshot failed: ${snapshotError instanceof Error ? snapshotError.message : String(snapshotError)}. ` +
+              'Backup aborted — raw copy of a live WAL database is not safe.'
+          )
+        }
+
+        // 3b: Copy remaining Data directory files (excluding chat.db/WAL/SHM/transient artifacts)
+        // SKIP when skipBackupFile=true — only chat.db is mandatory per LOCK-6008
         if (!skipBackupFile) {
-          const sourcePath = path.join(userDataPath, 'Data')
-          const stagedDataDir = path.join(stagingDir, 'Data')
+          logger.debug('[backupDirect] Copying Data directory (excluding live DB files)...')
+          const totalSize = await this.getDirSize(sourcePath, { dereferenceSymlinks: true })
 
-          if (await fs.pathExists(sourcePath)) {
-            const liveDbPath = path.join(sourcePath, 'chat.db')
-            const liveDbExists = await fs.pathExists(liveDbPath)
-
-            // 3a: If live chat.db exists, create a validated snapshot and stage it
-            if (liveDbExists) {
-              if (!chatDbService.isInitialised()) {
-                throw new Error(
-                  '[backupDirect] Live chat.db exists but ChatDbService is not initialised. ' +
-                    'Cannot create consistent snapshot — backup aborted.'
-                )
-              }
-
-              logger.debug('[backupDirect] Creating validated chat.db snapshot...')
-              const chatDbBackup = chatDbService.getBackup()
-              const stagedDbPath = path.join(stagedDataDir, 'chat.db')
-
-              // Ensure staged Data/ exists before snapshot creation
-              await fs.ensureDir(stagedDataDir)
-
-              try {
-                await chatDbBackup.createSnapshot(stagedDbPath)
-                logger.debug('[backupDirect] Validated chat.db snapshot staged')
-              } catch (snapshotError) {
-                // Snapshot failure is FATAL — no raw-copy fallback
-                logger.error('[backupDirect] Chat DB snapshot creation FAILED', snapshotError as Error)
-                throw new Error(
-                  `[backupDirect] chat.db snapshot failed: ${snapshotError instanceof Error ? snapshotError.message : String(snapshotError)}. ` +
-                    'Backup aborted — raw copy of a live WAL database is not safe.'
-                )
-              }
-            }
-
-            // 3b: Copy Data directory, EXCLUDING chat.db/WAL/SHM/transient artifacts
-            logger.debug('[backupDirect] Copying Data directory (excluding live DB files)...')
-            const totalSize = await this.getDirSize(sourcePath, { dereferenceSymlinks: true })
-
-            await this.copyDirWithProgressFiltered(
-              sourcePath,
-              stagedDataDir,
-              BackupManager.EXCLUDED_DATA_ENTRIES,
-              this.createCopyProgressHandler(totalSize, 52, 80, 'copying_files', onProgress),
-              { dereferenceSymlinks: true }
-            )
-          }
+          await this.copyDirWithProgressFiltered(
+            sourcePath,
+            stagedDataDir,
+            BackupManager.EXCLUDED_DATA_ENTRIES,
+            this.createCopyProgressHandler(totalSize, 52, 80, 'copying_files', onProgress),
+            { dereferenceSymlinks: true }
+          )
         } else {
-          logger.debug('[backupDirect] Skip the backup of the file')
-          await fs.promises.mkdir(path.join(stagingDir, 'Data'))
+          logger.debug('[backupDirect] skipBackupFile=true — chat.db snapshot included, other Data files skipped')
         }
 
         onProgress({ stage: 'compressing', progress: 80, total: 100 })
 
-        // Step 4: Create ZIP archive from staging directory
-        const backupedFilePath = path.join(destinationPath, fileName)
-        const output = fs.createWriteStream(backupedFilePath)
+        // LOCK-6035: Revalidate full destination chain identity immediately
+        // before staged archive open (boundary 2 of 3). Prevents writing to
+        // a workspace that is no longer under the accepted destination.
+        await revalidateLocalBackupDestination(acceptedDestination, 'backup-before-staged-archive-open')
+
+        // Step 4: Create the ZIP only at the operation-owned staging path.
+        // Preserve the user's accepted destination spelling (including the
+        // narrow macOS aliases) for the public return value and final path.
+        // The operation workspace remains under the canonical destination.
+        const backupedFilePath = path.join(validatedDestDir, validatedFileName)
+        const output = BackupManager.createExclusiveWriteStream(stagedArchivePath)
         const archive = archiver('zip', {
           zlib: { level: 1 },
           zip64: true
         })
 
+        // LOCK-6013: Use stream.finished to await writable completion before
+        // declaring the archive complete. This guarantees the output file is
+        // fully flushed and closed before any subsequent operations.
+        let archiveError: unknown = undefined
         await new Promise<void>((resolve, reject) => {
           // Settled flag prevents double resolve/reject when both
           // output error and archive error fire.
@@ -392,8 +911,27 @@ class BackupManager {
           }
 
           output.on('close', () => settle(resolve))
-          output.on('error', (err) => settle(() => reject(err)))
-          archive.on('error', (err) => settle(() => reject(err)))
+          output.on('error', (err) => {
+            // LOCK-6013: On output error, abort archive to prevent it from
+            // continuing to write to a broken pipe.
+            try {
+              archive.abort()
+            } catch {
+              /* best-effort — archive may already be finalised */
+            }
+            settle(() => reject(err))
+          })
+          archive.on('error', (err) => {
+            // LOCK-6013: On archive error, abort the archive and destroy
+            // the output to release the file descriptor before cleanup.
+            try {
+              archive.abort()
+            } catch {
+              /* best-effort — archive may already be finalised */
+            }
+            output.destroy(err instanceof Error ? err : new Error(String(err)))
+            settle(() => reject(err))
+          })
           archive.on('warning', (err: NodeJS.ErrnoException) => {
             if (err.code !== 'ENOENT') {
               logger.warn('[backupDirect] Archive warning:', err)
@@ -402,7 +940,24 @@ class BackupManager {
           archive.pipe(output)
           archive.directory(stagingDir, false)
           archive.finalize()
+        }).catch((err) => {
+          archiveError = err
         })
+
+        if (archiveError) {
+          // LOCK-6013: Await terminal settlement of output before path cleanup.
+          // output.destroy() was already called in the error handler.
+          await BackupManager.awaitStreamFinished(output).catch(() => {})
+          throw archiveError
+        }
+
+        // LOCK-6013: Explicitly await stream finished AFTER the Promise resolves
+        // to guarantee the writable stream's underlying file descriptor is closed.
+        await BackupManager.awaitStreamFinished(output)
+
+        // Full component no-follow rewalk and dev/ino identity match occurs
+        // immediately before same-filesystem atomic no-clobber publication.
+        await publishLocalBackupArchive(stagedArchivePath, backupedFilePath, acceptedDestination)
 
         onProgress({ stage: 'completed', progress: 100, total: 100 })
 
@@ -410,13 +965,25 @@ class BackupManager {
         return backupedFilePath
       } catch (error) {
         logger.error('[backupDirect] Backup failed:', error as Error)
-        // Clean up partial archive on failure
-        const archivePath = path.join(destinationPath, fileName)
-        await fs.remove(archivePath).catch(() => {})
         throw error
       } finally {
-        // Guarantee cleanup of the unique staging directory
-        await fs.remove(stagingDir).catch(() => {})
+        // Never remove by final pathname. Cleanup is restricted to exclusive,
+        // operation-owned workspaces.
+        if (stagingDir) {
+          await fs.remove(stagingDir).catch(() => {})
+        }
+        // LOCK-6034: Identity-checked workspace cleanup. Rewalks full
+        // destination chain and workspace dev/ino before removal. If either
+        // changed (ancestor swap, workspace replacement), cleanup is skipped,
+        // an orphan is left, and a safe path-free warning is logged.
+        // LOCK-6036: Residual TOCTOU between identity check and fs.remove
+        // syscall is acknowledged — Node lacks openat/linkat APIs.
+        if (publicationWorkspace && capturedWorkspaceIdentity) {
+          await safeCleanupWorkspace(capturedWorkspaceIdentity, acceptedDestination, 'backup')
+        } else if (publicationWorkspace) {
+          // Fallback: workspace identity was never captured (should not happen)
+          await fs.remove(publicationWorkspace).catch(() => {})
+        }
       }
     })
   }
@@ -468,6 +1035,10 @@ class BackupManager {
    * Creates a backup and saves it to a local directory.
    * Finding 5: Full operation serialised via backup() which holds the mutex.
    *
+   * LOCK-6012: Validates every component of localBackupDir for symlink-free
+   * path integrity before any write. Revalidates the parent directory
+   * immediately before the exclusive write to narrow the TOCTOU race window.
+   *
    * @param _ - Electron IPC event
    * @param fileName - Name of the backup file
    * @param localConfig - Local backup configuration (directory path and options)
@@ -479,8 +1050,18 @@ class BackupManager {
     localConfig: { localBackupDir?: string; skipBackupFile?: boolean }
   ) {
     try {
-      const backupDir = localConfig.localBackupDir || this.backupDir
+      let backupDir = localConfig.localBackupDir || this.backupDir
+      // LOCK-6012: Validate every component of the local backup directory
+      // for symlink-free path integrity. Rejects symlinked parents/dirs
+      // and canonical escapes.
+      if (localConfig.localBackupDir) {
+        backupDir = await validateLocalBackupDir(localConfig.localBackupDir)
+      }
       await fs.ensureDir(backupDir)
+      // LOCK-6012: Revalidate parent directory immediately before backup()
+      // opens the exclusive write stream. This narrows the TOCTOU race
+      // window where a symlink could be inserted between validation and write.
+      await revalidateParentDir(path.join(backupDir, 'placeholder'), 'backupToLocalDir')
       return await this.backup(_, fileName, backupDir, localConfig.skipBackupFile)
     } catch (error) {
       logger.error('[backupToLocalDir] Local backup failed:', error as Error)
@@ -498,6 +1079,10 @@ class BackupManager {
    * Finding 5: Uses a unique archive file name per operation to avoid
    * overwriting an active archive from a concurrent operation.
    *
+   * LOCK-6019: Intermediate archives are written to an exclusive
+   * per-operation temp directory (not shared backupDir). This prevents
+   * symlink following/truncation even if the mutex were bypassed.
+   *
    * @param _ - Electron IPC event
    * @param webdavConfig - WebDAV configuration including server URL, credentials, and options
    * @returns Result from WebDAV upload operation
@@ -507,11 +1092,17 @@ class BackupManager {
     return BackupManager.withBackupMutex(async () => {
       // Finding 5: Unique archive file name per operation
       const uniqueFilename = this.uniqueArchiveName(webdavConfig.fileName || 'cherry-studio.backup.zip')
-      const backupedFilePath = path.join(this.backupDir, uniqueFilename)
+
+      // LOCK-6019: Exclusive per-operation root for intermediate archives.
+      // The archive is created inside an mkdtemp directory that no other
+      // operation can collide with. Cleaned in finally.
+      const basePath = await BackupManager.ensureTempBase()
+      const opDir = await fs.mkdtemp(path.join(basePath, 'upload-'))
+      const backupedFilePath = path.join(opDir, uniqueFilename)
 
       try {
-        // Create the archive (inside staging dir, using our own staging logic)
-        await this.backupInternal(_, uniqueFilename, this.backupDir, webdavConfig.skipBackupFile)
+        // Create the archive inside the exclusive per-operation temp dir
+        await this.backupInternal(_, uniqueFilename, opDir, webdavConfig.skipBackupFile)
 
         const webdavClient = this.getWebDavInstance(webdavConfig)
         let result
@@ -520,18 +1111,30 @@ class BackupManager {
           result = await webdavClient.putFileContents(uniqueFilename, fileContent, { overwrite: true })
         } else {
           const contentLength = (await fs.stat(backupedFilePath)).size
-          result = await webdavClient.putFileContents(uniqueFilename, fs.createReadStream(backupedFilePath), {
-            overwrite: true,
-            contentLength
-          })
+          // LOCK-6019: Create and manage the read stream lifecycle explicitly.
+          // The stream must be closed after upload completes/fails to ensure
+          // the source file's file descriptor is released before cleanup.
+          const readStream = fs.createReadStream(backupedFilePath)
+          try {
+            result = await webdavClient.putFileContents(uniqueFilename, readStream, {
+              overwrite: true,
+              contentLength
+            })
+          } finally {
+            // LOCK-6019: Ensure read stream is closed after upload returns/throws.
+            // This guarantees the source file's file descriptor is released
+            // before the operation root is cleaned up in the outer finally block.
+            readStream.destroy()
+            await BackupManager.awaitStreamFinished(readStream).catch(() => {})
+          }
         }
         return result
       } catch (error) {
         logger.error('[backupToWebdav] WebDAV backup failed:', error as Error)
         throw error
       } finally {
-        // Finding 5: Always clean up the local archive file
-        await fs.remove(backupedFilePath).catch(() => {})
+        // LOCK-6019: Always clean up the exclusive per-operation temp directory.
+        await fs.remove(opDir).catch(() => {})
       }
     })
   }
@@ -545,6 +1148,9 @@ class BackupManager {
    *
    * Finding 5: Uses a unique archive file name per operation to avoid
    * overwriting an active archive from a concurrent operation.
+   *
+   * LOCK-6019: Intermediate archives are written to an exclusive
+   * per-operation temp directory (not shared backupDir).
    *
    * @param _ - Electron IPC event
    * @param s3Config - S3 configuration including endpoint, bucket, credentials, and options
@@ -562,13 +1168,17 @@ class BackupManager {
       // Finding 5: Unique archive file name per operation
       const baseFilename = s3Config.fileName || `cherry-studio.backup.${deviceName}.${timestamp}.zip`
       const uniqueFilename = this.uniqueArchiveName(baseFilename)
-      const backupedFilePath = path.join(this.backupDir, uniqueFilename)
+
+      // LOCK-6019: Exclusive per-operation root for intermediate archives.
+      const basePath = await BackupManager.ensureTempBase()
+      const opDir = await fs.mkdtemp(path.join(basePath, 'upload-'))
+      const backupedFilePath = path.join(opDir, uniqueFilename)
 
       logger.debug(`[backupToS3] Starting S3 backup to ${uniqueFilename}`)
 
       try {
-        // Create the archive (inside staging dir, using our own staging logic)
-        await this.backupInternal(_, uniqueFilename, this.backupDir, s3Config.skipBackupFile)
+        // Create the archive inside the exclusive per-operation temp dir
+        await this.backupInternal(_, uniqueFilename, opDir, s3Config.skipBackupFile)
 
         const s3Client = this.getS3Storage(s3Config)
         const fileBuffer = await fs.promises.readFile(backupedFilePath)
@@ -579,8 +1189,8 @@ class BackupManager {
         logger.error('[backupToS3] S3 backup failed:', error as Error)
         throw error
       } finally {
-        // Finding 5: Always clean up the local archive file
-        await fs.remove(backupedFilePath).catch(() => {})
+        // LOCK-6019: Always clean up the exclusive per-operation temp directory.
+        await fs.remove(opDir).catch(() => {})
       }
     })
   }
@@ -611,15 +1221,16 @@ class BackupManager {
     destinationPath: string,
     skipBackupFile: boolean = false
   ): Promise<string> {
-    // Unique staging directory per backup operation
-    const stagingDir = path.join(
-      app.getPath('temp'),
-      'cherry-studio',
-      'backup',
-      `staging-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    )
+    // Unique staging directory per backup operation — fs.mkdtemp for atomic exclusive creation
+    const stagingBase = path.join(await BackupManager.ensureTempBase(), 'backup')
+    await fs.ensureDir(stagingBase)
+    const stagingDir = await fs.mkdtemp(path.join(stagingBase, 'staging-'))
 
     const onProgress = this.onProgress(IpcChannel.BackupProgress, true)
+
+    // LOCK-6012: Track whether we successfully created the archive file.
+    // Declared outside try/catch so it's accessible in both blocks.
+    let archiveCreated = false
 
     try {
       await fs.ensureDir(stagingDir)
@@ -651,65 +1262,91 @@ class BackupManager {
       onProgress({ stage: 'copying_database', progress: 52, total: 100 })
 
       // Step 3: Create consistent chat.db snapshot and copy Data directory
+      // LOCK-6008: Every emitted L3 archive must contain authoritative
+      // Data/chat.db. Absent/unavailable DB makes backup fail before
+      // archive publication/upload.
+      const sourcePath = path.join(userDataPath, 'Data')
+      const liveDbPath = path.join(sourcePath, 'chat.db')
+
+      // LOCK-6008: Pre-flight — chat.db must exist for a valid L3 archive
+      const liveDbExists = await fs.pathExists(liveDbPath)
+      if (!liveDbExists) {
+        throw new Error(
+          '[backupInternal] Data/chat.db not found. ' +
+            'LOCK-6008 requires every L3 archive to contain authoritative Data/chat.db. ' +
+            'Backup aborted.'
+        )
+      }
+
+      // Data dir must exist (since chat.db exists inside it)
+      const stagedDataDir = path.join(stagingDir, 'Data')
+
+      // 3a: Create validated snapshot and stage it
+      if (!chatDbService.isInitialised()) {
+        throw new Error(
+          '[backupInternal] Live chat.db exists but ChatDbService is not initialised. ' +
+            'Cannot create consistent snapshot — backup aborted.'
+        )
+      }
+
+      logger.debug('[backupInternal] Creating validated chat.db snapshot...')
+      const chatDbBackup = chatDbService.getBackup()
+      const stagedDbPath = path.join(stagedDataDir, 'chat.db')
+
+      await fs.ensureDir(stagedDataDir)
+
+      try {
+        await chatDbBackup.createSnapshot(stagedDbPath)
+        logger.debug('[backupInternal] Validated chat.db snapshot staged')
+      } catch (snapshotError) {
+        logger.error('[backupInternal] Chat DB snapshot creation FAILED', snapshotError as Error)
+        throw new Error(
+          `[backupInternal] chat.db snapshot failed: ${snapshotError instanceof Error ? snapshotError.message : String(snapshotError)}. ` +
+            'Backup aborted — raw copy of a live WAL database is not safe.'
+        )
+      }
+
+      // Copy remaining Data directory files (excluding chat.db/WAL/SHM/transient artifacts)
+      // SKIP when skipBackupFile=true — only chat.db is mandatory per LOCK-6008
       if (!skipBackupFile) {
-        const sourcePath = path.join(userDataPath, 'Data')
-        const stagedDataDir = path.join(stagingDir, 'Data')
+        logger.debug('[backupInternal] Copying Data directory (excluding live DB files)...')
+        const totalSize = await this.getDirSize(sourcePath, { dereferenceSymlinks: true })
 
-        if (await fs.pathExists(sourcePath)) {
-          const liveDbPath = path.join(sourcePath, 'chat.db')
-          const liveDbExists = await fs.pathExists(liveDbPath)
-
-          if (liveDbExists) {
-            if (!chatDbService.isInitialised()) {
-              throw new Error(
-                '[backupInternal] Live chat.db exists but ChatDbService is not initialised. ' +
-                  'Cannot create consistent snapshot — backup aborted.'
-              )
-            }
-
-            logger.debug('[backupInternal] Creating validated chat.db snapshot...')
-            const chatDbBackup = chatDbService.getBackup()
-            const stagedDbPath = path.join(stagedDataDir, 'chat.db')
-
-            await fs.ensureDir(stagedDataDir)
-
-            try {
-              await chatDbBackup.createSnapshot(stagedDbPath)
-              logger.debug('[backupInternal] Validated chat.db snapshot staged')
-            } catch (snapshotError) {
-              logger.error('[backupInternal] Chat DB snapshot creation FAILED', snapshotError as Error)
-              throw new Error(
-                `[backupInternal] chat.db snapshot failed: ${snapshotError instanceof Error ? snapshotError.message : String(snapshotError)}. ` +
-                  'Backup aborted — raw copy of a live WAL database is not safe.'
-              )
-            }
-          }
-
-          logger.debug('[backupInternal] Copying Data directory (excluding live DB files)...')
-          const totalSize = await this.getDirSize(sourcePath, { dereferenceSymlinks: true })
-
-          await this.copyDirWithProgressFiltered(
-            sourcePath,
-            stagedDataDir,
-            BackupManager.EXCLUDED_DATA_ENTRIES,
-            this.createCopyProgressHandler(totalSize, 52, 80, 'copying_files', onProgress),
-            { dereferenceSymlinks: true }
-          )
-        }
+        await this.copyDirWithProgressFiltered(
+          sourcePath,
+          stagedDataDir,
+          BackupManager.EXCLUDED_DATA_ENTRIES,
+          this.createCopyProgressHandler(totalSize, 52, 80, 'copying_files', onProgress),
+          { dereferenceSymlinks: true }
+        )
       } else {
-        await fs.promises.mkdir(path.join(stagingDir, 'Data'))
+        logger.debug('[backupInternal] skipBackupFile=true — chat.db snapshot included, other Data files skipped')
       }
 
       onProgress({ stage: 'compressing', progress: 80, total: 100 })
 
       // Step 4: Create ZIP archive from staging directory
+      // LOCK-6019: backupInternal is only called by remote backup paths
+      // (backupToWebdav/backupToS3) which always pass exclusive per-operation
+      // temp dirs. Use O_EXCL for defense-in-depth — prevents truncation of
+      // any existing file at the archive path.
       const archivePath = path.join(destinationPath, fileName)
-      const output = fs.createWriteStream(archivePath)
+      const output = BackupManager.createExclusiveWriteStream(archivePath)
+      // LOCK-6029: Ownership starts when exclusive output open succeeds.
+      // Any later failure removes only that owned partial file; wx failure
+      // before open never removes a pre-existing file.
+      output.on('open', () => {
+        archiveCreated = true
+      })
       const archive = archiver('zip', {
         zlib: { level: 1 },
         zip64: true
       })
 
+      // LOCK-6013: Use stream.finished to await writable completion before
+      // declaring the archive complete. This guarantees the output file is
+      // fully flushed and closed before any subsequent operations.
+      let archiveError: unknown = undefined
       await new Promise<void>((resolve, reject) => {
         // Settled flag prevents double resolve/reject when both
         // output error and archive error fire.
@@ -722,8 +1359,27 @@ class BackupManager {
         }
 
         output.on('close', () => settle(resolve))
-        output.on('error', (err) => settle(() => reject(err)))
-        archive.on('error', (err) => settle(() => reject(err)))
+        output.on('error', (err) => {
+          // LOCK-6013: On output error, abort archive to prevent it from
+          // continuing to write to a broken pipe.
+          try {
+            archive.abort()
+          } catch {
+            /* best-effort — archive may already be finalised */
+          }
+          settle(() => reject(err))
+        })
+        archive.on('error', (err) => {
+          // LOCK-6013: On archive error, abort the archive and destroy
+          // the output to release the file descriptor before cleanup.
+          try {
+            archive.abort()
+          } catch {
+            /* best-effort — archive may already be finalised */
+          }
+          output.destroy(err instanceof Error ? err : new Error(String(err)))
+          settle(() => reject(err))
+        })
         archive.on('warning', (err: NodeJS.ErrnoException) => {
           if (err.code !== 'ENOENT') {
             logger.warn('[backupInternal] Archive warning:', err)
@@ -732,7 +1388,20 @@ class BackupManager {
         archive.pipe(output)
         archive.directory(stagingDir, false)
         archive.finalize()
+      }).catch((err) => {
+        archiveError = err
       })
+
+      if (archiveError) {
+        // LOCK-6013: Await terminal settlement of output before path cleanup.
+        // output.destroy() was already called in the error handler.
+        await BackupManager.awaitStreamFinished(output).catch(() => {})
+        throw archiveError
+      }
+
+      // LOCK-6013: Explicitly await stream finished AFTER the Promise resolves
+      // to guarantee the writable stream's underlying file descriptor is closed.
+      await BackupManager.awaitStreamFinished(output)
 
       onProgress({ stage: 'completed', progress: 100, total: 100 })
 
@@ -740,9 +1409,13 @@ class BackupManager {
       return archivePath
     } catch (error) {
       logger.error('[backupInternal] Backup failed:', error as Error)
-      // Clean up partial archive on failure
-      const archivePath = path.join(destinationPath, fileName)
-      await fs.remove(archivePath).catch(() => {})
+      // LOCK-6012: Only remove the file if WE created it (O_EXCL succeeded).
+      // If O_EXCL failed or archive creation failed, the file either doesn't
+      // exist or belongs to someone else — never remove it.
+      if (archiveCreated) {
+        const archivePath = path.join(destinationPath, fileName)
+        await fs.remove(archivePath).catch(() => {})
+      }
       throw error
     } finally {
       // Guarantee cleanup of the unique staging directory
@@ -751,15 +1424,26 @@ class BackupManager {
   }
 
   /**
-   * Restore from a backup file
-   * Automatically detects backup format (direct v6+ or legacy) and restores accordingly.
+   * Restore from a backup file.
+   *
+   * LOCK-6009: All L3 restore paths require metadata.json. Archives without
+   * metadata (legacy data.json format) are rejected — legacy logical restore
+   * is no longer reachable from any L3 path.
+   *
    * For direct backup: replaces IndexedDB and Local Storage directories, then relaunches app.
-   * For legacy backup: restores data from data.json and Data directory.
    * @param _ - Electron IPC event
    * @param backupPath - Path to the backup ZIP file
-   * @returns For legacy backup: the data string from data.json. For direct backup: void (app will relaunch)
+   * @param options - Optional restore options
+   * @param options.preExitCleanup - LOCK-6014: Provider-owned resources to clean
+   *   before app.exit. For remote restores (WebDAV/S3), this cleans the
+   *   download directory. For local user-selected backups, this is omitted.
+   * @returns void (app will relaunch on success)
    */
-  async restore(_: Electron.IpcMainInvokeEvent, backupPath: string): Promise<string | void> {
+  async restore(
+    _: Electron.IpcMainInvokeEvent,
+    backupPath: string,
+    options?: { preExitCleanup?: () => Promise<void> }
+  ): Promise<void> {
     // Phase 4.4.1 (LOCK-4416): restore staging holds the shared chat DB
     // maintenance lease ('restore') for its full duration — mutually
     // exclusive with backup, promotion, and live init/close. Fails with a
@@ -769,52 +1453,134 @@ class BackupManager {
     return withMaintenanceLease(getSharedMaintenanceCoordinator(), 'restore', 'backup-manager-restore', async () => {
       const onProgress = this.onProgress(IpcChannel.RestoreProgress, true)
 
+      // LOCK-6013: Each restore uses a unique clean extraction workspace.
+      // Abandoned roots are cleaned with bounded recovery/cleanup and
+      // cannot influence later restore classification.
+      const basePath = await BackupManager.ensureTempBase()
+      const restoreBase = path.join(basePath, 'restore')
+
+      // LOCK-6012: Validate the restore base is not a symlink before creating
+      // the extraction workspace under it. A symlinked base could redirect
+      // extraction to an attacker-controlled directory.  Canonical containment:
+      // the realpath of restoreBase must be canonically under basePath, which
+      // is itself the canonical (realpath-resolved) temp root.
+      await fs.ensureDir(restoreBase)
       try {
-        // Create temp directory
-        await fs.ensureDir(this.tempDir)
+        const baseReal = await fs.realpath(restoreBase)
+        if (!baseReal.startsWith(basePath + path.sep) && baseReal !== basePath) {
+          throw new Error(
+            `[restore] Restore base directory "${restoreBase}" resolves to "${baseReal}" ` +
+              `which escapes canonical temp root "${basePath}". LOCK-6012: Refusing to create extraction workspace.`
+          )
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('LOCK-6012')) {
+          throw err
+        }
+        // realpath can fail if dir doesn't exist yet (ensureDir may create it) — that's safe
+      }
+
+      // LOCK-6013: Use fs.mkdtemp for atomic exclusive directory creation.
+      // The OS guarantees the returned path is unique and created atomically;
+      // no pre-existing symlink or path can collide.
+      // LOCK-6012: Immediately revalidate restoreBase before mkdtemp to narrow
+      // the TOCTOU window where a symlink could be inserted after canonical
+      // validation above.
+      await revalidateParentDir(path.join(restoreBase, 'extraction-'), 'restore')
+      const extractionDir = await fs.mkdtemp(path.join(restoreBase, 'extraction-'))
+
+      let zip: StreamZip.StreamZipAsync | null = null
+
+      try {
         onProgress({ stage: 'preparing', progress: 0, total: 100 })
 
-        logger.debug(`step 1: unzip backup file: ${this.tempDir}`)
+        logger.debug(`step 1: validate and unzip backup file: ${extractionDir}`)
 
-        const zip = new StreamZip.async({ file: backupPath })
+        zip = new StreamZip.async({ file: backupPath })
+
+        // LOCK-6012: Validate ALL entries before extraction.
+        // Every entry name is untrusted; reject traversal, absolute paths,
+        // NUL bytes, ambiguous separators, symlink/special entries,
+        // encrypted entries, and canonical containment violations.
+        onProgress({ stage: 'validating', progress: 5, total: 100 })
+        const validation = await validateRestoreZipEntries(zip, extractionDir)
+        logger.debug(`ZIP entry validation passed: ${validation.entryCount} entries`)
+        onProgress({ stage: 'validated', progress: 10, total: 100 })
+
+        // LOCK-6012: Only after validation passes, extract to unique workspace
         onProgress({ stage: 'extracting', progress: 15, total: 100 })
-        await zip.extract(null, this.tempDir)
+        await zip.extract(null, extractionDir)
+        await zip.close()
+        zip = null
         onProgress({ stage: 'extracted', progress: 20, total: 100 })
 
-        // Check for backup type: direct (version 6+) or legacy (version <= 5)
-        const metadataPath = path.join(this.tempDir, 'metadata.json')
+        // LOCK-6009: All L3 restore paths must have metadata.json.
+        // Archives without metadata are not supported L3 format.
+        // Historical legacy formats are unreachable from L3 restore.
+        const metadataPath = path.join(extractionDir, 'metadata.json')
         const isDirectBackup = await fs.pathExists(metadataPath)
 
         if (isDirectBackup) {
           // Direct backup format (version 6+)
           logger.debug('Detected direct backup format (version 6+)')
-          // Note: tempDir is NOT cleaned up here - restoreDirect will use and clean it
-          await this.restoreDirect()
+          // Pass the unique extractionDir so restoreDirect uses it
+          // LOCK-6014: Pass preExitCleanup so provider-owned resources are
+          // cleaned before app.exit. For local user-selected backups, this
+          // is undefined (no cleanup needed).
+          await this.restoreDirect(extractionDir, options?.preExitCleanup)
           // Direct restore doesn't return data - app needs to relaunch
           return
         }
 
-        // Legacy backup format (version <= 5)
-        logger.debug('Detected legacy backup format (version <= 5)')
-
-        const data = await this.restoreLegacy()
-
-        return data
+        // LOCK-6009: Metadata-less archives are rejected.
+        // Legacy data.json/Dexie logical restore is no longer reachable
+        // from any L3 restore path (local/WebDAV/S3/Nutstore/file picker).
+        throw new Error(
+          '[restore] Archive does not contain metadata.json. ' +
+            'This is not a supported L3 backup format. Legacy logical restore is not supported.'
+        )
       } catch (error) {
         logger.error('Restore failed:', error as Error)
-        await fs.remove(this.tempDir).catch(() => {})
+        // Bounded cleanup: remove the unique extraction directory on failure.
+        // LOCK-6013: Abandoned roots cannot influence later restore classification.
+        await fs.remove(extractionDir).catch((cleanupError) => {
+          logger.warn('[restore] Failed to clean extraction directory', { extractionDir, error: cleanupError })
+        })
         throw error
+      } finally {
+        // Ensure zip is always closed even if validation or extraction fails
+        if (zip) {
+          await zip.close().catch(() => {})
+        }
       }
     })
   }
 
   /**
    * Restore from direct backup format (version 6+).
+   *
+   * LOCK-6005: Validates metadata and Data/chat.db BEFORE staging or
+   * destructive replacement. Rejects unsupported future versions, wrong
+   * purpose/product, missing DB, malformed DB, and failed integrity.
+   *
+   * LOCK-6004: Existing v6 direct archives remain restorable as bounded
+   * backward-compatible format (no product/purpose required).
+   *
+   * LOCK-6013: Accepts extractionDir as parameter — each restore uses a
+   * unique clean extraction workspace, not a shared stale directory.
+   *
+   * LOCK-6014: Accepts optional preExitCleanup for provider-owned resources
+   * (e.g., download directory) that must be cleaned before app.exit. Local
+   * user-selected backups do not provide this callback.
+   *
    * Writes to `*.restore` directories; `handleStartupRestore` performs the atomic
    * swap on next launch, before any DB connection or window opens. Avoids
    * overwriting live IndexedDB / libsql files (issue #14774).
+   *
+   * @param extractionDir  Unique extraction workspace (LOCK-6013)
+   * @param preExitCleanup Optional provider-owned resource cleanup (LOCK-6014)
    */
-  private async restoreDirect(): Promise<void> {
+  private async restoreDirect(extractionDir: string, preExitCleanup?: () => Promise<void>): Promise<void> {
     const onProgress = this.onProgress(IpcChannel.RestoreProgress, true)
 
     const userDataPath = app.getPath('userData')
@@ -822,14 +1588,22 @@ class BackupManager {
     const localStorageDest = path.join(userDataPath, 'Local Storage.restore')
     const dataDest = path.join(userDataPath, 'Data.restore')
 
+    // --- Phase 1-3: Validate metadata, validate DB, stage restore dirs ---
+    // LOCK-6013/6014: Staging failure is the only case that undoes staged
+    // directories. Post-staging failures (extraction cleanup, preExitCleanup)
+    // propagate without undoing staging — the staged .restore dirs are ready
+    // for handleStartupRestore on next launch.
     try {
-      // Read and validate metadata
-      const metadataPath = path.join(this.tempDir, 'metadata.json')
+      // --- Phase 1: Validate metadata (LOCK-6005) ---
+      const metadataPath = path.join(extractionDir, 'metadata.json')
       const metadata = await fs.readJson(metadataPath)
 
-      // Validate appName to ensure backup is from Cherry Studio
-      if (metadata.appName !== 'Cherry Studio') {
-        throw new Error('This backup file is not from Cherry Studio and cannot be restored')
+      const validation = validateL3ArchiveMetadata(metadata)
+      if (validation !== null) {
+        throw new Error(
+          `[restoreDirect] Archive metadata rejected: ${validation.reason}. ` +
+            'This backup file is not a supported Cherry Chat L3 archive.'
+        )
       }
 
       // Warn about cross-platform restore
@@ -841,11 +1615,41 @@ class BackupManager {
 
       onProgress({ stage: 'validating', progress: 25, total: 100 })
 
+      // --- Phase 2: Validate extracted Data/chat.db (LOCK-6005/6008) ---
+      const dataSource = path.join(extractionDir, 'Data')
+      const dataExists = await fs.pathExists(dataSource)
+      const hasChatDbInArchive = dataExists && (await fs.pathExists(path.join(dataSource, 'chat.db')))
+
+      if (hasChatDbInArchive) {
+        logger.debug('[restoreDirect] Validating extracted chat.db before staging...')
+        const extractedChatDbPath = path.join(dataSource, 'chat.db')
+
+        // Use the shared readonly validation gate from the promotion module.
+        // sampleCount=2: minimal reads to verify basic structure without
+        // spending excessive time on large databases.
+        const dbValidation = validateReadonlyChatDb(extractedChatDbPath, 2)
+        if (dbValidation !== null) {
+          throw new Error(
+            `[restoreDirect] Extracted chat.db validation failed at gate '${dbValidation.gate}' ` +
+              `(code: ${dbValidation.safeCode}). Archive contains an invalid, incompatible, or corrupt database.`
+          )
+        }
+        logger.debug('[restoreDirect] Extracted chat.db validation passed')
+      } else {
+        // LOCK-6008: Data dir absent OR Data has files but no chat.db — reject.
+        // A valid L3 archive must always contain authoritative Data/chat.db.
+        throw new Error(
+          '[restoreDirect] Archive does not contain authoritative Data/chat.db. ' +
+            'LOCK-6008 requires every L3 archive to include Data/chat.db. ' +
+            'Restore aborted — no .restore staging performed.'
+        )
+      }
+
       onProgress({ stage: 'restoring_database', progress: 30, total: 100 })
 
-      // IndexedDB & Local Storage Path
-      const indexedDBSource = path.join(this.tempDir, 'IndexedDB')
-      const localStorageSource = path.join(this.tempDir, 'Local Storage')
+      // --- Phase 3: Stage restore directories (only after validation passes) ---
+      const indexedDBSource = path.join(extractionDir, 'IndexedDB')
+      const localStorageSource = path.join(extractionDir, 'Local Storage')
 
       logger.debug('[restoreDirect] Staging database directories...')
 
@@ -861,24 +1665,8 @@ class BackupManager {
 
       onProgress({ stage: 'restoring_database', progress: 65, total: 100 })
 
-      //  Restore Data directory
-      const dataSource = path.join(this.tempDir, 'Data')
-      const dataExists = await fs.pathExists(dataSource)
-      const dataFiles = dataExists ? await fs.readdir(dataSource) : []
-
-      if (dataExists && dataFiles.length > 0) {
-        // Validate that the backup contains a chat.db (Finding 5).
-        // If the backup archive has Data/ but no chat.db, the restore marker
-        // will fail on next launch. Warn early so the user knows.
-        const backupChatDbPath = path.join(dataSource, 'chat.db')
-        const hasChatDb = await fs.pathExists(backupChatDbPath)
-        if (!hasChatDb) {
-          logger.warn(
-            '[restoreDirect] Backup Data directory does not contain chat.db. ' +
-              'Restore marker will not be set on next launch — chat DB will not be available.'
-          )
-        }
-
+      // Stage Data directory (validated above — Data/chat.db always present)
+      if (dataExists) {
         logger.debug('[restoreDirect] Staging Data directory...')
 
         const totalSize = await this.getDirSize(dataSource, { dereferenceSymlinks: false })
@@ -894,88 +1682,55 @@ class BackupManager {
       } else {
         logger.debug('[restoreDirect] No Data directory to restore')
       }
-
-      // Clean up
-      await fs.remove(this.tempDir)
-      onProgress({ stage: 'completed', progress: 100, total: 100 })
-
-      logger.info('[restoreDirect] Restore staged successfully, relaunching app to apply...')
-
-      app.relaunch()
-      app.exit(0)
     } catch (error) {
       logger.error('[restoreDirect] Restore failed:', error as Error)
+      // Staging failed — undo all staged directories
       await Promise.all([
-        fs.remove(this.tempDir).catch(() => {}),
+        fs.remove(extractionDir).catch(() => {}),
         fs.remove(indexedDBDest).catch(() => {}),
         fs.remove(localStorageDest).catch(() => {}),
         fs.remove(dataDest).catch(() => {})
       ])
       throw error
     }
-  }
 
-  /**
-   * Restore from legacy backup format (version <= 5)
-   * Restores data from data.json and Data directory.
-   * @param onProgress - Callback function to report restore progress
-   * @returns The data string read from data.json
-   */
-  private async restoreLegacy(): Promise<string> {
-    const onProgress = this.onProgress(IpcChannel.RestoreProgress, false)
+    // --- Post-staging: cleanup and relaunch (LOCK-6013/6014) ---
+    // These are part of the pre-exit gate. Failure here does NOT undo staging
+    // — the staged .restore dirs are ready for handleStartupRestore on next launch.
 
-    try {
-      logger.debug('[restoreLegacy] read data.json')
+    // LOCK-6013: Clean up the unique extraction directory after successful staging.
+    // Failure prevents relaunch per LOCK-6014 — the error propagates.
+    await fs.remove(extractionDir)
 
-      // Read data.json
-      const dataPath = path.join(this.tempDir, 'data.json')
-      const data = await fs.readFile(dataPath, 'utf-8')
-      onProgress({ stage: 'reading_data', progress: 35, total: 100 })
-
-      logger.debug('[restoreLegacy] restore Data directory')
-
-      const userDataPath = app.getPath('userData')
-      const dataSourcePath = path.join(this.tempDir, 'Data')
-      const dataDestPath = path.join(userDataPath, 'Data.restore')
-
-      const dataExists = await fs.pathExists(dataSourcePath)
-      const dataFiles = dataExists ? await fs.readdir(dataSourcePath) : []
-
-      if (dataExists && dataFiles.length > 0) {
-        // Get total size of source directory
-        const dataTotalSize = await this.getDirSize(dataSourcePath, { dereferenceSymlinks: false })
-
-        await fs.remove(dataDestPath).catch(() => {})
-
-        // Use streaming copy
-        await this.copyDirWithProgress(
-          dataSourcePath,
-          dataDestPath,
-          this.createCopyProgressHandler(dataTotalSize, 35, 85, 'copying_files', onProgress),
-          { dereferenceSymlinks: false }
-        )
-      } else {
-        logger.debug('[restoreLegacy] skipBackupFile is true, skip restoring Data directory')
-      }
-
-      // Clean up temp directory
-      logger.debug('[restoreLegacy] clean up temp directory')
-      await fs.remove(this.tempDir)
-
-      onProgress({ stage: 'completed', progress: 100, total: 100 })
-
-      logger.info('[restoreLegacy] Restore completed successfully')
-
-      return data
-    } catch (error) {
-      logger.error('[restoreLegacy] Restore failed:', error as Error)
-      await fs.remove(this.tempDir).catch(() => {})
-      throw error
+    // LOCK-6014: Clean provider-owned resources before app.exit.
+    // For remote restores (WebDAV/S3), this cleans the download directory
+    // containing the downloaded backup file. For local user-selected backups,
+    // preExitCleanup is undefined — the user's backup file is untouched.
+    // This runs before app.relaunch/app.exit because those calls terminate
+    // the process without running finally blocks.
+    //
+    // LOCK-6014: preExitCleanup failure is a restore failure and must
+    // prevent relaunch/exit. The error propagates to the caller.
+    if (preExitCleanup) {
+      await preExitCleanup()
     }
+
+    onProgress({ stage: 'completed', progress: 100, total: 100 })
+
+    logger.info('[restoreDirect] Restore staged successfully, relaunching app to apply...')
+
+    app.relaunch()
+    app.exit(0)
   }
+
+  // LOCK-6009: restoreLegacy() removed. Metadata-less data.json/Dexie logical
+  // restore is no longer reachable from any L3 restore path. Historical formats
+  // remain only behind this unreachable migration boundary — no existing code
+  // requires them.
 
   /**
    * Restore from a local backup file
+   * LOCK-6012: Validates localBackupDir for symlink-free path integrity.
    * @param _ - Electron IPC event
    * @param fileName - Name of the backup file
    * @param localBackupDir - Directory where the backup file is located
@@ -983,7 +1738,9 @@ class BackupManager {
    */
   async restoreFromLocalBackup(_: Electron.IpcMainInvokeEvent, fileName: string, localBackupDir: string) {
     try {
-      const backupPath = resolveAndValidatePath(localBackupDir, fileName)
+      // LOCK-6012: Validate directory components for symlink-free integrity
+      const validatedDir = await validateLocalBackupDir(localBackupDir)
+      const backupPath = resolveAndValidatePath(validatedDir, fileName)
 
       if (!fs.existsSync(backupPath)) {
         throw new Error(`Backup file not found: ${backupPath}`)
@@ -1004,30 +1761,60 @@ class BackupManager {
    * @returns Result from restore operation
    */
   async restoreFromWebdav(_: Electron.IpcMainInvokeEvent, webdavConfig: WebDavConfig) {
-    const filename = webdavConfig.fileName || 'cherry-studio.backup.zip'
+    const rawFilename = webdavConfig.fileName || 'cherry-studio.backup.zip'
     const webdavClient = this.getWebDavInstance(webdavConfig)
+    // LOCK-6013: Ensure the cherry-studio temp base exists before mkdtemp.
+    // On fresh installs the parent directory may not exist yet, causing
+    // ENOENT from mkdtemp.
+    const basePath = await BackupManager.ensureTempBase()
+    // LOCK-6012: Create an exclusive operation-owned temp directory for the
+    // downloaded file. mkdtemp guarantees atomic unique creation; the
+    // downloaded content never touches a shared or pre-existing path.
+    const downloadDir = await fs.mkdtemp(path.join(basePath, 'download-'))
     try {
-      const retrievedFile = await webdavClient.getFileContents(filename)
-      const backupedFilePath = path.join(this.backupDir, filename)
+      const retrievedFile = await webdavClient.getFileContents(rawFilename)
 
-      if (!fs.existsSync(this.backupDir)) {
-        fs.mkdirSync(this.backupDir, { recursive: true })
+      // LOCK-6012: Provider-controlled filenames must never be used directly
+      // in path.join() for local file writes. Sanitize to a safe basename
+      // and write inside the exclusive operation-owned temp directory.
+      const safeFilename = sanitizeProviderFilename(rawFilename, downloadDir)
+      const backupedFilePath = path.join(downloadDir, safeFilename)
+
+      // LOCK-6012: Atomically claim the file with O_CREAT|O_EXCL.
+      // The 'wx' flag creates a new file and fails if it already exists
+      // or is a symlink — preventing truncation and symlink following.
+      // LOCK-6013: Use stream.finished to await writable completion before
+      // calling restore. This guarantees the downloaded content is fully
+      // flushed and the file descriptor is closed before restore reads the file.
+      const writeStream = BackupManager.createExclusiveWriteStream(backupedFilePath)
+      // LOCK-6013: Wrap in try/finally to guarantee write stream settlement
+      // on both success and error before proceeding to restore or cleanup.
+      try {
+        await new Promise<void>((resolve, reject) => {
+          writeStream.on('finish', () => resolve())
+          writeStream.on('error', (error) => reject(error))
+          writeStream.write(retrievedFile as Buffer)
+          writeStream.end()
+        })
+      } finally {
+        // LOCK-6013: Ensure write stream is fully settled (FD released)
+        // before proceeding to restore or cleanup.
+        await BackupManager.awaitStreamFinished(writeStream).catch(() => {})
       }
 
-      // Write file using streaming
-      await new Promise<void>((resolve, reject) => {
-        const writeStream = fs.createWriteStream(backupedFilePath)
-        writeStream.write(retrievedFile as Buffer)
-        writeStream.end()
-
-        writeStream.on('finish', () => resolve())
-        writeStream.on('error', (error) => reject(error))
+      // LOCK-6014: preExitCleanup failure propagates and prevents relaunch.
+      // The .catch(() => {}) was removed so cleanup rejection is not swallowed.
+      return await this.restore(_, backupedFilePath, {
+        preExitCleanup: () => fs.remove(downloadDir)
       })
-
-      return await this.restore(_, backupedFilePath)
     } catch (error: any) {
       logger.error('Failed to restore from WebDAV:', error)
       throw new Error(error.message || 'Failed to restore backup file')
+    } finally {
+      // LOCK-6012: Guaranteed cleanup of the exclusive download directory.
+      // If restore succeeded, the app relaunches and the dir is gone.
+      // If restore failed, the dir is cleaned here.
+      await fs.remove(downloadDir).catch(() => {})
     }
   }
 
@@ -1039,30 +1826,58 @@ class BackupManager {
    * @returns Result from restore operation
    */
   async restoreFromS3(_: Electron.IpcMainInvokeEvent, s3Config: S3Config) {
-    const filename = s3Config.fileName || 'cherry-studio.backup.zip'
+    const rawFilename = s3Config.fileName || 'cherry-studio.backup.zip'
 
-    logger.debug(`Starting restore from S3: ${filename}`)
+    logger.debug(`Starting restore from S3: ${rawFilename}`)
 
     const s3Client = this.getS3Storage(s3Config)
+    // LOCK-6013: Ensure the cherry-studio temp base exists before mkdtemp.
+    const basePath = await BackupManager.ensureTempBase()
+    // LOCK-6012: Create an exclusive operation-owned temp directory for the
+    // downloaded file. mkdtemp guarantees atomic unique creation; the
+    // downloaded content never touches a shared or pre-existing path.
+    const downloadDir = await fs.mkdtemp(path.join(basePath, 'download-'))
     try {
-      const retrievedFile = await s3Client.getFileContents(filename)
-      const backupedFilePath = path.join(this.backupDir, filename)
-      if (!fs.existsSync(this.backupDir)) {
-        fs.mkdirSync(this.backupDir, { recursive: true })
-      }
-      await new Promise<void>((resolve, reject) => {
-        const writeStream = fs.createWriteStream(backupedFilePath)
-        writeStream.write(retrievedFile)
-        writeStream.end()
-        writeStream.on('finish', () => resolve())
-        writeStream.on('error', (error) => reject(error))
-      })
+      const retrievedFile = await s3Client.getFileContents(rawFilename)
 
-      logger.info(`S3 restore file downloaded successfully: ${filename}`)
-      return await this.restore(_, backupedFilePath)
+      // LOCK-6012: Provider-controlled filenames must never be used directly
+      // in path.join() for local file writes. Sanitize to a safe basename
+      // and write inside the exclusive operation-owned temp directory.
+      const safeFilename = sanitizeProviderFilename(rawFilename, downloadDir)
+      const backupedFilePath = path.join(downloadDir, safeFilename)
+
+      // LOCK-6012: Atomically claim the file with O_CREAT|O_EXCL.
+      // LOCK-6013: Use stream.finished to await writable completion before
+      // calling restore. This guarantees the downloaded content is fully
+      // flushed and the file descriptor is closed before restore reads the file.
+      const writeStream = BackupManager.createExclusiveWriteStream(backupedFilePath)
+      // LOCK-6013: Wrap in try/finally to guarantee write stream settlement
+      // on both success and error before proceeding to restore or cleanup.
+      try {
+        await new Promise<void>((resolve, reject) => {
+          writeStream.on('finish', () => resolve())
+          writeStream.on('error', (error) => reject(error))
+          writeStream.write(retrievedFile)
+          writeStream.end()
+        })
+      } finally {
+        // LOCK-6013: Ensure write stream is fully settled (FD released)
+        // before proceeding to restore or cleanup.
+        await BackupManager.awaitStreamFinished(writeStream).catch(() => {})
+      }
+
+      logger.info(`S3 restore file downloaded successfully: ${safeFilename}`)
+      // LOCK-6014: preExitCleanup failure propagates and prevents relaunch.
+      // The .catch(() => {}) was removed so cleanup rejection is not swallowed.
+      return await this.restore(_, backupedFilePath, {
+        preExitCleanup: () => fs.remove(downloadDir)
+      })
     } catch (error: any) {
       logger.error('[BackupManager] Failed to restore from S3:', error)
       throw new Error(error.message || 'Failed to restore backup file')
+    } finally {
+      // LOCK-6012: Guaranteed cleanup of the exclusive download directory.
+      await fs.remove(downloadDir).catch(() => {})
     }
   }
 
@@ -1172,6 +1987,85 @@ class BackupManager {
     const dataRestorePath = getDataPath() + '.restore'
     await fs.remove(dataRestorePath).catch(() => {})
     await fs.ensureDir(dataRestorePath)
+  }
+
+  // ---------------------------------------------------------------------------
+  // LOCK-6013/6019: Orphan temp directory cleanup
+  //
+  // On startup, clean up stale temp directories left behind by crashed
+  // restores or backup uploads. These directories are created with
+  // predictable prefix patterns under the system temp directory:
+  //   - extraction-* (restore extraction workspaces)
+  //   - download-*  (provider restore downloaded files)
+  //   - upload-*    (remote backup intermediate archives)
+  //
+  // Only directories older than a threshold (default: 1 hour) are cleaned
+  // to avoid deleting active operations.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Clean up orphaned temp directories from crashed restores and backup uploads.
+   *
+   * LOCK-6013: Abandoned extraction/download roots must not influence later
+   * restore classification.
+   * LOCK-6019: Abandoned upload roots must not leave intermediate archives.
+   *
+   * Scans all known operation-owned prefixes:
+   *   - cherry-studio/restore/extraction-*
+   *   - cherry-studio/download-*
+   *   - cherry-studio/upload-*
+   *
+   * Called once at app startup, after handleStartupRestore, before
+   * chatDbService.init().
+   *
+   * @param maxAgeMs  Maximum age in milliseconds (default: 1 hour)
+   */
+  static async cleanupOrphanedExtractions(maxAgeMs: number = 60 * 60 * 1000): Promise<void> {
+    const basePath = await BackupManager.ensureTempBase()
+    const now = Date.now()
+
+    try {
+      const baseExists = await fs.pathExists(basePath)
+      if (!baseExists) return
+
+      // Collect all directories to scan: restore/extraction-*, download-*, upload-*
+      const scanTargets: Array<{ dir: string; prefixes: readonly string[] }> = [
+        { dir: path.join(basePath, 'restore'), prefixes: ['extraction-'] },
+        { dir: basePath, prefixes: ['download-', 'upload-'] }
+      ]
+
+      for (const { dir: scanDir, prefixes } of scanTargets) {
+        const exists = await fs.pathExists(scanDir)
+        if (!exists) continue
+
+        const entries = await fs.readdir(scanDir, { withFileTypes: true })
+
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue
+          const matchesPrefix = prefixes.some((p) => entry.name.startsWith(p))
+          if (!matchesPrefix) continue
+
+          const dirPath = path.join(scanDir, entry.name)
+          try {
+            const stat = await fs.stat(dirPath)
+            const age = now - stat.mtimeMs
+            if (age > maxAgeMs) {
+              logger.info(
+                `[cleanupOrphanedExtractions] Removing stale temp directory: ` +
+                  `${path.relative(basePath, dirPath)} (age: ${Math.round(age / 1000)}s)`
+              )
+              await fs.remove(dirPath).catch((removeError) => {
+                logger.warn(`[cleanupOrphanedExtractions] Failed to remove ${entry.name}`, { error: removeError })
+              })
+            }
+          } catch {
+            // stat failure — skip this entry
+          }
+        }
+      }
+    } catch (error) {
+      logger.warn('[cleanupOrphanedExtractions] Orphan cleanup failed (non-fatal)', { error })
+    }
   }
 
   /**
@@ -1502,17 +2396,20 @@ class BackupManager {
 
   /**
    * List backup files in a local directory
+   * LOCK-6012: Validates localBackupDir for symlink-free path integrity.
    * @param _ - Electron IPC event
    * @param localBackupDir - Directory to list backup files from
    * @returns Array of backup file info (name, modified time, size), sorted by newest first
    */
   async listLocalBackupFiles(_: Electron.IpcMainInvokeEvent, localBackupDir: string) {
     try {
-      const files = await fs.readdir(localBackupDir)
+      // LOCK-6012: Validate directory components for symlink-free integrity
+      const validatedDir = await validateLocalBackupDir(localBackupDir)
+      const files = await fs.readdir(validatedDir)
       const result: Array<{ fileName: string; modifiedTime: string; size: number }> = []
 
       for (const file of files) {
-        const filePath = path.join(localBackupDir, file)
+        const filePath = path.join(validatedDir, file)
         const stat = await fs.stat(filePath)
 
         if (stat.isFile() && file.endsWith('.zip')) {
@@ -1541,7 +2438,9 @@ class BackupManager {
    */
   async deleteLocalBackupFile(_: Electron.IpcMainInvokeEvent, fileName: string, localBackupDir: string) {
     try {
-      const filePath = resolveAndValidatePath(localBackupDir, fileName)
+      // LOCK-6012: Validate directory components for symlink-free integrity
+      const validatedDir = await validateLocalBackupDir(localBackupDir)
+      const filePath = resolveAndValidatePath(validatedDir, fileName)
 
       if (!fs.existsSync(filePath)) {
         throw new Error(`Backup file not found: ${filePath}`)
@@ -1670,6 +2569,16 @@ class BackupManager {
   }
 }
 
-export { BackupManager }
+export {
+  BackupManager,
+  captureLocalBackupDestination,
+  captureWorkspaceIdentity,
+  publishLocalBackupArchive,
+  revalidateLocalBackupDestination,
+  revalidateParentDir,
+  safeCleanupWorkspace,
+  validateLocalBackupDir
+}
+export type { LocalBackupDestinationIdentity, WorkspaceIdentity }
 
 export default BackupManager

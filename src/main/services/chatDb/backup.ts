@@ -1,6 +1,4 @@
-import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
 
 import { loggerService } from '@logger'
@@ -84,38 +82,48 @@ export class BetterSqlite3BackupAdapter implements ChatDbBackupAdapter {
 //
 // Uses a global async mutex to prevent concurrent backup operations across
 // local/WebDAV/S3 entry points.
+//
+// LOCK-6020: Each createSnapshot call owns an isolated temporary workspace
+// created via fs.mkdtemp() in the destination's parent directory. This
+// guarantees:
+//  - Same filesystem as destination (atomic rename works)
+//  - Per-operation isolation (no shared temp directory)
+//  - Cleanup only removes the current operation's workspace
 // ---------------------------------------------------------------------------
 
 export class ChatDbBackup {
   private adapter: ChatDbBackupAdapter
-  private tempDir: string
 
   // Global async mutex — prevents concurrent backup operations
   private static backupMutex: Promise<void> = Promise.resolve()
 
-  constructor(adapter: ChatDbBackupAdapter, _dbDir: string) {
+  constructor(adapter: ChatDbBackupAdapter) {
     this.adapter = adapter
-    this.tempDir = path.join(os.tmpdir(), 'cherry-studio-chatdb-backup')
   }
 
   /**
    * Create a validated snapshot at `destPath`.
    *
    * Steps:
-   * 1. Ensure temp dir exists.
+   * 1. Create per-operation isolated temp workspace via mkdtemp (same filesystem as dest).
    * 2. Create snapshot in temp location (async await of backup API).
    * 3. Validate snapshot integrity.
    * 4. Atomic publish: move temp → destPath (same filesystem = rename).
-   * 5. Cleanup temp dir.
+   * 5. Cleanup ONLY this operation's owned workspace.
+   *
+   * LOCK-6020: No global fixed writable temp directory; cleanup removes only
+   * the current operation's owned workspace. Correctness does not depend on
+   * module-static mutex across worker threads/processes.
    *
    * @returns Path to the created snapshot file.
    * @throws If any step fails (temp files are cleaned up on failure).
    */
   async createSnapshot(destPath: string): Promise<string> {
     return ChatDbBackup.withMutex(async () => {
-      await fs.promises.mkdir(this.tempDir, { recursive: true })
-
-      const tempSnapshot = path.join(this.tempDir, `chat-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.db`)
+      // LOCK-6020: Per-operation isolated temp workspace on same filesystem as dest.
+      // mkdtemp creates a unique directory — no two operations can collide.
+      const tempWorkspace = await fs.promises.mkdtemp(path.join(path.dirname(destPath), `.chatdb-snapshot-tmp-`))
+      const tempSnapshot = path.join(tempWorkspace, 'chat-snapshot.db')
 
       try {
         // Step 1: Create consistent snapshot via async backup API
@@ -131,7 +139,7 @@ export class ChatDbBackup {
         }
         logger.info('Snapshot integrity validated')
 
-        // Step 3: Atomic publish — rename temp → dest (same filesystem)
+        // Step 3: Atomic publish — rename temp → dest (same filesystem guaranteed)
         await fs.promises.mkdir(path.dirname(destPath), { recursive: true })
 
         // Remove existing dest if present (atomic rename requires no existing target)
@@ -154,9 +162,10 @@ export class ChatDbBackup {
         }
         throw error
       } finally {
-        // Cleanup temp directory (best-effort)
+        // LOCK-6020: Cleanup ONLY this operation's isolated workspace.
+        // Never touches another operation's temp directory.
         try {
-          await fs.promises.rm(this.tempDir, { recursive: true, force: true })
+          await fs.promises.rm(tempWorkspace, { recursive: true, force: true })
         } catch {
           // Ignore cleanup errors
         }

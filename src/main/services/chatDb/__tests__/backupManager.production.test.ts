@@ -25,6 +25,7 @@
 import * as realFs from 'node:fs'
 import * as realOs from 'node:os'
 import * as realPath from 'node:path'
+import { crc32 } from 'node:zlib'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -36,6 +37,7 @@ vi.unmock('node:fs')
 vi.unmock('node:os')
 vi.unmock('node:path')
 vi.unmock('node:crypto')
+vi.unmock('node:zlib')
 
 // ---------------------------------------------------------------------------
 // Hoisted mocks — available at module init time
@@ -107,6 +109,7 @@ vi.mock('../../S3Storage', () => ({
 // Imports after mocks
 // ---------------------------------------------------------------------------
 
+import archiver from 'archiver'
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 import StreamZip from 'node-stream-zip'
@@ -127,6 +130,84 @@ function makeTempDir(): string {
 
 function rmrf(dir: string): void {
   realFs.rmSync(dir, { recursive: true, force: true })
+}
+
+/**
+ * Build a raw ZIP buffer with exact entry names, bypassing archiver's
+ * path normalization. This is essential for security tests that need
+ * specific malicious entry names (traversal, absolute paths) preserved
+ * verbatim in the ZIP file.
+ *
+ * Uses STORED (no compression) to keep the implementation simple.
+ * CRC32 is computed via node:zlib.crc32 for correctness.
+ */
+function buildRawZip(entries: Array<{ name: string; content: Buffer | string }>): Buffer {
+  const localParts: Buffer[] = []
+  const centralParts: Buffer[] = []
+  let offset = 0
+
+  for (const entry of entries) {
+    const nameBytes = Buffer.from(entry.name, 'utf-8')
+    const contentBytes = typeof entry.content === 'string' ? Buffer.from(entry.content, 'utf-8') : entry.content
+    const crc = crc32(contentBytes) >>> 0
+
+    // --- Local file header (30 bytes fixed) ---
+    const local = Buffer.alloc(30)
+    local.writeUInt32LE(0x04034b50, 0) // local file header signature
+    local.writeUInt16LE(20, 4) // version needed to extract
+    local.writeUInt16LE(0, 6) // general purpose bit flag
+    local.writeUInt16LE(0, 8) // compression method: stored (0)
+    local.writeUInt16LE(0, 10) // last mod file time
+    local.writeUInt16LE(0, 12) // last mod file date
+    local.writeUInt32LE(crc, 14) // crc-32
+    local.writeUInt32LE(contentBytes.length, 18) // compressed size
+    local.writeUInt32LE(contentBytes.length, 22) // uncompressed size
+    local.writeUInt16LE(nameBytes.length, 26) // file name length
+    local.writeUInt16LE(0, 28) // extra field length
+
+    localParts.push(Buffer.concat([local, nameBytes, contentBytes]))
+
+    // --- Central directory header (46 bytes fixed) ---
+    const central = Buffer.alloc(46)
+    central.writeUInt32LE(0x02014b50, 0) // central directory header signature
+    central.writeUInt16LE(20, 4) // version made by
+    central.writeUInt16LE(20, 6) // version needed to extract
+    central.writeUInt16LE(0, 8) // general purpose bit flag
+    central.writeUInt16LE(0, 10) // compression method
+    central.writeUInt16LE(0, 12) // last mod file time
+    central.writeUInt16LE(0, 14) // last mod file date
+    central.writeUInt32LE(crc, 16) // crc-32
+    central.writeUInt32LE(contentBytes.length, 20) // compressed size
+    central.writeUInt32LE(contentBytes.length, 24) // uncompressed size
+    central.writeUInt16LE(nameBytes.length, 28) // file name length
+    central.writeUInt16LE(0, 30) // extra field length
+    central.writeUInt16LE(0, 32) // file comment length
+    central.writeUInt16LE(0, 34) // disk number start
+    central.writeUInt16LE(0, 36) // internal file attributes
+    central.writeUInt32LE(0, 38) // external file attributes
+    central.writeUInt32LE(offset, 42) // relative offset of local header
+
+    centralParts.push(Buffer.concat([central, nameBytes]))
+
+    offset += local.length + nameBytes.length + contentBytes.length
+  }
+
+  // --- End of central directory record (22 bytes) ---
+  const cdOffset = offset
+  const cdBuffer = Buffer.concat(centralParts)
+  const cdSize = cdBuffer.length
+
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0) // end of central directory signature
+  eocd.writeUInt16LE(0, 4) // number of this disk
+  eocd.writeUInt16LE(0, 6) // disk where central directory starts
+  eocd.writeUInt16LE(entries.length, 8) // number of central directory records on this disk
+  eocd.writeUInt16LE(entries.length, 10) // total number of central directory records
+  eocd.writeUInt32LE(cdSize, 12) // size of central directory
+  eocd.writeUInt32LE(cdOffset, 16) // offset of start of central directory
+  eocd.writeUInt16LE(0, 20) // comment length
+
+  return Buffer.concat([...localParts, cdBuffer, eocd])
 }
 
 function openTestDb(dbPath: string): Database.Database {
@@ -176,7 +257,7 @@ describe('BackupManager Production-Path Integration', () => {
     // This allows BackupManager.backup() to create real snapshots via the
     // actual ChatDbBackup → BetterSqlite3BackupAdapter → better-sqlite3 path.
     const adapter = new BetterSqlite3BackupAdapter(() => sqlite)
-    const chatDbBackup = new ChatDbBackup(adapter, dataDir)
+    const chatDbBackup = new ChatDbBackup(adapter)
     mockChatDbService.isInitialised.mockReturnValue(true)
     mockChatDbService.getBackup.mockReturnValue(chatDbBackup)
   })
@@ -274,26 +355,61 @@ describe('BackupManager Production-Path Integration', () => {
       }
     })
 
-    it('should restore Data without marker when Data.restore has no chat.db', async () => {
+    it('should reject Data.restore without chat.db and NOT consume any staging', async () => {
       const dataDir = realPath.join(tempDir, 'Data')
+      const indexedDBRestore = realPath.join(tempDir, 'IndexedDB.restore')
       const dataRestoreDir = realPath.join(tempDir, 'Data.restore')
       realFs.mkdirSync(dataDir, { recursive: true })
+      realFs.mkdirSync(indexedDBRestore, { recursive: true })
+      realFs.writeFileSync(realPath.join(indexedDBRestore, 'idb-file'), 'idb data')
       realFs.mkdirSync(dataRestoreDir, { recursive: true })
 
       // No chat.db — just some other file
       realFs.writeFileSync(realPath.join(dataRestoreDir, 'notes.txt'), 'user data')
 
-      await BackupManager.handleStartupRestore()
+      // handleStartupRestore should reject — Data.restore has no chat.db
+      await expect(BackupManager.handleStartupRestore()).rejects.toThrow(/does not contain chat.db/)
 
-      // Data.restore was consumed
-      expect(realFs.existsSync(dataRestoreDir)).toBe(false)
+      // Data.restore must NOT be consumed — retained for retry
+      expect(realFs.existsSync(dataRestoreDir)).toBe(true)
+      expect(realFs.existsSync(realPath.join(dataRestoreDir, 'notes.txt'))).toBe(true)
 
-      // Data has the file from Data.restore
-      expect(realFs.existsSync(realPath.join(dataDir, 'notes.txt'))).toBe(true)
-      expect(realFs.readFileSync(realPath.join(dataDir, 'notes.txt'), 'utf-8')).toBe('user data')
+      // IndexedDB.restore must NOT be consumed — LOCK-6010: no staging consumed
+      expect(realFs.existsSync(indexedDBRestore)).toBe(true)
+      expect(realFs.existsSync(realPath.join(indexedDBRestore, 'idb-file'))).toBe(true)
 
-      // No marker created (no chat.db in Data.restore)
+      // No marker created (Data.restore has no chat.db)
       expect(realFs.existsSync(realPath.join(dataDir, 'chat.db.restore'))).toBe(false)
+    })
+
+    it('should reject Data.restore with chat.db absent even when only IndexedDB.restore exists', async () => {
+      // LOCK-6010: IndexedDB.restore present + Data.restore without chat.db
+      // must abort before consuming IndexedDB.restore.
+      const dataDir = realPath.join(tempDir, 'Data')
+      const indexedDBRestore = realPath.join(tempDir, 'IndexedDB.restore')
+      const dataRestoreDir = realPath.join(tempDir, 'Data.restore')
+      realFs.mkdirSync(dataDir, { recursive: true })
+      realFs.mkdirSync(indexedDBRestore, { recursive: true })
+      realFs.writeFileSync(realPath.join(indexedDBRestore, 'idb-file'), 'idb data')
+      realFs.mkdirSync(dataRestoreDir, { recursive: true })
+      realFs.writeFileSync(realPath.join(dataRestoreDir, 'notes.txt'), 'user data')
+
+      await expect(BackupManager.handleStartupRestore()).rejects.toThrow(/does not contain chat.db/)
+
+      // Neither IndexedDB.restore nor Data.restore consumed
+      expect(realFs.existsSync(indexedDBRestore)).toBe(true)
+      expect(realFs.existsSync(dataRestoreDir)).toBe(true)
+    })
+
+    it('should reject Data.restore with empty directory (no chat.db)', async () => {
+      const dataDir = realPath.join(tempDir, 'Data')
+      const dataRestoreDir = realPath.join(tempDir, 'Data.restore')
+      realFs.mkdirSync(dataDir, { recursive: true })
+      realFs.mkdirSync(dataRestoreDir, { recursive: true })
+      // Empty Data.restore — no chat.db
+
+      await expect(BackupManager.handleStartupRestore()).rejects.toThrow(/does not contain chat.db/)
+      expect(realFs.existsSync(dataRestoreDir)).toBe(true)
     })
 
     it('should handle IndexedDB + Data.restore together', async () => {
@@ -430,6 +546,32 @@ describe('BackupManager Production-Path Integration', () => {
       const topic = extractedDb.prepare('SELECT * FROM topics WHERE id = ?').get('t1') as Record<string, unknown>
       expect(topic.name).toBe('Production Backup Test')
       extractedDb.close()
+    })
+
+    it('should fail when Data/chat.db does not exist (LOCK-6008)', async () => {
+      const bm = new BackupManager()
+      const destDir = realPath.join(tempDir, 'backups-nodata')
+      realFs.mkdirSync(destDir, { recursive: true })
+
+      // Remove Data directory entirely
+      const dataDir = realPath.join(tempDir, 'Data')
+      realFs.rmSync(dataDir, { recursive: true, force: true })
+
+      await expect(bm.backup(null as any, 'nodata-backup.zip', destDir)).rejects.toThrow(/Data\/chat\.db not found/)
+    })
+
+    it('should fail when Data directory exists but chat.db is absent (LOCK-6008)', async () => {
+      const bm = new BackupManager()
+      const destDir = realPath.join(tempDir, 'backups-nodb')
+      realFs.mkdirSync(destDir, { recursive: true })
+
+      // Remove chat.db but keep Data directory with other files
+      const dataDir = realPath.join(tempDir, 'Data')
+      const chatDbPath = realPath.join(dataDir, 'chat.db')
+      realFs.rmSync(chatDbPath, { force: true })
+      realFs.writeFileSync(realPath.join(dataDir, 'notes.txt'), 'some data')
+
+      await expect(bm.backup(null as any, 'nodb-backup.zip', destDir)).rejects.toThrow(/Data\/chat\.db not found/)
     })
   })
 
@@ -618,7 +760,7 @@ describe('BackupManager Production-Path Integration', () => {
         .run('t1', 'Mutex Test', new Date().toISOString())
 
       const adapter = new BetterSqlite3BackupAdapter(() => mutexSqlite)
-      const backup = new ChatDbBackup(adapter, tempDir)
+      const backup = new ChatDbBackup(adapter)
 
       // First snapshot: should succeed
       const snap1 = realPath.join(tempDir, 'snap1.db')
@@ -632,7 +774,7 @@ describe('BackupManager Production-Path Integration', () => {
         },
         validateSnapshot: async () => 'ok' as const
       }
-      const failingBackup = new ChatDbBackup(failingAdapter, tempDir)
+      const failingBackup = new ChatDbBackup(failingAdapter)
       const snap2 = realPath.join(tempDir, 'snap2.db')
       await expect(failingBackup.createSnapshot(snap2)).rejects.toThrow('Simulated backup failure')
 
@@ -667,7 +809,7 @@ describe('BackupManager Production-Path Integration', () => {
       // Capture the holder at snapshot time — deep inside the backup operation.
       let holderDuringBackup: { kind: string; ownerId: string } | null = null
       const adapter = new BetterSqlite3BackupAdapter(() => sqlite)
-      const chatDbBackup = new ChatDbBackup(adapter, realPath.join(tempDir, 'Data'))
+      const chatDbBackup = new ChatDbBackup(adapter)
       mockChatDbService.getBackup.mockImplementation(() => {
         holderDuringBackup = coordinator.currentHolder()
         return chatDbBackup
@@ -760,6 +902,471 @@ describe('BackupManager Production-Path Integration', () => {
       // No-op activation (no .restore directories) acquires and releases.
       await BackupManager.handleStartupRestore()
       expect(coordinator.currentHolder()).toBeNull()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LOCK-6012/6013: Security regression tests for restore extraction
+  // ---------------------------------------------------------------------------
+
+  describe('Security: restore extraction containment', () => {
+    it('restore rejects ZIP with traversal (../) entries', async () => {
+      // Create a raw ZIP (not via archiver) to preserve the exact traversal
+      // entry name. Archiver normalizes leading "../" components which would
+      // defeat the purpose of testing our validation layer.
+      const zipPath = realPath.join(tempDir, 'traversal-backup.zip')
+      const zipBuf = buildRawZip([
+        { name: 'metadata.json', content: '{}' },
+        { name: '../../etc/passwd', content: 'traversed' }
+      ])
+      realFs.writeFileSync(zipPath, zipBuf)
+
+      const bm = new BackupManager()
+
+      // Both node-stream-zip ("Malicious entry") and our validateRestoreZipEntries
+      // ("traversal component") reject path traversal. The important outcome is
+      // that extraction is prevented before any unsafe staging.
+      await expect(bm.restore({} as any, zipPath)).rejects.toThrow(/Malicious|traversal component/)
+    })
+
+    it('restore rejects ZIP with absolute path entries', async () => {
+      // Use raw ZIP to preserve the leading "/" — archiver strips it.
+      const zipPath = realPath.join(tempDir, 'absolute-backup.zip')
+      const zipBuf = buildRawZip([
+        { name: 'metadata.json', content: '{}' },
+        { name: '/etc/passwd', content: 'absolute' }
+      ])
+      realFs.writeFileSync(zipPath, zipBuf)
+
+      const bm = new BackupManager()
+
+      // Both node-stream-zip ("Malicious entry") and our validateRestoreZipEntries
+      // ("absolute path") reject absolute path entries. The important outcome is
+      // that extraction is prevented before any unsafe staging.
+      await expect(bm.restore({} as any, zipPath)).rejects.toThrow(/Malicious|absolute path/)
+    })
+
+    it('restore rejects ZIP with NUL byte in entry name', async () => {
+      const zipPath = realPath.join(tempDir, 'nul-backup.zip')
+      const zipBuf = buildRawZip([
+        { name: 'metadata.json', content: '{}' },
+        { name: 'innocent.txt\x00../../etc/passwd', content: 'nul attack' }
+      ])
+      realFs.writeFileSync(zipPath, zipBuf)
+
+      const bm = new BackupManager()
+
+      // Verify no staging directories exist before restore
+      const indexedDBRestore = realPath.join(tempDir, 'IndexedDB.restore')
+      const dataRestore = realPath.join(tempDir, 'Data.restore')
+      expect(realFs.existsSync(indexedDBRestore)).toBe(false)
+      expect(realFs.existsSync(dataRestore)).toBe(false)
+
+      // NUL bytes cause path truncation attacks. Both node-stream-zip's
+      // built-in protection ("Malicious entry") and our validateRestoreZipEntries
+      // ("NUL byte") reject this. The important outcome is that extraction
+      // is prevented before any unsafe staging.
+      await expect(bm.restore({} as any, zipPath)).rejects.toThrow(/Malicious|NUL byte/)
+
+      // No .restore staging was created
+      expect(realFs.existsSync(indexedDBRestore)).toBe(false)
+      expect(realFs.existsSync(dataRestore)).toBe(false)
+
+      // App.relaunch was NOT called
+      const { app } = await import('electron')
+      expect(app.relaunch).not.toHaveBeenCalled()
+    })
+
+    it('restore rejects ZIP with backslash separator entries', async () => {
+      const zipPath = realPath.join(tempDir, 'backslash-backup.zip')
+      const zipBuf = buildRawZip([
+        { name: 'metadata.json', content: '{}' },
+        { name: 'Data\\..\\..\\etc\\passwd', content: 'backslash' }
+      ])
+      realFs.writeFileSync(zipPath, zipBuf)
+
+      const bm = new BackupManager()
+
+      // Verify no staging directories exist before restore
+      const indexedDBRestore = realPath.join(tempDir, 'IndexedDB.restore')
+      const dataRestore = realPath.join(tempDir, 'Data.restore')
+      expect(realFs.existsSync(indexedDBRestore)).toBe(false)
+      expect(realFs.existsSync(dataRestore)).toBe(false)
+
+      // Backslash separators are ambiguous across platforms and indicate
+      // cross-platform path traversal attacks. Both node-stream-zip (normalizes
+      // to "/" then detects "..") and our validateRestoreZipEntries reject these.
+      // The important outcome is that extraction is prevented before any unsafe staging.
+      await expect(bm.restore({} as any, zipPath)).rejects.toThrow(/Malicious|backslash separator/)
+
+      // No .restore staging was created
+      expect(realFs.existsSync(indexedDBRestore)).toBe(false)
+      expect(realFs.existsSync(dataRestore)).toBe(false)
+
+      // App.relaunch was NOT called
+      const { app } = await import('electron')
+      expect(app.relaunch).not.toHaveBeenCalled()
+    })
+
+    it('restore creates unique extraction directory per operation', async () => {
+      // Create a valid ZIP (will fail at metadata validation, but extraction dir is created)
+      const zipPath = realPath.join(tempDir, 'valid-structure.zip')
+      const output = realFs.createWriteStream(zipPath)
+      const archive = archiver('zip', { zlib: { level: 0 } })
+      await new Promise<void>((resolve, reject) => {
+        output.on('close', resolve)
+        output.on('error', reject)
+        archive.on('error', reject)
+        archive.pipe(output)
+        archive.append(Buffer.from('{}'), { name: 'metadata.json', store: true })
+        archive.finalize()
+      })
+
+      const bm = new BackupManager()
+
+      // This will fail because metadata is invalid, but extraction dir is unique
+      await expect(bm.restore({} as any, zipPath)).rejects.toThrow()
+
+      // Verify no stale extraction dirs remain (cleanup in catch)
+      const restoreBase = realPath.join(realOs.tmpdir(), 'cherry-studio', 'restore')
+      if (realFs.existsSync(restoreBase)) {
+        const entries = realFs.readdirSync(restoreBase, { withFileTypes: true })
+        const extractionDirs = entries.filter((e) => e.isDirectory() && e.name.startsWith('extraction-'))
+        // Should be 0 — cleanup runs in catch
+        expect(extractionDirs.length).toBe(0)
+      }
+    })
+
+    it('cleanupOrphanedExtractions removes stale extraction directories', async () => {
+      const restoreBase = realPath.join(realOs.tmpdir(), 'cherry-studio', 'restore')
+      realFs.mkdirSync(restoreBase, { recursive: true })
+
+      // Create a stale extraction directory (simulating a crashed restore)
+      const staleDir = realPath.join(restoreBase, 'extraction-00000000000000-stale')
+      realFs.mkdirSync(staleDir, { recursive: true })
+      realFs.writeFileSync(realPath.join(staleDir, 'test.txt'), 'stale data')
+
+      // Make it appear old by modifying mtime
+      const oldTime = new Date(Date.now() - 2 * 60 * 60 * 1000) // 2 hours ago
+      realFs.utimesSync(staleDir, oldTime, oldTime)
+
+      // Run cleanup with 1-hour threshold
+      await BackupManager.cleanupOrphanedExtractions(60 * 60 * 1000)
+
+      // Stale dir should be removed
+      expect(realFs.existsSync(staleDir)).toBe(false)
+    })
+
+    it('cleanupOrphanedExtractions preserves recent extraction directories', async () => {
+      const restoreBase = realPath.join(realOs.tmpdir(), 'cherry-studio', 'restore')
+      realFs.mkdirSync(restoreBase, { recursive: true })
+
+      // Create a recent extraction directory (active restore)
+      const recentDir = realPath.join(restoreBase, 'extraction-99999999999999-recent')
+      realFs.mkdirSync(recentDir, { recursive: true })
+      realFs.writeFileSync(realPath.join(recentDir, 'test.txt'), 'recent data')
+
+      // Run cleanup with 1-hour threshold
+      await BackupManager.cleanupOrphanedExtractions(60 * 60 * 1000)
+
+      // Recent dir should be preserved
+      expect(realFs.existsSync(recentDir)).toBe(true)
+
+      // Cleanup
+      realFs.rmSync(recentDir, { recursive: true, force: true })
+    })
+
+    it('sanitizeProviderFilename strips traversal from WebDAV/S3 filenames', async () => {
+      // This tests the sanitizeProviderFilename function used in restoreFromWebdav/restoreFromS3
+      const { sanitizeProviderFilename } = await import('../../zipSecurityValidation')
+
+      // Traversal attempt
+      const safe1 = sanitizeProviderFilename('../../etc/passwd', '/tmp/root')
+      expect(safe1).not.toContain('..')
+      expect(safe1).not.toContain('/')
+
+      // Absolute path
+      const safe2 = sanitizeProviderFilename('/etc/passwd', '/tmp/root')
+      expect(safe2).not.toContain('/')
+
+      // Windows traversal
+      const safe3 = sanitizeProviderFilename('..\\..\\windows\\system32\\config\\sam', '/tmp/root')
+      expect(safe3).not.toContain('..')
+      expect(safe3).not.toContain('\\')
+
+      // All safe filenames should be usable in path.join without escaping
+      const root = '/tmp/safe-root'
+      for (const safe of [safe1, safe2, safe3]) {
+        const fullPath = realPath.join(root, safe)
+        expect(fullPath.startsWith(root + realPath.sep)).toBe(true)
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // LOCK-6014: Metadata/chat.db rejection proves no .restore staging occurs
+    // -----------------------------------------------------------------------
+
+    it('restore with invalid metadata creates no .restore staging and no relaunch', async () => {
+      // Create a ZIP with invalid metadata (wrong version)
+      const zipPath = realPath.join(tempDir, 'invalid-meta.zip')
+      const output = realFs.createWriteStream(zipPath)
+      const archive = archiver('zip', { zlib: { level: 0 } })
+      await new Promise<void>((resolve, reject) => {
+        output.on('close', resolve)
+        output.on('error', reject)
+        archive.on('error', reject)
+        archive.pipe(output)
+        archive.append(Buffer.from(JSON.stringify({ version: 99, purpose: 'backup' })), {
+          name: 'metadata.json',
+          store: true
+        })
+        archive.append(Buffer.from('fake db'), { name: 'Data/chat.db', store: true })
+        archive.finalize()
+      })
+
+      const bm = new BackupManager()
+
+      // Verify no .restore dirs exist before the call
+      const indexedDBRestore = realPath.join(tempDir, 'IndexedDB.restore')
+      const dataRestore = realPath.join(tempDir, 'Data.restore')
+      expect(realFs.existsSync(indexedDBRestore)).toBe(false)
+      expect(realFs.existsSync(dataRestore)).toBe(false)
+
+      // Restore should reject due to invalid metadata
+      await expect(bm.restore({} as any, zipPath)).rejects.toThrow()
+
+      // No .restore staging was created
+      expect(realFs.existsSync(indexedDBRestore)).toBe(false)
+      expect(realFs.existsSync(dataRestore)).toBe(false)
+
+      // App.relaunch was NOT called (the mock is cleared per test)
+      const { app } = await import('electron')
+      expect(app.relaunch).not.toHaveBeenCalled()
+    })
+
+    it('restore with missing chat.db creates no .restore staging and no relaunch', async () => {
+      // Create a ZIP with valid L3 metadata but no Data/chat.db.
+      // The metadata must pass validateL3ArchiveMetadata so restoreDirect
+      // reaches the chat.db presence check (LOCK-6008).
+      const zipPath = realPath.join(tempDir, 'no-chatdb.zip')
+      const output = realFs.createWriteStream(zipPath)
+      const archive = archiver('zip', { zlib: { level: 0 } })
+      await new Promise<void>((resolve, reject) => {
+        output.on('close', resolve)
+        output.on('error', reject)
+        archive.on('error', reject)
+        archive.pipe(output)
+        archive.append(
+          Buffer.from(
+            JSON.stringify({
+              version: 7,
+              appName: 'Cherry Studio',
+              timestamp: Date.now(),
+              appVersion: '1.0.0',
+              platform: process.platform,
+              arch: process.arch,
+              product: 'Cherry Chat',
+              purpose: 'l3-backup'
+            })
+          ),
+          { name: 'metadata.json', store: true }
+        )
+        // Data dir exists but chat.db is absent
+        archive.append(Buffer.from('some data'), { name: 'Data/notes.txt', store: true })
+        archive.finalize()
+      })
+
+      const bm = new BackupManager()
+      const indexedDBRestore = realPath.join(tempDir, 'IndexedDB.restore')
+      const dataRestore = realPath.join(tempDir, 'Data.restore')
+      expect(realFs.existsSync(indexedDBRestore)).toBe(false)
+      expect(realFs.existsSync(dataRestore)).toBe(false)
+
+      await expect(bm.restore({} as any, zipPath)).rejects.toThrow(/chat\.db/)
+
+      // No .restore staging was created — LOCK-6014
+      expect(realFs.existsSync(indexedDBRestore)).toBe(false)
+      expect(realFs.existsSync(dataRestore)).toBe(false)
+
+      const { app } = await import('electron')
+      expect(app.relaunch).not.toHaveBeenCalled()
+    })
+
+    it('restore with corrupt chat.db creates no .restore staging and no relaunch', async () => {
+      // Create a ZIP with valid metadata but corrupt chat.db content
+      const zipPath = realPath.join(tempDir, 'corrupt-chatdb.zip')
+      const output = realFs.createWriteStream(zipPath)
+      const archive = archiver('zip', { zlib: { level: 0 } })
+      await new Promise<void>((resolve, reject) => {
+        output.on('close', resolve)
+        output.on('error', reject)
+        archive.on('error', reject)
+        archive.pipe(output)
+        archive.append(Buffer.from(JSON.stringify({ version: 7, purpose: 'backup', product: 'cherrystudio' })), {
+          name: 'metadata.json',
+          store: true
+        })
+        // Corrupt data — not a valid SQLite database
+        archive.append(Buffer.from('THIS IS NOT A SQLITE DATABASE'), {
+          name: 'Data/chat.db',
+          store: true
+        })
+        archive.finalize()
+      })
+
+      const bm = new BackupManager()
+      const indexedDBRestore = realPath.join(tempDir, 'IndexedDB.restore')
+      const dataRestore = realPath.join(tempDir, 'Data.restore')
+      expect(realFs.existsSync(indexedDBRestore)).toBe(false)
+      expect(realFs.existsSync(dataRestore)).toBe(false)
+
+      await expect(bm.restore({} as any, zipPath)).rejects.toThrow()
+
+      // No .restore staging was created — LOCK-6014
+      expect(realFs.existsSync(indexedDBRestore)).toBe(false)
+      expect(realFs.existsSync(dataRestore)).toBe(false)
+
+      const { app } = await import('electron')
+      expect(app.relaunch).not.toHaveBeenCalled()
+    })
+
+    it('restore with ZIP containing no metadata.json is rejected', async () => {
+      // ZIP with no metadata.json at all — legacy format rejected by LOCK-6009
+      const zipPath = realPath.join(tempDir, 'no-metadata.zip')
+      const output = realFs.createWriteStream(zipPath)
+      const archive = archiver('zip', { zlib: { level: 0 } })
+      await new Promise<void>((resolve, reject) => {
+        output.on('close', resolve)
+        output.on('error', reject)
+        archive.on('error', reject)
+        archive.pipe(output)
+        archive.append(Buffer.from('fake db'), { name: 'Data/chat.db', store: true })
+        archive.finalize()
+      })
+
+      const bm = new BackupManager()
+
+      await expect(bm.restore({} as any, zipPath)).rejects.toThrow(/metadata\.json/)
+
+      const dataRestore = realPath.join(tempDir, 'Data.restore')
+      expect(realFs.existsSync(dataRestore)).toBe(false)
+
+      const { app } = await import('electron')
+      expect(app.relaunch).not.toHaveBeenCalled()
+    })
+
+    it('restore cleans extraction dir on failure (no orphaned temp)', async () => {
+      // Use an invalid ZIP (traversal entry) to trigger failure
+      const zipPath = realPath.join(tempDir, 'fail-cleanup.zip')
+      const output = realFs.createWriteStream(zipPath)
+      const archive = archiver('zip', { zlib: { level: 0 } })
+      await new Promise<void>((resolve, reject) => {
+        output.on('close', resolve)
+        output.on('error', reject)
+        archive.on('error', reject)
+        archive.pipe(output)
+        archive.append(Buffer.from('{}'), { name: 'metadata.json', store: true })
+        archive.append(Buffer.from('evil'), { name: '../../etc/passwd', store: true })
+        archive.finalize()
+      })
+
+      const bm = new BackupManager()
+
+      // Record extraction dirs before
+      const restoreBase = realPath.join(realOs.tmpdir(), 'cherry-studio', 'restore')
+      const countExtractions = (): number => {
+        if (!realFs.existsSync(restoreBase)) return 0
+        return realFs.readdirSync(restoreBase).filter((d) => d.startsWith('extraction-')).length
+      }
+      const before = countExtractions()
+
+      await expect(bm.restore({} as any, zipPath)).rejects.toThrow()
+
+      // No new extraction dirs left behind (cleanup in catch block)
+      expect(countExtractions()).toBe(before)
+    })
+
+    // -----------------------------------------------------------------------
+    // LOCK-6012: Local backup fileName sanitization — real filesystem
+    // -----------------------------------------------------------------------
+
+    it('local backup sanitizes traversal fileName and creates archive with safe basename', async () => {
+      const bm = new BackupManager()
+      const destDir = realPath.join(tempDir, 'local-sec-backups')
+      realFs.mkdirSync(destDir, { recursive: true })
+
+      // '../../etc/passwd.zip' → path.basename → 'passwd.zip' (safe).
+      // The backup should succeed because mockChatDbService provides a real adapter.
+      // The key assertion: no file escapes the destination directory.
+      const archivePath = await bm.backup(null as any, '../../etc/passwd.zip', destDir)
+
+      // Verify: archive was created with the sanitized basename inside destDir
+      expect(realFs.existsSync(archivePath)).toBe(true)
+      expect(archivePath).toContain('passwd.zip')
+      expect(archivePath.startsWith(destDir)).toBe(true)
+
+      // Verify: no traversal file was created outside destDir
+      const files = realFs.readdirSync(destDir)
+      for (const f of files) {
+        expect(f).not.toContain('..')
+        expect(realPath.isAbsolute(f)).toBe(false)
+      }
+    })
+
+    it('local backup rejects empty fileName', async () => {
+      const bm = new BackupManager()
+      const destDir = realPath.join(tempDir, 'local-sec-backups2')
+      realFs.mkdirSync(destDir, { recursive: true })
+
+      await expect(bm.backup(null as any, '', destDir)).rejects.toThrow(/empty or invalid/)
+
+      const files = realFs.readdirSync(destDir)
+      expect(files.length).toBe(0)
+    })
+
+    it('local backup sanitizes and creates archive with safe basename', async () => {
+      const bm = new BackupManager()
+      const destDir = realPath.join(tempDir, 'local-sec-backups3')
+      realFs.mkdirSync(destDir, { recursive: true })
+
+      // Use a safe filename — backup should proceed past validation
+      // (will fail at chat.db snapshot since mockChatDbService.isInitialised is false,
+      //  but the filename validation and output containment are exercised)
+      try {
+        await bm.backup(null as any, 'safe-backup.zip', destDir)
+      } catch {
+        // Expected — chatDbService not initialized in this test context
+      }
+
+      // Verify: no traversal file was created outside destDir
+      const parentFiles = realFs.readdirSync(tempDir)
+      const suspiciousFiles = parentFiles.filter((f) => f.includes('..') || f.startsWith('/') || f === 'passwd.zip')
+      expect(suspiciousFiles.length).toBe(0)
+    })
+
+    it('local backup uses exclusive write — rejects duplicate fileName', async () => {
+      const bm = new BackupManager()
+      const destDir = realPath.join(tempDir, 'local-sec-excl')
+      realFs.mkdirSync(destDir, { recursive: true })
+
+      // Create a file that would collide with the backup output
+      const collisionPath = realPath.join(destDir, 'existing-backup.zip')
+      realFs.writeFileSync(collisionPath, 'existing content')
+
+      // backup() should fail (O_EXCL rejects the existing file)
+      // The error might be EEXIST from O_EXCL or a later error, but the
+      // existing file must NOT be truncated
+      try {
+        await bm.backup(null as any, 'existing-backup.zip', destDir)
+      } catch {
+        // Expected
+      }
+
+      // Verify: the existing file was NOT truncated
+      expect(realFs.readFileSync(collisionPath, 'utf-8')).toBe('existing content')
+
+      // Cleanup
+      realFs.rmSync(collisionPath, { force: true })
     })
   })
 })

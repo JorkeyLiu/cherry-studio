@@ -175,7 +175,12 @@ vi.mock('node:fs', () => ({
       memfs[to] = memfs[from]
       delete memfs[from]
     }),
-    rm: vi.fn(async () => {})
+    rm: vi.fn(async () => {}),
+    mkdtemp: vi.fn(async (prefix: string) => {
+      const id = `${prefix}${Date.now()}-${Math.random().toString(36).slice(2)}`
+      memfs[id] = memfs[id] || ''
+      return id
+    })
   }
 }))
 
@@ -597,7 +602,7 @@ describe('ChatDbBackup', () => {
         validateSnapshot: vi.fn(async () => 'ok' as const)
       }
 
-      const backup = new ChatDbBackup(mockAdapter, '/mock/data')
+      const backup = new ChatDbBackup(mockAdapter)
       const result = await backup.createSnapshot('/mock/data/chat.db.backup')
 
       expect(mockAdapter.createSnapshot).toHaveBeenCalled()
@@ -611,7 +616,7 @@ describe('ChatDbBackup', () => {
         validateSnapshot: vi.fn(async () => 'malformed database' as const)
       }
 
-      const backup = new ChatDbBackup(mockAdapter, '/mock/data')
+      const backup = new ChatDbBackup(mockAdapter)
 
       await expect(backup.createSnapshot('/mock/data/chat.db.backup')).rejects.toThrow(
         'Snapshot integrity check failed'
@@ -626,7 +631,7 @@ describe('ChatDbBackup', () => {
         validateSnapshot: vi.fn(async () => 'ok' as const)
       }
 
-      const backup = new ChatDbBackup(mockAdapter, '/mock/data')
+      const backup = new ChatDbBackup(mockAdapter)
 
       await expect(backup.createSnapshot('/mock/data/chat.db.backup')).rejects.toThrow('Backup API failed')
     })
@@ -639,7 +644,7 @@ describe('ChatDbBackup', () => {
         validateSnapshot: vi.fn(async () => 'ok' as const)
       }
 
-      const backup = new ChatDbBackup(mockAdapter, '/mock/data')
+      const backup = new ChatDbBackup(mockAdapter)
 
       await expect(backup.cleanupSnapshot('/mock/data')).resolves.toBeUndefined()
     })

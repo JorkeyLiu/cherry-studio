@@ -292,7 +292,7 @@ describe('ChatDbService Production-Path Integration', () => {
         .run('t1', 'Atomic Test', new Date().toISOString())
 
       const adapter = new BetterSqlite3BackupAdapter(() => sqlite)
-      const backup = new ChatDbBackup(adapter, tempDir)
+      const backup = new ChatDbBackup(adapter)
       const destPath = realPath.join(tempDir, 'published-snapshot.db')
 
       const result = await backup.createSnapshot(destPath)
@@ -323,7 +323,7 @@ describe('ChatDbService Production-Path Integration', () => {
         validateSnapshot: async () => 'ok' as const
       }
 
-      const backup = new ChatDbBackup(failingAdapter, tempDir)
+      const backup = new ChatDbBackup(failingAdapter)
       await expect(backup.createSnapshot(realPath.join(tempDir, 'dest.db'))).rejects.toThrow('Simulated backup failure')
 
       // Temp files should be cleaned up — the dest should not exist
@@ -344,7 +344,7 @@ describe('ChatDbService Production-Path Integration', () => {
         validateSnapshot: async () => 'malformed database' as const
       }
 
-      const backup = new ChatDbBackup(failingValidationAdapter, tempDir)
+      const backup = new ChatDbBackup(failingValidationAdapter)
       await expect(backup.createSnapshot(realPath.join(tempDir, 'dest.db'))).rejects.toThrow(
         'Snapshot integrity check failed'
       )
@@ -527,7 +527,7 @@ describe('ChatDbService Production-Path Integration', () => {
         .run('t1', 'Mutex Test', new Date().toISOString())
 
       const adapter = new BetterSqlite3BackupAdapter(() => sqlite)
-      const backup = new ChatDbBackup(adapter, tempDir)
+      const backup = new ChatDbBackup(adapter)
 
       // Fire 3 concurrent snapshot requests
       const p1 = backup.createSnapshot(realPath.join(tempDir, 'snap1.db'))
@@ -608,6 +608,240 @@ describe('ChatDbService Production-Path Integration', () => {
       }
 
       restoredDb.close()
+    })
+  })
+
+  // =========================================================================
+  // 9. LOCK-6020: Cross-instance concurrency isolation
+  //    Proves that independent ChatDbBackup instances with overlapping
+  //    snapshots cannot interfere with each other's temp workspaces.
+  // =========================================================================
+
+  describe('LOCK-6020: Cross-instance concurrency isolation', () => {
+    it('should isolate temp workspaces across independent ChatDbBackup instances', async () => {
+      // Create two independent source databases
+      const db1Path = realPath.join(tempDir, 'source1.db')
+      const db2Path = realPath.join(tempDir, 'source2.db')
+      const sqlite1 = openTestDb(db1Path)
+      const sqlite2 = openTestDb(db2Path)
+      runMigrations(wrapDrizzle(sqlite1), sqlite1)
+      runMigrations(wrapDrizzle(sqlite2), sqlite2)
+
+      sqlite1
+        .prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`)
+        .run('t1', 'Instance 1', new Date().toISOString())
+      sqlite2
+        .prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`)
+        .run('t2', 'Instance 2', new Date().toISOString())
+
+      // Two independent ChatDbBackup instances (no shared state beyond static mutex)
+      const adapter1 = new BetterSqlite3BackupAdapter(() => sqlite1)
+      const adapter2 = new BetterSqlite3BackupAdapter(() => sqlite2)
+      const backup1 = new ChatDbBackup(adapter1)
+      const backup2 = new ChatDbBackup(adapter2)
+
+      // Fire overlapping snapshots to different destinations
+      const dest1 = realPath.join(tempDir, 'dest1.db')
+      const dest2 = realPath.join(tempDir, 'dest2.db')
+      const [result1, result2] = await Promise.all([backup1.createSnapshot(dest1), backup2.createSnapshot(dest2)])
+
+      // Both destinations must exist and be valid
+      expect(result1).toBe(dest1)
+      expect(result2).toBe(dest2)
+      expect(realFs.existsSync(dest1)).toBe(true)
+      expect(realFs.existsSync(dest2)).toBe(true)
+
+      // Validate each snapshot contains only its own source data
+      const snapDb1 = new Database(dest1, { readonly: true })
+      expect(snapDb1.pragma('integrity_check', { simple: true })).toBe('ok')
+      const topic1 = snapDb1.prepare('SELECT * FROM topics WHERE id = ?').get('t1') as Record<string, unknown>
+      expect(topic1.name).toBe('Instance 1')
+      snapDb1.close()
+
+      const snapDb2 = new Database(dest2, { readonly: true })
+      expect(snapDb2.pragma('integrity_check', { simple: true })).toBe('ok')
+      const topic2 = snapDb2.prepare('SELECT * FROM topics WHERE id = ?').get('t2') as Record<string, unknown>
+      expect(topic2.name).toBe('Instance 2')
+      snapDb2.close()
+
+      // No leftover temp directories (cleanup removed only owned workspaces)
+      const destDir = tempDir
+      const tempEntries = realFs
+        .readdirSync(destDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && e.name.startsWith('.chatdb-snapshot-tmp-'))
+      expect(tempEntries).toHaveLength(0)
+
+      sqlite1.close()
+      sqlite2.close()
+    })
+
+    it('should clean up owned workspace on failure without affecting other operations', async () => {
+      const dbPath = realPath.join(tempDir, 'chat.db')
+      const sqlite = openTestDb(dbPath)
+      runMigrations(wrapDrizzle(sqlite), sqlite)
+      sqlite
+        .prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`)
+        .run('t1', 'Cleanup Test', new Date().toISOString())
+
+      const adapter = new BetterSqlite3BackupAdapter(() => sqlite)
+
+      // Failing adapter for one instance
+      const failingAdapter = {
+        createSnapshot: async () => {
+          throw new Error('Simulated failure')
+        },
+        validateSnapshot: async () => 'ok' as const
+      }
+
+      const successBackup = new ChatDbBackup(adapter)
+      const failBackup = new ChatDbBackup(failingAdapter)
+
+      // Fire both — the failing one should clean up its workspace
+      const successDest = realPath.join(tempDir, 'success.db')
+      const failDest = realPath.join(tempDir, 'should-not-exist.db')
+
+      const [, failError] = await Promise.allSettled([
+        successBackup.createSnapshot(successDest),
+        failBackup.createSnapshot(failDest)
+      ])
+
+      // The failure should have thrown
+      expect(failError.status).toBe('rejected')
+
+      // The success snapshot must still be valid
+      expect(realFs.existsSync(successDest)).toBe(true)
+      const db = new Database(successDest, { readonly: true })
+      expect(db.pragma('integrity_check', { simple: true })).toBe('ok')
+      const topic = db.prepare('SELECT * FROM topics WHERE id = ?').get('t1') as Record<string, unknown>
+      expect(topic.name).toBe('Cleanup Test')
+      db.close()
+
+      // No leftover temp directories
+      const tempEntries = realFs
+        .readdirSync(tempDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && e.name.startsWith('.chatdb-snapshot-tmp-'))
+      expect(tempEntries).toHaveLength(0)
+
+      sqlite.close()
+    })
+
+    it('should not leave temp artifacts when validation fails', async () => {
+      const dbPath = realPath.join(tempDir, 'chat.db')
+      const sqlite = openTestDb(dbPath)
+      runMigrations(wrapDrizzle(sqlite), sqlite)
+      sqlite
+        .prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`)
+        .run('t1', 'Validation Cleanup', new Date().toISOString())
+
+      const adapter = new BetterSqlite3BackupAdapter(() => sqlite)
+      // Adapter that creates a real snapshot but fails validation
+      const badValidationAdapter = {
+        createSnapshot: adapter.createSnapshot.bind(adapter),
+        validateSnapshot: async () => 'malformed database' as const
+      }
+
+      const backup = new ChatDbBackup(badValidationAdapter)
+      const dest = realPath.join(tempDir, 'validation-fail.db')
+
+      await expect(backup.createSnapshot(dest)).rejects.toThrow('Snapshot integrity check failed')
+
+      // Dest should not exist (rename never happened)
+      expect(realFs.existsSync(dest)).toBe(false)
+
+      // No leftover temp directories
+      const tempEntries = realFs
+        .readdirSync(tempDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && e.name.startsWith('.chatdb-snapshot-tmp-'))
+      expect(tempEntries).toHaveLength(0)
+
+      sqlite.close()
+    })
+
+    it('atomic publication: dest only exists after successful validation', async () => {
+      const dbPath = realPath.join(tempDir, 'chat.db')
+      const sqlite = openTestDb(dbPath)
+      runMigrations(wrapDrizzle(sqlite), sqlite)
+      sqlite
+        .prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`)
+        .run('t1', 'Atomic Test', new Date().toISOString())
+
+      const adapter = new BetterSqlite3BackupAdapter(() => sqlite)
+      const backup = new ChatDbBackup(adapter)
+
+      const dest = realPath.join(tempDir, 'atomic-dest.db')
+
+      // Precondition: dest does not exist
+      expect(realFs.existsSync(dest)).toBe(false)
+
+      const result = await backup.createSnapshot(dest)
+
+      // After success: dest exists and is valid
+      expect(result).toBe(dest)
+      expect(realFs.existsSync(dest)).toBe(true)
+      const db = new Database(dest, { readonly: true })
+      expect(db.pragma('integrity_check', { simple: true })).toBe('ok')
+      const topic = db.prepare('SELECT * FROM topics WHERE id = ?').get('t1') as Record<string, unknown>
+      expect(topic.name).toBe('Atomic Test')
+      db.close()
+
+      sqlite.close()
+    })
+
+    it('should pass with repeated concurrent runs (10 iterations)', async () => {
+      // Stress test: run 10 iterations of overlapping dual-instance snapshots
+      for (let i = 0; i < 10; i++) {
+        const iterDir = realPath.join(tempDir, `iter-${i}`)
+        realFs.mkdirSync(iterDir, { recursive: true })
+
+        const db1Path = realPath.join(iterDir, 'a.db')
+        const db2Path = realPath.join(iterDir, 'b.db')
+        const s1 = openTestDb(db1Path)
+        const s2 = openTestDb(db2Path)
+        runMigrations(wrapDrizzle(s1), s1)
+        runMigrations(wrapDrizzle(s2), s2)
+        s1.prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`).run(
+          'a',
+          `iter-${i}-a`,
+          new Date().toISOString()
+        )
+        s2.prepare(`INSERT INTO topics (id, name, created_at) VALUES (?, ?, ?)`).run(
+          'b',
+          `iter-${i}-b`,
+          new Date().toISOString()
+        )
+
+        const b1 = new ChatDbBackup(new BetterSqlite3BackupAdapter(() => s1))
+        const b2 = new ChatDbBackup(new BetterSqlite3BackupAdapter(() => s2))
+
+        const d1 = realPath.join(iterDir, 'out-a.db')
+        const d2 = realPath.join(iterDir, 'out-b.db')
+        const [r1, r2] = await Promise.all([b1.createSnapshot(d1), b2.createSnapshot(d2)])
+
+        expect(realFs.existsSync(r1)).toBe(true)
+        expect(realFs.existsSync(r2)).toBe(true)
+
+        // Validate both snapshots have correct data
+        const db1 = new Database(r1, { readonly: true })
+        expect(db1.pragma('integrity_check', { simple: true })).toBe('ok')
+        const rowA = db1.prepare('SELECT name FROM topics WHERE id = ?').get('a') as Record<string, unknown>
+        expect(rowA.name).toBe(`iter-${i}-a`)
+        db1.close()
+
+        const db2 = new Database(r2, { readonly: true })
+        expect(db2.pragma('integrity_check', { simple: true })).toBe('ok')
+        const rowB = db2.prepare('SELECT name FROM topics WHERE id = ?').get('b') as Record<string, unknown>
+        expect(rowB.name).toBe(`iter-${i}-b`)
+        db2.close()
+
+        // No leftover temp dirs in this iteration's directory
+        const leftover = realFs
+          .readdirSync(iterDir, { withFileTypes: true })
+          .filter((e) => e.isDirectory() && e.name.startsWith('.chatdb-snapshot-tmp-'))
+        expect(leftover).toHaveLength(0)
+
+        s1.close()
+        s2.close()
+      }
     })
   })
 })
