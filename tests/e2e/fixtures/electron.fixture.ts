@@ -101,6 +101,12 @@ export function queryChatDbViaElectron(dbPath: string, sql: string): Record<stri
   // Use a temp file for the script to avoid shell escaping issues with complex SQL
   const tmpScript = path.join(os.tmpdir(), `e2e-sqlite-query-${Date.now()}-${Math.random().toString(36).slice(2)}.js`)
   fs.writeFileSync(tmpScript, script, 'utf-8')
+
+  // LOCK-F3: temp-script deletion failures are never suppressed. ENOENT counts
+  // as already absent; every other removal failure fails the query, and exact
+  // absence is verified before returning. A removal failure combines with,
+  // never masks, any in-flight error (e.g. a JSON parse failure).
+  let pendingError: unknown = null
   try {
     // spawnSync with argument array — no shell interpolation
     const result = spawnSync(electronPath, [tmpScript], {
@@ -110,15 +116,23 @@ export function queryChatDbViaElectron(dbPath: string, sql: string): Record<stri
     })
 
     if (result.error) {
-      // spawnSync itself failed (e.g. electron binary not found)
-      console.error(`[E2E] queryChatDbViaElectron spawn error: ${result.error.message}`)
+      // spawnSync itself failed (e.g. electron binary not found). LOCK-N2:
+      // record the diagnostic as the pending body failure so a simultaneous
+      // temp-script cleanup failure reports BOTH failures instead of masking
+      // the subprocess error. Successful cleanup still returns null unchanged.
+      const diag = `[E2E] queryChatDbViaElectron spawn error: ${result.error.message}`
+      console.error(diag)
+      pendingError = new Error(diag)
       return null
     }
 
     if (result.status !== 0) {
-      // Non-zero exit: surface stderr for diagnostics
+      // Non-zero exit: surface stderr for diagnostics. LOCK-N2: same pending
+      // body failure record as the spawn-error path above.
       const stderr = result.stderr?.trim() || '(no stderr)'
-      console.error(`[E2E] queryChatDbViaElectron exited ${result.status}: ${stderr.slice(0, 500)}`)
+      const diag = `[E2E] queryChatDbViaElectron exited ${result.status}: ${stderr.slice(0, 500)}`
+      console.error(diag)
+      pendingError = new Error(diag)
       return null
     }
 
@@ -132,11 +146,31 @@ export function queryChatDbViaElectron(dbPath: string, sql: string): Record<stri
       }
     }
     return null
+  } catch (err) {
+    pendingError = err
+    throw err
   } finally {
+    let removalError: Error | null = null
     try {
       fs.unlinkSync(tmpScript)
-    } catch {
-      // ignore cleanup failure
+    } catch (err: any) {
+      // ENOENT means the script is already absent — not a failure (LOCK-F3).
+      if (err?.code !== 'ENOENT') {
+        removalError = new Error(
+          `[E2E] queryChatDbViaElectron failed to remove temp script ${tmpScript}: ${err?.message ?? String(err)}`
+        )
+      }
+    }
+    // Exact absence verification (LOCK-F3): unlink "success" is not trusted.
+    if (!removalError && fs.existsSync(tmpScript)) {
+      removalError = new Error(`[E2E] queryChatDbViaElectron temp script still exists after removal: ${tmpScript}`)
+    }
+    if (removalError) {
+      if (pendingError !== null) {
+        const originalMessage = pendingError instanceof Error ? pendingError.message : String(pendingError)
+        throw new Error(`${removalError.message} (original error: ${originalMessage})`)
+      }
+      throw removalError
     }
   }
 }
@@ -169,11 +203,12 @@ async function probeRuntimeAppDataPath(page: Page): Promise<void> {
     throw new Error(`Failed to probe runtime appDataPath: ${info.error}`)
   }
 
-  _runtimeAppDataPath = info.appDataPath
+  const runtimeAppDataPath = info.appDataPath
+  _runtimeAppDataPath = runtimeAppDataPath
 
   // Derive chatDb path from the ACTUAL runtime path.
   // Use the raw runtime path (Electron may report /private/var/... which is valid).
-  _chatDbPath = path.join(_runtimeAppDataPath, 'Data', 'chat.db')
+  _chatDbPath = path.join(runtimeAppDataPath, 'Data', 'chat.db')
 
   // LOCK-002: Assert the runtime path matches the expected disposable Dev path.
   // This ensures no config.json redirect to live user data.
@@ -183,8 +218,8 @@ async function probeRuntimeAppDataPath(page: Page): Promise<void> {
   const devDirName = path.basename(_userDataDir) + 'Dev'
   const resolvedTmpdir = fs.realpathSync(path.dirname(_userDataDir))
   const expectedDevPath = path.join(resolvedTmpdir, devDirName)
-  const resolvedRuntime = fs.realpathSync(path.dirname(_runtimeAppDataPath))
-  const runtimeChildName = path.basename(_runtimeAppDataPath)
+  const resolvedRuntime = fs.realpathSync(path.dirname(runtimeAppDataPath))
+  const runtimeChildName = path.basename(runtimeAppDataPath)
   if (resolvedRuntime !== resolvedTmpdir || runtimeChildName !== devDirName) {
     throw new Error(
       `LOCK-002 VIOLATION: Runtime appDataPath "${_runtimeAppDataPath}" ` +
@@ -477,4 +512,6 @@ export const test = base.extend<ElectronFixtures>({
 
 export { expect } from '@playwright/test'
 export { getRequestLog, clearRequestLog, findProductRequest, findProductRequestAfter, getRequestSequence }
-export { getRuntimeAppDataPath, getUserDataDir }
+// NOTE: getRuntimeAppDataPath/getUserDataDir are already exported at their
+// declarations above — a redundant `export { ... }` list here would be a
+// TS2323/TS2484 double-export under strict typechecking.

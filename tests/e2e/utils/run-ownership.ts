@@ -22,9 +22,20 @@ export function initializeRunRegistry(runToken: string, tmpDir = os.tmpdir()): s
   return registryPath
 }
 
-export function registerOwnedProfile(userDataDir: string, runToken: string, tmpDir = os.tmpdir()): void {
+/**
+ * Register one exact disposable owned path (a `--user-data-dir` profile root
+ * or any other disposable artifact directory directly under the OS temp dir)
+ * for the current run token so global teardown can remove it as a safety net.
+ * `cleanupRunRegistry` removes the registered path plus its `Dev` sibling.
+ */
+export function registerOwnedPath(ownedPath: string, runToken: string, tmpDir = os.tmpdir()): void {
   const registryPath = getRunRegistryPath(runToken, tmpDir)
-  fs.appendFileSync(registryPath, `${JSON.stringify(userDataDir)}\n`, 'utf-8')
+  fs.appendFileSync(registryPath, `${JSON.stringify(ownedPath)}\n`, 'utf-8')
+}
+
+/** Register a disposable `--user-data-dir` profile root (see {@link registerOwnedPath}). */
+export function registerOwnedProfile(userDataDir: string, runToken: string, tmpDir = os.tmpdir()): void {
+  registerOwnedPath(userDataDir, runToken, tmpDir)
 }
 
 function readOwnedProfiles(registryPath: string): string[] {
