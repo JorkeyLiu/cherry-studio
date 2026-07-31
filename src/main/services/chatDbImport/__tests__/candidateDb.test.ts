@@ -18,10 +18,14 @@
  */
 
 import * as fs from 'node:fs'
+// Default (mutable) fs object — spy target for bounded fault injection; the
+// candidate module imports the same default object (house pattern).
+import nodeFs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
 import type BetterSqlite3 from 'better-sqlite3'
+import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Unmock the globally-mocked node modules — we need real filesystem behavior.
@@ -44,7 +48,8 @@ import {
   getOwnedCandidateDirName,
   isValidCandidateId,
   isValidOwnedCandidateId,
-  recoverOrphanedCandidates
+  recoverOrphanedCandidates,
+  resealSealedCandidate
 } from '../candidateDb'
 
 // ---------------------------------------------------------------------------
@@ -497,6 +502,123 @@ describe('candidateDb — lifecycle primitives', () => {
       expect(() => getOwnedCandidateDirName('abc-123')).toThrow(/path safety/)
       expect(() => getOwnedCandidateDirName(CANDIDATE_DIR_PREFIX)).toThrow(/path safety/)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Reseal — post-verification sealed-invariant restoration (LOCK-RS3/RS6)
+// ---------------------------------------------------------------------------
+
+describe('candidateDb — reseal after readonly verification residue (LOCK-RS3)', () => {
+  let dataRoot: string
+
+  beforeEach(() => {
+    dataRoot = makeDataRoot()
+  })
+
+  afterEach(() => {
+    rmrf(dataRoot)
+    vi.restoreAllMocks()
+  })
+
+  /** Create a real sealed candidate with one topic row, then close (sealed). */
+  async function makeRealSealedResource(): Promise<{
+    resource: CandidateDbResource
+    dbPath: string
+  }> {
+    const resource = new CandidateDbResource({ sessionId: VALID_SESSION_ID, dataRoot })
+    await resource.initialize() // real ChatDbService + real migrations
+    const sqlite = resource.getSqlite() as BetterSqlite3.Database
+    sqlite.prepare("INSERT INTO topics (id, name) VALUES ('t1', 'x')").run()
+    resource.seal()
+    // A clean writable close leaves NO sidecars (sealed invariant).
+    const dbPath = resource.getDbPath()
+    expect(fs.existsSync(`${dbPath}-wal`)).toBe(false)
+    expect(fs.existsSync(`${dbPath}-shm`)).toBe(false)
+    return { resource, dbPath }
+  }
+
+  /** Recreate the verifier's readonly residue: readonly open + close. */
+  function leaveReadonlyResidue(dbPath: string): void {
+    const readonly = new Database(dbPath, { readonly: true, fileMustExist: true })
+    readonly.prepare('SELECT count(*) AS c FROM topics').get()
+    readonly.close()
+    // 0-byte -wal + empty 32KiB -shm residue (inspector-proven shape).
+    expect(fs.existsSync(`${dbPath}-wal`)).toBe(true)
+    expect(fs.statSync(`${dbPath}-wal`).size).toBe(0)
+    expect(fs.existsSync(`${dbPath}-shm`)).toBe(true)
+  }
+
+  it('reseal removes readonly residue, keeps main bytes stable, stays readable, and is idempotent', async () => {
+    const { resource, dbPath } = await makeRealSealedResource()
+    const mainBytesAtSeal = fs.statSync(dbPath).size
+
+    // Phase 4.3 verifier: readonly reopen leaves empty WAL/SHM residue.
+    leaveReadonlyResidue(dbPath)
+
+    // Reseal restores the sealed invariant without touching main bytes.
+    resource.reseal()
+    expect(fs.existsSync(`${dbPath}-wal`)).toBe(false)
+    expect(fs.existsSync(`${dbPath}-shm`)).toBe(false)
+    expect(fs.statSync(dbPath).size).toBe(mainBytesAtSeal)
+    expect(resource.getState()).toBe('sealed')
+
+    // Readable after reseal (candidate remains a valid DB for promotion).
+    const reread = new Database(dbPath, { readonly: true, fileMustExist: true })
+    const row = reread.prepare('SELECT count(*) AS c FROM topics').get() as { c: number }
+    expect(row.c).toBe(1)
+    reread.close()
+
+    // Idempotent: a second reseal on the clean sealed candidate succeeds.
+    resource.reseal()
+    expect(fs.existsSync(`${dbPath}-wal`)).toBe(false)
+    expect(fs.existsSync(`${dbPath}-shm`)).toBe(false)
+  })
+
+  it('module-level resealSealedCandidate restores the sealed invariant on a raw candidate path', async () => {
+    const { dbPath } = await makeRealSealedResource()
+    const mainBytesAtSeal = fs.statSync(dbPath).size
+
+    leaveReadonlyResidue(dbPath)
+    resealSealedCandidate(dbPath)
+
+    expect(fs.existsSync(`${dbPath}-wal`)).toBe(false)
+    expect(fs.existsSync(`${dbPath}-shm`)).toBe(false)
+    expect(fs.statSync(dbPath).size).toBe(mainBytesAtSeal)
+  })
+
+  it('reseal fails closed when the candidate DB is missing (no silent file creation)', async () => {
+    const { resource, dbPath } = await makeRealSealedResource()
+    // Remove the candidate DB after seal — the sealed invariant is gone.
+    fs.rmSync(dbPath)
+
+    expect(() => resource.reseal()).toThrow(/not a file/)
+    expect(fs.existsSync(`${dbPath}-wal`)).toBe(false)
+    expect(fs.existsSync(`${dbPath}-shm`)).toBe(false)
+  })
+
+  it('reseal refuses from non-sealed states (new / initialized)', async () => {
+    const fresh = new CandidateDbResource({ sessionId: VALID_SESSION_ID, dataRoot })
+    expect(() => fresh.reseal()).toThrow(/not sealed/)
+
+    const open = new CandidateDbResource({ sessionId: VALID_SESSION_ID, dataRoot })
+    await open.initialize()
+    expect(() => open.reseal()).toThrow(/not sealed/)
+  })
+
+  it('reseal fails closed when a sidecar survives the checkpoint — no blind unlink', async () => {
+    const { resource, dbPath } = await makeRealSealedResource()
+    leaveReadonlyResidue(dbPath)
+
+    // Inject a surviving -wal sidecar: make the post-checkpoint existence
+    // probe report the WAL as present so the fail-closed branch is taken.
+    const existsSpy = vi.spyOn(nodeFs, 'existsSync').mockImplementation((p) => {
+      if (typeof p === 'string' && p.endsWith('-wal')) return true
+      return fs.existsSync(p)
+    })
+
+    expect(() => resource.reseal()).toThrow(/still present after checkpoint/)
+    existsSpy.mockRestore()
   })
 })
 

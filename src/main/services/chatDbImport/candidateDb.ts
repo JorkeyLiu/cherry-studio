@@ -39,6 +39,7 @@ import path from 'node:path'
 import { loggerService } from '@logger'
 import { DATA_PATH } from '@main/config'
 import { ChatDbService } from '@main/services/chatDb'
+import Database from 'better-sqlite3'
 
 const logger = loggerService.withContext('chatDbImportCandidate')
 
@@ -171,6 +172,85 @@ function resolveOwnedCandidateDir(
 }
 
 // ---------------------------------------------------------------------------
+// Reseal — post-verification sealed-invariant restoration (LOCK-RS3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reseal a sealed candidate DB whose sealed invariant was disturbed by a
+ * READONLY reopen. The verifier's readonly open leaves empty WAL/SHM
+ * residue (0-byte `-wal` + 32KiB empty `-shm`) that the install guard
+ * (installCandidate, LOCK-RS1) must reject — so `verified-candidate` must
+ * never be claimed over such residue.
+ *
+ * Deterministic recipe (inspector-proven): writable open →
+ * `wal_checkpoint(TRUNCATE)` → close → verify BOTH sidecars absent. The
+ * main DB bytes are unchanged (the residue WAL is empty). Plain writable
+ * close and readonly checkpoint do NOT remove the residue.
+ *
+ * Fail closed (LOCK-RS3): every step is strict. A missing/non-file DB, a
+ * busy or absent checkpoint result, an open/close error, or a sidecar
+ * still present afterwards THROWS. This helper NEVER deletes sidecars —
+ * no blind unlink. The caller must route a failure into the session
+ * error/discard lifecycle; a failure must never be treated as a sealed
+ * candidate.
+ *
+ * Idempotent: resealing an already-clean sealed candidate is a no-op
+ * checkpoint and succeeds.
+ *
+ * @throws {Error} on any failure (fail closed, no partial seal state).
+ */
+export function resealSealedCandidate(dbPath: string): void {
+  // Fail closed on a missing/non-file candidate BEFORE any writable open
+  // (better-sqlite3 would otherwise CREATE the file).
+  let isFile = false
+  try {
+    isFile = fs.statSync(dbPath).isFile()
+  } catch {
+    isFile = false
+  }
+  if (!isFile) {
+    logger.error(`Candidate reseal refused: candidate DB is not a file: ${dbPath}`)
+    throw new Error(`Candidate reseal refused: candidate DB is not a file: ${dbPath}`)
+  }
+
+  let checkpointResult: Array<{ busy?: number }> | null = null
+  const sqlite = new Database(dbPath, { fileMustExist: true })
+  try {
+    checkpointResult = sqlite.pragma('wal_checkpoint(TRUNCATE)') as Array<{ busy?: number }>
+  } catch (error) {
+    logger.error(`Candidate reseal failed during wal_checkpoint(TRUNCATE) for ${dbPath}:`, error as Error)
+    throw error
+  } finally {
+    sqlite.close()
+  }
+
+  // Fail closed on a busy/absent checkpoint: a busy result proves another
+  // connection holds the WAL and the residue was NOT durably truncated.
+  const row = checkpointResult?.[0]
+  const busy = typeof row?.busy === 'number' ? row.busy : NaN
+  if (row === undefined || Number.isNaN(busy) || busy !== 0) {
+    logger.error(`Candidate reseal failed: wal_checkpoint(TRUNCATE) busy/absent for ${dbPath} (busy=${String(busy)})`)
+    throw new Error(
+      `Candidate reseal failed: wal_checkpoint(TRUNCATE) did not complete (busy=${String(busy)}). ` +
+        'The sealed invariant is NOT restored — refusing to claim a sealed candidate.'
+    )
+  }
+
+  // Sidecar-absence proof: the sealed invariant means NO -wal / -shm.
+  for (const sidecar of [`${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (fs.existsSync(sidecar)) {
+      logger.error(`Candidate reseal failed: sidecar still present after checkpoint: ${sidecar}`)
+      throw new Error(
+        `Candidate reseal failed: ${path.basename(sidecar)} still present after checkpoint. ` +
+          'The sealed invariant is NOT restored — refusing to claim a sealed candidate.'
+      )
+    }
+  }
+
+  logger.info(`Resealed candidate database ${dbPath} (no WAL/SHM sidecars)`)
+}
+
+// ---------------------------------------------------------------------------
 // CandidateDbResource — one instance per import session
 // ---------------------------------------------------------------------------
 
@@ -291,6 +371,23 @@ export class CandidateDbResource {
       this.state = 'sealed'
       logger.info(`Sealed candidate database for session ${this.sessionId}`)
     }
+  }
+
+  /**
+   * Re-establish the sealed invariant after READONLY verification residue
+   * (LOCK-RS3/RS4): writable open + deterministic `wal_checkpoint(TRUNCATE)`
+   * + close, then prove BOTH sidecars absent — main DB bytes unchanged.
+   *
+   * Only valid from `sealed` state: a resealed candidate stays `sealed` on
+   * success. Fail closed — any failure THROWS (never a blind unlink, never
+   * a partial seal state) and the session must route it into the
+   * error/discard lifecycle instead of claiming `verified-candidate`.
+   */
+  reseal(): void {
+    if (this.state !== 'sealed') {
+      throw new Error(`Candidate reseal refused: candidate is not sealed (state: ${this.state}).`)
+    }
+    resealSealedCandidate(this.candidateDbPath)
   }
 
   /**

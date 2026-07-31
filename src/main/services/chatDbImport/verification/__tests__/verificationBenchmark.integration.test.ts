@@ -35,6 +35,7 @@ vi.unmock('node:crypto')
 // Every resource in this file injects an explicit temp dataRoot.
 vi.mock('@main/config', () => ({ DATA_PATH: '/mock/data' }))
 
+import Database from 'better-sqlite3'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import type * as schema from '../../../chatDb/schema'
@@ -99,6 +100,9 @@ describe('chatDbImport Phase 4.3.4 — 10k-message candidate verification benchm
   it(
     'verifies all 13 dimensions pass on the 10k candidate with measured time and bounded evidence',
     async () => {
+      // LOCK-RS3: capture the sealed main-DB bytes BEFORE the readonly
+      // verifier open so reseal is proven byte-stable across the roundtrip.
+      const mainBytesAtSeal = realFs.statSync(dbPath).size
       const verifier = createCandidateVerifier({ dbPath, manifest })
       const startedAt = performance.now()
       const report = await verifier.run()
@@ -153,6 +157,23 @@ describe('chatDbImport Phase 4.3.4 — 10k-message candidate verification benchm
       expect(serializedReport).not.toContain('bench message')
       expect(serializedReport).not.toContain(dataRoot)
       expect(serializedReport).not.toContain('chat.db')
+
+      // --- LOCK-RS2/RS3: the readonly verifier open left empty WAL/SHM
+      //     residue; the explicit reseal restores the sealed invariant
+      //     (no sidecars, main bytes unchanged) that the promotion install
+      //     guard requires. Real install acceptance after reseal is covered
+      //     in promotion/__tests__/install.test.ts. ---
+      expect(realFs.existsSync(`${dbPath}-wal`)).toBe(true)
+      expect(realFs.existsSync(`${dbPath}-shm`)).toBe(true)
+      resource.reseal()
+      expect(realFs.existsSync(`${dbPath}-wal`)).toBe(false)
+      expect(realFs.existsSync(`${dbPath}-shm`)).toBe(false)
+      expect(realFs.statSync(dbPath).size).toBe(mainBytesAtSeal)
+      // Still readable as a valid candidate DB after reseal.
+      const reread = new Database(dbPath, { readonly: true, fileMustExist: true })
+      const row = reread.prepare('SELECT count(*) AS c FROM topics').get() as { c: number }
+      expect(row.c).toBe(TOPIC_COUNT)
+      reread.close()
 
       bench(
         `10k verification (13 dimensions): ${elapsedMs.toFixed(1)} ms — ` +

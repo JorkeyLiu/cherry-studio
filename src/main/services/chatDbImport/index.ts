@@ -192,6 +192,13 @@ export interface CandidateResourceLike {
   getDatabase(): unknown
   getDbPath(): string
   seal(): void
+  /**
+   * Re-establish the sealed invariant after the readonly verifier left
+   * empty WAL/SHM residue (LOCK-RS3/RS4). Must fail closed: on any failure
+   * the caller enters the error/discard lifecycle and NEVER claims
+   * `verified-candidate`.
+   */
+  reseal(): void
   discard(): Promise<void>
   discardSync(): void
 }
@@ -775,7 +782,11 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
     session.setState('discovering')
 
     const preloadPath = path.join(__dirname, '../preload/chat-import-preload.js')
-    const htmlPath = path.join(__dirname, '../renderer/chatImport.html')
+    // Production electron-vite output preserves the renderer input's nested
+    // path (out/renderer/src/windows/chatImport/chatImport.html), so the
+    // HTML must be resolved relative to out/main, not out/renderer root
+    // (LOCK-611). The preload is preserved at out/preload/chat-import-preload.js.
+    const htmlPath = path.join(__dirname, '../renderer/src/windows/chatImport/chatImport.html')
 
     // Register IPC handlers with orchestration callbacks.
     // These callbacks drive the state machine in response to renderer IPC.
@@ -2024,6 +2035,26 @@ async function settleVerification(
   }
 
   if (report.status === 'pass') {
+    // LOCK-RS2/RS3/RS4: the readonly verifier open leaves empty WAL/SHM
+    // residue, which breaks the sealed invariant the promotion install
+    // guard requires (LOCK-RS1: SIDECAR_PRESENT rejection — unchanged).
+    // Reseal explicitly BEFORE claiming `verified-candidate`: writable
+    // open + wal_checkpoint(TRUNCATE) + close + sidecar-absence proof.
+    // Fail closed: a reseal failure enters the existing error/discard
+    // lifecycle (session.fail) and the session NEVER reaches
+    // `verified-candidate` — no promotion claim from an unsealed candidate.
+    const candidate = session.candidate
+    if (!candidate) {
+      const error = new Error(`Verification passed without a retained candidate for ${session.id}`)
+      await session.fail('candidate reseal', error)
+      return
+    }
+    try {
+      candidate.reseal()
+    } catch (error) {
+      await session.fail('candidate reseal', error)
+      return
+    }
     // LOCK-4305: pass retains the sealed candidate + report; NO promotion,
     // live-DB replacement, snapshot, or relaunch in Phase 4.3.
     session.setState('verified-candidate')

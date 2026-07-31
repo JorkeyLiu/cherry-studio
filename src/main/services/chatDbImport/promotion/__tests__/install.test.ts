@@ -44,7 +44,7 @@ import {
 } from '../../../chatDb/maintenanceCoordination'
 import { runMigrations } from '../../../chatDb/migration'
 import * as schema from '../../../chatDb/schema'
-import { CANDIDATE_DB_FILENAME, CANDIDATE_ROOT_DIRNAME } from '../../candidateDb'
+import { CANDIDATE_DB_FILENAME, CANDIDATE_ROOT_DIRNAME, resealSealedCandidate } from '../../candidateDb'
 import type { CandidateInstallResult, ClosedLiveProof } from '../install'
 import { installCandidate, isInstallReceipt, mintClosedLiveProof, validateClosedLiveProof } from '../install'
 import { ROLLBACK_SNAPSHOT_FILENAME } from '../journal'
@@ -335,6 +335,35 @@ describe('installCandidate', () => {
     // Sealing the candidate (sidecar gone) makes the same proof succeed.
     realFs.unlinkSync(`${sourcePath}-wal`)
     expect(run(proof).ok).toBe(true)
+  })
+
+  it('accepts a resealed candidate after readonly verifier residue (verified-candidate → install, LOCK-RS3/RS6)', () => {
+    // Phase 4.3 verifier behavior: a READONLY open of the sealed candidate
+    // leaves empty WAL/SHM residue that the install guard rejects.
+    const readonly = new Database(sourcePath, { readonly: true, fileMustExist: true })
+    readonly.prepare('SELECT count(*) AS c FROM topics').get()
+    readonly.close()
+    expect(realFs.existsSync(`${sourcePath}-wal`)).toBe(true)
+    expect(realFs.existsSync(`${sourcePath}-shm`)).toBe(true)
+
+    // LOCK-RS1 unchanged: the guard refuses the unsealed candidate with NO
+    // blind-install tolerance. The proof is NOT consumed by the refusal.
+    const refusedProof = mintProof()
+    expectPreInstallFailure(run(refusedProof), 'CANDIDATE_NOT_SEALED', 'SIDECAR_PRESENT')
+
+    // Explicit post-verification reseal restores the sealed invariant.
+    resealSealedCandidate(sourcePath)
+    expect(realFs.existsSync(`${sourcePath}-wal`)).toBe(false)
+    expect(realFs.existsSync(`${sourcePath}-shm`)).toBe(false)
+
+    // Real install acceptance: the guard now accepts the resealed candidate.
+    const result = run(mintProof())
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(isInstallReceipt(result.receipt)).toBe(true)
+      expect(countTopics(livePath)).toBe(3)
+      expect(realFs.existsSync(sourcePath)).toBe(false)
+    }
   })
 
   it('fails with LIVE_SIDECAR_DELETE_FAILED when a live sidecar cannot be unlinked', () => {

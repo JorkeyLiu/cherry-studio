@@ -77,11 +77,18 @@ vi.mock('../zipIntake', () => ({
   })
 }))
 
+// Captures the options passed to createIsolatedReader for the
+// production-path assertions (LOCK-611: nested chatImport HTML + preload).
+let capturedReaderOptions: any = null
+
 vi.mock('../isolatedSession', () => ({
-  createIsolatedReader: vi.fn().mockResolvedValue({
-    sessionId: 'test',
-    window: {},
-    electronSession: {}
+  createIsolatedReader: vi.fn((options?: any) => {
+    capturedReaderOptions = options
+    return Promise.resolve({
+      sessionId: 'test',
+      window: {},
+      electronSession: {}
+    })
   }),
   dispose: vi.fn().mockResolvedValue(undefined),
   disposeSync: vi.fn(),
@@ -176,6 +183,7 @@ function makeCandidate(overrides: Partial<Record<string, any>> = {}) {
     getDatabase: vi.fn(() => ({ mock: 'candidate-db' })),
     getDbPath: vi.fn(() => MOCK_DB_PATH),
     seal: vi.fn(),
+    reseal: vi.fn(),
     discard: vi.fn(async () => {}),
     discardSync: vi.fn()
   }
@@ -359,6 +367,7 @@ describe('ChatImport index', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     capturedCallbacks = null
+    capturedReaderOptions = null
     // Production defaults delegate to the doubles (never real SQLite here).
     hoisted.candidateCtor.mockImplementation((_opts: any) => makeCandidate())
     hoisted.createPlane.mockImplementation((_db: unknown) => makePlane())
@@ -732,6 +741,36 @@ describe('ChatImport index', () => {
   })
 
   // =========================================================================
+  // Isolated reader production paths (LOCK-611/612)
+  // =========================================================================
+
+  describe('isolated reader production paths', () => {
+    itOnDarwin(
+      'resolves the nested chatImport HTML and the preserved preload relative to out/main (LOCK-611)',
+      async () => {
+        const { session } = await begin()
+
+        // The isolated reader is created inside startImport; its options are
+        // captured by the ../isolatedSession mock.
+        expect(capturedReaderOptions).toBeDefined()
+
+        // Production electron-vite output nests the renderer HTML under
+        // out/renderer/src/windows/chatImport/chatImport.html — NOT
+        // out/renderer/chatImport.html (LOCK-611).
+        expect(capturedReaderOptions.htmlPath).toMatch(
+          /renderer[\\/]src[\\/]windows[\\/]chatImport[\\/]chatImport\.html$/
+        )
+
+        // Preload output is preserved at out/preload/chat-import-preload.js
+        // (LOCK-611: ../preload/chat-import-preload.js from out/main).
+        expect(capturedReaderOptions.preloadPath).toMatch(/preload[\\/]chat-import-preload\.js$/)
+
+        await session.dispose()
+      }
+    )
+  })
+
+  // =========================================================================
   // Renderer onComplete is informational only (LOCK-O4)
   // =========================================================================
 
@@ -1097,6 +1136,64 @@ describe('ChatImport index', () => {
       await session.dispose()
       expect(getVerifiedCandidate()).toBeNull()
     })
+
+    itOnDarwin('pass reseals the candidate BEFORE claiming verified-candidate (LOCK-RS3/RS4)', async () => {
+      const { verifier, releaseRun } = makeGatedVerifier()
+      const { session, candidate, onVerificationComplete } = await begin({ verifier })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      expect(session.state).toBe('verifying')
+
+      // Reseal must run before the verified-candidate claim on the pass path.
+      expect(candidate.reseal).not.toHaveBeenCalled()
+      releaseRun(makeReport('pass'))
+      await flushVerification()
+
+      expect(candidate.reseal).toHaveBeenCalledTimes(1)
+      expect(candidate.reseal.mock.invocationCallOrder[0]).toBeLessThan(
+        // The state transition that claims verified-candidate is synchronous
+        // and has no spy — the reseal call order relative to the callback
+        // (which fires only after the claim) proves reseal ran first.
+        onVerificationComplete.mock.invocationCallOrder[0]
+      )
+      expect(session.state).toBe('verified-candidate')
+      expect(onVerificationComplete).toHaveBeenCalledTimes(1)
+      expect(getVerifiedCandidate()).not.toBeNull()
+
+      await session.dispose()
+    })
+
+    itOnDarwin(
+      'reseal failure fails closed into the error lifecycle; never reaches verified-candidate (LOCK-RS4)',
+      async () => {
+        const candidate = makeCandidate({
+          reseal: vi.fn(() => {
+            throw new Error('reseal boom: sidecar still present')
+          })
+        })
+        const { verifier, releaseRun } = makeGatedVerifier()
+        const { session, onVerificationComplete } = await begin({ candidate, verifier })
+
+        await discover(session.id)
+        await runAllPages(session.id)
+        expect(session.state).toBe('verifying')
+
+        releaseRun(makeReport('pass'))
+        await flushVerification()
+
+        // Fail closed: error lifecycle, candidate discarded, no promotion
+        // claim, no verification completion callback (the pass was retracted).
+        expect(session.state).toBe('error')
+        expect(getVerifiedCandidate()).toBeNull()
+        expect(getSealedCandidate()).toBeNull()
+        expect(onVerificationComplete).not.toHaveBeenCalled()
+        expect(candidate.discard).toHaveBeenCalledTimes(1)
+        expect(getActiveImport()).toBeNull()
+
+        await session.dispose()
+      }
+    )
 
     itOnDarwin('the verification completion payload contains no filesystem path (LOCK-4304)', async () => {
       const { session, onVerificationComplete } = await begin()

@@ -1,6 +1,8 @@
+import type { ChatImportEnvelope, DiscoveryResult, ReadPageResponse } from '@shared/chatImport/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { withTimeout } from './entryPoint'
+import type { ChatImportBridge } from './entryPoint'
+import { boot, createChatImportLogger, withTimeout } from './entryPoint'
 
 /**
  * Focused tests for the deterministic page-read timeout helper.
@@ -68,5 +70,654 @@ describe('withTimeout', () => {
     } finally {
       process.off('unhandledRejection', onUnhandled)
     }
+  })
+})
+
+/**
+ * Focused tests for the narrow chatImport logging adapter (LOCK-601/602).
+ *
+ * These verify that info/error calls are routed through the preload `log`
+ * bridge with the fixed levels and message/data shape, and that a missing
+ * bridge (or a bridge without `log`) degrades to a strict no-op — the
+ * CI-safe behavior required for the hidden sandboxed reader.
+ */
+describe('createChatImportLogger', () => {
+  it('routes info through the bridge log with level "info" and the data array', () => {
+    const log = vi.fn()
+    const logger = createChatImportLogger({ log })
+
+    logger.info('hello world', { context: 1 })
+
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(log).toHaveBeenCalledWith('info', 'hello world', [{ context: 1 }])
+  })
+
+  it('routes error through the bridge log with level "error" and the data array', () => {
+    const log = vi.fn()
+    const logger = createChatImportLogger({ log })
+
+    const failure = new Error('boom')
+    logger.error('[chatImport] Fatal error:', failure)
+
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(log).toHaveBeenCalledWith('error', '[chatImport] Fatal error:', [failure])
+  })
+
+  it('passes an empty data array when no extra arguments are given', () => {
+    const log = vi.fn()
+    const logger = createChatImportLogger({ log })
+
+    logger.info('plain message')
+
+    expect(log).toHaveBeenCalledWith('info', 'plain message', [])
+  })
+
+  it('is a strict no-op when the bridge is absent (LOCK-602)', () => {
+    const logger = createChatImportLogger(undefined)
+
+    expect(() => {
+      logger.info('hello')
+      logger.error('boom', new Error('x'))
+    }).not.toThrow()
+  })
+
+  it('is a strict no-op when the bridge lacks a log method (LOCK-602)', () => {
+    const logger = createChatImportLogger({})
+
+    expect(() => {
+      logger.info('hello')
+      logger.error('boom')
+    }).not.toThrow()
+  })
+})
+
+/**
+ * Shared fake preload bridge used by the boot regression suites. `on*` mirrors
+ * ipcRenderer: registration pushes the callback; unregistration removes it and
+ * increments the counter.
+ */
+function createFakeBridge(): {
+  bridge: ChatImportBridge
+  discoverCallbacks: Array<(sessionId: string) => void>
+  readPageCallbacks: Array<
+    (request: { sessionId: string; tableName: string; cursor: string | null; pageSize: number }) => void
+  >
+  cancelCallbacks: Array<(sessionId: string) => void>
+  unsubscribeCounts: { discover: number; readPage: number; cancel: number }
+  ready: ReturnType<typeof vi.fn>
+  discoverResult: ReturnType<typeof vi.fn>
+  readPageResult: ReturnType<typeof vi.fn>
+  error: ReturnType<typeof vi.fn>
+  complete: ReturnType<typeof vi.fn>
+  log: ReturnType<typeof vi.fn>
+} {
+  const discoverCallbacks: Array<(sessionId: string) => void> = []
+  const readPageCallbacks: Array<
+    (request: { sessionId: string; tableName: string; cursor: string | null; pageSize: number }) => void
+  > = []
+  const cancelCallbacks: Array<(sessionId: string) => void> = []
+  const unsubscribeCounts = { discover: 0, readPage: 0, cancel: 0 }
+
+  const ready = vi.fn().mockResolvedValue({ ok: true })
+  const discoverResult = vi.fn().mockResolvedValue({ ok: true })
+  const readPageResult = vi.fn().mockResolvedValue({ ok: true })
+  const error = vi.fn()
+  const complete = vi.fn()
+  const log = vi.fn()
+
+  const bridge: ChatImportBridge = {
+    ready,
+    discoverResult,
+    readPageResult,
+    complete,
+    error,
+    log,
+    onDiscover: (callback) => {
+      discoverCallbacks.push(callback)
+      return () => {
+        unsubscribeCounts.discover += 1
+        const idx = discoverCallbacks.indexOf(callback)
+        if (idx !== -1) discoverCallbacks.splice(idx, 1)
+      }
+    },
+    onReadPage: (callback) => {
+      readPageCallbacks.push(callback)
+      return () => {
+        unsubscribeCounts.readPage += 1
+        const idx = readPageCallbacks.indexOf(callback)
+        if (idx !== -1) readPageCallbacks.splice(idx, 1)
+      }
+    },
+    onCancel: (callback) => {
+      cancelCallbacks.push(callback)
+      return () => {
+        unsubscribeCounts.cancel += 1
+        const idx = cancelCallbacks.indexOf(callback)
+        if (idx !== -1) cancelCallbacks.splice(idx, 1)
+      }
+    }
+  }
+
+  return {
+    bridge,
+    discoverCallbacks,
+    readPageCallbacks,
+    cancelCallbacks,
+    unsubscribeCounts,
+    ready,
+    discoverResult,
+    readPageResult,
+    error,
+    complete,
+    log
+  }
+}
+
+const FILE_PROTOCOL_OPTIONS = { locationProtocol: 'file:' }
+const STUB_DISCOVER: DiscoveryResult = {
+  databaseName: 'CherryStudio',
+  nativeVersion: 110,
+  logicalVersion: 11,
+  tableNames: ['topics', 'files']
+}
+
+/** Flush the microtask queue so async bridge callbacks settle deterministically. */
+async function flushMicrotasks(times = 10): Promise<void> {
+  for (let i = 0; i < times; i += 1) {
+    await Promise.resolve()
+  }
+}
+
+/**
+ * Focused regression tests for the ready/discover listener-ordering fix
+ * (LOCK-Y1/Y2/Y4).
+ *
+ * The bug: `main()` awaited `api.ready('pending')` BEFORE registering
+ * `onDiscover`/`onReadPage`/`onCancel`. Main's ready IPC handler sends
+ * `ChatImport_Discover` synchronously from inside the ready handler (before its
+ * `{ ok: true }` reply), so the event reached the renderer while no listener
+ * was installed and was silently dropped — stalling genuine imports at
+ * `discovering`.
+ *
+ * These tests use a fake bridge that records listener registration at ready
+ * invocation and can emit a discover event synchronously during ready, proving
+ * the callback/result path end-to-end rather than by source-order text
+ * assertions.
+ */
+describe('boot ready/discover ordering (LOCK-Y1/Y2/Y4)', () => {
+  it('registers onDiscover, onReadPage, and onCancel before invoking ready (LOCK-Y1)', async () => {
+    const harness = createFakeBridge()
+    const snapshotAtReady = vi.fn(() => ({
+      discover: harness.discoverCallbacks.length,
+      readPage: harness.readPageCallbacks.length,
+      cancel: harness.cancelCallbacks.length
+    }))
+    harness.ready.mockImplementation(async () => {
+      snapshotAtReady()
+      return { ok: true }
+    })
+
+    await boot(harness.bridge, FILE_PROTOCOL_OPTIONS)
+
+    // The ready IPC handshake is the FIRST interaction with Main. All three
+    // listeners must already be installed at that instant (LOCK-Y1), otherwise
+    // a Discover sent synchronously by Main's ready handler is dropped.
+    expect(snapshotAtReady).toHaveBeenCalledTimes(1)
+    expect(snapshotAtReady).toHaveReturnedWith({ discover: 1, readPage: 1, cancel: 1 })
+  })
+
+  it('receives a discover event emitted synchronously during ready — no message loss (LOCK-Y1/Y4)', async () => {
+    const harness = createFakeBridge()
+    harness.ready.mockImplementation(async () => {
+      // Mirror Main: sendDiscover runs synchronously inside the ready handler,
+      // before the { ok: true } reply is produced.
+      const onDiscover = harness.discoverCallbacks[0]
+      expect(onDiscover).toBeDefined() // listener installed before ready (LOCK-Y1)
+      onDiscover('session-abc')
+      return { ok: true }
+    })
+
+    await boot(harness.bridge, { ...FILE_PROTOCOL_OPTIONS, discover: async () => STUB_DISCOVER })
+    await flushMicrotasks()
+
+    // The discover event fired during ready is NOT lost: the full
+    // discovery → discoverResult callback/result path completes.
+    expect(harness.discoverResult).toHaveBeenCalledTimes(1)
+    const envelope = harness.discoverResult.mock.calls[0][0] as ChatImportEnvelope<DiscoveryResult>
+    expect(envelope.sessionId).toBe('session-abc')
+    expect(envelope.phase).toBe('discovery')
+    expect(envelope.version).toBe(1)
+    expect(envelope.data).toEqual(STUB_DISCOVER)
+    expect(harness.error).not.toHaveBeenCalled()
+  })
+
+  it('unsubscribes all listeners and closes DB state when ready returns !ok (LOCK-Y2)', async () => {
+    const harness = createFakeBridge()
+    harness.ready.mockResolvedValue({ ok: false, error: 'SESSION_NOT_ACTIVE' })
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await boot(harness.bridge, { ...FILE_PROTOCOL_OPTIONS, closeDb })
+
+    expect(harness.unsubscribeCounts).toEqual({ discover: 1, readPage: 1, cancel: 1 })
+    // No listener leak: the callbacks are gone from the fake ipcRenderer.
+    expect(harness.discoverCallbacks).toHaveLength(0)
+    expect(harness.readPageCallbacks).toHaveLength(0)
+    expect(harness.cancelCallbacks).toHaveLength(0)
+    expect(closeDb).toHaveBeenCalledTimes(1)
+    expect(harness.discoverResult).not.toHaveBeenCalled()
+    expect(harness.error).not.toHaveBeenCalled()
+  })
+
+  it('unsubscribes all listeners and closes DB state when ready rejects (LOCK-Y2)', async () => {
+    const harness = createFakeBridge()
+    const readyError = new Error('ready exploded')
+    harness.ready.mockRejectedValue(readyError)
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await expect(boot(harness.bridge, { ...FILE_PROTOCOL_OPTIONS, closeDb })).rejects.toBe(readyError)
+
+    expect(harness.unsubscribeCounts).toEqual({ discover: 1, readPage: 1, cancel: 1 })
+    expect(harness.discoverCallbacks).toHaveLength(0)
+    expect(harness.readPageCallbacks).toHaveLength(0)
+    expect(harness.cancelCallbacks).toHaveLength(0)
+    expect(closeDb).toHaveBeenCalledTimes(1)
+    expect(harness.error).not.toHaveBeenCalled()
+  })
+
+  it('keeps normal cleanup idempotent when two terminal signals race (LOCK-Y2)', async () => {
+    const harness = createFakeBridge()
+    harness.ready.mockImplementation(async () => {
+      // Cancel and a discovery failure both drive the shared cleanup path.
+      const onCancel = harness.cancelCallbacks[0]
+      const onDiscover = harness.discoverCallbacks[0]
+      onCancel('session-c')
+      onDiscover('session-d')
+      return { ok: true }
+    })
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      closeDb,
+      discover: async () => {
+        throw new Error('IDB missing')
+      }
+    })
+    await flushMicrotasks()
+
+    // No listener is unsubscribed twice and the discovery failure is reported
+    // exactly once. The shared cleanup path is single-flight (LOCK-S2): the
+    // cancel and discovery-failure paths converge on the same cleanup promise,
+    // so closeDb runs exactly once even though two terminal signals raced.
+    expect(harness.unsubscribeCounts).toEqual({ discover: 1, readPage: 1, cancel: 1 })
+    expect(harness.error).toHaveBeenCalledTimes(1)
+    expect(harness.error.mock.calls[0][0]).toMatchObject({ data: { code: 'DISCOVERY_FAILED' } })
+    expect(closeDb).toHaveBeenCalledTimes(1)
+  })
+
+  it('propagates a closeDb rejection to every racing cleanup caller while running closeDb once (LOCK-S2)', async () => {
+    const harness = createFakeBridge()
+    const closeError = new Error('db close failed')
+    const closeDb = vi.fn().mockRejectedValue(closeError)
+
+    // Capture each racing terminal path's settlement with handlers attached at
+    // creation time, so the identical rejection is observed for both callers
+    // without any unhandled-rejection window.
+    let cancelSettled = Promise.resolve(false)
+    let cancelRejection: unknown
+    let discoverSettled = Promise.resolve(false)
+    let discoverRejection: unknown
+    harness.ready.mockImplementation(async () => {
+      const onCancel = harness.cancelCallbacks[0] as (sessionId: string) => Promise<void>
+      const onDiscover = harness.discoverCallbacks[0] as (sessionId: string) => Promise<void>
+      cancelSettled = onCancel('session-c').then(
+        () => false,
+        (error: unknown) => {
+          cancelRejection = error
+          return true
+        }
+      )
+      discoverSettled = onDiscover('session-d').then(
+        () => false,
+        (error: unknown) => {
+          discoverRejection = error
+          return true
+        }
+      )
+      return { ok: true }
+    })
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      closeDb,
+      discover: async () => {
+        throw new Error('IDB missing')
+      }
+    })
+
+    // Both concurrent cleanups rejected with the exact same closeDb error
+    // (shared single-flight promise) while closeDb itself ran exactly once.
+    expect(await Promise.all([cancelSettled, discoverSettled])).toEqual([true, true])
+    expect(cancelRejection).toBe(closeError)
+    expect(discoverRejection).toBe(closeError)
+    expect(closeDb).toHaveBeenCalledTimes(1)
+    expect(harness.unsubscribeCounts).toEqual({ discover: 1, readPage: 1, cancel: 1 })
+    expect(harness.error).toHaveBeenCalledTimes(1)
+  })
+
+  it('aborts before registering listeners when the page protocol is not file: (R-3)', async () => {
+    const harness = createFakeBridge()
+
+    await boot(harness.bridge, { locationProtocol: 'https:' })
+
+    expect(harness.ready).not.toHaveBeenCalled()
+    expect(harness.discoverCallbacks).toHaveLength(0)
+    expect(harness.readPageCallbacks).toHaveLength(0)
+    expect(harness.cancelCallbacks).toHaveLength(0)
+    expect(harness.error).toHaveBeenCalledTimes(1)
+    expect(harness.error.mock.calls[0][0]).toMatchObject({
+      data: { code: 'WRONG_ORIGIN' }
+    })
+  })
+})
+
+/**
+ * Focused regression tests for the production Dexie lifecycle defect
+ * (LOCK-RP2/RP3/RP4).
+ *
+ * The bug: `handleReadPage` closed the DB after every page and only reopened
+ * it when `hasMore` was true. After a single-page entity was consumed the DB
+ * stayed closed, so the first page of the NEXT entity failed deterministically
+ * with `READ_FAILED: Database not initialized. Run discovery first.` — the
+ * failure observed in the standard B-class run on message_blocks.
+ *
+ * The fix: a `discoveryCompleted` flag (set only after successful discovery,
+ * reset at every boot) plus an ensure-open-before-read seam — every read
+ * request opens the DB if needed and closes it again after the page (R-11
+ * retained). Discovery still gates reads (LOCK-RP4): a read before discovery
+ * keeps the existing database-not-initialized error, and per-page close is
+ * preserved. Only the DB IO seam is injected — no production pipeline mocks.
+ */
+describe('chatImport paged read lifecycle (LOCK-RP2/RP3/RP4)', () => {
+  const PAGE_SIZE = 500
+
+  /** Keyset-paginated in-memory DB matching the `ChatImportReadDb` surface. */
+  function createFakeDb(rows: Record<string, Array<{ id: string }>>) {
+    return {
+      table: (tableName: string) => {
+        const tableRows = rows[tableName] ?? []
+        return {
+          where: () => ({
+            above: (cursor: string) => ({
+              limit: (count: number) => ({
+                toArray: async () => tableRows.filter((row) => row.id > cursor).slice(0, count)
+              })
+            })
+          }),
+          toCollection: () => ({
+            limit: (count: number) => ({
+              toArray: async () => tableRows.slice(0, count)
+            })
+          })
+        }
+      }
+    }
+  }
+
+  /** Boot a fresh session and complete discovery so reads are permitted. */
+  async function bootAfterDiscovery(overrides: Parameters<typeof boot>[1] = {}) {
+    const harness = createFakeBridge()
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      ...overrides
+    })
+    harness.discoverCallbacks[0]('session-rp')
+    await flushMicrotasks()
+    return harness
+  }
+
+  it('reopens the DB for the next entity after a single-page entity closed it (cross-entity regression)', async () => {
+    const harness = createFakeBridge()
+    const openDb = vi.fn().mockResolvedValue(
+      createFakeDb({
+        topics: [{ id: 't1' }, { id: 't2' }],
+        message_blocks: [{ id: 'b1' }, { id: 'b2' }, { id: 'b3' }]
+      })
+    )
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      openDb,
+      closeDb
+    })
+    harness.discoverCallbacks[0]('session-rp')
+    await flushMicrotasks()
+
+    // First entity (topics) — single page, hasMore=false.
+    harness.readPageCallbacks[0]({ sessionId: 'session-rp', tableName: 'topics', cursor: null, pageSize: PAGE_SIZE })
+    await flushMicrotasks()
+
+    expect(harness.error).not.toHaveBeenCalled()
+    expect(harness.readPageResult).toHaveBeenCalledTimes(1)
+    const topicsEnvelope = harness.readPageResult.mock.calls[0][0] as ChatImportEnvelope<ReadPageResponse>
+    expect(topicsEnvelope.phase).toBe('reading')
+    expect(topicsEnvelope.data).toEqual({
+      tableName: 'topics',
+      items: [{ id: 't1' }, { id: 't2' }],
+      cursor: 't2',
+      hasMore: false
+    })
+    // R-11 retained: the page is closed even though hasMore=false.
+    expect(closeDb).toHaveBeenCalledTimes(1)
+
+    // Next entity (message_blocks) — the old hasMore-only reopen left the DB
+    // closed here and this read failed with READ_FAILED. The fix ensures open
+    // before read, so the first page of the next entity succeeds.
+    harness.readPageCallbacks[0]({
+      sessionId: 'session-rp',
+      tableName: 'message_blocks',
+      cursor: null,
+      pageSize: PAGE_SIZE
+    })
+    await flushMicrotasks()
+
+    expect(harness.error).not.toHaveBeenCalled()
+    expect(harness.readPageResult).toHaveBeenCalledTimes(2)
+    const blocksEnvelope = harness.readPageResult.mock.calls[1][0] as ChatImportEnvelope<ReadPageResponse>
+    expect(blocksEnvelope.data).toEqual({
+      tableName: 'message_blocks',
+      items: [{ id: 'b1' }, { id: 'b2' }, { id: 'b3' }],
+      cursor: 'b3',
+      hasMore: false
+    })
+    // ensure-open-before-read: exactly one open + one close per read request.
+    expect(openDb).toHaveBeenCalledTimes(2)
+    expect(closeDb).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps paging one entity across pages, reopening the DB between pages', async () => {
+    const harness = createFakeBridge()
+    const topics = Array.from({ length: 1200 }, (_, i) => ({ id: `t${String(i).padStart(4, '0')}` }))
+    const openDb = vi.fn().mockResolvedValue(createFakeDb({ topics }))
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      openDb,
+      closeDb
+    })
+    harness.discoverCallbacks[0]('session-rp')
+    await flushMicrotasks()
+
+    // Page 1: first 500 rows, cursor continues after t0499.
+    harness.readPageCallbacks[0]({ sessionId: 'session-rp', tableName: 'topics', cursor: null, pageSize: PAGE_SIZE })
+    await flushMicrotasks()
+    const page1 = harness.readPageResult.mock.calls[0][0].data as ReadPageResponse
+    expect(page1.items).toHaveLength(500)
+    expect(page1.items[0].id).toBe('t0000')
+    expect(page1.items[499].id).toBe('t0499')
+    expect(page1.cursor).toBe('t0499')
+    expect(page1.hasMore).toBe(true)
+
+    // Page 2: keyset continuation.
+    harness.readPageCallbacks[0]({ sessionId: 'session-rp', tableName: 'topics', cursor: 't0499', pageSize: PAGE_SIZE })
+    await flushMicrotasks()
+    const page2 = harness.readPageResult.mock.calls[1][0].data as ReadPageResponse
+    expect(page2.items).toHaveLength(500)
+    expect(page2.items[0].id).toBe('t0500')
+    expect(page2.cursor).toBe('t0999')
+    expect(page2.hasMore).toBe(true)
+
+    // Page 3: final partial page.
+    harness.readPageCallbacks[0]({ sessionId: 'session-rp', tableName: 'topics', cursor: 't0999', pageSize: PAGE_SIZE })
+    await flushMicrotasks()
+    const page3 = harness.readPageResult.mock.calls[2][0].data as ReadPageResponse
+    expect(page3.items).toHaveLength(200)
+    expect(page3.items[199].id).toBe('t1199')
+    expect(page3.cursor).toBe('t1199')
+    expect(page3.hasMore).toBe(false)
+
+    expect(harness.error).not.toHaveBeenCalled()
+    // Every request opened the DB before reading and closed it after the page.
+    expect(openDb).toHaveBeenCalledTimes(3)
+    expect(closeDb).toHaveBeenCalledTimes(3)
+  })
+
+  it('reports a DB read failure as READ_FAILED and runs the shared cleanup', async () => {
+    const harness = createFakeBridge()
+    const boom = new Error('read exploded')
+    const failingDb = {
+      table: () => ({
+        where: () => ({
+          above: () => ({
+            limit: () => ({
+              toArray: async () => {
+                throw boom
+              }
+            })
+          })
+        }),
+        toCollection: () => ({
+          limit: () => ({
+            toArray: async () => {
+              throw boom
+            }
+          })
+        })
+      })
+    }
+    const openDb = vi.fn().mockResolvedValue(failingDb)
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      openDb,
+      closeDb
+    })
+    harness.discoverCallbacks[0]('session-rp')
+    await flushMicrotasks()
+
+    harness.readPageCallbacks[0]({ sessionId: 'session-rp', tableName: 'topics', cursor: null, pageSize: PAGE_SIZE })
+    await flushMicrotasks()
+
+    expect(harness.error).toHaveBeenCalledTimes(1)
+    const envelope = harness.error.mock.calls[0][0] as ChatImportEnvelope<{ code: string; message: string }>
+    expect(envelope.phase).toBe('error')
+    expect(envelope.data.code).toBe('READ_FAILED')
+    expect(envelope.data.message).toBe('read exploded')
+    expect(harness.readPageResult).not.toHaveBeenCalled()
+    // Per-page close is not reached on error; the shared cleanup closes once.
+    expect(closeDb).toHaveBeenCalledTimes(1)
+    expect(harness.unsubscribeCounts).toEqual({ discover: 1, readPage: 1, cancel: 1 })
+  })
+
+  it('closes the DB and unsubscribes all listeners when cancel arrives after a successful read', async () => {
+    const harness = createFakeBridge()
+    const openDb = vi.fn().mockResolvedValue(createFakeDb({ topics: [{ id: 't1' }] }))
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      openDb,
+      closeDb
+    })
+    harness.discoverCallbacks[0]('session-rp')
+    await flushMicrotasks()
+
+    // One successful page → per-page close (R-11).
+    harness.readPageCallbacks[0]({ sessionId: 'session-rp', tableName: 'topics', cursor: null, pageSize: PAGE_SIZE })
+    await flushMicrotasks()
+    expect(closeDb).toHaveBeenCalledTimes(1)
+
+    // Cancel → shared idempotent cleanup closes once more and removes listeners.
+    harness.cancelCallbacks[0]('session-rp')
+    await flushMicrotasks()
+
+    expect(harness.unsubscribeCounts).toEqual({ discover: 1, readPage: 1, cancel: 1 })
+    expect(harness.discoverCallbacks).toHaveLength(0)
+    expect(harness.readPageCallbacks).toHaveLength(0)
+    expect(harness.cancelCallbacks).toHaveLength(0)
+    expect(closeDb).toHaveBeenCalledTimes(2)
+    expect(harness.error).not.toHaveBeenCalled()
+  })
+
+  it('rejects a read before discovery with the existing database-not-initialized error (LOCK-RP4)', async () => {
+    const harness = createFakeBridge()
+    const openDb = vi.fn()
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      openDb,
+      closeDb
+    })
+    // No discovery emitted — a read must not be allowed to open the DB.
+    harness.readPageCallbacks[0]({ sessionId: 'session-rp', tableName: 'topics', cursor: null, pageSize: PAGE_SIZE })
+    await flushMicrotasks()
+
+    expect(harness.error).toHaveBeenCalledTimes(1)
+    const envelope = harness.error.mock.calls[0][0] as ChatImportEnvelope<{ code: string; message: string }>
+    expect(envelope.data.code).toBe('READ_FAILED')
+    expect(envelope.data.message).toBe('Database not initialized. Run discovery first.')
+    expect(openDb).not.toHaveBeenCalled()
+    expect(harness.readPageResult).not.toHaveBeenCalled()
+  })
+
+  it('resets discovery completion for a fresh session so reads cannot reuse prior session state (LOCK-RP4)', async () => {
+    // Session 1: discovery completes, so reads are allowed.
+    const first = await bootAfterDiscovery({
+      openDb: vi.fn().mockResolvedValue(createFakeDb({ topics: [{ id: 't1' }] })),
+      closeDb: vi.fn().mockResolvedValue(undefined)
+    })
+    first.readPageCallbacks[0]({ sessionId: 'session-rp', tableName: 'topics', cursor: null, pageSize: PAGE_SIZE })
+    await flushMicrotasks()
+    expect(first.error).not.toHaveBeenCalled()
+
+    // Session 2 on the same page/module: a fresh boot clears the flag, so a
+    // read before session 2's discovery still fails with the same error.
+    const second = createFakeBridge()
+    const openDb2 = vi.fn()
+    const closeDb2 = vi.fn().mockResolvedValue(undefined)
+    await boot(second.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      openDb: openDb2,
+      closeDb: closeDb2
+    })
+    second.readPageCallbacks[0]({ sessionId: 'session-rp', tableName: 'topics', cursor: null, pageSize: PAGE_SIZE })
+    await flushMicrotasks()
+
+    expect(second.error).toHaveBeenCalledTimes(1)
+    expect(second.error.mock.calls[0][0]).toMatchObject({
+      data: { code: 'READ_FAILED', message: 'Database not initialized. Run discovery first.' }
+    })
+    expect(openDb2).not.toHaveBeenCalled()
   })
 })
