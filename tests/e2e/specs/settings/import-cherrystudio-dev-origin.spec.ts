@@ -1,49 +1,78 @@
 /**
- * E2E: L2 Cherry Studio genuine-ZIP full-flow import (LOCK-621..625).
+ * E2E: L2 Cherry Studio dev-origin ZIP full-flow import (LOCK-DEV-1..8).
  *
- * Covers the complete chain with disposable profiles only:
- *   1. Reproducibly generate a disposable source ZIP (real Electron + real
- *      production Dexie-created IndexedDB, v11/native 110, closed/flushed,
- *      `IndexedDB/` tree only) — explicitly a SYNTHETIC seed, never claimed
- *      to be a historical user backup (LOCK-621).
+ * Covers the complete chain for the L2 compatibility dev-origin path:
+ *   1. Reproducibly generate a disposable dev-origin source ZIP (real
+ *      Chromium at exact `http://localhost:5173`, natural origin mapping to
+ *      `http_localhost_5173.indexeddb.leveldb`, no rename/copy, LOCK-DEV-1/2/8).
  *   2. Seed baseline target chat.db data that the replace-all import MUST
  *      remove (LOCK-623 replace-all semantics).
- *   3. Drive `window.api.cherryImport.start(zipPath)` directly (no native
+ *   3. Start an owned Vite dev server on exact port 5173 serving the
+ *      chatImport entry point (LOCK-DEV-5). No external prerequisite.
+ *   4. Drive `window.api.cherryImport.start(zipPath)` directly (no native
  *      file dialog automation) and observe the status events.
- *   4. Hard terminal evidence (LOCK-622):
- *        a. observed status progression THROUGH `finalizing`
- *           (`promoted` is best-effort only and never required);
+ *   5. Hard terminal evidence (LOCK-622):
+ *        a. observed status progression THROUGH `finalizing`;
  *        b. the original target Electron process actually exits;
- *        c. post-exit chat.db contents contain the source records (incl. the
- *           installed topic_segment_messages relation, LOCK-T4) and the
+ *        c. post-exit chat.db contents contain the source records and the
  *           baseline target records are gone;
  *        d. the retained pre-import rollback snapshot still holds the
- *           baseline topic/message/block (LOCK-4434) and the promotion
- *           journal plus every .staging sibling is cleaned (LOCK-4436/4438).
- *   5. finally: terminate the relaunched process PRECISELY by the exact
- *      disposable `--user-data-dir` argv token (LOCK-625, never broad
- *      Electron process killing or substring matching) and remove all
- *      disposable source/profile/ZIP dirs (LOCK-624). Cleanup failures and
- *      leftover exact paths fail the test (LOCK-T1/T5).
+ *           baseline records and promotion artifacts are cleaned.
+ *   6. Assert relaunched process bears exact --user-data-dir token (LOCK-7).
+ *   7. finally: terminate the relaunched process PRECISELY by the exact
+ *      disposable `--user-data-dir` argv token (LOCK-625) and remove all
+ *      disposable source/profile/ZIP dirs (LOCK-624).
+ *   8. Stop the owned Vite server (LOCK-DEV-5).
  *
- * Platform: macOS-only (production A-9 gate + `session.fromPath` verified on
- * darwin). Skipped clearly on other platforms.
+ * LOCK-DEV-3: The target Cherry app must have `app.isPackaged===false` and
+ * its import renderer must load from the exact dev URL
+ * `http://localhost:5173/src/windows/chatImport/chatImport.html`.
  *
- * Prerequisite (owned by the main validation phase): a fresh build including
- * the chatImport window entry, and better-sqlite3 rebuilt for the Electron
- * ABI so `queryChatDbViaElectron` (post-exit file reads) can load the native
- * module under the Electron binary. In-app reads (chatDb IPC) work regardless.
+ * LOCK-DEV-4: Dev-origin imports are only supported in unpackaged builds.
+ * The standard E2E fixture already runs with `app.isPackaged===false`
+ * (electron . against electron-vite output).
+ *
+ * LOCK-DEV-6: classifyOriginCandidates returns `{ kind: 'dev' }` for the
+ * dev-origin ZIP, and the isolated reader loads from the Vite dev server.
+ *
+ * LOCK-DEV-8: Candidate/temp workspace inventory before/after import.
+ *   - <dataDir>/chat-import-candidates: empty promoted shells only
+ *     (installCandidate renames chat.db to live; directory shell remains
+ *     until age-based orphan recovery — LOCK-4423/4426/4213A).
+ *   - os.tmpdir cherry-import-*: deferred-recovery contract (LOCK-L3).
+ *
+ * Prerequisites:
+ *   - A fresh `pnpm build` (standard E2E prerequisite).
+ *   - better-sqlite3 rebuilt for the Electron ABI.
+ *   - NO external Vite dev server required — this spec owns the Vite lifecycle.
+ *
+ * Platform: macOS-only (production A-9 gate + `session.fromPath` verified
+ * on darwin). Skipped clearly on other platforms.
+ *
+ * Evidence: B-class pattern — deterministic assertions on authoritative
+ * final state (SQLite queries, process exit, filesystem). No visual UI
+ * assertions.
  */
 import * as fs from 'fs'
 import * as path from 'path'
 
 import { expect, getChatDbPath, queryChatDbViaElectron, test } from '../../fixtures/electron.fixture'
-import { createDisposableSeedZip, SEED_NATIVE_VERSION, SOURCE_IDS } from '../../utils/disposable-seed-zip'
+import {
+  createDisposableDevOriginSeedZip,
+  DEV_ORIGIN_DIR,
+  SEED_NATIVE_VERSION,
+  SOURCE_IDS
+} from '../../utils/disposable-dev-origin-seed-zip'
 import { assertStateSubsequence, observeImportStatuses, REQUIRED_STATE_CHAIN } from '../../utils/import-status'
+import { probeChatImportEntry, startOwnedViteServer } from '../../utils/owned-vite-server'
 import { terminateProcessesByUserDataDir, waitForProcessExit } from '../../utils/process-cleanup'
+import {
+  assertOnlyEmptyPromotedCandidateShells as validateCandidateInventory,
+  snapshotCandidateInventory as snapshotOwnedCandidateInventory
+} from '../../utils/import-artifact-validation'
 
 /** Baseline target records the replace-all import MUST remove. */
-const BASELINE = { topic: 't-baseline-1', message: 'm-baseline-1', block: 'b-baseline-1' } as const
+const BASELINE = { topic: 't-baseline-dev-1', message: 'm-baseline-dev-1', block: 'b-baseline-dev-1' } as const
 
 /** Fixed names produced by the promotion pipeline (Phase 4.4). */
 const ROLLBACK_SNAPSHOT_FILENAME = 'chat.db.pre-import-backup'
@@ -51,21 +80,23 @@ const ROLLBACK_SNAPSHOT_STAGING_FILENAME = 'chat.db.pre-import-backup.staging'
 const PROMOTION_JOURNAL_FILENAME = 'chat-import-promotion.journal.json'
 const PROMOTION_JOURNAL_STAGING_FILENAME = 'chat-import-promotion.journal.json.staging'
 
-test.describe('Cherry Studio genuine ZIP full-flow import', () => {
+test.describe('Cherry Studio dev-origin ZIP full-flow import', () => {
   test.skip(
     process.platform !== 'darwin',
-    'L2 import is macOS-only (LOCK-623); full-flow E2E requires darwin and session.fromPath behavior'
+    'L2 dev-origin import is macOS-only (LOCK-623 + session.fromPath); requires darwin'
   )
 
-  test('imports a disposable IndexedDB ZIP, replaces chat.db, and the original process exits', async ({
+  test('imports a disposable dev-origin IndexedDB ZIP, replaces chat.db, and the original process exits', async ({
     electronApp,
     mainWindow,
     userDataDir,
     ownedTmpRoot
   }) => {
-    // The full chain (fixture launch + seed generation + import + exit +
-    // post-exit verification) exceeds the 60s default timeout.
-    test.setTimeout(300000)
+    // Finding-9: Enlarge timeout to a justified budget exceeding all sequential
+    // phase bounds plus cleanup: fixture launch (120s) + seed generation (120s)
+    // + Vite server startup (90s) + import flow (120s) + process exit wait (90s)
+    // + termination/cleanup (60s) = 600s max. Use 660s for safety margin.
+    test.setTimeout(660000)
 
     // --- 0. Original process identity + target chat.db location -----------
     const originalPid = electronApp.process().pid
@@ -75,16 +106,28 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
     expect(chatDbPath, 'fixture must have captured the disposable chat.db path').toBeTruthy()
     const dataDir = path.dirname(chatDbPath!)
 
-    // Body + cleanup error capture (LOCK-C6: cleanup failure is a test failure,
-    // never a warning; a body failure is preserved for diagnosis).
+    // LOCK-DEV-6: Assert app.isPackaged === false (dev-origin requires unpackaged).
+    const appInfo = await mainWindow.evaluate(async () => {
+      const api = (window as any).api
+      const info = await api.getAppInfo()
+      return { isPackaged: info.isPackaged, appDataPath: info.appDataPath }
+    })
+    expect(appInfo.isPackaged, 'LOCK-DEV-6: dev-origin import requires app.isPackaged === false').toBe(false)
+
+    // Body + cleanup error capture (LOCK-C6).
     let bodyFailure: unknown = null
     const cleanupErrors: string[] = []
+
+    // LOCK-DEV-5: Owned Vite server handle (created later, stopped in finally).
+    let viteServer: Awaited<ReturnType<typeof startOwnedViteServer>> | null = null
+
+    // LOCK-L3: Test-owned tmpdir candidates to clean in finally (never pre-existing).
+    // LOCK-DEV-8: Snapshot of candidate temp workspaces + chat-import-candidates before import.
+    const candidateInventoryBefore = snapshotOwnedCandidateInventory(dataDir!, ownedTmpRoot)
 
     try {
       // --- 1. Baseline target data (proves replace-all, LOCK-623) -----------
       await seedBaselineTarget(mainWindow)
-      // LOCK-T4: the baseline topic, message AND block must all exist before
-      // the import so the replace-all semantics are provable afterwards.
       const baselineTopicExists = await mainWindow.evaluate(
         (topicId) => (window as any).api.chatDb.topicExists({ topicId }),
         BASELINE.topic
@@ -108,8 +151,8 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
         `baseline block ${BASELINE.block} must exist before import`
       ).toBe(true)
 
-      // --- 2. Disposable source ZIP (LOCK-621) -------------------------------
-      const seed = await createDisposableSeedZip(ownedTmpRoot)
+      // --- 2. Disposable dev-origin source ZIP (LOCK-DEV-1/2/8) ---------------
+      const seed = await createDisposableDevOriginSeedZip(ownedTmpRoot)
       try {
         // Source evidence: exactly what is documented, nothing more.
         expect(seed.evidence.nativeVersion).toBe(SEED_NATIVE_VERSION)
@@ -120,25 +163,50 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
         expect(seed.evidence.embeddedMessageIds).toContain(SOURCE_IDS.message)
         expect(seed.evidence.verifiedKeys.message_blocks).toContain(SOURCE_IDS.block)
         expect(seed.evidence.verifiedKeys.topic_segments).toContain(SOURCE_IDS.segment)
-        // f-e2e-1 is a source-only count-diagnostic row (LOCK-D7): it must be
-        // present in the source ZIP, and it is NOT persisted to the target DB.
         expect(seed.evidence.verifiedKeys.files).toContain(SOURCE_IDS.file)
         expect(seed.evidence.ldbFileCount).toBeGreaterThanOrEqual(1)
-        // LOCK-T4: the ZIP is production-format — every IndexedDB/ entry is
-        // under the expected origin directory and at least one .ldb table file
-        // lives inside it (intake Layer 4 would reject anything else).
-        expect(seed.evidence.zipEntryCount).toBeGreaterThan(0)
+
+        // LOCK-DEV-2: Origin directory must be EXACTLY the dev origin.
+        expect(seed.evidence.originDir, 'origin directory must be the dev origin').toBe(DEV_ORIGIN_DIR)
+
+        // LOCK-DEV-8: No file-origin entries in the ZIP.
         expect(
           seed.evidence.zipAllEntriesUnderOrigin,
-          'every ZIP IndexedDB/ entry must be under the expected origin'
+          'every ZIP IndexedDB/ entry must be under the expected dev origin'
         ).toBe(true)
         expect(
           seed.evidence.zipLdbEntryCount,
-          'ZIP must contain at least one .ldb entry inside the origin'
+          'ZIP must contain at least one .ldb entry inside the dev origin'
         ).toBeGreaterThanOrEqual(1)
-        console.log('[E2E] Seed ZIP evidence:', JSON.stringify(seed.evidence, null, 2))
+        console.log('[E2E] Dev-origin seed ZIP evidence:', JSON.stringify(seed.evidence, null, 2))
 
-        // --- 3. Observe statuses, then start the import -----------------------
+        // --- 3. Start owned Vite dev server (LOCK-DEV-5) ---------------------
+        // The seed server has fully stopped and port is free. Now acquire it
+        // with our owned Vite server for the import reader.
+        // Finding-2: __dirname is tests/e2e/specs/settings → 4 levels up to repo root.
+        const projectRoot = path.resolve(__dirname, '..', '..', '..', '..')
+        // Validate expected files exist before spawning.
+        expect(
+          fs.existsSync(path.join(projectRoot, 'package.json')),
+          `repo root must contain package.json: ${projectRoot}`
+        ).toBe(true)
+        expect(
+          fs.existsSync(path.join(projectRoot, 'electron.vite.config.ts')),
+          `repo root must contain electron.vite.config.ts: ${projectRoot}`
+        ).toBe(true)
+        viteServer = await startOwnedViteServer(projectRoot, ownedTmpRoot)
+
+        // Finding-4: Verify the chatImport entry point via Node-side HTTP
+        // probe, NOT renderer page fetch (CORS-sensitive).
+        const entryProbe = await probeChatImportEntry()
+        expect(
+          entryProbe.ok,
+          `chatImport entry point not accessible at http://localhost:5173/src/windows/chatImport/chatImport.html: ` +
+            `status=${entryProbe.status}`
+        ).toBe(true)
+        console.log(`[E2E] Owned Vite server verified: chatImport accessible (HTTP ${entryProbe.status})`)
+
+        // --- 4. Observe statuses, then start the import -----------------------
         const observer = await observeImportStatuses(mainWindow)
         const startResult = await mainWindow.evaluate(
           (zipPath) => (window as any).api.cherryImport.start(zipPath),
@@ -149,7 +217,7 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
         const sessionId = startResult.sessionId as string
         observer.setSessionId(sessionId)
 
-        // --- 4. Status progression THROUGH finalizing (LOCK-622 evidence a) ---
+        // --- 5. Status progression THROUGH finalizing (LOCK-622 evidence a) ---
         const finalizing = await observer.waitForState('finalizing', 120000)
         expect(finalizing.state).toBe('finalizing')
         const observed = await observer.getStates()
@@ -157,15 +225,14 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
         const chainError = assertStateSubsequence(stateNames, REQUIRED_STATE_CHAIN)
         expect(chainError, chainError ?? undefined).toBeNull()
 
-        // `promoted` races app.exit(0) and is best-effort only (LOCK-622):
-        // when observed it must come strictly after finalizing.
+        // `promoted` races app.exit(0) and is best-effort only (LOCK-622).
         const promotedIndex = stateNames.indexOf('promoted')
         if (promotedIndex !== -1) {
           expect(promotedIndex).toBeGreaterThan(stateNames.indexOf('finalizing'))
         }
-        console.log(`[E2E] Observed import states: ${stateNames.join(' -> ')}`)
+        console.log(`[E2E] Observed dev-origin import states: ${stateNames.join(' -> ')}`)
 
-        // f-e2e-1 evidence: candidate construction stats from candidate-ready.
+        // f-e2e-dev-1 evidence: candidate construction stats from candidate-ready.
         const ready = observed.find((s) => s.state === 'candidate-ready')
         expect(ready?.stats, 'candidate-ready event must carry CandidateImportStats').toBeTruthy()
         expect(ready?.stats?.topicCount).toBe(1)
@@ -174,33 +241,57 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
         expect(ready?.stats?.segmentCount).toBe(1)
         expect(ready?.stats?.segmentMembershipCount).toBe(1)
 
-        // --- 5. Original target process exit (LOCK-622 evidence b) ------------
+        // --- 6. Original target process exit (LOCK-622 evidence b) ------------
         const exited = await waitForProcessExit(originalPidValue, 90000)
         expect(exited, `original target process ${originalPidValue} did not exit within 90s`).toBe(true)
         console.log(`[E2E] Original target process ${originalPidValue} exited (hard terminal evidence)`)
 
-        // --- 6. Terminate the relaunched process by exact token (LOCK-625) ----
+        // --- 7. Terminate the relaunched process by exact token (LOCK-625) ----
+        // LOCK-7: Require observation of at least one relaunched process.
         const termination = await terminateProcessesByUserDataDir(userDataDir, originalPidValue)
-        if (termination.killedPids.length > 0) {
-          console.log(`[E2E] Terminated relaunched process(es) by profile token: ${termination.killedPids.join(', ')}`)
-        } else {
-          console.warn('[E2E] No relaunched process was observed for the disposable token')
-        }
+        expect(
+          termination.killedPids.length,
+          'LOCK-7: at least one relaunched process bearing the exact --user-data-dir token must be observed'
+        ).toBeGreaterThan(0)
+        console.log(`[E2E] Terminated relaunched process(es) by profile token: ${termination.killedPids.join(', ')}`)
         expect(
           termination.remainingPids,
           `processes still alive for disposable profile token: ${termination.remainingPids.join(', ')}`
         ).toEqual([])
         expect(termination.errors).toEqual([])
 
-        // --- 7. Post-exit chat.db replacement contents (LOCK-622 evidence c) --
+        // --- 7.5 Stop owned Vite server before DB verification (LOCK-DEV-5).
+        // The Vite server is only needed for the import reader. Leaving it
+        // alive through DB verification risks port contention and is
+        // unnecessary. stop() is idempotent — the finally block may call it
+        // again safely.
+        if (viteServer) {
+          try {
+            await viteServer.stop()
+          } catch (err) {
+            cleanupErrors.push(`Vite server stop failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+          viteServer = null
+        }
+
+        // --- 8. Post-exit chat.db replacement contents (LOCK-622 evidence c) --
         assertReplacementContents(chatDbPath!)
 
-        // --- 8. Retained pre-import snapshot + journal cleanup (LOCK-4434/36/38)
+        // --- 9. Retained pre-import snapshot + journal cleanup (LOCK-4434/36/38)
         assertRetainedPreImportSnapshot(dataDir)
+
+        // --- 10. LOCK-DEV-8 + LOCK-L3: Candidate workspace inventory --------
+        // <dataDir>/chat-import-candidates: empty promoted shells only
+        // (installCandidate renames chat.db to live; directory shell remains
+        // until age-based orphan recovery — LOCK-4423/4426/4213A).
+        // Owned tmp root cherry-import-*: deferred-recovery contract — capture exact
+        // new paths for E2E-owned cleanup in finally.
+        validateCandidateInventory(candidateInventoryBefore, dataDir, ownedTmpRoot)
       } finally {
-        // LOCK-625/624: always clean up — relaunched process by token, then the
-        // disposable seed profile + ZIP/work dirs. LOCK-C6: cleanup failure is
-        // a test failure; errors are accumulated and thrown after the body.
+        // LOCK-625/624: always clean up — relaunched process by exact token,
+        // then the disposable seed profile + ZIP/work dirs. The fixture owns
+        // root removal; the seed cleanup verifies its own artifacts and the
+        // spec inventories only ownedTmpRoot (never global temp paths).
         try {
           const leftover = await terminateProcessesByUserDataDir(userDataDir, originalPidValue)
           if (leftover.remainingPids.length > 0) {
@@ -213,20 +304,22 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
           cleanupErrors.push(`finally process cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
         }
         try {
-          // LOCK-T1: cleanup failures must fail the test. seed.cleanup()
-          // throws on unresolved owned resources, and every exact seed path
-          // is verified absent afterwards.
+          // seed.cleanup() closes + exact-cleans the seed profile, then removes
+          // the nested seed artifacts and verifies absence; it throws on any
+          // leftover (LOCK-T1).
           await seed.cleanup()
-          for (const dir of [seed.workDir, seed.profileDir, seed.profileDevDir]) {
-            if (fs.existsSync(dir)) {
-              cleanupErrors.push(`Seed dir still exists after cleanup: ${dir}`)
-            }
-          }
-          if (fs.existsSync(seed.zipPath)) {
-            cleanupErrors.push(`Seed ZIP still exists after cleanup: ${seed.zipPath}`)
-          }
         } catch (err) {
           cleanupErrors.push(`finally seed cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+
+        // LOCK-DEV-5: Stop owned Vite server in finally.
+        if (viteServer) {
+          try {
+            await viteServer.stop()
+          } catch (err) {
+            cleanupErrors.push(`Vite server stop failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+          viteServer = null
         }
       }
     } catch (error) {
@@ -252,25 +345,25 @@ async function seedBaselineTarget(page: import('@playwright/test').Page): Promis
     const chatDb = (window as any).api.chatDb
     const createdAt = '2026-07-30T00:00:00.000Z'
     const message = {
-      id: 'm-baseline-1',
+      id: 'm-baseline-dev-1',
       role: 'user',
       status: 'success',
-      content: 'baseline target message',
+      content: 'baseline dev-origin target message',
       createdAt,
-      topicId: 't-baseline-1',
-      blocks: ['b-baseline-1']
+      topicId: 't-baseline-dev-1',
+      blocks: ['b-baseline-dev-1']
     }
     const blocks = [
       {
-        id: 'b-baseline-1',
-        messageId: 'm-baseline-1',
+        id: 'b-baseline-dev-1',
+        messageId: 'm-baseline-dev-1',
         type: 'text',
         status: 'success',
-        content: 'baseline target block',
+        content: 'baseline dev-origin target block',
         createdAt
       }
     ]
-    return chatDb.appendMessage({ topicId: 't-baseline-1', message, blocks })
+    return chatDb.appendMessage({ topicId: 't-baseline-dev-1', message, blocks })
   })
   expect(appended?.ok, `baseline appendMessage failed: ${JSON.stringify(appended)}`).toBe(true)
 }
@@ -313,8 +406,7 @@ function assertRetainedPreImportSnapshot(dataDir: string): void {
   expect(fs.existsSync(snapshotPath), `retained pre-import snapshot missing at ${snapshotPath}`).toBe(true)
 
   // The snapshot is the pre-import live DB: it must still hold the baseline
-  // target records and must NOT contain the imported source records
-  // (LOCK-T4: topic, message AND block in both directions).
+  // target records and must NOT contain the imported source records.
   const snapshotTopicIds = queryRows(snapshotPath, 'SELECT id FROM topics ORDER BY id').map((r) => String(r.id))
   expect(snapshotTopicIds).toContain(BASELINE.topic)
   expect(snapshotTopicIds).not.toContain(SOURCE_IDS.topic)
@@ -327,8 +419,7 @@ function assertRetainedPreImportSnapshot(dataDir: string): void {
   expect(snapshotBlockIds).toContain(BASELINE.block)
   expect(snapshotBlockIds).not.toContain(SOURCE_IDS.block)
 
-  // LOCK-4436/4438: the journal and every staging sibling are durably cleaned
-  // before relaunch (LOCK-T4 — journal AND .staging absence).
+  // LOCK-4436/4438: the journal and every staging sibling are durably cleaned.
   for (const artifactName of [
     PROMOTION_JOURNAL_FILENAME,
     PROMOTION_JOURNAL_STAGING_FILENAME,

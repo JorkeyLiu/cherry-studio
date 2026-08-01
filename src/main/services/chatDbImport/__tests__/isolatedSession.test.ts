@@ -64,7 +64,7 @@ vi.mock('@logger', () => ({
 }))
 
 import { ChatImportSessionError } from '../errors'
-import { createIsolatedReader, dispose, getActiveReader } from '../isolatedSession'
+import { createIsolatedReader, DEV_LOAD_URL, DEV_ORIGIN_URL, dispose, getActiveReader } from '../isolatedSession'
 
 describe('isolatedSession', () => {
   beforeEach(() => {
@@ -97,6 +97,7 @@ describe('isolatedSession', () => {
       workspaceRoot: '/tmp/test-idb',
       htmlPath: '/app/chatImport.html',
       preloadPath: '/app/chat-import-preload.js',
+      loadMode: 'file' as const,
       onReady: vi.fn(),
       onDiscover: vi.fn(),
       onReadPage: vi.fn(),
@@ -113,10 +114,16 @@ describe('isolatedSession', () => {
       expect(getActiveReader()).toBe(reader)
     })
 
-    it('loads the HTML via file:// URL', async () => {
+    it('loads the HTML via file:// URL in file mode', async () => {
       await createIsolatedReader(baseOptions)
 
       expect(mockWindow.loadURL).toHaveBeenCalledWith('file:///app/chatImport.html')
+    })
+
+    it('loads the HTML via dev URL in dev mode', async () => {
+      await createIsolatedReader({ ...baseOptions, loadMode: 'dev' })
+
+      expect(mockWindow.loadURL).toHaveBeenCalledWith(DEV_LOAD_URL)
     })
 
     it('throws ChatImportSessionError if a session already exists (R-5)', async () => {
@@ -125,6 +132,14 @@ describe('isolatedSession', () => {
       await expect(createIsolatedReader({ ...baseOptions, sessionId: 'test-session-2' })).rejects.toThrow(
         ChatImportSessionError
       )
+    })
+
+    it('exports DEV_ORIGIN_URL as http://localhost:5173', () => {
+      expect(DEV_ORIGIN_URL).toBe('http://localhost:5173')
+    })
+
+    it('exports DEV_LOAD_URL as the full chatImport URL', () => {
+      expect(DEV_LOAD_URL).toBe('http://localhost:5173/src/windows/chatImport/chatImport.html')
     })
   })
 
@@ -139,6 +154,7 @@ describe('isolatedSession', () => {
         workspaceRoot: '/tmp/test-idb',
         htmlPath: '/app/chatImport.html',
         preloadPath: '/app/chat-import-preload.js',
+        loadMode: 'file' as const,
         onReady: vi.fn(),
         onDiscover: vi.fn(),
         onReadPage: vi.fn(),
@@ -162,6 +178,7 @@ describe('isolatedSession', () => {
         workspaceRoot: '/tmp/test-idb',
         htmlPath: '/app/chatImport.html',
         preloadPath: '/app/chat-import-preload.js',
+        loadMode: 'file' as const,
         onReady: vi.fn(),
         onDiscover: vi.fn(),
         onReadPage: vi.fn(),
@@ -186,6 +203,7 @@ describe('isolatedSession', () => {
         workspaceRoot: '/tmp/test-idb',
         htmlPath: '/app/chatImport.html',
         preloadPath: '/app/chat-import-preload.js',
+        loadMode: 'file' as const,
         onReady: vi.fn(),
         onDiscover: vi.fn(),
         onReadPage: vi.fn(),

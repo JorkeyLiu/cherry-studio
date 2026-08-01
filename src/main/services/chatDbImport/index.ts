@@ -83,12 +83,18 @@ import type {
   SourceReadStats
 } from '@shared/chatImport/types'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
+import { app } from 'electron'
 
 import { CandidateDbResource } from './candidateDb'
 import { ChatImportSessionError, ChatImportUnsupportedPlatformError } from './errors'
 import { createImportDataPlane } from './importDataPlane'
 import { registerChatImportIpc, sendCancel, sendDiscover, sendReadPage } from './importIpc'
-import { createIsolatedReader, dispose as disposeSession, disposeSync as disposeSessionSync } from './isolatedSession'
+import {
+  createIsolatedReader,
+  dispose as disposeSession,
+  disposeSync as disposeSessionSync,
+  type LoadMode
+} from './isolatedSession'
 import type {
   PromotionExecutionFailure,
   PromotionExecutionHandoff,
@@ -123,7 +129,7 @@ import type { CandidateVerifierOptions } from './verification/candidateVerifier'
 import { createCandidateVerifier } from './verification/candidateVerifier'
 import type { SourceVerificationManifest } from './verification/sourceManifest'
 import type { CandidateVerificationReport } from './verification/verificationContracts'
-import { extractZip } from './zipIntake'
+import { classifyOriginCandidates, extractZip } from './zipIntake'
 
 const logger = loggerService.withContext('chatDbImport')
 
@@ -342,6 +348,7 @@ class InternalImportSession implements ImportSession {
   public state: ImportState = 'intake'
   private tempDir: string | null = null
   private disposed = false
+  private ownedIpcDisposer: (() => void) | null = null
 
   /** Current entity index in the IMPORT_ENTITIES sequence. */
   public entityIndex = 0
@@ -427,6 +434,20 @@ class InternalImportSession implements ImportSession {
     this.tempDir = dir
   }
 
+  setIpcDisposer(disposer: () => void): void {
+    this.ownedIpcDisposer = disposer
+  }
+
+  private releaseIpcDisposer(): void {
+    const disposer = this.ownedIpcDisposer
+    if (!disposer) return
+    this.ownedIpcDisposer = null
+    if (ipcDisposer === disposer) {
+      disposer()
+      ipcDisposer = null
+    }
+  }
+
   async cancel(): Promise<void> {
     // LOCK-4401 boundary: cancel is decided by the pure promotion protocol.
     // - 'ignore-terminal'  → terminal state (incl. promoted/promotion-failed)
@@ -493,6 +514,7 @@ class InternalImportSession implements ImportSession {
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
+    this.releaseIpcDisposer()
 
     logger.info(`Disposing session ${this.id}`)
 
@@ -724,6 +746,10 @@ class InternalImportSession implements ImportSession {
     }
     logger.info(`Session ${this.id} marked disposed (sync)`)
   }
+
+  releaseIpcDisposerSync(): void {
+    this.releaseIpcDisposer()
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -777,6 +803,14 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
         `${extractResult.totalUncompressedBytes} bytes uncompressed, ` +
         `IndexedDB at ${extractResult.indexedDbDir}`
     )
+
+    // LOCK-DEV-3/4/6: Classify the origin of the extracted IndexedDB.
+    // This MUST occur after extraction but BEFORE IPC registration,
+    // window/session creation, and candidate initialization — a failed
+    // classification rejects the ZIP before any live DB or IPC mutation.
+    const origin = classifyOriginCandidates(extractResult.indexedDbDir, app.isPackaged)
+    const loadMode: LoadMode = origin.kind === 'dev' ? 'dev' : 'file'
+    logger.info(`Origin classified: ${origin.kind} (loadMode: ${loadMode})`)
 
     // Phase 2: Create isolated session + load import renderer
     session.setState('discovering')
@@ -937,6 +971,7 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
         await session.fail(`renderer error [${error.code}]`, new Error(error.message))
       }
     })
+    session.setIpcDisposer(ipcDisposer)
 
     // Create isolated reader — workspaceRoot is the temp dir (PARENT of IndexedDB/).
     // Chromium stores IDB at <sessionRoot>/IndexedDB/.
@@ -945,6 +980,7 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
       workspaceRoot: extractResult.destDir,
       htmlPath,
       preloadPath,
+      loadMode,
       onReady: (sid) => {
         logger.info(`Isolated reader window loaded for session ${sid}`)
       },
@@ -973,6 +1009,14 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
   } catch (error) {
     logger.error(`Import failed for session ${sessionId}:`, error as Error)
     session.setState('error')
+
+    // Release the active IPC disposer if one was registered before the
+    // failure (e.g. createIsolatedReader or loadURL threw after IPC
+    // registration). Without this, the ChatImport IPC handlers would
+    // remain registered on the next startImport call — the re-registration
+    // guard in registerChatImportIpc would dispose the stale handlers, but
+    // only if registerChatImportIpc is called again; a plain cancel or
+    // disposeActiveImport would not clean them up.
     await session.dispose()
     throw error
   }
@@ -1150,10 +1194,7 @@ export function disposeActiveImport(): void {
   session.markDisposedSync()
 
   // 5. Dispose IPC.
-  if (ipcDisposer) {
-    ipcDisposer()
-    ipcDisposer = null
-  }
+  session.releaseIpcDisposerSync()
 
   logger.info(`Disposed active import session ${session.id} (sync)`)
 }

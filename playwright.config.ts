@@ -29,9 +29,8 @@ export default defineConfig({
   // Reporter configuration
   reporter: [['html', { outputFolder: 'playwright-report' }], ['list']],
 
-  // Global setup and teardown
+  // Global setup (test-results dirs only; ownership cleanup is fixture-owned)
   globalSetup: './tests/e2e/global-setup.ts',
-  globalTeardown: './tests/e2e/global-teardown.ts',
 
   // Output directory for test artifacts
   outputDir: './test-results',

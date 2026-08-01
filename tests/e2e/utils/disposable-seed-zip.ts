@@ -24,12 +24,13 @@
 import { _electron as electron, type ElectronApplication, type Page } from '@playwright/test'
 import AdmZip from 'adm-zip'
 import * as fs from 'fs'
-import * as os from 'os'
 import * as path from 'path'
 import StreamZip from 'node-stream-zip'
 
+import { closeElectronWithExactCleanup } from './electron-cleanup'
+import { registerProfileLaunchToken, unregisterProfileLaunchToken } from '../fixtures/electron.fixture'
 import { terminateProcessesByUserDataDir } from './process-cleanup'
-import { getRequiredRunToken, registerOwnedPath } from './run-ownership'
+import { removeOwnedSeedArtifacts, validateProfileLaunchToken } from './run-ownership'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -114,18 +115,20 @@ export interface DisposableSeedZip {
 
 async function launchSeedApp(
   profileDir: string,
-  onApp: (app: ElectronApplication) => void
+  ownedTmpRoot: string
 ): Promise<{ app: ElectronApplication; page: Page }> {
   const app = await electron.launch({
     args: ['.', `--user-data-dir=${profileDir}`, '--no-sandbox', '--disable-gpu'],
-    env: { ...process.env, NODE_ENV: 'development', ELECTRON_RUN_AS_NODE: '' },
+    env: {
+      ...process.env,
+      NODE_ENV: 'development',
+      ELECTRON_RUN_AS_NODE: '',
+      TMPDIR: ownedTmpRoot,
+      TMP: ownedTmpRoot,
+      TEMP: ownedTmpRoot
+    },
     timeout: 120000
   })
-  // LOCK-F2: capture the handle IMMEDIATELY after launch resolves, before any
-  // readiness await. A failure during first-window/root/store readiness must
-  // still be able to close or precisely terminate this exact disposable
-  // profile process — the seed Electron handle is never lost to the caller.
-  onApp(app)
   const page = await app.waitForEvent('window', {
     predicate: async (win) => {
       try {
@@ -148,31 +151,12 @@ async function launchSeedApp(
  * ever deleted after the app is closed or its exact `--user-data-dir` process
  * is verified gone; any failure to reach that state propagates.
  */
-async function closeSeedApp(app: ElectronApplication, profileDir: string): Promise<void> {
-  try {
-    await app.close()
-    return
-  } catch (closeErr: any) {
-    const closeMessage = closeErr?.message ?? String(closeErr)
-    const termination = await terminateProcessesByUserDataDir(profileDir, null, {
-      termGraceMs: 5000,
-      settleMs: 2000,
-      verifyMs: 3000
-    })
-    if (termination.remainingPids.length > 0 || termination.errors.length > 0) {
-      const details: string[] = []
-      if (termination.remainingPids.length > 0) {
-        details.push(`process(es) still alive: ${termination.remainingPids.join(', ')}`)
-      }
-      if (termination.errors.length > 0) {
-        details.push(`termination errors: ${termination.errors.join('; ')}`)
-      }
-      throw new Error(
-        `[E2E] Seed app close failed (${closeMessage}) and exact-token termination did not fully succeed: ${details.join('; ')}`
-      )
-    }
-    console.warn(`[E2E] Seed app close failed (${closeMessage}); exact-token termination succeeded`)
-  }
+async function closeSeedApp(app: ElectronApplication | null, profileDir: string): Promise<void> {
+  return closeElectronWithExactCleanup(profileDir, {
+    close: () => (app ? app.close() : Promise.resolve()),
+    terminateExactProcesses: (profile) =>
+      terminateProcessesByUserDataDir(profile, null, { termGraceMs: 5000, settleMs: 2000, verifyMs: 3000 })
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -418,33 +402,10 @@ async function preflightZipEntries(zipPath: string, originDirName: string): Prom
 
 // ---------------------------------------------------------------------------
 // Owned-artifact cleanup (LOCK-624/T1)
+//
+// removeOwnedSeedArtifacts comes from run-ownership: it removes only the exact
+// dirs/ZIP this seed created and verifies absence, throwing on any leftover.
 // ---------------------------------------------------------------------------
-
-/**
- * Idempotently remove owned disposable seed dirs and the ZIP, then verify
- * EVERY exact owned path is absent. Throws when a path cannot be removed or
- * still exists afterwards — cleanup failure is a test failure, never a
- * warning. Only paths this seed created (run-owned) are touched.
- */
-async function removeOwnedSeedArtifacts(dirs: string[], zipPath: string): Promise<void> {
-  const errors: string[] = []
-  for (const dir of dirs) {
-    try {
-      if (fs.existsSync(dir)) {
-        fs.rmSync(dir, { recursive: true, force: true })
-      }
-    } catch (err: any) {
-      errors.push(`Failed to remove seed dir ${dir}: ${err?.message ?? String(err)}`)
-    }
-  }
-  for (const dir of dirs) {
-    if (fs.existsSync(dir)) errors.push(`Seed dir still exists after cleanup: ${dir}`)
-  }
-  if (fs.existsSync(zipPath)) errors.push(`Seed ZIP still exists after cleanup: ${zipPath}`)
-  if (errors.length > 0) {
-    throw new Error(`Disposable seed cleanup failed (${errors.length}): ${errors.join('; ')}`)
-  }
-}
 
 /**
  * Generate a disposable seed ZIP. Owns the seed Electron app lifecycle
@@ -453,33 +414,22 @@ async function removeOwnedSeedArtifacts(dirs: string[], zipPath: string): Promis
  * error propagates. Callers MUST call `cleanup()` on the returned handle;
  * cleanup failures throw (LOCK-T1).
  */
-export async function createDisposableSeedZip(): Promise<DisposableSeedZip> {
-  const runToken = getRequiredRunToken()
+export async function createDisposableSeedZip(ownedTmpRoot: string): Promise<DisposableSeedZip> {
   const unique = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   // Distinct directories: the work dir owns the produced ZIP, the profile dir
   // is the Electron --user-data-dir root (app data lands in <profileDir>Dev).
-  const workDir = path.join(os.tmpdir(), `${PROFILE_PREFIX}${unique}-work`)
-  const profileDir = path.join(os.tmpdir(), `${PROFILE_PREFIX}${unique}-profile`)
+  const workDir = path.join(ownedTmpRoot, `${PROFILE_PREFIX}${unique}-work`)
+  const profileDir = path.join(ownedTmpRoot, `${PROFILE_PREFIX}${unique}-profile`)
   const profileDevDir = profileDir + 'Dev'
   const zipPath = path.join(workDir, 'cherry-source-seed.zip')
 
   fs.mkdirSync(workDir, { recursive: true })
   fs.mkdirSync(profileDir, { recursive: true })
+  validateProfileLaunchToken(ownedTmpRoot, profileDir)
+  registerProfileLaunchToken(profileDir)
 
-  // LOCK-T5: register EVERY disposable source artifact (profile root AND the
-  // work dir owning the ZIP) so global teardown can remove them even if this
-  // process dies unexpectedly. The registry only accepts disposable paths
-  // directly under the OS temp dir — never broad parent deletion.
-  registerOwnedPath(profileDir, runToken)
-  registerOwnedPath(workDir, runToken)
-
-  let app: ElectronApplication | null = null
   try {
-    // LOCK-F2: the callback captures the seed handle the instant launch
-    // resolves, so it survives any later readiness/seed failure.
-    const launched = await launchSeedApp(profileDir, (launchedApp) => {
-      app = launchedApp
-    })
+    const launched = await launchSeedApp(profileDir, ownedTmpRoot)
     const seeded = await seedIndexedDb(launched.page)
 
     // Close the app cleanly (flushes LevelDB) before inspecting/zipping.
@@ -509,7 +459,11 @@ export async function createDisposableSeedZip(): Promise<DisposableSeedZip> {
         zipEntriesSample: preflight.sample
       },
       cleanup: async () => {
+        // Always close + exact-token terminate + final verify; only after
+        // success remove nested seed artifacts and unregister the profile.
+        await closeSeedApp(null, profileDir)
         await removeOwnedSeedArtifacts([workDir, profileDir, profileDevDir], zipPath)
+        unregisterProfileLaunchToken(profileDir)
       }
     }
   } catch (error) {
@@ -519,19 +473,24 @@ export async function createDisposableSeedZip(): Promise<DisposableSeedZip> {
     // and artifact-cleanup failures combine with, never mask, the original
     // error, and cleanup failure propagates.
     const cleanupErrors: string[] = []
-    if (app) {
-      try {
-        await closeSeedApp(app, profileDir)
-      } catch (err: any) {
-        cleanupErrors.push(`seed app close/terminate failed: ${err?.message ?? String(err)}`)
-      }
-    }
+    let cleaned = false
     try {
-      await removeOwnedSeedArtifacts([workDir, profileDir, profileDevDir], zipPath)
-    } catch (cleanupErr: any) {
-      cleanupErrors.push(
-        `owned artifact cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`
-      )
+      await closeSeedApp(null, profileDir)
+      cleaned = true
+    } catch (err: any) {
+      cleanupErrors.push(`seed app exact cleanup failed: ${err?.message ?? String(err)}`)
+    }
+    if (cleaned) {
+      try {
+        await removeOwnedSeedArtifacts([workDir, profileDir, profileDevDir], zipPath)
+        unregisterProfileLaunchToken(profileDir)
+      } catch (cleanupErr: any) {
+        cleanupErrors.push(
+          `owned artifact cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`
+        )
+      }
+    } else {
+      cleanupErrors.push('owned seed artifacts preserved because exact-profile cleanup did not succeed')
     }
     if (cleanupErrors.length > 0) {
       const original = error instanceof Error ? error.message : String(error)

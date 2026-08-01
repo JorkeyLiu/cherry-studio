@@ -2,7 +2,7 @@ import type { ChatImportEnvelope, DiscoveryResult, ReadPageResponse } from '@sha
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChatImportBridge } from './entryPoint'
-import { boot, createChatImportLogger, withTimeout } from './entryPoint'
+import { boot, createChatImportLogger, validateLocation, withTimeout } from './entryPoint'
 
 /**
  * Focused tests for the deterministic page-read timeout helper.
@@ -132,6 +132,211 @@ describe('createChatImportLogger', () => {
 })
 
 /**
+ * Focused tests for the location validation gate (LOCK-DEV-3).
+ *
+ * validateLocation accepts:
+ * - file: protocol (any file:// URL)
+ * - http://localhost:5173 with exact pathname and no search/hash
+ *
+ * All other protocols, hosts, ports, pathnames, search, hash are rejected.
+ */
+describe('validateLocation (LOCK-DEV-3)', () => {
+  it('accepts file: protocol with any pathname', () => {
+    const result = validateLocation({
+      protocol: 'file:',
+      origin: 'null',
+      pathname: '/tmp/chatImport.html',
+      search: '',
+      hash: '',
+      username: 'ignored',
+      password: 'ignored'
+    })
+    expect(result).toEqual({ ok: true, mode: 'file' })
+  })
+
+  it('accepts exact dev origin http://localhost:5173', () => {
+    const result = validateLocation({
+      protocol: 'http:',
+      origin: 'http://localhost:5173',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '',
+      hash: '',
+      username: '',
+      password: ''
+    })
+    expect(result).toEqual({ ok: true, mode: 'dev' })
+  })
+
+  it('rejects https: protocol on dev origin', () => {
+    const result = validateLocation({
+      protocol: 'https:',
+      origin: 'https://localhost:5173',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '',
+      hash: '',
+      username: '',
+      password: ''
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('WRONG_ORIGIN')
+  })
+
+  it('rejects http: on wrong host (127.0.0.1)', () => {
+    const result = validateLocation({
+      protocol: 'http:',
+      origin: 'http://127.0.0.1:5173',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '',
+      hash: '',
+      username: '',
+      password: ''
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('WRONG_ORIGIN')
+  })
+
+  it('rejects http: on wrong host ([::1])', () => {
+    const result = validateLocation({
+      protocol: 'http:',
+      origin: 'http://[::1]:5173',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '',
+      hash: '',
+      username: '',
+      password: ''
+    })
+    expect(result.ok).toBe(false)
+  })
+
+  it('rejects http: on wrong port', () => {
+    const result = validateLocation({
+      protocol: 'http:',
+      origin: 'http://localhost:3000',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '',
+      hash: '',
+      username: '',
+      password: ''
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('WRONG_ORIGIN')
+  })
+
+  it('rejects http: on wrong pathname', () => {
+    const result = validateLocation({
+      protocol: 'http:',
+      origin: 'http://localhost:5173',
+      pathname: '/src/windows/chatImport/index.html',
+      search: '',
+      hash: '',
+      username: '',
+      password: ''
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('WRONG_ORIGIN')
+  })
+
+  it('rejects http: with search params', () => {
+    const result = validateLocation({
+      protocol: 'http:',
+      origin: 'http://localhost:5173',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '?v=1',
+      hash: '',
+      username: '',
+      password: ''
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('WRONG_ORIGIN')
+  })
+
+  it('rejects http: with hash fragment', () => {
+    const result = validateLocation({
+      protocol: 'http:',
+      origin: 'http://localhost:5173',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '',
+      hash: '#section',
+      username: '',
+      password: ''
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('WRONG_ORIGIN')
+  })
+
+  it('rejects websocket protocol', () => {
+    const result = validateLocation({
+      protocol: 'ws:',
+      origin: 'ws://localhost:5173',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '',
+      hash: '',
+      username: '',
+      password: ''
+    })
+    expect(result.ok).toBe(false)
+  })
+
+  it('rejects dev origin with username in URL', () => {
+    const result = validateLocation({
+      protocol: 'http:',
+      origin: 'http://admin@localhost:5173',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '',
+      hash: '',
+      username: 'admin',
+      password: ''
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('WRONG_ORIGIN')
+  })
+
+  it('accepts dev origin only with explicit empty credentials', () => {
+    const result = validateLocation({
+      protocol: 'http:',
+      origin: 'http://localhost:5173',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '',
+      hash: '',
+      username: '',
+      password: ''
+    })
+    // This one should be accepted (no credentials in origin)
+    expect(result).toEqual({ ok: true, mode: 'dev' })
+  })
+
+  it('rejects dev origin with both username and password', () => {
+    // Simulate a URL with credentials by constructing the origin string
+    // In a real browser, origin would strip credentials, but we test the validation logic
+    const result = validateLocation({
+      protocol: 'http:',
+      origin: 'http://user:pass@localhost:5173',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '',
+      hash: '',
+      username: 'user',
+      password: 'pass'
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('WRONG_ORIGIN')
+  })
+
+  it('rejects dev origin with percent-encoded credentials', () => {
+    const result = validateLocation({
+      protocol: 'http:',
+      origin: 'http://user%40domain:pass%3Aword@localhost:5173',
+      pathname: '/src/windows/chatImport/chatImport.html',
+      search: '',
+      hash: '',
+      username: 'user%40domain',
+      password: 'pass%3Aword'
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('WRONG_ORIGIN')
+  })
+})
+
+/**
  * Shared fake preload bridge used by the boot regression suites. `on*` mirrors
  * ipcRenderer: registration pushes the callback; unregistration removes it and
  * increments the counter.
@@ -213,7 +418,28 @@ function createFakeBridge(): {
   }
 }
 
-const FILE_PROTOCOL_OPTIONS = { locationProtocol: 'file:' }
+const FILE_PROTOCOL_OPTIONS = {
+  location: {
+    protocol: 'file:',
+    origin: 'null',
+    pathname: '/tmp/chatImport.html',
+    search: '',
+    hash: '',
+    username: '',
+    password: ''
+  }
+}
+const DEV_PROTOCOL_OPTIONS = {
+  location: {
+    protocol: 'http:',
+    origin: 'http://localhost:5173',
+    pathname: '/src/windows/chatImport/chatImport.html',
+    search: '',
+    hash: '',
+    username: '',
+    password: ''
+  }
+}
 const STUB_DISCOVER: DiscoveryResult = {
   databaseName: 'CherryStudio',
   nativeVersion: 110,
@@ -405,10 +631,70 @@ describe('boot ready/discover ordering (LOCK-Y1/Y2/Y4)', () => {
     expect(harness.error).toHaveBeenCalledTimes(1)
   })
 
-  it('aborts before registering listeners when the page protocol is not file: (R-3)', async () => {
+  it('async terminal IPC disposer: cancel during in-flight discover does not double-unsubscribe (exact-once)', async () => {
+    const harness = createFakeBridge()
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    // Simulate: ready fires, discover event arrives and starts an async
+    // discovery, then cancel arrives before discovery completes.
+    // Both drive the shared cleanup path — must unsubscribe exactly once.
+    let resolveDiscover: (() => void) | null = null
+    harness.ready.mockImplementation(async () => {
+      // Emit discover event — this starts the async discovery.
+      const onDiscover = harness.discoverCallbacks[0]
+      // Kick off the discover handler (it will block on our promise).
+      onDiscover('session-async')
+      return { ok: true }
+    })
+
+    // Make discover slow — it blocks until we resolve it.
+    const discoverImpl = async () => {
+      await new Promise<void>((r) => {
+        resolveDiscover = r
+      })
+      return STUB_DISCOVER
+    }
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      closeDb,
+      discover: discoverImpl
+    })
+    await flushMicrotasks()
+
+    // Now cancel while discover is still in-flight.
+    harness.cancelCallbacks[0]('session-async')
+    await flushMicrotasks()
+
+    // Cancel drove cleanup — listeners unsubscribed, closeDb called once.
+    expect(harness.unsubscribeCounts).toEqual({ discover: 1, readPage: 1, cancel: 1 })
+    expect(closeDb).toHaveBeenCalledTimes(1)
+
+    // Now resolve the discover — it should find cleanup already done
+    // and not double-unsubscribe or call closeDb again.
+    const finishDiscover = resolveDiscover as (() => void) | null
+    if (finishDiscover) finishDiscover()
+    await flushMicrotasks()
+
+    // Still exactly once — no double-unsubscribe from the late discover completion.
+    expect(harness.unsubscribeCounts).toEqual({ discover: 1, readPage: 1, cancel: 1 })
+    expect(closeDb).toHaveBeenCalledTimes(1)
+  })
+
+  it('aborts before registering listeners when the page protocol is not file: and not dev (R-3)', async () => {
     const harness = createFakeBridge()
 
-    await boot(harness.bridge, { locationProtocol: 'https:' })
+    await boot(harness.bridge, {
+      location: {
+        protocol: 'https:',
+        origin: 'https://example.com',
+        pathname: '/chatImport.html',
+        search: '',
+        hash: '',
+        username: '',
+        password: ''
+      }
+    })
 
     expect(harness.ready).not.toHaveBeenCalled()
     expect(harness.discoverCallbacks).toHaveLength(0)
@@ -418,6 +704,21 @@ describe('boot ready/discover ordering (LOCK-Y1/Y2/Y4)', () => {
     expect(harness.error.mock.calls[0][0]).toMatchObject({
       data: { code: 'WRONG_ORIGIN' }
     })
+  })
+
+  it('accepts dev origin and registers listeners normally', async () => {
+    const harness = createFakeBridge()
+
+    await boot(harness.bridge, {
+      ...DEV_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER
+    })
+
+    expect(harness.ready).toHaveBeenCalled()
+    expect(harness.discoverCallbacks).toHaveLength(1)
+    expect(harness.readPageCallbacks).toHaveLength(1)
+    expect(harness.cancelCallbacks).toHaveLength(1)
+    expect(harness.error).not.toHaveBeenCalled()
   })
 })
 

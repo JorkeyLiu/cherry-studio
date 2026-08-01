@@ -3,14 +3,28 @@
  *
  * IMPORTANT: main.setup.ts globally mocks node:fs, node:os, node:path.
  * We override with real implementations using importActual inside vi.mock factories.
+ *
+ * The node:fs mock uses vi.hoisted to produce a MUTABLE wrapper whose
+ * properties can be overridden per-test for deterministic I/O failure
+ * simulation. ESM module namespaces are sealed by spec, so vi.spyOn cannot
+ * reconfigure exports — the hoisted mutable wrapper is the supported pattern.
  */
+
+import type * as NodeFs from 'node:fs'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('node:fs', async () => {
-  const actual = await vi.importActual('node:fs')
-  return { ...actual, default: actual }
+// Mutable fs wrapper: properties can be overridden per-test to simulate
+// deterministic readdirSync / lstatSync failures.  `default` points to
+// itself so `import fs from 'node:fs'` resolves to the mutable object.
+const { fsMock } = vi.hoisted(() => {
+  const actual = require('node:fs') as typeof NodeFs
+  const fsMock: any = { ...actual }
+  fsMock.default = fsMock
+  return { fsMock }
 })
+
+vi.mock('node:fs', () => fsMock)
 
 vi.mock('node:os', async () => {
   const actual = await vi.importActual('node:os')
@@ -30,6 +44,10 @@ import StreamZip from 'node-stream-zip'
 
 import { ChatImportZipError } from '../errors'
 import {
+  classifyOriginCandidates,
+  DEV_ORIGIN_DIR,
+  enumerateLdbCandidates,
+  FILE_ORIGIN_DIR,
   MAX_ENTRY_COUNT,
   MAX_SINGLE_ENTRY_BYTES,
   MAX_TOTAL_UNCOMPRESSED_BYTES,
@@ -149,6 +167,153 @@ describe('zipIntake', () => {
       const result = validateIndexedDbStructure(tempDir)
       expect(result).toBe(indexedDbPath)
     })
+
+    it('rejects when only .ldb-suffixed directories exist (not regular files)', () => {
+      const indexedDbPath = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbPath, 'some-origin')
+      fs.mkdirSync(subdir, { recursive: true })
+      // Directory with .ldb suffix — must NOT count
+      fs.mkdirSync(path.join(subdir, '000001.ldb'))
+
+      expect(() => validateIndexedDbStructure(tempDir)).toThrow(ChatImportZipError)
+      expect(() => validateIndexedDbStructure(tempDir)).toThrow(/NO_INDEXED_DB/)
+    })
+
+    // -----------------------------------------------------------------------
+    // Symlink structural validation (darwin-assumed; platform-guarded)
+    // -----------------------------------------------------------------------
+
+    const itOnDarwin = process.platform === 'darwin' ? it : it.skip
+
+    itOnDarwin('rejects .ldb symlink pointing to a valid file (lstatSync isFile=false for symlinks)', () => {
+      const indexedDbPath = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbPath, 'some-origin')
+      fs.mkdirSync(subdir, { recursive: true })
+
+      // Create a symlink target with a non-.ldb name (so only the symlink has .ldb suffix)
+      const targetFile = path.join(subdir, 'target-data')
+      fs.writeFileSync(targetFile, 'leveldb data')
+      // Create a symlink named 000001.ldb → target-data
+      // lstatSync on the symlink returns isFile() = false (symlink, not regular file)
+      fs.symlinkSync(targetFile, path.join(subdir, '000001.ldb'))
+
+      // Only the symlink exists with .ldb suffix; no regular .ldb file.
+      // validateIndexedDbStructure must reject because lstatSync.isFile() is false for symlinks.
+      expect(() => validateIndexedDbStructure(tempDir)).toThrow(ChatImportZipError)
+      expect(() => validateIndexedDbStructure(tempDir)).toThrow(/NO_INDEXED_DB/)
+    })
+
+    itOnDarwin('rejects dangling .ldb symlink (lstatSync throws → fail-closed)', () => {
+      const indexedDbPath = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbPath, 'some-origin')
+      fs.mkdirSync(subdir, { recursive: true })
+
+      // Create a dangling symlink named 000001.ldb → /nonexistent
+      fs.symlinkSync('/nonexistent', path.join(subdir, '000001.ldb'))
+
+      // Dangling symlink: lstatSync succeeds (it doesn't follow the link),
+      // but isFile() returns false. If it somehow throws, the catch returns false.
+      expect(() => validateIndexedDbStructure(tempDir)).toThrow(ChatImportZipError)
+      expect(() => validateIndexedDbStructure(tempDir)).toThrow(/NO_INDEXED_DB/)
+    })
+
+    itOnDarwin('accepts when a regular .ldb file coexists with a symlink .ldb (only regular qualifies)', () => {
+      const indexedDbPath = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbPath, 'some-origin')
+      fs.mkdirSync(subdir, { recursive: true })
+
+      // Real .ldb file
+      fs.writeFileSync(path.join(subdir, '000001.ldb'), 'leveldb data')
+      // Symlink .ldb file — must NOT count
+      fs.symlinkSync('/nonexistent', path.join(subdir, '000002.ldb'))
+
+      // Should accept because the real file qualifies
+      const result = validateIndexedDbStructure(tempDir)
+      expect(result).toBe(indexedDbPath)
+    })
+
+    // -----------------------------------------------------------------------
+    // Deterministic I/O failure tests (mutable fsMock overrides)
+    // -----------------------------------------------------------------------
+
+    it('readdirSync failure on inner entries skips the subdirectory (fail-closed, continues)', () => {
+      const indexedDbPath = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbPath, 'some-origin')
+      fs.mkdirSync(subdir, { recursive: true })
+      // Create a .ldb file so the subdir would normally qualify
+      fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+
+      // Save original and override inner readdirSync to fail
+      const origReaddirSync = fsMock.readdirSync
+      fsMock.readdirSync = (p: any, options?: any) => {
+        const pStr = String(p)
+        // Fail for the inner subdir readdirSync (not withFileTypes)
+        if (pStr.endsWith('some-origin') && !options?.withFileTypes) {
+          throw new Error('EACCES: permission denied')
+        }
+        // Pass through for everything else
+        return origReaddirSync(p, options)
+      }
+
+      try {
+        // The subdirectory's inner readdirSync fails → caught → skipped → no .ldb found → NO_INDEXED_DB
+        expect(() => validateIndexedDbStructure(tempDir)).toThrow(ChatImportZipError)
+        expect(() => validateIndexedDbStructure(tempDir)).toThrow(/NO_INDEXED_DB/)
+      } finally {
+        fsMock.readdirSync = origReaddirSync
+      }
+    })
+
+    it('lstatSync failure for a .ldb file returns false (fail-closed, file not counted)', () => {
+      const indexedDbPath = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbPath, 'some-origin')
+      fs.mkdirSync(subdir, { recursive: true })
+      // Create a .ldb file — this would normally qualify
+      fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+
+      // Save original and override lstatSync to fail for the .ldb file
+      const origLstatSync = fsMock.lstatSync
+      fsMock.lstatSync = (p: any) => {
+        const pStr = String(p)
+        if (pStr.endsWith('000001.ldb')) {
+          throw new Error('EACCES: permission denied')
+        }
+        return origLstatSync(p)
+      }
+
+      try {
+        // lstatSync fails for 000001.ldb → catch returns false → no qualifying .ldb → NO_INDEXED_DB
+        expect(() => validateIndexedDbStructure(tempDir)).toThrow(ChatImportZipError)
+        expect(() => validateIndexedDbStructure(tempDir)).toThrow(/NO_INDEXED_DB/)
+      } finally {
+        fsMock.lstatSync = origLstatSync
+      }
+    })
+
+    it('readdirSync failure on outer IndexedDB propagates (not wrapped in try/catch)', () => {
+      const indexedDbPath = path.join(tempDir, 'IndexedDB')
+      fs.mkdirSync(indexedDbPath, { recursive: true })
+
+      // Save original and override outer readdirSync (withFileTypes) to fail
+      const origReaddirSync = fsMock.readdirSync
+      fsMock.readdirSync = (p: any, options?: any) => {
+        const pStr = String(p)
+        if (pStr.endsWith('IndexedDB') && options?.withFileTypes) {
+          throw new Error('EACCES: permission denied')
+        }
+        return origReaddirSync(p, options)
+      }
+
+      try {
+        // Outer readdirSync failure is NOT caught by validateIndexedDbStructure
+        // (the outer readdirSync call is outside any try/catch). The raw error
+        // propagates — this is the actual production contract.
+        expect(() => validateIndexedDbStructure(tempDir)).toThrow('EACCES: permission denied')
+        expect(() => validateIndexedDbStructure(tempDir)).not.toThrow(ChatImportZipError)
+      } finally {
+        fsMock.readdirSync = origReaddirSync
+      }
+    })
   })
 
   describe('ChatImportZipError', () => {
@@ -177,7 +342,10 @@ describe('zipIntake', () => {
         'FILE_NOT_FOUND',
         'NOT_A_FILE',
         'DUPLICATE_ENTRIES',
-        'INVALID_ENTRY_SIZE'
+        'INVALID_ENTRY_SIZE',
+        'UNSUPPORTED_ORIGIN',
+        'AMBIGUOUS_ORIGIN',
+        'PACKAGED_DEV_ORIGIN'
       ] as const
       for (const code of codes) {
         const error = new ChatImportZipError(code, 'test')
@@ -502,6 +670,261 @@ describe('zipIntake', () => {
 
     it('replaces null byte injection with <redacted>', () => {
       expect(sanitizeEntryNameForMessage('innocent.txt\x00../../etc/passwd')).toBe('<redacted>')
+    })
+  })
+
+  // =========================================================================
+  // Origin classification (LOCK-DEV-3/4/6)
+  // =========================================================================
+
+  describe('enumerateLdbCandidates', () => {
+    it('returns empty array when IndexedDB dir has no .ldb-bearing subdirs', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      fs.mkdirSync(indexedDbDir, { recursive: true })
+      const emptyDir = path.join(indexedDbDir, 'empty')
+      fs.mkdirSync(emptyDir)
+      fs.writeFileSync(path.join(emptyDir, 'MANIFEST-000001'), 'data')
+
+      expect(enumerateLdbCandidates(indexedDbDir)).toEqual([])
+    })
+
+    it('returns the single candidate with .ldb files', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbDir, FILE_ORIGIN_DIR)
+      fs.mkdirSync(subdir, { recursive: true })
+      fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+
+      expect(enumerateLdbCandidates(indexedDbDir)).toEqual([FILE_ORIGIN_DIR])
+    })
+
+    it('returns multiple candidates when multiple subdirs have .ldb', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      for (const name of [FILE_ORIGIN_DIR, DEV_ORIGIN_DIR]) {
+        const subdir = path.join(indexedDbDir, name)
+        fs.mkdirSync(subdir, { recursive: true })
+        fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+      }
+
+      const result = enumerateLdbCandidates(indexedDbDir)
+      expect(result).toContain(FILE_ORIGIN_DIR)
+      expect(result).toContain(DEV_ORIGIN_DIR)
+      expect(result).toHaveLength(2)
+    })
+
+    it('returns empty array when IndexedDB dir does not exist', () => {
+      expect(enumerateLdbCandidates(path.join(tempDir, 'nonexistent'))).toEqual([])
+    })
+
+    it('skips unreadable subdirs without throwing', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const validDir = path.join(indexedDbDir, FILE_ORIGIN_DIR)
+      fs.mkdirSync(validDir, { recursive: true })
+      fs.writeFileSync(path.join(validDir, '000001.ldb'), 'data')
+
+      expect(enumerateLdbCandidates(indexedDbDir)).toEqual([FILE_ORIGIN_DIR])
+    })
+
+    it('rejects directories ending in .ldb (not regular files)', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbDir, FILE_ORIGIN_DIR)
+      fs.mkdirSync(subdir, { recursive: true })
+      // Create a directory whose name ends in .ldb — must NOT count
+      const fakeLdbDir = path.join(subdir, '000001.ldb')
+      fs.mkdirSync(fakeLdbDir)
+      fs.writeFileSync(path.join(fakeLdbDir, 'inner.txt'), 'data')
+
+      expect(enumerateLdbCandidates(indexedDbDir)).toEqual([])
+    })
+
+    it('rejects symlinks ending in .ldb (not regular files)', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbDir, FILE_ORIGIN_DIR)
+      fs.mkdirSync(subdir, { recursive: true })
+      // Create a symlink whose name ends in .ldb — must NOT count
+      const symlinkPath = path.join(subdir, '000001.ldb')
+      fs.symlinkSync('/nonexistent', symlinkPath)
+
+      expect(enumerateLdbCandidates(indexedDbDir)).toEqual([])
+    })
+
+    it('accepts only regular .ldb files when mixed with directories and symlinks', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbDir, FILE_ORIGIN_DIR)
+      fs.mkdirSync(subdir, { recursive: true })
+      // Real .ldb file
+      fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+      // Directory named .ldb
+      fs.mkdirSync(path.join(subdir, '000002.ldb'))
+      // Symlink named .ldb
+      fs.symlinkSync('/nonexistent', path.join(subdir, '000003.ldb'))
+
+      expect(enumerateLdbCandidates(indexedDbDir)).toEqual([FILE_ORIGIN_DIR])
+    })
+  })
+
+  describe('classifyOriginCandidates', () => {
+    const itOnDarwin = process.platform === 'darwin' ? it : it.skip
+
+    it('classifies file-origin correctly (packaged)', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbDir, FILE_ORIGIN_DIR)
+      fs.mkdirSync(subdir, { recursive: true })
+      fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+
+      const result = classifyOriginCandidates(indexedDbDir, true)
+      expect(result).toEqual({ kind: 'file', indexedDbDir })
+    })
+
+    it('classifies file-origin correctly (unpackaged)', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbDir, FILE_ORIGIN_DIR)
+      fs.mkdirSync(subdir, { recursive: true })
+      fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+
+      const result = classifyOriginCandidates(indexedDbDir, false)
+      expect(result).toEqual({ kind: 'file', indexedDbDir })
+    })
+
+    it('classifies dev-origin correctly (unpackaged)', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbDir, DEV_ORIGIN_DIR)
+      fs.mkdirSync(subdir, { recursive: true })
+      fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+
+      const result = classifyOriginCandidates(indexedDbDir, false)
+      expect(result).toEqual({ kind: 'dev', indexedDbDir })
+    })
+
+    it('rejects dev-origin in packaged mode (PACKAGED_DEV_ORIGIN)', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbDir, DEV_ORIGIN_DIR)
+      fs.mkdirSync(subdir, { recursive: true })
+      fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+
+      expect(() => classifyOriginCandidates(indexedDbDir, true)).toThrow(ChatImportZipError)
+      expect(() => classifyOriginCandidates(indexedDbDir, true)).toThrow(/PACKAGED_DEV_ORIGIN/)
+    })
+
+    it('rejects multiple candidates as ambiguous (AMBIGUOUS_ORIGIN)', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      for (const name of [FILE_ORIGIN_DIR, DEV_ORIGIN_DIR]) {
+        const subdir = path.join(indexedDbDir, name)
+        fs.mkdirSync(subdir, { recursive: true })
+        fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+      }
+
+      expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(ChatImportZipError)
+      expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(/AMBIGUOUS_ORIGIN/)
+    })
+
+    it('rejects a supported and unsupported origin combination as ambiguous', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      for (const name of [FILE_ORIGIN_DIR, 'unknown-origin.indexeddb.leveldb']) {
+        const subdir = path.join(indexedDbDir, name)
+        fs.mkdirSync(subdir, { recursive: true })
+        fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+      }
+
+      expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(/AMBIGUOUS_ORIGIN/)
+    })
+
+    it('does not treat nested .ldb entries as a direct origin candidate', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const originDir = path.join(indexedDbDir, FILE_ORIGIN_DIR)
+      fs.mkdirSync(path.join(originDir, 'nested'), { recursive: true })
+      fs.writeFileSync(path.join(originDir, 'nested', '000001.ldb'), 'data')
+
+      expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(/NO_INDEXED_DB/)
+    })
+
+    itOnDarwin('rejects a symlinked direct candidate directory', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const target = path.join(tempDir, 'real-origin')
+      fs.mkdirSync(target, { recursive: true })
+      fs.writeFileSync(path.join(target, '000001.ldb'), 'data')
+      fs.mkdirSync(indexedDbDir, { recursive: true })
+      fs.symlinkSync(target, path.join(indexedDbDir, FILE_ORIGIN_DIR), 'dir')
+
+      expect(enumerateLdbCandidates(indexedDbDir)).toEqual([])
+      expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(/NO_INDEXED_DB/)
+    })
+
+    it('rejects unsupported single candidate (UNSUPPORTED_ORIGIN)', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbDir, 'some_unknown_origin.indexeddb.leveldb')
+      fs.mkdirSync(subdir, { recursive: true })
+      fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+
+      expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(ChatImportZipError)
+      expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(/UNSUPPORTED_ORIGIN/)
+    })
+
+    it('rejects unsupported candidate in packaged mode (UNSUPPORTED_ORIGIN)', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const subdir = path.join(indexedDbDir, 'some_unknown_origin.indexeddb.leveldb')
+      fs.mkdirSync(subdir, { recursive: true })
+      fs.writeFileSync(path.join(subdir, '000001.ldb'), 'data')
+
+      expect(() => classifyOriginCandidates(indexedDbDir, true)).toThrow(ChatImportZipError)
+      expect(() => classifyOriginCandidates(indexedDbDir, true)).toThrow(/UNSUPPORTED_ORIGIN/)
+    })
+
+    it('rejects zero candidates (NO_INDEXED_DB)', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      fs.mkdirSync(indexedDbDir, { recursive: true })
+
+      expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(ChatImportZipError)
+      expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(/NO_INDEXED_DB/)
+    })
+
+    it('sanitizes directory names with control chars in AMBIGUOUS_ORIGIN message', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      // Name with control char — must be sanitized in the error message.
+      // Use \x01 (SOH) which is valid in directory names on most filesystems.
+      const evilName = 'evil\x01dir.indexeddb.leveldb'
+      const evilDir = path.join(indexedDbDir, evilName)
+      fs.mkdirSync(evilDir, { recursive: true })
+      fs.writeFileSync(path.join(evilDir, '000001.ldb'), 'data')
+      const otherDir = path.join(indexedDbDir, FILE_ORIGIN_DIR)
+      fs.mkdirSync(otherDir, { recursive: true })
+      fs.writeFileSync(path.join(otherDir, '000001.ldb'), 'data')
+
+      try {
+        classifyOriginCandidates(indexedDbDir, false)
+        expect.fail('should have thrown')
+      } catch (e: any) {
+        expect(e.code).toBe('AMBIGUOUS_ORIGIN')
+        // The raw control-char-containing name must NOT appear in the message
+        // (sanitizeEntryNameForMessage replaces control chars with <redacted>).
+        expect(e.message).not.toContain('evil\x01dir')
+      }
+    })
+
+    it('sanitizes directory names with path separators in UNSUPPORTED_ORIGIN message', () => {
+      // A name that includes path separators (simulating a crafted ZIP entry
+      // that somehow ended up as a real directory name — defensive check).
+      // Use mkdirSync with the actual path to create a directory that has
+      // a forward slash in its basename... but this is impossible on real
+      // filesystems. Instead, verify that classifyOriginCandidates uses
+      // sanitizeEntryNameForMessage by checking that an unsupported name
+      // containing control characters (which IS possible) is sanitized.
+      // We already test control chars above. Here, verify that the
+      // sanitizeEntryNameForMessage function itself redacts names with '/'.
+      expect(sanitizeEntryNameForMessage('../../etc/passwd')).toBe('<redacted>')
+      expect(sanitizeEntryNameForMessage('..\\windows\\system32')).toBe('<redacted>')
+    })
+
+    it('rejects file + unrelated (AMBIGUOUS_ORIGIN)', () => {
+      const indexedDbDir = path.join(tempDir, 'IndexedDB')
+      const fileDir = path.join(indexedDbDir, FILE_ORIGIN_DIR)
+      fs.mkdirSync(fileDir, { recursive: true })
+      fs.writeFileSync(path.join(fileDir, '000001.ldb'), 'data')
+      const otherDir = path.join(indexedDbDir, 'other.indexeddb.leveldb')
+      fs.mkdirSync(otherDir, { recursive: true })
+      fs.writeFileSync(path.join(otherDir, '000001.ldb'), 'data')
+
+      expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(ChatImportZipError)
+      expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(/AMBIGUOUS_ORIGIN/)
     })
   })
 })

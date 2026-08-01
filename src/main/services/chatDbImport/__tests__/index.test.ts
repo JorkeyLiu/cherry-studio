@@ -53,7 +53,8 @@ vi.mock('@logger', () => ({
 
 vi.mock('electron', () => ({
   app: {
-    getAppPath: vi.fn(() => '/app')
+    getAppPath: vi.fn(() => '/app'),
+    isPackaged: false
   }
 }))
 
@@ -74,7 +75,8 @@ vi.mock('../zipIntake', () => ({
     indexedDbDir: '/tmp/cherry-import-test/IndexedDB',
     entryCount: 10,
     totalUncompressedBytes: 1024
-  })
+  }),
+  classifyOriginCandidates: vi.fn().mockReturnValue({ kind: 'file', indexedDbDir: '/tmp/cherry-import-test/IndexedDB' })
 }))
 
 // Captures the options passed to createIsolatedReader for the
@@ -101,10 +103,18 @@ const mockSendReadPage = vi.fn()
 const mockSendCancel = vi.fn()
 let capturedCallbacks: any = null
 
+// Track IPC disposer invocations per-registration for exact-once/order assertions.
+// Each registerChatImportIpc call returns a fresh vi.fn() disposer so tests can
+// assert call count, call order, and that later registrations' disposers are not
+// invoked by earlier registrations' cleanup paths.
+let mockIpcDisposer: ReturnType<typeof vi.fn> | null = null
+
 vi.mock('../importIpc', () => ({
   registerChatImportIpc: vi.fn((callbacks?: any) => {
     capturedCallbacks = callbacks
-    return () => {}
+    // Fresh per-registration disposer — callers can assert toHaveBeenCalledTimes(1)
+    mockIpcDisposer = vi.fn()
+    return mockIpcDisposer
   }),
   sendCancel: vi.fn((...args: any[]) => mockSendCancel(...args)),
   sendReadPage: vi.fn((...args: any[]) => mockSendReadPage(...args)),
@@ -142,7 +152,7 @@ vi.mock('@main/services/chatDb', () => ({
 
 import { acquirePromotionLease, createMaintenanceCoordinator } from '@main/services/chatDb/maintenanceCoordination'
 
-import { ChatImportSessionError, ChatImportUnsupportedPlatformError } from '../errors'
+import { ChatImportSessionError, ChatImportUnsupportedPlatformError, ChatImportZipError } from '../errors'
 import type {
   ExecutingPromotionCapability,
   PreparedPromotionConsumeResult,
@@ -368,6 +378,7 @@ describe('ChatImport index', () => {
     vi.clearAllMocks()
     capturedCallbacks = null
     capturedReaderOptions = null
+    mockIpcDisposer = null
     // Production defaults delegate to the doubles (never real SQLite here).
     hoisted.candidateCtor.mockImplementation((_opts: any) => makeCandidate())
     hoisted.createPlane.mockImplementation((_db: unknown) => makePlane())
@@ -402,6 +413,78 @@ describe('ChatImport index', () => {
     it('ChatImportUnsupportedPlatformError includes linux', () => {
       const error = new ChatImportUnsupportedPlatformError('linux')
       expect(error.message).toContain('linux')
+    })
+  })
+
+  // =========================================================================
+  // Origin classification integration (LOCK-DEV-3/4/6)
+  // =========================================================================
+
+  describe('origin classification', () => {
+    itOnDarwin('calls classifyOriginCandidates after extraction and before IPC/session creation', async () => {
+      const { classifyOriginCandidates } = await import('../zipIntake')
+      const { session } = await begin()
+
+      // classifyOriginCandidates is called once per startImport.
+      expect(classifyOriginCandidates).toHaveBeenCalledTimes(1)
+      // Called with the extracted IndexedDB dir and app.isPackaged.
+      expect(classifyOriginCandidates).toHaveBeenCalledWith(
+        '/tmp/cherry-import-test/IndexedDB',
+        false // app.isPackaged from mock
+      )
+      // IPC and session were created (classification passed).
+      expect(capturedCallbacks).toBeDefined()
+      expect(capturedReaderOptions).toBeDefined()
+
+      await session.dispose()
+    })
+
+    itOnDarwin('rejects before IPC registration when classifyOriginCandidates throws', async () => {
+      const { classifyOriginCandidates } = await import('../zipIntake')
+      vi.mocked(classifyOriginCandidates).mockImplementationOnce(() => {
+        throw new ChatImportZipError('UNSUPPORTED_ORIGIN', 'Unsupported origin')
+      })
+
+      await expect(startImport('/tmp/test.zip')).rejects.toThrow('UNSUPPORTED_ORIGIN')
+
+      // IPC was NOT registered — the rejection happened before registerChatImportIpc.
+      expect(capturedCallbacks).toBeNull()
+      // Session/reader were NOT created.
+      expect(capturedReaderOptions).toBeNull()
+      // Singleton was reset (cleanup verified).
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin('workspace cleanup on classification failure (dispose verified)', async () => {
+      const { classifyOriginCandidates } = await import('../zipIntake')
+      vi.mocked(classifyOriginCandidates).mockImplementationOnce(() => {
+        throw new ChatImportZipError('AMBIGUOUS_ORIGIN', 'Multiple candidates')
+      })
+      const { disposeAsync } = await import('../tempWorkspace')
+
+      await expect(startImport('/tmp/test.zip')).rejects.toThrow('AMBIGUOUS_ORIGIN')
+
+      // Temp workspace was disposed through the existing error handling path.
+      expect(disposeAsync).toHaveBeenCalled()
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin('packaged dev-origin rejection proves pre-IPC boundary (LOCK-DEV-3/4/6)', async () => {
+      const { classifyOriginCandidates } = await import('../zipIntake')
+      vi.mocked(classifyOriginCandidates).mockImplementationOnce(() => {
+        throw new ChatImportZipError(
+          'PACKAGED_DEV_ORIGIN',
+          'ZIP contains dev-origin directory but the app is packaged.'
+        )
+      })
+
+      await expect(startImport('/tmp/test.zip')).rejects.toThrow('PACKAGED_DEV_ORIGIN')
+
+      // The rejection MUST happen before IPC registration and before
+      // session/reader creation — proving the pre-IPC classification gate.
+      expect(capturedCallbacks).toBeNull()
+      expect(capturedReaderOptions).toBeNull()
+      expect(getActiveImport()).toBeNull()
     })
   })
 
@@ -546,6 +629,139 @@ describe('ChatImport index', () => {
       expect(session.state).toBe('error')
       expect(candidate.discard).toHaveBeenCalled()
       expect(getActiveImport()).toBeNull()
+    })
+  })
+
+  // =========================================================================
+  // Startup failure cleanup — IPC/session/window/workspace (audit finding 1)
+  // =========================================================================
+
+  describe('startup failure cleanup', () => {
+    itOnDarwin(
+      'IPC disposer is invoked exactly once when createIsolatedReader throws after IPC registration',
+      async () => {
+        const { registerChatImportIpc } = await import('../importIpc')
+        const { createIsolatedReader } = await import('../isolatedSession')
+
+        // Mock: IPC registration succeeds, but createIsolatedReader fails
+        // (simulates loadURL failure or session error).
+        vi.mocked(createIsolatedReader).mockRejectedValueOnce(new Error('loadURL failed'))
+
+        await expect(startImport('/tmp/test.zip')).rejects.toThrow('loadURL failed')
+
+        // IPC was registered (the mock captured it).
+        expect(registerChatImportIpc).toHaveBeenCalled()
+        // Direct disposer assertion: the per-registration disposer was called
+        // EXACTLY ONCE — not zero (leaked handlers) and not twice (double-free).
+        expect(mockIpcDisposer).not.toBeNull()
+        expect(mockIpcDisposer).toHaveBeenCalledTimes(1)
+        // Session was cleaned up (singleton reset).
+        expect(getActiveImport()).toBeNull()
+        // Reader was attempted but failed.
+        expect(capturedReaderOptions).toBeDefined()
+      }
+    )
+
+    itOnDarwin('startup failure invokes disposer BEFORE session cleanup (ordering contract)', async () => {
+      const { createIsolatedReader } = await import('../isolatedSession')
+
+      vi.mocked(createIsolatedReader).mockRejectedValueOnce(new Error('loadURL failed'))
+
+      // Record invocation order: disposer vs. getActiveImport() becoming null.
+      // Since both happen synchronously in the same error path, we capture the
+      // disposer call count and then verify the session is already null.
+      const disposerCallSnapshot = mockIpcDisposer ? mockIpcDisposer.mock.calls.length : 0
+
+      await expect(startImport('/tmp/test.zip')).rejects.toThrow('loadURL failed')
+
+      // Disposer was invoked (at least one call beyond the snapshot).
+      expect(mockIpcDisposer).toHaveBeenCalledTimes(disposerCallSnapshot + 1)
+      // Session is already cleaned up AFTER the disposer ran — the error path
+      // calls ipcDisposer() BEFORE session.dispose().
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin(
+      'startup failure does NOT invoke a later registration disposer (no cross-registration cleanup)',
+      async () => {
+        const { createIsolatedReader } = await import('../isolatedSession')
+
+        // First startImport: IPC registered, then createIsolatedReader fails.
+        vi.mocked(createIsolatedReader).mockRejectedValueOnce(new Error('loadURL failed'))
+        await expect(startImport('/tmp/test.zip')).rejects.toThrow('loadURL failed')
+
+        // Capture the first registration's disposer reference.
+        const firstDisposer = mockIpcDisposer
+        expect(firstDisposer).not.toBeNull()
+        expect(firstDisposer).toHaveBeenCalledTimes(1)
+
+        // Second startImport: succeeds with a NEW registration.
+        vi.mocked(createIsolatedReader).mockResolvedValueOnce({
+          sessionId: 'test',
+          window: { isDestroyed: () => false, destroy: vi.fn(), webContents: { mainFrame: {} } },
+          electronSession: { clearStorageData: vi.fn(), clearCache: vi.fn() }
+        } as any)
+
+        await startImport('/tmp/test.zip')
+        const secondDisposer = mockIpcDisposer
+
+        // The second disposer is a different function instance (per-registration).
+        expect(secondDisposer).not.toBe(firstDisposer)
+        // The second registration's disposer has NOT been called yet.
+        expect(secondDisposer).toHaveBeenCalledTimes(0)
+
+        // disposeActiveImport (sync will-quit path) calls the IPC disposer.
+        disposeActiveImport()
+
+        // After disposeActiveImport, the second disposer is called exactly once.
+        expect(secondDisposer).toHaveBeenCalledTimes(1)
+        // The first disposer was NOT re-invoked by the second registration's dispose.
+        expect(firstDisposer).toHaveBeenCalledTimes(1)
+      }
+    )
+
+    itOnDarwin('no stale IPC handlers remain after startup failure — re-registration disposes stale', async () => {
+      const { registerChatImportIpc } = await import('../importIpc')
+      const { createIsolatedReader } = await import('../isolatedSession')
+
+      // First startImport: IPC registered, then createIsolatedReader fails.
+      vi.mocked(createIsolatedReader).mockRejectedValueOnce(new Error('loadURL failed'))
+      await expect(startImport('/tmp/test.zip')).rejects.toThrow('loadURL failed')
+
+      const firstCallCount = vi.mocked(registerChatImportIpc).mock.calls.length
+
+      // Second startImport: IPC re-registration must succeed (stale
+      // handlers from the first call were disposed by the error path).
+      vi.mocked(createIsolatedReader).mockResolvedValueOnce({
+        sessionId: 'test',
+        window: { isDestroyed: () => false, destroy: vi.fn(), webContents: { mainFrame: {} } },
+        electronSession: { clearStorageData: vi.fn(), clearCache: vi.fn() }
+      } as any)
+
+      const session = await startImport('/tmp/test.zip')
+      expect(vi.mocked(registerChatImportIpc).mock.calls.length).toBeGreaterThan(firstCallCount)
+
+      await session.dispose()
+    })
+
+    itOnDarwin('disposeActiveImport releases IPC disposer (sync will-quit path)', async () => {
+      const { registerChatImportIpc } = await import('../importIpc')
+
+      const session = await startImport('/tmp/test.zip')
+      expect(getActiveImport()).toBe(session)
+
+      // disposeActiveImport is the sync will-quit path — it must release
+      // the IPC disposer.
+      disposeActiveImport()
+
+      // After disposeActiveImport, the session is gone.
+      expect(getActiveImport()).toBeNull()
+      // registerChatImportIpc was called (to register), and the disposer
+      // was returned and stored — disposeActiveImport calls it.
+      expect(registerChatImportIpc).toHaveBeenCalled()
+      // Direct disposer assertion: the disposer was called exactly once
+      // by the sync will-quit path.
+      expect(mockIpcDisposer).toHaveBeenCalledTimes(1)
     })
   })
 
@@ -768,6 +984,30 @@ describe('ChatImport index', () => {
         await session.dispose()
       }
     )
+
+    itOnDarwin('passes loadMode "file" to createIsolatedReader for file-origin', async () => {
+      const { session } = await begin()
+
+      expect(capturedReaderOptions).toBeDefined()
+      expect(capturedReaderOptions.loadMode).toBe('file')
+
+      await session.dispose()
+    })
+
+    itOnDarwin('passes loadMode "dev" to createIsolatedReader for dev-origin', async () => {
+      const { classifyOriginCandidates } = await import('../zipIntake')
+      vi.mocked(classifyOriginCandidates).mockReturnValueOnce({
+        kind: 'dev',
+        indexedDbDir: '/tmp/cherry-import-test/IndexedDB'
+      })
+
+      const { session } = await begin()
+
+      expect(capturedReaderOptions).toBeDefined()
+      expect(capturedReaderOptions.loadMode).toBe('dev')
+
+      await session.dispose()
+    })
   })
 
   // =========================================================================

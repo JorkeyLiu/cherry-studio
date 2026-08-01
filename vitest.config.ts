@@ -89,6 +89,16 @@ export default defineConfig({
             include: ['packages/shared/**/*.bench.{ts,tsx}', 'packages/shared/**/__tests__/**/*.bench.{ts,tsx}']
           }
         }
+      },
+      // E2E utility tests (non-Electron, non-Playwright unit tests)
+      {
+        extends: true,
+        test: {
+          name: 'e2e-utils',
+          environment: 'node',
+          include: ['tests/e2e/utils/**/*.test.ts'],
+          testTimeout: 15000
+        }
       }
     ],
     // 全局共享配置

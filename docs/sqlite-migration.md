@@ -4,12 +4,12 @@
 >
 > ✅ **集成同步门（Baseline Sync Gate，Done/已合并/已验证）**：integration 分支（`05a401b711`）已集成同步进 migration 分支（pre-merge HEAD `5d50499e80`）；合并自动解决、无兼容性编辑；审计无阻塞/无代码发现，验证全部通过（format 无改动；lint exit 0 / 112 known warnings；typecheck 通过；`pnpm test` 265 文件 / 5664 通过 / 72 跳过 / 0 失败；聚焦测试 201 renderer + 822 chatDb/import）。Phase 4.4 既有架构未改变；合并后统一的 Renderer/context/type/Redux 结构已作为 Phase 5 实施基线。详见 Section 9「集成同步门（Baseline Sync Gate）」与决策日志。
 > **分支**：`jorkey/refactor/sqlite-migration`
-> **最后更新**：2026-08-01
+> **最后更新**：2026-08-02
 > **Owner**：Personal fork（jorkeyliu）
 >
 > ⚠️ **ADR-8 策略更正（2026-07-20）**：Phase 4+ 的产品策略已更正为**外部应用兼容性导入**模型。原 in-place Dexie→SQLite shadow/cutover 模型已正式废弃。详见 Section 6 A-8。
 >
-> ⚠️ **Post-closure 兼容性发现（2026-08-01）**：Phase 6 closure 后发现 L2 导入管线存在 **dev-origin 兼容性缺口**：Cherry Studio ZIP 从 `electron-vite` dev 模式生成时，IndexedDB 目录为 `IndexedDB/http_localhost_5173.indexeddb.leveldb`（dev origin）；ZIP intake（R-12）正确接受该目录，但隔离 import renderer 固定通过 `file://` 协议加载（`isolatedSession.ts` line 144–148），Chromium 将 `file://` origin 映射为 `file__0.indexeddb.leveldb`，导致 `indexedDB.databases()` discovery 失败（`[DISCOVERY_FAILED] CherryStudio database not found in isolated IndexedDB`）。**当前支持**：packaged/file-origin `file__0`（生产构建 + 标准用户备份）。**不支持**：dev-origin `http_localhost_5173`（未实现）。Phase 0–6 Done 状态不变；此为 closure 后发现的兼容性修正项，非 Phase 7。详见「Phase 6 交付收尾后发现：L2 dev-origin 兼容性缺口」。
+> ✅ **Post-closure L2 dev-origin 兼容性实现完成（2026-08-02）**：精确 `http://localhost:5173` dev-origin 已在 L2 导入管线中实现（LOCK-DEV-1…8）。Chromium 41.2.1 自然将精确 `http://localhost:5173` 映射为 `IndexedDB/http_localhost_5173.indexeddb.leveldb`，与 `file://` origin 隔离。Main intake 分类精确 file__0/dev 映射并在 IPC/窗口/candidate 之前拒绝不支持/歧义/多个 origin。Renderer 验证精确 dev origin/path/no-search/no-hash；最终验证重构 application-owned exact URL fields 而非接受任意 URL 输入。Dev E2E PASS 1/1 51.2s；genuine file-origin PASS 1/1 53.4s。Phase 0–6 Done 状态不变；此为 closure 后兼容性实现，非 Phase 7。详见「Phase 6 交付收尾后发现：L2 dev-origin 兼容性缺口（已实现）」。
 
 ---
 
@@ -435,7 +435,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **清理验证** | 10/10 fresh-root macOS arm64 迭代全部通过；child 正常退出（exit 0）；owned roots 在 exit 后删除，全部首次成功（cleanupAttempts=1）；无 owned leftovers |
 | **No-go 回退** | 专用隔离 Electron helper 进程（非破坏性恢复、非直接 LevelDB 解析）。**状态：contingency only，未选用** — same-process approach 在测试平台上满足 Phase 4.0 Go |
 | **未验证** | Windows/Linux；跨平台 fixture 可移植性；真实 ZIP snapshot 一致性/损坏处理（→ Phase 4.1） |
-| **Origin 支持边界（2026-08-01 post-closure 发现）** | Phase 4.0 spike 观测到的 `file://` origin + `file__0.indexeddb.leveldb` 映射为 **packaged/file-origin 生产构建的正确行为**。dev-origin ZIP（`http://localhost:5173` → `IndexedDB/http_localhost_5173.indexeddb.leveldb`）在当前实现下 discovery 失败：隔离 import renderer 固定通过 `file://` 协议加载，Chromium 将 `file://` origin 映射为 `file__0`，不映射为 `http_localhost_5173`。ZIP intake（R-12）正确接受 dev-origin 目录，但 discovery 层不匹配。dev-origin 支持为待实现项，不改变 A-8 产品语义 |
+| **Origin 支持边界（post-closure 实现，2026-08-02，LOCK-DEV-1…8）** | Phase 4.0 spike 观测到的 `file://` origin + `file__0.indexeddb.leveldb` 映射为 **packaged/file-origin 生产构建的正确行为**。精确 `http://localhost:5173` dev-origin 已实现（LOCK-DEV-1…8）：Chromium 41.2.1 自然将精确 `http://localhost:5173` 映射为 `IndexedDB/http_localhost_5173.indexeddb.leveldb`，与 `file://` origin 隔离。Main intake 分类精确 file__0/dev 映射并在 IPC/窗口/candidate 之前拒绝不支持/歧义/多个 origin；Renderer 验证精确 dev origin/path/no-search/no-hash（LOCK-DEV-2…4）；最终验证重构 application-owned exact URL fields 而非接受任意 URL 输入（LOCK-DEV-5）。当前支持矩阵：**packaged/file-origin `file__0`（生产构建 + 标准用户备份）= 支持；精确 `http://localhost:5173` dev-origin（electron-vite dev 模式 ZIP）= 支持；其他 origin/端口 = 拒绝**。packaged 构建不引入 HTTP origin 支持。不改变 A-8 产品语义 |
 | **退出条件** | ✅ macOS arm64 上 fromPath + origin + Dexie schema 读取验证通过；✅ v4→v11 升级验证通过；✅ v12 拒绝验证通过；✅ session 隔离验证通过；✅ LS 非必需验证通过；✅ 清理稳定性验证通过 |
 
 #### Phase 4.1：Secure ZIP intake + isolated IndexedDB source reader
@@ -449,7 +449,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **源数据约束** | 受支持源：Cherry Studio ZIP 备份含原始 Chromium IndexedDB。当前 IndexedDB schema 为主源。旧 IndexedDB 仅在当前 Dexie declaration/upgrades 可防御性识别并升级为当前逻辑形态时才接受 |
 | **缺失值规则** | 缺失值继承当前 Cherry Studio/Dexie upgrade 和 reader 语义。不创建 importer-specific 历史修复。不推断缺失 ID、ownership、timestamp、role、status、model 等字段。结构不可用数据被拒绝 |
 | **排除项** | 不解析 LevelDB（Main 不直接解析）；不恢复源到目标 app 的正常 Dexie profile；不扫描磁盘查找其他应用；不要求共享目录 |
-| **Origin 支持边界（2026-08-01 post-closure 发现）** | Phase 4.1 验证通过的 origin 为 `file://`（通过 `pathToFileURL` 加载 `chatImport.html`），对应 packaged/file-origin `file__0` 映射。**dev-origin（`http://localhost:5173`）不被当前实现支持**：ZIP intake（R-12）正确接受含 `.ldb` 的任意 IndexedDB 子目录（不硬编码 `file__0`），但隔离 import renderer 固定通过 `file://` 协议加载，Chromium 将 `file://` origin 映射为 `file__0.indexeddb.leveldb`，不映射为 `http_localhost_5173.indexeddb.leveldb`，导致 `indexedDB.databases()` discovery 失败。failure 发生在 candidate DB 初始化/promotion 之前，live chat.db 不受影响。当前支持矩阵：**packaged/file-origin `file__0`（生产构建 + 标准用户备份）= 支持；dev-origin `http_localhost_5173`（electron-vite dev 模式 ZIP）= 不支持** |
+| **Origin 支持边界（post-closure 实现，2026-08-02，LOCK-DEV-1…8）** | Phase 4.1 验证通过的 origin 包括：① `file://`（通过 `pathToFileURL` 加载 `chatImport.html`），对应 packaged/file-origin `file__0` 映射；② 精确 `http://localhost:5173` dev-origin（LOCK-DEV-1…8）。Chromium 41.2.1 自然将精确 `http://localhost:5173` 映射为 `IndexedDB/http_localhost_5173.indexeddb.leveldb`，与 `file://` origin 隔离。Main intake 分类精确 file__0/dev 映射并在 IPC/窗口/candidate 之前拒绝不支持/歧义/多个 origin（LOCK-DEV-3）；Renderer 验证精确 dev origin/path/no-search/no-hash（LOCK-DEV-4）；最终验证重构 application-owned exact URL fields 而非接受任意 URL 输入（LOCK-DEV-5）。Real Chromium E2E fixture 自然生成无需 rename。failure 发生在 candidate DB 初始化/promotion 之前时 live chat.db 不受影响。当前支持矩阵：**packaged/file-origin `file__0`（生产构建 + 标准用户备份）= 支持；精确 `http://localhost:5173` dev-origin（electron-vite dev 模式 ZIP）= 支持；其他 origin/端口 = 拒绝**。packaged 构建不引入 HTTP origin 支持 |
 | **退出条件** | ✅ 安全 ZIP 解压 + IndexedDB 结构校验通过（5 层校验 + 通用 IndexedDB 探测）；✅ 隔离 Session 成功加载源数据（`session.fromPath(destDir, {cache:false})` + file:// origin）；✅ import renderer 通过 current Dexie schema 读取数据（`indexedDB.databases()` discovery + production Dexie upgrades v4→v11 + future-version gate ≥120）；✅ 分页 IPC 将逻辑数据传输到 Main（Main 驱动 Discover→ReadPage cursor progression；源 reader 分页读完后 self-complete 并精确一次（exact-once）发送 `candidate-ready` 信号；Phase 4.2 接收该信号后启动候选 DB 批量写入，非由 Phase 4.1 内 onReadyForBulk 启动 bulk）；✅ 取消支持：用户可在 promotion 前中断，源数据和现有 SQLite 不受影响；✅ 平台拒绝（A-9 macOS-first）；✅ spike harness 保留（A-10）；✅ 主进程 977/977 测试通过；✅ 2 轮独立审计阻塞修复后最终 Clean |
 
 #### Phase 4.2：Candidate SQLite bulk importer
@@ -852,9 +852,11 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **LOCK-MD8** | push/remote CI 最终事实（2026-07-31 post-push）：origin 分支 `jorkey/refactor/sqlite-migration` 已推送，remote SHA `89803503fce89883bbc93b73f4910b05d90111ea`，upstream `origin/jorkey/refactor/sqlite-migration` 已建立（branch URL `https://github.com/JorkeyLiu/cherry-studio/tree/jorkey/refactor/sqlite-migration`）；GitHub Actions runs for this branch = 0——**未运行/无 run**（非失败、非 green CI），不虚构 workflow IDs/statuses；`.github/workflows/ci.yml` push trigger 仅 `main`/`v1`，未创建 PR、未手动 dispatch；E2E 非远程 CI 证据（B-class 本地标准 Playwright） |
 | **LOCK-MD9** | 保留历史事实；被取代的 no-console baseline 注释为 closure 中 resolved |
 
-#### Phase 6 交付收尾后发现：L2 dev-origin 兼容性缺口（2026-08-01）
+#### Phase 6 交付收尾后发现：L2 dev-origin 兼容性缺口（2026-08-01）— 已实现（2026-08-02）
 
-> **定位**：本节为 Phase 6 closure（2026-07-31）后发现的 **L2 导入管线兼容性缺口**，记录当前行为、根因、支持边界与未来任务契约。**不是 Phase 7**，不重开 Phase 0–6。Phase 0–6 Done 状态不变。
+> **定位**：本节为 Phase 6 closure（2026-07-31）后发现的 **L2 导入管线兼容性缺口**，记录发现历史、实现记录、决策锁、最终证据与残余边界。**不是 Phase 7**，不重开 Phase 0–6。Phase 0–6 Done 状态不变。
+
+##### 发现历史（2026-08-01，原始记录）
 
 | 属性 | 值 |
 |---|---|
@@ -862,24 +864,53 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **发现方式** | 用户从 `electron-vite` dev 模式生成 Cherry Studio ZIP，ZIP intake 接受后隔离 import renderer discovery 失败 |
 | **静态证据来源** | `zipIntake.ts` R-12（接受任意 `.ldb` 子目录）；`isolatedSession.ts` line 144–148（固定 `file://` 加载）；`entryPoint.ts` line 404–409（`indexedDB.databases()` discovery）；Chromium origin-to-directory 映射规则 |
 | **运行时证据（手动运行时观察 + 静态代码关联，非已提交自动化/E2E 证据）** | ZIP intake 成功（R-12 接受 `IndexedDB/http_localhost_5173.indexeddb.leveldb`）→ 隔离 session 创建成功（`session.fromPath`）→ import renderer 通过 `file://` 加载 → `indexedDB.databases()` 返回空或不含 `CherryStudio` → `[DISCOVERY_FAILED] CherryStudio database not found in isolated IndexedDB` |
-| **根因** | **Chromium origin 隔离**：Chromium 根据页面 URL 的 origin 决定 IndexedDB 存储目录。`file://` origin 映射为 `file__0.indexeddb.leveldb`，`http://localhost:5173` origin 映射为 `http_localhost_5173.indexeddb.leveldb`。当前实现固定通过 `pathToFileURL` 加载 `chatImport.html`（`file://` 协议），因此 Chromium 只查找 `file__0` 目录下的 IndexedDB 数据。dev-origin ZIP 的数据在 `http_localhost_5173` 目录下，对 `file://` origin 的 renderer 不可见 |
+| **根因** | **Chromium origin 隔离**：Chromium 根据页面 URL 的 origin 决定 IndexedDB 存储目录。`file://` origin 映射为 `file__0.indexeddb.leveldb`，`http://localhost:5173` origin 映射为 `http_localhost_5173.indexeddb.leveldb`。当时实现固定通过 `pathToFileURL` 加载 `chatImport.html`（`file://` 协议），因此 Chromium 只查找 `file__0` 目录下的 IndexedDB 数据。dev-origin ZIP 的数据在 `http_localhost_5173` 目录下，对 `file://` origin 的 renderer 不可见 |
 | **failure 位置** | Phase 4.1 discovery 层（`entryPoint.ts` `runDiscovery()`），在 candidate DB 初始化/promotion **之前** |
 | **数据影响** | 无。failure 在 discovery 阶段即停止，未触及候选 DB、未触及 live `chat.db`、未触及源 ZIP 数据 |
-| **当前支持矩阵** | **支持**：packaged/file-origin `file__0`（Cherry Studio 生产构建 + 标准用户备份，`IndexedDB/file__0.indexeddb.leveldb`）。**不支持**：dev-origin `http_localhost_5173`（electron-vite dev 模式 ZIP，`IndexedDB/http_localhost_5173.indexeddb.leveldb`） |
-| **安全边界** | Chromium origin 隔离为浏览器安全边界。当前实现不绕过、不要求绕过。未来 dev-origin 支持必须在 origin 隔离模型内实现，不得复制/重命名 origin 目录 |
-| **现有 E2E 证据影响** | B-class `import-cherrystudio-genuine.spec.ts` 使用 **disposable production-format Chromium IndexedDB ZIP fixture**（Level 1，LOCK-MD3），其 IndexedDB 为 `file__0` 格式，不受此缺口影响。历史 E2E 证据在其 scope 内仍然有效 |
 | **Phase 0–6 Done 状态影响** | **不变**。Phase 4.1 Done 状态反映 packaged/file-origin scope 内的验证通过。dev-origin 为新的兼容性需求，不构成对 Phase 4.1 完成性的否定 |
-| **与已有决策锁关系** | 本发现与 Phase 0–6 Done 不变一致（closure 后发现的兼容性修正项，非 Phase 7）。与当前支持矩阵一致：本节正式记录 dev-origin 不支持 |
 
-**未来任务契约（bounded dev-origin support）**：
+##### 实现记录（2026-08-02，closure 后兼容性实现）
 
 | 属性 | 值 |
 |---|---|
-| **任务定义** | 在 L2 导入管线中增加 trusted dev-origin 支持，使 electron-vite dev 模式生成的 ZIP 可被正确导入 |
-| **scope 约束** | ① **仅限精确 `http://localhost:5173`**（electron-vite 默认端口）：未来 dev-origin 支持仅接受此精确 origin，不接受 `127.0.0.1`、`::1`、其他主机、其他端口、格式错误的映射、多个/歧义 origin 目录；未经单独批准，均 fail closed；② **packaged 构建保持 file-only**：生产构建不引入 HTTP origin 支持；③ **Chromium origin 隔离安全边界不变**：不复制/重命名/合并 origin 目录，仅在 origin 隔离模型内操作 |
-| **实现方向（非约束）** | 隔离 import renderer 在检测到源 ZIP 含 `http_localhost_5173` 目录时，动态选择 `http://localhost:5173` 加载协议，使 Chromium 将 IDB 数据映射到正确的 origin 下。**不推断**其他 origin；其他目录名视为不支持。具体实现方案由实现 session 决定 |
-| **验证要求** | ① dev-origin ZIP 端到端导入成功（discovery → bulk import → verification → promotion）；② packaged file-origin ZIP 回归验证（B-class fixture 不退化）；③ 非 loopback origin fail-closed 验证；④ 聚焦测试覆盖 origin 路由逻辑 |
-| **不改变** | L2/L3 产品语义（LOCK-6001）；replace-all 语义（LOCK-6002）；隔离 import renderer 保留（LOCK-6023）；macOS-first（A-9）；Phase 0–6 Done 状态 |
+| **实现日期** | 2026-08-02 |
+| **定位** | Phase 6 closure 后兼容性实现，非 Phase 7；不重开 Phase 0–6 |
+| **Chromium 自然映射** | Electron 41.2.1 Chromium 自然将精确 `http://localhost:5173` 映射为 `IndexedDB/http_localhost_5173.indexeddb.leveldb`，与 `file://` origin 隔离。无需 rename/复制 origin 目录 |
+| **Trusted URL 构造（LOCK-DEV-1）** | 精确 dev renderer URL：`http://localhost:5173/src/windows/chatImport/chatImport.html`。App-owned constant，仅 `app.isPackaged=false` 且精确 dev source mapping 时使用 |
+| **Packaged/dev 分支规则（LOCK-DEV-2）** | Packaged 构建：始终 `file://` 协议 + `file__0` origin（不变）。Dev 构建：检测 ZIP 含精确 `http_localhost_5173` 目录时，使用 `http://localhost:5173` 协议加载 import renderer |
+| **Accepted mappings** | ① `file__0`（packaged 构建，`IndexedDB/file__0.indexeddb.leveldb`）；② 精确 `http_localhost_5173`（dev 构建，`IndexedDB/http_localhost_5173.indexeddb.leveldb`） |
+| **Main intake 分类（LOCK-DEV-3）** | Main intake 分类精确 file__0/dev 映射并在 IPC/窗口/candidate 之前拒绝不支持/歧义/多个 origin 目录 |
+| **Renderer 验证（LOCK-DEV-4）** | Renderer 验证精确 dev origin/path/no-search/no-hash；有界操作防止 silent discovering hang。最终验证重构 application-owned exact URL fields 而非接受任意 URL 输入（LOCK-DEV-5） |
+| **Unchanged semantics** | Pipeline/state/cancel/promotion 语义不变。State chain：discovering → candidate-ready → verified-candidate → promoting → finalizing |
+| **Real Chromium E2E fixture（LOCK-DEV-6）** | Real Chromium E2E fixture 自然生成，无需 rename。4 records |
+| **ABI chain（LOCK-DEV-7）** | Fresh build pass；Electron ABI145 proven；host restored Node v24.12.0 ABI137 |
+| **File-origin regression（LOCK-DEV-8）** | Genuine file-origin PASS 1/1 53.4s；packaged/file-origin 行为不变 |
+
+##### 最终验证证据
+
+| 测试 | 结果 |
+|---|---|
+| Dev-origin E2E（`import-cherrystudio-dev-origin.spec.ts`，精确 `http://localhost:5173` fixture） | **PASS 1/1 51.2s** |
+| Genuine file-origin E2E（`import-cherrystudio-genuine.spec.ts`，packaged/file-origin fixture） | **PASS 1/1 53.4s** |
+| State chain | discovering → candidate-ready → verified-candidate → promoting → finalizing |
+| DB records | 4 records |
+| Original exit/relaunch exact cleanup | Verified |
+| Fresh build pass | Electron ABI145 proven |
+| Host ABI | Restored Node v24.12.0 ABI137 |
+| Focused main tests | 82 files / 2309 pass / 72 skip |
+
+##### 残余边界与风险
+
+| 边界 | 说明 |
+|---|---|
+| **Exact localhost:5173 only** | 不接受 `127.0.0.1`、`::1`、其他主机、其他端口、格式错误映射、多个/歧义 origin 目录；未经单独批准均 fail closed |
+| **Packaged file-only** | 生产构建不引入 HTTP origin 支持 |
+| **No arbitrary URL inference** | 不推断任意 origin；App-owned exact URL fields 为唯一受信来源 |
+| **No LevelDB move/parse** | Main 不直接解析 LevelDB（不变） |
+| **No product boundary change** | L2/L3 产品语义不变（LOCK-6001）；replace-all 语义不变（LOCK-6002）；隔离 import renderer 保留不变（LOCK-6023） |
+| **Cleanup residual** | Unique owned root ordinary cleanup；hard runner/machine failure 可能 leave disposable temp root，no broad automatic cleanup |
+| **Platform scope** | macOS-only（A-9）；Windows/Linux 未验证 |
+| **Test counts** | 早期全量 Node gate 在最终 doc 之前：7113+ passes；最终 gates 将在 docs 后运行，不声称尚未运行的最终计数 |
 
 #### Phase 6 Decision Locks（LOCK-6001…6036）
 
@@ -918,6 +949,14 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **LOCK-6034** | 工作区 dev/ino 捕获与 identity 匹配门控清理：cleanup 仅在完整 destination/workspace identity 匹配后执行递归清理；identity 不匹配时跳过递归清理（mismatch skips recursive cleanup），防止跨操作污染 |
 | **LOCK-6035** | 目标组件 identity 完整再验证：在 mkdtemp、staged open 和 publish 三个关键操作前，对目标路径的完整组件 identity 进行再验证（含 dev/ino 和路径 containment），确保操作窗口内无外部替换 |
 | **LOCK-6036** | 单系统调用 same-user TOCTOU 保持 accepted：标准 Node.js 缺乏 descriptor-relative `openat`/`linkat`，同文件系统 hard link 为单系统调用但路径级 TOCTOU 窗口仍存在；**不声称消除**（do not claim elimination）；缓解措施为 no-clobber 策略 + identity 校验 + atomic rename（与 LOCK-6031 一致） |
+| **LOCK-DEV-1** | Trusted dev-origin URL 为 app-owned exact constant：`http://localhost:5173/src/windows/chatImport/chatImport.html`；仅 `app.isPackaged=false` 且精确 dev source mapping 时使用；不推断任意 origin、端口、路径 |
+| **LOCK-DEV-2** | Packaged/dev 分支规则：Packaged 构建始终 `file://` 协议 + `file__0` origin（不变）；Dev 构建检测 ZIP 含精确 `http_localhost_5173` 目录时使用 `http://localhost:5173` 协议加载 import renderer |
+| **LOCK-DEV-3** | Main intake 分类精确 file__0/dev 映射并在 IPC/窗口/candidate 之前拒绝不支持/歧义/多个 origin 目录；非精确映射 fail closed |
+| **LOCK-DEV-4** | Renderer 验证精确 dev origin/path/no-search/no-hash；有界操作防止 silent discovering hang |
+| **LOCK-DEV-5** | Plain Electron Location credential fields 不可靠；最终验证重构 application-owned exact URL fields 而非接受任意 URL 输入 |
+| **LOCK-DEV-6** | Real Chromium E2E fixture 自然生成 IndexedDB 目录，无需 rename/复制 origin 目录 |
+| **LOCK-DEV-7** | ABI chain：Fresh build pass；Electron ABI145 proven；host restored Node v24.12.0 ABI137 |
+| **LOCK-DEV-8** | File-origin regression 不变：genuine file-origin E2E PASS，packaged/file-origin 行为与 Phase 4.1 一致 |
 
 ---
 
@@ -1200,7 +1239,8 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-31** | **决策** | Q-6 Resolved（LOCK-6024：agents.db 永久保留，Phase 6 不自动删除/不提示删除） |
 | **2026-07-31** | **Phase 6** | **Done（实现 + 验证完成）**。Phase 6 拆为 6.0（L2/L3 架构决策）、6.1（L2 产品合同）、6.2（L3 适配 + v7 metadata）、6.3（安全/可靠性加固）、6.4（验证门/清理/文档）。Phase 6 Decision Locks：LOCK-6001…6036 全落地。Phase 4 全部 LOCK-44xx 与 Phase 5 全部 LOCK-51xx 继续有效 |
 | **2026-07-31** | **Phase 6 交付收尾（closure）** | **本地 closure 完成（Done）**：B-class `import-cherrystudio-genuine.spec.ts` 1/1 PASS（fresh ABI145 build 后精确标准 Playwright 命令；host ABI137 恢复）；A-class 未重跑（历史证据，LOCK-MD2）；六个交付阻塞项修复（LOCK-MD5）；本地 gates 全 PASS（CI=true lint 0 errors；CI=true test 312 文件 / 7009 通过 / 72 跳过 / 0 失败，LOCK-MD6）；C-4/C-5/C-7 parked（LOCK-MD7）；独立 artifact audit pass-with-nonblocking；**push/remote CI 事实（LOCK-MD8，post-push 填写）**——分支已推送（remote SHA `89803503fc...`，upstream `origin/jorkey/refactor/sqlite-migration` 建立）；GitHub Actions runs for this branch = 0（**未运行/无 run**，非失败、非 green CI）；ci.yml push trigger 仅 `main`/`v1`、无 PR、无手动 dispatch；no-console baseline 注释为 resolved（LOCK-MD9） |
-| **2026-08-01** | **Post-closure 发现：L2 dev-origin 兼容性缺口** | Phase 6 closure 后发现 L2 导入管线 dev-origin 兼容性缺口：Cherry Studio ZIP 从 electron-vite dev 模式生成时 IndexedDB 为 `http_localhost_5173.indexeddb.leveldb`（dev origin）；ZIP intake（R-12）正确接受，但隔离 import renderer 固定通过 `file://` 协议加载，Chromium 将 `file://` origin 映射为 `file__0.indexeddb.leveldb`，discovery 失败（`[DISCOVERY_FAILED] CherryStudio database not found in isolated IndexedDB`）。failure 发生在 candidate DB 初始化/promotion 之前，live chat.db 不受影响。当前支持：packaged/file-origin `file__0`（生产构建 + 标准用户备份）；不支持：dev-origin `http_localhost_5173`。Phase 0–6 Done 状态不变；此为 closure 后兼容性修正项，非 Phase 7。B-class E2E 使用 production-format fixture（`file__0`），不受影响。文档更新：top-level 状态注释、A-8 Origin 支持边界、Phase 4.1 Origin 支持边界、post-closure finding section（「Phase 6 交付收尾后发现：L2 dev-origin 兼容性缺口」）、未来任务契约（bounded dev-origin support） |
+| **2026-08-01** | **Post-closure 发现：L2 dev-origin 兼容性缺口** | Phase 6 closure 后发现 L2 导入管线 dev-origin 兼容性缺口：Cherry Studio ZIP 从 electron-vite dev 模式生成时 IndexedDB 为 `http_localhost_5173.indexeddb.leveldb`（dev origin）；ZIP intake（R-12）正确接受，但隔离 import renderer 固定通过 `file://` 协议加载，Chromium 将 `file://` origin 映射为 `file__0.indexeddb.leveldb`，discovery 失败（`[DISCOVERY_FAILED] CherryStudio database not found in isolated IndexedDB`）。failure 发生在 candidate DB 初始化/promotion 之前，live chat.db 不受影响。Phase 0–6 Done 状态不变；此为 closure 后兼容性修正项，非 Phase 7。B-class E2E 使用 production-format fixture（`file__0`），不受影响 |
+| **2026-08-02** | **Post-closure L2 dev-origin 兼容性实现完成（LOCK-DEV-1…8）** | 精确 `http://localhost:5173` dev-origin 已在 L2 导入管线中实现。Chromium 41.2.1 自然将精确 `http://localhost:5173` 映射为 `IndexedDB/http_localhost_5173.indexeddb.leveldb`，与 `file://` origin 隔离。Trusted URL 为 app-owned exact constant（`http://localhost:5173/src/windows/chatImport/chatImport.html`，LOCK-DEV-1）。Main intake 分类精确 file__0/dev 映射并在 IPC/窗口/candidate 之前拒绝不支持/歧义/多个 origin（LOCK-DEV-3）。Renderer 验证精确 dev origin/path/no-search/no-hash；最终验证重构 application-owned exact URL fields（LOCK-DEV-4…5）。Pipeline/state/cancel/promotion 语义不变。Real Chromium E2E fixture 自然生成无需 rename（LOCK-DEV-6）。Dev E2E PASS 1/1 51.2s；genuine file-origin PASS 1/1 53.4s；state chain discovering→candidate-ready→verified-candidate→promoting→finalizing；4 records；original exit/relaunch exact cleanup。Fresh build pass；Electron ABI145 proven；host restored Node v24.12.0 ABI137（LOCK-DEV-7…8）。Focused main 82 files/2309 pass/72 skip。Phase 0–6 Done 状态不变；非 Phase 7。文档更新：top-level 状态注释、A-8 Origin 支持边界、Phase 4.1 Origin 支持边界、post-closure section 转为实现记录、LOCK-DEV-1…8 决策锁 |
 
 ---
 

@@ -16,6 +16,10 @@
  * R-5: Singleton enforcement — throw if an active import session already exists.
  * R-10: BrowserWindow.on('closed') + render-process-gone → transition to error state.
  * R-11: Uses isolated session root (copy of ZIP data) — no contention with other processes.
+ *
+ * LOCK-DEV-5: The dev-origin load target is a module-owned exact constant.
+ * The caller never provides an arbitrary URL string; the load mode is a
+ * closed discriminated union (`file` | `dev`) resolved internally.
  */
 
 import { loggerService } from '@logger'
@@ -26,8 +30,40 @@ import { ChatImportSessionError } from './errors'
 const logger = loggerService.withContext('chatDbImport')
 
 // ---------------------------------------------------------------------------
+// Constants — LOCK-DEV-5: module-owned exact dev URL
+// ---------------------------------------------------------------------------
+
+/**
+ * Exact Vite dev server URL for the chatImport entry point.
+ * This is the ONLY HTTP origin accepted for dev-origin imports.
+ * LOCK-DEV-3: exact origin http://localhost:5173.
+ * LOCK-DEV-5: never derived from ZIP; this is a hardcoded constant.
+ */
+export const DEV_ORIGIN_URL = 'http://localhost:5173'
+
+/**
+ * Exact pathname of the chatImport HTML entry point on the Vite dev server.
+ * LOCK-DEV-3: exact path.
+ */
+const DEV_PATHNAME = '/src/windows/chatImport/chatImport.html'
+
+/** Full dev load URL: origin + pathname. */
+export const DEV_LOAD_URL = `${DEV_ORIGIN_URL}${DEV_PATHNAME}`
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/**
+ * Closed discriminated union for the load target of an isolated reader.
+ *
+ * - `file`: loads via `pathToFileURL(htmlPath).href` (existing behavior).
+ * - `dev`: loads via the module-owned `DEV_LOAD_URL` constant. Only valid
+ *   when `app.isPackaged === false`.
+ *
+ * LOCK-DEV-5: the caller cannot provide an arbitrary URL string.
+ */
+export type LoadMode = 'file' | 'dev'
 
 export interface ImportReader {
   /** The BrowserWindow hosting the hidden import renderer. */
@@ -44,6 +80,12 @@ export interface CreateReaderOptions {
   workspaceRoot: string
   htmlPath: string
   preloadPath: string
+  /**
+   * Closed load mode discriminator (LOCK-DEV-5). The caller specifies
+   * `'file'` or `'dev'`; the module resolves the exact URL internally.
+   * No arbitrary URL string from the caller.
+   */
+  loadMode: LoadMode
   onReady: (sessionId: string) => void
   onDiscover: (sessionId: string) => void
   onReadPage: (sessionId: string, tableName: string, cursor: string | null, pageSize: number) => void
@@ -80,7 +122,7 @@ export async function createIsolatedReader(options: CreateReaderOptions): Promis
     throw new ChatImportSessionError('An active import session already exists. Only one concurrent import is allowed.')
   }
 
-  const { sessionId, workspaceRoot, htmlPath, preloadPath } = options
+  const { sessionId, workspaceRoot, htmlPath, preloadPath, loadMode } = options
 
   // Create isolated session from the workspace root path.
   // This is the proven static API from Phase 4.0 spike.
@@ -89,7 +131,7 @@ export async function createIsolatedReader(options: CreateReaderOptions): Promis
   // R-11: No contention with other processes — isolated root.
   const electronSession = session.fromPath(workspaceRoot, { cache: false })
 
-  logger.info(`Created isolated session for ${sessionId} at ${workspaceRoot}`)
+  logger.info(`Created isolated session for ${sessionId} at ${workspaceRoot} (loadMode: ${loadMode})`)
 
   // Create hidden sandboxed BrowserWindow
   const win = new BrowserWindow({
@@ -141,11 +183,18 @@ export async function createIsolatedReader(options: CreateReaderOptions): Promis
 
   activeReader = { window: win, electronSession, sessionId }
 
-  // Load the import renderer HTML using file:// URL (proven correct origin)
-  const { pathToFileURL } = await import('node:url')
-  const fileUrl = pathToFileURL(htmlPath).href
-  logger.info(`Loading import renderer: ${fileUrl}`)
-  await win.loadURL(fileUrl)
+  // LOCK-DEV-5: resolve the load URL from the closed loadMode discriminator.
+  // The caller never provides an arbitrary URL string.
+  let loadUrl: string
+  if (loadMode === 'dev') {
+    loadUrl = DEV_LOAD_URL
+  } else {
+    // file mode: use the proven pathToFileURL (existing behavior).
+    const { pathToFileURL } = await import('node:url')
+    loadUrl = pathToFileURL(htmlPath).href
+  }
+  logger.info(`Loading import renderer: ${loadUrl}`)
+  await win.loadURL(loadUrl)
 
   return activeReader
 }

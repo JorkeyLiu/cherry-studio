@@ -43,6 +43,9 @@ export type ChatImportZipErrorCode =
   | 'NOT_A_FILE'
   | 'DUPLICATE_ENTRIES'
   | 'INVALID_ENTRY_SIZE'
+  | 'UNSUPPORTED_ORIGIN'
+  | 'AMBIGUOUS_ORIGIN'
+  | 'PACKAGED_DEV_ORIGIN'
 
 /**
  * Thrown during ZIP intake validation or extraction.

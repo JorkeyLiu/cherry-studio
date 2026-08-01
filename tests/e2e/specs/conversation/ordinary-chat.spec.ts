@@ -14,7 +14,6 @@
  * LOCK-005: No benchmark files touched
  */
 import * as fs from 'fs'
-import * as os from 'os'
 import * as path from 'path'
 
 import { removeTrailingDoubleSpaces } from '../../../../src/renderer/src/utils/markdown'
@@ -1143,17 +1142,6 @@ test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
         // If dirs still exist, cleanup hasn't run yet or failed — this is acceptable
         // if the test runner hasn't reached fixture teardown yet, but log it.
         console.warn('[Phase 5.4] WARNING: Disposable dirs still exist — cleanup may not have run')
-      }
-
-      // At minimum, verify no UNRELATED cherry-e2e dirs leaked (exact prefix, timestamped)
-      const tmpDirEntries = fs.readdirSync(os.tmpdir())
-      const unrelatedE2eDirs = tmpDirEntries.filter(
-        (d: string) => d.startsWith('cherry-e2e-') && d !== path.basename(userDataDir)
-      )
-      if (unrelatedE2eDirs.length > 0) {
-        console.warn(
-          `[Phase 5.4] WARNING: Found ${unrelatedE2eDirs.length} unrelated cherry-e2e-* dirs: ${unrelatedE2eDirs.join(', ')}`
-        )
       }
     })
   })

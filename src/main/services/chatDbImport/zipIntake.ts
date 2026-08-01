@@ -63,6 +63,28 @@ export const MAX_SINGLE_ENTRY_BYTES = 200 * 1024 * 1024
 export const MAX_TOTAL_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 
 // ---------------------------------------------------------------------------
+// Origin classification constants
+// ---------------------------------------------------------------------------
+
+/** Exact LevelDB directory name for the file:// origin (Chromium mapping). */
+export const FILE_ORIGIN_DIR = 'file__0.indexeddb.leveldb'
+
+/** Exact LevelDB directory name for the dev origin (Chromium mapping of http://localhost:5173). */
+export const DEV_ORIGIN_DIR = 'http_localhost_5173.indexeddb.leveldb'
+
+/**
+ * Discriminated union for the classified origin of an extracted ZIP.
+ *
+ * - `file`: the ZIP contains only the file-origin LevelDB directory.
+ *   Supported in both packaged and unpackaged apps.
+ * - `dev`: the ZIP contains only the dev-origin LevelDB directory.
+ *   Supported only when `app.isPackaged === false`.
+ */
+export type OriginClassification =
+  | { readonly kind: 'file'; readonly indexedDbDir: string }
+  | { readonly kind: 'dev'; readonly indexedDbDir: string }
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -310,8 +332,18 @@ export function validateIndexedDbStructure(destDir: string): string {
   for (const subdir of subdirs) {
     const subdirPath = path.join(indexedDbDir, subdir.name)
     try {
-      const files = fs.readdirSync(subdirPath)
-      const hasLdb = files.some((f) => f.endsWith('.ldb'))
+      const entries = fs.readdirSync(subdirPath)
+      const hasLdb = entries.some((f) => {
+        if (!f.endsWith('.ldb')) return false
+        // Require regular file (not directory/symlink) — directories with
+        // .ldb suffix must not qualify as LevelDB data files.
+        try {
+          const st = fs.lstatSync(path.join(subdirPath, f))
+          return st.isFile()
+        } catch {
+          return false
+        }
+      })
       if (hasLdb) {
         logger.info(`Found IndexedDB with LevelDB files in: ${subdir.name}`)
         return indexedDbDir
@@ -325,5 +357,109 @@ export function validateIndexedDbStructure(destDir: string): string {
   throw new ChatImportZipError(
     'NO_INDEXED_DB',
     'IndexedDB directory exists but contains no LevelDB manifest files (.ldb)'
+  )
+}
+
+/**
+ * Enumerate all direct child directories under IndexedDB/ that contain .ldb
+ * files. Returns the list of candidate directory names.
+ *
+ * Structural rule: a directory is a candidate iff it is a direct child of
+ * IndexedDB/ AND contains at least one file ending in `.ldb`.
+ */
+export function enumerateLdbCandidates(indexedDbDir: string): string[] {
+  const candidates: string[] = []
+  let subdirs: fs.Dirent[]
+  try {
+    subdirs = fs.readdirSync(indexedDbDir, { withFileTypes: true }).filter((d) => d.isDirectory())
+  } catch {
+    return candidates
+  }
+
+  for (const subdir of subdirs) {
+    const subdirPath = path.join(indexedDbDir, subdir.name)
+    try {
+      const entries = fs.readdirSync(subdirPath)
+      if (
+        entries.some((f) => {
+          if (!f.endsWith('.ldb')) return false
+          // Require regular file — directories with .ldb suffix must not qualify.
+          try {
+            const st = fs.lstatSync(path.join(subdirPath, f))
+            return st.isFile()
+          } catch {
+            return false
+          }
+        })
+      ) {
+        candidates.push(subdir.name)
+      }
+    } catch {
+      // Skip unreadable subdirs
+      continue
+    }
+  }
+
+  return candidates
+}
+
+/**
+ * Classify the origin candidates extracted from an IndexedDB ZIP backup.
+ *
+ * Classification rules (LOCK-DEV-3/4/6):
+ * - Exactly one candidate matching FILE_ORIGIN_DIR → `{ kind: 'file' }`
+ *   (supported in both packaged and unpackaged).
+ * - Exactly one candidate matching DEV_ORIGIN_DIR → `{ kind: 'dev' }`
+ *   (supported only when `app.isPackaged === false`).
+ * - Multiple .ldb-bearing candidates → AMBIGUOUS_ORIGIN (reject).
+ * - Zero .ldb-bearing candidates → NO_INDEXED_DB (reject — caller should
+ *   have already caught this via validateIndexedDbStructure).
+ * - Single candidate but not a known origin → UNSUPPORTED_ORIGIN (reject).
+ *
+ * @param indexedDbDir Absolute path to the IndexedDB directory.
+ * @param isPackaged  Whether the app is in packaged mode.
+ * @returns The classified origin, or throws a structured error.
+ * @throws {ChatImportZipError} UNSUPPORTED_ORIGIN | AMBIGUOUS_ORIGIN | PACKAGED_DEV_ORIGIN
+ */
+export function classifyOriginCandidates(indexedDbDir: string, isPackaged: boolean): OriginClassification {
+  const candidates = enumerateLdbCandidates(indexedDbDir)
+
+  if (candidates.length === 0) {
+    throw new ChatImportZipError(
+      'NO_INDEXED_DB',
+      'IndexedDB directory exists but contains no LevelDB manifest files (.ldb)'
+    )
+  }
+
+  if (candidates.length > 1) {
+    const safeNames = candidates.map(sanitizeEntryNameForMessage).join(', ')
+    throw new ChatImportZipError(
+      'AMBIGUOUS_ORIGIN',
+      `IndexedDB contains multiple LevelDB directories (${candidates.length}): [${safeNames}]. ` +
+        'ZIP must contain exactly one supported origin.'
+    )
+  }
+
+  const sole = candidates[0]
+
+  if (sole === FILE_ORIGIN_DIR) {
+    return { kind: 'file', indexedDbDir }
+  }
+
+  if (sole === DEV_ORIGIN_DIR) {
+    if (isPackaged) {
+      throw new ChatImportZipError(
+        'PACKAGED_DEV_ORIGIN',
+        `ZIP contains dev-origin directory "${sanitizeEntryNameForMessage(sole)}" but the app is packaged. ` +
+          'Dev-origin imports are only supported in unpackaged development builds.'
+      )
+    }
+    return { kind: 'dev', indexedDbDir }
+  }
+
+  throw new ChatImportZipError(
+    'UNSUPPORTED_ORIGIN',
+    `IndexedDB contains unsupported LevelDB directory "${sanitizeEntryNameForMessage(sole)}". ` +
+      `Supported directories: [${FILE_ORIGIN_DIR}, ${DEV_ORIGIN_DIR}] (dev-origin only in unpackaged builds).`
   )
 }

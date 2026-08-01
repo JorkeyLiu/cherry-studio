@@ -5,7 +5,9 @@
  * Electron session pointing at the extracted ZIP's IndexedDB data.
  *
  * Flow:
- * 1. Verify location.protocol === 'file:' — if not, report error, DO NOT touch IDB.
+ * 1. Verify location — accepts file: protocol (existing behavior) OR
+ *    exact http://localhost:5173 with exact pathname and no search/hash
+ *    (LOCK-DEV-3). If neither, report error, DO NOT touch IDB.
  * 2. Register ChatImport_Discover/ReadPage/Cancel listeners FIRST, then signal
  *    ready to Main (LOCK-Y1: listener-first — Main sends Discover synchronously
  *    from inside its ready handler, so late registration would drop the event).
@@ -18,9 +20,10 @@
  *    "Database not initialized" error. Discovery must complete before any
  *    read is allowed (LOCK-RP4).
  *
- * R-3: verify location.protocol === 'file:' before any IDB op.
+ * R-3: verify location protocol before any IDB op.
  * R-4: future version gate (nativeVersion >= 120).
  * R-12: discovery via indexedDB.databases() (authoritative).
+ * LOCK-DEV-3: dev-origin gate — exact origin + exact pathname + no search/hash.
  *
  * Protocol: Main orchestrates — renderer responds to commands.
  * Renderer does NOT auto-loop reads; Main drives paged iteration.
@@ -42,6 +45,18 @@ const DEFAULT_PAGE_TIMEOUT_MS = 120_000
 
 /** Native version threshold for future-version rejection (R-4). */
 const FUTURE_NATIVE_VERSION = 120
+
+/**
+ * Exact dev origin accepted for HTTP imports (LOCK-DEV-3).
+ * Matches the Chromium IndexedDB mapping: http_localhost_5173.indexeddb.leveldb.
+ */
+const DEV_ORIGIN = 'http://localhost:5173'
+
+/**
+ * Exact pathname of the chatImport entry point on the Vite dev server.
+ * LOCK-DEV-3: must match exactly; no trailing slash, no variations.
+ */
+const DEV_PATHNAME = '/src/windows/chatImport/chatImport.html'
 
 // ---------------------------------------------------------------------------
 // Global state
@@ -184,6 +199,93 @@ function makeEnvelope<T>(phase: ChatImportEnvelope<T>['phase'], data: T): ChatIm
 }
 
 // ---------------------------------------------------------------------------
+// Location validation (LOCK-DEV-3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of validating the renderer's location against allowed origins.
+ * A discriminated union so callers can branch on the specific failure mode.
+ */
+export type LocationValidation =
+  | { readonly ok: true; readonly mode: 'file' | 'dev' }
+  | { readonly ok: false; readonly code: string; readonly message: string }
+
+/**
+ * Validate the renderer's location fields against allowed origins.
+ *
+ * Accepted origins:
+ * - `file:` protocol (existing behavior, any file:// path).
+ * - `http://localhost:5173` with exact pathname `/src/windows/chatImport/chatImport.html`
+ *   and empty search and hash (LOCK-DEV-3).
+ *
+ * All other protocols, hosts, ports, pathnames, search params, and hash
+ * fragments are rejected before any IDB operation or listener registration.
+ *
+ * @param loc  The location object to validate. In production this is the
+ *             real `window.location`; tests inject a structural double.
+ * @returns    A `LocationValidation` result.
+ */
+export function validateLocation(loc: {
+  protocol: string
+  origin: string
+  pathname: string
+  search: string
+  hash: string
+  username: string
+  password: string
+}): LocationValidation {
+  // File origin: accept any file:// URL (existing behavior).
+  if (loc.protocol === 'file:') {
+    return { ok: true, mode: 'file' }
+  }
+
+  // HTTP dev origin: exact origin + exact pathname + no search/hash + no credentials.
+  if (loc.protocol === 'http:' && loc.origin === DEV_ORIGIN && loc.pathname === DEV_PATHNAME) {
+    if (loc.search !== '' || loc.hash !== '') {
+      return {
+        ok: false,
+        code: 'WRONG_ORIGIN',
+        message:
+          `Unexpected search/hash on dev origin: search="${loc.search}", hash="${loc.hash}". ` +
+          'Dev-origin imports must use the exact URL with no query parameters or hash fragments.'
+      }
+    }
+    // Reject credential-bearing URLs (username or password present).
+    // This prevents SSRF via http://user:pass@localhost:5173/...
+    //
+    // NOTE: window.location.username / window.location.password are
+    // deprecated and return incorrect (non-empty) values in some
+    // Electron contexts even for plain URLs without credentials.  We
+    // reconstruct a URL from the validated components and use the URL
+    // constructor to detect credentials reliably.
+    try {
+      const checkUrl = new URL(loc.origin + loc.pathname + loc.search + loc.hash)
+      if (checkUrl.username !== '' || checkUrl.password !== '') {
+        return {
+          ok: false,
+          code: 'WRONG_ORIGIN',
+          message: 'Dev-origin imports must not use credential-bearing URLs.'
+        }
+      }
+    } catch {
+      // URL parse failure — skip credential check (defense-in-depth);
+      // the exact origin + pathname validation above already constrains
+      // the URL to the hardcoded constant.
+    }
+    return { ok: true, mode: 'dev' }
+  }
+
+  // Everything else is rejected.
+  return {
+    ok: false,
+    code: 'WRONG_ORIGIN',
+    message:
+      `Unexpected origin: protocol="${loc.protocol}", origin="${loc.origin}", pathname="${loc.pathname}". ` +
+      `Expected file: or exact dev origin ${DEV_ORIGIN}${DEV_PATHNAME}. Aborting to prevent IDB corruption.`
+  }
+}
+
+// ---------------------------------------------------------------------------
 // DB IO seam (LOCK-RP2/RP3)
 // ---------------------------------------------------------------------------
 
@@ -235,8 +337,20 @@ export type ChatImportBridge = NonNullable<Window['chatImport']>
  * tests (LOCK-Y1/Y2/Y4).
  */
 export interface ChatImportBootOptions {
-  /** Page protocol used for the R-3 check. Defaults to `location.protocol`. */
-  locationProtocol?: string
+  /**
+   * Location override for the protocol/origin/pathname gate test seam.
+   * Defaults to the real `location` global. Tests inject a structural
+   * double with `{ protocol, origin, pathname, search, hash }`.
+   */
+  location?: {
+    protocol: string
+    origin: string
+    pathname: string
+    search: string
+    hash: string
+    username: string
+    password: string
+  }
   /** Discovery implementation. Defaults to the real {@link runDiscovery}. */
   discover?: () => Promise<DiscoveryResult>
   /** DB-open implementation used by every read request. Defaults to {@link openDb}. */
@@ -264,18 +378,18 @@ export interface ChatImportBootOptions {
  * double-unsubscribe or throw.
  */
 export async function boot(api: ChatImportBridge, options: ChatImportBootOptions = {}): Promise<void> {
-  const protocol = options.locationProtocol ?? location.protocol
+  const loc = options.location ?? (location as Location & { username: string; password: string })
   const discoverImpl = options.discover ?? runDiscovery
   const openDbImpl = options.openDb ?? openDb
   const closeDbImpl = options.closeDb ?? closeDb
 
-  // R-3: Verify origin before any IDB operation.
-  // Use location.protocol (not location.origin) because for file:// URLs,
-  // location.origin is the opaque-origin string "null" per the HTML Living Standard.
-  if (protocol !== 'file:') {
-    const msg = `Unexpected protocol: ${protocol}. Expected file:. Aborting to prevent IDB corruption.`
-    chatImportLogger.error(`[chatImport] ${msg}`)
-    api.error(makeEnvelope('error', { code: 'WRONG_ORIGIN', message: msg }))
+  // R-3/LOCK-DEV-3: Verify origin before any IDB operation.
+  // Accepts file: (existing) or exact http://localhost:5173 dev origin.
+  // All other protocols, origins, pathnames, search, hash are rejected.
+  const validation = validateLocation(loc)
+  if (!validation.ok) {
+    chatImportLogger.error(`[chatImport] ${validation.message}`)
+    api.error(makeEnvelope('error', { code: validation.code, message: validation.message }))
     return
   }
 
@@ -402,7 +516,7 @@ async function main(): Promise<void> {
 
 async function runDiscovery(): Promise<DiscoveryResult> {
   // R-12: Use indexedDB.databases() for discovery (authoritative)
-  const databases = await indexedDB.databases()
+  const databases = await withTimeout(indexedDB.databases(), 15_000, 'indexedDB.databases() timed out after 15s')
   const cherryDb = databases.find((d) => d.name === 'CherryStudio')
 
   if (!cherryDb) {
@@ -547,9 +661,13 @@ export function buildSourceReadStats(): SourceReadStats {
  */
 async function openDb(): Promise<unknown> {
   if (db) return db
-  const { db: cherryDbInstance } = await import('@renderer/databases/index')
+  const { db: cherryDbInstance } = await withTimeout(
+    import('@renderer/databases/index'),
+    60_000,
+    'dynamic import of databases/index timed out after 60s'
+  )
   db = cherryDbInstance
-  await db.open()
+  await withTimeout(db.open(), 30_000, 'db.open() timed out after 30s')
   return db
 }
 

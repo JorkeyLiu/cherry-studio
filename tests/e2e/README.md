@@ -37,10 +37,9 @@ exhaustive file-by-file tree:
 ```text
 tests/e2e/
 ├── README.md                   # this document
-├── global-setup.ts             # run token + registry init, artifact dirs
-├── global-teardown.ts          # per-token registry cleanup (safety net)
+├── global-setup.ts             # artifact dirs only (ownership cleanup is fixture-owned)
 ├── fixtures/
-│   ├── electron.fixture.ts     # shared test/expect + app lifecycle (use this!)
+│   ├── electron.fixture.ts     # shared test/expect + app lifecycle + owned temp root (use this!)
 │   └── mock-openai-server.ts   # deterministic OpenAI-compatible mock endpoint
 ├── pages/                      # Page Object Model — BasePage + one file per page, re-exported via index.ts
 ├── specs/                      # test files (testDir root); feature subdirectories allowed
@@ -118,7 +117,8 @@ The fixture extends `@playwright/test` with:
 
 | Fixture | Provides |
 |---|---|
-| `userDataDir` | A unique disposable profile dir `$TMPDIR/cherry-e2e-<token>-<pid>-<ts>-<rand>`, registered with the run ownership registry; removed (base + `<base>Dev`) and verified gone after the test, throwing on cleanup failure |
+| `ownedTmpRoot` | The unique atomic canonical temp root for this test (mkdtemp under the canonical OS temp dir); all test-owned temp artifacts live here and TMPDIR/TMP/TEMP point at it |
+| `userDataDir` | A unique disposable profile dir beneath the owned root (`cherry-e2e-*`); exact-cleaned and root-removed after the test, throwing on cleanup failure |
 | `mockPort` | An ephemeral in-process mock OpenAI-compatible HTTP server (see §6) |
 | `electronApp` | `_electron.launch({ args: ['.', '--user-data-dir=<userDataDir>', '--no-sandbox', '--disable-gpu'], ... })`; closed after the test with a WAL-flush wait; request log cleared |
 | `mainWindow` | The main `Cherry Studio` window, ready for interaction |
@@ -157,26 +157,29 @@ Non-negotiable rules:
 
 - **Every test uses a unique disposable profile** created by the fixture under the OS temp
   dir (`cherry-e2e-*`). Real user data must never be opened, seeded, or asserted.
-- **Run ownership registry.** Global setup creates one unique invocation token
-  (`CHERRY_E2E_RUN_TOKEN`) and a per-token registry file
-  (`$TMPDIR/cherry-e2e-run-registry-<token>.json`). Each fixture registers exactly the
-  profiles it owns. Global teardown processes **only that token's registry**, removing only
-  paths that are verifiably disposable, then unlinks the registry.
-- **No broad process killing and no glob deletion.** Never `pkill`, `killall`, kill-by-PID
-  guesswork, or `rm`/glob patterns over `cherry-e2e-*`. If a **spawned, relaunched, or
-  external child process** (one not owned by the fixture's `electronApp`) must be
-  terminated, target it **only by its exact unique `--user-data-dir=<profile>` token** and
-  verify it exited. This token rule does **not** apply to the fixture-owned app itself:
-  that instance is closed normally with `electronApp.close()` plus the fixture teardown
-  (§4, §10). Cleanup is ownership-scoped: your run never touches another run's profiles,
-  registries, or processes.
-- **Cleanup ownership.** Fixture-owned cleanup is primary and verifies each exact owned
-  path (base + `Dev`) is gone, propagating aggregate errors. Global teardown is a
-  per-token safety net for crashed runs.
+- **One atomic owned temp root per test.** The fixture creates exactly one unique
+  canonical temp root via `mkdtemp` under the canonical OS temp dir
+  (`$TMPDIR/cherry-e2e-owned-*`). The main profile, seed profiles, query scripts, Vite
+  temp files and production `os.tmpdir()` workspaces all live beneath that root
+  (TMPDIR/TMP/TEMP point at it). Uniqueness comes from `mkdtemp`; there is no registry,
+  run token, or global state.
+- **Exact-token process cleanup.** Never `pkill`, `killall`, kill-by-PID guesswork, or
+  `rm`/glob patterns over `cherry-e2e-*`. A spawned, relaunched, or external child process
+  is terminated **only by its exact unique `--user-data-dir=<profile>` token** and its
+  absence is verified (bounded stable-empty window). The fixture-owned app is closed
+  normally with `electronApp.close()` plus exact-token cleanup.
+- **Fail-closed root teardown.** The fixture exact-cleans every known profile (main app
+  profile plus any registered seed profiles), then — only if all clean and the exact root
+  still validates (real non-symlink directory, expected prefix) — recursively removes the
+  root and verifies absence. On any cleanup failure, remaining PID, or validation failure
+  the root is preserved and the error propagates. There is **no global teardown** and no
+  cross-run/global deletion.
+- **Accepted residual.** A hard runner SIGKILL, machine loss, or cleanup-code failure may
+  leave the uniquely prefixed disposable root behind for manual cleanup; there is no
+  global cross-process recovery.
 
 If a manual investigation of leftover temp dirs is ever needed: look in `$TMPDIR` for
-`cherry-e2e-*` entries and their owning registry file `cherry-e2e-run-registry-<token>.json`;
-remove them by exact path only.
+`cherry-e2e-owned-*` entries and remove them by exact path only.
 
 ## 6. Mock provider — no live APIs
 
@@ -369,9 +372,9 @@ Regression evidence is what CI-grade suites are judged on:
 
 **Cleanup**
 
-- The `userDataDir` fixture removes its exact owned base + `Dev` dirs after each test and
-  **verifies removal**, throwing an aggregate error on any failure (never swallowed).
-- Global teardown safety-net cleans the current invocation token's registry (§5).
+- The fixture exact-cleans every known profile and removes its exact owned temp root after
+  each test, **verifying removal** and throwing an aggregate error on any failure (never
+  swallowed). Global setup only creates artifact dirs; there is no global teardown.
 - No broad `pkill`/`killall`/glob deletion anywhere in the flow.
 
 **Failure artifacts** (from `playwright.config.ts`)
@@ -398,7 +401,7 @@ From `playwright.config.ts` (root):
 | `forbidOnly` | `!!process.env.CI` | Fails on stray `test.only` under CI env |
 | `retries` | `process.env.CI ? 2 : 0` | Retries only when a CI env var is set |
 | `reporter` | html (`playwright-report`) + list | Local report |
-| `globalSetup` / `globalTeardown` | `./tests/e2e/global-setup.ts` / `global-teardown.ts` | Run ownership init/cleanup |
+| `globalSetup` | `./tests/e2e/global-setup.ts` | Artifact dirs only (ownership cleanup is fixture-owned) |
 | `outputDir` | `./test-results` | Artifact output |
 | `use.trace/screenshot/video` | `retain-on-failure` / `only-on-failure` | Failure artifacts (diagnostic only — see §12) |
 | `use.actionTimeout` / `navigationTimeout` | 15 000 / 30 000 ms | Action/navigation timeouts |

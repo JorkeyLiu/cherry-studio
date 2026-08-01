@@ -160,6 +160,13 @@ export interface TerminateOptions {
   verifyMs?: number
 }
 
+export interface ProcessCleanupDependencies {
+  scan?: () => ProcessEntry[]
+  exists?: (pid: number) => boolean
+  kill?: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { ok: boolean; error?: string }
+  sleep?: (milliseconds: number) => Promise<void>
+}
+
 /**
  * Terminate every process holding the exact disposable profile token, EXCEPT
  * the recorded original target PID (LOCK-625). SIGTERM first, escalate to
@@ -178,7 +185,8 @@ export interface TerminateOptions {
 export async function terminateProcessesByUserDataDir(
   userDataDir: string,
   excludePid: number | null,
-  options: TerminateOptions = {}
+  options: TerminateOptions = {},
+  dependencies: ProcessCleanupDependencies = {}
 ): Promise<TerminationResult> {
   const termGraceMs = options.termGraceMs ?? 10_000
   const settleMs = options.settleMs ?? 3_000
@@ -187,11 +195,14 @@ export async function terminateProcessesByUserDataDir(
   const seen = new Set<number>()
 
   // Exact-token scan (LOCK-625). A ps failure propagates — never "clean".
-  const scan = (): ProcessEntry[] => findProcessesByUserDataDir(userDataDir).filter((p) => p.pid !== excludePid)
+  const scan = (): ProcessEntry[] =>
+    (dependencies.scan ?? (() => findProcessesByUserDataDir(userDataDir)))().filter((p) => p.pid !== excludePid)
+  const exists = dependencies.exists ?? processExists
+  const wait = dependencies.sleep ?? sleep
 
   const signal = async (signalName: 'SIGTERM' | 'SIGKILL', targets: ProcessEntry[]): Promise<void> => {
     for (const target of targets) {
-      const res = killProcess(target.pid, signalName)
+      const res = (dependencies.kill ?? killProcess)(target.pid, signalName)
       if (res.ok) {
         if (signalName === 'SIGKILL') result.killedPids.push(target.pid)
       } else {
@@ -201,13 +212,6 @@ export async function terminateProcessesByUserDataDir(
   }
 
   let current = scan()
-  if (current.length === 0) {
-    console.log('[E2E] No exact-token process found; entering bounded settle window for late spawns (LOCK-F1)')
-  } else {
-    console.log(
-      `[E2E] Terminating ${current.length} process(es) by exact token: ${current.map((p) => p.pid).join(', ')}`
-    )
-  }
 
   await signal('SIGTERM', current)
   current.forEach((p) => seen.add(p.pid))
@@ -224,7 +228,7 @@ export async function terminateProcessesByUserDataDir(
   const deadline = Date.now() + termGraceMs + settleMs
   let lastAliveAt = Date.now()
   for (;;) {
-    await sleep(300)
+    await wait(300)
     current = scan() // ps failure propagates
 
     const late = current.filter((p) => !seen.has(p.pid))
@@ -236,7 +240,7 @@ export async function terminateProcessesByUserDataDir(
 
     let aliveCount = 0
     for (const entry of current) {
-      if (processExists(entry.pid)) aliveCount += 1 // probe failure propagates
+      if (exists(entry.pid)) aliveCount += 1 // probe failure propagates
     }
     if (aliveCount > 0) {
       lastAliveAt = Date.now()
@@ -252,7 +256,7 @@ export async function terminateProcessesByUserDataDir(
   current = scan()
   const stragglers: ProcessEntry[] = []
   for (const entry of current) {
-    if (processExists(entry.pid)) stragglers.push(entry)
+    if (exists(entry.pid)) stragglers.push(entry)
   }
   if (stragglers.length > 0) {
     await signal('SIGKILL', stragglers)
@@ -264,6 +268,7 @@ export async function terminateProcessesByUserDataDir(
   // not merely observed) and its final absence is verified. Nothing matching
   // the exact token may remain when the window closes.
   const verifyStart = Date.now()
+  let emptySince: number | null = null
   let final: ProcessEntry[] = []
   for (;;) {
     current = scan()
@@ -272,10 +277,18 @@ export async function terminateProcessesByUserDataDir(
       await signal('SIGKILL', lateVerify)
       lateVerify.forEach((p) => seen.add(p.pid))
     }
-    final = current.filter((p) => processExists(p.pid))
-    if (final.length === 0) break
-    if (Date.now() - verifyStart >= verifyMs) break
-    await sleep(300)
+    final = current.filter((p) => exists(p.pid))
+    if (final.length === 0) {
+      emptySince ??= Date.now()
+      if (Date.now() - emptySince >= verifyMs) break
+    } else {
+      emptySince = null
+    }
+    if (Date.now() - verifyStart >= verifyMs * 2 + 300) {
+      result.errors.push(`Final exact-token verification did not remain empty for ${verifyMs}ms`)
+      break
+    }
+    await wait(300)
   }
 
   result.remainingPids = final.map((p) => p.pid)

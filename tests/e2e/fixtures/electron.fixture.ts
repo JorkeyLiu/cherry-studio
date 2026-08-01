@@ -9,15 +9,29 @@
  *   - Asserts ChatDb IPC availability before any test step
  *   - Verifies better-sqlite3 ABI matches Electron before launch
  *   - Post-shutdown SQLite verification via Electron binary (ABI 145)
+ *
+ * Ownership-safe temp root (per-test):
+ *   - Every fixture run creates ONE unique atomic canonical temp root via
+ *     mkdtemp under the canonical os.tmpdir() (run-ownership).
+ *   - TMPDIR/TMP/TEMP are passed to Electron so production os.tmpdir()
+ *     resolves inside the owned root.
+ *   - The fixture tracks every exact profile launch token created beneath the
+ *     root (main app profile + seed profiles registered by seed utilities).
+ *   - Teardown exact-cleans every known profile, then removes the exact root
+ *     and verifies absence. On any cleanup failure/remaining PID/validation
+ *     failure the root is preserved and the error propagates (fail-closed).
+ *   - Never scans or deletes the global os.tmpdir and never deletes another
+ *     test's root.
  */
 import type { ElectronApplication, Page } from '@playwright/test'
 import { _electron as electron, test as base } from '@playwright/test'
-import { spawnSync } from 'child_process'
 import * as fs from 'fs'
-import * as os from 'os'
 import * as path from 'path'
 
-import { getRequiredRunToken, registerOwnedProfile } from '../utils/run-ownership'
+import { closeElectronWithExactCleanup } from '../utils/electron-cleanup'
+import { findProcessesByUserDataDir, terminateProcessesByUserDataDir } from '../utils/process-cleanup'
+import { createOwnedTmpRoot, removeOwnedTmpRoot, validateProfileLaunchToken } from '../utils/run-ownership'
+import { queryChatDbViaElectron as queryChatDb } from '../utils/query-chat-db-electron'
 import {
   clearRequestLog,
   createMockServer,
@@ -33,9 +47,10 @@ export type ElectronFixtures = {
   mainWindow: Page
   mockPort: number
   userDataDir: string
+  /** Ownership-safe temp root: all test-owned temp artifacts live here. */
+  ownedTmpRoot: string
 }
 
-let _mockPort: number
 let _userDataDir: string
 
 // Exposed for post-shutdown SQLite verification
@@ -44,6 +59,29 @@ let _chatDbPath: string | null = null
 // Runtime appDataPath captured from the running Electron process.
 // Set after app launch via probeRuntimeAppDataPath().
 let _runtimeAppDataPath: string | null = null
+
+// Owned temp root for this fixture run — production os.tmpdir() resolves here
+// via TMPDIR/TMP/TEMP env vars passed to Electron.
+let _ownedTmpRoot: string | null = null
+
+// Exact canonical `--user-data-dir` launch tokens created beneath the owned
+// root for this fixture run. The root teardown exact-cleans every still-
+// registered token before it may remove the root.
+const _profileLaunchTokens = new Set<string>()
+
+/**
+ * Register an exact profile launch token beneath the current owned root so the
+ * fixture root teardown exact-cleans it before root removal. Used by seed
+ * utilities that launch their own disposable Electron profiles.
+ */
+export function registerProfileLaunchToken(launchToken: string): void {
+  _profileLaunchTokens.add(launchToken)
+}
+
+/** Forget an exact profile launch token after its cleanup succeeded. */
+export function unregisterProfileLaunchToken(launchToken: string): void {
+  _profileLaunchTokens.delete(launchToken)
+}
 
 /**
  * Returns the path to chat.db for the current disposable profile.
@@ -70,6 +108,15 @@ export function getUserDataDir(): string {
 }
 
 /**
+ * Returns the ownership-safe temp root for this fixture run.
+ * All test-owned temp artifacts live under this root; production os.tmpdir()
+ * resolves here via TMPDIR/TMP/TEMP env vars.
+ */
+export function getOwnedTmpRoot(): string | null {
+  return _ownedTmpRoot
+}
+
+/**
  * Query SQLite database via Electron binary (ABI compatible).
  * Returns parsed JSON result from the verification script.
  *
@@ -78,101 +125,12 @@ export function getUserDataDir(): string {
  * Resolves better-sqlite3 path portably via require.resolve().
  */
 export function queryChatDbViaElectron(dbPath: string, sql: string): Record<string, unknown> | null {
+  if (!_ownedTmpRoot) throw new Error('ownedTmpRoot fixture is required before querying ChatDb')
   const electronPath = require('electron') as string
-  // Resolve better-sqlite3 path portably (no hard-coded absolute path)
-  const bsPath = require.resolve('better-sqlite3')
-
-  // Escape the SQL for safe embedding in a JS string literal
-  const escapedSql = sql.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
-  const escapedDbPath = dbPath.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
-  const escapedBsPath = bsPath.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
-
-  const script = `
-    const Database = require('${escapedBsPath}');
-    try {
-      const db = new Database('${escapedDbPath}', { readonly: true });
-      const result = db.prepare('${escapedSql}').all();
-      console.log(JSON.stringify({ ok: true, rows: result }));
-      db.close();
-    } catch (err) {
-      console.log(JSON.stringify({ ok: false, error: err.message }));
-    }
-  `
-  // Use a temp file for the script to avoid shell escaping issues with complex SQL
-  const tmpScript = path.join(os.tmpdir(), `e2e-sqlite-query-${Date.now()}-${Math.random().toString(36).slice(2)}.js`)
-  fs.writeFileSync(tmpScript, script, 'utf-8')
-
-  // LOCK-F3: temp-script deletion failures are never suppressed. ENOENT counts
-  // as already absent; every other removal failure fails the query, and exact
-  // absence is verified before returning. A removal failure combines with,
-  // never masks, any in-flight error (e.g. a JSON parse failure).
-  let pendingError: unknown = null
-  try {
-    // spawnSync with argument array — no shell interpolation
-    const result = spawnSync(electronPath, [tmpScript], {
-      timeout: 15000,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe']
-    })
-
-    if (result.error) {
-      // spawnSync itself failed (e.g. electron binary not found). LOCK-N2:
-      // record the diagnostic as the pending body failure so a simultaneous
-      // temp-script cleanup failure reports BOTH failures instead of masking
-      // the subprocess error. Successful cleanup still returns null unchanged.
-      const diag = `[E2E] queryChatDbViaElectron spawn error: ${result.error.message}`
-      console.error(diag)
-      pendingError = new Error(diag)
-      return null
-    }
-
-    if (result.status !== 0) {
-      // Non-zero exit: surface stderr for diagnostics. LOCK-N2: same pending
-      // body failure record as the spawn-error path above.
-      const stderr = result.stderr?.trim() || '(no stderr)'
-      const diag = `[E2E] queryChatDbViaElectron exited ${result.status}: ${stderr.slice(0, 500)}`
-      console.error(diag)
-      pendingError = new Error(diag)
-      return null
-    }
-
-    // Find the JSON line in output (last line is typically the result)
-    const output = result.stdout || ''
-    const lines = output.trim().split('\n')
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i].trim()
-      if (line.startsWith('{')) {
-        return JSON.parse(line) as Record<string, unknown>
-      }
-    }
-    return null
-  } catch (err) {
-    pendingError = err
-    throw err
-  } finally {
-    let removalError: Error | null = null
-    try {
-      fs.unlinkSync(tmpScript)
-    } catch (err: any) {
-      // ENOENT means the script is already absent — not a failure (LOCK-F3).
-      if (err?.code !== 'ENOENT') {
-        removalError = new Error(
-          `[E2E] queryChatDbViaElectron failed to remove temp script ${tmpScript}: ${err?.message ?? String(err)}`
-        )
-      }
-    }
-    // Exact absence verification (LOCK-F3): unlink "success" is not trusted.
-    if (!removalError && fs.existsSync(tmpScript)) {
-      removalError = new Error(`[E2E] queryChatDbViaElectron temp script still exists after removal: ${tmpScript}`)
-    }
-    if (removalError) {
-      if (pendingError !== null) {
-        const originalMessage = pendingError instanceof Error ? pendingError.message : String(pendingError)
-        throw new Error(`${removalError.message} (original error: ${originalMessage})`)
-      }
-      throw removalError
-    }
-  }
+  return queryChatDb(dbPath, sql, _ownedTmpRoot, {
+    electronPath,
+    betterSqlitePath: require.resolve('better-sqlite3')
+  })
 }
 
 /**
@@ -290,9 +248,19 @@ async function assertChatDbReady(page: Page): Promise<void> {
 }
 
 async function launchElectron(): Promise<ElectronApplication> {
+  // Ownership-safe: pass TMPDIR/TMP/TEMP so production os.tmpdir() resolves
+  // inside the owned temp root. This ensures all production temp artifacts
+  // (cherry-import-*, etc.) land under our owned root for cleanup.
+  const tmpEnv: Record<string, string> = {}
+  if (_ownedTmpRoot) {
+    tmpEnv.TMPDIR = _ownedTmpRoot
+    tmpEnv.TMP = _ownedTmpRoot
+    tmpEnv.TEMP = _ownedTmpRoot
+  }
+
   return electron.launch({
     args: ['.', `--user-data-dir=${_userDataDir}`, '--no-sandbox', '--disable-gpu'],
-    env: { ...process.env, NODE_ENV: 'development', ELECTRON_RUN_AS_NODE: '' },
+    env: { ...process.env, NODE_ENV: 'development', ELECTRON_RUN_AS_NODE: '', ...tmpEnv },
     timeout: 120000
   })
 }
@@ -422,54 +390,39 @@ async function assertTextareaReady(page: Page): Promise<void> {
 }
 
 export const test = base.extend<ElectronFixtures>({
-  userDataDir: async ({}, use) => {
-    const runToken = getRequiredRunToken()
-    const profileToken = `${runToken}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    _userDataDir = path.join(os.tmpdir(), `cherry-e2e-${profileToken}`)
-    fs.mkdirSync(_userDataDir, { recursive: true })
+  ownedTmpRoot: async ({}, use) => {
+    const root = createOwnedTmpRoot()
+    _ownedTmpRoot = root
+    try {
+      await use(root)
+    } finally {
+      try {
+        // Fail-closed: exact-clean every still-registered profile, then remove
+        // the exact root. On any failure the root is preserved and the error
+        // propagates. There is no global teardown that deletes roots.
+        await removeOwnedTmpRoot(root, [..._profileLaunchTokens])
+      } finally {
+        _profileLaunchTokens.clear()
+        _ownedTmpRoot = null
+      }
+    }
+  },
 
-    // LOCK-004: Register this profile in the invocation-owned registry.
-    registerOwnedProfile(_userDataDir, runToken)
+  userDataDir: async ({ ownedTmpRoot }, use) => {
+    // Canonical child of the canonical owned root — the exact immutable string
+    // passed to Electron as --user-data-dir.
+    const profileToken = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const userDataDir = path.join(ownedTmpRoot, `cherry-e2e-${profileToken}`)
+    validateProfileLaunchToken(ownedTmpRoot, userDataDir, true)
+    _userDataDir = userDataDir
+    registerProfileLaunchToken(userDataDir)
 
     // Do NOT pre-compute chatDbPath here — it will be set by probeRuntimeAppDataPath()
     // after app launch, using the actual runtime appDataPath from the running Electron process.
     _chatDbPath = null
     _runtimeAppDataPath = null
 
-    await use(_userDataDir)
-
-    // LOCK-003: Fixture-owned cleanup is primary. Remove and verify exact owned
-    // base+Dev paths. Propagate aggregate errors after Electron/mock closure.
-    const cleanupErrors: string[] = []
-    const devDir = _userDataDir + 'Dev'
-
-    // 1. Remove base dir
-    try {
-      fs.rmSync(_userDataDir, { recursive: true, force: true })
-    } catch (err: any) {
-      cleanupErrors.push(`Failed to remove base dir "${_userDataDir}": ${err.message}`)
-    }
-
-    // 2. Remove Dev dir
-    try {
-      fs.rmSync(devDir, { recursive: true, force: true })
-    } catch (err: any) {
-      cleanupErrors.push(`Failed to remove Dev dir "${devDir}": ${err.message}`)
-    }
-
-    // 3. Verify both paths are actually gone
-    if (fs.existsSync(_userDataDir)) {
-      cleanupErrors.push(`Base dir "${_userDataDir}" still exists after rmSync`)
-    }
-    if (fs.existsSync(devDir)) {
-      cleanupErrors.push(`Dev dir "${devDir}" still exists after rmSync`)
-    }
-
-    // 4. Propagate aggregate errors — do not swallow
-    if (cleanupErrors.length > 0) {
-      console.error('[E2E] Cleanup errors:', cleanupErrors.join('; '))
-      throw new Error(`Fixture cleanup failed (${cleanupErrors.length} error(s)): ${cleanupErrors.join('; ')}`)
-    }
+    await use(userDataDir)
 
     _chatDbPath = null
     _runtimeAppDataPath = null
@@ -477,23 +430,52 @@ export const test = base.extend<ElectronFixtures>({
 
   mockPort: async ({}, use) => {
     const server = await createMockServer()
-    _mockPort = server.port
     await use(server.port)
     stopMockServer()
   },
 
-  electronApp: async ({ userDataDir, mockPort }, use) => {
+  electronApp: async ({ userDataDir, mockPort, ownedTmpRoot }, use) => {
     _userDataDir = userDataDir
-    _mockPort = mockPort
-    const electronApp = await launchElectron()
-    await use(electronApp)
-    // Close Electron and wait for WAL flush
-    await electronApp.close()
-    await new Promise((resolve) => setTimeout(resolve, 3000))
-    clearRequestLog()
+    _ownedTmpRoot = ownedTmpRoot
+    // Invariant: the mock server must be up before launch and stay up until
+    // this app is closed (fixture dependency keeps the teardown ordering).
+    if (!Number.isInteger(mockPort) || mockPort <= 0) {
+      throw new Error(`mockPort fixture must provide a positive port, got ${mockPort}`)
+    }
+    let electronApp: ElectronApplication | null = null
+    let fixtureError: Error | null = null
+    try {
+      electronApp = await launchElectron()
+      await use(electronApp)
+    } catch (error) {
+      fixtureError = error instanceof Error ? error : new Error(String(error))
+    } finally {
+      try {
+        await closeElectronWithExactCleanup(userDataDir, {
+          close: () => (electronApp ? electronApp.close() : Promise.resolve()),
+          findExactProcesses: findProcessesByUserDataDir,
+          terminateExactProcesses: (profileDir) => terminateProcessesByUserDataDir(profileDir, null)
+        })
+        // Exact cleanup succeeded: the profile is quiesced. The root teardown
+        // re-cleans only still-registered profiles (idempotent safety net).
+        unregisterProfileLaunchToken(userDataDir)
+      } catch (error) {
+        const cleanupError = error instanceof Error ? error : new Error(String(error))
+        // Fail-closed: the owned root is preserved and reported by the
+        // ownedTmpRoot teardown. Never swallow a cleanup failure.
+        if (fixtureError) throw new AggregateError([fixtureError, cleanupError], 'Fixture and Electron cleanup failed')
+        throw cleanupError
+      } finally {
+        // Allow WAL flush after the process has reached a terminal state.
+        await new Promise((resolve) => setTimeout(resolve, 3000))
+        clearRequestLog()
+      }
+    }
+    if (fixtureError) throw fixtureError
   },
 
-  mainWindow: async ({ electronApp, mockPort }, use) => {
+  mainWindow: async ({ electronApp, mockPort, ownedTmpRoot }, use) => {
+    _ownedTmpRoot = ownedTmpRoot
     const mainWindow = await waitForMainElectronWindow(electronApp)
 
     // LOCK-001: Probe runtime appDataPath IMMEDIATELY after window/root readiness
