@@ -1,17 +1,25 @@
 # SQLite 运行时迁移与 Cherry Studio 兼容导入 — 个人 fork 演进记录（面向未来独立 Cherry Chat）
 
-> **文档状态**：Phase 0–5 Done（Phase 5 各子阶段已提交至分支）；Phase 6 Done（实现 + 验证完成）。Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（已提交/已推送至迁移分支 `85603d0fd5`）；集成同步门 Baseline Sync Gate Done（integration `05a401b711` 已集成同步，已验证）；Phase 4.4.0 Done；Phase 4.4.1 Done；Phase 4.4.2 Done（已提交 `3a81557ac6`）；Phase 4.4.3 Done（commit `f6a6741b8e`；独立审计 pass + 全量验证通过）。Phase 5 Done（5.0–5.4 全部完成；5.1A 已提交 `6fa5ff5ef9`；5.1B 已提交 `e44e413f30`；5.2A 已提交 `e9de29ff97`；5.2B 实现 + 审计 + 验证完成；5.3 已提交 `b81a35c054`；5.4 feature commit `6c250f19a2` + docs commit `6b2f140955`；最终仓库验证 Node v24.12.0 ABI 137 / pnpm 10.27.0：311 文件 / 6976 通过 / 72 跳过 / 0 失败）。Phase 6 Done（6.0–6.4 全部完成：L2/L3 产品合同实现、安全/可靠性加固、隔离 import renderer 保留（LOCK-6023）、遗留清理与文档收尾；实现 + 验证通过）。**Phase 6 交付收尾（closure，非 Phase 7）本地完成（2026-07-31）**：B-class `import-cherrystudio-genuine.spec.ts` 1/1 PASS（fresh ABI145 build 后精确标准 Playwright 命令；host ABI137 已恢复；LOCK-MD2/4）；A-class `import-cherrystudio.spec.ts` 保持历史证据、未重跑；六个交付阻塞项修复（LOCK-MD5）；本地 gates 全 PASS（Node v24.12.0 / pnpm 10.27.0；CI=true lint 0 errors / CI=true test 312 文件 / 7009 通过 / 72 跳过 / 0 失败；LOCK-MD6）；**push/remote CI 事实（LOCK-MD8，2026-07-31 post-push）**——origin 分支 `jorkey/refactor/sqlite-migration` 已推送，remote SHA `89803503fc...`，upstream tracking `origin/jorkey/refactor/sqlite-migration` 已建立（branch URL `https://github.com/JorkeyLiu/cherry-studio/tree/jorkey/refactor/sqlite-migration`）；GitHub Actions runs for this branch = 0——**未运行/无 run**（非失败、非 green CI）；`.github/workflows/ci.yml` push trigger 仅 `main`/`v1`，未创建 PR、未手动 dispatch。E2E 仍为本地标准 Playwright 证据。详见「Phase 6 交付收尾 / 最终交付证据」
+> **文档状态**：Phase 0–5 Done（Phase 5 各子阶段已提交至分支）；Phase 6 Done（实现 + 验证完成）。Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（已提交/已推送至迁移分支 `85603d0fd5`）；集成同步门 Baseline Sync Gate Done（integration `05a401b711` 已集成同步，已验证）；Phase 4.4.0 Done；Phase 4.4.1 Done；Phase 4.4.2 Done（已提交 `3a81557ac6`）；Phase 4.4.3 Done（commit `f6a6741b8e`；独立审计 pass + 全量验证通过）。Phase 5 Done（5.0–5.4 全部完成；5.1A 已提交 `6fa5ff5ef9`；5.1B 已提交 `e44e413f30`；5.2A 已提交 `e9de29ff97`；5.2B 实现 + 审计 + 验证完成；5.3 已提交 `b81a35c054`；5.4 feature commit `6c250f19a2` + docs commit `6b2f140955`；最终仓库验证 Node v24.12.0 ABI 137 / pnpm 10.27.0：311 文件 / 6976 通过 / 72 跳过 / 0 失败）。Phase 6 Done（6.0–6.4 全部完成：L2/L3 产品合同实现、安全/可靠性加固、隔离 import renderer 保留（LOCK-6023）、遗留清理与文档收尾；实现 + 验证通过）。**Phase 6 交付收尾（closure，非 Phase 7）本地完成（2026-07-31）**：B-class `import-cherrystudio-genuine.spec.ts` 1/1 PASS（fresh ABI145 build 后精确标准 Playwright 命令；host ABI137 已恢复；LOCK-MD2/4）；A-class `import-cherrystudio.spec.ts` 保持历史证据、未重跑；六个交付阻塞项修复（LOCK-MD5）；本地 gates 全 PASS（Node v24.12.0 / pnpm 10.27.0；CI=true lint 0 errors / CI=true test 312 文件 / 7009 通过 / 72 跳过 / 0 失败；LOCK-MD6）；**push/remote CI 事实（LOCK-MD8，2026-07-31 post-push）**——origin 分支 `jorkey/refactor/sqlite-migration` 已推送（closure push 点 remote SHA `89803503fc...`），upstream tracking `origin/jorkey/refactor/sqlite-migration` 已建立（branch URL `https://github.com/JorkeyLiu/cherry-studio/tree/jorkey/refactor/sqlite-migration`）；其后 push-facts docs commit `3a64da6020`（父为 `89803503fc`）也已推送，**当前远程 tip = `3a64da6020`**；GitHub Actions runs for this branch = 0——**未运行/无 run**（非失败、非 green CI）；`.github/workflows/ci.yml` push trigger 仅 `main`/`v1`，未创建 PR、未手动 dispatch。E2E 仍为本地标准 Playwright 证据。**当前累积 diff 三分类（2026-08-03 docs closure 后更新）**：① 远程已推送 tip `3a64da6020`（不变）；② 本地已提交、未推送共 8 个 commit——原 3 个 `1fc19f590c`/`6b48d33e72`/`6d2db496b1`，加上本次新增 `b23c4ff4cb`（feat(native)：ABI 管理工具化）/`81a438b208`（fix(renderer)：JSON wire 共享引用）/`cbc19db426`（fix(import)：遗留 ownership 规范化）/`dbabae7eb8`（test(import)：规范化路径测试覆盖）/本 docs closure commit（无 SHA）；③ 本 docs closure commit 提交后工作树 clean（无未提交内容）。② 全部（8 个本地未推送 commit）均无远程 CI（详 §17 远程 CI 行）。详见「Phase 6 交付收尾 / 最终交付证据」
 >
 > ✅ **集成同步门（Baseline Sync Gate，Done/已合并/已验证）**：integration 分支（`05a401b711`）已集成同步进 migration 分支（pre-merge HEAD `5d50499e80`）；合并自动解决、无兼容性编辑；审计无阻塞/无代码发现，验证全部通过（format 无改动；lint exit 0 / 112 known warnings；typecheck 通过；`pnpm test` 265 文件 / 5664 通过 / 72 跳过 / 0 失败；聚焦测试 201 renderer + 822 chatDb/import）。Phase 4.4 既有架构未改变；合并后统一的 Renderer/context/type/Redux 结构已作为 Phase 5 实施基线。详见 Section 9「集成同步门（Baseline Sync Gate）」与决策日志。
 > **分支**：`jorkey/refactor/sqlite-migration`
-> **最后更新**：2026-08-02
+> **最后更新**：2026-08-03
 > **Owner**：Personal fork（jorkeyliu）
 >
 > ⚠️ **ADR-8 策略更正（2026-07-20）**：Phase 4+ 的产品策略已更正为**外部应用兼容性导入**模型。原 in-place Dexie→SQLite shadow/cutover 模型已正式废弃。详见 Section 6 A-8。
 >
 > ✅ **Post-closure L2 dev-origin 兼容性实现完成（2026-08-02）**：精确 `http://localhost:5173` dev-origin 已在 L2 导入管线中实现（LOCK-DEV-1…8）。Chromium 41.2.1 自然将精确 `http://localhost:5173` 映射为 `IndexedDB/http_localhost_5173.indexeddb.leveldb`，与 `file://` origin 隔离。Main intake 分类精确 file__0/dev 映射并在 IPC/窗口/candidate 之前拒绝不支持/歧义/多个 origin。Renderer 验证精确 dev origin/path/no-search/no-hash；最终验证重构 application-owned exact URL fields 而非接受任意 URL 输入。Dev E2E PASS 1/1 51.2s；genuine file-origin PASS 1/1 53.4s。Phase 0–6 Done 状态不变；此为 closure 后兼容性实现，非 Phase 7。详见「Phase 6 交付收尾后发现：L2 dev-origin 兼容性缺口（已实现）」。
 >
-> ✅ **Post-closure L2 explicit-undefined JSON wire 兼容性修复完成（2026-08-02）**：L2 导入管线 renderer-boundary JSON wire 兼容边界已修复（LOCK-N2/N3/N5/N6/N8/N11 + LOCK-C2/C3/C4 + LOCK-F2/F3）。IndexedDB structured clone 保留显式 undefined own-properties；JSON wire 不允许 undefined；依赖中立工具 `src/renderer/src/utils/jsonWire.ts`（cloneForWire）递归省略 undefined 对象属性使可选 absent/undefined 等价，`SqliteMessageDataSource` 复用，import 页行在 `entryPoint.ts` Dexie toArray 后、IPC 前统一归一化；数组 undefined 与一切 exotic/non-JSON 值仍被拒绝；Main/shared validators 未放宽。Dev-origin E2E PASS 1/1 55.6s；genuine file-origin E2E PASS 1/1 51.8s；13/13 explicit undefined own-properties 经 Chromium IndexedDB readback 存活（hasOwnProperty/valueIsUndefined 均 true）。**原始真实用户 dev ZIP（native110/logical11、25 topics、candidate init 后 topics[0].messages[0].mentions undefined 失败）尚未在修复后重跑，不得声称成功**；全量最终验证完成（Node v24.12.0 ABI137 / pnpm 10.27.0）：`pnpm format` exit 0（1803 files，4 个预期文件首次 pass 被格式化、二次 pass clean）；`CI=true pnpm lint` exit 0 / 0 errors / 76 oxlint + 4 ESLint pre-existing warnings / node/web/aicore typecheck + i18n 通过；最终有效 `CI=true pnpm test` exit 0 / 318 files / 7148 passed / 72 skipped / 0 failed / 309.41s（初始全量 run 的单一 parseDataUrl <10ms timing failure 经 focused rerun 确认 flaky、由最终 clean 全量 run 取代）。Phase 0–6 Done 状态不变；此为 closure 后兼容性修复，非 Phase 7。详见「Phase 6 交付收尾后发现：L2 explicit-undefined JSON wire 兼容边界」。
+> ✅ **Post-closure L2 explicit-undefined JSON wire 兼容性修复完成（2026-08-02）**：L2 导入管线 renderer-boundary JSON wire 兼容边界已修复（LOCK-N2/N3/N5/N6/N8/N11 + LOCK-C2/C3/C4 + LOCK-F2/F3）。IndexedDB structured clone 保留显式 undefined own-properties；JSON wire 不允许 undefined；依赖中立工具 `src/renderer/src/utils/jsonWire.ts`（cloneForWire）递归省略 undefined 对象属性使可选 absent/undefined 等价，`SqliteMessageDataSource` 复用，import 页行在 `entryPoint.ts` Dexie toArray 后、IPC 前统一归一化；数组 undefined 与一切 exotic/non-JSON 值仍被拒绝；Main/shared validators 未放宽。Dev-origin E2E PASS 1/1 55.6s；genuine file-origin E2E PASS 1/1 51.8s；13/13 explicit undefined own-properties 经 Chromium IndexedDB readback 存活（hasOwnProperty/valueIsUndefined 均 true）。**原始真实用户 dev ZIP（native110/logical11、25 topics、candidate init 后 topics[0].messages[0].mentions undefined 失败）为历史失败点（失败链第 ① 步）；该原始 ZIP 已由导入 harness 重跑 PASS（1/1，38.9s，fresh ABI145 build），历史失败链 explicit undefined → false shared-ref cycle → topicId mismatch → orphan block strict rejection → approved canonicalizations → PASS 以 PASS 终结（LOCK-OWN-3 / LOCK-BLOCK-3 已履行）**；全量最终验证完成（Node v24.12.0 ABI137 / pnpm 10.27.0）：`pnpm format` exit 0（1803 files，4 个预期文件首次 pass 被格式化、二次 pass clean）；`CI=true pnpm lint` exit 0 / 0 errors / 76 oxlint + 4 ESLint pre-existing warnings / node/web/aicore typecheck + i18n 通过；最终有效 `CI=true pnpm test` exit 0 / 318 files / 7148 passed / 72 skipped / 0 failed / 309.41s（初始全量 run 的单一 parseDataUrl <10ms timing failure 经 focused rerun 确认 flaky、由最终 clean 全量 run 取代）。Phase 0–6 Done 状态不变；此为 closure 后兼容性修复，非 Phase 7。详见「Phase 6 交付收尾后发现：L2 explicit-undefined JSON wire 兼容边界」。
+>
+> ✅ **Post-closure L2 遗留 Dexie 嵌入消息 topicId 归属规范化完成（2026-08-02，LOCK-OWN-1/2）**：L2 导入管线 `projectTopicsPage` 中，**外层 Topic 包含关系对遗留 Dexie 数据具备权威性**——嵌入消息 `message.topicId` 存在且为有效非空字符串但与外层 `topic.id` 不一致时，仅将该冗余投影字段规范化（canonicalize）为外层 Topic ID（投影后 `wireToMessage` 覆写，原始 JsonObject 不突变，消息**不**移动到其声称的 topic）；缺失/空/类型非法的 topicId 以及全部其他 ownership/identity 校验（重复 ID、block owner、segment/file-reference ownership）保持严格拒绝。规范化仅按提交页原子计数（`DataPlaneNormalizationStats.topicIdNormalizationCount`，Main-only、快照访问器、回滚/拒绝页不泄漏），编排器在 finalize 后**恰好一次**发出 count-only `logger.warn`（无 ID/内容/路径/源值）。Source manifest 证据与 candidate 写入以及验证器 hash 均消费同一规范化后的投影值。只读诊断：真实 ZIP 25 topics / 107 messages，**恰好 2 条有效字符串不一致**，0 条缺失/空/类型非法，无 topic 内/cross-topic 重复 message ID，两条 stale 引用均指向已存在 sibling topic；证据仅记录计数与无重复事实，不含完整 ID。**LOCK-OWN-3 已履行（2026-08-02）**：此前的原始真实 ZIP ownership 失败为历史事实（chronology 保留）；修复链完成后原始 ZIP 由导入 harness 重跑 **PASS 1/1（38.9s，fresh ABI145 build）**——topicId 规范化恰好 2 条，candidate/live 计数 topics 25 / messages 107 / blocks 120 / segments 6 / memberships 16 / fileRefs 4，恰好一条合并 count-only warning。详见「Phase 6 交付收尾后发现：L2 遗留 Dexie 嵌入消息 topicId 归属规范化」。
+>
+> ✅ **Post-closure L2 不可达孤儿 block 规范化完成（2026-08-02，LOCK-BLOCK-1/2/3）**：L2 导入管线 `projectBlocksPage` 在**源投影边界**跳过不可达孤儿 `message_blocks` 行——当且仅当 (a) 该 block id 不出现在任何已导入 message.blocks[] 注册表（`blockOwnerById` 无 owner）**且** (b) 该行声称的 `messageId` 不在任何已导入 message 中（`messageTopicById` 无该 message）。跳过发生在源页投影时（**绝不写入后再 SQL 删除**）；被跳过的行不产生任何 MessageBlockData / file reference / manifest 行 / writer 插入 / seen 标记。声称已存在 message 的未引用行仍为严格 `OWNERSHIP_MISMATCH`；引用的 owner 不匹配、重复 block ID（含被跳过孤儿，页内/跨页，经事务性 source-seen registry）、cross-message 引用、finalize 时缺失引用 block 全部保持严格。跳过计数 Main-only（`DataPlaneNormalizationStats.unreachableBlockSkipCount`，按页 delta、仅在成功提交后合并），编排器在 finalize 后**恰好一次**发出 count-only 聚合 warning（每非零类别一条，或两类别均 >0 时一条合并 warning；无 ID/内容/路径/源值）。SourceReadStats.blockRecordCount 保持 125（源行分页），CandidateImportStats.blockCount / import manifest / block hashes 保持 120——manifest 与 verifier 自动 reachable-only（被跳过的行从不 staging）。只读诊断精确聚合：25 topics / 107 messages；嵌入引用 120 个不同 id；源行 125；120 个引用各恰好一次且 messageId 匹配；**5 个未引用孤儿全部声称不存在的 messageId**；0 个无效 id / 重复行/引用 / wrong-owner / multi-message 引用 / 缺失引用 block。无 archive/schema 变更。**LOCK-BLOCK-3 已履行（2026-08-02）**：此前 block-orphan ownership 拒绝为历史事实（chronology 保留）；修复链完成后原始 ZIP 由导入 harness 重跑 **PASS 1/1（38.9s，fresh ABI145 build）**——source blocks 125 / skipped 5 / candidate blocks 120，无孤儿/重复/cross-topic 链接，ZIP 不可变（size 1056109、mtime/inode/mode 不变）。详见「Phase 6 交付收尾后发现：L2 不可达孤儿 block 规范化」。
+>
+> ✅ **Post-closure 原始真实 ZIP 重跑 PASS（2026-08-02，LOCK-OWN-3 / LOCK-BLOCK-3 履行）**：原始真实用户 ZIP 经导入 harness 在 fresh Electron ABI145 build 后重跑 **PASS 1/1（38.9s）**。status chain discovering→candidate-ready→verified-candidate→promoting→finalizing；candidate/live 计数 topics 25 / messages 107 / blocks 120 / segments 6 / memberships 16 / fileRefs 4；source blocks 125 / skipped 5（不可达孤儿）；topicId normalized 2；**恰好一条合并 count-only warning**；original PID exit / relaunch exact-token 清理；`integrity_check` ok / `foreign_key_check` 空；无 orphan parent / 重复 / cross-topic 链接；snapshot（topics 2 / messages 1 / blocks 1）保留 baseline 且排除导入源；journals/staging 无残留；candidate shells 空；ZIP / binding（ABI 145，hash `48191d9b…`）/ git 全部未变。ZIP 以隐私安全角色描述（不记录绝对用户路径）；不可变证据：size 1056109、mtime/inode/mode 不变（MD5 一致，按既有证据风格）。历史失败链以 PASS 终结：explicit undefined → false shared-ref cycle → topicId mismatch → orphan block strict rejection → approved canonicalizations → **PASS**。LOCK-OWN-3 / LOCK-BLOCK-3 仅对本 artifact 履行；strict residuals 保持严格；canonicalization 仅限 L2 导入管线。**无远程 CI 声明；未 commit / 未 push（2026-08-02 当日快照；其后部分证据已本地提交 `1fc19f590c`/`6b48d33e72`/`6d2db496b1`，其余仍为未提交工作树，均未推送；三分类见 §17 远程 CI 行）**。详见「Phase 6 交付收尾后发现：L2 explicit-undefined JSON wire 兼容边界 / topicId 归属规范化 / 不可达孤儿 block 规范化」各小节最终验证证据。
+>
+> ✅ **最终交付验证完成（2026-08-03，latest-source authoritative closure）**：在最新源上完成最终交付验证——`native:rebuild:node` exit 0（独立 Node ABI137 SQL PASS）；`pnpm format` exit 0 无改动；`CI=true pnpm lint` exit 0 / 0 errors / 76 oxlint + 4 ESLint pre-existing warnings / node/web/aicore typecheck + i18n 通过；`CI=true pnpm test` exit 0 / **319 files / 7274 passed** / 72 skipped / 0 failed / 449.99s（active final closure；2026-08-02 explicit-undefined 318/7148 与 staged-validation 319/7230 保持为历史计数，时间顺序保留）；`native:rebuild:electron` exit 0（独立 Electron 41.2.1 ABI145 SQL PASS）；`pnpm build` exit 0 / built 9.02s；标准 E2E ordinary-chat 1/1 37.5s / genuine 1/1 67.5s / dev-origin 1/1 59.7s；原始真实 ZIP harness latest build PASS 1/1 **41.9s**（candidate/live 25/107/120/6/16/4；topicId normalized 2 / orphan skipped 5 / 恰好一条合并 count-only warning；integrity/FK/snapshot/relaunch/cleanup PASS；ZIP 未变：size 1056109 / mtime / inode / mode 不变；final ABI145 hash `48191d9b…`）；**最终 node_modules 状态 Electron ABI145**；远程 CI 三分类与既有精确 provenance 完全一致（无新 commit/push/PR 声明）。详见「§17 最终交付验证（2026-08-03）」。
 
 ---
 
@@ -710,7 +718,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **状态** | **Done（feature commit `6c250f19a2` + docs commit `6b2f140955`）** |
 | **前置** | Phase 5.3 完成 |
 | **目标** | 端到端验证、性能不低于 Dexie 基线、A-10 spike harness 清理、Group D/E 清理与文档收尾 |
-| **实际交付范围** | **Electron ABI 145 重建**：better-sqlite3 为 Electron 38（ABI 145）重新编译，E2E 运行时验证通过。**E2E 验证矩阵**（4 个 spec 文件通过）：① ordinary-chat：真实 send / edit / resend / regenerate / copy + exact request/SQL 验证；② topic-trash：soft-delete / restore / hard-delete / empty-trash + name/title + cross-assistant isolation；③ multi-model：append + real dnd reorder persisted；④ topic-move：real delete + undo/redo persisted。**Agent session**：focused assertions 通过（185 tests），但 runtime agent UI 不可用——因无 Main handler / IPC / UI entry，非 ABI 问题。**性能基准**（方法学说明见下）：消息加载 p50 7.42ms / p95 8.23ms；repository two-transaction write microbenchmark 38.5 batch ops/s / 385.2 msgs/s（诚实标注为 microbenchmark，非聚合生产吞吐）；cold open p95 6.91ms < 500ms。**历史 Dexie comparator 不可用**，仅报告绝对 SQLite 结果，不做相对非回归声明。**Phase 4 spike gate 已通过后删除**：A pass、C1 4/4、C2a 8/8、C2b 10/10 在 Phase 4 spike gate 通过后，22 个 spike-only 文件 + build gate 已移除（A-10 fulfilled/deleted）；production imports 保留/审计。**零 ordinary runtime Dexie chat-table references** 确认；有效例外：agent / import（LOCK-6023 隔离 import renderer 保留）。**Topic name persistence 和 durable file lifecycle correctness fixes** 在 E2E 过程中发现并实现/审计。**文档收尾**：更新本迁移文档反映 Phase 5.4 最终态 |
+| **实际交付范围** | **Electron ABI 145 重建**：better-sqlite3 为 Electron 重建（ABI 145；Phase 5.4 当时的 Electron 版本，现仓库锁定 Electron 41.2.1），E2E 运行时验证通过。**E2E 验证矩阵**（4 个 spec 文件通过）：① ordinary-chat：真实 send / edit / resend / regenerate / copy + exact request/SQL 验证；② topic-trash：soft-delete / restore / hard-delete / empty-trash + name/title + cross-assistant isolation；③ multi-model：append + real dnd reorder persisted；④ topic-move：real delete + undo/redo persisted。**Agent session**：focused assertions 通过（185 tests），但 runtime agent UI 不可用——因无 Main handler / IPC / UI entry，非 ABI 问题。**性能基准**（方法学说明见下）：消息加载 p50 7.42ms / p95 8.23ms；repository two-transaction write microbenchmark 38.5 batch ops/s / 385.2 msgs/s（诚实标注为 microbenchmark，非聚合生产吞吐）；cold open p95 6.91ms < 500ms。**历史 Dexie comparator 不可用**，仅报告绝对 SQLite 结果，不做相对非回归声明。**Phase 4 spike gate 已通过后删除**：A pass、C1 4/4、C2a 8/8、C2b 10/10 在 Phase 4 spike gate 通过后，22 个 spike-only 文件 + build gate 已移除（A-10 fulfilled/deleted）；production imports 保留/审计。**零 ordinary runtime Dexie chat-table references** 确认；有效例外：agent / import（LOCK-6023 隔离 import renderer 保留）。**Topic name persistence 和 durable file lifecycle correctness fixes** 在 E2E 过程中发现并实现/审计。**文档收尾**：更新本迁移文档反映 Phase 5.4 最终态 |
 | **A-10 spike harness 清理** | Phase 4.0 的 22 个 spike-only 文件（含 `packages/shared/phase4*.ts`、`scripts/phase4-*.sh`、`src/main/phase4-*.ts`、`src/preload/phase4-spike-preload.ts`、`src/renderer/phase4Spike.html`、`src/renderer/src/windows/phase4Spike/`、`electron.vite.config.ts` 的 `PHASE4_SPIKE=1` build gate）已移除。A-10 原始保留决策在 Phase 4 spike gate（A pass、C1 4/4、C2a 8/8、C2b 10/10）通过后 fulfilled/deleted。production imports（`src/main/services/chatDbImport/`、`src/preload/chatImport/`、`src/renderer/src/windows/chatImport/`）保留，不受影响 |
 | **E2E 方法学** | Playwright E2E 覆盖普通聊天路径（ordinary-chat / topic-trash / multi-model / topic-move）；每个 spec 使用真实 IPC/SQLite 路径（非 mock）；agent session focused assertions 通过但无 runtime UI 覆盖（无 Main handler/IPC/UI entry） |
 | **性能方法学** | 消息加载：真实消息加载延迟测量，p50/p95 统计。Repository two-transaction write microbenchmark：两事务写入微基准，标注为微基准非聚合生产吞吐（LOCK-DOC6）。Cold open：冷启动 DB 打开时间 < 500ms。**历史 Dexie comparator 不可用**：不声明相对非回归，仅报告绝对 SQLite 结果（LOCK-DOC7） |
@@ -927,7 +935,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **失败点** | `topics[0].messages[0].mentions` 为显式 `undefined`（upgradeToV7 Dexie structured-clone 行形态） |
 | **失败机制** | Chromium IndexedDB **structured clone 保留显式 undefined own-properties**（hasOwnProperty=true / value===undefined）；这些行经 import renderer 分页 IPC 传输时，renderer-boundary 未在 IPC 前递归省略 → JSON wire（`undefined` 非法）拒绝，candidate 阶段失败 |
 | **清理事实** | candidate / live DB / session / workspace 清理正确；live `chat.db` 与源 ZIP 不受影响 |
-| **修复后状态** | 该原始真实 ZIP **尚未在修复后重跑**；不得声称成功；可能揭示更深层独立 legacy-data 问题 |
+| **修复后状态** | 该原始真实 ZIP 为**历史失败点**（`mentions` explicit undefined 为失败链第 ① 步）。修复链（explicit undefined → false shared-ref cycle → topicId mismatch → 孤儿 block 严格拒绝 → approved canonicalizations）完成后，原始 ZIP 由导入 harness **重跑 PASS 1/1（38.9s，fresh ABI145 build）**，失败链以 PASS 终结；此前的「不得声称成功」残余已由 LOCK-OWN-3 / LOCK-BLOCK-3 履行（详见对应小节最终验证证据） |
 
 ##### 实现记录（2026-08-02，closure 后兼容性修复）
 
@@ -965,13 +973,14 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | Promotion artifacts/processes/ports/workspaces | 已清理 |
 | Host ABI | Restored Node v24.12.0 ABI137 |
 | 独立审计 | 生产修复 + 测试已实现，独立审计 pass |
+| 原始真实 ZIP 导入 harness 重跑（definitive，fresh ABI145 build） | **PASS 1/1 38.9s**：历史失败链 explicit undefined → false shared-ref cycle → topicId mismatch → orphan block strict rejection → approved canonicalizations → **PASS**；status chain discovering→candidate-ready→verified-candidate→promoting→finalizing；candidate/live 25/107/120/6/16/4（topics/messages/blocks/segments/memberships/fileRefs）；topicId normalized 2；恰一条合并 count-only warning；integrity ok / FK 空；ZIP 不可变（size 1056109、mtime/inode/mode 不变，MD5 一致） |
 | **全量最终验证（Node v24.12.0 ABI137 / pnpm 10.27.0）** | 上述即实现/audit/runtime 证据；最终有效 gates：`pnpm format` exit 0（1803 files，4 个预期文件首次 pass 被格式化、二次 pass clean）；`CI=true pnpm lint` exit 0 / 0 errors / 76 oxlint + 4 ESLint pre-existing warnings / node/web/aicore typecheck + i18n 通过；`CI=true pnpm test` exit 0 / 318 files / 7148 passed / 72 skipped / 0 failed / 309.41s。初始全量 test run 的单一 parseDataUrl <10ms timing failure 经 focused rerun 确认为 flaky，由最终 clean 全量 run 取代 |
 
 ##### 残余边界与风险
 
 | 边界 | 说明 |
 |---|---|
-| **原始真实 ZIP 未重跑** | 原始用户真实 dev-origin ZIP（native110/logical11、25 topics、candidate init 后 `topics[0].messages[0].mentions` undefined 失败）**尚未在修复后重跑**；不得声称其成功；重跑可能揭示更深层独立 legacy-data 问题 |
+| **原始真实 ZIP 重跑 PASS（LOCK-OWN-3 / LOCK-BLOCK-3 履行）** | 原始用户真实 dev-origin ZIP（native110/logical11、25 topics、candidate init 后 `topics[0].messages[0].mentions` undefined 失败）为**历史失败点**；修复链完成后由导入 harness **重跑 PASS 1/1（38.9s，fresh ABI145 build）**——status chain discovering→candidate-ready→verified-candidate→promoting→finalizing；candidate/live 计数 25 / 107 / 120 / 6 / 16 / 4（topics/messages/blocks/segments/memberships/fileRefs）；source blocks 125 / skipped 5；topicId normalized 2；恰好一条合并 count-only warning；integrity ok / FK 空。ZIP 不可变（size 1056109、mtime/inode/mode 不变，MD5 一致）；路径保持隐私安全角色描述，不记录绝对用户路径 |
 | **Explicit undefined 边界** | 对象 own-property 显式 undefined 被 renderer-boundary 递归省略（absent/undefined 等价）；**数组内 undefined 与一切 exotic/non-JSON 值仍被拒绝**；Main/shared validators 未放宽/默认/推断 |
 | **Exact localhost:5173 only** | dev-origin 支持矩阵不变：精确 `http://localhost:5173` 支持；`127.0.0.1`/`::1`/其他主机/端口/歧义 origin fail closed（LOCK-DEV-1…8 保持） |
 | **Packaged file-only** | 生产构建不引入 HTTP origin 支持（不变） |
@@ -979,6 +988,105 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **Cleanup residual** | Unique owned root ordinary cleanup；hard runner/machine failure 可能 leave disposable temp root，no broad automatic cleanup（不变） |
 | **Platform scope** | macOS-only（A-9）；Windows/Linux 未验证（不变） |
 | **Full gates（最终验证完成）** | 全量 format/lint/test 最终计数已记录于「最终验证证据」（Node v24.12.0 ABI137 / pnpm 10.27.0：format exit 0；CI=true lint exit 0 / 0 errors；CI=true test exit 0 / 318 files / 7148 passed / 72 skipped / 0 failed / 309.41s）；无剩余 pending 最终计数 |
+
+#### Phase 6 交付收尾后发现：L2 遗留 Dexie 嵌入消息 topicId 归属规范化（2026-08-02）— 已实现（LOCK-OWN-1/2）
+
+> **定位**：本节为 Phase 6 closure（2026-07-31）与 dev-origin / explicit-undefined 兼容性修复（2026-08-02）之后实现的 **L2 导入管线嵌入消息 `topicId` 归属规范化**记录（LOCK-OWN-1/2）。**不是 Phase 7**，不重开 Phase 0–6。Phase 0–6 Done 状态不变。
+
+##### 发现与历史事实
+
+| 属性 | 值 |
+|---|---|
+| **发现方式** | 只读诊断原始真实 ZIP（不 inspect 内容细节、不修改任何源）：25 topics / 107 messages，**恰好 2 条 `message.topicId` 为有效非空字符串但与外层 `topic.id` 不一致（valid-string mismatch）**；缺失/空/类型非法 0 条；无 topic 内/cross-topic 重复 message ID；两条 stale 引用均指向已存在的 sibling topic |
+| **根因** | 遗留 Dexie 行中嵌入消息的冗余 `topicId` 字段可携带过期（stale）但结构有效的外层引用；旧实现在 L2 投影时将其视为严格 ownership 不匹配而拒绝整页 |
+| **历史原语（LOCK-OWN-3）** | **此前的原始真实 ZIP ownership 失败（message.topicId mismatch 拒绝）为历史事实**（chronology 保留，失败链第 ③ 步）。**LOCK-OWN-3 已履行（2026-08-02）**：approved canonicalizations 完成后原始 ZIP 由导入 harness 重跑 **PASS 1/1（38.9s，fresh ABI145 build）**——topicId 规范化恰好 2 条（0 缺失/空/非法，无重复 message ID），candidate/live 计数 topics 25 / messages 107 / blocks 120 / segments 6 / memberships 16 / fileRefs 4；恰好一条合并 count-only warning（topicId 2 + 孤儿跳过 5） |
+| **数据影响** | 无。仅投影语义变更；原始 ZIP / profiles 未被触碰 |
+
+##### 实现记录（LOCK-OWN-1/2，2026-08-02）
+
+| 属性 | 值 |
+|---|---|
+| **定位** | closure 后兼容性实现，非 Phase 7；不重开 Phase 0–6 |
+| **LOCK-OWN-1（外层 Topic 归属权威）** | `importDataPlane.ts::projectTopicsPage` 中**保留 `requireNonEmptyString` 前置校验**（缺失/空/number/null/object topicId 一律 INVALID_ROW 严格拒绝）；仅对「存在且为有效非空字符串但与外层 `topic.id` 不一致」做规范化：计数递增（非逐条拒绝），并在 `wireToMessage` 之后**始终**将投影 `MessageData.topicId` 覆写为外层 topicId（一致时为空操作）。原始 JsonObject 不突变；消息**不**移动到其声称的 topic |
+| **保持严格** | 重复 message ID（页内/跨页/cross-topic）、block 归属、segment membership、file-reference 派生 ownership 全部保持严格拒绝；规范化绝不 bypass 这些 gate |
+| **LOCK-OWN-2（隐私 + 事务性计数 + 完成时序）** | Main-only `DataPlaneNormalizationStats.topicIdNormalizationCount`（`getNormalizationStats()` 快照访问器，无别名）。计数 delta 放在 `StagedPage` 上、在 `commitStaged` 于 writer 提交后合并（与 index deltas 同构，LOCK-D9）——初始 0，回滚/拒绝页绝不泄漏；finalize 后保持稳定。编排器（`chatDbImport/index.ts` completeCandidate）在**全部 candidate-completion 成功 gate 之后**（source stats 比对、candidate seal、candidate-ready transition、ready callback 全部通过——即 finalize 之后的最新自然成功点）读取聚合值并**恰好一次**发出 `logger.warn`（仅 >0 时）：source-stats 不匹配 / seal 失败 / ready callback 失败 / 重试的候选完成**绝不**发 warning；verification/promotion 为独立阶段，本 warning 仅作为 candidate-projection canonicalization 证据而非全量导入成功。内容仅含 session/run 上下文 + 聚合计数 + 非内容陈述：**无 topic ID、message ID、名称、内容、路径、源值** |
+| **Hash / verifier 一致** | source manifest（evidence `topicId` + digest）与 candidate 写入、candidate verifier 全部消费同一规范化后的投影 `MessageData` 与同一 `entityFraming`——**不重复 canonicalization**；自动化集成测试证明 plane → manifest → sealed candidate → verifier 13 维度全过（见「最终验证证据」） |
+| **实现位置** | `src/main/services/chatDbImport/importDataPlane.ts`（投影 + `DataPlaneNormalizationStats` + 访问器 + 事务性计数）、`src/main/services/chatDbImport/index.ts`（`ImportDataPlaneLike.getNormalizationStats()` + 恰好一次 count-only warning）、测试：`__tests__/importDataPlane.test.ts`、`__tests__/index.test.ts`（loggerService mock）、`verification/__tests__/candidateVerifier.test.ts`（全链集成）。**shared DTO 未扩展**（`CandidateImportStats` 不变）；Main/shared 全局校验未放宽 |
+| **不变量保持** | LOCK-ABI-1…10 / LOCK-D1…D11 / LOCK-4301…4305 全部继续有效；原始 ZIP / profiles 未触碰；当前 binding 为 Electron ABI 145（native:check:electron PASS，binding hash 不变，未 rebuild） |
+
+##### 最终验证证据
+
+| 测试 | 结果 |
+|---|---|
+| `importDataPlane.test.ts`（聚焦，real better-sqlite3） | PASS：canonical mismatch 导入外层 owner + 计数 1；匹配值计数 0 / 初始 0；拒绝/回滚页不泄漏计数；缺失/空/number/null/object topicId 严格拒绝；canonicalization 不 bypass 重复/cross-owner gate；manifest evidence.topicId + digest 反映外层（canonical 投影） |
+| `candidateVerifier.test.ts`（LOCK-OWN-1 全链集成） | PASS：plane → finalize → manifest → seal → verifier 13 维度全过；manifest evidence.topicId = 外层；digest 为 canonical 投影；candidate 行 `topic_id` 存储外层 |
+| `index.test.ts`（LOCK-OWN-2 日志） | PASS：count>0 → **恰好 1 条** warn（聚合计数）；count=0 → 无 warn；finalize 失败 → 无 warn（无双日志）；warn 不含 ID/内容/路径/源值（单字符串参数） |
+| `verificationBenchmark.integration.test.ts`（10k 回归） | PASS：既有 10k 全链证据保持（matching topicId 无计数）；无回归 |
+| Main typecheck / 聚焦 lint / format / `git diff --check` | PASS（见会话验证结果） |
+| binding / ABI | `native:check:electron` PASS（Electron 41.2.1 ABI 145）；binding hash 未变；未 rebuild |
+| **原始真实 ZIP 导入 harness 重跑（definitive，fresh ABI145 build）** | **PASS 1/1 38.9s**：status chain discovering→candidate-ready→verified-candidate→promoting→finalizing；topicId normalized 2（恰好一条合并 count-only warning）；candidate/live topics 25 / messages 107 / blocks 120 / segments 6 / memberships 16 / fileRefs 4；integrity ok / FK 空；无 orphan parent / 重复 / cross-topic 链接；snapshot（topics 2 / messages 1 / blocks 1）保留 baseline 且排除导入源；journals/staging 无残留；candidate shells 空；original PID exit / relaunch exact-token 清理；ZIP 不可变（size 1056109、mtime/inode/mode 不变）；binding（ABI 145，hash `48191d9b…`）/ git 未变 |
+
+##### 残余边界与风险
+
+| 边界 | 说明 |
+|---|---|
+| **LOCK-OWN-3：原始真实 ZIP 重跑 PASS（已履行）** | ownership 失败为历史事实（chronology 保留）；修复链完成后原始 ZIP 由导入 harness **重跑 PASS 1/1（38.9s，fresh ABI145 build）**——topicId 规范化恰好 2 条、无重复/cross-topic 链接、恰好一条合并 count-only warning。**仅对本 artifact（该原始 ZIP）履行**；canonicalization 仅限 L2 导入管线（L1/L3 语义不变，LOCK-6001/6002/6023 不变）；strict residuals（缺失/空/类型非法 topicId、重复 message ID、block/segment/file-reference ownership）保持严格拒绝不变 |
+| **仅冗余投影规范化** | 只规范化「有效非空字符串不一致」这一种情况；缺失/空/类型非法与其他全部 ownership 校验保持严格；消息从不移动到其声称的 topic |
+| **计数事务性** | 计数仅在整页验证 + 提交成功后合并；拒绝/回滚页不泄漏 |
+| **No product boundary change** | L2/L3 产品语义（LOCK-6001）、replace-all（LOCK-6002）、隔离 import renderer 保留（LOCK-6023）不变 |
+| **Platform scope** | macOS-only（A-9）；Windows/Linux 未验证（不变） |
+| **Full gates** | 本实现会话执行聚焦验证（未运行 rebuild / 全量测试 / E2E / commit / push） |
+
+#### Phase 6 交付收尾后发现：L2 不可达孤儿 block 规范化（2026-08-02）— 已实现（LOCK-BLOCK-1/2/3）
+
+> **定位**：本节为 Phase 6 closure（2026-07-31）与 dev-origin / explicit-undefined 兼容性修复（2026-08-02）以及 LOCK-OWN-1/2 topicId 规范化（2026-08-02）之后实现的 **L2 导入管线不可达孤儿 `message_blocks` 规范化**记录（LOCK-BLOCK-1/2/3）。**不是 Phase 7**，不重开 Phase 0–6。Phase 0–6 Done 状态不变。
+
+##### 发现与历史事实
+
+| 属性 | 值 |
+|---|---|
+| **发现方式** | 只读诊断精确聚合（不 inspect 内容细节、不修改任何源）：25 topics / 107 messages；嵌入引用 120 个不同 id；源 `message_blocks` 行 125；120 个引用 block 各恰好出现一次且 `messageId` 匹配；**5 个未引用孤儿行全部声称不存在的 messageId**；0 个无效 id、0 重复行/重复引用、0 wrong-owner、0 multi-message 引用、0 finalize 缺失引用 block |
+| **根因** | 遗留 Dexie 可残留「死」`message_blocks` 行：block id 未被任何消息 `blocks[]` 引用、且声称的 `messageId` 也不存在于任何消息（被删除消息的残留）。旧实现在 L2 投影时对任何「无 owner」block 行一律 `OWNERSHIP_MISMATCH` 拒绝整页 |
+| **历史原语（LOCK-BLOCK-3）** | **此前原始真实 ZIP 的失败链为历史事实（chronology 保留）：① `mentions` explicit undefined（已修复，LOCK-N2/N3）；② false shared-ref cycle；③ `message.topicId` mismatch（已修复，LOCK-OWN-1/2）；④ 不可达孤儿 block ownership 严格拒绝（本修复，LOCK-BLOCK-1/2）；⑤ approved canonicalizations（LOCK-OWN-1/2 + LOCK-BLOCK-1/2）**。**LOCK-BLOCK-3 已履行（2026-08-02）**：修复链完成后原始 ZIP 由导入 harness **重跑 PASS 1/1（38.9s，fresh ABI145 build）**，失败链以 PASS 终结 |
+| **数据影响** | 无。仅源投影语义变更（跳过，非删除后写入）；原始 ZIP / profiles 未被触碰；无 archive/schema 变更 |
+
+##### 实现记录（LOCK-BLOCK-1/2，2026-08-02）
+
+| 属性 | 值 |
+|---|---|
+| **定位** | closure 后兼容性实现，非 Phase 7；不重开 Phase 0–6 |
+| **LOCK-BLOCK-1（精确跳过谓词）** | `importDataPlane.ts::projectBlocksPage`：**保留严格行形状与非空 id/messageId/type/status/createdAt 前置校验**（INVALID_ROW 先于分类）；跳过源 `message_blocks` 行当且仅当 (a) `blockOwnerById` 中无该 block id（未被任何导入消息 `blocks[]` 引用）**且** (b) `messageTopicById` 中无该行声称的 `messageId`（不在任何导入消息）。**跳过发生在源页投影时**——从不写入后再 SQL-delete；被跳过行不产生 MessageBlockData / file references / manifest 行 / writer 插入 / seen 标记 |
+| **保持严格** | 声称已存在 message 的未引用 block 行仍为 `OWNERSHIP_MISMATCH`；引用 owner 不匹配（含 block.messageId 与索引 owner 不一致）仍为 `OWNERSHIP_MISMATCH`；**重复 source block id 在所有行/页（含被跳过的孤儿行，页内/跨页）仍拒绝**——经独立于 `seenBlockIds`（仅提交写入行）的**事务性 source-seen registry**（`sourceSeenBlockIds`，仅提交成功后合并；失败页不污染、重试有效）；cross-message 重复引用、segment/file-reference ownership、finalize 时 `MISSING_BLOCKS`（reachable 期望 id 对导入 seen id）全部不变 |
+| **LOCK-BLOCK-2（隐私 + 事务性计数 + reachable-only 证据 + 完成时序）** | Main-only `DataPlaneNormalizationStats.unreachableBlockSkipCount`（`getNormalizationStats()` 快照访问器，无别名）。计数 delta 放在 `StagedPage` 上、在 `commitStaged` 于 writer 提交后合并（与 index deltas 同构，LOCK-D9）——初始 0，回滚/拒绝页绝不泄漏；finalize 后稳定。编排器（`chatDbImport/index.ts` completeCandidate）在**全部 candidate-completion 成功 gate 之后**（source stats 比对、candidate seal、candidate-ready transition、ready callback 全部通过——即 finalize 之后的最新自然成功点）读取聚合值并**恰好一次**发出 `logger.warn`：每非零类别一条，或两类别（topicId 规范化 + 孤儿跳过）均 >0 时一条**合并** warning；source-stats 不匹配 / seal 失败 / ready callback 失败 / 重试的候选完成**绝不**发 warning；verification/promotion 为独立阶段，本 warning 仅作为 candidate-projection canonicalization 证据而非全量导入成功。内容仅含 session/run 上下文 + 聚合计数 + 非内容陈述：**无 topic/message/block ID、名称、内容、路径、源值** |
+| **Source vs candidate 计数语义** | `SourceReadStats.blockRecordCount` **保持 125**（源行分页，含跳过行）；`CandidateImportStats.blockCount` / import manifest（`manifest.blocks.count` + 逐 id digest）/ block hashes **保持 120**（reachable-only）——manifest 与 verifier 自动 reachable-only 因为被跳过行从不 staging；`DataPlaneNormalizationStats.unreachableBlockSkipCount` = 5 |
+| **Hash / verifier 一致** | source manifest、candidate 写入、candidate verifier 全部消费同一 reachable-only 投影；集成测试证明 plane → finalize → manifest → sealed candidate → verifier 13 维度全过（见「最终验证证据」） |
+| **实现位置** | `src/main/services/chatDbImport/importDataPlane.ts`（`projectBlocksPage` 分类跳过 + source-seen registry + `DataPlaneNormalizationStats` + 访问器 + 事务性计数）、`src/main/services/chatDbImport/index.ts`（合并 warning）、测试：`__tests__/importDataPlane.test.ts`、`__tests__/index.test.ts`（loggerService mock）、`verification/__tests__/candidateVerifier.test.ts`（全链集成）。**shared DTO 未扩展**（`SourceReadStats`/`CandidateImportStats` 不变）；Main/shared 全局校验未放宽 |
+| **不变量保持** | LOCK-ABI-1…10 / LOCK-D1…D11 / LOCK-4301…4305 / LOCK-OWN-1/2 全部继续有效；**LOCK-OWN-3 已履行（见残余边界）**；原始 ZIP / profiles 未触碰（重跑仅读取，ZIP 不可变：size 1056109、mtime/inode/mode 不变）；当前 binding 为 Electron ABI 145（native:check:electron PASS，binding hash 不变，未 rebuild） |
+
+##### 最终验证证据
+
+| 测试 | 结果 |
+|---|---|
+| `importDataPlane.test.ts`（聚焦，real better-sqlite3） | PASS：125/120/5 fixture（20 messages × 6 blocks = 120 引用 + 5 孤儿）——source 125 / candidate 120 / skip 5 / manifest blocks 120 无孤儿 id / candidate DB 恰 120 行 / 孤儿 file payload 不产生引用；未引用 + 已存在 claimed message → `OWNERSHIP_MISMATCH`；重复孤儿行页内/跨页 → `DUPLICATE_RELATION`；无效 id/messageId → INVALID_ROW 先于跳过；DB 约束回滚页不计数、不污染 source-seen registry（孤儿可重试）；原始行不突变 |
+| `candidateVerifier.test.ts`（LOCK-BLOCK-1 全链集成） | PASS：plane → finalize → manifest → seal → verifier 13 维度全过；manifest blocks 120 / file refs 0（孤儿 file payload 忽略）；candidate DB 恰 120 行无孤儿 id |
+| `index.test.ts`（LOCK-BLOCK-2 日志） | PASS：仅孤儿跳过 >0 → **恰好 1 条** warn（聚合计数 5）；两类别均 >0 → **恰好 1 条合并** warn（计数 2 与 5，即原始 ZIP 预期聚合证据）；count=0 → 无 warn；finalize 失败 → 无 warn；warn 单字符串参数、精确模板、无 ID/内容/路径/源值 |
+| `verificationBenchmark.integration.test.ts`（10k 回归） | PASS：既有 10k 全链证据保持；无回归 |
+| `importBenchmark.integration.test.ts`（10k candidate） | PASS：既有 10k candidate 证据保持；无回归 |
+| Main typecheck / 聚焦 lint / format / `git diff --check` | PASS（见会话验证结果） |
+| binding / ABI | `native:check:electron` PASS（Electron 41.2.1 ABI 145）；binding hash 未变；未 rebuild |
+| **原始真实 ZIP 导入 harness 重跑（definitive，fresh ABI145 build）** | **PASS 1/1 38.9s**：source `message_blocks` 125（源行分页）→ skipped 5（不可达孤儿）→ candidate blocks 120；candidate/live topics 25 / messages 107 / blocks 120 / segments 6 / memberships 16 / fileRefs 4；topicId normalized 2；**恰好一条合并 count-only warning（topicId 2 + 孤儿跳过 5）**；`integrity_check` ok / `foreign_key_check` 空；无 orphan parent / 重复 / cross-topic 链接；snapshot（topics 2 / messages 1 / blocks 1）保留 baseline 且排除导入源；journals/staging 无残留；candidate shells 空；original PID exit / relaunch exact-token 清理；ZIP 不可变（size 1056109、mtime/inode/mode 不变）；binding（ABI 145，hash `48191d9b…`）/ git 未变 |
+
+##### 残余边界与风险
+
+| 边界 | 说明 |
+|---|---|
+| **LOCK-BLOCK-3：原始真实 ZIP 重跑 PASS（已履行）** | 失败链为历史事实（chronology 保留，见「发现与历史事实」）；本修复后原始 ZIP 由导入 harness **重跑 PASS 1/1（38.9s，fresh ABI145 build）**——source 125 / skipped 5 / candidate 120、integrity ok / FK 空、无孤儿/重复/cross-topic 链接。**仅对本 artifact 履行**；strict residuals（声称已存在 message 的未引用行 `OWNERSHIP_MISMATCH`、owner 不匹配、重复 id 含孤儿、finalize 缺失引用 block）保持严格不变 |
+| **精确跳过谓词** | 仅跳过「block id 未被引用 且 claimed messageId 不存在」的源行；声称已存在 message 的未引用行、引用 owner 不匹配、重复 id（含孤儿）、finalize 缺失引用 block 全部保持严格 |
+| **跳过时机** | 源投影时跳过，从不写后删除；无 archive/schema 变更；不推断 attachment/sort order；原始源行不突变 |
+| **计数事务性** | 计数与 source-seen registry 仅在整页验证 + 提交成功后合并；拒绝/回滚页不泄漏、不污染 |
+| **No product boundary change** | L2/L3 产品语义（LOCK-6001）、replace-all（LOCK-6002）、隔离 import renderer 保留（LOCK-6023）不变 |
+| **Platform scope** | macOS-only（A-9）；Windows/Linux 未验证（不变） |
+| **Full gates** | 本实现会话执行聚焦验证（未运行 rebuild / 全量测试 / E2E / commit / push） |
 
 #### Phase 6 Decision Locks（LOCK-6001…6036）
 
@@ -1320,7 +1428,11 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-31** | **Phase 6 交付收尾（closure）** | **本地 closure 完成（Done）**：B-class `import-cherrystudio-genuine.spec.ts` 1/1 PASS（fresh ABI145 build 后精确标准 Playwright 命令；host ABI137 恢复）；A-class 未重跑（历史证据，LOCK-MD2）；六个交付阻塞项修复（LOCK-MD5）；本地 gates 全 PASS（CI=true lint 0 errors；CI=true test 312 文件 / 7009 通过 / 72 跳过 / 0 失败，LOCK-MD6）；C-4/C-5/C-7 parked（LOCK-MD7）；独立 artifact audit pass-with-nonblocking；**push/remote CI 事实（LOCK-MD8，post-push 填写）**——分支已推送（remote SHA `89803503fc...`，upstream `origin/jorkey/refactor/sqlite-migration` 建立）；GitHub Actions runs for this branch = 0（**未运行/无 run**，非失败、非 green CI）；ci.yml push trigger 仅 `main`/`v1`、无 PR、无手动 dispatch；no-console baseline 注释为 resolved（LOCK-MD9） |
 | **2026-08-01** | **Post-closure 发现：L2 dev-origin 兼容性缺口** | Phase 6 closure 后发现 L2 导入管线 dev-origin 兼容性缺口：Cherry Studio ZIP 从 electron-vite dev 模式生成时 IndexedDB 为 `http_localhost_5173.indexeddb.leveldb`（dev origin）；ZIP intake（R-12）正确接受，但隔离 import renderer 固定通过 `file://` 协议加载，Chromium 将 `file://` origin 映射为 `file__0.indexeddb.leveldb`，discovery 失败（`[DISCOVERY_FAILED] CherryStudio database not found in isolated IndexedDB`）。failure 发生在 candidate DB 初始化/promotion 之前，live chat.db 不受影响。Phase 0–6 Done 状态不变；此为 closure 后兼容性修正项，非 Phase 7。B-class E2E 使用 production-format fixture（`file__0`），不受影响 |
 | **2026-08-02** | **Post-closure L2 dev-origin 兼容性实现完成（LOCK-DEV-1…8）** | 精确 `http://localhost:5173` dev-origin 已在 L2 导入管线中实现。Chromium 41.2.1 自然将精确 `http://localhost:5173` 映射为 `IndexedDB/http_localhost_5173.indexeddb.leveldb`，与 `file://` origin 隔离。Trusted URL 为 app-owned exact constant（`http://localhost:5173/src/windows/chatImport/chatImport.html`，LOCK-DEV-1）。Main intake 分类精确 file__0/dev 映射并在 IPC/窗口/candidate 之前拒绝不支持/歧义/多个 origin（LOCK-DEV-3）。Renderer 验证精确 dev origin/path/no-search/no-hash；最终验证重构 application-owned exact URL fields（LOCK-DEV-4…5）。Pipeline/state/cancel/promotion 语义不变。Real Chromium E2E fixture 自然生成无需 rename（LOCK-DEV-6）。Dev E2E PASS 1/1 51.2s；genuine file-origin PASS 1/1 53.4s；state chain discovering→candidate-ready→verified-candidate→promoting→finalizing；4 records；original exit/relaunch exact cleanup。Fresh build pass；Electron ABI145 proven；host restored Node v24.12.0 ABI137（LOCK-DEV-7…8）。Focused main 82 files/2309 pass/72 skip。Phase 0–6 Done 状态不变；非 Phase 7。文档更新：top-level 状态注释、A-8 Origin 支持边界、Phase 4.1 Origin 支持边界、post-closure section 转为实现记录、LOCK-DEV-1…8 决策锁 |
-| **2026-08-02** | **Post-closure L2 explicit-undefined JSON wire 兼容性修复完成（LOCK-N2/N3/N5/N6/N8/N11 + LOCK-C2/C3/C4 + LOCK-F2/F3）** | 原始真实 dev-origin ZIP 首次导入在 candidate init 后因 `topics[0].messages[0].mentions` 显式 `undefined` 失败（upgradeToV7 structured-clone 行形态）；Chromium IndexedDB structured clone 保留显式 undefined own-properties，JSON wire 不允许 undefined。修复：依赖中立 renderer 工具 `src/renderer/src/utils/jsonWire.ts`（`cloneForWire`，LOCK-N2/N3），`SqliteMessageDataSource` 复用（LOCK-N5），import 页行在 `entryPoint.ts` `handleReadPage` 于 `toArray()` 后、IPC 前归一化（LOCK-N6）；Main/shared validators 未改。自动化验证（fresh Electron ABI145 build）：dev-origin E2E 1/1 PASS 55.6s；genuine file-origin E2E 1/1 PASS 51.8s（origin 非回归）；13/13 explicit undefined own-properties 经真实 Chromium IndexedDB readback 存活（hasOwnProperty/valueIsUndefined 均 true，LOCK-N8/N11/F2/F3）；两 flow 均达 candidate-ready→verified-candidate→promoting→finalizing；original exited；live DB 含 source 非 baseline、rollback snapshot 含 baseline 非 source；promotion artifacts/processes/ports/workspaces 已清理；host ABI137 恢复。独立审计 pass。**原始真实用户 ZIP 尚未在修复后重跑，不得声称成功**；全量最终验证完成（Node v24.12.0 ABI137 / pnpm 10.27.0）：`pnpm format` exit 0（1803 files，4 个预期文件首次 pass 被格式化、二次 pass clean）；`CI=true pnpm lint` exit 0 / 0 errors / 76 oxlint + 4 ESLint pre-existing warnings / node/web/aicore typecheck + i18n 通过；最终有效 `CI=true pnpm test` exit 0 / 318 files / 7148 passed / 72 skipped / 0 failed / 309.41s（初始全量 run 的单一 parseDataUrl <10ms timing failure 经 focused rerun 确认 flaky、由最终 clean 全量 run 取代）。Phase 0–6 Done 状态不变；非 Phase 7。文档更新：top-level 状态注释、post-closure section 新增本修复记录、LOCK-N2/N3/N5/N6/N8/N11 + LOCK-C2/C3/C4 + LOCK-F2/F3 决策锁 |
+| **2026-08-02** | **Post-closure L2 explicit-undefined JSON wire 兼容性修复完成（LOCK-N2/N3/N5/N6/N8/N11 + LOCK-C2/C3/C4 + LOCK-F2/F3）** | 原始真实 dev-origin ZIP 首次导入在 candidate init 后因 `topics[0].messages[0].mentions` 显式 `undefined` 失败（upgradeToV7 structured-clone 行形态）；Chromium IndexedDB structured clone 保留显式 undefined own-properties，JSON wire 不允许 undefined。修复：依赖中立 renderer 工具 `src/renderer/src/utils/jsonWire.ts`（`cloneForWire`，LOCK-N2/N3），`SqliteMessageDataSource` 复用（LOCK-N5），import 页行在 `entryPoint.ts` `handleReadPage` 于 `toArray()` 后、IPC 前归一化（LOCK-N6）；Main/shared validators 未改。自动化验证（fresh Electron ABI145 build）：dev-origin E2E 1/1 PASS 55.6s；genuine file-origin E2E 1/1 PASS 51.8s（origin 非回归）；13/13 explicit undefined own-properties 经真实 Chromium IndexedDB readback 存活（hasOwnProperty/valueIsUndefined 均 true，LOCK-N8/N11/F2/F3）；两 flow 均达 candidate-ready→verified-candidate→promoting→finalizing；original exited；live DB 含 source 非 baseline、rollback snapshot 含 baseline 非 source；promotion artifacts/processes/ports/workspaces 已清理；host ABI137 恢复。独立审计 pass。**原始真实用户 ZIP 为历史失败点（explicit undefined 为失败链第 ① 步）；当时尚未重跑——该「不得声称成功」语句为 chronology，已由「原始真实 ZIP 重跑 PASS（2026-08-02）」条目履行**；全量最终验证完成（Node v24.12.0 ABI137 / pnpm 10.27.0）：`pnpm format` exit 0（1803 files，4 个预期文件首次 pass 被格式化、二次 pass clean）；`CI=true pnpm lint` exit 0 / 0 errors / 76 oxlint + 4 ESLint pre-existing warnings / node/web/aicore typecheck + i18n 通过；最终有效 `CI=true pnpm test` exit 0 / 318 files / 7148 passed / 72 skipped / 0 failed / 309.41s（初始全量 run 的单一 parseDataUrl <10ms timing failure 经 focused rerun 确认 flaky、由最终 clean 全量 run 取代）。Phase 0–6 Done 状态不变；非 Phase 7。文档更新：top-level 状态注释、post-closure section 新增本修复记录、LOCK-N2/N3/N5/N6/N8/N11 + LOCK-C2/C3/C4 + LOCK-F2/F3 决策锁 |
+| **2026-08-02** | **Post-closure L2 遗留 Dexie 嵌入消息 topicId 归属规范化完成（LOCK-OWN-1/2）** | `importDataPlane.ts::projectTopicsPage` 保留 `requireNonEmptyString` 前置校验；仅对「有效非空字符串但与外层 `topic.id` 不一致」的嵌入 `message.topicId` 计数并规范化：`wireToMessage` 后始终投影外层 topicId（LOCK-OWN-1：外层 Topic 包含关系权威；消息不移动到其声称的 topic；原始 JsonObject 不突变）。缺失/空/类型非法与全部其他 ownership 校验（重复 ID、block owner、segment membership、file-reference）保持严格。Main-only `DataPlaneNormalizationStats.topicIdNormalizationCount` 快照访问器 + StagedPage delta 事务性合并（LOCK-D9 语义：回滚/拒绝页不泄漏；finalize 后稳定）；编排器 finalize 后恰好一次 count-only `logger.warn`（LOCK-OWN-2：无 ID/内容/路径/源值）。shared DTO 未扩展、Main/shared 全局校验未放宽。只读诊断：25 topics / 107 messages，恰好 2 条有效字符串不一致、0 缺失/空/非法、无重复 message ID（LOCK-OWN-3：仅计数与无重复事实，无完整 ID）。**原始真实 ZIP ownership 失败为历史事实（chronology）；LOCK-OWN-3 已由「原始真实 ZIP 重跑 PASS（2026-08-02）」条目履行——harness 重跑 PASS 1/1（38.9s，fresh ABI145 build），topicId normalized 2**。聚焦验证：importDataPlane / index（loggerService mock）/ candidateVerifier 全链集成 / verificationBenchmark 10k 回归 / Main typecheck / 聚焦 lint+format+git-diff 全 PASS；`native:check:electron` PASS（ABI 145，binding hash 不变，未 rebuild）；未 commit / 未 push（当日快照；当前三分类见 §17 远程 CI 行）。文档更新：top-level 状态注释、post-closure section 新增本实现记录、LOCK-OWN-1/2/3 决策锁 |
+| **2026-08-02** | **Post-closure L2 不可达孤儿 block 规范化完成（LOCK-BLOCK-1/2/3）** | `importDataPlane.ts::projectBlocksPage` 在**源投影边界**跳过不可达孤儿 `message_blocks` 行——当且仅当 (a) block id 不在任何导入 message.blocks[] 注册表（`blockOwnerById` 无 owner）且 (b) 声称的 `messageId` 不在任何导入消息（`messageTopicById` 无该 message）。**跳过发生在投影时，从不写后删除**；被跳过行不产生 MessageBlockData / file references / manifest 行 / writer 插入 / seen 标记。声称已存在 message 的未引用行仍严格 `OWNERSHIP_MISMATCH`；引用 owner 不匹配、重复 source block id（含被跳过孤儿，页内/跨页，经事务性 `sourceSeenBlockIds` registry）、cross-message 引用、finalize `MISSING_BLOCKS` 全部保持严格。Main-only `DataPlaneNormalizationStats.unreachableBlockSkipCount` 快照访问器 + StagedPage delta 事务性合并（LOCK-D9 语义：回滚/拒绝页不泄漏、source-seen 不污染）；编排器 finalize 后恰好一次 count-only `logger.warn`（LOCK-BLOCK-2：每非零类别一条或两类别合并一条；仅 session 上下文 + 聚合计数，无 ID/内容/路径/源值）。`SourceReadStats.blockRecordCount` 保持 125（源行分页）；`CandidateImportStats.blockCount` / import manifest / block hashes 保持 120（reachable-only；manifest 与 verifier 自动 reachable-only 因跳过行从不 staging）。shared DTO 未扩展、无 archive/schema 变更。只读诊断精确聚合：25 topics / 107 messages；嵌入引用 120 不同 id；源行 125；120 引用各恰好一次且 messageId 匹配；**5 未引用孤儿全部声称不存在 messageId**；0 无效/重复/wrong-owner/multi-message/缺失引用。**原始真实 ZIP 失败链（explicit undefined → false shared-ref cycle → topicId mismatch → 孤儿 block 严格拒绝 → approved canonicalizations）为历史事实（chronology）；LOCK-BLOCK-3 已由「原始真实 ZIP 重跑 PASS（2026-08-02）」条目履行——harness 重跑 PASS 1/1（38.9s，fresh ABI145 build），source 125 / skipped 5 / candidate 120**。聚焦验证：importDataPlane（125/120/5 fixture、严格矩阵、回滚事务性）/ index（loggerService mock：skip-only 与合并 warning）/ candidateVerifier 全链集成 13 维度 / verificationBenchmark + importBenchmark 10k 回归 / Main typecheck / 聚焦 lint+format+git-diff 全 PASS；`native:check:electron` PASS（ABI 145，binding hash 不变，未 rebuild）；未 commit / 未 push（当日快照；当前三分类见 §17 远程 CI 行）。文档更新：top-level 状态注释、post-closure section 新增本实现记录、LOCK-BLOCK-1/2/3 决策锁、LOCK-OWN-3 失败链更新 |
+| **2026-08-02** | **原始真实 ZIP 重跑 PASS（LOCK-OWN-3 / LOCK-BLOCK-3 履行，definitive evidence）** | 原始真实用户 ZIP 经导入 harness 在 fresh Electron ABI145 build 后重跑 **PASS 1/1（38.9s）**。ZIP 以隐私安全角色描述（不记录绝对用户路径）；不可变证据：size 1056109、mtime/inode/mode 不变（MD5 一致）。status chain discovering→candidate-ready→verified-candidate→promoting→finalizing；candidate/live 计数 topics 25 / messages 107 / blocks 120 / segments 6 / memberships 16 / fileRefs 4；source blocks 125 / skipped 5（不可达孤儿）；topicId normalized 2；**恰好一条合并 count-only warning（topicId 2 + 孤儿跳过 5）**；original PID exit / relaunch exact-token 清理；`integrity_check` ok / `foreign_key_check` 空；无 orphan parent / 重复 / cross-topic 链接；snapshot（topics 2 / messages 1 / blocks 1）保留 baseline、排除导入源；journals/staging 无残留；candidate shells 空；ZIP / binding（ABI 145，hash `48191d9b…`）/ git 全部未变。历史失败链以 PASS 终结：explicit undefined → false shared-ref cycle → topicId mismatch → orphan block strict rejection → approved canonicalizations → **PASS**。LOCK-OWN-3 / LOCK-BLOCK-3 及 explicit-undefined「未重跑/不得声称成功」残余仅对本 artifact 履行；strict residuals（缺失/空/非法 topicId、未引用+已存在 message 行、owner 不匹配、重复 id 含孤儿、finalize 缺失引用 block）保持严格；canonicalization 仅限 L2 导入管线（LOCK-6001/6002/6023 不变）。**无远程 CI 声明；未 commit / 未 push（当日快照；当前三分类见 §17 远程 CI 行）**。文档更新：top-level 状态注释、LOCK-OWN/LOCK-BLOCK/explicit-undefined post-closure 小节残余与最终验证证据、§17 关闭证据、决策日志 |
+| **2026-08-03** | **最终交付验证（latest-source authoritative closure，active final）** | 在最新源上完成最终交付验证：`pnpm native:rebuild:node` exit 0 + 独立 Node ABI137 SQL PASS；`pnpm format` exit 0 无改动；`CI=true pnpm lint` exit 0 / 0 errors / 76 oxlint + 4 ESLint pre-existing warnings / node/web/aicore typecheck + i18n 通过；`CI=true pnpm test` exit 0 / **319 files / 7274 passed** / 72 skipped / 0 failed / 449.99s（active final closure；2026-08-02 explicit-undefined 318/7148 与 staged-validation 319/7230 保持为历史计数，时间顺序保留）；`pnpm native:rebuild:electron` exit 0 + 独立 Electron 41.2.1 ABI145 SQL PASS；`pnpm build` exit 0 / built 9.02s；标准 E2E：ordinary-chat 1/1 37.5s / genuine 1/1 67.5s / dev-origin 1/1 59.7s；原始真实 ZIP harness latest build PASS 1/1 **41.9s**（candidate/live 25/107/120/6/16/4；topicId normalized 2 / orphan skipped 5 / 恰好一条合并 count-only warning；integrity/FK/snapshot/relaunch/cleanup PASS；ZIP 未变；final ABI145 hash `48191d9b…`）；最终 node_modules 状态 Electron ABI145；远程 CI 三分类无变化（无新 commit/push/PR 声明）。仅更新本文档（docs-only）；未 commit / 未 push。文档更新：§17 最终交付验证（2026-08-03）active closure 表 + 历史计数/定时区分、top-level 状态注释 |
 
 ---
 
@@ -1394,3 +1506,145 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 |---|---|---|
 | `src/renderer/src/services/db/routingPolicy.ts` | **Phase 5.3 已移除（C-13）** | 临时验证用路由策略注入，Phase 5.3 权威切换时删除 |
 | `src/renderer/src/services/db/DexieMessageDataSource.ts` | **Phase 5.3 从普通路径移除（C-11）** | 仅保留于隔离 import renderer 内部 |
+
+---
+
+## 17. 原生 ABI 管理契约（post-closure，2026-08-02）
+
+> **定位**：Phase 6 closure 与 L2 explicit-undefined 修复之后实现（2026-08-02）的**仓库级原生 ABI 管理工具化**：把单一 better-sqlite3 binding 的 Node ABI137 ↔ Electron ABI145 状态变为显式、确定性、由真实运行时 SQL 验证、并在工作流边界 fail-fast。**不是 Phase 7**，不重开 Phase 0–6。Phase 0–6 Done 状态不变。
+
+### 单一 binding 限制（LOCK-ABI-1 / LOCK-ABI-9）
+
+仓库只有**一个** native module：`better-sqlite3@12.11.1`。它的编译产物在同一时刻只可能是 **Node24 ABI 137** 或 **Electron 41.2.1 ABI 145** 之一，不可能同时满足两者。因此：
+
+- Node 单元测试/typecheck/format/lint 全量 gates 需要 **Node ABI137** binding；
+- `pnpm dev` 与 Playwright E2E 需要 **Electron ABI145** binding；
+- 切换只能通过显式命令（LOCK-ABI-3），preflight **永不自动 rebuild**（LOCK-ABI-4）。
+
+### 命令面（`scripts/native-abi/`）
+
+| 命令 | 行为 |
+|---|---|
+| `pnpm native:check:node` | 只读；要求当前 Node ≥24.11.1 且 ABI137；校验 resolved better-sqlite3 **精确 12.11.1**；打印 runtime name/version/ABI/platform/arch、better-sqlite3 package realpath、实际 resolved binding path（`compiled/<node runtime version>/…` 候选使用目标 runtime 的 Node 版本，非 package 版本）；真实 `Database(':memory:')` + `select 1 as ok` + close；失败给出修复或依赖 remediation |
+| `pnpm native:check:electron` | 只读；要求 darwin arm64 + Electron 精确 41.2.1 + ABI145；校验 resolved better-sqlite3 精确 12.11.1；通过 `ELECTRON_RUN_AS_NODE=1` 以安装的 Electron 可执行文件运行仓库自有 probe（`scripts/native-abi/probe.cjs`），保留 child stdout/stderr 与 exit code，失败时仍报告 probe 运行时事实与 resolved binding path。**LOCK-ABI-2 加固**：probe 生产模式硬编码 resolved `better-sqlite3` 模块合同（`NATIVE_ABI_PROBE_MODULE` 仅在该探针的显式 test-seam gate 下生效），且 `spawnElectronProbe` 在 spawn 前**显式删除** `NATIVE_ABI_PROBE_MODULE` 与 test-seam 变量——继承的恶意环境无法重定向真实运行时 SQL 证明 |
+| `pnpm native:rebuild:node` | 显式 node-gyp source build（仅 better-sqlite3 realpath，`--nodedir` 指向已验证 Node 的头文件，`nodeDirFromExecPath` 必须证明 `<prefix>/include/node/node.h` 存在——缺失时在 spawn 子进程前以精确错误 fail precondition，绝不 fallback）；**child env 已 sanitize（LOCK-ABI-5/7）**：剥离全部 target-affecting npm/node-gyp 变量（runtime/target/target_arch/arch/dist_url/nodedir/devdir/electron_version/build_from_source 及大小写 `npm_config`/`NPM_CONFIG` 变体）并显式注入已验证 arch/platform/`--arch`/`--nodedir`/`--platform` 受控参数，保留 proxy/compiler 变量；前置校验 Node/ABI/execPath/pnpm10.27.0/PATH + 依赖版本精确 12.11.1；自动执行 `native:check:node` 并失败即停；清理（marker/stale bin）失败使 rebuild 结果 FAIL（不吞错） |
+| `pnpm native:rebuild:electron` | 显式 `@electron/rebuild` API（`force=true`、`buildFromSource=true`、`onlyModules=['better-sqlite3']`、sequential、显式 resolved buildPath/projectRootPath）；前置校验同上 + darwin arm64 + Electron 41.2.1；自动执行 `native:check:electron` 并失败即停 |
+
+### 依赖版本强制（LOCK-ABI finding A）
+
+`check` 与 `rebuild` 都在准备阶段校验 resolved `better-sqlite3` 版本**精确等于**锁定常量 `12.11.1`（与 `package.json`/`pnpm-lock.yaml` 的 exact pin 一致）。版本不匹配时：
+
+- 以**依赖 remediation** 失败（`package.json` 精确 pin + 重新 `pnpm install`），**绝不声称 native rebuild 可以修复**依赖版本不匹配（`repair:` 不会打印 rebuild 命令）；
+- `rebuild` 在任何构建动作前 fail-fast，不触碰 marker/binding。
+
+### 验证只认真实运行时 SQL（LOCK-ABI-2）
+
+成功仅由目标 runtime **实际创建** `Database(':memory:')`、执行 `select 1 as ok`、关闭数据库证明。`.forge-meta` 标记、目录/文件名**永不**作为成功证据。checks 完全不读 marker（报告固定 `marker: ignored`）。
+
+Probe 诚实性（finding D）：Node 与 Electron probe 均在 `finally` 中关闭已打开的 `Database`（错误路径不泄漏）；SQL 结果不为 `ok:1` 时 child 输出 `ok:false`/`sqlOk:false` 并**非零退出**（绝不 `ok:true`/exit 0）；主要错误与 close 错误都保留在输出中。
+
+诊断可见性（finding H，2026-08-02 修正后）：check 报告结构化保留并格式化显示 probe close 错误（`probe close:`，Node 与 Electron 均**叠加**在主错误之上、不覆盖主错误）与 Electron child 退出码（`probe exit:`）；Electron 失败详情恒包含显式 `Probe exit code: N` 行与 `Electron probe close error: …` 行（不只在自由文本中埋没）。
+
+### Marker 安全（LOCK-ABI-6，finding C）
+
+- rebuild 前捕获 marker 状态并报告（before-state 保留）；
+- rebuild 失败或自动 post-check 失败 ⇒ 移除任何可能宣称成功的 `.forge-meta`；**移除失败作为可观测错误保留在报告中**（绝不吞错），rebuild 结果恒为 FAIL；
+- 成功路径上的 stale marker / stale `bin/darwin-arm64-*` 清理失败同样使 rebuild FAIL；**可选 stale 目录不存在不是错误**（不因缺席误失败）；
+- **目录枚举失败（finding H，2026-08-02 修正后）**：`listDir` 将 ENOENT（可选目录缺失）视为空目录，但 **EACCES 等其他枚举错误是可观测失败**——marker build 目录枚举失败使 rebuild 在任何构建动作前 fail-fast（`marker enumeration failed`），stale `bin/` 目录枚举失败使成功 rebuild 结果转为 FAIL（`post-rebuild cleanup failed`），绝不把枚举失败误当作空目录后报告成功；
+- 工具从不手工写成功 marker；成功的 Electron rebuild 可能留下 tool-written marker，但文档声明其**非权威**（non-authoritative）；
+- 成功 Node rebuild 会移除 stale Electron marker 与 stale `bin/darwin-arm64-145/` 拷贝，避免误导性状态。
+
+### Node → Electron 验证顺序（fail-fast）
+
+```text
+pnpm native:rebuild:node      # 切到 Node ABI137（自动 native:check:node）
+pnpm test / pnpm ci:test-check # 最外层 preflight native:check:node 一次
+pnpm native:rebuild:electron  # 切到 Electron ABI145（自动 native:check:electron）
+pnpm start / pnpm dev / pnpm test:e2e  # preflight native:check:electron 一次
+```
+
+Preflight 调用图（finding F/G，2026-08-02 修正后）：
+
+- **Electron preflight 一次**：`pnpm start`、`pnpm dev`、`pnpm dev:watch`、`pnpm debug`、`pnpm test:e2e`；
+- **Node preflight 一次**：`pnpm test`、`pnpm test:coverage`、`pnpm test:watch`、`pnpm test:ui`、`pnpm bench`、`pnpm ci:test-check`；
+- **focused 子套件（`test:main`/`test:renderer`/`test:aicore`/`test:shared`/`test:scripts`/`bench:*`）保持无 preflight（by design）**：聚合入口已 check 一次，CI 在 `ci.yml` 的 `general-test` 与 `render-test` job 中于安装之后、测试之前各加**一个** `pnpm native:check:node` step（focused suites 直接调用时覆盖），避免重复 check；
+- E2E 直接 `pnpm playwright test …` 路径：README 中每个直接示例都先执行**一次** `pnpm native:check:electron`（或使用 `test:e2e` wrapper）；
+- 默认外层 shell 若为 Node22（ABI127），`native:check:node` 以清晰信息失败并给出修复命令——必须以受支持的 Node24 在 PATH 上运行。
+
+### 最终状态报告
+
+每个命令在 PASS/FAIL 时都打印 runtime name/version/ABI/platform/arch（Electron 附带 embedded Node 版本）、package realpath、实际 resolved binding path、SQL 验证结果、marker 状态（check 恒为 ignored）、以及失败时的精确修复命令或依赖 remediation；Electron check 在 probe 已执行时恒打印 `probe exit:` 行，probe 存在 close 错误时打印 `probe close:` 行（finding H）。
+
+### 当前恢复证据（2026-08-02，修正阶段状态）
+
+| 项 | 证据 |
+|---|---|
+| 实现时 binding | Electron ABI145（`build/Release/better_sqlite3.node` 与 `bin/darwin-arm64-145/better-sqlite3.node` SHA-256 均为 `48191d9b…`；`.forge-meta` = `arm64--145`） |
+| `pnpm native:check:electron` | PASS（真实 Electron SQL probe；ABI 145；darwin/arm64；embedded Node 24.14.1） |
+| `pnpm native:check:node`（Node22 shell） | FAIL（ABI 127 / 版本不足），输出 `pnpm native:rebuild:node` 修复命令——按设计 |
+| `pnpm native:check:node`（Node24 + Electron binding） | FAIL（NODE_MODULE_VERSION 145 vs 137），输出修复命令——按设计 |
+| 单元测试（scripts Vitest project） | 全部 PASS，全部注入 fakes + narrow 真实 subprocess probe 覆盖（stub module，ABI 无关），**未**触碰真实 binding；binding 前后哈希一致（read-only） |
+| 静态检查 | `pnpm typecheck:node` PASS；oxlint/eslint/biome clean（仅改动的 ABI 文件）；`git diff --check` PASS |
+| 依赖 pin | `package.json` `"better-sqlite3": "12.11.1"` exact；`pnpm-lock.yaml` importer specifier 同步 `12.11.1`（仅 importer 一行，resolution 不变）；binding 哈希未变 |
+
+### 残余风险
+
+| 风险 | 说明 |
+|---|---|
+| 平台范围 | Electron rebuild/check 当前限定 darwin arm64（LOCK-ABI-5）；其他平台按设计 fail 而非猜测 |
+| Node 头文件 | Node rebuild **必须**以已验证 Node 的 `include/node`（`--nodedir`，`nodeDirFromExecPath` 证明 `<prefix>/include/node/node.h` 存在）构建；本地头文件缺失 ⇒ **在 spawn 任何子进程之前**以精确错误 fail precondition（绝不 fallback 到网络下载或继承的 `npm_config_nodedir`） |
+| 单一 binding | 两个 runtime 共享一个 binding，任何时刻只能服务一个目标；这是 LOCK-ABI-9 接受的架构限制 |
+| 全量 gates | 全量 `pnpm test`/lint/format 需在 Node ABI137 状态下运行（与既有 Phase 5.4/6 全量验证证据一致）；本实现阶段按要求未跑全量 gates |
+
+### 最终分阶段验证 / 关闭证据（2026-08-02 追加，distinct staged-validation closure）
+
+> **定位**：本小节是 §17 的**最终分阶段验证与关闭证据**（final staged validation / closure），**不重写**上述历史证据，也不重写第 15 节进度日志 / 顶部状态注释中的 explicit-undefined closure 计数（Node v24.12.0 ABI137：318 files / 7148 passed / 72 skipped / 0 failed，2026-08-02 当时）。此处按时间顺序**追加**最终分阶段验证事实，并记录 stale-bin 递归清理的边界加固（removeDir 与 removeFile 同契约）与关闭状态。下方表格为 **2026-08-02 staged-validation 历史证据**（其中 7230 计数、E2E 31.2s/53.5s/54.5s 与 ZIP 38.9s 均以日期限定为历史运行）；**当前有效最终计数 319 files / 7274 passed 与最新 E2E / ZIP 定时记录于本小节末尾「最终交付验证（2026-08-03）」**。仍**不是 Phase 7**；Phase 0–6 Done 状态不变。
+
+| 项 | 最终事实 |
+|---|---|
+| **最终 binding 状态（最终验证）** | **Electron ABI145**：`build/Release/better_sqlite3.node` 与 `bin/darwin-arm64-145/better-sqlite3.node` SHA-256 **均为 `48191d9b…`**；`.forge-meta` = `arm64--145`；`native:check:electron` PASS（Electron 41.2.1 / embedded Node 24.14.1 / ABI 145 / darwin arm64 / 真实 SQL probe `Database(':memory:')`+`select 1 as ok`+close / probe exit 0 / marker ignored） |
+| **Node 24.12.0 ABI137 rebuild** | exit 0；marker 零（无成功 marker 遗留）；`pnpm format` exit 0（1 个文件被修复，身份未指明）；`pnpm lint` exit 0（仅 pre-existing warnings） |
+| **最终 clean 全量测试（2026-08-02 staged-validation，历史证据）** | 319 files / **7230 passed** / 72 skipped / 0 failed；active final closure 为 2026-08-03 的 319 files / **7274 passed**（见本小节末尾「最终交付验证（2026-08-03）」） |
+| **Electron rebuild（ABI145 恢复）** | exit 0，`onlyModules=['better-sqlite3']`（仅 better-sqlite3 被重建）；随后 `native:check:electron` PASS（同上）；`pnpm build` PASS |
+| **标准 disposable dev-origin E2E（2026-08-02 历史运行；fresh ABI145 production build、一次性 profile）** | **PASS**：`ordinary-chat.spec.ts` 1/1 31.2s；`import-cherrystudio-genuine.spec.ts` 1/1 53.5s；`import-cherrystudio-dev-origin.spec.ts` 1/1 54.5s，13 个显式 undefined properties 经真实 Chromium IndexedDB readback 存活；2026-08-03 latest 定时（37.5s / 67.5s / 59.7s）见本小节末尾「最终交付验证（2026-08-03）」 |
+| **原始真实用户 dev ZIP（2026-08-02 历史 rerun；latest definitive 见 2026-08-03）** | **已重跑 PASS**（导入 harness 1/1，38.9s，fresh ABI145 build，2026-08-02 历史运行）；路径保持隐私安全角色描述（redact，不记录绝对用户路径）；不可变证据：size 1056109、mtime/inode/mode 不变（MD5 一致）；binding hash `48191d9b…` 前后一致、git 未变。此前「未搜索/未读取/未重跑」语句为该 ZIP 在 explicit-undefined closure 时的 chronology，已由本次重跑 PASS 履行（LOCK-OWN-3 / LOCK-BLOCK-3）；与 disposable E2E fixture 证据仍明确区分（fixture 为自动化兼容性证据，此为原始真实用户数据最终证明）。**最新 definitive rerun（2026-08-03，latest fresh ABI145 build）：PASS 1/1 41.9s，见本小节末尾「最终交付验证（2026-08-03）」** |
+| **远程 CI** | **push 时序（三分类，明确区分）**：① **远程已推送 tip**：`3a64da6020`（2026-07-31 `docs(sqlite-migration): record push and workflow facts`，其父恰为 closure push 点 `89803503fc`——远程由 `89803503fc` 推进至 `3a64da6020` 仅因该 push-facts docs commit 被推送；LOCK-MD8 的 2026-07-31 post-push 历史事实保留，upstream `origin/jorkey/refactor/sqlite-migration` 已建立）；② **本地已提交、未推送**（`origin/jorkey/refactor/sqlite-migration`..HEAD 共 8 个 commit）：原 3 个 `1fc19f590c`（docs：post-closure L2 dev-origin 兼容性 findings）、`6b48d33e72`（fix(import)：精确 dev-origin 备份支持）、`6d2db496b1`（fix(import)：JSON wire undefined 归一化），加上本次新增 5 个 commit——`b23c4ff4cb`（feat(native)：ABI 管理工具化，含 `scripts/native-abi/`/CI workflow/依赖/CLAUDE.md）、`81a438b208`（fix(renderer)：JSON wire 共享引用）、`cbc19db426`（fix(import)：遗留 ownership 规范化）、`dbabae7eb8`（test(import)：规范化路径测试覆盖）、本 docs closure commit（`docs/sqlite-migration.md` + `tests/e2e/README.md`，无 SHA）；③ **工作树 clean**（本 docs closure commit 提交后无未提交内容）。对 ② 全部（8 个本地未推送 commit）**均无远程 CI run**（LOCK-MD8：GitHub Actions runs for this branch = 0；ci.yml push trigger 仅 `main`/`v1`；未创建 PR、未手动 dispatch）——不得对 ② 声称远程 CI 成功；本地 gates 证据如上 |
+| **stale-bin 递归清理边界加固（本小节实现）** | `removeDir(p, boundary?)` 现在与 `removeFile` 同契约：parent 组件链（含 `bin` 组件本身）逐一 lstat/realpath 校验，必须落在 resolved package realpath 内；**symlinked `bin` 解析到包外、或 stale 条目是解析到包外的 symlink ⇒ 以可观测错误拒绝**，递归删除不可能经由包路径触及外部树；ENOENT/ENOTDIR 父组件 = 无操作；EACCES 等保留为可观测错误。真实文件系统测试：外部 symlink bin 拒绝、内部合法 stale 目录删除、`..` 路径逃逸拒绝、ENOENT 容忍、悬空 symlink unlink、权限失败可观测。`removeStaleBinDirs` 向 `removeDir` 传入 resolved `packagePath` 作为 boundary |
+
+**锁契约补充（§17 关闭状态）**
+
+- **LOCK-ABI-8（无 fail-soft / 无产品行为掩盖）**：所有清理/边界失败均为**可观测错误**，使 rebuild 结果 FAIL（finding C/H）——绝不静默吞错、绝不弱化产品逻辑。`ChatDbService` fail-soft / chat 逻辑**未修改**（LOCK-ABI-8 保持；本次仅触及 `scripts/native-abi/` 与文档）。
+- **LOCK-ABI-10（用户批准 commit 已执行；仍无 push / PR）**：用户明确批准后，ABI/import/jsonWire/test 累积已本地提交（`b23c4ff4cb` / `81a438b208` / `cbc19db426` / `dbabae7eb8`），本 docs closure 为最后本地 commit——全部**不 push、不创建 PR**。与既有 LOCK-MD8 的 push 时序一致且无歧义：① **远程已推送 tip** `3a64da6020`（2026-07-31 push-facts docs commit，其父为 closure push 点 `89803503fc`）不变；② **本地已提交、未推送** 共 8 个 commit（原 `1fc19f590c` / `6b48d33e72` / `6d2db496b1` + 新增 `b23c4ff4cb`（feat(native)）/ `81a438b208`（fix(renderer)）/ `cbc19db426`（fix(import)）/ `dbabae7eb8`（test(import)）/ 本 docs closure commit（无 SHA））；③ 本 docs closure commit 提交后**工作树 clean**。全部本地未推送 commit 的 GitHub Actions runs = 0（push trigger 仅 `main`/`v1`、无 PR、无手动 dispatch）——不虚构任何本地未推送 commit 的远程状态。
+
+**验证补充（本小节关闭验证，session-local）**
+
+- focused native-abi 测试：82/82 PASS（含新增 stale-bin 边界真实文件系统测试）；
+- `pnpm test:scripts`：139 PASS（4 files）；`pnpm typecheck:node` PASS；
+- oxlint 0 warnings / 0 errors、eslint clean、biome format clean（仅改动的 `scripts/native-abi/` 文件）；`git diff --check` PASS；
+- 只读 `pnpm native:check:electron` PASS；binding 哈希**前后一致**（`48191d9b…`，read-only）。
+
+**残余风险（追加）**
+
+| 风险 | 说明 |
+|---|---|
+| TOCTOU（残余，接受） | boundary 校验与 `fs.rmSync` 之间的同步 Node fs API 窗口（目录被换为包外 symlink）作为残余限制接受；`rmSync(recursive)` 从不跟随 symlink，校验过的 parent 链是唯一外部可达路径 |
+| 原始真实用户 ZIP 路径保密 | 路径保持隐私安全角色描述（不记录绝对用户路径）；已由导入 harness 重跑 PASS（1/1，41.9s，2026-08-03 latest fresh ABI145 build；ZIP 不可变：size 1056109 / mtime / inode / mode 不变；2026-08-02 的 38.9s 为历史运行）；与标准 disposable dev-origin E2E fixture 证据明确区分（fixture 为自动化兼容性证据，原始 ZIP 为真实用户数据最终证明） |
+| 历史计数保留 | explicit-undefined closure 的 318/7148（2026-08-02）、staged-validation closure 的 319/7230（2026-08-02）与最终交付验证的 319/7274（2026-08-03，active）计数**并存**（时间顺序追加），互不覆盖 |
+
+### 最终交付验证（2026-08-03 追加，active final closure / latest-source authoritative）
+
+> **定位**：本小节是 §17 的**最新最终交付验证**（active final closure），在 2026-08-02 staged-validation 关闭证据之上，于**最新源（latest source）**重新完成最终交付验证。**不重写**上述历史证据：explicit-undefined closure 的 318/7148（2026-08-02）与 staged-validation closure 的 319/7230（2026-08-02）均为历史计数（时间顺序保留，互不覆盖）；**当前有效最终计数为 319 files / 7274 passed**。最终 node_modules 状态为 **Electron ABI145**（binding hash `48191d9b…`）。仍**不是 Phase 7**；Phase 0–6 Done 状态不变。
+
+| 项 | 最终事实（2026-08-03，latest source） |
+|---|---|
+| **最终 binding / node_modules 状态** | **Electron ABI145**：`build/Release/better_sqlite3.node` 与 `bin/darwin-arm64-145/better-sqlite3.node` SHA-256 均为 `48191d9b…`；`.forge-meta` = `arm64--145`；`native:check:electron` PASS；**最终 node_modules 状态为 Electron ABI145** |
+| **Node rebuild + 独立 SQL 验证** | `pnpm native:rebuild:node` exit 0（自动 `native:check:node` PASS）+ 独立 Node ABI137 SQL 验证 PASS（`Database(':memory:')` + `select 1 as ok` + close） |
+| **format** | `pnpm format` exit 0 无改动 |
+| **lint** | `CI=true pnpm lint` exit 0 / 0 errors / 76 oxlint + 4 ESLint pre-existing warnings / node/web/aicore typecheck + i18n 通过 |
+| **最终 clean 全量测试（active）** | `CI=true pnpm test` exit 0 / 319 files / **7274 passed** / 72 skipped / 0 failed / 449.99s |
+| **Electron rebuild + 独立 SQL 验证** | `pnpm native:rebuild:electron` exit 0（自动 `native:check:electron` PASS）+ 独立 Electron 41.2.1 ABI145 SQL 验证 PASS（真实 Electron SQL probe） |
+| **build** | `pnpm build` exit 0 / built / 9.02s |
+| **标准 disposable E2E（fresh ABI145 production build、一次性 profile）** | **PASS**：`ordinary-chat.spec.ts` 1/1 37.5s；`import-cherrystudio-genuine.spec.ts` 1/1 67.5s；`import-cherrystudio-dev-origin.spec.ts` 1/1 59.7s（2026-08-02 的 31.2s / 53.5s / 54.5s 为历史运行，时间顺序保留） |
+| **原始真实用户 dev ZIP（latest definitive rerun）** | **PASS 1/1（41.9s，latest fresh ABI145 build）**：candidate/live 计数 topics 25 / messages 107 / blocks 120 / segments 6 / memberships 16 / fileRefs 4；topicId normalized 2 / 孤儿 block skipped 5；**恰好一条合并 count-only warning**；integrity / FK / snapshot / relaunch / cleanup 全部 PASS；**ZIP 未变**（size 1056109、mtime/inode/mode 不变，MD5 一致）；final ABI145 binding hash `48191d9b…` 前后一致、git 未变。2026-08-02 的 38.9s 为历史运行（时间顺序保留） |
+| **历史计数保留** | explicit-undefined closure 318/7148（2026-08-02）、staged-validation closure 319/7230（2026-08-02）、**最终交付验证 319/7274（2026-08-03，active）** 三者**并存**（时间顺序追加），互不覆盖 |
+| **远程 CI** | 2026-08-03 docs closure 后更新：① 远程已推送 tip `3a64da6020` 不变；② 本地已提交、未推送共 8 个 commit——原 `1fc19f590c`/`6b48d33e72`/`6d2db496b1` + 新增 `b23c4ff4cb`（feat(native)：ABI 管理工具化）/`81a438b208`（fix(renderer)：JSON wire 共享引用）/`cbc19db426`（fix(import)：遗留 ownership 规范化）/`dbabae7eb8`（test(import)：规范化路径测试覆盖）+ 本 docs closure commit（无 SHA）；③ 本 docs closure commit 提交后工作树 clean。② 全部 8 个本地未推送 commit 均无远程 CI run（GitHub Actions runs for this branch = 0；ci.yml push trigger 仅 `main`/`v1`；未创建 PR、未手动 dispatch）；**无 push / 无 PR / 无远程 CI 变更** |

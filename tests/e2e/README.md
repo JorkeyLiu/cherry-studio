@@ -66,32 +66,69 @@ never from working-tree files, which may include uncommitted or throwaway artifa
    validate old code — never run E2E against a build you did not just produce.
    `pnpm build` = `npm run generate:openapi && npm run typecheck && electron-vite build`.
 
+### Native ABI prerequisites (better-sqlite3)
+
+The repository has a **single native module** (`better-sqlite3`) that is compiled for
+**either** Node24 (ABI 137) **or** Electron 41.2.1 (ABI 145) — never both at once.
+The E2E suite launches the real Electron app, so it requires the **Electron ABI 145**
+binding. Verification is runtime SQL only (`.forge-meta` markers and file names are
+never trusted as proof):
+
+```bash
+pnpm native:check:electron   # read-only: real Database(':memory:') + select 1 + close under Electron
+pnpm native:check:node       # read-only: same probe under Node24 (must be on PATH)
+```
+
+Command ordering / switching (explicit; preflights never rebuild):
+
+```bash
+# Host Node unit tests need the Node binding:
+pnpm native:rebuild:node      # node-gyp source build + automatic native:check:node
+
+# E2E / `pnpm dev` need the Electron binding:
+pnpm native:rebuild:electron  # @electron/rebuild source build + automatic native:check:electron
+pnpm test:e2e                 # preflights native:check:electron once, then runs Playwright
+```
+
+- `pnpm test:e2e` preflights `native:check:electron` once before Playwright launches.
+- If the binding is currently the Node137 build, E2E fails fast with the exact repair
+  command (`pnpm native:rebuild:electron`) instead of silently rebuilding.
+- After E2E, restore the host ABI for Node workflows with `pnpm native:rebuild:node`
+  (see `docs/sqlite-migration.md` for the full contract and recovery evidence).
+
 ### Running (canonical commands via package scripts)
 
 ```bash
 # Full E2E suite
-pnpm test:e2e                     # == pnpm playwright test
+pnpm test:e2e                     # == pnpm native:check:electron && pnpm playwright test
 
-# A single spec file
-pnpm playwright test tests/e2e/specs/app-launch.spec.ts
+# A single spec file (direct path — one read-only Electron preflight first)
+pnpm native:check:electron && pnpm playwright test tests/e2e/specs/app-launch.spec.ts
 
 # Tests matching a name/title
-pnpm playwright test -g "should launch"
+pnpm native:check:electron && pnpm playwright test -g "should launch"
 
 # A directory (e.g. conversation specs)
-pnpm playwright test tests/e2e/specs/conversation
+pnpm native:check:electron && pnpm playwright test tests/e2e/specs/conversation
 
-# HTML report from the last run
+# HTML report from the last run (read-only, no app launch — no preflight needed)
 pnpm playwright show-report
 ```
 
 Debugging-oriented invocations (diagnostic only — see §12):
 
 ```bash
-pnpm playwright test --debug      # open inspector, pause at start
-pnpm playwright test --trace on   # force trace collection for every test
-pnpm playwright test --ui         # Playwright UI mode
+pnpm native:check:electron && pnpm playwright test --debug      # open inspector, pause at start
+pnpm native:check:electron && pnpm playwright test --trace on   # force trace collection for every test
+pnpm native:check:electron && pnpm playwright test --ui         # Playwright UI mode
 ```
+
+The enforced preflight lives in the **`pnpm test:e2e` package wrapper**: it runs
+**one** `pnpm native:check:electron` (read-only) before Playwright launches.
+Direct `pnpm playwright test` invocations are **not** auto-preflighted — the direct
+examples above work because they **explicitly prepend** `pnpm native:check:electron &&`
+themselves (same single read-only check, one per direct invocation). Preflight never
+rebuilds; a Node137 binding fails fast with `pnpm native:rebuild:electron`.
 
 Notes on running:
 
