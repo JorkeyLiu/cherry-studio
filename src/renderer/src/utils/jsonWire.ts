@@ -10,6 +10,11 @@
  *     array elements, cycles.
  *   - Bounded nesting: max depth 20 levels.
  *
+ * Shared non-cyclic references (e.g. one assistant.model object stored on
+ * many messages) are treated like JSON.stringify: each occurrence is
+ * cloned independently, producing duplicated equal-but-independent data
+ * over the wire. Only true ancestor cycles are rejected.
+ *
  * Does NOT use JSON.stringify/parse. Does NOT mutate inputs.
  *
  * Shared by SqliteMessageDataSource (renderer→Main IPC) and the chatImport
@@ -82,23 +87,30 @@ export function cloneForWire<T>(value: T, depth = 0, seen = new WeakSet()): T {
   }
 
   if (Array.isArray(value)) {
-    // Cycle detection
+    // Cycle detection: `seen` tracks only ACTIVE ancestors, so a shared object
+    // referenced by two siblings is cloned twice (JSON.stringify-compatible)
+    // instead of being misread as a cycle. The value is removed in `finally`
+    // so a throwing child can never leave a stale entry behind.
     if (seen.has(value as object)) {
       throw new TypeError('cloneForWire: cyclic reference detected')
     }
     seen.add(value as object)
 
-    const result: unknown[] = new Array(value.length)
-    for (let i = 0; i < value.length; i++) {
-      if (!(i in value)) {
-        throw new TypeError(`cloneForWire: sparse arrays are not allowed (hole at index ${i})`)
+    try {
+      const result: unknown[] = new Array(value.length)
+      for (let i = 0; i < value.length; i++) {
+        if (!(i in value)) {
+          throw new TypeError(`cloneForWire: sparse arrays are not allowed (hole at index ${i})`)
+        }
+        if (value[i] === undefined) {
+          throw new TypeError(`cloneForWire: undefined in arrays is not a valid JSON value (index ${i})`)
+        }
+        result[i] = cloneForWire(value[i], depth + 1, seen)
       }
-      if (value[i] === undefined) {
-        throw new TypeError(`cloneForWire: undefined in arrays is not a valid JSON value (index ${i})`)
-      }
-      result[i] = cloneForWire(value[i], depth + 1, seen)
+      return result as T
+    } finally {
+      seen.delete(value as object)
     }
-    return result as T
   }
 
   if (typeof value === 'object') {
@@ -108,22 +120,27 @@ export function cloneForWire<T>(value: T, depth = 0, seen = new WeakSet()): T {
       throw new TypeError(`cloneForWire: non-plain object (constructor: ${proto?.constructor?.name ?? 'unknown'})`)
     }
 
-    // Cycle detection
+    // Cycle detection: active-ancestor only (see array branch). A shared
+    // object reached again from a sibling is cloned again, not rejected.
     if (seen.has(value as object)) {
       throw new TypeError('cloneForWire: cyclic reference detected')
     }
     seen.add(value as object)
 
-    const result: Record<string, unknown> = {}
-    for (const key of Object.keys(value as Record<string, unknown>)) {
-      const v = (value as Record<string, unknown>)[key]
-      if (v === undefined) {
-        // Omit undefined values — they are not valid in JSON wire
-        continue
+    try {
+      const result: Record<string, unknown> = {}
+      for (const key of Object.keys(value as Record<string, unknown>)) {
+        const v = (value as Record<string, unknown>)[key]
+        if (v === undefined) {
+          // Omit undefined values — they are not valid in JSON wire
+          continue
+        }
+        result[key] = cloneForWire(v, depth + 1, seen)
       }
-      result[key] = cloneForWire(v, depth + 1, seen)
+      return result as T
+    } finally {
+      seen.delete(value as object)
     }
-    return result as T
   }
 
   throw new TypeError(`cloneForWire: unsupported type: ${typeof value}`)
