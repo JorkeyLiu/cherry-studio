@@ -824,6 +824,78 @@ describe('cloneForWire integration in paged reads (LOCK-N2/N5/N6)', () => {
     }
   }
 
+  /**
+   * Shared model object referenced by BOTH messages in the topic row.
+   *
+   * Mirrors the real defect: IndexedDB structured clone preserves shared
+   * references (each assistant message stores `model: assistant.model` — the
+   * same object), so the Dexie row contains a non-cyclic shared graph. Before
+   * LOCK-N6 this was misreported as `cyclic reference detected` and the first
+   * topics page failed with READ_FAILED.
+   */
+  const SHARED_MODEL = {
+    id: 'gpt-4',
+    provider: 'openai',
+    name: 'GPT-4',
+    group: 'gpt',
+    capabilities: [{ type: 'text' }]
+  }
+
+  /** Create a fake DB whose topic row embeds two messages sharing one model object. */
+  function createDbWithSharedModelRows() {
+    const sharedModel = { ...SHARED_MODEL }
+    return {
+      table: (tableName: string) => {
+        const rows: Record<string, unknown>[] =
+          tableName === 'topics'
+            ? [
+                {
+                  id: 't-1',
+                  messages: [
+                    {
+                      id: 'm-1',
+                      role: 'assistant',
+                      status: 'success',
+                      content: 'first',
+                      createdAt: '2026-01-01T00:00:00.000Z',
+                      topicId: 't-1',
+                      blocks: [],
+                      // Same object reference on both messages — shared, NOT cyclic.
+                      model: sharedModel
+                    },
+                    {
+                      id: 'm-2',
+                      role: 'assistant',
+                      status: 'success',
+                      content: 'second',
+                      createdAt: '2026-01-01T00:00:00.000Z',
+                      topicId: 't-1',
+                      blocks: [],
+                      model: sharedModel
+                    }
+                  ],
+                  deletedAt: null
+                }
+              ]
+            : []
+        return {
+          where: () => ({
+            above: () => ({
+              limit: (count: number) => ({
+                toArray: async () => rows.slice(0, count)
+              })
+            })
+          }),
+          toCollection: () => ({
+            limit: (count: number) => ({
+              toArray: async () => rows.slice(0, count)
+            })
+          })
+        }
+      }
+    }
+  }
+
   it('strips explicit undefined properties from items via cloneForWire before IPC (LOCK-N2/N6)', async () => {
     const harness = createFakeBridge()
     const openDb = vi.fn().mockResolvedValue(createDbWithUndefinedRows())
@@ -947,6 +1019,51 @@ describe('cloneForWire integration in paged reads (LOCK-N2/N5/N6)', () => {
     expect(harness.readPageCallbacks).toHaveLength(0)
     expect(harness.cancelCallbacks).toHaveLength(0)
     expect(closeDb).toHaveBeenCalledTimes(1)
+  })
+
+  it('emits a paged topic row whose messages share one model object as duplicated valid JSON, no READ_FAILED (LOCK-N6)', async () => {
+    const harness = createFakeBridge()
+    const openDb = vi.fn().mockResolvedValue(createDbWithSharedModelRows())
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      openDb,
+      closeDb
+    })
+    harness.discoverCallbacks[0]('session-n6')
+    await flushMicrotasks()
+
+    // Read the first topics page — the row embeds two messages that share one
+    // model object (the exact real-ZIP shape that previously failed with
+    // `cloneForWire: cyclic reference detected` → READ_FAILED).
+    harness.readPageCallbacks[0]({ sessionId: 'session-n6', tableName: 'topics', cursor: null, pageSize: PAGE_SIZE })
+    await flushMicrotasks()
+
+    // No READ_FAILED: the page result was emitted normally.
+    expect(harness.error).not.toHaveBeenCalled()
+    expect(harness.readPageResult).toHaveBeenCalledTimes(1)
+    const envelope = harness.readPageResult.mock.calls[0][0] as ChatImportEnvelope<ReadPageResponse>
+    expect(envelope.phase).toBe('reading')
+
+    const items = envelope.data.items
+    expect(items).toHaveLength(1)
+    const topic = items[0]
+    const messages = (topic as { messages: Array<{ model: Record<string, unknown> }> }).messages
+    expect(messages).toHaveLength(2)
+
+    // Shared source identity became duplicated equal-but-independent clones
+    // that are themselves valid JSON over the wire (JSON.stringify-compatible).
+    const modelA = messages[0].model
+    const modelB = messages[1].model
+    expect(modelA).toEqual(SHARED_MODEL)
+    expect(modelB).toEqual(SHARED_MODEL)
+    expect(modelA).not.toBe(modelB)
+    expect(JSON.parse(JSON.stringify(modelA))).toEqual(SHARED_MODEL)
+    expect(JSON.parse(JSON.stringify(modelB))).toEqual(SHARED_MODEL)
+    // No cycle error surfaced anywhere in the pipeline.
+    expect(harness.error).not.toHaveBeenCalled()
   })
 })
 

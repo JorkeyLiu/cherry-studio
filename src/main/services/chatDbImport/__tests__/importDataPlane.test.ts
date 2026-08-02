@@ -5,6 +5,20 @@
  * - Canonical topic flattening: no `messages` in topics.extra, leaked UI
  *   metadata ignored, deletedAt preserved (LOCK-D2).
  * - Exact message/block/membership order survives pages (LOCK-D3/D5/D6).
+ * - Outer-topic ownership canonicalization (LOCK-OWN-1/2): a present valid
+ *   non-empty embedded `message.topicId` differing from the outer topic is
+ *   projected under the authoritative outer topic and counted once per
+ *   committed page; matching values count 0; rolled-back/rejected pages
+ *   never leak a count delta. Missing/empty/wrong-type topicId still reject
+ *   and duplicate/cross-owner gates stay strict.
+ * - Unreachable orphan block canonicalization (LOCK-BLOCK-1/2): a source
+ *   `message_blocks` row whose block id is referenced by no imported message
+ *   AND whose claimed messageId exists in no imported message is skipped at
+ *   the projection boundary — never staged/written/verified — and counted
+ *   once per committed page. Rows claiming an existing message stay strict
+ *   OWNERSHIP_MISMATCH; duplicate source block rows (imported and skipped,
+ *   within/across pages) reject; source counts stay full while candidate/
+ *   manifest counts are reachable-only.
  * - structured model / tool content / file metadata / unknown JSON round-trip.
  * - Malformed/missing/duplicate/cross-owner inputs reject with page rollback
  *   and untouched stats (LOCK-D4/D5/D6/D8/D9).
@@ -335,11 +349,203 @@ describe('ChatImportDataPlane', () => {
     expect(plane.getSourceReadStats().topicRecordCount).toBe(0)
   })
 
-  it('rejects message.topicId mismatch with the outer topic', () => {
+  // -------------------------------------------------------------------------
+  // Outer-topic ownership canonicalization (LOCK-OWN-1/2)
+  //
+  // A PRESENT valid non-empty embedded `message.topicId` that differs from
+  // the authoritative outer `topic.id` is canonicalized to the outer topic
+  // on the projected MessageData and counted. Matching values count 0;
+  // missing/empty/wrong-type still reject; duplicate/cross-owner gates
+  // stay strict; the count is transactional (rejected pages leak nothing).
+  // -------------------------------------------------------------------------
+
+  it('canonicalizes a valid stale message.topicId to the outer topic and counts it once', () => {
     const plane = createImportDataPlane(db)
-    expect(() => plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-other', [])])]))).toThrowError(
+
+    // m-1 claims topic 't-stale' but lives inside outer topic 't-1'.
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-stale', ['b-1'])])]))
+    plane.processPage(page('message_blocks', [srcBlock('b-1', 'm-1')]))
+
+    // The candidate row is stored under the authoritative OUTER topic.
+    const msg = db.select().from(schema.messages).where(eq(schema.messages.id, 'm-1')).get() as any
+    expect(msg).toBeDefined()
+    expect(msg.topicId).toBe('t-1')
+
+    // The count is exactly 1 for the single canonicalized message.
+    expect(plane.getNormalizationStats().topicIdNormalizationCount).toBe(1)
+    // The raw source object is never mutated.
+    const src = db.select().from(schema.topics).where(eq(schema.topics.id, 't-1')).get() as any
+    expect(src).toBeDefined()
+    expect(src.extra).toBeNull()
+  })
+
+  it('counts 0 for matching topicId values and starts at 0 before any commit', () => {
+    const plane = createImportDataPlane(db)
+    expect(plane.getNormalizationStats().topicIdNormalizationCount).toBe(0)
+
+    plane.processPage(
+      page('topics', [
+        srcTopic('t-1', [srcMessage('m-1', 't-1', []), srcMessage('m-2', 't-1', [])]),
+        srcTopic('t-2', [srcMessage('m-3', 't-2', [])])
+      ])
+    )
+
+    // Matching values never advance the counter.
+    expect(plane.getNormalizationStats().topicIdNormalizationCount).toBe(0)
+
+    // Snapshots are non-aliased copies (LOCK-D9 pattern).
+    const snapshot = plane.getNormalizationStats()
+    ;(snapshot as { topicIdNormalizationCount: number }).topicIdNormalizationCount = 999
+    expect(plane.getNormalizationStats().topicIdNormalizationCount).toBe(0)
+  })
+
+  it('does not leak a count delta from a rejected or rolled-back page', () => {
+    const plane = createImportDataPlane(db)
+
+    // Validation rejection: the mismatched m-bad page is rejected and must
+    // not advance the aggregate — even though the valid m-ok message inside
+    // the same page would have been canonicalized.
+    const badMessage = { ...srcMessage('m-bad', 't-stale', []) } as Record<string, unknown>
+    delete badMessage.role
+    expect(() =>
+      plane.processPage(
+        page('topics', [
+          srcTopic('t-ok', [srcMessage('m-ok', 't-stale', [])]),
+          srcTopic('t-1', [badMessage as JsonObject])
+        ])
+      )
+    ).toThrowError(ChatImportDataPlaneError)
+    expect(plane.getNormalizationStats().topicIdNormalizationCount).toBe(0)
+
+    // DB constraint failure mid-transaction: a pre-seeded duplicate topic
+    // forces the page to roll back after validation succeeded.
+    createImportWriter(db).insertTopics([
+      { id: 't-dup', assistantId: null, name: null, createdAt: null, updatedAt: null, deletedAt: null, overflow: {} }
+    ])
+    expect(() =>
+      plane.processPage(
+        page('topics', [srcTopic('t-new', [srcMessage('m-new', 't-stale', [])]), srcTopic('t-dup', [])])
+      )
+    ).toThrow()
+    expect(plane.getNormalizationStats().topicIdNormalizationCount).toBe(0)
+
+    // After a successful page the count reflects exactly the committed row.
+    plane.processPage(page('topics', [srcTopic('t-new', [srcMessage('m-new', 't-stale', [])])]))
+    expect(plane.getNormalizationStats().topicIdNormalizationCount).toBe(1)
+  })
+
+  it('rejects missing/empty/number/null/object message.topicId (strict, LOCK-OWN-1)', () => {
+    const plane = createImportDataPlane(db)
+
+    // Missing field.
+    const noTopic = { ...srcMessage('m-1', 't-1', []) } as Record<string, unknown>
+    delete noTopic.topicId
+    expect(() => plane.processPage(page('topics', [srcTopic('t-1', [noTopic as JsonObject])]))).toThrowError(
+      /field 'topicId' must be a non-empty string/
+    )
+
+    // Empty string.
+    expect(() => plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', '', [])])]))).toThrowError(
+      /field 'topicId' must be a non-empty string/
+    )
+
+    // Number.
+    const numeric = { ...srcMessage('m-1', 't-1', []), topicId: 42 } as unknown as JsonObject
+    expect(() => plane.processPage(page('topics', [srcTopic('t-1', [numeric])]))).toThrowError(
+      /field 'topicId' must be a non-empty string/
+    )
+
+    // null.
+    const nullTopic = { ...srcMessage('m-1', 't-1', []), topicId: null } as unknown as JsonObject
+    expect(() => plane.processPage(page('topics', [srcTopic('t-1', [nullTopic])]))).toThrowError(
+      /field 'topicId' must be a non-empty string/
+    )
+
+    // object.
+    const objectTopic = { ...srcMessage('m-1', 't-1', []), topicId: { id: 'x' } } as unknown as JsonObject
+    expect(() => plane.processPage(page('topics', [srcTopic('t-1', [objectTopic])]))).toThrowError(
+      /field 'topicId' must be a non-empty string/
+    )
+
+    // Nothing committed, count stays 0.
+    expect(db.select().from(schema.messages).all()).toEqual([])
+    expect(plane.getNormalizationStats().topicIdNormalizationCount).toBe(0)
+  })
+
+  it('does not let canonicalization bypass duplicate or cross-owner gates (LOCK-OWN-1)', () => {
+    const plane = createImportDataPlane(db)
+
+    // Duplicate message ID within one page — both claim a stale topic but
+    // canonicalize to the same outer topic; the duplicate gate must still
+    // reject.
+    expect(() =>
+      plane.processPage(
+        page('topics', [srcTopic('t-1', [srcMessage('m-dup', 't-stale-a', []), srcMessage('m-dup', 't-stale-b', [])])])
+      )
+    ).toThrowError(/DUPLICATE_RELATION/)
+
+    // Duplicate message ID across committed pages.
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-stale', [])])]))
+    expect(() =>
+      plane.processPage(page('topics', [srcTopic('t-2', [srcMessage('m-1', 't-stale-2', [])])]))
+    ).toThrowError(/DUPLICATE_RELATION/)
+
+    // Duplicate block claims across messages on a FRESH topic (both
+    // canonicalized to t-3 — the block-claim gate must still reject).
+    expect(() =>
+      plane.processPage(
+        page('topics', [
+          srcTopic('t-3', [srcMessage('m-2', 't-stale', ['b-x']), srcMessage('m-3', 't-stale', ['b-x'])])
+        ])
+      )
+    ).toThrowError(/DUPLICATE_RELATION/)
+
+    // Commit a fresh topic + message (canonicalized) so the block-owner and
+    // segment gates below have real targets.
+    plane.processPage(page('topics', [srcTopic('t-4', [srcMessage('m-4', 't-stale', ['b-1'])])]))
+
+    // Block row ownership mismatch stays strict after canonicalization.
+    expect(() => plane.processPage(page('message_blocks', [srcBlock('b-1', 'm-wrong')]))).toThrowError(
       /OWNERSHIP_MISMATCH/
     )
+
+    // Segment membership ownership stays strict: m-4 belongs to t-4, so a
+    // segment claiming imported topic t-1 with that message must reject.
+    expect(() => plane.processPage(page('topic_segments', [srcSegment('s-1', 't-1', ['m-4'])]))).toThrowError(
+      /belongs to topic 't-4'/
+    )
+
+    // Count reflects only committed canonicalizations (m-1 and m-4).
+    expect(plane.getNormalizationStats().topicIdNormalizationCount).toBe(2)
+  })
+
+  it('records canonical topicId in the source manifest evidence and digest (LOCK-OWN-1/4301)', () => {
+    const plane = createImportDataPlane(db)
+    const msg1 = srcMessage('m-1', 't-stale', ['b-1'], { unknownMessageKey: { keep: 1 } })
+    const msg2 = srcMessage('m-2', 't-2', []) // matching value → no normalization
+
+    plane.processPage(page('topics', [srcTopic('t-1', [msg1])]))
+    plane.processPage(page('topics', [srcTopic('t-2', [msg2])]))
+    plane.processPage(page('message_blocks', [srcBlock('b-1', 'm-1')]))
+    plane.finalize()
+
+    const manifest = plane.getSourceVerificationManifest()
+
+    // Evidence topicId is the canonical OUTER topic — never the stale claim.
+    expect(manifest.messages.entries['m-1'].topicId).toBe('t-1')
+    expect(manifest.messages.entries['m-2'].topicId).toBe('t-2')
+
+    // The digest is framed from the canonical projection (topicId = outer).
+    const expected = wireToMessage(msg1)
+    expected.topicId = 't-1'
+    expected.sortOrder = 0
+    expect(manifest.messages.entries['m-1'].digest).toBe(canonicalDigest({ ...expected }))
+    expect(manifest.messages.entries['m-1'].overflowDigest).toBe(canonicalDigest(expected.overflow))
+
+    // Aggregate count is stable after finalize and cannot change further.
+    expect(plane.getNormalizationStats().topicIdNormalizationCount).toBe(1)
+    expect(plane.finalize().candidateImportStats.messageCount).toBe(2)
+    expect(plane.getNormalizationStats().topicIdNormalizationCount).toBe(1)
   })
 
   it('rejects duplicate block claims across messages (LOCK-D4)', () => {
@@ -396,6 +602,263 @@ describe('ChatImportDataPlane', () => {
     // No segment rows or memberships committed by the failed pages.
     expect(db.select().from(schema.topicSegments).all()).toEqual([])
     expect(db.select().from(schema.topicSegmentMessages).all()).toEqual([])
+  })
+
+  // -------------------------------------------------------------------------
+  // Unreachable orphan block canonicalization (LOCK-BLOCK-1/2)
+  //
+  // A source `message_blocks` row is skipped at the source projection
+  // boundary iff (a) its block id appears in NO imported message.blocks[]
+  // registry AND (b) its claimed `messageId` exists in NO imported message.
+  // Skipped rows produce no target rows, file references, manifest evidence,
+  // writer inserts, or seen markers; the skip count is Main-only,
+  // transactional, and aggregated once. A row claiming an EXISTING message
+  // stays a strict OWNERSHIP_MISMATCH; duplicate source block rows (imported
+  // and skipped, within/across pages) reject; invalid id/messageId rejects
+  // before classification; failed pages neither count nor poison the
+  // source-seen registry; raw rows are never mutated.
+  // -------------------------------------------------------------------------
+
+  it('skips unreachable orphan block rows and keeps source/candidate/registry counts exact (LOCK-BLOCK-1/2)', () => {
+    const plane = createImportDataPlane(db)
+
+    // 20 messages × 6 blocks = 120 referenced blocks; 5 orphan rows with
+    // block ids and messageIds absent from every imported message → 125
+    // source rows / 120 imported / 5 skipped (diagnostic-equivalent shape).
+    const messages: JsonObject[] = []
+    const blockRows: JsonObject[] = []
+    let blockIndex = 0
+    for (let m = 0; m < 20; m++) {
+      const messageBlocks: string[] = []
+      for (let b = 0; b < 6; b++) {
+        const blockId = `b-${blockIndex}`
+        messageBlocks.push(blockId)
+        blockRows.push(
+          srcBlock(blockId, `m-${m}`, b === 0 && m === 0 ? { type: 'file', file: { id: 'file-0', name: 'a.pdf' } } : {})
+        )
+        blockIndex++
+      }
+      messages.push(srcMessage(`m-${m}`, 't-1', messageBlocks))
+    }
+    for (let o = 0; o < 5; o++) {
+      // Orphan rows carry file payloads that MUST be ignored (LOCK-BLOCK-1).
+      blockRows.push(
+        srcBlock(`b-orphan-${o}`, `m-orphan-${o}`, {
+          type: 'file',
+          file: { id: `f-orphan-${o}`, name: `orphan-${o}.png` }
+        })
+      )
+    }
+
+    plane.processPage(page('topics', [srcTopic('t-1', messages)]))
+    plane.processPage(page('message_blocks', blockRows))
+    const finalized = plane.finalize()
+
+    // Source accounting remains the full paged row count (125); candidate
+    // accounting counts only the 120 imported rows (LOCK-BLOCK-1).
+    expect(finalized.sourceReadStats.blockRecordCount).toBe(125)
+    expect(finalized.candidateImportStats.blockCount).toBe(120)
+    expect(plane.getSourceReadStats().blockRecordCount).toBe(125)
+    expect(plane.getCandidateImportStats().blockCount).toBe(120)
+
+    // Main-only normalization aggregate counts exactly the 5 skipped rows.
+    const normalization = plane.getNormalizationStats()
+    expect(normalization.unreachableBlockSkipCount).toBe(5)
+    expect(normalization.topicIdNormalizationCount).toBe(0)
+
+    // Candidate DB holds exactly the 120 reachable blocks, none orphaned.
+    const rows = db.select().from(schema.messageBlocks).all() as any[]
+    expect(rows).toHaveLength(120)
+    for (const row of rows) {
+      expect(row.id.startsWith('b-orphan-')).toBe(false)
+    }
+
+    // Only the imported file block produced a file reference — orphan file
+    // payloads are never projected (LOCK-BLOCK-1).
+    const refs = db.select().from(schema.fileReferences).all() as any[]
+    expect(refs).toHaveLength(1)
+    expect(refs[0].blockId).toBe('b-0')
+
+    // Source verification manifest is reachable-only: 120 block entries,
+    // no orphan ids.
+    const manifest = plane.getSourceVerificationManifest()
+    expect(manifest.blocks.count).toBe(120)
+    for (let o = 0; o < 5; o++) {
+      expect(manifest.blocks.entries[`b-orphan-${o}`]).toBeUndefined()
+    }
+    expect(Object.keys(manifest.blocks.entries)).toHaveLength(120)
+    expect(manifest.fileReferences.count).toBe(1)
+  })
+
+  it('rejects an unreferenced block row claiming an existing message (LOCK-BLOCK-1 strict)', () => {
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', [])])]))
+
+    // b-ghost is not referenced, but its messageId m-1 IS imported — not an
+    // orphan: strict OWNERSHIP_MISMATCH, never skipped.
+    expect(() => plane.processPage(page('message_blocks', [srcBlock('b-ghost', 'm-1')]))).toThrowError(
+      /OWNERSHIP_MISMATCH/
+    )
+    expect(plane.getNormalizationStats().unreachableBlockSkipCount).toBe(0)
+    expect(db.select().from(schema.messageBlocks).all()).toEqual([])
+  })
+
+  it('rejects duplicate skipped orphan rows within a page and across pages (LOCK-BLOCK-1)', () => {
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', ['b-1'])])]))
+
+    // Same-page duplicate orphan rows reject.
+    expect(() =>
+      plane.processPage(
+        page('message_blocks', [srcBlock('b-orphan-a', 'm-dead-a'), srcBlock('b-orphan-a', 'm-dead-b')])
+      )
+    ).toThrowError(/DUPLICATE_RELATION/)
+
+    // A committed orphan then duplicates across pages.
+    plane.processPage(page('message_blocks', [srcBlock('b-orphan-b', 'm-dead-b')]))
+    expect(() => plane.processPage(page('message_blocks', [srcBlock('b-orphan-b', 'm-dead-c')]))).toThrowError(
+      /DUPLICATE_RELATION/
+    )
+
+    // Committed rows stay untouched and the count reflects only the valid skip.
+    const committedIds = (db.select().from(schema.messageBlocks).all() as any[]).map((row) => row.id)
+    expect(committedIds).not.toContain('b-orphan-a')
+    expect(committedIds).not.toContain('b-orphan-b')
+    expect(plane.getNormalizationStats().unreachableBlockSkipCount).toBe(1)
+  })
+
+  it('classifies a duplicate of a committed skipped orphan claiming an existing message as DUPLICATE_RELATION (LOCK-BLOCK-1 precedence)', () => {
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', [])])]))
+
+    // b-x is skipped as an unreachable orphan on a committed page: block id
+    // referenced by no imported message AND messageId m-dead in no message.
+    plane.processPage(page('message_blocks', [srcBlock('b-x', 'm-dead')]))
+    expect(plane.getNormalizationStats().unreachableBlockSkipCount).toBe(1)
+
+    // Duplicate b-x row now claims the EXISTING imported message m-1. The
+    // duplicate gate runs before orphan/owner classification, so this is
+    // DUPLICATE_RELATION — never the OWNERSHIP_MISMATCH the orphan boundary
+    // would otherwise produce.
+    expect(() => plane.processPage(page('message_blocks', [srcBlock('b-x', 'm-1')]))).toThrowError(/DUPLICATE_RELATION/)
+
+    // Same-page variant: a skipped orphan followed on the SAME page by a
+    // duplicate claiming the existing message also rejects as DUPLICATE_RELATION.
+    expect(() =>
+      plane.processPage(page('message_blocks', [srcBlock('b-y', 'm-dead-2'), srcBlock('b-y', 'm-1')]))
+    ).toThrowError(/DUPLICATE_RELATION/)
+
+    // Both failed pages rolled back: only the valid first skip is counted.
+    expect(plane.getNormalizationStats().unreachableBlockSkipCount).toBe(1)
+    expect(db.select().from(schema.messageBlocks).all()).toEqual([])
+  })
+
+  it('classifies a duplicate of a committed referenced block with a wrong owner as DUPLICATE_RELATION (LOCK-BLOCK-1 precedence)', () => {
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', ['b-x', 'b-y'])])]))
+
+    // b-x is committed as m-1's block.
+    plane.processPage(page('message_blocks', [srcBlock('b-x', 'm-1')]))
+    expect(plane.getCandidateImportStats().blockCount).toBe(1)
+
+    // Duplicate b-x row now claims a DIFFERENT owner m-wrong. The duplicate
+    // gate runs before owner-index classification, so this is
+    // DUPLICATE_RELATION — never the OWNERSHIP_MISMATCH the mismatched owner
+    // would otherwise produce.
+    expect(() => plane.processPage(page('message_blocks', [srcBlock('b-x', 'm-wrong')]))).toThrowError(
+      /DUPLICATE_RELATION/
+    )
+
+    // Same-page variant: an imported row followed on the SAME page by a
+    // duplicate with a wrong owner also rejects as DUPLICATE_RELATION.
+    expect(() =>
+      plane.processPage(page('message_blocks', [srcBlock('b-y', 'm-1'), srcBlock('b-y', 'm-wrong')]))
+    ).toThrowError(/DUPLICATE_RELATION/)
+
+    // Both failed pages rolled back: only the committed b-x remains.
+    const committed = db.select().from(schema.messageBlocks).all() as any[]
+    expect(committed).toHaveLength(1)
+    expect(committed[0].id).toBe('b-x')
+    expect(plane.getCandidateImportStats().blockCount).toBe(1)
+  })
+
+  it('rejects invalid id/messageId before any orphan classification (LOCK-BLOCK-1)', () => {
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', [])])]))
+
+    // Missing id — INVALID_ROW before any skip logic.
+    const noId = { ...srcBlock('b-x', 'm-dead') } as Record<string, unknown>
+    delete noId.id
+    expect(() => plane.processPage(page('message_blocks', [noId as JsonObject]))).toThrowError(/field 'id'/)
+
+    // Empty/non-string messageId — INVALID_ROW before classification.
+    expect(() => plane.processPage(page('message_blocks', [srcBlock('b-orphan', '')]))).toThrowError(
+      /field 'messageId' must be a non-empty string/
+    )
+    const numericMessageId = { ...srcBlock('b-orphan', 'm-dead'), messageId: 42 } as unknown as JsonObject
+    expect(() => plane.processPage(page('message_blocks', [numericMessageId]))).toThrowError(
+      /field 'messageId' must be a non-empty string/
+    )
+
+    // Missing type/status/createdAt still reject (strict row shape retained).
+    const noType = { ...srcBlock('b-orphan', 'm-dead') } as Record<string, unknown>
+    delete noType.type
+    expect(() => plane.processPage(page('message_blocks', [noType as JsonObject]))).toThrowError(/field 'type'/)
+
+    expect(plane.getNormalizationStats().unreachableBlockSkipCount).toBe(0)
+    expect(db.select().from(schema.messageBlocks).all()).toEqual([])
+  })
+
+  it('does not count or poison the source-seen registry when a page rolls back (LOCK-BLOCK-1)', () => {
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', ['b-1'])])]))
+
+    // Pre-seed a block row directly so the message_blocks page passes
+    // validation but hits a PRIMARY KEY violation inside the tx. The page
+    // also carries an orphan row — the rollback must drop BOTH the skip
+    // count delta and the orphan's source-seen registration.
+    createImportWriter(db).insertBlocks([
+      {
+        id: 'b-1',
+        messageId: 'm-1',
+        type: 'main_text',
+        content: 'seeded',
+        status: 'success',
+        createdAt: '2020-01-01T00:00:00.000Z',
+        updatedAt: null,
+        sortOrder: 0,
+        overflow: {}
+      }
+    ])
+    expect(() =>
+      plane.processPage(page('message_blocks', [srcBlock('b-1', 'm-1'), srcBlock('b-orphan-x', 'm-dead-x')]))
+    ).toThrow()
+
+    // No count leaked, and the orphan is NOT poisoned: a fresh retry of the
+    // orphan row on a clean page succeeds and is counted once.
+    expect(plane.getNormalizationStats().unreachableBlockSkipCount).toBe(0)
+    expect(plane.getCandidateImportStats().blockCount).toBe(0)
+    plane.processPage(page('message_blocks', [srcBlock('b-orphan-x', 'm-dead-x')]))
+    expect(plane.getNormalizationStats().unreachableBlockSkipCount).toBe(1)
+  })
+
+  it('leaves raw source block rows unmutated through the orphan path (LOCK-BLOCK-1)', () => {
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', ['b-1'])])]))
+
+    const orphanRow = srcBlock('b-orphan-keep', 'm-dead-keep', {
+      type: 'file',
+      content: null,
+      file: { id: 'f-keep', name: 'keep.pdf', path: '/x/keep.pdf', type: 'file', size: 5 }
+    })
+    const before = JSON.parse(JSON.stringify(orphanRow))
+    plane.processPage(page('message_blocks', [srcBlock('b-1', 'm-1'), orphanRow]))
+
+    // The raw JsonObject is untouched (LOCK-OWN-1 pattern; skip never mutates).
+    expect(orphanRow).toEqual(before)
+    expect(plane.getNormalizationStats().unreachableBlockSkipCount).toBe(1)
+    // And the orphan's file payload produced no reference row.
+    expect(db.select().from(schema.fileReferences).all()).toEqual([])
   })
 
   // -------------------------------------------------------------------------

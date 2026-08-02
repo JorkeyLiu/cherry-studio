@@ -35,9 +35,11 @@ import { drizzle } from 'drizzle-orm/better-sqlite3'
 
 import { registerChatDbNormalize, runMigrations } from '../../../chatDb/migration'
 import * as schema from '../../../chatDb/schema'
+import { wireToMessage } from '../../../chatDb/wireAdapters'
 import { createImportDataPlane } from '../../importDataPlane'
 import type { CandidateVerifierOptions } from '../candidateVerifier'
 import { createCandidateVerifier } from '../candidateVerifier'
+import { canonicalDigest } from '../canonicalJson'
 import type { SourceVerificationManifest } from '../sourceManifest'
 import type { CandidateVerificationReport, VerificationDimension } from '../verificationContracts'
 import { VERIFICATION_DIMENSIONS } from '../verificationContracts'
@@ -645,5 +647,194 @@ describe('CandidateVerifier', () => {
     expect(digests.checkedCount).toBeGreaterThanOrEqual(4)
     // Diagnostics never carry the raw mutated content.
     expect(JSON.stringify(report)).not.toContain('tampered')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LOCK-OWN-1: outer-topic canonicalization through the FULL
+// plane → manifest → sealed candidate → verifier path
+// ---------------------------------------------------------------------------
+
+describe('LOCK-OWN-1 outer-topic canonicalization (full plane+manifest+verify)', () => {
+  let tempDir: string
+  let dbPath: string
+  let manifest: SourceVerificationManifest
+
+  // Embedded messages whose `topicId` claims a STALE topic (valid string,
+  // different from the authoritative outer topic — LOCK-OWN-1 canonicalizes).
+  const STALE_MSG_1 = srcMessage('m-1', 't-stale', ['b-1'], { model: STRUCTURED_MODEL })
+  const STALE_MSG_2 = srcMessage('m-2', 't-stale-2', ['b-2'])
+  // Matching message (no normalization).
+  const MATCHING_MSG_3 = srcMessage('m-3', 't-2', ['b-3'])
+
+  beforeEach(() => {
+    tempDir = makeTempDir()
+    dbPath = realPath.join(tempDir, 'chat.db')
+    const sqlite = new Database(dbPath)
+    sqlite.pragma('journal_mode = WAL')
+    sqlite.pragma('foreign_keys = ON')
+    const db = drizzle(sqlite, { schema })
+    runMigrations(db, sqlite)
+
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [STALE_MSG_1, STALE_MSG_2]), srcTopic('t-2', [MATCHING_MSG_3])]))
+    plane.processPage(
+      page('message_blocks', [
+        srcBlock('b-1', 'm-1'),
+        srcBlock('b-2', 'm-2', { type: 'file', file: FILE_META as unknown as JsonObject['x'] }),
+        srcBlock('b-3', 'm-3')
+      ])
+    )
+    plane.processPage(page('topic_segments', [srcSegment('s-1', 't-1', ['m-2', 'm-1'])]))
+    plane.finalize()
+
+    manifest = plane.getSourceVerificationManifest()
+    sqlite.close() // sealed — the verifier reopens readonly
+  })
+
+  afterEach(() => {
+    realFs.rmSync(tempDir, { recursive: true, force: true })
+    expect(realFs.existsSync(tempDir)).toBe(false)
+  })
+
+  it('records canonical outer topicId in manifest evidence and digests, stores it in the candidate, and verifies clean', async () => {
+    // --- Source manifest evidence is canonical (LOCK-OWN-1/4301) ---
+    expect(manifest.messages.entries['m-1'].topicId).toBe('t-1')
+    expect(manifest.messages.entries['m-2'].topicId).toBe('t-1')
+    expect(manifest.messages.entries['m-3'].topicId).toBe('t-2')
+
+    // The digest is framed from the canonical projection: wire projection
+    // with topicId overridden to the outer topic and sortOrder = array index.
+    const expectedM1 = wireToMessage(STALE_MSG_1)
+    expectedM1.topicId = 't-1'
+    expectedM1.sortOrder = 0
+    expect(manifest.messages.entries['m-1'].digest).toBe(canonicalDigest({ ...expectedM1 }))
+    expect(manifest.messages.entries['m-1'].overflowDigest).toBe(canonicalDigest(expectedM1.overflow))
+    const expectedM2 = wireToMessage(STALE_MSG_2)
+    expectedM2.topicId = 't-1'
+    expectedM2.sortOrder = 1
+    expect(manifest.messages.entries['m-2'].digest).toBe(canonicalDigest({ ...expectedM2 }))
+    const expectedM3 = wireToMessage(MATCHING_MSG_3)
+    expectedM3.sortOrder = 0
+    expect(manifest.messages.entries['m-3'].digest).toBe(canonicalDigest({ ...expectedM3 }))
+
+    // --- Candidate write stores the authoritative outer topic ---
+    const readonly = new Database(dbPath, { readonly: true, fileMustExist: true })
+    const rows = readonly.prepare('SELECT id, topic_id FROM messages ORDER BY id').all() as Array<{
+      id: string
+      topic_id: string
+    }>
+    expect(rows).toEqual([
+      { id: 'm-1', topic_id: 't-1' },
+      { id: 'm-2', topic_id: 't-1' },
+      { id: 'm-3', topic_id: 't-2' }
+    ])
+    readonly.close()
+
+    // --- Verifier passes ALL 13 dimensions from the same canonical staged data ---
+    const report = await verify(dbPath, manifest)
+    expect(report.status).toBe('pass')
+    expect(report.fatal).toBeNull()
+    for (const result of report.dimensions) {
+      expect(result.status).toBe('pass')
+      expect(result.diagnostics).toEqual([])
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LOCK-BLOCK-1/2: unreachable orphan block canonicalization through the FULL
+// plane → manifest → sealed candidate → verifier path
+//
+// Source rows 125 (120 referenced + 5 unreachable orphans), imported 120,
+// skipped 5. The manifest is reachable-only (skipped rows are never staged),
+// the candidate holds exactly the 120 reachable blocks, and all 13 verifier
+// dimensions pass on the same reachable-only projection.
+// ---------------------------------------------------------------------------
+
+describe('LOCK-BLOCK-1 unreachable orphan block canonicalization (full plane+manifest+verify)', () => {
+  let tempDir: string
+  let dbPath: string
+  let manifest: SourceVerificationManifest
+
+  beforeEach(() => {
+    tempDir = makeTempDir()
+    dbPath = realPath.join(tempDir, 'chat.db')
+    const sqlite = new Database(dbPath)
+    sqlite.pragma('journal_mode = WAL')
+    sqlite.pragma('foreign_keys = ON')
+    const db = drizzle(sqlite, { schema })
+    runMigrations(db, sqlite)
+
+    const plane = createImportDataPlane(db)
+    // 20 messages × 6 blocks = 120 referenced blocks.
+    const messages: JsonObject[] = []
+    const blockRows: JsonObject[] = []
+    let blockIndex = 0
+    for (let m = 0; m < 20; m++) {
+      const messageBlocks: string[] = []
+      for (let b = 0; b < 6; b++) {
+        const blockId = `b-${blockIndex}`
+        messageBlocks.push(blockId)
+        blockRows.push(srcBlock(blockId, `m-${m}`))
+        blockIndex++
+      }
+      messages.push(srcMessage(`m-${m}`, 't-1', messageBlocks))
+    }
+    // 5 unreachable orphans: block id AND messageId absent from all imported
+    // messages; file payloads must be ignored by the reachable-only projection.
+    for (let o = 0; o < 5; o++) {
+      blockRows.push(
+        srcBlock(`b-orphan-${o}`, `m-orphan-${o}`, {
+          type: 'file',
+          content: null,
+          file: { id: `f-orphan-${o}`, name: `orphan-${o}.png`, path: '/o', type: 'file' }
+        })
+      )
+    }
+
+    plane.processPage(page('topics', [srcTopic('t-1', messages)]))
+    plane.processPage(page('message_blocks', blockRows))
+    plane.processPage(page('topic_segments', [srcSegment('s-1', 't-1', ['m-0', 'm-19'])]))
+    plane.finalize()
+
+    manifest = plane.getSourceVerificationManifest()
+    sqlite.close() // sealed — the verifier reopens readonly
+  })
+
+  afterEach(() => {
+    realFs.rmSync(tempDir, { recursive: true, force: true })
+    expect(realFs.existsSync(tempDir)).toBe(false)
+  })
+
+  it('keeps the manifest reachable-only, stores exactly 120 blocks in the candidate, and verifies all 13 dimensions', async () => {
+    // --- Source manifest evidence is reachable-only (LOCK-BLOCK-1) ---
+    expect(manifest.blocks.count).toBe(120)
+    expect(manifest.fileReferences.count).toBe(0) // orphan file payloads ignored
+    expect(manifest.messages.count).toBe(20)
+    expect(Object.keys(manifest.blocks.entries)).toHaveLength(120)
+    for (let o = 0; o < 5; o++) {
+      expect(manifest.blocks.entries[`b-orphan-${o}`]).toBeUndefined()
+    }
+
+    // --- Candidate stores exactly the 120 reachable blocks, none orphaned ---
+    const readonly = new Database(dbPath, { readonly: true, fileMustExist: true })
+    const blockRows = readonly.prepare('SELECT id, message_id FROM message_blocks ORDER BY id').all() as Array<{
+      id: string
+      message_id: string
+    }>
+    expect(blockRows).toHaveLength(120)
+    expect(blockRows.every((r) => !r.id.startsWith('b-orphan-'))).toBe(true)
+    expect(readonly.prepare('SELECT count(*) AS c FROM file_references').get()).toEqual({ c: 0 })
+    readonly.close()
+
+    // --- Verifier passes ALL 13 dimensions from the same reachable-only data ---
+    const report = await verify(dbPath, manifest)
+    expect(report.status).toBe('pass')
+    expect(report.fatal).toBeNull()
+    for (const result of report.dimensions) {
+      expect(result.status).toBe('pass')
+      expect(result.diagnostics).toEqual([])
+    }
   })
 })

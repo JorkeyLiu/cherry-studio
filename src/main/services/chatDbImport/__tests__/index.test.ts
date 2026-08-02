@@ -39,15 +39,36 @@
 import type { CandidateImportStats, ReadPageResponse, SourceReadStats } from '@shared/chatImport/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+// Per-context logger mock registry (LOCK-OWN-2 logging assertions). Each
+// module context gets its own cached info/warn/error/debug mock so
+// assertions on the 'chatDbImport' context logger are not polluted by other
+// modules' logs and stay deterministic under vi.clearAllMocks().
+const loggerHoisted = vi.hoisted(() => {
+  const contexts = new Map<
+    string,
+    {
+      info: ReturnType<typeof vi.fn>
+      warn: ReturnType<typeof vi.fn>
+      error: ReturnType<typeof vi.fn>
+      debug: ReturnType<typeof vi.fn>
+    }
+  >()
+  return {
+    withContext: (name: string) => {
+      let ctx = contexts.get(name)
+      if (!ctx) {
+        ctx = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
+        contexts.set(name, ctx)
+      }
+      return ctx
+    }
+  }
+})
+
 // Mock all dependencies
 vi.mock('@logger', () => ({
   loggerService: {
-    withContext: () => ({
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-      debug: vi.fn()
-    })
+    withContext: loggerHoisted.withContext
   }
 }))
 
@@ -241,6 +262,7 @@ function makePlane(overrides: Partial<Record<string, any>> = {}) {
       sourceReadStats: computeSourceStats(pages),
       candidateImportStats: makeCandidateStats(pages.length)
     })),
+    getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 0, unreachableBlockSkipCount: 0 })),
     getSourceVerificationManifest: vi.fn(() => MOCK_MANIFEST)
   }
   return Object.assign(plane, overrides)
@@ -914,6 +936,288 @@ describe('ChatImport index', () => {
 
       await session.dispose()
       expect(getSealedCandidate()).toBeNull()
+    })
+  })
+
+  // =========================================================================
+  // LOCK-OWN-2 / LOCK-BLOCK-2: exactly one aggregate count-only
+  // canonicalization / orphan-skip warning
+  // =========================================================================
+
+  describe('outer-topic canonicalization warning (LOCK-OWN-1/2)', () => {
+    /** The cached 'chatDbImport' context logger mock used by index.ts. */
+    function chatDbImportLogger() {
+      return loggerHoisted.withContext('chatDbImport') as {
+        info: ReturnType<typeof vi.fn>
+        warn: ReturnType<typeof vi.fn>
+        error: ReturnType<typeof vi.fn>
+        debug: ReturnType<typeof vi.fn>
+      }
+    }
+
+    async function runToCandidateReady(
+      opts: { plane?: ReturnType<typeof makePlane> } = {}
+    ): Promise<{ sessionId: string }> {
+      const { session } = await begin(opts)
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+      await session.dispose()
+      return { sessionId: session.id }
+    }
+
+    itOnDarwin('emits exactly ONE warn with the aggregate count when normalization count > 0', async () => {
+      const logger = chatDbImportLogger()
+      const plane = makePlane({
+        getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 7, unreachableBlockSkipCount: 0 }))
+      })
+
+      await runToCandidateReady({ plane })
+
+      const matching = logger.warn.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
+      )
+      // Exactly one aggregate warning (LOCK-OWN-2) — never per message.
+      expect(matching).toHaveLength(1)
+      const [message] = matching[0]
+      expect(message).toContain('7')
+    })
+
+    itOnDarwin('emits no warning when the normalization count is 0', async () => {
+      const logger = chatDbImportLogger()
+
+      await runToCandidateReady()
+
+      const matching = logger.warn.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
+      )
+      expect(matching).toHaveLength(0)
+    })
+
+    itOnDarwin(
+      'warning carries no topic/message IDs, content, paths, or source values (LOCK-OWN-2 privacy)',
+      async () => {
+        const logger = chatDbImportLogger()
+        const plane = makePlane({
+          getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 7, unreachableBlockSkipCount: 0 }))
+        })
+
+        const { sessionId } = await runToCandidateReady({ plane })
+
+        const matching = logger.warn.mock.calls.filter(
+          (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
+        )
+        expect(matching).toHaveLength(1)
+        const [message, ...rest] = matching[0]
+
+        // LOCK-OWN-2: the warning is EXACTLY the static non-content template
+        // with only session/run context + aggregate count interpolated — no
+        // topic/message IDs, names, content, paths, or source values can be
+        // present by construction.
+        expect(message).toBe(
+          `Session ${sessionId}: 7 embedded message topicId value(s) differed from the authoritative outer topic ` +
+            'and were canonicalized (LOCK-OWN-1); all other ownership/identity validations remain strict'
+        )
+        // The warning is a single string argument — no structured args carrying values.
+        expect(rest).toEqual([])
+      }
+    )
+
+    itOnDarwin(
+      'emits exactly ONE skip-count warn when only unreachable orphans were skipped (LOCK-BLOCK-2)',
+      async () => {
+        const logger = chatDbImportLogger()
+        const plane = makePlane({
+          getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 0, unreachableBlockSkipCount: 5 }))
+        })
+
+        const { sessionId } = await runToCandidateReady({ plane })
+
+        const matching = logger.warn.mock.calls.filter(
+          (call) => typeof call[0] === 'string' && call[0].includes('unreachable orphan message_blocks row(s)')
+        )
+        expect(matching).toHaveLength(1)
+        const [message, ...rest] = matching[0]
+
+        // LOCK-BLOCK-2: session/run context + aggregate count ONLY — no block
+        // IDs, message IDs, content, paths, or source values; single argument.
+        expect(message).toBe(
+          `Session ${sessionId}: 5 unreachable orphan message_blocks row(s) were skipped ` +
+            '(LOCK-BLOCK-1); all other ownership/identity validations remain strict'
+        )
+        expect(rest).toEqual([])
+      }
+    )
+
+    itOnDarwin(
+      'emits exactly ONE combined warn with both aggregate counts when both categories are nonzero',
+      async () => {
+        const logger = chatDbImportLogger()
+        const plane = makePlane({
+          getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 2, unreachableBlockSkipCount: 5 }))
+        })
+
+        const { sessionId } = await runToCandidateReady({ plane })
+
+        // Exactly one warning overall (never two), carrying both counts 2 and 5
+        // (the expected original-ZIP aggregate evidence — LOCK-BLOCK-2).
+        const matching = logger.warn.mock.calls.filter(
+          (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
+        )
+        expect(matching).toHaveLength(1)
+        const [message, ...rest] = matching[0]
+        expect(message).toBe(
+          `Session ${sessionId}: 2 embedded message topicId value(s) differed from the authoritative outer topic ` +
+            'and were canonicalized (LOCK-OWN-1); 5 unreachable orphan message_blocks row(s) were skipped ' +
+            '(LOCK-BLOCK-1); all other ownership/identity validations remain strict'
+        )
+        expect(rest).toEqual([])
+      }
+    )
+
+    itOnDarwin('a failed page / failed finalize never double-logs the warning', async () => {
+      const logger = chatDbImportLogger()
+      const plane = makePlane()
+      // finalize throws (e.g. MISSING_BLOCKS): no ready, no warning.
+      plane.finalize.mockImplementationOnce(() => {
+        throw new Error('missing blocks')
+      })
+
+      const { session } = await begin({ plane })
+      await discover(session.id)
+      await expect(runAllPages(session.id)).rejects.toThrow('missing blocks')
+
+      // The session entered the error lifecycle; the warning must not exist.
+      expect(session.state).toBe('error')
+      const matching = logger.warn.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
+      )
+      expect(matching).toHaveLength(0)
+
+      await session.dispose()
+    })
+
+    itOnDarwin('source-stats mismatch emits NO warning (the stats gate precedes the warning)', async () => {
+      const logger = chatDbImportLogger()
+      const plane = makePlane({
+        getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 7, unreachableBlockSkipCount: 0 }))
+      })
+      // Orchestrator/data-plane stats disagree: completion fails BEFORE the
+      // warning point, so no canonicalization claim may be emitted.
+      plane.finalize = vi.fn(() => ({
+        sourceReadStats: { ...EXPECTED_SOURCE_STATS, blockRecordCount: 99 },
+        candidateImportStats: makeCandidateStats(4)
+      }))
+
+      const { session, candidate } = await begin({ plane })
+      await discover(session.id)
+      await capturedCallbacks.onReadPage(session.id, page('topics', [{ id: 't1' }, { id: 't2' }, { id: 't3' }]))
+      await capturedCallbacks.onReadPage(session.id, page('message_blocks', [{ id: 'b1' }, { id: 'b2' }]))
+      await capturedCallbacks.onReadPage(session.id, page('topic_segments', [{ id: 's1' }]))
+      await expect(
+        capturedCallbacks.onReadPage(session.id, page('files', [{ id: 'f1' }, { id: 'f2' }]))
+      ).rejects.toThrow(/mismatch/s)
+
+      expect(session.state).toBe('error')
+      expect(candidate.seal).not.toHaveBeenCalled()
+      const matching = logger.warn.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
+      )
+      expect(matching).toHaveLength(0)
+
+      await session.dispose()
+    })
+
+    itOnDarwin('seal failure emits NO warning (the seal gate precedes the warning)', async () => {
+      const logger = chatDbImportLogger()
+      const candidate = makeCandidate({
+        seal: vi.fn(() => {
+          throw new Error('seal boom')
+        })
+      })
+      const plane = makePlane({
+        getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 7, unreachableBlockSkipCount: 0 }))
+      })
+
+      const { session } = await begin({ candidate, plane })
+      await discover(session.id)
+      await capturedCallbacks.onReadPage(session.id, page('topics', []))
+      await capturedCallbacks.onReadPage(session.id, page('message_blocks', []))
+      await capturedCallbacks.onReadPage(session.id, page('topic_segments', []))
+      await expect(capturedCallbacks.onReadPage(session.id, page('files', []))).rejects.toThrow('seal boom')
+
+      expect(session.state).toBe('error')
+      const matching = logger.warn.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
+      )
+      expect(matching).toHaveLength(0)
+
+      await session.dispose()
+    })
+
+    itOnDarwin(
+      'candidate-ready callback failure emits NO warning (candidate readiness precedes the warning)',
+      async () => {
+        const logger = chatDbImportLogger()
+        const onCandidateReady = vi.fn(() => {
+          throw new Error('callback boom')
+        })
+        const plane = makePlane({
+          getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 7, unreachableBlockSkipCount: 0 }))
+        })
+
+        const { session } = await begin({ plane, onCandidateReady })
+        await discover(session.id)
+        await capturedCallbacks.onReadPage(session.id, page('topics', []))
+        await capturedCallbacks.onReadPage(session.id, page('message_blocks', []))
+        await capturedCallbacks.onReadPage(session.id, page('topic_segments', []))
+        await expect(capturedCallbacks.onReadPage(session.id, page('files', []))).rejects.toThrow('callback boom')
+
+        expect(session.state).toBe('error')
+        const matching = logger.warn.mock.calls.filter(
+          (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
+        )
+        expect(matching).toHaveLength(0)
+
+        await session.dispose()
+      }
+    )
+
+    itOnDarwin('a failed attempt emits no warning and a succeeding retry emits exactly once', async () => {
+      const logger = chatDbImportLogger()
+
+      // Attempt 1: seal fails → error lifecycle; the count > 0 must NOT warn.
+      const badCandidate = makeCandidate({
+        seal: vi.fn(() => {
+          throw new Error('seal boom')
+        })
+      })
+      const plane1 = makePlane({
+        getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 3, unreachableBlockSkipCount: 0 }))
+      })
+      const { session: s1 } = await begin({ candidate: badCandidate, plane: plane1 })
+      await discover(s1.id)
+      await capturedCallbacks.onReadPage(s1.id, page('topics', []))
+      await capturedCallbacks.onReadPage(s1.id, page('message_blocks', []))
+      await capturedCallbacks.onReadPage(s1.id, page('topic_segments', []))
+      await expect(capturedCallbacks.onReadPage(s1.id, page('files', []))).rejects.toThrow('seal boom')
+      expect(s1.state).toBe('error')
+      let matching = logger.warn.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
+      )
+      expect(matching).toHaveLength(0)
+
+      // Retry (fresh session + fresh plane): the succeeding completion warns
+      // exactly once with the aggregate count.
+      const plane2 = makePlane({
+        getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 3, unreachableBlockSkipCount: 0 }))
+      })
+      await runToCandidateReady({ plane: plane2 })
+      matching = logger.warn.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
+      )
+      expect(matching).toHaveLength(1)
+      expect(matching[0][0]).toContain('3')
     })
   })
 

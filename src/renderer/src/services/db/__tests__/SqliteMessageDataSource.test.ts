@@ -45,6 +45,7 @@ import type {
   GetRawTopicResponse,
   HardDeleteTopicRequest,
   HardDeleteTopicResponse,
+  JsonObject,
   ListBlocksByFileRequest,
   ListBlocksByFileResponse,
   ListFileRefsByFileRequest,
@@ -802,6 +803,36 @@ describe('SqliteMessageDataSource', () => {
       api.cloneMessagesToTopic.mockResolvedValue(successResult(null))
       await ds.cloneMessagesToTopic('t-1', [{ message: { id: 'm1' }, blocks: [{ id: 'b1', messageId: 'm1' }] }], 'a1')
       expect(api.cloneMessagesToTopic).toHaveBeenCalledOnce()
+      expect(mockDispatch).toHaveBeenCalledOnce()
+    })
+
+    it('cloneMessagesToTopic sends duplicated independent clones for messages sharing one model object (LOCK-N6)', async () => {
+      api.cloneMessagesToTopic.mockResolvedValue(successResult(null))
+      // Real call shape: createAssistantMessage stores `model: assistant.model`
+      // — the SAME object reference on every assistant message — so one
+      // cloneForWire invocation over the entries array contains a shared
+      // non-cyclic graph. This must serialize as duplicated valid JSON, not
+      // throw `cyclic reference detected`.
+      const model = { id: 'gpt-4', provider: 'openai', name: 'GPT-4', group: 'gpt', capabilities: [{ type: 'text' }] }
+      const mkMessage = (id: string): JsonObject => ({ id, role: 'assistant', model })
+      await ds.cloneMessagesToTopic(
+        't-1',
+        [
+          { message: mkMessage('m-1'), blocks: [{ id: 'b-1', messageId: 'm-1', type: 'main_text', content: 'a' }] },
+          { message: mkMessage('m-2'), blocks: [{ id: 'b-2', messageId: 'm-2', type: 'main_text', content: 'b' }] }
+        ],
+        'a-1'
+      )
+      expect(api.cloneMessagesToTopic).toHaveBeenCalledOnce()
+      const req = api.cloneMessagesToTopic.mock.calls[0][0]
+      const modelA = req.entries[0].message.model as Record<string, unknown>
+      const modelB = req.entries[1].message.model as Record<string, unknown>
+      expect(modelA).toEqual(model)
+      expect(modelB).toEqual(model)
+      // Duplicated equal-but-independent clones — never the shared reference.
+      expect(modelA).not.toBe(modelB)
+      expect(modelA).not.toBe(model)
+      expect(modelB).not.toBe(model)
       expect(mockDispatch).toHaveBeenCalledOnce()
     })
 
