@@ -44,13 +44,20 @@ If the skill is unavailable, directly read `.agents/skills/gh-create-issue/SKILL
   - If having i18n sort issues, run `pnpm i18n:sync` first
   - If having formatting issues, run `pnpm format` first
 - **Full Build**: `pnpm build` — TypeScript typecheck + electron-vite build
-- **Test**: `pnpm test` — Run all Vitest tests (main + renderer + aiCore + shared + scripts)
+- **Native ABI (better-sqlite3)**: the single native module is compiled for **either** Node24 (ABI 137) **or** Electron 41.2.1 (ABI 145) — never both at once. Switching is **explicit**; preflights never rebuild.
+  - `pnpm native:check:node` — read-only check: binding must actually create `Database(':memory:')`, run `select 1 as ok`, and close under a supported Node24 (ABI 137). Requires Node ≥24.11.1 on PATH.
+  - `pnpm native:check:electron` — read-only check: binding verified under the installed Electron binary (`ELECTRON_RUN_AS_NODE=1`) for Electron 41.2.1 / ABI 145 (darwin arm64).
+  - `pnpm native:rebuild:node` — explicit node-gyp source build of better-sqlite3 for Node24, then runs `native:check:node` (fails on any failure).
+  - `pnpm native:rebuild:electron` — explicit `@electron/rebuild` source build (force, buildFromSource, only better-sqlite3) for Electron, then runs `native:check:electron`.
+  - Preflight integration: `pnpm start` / `pnpm dev` / `pnpm dev:watch` / `pnpm debug` / `pnpm test:e2e` run `native:check:electron` once before launch; `pnpm test` / `pnpm test:coverage` / `pnpm test:watch` / `pnpm test:ui` / `pnpm bench` / `pnpm ci:test-check` run `native:check:node` once. Focused `test:*` / `bench:*` sub-suite commands are intentionally unguarded (aggregate entry points check once; CI adds one `native:check:node` step per focused-suite test job in `.github/workflows/ci.yml`). `.forge-meta` markers are never trusted as proof (LOCK-ABI-2) — only real runtime SQL counts. Implementation: `scripts/native-abi/`.
+- **Test**: `pnpm test` — preflights Node ABI, then runs all Vitest tests (main + renderer + aiCore + shared + scripts)
   - `pnpm test:main` — Main process tests only (Node environment)
   - `pnpm test:renderer` — Renderer process tests only (jsdom environment)
   - `pnpm test:aicore` — aiCore package tests only
   - `pnpm test:watch` — Watch mode
   - `pnpm test:coverage` — With v8 coverage report
-  - `pnpm test:e2e` — Playwright end-to-end tests
+  - `pnpm test:e2e` — Preflights Electron ABI, then Playwright end-to-end tests
+  - Focused suites (`test:main` etc.) run without preflight so aggregate runs do not repeat it; run `pnpm native:check:node` first when switching from the Electron binding.
 - **Lint**: `pnpm lint` — oxlint + eslint fix + TypeScript typecheck + i18n check + format check
 - **Format**: `pnpm format` — Biome format + lint (write mode)
 - **Typecheck**: `pnpm typecheck` — Concurrent node + web TypeScript checks using `tsgo`
@@ -214,7 +221,7 @@ logger.error("message", error);
 
 | Layer | Technologies |
 |---|---|
-| Runtime | Electron 38, Node ≥24.11.1 |
+| Runtime | Electron 41, Node ≥24.11.1 |
 | Frontend | React 19, TypeScript ~5.8 |
 | UI | Ant Design 5.27, styled-components 6, TailwindCSS v4 |
 | State | Redux Toolkit, redux-persist, Dexie (IndexedDB) |
