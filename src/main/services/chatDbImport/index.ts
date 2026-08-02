@@ -87,7 +87,7 @@ import { app } from 'electron'
 
 import { CandidateDbResource } from './candidateDb'
 import { ChatImportSessionError, ChatImportUnsupportedPlatformError } from './errors'
-import { createImportDataPlane } from './importDataPlane'
+import { createImportDataPlane, type DataPlaneNormalizationStats } from './importDataPlane'
 import { registerChatImportIpc, sendCancel, sendDiscover, sendReadPage } from './importIpc'
 import {
   createIsolatedReader,
@@ -216,6 +216,13 @@ export interface CandidateResourceLike {
 export interface ImportDataPlaneLike {
   processPage(response: ReadPageResponse): void | Promise<void>
   finalize(): { sourceReadStats: SourceReadStats; candidateImportStats: CandidateImportStats }
+  /**
+   * Main-only normalization accounting after a successful finalize()
+   * (LOCK-OWN-1/2, LOCK-BLOCK-1/2). The orchestrator emits exactly one
+   * aggregate count-only warning from this — never per message/block,
+   * never with IDs/content.
+   */
+  getNormalizationStats(): DataPlaneNormalizationStats
   /**
    * Finalized source verification manifest (LOCK-4301). Only callable after
    * a successful finalize(); the orchestrator uses it to start the verifier.
@@ -1912,6 +1919,49 @@ async function completeCandidate(
   if (activeSession?.id !== session.id || (session.state as ImportState) !== 'candidate-ready') {
     logger.info(`Session ${session.id} left candidate-ready during the ready callback; verification not started`)
     return
+  }
+
+  // 5b. LOCK-OWN-2 / LOCK-BLOCK-2: exactly ONE aggregate count-only warning
+  // when legacy embedded `message.topicId` values were canonicalized to the
+  // authoritative outer topic (LOCK-OWN-1) and/or unreachable orphan
+  // `message_blocks` rows were skipped at the source projection boundary
+  // (LOCK-BLOCK-1). One warning per nonzero category, or one COMBINED
+  // warning when both categories are nonzero.
+  //
+  // Timing contract: this is the latest natural success point INSIDE
+  // completeCandidate — every candidate-completion gate that can fail/retry
+  // has already succeeded (finalize, source-stat compare, seal, the
+  // candidate-ready transition, and the ready callback). A source-stat
+  // mismatch, a seal failure, or a failed ready callback therefore NEVER
+  // emits this warning; a successful candidate completion emits it exactly
+  // once (the completion path is exact-once via the readyEmitted guard, the
+  // finalized plane is stable, and a rejected/rolled-back page never
+  // advanced either count). Verification/promotion are a separate phase:
+  // this warning documents candidate-projection canonicalization evidence,
+  // not full import success. The payload is session/run context + aggregate
+  // counts ONLY: no topic IDs, message IDs, block IDs, names, content,
+  // paths, or source values.
+  const normalization = plane.getNormalizationStats()
+  const topicNormalized = normalization.topicIdNormalizationCount > 0
+  const orphansSkipped = normalization.unreachableBlockSkipCount > 0
+  if (topicNormalized && orphansSkipped) {
+    logger.warn(
+      `Session ${session.id}: ${normalization.topicIdNormalizationCount} embedded message topicId value(s) ` +
+        'differed from the authoritative outer topic and were canonicalized (LOCK-OWN-1); ' +
+        `${normalization.unreachableBlockSkipCount} unreachable orphan message_blocks row(s) were skipped ` +
+        '(LOCK-BLOCK-1); all other ownership/identity validations remain strict'
+    )
+  } else if (topicNormalized) {
+    logger.warn(
+      `Session ${session.id}: ${normalization.topicIdNormalizationCount} embedded message topicId value(s) ` +
+        'differed from the authoritative outer topic and were canonicalized (LOCK-OWN-1); ' +
+        'all other ownership/identity validations remain strict'
+    )
+  } else if (orphansSkipped) {
+    logger.warn(
+      `Session ${session.id}: ${normalization.unreachableBlockSkipCount} unreachable orphan message_blocks row(s) ` +
+        'were skipped (LOCK-BLOCK-1); all other ownership/identity validations remain strict'
+    )
   }
 
   // 6. Phase 4.3.3: start exactly one verification run (LOCK-4304).

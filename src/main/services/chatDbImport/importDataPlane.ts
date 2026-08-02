@@ -8,11 +8,29 @@
  * Responsibilities:
  * - Strict source validation with contextual errors (table, page index, id).
  * - Canonical topic projection (id/messages/deletedAt only — LOCK-D2).
- * - Embedded-message projection with array-index sortOrder (LOCK-D3).
+ * - Embedded-message projection with array-index sortOrder (LOCK-D3) and
+ *   outer-topic ownership canonicalization (LOCK-OWN-1): a PRESENT valid
+ *   non-empty `message.topicId` that differs from the outer `topic.id` is
+ *   canonicalized to the outer topic on the projected MessageData. Missing/
+ *   empty/wrong-type topicId still reject, and every other ownership/
+ *   identity validation (duplicate IDs, block owner, segment membership,
+ *   file-reference derivation) stays strict. Normalizations are counted
+ *   Main-only and aggregated exactly once by the orchestrator (LOCK-OWN-2)
+ *   — never warned per message, never with IDs/content/source values.
  * - Streaming relation indexes: messageId→topicId and
  *   blockId→{messageId, sortOrder, seen} (LOCK-D4).
  * - Block projection with parent-index sortOrder and file-reference
- *   derivation via `projectFileReferences` (LOCK-D5).
+ *   derivation via `projectFileReferences` (LOCK-D5), plus unreachable
+ *   orphan canonicalization (LOCK-BLOCK-1): a source `message_blocks` row
+ *   is skipped at the projection boundary iff its block id appears in NO
+ *   imported message.blocks[] registry AND its claimed `messageId` exists
+ *   in NO imported message. Skipped rows produce no target rows, file
+ *   references, manifest evidence, writer inserts, or seen markers; they
+ *   are counted Main-only and aggregated exactly once by the orchestrator
+ *   (LOCK-BLOCK-2) — never warned with IDs/content/source values. A row
+ *   claiming an EXISTING message stays a strict OWNERSHIP_MISMATCH, and
+ *   duplicate source block ids across all rows/pages (imported and
+ *   skipped) still reject via a transactional source-seen registry.
  * - Segment/membership projection with ownership checks (LOCK-D6).
  * - `files` pages as validated count-diagnostics only (LOCK-D7).
  * - One outer transaction per page; all-or-nothing (LOCK-D8).
@@ -94,6 +112,26 @@ export class ChatImportDataPlaneError extends Error {
 // Internal types
 // ---------------------------------------------------------------------------
 
+/**
+ * Main-only normalization accounting (LOCK-OWN-1/2, LOCK-BLOCK-1/2).
+ *
+ * Counts ONLY — never IDs, names, message content, paths, or source values.
+ * `topicIdNormalizationCount` is the number of PRESENT valid non-empty
+ * embedded `message.topicId` values that differed from the authoritative
+ * outer `topic.id` and were canonicalized during L2 topic/message
+ * projection. `unreachableBlockSkipCount` is the number of source
+ * `message_blocks` rows skipped at the projection boundary because their
+ * block id was referenced by no imported message AND their claimed
+ * `messageId` existed in no imported message (LOCK-BLOCK-1). Both use
+ * committed-page semantics (LOCK-D9): the aggregate advances only after a
+ * page's candidate transaction commits; a rolled-back or rejected page
+ * never leaks its delta. Never exposed over IPC/shared types.
+ */
+export interface DataPlaneNormalizationStats {
+  readonly topicIdNormalizationCount: number
+  readonly unreachableBlockSkipCount: number
+}
+
 /** Bounded per-block index entry (LOCK-D4). Values kept minimal. */
 interface BlockOwnerEntry {
   messageId: string
@@ -125,6 +163,25 @@ interface StagedPage {
   seenBlockIds: string[]
   newSegmentIds: string[]
   membershipRowCount: number
+  /**
+   * Every source `message_blocks` row id in this page — imported AND
+   * skipped orphans (LOCK-BLOCK-1). Merged post-commit into the separate
+   * source-seen registry so duplicate source block rows across all
+   * pages (including skipped ones) always reject.
+   */
+  sourceSeenBlockIds: string[]
+  /**
+   * Canonicalized embedded-message topicId count staged for this page
+   * (LOCK-OWN-1). Merged into the aggregate only on commit, exactly like
+   * the relation-index deltas (LOCK-D9).
+   */
+  topicIdNormalizationCount: number
+  /**
+   * Unreachable orphan `message_blocks` rows skipped at the projection
+   * boundary for this page (LOCK-BLOCK-1). Merged into the aggregate only
+   * on commit, exactly like the relation-index deltas (LOCK-D9).
+   */
+  orphanBlockSkipCount: number
 }
 
 function emptyStagedPage(): StagedPage {
@@ -140,7 +197,10 @@ function emptyStagedPage(): StagedPage {
     newBlockOwners: [],
     seenBlockIds: [],
     newSegmentIds: [],
-    membershipRowCount: 0
+    membershipRowCount: 0,
+    sourceSeenBlockIds: [],
+    topicIdNormalizationCount: 0,
+    orphanBlockSkipCount: 0
   }
 }
 
@@ -263,6 +323,16 @@ export class ChatImportDataPlane {
   private readonly blockOwnerById = new Map<string, BlockOwnerEntry>()
   private readonly segmentIds = new Set<string>()
 
+  /**
+   * Source-seen block id registry (LOCK-BLOCK-1). Records EVERY source
+   * `message_blocks` row id observed on a COMMITTED page — imported AND
+   * skipped orphans — so duplicate source block rows reject across all
+   * rows/pages. Transactional like the relation indexes: merged only after
+   * a successful page commit, so a failed page never poisons the registry
+   * and a retry of the same rows remains valid.
+   */
+  private readonly sourceSeenBlockIds = new Set<string>()
+
   /** Highest entity-order position committed/attempted so far (LOCK-D1). */
   private entityCursor = 0
   private finalized = false
@@ -291,6 +361,19 @@ export class ChatImportDataPlane {
     fileReferenceCount: 0,
     pageCount: 0,
     elapsedMs: 0
+  }
+
+  // Main-only normalization accounting (LOCK-OWN-1/2, LOCK-BLOCK-1/2).
+  // Mutated ONLY in commitStaged, after a successful page commit (LOCK-D9
+  // semantics) — a rejected/rolled-back page never advances the aggregate.
+  // The private shape is deliberately mutable; getNormalizationStats()
+  // exposes the readonly {@link DataPlaneNormalizationStats} contract.
+  private readonly normalizationStats: {
+    topicIdNormalizationCount: number
+    unreachableBlockSkipCount: number
+  } = {
+    topicIdNormalizationCount: 0,
+    unreachableBlockSkipCount: 0
   }
 
   /**
@@ -426,6 +509,17 @@ export class ChatImportDataPlane {
     return { ...this.candidateStats }
   }
 
+  /**
+   * Snapshot of Main-only normalization accounting (LOCK-OWN-1/2,
+   * LOCK-BLOCK-1/2). New object per call (no aliasing). Stable after
+   * finalize(): no further commits are possible once the plane is
+   * finalized, so the counts can no longer change. Main-only — never
+   * expose over IPC.
+   */
+  getNormalizationStats(): DataPlaneNormalizationStats {
+    return { ...this.normalizationStats }
+  }
+
   // -------------------------------------------------------------------------
   // Internals — entity resolution + staged commit
   // -------------------------------------------------------------------------
@@ -449,6 +543,9 @@ export class ChatImportDataPlane {
       const entry = this.blockOwnerById.get(blockId)
       if (entry) entry.seen = true
     }
+    // Source-seen registry (LOCK-BLOCK-1): committed only after the page
+    // transaction succeeded, covering imported AND skipped orphan rows.
+    for (const blockId of staged.sourceSeenBlockIds) this.sourceSeenBlockIds.add(blockId)
     for (const id of staged.newSegmentIds) this.segmentIds.add(id)
 
     // Source-read accounting (LOCK-D9): successful source rows per entity.
@@ -475,6 +572,11 @@ export class ChatImportDataPlane {
     this.candidateStats.segmentMembershipCount += staged.membershipRowCount
     this.candidateStats.fileReferenceCount += staged.fileReferences.length
     this.candidateStats.pageCount += 1
+
+    // Normalization accounting (LOCK-OWN-1/2, LOCK-BLOCK-1/2): merge the
+    // staged deltas only now that the page transaction committed.
+    this.normalizationStats.topicIdNormalizationCount += staged.topicIdNormalizationCount
+    this.normalizationStats.unreachableBlockSkipCount += staged.orphanBlockSkipCount
   }
 
   // -------------------------------------------------------------------------
@@ -495,13 +597,17 @@ export class ChatImportDataPlane {
   }
 
   /**
-   * Topics page (LOCK-D2/D3/D4):
+   * Topics page (LOCK-D2/D3/D4, LOCK-OWN-1/2):
    * - Accept only id/messages/deletedAt; ignore leaked UI topic metadata.
    * - Extract embedded messages; never store `messages` in topics.extra.
    * - Missing topic name/assistant/timestamps remain null.
    * - Each embedded message: strict required fields, JSON-safe shape,
-   *   topicId === outer topic id, sortOrder = array index, existing
+   *   non-empty-string topicId, sortOrder = array index, existing
    *   wireToMessage/overflow semantics preserved (no inference).
+   * - A PRESENT valid non-empty `message.topicId` that differs from the
+   *   outer `topic.id` is canonicalized to the outer topic on the projected
+   *   MessageData and counted (LOCK-OWN-1). Missing/empty/wrong-type still
+   *   reject; the raw JsonObject is never mutated.
    * - message.blocks: unique non-empty IDs registered in the block index.
    */
   private projectTopicsPage(items: JsonObject[]): StagedPage {
@@ -566,13 +672,15 @@ export class ChatImportDataPlane {
         requireNonEmptyString(msgJson, 'role', messageCtx)
         requireNonEmptyString(msgJson, 'status', messageCtx)
         requireNonEmptyString(msgJson, 'createdAt', messageCtx)
+        // LOCK-OWN-1: retain the STRICT non-empty-string requirement for
+        // `topicId` — missing/empty/number/null/object still reject as
+        // INVALID_ROW. Only a present valid non-empty string that differs
+        // from the authoritative outer topic is normalized (never moved to
+        // another topic): it is counted and the projected MessageData is
+        // canonicalized to the outer topic below.
         const msgTopicId = requireNonEmptyString(msgJson, 'topicId', messageCtx)
         if (msgTopicId !== topicId) {
-          throw new ChatImportDataPlaneError(
-            'OWNERSHIP_MISMATCH',
-            `${rowLabel(messageCtx)}: message.topicId '${msgTopicId}' does not match outer topic '${topicId}'`,
-            { tableName: 'topics', entityId: messageId }
-          )
+          staged.topicIdNormalizationCount += 1
         }
         if (this.messageTopicById.has(messageId) || stagedMessageIds.has(messageId)) {
           throw new ChatImportDataPlaneError(
@@ -600,6 +708,10 @@ export class ChatImportDataPlane {
         // Existing wire semantics preserve structured model and all unknown
         // message JSON (including `blocks`) in overflow (LOCK-D3).
         const messageData: MessageData = wireToMessage(msgJson)
+        // LOCK-OWN-1: the authoritative outer topic is ALWAYS projected —
+        // a matching value is a no-op, a valid stale value is canonicalized
+        // (never the embedded claim). The raw JsonObject is untouched.
+        messageData.topicId = topicId // outer Topic containment is authoritative
         messageData.sortOrder = m // array index is authoritative (LOCK-D3)
         staged.messages.push(messageData)
         stagedMessageIds.add(messageId)
@@ -611,15 +723,25 @@ export class ChatImportDataPlane {
   }
 
   /**
-   * message_blocks page (LOCK-D5):
+   * message_blocks page (LOCK-D5, LOCK-BLOCK-1):
    * - Strict required fields; must match the block-index owner.
+   * - Duplicate source block id detection takes precedence: after complete
+   *   row validation and BEFORE ownership/orphan classification, a block id
+   *   already seen on a committed page or staged on this page rejects as
+   *   DUPLICATE_RELATION — even a duplicate that would otherwise classify
+   *   as an orphan or an ownership mismatch.
+   * - Unreachable orphan canonicalization (LOCK-BLOCK-1): a row whose
+   *   block id appears in NO imported message.blocks[] registry AND whose
+   *   claimed `messageId` exists in NO imported message is SKIPPED at the
+   *   source projection boundary — never staged, never written, never
+   *   verified. A row claiming an EXISTING message stays OWNERSHIP_MISMATCH.
    * - sortOrder comes ONLY from the parent message.blocks index.
    * - Unknown/tool/content/file JSON preserved through wireToBlock.
    * - Target file references derived ONLY via projectFileReferences(block).
    */
   private projectBlocksPage(items: JsonObject[]): StagedPage {
     const staged = emptyStagedPage()
-    const stagedSeen = new Set<string>()
+    const stagedSourceSeen = new Set<string>()
 
     for (let i = 0; i < items.length; i++) {
       const baseCtx: RowContext = { tableName: 'message_blocks', index: i }
@@ -631,13 +753,38 @@ export class ChatImportDataPlane {
       requireNonEmptyString(raw, 'status', ctx)
       requireNonEmptyString(raw, 'createdAt', ctx)
 
-      const owner = this.blockOwnerById.get(blockId)
-      if (!owner) {
+      // LOCK-BLOCK-1 precedence: the duplicate source block id gate runs
+      // after complete row validation and BEFORE ownership/orphan
+      // classification. A duplicate row (committed across pages or staged
+      // on this page) always rejects as DUPLICATE_RELATION, even when it
+      // would otherwise classify as an orphan or ownership mismatch.
+      if (this.sourceSeenBlockIds.has(blockId) || stagedSourceSeen.has(blockId)) {
         throw new ChatImportDataPlaneError(
-          'OWNERSHIP_MISMATCH',
-          `${rowLabel(ctx)}: block is not referenced by any imported message`,
+          'DUPLICATE_RELATION',
+          `${rowLabel(ctx)}: duplicate message_blocks row for block '${blockId}'`,
           { tableName: 'message_blocks', entityId: blockId }
         )
+      }
+
+      const owner = this.blockOwnerById.get(blockId)
+      if (!owner) {
+        // LOCK-BLOCK-1 classification: skip only when the block id is
+        // referenced by NO imported message AND the claimed messageId
+        // exists in NO imported message. A row claiming an EXISTING
+        // message is not an orphan — it stays a strict OWNERSHIP_MISMATCH.
+        if (this.messageTopicById.has(messageId)) {
+          throw new ChatImportDataPlaneError(
+            'OWNERSHIP_MISMATCH',
+            `${rowLabel(ctx)}: block is not referenced by any imported message`,
+            { tableName: 'message_blocks', entityId: blockId }
+          )
+        }
+        // Skip: no target rows, no file references, no manifest evidence,
+        // no writer insert, no seen marker — aggregate count only.
+        stagedSourceSeen.add(blockId)
+        staged.sourceSeenBlockIds.push(blockId)
+        staged.orphanBlockSkipCount += 1
+        continue
       }
       if (owner.messageId !== messageId) {
         throw new ChatImportDataPlaneError(
@@ -646,18 +793,12 @@ export class ChatImportDataPlane {
           { tableName: 'message_blocks', entityId: blockId }
         )
       }
-      if (owner.seen || stagedSeen.has(blockId)) {
-        throw new ChatImportDataPlaneError(
-          'DUPLICATE_RELATION',
-          `${rowLabel(ctx)}: duplicate message_blocks row for block '${blockId}'`,
-          { tableName: 'message_blocks', entityId: blockId }
-        )
-      }
 
       const blockData: MessageBlockData = wireToBlock(raw)
       blockData.sortOrder = owner.sortOrder // parent index only (LOCK-D5)
       staged.blocks.push(blockData)
-      stagedSeen.add(blockId)
+      stagedSourceSeen.add(blockId)
+      staged.sourceSeenBlockIds.push(blockId)
       staged.seenBlockIds.push(blockId)
 
       // Target file references derived only via the existing projection.
