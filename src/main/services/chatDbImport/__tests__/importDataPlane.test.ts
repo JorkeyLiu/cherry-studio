@@ -679,6 +679,114 @@ describe('ChatImportDataPlane', () => {
   })
 
   // -------------------------------------------------------------------------
+  // cloneForWire-normalized realistic shape acceptance (LOCK-N5/N6)
+  // -------------------------------------------------------------------------
+
+  it('accepts a cloneForWire-normalized realistic topic/message/block shape and finalizes with manifest (LOCK-N5/N6/C4)', () => {
+    // This simulates the exact shape that arrives at the data plane after
+    // cloneForWire strips explicit undefined properties from Dexie rows.
+    // The shape must be accepted without error — proving the data plane
+    // handles the post-normalization payload correctly.
+    const plane = createImportDataPlane(db)
+
+    // LOCK-C4: Realistic topic with embedded message — optional fields that
+    // cloneForWire strips (assistantId, modelId, model, type, useful, askId,
+    // mentions, enabledMCPs, usage, metrics, multiModelMessageStyle,
+    // foldSelected) are OMITTED, not supplied as empty strings. This proves
+    // the data plane accepts the post-normalization payload where absent
+    // optional fields remain absent.
+    const normalizedTopic: JsonObject = {
+      id: 't-norm-1',
+      messages: [
+        {
+          id: 'm-norm-1',
+          role: 'user',
+          status: 'success',
+          content: 'Normalized realistic message (cloneForWire-stripped undefined fields)',
+          createdAt: '2026-08-01T00:00:00.000Z',
+          topicId: 't-norm-1',
+          blocks: ['b-norm-1', 'b-norm-2']
+          // All undefined fields (assistantId, modelId, model, type, useful,
+          // askId, mentions, enabledMCPs, usage, metrics, multiModelMessageStyle,
+          // foldSelected) are ABSENT — stripped by cloneForWire.
+        }
+      ],
+      deletedAt: null
+    }
+
+    // Realistic blocks (undefined error field already stripped by cloneForWire).
+    const normalizedBlock1: JsonObject = {
+      id: 'b-norm-1',
+      messageId: 'm-norm-1',
+      type: 'main_text',
+      content: 'Normalized block content (cloneForWire-stripped undefined error)',
+      status: 'success',
+      createdAt: '2026-08-01T00:00:00.000Z'
+      // error field ABSENT — stripped by cloneForWire.
+    }
+
+    const normalizedBlock2: JsonObject = {
+      id: 'b-norm-2',
+      messageId: 'm-norm-1',
+      type: 'tool',
+      content: { toolName: 'web_search', result: { hits: 3 } },
+      status: 'success',
+      createdAt: '2026-08-01T00:00:00.000Z'
+    }
+
+    // Process the normalized pages — must not throw.
+    plane.processPage(page('topics', [normalizedTopic]))
+    plane.processPage(page('message_blocks', [normalizedBlock1, normalizedBlock2]))
+
+    // Verify the data was accepted and committed.
+    const topicRow = db.select().from(schema.topics).where(eq(schema.topics.id, 't-norm-1')).get() as any
+    expect(topicRow).toBeDefined()
+
+    const msgRow = db.select().from(schema.messages).where(eq(schema.messages.id, 'm-norm-1')).get() as any
+    expect(msgRow).toBeDefined()
+    expect(msgRow.topicId).toBe('t-norm-1')
+
+    const block1Row = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, 'b-norm-1')).get() as any
+    expect(block1Row).toBeDefined()
+    expect(block1Row.messageId).toBe('m-norm-1')
+
+    const block2Row = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, 'b-norm-2')).get() as any
+    expect(block2Row).toBeDefined()
+    expect(block2Row.messageId).toBe('m-norm-1')
+
+    // Stats must reflect the accepted records.
+    const stats = plane.getCandidateImportStats()
+    expect(stats.topicCount).toBe(1)
+    expect(stats.messageCount).toBe(1)
+    expect(stats.blockCount).toBe(2)
+
+    // LOCK-C4: Finalize and assert source verification manifest/statistics
+    // proving accepted committed data. The manifest captures the complete
+    // target-equivalent evidence from committed pages.
+    const finalized = plane.finalize()
+    expect(finalized.candidateImportStats.topicCount).toBe(1)
+    expect(finalized.candidateImportStats.messageCount).toBe(1)
+    expect(finalized.candidateImportStats.blockCount).toBe(2)
+    expect(finalized.candidateImportStats.pageCount).toBe(2)
+
+    const manifest = plane.getSourceVerificationManifest()
+    expect(manifest.topics.count).toBe(1)
+    expect(manifest.messages.count).toBe(1)
+    expect(manifest.blocks.count).toBe(2)
+    expect(manifest.committedPageCount).toBe(2)
+    expect(Object.keys(manifest.topics.entries)).toEqual(['t-norm-1'])
+    expect(Object.keys(manifest.messages.entries)).toEqual(['m-norm-1'])
+    expect(Object.keys(manifest.blocks.entries).sort()).toEqual(['b-norm-1', 'b-norm-2'])
+
+    // Message block membership verified in manifest.
+    expect(manifest.blocks.entries['b-norm-1'].messageId).toBe('m-norm-1')
+    expect(manifest.blocks.entries['b-norm-2'].messageId).toBe('m-norm-1')
+
+    // Plane is finalized — further processing is rejected.
+    expect(() => plane.processPage(page('files', []))).toThrowError(/FINALIZED/)
+  })
+
+  // -------------------------------------------------------------------------
   // Source verification manifest (Phase 4.3.1, LOCK-4301/4302)
   // -------------------------------------------------------------------------
 

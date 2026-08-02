@@ -180,6 +180,47 @@ test.describe('Cherry Studio dev-origin ZIP full-flow import', () => {
         ).toBeGreaterThanOrEqual(1)
         console.log('[E2E] Dev-origin seed ZIP evidence:', JSON.stringify(seed.evidence, null, 2))
 
+        // LOCK-N8/N11/LOCK-F2: Verify explicit undefined own-properties
+        // survive real Chromium IndexedDB readback. The fixture THROWS inside
+        // Chromium if either predicate fails, so a passing seed proves
+        // survival; the assertions below re-require both durable booleans to
+        // be true on the returned evidence (LOCK-F3).
+        expect(
+          seed.evidence.readbackUndefinedEvidence.length,
+          'readback evidence must cover all undefined fields'
+        ).toBeGreaterThan(0)
+
+        // LOCK-F3: The E2E must assert BOTH booleans `.toBe(true)` for every
+        // entry. hasOwnProperty and valueIsUndefined are durable booleans
+        // that safely cross the serialization boundary (LOCK-C2).
+        for (const entry of seed.evidence.readbackUndefinedEvidence) {
+          expect(
+            entry.hasOwnProperty,
+            `LOCK-F3: evidence[${entry.store}/${entry.field}].hasOwnProperty must be true after readback`
+          ).toBe(true)
+          expect(
+            entry.valueIsUndefined,
+            `LOCK-F3: evidence[${entry.store}/${entry.field}].valueIsUndefined must be true after readback`
+          ).toBe(true)
+          expect(entry.store, `evidence[${entry.store}/${entry.field}].store must be truthy`).toBeTruthy()
+          expect(entry.field, `evidence[${entry.store}/${entry.field}].field must be truthy`).toBeTruthy()
+          expect(entry.recordId, `evidence[${entry.store}/${entry.field}].recordId must be truthy`).toBeTruthy()
+          // Expose the actual readback behavior for evidence.
+          console.log(
+            `[E2E] LOCK-N8 readback: store=${entry.store} field=${entry.field} ` +
+              `hasOwnProperty=${entry.hasOwnProperty} valueIsUndefined=${entry.valueIsUndefined}`
+          )
+        }
+
+        // At least the message nested fields and block field must be covered.
+        // LOCK-C3: multiModelMessageStyle is the canonical application field name.
+        const readbackFields = seed.evidence.readbackUndefinedEvidence.map((e) => `${e.store}/${e.field}`)
+        expect(readbackFields, 'must cover assistantId in messages').toContain('topics.messages[0]/assistantId')
+        expect(readbackFields, 'must cover multiModelMessageStyle in messages').toContain(
+          'topics.messages[0]/multiModelMessageStyle'
+        )
+        expect(readbackFields, 'must cover error in message_blocks').toContain('message_blocks/error')
+
         // --- 3. Start owned Vite dev server (LOCK-DEV-5) ---------------------
         // The seed server has fully stopped and port is free. Now acquire it
         // with our owned Vite server for the import reader.

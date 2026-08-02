@@ -29,6 +29,7 @@
  * Renderer does NOT auto-loop reads; Main drives paged iteration.
  */
 
+import { cloneForWire } from '@renderer/utils/jsonWire'
 import type { JsonObject } from '@shared/chatDb/types'
 import type { ChatImportEnvelope, DiscoveryResult, ReadPageResponse, SourceReadStats } from '@shared/chatImport/types'
 import type { LogLevel } from '@shared/config/logger'
@@ -601,12 +602,16 @@ async function handleReadPage(
       collection = table.toCollection().limit(effectivePageSize)
     }
 
-    const items: JsonObject[] = await collection.toArray()
+    const rawItems: JsonObject[] = await collection.toArray()
+    // LOCK-N2/N6: Recursively strip explicit undefined object properties
+    // (created by upgradeToV7 Dexie structured-clone rows) before IPC.
+    // Rejects undefined array elements and every other non-JSON value.
+    const items: JsonObject[] = rawItems.map((item) => cloneForWire(item))
     const nextCursor = computeNextCursor(items)
-    const hasMore = items.length === effectivePageSize
+    const hasMore = rawItems.length === effectivePageSize
 
     // Track counts for completion stats
-    tableReadCounts[tableName] = (tableReadCounts[tableName] || 0) + items.length
+    tableReadCounts[tableName] = (tableReadCounts[tableName] || 0) + rawItems.length
 
     return {
       tableName,

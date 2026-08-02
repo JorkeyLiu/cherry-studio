@@ -10,6 +10,8 @@
 > ⚠️ **ADR-8 策略更正（2026-07-20）**：Phase 4+ 的产品策略已更正为**外部应用兼容性导入**模型。原 in-place Dexie→SQLite shadow/cutover 模型已正式废弃。详见 Section 6 A-8。
 >
 > ✅ **Post-closure L2 dev-origin 兼容性实现完成（2026-08-02）**：精确 `http://localhost:5173` dev-origin 已在 L2 导入管线中实现（LOCK-DEV-1…8）。Chromium 41.2.1 自然将精确 `http://localhost:5173` 映射为 `IndexedDB/http_localhost_5173.indexeddb.leveldb`，与 `file://` origin 隔离。Main intake 分类精确 file__0/dev 映射并在 IPC/窗口/candidate 之前拒绝不支持/歧义/多个 origin。Renderer 验证精确 dev origin/path/no-search/no-hash；最终验证重构 application-owned exact URL fields 而非接受任意 URL 输入。Dev E2E PASS 1/1 51.2s；genuine file-origin PASS 1/1 53.4s。Phase 0–6 Done 状态不变；此为 closure 后兼容性实现，非 Phase 7。详见「Phase 6 交付收尾后发现：L2 dev-origin 兼容性缺口（已实现）」。
+>
+> ✅ **Post-closure L2 explicit-undefined JSON wire 兼容性修复完成（2026-08-02）**：L2 导入管线 renderer-boundary JSON wire 兼容边界已修复（LOCK-N2/N3/N5/N6/N8/N11 + LOCK-C2/C3/C4 + LOCK-F2/F3）。IndexedDB structured clone 保留显式 undefined own-properties；JSON wire 不允许 undefined；依赖中立工具 `src/renderer/src/utils/jsonWire.ts`（cloneForWire）递归省略 undefined 对象属性使可选 absent/undefined 等价，`SqliteMessageDataSource` 复用，import 页行在 `entryPoint.ts` Dexie toArray 后、IPC 前统一归一化；数组 undefined 与一切 exotic/non-JSON 值仍被拒绝；Main/shared validators 未放宽。Dev-origin E2E PASS 1/1 55.6s；genuine file-origin E2E PASS 1/1 51.8s；13/13 explicit undefined own-properties 经 Chromium IndexedDB readback 存活（hasOwnProperty/valueIsUndefined 均 true）。**原始真实用户 dev ZIP（native110/logical11、25 topics、candidate init 后 topics[0].messages[0].mentions undefined 失败）尚未在修复后重跑，不得声称成功**；全量最终验证完成（Node v24.12.0 ABI137 / pnpm 10.27.0）：`pnpm format` exit 0（1803 files，4 个预期文件首次 pass 被格式化、二次 pass clean）；`CI=true pnpm lint` exit 0 / 0 errors / 76 oxlint + 4 ESLint pre-existing warnings / node/web/aicore typecheck + i18n 通过；最终有效 `CI=true pnpm test` exit 0 / 318 files / 7148 passed / 72 skipped / 0 failed / 309.41s（初始全量 run 的单一 parseDataUrl <10ms timing failure 经 focused rerun 确认 flaky、由最终 clean 全量 run 取代）。Phase 0–6 Done 状态不变；此为 closure 后兼容性修复，非 Phase 7。详见「Phase 6 交付收尾后发现：L2 explicit-undefined JSON wire 兼容边界」。
 
 ---
 
@@ -910,7 +912,73 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **No product boundary change** | L2/L3 产品语义不变（LOCK-6001）；replace-all 语义不变（LOCK-6002）；隔离 import renderer 保留不变（LOCK-6023） |
 | **Cleanup residual** | Unique owned root ordinary cleanup；hard runner/machine failure 可能 leave disposable temp root，no broad automatic cleanup |
 | **Platform scope** | macOS-only（A-9）；Windows/Linux 未验证 |
-| **Test counts** | 早期全量 Node gate 在最终 doc 之前：7113+ passes；最终 gates 将在 docs 后运行，不声称尚未运行的最终计数 |
+| **Test counts** | 早期全量 Node gate 在最终 doc 之前：7113+ passes；最终有效 repository gates 已记录于下方 explicit-undefined 小节：Node v24.12.0 ABI137，`CI=true pnpm test` exit 0，318 files / 7148 passed / 72 skipped / 0 failed（format/lint 细节不在此重复） |
+
+#### Phase 6 交付收尾后发现：L2 explicit-undefined JSON wire 兼容边界（2026-08-02）— 已修复并验证
+
+> **定位**：本节为 Phase 6 closure（2026-07-31）与 L2 dev-origin 兼容性实现（2026-08-02）之后发现的 **L2 导入管线 JSON wire 兼容边界**修复记录：IndexedDB structured clone 保留显式 `undefined` own-properties，而 JSON wire 不允许 `undefined`，导致真实 dev-origin ZIP 在 candidate 阶段失败。记录原始真实 ZIP 失败/清理事实、实现位置、自动化验证证据、清理/ABI 纪律与残余风险。**不是 Phase 7**，不重开 Phase 0–6。Phase 0–6 Done 状态不变。
+
+##### 原始真实 ZIP 失败事实（2026-08-02，原始记录）
+
+| 属性 | 值 |
+|---|---|
+| **发现方式** | 用户原始真实 dev-origin ZIP 首次导入（非自动化 fixture） |
+| **进展到** | native110/logical11、25 topics、candidate init 开始 |
+| **失败点** | `topics[0].messages[0].mentions` 为显式 `undefined`（upgradeToV7 Dexie structured-clone 行形态） |
+| **失败机制** | Chromium IndexedDB **structured clone 保留显式 undefined own-properties**（hasOwnProperty=true / value===undefined）；这些行经 import renderer 分页 IPC 传输时，renderer-boundary 未在 IPC 前递归省略 → JSON wire（`undefined` 非法）拒绝，candidate 阶段失败 |
+| **清理事实** | candidate / live DB / session / workspace 清理正确；live `chat.db` 与源 ZIP 不受影响 |
+| **修复后状态** | 该原始真实 ZIP **尚未在修复后重跑**；不得声称成功；可能揭示更深层独立 legacy-data 问题 |
+
+##### 实现记录（2026-08-02，closure 后兼容性修复）
+
+| 属性 | 值 |
+|---|---|
+| **实现日期** | 2026-08-02 |
+| **定位** | Phase 6 closure 后兼容性修复，非 Phase 7；不重开 Phase 0–6 |
+| **Wire 兼容边界** | **IndexedDB structured clone 保留显式 undefined own-properties**；**JSON wire 不允许 undefined**；**renderer-boundary 递归省略（recursive omission）使可选字段 absent/undefined 等价**；**数组中的 undefined 与一切 exotic/non-JSON 值仍被拒绝**；**无 Main validator 放宽/默认/推断** |
+| **实现位置** | 依赖中立 renderer 工具 **`src/renderer/src/utils/jsonWire.ts`**（`cloneForWire`，dependency-neutral，无 services/databases/preload imports）；**`SqliteMessageDataSource` 复用**（renderer→Main IPC）；**所有 import 页行在 `entryPoint.ts` 的 `handleReadPage` 中经 Dexie `toArray` 之后、IPC 之前归一化**；**Main/shared validators 未改** |
+| **LOCK-N2** | `cloneForWire` 递归省略对象显式 `undefined` 属性（可选 absent/undefined 等价）；数组显式 undefined 元素与 sparse arrays 拒绝 |
+| **LOCK-N3** | 非 JSON 值全部拒绝（bigint/symbol/function/Date/Map/Set/TypedArray/NaN/Infinity/class instances/cyclic/depth>20） |
+| **LOCK-N5** | 共享依赖中立 renderer 工具：`jsonWire.ts` 同时被 `SqliteMessageDataSource`（renderer→Main IPC）与 chatImport entry point（Dexie→Main IPC）复用 |
+| **LOCK-N6** | import 页行归一化位置：`entryPoint.ts` `handleReadPage` 在 `toArray()` 后、`readPageResult` IPC 前对每行 `cloneForWire` |
+| **LOCK-N8** | 显式 undefined own-properties 为 upgradeToV7 structured-clone 行形态；fixture 在真实 Chromium IndexedDB 中写入并验证 readback 存活 |
+| **LOCK-N11** | E2E fixture 在 Chromium 内对每个 undefined 字段验证 hasOwnProperty 与 valueIsUndefined（false 时精确 throw） |
+| **LOCK-C2** | 跨进程证据仅携带 durable booleans（hasOwnProperty/valueIsUndefined），安全跨越序列化边界 |
+| **LOCK-C3** | `multiModelMessageStyle` 为 canonical application 字段名（消息 undefined 字段集精确匹配生产 Message 类型） |
+| **LOCK-C4** | `importDataPlane` 接受 cloneForWire-normalized 现实 topic/message/block 形态并以 manifest 终结（LOCK-N5/N6/C4） |
+| **LOCK-F2** | fixture 在 Chromium 内对 readback 违反精确 throw（false 的 readback 永远无法通过 fixture） |
+| **LOCK-F3** | E2E 对每条证据断言 `hasOwnProperty` 与 `valueIsUndefined` 均 `.toBe(true)` |
+| **Unchanged semantics** | Pipeline/state/cancel/promotion 语义不变；state chain：candidate-ready → verified-candidate → promoting → finalizing |
+| **ABI chain（LOCK-DEV-7 保持）** | Fresh Electron ABI145 build；host restored Node v24.12.0 ABI137 |
+
+##### 最终验证证据
+
+| 测试 | 结果 |
+|---|---|
+| Dev-origin E2E（`import-cherrystudio-dev-origin.spec.ts`，精确 `http://localhost:5173` fixture，fresh ABI145 build） | **PASS 1/1 55.6s** |
+| Genuine file-origin E2E（`import-cherrystudio-genuine.spec.ts`，packaged/file-origin fixture，origin 非回归） | **PASS 1/1 51.8s** |
+| Explicit undefined readback（真实 Chromium IndexedDB，LOCK-N8/N11/F2/F3） | **13/13 存活**：hasOwnProperty/valueIsUndefined 均 true（assistantId、modelId、model、type、useful、askId、mentions、enabledMCPs、usage、metrics、multiModelMessageStyle、foldSelected、message_blocks error） |
+| State chain（两 flow） | candidate-ready → verified-candidate → promoting → finalizing |
+| Original exit | Verified（original target process exited） |
+| Live DB 内容 | 含 source 非 baseline |
+| Rollback snapshot 内容 | 含 baseline 非 source |
+| Promotion artifacts/processes/ports/workspaces | 已清理 |
+| Host ABI | Restored Node v24.12.0 ABI137 |
+| 独立审计 | 生产修复 + 测试已实现，独立审计 pass |
+| **全量最终验证（Node v24.12.0 ABI137 / pnpm 10.27.0）** | 上述即实现/audit/runtime 证据；最终有效 gates：`pnpm format` exit 0（1803 files，4 个预期文件首次 pass 被格式化、二次 pass clean）；`CI=true pnpm lint` exit 0 / 0 errors / 76 oxlint + 4 ESLint pre-existing warnings / node/web/aicore typecheck + i18n 通过；`CI=true pnpm test` exit 0 / 318 files / 7148 passed / 72 skipped / 0 failed / 309.41s。初始全量 test run 的单一 parseDataUrl <10ms timing failure 经 focused rerun 确认为 flaky，由最终 clean 全量 run 取代 |
+
+##### 残余边界与风险
+
+| 边界 | 说明 |
+|---|---|
+| **原始真实 ZIP 未重跑** | 原始用户真实 dev-origin ZIP（native110/logical11、25 topics、candidate init 后 `topics[0].messages[0].mentions` undefined 失败）**尚未在修复后重跑**；不得声称其成功；重跑可能揭示更深层独立 legacy-data 问题 |
+| **Explicit undefined 边界** | 对象 own-property 显式 undefined 被 renderer-boundary 递归省略（absent/undefined 等价）；**数组内 undefined 与一切 exotic/non-JSON 值仍被拒绝**；Main/shared validators 未放宽/默认/推断 |
+| **Exact localhost:5173 only** | dev-origin 支持矩阵不变：精确 `http://localhost:5173` 支持；`127.0.0.1`/`::1`/其他主机/端口/歧义 origin fail closed（LOCK-DEV-1…8 保持） |
+| **Packaged file-only** | 生产构建不引入 HTTP origin 支持（不变） |
+| **No product boundary change** | L2/L3 产品语义（LOCK-6001）、replace-all（LOCK-6002）、隔离 import renderer 保留（LOCK-6023）不变 |
+| **Cleanup residual** | Unique owned root ordinary cleanup；hard runner/machine failure 可能 leave disposable temp root，no broad automatic cleanup（不变） |
+| **Platform scope** | macOS-only（A-9）；Windows/Linux 未验证（不变） |
+| **Full gates（最终验证完成）** | 全量 format/lint/test 最终计数已记录于「最终验证证据」（Node v24.12.0 ABI137 / pnpm 10.27.0：format exit 0；CI=true lint exit 0 / 0 errors；CI=true test exit 0 / 318 files / 7148 passed / 72 skipped / 0 failed / 309.41s）；无剩余 pending 最终计数 |
 
 #### Phase 6 Decision Locks（LOCK-6001…6036）
 
@@ -957,6 +1025,17 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **LOCK-DEV-6** | Real Chromium E2E fixture 自然生成 IndexedDB 目录，无需 rename/复制 origin 目录 |
 | **LOCK-DEV-7** | ABI chain：Fresh build pass；Electron ABI145 proven；host restored Node v24.12.0 ABI137 |
 | **LOCK-DEV-8** | File-origin regression 不变：genuine file-origin E2E PASS，packaged/file-origin 行为与 Phase 4.1 一致 |
+| **LOCK-N2** | `cloneForWire`（`src/renderer/src/utils/jsonWire.ts`）递归省略对象显式 `undefined` 属性（可选 absent/undefined 等价）；数组显式 undefined 元素与 sparse arrays 拒绝 |
+| **LOCK-N3** | 非 JSON 值全部拒绝（bigint/symbol/function/Date/Map/Set/TypedArray/NaN/Infinity/class instances/cyclic/depth>20） |
+| **LOCK-N5** | 共享依赖中立 renderer 工具：`jsonWire.ts` 同时被 `SqliteMessageDataSource`（renderer→Main IPC）与 chatImport entry point（Dexie→Main IPC）复用 |
+| **LOCK-N6** | import 页行归一化位置：`entryPoint.ts` `handleReadPage` 在 `toArray()` 后、`readPageResult` IPC 前对每行 `cloneForWire` |
+| **LOCK-N8** | 显式 undefined own-properties 为 upgradeToV7 structured-clone 行形态；fixture 在真实 Chromium IndexedDB 中写入并验证 readback 存活 |
+| **LOCK-N11** | E2E fixture 在 Chromium 内对每个 undefined 字段验证 hasOwnProperty 与 valueIsUndefined（false 时精确 throw） |
+| **LOCK-C2** | 跨进程证据仅携带 durable booleans（hasOwnProperty/valueIsUndefined），安全跨越序列化边界 |
+| **LOCK-C3** | `multiModelMessageStyle` 为 canonical application 字段名（消息 undefined 字段集精确匹配生产 Message 类型） |
+| **LOCK-C4** | `importDataPlane` 接受 cloneForWire-normalized 现实 topic/message/block 形态并以 manifest 终结（LOCK-N5/N6/C4） |
+| **LOCK-F2** | fixture 在 Chromium 内对 readback 违反精确 throw（false 的 readback 永远无法通过 fixture） |
+| **LOCK-F3** | E2E 对每条证据断言 `hasOwnProperty` 与 `valueIsUndefined` 均 `.toBe(true)` |
 
 ---
 
@@ -1241,6 +1320,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | **2026-07-31** | **Phase 6 交付收尾（closure）** | **本地 closure 完成（Done）**：B-class `import-cherrystudio-genuine.spec.ts` 1/1 PASS（fresh ABI145 build 后精确标准 Playwright 命令；host ABI137 恢复）；A-class 未重跑（历史证据，LOCK-MD2）；六个交付阻塞项修复（LOCK-MD5）；本地 gates 全 PASS（CI=true lint 0 errors；CI=true test 312 文件 / 7009 通过 / 72 跳过 / 0 失败，LOCK-MD6）；C-4/C-5/C-7 parked（LOCK-MD7）；独立 artifact audit pass-with-nonblocking；**push/remote CI 事实（LOCK-MD8，post-push 填写）**——分支已推送（remote SHA `89803503fc...`，upstream `origin/jorkey/refactor/sqlite-migration` 建立）；GitHub Actions runs for this branch = 0（**未运行/无 run**，非失败、非 green CI）；ci.yml push trigger 仅 `main`/`v1`、无 PR、无手动 dispatch；no-console baseline 注释为 resolved（LOCK-MD9） |
 | **2026-08-01** | **Post-closure 发现：L2 dev-origin 兼容性缺口** | Phase 6 closure 后发现 L2 导入管线 dev-origin 兼容性缺口：Cherry Studio ZIP 从 electron-vite dev 模式生成时 IndexedDB 为 `http_localhost_5173.indexeddb.leveldb`（dev origin）；ZIP intake（R-12）正确接受，但隔离 import renderer 固定通过 `file://` 协议加载，Chromium 将 `file://` origin 映射为 `file__0.indexeddb.leveldb`，discovery 失败（`[DISCOVERY_FAILED] CherryStudio database not found in isolated IndexedDB`）。failure 发生在 candidate DB 初始化/promotion 之前，live chat.db 不受影响。Phase 0–6 Done 状态不变；此为 closure 后兼容性修正项，非 Phase 7。B-class E2E 使用 production-format fixture（`file__0`），不受影响 |
 | **2026-08-02** | **Post-closure L2 dev-origin 兼容性实现完成（LOCK-DEV-1…8）** | 精确 `http://localhost:5173` dev-origin 已在 L2 导入管线中实现。Chromium 41.2.1 自然将精确 `http://localhost:5173` 映射为 `IndexedDB/http_localhost_5173.indexeddb.leveldb`，与 `file://` origin 隔离。Trusted URL 为 app-owned exact constant（`http://localhost:5173/src/windows/chatImport/chatImport.html`，LOCK-DEV-1）。Main intake 分类精确 file__0/dev 映射并在 IPC/窗口/candidate 之前拒绝不支持/歧义/多个 origin（LOCK-DEV-3）。Renderer 验证精确 dev origin/path/no-search/no-hash；最终验证重构 application-owned exact URL fields（LOCK-DEV-4…5）。Pipeline/state/cancel/promotion 语义不变。Real Chromium E2E fixture 自然生成无需 rename（LOCK-DEV-6）。Dev E2E PASS 1/1 51.2s；genuine file-origin PASS 1/1 53.4s；state chain discovering→candidate-ready→verified-candidate→promoting→finalizing；4 records；original exit/relaunch exact cleanup。Fresh build pass；Electron ABI145 proven；host restored Node v24.12.0 ABI137（LOCK-DEV-7…8）。Focused main 82 files/2309 pass/72 skip。Phase 0–6 Done 状态不变；非 Phase 7。文档更新：top-level 状态注释、A-8 Origin 支持边界、Phase 4.1 Origin 支持边界、post-closure section 转为实现记录、LOCK-DEV-1…8 决策锁 |
+| **2026-08-02** | **Post-closure L2 explicit-undefined JSON wire 兼容性修复完成（LOCK-N2/N3/N5/N6/N8/N11 + LOCK-C2/C3/C4 + LOCK-F2/F3）** | 原始真实 dev-origin ZIP 首次导入在 candidate init 后因 `topics[0].messages[0].mentions` 显式 `undefined` 失败（upgradeToV7 structured-clone 行形态）；Chromium IndexedDB structured clone 保留显式 undefined own-properties，JSON wire 不允许 undefined。修复：依赖中立 renderer 工具 `src/renderer/src/utils/jsonWire.ts`（`cloneForWire`，LOCK-N2/N3），`SqliteMessageDataSource` 复用（LOCK-N5），import 页行在 `entryPoint.ts` `handleReadPage` 于 `toArray()` 后、IPC 前归一化（LOCK-N6）；Main/shared validators 未改。自动化验证（fresh Electron ABI145 build）：dev-origin E2E 1/1 PASS 55.6s；genuine file-origin E2E 1/1 PASS 51.8s（origin 非回归）；13/13 explicit undefined own-properties 经真实 Chromium IndexedDB readback 存活（hasOwnProperty/valueIsUndefined 均 true，LOCK-N8/N11/F2/F3）；两 flow 均达 candidate-ready→verified-candidate→promoting→finalizing；original exited；live DB 含 source 非 baseline、rollback snapshot 含 baseline 非 source；promotion artifacts/processes/ports/workspaces 已清理；host ABI137 恢复。独立审计 pass。**原始真实用户 ZIP 尚未在修复后重跑，不得声称成功**；全量最终验证完成（Node v24.12.0 ABI137 / pnpm 10.27.0）：`pnpm format` exit 0（1803 files，4 个预期文件首次 pass 被格式化、二次 pass clean）；`CI=true pnpm lint` exit 0 / 0 errors / 76 oxlint + 4 ESLint pre-existing warnings / node/web/aicore typecheck + i18n 通过；最终有效 `CI=true pnpm test` exit 0 / 318 files / 7148 passed / 72 skipped / 0 failed / 309.41s（初始全量 run 的单一 parseDataUrl <10ms timing failure 经 focused rerun 确认 flaky、由最终 clean 全量 run 取代）。Phase 0–6 Done 状态不变；非 Phase 7。文档更新：top-level 状态注释、post-closure section 新增本修复记录、LOCK-N2/N3/N5/N6/N8/N11 + LOCK-C2/C3/C4 + LOCK-F2/F3 决策锁 |
 
 ---
 

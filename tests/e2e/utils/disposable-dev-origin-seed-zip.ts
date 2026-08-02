@@ -117,6 +117,41 @@ export interface DevOriginSeedZipEvidence {
   zipLdbEntryCount: number
   /** Entry names listed from the produced ZIP (pre-flight sample). */
   zipEntriesSample: string[]
+  /**
+   * LOCK-N8/N11: Readback evidence for explicit undefined own-properties.
+   * After writing objects with explicit `undefined` fields to Chromium
+   * IndexedDB, every representative field MUST read back as an own-property
+   * with value strictly `undefined` (LOCK-F2 throws inside Chromium on any
+   * other readback). The returned booleans are durable evidence of that
+   * requirement being met.
+   */
+  readbackUndefinedEvidence: ReadbackUndefinedEvidence[]
+}
+
+/**
+ * Evidence for a single explicit-undefined field's readback behavior.
+ *
+ * LOCK-C2: Cross-process evidence carries only durable booleans.
+ * `actualValue: unknown` is replaced by `valueIsUndefined: boolean` because
+ * `undefined` cannot safely survive Chromium structured-clone → Playwright
+ * page.evaluate serialization. The Chromium page asserts own-property and
+ * value-strictly-undefined locally, then returns boolean evidence.
+ */
+export interface ReadbackUndefinedEvidence {
+  /** Which store the record was read from. */
+  store: string
+  /** The record's primary key. */
+  recordId: string
+  /** The field name that was written with explicit `undefined`. */
+  field: string
+  /** Whether the field is an own-property after Chromium IndexedDB readback. */
+  hasOwnProperty: boolean
+  /**
+   * LOCK-C2: Whether the field's value is strictly `undefined` after readback.
+   * Computed inside Chromium (where the value IS accessible) and returned as a
+   * boolean so serialization never needs to carry `undefined`.
+   */
+  valueIsUndefined: boolean
 }
 
 export interface DisposableDevOriginSeedZip {
@@ -345,6 +380,8 @@ interface SeedEvaluateResult {
   verifiedKeys: Record<string, string[]>
   embeddedMessageIds: string[]
   settingsRecordCount: number
+  /** LOCK-N8/N11: Readback evidence for explicit undefined own-properties. */
+  readbackUndefinedEvidence: ReadbackUndefinedEvidence[]
 }
 
 async function seedIndexedDb(page: Page): Promise<SeedEvaluateResult> {
@@ -443,7 +480,22 @@ async function seedIndexedDb(page: Page): Promise<SeedEvaluateResult> {
                 content: 'Disposable dev-origin seed message (synthetic, not a real user backup)',
                 createdAt,
                 topicId: ids.topic,
-                blocks: [ids.block]
+                blocks: [ids.block],
+                // LOCK-N2/N8: Explicit undefined properties that replicate
+                // upgradeToV7 Dexie structured-clone rows. These must be
+                // stripped by cloneForWire before IPC to Main.
+                assistantId: undefined,
+                modelId: undefined,
+                model: undefined,
+                type: undefined,
+                useful: undefined,
+                askId: undefined,
+                mentions: undefined,
+                enabledMCPs: undefined,
+                usage: undefined,
+                metrics: undefined,
+                multiModelMessageStyle: undefined,
+                foldSelected: undefined
               }
             ],
             deletedAt: null
@@ -455,7 +507,9 @@ async function seedIndexedDb(page: Page): Promise<SeedEvaluateResult> {
             status: 'success',
             content: 'Disposable dev-origin seed block (synthetic, not a real user backup)',
             createdAt,
-            updatedAt: null
+            updatedAt: null,
+            // LOCK-N2/N8: Explicit undefined field from upgradeToV7.
+            error: undefined
           },
           topic_segments: {
             id: ids.segment,
@@ -522,13 +576,122 @@ async function seedIndexedDb(page: Page): Promise<SeedEvaluateResult> {
           ? (topicRecord!.messages as Array<{ id: string }>).map((m) => m.id)
           : []
 
+        // -------------------------------------------------------------------
+        // LOCK-N8/N11/LOCK-F2: Readback verification for explicit undefined
+        // own-properties. After writing objects with explicit `undefined`
+        // fields to Chromium IndexedDB, every representative field MUST read
+        // back as an own-property with value strictly `undefined`. Any other
+        // readback throws precisely inside Chromium, so a false readback can
+        // never pass the fixture.
+        // -------------------------------------------------------------------
+        const readbackUndefinedEvidence: Array<{
+          store: string
+          recordId: string
+          field: string
+          hasOwnProperty: boolean
+          valueIsUndefined: boolean
+        }> = []
+
+        // LOCK-C3: Message fields written with explicit undefined (nested in
+        // topic.messages[0]). Field names match the production Message type
+        // exactly — `multiModelMessageStyle` is the canonical application name.
+        const MESSAGE_UNDEFINED_FIELDS = [
+          'assistantId',
+          'modelId',
+          'model',
+          'type',
+          'useful',
+          'askId',
+          'mentions',
+          'enabledMCPs',
+          'usage',
+          'metrics',
+          'multiModelMessageStyle',
+          'foldSelected'
+        ]
+        if (Array.isArray(topicRecord?.messages) && topicRecord!.messages.length > 0) {
+          const msg = topicRecord!.messages[0] as Record<string, unknown>
+          for (const field of MESSAGE_UNDEFINED_FIELDS) {
+            // LOCK-C2/F2: Require own-property AND value-strictly-undefined
+            // INSIDE Chromium (where the value IS accessible). A readback
+            // where Chromium stripped or mutated the explicit undefined
+            // property is a hard fixture failure — throw precisely. Durable
+            // booleans still cross the serialization boundary.
+            const hop = Object.prototype.hasOwnProperty.call(msg, field)
+            const valueIsUndefined = hop && msg[field] === undefined
+            if (!hop || !valueIsUndefined) {
+              throw new Error(
+                `[E2E] LOCK-F2 READBACK VIOLATION: message field "${field}" on record ` +
+                  `"${ids.message}" (store topics.messages[0]) must survive Chromium ` +
+                  `IndexedDB readback as an explicit undefined own-property, but ` +
+                  `hasOwnProperty=${String(hop)} valueIsUndefined=${String(valueIsUndefined)}`
+              )
+            }
+            readbackUndefinedEvidence.push({
+              store: 'topics.messages[0]',
+              recordId: ids.message,
+              field,
+              hasOwnProperty: hop,
+              valueIsUndefined
+            })
+          }
+        } else {
+          throw new Error(
+            `[E2E] LOCK-F2 READBACK VIOLATION: source topic record "${ids.topic}" did not ` +
+              `read back with a non-empty messages array — cannot produce message ` +
+              `undefined-own-property evidence`
+          )
+        }
+
+        // Block field written with explicit undefined (message_blocks store)
+        const BLOCK_UNDEFINED_FIELDS = ['error']
+        const blockRecord = await new Promise<Record<string, unknown> | undefined>((resolve, reject) => {
+          const req = tx.db.transaction('message_blocks', 'readonly').objectStore('message_blocks').get(ids.block)
+          req.onsuccess = () => resolve(req.result as Record<string, unknown> | undefined)
+          req.onerror = () => reject(req.error ?? new Error('message_blocks readback failed'))
+        })
+        if (blockRecord) {
+          for (const field of BLOCK_UNDEFINED_FIELDS) {
+            // LOCK-C2/F2: Same hard requirement — explicit undefined must
+            // survive as an own-property, else throw precisely.
+            const hop = Object.prototype.hasOwnProperty.call(blockRecord, field)
+            const valueIsUndefined = hop && blockRecord[field] === undefined
+            if (!hop || !valueIsUndefined) {
+              throw new Error(
+                `[E2E] LOCK-F2 READBACK VIOLATION: block field "${field}" on record ` +
+                  `"${ids.block}" (store message_blocks) must survive Chromium IndexedDB ` +
+                  `readback as an explicit undefined own-property, but ` +
+                  `hasOwnProperty=${String(hop)} valueIsUndefined=${String(valueIsUndefined)}`
+              )
+            }
+            readbackUndefinedEvidence.push({
+              store: 'message_blocks',
+              recordId: ids.block,
+              field,
+              hasOwnProperty: hop,
+              valueIsUndefined
+            })
+          }
+        } else {
+          throw new Error(
+            `[E2E] LOCK-F2 READBACK VIOLATION: block record "${ids.block}" did not read ` +
+              `back from message_blocks — cannot produce block undefined-own-property evidence`
+          )
+        }
+
+        console.log(
+          `[E2E] LOCK-N8/N11 readback undefined evidence:`,
+          JSON.stringify(readbackUndefinedEvidence, null, 2)
+        )
+
         return {
           nativeVersion: targetVersion,
           stores,
           inserted,
           verifiedKeys,
           embeddedMessageIds,
-          settingsRecordCount
+          settingsRecordCount,
+          readbackUndefinedEvidence
         }
       } finally {
         db.close()
@@ -744,6 +907,7 @@ export async function createDisposableDevOriginSeedZip(ownedTmpRoot: string): Pr
         verifiedKeys: seeded.verifiedKeys,
         embeddedMessageIds: seeded.embeddedMessageIds,
         settingsRecordCount: seeded.settingsRecordCount,
+        readbackUndefinedEvidence: seeded.readbackUndefinedEvidence,
         originDir,
         ldbFileCount,
         zipEntryCount: preflight.entryCount,

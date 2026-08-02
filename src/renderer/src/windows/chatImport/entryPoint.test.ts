@@ -723,6 +723,234 @@ describe('boot ready/discover ordering (LOCK-Y1/Y2/Y4)', () => {
 })
 
 /**
+ * Focused tests for cloneForWire integration in the paged read flow
+ * (LOCK-N2/N5/N6).
+ *
+ * Proves that:
+ * - Success: items with explicit undefined properties are stripped before IPC.
+ * - Failure: non-JSON values (e.g., BigInt) in items produce READ_FAILED,
+ *   no page result, and the shared cleanup path runs (listeners unsubscribed,
+ *   DB closed).
+ */
+describe('cloneForWire integration in paged reads (LOCK-N2/N5/N6)', () => {
+  const PAGE_SIZE = 500
+
+  /** Create a fake DB whose rows contain explicit undefined properties. */
+  function createDbWithUndefinedRows() {
+    return {
+      table: (tableName: string) => {
+        const rows: Record<string, unknown>[] =
+          tableName === 'topics'
+            ? [
+                {
+                  id: 't-1',
+                  messages: [
+                    {
+                      id: 'm-1',
+                      role: 'user',
+                      status: 'success',
+                      content: 'hello',
+                      createdAt: '2026-01-01T00:00:00.000Z',
+                      topicId: 't-1',
+                      blocks: ['b-1'],
+                      // Explicit undefined fields (LOCK-N2/N8)
+                      assistantId: undefined,
+                      modelId: undefined,
+                      model: undefined,
+                      type: undefined,
+                      useful: undefined,
+                      askId: undefined,
+                      mentions: undefined,
+                      enabledMCPs: undefined,
+                      usage: undefined,
+                      metrics: undefined,
+                      multiModelMessageStyle: undefined,
+                      foldSelected: undefined
+                    }
+                  ],
+                  deletedAt: null
+                }
+              ]
+            : tableName === 'message_blocks'
+              ? [
+                  {
+                    id: 'b-1',
+                    messageId: 'm-1',
+                    type: 'text',
+                    status: 'success',
+                    content: 'block content',
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: null,
+                    // Explicit undefined field (LOCK-N2/N8)
+                    error: undefined
+                  }
+                ]
+              : []
+        return {
+          where: () => ({
+            above: () => ({
+              limit: (count: number) => ({
+                toArray: async () => rows.slice(0, count)
+              })
+            })
+          }),
+          toCollection: () => ({
+            limit: (count: number) => ({
+              toArray: async () => rows.slice(0, count)
+            })
+          })
+        }
+      }
+    }
+  }
+
+  /** Create a fake DB whose rows contain non-JSON values (BigInt). */
+  function createDbWithUnsafeRows() {
+    return {
+      table: () => ({
+        where: () => ({
+          above: () => ({
+            limit: () => ({
+              toArray: async () => [{ id: 't-1', bad: BigInt(42) }]
+            })
+          })
+        }),
+        toCollection: () => ({
+          limit: () => ({
+            toArray: async () => [{ id: 't-1', bad: BigInt(42) }]
+          })
+        })
+      })
+    }
+  }
+
+  it('strips explicit undefined properties from items via cloneForWire before IPC (LOCK-N2/N6)', async () => {
+    const harness = createFakeBridge()
+    const openDb = vi.fn().mockResolvedValue(createDbWithUndefinedRows())
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      openDb,
+      closeDb
+    })
+    harness.discoverCallbacks[0]('session-n2')
+    await flushMicrotasks()
+
+    // Read topics page — the DB returns rows with explicit undefined fields.
+    harness.readPageCallbacks[0]({ sessionId: 'session-n2', tableName: 'topics', cursor: null, pageSize: PAGE_SIZE })
+    await flushMicrotasks()
+
+    expect(harness.error).not.toHaveBeenCalled()
+    expect(harness.readPageResult).toHaveBeenCalledTimes(1)
+    const envelope = harness.readPageResult.mock.calls[0][0] as ChatImportEnvelope<ReadPageResponse>
+    expect(envelope.phase).toBe('reading')
+
+    // cloneForWire must have stripped all explicit undefined properties.
+    const items = envelope.data.items
+    expect(items).toHaveLength(1)
+    const topic = items[0]
+    // The topic itself should not have undefined properties.
+    expect(topic).not.toHaveProperty('badUndefined')
+    // The embedded message must have undefined fields stripped.
+    const msg = (topic as any).messages[0]
+    expect(msg).toEqual({
+      id: 'm-1',
+      role: 'user',
+      status: 'success',
+      content: 'hello',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      topicId: 't-1',
+      blocks: ['b-1']
+    })
+    // Verify each undefined field was stripped (not just equal).
+    expect(Object.prototype.hasOwnProperty.call(msg, 'assistantId')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(msg, 'modelId')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(msg, 'usage')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(msg, 'multiModelMessageStyle')).toBe(false)
+  })
+
+  it('strips undefined from nested block fields via cloneForWire (LOCK-N2/N6)', async () => {
+    const harness = createFakeBridge()
+    const openDb = vi.fn().mockResolvedValue(createDbWithUndefinedRows())
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      openDb,
+      closeDb
+    })
+    harness.discoverCallbacks[0]('session-n2-block')
+    await flushMicrotasks()
+
+    // Read message_blocks page.
+    harness.readPageCallbacks[0]({
+      sessionId: 'session-n2-block',
+      tableName: 'message_blocks',
+      cursor: null,
+      pageSize: PAGE_SIZE
+    })
+    await flushMicrotasks()
+
+    expect(harness.error).not.toHaveBeenCalled()
+    const envelope = harness.readPageResult.mock.calls[0][0] as ChatImportEnvelope<ReadPageResponse>
+    const block = envelope.data.items[0] as Record<string, unknown>
+    // The 'error' field was written as undefined, must be stripped.
+    expect(Object.prototype.hasOwnProperty.call(block, 'error')).toBe(false)
+    expect(block).toEqual({
+      id: 'b-1',
+      messageId: 'm-1',
+      type: 'text',
+      status: 'success',
+      content: 'block content',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: null
+    })
+  })
+
+  it('rejects non-JSON values with READ_FAILED and runs shared cleanup (LOCK-N2/N5)', async () => {
+    const harness = createFakeBridge()
+    const openDb = vi.fn().mockResolvedValue(createDbWithUnsafeRows())
+    const closeDb = vi.fn().mockResolvedValue(undefined)
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      openDb,
+      closeDb
+    })
+    harness.discoverCallbacks[0]('session-n2-fail')
+    await flushMicrotasks()
+
+    // Read page — cloneForWire will throw on BigInt.
+    harness.readPageCallbacks[0]({
+      sessionId: 'session-n2-fail',
+      tableName: 'topics',
+      cursor: null,
+      pageSize: PAGE_SIZE
+    })
+    await flushMicrotasks()
+
+    // READ_FAILED error sent, no page result.
+    expect(harness.readPageResult).not.toHaveBeenCalled()
+    expect(harness.error).toHaveBeenCalledTimes(1)
+    const envelope = harness.error.mock.calls[0][0] as ChatImportEnvelope<{ code: string; message: string }>
+    expect(envelope.phase).toBe('error')
+    expect(envelope.data.code).toBe('READ_FAILED')
+    expect(envelope.data.message).toContain('bigint')
+
+    // Shared cleanup path ran: listeners unsubscribed, DB closed.
+    expect(harness.unsubscribeCounts).toEqual({ discover: 1, readPage: 1, cancel: 1 })
+    expect(harness.discoverCallbacks).toHaveLength(0)
+    expect(harness.readPageCallbacks).toHaveLength(0)
+    expect(harness.cancelCallbacks).toHaveLength(0)
+    expect(closeDb).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
  * Focused regression tests for the production Dexie lifecycle defect
  * (LOCK-RP2/RP3/RP4).
  *
