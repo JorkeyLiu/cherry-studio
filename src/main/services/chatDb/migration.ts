@@ -56,6 +56,182 @@ export interface MigrationEntry {
   sql: string[]
 }
 
+// ===========================================================================
+// Derived search projection — single source of truth (LOCK-FTS-2)
+// ===========================================================================
+//
+// The migration 003 entry below is assembled from these named constants. The
+// candidate-only deferred rebuild helper (chatDbImport/ftsProjection.ts)
+// executes DERIVED_PROJECTION_DROP_SQL / DERIVED_PROJECTION_REBUILD_SQL from
+// the SAME constants — no duplicated strings, no reliance on the migration
+// array index. Migration 003 applied schema must remain byte/semantic
+// equivalent (LOCK-FTS-6).
+//
+// Object names are exported for object-inventory tests.
+// ===========================================================================
+
+/** Normalized content projection table created by migration 003. */
+export const MESSAGE_BLOCKS_NORMALIZED_TABLE = 'message_blocks_normalized'
+
+/** FTS5 trigram virtual table over normalized content created by migration 003. */
+export const MESSAGE_BLOCKS_FTS_TABLE = 'message_blocks_fts'
+
+/** Index on message_blocks_normalized(message_id) created by migration 003. */
+export const MESSAGE_BLOCKS_NORMALIZED_MESSAGE_ID_INDEX = 'message_blocks_normalized_message_id_idx'
+
+/** INSERT sync trigger created by migration 003. */
+export const MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER = 'message_blocks_normalized_insert'
+
+/** UPDATE sync trigger created by migration 003. */
+export const MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER = 'message_blocks_normalized_update'
+
+/** DELETE sync trigger created by migration 003. */
+export const MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER = 'message_blocks_normalized_delete'
+
+/**
+ * Fixed synthetic FTS MATCH smoke token (LOCK-SP-4). The candidate verifier
+ * and the readonly promotion gate both execute `MATCH ?` with this fixed
+ * token to prove the FTS5 virtual table is functionally queryable. It is a
+ * single lowercase alphanumeric word (trigram-tokenizer safe) that is NOT
+ * expected to match source content — a MATCH execution that does not throw
+ * proves the operator runs; completeness is proven by the structural/count/
+ * parity checks. Single source of truth so the verifier and the readonly
+ * gate cannot drift.
+ */
+export const FTS_SMOKE_TOKEN = 'chatdbsmoketoken'
+
+/**
+ * CREATE TABLE for the normalized projection (LOCK-FTS-2 single source).
+ * BYTE-IDENTICAL to the original migration 003 statement (LOCK-FTS-6).
+ */
+export const CREATE_MESSAGE_BLOCKS_NORMALIZED_SQL = `CREATE TABLE IF NOT EXISTS message_blocks_normalized (
+        block_id TEXT PRIMARY KEY REFERENCES message_blocks(id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL,
+        normalized_content TEXT NOT NULL
+      )`
+
+/**
+ * CREATE INDEX on message_id for joins (LOCK-FTS-2 single source).
+ * BYTE-IDENTICAL to the original migration 003 statement (LOCK-FTS-6).
+ */
+export const CREATE_MESSAGE_BLOCKS_NORMALIZED_MESSAGE_ID_INDEX_SQL = `CREATE INDEX IF NOT EXISTS message_blocks_normalized_message_id_idx ON message_blocks_normalized(message_id)`
+
+/**
+ * CREATE VIRTUAL TABLE for the FTS5 trigram index (LOCK-FTS-2 single source).
+ * BYTE-IDENTICAL to the original migration 003 statement (LOCK-FTS-6).
+ */
+export const CREATE_MESSAGE_BLOCKS_FTS_SQL = `CREATE VIRTUAL TABLE IF NOT EXISTS message_blocks_fts USING fts5(
+        block_id UNINDEXED,
+        normalized_content,
+        tokenize='trigram'
+      )`
+
+/**
+ * Backfill of message_blocks_normalized from canonical MAIN_TEXT rows with
+ * non-null content (LOCK-FTS-2 single source). BYTE-IDENTICAL to the
+ * original migration 003 statement (LOCK-FTS-6).
+ */
+export const BACKFILL_MESSAGE_BLOCKS_NORMALIZED_SQL = `INSERT INTO message_blocks_normalized (block_id, message_id, normalized_content)
+       SELECT
+         mb.id,
+         mb.message_id,
+         chatdb_normalize(mb.content)
+       FROM message_blocks mb
+       WHERE mb.type = 'main_text' AND mb.content IS NOT NULL`
+
+/**
+ * Backfill of message_blocks_fts from canonical MAIN_TEXT rows with non-null
+ * content (LOCK-FTS-2 single source). BYTE-IDENTICAL to the original
+ * migration 003 statement (LOCK-FTS-6).
+ */
+export const BACKFILL_MESSAGE_BLOCKS_FTS_SQL = `INSERT INTO message_blocks_fts (block_id, normalized_content)
+       SELECT
+         mb.id,
+         chatdb_normalize(mb.content)
+       FROM message_blocks mb
+       WHERE mb.type = 'main_text' AND mb.content IS NOT NULL`
+
+/**
+ * INSERT sync trigger (LOCK-FTS-6: post-rebuild behavior must match a
+ * trigger-maintained DB). BYTE-IDENTICAL to the original migration 003
+ * statement (LOCK-FTS-2 single source).
+ */
+export const CREATE_MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER_SQL = `CREATE TRIGGER IF NOT EXISTS message_blocks_normalized_insert
+       AFTER INSERT ON message_blocks
+       BEGIN
+         DELETE FROM message_blocks_normalized WHERE block_id = NEW.id;
+         DELETE FROM message_blocks_fts WHERE block_id = NEW.id;
+         INSERT INTO message_blocks_normalized (block_id, message_id, normalized_content)
+         SELECT NEW.id, NEW.message_id, chatdb_normalize(NEW.content)
+         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
+         INSERT INTO message_blocks_fts (block_id, normalized_content)
+         SELECT NEW.id, chatdb_normalize(NEW.content)
+         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
+       END`
+
+/**
+ * UPDATE sync trigger for content/type/message_id (LOCK-FTS-6). BYTE-IDENTICAL
+ * to the original migration 003 statement (LOCK-FTS-2 single source).
+ */
+export const CREATE_MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER_SQL = `CREATE TRIGGER IF NOT EXISTS message_blocks_normalized_update
+       AFTER UPDATE OF content, type, message_id ON message_blocks
+       BEGIN
+         DELETE FROM message_blocks_normalized WHERE block_id = NEW.id;
+         DELETE FROM message_blocks_fts WHERE block_id = NEW.id;
+         INSERT INTO message_blocks_normalized (block_id, message_id, normalized_content)
+         SELECT NEW.id, NEW.message_id, chatdb_normalize(NEW.content)
+         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
+         INSERT INTO message_blocks_fts (block_id, normalized_content)
+         SELECT NEW.id, chatdb_normalize(NEW.content)
+         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
+       END`
+
+/**
+ * DELETE sync trigger (LOCK-FTS-6). BYTE-IDENTICAL to the original migration
+ * 003 statement (LOCK-FTS-2 single source).
+ */
+export const CREATE_MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER_SQL = `CREATE TRIGGER IF NOT EXISTS message_blocks_normalized_delete
+       AFTER DELETE ON message_blocks
+       BEGIN
+         DELETE FROM message_blocks_normalized WHERE block_id = OLD.id;
+         DELETE FROM message_blocks_fts WHERE block_id = OLD.id;
+       END`
+
+/**
+ * Derived-object drops in the mandatory safe order (LOCK-FTS-3/4): triggers
+ * first (they reference the tables), then the FTS virtual table, then the
+ * normalized table (its message_id index auto-drops with the table).
+ * Candidate-only — migration 003 never drops.
+ */
+export const DERIVED_PROJECTION_DROP_SQL: readonly string[] = [
+  `DROP TRIGGER IF EXISTS ${MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER}`,
+  `DROP TRIGGER IF EXISTS ${MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER}`,
+  `DROP TRIGGER IF EXISTS ${MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER}`,
+  `DROP TABLE IF EXISTS ${MESSAGE_BLOCKS_FTS_TABLE}`,
+  `DROP TABLE IF EXISTS ${MESSAGE_BLOCKS_NORMALIZED_TABLE}`
+]
+
+/**
+ * Complete candidate rebuild sequence (LOCK-FTS-4): drop-if-exists in safe
+ * order → recreate normalized table/index/FTS → backfill normalized and FTS
+ * from canonical MAIN_TEXT/content-not-null rows → recreate the three sync
+ * triggers. Executed atomically and exactly once by the candidate-local
+ * helper (chatDbImport/ftsProjection.ts) AFTER the data plane finalizes and
+ * BEFORE any seal path. This is the single source of truth for the rebuild —
+ * identical bytes to a trigger-maintained (migration-003-applied) schema.
+ */
+export const DERIVED_PROJECTION_REBUILD_SQL: readonly string[] = [
+  ...DERIVED_PROJECTION_DROP_SQL,
+  CREATE_MESSAGE_BLOCKS_NORMALIZED_SQL,
+  CREATE_MESSAGE_BLOCKS_NORMALIZED_MESSAGE_ID_INDEX_SQL,
+  CREATE_MESSAGE_BLOCKS_FTS_SQL,
+  BACKFILL_MESSAGE_BLOCKS_NORMALIZED_SQL,
+  BACKFILL_MESSAGE_BLOCKS_FTS_SQL,
+  CREATE_MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER_SQL,
+  CREATE_MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER_SQL,
+  CREATE_MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER_SQL
+]
+
 /**
  * Registry of all known migrations in execution order.
  * New migrations MUST be appended at the end. Never reorder or remove entries.
@@ -378,80 +554,27 @@ export const MIGRATIONS: MigrationEntry[] = [
   //
   // LOCK-5125: FTS is a candidate accelerator, not semantic authority.
   // Every result must pass the shared exact regex matcher.
+  //
+  // LOCK-FTS-2: the derived-object DDL/backfill below is defined ONCE as
+  // named exported constants (DERIVED_PROJECTION_*) and shared verbatim by
+  // this migration and the candidate deferred-rebuild helper
+  // (chatDbImport/ftsProjection.ts). Never duplicate these strings elsewhere
+  // and never index MIGRATIONS to reach them — migration 003 applied schema
+  // must remain byte/semantic equivalent (LOCK-FTS-6).
   // =========================================================================
+
   {
     key: '003_fts5_normalized_search',
     description: 'FTS5 normalized search projection: block_normalized table, trigram FTS, and synchronization triggers',
     sql: [
-      // 1. Create projection table for normalized content
-      `CREATE TABLE IF NOT EXISTS message_blocks_normalized (
-        block_id TEXT PRIMARY KEY REFERENCES message_blocks(id) ON DELETE CASCADE,
-        message_id TEXT NOT NULL,
-        normalized_content TEXT NOT NULL
-      )`,
-
-      // 2. Create index on message_id for joins
-      `CREATE INDEX IF NOT EXISTS message_blocks_normalized_message_id_idx ON message_blocks_normalized(message_id)`,
-
-      // 3. Create FTS5 trigram virtual table (standalone, not content-linked)
-      `CREATE VIRTUAL TABLE IF NOT EXISTS message_blocks_fts USING fts5(
-        block_id UNINDEXED,
-        normalized_content,
-        tokenize='trigram'
-      )`,
-
-      // 4. Backfill existing MAIN_TEXT blocks transactionally
-      `INSERT INTO message_blocks_normalized (block_id, message_id, normalized_content)
-       SELECT
-         mb.id,
-         mb.message_id,
-         chatdb_normalize(mb.content)
-       FROM message_blocks mb
-       WHERE mb.type = 'main_text' AND mb.content IS NOT NULL`,
-
-      // 4b. Backfill FTS index
-      `INSERT INTO message_blocks_fts (block_id, normalized_content)
-       SELECT
-         mb.id,
-         chatdb_normalize(mb.content)
-       FROM message_blocks mb
-       WHERE mb.type = 'main_text' AND mb.content IS NOT NULL`,
-
-      // 5. Trigger: INSERT into message_blocks
-      `CREATE TRIGGER IF NOT EXISTS message_blocks_normalized_insert
-       AFTER INSERT ON message_blocks
-       BEGIN
-         DELETE FROM message_blocks_normalized WHERE block_id = NEW.id;
-         DELETE FROM message_blocks_fts WHERE block_id = NEW.id;
-         INSERT INTO message_blocks_normalized (block_id, message_id, normalized_content)
-         SELECT NEW.id, NEW.message_id, chatdb_normalize(NEW.content)
-         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
-         INSERT INTO message_blocks_fts (block_id, normalized_content)
-         SELECT NEW.id, chatdb_normalize(NEW.content)
-         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
-       END`,
-
-      // 6. Trigger: UPDATE of content, type, or message_id on message_blocks
-      `CREATE TRIGGER IF NOT EXISTS message_blocks_normalized_update
-       AFTER UPDATE OF content, type, message_id ON message_blocks
-       BEGIN
-         DELETE FROM message_blocks_normalized WHERE block_id = NEW.id;
-         DELETE FROM message_blocks_fts WHERE block_id = NEW.id;
-         INSERT INTO message_blocks_normalized (block_id, message_id, normalized_content)
-         SELECT NEW.id, NEW.message_id, chatdb_normalize(NEW.content)
-         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
-         INSERT INTO message_blocks_fts (block_id, normalized_content)
-         SELECT NEW.id, chatdb_normalize(NEW.content)
-         WHERE NEW.type = 'main_text' AND NEW.content IS NOT NULL;
-       END`,
-
-      // 7. Trigger: DELETE from message_blocks
-      `CREATE TRIGGER IF NOT EXISTS message_blocks_normalized_delete
-       AFTER DELETE ON message_blocks
-       BEGIN
-         DELETE FROM message_blocks_normalized WHERE block_id = OLD.id;
-         DELETE FROM message_blocks_fts WHERE block_id = OLD.id;
-       END`
+      CREATE_MESSAGE_BLOCKS_NORMALIZED_SQL,
+      CREATE_MESSAGE_BLOCKS_NORMALIZED_MESSAGE_ID_INDEX_SQL,
+      CREATE_MESSAGE_BLOCKS_FTS_SQL,
+      BACKFILL_MESSAGE_BLOCKS_NORMALIZED_SQL,
+      BACKFILL_MESSAGE_BLOCKS_FTS_SQL,
+      CREATE_MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER_SQL,
+      CREATE_MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER_SQL,
+      CREATE_MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER_SQL
     ]
   }
 ]

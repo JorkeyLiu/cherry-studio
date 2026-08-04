@@ -15,6 +15,7 @@ import type { JsonObject } from '@shared/chatDb'
 import { describe, expect, it } from 'vitest'
 
 import type { MessageBlockData } from '../domain/types'
+import { L2_TRASH_RETENTION_MARKER } from '../trashRetention'
 import {
   blocksToWire,
   blockToWire,
@@ -23,11 +24,13 @@ import {
   projectFileReferences,
   reconstructMessageBlockRelations,
   topicToWire,
+  topicToWireFull,
   wireToBlock,
   wireToBlockPatch,
   wireToMessage,
   wireToMessagePatch,
-  wireToTopic
+  wireToTopic,
+  wireToTopicMetadataPatch
 } from '../wireAdapters'
 
 describe('wireAdapters', () => {
@@ -82,6 +85,85 @@ describe('wireAdapters', () => {
       const wire = topicToWire(topic)
       expect(wire.assistantId).toBeNull()
       expect(wire.name).toBeNull()
+    })
+
+    // =========================================================================
+    // LOCK-TRASH-11: Main-internal retention marker is stripped from every
+    // public topic wire response (single wire-boundary stripping seam)
+    // =========================================================================
+
+    it('topicToWire strips the importer retention marker but keeps unrelated overflow (LOCK-TRASH-11)', () => {
+      const topic = wireToTopic({
+        id: 't-1',
+        assistantId: 'asst-1',
+        name: 'Imported',
+        deletedAt: '2026-08-01T00:00:00.000Z',
+        [L2_TRASH_RETENTION_MARKER]: '2026-08-04T00:00:00.000Z',
+        pinned: true,
+        prompt: 'p',
+        customKey: { keep: true }
+      })
+
+      // Main domain DTO retains the marker in overflow (never stripped at
+      // the domain boundary — only at the wire boundary).
+      expect(topic.overflow[L2_TRASH_RETENTION_MARKER]).toBe('2026-08-04T00:00:00.000Z')
+
+      const wire = topicToWire(topic)
+      expect(wire.id).toBe('t-1')
+      expect(wire[L2_TRASH_RETENTION_MARKER]).toBeUndefined()
+      // Unrelated overflow keys survive untouched.
+      expect(wire.pinned).toBe(true)
+      expect(wire.prompt).toBe('p')
+      expect(wire.customKey).toEqual({ keep: true })
+      expect(wire.overflow).toBeUndefined()
+    })
+
+    it('topicToWireFull strips the marker through the same seam (LOCK-TRASH-11)', () => {
+      const topic = wireToTopic({
+        id: 't-1',
+        assistantId: 'asst-1',
+        name: 'Imported',
+        deletedAt: '2026-08-01T00:00:00.000Z',
+        [L2_TRASH_RETENTION_MARKER]: '2026-08-04T00:00:00.000Z',
+        pinned: false,
+        isNameManuallyEdited: true
+      })
+
+      const wire = topicToWireFull(topic)
+      expect(wire.id).toBe('t-1')
+      expect(wire[L2_TRASH_RETENTION_MARKER]).toBeUndefined()
+      // Column + unrelated overflow keys remain.
+      expect(wire.name).toBe('Imported')
+      expect(wire.pinned).toBe(false)
+      expect(wire.isNameManuallyEdited).toBe(true)
+    })
+
+    it('does not mutate the domain DTO when stripping the marker (LOCK-TRASH-11)', () => {
+      const topic = wireToTopic({
+        id: 't-1',
+        [L2_TRASH_RETENTION_MARKER]: '2026-08-04T00:00:00.000Z',
+        pinned: true
+      })
+      const before = { ...topic.overflow }
+      topicToWire(topic)
+      topicToWireFull(topic)
+      // Domain overflow is untouched — Main still owns the marker.
+      expect(topic.overflow).toEqual(before)
+      expect(topic.overflow[L2_TRASH_RETENTION_MARKER]).toBe('2026-08-04T00:00:00.000Z')
+    })
+
+    it('topicToWire/topicToWireFull pass through topics without a marker unchanged (LOCK-TRASH-11)', () => {
+      const topic = wireToTopic({
+        id: 't-1',
+        name: 'Plain',
+        pinned: true
+      })
+      const wire = topicToWire(topic)
+      expect(wire.id).toBe('t-1')
+      expect(wire.name).toBe('Plain')
+      expect(wire.pinned).toBe(true)
+      expect(wire[L2_TRASH_RETENTION_MARKER]).toBeUndefined()
+      expect(topicToWireFull(topic)).toEqual(wire)
     })
   })
 
@@ -574,6 +656,47 @@ describe('wireAdapters', () => {
       const patch = wireToMessagePatch({ model: 'gpt-4' })
       expect(patch.model).toBe('gpt-4')
       expect(patch.overflow).toBeUndefined()
+    })
+  })
+
+  // =========================================================================
+  // wireToTopicMetadataPatch (LOCK-TRASH-4: marker key is not renderer mutable)
+  // =========================================================================
+
+  describe('wireToTopicMetadataPatch', () => {
+    it('maps name to columns and pinned/prompt/isNameManuallyEdited to overflow', () => {
+      const patch = wireToTopicMetadataPatch({
+        topicId: 't-1',
+        name: 'Renamed',
+        pinned: true,
+        prompt: 'p',
+        isNameManuallyEdited: false
+      })
+      expect(patch.columns).toEqual({ name: 'Renamed' })
+      expect(patch.overflow).toEqual({ pinned: true, prompt: 'p', isNameManuallyEdited: false })
+    })
+
+    it('cannot set or clear the importer L2 retention marker (LOCK-TRASH-4)', () => {
+      // The internal marker key is not a mutable topic metadata field — a
+      // hostile renderer patch that smuggles the key is dropped entirely.
+      const patch = wireToTopicMetadataPatch({
+        topicId: 't-1',
+        name: 'Renamed',
+        l2TrashRetentionStartedAt: '2099-01-01T00:00:00.000Z'
+      })
+      expect(patch.columns).toEqual({ name: 'Renamed' })
+      expect(patch.overflow).toEqual({})
+    })
+
+    it('drops identity and unknown fields', () => {
+      const patch = wireToTopicMetadataPatch({
+        topicId: 't-1',
+        deletedAt: '2020-01-01T00:00:00.000Z',
+        assistantId: 'hacked',
+        someRandomKey: 'value'
+      })
+      expect(patch.columns).toEqual({})
+      expect(patch.overflow).toEqual({})
     })
   })
 })

@@ -36,6 +36,7 @@ import {
   type RecoveryExecutionPrimitives,
   type RecoveryExecutorResult
 } from './recoveryExecutor'
+import type { RestartMode } from './restart'
 
 const logger = loggerService.withContext('chatDbImportPromotionGate')
 
@@ -57,6 +58,13 @@ export interface StartupRecoveryGateResult {
   readonly repairRequired: boolean
   /** Whether a relaunch is pending (process will exit). */
   readonly relaunchPending: boolean
+  /**
+   * LOCK-PROD-7: true when the recovery requested an in-process main
+   * renderer reload (non-packaged). At startup the window does not exist
+   * yet, so the reload is a bounded no-op and startup proceeds normally —
+   * the freshly created renderer applies the pending projection.
+   */
+  readonly inProcessReloadRequested: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +94,12 @@ export async function runStartupRecoveryGate(
     skipExecution?: boolean
     /** Test injection: override probe/decide/primitives. */
     primitives?: RecoveryExecutionPrimitives
+    /**
+     * LOCK-PROD-7 restart strategy override forwarded to the recovery
+     * executor. Defaults to packaged → relaunch, non-packaged → in-process
+     * renderer reload (resolved from `app.isPackaged`).
+     */
+    restartMode?: RestartMode
   }
 ): Promise<StartupRecoveryGateResult> {
   const dataRoot = options?.dataRoot ?? DATA_PATH
@@ -106,7 +120,8 @@ export async function runStartupRecoveryGate(
         decision: { action: 'keep-old-live', reason: 'NO_JOURNAL' },
         executorResult: null,
         repairRequired: false,
-        relaunchPending: false
+        relaunchPending: false,
+        inProcessReloadRequested: false
       }
     }
     if (journalResult.status === 'invalid') {
@@ -167,7 +182,8 @@ export async function runStartupRecoveryGate(
       decision,
       executorResult: null,
       repairRequired: true,
-      relaunchPending: false
+      relaunchPending: false,
+      inProcessReloadRequested: false
     }
   }
 
@@ -179,7 +195,8 @@ export async function runStartupRecoveryGate(
       decision,
       executorResult: null,
       repairRequired: false,
-      relaunchPending: false
+      relaunchPending: false,
+      inProcessReloadRequested: false
     }
   }
 
@@ -191,23 +208,38 @@ export async function runStartupRecoveryGate(
     liveDb: {
       isInitialised: () => liveDbIsInitialised
     },
-    primitives: options?.primitives
+    primitives: options?.primitives,
+    // LOCK-PROD-7: explicit stable injection wins; otherwise the executor
+    // resolves from `app.isPackaged` (packaged → relaunch, non-packaged →
+    // in-process renderer reload).
+    restartMode: options?.restartMode
   })
 
   const executorResult = await executor.run()
 
   // ======================================================================
-  // 7. Determine if relaunch is pending
+  // 7. Determine if relaunch / in-process reload is pending
   // ======================================================================
-  const relaunchPending =
+  // LOCK-PROD-7: a packaged relaunch terminates the process
+  // (relaunchPending). A non-packaged in-process reload keeps the process
+  // alive (inProcessReloadRequested) — at startup the window is created
+  // fresh afterwards, so no reload action is needed here.
+  let inProcessReloadRequested = false
+  let relaunchPending = false
+  if (
     executorResult.ok &&
     (executorResult.action.action === 'accept-verified-replacement' ||
       executorResult.action.action === 'restore-rollback-snapshot')
+  ) {
+    inProcessReloadRequested = executorResult.inProcessReload === true
+    relaunchPending = !inProcessReloadRequested
+  }
 
   return {
     decision,
     executorResult,
     repairRequired: false,
-    relaunchPending
+    relaunchPending,
+    inProcessReloadRequested
   }
 }

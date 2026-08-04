@@ -8,6 +8,7 @@
 import { and, asc, desc, eq, isNotNull, isNull, sql } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
+import { OVERFLOW_REMOVE } from '../domain/codec'
 import {
   decodeTopicTimestampCursor,
   encodeTopicTimestampCursor,
@@ -17,6 +18,7 @@ import {
 import { topicToRowPatch } from '../domain/mappers'
 import type { EntityPatchInput, TopicData } from '../domain/types'
 import { topics } from '../schema'
+import { L2_TRASH_RETENTION_MARKER } from '../trashRetention'
 import {
   type AffectedCount,
   assertNoIdentityChange,
@@ -117,7 +119,14 @@ export class TopicsRepository {
   }
 
   restore(id: string): AffectedCount {
-    return this.updatePatch(id, { deletedAt: null })
+    // LOCK-TRASH-8: restore clears deletedAt AND removes the importer-owned
+    // L2 retention marker from overflow (internal key cleanup via the
+    // existing overflow patch semantics). Runtime re-delete afterwards uses
+    // a fresh deletedAt with no stale marker.
+    return this.updatePatch(id, {
+      deletedAt: null,
+      overflow: { [L2_TRASH_RETENTION_MARKER]: OVERFLOW_REMOVE }
+    })
   }
 
   hardDelete(id: string): AffectedCount {
@@ -287,4 +296,56 @@ export class TopicsRepository {
       hasMore
     }
   }
+
+  /**
+   * LOCK-TRASH-10: narrow raw retention-page seam used ONLY by the trash
+   * purge. Extracts exactly id/deletedAt/extra so a malformed or non-object
+   * `extra` column can never abort the purge via the strict TopicData
+   * decoder. Same (deletedAt, id) keyset ordering and cursor encoding as
+   * {@link listTrashPage}; `extra` is returned raw and decoded safely by the
+   * caller (invalid-marker fallback). Never weakens normal TopicData reads.
+   */
+  listTrashRetentionPage(page: PageCursor): PageResult<TrashRetentionRow> {
+    const limit = validatePageLimit(page.limit)
+    const conditions = [isNotNull(topics.deletedAt)]
+    if (page.cursor) {
+      const decoded = decodeTopicTimestampCursor(page.cursor)
+      const ts = decoded.sortOrder
+      if (page.direction === 'asc') {
+        conditions.push(sql`(${topics.deletedAt}, ${topics.id}) > (${ts}, ${decoded.id})`)
+      } else {
+        conditions.push(sql`(${topics.deletedAt}, ${topics.id}) < (${ts}, ${decoded.id})`)
+      }
+    }
+    const where = and(...conditions)
+    const orderBy =
+      page.direction === 'asc' ? [asc(topics.deletedAt), asc(topics.id)] : [desc(topics.deletedAt), desc(topics.id)]
+    const items = this.db
+      .select({ id: topics.id, deletedAt: topics.deletedAt, extra: topics.extra })
+      .from(topics)
+      .where(where)
+      .orderBy(...orderBy)
+      .limit(limit + 1)
+      .all()
+    const hasMore = items.length > limit
+    const pageItems = hasMore ? items.slice(0, limit) : items
+    let nextCursor: string | undefined
+    if (hasMore && pageItems.length > 0) {
+      const last = pageItems[pageItems.length - 1]
+      nextCursor = encodeTopicTimestampCursor(last.deletedAt ?? '', last.id)
+    }
+    return {
+      items: pageItems.map((r) => ({ id: r.id, deletedAt: r.deletedAt, extra: r.extra })),
+      nextCursor,
+      hasMore
+    }
+  }
+}
+
+/** One raw soft-deleted topic row for the retention purge seam (LOCK-TRASH-10). */
+export interface TrashRetentionRow {
+  readonly id: string
+  readonly deletedAt: string | null
+  /** Raw `extra` JSON column — NOT decoded (malformed extra must not abort). */
+  readonly extra: string | null
 }

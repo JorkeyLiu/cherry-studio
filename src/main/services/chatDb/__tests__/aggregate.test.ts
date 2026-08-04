@@ -18,7 +18,8 @@ vi.unmock('node:crypto')
 
 vi.mock('@main/config', () => ({ DATA_PATH: '/mock/data' }))
 
-import { isSuccess } from '@shared/chatDb'
+import { loggerService } from '@logger'
+import { ERR_VALIDATION, isSuccess, MAX_ARRAY_LENGTH, validateChatDbResult } from '@shared/chatDb'
 import Database from 'better-sqlite3'
 import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
 
@@ -267,6 +268,79 @@ describe('ChatDbAggregateService', () => {
       const result = agg.fetchMessages(topicId)
       expect(result.ok).toBe(true)
       expect(okValue(result).messages[0].blocks).toEqual([blk1.id, blk2.id])
+    })
+
+    it('round-trips a block with a >1 MiB nested string (LOCK-LB-5)', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      const big = 'x'.repeat(2 * 1024 * 1024 + 700_000) // ~2.67 MiB
+      const blk = makeBlockJson(msg.id as string, 'main_text', { content: big })
+
+      agg.appendMessage(topicId, msg as any, [blk as any])
+
+      const result = agg.fetchMessages(topicId)
+      expect(result.ok).toBe(true)
+      const value = okValue(result)
+      expect(value.blocks).toHaveLength(1)
+      expect(value.blocks[0].id).toBe(blk.id)
+      expect(value.blocks[0].content).toBe(big)
+      expect(value.messages[0].blocks).toEqual([blk.id])
+    })
+
+    it('passes a real >1 MiB block result through the fetchMessages contract (LOCK-LB-10)', () => {
+      const topicId = `t-${uid()}`
+      const msg = makeMessageJson(topicId)
+      const big = 'x'.repeat(2 * 1024 * 1024 + 700_000) // ~2.67 MiB
+      const blk = makeBlockJson(msg.id as string, 'main_text', { content: big })
+
+      agg.appendMessage(topicId, msg as any, [blk as any])
+
+      // The real aggregate result must satisfy the shared fetchMessages
+      // contract: plain-object value, exact keys, generic messages,
+      // block-profile blocks (>1 MiB string legal for blocks).
+      const result = agg.fetchMessages(topicId)
+      expect(() => validateChatDbResult('chatdb:fetch-messages', result as never)).not.toThrow()
+
+      // Target linkage is preserved through the contract-validated wire result.
+      const value = okValue(result)
+      expect(value.blocks).toHaveLength(1)
+      expect(value.blocks[0].id).toBe(blk.id)
+      expect(value.blocks[0].messageId).toBe(msg.id)
+      expect(value.messages).toHaveLength(1)
+      expect(value.messages[0].id).toBe(msg.id)
+      expect(value.messages[0].blocks).toEqual([blk.id])
+    })
+
+    it('rejects a generic oversized message through the fetchMessages contract (LOCK-LB-10)', () => {
+      const topicId = `t-${uid()}`
+      // Appended directly to the aggregate (IPC request caps do not run in
+      // this test), so fetchMessages yields a REAL oversized message that
+      // the shared contract must reject on the generic 1 MiB cap.
+      const msg = makeMessageJson(topicId, { content: 'x'.repeat(1024 * 1024 + 1) })
+      agg.appendMessage(topicId, msg as any, [])
+
+      const result = agg.fetchMessages(topicId)
+      expect(result.ok).toBe(true)
+      expect(() => validateChatDbResult('chatdb:fetch-messages', result as never)).toThrow(
+        /String length .* exceeds maximum/
+      )
+    })
+
+    it('rejects >100k messages/blocks arrays through the fetchMessages contract (LOCK-LB-10/7)', () => {
+      const sharedMessage = { id: 'm1' }
+      expect(() =>
+        validateChatDbResult('chatdb:fetch-messages', {
+          ok: true,
+          value: { messages: new Array(MAX_ARRAY_LENGTH + 1).fill(sharedMessage), blocks: [] }
+        })
+      ).toThrow(/Array length .* exceeds maximum/)
+      const sharedBlock = { id: 'b1' }
+      expect(() =>
+        validateChatDbResult('chatdb:fetch-messages', {
+          ok: true,
+          value: { messages: [], blocks: new Array(MAX_ARRAY_LENGTH + 1).fill(sharedBlock) }
+        })
+      ).toThrow(/Array length .* exceeds maximum/)
     })
 
     it('preserves overflow/unknown JSON fields', () => {
@@ -2018,6 +2092,408 @@ describe('ChatDbAggregateService', () => {
       // So it should NOT be purged
       const trash = agg.listTrashTopics()
       expect(okValue(trash).items.some((i: any) => i.id === t1)).toBe(true)
+    })
+  })
+
+  // =========================================================================
+  // L2 imported-trash five-day retention baseline (LOCK-TRASH-1..10)
+  // =========================================================================
+
+  describe('L2 imported-trash retention (LOCK-TRASH-1..10)', () => {
+    const MARKER = 'l2TrashRetentionStartedAt'
+    const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000
+
+    /** Directly rewrite a topic's deleted_at column (simulates import state). */
+    function setTopicDeletedAt(topicId: string, iso: string): void {
+      sqlite.prepare('UPDATE topics SET deleted_at = ? WHERE id = ?').run(iso, topicId)
+    }
+
+    /** Directly rewrite a topic's extra column (simulates import state). */
+    function setTopicExtra(topicId: string, extra: string | null): void {
+      sqlite.prepare('UPDATE topics SET extra = ? WHERE id = ?').run(extra, topicId)
+    }
+
+    /** Write a marker value (or invalid value) into a topic's overflow. */
+    function setMarker(topicId: string, value: unknown): void {
+      setTopicExtra(topicId, JSON.stringify({ [MARKER]: value }))
+    }
+
+    /**
+     * Create a topic in the imported soft-deleted shape: authoritative
+     * source deletedAt + importer-owned retention marker in overflow.
+     */
+    function createImportedDeletedTopic(deletedAt: string, marker: unknown): string {
+      const id = `t-imp-${uid()}`
+      agg.ensureTopic(id, 'assistant-r')
+      setTopicDeletedAt(id, deletedAt)
+      if (marker === null) {
+        setTopicExtra(id, null)
+      } else {
+        setMarker(id, marker)
+      }
+      return id
+    }
+
+    function purgeWarnSpy() {
+      return vi.spyOn(loggerService, 'warn').mockImplementation(() => undefined)
+    }
+
+    const nowMs = Date.now()
+    const cutoff = new Date(nowMs - FIVE_DAYS_MS).toISOString()
+    const oldDeletedAt = new Date(nowMs - 30 * 24 * 60 * 60 * 1000).toISOString()
+    const freshMarker = new Date(nowMs).toISOString()
+    const fourDay23hAgo = new Date(nowMs - (5 * 24 * 60 * 60 - 60 * 60) * 1000).toISOString()
+    const fiveDaysPlus1hAgo = new Date(nowMs - (5 * 24 * 60 * 60 + 60 * 60) * 1000).toISOString()
+
+    it('immediate purge after import retains a topic with old deletedAt + fresh marker (LOCK-TRASH-6)', () => {
+      const t = createImportedDeletedTopic(oldDeletedAt, freshMarker)
+      const result = agg.purgeExpiredTopics(cutoff)
+      expect(result.ok).toBe(true)
+      expect(okValue(agg.topicExists(t))).toBe(true)
+      const trash = agg.listTrashTopics()
+      expect(okValue(trash).items.some((i: any) => i.id === t)).toBe(true)
+    })
+
+    it('4d23h-old marker retains; >5d-old marker purges (LOCK-TRASH-6)', () => {
+      const retained = createImportedDeletedTopic(oldDeletedAt, fourDay23hAgo)
+      const purged = createImportedDeletedTopic(oldDeletedAt, fiveDaysPlus1hAgo)
+
+      const result = agg.purgeExpiredTopics(cutoff)
+      expect(result.ok).toBe(true)
+      expect(okValue(agg.topicExists(retained))).toBe(true)
+      expect(okValue(agg.topicExists(purged))).toBe(false)
+    })
+
+    it('marker older than deletedAt → effective start = deletedAt (max, LOCK-TRASH-6)', () => {
+      // deletedAt is 3 days ago (> cutoff) while the marker is 60 days ago.
+      const threeDaysAgo = new Date(nowMs - 3 * 24 * 60 * 60 * 1000).toISOString()
+      const sixtyDaysAgo = new Date(nowMs - 60 * 24 * 60 * 60 * 1000).toISOString()
+      const t = createImportedDeletedTopic(threeDaysAgo, sixtyDaysAgo)
+
+      const result = agg.purgeExpiredTopics(cutoff)
+      expect(result.ok).toBe(true)
+      // max(3d ago, 60d ago) = 3d ago > cutoff → retained.
+      expect(okValue(agg.topicExists(t))).toBe(true)
+    })
+
+    it('future valid marker protects until its calculated window (LOCK-TRASH-6)', () => {
+      const futureMarker = new Date(nowMs + 10 * 24 * 60 * 60 * 1000).toISOString()
+      const t = createImportedDeletedTopic(oldDeletedAt, futureMarker)
+
+      const result = agg.purgeExpiredTopics(cutoff)
+      expect(result.ok).toBe(true)
+      expect(okValue(agg.topicExists(t))).toBe(true)
+    })
+
+    it('exact-cutoff effective start is retained (strictly earlier required)', () => {
+      const t = createImportedDeletedTopic(oldDeletedAt, cutoff)
+      const result = agg.purgeExpiredTopics(cutoff)
+      expect(result.ok).toBe(true)
+      expect(okValue(agg.topicExists(t))).toBe(true)
+    })
+
+    it('missing marker (L3 legacy) uses deletedAt exactly as before — purged, no warning', () => {
+      const warnSpy = purgeWarnSpy()
+      const t = createImportedDeletedTopic(oldDeletedAt, null)
+
+      const result = agg.purgeExpiredTopics(cutoff)
+      expect(result.ok).toBe(true)
+      expect(okValue(agg.topicExists(t))).toBe(false)
+      // LOCK-TRASH-7: no invalid-marker warning when nothing was invalid.
+      expect(
+        warnSpy.mock.calls.filter((c) => typeof c[0] === 'string' && String(c[0]).includes('retention marker'))
+      ).toHaveLength(0)
+      warnSpy.mockRestore()
+    })
+
+    it('invalid marker falls back to deletedAt and emits exactly one count-only warning', () => {
+      const warnSpy = purgeWarnSpy()
+      const t = createImportedDeletedTopic(oldDeletedAt, 'not-a-date')
+
+      const result = agg.purgeExpiredTopics(cutoff)
+      expect(result.ok).toBe(true)
+      // Invalid marker ignored → deletedAt (30d ago) is strictly earlier → purged.
+      expect(okValue(agg.topicExists(t))).toBe(false)
+
+      const matching = warnSpy.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && String(c[0]).includes('retention marker')
+      )
+      // LOCK-TRASH-7: exactly one count-only warning; no IDs, marker values,
+      // paths, or content.
+      expect(matching).toHaveLength(1)
+      const [message] = matching[0]
+      expect(String(message)).toContain('1 imported-topic retention marker')
+      expect(String(message)).not.toContain(t)
+      expect(String(message)).not.toContain('not-a-date')
+      warnSpy.mockRestore()
+    })
+
+    it('malformed extra never aborts the purge — invalid-marker fallback + one warning (LOCK-TRASH-10/7)', () => {
+      const warnSpy = purgeWarnSpy()
+      const t = `t-malformed-${uid()}`
+      agg.ensureTopic(t)
+      setTopicDeletedAt(t, oldDeletedAt)
+      setTopicExtra(t, '{ definitely not json')
+
+      const result = agg.purgeExpiredTopics(cutoff)
+      expect(result.ok).toBe(true)
+      expect(okValue(agg.topicExists(t))).toBe(false)
+
+      const matching = warnSpy.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && String(c[0]).includes('retention marker')
+      )
+      expect(matching).toHaveLength(1)
+      expect(String(matching[0][0])).toContain('1 imported-topic retention marker')
+      warnSpy.mockRestore()
+    })
+
+    it('drains all keyset pages even when retained rows dominate the first page (LOCK-TRASH-7)', () => {
+      const warnSpy = purgeWarnSpy()
+      // 120 retained rows (fresh marker → effective start now > cutoff) with
+      // RECENT deletedAt, so they sort FIRST in (deletedAt DESC, id DESC)
+      // pagination. 10 purgeable rows (no marker, old deletedAt) sort last.
+      const retained: string[] = []
+      const recentDeletedAt = new Date(nowMs - 60 * 60 * 1000).toISOString()
+      for (let i = 0; i < 120; i++) {
+        const id = `t-ret-${uid()}`
+        agg.ensureTopic(id, 'assistant-r')
+        setTopicDeletedAt(id, recentDeletedAt)
+        setMarker(id, freshMarker)
+        retained.push(id)
+      }
+      const purgeable: string[] = []
+      for (let i = 0; i < 10; i++) {
+        const id = `t-purge-${uid()}`
+        agg.ensureTopic(id, 'assistant-r')
+        setTopicDeletedAt(id, oldDeletedAt)
+        setTopicExtra(id, null)
+        purgeable.push(id)
+      }
+
+      const result = agg.purgeExpiredTopics(cutoff)
+      expect(result.ok).toBe(true)
+      for (const id of retained) expect(okValue(agg.topicExists(id))).toBe(true)
+      for (const id of purgeable) expect(okValue(agg.topicExists(id))).toBe(false)
+      // No invalid markers in this scenario → no warning.
+      expect(
+        warnSpy.mock.calls.filter((c) => typeof c[0] === 'string' && String(c[0]).includes('retention marker'))
+      ).toHaveLength(0)
+      warnSpy.mockRestore()
+    })
+
+    it('no invalid-marker warning on a failed purge; exactly one on the retry (LOCK-TRASH-7)', () => {
+      const warnSpy = purgeWarnSpy()
+      const t = createImportedDeletedTopic(oldDeletedAt, 'bad-marker')
+
+      // Force the purge transaction to abort (rollback) so no warning may
+      // fire for a failed purge.
+      sqlite.exec(`
+        CREATE TEMP TRIGGER abort_purge_retention_test
+        BEFORE DELETE ON topics
+        WHEN OLD.id = '${t}'
+        BEGIN
+          SELECT RAISE(ABORT, 'trigger-forced abort for purge retention test');
+        END;
+      `)
+
+      try {
+        const failed = agg.purgeExpiredTopics(cutoff)
+        expect(failed.ok).toBe(false)
+        expect(okValue(agg.topicExists(t))).toBe(true) // rolled back
+        expect(
+          warnSpy.mock.calls.filter((c) => typeof c[0] === 'string' && String(c[0]).includes('retention marker'))
+        ).toHaveLength(0)
+      } finally {
+        sqlite.exec('DROP TRIGGER IF EXISTS TEMP.abort_purge_retention_test')
+      }
+
+      // Retry after the abort: the purge succeeds and the invalid marker is
+      // counted exactly once (the failed attempt emitted nothing).
+      const retried = agg.purgeExpiredTopics(cutoff)
+      expect(retried.ok).toBe(true)
+      expect(okValue(agg.topicExists(t))).toBe(false)
+      const matching = warnSpy.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && String(c[0]).includes('retention marker')
+      )
+      expect(matching).toHaveLength(1)
+      expect(String(matching[0][0])).toContain('1 imported-topic retention marker')
+      warnSpy.mockRestore()
+    })
+
+    it('invalid cutoff rejects with typed validation semantics (ERR_VALIDATION, LOCK-TRASH-10)', () => {
+      const result = agg.purgeExpiredTopics('not-a-valid-cutoff')
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.error.code).toBe(ERR_VALIDATION)
+        expect(result.error.retryable).toBe(false)
+      }
+    })
+
+    // LOCK-TRASH-13: the purge cutoff must be a strict canonical UTC ISO
+    // timestamp with milliseconds — identical to the shared IPC contract.
+    // Parseable-but-non-canonical values reject as typed ERR_VALIDATION.
+    const NON_CANONICAL_CUTOFFS = [
+      '2026-08-04T00:00:00Z', // missing milliseconds
+      '2026-08-04', // date-only
+      '2026-08-04T00:00:00.000+00:00', // offset timezone (not Z)
+      '2026-08-04 00:00:00.000Z', // space separator
+      '2026-08-04T00:00:00.000', // no Z suffix
+      '2026-08-04T00:00:00.00Z' // 2-digit milliseconds
+    ]
+
+    it.each(NON_CANONICAL_CUTOFFS)(
+      'purgeExpiredTopics rejects parseable non-canonical cutoff %s with ERR_VALIDATION (LOCK-TRASH-13)',
+      (nonCanonical) => {
+        const result = agg.purgeExpiredTopics(nonCanonical)
+        expect(result.ok).toBe(false)
+        if (!result.ok) {
+          expect(result.error.code).toBe(ERR_VALIDATION)
+          expect(result.error.retryable).toBe(false)
+          // LOCK-PRIV-TRASH: the cutoff value never appears in the
+          // validation message — fixed static text only.
+          expect(result.error.message).not.toContain(nonCanonical)
+        }
+      }
+    )
+
+    it('purgeExpiredTopics accepts a strict canonical UTC ISO cutoff (LOCK-TRASH-13)', () => {
+      const t = createImportedDeletedTopic(oldDeletedAt, null)
+      const result = agg.purgeExpiredTopics(new Date(nowMs - FIVE_DAYS_MS).toISOString())
+      expect(result.ok).toBe(true)
+      expect(okValue(agg.topicExists(t))).toBe(false)
+    })
+
+    it('invalid-cutoff error message and logs never contain the cutoff value (LOCK-PRIV-TRASH)', () => {
+      const warnSpy = vi.spyOn(loggerService, 'warn').mockImplementation(() => undefined)
+      // A parseable non-canonical sentinel: if it ever leaked it would be
+      // trivially greppable in the error message and every mapped log.
+      const sentinel = '2099-08-04T00:00:00Z'
+
+      const result = agg.purgeExpiredTopics(sentinel)
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.error.code).toBe(ERR_VALIDATION)
+        // Fixed static message — no sentinel fragment.
+        expect(result.error.message).not.toContain(sentinel)
+        expect(result.error.message).not.toContain('2099')
+      }
+      // wrapResult context and mapped validation error both log through
+      // loggerService — none of them may carry the cutoff value.
+      for (const call of warnSpy.mock.calls) {
+        const text = call.map((c) => (typeof c === 'string' ? c : String(c))).join(' ')
+        expect(text).not.toContain(sentinel)
+        expect(text).not.toContain('2099-08-04T00:00:00')
+      }
+      warnSpy.mockRestore()
+    })
+
+    it('restore clears deletedAt AND removes the internal retention marker (LOCK-TRASH-8)', () => {
+      const t = createImportedDeletedTopic(oldDeletedAt, freshMarker)
+      const before = agg.getRawTopic(t)
+      expect(okValue(before)).not.toBeNull()
+
+      const restored = agg.restoreTopic(t)
+      expect(restored.ok).toBe(true)
+      const wire = okValue(restored) as any
+      expect(wire).not.toBeNull()
+      expect(wire.deletedAt ?? null).toBeNull()
+      // Marker removed from the stored overflow (internal key cleanup).
+      const row = sqlite.prepare('SELECT extra FROM topics WHERE id = ?').get(t) as { extra: string | null } | undefined
+      expect(row).toBeDefined()
+      expect(row!.extra).toBeNull()
+    })
+
+    it('runtime soft-delete never creates a marker; re-delete has no stale marker (LOCK-TRASH-8)', () => {
+      const t = `t-rt-${uid()}`
+      agg.ensureTopic(t, 'assistant-r')
+      agg.softDeleteTopic(t)
+      let row = sqlite.prepare('SELECT extra FROM topics WHERE id = ?').get(t) as { extra: string | null }
+      expect(row.extra).toBeNull() // no marker from runtime soft-delete
+
+      // Imported marker + restore, then a fresh runtime re-delete.
+      const imported = createImportedDeletedTopic(oldDeletedAt, freshMarker)
+      agg.restoreTopic(imported)
+      agg.softDeleteTopic(imported)
+      row = sqlite.prepare('SELECT extra FROM topics WHERE id = ?').get(imported) as { extra: string | null }
+      expect(row.extra).toBeNull() // stale marker removed at restore, none re-added
+      // The re-delete uses the NEW deletedAt: with a fresh deletedAt the topic
+      // is retained under the current cutoff.
+      const result = agg.purgeExpiredTopics(cutoff)
+      expect(result.ok).toBe(true)
+      expect(okValue(agg.topicExists(imported))).toBe(true)
+    })
+
+    it('explicit hard delete / empty trash ignore the retention marker as today (LOCK-TRASH-8)', () => {
+      const t = createImportedDeletedTopic(oldDeletedAt, freshMarker)
+      const empty = agg.emptyTrashTopics('assistant-r')
+      expect(empty.ok).toBe(true)
+      expect(okValue(agg.topicExists(t))).toBe(false)
+    })
+
+    it('updateTopicMetadata preserves the importer marker in overflow (renderer patch cannot clear it)', () => {
+      const t = createImportedDeletedTopic(oldDeletedAt, freshMarker)
+      const result = agg.updateTopicMetadata(t, 'Renamed', true, 'prompt', false)
+      expect(result.ok).toBe(true)
+      const row = sqlite.prepare('SELECT extra FROM topics WHERE id = ?').get(t) as { extra: string | null }
+      const overflow = JSON.parse(row.extra!) as Record<string, unknown>
+      expect(overflow[MARKER]).toBe(freshMarker)
+    })
+
+    // LOCK-TRASH-11: the importer-owned marker is stripped from EVERY public
+    // topic wire response (single wire-boundary stripping seam) while
+    // unrelated overflow keys survive; Main domain/DB still owns the marker.
+    it('listTrashTopics wire omits the marker but keeps unrelated overflow (LOCK-TRASH-11)', () => {
+      const id = `t-wire-${uid()}`
+      agg.ensureTopic(id, 'assistant-r')
+      setTopicDeletedAt(id, oldDeletedAt)
+      setTopicExtra(id, JSON.stringify({ [MARKER]: freshMarker, pinned: true, prompt: 'keep-me' }))
+
+      const trash = agg.listTrashTopics('assistant-r')
+      expect(trash.ok).toBe(true)
+      const item = okValue(trash).items.find((i: any) => i.id === id)
+      expect(item).toBeDefined()
+      // Marker never crosses the wire boundary.
+      expect((item as any)[MARKER]).toBeUndefined()
+      // Unrelated overflow keys survive untouched.
+      expect((item as any).pinned).toBe(true)
+      expect((item as any).prompt).toBe('keep-me')
+      // Main domain/DB retains the marker.
+      const row = sqlite.prepare('SELECT extra FROM topics WHERE id = ?').get(id) as { extra: string | null }
+      const overflow = JSON.parse(row.extra!) as Record<string, unknown>
+      expect(overflow[MARKER]).toBe(freshMarker)
+    })
+
+    it('restoreTopic wire never carries the marker key (LOCK-TRASH-11)', () => {
+      const t = createImportedDeletedTopic(oldDeletedAt, freshMarker)
+      const restored = agg.restoreTopic(t)
+      expect(restored.ok).toBe(true)
+      const wire = okValue(restored) as any
+      expect(wire).not.toBeNull()
+      expect(wire[MARKER]).toBeUndefined()
+    })
+
+    it('updateTopicMetadata wire omits the marker while the DB keeps it (LOCK-TRASH-11)', () => {
+      const t = createImportedDeletedTopic(oldDeletedAt, freshMarker)
+      const result = agg.updateTopicMetadata(t, 'Renamed', true, 'prompt', false)
+      expect(result.ok).toBe(true)
+      const wire = okValue(result) as any
+      expect(wire[MARKER]).toBeUndefined()
+      expect(wire.pinned).toBe(true)
+      expect(wire.name).toBe('Renamed')
+      // The marker is NOT stripped from the stored overflow — only from the
+      // wire output.
+      const row = sqlite.prepare('SELECT extra FROM topics WHERE id = ?').get(t) as { extra: string | null }
+      const overflow = JSON.parse(row.extra!) as Record<string, unknown>
+      expect(overflow[MARKER]).toBe(freshMarker)
+    })
+
+    it('resetAssistantTopics replacementTopic wire never carries the marker key (LOCK-TRASH-11)', () => {
+      const replacementTopicId = `t-repl-${uid()}`
+      const result = agg.resetAssistantTopics('assistant-r', replacementTopicId)
+      expect(result.ok).toBe(true)
+      const replacement = okValue(result).replacementTopic as any
+      expect(replacement.id).toBe(replacementTopicId)
+      expect(replacement[MARKER]).toBeUndefined()
     })
   })
 

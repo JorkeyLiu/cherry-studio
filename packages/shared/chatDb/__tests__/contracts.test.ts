@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import { chatDbContracts, getContract, validateChatDbRequest, validateChatDbResult, ValidationError } from '../index'
+import {
+  chatDbContracts,
+  getContract,
+  MAX_ARRAY_LENGTH,
+  validateChatDbRequest,
+  validateChatDbResult,
+  ValidationError
+} from '../index'
 
 // ===========================================================================
 // Contract registry completeness
@@ -360,6 +367,17 @@ describe('validateChatDbRequest — valid payloads', () => {
         isNameManuallyEdited: true
       })
     ).not.toThrow()
+  })
+
+  it('update-topic-metadata: rejects the internal L2 retention marker key (LOCK-TRASH-4 — not renderer mutable)', () => {
+    // The `l2TrashRetentionStartedAt` overflow key is importer-owned; the
+    // renderer metadata patch boundary must reject any attempt to set it.
+    expect(() =>
+      validateChatDbRequest('chatdb:update-topic-metadata', {
+        topicId: 't1',
+        l2TrashRetentionStartedAt: '2099-01-01T00:00:00.000Z'
+      })
+    ).toThrow(ValidationError)
   })
 
   it('soft-delete-topic: { topicId }', () => {
@@ -1633,6 +1651,198 @@ describe('validateChatDbResult — invalid envelopes', () => {
 })
 
 // ===========================================================================
+// LOCK-LB-5: fetchMessages result uses the block profile for `blocks` while
+// message objects and every other contract retain the generic 1 MiB caps.
+// ===========================================================================
+
+describe('fetch-messages block profile (LOCK-LB-5)', () => {
+  it('accepts a blocks array carrying a >1 MiB string', () => {
+    const big = 'x'.repeat(3 * 1024 * 1024) // 3 MiB UTF-8 — above generic 1 MiB
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: true,
+        value: {
+          messages: [{ id: 'm1', role: 'user', blocks: ['b1'] }],
+          blocks: [{ id: 'b1', messageId: 'm1', type: 'main_text', content: big, status: 'success' }]
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('accepts a blocks array at exactly the 16 MiB per-row budget', () => {
+    const half = 'x'.repeat(8 * 1024 * 1024 - 1)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [{ a: half, b: half }]
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('rejects a blocks string above the 8 MiB profile cap', () => {
+    const tooBig = 'x'.repeat(8 * 1024 * 1024 + 1)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [{ id: 'b1', content: tooBig }]
+        }
+      })
+    ).toThrow(/UTF-8 bytes exceeds maximum/)
+  })
+
+  it('rejects a blocks row above the 16 MiB cumulative cap', () => {
+    const eight = 'x'.repeat(8 * 1024 * 1024)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [{ a: eight, b: eight }]
+        }
+      })
+    ).toThrow(/Row cumulative UTF-8 size/)
+  })
+
+  it('rejects a blocks result above the 64 MiB aggregate cap', () => {
+    // 11 × ~6 MiB ≈ 66 MiB across the whole blocks result.
+    const blocks = Array.from({ length: 11 }, (_, i) => ({ id: `b${i}`, content: 'x'.repeat(6 * 1024 * 1024) }))
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: true,
+        value: { messages: [], blocks }
+      })
+    ).toThrow(/Aggregate UTF-8 size/)
+  })
+
+  it('keeps message objects on the generic 1 MiB caps (LOCK-LB-5)', () => {
+    const big = 'x'.repeat(1024 * 1024 + 1)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: true,
+        value: {
+          messages: [{ id: 'm1', content: big }],
+          blocks: []
+        }
+      })
+    ).toThrow(/String length .* exceeds maximum/)
+  })
+
+  it('keeps message objects JSON-safe under the generic caps even when blocks are large', () => {
+    const big = 'x'.repeat(2 * 1024 * 1024)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: true,
+        value: {
+          messages: [{ id: 'm1', content: new Date() }],
+          blocks: [{ id: 'b1', content: big }]
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('keeps blocks JSON-safe under the profile rejection set', () => {
+    const big = 'x'.repeat(2 * 1024 * 1024)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [{ id: 'b1', content: big, bad: undefined }]
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('keeps failure envelopes structurally validated for fetch-messages', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: false,
+        error: { code: 'ERR', message: 'm', retryable: false }
+      })
+    ).not.toThrow()
+  })
+
+  it('does not widen ANY other contract — large blocks still reject at 1 MiB (LOCK-LB-5)', () => {
+    const big = 'x'.repeat(1024 * 1024 + 1)
+    // append-message request with a large block
+    expect(() =>
+      validateChatDbRequest('chatdb:append-message', {
+        topicId: 't1',
+        message: { id: 'm1', role: 'user' },
+        blocks: [{ id: 'b1', messageId: 'm1', content: big }]
+      })
+    ).toThrow(ValidationError)
+    // bulk-add-blocks request with a large block
+    expect(() =>
+      validateChatDbRequest('chatdb:bulk-add-blocks', {
+        blocks: [{ id: 'b1', messageId: 'm1', content: big }]
+      })
+    ).toThrow(ValidationError)
+    // get-raw-topic result with a large embedded message string
+    expect(() =>
+      validateChatDbResult('chatdb:get-raw-topic', {
+        ok: true,
+        value: { id: 't1', messages: [{ id: 'm1', content: big }] }
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
+// ===========================================================================
+// LOCK-LB-8: fetchMessages success value must be a PLAIN object (Object.prototype
+// or null prototype) with exact keys only; >100k arrays reject via LOCK-LB-7.
+// ===========================================================================
+
+describe('fetch-messages success-value plain-object and cardinality (LOCK-LB-8/7)', () => {
+  it('rejects a class instance as the success value', () => {
+    class FetchValue {
+      messages: unknown[] = []
+      blocks: unknown[] = []
+    }
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: true,
+        value: new FetchValue() as never
+      })
+    ).toThrow(/plain object/)
+  })
+
+  it('accepts a null-prototype success value', () => {
+    const value = Object.create(null) as Record<string, unknown>
+    value.messages = []
+    value.blocks = []
+    expect(() => validateChatDbResult('chatdb:fetch-messages', { ok: true, value })).not.toThrow()
+  })
+
+  it('rejects a >100k messages array (generic cardinality)', () => {
+    const shared = { id: 'm1' }
+    const oversizedMessages = new Array(MAX_ARRAY_LENGTH + 1).fill(shared)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: true,
+        value: { messages: oversizedMessages, blocks: [] }
+      })
+    ).toThrow(/Array length .* exceeds maximum/)
+  })
+
+  it('rejects a >100k blocks array (block-profile cardinality)', () => {
+    const shared = { id: 'b1' }
+    const oversizedBlocks = new Array(MAX_ARRAY_LENGTH + 1).fill(shared)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-messages', {
+        ok: true,
+        value: { messages: [], blocks: oversizedBlocks }
+      })
+    ).toThrow(/Array length .* exceeds maximum/)
+  })
+})
+
+// ===========================================================================
 // Coverage consistency: every command must have both request and result validation
 // ===========================================================================
 
@@ -1758,6 +1968,60 @@ describe('purge-expired-topics: cutoffTimestamp validation', () => {
     expect(() =>
       validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: '2025-13-01T00:00:00.000Z' })
     ).toThrow(ValidationError)
+  })
+})
+
+// ===========================================================================
+// LOCK-PRIV-TRASH: purge cutoff validation error privacy
+//
+// Noncanonical/invalid purge cutoff values must never be interpolated into
+// validation errors, Main logs, or IPC error responses — static messages
+// only. Validation rule and error code are unchanged.
+// ===========================================================================
+
+describe('purge-expired-topics: cutoffTimestamp error privacy (LOCK-PRIV-TRASH)', () => {
+  const FORMAT_SENTINEL = 'PRIVSENTINEL-7F3A9C2B-format'
+  const DATE_SENTINEL = '2099-13-01T00:00:00.000Z'
+
+  it('format-rejection message is static and omits the supplied value', () => {
+    let message = ''
+    try {
+      validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: FORMAT_SENTINEL })
+      throw new Error('expected validation to fail')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError)
+      message = (error as Error).message
+    }
+    // Fixed path/family text present…
+    expect(message).toContain('Expected canonical ISO 8601 timestamp (YYYY-MM-DDTHH:mm:ss.sssZ)')
+    // …and the supplied value is never echoed.
+    expect(message).not.toContain(FORMAT_SENTINEL)
+  })
+
+  it('invalid-date message is static and omits the supplied value', () => {
+    let message = ''
+    try {
+      validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: DATE_SENTINEL })
+      throw new Error('expected validation to fail')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError)
+      message = (error as Error).message
+    }
+    expect(message).toContain('Invalid ISO 8601 timestamp (date out of range)')
+    expect(message).not.toContain(DATE_SENTINEL)
+  })
+
+  it('non-string rejection message is static (type only, no value)', () => {
+    let message = ''
+    try {
+      validateChatDbRequest('chatdb:purge-expired-topics', { cutoffTimestamp: 12345 })
+      throw new Error('expected validation to fail')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError)
+      message = (error as Error).message
+    }
+    expect(message).toContain('Expected a string, got number')
+    expect(message).not.toContain('12345')
   })
 })
 

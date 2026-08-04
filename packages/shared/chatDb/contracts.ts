@@ -55,11 +55,13 @@ import type {
   UpsertSegmentRequest
 } from './types'
 import {
+  BLOCK_JSON_PROFILE,
   validateIdField,
   validateIndex,
   validateIso8601Timestamp,
   validateJsonObject,
   validateJsonObjectArray,
+  validateJsonObjectArrayBlock,
   validateMessageIdField,
   validateNoIdentityFields,
   validateNonEmptyString,
@@ -143,7 +145,12 @@ const fetchMessagesContract: ChatDbContract = {
     validateNonEmptyString(req.topicId, 'request.topicId')
   },
   validateResult(result: unknown): void {
-    validateResultEnvelope(result, 'chatdb:fetch-messages')
+    // LOCK-LB-5: the success value is validated per-array below — message
+    // objects retain the generic caps, while the `blocks` array is validated
+    // with the named block-specific profile (per-string 8 MiB, per-row
+    // 16 MiB, 64 MiB per result). The envelope-level generic walk is skipped
+    // so its 1 MiB string cap cannot reject legitimate large blocks.
+    validateResultEnvelope(result, 'chatdb:fetch-messages', { skipValueValidation: true })
     const obj = result as Record<string, unknown>
     if (obj.ok === true) {
       const value = obj.value
@@ -152,6 +159,12 @@ const fetchMessagesContract: ChatDbContract = {
           'result.value',
           '[chatdb:fetch-messages] Expected object with "messages" and "blocks"'
         )
+      }
+      // LOCK-LB-8: the success value must be a PLAIN object — Object.prototype
+      // or null prototype — never a class instance.
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:fetch-messages] Success value must be a plain object')
       }
       const v = value as Record<string, unknown>
       for (const key of Object.keys(v)) {
@@ -162,8 +175,11 @@ const fetchMessagesContract: ChatDbContract = {
           )
         }
       }
+      // Message objects stay on the generic 1 MiB caps (LOCK-LB-5).
       validateJsonObjectArray(v.messages, 'result.value.messages')
-      validateJsonObjectArray(v.blocks, 'result.value.blocks')
+      // Blocks use the block-specific profile with a shared 64 MiB result
+      // aggregate budget (LOCK-LB-1/4/5).
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
     }
   }
 }

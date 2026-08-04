@@ -53,6 +53,56 @@ vi.mock('@renderer/services/db', () => ({
   }
 }))
 
+// messageThunk cold-loads DbService (Dexie/SQLite data sources, chatDb IPC,
+// FileLock) at import time via `DbService.getInstance()`; clearTopicMessagesThunk
+// only uses dbService.clearMessages, so mock the class per sibling pattern.
+vi.mock('@renderer/services/db/DbService', () => ({
+  DbService: {
+    getInstance: () => ({})
+  }
+}))
+
+// Remaining heavy vendor graph (AI SDK, OpenTelemetry, FileManager, AI core
+// providers) is unused by clearTopicMessagesThunk — mock the static-import
+// leaves to keep cold import far below the 20s test timeout.
+vi.mock('@renderer/aiCore/chunk/AiSdkToChunkAdapter', () => ({
+  AiSdkToChunkAdapter: class {}
+}))
+
+vi.mock('@renderer/hooks/useModel', () => ({
+  getModel: vi.fn()
+}))
+
+vi.mock('@renderer/services/ApiService', () => ({
+  fetchMessagesSummary: vi.fn(),
+  transformMessagesAndFetch: vi.fn()
+}))
+
+vi.mock('@renderer/services/FileManager', () => ({
+  default: {
+    deleteFile: vi.fn()
+  }
+}))
+
+vi.mock('@renderer/services/SpanManagerService', () => ({
+  endSpan: vi.fn()
+}))
+
+// clearTopicMessagesThunk only uses `uuid` from the utils barrel; the barrel's
+// re-exports pull browser-image-compression / html-to-image / mime-types / i18n.
+// Mock per sibling streamCallback.integration.test.ts pattern.
+vi.mock('@renderer/utils', () => ({
+  default: {},
+  uuid: vi.fn(() => 'test-uuid')
+}))
+
+// messageThunk statically imports createCallbacks which loads 8 callback
+// sub-modules (i18n, TokenService, contextInfoService, NotificationService,
+// EventService, analytics). Not exercised by clearTopicMessagesThunk.
+vi.mock('@renderer/services/messageStreaming/callbacks', () => ({
+  createCallbacks: vi.fn()
+}))
+
 vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
   consumeFileCleanupResult: mocks.consumeFileCleanupResult,
   restoreOrdinaryTopic: vi.fn(),

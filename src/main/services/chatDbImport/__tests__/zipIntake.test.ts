@@ -47,12 +47,16 @@ import {
   classifyOriginCandidates,
   DEV_ORIGIN_DIR,
   enumerateLdbCandidates,
+  extractZip,
   FILE_ORIGIN_DIR,
   MAX_ENTRY_COUNT,
-  MAX_SINGLE_ENTRY_BYTES,
-  MAX_TOTAL_UNCOMPRESSED_BYTES,
+  MAX_SELECTED_COMPRESSION_RATIO,
+  MAX_SELECTED_SINGLE_ENTRY_BYTES,
+  MAX_SELECTED_TOTAL_UNCOMPRESSED_BYTES,
   MAX_ZIP_SIZE_BYTES,
   sanitizeEntryNameForMessage,
+  selectExtractionEntries,
+  setAppIsPackagedForTests,
   validateEntries,
   validateFileStat,
   validateIndexedDbStructure,
@@ -67,24 +71,31 @@ describe('zipIntake', () => {
   })
 
   afterEach(() => {
+    // LOCK-Z2 test seam restoration: never leak a packaged-mode override
+    // into other tests (extractZip resolves the seam via appIsPackaged()).
+    setAppIsPackagedForTests(null)
     fs.rmSync(tempDir, { recursive: true, force: true })
   })
 
   describe('constants', () => {
-    it('MAX_ZIP_SIZE_BYTES is 500 MB', () => {
-      expect(MAX_ZIP_SIZE_BYTES).toBe(500 * 1024 * 1024)
+    it('MAX_ZIP_SIZE_BYTES is 4 GiB (LOCK-PROD-9 container hard cap)', () => {
+      expect(MAX_ZIP_SIZE_BYTES).toBe(4 * 1024 * 1024 * 1024)
     })
 
     it('MAX_ENTRY_COUNT is 10000', () => {
       expect(MAX_ENTRY_COUNT).toBe(10_000)
     })
 
-    it('MAX_SINGLE_ENTRY_BYTES is 200 MB', () => {
-      expect(MAX_SINGLE_ENTRY_BYTES).toBe(200 * 1024 * 1024)
+    it('MAX_SELECTED_SINGLE_ENTRY_BYTES is 128 MiB (LOCK-PROD-9)', () => {
+      expect(MAX_SELECTED_SINGLE_ENTRY_BYTES).toBe(128 * 1024 * 1024)
     })
 
-    it('MAX_TOTAL_UNCOMPRESSED_BYTES is 2 GB', () => {
-      expect(MAX_TOTAL_UNCOMPRESSED_BYTES).toBe(2 * 1024 * 1024 * 1024)
+    it('MAX_SELECTED_TOTAL_UNCOMPRESSED_BYTES is 768 MiB (LOCK-PROD-9)', () => {
+      expect(MAX_SELECTED_TOTAL_UNCOMPRESSED_BYTES).toBe(768 * 1024 * 1024)
+    })
+
+    it('MAX_SELECTED_COMPRESSION_RATIO is 100 (LOCK-PROD-9)', () => {
+      expect(MAX_SELECTED_COMPRESSION_RATIO).toBe(100)
     })
   })
 
@@ -345,7 +356,14 @@ describe('zipIntake', () => {
         'INVALID_ENTRY_SIZE',
         'UNSUPPORTED_ORIGIN',
         'AMBIGUOUS_ORIGIN',
-        'PACKAGED_DEV_ORIGIN'
+        'PACKAGED_DEV_ORIGIN',
+        'SELECTED_ENTRY_TOO_LARGE',
+        'SELECTED_TOO_LARGE',
+        'SELECTED_RATIO_TOO_HIGH',
+        'UNSUPPORTED_ENTRY_TYPE',
+        'SELECTED_EXTRACT_OVERFLOW',
+        'SELECTED_ENTRY_SIZE_MISMATCH',
+        'DUPLICATE_EXTRACTION_TARGET'
       ] as const
       for (const code of codes) {
         const error = new ChatImportZipError(code, 'test')
@@ -396,7 +414,13 @@ describe('zipIntake', () => {
      * entriesCount (raw central-directory count).
      */
     function createMockZip(
-      rawEntries: Array<{ name: string; isDirectory?: boolean; flags?: number; size?: number }>,
+      rawEntries: Array<{
+        name: string
+        isDirectory?: boolean
+        flags?: number
+        size?: number
+        attr?: number
+      }>,
       rawCount?: number
     ): { entries: () => Promise<Record<string, any>>; entriesCount: Promise<number> } {
       const entryMap: Record<string, any> = {}
@@ -405,7 +429,8 @@ describe('zipIntake', () => {
           name: entry.name,
           isDirectory: entry.isDirectory ?? false,
           flags: entry.flags,
-          size: entry.size
+          size: entry.size,
+          attr: entry.attr
         }
       }
       // Default: rawCount = number of items passed (no duplicates)
@@ -517,48 +542,194 @@ describe('zipIntake', () => {
       })
     })
 
-    it('REJECTS total uncompressed size one byte over the 2 GiB limit', async () => {
-      const entries = [
-        ...Array.from({ length: 10 }, (_, i) => ({
-          name: `file${i}.bin`,
-          size: MAX_SINGLE_ENTRY_BYTES
-        })),
-        { name: 'remainder.bin', size: 48 * 1024 * 1024 + 1 }
-      ]
-      const mockZip = createMockZip(entries)
+    // -----------------------------------------------------------------------
+    // LOCK-Z2: symlink / mode / file-type validation from external attributes
+    // -----------------------------------------------------------------------
+
+    it('REJECTS a symlink-mode entry (S_IFLNK 0xA000) fail-closed', async () => {
+      // attr = (0xA1FF << 16) — POSIX mode with S_IFLNK file type bits.
+      const mockZip = createMockZip([{ name: 'evil-link', size: 10, attr: 0xa1ff0000 }])
+      await expect(validateEntries(mockZip as any)).rejects.toThrow(ChatImportZipError)
       await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
-        code: 'TOTAL_UNCOMPRESSED_TOO_LARGE'
+        code: 'UNSUPPORTED_ENTRY_TYPE'
       })
     })
 
-    it('accepts ZIP at exact 2 GiB total boundary', async () => {
+    it('REJECTS a special-type entry (S_IFIFO 0x1000)', async () => {
+      const mockZip = createMockZip([{ name: 'fifo', size: 0, attr: 0x11ff0000 }])
+      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
+        code: 'UNSUPPORTED_ENTRY_TYPE'
+      })
+    })
+
+    it('accepts regular-file entries with POSIX S_IFREG mode', async () => {
+      const mockZip = createMockZip([{ name: 'file.txt', size: 10, attr: 0x81a40000 }])
+      const result = await validateEntries(mockZip as any)
+      expect(result.entryCount).toBe(1)
+    })
+
+    it('accepts directory entries with POSIX S_IFDIR mode', async () => {
+      const mockZip = createMockZip([{ name: 'Data/', isDirectory: true, size: 0, attr: 0x41ed0010 }])
+      const result = await validateEntries(mockZip as any)
+      expect(result.entryCount).toBe(1)
+    })
+
+    it('treats entries with no POSIX mode (attr 0) leniently as regular files', async () => {
+      // Windows-made archives carry attr 0x20/0x10 with mode bits 0 — the
+      // file type cannot be inferred and must NOT be rejected.
+      const mockZip = createMockZip([{ name: 'file.txt', size: 10, attr: 0x20 }])
+      const result = await validateEntries(mockZip as any)
+      expect(result.entryCount).toBe(1)
+    })
+
+    it('REJECTS symlink entries even when they carry a safe size', async () => {
+      const mockZip = createMockZip([
+        { name: 'IndexedDB/file__0.indexeddb.leveldb/000001.ldb', size: 1024, attr: 0xa1ff0000 }
+      ])
+      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
+        code: 'UNSUPPORTED_ENTRY_TYPE'
+      })
+    })
+
+    // -----------------------------------------------------------------------
+    // LOCK-Z2: ZIP64 / size consistency — real node-stream-zip parse of a
+    // synthetic ZIP64 central directory (metadata-only, ~300 bytes on disk).
+    // -----------------------------------------------------------------------
+
+    /**
+     * Build a minimal ZIP64 archive whose single entry's uncompressed size is
+     * carried by a ZIP64 extra field (the 32-bit CEN field is 0xFFFFFFFF).
+     * Only the central directory is meaningful — the local data region is
+     * never read, so no large data is ever allocated or touched.
+     */
+    function buildZip64Buffer(name: string, uncompressedSize: bigint, compressedSize: bigint): Buffer {
+      const h16 = (n: number) => {
+        const b = Buffer.alloc(2)
+        b.writeUInt16LE(n, 0)
+        return b
+      }
+      const h64 = (n: bigint) => {
+        const b = Buffer.alloc(8)
+        b.writeBigUInt64LE(n, 0)
+        return b
+      }
+      const nameBuf = Buffer.from(name)
+      const marker = 0xffffffff
+
+      const local = Buffer.alloc(30)
+      local.writeUInt32LE(0x04034b50, 0)
+      local.writeUInt16LE(45, 4)
+      local.writeUInt16LE(0, 6)
+      local.writeUInt16LE(0, 8)
+      local.writeUInt32LE(marker, 14)
+      local.writeUInt32LE(marker, 18)
+      local.writeUInt32LE(marker, 22)
+      local.writeUInt16LE(nameBuf.length, 26)
+      local.writeUInt16LE(0, 28)
+      const localBody = Buffer.concat([local, nameBuf])
+
+      const cen = Buffer.alloc(46)
+      cen.writeUInt32LE(0x02014b50, 0)
+      cen.writeUInt16LE(45, 4)
+      cen.writeUInt16LE(45, 6)
+      cen.writeUInt16LE(0, 8)
+      cen.writeUInt16LE(0, 10)
+      cen.writeUInt32LE(marker, 16)
+      cen.writeUInt32LE(marker, 20)
+      cen.writeUInt32LE(marker, 24)
+      cen.writeUInt16LE(nameBuf.length, 28)
+      const extra = Buffer.concat([h16(0x0001), h16(24), h64(uncompressedSize), h64(compressedSize), h64(0n)])
+      cen.writeUInt16LE(extra.length, 30)
+      cen.writeUInt32LE(0, 42)
+      const cenEntry = Buffer.concat([cen, nameBuf, extra])
+      const cenOffset = localBody.length
+
+      const zip64eocd = Buffer.alloc(56)
+      zip64eocd.writeUInt32LE(0x06064b50, 0)
+      zip64eocd.writeBigUInt64LE(44n, 4)
+      zip64eocd.writeUInt16LE(45, 12)
+      zip64eocd.writeUInt16LE(45, 14)
+      zip64eocd.writeUInt32LE(0, 16)
+      zip64eocd.writeUInt32LE(0, 20)
+      zip64eocd.writeBigUInt64LE(1n, 24)
+      zip64eocd.writeBigUInt64LE(1n, 32)
+      zip64eocd.writeBigUInt64LE(BigInt(cenEntry.length), 40)
+      zip64eocd.writeBigUInt64LE(BigInt(cenOffset), 48)
+
+      const locator = Buffer.alloc(20)
+      locator.writeUInt32LE(0x07064b50, 0)
+      locator.writeUInt32LE(0, 4)
+      locator.writeBigUInt64LE(BigInt(cenOffset + cenEntry.length), 8)
+      locator.writeUInt32LE(1, 16)
+
+      const eocd = Buffer.alloc(22)
+      eocd.writeUInt32LE(0x06054b50, 0)
+      eocd.writeUInt16LE(0xffff, 8)
+      eocd.writeUInt16LE(0xffff, 10)
+      eocd.writeUInt32LE(marker, 12)
+      eocd.writeUInt32LE(marker, 16)
+
+      return Buffer.concat([localBody, cenEntry, zip64eocd, locator, eocd])
+    }
+
+    it('parses a real ZIP64 central directory and REJECTS a >2^53 entry size', async () => {
+      // 2^55 uncompressed — expressible only via the ZIP64 extra field.
+      const zipPath = path.join(tempDir, 'zip64-huge.zip')
+      fs.writeFileSync(zipPath, buildZip64Buffer('IndexedDB/file__0.indexeddb.leveldb/000001.ldb', 1n << 55n, 1024n))
+      const zip = new StreamZip.async({ file: zipPath })
+      try {
+        // Library exposes the ZIP64 size as a number; it is not a safe integer.
+        const entries = await zip.entries()
+        const entry = entries['IndexedDB/file__0.indexeddb.leveldb/000001.ldb']
+        expect(entry.size).toBeGreaterThan(Number.MAX_SAFE_INTEGER)
+        expect(Number.isSafeInteger(entry.size)).toBe(false)
+
+        await expect(validateEntries(zip)).rejects.toMatchObject({
+          code: 'INVALID_ENTRY_SIZE'
+        })
+      } finally {
+        await zip.close()
+      }
+    })
+
+    it('accepts a real ZIP64 entry size that stays within the safe integer range', async () => {
+      // 5 GiB uncompressed, 1 KiB compressed — only expressible via ZIP64.
+      // Non-selected path (Data/) — passes container-level validation without
+      // ever allocating the uncompressed bytes.
+      const zipPath = path.join(tempDir, 'zip64-safe.zip')
+      fs.writeFileSync(zipPath, buildZip64Buffer('Data/huge.bin', 5n * 1024n * 1024n * 1024n, 1024n))
+      const zip = new StreamZip.async({ file: zipPath })
+      try {
+        const result = await validateEntries(zip)
+        expect(result.entryCount).toBe(1)
+        expect(result.totalUncompressedBytes).toBe(5 * 1024 * 1024 * 1024)
+      } finally {
+        await zip.close()
+      }
+    })
+
+    it('does NOT enforce byte limits at container level (LOCK-PROD-9: non-selected entries excluded from selected-byte limits)', async () => {
+      // A huge irrelevant (non-selected) entry passes container validation —
+      // selected-byte limits apply only to the selected subtrees.
       const entries = [
         ...Array.from({ length: 10 }, (_, i) => ({
           name: `file${i}.bin`,
-          size: MAX_SINGLE_ENTRY_BYTES
+          size: 200 * 1024 * 1024
         })),
-        { name: 'remainder.bin', size: 48 * 1024 * 1024 }
+        { name: 'remainder.bin', size: 600 * 1024 * 1024 }
       ]
       const mockZip = createMockZip(entries)
       const result = await validateEntries(mockZip as any)
       expect(result.entryCount).toBe(11)
-      expect(result.totalUncompressedBytes).toBe(MAX_TOTAL_UNCOMPRESSED_BYTES)
+      expect(result.totalUncompressedBytes).toBe(10 * 200 * 1024 * 1024 + 600 * 1024 * 1024)
     })
 
-    it('REJECTS entry exceeding per-entry 200 MiB limit', async () => {
-      const overLimit = MAX_SINGLE_ENTRY_BYTES + 1
+    it('accepts an entry far above the old single-entry cap at container level', async () => {
+      const overLimit = 256 * 1024 * 1024
       const mockZip = createMockZip([{ name: 'huge.bin', size: overLimit }])
-      await expect(validateEntries(mockZip as any)).rejects.toThrow(ChatImportZipError)
-      await expect(validateEntries(mockZip as any)).rejects.toMatchObject({
-        code: 'SINGLE_ENTRY_TOO_LARGE'
-      })
-    })
-
-    it('accepts entry at exact 200 MiB per-entry limit', async () => {
-      const mockZip = createMockZip([{ name: 'max.bin', size: MAX_SINGLE_ENTRY_BYTES }])
       const result = await validateEntries(mockZip as any)
       expect(result.entryCount).toBe(1)
-      expect(result.totalUncompressedBytes).toBe(MAX_SINGLE_ENTRY_BYTES)
+      expect(result.totalUncompressedBytes).toBe(overLimit)
     })
 
     it('REJECTS encrypted entries', async () => {
@@ -619,6 +790,108 @@ describe('zipIntake', () => {
       await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toMatchObject({
         code: 'PATH_TRAVERSAL'
       })
+    })
+
+    // -----------------------------------------------------------------------
+    // LOCK-Z2: drive-letter / backslash / NUL / ".." component semantics
+    // -----------------------------------------------------------------------
+
+    it('rejects Windows drive-letter paths (C:evil)', async () => {
+      const entryMap = { 'C:\\evil\\file.txt': { name: 'C:\\evil\\file.txt', isDirectory: false } }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toMatchObject({
+        code: 'PATH_TRAVERSAL'
+      })
+    })
+
+    it('rejects Windows drive-letter paths with forward slashes (C:/evil)', async () => {
+      const entryMap = { 'C:/evil/file.txt': { name: 'C:/evil/file.txt', isDirectory: false } }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toMatchObject({
+        code: 'PATH_TRAVERSAL'
+      })
+    })
+
+    it('rejects backslash path separators even without a drive letter', async () => {
+      // On POSIX path.resolve treats `..\..\x` as a plain name; the backslash
+      // is rejected explicitly as a Windows separator (LOCK-Z2).
+      const entryMap = { '..\\..\\etc\\passwd': { name: '..\\..\\etc\\passwd', isDirectory: false } }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toMatchObject({
+        code: 'PATH_TRAVERSAL'
+      })
+    })
+
+    it('rejects entry names containing a NUL byte', async () => {
+      const entryMap = { 'evil\x00name.txt': { name: 'evil\x00name.txt', isDirectory: false } }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toMatchObject({
+        code: 'PATH_TRAVERSAL'
+      })
+    })
+
+    it('accepts names containing ".." as a non-component substring (file..txt)', async () => {
+      // Only a `..` path COMPONENT is a traversal; a dotted filename is not.
+      const entryMap = { 'file..txt': { name: 'file..txt', isDirectory: false } }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).resolves.not.toThrow()
+    })
+
+    // -----------------------------------------------------------------------
+    // LOCK-FZ2: canonical-destination duplicate rejection — distinct names
+    // that normalize to the same extraction target (a/b vs a//b vs a/./b)
+    // must be rejected before extraction.
+    // -----------------------------------------------------------------------
+
+    it('REJECTS distinct names that normalize to the same target (a/b vs a//b)', async () => {
+      const entryMap = {
+        'a/b': { name: 'a/b', isDirectory: false },
+        'a//b': { name: 'a//b', isDirectory: false }
+      }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toThrow(ChatImportZipError)
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toMatchObject({
+        code: 'DUPLICATE_EXTRACTION_TARGET'
+      })
+    })
+
+    it('REJECTS distinct names that normalize to the same target (a/b vs a/./b)', async () => {
+      const entryMap = {
+        'a/b': { name: 'a/b', isDirectory: false },
+        'a/./b': { name: 'a/./b', isDirectory: false }
+      }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toMatchObject({
+        code: 'DUPLICATE_EXTRACTION_TARGET'
+      })
+    })
+
+    it('REJECTS directory + file names that normalize to the same target (a/ vs a)', async () => {
+      const entryMap = {
+        'a/': { name: 'a/', isDirectory: true },
+        a: { name: 'a', isDirectory: false }
+      }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).rejects.toMatchObject({
+        code: 'DUPLICATE_EXTRACTION_TARGET'
+      })
+    })
+
+    it('accepts distinct names that normalize to DIFFERENT targets', async () => {
+      const entryMap = {
+        'a/b': { name: 'a/b', isDirectory: false },
+        'a/c': { name: 'a/c', isDirectory: false },
+        'b//d': { name: 'b//d', isDirectory: false },
+        'b/./e': { name: 'b/./e', isDirectory: false }
+      }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).resolves.not.toThrow()
+    })
+
+    it('accepts a single repeated-separator / dot-component name without a collision', async () => {
+      const entryMap = { 'a//b': { name: 'a//b', isDirectory: false } }
+      const mockZip = { entries: async () => entryMap }
+      await expect(validateNoZipSlip(mockZip as any, destDir)).resolves.not.toThrow()
     })
   })
 
@@ -925,6 +1198,663 @@ describe('zipIntake', () => {
 
       expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(ChatImportZipError)
       expect(() => classifyOriginCandidates(indexedDbDir, false)).toThrow(/AMBIGUOUS_ORIGIN/)
+    })
+  })
+
+  // =========================================================================
+  // LOCK-PROD-8/9 — selective extraction from the central directory
+  // =========================================================================
+
+  describe('selectExtractionEntries', () => {
+    function createMockZip(
+      rawEntries: Array<{
+        name: string
+        isDirectory?: boolean
+        flags?: number
+        size?: number
+        compressedSize?: number
+      }>
+    ) {
+      const entryMap: Record<string, any> = {}
+      for (const entry of rawEntries) {
+        entryMap[entry.name] = {
+          name: entry.name,
+          isDirectory: entry.isDirectory ?? false,
+          flags: entry.flags,
+          size: entry.size ?? 0,
+          compressedSize: entry.compressedSize ?? entry.size ?? 0
+        }
+      }
+      return { entries: async () => entryMap }
+    }
+
+    const FILE_ORIGIN_PREFIX = `IndexedDB/${FILE_ORIGIN_DIR}/`
+    const BLOB_ORIGIN_PREFIX = `IndexedDB/${FILE_ORIGIN_DIR.replace('.indexeddb.leveldb', '.indexeddb.blob')}/`
+    const LS_PREFIX = 'Local Storage/leveldb/'
+
+    it('classifies the file origin and selects exactly the accepted subtrees (LOCK-PROD-8)', async () => {
+      const mockZip = createMockZip([
+        { name: `${FILE_ORIGIN_PREFIX}000001.ldb`, size: 100 },
+        { name: `${FILE_ORIGIN_PREFIX}MANIFEST-000001`, size: 10 },
+        { name: `${BLOB_ORIGIN_PREFIX}000001.ldb`, size: 50 },
+        { name: `${LS_PREFIX}CURRENT`, size: 10 },
+        { name: `${LS_PREFIX}LOG`, size: 20 },
+        // Never-selected container entries:
+        { name: 'Data/Files/image.png', size: 500 * 1024 * 1024 },
+        { name: 'chat.db', size: 100 },
+        { name: 'Memory/knowledge.db', size: 100 },
+        // An unrelated origin WITHOUT .ldb files is not a classification
+        // candidate and is never selected/extracted.
+        { name: 'IndexedDB/other-origin.indexeddb.leveldb/MANIFEST-000001', size: 10 }
+      ])
+      const selection = await selectExtractionEntries(mockZip as any, tempDir, false)
+      expect(selection.origin).toEqual({ kind: 'file', indexedDbDir: path.join(tempDir, 'IndexedDB') })
+      expect(selection.selectedEntries.map((e) => e.name)).toEqual([
+        `${FILE_ORIGIN_PREFIX}000001.ldb`,
+        `${FILE_ORIGIN_PREFIX}MANIFEST-000001`,
+        `${BLOB_ORIGIN_PREFIX}000001.ldb`,
+        `${LS_PREFIX}CURRENT`,
+        `${LS_PREFIX}LOG`
+      ])
+      expect(selection.selectedEntryCount).toBe(5)
+      expect(selection.selectedTotalUncompressedBytes).toBe(190)
+    })
+
+    it('rejects multiple supported origins as AMBIGUOUS_ORIGIN before extraction (LOCK-PROD-8)', async () => {
+      const mockZip = createMockZip([
+        { name: `${FILE_ORIGIN_PREFIX}000001.ldb`, size: 10 },
+        { name: `IndexedDB/${DEV_ORIGIN_DIR}/000001.ldb`, size: 10 }
+      ])
+      await expect(selectExtractionEntries(mockZip as any, tempDir, false)).rejects.toMatchObject({
+        code: 'AMBIGUOUS_ORIGIN'
+      })
+    })
+
+    it('rejects unsupported single origin as UNSUPPORTED_ORIGIN', async () => {
+      const mockZip = createMockZip([{ name: 'IndexedDB/unknown.indexeddb.leveldb/000001.ldb', size: 10 }])
+      await expect(selectExtractionEntries(mockZip as any, tempDir, false)).rejects.toMatchObject({
+        code: 'UNSUPPORTED_ORIGIN'
+      })
+    })
+
+    it('rejects dev origin in packaged mode as PACKAGED_DEV_ORIGIN', async () => {
+      const mockZip = createMockZip([{ name: `IndexedDB/${DEV_ORIGIN_DIR}/000001.ldb`, size: 10 }])
+      await expect(selectExtractionEntries(mockZip as any, tempDir, true)).rejects.toMatchObject({
+        code: 'PACKAGED_DEV_ORIGIN'
+      })
+    })
+
+    it('rejects NO_INDEXED_DB when no origin has .ldb entries', async () => {
+      const mockZip = createMockZip([{ name: 'IndexedDB/file__0.indexeddb.leveldb/MANIFEST-000001', size: 10 }])
+      await expect(selectExtractionEntries(mockZip as any, tempDir, false)).rejects.toMatchObject({
+        code: 'NO_INDEXED_DB'
+      })
+    })
+
+    it('rejects a selected single entry above 128 MiB (LOCK-PROD-9)', async () => {
+      const mockZip = createMockZip([
+        { name: `${FILE_ORIGIN_PREFIX}000001.ldb`, size: MAX_SELECTED_SINGLE_ENTRY_BYTES + 1 }
+      ])
+      await expect(selectExtractionEntries(mockZip as any, tempDir, false)).rejects.toMatchObject({
+        code: 'SELECTED_ENTRY_TOO_LARGE'
+      })
+    })
+
+    it('accepts a selected single entry at exactly 128 MiB', async () => {
+      const mockZip = createMockZip([
+        { name: `${FILE_ORIGIN_PREFIX}000001.ldb`, size: MAX_SELECTED_SINGLE_ENTRY_BYTES }
+      ])
+      const selection = await selectExtractionEntries(mockZip as any, tempDir, false)
+      expect(selection.selectedEntryCount).toBe(1)
+    })
+
+    it('rejects selected cumulative uncompressed above 768 MiB (LOCK-PROD-9)', async () => {
+      const mockZip = createMockZip([
+        // Seven 128 MiB selected entries → 896 MiB cumulative → reject
+        // (each entry stays within the 128 MiB single-entry bound).
+        { name: `${FILE_ORIGIN_PREFIX}a.ldb`, size: 128 * 1024 * 1024 },
+        { name: `${FILE_ORIGIN_PREFIX}b.ldb`, size: 128 * 1024 * 1024 },
+        { name: `${FILE_ORIGIN_PREFIX}c.ldb`, size: 128 * 1024 * 1024 },
+        { name: `${FILE_ORIGIN_PREFIX}d.ldb`, size: 128 * 1024 * 1024 },
+        { name: `${FILE_ORIGIN_PREFIX}e.ldb`, size: 128 * 1024 * 1024 },
+        { name: `${FILE_ORIGIN_PREFIX}f.ldb`, size: 128 * 1024 * 1024 },
+        { name: `${FILE_ORIGIN_PREFIX}g.ldb`, size: 128 * 1024 * 1024 }
+      ])
+      await expect(selectExtractionEntries(mockZip as any, tempDir, false)).rejects.toMatchObject({
+        code: 'SELECTED_TOO_LARGE'
+      })
+    })
+
+    it('rejects a selected entry with compression ratio above 100 (LOCK-PROD-9)', async () => {
+      const mockZip = createMockZip([
+        // uncompressed 10 MiB, compressed 1 KiB → ratio 10240 > 100.
+        { name: `${FILE_ORIGIN_PREFIX}bomb.ldb`, size: 10 * 1024 * 1024, compressedSize: 1024 }
+      ])
+      await expect(selectExtractionEntries(mockZip as any, tempDir, false)).rejects.toMatchObject({
+        code: 'SELECTED_RATIO_TOO_HIGH'
+      })
+    })
+
+    it('rejects a selected entry with zero compressed size and nonzero size (infinite ratio)', async () => {
+      const mockZip = createMockZip([{ name: `${FILE_ORIGIN_PREFIX}zero.ldb`, size: 1024, compressedSize: 0 }])
+      await expect(selectExtractionEntries(mockZip as any, tempDir, false)).rejects.toMatchObject({
+        code: 'SELECTED_RATIO_TOO_HIGH'
+      })
+    })
+
+    it('ignores directory entries during selection and limits', async () => {
+      const mockZip = createMockZip([
+        { name: `${FILE_ORIGIN_PREFIX}`, isDirectory: true },
+        { name: `${FILE_ORIGIN_PREFIX}000001.ldb`, size: 10 }
+      ])
+      const selection = await selectExtractionEntries(mockZip as any, tempDir, false)
+      expect(selection.selectedEntryCount).toBe(1)
+    })
+
+    it('PASSES a >500 MiB container-level irrelevant entry without materializing it (LOCK-Z2 mocked central-directory proof)', async () => {
+      // The container carries a 1 GiB irrelevant entry (Data/Files). Only
+      // central-directory metadata is inspected — nothing is written, so no
+      // disk/time is consumed. Selected totals must EXCLUDE the irrelevant
+      // bytes (LOCK-Z1: nonselected bytes excluded from selected totals).
+      const mockZip = createMockZip([
+        { name: `${FILE_ORIGIN_PREFIX}000001.ldb`, size: 100 },
+        { name: `${BLOB_ORIGIN_PREFIX}000001.ldb`, size: 50 },
+        { name: `${LS_PREFIX}CURRENT`, size: 10 },
+        { name: 'Data/Files/video-1GiB.bin', size: 1024 * 1024 * 1024 },
+        { name: 'Data/Files/archive-700MiB.bin', size: 700 * 1024 * 1024 }
+      ])
+      const selection = await selectExtractionEntries(mockZip as any, tempDir, false)
+      // Origin still classified; huge irrelevant entries never selected.
+      expect(selection.origin).toEqual({ kind: 'file', indexedDbDir: path.join(tempDir, 'IndexedDB') })
+      expect(selection.selectedEntries.map((e) => e.name)).toEqual([
+        `${FILE_ORIGIN_PREFIX}000001.ldb`,
+        `${BLOB_ORIGIN_PREFIX}000001.ldb`,
+        `${LS_PREFIX}CURRENT`
+      ])
+      expect(selection.selectedEntryCount).toBe(3)
+      // Nonselected bytes are excluded from the selected resource totals.
+      expect(selection.selectedTotalUncompressedBytes).toBe(160)
+    })
+
+    it('accepts a zero-size selected entry (size 0, compressed 0)', async () => {
+      const mockZip = createMockZip([{ name: `${FILE_ORIGIN_PREFIX}empty.ldb`, size: 0, compressedSize: 0 }])
+      const selection = await selectExtractionEntries(mockZip as any, tempDir, false)
+      expect(selection.selectedEntryCount).toBe(1)
+      expect(selection.selectedTotalUncompressedBytes).toBe(0)
+    })
+
+    it('accepts a selected entry at the exact ratio boundary of 100', async () => {
+      const mockZip = createMockZip([
+        { name: `${FILE_ORIGIN_PREFIX}boundary.ldb`, size: 100 * 1024, compressedSize: 1024 }
+      ])
+      const selection = await selectExtractionEntries(mockZip as any, tempDir, false)
+      expect(selection.selectedEntryCount).toBe(1)
+    })
+
+    it('never selects a blob subtree that does not match the classified origin', async () => {
+      const mockZip = createMockZip([
+        { name: `${FILE_ORIGIN_PREFIX}000001.ldb`, size: 10 },
+        // A DIFFERENT origin's blob subtree (with .ldb-looking files) must
+        // NOT be selected — blob naming mirrors the accepted origin exactly.
+        { name: 'IndexedDB/unrelated.indexeddb.blob/000001.ldb', size: 10 }
+      ])
+      const selection = await selectExtractionEntries(mockZip as any, tempDir, false)
+      expect(selection.selectedEntries.map((e) => e.name)).toEqual([`${FILE_ORIGIN_PREFIX}000001.ldb`])
+      expect(selection.selectedTotalUncompressedBytes).toBe(10)
+    })
+
+    it('selects EXACTLY Local Storage/leveldb and nothing else under Local Storage', async () => {
+      const mockZip = createMockZip([
+        { name: `${FILE_ORIGIN_PREFIX}000001.ldb`, size: 10 },
+        { name: `${LS_PREFIX}CURRENT`, size: 10 },
+        { name: `${LS_PREFIX}LOG`, size: 20 },
+        // Sibling / near-miss subtrees must never be selected (LOCK-Z4).
+        { name: 'Local Storage/other/state.json', size: 100 },
+        { name: 'Local Storage/leveldb-backup/CURRENT', size: 100 },
+        { name: 'Local Storage/leveldb2/LOG', size: 100 }
+      ])
+      const selection = await selectExtractionEntries(mockZip as any, tempDir, false)
+      expect(selection.selectedEntries.map((e) => e.name)).toEqual([
+        `${FILE_ORIGIN_PREFIX}000001.ldb`,
+        `${LS_PREFIX}CURRENT`,
+        `${LS_PREFIX}LOG`
+      ])
+      expect(selection.selectedTotalUncompressedBytes).toBe(40)
+    })
+
+    it('selects the matching blob subtree for the dev origin (unpackaged)', async () => {
+      const devBlob = `IndexedDB/${DEV_ORIGIN_DIR.replace('.indexeddb.leveldb', '.indexeddb.blob')}/`
+      const mockZip = createMockZip([
+        { name: `IndexedDB/${DEV_ORIGIN_DIR}/000001.ldb`, size: 10 },
+        { name: `${devBlob}000001.ldb`, size: 5 }
+      ])
+      const selection = await selectExtractionEntries(mockZip as any, tempDir, false)
+      expect(selection.origin).toEqual({ kind: 'dev', indexedDbDir: path.join(tempDir, 'IndexedDB') })
+      expect(selection.selectedEntries.map((e) => e.name)).toEqual([
+        `IndexedDB/${DEV_ORIGIN_DIR}/000001.ldb`,
+        `${devBlob}000001.ldb`
+      ])
+    })
+  })
+
+  describe('extractZip selective extraction (LOCK-PROD-8)', () => {
+    const itOnDarwin = process.platform === 'darwin' ? it : it.skip
+    const FILE_ORIGIN_PREFIX = `IndexedDB/${FILE_ORIGIN_DIR}/`
+    const LS_PREFIX = 'Local Storage/leveldb/'
+
+    it('materializes ONLY the accepted subtrees; irrelevant entries are never written', async () => {
+      // Build a REAL zip containing the file origin + Local Storage + huge
+      // irrelevant Data/ entries using AdmZip (production-format).
+      const { default: AdmZip } = await import('adm-zip')
+      const zipPath = path.join(tempDir, 'selective.zip')
+      const work = path.join(tempDir, 'seed')
+      const idbDir = path.join(work, 'IndexedDB', FILE_ORIGIN_DIR)
+      const blobDir = path.join(work, 'IndexedDB', FILE_ORIGIN_DIR.replace('.indexeddb.leveldb', '.indexeddb.blob'))
+      const lsDir = path.join(work, 'Local Storage', 'leveldb')
+      const dataDir = path.join(work, 'Data', 'Files')
+      const memoryDir = path.join(work, 'Memory')
+      fs.mkdirSync(idbDir, { recursive: true })
+      fs.mkdirSync(blobDir, { recursive: true })
+      fs.mkdirSync(lsDir, { recursive: true })
+      fs.mkdirSync(dataDir, { recursive: true })
+      fs.mkdirSync(memoryDir, { recursive: true })
+      fs.writeFileSync(path.join(idbDir, '000001.ldb'), 'idb-data')
+      fs.writeFileSync(path.join(blobDir, '000001.ldb'), 'blob-data')
+      fs.writeFileSync(path.join(lsDir, 'CURRENT'), 'ls-data')
+      fs.writeFileSync(path.join(dataDir, 'image.png'), 'x'.repeat(1024))
+      fs.writeFileSync(path.join(memoryDir, 'knowledge.db'), 'memory')
+      fs.writeFileSync(path.join(work, 'chat.db'), 'chat')
+
+      const zip = new AdmZip()
+      zip.addLocalFolder(work, '')
+      zip.writeZip(zipPath)
+
+      const destDir = path.join(tempDir, 'out')
+      fs.mkdirSync(destDir, { recursive: true })
+
+      const result = await extractZip(zipPath, destDir)
+
+      // Origin classified from the central directory.
+      expect(result.origin.kind).toBe('file')
+      // The accepted subtrees were materialized.
+      expect(fs.existsSync(path.join(destDir, 'IndexedDB', FILE_ORIGIN_DIR, '000001.ldb'))).toBe(true)
+      expect(
+        fs.existsSync(
+          path.join(
+            destDir,
+            'IndexedDB',
+            FILE_ORIGIN_DIR.replace('.indexeddb.leveldb', '.indexeddb.blob'),
+            '000001.ldb'
+          )
+        )
+      ).toBe(true)
+      expect(fs.existsSync(path.join(destDir, 'Local Storage', 'leveldb', 'CURRENT'))).toBe(true)
+      // Irrelevant container entries were NEVER materialized (LOCK-PROD-8).
+      expect(fs.existsSync(path.join(destDir, 'Data'))).toBe(false)
+      expect(fs.existsSync(path.join(destDir, 'Memory'))).toBe(false)
+      expect(fs.existsSync(path.join(destDir, 'chat.db'))).toBe(false)
+    })
+
+    it('creates parent directories for deeply nested selected entries (per-entry extraction semantics)', async () => {
+      // node-stream-zip's per-file extract does NOT create parents — zipIntake
+      // must create them explicitly. A direct .ldb keeps Layer 4 valid while
+      // the nested entry proves deep parent creation at the EXACT path.
+      const { default: AdmZip } = await import('adm-zip')
+      const zipPath = path.join(tempDir, 'nested.zip')
+      const zip = new AdmZip()
+      zip.addFile(`${FILE_ORIGIN_PREFIX}000001.ldb`, Buffer.from('idb'))
+      zip.addFile(`${FILE_ORIGIN_PREFIX}deep/nested/extra.bin`, Buffer.from('nested-data'))
+      zip.writeZip(zipPath)
+
+      const destDir = path.join(tempDir, 'out')
+      fs.mkdirSync(destDir, { recursive: true })
+
+      await extractZip(zipPath, destDir)
+
+      const expected = path.join(destDir, 'IndexedDB', FILE_ORIGIN_DIR, 'deep', 'nested', 'extra.bin')
+      expect(fs.existsSync(expected)).toBe(true)
+      expect(fs.readFileSync(expected, 'utf8')).toBe('nested-data')
+      expect(fs.existsSync(path.join(destDir, 'IndexedDB', FILE_ORIGIN_DIR, '000001.ldb'))).toBe(true)
+      // No stray tree anywhere else.
+      expect(fs.readdirSync(destDir).sort()).toEqual(['IndexedDB'])
+    })
+
+    it('REJECTS a real archive containing a symlink-mode entry BEFORE extraction (LOCK-Z2)', async () => {
+      const { default: AdmZip } = await import('adm-zip')
+      const zipPath = path.join(tempDir, 'symlink.zip')
+      const zip = new AdmZip()
+      zip.addFile(`${FILE_ORIGIN_PREFIX}000001.ldb`, Buffer.from('idb'))
+      // Symlink entry (S_IFLNK mode in the external attributes).
+      zip.addFile(`${FILE_ORIGIN_PREFIX}evil-link`, Buffer.from('/etc/passwd'), 'link', 0xa1ff0000)
+      zip.writeZip(zipPath)
+
+      const destDir = path.join(tempDir, 'out')
+      fs.mkdirSync(destDir, { recursive: true })
+
+      await expect(extractZip(zipPath, destDir)).rejects.toMatchObject({
+        code: 'UNSUPPORTED_ENTRY_TYPE'
+      })
+      // Fail-closed BEFORE extraction: nothing materialized.
+      expect(fs.existsSync(path.join(destDir, 'IndexedDB'))).toBe(false)
+    })
+
+    itOnDarwin(
+      'partial extraction failure: error is typed+redacted and partial files stay inside destDir (LOCK-Z5)',
+      async () => {
+        const { default: AdmZip } = await import('adm-zip')
+        const zipPath = path.join(tempDir, 'partial.zip')
+        const zip = new AdmZip()
+        // First selected entry extracts fine; the Local Storage entry fails.
+        zip.addFile(`${FILE_ORIGIN_PREFIX}000001.ldb`, Buffer.from('idb'))
+        zip.addFile(`${LS_PREFIX}CURRENT`, Buffer.from('ls'))
+        zip.writeZip(zipPath)
+
+        const destDir = path.join(tempDir, 'out')
+        fs.mkdirSync(destDir, { recursive: true })
+        // Pre-create the Local Storage leveldb dir as READ-ONLY so the second
+        // selected entry cannot be opened for writing → deterministic EACCES.
+        const lsDir = path.join(destDir, 'Local Storage', 'leveldb')
+        fs.mkdirSync(lsDir, { recursive: true })
+        fs.chmodSync(lsDir, 0o555)
+        try {
+          const err = await extractZip(zipPath, destDir).catch((e: unknown) => e)
+          expect(err).toBeInstanceOf(ChatImportZipError)
+          expect((err as ChatImportZipError).code).toBe('EXTRACT_FAILED')
+          // LOCK-Z5: surfaced message must not leak the source/dest paths.
+          expect((err as Error).message).not.toContain(destDir)
+          expect((err as Error).message).not.toContain(zipPath)
+
+          // Partial files from the already-extracted entry remain INSIDE destDir.
+          expect(fs.existsSync(path.join(destDir, 'IndexedDB', FILE_ORIGIN_DIR, '000001.ldb'))).toBe(true)
+          // Nothing escaped outside destDir (tempDir contains only the seeds).
+          const stray = fs.readdirSync(tempDir).filter((n) => n !== 'partial.zip' && n !== 'out' && n !== 'seed')
+          expect(stray).toEqual([])
+
+          // Cleanup is possible — the caller (tempWorkspace/session) removes the
+          // whole workspace; force-recursive removal must succeed.
+          expect(() => fs.rmSync(destDir, { recursive: true, force: true })).not.toThrow()
+        } finally {
+          // destDir (and lsDir inside it) may already be removed above.
+          if (fs.existsSync(lsDir)) {
+            fs.chmodSync(lsDir, 0o755)
+          }
+        }
+      }
+    )
+
+    it('honors the app-packaged test seam: dev-origin archive is rejected when packaged', async () => {
+      const { default: AdmZip } = await import('adm-zip')
+      const zipPath = path.join(tempDir, 'dev-origin.zip')
+      const zip = new AdmZip()
+      zip.addFile(`IndexedDB/${DEV_ORIGIN_DIR}/000001.ldb`, Buffer.from('dev-idb'))
+      zip.writeZip(zipPath)
+
+      const destDir = path.join(tempDir, 'out')
+      fs.mkdirSync(destDir, { recursive: true })
+
+      // Seam override: simulate a packaged app (LOCK-Z3).
+      setAppIsPackagedForTests(true)
+      await expect(extractZip(zipPath, destDir)).rejects.toMatchObject({
+        code: 'PACKAGED_DEV_ORIGIN'
+      })
+      // Rejected before extraction.
+      expect(fs.existsSync(path.join(destDir, 'IndexedDB'))).toBe(false)
+
+      // Seam override: unpackaged app accepts the dev origin.
+      setAppIsPackagedForTests(false)
+      const result = await extractZip(zipPath, destDir)
+      expect(result.origin.kind).toBe('dev')
+      expect(fs.existsSync(path.join(destDir, 'IndexedDB', DEV_ORIGIN_DIR, '000001.ldb'))).toBe(true)
+    })
+
+    // -----------------------------------------------------------------------
+    // LOCK-FZ1 — actual extracted-byte enforcement
+    // -----------------------------------------------------------------------
+
+    /**
+     * Build a raw ZIP archive with exact entry payloads, compression
+     * methods, and general-purpose flags (LOCK-FZ1/FZ2 crafting).
+     *
+     * `payload` is placed verbatim in the local data region: pass
+     * `zlib.deflateRawSync(content)` for method 8 (deflated) entries and
+     * the raw content for method 0 (stored) entries. For bit-3
+     * (data-descriptor) entries the local-header sizes are zero and a data
+     * descriptor record is appended — matching how streaming writers
+     * (archiver) produce archives. The CEN sizes carry the claimed values,
+     * which may intentionally differ from the actual payload (crafted
+     * metadata for the LOCK-FZ1 tests).
+     */
+    function buildRawZipWithData(
+      entries: Array<{
+        name: string
+        payload: Buffer
+        method?: number
+        flags?: number
+        claimedSize?: number
+        claimedCompressedSize?: number
+      }>
+    ): Buffer {
+      const localParts: Buffer[] = []
+      const centralParts: Buffer[] = []
+      let localOffset = 0
+
+      for (const spec of entries) {
+        const name = Buffer.from(spec.name)
+        const flags = spec.flags ?? 0
+        const method = spec.method ?? 0
+        const claimedSize = spec.claimedSize ?? spec.payload.length
+        const claimedCompressedSize = spec.claimedCompressedSize ?? spec.payload.length
+        const hasDataDescriptor = (flags & 0x8) !== 0
+
+        const localHeader = Buffer.alloc(30)
+        localHeader.writeUInt32LE(0x04034b50, 0)
+        localHeader.writeUInt16LE(20, 4)
+        localHeader.writeUInt16LE(flags, 6)
+        localHeader.writeUInt16LE(method, 8)
+        localHeader.writeUInt16LE(0, 10)
+        localHeader.writeUInt16LE(0, 12)
+        localHeader.writeUInt32LE(0, 14)
+        // Bit-3: local sizes are zero (data descriptor); otherwise mirror CEN.
+        localHeader.writeUInt32LE(hasDataDescriptor ? 0 : claimedCompressedSize, 18)
+        localHeader.writeUInt32LE(hasDataDescriptor ? 0 : claimedSize, 22)
+        localHeader.writeUInt16LE(name.length, 26)
+        localHeader.writeUInt16LE(0, 28)
+        localParts.push(Buffer.concat([localHeader, name, spec.payload]))
+
+        if (hasDataDescriptor) {
+          const dd = Buffer.alloc(16)
+          dd.writeUInt32LE(0x08074b50, 0)
+          dd.writeUInt32LE(0, 4)
+          dd.writeUInt32LE(claimedCompressedSize, 8)
+          dd.writeUInt32LE(claimedSize, 12)
+          localParts.push(dd)
+        }
+
+        const centralHeader = Buffer.alloc(46)
+        centralHeader.writeUInt32LE(0x02014b50, 0)
+        centralHeader.writeUInt16LE(20, 4)
+        centralHeader.writeUInt16LE(20, 6)
+        centralHeader.writeUInt16LE(flags, 8)
+        centralHeader.writeUInt16LE(method, 10)
+        centralHeader.writeUInt16LE(0, 12)
+        centralHeader.writeUInt16LE(0, 14)
+        centralHeader.writeUInt32LE(0, 16)
+        centralHeader.writeUInt32LE(claimedCompressedSize, 20)
+        centralHeader.writeUInt32LE(claimedSize, 24)
+        centralHeader.writeUInt16LE(name.length, 28)
+        centralHeader.writeUInt16LE(0, 30)
+        centralHeader.writeUInt16LE(0, 32)
+        centralHeader.writeUInt16LE(0, 34)
+        centralHeader.writeUInt16LE(0, 36)
+        centralHeader.writeUInt32LE(0, 38)
+        centralHeader.writeUInt32LE(localOffset, 42)
+        centralParts.push(Buffer.concat([centralHeader, name]))
+
+        localOffset += 30 + name.length + spec.payload.length + (hasDataDescriptor ? 16 : 0)
+      }
+
+      const centralDirectory = Buffer.concat(centralParts)
+      const endOfCentralDirectory = Buffer.alloc(22)
+      endOfCentralDirectory.writeUInt32LE(0x06054b50, 0)
+      endOfCentralDirectory.writeUInt16LE(entries.length, 8)
+      endOfCentralDirectory.writeUInt16LE(entries.length, 10)
+      endOfCentralDirectory.writeUInt32LE(centralDirectory.length, 12)
+      endOfCentralDirectory.writeUInt32LE(localOffset, 16)
+
+      return Buffer.concat([...localParts, centralDirectory, endOfCentralDirectory])
+    }
+
+    it('REJECTS a crafted data-descriptor (bit 3) selected entry whose ACTUAL bytes exceed the claimed central size (LOCK-FZ1)', async () => {
+      const zlib = await import('node:zlib')
+      const zipPath = path.join(tempDir, 'bit3-overflow.zip')
+      const name = `${FILE_ORIGIN_PREFIX}000001.ldb`
+      // CEN claims 10 bytes; the deflate payload decompresses to 100 bytes.
+      // Bit 3 (0x08) makes node-stream-zip skip its EntryVerifyStream, so
+      // only the LOCK-FZ1 counting guard can detect the overflow.
+      const payload = zlib.deflateRawSync(Buffer.alloc(100, 0x41))
+      fs.writeFileSync(
+        zipPath,
+        buildRawZipWithData([
+          { name, payload, method: 8, flags: 0x08, claimedSize: 10, claimedCompressedSize: payload.length }
+        ])
+      )
+
+      const destDir = path.join(tempDir, 'out')
+      fs.mkdirSync(destDir, { recursive: true })
+
+      await expect(extractZip(zipPath, destDir)).rejects.toMatchObject({
+        code: 'SELECTED_EXTRACT_OVERFLOW'
+      })
+      // No oversized or malformed FILE remains behind (LOCK-FZ1 cleanup);
+      // parent directories created by the extraction step are empty.
+      expect(fs.existsSync(path.join(destDir, 'IndexedDB', FILE_ORIGIN_DIR, '000001.ldb'))).toBe(false)
+      // The source zip itself stays untouched; only in-workspace state is contained.
+      expect(fs.existsSync(zipPath)).toBe(true)
+    })
+
+    it('REJECTS a crafted data-descriptor (bit 3) selected entry whose ACTUAL bytes are fewer than the claimed central size (LOCK-FZ1)', async () => {
+      const zlib = await import('node:zlib')
+      const zipPath = path.join(tempDir, 'bit3-short.zip')
+      const name = `${FILE_ORIGIN_PREFIX}000001.ldb`
+      // CEN claims 100 bytes; the payload only decompresses to 10 bytes.
+      const payload = zlib.deflateRawSync(Buffer.alloc(10, 0x42))
+      fs.writeFileSync(
+        zipPath,
+        buildRawZipWithData([
+          { name, payload, method: 8, flags: 0x08, claimedSize: 100, claimedCompressedSize: payload.length }
+        ])
+      )
+
+      const destDir = path.join(tempDir, 'out')
+      fs.mkdirSync(destDir, { recursive: true })
+
+      await expect(extractZip(zipPath, destDir)).rejects.toMatchObject({
+        code: 'SELECTED_ENTRY_SIZE_MISMATCH'
+      })
+      // Partial malformed file removed (LOCK-FZ1 cleanup).
+      expect(fs.existsSync(path.join(destDir, 'IndexedDB', FILE_ORIGIN_DIR, '000001.ldb'))).toBe(false)
+    })
+
+    it('extracts an ORDINARY archiver-made backup (data-descriptor bit 3) with exact-size enforcement (LOCK-FZ1)', async () => {
+      // The real backup writer (BackupManager) uses archiver, which emits
+      // data-descriptor (bit 3) entries. These MUST still extract when the
+      // actual bytes equal the claimed central sizes.
+      const { default: archiver } = await import('archiver')
+      const zipPath = path.join(tempDir, 'archiver-backup.zip')
+      const out = fs.createWriteStream(zipPath)
+      const archive = archiver('zip', { zlib: { level: 9 } })
+      const closed = new Promise<void>((resolve, reject) => {
+        out.on('close', resolve)
+        out.on('error', reject)
+        archive.on('error', reject)
+      })
+      archive.pipe(out)
+      archive.append(Buffer.from('idb-data-1234'), { name: `${FILE_ORIGIN_PREFIX}000001.ldb` })
+      archive.append(Buffer.from('ls-data'), { name: `${LS_PREFIX}CURRENT` })
+      await archive.finalize()
+      await closed
+
+      // Prove the archive really carries bit-3 entries (data descriptors).
+      const probe = new StreamZip.async({ file: zipPath })
+      try {
+        const probeEntries = await probe.entries()
+        const probeList = Object.values(probeEntries)
+        expect(probeList.length).toBeGreaterThan(0)
+        for (const e of probeList) {
+          expect((e as { flags: number }).flags & 0x8).toBe(0x8)
+        }
+      } finally {
+        await probe.close()
+      }
+
+      const destDir = path.join(tempDir, 'out')
+      fs.mkdirSync(destDir, { recursive: true })
+
+      const result = await extractZip(zipPath, destDir)
+      expect(result.origin.kind).toBe('file')
+      expect(fs.readFileSync(path.join(destDir, 'IndexedDB', FILE_ORIGIN_DIR, '000001.ldb'), 'utf8')).toBe(
+        'idb-data-1234'
+      )
+      expect(fs.readFileSync(path.join(destDir, 'Local Storage', 'leveldb', 'CURRENT'), 'utf8')).toBe('ls-data')
+    })
+
+    // -----------------------------------------------------------------------
+    // LOCK-FZ2 — canonical extraction-target duplicate rejection (integration)
+    // -----------------------------------------------------------------------
+
+    it('REJECTS a canonical extraction-target collision before extraction (a/b vs a//b, LOCK-FZ2)', async () => {
+      const { default: AdmZip } = await import('adm-zip')
+      const zipPath = path.join(tempDir, 'canonical-collision.zip')
+      const zip = new AdmZip()
+      zip.addFile(`${FILE_ORIGIN_PREFIX}000001.ldb`, Buffer.from('idb'))
+      zip.addFile(`${FILE_ORIGIN_PREFIX}//000001.ldb`, Buffer.from('idb-other'))
+      zip.writeZip(zipPath)
+
+      const destDir = path.join(tempDir, 'out')
+      fs.mkdirSync(destDir, { recursive: true })
+
+      await expect(extractZip(zipPath, destDir)).rejects.toMatchObject({
+        code: 'DUPLICATE_EXTRACTION_TARGET'
+      })
+      // Rejected before extraction: nothing materialized.
+      expect(fs.existsSync(path.join(destDir, 'IndexedDB'))).toBe(false)
+    })
+
+    it('REJECTS a canonical extraction-target collision with a dot component (a/./b, LOCK-FZ2)', async () => {
+      const { default: AdmZip } = await import('adm-zip')
+      const zipPath = path.join(tempDir, 'canonical-dot-collision.zip')
+      const zip = new AdmZip()
+      zip.addFile(`${FILE_ORIGIN_PREFIX}000001.ldb`, Buffer.from('idb'))
+      zip.addFile(`${FILE_ORIGIN_PREFIX}./000001.ldb`, Buffer.from('idb-other'))
+      zip.writeZip(zipPath)
+
+      const destDir = path.join(tempDir, 'out')
+      fs.mkdirSync(destDir, { recursive: true })
+
+      await expect(extractZip(zipPath, destDir)).rejects.toMatchObject({
+        code: 'DUPLICATE_EXTRACTION_TARGET'
+      })
+      expect(fs.existsSync(path.join(destDir, 'IndexedDB'))).toBe(false)
+    })
+
+    it('REJECTS canonical collisions between NON-selected entries too (all-entry policy, LOCK-FZ2)', async () => {
+      // Data/x vs Data//x — both never-selected, but the all-entry
+      // canonical-destination duplicate requirement still rejects the
+      // container BEFORE extraction (Layer 3 runs for every entry).
+      const { default: AdmZip } = await import('adm-zip')
+      const zipPath = path.join(tempDir, 'nonselected-collision.zip')
+      const zip = new AdmZip()
+      zip.addFile('Data/x', Buffer.from('a'))
+      zip.addFile('Data//x', Buffer.from('b'))
+      zip.writeZip(zipPath)
+
+      const destDir = path.join(tempDir, 'out')
+      fs.mkdirSync(destDir, { recursive: true })
+
+      await expect(extractZip(zipPath, destDir)).rejects.toMatchObject({
+        code: 'DUPLICATE_EXTRACTION_TARGET'
+      })
+      expect(fs.existsSync(path.join(destDir, 'Data'))).toBe(false)
     })
   })
 })

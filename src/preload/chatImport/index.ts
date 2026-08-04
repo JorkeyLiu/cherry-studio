@@ -19,6 +19,7 @@
 
 import type {
   ChatImportEnvelope,
+  ChatImportProjectionPayload,
   DiscoveryResult,
   ImportErrorPayload,
   ReadPageRequest,
@@ -58,7 +59,8 @@ const CHAT_IMPORT_CHANNELS = {
   readPage: 'chat-import:read-page',
   cancel: 'chat-import:cancel',
   complete: 'chat-import:complete',
-  error: 'chat-import:error'
+  error: 'chat-import:error',
+  projection: 'chat-import:projection'
 } as const
 
 const chatImport = {
@@ -90,6 +92,14 @@ const chatImport = {
   /** Renderer → Main: report an error (fire-and-forget). */
   error: (envelope: ChatImportEnvelope<ImportErrorPayload>): void =>
     ipcRenderer.send(CHAT_IMPORT_CHANNELS.error, envelope),
+
+  /**
+   * Renderer → Main: report the source Local Storage `persist:cherry-studio`
+   * payload for the L2 navigation projection (LOCK-PROD-2/6). The raw string
+   * crosses the wire verbatim; Main parses/validates it. Fire-and-forget.
+   */
+  localStorageProjection: (envelope: ChatImportEnvelope<ChatImportProjectionPayload>): void =>
+    ipcRenderer.send(CHAT_IMPORT_CHANNELS.projection, envelope),
 
   /** Main → Renderer: listen for discover trigger. */
   onDiscover: (callback: (sessionId: string) => void): (() => void) => {

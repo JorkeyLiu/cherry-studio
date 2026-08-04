@@ -18,6 +18,7 @@ import type { FileCleanupResult, FileReferenceWire, JsonObject, SegmentWire } fr
 import { OVERFLOW_REMOVE, reconstruct, reconstructBlock } from './domain/codec'
 import type { FileReferenceData, MessageBlockData, MessageData, TopicData } from './domain/types'
 import type { ChatDbRepositories } from './repository/factory'
+import { L2_TRASH_RETENTION_MARKER } from './trashRetention'
 
 // ---------------------------------------------------------------------------
 // Known field sets for mapping
@@ -213,12 +214,38 @@ export function wireToBlock(json: JsonObject): MessageBlockData {
 // ---------------------------------------------------------------------------
 
 /**
+ * LOCK-TRASH-11: central Main-only wire-boundary stripping seam for topic
+ * wire output.
+ *
+ * The importer-owned `l2TrashRetentionStartedAt` overflow key is retained in
+ * the Main domain/DB/manifest/verifier but must NEVER cross the IPC boundary:
+ * the renderer can neither observe nor round-trip it. Every public topic wire
+ * response (list trash, restore, update-topic-metadata, reset-assistant-topics,
+ * and any shared topicToWire/reconstruct path) routes through this single
+ * helper — no per-caller duplication. Only the marker key is removed; all
+ * other overflow keys (pinned, prompt, isNameManuallyEdited, …) are untouched.
+ */
+export function stripMainOnlyTopicOverflow(wire: JsonObject): JsonObject {
+  if (L2_TRASH_RETENTION_MARKER in wire) {
+    // The reconstructed object is a fresh spread from `reconstruct` — safe to
+    // delete without mutating any shared domain/DB object.
+    const stripped: JsonObject = { ...wire }
+    delete stripped[L2_TRASH_RETENTION_MARKER]
+    return stripped
+  }
+  return wire
+}
+
+/**
  * Convert a TopicData domain DTO to a JsonObject for the wire.
  * Overflow keys are spread as the base, then column values overlay.
  * The `overflow` key itself is excluded from the output.
+ *
+ * LOCK-TRASH-11: the Main-internal L2 retention marker is stripped from the
+ * wire output (see {@link stripMainOnlyTopicOverflow}).
  */
 export function topicToWire(topic: TopicData): JsonObject {
-  return reconstruct(topic) as JsonObject
+  return stripMainOnlyTopicOverflow(reconstruct(topic) as JsonObject)
 }
 
 /**
@@ -569,11 +596,12 @@ export function wireToTopicMetadataPatch(json: JsonObject): {
 /**
  * Convert a TopicData domain DTO to a TopicWire.
  * Includes overflow fields (pinned, prompt, isNameManuallyEdited).
+ *
+ * LOCK-TRASH-11: delegates to the single stripping seam — the Main-internal
+ * L2 retention marker never appears in the wire output.
  */
 export function topicToWireFull(topic: TopicData): JsonObject {
-  const base = reconstruct(topic) as JsonObject
-  // Overflow fields are already included by reconstruct().
-  return base
+  return topicToWire(topic)
 }
 
 // ---------------------------------------------------------------------------

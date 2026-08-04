@@ -240,6 +240,7 @@ function snapshotFailurePhase(code: RollbackSnapshotFailureCode): PromotionPrepa
     case 'SNAPSHOT_INTEGRITY_FAILED':
     case 'SNAPSHOT_FOREIGN_KEYS_FAILED':
     case 'SNAPSHOT_MIGRATION_INCOMPATIBLE':
+    case 'SNAPSHOT_SEARCH_PROJECTION_FAILED':
     case 'SNAPSHOT_SAMPLE_READ_FAILED':
       return 'validate-snapshot'
     case 'SNAPSHOT_DURABILITY_FAILED':

@@ -2042,6 +2042,10 @@
         "success": "导入成功完成！应用将重启。",
         "unsupported": "平台不支持"
       },
+      "recovered": {
+        "assistant_name": "已恢复的对话",
+        "topic_name": "恢复的对话 {{index}}"
+      },
       "select_button": "选择文件",
       "select_file": "选择 Cherry Studio ZIP 备份",
       "steps": {
@@ -2059,6 +2063,7 @@
         "description": "Cherry Studio ZIP 导入目前仅在 macOS 上支持。您当前的平台暂不支持。",
         "title": "平台不支持"
       },
+      "untitled_topic": "未命名话题",
       "warning": {
         "description": "此导入将替换所有现有聊天数据。如果需要，请确保已备份当前数据。",
         "title": "全部替换"

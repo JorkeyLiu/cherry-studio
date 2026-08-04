@@ -246,3 +246,136 @@ export interface CherryImportCancelResult {
   /** Sanitised error message (never raw error.message). */
   readonly error?: string
 }
+
+// ---------------------------------------------------------------------------
+// L2 navigation projection (LOCK-PROD-2/3/4/6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Source Local Storage (`persist:cherry-studio`) payload reported by the
+ * import renderer. The raw redux-persist string is sent verbatim to Main —
+ * parsing/validation is a Main-side concern (LOCK-PROD-2).
+ */
+export interface ChatImportProjectionPayload {
+  /** The raw `persist:cherry-studio` localStorage string (may be null). */
+  readonly persist: string | null
+}
+
+/**
+ * One assistant in the versioned minimal navigation projection.
+ * Carries ONLY source navigation metadata (LOCK-PROD-2) — never assistant
+ * behavior configuration (prompts/settings/models are not imported).
+ */
+export interface ProjectionAssistant {
+  /** Source assistant id. Must be unique within the projection (LOCK-PROD-5). */
+  readonly id: string
+  /** Source assistant display name. */
+  readonly name: string
+  /** Source assistant emoji, when present. */
+  readonly emoji: string | null
+  /** Position in the source assistant list (source order). */
+  readonly order: number
+}
+
+/**
+ * One topic in the versioned minimal navigation projection. LS metadata is
+ * authoritative for these fields ONLY; topic existence/messages/blocks/
+ * segments/files/deletedAt remain authoritative in IndexedDB/SQLite
+ * (LOCK-PROD-2/3).
+ */
+export interface ProjectionTopic {
+  /** Topic id — must exist in the imported IndexedDB topics (LOCK-PROD-3). */
+  readonly id: string
+  /** Owning assistant id (container assistant is authoritative for grouping). */
+  readonly assistantId: string
+  /** Source topic display name. */
+  readonly name: string
+  /** Source created-at ISO string, or null when unknown (LOCK-PROD-4). */
+  readonly createdAt: string | null
+  /** Source updated-at ISO string, or null when unknown (LOCK-PROD-4). */
+  readonly updatedAt: string | null
+  /**
+   * Deleted-at ISO string, or null when active. ALWAYS resolved to the
+   * IndexedDB/SQLite value (LOCK-PROD-3: LS may not override deleted state).
+   */
+  readonly deletedAt: string | null
+  /** Source pinned state. */
+  readonly pinned: boolean
+  /** Source isNameManuallyEdited state. */
+  readonly isNameManuallyEdited: boolean
+  /** Position within the source assistant's topics list (source order). */
+  readonly order: number
+}
+
+/**
+ * One IndexedDB-only topic surfaced under the reserved "Recovered
+ * conversations" shell assistant (LOCK-PROD-4).
+ *
+ * IndexedDB owns existence and deletedAt (LOCK-FP2): the recovered payload
+ * carries ONLY {id, deletedAt} — no source metadata (names, timestamps,
+ * assistant ownership) is ever inferred. Active recovered topics (deletedAt
+ * null) surface as visible navigation under the shell; deleted recovered
+ * topics are NEVER resurrected as active navigation — the product pattern
+ * excludes soft-deleted topics from Redux entirely (trash semantics are
+ * DB-backed by the imported SQLite/Dexie rows that carry the authoritative
+ * deletedAt).
+ */
+export interface ProjectionRecoveredTopic {
+  /** Topic id — must exist in the imported IndexedDB topics (LOCK-PROD-3). */
+  readonly id: string
+  /** IndexedDB-authoritative deletedAt; null when the topic is active. */
+  readonly deletedAt: string | null
+}
+
+/**
+ * Reserved shell assistant id for IndexedDB-only "Recovered conversations"
+ * topics (LOCK-PROD-4). Imported source assistant ids must never collide
+ * with it (LOCK-PROD-5). Shared between Main (projection validation) and
+ * renderer (projection apply).
+ */
+export const RECOVERED_SHELL_ASSISTANT_ID = 'import-recovered-conversations'
+
+/**
+ * Versioned one-shot navigation projection. Travels atomically with the
+ * candidate `chat.db` (stored under a versioned `migration_state` key) and
+ * is applied idempotently by the renderer after Redux rehydration
+ * (LOCK-PROD-6).
+ */
+export interface ImportNavigationProjection {
+  /** Projection schema version. */
+  readonly version: 1
+  /** Source redux-persist version observed (diagnostic only). */
+  readonly sourcePersistVersion: number | null
+  /** Imported assistant shells, in source order (LOCK-PROD-2/5). */
+  readonly assistants: ProjectionAssistant[]
+  /** Imported topics joined against IndexedDB, grouped by assistantId. */
+  readonly topics: ProjectionTopic[]
+  /**
+   * IndexedDB-only topics with no Local Storage metadata (LOCK-PROD-4).
+   * Each entry carries the IndexedDB-authoritative deletedAt (LOCK-FP2):
+   * active recovered topics surface under the localized "Recovered
+   * conversations" shell assistant; deleted recovered topics are retained
+   * in the payload so the renderer can honor the deleted state and never
+   * resurrect them as active navigation.
+   */
+  readonly recoveredTopicIds: ProjectionRecoveredTopic[]
+}
+
+/**
+ * Result of the renderer → Main one-shot projection read. Returns the
+ * pending projection or a no-op result when none is pending (LOCK-PROD-6).
+ */
+export type CherryImportGetProjectionResult =
+  | { readonly ok: true; readonly projection: ImportNavigationProjection }
+  | { readonly ok: true; readonly projection: null }
+  | { readonly ok: false; readonly error: string }
+
+/**
+ * Result of the renderer → Main durable projection acknowledgment. The ack
+ * clears the one-shot payload from the live SQLite `migration_state` after
+ * the renderer has applied it and flushed redux-persist (LOCK-PROD-6).
+ */
+export interface CherryImportAckProjectionResult {
+  readonly ok: boolean
+  readonly error?: string
+}

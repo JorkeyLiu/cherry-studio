@@ -47,6 +47,7 @@ import { drizzle } from 'drizzle-orm/better-sqlite3'
 import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
 import { CandidateDbResource, getCandidateRoot } from '../candidateDb'
+import { computeMessageTargetId } from '../identity/messageIdentity'
 import { createImportDataPlane } from '../importDataPlane'
 // Deterministic 10k fixture shared with the Phase 4.3.4 verification
 // benchmark (same source stream, same LOCK-B2 dimensions).
@@ -129,6 +130,11 @@ function assertLiveSentinelUnchanged(sentinel: LiveSentinel): void {
 
 const SESSION_ID = 'bench-4202-10k-session'
 
+/** Deterministic L2 target ID of the message at global index `g` (LOCK-MID-1). */
+function messageTargetIdOf(g: number): string {
+  return computeMessageTargetId(topicIdOf(Math.floor(g / MESSAGES_PER_TOPIC)), messageIdOf(g))
+}
+
 function countOf(sqlite: Database.Database, table: string): number {
   return (sqlite.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
 }
@@ -169,12 +175,61 @@ describe('chatDbImport Phase 4.2 — 10k-message candidate integration benchmark
       resource = new CandidateDbResource({ sessionId: SESSION_ID, dataRoot })
       await resource.initialize() // real ChatDbService + real migrations (LOCK-B1)
 
+      // LOCK-FTS-3: defer the derived search projection before any page
+      // write — bulk import must not pay per-row trigger/FTS maintenance.
+      const deferStartedAt = performance.now()
+      resource.deferFtsProjection()
+      const deferMs = performance.now() - deferStartedAt
+
+      // Structural proof (LOCK-FTS-3/7): derived objects are ABSENT while
+      // the import writes pages — no triggers, no FTS, no normalized table.
+      {
+        const sqlite = resource.getSqlite() as Database.Database
+        const derived = sqlite
+          .prepare(
+            "SELECT name, type FROM sqlite_master WHERE name IN ('message_blocks_normalized', " +
+              "'message_blocks_normalized_message_id_idx', 'message_blocks_fts', " +
+              "'message_blocks_normalized_insert', 'message_blocks_normalized_update', " +
+              "'message_blocks_normalized_delete')"
+          )
+          .all() as Array<{ name: string; type: string }>
+        expect(derived).toEqual([])
+        // migration_state 003 remains recorded (LOCK-FTS-3): the deferral
+        // never unsets the migration — explicit rebuild is mandatory.
+        expect(
+          (
+            sqlite
+              .prepare("SELECT COUNT(*) AS n FROM migration_state WHERE key = '003_fts5_normalized_search'")
+              .get() as {
+              n: number
+            }
+          ).n
+        ).toBe(1)
+      }
+
       const plane = createImportDataPlane(resource.getDatabase() as BetterSQLite3Database<typeof schema>)
 
-      // --- Benchmark: full page stream + finalize + seal (LOCK-B3/B6) ---
+      // --- Benchmark: full page stream + finalize + rebuild + seal (LOCK-B3/B6) ---
       const startedAt = performance.now()
       streamAllPages(plane)
+      const pagesMs = performance.now() - startedAt
       const finalized = plane.finalize()
+
+      // LOCK-FTS-7: while deferred, the page stream wrote ZERO derived rows
+      // (trigger absence during writes is proven structurally — no wall-clock
+      // threshold is asserted for the write cost shape).
+      {
+        const sqlite = resource.getSqlite() as Database.Database
+        const normalizedExists = sqlite
+          .prepare('SELECT COUNT(*) AS n FROM sqlite_master WHERE type = ? AND name = ?')
+          .get('table', 'message_blocks_normalized') as { n: number }
+        expect(normalizedExists.n).toBe(0)
+      }
+
+      // LOCK-FTS-4: rebuild exactly once AFTER finalize and BEFORE seal.
+      const rebuildStartedAt = performance.now()
+      resource.rebuildFtsProjection()
+      const rebuildMs = performance.now() - rebuildStartedAt
       resource.seal()
       const elapsedMs = performance.now() - startedAt
 
@@ -183,7 +238,8 @@ describe('chatDbImport Phase 4.2 — 10k-message candidate integration benchmark
       // Reporter-safe benchmark emission (test stdout only; no production log).
       process.stdout.write(
         `[chatdb-import-benchmark] 10k-message candidate build+finalize+seal: ${elapsedMs.toFixed(1)} ms ` +
-          `(${TOTAL_MESSAGES} messages, ${TOTAL_BLOCKS} blocks, ${EXPECTED_PAGE_COUNT} pages)\n`
+          `(defer: ${deferMs.toFixed(1)} ms, pages: ${pagesMs.toFixed(1)} ms, rebuild: ${rebuildMs.toFixed(1)} ms, ` +
+          `${TOTAL_MESSAGES} messages, ${TOTAL_BLOCKS} blocks, ${EXPECTED_PAGE_COUNT} pages)\n`
       )
 
       // --- Stats accounting (LOCK-B3) ---
@@ -221,41 +277,86 @@ describe('chatDbImport Phase 4.2 — 10k-message candidate integration benchmark
         expect(countOf(sqlite, 'topic_segment_messages')).toBe(TOTAL_MEMBERSHIPS)
         expect(countOf(sqlite, 'file_references')).toBe(EXPECTED_FILE_REFERENCES)
 
+        // LOCK-FTS-4/7: rebuilt projection counts match the canonical
+        // MAIN_TEXT/content-not-null source (10,000 base blocks; the 1,000
+        // extra tool/file/image sibling blocks are never projected).
+        const canonicalMainText = (
+          sqlite
+            .prepare("SELECT COUNT(*) AS n FROM message_blocks WHERE type = 'main_text' AND content IS NOT NULL")
+            .get() as { n: number }
+        ).n
+        expect(canonicalMainText).toBe(TOTAL_MESSAGES)
+        expect(countOf(sqlite, 'message_blocks_normalized')).toBe(canonicalMainText)
+        expect(countOf(sqlite, 'message_blocks_fts')).toBe(canonicalMainText)
+        // The message_id join index exists again after the rebuild.
+        const rebuiltIndex = sqlite
+          .prepare(
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' " +
+              "AND name = 'message_blocks_normalized_message_id_idx'"
+          )
+          .get() as { n: number }
+        expect(rebuiltIndex.n).toBe(1)
+        // The three sync triggers are restored (LOCK-FTS-6).
+        for (const trigger of [
+          'message_blocks_normalized_insert',
+          'message_blocks_normalized_update',
+          'message_blocks_normalized_delete'
+        ]) {
+          expect(
+            (
+              sqlite
+                .prepare('SELECT COUNT(*) AS n FROM sqlite_master WHERE type = ? AND name = ?')
+                .get('trigger', trigger) as {
+                n: number
+              }
+            ).n
+          ).toBe(1)
+        }
+        // Search projection query parity (LOCK-FTS-7): the rebuilt FTS index
+        // returns the exact canonical MAIN_TEXT block set for a content term.
+        const ftsMatches = sqlite
+          .prepare('SELECT COUNT(*) AS n FROM message_blocks_fts WHERE message_blocks_fts MATCH \'"bench message"\'')
+          .get() as { n: number }
+        expect(ftsMatches.n).toBe(canonicalMainText)
+
         // Representative first/middle/last message order per topic: embedded
         // arrays were REVERSED, so sortOrder i → global index (last - i).
+        // Candidate ids are deterministic targets (LOCK-MID-1).
         const messageAt = sqlite.prepare('SELECT id FROM messages WHERE topic_id = ? AND sort_order = ?')
         for (const t of [0, 12, TOPIC_COUNT - 1]) {
           const base = t * MESSAGES_PER_TOPIC
-          expect((messageAt.get(topicIdOf(t), 0) as { id: string }).id).toBe(messageIdOf(base + 399))
-          expect((messageAt.get(topicIdOf(t), 200) as { id: string }).id).toBe(messageIdOf(base + 199))
-          expect((messageAt.get(topicIdOf(t), 399) as { id: string }).id).toBe(messageIdOf(base))
+          expect((messageAt.get(topicIdOf(t), 0) as { id: string }).id).toBe(messageTargetIdOf(base + 399))
+          expect((messageAt.get(topicIdOf(t), 200) as { id: string }).id).toBe(messageTargetIdOf(base + 199))
+          expect((messageAt.get(topicIdOf(t), 399) as { id: string }).id).toBe(messageTargetIdOf(base))
         }
 
         // Sibling block order survives the b-*/x-* page split: extras were
-        // listed FIRST in message.blocks, so x-* gets sortOrder 0.
+        // listed FIRST in message.blocks, so x-* gets sortOrder 0. Block
+        // message_id is the owner's target (LOCK-REF-1).
         const blocksOf = sqlite.prepare(
           'SELECT id, sort_order AS sortOrder FROM message_blocks WHERE message_id = ? ORDER BY sort_order ASC'
         )
         for (const g of [0, 5000, 9990]) {
           const e = g / EXTRA_BLOCK_EVERY
-          expect(blocksOf.all(messageIdOf(g))).toEqual([
+          expect(blocksOf.all(messageTargetIdOf(g))).toEqual([
             { id: extraBlockIdOf(e), sortOrder: 0 },
             { id: baseBlockIdOf(g), sortOrder: 1 }
           ])
         }
-        expect(blocksOf.all(messageIdOf(1))).toEqual([{ id: baseBlockIdOf(1), sortOrder: 0 }])
+        expect(blocksOf.all(messageTargetIdOf(1))).toEqual([{ id: baseBlockIdOf(1), sortOrder: 0 }])
 
-        // Membership order = messageIds array index (reversed member lists).
+        // Membership order = messageIds array index (reversed member lists);
+        // memberships persist as target IDs (LOCK-REF-1).
         const membersOf = sqlite.prepare(
           'SELECT message_id AS messageId, sort_order AS sortOrder FROM topic_segment_messages ' +
             'WHERE segment_id = ? ORDER BY sort_order ASC'
         )
         const firstSegment = membersOf.all('s-00') as Array<{ messageId: string; sortOrder: number }>
         expect(firstSegment).toHaveLength(SEGMENT_MEMBER_COUNT)
-        expect(firstSegment[0]).toEqual({ messageId: messageIdOf(9), sortOrder: 0 })
-        expect(firstSegment[9]).toEqual({ messageId: messageIdOf(0), sortOrder: 9 })
+        expect(firstSegment[0]).toEqual({ messageId: messageTargetIdOf(9), sortOrder: 0 })
+        expect(firstSegment[9]).toEqual({ messageId: messageTargetIdOf(0), sortOrder: 9 })
         const lastSegment = membersOf.all(`s-${pad(TOPIC_COUNT - 1, 2)}`) as Array<{ messageId: string }>
-        expect(lastSegment[0].messageId).toBe(messageIdOf((TOPIC_COUNT - 1) * MESSAGES_PER_TOPIC + 9))
+        expect(lastSegment[0].messageId).toBe(messageTargetIdOf((TOPIC_COUNT - 1) * MESSAGES_PER_TOPIC + 9))
 
         // Empty segment retained with zero memberships.
         expect(sqlite.prepare('SELECT id FROM topic_segments WHERE id = ?').get('s-empty')).toBeDefined()
@@ -264,7 +365,7 @@ describe('chatDbImport Phase 4.2 — 10k-message candidate integration benchmark
         // Structured model round-trip: column null, modelId promoted, extra keeps object.
         const modelMsg = sqlite
           .prepare('SELECT model, model_id AS modelId, extra FROM messages WHERE id = ?')
-          .get(messageIdOf(0)) as { model: string | null; modelId: string; extra: string }
+          .get(messageTargetIdOf(0)) as { model: string | null; modelId: string; extra: string }
         expect(modelMsg.model).toBeNull()
         expect(modelMsg.modelId).toBe(STRUCTURED_MODEL.id)
         const modelExtra = JSON.parse(modelMsg.extra)
@@ -303,6 +404,9 @@ describe('chatDbImport Phase 4.2 — 10k-message candidate integration benchmark
     async () => {
       resource = new CandidateDbResource({ sessionId: SESSION_ID, dataRoot })
       await resource.initialize()
+      // LOCK-FTS-3: defer the derived projection before writing pages — the
+      // partial build must never pay per-row trigger/FTS maintenance.
+      resource.deferFtsProjection()
 
       const plane = createImportDataPlane(resource.getDatabase() as BetterSQLite3Database<typeof schema>)
 

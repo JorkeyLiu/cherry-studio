@@ -47,15 +47,35 @@ vi.mock('electron', () => ({
   }
 }))
 
+// Per-context logger mock registry (same pattern as index.test.ts): each
+// module context gets its own cached info/warn/error/debug mock so tests can
+// assert on the 'chatDbImport' context logs deterministically.
+const loggerHoisted = vi.hoisted(() => {
+  const contexts = new Map<
+    string,
+    {
+      info: ReturnType<typeof vi.fn>
+      warn: ReturnType<typeof vi.fn>
+      error: ReturnType<typeof vi.fn>
+      debug: ReturnType<typeof vi.fn>
+    }
+  >()
+  return {
+    withContext: (name: string) => {
+      let ctx = contexts.get(name)
+      if (!ctx) {
+        ctx = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
+        contexts.set(name, ctx)
+      }
+      return ctx
+    }
+  }
+})
+
 // Mock loggerService
 vi.mock('@logger', () => ({
   loggerService: {
-    withContext: () => ({
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-      debug: vi.fn()
-    })
+    withContext: loggerHoisted.withContext
   }
 }))
 
@@ -70,6 +90,7 @@ vi.mock('../isolatedSession', () => ({
 
 import { IpcChannel } from '@shared/IpcChannel'
 
+import { ChatImportDataPlaneError } from '../importDataPlane'
 import { registerChatImportIpc } from '../importIpc'
 
 /** Helper to create a mock active reader with matching mainFrame. */
@@ -111,13 +132,13 @@ describe('ChatImport IPC Registration', () => {
   // =========================================================================
 
   describe('handler registration', () => {
-    it('registers 3 handle handlers (Ready, Discover, ReadPage) and 2 on listeners (Complete, Error)', () => {
+    it('registers 3 handle handlers (Ready, Discover, ReadPage) and 3 on listeners (Complete, Error, Projection)', () => {
       disposer = registerChatImportIpc()
 
       // ipcMain.handle called for Ready, Discover, ReadPage
       expect(mockHandle).toHaveBeenCalledTimes(3)
-      // ipcMain.on called for Complete, Error
-      expect(mockOn).toHaveBeenCalledTimes(2)
+      // ipcMain.on called for Complete, Error, Projection (LOCK-PROD-2/6)
+      expect(mockOn).toHaveBeenCalledTimes(3)
     })
 
     it('registers handle for the expected channels', () => {
@@ -128,7 +149,7 @@ describe('ChatImport IPC Registration', () => {
       expect(handlers.has(IpcChannel.ChatImport_ReadPage)).toBe(true)
     })
 
-    it('registers on listeners for Complete and Error', () => {
+    it('registers on listeners for Complete, Error and Projection', () => {
       disposer = registerChatImportIpc()
 
       expect(onListeners.has(IpcChannel.ChatImport_Complete)).toBe(true)
@@ -604,6 +625,160 @@ describe('ChatImport IPC Registration', () => {
   })
 
   // =========================================================================
+  // Projection handler (LOCK-PROD-2/6, LOCK-I1) — renderer → main source
+  // Local Storage payload. Fire-and-forget (ipcMain.on); Main parses and
+  // persists the minimal projection. The raw string never crosses IPC back.
+  // =========================================================================
+
+  describe('Projection handler', () => {
+    /** Register a fresh registration and fire the Projection handler once. */
+    function fireProjection(persist: unknown, callbacks: { onProjection?: (...args: any[]) => any } = {}) {
+      disposer = registerChatImportIpc(callbacks)
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+      const handler = onListeners.get(IpcChannel.ChatImport_Projection)!
+      handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'discovery',
+        version: 1,
+        data: { persist }
+      })
+      return { reader, handler }
+    }
+
+    it('registers an ipcMain.on listener on ChatImport_Projection', () => {
+      disposer = registerChatImportIpc()
+      expect(onListeners.has(IpcChannel.ChatImport_Projection)).toBe(true)
+    })
+
+    it('rejects the payload when the sender identity does not match (R-9)', () => {
+      const onProjection = vi.fn()
+      disposer = registerChatImportIpc({ onProjection })
+      mockGetActiveReader.mockReturnValue(makeReader())
+
+      const handler = onListeners.get(IpcChannel.ChatImport_Projection)!
+      handler(
+        { senderFrame: { id: 999 } },
+        {
+          sessionId: 'test',
+          phase: 'discovery',
+          version: 1,
+          data: { persist: 'x' }
+        }
+      )
+
+      expect(onProjection).not.toHaveBeenCalled()
+    })
+
+    it('rejects a null envelope without invoking the callback', () => {
+      const onProjection = vi.fn()
+      disposer = registerChatImportIpc({ onProjection })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = onListeners.get(IpcChannel.ChatImport_Projection)!
+      handler(makeEvent(reader.mainFrame), null)
+
+      expect(onProjection).not.toHaveBeenCalled()
+    })
+
+    it('rejects a wrong phase', () => {
+      const onProjection = vi.fn()
+      disposer = registerChatImportIpc({ onProjection })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = onListeners.get(IpcChannel.ChatImport_Projection)!
+      handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'reading',
+        version: 1,
+        data: { persist: 'x' }
+      })
+
+      expect(onProjection).not.toHaveBeenCalled()
+    })
+
+    it('rejects a wrong version', () => {
+      const onProjection = vi.fn()
+      disposer = registerChatImportIpc({ onProjection })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = onListeners.get(IpcChannel.ChatImport_Projection)!
+      handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'discovery',
+        version: 2,
+        data: { persist: 'x' }
+      })
+
+      expect(onProjection).not.toHaveBeenCalled()
+    })
+
+    it('accepts a string persist and invokes onProjection with the raw payload', () => {
+      const onProjection = vi.fn()
+      fireProjection('{"assistants":[]}', { onProjection })
+      expect(onProjection).toHaveBeenCalledWith('test', { persist: '{"assistants":[]}' })
+    })
+
+    it('accepts a null persist (missing source key) and passes persist: null', () => {
+      const onProjection = vi.fn()
+      disposer = registerChatImportIpc({ onProjection })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = onListeners.get(IpcChannel.ChatImport_Projection)!
+      handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'discovery',
+        version: 1,
+        data: { persist: null }
+      })
+
+      expect(onProjection).toHaveBeenCalledWith('test', { persist: null })
+    })
+
+    it('rejects every non-string non-null persist value (number, boolean, object, array)', () => {
+      for (const bad of [42, true, { a: 1 }, [1]]) {
+        const onProjection = vi.fn()
+        fireProjection(bad, { onProjection })
+        expect(onProjection).not.toHaveBeenCalled()
+        disposer()
+        disposer = null as unknown as () => void
+      }
+    })
+
+    it('contains an async onProjection rejection (no unhandled rejection)', async () => {
+      const onUnhandled = vi.fn()
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        const onProjection = vi.fn(async () => {
+          throw new Error('projection hook failed')
+        })
+        disposer = registerChatImportIpc({ onProjection })
+        const reader = makeReader()
+        mockGetActiveReader.mockReturnValue(reader)
+
+        const handler = onListeners.get(IpcChannel.ChatImport_Projection)!
+        handler(makeEvent(reader.mainFrame), {
+          sessionId: 'test',
+          phase: 'discovery',
+          version: 1,
+          data: { persist: 'x' }
+        })
+
+        await new Promise((resolve) => setTimeout(resolve, 10))
+
+        expect(onProjection).toHaveBeenCalled()
+        expect(onUnhandled).not.toHaveBeenCalled()
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled)
+      }
+    })
+  })
+
+  // =========================================================================
   // Async callback transport contract (Phase 4.2 — LOCK-T2/T3/T4)
   // =========================================================================
 
@@ -665,6 +840,233 @@ describe('ChatImport IPC Registration', () => {
       expect(result.ok).toBe(false)
       expect(result.error).toContain('CALLBACK_FAILED')
       expect(result.error).toContain('candidate write failed')
+    })
+
+    it('ReadPage summarizes a ChatImportDataPlaneError ack to bounded code/table context (LOCK-PRIV-2)', async () => {
+      // A data-plane rejection's raw message carries source IDs (entityId,
+      // source block/message IDs). The IPC ack must expose ONLY the bounded
+      // machine code + table — never the raw detail.
+      const onReadPage = vi.fn(() => {
+        throw new ChatImportDataPlaneError(
+          'INVALID_ROW',
+          `topics[0] (id=secret-topic-0x1): field 'id' must be a non-empty string (got undefined)`,
+          { tableName: 'topics', entityId: 'secret-topic-0x1' }
+        )
+      })
+      disposer = registerChatImportIpc({ onReadPage })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = handlers.get(IpcChannel.ChatImport_ReadPage)!
+      const result = await handler(makeEvent(reader.mainFrame), makeReadPageEnvelope())
+
+      expect(result.ok).toBe(false)
+      expect(result.error).toContain('CALLBACK_FAILED')
+      expect(result.error).toContain('DATA_PLANE_REJECTION(INVALID_ROW, table=topics)')
+      // LOCK-PRIV-2: never entityId, error.detail, or raw error.message.
+      expect(result.error).not.toContain('secret-topic-0x1')
+      expect(result.error).not.toContain("field 'id' must be a non-empty string")
+      expect(result.error).not.toContain('topics[0]')
+    })
+
+    it('ReadPage summarizes a cause-wrapped ChatImportDataPlaneError ack (LOCK-PRIV-4/5)', async () => {
+      // A rejection nested inside an Error.cause chain must still produce a
+      // bounded ack — the wrapper's raw message must never leak.
+      const secret = 'secret-topic-0xWrappedIpc'
+      const rejection = new ChatImportDataPlaneError(
+        'INVALID_ROW',
+        `topics[0] (id=${secret}): field 'id' must be a non-empty string`,
+        { tableName: 'topics', entityId: secret }
+      )
+      const wrapper = new Error(`wrapped failure containing ${secret}`)
+      wrapper.cause = rejection
+      const onReadPage = vi.fn(() => {
+        throw wrapper
+      })
+      disposer = registerChatImportIpc({ onReadPage })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = handlers.get(IpcChannel.ChatImport_ReadPage)!
+      const result = await handler(makeEvent(reader.mainFrame), makeReadPageEnvelope())
+
+      expect(result.ok).toBe(false)
+      expect(result.error).toContain('CALLBACK_FAILED')
+      expect(result.error).toContain('DATA_PLANE_REJECTION(INVALID_ROW, table=topics)')
+      // LOCK-PRIV-5: neither the wrapper message nor the raw detail leaks
+      // into the serialized ack.
+      expect(result.error).not.toContain(secret)
+      expect(result.error).not.toContain('wrapped failure')
+      expect(JSON.stringify(result)).not.toContain(secret)
+    })
+
+    it('ReadPage summarizes an AggregateError-contained ChatImportDataPlaneError ack (LOCK-PRIV-4/5)', async () => {
+      const secret = 'secret-block-0xAggIpc'
+      const rejection = new ChatImportDataPlaneError(
+        'OWNERSHIP_MISMATCH',
+        `message_blocks[0] (id=${secret}): block owner mismatch`,
+        { tableName: 'message_blocks', entityId: secret }
+      )
+      const onReadPage = vi.fn(() => {
+        throw new AggregateError([new Error(`raw aggregate entry with ${secret}`), rejection])
+      })
+      disposer = registerChatImportIpc({ onReadPage })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = handlers.get(IpcChannel.ChatImport_ReadPage)!
+      const result = await handler(makeEvent(reader.mainFrame), makeReadPageEnvelope())
+
+      expect(result.ok).toBe(false)
+      expect(result.error).toContain('CALLBACK_FAILED')
+      expect(result.error).toContain('DATA_PLANE_REJECTION(OWNERSHIP_MISMATCH, table=message_blocks)')
+      expect(result.error).not.toContain(secret)
+      expect(result.error).not.toContain('raw aggregate entry')
+      expect(JSON.stringify(result)).not.toContain(secret)
+    })
+
+    it('ReadPage keeps the generic message when the error tree has no data-plane rejection (LOCK-PRIV-5)', async () => {
+      const wrapper = new Error('outer generic failure')
+      wrapper.cause = new Error('inner generic failure')
+      const onReadPage = vi.fn(() => {
+        throw wrapper
+      })
+      disposer = registerChatImportIpc({ onReadPage })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = handlers.get(IpcChannel.ChatImport_ReadPage)!
+      const result = await handler(makeEvent(reader.mainFrame), makeReadPageEnvelope())
+
+      expect(result.ok).toBe(false)
+      expect(result.error).toContain('CALLBACK_FAILED')
+      expect(result.error).toContain('outer generic failure')
+    })
+
+    // =======================================================================
+    // Renderer-controlled value bounding at the log boundary (LOCK-PRIV-6)
+    // =======================================================================
+
+    function importLogger() {
+      return loggerHoisted.withContext('chatDbImport') as {
+        info: ReturnType<typeof vi.fn>
+        warn: ReturnType<typeof vi.fn>
+        error: ReturnType<typeof vi.fn>
+        debug: ReturnType<typeof vi.fn>
+      }
+    }
+
+    function allLogText(): string {
+      const logger = importLogger()
+      return [...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls]
+        .map((call) => call.map(String).join(' '))
+        .join('\n')
+    }
+
+    it('Error channel logs only the allowlisted code family, never the renderer message (LOCK-PRIV-6)', () => {
+      const sentinel = 'SENTINEL-0xErrorChannel'
+      disposer = registerChatImportIpc()
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = onListeners.get(IpcChannel.ChatImport_Error)!
+      handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'error',
+        version: 1,
+        data: { code: 'READ_FAILED', message: `secret ${sentinel}` }
+      })
+
+      expect(
+        importLogger().error.mock.calls.some((call) => String(call[0]).includes('RENDERER_ERROR(READ_FAILED)'))
+      ).toBe(true)
+      expect(allLogText()).not.toContain(sentinel)
+      expect(allLogText()).not.toContain('secret ')
+    })
+
+    it('Error channel bounds an untrusted renderer code to static UNKNOWN (LOCK-PRIV-6)', () => {
+      const sentinel = 'SENTINEL-0xHostileCode'
+      disposer = registerChatImportIpc()
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = onListeners.get(IpcChannel.ChatImport_Error)!
+      handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'error',
+        version: 1,
+        data: { code: `DROP TABLE messages; -- ${sentinel}`, message: `secret ${sentinel}` }
+      })
+
+      expect(importLogger().error.mock.calls.some((call) => String(call[0]).includes('RENDERER_ERROR(UNKNOWN)'))).toBe(
+        true
+      )
+      expect(allLogText()).not.toContain(sentinel)
+      expect(allLogText()).not.toContain('DROP TABLE')
+    })
+
+    it('Discover channel logs the table count, never renderer table entries (LOCK-PRIV-6)', async () => {
+      const sentinel = 'SENTINEL-0xTableNames'
+      disposer = registerChatImportIpc()
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = handlers.get(IpcChannel.ChatImport_Discover)!
+      const result = await handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'discovery',
+        version: 1,
+        data: {
+          databaseName: 'CherryStudio',
+          nativeVersion: 110,
+          logicalVersion: 11,
+          tableNames: [`${sentinel}`, 'topics']
+        }
+      })
+
+      expect(result).toEqual({ ok: true })
+      expect(importLogger().info.mock.calls.some((call) => String(call[0]).includes('tables=2'))).toBe(true)
+      expect(allLogText()).not.toContain(sentinel)
+    })
+
+    it('ReadPage channel logs a bounded table label, never the renderer table name (LOCK-PRIV-6)', async () => {
+      const sentinel = 'SENTINEL-0xTableName'
+      const onReadPage = vi.fn()
+      disposer = registerChatImportIpc({ onReadPage })
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = handlers.get(IpcChannel.ChatImport_ReadPage)!
+      const result = await handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'reading',
+        version: 1,
+        data: { tableName: sentinel, items: [{ id: '1' }], cursor: null, hasMore: false }
+      })
+
+      expect(result).toEqual({ ok: true })
+      expect(importLogger().info.mock.calls.some((call) => String(call[0]).includes('table=unknown'))).toBe(true)
+      expect(allLogText()).not.toContain(sentinel)
+    })
+
+    it('Complete channel invalid stats log stays static (no renderer key names) (LOCK-PRIV-6)', () => {
+      const sentinel = 'SENTINEL-0xCompleteKey'
+      disposer = registerChatImportIpc()
+      const reader = makeReader()
+      mockGetActiveReader.mockReturnValue(reader)
+
+      const handler = onListeners.get(IpcChannel.ChatImport_Complete)!
+      handler(makeEvent(reader.mainFrame), {
+        sessionId: 'test',
+        phase: 'complete',
+        version: 1,
+        data: { topicRecordCount: 1, [sentinel]: 'x' }
+      })
+
+      expect(importLogger().warn.mock.calls.some((call) => String(call[0]).includes('Invalid source read stats'))).toBe(
+        true
+      )
+      expect(allLogText()).not.toContain(sentinel)
     })
 
     it('ReadPage converts a synchronous onReadPage throw into a structured failure ack', async () => {

@@ -112,14 +112,22 @@ export {
 
 // Runtime validation
 export {
+  BLOCK_JSON_PROFILE,
+  createProfileBytes,
   MAX_ARRAY_LENGTH,
+  MAX_BLOCK_AGGREGATE_UTF8_BYTES,
+  MAX_BLOCK_ROW_UTF8_BYTES,
+  MAX_BLOCK_STRING_UTF8_BYTES,
   MAX_DEPTH,
   MAX_STRING_LENGTH,
+  utf8ByteLength,
   validateIdField,
   validateIndex,
   validateIso8601Timestamp,
   validateJsonObject,
   validateJsonObjectArray,
+  validateJsonObjectArrayBlock,
+  validateJsonObjectBlock,
   validateJsonValue,
   validateMessageIdField,
   validateNoIdentityFields,
@@ -130,6 +138,9 @@ export {
   validateStringArray,
   ValidationError
 } from './validation'
+
+// Validation types
+export type { JsonProfileBytes, JsonValidationProfile, ResultEnvelopeValidationOptions } from './validation'
 
 // Command contracts
 export type { ChatDbContract } from './contracts'

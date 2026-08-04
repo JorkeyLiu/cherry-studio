@@ -46,6 +46,25 @@ export type ChatImportZipErrorCode =
   | 'UNSUPPORTED_ORIGIN'
   | 'AMBIGUOUS_ORIGIN'
   | 'PACKAGED_DEV_ORIGIN'
+  // LOCK-PROD-9: selective-extraction selected-byte limits. The legacy
+  // SINGLE_ENTRY_TOO_LARGE / TOTAL_UNCOMPRESSED_TOO_LARGE codes remain for
+  // backward compatibility with existing tests/callers.
+  | 'SELECTED_ENTRY_TOO_LARGE'
+  | 'SELECTED_TOO_LARGE'
+  | 'SELECTED_RATIO_TOO_HIGH'
+  // LOCK-Z2: container-level rejection of symlink / special-mode entries
+  // detected from the external-file-attribute mode bits.
+  | 'UNSUPPORTED_ENTRY_TYPE'
+  // LOCK-FZ1: actual extracted-byte enforcement. node-stream-zip skips its
+  // EntryVerifyStream for data-descriptor (flag bit 3) entries, so extraction
+  // aborts when written bytes exceed the claimed central size (or the
+  // single-entry / cumulative caps) and requires the final byte count to
+  // equal the validated central uncompressed size exactly.
+  | 'SELECTED_EXTRACT_OVERFLOW'
+  | 'SELECTED_ENTRY_SIZE_MISMATCH'
+  // LOCK-FZ2: distinct entry names that normalize to the same extraction
+  // destination (a/b vs a//b vs a/./b) are rejected before extraction.
+  | 'DUPLICATE_EXTRACTION_TARGET'
 
 /**
  * Thrown during ZIP intake validation or extraction.
@@ -89,5 +108,25 @@ export class ChatImportCancelledError extends Error {
   constructor(sessionId: string) {
     super(`Import cancelled for session ${sessionId}`)
     this.name = 'ChatImportCancelledError'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Navigation projection errors (LOCK-PROD-6)
+// ---------------------------------------------------------------------------
+
+export type ChatImportProjectionErrorCode = 'ENCODE_FAILED' | 'DECODE_FAILED' | 'APPLY_REJECTED'
+
+/**
+ * Thrown when the L2 navigation projection cannot be encoded/decoded or
+ * applied. Messages are sanitised — never raw paths or payload contents.
+ */
+export class ChatImportProjectionError extends Error {
+  public readonly code: ChatImportProjectionErrorCode
+
+  constructor(code: ChatImportProjectionErrorCode, detail: string) {
+    super(`Navigation projection error (${code}): ${detail}`)
+    this.name = 'ChatImportProjectionError'
+    this.code = code
   }
 }

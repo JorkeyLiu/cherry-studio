@@ -413,6 +413,10 @@ export enum IpcChannel {
   ChatImport_Cancel = 'chat-import:cancel',
   ChatImport_Complete = 'chat-import:complete',
   ChatImport_Error = 'chat-import:error',
+  // ChatImport_Projection — renderer → main: source Local Storage
+  // `persist:cherry-studio` payload for the L2 navigation projection
+  // (LOCK-PROD-2/6). Main-only parse/validation; never crosses IPC back.
+  ChatImport_Projection = 'chat-import:projection',
 
   // CherryImport — L2 Cherry Studio ZIP compatibility-import control IPC.
   // Command-oriented bridge from the main renderer to the Phase 4 import
@@ -423,5 +427,10 @@ export enum IpcChannel {
   CherryImport_Start = 'cherry-import:start',
   CherryImport_Cancel = 'cherry-import:cancel',
   CherryImport_GetStatus = 'cherry-import:get-status',
-  CherryImport_StatusChanged = 'cherry-import:status-changed'
+  CherryImport_StatusChanged = 'cherry-import:status-changed',
+  // L2 one-shot navigation projection (LOCK-PROD-6): renderer reads the
+  // pending projection after Redux rehydration, applies it, flushes, then
+  // durably acks so a crash-before-ack retries on next startup.
+  CherryImport_GetProjection = 'cherry-import:get-projection',
+  CherryImport_AckProjection = 'cherry-import:ack-projection'
 }

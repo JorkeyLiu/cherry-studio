@@ -20,7 +20,9 @@ import { loggerService } from '@logger'
 import { DATA_PATH } from '@main/config'
 import { chatDbService } from '@main/services/chatDb'
 import type {
+  CherryImportAckProjectionResult,
   CherryImportCancelResult,
+  CherryImportGetProjectionResult,
   CherryImportPlatformSupport,
   CherryImportStartResult,
   CherryImportStatusEvent,
@@ -28,7 +30,7 @@ import type {
 } from '@shared/chatImport/types'
 import type { CandidateReadyResult } from '@shared/chatImport/types'
 import { IpcChannel } from '@shared/IpcChannel'
-import type { WebContents } from 'electron'
+import type { IpcMainInvokeEvent, WebContents } from 'electron'
 import { ipcMain } from 'electron'
 
 import {
@@ -49,6 +51,8 @@ import {
   takeTerminalPromotionOwnershipIfMatches,
   type VerificationCompletedResult
 } from './index'
+import { decodeProjectionState, NAVIGATION_PROJECTION_STATE_KEY } from './navigationProjection'
+import { registerMainRendererWebContents } from './promotion/restart'
 
 const logger = loggerService.withContext('chatDbImportControl')
 
@@ -247,6 +251,34 @@ function stopStatePoller(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Projection handler authorization (LOCK-FA1/FA2/FA3)
+// ---------------------------------------------------------------------------
+
+/**
+ * LOCK-FA1: Authorization gate for the one-shot navigation projection
+ * handlers (GetProjection/AckProjection).
+ *
+ * Only the currently registered main renderer's MAIN FRAME may read or
+ * durably acknowledge the pending projection. Any other sender — an
+ * unrelated window sharing the broad preload, a subframe of the main
+ * window, or a missing/destroyed/unregistered target — is rejected
+ * WITHOUT touching the database (LOCK-FA2).
+ *
+ * LOCK-FA3: No new capability subsystem — this reuses the single-owner
+ * `mainWebContents` registration. The destroyed-target case is handled
+ * before `mainWebContents.mainFrame` is dereferenced (a destroyed
+ * webContents has no live main frame).
+ */
+function isAuthorizedProjectionSender(event: IpcMainInvokeEvent): boolean {
+  return (
+    mainWebContents !== null &&
+    !mainWebContents.isDestroyed() &&
+    event.sender === mainWebContents &&
+    event.senderFrame === mainWebContents.mainFrame
+  )
+}
+
+// ---------------------------------------------------------------------------
 // IPC handler registration
 // ---------------------------------------------------------------------------
 
@@ -258,6 +290,10 @@ function stopStatePoller(): void {
  */
 export function registerCherryImportControlIpc(webContents: WebContents): void {
   mainWebContents = webContents
+  // LOCK-PROD-7: register the main renderer webContents so the recovery
+  // executor can request an in-process renderer reload (non-packaged
+  // restart path) once the installed/verified SQLite is live.
+  registerMainRendererWebContents(webContents)
 
   // --- get-platform-support ---
   ipcMain.handle(IpcChannel.CherryImport_GetPlatformSupport, (): CherryImportPlatformSupport => {
@@ -417,7 +453,77 @@ export function registerCherryImportControlIpc(webContents: WebContents): void {
     }
   })
 
-  logger.info('Registered 4 L2 Cherry Import control IPC handlers')
+  // --- get-projection (LOCK-PROD-6, LOCK-FA1/FA2) ---
+  // Renderer reads the one-shot navigation projection from the LIVE DB
+  // after Redux rehydration. Idempotent: absent/malformed rows are a
+  // no-op result (crash-before-ack simply retries next startup).
+  // LOCK-FA1: only the registered main renderer's main frame may read the
+  // pending projection; any other sender is rejected with a structured,
+  // path-redacted error BEFORE any DB access.
+  ipcMain.handle(IpcChannel.CherryImport_GetProjection, (event): CherryImportGetProjectionResult => {
+    if (!isAuthorizedProjectionSender(event)) {
+      logger.warn('L2 projection read rejected: sender is not the registered main renderer main frame')
+      return { ok: false, error: 'Unauthorized: navigation projection read denied' }
+    }
+    try {
+      const sqlite = chatDbService.getSqlite()
+      if (!sqlite) {
+        return { ok: true, projection: null }
+      }
+      const raw = sqlite as {
+        prepare(sql: string): { get(...params: unknown[]): { key?: string; value?: string | null } | undefined }
+      }
+      const row = raw.prepare('SELECT value FROM migration_state WHERE key = ?').get(NAVIGATION_PROJECTION_STATE_KEY)
+      const projection = decodeProjectionState(row?.value ?? null)
+      if (projection === null) {
+        return { ok: true, projection: null }
+      }
+      logger.info(
+        `L2 navigation projection pending for apply ` +
+          `(assistants: ${projection.assistants.length}, topics: ${projection.topics.length}, ` +
+          `recovered: ${projection.recoveredTopicIds.length})`
+      )
+      return { ok: true, projection }
+    } catch (error) {
+      logger.warn('L2 navigation projection read failed (no-op):', error as Error)
+      return { ok: true, projection: null }
+    }
+  })
+
+  // --- ack-projection (LOCK-PROD-6, LOCK-FA1/FA2) ---
+  // Renderer durably acknowledges the applied projection. The row is
+  // removed from the live DB so a crash-before-ack retries on next startup
+  // and a completed apply is never re-applied. Failure is surfaced to the
+  // renderer (the row stays pending and is retried).
+  // LOCK-FA1: only the registered main renderer's main frame may
+  // acknowledge. LOCK-FA2: an unauthorized ack MUST NOT execute SQL — the
+  // DELETE below is never reached for a rejected sender.
+  ipcMain.handle(IpcChannel.CherryImport_AckProjection, (event): CherryImportAckProjectionResult => {
+    if (!isAuthorizedProjectionSender(event)) {
+      logger.warn('L2 projection ack rejected: sender is not the registered main renderer main frame')
+      return { ok: false, error: 'Unauthorized: navigation projection acknowledgment denied' }
+    }
+    try {
+      const sqlite = chatDbService.getSqlite()
+      if (!sqlite) {
+        return { ok: false, error: 'Chat database is not available' }
+      }
+      const raw = sqlite as {
+        prepare(sql: string): { run(...params: unknown[]): { changes: number } }
+      }
+      const result = raw.prepare('DELETE FROM migration_state WHERE key = ?').run(NAVIGATION_PROJECTION_STATE_KEY)
+      if (result.changes !== 1) {
+        logger.warn(`L2 projection ack: no pending row deleted (changes=${result.changes})`)
+      }
+      logger.info('L2 navigation projection acknowledged (one-shot cleared)')
+      return { ok: true }
+    } catch (error) {
+      logger.warn('L2 navigation projection ack failed (row stays pending):', error as Error)
+      return { ok: false, error: 'Projection acknowledgment failed' }
+    }
+  })
+
+  logger.info('Registered 6 L2 Cherry Import control IPC handlers')
 }
 
 // ---------------------------------------------------------------------------
@@ -538,10 +644,11 @@ async function triggerPromotion(sessionId: string): Promise<void> {
         logger.info(`L2 promotion promoted session ${sessionId} — entering finalization`)
         emitStatus({ sessionId, state: 'finalizing' }, myGeneration)
 
-        // Phase 4.4.3: Run recovery executor for journal cleanup + relaunch.
+        // Phase 4.4.3: Run recovery executor for journal cleanup + restart.
         // The recovery executor takes terminal ownership, cleans up the
-        // replacement-verified journal, and relaunches the app. If recovery
-        // fails, startup recovery handles it deterministically.
+        // replacement-verified journal, and relaunches (packaged) or
+        // requests an in-process renderer reload (non-packaged). If
+        // recovery fails, startup recovery handles it deterministically.
         try {
           const { createRecoveryExecutor } = await import('./promotion/recoveryExecutor')
           const recoveryExecutor = createRecoveryExecutor({
@@ -603,8 +710,20 @@ async function triggerPromotion(sessionId: string): Promise<void> {
             // LOCK-6016: Recovery succeeded with a valid verified outcome.
             // Safe to emit 'promoted'.
             emitStatus({ sessionId, state: 'promoted' }, myGeneration)
-            // If recovery succeeded (relaunch initiated), process will exit.
-            // Ownership is terminal — not cleaned up here.
+            // LOCK-FR1/FR2: Packaged relaunch exits the process — ownership
+            // is terminal there (unchanged). Non-packaged in-process reload
+            // (LOCK-PROD-7) keeps the process alive: after the durable
+            // journal cleanup and the accepted reload request, return import
+            // control and maintenance ownership to a clean idle state so a
+            // second independent import can succeed in the SAME process.
+            // cleanupSessionOwnership() stops the old session poller, clears
+            // active session/control ownership, disposes session resources,
+            // and consumes/releases terminal promotion ownership exactly
+            // once (idempotent — the executor already consumed it on the
+            // restore-rollback-snapshot path).
+            if (recoveryResult.inProcessReload === true) {
+              cleanupSessionOwnership()
+            }
           } else {
             // keep-old-live or unexpected action from promoted execution.
             // Shouldn't happen but handle defensively.
@@ -639,7 +758,9 @@ async function triggerPromotion(sessionId: string): Promise<void> {
           // LOCK-6018: consume/release terminal ownership.
           cleanupSessionOwnership()
         }
-        // After successful relaunch, process exits. Ownership is terminal.
+        // Packaged relaunch exits the process — ownership stays terminal.
+        // Non-packaged in-process reload already returned ownership to idle
+        // via cleanupSessionOwnership() above (LOCK-FR2).
         break
       }
 
@@ -698,6 +819,13 @@ async function triggerPromotion(sessionId: string): Promise<void> {
               recoveryResult.action.action === 'restore-rollback-snapshot'
             ) {
               emitStatus({ sessionId, state: 'promoted' }, myGeneration)
+              // LOCK-FR1/FR2: packaged relaunch exits the process (ownership
+              // terminal); non-packaged in-process reload returns control and
+              // maintenance ownership to a clean idle state so a second
+              // independent import can succeed in the same process.
+              if (recoveryResult.inProcessReload === true) {
+                cleanupSessionOwnership()
+              }
             } else {
               // keep-old-live or unexpected action
               logger.warn(`L2 unexpected recovery action for session ${sessionId}: ${recoveryResult.action.action}`)
@@ -824,8 +952,9 @@ function settleStaleRecoveryHandoff(
 ): void {
   // Determine if the process will exit: accept-verified-replacement or
   // restore-rollback-snapshot recovery actions that succeeded indicate the
-  // relaunch was initiated (process exits). In the stale case, we still
-  // settle because the originating handoff's capability must not leak.
+  // restart was initiated (packaged exits; non-packaged reloads
+  // in-process). In the stale case, we still settle because the
+  // originating handoff's capability must not leak.
   const willExit =
     recoveryResult.ok &&
     recoveryResult.action &&
@@ -857,16 +986,18 @@ function settleStaleRecoveryHandoff(
 
 /**
  * Clean up module-level session ownership after a terminal outcome.
- * Called after promotion-failed, stale-settle, etc. NOT called after
- * promoted (which retains ownership through relaunch).
+ * Called after promotion-failed, stale-settle, etc., and after promoted
+ * success in the NON-PACKAGED in-process reload path (LOCK-FR2). NOT
+ * called after packaged promoted success — the process exits and
+ * ownership is terminal there.
  *
  * LOCK-6003: For non-exiting terminal outcomes, this also disposes the
  * session's import resources (temp workspace, isolated session, verifier)
  * while preserving promotion-owned artifacts per protocol.
  *
  * LOCK-6018: Consumes any unclaimed terminal promotion ownership on
- * non-exiting failure paths. This releases the capability so a subsequent
- * promotion can acquire a fresh lease. Uses the atomic
+ * non-exiting failure paths and on non-packaged in-process success, so a
+ * subsequent promotion can acquire a fresh lease. Uses the atomic
  * takeTerminalPromotionOwnership() API to avoid double-release.
  */
 function cleanupSessionOwnership(): void {
@@ -914,6 +1045,10 @@ function cleanupSessionOwnership(): void {
  */
 export function disposeCherryImportControl(): void {
   stopStatePoller()
+
+  // LOCK-PROD-7: clear the registered main renderer webContents so a stale
+  // in-process reload can never target a destroyed window.
+  registerMainRendererWebContents(null)
 
   // LOCK-6018: Release any remaining terminal ownership on app quit.
   const ownership = takeTerminalPromotionOwnership()

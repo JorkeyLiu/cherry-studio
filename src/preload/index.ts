@@ -43,7 +43,9 @@ import type {
   UpsertSegmentRequest
 } from '@shared/chatDb'
 import type {
+  CherryImportAckProjectionResult,
   CherryImportCancelResult,
+  CherryImportGetProjectionResult,
   CherryImportPlatformSupport,
   CherryImportStartResult,
   CherryImportStatusEvent
@@ -552,6 +554,10 @@ const api = {
       ipcRenderer.invoke(IpcChannel.CherryImport_Cancel, sessionId),
     getStatus: (sessionId: string): Promise<CherryImportStatusEvent | null> =>
       ipcRenderer.invoke(IpcChannel.CherryImport_GetStatus, sessionId),
+    getProjection: (): Promise<CherryImportGetProjectionResult> =>
+      ipcRenderer.invoke(IpcChannel.CherryImport_GetProjection),
+    ackProjection: (): Promise<CherryImportAckProjectionResult> =>
+      ipcRenderer.invoke(IpcChannel.CherryImport_AckProjection),
     onStatusChanged: (callback: (event: CherryImportStatusEvent) => void): (() => void) => {
       const listener = (_event: Electron.IpcRendererEvent, data: CherryImportStatusEvent) => {
         callback(data)

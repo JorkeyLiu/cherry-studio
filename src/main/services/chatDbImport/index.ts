@@ -75,19 +75,28 @@ import path from 'node:path'
 
 import { loggerService } from '@logger'
 import type { MaintenanceCoordinator } from '@main/services/chatDb/maintenanceCoordination'
+import { generateL2TrashRetentionBaseline } from '@main/services/chatDb/trashRetention'
 import type {
   CandidateImportStats,
   CandidateReadyResult,
+  ChatImportProjectionPayload,
   DiscoveryResult,
+  ImportNavigationProjection,
   ReadPageResponse,
   SourceReadStats
 } from '@shared/chatImport/types'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
-import { app } from 'electron'
 
 import { CandidateDbResource } from './candidateDb'
 import { ChatImportSessionError, ChatImportUnsupportedPlatformError } from './errors'
-import { createImportDataPlane, type DataPlaneNormalizationStats } from './importDataPlane'
+import {
+  boundImportTableLabel,
+  boundRendererErrorCode,
+  createImportDataPlane,
+  type DataPlaneNormalizationStats,
+  summarizeDataPlaneFailure,
+  summarizeRendererError
+} from './importDataPlane'
 import { registerChatImportIpc, sendCancel, sendDiscover, sendReadPage } from './importIpc'
 import {
   createIsolatedReader,
@@ -95,6 +104,11 @@ import {
   disposeSync as disposeSessionSync,
   type LoadMode
 } from './isolatedSession'
+import {
+  buildNavigationProjection,
+  encodeProjectionState,
+  NAVIGATION_PROJECTION_STATE_KEY
+} from './navigationProjection'
 import type {
   PromotionExecutionFailure,
   PromotionExecutionHandoff,
@@ -129,7 +143,7 @@ import type { CandidateVerifierOptions } from './verification/candidateVerifier'
 import { createCandidateVerifier } from './verification/candidateVerifier'
 import type { SourceVerificationManifest } from './verification/sourceManifest'
 import type { CandidateVerificationReport } from './verification/verificationContracts'
-import { classifyOriginCandidates, extractZip } from './zipIntake'
+import { extractZip } from './zipIntake'
 
 const logger = loggerService.withContext('chatDbImport')
 
@@ -195,8 +209,33 @@ export interface ImportSession {
  */
 export interface CandidateResourceLike {
   initialize(): Promise<void>
+  /**
+   * LOCK-FTS-3: defer the migration-003 derived search projection on the
+   * candidate (drop triggers → FTS table → normalized table atomically) so
+   * bulk page writes pay NO per-row trigger/FTS maintenance. Called by the
+   * orchestrator immediately after initialize(), before any page write.
+   * Fail closed: throws on any error — the session then enters the error
+   * lifecycle and discards the candidate.
+   */
+  deferFtsProjection(): void
+  /**
+   * LOCK-FTS-4/5: rebuild the deferred projection on the candidate
+   * atomically and exactly once (drop-if-exists → recreate normalized
+   * table/index/FTS → backfill → recreate the three sync triggers). Called
+   * by the orchestrator AFTER the data plane finalizes and BEFORE the
+   * navigation projection/stats/seal. Fail closed: throws on any error —
+   * the session then enters the error lifecycle and discards the candidate;
+   * a candidate without its rebuilt projection is never sealed.
+   */
+  rebuildFtsProjection(): void
   getDatabase(): unknown
   getDbPath(): string
+  /**
+   * Raw better-sqlite3 handle for candidate-local writes (LOCK-PROD-6:
+   * navigation projection migration_state row). Production CandidateDbResource
+   * always provides it; injection doubles must too.
+   */
+  getSqlite(): unknown
   seal(): void
   /**
    * Re-establish the sealed invariant after the readonly verifier left
@@ -218,11 +257,18 @@ export interface ImportDataPlaneLike {
   finalize(): { sourceReadStats: SourceReadStats; candidateImportStats: CandidateImportStats }
   /**
    * Main-only normalization accounting after a successful finalize()
-   * (LOCK-OWN-1/2, LOCK-BLOCK-1/2). The orchestrator emits exactly one
-   * aggregate count-only warning from this — never per message/block,
-   * never with IDs/content.
+   * (LOCK-OWN-1/2, LOCK-BLOCK-1/1X, LOCK-ASK-2, LOCK-SEG-1, LOCK-STAT-1).
+   * All six count-only categories. The orchestrator emits exactly one
+   * aggregate count-only warning from this (LOCK-LOG-1) — never per
+   * message/block, never with IDs/content.
    */
   getNormalizationStats(): DataPlaneNormalizationStats
+  /**
+   * IndexedDB-authoritative topic facts (id + deletedAt) for the L2
+   * navigation projection join (LOCK-PROD-3). Available only after a
+   * successful finalize(). Main-only — never expose over IPC.
+   */
+  getImportedTopicFacts(): Array<{ id: string; deletedAt: string | null }>
   /**
    * Finalized source verification manifest (LOCK-4301). Only callable after
    * a successful finalize(); the orchestrator uses it to start the verifier.
@@ -254,7 +300,7 @@ export interface VerificationCompletedResult {
   candidateId: string
   /** Candidate construction accounting (from the CandidateReadyResult). */
   stats: CandidateImportStats
-  /** Sanitized 13-dimension verification report. */
+  /** Sanitized 14-dimension verification report. */
   report: CandidateVerificationReport
 }
 
@@ -289,9 +335,22 @@ export interface StartImportOptions {
   verifierFactory?: (options: CandidateVerifierOptions) => CandidateVerifierLike
   /**
    * Test injection (LOCK-O8): data-plane factory bound to the candidate DB.
-   * Production default is `createImportDataPlane(candidate.getDatabase())`.
+   * Production default is
+   * `createImportDataPlane(candidate.getDatabase(), { l2TrashRetentionBaseline })`.
+   * The second argument carries the session's exactly-once L2 trash
+   * retention baseline (LOCK-TRASH-2) so the plane can inject the marker
+   * into every imported soft-deleted topic.
    */
-  dataPlaneFactory?: (db: unknown) => ImportDataPlaneLike
+  dataPlaneFactory?: (db: unknown, options?: { l2TrashRetentionBaseline?: string }) => ImportDataPlaneLike
+  /**
+   * LOCK-PROD-6: persist the validated navigation projection into the
+   * candidate `migration_state` (travels atomically with `chat.db`).
+   * Production default writes via the raw candidate sqlite handle; tests
+   * inject a double (LOCK-O8). Must throw on any failure — the import then
+   * enters the error lifecycle (a candidate without its projection must
+   * never seal).
+   */
+  projectionWriter?: (sqlite: unknown, projection: ImportNavigationProjection) => void
   /**
    * Test injection (LOCK-O8): clock used for CandidateImportStats.elapsedMs.
    * Production default is Date.now.
@@ -341,12 +400,15 @@ let ipcDisposer: (() => void) | null = null
  * the startPromotionExecution caller drops the returned handoff; the
  * session never aliases the capability after transfer.
  *
- * Release contract: the retained lease is released ONLY by the future
- * Phase 4.4.3 recovery/finalization executor (through the stored handoff's
- * capability, exact-once) or implicitly by process exit — never by stale
- * session fail/dispose/will-quit cleanup. This is deliberate: holding the
- * in-memory lease for the rest of the process lifetime is the isolation
- * guarantee, not a leak.
+ * Release contract: the retained lease is released ONLY by the Phase 4.4.3
+ * recovery/finalization executor (through the stored handoff's capability,
+ * exact-once), by the import control layer after a successful NON-PACKAGED
+ * in-process reload (LOCK-FR2 — the process stays alive, so maintenance
+ * ownership returns to idle for a second independent import), or implicitly
+ * by process exit — never by stale session fail/dispose/will-quit cleanup.
+ * This is deliberate: holding the in-memory lease until recovery (or the
+ * non-packaged success cleanup) settles is the isolation guarantee, not a
+ * leak.
  */
 let terminalPromotionOwnership: TerminalPromotionOwnership | null = null
 
@@ -369,10 +431,25 @@ class InternalImportSession implements ImportSession {
   /** Discovery result received from renderer. */
   public discoveryResult: DiscoveryResult | null = null
 
+  /**
+   * Raw source Local Storage `persist:cherry-studio` payload reported by
+   * the import renderer (LOCK-PROD-2). Main parses/validates it at
+   * completion and persists the minimal navigation projection with the
+   * candidate. Never echoed back over IPC.
+   */
+  public rawPersistedState: string | null = null
+
   /** Candidate DB resource — owned by this session (LOCK-O1). */
   public candidate: CandidateResourceLike | null = null
   /** Data plane bound to the candidate DB — owned by this session. */
   public dataPlane: ImportDataPlaneLike | null = null
+  /**
+   * LOCK-TRASH-2: exactly one immutable L2 trash retention baseline captured
+   * per import session from the injectable Main clock. Every page/topic of
+   * the session shares the identical canonical UTC ISO string. A retry or
+   * new L2 replace-all import is a new session and gets a new baseline.
+   */
+  public l2TrashRetentionBaseline: string | null = null
   /** Clock reading at candidate initialization (for elapsedMs). */
   public candidateStartedAt = 0
   /** Exact-once guard for finalize + candidate-ready emission (LOCK-O3/O4). */
@@ -494,7 +571,14 @@ class InternalImportSession implements ImportSession {
    * authoritative outcome (LOCK-4304); cleanup is idempotent via dispose().
    */
   async fail(context: string, error: unknown): Promise<void> {
-    const message = error instanceof Error ? error.message : String(error)
+    // LOCK-PRIV-2/4/5: when the error tree contains a data-plane rejection
+    // (direct, wrapped in Error.cause, or inside AggregateError.errors), the
+    // failure log carries ONLY the bounded code/table summary — its detail
+    // carries source IDs (entityId, source/target IDs, paths) and must never
+    // reach the session-failure log, and neither may a wrapper's raw
+    // message. Error trees with no data-plane rejection keep the existing
+    // stable generic-error message.
+    const message = summarizeDataPlaneFailure(error)
     logger.error(`Session ${this.id} failed during ${context}: ${message}`)
     if (this.state === 'promoting') {
       // LOCK-4401: `promoting` may only leave to a terminal result state.
@@ -788,12 +872,49 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
   // Production defaults (LOCK-O8): CandidateDbResource + createImportDataPlane.
   const candidateFactory = options?.candidateFactory ?? ((sessionId: string) => new CandidateDbResource({ sessionId }))
   const dataPlaneFactory =
-    options?.dataPlaneFactory ?? ((db: unknown) => createImportDataPlane(db as BetterSQLite3Database<any>))
+    options?.dataPlaneFactory ??
+    ((db: unknown, planeOptions?: { l2TrashRetentionBaseline?: string }) =>
+      createImportDataPlane(db as BetterSQLite3Database<any>, planeOptions))
   const now = options?.now ?? Date.now
+
+  // LOCK-PROD-6: production projection writer persists the validated
+  // navigation projection into the candidate `migration_state` table. The
+  // row travels atomically with `chat.db` through the promotion install.
+  const writeProjection =
+    options?.projectionWriter ??
+    ((sqlite: unknown, projection: ImportNavigationProjection): void => {
+      const raw = sqlite as { prepare(sql: string): { run(...params: unknown[]): { changes: number } } }
+      const stmt = raw.prepare(`INSERT OR REPLACE INTO migration_state (key, value, updated_at) VALUES (?, ?, ?)`)
+      const result = stmt.run(
+        NAVIGATION_PROJECTION_STATE_KEY,
+        encodeProjectionState(projection),
+        new Date().toISOString()
+      )
+      if (result === undefined || typeof result.changes !== 'number' || result.changes !== 1) {
+        throw new Error('Navigation projection write did not affect exactly one migration_state row.')
+      }
+    })
 
   // Generate session ID
   const sessionId = generateSessionId()
   const session = new InternalImportSession(sessionId)
+
+  // LOCK-TRASH-2/12: capture exactly one immutable retention baseline per
+  // import session from the injectable Main clock. Separate from elapsed
+  // timing (candidateStartedAt); a retry/new replace-all import is a new
+  // session and therefore gets a fresh baseline. Canonical by construction
+  // (LOCK-TRASH-5: generateL2TrashRetentionBaseline always satisfies the
+  // strict canonical UTC ISO check).
+  //
+  // LOCK-TRASH-12: the baseline is captured BEFORE the session is published
+  // to the active singleton. A defective injected clock — one that throws,
+  // or returns NaN/Infinity/out-of-range so `new Date(...).toISOString()`
+  // throws RangeError — fails here, before any session is ever visible, so
+  // it can never strand `activeSession`. startImport rejects and an
+  // immediate retry proceeds with a fresh session. Production one-baseline
+  // semantics are unchanged (still exactly one capture per session at
+  // session start).
+  session.l2TrashRetentionBaseline = generateL2TrashRetentionBaseline(now)
   activeSession = session
 
   logger.info(`Starting import session ${sessionId} from ZIP: [redacted]`)
@@ -808,14 +929,15 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
     logger.info(
       `Extraction complete: ${extractResult.entryCount} entries, ` +
         `${extractResult.totalUncompressedBytes} bytes uncompressed, ` +
+        `${extractResult.selectedEntryCount} selected entries, ` +
         `IndexedDB at ${extractResult.indexedDbDir}`
     )
 
-    // LOCK-DEV-3/4/6: Classify the origin of the extracted IndexedDB.
-    // This MUST occur after extraction but BEFORE IPC registration,
-    // window/session creation, and candidate initialization — a failed
+    // LOCK-PROD-8: the origin is classified from the ZIP CENTRAL DIRECTORY
+    // during selective extraction (before anything is materialized). The
+    // classified origin must be the single accepted origin — a failed
     // classification rejects the ZIP before any live DB or IPC mutation.
-    const origin = classifyOriginCandidates(extractResult.indexedDbDir, app.isPackaged)
+    const origin = extractResult.origin
     const loadMode: LoadMode = origin.kind === 'dev' ? 'dev' : 'file'
     logger.info(`Origin classified: ${origin.kind} (loadMode: ${loadMode})`)
 
@@ -844,12 +966,12 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
       },
 
       onDiscover: async (sid, result: DiscoveryResult) => {
+        // LOCK-PRIV-6: table names are renderer-controlled — log only the
+        // aggregate count, never the individual entries.
         logger.info(
-          `Discovery result for session ${sid}: native=${result.nativeVersion}, tables=${result.tableNames.join(',')}`
+          `Discovery result for session ${sid}: native=${result.nativeVersion}, tables=${result.tableNames.length}`
         )
-        if (activeSession?.id !== sid || session.state !== 'discovering') return
-
-        // Store discovery result
+        if (activeSession?.id !== sid || session.state !== 'discovering') return // Store discovery result
         session.discoveryResult = result
 
         // LOCK-O1: initialize the independent candidate AFTER successful
@@ -861,7 +983,14 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
           // Attach before awaiting init so cancel/dispose can discard it.
           session.candidate = candidate
           await candidate.initialize()
-          session.dataPlane = dataPlaneFactory(candidate.getDatabase())
+          // LOCK-FTS-3: defer the migration-003 derived search projection
+          // (drop triggers → FTS → normalized atomically) BEFORE any page
+          // write so L2 bulk import does not pay per-row trigger/FTS
+          // maintenance. Fail closed: an error enters the error lifecycle.
+          candidate.deferFtsProjection()
+          session.dataPlane = dataPlaneFactory(candidate.getDatabase(), {
+            l2TrashRetentionBaseline: session.l2TrashRetentionBaseline ?? undefined
+          })
           session.candidateStartedAt = now()
         } catch (error) {
           await session.fail('candidate initialization', error)
@@ -889,6 +1018,17 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
         })
       },
 
+      onProjection: (sid, payload: ChatImportProjectionPayload) => {
+        // LOCK-PROD-2/6: retain the raw source Local Storage payload on the
+        // session. Fire-and-forget — the projection is built and persisted
+        // at candidate completion. Stale/duplicate payloads are no-ops.
+        if (activeSession?.id !== sid || session.state === 'error' || session.state === 'cancelled') return
+        session.rawPersistedState = payload.persist
+        logger.info(
+          `Local Storage projection retained for session ${sid} (persist bytes: ${payload.persist?.length ?? 0})`
+        )
+      },
+
       onReadPage: async (sid, response: ReadPageResponse) => {
         if (activeSession?.id !== sid || session.state !== 'reading') return
 
@@ -910,7 +1050,8 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
           default:
             // Not a paged source entity — the data plane below rejects it
             // (UNKNOWN_TABLE) and the session enters the error lifecycle.
-            logger.warn(`Unexpected table '${response.tableName}' in session ${sid}`)
+            // LOCK-PRIV-6: never interpolate the renderer-supplied table name.
+            logger.warn(`Unexpected table '${boundImportTableLabel(response.tableName)}' in session ${sid}`)
             break
         }
 
@@ -956,7 +1097,7 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
           } else {
             // All entities exhausted — Main self-completes (authoritative,
             // LOCK-O4). Finalize + seal + candidate-ready exactly once.
-            await completeCandidate(session, options, now)
+            await completeCandidate(session, options, now, writeProjection)
           }
         }
       },
@@ -971,11 +1112,17 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
       },
 
       onError: async (sid, error) => {
-        logger.error(`Import error for session ${sid}: [${error.code}] ${error.message}`)
+        // LOCK-PRIV-6: renderer-reported code/message are never interpolated —
+        // only the allowlisted code family plus static text is logged, and the
+        // error lifecycle receives a static bounded reason.
+        logger.error(`Import error for session ${sid}: ${summarizeRendererError(error)}`)
         if (activeSession?.id !== sid) return
         // LOCK-O6: renderer-reported failure enters the error lifecycle —
         // candidate discarded, isolated resources disposed, singleton reset.
-        await session.fail(`renderer error [${error.code}]`, new Error(error.message))
+        await session.fail(
+          `renderer error [${boundRendererErrorCode(error.code)}]`,
+          new Error('renderer-reported failure')
+        )
       }
     })
     session.setIpcDisposer(ipcDisposer)
@@ -1001,10 +1148,15 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
         /* unused */
       },
       onError: (sid, error) => {
-        logger.error(`Isolated reader error for session ${sid}: [${error.code}] ${error.message}`)
+        // LOCK-PRIV-6: bounded code family + static text only — the message
+        // (even a Main-constructed one) never crosses the log boundary here.
+        logger.error(`Isolated reader error for session ${sid}: ${summarizeRendererError(error)}`)
         if (activeSession?.id === sid) {
           // Contained: fail() never rejects (LOCK-O6 — no unhandled rejection).
-          void session.fail(`isolated reader error [${error.code}]`, new Error(error.message))
+          void session.fail(
+            `isolated reader error [${boundRendererErrorCode(error.code)}]`,
+            new Error('renderer-reported failure')
+          )
         }
       },
       onCancel: (_sid) => {
@@ -1509,8 +1661,9 @@ export type TerminalPromotionOwnership =
 /**
  * Main-local peek at the terminal promotion ownership record (never crosses
  * IPC). Null until an execution settles promoted or post-install
- * recovery-required. The future Phase 4.4.3 executor consumes this to take
- * over the retained capability; nothing else may release it.
+ * recovery-required. The Phase 4.4.3 recovery executor and the import
+ * control layer's cleanupSessionOwnership() are the consumers
+ * (LOCK-FR2/6018); nothing else may release it.
  */
 export function getTerminalPromotionOwnership(): TerminalPromotionOwnership | null {
   return terminalPromotionOwnership
@@ -1520,7 +1673,8 @@ export function getTerminalPromotionOwnership(): TerminalPromotionOwnership | nu
  * Test-only: drop the terminal ownership record so each test starts clean.
  * Deliberately does NOT release the retained lease (release stays
  * exact-once through the stored handoff's capability — the production
- * contract is Phase 4.4.3 or process exit). Never call from production.
+ * contract is Phase 4.4.3, the import control layer's non-packaged
+ * success cleanup, or process exit). Never call from production.
  */
 export function resetTerminalPromotionOwnershipForTests(): void {
   terminalPromotionOwnership = null
@@ -1566,8 +1720,9 @@ export type TakeTerminalOwnershipOutcome =
  *   with a structured error. This prevents a second promotion settlement
  *   from silently replacing an owned handoff.
  *
- * Phase 4.4.3 foundation: the future recovery executor calls this to
- * take over the retained capability. Nothing else may release it.
+ * Consumers: the Phase 4.4.3 recovery executor (to take over the retained
+ * capability) and the import control layer via cleanupSessionOwnership()
+ * on non-exiting or non-packaged paths (LOCK-FR2/6018).
  */
 export function takeTerminalPromotionOwnership(): TakeTerminalOwnershipOutcome {
   const current = terminalPromotionOwnership
@@ -1775,8 +1930,9 @@ export async function startPromotionExecution(
     // LOCK-4428: STOP at the replacement-verified handoff. Capability
     // ownership is TRANSFERRED (not aliased) out of the session to the
     // terminal handoff owner: stale session fail/dispose can never release
-    // it. Released only by the future Phase 4.4.3 executor or process
-    // exit. No cleanup, no relaunch.
+    // it. Released by the Phase 4.4.3 recovery executor, by the import
+    // control layer's non-packaged success cleanup (LOCK-FR2), or by
+    // process exit. No cleanup, no relaunch.
     session.takeExecutingCapability()
     setTerminalPromotionOwnership({ kind: 'promoted' as const, handoff: result.handoff })
     logger.info(
@@ -1846,7 +2002,8 @@ export async function startPromotionExecution(
 async function completeCandidate(
   session: InternalImportSession,
   options: StartImportOptions | undefined,
-  now: () => number
+  now: () => number,
+  writeProjection: (sqlite: unknown, projection: ImportNavigationProjection) => void
 ): Promise<void> {
   // Exact-once guard (LOCK-O3/O4): completion runs only from `reading` and
   // only if no ready result has been emitted.
@@ -1867,6 +2024,72 @@ async function completeCandidate(
   } catch (error) {
     await session.fail('data plane finalize', error)
     throw toError(error)
+  }
+
+  // 1a. LOCK-FTS-4/5: rebuild the deferred FTS/normalized projection
+  // atomically and exactly once AFTER finalize and BEFORE the navigation
+  // projection/stats/seal. Failure rolls back and aborts/discards the
+  // candidate — a candidate without its rebuilt projection never seals
+  // (LOCK-FTS-4: never seal unrebuilt).
+  try {
+    candidate.rebuildFtsProjection()
+  } catch (error) {
+    await session.fail('fts projection rebuild', error)
+    throw toError(error)
+  }
+
+  // 1b. LOCK-PROD-6: build + persist the navigation projection BEFORE the
+  // candidate is sealed so the versioned one-shot payload travels atomically
+  // with chat.db through the promotion install. A rejected/malformed source
+  // projection fails the import (LOCK-PROD-5) — never a silent partial seal.
+  {
+    let topicFacts: Array<{ id: string; deletedAt: string | null }>
+    try {
+      topicFacts = plane.getImportedTopicFacts()
+    } catch (error) {
+      await session.fail('navigation projection facts', error)
+      throw toError(error)
+    }
+    let droppedLsTopics = 0
+    let malformedAssistants = 0
+    const outcome = buildNavigationProjection(session.rawPersistedState, topicFacts, (category, count) => {
+      if (category === 'ls-topic-missing-in-idb') droppedLsTopics = count
+      else malformedAssistants = count
+    })
+    if (outcome.status === 'rejected') {
+      // LOCK-PRIV-6/9: the projection rejection message is built from
+      // RENDERER-ORIGIN persisted state and embeds assistant/topic IDs —
+      // never interpolate it into the failure Error (which reaches the
+      // session-failure log and the IPC callback-failure log). Only the
+      // fixed rejection code is retained with static text.
+      const error = new Error(`Navigation projection rejected (${outcome.code})`)
+      await session.fail('navigation projection', error)
+      throw error
+    }
+    // Count-only, path-redacted diagnostics (LOCK-PROD-12): never IDs/names.
+    if (droppedLsTopics > 0) {
+      logger.warn(
+        `Session ${session.id}: ${droppedLsTopics} Local Storage topic(s) absent from IndexedDB ` +
+          'were ignored (LOCK-PROD-3).'
+      )
+    }
+    if (malformedAssistants > 0) {
+      logger.warn(
+        `Session ${session.id}: ${malformedAssistants} malformed Local Storage assistant record(s) ` +
+          'were skipped (LOCK-PROD-5).'
+      )
+    }
+    try {
+      writeProjection(candidate.getSqlite(), outcome.projection)
+    } catch (error) {
+      await session.fail('navigation projection persist', error)
+      throw toError(error)
+    }
+    logger.info(
+      `Session ${session.id}: navigation projection persisted ` +
+        `(assistants: ${outcome.projection.assistants.length}, topics: ${outcome.projection.topics.length}, ` +
+        `recovered: ${outcome.projection.recoveredTopicIds.length})`
+    )
   }
 
   // 2. LOCK-O7: orchestrator and data-plane source stats must agree exactly.
@@ -1921,12 +2144,15 @@ async function completeCandidate(
     return
   }
 
-  // 5b. LOCK-OWN-2 / LOCK-BLOCK-2: exactly ONE aggregate count-only warning
-  // when legacy embedded `message.topicId` values were canonicalized to the
-  // authoritative outer topic (LOCK-OWN-1) and/or unreachable orphan
-  // `message_blocks` rows were skipped at the source projection boundary
-  // (LOCK-BLOCK-1). One warning per nonzero category, or one COMBINED
-  // warning when both categories are nonzero.
+  // 5b. LOCK-OWN-2 / LOCK-BLOCK-2 / LOCK-ASK-2 / LOCK-SEG-1 / LOCK-LOG-1:
+  // exactly ONE aggregate count-only warning iff ANY normalization category
+  // is nonzero. Static category names + integer counts ONLY for:
+  // - topicIdNormalization            (LOCK-OWN-1 canonicalized embedded topicId)
+  // - unreachableBlockSkip            (LOCK-BLOCK-1 absent-owner orphan rows)
+  // - existingOwnerUnembeddedBlockSkip (LOCK-BLOCK-1X resurrection guard)
+  // - danglingAskIdPreserved          (LOCK-ASK-2 verbatim-preserved askId)
+  // - skippedSegmentRow / skippedSegmentMembership (LOCK-SEG-1 absent-topic)
+  // Never per-message, never with IDs/content/source values.
   //
   // Timing contract: this is the latest natural success point INSIDE
   // completeCandidate — every candidate-completion gate that can fail/retry
@@ -1936,31 +2162,26 @@ async function completeCandidate(
   // emits this warning; a successful candidate completion emits it exactly
   // once (the completion path is exact-once via the readyEmitted guard, the
   // finalized plane is stable, and a rejected/rolled-back page never
-  // advanced either count). Verification/promotion are a separate phase:
-  // this warning documents candidate-projection canonicalization evidence,
-  // not full import success. The payload is session/run context + aggregate
-  // counts ONLY: no topic IDs, message IDs, block IDs, names, content,
-  // paths, or source values.
+  // advanced any count). Rejected/rolled-back pages and failed/retried
+  // sessions never leak counts; one successful retry emits once.
+  // Verification/promotion are a separate phase: this warning documents
+  // candidate-projection normalization evidence, not full import success.
+  // The payload is session/run context + aggregate counts ONLY: no topic
+  // IDs, message IDs, block IDs, names, content, paths, or source values.
   const normalization = plane.getNormalizationStats()
-  const topicNormalized = normalization.topicIdNormalizationCount > 0
-  const orphansSkipped = normalization.unreachableBlockSkipCount > 0
-  if (topicNormalized && orphansSkipped) {
+  const residualCategories: ReadonlyArray<readonly [string, number]> = [
+    ['topicIdNormalization', normalization.topicIdNormalizationCount],
+    ['unreachableBlockSkip', normalization.unreachableBlockSkipCount],
+    ['existingOwnerUnembeddedBlockSkip', normalization.skippedExistingOwnerUnembeddedBlockCount],
+    ['danglingAskIdPreserved', normalization.danglingAskIdPreservedCount],
+    ['skippedSegmentRow', normalization.skippedSegmentRowCount],
+    ['skippedSegmentMembership', normalization.skippedSegmentMembershipCount]
+  ]
+  if (residualCategories.some(([, count]) => count > 0)) {
+    const residualSummary = residualCategories.map(([name, count]) => `${name}=${count}`).join(', ')
     logger.warn(
-      `Session ${session.id}: ${normalization.topicIdNormalizationCount} embedded message topicId value(s) ` +
-        'differed from the authoritative outer topic and were canonicalized (LOCK-OWN-1); ' +
-        `${normalization.unreachableBlockSkipCount} unreachable orphan message_blocks row(s) were skipped ` +
-        '(LOCK-BLOCK-1); all other ownership/identity validations remain strict'
-    )
-  } else if (topicNormalized) {
-    logger.warn(
-      `Session ${session.id}: ${normalization.topicIdNormalizationCount} embedded message topicId value(s) ` +
-        'differed from the authoritative outer topic and were canonicalized (LOCK-OWN-1); ' +
+      `Session ${session.id}: data-plane normalization residuals (${residualSummary}); ` +
         'all other ownership/identity validations remain strict'
-    )
-  } else if (orphansSkipped) {
-    logger.warn(
-      `Session ${session.id}: ${normalization.unreachableBlockSkipCount} unreachable orphan message_blocks row(s) ` +
-        'were skipped (LOCK-BLOCK-1); all other ownership/identity validations remain strict'
     )
   }
 

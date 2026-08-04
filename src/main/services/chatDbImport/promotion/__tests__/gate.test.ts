@@ -37,14 +37,16 @@ vi.mock('../recovery', () => ({
 
 // Mock the recovery executor
 const mockExecutorRun = vi.fn()
+const mockCreateRecoveryExecutor = vi.fn((options: unknown) => ({
+  options,
+  run: (...args: unknown[]) => mockExecutorRun(...args),
+  requestAbort: vi.fn(),
+  subphase: () => 'settled',
+  isSettled: () => true,
+  whenSettled: () => Promise.resolve()
+}))
 vi.mock('../recoveryExecutor', () => ({
-  createRecoveryExecutor: vi.fn(() => ({
-    run: (...args: unknown[]) => mockExecutorRun(...args),
-    requestAbort: vi.fn(),
-    subphase: () => 'settled',
-    isSettled: () => true,
-    whenSettled: () => Promise.resolve()
-  })),
+  createRecoveryExecutor: (options: unknown) => mockCreateRecoveryExecutor(options),
   RECOVERY_EXECUTOR_SUBPHASES: []
 }))
 
@@ -116,6 +118,96 @@ describe('startup recovery gate (LOCK-4431..LOCK-4439)', () => {
       expect(result).toBeDefined()
       expect(mockProbePromotionArtifacts).toHaveBeenCalledWith('c1', expect.any(String), 3)
       expect(mockExecutorRun).toHaveBeenCalled()
+    })
+  })
+
+  describe('LOCK-PROD-7 gate result propagation', () => {
+    beforeEach(() => {
+      // Valid journal → full pipeline → executor runs.
+      mockReadPromotionJournal.mockResolvedValue({
+        status: 'valid',
+        journal: { version: 1, sessionId: 's1', candidateId: 'c1', phase: 'replacement-verified' }
+      })
+      mockProbePromotionArtifacts.mockReturnValue({
+        journal: {
+          status: 'valid',
+          journal: { version: 1, sessionId: 's1', candidateId: 'c1', phase: 'replacement-verified' }
+        },
+        live: { status: 'present-verified', detail: null },
+        snapshot: { status: 'present-verified', detail: null },
+        candidate: { status: 'missing' },
+        sidecarFree: true,
+        mutationEvidence: { added: [], removed: [] },
+        cleanedSidecars: []
+      })
+      mockProbeResultToRecoveryInput.mockReturnValue({
+        journal: {
+          status: 'valid',
+          journal: { version: 1, sessionId: 's1', candidateId: 'c1', phase: 'replacement-verified' }
+        },
+        live: 'present-verified',
+        snapshot: 'present-verified',
+        candidate: 'missing'
+      })
+    })
+
+    it('in-process reload result maps to inProcessReloadRequested (no relaunch pending)', async () => {
+      mockExecutorRun.mockResolvedValue({
+        ok: true,
+        action: { action: 'accept-verified-replacement', cleaned: true },
+        decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
+        inProcessReload: true
+      })
+
+      const result = await runStartupRecoveryGate(false)
+
+      expect(result.inProcessReloadRequested).toBe(true)
+      expect(result.relaunchPending).toBe(false)
+      expect(result.repairRequired).toBe(false)
+    })
+
+    it('packaged relaunch result maps to relaunchPending (no in-process reload)', async () => {
+      mockExecutorRun.mockResolvedValue({
+        ok: true,
+        action: { action: 'accept-verified-replacement', cleaned: true },
+        decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' }
+      })
+
+      const result = await runStartupRecoveryGate(false)
+
+      expect(result.relaunchPending).toBe(true)
+      expect(result.inProcessReloadRequested).toBe(false)
+    })
+
+    it('executor failure maps to neither relaunch nor in-process reload', async () => {
+      mockExecutorRun.mockResolvedValue({
+        ok: false,
+        failure: { subphase: 'relaunching', code: 'RELAUNCH_FAILED', safeCode: 'RELAUNCH_RETURNED' },
+        decision: null
+      })
+
+      const result = await runStartupRecoveryGate(false)
+
+      expect(result.relaunchPending).toBe(false)
+      expect(result.inProcessReloadRequested).toBe(false)
+      expect(result.repairRequired).toBe(false)
+      // The gate must not throw on a failed executor result (LOCK-L3).
+      expect(result.decision).toBeDefined()
+    })
+
+    it('forwards restartMode to the recovery executor (LOCK-PROD-7 explicit injection)', async () => {
+      mockExecutorRun.mockResolvedValue({
+        ok: true,
+        action: { action: 'accept-verified-replacement', cleaned: true },
+        decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
+        inProcessReload: true
+      })
+
+      await runStartupRecoveryGate(false, { restartMode: 'in-process-reload' })
+
+      expect(mockCreateRecoveryExecutor).toHaveBeenCalledTimes(1)
+      const options = mockCreateRecoveryExecutor.mock.calls[0][0] as Record<string, unknown>
+      expect(options.restartMode).toBe('in-process-reload')
     })
   })
 

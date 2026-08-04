@@ -31,6 +31,81 @@ export const MAX_STRING_LENGTH = 1_048_576
 export const MAX_ARRAY_LENGTH = 100_000
 
 // ---------------------------------------------------------------------------
+// Block-specific validation profile (LOCK-LB-1/2)
+// ---------------------------------------------------------------------------
+//
+// Message-block payloads (import `message_blocks` pages and the
+// `fetchMessages` blocks result) may legally contain nested strings above
+// the generic 1 MiB cap. A NAMED block-specific profile bounds them
+// explicitly WITHOUT widening the generic `MAX_STRING_LENGTH` behavior:
+// every other ChatDb contract keeps the generic caps. The profile counts
+// all string payload bytes AND object-key UTF-8 bytes deterministically
+// (TextEncoder — browser/Main compatible, no Node-only Buffer).
+
+/** Block profile: max UTF-8 bytes per string value (8 MiB). */
+export const MAX_BLOCK_STRING_UTF8_BYTES = 8 * 1024 * 1024
+
+/** Block profile: max cumulative UTF-8 bytes per block row (16 MiB). */
+export const MAX_BLOCK_ROW_UTF8_BYTES = 16 * 1024 * 1024
+
+/** Block profile: max cumulative UTF-8 bytes per page/result aggregate (64 MiB). */
+export const MAX_BLOCK_AGGREGATE_UTF8_BYTES = 64 * 1024 * 1024
+
+/**
+ * Resource bounds for a named JSON validation profile.
+ *
+ * Profile validation keeps the shared JSON-safety rules (depth 20,
+ * array length 100 000, and the exact rejection set) while replacing the
+ * generic 1 MiB code-unit string cap with explicit UTF-8 byte budgets:
+ * - {@link maxStringUtf8Bytes}: per-string cap.
+ * - {@link maxRowUtf8Bytes}: cumulative cap for ONE top-level row object.
+ * - {@link maxAggregateUtf8Bytes}: cumulative cap across a whole page /
+ *   result array (charged by {@link JsonProfileBytes}).
+ */
+export interface JsonValidationProfile {
+  readonly maxStringUtf8Bytes: number
+  readonly maxRowUtf8Bytes: number
+  readonly maxAggregateUtf8Bytes: number
+}
+
+/** The named block-specific profile (LOCK-LB-1). */
+export const BLOCK_JSON_PROFILE: JsonValidationProfile = Object.freeze({
+  maxStringUtf8Bytes: MAX_BLOCK_STRING_UTF8_BYTES,
+  maxRowUtf8Bytes: MAX_BLOCK_ROW_UTF8_BYTES,
+  maxAggregateUtf8Bytes: MAX_BLOCK_AGGREGATE_UTF8_BYTES
+})
+
+/**
+ * Deterministic UTF-8 byte counting (LOCK-LB-2).
+ *
+ * Uses {@link TextEncoder}, available in both browsers and Node ≥ 11 — no
+ * Node-only Buffer in shared code. Lone surrogates encode as U+FFFD (3
+ * bytes), matching standard UTF-8 encoding of ill-formed strings.
+ */
+export function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength
+}
+
+/**
+ * Mutable byte accountant shared across one profile-validated aggregate
+ * (one import page or one fetchMessages result).
+ *
+ * - {@link rowBytes}: reset to 0 at the START of every top-level row object.
+ * - {@link aggregateBytes}: never reset within one aggregate — the page /
+ *   result budget includes EVERY row, including rows later skipped
+ *   (LOCK-LB-4).
+ */
+export interface JsonProfileBytes {
+  rowBytes: number
+  aggregateBytes: number
+}
+
+/** Create a fresh profile byte accountant. */
+export function createProfileBytes(): JsonProfileBytes {
+  return { rowBytes: 0, aggregateBytes: 0 }
+}
+
+// ---------------------------------------------------------------------------
 // Validation error
 // ---------------------------------------------------------------------------
 
@@ -52,16 +127,70 @@ export class ValidationError extends Error {
 // ---------------------------------------------------------------------------
 
 /**
- * Validate that a value is JSON-safe (JsonValue).
- *
- * @param value   The value to validate.
- * @param path    Dot-separated path for error messages.
- * @param depth   Current nesting depth.
- * @throws {ValidationError} If the value is not JSON-safe.
+ * Effective limits for one JSON walk. The generic path enforces the legacy
+ * code-unit string cap; the block-profile path enforces UTF-8 byte caps and
+ * charges the caller-owned accountant. Only the limits relevant to the
+ * active path are set, so neither path ever reads the other's behavior.
  */
-export function validateJsonValue(value: unknown, path = 'root', depth = 0): void {
-  if (depth > MAX_DEPTH) {
-    throw new ValidationError(path, `Nesting depth exceeds maximum (${MAX_DEPTH})`)
+interface JsonWalkLimits {
+  maxDepth: number
+  maxArrayLength: number
+  /** Generic cap: max code units per string (legacy 1 MiB behavior). */
+  maxStringCodeUnits?: number
+  /** Block profile: max UTF-8 bytes per string value. */
+  maxStringUtf8Bytes?: number
+  /** Block profile: max cumulative UTF-8 bytes per row object. */
+  maxRowUtf8Bytes?: number
+  /** Block profile: max cumulative UTF-8 bytes per aggregate. */
+  maxAggregateUtf8Bytes?: number
+}
+
+/**
+ * Charge UTF-8 bytes toward the profile row + aggregate budgets (LOCK-LB-2).
+ * A no-op when the walk is not profile-bounded (`accountant` is null).
+ */
+function chargeProfileBytes(
+  bytes: number,
+  path: string,
+  limits: JsonWalkLimits,
+  accountant: JsonProfileBytes | null
+): void {
+  if (accountant === null) return
+  accountant.rowBytes += bytes
+  accountant.aggregateBytes += bytes
+  if (limits.maxRowUtf8Bytes !== undefined && accountant.rowBytes > limits.maxRowUtf8Bytes) {
+    throw new ValidationError(
+      path,
+      `Row cumulative UTF-8 size ${accountant.rowBytes} exceeds maximum (${limits.maxRowUtf8Bytes})`
+    )
+  }
+  if (limits.maxAggregateUtf8Bytes !== undefined && accountant.aggregateBytes > limits.maxAggregateUtf8Bytes) {
+    throw new ValidationError(
+      path,
+      `Aggregate UTF-8 size ${accountant.aggregateBytes} exceeds maximum (${limits.maxAggregateUtf8Bytes})`
+    )
+  }
+}
+
+/**
+ * Shared JSON-safety walker (LOCK-LB-2).
+ *
+ * Enforces the exact generic rejection set — undefined, bigint, symbol,
+ * function, non-finite numbers, sparse arrays, cycles (via depth), non-plain
+ * objects, Date/Map/Set/RegExp/Error/TypedArray, ill-formed inputs — with
+ * limits supplied per path. The generic path behaves byte-for-byte like the
+ * legacy validator (code-unit string cap); the block-profile path applies
+ * the UTF-8 byte budgets and charges the accountant.
+ */
+function validateJsonValueInternal(
+  value: unknown,
+  path: string,
+  depth: number,
+  limits: JsonWalkLimits,
+  accountant: JsonProfileBytes | null
+): void {
+  if (depth > limits.maxDepth) {
+    throw new ValidationError(path, `Nesting depth exceeds maximum (${limits.maxDepth})`)
   }
 
   if (value === undefined) {
@@ -69,8 +198,20 @@ export function validateJsonValue(value: unknown, path = 'root', depth = 0): voi
   }
 
   if (value === null || typeof value === 'boolean' || typeof value === 'string') {
-    if (typeof value === 'string' && value.length > MAX_STRING_LENGTH) {
-      throw new ValidationError(path, `String length ${value.length} exceeds maximum (${MAX_STRING_LENGTH})`)
+    if (typeof value === 'string') {
+      if (limits.maxStringCodeUnits !== undefined && value.length > limits.maxStringCodeUnits) {
+        throw new ValidationError(path, `String length ${value.length} exceeds maximum (${limits.maxStringCodeUnits})`)
+      }
+      if (limits.maxStringUtf8Bytes !== undefined) {
+        const byteCount = utf8ByteLength(value)
+        if (byteCount > limits.maxStringUtf8Bytes) {
+          throw new ValidationError(
+            path,
+            `String length ${byteCount} UTF-8 bytes exceeds maximum (${limits.maxStringUtf8Bytes})`
+          )
+        }
+        chargeProfileBytes(byteCount, path, limits, accountant)
+      }
     }
     return
   }
@@ -119,8 +260,8 @@ export function validateJsonValue(value: unknown, path = 'root', depth = 0): voi
   }
 
   if (Array.isArray(value)) {
-    if (value.length > MAX_ARRAY_LENGTH) {
-      throw new ValidationError(path, `Array length ${value.length} exceeds maximum (${MAX_ARRAY_LENGTH})`)
+    if (value.length > limits.maxArrayLength) {
+      throw new ValidationError(path, `Array length ${value.length} exceeds maximum (${limits.maxArrayLength})`)
     }
     for (let i = 0; i < value.length; i++) {
       // Detect sparse arrays: if the index does not exist as own property,
@@ -128,7 +269,7 @@ export function validateJsonValue(value: unknown, path = 'root', depth = 0): voi
       if (!(i in value)) {
         throw new ValidationError(`${path}[${i}]`, 'Sparse arrays are not allowed')
       }
-      validateJsonValue(value[i], `${path}[${i}]`, depth + 1)
+      validateJsonValueInternal(value[i], `${path}[${i}]`, depth + 1, limits, accountant)
     }
     return
   }
@@ -141,12 +282,43 @@ export function validateJsonValue(value: unknown, path = 'root', depth = 0): voi
     }
     const keys = Object.keys(value as Record<string, unknown>)
     for (const key of keys) {
-      validateJsonValue((value as Record<string, unknown>)[key], `${path}.${key}`, depth + 1)
+      // LOCK-LB-2: object-key UTF-8 bytes count toward the profile budgets.
+      if (limits.maxStringUtf8Bytes !== undefined) {
+        chargeProfileBytes(utf8ByteLength(key), `${path}.${key}`, limits, accountant)
+      }
+      validateJsonValueInternal(
+        (value as Record<string, unknown>)[key],
+        `${path}.${key}`,
+        depth + 1,
+        limits,
+        accountant
+      )
     }
     return
   }
 
   throw new ValidationError(path, `Unexpected type: ${typeof value}`)
+}
+
+/**
+ * Validate that a value is JSON-safe (JsonValue).
+ *
+ * Generic path — EXACTLY the legacy 1 MiB code-unit string cap behavior
+ * (LOCK-LB-1); the block-specific profile never widens this.
+ *
+ * @param value   The value to validate.
+ * @param path    Dot-separated path for error messages.
+ * @param depth   Current nesting depth.
+ * @throws {ValidationError} If the value is not JSON-safe.
+ */
+export function validateJsonValue(value: unknown, path = 'root', depth = 0): void {
+  validateJsonValueInternal(
+    value,
+    path,
+    depth,
+    { maxDepth: MAX_DEPTH, maxArrayLength: MAX_ARRAY_LENGTH, maxStringCodeUnits: MAX_STRING_LENGTH },
+    null
+  )
 }
 
 /**
@@ -227,12 +399,15 @@ export function validateIso8601Timestamp(value: unknown, path: string): void {
   // Rejects: missing Z, timezone offsets (+HH:mm), missing milliseconds,
   // non-UTC timezones, and non-ISO formats.
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
-    throw new ValidationError(path, `Expected canonical ISO 8601 timestamp (YYYY-MM-DDTHH:mm:ss.sssZ), got "${value}"`)
+    // LOCK-PRIV-TRASH: static message only — the supplied value is never
+    // echoed into validation errors, Main logs, or IPC error responses.
+    throw new ValidationError(path, 'Expected canonical ISO 8601 timestamp (YYYY-MM-DDTHH:mm:ss.sssZ)')
   }
   // Verify the date is actually valid
   const parsed = Date.parse(value)
   if (Number.isNaN(parsed)) {
-    throw new ValidationError(path, `Invalid date: "${value}"`)
+    // LOCK-PRIV-TRASH: static message only — never interpolate the value.
+    throw new ValidationError(path, 'Invalid ISO 8601 timestamp (date out of range)')
   }
 }
 
@@ -257,6 +432,10 @@ export function validateStringArray(value: unknown, path: string): void {
 /**
  * Validate that a value is a plain object array (JsonObject[]).
  *
+ * LOCK-LB-7: the top-level array length is capped at {@link MAX_ARRAY_LENGTH}
+ * BEFORE element iteration, so an oversized page/result never walks (or
+ * allocates per-element error paths for) its elements.
+ *
  * @param value  The value to validate.
  * @param path   Dot-separated path for error messages.
  * @throws {ValidationError} If the value is not a JsonObject array.
@@ -265,8 +444,91 @@ export function validateJsonObjectArray(value: unknown, path: string): JsonObjec
   if (!Array.isArray(value)) {
     throw new ValidationError(path, `Expected an array, got ${typeof value}`)
   }
+  if (value.length > MAX_ARRAY_LENGTH) {
+    throw new ValidationError(path, `Array length ${value.length} exceeds maximum (${MAX_ARRAY_LENGTH})`)
+  }
   for (let i = 0; i < value.length; i++) {
     validateJsonObject(value[i], `${path}[${i}]`)
+  }
+  return value as JsonObject[]
+}
+
+/**
+ * Validate one object with a named JSON profile (block-specific, LOCK-LB-1).
+ *
+ * Applies the profile's per-string and per-row UTF-8 byte budgets plus the
+ * shared JSON-safety rules; the caller-owned {@link JsonProfileBytes}
+ * accumulates the aggregate budget across rows of one page/result. The row
+ * budget is reset at the start of every call (one top-level row object);
+ * the aggregate budget persists across calls (LOCK-LB-4).
+ *
+ * @param value    The object to validate.
+ * @param path     Dot-separated path for error messages.
+ * @param profile  The named validation profile (e.g. {@link BLOCK_JSON_PROFILE}).
+ * @param bytes    Caller-owned byte accountant (fresh per page/result).
+ * @throws {ValidationError} If the object fails profile validation.
+ */
+export function validateJsonObjectBlock(
+  value: unknown,
+  path: string,
+  profile: JsonValidationProfile,
+  bytes: JsonProfileBytes
+): JsonObject {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(path, 'Expected a plain object')
+  }
+  // One row per top-level object — the row budget starts fresh while the
+  // aggregate budget keeps accumulating across the whole page/result.
+  bytes.rowBytes = 0
+  validateJsonValueInternal(
+    value,
+    path,
+    0,
+    {
+      maxDepth: MAX_DEPTH,
+      maxArrayLength: MAX_ARRAY_LENGTH,
+      maxStringUtf8Bytes: profile.maxStringUtf8Bytes,
+      maxRowUtf8Bytes: profile.maxRowUtf8Bytes,
+      maxAggregateUtf8Bytes: profile.maxAggregateUtf8Bytes
+    },
+    bytes
+  )
+  return value as JsonObject
+}
+
+/**
+ * Validate an array of objects with a named JSON profile (LOCK-LB-1).
+ *
+ * Mirrors {@link validateJsonObjectArray} for the profile path: every
+ * element is validated with the profile (per-string + per-row budgets), and
+ * the whole array shares one aggregate budget (per-page / per-result cap).
+ * When no accountant is supplied a fresh one is created for the call.
+ *
+ * LOCK-LB-7: the top-level array length is capped at {@link MAX_ARRAY_LENGTH}
+ * BEFORE element iteration (and before any aggregate bytes are charged), so
+ * an oversized page/result is rejected without walking its elements.
+ *
+ * @param value    The array to validate.
+ * @param path     Dot-separated path for error messages.
+ * @param profile  The named validation profile (e.g. {@link BLOCK_JSON_PROFILE}).
+ * @param bytes    Optional caller-owned byte accountant.
+ * @throws {ValidationError} If any element fails profile validation.
+ */
+export function validateJsonObjectArrayBlock(
+  value: unknown,
+  path: string,
+  profile: JsonValidationProfile,
+  bytes?: JsonProfileBytes
+): JsonObject[] {
+  if (!Array.isArray(value)) {
+    throw new ValidationError(path, `Expected an array, got ${typeof value}`)
+  }
+  if (value.length > MAX_ARRAY_LENGTH) {
+    throw new ValidationError(path, `Array length ${value.length} exceeds maximum (${MAX_ARRAY_LENGTH})`)
+  }
+  const accountant = bytes ?? createProfileBytes()
+  for (let i = 0; i < value.length; i++) {
+    validateJsonObjectBlock(value[i], `${path}[${i}]`, profile, accountant)
   }
   return value as JsonObject[]
 }
@@ -363,6 +625,24 @@ const FAILURE_ENVELOPE_KEYS: ReadonlySet<string> = new Set(['ok', 'error'])
 const ERROR_KEYS: ReadonlySet<string> = new Set(['code', 'message', 'retryable', 'details'])
 
 /**
+ * Options for {@link validateResultEnvelope}.
+ */
+export interface ResultEnvelopeValidationOptions {
+  /**
+   * Skip the generic JSON-safe deep walk of a SUCCESS envelope's value.
+   *
+   * Used ONLY by commands whose success value contains fields that must be
+   * validated with a command-specific profile — e.g. fetchMessages, where
+   * `blocks` may legally carry nested strings above the generic 1 MiB cap.
+   * The command contract then validates every part of the value itself
+   * (generic caps for message objects, block profile for blocks), so no
+   * JSON-safety coverage is lost — only the generic walker's string cap is
+   * replaced by the command-specific profile.
+   */
+  readonly skipValueValidation?: boolean
+}
+
+/**
  * Validate a ChatDb result envelope structure.
  *
  * Enforces:
@@ -376,9 +656,14 @@ const ERROR_KEYS: ReadonlySet<string> = new Set(['code', 'message', 'retryable',
  *
  * @param value    The raw result to validate.
  * @param channel  The command channel (for error messages).
+ * @param options  Optional envelope validation options (LOCK-LB-5).
  * @throws {ValidationError} If the envelope is malformed.
  */
-export function validateResultEnvelope(value: unknown, channel: string): void {
+export function validateResultEnvelope(
+  value: unknown,
+  channel: string,
+  options: ResultEnvelopeValidationOptions = {}
+): void {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new ValidationError('result', `[${channel}] Result must be a plain object`)
   }
@@ -404,8 +689,12 @@ export function validateResultEnvelope(value: unknown, channel: string): void {
     if (!('value' in obj)) {
       throw new ValidationError('result.value', `[${channel}] Success result must have "value" field`)
     }
-    // Value must be JSON-safe (including null)
-    validateJsonValue(obj.value, 'result.value')
+    // Value must be JSON-safe (including null). Commands with a
+    // command-specific value profile (LOCK-LB-5) opt out here and validate
+    // every part of the value in their own contract validator.
+    if (!options.skipValueValidation) {
+      validateJsonValue(obj.value, 'result.value')
+    }
   } else {
     // Failure envelope: ok + error, no unknown keys
     for (const key of keys) {

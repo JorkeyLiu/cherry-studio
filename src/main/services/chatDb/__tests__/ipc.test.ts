@@ -47,15 +47,20 @@ vi.mock('../index', () => ({
   }
 }))
 
-// Mock loggerService
+// Mock loggerService — capture the shared context so tests can assert
+// log content (LOCK-PRIV-TRASH: supplied values must never reach logs).
+const { mockLoggerContext } = vi.hoisted(() => ({
+  mockLoggerContext: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn()
+  }
+}))
+
 vi.mock('@logger', () => ({
   loggerService: {
-    withContext: () => ({
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-      debug: vi.fn()
-    })
+    withContext: () => mockLoggerContext
   }
 }))
 
@@ -615,5 +620,43 @@ describe('ChatDb IPC Registration', () => {
     // Active disposer works
     disposer()
     expect(handlers.size).toBe(0)
+  })
+
+  // =========================================================================
+  // LOCK-PRIV-TRASH: purge cutoff privacy sentinel
+  //
+  // A noncanonical/invalid purge cutoff value must never appear in the
+  // validation error message, the Main log line, or the IPC error response.
+  // Validation rule and error code (VALIDATION_ERROR) are unchanged.
+  // =========================================================================
+
+  it('purge-expired-topics: invalid cutoff value never appears in log or IPC error (LOCK-PRIV-TRASH)', async () => {
+    disposer = registerChatDbIpc()
+
+    const handler = handlers.get(IpcChannel.ChatDb_PurgeExpiredTopics)!
+    const formatSentinel = 'PRIVSENTINEL-7F3A9C2B-format'
+    const dateSentinel = '2099-13-01T00:00:00.000Z'
+
+    const formatResult = await handler({}, { cutoffTimestamp: formatSentinel })
+    const dateResult = await handler({}, { cutoffTimestamp: dateSentinel })
+
+    // Rule/error code unchanged: both still fail as VALIDATION_ERROR.
+    expect(formatResult.ok).toBe(false)
+    expect(formatResult.error.code).toBe('VALIDATION_ERROR')
+    expect(formatResult.error.retryable).toBe(false)
+    expect(dateResult.ok).toBe(false)
+    expect(dateResult.error.code).toBe('VALIDATION_ERROR')
+
+    // IPC error response: fixed static text present, supplied value absent.
+    expect(formatResult.error.message).toContain('Expected canonical ISO 8601 timestamp (YYYY-MM-DDTHH:mm:ss.sssZ)')
+    expect(formatResult.error.message).not.toContain(formatSentinel)
+    expect(dateResult.error.message).toContain('Invalid ISO 8601 timestamp (date out of range)')
+    expect(dateResult.error.message).not.toContain(dateSentinel)
+
+    // Main log: the request-validation warn line must not echo the values.
+    const warnText = mockLoggerContext.warn.mock.calls.map((args) => String(args[0] ?? '')).join('\n')
+    expect(warnText).toContain('Request validation failed')
+    expect(warnText).not.toContain(formatSentinel)
+    expect(warnText).not.toContain(dateSentinel)
   })
 })

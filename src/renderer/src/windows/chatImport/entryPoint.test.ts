@@ -1,4 +1,9 @@
-import type { ChatImportEnvelope, DiscoveryResult, ReadPageResponse } from '@shared/chatImport/types'
+import type {
+  ChatImportEnvelope,
+  ChatImportProjectionPayload,
+  DiscoveryResult,
+  ReadPageResponse
+} from '@shared/chatImport/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChatImportBridge } from './entryPoint'
@@ -354,6 +359,7 @@ function createFakeBridge(): {
   readPageResult: ReturnType<typeof vi.fn>
   error: ReturnType<typeof vi.fn>
   complete: ReturnType<typeof vi.fn>
+  localStorageProjection: ReturnType<typeof vi.fn>
   log: ReturnType<typeof vi.fn>
 } {
   const discoverCallbacks: Array<(sessionId: string) => void> = []
@@ -368,6 +374,7 @@ function createFakeBridge(): {
   const readPageResult = vi.fn().mockResolvedValue({ ok: true })
   const error = vi.fn()
   const complete = vi.fn()
+  const localStorageProjection = vi.fn()
   const log = vi.fn()
 
   const bridge: ChatImportBridge = {
@@ -376,6 +383,7 @@ function createFakeBridge(): {
     readPageResult,
     complete,
     error,
+    localStorageProjection,
     log,
     onDiscover: (callback) => {
       discoverCallbacks.push(callback)
@@ -414,6 +422,7 @@ function createFakeBridge(): {
     readPageResult,
     error,
     complete,
+    localStorageProjection,
     log
   }
 }
@@ -719,6 +728,124 @@ describe('boot ready/discover ordering (LOCK-Y1/Y2/Y4)', () => {
     expect(harness.readPageCallbacks).toHaveLength(1)
     expect(harness.cancelCallbacks).toHaveLength(1)
     expect(harness.error).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Focused tests for the source Local Storage `persist:cherry-studio`
+ * projection bridge (LOCK-PROD-2 / LOCK-I1).
+ *
+ * The import renderer runs on the source profile's origin (file:// or the
+ * exact dev origin), so `localStorage.getItem('persist:cherry-studio')`
+ * reads the exact source entry. The raw serialized string is sent verbatim
+ * over the import-only `localStorageProjection` bridge on discovery —
+ * never a wholesale Local Storage copy/restore, and never through any
+ * other IPC channel. A missing key is represented safely as `persist: null`.
+ */
+describe('source Local Storage projection (LOCK-PROD-2/LOCK-I1)', () => {
+  afterEach(() => {
+    window.localStorage.clear()
+  })
+
+  it('reads exactly the persist:cherry-studio key and sends the raw state over the import-only bridge', async () => {
+    const harness = createFakeBridge()
+    window.localStorage.setItem('persist:cherry-studio', '{"assistants":{"assistants":[{"id":"a1"}]}}')
+    window.localStorage.setItem('other:key', 'MUST-NOT-LEAK')
+
+    await boot(harness.bridge, { ...FILE_PROTOCOL_OPTIONS, discover: async () => STUB_DISCOVER })
+    harness.discoverCallbacks[0]('session-proj')
+    await flushMicrotasks()
+
+    expect(harness.localStorageProjection).toHaveBeenCalledTimes(1)
+    const envelope = harness.localStorageProjection.mock.calls[0][0] as ChatImportEnvelope<ChatImportProjectionPayload>
+    expect(envelope.sessionId).toBe('session-proj')
+    expect(envelope.phase).toBe('discovery')
+    expect(envelope.version).toBe(1)
+    // Raw serialized state is sent verbatim — never a parsed/partial copy.
+    expect(envelope.data.persist).toBe('{"assistants":{"assistants":[{"id":"a1"}]}}')
+    // Unrelated keys are never read or forwarded.
+    expect(envelope.data.persist).not.toContain('MUST-NOT-LEAK')
+  })
+
+  it('represents a missing source key safely as persist: null', async () => {
+    const harness = createFakeBridge()
+
+    await boot(harness.bridge, { ...FILE_PROTOCOL_OPTIONS, discover: async () => STUB_DISCOVER })
+    harness.discoverCallbacks[0]('session-proj-null')
+    await flushMicrotasks()
+
+    expect(harness.localStorageProjection).toHaveBeenCalledTimes(1)
+    const envelope = harness.localStorageProjection.mock.calls[0][0] as ChatImportEnvelope<ChatImportProjectionPayload>
+    expect(envelope.data.persist).toBeNull()
+  })
+
+  it('reports the projection BEFORE the discovery result for the same session (event ordering)', async () => {
+    const harness = createFakeBridge()
+    window.localStorage.setItem('persist:cherry-studio', 'raw-state')
+
+    await boot(harness.bridge, { ...FILE_PROTOCOL_OPTIONS, discover: async () => STUB_DISCOVER })
+    harness.discoverCallbacks[0]('session-ord')
+    await flushMicrotasks()
+
+    expect(harness.localStorageProjection).toHaveBeenCalledTimes(1)
+    expect(harness.discoverResult).toHaveBeenCalledTimes(1)
+    expect(harness.localStorageProjection.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.discoverResult.mock.invocationCallOrder[0]
+    )
+  })
+
+  it('contains a readPersistedState throw — discovery still proceeds, no projection envelope', async () => {
+    const harness = createFakeBridge()
+
+    await boot(harness.bridge, {
+      ...FILE_PROTOCOL_OPTIONS,
+      discover: async () => STUB_DISCOVER,
+      readPersistedState: () => {
+        throw new Error('localStorage blocked')
+      }
+    })
+    harness.discoverCallbacks[0]('session-throw')
+    await flushMicrotasks()
+
+    expect(harness.discoverResult).toHaveBeenCalledTimes(1)
+    expect(harness.error).not.toHaveBeenCalled()
+    expect(harness.localStorageProjection).not.toHaveBeenCalled()
+  })
+
+  it('reads the source key on the dev origin too (LOCK-I1 selected origin)', async () => {
+    const harness = createFakeBridge()
+    window.localStorage.setItem('persist:cherry-studio', 'dev-state')
+
+    await boot(harness.bridge, { ...DEV_PROTOCOL_OPTIONS, discover: async () => STUB_DISCOVER })
+    harness.discoverCallbacks[0]('session-dev')
+    await flushMicrotasks()
+
+    expect(harness.localStorageProjection).toHaveBeenCalledTimes(1)
+    const envelope = harness.localStorageProjection.mock.calls[0][0] as ChatImportEnvelope<ChatImportProjectionPayload>
+    expect(envelope.data.persist).toBe('dev-state')
+  })
+
+  it('never reads Local Storage when the location gate rejects (only file/dev origins)', async () => {
+    const harness = createFakeBridge()
+    const readPersistedState = vi.fn(() => 'secret')
+
+    await boot(harness.bridge, {
+      location: {
+        protocol: 'https:',
+        origin: 'https://example.com',
+        pathname: '/chatImport.html',
+        search: '',
+        hash: '',
+        username: '',
+        password: ''
+      },
+      readPersistedState
+    })
+
+    expect(harness.localStorageProjection).not.toHaveBeenCalled()
+    expect(readPersistedState).not.toHaveBeenCalled()
+    expect(harness.error).toHaveBeenCalledTimes(1)
+    expect(harness.error.mock.calls[0][0]).toMatchObject({ data: { code: 'WRONG_ORIGIN' } })
   })
 })
 

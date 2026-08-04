@@ -274,6 +274,73 @@ describe('Repository Tests', () => {
       const r = topicsRepo.getById('topic-1')
       if (r.found) expect(r.data.overflow).toEqual({})
     })
+
+    it('restore clears deletedAt AND removes the L2 retention marker (LOCK-TRASH-8)', () => {
+      // Imported shape: soft-deleted topic carrying the importer marker.
+      topicsRepo.create(
+        makeTopic({
+          id: 't-imported-trash',
+          deletedAt: '2020-01-01T00:00:00.000Z',
+          overflow: { l2TrashRetentionStartedAt: '2026-08-04T00:00:00.000Z', pinned: true }
+        })
+      )
+      const before = topicsRepo.getById('t-imported-trash')
+      if (!before.found) throw new Error('expected topic')
+      expect(before.data.overflow.l2TrashRetentionStartedAt).toBe('2026-08-04T00:00:00.000Z')
+
+      topicsRepo.restore('t-imported-trash')
+      const after = topicsRepo.getById('t-imported-trash')
+      if (!after.found) throw new Error('expected topic')
+      expect(after.data.deletedAt).toBeNull()
+      // Marker removed; unrelated overflow preserved.
+      expect(after.data.overflow.l2TrashRetentionStartedAt).toBeUndefined()
+      expect(after.data.overflow.pinned).toBe(true)
+    })
+
+    it('listTrashRetentionPage returns raw id/deletedAt/extra and never decodes extra (LOCK-TRASH-10)', () => {
+      // Malformed extra must be returned RAW — the retention seam decodes it
+      // safely, it must never abort via the strict TopicData decoder.
+      sqlite
+        .prepare('UPDATE topics SET deleted_at = ?, extra = ? WHERE id = ?')
+        .run('2020-01-01T00:00:00.000Z', '{ definitely not json', 'topic-1')
+      const page = topicsRepo.listTrashRetentionPage({ limit: 20, direction: 'desc' })
+      expect(page.items).toHaveLength(1)
+      expect(page.items[0]).toEqual({
+        id: 'topic-1',
+        deletedAt: '2020-01-01T00:00:00.000Z',
+        extra: '{ definitely not json'
+      })
+      // Normal TopicData reads still behave strictly (decodeJson throws) —
+      // the seam does NOT weaken the normal path.
+      expect(() => topicsRepo.getById('topic-1')).toThrow()
+    })
+
+    it('listTrashRetentionPage excludes active topics and paginates by (deletedAt, id)', () => {
+      const older = '2020-01-01T00:00:00.000Z'
+      const newer = '2020-02-01T00:00:00.000Z'
+      topicsRepo.create(
+        makeTopic({
+          id: 't-older',
+          deletedAt: older,
+          overflow: { l2TrashRetentionStartedAt: '2026-01-01T00:00:00.000Z' }
+        })
+      )
+      topicsRepo.create(makeTopic({ id: 't-newer', deletedAt: newer, overflow: {} }))
+      topicsRepo.create(makeTopic({ id: 't-active', deletedAt: null, overflow: {} }))
+
+      // DESC order: newer first (deletedAt DESC, id DESC tie-break).
+      const first = topicsRepo.listTrashRetentionPage({ limit: 1, direction: 'desc' })
+      expect(first.hasMore).toBe(true)
+      expect(first.items.map((r) => r.id)).toEqual(['t-newer'])
+      expect(first.nextCursor).toBeDefined()
+
+      const second = topicsRepo.listTrashRetentionPage({ limit: 1, direction: 'desc', cursor: first.nextCursor })
+      expect(second.hasMore).toBe(false)
+      expect(second.items.map((r) => r.id)).toEqual(['t-older'])
+      // Active topic never appears.
+      const all = topicsRepo.listTrashRetentionPage({ limit: 20, direction: 'desc' })
+      expect(all.items.map((r) => r.id)).toEqual(['t-newer', 't-older'])
+    })
   })
 
   // ===========================================================================

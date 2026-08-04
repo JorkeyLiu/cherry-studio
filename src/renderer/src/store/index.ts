@@ -21,6 +21,7 @@ import { useDispatch, useSelector, useStore } from 'react-redux'
 import { FLUSH, PAUSE, PERSIST, persistReducer, persistStore, PURGE, REGISTER, REHYDRATE } from 'redux-persist'
 import storage from 'redux-persist/lib/storage'
 
+import { applyPendingImportProjection } from '../services/importProjection'
 import storeSyncService from '../services/StoreSyncService'
 import assistants from './assistants'
 import backup from './backup'
@@ -145,6 +146,16 @@ export const persistor = persistStore(store, undefined, () => {
       }
     }, 0)
   }
+
+  // LOCK-PROD-6: apply the one-shot L2 navigation projection (idempotent).
+  // Runs after Redux rehydration on every startup; a crash before the ack
+  // leaves the row pending so the apply retries on the next startup. A
+  // failure is logged and the pending row is retained for retry — never a
+  // startup blocker. dispatch/flush are injected to keep the apply module
+  // free of a static cycle back into this store module.
+  void applyPendingImportProjection({ dispatch: store.dispatch, flush: handleSaveData }).catch((error) => {
+    logger.error('Failed to apply pending import navigation projection (retained for retry):', error as Error)
+  })
 
   // Notify main process that Redux store is ready
   void window.electron?.ipcRenderer?.invoke(IpcChannel.ReduxStoreReady)

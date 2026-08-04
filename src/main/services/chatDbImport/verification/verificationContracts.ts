@@ -1,7 +1,7 @@
 /**
  * Shared verification result and diagnostic contracts (LOCK-4304).
  *
- * Defines the 13 documented verification dimensions, the structured
+ * Defines the 14 documented verification dimensions, the structured
  * per-dimension result shape, and the bounded, safe diagnostic type used
  * by the candidate verifier (Phase 4.3.2). Nothing here reads databases.
  *
@@ -17,11 +17,11 @@
  */
 
 // ---------------------------------------------------------------------------
-// Dimensions — one-to-one with docs/sqlite-migration.md Phase 4.3 ①–⑬
+// Dimensions — one-to-one with docs/sqlite-migration.md Phase 4.3 ①–⑭
 // ---------------------------------------------------------------------------
 
 /**
- * The 13 documented verification dimensions (LOCK-4304). Order is the
+ * The 14 documented verification dimensions (LOCK-4304). Order is the
  * canonical report order and maps one-to-one to the documented list:
  *
  *  1. `id_sets`            — ① source vs target ID set match
@@ -37,6 +37,11 @@
  * 11. `integrity_check`    — ⑪ PRAGMA integrity_check
  * 12. `foreign_key_check`  — ⑫ PRAGMA foreign_key_check
  * 13. `sample_reads`       — ⑬ repository-level application sample reads
+ * 14. `search_projection`  — ⑭ derived FTS/normalized search projection
+ *     (LOCK-SP-1..4): sqlite_master object inventory, canonical vs
+ *     normalized vs FTS count parity, message_id/content parity against
+ *     shared normalizeSearchText, exact FTS↔normalized multiset parity,
+ *     and a fixed MATCH smoke query.
  */
 export const VERIFICATION_DIMENSIONS = [
   'id_sets',
@@ -51,7 +56,8 @@ export const VERIFICATION_DIMENSIONS = [
   'overflow',
   'integrity_check',
   'foreign_key_check',
-  'sample_reads'
+  'sample_reads',
+  'search_projection'
 ] as const
 
 export type VerificationDimension = (typeof VERIFICATION_DIMENSIONS)[number]
@@ -76,6 +82,22 @@ export type VerificationDiagnosticCode =
   | 'FOREIGN_KEY_CHECK_VIOLATION'
   | 'SAMPLE_READ_FAILED'
   | 'SAMPLE_READ_MISMATCH'
+  // Derived search projection (LOCK-SP-1..4). Evidence is fixed codes,
+  // counts, schema object names, and entity IDs ONLY — never normalized/raw
+  // content, digests of content, SQL, or filesystem paths.
+  | 'SEARCH_PROJECTION_OBJECT_MISSING'
+  | 'SEARCH_PROJECTION_COUNT_MISMATCH'
+  | 'SEARCH_PROJECTION_MESSAGE_ID_MISMATCH'
+  | 'SEARCH_PROJECTION_CONTENT_MISMATCH'
+  | 'SEARCH_PROJECTION_ROW_MISSING'
+  | 'SEARCH_PROJECTION_ROW_UNEXPECTED'
+  // Aggregate FTS↔normalized multiset-parity failure (LOCK-SP-2/3): emitted
+  // once when the exact ordered merge finds any row-level inequality. The
+  // per-row ROW_MISSING/ROW_UNEXPECTED diagnostics carry the exact entity
+  // IDs; this code carries fixed counts only.
+  | 'SEARCH_PROJECTION_FTS_MISMATCH'
+  | 'SEARCH_PROJECTION_SMOKE_FAILED'
+  | 'SEARCH_PROJECTION_READ_FAILED'
 
 /**
  * Safe expected/actual evidence value: a canonical digest, a count, an

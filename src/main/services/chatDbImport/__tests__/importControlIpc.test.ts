@@ -96,7 +96,8 @@ vi.mock('../promotion/recoveryExecutor', () => ({
 function createMockWebContents() {
   return {
     isDestroyed: vi.fn(() => false),
-    send: mockWebContentsSend
+    send: mockWebContentsSend,
+    mainFrame: { id: 1, url: 'file:///index.html' }
   } as any
 }
 
@@ -118,12 +119,80 @@ describe('importControlIpc', () => {
     disposeCherryImportControl()
   })
 
-  it('registers 4 IPC handlers', () => {
-    expect(mockHandle).toHaveBeenCalledTimes(4)
-    expect(mockHandle.mock.calls.map((c: any) => c[0])).toContain(IpcChannel.CherryImport_GetPlatformSupport)
-    expect(mockHandle.mock.calls.map((c: any) => c[0])).toContain(IpcChannel.CherryImport_Start)
-    expect(mockHandle.mock.calls.map((c: any) => c[0])).toContain(IpcChannel.CherryImport_Cancel)
-    expect(mockHandle.mock.calls.map((c: any) => c[0])).toContain(IpcChannel.CherryImport_GetStatus)
+  // -------------------------------------------------------------------------
+  // Shared fixtures
+  // -------------------------------------------------------------------------
+
+  /** Build an IPC invoke event carrying the given webContents' main frame
+   *  identity (mirrors Electron's IpcMainInvokeEvent.sender/senderFrame). */
+  function eventFromContents(contents: any) {
+    return { sender: contents, senderFrame: contents.mainFrame, frameId: contents.mainFrame.id }
+  }
+
+  /** One-shot projection state key stored in migration_state. */
+  const NAVIGATION_PROJECTION_STATE_KEY = 'import_navigation_projection_v1'
+
+  /** Valid encoded projection value as stored in migration_state. */
+  const PENDING_ROW = JSON.stringify({
+    version: 1,
+    sourcePersistVersion: 3,
+    assistants: [{ id: 'a1', name: 'Alpha', emoji: null, order: 0 }],
+    topics: [
+      {
+        id: 't1',
+        assistantId: 'a1',
+        name: 'Topic One',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: null,
+        deletedAt: null,
+        pinned: true,
+        isNameManuallyEdited: false,
+        order: 0
+      }
+    ],
+    recoveredTopicIds: []
+  })
+
+  /** Live better-sqlite3-shaped double over migration_state. */
+  function makeSqliteDouble(overrides: Record<string, any> = {}) {
+    const reads: string[] = []
+    const deletes: string[] = []
+    const sqlite: any = {
+      reads,
+      deletes,
+      prepare: vi.fn((sql: string) => {
+        if (sql.includes('SELECT value FROM migration_state')) {
+          return {
+            get: vi.fn((key: string) => {
+              reads.push(key)
+              return 'row' in overrides ? overrides.row : { value: PENDING_ROW }
+            })
+          }
+        }
+        if (sql.includes('DELETE FROM migration_state')) {
+          return {
+            run: vi.fn((key: string) => {
+              deletes.push(key)
+              return { changes: overrides.deleteChanges ?? 1 }
+            })
+          }
+        }
+        throw new Error(`Unexpected SQL: ${sql}`)
+      })
+    }
+    return Object.assign(sqlite, overrides)
+  }
+
+  it('registers 6 IPC handlers', () => {
+    expect(mockHandle).toHaveBeenCalledTimes(6)
+    const channels = mockHandle.mock.calls.map((c: any) => c[0])
+    expect(channels).toContain(IpcChannel.CherryImport_GetPlatformSupport)
+    expect(channels).toContain(IpcChannel.CherryImport_Start)
+    expect(channels).toContain(IpcChannel.CherryImport_Cancel)
+    expect(channels).toContain(IpcChannel.CherryImport_GetStatus)
+    // LOCK-PROD-6: the two one-shot projection channels are fixed handlers.
+    expect(channels).toContain(IpcChannel.CherryImport_GetProjection)
+    expect(channels).toContain(IpcChannel.CherryImport_AckProjection)
   })
 
   describe('get-platform-support', () => {
@@ -327,6 +396,286 @@ describe('importControlIpc', () => {
         sessionId: 'session-123',
         state: 'reading'
       })
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LOCK-PROD-6: one-shot navigation projection handlers
+  // ---------------------------------------------------------------------------
+
+  describe('navigation projection handlers (LOCK-PROD-6)', () => {
+    it('get-projection returns the validated pending payload from the live sqlite row', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+
+      const handler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_GetProjection)![1]
+      const result = handler(eventFromContents(webContents))
+
+      // LOCK-I3: only a validated pending payload is returned over IPC.
+      expect(result).toEqual({ ok: true, projection: JSON.parse(PENDING_ROW) })
+      // The read targets the exact versioned key — never a wildcard.
+      expect(sqlite.reads).toEqual([NAVIGATION_PROJECTION_STATE_KEY])
+    })
+
+    it('get-projection is a no-op when no row is pending (crash-before-ack retries next startup)', () => {
+      const sqlite = makeSqliteDouble({ row: undefined })
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+
+      const handler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_GetProjection)![1]
+      const result = handler(eventFromContents(webContents))
+
+      expect(result).toEqual({ ok: true, projection: null })
+    })
+
+    it('get-projection treats a malformed row as absent — safe no-op, never a throw', () => {
+      const sqlite = makeSqliteDouble({ row: { value: 'not-json{{{' } })
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+
+      const handler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_GetProjection)![1]
+      const result = handler(eventFromContents(webContents))
+
+      expect(result).toEqual({ ok: true, projection: null })
+    })
+
+    it('get-projection returns a structured safe result when the live DB is unavailable', () => {
+      mockChatDbService.getSqlite.mockReturnValue(null)
+
+      const handler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_GetProjection)![1]
+      const result = handler(eventFromContents(webContents))
+
+      expect(result).toEqual({ ok: true, projection: null })
+    })
+
+    it('get-projection contains a DB read failure as a structured safe result', () => {
+      mockChatDbService.getSqlite.mockReturnValue({
+        prepare: () => {
+          throw new Error('database is locked /Users/secret/data.db')
+        }
+      })
+
+      const handler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_GetProjection)![1]
+      const result = handler(eventFromContents(webContents))
+
+      // LOCK-I3: the raw error (including any path) never crosses IPC.
+      expect(result).toEqual({ ok: true, projection: null })
+      expect(JSON.stringify(result)).not.toContain('/Users/secret')
+    })
+
+    it('ack-projection deletes exactly the pending key and succeeds', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+
+      const handler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_AckProjection)![1]
+      const result = handler(eventFromContents(webContents))
+
+      expect(result).toEqual({ ok: true })
+      expect(sqlite.deletes).toEqual([NAVIGATION_PROJECTION_STATE_KEY])
+    })
+
+    it('ack-projection is idempotent when no row was pending (changes=0)', () => {
+      const sqlite = makeSqliteDouble({ deleteChanges: 0 })
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+
+      const handler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_AckProjection)![1]
+      const result = handler(eventFromContents(webContents))
+
+      expect(result).toEqual({ ok: true })
+    })
+
+    it('ack-projection fails closed when the live DB is unavailable — row stays pending', () => {
+      mockChatDbService.getSqlite.mockReturnValue(null)
+
+      const handler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_AckProjection)![1]
+      const result = handler(eventFromContents(webContents))
+
+      expect(result).toEqual({ ok: false, error: 'Chat database is not available' })
+    })
+
+    it('ack-projection surfaces a delete failure — row stays pending for retry', () => {
+      mockChatDbService.getSqlite.mockReturnValue({
+        prepare: () => {
+          throw new Error('SQLITE_BUSY /Users/secret/data.db')
+        }
+      })
+
+      const handler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_AckProjection)![1]
+      const result = handler(eventFromContents(webContents))
+
+      expect(result).toEqual({ ok: false, error: 'Projection acknowledgment failed' })
+      // LOCK-I3: the raw error (including any path) never crosses IPC.
+      expect(JSON.stringify(result)).not.toContain('/Users/secret')
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LOCK-FA1/FA2/FA3: projection handler authorization — only the registered
+  // main renderer's main frame may read/acknowledge the pending projection.
+  // ---------------------------------------------------------------------------
+
+  describe('projection handler authorization (LOCK-FA1/FA2/FA3)', () => {
+    function getProjectionHandler(): any {
+      return mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_GetProjection)![1]
+    }
+
+    function ackProjectionHandler(): any {
+      return mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_AckProjection)![1]
+    }
+
+    it('get-projection rejects an unrelated window sender (broad preload) — no SQL read', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      const unrelatedWindow = createMockWebContents()
+
+      const result = getProjectionHandler()(eventFromContents(unrelatedWindow))
+
+      // LOCK-FA1: reject. LOCK-FA2: structured, path-redacted error.
+      expect(result).toEqual({ ok: false, error: 'Unauthorized: navigation projection read denied' })
+      expect(JSON.stringify(result)).not.toContain('/')
+      // No DB access for a rejected sender.
+      expect(sqlite.prepare).not.toHaveBeenCalled()
+      expect(sqlite.reads).toEqual([])
+    })
+
+    it('get-projection rejects a mini-like window sender sharing the broad preload — no SQL read', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      const miniLikeWindow = createMockWebContents()
+      miniLikeWindow.mainFrame = { id: 2, url: 'file:///miniWindow.html' }
+
+      const result = getProjectionHandler()(eventFromContents(miniLikeWindow))
+
+      expect(result).toEqual({ ok: false, error: 'Unauthorized: navigation projection read denied' })
+      expect(sqlite.prepare).not.toHaveBeenCalled()
+      expect(sqlite.reads).toEqual([])
+    })
+
+    it('get-projection rejects a non-main frame on the registered window — no SQL read', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+
+      const result = getProjectionHandler()({ sender: webContents, senderFrame: { id: 99 }, frameId: 99 })
+
+      expect(result).toEqual({ ok: false, error: 'Unauthorized: navigation projection read denied' })
+      expect(sqlite.prepare).not.toHaveBeenCalled()
+      expect(sqlite.reads).toEqual([])
+    })
+
+    it('get-projection rejects when registration is missing (disposed) — no SQL read', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      disposeCherryImportControl() // LOCK-FA3: single-owner registration cleared
+
+      const result = getProjectionHandler()(eventFromContents(webContents))
+
+      expect(result).toEqual({ ok: false, error: 'Unauthorized: navigation projection read denied' })
+      expect(sqlite.prepare).not.toHaveBeenCalled()
+      expect(sqlite.reads).toEqual([])
+    })
+
+    it('get-projection rejects when the registered target is destroyed — no SQL read', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      webContents.isDestroyed.mockReturnValue(true)
+
+      const result = getProjectionHandler()(eventFromContents(webContents))
+
+      expect(result).toEqual({ ok: false, error: 'Unauthorized: navigation projection read denied' })
+      expect(sqlite.prepare).not.toHaveBeenCalled()
+      expect(sqlite.reads).toEqual([])
+    })
+
+    it('re-registration transfers authorization to the new main target only (LOCK-FA3)', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      const previousTarget = webContents
+      const newTarget = createMockWebContents()
+      registerCherryImportControlIpc(newTarget)
+
+      // The old target is no longer authorized.
+      const staleResult = getProjectionHandler()(eventFromContents(previousTarget))
+      expect(staleResult).toEqual({ ok: false, error: 'Unauthorized: navigation projection read denied' })
+      expect(sqlite.prepare).not.toHaveBeenCalled()
+      expect(sqlite.reads).toEqual([])
+
+      // The current target's main frame is authorized — the read proceeds.
+      const currentResult = getProjectionHandler()(eventFromContents(newTarget))
+      expect(currentResult).toEqual({ ok: true, projection: JSON.parse(PENDING_ROW) })
+      expect(sqlite.reads).toEqual([NAVIGATION_PROJECTION_STATE_KEY])
+    })
+
+    it('ack-projection rejects an unrelated window sender WITHOUT executing SQL (LOCK-FA2)', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      const unrelatedWindow = createMockWebContents()
+
+      const result = ackProjectionHandler()(eventFromContents(unrelatedWindow))
+
+      expect(result).toEqual({ ok: false, error: 'Unauthorized: navigation projection acknowledgment denied' })
+      expect(JSON.stringify(result)).not.toContain('/')
+      // LOCK-FA2: the DELETE must never run for a rejected sender.
+      expect(sqlite.prepare).not.toHaveBeenCalled()
+      expect(sqlite.deletes).toEqual([])
+    })
+
+    it('ack-projection rejects a mini-like window sender WITHOUT executing SQL', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      const miniLikeWindow = createMockWebContents()
+      miniLikeWindow.mainFrame = { id: 2, url: 'file:///miniWindow.html' }
+
+      const result = ackProjectionHandler()(eventFromContents(miniLikeWindow))
+
+      expect(result).toEqual({ ok: false, error: 'Unauthorized: navigation projection acknowledgment denied' })
+      expect(sqlite.prepare).not.toHaveBeenCalled()
+      expect(sqlite.deletes).toEqual([])
+    })
+
+    it('ack-projection rejects a non-main frame on the registered window WITHOUT executing SQL', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+
+      const result = ackProjectionHandler()({ sender: webContents, senderFrame: { id: 99 }, frameId: 99 })
+
+      expect(result).toEqual({ ok: false, error: 'Unauthorized: navigation projection acknowledgment denied' })
+      expect(sqlite.prepare).not.toHaveBeenCalled()
+      expect(sqlite.deletes).toEqual([])
+    })
+
+    it('ack-projection rejects when registration is missing WITHOUT executing SQL', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      disposeCherryImportControl()
+
+      const result = ackProjectionHandler()(eventFromContents(webContents))
+
+      expect(result).toEqual({ ok: false, error: 'Unauthorized: navigation projection acknowledgment denied' })
+      expect(sqlite.prepare).not.toHaveBeenCalled()
+      expect(sqlite.deletes).toEqual([])
+    })
+
+    it('ack-projection rejects when the registered target is destroyed WITHOUT executing SQL', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      webContents.isDestroyed.mockReturnValue(true)
+
+      const result = ackProjectionHandler()(eventFromContents(webContents))
+
+      expect(result).toEqual({ ok: false, error: 'Unauthorized: navigation projection acknowledgment denied' })
+      expect(sqlite.prepare).not.toHaveBeenCalled()
+      expect(sqlite.deletes).toEqual([])
+    })
+
+    it('authorized main-frame get and ack still succeed (LOCK-FA1 same main frame)', () => {
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+
+      const getResult = getProjectionHandler()(eventFromContents(webContents))
+      expect(getResult).toEqual({ ok: true, projection: JSON.parse(PENDING_ROW) })
+
+      const ackResult = ackProjectionHandler()(eventFromContents(webContents))
+      expect(ackResult).toEqual({ ok: true })
+      expect(sqlite.reads).toEqual([NAVIGATION_PROJECTION_STATE_KEY])
+      expect(sqlite.deletes).toEqual([NAVIGATION_PROJECTION_STATE_KEY])
     })
   })
 
@@ -2693,6 +3042,361 @@ describe('importControlIpc', () => {
 
       // Reset mock.
       mockTakeTerminalPromotionOwnershipIfMatches.mockReturnValue({ status: 'not-available' })
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LOCK-FR1..FR4: repeat-import lifecycle after non-packaged success
+  // ---------------------------------------------------------------------------
+
+  describe('LOCK-FR2/FR3: non-packaged success returns control to idle', () => {
+    it('non-packaged success immediately clears session/poller and releases terminal ownership', async () => {
+      let verificationCallback: ((result: any) => void) | undefined
+      const disposeSession = vi.fn().mockResolvedValue(undefined)
+      mockStartImport.mockImplementation((_zipPath: string, options: any) => {
+        verificationCallback = options.onVerificationComplete
+        return Promise.resolve({ id: 'session-fr2', state: 'intake', dispose: disposeSession })
+      })
+      mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
+      mockStartPromotionExecution.mockResolvedValue({
+        status: 'promoted',
+        handoff: { sessionId: 'session-fr2', capability: {} }
+      })
+
+      // Non-packaged recovery: the in-process renderer reload was requested
+      // (LOCK-PROD-7) — the process stays alive.
+      mockCreateRecoveryExecutor.mockReturnValue({
+        run: vi.fn().mockResolvedValue({
+          ok: true,
+          action: { action: 'accept-verified-replacement', cleaned: true },
+          decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
+          inProcessReload: true
+        })
+      })
+
+      const mockRelease = vi.fn()
+      mockTakeTerminalPromotionOwnership
+        .mockReturnValueOnce({
+          status: 'taken',
+          ownership: {
+            kind: 'promoted',
+            handoff: { capability: { release: mockRelease, isReleased: vi.fn(() => false) } }
+          }
+        })
+        .mockReturnValue({ status: 'not-available' })
+      mockGetActiveImport.mockReturnValue({ id: 'session-fr2', state: 'promoted', dispose: disposeSession })
+
+      const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+      await startHandler({}, '/tmp/test.zip')
+
+      verificationCallback!({
+        sessionId: 'session-fr2',
+        candidateId: 'candidate-fr2',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      // promoted emitted
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({ state: 'promoted' })
+      )
+      // LOCK-FR2: terminal ownership consumed + released exactly once.
+      expect(mockTakeTerminalPromotionOwnership).toHaveBeenCalled()
+      expect(mockRelease).toHaveBeenCalledTimes(1)
+      // Session resources disposed — control ownership cleared immediately
+      // (no reliance on the poller's next tick).
+      expect(disposeSession).toHaveBeenCalled()
+
+      // A second independent import starts immediately — not "already in progress".
+      mockGetActiveImport.mockReturnValue(null)
+      mockStartImport.mockResolvedValue({ id: 'session-fr2-second', state: 'intake' })
+      const second = await startHandler({}, '/tmp/test2.zip')
+      expect(second.ok).toBe(true)
+      expect(second.sessionId).toBe('session-fr2-second')
+    })
+
+    it('two sequential independent non-packaged flows each reload exactly once (LOCK-FR3)', async () => {
+      let verificationCallbackA: ((result: any) => void) | undefined
+      const disposeA = vi.fn().mockResolvedValue(undefined)
+      mockStartImport.mockImplementationOnce((_zipPath: string, options: any) => {
+        verificationCallbackA = options.onVerificationComplete
+        return Promise.resolve({ id: 'session-seq-A', state: 'intake', dispose: disposeA })
+      })
+      mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok-A' } })
+      mockStartPromotionExecution.mockResolvedValue({
+        status: 'promoted',
+        handoff: { sessionId: 'session-seq-A', capability: {} }
+      })
+      const reloadRunA = vi.fn().mockResolvedValue({
+        ok: true,
+        action: { action: 'accept-verified-replacement', cleaned: true },
+        decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
+        inProcessReload: true
+      })
+      mockCreateRecoveryExecutor.mockReturnValue({ run: reloadRunA })
+
+      const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+      await startHandler({}, '/tmp/testA.zip')
+
+      // A's promoted execution left a terminal ownership record — cleanup
+      // must consume and release it exactly once.
+      const mockReleaseA = vi.fn()
+      mockTakeTerminalPromotionOwnership
+        .mockReturnValueOnce({
+          status: 'taken',
+          ownership: {
+            kind: 'promoted',
+            handoff: { capability: { release: mockReleaseA, isReleased: vi.fn(() => false) } }
+          }
+        })
+        .mockReturnValue({ status: 'not-available' })
+      mockGetActiveImport.mockReturnValue({ id: 'session-seq-A', state: 'promoted', dispose: disposeA })
+
+      verificationCallbackA!({
+        sessionId: 'session-seq-A',
+        candidateId: 'candidate-A',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(reloadRunA).toHaveBeenCalledTimes(1)
+      expect(mockReleaseA).toHaveBeenCalledTimes(1)
+      expect(disposeA).toHaveBeenCalled()
+
+      // ---- Flow B: a second independent import in the same process ----
+      let verificationCallbackB: ((result: any) => void) | undefined
+      const disposeB = vi.fn().mockResolvedValue(undefined)
+      mockStartImport.mockImplementation((_zipPath: string, options: any) => {
+        verificationCallbackB = options.onVerificationComplete
+        return Promise.resolve({ id: 'session-seq-B', state: 'intake', dispose: disposeB })
+      })
+      mockGetActiveImport.mockReturnValue({ id: 'session-seq-B', state: 'intake', dispose: disposeB })
+      mockWebContentsSend.mockClear()
+
+      const resultB = await startHandler({}, '/tmp/testB.zip')
+      // LOCK-FR2/FR3: A's success left the controller idle — B starts immediately.
+      expect(resultB.ok).toBe(true)
+      expect(resultB.sessionId).toBe('session-seq-B')
+
+      const reloadRunB = vi.fn().mockResolvedValue({
+        ok: true,
+        action: { action: 'accept-verified-replacement', cleaned: true },
+        decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
+        inProcessReload: true
+      })
+      mockCreateRecoveryExecutor.mockReturnValue({ run: reloadRunB })
+      mockGetActiveImport.mockReturnValue({ id: 'session-seq-B', state: 'promoted', dispose: disposeB })
+
+      verificationCallbackB!({
+        sessionId: 'session-seq-B',
+        candidateId: 'candidate-B',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      // B's own recovery requested its own reload exactly once.
+      expect(reloadRunB).toHaveBeenCalledTimes(1)
+      // B's terminal state was emitted.
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({ sessionId: 'session-seq-B', state: 'promoted' })
+      )
+    })
+
+    it('non-packaged success via recoveryHandoff also returns control to idle (LOCK-FR2)', async () => {
+      let verificationCallback: ((result: any) => void) | undefined
+      const disposeSession = vi.fn().mockResolvedValue(undefined)
+      mockStartImport.mockImplementation((_zipPath: string, options: any) => {
+        verificationCallback = options.onVerificationComplete
+        return Promise.resolve({ id: 'session-handoff-fr2', state: 'intake', dispose: disposeSession })
+      })
+      mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
+      mockStartPromotionExecution.mockResolvedValue({
+        status: 'promotion-failed',
+        failure: {
+          subphase: 'verifying-replacement',
+          classification: 'post-install',
+          recoveryRequired: true,
+          code: 'REPLACEMENT_VERIFICATION_FAILED',
+          safeCode: null,
+          liveDisposition: 'closed'
+        },
+        recoveryHandoff: {
+          sessionId: 'session-handoff-fr2',
+          candidateId: 'candidate-handoff-fr2',
+          token: 'tok',
+          failure: {},
+          capability: { release: vi.fn(), isReleased: vi.fn(() => false) }
+        }
+      })
+
+      // Recovery executor succeeds via in-process reload (non-packaged).
+      mockCreateRecoveryExecutor.mockReturnValue({
+        run: vi.fn().mockResolvedValue({
+          ok: true,
+          action: { action: 'accept-verified-replacement', cleaned: true },
+          decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
+          inProcessReload: true
+        })
+      })
+
+      const mockRelease = vi.fn()
+      mockTakeTerminalPromotionOwnership
+        .mockReturnValueOnce({
+          status: 'taken',
+          ownership: {
+            kind: 'recovery-required',
+            handoff: { capability: { release: mockRelease, isReleased: vi.fn(() => false) } }
+          }
+        })
+        .mockReturnValue({ status: 'not-available' })
+      mockGetActiveImport.mockReturnValue({
+        id: 'session-handoff-fr2',
+        state: 'promotion-failed',
+        dispose: disposeSession
+      })
+
+      const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+      await startHandler({}, '/tmp/test.zip')
+
+      verificationCallback!({
+        sessionId: 'session-handoff-fr2',
+        candidateId: 'candidate-handoff-fr2',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      // promoted emitted and the recovery-required terminal ownership was
+      // consumed + released exactly once (no maintenance lease leak).
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({ state: 'promoted' })
+      )
+      expect(mockTakeTerminalPromotionOwnership).toHaveBeenCalled()
+      expect(mockRelease).toHaveBeenCalledTimes(1)
+      expect(disposeSession).toHaveBeenCalled()
+
+      // A fresh import starts immediately.
+      mockGetActiveImport.mockReturnValue(null)
+      mockStartImport.mockResolvedValue({ id: 'session-handoff-fr2-second', state: 'intake' })
+      const second = await startHandler({}, '/tmp/test2.zip')
+      expect(second.ok).toBe(true)
+    })
+  })
+
+  describe('LOCK-FR1: packaged success path unchanged', () => {
+    it('packaged recovery (no in-process reload) retains terminal ownership — process exits', async () => {
+      let verificationCallback: ((result: any) => void) | undefined
+      mockStartImport.mockImplementation((_zipPath: string, options: any) => {
+        verificationCallback = options.onVerificationComplete
+        return Promise.resolve({ id: 'session-packaged', state: 'intake' })
+      })
+      mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
+      mockStartPromotionExecution.mockResolvedValue({
+        status: 'promoted',
+        handoff: { sessionId: 'session-packaged', capability: {} }
+      })
+
+      // Packaged recovery: no inProcessReload field — the process exits
+      // after app.relaunch() (LOCK-FR1 exact-once).
+      mockCreateRecoveryExecutor.mockReturnValue({
+        run: vi.fn().mockResolvedValue({
+          ok: true,
+          action: { action: 'accept-verified-replacement', cleaned: true },
+          decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' }
+        })
+      })
+
+      const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+      await startHandler({}, '/tmp/test.zip')
+
+      verificationCallback!({
+        sessionId: 'session-packaged',
+        candidateId: 'candidate-pkg',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      // LOCK-FR1: packaged success lifecycle is unchanged — promoted is
+      // emitted and ownership is NOT consumed (the process exits; the
+      // control layer does not clean up).
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({ state: 'promoted' })
+      )
+      expect(mockTakeTerminalPromotionOwnership).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('LOCK-FR4: absent/failed reload leaves durable recoverable state without lease leak', () => {
+    it('bounded-no-op in-process reload still settles to idle and releases the lease', async () => {
+      let verificationCallback: ((result: any) => void) | undefined
+      const disposeSession = vi.fn().mockResolvedValue(undefined)
+      mockStartImport.mockImplementation((_zipPath: string, options: any) => {
+        verificationCallback = options.onVerificationComplete
+        return Promise.resolve({ id: 'session-fr4', state: 'intake', dispose: disposeSession })
+      })
+      mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
+      mockStartPromotionExecution.mockResolvedValue({
+        status: 'promoted',
+        handoff: { sessionId: 'session-fr4', capability: {} }
+      })
+
+      // The reload target was absent/destroyed or reload() threw — the
+      // executor reports the recovery as a successful bounded no-op
+      // (inProcessReload: true; the pending projection row retries on the
+      // next startup). LOCK-FR4: this must NOT leave a lease leak.
+      mockCreateRecoveryExecutor.mockReturnValue({
+        run: vi.fn().mockResolvedValue({
+          ok: true,
+          action: { action: 'accept-verified-replacement', cleaned: true },
+          decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
+          inProcessReload: true
+        })
+      })
+
+      const mockRelease = vi.fn()
+      mockTakeTerminalPromotionOwnership
+        .mockReturnValueOnce({
+          status: 'taken',
+          ownership: {
+            kind: 'promoted',
+            handoff: { capability: { release: mockRelease, isReleased: vi.fn(() => false) } }
+          }
+        })
+        .mockReturnValue({ status: 'not-available' })
+      mockGetActiveImport.mockReturnValue({ id: 'session-fr4', state: 'promoted', dispose: disposeSession })
+
+      const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+      await startHandler({}, '/tmp/test.zip')
+
+      verificationCallback!({
+        sessionId: 'session-fr4',
+        candidateId: 'candidate-fr4',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      // No lease leak: terminal ownership consumed + released exactly once;
+      // session/control ownership cleared so the app is idle.
+      expect(mockTakeTerminalPromotionOwnership).toHaveBeenCalled()
+      expect(mockRelease).toHaveBeenCalledTimes(1)
+      expect(disposeSession).toHaveBeenCalled()
+
+      // The pending projection row is durable (untouched by cleanup) — a
+      // fresh import can start immediately.
+      mockGetActiveImport.mockReturnValue(null)
+      mockStartImport.mockResolvedValue({ id: 'session-fr4-second', state: 'intake' })
+      const second = await startHandler({}, '/tmp/test2.zip')
+      expect(second.ok).toBe(true)
+      expect(second.sessionId).toBe('session-fr4-second')
     })
   })
 })

@@ -2042,6 +2042,10 @@
         "success": "匯入成功完成！應用程式將重新啟動。",
         "unsupported": "不支援的平台"
       },
+      "recovered": {
+        "assistant_name": "已復原的對話",
+        "topic_name": "復原的對話 {{index}}"
+      },
       "select_button": "選擇檔案",
       "select_file": "選擇 Cherry Studio ZIP 備份",
       "steps": {
@@ -2059,6 +2063,7 @@
         "description": "Cherry Studio ZIP 匯入目前僅支援 macOS。您目前的平台尚未支援。",
         "title": "不支援的平台"
       },
+      "untitled_topic": "未命名話題",
       "warning": {
         "description": "此次匯入將取代所有現有聊天資料。如有需要，請先備份目前的資料。",
         "title": "全部取代"

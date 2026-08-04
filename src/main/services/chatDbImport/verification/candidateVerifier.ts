@@ -1,16 +1,18 @@
 /**
  * Candidate verifier — readonly sealed-candidate verification across the
- * 13 documented dimensions (Phase 4.3.2, LOCK-4301/4302/4303/4304/4305).
+ * 14 documented dimensions (Phase 4.3.2, LOCK-4301/4302/4303/4304/4305,
+ * LOCK-SP-1..4/6).
  *
  * Given a sealed candidate dbPath and a finalized SourceVerificationManifest,
  * this module reopens the candidate strictly readonly, reconstructs
  * target-equivalent domain records through the existing Drizzle/domain
  * mappers, compares the complete source evidence (IDs, counts, full record
  * digests, orders, relations, file refs, segments/memberships, structured
- * model/tool JSON, overflow), runs both SQLite PRAGMAs, and performs
+ * model/tool JSON, overflow), runs both SQLite PRAGMAs, performs
  * deterministic repository-level sample reads through the existing
  * application read path (ChatDbAggregateService + repositories) bound to
- * the candidate.
+ * the candidate, and verifies the derived FTS/normalized search projection
+ * (LOCK-SP-2..4).
  *
  * Guarantees:
  * - LOCK-4301: full source-vs-target verification. Every comparison uses
@@ -28,6 +30,31 @@
  * - LOCK-4305: readonly only. Never initializes ChatDbService, runs
  *   migrations, writes the candidate, touches the live DB, promotes,
  *   snapshots, relaunches, or changes shared/preload/renderer APIs.
+ * - LOCK-SP-1: dimension ⑭ `search_projection` is appended AFTER the
+ *   existing 13 dimensions; their names/order/semantics are unchanged.
+ * - LOCK-SP-2: the search projection check is full, readonly and
+ *   deterministic: exact sqlite_master object inventory (normalized table,
+ *   message_id index, FTS table, three sync triggers — names from the
+ *   migration constants, LOCK-FTS-2), canonical-predicate vs normalized vs
+ *   FTS count parity, normalized.message_id vs canonical block.message_id,
+ *   normalized_content vs shared normalizeSearchText(canonical content)
+ *   computed JS-side (LOCK-SP-6), and EXACT FTS↔normalized multiset parity
+ *   (no probabilistic hashing): both projections are streamed in the same
+ *   deterministic order and merged row-by-row with the injective
+ *   length-prefixed key (length(block_id), block_id,
+ *   length(normalized_content), normalized_content) — duplicates and NUL
+ *   bytes are preserved, and the merge compares actual bytes, so it is
+ *   injective rather than collision-prone.
+ * - LOCK-SP-3: FTS parity is exact and scalable — bounded chunked scans
+ *   with an explicit finite chunk budget, cursor-index buffering (no O(n)
+ *   shift queue), and a single SQLite temp-sort stream on the FTS side to
+ *   obtain the shared deterministic order without quadratic keyset
+ *   re-scans. O(chunk) JS memory plus SQLite's bounded external sort; abort
+ *   checkpoints are honored on every chunk. Diagnostics carry fixed codes,
+ *   counts, schema object names and allowed entity IDs only — never
+ *   content, paths, or SQL.
+ * - LOCK-SP-4: a fixed synthetic MATCH token proves FTS MATCH executes;
+ *   it is not required to match source content.
  *
  * Main-only. Never expose over IPC/preload/renderer.
  */
@@ -50,13 +77,25 @@ import type {
   TopicSegmentMessageRow,
   TopicSegmentRow
 } from '@main/services/chatDb/domain/types'
+import {
+  FTS_SMOKE_TOKEN,
+  MESSAGE_BLOCKS_FTS_TABLE,
+  MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER,
+  MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER,
+  MESSAGE_BLOCKS_NORMALIZED_MESSAGE_ID_INDEX,
+  MESSAGE_BLOCKS_NORMALIZED_TABLE,
+  MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER
+} from '@main/services/chatDb/migration'
 import { createRepositories } from '@main/services/chatDb/repository/factory'
 import * as schema from '@main/services/chatDb/schema'
+import { normalizeSearchText } from '@shared/searchTextNormalization'
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 
 import { canonicalDigest, CanonicalizationError } from './canonicalJson'
 import { digestBlock, digestFileReference, digestMessage, digestSegment, digestTopic } from './entityFraming'
+import type { ProjectionRow } from './searchProjectionCompare'
+import { compareProjectionRows } from './searchProjectionCompare'
 import type { ManifestEntitySection, SourceVerificationManifest } from './sourceManifest'
 import type {
   CandidateVerificationReport,
@@ -79,7 +118,12 @@ export interface CandidateVerifierOptions {
   manifest: SourceVerificationManifest
   /** Cooperative cancellation, honored at checkpoint boundaries (LOCK-4303). */
   signal?: AbortSignal
-  /** Rows per query chunk (default 500, min 1). */
+  /**
+   * Rows per query chunk. Bounded to [1, MAX_SEARCH_PROJECTION_CHUNK_SIZE]
+   * before any allocation (LOCK-SP-3): non-finite (NaN/±Infinity) and
+   * non-positive (zero/negative) values normalize to the default (500);
+   * values above the fixed maximum clamp to it. Production default 500.
+   */
   chunkSize?: number
   /** Diagnostics kept per dimension before truncation (default 25, min 1). */
   maxDiagnosticsPerDimension?: number
@@ -180,7 +224,26 @@ type CollectorMap = Record<VerificationDimension, DimensionCollector>
 // Constants
 // ---------------------------------------------------------------------------
 
+/**
+ * Default rows per query chunk (production default, unchanged).
+ */
 const DEFAULT_CHUNK_SIZE = 500
+
+/**
+ * Fixed finite upper bound for the verifier chunk size (LOCK-SP-3).
+ *
+ * Every chunked scan — the entity keyset scans (scanById/scanMemberships),
+ * the canonical↔normalized projection scans and the exact FTS↔normalized
+ * parity stream — buffers O(chunkSize) rows at a time (plus one bounded
+ * SQLite temp sort on the FTS side), so the chunk size MUST be a finite
+ * positive integer. Direct/future callers passing Infinity, NaN, negatives,
+ * zero, or values above this bound (e.g. Number.MAX_SAFE_INTEGER) normalize
+ * conservatively to the fixed default or this fixed maximum — no unbounded
+ * allocation is possible. Production callers pass nothing and keep the
+ * default (500).
+ */
+export const MAX_SEARCH_PROJECTION_CHUNK_SIZE = 5000
+
 const DEFAULT_DIAGNOSTIC_CAP = 25
 const DEFAULT_SAMPLE_COUNT = 5
 
@@ -190,6 +253,27 @@ const MESSAGE_COLUMNS =
 const BLOCK_COLUMNS = 'id, message_id, type, content, status, created_at, updated_at, sort_order, extra'
 const SEGMENT_COLUMNS = 'id, topic_id, name, created_at, updated_at, sort_order, extra'
 const FILE_REFERENCE_COLUMNS = 'id, block_id, file_id, file_name, file_path, file_type, count, extra'
+
+// ---------------------------------------------------------------------------
+// Chunk size normalization (LOCK-SP-3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a caller-supplied chunk size to a finite integer within
+ * [1, MAX_SEARCH_PROJECTION_CHUNK_SIZE] BEFORE any cursor/buffer
+ * allocation, so every chunked scan stays O(chunk) bounded:
+ *
+ * - undefined (production)                 → DEFAULT_CHUNK_SIZE (unchanged)
+ * - NaN / ±Infinity (non-finite)           → DEFAULT_CHUNK_SIZE
+ * - ≤ 0 (zero/negative — invalid LIMIT)    → DEFAULT_CHUNK_SIZE
+ * - finite > MAX_SEARCH_PROJECTION_CHUNK_SIZE → MAX_SEARCH_PROJECTION_CHUNK_SIZE
+ * - finite within bounds (incl. 0 < v < 1) → floor(value) clamped to ≥ 1
+ */
+export function normalizeChunkSize(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_CHUNK_SIZE
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_CHUNK_SIZE
+  return Math.min(Math.max(Math.floor(value), 1), MAX_SEARCH_PROJECTION_CHUNK_SIZE)
+}
 
 // ---------------------------------------------------------------------------
 // CandidateVerifier
@@ -217,7 +301,7 @@ export class CandidateVerifier {
     this.dbPath = options.dbPath
     this.manifest = options.manifest
     this.signal = options.signal
-    this.chunkSize = Math.max(1, Math.floor(options.chunkSize ?? DEFAULT_CHUNK_SIZE))
+    this.chunkSize = normalizeChunkSize(options.chunkSize)
     this.diagnosticCap = Math.max(1, Math.floor(options.maxDiagnosticsPerDimension ?? DEFAULT_DIAGNOSTIC_CAP))
     this.sampleCount = Math.max(1, Math.floor(options.sampleCount ?? DEFAULT_SAMPLE_COUNT))
     this.onCheckpoint = options.onCheckpoint
@@ -271,6 +355,8 @@ export class CandidateVerifier {
       this.runForeignKeyCheck(collectors)
       await this.checkpoint()
       await this.runSampleReads(collectors)
+      await this.checkpoint()
+      await this.runSearchProjectionCheck(collectors)
     } catch (error) {
       if (error instanceof VerifierAborted) {
         aborted = true
@@ -868,6 +954,494 @@ export class CandidateVerifier {
     }
 
     c.sample_reads.complete()
+  }
+
+  // -------------------------------------------------------------------------
+  // Dimension ⑭ — derived FTS/normalized search projection (LOCK-SP-1..4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Required migration-003 derived objects (LOCK-FTS-2 single source: names
+   * come from the migration constants, never duplicated strings).
+   */
+  private readonly SEARCH_PROJECTION_OBJECTS: ReadonlyArray<{
+    readonly name: string
+    readonly type: 'table' | 'index' | 'trigger'
+  }> = [
+    { name: MESSAGE_BLOCKS_NORMALIZED_TABLE, type: 'table' },
+    { name: MESSAGE_BLOCKS_NORMALIZED_MESSAGE_ID_INDEX, type: 'index' },
+    { name: MESSAGE_BLOCKS_FTS_TABLE, type: 'table' },
+    { name: MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER, type: 'trigger' },
+    { name: MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER, type: 'trigger' },
+    { name: MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER, type: 'trigger' }
+  ]
+
+  /**
+   * LOCK-SP-2/3/4: full readonly, deterministic check of the derived search
+   * projection:
+   *   1. exact sqlite_master object inventory (table/index/FTS/3 triggers);
+   *   2. count parity: canonical predicate vs normalized vs FTS;
+   *   3. canonical↔normalized merge scan: message_id parity + normalized
+   *      content parity vs JS-side `normalizeSearchText(canonical content)`
+   *      (LOCK-SP-6 — no function registration, no DB writes);
+   *   4. EXACT FTS↔normalized multiset parity: both projections streamed in
+   *      the same deterministic order and merged row-by-row with the
+   *      injective length-prefixed key (length(block_id), block_id,
+   *      length(normalized_content), normalized_content) — no hashing, so
+   *      duplicates, NUL bytes and prefix-framing collisions are detected
+   *      exactly (LOCK-SP-2); bounded chunked scans (O(chunk) memory, cursor
+   *      index buffering, one bounded SQLite temp sort on the FTS side —
+   *      LOCK-SP-3);
+   *   5. LOCK-SP-4: fixed synthetic MATCH smoke proving FTS MATCH executes.
+   *
+   * Every chunk boundary honors the abort/close checkpoint (LOCK-4303).
+   * Unexpected query errors inside this dimension (e.g. a corrupted FTS that
+   * throws on MATCH) are recorded as one bounded READ_FAILED/SMOKE_FAILED
+   * diagnostic and stop the remaining sub-checks — the derived-object
+   * corruption is an expected verification failure class, never a fatal.
+   * Diagnostics carry fixed codes, counts, schema object names, and allowed
+   * entity IDs only (LOCK-SP-3, LOCK-PRIV).
+   */
+  private async runSearchProjectionCheck(c: CollectorMap): Promise<void> {
+    const sqlite = this.requireHandle()
+    try {
+      // ---- 1. Object inventory (sqlite_master) ---------------------------
+      const objects = this.SEARCH_PROJECTION_OBJECTS
+      const placeholders = objects.map(() => '?').join(',')
+      const master = new Map(
+        (
+          sqlite
+            .prepare(`SELECT name, type FROM sqlite_master WHERE name IN (${placeholders})`)
+            .all(...objects.map((o) => o.name)) as Array<{ name: string; type: string }>
+        ).map((r) => [r.name, r.type])
+      )
+      for (const obj of objects) {
+        c.search_projection.check()
+        if (master.get(obj.name) !== obj.type) {
+          c.search_projection.fail({
+            entity: 'sqlite_master',
+            entityId: null,
+            fieldPath: null,
+            expected: obj.name,
+            actual: master.get(obj.name) ?? null,
+            code: 'SEARCH_PROJECTION_OBJECT_MISSING'
+          })
+        }
+      }
+
+      // ---- 2. Count parity ------------------------------------------------
+      const countOf = (sql: string): number => {
+        const row = sqlite.prepare(sql).get() as { n: unknown }
+        return typeof row.n === 'number' ? row.n : -1
+      }
+      const canonicalCount = countOf(
+        `SELECT COUNT(*) AS n FROM message_blocks WHERE type = 'main_text' AND content IS NOT NULL`
+      )
+      const normalizedCount = countOf(`SELECT COUNT(*) AS n FROM message_blocks_normalized`)
+      const ftsCount = countOf(`SELECT COUNT(*) AS n FROM message_blocks_fts`)
+      c.search_projection.check()
+      if (canonicalCount !== normalizedCount) {
+        c.search_projection.fail({
+          entity: MESSAGE_BLOCKS_NORMALIZED_TABLE,
+          entityId: null,
+          fieldPath: null,
+          expected: canonicalCount,
+          actual: normalizedCount,
+          code: 'SEARCH_PROJECTION_COUNT_MISMATCH'
+        })
+      }
+      c.search_projection.check()
+      if (canonicalCount !== ftsCount) {
+        c.search_projection.fail({
+          entity: MESSAGE_BLOCKS_FTS_TABLE,
+          entityId: null,
+          fieldPath: null,
+          expected: canonicalCount,
+          actual: ftsCount,
+          code: 'SEARCH_PROJECTION_COUNT_MISMATCH'
+        })
+      }
+
+      // ---- 3. Canonical↔normalized merge scan (message_id + content
+      //      parity, LOCK-SP-6) --------------------------------------------
+      const canonicalCursor = this.scanProjectionRows(
+        sqlite,
+        'message_blocks',
+        `id, message_id, content`,
+        'id',
+        `WHERE type = 'main_text' AND content IS NOT NULL`
+      )
+      const normalizedCursor = this.scanProjectionRows(
+        sqlite,
+        MESSAGE_BLOCKS_NORMALIZED_TABLE,
+        'block_id, message_id, normalized_content',
+        'block_id',
+        ''
+      )
+      let canon = await canonicalCursor.next()
+      let norm = await normalizedCursor.next()
+      while (canon !== null) {
+        while (norm !== null && norm.block_id < canon.id) {
+          c.search_projection.check()
+          c.search_projection.fail({
+            entity: MESSAGE_BLOCKS_NORMALIZED_TABLE,
+            entityId: norm.block_id,
+            fieldPath: null,
+            expected: 'canonical-source-row',
+            actual: null,
+            code: 'SEARCH_PROJECTION_ROW_UNEXPECTED'
+          })
+          norm = await normalizedCursor.next()
+        }
+        if (norm !== null && norm.block_id === canon.id) {
+          c.search_projection.check()
+          if (norm.message_id !== canon.message_id) {
+            c.search_projection.fail({
+              entity: MESSAGE_BLOCKS_NORMALIZED_TABLE,
+              entityId: canon.id,
+              fieldPath: 'message_id',
+              expected: canon.message_id,
+              actual: norm.message_id,
+              code: 'SEARCH_PROJECTION_MESSAGE_ID_MISMATCH'
+            })
+          }
+          c.search_projection.check()
+          if (norm.normalized_content !== normalizeSearchText(String(canon.content))) {
+            // No content-derived evidence (LOCK-SP-3): fixed tokens only.
+            c.search_projection.fail({
+              entity: MESSAGE_BLOCKS_NORMALIZED_TABLE,
+              entityId: canon.id,
+              fieldPath: 'normalized_content',
+              expected: 'match',
+              actual: 'differ',
+              code: 'SEARCH_PROJECTION_CONTENT_MISMATCH'
+            })
+          }
+          norm = await normalizedCursor.next()
+        } else {
+          c.search_projection.check()
+          c.search_projection.fail({
+            entity: MESSAGE_BLOCKS_NORMALIZED_TABLE,
+            entityId: canon.id,
+            fieldPath: null,
+            expected: 'projection-row',
+            actual: null,
+            code: 'SEARCH_PROJECTION_ROW_MISSING'
+          })
+        }
+        canon = await canonicalCursor.next()
+      }
+      while (norm !== null) {
+        c.search_projection.check()
+        c.search_projection.fail({
+          entity: MESSAGE_BLOCKS_NORMALIZED_TABLE,
+          entityId: norm.block_id,
+          fieldPath: null,
+          expected: 'canonical-source-row',
+          actual: null,
+          code: 'SEARCH_PROJECTION_ROW_UNEXPECTED'
+        })
+        norm = await normalizedCursor.next()
+      }
+
+      // ---- 4. Exact FTS↔normalized multiset parity (LOCK-SP-2/3) ----------
+      // Both projections are streamed in the SAME deterministic order
+      // (block_id, normalized_content under SQLite BINARY collation) and
+      // merged row-by-row with the injective length-prefixed key. The
+      // normalized side is scanned by its block_id primary key (index
+      // keyset, O(log n + chunk) per chunk); the FTS side is streamed from a
+      // single ORDER BY statement (one bounded SQLite temp sort — external
+      // sort, never a quadratic keyset re-scan) via a bounded chunk buffer
+      // with cursor indexing. Duplicates and NUL bytes survive because
+      // equality compares actual row bytes, never a hash.
+      const normalizedParityCursor = this.scanNormalizedProjectionRows(sqlite)
+      const ftsParityCursor = this.scanFtsProjectionRows(sqlite)
+      let projNorm = await normalizedParityCursor.next()
+      let projFts = await ftsParityCursor.next()
+      let normalizedMergeRows = 0
+      let ftsMergeRows = 0
+      let parityFailed = false
+      while (projNorm !== null || projFts !== null) {
+        // Const locals so control-flow analysis can narrow each row. The
+        // loop condition guarantees at least one side is non-null, so inside
+        // each null branch the other side is non-null.
+        const normRow = projNorm
+        const ftsRow = projFts
+        if (normRow === null) {
+          // FTS row has no normalized counterpart (extra in FTS).
+          const extraFts = ftsRow as ProjectionRow
+          c.search_projection.check()
+          c.search_projection.fail({
+            entity: MESSAGE_BLOCKS_FTS_TABLE,
+            entityId: extraFts.block_id,
+            fieldPath: null,
+            expected: 'normalized-row',
+            actual: null,
+            code: 'SEARCH_PROJECTION_ROW_UNEXPECTED'
+          })
+          parityFailed = true
+          ftsMergeRows += 1
+          projFts = await ftsParityCursor.next()
+          continue
+        }
+        if (ftsRow === null) {
+          // Normalized row has no FTS counterpart (missing from FTS).
+          c.search_projection.check()
+          c.search_projection.fail({
+            entity: MESSAGE_BLOCKS_NORMALIZED_TABLE,
+            entityId: normRow.block_id,
+            fieldPath: null,
+            expected: 'fts-row',
+            actual: null,
+            code: 'SEARCH_PROJECTION_ROW_MISSING'
+          })
+          parityFailed = true
+          normalizedMergeRows += 1
+          projNorm = await normalizedParityCursor.next()
+          continue
+        }
+        const cmp = compareProjectionRows(normRow, ftsRow)
+        if (cmp === 0) {
+          c.search_projection.check()
+          normalizedMergeRows += 1
+          ftsMergeRows += 1
+          projNorm = await normalizedParityCursor.next()
+          projFts = await ftsParityCursor.next()
+        } else if (cmp < 0) {
+          c.search_projection.check()
+          c.search_projection.fail({
+            entity: MESSAGE_BLOCKS_NORMALIZED_TABLE,
+            entityId: normRow.block_id,
+            fieldPath: null,
+            expected: 'fts-row',
+            actual: null,
+            code: 'SEARCH_PROJECTION_ROW_MISSING'
+          })
+          parityFailed = true
+          normalizedMergeRows += 1
+          projNorm = await normalizedParityCursor.next()
+        } else {
+          c.search_projection.check()
+          c.search_projection.fail({
+            entity: MESSAGE_BLOCKS_FTS_TABLE,
+            entityId: ftsRow.block_id,
+            fieldPath: null,
+            expected: 'normalized-row',
+            actual: null,
+            code: 'SEARCH_PROJECTION_ROW_UNEXPECTED'
+          })
+          parityFailed = true
+          ftsMergeRows += 1
+          projFts = await ftsParityCursor.next()
+        }
+      }
+      // Exact multiset count parity from the merge itself (belt-and-suspenders
+      // with the COUNT(*) checks above; duplicates change no total).
+      c.search_projection.check()
+      if (normalizedMergeRows !== ftsMergeRows) {
+        c.search_projection.fail({
+          entity: MESSAGE_BLOCKS_FTS_TABLE,
+          entityId: null,
+          fieldPath: null,
+          expected: normalizedMergeRows,
+          actual: ftsMergeRows,
+          code: 'SEARCH_PROJECTION_COUNT_MISMATCH'
+        })
+        parityFailed = true
+      }
+      // Aggregate parity evidence: fixed counts only (LOCK-SP-3/LOCK-PRIV).
+      if (parityFailed) {
+        c.search_projection.check()
+        c.search_projection.fail({
+          entity: MESSAGE_BLOCKS_FTS_TABLE,
+          entityId: null,
+          fieldPath: null,
+          expected: normalizedMergeRows,
+          actual: ftsMergeRows,
+          code: 'SEARCH_PROJECTION_FTS_MISMATCH'
+        })
+      }
+
+      // ---- 5. Fixed synthetic MATCH smoke (LOCK-SP-4) ---------------------
+      c.search_projection.check()
+      try {
+        const rows = sqlite
+          .prepare(`SELECT block_id FROM ${MESSAGE_BLOCKS_FTS_TABLE} WHERE ${MESSAGE_BLOCKS_FTS_TABLE} MATCH ?`)
+          .all(FTS_SMOKE_TOKEN)
+        if (!Array.isArray(rows)) {
+          c.search_projection.fail({
+            entity: MESSAGE_BLOCKS_FTS_TABLE,
+            entityId: null,
+            fieldPath: null,
+            expected: 'MATCH-executed',
+            actual: null,
+            code: 'SEARCH_PROJECTION_SMOKE_FAILED'
+          })
+        }
+      } catch (error) {
+        // LOCK-SP-3: fixed code + safe machine code only. A cooperative
+        // abort/close is NOT a projection failure — rethrow so the run
+        // settles as 'aborted' (LOCK-4303).
+        if (error instanceof VerifierAborted) throw error
+        c.search_projection.fail({
+          entity: MESSAGE_BLOCKS_FTS_TABLE,
+          entityId: null,
+          fieldPath: null,
+          expected: 'MATCH-executed',
+          actual: safeErrorCode(error),
+          code: 'SEARCH_PROJECTION_SMOKE_FAILED'
+        })
+      }
+    } catch (error) {
+      if (error instanceof VerifierAborted) throw error
+      // Bounded single diagnostic for unexpected errors inside the derived
+      // projection (fixed code + safe machine code only, LOCK-SP-3/LOCK-PRIV).
+      c.search_projection.check()
+      c.search_projection.fail({
+        entity: 'candidate_db',
+        entityId: null,
+        fieldPath: null,
+        expected: 'ok',
+        actual: safeErrorCode(error),
+        code: 'SEARCH_PROJECTION_READ_FAILED'
+      })
+    }
+    c.search_projection.complete()
+  }
+
+  /**
+   * Bounded chunked keyset cursor over one ordered id column (LOCK-SP-3):
+   * O(chunkSize) rows in memory at a time, one abort checkpoint per chunk,
+   * deterministic keyset pagination (never rowid-dependent), and O(1)
+   * buffered reads via a cursor index (no `Array.prototype.shift` — no
+   * O(n) queue behavior). Once exhausted it stays exhausted (no repeat
+   * queries).
+   */
+  private scanProjectionRows(
+    sqlite: Database.Database,
+    table: string,
+    columns: string,
+    orderColumn: string,
+    whereClause: string
+  ): { next: () => Promise<Record<string, string> | null> } {
+    const where = whereClause.length > 0 ? `${whereClause} AND ` : 'WHERE '
+    const first = sqlite.prepare(`SELECT ${columns} FROM ${table} ${whereClause} ORDER BY ${orderColumn} LIMIT ?`)
+    const next = sqlite.prepare(
+      `SELECT ${columns} FROM ${table} ${where}${orderColumn} > ? ORDER BY ${orderColumn} LIMIT ?`
+    )
+    let buffer: Record<string, string>[] = []
+    let bufferIndex = 0
+    let lastKey: string | null = null
+    let exhausted = false
+    return {
+      next: async () => {
+        if (bufferIndex >= buffer.length) {
+          if (exhausted) return null
+          await this.checkpoint()
+          buffer =
+            (lastKey === null
+              ? (first.all(this.chunkSize) as Record<string, string>[])
+              : (next.all(lastKey, this.chunkSize) as Record<string, string>[])) ?? []
+          bufferIndex = 0
+          if (buffer.length === 0) {
+            exhausted = true
+            return null
+          }
+          lastKey = buffer[buffer.length - 1][orderColumn]
+        }
+        const row = buffer[bufferIndex]
+        bufferIndex += 1
+        return row
+      }
+    }
+  }
+
+  /**
+   * Bounded chunked keyset cursor over the normalized projection's PRIMARY
+   * KEY (block_id, LOCK-SP-3): index-backed keyset pagination
+   * (O(log n + chunk) per chunk — never quadratic), O(chunkSize) rows in
+   * memory, cursor-index buffering, one abort checkpoint per chunk. The
+   * normalized table's block_id primary key makes `ORDER BY block_id` the
+   * SAME order as the FTS stream's `ORDER BY block_id, normalized_content`.
+   */
+  private scanNormalizedProjectionRows(sqlite: Database.Database): {
+    next: () => Promise<ProjectionRow | null>
+  } {
+    const first = sqlite.prepare(
+      `SELECT rowid, block_id, normalized_content FROM ${MESSAGE_BLOCKS_NORMALIZED_TABLE} ORDER BY block_id LIMIT ?`
+    )
+    const next = sqlite.prepare(
+      `SELECT rowid, block_id, normalized_content FROM ${MESSAGE_BLOCKS_NORMALIZED_TABLE} WHERE block_id > ? ORDER BY block_id LIMIT ?`
+    )
+    let buffer: ProjectionRow[] = []
+    let bufferIndex = 0
+    let lastBlockId: string | null = null
+    let exhausted = false
+    return {
+      next: async () => {
+        if (bufferIndex >= buffer.length) {
+          if (exhausted) return null
+          await this.checkpoint()
+          buffer =
+            (lastBlockId === null
+              ? (first.all(this.chunkSize) as ProjectionRow[])
+              : (next.all(lastBlockId, this.chunkSize) as ProjectionRow[])) ?? []
+          bufferIndex = 0
+          if (buffer.length === 0) {
+            exhausted = true
+            return null
+          }
+          lastBlockId = buffer[buffer.length - 1].block_id
+        }
+        const row = buffer[bufferIndex]
+        bufferIndex += 1
+        return row
+      }
+    }
+  }
+
+  /**
+   * Bounded chunked cursor over the FTS5 virtual table in the SAME
+   * deterministic order as the normalized stream (LOCK-SP-2/3). FTS5 has no
+   * usable index on the UNINDEXED block_id column, so a single ORDER BY
+   * statement is streamed row-by-row via `iterate()`; SQLite performs one
+   * bounded external sort (temp b-tree — the spec-permitted external/temp
+   * sort; never a quadratic keyset re-scan). Rows are consumed in bounded
+   * chunks with cursor-index buffering and one abort checkpoint per chunk.
+   */
+  private scanFtsProjectionRows(sqlite: Database.Database): {
+    next: () => Promise<ProjectionRow | null>
+  } {
+    const statement = sqlite.prepare(
+      `SELECT rowid, block_id, normalized_content FROM ${MESSAGE_BLOCKS_FTS_TABLE} ORDER BY block_id, normalized_content, rowid`
+    )
+    const iterator = statement.iterate() as IterableIterator<ProjectionRow>
+    let buffer: ProjectionRow[] = []
+    let bufferIndex = 0
+    let exhausted = false
+    return {
+      next: async () => {
+        if (bufferIndex >= buffer.length) {
+          if (exhausted) return null
+          await this.checkpoint()
+          const chunk: ProjectionRow[] = []
+          for (let i = 0; i < this.chunkSize; i++) {
+            const step = iterator.next()
+            if (step.done === true) {
+              exhausted = true
+              break
+            }
+            chunk.push(step.value)
+          }
+          buffer = chunk
+          bufferIndex = 0
+          if (buffer.length === 0) return null
+        }
+        const row = buffer[bufferIndex]
+        bufferIndex += 1
+        return row
+      }
+    }
   }
 }
 

@@ -5,7 +5,7 @@
  * its finalized manifest is verified after sealing (connection closed).
  *
  * Covers:
- * - Pristine candidate passes all 13 dimensions (LOCK-4304).
+ * - Pristine candidate passes all 14 dimensions (LOCK-4304).
  * - Corruption matrix: missing/extra ID, count, field/overflow/structured
  *   JSON mutation, message order, owner relation, membership, file ref,
  *   FK violation, integrity/open/query failure, sample-read failure.
@@ -30,19 +30,33 @@ vi.mock('@main/config', () => ({ DATA_PATH: '/mock/data' }))
 
 import type { JsonObject } from '@shared/chatDb'
 import type { ReadPageResponse } from '@shared/chatImport/types'
+import { normalizeSearchText } from '@shared/searchTextNormalization'
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 
-import { registerChatDbNormalize, runMigrations } from '../../../chatDb/migration'
+import {
+  MESSAGE_BLOCKS_FTS_TABLE,
+  MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER,
+  MESSAGE_BLOCKS_NORMALIZED_TABLE,
+  registerChatDbNormalize,
+  runMigrations
+} from '../../../chatDb/migration'
 import * as schema from '../../../chatDb/schema'
 import { wireToMessage } from '../../../chatDb/wireAdapters'
+import { CandidateFtsProjection } from '../../ftsProjection'
+import { computeMessageTargetId } from '../../identity/messageIdentity'
 import { createImportDataPlane } from '../../importDataPlane'
 import type { CandidateVerifierOptions } from '../candidateVerifier'
-import { createCandidateVerifier } from '../candidateVerifier'
+import { createCandidateVerifier, MAX_SEARCH_PROJECTION_CHUNK_SIZE, normalizeChunkSize } from '../candidateVerifier'
 import { canonicalDigest } from '../canonicalJson'
 import type { SourceVerificationManifest } from '../sourceManifest'
 import type { CandidateVerificationReport, VerificationDimension } from '../verificationContracts'
 import { VERIFICATION_DIMENSIONS } from '../verificationContracts'
+
+/** Deterministic L2 target ID for the source tuple (LOCK-MID-1/2). */
+function targetId(outerTopicId: string, legacyMessageId: string): string {
+  return computeMessageTargetId(outerTopicId, legacyMessageId)
+}
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -231,13 +245,13 @@ describe('CandidateVerifier', () => {
   // Happy path
   // -------------------------------------------------------------------------
 
-  it('passes all 13 dimensions for a pristine sealed candidate', async () => {
+  it('passes all 14 dimensions for a pristine sealed candidate', async () => {
     const report = await verify(dbPath, manifest)
 
     expect(report.status).toBe('pass')
     expect(report.fatal).toBeNull()
     expect(report.dimensions.map((d) => d.dimension)).toEqual([...VERIFICATION_DIMENSIONS])
-    expect(report.dimensions).toHaveLength(13)
+    expect(report.dimensions).toHaveLength(14)
     for (const result of report.dimensions) {
       expect(result.status).toBe('pass')
       expect(result.diagnostics).toEqual([])
@@ -248,6 +262,11 @@ describe('CandidateVerifier', () => {
     expect(dim(report, 'table_counts').checkedCount).toBe(6)
     expect(dim(report, 'structured_json').checkedCount).toBe(4 + 5)
     expect(dim(report, 'sample_reads').checkedCount).toBeGreaterThan(0)
+    // LOCK-SP-2/3/4: the derived search projection was fully scanned on the
+    // pristine (trigger-maintained) candidate: 6 objects + 2 count pairs +
+    // 3 canonical rows × 2 (message_id + content) + 3 FTS rows + 1 FTS
+    // fingerprint compare + 1 MATCH smoke.
+    expect(dim(report, 'search_projection').checkedCount).toBe(6 + 2 + 3 * 2 + 3 + 1 + 1)
     // Candidate file untouched and deletable (handle closed).
     expect(realFs.existsSync(dbPath)).toBe(true)
   })
@@ -260,17 +279,87 @@ describe('CandidateVerifier', () => {
   })
 
   // -------------------------------------------------------------------------
+  // L2 imported-trash retention marker evidence (LOCK-TRASH-3/4/5)
+  // -------------------------------------------------------------------------
+
+  it('marker-bearing candidate passes all 14 dimensions with the marker in manifest + record digests', async () => {
+    const baseline = '2026-08-04T00:00:00.000Z'
+    const markerDbPath = realPath.join(tempDir, 'marker-chat.db')
+    const markerSqlite = new Database(markerDbPath)
+    markerSqlite.pragma('journal_mode = WAL')
+    markerSqlite.pragma('foreign_keys = ON')
+    const markerDb = drizzle(markerSqlite, { schema })
+    runMigrations(markerDb, markerSqlite)
+
+    const plane = createImportDataPlane(markerDb, { l2TrashRetentionBaseline: baseline })
+    plane.processPage(
+      page('topics', [
+        srcTopic('t-del', [srcMessage('m-1', 't-del', [])], { deletedAt: '2020-01-01T00:00:00.000Z' }),
+        srcTopic('t-active', [srcMessage('m-2', 't-active', [])])
+      ])
+    )
+    plane.finalize()
+    const markerManifest = plane.getSourceVerificationManifest()
+    markerSqlite.close()
+
+    // LOCK-TRASH-3/5: the manifest overflow digest for the soft-deleted
+    // topic is the digest of the marker-bearing overflow object; the active
+    // topic carries an empty overflow.
+    expect(markerManifest.topics.entries['t-del'].overflowDigest).toBe(
+      canonicalDigest({ l2TrashRetentionStartedAt: baseline })
+    )
+    expect(markerManifest.topics.entries['t-active'].overflowDigest).toBe(canonicalDigest({}))
+
+    const report = await verify(markerDbPath, markerManifest)
+    expect(report.status).toBe('pass')
+    for (const result of report.dimensions) {
+      expect(result.status).toBe('pass')
+    }
+  })
+
+  it('fails the overflow dimension when the importer marker is mutated in the candidate DB', async () => {
+    const baseline = '2026-08-04T00:00:00.000Z'
+    const markerDbPath = realPath.join(tempDir, 'marker-mutated-chat.db')
+    const markerSqlite = new Database(markerDbPath)
+    markerSqlite.pragma('journal_mode = WAL')
+    markerSqlite.pragma('foreign_keys = ON')
+    const markerDb = drizzle(markerSqlite, { schema })
+    runMigrations(markerDb, markerSqlite)
+
+    const plane = createImportDataPlane(markerDb, { l2TrashRetentionBaseline: baseline })
+    plane.processPage(
+      page('topics', [srcTopic('t-del', [srcMessage('m-1', 't-del', [])], { deletedAt: '2020-01-01T00:00:00.000Z' })])
+    )
+    plane.finalize()
+    const markerManifest = plane.getSourceVerificationManifest()
+    markerSqlite.close()
+
+    // Tamper with the marker in the target extra column.
+    corrupt(markerDbPath, (db) =>
+      db
+        .prepare(`UPDATE topics SET extra = ? WHERE id = 't-del'`)
+        .run(JSON.stringify({ l2TrashRetentionStartedAt: '2099-01-01T00:00:00.000Z' }))
+    )
+
+    const report = await verify(markerDbPath, markerManifest)
+    expect(report.status).toBe('fail')
+    const overflow = dim(report, 'overflow')
+    expect(overflow.status).toBe('fail')
+    expect(overflow.diagnostics.some((d) => d.entityId === 't-del' && d.code === 'OVERFLOW_DIGEST_MISMATCH')).toBe(true)
+  })
+
+  // -------------------------------------------------------------------------
   // Corruption matrix — each injected corruption fails its intended dimension
   // -------------------------------------------------------------------------
 
   it('fails id_sets + table_counts on a missing row', async () => {
-    corrupt(dbPath, (db) => db.prepare(`DELETE FROM messages WHERE id = 'm-4'`).run())
+    corrupt(dbPath, (db) => db.prepare(`DELETE FROM messages WHERE id = ?`).run(targetId('t-3', 'm-4')))
     const report = await verify(dbPath, manifest)
 
     expect(report.status).toBe('fail')
     const ids = dim(report, 'id_sets')
     expect(ids.status).toBe('fail')
-    expect(ids.diagnostics.some((d) => d.code === 'MISSING_ENTITY' && d.entityId === 'm-4')).toBe(true)
+    expect(ids.diagnostics.some((d) => d.code === 'MISSING_ENTITY' && d.entityId === targetId('t-3', 'm-4'))).toBe(true)
     expect(dim(report, 'table_counts').status).toBe('fail')
   })
 
@@ -285,12 +374,16 @@ describe('CandidateVerifier', () => {
   })
 
   it('fails field_digests on a column mutation without touching structured/overflow', async () => {
-    corrupt(dbPath, (db) => db.prepare(`UPDATE messages SET role = 'assistant' WHERE id = 'm-2'`).run())
+    corrupt(dbPath, (db) =>
+      db.prepare(`UPDATE messages SET role = 'assistant' WHERE id = ?`).run(targetId('t-1', 'm-2'))
+    )
     const report = await verify(dbPath, manifest)
 
     const digests = dim(report, 'field_digests')
     expect(digests.status).toBe('fail')
-    expect(digests.diagnostics.some((d) => d.entityId === 'm-2' && d.code === 'FIELD_DIGEST_MISMATCH')).toBe(true)
+    expect(
+      digests.diagnostics.some((d) => d.entityId === targetId('t-1', 'm-2') && d.code === 'FIELD_DIGEST_MISMATCH')
+    ).toBe(true)
     expect(dim(report, 'overflow').status).toBe('pass')
     expect(dim(report, 'structured_json').status).toBe('pass')
     expect(dim(report, 'order').status).toBe('pass')
@@ -308,10 +401,10 @@ describe('CandidateVerifier', () => {
 
   it('fails structured_json on a structured model mutation', async () => {
     corrupt(dbPath, (db) => {
-      const row = db.prepare(`SELECT extra FROM messages WHERE id = 'm-1'`).get() as { extra: string }
+      const row = db.prepare(`SELECT extra FROM messages WHERE id = ?`).get(targetId('t-1', 'm-1')) as { extra: string }
       const extra = JSON.parse(row.extra)
       extra.model = { ...extra.model, id: 'tampered-model' }
-      db.prepare(`UPDATE messages SET extra = ? WHERE id = 'm-1'`).run(JSON.stringify(extra))
+      db.prepare(`UPDATE messages SET extra = ? WHERE id = ?`).run(JSON.stringify(extra), targetId('t-1', 'm-1'))
     })
     const report = await verify(dbPath, manifest)
 
@@ -319,7 +412,10 @@ describe('CandidateVerifier', () => {
     expect(structured.status).toBe('fail')
     expect(
       structured.diagnostics.some(
-        (d) => d.entityId === 'm-1' && d.fieldPath === 'overflow.model' && d.code === 'STRUCTURED_JSON_MISMATCH'
+        (d) =>
+          d.entityId === targetId('t-1', 'm-1') &&
+          d.fieldPath === 'overflow.model' &&
+          d.code === 'STRUCTURED_JSON_MISMATCH'
       )
     ).toBe(true)
   })
@@ -344,8 +440,8 @@ describe('CandidateVerifier', () => {
 
   it('fails order on a message sort_order swap', async () => {
     corrupt(dbPath, (db) => {
-      db.prepare(`UPDATE messages SET sort_order = 1 WHERE id = 'm-1'`).run()
-      db.prepare(`UPDATE messages SET sort_order = 0 WHERE id = 'm-2'`).run()
+      db.prepare(`UPDATE messages SET sort_order = 1 WHERE id = ?`).run(targetId('t-1', 'm-1'))
+      db.prepare(`UPDATE messages SET sort_order = 0 WHERE id = ?`).run(targetId('t-1', 'm-2'))
     })
     const report = await verify(dbPath, manifest)
 
@@ -380,7 +476,9 @@ describe('CandidateVerifier', () => {
   })
 
   it('fails relations on an owner reassignment', async () => {
-    corrupt(dbPath, (db) => db.prepare(`UPDATE message_blocks SET message_id = 'm-2' WHERE id = 'b-1'`).run())
+    corrupt(dbPath, (db) =>
+      db.prepare(`UPDATE message_blocks SET message_id = ? WHERE id = 'b-1'`).run(targetId('t-1', 'm-2'))
+    )
     const report = await verify(dbPath, manifest)
 
     const relations = dim(report, 'relations')
@@ -396,9 +494,9 @@ describe('CandidateVerifier', () => {
 
   it('fails segments on membership order corruption', async () => {
     corrupt(dbPath, (db) => {
-      db.prepare(
-        `UPDATE topic_segment_messages SET sort_order = 2 WHERE segment_id = 's-1' AND message_id = 'm-2'`
-      ).run()
+      db.prepare(`UPDATE topic_segment_messages SET sort_order = 2 WHERE segment_id = 's-1' AND message_id = ?`).run(
+        targetId('t-1', 'm-2')
+      )
     })
     const report = await verify(dbPath, manifest)
 
@@ -417,12 +515,16 @@ describe('CandidateVerifier', () => {
   })
 
   it('fails fk_references and foreign_key_check on a dangling FK', async () => {
-    corrupt(dbPath, (db) => db.prepare(`UPDATE messages SET topic_id = 'ghost' WHERE id = 'm-3'`).run())
+    corrupt(dbPath, (db) =>
+      db.prepare(`UPDATE messages SET topic_id = 'ghost' WHERE id = ?`).run(targetId('t-2', 'm-3'))
+    )
     const report = await verify(dbPath, manifest)
 
     const fk = dim(report, 'fk_references')
     expect(fk.status).toBe('fail')
-    expect(fk.diagnostics.some((d) => d.entityId === 'm-3' && d.code === 'FK_REFERENCE_BROKEN')).toBe(true)
+    expect(fk.diagnostics.some((d) => d.entityId === targetId('t-2', 'm-3') && d.code === 'FK_REFERENCE_BROKEN')).toBe(
+      true
+    )
     const pragma = dim(report, 'foreign_key_check')
     expect(pragma.status).toBe('fail')
     expect(pragma.diagnostics.some((d) => d.code === 'FOREIGN_KEY_CHECK_VIOLATION')).toBe(true)
@@ -467,7 +569,9 @@ describe('CandidateVerifier', () => {
   })
 
   it('sanitizes malformed extra JSON into a fatal without leaking the raw value', async () => {
-    corrupt(dbPath, (db) => db.prepare(`UPDATE messages SET extra = '{invalid-json' WHERE id = 'm-1'`).run())
+    corrupt(dbPath, (db) =>
+      db.prepare(`UPDATE messages SET extra = '{invalid-json' WHERE id = ?`).run(targetId('t-1', 'm-1'))
+    )
     const report = await verify(dbPath, manifest)
 
     expect(report.status).toBe('fail')
@@ -529,7 +633,7 @@ describe('CandidateVerifier', () => {
     expect(report.status).toBe('fail')
     expect(report.fatal).not.toBeNull()
     expect(report.fatal!.code).toBe('CANDIDATE_OPEN_FAILED')
-    expect(report.dimensions).toHaveLength(13)
+    expect(report.dimensions).toHaveLength(14)
     for (const result of report.dimensions) expect(result.status).toBe('skipped')
     expect(JSON.stringify(report)).not.toContain(tempDir)
     expect(verifier.getState()).toBe('done')
@@ -542,7 +646,7 @@ describe('CandidateVerifier', () => {
     expect(report.status).toBe('fail')
     expect(report.fatal).not.toBeNull()
     expect(report.fatal!.code).toBe('CANDIDATE_QUERY_FAILED')
-    expect(report.dimensions).toHaveLength(13)
+    expect(report.dimensions).toHaveLength(14)
     expect(JSON.stringify(report)).not.toContain('SELECT')
   })
 
@@ -576,7 +680,7 @@ describe('CandidateVerifier', () => {
 
     expect(report.status).toBe('aborted')
     expect(report.fatal).toBeNull()
-    expect(report.dimensions).toHaveLength(13)
+    expect(report.dimensions).toHaveLength(14)
     for (const result of report.dimensions) expect(result.status).toBe('skipped')
     expect(checkpoints).toBe(1)
   })
@@ -698,40 +802,46 @@ describe('LOCK-OWN-1 outer-topic canonicalization (full plane+manifest+verify)',
   })
 
   it('records canonical outer topicId in manifest evidence and digests, stores it in the candidate, and verifies clean', async () => {
-    // --- Source manifest evidence is canonical (LOCK-OWN-1/4301) ---
-    expect(manifest.messages.entries['m-1'].topicId).toBe('t-1')
-    expect(manifest.messages.entries['m-2'].topicId).toBe('t-1')
-    expect(manifest.messages.entries['m-3'].topicId).toBe('t-2')
+    // --- Source manifest evidence is canonical (LOCK-OWN-1/4301, MID-1) ---
+    expect(manifest.messages.entries[targetId('t-1', 'm-1')].topicId).toBe('t-1')
+    expect(manifest.messages.entries[targetId('t-1', 'm-2')].topicId).toBe('t-1')
+    expect(manifest.messages.entries[targetId('t-2', 'm-3')].topicId).toBe('t-2')
 
     // The digest is framed from the canonical projection: wire projection
-    // with topicId overridden to the outer topic and sortOrder = array index.
+    // with target id, topicId overridden to the outer topic and sortOrder =
+    // array index.
     const expectedM1 = wireToMessage(STALE_MSG_1)
+    expectedM1.id = targetId('t-1', 'm-1')
     expectedM1.topicId = 't-1'
     expectedM1.sortOrder = 0
-    expect(manifest.messages.entries['m-1'].digest).toBe(canonicalDigest({ ...expectedM1 }))
-    expect(manifest.messages.entries['m-1'].overflowDigest).toBe(canonicalDigest(expectedM1.overflow))
+    expect(manifest.messages.entries[expectedM1.id].digest).toBe(canonicalDigest({ ...expectedM1 }))
+    expect(manifest.messages.entries[expectedM1.id].overflowDigest).toBe(canonicalDigest(expectedM1.overflow))
     const expectedM2 = wireToMessage(STALE_MSG_2)
+    expectedM2.id = targetId('t-1', 'm-2')
     expectedM2.topicId = 't-1'
     expectedM2.sortOrder = 1
-    expect(manifest.messages.entries['m-2'].digest).toBe(canonicalDigest({ ...expectedM2 }))
+    expect(manifest.messages.entries[expectedM2.id].digest).toBe(canonicalDigest({ ...expectedM2 }))
     const expectedM3 = wireToMessage(MATCHING_MSG_3)
+    expectedM3.id = targetId('t-2', 'm-3')
     expectedM3.sortOrder = 0
-    expect(manifest.messages.entries['m-3'].digest).toBe(canonicalDigest({ ...expectedM3 }))
+    expect(manifest.messages.entries[expectedM3.id].digest).toBe(canonicalDigest({ ...expectedM3 }))
 
-    // --- Candidate write stores the authoritative outer topic ---
+    // --- Candidate write stores the authoritative outer topic + target ids ---
     const readonly = new Database(dbPath, { readonly: true, fileMustExist: true })
     const rows = readonly.prepare('SELECT id, topic_id FROM messages ORDER BY id').all() as Array<{
       id: string
       topic_id: string
     }>
-    expect(rows).toEqual([
-      { id: 'm-1', topic_id: 't-1' },
-      { id: 'm-2', topic_id: 't-1' },
-      { id: 'm-3', topic_id: 't-2' }
-    ])
+    expect(rows).toEqual(
+      [
+        { id: targetId('t-1', 'm-1'), topic_id: 't-1' },
+        { id: targetId('t-1', 'm-2'), topic_id: 't-1' },
+        { id: targetId('t-2', 'm-3'), topic_id: 't-2' }
+      ].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    )
     readonly.close()
 
-    // --- Verifier passes ALL 13 dimensions from the same canonical staged data ---
+    // --- Verifier passes ALL 14 dimensions from the same canonical staged data ---
     const report = await verify(dbPath, manifest)
     expect(report.status).toBe('pass')
     expect(report.fatal).toBeNull()
@@ -748,7 +858,7 @@ describe('LOCK-OWN-1 outer-topic canonicalization (full plane+manifest+verify)',
 //
 // Source rows 125 (120 referenced + 5 unreachable orphans), imported 120,
 // skipped 5. The manifest is reachable-only (skipped rows are never staged),
-// the candidate holds exactly the 120 reachable blocks, and all 13 verifier
+// the candidate holds exactly the 120 reachable blocks, and all 14 verifier
 // dimensions pass on the same reachable-only projection.
 // ---------------------------------------------------------------------------
 
@@ -807,7 +917,7 @@ describe('LOCK-BLOCK-1 unreachable orphan block canonicalization (full plane+man
     expect(realFs.existsSync(tempDir)).toBe(false)
   })
 
-  it('keeps the manifest reachable-only, stores exactly 120 blocks in the candidate, and verifies all 13 dimensions', async () => {
+  it('keeps the manifest reachable-only, stores exactly 120 blocks in the candidate, and verifies all 14 dimensions', async () => {
     // --- Source manifest evidence is reachable-only (LOCK-BLOCK-1) ---
     expect(manifest.blocks.count).toBe(120)
     expect(manifest.fileReferences.count).toBe(0) // orphan file payloads ignored
@@ -828,7 +938,7 @@ describe('LOCK-BLOCK-1 unreachable orphan block canonicalization (full plane+man
     expect(readonly.prepare('SELECT count(*) AS c FROM file_references').get()).toEqual({ c: 0 })
     readonly.close()
 
-    // --- Verifier passes ALL 13 dimensions from the same reachable-only data ---
+    // --- Verifier passes ALL 14 dimensions from the same reachable-only data ---
     const report = await verify(dbPath, manifest)
     expect(report.status).toBe('pass')
     expect(report.fatal).toBeNull()
@@ -836,5 +946,1017 @@ describe('LOCK-BLOCK-1 unreachable orphan block canonicalization (full plane+man
       expect(result.status).toBe('pass')
       expect(result.diagnostics).toEqual([])
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LOCK-VERIFY-1 + LOCK-REF-1 + LOCK-ASK-1 + LOCK-PRIV-1: all-occurrence
+// identity through the FULL plane → manifest → sealed candidate → verifier path
+//
+// One real better-sqlite3 session exercises the complete canonical-ID
+// closure the E2E seeds stay too simple to cover:
+// - cross-topic REUSED legacy id ('m-shared' in t-1 and t-2) → distinct
+//   targets, every occurrence mapped, no legacy id retained (LOCK-MID-1/2);
+// - same-topic askId rewritten to the occurrence target (LOCK-ASK-1);
+// - a preserved DANGLING askId carrying a synthetic privacy sentinel
+//   (LOCK-ASK-1/2 + LOCK-PRIV-1);
+// - target block.messageId / segment memberships with UNCHANGED block
+//   primary IDs and file-reference blockIds (LOCK-REF-1);
+// - all 14 verifier dimensions pass on the same projection, and the
+//   serialized report never leaks the raw mapped/preserved askId sentinels.
+// ---------------------------------------------------------------------------
+
+describe('LOCK-VERIFY-1 all-occurrence identity (full plane+manifest+verify)', () => {
+  /** Synthetic privacy sentinel — never a real artifact value (LOCK-PRIV-1). */
+  const PRIV_SENTINEL = 'zz-priv-sentinel-9f3a-77c1'
+
+  let tempDir: string
+  let dbPath: string
+  let manifest: SourceVerificationManifest
+
+  beforeEach(() => {
+    tempDir = makeTempDir()
+    dbPath = realPath.join(tempDir, 'chat.db')
+    const sqlite = new Database(dbPath)
+    sqlite.pragma('journal_mode = WAL')
+    sqlite.pragma('foreign_keys = ON')
+    const db = drizzle(sqlite, { schema })
+    runMigrations(db, sqlite)
+
+    const plane = createImportDataPlane(db)
+    // t-1: same-topic askId mapping (m-user ← m-asst-1/m-asst-2) + the FIRST
+    // occurrence of the reused legacy id 'm-shared'.
+    plane.processPage(
+      page('topics', [
+        srcTopic('t-1', [
+          srcMessage('m-user', 't-1', ['b-user']),
+          srcMessage('m-asst-1', 't-1', [], { role: 'assistant', askId: 'm-user' }),
+          srcMessage('m-asst-2', 't-1', [], { role: 'assistant', askId: 'm-user' }),
+          srcMessage('m-shared', 't-1', [])
+        ]),
+        // t-2: the SECOND occurrence of 'm-shared' (distinct target) + a
+        // preserved dangling askId carrying the synthetic privacy sentinel.
+        srcTopic('t-2', [
+          srcMessage('m-shared', 't-2', ['b-shared-t2', 'b-file']),
+          srcMessage('m-dangle', 't-2', [], { role: 'assistant', askId: PRIV_SENTINEL })
+        ])
+      ])
+    )
+    plane.processPage(
+      page('message_blocks', [
+        srcBlock('b-user', 'm-user'),
+        srcBlock('b-shared-t2', 'm-shared'),
+        srcBlock('b-file', 'm-shared', { type: 'file', file: FILE_META as unknown as JsonObject['x'] })
+      ])
+    )
+    // Memberships reference the reused legacy id in BOTH topics — each must
+    // resolve to its own same-topic target (LOCK-REF-1).
+    plane.processPage(
+      page('topic_segments', [
+        srcSegment('s-1', 't-1', ['m-user', 'm-shared', 'm-asst-1']),
+        srcSegment('s-2', 't-2', ['m-shared', 'm-dangle'])
+      ])
+    )
+    plane.processPage(page('files', [{ id: 'file-1' } as JsonObject]))
+    plane.finalize()
+
+    manifest = plane.getSourceVerificationManifest()
+    sqlite.close() // sealed — the verifier reopens readonly
+  })
+
+  afterEach(() => {
+    realFs.rmSync(tempDir, { recursive: true, force: true })
+    expect(realFs.existsSync(tempDir)).toBe(false)
+  })
+
+  it('maps every occurrence, rewrites askId/refs to targets, keeps block/file ids, and passes all 14 dimensions', async () => {
+    // --- Manifest evidence: all 6 occurrences mapped, reused id distinct ---
+    expect(manifest.messages.count).toBe(6)
+    expect(manifest.messages.entries[targetId('t-1', 'm-shared')].topicId).toBe('t-1')
+    expect(manifest.messages.entries[targetId('t-2', 'm-shared')].topicId).toBe('t-2')
+    expect(manifest.messages.entries[targetId('t-1', 'm-user')].topicId).toBe('t-1')
+
+    // The same-topic askId is rewritten to the occurrence target inside the
+    // manifest digest (LOCK-ASK-1/4301).
+    const expectedAsst = wireToMessage(srcMessage('m-asst-2', 't-1', [], { role: 'assistant', askId: 'm-user' }))
+    expectedAsst.id = targetId('t-1', 'm-asst-2')
+    expectedAsst.topicId = 't-1'
+    expectedAsst.sortOrder = 2
+    expectedAsst.askId = targetId('t-1', 'm-user')
+    expect(manifest.messages.entries[expectedAsst.id].digest).toBe(canonicalDigest({ ...expectedAsst }))
+
+    // Block ownership evidence resolves through the EMBEDDED owner to the
+    // target — including the reused legacy id in t-2 (LOCK-REF-1).
+    expect(manifest.blocks.entries['b-user'].messageId).toBe(targetId('t-1', 'm-user'))
+    expect(manifest.blocks.entries['b-shared-t2'].messageId).toBe(targetId('t-2', 'm-shared'))
+    expect(manifest.blocks.entries['b-file'].messageId).toBe(targetId('t-2', 'm-shared'))
+    // File-reference evidence keeps the SOURCE block id (LOCK-REF-1). The
+    // evidence is keyed by the derived reference id `fr-<blockId>-<fileId>`;
+    // the fileId itself lives in the digest and is asserted on the row below.
+    expect(manifest.fileReferences.entries['fr-b-file-file-1'].blockId).toBe('b-file')
+
+    // Membership evidence: same-topic resolution per segment (LOCK-REF-1).
+    expect(manifest.memberships.bySegment['s-1']).toEqual([
+      targetId('t-1', 'm-user'),
+      targetId('t-1', 'm-shared'),
+      targetId('t-1', 'm-asst-1')
+    ])
+    expect(manifest.memberships.bySegment['s-2']).toEqual([targetId('t-2', 'm-shared'), targetId('t-2', 'm-dangle')])
+
+    // --- Candidate rows: target ids everywhere, block/file primary ids kept ---
+    const readonly = new Database(dbPath, { readonly: true, fileMustExist: true })
+    const messages = readonly.prepare('SELECT id, topic_id, ask_id FROM messages ORDER BY id').all() as Array<{
+      id: string
+      topic_id: string
+      ask_id: string | null
+    }>
+    expect(messages).toHaveLength(6)
+    const ids = new Set(messages.map((m) => m.id))
+    expect(ids).toEqual(
+      new Set([
+        targetId('t-1', 'm-user'),
+        targetId('t-1', 'm-asst-1'),
+        targetId('t-1', 'm-asst-2'),
+        targetId('t-1', 'm-shared'),
+        targetId('t-2', 'm-shared'),
+        targetId('t-2', 'm-dangle')
+      ])
+    )
+    expect(ids.size).toBe(6)
+    // No occurrence retains its legacy id (LOCK-MID-1).
+    expect(messages.some((m) => m.id === 'm-user' || m.id === 'm-shared')).toBe(false)
+    const askIdById = new Map(messages.map((m) => [m.id, m.ask_id]))
+    expect(askIdById.get(targetId('t-1', 'm-asst-1'))).toBe(targetId('t-1', 'm-user'))
+    expect(askIdById.get(targetId('t-1', 'm-asst-2'))).toBe(targetId('t-1', 'm-user'))
+    expect(askIdById.get(targetId('t-2', 'm-dangle'))).toBe(PRIV_SENTINEL) // preserved verbatim (LOCK-ASK-1)
+
+    const blocks = readonly.prepare('SELECT id, message_id FROM message_blocks ORDER BY id').all() as Array<{
+      id: string
+      message_id: string
+    }>
+    expect(blocks).toEqual([
+      { id: 'b-file', message_id: targetId('t-2', 'm-shared') },
+      { id: 'b-shared-t2', message_id: targetId('t-2', 'm-shared') },
+      { id: 'b-user', message_id: targetId('t-1', 'm-user') }
+    ])
+    const refs = readonly.prepare('SELECT block_id, file_id FROM file_references ORDER BY block_id').all()
+    expect(refs).toEqual([{ block_id: 'b-file', file_id: 'file-1' }])
+    const memberships = readonly
+      .prepare('SELECT segment_id, message_id FROM topic_segment_messages ORDER BY segment_id, sort_order')
+      .all() as Array<{ segment_id: string; message_id: string }>
+    expect(memberships).toEqual([
+      { segment_id: 's-1', message_id: targetId('t-1', 'm-user') },
+      { segment_id: 's-1', message_id: targetId('t-1', 'm-shared') },
+      { segment_id: 's-1', message_id: targetId('t-1', 'm-asst-1') },
+      { segment_id: 's-2', message_id: targetId('t-2', 'm-shared') },
+      { segment_id: 's-2', message_id: targetId('t-2', 'm-dangle') }
+    ])
+    readonly.close()
+
+    // --- Verifier passes ALL 14 dimensions on the same projection ---
+    const report = await verify(dbPath, manifest)
+    expect(report.status).toBe('pass')
+    expect(report.fatal).toBeNull()
+    for (const result of report.dimensions) {
+      expect(result.status).toBe('pass')
+      expect(result.diagnostics).toEqual([])
+    }
+    // LOCK-PRIV-1: even on the pristine pass, the serialized report never
+    // carries the raw preserved sentinel NOR the raw mapped legacy value.
+    const serialized = JSON.stringify(report)
+    expect(serialized).not.toContain(PRIV_SENTINEL)
+    expect(serialized).not.toContain('m-user')
+  })
+
+  it('omits raw mapped/preserved askId sentinels from serialized diagnostics on corruption (LOCK-PRIV-1)', async () => {
+    // Force field_digests to fail on the message that HOLDS the preserved
+    // sentinel (the only place a raw askId value could ever surface). The
+    // diagnostics must report the TARGET id and digests only.
+    corrupt(dbPath, (db) =>
+      db.prepare(`UPDATE messages SET role = 'user' WHERE id = ?`).run(targetId('t-2', 'm-dangle'))
+    )
+    const report = await verify(dbPath, manifest)
+
+    expect(report.status).toBe('fail')
+    const digests = dim(report, 'field_digests')
+    expect(digests.status).toBe('fail')
+    expect(digests.diagnostics.some((d) => d.entityId === targetId('t-2', 'm-dangle'))).toBe(true)
+
+    // The serialized diagnostics never leak the raw sentinel values
+    // (LOCK-PRIV-1): the preserved dangling value and the mapped raw legacy
+    // value must be absent from the entire report.
+    const serialized = JSON.stringify(report)
+    expect(serialized).not.toContain(PRIV_SENTINEL)
+    expect(serialized).not.toContain('m-user')
+    expect(serialized).not.toContain(tempDir)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LOCK-LB-6: bounded large message-block compatibility through the FULL
+// plane → manifest → sealed candidate → verifier path.
+//
+// One real better-sqlite3 session proves a reachable block carrying a
+// ~2.67 MiB nested string (above the generic 1 MiB cap, inside the named
+// block profile) completes the whole pipeline and verifies clean across all
+// 14 dimensions, while a large unreachable orphan produces no manifest
+// evidence, no candidate row, and never reaches the verifier.
+// ---------------------------------------------------------------------------
+
+describe('LOCK-LB-6 large block full plane+manifest+verify', () => {
+  const BIG_CONTENT = 'x'.repeat(2 * 1024 * 1024 + 700_000) // ~2.67 MiB (artifact mirror)
+
+  let tempDir: string
+  let dbPath: string
+  let manifest: SourceVerificationManifest
+
+  beforeEach(() => {
+    tempDir = makeTempDir()
+    dbPath = realPath.join(tempDir, 'chat.db')
+    const sqlite = new Database(dbPath)
+    sqlite.pragma('journal_mode = WAL')
+    sqlite.pragma('foreign_keys = ON')
+    const db = drizzle(sqlite, { schema })
+    runMigrations(db, sqlite)
+
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', ['b-big'])])]))
+    plane.processPage(
+      page('message_blocks', [
+        srcBlock('b-big', 'm-1', { content: BIG_CONTENT }),
+        // Large unreachable orphan: skipped, never staged/verified.
+        srcBlock('b-orphan-large', 'm-dead-large', { content: 'y'.repeat(2 * 1024 * 1024) })
+      ])
+    )
+    plane.finalize()
+
+    manifest = plane.getSourceVerificationManifest()
+    sqlite.close() // sealed — the verifier reopens readonly
+  })
+
+  afterEach(() => {
+    realFs.rmSync(tempDir, { recursive: true, force: true })
+    expect(realFs.existsSync(tempDir)).toBe(false)
+  })
+
+  it('keeps the manifest reachable-only, stores the large block, and verifies all 14 dimensions', async () => {
+    // Manifest is reachable-only: the large orphan is absent (LOCK-BLOCK-1).
+    expect(manifest.blocks.count).toBe(1)
+    expect(manifest.blocks.entries['b-big']).toBeDefined()
+    expect(manifest.blocks.entries['b-orphan-large']).toBeUndefined()
+    expect(manifest.messages.count).toBe(1)
+
+    // Candidate stores the reachable large block with its exact content.
+    const readonly = new Database(dbPath, { readonly: true, fileMustExist: true })
+    const row = readonly.prepare('SELECT id, message_id, content FROM message_blocks ORDER BY id').all() as Array<{
+      id: string
+      message_id: string
+      content: string | null
+    }>
+    expect(row).toHaveLength(1)
+    expect(row[0].id).toBe('b-big')
+    expect(row[0].content).toBe(BIG_CONTENT)
+    readonly.close()
+
+    // The verifier passes ALL 14 dimensions on the large-block candidate.
+    const report = await verify(dbPath, manifest)
+    expect(report.status).toBe('pass')
+    expect(report.fatal).toBeNull()
+    for (const result of report.dimensions) {
+      expect(result.status).toBe('pass')
+      expect(result.diagnostics).toEqual([])
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LOCK-SP-7: derived search projection corruption classes through the FULL
+// verifier. Every corruption deterministically fails dimension ⑭
+// (`search_projection`) with bounded evidence, never a fatal, and the
+// serialized report never carries content/paths (LOCK-SP-3/LOCK-PRIV).
+//
+// The pristine sealed candidate (buildSealedCandidate) is trigger-maintained
+// by migration 003, so the derived projection is correct: 3 MAIN_TEXT
+// content-not-null blocks (b-1, b-4, b-5) mirrored in both the normalized
+// table and the FTS table.
+// ---------------------------------------------------------------------------
+
+describe('LOCK-SP-7 search projection corruption (candidate verifier)', () => {
+  let tempDir: string
+  let dbPath: string
+  let manifest: SourceVerificationManifest
+
+  beforeEach(() => {
+    tempDir = makeTempDir()
+    const sealed = buildSealedCandidate(tempDir)
+    dbPath = sealed.dbPath
+    manifest = sealed.manifest
+  })
+
+  afterEach(() => {
+    realFs.rmSync(tempDir, { recursive: true, force: true })
+    expect(realFs.existsSync(tempDir)).toBe(false)
+  })
+
+  const pristinePredicateCount = 3 // b-1, b-4, b-5 are MAIN_TEXT with content
+  const expectedPristineCheckedCount = 6 + 2 + pristinePredicateCount * 2 + pristinePredicateCount + 1 + 1
+
+  it('passes the search_projection dimension on the pristine candidate', async () => {
+    const report = await verify(dbPath, manifest)
+    expect(report.status).toBe('pass')
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('pass')
+    expect(sp.checkedCount).toBe(expectedPristineCheckedCount)
+  })
+
+  it('fails the dimension with OBJECT_MISSING when the FTS table is dropped', async () => {
+    corrupt(dbPath, (db) => db.exec(`DROP TABLE ${MESSAGE_BLOCKS_FTS_TABLE}`))
+    const report = await verify(dbPath, manifest)
+
+    expect(report.status).toBe('fail')
+    expect(report.fatal).toBeNull()
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(
+      sp.diagnostics.some(
+        (d) => d.code === 'SEARCH_PROJECTION_OBJECT_MISSING' && d.expected === MESSAGE_BLOCKS_FTS_TABLE
+      )
+    ).toBe(true)
+    // All 13 pre-existing dimensions still pass — the projection is the only damage.
+    for (const result of report.dimensions) {
+      if (result.dimension !== 'search_projection') expect(result.status).toBe('pass')
+    }
+  })
+
+  it('fails the dimension with OBJECT_MISSING when a sync trigger is dropped', async () => {
+    corrupt(dbPath, (db) => db.exec(`DROP TRIGGER ${MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER}`))
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(
+      sp.diagnostics.some(
+        (d) => d.code === 'SEARCH_PROJECTION_OBJECT_MISSING' && d.expected === MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER
+      )
+    ).toBe(true)
+  })
+
+  it('fails the dimension with OBJECT_MISSING when the normalized table is dropped', async () => {
+    corrupt(dbPath, (db) => db.exec(`DROP TABLE ${MESSAGE_BLOCKS_NORMALIZED_TABLE}`))
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(
+      sp.diagnostics.some(
+        (d) => d.code === 'SEARCH_PROJECTION_OBJECT_MISSING' && d.expected === MESSAGE_BLOCKS_NORMALIZED_TABLE
+      )
+    ).toBe(true)
+  })
+
+  it('fails the dimension with COUNT_MISMATCH on an empty FTS table', async () => {
+    corrupt(dbPath, (db) => db.exec(`DELETE FROM ${MESSAGE_BLOCKS_FTS_TABLE}`))
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(
+      sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_COUNT_MISMATCH' && d.entity === MESSAGE_BLOCKS_FTS_TABLE)
+    ).toBe(true)
+  })
+
+  it('fails the dimension with COUNT_MISMATCH + FTS_MISMATCH + ROW_MISSING on a partial FTS', async () => {
+    corrupt(dbPath, (db) => db.exec(`DELETE FROM ${MESSAGE_BLOCKS_FTS_TABLE} WHERE block_id = 'b-1'`))
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(
+      sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_COUNT_MISMATCH' && d.entity === MESSAGE_BLOCKS_FTS_TABLE)
+    ).toBe(true)
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_FTS_MISMATCH')).toBe(true)
+    // Exact per-row evidence: the b-1 normalized row has no FTS counterpart.
+    expect(
+      sp.diagnostics.some(
+        (d) =>
+          d.code === 'SEARCH_PROJECTION_ROW_MISSING' &&
+          d.entityId === 'b-1' &&
+          d.entity === MESSAGE_BLOCKS_NORMALIZED_TABLE
+      )
+    ).toBe(true)
+  })
+
+  it('fails the dimension with CONTENT_MISMATCH on stale normalized content', async () => {
+    corrupt(dbPath, (db) =>
+      db
+        .prepare(
+          `UPDATE ${MESSAGE_BLOCKS_NORMALIZED_TABLE} SET normalized_content = 'stale-text' WHERE block_id = 'b-1'`
+        )
+        .run()
+    )
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(
+      sp.diagnostics.some(
+        (d) =>
+          d.code === 'SEARCH_PROJECTION_CONTENT_MISMATCH' &&
+          d.entityId === 'b-1' &&
+          d.fieldPath === 'normalized_content'
+      )
+    ).toBe(true)
+    // Fixed tokens only — the raw stored value never leaks.
+    expect(JSON.stringify(report)).not.toContain('stale-text')
+  })
+
+  it('fails the dimension with MESSAGE_ID_MISMATCH on a wrong normalized message_id', async () => {
+    corrupt(dbPath, (db) =>
+      db
+        .prepare(`UPDATE ${MESSAGE_BLOCKS_NORMALIZED_TABLE} SET message_id = ? WHERE block_id = 'b-1'`)
+        .run(targetId('t-1', 'm-2'))
+    )
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    const diag = sp.diagnostics.find((d) => d.code === 'SEARCH_PROJECTION_MESSAGE_ID_MISMATCH' && d.entityId === 'b-1')
+    expect(diag).toBeDefined()
+    // Allowed entity-ID evidence only (LOCK-SP-3).
+    expect(diag!.expected).toBe(targetId('t-1', 'm-1'))
+    expect(diag!.actual).toBe(targetId('t-1', 'm-2'))
+  })
+
+  it('fails the dimension with FTS_MISMATCH on wrong FTS content (counts unchanged)', async () => {
+    corrupt(dbPath, (db) =>
+      db
+        .prepare(`UPDATE ${MESSAGE_BLOCKS_FTS_TABLE} SET normalized_content = 'tampered-fts' WHERE block_id = 'b-1'`)
+        .run()
+    )
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_FTS_MISMATCH')).toBe(true)
+    // No count mismatch (counts stay 3/3/3) — the exact merge still fails
+    // on the content inequality: one normalized row missing from FTS and one
+    // FTS row without a normalized counterpart, both for b-1.
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_COUNT_MISMATCH')).toBe(false)
+    expect(
+      sp.diagnostics.some(
+        (d) =>
+          d.code === 'SEARCH_PROJECTION_ROW_MISSING' &&
+          d.entityId === 'b-1' &&
+          d.entity === MESSAGE_BLOCKS_NORMALIZED_TABLE
+      )
+    ).toBe(true)
+    expect(
+      sp.diagnostics.some(
+        (d) =>
+          d.code === 'SEARCH_PROJECTION_ROW_UNEXPECTED' && d.entityId === 'b-1' && d.entity === MESSAGE_BLOCKS_FTS_TABLE
+      )
+    ).toBe(true)
+    expect(JSON.stringify(report)).not.toContain('tampered-fts')
+  })
+
+  it('fails the dimension with COUNT_MISMATCH + ROW_UNEXPECTED on an extra normalized row', async () => {
+    corrupt(dbPath, (db) =>
+      db
+        .prepare(
+          `INSERT INTO ${MESSAGE_BLOCKS_NORMALIZED_TABLE} (block_id, message_id, normalized_content) VALUES ('b-extra', ?, ?)`
+        )
+        .run(targetId('t-1', 'm-1'), 'extra')
+    )
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_COUNT_MISMATCH')).toBe(true)
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_ROW_UNEXPECTED' && d.entityId === 'b-extra')).toBe(
+      true
+    )
+  })
+
+  it('fails the dimension with COUNT_MISMATCH + ROW_MISSING on a missing normalized row', async () => {
+    corrupt(dbPath, (db) => db.prepare(`DELETE FROM ${MESSAGE_BLOCKS_NORMALIZED_TABLE} WHERE block_id = 'b-5'`).run())
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_COUNT_MISMATCH')).toBe(true)
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_ROW_MISSING' && d.entityId === 'b-5')).toBe(true)
+  })
+
+  it('a pristine deferred+rebuilt candidate passes all 14 dimensions (LOCK-SP-7)', async () => {
+    // Build a fresh candidate through the real deferred-rebuild flow:
+    // defer BEFORE any page write, write through the plane, rebuild, seal.
+    const dir = realPath.join(tempDir, 'deferred')
+    realFs.mkdirSync(dir, { recursive: true })
+    const deferredPath = realPath.join(dir, 'chat.db')
+    const sqlite = new Database(deferredPath)
+    sqlite.pragma('journal_mode = WAL')
+    sqlite.pragma('foreign_keys = ON')
+    const db = drizzle(sqlite, { schema })
+    runMigrations(db, sqlite)
+
+    // Import the CandidateFtsProjection helper is statically imported above.
+    const helper = new CandidateFtsProjection()
+    helper.defer(sqlite)
+    expect(
+      (
+        sqlite
+          .prepare('SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?')
+          .get(MESSAGE_BLOCKS_NORMALIZED_TABLE) as {
+          n: number
+        }
+      ).n
+    ).toBe(0)
+
+    const plane = createImportDataPlane(db)
+    plane.processPage(
+      page('topics', [
+        srcTopic('t-1', [srcMessage('m-1', 't-1', ['b-1', 'b-2']), srcMessage('m-2', 't-1', ['b-3'])]),
+        srcTopic('t-2', [srcMessage('m-3', 't-2', ['b-4', 'b-5'])])
+      ])
+    )
+    plane.processPage(
+      page('message_blocks', [
+        srcBlock('b-1', 'm-1'),
+        srcBlock('b-2', 'm-1', { type: 'tool', content: TOOL_CONTENT as unknown as JsonObject['x'] }),
+        srcBlock('b-3', 'm-2', { type: 'file', file: FILE_META as unknown as JsonObject['x'] }),
+        srcBlock('b-4', 'm-3'),
+        srcBlock('b-5', 'm-3')
+      ])
+    )
+    plane.finalize()
+    helper.rebuild()
+    expect(helper.getState()).toBe('rebuilt')
+
+    const deferredManifest = plane.getSourceVerificationManifest()
+    sqlite.close()
+
+    const report = await verify(deferredPath, deferredManifest)
+    expect(report.status).toBe('pass')
+    expect(report.fatal).toBeNull()
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('pass')
+    // Rebuilt projection has the same 3-predicate profile as the trigger path.
+    expect(sp.checkedCount).toBe(expectedPristineCheckedCount)
+  })
+
+  it('the serialized report excludes content and paths on search-projection corruption (LOCK-PRIV)', async () => {
+    corrupt(dbPath, (db) =>
+      db
+        .prepare(
+          `UPDATE ${MESSAGE_BLOCKS_NORMALIZED_TABLE} SET normalized_content = 'sensitive-body' WHERE block_id = 'b-4'`
+        )
+        .run()
+    )
+    corrupt(dbPath, (db) =>
+      db
+        .prepare(`UPDATE ${MESSAGE_BLOCKS_FTS_TABLE} SET normalized_content = 'sensitive-fts' WHERE block_id = 'b-4'`)
+        .run()
+    )
+    const report = await verify(dbPath, manifest)
+
+    expect(report.status).toBe('fail')
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    const serialized = JSON.stringify(report)
+    // No raw/normalized content, no paths, no SQL.
+    expect(serialized).not.toContain('sensitive-body')
+    expect(serialized).not.toContain('sensitive-fts')
+    expect(serialized).not.toContain('content of')
+    expect(serialized).not.toContain(tempDir)
+    expect(serialized).not.toContain('chat.db')
+    expect(serialized).not.toContain('SELECT')
+  })
+
+  it('normalized content parity is deterministic for markdown/CRLF inputs (LOCK-SP-2)', async () => {
+    // The plane normalizes content through the shared pipeline; the verifier
+    // recomputes it JS-side. Prove both sides agree on a tricky input.
+    const dir = realPath.join(tempDir, 'normalization')
+    realFs.mkdirSync(dir, { recursive: true })
+    const dbPath2 = realPath.join(dir, 'chat.db')
+    const sqlite = new Database(dbPath2)
+    sqlite.pragma('journal_mode = WAL')
+    sqlite.pragma('foreign_keys = ON')
+    const db = drizzle(sqlite, { schema })
+    runMigrations(db, sqlite)
+
+    const plane = createImportDataPlane(db)
+    plane.processPage(
+      page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', ['b-1']), srcMessage('m-2', 't-1', ['b-2'])])])
+    )
+    // **Bold**, `inline`, header, link, and CRLF content.
+    plane.processPage(
+      page('message_blocks', [
+        srcBlock('b-1', 'm-1', { content: '**Hello** `world`\r\n# Title\r\n[link](http://x)' }),
+        srcBlock('b-2', 'm-2', { content: 'plain text' })
+      ])
+    )
+    plane.finalize()
+    const manifest2 = plane.getSourceVerificationManifest()
+    sqlite.close()
+
+    const report = await verify(dbPath2, manifest2)
+    expect(report.status).toBe('pass')
+    expect(dim(report, 'search_projection').status).toBe('pass')
+
+    // The stored normalized content equals the shared JS-side pipeline.
+    const readonly = new Database(dbPath2, { readonly: true, fileMustExist: true })
+    const row = readonly
+      .prepare(`SELECT normalized_content FROM ${MESSAGE_BLOCKS_NORMALIZED_TABLE} WHERE block_id = 'b-1'`)
+      .get() as { normalized_content: string }
+    readonly.close()
+    expect(row.normalized_content).toBe(normalizeSearchText('**Hello** `world`\r\n# Title\r\n[link](http://x)'))
+  })
+
+  // -------------------------------------------------------------------------
+  // Exact FTS↔normalized multiset parity (LOCK-SP-2/3) — adversarial classes
+  // the old XOR fingerprint could not guarantee: NUL/prefix framing
+  // collisions, duplicate FTS rows, same-count substitutions, extra rows,
+  // chunk-boundary behavior, and privacy of the new evidence.
+  // -------------------------------------------------------------------------
+
+  it('detects a NUL/prefix framing collision pair exactly (injective key, counts unchanged)', async () => {
+    // Two distinct projection rows whose UNFRAMED concatenations are byte-
+    // identical: normalized {('abc','xy')} vs FTS {('a','bcxy')} both
+    // serialize to 'abcxy' without length-prefix framing. The injective key
+    // (length(block_id), block_id, length(normalized_content),
+    // normalized_content) must still fail the parity — and counts are
+    // unchanged (1/1/1), so only the exact row merge can detect it.
+    const dir = realPath.join(tempDir, 'framing')
+    realFs.mkdirSync(dir, { recursive: true })
+    const framedPath = realPath.join(dir, 'chat.db')
+    const sqlite = new Database(framedPath)
+    sqlite.pragma('journal_mode = WAL')
+    sqlite.pragma('foreign_keys = ON')
+    const db = drizzle(sqlite, { schema })
+    runMigrations(db, sqlite)
+
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', ['abc'])])]))
+    plane.processPage(page('message_blocks', [srcBlock('abc', 'm-1', { content: 'xy' })]))
+    plane.finalize()
+    const framedManifest = plane.getSourceVerificationManifest()
+    sqlite.close()
+
+    corrupt(framedPath, (db2) =>
+      db2
+        .prepare(
+          `UPDATE ${MESSAGE_BLOCKS_FTS_TABLE} SET block_id = 'a', normalized_content = 'bcxy' WHERE block_id = 'abc'`
+        )
+        .run()
+    )
+
+    const report = await verify(framedPath, framedManifest)
+    expect(report.status).toBe('fail')
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_FTS_MISMATCH')).toBe(true)
+    expect(
+      sp.diagnostics.some(
+        (d) =>
+          d.code === 'SEARCH_PROJECTION_ROW_MISSING' &&
+          d.entityId === 'abc' &&
+          d.entity === MESSAGE_BLOCKS_NORMALIZED_TABLE
+      )
+    ).toBe(true)
+    expect(
+      sp.diagnostics.some(
+        (d) =>
+          d.code === 'SEARCH_PROJECTION_ROW_UNEXPECTED' && d.entityId === 'a' && d.entity === MESSAGE_BLOCKS_FTS_TABLE
+      )
+    ).toBe(true)
+    // Counts are unchanged — only the exact row merge fails.
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_COUNT_MISMATCH')).toBe(false)
+    // Privacy: the framing payload never leaks (only IDs/codes do).
+    expect(JSON.stringify(report)).not.toContain('bcxy')
+    expect(JSON.stringify(report)).not.toContain('xy')
+  })
+
+  it('preserves NUL and supplementary characters through the exact parity (pristine passes, swap fails)', async () => {
+    const NUL_CONTENT = 'a\x00b\u{1F600} \u{FFFD} tail'
+    const dir = realPath.join(tempDir, 'nul')
+    realFs.mkdirSync(dir, { recursive: true })
+    const nulPath = realPath.join(dir, 'chat.db')
+    const sqlite = new Database(nulPath)
+    sqlite.pragma('journal_mode = WAL')
+    sqlite.pragma('foreign_keys = ON')
+    const db = drizzle(sqlite, { schema })
+    runMigrations(db, sqlite)
+
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', ['b-1', 'b-2'])])]))
+    plane.processPage(
+      page('message_blocks', [srcBlock('b-1', 'm-1', { content: NUL_CONTENT }), srcBlock('b-2', 'm-1')])
+    )
+    plane.finalize()
+    const nulManifest = plane.getSourceVerificationManifest()
+    sqlite.close()
+
+    // Pristine: both projections carry the NUL bytes; the byte-exact merge
+    // must agree.
+    const pristine = await verify(nulPath, nulManifest)
+    expect(pristine.status).toBe('pass')
+    expect(dim(pristine, 'search_projection').status).toBe('pass')
+
+    // Swap the two FTS contents (counts unchanged) → the NUL boundary must
+    // be part of the equality key, not a framing separator.
+    corrupt(nulPath, (db2) => {
+      const a = db2
+        .prepare(`SELECT normalized_content FROM ${MESSAGE_BLOCKS_NORMALIZED_TABLE} WHERE block_id = 'b-1'`)
+        .get() as {
+        normalized_content: string
+      }
+      const b = db2
+        .prepare(`SELECT normalized_content FROM ${MESSAGE_BLOCKS_NORMALIZED_TABLE} WHERE block_id = 'b-2'`)
+        .get() as {
+        normalized_content: string
+      }
+      db2
+        .prepare(`UPDATE ${MESSAGE_BLOCKS_FTS_TABLE} SET normalized_content = ? WHERE block_id = 'b-1'`)
+        .run(b.normalized_content)
+      db2
+        .prepare(`UPDATE ${MESSAGE_BLOCKS_FTS_TABLE} SET normalized_content = ? WHERE block_id = 'b-2'`)
+        .run(a.normalized_content)
+    })
+
+    const report = await verify(nulPath, nulManifest)
+    expect(report.status).toBe('fail')
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_FTS_MISMATCH')).toBe(true)
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_ROW_MISSING')).toBe(true)
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_ROW_UNEXPECTED')).toBe(true)
+    // NUL-containing content never leaks into the serialized report.
+    expect(JSON.stringify(report)).not.toContain('a\u0000b')
+    expect(JSON.stringify(report)).not.toContain('tail')
+  })
+
+  it('detects a duplicate FTS row (same block_id + normalized_content) exactly', async () => {
+    corrupt(dbPath, (db) => {
+      const row = db
+        .prepare(`SELECT normalized_content FROM ${MESSAGE_BLOCKS_NORMALIZED_TABLE} WHERE block_id = 'b-1'`)
+        .get() as { normalized_content: string }
+      db.prepare(`INSERT INTO ${MESSAGE_BLOCKS_FTS_TABLE} (block_id, normalized_content) VALUES ('b-1', ?)`).run(
+        row.normalized_content
+      )
+    })
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(
+      sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_COUNT_MISMATCH' && d.entity === MESSAGE_BLOCKS_FTS_TABLE)
+    ).toBe(true)
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_FTS_MISMATCH')).toBe(true)
+    // The extra FTS row has no normalized counterpart at that position.
+    expect(
+      sp.diagnostics.some(
+        (d) =>
+          d.code === 'SEARCH_PROJECTION_ROW_UNEXPECTED' && d.entityId === 'b-1' && d.entity === MESSAGE_BLOCKS_FTS_TABLE
+      )
+    ).toBe(true)
+  })
+
+  it('detects a same-count substitution (two FTS contents swapped)', async () => {
+    corrupt(dbPath, (db) => {
+      const a = db
+        .prepare(`SELECT normalized_content FROM ${MESSAGE_BLOCKS_NORMALIZED_TABLE} WHERE block_id = 'b-1'`)
+        .get() as {
+        normalized_content: string
+      }
+      const c = db
+        .prepare(`SELECT normalized_content FROM ${MESSAGE_BLOCKS_NORMALIZED_TABLE} WHERE block_id = 'b-4'`)
+        .get() as {
+        normalized_content: string
+      }
+      db.prepare(`UPDATE ${MESSAGE_BLOCKS_FTS_TABLE} SET normalized_content = ? WHERE block_id = 'b-1'`).run(
+        c.normalized_content
+      )
+      db.prepare(`UPDATE ${MESSAGE_BLOCKS_FTS_TABLE} SET normalized_content = ? WHERE block_id = 'b-4'`).run(
+        a.normalized_content
+      )
+    })
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_FTS_MISMATCH')).toBe(true)
+    // Counts stay 3/3/3 — the swap is only visible to the exact merge.
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_COUNT_MISMATCH')).toBe(false)
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_ROW_MISSING')).toBe(true)
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_ROW_UNEXPECTED')).toBe(true)
+  })
+
+  it('detects an extra FTS row with no canonical/normalized counterpart', async () => {
+    corrupt(dbPath, (db) =>
+      db
+        .prepare(`INSERT INTO ${MESSAGE_BLOCKS_FTS_TABLE} (block_id, normalized_content) VALUES ('b-ghost', 'ghost')`)
+        .run()
+    )
+    const report = await verify(dbPath, manifest)
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_COUNT_MISMATCH')).toBe(true)
+    expect(
+      sp.diagnostics.some(
+        (d) =>
+          d.code === 'SEARCH_PROJECTION_ROW_UNEXPECTED' &&
+          d.entityId === 'b-ghost' &&
+          d.entity === MESSAGE_BLOCKS_FTS_TABLE
+      )
+    ).toBe(true)
+    expect(sp.diagnostics.some((d) => d.code === 'SEARCH_PROJECTION_FTS_MISMATCH')).toBe(true)
+  })
+
+  it('passes exactly across chunk boundaries (chunkSize=1 and chunkSize=2)', async () => {
+    // 3 projection rows over chunkSize=2 and chunkSize=1 force the
+    // canonical/normalized/FTS cursors to cross chunk boundaries; the merge
+    // must be boundary-independent and preserve the exact checkedCount.
+    const report1 = await verify(dbPath, manifest, { chunkSize: 1 })
+    expect(report1.status).toBe('pass')
+    expect(dim(report1, 'search_projection').status).toBe('pass')
+    expect(dim(report1, 'search_projection').checkedCount).toBe(expectedPristineCheckedCount)
+
+    const report2 = await verify(dbPath, manifest, { chunkSize: 2 })
+    expect(report2.status).toBe('pass')
+    expect(dim(report2, 'search_projection').status).toBe('pass')
+    expect(dim(report2, 'search_projection').checkedCount).toBe(expectedPristineCheckedCount)
+  })
+
+  it('detects a chunk-boundary mismatch with chunkSize=1 (every row its own chunk)', async () => {
+    corrupt(dbPath, (db) => db.exec(`DELETE FROM ${MESSAGE_BLOCKS_FTS_TABLE} WHERE block_id = 'b-4'`))
+    const report = await verify(dbPath, manifest, { chunkSize: 1 })
+
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('fail')
+    expect(
+      sp.diagnostics.some(
+        (d) =>
+          d.code === 'SEARCH_PROJECTION_ROW_MISSING' &&
+          d.entityId === 'b-4' &&
+          d.entity === MESSAGE_BLOCKS_NORMALIZED_TABLE
+      )
+    ).toBe(true)
+  })
+
+  it('honors abort checkpoints inside the search_projection parity merge (LOCK-4303)', async () => {
+    // Count the deterministic total checkpoints on a pristine chunkSize=1
+    // run; the tail of the run is dimension ⑭'s chunked parity scans
+    // (canonical, normalized, normalized-parity, FTS-parity cursors), so
+    // aborting a few checkpoints before the end lands mid-merge.
+    let total = 0
+    await verify(dbPath, manifest, {
+      chunkSize: 1,
+      onCheckpoint: () => {
+        total += 1
+      }
+    })
+    expect(total).toBeGreaterThan(40) // sanity: the parity scans ran
+
+    const controller = new AbortController()
+    let count = 0
+    const report = await verify(dbPath, manifest, {
+      chunkSize: 1,
+      signal: controller.signal,
+      onCheckpoint: () => {
+        count += 1
+        if (count === total - 3) controller.abort()
+      }
+    })
+
+    expect(report.status).toBe('aborted')
+    expect(report.fatal).toBeNull()
+    const sp = dim(report, 'search_projection')
+    expect(sp.status).toBe('skipped')
+    // The parity phase was already running when the abort landed: object
+    // inventory, count parity and pass-A checks had all been performed.
+    expect(sp.checkedCount).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LOCK-SP-3: the verifier chunk size is ALWAYS a finite bounded integer
+// before any cursor/buffer allocation. Direct/future callers passing
+// Infinity, NaN, zero, negatives, or arbitrarily large finite values
+// (e.g. Number.MAX_SAFE_INTEGER) normalize conservatively to the fixed
+// default or the fixed maximum — no unbounded allocation, and the exact
+// search_projection parity merge (and its checkedCount) is unchanged.
+// ---------------------------------------------------------------------------
+
+describe('LOCK-SP-3 chunk size bounding (candidate verifier)', () => {
+  let tempDir: string
+  let dbPath: string
+  let manifest: SourceVerificationManifest
+
+  beforeEach(() => {
+    tempDir = makeTempDir()
+    const sealed = buildSealedCandidate(tempDir)
+    dbPath = sealed.dbPath
+    manifest = sealed.manifest
+  })
+
+  afterEach(() => {
+    realFs.rmSync(tempDir, { recursive: true, force: true })
+    expect(realFs.existsSync(tempDir)).toBe(false)
+  })
+
+  const pristinePredicateCount = 3 // b-1, b-4, b-5 are MAIN_TEXT with content
+  const expectedPristineCheckedCount = 6 + 2 + pristinePredicateCount * 2 + pristinePredicateCount + 1 + 1
+
+  describe('normalizeChunkSize (pure)', () => {
+    it('keeps the production default when chunkSize is omitted', () => {
+      expect(normalizeChunkSize(undefined)).toBe(500)
+    })
+
+    it('normalizes NaN and ±Infinity to the fixed default', () => {
+      expect(normalizeChunkSize(Number.NaN)).toBe(500)
+      expect(normalizeChunkSize(Number.POSITIVE_INFINITY)).toBe(500)
+      expect(normalizeChunkSize(Number.NEGATIVE_INFINITY)).toBe(500)
+    })
+
+    it('normalizes zero and negatives to the fixed default', () => {
+      expect(normalizeChunkSize(0)).toBe(500)
+      expect(normalizeChunkSize(-1)).toBe(500)
+      expect(normalizeChunkSize(-Infinity)).toBe(500)
+    })
+
+    it('floors fractional in-bounds values unchanged', () => {
+      expect(normalizeChunkSize(1)).toBe(1)
+      expect(normalizeChunkSize(2.9)).toBe(2)
+      expect(normalizeChunkSize(500)).toBe(500)
+      expect(normalizeChunkSize(MAX_SEARCH_PROJECTION_CHUNK_SIZE)).toBe(MAX_SEARCH_PROJECTION_CHUNK_SIZE)
+    })
+
+    it('clamps positive fractions below 1 up to the floor minimum of 1', () => {
+      expect(normalizeChunkSize(0.5)).toBe(1)
+      expect(normalizeChunkSize(0.999999)).toBe(1)
+      expect(normalizeChunkSize(Number.MIN_VALUE)).toBe(1)
+    })
+
+    it('clamps finite oversized values to the fixed maximum', () => {
+      expect(normalizeChunkSize(MAX_SEARCH_PROJECTION_CHUNK_SIZE + 1)).toBe(MAX_SEARCH_PROJECTION_CHUNK_SIZE)
+      expect(normalizeChunkSize(100_000)).toBe(MAX_SEARCH_PROJECTION_CHUNK_SIZE)
+      expect(normalizeChunkSize(Number.MAX_SAFE_INTEGER)).toBe(MAX_SEARCH_PROJECTION_CHUNK_SIZE)
+      expect(normalizeChunkSize(Number.MAX_VALUE)).toBe(MAX_SEARCH_PROJECTION_CHUNK_SIZE)
+    })
+
+    it('is always a finite integer in [1, MAX_SEARCH_PROJECTION_CHUNK_SIZE]', () => {
+      for (const v of [
+        undefined,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        -Infinity,
+        -1,
+        0,
+        0.5,
+        Number.MIN_VALUE,
+        1,
+        2.9,
+        500,
+        MAX_SEARCH_PROJECTION_CHUNK_SIZE,
+        MAX_SEARCH_PROJECTION_CHUNK_SIZE + 1,
+        Number.MAX_SAFE_INTEGER,
+        Number.MAX_VALUE
+      ]) {
+        const n = normalizeChunkSize(v)
+        expect(Number.isFinite(n)).toBe(true)
+        expect(Number.isInteger(n)).toBe(true)
+        expect(n).toBeGreaterThanOrEqual(1)
+        expect(n).toBeLessThanOrEqual(MAX_SEARCH_PROJECTION_CHUNK_SIZE)
+      }
+    })
+  })
+
+  describe('integration — exact parity preserved for pathological chunk sizes', () => {
+    const cases: Array<[string, number]> = [
+      ['Infinity', Number.POSITIVE_INFINITY],
+      ['NaN', Number.NaN],
+      ['Number.MAX_SAFE_INTEGER', Number.MAX_SAFE_INTEGER],
+      ['zero', 0],
+      ['positive fraction (0.5)', 0.5],
+      ['smallest positive (Number.MIN_VALUE)', Number.MIN_VALUE],
+      ['finite over-bound (MAX+1)', MAX_SEARCH_PROJECTION_CHUNK_SIZE + 1],
+      ['finite over-bound (100000)', 100_000]
+    ]
+
+    it.each(cases)('passes exactly with chunkSize=%s', async (_label, chunkSize) => {
+      const report = await verify(dbPath, manifest, { chunkSize })
+      expect(report.status).toBe('pass')
+      expect(report.fatal).toBeNull()
+      const sp = dim(report, 'search_projection')
+      expect(sp.status).toBe('pass')
+      expect(sp.diagnostics).toEqual([])
+      // The bounded normalization must not alter the exact parity merge:
+      // checkedCount identical to the production-default run.
+      expect(sp.checkedCount).toBe(expectedPristineCheckedCount)
+      const defaultSp = dim(await verify(dbPath, manifest), 'search_projection')
+      expect(sp.checkedCount).toBe(defaultSp.checkedCount)
+    })
   })
 })

@@ -191,6 +191,7 @@ const STAGING_GATE_TO_CODE: Record<ReadonlyChatDbValidationGate, RollbackInstall
   integrity: 'STAGING_VALIDATION_FAILED',
   'foreign-keys': 'STAGING_VALIDATION_FAILED',
   migration: 'STAGING_VALIDATION_FAILED',
+  'search-projection': 'STAGING_VALIDATION_FAILED',
   'sample-reads': 'STAGING_VALIDATION_FAILED'
 }
 
@@ -199,6 +200,7 @@ const RESTORED_LIVE_GATE_TO_CODE: Record<ReadonlyChatDbValidationGate, RollbackI
   integrity: 'RESTORED_LIVE_VALIDATION_FAILED',
   'foreign-keys': 'RESTORED_LIVE_VALIDATION_FAILED',
   migration: 'RESTORED_LIVE_VALIDATION_FAILED',
+  'search-projection': 'RESTORED_LIVE_VALIDATION_FAILED',
   'sample-reads': 'RESTORED_LIVE_VALIDATION_FAILED'
 }
 

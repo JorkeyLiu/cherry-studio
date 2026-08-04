@@ -38,8 +38,10 @@ import {
   type PromotionLeaseHandle
 } from '../../../chatDb/maintenanceCoordination'
 import { runMigrations } from '../../../chatDb/migration'
+import { MESSAGE_BLOCKS_FTS_TABLE, MESSAGE_BLOCKS_NORMALIZED_TABLE } from '../../../chatDb/migration'
 import * as schema from '../../../chatDb/schema'
 import { CANDIDATE_DB_FILENAME, CANDIDATE_ROOT_DIRNAME } from '../../candidateDb'
+import { NAVIGATION_PROJECTION_STATE_KEY } from '../../navigationProjection'
 import type { InstallReceipt } from '../install'
 import { installCandidate, mintClosedLiveProof } from '../install'
 import type { ReplacementVerificationResult } from '../replacementVerifier'
@@ -85,6 +87,26 @@ function mutateLive(livePath: string, fn: (db: Database.Database) => void): void
   fn(db)
   db.close()
 }
+
+/** Insert the pending navigation projection row into the LIVE db in place. */
+function insertProjectionRow(livePath: string, value: string): void {
+  mutateLive(livePath, (db) => {
+    db.prepare(`INSERT INTO migration_state (key, value, updated_at) VALUES (?, ?, ?)`).run(
+      NAVIGATION_PROJECTION_STATE_KEY,
+      value,
+      '2020-01-01T00:00:00.000Z'
+    )
+  })
+}
+
+/** Minimal valid v1 projection JSON (matches the production encoder shape). */
+const VALID_PROJECTION_JSON = JSON.stringify({
+  version: 1,
+  sourcePersistVersion: null,
+  assistants: [],
+  topics: [],
+  recoveredTopicIds: []
+})
 
 /**
  * Overwrite the root b-tree page of one named index with a structurally
@@ -269,11 +291,77 @@ describe('verifyReplacement', () => {
     expectFailure(run(), 'REPLACEMENT_MIGRATION_INCOMPATIBLE', 'MIGRATION_KEY_UNKNOWN')
   })
 
+  // -------------------------------------------------------------------------
+  // Pending navigation projection row (LOCK-RV1/RV2) — the exact one-shot
+  // operational key is allowed to survive migration compatibility until the
+  // renderer durable apply+ack; every other unknown key still rejects.
+  // -------------------------------------------------------------------------
+
+  it('verifies the installed replacement with the pending navigation projection row present', () => {
+    insertProjectionRow(livePath, VALID_PROJECTION_JSON)
+    expect(run().ok).toBe(true)
+  })
+
+  it('keeps the migration gate payload-agnostic: any value under the exact projection key stays compatible (payload validation belongs to the later durable apply path)', () => {
+    insertProjectionRow(livePath, 'not-json-at-all')
+    expect(run().ok).toBe(true)
+  })
+
+  it('fails with REPLACEMENT_MIGRATION_INCOMPATIBLE when an unknown key coexists with the projection key', () => {
+    mutateLive(livePath, (db) => {
+      db.prepare(
+        `INSERT INTO migration_state (key, value, updated_at) VALUES ('999_future', '999_future', '2020-01-01T00:00:00.000Z')`
+      ).run()
+    })
+    insertProjectionRow(livePath, VALID_PROJECTION_JSON)
+    expectFailure(run(), 'REPLACEMENT_MIGRATION_INCOMPATIBLE', 'MIGRATION_KEY_UNKNOWN')
+  })
+
   it('fails with REPLACEMENT_SAMPLE_READ_FAILED when application-layer reads break', () => {
     mutateLive(livePath, (db) => {
       db.exec('DROP TABLE topic_segment_messages')
     })
     expectFailure(run(), 'REPLACEMENT_SAMPLE_READ_FAILED')
+  })
+
+  // -------------------------------------------------------------------------
+  // Derived search projection gate (LOCK-SP-5/7) — migration_state 003 stays
+  // recorded, so the migration gate passes and ONLY the lightweight
+  // `search-projection` gate fires.
+  // -------------------------------------------------------------------------
+
+  it('rejects migration_state-003-with-missing-objects: REPLACEMENT_SEARCH_PROJECTION_FAILED when the FTS table is dropped', () => {
+    mutateLive(livePath, (db) => {
+      db.exec(`DROP TABLE ${MESSAGE_BLOCKS_FTS_TABLE}`)
+    })
+    expectFailure(run(), 'REPLACEMENT_SEARCH_PROJECTION_FAILED', 'OBJECT_MISSING_MESSAGE_BLOCKS_FTS')
+  })
+
+  it('rejects migration_state-003-with-missing-objects: REPLACEMENT_SEARCH_PROJECTION_FAILED when the normalized table is dropped', () => {
+    mutateLive(livePath, (db) => {
+      db.exec(`DROP TABLE ${MESSAGE_BLOCKS_NORMALIZED_TABLE}`)
+    })
+    expectFailure(run(), 'REPLACEMENT_SEARCH_PROJECTION_FAILED', 'OBJECT_MISSING_MESSAGE_BLOCKS_NORMALIZED')
+  })
+
+  it('rejects a partial/empty FTS via count parity (REPLACEMENT_SEARCH_PROJECTION_FAILED, COUNT_MISMATCH)', () => {
+    mutateLive(livePath, (db) => {
+      db.exec(`DELETE FROM ${MESSAGE_BLOCKS_FTS_TABLE} WHERE block_id = 'b-1'`)
+    })
+    expectFailure(run(), 'REPLACEMENT_SEARCH_PROJECTION_FAILED', 'COUNT_MISMATCH')
+  })
+
+  it('rejects a wrong normalized message_id via messageId parity (MESSAGE_ID_MISMATCH)', () => {
+    mutateLive(livePath, (db) => {
+      db.prepare(`UPDATE ${MESSAGE_BLOCKS_NORMALIZED_TABLE} SET message_id = 'm-ghost' WHERE block_id = 'b-1'`).run()
+    })
+    expectFailure(run(), 'REPLACEMENT_SEARCH_PROJECTION_FAILED', 'MESSAGE_ID_MISMATCH')
+  })
+
+  it('still verifies the pristine replacement through the new gate (search-projection passes)', () => {
+    // The pristine live DB is trigger-maintained by migration 003: the
+    // derived objects + counts + messageId parity + MATCH smoke all pass.
+    expect(run().ok).toBe(true)
   })
 
   // -------------------------------------------------------------------------

@@ -37,6 +37,7 @@
  */
 
 import type { CandidateImportStats, ReadPageResponse, SourceReadStats } from '@shared/chatImport/types'
+import { RECOVERED_SHELL_ASSISTANT_ID } from '@shared/chatImport/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Per-context logger mock registry (LOCK-OWN-2 logging assertions). Each
@@ -95,9 +96,11 @@ vi.mock('../zipIntake', () => ({
     destDir: '/tmp/cherry-import-test',
     indexedDbDir: '/tmp/cherry-import-test/IndexedDB',
     entryCount: 10,
-    totalUncompressedBytes: 1024
+    totalUncompressedBytes: 1024,
+    origin: { kind: 'file', indexedDbDir: '/tmp/cherry-import-test/IndexedDB' },
+    selectedEntryCount: 3
   }),
-  classifyOriginCandidates: vi.fn().mockReturnValue({ kind: 'file', indexedDbDir: '/tmp/cherry-import-test/IndexedDB' })
+  classifyOriginCandidates: vi.fn()
 }))
 
 // Captures the options passed to createIsolatedReader for the
@@ -155,9 +158,16 @@ vi.mock('../candidateDb', () => ({
   CandidateDbResource: hoisted.candidateCtor
 }))
 
-vi.mock('../importDataPlane', () => ({
-  createImportDataPlane: hoisted.createPlane
-}))
+vi.mock('../importDataPlane', async (importOriginal) => {
+  // Preserve the real ChatImportDataPlaneError / summarizeDataPlaneRejection
+  // (LOCK-PRIV-2) while delegating the production-default plane factory to
+  // the same test double (LOCK-O8).
+  const actual: typeof ImportDataPlaneModule = await importOriginal<typeof ImportDataPlaneModule>()
+  return {
+    ...actual,
+    createImportDataPlane: hoisted.createPlane
+  }
+})
 
 // Production-default verifier (LOCK-O8): mocked so no real better-sqlite3 /
 // chatDb read path is ever touched by this suite.
@@ -174,6 +184,9 @@ vi.mock('@main/services/chatDb', () => ({
 import { acquirePromotionLease, createMaintenanceCoordinator } from '@main/services/chatDb/maintenanceCoordination'
 
 import { ChatImportSessionError, ChatImportUnsupportedPlatformError, ChatImportZipError } from '../errors'
+import type * as ImportDataPlaneModule from '../importDataPlane'
+import type { DataPlaneNormalizationStats } from '../importDataPlane'
+import { ChatImportDataPlaneError } from '../importDataPlane'
 import type {
   ExecutingPromotionCapability,
   PreparedPromotionConsumeResult,
@@ -198,6 +211,7 @@ import {
   takeTerminalPromotionOwnershipIfMatches,
   transferPromotionExecution
 } from '../index'
+import { NAVIGATION_PROJECTION_STATE_KEY } from '../navigationProjection'
 
 // ---------------------------------------------------------------------------
 // Test doubles (LOCK-O8 factory injection)
@@ -211,7 +225,10 @@ const MOCK_MANIFEST: any = { mock: 'source-verification-manifest' }
 function makeCandidate(overrides: Partial<Record<string, any>> = {}) {
   const candidate: any = {
     initialize: vi.fn(async () => {}),
+    deferFtsProjection: vi.fn(),
+    rebuildFtsProjection: vi.fn(),
     getDatabase: vi.fn(() => ({ mock: 'candidate-db' })),
+    getSqlite: vi.fn(() => makeMockSqlite()),
     getDbPath: vi.fn(() => MOCK_DB_PATH),
     seal: vi.fn(),
     reseal: vi.fn(),
@@ -219,6 +236,28 @@ function makeCandidate(overrides: Partial<Record<string, any>> = {}) {
     discardSync: vi.fn()
   }
   return Object.assign(candidate, overrides)
+}
+
+/**
+ * Minimal better-sqlite3-shaped double for the navigation projection
+ * migration_state write (LOCK-PROD-6). Records the written row so tests can
+ * assert the projection was persisted with the candidate.
+ */
+function makeMockSqlite() {
+  const written: Array<{ key: string; value: string }> = []
+  const sqlite: any = {
+    written,
+    prepare: vi.fn((sql: string) => ({
+      run: vi.fn((key: string, value: string, _updatedAt: string) => {
+        if (sql.includes('INSERT OR REPLACE INTO migration_state')) {
+          written.push({ key, value })
+          return { changes: 1 }
+        }
+        return { changes: 0 }
+      })
+    }))
+  }
+  return sqlite
 }
 
 function computeSourceStats(pages: ReadPageResponse[]): SourceReadStats {
@@ -251,6 +290,23 @@ function makeCandidateStats(pageCount: number): CandidateImportStats {
   }
 }
 
+/**
+ * All-six-category normalization stats double (LOCK-LOG-1). Every test
+ * double returns the full six-field contract so the exact-once aggregate
+ * warning is exercised with complete coverage.
+ */
+function normalizationStats(overrides: Partial<DataPlaneNormalizationStats> = {}): DataPlaneNormalizationStats {
+  return {
+    topicIdNormalizationCount: 0,
+    unreachableBlockSkipCount: 0,
+    skippedExistingOwnerUnembeddedBlockCount: 0,
+    danglingAskIdPreservedCount: 0,
+    skippedSegmentRowCount: 0,
+    skippedSegmentMembershipCount: 0,
+    ...overrides
+  }
+}
+
 function makePlane(overrides: Partial<Record<string, any>> = {}) {
   const pages: ReadPageResponse[] = []
   const plane: any = {
@@ -262,7 +318,8 @@ function makePlane(overrides: Partial<Record<string, any>> = {}) {
       sourceReadStats: computeSourceStats(pages),
       candidateImportStats: makeCandidateStats(pages.length)
     })),
-    getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 0, unreachableBlockSkipCount: 0 })),
+    getNormalizationStats: vi.fn(() => normalizationStats()),
+    getImportedTopicFacts: vi.fn(() => []),
     getSourceVerificationManifest: vi.fn(() => MOCK_MANIFEST)
   }
   return Object.assign(plane, overrides)
@@ -281,10 +338,11 @@ const REPORT_DIMENSIONS = [
   'overflow',
   'integrity_check',
   'foreign_key_check',
-  'sample_reads'
+  'sample_reads',
+  'search_projection'
 ] as const
 
-/** Sanitized 13-dimension report double (LOCK-4304 shape). */
+/** Sanitized 14-dimension report double (LOCK-4304 shape). */
 function makeReport(status: 'pass' | 'fail' | 'aborted' = 'pass', fatal: any = null) {
   return {
     status,
@@ -439,21 +497,19 @@ describe('ChatImport index', () => {
   })
 
   // =========================================================================
-  // Origin classification integration (LOCK-DEV-3/4/6)
+  // Origin classification integration (LOCK-PROD-8, LOCK-DEV-3/4/6)
   // =========================================================================
 
   describe('origin classification', () => {
-    itOnDarwin('calls classifyOriginCandidates after extraction and before IPC/session creation', async () => {
-      const { classifyOriginCandidates } = await import('../zipIntake')
+    itOnDarwin('derives loadMode from the origin classified during selective extraction (LOCK-PROD-8)', async () => {
+      const { extractZip } = await import('../zipIntake')
       const { session } = await begin()
 
-      // classifyOriginCandidates is called once per startImport.
-      expect(classifyOriginCandidates).toHaveBeenCalledTimes(1)
-      // Called with the extracted IndexedDB dir and app.isPackaged.
-      expect(classifyOriginCandidates).toHaveBeenCalledWith(
-        '/tmp/cherry-import-test/IndexedDB',
-        false // app.isPackaged from mock
-      )
+      // extractZip is called once per startImport and returns the classified
+      // origin (selected BEFORE anything is materialized).
+      expect(extractZip).toHaveBeenCalledTimes(1)
+      // LoadMode 'file' is derived from the returned origin.kind.
+      expect(capturedReaderOptions?.loadMode).toBe('file')
       // IPC and session were created (classification passed).
       expect(capturedCallbacks).toBeDefined()
       expect(capturedReaderOptions).toBeDefined()
@@ -461,9 +517,9 @@ describe('ChatImport index', () => {
       await session.dispose()
     })
 
-    itOnDarwin('rejects before IPC registration when classifyOriginCandidates throws', async () => {
-      const { classifyOriginCandidates } = await import('../zipIntake')
-      vi.mocked(classifyOriginCandidates).mockImplementationOnce(() => {
+    itOnDarwin('rejects before IPC registration when selective extraction rejects the origin', async () => {
+      const { extractZip } = await import('../zipIntake')
+      vi.mocked(extractZip).mockImplementationOnce(async () => {
         throw new ChatImportZipError('UNSUPPORTED_ORIGIN', 'Unsupported origin')
       })
 
@@ -477,9 +533,9 @@ describe('ChatImport index', () => {
       expect(getActiveImport()).toBeNull()
     })
 
-    itOnDarwin('workspace cleanup on classification failure (dispose verified)', async () => {
-      const { classifyOriginCandidates } = await import('../zipIntake')
-      vi.mocked(classifyOriginCandidates).mockImplementationOnce(() => {
+    itOnDarwin('workspace cleanup on origin rejection (dispose verified)', async () => {
+      const { extractZip } = await import('../zipIntake')
+      vi.mocked(extractZip).mockImplementationOnce(async () => {
         throw new ChatImportZipError('AMBIGUOUS_ORIGIN', 'Multiple candidates')
       })
       const { disposeAsync } = await import('../tempWorkspace')
@@ -492,8 +548,8 @@ describe('ChatImport index', () => {
     })
 
     itOnDarwin('packaged dev-origin rejection proves pre-IPC boundary (LOCK-DEV-3/4/6)', async () => {
-      const { classifyOriginCandidates } = await import('../zipIntake')
-      vi.mocked(classifyOriginCandidates).mockImplementationOnce(() => {
+      const { extractZip } = await import('../zipIntake')
+      vi.mocked(extractZip).mockImplementationOnce(async () => {
         throw new ChatImportZipError(
           'PACKAGED_DEV_ORIGIN',
           'ZIP contains dev-origin directory but the app is packaged.'
@@ -507,6 +563,23 @@ describe('ChatImport index', () => {
       expect(capturedCallbacks).toBeNull()
       expect(capturedReaderOptions).toBeNull()
       expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin('derives dev loadMode from a dev-origin classification', async () => {
+      const { extractZip } = await import('../zipIntake')
+      vi.mocked(extractZip).mockResolvedValueOnce({
+        destDir: '/tmp/cherry-import-test',
+        indexedDbDir: '/tmp/cherry-import-test/IndexedDB',
+        entryCount: 10,
+        totalUncompressedBytes: 1024,
+        origin: { kind: 'dev', indexedDbDir: '/tmp/cherry-import-test/IndexedDB' },
+        selectedEntryCount: 3
+      })
+      const { session } = await begin()
+
+      expect(capturedReaderOptions?.loadMode).toBe('dev')
+
+      await session.dispose()
     })
   })
 
@@ -847,7 +920,10 @@ describe('ChatImport index', () => {
     itOnDarwin(
       'last page finalizes once, seals, transitions to candidate-ready, emits one result (LOCK-O3/O7)',
       async () => {
-        const nowValues = [1000, 3500]
+        const nowValues = [1000, 1000, 3500]
+        // First tick: L2 trash retention baseline (captured at session
+        // start, LOCK-TRASH-2). Second tick: candidateStartedAt (discover).
+        // Third tick: elapsedMs read at completion (2500).
         const now = vi.fn(() => nowValues.shift() ?? 3500)
         const { verifier, releaseRun } = makeGatedVerifier()
         const { session, candidate, plane, onCandidateReady } = await begin({ now, verifier })
@@ -940,11 +1016,350 @@ describe('ChatImport index', () => {
   })
 
   // =========================================================================
-  // LOCK-OWN-2 / LOCK-BLOCK-2: exactly one aggregate count-only
-  // canonicalization / orphan-skip warning
+  // FTS projection deferral + rebuild wiring (LOCK-FTS-3/4/5)
   // =========================================================================
 
-  describe('outer-topic canonicalization warning (LOCK-OWN-1/2)', () => {
+  describe('FTS projection lifecycle wiring (LOCK-FTS-3/4/5)', () => {
+    itOnDarwin('defers the FTS projection at candidate init before any page write (LOCK-FTS-3)', async () => {
+      const { session, candidate } = await begin()
+
+      await discover(session.id, { clearSends: false })
+
+      // Exactly-once deferral, immediately after candidate init.
+      expect(candidate.deferFtsProjection).toHaveBeenCalledTimes(1)
+      expect(candidate.initialize).toHaveBeenCalledTimes(1)
+      const initOrder = candidate.initialize.mock.invocationCallOrder[0]
+      const deferOrder = candidate.deferFtsProjection.mock.invocationCallOrder[0]
+      expect(initOrder).toBeLessThan(deferOrder)
+      // Deferral strictly precedes the first page request.
+      expect(deferOrder).toBeLessThan(mockSendReadPage.mock.invocationCallOrder[0])
+      // No rebuild at init (rebuild is the completion-time counterpart).
+      expect(candidate.rebuildFtsProjection).not.toHaveBeenCalled()
+
+      await session.dispose()
+    })
+
+    itOnDarwin('rebuilds the FTS projection after finalize and before seal, exactly once (LOCK-FTS-4/5)', async () => {
+      const { verifier, releaseRun } = makeGatedVerifier()
+      const { session, candidate, plane } = await begin({ verifier })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+
+      // Exactly-once rebuild at completion, never at init.
+      expect(candidate.deferFtsProjection).toHaveBeenCalledTimes(1)
+      expect(candidate.rebuildFtsProjection).toHaveBeenCalledTimes(1)
+
+      // Ordering contract: finalize → rebuild → projection write (getSqlite)
+      // → seal (LOCK-FTS-4: rebuild precedes navigation projection/stats/seal).
+      const finalizeOrder = plane.finalize.mock.invocationCallOrder[0]
+      const rebuildOrder = candidate.rebuildFtsProjection.mock.invocationCallOrder[0]
+      const projectionOrder = candidate.getSqlite.mock.invocationCallOrder[0]
+      const sealOrder = candidate.seal.mock.invocationCallOrder[0]
+      expect(finalizeOrder).toBeLessThan(rebuildOrder)
+      expect(rebuildOrder).toBeLessThan(projectionOrder)
+      expect(projectionOrder).toBeLessThan(sealOrder)
+      expect(session.state).toBe('verifying')
+
+      releaseRun(makeReport('pass'))
+      await flushVerification()
+      await session.dispose()
+    })
+
+    itOnDarwin('deferral failure at init enters the error lifecycle (LOCK-FTS-3 fail closed)', async () => {
+      const candidate = makeCandidate({
+        deferFtsProjection: vi.fn(() => {
+          throw new Error('defer boom')
+        })
+      })
+      const { session } = await begin({ candidate })
+
+      await expect(discover(session.id)).rejects.toThrow('defer boom')
+
+      expect(session.state).toBe('error')
+      expect(candidate.seal).not.toHaveBeenCalled()
+      expect(candidate.discard).toHaveBeenCalled()
+      await session.dispose()
+    })
+
+    itOnDarwin('rebuild failure prevents seal and discards the candidate (LOCK-FTS-4/5 fail closed)', async () => {
+      const candidate = makeCandidate({
+        rebuildFtsProjection: vi.fn(() => {
+          throw new Error('rebuild boom')
+        })
+      })
+      const plane = makePlane()
+      const { session } = await begin({ candidate, plane })
+
+      await discover(session.id)
+      await capturedCallbacks.onReadPage(session.id, page('topics', []))
+      await capturedCallbacks.onReadPage(session.id, page('message_blocks', []))
+      await capturedCallbacks.onReadPage(session.id, page('topic_segments', []))
+      await expect(capturedCallbacks.onReadPage(session.id, page('files', []))).rejects.toThrow('rebuild boom')
+
+      expect(session.state).toBe('error')
+      // A candidate whose projection rebuild failed is NEVER sealed.
+      expect(candidate.seal).not.toHaveBeenCalled()
+      expect(candidate.discard).toHaveBeenCalled()
+
+      // LOCK-FTS-5: a fresh session/retry owns an independent candidate with
+      // its own defer/rebuild state — a failed session cannot poison the
+      // next candidate's lifecycle.
+      const { session: s2, candidate: c2 } = await begin()
+      await discover(s2.id)
+      await runAllPages(s2.id)
+      expect(c2.deferFtsProjection).toHaveBeenCalledTimes(1)
+      expect(c2.rebuildFtsProjection).toHaveBeenCalledTimes(1)
+      expect(c2.seal).toHaveBeenCalledTimes(1)
+      await flushVerification()
+      expect(s2.state).toBe('verified-candidate')
+      await s2.dispose()
+    })
+  })
+
+  // =========================================================================
+  // Navigation projection integration (LOCK-PROD-2/3/4/5/6) — the source
+  // Local Storage payload reported over the import-only bridge is retained,
+  // validated against IndexedDB topic facts, and persisted into the
+  // candidate `migration_state` BEFORE the candidate is sealed.
+  // =========================================================================
+
+  describe('navigation projection integration (LOCK-PROD-2/3/4/5/6)', () => {
+    /** The cached 'chatDbImport' context logger mock (count-only warnings). */
+    function projectionLogger() {
+      return loggerHoisted.withContext('chatDbImport') as {
+        info: ReturnType<typeof vi.fn>
+        warn: ReturnType<typeof vi.fn>
+        error: ReturnType<typeof vi.fn>
+      }
+    }
+
+    itOnDarwin(
+      'persists the validated projection into the candidate migration_state BEFORE the seal (LOCK-PROD-2/3/6)',
+      async () => {
+        const { verifier, releaseRun } = makeGatedVerifier()
+        const sqlite = makeMockSqlite()
+        const candidate = makeCandidate({ getSqlite: vi.fn(() => sqlite) })
+        const plane = makePlane({
+          getImportedTopicFacts: vi.fn(() => [{ id: 't1', deletedAt: null }])
+        })
+        const { session, onCandidateReady } = await begin({ candidate, plane, verifier })
+
+        // Renderer-reported source Local Storage payload (LOCK-PROD-2).
+        // Exact real redux-persist wire: the outer JSON's persisted slice
+        // values (`_persist`, `assistants`) are JSON strings (LOCK-FP1).
+        const rawPersist = JSON.stringify({
+          _persist: JSON.stringify({ version: 3, rehydrated: true }),
+          assistants: JSON.stringify({
+            assistants: [
+              {
+                id: 'a1',
+                name: 'Alpha',
+                emoji: 'robot',
+                topics: [
+                  {
+                    id: 't1',
+                    name: 'Topic One',
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: null,
+                    pinned: true
+                  }
+                ]
+              }
+            ]
+          })
+        })
+        capturedCallbacks.onProjection(session.id, { persist: rawPersist })
+
+        await discover(session.id)
+        await runAllPages(session.id)
+        expect(session.state).toBe('verifying')
+
+        // The versioned row was written exactly once with the encoded value.
+        expect(sqlite.written).toHaveLength(1)
+        expect(sqlite.written[0].key).toBe(NAVIGATION_PROJECTION_STATE_KEY)
+        const stored = JSON.parse(sqlite.written[0].value)
+        expect(stored.version).toBe(1)
+        expect(stored.sourcePersistVersion).toBe(3)
+        expect(stored.assistants).toHaveLength(1)
+        expect(stored.assistants[0]).toMatchObject({ id: 'a1', name: 'Alpha', emoji: 'robot', order: 0 })
+        expect(stored.topics).toHaveLength(1)
+        expect(stored.topics[0]).toMatchObject({
+          id: 't1',
+          assistantId: 'a1',
+          name: 'Topic One',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: null,
+          deletedAt: null,
+          pinned: true
+        })
+
+        // Ordering contract: the projection write (via getSqlite) strictly
+        // precedes the candidate seal (LOCK-PROD-6 — travels atomically).
+        expect(candidate.getSqlite.mock.invocationCallOrder[0]).toBeLessThan(candidate.seal.mock.invocationCallOrder[0])
+        expect(onCandidateReady).toHaveBeenCalledTimes(1)
+
+        releaseRun(makeReport('pass'))
+        await flushVerification()
+        await session.dispose()
+      }
+    )
+
+    itOnDarwin('counts malformed source assistant records with a count-only warning (LOCK-PROD-5)', async () => {
+      const { verifier, releaseRun } = makeGatedVerifier()
+      const { session, onCandidateReady } = await begin({ verifier })
+      const logger = projectionLogger()
+
+      const rawPersist = JSON.stringify({
+        _persist: JSON.stringify({ version: 215, rehydrated: true }),
+        assistants: JSON.stringify({
+          assistants: [
+            { id: 'a1', name: 'Alpha', topics: [] },
+            { name: 'no-id' }, // malformed — missing id, counted + skipped
+            'not-an-object' // malformed — counted + skipped
+          ]
+        })
+      })
+      capturedCallbacks.onProjection(session.id, { persist: rawPersist })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+
+      expect(session.state).toBe('verifying')
+      expect(onCandidateReady).toHaveBeenCalledTimes(1)
+      // Count-only, path-redacted warning: exactly 2 malformed assistants.
+      const warnCalls = logger.warn.mock.calls
+      const malformedLog = warnCalls.find((call: any[]) =>
+        String(call[0]).includes('malformed Local Storage assistant')
+      )
+      expect(malformedLog).toBeDefined()
+      expect(String(malformedLog![0])).toContain('2 malformed Local Storage assistant record(s)')
+
+      releaseRun(makeReport('pass'))
+      await flushVerification()
+      await session.dispose()
+    })
+
+    itOnDarwin(
+      'drops LS-only topics with a counted warning and surfaces IDB-only topics as recovered (LOCK-PROD-3/4)',
+      async () => {
+        const { verifier, releaseRun } = makeGatedVerifier()
+        const sqlite = makeMockSqlite()
+        const candidate = makeCandidate({ getSqlite: vi.fn(() => sqlite) })
+        const plane = makePlane({
+          getImportedTopicFacts: vi.fn(() => [
+            { id: 't1', deletedAt: null },
+            { id: 't-idb-only', deletedAt: '2026-02-02T00:00:00.000Z' }
+          ])
+        })
+        const { session } = await begin({ candidate, plane, verifier })
+        const logger = projectionLogger()
+
+        const rawPersist = JSON.stringify({
+          _persist: JSON.stringify({ version: 215, rehydrated: true }),
+          assistants: JSON.stringify({
+            assistants: [
+              {
+                id: 'a1',
+                name: 'Alpha',
+                topics: [
+                  { id: 't1', name: 'Kept' },
+                  { id: 't-ls-only', name: 'Dropped' } // absent from IDB facts → ignored (LOCK-PROD-3)
+                ]
+              }
+            ]
+          })
+        })
+        capturedCallbacks.onProjection(session.id, { persist: rawPersist })
+
+        await discover(session.id)
+        await runAllPages(session.id)
+        expect(session.state).toBe('verifying')
+
+        const stored = JSON.parse(sqlite.written[0].value)
+        expect(stored.topics).toHaveLength(1)
+        expect(stored.topics[0]).toMatchObject({ id: 't1', assistantId: 'a1' })
+        // IDB-only topics surface as recovered with their authoritative
+        // {id, deletedAt} (LOCK-PROD-4/FP2) — the deleted state survives.
+        expect(stored.recoveredTopicIds).toEqual([{ id: 't-idb-only', deletedAt: '2026-02-02T00:00:00.000Z' }])
+
+        const warnCalls = logger.warn.mock.calls
+        const droppedLog = warnCalls.find((call: any[]) =>
+          String(call[0]).includes('Local Storage topic(s) absent from IndexedDB')
+        )
+        expect(droppedLog).toBeDefined()
+        expect(String(droppedLog![0])).toContain('1 Local Storage topic(s) absent from IndexedDB')
+
+        releaseRun(makeReport('pass'))
+        await flushVerification()
+        await session.dispose()
+      }
+    )
+
+    itOnDarwin('a reserved recovered-conversations assistant id rejects the import (LOCK-PROD-5)', async () => {
+      const { session, candidate, onCandidateReady } = await begin()
+
+      capturedCallbacks.onProjection(session.id, {
+        persist: JSON.stringify({
+          _persist: JSON.stringify({ version: 215, rehydrated: true }),
+          assistants: JSON.stringify({
+            assistants: [{ id: RECOVERED_SHELL_ASSISTANT_ID, name: 'x', topics: [] }]
+          })
+        })
+      })
+
+      await discover(session.id)
+      await capturedCallbacks.onReadPage(session.id, page('topics', []))
+      await capturedCallbacks.onReadPage(session.id, page('message_blocks', []))
+      await capturedCallbacks.onReadPage(session.id, page('topic_segments', []))
+      await expect(capturedCallbacks.onReadPage(session.id, page('files', []))).rejects.toThrow(
+        'Navigation projection rejected'
+      )
+
+      // LOCK-PROD-5: rejection enters the error lifecycle — the candidate is
+      // never sealed and is discarded (rollback unchanged, LOCK-O6).
+      expect(session.state).toBe('error')
+      expect(candidate.seal).not.toHaveBeenCalled()
+      expect(candidate.discard).toHaveBeenCalled()
+      expect(onCandidateReady).not.toHaveBeenCalled()
+      expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin('a failed projection write enters the error lifecycle (LOCK-PROD-6)', async () => {
+      const candidate = makeCandidate()
+      const plane = makePlane()
+      const projectionWriter = vi.fn(() => {
+        throw new Error('projection persist failed')
+      })
+      const session = await startImport('/tmp/test.zip', {
+        candidateFactory: () => candidate,
+        dataPlaneFactory: () => plane,
+        verifierFactory: () => makeVerifier(),
+        projectionWriter
+      })
+
+      await discover(session.id)
+      await capturedCallbacks.onReadPage(session.id, page('topics', []))
+      await capturedCallbacks.onReadPage(session.id, page('message_blocks', []))
+      await capturedCallbacks.onReadPage(session.id, page('topic_segments', []))
+      await expect(capturedCallbacks.onReadPage(session.id, page('files', []))).rejects.toThrow(
+        'projection persist failed'
+      )
+
+      // A candidate without its projection must never seal (LOCK-PROD-6).
+      expect(session.state).toBe('error')
+      expect(candidate.seal).not.toHaveBeenCalled()
+      expect(candidate.discard).toHaveBeenCalled()
+      expect(getActiveImport()).toBeNull()
+    })
+  })
+
+  // =========================================================================
+  // LOCK-LOG-1: exactly one aggregate count-only residual warning over all
+  // six normalization categories (LOCK-OWN-1/BLOCK-1/1X/ASK-2/SEG-1)
+  // =========================================================================
+
+  describe('data-plane normalization residual warning (LOCK-LOG-1)', () => {
     /** The cached 'chatDbImport' context logger mock used by index.ts. */
     function chatDbImportLogger() {
       return loggerHoisted.withContext('chatDbImport') as {
@@ -953,6 +1368,15 @@ describe('ChatImport index', () => {
         error: ReturnType<typeof vi.fn>
         debug: ReturnType<typeof vi.fn>
       }
+    }
+
+    /** The exact-once aggregate residual warning (LOCK-LOG-1) calls. */
+    function residualWarnings(logger: {
+      warn: ReturnType<typeof vi.fn>
+    }): Array<ReturnType<typeof vi.fn>['mock']['calls'][number]> {
+      return logger.warn.mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string' && call[0].includes('data-plane normalization residuals')
+      )
     }
 
     async function runToCandidateReady(
@@ -969,54 +1393,52 @@ describe('ChatImport index', () => {
     itOnDarwin('emits exactly ONE warn with the aggregate count when normalization count > 0', async () => {
       const logger = chatDbImportLogger()
       const plane = makePlane({
-        getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 7, unreachableBlockSkipCount: 0 }))
+        getNormalizationStats: vi.fn(() => normalizationStats({ topicIdNormalizationCount: 7 }))
       })
 
       await runToCandidateReady({ plane })
 
-      const matching = logger.warn.mock.calls.filter(
-        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
-      )
-      // Exactly one aggregate warning (LOCK-OWN-2) — never per message.
+      const matching = residualWarnings(logger)
+      // Exactly one aggregate warning (LOCK-LOG-1) — never per message.
       expect(matching).toHaveLength(1)
       const [message] = matching[0]
-      expect(message).toContain('7')
+      expect(message).toContain('topicIdNormalization=7')
     })
 
-    itOnDarwin('emits no warning when the normalization count is 0', async () => {
+    itOnDarwin('emits no warning when every normalization category is 0', async () => {
       const logger = chatDbImportLogger()
 
       await runToCandidateReady()
 
-      const matching = logger.warn.mock.calls.filter(
-        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
-      )
+      const matching = residualWarnings(logger)
       expect(matching).toHaveLength(0)
     })
 
     itOnDarwin(
-      'warning carries no topic/message IDs, content, paths, or source values (LOCK-OWN-2 privacy)',
+      'warning carries no topic/message IDs, content, paths, or source values (LOCK-PRIV-2 privacy)',
       async () => {
         const logger = chatDbImportLogger()
         const plane = makePlane({
-          getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 7, unreachableBlockSkipCount: 0 }))
+          getNormalizationStats: vi.fn(() =>
+            normalizationStats({ topicIdNormalizationCount: 7, unreachableBlockSkipCount: 5 })
+          )
         })
 
         const { sessionId } = await runToCandidateReady({ plane })
 
-        const matching = logger.warn.mock.calls.filter(
-          (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
-        )
+        const matching = residualWarnings(logger)
         expect(matching).toHaveLength(1)
         const [message, ...rest] = matching[0]
 
-        // LOCK-OWN-2: the warning is EXACTLY the static non-content template
-        // with only session/run context + aggregate count interpolated — no
-        // topic/message IDs, names, content, paths, or source values can be
-        // present by construction.
+        // LOCK-LOG-1: the warning is EXACTLY the static non-content template
+        // with only session/run context + the six static category names and
+        // integer counts interpolated — no IDs, names, content, paths, or
+        // source values can be present by construction.
         expect(message).toBe(
-          `Session ${sessionId}: 7 embedded message topicId value(s) differed from the authoritative outer topic ` +
-            'and were canonicalized (LOCK-OWN-1); all other ownership/identity validations remain strict'
+          `Session ${sessionId}: data-plane normalization residuals ` +
+            '(topicIdNormalization=7, unreachableBlockSkip=5, existingOwnerUnembeddedBlockSkip=0, ' +
+            'danglingAskIdPreserved=0, skippedSegmentRow=0, skippedSegmentMembership=0); ' +
+            'all other ownership/identity validations remain strict'
         )
         // The warning is a single string argument — no structured args carrying values.
         expect(rest).toEqual([])
@@ -1024,58 +1446,38 @@ describe('ChatImport index', () => {
     )
 
     itOnDarwin(
-      'emits exactly ONE skip-count warn when only unreachable orphans were skipped (LOCK-BLOCK-2)',
+      'emits exactly ONE warn carrying all SIX counts when every category is nonzero (LOCK-LOG-1)',
       async () => {
         const logger = chatDbImportLogger()
         const plane = makePlane({
-          getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 0, unreachableBlockSkipCount: 5 }))
+          getNormalizationStats: vi.fn(() =>
+            normalizationStats({
+              topicIdNormalizationCount: 1,
+              unreachableBlockSkipCount: 2,
+              skippedExistingOwnerUnembeddedBlockCount: 3,
+              danglingAskIdPreservedCount: 4,
+              skippedSegmentRowCount: 5,
+              skippedSegmentMembershipCount: 6
+            })
+          )
         })
 
         const { sessionId } = await runToCandidateReady({ plane })
 
-        const matching = logger.warn.mock.calls.filter(
-          (call) => typeof call[0] === 'string' && call[0].includes('unreachable orphan message_blocks row(s)')
-        )
+        const matching = residualWarnings(logger)
         expect(matching).toHaveLength(1)
         const [message, ...rest] = matching[0]
-
-        // LOCK-BLOCK-2: session/run context + aggregate count ONLY — no block
-        // IDs, message IDs, content, paths, or source values; single argument.
         expect(message).toBe(
-          `Session ${sessionId}: 5 unreachable orphan message_blocks row(s) were skipped ` +
-            '(LOCK-BLOCK-1); all other ownership/identity validations remain strict'
+          `Session ${sessionId}: data-plane normalization residuals ` +
+            '(topicIdNormalization=1, unreachableBlockSkip=2, existingOwnerUnembeddedBlockSkip=3, ' +
+            'danglingAskIdPreserved=4, skippedSegmentRow=5, skippedSegmentMembership=6); ' +
+            'all other ownership/identity validations remain strict'
         )
         expect(rest).toEqual([])
       }
     )
 
-    itOnDarwin(
-      'emits exactly ONE combined warn with both aggregate counts when both categories are nonzero',
-      async () => {
-        const logger = chatDbImportLogger()
-        const plane = makePlane({
-          getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 2, unreachableBlockSkipCount: 5 }))
-        })
-
-        const { sessionId } = await runToCandidateReady({ plane })
-
-        // Exactly one warning overall (never two), carrying both counts 2 and 5
-        // (the expected original-ZIP aggregate evidence — LOCK-BLOCK-2).
-        const matching = logger.warn.mock.calls.filter(
-          (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
-        )
-        expect(matching).toHaveLength(1)
-        const [message, ...rest] = matching[0]
-        expect(message).toBe(
-          `Session ${sessionId}: 2 embedded message topicId value(s) differed from the authoritative outer topic ` +
-            'and were canonicalized (LOCK-OWN-1); 5 unreachable orphan message_blocks row(s) were skipped ' +
-            '(LOCK-BLOCK-1); all other ownership/identity validations remain strict'
-        )
-        expect(rest).toEqual([])
-      }
-    )
-
-    itOnDarwin('a failed page / failed finalize never double-logs the warning', async () => {
+    itOnDarwin('a failed page / failed finalize never logs the warning', async () => {
       const logger = chatDbImportLogger()
       const plane = makePlane()
       // finalize throws (e.g. MISSING_BLOCKS): no ready, no warning.
@@ -1089,10 +1491,7 @@ describe('ChatImport index', () => {
 
       // The session entered the error lifecycle; the warning must not exist.
       expect(session.state).toBe('error')
-      const matching = logger.warn.mock.calls.filter(
-        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
-      )
-      expect(matching).toHaveLength(0)
+      expect(residualWarnings(logger)).toHaveLength(0)
 
       await session.dispose()
     })
@@ -1100,10 +1499,10 @@ describe('ChatImport index', () => {
     itOnDarwin('source-stats mismatch emits NO warning (the stats gate precedes the warning)', async () => {
       const logger = chatDbImportLogger()
       const plane = makePlane({
-        getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 7, unreachableBlockSkipCount: 0 }))
+        getNormalizationStats: vi.fn(() => normalizationStats({ topicIdNormalizationCount: 7 }))
       })
       // Orchestrator/data-plane stats disagree: completion fails BEFORE the
-      // warning point, so no canonicalization claim may be emitted.
+      // warning point, so no residual claim may be emitted.
       plane.finalize = vi.fn(() => ({
         sourceReadStats: { ...EXPECTED_SOURCE_STATS, blockRecordCount: 99 },
         candidateImportStats: makeCandidateStats(4)
@@ -1120,10 +1519,7 @@ describe('ChatImport index', () => {
 
       expect(session.state).toBe('error')
       expect(candidate.seal).not.toHaveBeenCalled()
-      const matching = logger.warn.mock.calls.filter(
-        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
-      )
-      expect(matching).toHaveLength(0)
+      expect(residualWarnings(logger)).toHaveLength(0)
 
       await session.dispose()
     })
@@ -1136,7 +1532,7 @@ describe('ChatImport index', () => {
         })
       })
       const plane = makePlane({
-        getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 7, unreachableBlockSkipCount: 0 }))
+        getNormalizationStats: vi.fn(() => normalizationStats({ topicIdNormalizationCount: 7 }))
       })
 
       const { session } = await begin({ candidate, plane })
@@ -1147,10 +1543,7 @@ describe('ChatImport index', () => {
       await expect(capturedCallbacks.onReadPage(session.id, page('files', []))).rejects.toThrow('seal boom')
 
       expect(session.state).toBe('error')
-      const matching = logger.warn.mock.calls.filter(
-        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
-      )
-      expect(matching).toHaveLength(0)
+      expect(residualWarnings(logger)).toHaveLength(0)
 
       await session.dispose()
     })
@@ -1163,7 +1556,7 @@ describe('ChatImport index', () => {
           throw new Error('callback boom')
         })
         const plane = makePlane({
-          getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 7, unreachableBlockSkipCount: 0 }))
+          getNormalizationStats: vi.fn(() => normalizationStats({ topicIdNormalizationCount: 7 }))
         })
 
         const { session } = await begin({ plane, onCandidateReady })
@@ -1174,10 +1567,7 @@ describe('ChatImport index', () => {
         await expect(capturedCallbacks.onReadPage(session.id, page('files', []))).rejects.toThrow('callback boom')
 
         expect(session.state).toBe('error')
-        const matching = logger.warn.mock.calls.filter(
-          (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
-        )
-        expect(matching).toHaveLength(0)
+        expect(residualWarnings(logger)).toHaveLength(0)
 
         await session.dispose()
       }
@@ -1193,7 +1583,7 @@ describe('ChatImport index', () => {
         })
       })
       const plane1 = makePlane({
-        getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 3, unreachableBlockSkipCount: 0 }))
+        getNormalizationStats: vi.fn(() => normalizationStats({ topicIdNormalizationCount: 3 }))
       })
       const { session: s1 } = await begin({ candidate: badCandidate, plane: plane1 })
       await discover(s1.id)
@@ -1202,22 +1592,17 @@ describe('ChatImport index', () => {
       await capturedCallbacks.onReadPage(s1.id, page('topic_segments', []))
       await expect(capturedCallbacks.onReadPage(s1.id, page('files', []))).rejects.toThrow('seal boom')
       expect(s1.state).toBe('error')
-      let matching = logger.warn.mock.calls.filter(
-        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
-      )
-      expect(matching).toHaveLength(0)
+      expect(residualWarnings(logger)).toHaveLength(0)
 
       // Retry (fresh session + fresh plane): the succeeding completion warns
       // exactly once with the aggregate count.
       const plane2 = makePlane({
-        getNormalizationStats: vi.fn(() => ({ topicIdNormalizationCount: 3, unreachableBlockSkipCount: 0 }))
+        getNormalizationStats: vi.fn(() => normalizationStats({ topicIdNormalizationCount: 3 }))
       })
       await runToCandidateReady({ plane: plane2 })
-      matching = logger.warn.mock.calls.filter(
-        (call) => typeof call[0] === 'string' && call[0].includes('canonicalized')
-      )
+      const matching = residualWarnings(logger)
       expect(matching).toHaveLength(1)
-      expect(matching[0][0]).toContain('3')
+      expect(matching[0][0]).toContain('topicIdNormalization=3')
     })
   })
 
@@ -1239,9 +1624,13 @@ describe('ChatImport index', () => {
       // layout under the Data root — no override that could alias live paths).
       expect(hoisted.candidateCtor).toHaveBeenCalledTimes(1)
       expect(hoisted.candidateCtor).toHaveBeenCalledWith({ sessionId: session.id })
-      // Data plane is bound to the candidate's DB handle.
+      // Data plane is bound to the candidate's DB handle and receives the
+      // session's exactly-once L2 trash retention baseline (LOCK-TRASH-2/5).
       expect(hoisted.createPlane).toHaveBeenCalledTimes(1)
-      expect(hoisted.createPlane).toHaveBeenCalledWith(candidate.getDatabase())
+      const [dbArg, planeOptions] = hoisted.createPlane.mock.calls[0]
+      expect(dbArg).toEqual({ mock: 'candidate-db' })
+      expect(typeof planeOptions?.l2TrashRetentionBaseline).toBe('string')
+      expect(new Date(planeOptions.l2TrashRetentionBaseline).toISOString()).toBe(planeOptions.l2TrashRetentionBaseline)
 
       await session.dispose()
     })
@@ -1258,6 +1647,101 @@ describe('ChatImport index', () => {
 
       await session.dispose()
     })
+
+    itOnDarwin(
+      'captures exactly one immutable retention baseline per session from the injectable clock (LOCK-TRASH-2/5)',
+      async () => {
+        const candidate = makeCandidate()
+        const plane = makePlane()
+        hoisted.candidateCtor.mockImplementation((_opts: any) => candidate)
+        hoisted.createPlane.mockImplementation((_db: unknown) => plane)
+        let tick = 1785801600000 // 2026-08-04T00:00:00.000Z
+        const now = () => tick
+
+        const session = await startImport('/tmp/test.zip', { now })
+        // The baseline is captured at session start (startImport), before the
+        // plane is constructed at discover — advancing the clock in between
+        // must NOT change the immutable session baseline.
+        tick += 60_000
+        await discover(session.id, { clearSends: false })
+
+        const planeOptions = hoisted.createPlane.mock.calls[0][1] as { l2TrashRetentionBaseline?: string }
+        expect(planeOptions?.l2TrashRetentionBaseline).toBe('2026-08-04T00:00:00.000Z')
+
+        await session.dispose()
+      }
+    )
+
+    itOnDarwin('a retry/new replace-all import is a new session and gets a new baseline (LOCK-TRASH-2)', async () => {
+      const candidate = makeCandidate()
+      const plane = makePlane()
+      hoisted.candidateCtor.mockImplementation((_opts: any) => candidate)
+      hoisted.createPlane.mockImplementation((_db: unknown) => plane)
+      let tick = 1000
+      const now = () => (tick += 1000)
+
+      const first = await startImport('/tmp/test.zip', { now })
+      await discover(first.id, { clearSends: false })
+      const firstBaseline = (hoisted.createPlane.mock.calls[0][1] as { l2TrashRetentionBaseline?: string })
+        ?.l2TrashRetentionBaseline
+      expect(firstBaseline).toBeDefined()
+      await first.dispose()
+
+      const second = await startImport('/tmp/test.zip', { now })
+      await discover(second.id, { clearSends: false })
+      const secondBaseline = (hoisted.createPlane.mock.calls[1][1] as { l2TrashRetentionBaseline?: string })
+        ?.l2TrashRetentionBaseline
+      expect(secondBaseline).toBeDefined()
+      expect(secondBaseline).not.toBe(firstBaseline)
+
+      await second.dispose()
+    })
+
+    // LOCK-TRASH-12: the retention baseline is generated BEFORE the session
+    // is published to the active singleton. A defective injected clock —
+    // throwing, NaN, or Infinity (the latter two make
+    // `new Date(...).toISOString()` throw RangeError) — rejects startImport
+    // without ever stranding `activeSession`, so an immediate retry proceeds.
+    itOnDarwin(
+      'a throwing injectable clock rejects startImport without stranding the active session (LOCK-TRASH-12)',
+      async () => {
+        const failing = vi.fn(() => {
+          throw new Error('clock exploded')
+        })
+        await expect(startImport('/tmp/test.zip', { now: failing })).rejects.toThrow('clock exploded')
+        // The session was never published — nothing is stranded.
+        expect(getActiveImport()).toBeNull()
+
+        // An immediate retry with the default healthy clock proceeds.
+        const retried = await startImport('/tmp/test.zip')
+        expect(getActiveImport()).toBe(retried)
+        await retried.dispose()
+      }
+    )
+
+    itOnDarwin(
+      'a NaN injectable clock rejects startImport without stranding the active session (LOCK-TRASH-12)',
+      async () => {
+        await expect(startImport('/tmp/test.zip', { now: () => Number.NaN })).rejects.toThrow()
+        expect(getActiveImport()).toBeNull()
+
+        const retried = await startImport('/tmp/test.zip')
+        expect(getActiveImport()).toBe(retried)
+        await retried.dispose()
+      }
+    )
+
+    itOnDarwin(
+      'an Infinity injectable clock rejects startImport without stranding the active session (LOCK-TRASH-12)',
+      async () => {
+        await expect(startImport('/tmp/test.zip', { now: () => Number.POSITIVE_INFINITY })).rejects.toThrow()
+        expect(getActiveImport()).toBeNull()
+
+        const retried = await startImport('/tmp/test.zip')
+        expect(getActiveImport()).toBe(retried)
+        await retried.dispose()
+      }
+    )
   })
 
   // =========================================================================
@@ -1299,10 +1783,14 @@ describe('ChatImport index', () => {
     })
 
     itOnDarwin('passes loadMode "dev" to createIsolatedReader for dev-origin', async () => {
-      const { classifyOriginCandidates } = await import('../zipIntake')
-      vi.mocked(classifyOriginCandidates).mockReturnValueOnce({
-        kind: 'dev',
-        indexedDbDir: '/tmp/cherry-import-test/IndexedDB'
+      const { extractZip } = await import('../zipIntake')
+      vi.mocked(extractZip).mockResolvedValueOnce({
+        destDir: '/tmp/cherry-import-test',
+        indexedDbDir: '/tmp/cherry-import-test/IndexedDB',
+        entryCount: 10,
+        totalUncompressedBytes: 1024,
+        origin: { kind: 'dev', indexedDbDir: '/tmp/cherry-import-test/IndexedDB' },
+        selectedEntryCount: 3
       })
 
       const { session } = await begin()
@@ -1399,6 +1887,250 @@ describe('ChatImport index', () => {
       expect(mockSendReadPage).not.toHaveBeenCalled()
       expect(onCandidateReady).not.toHaveBeenCalled()
       expect(getActiveImport()).toBeNull()
+    })
+
+    itOnDarwin('logs a data-plane page rejection in bounded form, never source IDs (LOCK-PRIV-2)', async () => {
+      const logger = loggerHoisted.withContext('chatDbImport') as { error: ReturnType<typeof vi.fn> }
+      const secretTopic = 'secret-topic-0xDEADBEEF'
+      const secretBlock = 'secret-block-0xCAFE'
+      const plane = makePlane({
+        processPage: vi.fn(async () => {
+          throw new ChatImportDataPlaneError(
+            'OWNERSHIP_MISMATCH',
+            `message_blocks[0] (id=${secretBlock}): block.messageId 'm-wrong' does not match index owner`,
+            { tableName: 'message_blocks', entityId: secretBlock }
+          )
+        })
+      })
+      const { session } = await begin({ plane })
+      await discover(session.id)
+
+      // The rejection enters the error lifecycle and rethrows at the IPC
+      // boundary (ack { ok: false }) — the session failure log must carry
+      // ONLY the bounded code/table summary.
+      await expect(capturedCallbacks.onReadPage(session.id, page('topics', [{ id: 't1' }]))).rejects.toThrow(
+        ChatImportDataPlaneError
+      )
+      expect(session.state).toBe('error')
+
+      const failureLogs = logger.error.mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string' && call[0].includes('failed during page write')
+      )
+      expect(failureLogs).toHaveLength(1)
+      const [message] = failureLogs[0]
+      expect(message).toContain('DATA_PLANE_REJECTION(OWNERSHIP_MISMATCH, table=message_blocks)')
+      for (const leaked of [secretTopic, secretBlock, 'm-wrong', 'does not match index owner']) {
+        expect(message).not.toContain(leaked)
+      }
+
+      await session.dispose()
+    })
+
+    itOnDarwin('logs a cause-wrapped data-plane page rejection in bounded form (LOCK-PRIV-4/5)', async () => {
+      const logger = loggerHoisted.withContext('chatDbImport') as { error: ReturnType<typeof vi.fn> }
+      const secretBlock = 'secret-block-0xWrappedIndex'
+      const rejection = new ChatImportDataPlaneError(
+        'OWNERSHIP_MISMATCH',
+        `message_blocks[0] (id=${secretBlock}): block.messageId 'm-wrong' does not match index owner`,
+        { tableName: 'message_blocks', entityId: secretBlock }
+      )
+      const wrapper = new Error(`wrapped page failure containing ${secretBlock}`)
+      wrapper.cause = rejection
+      const plane = makePlane({
+        processPage: vi.fn(async () => {
+          throw wrapper
+        })
+      })
+      const { session } = await begin({ plane })
+      await discover(session.id)
+
+      await expect(capturedCallbacks.onReadPage(session.id, page('topics', [{ id: 't1' }]))).rejects.toThrow(
+        'wrapped page failure'
+      )
+      expect(session.state).toBe('error')
+
+      const failureLogs = logger.error.mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string' && call[0].includes('failed during page write')
+      )
+      expect(failureLogs).toHaveLength(1)
+      const [message] = failureLogs[0]
+      // LOCK-PRIV-5: the wrapped rejection logs ONLY the bounded summary —
+      // neither the wrapper message nor the raw detail.
+      expect(message).toContain('DATA_PLANE_REJECTION(OWNERSHIP_MISMATCH, table=message_blocks)')
+      for (const leaked of [secretBlock, 'm-wrong', 'wrapped page failure']) {
+        expect(message).not.toContain(leaked)
+      }
+
+      await session.dispose()
+    })
+
+    itOnDarwin(
+      'logs an AggregateError-contained data-plane page rejection in bounded form (LOCK-PRIV-4/5)',
+      async () => {
+        const logger = loggerHoisted.withContext('chatDbImport') as { error: ReturnType<typeof vi.fn> }
+        const secretBlock = 'secret-block-0xAggIndex'
+        const rejection = new ChatImportDataPlaneError(
+          'OWNERSHIP_MISMATCH',
+          `message_blocks[0] (id=${secretBlock}): block.messageId 'm-wrong' does not match index owner`,
+          { tableName: 'message_blocks', entityId: secretBlock }
+        )
+        const plane = makePlane({
+          processPage: vi.fn(async () => {
+            throw new AggregateError([new Error(`raw aggregate entry with ${secretBlock}`), rejection])
+          })
+        })
+        const { session } = await begin({ plane })
+        await discover(session.id)
+
+        await expect(capturedCallbacks.onReadPage(session.id, page('topics', [{ id: 't1' }]))).rejects.toThrow(
+          AggregateError
+        )
+        expect(session.state).toBe('error')
+
+        const failureLogs = logger.error.mock.calls.filter(
+          (call: unknown[]) => typeof call[0] === 'string' && call[0].includes('failed during page write')
+        )
+        expect(failureLogs).toHaveLength(1)
+        const [message] = failureLogs[0]
+        expect(message).toContain('DATA_PLANE_REJECTION(OWNERSHIP_MISMATCH, table=message_blocks)')
+        for (const leaked of [secretBlock, 'm-wrong', 'raw aggregate entry']) {
+          expect(message).not.toContain(leaked)
+        }
+
+        await session.dispose()
+      }
+    )
+
+    itOnDarwin('logs a plain wrapper error with its own message (LOCK-PRIV-5 fallback)', async () => {
+      const logger = loggerHoisted.withContext('chatDbImport') as { error: ReturnType<typeof vi.fn> }
+      const wrapper = new Error('outer generic page failure')
+      wrapper.cause = new Error('inner generic page failure')
+      const plane = makePlane({
+        processPage: vi.fn(async () => {
+          throw wrapper
+        })
+      })
+      const { session } = await begin({ plane })
+      await discover(session.id)
+
+      await expect(capturedCallbacks.onReadPage(session.id, page('topics', [{ id: 't1' }]))).rejects.toThrow(
+        'outer generic page failure'
+      )
+      expect(session.state).toBe('error')
+
+      const failureLogs = logger.error.mock.calls.filter(
+        (call: unknown[]) => typeof call[0] === 'string' && call[0].includes('failed during page write')
+      )
+      expect(failureLogs).toHaveLength(1)
+      expect(failureLogs[0][0]).toContain('outer generic page failure')
+
+      await session.dispose()
+    })
+
+    // =======================================================================
+    // Renderer-controlled value bounding at the orchestration log boundary
+    // (LOCK-PRIV-6)
+    // =======================================================================
+
+    function importLogger() {
+      return loggerHoisted.withContext('chatDbImport') as {
+        info: ReturnType<typeof vi.fn>
+        warn: ReturnType<typeof vi.fn>
+        error: ReturnType<typeof vi.fn>
+        debug: ReturnType<typeof vi.fn>
+      }
+    }
+
+    function allImportLogText(): string {
+      const logger = importLogger()
+      return [...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls]
+        .map((call) => call.map(String).join(' '))
+        .join('\n')
+    }
+
+    itOnDarwin('renderer error message and code never reach any log (LOCK-PRIV-6)', async () => {
+      const sentinel = 'SENTINEL-0xRendererMessage'
+      const { session, candidate } = await begin()
+      await discover(session.id)
+
+      await capturedCallbacks.onError(session.id, {
+        code: 'DISCOVERY_FAILED',
+        message: `secret ${sentinel}`
+      })
+
+      expect(session.state).toBe('error')
+      expect(candidate.discard).toHaveBeenCalled()
+      expect(getActiveImport()).toBeNull()
+      // The bounded fail context carries the allowlisted code family only.
+      expect(
+        importLogger().error.mock.calls.some((call) => String(call[0]).includes('renderer error [DISCOVERY_FAILED]'))
+      ).toBe(true)
+      expect(allImportLogText()).not.toContain(sentinel)
+      expect(allImportLogText()).not.toContain('secret ')
+      await session.dispose()
+    })
+
+    itOnDarwin('renderer error with an untrusted code logs static UNKNOWN (LOCK-PRIV-6)', async () => {
+      const sentinel = 'SENTINEL-0xRendererCode'
+      const { session } = await begin()
+      await discover(session.id)
+
+      await capturedCallbacks.onError(session.id, {
+        code: `DROP TABLE messages; -- ${sentinel}`,
+        message: `secret ${sentinel}`
+      })
+
+      expect(session.state).toBe('error')
+      expect(importLogger().error.mock.calls.some((call) => String(call[0]).includes('renderer error [UNKNOWN]'))).toBe(
+        true
+      )
+      expect(allImportLogText()).not.toContain(sentinel)
+      expect(allImportLogText()).not.toContain('DROP TABLE')
+      await session.dispose()
+    })
+
+    itOnDarwin('discovery table names are logged as a count, never the entries (LOCK-PRIV-6)', async () => {
+      const sentinel = 'SENTINEL-0xDiscoveryTables'
+      const { session } = await begin()
+      await capturedCallbacks.onDiscover(session.id, {
+        databaseName: 'CherryStudio',
+        nativeVersion: 110,
+        logicalVersion: 11,
+        tableNames: [`${sentinel}`, 'topics']
+      })
+
+      expect(importLogger().info.mock.calls.some((call) => String(call[0]).includes('tables=2'))).toBe(true)
+      expect(allImportLogText()).not.toContain(sentinel)
+      await session.dispose()
+    })
+
+    itOnDarwin('unexpected renderer table name logs the static unknown label (LOCK-PRIV-6)', async () => {
+      const sentinel = 'SENTINEL-0xUnexpectedTable'
+      const plane = makePlane({
+        processPage: vi.fn(async () => {
+          throw new ChatImportDataPlaneError('UNKNOWN_TABLE', 'unknown source table', { tableName: sentinel })
+        })
+      })
+      const { session } = await begin({ plane })
+      await discover(session.id)
+
+      await expect(capturedCallbacks.onReadPage(session.id, page(sentinel, [{ id: 't1' }]))).rejects.toThrow(
+        'Import data-plane rejection (UNKNOWN_TABLE)'
+      )
+
+      expect(
+        importLogger().warn.mock.calls.some((call) => String(call[0]).includes(`Unexpected table 'unknown'`))
+      ).toBe(true)
+      expect(allImportLogText()).not.toContain(sentinel)
+      // The data plane then rejects UNKNOWN_TABLE (bounded summary) and the
+      // session errors — the sentinel appears in neither log.
+      expect(session.state).toBe('error')
+      expect(
+        importLogger().error.mock.calls.some((call) =>
+          String(call[0]).includes('DATA_PLANE_REJECTION(UNKNOWN_TABLE, table=unknown)')
+        )
+      ).toBe(true)
+      await session.dispose()
     })
 
     itOnDarwin('page write failure on the LAST page does not self-complete', async () => {

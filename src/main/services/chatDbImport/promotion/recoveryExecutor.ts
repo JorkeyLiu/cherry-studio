@@ -65,6 +65,14 @@ import {
 import type { PromotionRecoveryDecision } from './recovery'
 import { decidePromotionRecovery } from './recovery'
 import { type RelaunchApp, relaunchApp } from './relaunch'
+import {
+  createInProcessReloadGuard,
+  getMainRendererWebContents,
+  type ReloadableWebContents,
+  reloadMainRenderer,
+  resolveRestartMode,
+  type RestartMode
+} from './restart'
 import { rollbackInstall } from './rollback'
 
 const logger = loggerService.withContext('chatDbImportPromotionRecoveryExecutor')
@@ -147,16 +155,23 @@ export interface RecoveryExecutorFailure {
 
 /** Result of {@link RecoveryExecutor.run}. Never rejects. */
 export type RecoveryExecutorResult =
-  | { readonly ok: true; readonly action: RecoveryActionResult; readonly decision: PromotionRecoveryDecision }
+  | {
+      readonly ok: true
+      readonly action: RecoveryActionResult
+      readonly decision: PromotionRecoveryDecision
+      /**
+       * True when the executor requested an in-process main renderer reload
+       * (LOCK-PROD-7 non-packaged path) instead of an app relaunch. The
+       * process does NOT exit; the pending one-shot projection applies on
+       * rehydration. Absent/false for the packaged `relaunch` path.
+       */
+      readonly inProcessReload?: boolean
+    }
   | {
       readonly ok: false
       readonly failure: RecoveryExecutorFailure
       readonly decision: PromotionRecoveryDecision | null
     }
-
-// ---------------------------------------------------------------------------
-// Injection surfaces
-// ---------------------------------------------------------------------------
 
 /**
  * Narrow live ChatDbService surface the recovery executor needs. The
@@ -185,6 +200,18 @@ export interface RecoveryExecutionPrimitives {
   rollbackInstall: typeof rollbackInstall
   relaunch: typeof relaunchApp
   /**
+   * LOCK-PROD-7 restart strategy. Production default resolves from
+   * `app.isPackaged` (packaged → relaunch; non-packaged → in-process
+   * renderer reload).
+   */
+  restartMode: () => RestartMode
+  /**
+   * LOCK-PROD-7 in-process renderer reload primitive. Production default
+   * reloads the registered main renderer webContents (bounded no-op when
+   * unavailable); tests inject a double.
+   */
+  reloadRenderer: (ownerId: string) => { ok: true; reloaded: boolean }
+  /**
    * Durable repair marker write primitive. LOCK-4437: must durably write
    * the repair marker before reporting success. Production default calls
    * chatDbService.markRepairRequiredBeforeInit().
@@ -212,6 +239,17 @@ export interface RecoveryExecutorOptions {
   primitives?: Partial<RecoveryExecutionPrimitives>
   /** App surface for relaunch (default: electron app). */
   relaunchApp?: RelaunchApp
+  /**
+   * LOCK-PROD-7 restart strategy override. Defaults to packaged → relaunch,
+   * non-packaged → in-process renderer reload.
+   */
+  restartMode?: RestartMode
+  /**
+   * LOCK-PROD-7 in-process reload target. Production default uses the
+   * module-registered main renderer webContents (see
+   * {@link registerMainRendererWebContents}); tests inject a double.
+   */
+  mainRendererWebContents?: ReloadableWebContents | null
   /** Topics/segments sampled for rollback validation (default 3). */
   sampleCount?: number
   /** Cooperative abort signal. */
@@ -232,6 +270,24 @@ export function createRecoveryExecutor(options: RecoveryExecutorOptions): Recove
   const liveDb = options.liveDb
   const coordinator = options.coordinator ?? getSharedMaintenanceCoordinator()
 
+  // LOCK-PROD-7: restart strategy. Explicit option wins; otherwise resolve
+  // from `app.isPackaged` (lazy require keeps this module testable without
+  // electron). Packaged → relaunch; non-packaged → in-process renderer reload.
+  const restartMode =
+    options.restartMode ??
+    (() => {
+      try {
+        const { app } = require('electron') as { app: { isPackaged: boolean } }
+        return resolveRestartMode(app)
+      } catch {
+        // Electron unavailable (pure-Node tests): preserve the pre-existing
+        // default of the packaged relaunch path. Non-packaged dev/E2E always
+        // runs under Electron, where `app.isPackaged` resolves correctly to
+        // 'in-process-reload' — this fallback never fires there.
+        return 'relaunch' as const
+      }
+    })()
+
   const primitives: RecoveryExecutionPrimitives = {
     probe: options.primitives?.probe ?? probePromotionArtifacts,
     decide: options.primitives?.decide ?? decidePromotionRecovery,
@@ -242,6 +298,21 @@ export function createRecoveryExecutor(options: RecoveryExecutorOptions): Recove
       options.primitives?.cleanupReplacementVerified ?? cleanupPromotionJournalAfterReplacementVerified,
     rollbackInstall: options.primitives?.rollbackInstall ?? rollbackInstall,
     relaunch: options.primitives?.relaunch ?? relaunchApp,
+    restartMode: options.primitives?.restartMode ?? (() => restartMode),
+    // LOCK-FR3: per-recovery exact-once reload guard. Each executor may
+    // request the in-process renderer reload at most once; a later
+    // independent executor (a second import in the same process) owns a
+    // fresh guard and may reload again. Stale/duplicate settlement from the
+    // same recovery cannot re-request the reload.
+    reloadRenderer:
+      options.primitives?.reloadRenderer ??
+      (() => {
+        const reloadGuard = createInProcessReloadGuard()
+        return (ownerId: string) => {
+          const target = options.mainRendererWebContents ?? getMainRendererWebContents()
+          return reloadMainRenderer(target, ownerId, reloadGuard)
+        }
+      })(),
     markRepairRequiredBeforeInit:
       options.primitives?.markRepairRequiredBeforeInit ??
       (() => {
@@ -382,7 +453,7 @@ export function createRecoveryExecutor(options: RecoveryExecutorOptions): Recove
     }
 
     // ====================================================================
-    // 6. RELAUNCH — exact-once after verified authoritative live + cleanup
+    // 6. RESTART — exact-once after verified authoritative live + cleanup
     // ====================================================================
     if (decision.action === 'accept-verified-replacement' || decision.action === 'restore-rollback-snapshot') {
       currentSubphase = 'relaunching'
@@ -392,6 +463,36 @@ export function createRecoveryExecutor(options: RecoveryExecutorOptions): Recove
       }
 
       try {
+        if (primitives.restartMode() === 'in-process-reload') {
+          // LOCK-PROD-7: non-packaged mode must NOT app.relaunch() (a dev
+          // relaunch would land on a dead Vite server). Instead request an
+          // in-process main renderer reload — the process stays alive, the
+          // installed/reopened/verified chat.db is already live, and the
+          // one-shot navigation projection applies on rehydration.
+          const reloadResult = primitives.reloadRenderer('recovery-executor')
+          if (reloadResult.ok) {
+            currentSubphase = 'settled'
+            releaseAuthorization(authorization)
+            logger.info(
+              `Recovery settled with in-process renderer reload: action=${decision.action}, ` +
+                `reason=${decision.reason}, reloaded=${reloadResult.reloaded}`
+            )
+            return Object.freeze({
+              ok: true as const,
+              action: actionResult,
+              decision,
+              inProcessReload: true
+            })
+          }
+          // The reload primitive returned a non-ok result. The process keeps
+          // running in non-packaged mode, so release any held authorization
+          // (fresh lease / terminal ownership) before surfacing the failure —
+          // otherwise the lease leaks for the remainder of the session.
+          releaseAuthorization(authorization)
+          return failRecovery('RELAUNCH_FAILED', 'IN_PROCESS_RELOAD_RETURNED', null)
+        }
+
+        // Packaged mode: reliable exact-once app.relaunch() (unchanged).
         const { mintRelaunchReceipt } = await import('./relaunch')
         const receipt = mintRelaunchReceipt('recovery-executor')
         const relaunchResult = primitives.relaunch(receipt, options.relaunchApp)

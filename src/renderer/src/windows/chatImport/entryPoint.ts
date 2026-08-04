@@ -31,7 +31,13 @@
 
 import { cloneForWire } from '@renderer/utils/jsonWire'
 import type { JsonObject } from '@shared/chatDb/types'
-import type { ChatImportEnvelope, DiscoveryResult, ReadPageResponse, SourceReadStats } from '@shared/chatImport/types'
+import type {
+  ChatImportEnvelope,
+  ChatImportProjectionPayload,
+  DiscoveryResult,
+  ReadPageResponse,
+  SourceReadStats
+} from '@shared/chatImport/types'
 import type { LogLevel } from '@shared/config/logger'
 
 // ---------------------------------------------------------------------------
@@ -43,6 +49,13 @@ const DEFAULT_PAGE_SIZE = 500
 
 /** Per-page timeout in milliseconds. */
 const DEFAULT_PAGE_TIMEOUT_MS = 120_000
+
+/**
+ * Source redux-persist localStorage key (LOCK-PROD-2). The import renderer
+ * runs on the same origin as the source profile, so `localStorage` reads the
+ * exact source `persist:cherry-studio` entry (file:// or dev origin).
+ */
+const PERSISTED_STATE_KEY = 'persist:cherry-studio'
 
 /** Native version threshold for future-version rejection (R-4). */
 const FUTURE_NATIVE_VERSION = 120
@@ -80,6 +93,7 @@ declare global {
       readPageResult: (envelope: ChatImportEnvelope<ReadPageResponse>) => Promise<{ ok: boolean; error?: string }>
       complete: (envelope: ChatImportEnvelope<SourceReadStats>) => void
       error: (envelope: ChatImportEnvelope<{ code: string; message: string }>) => void
+      localStorageProjection: (envelope: ChatImportEnvelope<ChatImportProjectionPayload>) => void
       log: (level: LogLevel, message: string, data?: unknown[]) => void
       onDiscover: (callback: (sessionId: string) => void) => () => void
       onReadPage: (
@@ -358,6 +372,12 @@ export interface ChatImportBootOptions {
   openDb?: () => Promise<unknown>
   /** DB closure used by per-page close and the shared cleanup path. Defaults to {@link closeDb}. */
   closeDb?: () => Promise<void>
+  /**
+   * Source Local Storage `persist:cherry-studio` reader (LOCK-PROD-2).
+   * Defaults to the real `localStorage.getItem`; tests inject a double.
+   * Returns null when absent/unavailable.
+   */
+  readPersistedState?: () => string | null
 }
 
 /**
@@ -383,6 +403,15 @@ export async function boot(api: ChatImportBridge, options: ChatImportBootOptions
   const discoverImpl = options.discover ?? runDiscovery
   const openDbImpl = options.openDb ?? openDb
   const closeDbImpl = options.closeDb ?? closeDb
+  const readPersistedStateImpl =
+    options.readPersistedState ??
+    ((): string | null => {
+      try {
+        return localStorage.getItem(PERSISTED_STATE_KEY)
+      } catch {
+        return null
+      }
+    })
 
   // R-3/LOCK-DEV-3: Verify origin before any IDB operation.
   // Accepts file: (existing) or exact http://localhost:5173 dev origin.
@@ -442,6 +471,16 @@ export async function boot(api: ChatImportBridge, options: ChatImportBootOptions
   cleanupDiscover = api.onDiscover(async (sessionId) => {
     activeSessionId = sessionId
     try {
+      // LOCK-PROD-2: report the source Local Storage navigation metadata
+      // before (or in parallel with) discovery. Fire-and-forget — Main
+      // parses/validates it; a missing bridge method degrades to no-op.
+      try {
+        const persist = readPersistedStateImpl()
+        api.localStorageProjection(makeEnvelope('discovery', { persist }))
+      } catch (error) {
+        chatImportLogger.error(`[chatImport] Local Storage projection read failed: ${String(error)}`)
+      }
+
       const result = await discoverImpl()
       // LOCK-RP3/RP4: discovery succeeded — subsequent read requests are
       // allowed to (re)open the DB. When discovery fails (missing DB, future

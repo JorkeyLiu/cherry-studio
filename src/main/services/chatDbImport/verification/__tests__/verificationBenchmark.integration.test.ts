@@ -1,13 +1,17 @@
 /**
  * Phase 4.3.4 verification benchmark — deterministic 10,000-message
- * candidate verified end-to-end with real SQLite (LOCK-4301…4305).
+ * candidate verified end-to-end with real SQLite (LOCK-4301…4305,
+ * LOCK-SP-1..4).
  *
  * Builds the SAME 10k source stream as the Phase 4.2 import benchmark
  * through the real Phase 4.2 path (CandidateDbResource + real migrations +
  * createImportDataPlane), finalizes the manifest from the SAME data plane,
  * seals the candidate, then proves:
- * - all 13 verification dimensions pass with zero diagnostics at 10k scale,
- * - per-dimension checked counts match the fixture arithmetic,
+ * - all 14 verification dimensions pass with zero diagnostics at 10k scale,
+ * - per-dimension checked counts match the fixture arithmetic (including
+ *   dimension ⑭ `search_projection`: object inventory + count parity +
+ *   canonical↔normalized merge + exact FTS↔normalized ordered merge +
+ *   MATCH smoke, LOCK-SP-1..4),
  * - measured wall-clock verification time (test evidence only — a generous
  *   hang ceiling, NOT a production performance threshold),
  * - approximate manifest memory via serialized evidence size, proving the
@@ -98,7 +102,7 @@ describe('chatDbImport Phase 4.3.4 — 10k-message candidate verification benchm
   })
 
   it(
-    'verifies all 13 dimensions pass on the 10k candidate with measured time and bounded evidence',
+    'verifies all 14 dimensions pass on the 10k candidate with measured time and bounded evidence',
     async () => {
       // LOCK-RS3: capture the sealed main-DB bytes BEFORE the readonly
       // verifier open so reseal is proven byte-stable across the roundtrip.
@@ -112,7 +116,7 @@ describe('chatDbImport Phase 4.3.4 — 10k-message candidate verification benchm
       expect(elapsedMs).toBeGreaterThan(0)
       expect(elapsedMs).toBeLessThan(BENCHMARK_CEILING_MS)
 
-      // --- All 13 dimensions pass with zero/bounded diagnostics ---
+      // --- All 14 dimensions pass with zero/bounded diagnostics ---
       expect(report.status).toBe('pass')
       expect(report.fatal).toBeNull()
       expect(report.dimensions.map((d) => d.dimension)).toEqual([...VERIFICATION_DIMENSIONS])
@@ -137,6 +141,13 @@ describe('chatDbImport Phase 4.3.4 — 10k-message candidate verification benchm
       )
       expect(dim('integrity_check').checkedCount).toBe(1)
       expect(dim('sample_reads').checkedCount).toBeGreaterThan(0)
+      // LOCK-SP-1..4: dimension ⑭ scans the derived search projection fully.
+      // Every base block is MAIN_TEXT with content → the canonical predicate
+      // count is TOTAL_MESSAGES (tool/file/image extras are excluded).
+      // 6 objects + 2 count pairs + TOTAL_MESSAGES×2 (message_id + content
+      // merge) + TOTAL_MESSAGES (exact normalized↔FTS ordered merge rows) +
+      // 1 merge count parity + 1 MATCH smoke.
+      expect(dim('search_projection').checkedCount).toBe(6 + 2 + TOTAL_MESSAGES * 2 + TOTAL_MESSAGES + 1 + 1)
 
       // --- Manifest counts mirror the candidate exactly (LOCK-4301) ---
       expect(manifest.topics.count).toBe(TOPIC_COUNT)
@@ -176,7 +187,9 @@ describe('chatDbImport Phase 4.3.4 — 10k-message candidate verification benchm
       reread.close()
 
       bench(
-        `10k verification (13 dimensions): ${elapsedMs.toFixed(1)} ms — ` +
+        `10k verification (14 dimensions): ${elapsedMs.toFixed(1)} ms — ` +
+          `search_projection scan: ${TOTAL_MESSAGES} canonical + ${TOTAL_MESSAGES} normalized + ` +
+          `${TOTAL_MESSAGES} FTS rows (${dim('search_projection').checkedCount} comparisons, exact merge) — ` +
           `manifest evidence ${(serializedManifest.length / 1024).toFixed(1)} KiB serialized ` +
           `(${totalEntities} entity entries), report ${(serializedReport.length / 1024).toFixed(1)} KiB`
       )

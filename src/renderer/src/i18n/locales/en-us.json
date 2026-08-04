@@ -2042,6 +2042,10 @@
         "success": "Import completed successfully! The application will restart.",
         "unsupported": "Platform not supported"
       },
+      "recovered": {
+        "assistant_name": "Recovered conversations",
+        "topic_name": "Recovered conversation {{index}}"
+      },
       "select_button": "Select File",
       "select_file": "Select Cherry Studio ZIP Backup",
       "steps": {
@@ -2059,6 +2063,7 @@
         "description": "Cherry Studio ZIP import is currently only supported on macOS. Your current platform is not yet supported.",
         "title": "Platform Not Supported"
       },
+      "untitled_topic": "Untitled Topic",
       "warning": {
         "description": "This import will replace all existing chat data. Make sure you have a backup of your current data if needed.",
         "title": "Replace All"
