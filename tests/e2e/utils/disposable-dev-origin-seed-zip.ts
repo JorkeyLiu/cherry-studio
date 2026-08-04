@@ -3,12 +3,15 @@
  * Cherry Studio import E2E (LOCK-DEV-1..8).
  *
  * Produces a REPRODUCIBLY generated disposable source ZIP containing only
- * the `IndexedDB/` tree of a Chromium profile whose `CherryStudio`
- * IndexedDB was created under the EXACT origin `http://localhost:5173`.
+ * the `IndexedDB/` origin tree and the `Local Storage/leveldb/` subtree of
+ * a Chromium profile whose `CherryStudio` IndexedDB and `persist:cherry-studio`
+ * Local Storage were created under the EXACT origin `http://localhost:5173`.
  *
  * Chromium naturally maps this origin to the LevelDB directory name
  * `http_localhost_5173.indexeddb.leveldb` — no rename, no copy, no
- * file__0 transformation (LOCK-DEV-1/2).
+ * file__0 transformation (LOCK-DEV-1/2). Local Storage is a single shared
+ * per-profile LevelDB (`Local Storage/leveldb`); the seed profile only ever
+ * loads the dev origin, so that LevelDB holds no unrelated-origin data.
  *
  * The seed:
  *   1. Starts a minimal HTTP server on port 5173 serving a blank page
@@ -19,15 +22,26 @@
  *   3. The seed page CREATES the CherryStudio IndexedDB with the correct
  *      Dexie v11 schema (native version 110) via raw onupgradeneeded,
  *      then seeds realistic data and padding records.
- *   4. Closes the app (flushes LevelDB to disk).
- *   5. Asserts the origin directory is EXACTLY
- *      `http_localhost_5173.indexeddb.leveldb` under `IndexedDB/`.
- *   6. Zips the `IndexedDB/` subtree WITHOUT rename/copy.
+ *   4. The same page seeds the version-215 redux-persist
+ *      `persist:cherry-studio` Local Storage payload in the REAL wire
+ *      representation (LOCK-FF1: each slice value is a JSON string, exactly
+ *      as `createPersistoid` writes it; minimal synthetic
+ *      one-assistant/one-topic navigation metadata) and pads the Local
+ *      Storage commit path so the payload is durably written before the
+ *      graceful close finalizes the LevelDB flush (LOCK-D2).
+ *   5. Closes the app (flushes both LevelDBs to disk).
+ *   6. Asserts the origin directory is EXACTLY
+ *      `http_localhost_5173.indexeddb.leveldb` under `IndexedDB/`, and that
+ *      `Local Storage/leveldb` exists with a valid `CURRENT` marker.
+ *   7. Zips ONLY the `IndexedDB/<origin>/` and `Local Storage/leveldb/`
+ *      subtrees WITHOUT rename/copy — no unrelated roots/origins enter.
  *
  * LOCK-DEV-1: Origin must be exact `http://localhost:5173`.
  * LOCK-DEV-2: Directory must be exact `http_localhost_5173.indexeddb.leveldb`.
  * LOCK-DEV-8: No file__0 rename/copy; the ZIP contains the natural Chromium
  *             directory structure.
+ * LOCK-D2:    Local Storage projection is `persist:cherry-studio` with
+ *             redux-persist version 215 and minimal assistants/topic metadata.
  *
  * Port ownership: fails immediately if port 5173 is occupied by an unowned
  * process (LOCK-DEV-7). No broad process killing.
@@ -60,6 +74,14 @@ export const SEED_NATIVE_VERSION = 110
  * then appending `.indexeddb.leveldb`.
  */
 export const DEV_ORIGIN_DIR = 'http_localhost_5173.indexeddb.leveldb'
+/**
+ * LOCK-PROD-8: ZIP root of the Local Storage LevelDB subtree production
+ * selectively extracts for the navigation projection. Local Storage is a
+ * single shared per-profile LevelDB; the disposable seed profile only ever
+ * loads the dev origin, so this LevelDB holds no unrelated-origin data.
+ */
+export const DEV_LOCAL_STORAGE_ROOT = 'Local Storage/leveldb'
+
 /** Production Dexie v11 table names required for discovery. */
 export const SEED_REQUIRED_STORES = ['topics', 'message_blocks', 'topic_segments', 'files'] as const
 
@@ -76,9 +98,83 @@ export const SOURCE_IDS = {
   file: 'f-e2e-dev-1'
 } as const
 
+// ---------------------------------------------------------------------------
+// Local Storage projection constants (LOCK-D2)
+//
+// Deterministic expected UI metadata for the seeded navigation projection.
+// Downstream projection/in-process-reload E2E specs assert the post-import
+// UI against these exact values.
+// ---------------------------------------------------------------------------
+
+/** Exact redux-persist localStorage key (LOCK-PROD-2). */
+export const SEED_PERSIST_KEY = 'persist:cherry-studio'
+
+/** redux-persist version written by production (src/renderer/src/store/index.ts). */
+export const SEED_PERSIST_VERSION = 215
+
+/** Synthetic assistant id for the one-assistant projection. */
+export const DEV_ASSISTANT_ID = 'a-e2e-dev-1'
+
+/** Expected UI display name of the seeded assistant. */
+export const DEV_ASSISTANT_NAME = 'Dev Origin Seed Assistant'
+
+/** Expected UI emoji of the seeded assistant. */
+export const DEV_ASSISTANT_EMOJI = '🧪'
+
+/** Seeded topic id — EXACTLY the existing dev IndexedDB topic id (LOCK-D1). */
+export const DEV_TOPIC_ID = SOURCE_IDS.topic
+
+/** Expected UI display name of the seeded topic. */
+export const DEV_TOPIC_NAME = 'Dev Origin Seed Topic'
+
+/** Expected UI created-at of the seeded topic (matches IDB seed timestamps). */
+export const DEV_TOPIC_CREATED_AT = '2026-07-31T00:00:00.000Z'
+
+/** Expected UI updated-at of the seeded topic. */
+export const DEV_TOPIC_UPDATED_AT = DEV_TOPIC_CREATED_AT
+
+/** Seeded topic order within its assistant (single-topic list → 0). */
+export const DEV_TOPIC_ORDER = 0
+
+/**
+ * Deterministic expected UI navigation metadata of the seeded projection.
+ * Grouped for downstream E2E assertion ergonomics.
+ */
+export const DEV_NAV_METADATA = {
+  persistKey: SEED_PERSIST_KEY,
+  persistVersion: SEED_PERSIST_VERSION,
+  assistant: { id: DEV_ASSISTANT_ID, name: DEV_ASSISTANT_NAME, emoji: DEV_ASSISTANT_EMOJI },
+  topic: {
+    id: DEV_TOPIC_ID,
+    name: DEV_TOPIC_NAME,
+    createdAt: DEV_TOPIC_CREATED_AT,
+    updatedAt: DEV_TOPIC_UPDATED_AT,
+    deletedAt: null,
+    pinned: false,
+    isNameManuallyEdited: true,
+    order: DEV_TOPIC_ORDER
+  }
+} as const
+
 /** Padding records in the import-ignored `settings` store (LevelDB flush). */
 const PAD_SETTINGS_COUNT = 700
 const PAD_SETTINGS_VALUE_BYTES = 12_000
+
+/**
+ * Local Storage LevelDB flush padding (LOCK-D2): the persist key is written
+ * FIRST, then enough synthetic keys are appended to force a real committed
+ * write batch through Chromium's debounced Local Storage commit path (the
+ * LevelDB WAL) before the graceful app close finalizes the flush to disk.
+ * The padding keys are removed before close so the disposable origin's Local
+ * Storage holds only the minimal persist projection (removals are inert
+ * tombstones). 4 MiB total stays well under the Chromium per-origin Local
+ * Storage quota. The persist key's durability is finalized by the graceful
+ * close (LevelDB WAL + OS flush on process exit); the observed `.ldb` count
+ * is diagnostic only — production reads this subtree through Chromium, which
+ * replays the WAL.
+ */
+const PAD_LS_KEYS = 8
+const PAD_LS_VALUE_BYTES = 512 * 1024
 
 const PROFILE_PREFIX = 'cherry-e2e-dev-seed-'
 
@@ -126,6 +222,28 @@ export interface DevOriginSeedZipEvidence {
    * requirement being met.
    */
   readbackUndefinedEvidence: ReadbackUndefinedEvidence[]
+  /** LOCK-D2: seeded redux-persist Local Storage key (exact persist:cherry-studio). */
+  persistKey: string
+  /** LOCK-D2: byte length of the seeded `persist:cherry-studio` payload. */
+  persistPayloadLength: number
+  /** LOCK-D2: whether the persist key read back byte-identical after seeding. */
+  persistReadbackEqual: boolean
+  /** LOCK-D2: synthetic padding keys written to force the LS LevelDB flush. */
+  localStoragePaddingCount: number
+  /** Number of LevelDB table files (.ldb) under Local Storage/leveldb after close. */
+  localStorageLdbFileCount: number
+  /** Whether the produced ZIP contains the Local Storage/leveldb subtree. */
+  zipHasLocalStorage: boolean
+  /** Number of Local Storage/leveldb file entries in the produced ZIP. */
+  zipLocalStorageEntryCount: number
+  /** Local Storage/leveldb entry names from the produced ZIP (pre-flight sample). */
+  zipLocalStorageEntriesSample: string[]
+  /**
+   * True when EVERY non-directory ZIP entry lives under exactly
+   * `IndexedDB/<dev origin>/` or `Local Storage/leveldb/` — no unrelated
+   * roots (Data/, chat.db, other origins) enter the container.
+   */
+  zipAllEntriesUnderAllowedRoots: boolean
 }
 
 /**
@@ -708,12 +826,195 @@ async function seedIndexedDb(page: Page): Promise<SeedEvaluateResult> {
 }
 
 // ---------------------------------------------------------------------------
+// Local Storage projection (LOCK-D2)
+//
+// The seed page also writes the version-215 redux-persist
+// `persist:cherry-studio` payload. The payload carries the REAL redux-persist
+// wire representation (LOCK-FF1): an outer JSON object whose `_persist` and
+// `assistants` values are each the JSON string of that slice's state —
+// exactly what `createPersistoid` writes with the default serializer
+// (verified against the installed redux-persist@6.0.0 createPersistoid). The
+// decoded synthetic nested-object shape would be a false-positive fixture.
+// Only synthetic minimal navigation metadata is included — never assistant
+// behavior configuration (LOCK-PROD-2).
+// ---------------------------------------------------------------------------
+
+/**
+ * Tiny local mirror of redux-persist's default serializer
+ * (`createPersistoid` `defaultSerialize` = `JSON.stringify`, verified against
+ * the installed redux-persist@6.0.0 implementation). Deliberately duplicated
+ * into the file-origin builder too — no renderer store is ever imported, and
+ * sharing across builders would require editing a third file (LOCK-FF1 scope).
+ */
+function serializePersistSlice(slice: unknown): string {
+  return JSON.stringify(slice)
+}
+
+/**
+ * Serialize a staged slice map to the exact redux-persist wire value: every
+ * persisted slice (including `_persist`) is JSON-stringified individually,
+ * then the whole staged map is JSON-stringified — byte-identical to what
+ * `createPersistoid.writeStagedState` writes to localStorage (LOCK-FF1).
+ */
+function serializePersistWire(staged: Record<string, unknown>): string {
+  const encoded: Record<string, string> = {}
+  for (const [key, slice] of Object.entries(staged)) {
+    encoded[key] = serializePersistSlice(slice)
+  }
+  return JSON.stringify(encoded)
+}
+
+/**
+ * Decode a raw redux-persist wire value back into its slice map: outer JSON
+ * parse, then an inner JSON parse of each string-valued slice (LOCK-FF1).
+ * Exported for the focused tests to assert the raw wire representation
+ * round-trips to the expected structures. Throws on malformed input.
+ */
+export function parsePersistWireValue(raw: string): Record<string, unknown> {
+  const root = JSON.parse(raw) as Record<string, unknown>
+  const decoded: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(root)) {
+    decoded[key] = typeof value === 'string' ? (JSON.parse(value) as unknown) : value
+  }
+  return decoded
+}
+
+/**
+ * Build the deterministic version-215 `persist:cherry-studio` payload in the
+ * REAL redux-persist wire representation (LOCK-FF1). The single assistant
+ * carries one topic whose id EXACTLY matches the seeded IndexedDB topic
+ * (`t-e2e-dev-1`); its name/timestamps are the exported expected-UI
+ * constants. Topic/assistant order are positional in production (order 0 / 0).
+ *
+ * Exported so downstream projection E2E specs can assert the isolated
+ * renderer's raw read is byte-identical to what the seed produced.
+ */
+export function buildDevOriginPersistPayload(): string {
+  return serializePersistWire({
+    _persist: { version: SEED_PERSIST_VERSION, rehydrated: true },
+    assistants: {
+      defaultAssistant: {},
+      assistants: [
+        {
+          id: DEV_ASSISTANT_ID,
+          name: DEV_ASSISTANT_NAME,
+          emoji: DEV_ASSISTANT_EMOJI,
+          topics: [
+            {
+              id: DEV_TOPIC_ID,
+              assistantId: DEV_ASSISTANT_ID,
+              name: DEV_TOPIC_NAME,
+              createdAt: DEV_TOPIC_CREATED_AT,
+              updatedAt: DEV_TOPIC_UPDATED_AT,
+              deletedAt: null,
+              pinned: false,
+              isNameManuallyEdited: true
+            }
+          ]
+        }
+      ],
+      tagsOrder: [],
+      collapsedTags: {},
+      presets: [],
+      unifiedListOrder: []
+    }
+  })
+}
+
+/** Evidence returned by {@link seedLocalStorage} (cross-process safe JSON). */
+interface LocalStorageSeedResult {
+  /** Exact redux-persist key written. */
+  persistKey: string
+  /** Byte length of the seeded payload string. */
+  persistPayloadLength: number
+  /** Whether the persist key read back byte-identical after seeding. */
+  persistReadbackEqual: boolean
+  /** Padding keys actually written (may degrade on quota exhaustion). */
+  paddingCount: number
+}
+
+/**
+ * Seed Local Storage for the dev origin inside the seed app renderer:
+ *   1. Write the exact `persist:cherry-studio` key.
+ *   2. Pad with synthetic keys to force a real committed write batch through
+ *      Chromium's debounced Local Storage commit path (LOCK-D2 flush). The
+ *      durable disk state is finalized by the graceful app close afterwards.
+ *   3. Read the persist key back and assert byte-identical round-trip.
+ *   4. Remove the padding keys so the disposable origin's Local Storage
+ *      contains only the minimal projection (tombstones are inert).
+ *
+ * Graceful app close afterwards flushes Local Storage LevelDB to disk.
+ */
+async function seedLocalStorage(page: Page): Promise<LocalStorageSeedResult> {
+  return page.evaluate(
+    async ({ persistKey, payload, padCount, padBytes }) => {
+      // Step 1: exact persist key (LOCK-PROD-2 reads precisely this key).
+      localStorage.setItem(persistKey, payload)
+
+      // Step 2: force a real committed write batch through Chromium's
+      // debounced Local Storage commit path (LOCK-D2 flush). On quota
+      // exhaustion we degrade gracefully — the graceful-close flush still
+      // durably commits the WAL.
+      const padValue = 'x'.repeat(padBytes)
+      let paddingCount = 0
+      try {
+        for (let i = 0; i < padCount; i++) {
+          localStorage.setItem(`__cherry_e2e_pad_${String(i).padStart(4, '0')}`, `${i}:${padValue}`)
+          paddingCount++
+        }
+      } catch {
+        // QuotaExceededError or similar — stop padding, keep going.
+      }
+
+      // Step 3: byte-identical readback of the exact key.
+      const readback = localStorage.getItem(persistKey)
+      const persistReadbackEqual = readback === payload
+
+      // Step 4: remove the padding keys (inert tombstones — the persist key
+      // was written first and is never touched by removals).
+      try {
+        for (let i = 0; i < paddingCount; i++) {
+          localStorage.removeItem(`__cherry_e2e_pad_${String(i).padStart(4, '0')}`)
+        }
+      } catch {
+        // Removal failure is inert — padding keys are never read by import.
+      }
+
+      return {
+        persistKey,
+        persistPayloadLength: payload.length,
+        persistReadbackEqual,
+        paddingCount
+      }
+    },
+    {
+      persistKey: SEED_PERSIST_KEY,
+      payload: buildDevOriginPersistPayload(),
+      padCount: PAD_LS_KEYS,
+      padBytes: PAD_LS_VALUE_BYTES
+    }
+  )
+}
+
+// ---------------------------------------------------------------------------
 // ZIP production + pre-flight
 // ---------------------------------------------------------------------------
 
-function produceIndexedDbZip(profileDevDir: string, zipPath: string): { originDir: string; ldbFileCount: number } {
+/**
+ * Produce the seed ZIP from the disposable profile. Materializes EXACTLY two
+ * Chromium subtrees (LOCK-PROD-8 selective extraction contract):
+ *   - `IndexedDB/<dev origin>/`   (LOCK-DEV-2 exact directory, .ldb required)
+ *   - `Local Storage/leveldb/`    (projection data; valid CURRENT marker)
+ * Nothing else in the profile (Data/, GPUCache, Session Storage, other
+ * origins) enters the ZIP.
+ */
+function produceSeedZip(
+  profileDevDir: string,
+  zipPath: string
+): { originDir: string; ldbFileCount: number; localStorageLdbFileCount: number } {
   const idbDir = path.join(profileDevDir, 'IndexedDB')
   const originDir = path.join(idbDir, DEV_ORIGIN_DIR)
+  const localStorageLeveldbDir = path.join(profileDevDir, 'Local Storage', 'leveldb')
 
   // LOCK-DEV-2: Assert the origin directory EXACTLY matches before proceeding.
   if (!fs.existsSync(originDir)) {
@@ -738,14 +1039,35 @@ function produceIndexedDbZip(profileDevDir: string, zipPath: string): { originDi
     )
   }
 
+  // LOCK-D2: the seeded Local Storage LevelDB must exist with a valid
+  // `CURRENT` marker (LevelDB openability). The persist key was written
+  // inside the seed page, so absence means the write never committed.
+  if (!fs.existsSync(localStorageLeveldbDir)) {
+    throw new Error(
+      `[E2E] LOCK-D2 VIOLATION: Expected Local Storage leveldb directory ` +
+        `"${localStorageLeveldbDir}" does not exist — the persist:cherry-studio ` +
+        `projection was seeded but Chromium did not materialize Local Storage. ` +
+        `Profile Local Storage parent: ${fs.existsSync(path.join(profileDevDir, 'Local Storage')) ? 'exists' : 'absent'}`
+    )
+  }
+  const lsFiles = fs.readdirSync(localStorageLeveldbDir)
+  if (!lsFiles.includes('CURRENT')) {
+    throw new Error(
+      `[E2E] LOCK-D2 VIOLATION: Local Storage leveldb at ${localStorageLeveldbDir} ` +
+        `has no CURRENT marker (invalid LevelDB): ${lsFiles.join(', ') || '(empty)'}`
+    )
+  }
+  const localStorageLdbFileCount = lsFiles.filter((f) => f.endsWith('.ldb')).length
+
   const zip = new AdmZip()
   zip.addLocalFolder(idbDir, 'IndexedDB')
+  zip.addLocalFolder(localStorageLeveldbDir, DEV_LOCAL_STORAGE_ROOT)
   zip.writeZip(zipPath)
 
   if (!fs.existsSync(zipPath) || fs.statSync(zipPath).size === 0) {
     throw new Error(`Seed ZIP was not produced at ${zipPath}`)
   }
-  return { originDir: DEV_ORIGIN_DIR, ldbFileCount }
+  return { originDir: DEV_ORIGIN_DIR, ldbFileCount, localStorageLdbFileCount }
 }
 
 interface ZipPreflightResult {
@@ -753,12 +1075,21 @@ interface ZipPreflightResult {
   allEntriesUnderOrigin: boolean
   ldbEntryCount: number
   sample: string[]
+  localStorageEntryCount: number
+  localStorageLdbEntryCount: number
+  localStorageEntriesSample: string[]
+  allEntriesUnderAllowedRoots: boolean
 }
 
 /**
- * Pre-flight the produced ZIP (LOCK-T4): EVERY `IndexedDB/` entry must live
- * under the expected origin directory, and at least one `.ldb` table entry
- * must exist inside that origin.
+ * Pre-flight the produced ZIP (LOCK-T4):
+ * - EVERY `IndexedDB/` entry must live under the expected origin directory,
+ *   and at least one `.ldb` table entry must exist inside that origin.
+ * - The `Local Storage/leveldb/` subtree must be present with a `CURRENT`
+ *   marker and at least one file entry (LOCK-D2).
+ * - EVERY non-directory entry must live under exactly
+ *   `IndexedDB/<origin>/` or `Local Storage/leveldb/` — no unrelated roots
+ *   (Data/, chat.db, other origins) enter the container.
  */
 async function preflightZipEntries(zipPath: string, originDirName: string): Promise<ZipPreflightResult> {
   const zip = new StreamZip.async({ file: zipPath })
@@ -766,6 +1097,7 @@ async function preflightZipEntries(zipPath: string, originDirName: string): Prom
     const entries = await zip.entries()
     const names = Object.keys(entries)
     const originPrefix = `IndexedDB/${originDirName}/`
+    const localStoragePrefix = `${DEV_LOCAL_STORAGE_ROOT}/`
     const indexedDbEntries = names.filter((n) => n.startsWith('IndexedDB/'))
     const outsideOrigin = indexedDbEntries.filter((n) => !n.startsWith(originPrefix))
     if (outsideOrigin.length > 0) {
@@ -780,11 +1112,46 @@ async function preflightZipEntries(zipPath: string, originDirName: string): Prom
         `Seed ZIP has no .ldb table entry inside ${originPrefix} — ` + `production intake Layer 4 would reject this ZIP`
       )
     }
+
+    // LOCK-D2: Local Storage subtree must be present and LevelDB-valid.
+    const localStorageEntries = names.filter((n) => n.startsWith(localStoragePrefix))
+    if (localStorageEntries.length === 0) {
+      throw new Error(
+        `Seed ZIP has no Local Storage leveldb entries under ${localStoragePrefix} — ` +
+          'production intake selects this subtree for the navigation projection'
+      )
+    }
+    if (!localStorageEntries.some((n) => n === `${localStoragePrefix}CURRENT`)) {
+      throw new Error(
+        `Seed ZIP Local Storage leveldb has no CURRENT marker: ` +
+          `${localStorageEntries.slice(0, 8).join(', ') || '(empty)'}`
+      )
+    }
+    const localStorageLdbEntryCount = localStorageEntries.filter((n) => n.endsWith('.ldb')).length
+
+    // No unrelated roots: every FILE entry must be inside one of the two
+    // accepted subtrees (directory entries are structural, ignored exactly
+    // like production's isDirectory skip).
+    const fileEntries = names.filter((n) => !n.endsWith('/'))
+    const outsideAllowedRoots = fileEntries.filter(
+      (n) => !n.startsWith(originPrefix) && !n.startsWith(localStoragePrefix)
+    )
+    if (outsideAllowedRoots.length > 0) {
+      throw new Error(
+        `Seed ZIP has entries outside the allowed roots ` +
+          `(${originPrefix} | ${localStoragePrefix}): ${outsideAllowedRoots.slice(0, 5).join(', ')}`
+      )
+    }
+
     return {
       entryCount: names.length,
       allEntriesUnderOrigin: indexedDbEntries.length > 0 && outsideOrigin.length === 0,
       ldbEntryCount,
-      sample: names.slice(0, 12)
+      sample: names.slice(0, 12),
+      localStorageEntryCount: localStorageEntries.length,
+      localStorageLdbEntryCount,
+      localStorageEntriesSample: localStorageEntries.slice(0, 8),
+      allEntriesUnderAllowedRoots: fileEntries.length > 0 && outsideAllowedRoots.length === 0
     }
   } finally {
     await zip.close()
@@ -837,6 +1204,8 @@ async function assertNoFileOriginEntries(zipPath: string): Promise<void> {
  * LOCK-DEV-7: Fails immediately if port 5173 is occupied.
  * LOCK-DEV-1/2: Origin is exactly `http://localhost:5173`.
  * LOCK-DEV-8: No file__0 rename/copy.
+ * LOCK-D2: ZIP also carries the `Local Storage/leveldb` subtree seeded with
+ *          the version-215 `persist:cherry-studio` minimal projection.
  */
 export async function createDisposableDevOriginSeedZip(ownedTmpRoot: string): Promise<DisposableDevOriginSeedZip> {
   const unique = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -871,6 +1240,17 @@ export async function createDisposableDevOriginSeedZip(ownedTmpRoot: string): Pr
     // LOCK-DEV-2 FIX: This CREATES the DB schema via onupgradeneeded.
     const seeded = await seedIndexedDb(launched.page)
 
+    // LOCK-D2: seed the version-215 redux-persist `persist:cherry-studio`
+    // Local Storage projection on the same dev origin, then let Chromium
+    // batch-commit Local Storage before the graceful close.
+    const lsSeeded = await seedLocalStorage(launched.page)
+    await launched.page.waitForTimeout(1500)
+    console.log(
+      `[E2E] LOCK-D2 Local Storage projection seeded (key=${lsSeeded.persistKey}, ` +
+        `payloadBytes=${lsSeeded.persistPayloadLength}, ` +
+        `readbackEqual=${lsSeeded.persistReadbackEqual}, padding=${lsSeeded.paddingCount})`
+    )
+
     // Close the app cleanly (flushes LevelDB) before inspecting/zipping.
     await closeSeedApp(launched.app, profileDir)
     await new Promise((resolve) => setTimeout(resolve, 1500))
@@ -881,7 +1261,7 @@ export async function createDisposableDevOriginSeedZip(ownedTmpRoot: string): Pr
     console.log(`[E2E] Dev-origin HTTP server stopped`)
 
     // LOCK-DEV-2: Produce ZIP and assert exact origin directory.
-    const { originDir, ldbFileCount } = produceIndexedDbZip(profileDevDir, zipPath)
+    const { originDir, ldbFileCount, localStorageLdbFileCount } = produceSeedZip(profileDevDir, zipPath)
 
     // Verify origin directory matches exactly (LOCK-DEV-2).
     if (originDir !== DEV_ORIGIN_DIR) {
@@ -913,7 +1293,16 @@ export async function createDisposableDevOriginSeedZip(ownedTmpRoot: string): Pr
         zipEntryCount: preflight.entryCount,
         zipAllEntriesUnderOrigin: preflight.allEntriesUnderOrigin,
         zipLdbEntryCount: preflight.ldbEntryCount,
-        zipEntriesSample: preflight.sample
+        zipEntriesSample: preflight.sample,
+        persistKey: lsSeeded.persistKey,
+        persistPayloadLength: lsSeeded.persistPayloadLength,
+        persistReadbackEqual: lsSeeded.persistReadbackEqual,
+        localStoragePaddingCount: lsSeeded.paddingCount,
+        localStorageLdbFileCount,
+        zipHasLocalStorage: preflight.localStorageEntryCount > 0,
+        zipLocalStorageEntryCount: preflight.localStorageEntryCount,
+        zipLocalStorageEntriesSample: preflight.localStorageEntriesSample,
+        zipAllEntriesUnderAllowedRoots: preflight.allEntriesUnderAllowedRoots
       },
       cleanup: async () => {
         const cleanupErrors: string[] = []

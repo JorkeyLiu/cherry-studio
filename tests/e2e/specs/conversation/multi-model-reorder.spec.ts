@@ -117,9 +117,8 @@ function queryTopicMessages(dbPath: string, topicId: string) {
     dbPath,
     `SELECT id, topic_id, role, ask_id, status, sort_order FROM messages WHERE topic_id = '${escapedTopicId}' ORDER BY sort_order, id`
   )
-  expect(result?.ok).toBe(true)
-  expect(Array.isArray(result?.rows)).toBe(true)
-  return result!.rows as Array<{
+  if (!result.ok) throw new Error(`SQLite query failed: ${result.code}`)
+  return result.rows as Array<{
     id: string
     topic_id: string
     role: string

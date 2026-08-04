@@ -78,7 +78,10 @@ function startWithScript(mode: string, port: number, options: Record<string, unk
     start: startOwnedViteServerForTest(ownedTmpRoot, ownedTmpRoot, {
       childModulePath: fixture,
       port,
-      readinessTimeoutMs: 500,
+      // General child startup tests: 5000ms absorbs full-suite I/O contention
+      // (unloaded child 78-183ms; contention can exceed 500ms). Deliberate
+      // no-readiness coverage overrides this to a bounded 1000ms.
+      readinessTimeoutMs: 5000,
       stopGraceMs: 50,
       spawnImpl: (_command, args, spawnOptions) =>
         spawn(process.execPath, [fixture, String(args.at(-1))], spawnOptions),
@@ -184,7 +187,10 @@ describe('startOwnedViteServer readiness lifecycle', () => {
     const startedAt = Date.now()
     const harness = startWithScript('ready-then-exit', port, { probeReadyImpl: () => new Promise<boolean>(() => {}) })
     await expect(harness.start).rejects.toThrow(/exited/i)
-    expect(Date.now() - startedAt).toBeLessThan(500)
+    // Promptness intent: the child self-exits, so rejection must not wait on the
+    // readiness timer. Relaxed from 500ms so full-suite contention cannot flake
+    // the spawn + IPC round trip, while still far below the production 90s timeout.
+    expect(Date.now() - startedAt).toBeLessThan(2000)
     await expectPortFree(port)
   })
 
@@ -213,7 +219,14 @@ describe('startOwnedViteServer readiness lifecycle', () => {
 
   it.each(['nonzero-exit', 'timeout'])('rejects and cleans up on %s', async (mode) => {
     const port = await freePort()
-    const harness = startWithScript(mode, port)
+    const harness = startWithScript(
+      mode,
+      port,
+      // The deliberate no-readiness 'timeout' mode never becomes ready; cap it
+      // at 1000ms so the coverage stays bounded even while general startup
+      // tests use the 5000ms contention-tolerant default.
+      mode === 'timeout' ? { readinessTimeoutMs: 1000 } : {}
+    )
     await expect(harness.start).rejects.toThrow()
     await expectPortFree(port)
   })
@@ -247,7 +260,7 @@ describe('startOwnedViteServer readiness lifecycle', () => {
       if (probe.listening) await new Promise<void>((resolve) => probe.close(() => resolve()))
     }
 
-    const harness = startWithScript('success', 5173, { probeReadyImpl: probeExactEntry, readinessTimeoutMs: 2000 })
+    const harness = startWithScript('success', 5173, { probeReadyImpl: probeExactEntry })
     const server = await harness.start
     await expect(server.stop()).resolves.toBeUndefined()
   })

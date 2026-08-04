@@ -6,7 +6,11 @@
  * their shared constants collide (SEED_DB_NAME, SEED_NATIVE_VERSION, ...).
  * Specs import them directly from `./disposable-seed-zip` /
  * `./disposable-dev-origin-seed-zip`.
+ *
+ * `derived-large-container-zip` is Playwright-free (archiver + node-stream-zip
+ * + run-ownership only), so it is safe to re-export here.
  */
+export * from './derived-large-container-zip'
 export * from './import-status'
 export * from './owned-vite-server'
 export * from './process-cleanup'

@@ -38,6 +38,16 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Fail-closed SQLite row accessor (LOCK-QDB-5): the typed outcome is never
+ * null; a fixed failure code throws, and rows are only reachable on success.
+ */
+function queryRows(dbPath: string, sql: string): any[] {
+  const result = queryChatDbViaElectron(dbPath, sql)
+  if (!result.ok) throw new Error(`SQLite query failed: ${result.code}`)
+  return result.rows as any[]
+}
+
 /** Get active context from Redux. */
 async function getActiveContext(page: import('@playwright/test').Page) {
   return page.evaluate(() => {
@@ -588,18 +598,14 @@ function assertCascadeIdsExistInSql(
 
   // Topic must exist
   const topicSql = `SELECT id, assistant_id FROM topics WHERE id = '${esc(topicId)}'`
-  const topicResult = queryChatDbViaElectron(chatDbPath, topicSql)
-  expect(topicResult?.ok).toBe(true)
-  const topicRows = topicResult!.rows as any[]
+  const topicRows = queryRows(chatDbPath, topicSql)
   expect(topicRows.length).toBe(1)
 
   // Messages must exist and belong to this topic
   if (messageIds.length > 0) {
     const msgIdList = messageIds.map((id) => `'${esc(id)}'`).join(',')
     const msgSql = `SELECT id, topic_id FROM messages WHERE id IN (${msgIdList})`
-    const msgResult = queryChatDbViaElectron(chatDbPath, msgSql)
-    expect(msgResult?.ok).toBe(true)
-    const msgRows = msgResult!.rows as any[]
+    const msgRows = queryRows(chatDbPath, msgSql)
     expect(msgRows.length).toBe(messageIds.length)
     for (const row of msgRows) {
       expect(row.topic_id).toBe(topicId)
@@ -610,9 +616,7 @@ function assertCascadeIdsExistInSql(
   if (blockIds.length > 0) {
     const blockIdList = blockIds.map((id) => `'${esc(id)}'`).join(',')
     const blockSql = `SELECT id, message_id FROM message_blocks WHERE id IN (${blockIdList})`
-    const blockResult = queryChatDbViaElectron(chatDbPath, blockSql)
-    expect(blockResult?.ok).toBe(true)
-    const blockRows = blockResult!.rows as any[]
+    const blockRows = queryRows(chatDbPath, blockSql)
     expect(blockRows.length).toBe(blockIds.length)
   }
 }
@@ -630,18 +634,14 @@ function assertCascadeIdsAbsentInSql(
 
   // Topic must be gone
   const topicSql = `SELECT id FROM topics WHERE id = '${esc(topicId)}'`
-  const topicResult = queryChatDbViaElectron(chatDbPath, topicSql)
-  expect(topicResult?.ok).toBe(true)
-  const topicRows = topicResult!.rows as any[]
+  const topicRows = queryRows(chatDbPath, topicSql)
   expect(topicRows.length).toBe(0)
 
   // Messages must be gone
   if (messageIds.length > 0) {
     const msgIdList = messageIds.map((id) => `'${esc(id)}'`).join(',')
     const msgSql = `SELECT id FROM messages WHERE id IN (${msgIdList})`
-    const msgResult = queryChatDbViaElectron(chatDbPath, msgSql)
-    expect(msgResult?.ok).toBe(true)
-    const msgRows = msgResult!.rows as any[]
+    const msgRows = queryRows(chatDbPath, msgSql)
     expect(msgRows.length).toBe(0)
   }
 
@@ -649,9 +649,7 @@ function assertCascadeIdsAbsentInSql(
   if (blockIds.length > 0) {
     const blockIdList = blockIds.map((id) => `'${esc(id)}'`).join(',')
     const blockSql = `SELECT id FROM message_blocks WHERE id IN (${blockIdList})`
-    const blockResult = queryChatDbViaElectron(chatDbPath, blockSql)
-    expect(blockResult?.ok).toBe(true)
-    const blockRows = blockResult!.rows as any[]
+    const blockRows = queryRows(chatDbPath, blockSql)
     expect(blockRows.length).toBe(0)
   }
 }
@@ -752,9 +750,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       expect(chatDbPath).not.toBeNull()
       const esc = (value: string) => value.replace(/'/g, "''")
       const sql = `SELECT id, name, deleted_at FROM topics WHERE id IN ('${esc(topicBId)}', '${esc(topicCId)}')`
-      const result = queryChatDbViaElectron(chatDbPath!, sql)
-      expect(result?.ok).toBe(true)
-      const rows = result!.rows as any[]
+      const rows = queryRows(chatDbPath!, sql)
       expect(rows).toHaveLength(2)
       expect(rows.find((row) => row.id === topicBId)).toMatchObject({
         id: topicBId,
@@ -821,9 +817,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       expect(chatDbPath).not.toBeNull()
 
       const sql = `SELECT id, name, deleted_at FROM topics WHERE id = '${topicBId.replace(/'/g, "''")}'`
-      const result = queryChatDbViaElectron(chatDbPath!, sql)
-      expect(result?.ok).toBe(true)
-      const rows = result!.rows as any[]
+      const rows = queryRows(chatDbPath!, sql)
       expect(rows.length).toBe(1)
       expect(rows[0].id).toBe(topicBId)
       expect(rows[0].name).toBe(topicBName)
@@ -868,9 +862,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       expect(chatDbPath).not.toBeNull()
 
       const sql = `SELECT id, name, deleted_at FROM topics WHERE id IN ('${topicBId.replace(/'/g, "''")}', '${topicCId.replace(/'/g, "''")}')`
-      const result = queryChatDbViaElectron(chatDbPath!, sql)
-      expect(result?.ok).toBe(true)
-      const rows = result!.rows as any[]
+      const rows = queryRows(chatDbPath!, sql)
       expect(rows.length).toBe(2)
       for (const row of rows) {
         expect(row.deleted_at).not.toBeNull()
@@ -920,9 +912,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       expect(chatDbPath).not.toBeNull()
 
       const sql = `SELECT id, deleted_at FROM topics WHERE id = '${topicBId.replace(/'/g, "''")}'`
-      const result = queryChatDbViaElectron(chatDbPath!, sql)
-      expect(result?.ok).toBe(true)
-      const rows = result!.rows as any[]
+      const rows = queryRows(chatDbPath!, sql)
       expect(rows.length).toBe(1)
       expect(rows[0].id).toBe(topicBId)
       expect(rows[0].deleted_at).toBeNull()
@@ -949,9 +939,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       expect(chatDbPath).not.toBeNull()
 
       const sql = `SELECT id, deleted_at FROM topics WHERE id = '${topicBId.replace(/'/g, "''")}'`
-      const result = queryChatDbViaElectron(chatDbPath!, sql)
-      expect(result?.ok).toBe(true)
-      const rows = result!.rows as any[]
+      const rows = queryRows(chatDbPath!, sql)
       expect(rows.length).toBe(1)
       expect(rows[0].deleted_at).not.toBeNull()
       console.log(`[TrashLifecycle] SQL checkpoint F2b: Topic B deleted_at=${rows[0].deleted_at} ✓`)
@@ -1037,9 +1025,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       expect(chatDbPath).not.toBeNull()
       const esc = (s: string) => s.replace(/'/g, "''")
       const sql = `SELECT id, name, deleted_at, assistant_id FROM topics WHERE id = '${esc(secondTopicId)}'`
-      const result = queryChatDbViaElectron(chatDbPath!, sql)
-      expect(result?.ok).toBe(true)
-      const rows = result!.rows as any[]
+      const rows = queryRows(chatDbPath!, sql)
       expect(rows.length).toBe(1)
       expect(rows[0].assistant_id).toBe(secondAssistantId)
       expect(rows[0].name).toBe(secondTopicName)
@@ -1138,9 +1124,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       const esc = (s: string) => s.replace(/'/g, "''")
 
       const sql = `SELECT id, deleted_at, assistant_id FROM topics WHERE id = '${esc(secondTopicId)}'`
-      const result = queryChatDbViaElectron(chatDbPath!, sql)
-      expect(result?.ok).toBe(true)
-      const rows = result!.rows as any[]
+      const rows = queryRows(chatDbPath!, sql)
       expect(rows.length).toBe(1)
       expect(rows[0].id).toBe(secondTopicId)
       expect(rows[0].deleted_at).not.toBeNull()
@@ -1185,9 +1169,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
 
       // ── I1: Default topic still exists with deleted_at NULL ──
       const defaultTopicSql = `SELECT id, deleted_at FROM topics WHERE id = '${esc(defaultTopicId)}'`
-      const defaultResult = queryChatDbViaElectron(chatDbPath!, defaultTopicSql)
-      expect(defaultResult?.ok).toBe(true)
-      const defaultRows = defaultResult!.rows as any[]
+      const defaultRows = queryRows(chatDbPath!, defaultTopicSql)
       expect(defaultRows.length).toBe(1)
       expect(defaultRows[0].id).toBe(defaultTopicId)
       expect(defaultRows[0].deleted_at).toBeNull()
@@ -1195,9 +1177,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
 
       // ── I2: Topic B (hard-deleted) — check SQLite state ──
       const topicBSql = `SELECT id, deleted_at FROM topics WHERE id = '${esc(topicBId)}'`
-      const topicBResult = queryChatDbViaElectron(chatDbPath!, topicBSql)
-      expect(topicBResult?.ok).toBe(true)
-      const topicBRows = topicBResult!.rows as any[]
+      const topicBRows = queryRows(chatDbPath!, topicBSql)
 
       if (topicBRows.length > 0) {
         throw new Error(`Topic B hard-delete left a topic row post-shutdown: ${JSON.stringify(topicBRows[0])}`)
@@ -1208,9 +1188,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       if (topicBMessageIds.length > 0) {
         const msgIdList = topicBMessageIds.map((id) => `'${esc(id)}'`).join(',')
         const topicBMsgSql = `SELECT id FROM messages WHERE id IN (${msgIdList})`
-        const topicBMsgResult = queryChatDbViaElectron(chatDbPath!, topicBMsgSql)
-        expect(topicBMsgResult?.ok).toBe(true)
-        const topicBMsgRows = topicBMsgResult!.rows as any[]
+        const topicBMsgRows = queryRows(chatDbPath!, topicBMsgSql)
         if (topicBMsgRows.length === 0) {
           console.log(`[TrashLifecycle] I3: Topic B exact messages: absent (${topicBMessageIds.length} IDs checked) ✓`)
         } else {
@@ -1222,9 +1200,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       if (topicBBlockIds.length > 0) {
         const blockIdList = topicBBlockIds.map((id) => `'${esc(id)}'`).join(',')
         const topicBBlockSql = `SELECT id FROM message_blocks WHERE id IN (${blockIdList})`
-        const topicBBlockResult = queryChatDbViaElectron(chatDbPath!, topicBBlockSql)
-        expect(topicBBlockResult?.ok).toBe(true)
-        const topicBBlockRows = topicBBlockResult!.rows as any[]
+        const topicBBlockRows = queryRows(chatDbPath!, topicBBlockSql)
         if (topicBBlockRows.length === 0) {
           console.log(`[TrashLifecycle] I4: Topic B exact blocks: absent (${topicBBlockIds.length} IDs checked) ✓`)
         } else {
@@ -1234,9 +1210,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
 
       // ── I5: Topic C (empty-trashed) must NOT exist in topics table ──
       const topicCSql = `SELECT id FROM topics WHERE id = '${esc(topicCId)}'`
-      const topicCResult = queryChatDbViaElectron(chatDbPath!, topicCSql)
-      expect(topicCResult?.ok).toBe(true)
-      const topicCRows = topicCResult!.rows as any[]
+      const topicCRows = queryRows(chatDbPath!, topicCSql)
       expect(topicCRows.length).toBe(0)
       console.log(`[TrashLifecycle] I5: Topic C (empty-trashed): absent from topics ✓`)
 
@@ -1244,9 +1218,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       if (topicCMessageIds.length > 0) {
         const msgIdList = topicCMessageIds.map((id) => `'${esc(id)}'`).join(',')
         const topicCMsgSql = `SELECT id FROM messages WHERE id IN (${msgIdList})`
-        const topicCMsgResult = queryChatDbViaElectron(chatDbPath!, topicCMsgSql)
-        expect(topicCMsgResult?.ok).toBe(true)
-        const topicCMsgRows = topicCMsgResult!.rows as any[]
+        const topicCMsgRows = queryRows(chatDbPath!, topicCMsgSql)
         expect(topicCMsgRows.length).toBe(0)
         console.log(`[TrashLifecycle] I6: Topic C exact messages: absent (${topicCMessageIds.length} IDs) ✓`)
       }
@@ -1255,18 +1227,14 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       if (topicCBlockIds.length > 0) {
         const blockIdList = topicCBlockIds.map((id) => `'${esc(id)}'`).join(',')
         const topicCBlockSql = `SELECT id FROM message_blocks WHERE id IN (${blockIdList})`
-        const topicCBlockResult = queryChatDbViaElectron(chatDbPath!, topicCBlockSql)
-        expect(topicCBlockResult?.ok).toBe(true)
-        const topicCBlockRows = topicCBlockResult!.rows as any[]
+        const topicCBlockRows = queryRows(chatDbPath!, topicCBlockSql)
         expect(topicCBlockRows.length).toBe(0)
         console.log(`[TrashLifecycle] I7: Topic C exact blocks: absent (${topicCBlockIds.length} IDs) ✓`)
       }
 
       // ── I8: Default topic messages intact ──
       const defaultMsgSql = `SELECT id, role FROM messages WHERE topic_id = '${esc(defaultTopicId)}' ORDER BY sort_order`
-      const defaultMsgResult = queryChatDbViaElectron(chatDbPath!, defaultMsgSql)
-      expect(defaultMsgResult?.ok).toBe(true)
-      const defaultMsgRows = defaultMsgResult!.rows as any[]
+      const defaultMsgRows = queryRows(chatDbPath!, defaultMsgSql)
       const userMsgs = defaultMsgRows.filter((m: any) => m.role === 'user')
       const assistantMsgs = defaultMsgRows.filter((m: any) => m.role === 'assistant')
       expect(userMsgs.length).toBe(1)
@@ -1277,9 +1245,7 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
 
       // ── I9: No stale trash rows (deleted_at non-null) for deleted topics ──
       const staleTrashSql = `SELECT id, deleted_at FROM topics WHERE deleted_at IS NOT NULL AND (id = '${esc(topicBId)}' OR id = '${esc(topicCId)}')`
-      const staleTrashResult = queryChatDbViaElectron(chatDbPath!, staleTrashSql)
-      expect(staleTrashResult?.ok).toBe(true)
-      const staleTrashRows = staleTrashResult!.rows as any[]
+      const staleTrashRows = queryRows(chatDbPath!, staleTrashSql)
       expect(staleTrashRows.length).toBe(0)
       console.log(`[TrashLifecycle] I9: No stale trash rows for deleted topics ✓`)
 

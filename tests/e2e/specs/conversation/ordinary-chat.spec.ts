@@ -328,7 +328,7 @@ function expectedMockResponse(userContent: string): string {
 test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
   test.setTimeout(300000)
 
-  test('full ordinary-chat verification (one launch)', async ({ electronApp, mainWindow, mockPort, userDataDir }) => {
+  test('full ordinary-chat verification (one launch)', async ({ electronApp, mainWindow, mockPort }) => {
     const page = mainWindow
 
     // ═══════════════════════════════════════════════════════════════════
@@ -611,14 +611,14 @@ test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
     await test.step('J1b: Verify edit in Redux', async () => {
       // Verify the block content was updated in Redux
       const editedContent = await page.evaluate(
-        ({ topicId, msgId }: { topicId: string; msgId: string }) => {
+        ({ msgId }: { msgId: string }) => {
           const s = (window as any).store.getState()
           const msg = s.messages.entities[msgId]
           if (!msg || !msg.blocks || msg.blocks.length === 0) return null
           const block = s.messageBlocks.entities[msg.blocks[0]]
           return block?.content || null
         },
-        { topicId: activeTopicId, msgId: editedUserMessageId }
+        { msgId: editedUserMessageId }
       )
       expect(editedContent).toBe('EDITED: E2E verification message (edit proven)')
       console.log(`[Phase 5.4] Redux verified: block content = "${editedContent}"`)
@@ -1005,10 +1005,13 @@ test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
       // Query OUR specific topic via its ID
       const topicSql = `SELECT id, assistant_id, name, deleted_at FROM topics WHERE id = '${activeTopicId.replace(/'/g, "''")}'`
       const topicsResult = queryChatDbViaElectron(chatDbPath!, topicSql)
-      console.log(`[Phase 5.4] Topic query (scoped):`, JSON.stringify(topicsResult))
-      expect(topicsResult?.ok).toBe(true)
-      expect(topicsResult?.rows).toBeDefined()
-      const ourTopicRows = topicsResult!.rows as any[]
+      // LOCK-PRIV-2: never serialize the full query outcome — fixed labels,
+      // booleans and codes only (rows are asserted below).
+      console.log(
+        `[Phase 5.4] Topic query (scoped): ok=${topicsResult.ok} code=${topicsResult.ok ? 'none' : topicsResult.code}`
+      )
+      if (!topicsResult.ok) throw new Error(`SQLite query failed: ${topicsResult.code}`)
+      const ourTopicRows = topicsResult.rows as any[]
       expect(ourTopicRows.length).toBe(1)
       expect(ourTopicRows[0].id).toBe(activeTopicId)
       // assistant_id may be null if ensureTopic was called without it (default topic creation).
@@ -1021,9 +1024,13 @@ test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
       // Query messages for OUR topic only
       const msgSql = `SELECT id, topic_id, role, status, sort_order FROM messages WHERE topic_id = '${activeTopicId.replace(/'/g, "''")}' ORDER BY sort_order`
       const messagesResult = queryChatDbViaElectron(chatDbPath!, msgSql)
-      console.log(`[Phase 5.4] Messages query (scoped):`, JSON.stringify(messagesResult))
-      expect(messagesResult?.ok).toBe(true)
-      const msgs = messagesResult!.rows as any[]
+      // LOCK-PRIV-2: fixed labels, booleans and codes only — never the full
+      // query outcome (row counts are asserted below).
+      console.log(
+        `[Phase 5.4] Messages query (scoped): ok=${messagesResult.ok} code=${messagesResult.ok ? 'none' : messagesResult.code}`
+      )
+      if (!messagesResult.ok) throw new Error(`SQLite query failed: ${messagesResult.code}`)
+      const msgs = messagesResult.rows as any[]
 
       // All returned messages must belong to our topic
       for (const m of msgs) {
@@ -1044,9 +1051,13 @@ test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
       const msgIdList = msgs.map((m: any) => `'${m.id}'`).join(',')
       const blockSql = `SELECT id, message_id, type, content, status, sort_order FROM message_blocks WHERE message_id IN (${msgIdList}) ORDER BY sort_order`
       const blocksResult = queryChatDbViaElectron(chatDbPath!, blockSql)
-      console.log(`[Phase 5.4] Blocks query (scoped):`, JSON.stringify(blocksResult))
-      expect(blocksResult?.ok).toBe(true)
-      const blocks = blocksResult!.rows as any[]
+      // LOCK-PRIV-2: fixed labels, booleans and codes only — never the full
+      // query outcome (row counts are asserted below).
+      console.log(
+        `[Phase 5.4] Blocks query (scoped): ok=${blocksResult.ok} code=${blocksResult.ok ? 'none' : blocksResult.code}`
+      )
+      if (!blocksResult.ok) throw new Error(`SQLite query failed: ${blocksResult.code}`)
+      const blocks = blocksResult.rows as any[]
 
       // Every block must belong to a message in our topic (guaranteed by JOIN)
       // After edit + resend + regenerate: still 6 blocks (3 user + 3 assistant)

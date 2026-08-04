@@ -31,7 +31,15 @@ import * as path from 'path'
 import { closeElectronWithExactCleanup } from '../utils/electron-cleanup'
 import { findProcessesByUserDataDir, terminateProcessesByUserDataDir } from '../utils/process-cleanup'
 import { createOwnedTmpRoot, removeOwnedTmpRoot, validateProfileLaunchToken } from '../utils/run-ownership'
-import { queryChatDbViaElectron as queryChatDb } from '../utils/query-chat-db-electron'
+import {
+  queryChatDbWithBoundedRetry,
+  runChatDbQueryAttempt,
+  runChatDbVerifyAttempt,
+  verifyChatDbWithBoundedRetry,
+  type QueryChatDbDependencies,
+  type QueryChatDbOutcome,
+  type VerifyChatDbOutcome
+} from '../utils/query-chat-db-electron'
 import {
   clearRequestLog,
   createMockServer,
@@ -117,20 +125,60 @@ export function getOwnedTmpRoot(): string | null {
 }
 
 /**
- * Query SQLite database via Electron binary (ABI compatible).
- * Returns parsed JSON result from the verification script.
- *
- * Uses a temp file for the query script and spawnSync argument array
- * (no shell interpolation) for portability and actionable diagnostics.
- * Resolves better-sqlite3 path portably via require.resolve().
+ * Resolve the fixture-owned Electron binary + native module. Requires the
+ * owned temp root (LOCK-001) so every query/verification script lands inside
+ * the disposable root for exact cleanup.
  */
-export function queryChatDbViaElectron(dbPath: string, sql: string): Record<string, unknown> | null {
+function fixtureQueryDependencies(): QueryChatDbDependencies {
   if (!_ownedTmpRoot) throw new Error('ownedTmpRoot fixture is required before querying ChatDb')
-  const electronPath = require('electron') as string
-  return queryChatDb(dbPath, sql, _ownedTmpRoot, {
-    electronPath,
+  return {
+    electronPath: require('electron') as string,
     betterSqlitePath: require.resolve('better-sqlite3')
-  })
+  }
+}
+
+/**
+ * Query SQLite via the Electron binary (ABI compatible).
+ *
+ * LOCK-QDB-1/5: returns a discriminated typed outcome — never null. On
+ * success `rows` is a strict array; malformed/missing/non-array rows fail
+ * closed with a fixed code. On failure only fixed codes and bounded numerics
+ * are surfaced (never stderr/stdout/path/SQL/raw error).
+ *
+ * Single attempt (generic API retained for existing callers). Peak-pressure
+ * post-close paths use `queryChatDbViaElectronWithRetry`.
+ */
+export function queryChatDbViaElectron(dbPath: string, sql: string): QueryChatDbOutcome {
+  return runChatDbQueryAttempt(dbPath, sql, _ownedTmpRoot as string, fixtureQueryDependencies())
+}
+
+/**
+ * LOCK-QDB-3: run the fixed batched readonly verification plan against a
+ * live chat.db in ONE child/connection/snapshot — exact one-row integrity
+ * 'ok', exactly empty foreign_key_check, exact one valid non-negative integer
+ * count per allowlisted CandidateImportStats table. Returns only fixed
+ * booleans/counts. No caller-supplied SQL.
+ */
+export function verifyChatDbViaElectron(dbPath: string): VerifyChatDbOutcome {
+  return runChatDbVerifyAttempt(dbPath, _ownedTmpRoot as string, fixtureQueryDependencies())
+}
+
+/**
+ * LOCK-QDB-4: bounded-retry generic query. Retries only transient codes
+ * (TIMEOUT/SPAWN/SIGNAL/BUSY/LOCKED), max 3 attempts within a <=60s total
+ * deadline with short bounded backoff. Permanent codes fail immediately.
+ */
+export async function queryChatDbViaElectronWithRetry(dbPath: string, sql: string): Promise<QueryChatDbOutcome> {
+  return queryChatDbWithBoundedRetry(dbPath, sql, _ownedTmpRoot as string, fixtureQueryDependencies())
+}
+
+/**
+ * LOCK-QDB-3/4: bounded-retry fixed batched verification plan. Use for the
+ * post-close real-backup evidence — ONE child per attempt, transient retries
+ * bounded by the 60s deadline instead of a fixed sleep-as-evidence.
+ */
+export async function verifyChatDbViaElectronWithRetry(dbPath: string): Promise<VerifyChatDbOutcome> {
+  return verifyChatDbWithBoundedRetry(dbPath, _ownedTmpRoot as string, fixtureQueryDependencies())
 }
 
 /**

@@ -146,8 +146,8 @@ async function switchToTopicsViaUI(page: Page): Promise<void> {
 
 function queryRows(dbPath: string, sql: string): any[] {
   const result = queryChatDbViaElectron(dbPath, sql)
-  expect(result?.ok).toBe(true)
-  return result!.rows as any[]
+  if (!result.ok) throw new Error(`SQLite query failed: ${result.code}`)
+  return result.rows as any[]
 }
 
 type ExpectedMessage = {
