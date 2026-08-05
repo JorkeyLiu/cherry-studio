@@ -2,9 +2,11 @@
 
 > **文档状态**：Phase 0–5 Done（Phase 5 各子阶段已提交至分支）；Phase 6 Done（实现 + 验证完成）。Phase 0–3 完成；Phase 4.0 Done on macOS arm64；Phase 4.1 Done；Phase 4.2 Done；Phase 4.3 Done（已提交/已推送至迁移分支 `85603d0fd5`）；集成同步门 Baseline Sync Gate Done（integration `05a401b711` 已集成同步，已验证）；Phase 4.4.0 Done；Phase 4.4.1 Done；Phase 4.4.2 Done（已提交 `3a81557ac6`）；Phase 4.4.3 Done（commit `f6a6741b8e`；独立审计 pass + 全量验证通过）。Phase 5 Done（5.0–5.4 全部完成；5.1A 已提交 `6fa5ff5ef9`；5.1B 已提交 `e44e413f30`；5.2A 已提交 `e9de29ff97`；5.2B 实现 + 审计 + 验证完成；5.3 已提交 `b81a35c054`；5.4 feature commit `6c250f19a2` + docs commit `6b2f140955`；最终仓库验证 Node v24.12.0 ABI 137 / pnpm 10.27.0：311 文件 / 6976 通过 / 72 跳过 / 0 失败）。Phase 6 Done（6.0–6.4 全部完成：L2/L3 产品合同实现、安全/可靠性加固、隔离 import renderer 保留（LOCK-6023）、遗留清理与文档收尾；实现 + 验证通过）。**Post-closure L2 产品闭环最终实现完成（2026-08-04，非 Phase 7）**——确定性全出现消息身份（`(outerTopicId, legacyMessageId)` → `cherry-chat:l2-message-id` 帧 → `l2m1:`+64 lowercase SHA256，精确真实 artifact 129150/129150 零碰撞）、规范化残余六类 exact-once count-only、L2/fetch 大块边界、candidate-only FTS 原子重建（search_projection 第 14 verifier 维度）、导入回收站五天保留（2707/2704/3）、post-close helper/observer test-only 硬化；Node latest-source 335 files / 7901 tests passed / 75 skipped / 0 failed（final authoritative；user-source 7890/74 为历史证据）；Electron 精确真实 spec 1/1（6m48s）候选 2707/129150/158441/13/39/4158、全链 promoted、ZIP 指纹不变；实现与 E2E 已本地提交（`26c7190333` feat(import)：complete L2 Cherry Studio migration flow / `1c2c70a3dd` test(import)：add end-to-end migration coverage）；本节文档收尾提交后 HEAD = 本节文档收尾提交（哈希见当前 git history）/ 远程 tip `3a64da6020` 不变 / 本地 ahead 11（pre-existing 8 + 本次 closure 3）/ 工作树 clean / 无 push/PR。**Phase 6 交付收尾（closure，非 Phase 7）本地完成（2026-07-31）**：B-class `import-cherrystudio-genuine.spec.ts` 1/1 PASS（fresh ABI145 build 后精确标准 Playwright 命令；host ABI137 已恢复；LOCK-MD2/4）；A-class `import-cherrystudio.spec.ts` 保持历史证据、未重跑；六个交付阻塞项修复（LOCK-MD5）；本地 gates 全 PASS（Node v24.12.0 / pnpm 10.27.0；CI=true lint 0 errors / CI=true test 312 文件 / 7009 通过 / 72 跳过 / 0 失败；LOCK-MD6）；**push/remote CI 事实（LOCK-MD8，2026-07-31 post-push）**——origin 分支 `jorkey/refactor/sqlite-migration` 已推送（closure push 点 remote SHA `89803503fc...`），upstream tracking `origin/jorkey/refactor/sqlite-migration` 已建立（branch URL `https://github.com/JorkeyLiu/cherry-studio/tree/jorkey/refactor/sqlite-migration`）；其后 push-facts docs commit `3a64da6020`（父为 `89803503fc`）也已推送，**当前远程 tip = `3a64da6020`**；GitHub Actions runs for this branch = 0——**未运行/无 run**（非失败、非 green CI）；`.github/workflows/ci.yml` push trigger 仅 `main`/`v1`，未创建 PR、未手动 dispatch。E2E 仍为本地标准 Playwright 证据。**当前累积 diff 三分类（2026-08-04 三 commit 收尾后更新）**：① 远程已推送 tip `3a64da6020`（不变）；② 本地已提交、未推送共 11 个 commit——pre-existing 8 个（`1fc19f590c`/`6b48d33e72`/`6d2db496b1`/`b23c4ff4cb`/`81a438b208`/`cbc19db426`/`dbabae7eb8`/`4dc3912840`（docs(migration)：record native ABI and import validation））加上本次 closure 3 个（`26c7190333` feat(import)：complete L2 Cherry Studio migration flow / `1c2c70a3dd` test(import)：add end-to-end migration coverage / 本节文档收尾提交（哈希见当前 git history））；③ 本节文档收尾提交后工作树 clean。② 全部 11 个本地未推送 commit 均无远程 CI（LOCK-MD8：GitHub Actions runs for this branch = 0；ci.yml push trigger 仅 `main`/`v1`；无 PR、无手动 dispatch；详 §17 远程 CI 行）；无 push / 无 PR / 无远程 CI 变更（LOCK-GIT）。详见「Phase 6 交付收尾 / 最终交付证据」
 >
+> ✅ **Post-closure L2 attachment/file 兼容性修复完成（2026-08-05，非 Phase 7）**：L2 replace-all 现导入**物理 `Data/Files` payload + 源 Dexie `files` catalog**（candidate Files 目录 + `files-catalog.json` handoff + promotion 后单 Dexie 事务 apply）；文件异常按用户批准合同分级——**archive fatal（整批拒绝）/ reference degraded（单附件降级不阻断聊天导入、聚合计数）/ optional catalog/orphan（导入/跳过/显式 reference-backed canonicalization）**（LOCK-DOC-3）；degraded 引用块写入 import-only `l2AttachmentUnavailable` marker，UI 显示 unavailable 占位、不触发缺文件错误（LOCK-UI-1…6）。promotion 升级为 **v2 三 artifact durable journal**（candidates-ready → snapshots-ready → db-installed → files-installed → catalog-pending → catalog-applied → replacement-verified；v1 兼容；全 old / 全 new 收敛；promotion 开始后短时不可取消）。catalog apply 前不开放普通 UI（recovery-only 窗口 + 有界重试 + terminal repair surface，LOCK-PROMO-7 / LOCK-F2）。L3 备份现包含 live `Data/Files` + IndexedDB catalog、排除全部 promotion artifacts；`skipBackupFile=true` 排除 Files 但保留 catalog（不对称，LOCK-L3-4）。Data/Files 独立预算 + 流式 SHA-256/CRC-32 + 磁盘预检（1.30 GiB 级真实备份验证，不声明无限制支持，LOCK-DOC-5）。**验证证据（LOCK-DOC-7）**：合成附件标准 E2E（fresh build，final-source）**1/1（约 1m57s）**；真实 opt-in 大 ZIP（final-source）**1/1（4m36s，1.30 GiB 级；聚合 candidate topics **2707** / messages **129150** / blocks **158441** / file refs **4158**、active **2704** / deleted **0**；integrity/FK PASS；ZIP 不可变 boolean）**；recoveryV2 **236,196 惰性组合 47/47**、约 25s、主进程峰值约 341 MiB / 合计约 775 MiB（被强退的运行明确非证据）；**全量最终 gates 完成（final-source，Node24.12 ABI137 / pnpm 10.27.0）**：`pnpm format` exit 0（1882 files、1 fixed 后稳定）；`CI=true pnpm lint` exit 0（0 errors；85 ESLint + 4 oxlint known warnings；typecheck/i18n/format PASS）；`CI=true pnpm test` exit 0（357 files passed / 1 file skipped；8647 passed / 75 skipped / 0 failed / 127.09s）；Electron final（ABI145）：`native:rebuild:electron` PASS、`pnpm build` PASS（12.5s）；**无 commit / push / 远程 CI 声明（LOCK-DOC-8）**。Phase 0–6 Done 状态不变。详见「Phase 6 交付收尾后发现：L2 attachment/file 兼容修复」。
+>
 > ✅ **集成同步门（Baseline Sync Gate，Done/已合并/已验证）**：integration 分支（`05a401b711`）已集成同步进 migration 分支（pre-merge HEAD `5d50499e80`）；合并自动解决、无兼容性编辑；审计无阻塞/无代码发现，验证全部通过（format 无改动；lint exit 0 / 112 known warnings；typecheck 通过；`pnpm test` 265 文件 / 5664 通过 / 72 跳过 / 0 失败；聚焦测试 201 renderer + 822 chatDb/import）。Phase 4.4 既有架构未改变；合并后统一的 Renderer/context/type/Redux 结构已作为 Phase 5 实施基线。详见 Section 9「集成同步门（Baseline Sync Gate）」与决策日志。
 > **分支**：`jorkey/refactor/sqlite-migration`
-> **最后更新**：2026-08-04
+> **最后更新**：2026-08-05
 > **Owner**：Personal fork（jorkeyliu）
 >
 > ⚠️ **ADR-8 策略更正（2026-07-20）**：Phase 4+ 的产品策略已更正为**外部应用兼容性导入**模型。原 in-place Dexie→SQLite shadow/cutover 模型已正式废弃。详见 Section 6 A-8。
@@ -86,7 +88,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 ### 非目标（明确排除）
 
 - Agent session 数据导入（out of scope）
-- 文件内容 blob 迁移（file references 是快照，不建 canonical files 表）
+- ~~文件内容 blob 迁移（file references 是快照，不建 canonical files 表）~~ → **已 Superseded（2026-08-05，post-closure L2 attachment/file 兼容修复，LOCK-DOC-1）**：物理 `Data/Files` payload 与 Dexie `files` catalog 现已随 L2 replace-all 一并导入（candidate Files 目录 + `files-catalog.json` handoff + promotion 后单事务 apply）；仍**不建 SQL canonical files 表**（Dexie catalog 保持权威，LOCK-FIX-1）。文件异常按 **archive fatal / reference degraded / optional catalog** 三级分类（LOCK-DOC-3），单附件降级不阻断聊天导入。详见「Phase 6 交付收尾后发现：L2 attachment/file 兼容修复」
 - FTS/全文搜索
 - 推断缺失的 ID、ownership、timestamp、role、status、model 等字段
 - 历史逻辑格式 `data.json` / `.bak` 兼容（明确放弃）
@@ -186,7 +188,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | A-5 | ~~迁移期一次性切换 + Dexie 快照回滚~~ | **Superseded by A-8** | 原决策基于 in-place 本地 Dexie→SQLite 导入+切换模型。A-8 更正为外部应用兼容性导入模型：源数据来自用户选择的 Cherry Studio ZIP，不是当前运行时 Dexie；导入是 replace-all 而非 merge/shadow；不涉及"切换后新增数据回滚"场景 |
 | A-6 | 备份策略：online backup adapter + full-operation coordination | **Accepted** | better-sqlite3 `backup()` API 封装为可替换 adapter（抽象层），`BackupManager` 协调全操作（互斥锁、staging、生产路径过滤、恢复后 integrity check）；未来可替换为 PowerSync 方案；不使用 live WAL raw copy |
 | A-7 | 技术栈：better-sqlite3 + Drizzle ORM + drizzle-kit | **Accepted** | better-sqlite3 是 Node.js 生态最成熟 SQLite 驱动，同步 API，Drizzle 官方主推组合；与未来 PowerSync 集成兼容（PowerSync 首选 better-sqlite3）。@libsql/client 保留给 Memory/Knowledge 继续使用，不在本阶段统一 |
-| **A-8** | **外部应用兼容性导入：隔离 Session + 候选 SQLite 构建 + 原子替换** | **Accepted (2026-07-20)** | **最终产品行为**：SQLite-authoritative Cherry Chat 是独立于当前 Cherry Studio 的应用。用户在 Cherry Chat 中选择 Cherry Studio ZIP 备份来导入。**技术路线**：安全解压 ZIP 到唯一临时工作区 → 通过 `session.fromPath(absolutePath, { cache: false })`（Electron 静态 API，非 `session.defaultSession.fromPath()`）+ 正确 origin 创建隔离 Electron Session → 隐藏 sandboxed import renderer 加载当前 Dexie schema/upgrades → 窄 import-only IPC 分页读取逻辑数据 → Main 构建候选 SQLite DB → 验证（源 vs 目标 ID/计数/字段/顺序/关系/哈希/完整性/外键/应用层抽样）→ 原子替换 live `chat.db`（失败时回滚）。**约束**：① 不扫描磁盘查找其他应用；② 不在启动时静默迁移；③ 不要求共享目录；④ 不解析 LevelDB（Main 不直接解析）；⑤ 不恢复源到目标 app 的正常 Dexie profile；⑥ 旧 IndexedDB 仅在当前 Dexie declaration/upgrades 可防御性识别并升级为结构有效的当前逻辑形态时才接受；⑦ 缺失值继承当前 Cherry Studio/Dexie 升级和读取语义，不创建 importer-specific 历史修复；⑧ 结构不可用数据被拒绝；⑨ 导入语义是 replace-all，非 merge；⑩ 在导入过程中现有 SQLite 保持 authoritative；⑪ 取消支持至最终 promotion 之前；⑫ promotion 短时不可取消，保留一个回滚快照，重开/检查 DB，成功后 relaunch。**Phase 4.0 spike 结果**（macOS arm64）：`session.fromPath()` 可行；file:// origin 为正确 origin；`IndexedDB/file__0.indexeddb.leveldb` 为观测到的 profile 映射；Dexie logical 4→native 40, 11→native 110, 12→native 120；v12 被当前 Dexie upgrades 正确拒绝；default session 隔离确认；Local Storage 非 discovery/read 必需；10/10 fresh-root 迭代通过；helper 进程回退仍为 contingency，未选用。**未验证**：Windows/Linux、真实 ZIP snapshot 一致性 |
+| **A-8** | **外部应用兼容性导入：隔离 Session + 候选 SQLite 构建 + 原子替换** | **Accepted (2026-07-20)** | **最终产品行为**：SQLite-authoritative Cherry Chat 是独立于当前 Cherry Studio 的应用。用户在 Cherry Chat 中选择 Cherry Studio ZIP 备份来导入。**技术路线**：安全解压 ZIP 到唯一临时工作区 → 通过 `session.fromPath(absolutePath, { cache: false })`（Electron 静态 API，非 `session.defaultSession.fromPath()`）+ 正确 origin 创建隔离 Electron Session → 隐藏 sandboxed import renderer 加载当前 Dexie schema/upgrades → 窄 import-only IPC 分页读取逻辑数据 → Main 构建候选 SQLite DB → 验证（源 vs 目标 ID/计数/字段/顺序/关系/哈希/完整性/外键/应用层抽样）→ 原子替换 live `chat.db`（失败时回滚）。**约束**：① 不扫描磁盘查找其他应用；② 不在启动时静默迁移；③ 不要求共享目录；④ 不解析 LevelDB（Main 不直接解析）；⑤ 不恢复源到目标 app 的正常 Dexie profile；⑥ 旧 IndexedDB 仅在当前 Dexie declaration/upgrades 可防御性识别并升级为结构有效的当前逻辑形态时才接受；⑦ 缺失值继承当前 Cherry Studio/Dexie 升级和读取语义，不创建 importer-specific 历史修复；⑧ 结构不可用数据被拒绝；⑨ 导入语义是 replace-all，非 merge；⑩ 在导入过程中现有 SQLite 保持 authoritative；⑪ 取消支持至最终 promotion 之前；⑫ promotion 短时不可取消，保留一个回滚快照，重开/检查 DB，成功后 relaunch。**Phase 4.0 spike 结果**（macOS arm64）：`session.fromPath()` 可行；file:// origin 为正确 origin；`IndexedDB/file__0.indexeddb.leveldb` 为观测到的 profile 映射；Dexie logical 4→native 40, 11→native 110, 12→native 120；v12 被当前 Dexie upgrades 正确拒绝；default session 隔离确认；Local Storage 非 discovery/read 必需；10/10 fresh-root 迭代通过；helper 进程回退仍为 contingency，未选用。**未验证**：Windows/Linux、真实 ZIP snapshot 一致性。**post-closure 扩展（2026-08-05，LOCK-DOC-1）**：L2 attachment/file 兼容修复将候选扩展为三 artifact（candidate chat.db + candidate Files 目录 + candidate `files-catalog.json` handoff），promotion 经 v2 三 artifact journal 协调安装、收敛全 new/全 old；单附件降级不阻断聊天导入（archive fatal / reference degraded / optional catalog 分级，LOCK-DOC-3）。详见「Phase 6 交付收尾后发现：L2 attachment/file 兼容修复」 |
 
 > **Phase 1 前置**：A-7（技术栈）和 A-5（~~authoritative 切换方式~~，已由 A-8 替代）两个 ADR 已关闭（Accepted），Phase 1 可启动。A-5 在 Phase 1 启动时已 Accepted，后因产品策略更正被 A-8 Superseded。
 
@@ -252,6 +254,8 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 └──────────────────────────────────────────────────────┘
 ```
 
+> ⚠️ **post-closure 更正（2026-08-05，LOCK-DOC-1/6）**：图中「Dexie 仅保留于隔离 import renderer」指**聊天表**（topics/messages/message_blocks/topic_segments 等）为 SQLite-only；post-closure L2 attachment/file 兼容修复后，运行时 **Dexie `files` catalog 恢复为 live 消费者**（文件浏览器 FilesPage、FileManager、OrphanCleanupService、DbService.updateFileCount 均读/写 `db.files`）——L2 导入在 promotion 的 catalog-applied 阶段以单 Dexie 事务 replace-all 填充该 catalog；聊天数据仍全部经 IPC → SQLite。详见「Phase 6 交付收尾后发现：L2 attachment/file 兼容修复」。
+
 ### 导入数据流（Phase 4）
 
 ```
@@ -312,7 +316,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 **设计原则**：
 - 消息顺序通过 `sort_order` 显式管理，不依赖自增 ID 或插入时间
 - JSON `extra` 字段用于扩展属性，避免 schema 频繁变更
-- 文件引用首期仅迁移元数据，不迁移文件内容
+- ~~文件引用首期仅迁移元数据，不迁移文件内容~~ → **已 superseded（2026-08-05，post-closure L2 attachment/file 兼容修复，LOCK-DOC-1）**：L2 导入现同时迁移物理 payload（canonical `Files/<id><ext>`）+ Dexie `files` catalog（`files-catalog.json` handoff）；SQLite `file_references` 仍为 block-linked 快照行（关系 + 查询索引），不建 canonical files 表
 - 预留索引：`messages(topic_id, sort_order)`，`message_blocks(message_id, sort_order)`，`topic_segments(topic_id, sort_order)`，`file_references(message_id)`，`file_references(file_id)`
 
 ---
@@ -1184,6 +1188,53 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 远程 CI | 无新 commit / push / PR / run（LOCK-GIT-1；见 §17 远程 CI 行） |
 | Platform scope | macOS-only（A-9）不变 |
 
+#### Phase 6 交付收尾后发现：L2 attachment/file 兼容修复（2026-08-05）— 已实现
+
+> **定位**：本节为 Phase 6 closure（2026-07-31）与 L2 产品闭环最终实现（2026-08-04）之后完成的 **L2 attachment/file 兼容性修复**（用户批准合同 2026-08-04；实现分三个依赖阶段：候选文件 artifact → 三 artifact promotion/recovery → catalog handoff + unavailable UI + L3/E2E + 文档，每阶段独立审计）。**不是 Phase 7**，不重开 Phase 0–6。Phase 0–6 Done 状态不变。历史契约（Phase 2「file references 为元数据快照」、Q-3「不建 canonical files 表」、非目标「文件内容 blob 迁移」）保持历史事实（chronology 保留，LOCK-DOC-1），在对应位置以 dated superseded 标注；本节为 current 边界。全程隐私安全（LOCK-DOC-2）：不记录 artifact 绝对路径 / 文件 ID / 名称 / 内容 / 精确哈希。
+
+##### 用户批准合同（分类，LOCK-DOC-3）
+
+| 类别 | 精确内容（用户批准，2026-08-04） |
+|---|---|
+| **A. Archive/session fatal（整批拒绝）** | ZIP 路径穿越；symlink/hardlink 或不支持 entry type；加密 entry；重复 archive path；Unicode/case-fold 后的目标路径冲突；central directory 损坏到无法安全继续；zip-bomb / entry count / 压缩比 / 资源配额超限；磁盘空间预检失败；candidate/journal/snapshot/promotion 无法保证恢复；同一 file ID 对应多个无法区分的 payload |
+| **B. Reference degraded（不得阻止聊天导入）** | 被引用但 payload 缺失；被引用但 Dexie catalog row 缺失；catalog metadata 与 block/file-reference snapshot 不一致；单个 payload CRC / 大小 / 读取校验失败但解析器仍可安全继续；文件内容丢失但消息及 file metadata 完整。**处理规则**：保留 message block 与 SQLite file_reference metadata；不创建声称文件存在的 catalog row；不创建空文件或伪造 payload；附件视为 **unavailable**；UI 保留文件名/类型、预览明确提示不可用；只记录聚合计数（日志不含文件名/路径/用户内容）；**单个附件降级不得导致整个聊天导入失败** |
+| **C. Optional catalog/orphan** | catalog row 有合法 payload、即使当前无消息引用也导入 catalog + payload（文件浏览器与源备份一致）；catalog row 缺 payload → 跳过该 row 并计数；payload 存在但无 catalog row 且无消息引用 → 跳过；缺 catalog row 但 file-reference snapshot 完整一致且 payload 唯一可定位 → 作为**单独、显式记录**的 reference-backed catalog canonicalization；metadata 不完整或多个 reference snapshot 互相冲突 → **不猜测，按 unavailable 降级** |
+
+##### 实现记录（2026-08-05）
+
+| 属性 | 值 |
+|---|---|
+| **定位** | closure 后兼容性修复，非 Phase 7；不重开 Phase 0–6 |
+| **候选文件 artifact（attachmentPlane，LOCK-FIX-1…9 + LOCK-CORR-1…4）** | 源 `Data/Files` payload + 源 Dexie `files` catalog 行 + committed candidate file references → sealed candidate artifacts：① **candidate Files 目录**——canonical `Files/<id><ext>`（LOCK-FIX-2/6），流式提取 + 流式 SHA-256（LOCK-FIX-7，never whole-file buffered）；② **durable catalog handoff**——`files-catalog.json`（LOCK-FIX-2），normalized rows，供 promotion 阶段填 live Dexie `files` 表（LOCK-FIX-1：Dexie catalog 保持权威，**无 SQL files 表**）；③ **degraded manifest/statistics**——aggregate count-only（LOCK-FIX-4/5），never per-file。分类：HEALTHY / DEGRADED（missingPayload、missingCatalogRow、metadataMismatch、payloadReadFailure、lostContent、invalidTargetName、duplicateCatalogRow）/ SKIPPED（payloadWithoutCatalog）/ FATAL |
+| **不变量（LOCK-FIX-6/8/9）** | 源 ZIP 永不被修改；源绝对路径永不进入 handoff（`path` 为 candidate-relative `Files/<id><ext>`）；物理 size + 流式 SHA-256 为物理权威（size 差异=degrade，缺失=无 claim）；handoff 原子写（temp+rename）+ read-back 校验 + healthy payload 写后重述（fail closed → `CANDIDATE_STATE_UNRECOVERABLE`）；**健康未引用 target count ≥ 1**——重建引用计数使启动孤儿清理（count ≤ 0）永不误删已导入未引用文件；candidate discard 精确移除全部 artifacts（LOCK-FIX-9） |
+| **LOCK-CORR-1…4（审计修正）** | ① cancel/dispose 在 durable publication 与 finalize 后 seal 前复检，取消会话永不 candidate-ready；② 增量**流式 CRC-32**（zlib.crc32）对**每个** payload（含 bit-3 data-descriptor 条目，node-stream-zip 跳过自验）与 central-directory CRC 比对，mismatch → payloadReadFailure degrade；③ ZIP 每 finalize 仅 reopen + central directory 解析一次，共享 handle + entry map，finally 精确一次关闭；④ entry-not-found 为 payload 级 degrade；archive open / CEN / global parser 失败保持 fatal |
+| **Data/Files 预算 + 磁盘预检（LOCK-DOC-5，LOCK-PROD-9）** | **独立预算模型**：IndexedDB / Local Storage / Data/Files 各自独立资源上限（不再用 500 MiB 容器限制直接拒绝真实长期备份）；Data/Files：前缀 `Data/Files/`、单 entry ≤ 2 GiB、累计解压 ≤ 8 GiB、压缩比等硬上限保留；流式 SHA-256 + 增量 CRC-32；提取前磁盘预检（需求 + 256 MiB 安全余量，statfs fail-closed → `DISK_PREFLIGHT_FAILED`）；**1.30 GiB 级理性**——阈值依据真实 1.39 GiB 备份 inventory（1393936335 bytes ≈ 1.30 GiB）与资源模型确定，**不声明无限制支持** |
+| **Promotion journal v2（LOCK-PROMO-2/10/12）** | **v1**（LOCK-4404）chat.db-only：`version/sessionId/candidateId/phase` ∈ `snapshot-ready \| candidate-installed \| replacement-verified`。**v2（LOCK-PROMO-2）三 artifact**：`version/sessionId/candidateId/phase/receipts`，phase ∈ `candidates-ready → snapshots-ready → db-installed → files-installed → catalog-pending → catalog-applied → replacement-verified`（7 相）；receipts = candidate + old 两代 aggregate 完整性（counts + canonical SHA-256 over candidate/old artifacts），**无文件名/路径/内容/raw IDs（LOCK-PROMO-12）**。**v1 兼容（LOCK-PROMO-10）**：v1 journal 仍可解码并按原 chat.db-only 协议恢复，绝不重释为部分安装的 Files 代。**短时不可取消边界**：promotion（破坏性窗口）开始后短时不可取消；此前允许取消并精确清理 candidate（LOCK-CLEAN-1…5：journal 存在期间绝不删除 candidate 证据；journal cleanup 后才移除 owned candidate 目录） |
+| **Recovery v2（LOCK-PROMO-6/7，LOCK-JRNL-1/3/4，LOCK-AMB-3/4）** | 五动作：keep-old-live / complete-catalog-apply / accept-verified-replacement / restore-rollback-snapshot（**三 artifact 全恢复**，逐代验证）/ repair-required；**每个 journal phase 崩溃恢复收敛到全新或全旧**——rollback-midway（restored OLD db 后 Files/catalog 未恢复）绝不 forward/accept（经 live DB 精确 identity：size + SHA-256 vs journal candidate db receipt 识别混代）。**236,196 组合全枚举**（9 journals × 3 live × 3 dbSnapshot × 2 candidate × 3 files × 3 filesSnapshot × 2 filesStaging × 3 catalogSnapshot × 3 catalogApplied × 3 candidateCatalog × 3 liveDbReceiptMatchesCandidate），**惰性 generator 枚举、绝不物化数组**（LOCK-MEM-1/2/3）；deferredToWindow（catalog boundary 不可用 → recovery-only window 模式）与 deferredToStartup（terminal-handoff lease-busy → 新进程启动恢复确定性重验/接受/清理） |
+| **Catalog UI gate / retry / repair（LOCK-PROMO-7，LOCK-F2，LOCK-CAT-1/4/5/8，LOCK-BRIDGE-1）** | `catalogRecoveryRequired` 时 app **不启动普通 UI**；创建 minimal recovery-only BrowserWindow（`?cherryImportRecovery=1`，仅渲染静态 recovery surface，普通数据流阻断）；注册 catalog boundary（apply-candidate / restore-snapshot / query-facts），等待 renderer authenticated ready（有界，不竞态 handler mount）；单次 transient failure 以 fresh recovery window **重试一次**（预算 ≤ 2 windows，journal/protocol 语义不变），预算耗尽或非 transient → 保持 recovery window 存活并导航至**有界 terminal repair surface**（i18n text + machine code only，无路径/名字/内容/ID）；catalog apply/restore 均为**单 Dexie 事务 replace-all**；catalog-pending 期间普通 UI 阻断 |
+| **Unavailable marker（LOCK-UI-1…6）** | import-only per-block **`l2AttachmentUnavailable=true`** overflow marker：candidate seal 前按 reference-degraded file id 批量写入引用块（单 SQLite transaction；仅引用 degraded 文件的块被标记，healthy / degraded-but-unreferenced / 孤儿不标记，LOCK-UI-2）；Renderer 只读标记显示 unavailable 占位并禁用预览（不逐渲染 IPC、不触发 Sharp/文件 IPC 缺文件错误）；token estimation `imageSize` 与图片复用 `base64Image` 均加 marker guard；**隐私（LOCK-UI-5）**：degraded 分类与 marker 结果 aggregate count-only，Main-only 隐私内部 degraded file id set（快照访问器、无别名）；**确定性（LOCK-UI-6）**：marker 从 record/overflow digest 确定性剥离，candidate 仍过全部 14 维，wire adapter 往返保留 |
+| **L3（LOCK-L3-1/2/3/4）** | 备份现包含 **live `Data/Files` 递归 byte-identical** + **IndexedDB Dexie catalog 存储**（LOCK-L3-1）；**promotion artifact 排除（LOCK-L3-2）**——candidate 根目录、promotion journal/staging、rollback 快照（chat.db + Files 快照/old/staging 目录）、Files promote staging、catalog snapshot/staging 等全部从备份排除；restore round-trip 保留物理 Files 字节与 catalog 存储、不激活 promotion artifact（LOCK-L3-3）；**skipBackupFile 不对称（LOCK-L3-4）**——`skipBackupFile=true` 时排除 `Data/Files` 但**保留 IndexedDB catalog**（chat.db 快照仍强制包含，LOCK-6008） |
+
+##### 最终验证证据（LOCK-DOC-7）
+
+| 测试 | 结果 |
+|---|---|
+| **合成附件标准 E2E（`import-cherrystudio-attachments.spec.ts`，fresh production build）** | **PASS 1/1（约 1m57s）**：4 catalog rows / 3 payload / 1 degraded missing（unavailable）/ 3 file references；图片渲染、附件 UI unavailable 占位、文件浏览器（Files 页列出 png/txt/orphan、排除 missing、无 Invalid Date）、ZIP 指纹不变、**同 profile 重启后全部存活** |
+| **真实 opt-in 大 ZIP（`import-cherrystudio-real-backup.spec.ts`，`CHERRY_E2E_REAL_ZIP` opt-in，隐私关闭 trace/screenshot/video）** | **PASS 1/1（final-source 权威）**：完整链路 **4 分 36 秒**、**1.30 GiB 级**（此前 run 完整链路 4 分 54 秒 / post-finalizing 2 分 53 秒为历史证据，时间顺序保留——旧 180s marker timeout 实测过短：finalizing 后全 DB 校验 + 4158 文件全量哈希 + catalog facts + 大 Renderer reload；real-only marker budget 调至 6 分钟、生产校验强度不变、重跑通过，**该超时非产品缺陷证据**）；聚合 candidate topics **2707** / messages **129150** / blocks **158441** / file refs **4158**、active **2704** / deleted **0**；**ZIP 不可变（boolean）**；integrity/FK 通过；无残留进程/profile |
+| **RecoveryV2 穷举（`recoveryV2.test.ts`）** | **236,196 惰性组合全覆盖；47/47 PASS、约 25s、主进程峰值约 341 MiB / 全部 Vitest 进程合计峰值约 775 MiB**（plain Node24 单 fork、自然 exit 0、无残留进程）；**被强退的运行明确非证据**（仅证明旧物化方式资源耗尽） |
+| **全量最终 gates（final-source 权威）** | **全部通过（LOCK-DOC-7）**：实现 + 聚焦测试（attachmentPlane / attachmentMarkers / journalStoreV2 / recoveryV2 / recoveryExecutorV2 / catalogApplyIpc / catalogStartupRecovery / rollbackV2 / execution / backupManager.production 等）+ 合成/真实 E2E 完成。Node24.12 ABI137 / pnpm 10.27.0：`pnpm format` exit 0（**1882 files**，1 个文件首次 pass 被修复、二次 pass clean/稳定）；`CI=true pnpm lint` exit 0（0 errors；**85 ESLint + 4 oxlint known warnings**；node/web/aicore typecheck + i18n + format PASS）；`CI=true pnpm test` exit 0（**357 files passed / 1 file skipped**；**8647 passed / 75 skipped / 0 failed / 127.09s**）。Electron final（ABI145）：`native:rebuild:electron` PASS、`pnpm build` PASS（**12.5s**） |
+
+##### 残余边界与风险
+
+| 边界 | 说明 |
+|---|---|
+| **预算不声明无限制** | Data/Files 独立预算 + 硬上限保留，阈值按真实 1.39 GiB 级 inventory 与资源模型确定（LOCK-DOC-5） |
+| **计数 provenance** | final run 未发出的逐类别 degraded 计数不声明；分类以用户批准合同（LOCK-DOC-3）为准 |
+| **隐私** | 本文档不记录 artifact 绝对路径 / 文件 ID / 名称 / 内容 / 精确哈希（LOCK-DOC-2）；ZIP 不可变以 boolean 记录 |
+| **无 commit / push / PR / 远程 CI 声明（LOCK-DOC-8）** | 实现与测试全部位于本地工作树（未提交、未推送）；不虚构任何远程状态 |
+| **strict residuals** | archive fatal 整批拒绝、reference degraded 聚合计数、optional 跳过语义按合同保持；文件引用 ownership 等既有严格拒绝不变 |
+| **Platform scope** | macOS-only（A-9）不变 |
+
 #### Phase 6 Decision Locks（LOCK-6001…6036）
 
 > 全部 LOCK-60xx 在 Phase 6 确立且保持 active；Phase 4 全部 LOCK-44xx 与 Phase 5 全部 LOCK-51xx 继续有效。
@@ -1298,6 +1349,8 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 │ · promotion 短时不可取消                 │
 └─────────────────────────────────────────┘
 ```
+
+> ⚠️ **post-closure 扩展（2026-08-05，LOCK-DOC-4）**：上述为 Phase 4 原始数据流（chat.db 单 artifact）。L2 attachment/file 兼容修复后，candidate 为**三 artifact**（candidate chat.db + candidate Files 目录 + candidate `files-catalog.json` handoff）；4.2 增加 attachment plane（流式提取 + 流式 SHA-256/CRC-32 + fatal/degraded/optional 分类）；4.3 增加候选 Files/catalog 重述与 aggregate receipt 校验；4.4 promotion 经 **v2 三 artifact journal**（candidates-ready → snapshots-ready → db-installed → files-installed → catalog-pending → catalog-applied → replacement-verified）协调安装，catalog 单 Dexie 事务 replace-all 后开放普通 UI。详见「Phase 6 交付收尾后发现：L2 attachment/file 兼容修复」。
 
 ### 权威语义
 
@@ -1416,7 +1469,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 |---|---|---|---|
 | Q-1 | libSQL + Drizzle vs better-sqlite3 / 其他方案？ | A-7 技术栈决策 | **Resolved**：选择 better-sqlite3 + Drizzle ORM（A-7 Accepted） |
 | Q-2 | chat.db 是否未来统一为 app.db（合并 Memory/Knowledge）？ | 架构长期演进 | Open |
-| Q-3 | 文件元数据首期迁移深度：仅 references 还是包含 files 表全量？ | Phase 2 范围 | **Resolved**：Phase 2 使用 block-linked file references，每条引用携带完整元数据快照（file_name, file_path, file_type 等）；不建 canonical files 表。canonical files 表推迟到 FileManager 全局迁移前做显式决策 |
+| Q-3 | 文件元数据首期迁移深度：仅 references 还是包含 files 表全量？ | Phase 2 范围 | **Resolved**：Phase 2 使用 block-linked file references，每条引用携带完整元数据快照（file_name, file_path, file_type 等）；不建 canonical files 表。canonical files 表推迟到 FileManager 全局迁移前做显式决策。**superseded 注（2026-08-05，LOCK-DOC-1）**：上述为 Phase 2 范围的历史决议；post-closure L2 attachment/file 兼容修复扩展为导入物理 `Data/Files` payload + 源 Dexie `files` catalog（`files-catalog.json` handoff）；仍不建 SQL canonical files 表（Dexie catalog 权威，LOCK-FIX-1）。详见 post-closure attachment 小节 |
 | Q-4 | 流式批次阈值：多大消息量触发分批 IPC？ | Phase 4.1 import IPC 分页 | Open |
 | Q-5 | 搜索/FTS 首期是否实现？schema 预留还是 Phase 6 再加？ | Phase 2 schema | **Resolved**：Phase 2 不含 FTS；后续通过 append-only migration 添加，时机为搜索 projection 设计完成时 |
 | Q-6 | 遗留 agents.db 用户文件处理：归档提示还是自动清理？ | Group E 清理 | **Resolved（LOCK-6024）**：agents.db 永久保留；Phase 6 不自动删除且不提示删除。Agent runtime wiring 属 out of scope |
