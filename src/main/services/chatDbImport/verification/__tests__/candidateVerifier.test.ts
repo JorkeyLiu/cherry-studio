@@ -43,6 +43,7 @@ import {
 } from '../../../chatDb/migration'
 import * as schema from '../../../chatDb/schema'
 import { wireToMessage } from '../../../chatDb/wireAdapters'
+import { markUnavailableAttachmentBlocks } from '../../attachmentMarkers'
 import { CandidateFtsProjection } from '../../ftsProjection'
 import { computeMessageTargetId } from '../../identity/messageIdentity'
 import { createImportDataPlane } from '../../importDataPlane'
@@ -346,6 +347,43 @@ describe('CandidateVerifier', () => {
     const overflow = dim(report, 'overflow')
     expect(overflow.status).toBe('fail')
     expect(overflow.diagnostics.some((d) => d.entityId === 't-del' && d.code === 'OVERFLOW_DIGEST_MISMATCH')).toBe(true)
+  })
+
+  it('post-manifest unavailable-attachment marker passes all 14 dimensions (LOCK-UI-6)', async () => {
+    // Build a candidate whose file block references file-1. The marker is
+    // applied AFTER the manifest is finalized (the degraded file set exists
+    // only after attachment reconciliation) — exactly the production order.
+    const markerDbPath = realPath.join(tempDir, 'marker-attachment-chat.db')
+    const markerSqlite = new Database(markerDbPath)
+    markerSqlite.pragma('journal_mode = WAL')
+    markerSqlite.pragma('foreign_keys = ON')
+    const markerDb = drizzle(markerSqlite, { schema })
+    runMigrations(markerDb, markerSqlite)
+
+    const plane = createImportDataPlane(markerDb)
+    plane.processPage(page('topics', [srcTopic('t-1', [srcMessage('m-1', 't-1', ['b-1'])])]))
+    plane.processPage(
+      page('message_blocks', [srcBlock('b-1', 'm-1', { type: 'file', file: FILE_META as unknown as JsonObject['x'] })])
+    )
+    plane.finalize()
+    const manifest = plane.getSourceVerificationManifest()
+    markerSqlite.close()
+
+    // Apply the marker through the real candidate-DB mutation helper.
+    corrupt(markerDbPath, (db) => {
+      const result = markUnavailableAttachmentBlocks(db, ['file-1'])
+      expect(result.markedBlockCount).toBe(1)
+    })
+
+    // LOCK-UI-6: the marker is deterministically excluded from the block
+    // digest framing, so the marker-bearing candidate still matches the
+    // source manifest across all 14 dimensions.
+    const report = await verify(markerDbPath, manifest)
+    expect(report.status).toBe('pass')
+    expect(report.fatal).toBeNull()
+    for (const result of report.dimensions) {
+      expect(result.status).toBe('pass')
+    }
   })
 
   // -------------------------------------------------------------------------

@@ -154,6 +154,18 @@ import BackupManager, {
   safeCleanupWorkspace,
   validateLocalBackupDir
 } from '../BackupManager'
+import { FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME } from '../chatDbImport/promotion/filesSnapshot'
+import {
+  FILES_CATALOG_SNAPSHOT_FILENAME,
+  FILES_CATALOG_SNAPSHOT_STAGING_FILENAME,
+  FILES_PROMOTE_STAGING_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_STAGING_DIRNAME,
+  PROMOTION_JOURNAL_FILENAME,
+  ROLLBACK_SNAPSHOT_FILENAME,
+  ROLLBACK_SNAPSHOT_STAGING_FILENAME
+} from '../chatDbImport/promotion/journal'
+import { PROMOTION_JOURNAL_STAGING_FILENAME } from '../chatDbImport/promotion/journalStore'
 
 const createDirent = (name: string) => ({ name })
 
@@ -374,6 +386,121 @@ describe('BackupManager.copyDirWithProgress - Symlink Handling', () => {
       expect.stringContaining('Skipping circular symlink directory'),
       expect.objectContaining({ path: '/src/self-link', realPath: '/src' })
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LOCK-L3-1/L3-2: Data-root filter coverage — copyDirWithProgressFiltered
+// skips live chat DB coordination files and every owned L2 promotion
+// artifact while copying live Data/Files recursively. EXCLUDED_DATA_ENTRIES
+// is asserted against the L2 module constants (drift guard).
+// ---------------------------------------------------------------------------
+
+describe('BackupManager EXCLUDED_DATA_ENTRIES + copyDirWithProgressFiltered (LOCK-L3-1/L3-2)', () => {
+  let backupManager: BackupManager
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    backupManager = new BackupManager()
+    vi.mocked(fs.ensureDir).mockResolvedValue(undefined as never)
+    vi.mocked(fs.copy).mockResolvedValue(undefined as never)
+    vi.mocked(fs.realpath).mockImplementation(async (entryPath) => String(entryPath) as never)
+  })
+
+  it('EXCLUDED_DATA_ENTRIES excludes live chat DB coordination files and every L2 promotion artifact (LOCK-L3-2)', () => {
+    const excluded = (BackupManager as unknown as { EXCLUDED_DATA_ENTRIES: Set<string> }).EXCLUDED_DATA_ENTRIES
+
+    // Live chat DB coordination files (historical behavior)
+    expect(excluded.has('chat.db')).toBe(true)
+    expect(excluded.has('chat.db-wal')).toBe(true)
+    expect(excluded.has('chat.db-shm')).toBe(true)
+    expect(excluded.has('chat.db.backup')).toBe(true)
+
+    // L2 promotion internals at the Data root (LOCK-L3-2)
+    // The candidate root is pinned as the literal 'chat-import-candidates'
+    // (== candidateDb.CANDIDATE_ROOT_DIRNAME; drift-guarded in the production test)
+    expect(excluded.has('chat-import-candidates')).toBe(true)
+    expect(excluded.has(PROMOTION_JOURNAL_FILENAME)).toBe(true)
+    expect(excluded.has(PROMOTION_JOURNAL_STAGING_FILENAME)).toBe(true)
+    expect(excluded.has(ROLLBACK_SNAPSHOT_FILENAME)).toBe(true)
+    expect(excluded.has(ROLLBACK_SNAPSHOT_STAGING_FILENAME)).toBe(true)
+    expect(excluded.has(FILES_ROLLBACK_SNAPSHOT_DIRNAME)).toBe(true)
+    expect(excluded.has(FILES_ROLLBACK_SNAPSHOT_STAGING_DIRNAME)).toBe(true)
+    expect(excluded.has(FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME)).toBe(true)
+    expect(excluded.has(FILES_PROMOTE_STAGING_DIRNAME)).toBe(true)
+    expect(excluded.has(FILES_CATALOG_SNAPSHOT_FILENAME)).toBe(true)
+    expect(excluded.has(FILES_CATALOG_SNAPSHOT_STAGING_FILENAME)).toBe(true)
+
+    // Live user content names are NOT excluded (LOCK-L3-1)
+    expect(excluded.has('Files')).toBe(false)
+    expect(excluded.has('notes.txt')).toBe(false)
+  })
+
+  it('copyDirWithProgressFiltered copies Data/Files recursively but skips DB coordination files and promotion artifacts', async () => {
+    // Directory tree simulated under /src (the Data root)
+    const fileLeaves = new Set([
+      '/src/chat.db',
+      '/src/chat.db-wal',
+      '/src/chat.db-shm',
+      '/src/chat.db.backup',
+      '/src/keep.txt',
+      '/src/chat-import-candidates/candidate-s1/chat.db',
+      '/src/chat-import-candidates/candidate-s1/files-catalog.json',
+      '/src/Files/payload.png',
+      '/src/Files/nested/doc.pdf'
+    ])
+    const dirEntries: Record<string, string[]> = {
+      '/src': [
+        'chat.db',
+        'chat.db-wal',
+        'chat.db-shm',
+        'chat.db.backup',
+        'keep.txt',
+        'chat-import-candidates',
+        'Files'
+      ],
+      '/src/chat-import-candidates': ['candidate-s1'],
+      '/src/chat-import-candidates/candidate-s1': ['chat.db', 'files-catalog.json'],
+      '/src/Files': ['payload.png', 'nested'],
+      '/src/Files/nested': ['doc.pdf']
+    }
+
+    vi.mocked(fs.readdir).mockImplementation(async (dir: unknown) => {
+      const entries = dirEntries[String(dir)] ?? []
+      return entries.map((name) => ({ name })) as never
+    })
+    vi.mocked(fs.lstat).mockImplementation(async (entryPath: unknown) => {
+      const sourcePath = String(entryPath)
+      if (fileLeaves.has(sourcePath)) {
+        return { size: 10, isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false } as never
+      }
+      return { size: 0, isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false } as never
+    })
+
+    const onProgress = vi.fn()
+    const excluded = (BackupManager as unknown as { EXCLUDED_DATA_ENTRIES: Set<string> }).EXCLUDED_DATA_ENTRIES
+
+    await (backupManager as any).copyDirWithProgressFiltered('/src', '/dest', excluded, onProgress, {
+      dereferenceSymlinks: true
+    })
+
+    // Live user content is copied recursively — Files subtree included (LOCK-L3-1)
+    expect(fs.copy).toHaveBeenCalledWith('/src/keep.txt', '/dest/keep.txt')
+    expect(fs.copy).toHaveBeenCalledWith('/src/Files/payload.png', '/dest/Files/payload.png')
+    expect(fs.copy).toHaveBeenCalledWith('/src/Files/nested/doc.pdf', '/dest/Files/nested/doc.pdf')
+
+    // DB coordination files never copied
+    const copiedSources = vi.mocked(fs.copy).mock.calls.map((call) => call[0])
+    expect(copiedSources).not.toContain('/src/chat.db')
+    expect(copiedSources).not.toContain('/src/chat.db-wal')
+    expect(copiedSources).not.toContain('/src/chat.db-shm')
+    expect(copiedSources).not.toContain('/src/chat.db.backup')
+
+    // L2 promotion artifacts never copied (candidate subtree pruned whole)
+    expect(copiedSources.some((source) => source.includes('chat-import-candidates'))).toBe(false)
+
+    // Progress reported exactly for the three copied files
+    expect(onProgress).toHaveBeenCalledTimes(3)
   })
 })
 

@@ -16,7 +16,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { PROMOTION_JOURNAL_PHASES, type PromotionJournalPhase, type PromotionJournalV1 } from '../journal'
+import { PROMOTION_JOURNAL_PHASES, type PromotionJournalPhaseV1, type PromotionJournalV1 } from '../journal'
 import { PROMOTION_CRASH_POINTS } from '../protocol'
 import {
   type CandidateArtifactStatus,
@@ -33,7 +33,7 @@ const LIVE_STATUSES: readonly LiveDbArtifactStatus[] = ['missing', 'present-unve
 const SNAPSHOT_STATUSES: readonly SnapshotArtifactStatus[] = ['missing', 'present-unverified', 'present-verified']
 const CANDIDATE_STATUSES: readonly CandidateArtifactStatus[] = ['missing', 'present']
 
-function journalFor(phase: PromotionJournalPhase): PromotionJournalV1 {
+function journalFor(phase: PromotionJournalPhaseV1): PromotionJournalV1 {
   return { version: 1, sessionId: 'import-s1', candidateId: 'candidate-import-s1', phase }
 }
 
@@ -231,7 +231,9 @@ describe('decidePromotionRecovery (LOCK-4406)', () => {
     it('every matrix row decision matches decidePromotionRecovery exactly', () => {
       for (const row of PROMOTION_CRASH_POINT_MATRIX) {
         const journal: PromotionJournalObservation =
-          row.journal === 'absent' ? { status: 'absent' } : { status: 'valid', journal: journalFor(row.journal) }
+          row.journal === 'absent'
+            ? { status: 'absent' }
+            : { status: 'valid', journal: journalFor(row.journal as PromotionJournalPhaseV1) }
         const decision = decidePromotionRecovery({
           journal,
           live: row.live,

@@ -133,6 +133,27 @@ export default defineConfig({
       threads: {
         singleThread: false
       }
-    }
+    },
+    // Native-module (better-sqlite3) suites run in fork processes so the
+    // Node ABI 137 binding is loaded under process isolation (LOCK-ABI-2 —
+    // real runtime SQL only; markers are never trusted). Thread-pool runs of
+    // the native binding are flaky (SIGSEGV), so every native suite in the
+    // v2 recovery verification scope is pinned to forks. recoveryV2.test.ts
+    // is pure TS but is ALSO pinned to forks (LOCK-MEM-4): its exhaustive
+    // 236,196-combination sweep must run in a single bounded-memory fork
+    // process, not a thread-pool worker. The canonical single-fork command
+    // is documented with the recoveryV2 test itself.
+    poolMatchGlobs: [
+      ['**/promotion/__tests__/execution.test.ts', 'forks'],
+      ['**/promotion/__tests__/recoveryExecutorV2.test.ts', 'forks'],
+      ['**/promotion/__tests__/rollbackV2.test.ts', 'forks'],
+      ['**/promotion/__tests__/rollback.test.ts', 'forks'],
+      ['**/promotion/__tests__/artifactProbe.test.ts', 'forks'],
+      ['**/promotion/__tests__/install.test.ts', 'forks'],
+      ['**/promotion/__tests__/preparation.test.ts', 'forks'],
+      ['**/promotion/__tests__/replacementVerifier.test.ts', 'forks'],
+      ['**/promotion/__tests__/snapshot.test.ts', 'forks'],
+      ['**/promotion/__tests__/recoveryV2.test.ts', 'forks']
+    ]
   }
 })

@@ -94,6 +94,16 @@ const IGNORED_DATA_ROOT_NAME = 'Data'
 /** Deterministic synthetic pre-import marker (LOCK-REAL5: replace-all must remove it). */
 const MARKER = { topic: 't-marker-real-e2e', name: 'Marker Topic' } as const
 
+/**
+ * Post-finalizing reload-marker timeout: after `finalizing`, the imported
+ * full DB / Files / catalog re-verification and the in-process reload run at
+ * real 1.3 GiB scale (thousands of files), which far exceeds the previous
+ * fixed 180s budget. Bounded: this is a step-level wait budget only — the
+ * test-level timeout stays 1_200_000 ms and no status wait, assertion,
+ * privacy setting, or production code changes.
+ */
+const REAL_BACKUP_RELOAD_MARKER_TIMEOUT_MS = 360_000
+
 // LOCK-REAL2: disable Playwright failure artifacts for this file — the real
 // backup path must never leak into a trace/screenshot/video. `video` cannot
 // be set inside a describe group (it forces a new worker), so it is file-
@@ -213,7 +223,9 @@ test.describe('Cherry Studio real-backup import harness', () => {
         electronApp.process().pid,
         `original PID ${originalPidValue} must still be alive after finalizing (LOCK-UI1)`
       ).toBe(originalPidValue)
-      await page.waitForFunction(() => (window as any).__e2ePreImportMarker !== true, { timeout: 180000 })
+      await page.waitForFunction(() => (window as any).__e2ePreImportMarker !== true, {
+        timeout: REAL_BACKUP_RELOAD_MARKER_TIMEOUT_MS
+      })
       await waitForMainWindowReady(page)
 
       // LOCK-REAL5: the one-shot navigation projection must be durably applied

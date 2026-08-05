@@ -39,7 +39,13 @@ vi.mock('@main/config', () => ({
   DATA_PATH: '/mock/data'
 }))
 
-import { encodePromotionJournal, PROMOTION_JOURNAL_FILENAME, type PromotionJournalV1 } from '../journal'
+import {
+  encodePromotionJournal,
+  PROMOTION_JOURNAL_FILENAME,
+  type PromotionJournalDoc,
+  type PromotionJournalV1,
+  type PromotionJournalV2
+} from '../journal'
 import type { PromotionJournalCleanupIdentity } from '../journalStore'
 import {
   advancePromotionJournalToCandidateInstalled,
@@ -779,7 +785,7 @@ describe('promotion journal cleanup (LOCK-4435..4438)', () => {
     candidateId: VALID.candidateId
   }
 
-  function seedJournal(doc: PromotionJournalV1): void {
+  function seedJournal(doc: PromotionJournalDoc): void {
     realFs.writeFileSync(journalPath, encodePromotionJournal(doc), 'utf8')
   }
 
@@ -787,7 +793,7 @@ describe('promotion journal cleanup (LOCK-4435..4438)', () => {
     expect(realFs.existsSync(journalPath)).toBe(false)
   }
 
-  function expectJournalPresent(doc: PromotionJournalV1): void {
+  function expectJournalPresent(doc: PromotionJournalDoc): void {
     expect(realFs.existsSync(journalPath)).toBe(true)
     expect(realFs.readFileSync(journalPath, 'utf8')).toBe(encodePromotionJournal(doc))
   }
@@ -995,6 +1001,47 @@ describe('promotion journal cleanup (LOCK-4435..4438)', () => {
       expect(unlinkSpy).not.toHaveBeenCalled()
       expect(openSpy).not.toHaveBeenCalled()
       expectJournalPresent(VALID)
+    })
+
+    it('v1 cleanup refuses a v2 journal at the shared replacement-verified phase (LOCK-CLOSE-1)', async () => {
+      const v2: PromotionJournalV2 = {
+        version: 2,
+        sessionId: VALID.sessionId,
+        candidateId: VALID.candidateId,
+        phase: 'replacement-verified',
+        receipts: {
+          candidate: { db: { sha256: 'a'.repeat(64), size: 100 }, files: null, catalog: null },
+          old: { db: null, files: null, catalog: null }
+        }
+      }
+      seedJournal(v2)
+      // Same phase + matching identity — only the schema-version bound stops
+      // the v1 cleanup from removing a v2 journal.
+      await expectStoreError(
+        cleanupPromotionJournalAfterReplacementVerified(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PHASE_MISMATCH'
+      )
+      expectJournalPresent(v2)
+      expectRetainedUntouched()
+    })
+
+    it('v1 cleanup refuses a v2 journal at any other phase too (LOCK-CLOSE-1)', async () => {
+      const v2: PromotionJournalV2 = {
+        version: 2,
+        sessionId: VALID.sessionId,
+        candidateId: VALID.candidateId,
+        phase: 'candidates-ready',
+        receipts: {
+          candidate: { db: { sha256: 'a'.repeat(64), size: 100 }, files: null, catalog: null },
+          old: { db: null, files: null, catalog: null }
+        }
+      }
+      seedJournal(v2)
+      await expectStoreError(
+        cleanupPromotionJournalAfterSnapshotReady(VALID_IDENTITY, dataRoot),
+        'CLEANUP_PHASE_MISMATCH'
+      )
+      expectJournalPresent(v2)
     })
   })
 

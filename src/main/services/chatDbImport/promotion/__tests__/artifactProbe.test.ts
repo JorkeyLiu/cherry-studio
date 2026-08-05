@@ -15,7 +15,8 @@
  * except DATA_PATH. Tests run on actual filesystem.
  */
 
-import * as realFs from 'node:fs'
+import * as crypto from 'node:crypto'
+import fsCjs, * as realFs from 'node:fs'
 import * as realOs from 'node:os'
 import * as realPath from 'node:path'
 
@@ -28,6 +29,7 @@ vi.unmock('node:crypto')
 
 vi.mock('@main/config', () => ({ DATA_PATH: '/mock/data' }))
 
+import type { FilesCatalogSnapshotRow } from '@shared/chatImport/types'
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 
@@ -35,10 +37,14 @@ import { runMigrations } from '../../../chatDb/migration'
 import * as schema from '../../../chatDb/schema'
 import { CANDIDATE_ROOT_DIRNAME } from '../../candidateDb'
 import {
+  type ArtifactProbeResult,
   diffDirectorySnapshots,
   probeCandidate,
+  probeFilesStaging,
   probeLiveDb,
+  probeLiveFiles,
   probePromotionArtifacts,
+  probePromotionArtifactsV2,
   probeResultToRecoveryInput,
   probeRetainedSnapshot,
   resolveCandidateDbPath,
@@ -46,7 +52,25 @@ import {
   resolveRetainedSnapshotPath,
   snapshotDirectory
 } from '../artifactProbe'
-import { PROMOTION_JOURNAL_FILENAME, ROLLBACK_SNAPSHOT_FILENAME } from '../journal'
+import { computeFilesReceipt } from '../artifactReceipts'
+import { buildCatalogSnapshotWire } from '../catalogSnapshot'
+import {
+  encodeFilesSnapshotManifest,
+  FILES_SNAPSHOT_MANIFEST_FILENAME,
+  LIVE_FILES_DIRNAME,
+  resolveLiveFilesDir
+} from '../filesSnapshot'
+import {
+  encodePromotionJournal,
+  FILES_CATALOG_SNAPSHOT_FILENAME,
+  FILES_PROMOTE_STAGING_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_DIRNAME,
+  PROMOTION_JOURNAL_FILENAME,
+  PROMOTION_JOURNAL_VERSION_V2,
+  type PromotionJournalPhaseV2,
+  type PromotionJournalV2,
+  ROLLBACK_SNAPSHOT_FILENAME
+} from '../journal'
 import { PROMOTION_JOURNAL_PHASES } from '../journal'
 import { decidePromotionRecovery } from '../recovery'
 
@@ -162,6 +186,7 @@ describe('artifactProbe (Phase 4.4.3, LOCK-4431/LOCK-4432)', () => {
 
   afterEach(() => {
     realFs.rmSync(tempDir, { recursive: true, force: true })
+    vi.restoreAllMocks()
   })
 
   // -------------------------------------------------------------------------
@@ -479,6 +504,98 @@ describe('artifactProbe (Phase 4.4.3, LOCK-4431/LOCK-4432)', () => {
     it('returns error for empty candidateId', () => {
       const result = probeCandidate('', tempDir)
       expect(result).toEqual({ kind: 'error', code: 'INVALID_CANDIDATE_ID' })
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Live Files / staging probes — audit F2/F4 (lstat presence, no follow)
+  // -------------------------------------------------------------------------
+
+  describe('probeLiveFiles / probeFilesStaging (audit F2/F4)', () => {
+    it('probeLiveFiles reports missing when the live Files dir is absent', () => {
+      expect(probeLiveFiles(null, tempDir)).toBe('missing')
+    })
+
+    it('probeLiveFiles reports present-unverified for a BROKEN SYMLINK live Files root, never missing (audit F2)', () => {
+      const live = resolveLiveFilesDir(tempDir)
+      try {
+        realFs.symlinkSync(realPath.join(tempDir, 'missing-target'), live)
+      } catch {
+        return
+      }
+      expect(probeLiveFiles(null, tempDir)).toBe('present-unverified')
+    })
+
+    it('probeLiveFiles reports present-unverified for a WORKING SYMLINK live Files root (lstat, never followed — audit F4)', () => {
+      realFs.mkdirSync(realPath.join(tempDir, 'real-files'))
+      const live = resolveLiveFilesDir(tempDir)
+      try {
+        realFs.symlinkSync(realPath.join(tempDir, 'real-files'), live)
+      } catch {
+        return
+      }
+      expect(probeLiveFiles(null, tempDir)).toBe('present-unverified')
+    })
+
+    it('probeFilesStaging reports present for a BROKEN SYMLINK staging path, never missing (audit F2)', () => {
+      const staging = realPath.join(tempDir, FILES_PROMOTE_STAGING_DIRNAME)
+      try {
+        realFs.symlinkSync(realPath.join(tempDir, 'missing-target'), staging)
+      } catch {
+        return
+      }
+      expect(probeFilesStaging(tempDir)).toBe('present')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // DB root probes — audit F4 (lstat, never follow a symlink)
+  // -------------------------------------------------------------------------
+
+  describe('DB root probes use lstat (audit F4)', () => {
+    it('probeLiveDb reports NOT_A_FILE for a WORKING SYMLINK at the live DB path', () => {
+      const dbPath = realPath.join(tempDir, 'chat.db')
+      makeValidDb(tempDir)
+      const elsewhere = realPath.join(tempDir, 'elsewhere.db')
+      realFs.renameSync(dbPath, elsewhere)
+      try {
+        realFs.symlinkSync(elsewhere, dbPath)
+      } catch {
+        return
+      }
+      const result = probeLiveDb(tempDir)
+      expect(result.status).toBe('present-unverified')
+      expect(result.detail).toEqual({ kind: 'stat-failure', code: 'NOT_A_FILE' })
+      expectNoSidecarResidue(dbPath)
+    })
+
+    it('probeRetainedSnapshot reports NOT_A_FILE for a BROKEN SYMLINK, never missing (audit F2)', () => {
+      const snapshotPath = realPath.join(tempDir, ROLLBACK_SNAPSHOT_FILENAME)
+      try {
+        realFs.symlinkSync(realPath.join(tempDir, 'missing-target'), snapshotPath)
+      } catch {
+        return
+      }
+      const result = probeRetainedSnapshot(tempDir)
+      expect(result.status).toBe('present-unverified')
+      expect(result.detail).toEqual({ kind: 'stat-failure', code: 'NOT_A_FILE' })
+      expectNoSidecarResidue(snapshotPath)
+    })
+
+    it('probeRetainedSnapshot reports NOT_A_FILE for a WORKING SYMLINK retained root (never followed)', () => {
+      makeValidDb(tempDir)
+      const snapshotPath = realPath.join(tempDir, ROLLBACK_SNAPSHOT_FILENAME)
+      const elsewhere = realPath.join(tempDir, 'elsewhere.db')
+      realFs.renameSync(realPath.join(tempDir, 'chat.db'), elsewhere)
+      try {
+        realFs.symlinkSync(elsewhere, snapshotPath)
+      } catch {
+        return
+      }
+      const result = probeRetainedSnapshot(tempDir)
+      expect(result.status).toBe('present-unverified')
+      expect(result.detail).toEqual({ kind: 'stat-failure', code: 'NOT_A_FILE' })
+      expectNoSidecarResidue(snapshotPath)
     })
   })
 
@@ -924,6 +1041,303 @@ describe('artifactProbe (Phase 4.4.3, LOCK-4431/LOCK-4432)', () => {
       const candidateDir = makeCandidateDir(tempDir, 'candidate-import_s1')
       makeValidDb(candidateDir)
       expect(probeCandidate('candidate-import_s1', tempDir)).toEqual({ status: 'present' })
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // v2 composite probe — disk → matrix bridge (LOCK-CLOSE-3)
+  // -------------------------------------------------------------------------
+
+  describe('probePromotionArtifactsV2 (LOCK-CLOSE-3)', () => {
+    const V2_SESSION = 'import-s1'
+    const V2_CANDIDATE = 'candidate-import-s1'
+    const V2_CANDIDATE_RECEIPTS = {
+      db: { sha256: 'a'.repeat(64), size: 100 },
+      files: { count: 1, totalBytes: 11, sha256: 'b'.repeat(64) },
+      catalog: { count: 1, sha256: 'c'.repeat(64) }
+    }
+    const V2_OLD_RECEIPTS = {
+      db: { sha256: 'd'.repeat(64), size: 200 },
+      files: { count: 0, totalBytes: 0, sha256: 'e'.repeat(64) },
+      catalog: { count: 0, sha256: 'f'.repeat(64) }
+    }
+
+    function v2Doc(phase: PromotionJournalPhaseV2): PromotionJournalV2 {
+      const old = phase === 'candidates-ready' ? { db: null, files: null, catalog: null } : V2_OLD_RECEIPTS
+      return {
+        version: PROMOTION_JOURNAL_VERSION_V2,
+        sessionId: V2_SESSION,
+        candidateId: V2_CANDIDATE,
+        phase,
+        receipts: { candidate: V2_CANDIDATE_RECEIPTS, old }
+      }
+    }
+
+    function writeV2Journal(doc: PromotionJournalV2): void {
+      realFs.writeFileSync(realPath.join(tempDir, PROMOTION_JOURNAL_FILENAME), encodePromotionJournal(doc), 'utf8')
+    }
+
+    /** One canonical payload `id.png` with derived physical size + sha256. */
+    function makePayload(id: string, content: string): { name: string; size: number; sha256: string } {
+      const name = `${id}.png`
+      const buf = Buffer.from(content, 'utf8')
+      return { name, size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex') }
+    }
+
+    /** Write live `Files/<name>` payload files. */
+    function makeLiveFilesDir(entries: Array<{ name: string; content: string }>): void {
+      const filesDir = realPath.join(tempDir, LIVE_FILES_DIRNAME)
+      realFs.mkdirSync(filesDir, { recursive: true })
+      for (const entry of entries) {
+        realFs.writeFileSync(realPath.join(filesDir, entry.name), entry.content, 'utf8')
+      }
+    }
+
+    /** Write a valid candidate `files-catalog.json` handoff for V2_CANDIDATE. */
+    function writeCandidateCatalog(payloads: Array<{ name: string; size: number; sha256: string }>): void {
+      const rows = payloads.map((p) => {
+        const id = p.name.slice(0, -'.png'.length)
+        return {
+          id,
+          name: p.name,
+          origin_name: `source-${p.name}`,
+          size: p.size,
+          sha256: p.sha256,
+          ext: '.png',
+          type: 'image/png',
+          created_at: '2020-01-01T00:00:00.000Z',
+          count: 1,
+          path: `Files/${p.name}`
+        }
+      })
+      const catalog = {
+        version: 1,
+        sessionId: V2_SESSION,
+        createdAt: '2020-01-01T00:00:00.000Z',
+        rows,
+        referenced: { referencedFileIdCount: rows.length },
+        degraded: {
+          missingPayload: 0,
+          missingCatalogRow: 0,
+          metadataMismatch: 0,
+          payloadReadFailure: 0,
+          lostContent: 0,
+          invalidTargetName: 0,
+          duplicateCatalogRow: 0
+        },
+        skipped: { payloadWithoutCatalog: 0 }
+      }
+      const catalogPath = realPath.join(tempDir, CANDIDATE_ROOT_DIRNAME, V2_CANDIDATE, 'files-catalog.json')
+      realFs.mkdirSync(realPath.dirname(catalogPath), { recursive: true })
+      realFs.writeFileSync(catalogPath, JSON.stringify(catalog), 'utf8')
+    }
+
+    /** Write a valid empty retained Files snapshot dir (manifest only). */
+    function writeEmptyRetainedFilesSnapshot(): void {
+      const dir = realPath.join(tempDir, FILES_ROLLBACK_SNAPSHOT_DIRNAME)
+      realFs.mkdirSync(dir, { recursive: true })
+      const manifest = {
+        version: 1 as const,
+        capturedAt: '2020-01-01T00:00:00.000Z',
+        kind: 'empty' as const,
+        entries: [] as Array<{ rel: string; size: number; sha256: string }>,
+        integrity: computeFilesReceipt([])
+      }
+      realFs.writeFileSync(
+        realPath.join(dir, FILES_SNAPSHOT_MANIFEST_FILENAME),
+        encodeFilesSnapshotManifest(manifest),
+        'utf8'
+      )
+    }
+
+    /** Write a valid retained catalog snapshot file. */
+    function writeCatalogSnapshot(payloads: Array<{ name: string; size: number; sha256: string }>): void {
+      const rows: FilesCatalogSnapshotRow[] = payloads.map((p) => {
+        const id = p.name.slice(0, -'.png'.length)
+        return {
+          id,
+          name: p.name,
+          origin_name: `source-${p.name}`,
+          // LOCK-BRIDGE-2: a restorable retained row — the app's own absolute
+          // storage path whose basename equals the canonical physical name.
+          path: `/owned/Data/Files/${p.name}`,
+          size: p.size,
+          ext: '.png',
+          type: 'image/png',
+          created_at: '2020-01-01T00:00:00.000Z',
+          count: 1
+        }
+      })
+      const payload = buildCatalogSnapshotWire(rows)
+      realFs.writeFileSync(realPath.join(tempDir, FILES_CATALOG_SNAPSHOT_FILENAME), JSON.stringify(payload), 'utf8')
+    }
+
+    it('absent journal → every artifact missing and catalogApplied unknown', () => {
+      const result = probePromotionArtifactsV2(null, tempDir)
+      expect(result.journal).toEqual({ status: 'absent' })
+      expect(result.live).toBe('missing')
+      expect(result.dbSnapshot).toBe('missing')
+      expect(result.candidate).toBe('missing')
+      expect(result.files).toBe('missing')
+      expect(result.filesSnapshot).toBe('missing')
+      expect(result.filesStaging).toBe('missing')
+      expect(result.catalogSnapshot).toBe('missing')
+      expect(result.catalogApplied).toBe('unknown')
+      expect(result.candidateCatalog).toBe('missing')
+    })
+
+    it('candidates-ready: candidate + catalog handoff present, files unverified, no snapshots yet', () => {
+      makeSeededDb(tempDir) // live chat.db
+      const candidateDir = makeCandidateDir(tempDir, V2_CANDIDATE)
+      makeValidDb(candidateDir) // candidate chat.db present
+      writeCandidateCatalog([makePayload('f-1', 'hello world')])
+      // Live Files is still the OLD generation — parity against the candidate
+      // catalog fails (extra payload) → present-unverified.
+      makeLiveFilesDir([{ name: 'stray.bin', content: 'not-in-catalog' }])
+      writeV2Journal(v2Doc('candidates-ready'))
+
+      const result = probePromotionArtifactsV2(null, tempDir)
+      expect(result.journal.status).toBe('valid')
+      if (result.journal.status === 'valid') {
+        expect(result.journal.journal.version).toBe(2)
+        expect(result.journal.journal.phase).toBe('candidates-ready')
+        expect(result.journal.journal.candidateId).toBe(V2_CANDIDATE)
+      }
+      expect(result.live).toBe('present-verified')
+      expect(result.dbSnapshot).toBe('missing')
+      expect(result.candidate).toBe('present')
+      expect(result.files).toBe('present-unverified')
+      expect(result.filesSnapshot).toBe('missing')
+      expect(result.filesStaging).toBe('missing')
+      expect(result.catalogSnapshot).toBe('missing')
+      expect(result.catalogApplied).toBe('unknown')
+      expect(result.candidateCatalog).toBe('present')
+    })
+
+    it('snapshots-ready: all three rollback snapshots retained and verified', () => {
+      makeSeededDb(tempDir)
+      realFs.copyFileSync(realPath.join(tempDir, 'chat.db'), realPath.join(tempDir, ROLLBACK_SNAPSHOT_FILENAME))
+      cleanupWalFiles(realPath.join(tempDir, ROLLBACK_SNAPSHOT_FILENAME))
+
+      const candidateDir = makeCandidateDir(tempDir, V2_CANDIDATE)
+      makeValidDb(candidateDir)
+      writeCandidateCatalog([makePayload('f-1', 'hello world')])
+      makeLiveFilesDir([{ name: 'stray.bin', content: 'not-in-catalog' }])
+      writeEmptyRetainedFilesSnapshot()
+      writeCatalogSnapshot([makePayload('f-1', 'hello world')])
+      writeV2Journal(v2Doc('snapshots-ready'))
+
+      const result = probePromotionArtifactsV2(null, tempDir)
+      expect(result.journal.status).toBe('valid')
+      if (result.journal.status === 'valid') {
+        expect(result.journal.journal.phase).toBe('snapshots-ready')
+      }
+      expect(result.live).toBe('present-verified')
+      expect(result.dbSnapshot).toBe('present-verified')
+      expect(result.candidate).toBe('present')
+      expect(result.files).toBe('present-unverified')
+      expect(result.filesSnapshot).toBe('present-verified')
+      expect(result.filesStaging).toBe('missing')
+      expect(result.catalogSnapshot).toBe('present-verified')
+      expect(result.catalogApplied).toBe('unknown')
+      expect(result.candidateCatalog).toBe('present')
+    })
+
+    it('files-installed: candidate consumed + catalog handoff present + live Files verified', () => {
+      makeSeededDb(tempDir)
+      realFs.copyFileSync(realPath.join(tempDir, 'chat.db'), realPath.join(tempDir, ROLLBACK_SNAPSHOT_FILENAME))
+      cleanupWalFiles(realPath.join(tempDir, ROLLBACK_SNAPSHOT_FILENAME))
+
+      // Candidate chat.db was consumed by the install — the candidate dir
+      // survives only as the catalog handoff.
+      makeCandidateDir(tempDir, V2_CANDIDATE)
+      const payload = makePayload('f-1', 'hello world')
+      writeCandidateCatalog([payload])
+      // Live Files now EXACTLY matches the candidate catalog (files installed).
+      makeLiveFilesDir([{ name: payload.name, content: 'hello world' }])
+      writeEmptyRetainedFilesSnapshot()
+      writeCatalogSnapshot([payload])
+      writeV2Journal(v2Doc('files-installed'))
+
+      const result = probePromotionArtifactsV2(null, tempDir)
+      expect(result.journal.status).toBe('valid')
+      if (result.journal.status === 'valid') {
+        expect(result.journal.journal.phase).toBe('files-installed')
+      }
+      expect(result.live).toBe('present-verified')
+      expect(result.dbSnapshot).toBe('present-verified')
+      // Candidate consumed → missing; catalog handoff survives → present.
+      expect(result.candidate).toBe('missing')
+      expect(result.candidateCatalog).toBe('present')
+      expect(result.files).toBe('present-verified')
+      expect(result.filesSnapshot).toBe('present-verified')
+      expect(result.filesStaging).toBe('missing')
+      expect(result.catalogSnapshot).toBe('present-verified')
+      expect(result.catalogApplied).toBe('unknown')
+    })
+
+    it('explicit candidateId is honored even when the journal is absent', () => {
+      const candidateDir = makeCandidateDir(tempDir, V2_CANDIDATE)
+      makeValidDb(candidateDir)
+      writeCandidateCatalog([makePayload('f-1', 'hello world')])
+      // No journal on disk — the caller supplies the candidateId directly.
+      const result = probePromotionArtifactsV2(V2_CANDIDATE, tempDir)
+      expect(result.journal).toEqual({ status: 'absent' })
+      expect(result.candidate).toBe('present')
+      expect(result.candidateCatalog).toBe('present')
+      expect(result.files).toBe('missing') // live Files absent → parity not run
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Sidecar cleanup never throws (LOCK-CLOSE-4/F5)
+  // -------------------------------------------------------------------------
+
+  describe('sidecar cleanup never throws (LOCK-CLOSE-4/F5)', () => {
+    it('live probe retains the primary result when a probe-created sidecar unlink fails', () => {
+      makeSeededDb(tempDir)
+      const dbPath = realPath.join(tempDir, 'chat.db')
+
+      // Spy on the mutable CJS exports object (the ESM namespace is frozen).
+      const realUnlinkSync = fsCjs.unlinkSync
+      let injectedWalUnlink = false
+      vi.spyOn(fsCjs, 'unlinkSync').mockImplementation((target: realFs.PathLike) => {
+        if (!injectedWalUnlink && String(target).endsWith('-wal')) {
+          injectedWalUnlink = true
+          throw Object.assign(new Error('injected unlink failure'), { code: 'EACCES' })
+        }
+        return realUnlinkSync(target)
+      })
+
+      let result: ArtifactProbeResult | undefined
+      expect(() => {
+        result = probeLiveDb(tempDir)
+      }).not.toThrow()
+
+      // The failure path was actually exercised (sidecar created by the probe).
+      expect(injectedWalUnlink).toBe(true)
+      // Primary result retained — the cleanup failure is captured, not thrown.
+      expect(result!.status).toBe('present-verified')
+      expect(result!.detail).toBeNull()
+      // The failed unlink left probe-created residue on disk.
+      expect(realFs.existsSync(`${dbPath}-wal`)).toBe(true)
+    })
+
+    it('composite probe fails closed via sidecarFree when cleanup leaves residue', () => {
+      makeSeededDb(tempDir)
+      vi.spyOn(fsCjs, 'unlinkSync').mockImplementation((target: realFs.PathLike) => {
+        if (String(target).endsWith('-wal')) {
+          throw Object.assign(new Error('injected unlink failure'), { code: 'EACCES' })
+        }
+        return fsCjs.unlinkSync(target)
+      })
+
+      const result = probePromotionArtifacts(null, tempDir)
+      // Never throws; the primary live status is still reported.
+      expect(result.live.status).toBe('present-verified')
+      // The residue is observable and flips the no-residue gate closed.
+      expect(result.sidecarFree).toBe(false)
+      expect(result.mutationEvidence.added).toContain('chat.db-wal')
     })
   })
 })

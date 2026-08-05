@@ -44,6 +44,7 @@ import { _electron as electron, type ElectronApplication, type Page } from '@pla
 import AdmZip from 'adm-zip'
 import * as fs from 'fs'
 import * as path from 'path'
+import crypto from 'node:crypto'
 import StreamZip from 'node-stream-zip'
 
 import { closeElectronWithExactCleanup } from './electron-cleanup'
@@ -75,6 +76,139 @@ export const SOURCE_IDS = {
   segment: 's-e2e-1',
   file: 'f-e2e-1'
 } as const
+
+// ---------------------------------------------------------------------------
+// Attachment variant constants (LOCK-E2-FIX)
+//
+// Deterministic attachment scenario for the import attachment plane
+// (src/main/services/chatDbImport/attachmentPlane.ts). Every id/name/byte/
+// timestamp is FIXED; source paths are FAKE absolute paths (`/fake/...`)
+// that the import pipeline normalizes and NEVER retains in the candidate
+// (LOCK-FIX-6). No real/private assets are embedded.
+//
+// Scenario (LOCK-E2-FIX-2):
+// - one valid tiny PNG image:      block + files catalog row + Data/Files
+//                                  payload (healthy);
+// - one valid text document:       block + files catalog row + Data/Files
+//                                  payload (healthy);
+// - one missing referenced file:   block + files catalog row but NO payload
+//                                  (attachment plane degrades
+//                                  `missingPayload`; the block gets marked
+//                                  unavailable LOCK-UI-4);
+// - one unreferenced catalog+payload: files catalog row + Data/Files payload
+//                                  but NO block (browser-only orphan — never
+//                                  referenced by any message).
+// ---------------------------------------------------------------------------
+
+/** Deterministic 1×1 transparent PNG (70 bytes, valid IEND chunk). */
+const ATTACHMENT_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+
+/** Deterministic tiny payload buffers (synthetic — never real user assets). */
+export const ATTACHMENT_PAYLOADS = {
+  /** 70-byte 1×1 transparent PNG (renderable image block payload). */
+  png: Buffer.from(ATTACHMENT_PNG_BASE64, 'base64'),
+  /** Deterministic UTF-8 text document payload (em-dash → multi-byte check). */
+  txt: Buffer.from(
+    'Cherry Studio disposable seed — deterministic text attachment (synthetic, not a real user backup).\n',
+    'utf8'
+  ),
+  /** Deterministic UTF-8 text payload for the browser-only orphan file. */
+  orphan: Buffer.from(
+    'Cherry Studio disposable seed — browser-only unreferenced attachment payload (synthetic, not a real user backup).\n',
+    'utf8'
+  )
+} as const
+
+/** Claimed byte size of the missing referenced file (no payload exists). */
+export const ATTACHMENT_MISSING_CLAIMED_BYTES = 4096
+
+/** Payload key into {@link ATTACHMENT_PAYLOADS} (null = missing payload). */
+export type AttachmentPayloadKey = 'png' | 'txt' | 'orphan'
+
+/**
+ * One deterministic file entry of the attachment scenario (LOCK-E2-FIX-3).
+ * `name` is always the canonical physical filename `<id><ext>` (production
+ * Dexie convention — LOCK-FIX-6), and the ZIP basename equals it.
+ */
+export interface AttachmentFileSeed {
+  /** Source Dexie files primary key. */
+  readonly id: string
+  /** Physical extension incl. dot (`<id><ext>` = Data/Files basename). */
+  readonly ext: string
+  /** Source file type (image/file). */
+  readonly type: string
+  /** Display name (origin_name). */
+  readonly origin_name: string
+  /** Message block id when referenced (null = browser-only orphan). */
+  readonly blockId: string | null
+  /** Block type when referenced ('image' | 'file'). */
+  readonly blockType: string | null
+  /** Deterministic source created-at ISO. */
+  readonly created_at: string
+  /** Payload key into ATTACHMENT_PAYLOADS (null = missing referenced payload). */
+  readonly payloadKey: AttachmentPayloadKey | null
+}
+
+/**
+ * Deterministic attachment file catalog (LOCK-E2-FIX-2/3). Array order is
+ * the source `files` row order and the evidence `catalogRows` order.
+ */
+export const ATTACHMENT_FILES: readonly AttachmentFileSeed[] = [
+  {
+    id: 'f-e2e-att-png',
+    ext: '.png',
+    type: 'image',
+    origin_name: 'seed-photo.png',
+    blockId: 'b-e2e-att-png',
+    blockType: 'image',
+    created_at: '2026-08-01T00:00:00.000Z',
+    payloadKey: 'png'
+  },
+  {
+    id: 'f-e2e-att-txt',
+    ext: '.txt',
+    type: 'file',
+    origin_name: 'seed-doc.txt',
+    blockId: 'b-e2e-att-txt',
+    blockType: 'file',
+    created_at: '2026-08-01T00:00:01.000Z',
+    payloadKey: 'txt'
+  },
+  {
+    id: 'f-e2e-att-missing',
+    ext: '.png',
+    type: 'image',
+    origin_name: 'seed-missing.png',
+    blockId: 'b-e2e-att-missing',
+    blockType: 'image',
+    created_at: '2026-08-01T00:00:02.000Z',
+    payloadKey: null
+  },
+  {
+    id: 'f-e2e-att-orphan',
+    ext: '.txt',
+    type: 'file',
+    origin_name: 'seed-orphan.txt',
+    blockId: null,
+    blockType: null,
+    created_at: '2026-08-01T00:00:03.000Z',
+    payloadKey: 'orphan'
+  }
+]
+
+/** Deterministic message id owning every attachment block (LOCK-E2-FIX-5). */
+export const ATTACHMENT_MESSAGE_ID = 'm-e2e-att-1'
+
+/** Block ids in message blocks[] order (ownership/order contract). */
+export const ATTACHMENT_BLOCK_IDS: readonly string[] = ATTACHMENT_FILES.filter((f) => f.blockId !== null).map(
+  (f) => f.blockId as string
+)
+
+/** Fake source absolute paths are normalized by import; never private (LOCK-E2-FIX-3). */
+function fakeSourcePath(originName: string): string {
+  return `/fake/${originName}`
+}
 
 // ---------------------------------------------------------------------------
 // Local Storage projection constants (LOCK-E3/E4)
@@ -230,6 +364,112 @@ export interface SeedZipEvidence {
    * roots (Data/, chat.db, other origins) enter the container (LOCK-E2).
    */
   zipAllEntriesUnderAllowedRoots: boolean
+  /**
+   * LOCK-E2-FIX-4: typed attachment-variant evidence (present ONLY when
+   * `createDisposableSeedZip` was called with `withAttachments: true`).
+   */
+  attachment?: AttachmentSeedEvidence
+}
+
+/**
+ * One validated source `files` catalog row as seeded (LOCK-E2-FIX-4 evidence).
+ * Mirrors the attachment plane's `SourceFileRow` capture
+ * (src/main/services/chatDbImport/importDataPlane.ts `projectFilesPage`).
+ */
+export interface AttachmentCatalogRow {
+  /** Source Dexie files primary key. */
+  readonly id: string
+  /** Canonical physical filename `<id><ext>` (production convention). */
+  readonly name: string
+  /** Source display name. */
+  readonly origin_name: string
+  /** Fake source absolute path (normalized by import, never retained). */
+  readonly path: string
+  /** Claimed byte size (equals the payload size when a payload exists). */
+  readonly size: number
+  /** Source extension incl. dot. */
+  readonly ext: string
+  /** Source file type (image/file). */
+  readonly type: string
+  /** Source created-at ISO (deterministic). */
+  readonly created_at: string
+  /** Source reference count (1 referenced, 0 browser-only orphan). */
+  readonly count: number
+}
+
+/** One verified Data/Files payload from the produced ZIP (LOCK-E2-FIX-4). */
+export interface AttachmentPayloadEvidence {
+  /** ZIP entry basename under Data/Files (`<id><ext>`). */
+  readonly name: string
+  /** Verified payload byte size from the produced ZIP. */
+  readonly size: number
+  /** SHA-256 hex of the payload (verified from the produced ZIP). */
+  readonly sha256: string
+  /** True when the ZIP payload is byte-identical to the deterministic buffer. */
+  readonly bytesEqual: boolean
+}
+
+/**
+ * Expected attachment-plane classification contract (LOCK-E2-FIX-2/5),
+ * derived deterministically from the scenario facts. The future import E2E
+ * spec asserts the REAL import result against these exact values.
+ */
+export interface AttachmentExpectedClassification {
+  /** Distinct fileIds referenced by committed candidate references. */
+  readonly referencedFileIdCount: number
+  /** Files with a consistent catalog row + payload (extracted healthy). */
+  readonly healthyFileCount: number
+  /** Referenced catalog rows with NO payload (degrade missingPayload). */
+  readonly degradedMissingPayload: number
+  /** Degraded file ids (referenced, no payload → LOCK-UI-4 marking). */
+  readonly degradedFileIds: readonly string[]
+  /** ZIP payloads matching no catalog row (skip payloadWithoutCatalog). */
+  readonly skippedPayloadWithoutCatalog: number
+}
+
+/** LOCK-E2-FIX-4: typed attachment evidence carried on SeedZipEvidence. */
+export interface AttachmentSeedEvidence {
+  /** Message id owning every attachment block (LOCK-E2-FIX-5). */
+  readonly messageId: string
+  /** Block ids in message blocks[] order (ownership/order contract). */
+  readonly blockIds: readonly string[]
+  /** Source files catalog rows as seeded (deterministic contract). */
+  readonly catalogRows: readonly AttachmentCatalogRow[]
+  /** ZIP Data/Files payload inventory (verified bytes + SHA-256). */
+  readonly payloads: readonly AttachmentPayloadEvidence[]
+  /** Data/Files entry names present in the ZIP (sorted). */
+  readonly zipDataFilesEntries: readonly string[]
+  /** True when every expected Data/Files payload is present + byte-identical. */
+  readonly zipPayloadsVerified: boolean
+  /** Expected attachment-plane classification (LOCK-E2-FIX-2 contract). */
+  readonly expected: AttachmentExpectedClassification
+}
+
+/**
+ * In-renderer seeding config for the attachment variant (plain serializable
+ * records passed through `page.evaluate`, LOCK-E2-FIX-5).
+ */
+export interface AttachmentSeedConfig {
+  /** Additional embedded message for topic t-e2e-1 (owns every block). */
+  readonly message: Record<string, unknown>
+  /** Additional `message_blocks` rows (file/image blocks). */
+  readonly blocks: Array<Record<string, unknown>>
+  /** Additional `files` rows (concrete catalog shape, LOCK-E2-FIX-4). */
+  readonly files: readonly AttachmentCatalogRow[]
+}
+
+/**
+ * Options for {@link createDisposableSeedZip}. The DEFAULT output stays
+ * byte/behavior compatible with existing consumers (LOCK-E2-FIX-1); the
+ * attachment variant is opt-in.
+ */
+export interface DisposableSeedZipOptions {
+  /**
+   * Seed the deterministic attachment variant (LOCK-E2-FIX): adds a second
+   * message with file/image blocks + Dexie files rows + ZIP `Data/Files`
+   * payloads, and returns typed attachment evidence.
+   */
+  readonly withAttachments?: boolean
 }
 
 export interface DisposableSeedZip {
@@ -310,9 +550,9 @@ interface SeedEvaluateResult {
   settingsRecordCount: number
 }
 
-async function seedIndexedDb(page: Page): Promise<SeedEvaluateResult> {
+async function seedIndexedDb(page: Page, attachments?: AttachmentSeedConfig): Promise<SeedEvaluateResult> {
   return page.evaluate(
-    async ({ dbName, targetVersion, padCount, padBytes, ids }) => {
+    async ({ dbName, targetVersion, padCount, padBytes, ids, attachments }) => {
       const waitForDb = async (target: number, timeoutMs: number): Promise<{ version: number }> => {
         const start = Date.now()
         for (;;) {
@@ -350,40 +590,55 @@ async function seedIndexedDb(page: Page): Promise<SeedEvaluateResult> {
         }
 
         const createdAt = '2026-07-31T00:00:00.000Z'
-        const records: Record<string, Record<string, unknown>> = {
-          topics: {
-            id: ids.topic,
-            messages: [
-              {
-                id: ids.message,
-                role: 'user',
-                status: 'success',
-                content: 'Disposable seed message (synthetic, not a real user backup)',
-                createdAt,
-                topicId: ids.topic,
-                blocks: [ids.block]
-              }
-            ],
-            deletedAt: null
-          },
-          message_blocks: {
-            id: ids.block,
-            messageId: ids.message,
-            type: 'text',
+        const topicMessages: Array<Record<string, unknown>> = [
+          {
+            id: ids.message,
+            role: 'user',
             status: 'success',
-            content: 'Disposable seed block (synthetic, not a real user backup)',
+            content: 'Disposable seed message (synthetic, not a real user backup)',
             createdAt,
-            updatedAt: null
-          },
-          topic_segments: {
-            id: ids.segment,
             topicId: ids.topic,
-            name: 'Seed Segment',
-            messageIds: [ids.message],
-            createdAt,
-            updatedAt: createdAt
-          },
-          files: { id: ids.file, name: 'seed-file.txt', size: 0 }
+            blocks: [ids.block]
+          }
+        ]
+        if (attachments) {
+          // LOCK-E2-FIX-5: every attachment block belongs to an IMPORTED
+          // message — embedded in the same topic record's messages array.
+          topicMessages.push(attachments.message)
+        }
+        const records: Record<string, Array<Record<string, unknown>>> = {
+          topics: [{ id: ids.topic, messages: topicMessages, deletedAt: null }],
+          message_blocks: [
+            {
+              id: ids.block,
+              messageId: ids.message,
+              type: 'text',
+              status: 'success',
+              content: 'Disposable seed block (synthetic, not a real user backup)',
+              createdAt,
+              updatedAt: null
+            }
+          ],
+          topic_segments: [
+            {
+              id: ids.segment,
+              topicId: ids.topic,
+              name: 'Seed Segment',
+              messageIds: [ids.message],
+              createdAt,
+              updatedAt: createdAt
+            }
+          ],
+          files: [{ id: ids.file, name: 'seed-file.txt', size: 0 }]
+        }
+        if (attachments) {
+          // LOCK-E2-FIX-2/5: attachment message_blocks (file/image) + the
+          // complete Dexie `files` catalog rows (healthy/missing/orphan).
+          // The catalog rows are structured-cloned plain objects across the
+          // page.evaluate boundary, so the concrete type is erased on both
+          // sides.
+          records.message_blocks.push(...attachments.blocks)
+          records.files.push(...(attachments.files as unknown as Array<Record<string, unknown>>))
         }
 
         // Padding into the import-ignored settings store: forces the LevelDB
@@ -404,10 +659,12 @@ async function seedIndexedDb(page: Page): Promise<SeedEvaluateResult> {
         const tx = db.transaction(Object.keys(records), 'readwrite')
         const inserted: Array<{ store: string; id: string }> = []
         await new Promise<void>((resolve, reject) => {
-          for (const [store, rec] of Object.entries(records)) {
-            const req = tx.objectStore(store).add(rec)
-            req.onsuccess = () => inserted.push({ store, id: rec.id as string })
-            req.onerror = () => reject(req.error ?? new Error(`add to ${store} failed`))
+          for (const [store, recs] of Object.entries(records)) {
+            for (const rec of recs) {
+              const req = tx.objectStore(store).add(rec)
+              req.onsuccess = () => inserted.push({ store, id: rec.id as string })
+              req.onerror = () => reject(req.error ?? new Error(`add to ${store} failed`))
+            }
           }
           tx.oncomplete = () => resolve()
           tx.onerror = () => reject(tx.error ?? new Error('seed transaction failed'))
@@ -457,7 +714,8 @@ async function seedIndexedDb(page: Page): Promise<SeedEvaluateResult> {
       targetVersion: SEED_NATIVE_VERSION,
       padCount: PAD_SETTINGS_COUNT,
       padBytes: PAD_SETTINGS_VALUE_BYTES,
-      ids: SOURCE_IDS
+      ids: SOURCE_IDS,
+      attachments: attachments ?? null
     }
   )
 }
@@ -683,6 +941,125 @@ async function seedLocalStorageProjection(page: Page): Promise<LocalStorageSeedR
 }
 
 // ---------------------------------------------------------------------------
+// Attachment variant builders (LOCK-E2-FIX)
+//
+// Pure Node-side deterministic builders shared by the in-renderer seeding
+// (`seedIndexedDb`), the ZIP production (`produceSeedZip` payload entries),
+// and the typed evidence. Exported so the focused unit tests can assert the
+// exact scenario contract without launching Electron.
+// ---------------------------------------------------------------------------
+
+/** One Data/Files payload entry for {@link produceSeedZip} (LOCK-E2-FIX-4). */
+export interface AttachmentPayloadEntry {
+  /** ZIP entry basename under Data/Files (`<id><ext>`). */
+  readonly name: string
+  /** Exact deterministic payload bytes. */
+  readonly bytes: Buffer
+}
+
+/**
+ * LOCK-E2-FIX-4: the ZIP `Data/Files` payload entries (written AFTER the
+ * Chromium IndexedDB + Local Storage subtrees). Excludes the missing
+ * referenced file (f-e2e-att-missing has NO payload by design).
+ */
+export function buildAttachmentPayloadEntries(): AttachmentPayloadEntry[] {
+  return ATTACHMENT_FILES.filter((f) => f.payloadKey !== null).map((f) => ({
+    name: `${f.id}${f.ext}`,
+    bytes: ATTACHMENT_PAYLOADS[f.payloadKey as AttachmentPayloadKey]
+  }))
+}
+
+/**
+ * The source Dexie `files` catalog rows as seeded (LOCK-E2-FIX-4 evidence).
+ * `size` equals the payload byte length when a payload exists; the missing
+ * referenced file carries its deterministic claimed size. Deterministic:
+ * identical on every call.
+ */
+export function buildAttachmentCatalogRows(): AttachmentCatalogRow[] {
+  return ATTACHMENT_FILES.map((f) => ({
+    id: f.id,
+    name: `${f.id}${f.ext}`,
+    origin_name: f.origin_name,
+    path: fakeSourcePath(f.origin_name),
+    size: f.payloadKey !== null ? ATTACHMENT_PAYLOADS[f.payloadKey].length : ATTACHMENT_MISSING_CLAIMED_BYTES,
+    ext: f.ext,
+    type: f.type,
+    created_at: f.created_at,
+    count: f.blockId !== null ? 1 : 0
+  }))
+}
+
+/**
+ * The in-renderer seeding config (LOCK-E2-FIX-2/5): the deterministic
+ * attachment message (embedded in topic t-e2e-1), its three file/image
+ * message_blocks (block id in the message blocks[] array AND block.messageId
+ * pointing at the same imported message), and the four `files` catalog rows.
+ * Deterministic: identical on every call.
+ */
+export function buildAttachmentSeedConfig(): AttachmentSeedConfig {
+  return {
+    message: {
+      id: ATTACHMENT_MESSAGE_ID,
+      role: 'user',
+      status: 'success',
+      content: 'Disposable seed attachment message (synthetic, not a real user backup)',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      topicId: SOURCE_IDS.topic,
+      blocks: [...ATTACHMENT_BLOCK_IDS]
+    },
+    blocks: ATTACHMENT_FILES.filter((f) => f.blockId !== null).map((f) => ({
+      id: f.blockId,
+      messageId: ATTACHMENT_MESSAGE_ID,
+      type: f.blockType,
+      status: 'success',
+      content: null,
+      createdAt: f.created_at,
+      updatedAt: null,
+      file: {
+        id: f.id,
+        // Canonical physical filename `<id><ext>` — production
+        // FileMetadata.name (FileStorage.uploadFile writes `uuid + ext`) and
+        // the exact name FileManager resolves against `filesPath/<id><ext>`
+        // for path/URL/display behavior (LOCK-FIX-6).
+        name: `${f.id}${f.ext}`,
+        origin_name: f.origin_name,
+        path: fakeSourcePath(f.origin_name),
+        size: f.payloadKey !== null ? ATTACHMENT_PAYLOADS[f.payloadKey].length : ATTACHMENT_MISSING_CLAIMED_BYTES,
+        ext: f.ext,
+        type: f.type,
+        created_at: f.created_at,
+        count: f.blockId !== null ? 1 : 0
+      }
+    })),
+    files: buildAttachmentCatalogRows()
+  }
+}
+
+/**
+ * The expected attachment-plane classification (LOCK-E2-FIX-2 contract),
+ * derived deterministically from the scenario facts:
+ * - referenced file ids = files with a message block (3);
+ * - healthy = catalog row + payload (png/txt/orphan → 3);
+ * - degraded `missingPayload` = referenced files with no payload (missing →
+ *   1, its block gets marked unavailable LOCK-UI-4);
+ * - skipped `payloadWithoutCatalog` = ZIP payloads matching no catalog row
+ *   (0 — every payload matches its catalog row).
+ */
+export function attachmentExpectedClassification(): AttachmentExpectedClassification {
+  const referenced = ATTACHMENT_FILES.filter((f) => f.blockId !== null)
+  const noPayload = ATTACHMENT_FILES.filter((f) => f.payloadKey === null)
+  const payloadNames = new Set(buildAttachmentPayloadEntries().map((p) => p.name))
+  const catalogNames = new Set(ATTACHMENT_FILES.map((f) => `${f.id}${f.ext}`))
+  return {
+    referencedFileIdCount: referenced.length,
+    healthyFileCount: ATTACHMENT_FILES.filter((f) => f.payloadKey !== null).length,
+    degradedMissingPayload: noPayload.length,
+    degradedFileIds: noPayload.map((f) => f.id),
+    skippedPayloadWithoutCatalog: Array.from(payloadNames).filter((n) => !catalogNames.has(n)).length
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ZIP production + pre-flight
 // ---------------------------------------------------------------------------
 
@@ -693,6 +1070,18 @@ export interface ProduceSeedZipResult {
   ldbFileCount: number
   /** Number of LevelDB table files (.ldb) under Local Storage/leveldb after close. */
   localStorageLdbFileCount: number
+  /** LOCK-E2-FIX-4: Data/Files entries written (0 for the default fixture). */
+  dataFilesEntryCount: number
+}
+
+/** Options for {@link produceSeedZip} (attachment variant). */
+export interface ProduceSeedZipOptions {
+  /**
+   * LOCK-E2-FIX-4: `Data/Files/<name>` payload entries appended AFTER the
+   * Chromium IndexedDB + Local Storage subtrees are added. Omit for the
+   * default fixture (no Data/ root — LOCK-E2).
+   */
+  readonly payloadEntries?: ReadonlyArray<AttachmentPayloadEntry>
 }
 
 /**
@@ -704,10 +1093,19 @@ export interface ProduceSeedZipResult {
  * Nothing else in the profile (Data/, GPUCache, Session Storage, other
  * origins) enters the ZIP.
  *
+ * LOCK-E2-FIX-4: when `options.payloadEntries` is provided, the synthetic
+ * `Data/Files/<name>` payload entries are appended AFTER the two Chromium
+ * subtrees (the attachment variant's deterministic payloads are buffers —
+ * never part of the seeded profile).
+ *
  * Exported for the focused unit test, which drives it against synthetic
  * profile directories (no Electron needed).
  */
-export function produceSeedZip(profileDevDir: string, zipPath: string): ProduceSeedZipResult {
+export function produceSeedZip(
+  profileDevDir: string,
+  zipPath: string,
+  options?: ProduceSeedZipOptions
+): ProduceSeedZipResult {
   const idbDir = path.join(profileDevDir, 'IndexedDB')
   const originDir = path.join(idbDir, SEED_ORIGIN_DIR)
   const localStorageLeveldbDir = path.join(profileDevDir, SEED_LOCAL_STORAGE_LEVELDB_DIR)
@@ -749,12 +1147,21 @@ export function produceSeedZip(profileDevDir: string, zipPath: string): ProduceS
   const zip = new AdmZip()
   zip.addLocalFolder(idbDir, 'IndexedDB')
   zip.addLocalFolder(localStorageLeveldbDir, SEED_LOCAL_STORAGE_LEVELDB_DIR)
+
+  // LOCK-E2-FIX-4: append the deterministic Data/Files payloads AFTER the
+  // Chromium subtrees (attachment variant only; default writes no Data/ root).
+  let dataFilesEntryCount = 0
+  for (const entry of options?.payloadEntries ?? []) {
+    zip.addFile(`Data/Files/${entry.name}`, entry.bytes)
+    dataFilesEntryCount++
+  }
+
   zip.writeZip(zipPath)
 
   if (!fs.existsSync(zipPath) || fs.statSync(zipPath).size === 0) {
     throw new Error(`Seed ZIP was not produced at ${zipPath}`)
   }
-  return { originDir: SEED_ORIGIN_DIR, ldbFileCount, localStorageLdbFileCount }
+  return { originDir: SEED_ORIGIN_DIR, ldbFileCount, localStorageLdbFileCount, dataFilesEntryCount }
 }
 
 interface ZipPreflightResult {
@@ -766,6 +1173,23 @@ interface ZipPreflightResult {
   localStorageLdbEntryCount: number
   localStorageEntriesSample: string[]
   allEntriesUnderAllowedRoots: boolean
+  /** LOCK-E2-FIX-4: non-directory Data/Files entry names (sorted). */
+  dataFilesEntries: string[]
+  /** LOCK-E2-FIX-4: per-payload verification (name, size, sha256, bytesEqual). */
+  payloadVerification: AttachmentPayloadEvidence[]
+  /** LOCK-E2-FIX-4: every expected payload present + byte-identical. */
+  payloadsAllVerified: boolean
+}
+
+/** Options for {@link preflightZipEntries} (attachment variant). */
+export interface ZipPreflightOptions {
+  /**
+   * LOCK-E2-FIX-4: allow `Data/Files/` payload entries (attachment variant).
+   * Default false keeps the LOCK-E2 no-Data/ contract strict.
+   */
+  readonly allowDataFiles?: boolean
+  /** Expected Data/Files payloads; verified byte-identical from the ZIP. */
+  readonly expectedPayloads?: ReadonlyArray<AttachmentPayloadEntry>
 }
 
 /**
@@ -777,9 +1201,21 @@ interface ZipPreflightResult {
  * - EVERY non-directory entry must live under exactly
  *   `IndexedDB/<origin>/` or `Local Storage/leveldb/` — no unrelated roots
  *   (Data/, chat.db, other origins) enter the container (LOCK-E2).
+ * - LOCK-E2-FIX-4 (attachment variant, `allowDataFiles`): `Data/Files/`
+ *   entries are allowed, must EXACTLY match the expected payload set, and
+ *   every expected payload is read back from the ZIP and verified
+ *   byte-identical with a SHA-256.
  * Throws on violation; the returned evidence is what the spec asserts.
+ * Exported for the focused unit test (pure Node, no Electron).
  */
-async function preflightZipEntries(zipPath: string, originDirName: string): Promise<ZipPreflightResult> {
+export async function preflightZipEntries(
+  zipPath: string,
+  originDirName: string,
+  options?: ZipPreflightOptions
+): Promise<ZipPreflightResult> {
+  const allowDataFiles = options?.allowDataFiles === true
+  const expectedPayloads = options?.expectedPayloads ?? []
+  const dataFilesPrefix = 'Data/Files/'
   const zip = new StreamZip.async({ file: zipPath })
   try {
     const entries = await zip.entries()
@@ -817,18 +1253,64 @@ async function preflightZipEntries(zipPath: string, originDirName: string): Prom
     }
     const localStorageLdbEntryCount = localStorageEntries.filter((n) => n.endsWith('.ldb')).length
 
-    // LOCK-E2: no unrelated roots — every FILE entry must be inside one of
-    // the two accepted subtrees (directory entries are structural, ignored
-    // exactly like production's isDirectory skip).
+    // LOCK-E2 / LOCK-E2-FIX-4: no unrelated roots — every FILE entry must be
+    // inside one of the accepted subtrees (directory entries are structural,
+    // ignored exactly like production's isDirectory skip). The attachment
+    // variant additionally accepts Data/Files/ (LOCK-E2-FIX-4).
     const fileEntries = names.filter((n) => !n.endsWith('/'))
     const outsideAllowedRoots = fileEntries.filter(
-      (n) => !n.startsWith(originPrefix) && !n.startsWith(localStoragePrefix)
+      (n) =>
+        !n.startsWith(originPrefix) &&
+        !n.startsWith(localStoragePrefix) &&
+        !(allowDataFiles && n.startsWith(dataFilesPrefix))
     )
     if (outsideAllowedRoots.length > 0) {
       throw new Error(
         `Seed ZIP has entries outside the allowed roots ` +
-          `(${originPrefix} | ${localStoragePrefix}): ${outsideAllowedRoots.slice(0, 5).join(', ')}`
+          `(${originPrefix} | ${localStoragePrefix}${allowDataFiles ? ` | ${dataFilesPrefix}` : ''}): ` +
+          `${outsideAllowedRoots.slice(0, 5).join(', ')}`
       )
+    }
+
+    // LOCK-E2-FIX-4: exact Data/Files inventory + byte-identical payload
+    // verification (SHA-256). Fail closed: missing expected entries, any
+    // unexpected entry, or any byte mismatch reject the ZIP. (An unexpected
+    // Data/Files entry with `allowDataFiles: false` is already rejected by
+    // the outside-allowed-roots check above — LOCK-E2.)
+    const dataFilesEntries = fileEntries.filter((n) => n.startsWith(dataFilesPrefix)).sort()
+    const expectedNames = new Set(expectedPayloads.map((p) => `${dataFilesPrefix}${p.name}`))
+    if (allowDataFiles) {
+      if (dataFilesEntries.length !== expectedPayloads.length) {
+        throw new Error(
+          `Seed ZIP Data/Files inventory mismatch: expected ${expectedPayloads.length} payload(s), ` +
+            `found ${dataFilesEntries.length} (${dataFilesEntries.slice(0, 5).join(', ') || '(none)'})`
+        )
+      }
+      for (const entryName of dataFilesEntries) {
+        if (!expectedNames.has(entryName)) {
+          throw new Error(`Seed ZIP has an unexpected Data/Files entry: ${entryName}`)
+        }
+      }
+    }
+
+    const payloadVerification: AttachmentPayloadEvidence[] = []
+    let payloadsAllVerified = expectedPayloads.length > 0
+    for (const payload of expectedPayloads) {
+      const entryName = `${dataFilesPrefix}${payload.name}`
+      let data: Buffer
+      try {
+        data = await zip.entryData(entryName)
+      } catch {
+        throw new Error(`Seed ZIP is missing the expected Data/Files payload: ${payload.name}`)
+      }
+      const bytesEqual = Buffer.compare(data, payload.bytes) === 0
+      payloadsAllVerified = payloadsAllVerified && bytesEqual
+      payloadVerification.push({
+        name: payload.name,
+        size: data.length,
+        sha256: crypto.createHash('sha256').update(data).digest('hex'),
+        bytesEqual
+      })
     }
 
     return {
@@ -839,7 +1321,10 @@ async function preflightZipEntries(zipPath: string, originDirName: string): Prom
       localStorageEntryCount: localStorageEntries.length,
       localStorageLdbEntryCount,
       localStorageEntriesSample: localStorageEntries.slice(0, 8),
-      allEntriesUnderAllowedRoots: fileEntries.length > 0 && outsideAllowedRoots.length === 0
+      allEntriesUnderAllowedRoots: fileEntries.length > 0 && outsideAllowedRoots.length === 0,
+      dataFilesEntries,
+      payloadVerification,
+      payloadsAllVerified
     }
   } finally {
     await zip.close()
@@ -860,13 +1345,22 @@ async function preflightZipEntries(zipPath: string, originDirName: string): Prom
  * profile/work dirs are removed before the error propagates. Callers MUST
  * call `cleanup()` on the returned handle; cleanup failures throw (LOCK-T1).
  *
- * LOCK-E2: ZIP carries exactly `IndexedDB/` + `Local Storage/leveldb/` — no
- * `Data/` blobs, no other roots.
+ * Default (LOCK-E2): ZIP carries exactly `IndexedDB/` + `Local Storage/leveldb/`
+ * — no `Data/` blobs, no other roots (existing consumers unchanged,
+ * LOCK-E2-FIX-1).
  * LOCK-E3: Local Storage carries the deterministic version-215
  *          `persist:cherry-studio` navigation projection (two fixture
  *          assistants + topic metadata, including the deleted-topic record).
+ * LOCK-E2-FIX (options.withAttachments): also seeds the deterministic
+ * attachment scenario — a second message with file/image blocks + Dexie
+ * `files` catalog rows (healthy/missing/orphan) + ZIP `Data/Files` payloads —
+ * and returns typed attachment evidence (`evidence.attachment`).
  */
-export async function createDisposableSeedZip(ownedTmpRoot: string): Promise<DisposableSeedZip> {
+export async function createDisposableSeedZip(
+  ownedTmpRoot: string,
+  options?: DisposableSeedZipOptions
+): Promise<DisposableSeedZip> {
+  const withAttachments = options?.withAttachments === true
   const unique = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   // Distinct directories: the work dir owns the produced ZIP, the profile dir
   // is the Electron --user-data-dir root (app data lands in <profileDir>Dev).
@@ -882,7 +1376,10 @@ export async function createDisposableSeedZip(ownedTmpRoot: string): Promise<Dis
 
   try {
     const launched = await launchSeedApp(profileDir, ownedTmpRoot)
-    const seeded = await seedIndexedDb(launched.page)
+    // LOCK-E2-FIX-5: the attachment variant seeds the extra message + file/
+    // image blocks + Dexie files rows INSIDE the same IndexedDB seeding pass.
+    const attachmentConfig = withAttachments ? buildAttachmentSeedConfig() : undefined
+    const seeded = await seedIndexedDb(launched.page, attachmentConfig)
 
     // LOCK-E3: seed the version-215 redux-persist `persist:cherry-studio`
     // Local Storage navigation projection on the same file origin, then let
@@ -903,8 +1400,28 @@ export async function createDisposableSeedZip(ownedTmpRoot: string): Promise<Dis
     await closeSeedApp(launched.app, profileDir)
     await new Promise((resolve) => setTimeout(resolve, 1500))
 
-    const { originDir, ldbFileCount, localStorageLdbFileCount } = produceSeedZip(profileDevDir, zipPath)
-    const preflight = await preflightZipEntries(zipPath, SEED_ORIGIN_DIR)
+    // LOCK-E2-FIX-4: Data/Files payload entries are appended AFTER the
+    // Chromium IndexedDB seed (never part of the seeded profile — synthetic
+    // deterministic buffers).
+    const payloadEntries = withAttachments ? buildAttachmentPayloadEntries() : undefined
+    const { originDir, ldbFileCount, localStorageLdbFileCount, dataFilesEntryCount } = produceSeedZip(
+      profileDevDir,
+      zipPath,
+      payloadEntries ? { payloadEntries } : undefined
+    )
+    const preflight = await preflightZipEntries(zipPath, SEED_ORIGIN_DIR, {
+      allowDataFiles: withAttachments,
+      expectedPayloads: payloadEntries
+    })
+
+    if (withAttachments) {
+      console.log(
+        `[E2E] Attachment variant seeded — catalogRows=${buildAttachmentCatalogRows().length}, ` +
+          `payloadEntries=${dataFilesEntryCount}, ` +
+          `zipPayloadsVerified=${preflight.payloadsAllVerified}, ` +
+          `expected.degradedMissingPayload=${attachmentExpectedClassification().degradedMissingPayload}`
+      )
+    }
 
     return {
       zipPath,
@@ -935,7 +1452,20 @@ export async function createDisposableSeedZip(ownedTmpRoot: string): Promise<Dis
         zipHasLocalStorage: preflight.localStorageEntryCount > 0,
         zipLocalStorageEntryCount: preflight.localStorageEntryCount,
         zipLocalStorageEntriesSample: preflight.localStorageEntriesSample,
-        zipAllEntriesUnderAllowedRoots: preflight.allEntriesUnderAllowedRoots
+        zipAllEntriesUnderAllowedRoots: preflight.allEntriesUnderAllowedRoots,
+        ...(withAttachments
+          ? {
+              attachment: {
+                messageId: ATTACHMENT_MESSAGE_ID,
+                blockIds: [...ATTACHMENT_BLOCK_IDS],
+                catalogRows: buildAttachmentCatalogRows(),
+                payloads: preflight.payloadVerification,
+                zipDataFilesEntries: preflight.dataFilesEntries,
+                zipPayloadsVerified: preflight.payloadsAllVerified,
+                expected: attachmentExpectedClassification()
+              } satisfies AttachmentSeedEvidence
+            }
+          : {})
       },
       cleanup: async () => {
         // Always close + exact-token terminate + final verify; only after

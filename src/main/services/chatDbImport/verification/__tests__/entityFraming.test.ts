@@ -262,6 +262,25 @@ describe('entityFraming — digest consistency', () => {
     expect(digestTopic(shuffled).record).toBe(digestTopic(ordered).record)
     expect(digestTopic(shuffled).overflow).toBe(digestTopic(ordered).overflow)
   })
+
+  it('excludes the import-only unavailable marker from block digests (LOCK-UI-6)', () => {
+    const marked = block({
+      overflow: { file: { id: 'f' }, metadata: { prompt: 'p' }, l2AttachmentUnavailable: true }
+    })
+    const unmarked = block({
+      overflow: { file: { id: 'f' }, metadata: { prompt: 'p' } }
+    })
+
+    // The marker is importer-owned, applied AFTER the manifest — the
+    // candidate-side digest must equal the manifest-side digest.
+    expect(digestBlock(marked).record).toBe(digestBlock(unmarked).record)
+    expect(digestBlock(marked).overflow).toBe(digestBlock(unmarked).overflow)
+    // The strip is visible in the framed record used for the digest.
+    expect(frameBlockRecord(marked)).toEqual(frameBlockRecord(unmarked))
+    // Unrelated overflow still moves the digests (nothing is hidden).
+    const other = block({ overflow: { file: { id: 'g' }, metadata: { prompt: 'p' } } })
+    expect(digestBlock(other).overflow).not.toBe(digestBlock(unmarked).overflow)
+  })
 })
 
 // ---------------------------------------------------------------------------

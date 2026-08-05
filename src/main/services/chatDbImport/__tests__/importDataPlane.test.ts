@@ -1874,6 +1874,112 @@ describe('ChatImportDataPlane', () => {
     expect(() => plane.processPage(page('files', [{ name: 'no-id' }]))).toThrowError(/INVALID_ROW/)
   })
 
+  it('captures complete source files rows for the attachment plane (LOCK-FIX-2/4/6)', () => {
+    const plane = createImportDataPlane(db)
+    plane.processPage(page('topics', [srcTopic('t-1', [])]))
+    plane.processPage(page('message_blocks', []))
+    plane.processPage(page('topic_segments', []))
+    plane.processPage(
+      page('files', [
+        {
+          id: 'file-1',
+          name: 'file-1.png',
+          origin_name: 'photo.png',
+          path: '/source/Data/Files/file-1.png',
+          size: 10,
+          ext: '.png',
+          type: 'image',
+          created_at: '2020-01-01T00:00:00.000Z',
+          count: 3
+        },
+        // Lenient capture: invalid size/count degrade to null (physical
+        // authority at reconcile, LOCK-FIX-6); a previously-accepted row is
+        // never newly rejected.
+        { id: 'file-2', size: -5, count: 1.5, ext: 42 }
+      ])
+    )
+    plane.finalize()
+
+    const rows = plane.getSourceFileRows()
+    expect(rows).toEqual([
+      {
+        id: 'file-1',
+        name: 'file-1.png',
+        origin_name: 'photo.png',
+        path: '/source/Data/Files/file-1.png',
+        size: 10,
+        ext: '.png',
+        type: 'image',
+        created_at: '2020-01-01T00:00:00.000Z',
+        count: 3
+      },
+      {
+        id: 'file-2',
+        name: null,
+        origin_name: null,
+        path: null,
+        size: null,
+        ext: null,
+        type: null,
+        created_at: null,
+        count: null
+      }
+    ])
+    // Snapshots must not alias internal state (the row fields are readonly
+    // in the contract; a hostile mutation must not leak into the plane).
+    ;(rows[0] as { size: number }).size = 999
+    expect(plane.getSourceFileRows()[0].size).toBe(10)
+
+    // Not available before finalize (fresh independent DB + plane).
+    const db2 = openTestDb(realPath.join(tempDir, 'candidate2.db'))
+    runMigrations(drizzle(db2), db2)
+    const plane2 = createImportDataPlane(drizzle(db2))
+    plane2.processPage(page('topics', [srcTopic('t-1', [])]))
+    plane2.processPage(page('message_blocks', []))
+    plane2.processPage(page('topic_segments', []))
+    plane2.processPage(page('files', []))
+    expect(() => plane2.getSourceFileRows()).toThrowError(/NOT_FINALIZED/)
+    expect(() => plane2.getImportedFileReferenceCounts()).toThrowError(/NOT_FINALIZED/)
+    plane2.finalize()
+    db2.close()
+  })
+
+  it('tracks committed file-reference multiplicity for the attachment plane (LOCK-FIX-5/6)', () => {
+    const plane = createImportDataPlane(db)
+    plane.processPage(
+      page('topics', [
+        srcTopic('t-1', [srcMessage('m-1', 't-1', ['b-1', 'b-2', 'b-3']), srcMessage('m-2', 't-1', ['b-4'])])
+      ])
+    )
+    // Three blocks reference the same file; one references another file.
+    plane.processPage(
+      page('message_blocks', [
+        srcBlock('b-1', 'm-1', {
+          type: 'file',
+          file: { id: 'f-shared', name: 's.png', path: '/s.png', type: 'image' }
+        }),
+        srcBlock('b-2', 'm-1', {
+          type: 'file',
+          file: { id: 'f-shared', name: 's.png', path: '/s.png', type: 'image' }
+        }),
+        srcBlock('b-3', 'm-1', {
+          type: 'image',
+          file: { id: 'f-shared', name: 's.png', path: '/s.png', type: 'image' }
+        }),
+        srcBlock('b-4', 'm-2', {
+          type: 'file',
+          file: { id: 'f-other', name: 'o.bin', path: '/o.bin', type: 'other' }
+        })
+      ])
+    )
+    plane.processPage(page('topic_segments', []))
+    plane.processPage(page('files', []))
+    plane.finalize()
+
+    const counts = plane.getImportedFileReferenceCounts()
+    expect(Object.fromEntries(counts)).toEqual({ 'f-shared': 3, 'f-other': 1 })
+  })
+
   // -------------------------------------------------------------------------
   // finalize (LOCK-D10)
   // -------------------------------------------------------------------------

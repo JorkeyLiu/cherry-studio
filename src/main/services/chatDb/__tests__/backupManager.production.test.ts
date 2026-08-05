@@ -115,6 +115,19 @@ import { drizzle } from 'drizzle-orm/better-sqlite3'
 import StreamZip from 'node-stream-zip'
 
 import { BackupManager } from '../../BackupManager'
+import { CANDIDATE_ROOT_DIRNAME } from '../../chatDbImport/candidateDb'
+import { FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME } from '../../chatDbImport/promotion/filesSnapshot'
+import {
+  FILES_CATALOG_SNAPSHOT_FILENAME,
+  FILES_CATALOG_SNAPSHOT_STAGING_FILENAME,
+  FILES_PROMOTE_STAGING_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_STAGING_DIRNAME,
+  PROMOTION_JOURNAL_FILENAME,
+  ROLLBACK_SNAPSHOT_FILENAME,
+  ROLLBACK_SNAPSHOT_STAGING_FILENAME
+} from '../../chatDbImport/promotion/journal'
+import { PROMOTION_JOURNAL_STAGING_FILENAME } from '../../chatDbImport/promotion/journalStore'
 import { BetterSqlite3BackupAdapter, ChatDbBackup } from '../backup'
 import { getSharedMaintenanceCoordinator, isMaintenanceBusyError } from '../maintenanceCoordination'
 import { runMigrations } from '../migration'
@@ -217,6 +230,71 @@ function openTestDb(dbPath: string): Database.Database {
   db.pragma('synchronous = NORMAL')
   db.pragma('busy_timeout = 5000')
   return db
+}
+
+// ---------------------------------------------------------------------------
+// LOCK-L3-2 helpers — every owned L2 promotion artifact name at the Data root
+// ---------------------------------------------------------------------------
+
+/** Every owned promotion artifact name, sourced from the L2 constants. */
+const PROMOTION_ARTIFACT_NAMES: readonly string[] = [
+  CANDIDATE_ROOT_DIRNAME,
+  PROMOTION_JOURNAL_FILENAME,
+  PROMOTION_JOURNAL_STAGING_FILENAME,
+  ROLLBACK_SNAPSHOT_FILENAME,
+  ROLLBACK_SNAPSHOT_STAGING_FILENAME,
+  FILES_ROLLBACK_SNAPSHOT_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_STAGING_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME,
+  FILES_PROMOTE_STAGING_DIRNAME,
+  FILES_CATALOG_SNAPSHOT_FILENAME,
+  FILES_CATALOG_SNAPSHOT_STAGING_FILENAME
+]
+
+/**
+ * Seed every owned promotion artifact at the Data root with sentinel content.
+ * Directories get a sentinel.txt child; files get sentinel bytes.
+ */
+function seedPromotionArtifacts(dataDir: string): void {
+  const mkFile = (name: string): void => {
+    realFs.writeFileSync(realPath.join(dataDir, name), `artifact-${name}`)
+  }
+  const mkDir = (name: string): void => {
+    realFs.mkdirSync(realPath.join(dataDir, name), { recursive: true })
+    realFs.writeFileSync(realPath.join(dataDir, name, 'sentinel.txt'), `artifact-${name}`)
+  }
+
+  // Candidate root with a nested candidate dir (deep tree must be pruned whole)
+  mkDir(CANDIDATE_ROOT_DIRNAME)
+  realFs.mkdirSync(realPath.join(dataDir, CANDIDATE_ROOT_DIRNAME, 'candidate-s1'), { recursive: true })
+  realFs.writeFileSync(realPath.join(dataDir, CANDIDATE_ROOT_DIRNAME, 'candidate-s1', 'chat.db'), 'candidate-db-bytes')
+  realFs.writeFileSync(realPath.join(dataDir, CANDIDATE_ROOT_DIRNAME, 'candidate-s1', 'files-catalog.json'), '{}')
+
+  mkFile(PROMOTION_JOURNAL_FILENAME)
+  mkFile(PROMOTION_JOURNAL_STAGING_FILENAME)
+  mkFile(ROLLBACK_SNAPSHOT_FILENAME)
+  mkFile(ROLLBACK_SNAPSHOT_STAGING_FILENAME)
+  mkDir(FILES_ROLLBACK_SNAPSHOT_DIRNAME)
+  mkDir(FILES_ROLLBACK_SNAPSHOT_STAGING_DIRNAME)
+  mkDir(FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME)
+  mkDir(FILES_PROMOTE_STAGING_DIRNAME)
+  mkFile(FILES_CATALOG_SNAPSHOT_FILENAME)
+  mkFile(FILES_CATALOG_SNAPSHOT_STAGING_FILENAME)
+}
+
+/** Assert no archive entry matches any promotion artifact (file or dir subtree). */
+function assertNoPromotionArtifactsInArchive(entries: readonly string[]): void {
+  for (const name of PROMOTION_ARTIFACT_NAMES) {
+    const prefix = `Data/${name}`
+    expect(entries.some((entry) => entry === prefix || entry.startsWith(`${prefix}/`))).toBe(false)
+  }
+}
+
+/** Assert no promotion artifact exists on disk under dir. */
+function assertNoPromotionArtifactsOnDisk(dir: string): void {
+  for (const name of PROMOTION_ARTIFACT_NAMES) {
+    expect(realFs.existsSync(realPath.join(dir, name))).toBe(false)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -572,6 +650,218 @@ describe('BackupManager Production-Path Integration', () => {
       realFs.writeFileSync(realPath.join(dataDir, 'notes.txt'), 'some data')
 
       await expect(bm.backup(null as any, 'nodb-backup.zip', destDir)).rejects.toThrow(/Data\/chat\.db not found/)
+    })
+  })
+
+  // =========================================================================
+  // 2b. LOCK-L3-1/L3-2/L3-4: live Data/Files inclusion, promotion artifact
+  //     exclusion, IndexedDB sentinel inclusion, and skipBackupFile asymmetry.
+  //     These run the ACTUAL backup() entry point with real filesystem and
+  //     real archiver, then inspect archive entries + bytes directly.
+  // =========================================================================
+
+  describe('BackupManager.backup() — L3 artifact coverage (LOCK-L3-1/L3-2/L3-4)', () => {
+    it('archive includes live Data/Files recursively byte-identical, excludes every promotion artifact, and retains IndexedDB (LOCK-L3-1/L3-2)', async () => {
+      const bm = new BackupManager()
+      const destDir = realPath.join(tempDir, 'backups-l3')
+      realFs.mkdirSync(destDir, { recursive: true })
+
+      const dataDir = realPath.join(tempDir, 'Data')
+
+      // Live Files payloads (recursive subtree — LOCK-L3-1)
+      realFs.mkdirSync(realPath.join(dataDir, 'Files', 'nested'), { recursive: true })
+      const payloadA = Buffer.from('files-payload-a-123456')
+      const payloadB = Buffer.from('files-payload-b-abcdef')
+      realFs.writeFileSync(realPath.join(dataDir, 'Files', 'abc123.png'), payloadA)
+      realFs.writeFileSync(realPath.join(dataDir, 'Files', 'nested', 'doc.pdf'), payloadB)
+
+      // Unrelated Data subtree must be preserved (LOCK-L3-5)
+      realFs.mkdirSync(realPath.join(dataDir, 'OtherSubtree'), { recursive: true })
+      const otherPayload = Buffer.from('other-subtree-bytes')
+      realFs.writeFileSync(realPath.join(dataDir, 'OtherSubtree', 'keep.txt'), otherPayload)
+
+      // Seed every owned promotion artifact at the Data root (LOCK-L3-2)
+      seedPromotionArtifacts(dataDir)
+
+      // IndexedDB Dexie LevelDB subtree + sentinel bytes (catalog storage presence)
+      realFs.mkdirSync(realPath.join(tempDir, 'IndexedDB', 'file__0.indexeddb.leveldb'), { recursive: true })
+      const idbSentinel = Buffer.from('indexeddb-leveldb-sentinel')
+      realFs.writeFileSync(realPath.join(tempDir, 'IndexedDB', 'file__0.indexeddb.leveldb', 'CURRENT'), idbSentinel)
+
+      // Local Storage LevelDB subtree + sentinel bytes
+      realFs.mkdirSync(realPath.join(tempDir, 'Local Storage', 'leveldb'), { recursive: true })
+      const lsSentinel = Buffer.from('local-storage-sentinel')
+      realFs.writeFileSync(realPath.join(tempDir, 'Local Storage', 'leveldb', 'LOG'), lsSentinel)
+
+      const archivePath = await bm.backup(null as any, 'l3-backup.zip', destDir)
+      expect(realFs.existsSync(archivePath)).toBe(true)
+
+      const zip = new StreamZip.async({ file: archivePath })
+      const entries = Object.keys(await zip.entries())
+
+      // Live Files included recursively with byte identity (LOCK-L3-1)
+      expect(entries).toContain('Data/Files/abc123.png')
+      expect(entries).toContain('Data/Files/nested/doc.pdf')
+      expect(Buffer.from(await zip.entryData('Data/Files/abc123.png')).equals(payloadA)).toBe(true)
+      expect(Buffer.from(await zip.entryData('Data/Files/nested/doc.pdf')).equals(payloadB)).toBe(true)
+
+      // Unrelated Data subtree preserved (LOCK-L3-5)
+      expect(entries).toContain('Data/OtherSubtree/keep.txt')
+      expect(Buffer.from(await zip.entryData('Data/OtherSubtree/keep.txt')).equals(otherPayload)).toBe(true)
+
+      // Every promotion artifact excluded from the archive (LOCK-L3-2)
+      assertNoPromotionArtifactsInArchive(entries)
+
+      // IndexedDB + Local Storage sentinels retained with byte identity
+      expect(entries).toContain('IndexedDB/file__0.indexeddb.leveldb/CURRENT')
+      expect(entries).toContain('Local Storage/leveldb/LOG')
+      expect(Buffer.from(await zip.entryData('IndexedDB/file__0.indexeddb.leveldb/CURRENT')).equals(idbSentinel)).toBe(
+        true
+      )
+      expect(Buffer.from(await zip.entryData('Local Storage/leveldb/LOG')).equals(lsSentinel)).toBe(true)
+
+      // chat.db snapshot is authoritative (LOCK-6008) and WAL/SHM are excluded
+      expect(entries).toContain('Data/chat.db')
+      expect(entries).not.toContain('Data/chat.db-wal')
+      expect(entries).not.toContain('Data/chat.db-shm')
+
+      await zip.close()
+    })
+
+    it('skipBackupFile=true excludes Data/Files while retaining IndexedDB (LOCK-L3-4)', async () => {
+      const bm = new BackupManager()
+      const destDir = realPath.join(tempDir, 'backups-l3-skip')
+      realFs.mkdirSync(destDir, { recursive: true })
+
+      const dataDir = realPath.join(tempDir, 'Data')
+
+      // Live Files payload that must be skipped when skipBackupFile=true
+      realFs.mkdirSync(realPath.join(dataDir, 'Files'), { recursive: true })
+      realFs.writeFileSync(realPath.join(dataDir, 'Files', 'abc123.png'), 'files-payload')
+
+      // Seed promotion artifacts — skipped as well (nothing from Data except chat.db)
+      seedPromotionArtifacts(dataDir)
+
+      // IndexedDB sentinel — must be retained despite skipBackupFile=true
+      realFs.mkdirSync(realPath.join(tempDir, 'IndexedDB', 'file__0.indexeddb.leveldb'), { recursive: true })
+      const idbSentinel = Buffer.from('indexeddb-sentinel-retained')
+      realFs.writeFileSync(realPath.join(tempDir, 'IndexedDB', 'file__0.indexeddb.leveldb', 'CURRENT'), idbSentinel)
+
+      const archivePath = await bm.backup(null as any, 'skip-file.zip', destDir, true)
+      expect(realFs.existsSync(archivePath)).toBe(true)
+
+      const zip = new StreamZip.async({ file: archivePath })
+      const entries = Object.keys(await zip.entries())
+
+      // LOCK-6008: authoritative Data/chat.db snapshot is still mandatory
+      expect(entries).toContain('Data/chat.db')
+      expect(entries).toContain('metadata.json')
+
+      // Data/Files payload is intentionally excluded (LOCK-L3-4 asymmetry)
+      expect(entries).not.toContain('Data/Files/abc123.png')
+
+      // No promotion artifacts either — the only Data content is the chat.db snapshot
+      assertNoPromotionArtifactsInArchive(entries)
+      const dataEntries = entries.filter((entry) => entry.startsWith('Data/') && entry !== 'Data/')
+      expect(dataEntries).toEqual(['Data/chat.db'])
+
+      // IndexedDB retained while Data/Files is skipped (documented asymmetry)
+      expect(entries).toContain('IndexedDB/file__0.indexeddb.leveldb/CURRENT')
+      expect(Buffer.from(await zip.entryData('IndexedDB/file__0.indexeddb.leveldb/CURRENT')).equals(idbSentinel)).toBe(
+        true
+      )
+
+      await zip.close()
+    })
+
+    it('EXCLUDED_DATA_ENTRIES covers every L2 promotion constant and the pinned candidate root (LOCK-L3-2 drift guard)', () => {
+      const excluded = (BackupManager as unknown as { EXCLUDED_DATA_ENTRIES: Set<string> }).EXCLUDED_DATA_ENTRIES
+
+      // Live chat DB coordination files (historical)
+      expect(excluded.has('chat.db')).toBe(true)
+      expect(excluded.has('chat.db-wal')).toBe(true)
+      expect(excluded.has('chat.db-shm')).toBe(true)
+      expect(excluded.has('chat.db.backup')).toBe(true)
+
+      // Every L2 promotion artifact constant (LOCK-L3-2)
+      expect(excluded.has(CANDIDATE_ROOT_DIRNAME)).toBe(true)
+      expect(excluded.has(PROMOTION_JOURNAL_FILENAME)).toBe(true)
+      expect(excluded.has(PROMOTION_JOURNAL_STAGING_FILENAME)).toBe(true)
+      expect(excluded.has(ROLLBACK_SNAPSHOT_FILENAME)).toBe(true)
+      expect(excluded.has(ROLLBACK_SNAPSHOT_STAGING_FILENAME)).toBe(true)
+      expect(excluded.has(FILES_ROLLBACK_SNAPSHOT_DIRNAME)).toBe(true)
+      expect(excluded.has(FILES_ROLLBACK_SNAPSHOT_STAGING_DIRNAME)).toBe(true)
+      expect(excluded.has(FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME)).toBe(true)
+      expect(excluded.has(FILES_PROMOTE_STAGING_DIRNAME)).toBe(true)
+      expect(excluded.has(FILES_CATALOG_SNAPSHOT_FILENAME)).toBe(true)
+      expect(excluded.has(FILES_CATALOG_SNAPSHOT_STAGING_FILENAME)).toBe(true)
+    })
+  })
+
+  // =========================================================================
+  // 2c. LOCK-L3-3: restore round-trip — valid live Files bytes and catalog
+  //     storage round-trip without injecting stale promotion state.
+  // =========================================================================
+
+  describe('BackupManager.restore() — physical round-trip without promotion state (LOCK-L3-3)', () => {
+    it('restore staging preserves physical Files bytes and catalog storage, activates without promotion artifacts', async () => {
+      const bm = new BackupManager()
+      const destDir = realPath.join(tempDir, 'backups-l3-restore')
+      realFs.mkdirSync(destDir, { recursive: true })
+
+      const dataDir = realPath.join(tempDir, 'Data')
+
+      // Live Files payload
+      realFs.mkdirSync(realPath.join(dataDir, 'Files'), { recursive: true })
+      const filePayload = Buffer.from('restore-roundtrip-file-payload')
+      realFs.writeFileSync(realPath.join(dataDir, 'Files', 'rt-123.png'), filePayload)
+
+      // Live promotion artifacts — must NOT round-trip into the restore
+      seedPromotionArtifacts(dataDir)
+
+      // IndexedDB Dexie catalog storage sentinel (LevelDB subtree)
+      realFs.mkdirSync(realPath.join(tempDir, 'IndexedDB', 'file__0.indexeddb.leveldb'), { recursive: true })
+      const catalogSentinel = Buffer.from('dexie-catalog-leveldb-sentinel')
+      realFs.writeFileSync(realPath.join(tempDir, 'IndexedDB', 'file__0.indexeddb.leveldb', 'CURRENT'), catalogSentinel)
+
+      // Backup first (real archive with chat.db snapshot + metadata.json)
+      const archivePath = await bm.backup(null as any, 'roundtrip.zip', destDir)
+      expect(realFs.existsSync(archivePath)).toBe(true)
+
+      // Close the live DB handle before the Data swap (the handle would dangle
+      // after handleStartupRestore renames over the live Data directory).
+      sqlite.close()
+
+      // Restore — stages Data.restore / IndexedDB.restore, then relaunches (mocked).
+      // The staged dirs are ready for handleStartupRestore on next launch.
+      await bm.restore(null as any, archivePath)
+
+      // Staged Data.restore preserves physical Files bytes and has NO promotion state
+      const stagedFiles = realPath.join(tempDir, 'Data.restore', 'Files', 'rt-123.png')
+      expect(realFs.existsSync(stagedFiles)).toBe(true)
+      expect(realFs.readFileSync(stagedFiles).equals(filePayload)).toBe(true)
+      assertNoPromotionArtifactsOnDisk(realPath.join(tempDir, 'Data.restore'))
+
+      // Staged IndexedDB.restore preserves the catalog storage sentinel
+      expect(
+        realFs
+          .readFileSync(realPath.join(tempDir, 'IndexedDB.restore', 'file__0.indexeddb.leveldb', 'CURRENT'))
+          .equals(catalogSentinel)
+      ).toBe(true)
+
+      // Activation — handleStartupRestore swaps Data.restore → Data
+      await BackupManager.handleStartupRestore()
+
+      // Live Data now carries the restored Files payload, with no promotion artifacts
+      expect(realFs.readFileSync(realPath.join(dataDir, 'Files', 'rt-123.png')).equals(filePayload)).toBe(true)
+      assertNoPromotionArtifactsOnDisk(dataDir)
+
+      // Live IndexedDB carries the restored catalog storage sentinel
+      expect(
+        realFs
+          .readFileSync(realPath.join(tempDir, 'IndexedDB', 'file__0.indexeddb.leveldb', 'CURRENT'))
+          .equals(catalogSentinel)
+      ).toBe(true)
     })
   })
 

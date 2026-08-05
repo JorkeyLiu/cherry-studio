@@ -552,6 +552,76 @@ describe('estimateImageBlockTokens', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Degraded imported image blocks (LOCK-UI-2): a marked block is skipped
+// BEFORE any file:imageSize IPC — deterministic fallback, zero IPC attempts.
+// ---------------------------------------------------------------------------
+
+describe('estimateImageBlockTokens — degraded imported images (LOCK-UI-2)', () => {
+  it('returns the fixed fallback for a marked file-backed block without any imageSize IPC', async () => {
+    imageSizeMock.mockResolvedValue({ width: 512, height: 512 })
+    const block = makeImageBlock({
+      l2AttachmentUnavailable: true,
+      file: createFile({ id: 'degraded', ext: '.png', origin_name: 'missing.png', type: FILE_TYPE.IMAGE })
+    })
+
+    await expect(estimateImageBlockTokens(block)).resolves.toBe(IMAGE_FALLBACK_TOKENS)
+    expect(imageSizeMock).not.toHaveBeenCalled()
+    expect(imageSizeExternalMock).not.toHaveBeenCalled()
+    expect(base64ImageMock).not.toHaveBeenCalled()
+    expect(base64ImageExternalMock).not.toHaveBeenCalled()
+  })
+
+  it('returns the fixed fallback for a marked url-only block without probing or IPC', async () => {
+    imageProbeResult = { width: 512, height: 512 }
+    const block = makeImageBlock({
+      l2AttachmentUnavailable: true,
+      url: 'https://example.com/missing.png'
+    })
+
+    await expect(estimateImageBlockTokens(block)).resolves.toBe(IMAGE_FALLBACK_TOKENS)
+    expect(imageConstructorCalls).toBe(0)
+    expect(imageSizeMock).not.toHaveBeenCalled()
+    expect(base64ImageMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps the healthy file-backed path when the marker is explicitly false', async () => {
+    imageSizeMock.mockResolvedValue({ width: 512, height: 512 })
+    const block = makeImageBlock({
+      l2AttachmentUnavailable: false,
+      file: createFile({ id: 'healthy', ext: '.png', origin_name: 'ok.png', type: FILE_TYPE.IMAGE })
+    })
+
+    await expect(estimateImageBlockTokens(block)).resolves.toBe(255)
+    expect(imageSizeMock).toHaveBeenCalledWith('healthy.png')
+  })
+
+  it('excludes marked blocks from the message-level estimate without any imageSize IPC', async () => {
+    imageSizeMock.mockResolvedValue({ width: 512, height: 512 })
+    imageProbeResult = { width: 512, height: 512 }
+    const message = makeMessage('m-degraded', [
+      {
+        id: 'b-degraded',
+        type: MessageBlockType.IMAGE,
+        l2AttachmentUnavailable: true,
+        file: createFile({ id: 'd1', ext: '.png', origin_name: 'missing.png', type: FILE_TYPE.IMAGE })
+      },
+      { id: 'b-healthy', type: MessageBlockType.IMAGE, url: 'data:image/png;base64,AAAA' }
+    ])
+
+    const estimate = await estimateMessageTokens(message)
+
+    // Degraded block contributes the deterministic fallback; the healthy
+    // data-URL block estimates 255 via an in-renderer probe — and no file
+    // IPC ever fired for the marked block.
+    expect(estimate.imageTokens).toBe(IMAGE_FALLBACK_TOKENS + 255)
+    expect(imageSizeMock).not.toHaveBeenCalled()
+    expect(imageSizeExternalMock).not.toHaveBeenCalled()
+    expect(base64ImageMock).not.toHaveBeenCalled()
+    expect(base64ImageExternalMock).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Cache behavior (LOCK-009)
 // ---------------------------------------------------------------------------
 

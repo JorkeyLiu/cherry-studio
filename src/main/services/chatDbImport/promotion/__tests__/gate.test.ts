@@ -20,18 +20,22 @@ vi.mock('../journalStore', () => ({
 // Mock the artifactProbe
 const mockProbePromotionArtifacts = vi.fn()
 const mockProbeResultToRecoveryInput = vi.fn()
+const mockProbePromotionArtifactsV2 = vi.fn()
 vi.mock('../artifactProbe', () => ({
   probePromotionArtifacts: (...args: unknown[]) => mockProbePromotionArtifacts(...args),
-  probeResultToRecoveryInput: (...args: unknown[]) => mockProbeResultToRecoveryInput(...args)
+  probeResultToRecoveryInput: (...args: unknown[]) => mockProbeResultToRecoveryInput(...args),
+  probePromotionArtifactsV2: (...args: unknown[]) => mockProbePromotionArtifactsV2(...args)
 }))
 
 // Mock the recovery decision (pass-through)
+const mockDecidePromotionRecoveryV2 = vi.fn()
 vi.mock('../recovery', () => ({
   decidePromotionRecovery: vi.fn((input: any) => {
     if (input.journal.status === 'absent') return { action: 'keep-old-live', reason: 'NO_JOURNAL' }
     if (input.journal.status === 'invalid') return { action: 'repair-required', reason: 'JOURNAL_INVALID' }
     return { action: 'keep-old-live', reason: 'NO_JOURNAL' }
   }),
+  decidePromotionRecoveryV2: (...args: unknown[]) => mockDecidePromotionRecoveryV2(...args),
   PROMOTION_CRASH_POINT_MATRIX: []
 }))
 
@@ -208,6 +212,83 @@ describe('startup recovery gate (LOCK-4431..LOCK-4439)', () => {
       expect(mockCreateRecoveryExecutor).toHaveBeenCalledTimes(1)
       const options = mockCreateRecoveryExecutor.mock.calls[0][0] as Record<string, unknown>
       expect(options.restartMode).toBe('in-process-reload')
+    })
+  })
+
+  describe('v2 journal — truthful deferral decision (LOCK-BRIDGE-4)', () => {
+    const V2_JOURNAL = {
+      status: 'valid' as const,
+      journal: { version: 2, sessionId: 's2', candidateId: 'c2', phase: 'catalog-pending' }
+    }
+    const V2_PROBE = {
+      journal: V2_JOURNAL,
+      live: 'present-verified',
+      dbSnapshot: 'present-verified',
+      candidate: 'missing',
+      files: 'present-verified',
+      filesSnapshot: 'present-verified',
+      filesStaging: 'missing',
+      catalogSnapshot: 'present-verified',
+      catalogApplied: 'unknown',
+      candidateCatalog: 'present'
+    }
+
+    beforeEach(() => {
+      mockReadPromotionJournal.mockResolvedValue(V2_JOURNAL)
+      mockProbePromotionArtifactsV2.mockReturnValue(V2_PROBE)
+    })
+
+    it('reports the TRUE v2 action (not keep-old-live) when deferring complete-catalog-apply', async () => {
+      mockDecidePromotionRecoveryV2.mockReturnValue({
+        action: 'complete-catalog-apply',
+        reason: 'CATALOG_PENDING_FORWARD_VERIFIABLE'
+      })
+
+      const result = await runStartupRecoveryGate(false)
+
+      // LOCK-BRIDGE-4: the decision must be truthful — the gate deferred the
+      // action to the recovery window; it must not claim keep-old-live.
+      expect(result.decision).toEqual({
+        action: 'complete-catalog-apply',
+        reason: 'CATALOG_PENDING_FORWARD_VERIFIABLE'
+      })
+      expect(result.catalogRecoveryRequired).toBe(true)
+      expect(result.catalogRecoveryAction).toBe('complete-catalog-apply')
+      expect(result.catalogRecoveryPhase).toBe('catalog-pending')
+      expect(result.executorResult).toBeNull()
+      expect(result.relaunchPending).toBe(false)
+    })
+
+    it('reports the TRUE restore action while retaining the restore-snapshot handoff', async () => {
+      mockDecidePromotionRecoveryV2.mockReturnValue({
+        action: 'restore-rollback-snapshot',
+        reason: 'CATALOG_APPLIED_RESTORE_SNAPSHOT_VERIFIED'
+      })
+
+      const result = await runStartupRecoveryGate(false)
+
+      expect(result.decision).toEqual({
+        action: 'restore-rollback-snapshot',
+        reason: 'CATALOG_APPLIED_RESTORE_SNAPSHOT_VERIFIED'
+      })
+      expect(result.catalogRecoveryRequired).toBe(true)
+      // The dedicated handoff keeps its established value (LOCK-BRIDGE-4:
+      // no runtime behavior change beyond truthful representation).
+      expect(result.catalogRecoveryAction).toBe('restore-snapshot')
+    })
+
+    it('v2 keep-old-live still reports keep-old-live WITHOUT catalog recovery', async () => {
+      mockDecidePromotionRecoveryV2.mockReturnValue({
+        action: 'keep-old-live',
+        reason: 'CANDIDATES_READY_NO_MUTATION'
+      })
+
+      const result = await runStartupRecoveryGate(false)
+
+      expect(result.decision).toEqual({ action: 'keep-old-live', reason: 'CANDIDATES_READY_NO_MUTATION' })
+      expect(result.catalogRecoveryRequired).toBe(false)
+      expect(result.catalogRecoveryAction).toBeNull()
+      expect(result.repairRequired).toBe(false)
     })
   })
 

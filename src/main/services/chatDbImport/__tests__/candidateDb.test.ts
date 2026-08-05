@@ -49,6 +49,7 @@ import {
   isValidCandidateId,
   isValidOwnedCandidateId,
   recoverOrphanedCandidates,
+  removeConvergedCandidate,
   resealSealedCandidate
 } from '../candidateDb'
 
@@ -546,6 +547,219 @@ describe('candidateDb — lifecycle primitives', () => {
       // would silently protect nothing (LOCK-4415).
       expect(() => getOwnedCandidateDirName('abc-123')).toThrow(/path safety/)
       expect(() => getOwnedCandidateDirName(CANDIDATE_DIR_PREFIX)).toThrow(/path safety/)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // removeConvergedCandidate — exact owned candidate removal after a
+  // CONVERGED promotion (LOCK-CLEAN-1..5). Deletes ONLY the exact owned leaf
+  // named by a validated candidate ID; the candidate root, unrelated
+  // sessions, and foreign residue are never touched.
+  // -------------------------------------------------------------------------
+
+  describe('removeConvergedCandidate', () => {
+    /** Create a candidate leaf that mirrors the post-promotion residue:
+     *  only `files-catalog.json` remains (chat.db and Files/ were renamed
+     *  away), plus an empty shell. */
+    function makePromotedResidueLeaf(candidateId: string): string {
+      const dir = path.join(getCandidateRoot(dataRoot), candidateId)
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, 'files-catalog.json'), '{"version":1}', 'utf-8')
+      return dir
+    }
+
+    it('removes the exact owned candidate shell including the files-catalog.json handoff', async () => {
+      const candidateId = `${CANDIDATE_DIR_PREFIX}import-s1`
+      const dir = makePromotedResidueLeaf(candidateId)
+      expect(fs.existsSync(path.join(dir, 'files-catalog.json'))).toBe(true)
+
+      const removed = await removeConvergedCandidate(candidateId, dataRoot)
+
+      expect(removed).toBe(true)
+      expect(fs.existsSync(dir)).toBe(false)
+      expect(fs.existsSync(path.join(getCandidateRoot(dataRoot), candidateId))).toBe(false)
+    })
+
+    it('removes the entire owned leaf — chat.db, Files/, files-catalog.json, and the empty shell (LOCK-CLEAN-3)', async () => {
+      const candidateId = `${CANDIDATE_DIR_PREFIX}import-s1`
+      const dir = path.join(getCandidateRoot(dataRoot), candidateId)
+      fs.mkdirSync(path.join(dir, 'Files'), { recursive: true })
+      fs.writeFileSync(path.join(dir, 'chat.db'), 'candidate-bytes', 'utf-8')
+      fs.writeFileSync(path.join(dir, 'files-catalog.json'), '{"version":1}', 'utf-8')
+
+      await removeConvergedCandidate(candidateId, dataRoot)
+
+      expect(fs.existsSync(dir)).toBe(false)
+    })
+
+    it('is idempotent — a second call on an already-removed leaf returns true (LOCK-CLEAN-2)', async () => {
+      const candidateId = `${CANDIDATE_DIR_PREFIX}import-s1`
+      makePromotedResidueLeaf(candidateId)
+
+      await expect(removeConvergedCandidate(candidateId, dataRoot)).resolves.toBe(true)
+      await expect(removeConvergedCandidate(candidateId, dataRoot)).resolves.toBe(true)
+      await expect(removeConvergedCandidate(candidateId, dataRoot)).resolves.toBe(true)
+    })
+
+    it('is a clean no-op when the candidate root itself does not exist yet', async () => {
+      await expect(removeConvergedCandidate(`${CANDIDATE_DIR_PREFIX}import-s1`, dataRoot)).resolves.toBe(true)
+    })
+
+    it('preserves unrelated candidate sessions when removing exactly one (LOCK-CLEAN-2)', async () => {
+      const keepId = `${CANDIDATE_DIR_PREFIX}import-keep`
+      const keepDir = makePromotedResidueLeaf(keepId)
+      const otherId = `${CANDIDATE_DIR_PREFIX}import-other`
+      const otherDir = makePromotedResidueLeaf(otherId)
+      const removeId = `${CANDIDATE_DIR_PREFIX}import-remove`
+      const removeDir = makePromotedResidueLeaf(removeId)
+
+      await removeConvergedCandidate(removeId, dataRoot)
+
+      expect(fs.existsSync(removeDir)).toBe(false)
+      expect(fs.existsSync(keepDir)).toBe(true)
+      expect(fs.existsSync(path.join(keepDir, 'files-catalog.json'))).toBe(true)
+      expect(fs.existsSync(otherDir)).toBe(true)
+      // The candidate ROOT itself survives.
+      expect(fs.existsSync(getCandidateRoot(dataRoot))).toBe(true)
+    })
+
+    it('never removes the candidate root or unrelated non-owned entries', async () => {
+      const unrelated = path.join(dataRoot, 'unrelated-dir')
+      fs.mkdirSync(unrelated, { recursive: true })
+      const root = getCandidateRoot(dataRoot)
+      fs.mkdirSync(root, { recursive: true })
+      const unownedLeaf = path.join(root, 'unowned-leaf')
+      fs.mkdirSync(unownedLeaf, { recursive: true })
+      const candidateId = `${CANDIDATE_DIR_PREFIX}import-s1`
+      makePromotedResidueLeaf(candidateId)
+
+      await removeConvergedCandidate(candidateId, dataRoot)
+
+      expect(fs.existsSync(root)).toBe(true)
+      expect(fs.existsSync(unrelated)).toBe(true)
+      expect(fs.existsSync(unownedLeaf)).toBe(true)
+    })
+
+    it.each([
+      '../escape',
+      '..',
+      'a/b',
+      'a\\b',
+      'foo.bar',
+      '',
+      'a'.repeat(200),
+      'candidate-x/../../etc',
+      'candidate-..',
+      CANDIDATE_DIR_PREFIX,
+      'candidatex'
+    ])('rejects malicious/foreign candidateId %j before deleting anything (LOCK-CLEAN-2)', async (badId) => {
+      const keepId = `${CANDIDATE_DIR_PREFIX}import-keep`
+      const keepDir = makePromotedResidueLeaf(keepId)
+
+      await expect(removeConvergedCandidate(badId, dataRoot)).rejects.toThrow(/path safety/)
+
+      // Fail closed: nothing was removed.
+      expect(fs.existsSync(keepDir)).toBe(true)
+      expect(fs.existsSync(path.join(keepDir, 'files-catalog.json'))).toBe(true)
+    })
+
+    it('a foreign-but-valid candidateId (no such owned leaf) is an idempotent clean state', async () => {
+      const keepId = `${CANDIDATE_DIR_PREFIX}import-keep`
+      const keepDir = makePromotedResidueLeaf(keepId)
+
+      await expect(removeConvergedCandidate(`${CANDIDATE_DIR_PREFIX}import-unknown`, dataRoot)).resolves.toBe(true)
+
+      // The unrelated session was never touched.
+      expect(fs.existsSync(keepDir)).toBe(true)
+    })
+
+    it('leaves a non-directory (or symlink) at the owned leaf alone — never broad-deletes foreign residue', async () => {
+      const root = getCandidateRoot(dataRoot)
+      fs.mkdirSync(root, { recursive: true })
+      const leafPath = path.join(root, `${CANDIDATE_DIR_PREFIX}import-s1`)
+      // A regular FILE at the owned leaf — not an owned candidate directory.
+      fs.writeFileSync(leafPath, 'foreign', 'utf-8')
+      // A symlinked owned-looking leaf with a real target.
+      const target = path.join(dataRoot, 'symlink-target')
+      fs.mkdirSync(target, { recursive: true })
+      fs.writeFileSync(path.join(target, 'keep.txt'), 'x', 'utf-8')
+      const link = path.join(root, `${CANDIDATE_DIR_PREFIX}import-link`)
+      fs.symlinkSync(target, link, 'dir')
+
+      await expect(removeConvergedCandidate(`${CANDIDATE_DIR_PREFIX}import-s1`, dataRoot)).resolves.toBe(true)
+      await expect(removeConvergedCandidate(`${CANDIDATE_DIR_PREFIX}import-link`, dataRoot)).resolves.toBe(true)
+
+      // Neither the foreign file, the symlink, nor its target was removed.
+      expect(fs.readFileSync(leafPath, 'utf-8')).toBe('foreign')
+      expect(fs.existsSync(link)).toBe(true)
+      expect(fs.existsSync(path.join(target, 'keep.txt'))).toBe(true)
+    })
+
+    it('fails closed when the candidate ROOT is a symlink — no removal through an unvalidated root (LOCK-LIFE-1)', async () => {
+      const external = path.join(dataRoot, 'recovery-external')
+      fs.mkdirSync(external, { recursive: true })
+      const aged = path.join(external, `${CANDIDATE_DIR_PREFIX}aged-session`)
+      fs.mkdirSync(aged, { recursive: true })
+      fs.writeFileSync(path.join(aged, 'files-catalog.json'), '{}', 'utf-8')
+
+      const root = getCandidateRoot(dataRoot)
+      fs.mkdirSync(path.dirname(root), { recursive: true })
+      fs.symlinkSync(external, root, 'dir')
+
+      await expect(removeConvergedCandidate(`${CANDIDATE_DIR_PREFIX}aged-session`, dataRoot)).rejects.toThrow(
+        /isolation refused|symlink/
+      )
+
+      // Fail closed: nothing under the external target was removed.
+      expect(fs.existsSync(aged)).toBe(true)
+    })
+
+    it('a persistent removal failure throws a fixed-context error (no private path) and leaves the leaf intact', async () => {
+      const candidateId = `${CANDIDATE_DIR_PREFIX}import-s1`
+      const dir = makePromotedResidueLeaf(candidateId)
+      const busy = Object.assign(new Error('resource busy'), { code: 'EBUSY' })
+      // Mock the owned-leaf probe too so the fake-timer chain contains no
+      // native I/O (the helper awaits lstat before the retried rm).
+      const lstatSpy = vi.spyOn(fs.promises, 'lstat').mockResolvedValue({
+        isDirectory: () => true
+      } as unknown as fs.Stats)
+      const rmSpy = vi.spyOn(fs.promises, 'rm').mockRejectedValue(busy)
+
+      vi.useFakeTimers()
+      const p = removeConvergedCandidate(candidateId, dataRoot)
+      const assertion = expect(p).rejects.toThrow(/could not be removed/)
+      await vi.runAllTimersAsync()
+      await assertion
+      vi.useRealTimers()
+
+      expect(rmSpy).toHaveBeenCalledTimes(3)
+      expect(lstatSpy).toHaveBeenCalledTimes(1)
+      // The leaf remains on disk for age-based orphan cleanup (LOCK-CLEAN-4).
+      expect(fs.existsSync(dir)).toBe(true)
+      expect(fs.existsSync(path.join(dir, 'files-catalog.json'))).toBe(true)
+    })
+
+    it('succeeds when EBUSY clears within the bounded retry budget', async () => {
+      const candidateId = `${CANDIDATE_DIR_PREFIX}import-s1`
+      const dir = makePromotedResidueLeaf(candidateId)
+      const busy = Object.assign(new Error('resource busy'), { code: 'EBUSY' })
+      // Mock the owned-leaf probe so the fake-timer chain contains no native
+      // I/O (the helper awaits lstat before the retried rm).
+      vi.spyOn(fs.promises, 'lstat').mockResolvedValue({
+        isDirectory: () => true
+      } as unknown as fs.Stats)
+      const origRm = fs.promises.rm.bind(fs.promises)
+      const rmSpy = vi.spyOn(fs.promises, 'rm').mockRejectedValueOnce(busy).mockImplementationOnce(origRm)
+
+      vi.useFakeTimers()
+      const p = removeConvergedCandidate(candidateId, dataRoot)
+      await vi.runAllTimersAsync()
+      await expect(p).resolves.toBe(true)
+      vi.useRealTimers()
+
+      expect(rmSpy).toHaveBeenCalledTimes(2)
+      // The retried (real) removal actually deleted the owned leaf.
+      expect(fs.existsSync(dir)).toBe(false)
     })
   })
 

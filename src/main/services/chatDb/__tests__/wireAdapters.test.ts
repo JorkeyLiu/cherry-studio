@@ -285,6 +285,38 @@ describe('wireAdapters', () => {
       const wire = blockToWire(block)
       expect(wire.content).toBe('Text content')
     })
+
+    it('round-trips the import-only unavailable marker through the block wire adapters (LOCK-UI-1/3/6)', () => {
+      // The candidate marker lives in block overflow as the top-level
+      // `l2AttachmentUnavailable = true`. A renderer-visible block carries it
+      // through the SAME overflow round-trip with every other key preserved.
+      const json: JsonObject = {
+        id: 'b-file',
+        messageId: 'm-1',
+        type: 'file',
+        status: 'success',
+        file: { id: 'file-degraded', name: 'photo.png', path: '/abs/photo.png', type: 'image' },
+        metadata: { prompt: 'p' },
+        l2AttachmentUnavailable: true
+      }
+
+      const block = wireToBlock(json)
+      expect(block.overflow.file).toEqual({
+        id: 'file-degraded',
+        name: 'photo.png',
+        path: '/abs/photo.png',
+        type: 'image'
+      })
+      // Marker + original overflow keys survive in the overflow bag.
+      expect(block.overflow.l2AttachmentUnavailable).toBe(true)
+      expect(block.overflow.metadata).toEqual({ prompt: 'p' })
+
+      const wire = blockToWire(block)
+      expect(wire.l2AttachmentUnavailable).toBe(true)
+      expect(wire.metadata).toEqual({ prompt: 'p' })
+      expect(wire.file).toEqual({ id: 'file-degraded', name: 'photo.png', path: '/abs/photo.png', type: 'image' })
+      expect(wire.overflow).toBeUndefined()
+    })
   })
 
   // =========================================================================

@@ -44,12 +44,17 @@ import StreamZip from 'node-stream-zip'
 
 import { ChatImportZipError } from '../errors'
 import {
+  assertDiskSpaceAvailable,
+  buildFilesInventory,
   classifyOriginCandidates,
   DEV_ORIGIN_DIR,
   enumerateLdbCandidates,
   extractZip,
   FILE_ORIGIN_DIR,
+  FILES_PAYLOAD_PREFIX,
   MAX_ENTRY_COUNT,
+  MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES,
+  MAX_FILES_PAYLOAD_TOTAL_UNCOMPRESSED_BYTES,
   MAX_SELECTED_COMPRESSION_RATIO,
   MAX_SELECTED_SINGLE_ENTRY_BYTES,
   MAX_SELECTED_TOTAL_UNCOMPRESSED_BYTES,
@@ -1855,6 +1860,198 @@ describe('zipIntake', () => {
         code: 'DUPLICATE_EXTRACTION_TARGET'
       })
       expect(fs.existsSync(path.join(destDir, 'Data'))).toBe(false)
+    })
+  })
+
+  // =========================================================================
+  // LOCK-FIX-3 — Unicode/case-fold target conflict rejection
+  // =========================================================================
+
+  describe('Unicode/case-fold target conflicts (LOCK-FIX-3)', () => {
+    function mockZipWith(names: string[]) {
+      const entryMap: Record<string, any> = {}
+      for (const name of names) {
+        entryMap[name] = { name, isDirectory: false, flags: 0, size: 1, compressedSize: 1 }
+      }
+      return { entries: async () => entryMap }
+    }
+
+    it('rejects case-fold-distinct names that collide on a case-insensitive filesystem', async () => {
+      const zip = mockZipWith(['Data/Files/a.png', 'Data/Files/A.png'])
+      await expect(validateNoZipSlip(zip as any, tempDir)).rejects.toMatchObject({
+        code: 'CASE_FOLD_TARGET_CONFLICT'
+      })
+    })
+
+    it('rejects Unicode normalization collisions (NFC vs NFD)', async () => {
+      const zip = mockZipWith(['Data/Files/caf\u00e9.png', 'Data/Files/cafe\u0301.png'])
+      await expect(validateNoZipSlip(zip as any, tempDir)).rejects.toMatchObject({
+        code: 'CASE_FOLD_TARGET_CONFLICT'
+      })
+    })
+
+    it('accepts case-distinct names that stay distinct after case folding', async () => {
+      const zip = mockZipWith(['Data/Files/a.png', 'Data/Files/b.png', `IndexedDB/${FILE_ORIGIN_DIR}/000001.ldb`])
+      await expect(validateNoZipSlip(zip as any, tempDir)).resolves.not.toThrow()
+    })
+  })
+
+  // =========================================================================
+  // LOCK-FIX-2/7 — bounded Data/Files payload inventory
+  // =========================================================================
+
+  describe('buildFilesInventory (LOCK-FIX-2/7)', () => {
+    function mockZip(
+      rawEntries: Array<{ name: string; isDirectory?: boolean; size?: number; compressedSize?: number }>
+    ) {
+      const entryMap: Record<string, any> = {}
+      for (const entry of rawEntries) {
+        entryMap[entry.name] = {
+          name: entry.name,
+          isDirectory: entry.isDirectory ?? false,
+          flags: 0,
+          size: entry.size ?? 0,
+          compressedSize: entry.compressedSize ?? entry.size ?? 0
+        }
+      }
+      return { entries: async () => entryMap }
+    }
+
+    it('inventories every non-directory Data/Files entry with its central size', async () => {
+      const zip = mockZip([
+        { name: 'Data/Files/file-1.png', size: 100 },
+        { name: 'Data/Files/sub/file-2.bin', size: 200 },
+        { name: 'Data/Files/dir/', isDirectory: true, size: 0 },
+        // Outside the subtree — never inventoried.
+        { name: 'Data/chat.db', size: 999 },
+        { name: 'Memory/knowledge.db', size: 999 },
+        { name: `IndexedDB/${FILE_ORIGIN_DIR}/000001.ldb`, size: 10 }
+      ])
+      const inventory = await buildFilesInventory(zip as any)
+      expect(inventory.entries.map((e) => [e.entryName, e.size])).toEqual([
+        ['Data/Files/file-1.png', 100],
+        ['Data/Files/sub/file-2.bin', 200]
+      ])
+      expect(inventory.totalUncompressedBytes).toBe(300)
+    })
+
+    it('returns an empty inventory when the ZIP has no Data/Files subtree', async () => {
+      const zip = mockZip([{ name: `IndexedDB/${FILE_ORIGIN_DIR}/000001.ldb`, size: 10 }])
+      const inventory = await buildFilesInventory(zip as any)
+      expect(inventory.entries).toEqual([])
+      expect(inventory.totalUncompressedBytes).toBe(0)
+    })
+
+    it('rejects a single entry above the per-payload cap (FILES_ENTRY_TOO_LARGE)', async () => {
+      const zip = mockZip([{ name: 'Data/Files/huge.bin', size: MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES + 1 }])
+      await expect(buildFilesInventory(zip as any)).rejects.toMatchObject({
+        code: 'FILES_ENTRY_TOO_LARGE'
+      })
+    })
+
+    it('rejects a cumulative Data/Files total above the quota (FILES_QUOTA_EXCEEDED)', async () => {
+      const zip = mockZip([
+        // Five entries each below the single-entry cap but summing above
+        // the 8 GiB cumulative quota → FILES_QUOTA_EXCEEDED (quota/bomb
+        // class, rejected in the central-directory pass).
+        { name: 'Data/Files/a.bin', size: MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES - 1 },
+        { name: 'Data/Files/b.bin', size: MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES - 1 },
+        { name: 'Data/Files/c.bin', size: MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES - 1 },
+        { name: 'Data/Files/d.bin', size: MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES - 1 },
+        { name: 'Data/Files/e.bin', size: MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES - 1 }
+      ])
+      await expect(buildFilesInventory(zip as any)).rejects.toMatchObject({
+        code: 'FILES_QUOTA_EXCEEDED'
+      })
+    })
+
+    it('accepts a cumulative total exactly at the quota boundary', async () => {
+      const zip = mockZip([
+        // Four entries at exactly the single-entry cap sum to exactly the
+        // cumulative quota — both boundaries inclusive.
+        { name: 'Data/Files/a.bin', size: MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES },
+        { name: 'Data/Files/b.bin', size: MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES },
+        { name: 'Data/Files/c.bin', size: MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES },
+        { name: 'Data/Files/d.bin', size: MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES }
+      ])
+      const inventory = await buildFilesInventory(zip as any)
+      expect(inventory.totalUncompressedBytes).toBe(MAX_FILES_PAYLOAD_TOTAL_UNCOMPRESSED_BYTES)
+    })
+  })
+
+  // =========================================================================
+  // LOCK-FIX-3 — disk preflight
+  // =========================================================================
+
+  describe('assertDiskSpaceAvailable (LOCK-FIX-3)', () => {
+    it('passes when the target filesystem has headroom', () => {
+      expect(() => assertDiskSpaceAvailable(tempDir, 1024)).not.toThrow()
+    })
+
+    it('fails closed when statfs reports insufficient bytes (DISK_PREFLIGHT_FAILED)', () => {
+      const realStatfs = fs.statfsSync
+      fsMock.statfsSync = vi.fn(() => ({ bavail: BigInt(1), bsize: BigInt(512) })) as any
+      try {
+        // 512 bytes available < 1024 required + fixed headroom.
+        expect(() => assertDiskSpaceAvailable(tempDir, 1024)).toThrow(ChatImportZipError)
+        expect(() => assertDiskSpaceAvailable(tempDir, 1024)).toThrow(/DISK_PREFLIGHT_FAILED/)
+      } finally {
+        fsMock.statfsSync = realStatfs
+      }
+    })
+
+    it('fails closed when statfs itself throws (DISK_PREFLIGHT_FAILED)', () => {
+      const realStatfs = fs.statfsSync
+      fsMock.statfsSync = vi.fn(() => {
+        throw new Error('ENOSYS')
+      }) as any
+      try {
+        expect(() => assertDiskSpaceAvailable(tempDir, 1024)).toThrow(/DISK_PREFLIGHT_FAILED/)
+      } finally {
+        fsMock.statfsSync = realStatfs
+      }
+    })
+  })
+
+  // =========================================================================
+  // LOCK-FIX-2 — extractZip surfaces the files inventory (two-pass handoff)
+  // =========================================================================
+
+  describe('extractZip files inventory handoff (LOCK-FIX-2/7)', () => {
+    it('surfaces the Data/Files inventory while NEVER materializing payloads in the temp dir', async () => {
+      const { default: AdmZip } = await import('adm-zip')
+      const zipPath = path.join(tempDir, 'inventory.zip')
+      const work = path.join(tempDir, 'seed')
+      const idbDir = path.join(work, 'IndexedDB', FILE_ORIGIN_DIR)
+      const lsDir = path.join(work, 'Local Storage', 'leveldb')
+      fs.mkdirSync(idbDir, { recursive: true })
+      fs.mkdirSync(lsDir, { recursive: true })
+      fs.writeFileSync(path.join(idbDir, '000001.ldb'), 'idb-data')
+      fs.writeFileSync(path.join(lsDir, 'CURRENT'), 'ls-data')
+
+      const zip = new AdmZip()
+      zip.addFile(`${FILES_PAYLOAD_PREFIX}file-1.png`, Buffer.from('png-bytes'))
+      zip.addFile(`${FILES_PAYLOAD_PREFIX}sub/file-2.bin`, Buffer.from('bin-bytes'))
+      zip.addLocalFolder(work, '')
+      zip.writeZip(zipPath)
+
+      const destDir = path.join(tempDir, 'out')
+      fs.mkdirSync(destDir, { recursive: true })
+
+      const result = await extractZip(zipPath, destDir)
+
+      // Two-pass handoff: the intake pass inventories payloads...
+      expect(result.filesInventory.entries.map((e) => e.entryName).sort()).toEqual([
+        'Data/Files/file-1.png',
+        'Data/Files/sub/file-2.bin'
+      ])
+      expect(result.filesInventory.totalUncompressedBytes).toBe(18)
+      // ...but NEVER materializes them into the extraction workspace
+      // (LOCK-FIX-7 — the payload extraction happens in the attachment
+      // plane against the candidate-scoped Files directory).
+      expect(fs.existsSync(path.join(destDir, 'Data'))).toBe(false)
+      // The selected subtrees still materialize as before.
+      expect(fs.existsSync(path.join(destDir, 'IndexedDB', FILE_ORIGIN_DIR, '000001.ldb'))).toBe(true)
     })
   })
 })

@@ -26,14 +26,26 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import crypto from 'node:crypto'
 
 import StreamZip from 'node-stream-zip'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import {
+  ATTACHMENT_BLOCK_IDS,
+  ATTACHMENT_FILES,
+  ATTACHMENT_MESSAGE_ID,
+  ATTACHMENT_MISSING_CLAIMED_BYTES,
+  ATTACHMENT_PAYLOADS,
+  attachmentExpectedClassification,
+  buildAttachmentCatalogRows,
+  buildAttachmentPayloadEntries,
+  buildAttachmentSeedConfig,
   buildSeedPersistedState,
   parsePersistWireValue,
+  preflightZipEntries,
   produceSeedZip,
+  type AttachmentCatalogRow,
   PROJECTION_ASSISTANTS,
   PROJECTION_TOPICS,
   SEED_LOCAL_STORAGE_LEVELDB_DIR,
@@ -91,6 +103,16 @@ async function zipEntryNames(zipPath: string): Promise<string[]> {
   try {
     const entries = await zip.entries()
     return Object.keys(entries)
+  } finally {
+    await zip.close()
+  }
+}
+
+/** Read one ZIP entry's bytes (independent oracle — node-stream-zip). */
+async function readZipEntry(zipPath: string, entryName: string): Promise<Buffer> {
+  const zip = new StreamZip.async({ file: zipPath })
+  try {
+    return await zip.entryData(entryName)
   } finally {
     await zip.close()
   }
@@ -405,5 +427,298 @@ describe('produceSeedZip (LOCK-E2 exact roots, no Data/)', () => {
     const zipPath = path.join(root, 'seed.zip')
     expect(() => produceSeedZip(profileDevDir, zipPath)).toThrow(/no \.ldb files/)
     expect(fs.existsSync(zipPath)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Attachment variant (LOCK-E2-FIX)
+// ---------------------------------------------------------------------------
+
+describe('attachment variant payload assets (LOCK-E2-FIX-2/3)', () => {
+  it('embeds a valid deterministic tiny PNG (magic + IEND, pinned bytes)', () => {
+    const png = ATTACHMENT_PAYLOADS.png
+    // 1×1 transparent PNG: 70 bytes, valid PNG magic + IEND chunk.
+    expect(png.length).toBe(70)
+    expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    // IEND chunk signature (12 bytes incl. length + CRC).
+    expect(png.subarray(-8)).toEqual(Buffer.from([0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]))
+    // Deterministic across calls.
+    expect(ATTACHMENT_PAYLOADS.png.equals(png)).toBe(true)
+  })
+
+  it('embeds deterministic text payloads (pinned multi-byte UTF-8 lengths)', () => {
+    const txt = ATTACHMENT_PAYLOADS.txt
+    const orphan = ATTACHMENT_PAYLOADS.orphan
+    // Em-dash is multi-byte UTF-8: byte length must differ from char length.
+    const txtChars = txt.toString('utf8')
+    const orphanChars = orphan.toString('utf8')
+    expect(txt.length).toBeGreaterThan(txtChars.length)
+    expect(orphan.length).toBeGreaterThan(orphanChars.length)
+    // Pinned exact byte lengths.
+    expect(txt.length).toBe(101)
+    expect(orphan.length).toBe(116)
+    expect(ATTACHMENT_PAYLOADS.txt.equals(txt)).toBe(true)
+    expect(ATTACHMENT_PAYLOADS.orphan.equals(orphan)).toBe(true)
+  })
+})
+
+describe('attachment scenario contract (LOCK-E2-FIX-2/3/5)', () => {
+  it('builds a deterministic seed config with fixed ids/names/sizes/timestamps', () => {
+    const a = buildAttachmentSeedConfig()
+    const b = buildAttachmentSeedConfig()
+    expect(a).toEqual(b)
+
+    const catalog = buildAttachmentCatalogRows()
+    expect(catalog.map((f) => f.id)).toEqual([
+      'f-e2e-att-png',
+      'f-e2e-att-txt',
+      'f-e2e-att-missing',
+      'f-e2e-att-orphan'
+    ])
+    for (const row of catalog) {
+      // Canonical physical filename (LOCK-FIX-6) and fake normalized path.
+      expect(row.name).toBe(`${row.id}${row.ext}`)
+      expect(row.path.startsWith('/fake/')).toBe(true)
+    }
+    // Sizes: payload lengths for healthy/orphan, claimed bytes for missing.
+    expect(catalog[0].size).toBe(ATTACHMENT_PAYLOADS.png.length)
+    expect(catalog[1].size).toBe(ATTACHMENT_PAYLOADS.txt.length)
+    expect(catalog[2].size).toBe(ATTACHMENT_MISSING_CLAIMED_BYTES)
+    expect(catalog[3].size).toBe(ATTACHMENT_PAYLOADS.orphan.length)
+    // Reference counts: 1 for referenced, 0 for the browser-only orphan.
+    expect(catalog.map((f) => f.count)).toEqual([1, 1, 1, 0])
+  })
+
+  it('seeds three attachment blocks owned by the deterministic message (LOCK-E2-FIX-5)', () => {
+    const cfg = buildAttachmentSeedConfig()
+
+    // The attachment message is embedded in topic t-e2e-1 (imported).
+    expect(cfg.message.id).toBe(ATTACHMENT_MESSAGE_ID)
+    expect(cfg.message.topicId).toBe(SOURCE_IDS.topic)
+    expect(cfg.message.blocks).toEqual([...ATTACHMENT_BLOCK_IDS])
+
+    // Exactly three blocks: png image, txt file, missing image.
+    expect(cfg.blocks).toHaveLength(3)
+    const blockFileIds = cfg.blocks.map((b: any) => b.file.id)
+    expect(blockFileIds).toEqual(['f-e2e-att-png', 'f-e2e-att-txt', 'f-e2e-att-missing'])
+    expect(cfg.blocks.map((b: any) => b.type)).toEqual(['image', 'file', 'image'])
+    for (const block of cfg.blocks) {
+      expect(block.messageId).toBe(ATTACHMENT_MESSAGE_ID)
+      const file = (block as any).file
+      expect(file.path.startsWith('/fake/')).toBe(true)
+      expect(file.name).toBeDefined()
+    }
+    // The orphan has a catalog row + payload but NO block (browser-only).
+    expect(cfg.blocks.some((b: any) => b.file.id === 'f-e2e-att-orphan')).toBe(false)
+    expect(cfg.files).toHaveLength(4)
+  })
+
+  it('exposes the exact deterministic scenario facts (LOCK-E2-FIX-3)', () => {
+    expect(ATTACHMENT_FILES.map((f) => f.id)).toEqual([
+      'f-e2e-att-png',
+      'f-e2e-att-txt',
+      'f-e2e-att-missing',
+      'f-e2e-att-orphan'
+    ])
+    expect(ATTACHMENT_MESSAGE_ID).toBe('m-e2e-att-1')
+    expect([...ATTACHMENT_BLOCK_IDS]).toEqual(['b-e2e-att-png', 'b-e2e-att-txt', 'b-e2e-att-missing'])
+    // Exactly one file has no payload (the missing referenced one).
+    expect(ATTACHMENT_FILES.filter((f) => f.payloadKey === null).map((f) => f.id)).toEqual(['f-e2e-att-missing'])
+  })
+
+  it('computes the expected attachment-plane classification (LOCK-E2-FIX-2)', () => {
+    expect(attachmentExpectedClassification()).toEqual({
+      referencedFileIdCount: 3,
+      healthyFileCount: 3,
+      degradedMissingPayload: 1,
+      degradedFileIds: ['f-e2e-att-missing'],
+      skippedPayloadWithoutCatalog: 0
+    })
+  })
+})
+
+describe('embedded file bag metadata (LOCK-E2-FIX FileManager realism)', () => {
+  /**
+   * Utility assertions: the `file` bag embedded on a seeded message block is
+   * a complete production FileMetadata whose name/id/ext/origin_name/path/
+   * type/size/count/timestamp each match its catalog row, and whose target
+   * URL suffix (`id + ext`) resolves to the canonical physical filename —
+   * the exact `filesPath/<id><ext>` FileManager path/URL contract.
+   */
+  function expectEmbeddedFileBagMatchesCatalog(
+    block: { file: Record<string, unknown> },
+    row: AttachmentCatalogRow
+  ): void {
+    const file = block.file
+    // Name is the canonical physical filename `<id><ext>`, never origin_name.
+    expect(file.name).toBe(row.name)
+    expect(file.id).toBe(row.id)
+    expect(file.ext).toBe(row.ext)
+    expect(file.origin_name).toBe(row.origin_name)
+    // Fake source path is retained unchanged on the embedded bag.
+    expect(file.path).toBe(row.path)
+    expect(file.path.startsWith('/fake/')).toBe(true)
+    expect(file.type).toBe(row.type)
+    expect(file.size).toBe(row.size)
+    expect(file.count).toBe(row.count)
+    expect(file.created_at).toBe(row.created_at)
+    // Target URL suffix: FileManager resolves the physical payload as
+    // `filesPath/<id><ext>` (getFilePath/getFileUrl) — the canonical name.
+    expect(`${file.id}${file.ext}`).toBe(row.name)
+  }
+
+  it('seeds a complete FileMetadata bag matching its catalog row for every block', () => {
+    const cfg = buildAttachmentSeedConfig()
+    const catalog = buildAttachmentCatalogRows()
+    const catalogById = new Map(catalog.map((row) => [row.id, row]))
+    const payloadNames = new Set(buildAttachmentPayloadEntries().map((p) => p.name))
+
+    // Exactly the three referenced blocks (the orphan has no block).
+    expect(cfg.blocks).toHaveLength(3)
+    for (const block of cfg.blocks) {
+      const file = (block as { file: Record<string, unknown> }).file
+      const row = catalogById.get(file.id as string)
+      expect(row, `catalog row for ${file.id}`).toBeDefined()
+      expectEmbeddedFileBagMatchesCatalog(block as { file: Record<string, unknown> }, row!)
+      // Healthy bags resolve to a real Data/Files payload basename; the
+      // missing referenced file has NO payload by design (LOCK-E2-FIX-2).
+      const seed = ATTACHMENT_FILES.find((f) => f.id === file.id)
+      expect(seed, `seed entry for ${file.id}`).toBeDefined()
+      if (seed!.payloadKey !== null) {
+        expect(payloadNames).toContain(`${file.id}${file.ext}`)
+      }
+    }
+  })
+
+  it('keeps the missing referenced file bag count/timestamp/size consistent (LOCK-E2-FIX)', () => {
+    const cfg = buildAttachmentSeedConfig()
+    const catalog = buildAttachmentCatalogRows()
+    const missingBlock = cfg.blocks.find((b: any) => b.file.id === 'f-e2e-att-missing')
+    const missingRow = catalog.find((row) => row.id === 'f-e2e-att-missing')
+
+    expect(missingBlock).toBeDefined()
+    expect(missingRow).toBeDefined()
+    expectEmbeddedFileBagMatchesCatalog(missingBlock as { file: Record<string, unknown> }, missingRow!)
+    // No payload exists, but the claimed size and reference count stay fixed.
+    expect(missingRow!.size).toBe(ATTACHMENT_MISSING_CLAIMED_BYTES)
+    expect(missingRow!.count).toBe(1)
+    // The missing file has NO Data/Files payload entry.
+    expect(buildAttachmentPayloadEntries().map((p) => p.name)).not.toContain('f-e2e-att-missing.png')
+  })
+})
+
+describe('produceSeedZip + preflight with Data/Files payloads (LOCK-E2-FIX-4)', () => {
+  it('writes Data/Files entries AFTER the Chromium subtrees with exact bytes', async () => {
+    const root = tempDir()
+    const profileDevDir = syntheticProfileDevDir(root)
+    const zipPath = path.join(root, 'seed-att.zip')
+    const payloads = buildAttachmentPayloadEntries()
+
+    // Exactly the three healthy/orphan payloads — NOT the missing file.
+    expect(payloads.map((p) => p.name)).toEqual(['f-e2e-att-png.png', 'f-e2e-att-txt.txt', 'f-e2e-att-orphan.txt'])
+
+    const result = produceSeedZip(profileDevDir, zipPath, { payloadEntries: payloads })
+    expect(result.dataFilesEntryCount).toBe(3)
+
+    const names = await zipEntryNames(zipPath)
+    const roots = Array.from(new Set(names.map((n) => n.split('/')[0]))).sort()
+    expect(roots).toEqual(['Data', 'IndexedDB', SEED_LOCAL_STORAGE_ROOT])
+
+    // Exact Data/Files inventory (sorted, independent oracle).
+    const dataFiles = names.filter((n) => n.startsWith('Data/Files/') && !n.endsWith('/')).sort()
+    expect(dataFiles).toEqual([
+      'Data/Files/f-e2e-att-orphan.txt',
+      'Data/Files/f-e2e-att-png.png',
+      'Data/Files/f-e2e-att-txt.txt'
+    ])
+    expect(dataFiles.some((n) => n.includes('missing'))).toBe(false)
+
+    // Byte-identical round-trip through the ZIP (independent oracle).
+    for (const payload of payloads) {
+      const entry = await readZipEntry(zipPath, `Data/Files/${payload.name}`)
+      expect(entry.equals(payload.bytes)).toBe(true)
+    }
+  })
+
+  it('preflight verifies payload inventory, bytes and SHA-256 (LOCK-E2-FIX-4)', async () => {
+    const root = tempDir()
+    const profileDevDir = syntheticProfileDevDir(root)
+    const zipPath = path.join(root, 'seed-att.zip')
+    const payloads = buildAttachmentPayloadEntries()
+    produceSeedZip(profileDevDir, zipPath, { payloadEntries: payloads })
+
+    const preflight = await preflightZipEntries(zipPath, SEED_ORIGIN_DIR, {
+      allowDataFiles: true,
+      expectedPayloads: payloads
+    })
+
+    expect(preflight.payloadsAllVerified).toBe(true)
+    expect(preflight.dataFilesEntries).toEqual([
+      'Data/Files/f-e2e-att-orphan.txt',
+      'Data/Files/f-e2e-att-png.png',
+      'Data/Files/f-e2e-att-txt.txt'
+    ])
+    expect(preflight.payloadVerification).toHaveLength(3)
+    for (const payload of payloads) {
+      const verified = preflight.payloadVerification.find((v) => v.name === payload.name)
+      expect(verified).toBeDefined()
+      expect(verified!.size).toBe(payload.bytes.length)
+      expect(verified!.bytesEqual).toBe(true)
+      // Independent SHA-256 oracle.
+      expect(verified!.sha256).toBe(crypto.createHash('sha256').update(payload.bytes).digest('hex'))
+    }
+    // The missing referenced file is NOT inventoried.
+    expect(preflight.dataFilesEntries.some((n) => n.includes('missing'))).toBe(false)
+  })
+
+  it('rejects the attachment ZIP when allowDataFiles is false (LOCK-E2 preserved)', async () => {
+    const root = tempDir()
+    const profileDevDir = syntheticProfileDevDir(root)
+    const zipPath = path.join(root, 'seed-att.zip')
+    const payloads = buildAttachmentPayloadEntries()
+    produceSeedZip(profileDevDir, zipPath, { payloadEntries: payloads })
+
+    // LOCK-E2: Data/Files is an unrelated root for the default contract.
+    await expect(preflightZipEntries(zipPath, SEED_ORIGIN_DIR)).rejects.toThrow(/outside the allowed roots/)
+  })
+
+  it('fails closed on a missing expected payload', async () => {
+    const root = tempDir()
+    const profileDevDir = syntheticProfileDevDir(root)
+    const zipPath = path.join(root, 'seed-att.zip')
+    const payloads = buildAttachmentPayloadEntries()
+    produceSeedZip(profileDevDir, zipPath, { payloadEntries: payloads })
+
+    // Ask for a payload that was never written (the missing file).
+    const wrongExpectation = [{ name: 'f-e2e-att-missing.png', bytes: ATTACHMENT_PAYLOADS.png }]
+    await expect(
+      preflightZipEntries(zipPath, SEED_ORIGIN_DIR, { allowDataFiles: true, expectedPayloads: wrongExpectation })
+    ).rejects.toThrow(/inventory mismatch/)
+  })
+
+  it('fails closed on an unexpected Data/Files entry', async () => {
+    const root = tempDir()
+    const profileDevDir = syntheticProfileDevDir(root)
+    const zipPath = path.join(root, 'seed-att.zip')
+    const payloads = buildAttachmentPayloadEntries()
+    produceSeedZip(profileDevDir, zipPath, { payloadEntries: payloads })
+
+    // Same entry count (3) but one expected name swapped for an entry that is
+    // NOT in the ZIP → the actual Data/Files entry with no expectation throws.
+    const swappedExpectation = [payloads[0], payloads[1], { name: 'f-e2e-unknown.txt', bytes: Buffer.from('x') }]
+    await expect(
+      preflightZipEntries(zipPath, SEED_ORIGIN_DIR, { allowDataFiles: true, expectedPayloads: swappedExpectation })
+    ).rejects.toThrow(/unexpected Data\/Files entry/)
+  })
+
+  it('default produceSeedZip writes no Data/Files entries (default fixture unchanged)', async () => {
+    const root = tempDir()
+    const profileDevDir = syntheticProfileDevDir(root)
+    const zipPath = path.join(root, 'seed-default.zip')
+    const result = produceSeedZip(profileDevDir, zipPath)
+    expect(result.dataFilesEntryCount).toBe(0)
+
+    const names = await zipEntryNames(zipPath)
+    expect(names.some((n) => n === 'Data' || n.startsWith('Data/'))).toBe(false)
   })
 })

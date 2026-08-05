@@ -23,6 +23,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // All mock variables must be hoisted to be accessible in vi.mock factories
 const {
   mockHandle,
+  mockRemoveHandler,
+  mockApp,
   mockWebContentsSend,
   mockStartImport,
   mockCancelImport,
@@ -32,10 +34,14 @@ const {
   mockCreateRecoveryExecutor,
   mockTakeTerminalPromotionOwnership,
   mockTakeTerminalPromotionOwnershipIfMatches,
+  mockReadPromotionJournal,
+  mockRunRecoveryV2,
   mockChatDbService
 } = vi.hoisted(() => {
   return {
     mockHandle: vi.fn(),
+    mockRemoveHandler: vi.fn(),
+    mockApp: { isPackaged: false, relaunch: vi.fn(), exit: vi.fn() },
     mockWebContentsSend: vi.fn(),
     mockStartImport: vi.fn(),
     mockCancelImport: vi.fn(),
@@ -45,6 +51,8 @@ const {
     mockCreateRecoveryExecutor: vi.fn(),
     mockTakeTerminalPromotionOwnership: vi.fn().mockReturnValue({ status: 'not-available' }),
     mockTakeTerminalPromotionOwnershipIfMatches: vi.fn().mockReturnValue({ status: 'not-available' }),
+    mockReadPromotionJournal: vi.fn(),
+    mockRunRecoveryV2: vi.fn(),
     mockChatDbService: {
       getSqlite: vi.fn(),
       isInitialised: vi.fn(() => true),
@@ -56,8 +64,10 @@ const {
 
 vi.mock('electron', () => ({
   ipcMain: {
-    handle: mockHandle
-  }
+    handle: mockHandle,
+    removeHandler: mockRemoveHandler
+  },
+  app: mockApp
 }))
 
 vi.mock('@logger', () => ({
@@ -93,17 +103,28 @@ vi.mock('../promotion/recoveryExecutor', () => ({
   createRecoveryExecutor: mockCreateRecoveryExecutor
 }))
 
+vi.mock('../promotion/journalStore', () => ({
+  readPromotionJournal: mockReadPromotionJournal
+}))
+
+vi.mock('../promotion/recoveryExecutorV2', () => ({
+  runRecoveryV2: mockRunRecoveryV2
+}))
+
 function createMockWebContents() {
   return {
     isDestroyed: vi.fn(() => false),
     send: mockWebContentsSend,
+    reload: vi.fn(),
     mainFrame: { id: 1, url: 'file:///index.html' }
   } as any
 }
 
 import { IpcChannel } from '@shared/IpcChannel'
 
+import { ChatImportAttachmentError } from '../errors'
 import { disposeCherryImportControl, registerCherryImportControlIpc } from '../importControlIpc'
+import { resetRelaunchGuardForTests } from '../promotion/relaunch'
 
 describe('importControlIpc', () => {
   let webContents: ReturnType<typeof createMockWebContents>
@@ -111,6 +132,24 @@ describe('importControlIpc', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockTakeTerminalPromotionOwnership.mockReturnValue({ status: 'not-available' })
+    mockTakeTerminalPromotionOwnershipIfMatches.mockReturnValue({ status: 'not-available' })
+    // LOCK-CTRL-5 dispatch: default to an ABSENT journal (the recovery path
+    // fails closed on absent — tests that run a recovery set the journal).
+    mockReadPromotionJournal.mockResolvedValue({ status: 'absent' })
+    // Default v2 recovery result: all-new, restart requested, in-process
+    // mode (the default `app.isPackaged` is false).
+    mockRunRecoveryV2.mockReset()
+    mockRunRecoveryV2.mockResolvedValue({
+      ok: true,
+      action: 'accept-verified-replacement',
+      journalCleaned: true,
+      restartRequested: true,
+      deferredToWindow: false
+    })
+    mockApp.isPackaged = false
+    mockApp.relaunch.mockReset()
+    mockApp.exit.mockReset()
+    resetRelaunchGuardForTests()
     webContents = createMockWebContents()
     registerCherryImportControlIpc(webContents)
   })
@@ -127,6 +166,131 @@ describe('importControlIpc', () => {
    *  identity (mirrors Electron's IpcMainInvokeEvent.sender/senderFrame). */
   function eventFromContents(contents: any) {
     return { sender: contents, senderFrame: contents.mainFrame, frameId: contents.mainFrame.id }
+  }
+
+  /** Valid v2 promotion journal (LOCK-CTRL-5 dispatch evidence). */
+  function v2Journal(phase: string = 'replacement-verified'): any {
+    return {
+      version: 2,
+      sessionId: 'import-s',
+      candidateId: 'candidate-s',
+      phase,
+      receipts: {
+        candidate: {
+          db: { sha256: 'a'.repeat(64), size: 100 },
+          files: { count: 1, totalBytes: 10, sha256: 'b'.repeat(64) },
+          catalog: { count: 1, sha256: 'c'.repeat(64) }
+        },
+        old: {
+          db: { sha256: 'd'.repeat(64), size: 90 },
+          files: { count: 0, totalBytes: 0, sha256: 'e'.repeat(64) },
+          catalog: { count: 0, sha256: 'f'.repeat(64) }
+        }
+      }
+    }
+  }
+
+  /** Valid v1 promotion journal (LOCK-CTRL-5 dispatch evidence). */
+  function v1Journal(): any {
+    return {
+      version: 1,
+      sessionId: 'import-s',
+      candidateId: 'candidate-s',
+      phase: 'replacement-verified',
+      receipts: {
+        candidate: { db: { sha256: 'a'.repeat(64), size: 100 } },
+        old: { db: { sha256: 'd'.repeat(64), size: 90 } }
+      }
+    }
+  }
+
+  /** The last v2 recovery options captured by the mocked runRecoveryV2. */
+  let lastRecoveryOptions: any
+  function captureRecoveryOptions(): void {
+    mockRunRecoveryV2.mockImplementation(async (options: any) => {
+      lastRecoveryOptions = options
+      return {
+        ok: true,
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: true,
+        deferredToWindow: false
+      }
+    })
+  }
+
+  /**
+   * Simulate the REAL v2 executor's restart behavior inside the mocked
+   * runner: it calls the restart surface and maps the outcome exactly like
+   * `requestRestart` (relaunch/reload throw → RELAUNCH_FAILED).
+   */
+  function runRecoveryV2ThroughRestart(options: any): any {
+    const restart = options.restart
+    try {
+      if (restart.mode === 'relaunch') {
+        const result = restart.relaunch()
+        return {
+          ok: true,
+          action: 'accept-verified-replacement',
+          journalCleaned: true,
+          restartRequested: result.relaunched === true,
+          deferredToWindow: false
+        }
+      }
+      const result = restart.reloadRenderer('recovery-v2')
+      return {
+        ok: true,
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: result.reloaded === true,
+        deferredToWindow: false
+      }
+    } catch {
+      return { ok: false, code: 'RELAUNCH_FAILED', safeCode: 'IO' }
+    }
+  }
+
+  /** Wire the default promoted-execution flow and fire verification pass. */
+  async function runPromotedFlow(
+    options: { sessionId?: string; handoffToken?: string; session?: any } = {}
+  ): Promise<() => void> {
+    const sessionId = options.sessionId ?? 'session-flow'
+    const handoffToken = options.handoffToken ?? 'token-flow'
+    let verificationCallback: ((result: any) => void) | undefined
+    mockStartImport.mockImplementation((_zipPath: string, opts: any) => {
+      verificationCallback = opts.onVerificationComplete
+      return Promise.resolve(
+        options.session ?? { id: sessionId, state: 'intake', dispose: vi.fn().mockResolvedValue(undefined) }
+      )
+    })
+    mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
+    mockStartPromotionExecution.mockResolvedValue({
+      status: 'promoted',
+      handoff: { sessionId, token: handoffToken, capability: { release: vi.fn(), isReleased: vi.fn(() => false) } }
+    })
+
+    const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+    await startHandler({}, '/tmp/test.zip')
+
+    return () => {
+      verificationCallback!({
+        sessionId,
+        candidateId: `candidate-${sessionId}`,
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+    }
+  }
+
+  /** All emitted CherryImport_StatusChanged event payloads, in order. */
+  function emittedStatusEvents(): any[] {
+    return mockWebContentsSend.mock.calls
+      .filter((call: any) => call[0] === IpcChannel.CherryImport_StatusChanged)
+      .map((call: any) => call[1])
+  }
+
+  function emittedStates(): string[] {
+    return emittedStatusEvents().map((e: any) => e.state)
   }
 
   /** One-shot projection state key stored in migration_state. */
@@ -183,8 +347,8 @@ describe('importControlIpc', () => {
     return Object.assign(sqlite, overrides)
   }
 
-  it('registers 6 IPC handlers', () => {
-    expect(mockHandle).toHaveBeenCalledTimes(6)
+  it('registers 8 IPC handlers (incl. the catalog boundary + ready handshake)', () => {
+    expect(mockHandle).toHaveBeenCalledTimes(8)
     const channels = mockHandle.mock.calls.map((c: any) => c[0])
     expect(channels).toContain(IpcChannel.CherryImport_GetPlatformSupport)
     expect(channels).toContain(IpcChannel.CherryImport_Start)
@@ -193,6 +357,10 @@ describe('importControlIpc', () => {
     // LOCK-PROD-6: the two one-shot projection channels are fixed handlers.
     expect(channels).toContain(IpcChannel.CherryImport_GetProjection)
     expect(channels).toContain(IpcChannel.CherryImport_AckProjection)
+    // LOCK-PROMO-5: the renderer catalog response handler.
+    expect(channels).toContain(IpcChannel.CherryImport_CatalogRespond)
+    // LOCK-BRIDGE-1: the renderer → main ready handshake channel.
+    expect(channels).toContain(IpcChannel.CherryImport_CatalogReady)
   })
 
   describe('get-platform-support', () => {
@@ -286,6 +454,17 @@ describe('importControlIpc', () => {
 
       expect(result.ok).toBe(false)
       expect(result.error).toContain('already in progress')
+    })
+
+    it('bounds an attachment fatal error to its code family (LOCK-FIX-3/8)', async () => {
+      mockStartImport.mockRejectedValue(new ChatImportAttachmentError('AMBIGUOUS_PAYLOAD', 'ambiguous payload'))
+
+      const handler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+      const result = await handler({}, '/tmp/test.zip')
+
+      expect(result.ok).toBe(false)
+      // Bounded code family only — never paths, names, or raw file IDs.
+      expect(result.error).toBe('Attachment import failed (AMBIGUOUS_PAYLOAD)')
     })
   })
 
@@ -706,25 +885,32 @@ describe('importControlIpc', () => {
   // ---------------------------------------------------------------------------
 
   describe('verification gating (audit blocker)', () => {
-    it('verification pass triggers promotion', async () => {
+    it('verification pass triggers promotion through the v2 terminal flow', async () => {
       let verificationCallback: ((result: any) => void) | undefined
 
       mockStartImport.mockImplementation((_zipPath: string, options: any) => {
         verificationCallback = options.onVerificationComplete
-        return Promise.resolve({ id: 'session-pass', state: 'intake' })
+        return Promise.resolve({
+          id: 'session-pass',
+          state: 'intake',
+          dispose: vi.fn().mockResolvedValue(undefined)
+        })
       })
 
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-pass', capability: {} }
+        handoff: { sessionId: 'session-pass', token: 'token-pass', capability: {} }
       })
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'accept-verified-replacement', cleaned: true },
-          decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' }
-        })
+
+      // LOCK-CTRL-5: a valid v2 journal dispatches to the v2 recovery.
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
@@ -741,17 +927,24 @@ describe('importControlIpc', () => {
       // Allow microtasks to flush
       await new Promise((r) => setTimeout(r, 50))
 
-      // Promotion preparation should have been called
-      expect(mockStartPromotionPreparation).toHaveBeenCalledWith(expect.objectContaining({ dbDir: '/mock/data' }))
+      // Promotion preparation should have been called with the production
+      // boundary and the controlled data root
+      expect(mockStartPromotionPreparation).toHaveBeenCalledWith(
+        expect.objectContaining({ dbDir: '/mock/data', catalogBoundary: expect.any(Object) })
+      )
       // Promotion execution should have been called
       expect(mockStartPromotionExecution).toHaveBeenCalled()
+
+      // The v2 recovery executor was dispatched with a v2 journal
+      expect(mockReadPromotionJournal).toHaveBeenCalledWith('/mock/data')
+      expect(mockRunRecoveryV2).toHaveBeenCalled()
 
       // promoting state should have been emitted
       expect(mockWebContentsSend).toHaveBeenCalledWith(
         IpcChannel.CherryImport_StatusChanged,
         expect.objectContaining({ state: 'promoting' })
       )
-      // promoted state should have been emitted
+      // promoted state should have been emitted (all-new convergence)
       expect(mockWebContentsSend).toHaveBeenCalledWith(
         IpcChannel.CherryImport_StatusChanged,
         expect.objectContaining({ state: 'promoted' })
@@ -922,14 +1115,16 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-term', capability: {} }
+        handoff: { sessionId: 'session-term', token: 'token-term', capability: {} }
       })
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'accept-verified-replacement', cleaned: true },
-          decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' }
-        })
+      // v2 terminal flow: valid v2 journal → v2 recovery converges all-new.
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
@@ -969,16 +1164,15 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-recovery-fail', capability: {} }
+        handoff: { sessionId: 'session-recovery-fail', token: 'token-rec-fail', capability: {} }
       })
 
-      // Recovery executor returns a structured failure (relaunch refused)
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: false,
-          failure: { subphase: 'relaunching', code: 'RELAUNCH_FAILED', safeCode: 'RELAUNCH_RETURNED' },
-          decision: null
-        })
+      // v2 recovery returns a structured failure (relaunch refused)
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: false,
+        code: 'RELAUNCH_FAILED',
+        safeCode: 'RELAUNCH_RETURNED'
       })
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
@@ -1352,16 +1546,17 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-repair', capability: {} }
+        handoff: { sessionId: 'session-repair', token: 'token-repair', capability: {} }
       })
 
-      // Recovery executor returns ok:true but action is repair-required
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'repair-required', marked: true },
-          decision: { action: 'repair-required', reason: 'REPLACEMENT_VERIFIED_LIVE_NOT_VERIFIED' }
-        })
+      // v2 recovery converges to repair-required (ok:true but failure action)
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'repair-required',
+        journalCleaned: false,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
@@ -1412,16 +1607,17 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-keep', capability: {} }
+        handoff: { sessionId: 'session-keep', token: 'token-keep', capability: {} }
       })
 
-      // Recovery returns ok:true with unexpected keep-old-live action
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'keep-old-live', cleaned: false },
-          decision: { action: 'keep-old-live', reason: 'NO_JOURNAL' }
-        })
+      // v2 recovery returns ok:true with the unexpected keep-old-live action
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'keep-old-live',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
@@ -1465,17 +1661,17 @@ describe('importControlIpc', () => {
         status: 'promoted',
         handoff: {
           sessionId: 'session-rel',
+          token: 'token-rel',
           capability: { release: vi.fn(), isReleased: vi.fn(() => false) }
         }
       })
 
-      // Recovery executor returns structured failure
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: false,
-          failure: { subphase: 'relaunching', code: 'RELAUNCH_FAILED', safeCode: 'RELAUNCH_RETURNED' },
-          decision: null
-        })
+      // v2 recovery returns a structured failure
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: false,
+        code: 'RELAUNCH_FAILED',
+        safeCode: 'RELAUNCH_RETURNED'
       })
 
       // Mock takeTerminalPromotionOwnership to return 'taken' on first call
@@ -1516,7 +1712,7 @@ describe('importControlIpc', () => {
       )
     })
 
-    it('recovery executor unavailable consumes terminal ownership', async () => {
+    it('recovery unavailable (journal I/O failure) consumes terminal ownership', async () => {
       let verificationCallback: ((result: any) => void) | undefined
 
       mockStartImport.mockImplementation((_zipPath: string, options: any) => {
@@ -1533,14 +1729,14 @@ describe('importControlIpc', () => {
         status: 'promoted',
         handoff: {
           sessionId: 'session-unavail',
+          token: 'token-unavail',
           capability: { release: vi.fn(), isReleased: vi.fn(() => false) }
         }
       })
 
-      // Recovery executor dynamic import fails
-      mockCreateRecoveryExecutor.mockImplementation(() => {
-        throw new Error('Module not found')
-      })
+      // The journal read itself fails (I/O) — runFinalRecovery fails closed
+      // with a bounded RECOVERY_UNAVAILABLE outcome.
+      mockReadPromotionJournal.mockRejectedValue(new Error('disk io failure'))
 
       const mockRelease = vi.fn()
       mockTakeTerminalPromotionOwnership
@@ -1568,14 +1764,17 @@ describe('importControlIpc', () => {
       // Terminal ownership was consumed and released
       expect(mockTakeTerminalPromotionOwnership).toHaveBeenCalled()
       expect(mockRelease).toHaveBeenCalled()
-      // promotion-failed emitted for recovery executor unavailable
+      // promotion-failed emitted for the bounded RECOVERY_UNAVAILABLE outcome
       expect(mockWebContentsSend).toHaveBeenCalledWith(
         IpcChannel.CherryImport_StatusChanged,
         expect.objectContaining({
           state: 'promotion-failed',
-          error: expect.stringContaining('Recovery executor unavailable')
+          error: expect.stringContaining('RECOVERY_UNAVAILABLE')
         })
       )
+      // The raw I/O error never crossed IPC.
+      const allStatus = JSON.stringify(emittedStatusEvents())
+      expect(allStatus).not.toContain('disk io failure')
     })
 
     it('repair-required path consumes terminal ownership', async () => {
@@ -1595,17 +1794,19 @@ describe('importControlIpc', () => {
         status: 'promoted',
         handoff: {
           sessionId: 'session-repair-own',
+          token: 'token-repair-own',
           capability: { release: vi.fn(), isReleased: vi.fn(() => false) }
         }
       })
 
-      // Recovery returns repair-required (ok:true but action is failure)
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'repair-required', marked: true },
-          decision: { action: 'repair-required', reason: 'REPLACEMENT_VERIFIED_LIVE_NOT_VERIFIED' }
-        })
+      // v2 recovery returns repair-required (ok:true but action is failure)
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'repair-required',
+        journalCleaned: false,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       const mockRelease = vi.fn()
@@ -1778,16 +1979,15 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-recovery', capability: {} }
+        handoff: { sessionId: 'session-recovery', token: 'token-recovery', capability: {} }
       })
 
-      // Recovery executor returns a structured failure (relaunch refused)
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: false,
-          failure: { subphase: 'relaunching', code: 'RELAUNCH_FAILED', safeCode: 'RELAUNCH_RETURNED' },
-          decision: null
-        })
+      // v2 recovery returns a structured failure (relaunch refused)
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: false,
+        code: 'RELAUNCH_FAILED',
+        safeCode: 'RELAUNCH_RETURNED'
       })
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
@@ -1946,8 +2146,8 @@ describe('importControlIpc', () => {
     })
   })
 
-  describe('L2 Gap 3: recoveryHandoff routes through recovery executor', () => {
-    it('post-install promotion-failed with recoveryHandoff routes to recovery executor', async () => {
+  describe('L2 Gap 3: recoveryHandoff routes through v2 recovery', () => {
+    it('post-install promotion-failed with recoveryHandoff routes to v2 recovery', async () => {
       let verificationCallback: ((result: any) => void) | undefined
 
       mockStartImport.mockImplementation((_zipPath: string, options: any) => {
@@ -1981,14 +2181,14 @@ describe('importControlIpc', () => {
         }
       })
 
-      // Recovery executor succeeds with accept-verified-replacement
-      const mockRecoveryRun = vi.fn().mockResolvedValue({
+      // v2 recovery succeeds with accept-verified-replacement (all-new)
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
         ok: true,
-        action: { action: 'accept-verified-replacement', cleaned: true },
-        decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' }
-      })
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: mockRecoveryRun
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
@@ -2003,11 +2203,12 @@ describe('importControlIpc', () => {
 
       await new Promise((r) => setTimeout(r, 100))
 
-      // LOCK-6018: Recovery executor should have been called (not cleanupSessionOwnership)
-      expect(mockCreateRecoveryExecutor).toHaveBeenCalled()
-      expect(mockRecoveryRun).toHaveBeenCalled()
+      // LOCK-CTRL-4: the v2 recovery was dispatched for the recovery-required
+      // handoff (NOT the v1 executor).
+      expect(mockRunRecoveryV2).toHaveBeenCalled()
+      expect(mockReadPromotionJournal).toHaveBeenCalledWith('/mock/data')
 
-      // promoted should have been emitted (recovery succeeded)
+      // promoted should have been emitted (recovery converged all-new)
       expect(mockWebContentsSend).toHaveBeenCalledWith(
         IpcChannel.CherryImport_StatusChanged,
         expect.objectContaining({
@@ -2050,14 +2251,12 @@ describe('importControlIpc', () => {
         }
       })
 
-      // Recovery executor fails
-      const mockRecoveryRun = vi.fn().mockResolvedValue({
+      // v2 recovery fails
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
         ok: false,
-        failure: { subphase: 'relaunching', code: 'RELAUNCH_FAILED', safeCode: 'RELAUNCH_RETURNED' },
-        decision: null
-      })
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: mockRecoveryRun
+        code: 'RELAUNCH_FAILED',
+        safeCode: 'RELAUNCH_RETURNED'
       })
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
@@ -2072,9 +2271,8 @@ describe('importControlIpc', () => {
 
       await new Promise((r) => setTimeout(r, 100))
 
-      // Recovery executor was called
-      expect(mockCreateRecoveryExecutor).toHaveBeenCalled()
-      expect(mockRecoveryRun).toHaveBeenCalled()
+      // v2 recovery was dispatched
+      expect(mockRunRecoveryV2).toHaveBeenCalled()
 
       // promotion-failed emitted with recovery failure message
       expect(mockWebContentsSend).toHaveBeenCalledWith(
@@ -2186,13 +2384,12 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-delayed-recovery', capability: {} }
+        handoff: { sessionId: 'session-delayed-recovery', token: 'token-delayed', capability: {} }
       })
 
-      // Recovery executor is gated — we control when it resolves
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn(() => recoveryGate)
-      })
+      // v2 recovery is gated — we control when it resolves
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockReturnValue(recoveryGate)
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
       await startHandler({}, '/tmp/test.zip')
@@ -2220,11 +2417,13 @@ describe('importControlIpc', () => {
       const statusDuringRecovery = statusHandler({}, 'session-delayed-recovery')
       expect(statusDuringRecovery.state).toBe('finalizing')
 
-      // Now resolve recovery with accept-verified-replacement
+      // Now resolve recovery with accept-verified-replacement (all-new)
       resolveRecovery({
         ok: true,
-        action: { action: 'accept-verified-replacement', cleaned: true },
-        decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' }
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       await new Promise((r) => setTimeout(r, 50))
@@ -2253,12 +2452,11 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-delayed-fail', capability: {} }
+        handoff: { sessionId: 'session-delayed-fail', token: 'token-delayed-fail', capability: {} }
       })
 
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn(() => recoveryGate)
-      })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockReturnValue(recoveryGate)
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
       await startHandler({}, '/tmp/test.zip')
@@ -2284,8 +2482,8 @@ describe('importControlIpc', () => {
       // Resolve recovery with failure
       resolveRecovery({
         ok: false,
-        failure: { subphase: 'relaunching', code: 'RELAUNCH_FAILED', safeCode: 'RELAUNCH_RETURNED' },
-        decision: null
+        code: 'RELAUNCH_FAILED',
+        safeCode: 'RELAUNCH_RETURNED'
       })
 
       await new Promise((r) => setTimeout(r, 50))
@@ -2325,14 +2523,14 @@ describe('importControlIpc', () => {
         status: 'promoted',
         handoff: {
           sessionId: 'session-stale-recovery-A',
+          token: 'token-stale-recovery-A',
           capability: mockCapabilityA
         }
       })
 
-      // Recovery executor is gated
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn(() => recoveryGateA)
-      })
+      // v2 recovery is gated
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockReturnValue(recoveryGateA)
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
       await startHandler({}, '/tmp/testA.zip')
@@ -2365,25 +2563,33 @@ describe('importControlIpc', () => {
       mockWebContentsSend.mockClear()
       await startHandler({}, '/tmp/testB.zip')
 
-      // Mock takeTerminalPromotionOwnership to return the originating handoff
-      // The module mock already returns 'not-available' by default — the
-      // stale settlement path is exercised when takeTerminalPromotionOwnership
-      // is called. We verify the path was taken by checking no events for A.
+      // The stale settlement consumes A's originating record by exact token.
+      mockTakeTerminalPromotionOwnershipIfMatches.mockReturnValueOnce({
+        status: 'taken',
+        ownership: {
+          kind: 'promoted',
+          handoff: { token: 'token-stale-recovery-A', capability: mockCapabilityA }
+        }
+      })
 
       // Now resolve A's recovery — its continuation is stale
       mockGetActiveImport.mockReturnValue({ id: 'session-stale-recovery-B', state: 'reading' })
       resolveRecoveryA({
         ok: true,
-        action: { action: 'repair-required', marked: true },
-        decision: { action: 'repair-required', reason: 'REPLACEMENT_VERIFIED_LIVE_NOT_VERIFIED' }
+        action: 'repair-required',
+        journalCleaned: false,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       await new Promise((r) => setTimeout(r, 100))
 
-      // The mockTakeTerminalPromotionOwnership in the module should have been
-      // called during stale settlement. Since the module mock returns
-      // 'not-available' by default, we verify the path was taken.
-      // The key assertion: stale A's continuation did NOT emit events for A
+      // LOCK-6018: identity-checked take consumed A's origin token exactly once
+      // and released the originating handoff capability.
+      expect(mockTakeTerminalPromotionOwnershipIfMatches).toHaveBeenCalledWith('token-stale-recovery-A')
+      expect(mockReleaseA).toHaveBeenCalledTimes(1)
+
+      // Stale A's continuation did NOT emit events for A after the clear
       const eventsA = mockWebContentsSend.mock.calls.filter(
         (call: any) =>
           call[0] === IpcChannel.CherryImport_StatusChanged && call[1].sessionId === 'session-stale-recovery-A'
@@ -2443,6 +2649,15 @@ describe('importControlIpc', () => {
       mockWebContentsSend.mockClear()
       await startHandler({}, '/tmp/testB.zip')
 
+      // The stale promoted-execution settlement consumes A's record by token.
+      mockTakeTerminalPromotionOwnershipIfMatches.mockReturnValueOnce({
+        status: 'taken',
+        ownership: {
+          kind: 'promoted',
+          handoff: { token: 'token-stale-exec-A', capability: mockCapabilityA }
+        }
+      })
+
       // Resolve A's execution with promoted — its continuation is stale
       // because B has incremented the generation
       mockGetActiveImport.mockReturnValue({ id: 'session-stale-exec-B', state: 'reading' })
@@ -2450,11 +2665,16 @@ describe('importControlIpc', () => {
         status: 'promoted',
         handoff: {
           sessionId: 'session-stale-exec-A',
+          token: 'token-stale-exec-A',
           capability: mockCapabilityA
         }
       })
 
       await new Promise((r) => setTimeout(r, 100))
+
+      // LOCK-6018: the stale execution settlement released A's origin exactly once.
+      expect(mockTakeTerminalPromotionOwnershipIfMatches).toHaveBeenCalledWith('token-stale-exec-A')
+      expect(mockReleaseA).toHaveBeenCalledTimes(1)
 
       // Stale A's continuation should NOT have emitted events for A
       const eventsA = mockWebContentsSend.mock.calls.filter(
@@ -2497,11 +2717,10 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok-A' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-no-effect-A', capability: {} }
+        handoff: { sessionId: 'session-no-effect-A', token: 'token-no-effect-A', capability: {} }
       })
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn(() => recoveryGateA)
-      })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockReturnValue(recoveryGateA)
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
       await startHandler({}, '/tmp/testA.zip')
@@ -2546,8 +2765,8 @@ describe('importControlIpc', () => {
       mockGetActiveImport.mockReturnValue(sessionBObj)
       resolveRecoveryA({
         ok: false,
-        failure: { subphase: 'relaunching', code: 'RELAUNCH_FAILED', safeCode: 'RELAUNCH_RETURNED' },
-        decision: null
+        code: 'RELAUNCH_FAILED',
+        safeCode: 'RELAUNCH_RETURNED'
       })
 
       await new Promise((r) => setTimeout(r, 100))
@@ -2674,9 +2893,9 @@ describe('importControlIpc', () => {
         }
       })
 
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn(() => recoveryGateA)
-      })
+      // A's v2 recovery is gated.
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockReturnValue(recoveryGateA)
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
       await startHandler({}, '/tmp/testA.zip')
@@ -2717,12 +2936,12 @@ describe('importControlIpc', () => {
           capability: mockCapabilityB
         }
       })
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'accept-verified-replacement' },
-          decision: null
-        })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       mockWebContentsSend.mockClear()
@@ -2731,8 +2950,10 @@ describe('importControlIpc', () => {
       // Now resolve A's recovery — its continuation is stale.
       resolveRecoveryA({
         ok: true,
-        action: { action: 'repair-required', marked: true },
-        decision: { action: 'repair-required', reason: 'REPLACEMENT_VERIFIED_LIVE_NOT_VERIFIED' }
+        action: 'repair-required',
+        journalCleaned: false,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       await new Promise((r) => setTimeout(r, 100))
@@ -2782,9 +3003,9 @@ describe('importControlIpc', () => {
         }
       })
 
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn(() => recoveryGateA)
-      })
+      // A's v2 recovery is gated.
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockReturnValue(recoveryGateA)
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
       await startHandler({}, '/tmp/testFail.zip')
@@ -2816,12 +3037,12 @@ describe('importControlIpc', () => {
         status: 'promoted',
         handoff: { sessionId: 'session-id-B2', token: 'token-B2', capability: {} }
       })
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'accept-verified-replacement' },
-          decision: null
-        })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       mockWebContentsSend.mockClear()
@@ -2838,8 +3059,8 @@ describe('importControlIpc', () => {
 
       resolveRecoveryA({
         ok: false,
-        failure: { subphase: 'relaunching', code: 'RELAUNCH_FAILED', safeCode: 'RELAUNCH_RETURNED' },
-        decision: null
+        code: 'RELAUNCH_FAILED',
+        safeCode: 'RELAUNCH_RETURNED'
       })
 
       await new Promise((r) => setTimeout(r, 100))
@@ -2917,12 +3138,12 @@ describe('importControlIpc', () => {
         status: 'promoted',
         handoff: { sessionId: 'session-id-B-fail', token: 'token-B-fail', capability: {} }
       })
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'accept-verified-replacement' },
-          decision: null
-        })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
       })
 
       await startHandler({}, '/tmp/testBFail.zip')
@@ -3002,9 +3223,8 @@ describe('importControlIpc', () => {
         }
       })
 
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn(() => recoveryGateA)
-      })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockReturnValue(recoveryGateA)
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
       await startHandler({}, '/tmp/testConsumed.zip')
@@ -3022,14 +3242,14 @@ describe('importControlIpc', () => {
       mockGetActiveImport.mockReturnValue(null)
       await new Promise((r) => setTimeout(r, 700))
 
-      // Recovery was already consumed (simulates recovery executor took it).
+      // Recovery was already consumed (simulates the recovery executor took it).
       mockTakeTerminalPromotionOwnershipIfMatches.mockReturnValueOnce({ status: 'not-available' })
 
       // Resolve A's recovery — stale.
       resolveRecoveryA({
         ok: false,
-        failure: { subphase: 'relaunching', code: 'RELAUNCH_FAILED', safeCode: 'RELAUNCH_RETURNED' },
-        decision: null
+        code: 'RELAUNCH_FAILED',
+        safeCode: 'RELAUNCH_RETURNED'
       })
 
       await new Promise((r) => setTimeout(r, 100))
@@ -3060,19 +3280,14 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-fr2', capability: {} }
+        handoff: { sessionId: 'session-fr2', token: 'token-fr2', capability: {} }
       })
 
-      // Non-packaged recovery: the in-process renderer reload was requested
-      // (LOCK-PROD-7) — the process stays alive.
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'accept-verified-replacement', cleaned: true },
-          decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
-          inProcessReload: true
-        })
-      })
+      // Non-packaged recovery: default `app.isPackaged` is false, so the
+      // restart surface is in-process-reload — the v2 runner requests the
+      // in-process renderer reload and the process stays alive (LOCK-PROD-7).
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockImplementation(runRecoveryV2ThroughRestart)
 
       const mockRelease = vi.fn()
       mockTakeTerminalPromotionOwnership
@@ -3105,6 +3320,8 @@ describe('importControlIpc', () => {
       // LOCK-FR2: terminal ownership consumed + released exactly once.
       expect(mockTakeTerminalPromotionOwnership).toHaveBeenCalled()
       expect(mockRelease).toHaveBeenCalledTimes(1)
+      // The in-process renderer reload was requested (non-packaged path).
+      expect(webContents.reload).toHaveBeenCalledTimes(1)
       // Session resources disposed — control ownership cleared immediately
       // (no reliance on the poller's next tick).
       expect(disposeSession).toHaveBeenCalled()
@@ -3127,15 +3344,10 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok-A' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-seq-A', capability: {} }
+        handoff: { sessionId: 'session-seq-A', token: 'token-seq-A', capability: {} }
       })
-      const reloadRunA = vi.fn().mockResolvedValue({
-        ok: true,
-        action: { action: 'accept-verified-replacement', cleaned: true },
-        decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
-        inProcessReload: true
-      })
-      mockCreateRecoveryExecutor.mockReturnValue({ run: reloadRunA })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockImplementation(runRecoveryV2ThroughRestart)
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
       await startHandler({}, '/tmp/testA.zip')
@@ -3162,7 +3374,9 @@ describe('importControlIpc', () => {
       })
       await new Promise((r) => setTimeout(r, 50))
 
-      expect(reloadRunA).toHaveBeenCalledTimes(1)
+      // LOCK-FR3: A's recovery requested its in-process reload exactly once
+      // (per-recovery guard) and released the terminal lease.
+      expect(webContents.reload).toHaveBeenCalledTimes(1)
       expect(mockReleaseA).toHaveBeenCalledTimes(1)
       expect(disposeA).toHaveBeenCalled()
 
@@ -3181,13 +3395,6 @@ describe('importControlIpc', () => {
       expect(resultB.ok).toBe(true)
       expect(resultB.sessionId).toBe('session-seq-B')
 
-      const reloadRunB = vi.fn().mockResolvedValue({
-        ok: true,
-        action: { action: 'accept-verified-replacement', cleaned: true },
-        decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
-        inProcessReload: true
-      })
-      mockCreateRecoveryExecutor.mockReturnValue({ run: reloadRunB })
       mockGetActiveImport.mockReturnValue({ id: 'session-seq-B', state: 'promoted', dispose: disposeB })
 
       verificationCallbackB!({
@@ -3198,8 +3405,9 @@ describe('importControlIpc', () => {
       })
       await new Promise((r) => setTimeout(r, 50))
 
-      // B's own recovery requested its own reload exactly once.
-      expect(reloadRunB).toHaveBeenCalledTimes(1)
+      // LOCK-FR3: B's own recovery requested its OWN reload exactly once —
+      // the second flow is NOT blocked by A's consumed per-recovery guard.
+      expect(webContents.reload).toHaveBeenCalledTimes(2)
       // B's terminal state was emitted.
       expect(mockWebContentsSend).toHaveBeenCalledWith(
         IpcChannel.CherryImport_StatusChanged,
@@ -3234,15 +3442,9 @@ describe('importControlIpc', () => {
         }
       })
 
-      // Recovery executor succeeds via in-process reload (non-packaged).
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'accept-verified-replacement', cleaned: true },
-          decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
-          inProcessReload: true
-        })
-      })
+      // v2 recovery succeeds via the in-process reload surface (non-packaged).
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockImplementation(runRecoveryV2ThroughRestart)
 
       const mockRelease = vi.fn()
       mockTakeTerminalPromotionOwnership
@@ -3299,18 +3501,17 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-packaged', capability: {} }
+        handoff: { sessionId: 'session-packaged', token: 'token-packaged', capability: {} }
       })
 
-      // Packaged recovery: no inProcessReload field — the process exits
-      // after app.relaunch() (LOCK-FR1 exact-once).
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'accept-verified-replacement', cleaned: true },
-          decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' }
-        })
-      })
+      // Packaged recovery: app.isPackaged is true → the restart surface is
+      // relaunch mode; the v2 runner requests app.relaunch() (LOCK-FR1
+      // exact-once) and the process would exit.
+      mockApp.isPackaged = true
+      mockApp.relaunch.mockReturnValue(undefined)
+      mockApp.exit.mockReturnValue(undefined)
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockImplementation(runRecoveryV2ThroughRestart)
 
       const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
       await startHandler({}, '/tmp/test.zip')
@@ -3324,12 +3525,13 @@ describe('importControlIpc', () => {
       await new Promise((r) => setTimeout(r, 50))
 
       // LOCK-FR1: packaged success lifecycle is unchanged — promoted is
-      // emitted and ownership is NOT consumed (the process exits; the
-      // control layer does not clean up).
+      // emitted, the packaged relaunch was requested, and ownership is NOT
+      // consumed (the process exits; the control layer does not clean up).
       expect(mockWebContentsSend).toHaveBeenCalledWith(
         IpcChannel.CherryImport_StatusChanged,
         expect.objectContaining({ state: 'promoted' })
       )
+      expect(mockApp.relaunch).toHaveBeenCalledTimes(1)
       expect(mockTakeTerminalPromotionOwnership).not.toHaveBeenCalled()
     })
   })
@@ -3345,21 +3547,20 @@ describe('importControlIpc', () => {
       mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
       mockStartPromotionExecution.mockResolvedValue({
         status: 'promoted',
-        handoff: { sessionId: 'session-fr4', capability: {} }
+        handoff: { sessionId: 'session-fr4', token: 'token-fr4', capability: {} }
       })
 
-      // The reload target was absent/destroyed or reload() threw — the
-      // executor reports the recovery as a successful bounded no-op
-      // (inProcessReload: true; the pending projection row retries on the
-      // next startup). LOCK-FR4: this must NOT leave a lease leak.
-      mockCreateRecoveryExecutor.mockReturnValue({
-        run: vi.fn().mockResolvedValue({
-          ok: true,
-          action: { action: 'accept-verified-replacement', cleaned: true },
-          decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' },
-          inProcessReload: true
-        })
+      // The reload target's reload() THROWS — the real reloadMainRenderer
+      // catches it and reports a bounded no-op (reloaded: false). The v2
+      // runner maps that to ok:true with restartRequested:false. LOCK-FR4:
+      // the control layer still settles to idle (mode-based in-process
+      // reload) and releases the lease — the pending projection row retries
+      // on the next startup.
+      webContents.reload.mockImplementation(() => {
+        throw new Error('reload exploded')
       })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockImplementation(runRecoveryV2ThroughRestart)
 
       const mockRelease = vi.fn()
       mockTakeTerminalPromotionOwnership
@@ -3397,6 +3598,674 @@ describe('importControlIpc', () => {
       const second = await startHandler({}, '/tmp/test2.zip')
       expect(second.ok).toBe(true)
       expect(second.sessionId).toBe('session-fr4-second')
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LOCK-CTRL-1: idempotent registration
+  // ---------------------------------------------------------------------------
+
+  describe('LOCK-CTRL-1: idempotent IPC registration', () => {
+    it('re-registration swaps the target and never double-registers handlers', () => {
+      // First registration (beforeEach): 6 control + 2 catalog = 8 handles.
+      const afterFirst = mockHandle.mock.calls.length
+      expect(afterFirst).toBe(8)
+
+      const newTarget = createMockWebContents()
+      registerCherryImportControlIpc(newTarget)
+
+      // Exactly one more set of 8 handles for the new target.
+      expect(mockHandle.mock.calls.length).toBe(afterFirst + 8)
+      // Each control channel is registered exactly once per registration.
+      const startCalls = mockHandle.mock.calls.filter((c: any) => c[0] === IpcChannel.CherryImport_Start)
+      const respondCalls = mockHandle.mock.calls.filter((c: any) => c[0] === IpcChannel.CherryImport_CatalogRespond)
+      expect(startCalls).toHaveLength(2)
+      expect(respondCalls).toHaveLength(2)
+
+      // The new target's main frame is now authorized for the projection read.
+      const sqlite = makeSqliteDouble()
+      mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      const getHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_GetProjection)![1]
+      const result = getHandler(eventFromContents(newTarget))
+      expect(result).toEqual({ ok: true, projection: JSON.parse(PENDING_ROW) })
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LOCK-CTRL-2: one authorized boundary shared by preparation and execution
+  // ---------------------------------------------------------------------------
+
+  describe('LOCK-CTRL-2: same authorized boundary for preparation and execution', () => {
+    it('passes the SAME boundary instance to preparation and execution', async () => {
+      const fire = await runPromotedFlow({ sessionId: 'session-boundary', handoffToken: 'token-boundary' })
+
+      // Capture the boundary handed to each stage (after the shared flow
+      // wiring, before firing the verification callback).
+      let prepBoundary: any
+      let execBoundary: any
+      mockStartPromotionPreparation.mockImplementation(async (opts: any) => {
+        prepBoundary = opts.catalogBoundary
+        return { status: 'prepared', handle: { token: 'tok' } }
+      })
+      mockStartPromotionExecution.mockImplementation(async (opts: any) => {
+        execBoundary = opts.catalogBoundary
+        return { status: 'promoted', handoff: { sessionId: 's', token: 't', capability: {} } }
+      })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
+      })
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(prepBoundary).toBeDefined()
+      expect(prepBoundary).toBe(execBoundary)
+      expect(typeof prepBoundary.captureSnapshot).toBe('function')
+      expect(typeof prepBoundary.applyCandidate).toBe('function')
+      expect(typeof prepBoundary.restoreSnapshot).toBe('function')
+      expect(typeof prepBoundary.queryFacts).toBe('function')
+    })
+
+    it('an unavailable boundary fails during preparation BEFORE destructive execution', async () => {
+      let verificationCallback: ((r: any) => void) | undefined
+      mockStartImport.mockImplementation((_p: string, o: any) => {
+        verificationCallback = o.onVerificationComplete
+        return Promise.resolve({ id: 'session-prep-unavail', state: 'intake' })
+      })
+      // Preparation fails because the renderer boundary is unavailable.
+      mockStartPromotionPreparation.mockResolvedValue({
+        status: 'preparation-failed',
+        failure: { phase: 'create-snapshot', code: 'NO_TARGET', safeCode: null }
+      })
+
+      const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+      await startHandler({}, '/tmp/test.zip')
+      verificationCallback!({
+        sessionId: 'session-prep-unavail',
+        candidateId: 'candidate-session-prep-unavail',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(mockStartPromotionExecution).not.toHaveBeenCalled()
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({ state: 'promotion-failed', error: expect.stringContaining('NO_TARGET') })
+      )
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LOCK-CTRL-5: journal version dispatch — v1/v2/invalid/absent
+  // ---------------------------------------------------------------------------
+
+  describe('LOCK-CTRL-5: journal version dispatch', () => {
+    it('a valid v2 journal dispatches to the v2 recovery executor', async () => {
+      const fire = await runPromotedFlow({ sessionId: 'session-dispatch-v2', handoffToken: 'token-dispatch-v2' })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
+      })
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(mockRunRecoveryV2).toHaveBeenCalled()
+      expect(mockCreateRecoveryExecutor).not.toHaveBeenCalled()
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({ state: 'promoted' })
+      )
+    })
+
+    it('a valid v1 journal dispatches to the original v1 recovery executor', async () => {
+      const fire = await runPromotedFlow({ sessionId: 'session-dispatch-v1', handoffToken: 'token-dispatch-v1' })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v1Journal() })
+      mockCreateRecoveryExecutor.mockReturnValue({
+        run: vi.fn().mockResolvedValue({
+          ok: true,
+          action: { action: 'accept-verified-replacement', cleaned: true },
+          decision: { action: 'accept-verified-replacement', reason: 'REPLACEMENT_VERIFIED_LIVE_VERIFIED' }
+        })
+      })
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      // LOCK-CTRL-5: the v1 executor remains the original chat.db-only path.
+      expect(mockCreateRecoveryExecutor).toHaveBeenCalled()
+      expect(mockRunRecoveryV2).not.toHaveBeenCalled()
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({ state: 'promoted' })
+      )
+    })
+
+    it('an invalid journal after terminal handoff fails closed', async () => {
+      const fire = await runPromotedFlow({
+        sessionId: 'session-dispatch-invalid',
+        handoffToken: 'token-dispatch-invalid'
+      })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'invalid', code: 'BAD_VERSION' })
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      // LOCK-CTRL-5: invalid journal fails closed — no executor is dispatched.
+      expect(mockRunRecoveryV2).not.toHaveBeenCalled()
+      expect(mockCreateRecoveryExecutor).not.toHaveBeenCalled()
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({
+          state: 'promotion-failed',
+          error: expect.stringContaining('JOURNAL_UNAVAILABLE')
+        })
+      )
+    })
+
+    it('an absent journal after terminal handoff fails closed', async () => {
+      // beforeEach default: readPromotionJournal → { status: 'absent' }.
+      const fire = await runPromotedFlow({
+        sessionId: 'session-dispatch-absent',
+        handoffToken: 'token-dispatch-absent'
+      })
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(mockRunRecoveryV2).not.toHaveBeenCalled()
+      expect(mockCreateRecoveryExecutor).not.toHaveBeenCalled()
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({
+          state: 'promotion-failed',
+          error: expect.stringContaining('JOURNAL_UNAVAILABLE')
+        })
+      )
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LOCK-CTRL-3/4: recovery all-new / all-old / repair convergence semantics
+  // ---------------------------------------------------------------------------
+
+  describe('LOCK-CTRL-3/4: recovery convergence status semantics', () => {
+    it('all-new convergence emits promoted exactly once and settles to idle (non-packaged)', async () => {
+      const fire = await runPromotedFlow({ sessionId: 'session-all-new', handoffToken: 'token-all-new' })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
+      })
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      const states = emittedStates()
+      expect(states.filter((s) => s === 'promoted')).toHaveLength(1)
+      // finalizing precedes promoted (established order, LOCK-CTRL-3).
+      expect(states.indexOf('finalizing')).toBeGreaterThanOrEqual(0)
+      expect(states.indexOf('promoted')).toBeGreaterThan(states.indexOf('finalizing'))
+    })
+
+    it('all-old convergence (restore-rollback-snapshot) is a bounded failure, never promoted', async () => {
+      const fire = await runPromotedFlow({ sessionId: 'session-all-old', handoffToken: 'token-all-old' })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'restore-rollback-snapshot',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
+      })
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      // LOCK-CTRL-4: the new data is NOT live — claiming promoted would lie.
+      expect(emittedStates().filter((s) => s === 'promoted')).toHaveLength(0)
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({
+          state: 'promotion-failed',
+          error: expect.stringContaining('restored the previous data')
+        })
+      )
+      // Non-exiting outcome — terminal ownership released exactly once.
+      expect(mockTakeTerminalPromotionOwnership).toHaveBeenCalled()
+    })
+
+    it('all-old convergence via a post-install recoveryHandoff is also a bounded failure', async () => {
+      let verificationCallback: ((r: any) => void) | undefined
+      mockStartImport.mockImplementation((_p: string, o: any) => {
+        verificationCallback = o.onVerificationComplete
+        return Promise.resolve({
+          id: 'session-handoff-old',
+          state: 'intake',
+          dispose: vi.fn().mockResolvedValue(undefined)
+        })
+      })
+      mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
+      mockStartPromotionExecution.mockResolvedValue({
+        status: 'promotion-failed',
+        failure: {
+          subphase: 'verifying-replacement',
+          classification: 'post-install',
+          recoveryRequired: true,
+          code: 'REPLACEMENT_VERIFICATION_FAILED',
+          safeCode: null,
+          liveDisposition: 'closed'
+        },
+        recoveryHandoff: {
+          sessionId: 'session-handoff-old',
+          candidateId: 'candidate-handoff-old',
+          token: 'token-handoff-old',
+          failure: {},
+          capability: { release: vi.fn(), isReleased: vi.fn(() => false) }
+        }
+      })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'restore-rollback-snapshot',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
+      })
+
+      const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+      await startHandler({}, '/tmp/test.zip')
+      verificationCallback!({
+        sessionId: 'session-handoff-old',
+        candidateId: 'candidate-handoff-old',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(emittedStates().filter((s) => s === 'promoted')).toHaveLength(0)
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({ state: 'promotion-failed' })
+      )
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // F1 (protocol-audit correction): lease-busy restore deferred to startup
+  // ---------------------------------------------------------------------------
+
+  describe('F1: deferred-to-startup finalization semantics', () => {
+    it('promoted flow: lease-busy restore is never promoted/restored-old/failed, no restart, ownership released once', async () => {
+      const fire = await runPromotedFlow({ sessionId: 'session-f1-defer', handoffToken: 'token-f1-defer' })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      // The executor deferred: journal retained, no rollback, no restart.
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'restore-rollback-snapshot',
+        journalCleaned: false,
+        restartRequested: false,
+        deferredToWindow: false,
+        deferredToStartup: true,
+        deferReason: 'LEASE_BUSY'
+      })
+      const mockRelease = vi.fn()
+      mockTakeTerminalPromotionOwnership
+        .mockReturnValueOnce({
+          status: 'taken',
+          ownership: {
+            kind: 'promoted',
+            handoff: { capability: { release: mockRelease, isReleased: vi.fn(() => false) } }
+          }
+        })
+        .mockReturnValue({ status: 'not-available' })
+      mockGetActiveImport.mockReturnValue({
+        id: 'session-f1-defer',
+        state: 'promoted',
+        dispose: vi.fn().mockResolvedValue(undefined)
+      })
+
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      // Never promoted — the all-new generation was NOT accepted+cleaned.
+      expect(emittedStates().filter((s) => s === 'promoted')).toHaveLength(0)
+      const events = emittedStatusEvents()
+      // A truthful defer terminal — NOT the restored-old message, NOT a
+      // generic recovery failure.
+      expect(events.some((e) => e.state === 'promotion-failed' && /deferred/i.test(e.error ?? ''))).toBe(true)
+      expect(events.some((e) => /restored the previous data/i.test(e.error ?? ''))).toBe(false)
+      expect(events.some((e) => /Recovery failed/i.test(e.error ?? ''))).toBe(false)
+      // No duplicate restart: no relaunch and no in-process reload.
+      expect(mockApp.relaunch).not.toHaveBeenCalled()
+      expect(mockApp.exit).not.toHaveBeenCalled()
+      expect(webContents.reload).not.toHaveBeenCalled()
+      // Non-exiting outcome — terminal ownership consumed + released exactly
+      // once (LOCK-6018), so a later promotion can acquire a fresh lease.
+      expect(mockTakeTerminalPromotionOwnership).toHaveBeenCalled()
+      expect(mockRelease).toHaveBeenCalledTimes(1)
+    })
+
+    it('post-install recoveryHandoff flow: deferred-to-startup is truthful and settles ownership once', async () => {
+      let verificationCallback: ((r: any) => void) | undefined
+      mockStartImport.mockImplementation((_p: string, o: any) => {
+        verificationCallback = o.onVerificationComplete
+        return Promise.resolve({
+          id: 'session-f1-handoff',
+          state: 'intake',
+          dispose: vi.fn().mockResolvedValue(undefined)
+        })
+      })
+      mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
+      mockStartPromotionExecution.mockResolvedValue({
+        status: 'promotion-failed',
+        failure: {
+          subphase: 'verifying-replacement',
+          classification: 'post-install',
+          recoveryRequired: true,
+          code: 'REPLACEMENT_VERIFICATION_FAILED',
+          safeCode: null,
+          liveDisposition: 'closed'
+        },
+        recoveryHandoff: {
+          sessionId: 'session-f1-handoff',
+          candidateId: 'candidate-f1-handoff',
+          token: 'token-f1-handoff',
+          failure: {},
+          capability: { release: vi.fn(), isReleased: vi.fn(() => false) }
+        }
+      })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({
+        ok: true,
+        action: 'restore-rollback-snapshot',
+        journalCleaned: false,
+        restartRequested: false,
+        deferredToWindow: false,
+        deferredToStartup: true,
+        deferReason: 'LEASE_BUSY'
+      })
+      const mockRelease = vi.fn()
+      mockTakeTerminalPromotionOwnership
+        .mockReturnValueOnce({
+          status: 'taken',
+          ownership: {
+            kind: 'recovery-required',
+            handoff: { capability: { release: mockRelease, isReleased: vi.fn(() => false) } }
+          }
+        })
+        .mockReturnValue({ status: 'not-available' })
+      mockGetActiveImport.mockReturnValue({
+        id: 'session-f1-handoff',
+        state: 'promotion-failed',
+        dispose: vi.fn().mockResolvedValue(undefined)
+      })
+
+      const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+      await startHandler({}, '/tmp/test.zip')
+      verificationCallback!({
+        sessionId: 'session-f1-handoff',
+        candidateId: 'candidate-f1-handoff',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(emittedStates().filter((s) => s === 'promoted')).toHaveLength(0)
+      const events = emittedStatusEvents()
+      expect(events.some((e) => e.state === 'promotion-failed' && /deferred/i.test(e.error ?? ''))).toBe(true)
+      expect(events.some((e) => /restored the previous data/i.test(e.error ?? ''))).toBe(false)
+      expect(events.some((e) => /Recovery failed/i.test(e.error ?? ''))).toBe(false)
+      expect(mockApp.relaunch).not.toHaveBeenCalled()
+      expect(webContents.reload).not.toHaveBeenCalled()
+      expect(mockTakeTerminalPromotionOwnership).toHaveBeenCalled()
+      expect(mockRelease).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LOCK-CTRL-8: bounded recovery failure statuses — boundary/cleanup/restart
+  // ---------------------------------------------------------------------------
+
+  describe('LOCK-CTRL-8: bounded recovery failure statuses', () => {
+    it('boundary-unavailable recovery fails closed with a bounded status', async () => {
+      const fire = await runPromotedFlow({
+        sessionId: 'session-boundary-unavail',
+        handoffToken: 'token-boundary-unavail'
+      })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({ ok: false, code: 'BOUNDARY_UNAVAILABLE', safeCode: 'NO_TARGET' })
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(emittedStates().filter((s) => s === 'promoted')).toHaveLength(0)
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({
+          state: 'promotion-failed',
+          error: expect.stringContaining('BOUNDARY_UNAVAILABLE')
+        })
+      )
+    })
+
+    it('cleanup failure emits a bounded promotion-failed and never promoted', async () => {
+      const fire = await runPromotedFlow({ sessionId: 'session-cleanup', handoffToken: 'token-cleanup' })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({ ok: false, code: 'CLEANUP_FAILED', safeCode: 'IO' })
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(emittedStates().filter((s) => s === 'promoted')).toHaveLength(0)
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({
+          state: 'promotion-failed',
+          error: expect.stringContaining('CLEANUP_FAILED')
+        })
+      )
+    })
+
+    it('non-packaged mode builds the in-process-reload restart surface', async () => {
+      const fire = await runPromotedFlow({ sessionId: 'session-mode-np', handoffToken: 'token-mode-np' })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      captureRecoveryOptions()
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(lastRecoveryOptions.restart.mode).toBe('in-process-reload')
+      expect(typeof lastRecoveryOptions.restart.reloadRenderer).toBe('function')
+    })
+
+    it('packaged mode builds the relaunch restart surface', async () => {
+      mockApp.isPackaged = true
+      const fire = await runPromotedFlow({ sessionId: 'session-mode-p', handoffToken: 'token-mode-p' })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      captureRecoveryOptions()
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(lastRecoveryOptions.restart.mode).toBe('relaunch')
+    })
+
+    it('a refused/throwing relaunch reports a bounded failure and never promoted (LOCK-CTRL-8)', async () => {
+      // Packaged mode with app.relaunch() throwing — the relaunch module maps
+      // the throw to a refused restart ({ relaunched: false }), the executor
+      // reports restartRequested:false, and the control layer fails closed.
+      mockApp.isPackaged = true
+      mockApp.relaunch.mockImplementation(() => {
+        throw new Error('relaunch denied')
+      })
+      const fire = await runPromotedFlow({
+        sessionId: 'session-relaunch-refusal',
+        handoffToken: 'token-relaunch-refusal'
+      })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockImplementation(runRecoveryV2ThroughRestart)
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      // LOCK-CTRL-8: verified durable state remains but the control layer
+      // reports a bounded failure — never promoted — and releases ownership.
+      expect(emittedStates().filter((s) => s === 'promoted')).toHaveLength(0)
+      expect(mockWebContentsSend).toHaveBeenCalledWith(
+        IpcChannel.CherryImport_StatusChanged,
+        expect.objectContaining({
+          state: 'promotion-failed',
+          error: expect.stringContaining('RELAUNCH_FAILED')
+        })
+      )
+      expect(mockTakeTerminalPromotionOwnership).toHaveBeenCalled()
+      // No duplicate restart emission: app.relaunch was attempted exactly once.
+      expect(mockApp.relaunch).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LOCK-CTRL-6/6015: exact-once ownership and identity-mismatch safety
+  // ---------------------------------------------------------------------------
+
+  describe('LOCK-CTRL-6: exact ownership match (identity mismatch safety)', () => {
+    it('identity mismatch settlement never releases another session ownership', async () => {
+      // Session A: promoted with token-A; recovery gated.
+      let verificationCallbackA: ((r: any) => void) | undefined
+      let resolveRecoveryA!: (v: any) => void
+      const gate = new Promise((r) => {
+        resolveRecoveryA = r
+      })
+      const mockReleaseA = vi.fn()
+      mockStartImport.mockImplementation((_p: string, o: any) => {
+        verificationCallbackA = o.onVerificationComplete
+        return Promise.resolve({
+          id: 'session-mismatch-A',
+          state: 'intake',
+          dispose: vi.fn().mockResolvedValue(undefined)
+        })
+      })
+      mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok-A' } })
+      mockStartPromotionExecution.mockResolvedValue({
+        status: 'promoted',
+        handoff: {
+          sessionId: 'session-mismatch-A',
+          token: 'token-mismatch-A',
+          capability: { release: mockReleaseA, isReleased: vi.fn(() => false) }
+        }
+      })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockReturnValue(gate)
+
+      const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+      await startHandler({}, '/tmp/testA.zip')
+      verificationCallbackA!({
+        sessionId: 'session-mismatch-A',
+        candidateId: 'candidate-A',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      await new Promise((r) => setTimeout(r, 10))
+
+      // A disappears; session B owns the controller (token-B).
+      mockGetActiveImport.mockReturnValue(null)
+      await new Promise((r) => setTimeout(r, 700))
+      mockStartImport.mockResolvedValue({
+        id: 'session-mismatch-B',
+        state: 'intake',
+        dispose: vi.fn().mockResolvedValue(undefined)
+      })
+      mockGetActiveImport.mockReturnValue({ id: 'session-mismatch-B', state: 'intake' })
+      await startHandler({}, '/tmp/testB.zip')
+
+      // The terminal record is B's — A's token is a MISMATCH (LOCK-6015).
+      mockTakeTerminalPromotionOwnershipIfMatches.mockReturnValue({ status: 'mismatch' })
+      resolveRecoveryA({ ok: false, code: 'RELAUNCH_FAILED', safeCode: 'IO' })
+      await new Promise((r) => setTimeout(r, 100))
+
+      expect(mockTakeTerminalPromotionOwnershipIfMatches).toHaveBeenCalledWith('token-mismatch-A')
+      // LOCK-6015: mismatch → B's record is untouched, A's capability is NOT released.
+      expect(mockReleaseA).not.toHaveBeenCalled()
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // LOCK-CTRL-3/7: duplicate terminal callback + status payload privacy
+  // ---------------------------------------------------------------------------
+
+  describe('LOCK-CTRL-3/7: duplicate terminal callback and status privacy', () => {
+    it('a duplicate verification callback while promotion is in flight is ignored (exact-once)', async () => {
+      let verificationCallback: ((r: any) => void) | undefined
+      let resolveRecovery!: (v: any) => void
+      const gate = new Promise((r) => {
+        resolveRecovery = r
+      })
+      mockStartImport.mockImplementation((_p: string, o: any) => {
+        verificationCallback = o.onVerificationComplete
+        return Promise.resolve({ id: 'session-dup', state: 'intake', dispose: vi.fn().mockResolvedValue(undefined) })
+      })
+      mockStartPromotionPreparation.mockResolvedValue({ status: 'prepared', handle: { token: 'tok' } })
+      mockStartPromotionExecution.mockResolvedValue({
+        status: 'promoted',
+        handoff: { sessionId: 'session-dup', token: 'token-dup', capability: {} }
+      })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockReturnValue(gate)
+
+      const startHandler = mockHandle.mock.calls.find((c: any) => c[0] === IpcChannel.CherryImport_Start)![1]
+      await startHandler({}, '/tmp/test.zip')
+      verificationCallback!({
+        sessionId: 'session-dup',
+        candidateId: 'candidate-dup',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      // Promotion is in flight (awaiting the gated recovery).
+      await new Promise((r) => setTimeout(r, 10))
+
+      // Duplicate delivery of the SAME terminal callback.
+      verificationCallback!({
+        sessionId: 'session-dup',
+        candidateId: 'candidate-dup',
+        stats: {},
+        report: { status: 'pass', dimensions: [], fatal: null }
+      })
+      await new Promise((r) => setTimeout(r, 10))
+
+      // The promotion pipeline did NOT re-run for the duplicate callback.
+      expect(mockStartPromotionPreparation.mock.calls.length).toBe(1)
+      expect(mockStartPromotionExecution.mock.calls.length).toBe(1)
+
+      resolveRecovery({
+        ok: true,
+        action: 'accept-verified-replacement',
+        journalCleaned: true,
+        restartRequested: false,
+        deferredToWindow: false
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      // Exactly one terminal 'promoted' status.
+      expect(emittedStates().filter((s) => s === 'promoted')).toHaveLength(1)
+    })
+
+    it('status payloads remain code-only — never paths, candidate IDs, or content (LOCK-CTRL-7)', async () => {
+      const fire = await runPromotedFlow({ sessionId: 'session-privacy', handoffToken: 'token-privacy' })
+      mockReadPromotionJournal.mockResolvedValue({ status: 'valid', journal: v2Journal('replacement-verified') })
+      mockRunRecoveryV2.mockResolvedValue({ ok: false, code: 'CLEANUP_FAILED', safeCode: 'IO' })
+      fire()
+      await new Promise((r) => setTimeout(r, 50))
+
+      const serialized = JSON.stringify(emittedStatusEvents())
+      // No filesystem paths, no chat.db references, no candidate IDs, and no
+      // raw error messages from the underlying failure.
+      expect(serialized).not.toContain('/mock/data')
+      expect(serialized).not.toContain('chat.db')
+      expect(serialized).not.toContain('candidate-')
+      // Only aggregate/code payloads cross the boundary.
+      expect(serialized).not.toContain('recovery-verified')
     })
   })
 })

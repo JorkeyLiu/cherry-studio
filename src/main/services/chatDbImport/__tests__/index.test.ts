@@ -98,9 +98,16 @@ vi.mock('../zipIntake', () => ({
     entryCount: 10,
     totalUncompressedBytes: 1024,
     origin: { kind: 'file', indexedDbDir: '/tmp/cherry-import-test/IndexedDB' },
-    selectedEntryCount: 3
+    selectedEntryCount: 3,
+    filesInventory: { entries: [], totalUncompressedBytes: 0 }
   }),
-  classifyOriginCandidates: vi.fn()
+  classifyOriginCandidates: vi.fn(),
+  // Runtime exports required by the attachment plane module graph.
+  FILES_PAYLOAD_PREFIX: 'Data/Files/',
+  MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES: 2 * 1024 * 1024 * 1024,
+  MAX_FILES_PAYLOAD_TOTAL_UNCOMPRESSED_BYTES: 8 * 1024 * 1024 * 1024,
+  sanitizeEntryNameForMessage: vi.fn((name: string) => name),
+  assertDiskSpaceAvailable: vi.fn()
 }))
 
 // Captures the options passed to createIsolatedReader for the
@@ -183,7 +190,12 @@ vi.mock('@main/services/chatDb', () => ({
 
 import { acquirePromotionLease, createMaintenanceCoordinator } from '@main/services/chatDb/maintenanceCoordination'
 
-import { ChatImportSessionError, ChatImportUnsupportedPlatformError, ChatImportZipError } from '../errors'
+import {
+  ChatImportAttachmentError,
+  ChatImportSessionError,
+  ChatImportUnsupportedPlatformError,
+  ChatImportZipError
+} from '../errors'
 import type * as ImportDataPlaneModule from '../importDataPlane'
 import type { DataPlaneNormalizationStats } from '../importDataPlane'
 import { ChatImportDataPlaneError } from '../importDataPlane'
@@ -320,6 +332,8 @@ function makePlane(overrides: Partial<Record<string, any>> = {}) {
     })),
     getNormalizationStats: vi.fn(() => normalizationStats()),
     getImportedTopicFacts: vi.fn(() => []),
+    getSourceFileRows: vi.fn(() => []),
+    getImportedFileReferenceCounts: vi.fn(() => []),
     getSourceVerificationManifest: vi.fn(() => MOCK_MANIFEST)
   }
   return Object.assign(plane, overrides)
@@ -390,6 +404,37 @@ interface Harness {
   onVerificationComplete: ReturnType<typeof vi.fn>
 }
 
+/**
+ * LOCK-FIX-2/7/9: attachment-plane double (LOCK-O8). Records the factory
+ * options and the finalize inputs; returns deterministic count-only stats.
+ */
+function makeAttachment(overrides: Partial<Record<string, any>> = {}) {
+  const attachment: any = {
+    finalize: vi.fn(async () => ({
+      catalogRowCount: 0,
+      healthyFileCount: 0,
+      extractedBytes: 0,
+      referencedFileIdCount: 0,
+      degraded: {
+        missingPayload: 0,
+        missingCatalogRow: 0,
+        metadataMismatch: 0,
+        payloadReadFailure: 0,
+        lostContent: 0,
+        invalidTargetName: 0,
+        duplicateCatalogRow: 0
+      },
+      skipped: { payloadWithoutCatalog: 0 }
+    })),
+    getCatalog: vi.fn(() => null),
+    getStats: vi.fn(() => null),
+    // LOCK-UI-5: Main-only privacy-internal degraded set (empty by default —
+    // the marker mutation is skipped for healthy imports).
+    getDegradedFileIds: vi.fn(() => [])
+  }
+  return Object.assign(attachment, overrides)
+}
+
 async function begin(
   opts: {
     candidate?: ReturnType<typeof makeCandidate>
@@ -398,6 +443,8 @@ async function begin(
     verifierFactory?: ReturnType<typeof vi.fn>
     onCandidateReady?: ReturnType<typeof vi.fn>
     onVerificationComplete?: ReturnType<typeof vi.fn>
+    attachmentFactory?: ReturnType<typeof vi.fn>
+    attachmentMarkerWriter?: ReturnType<typeof vi.fn>
     now?: () => number
   } = {}
 ): Promise<Harness> {
@@ -407,12 +454,15 @@ async function begin(
   const verifierFactory = opts.verifierFactory ?? vi.fn((_options: any) => verifier)
   const onCandidateReady = opts.onCandidateReady ?? vi.fn()
   const onVerificationComplete = opts.onVerificationComplete ?? vi.fn()
+  const attachmentFactory = opts.attachmentFactory ?? vi.fn(() => makeAttachment())
   const session = await startImport('/tmp/test.zip', {
     onCandidateReady,
     onVerificationComplete,
     candidateFactory: () => candidate,
     dataPlaneFactory: () => plane,
     verifierFactory,
+    attachmentFactory,
+    attachmentMarkerWriter: opts.attachmentMarkerWriter,
     now: opts.now
   })
   return { session, candidate, plane, verifier, verifierFactory, onCandidateReady, onVerificationComplete }
@@ -573,11 +623,327 @@ describe('ChatImport index', () => {
         entryCount: 10,
         totalUncompressedBytes: 1024,
         origin: { kind: 'dev', indexedDbDir: '/tmp/cherry-import-test/IndexedDB' },
-        selectedEntryCount: 3
+        selectedEntryCount: 3,
+        filesInventory: { entries: [], totalUncompressedBytes: 0 }
       })
       const { session } = await begin()
 
       expect(capturedReaderOptions?.loadMode).toBe('dev')
+
+      await session.dispose()
+    })
+  })
+
+  // =========================================================================
+  // Attachment plane wiring (LOCK-FIX-2/7/9)
+  // =========================================================================
+
+  describe('attachment plane wiring', () => {
+    itOnDarwin('constructs the plane bound to the candidate dir + files inventory (LOCK-FIX-2/7)', async () => {
+      const attachmentFactory = vi.fn((_opts: any) => makeAttachment())
+      const { session } = await begin({ attachmentFactory })
+
+      // The plane is constructed after candidate init with Main-internal
+      // options derived from the candidate directory + intake inventory.
+      await discover(session.id)
+      expect(attachmentFactory).toHaveBeenCalledTimes(1)
+      const opts = attachmentFactory.mock.calls[0][0]
+      expect(opts.sessionId).toBe(session.id)
+      expect(opts.filesInventory).toEqual({ entries: [], totalUncompressedBytes: 0 })
+      expect(opts.candidateFilesDir).toBe('/mock/candidates/candidate-x/Files')
+      expect(opts.catalogPath).toBe('/mock/candidates/candidate-x/files-catalog.json')
+
+      await session.dispose()
+    })
+
+    itOnDarwin('finalizes the plane before sealing and retains count-only stats (LOCK-FIX-2/4)', async () => {
+      const attachment = makeAttachment()
+      const attachmentFactory = vi.fn(() => attachment)
+      const { session, candidate, onCandidateReady } = await begin({ attachmentFactory })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+
+      expect(attachment.finalize).toHaveBeenCalledTimes(1)
+      // Finalize inputs come from the finalized data plane (Main-only).
+      const inputs = attachment.finalize.mock.calls[0][0]
+      expect(inputs.sourceFileRows).toEqual([])
+      expect(inputs.referenceCounts).toEqual([])
+      // LOCK-FIX-2: attachment finalize runs BEFORE the candidate chat.db is
+      // sealed — candidate-ready always implies a complete sealed candidate.
+      expect(attachment.finalize.mock.invocationCallOrder[0]).toBeLessThan(candidate.seal.mock.invocationCallOrder[0])
+      expect(onCandidateReady).toHaveBeenCalledTimes(1)
+
+      await session.dispose()
+    })
+
+    itOnDarwin('attachment fatal class enters the error lifecycle and discards the candidate', async () => {
+      const attachmentFactory = vi.fn(() =>
+        makeAttachment({
+          finalize: vi.fn(async () => {
+            throw new ChatImportAttachmentError('AMBIGUOUS_PAYLOAD', 'ambiguous payload')
+          })
+        })
+      )
+      const { session, candidate, onCandidateReady } = await begin({ attachmentFactory })
+
+      await discover(session.id)
+      // The fatal class rejects the onReadPage IPC boundary (ack { ok:false }),
+      // so the awaited page call rejects — contained in the test.
+      await runAllPages(session.id).catch(() => {})
+      await flushVerification()
+
+      expect(session.state).toBe('error')
+      expect(candidate.discard).toHaveBeenCalled()
+      expect(onCandidateReady).not.toHaveBeenCalled()
+
+      await session.dispose()
+    })
+
+    itOnDarwin('cancellation during attachment finalize keeps the cancelled state (LOCK-FIX-9)', async () => {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const attachmentFactory = vi.fn(() =>
+        makeAttachment({
+          finalize: vi.fn(async () => {
+            await gate
+            throw new ChatImportAttachmentError('CANCELLED', 'aborted by cancellation')
+          })
+        })
+      )
+      const { session, candidate } = await begin({ attachmentFactory })
+
+      await discover(session.id)
+      await capturedCallbacks.onReadPage(session.id, page('topics', [{ id: 't1' }]))
+      await capturedCallbacks.onReadPage(session.id, page('message_blocks', []))
+      await capturedCallbacks.onReadPage(session.id, page('topic_segments', []))
+      // The files page triggers completeCandidate → the gated attachment
+      // finalize. Do not await it yet.
+      const pending = capturedCallbacks.onReadPage(session.id, page('files', [{ id: 'f1' }]))
+
+      // Cancel while the attachment extraction is in flight. Cancel sets the
+      // cancelled state and disposes (candidate discard cleans all candidate
+      // artifacts — LOCK-FIX-9).
+      await session.cancel()
+      release()
+      await pending.catch(() => {})
+
+      expect(session.state).toBe('cancelled')
+      expect(candidate.discard).toHaveBeenCalled()
+    })
+
+    itOnDarwin(
+      'cancel racing a SUCCESSFUL attachment finalize never seals or transitions (LOCK-CORR-1/F1)',
+      async () => {
+        // F1: cancellation racing the FINAL checks of a successful finalize
+        // must not seal the (already-discarded) candidate nor transition
+        // cancelled → candidate-ready. `shouldAbort` only probes at the
+        // plane's cooperative check points; the completion continuation must
+        // re-check after the awaited finalize, before seal/ready.
+        let release!: () => void
+        const gate = new Promise<void>((resolve) => {
+          release = resolve
+        })
+        const attachment = makeAttachment({
+          finalize: vi.fn(async () => {
+            await gate // hold finalize open so cancel can run
+            return {
+              catalogRowCount: 1,
+              healthyFileCount: 1,
+              extractedBytes: 5,
+              referencedFileIdCount: 1,
+              degraded: {
+                missingPayload: 0,
+                missingCatalogRow: 0,
+                metadataMismatch: 0,
+                payloadReadFailure: 0,
+                lostContent: 0,
+                invalidTargetName: 0,
+                duplicateCatalogRow: 0
+              },
+              skipped: { payloadWithoutCatalog: 0 }
+            }
+          })
+        })
+        const attachmentFactory = vi.fn(() => attachment)
+        const { session, candidate, onCandidateReady } = await begin({ attachmentFactory })
+
+        await discover(session.id)
+        await capturedCallbacks.onReadPage(session.id, page('topics', [{ id: 't1' }]))
+        await capturedCallbacks.onReadPage(session.id, page('message_blocks', []))
+        await capturedCallbacks.onReadPage(session.id, page('topic_segments', []))
+        // The files page triggers completeCandidate → the gated attachment
+        // finalize. Do not await it yet.
+        const pending = capturedCallbacks.onReadPage(session.id, page('files', [{ id: 'f1' }]))
+
+        // Cancel while finalize is gated: cancel() synchronously sets the
+        // cancelled state and starts dispose (disposed=true) BEFORE releasing
+        // the gate, so the completion continuation sees a cancelled/disposed
+        // session at its post-finalize re-check (LOCK-CORR-1).
+        const cancelPromise = session.cancel()
+        release()
+        await pending
+        await cancelPromise
+
+        expect(session.state).toBe('cancelled')
+        // The candidate was discarded — the completion continuation must NOT
+        // have sealed it (sealing a discarded candidate would recreate owned
+        // paths) and must NOT have emitted candidate-ready.
+        expect(candidate.seal).not.toHaveBeenCalled()
+        expect(onCandidateReady).not.toHaveBeenCalled()
+        expect(candidate.discard).toHaveBeenCalled()
+      }
+    )
+
+    itOnDarwin(
+      'cancel after verified-candidate (pre-promotion) discards the attachment artifacts with the candidate (LOCK-ORCH-7 cleanup)',
+      async () => {
+        const attachment = makeAttachment()
+        const attachmentFactory = vi.fn(() => attachment)
+        const { session, candidate } = await begin({ attachmentFactory })
+
+        await discover(session.id)
+        await runAllPages(session.id)
+        await flushVerification()
+        expect(session.state).toBe('verified-candidate')
+        // Attachments finalized into the owned candidate directory.
+        expect(attachment.finalize).toHaveBeenCalledTimes(1)
+
+        // Cancel BEFORE the promotion claim: the candidate directory —
+        // including Files/ + files-catalog.json — is discarded with it.
+        await session.cancel()
+
+        expect(session.state).toBe('cancelled')
+        expect(candidate.discard).toHaveBeenCalledTimes(1)
+        expect(getActiveImport()).toBeNull()
+      }
+    )
+
+    // =======================================================================
+    // Import-only unavailable-attachment marker (LOCK-UI-1..6)
+    // =======================================================================
+
+    itOnDarwin(
+      'persists the unavailable marker after attachment finalize and BEFORE seal when degraded file ids exist (LOCK-UI-4)',
+      async () => {
+        const secretFileId = 'degraded-file-0xMarker'
+        const attachment = makeAttachment({
+          getDegradedFileIds: vi.fn(() => [secretFileId])
+        })
+        const attachmentFactory = vi.fn(() => attachment)
+        const markerWriter = vi.fn((_sqlite: unknown, _ids: readonly string[]) => ({
+          markedBlockCount: 2,
+          degradedFileIdCount: 1
+        }))
+        const { session, candidate, onCandidateReady } = await begin({
+          attachmentFactory,
+          attachmentMarkerWriter: markerWriter
+        })
+
+        await discover(session.id)
+        await runAllPages(session.id)
+        await flushVerification()
+
+        // The marker writer ran exactly once, with the plane's Main-only
+        // degraded set and the candidate raw sqlite handle.
+        expect(markerWriter).toHaveBeenCalledTimes(1)
+        const [sqliteArg, degradedIds] = markerWriter.mock.calls[0]
+        expect(degradedIds).toEqual([secretFileId])
+        // The sqlite argument is the candidate's raw handle (the candidate
+        // double fabricates a fresh mock per call — assert shape, not identity).
+        expect(candidate.getSqlite).toHaveBeenCalled()
+        expect(sqliteArg).toMatchObject({ written: [], prepare: expect.any(Function) })
+        // Ordering: attachment finalize → marker mutation → candidate seal.
+        expect(attachment.finalize.mock.invocationCallOrder[0]).toBeLessThan(markerWriter.mock.invocationCallOrder[0])
+        expect(markerWriter.mock.invocationCallOrder[0]).toBeLessThan(candidate.seal.mock.invocationCallOrder[0])
+        expect(onCandidateReady).toHaveBeenCalledTimes(1)
+
+        await session.dispose()
+      }
+    )
+
+    itOnDarwin('skips the marker mutation entirely for a healthy import (no degraded ids)', async () => {
+      const attachment = makeAttachment() // getDegradedFileIds → []
+      const attachmentFactory = vi.fn(() => attachment)
+      const markerWriter = vi.fn(() => ({ markedBlockCount: 0, degradedFileIdCount: 0 }))
+      const { session, candidate, onCandidateReady } = await begin({
+        attachmentFactory,
+        attachmentMarkerWriter: markerWriter
+      })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+
+      expect(attachment.finalize).toHaveBeenCalledTimes(1)
+      expect(markerWriter).not.toHaveBeenCalled()
+      expect(candidate.seal).toHaveBeenCalledTimes(1)
+      expect(onCandidateReady).toHaveBeenCalledTimes(1)
+
+      await session.dispose()
+    })
+
+    itOnDarwin(
+      'marker mutation failure rejects candidate finalization and discards the candidate (LOCK-UI-4)',
+      async () => {
+        const secretFileId = 'degraded-file-0xMarkerFail'
+        const attachmentFactory = vi.fn(() =>
+          makeAttachment({
+            getDegradedFileIds: vi.fn(() => [secretFileId])
+          })
+        )
+        const markerWriter = vi.fn(() => {
+          throw new Error('synthetic marker write failure')
+        })
+        const { session, candidate, onCandidateReady } = await begin({
+          attachmentFactory,
+          attachmentMarkerWriter: markerWriter
+        })
+
+        await discover(session.id)
+        // The marker failure rejects the onReadPage IPC boundary (ack ok:false).
+        await runAllPages(session.id).catch(() => {})
+        await flushVerification()
+
+        expect(session.state).toBe('error')
+        expect(candidate.seal).not.toHaveBeenCalled()
+        expect(candidate.discard).toHaveBeenCalled()
+        expect(onCandidateReady).not.toHaveBeenCalled()
+
+        await session.dispose()
+      }
+    )
+
+    itOnDarwin('logs the marker outcome aggregate-only — never file/block ids (LOCK-UI-3/5)', async () => {
+      const secretFileId = 'degraded-file-0xMarkerLog'
+      const attachmentFactory = vi.fn(() =>
+        makeAttachment({
+          getDegradedFileIds: vi.fn(() => [secretFileId])
+        })
+      )
+      const markerWriter = vi.fn(() => ({ markedBlockCount: 3, degradedFileIdCount: 1 }))
+      const { session } = await begin({ attachmentFactory, attachmentMarkerWriter: markerWriter })
+
+      await discover(session.id)
+      await runAllPages(session.id)
+      await flushVerification()
+
+      const logger = loggerHoisted.withContext('chatDbImport') as {
+        info: ReturnType<typeof vi.fn>
+        warn: ReturnType<typeof vi.fn>
+        error: ReturnType<typeof vi.fn>
+      }
+      const allText = [...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls]
+        .map((call) => call.map(String).join(' '))
+        .join('\n')
+      expect(allText).toContain('attachment availability marker applied')
+      expect(allText).toContain('3 block(s) marked unavailable')
+      expect(allText).toContain('1 degraded file id(s)')
+      // The privacy-internal degraded file id never reaches any log line.
+      expect(allText).not.toContain(secretFileId)
 
       await session.dispose()
     })
@@ -1790,7 +2156,8 @@ describe('ChatImport index', () => {
         entryCount: 10,
         totalUncompressedBytes: 1024,
         origin: { kind: 'dev', indexedDbDir: '/tmp/cherry-import-test/IndexedDB' },
-        selectedEntryCount: 3
+        selectedEntryCount: 3,
+        filesInventory: { entries: [], totalUncompressedBytes: 0 }
       })
 
       const { session } = await begin()
@@ -3287,6 +3654,12 @@ describe('ChatImport index', () => {
             candidateId: claim.candidateId,
             retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
             candidateDbPath: claim.dbPath,
+            retainedFilesSnapshotDir: '/mock/data-root/Files.rollback',
+            catalogSnapshotPath: '/mock/data-root/files-catalog.snapshot.json',
+            receipts: {
+              candidate: { db: null, files: null, catalog: null },
+              old: { db: null, files: null, catalog: null }
+            },
             authorization: {
               ownerId: claim.candidateId,
               isReleased: () => released,
@@ -3533,6 +3906,123 @@ describe('ChatImport index', () => {
         expect(session.state).toBe('promotion-failed')
       }
     )
+
+    itOnDarwin(
+      'raced failure at a preparation await point aborts the gate cooperatively via the shouldAbort probe (LOCK-ORCH-1/LOCK-PREP-4)',
+      async () => {
+        const { session, candidate } = await begin()
+        await toVerified(session)
+
+        // Realistic gate double honoring the orchestrator-wired probe: it
+        // checks shouldAbort at an await boundary and settles a bounded
+        // CANCELLED failure instead of continuing to create snapshots.
+        let releasePrepare!: () => void
+        const gate = new Promise<void>((resolve) => {
+          releasePrepare = resolve
+        })
+        let capturedShouldAbort: (() => boolean) | null = null
+        let aborted = false
+        const prepare = vi.fn(
+          async (
+            claim: any,
+            _dbDir: string,
+            _getLiveSqlite: () => unknown,
+            options?: { shouldAbort?: () => boolean }
+          ): Promise<PromotionPreparationResult> => {
+            capturedShouldAbort = options?.shouldAbort ?? null
+            await gate
+            if (capturedShouldAbort?.()) {
+              aborted = true
+              return {
+                ok: false as const,
+                failure: { phase: 'create-snapshot', code: 'CANCELLED', safeCode: 'USER_CANCELLED' }
+              }
+            }
+            const handle = makePreparedHandle(claim)
+            return { ok: true, handle }
+          }
+        )
+
+        const outcomePromise = startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        // The orchestrator wired the session cancellation probe into the gate.
+        expect(capturedShouldAbort).not.toBeNull()
+        expect(capturedShouldAbort!()).toBe(false)
+
+        // The session fails while the gate awaits — the probe flips.
+        await capturedCallbacks.onError(session.id, { code: 'E_LATE', message: 'late renderer error' })
+        expect(capturedShouldAbort!()).toBe(true)
+
+        releasePrepare()
+        const outcome = await outcomePromise
+
+        // The gate aborted at the await point: bounded CANCELLED failure,
+        // never a late success. The owner already settled promotion-failed
+        // and released the lease; nothing was stored on the session.
+        expect(aborted).toBe(true)
+        expect(outcome.status).toBe('preparation-failed')
+        if (outcome.status === 'preparation-failed') {
+          expect(outcome.failure.code).toBe('CANCELLED')
+        }
+        expect(session.state).toBe('promotion-failed')
+        expect((session as any).preparedHandle).toBeNull()
+        // Promotion-owned candidate preserved for startup recovery.
+        expect(candidate.discard).not.toHaveBeenCalled()
+        expect(getActiveImport()).toBeNull()
+      }
+    )
+
+    itOnDarwin(
+      'attachment candidate artifacts + degraded stats survive through preparation; no privacy detail in public status (LOCK-ORCH-7)',
+      async () => {
+        // Candidate with count-only attachment degradations (LOCK-FIX-4/5).
+        const attachment = makeAttachment({
+          finalize: vi.fn(async () => ({
+            catalogRowCount: 2,
+            healthyFileCount: 1,
+            extractedBytes: 42,
+            referencedFileIdCount: 2,
+            degraded: {
+              missingPayload: 1,
+              missingCatalogRow: 0,
+              metadataMismatch: 0,
+              payloadReadFailure: 0,
+              lostContent: 0,
+              invalidTargetName: 0,
+              duplicateCatalogRow: 0
+            },
+            skipped: { payloadWithoutCatalog: 0 }
+          }))
+        })
+        const attachmentFactory = vi.fn(() => attachment)
+        const { session, candidate } = await begin({ attachmentFactory })
+        await toVerified(session)
+        expect((session as any).attachmentStats).not.toBeNull()
+
+        const { prepare } = makePrepareOk()
+        const outcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+
+        expect(outcome.status).toBe('prepared')
+        // The candidate directory (chat.db + Files/ + files-catalog.json) is
+        // preserved through preparation — only the promotion executor /
+        // deterministic startup recovery may touch promotion-owned artifacts.
+        expect(candidate.discard).not.toHaveBeenCalled()
+        expect(candidate.discardSync).not.toHaveBeenCalled()
+        // Count-only degraded stats survive on the session (Main-internal).
+        expect((session as any).attachmentStats).toMatchObject({
+          catalogRowCount: 2,
+          healthyFileCount: 1,
+          degraded: { missingPayload: 1 }
+        })
+        // The public status stays a bare state string — no attachment counts,
+        // degradation detail, or paths leak into it (LOCK-ORCH-7).
+        expect(session.state).toBe('promoting')
+        expect(String(session.state)).not.toContain('missingPayload')
+        expect(String(session.state)).not.toContain('42')
+
+        await session.dispose()
+      }
+    )
   })
 
   // =========================================================================
@@ -3579,6 +4069,12 @@ describe('ChatImport index', () => {
             candidateId: claim.candidateId,
             retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
             candidateDbPath: claim.dbPath,
+            retainedFilesSnapshotDir: '/mock/data-root/Files.rollback',
+            catalogSnapshotPath: '/mock/data-root/files-catalog.snapshot.json',
+            receipts: {
+              candidate: { db: null, files: null, catalog: null },
+              old: { db: null, files: null, catalog: null }
+            },
             authorization: {
               ownerId: claim.candidateId,
               isReleased: () => released,
@@ -3749,6 +4245,30 @@ describe('ChatImport index', () => {
       expect((session as any).preparedHandle).toBeNull()
       expect(getActiveImport()).toBeNull()
     })
+
+    itOnDarwin(
+      'cancel after the capability was consumed is refused: no state change, no cleanup (LOCK-ORCH-3)',
+      async () => {
+        const { session, handle } = await toPrepared()
+        const outcome = transferPromotionExecution()
+        expect(outcome.status).toBe('transferred')
+        mockSendCancel.mockClear()
+
+        await session.cancel()
+        await cancelImport(session.id)
+
+        // LOCK-ORCH-3: promotion is non-cancellable after consume — cancel
+        // requests are refused with NO state change and NO cleanup. The
+        // capability/lease stays owned by the session until execution settles.
+        expect(session.state).toBe('promoting')
+        expect(mockSendCancel).not.toHaveBeenCalled()
+        expect(handle.capabilities[0].release).not.toHaveBeenCalled()
+        expect((session as any).executingCapability).not.toBeNull()
+        expect(getActiveImport()).toBe(session)
+
+        await session.dispose()
+      }
+    )
   })
 
   // =========================================================================
@@ -3795,6 +4315,12 @@ describe('ChatImport index', () => {
             candidateId: claim.candidateId,
             retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
             candidateDbPath: claim.dbPath,
+            retainedFilesSnapshotDir: '/mock/data-root/Files.rollback',
+            catalogSnapshotPath: '/mock/data-root/files-catalog.snapshot.json',
+            receipts: {
+              candidate: { db: null, files: null, catalog: null },
+              old: { db: null, files: null, catalog: null }
+            },
             authorization: {
               ownerId: claim.candidateId,
               isReleased: () => released,
@@ -3857,6 +4383,21 @@ describe('ChatImport index', () => {
       }
     }
 
+    /**
+     * Catalog-boundary double (LOCK-PROMO-5 / LOCK-ORCH-2). The executor
+     * factory double never touches it, but the orchestrator requires a live
+     * boundary to start execution — no fallback/mock boundary may hide in
+     * the core orchestrator. Records its methods so tests can assert the
+     * injected boundary is forwarded to the executor unchanged.
+     */
+    function makeCatalogBoundary(overrides: Partial<Record<string, any>> = {}) {
+      const boundary: any = {
+        applyCandidate: vi.fn(async () => ({ ok: true, facts: { count: 0, sha256: 'mock-catalog-digest' } })),
+        queryFacts: vi.fn(async () => ({ ok: true, facts: { count: 0, sha256: 'mock-catalog-digest' } }))
+      }
+      return Object.assign(boundary, overrides)
+    }
+
     /** Gated executor double implementing the quiesce contract. */
     function makeExecutorDouble() {
       let resolveRun!: (result: any) => void
@@ -3894,9 +4435,16 @@ describe('ChatImport index', () => {
 
     function makeExecOptions(executor: ReturnType<typeof makeExecutorDouble>['executor']) {
       const executorFactory = vi.fn((_options: any) => executor)
+      const catalogBoundary = makeCatalogBoundary()
       return {
-        options: { dataRoot: '/mock/data-root', liveDb: makeLiveDbDouble(), executorFactory },
-        executorFactory
+        options: {
+          dataRoot: '/mock/data-root',
+          liveDb: makeLiveDbDouble(),
+          catalogBoundary,
+          executorFactory
+        },
+        executorFactory,
+        catalogBoundary
       }
     }
 
@@ -3927,10 +4475,90 @@ describe('ChatImport index', () => {
       await session.dispose()
     })
 
+    itOnDarwin(
+      'C2b: missing catalog boundary refuses execution with CATALOG_BOUNDARY_UNAVAILABLE (LOCK-ORCH-2)',
+      async () => {
+        const { session, handle, candidate } = await toPrepared()
+        const { executor } = makeExecutorDouble()
+        const { options } = makeExecOptions(executor)
+        // Simulate the production boundary not being registered.
+        delete (options as any).catalogBoundary
+
+        const outcome = await startPromotionExecution(options)
+
+        // LOCK-ORCH-2: no fallback/mock production boundary hides in the
+        // core orchestrator — a missing boundary is a bounded pre-install
+        // refusal, never a destructive run.
+        expect(outcome.status).toBe('promotion-failed')
+        if (outcome.status !== 'promotion-failed') return
+        expect(outcome.failure.code).toBe('CATALOG_BOUNDARY_UNAVAILABLE')
+        expect(outcome.failure.classification).toBe('pre-install')
+        expect(outcome.failure.recoveryRequired).toBe(false)
+        expect(outcome.failure.subphase).toBe('not-started')
+        expect(outcome.recoveryHandoff).toBeNull()
+
+        // The executor never ran — no destructive work was scheduled.
+        expect(executor.run).not.toHaveBeenCalled()
+        // The consumed capability released the lease exactly once.
+        expect(handle.capabilities[0].release).toHaveBeenCalledTimes(1)
+        expect((session as any).executingCapability).toBeNull()
+        // Terminal state settled exactly once; nothing retained.
+        expect(session.state).toBe('promotion-failed')
+        expect(getTerminalPromotionOwnership()).toBeNull()
+        // Repeated execution is refused by the never-reset start guard.
+        expect(await startPromotionExecution(options)).toEqual({ status: 'already-started' })
+        expect(handle.consume).toHaveBeenCalledTimes(1)
+        // Promotion-owned candidate preserved for startup recovery.
+        expect(candidate.discard).not.toHaveBeenCalled()
+        expect(candidate.discardSync).not.toHaveBeenCalled()
+      }
+    )
+
+    itOnDarwin('exact promotion state transition sequence (LOCK-ORCH-1/4)', async () => {
+      const { session } = await begin()
+      await toVerified(session)
+      expect(session.state).toBe('verified-candidate')
+
+      // Preparation: claim + prepare transition to promoting exactly once.
+      const { prepare, handles } = makePrepareOk()
+      const prepOutcome = await startPromotionPreparation({ ...PREPARE_OPTIONS, prepare })
+      expect(prepOutcome.status).toBe('prepared')
+      expect(session.state).toBe('promoting')
+      // The verified handle was consumed by the claim (only the promotion
+      // handle remains reachable).
+      expect(getVerifiedCandidate()).toBeNull()
+      expect(getSealedCandidate()).toBeNull()
+
+      // Execution: promoted settles ONLY after the durable executor result.
+      const { executor, resolveRun } = makeExecutorDouble()
+      const { options } = makeExecOptions(executor)
+      const outcomePromise = startPromotionExecution(options)
+      const capability = handles[0].capabilities[0]
+      resolveRun({
+        ok: true,
+        handoff: {
+          sessionId: session.id,
+          candidateId: capability.candidateId,
+          token: capability.token,
+          receipt: { mock: 'receipt' },
+          retainedSnapshotPath: capability.retainedSnapshotPath,
+          capability
+        }
+      })
+      const outcome = await outcomePromise
+      expect(outcome.status).toBe('promoted')
+      expect(session.state).toBe('promoted')
+
+      // Terminal promotion state is immutable (LOCK-4401): the consumed
+      // token can never flip promoted to a second result.
+      expect(completePromotion(capability.token, 'promotion-failed')).toBe(false)
+      expect(session.state).toBe('promoted')
+    })
+
     itOnDarwin('C18: success settles promoted ONLY after the executor result; capability stays owned', async () => {
       const { session, handle, candidate } = await toPrepared()
       const { executor, resolveRun } = makeExecutorDouble()
-      const { options, executorFactory } = makeExecOptions(executor)
+      const { options, executorFactory, catalogBoundary } = makeExecOptions(executor)
 
       const outcomePromise = startPromotionExecution(options)
       await new Promise<void>((resolve) => setImmediate(resolve))
@@ -3942,6 +4570,10 @@ describe('ChatImport index', () => {
       const factoryOptions = executorFactory.mock.calls[0][0]
       expect(factoryOptions.capability).toBe(handle.capabilities[0])
       expect(factoryOptions.dataRoot).toBe('/mock/data-root')
+      // LOCK-PROMO-5/LOCK-ORCH-2: the injected catalog boundary is forwarded
+      // to the executor unchanged — no fallback boundary hidden in the core
+      // orchestrator.
+      expect(factoryOptions.catalogBoundary).toBe(catalogBoundary)
       expect((session as any).executingCapability).toBe(handle.capabilities[0])
       // Not settled while the executor runs.
       expect(session.state).toBe('promoting')
@@ -4258,6 +4890,12 @@ describe('ChatImport index', () => {
             candidateId: claim.candidateId,
             retainedSnapshotPath: '/mock/data-root/chat.db.rollback',
             candidateDbPath: claim.dbPath,
+            retainedFilesSnapshotDir: '/mock/data-root/Files.rollback',
+            catalogSnapshotPath: '/mock/data-root/files-catalog.snapshot.json',
+            receipts: {
+              candidate: { db: null, files: null, catalog: null },
+              old: { db: null, files: null, catalog: null }
+            },
             authorization,
             release: () => {
               authorization.release()
@@ -4735,5 +5373,70 @@ describe('ChatImport index', () => {
       const result = takeTerminalPromotionOwnershipIfMatches(handle.capabilities[0].token)
       expect(result.status).toBe('not-available')
     })
+
+    itOnDarwin(
+      'active-session replacement: a new session claims/prepares/executes independently after the old ownership was consumed',
+      async () => {
+        // Session A settles promoted (terminal ownership retained).
+        const { session: sessionA, handle: handleA } = await toPrepared()
+        const { executor: execA, resolveRun: resolveA } = makeExecutorDouble()
+        const { options: optionsA } = makeExecOptions(execA)
+        const outcomeA = startPromotionExecution(optionsA)
+        const capabilityA = handleA.capabilities[0]
+        resolveA({
+          ok: true,
+          handoff: {
+            sessionId: sessionA.id,
+            candidateId: capabilityA.candidateId,
+            token: capabilityA.token,
+            receipt: { mock: 'receipt' },
+            retainedSnapshotPath: capabilityA.retainedSnapshotPath,
+            capability: capabilityA
+          }
+        })
+        expect((await outcomeA).status).toBe('promoted')
+        expect(getTerminalPromotionOwnership()?.kind).toBe('promoted')
+
+        // The upper layer consumes A's terminal ownership (LOCK-4433), then
+        // the session is disposed so a fresh import can start.
+        const taken = takeTerminalPromotionOwnership()
+        expect(taken.status).toBe('taken')
+        if (taken.status !== 'taken') return
+        const tokenA = taken.ownership.handoff.token
+        await sessionA.dispose()
+        disposeActiveImport()
+        expect(getActiveImport()).toBeNull()
+
+        // Session B runs the full claim → prepare → execute independently.
+        const { session: sessionB, handle: handleB } = await toPrepared()
+        expect(sessionB.state).toBe('promoting')
+        const { executor: execB, resolveRun: resolveB } = makeExecutorDouble()
+        const { options: optionsB } = makeExecOptions(execB)
+        const outcomeB = startPromotionExecution(optionsB)
+        const capabilityB = handleB.capabilities[0]
+        expect(capabilityB.token).not.toBe(tokenA)
+        resolveB({
+          ok: true,
+          handoff: {
+            sessionId: sessionB.id,
+            candidateId: capabilityB.candidateId,
+            token: capabilityB.token,
+            receipt: { mock: 'receipt' },
+            retainedSnapshotPath: capabilityB.retainedSnapshotPath,
+            capability: capabilityB
+          }
+        })
+        const resultB = await outcomeB
+        expect(resultB.status).toBe('promoted')
+        expect(sessionB.state).toBe('promoted')
+        expect(getTerminalPromotionOwnership()?.kind).toBe('promoted')
+
+        // A stale take from session A is refused — B's record is untouched
+        // (LOCK-6015 identity boundary).
+        const staleTake = takeTerminalPromotionOwnershipIfMatches(tokenA)
+        expect(staleTake.status).toBe('mismatch')
+        expect(getTerminalPromotionOwnership()?.kind).toBe('promoted')
+      }
+    )
   })
 })
