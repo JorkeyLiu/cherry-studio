@@ -19,10 +19,14 @@
  * Better-sqlite3 with readonly=true still creates WAL/SHM sidecars on
  * some platforms/configurations. The probe implements a no-residue
  * strategy: after the readonly validation handle closes, any sidecar files
- * that appeared during the probe are detected and removed. The composite
- * probe captures before/after directory snapshots to prove zero net
- * filesystem mutations. This is a controlled, bounded cleanup of probe-
- * owned residue only — never touching files that existed before the probe.
+ * that appeared during the probe are detected and removed — every removal
+ * is guarded (LOCK-CLOSE-4), so a cleanup failure is captured and logged
+ * and never escapes the probe (never-throws contract). The composite probe
+ * captures before/after directory snapshots to prove zero net filesystem
+ * mutations: any residue a failed cleanup leaves behind flips the
+ * `sidecarFree` gate closed. This is a controlled, bounded cleanup of
+ * probe-owned residue only — never touching files that existed before the
+ * probe.
  *
  * Structured error details: stat I/O failures and validation failures are
  * distinguished and yielded as structured probe result details, never
@@ -37,9 +41,13 @@ import path from 'node:path'
 import { loggerService } from '@logger'
 import { DATA_PATH } from '@main/config'
 
+import { readAndValidateCatalog } from '../attachmentPlane'
 import { isValidOwnedCandidateId } from '../candidateDb'
-import type { PromotionJournalV1 } from './journal'
-import { PROMOTION_JOURNAL_FILENAME, PROMOTION_JOURNAL_VERSION, ROLLBACK_SNAPSHOT_FILENAME } from './journal'
+import { verifyFilesDirAgainstCatalog } from './catalogParity'
+import { probeRetainedCatalogSnapshot } from './catalogSnapshot'
+import { probeRetainedFilesSnapshot, resolveLiveFilesDir } from './filesSnapshot'
+import { decodePromotionJournal, PROMOTION_JOURNAL_FILENAME, ROLLBACK_SNAPSHOT_FILENAME } from './journal'
+import { FILES_PROMOTE_STAGING_DIRNAME } from './journal'
 import { type ReadonlyChatDbValidationFailure, safeErrorCode, validateReadonlyChatDb } from './readonlyDbValidation'
 import type { PromotionJournalObservation, PromotionRecoveryInput } from './recovery'
 
@@ -112,7 +120,13 @@ export interface PromotionArtifactProbesResult {
     readonly added: readonly string[]
     readonly removed: readonly string[]
   }
-  /** Sidecar files that were created during probing and then cleaned up. */
+  /**
+   * Basenames of WAL/SHM sidecars that the probe created during its readonly
+   * validation and successfully removed (probe-owned cleanup, reported by
+   * the individual probes — LOCK-CLOSE-5). Never private paths. The
+   * before/after directory diff cannot observe created-and-cleaned files,
+   * so this is the probe's own evidence of its cleanup actions.
+   */
   readonly cleanedSidecars: readonly string[]
 }
 
@@ -206,6 +220,47 @@ function fileExists(filePath: string): boolean {
   }
 }
 
+/**
+ * Remove probe-created WAL/SHM sidecars for one DB path (controlled
+ * no-residue strategy — LOCK-CLOSE-4/F5).
+ *
+ * Only sidecars that did NOT exist before the probe are candidates: files
+ * that pre-existed the probe are never touched. Every unlink is guarded —
+ * a cleanup failure is captured, logged, and never escapes the probe (the
+ * probe contract is never-throws). A failed cleanup leaves the sidecar on
+ * disk, which the composite probe's directory-diff `sidecarFree` gate
+ * detects and fails closed on.
+ *
+ * Returns the basenames of the sidecars this call successfully removed
+ * (private-path-free diagnostic evidence).
+ */
+function cleanupCreatedSidecars(dbPath: string, hasWalBefore: boolean, hasShmBefore: boolean): string[] {
+  const cleaned: string[] = []
+  for (const suffix of SIDECAR_SUFFIXES) {
+    const sidecarPath = `${dbPath}${suffix}`
+    const existedBefore = suffix === '-wal' ? hasWalBefore : hasShmBefore
+    if (!existedBefore && fileExists(sidecarPath)) {
+      try {
+        fs.unlinkSync(sidecarPath)
+        cleaned.push(`${path.basename(dbPath)}${suffix}`)
+      } catch (error) {
+        logger.warn('Failed to clean probe-created sidecar during readonly probe (residue fails closed)', {
+          code: safeErrorCode(error),
+          file: `${path.basename(dbPath)}${suffix}`
+        })
+      }
+    }
+  }
+  return cleaned
+}
+
+/** Internal probe result with the sidecar-cleanup evidence report. */
+interface ProbeWithCleanupReport {
+  readonly result: ArtifactProbeResult
+  /** Basenames of sidecars created during probing and successfully removed. */
+  readonly cleanedSidecars: string[]
+}
+
 // ---------------------------------------------------------------------------
 // Individual artifact probes
 // ---------------------------------------------------------------------------
@@ -219,22 +274,29 @@ function fileExists(filePath: string): boolean {
  * Returns structured detail for stat I/O and validation failures.
  */
 export function probeLiveDb(dataRoot: string = DATA_PATH, sampleCount: number = 3): ArtifactProbeResult {
+  return probeLiveDbWithCleanupReport(dataRoot, sampleCount).result
+}
+
+/** {@link probeLiveDb} plus the basenames of sidecars it actually removed. */
+function probeLiveDbWithCleanupReport(dataRoot: string, sampleCount: number): ProbeWithCleanupReport {
   const dbPath = resolveLiveDbPath(dataRoot)
 
   // --- Stat check ---------------------------------------------------------
+  // lstat (audit F4): a symlinked DB root (broken or working) is tamper —
+  // NOT_A_FILE, never followed into a valid-looking DB elsewhere.
   try {
-    const stat = fs.statSync(dbPath)
+    const stat = fs.lstatSync(dbPath)
     if (!stat.isFile()) {
       const detail: StatFailureDetail = { kind: 'stat-failure', code: 'NOT_A_FILE' }
-      return { status: 'present-unverified', detail }
+      return { result: { status: 'present-unverified', detail }, cleanedSidecars: [] }
     }
   } catch (error) {
     const code = safeErrorCode(error)
     if (code === 'ENOENT') {
-      return { status: 'missing', detail: null }
+      return { result: { status: 'missing', detail: null }, cleanedSidecars: [] }
     }
     const detail: StatFailureDetail = { kind: 'stat-failure', code }
-    return { status: 'present-unverified', detail }
+    return { result: { status: 'present-unverified', detail }, cleanedSidecars: [] }
   }
 
   // --- Capture pre-probe sidecar state ------------------------------------
@@ -245,12 +307,7 @@ export function probeLiveDb(dataRoot: string = DATA_PATH, sampleCount: number = 
   const failure = validateReadonlyChatDb(dbPath, sampleCount)
 
   // --- Cleanup any sidecars created during the probe (no-residue) ----------
-  if (!hasWalBefore && fileExists(`${dbPath}-wal`)) {
-    fs.unlinkSync(`${dbPath}-wal`)
-  }
-  if (!hasShmBefore && fileExists(`${dbPath}-shm`)) {
-    fs.unlinkSync(`${dbPath}-shm`)
-  }
+  const cleanedSidecars = cleanupCreatedSidecars(dbPath, hasWalBefore, hasShmBefore)
 
   if (failure !== null) {
     const detail: ValidationFailureDetail = {
@@ -258,10 +315,10 @@ export function probeLiveDb(dataRoot: string = DATA_PATH, sampleCount: number = 
       gate: failure.gate,
       safeCode: failure.safeCode
     }
-    return { status: 'present-unverified', detail }
+    return { result: { status: 'present-unverified', detail }, cleanedSidecars }
   }
 
-  return { status: 'present-verified', detail: null }
+  return { result: { status: 'present-verified', detail: null }, cleanedSidecars }
 }
 
 /**
@@ -271,22 +328,29 @@ export function probeLiveDb(dataRoot: string = DATA_PATH, sampleCount: number = 
  * Same readonly semantics and no-residue strategy as the live probe.
  */
 export function probeRetainedSnapshot(dataRoot: string = DATA_PATH, sampleCount: number = 3): ArtifactProbeResult {
+  return probeRetainedSnapshotWithCleanupReport(dataRoot, sampleCount).result
+}
+
+/** {@link probeRetainedSnapshot} plus the basenames of sidecars it actually removed. */
+function probeRetainedSnapshotWithCleanupReport(dataRoot: string, sampleCount: number): ProbeWithCleanupReport {
   const snapshotPath = resolveRetainedSnapshotPath(dataRoot)
 
   // --- Stat check ---------------------------------------------------------
+  // lstat (audit F4): a symlinked retained root (broken or working) is tamper
+  // — NOT_A_FILE, never followed.
   try {
-    const stat = fs.statSync(snapshotPath)
+    const stat = fs.lstatSync(snapshotPath)
     if (!stat.isFile()) {
       const detail: StatFailureDetail = { kind: 'stat-failure', code: 'NOT_A_FILE' }
-      return { status: 'present-unverified', detail }
+      return { result: { status: 'present-unverified', detail }, cleanedSidecars: [] }
     }
   } catch (error) {
     const code = safeErrorCode(error)
     if (code === 'ENOENT') {
-      return { status: 'missing', detail: null }
+      return { result: { status: 'missing', detail: null }, cleanedSidecars: [] }
     }
     const detail: StatFailureDetail = { kind: 'stat-failure', code }
-    return { status: 'present-unverified', detail }
+    return { result: { status: 'present-unverified', detail }, cleanedSidecars: [] }
   }
 
   // --- Capture pre-probe sidecar state ------------------------------------
@@ -297,12 +361,7 @@ export function probeRetainedSnapshot(dataRoot: string = DATA_PATH, sampleCount:
   const failure = validateReadonlyChatDb(snapshotPath, sampleCount)
 
   // --- Cleanup any sidecars created during the probe (no-residue) ----------
-  if (!hasWalBefore && fileExists(`${snapshotPath}-wal`)) {
-    fs.unlinkSync(`${snapshotPath}-wal`)
-  }
-  if (!hasShmBefore && fileExists(`${snapshotPath}-shm`)) {
-    fs.unlinkSync(`${snapshotPath}-shm`)
-  }
+  const cleanedSidecars = cleanupCreatedSidecars(snapshotPath, hasWalBefore, hasShmBefore)
 
   if (failure !== null) {
     const detail: ValidationFailureDetail = {
@@ -310,10 +369,10 @@ export function probeRetainedSnapshot(dataRoot: string = DATA_PATH, sampleCount:
       gate: failure.gate,
       safeCode: failure.safeCode
     }
-    return { status: 'present-unverified', detail }
+    return { result: { status: 'present-unverified', detail }, cleanedSidecars }
   }
 
-  return { status: 'present-verified', detail: null }
+  return { result: { status: 'present-verified', detail: null }, cleanedSidecars }
 }
 
 /**
@@ -339,7 +398,9 @@ export function probeCandidate(
   // --- Stat check ---------------------------------------------------------
   const dbPath = resolveCandidateDbPath(candidateId, dataRoot)
   try {
-    const stat = fs.statSync(dbPath)
+    // lstat (audit F4): a symlinked candidate DB (broken or working) is tamper
+    // — CANDIDATE_NOT_A_FILE, never followed.
+    const stat = fs.lstatSync(dbPath)
     if (!stat.isFile()) {
       return { kind: 'error', code: 'CANDIDATE_NOT_A_FILE' }
     }
@@ -360,8 +421,9 @@ export function probeCandidate(
 
 /**
  * Observe the promotion journal status at the fixed path. This function
- * reads the journal bytes and decodes them, returning the structured
- * observation for the recovery decision matrix.
+ * reads the journal bytes and decodes them through the strict shared codec
+ * (v1 chat.db-only AND v2 three-artifact documents), returning the
+ * structured observation for the recovery decision matrix.
  *
  * Returns 'invalid' for any I/O failure or decode rejection. Returns
  * 'absent' only for ENOENT. The journal file must already exist for this
@@ -381,49 +443,145 @@ export function observePromotionJournal(dataRoot: string = DATA_PATH): Promotion
     return { status: 'invalid' }
   }
 
-  // Decode and validate the journal document.
-  try {
-    const parsed = JSON.parse(raw)
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      return { status: 'invalid' }
-    }
-
-    const record = parsed as Record<string, unknown>
-
-    // Validate version
-    if (record.version !== PROMOTION_JOURNAL_VERSION) {
-      return { status: 'invalid' }
-    }
-
-    // Validate sessionId (strict allowlist)
-    const sessionId = record.sessionId
-    if (typeof sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) {
-      return { status: 'invalid' }
-    }
-
-    // Validate candidateId (strict allowlist)
-    const candidateId = record.candidateId
-    if (typeof candidateId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(candidateId)) {
-      return { status: 'invalid' }
-    }
-
-    // Validate phase
-    const phase = record.phase
-    const validPhases: readonly string[] = ['snapshot-ready', 'candidate-installed', 'replacement-verified']
-    if (typeof phase !== 'string' || !validPhases.includes(phase)) {
-      return { status: 'invalid' }
-    }
-
-    const journal: PromotionJournalV1 = {
-      version: PROMOTION_JOURNAL_VERSION,
-      sessionId,
-      candidateId,
-      phase: phase as PromotionJournalV1['phase']
-    }
-
-    return { status: 'valid', journal }
-  } catch {
+  const decoded = decodePromotionJournal(raw)
+  if (!decoded.ok) {
     return { status: 'invalid' }
+  }
+  return { status: 'valid', journal: decoded.journal }
+}
+
+// ---------------------------------------------------------------------------
+// v2 three-artifact probes (LOCK-PROMO-6/9)
+// ---------------------------------------------------------------------------
+
+/** Probe the live Files directory parity against the candidate catalog. */
+export function probeLiveFiles(
+  candidateId: string | null,
+  dataRoot: string = DATA_PATH
+): 'missing' | 'present-unverified' | 'present-verified' {
+  const liveFilesDir = resolveLiveFilesDir(dataRoot)
+  // lstat-based presence (audit F2/F4): a BROKEN symlink at the live Files
+  // root is PRESENT tamper (present-unverified), never 'missing'; a working
+  // symlink is never followed (lstat, not stat).
+  let rootStat: fs.Stats
+  try {
+    rootStat = fs.lstatSync(liveFilesDir)
+  } catch (error) {
+    if (safeErrorCode(error) === 'ENOENT') {
+      return 'missing'
+    }
+    return 'present-unverified'
+  }
+  if (!rootStat.isDirectory()) {
+    return 'present-unverified'
+  }
+  if (candidateId === null || !isValidOwnedCandidateId(candidateId)) {
+    return 'present-unverified'
+  }
+  try {
+    const catalogPath = path.resolve(path.join(dataRoot, CANDIDATE_ROOT_DIRNAME, candidateId, 'files-catalog.json'))
+    const catalog = readAndValidateCatalog(catalogPath)
+    if (catalog === null) {
+      return 'present-unverified'
+    }
+    const rows = catalog.rows.map((row) => ({ name: row.name, size: row.size, sha256: row.sha256 }))
+    const parity = verifyFilesDirAgainstCatalog(liveFilesDir, rows)
+    return parity.ok ? 'present-verified' : 'present-unverified'
+  } catch {
+    return 'present-unverified'
+  }
+}
+
+/** Probe the retained Files snapshot (delegates to filesSnapshot). */
+export function probeRetainedFilesSnapshotStatus(
+  dataRoot: string = DATA_PATH
+): 'missing' | 'present-unverified' | 'present-verified' {
+  return probeRetainedFilesSnapshot(dataRoot).status
+}
+
+/** Probe the retained catalog snapshot (delegates to catalogSnapshot). */
+export function probeRetainedCatalogSnapshotStatus(
+  dataRoot: string = DATA_PATH
+): 'missing' | 'present-unverified' | 'present-verified' {
+  return probeRetainedCatalogSnapshot(dataRoot).status
+}
+
+/** Probe the `Files.promote-staging` mid-install dir presence. */
+export function probeFilesStaging(dataRoot: string = DATA_PATH): 'missing' | 'present' {
+  const stagingDir = path.resolve(path.join(dataRoot, FILES_PROMOTE_STAGING_DIRNAME))
+  // lstat-based presence (audit F2): a broken symlink at the staging path is
+  // PRESENT tamper, never 'missing'.
+  try {
+    fs.lstatSync(stagingDir)
+    return 'present'
+  } catch {
+    return 'missing'
+  }
+}
+
+/** Probe the candidate catalog handoff validity (present + readable). */
+export function probeCandidateCatalog(candidateId: string, dataRoot: string = DATA_PATH): 'missing' | 'present' {
+  if (!isValidOwnedCandidateId(candidateId)) {
+    return 'missing'
+  }
+  try {
+    const catalogPath = path.resolve(path.join(dataRoot, CANDIDATE_ROOT_DIRNAME, candidateId, 'files-catalog.json'))
+    return readAndValidateCatalog(catalogPath) === null ? 'missing' : 'present'
+  } catch {
+    return 'missing'
+  }
+}
+
+/**
+ * Full v2 probe → recovery input. `catalogApplied` is always 'unknown'
+ * here: the live Dexie facts can only be observed through the renderer
+ * boundary (window mode), which fills it before deciding.
+ *
+ * `candidate` is the candidate chat.db presence (consumed by the db
+ * install); `candidateCatalog` is the retained candidate catalog handoff
+ * (files-catalog.json) presence/validity — the forward-completion evidence
+ * at `files-installed`/`catalog-pending` (LOCK-JRNL-3).
+ */
+export function probePromotionArtifactsV2(
+  candidateId: string | null,
+  dataRoot: string = DATA_PATH
+): {
+  readonly journal: PromotionJournalObservation
+  readonly live: 'missing' | 'present-unverified' | 'present-verified'
+  readonly dbSnapshot: 'missing' | 'present-unverified' | 'present-verified'
+  readonly candidate: 'missing' | 'present'
+  readonly files: 'missing' | 'present-unverified' | 'present-verified'
+  readonly filesSnapshot: 'missing' | 'present-unverified' | 'present-verified'
+  readonly filesStaging: 'missing' | 'present'
+  readonly catalogSnapshot: 'missing' | 'present-unverified' | 'present-verified'
+  readonly catalogApplied: 'unknown'
+  readonly candidateCatalog: 'missing' | 'present'
+} {
+  const journal = observePromotionJournal(dataRoot)
+  let resolvedCandidateId = candidateId
+  if (resolvedCandidateId === null && journal.status === 'valid') {
+    resolvedCandidateId = journal.journal.candidateId
+  }
+  let candidate: 'missing' | 'present' = 'missing'
+  if (resolvedCandidateId !== null) {
+    const candidateResult = probeCandidate(resolvedCandidateId, dataRoot)
+    if ('kind' in candidateResult) {
+      candidate = 'missing'
+    } else {
+      candidate = candidateResult.status
+    }
+  }
+  return {
+    journal,
+    live: probeLiveDb(dataRoot).status,
+    dbSnapshot: probeRetainedSnapshot(dataRoot).status,
+    candidate,
+    files: probeLiveFiles(resolvedCandidateId, dataRoot),
+    filesSnapshot: probeRetainedFilesSnapshotStatus(dataRoot),
+    filesStaging: probeFilesStaging(dataRoot),
+    catalogSnapshot: probeRetainedCatalogSnapshotStatus(dataRoot),
+    catalogApplied: 'unknown',
+    candidateCatalog: resolvedCandidateId !== null ? probeCandidateCatalog(resolvedCandidateId, dataRoot) : 'missing'
   }
 }
 
@@ -458,10 +616,10 @@ export function probePromotionArtifacts(
   const journal = observePromotionJournal(dataRoot)
 
   // --- Live probe ---------------------------------------------------------
-  const live = probeLiveDb(dataRoot, sampleCount)
+  const live = probeLiveDbWithCleanupReport(dataRoot, sampleCount)
 
   // --- Snapshot probe -----------------------------------------------------
-  const snapshot = probeRetainedSnapshot(dataRoot, sampleCount)
+  const snapshot = probeRetainedSnapshotWithCleanupReport(dataRoot, sampleCount)
 
   // --- Candidate probe ----------------------------------------------------
   let candidate: CandidateProbeResult
@@ -499,32 +657,17 @@ export function probePromotionArtifacts(
   const allAdded = [...new Set([...dataDiff.added, ...candidateDiff.added])].sort()
   const allRemoved = [...new Set([...dataDiff.removed, ...candidateDiff.removed])].sort()
 
-  // Sidecar detection: flag any -wal/-shm files that appeared AND were NOT cleaned
+  // Sidecar detection: flag any -wal/-shm files that appeared AND were not
+  // cleaned — the fail-closed no-residue gate.
   const sidecarsRemaining = allAdded.filter((entry) => entry.endsWith('-wal') || entry.endsWith('-shm'))
   const sidecarFree = sidecarsRemaining.length === 0
 
-  // Detect sidecars that were created and then cleaned up by individual probes
-  const cleanedSidecars: string[] = []
-
-  // Check for cleaned live DB sidecars
-  const liveDbPath = resolveLiveDbPath(dataRoot)
-  for (const suffix of SIDECAR_SUFFIXES) {
-    const sidecarName = `${path.basename(liveDbPath)}${suffix}`
-    // If it was in before but not in after, it was cleaned
-    if (dataDirBefore.entries.includes(sidecarName) && !dataDirAfter.entries.includes(sidecarName)) {
-      cleanedSidecars.push(sidecarName)
-    }
-    // If it was created during probe and cleaned, it won't appear in after
-  }
-
-  // Check for cleaned snapshot sidecars
-  const snapshotPath = resolveRetainedSnapshotPath(dataRoot)
-  for (const suffix of SIDECAR_SUFFIXES) {
-    const sidecarName = `${path.basename(snapshotPath)}${suffix}`
-    if (dataDirBefore.entries.includes(sidecarName) && !dataDirAfter.entries.includes(sidecarName)) {
-      cleanedSidecars.push(sidecarName)
-    }
-  }
+  // Sidecars created during probing and successfully removed are reported by
+  // the individual probes themselves (LOCK-CLOSE-5): the before/after
+  // directory diff cannot observe created-and-cleaned files (they appear in
+  // neither snapshot), so the report is the truthful source of evidence.
+  // Only basenames are exposed — never private paths.
+  const cleanedSidecars = [...live.cleanedSidecars, ...snapshot.cleanedSidecars].sort()
 
   if (!sidecarFree) {
     logger.warn(`Promotion artifact probe detected uncleaned sidecar residue: ${sidecarsRemaining.join(', ')}`)
@@ -532,8 +675,8 @@ export function probePromotionArtifacts(
 
   return {
     journal,
-    live,
-    snapshot,
+    live: live.result,
+    snapshot: snapshot.result,
     candidate,
     sidecarFree,
     mutationEvidence: { added: allAdded, removed: allRemoved },

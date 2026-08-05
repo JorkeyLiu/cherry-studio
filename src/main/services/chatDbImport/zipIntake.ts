@@ -1,5 +1,6 @@
 /**
- * Secure ZIP extraction for the ChatImport pipeline (LOCK-PROD-8/9).
+ * Secure ZIP extraction for the ChatImport pipeline (LOCK-PROD-8/9,
+ * LOCK-FIX-2/3/7/8).
  *
  * Selective extraction — only L2-required Chromium subtrees are materialized:
  *   1. the exact accepted origin IndexedDB LevelDB subtree, plus
@@ -7,11 +8,20 @@
  *   3. the bounded `Local Storage/leveldb` subtree needed for the
  *      navigation projection (LOCK-PROD-2/6).
  *
- * Everything else in the container — `Data/`, images/attachments, `chat.db`,
+ * Data/Files payload extraction is TWO-PASS (LOCK-FIX-7 — simplest safe
+ * approach, reported): PASS 1 here inventories the `Data/Files/` subtree
+ * from the CENTRAL DIRECTORY (metadata only, bounded quotas, never
+ * materialized); PASS 2 (attachmentPlane, after the source `files` catalog
+ * pages arrive) reopens the ZIP and streams ONLY the catalog-matched
+ * payloads into the candidate-scoped Files directory with bounded streaming
+ * + SHA-256. The source ZIP is never mutated (LOCK-FIX-8).
+ *
+ * Everything else in the container — `Data/` (except the inventoried
+ * Data/Files payloads), images/attachments, `chat.db`,
  * Memory/Knowledge/Agents/Notes/Skills, unrelated origins — is NEVER
  * extracted, while STILL participating in container-level safety validation
  * (path traversal, absolute/drive/backslash/NUL, normalized duplicates,
- * symlink/unsupported mode, encryption).
+ * case-fold/Unicode target conflicts, symlink/unsupported mode, encryption).
  *
  *  Validation layers:
  *   Layer 1: fs.stat — file exists, regular file, size ≤ 4 GiB
@@ -22,9 +32,21 @@
  *            (POSIX + drive-letter), backslash, NUL and ".." component
  *            rejection for every entry; canonical extraction-target
  *            duplicate rejection (LOCK-FZ2: a/b vs a//b vs a/./b)
+ *   Layer 3.25: Unicode/case-fold target conflict rejection (LOCK-FIX-3):
+ *            distinct entry names that case-fold + NFC-normalize to the
+ *            same extraction target collide on macOS's default
+ *            case-insensitive filesystem — rejected before extraction
  *   Layer 3.5: origin classification from the CENTRAL DIRECTORY + selected
  *            subtree byte limits (cumulative ≤ 768 MiB, single ≤ 128 MiB,
  *            compression ratio ≤ 100) — BEFORE extraction
+ *   Layer 3.55: Data/Files payload inventory (LOCK-FIX-7): every
+ *            non-directory `Data/Files/` entry is inventoried from the
+ *            central directory with its OWN bounded budget (single ≤ 2 GiB,
+ *            cumulative ≤ 8 GiB, justified against the 1.39 GiB real-backup
+ *            class) — BEFORE extraction, never materialized here
+ *   Layer 3.6: disk preflight (LOCK-FIX-3): the extraction target
+ *            filesystem must have headroom (uncompressed bytes + fixed
+ *            headroom) before anything is materialized
  *   Layer 5: selective extraction of only the accepted subtrees, with
  *            ACTUAL-byte enforcement (LOCK-FZ1): each selected entry streams
  *            through a counting transform that aborts when written bytes
@@ -35,7 +57,7 @@
  *  Uses node-stream-zip (already in repo deps — BackupManager, DxtService).
  *
  *  R-6 (zip-slip): path.resolve cross-platform check BEFORE extraction.
- *  R-7 (zip-bomb): layer 2 + 3.5 caps BEFORE extraction.
+ *  R-7 (zip-bomb): layer 2 + 3.5 + 3.55 caps BEFORE extraction.
  *  R-8 (encrypted): entry.flags & 1 reject BEFORE extraction.
  *  R-11 (LevelDB lock): design uses isolated session root (copy of ZIP data).
  *  R-12 (origin-mapping variance): structure validation accepts ANY subdir
@@ -96,6 +118,46 @@ export const MAX_SELECTED_SINGLE_ENTRY_BYTES = 128 * 1024 * 1024
 /** Maximum compression ratio (uncompressed / compressed) of a selected entry. */
 export const MAX_SELECTED_COMPRESSION_RATIO = 100
 
+/**
+ * LOCK-FIX-7: separate Data/Files payload budget — maximum uncompressed size
+ * of a SINGLE `Data/Files/` payload entry.
+ *
+ * Justification (LOCK-FIX-7 — bounded resource model, not unlimited): the
+ * real Cherry Studio backup class is ~1.39 GiB compressed for the whole
+ * container. Data/Files payloads dominate the uncompressed mass (a single
+ * 700 MiB attachment was observed in real backups); a 2 GiB single payload
+ * covers the realistic worst case with 2.9× headroom over the observed
+ * class while keeping per-entry decompression work bounded. Exceeding it is
+ * a quota/bomb fatal (LOCK-FIX-3), rejected in the central-directory pass.
+ */
+export const MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES = 2 * 1024 * 1024 * 1024
+
+/**
+ * LOCK-FIX-7: separate Data/Files payload budget — maximum CUMULATIVE
+ * uncompressed size of all `Data/Files/` payload entries.
+ *
+ * Justification: the 1.39 GiB compressed whole-backup class implies a
+ * multi-GiB uncompressed attachment mass; 8 GiB cumulative covers multiple
+ * full generations of that class while bounding total decompression/disk
+ * work. Exceeding it is a quota fatal (LOCK-FIX-3), rejected in the
+ * central-directory pass BEFORE any payload is materialized.
+ */
+export const MAX_FILES_PAYLOAD_TOTAL_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
+
+/**
+ * LOCK-FIX-3: fixed disk headroom required on top of the validated
+ * uncompressed bytes during the disk preflight. Small enough to never
+ * reject realistic disks, large enough to absorb filesystem metadata and
+ * the extraction working set.
+ */
+export const DISK_PREFLIGHT_HEADROOM_BYTES = 256 * 1024 * 1024
+
+/**
+ * Exact prefix of the Data/Files payload subtree in a Cherry Studio backup
+ * ZIP (the physical attachments live at `Data/Files/<id><ext>` — LOCK-FIX-6).
+ */
+export const FILES_PAYLOAD_PREFIX = 'Data/Files/'
+
 // ---------------------------------------------------------------------------
 // Origin classification constants
 // ---------------------------------------------------------------------------
@@ -122,6 +184,29 @@ export type OriginClassification =
 // Public API
 // ---------------------------------------------------------------------------
 
+/**
+ * One non-directory `Data/Files/` payload entry as seen in the ZIP central
+ * directory (LOCK-FIX-2/7). Metadata only — never materialized by zipIntake.
+ */
+export interface FilesPayloadEntry {
+  /** Full central-directory entry name under `Data/Files/` (e.g. `Data/Files/<id><ext>`). */
+  readonly entryName: string
+  /** Central-directory uncompressed size in bytes. */
+  readonly size: number
+}
+
+/**
+ * Central-directory inventory of the `Data/Files/` payload subtree
+ * (LOCK-FIX-2/7). Built during the intake pass; consumed by the attachment
+ * plane for the bounded two-pass payload extraction.
+ */
+export interface FilesInventory {
+  /** Every non-directory entry under `Data/Files/` (any depth). */
+  readonly entries: readonly FilesPayloadEntry[]
+  /** Cumulative uncompressed size of the entries (≤ MAX_FILES_PAYLOAD_TOTAL_UNCOMPRESSED_BYTES). */
+  readonly totalUncompressedBytes: number
+}
+
 export interface ExtractResult {
   /** Absolute path to the extraction destination directory. */
   destDir: string
@@ -135,6 +220,12 @@ export interface ExtractResult {
   origin: OriginClassification
   /** Number of entries selected for extraction. */
   selectedEntryCount: number
+  /**
+   * LOCK-FIX-2/7: central-directory inventory of the `Data/Files/` payload
+   * subtree. Passed to the attachment plane for the bounded two-pass
+   * payload extraction into the candidate Files directory.
+   */
+  filesInventory: FilesInventory
 }
 
 /**
@@ -167,6 +258,19 @@ export async function extractZip(zipPath: string, destDir: string): Promise<Extr
     // selected subtree byte limits BEFORE anything is materialized
     // (LOCK-PROD-8/9).
     const selection = await selectExtractionEntries(zip, destDir, appIsPackaged())
+
+    // Layer 3.55 (LOCK-FIX-2/7): inventory the Data/Files payload subtree
+    // from the central directory with its OWN bounded budget (single-entry
+    // and cumulative caps, justified against the 1.39 GiB real-backup
+    // class). Metadata only — never materialized by the intake pass; the
+    // attachment plane performs the bounded two-pass payload extraction.
+    const filesInventory = await buildFilesInventory(zip)
+
+    // Layer 3.6 (LOCK-FIX-3): disk preflight for THIS extraction target
+    // (the temp workspace receives the selected IndexedDB/Local Storage
+    // bytes). The candidate Files directory preflights separately in the
+    // attachment plane (same helper, its own filesystem target).
+    assertDiskSpaceAvailable(destDir, selection.selectedTotalUncompressedBytes)
 
     // Layer 5: extract ONLY the selected entries, each to its EXACT path
     // under destDir (LOCK-PROD-8). Parent directories are created
@@ -227,7 +331,8 @@ export async function extractZip(zipPath: string, destDir: string): Promise<Extr
       entryCount,
       totalUncompressedBytes,
       origin: selection.origin,
-      selectedEntryCount: selection.selectedEntryCount
+      selectedEntryCount: selection.selectedEntryCount,
+      filesInventory
     }
   } finally {
     await zip.close()
@@ -490,6 +595,21 @@ export async function validateEntries(
  * No filesystem probing and no case folding: a stable cross-platform
  * canonical rule exists only for pure path normalization (LOCK-FZ2).
  *
+ * LOCK-FIX-3: additionally rejects Unicode/case-fold TARGET CONFLICTS. The
+ * extraction target filesystem on macOS defaults to case-insensitive (and
+ * historically normalized Unicode), so two DISTINCT entry names that
+ * case-fold + NFC-normalize to the same canonical extraction target would
+ * silently overwrite each other — e.g. `Data/Files/a.png` vs
+ * `Data/Files/A.png`, or NFC `café.png` vs NFD `café.png`. Rejected
+ * fail-closed (CASE_FOLD_TARGET_CONFLICT) before anything is materialized.
+ * The canonical key is `path.resolve(destDir, name).toLowerCase()` with
+ * NFC normalization — applied to ALL entries (selected and non-selected),
+ * matching the all-entry duplicate policy. This is distinct from LOCK-FZ2
+ * (pure path normalization) and is deliberately NOT followed on
+ * case-sensitive filesystems: a case-fold collision is treated as a
+ * conflict regardless of the host filesystem, because the same ZIP may be
+ * extracted onto a case-insensitive volume.
+ *
  * Notes:
  * - A backslash is a legal filename character on POSIX, so `..\..\x` would
  *   otherwise slip through path.resolve as a plain (safe) name — reject it
@@ -502,6 +622,10 @@ export async function validateNoZipSlip(zip: StreamZip.StreamZipAsync, destDir: 
   const resolvedDest = path.resolve(destDir) + path.sep
   // LOCK-FZ2: canonical (path-normalized) extraction destinations seen so far.
   const canonicalTargets = new Set<string>()
+  // LOCK-FIX-3: Unicode/case-fold canonical extraction destinations seen so
+  // far. `toLowerCase()` + NFC normalization approximates the macOS default
+  // case-insensitive (and historically Unicode-normalizing) filesystem.
+  const caseFoldTargets = new Set<string>()
 
   for (const entry of Object.values(entries)) {
     const name = entry.name
@@ -546,6 +670,29 @@ export async function validateNoZipSlip(zip: StreamZip.StreamZipAsync, destDir: 
       )
     }
     canonicalTargets.add(resolved)
+
+    // LOCK-FIX-3: Unicode/case-fold target conflict rejection. A distinct
+    // entry name that case-folds + NFC-normalizes to an already-seen target
+    // would silently overwrite it on a case-insensitive (macOS default)
+    // filesystem — reject fail-closed BEFORE extraction. The key is
+    // computed after traversal checks, so only in-bounds names reach it.
+    // Defensive normalization guard: an unnormalizable (hostile) string
+    // degrades to the raw lowercase form rather than throwing.
+    let caseFoldKey = resolved.toLowerCase()
+    try {
+      caseFoldKey = caseFoldKey.normalize('NFC')
+    } catch {
+      // Keep the lowercase form — normalization failure is treated as
+      // "no additional folding" (never a crash on hostile input).
+    }
+    if (caseFoldTargets.has(caseFoldKey)) {
+      throw new ChatImportZipError(
+        'CASE_FOLD_TARGET_CONFLICT',
+        `Multiple ZIP entries case-fold/Unicode-normalize to the same extraction destination ` +
+          `(collision with entry "${sanitizeEntryNameForMessage(name)}")`
+      )
+    }
+    caseFoldTargets.add(caseFoldKey)
   }
 }
 
@@ -914,4 +1061,110 @@ export async function selectExtractionEntries(
     originDir === DEV_ORIGIN_DIR ? { kind: 'dev', indexedDbDir } : { kind: 'file', indexedDbDir }
 
   return { origin, selectedEntries, selectedEntryCount, selectedTotalUncompressedBytes }
+}
+
+// ---------------------------------------------------------------------------
+// LOCK-FIX-2/3/7 — Data/Files payload inventory + disk preflight
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the bounded central-directory inventory of the `Data/Files/`
+ * payload subtree (LOCK-FIX-2/7).
+ *
+ * Enumerates every non-directory entry under `Data/Files/` (any depth) and
+ * enforces the SEPARATE Data/Files budget BEFORE anything is materialized:
+ * - single entry ≤ MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES (FILES_ENTRY_TOO_LARGE)
+ * - cumulative ≤ MAX_FILES_PAYLOAD_TOTAL_UNCOMPRESSED_BYTES (FILES_QUOTA_EXCEEDED)
+ *
+ * Both thresholds are justified against the 1.39 GiB real-backup inventory
+ * class (LOCK-FIX-7 — bounded resource model, not unlimited). This pass is
+ * metadata-only: payloads are NEVER materialized here — the attachment
+ * plane performs the bounded two-pass extraction (LOCK-FIX-7, reported).
+ *
+ * Safety context: container-level entry validation (Layer 2), zip-slip
+ * (Layer 3) and case-fold/Unicode target-conflict rejection (Layer 3.25)
+ * already covered ALL entries of the container, including these.
+ *
+ * @throws {ChatImportZipError} FILES_ENTRY_TOO_LARGE | FILES_QUOTA_EXCEEDED
+ *         when the bounded Data/Files budget is exceeded (fatal, before
+ *         extraction — LOCK-FIX-3 quota/bomb class).
+ */
+export async function buildFilesInventory(zip: StreamZip.StreamZipAsync): Promise<FilesInventory> {
+  const entries = await zip.entries()
+  const inventory: FilesPayloadEntry[] = []
+  let totalUncompressedBytes = 0
+
+  for (const entry of Object.values(entries)) {
+    if (entry.isDirectory) continue
+    const name = entry.name
+    if (!name.startsWith(FILES_PAYLOAD_PREFIX)) continue
+
+    const uncompressedSize = (entry as { size?: number }).size ?? 0
+
+    // Single-entry cap (defensive: Layer 2 already validated safe integers).
+    if (uncompressedSize > MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES) {
+      throw new ChatImportZipError(
+        'FILES_ENTRY_TOO_LARGE',
+        `Data/Files entry "${sanitizeEntryNameForMessage(name)}" size (${uncompressedSize} bytes) exceeds ` +
+          `the per-payload maximum (${MAX_FILES_PAYLOAD_SINGLE_ENTRY_BYTES} bytes)`
+      )
+    }
+
+    totalUncompressedBytes += uncompressedSize
+    if (totalUncompressedBytes > MAX_FILES_PAYLOAD_TOTAL_UNCOMPRESSED_BYTES) {
+      throw new ChatImportZipError(
+        'FILES_QUOTA_EXCEEDED',
+        `Data/Files payload total (${totalUncompressedBytes} bytes) exceeds ` +
+          `the cumulative maximum (${MAX_FILES_PAYLOAD_TOTAL_UNCOMPRESSED_BYTES} bytes)`
+      )
+    }
+
+    inventory.push({ entryName: name, size: uncompressedSize })
+  }
+
+  logger.info(
+    `Files payload inventory: ${inventory.length} entry(ies), ` +
+      `${totalUncompressedBytes} bytes uncompressed (never materialized during intake)`
+  )
+
+  return { entries: inventory, totalUncompressedBytes }
+}
+
+/**
+ * LOCK-FIX-3: disk preflight for an extraction target directory.
+ *
+ * Fails closed when the target filesystem does not have `requiredBytes`
+ * available PLUS the fixed {@link DISK_PREFLIGHT_HEADROOM_BYTES} headroom.
+ * Uses `fs.statfsSync` (bavail × bsize — the actual bytes usable by an
+ * unprivileged process, not the root-reserved bfree). A statfs failure is
+ * treated as preflight failure (bounded resource model requires the check).
+ *
+ * @param dir            Absolute path of the extraction target directory.
+ * @param requiredBytes  Validated uncompressed bytes to be materialized.
+ * @throws {ChatImportZipError} DISK_PREFLIGHT_FAILED when the target
+ *         filesystem lacks the required headroom, or statfs cannot run.
+ */
+export function assertDiskSpaceAvailable(dir: string, requiredBytes: number): void {
+  const requirement = requiredBytes + DISK_PREFLIGHT_HEADROOM_BYTES
+  let stat: fs.StatsFs
+  try {
+    stat = fs.statfsSync(dir)
+  } catch (error) {
+    const detail = error instanceof Error && error.message ? error.message.split('\n')[0].trim() : 'unknown error'
+    const redacted = detail.replaceAll(dir, '<destDir>')
+    throw new ChatImportZipError(
+      'DISK_PREFLIGHT_FAILED',
+      `Disk preflight could not be evaluated for the extraction target (${redacted})`
+    )
+  }
+  const available = Number(stat.bavail) * Number(stat.bsize)
+  if (!Number.isFinite(available) || available < requirement) {
+    throw new ChatImportZipError(
+      'DISK_PREFLIGHT_FAILED',
+      `Disk preflight failed: extraction requires ${requirement} bytes of headroom ` +
+        `(uncompressed ${requiredBytes} bytes + fixed headroom ` +
+        `${DISK_PREFLIGHT_HEADROOM_BYTES} bytes) but the target filesystem has ` +
+        `${Number.isFinite(available) ? available : 'unknown'} bytes available`
+    )
+  }
 }

@@ -2021,6 +2021,15 @@
         "description": "导入已取消。未对您的数据进行任何更改。",
         "title": "导入已取消"
       },
+      "catalog_recovery": {
+        "description": "请稍候——应用程序即将重新打开。",
+        "error_code": "错误代码",
+        "repair_required": {
+          "description": "Cherry Studio 未能完成数据恢复。您的数据未被更改。请重新启动应用后重试。",
+          "title": "数据恢复未完成"
+        },
+        "title": "正在恢复导入的数据…"
+      },
       "confirm_button": "开始导入",
       "confirm_description": "这将用 Cherry Studio 备份中的数据替换所有现有聊天数据。此操作无法撤销。",
       "confirm_title": "确认导入",
@@ -2366,7 +2375,8 @@
     },
     "attachments": {
       "pasted_image": "剪切板图片",
-      "pasted_text": "剪切板文件"
+      "pasted_text": "剪切板文件",
+      "unavailable": "附件不可用"
     },
     "backup": {
       "failed": "备份失败",

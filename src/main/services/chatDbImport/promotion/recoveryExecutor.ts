@@ -581,6 +581,12 @@ export function createRecoveryExecutor(options: RecoveryExecutorOptions): Recove
         candidateId: decision.action === 'restore-rollback-snapshot' ? 'unknown' : '',
         retainedSnapshotPath: '',
         candidateDbPath: '',
+        retainedFilesSnapshotDir: '',
+        catalogSnapshotPath: '',
+        receipts: {
+          candidate: { db: null, files: null, catalog: null },
+          old: { db: null, files: null, catalog: null }
+        },
         authorization: lease,
         release() {
           if (!lease.isReleased()) {

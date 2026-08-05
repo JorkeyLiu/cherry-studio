@@ -2021,6 +2021,15 @@
         "description": "匯入已取消。您的資料未做任何變更。",
         "title": "匯入已取消"
       },
+      "catalog_recovery": {
+        "description": "請稍候——應用程式即將重新開啟。",
+        "error_code": "錯誤代碼",
+        "repair_required": {
+          "description": "Cherry Studio 未能完成資料恢復。您的資料未被更改。請重新啟動應用程式後重試。",
+          "title": "資料恢復未完成"
+        },
+        "title": "正在還原匯入的資料…"
+      },
       "confirm_button": "開始匯入",
       "confirm_description": "此操作將使用 Cherry Studio 備份中的資料取代所有現有聊天資料。此操作無法復原。",
       "confirm_title": "確認匯入",
@@ -2366,7 +2375,8 @@
     },
     "attachments": {
       "pasted_image": "剪貼簿圖片",
-      "pasted_text": "剪貼簿檔案"
+      "pasted_text": "剪貼簿檔案",
+      "unavailable": "附件不可用"
     },
     "backup": {
       "failed": "備份失敗",

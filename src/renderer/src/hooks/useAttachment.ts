@@ -1,6 +1,5 @@
 import { loggerService } from '@logger'
 import TextFilePreviewPopup from '@renderer/components/Popups/TextFilePreview'
-import type { FileType } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
 import { useTranslation } from 'react-i18next'
 
@@ -13,7 +12,7 @@ const logger = loggerService.withContext('FileAction')
  */
 export function useAttachment() {
   const { t } = useTranslation()
-  const preview = async (path: string, title: string, fileType: FileType, extension?: string) => {
+  const preview = async (path: string, title: string, fileType: string | null, extension?: string) => {
     try {
       if (fileType === FILE_TYPE.TEXT) {
         const content = await window.api.fs.readText(path)

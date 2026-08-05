@@ -24,6 +24,7 @@
  * Main-only. Never expose over IPC/preload/renderer.
  */
 
+import { stripBlockAttachmentUnavailableMarker } from '@main/services/chatDb/attachmentAvailability'
 import type {
   FileReferenceData,
   MessageBlockData,
@@ -94,7 +95,14 @@ export function frameMessageRecord(m: MessageData): Record<string, unknown> {
   }
 }
 
-/** Frame a block record: every canonical column present, null when null. */
+/**
+ * Frame a block record: every canonical column present, null when null.
+ *
+ * LOCK-UI-6: the importer-owned attachment-unavailable marker (applied to
+ * the candidate AFTER the source manifest is built) is deterministically
+ * EXCLUDED from the framed overflow — it is not source evidence, so the
+ * manifest-side and candidate-side record digests stay comparable.
+ */
 export function frameBlockRecord(b: MessageBlockData): Record<string, unknown> {
   return {
     id: b.id,
@@ -105,7 +113,7 @@ export function frameBlockRecord(b: MessageBlockData): Record<string, unknown> {
     createdAt: b.createdAt,
     updatedAt: b.updatedAt,
     sortOrder: b.sortOrder,
-    overflow: b.overflow
+    overflow: stripBlockAttachmentUnavailableMarker(b.overflow)
   }
 }
 
@@ -157,11 +165,16 @@ export function digestMessage(m: MessageData): MessageDigests {
   }
 }
 
-/** Compute block digests (record + overflow + structured content slot). */
+/**
+ * Compute block digests (record + overflow + structured content slot).
+ * LOCK-UI-6: the importer-owned unavailable marker is stripped from both
+ * the record and overflow digests (see {@link frameBlockRecord}).
+ */
 export function digestBlock(b: MessageBlockData): BlockDigests {
+  const overflow = stripBlockAttachmentUnavailableMarker(b.overflow)
   return {
     record: canonicalDigest(frameBlockRecord(b)),
-    overflow: canonicalDigest(b.overflow),
+    overflow: canonicalDigest(overflow),
     structuredContent: 'content' in b.overflow ? canonicalDigest(b.overflow.content) : null
   }
 }

@@ -67,6 +67,18 @@
  *   once. The live DB stays open and authoritative (LOCK-4411); close/
  *   install/verify belong to Phase 4.4.2.
  *
+ * Attachment plane (LOCK-FIX-2/7/9): after the data plane finalizes and
+ * BEFORE the candidate chat.db is sealed, the attachment plane reconciles
+ * the source `files` catalog rows + the committed file references against
+ * the central-directory Data/Files inventory, streams catalog-matched
+ * payloads into the candidate Files directory (`Files/<id><ext>`) with
+ * bounded streaming + SHA-256 (two-pass ZIP access), and writes the durable
+ * `files-catalog.json` handoff. All artifacts live inside the owned
+ * candidate directory, so cancellation before promotion precisely cleans
+ * them (candidate discard). Fatal classes reject the import atomically
+ * (LOCK-FIX-3); per-payload degradations are aggregated count-only and
+ * never reject (LOCK-FIX-4/5).
+ *
  * A-9: Platform gate — if process.platform !== 'darwin', throw.
  * All imports route through loggerService with context 'chatDbImport'.
  */
@@ -87,6 +99,9 @@ import type {
 } from '@shared/chatImport/types'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
+import { type AttachmentMarkerResult, markUnavailableAttachmentBlocks } from './attachmentMarkers'
+import type { AttachmentPlaneLike, AttachmentPlaneOptions, AttachmentPlaneStats } from './attachmentPlane'
+import { createAttachmentPlane, FILES_CATALOG_FILENAME } from './attachmentPlane'
 import { CandidateDbResource } from './candidateDb'
 import { ChatImportSessionError, ChatImportUnsupportedPlatformError } from './errors'
 import {
@@ -94,6 +109,7 @@ import {
   boundRendererErrorCode,
   createImportDataPlane,
   type DataPlaneNormalizationStats,
+  type SourceFileRow,
   summarizeDataPlaneFailure,
   summarizeRendererError
 } from './importDataPlane'
@@ -110,6 +126,7 @@ import {
   NAVIGATION_PROJECTION_STATE_KEY
 } from './navigationProjection'
 import type {
+  CatalogBoundary,
   PromotionExecutionFailure,
   PromotionExecutionHandoff,
   PromotionExecutionLiveDb,
@@ -120,6 +137,7 @@ import type {
 } from './promotion/execution'
 import { createPromotionExecutor } from './promotion/execution'
 import type {
+  CatalogSnapshotBoundary,
   ExecutingPromotionCapability,
   PreparedPromotionHandle,
   PromotionPreparationFailure,
@@ -143,7 +161,7 @@ import type { CandidateVerifierOptions } from './verification/candidateVerifier'
 import { createCandidateVerifier } from './verification/candidateVerifier'
 import type { SourceVerificationManifest } from './verification/sourceManifest'
 import type { CandidateVerificationReport } from './verification/verificationContracts'
-import { extractZip } from './zipIntake'
+import { extractZip, type FilesInventory } from './zipIntake'
 
 const logger = loggerService.withContext('chatDbImport')
 
@@ -270,6 +288,21 @@ export interface ImportDataPlaneLike {
    */
   getImportedTopicFacts(): Array<{ id: string; deletedAt: string | null }>
   /**
+   * LOCK-FIX-2/4/6: validated source `files` rows captured on committed
+   * pages (Main-only — never expose over IPC). Only callable after a
+   * successful finalize(); the attachment plane consumes them for the
+   * candidate catalog handoff.
+   */
+  getSourceFileRows(): SourceFileRow[]
+  /**
+   * LOCK-FIX-6: fileId → reference multiplicity over the committed
+   * candidate `file_references` projection (Main-only — never expose over
+   * IPC). Only callable after a successful finalize(); the attachment plane
+   * uses it to classify referenced-vs-orphan files and rebuild counts under
+   * existing FileManager semantics.
+   */
+  getImportedFileReferenceCounts(): Array<[string, number]>
+  /**
    * Finalized source verification manifest (LOCK-4301). Only callable after
    * a successful finalize(); the orchestrator uses it to start the verifier.
    */
@@ -356,6 +389,27 @@ export interface StartImportOptions {
    * Production default is Date.now.
    */
   now?: () => number
+  /**
+   * LOCK-FIX-2/7/9: attachment-plane factory bound to the sealed candidate.
+   * Production default is `createAttachmentPlane(options)` — it reopens the
+   * source ZIP (two-pass, LOCK-FIX-7) to stream Data/Files payloads into
+   * the candidate Files directory with bounded streaming + SHA-256, and
+   * writes the durable `files-catalog.json` handoff. All artifacts live
+   * inside the owned candidate directory, so candidate discard removes them
+   * exactly (LOCK-FIX-9). Test injection (LOCK-O8) substitutes a double.
+   */
+  attachmentFactory?: (options: AttachmentPlaneOptions) => AttachmentPlaneLike
+  /**
+   * LOCK-UI-2/3/4/5/6: import-only per-block unavailable-attachment marker
+   * writer. Production default is `markUnavailableAttachmentBlocks(sqlite,
+   * degradedFileIds)` — it transactionally marks every imported file/image
+   * block referencing a reference-degraded file BEFORE the candidate seals,
+   * preserving display metadata + file_reference rows. Test injection
+   * (LOCK-O8) substitutes a double. Must throw on any failure — the import
+   * then enters the error lifecycle (a marker that cannot be persisted
+   * rejects candidate finalization, never a silent partial seal).
+   */
+  attachmentMarkerWriter?: (sqlite: unknown, degradedFileIds: readonly string[]) => AttachmentMarkerResult
 }
 
 /**
@@ -443,6 +497,25 @@ class InternalImportSession implements ImportSession {
   public candidate: CandidateResourceLike | null = null
   /** Data plane bound to the candidate DB — owned by this session. */
   public dataPlane: ImportDataPlaneLike | null = null
+  /**
+   * LOCK-FIX-2/7/9: attachment plane bound to the candidate Files dir +
+   * catalog handoff path. Owned by this session; constructed after the
+   * candidate initializes. All attachment artifacts live inside the owned
+   * candidate directory, so candidate discard removes them exactly.
+   */
+  public attachmentPlane: AttachmentPlaneLike | null = null
+  /** Count-only attachment stats retained after the plane finalizes. */
+  public attachmentStats: AttachmentPlaneStats | null = null
+  /**
+   * LOCK-FIX-8: source ZIP path retained Main-internally for the two-pass
+   * payload extraction (LOCK-FIX-7). Never logged, never over IPC.
+   */
+  public zipPath: string | null = null
+  /**
+   * LOCK-FIX-2/7: central-directory Data/Files inventory from the intake
+   * pass — handed to the attachment plane for the bounded extraction.
+   */
+  public filesInventory: FilesInventory | null = null
   /**
    * LOCK-TRASH-2: exactly one immutable L2 trash retention baseline captured
    * per import session from the injectable Main clock. Every page/topic of
@@ -895,6 +968,15 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
       }
     })
 
+  // LOCK-UI-2/3/4/5/6: production attachment-marker writer persists the
+  // import-only unavailable marker into every imported file/image block
+  // referencing a reference-degraded file — BEFORE the candidate seals.
+  // It is transactional (fail closed → rejects candidate finalization) and
+  // aggregate-only (never logs/returns file/block IDs).
+  const writeAttachmentMarkers =
+    options?.attachmentMarkerWriter ??
+    ((sqlite: unknown, degradedFileIds: readonly string[]) => markUnavailableAttachmentBlocks(sqlite, degradedFileIds))
+
   // Generate session ID
   const sessionId = generateSessionId()
   const session = new InternalImportSession(sessionId)
@@ -932,6 +1014,11 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
         `${extractResult.selectedEntryCount} selected entries, ` +
         `IndexedDB at ${extractResult.indexedDbDir}`
     )
+    // LOCK-FIX-2/7/8: retain the source ZIP path and the central-directory
+    // Data/Files inventory for the two-pass payload extraction. Both stay
+    // Main-internal — never logged, never over IPC.
+    session.zipPath = zipPath
+    session.filesInventory = extractResult.filesInventory
 
     // LOCK-PROD-8: the origin is classified from the ZIP CENTRAL DIRECTORY
     // during selective extraction (before anything is materialized). The
@@ -1007,6 +1094,23 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
           }
           return
         }
+
+        // LOCK-FIX-2/7/9: construct the attachment plane bound to the
+        // candidate directory (chat.db sits at <candidateDir>/chat.db, so
+        // dirname(dbPath) IS the owned candidate dir). All attachment
+        // artifacts (Files/ + files-catalog.json) live inside it, so
+        // candidate discard removes them exactly. Construction is pure
+        // (no filesystem side effects until finalize).
+        const attachmentFactory = options?.attachmentFactory ?? createAttachmentPlane
+        const candidateDir = path.dirname(candidate.getDbPath())
+        session.attachmentPlane = attachmentFactory({
+          sessionId: sid,
+          zipPath: session.zipPath as string,
+          filesInventory: session.filesInventory as FilesInventory,
+          candidateFilesDir: path.join(candidateDir, 'Files'),
+          catalogPath: path.join(candidateDir, FILES_CATALOG_FILENAME),
+          now
+        })
 
         // Transition to reading and send first page request for the first entity
         session.setState('reading')
@@ -1097,7 +1201,7 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
           } else {
             // All entities exhausted — Main self-completes (authoritative,
             // LOCK-O4). Finalize + seal + candidate-ready exactly once.
-            await completeCandidate(session, options, now, writeProjection)
+            await completeCandidate(session, options, now, writeProjection, writeAttachmentMarkers)
           }
         }
       },
@@ -1378,6 +1482,7 @@ export { registerChatImportIpc }
  * Promotion preparation API (Phase 4.4.1, LOCK-4411..4417).
  */
 export type {
+  CatalogSnapshotBoundary,
   ExecutingPromotionCapability,
   PreparedPromotionConsumeResult,
   PreparedPromotionHandle,
@@ -1430,6 +1535,12 @@ export interface StartPromotionPreparationOptions {
   /** Optional coordinator override (default: shared coordinator). */
   coordinator?: MaintenanceCoordinator
   /**
+   * LOCK-PROMO-3: catalog snapshot boundary used to capture the LIVE Dexie
+   * files catalog before any mutation. Production wraps the registered
+   * main renderer catalog boundary; tests inject a double.
+   */
+  catalogBoundary?: CatalogSnapshotBoundary
+  /**
    * Test injection (LOCK-O8): preparation function. Production default is
    * the promotion preparation gate (`preparePromotion`).
    */
@@ -1437,7 +1548,18 @@ export interface StartPromotionPreparationOptions {
     claim: PromotionClaimHandle,
     dbDir: string,
     getLiveSqlite: () => unknown,
-    coordinator?: MaintenanceCoordinator
+    options?: {
+      coordinator?: MaintenanceCoordinator
+      catalogBoundary?: CatalogSnapshotBoundary
+      /**
+       * LOCK-ORCH-1/LOCK-PREP-4: cooperative cancellation probe wired from
+       * the session. When it returns true at a preparation await boundary
+       * (raced cancel/fail/dispose/will-quit), the gate settles a bounded
+       * CANCELLED failure — the lease is released and any already-written
+       * journal stays at the safe `candidates-ready` phase.
+       */
+      shouldAbort?: () => boolean
+    }
   ) => Promise<PromotionPreparationResult>
 }
 
@@ -1494,7 +1616,23 @@ export async function startPromotionPreparation(
     return { status: 'not-claimable' }
   }
 
-  const result = await prepare(claim, options.dbDir, options.getLiveSqlite, options.coordinator)
+  // LOCK-ORCH-1/LOCK-PREP-4: the session is the single cancellation source.
+  // The probe fires at every preparation await boundary once the session was
+  // cancelled/disposed/superseded — the gate then settles a bounded CANCELLED
+  // failure (lease released, journal left at the safe candidates-ready phase)
+  // instead of continuing to create snapshots for a session that no longer
+  // owns the claim.
+  const shouldAbort = (): boolean =>
+    session.state === 'cancelled' || session.isDisposed || activeSession?.id !== session.id
+
+  const result = await prepare(
+    claim,
+    options.dbDir,
+    options.getLiveSqlite,
+    options.coordinator !== undefined || options.catalogBoundary !== undefined
+      ? { coordinator: options.coordinator, catalogBoundary: options.catalogBoundary, shouldAbort }
+      : { shouldAbort }
+  )
 
   if (!result.ok) {
     // Exact-once terminal settle via the existing token/state protocol.
@@ -1587,6 +1725,7 @@ export function transferPromotionExecution(): PromotionExecutionTransferOutcome 
  * Destructive promotion execution API (Phase 4.4.2, LOCK-4421..4428).
  */
 export type {
+  CatalogBoundary,
   PromotionExecutionClassification,
   PromotionExecutionFailure,
   PromotionExecutionFailureCode,
@@ -1614,6 +1753,12 @@ export interface StartPromotionExecutionOptions {
   liveDb: PromotionExecutionLiveDb
   /** Optional coordinator override (default: shared coordinator). */
   coordinator?: MaintenanceCoordinator
+  /**
+   * LOCK-PROMO-5: catalog boundary for the single Dexie transaction
+   * replace-all and the post-install catalog facts query. Production wraps
+   * the registered main renderer catalog boundary.
+   */
+  catalogBoundary?: CatalogBoundary
   /**
    * Test injection (LOCK-O8): executor factory. Production default is
    * {@link createPromotionExecutor}.
@@ -1898,11 +2043,31 @@ export async function startPromotionExecution(
   const token = capability.token
 
   const executorFactory = options.executorFactory ?? createPromotionExecutor
+  if (!options.catalogBoundary) {
+    logger.error(
+      `Promotion execution for session ${session.id} cannot start: catalog boundary unavailable (LOCK-PROMO-5)`
+    )
+    completePromotion(token, 'promotion-failed')
+    session.releasePromotionOwnership()
+    return {
+      status: 'promotion-failed',
+      failure: Object.freeze({
+        subphase: 'not-started',
+        classification: 'pre-install',
+        recoveryRequired: false,
+        code: 'CATALOG_BOUNDARY_UNAVAILABLE',
+        safeCode: null,
+        liveDisposition: 'open'
+      }),
+      recoveryHandoff: null
+    }
+  }
   const executor = executorFactory({
     capability,
     dataRoot: options.dataRoot,
     liveDb: options.liveDb,
     coordinator: options.coordinator,
+    catalogBoundary: options.catalogBoundary,
     primitives: options.primitives
   })
   session.promotionExecutor = executor
@@ -2003,7 +2168,8 @@ async function completeCandidate(
   session: InternalImportSession,
   options: StartImportOptions | undefined,
   now: () => number,
-  writeProjection: (sqlite: unknown, projection: ImportNavigationProjection) => void
+  writeProjection: (sqlite: unknown, projection: ImportNavigationProjection) => void,
+  writeAttachmentMarkers: (sqlite: unknown, degradedFileIds: readonly string[]) => AttachmentMarkerResult
 ): Promise<void> {
   // Exact-once guard (LOCK-O3/O4): completion runs only from `reading` and
   // only if no ready result has been emitted.
@@ -2098,6 +2264,69 @@ async function completeCandidate(
     const error = new Error(`Source read stats mismatch between orchestrator and data plane: ${mismatch}`)
     await session.fail('stats comparison', error)
     throw error
+  }
+
+  // 2a. LOCK-FIX-2/7/9: finalize the attachment plane (reconcile catalog/
+  // refs/payloads, stream Data/Files payloads into the candidate Files dir
+  // with bounded streaming + SHA-256, write + verify the durable
+  // files-catalog.json handoff). Runs BEFORE the candidate chat.db is
+  // sealed so a failure enters the error lifecycle with the candidate still
+  // discardable — a candidate-ready result always implies a complete sealed
+  // candidate + attachments. Any fatal class (LOCK-FIX-3) rejects the
+  // import atomically; per-payload degradations (LOCK-FIX-4/5) are
+  // aggregated count-only by the plane and never reject.
+  const attachment = session.attachmentPlane
+  if (attachment) {
+    try {
+      session.attachmentStats = await attachment.finalize({
+        sourceFileRows: plane.getSourceFileRows(),
+        referenceCounts: plane.getImportedFileReferenceCounts(),
+        shouldAbort: () => session.state === 'cancelled' || session.isDisposed
+      })
+    } catch (error) {
+      await session.fail('attachment plane finalize', error)
+      throw toError(error)
+    }
+  }
+
+  // LOCK-CORR-1: cancellation/disposal must be rechecked AFTER the awaited
+  // attachment finalize and BEFORE the candidate is sealed / transitions to
+  // candidate-ready. `shouldAbort` above can only probe at the plane's
+  // cooperative check points; cancel/dispose racing the finalize's final
+  // checks would otherwise let this continuation seal a DISCARDED candidate
+  // (recreating owned paths) and spuriously transition cancelled →
+  // candidate-ready. A cancelled/disposed/superseded session returns here —
+  // the cancel/error lifecycle (already in flight) discards the candidate.
+  // (Cast: TS narrowed `state` to 'reading' from the entry guard, but
+  // setState() mutated it and cancel may have raced the awaited finalize.)
+  if ((session.state as ImportState) === 'cancelled' || session.isDisposed || activeSession?.id !== session.id) {
+    logger.info(`Session ${session.id} was cancelled/disposed during attachment finalize; candidate not sealed`)
+    return
+  }
+
+  // 2b. LOCK-UI-2/3/4/5/6: persist the import-only per-block unavailable
+  // marker into EVERY imported file/image block referencing a
+  // reference-degraded file — BEFORE the candidate seals. Runs only when
+  // the attachment plane reported degraded ids (never for healthy imports).
+  // The mutation is transactional: a failure rejects candidate finalization
+  // (error/discard lifecycle) — never a silent partial seal. The log line is
+  // aggregate count-only (LOCK-UI-5): never file/block IDs, paths, names,
+  // or content.
+  if (attachment) {
+    try {
+      const degradedFileIds = attachment.getDegradedFileIds()
+      if (degradedFileIds.length > 0) {
+        const markerResult = writeAttachmentMarkers(candidate.getSqlite(), degradedFileIds)
+        logger.info(
+          `Session ${session.id}: attachment availability marker applied — ` +
+            `${markerResult.markedBlockCount} block(s) marked unavailable ` +
+            `for ${markerResult.degradedFileIdCount} degraded file id(s) (aggregate)`
+        )
+      }
+    } catch (error) {
+      await session.fail('attachment unavailable marker', error)
+      throw toError(error)
+    }
   }
 
   // 3. elapsedMs: wall-clock candidate construction time (LOCK-O7/O8 clock).

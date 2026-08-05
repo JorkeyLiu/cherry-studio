@@ -388,14 +388,17 @@ class FileManager {
       return ''
     }
 
-    const date = dayjs(file.created_at).format('YYYY-MM-DD')
+    // LOCK-BROWSE-3: catalog-imported rows may have a null source timestamp —
+    // render the neutral name without an "Invalid Date" prefix.
+    const date = file.created_at ? dayjs(file.created_at).format('YYYY-MM-DD') : ''
+    const datePrefix = date ? `${date} ` : ''
 
     if (file.origin_name.includes('pasted_text')) {
-      return date + ' ' + i18n.t('message.attachments.pasted_text') + file.ext
+      return datePrefix + i18n.t('message.attachments.pasted_text') + file.ext
     }
 
     if (file.origin_name.startsWith('temp_file') && file.origin_name.includes('image')) {
-      return date + ' ' + i18n.t('message.attachments.pasted_image') + file.ext
+      return datePrefix + i18n.t('message.attachments.pasted_image') + file.ext
     }
 
     return file.origin_name

@@ -65,6 +65,27 @@ export type ChatImportZipErrorCode =
   // LOCK-FZ2: distinct entry names that normalize to the same extraction
   // destination (a/b vs a//b vs a/./b) are rejected before extraction.
   | 'DUPLICATE_EXTRACTION_TARGET'
+  // LOCK-FIX-3: Unicode/case-fold target conflicts. Distinct entry names
+  // that normalize to the same canonical target under macOS's default
+  // case-insensitive filesystem (case folding + NFC normalization) would
+  // silently overwrite each other during extraction — rejected fail-closed
+  // in the central-directory pass, before anything is materialized.
+  | 'CASE_FOLD_TARGET_CONFLICT'
+  // LOCK-FIX-3: bounded Data/Files payload budget (LOCK-FIX-7). The
+  // Data/Files subtree gets its own single-entry and cumulative
+  // uncompressed quotas, justified against the 1.39 GiB real-backup
+  // inventory class, and is rejected BEFORE extraction (quota/bomb class).
+  | 'FILES_ENTRY_TOO_LARGE'
+  | 'FILES_QUOTA_EXCEEDED'
+  // LOCK-FIX-3: disk preflight failure. The bounded resource model requires
+  // the extraction target filesystem to have headroom for the validated
+  // uncompressed bytes before anything is materialized.
+  | 'DISK_PREFLIGHT_FAILED'
+  // LOCK-FIX-3: ambiguous payload per file ID. Two distinct ZIP entries
+  // under Data/Files/ resolve to the same canonical `<id><ext>` payload for
+  // one catalog file — the source is inconsistent, so the archive is
+  // rejected atomically (never guess which payload is authoritative).
+  | 'AMBIGUOUS_PAYLOAD'
 
 /**
  * Thrown during ZIP intake validation or extraction.
@@ -77,6 +98,49 @@ export class ChatImportZipError extends Error {
     // Sanitise: never include raw paths in the message
     super(`ZIP validation failed (${code}): ${detail}`)
     this.name = 'ChatImportZipError'
+    this.code = code
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Attachment plane errors (LOCK-FIX-3 fatal classes, LOCK-FIX-4 degraded)
+// ---------------------------------------------------------------------------
+
+export type ChatImportAttachmentErrorCode =
+  // Fatal: two Data/Files entries resolve to one catalog file id+ext.
+  | 'AMBIGUOUS_PAYLOAD'
+  // Fatal: an ACTUAL streamed payload exceeded the hard single-entry /
+  // cumulative Files caps (bomb/quota class — the archive is untrustworthy).
+  | 'FILES_PAYLOAD_OVERFLOW'
+  // Fatal: a candidate artifact verification/seal step failed (extracted
+  // payload missing/mismatched after write, or the catalog cannot be
+  // durably sealed/read back). The candidate state is unrecoverable.
+  | 'CANDIDATE_STATE_UNRECOVERABLE'
+  // Fatal: the catalog handoff could not be written/renamed durably.
+  | 'CATALOG_WRITE_FAILED'
+  // Fatal: the source ZIP could not be reopened/read for payload extraction
+  // (missing/moved/unreadable source archive) — the candidate cannot be
+  // completed.
+  | 'FILES_EXTRACTION_FAILED'
+  // Fatal: a hard-budget violation encountered during streaming that must
+  // reject the archive atomically (distinct from per-payload degradations).
+  | 'FILES_BUDGET_VIOLATION'
+  // Fatal-class cancellation signal raised by the attachment plane when the
+  // session was cancelled mid-extraction (cleanup is owned by the caller).
+  | 'CANCELLED'
+
+/**
+ * Thrown by the attachment plane for archive/session FATAL classes
+ * (LOCK-FIX-3). Per-payload degradation (LOCK-FIX-4) never throws — it is
+ * aggregated count-only. Messages are sanitized: never source paths,
+ * filenames, user content, or raw file IDs.
+ */
+export class ChatImportAttachmentError extends Error {
+  public readonly code: ChatImportAttachmentErrorCode
+
+  constructor(code: ChatImportAttachmentErrorCode, detail: string) {
+    super(`Attachment import failed (${code}): ${detail}`)
+    this.name = 'ChatImportAttachmentError'
     this.code = code
   }
 }

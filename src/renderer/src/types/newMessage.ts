@@ -101,6 +101,14 @@ export interface ImageMessageBlock extends BaseMessageBlock {
   type: MessageBlockType.IMAGE
   url?: string // For generated images or direct links
   file?: FileMetadata // For user uploaded image files
+  /**
+   * Import-only overflow marker (LOCK-UI-1): a strict `true` means the
+   * referenced attachment is degraded (no physical payload/catalog row) —
+   * the renderer must show an unavailable placeholder instead of building a
+   * missing file URL or calling path/image-size IPC. Absent/false keeps the
+   * current behavior.
+   */
+  l2AttachmentUnavailable?: boolean
   metadata?: BaseMessageBlock['metadata'] & {
     prompt?: string
     negativePrompt?: string
@@ -132,6 +140,14 @@ export interface CitationMessageBlock extends BaseMessageBlock {
 export interface FileMessageBlock extends BaseMessageBlock {
   type: MessageBlockType.FILE
   file: FileMetadata // 文件信息
+  /**
+   * Import-only overflow marker (LOCK-UI-1): a strict `true` means the
+   * referenced attachment is degraded (no physical payload/catalog row) —
+   * the renderer must keep the icon/name/type visible but disable
+   * preview/open instead of building a missing `file://` URL or calling
+   * fs/openPath IPC. Absent/false keeps the current behavior.
+   */
+  l2AttachmentUnavailable?: boolean
 }
 
 // 视频块

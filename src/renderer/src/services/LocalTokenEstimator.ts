@@ -22,6 +22,7 @@ import {
 import type { FileMetadata } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
 import type { ImageMessageBlock, Message } from '@renderer/types/newMessage'
+import { isBlockAttachmentUnavailable } from '@renderer/utils/attachmentAvailability'
 import {
   findFileBlocks,
   findImageBlocks,
@@ -317,11 +318,20 @@ export function estimateFileTokens(file: FileMetadata): Promise<number> {
 
 /**
  * 估算 ImageMessageBlock 的 token 数：
+ * - 标记为不可用（导入降级，LOCK-UI-2）的图片 → 固定回退值，绝不发起
+ *   file:imageSize IPC（物理载荷缺失，无法/不应读取尺寸）
  * - 本地上传文件 → 文件路径（分辨率驱动，带缓存）
  * - data URL → 直接解析分辨率
  * - 远程 URL → 固定回退值（绝不下载，LOCK-003）
  */
 export async function estimateImageBlockTokens(block: ImageMessageBlock): Promise<number> {
+  // LOCK-UI-2: degraded imported image — deterministic fallback consistent
+  // with the existing missing-image policy (IMAGE_FALLBACK_TOKENS), with NO
+  // file:imageSize / file:imageSizeExternal IPC attempt.
+  if (isBlockAttachmentUnavailable(block)) {
+    return IMAGE_FALLBACK_TOKENS
+  }
+
   if (block.file) {
     return estimateFileTokens(block.file)
   }

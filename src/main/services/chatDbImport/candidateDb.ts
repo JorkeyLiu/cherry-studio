@@ -967,6 +967,80 @@ export async function recoverOrphanedCandidates(
   }
 }
 
+/**
+ * Remove the EXACT owned candidate directory for a CONVERGED promotion
+ * (LOCK-CLEAN-1..5). Called by the v2 recovery executor ONLY AFTER the
+ * promotion journal has been durably cleaned — no recovery path can need
+ * the candidate handoff (`files-catalog.json`) anymore, so a successful
+ * import leaves no promoted candidate residue.
+ *
+ * Safety / ownership:
+ * - LOCK-CLEAN-2: the candidateId is validated against the strict owned
+ *   allowlist BEFORE any path resolution or deletion; a malicious/foreign
+ *   ID fails closed (throws) and can never influence what gets deleted.
+ * - Never broad-deletes: only the exact owned leaf directory named by the
+ *   candidateId is a removal candidate; the candidate ROOT and unrelated
+ *   sessions are never touched. A non-directory or symlink at the owned
+ *   leaf is foreign residue and is LEFT ALONE (never removed).
+ * - LOCK-LIFE-1: removal never runs through an unvalidated candidate root —
+ *   a root replaced by a symlink after init fails closed before any removal.
+ * - LOCK-CLEAN-3: whatever remains in the owned leaf (the
+ *   `files-catalog.json` handoff, an empty `Files/` / `chat.db`, and the
+ *   empty shell) is removed through the existing bounded EBUSY-retry
+ *   primitive. Thrown errors and this helper's own logs carry no private
+ *   paths — only the bounded candidate ID and fixed context.
+ *
+ * Idempotent (LOCK-CLEAN-2): an already-absent leaf is a clean state and
+ * returns `true` — safe to call any number of times.
+ *
+ * @returns `true` when no candidate evidence remains (removed or already
+ *   absent).
+ * @throws {Error} on an invalid candidateId or when the owned leaf could
+ *   not be removed (fixed context — no private paths/names).
+ */
+export async function removeConvergedCandidate(candidateId: string, dataRoot: string = DATA_PATH): Promise<boolean> {
+  // LOCK-CLEAN-2: strict owned-ID validation BEFORE any filesystem access.
+  const candidateDirName = getOwnedCandidateDirName(candidateId)
+
+  const candidateRoot = getCandidateRoot(dataRoot)
+  const candidateDir = path.join(candidateRoot, candidateDirName)
+
+  // LOCK-LIFE-1: never remove through an unvalidated candidate root. ENOENT
+  // root (no candidates yet) is permitted and is a clean state.
+  assertCandidateRootRealDir(candidateRoot)
+
+  // Idempotent: an absent owned leaf is already clean.
+  let stat: fs.Stats | null = null
+  try {
+    stat = await fs.promises.lstat(candidateDir)
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') {
+      logger.info(`Converged candidate already absent (candidateId=${candidateId})`)
+      return true
+    }
+    logger.error(
+      `Converged candidate removal refused: owned leaf unreadable (candidateId=${candidateId})`,
+      error as Error
+    )
+    throw new Error('Converged candidate removal refused: owned candidate leaf is unreadable (fail closed).')
+  }
+  if (!stat.isDirectory()) {
+    // LOCK-CLEAN-2: never broad-delete. A non-directory/symlink at the owned
+    // leaf is foreign residue, not an owned candidate directory.
+    logger.warn(`Converged candidate removal skipped: owned leaf is not a directory (candidateId=${candidateId})`)
+    return true
+  }
+
+  try {
+    await removeDirWithRetryAsync(candidateDir)
+  } catch (error) {
+    logger.error(`Failed to remove converged candidate directory (candidateId=${candidateId})`, error as Error)
+    throw new Error('Converged candidate removal failed: owned candidate directory could not be removed.')
+  }
+  logger.info(`Removed converged candidate directory (candidateId=${candidateId})`)
+  return true
+}
+
 // ---------------------------------------------------------------------------
 // Internals — bounded EBUSY retry deletion (async + sync)
 // ---------------------------------------------------------------------------

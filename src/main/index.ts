@@ -13,6 +13,9 @@ import installExtension, { REACT_DEVELOPER_TOOLS, REDUX_DEVTOOLS } from 'electro
 import { isDev, isLinux, isWin } from './constant'
 
 import process from 'node:process'
+import { join } from 'node:path'
+
+import { DATA_PATH } from '@main/config'
 
 import { registerIpc } from './ipc'
 import { analyticsService } from './services/AnalyticsService'
@@ -182,6 +185,11 @@ if (!app.requestSingleInstanceLock()) {
     //   3. chatDbService.init()
     //   4. Ordinary orphan cleanup / window startup
     let promotionGateRepairRequired = false
+    // LOCK-F2: when the catalog recovery window exhausted its bounded retry
+    // budget, it stays up showing the bounded terminal repair surface. The
+    // app must NOT boot ordinary UI nor init chatDb — the whole ordinary
+    // startup path below is skipped.
+    let catalogRecoveryTerminal = false
     try {
       const gateResult = await runStartupRecoveryGate(false)
       if (gateResult.repairRequired) {
@@ -197,6 +205,73 @@ if (!app.requestSingleInstanceLock()) {
         logger.info('Promotion recovery gate: relaunch pending — process will exit')
         return
       }
+      // LOCK-PROMO-7: v2 catalog-dependent recovery — boot the recovery-only
+      // window surface, run the three-artifact recovery to convergence
+      // (all-new or all-old), then continue normal startup. Ordinary UI is
+      // blocked until the handoff completes or the old generation is
+      // restored.
+      if (gateResult.catalogRecoveryRequired) {
+        logger.warn(
+          `Promotion recovery gate: catalog recovery required (${String(gateResult.catalogRecoveryAction)}, ` +
+            `phase ${String(gateResult.catalogRecoveryPhase)}) — booting the recovery-only surface; ` +
+            'ordinary UI stays blocked (LOCK-PROMO-7)'
+        )
+        try {
+          const { runCatalogStartupRecovery } = await import('./services/chatDbImport/catalogStartupRecovery')
+          const { BrowserWindow } = await import('electron')
+          const recoveryResult = await runCatalogStartupRecovery({
+            dataRoot: DATA_PATH,
+            createWindow: () =>
+              new BrowserWindow({
+                width: 480,
+                height: 300,
+                // LOCK-CAT-8: the recovery window stays hidden — the renderer
+                // only needs to run the catalog handoff in the background; it
+                // is shown only when the bounded terminal repair surface is
+                // raised (LOCK-F2).
+                show: false,
+                autoHideMenuBar: true,
+                backgroundColor: '#181818',
+                webPreferences: {
+                  preload: join(__dirname, '../preload/index.js'),
+                  // Mirror the main window webPreferences (house style):
+                  // sandbox/webSecurity follow the existing window bootstrap
+                  // patterns; webviewTag stays disabled on the minimal surface.
+                  sandbox: false,
+                  webSecurity: false,
+                  webviewTag: false,
+                  contextIsolation: true
+                }
+              }),
+            liveDb: chatDbService
+          })
+          if (!recoveryResult.ok) {
+            // LOCK-F2: terminal recovery failure — fail closed (LOCK-4431):
+            // chatDb init is blocked and, when the bounded repair surface is
+            // shown, the ordinary app window is NOT created.
+            promotionGateRepairRequired = true
+            catalogRecoveryTerminal = recoveryResult.terminalSurface
+            logger.error(
+              `Catalog startup recovery failed (${recoveryResult.code}) — failing closed: ` +
+                'chatDbService init will be skipped until repair is completed',
+              recoveryResult.safeCode ? new Error(recoveryResult.safeCode) : undefined
+            )
+          } else if (recoveryResult.restartRequested) {
+            // Packaged relaunch path: the process is exiting.
+            logger.info('Catalog startup recovery: relaunch pending — process will exit')
+            return
+          }
+          // Non-packaged: the recovery window is destroyed; normal startup
+          // (chatDb init + main window) proceeds below.
+        } catch (error) {
+          promotionGateRepairRequired = true
+          logger.error(
+            'Catalog startup recovery failed unexpectedly — failing closed (LOCK-4431): ' +
+              'chatDbService init will be skipped. Error:',
+            error as Error
+          )
+        }
+      }
     } catch (error) {
       // LOCK-4431: unexpected gate failures must fail closed — no unverified
       // DB init. Set repair-required so chatDbService.init() is skipped.
@@ -206,6 +281,16 @@ if (!app.requestSingleInstanceLock()) {
           'chatDbService init will be skipped. Error:',
         error as Error
       )
+    }
+
+    // LOCK-F2: terminal catalog recovery — the recovery window is showing the
+    // bounded repair surface (or no window could be shown at all). Ordinary
+    // UI, chatDb init, and every downstream service stay off; the process
+    // stays alive on the repair surface and the will-quit cleanup below still
+    // runs.
+    if (catalogRecoveryTerminal) {
+      logger.warn('Catalog recovery terminal — ordinary startup skipped (bounded repair surface shown, LOCK-F2)')
+      return
     }
 
     // Initialise chat database after restore and recovery gate, before normal

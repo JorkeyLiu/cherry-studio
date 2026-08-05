@@ -2021,6 +2021,15 @@
         "description": "The import was cancelled. No changes were made to your data.",
         "title": "Import Cancelled"
       },
+      "catalog_recovery": {
+        "description": "Please wait — the application will reopen shortly.",
+        "error_code": "Error code",
+        "repair_required": {
+          "description": "Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
+          "title": "Data recovery incomplete"
+        },
+        "title": "Recovering imported data…"
+      },
       "confirm_button": "Start Import",
       "confirm_description": "This will replace all existing chat data with the data from the Cherry Studio backup. This action cannot be undone.",
       "confirm_title": "Confirm Import",
@@ -2366,7 +2375,8 @@
     },
     "attachments": {
       "pasted_image": "Pasted Image",
-      "pasted_text": "Pasted Text"
+      "pasted_text": "Pasted Text",
+      "unavailable": "Attachment unavailable"
     },
     "backup": {
       "failed": "Backup failed",

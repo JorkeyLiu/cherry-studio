@@ -63,7 +63,17 @@
  *   globally resolvable member rejects. Memberships persist as target IDs
  *   resolved by (segment.topicId, legacyMessageId). Never truncate
  *   memberships or infer a target.
- * - `files` pages as validated count-diagnostics only (LOCK-D7).
+ * - `files` pages as validated count-diagnostics plus complete source
+ *   FileMetadata row capture (LOCK-D7 extended, LOCK-FIX-2/4/6): each row is
+ *   validated leniently (strict `id`; lenient size/ext/name/origin_name/
+ *   path/type/created_at/count) and the captured rows are exposed Main-only
+ *   via {@link getSourceFileRows} for the attachment plane's catalog
+ *   handoff. Files pages still insert NO target rows and never influence
+ *   fileReferenceCount. Captured rows never cross IPC.
+ * - Committed file-reference ID set (LOCK-FIX-5): every `fileId` in the
+ *   committed `file_references` projection is tracked Main-only and exposed
+ *   via {@link getImportedFileReferenceIds} so the attachment plane can
+ *   classify referenced-vs-orphan catalog files without guessing.
  * - One outer transaction per page; all-or-nothing (LOCK-D8).
  * - Stats accounting for committed rows/pages only (LOCK-D9).
  * - finalize() rejection of referenced-but-missing blocks and
@@ -569,6 +579,43 @@ interface StagedMembership {
 }
 
 /**
+ * One validated source `files` row captured for the attachment plane
+ * (LOCK-D7 extended, LOCK-FIX-2/4/6). Strict: `id` must be a non-empty
+ * string. Lenient: every other field degrades to null / is validated only
+ * for type shape, so a previously-accepted row is never newly rejected.
+ *
+ * `size` is captured as `null` when absent/invalid (negative, NaN,
+ * Infinity, non-number) — at reconcile the physical payload size is then
+ * authoritative (LOCK-FIX-6) with no disagreement to report. A PRESENT
+ * valid non-negative finite size that differs from the physical payload
+ * size is a metadata disagreement (degrade, LOCK-FIX-4).
+ *
+ * The source absolute `path` is captured Main-only for validation and is
+ * NEVER retained in the catalog handoff (LOCK-FIX-6) and never logged
+ * (LOCK-FIX-8).
+ */
+export interface SourceFileRow {
+  /** Source file id (Dexie files primary key). Strict non-empty string. */
+  readonly id: string
+  /** Source physical filename (`<id><ext>` in production); null when absent. */
+  readonly name: string | null
+  /** Source display name; null when absent. */
+  readonly origin_name: string | null
+  /** Source absolute path; null when absent. NEVER crosses the handoff. */
+  readonly path: string | null
+  /** Source claimed size in bytes; null when absent/invalid (physical authority). */
+  readonly size: number | null
+  /** Source extension incl. dot (e.g. `.png`); null when absent. */
+  readonly ext: string | null
+  /** Source file type (image/video/...); null when absent. */
+  readonly type: string | null
+  /** Source created-at ISO string; null when absent. */
+  readonly created_at: string | null
+  /** Source reference count; null when absent/invalid. */
+  readonly count: number | null
+}
+
+/**
  * Fully validated/projected page, plus the relation-index deltas that must
  * only be merged into the streaming indexes after a successful commit.
  */
@@ -651,6 +698,11 @@ interface StagedPage {
   skippedSegmentRowCount: number
   /** Memberships of the skipped segment rows (LOCK-SEG-1). */
   skippedSegmentMembershipCount: number
+  /**
+   * Validated source `files` rows captured on this page (LOCK-D7 extended).
+   * Merged post-commit (LOCK-D9) into the attachment-plane catalog input.
+   */
+  newSourceFileRows: SourceFileRow[]
 }
 
 function emptyStagedPage(): StagedPage {
@@ -677,7 +729,8 @@ function emptyStagedPage(): StagedPage {
     newPreservedDanglingAskIds: [],
     danglingAskIdPreservedCount: 0,
     skippedSegmentRowCount: 0,
-    skippedSegmentMembershipCount: 0
+    skippedSegmentMembershipCount: 0,
+    newSourceFileRows: []
   }
 }
 
@@ -812,6 +865,40 @@ function describeValue(value: unknown): string {
   return typeof value
 }
 
+/**
+ * LOCK-FIX-2/4/6: lenient string capture for source `files` rows. A string
+ * is captured verbatim; missing/null/any other type degrades to null (never
+ * a row rejection — display/type differences are not batch fatal).
+ */
+function optionalString(obj: JsonObject, field: string): string | null {
+  const value = obj[field]
+  return typeof value === 'string' ? value : null
+}
+
+/**
+ * LOCK-FIX-6: lenient non-negative safe-integer size capture for source
+ * `files` rows. A valid non-negative finite number is captured; absent,
+ * negative, NaN/Infinity, or non-number degrades to null (treated as "no
+ * claim" — the physical payload size then becomes authoritative).
+ */
+function optionalSize(obj: JsonObject, field: string): number | null {
+  const value = obj[field]
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null
+  return value
+}
+
+/**
+ * LOCK-FIX-6: lenient non-negative integer count capture for source `files`
+ * rows. Valid non-negative integers are captured; anything else (including
+ * fractional values) degrades to null (counts are rebuilt under existing
+ * FileManager semantics at the handoff, LOCK-FIX-6).
+ */
+function optionalCount(obj: JsonObject, field: string): number | null {
+  const value = obj[field]
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || !Number.isInteger(value)) return null
+  return value
+}
+
 // ---------------------------------------------------------------------------
 // ChatImportDataPlane
 // ---------------------------------------------------------------------------
@@ -894,6 +981,31 @@ export class ChatImportDataPlane {
   private readonly preservedDanglingAskIds = new Set<string>()
   private readonly blockOwnerById = new Map<string, BlockOwnerEntry>()
   private readonly segmentIds = new Set<string>()
+
+  /**
+   * LOCK-FIX-2/4/6: validated source `files` rows captured on COMMITTED
+   * pages (LOCK-D9 semantics). Main-only — never exposed over IPC. Rows are
+   * merged after a successful page transaction; a rolled-back/rejected page
+   * never leaks its delta. Consumed by the attachment plane catalog handoff.
+   */
+  private readonly sourceFileRows: SourceFileRow[] = []
+
+  /**
+   * LOCK-FIX-5: every fileId present in the committed `file_references`
+   * projection (each derived from a projected file/image block). Main-only.
+   * The complete consistent reference snapshot is available only after
+   * finalize(); the attachment plane uses it to classify referenced-vs-
+   * orphan catalog files without guessing.
+   */
+  private readonly committedFileReferenceIds = new Set<string>()
+
+  /**
+   * LOCK-FIX-6: reference MULTIPLICITY per fileId over the committed
+   * `file_references` projection (one candidate reference row per projected
+   * file/image block). Used to rebuild handoff `count` values under existing
+   * FileManager semantics. Main-only; complete only after finalize().
+   */
+  private readonly committedFileReferenceMultiplicity = new Map<string, number>()
 
   /**
    * Source-seen block id registry (LOCK-BLOCK-1). Records EVERY source
@@ -1185,6 +1297,57 @@ export class ChatImportDataPlane {
     return facts
   }
 
+  /**
+   * LOCK-FIX-2/4/6: validated source `files` rows captured on committed
+   * pages (Main-only — never expose over IPC). Snapshot, no aliasing. Only
+   * callable after a successful finalize() (the source catalog is complete
+   * once every `files` page committed).
+   *
+   * @throws {ChatImportDataPlaneError} code NOT_FINALIZED before finalize().
+   */
+  getSourceFileRows(): SourceFileRow[] {
+    if (!this.finalized) {
+      throw new ChatImportDataPlaneError('NOT_FINALIZED', 'getSourceFileRows called before a successful finalize()')
+    }
+    return this.sourceFileRows.map((row) => ({ ...row }))
+  }
+
+  /**
+   * LOCK-FIX-5: the complete consistent reference snapshot — every fileId
+   * referenced by a committed candidate `file_references` projection
+   * (Main-only — never expose over IPC). Snapshot, no aliasing. Only
+   * callable after a successful finalize(); before finalize the snapshot is
+   * definitionally incomplete.
+   *
+   * @throws {ChatImportDataPlaneError} code NOT_FINALIZED before finalize().
+   */
+  getImportedFileReferenceIds(): string[] {
+    if (!this.finalized) {
+      throw new ChatImportDataPlaneError(
+        'NOT_FINALIZED',
+        'getImportedFileReferenceIds called before a successful finalize()'
+      )
+    }
+    return Array.from(this.committedFileReferenceIds)
+  }
+
+  /**
+   * LOCK-FIX-6: fileId → reference multiplicity over the committed
+   * `file_references` projection (Main-only — never expose over IPC).
+   * Snapshot, no aliasing. Only callable after a successful finalize().
+   *
+   * @throws {ChatImportDataPlaneError} code NOT_FINALIZED before finalize().
+   */
+  getImportedFileReferenceCounts(): Array<[string, number]> {
+    if (!this.finalized) {
+      throw new ChatImportDataPlaneError(
+        'NOT_FINALIZED',
+        'getImportedFileReferenceCounts called before a successful finalize()'
+      )
+    }
+    return Array.from(this.committedFileReferenceMultiplicity, ([id, count]) => [id, count] as [string, number])
+  }
+
   // -------------------------------------------------------------------------
   // Internals — entity resolution + staged commit
   // -------------------------------------------------------------------------
@@ -1231,6 +1394,18 @@ export class ChatImportDataPlane {
     // transaction succeeded, covering imported AND skipped orphan rows.
     for (const blockId of staged.sourceSeenBlockIds) this.sourceSeenBlockIds.add(blockId)
     for (const id of staged.newSegmentIds) this.segmentIds.add(id)
+    // LOCK-FIX-5: committed file-reference IDs (derived from projected
+    // file/image blocks) — complete only after the last page commits.
+    for (const ref of staged.fileReferences) {
+      this.committedFileReferenceIds.add(ref.fileId)
+      this.committedFileReferenceMultiplicity.set(
+        ref.fileId,
+        (this.committedFileReferenceMultiplicity.get(ref.fileId) ?? 0) + 1
+      )
+    }
+    // LOCK-FIX-2/4/6: captured source `files` rows (LOCK-D9 committed-page
+    // semantics — a rejected/rolled-back page never leaks its rows).
+    for (const row of staged.newSourceFileRows) this.sourceFileRows.push(row)
 
     // Source-read accounting (LOCK-D9): successful source rows per entity.
     switch (entity) {
@@ -1810,18 +1985,40 @@ export class ChatImportDataPlane {
   }
 
   /**
-   * files page (LOCK-D7): validated / count-diagnostic only. Inserts no
-   * target rows, never influences fileReferenceCount, and retains no
-   * source file payloads.
+   * files page (LOCK-D7 extended, LOCK-FIX-2/4/6): validated count-diagnostic
+   * plus complete source FileMetadata row capture. Inserts no target rows,
+   * never influences fileReferenceCount, and never retains payload bytes.
+   *
+   * Row validation is intentionally LENIENT (LOCK-FIX-6: display/type
+   * differences are not batch fatal): `id` stays STRICT (non-empty string,
+   * existing behavior — a malformed row still rejects INVALID_ROW); every
+   * other field is captured as-is when it matches its expected type and
+   * degrades to null otherwise (a row previously accepted remains
+   * accepted). `size` null/absent/invalid is treated as "no claim" — the
+   * physical payload size becomes authoritative at reconcile (LOCK-FIX-6);
+   * a present valid size is compared against the physical size there
+   * (metadata disagreement → per-file degrade, LOCK-FIX-4).
    */
   private projectFilesPage(items: JsonObject[]): StagedPage {
+    const staged = emptyStagedPage()
     for (let i = 0; i < items.length; i++) {
       const ctx: RowContext = { tableName: 'files', index: i }
       const raw = requirePlainObject(items[i], ctx)
-      requireNonEmptyString(raw, 'id', ctx)
-      // Payload intentionally not retained (LOCK-D7).
+      const id = requireNonEmptyString(raw, 'id', ctx)
+      ctx.entityId = id
+      staged.newSourceFileRows.push({
+        id,
+        name: optionalString(raw, 'name'),
+        origin_name: optionalString(raw, 'origin_name'),
+        path: optionalString(raw, 'path'),
+        size: optionalSize(raw, 'size'),
+        ext: optionalString(raw, 'ext'),
+        type: optionalString(raw, 'type'),
+        created_at: optionalString(raw, 'created_at'),
+        count: optionalCount(raw, 'count')
+      })
     }
-    return emptyStagedPage()
+    return staged
   }
 }
 

@@ -20,6 +20,7 @@ import { abortCompletion, readyToAbort } from '@renderer/utils/abortController'
 import { trackTokenUsage } from '@renderer/utils/analytics'
 import { isToolUseModeFunction } from '@renderer/utils/assistant'
 import { isPromptToolUse, isSupportedToolUse } from '@renderer/utils/assistant'
+import { isBlockAttachmentUnavailable } from '@renderer/utils/attachmentAvailability'
 import { getErrorMessage, isAbortError } from '@renderer/utils/error'
 import { purifyMarkdownImages } from '@renderer/utils/markdown'
 import { findFileBlocks, findImageBlocks, getMainTextContent } from '@renderer/utils/messageUtils/find'
@@ -304,8 +305,11 @@ export async function fetchChatCompletion({
 /**
  * 从消息中收集图像（用于图像编辑）
  * 收集用户消息中上传的图像和助手消息中生成的图像
+ *
+ * @internal 导出仅为聚焦测试（image collection 的 LOCK-UI-2 覆盖）；
+ *           生产调用方仍只有 fetchImageGeneration。
  */
-async function collectImagesFromMessages(userMessage: Message, assistantMessage?: Message): Promise<string[]> {
+export async function collectImagesFromMessages(userMessage: Message, assistantMessage?: Message): Promise<string[]> {
   const images: string[] = []
 
   // 收集用户消息中的图像
@@ -318,6 +322,11 @@ async function collectImagesFromMessages(userMessage: Message, assistantMessage?
   // (and normalizes jpg → image/jpeg).
   const userImageBlocks = findImageBlocks(userMessage)
   for (const block of userImageBlocks) {
+    // LOCK-UI-2: degraded imported image — omit from generation input and
+    // NEVER attempt the file:base64Image IPC against a missing payload.
+    if (isBlockAttachmentUnavailable(block)) {
+      continue
+    }
     if (block.file) {
       const { data } = await window.api.file.base64Image(block.file.name)
       images.push(data)
@@ -328,6 +337,11 @@ async function collectImagesFromMessages(userMessage: Message, assistantMessage?
   if (assistantMessage) {
     const assistantImageBlocks = findImageBlocks(assistantMessage)
     for (const block of assistantImageBlocks) {
+      // LOCK-UI-2: degraded imported image — omitted from generation input,
+      // no base64Image IPC and no url reuse (the attachment is unavailable).
+      if (isBlockAttachmentUnavailable(block)) {
+        continue
+      }
       if (block.file) {
         try {
           const { data } = await window.api.file.base64Image(block.file.name)

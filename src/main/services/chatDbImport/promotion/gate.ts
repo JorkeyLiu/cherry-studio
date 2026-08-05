@@ -29,8 +29,20 @@
 import { loggerService } from '@logger'
 import { DATA_PATH } from '@main/config'
 
-import { probePromotionArtifacts, probeResultToRecoveryInput } from './artifactProbe'
-import { decidePromotionRecovery, type PromotionJournalObservation, type PromotionRecoveryDecision } from './recovery'
+import { probePromotionArtifacts, probePromotionArtifactsV2, probeResultToRecoveryInput } from './artifactProbe'
+import type { PromotionJournalPhaseV2 } from './journal'
+import { PROMOTION_JOURNAL_VERSION_V2 } from './journal'
+import type { PromotionJournalCleanupIdentity } from './journalStore'
+import { cleanupPromotionJournalAtV2Phase } from './journalStore'
+import {
+  decidePromotionRecovery,
+  decidePromotionRecoveryV2,
+  type PromotionJournalObservation,
+  type PromotionRecoveryActionV2,
+  type PromotionRecoveryDecision,
+  type PromotionRecoveryDecisionV2,
+  type PromotionRecoveryReasonCodeV2
+} from './recovery'
 import {
   createRecoveryExecutor,
   type RecoveryExecutionPrimitives,
@@ -45,13 +57,24 @@ const logger = loggerService.withContext('chatDbImportPromotionGate')
 // ---------------------------------------------------------------------------
 
 /**
+ * Gate decision — either the v1 chat.db-only decision or the v2
+ * three-artifact decision (dispatched on the journal version).
+ */
+export type StartupGateDecision =
+  | PromotionRecoveryDecision
+  | {
+      readonly action: PromotionRecoveryActionV2
+      readonly reason: PromotionRecoveryReasonCodeV2
+    }
+
+/**
  * Result of the startup recovery gate. Never throws — startup must
  * continue regardless of recovery outcomes (LOCK-L3), EXCEPT for
  * repair-required which hard-blocks init.
  */
 export interface StartupRecoveryGateResult {
-  /** The recovery decision from the pure matrix. */
-  readonly decision: PromotionRecoveryDecision
+  /** The recovery decision from the pure matrix (v1 or v2 dispatch). */
+  readonly decision: StartupGateDecision
   /** The executor result if one was run. Null for absent-journal fast path. */
   readonly executorResult: RecoveryExecutorResult | null
   /** Whether the gate determined repair is required (hard-blocks init). */
@@ -65,6 +88,17 @@ export interface StartupRecoveryGateResult {
    * the freshly created renderer applies the pending projection.
    */
   readonly inProcessReloadRequested: boolean
+  /**
+   * LOCK-PROMO-7: true when the v2 journal is at a phase whose recovery
+   * needs the renderer catalog boundary (catalog-pending or later, or a
+   * v2 restore). The app must boot into the recovery-only surface; normal
+   * application UI stays blocked until the handoff converges.
+   */
+  readonly catalogRecoveryRequired: boolean
+  /** The pending catalog recovery action for the recovery-only surface. */
+  readonly catalogRecoveryAction: 'complete-catalog-apply' | 'restore-snapshot' | 'accept-verified-replacement' | null
+  /** The v2 journal phase that blocked ordinary startup. */
+  readonly catalogRecoveryPhase: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +142,7 @@ export async function runStartupRecoveryGate(
   // 1. Quick journal observation (async read for the fast path)
   // ======================================================================
   let journalObservation: PromotionJournalObservation
+  let journalVersion: number | null = null
   try {
     const { readPromotionJournal } = await import('./journalStore')
     const journalResult = await readPromotionJournal(dataRoot)
@@ -121,13 +156,17 @@ export async function runStartupRecoveryGate(
         executorResult: null,
         repairRequired: false,
         relaunchPending: false,
-        inProcessReloadRequested: false
+        inProcessReloadRequested: false,
+        catalogRecoveryRequired: false,
+        catalogRecoveryAction: null,
+        catalogRecoveryPhase: null
       }
     }
     if (journalResult.status === 'invalid') {
       journalObservation = { status: 'invalid' }
     } else {
       journalObservation = journalResult
+      journalVersion = journalResult.journal.version
     }
   } catch (error) {
     // I/O failure reading the journal: treat as invalid (LOCK-4414).
@@ -136,7 +175,103 @@ export async function runStartupRecoveryGate(
   }
 
   // ======================================================================
-  // 2. Probe all promotion artifacts (synchronous, comprehensive)
+  // 2. v2 three-artifact dispatch (LOCK-PROMO-6/7)
+  // ======================================================================
+  if (journalVersion === PROMOTION_JOURNAL_VERSION_V2 && journalObservation.status === 'valid') {
+    const v2CandidateId = journalObservation.journal.candidateId
+    const v2Probe = probePromotionArtifactsV2(v2CandidateId, dataRoot)
+    const v2Input = {
+      journal: v2Probe.journal,
+      live: v2Probe.live,
+      dbSnapshot: v2Probe.dbSnapshot,
+      candidate: v2Probe.candidate,
+      files: v2Probe.files,
+      filesSnapshot: v2Probe.filesSnapshot,
+      filesStaging: v2Probe.filesStaging,
+      catalogSnapshot: v2Probe.catalogSnapshot,
+      catalogApplied: v2Probe.catalogApplied as 'unknown'
+    }
+    const v2Decision: PromotionRecoveryDecisionV2 = decidePromotionRecoveryV2(v2Input)
+    const v2Phase = journalObservation.journal.phase
+
+    logger.info(`Promotion recovery gate v2 decision: action=${v2Decision.action}, reason=${v2Decision.reason}`)
+
+    if (v2Decision.action === 'repair-required') {
+      logger.warn(
+        `Promotion recovery gate: v2 repair required (${v2Decision.reason}) — ` +
+          'normal init will be blocked until repair is completed'
+      )
+      try {
+        const { chatDbService } = await import('@main/services/chatDb')
+        chatDbService.markRepairRequiredBeforeInit()
+      } catch (error) {
+        logger.error(
+          'Promotion recovery gate: failed to write durable repair marker (init still blocked this session)',
+          error as Error
+        )
+      }
+      return {
+        decision: { action: 'repair-required', reason: v2Decision.reason },
+        executorResult: null,
+        repairRequired: true,
+        relaunchPending: false,
+        inProcessReloadRequested: false,
+        catalogRecoveryRequired: false,
+        catalogRecoveryAction: null,
+        catalogRecoveryPhase: v2Phase
+      }
+    }
+
+    if (v2Decision.action === 'keep-old-live') {
+      // No live mutation (candidates-ready / snapshots-ready with the old
+      // generation intact): cleanup the v2 journal at its current phase and
+      // proceed — no renderer boundary needed.
+      const identity: PromotionJournalCleanupIdentity = {
+        sessionId: journalObservation.journal.sessionId,
+        candidateId: journalObservation.journal.candidateId
+      }
+      try {
+        await cleanupPromotionJournalAtV2Phase(v2Phase as PromotionJournalPhaseV2, identity, dataRoot)
+        logger.info(`Promotion recovery gate: v2 keep-old-live cleaned the ${String(v2Phase)} journal`)
+      } catch (error) {
+        logger.warn('Promotion recovery gate: v2 keep-old-live journal cleanup failed (non-fatal)', error as Error)
+      }
+      return {
+        decision: { action: 'keep-old-live', reason: v2Decision.reason },
+        executorResult: null,
+        repairRequired: false,
+        relaunchPending: false,
+        inProcessReloadRequested: false,
+        catalogRecoveryRequired: false,
+        catalogRecoveryAction: null,
+        catalogRecoveryPhase: null
+      }
+    }
+
+    // restore / complete-catalog-apply / accept — all need the renderer
+    // catalog boundary (LOCK-PROMO-7): defer to the recovery-only window.
+    logger.warn(
+      `Promotion recovery gate: v2 action ${v2Decision.action} requires the renderer catalog boundary ` +
+        `(phase ${String(v2Phase)}) — booting the recovery-only surface; ordinary UI blocked`
+    )
+    // LOCK-BRIDGE-4: report the TRUE v2 decision action — the gate deferred
+    // the action to the recovery window rather than executing it, so the
+    // decision must not claim keep-old-live. The dedicated
+    // `catalogRecoveryAction` handoff is retained unchanged.
+    return {
+      decision: { action: v2Decision.action, reason: v2Decision.reason },
+      executorResult: null,
+      repairRequired: false,
+      relaunchPending: false,
+      inProcessReloadRequested: false,
+      catalogRecoveryRequired: true,
+      catalogRecoveryAction: v2Decision.action === 'restore-rollback-snapshot' ? 'restore-snapshot' : v2Decision.action,
+      catalogRecoveryPhase: v2Phase
+    }
+  }
+
+  // ======================================================================
+  // 3. v1 chat.db-only path (unchanged) — probe all promotion artifacts
   // ======================================================================
   let candidateId: string | null = null
   if (journalObservation.status === 'valid') {
@@ -146,7 +281,7 @@ export async function runStartupRecoveryGate(
   const probes = probePromotionArtifacts(candidateId, dataRoot, options?.sampleCount ?? 3)
 
   // ======================================================================
-  // 3. Decide via pure matrix
+  // 4. Decide via pure matrix
   // ======================================================================
   const input = probeResultToRecoveryInput(probes)
   const decision = decidePromotionRecovery(input)
@@ -154,7 +289,7 @@ export async function runStartupRecoveryGate(
   logger.info(`Promotion recovery gate decision: action=${decision.action}, reason=${decision.reason}`)
 
   // ======================================================================
-  // 4. Repair-required: hard-block init, write durable marker, return
+  // 5. Repair-required: hard-block init, write durable marker, return
   // ======================================================================
   if (decision.action === 'repair-required') {
     logger.warn(
@@ -183,12 +318,15 @@ export async function runStartupRecoveryGate(
       executorResult: null,
       repairRequired: true,
       relaunchPending: false,
-      inProcessReloadRequested: false
+      inProcessReloadRequested: false,
+      catalogRecoveryRequired: false,
+      catalogRecoveryAction: null,
+      catalogRecoveryPhase: null
     }
   }
 
   // ======================================================================
-  // 5. Skip execution in test mode
+  // 6. Skip execution in test mode
   // ======================================================================
   if (options?.skipExecution) {
     return {
@@ -196,12 +334,15 @@ export async function runStartupRecoveryGate(
       executorResult: null,
       repairRequired: false,
       relaunchPending: false,
-      inProcessReloadRequested: false
+      inProcessReloadRequested: false,
+      catalogRecoveryRequired: false,
+      catalogRecoveryAction: null,
+      catalogRecoveryPhase: null
     }
   }
 
   // ======================================================================
-  // 6. Execute recovery via the executor
+  // 7. Execute recovery via the executor
   // ======================================================================
   const executor = createRecoveryExecutor({
     dataRoot,
@@ -218,7 +359,7 @@ export async function runStartupRecoveryGate(
   const executorResult = await executor.run()
 
   // ======================================================================
-  // 7. Determine if relaunch / in-process reload is pending
+  // 8. Determine if relaunch / in-process reload is pending
   // ======================================================================
   // LOCK-PROD-7: a packaged relaunch terminates the process
   // (relaunchPending). A non-packaged in-process reload keeps the process
@@ -240,6 +381,9 @@ export async function runStartupRecoveryGate(
     executorResult,
     repairRequired: false,
     relaunchPending,
-    inProcessReloadRequested
+    inProcessReloadRequested,
+    catalogRecoveryRequired: false,
+    catalogRecoveryAction: null,
+    catalogRecoveryPhase: null
   }
 }

@@ -106,13 +106,14 @@ export interface FileMetadata {
    */
   ext: string
   /**
-   * 文件类型
+   * 文件类型 — 上传创建的行总是携带应用识别的 FileType；目录导入行保留源
+   * 字符串或 null（LOCK-BROWSE-1/4），因此持久化边界允许 string | null。
    */
-  type: FileType
+  type: string | null
   /**
-   * 文件创建时间的ISO字符串
+   * 文件创建时间的ISO字符串 — 上传创建的行总是携带；目录导入行可能为 null。
    */
-  created_at: string
+  created_at: string | null
   /**
    * 文件计数
    */

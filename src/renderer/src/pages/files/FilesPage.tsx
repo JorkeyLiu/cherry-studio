@@ -88,8 +88,7 @@ const FilesPage: FC = () => {
       count: file.count,
       path: FileManager.getFilePath(file),
       ext: file.ext,
-      created_at: dayjs(file.created_at).format('MM-DD HH:mm'),
-      created_at_unix: dayjs(file.created_at).unix(),
+      created_at: file.created_at ? dayjs(file.created_at).format('MM-DD HH:mm') : '—',
       actions: (
         <Flex align="center" gap={0} style={{ opacity: 0.7 }}>
           <Button type="text" icon={<EditIcon size={14} />} onClick={() => handleRename(file.id)} />

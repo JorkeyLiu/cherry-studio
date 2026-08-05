@@ -22,12 +22,26 @@ export function tempFilesSort(files: FileMetadata[]): FileMetadata[] {
   })
 }
 
+/**
+ * Deterministic created-at sort key (LOCK-BROWSE-3). A null/absent source
+ * timestamp maps to `Number.MIN_SAFE_INTEGER` — it never yields NaN and
+ * always lands at one fixed end of either sort order. An unparseable stored
+ * value degrades to the same fallback. No timestamp is invented.
+ */
+export function createdAtSortKey(file: FileMetadata): number {
+  if (file.created_at === null || file.created_at === undefined) {
+    return Number.MIN_SAFE_INTEGER
+  }
+  const unix = dayjs(file.created_at).unix()
+  return Number.isNaN(unix) ? Number.MIN_SAFE_INTEGER : unix
+}
+
 export function sortFiles(files: FileMetadata[], sortField: SortField, sortOrder: SortOrder): FileMetadata[] {
   return [...files].sort((a, b) => {
     let comparison = 0
     switch (sortField) {
       case 'created_at':
-        comparison = dayjs(a.created_at).unix() - dayjs(b.created_at).unix()
+        comparison = createdAtSortKey(a) - createdAtSortKey(b)
         break
       case 'size':
         comparison = a.size - b.size

@@ -43,6 +43,9 @@ import type {
   UpsertSegmentRequest
 } from '@shared/chatDb'
 import type {
+  CatalogRecoveryReadyResult,
+  CatalogRecoveryRequest,
+  CatalogRecoveryResponse,
   CherryImportAckProjectionResult,
   CherryImportCancelResult,
   CherryImportGetProjectionResult,
@@ -566,6 +569,29 @@ const api = {
       return () => {
         ipcRenderer.removeListener(IpcChannel.CherryImport_StatusChanged, listener)
       }
+    },
+    // L2 files catalog handoff boundary (Phase 2, LOCK-PROMO-5/7). Main
+    // drives capture/apply/restore/query through this minimal typed surface;
+    // the renderer owns the live Dexie files table. Only the registered main
+    // renderer's main frame may respond.
+    catalog: {
+      onRequest: (callback: (request: CatalogRecoveryRequest) => void): (() => void) => {
+        const listener = (_event: Electron.IpcRendererEvent, data: CatalogRecoveryRequest) => {
+          if (data && typeof data === 'object') {
+            callback(data)
+          }
+        }
+        ipcRenderer.on(IpcChannel.CherryImport_CatalogRequest, listener)
+        return () => {
+          ipcRenderer.removeListener(IpcChannel.CherryImport_CatalogRequest, listener)
+        }
+      },
+      respond: (requestId: string, response: CatalogRecoveryResponse) =>
+        ipcRenderer.invoke(IpcChannel.CherryImport_CatalogRespond, requestId, response),
+      // LOCK-BRIDGE-1: ready handshake — the renderer signals Main that its
+      // catalog request handler is installed (only then may Main send
+      // requests). Main rejects stale/duplicate/post-dispose signals.
+      ready: (): Promise<CatalogRecoveryReadyResult> => ipcRenderer.invoke(IpcChannel.CherryImport_CatalogReady)
     }
   },
   anthropic_oauth: {

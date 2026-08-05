@@ -379,3 +379,144 @@ export interface CherryImportAckProjectionResult {
   readonly ok: boolean
   readonly error?: string
 }
+
+// ---------------------------------------------------------------------------
+// L2 files catalog snapshot + catalog apply boundary (Phase 2, LOCK-PROMO-5)
+// ---------------------------------------------------------------------------
+
+/**
+ * One normalized Dexie `files` row captured from the LIVE catalog (or
+ * restored into it). JSON-only — no Electron/Node/renderer imports. `type`
+ * and `created_at` are nullable so both live rows and candidate rows map
+ * onto the same wire shape.
+ */
+export interface FilesCatalogSnapshotRow {
+  /** Dexie files primary key. */
+  readonly id: string
+  /** Canonical physical filename `<id><ext>`. */
+  readonly name: string
+  /** Source display name (origin_name ?? name ?? canonical name). */
+  readonly origin_name: string
+  /** Stored path value (the app recomputes it from id/ext at read time). */
+  readonly path: string
+  /** Physical payload size in bytes. */
+  readonly size: number
+  /** Source extension incl. dot ('' when absent). */
+  readonly ext: string
+  /** Source file type or null. */
+  readonly type: string | null
+  /** Source created-at ISO string or null. */
+  readonly created_at: string | null
+  /** Rebuilt reference count. */
+  readonly count: number
+}
+
+/**
+ * Durable live-catalog rollback snapshot payload (LOCK-PROMO-3). Written by
+ * Main at the fixed owned name; the renderer captures the rows and Main
+ * persists + verifies the bytes. `integrity` is the aggregate receipt.
+ */
+export interface FilesCatalogSnapshotV1 {
+  readonly version: 1
+  readonly capturedAt: string
+  readonly rows: readonly FilesCatalogSnapshotRow[]
+  readonly integrity: {
+    readonly count: number
+    /** SHA-256 hex of {@link filesCatalogHashInput}(rows). */
+    readonly sha256: string
+  }
+}
+
+/**
+ * Canonical digest input over catalog rows (sorted by id). Both Main
+ * (node:crypto) and renderer (Web Crypto) hash EXACTLY this string so the
+ * aggregate receipts agree across the boundary.
+ */
+export function filesCatalogHashInput(rows: readonly FilesCatalogSnapshotRow[]): string {
+  const sorted = [...rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  let out = ''
+  for (const row of sorted) {
+    out += `${row.id}\0${row.name}\0${row.size}\0${row.count}\n`
+  }
+  return out
+}
+
+/** Kinds of renderer catalog requests Main can send (LOCK-PROMO-5/7). */
+export type CatalogRecoveryRequestKind =
+  /** Read the live Dexie files table and return canonical rows + digest. */
+  | 'capture-snapshot'
+  /** Single-transaction replace-all with candidate catalog rows. */
+  | 'apply-candidate'
+  /** Single-transaction replace-all restoring old snapshot rows. */
+  | 'restore-snapshot'
+  /** Read-only facts (count + digest) of the CURRENT files table. */
+  | 'query-facts'
+
+/** One main → renderer catalog request. */
+export interface CatalogRecoveryRequest {
+  readonly requestId: string
+  readonly kind: CatalogRecoveryRequestKind
+  /**
+   * Current canonical target files root (e.g. `<userData>/Data/Files`) for
+   * apply-candidate and restore-snapshot. The renderer rewrites every row
+   * `path` to `<filesPath>/<id><ext>` (LOCK-CAT-4). Provided by Main because
+   * the recovery-only renderer has no `getAppInfo` IPC during startup.
+   */
+  readonly filesPath?: string
+  /** For apply-candidate: the candidate catalog rows (name/size/etc). */
+  readonly catalogRows?: readonly FilesCatalogSnapshotRow[]
+  /** For apply-candidate: expected aggregate receipt (candidate generation). */
+  readonly expected?: { readonly count: number; readonly sha256: string }
+  /** For restore-snapshot: the snapshot to restore (rows + integrity). */
+  readonly snapshot?: FilesCatalogSnapshotV1
+}
+
+/** Aggregate facts returned by the renderer after a Dexie operation. */
+export interface CatalogRecoveryFacts {
+  readonly count: number
+  /** SHA-256 hex over {@link filesCatalogHashInput}(current rows). */
+  readonly sha256: string
+}
+
+/** One renderer → main catalog response. */
+export type CatalogRecoveryResponse =
+  | {
+      readonly ok: true
+      readonly requestId: string
+      /** Canonical rows (capture-snapshot only). */
+      readonly rows?: readonly FilesCatalogSnapshotRow[]
+      /** Facts AFTER the requested operation (apply/restore/query/capture). */
+      readonly facts?: CatalogRecoveryFacts
+    }
+  | {
+      readonly ok: false
+      readonly requestId: string
+      /** Bounded machine-readable failure code (never raw messages/paths). */
+      readonly code: string
+    }
+
+/** Result of a Main-driven catalog boundary operation. */
+export type CatalogApplyOutcome =
+  | { readonly ok: true; readonly facts: CatalogRecoveryFacts }
+  | { readonly ok: false; readonly code: string }
+
+/**
+ * Result of the renderer → Main catalog ready signal (LOCK-BRIDGE-1).
+ * The recovery renderer invokes the ready channel ONLY after its catalog
+ * request handler is installed; Main awaits it (bounded) before sending any
+ * catalog request. `accepted: false` covers stale/duplicate/post-dispose
+ * signals — the awaiting Main falls back to its own bounded ready timeout.
+ */
+export interface CatalogRecoveryReadyResult {
+  readonly accepted: boolean
+}
+
+/** Startup recovery signal for the catalog handoff (LOCK-PROMO-7). */
+export interface CatalogStartupRecoverySignal {
+  /** True when the app must boot into the recovery-only surface. */
+  readonly catalogRecoveryRequired: boolean
+  /** The pending operation the recovery surface must perform. */
+  readonly action: 'apply-candidate' | 'restore-snapshot' | null
+  /** The v2 journal phase that blocked ordinary startup. */
+  readonly phase: string | null
+}

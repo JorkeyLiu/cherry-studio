@@ -61,12 +61,18 @@
  * because unreadable is not the same evidence as readable-but-rejected).
  *
  * Cleanup semantics (Phase 4.4.3, LOCK-4435..LOCK-4438):
- * - {@link cleanupPromotionJournal} is the idempotent fixed-path cleanup
- *   primitive. It removes the promotion journal and any stale staging file,
- *   then fsyncs the parent directory for durability.
+ * - The cleanup APIs (`cleanupPromotionJournalAfterReplacementVerified`,
+ *   `cleanupPromotionJournalAfterSnapshotReady`,
+ *   `cleanupPromotionJournalAfterCandidateInstalled` for the v1 protocol,
+ *   and `cleanupPromotionJournalAtV2Phase` for the v2 protocol) share one
+ *   idempotent fixed-path primitive: remove the promotion journal and any
+ *   stale staging file, then fsync the parent directory for durability.
  * - Guard-read validates the current journal: absent journals are idempotent
  *   success (already clean); valid journals must match the caller's expected
- *   phase and identity (sessionId/candidateId) before unlink.
+ *   schema version, phase, and identity (sessionId/candidateId) before
+ *   unlink. The version bound is symmetric (LOCK-CLOSE-1): a v1 cleanup
+ *   never removes a v2 journal and a v2 cleanup never removes a v1 journal —
+ *   both reject with `CLEANUP_PHASE_MISMATCH`.
  * - The rollback snapshot (`ROLLBACK_SNAPSHOT_FILENAME`) is NEVER touched.
  * - ENOENT during the unlink step is idempotent only when the guard read
  *   observed the journal as absent (immediate return) or the file was
@@ -95,8 +101,27 @@ import path from 'node:path'
 import { loggerService } from '@logger'
 import { DATA_PATH } from '@main/config'
 
-import type { PromotionJournalDecodeErrorCode, PromotionJournalPhase, PromotionJournalV1 } from './journal'
-import { decodePromotionJournal, encodePromotionJournal, PROMOTION_JOURNAL_FILENAME } from './journal'
+import type {
+  PromotionJournalDecodeErrorCode,
+  PromotionJournalDoc,
+  PromotionJournalPhase,
+  PromotionJournalPhaseV2,
+  PromotionJournalV1,
+  PromotionJournalV2,
+  PromotionJournalVersion
+} from './journal'
+import {
+  artifactReceiptsEqual,
+  catalogReceiptsEqual,
+  dbReceiptsEqual,
+  decodePromotionJournal,
+  encodePromotionJournal,
+  filesReceiptsEqual,
+  isV2SuccessorPhase,
+  PROMOTION_JOURNAL_FILENAME,
+  PROMOTION_JOURNAL_VERSION_V1,
+  PROMOTION_JOURNAL_VERSION_V2
+} from './journal'
 
 const logger = loggerService.withContext('chatDbImportPromotionJournalStore')
 
@@ -180,12 +205,13 @@ function errnoCode(error: unknown): string | undefined {
 /**
  * Strict three-state read result. Shape-compatible with the recovery
  * matrix's PromotionJournalObservation; `invalid` additionally carries the
- * bounded codec rejection code for diagnostics.
+ * bounded codec rejection code for diagnostics. A `valid` result carries
+ * either a v1 (chat.db-only) or v2 (three-artifact) journal document.
  */
 export type PromotionJournalStoreReadResult =
   | { readonly status: 'absent' }
   | { readonly status: 'invalid'; readonly code: PromotionJournalDecodeErrorCode }
-  | { readonly status: 'valid'; readonly journal: PromotionJournalV1 }
+  | { readonly status: 'valid'; readonly journal: PromotionJournalDoc }
 
 // ---------------------------------------------------------------------------
 // Fixed owned path resolution
@@ -266,7 +292,7 @@ export async function readPromotionJournal(dataRoot: string = DATA_PATH): Promis
  * A previously published journal is never modified, deleted, or cleared by
  * a failed write.
  */
-async function writePromotionJournalDurably(journal: PromotionJournalV1, dataRoot: string): Promise<void> {
+async function writePromotionJournalDurably(journal: PromotionJournalDoc, dataRoot: string): Promise<void> {
   const journalPath = getPromotionJournalPath(dataRoot)
   const stagingPath = getPromotionJournalStagingPath(dataRoot)
 
@@ -347,7 +373,7 @@ async function writePromotionJournalDurably(journal: PromotionJournalV1, dataRoo
 
 /**
  * Durably persist a `snapshot-ready` v1 journal at the fixed owned path.
- * This is the ONLY write that does not require a prior journal.
+ * This is the ONLY v1 write that does not require a prior journal.
  *
  * Phase gate (LOCK-4417): any phase other than `snapshot-ready` is rejected
  * with `PHASE_NOT_WRITABLE` before any filesystem effect. Later phases must
@@ -356,12 +382,12 @@ async function writePromotionJournalDurably(journal: PromotionJournalV1, dataRoo
  * storage only and cannot check that precondition.
  */
 export async function writeSnapshotReadyPromotionJournal(
-  journal: PromotionJournalV1,
+  journal: PromotionJournalDoc,
   dataRoot: string = DATA_PATH
 ): Promise<void> {
   assertControlledDataRoot(dataRoot)
 
-  if (journal.phase !== INITIAL_WRITABLE_PHASE) {
+  if (journal.version !== 1 || journal.phase !== INITIAL_WRITABLE_PHASE) {
     throw storeError(
       'PHASE_NOT_WRITABLE',
       `Promotion journal store refuses phase "${String(journal.phase)}": ` +
@@ -371,6 +397,158 @@ export async function writeSnapshotReadyPromotionJournal(
   }
 
   await writePromotionJournalDurably(journal, dataRoot)
+}
+
+// ---------------------------------------------------------------------------
+// v2 initial write + guarded phase transitions (LOCK-PROMO-2/3/6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Durably persist a `candidates-ready` v2 journal — the initial v2 write.
+ *
+ * Phase gate (LOCK-PROMO-2): any phase other than `candidates-ready` is
+ * rejected with `PHASE_NOT_WRITABLE` before any filesystem effect. The
+ * caller must already hold the three validated candidate artifacts (sealed
+ * chat.db, candidate Files dir, files-catalog.json) and must supply the
+ * candidate-generation aggregate receipts.
+ */
+export async function writeCandidatesReadyPromotionJournal(
+  journal: PromotionJournalV2,
+  dataRoot: string = DATA_PATH
+): Promise<void> {
+  assertControlledDataRoot(dataRoot)
+
+  if (journal.version !== PROMOTION_JOURNAL_VERSION_V2 || journal.phase !== 'candidates-ready') {
+    throw storeError(
+      'PHASE_NOT_WRITABLE',
+      `Promotion journal store refuses phase "${String(journal.phase)}": ` +
+        'only "candidates-ready" may be persisted as the initial v2 write.'
+    )
+  }
+
+  await writePromotionJournalDurably(journal, dataRoot)
+}
+
+/**
+ * v2 guarded advance: `prior` → `next` where `next` is the strict successor
+ * of `prior` in the v2 phase order (no skips, regressions, or repeats).
+ *
+ * Guard (all checks happen BEFORE any staging/publish mutation; the current
+ * durable journal is never modified by a rejection):
+ * - the current durable journal must be a VALID v2 document;
+ * - its phase must be exactly `expectedPriorPhase` and `next` must be its
+ *   strict successor (`isV2SuccessorPhase`);
+ * - version/sessionId/candidateId must be identical;
+ * - the candidate receipts must be strictly equal (immutable once written);
+ * - the old receipts must be monotonic: each artifact field may only go
+ *   null → value or stay equal (they are filled exactly once at
+ *   `snapshots-ready`, never reverted).
+ *
+ * The caller must have completed the durable operation the phase names
+ * (LOCK-PROMO-6 ordering) BEFORE invoking the corresponding advance — the
+ * store is storage only and cannot perform or check the operation itself.
+ */
+export async function advancePromotionJournalV2(
+  journal: PromotionJournalV2,
+  expectedPriorPhase: PromotionJournalPhaseV2,
+  dataRoot: string = DATA_PATH
+): Promise<void> {
+  assertControlledDataRoot(dataRoot)
+
+  if (journal.version !== PROMOTION_JOURNAL_VERSION_V2) {
+    throw storeError('PHASE_NOT_WRITABLE', 'advancePromotionJournalV2 requires a v2 journal document.')
+  }
+  if (!isV2SuccessorPhase(expectedPriorPhase, journal.phase)) {
+    throw storeError(
+      'PHASE_NOT_WRITABLE',
+      `advancePromotionJournalV2 refuses phase "${journal.phase}": ` +
+        `"${expectedPriorPhase}" is not its strict predecessor in the v2 phase order.`
+    )
+  }
+
+  const current = await readPromotionJournal(dataRoot)
+
+  if (current.status === 'absent') {
+    throw storeError(
+      'TRANSITION_JOURNAL_ABSENT',
+      `Cannot advance the promotion journal to "${journal.phase}": no durable journal exists at the fixed path.`
+    )
+  }
+  if (current.status === 'invalid') {
+    throw storeError(
+      'TRANSITION_JOURNAL_INVALID',
+      `Cannot advance the promotion journal to "${journal.phase}": ` +
+        `the current durable journal failed strict decoding (${current.code}).`
+    )
+  }
+  const prior = current.journal
+  if (prior.version !== PROMOTION_JOURNAL_VERSION_V2) {
+    throw storeError(
+      'TRANSITION_PHASE_MISMATCH',
+      `Cannot advance the promotion journal to "${journal.phase}": ` +
+        'the current durable journal is v1 (chat.db-only protocol) — ' +
+        'a v2 three-artifact promotion may never continue a v1 journal.'
+    )
+  }
+  if (prior.phase !== expectedPriorPhase) {
+    throw storeError(
+      'TRANSITION_PHASE_MISMATCH',
+      `Cannot advance the promotion journal to "${journal.phase}": ` +
+        `current phase is "${prior.phase}" but exactly "${expectedPriorPhase}" is required ` +
+        '(no skips, regressions, or repeats).'
+    )
+  }
+  if (prior.sessionId !== journal.sessionId || prior.candidateId !== journal.candidateId) {
+    throw storeError(
+      'TRANSITION_IDENTITY_MISMATCH',
+      `Cannot advance the promotion journal to "${journal.phase}": ` +
+        'sessionId/candidateId must be identical to the current durable journal ' +
+        '(cross-session or cross-candidate replacement is forbidden).'
+    )
+  }
+  if (!artifactReceiptsEqual(prior.receipts.candidate, journal.receipts.candidate)) {
+    throw storeError(
+      'TRANSITION_IDENTITY_MISMATCH',
+      `Cannot advance the promotion journal to "${journal.phase}": ` +
+        'candidate aggregate receipts must be immutable across transitions.'
+    )
+  }
+  if (!oldReceiptsMonotonic(prior.receipts.old, journal.receipts.old)) {
+    throw storeError(
+      'TRANSITION_IDENTITY_MISMATCH',
+      `Cannot advance the promotion journal to "${journal.phase}": ` +
+        'old-generation aggregate receipts may only be filled in once (monotonic).'
+    )
+  }
+
+  await writePromotionJournalDurably(journal, dataRoot)
+}
+
+/** True when `next.old` only fills in previously-null fields of `prior.old`. */
+function oldReceiptsMonotonic(
+  prior: PromotionJournalV2['receipts']['old'],
+  next: PromotionJournalV2['receipts']['old']
+): boolean {
+  return (
+    oldReceiptFieldMonotonic(prior.db, next.db, dbReceiptsEqual) &&
+    oldReceiptFieldMonotonic(prior.files, next.files, filesReceiptsEqual) &&
+    oldReceiptFieldMonotonic(prior.catalog, next.catalog, catalogReceiptsEqual)
+  )
+}
+
+/**
+ * Canonical per-field monotonicity: `null → any` (fill-in once) or equal is
+ * monotonic; `value → null` (regression) and `value → different value` are
+ * not. Comparison is key-order independent (LOCK-CLOSE-2).
+ */
+function oldReceiptFieldMonotonic<T>(
+  prior: T | null,
+  next: T | null,
+  equal: (a: T | null, b: T | null) => boolean
+): boolean {
+  if (prior === null) return true
+  if (next === null) return false
+  return equal(prior, next)
 }
 
 // ---------------------------------------------------------------------------
@@ -537,13 +715,17 @@ export type PromotionJournalCleanupResult =
  *   1. Guard-read the current durable journal.
  *   2. Absent → return idempotent success (already-absent, no sync needed).
  *   3. Invalid → reject CLEANUP_JOURNAL_INVALID (no unlink).
- *   4. Valid but wrong phase → reject CLEANUP_PHASE_MISMATCH (no unlink).
- *   5. Valid but wrong identity → reject CLEANUP_IDENTITY_MISMATCH (no
+ *   4. Wrong schema version → reject CLEANUP_PHASE_MISMATCH (no unlink).
+ *      Each cleanup API owns exactly one journal protocol: a v1 cleanup
+ *      must NEVER remove a v2 journal (they share the `replacement-verified`
+ *      phase — LOCK-CLOSE-1), and the v2 cleanup never removes a v1 journal.
+ *   5. Valid but wrong phase → reject CLEANUP_PHASE_MISMATCH (no unlink).
+ *   6. Valid but wrong identity → reject CLEANUP_IDENTITY_MISMATCH (no
  *      unlink).
- *   6. Valid and matches → unlink the fixed journal (ENOENT race is
+ *   7. Valid and matches → unlink the fixed journal (ENOENT race is
  *      idempotent after confirmed presence).
- *   7. Best-effort unlink stale staging file (never a failure).
- *   8. Fsync parent directory for durability (LOCK-4438).
+ *   8. Best-effort unlink stale staging file (never a failure).
+ *   9. Fsync parent directory for durability (LOCK-4438).
  *
  * LOCK-4436: only the fixed promotion journal and stale staging are
  * candidates for deletion. The rollback snapshot, candidate files, and live
@@ -556,7 +738,8 @@ export type PromotionJournalCleanupResult =
 async function cleanupPromotionJournalBody(
   expectedPhase: PromotionJournalPhase,
   expectedIdentity: PromotionJournalCleanupIdentity,
-  dataRoot: string
+  dataRoot: string,
+  requiredVersion: PromotionJournalVersion
 ): Promise<PromotionJournalCleanupResult> {
   const journalPath = getPromotionJournalPath(dataRoot)
   const stagingPath = getPromotionJournalStagingPath(dataRoot)
@@ -577,7 +760,17 @@ async function cleanupPromotionJournalBody(
     )
   }
 
-  // 4. Phase mismatch → reject.
+  // 4. Schema-version mismatch → reject (LOCK-CLOSE-1 symmetric isolation).
+  if (current.journal.version !== requiredVersion) {
+    throw storeError(
+      'CLEANUP_PHASE_MISMATCH',
+      `Cannot clean up the promotion journal: the current durable journal is v${current.journal.version} ` +
+        `but this cleanup API owns the v${requiredVersion} journal protocol ` +
+        '(a v1 cleanup never removes a v2 journal and vice versa).'
+    )
+  }
+
+  // 5. Phase mismatch → reject.
   if (current.journal.phase !== expectedPhase) {
     throw storeError(
       'CLEANUP_PHASE_MISMATCH',
@@ -586,7 +779,7 @@ async function cleanupPromotionJournalBody(
     )
   }
 
-  // 5. Identity mismatch → reject.
+  // 6. Identity mismatch → reject.
   if (
     current.journal.sessionId !== expectedIdentity.sessionId ||
     current.journal.candidateId !== expectedIdentity.candidateId
@@ -597,7 +790,7 @@ async function cleanupPromotionJournalBody(
     )
   }
 
-  // 6. Unlink the fixed journal (guard confirmed presence).
+  // 7. Unlink the fixed journal (guard confirmed presence).
   try {
     await fs.unlink(journalPath)
   } catch (error) {
@@ -609,7 +802,7 @@ async function cleanupPromotionJournalBody(
     }
   }
 
-  // 7. Best-effort unlink of stale staging file (never a failure).
+  // 8. Best-effort unlink of stale staging file (never a failure).
   try {
     await fs.unlink(stagingPath)
   } catch (error) {
@@ -620,7 +813,7 @@ async function cleanupPromotionJournalBody(
     }
   }
 
-  // 8. Fsync parent directory for durability (LOCK-4438).
+  // 9. Fsync parent directory for durability (LOCK-4438).
   await syncParentDirectoryForCleanup(dataRoot)
 
   return { deleted: true }
@@ -644,7 +837,7 @@ export async function cleanupPromotionJournalAfterReplacementVerified(
   dataRoot: string = DATA_PATH
 ): Promise<PromotionJournalCleanupResult> {
   assertControlledDataRoot(dataRoot)
-  return cleanupPromotionJournalBody('replacement-verified', expectedIdentity, dataRoot)
+  return cleanupPromotionJournalBody('replacement-verified', expectedIdentity, dataRoot, PROMOTION_JOURNAL_VERSION_V1)
 }
 
 /**
@@ -664,7 +857,7 @@ export async function cleanupPromotionJournalAfterSnapshotReady(
   dataRoot: string = DATA_PATH
 ): Promise<PromotionJournalCleanupResult> {
   assertControlledDataRoot(dataRoot)
-  return cleanupPromotionJournalBody('snapshot-ready', expectedIdentity, dataRoot)
+  return cleanupPromotionJournalBody('snapshot-ready', expectedIdentity, dataRoot, PROMOTION_JOURNAL_VERSION_V1)
 }
 
 /**
@@ -684,7 +877,29 @@ export async function cleanupPromotionJournalAfterCandidateInstalled(
   dataRoot: string = DATA_PATH
 ): Promise<PromotionJournalCleanupResult> {
   assertControlledDataRoot(dataRoot)
-  return cleanupPromotionJournalBody('candidate-installed', expectedIdentity, dataRoot)
+  return cleanupPromotionJournalBody('candidate-installed', expectedIdentity, dataRoot, PROMOTION_JOURNAL_VERSION_V1)
+}
+
+/**
+ * v2 cleanup — remove the fixed journal when it is a valid v2 document at
+ * exactly `expectedPhase` with the matching identity (LOCK-PROMO-6:
+ * rollback completion cleans up whatever v2 phase the journal was at).
+ *
+ * The shared cleanup body enforces the schema-version bound symmetrically:
+ * a v2 cleanup only ever removes a v2 journal (a v1 journal is rejected
+ * with CLEANUP_PHASE_MISMATCH — LOCK-CLOSE-1).
+ *
+ * LOCK-4436: only the fixed promotion journal and stale staging are
+ * candidates for deletion. Snapshots, candidate files, and live artifacts
+ * are NEVER touched.
+ */
+export async function cleanupPromotionJournalAtV2Phase(
+  expectedPhase: PromotionJournalPhaseV2,
+  expectedIdentity: PromotionJournalCleanupIdentity,
+  dataRoot: string = DATA_PATH
+): Promise<PromotionJournalCleanupResult> {
+  assertControlledDataRoot(dataRoot)
+  return cleanupPromotionJournalBody(expectedPhase, expectedIdentity, dataRoot, PROMOTION_JOURNAL_VERSION_V2)
 }
 
 /**

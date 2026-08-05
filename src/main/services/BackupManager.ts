@@ -34,6 +34,18 @@ import { isPathInside, resolveAndValidatePath } from '../utils/file'
 import { chatDbService } from './chatDb'
 import { createL3ArchiveMetadata, type L3ArchiveMetadata, validateL3ArchiveMetadata } from './chatDb/l3ArchiveMetadata'
 import { getSharedMaintenanceCoordinator, withMaintenanceLease } from './chatDb/maintenanceCoordination'
+import { FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME } from './chatDbImport/promotion/filesSnapshot'
+import {
+  FILES_CATALOG_SNAPSHOT_FILENAME,
+  FILES_CATALOG_SNAPSHOT_STAGING_FILENAME,
+  FILES_PROMOTE_STAGING_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_DIRNAME,
+  FILES_ROLLBACK_SNAPSHOT_STAGING_DIRNAME,
+  PROMOTION_JOURNAL_FILENAME,
+  ROLLBACK_SNAPSHOT_FILENAME,
+  ROLLBACK_SNAPSHOT_STAGING_FILENAME
+} from './chatDbImport/promotion/journal'
+import { PROMOTION_JOURNAL_STAGING_FILENAME } from './chatDbImport/promotion/journalStore'
 import { validateReadonlyChatDb } from './chatDbImport/promotion/readonlyDbValidation'
 import S3Storage from './S3Storage'
 import WebDav from './WebDav'
@@ -615,11 +627,47 @@ class BackupManager {
     return createL3ArchiveMetadata()
   }
 
-  // Transient files that must NEVER appear in backup archives.
-  // chat.db is replaced by a validated snapshot; WAL/SHM are live-replication
-  // artifacts that are meaningless outside a running DB; .backup is a
-  // transient snapshot staging file.
-  private static readonly EXCLUDED_DATA_ENTRIES = new Set(['chat.db', 'chat.db-wal', 'chat.db-shm', 'chat.db.backup'])
+  // ---------------------------------------------------------------------------
+  // LOCK-L3-1 / LOCK-L3-2: Entries that must NEVER appear in L3 backup
+  // archives.
+  //
+  // Live chat DB coordination files (historical behavior): chat.db is
+  // replaced by a validated snapshot (LOCK-6008); WAL/SHM are live-replication
+  // artifacts that are meaningless outside a running DB; chat.db.backup is a
+  // transient snapshot staging file (LOCK-6020).
+  //
+  // L2 promotion internals at the Data root (LOCK-L3-2): the owned candidate
+  // root, the promotion journal (+ staging), the chat.db rollback snapshot
+  // (+ staging), the Files rollback snapshots (retained / old / staging),
+  // the Files promote-staging dir, and the Dexie files-catalog snapshot
+  // (+ staging). These are stale-state artifacts that must never round-trip
+  // through a backup/restore. Names are imported from the L2 module constants
+  // to avoid drift; the candidate root is pinned below (must equal
+  // candidateDb.CANDIDATE_ROOT_DIRNAME) and cross-checked in
+  // backupManager.production.test.ts.
+  //
+  // Exclusions apply by basename at every level of the Data subtree,
+  // matching the historical filter semantics of copyDirWithProgressFiltered.
+  // ---------------------------------------------------------------------------
+  private static readonly EXCLUDED_DATA_ENTRIES: Set<string> = new Set([
+    // Live chat DB coordination files
+    'chat.db',
+    'chat.db-wal',
+    'chat.db-shm',
+    'chat.db.backup',
+    // L2 promotion internals at the Data root (LOCK-L3-2)
+    'chat-import-candidates', // == candidateDb.CANDIDATE_ROOT_DIRNAME
+    PROMOTION_JOURNAL_FILENAME,
+    PROMOTION_JOURNAL_STAGING_FILENAME,
+    ROLLBACK_SNAPSHOT_FILENAME,
+    ROLLBACK_SNAPSHOT_STAGING_FILENAME,
+    FILES_ROLLBACK_SNAPSHOT_DIRNAME,
+    FILES_ROLLBACK_SNAPSHOT_STAGING_DIRNAME,
+    FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME,
+    FILES_PROMOTE_STAGING_DIRNAME,
+    FILES_CATALOG_SNAPSHOT_FILENAME,
+    FILES_CATALOG_SNAPSHOT_STAGING_FILENAME
+  ])
 
   // ---------------------------------------------------------------------------
   // LOCK-6012/6013/6019: Stream lifecycle helpers
@@ -2213,8 +2261,10 @@ class BackupManager {
 
   /**
    * Copy directory with progress reporting, EXCLUDING specific filenames.
-   * Used to copy Data/ while omitting live chat.db, WAL, SHM, and transient
-   * backup artifacts — the snapshot is staged separately.
+   * Used to copy Data/ while omitting live chat.db, WAL, SHM, transient
+   * backup artifacts, and L2 promotion internals (candidate root, journal,
+   * rollback snapshots/staging, Files promote-staging, catalog snapshots —
+   * see EXCLUDED_DATA_ENTRIES). The chat.db snapshot is staged separately.
    *
    * @param source - Source directory path
    * @param destination - Destination directory path

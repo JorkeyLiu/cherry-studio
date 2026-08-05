@@ -432,5 +432,19 @@ export enum IpcChannel {
   // pending projection after Redux rehydration, applies it, flushes, then
   // durably acks so a crash-before-ack retries on next startup.
   CherryImport_GetProjection = 'cherry-import:get-projection',
-  CherryImport_AckProjection = 'cherry-import:ack-projection'
+  CherryImport_AckProjection = 'cherry-import:ack-projection',
+  // L2 files catalog handoff boundary (Phase 2, LOCK-PROMO-5/7): Main →
+  // renderer request events and the renderer → Main typed response invoke.
+  // The renderer owns the only handle to the live Dexie files table, so
+  // Main drives capture/apply/restore/query through this minimal boundary.
+  // The main renderer's MAIN FRAME only; ordinary UI is blocked while the
+  // catalog-pending apply/recovery is in flight.
+  // LOCK-BRIDGE-1: renderer → main ready handshake. The recovery renderer
+  // invokes this ONLY after its catalog request handler is installed (App
+  // mount after PersistGate); Main awaits it with a bounded timeout before
+  // sending any catalog request so the recovery window never races the
+  // handler registration (the previous 60s per-request timeout race).
+  CherryImport_CatalogRequest = 'cherry-import:catalog-request',
+  CherryImport_CatalogRespond = 'cherry-import:catalog-respond',
+  CherryImport_CatalogReady = 'cherry-import:catalog-ready'
 }

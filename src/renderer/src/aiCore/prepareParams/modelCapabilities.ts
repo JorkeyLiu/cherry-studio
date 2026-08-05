@@ -5,7 +5,7 @@
 
 import { isVisionModel } from '@renderer/config/models'
 import { getProviderByModel } from '@renderer/services/AssistantService'
-import type { FileType, Model } from '@renderer/types'
+import type { Model } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
 
 import { getAiSdkProviderId } from '../provider/factory'
@@ -68,7 +68,7 @@ export function supportsLargeFileUpload(model: Model): boolean {
 /**
  * 获取提供商特定的文件大小限制
  */
-export function getFileSizeLimit(model: Model, fileType: FileType): number {
+export function getFileSizeLimit(model: Model, fileType: string | null): number {
   const provider = getProviderByModel(model)
   const aiSdkId = getAiSdkProviderId(provider)
 
