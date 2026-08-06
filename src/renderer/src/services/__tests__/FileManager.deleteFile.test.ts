@@ -42,6 +42,18 @@ vi.mock('@renderer/store', () => ({
   }
 }))
 
+// Narrow mocks for FileManager's heavyweight imports (LOCK-STAB). Real
+// '@renderer/i18n' (~3.3MB locale init) and '@renderer/utils' are not used
+// by deleteFile paths; mocking them avoids cold-import timeout in full runs.
+// Matches FileManager.concurrency.test.ts pattern.
+vi.mock('@renderer/i18n', () => ({
+  default: { t: (key: string) => key }
+}))
+
+vi.mock('@renderer/utils', () => ({
+  getFileDirectory: (filePath: string) => filePath
+}))
+
 vi.mock('@renderer/databases', () => {
   const db = {
     files: {

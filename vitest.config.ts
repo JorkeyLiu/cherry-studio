@@ -153,7 +153,11 @@ export default defineConfig({
       ['**/promotion/__tests__/preparation.test.ts', 'forks'],
       ['**/promotion/__tests__/replacementVerifier.test.ts', 'forks'],
       ['**/promotion/__tests__/snapshot.test.ts', 'forks'],
-      ['**/promotion/__tests__/recoveryV2.test.ts', 'forks']
+      ['**/promotion/__tests__/recoveryV2.test.ts', 'forks'],
+      // Shiki exact-HTML contract: pin to a single bounded fork process so the
+      // exact HTML toBe() assertions are isolated from thread-pool contention
+      // in full-suite runs (LOCK-STAB).
+      ['**/ShikiStreamTokenizer.test.ts', 'forks']
     ]
   }
 })
