@@ -59,6 +59,17 @@ corepack enable
 pnpm install
 ```
 
+### Native ABI (better-sqlite3)
+
+`better-sqlite3` is the single native module. It is compiled for **either** Node24 (ABI 137) **or** Electron 41.2.1 (ABI 145) — never both at once.
+
+- `.node-version` / `.nvmrc` are the source of truth for the required Node version.
+- Confirm Node24 is on PATH (`node -v`) before `pnpm install`; installing under the wrong Node can produce an incompatible binding.
+- Preflights (`pnpm dev` / `pnpm test` / …) only verify the binding — they never rebuild.
+- Switch explicitly between ABIs when needed:
+  - `pnpm native:rebuild:node` — rebuild for Node24 (ABI 137), then `pnpm native:check:node`
+  - `pnpm native:rebuild:electron` — rebuild for Electron 41.2.1 (ABI 145), then `pnpm native:check:electron`
+
 ### ENV
 
 ```bash

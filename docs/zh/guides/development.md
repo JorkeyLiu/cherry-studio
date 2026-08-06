@@ -51,6 +51,17 @@ corepack enable
 pnpm install
 ```
 
+### 原生 ABI（better-sqlite3）
+
+`better-sqlite3` 是唯一的原生模块，编译目标为 **Node24（ABI 137）** 或 **Electron 41.2.1（ABI 145）** 之一——两者不可同时存在。
+
+- `.node-version` / `.nvmrc` 是所需 Node 版本的权威来源。
+- 执行 `pnpm install` 前请确认 Node24 已在 PATH 中（`node -v`）；在错误的 Node 版本下安装可能产生不兼容的 binding。
+- 预检命令（`pnpm dev` / `pnpm test` 等）只校验 binding，从不重新编译。
+- 需要时显式切换 ABI：
+  - `pnpm native:rebuild:node` — 为 Node24（ABI 137）重新编译，随后 `pnpm native:check:node`
+  - `pnpm native:rebuild:electron` — 为 Electron 41.2.1（ABI 145）重新编译，随后 `pnpm native:check:electron`
+
 ### 环境变量
 
 ```bash

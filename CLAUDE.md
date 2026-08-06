@@ -49,6 +49,7 @@ If the skill is unavailable, directly read `.agents/skills/gh-create-issue/SKILL
   - `pnpm native:check:electron` — read-only check: binding verified under the installed Electron binary (`ELECTRON_RUN_AS_NODE=1`) for Electron 41.2.1 / ABI 145 (darwin arm64).
   - `pnpm native:rebuild:node` — explicit node-gyp source build of better-sqlite3 for Node24, then runs `native:check:node` (fails on any failure).
   - `pnpm native:rebuild:electron` — explicit `@electron/rebuild` source build (force, buildFromSource, only better-sqlite3) for Electron, then runs `native:check:electron`.
+  - ABI onboarding: `.node-version` / `.nvmrc` are the source of truth for the required Node version. Confirm Node24 is on PATH (`node -v`) before installing — installing under the wrong Node can produce an incompatible binding. Preflights never rebuild: switch explicitly between Node ABI 137 and Electron ABI 145 with `pnpm native:rebuild:node` / `pnpm native:rebuild:electron`.
   - Preflight integration: `pnpm start` / `pnpm dev` / `pnpm dev:watch` / `pnpm debug` / `pnpm test:e2e` run `native:check:electron` once before launch; `pnpm test` / `pnpm test:coverage` / `pnpm test:watch` / `pnpm test:ui` / `pnpm bench` / `pnpm ci:test-check` run `native:check:node` once. Focused `test:*` / `bench:*` sub-suite commands are intentionally unguarded (aggregate entry points check once; CI adds one `native:check:node` step per focused-suite test job in `.github/workflows/ci.yml`). `.forge-meta` markers are never trusted as proof (LOCK-ABI-2) — only real runtime SQL counts. Implementation: `scripts/native-abi/`.
 - **Test**: `pnpm test` — preflights Node ABI, then runs all Vitest tests (main + renderer + aiCore + shared + scripts)
   - `pnpm test:main` — Main process tests only (Node environment)
@@ -108,6 +109,9 @@ Node.js backend services. Key services:
 | `LoggerService` | Winston-based structured logging (daily rotate) |
 | `StoreSyncService` | Syncs Redux state to/from main process |
 | `BackupManager` | Data backup/restore (WebDAV, S3, Nutstore) |
+| `ChatDbService` | SQLite chat database (`Data/chat.db`) connection lifecycle, schema migrations, integrity checks, and maintenance coordination — see `src/main/services/chatDb/` |
+| `ChatDbAggregateService` | Command-oriented typed access to the chat database (topics, messages, blocks, topic_segments, file references); the `ChatDb_*` IPC channels map 1:1 onto its capabilities |
+| `ChatDbImport` | L2 Cherry Studio ZIP compatibility import pipeline (ZIP intake, candidate build, verification, atomic promotion) — see `src/main/services/chatDbImport/` |
 | `ApiServerService` | Express HTTP API server (Swagger docs at `/api-docs`) |
 | `AppUpdater` | electron-updater auto-update |
 | `ShortcutService` | Global keyboard shortcuts |
@@ -126,7 +130,7 @@ React 19 + Redux Toolkit SPA. Key structure:
 aiCore/          # Legacy middleware pipeline (deprecated, migrating to packages/aiCore)
 api/             # IPC call wrappers (typed electron API calls)
 components/      # Shared UI components (Ant Design 5 + styled-components + TailwindCSS v4)
-databases/       # Dexie (IndexedDB) — topics, files, message_blocks, etc.
+databases/       # Dexie (IndexedDB) — files catalog, settings, knowledge notes, translation history/languages, quick phrases
 hooks/           # React hooks (useAssistant, useChatContext, useModel, etc.)
 pages/           # Route pages (home, settings, knowledge, paintings, notes, etc.)
 services/        # Frontend services (ApiService, ModelService, MemoryService, etc.)
@@ -156,8 +160,10 @@ Slices (redux-persist enabled):
 
 ### Database Layer
 
+- **SQLite is authoritative for ordinary chat**: `Data/chat.db` lives in the Main process, written through `ChatDbAggregateService` (Drizzle ORM + better-sqlite3). The renderer never holds a SQLite connection — it accesses chat data via typed IPC (`api.*` wrappers) through `SqliteMessageDataSource` (`src/renderer/src/services/db/SqliteMessageDataSource.ts`).
 - **IndexedDB** (Dexie): `src/renderer/src/databases/index.ts`
-  - Tables: `files`, `topics`, `settings`, `knowledge_notes`, `translate_history`, `quick_phrases`, `message_blocks`, `translate_languages`
+  - Live tables: `files` (catalog), `settings`, `knowledge_notes`, `translate_history`, `translate_languages`, `quick_phrases`
+  - Exceptions: `topics` / `message_blocks` remain for agent sessions and for the legacy renderer-side conversation import path — that path is not ordinary SQLite chat authority; `topic_segments` remains for isolated L2 import compatibility and is not ordinary runtime authority
   - Schema versioned with upgrade functions (`upgradeToV5`, `upgradeToV7`, `upgradeToV8`)
 
 ### IPC Communication
@@ -231,7 +237,7 @@ logger.error("message", error);
 | Test | Vitest 3 (unit), Playwright (e2e) |
 | Lint/Format | ESLint 9, oxlint, Biome 2 |
 | DB (main) | Drizzle ORM + better-sqlite3 (SQLite) — see `src/main/services/chatDb/` |
-| DB (renderer) | Dexie (IndexedDB) |
+| DB (renderer) | Dexie (IndexedDB) — files catalog, settings, knowledge notes, translation history/languages, quick phrases |
 | Logging | Winston + winston-daily-rotate-file |
 | Tracing | OpenTelemetry |
 | i18n | i18next + react-i18next |

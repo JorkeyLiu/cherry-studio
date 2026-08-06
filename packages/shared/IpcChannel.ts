@@ -406,7 +406,7 @@ export enum IpcChannel {
   ChatDb_SearchMessages = 'chatdb:search-messages',
 
   // ChatImport — import-only IPC for Phase 4 source-reader pipeline.
-  // Independent of the 23 ChatDb_* channels. Prefix: chat-import:*
+  // Independent of the ChatDb_* channels. Prefix: chat-import:*
   ChatImport_Ready = 'chat-import:ready',
   ChatImport_Discover = 'chat-import:discover',
   ChatImport_ReadPage = 'chat-import:read-page',

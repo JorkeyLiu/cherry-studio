@@ -1,7 +1,8 @@
 /**
- * ChatDbAggregateService — implements all 23 ChatDb commands.
+ * ChatDbAggregateService — implements the complete typed ChatDb command
+ * surface (the `ChatDb_*` IPC channels map 1:1 onto its capabilities).
  *
- * Combines the five Phase 2 repositories (topics, messages, blocks,
+ * Combines the five repositories (topics, messages, blocks,
  * topic_segments, file_references) into a single service that the IPC
  * handlers delegate to.
  *
@@ -13,7 +14,7 @@
  * - No per-call SQLite→Dexie fallback.
  * - No implicit init. DB must be initialised before calling any command.
  *
- * Dexie remains authoritative throughout Phase 3/4.
+ * SQLite (Data/chat.db) is authoritative for ordinary chat.
  * updateFileCount(s) stays in Dexie/FileManager; not called here.
  */
 

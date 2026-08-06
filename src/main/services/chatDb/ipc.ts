@@ -1,7 +1,7 @@
 /**
  * ChatDb IPC handler registration.
  *
- * Registers exactly 36 fixed IPC handlers matching the ChatDb IpcChannel entries.
+ * Registers a fixed set of typed IPC handlers matching the ChatDb IpcChannel entries.
  * Each handler:
  * 1. Validates the request using the shared contract validators.
  * 2. Delegates to ChatDbAggregateService.
@@ -13,7 +13,7 @@
  *
  * Design:
  * - Dedicated module invoked from central src/main/ipc.ts.
- * - Exactly 23 channels; no execute/query/repository CRUD.
+ * - Fixed typed channels only; no execute/query/repository CRUD.
  * - No implicit init and no fallback.
  * - Returns disposer/removeHandler for lifecycle management.
  * - Re-registration is safe: a new call disposes the prior registration
@@ -95,7 +95,7 @@ let activeDisposer: (() => void) | null = null
 // ---------------------------------------------------------------------------
 
 /**
- * Register all 36 ChatDb IPC handlers.
+ * Register all ChatDb IPC handlers.
  *
  * Re-registration safety:
  * - If a prior registration exists, it is disposed before installing new
@@ -138,7 +138,7 @@ export function registerChatDbIpc(): () => void {
     channel: string,
     execute: (aggregate: ChatDbAggregateService, request: any) => ChatDbResult<any>
   ): void {
-    // All 34 ChatDb channels are valid ChatDbChannel values.
+    // All ChatDb channels are valid ChatDbChannel values.
     // Cast once for shared validator calls.
     const chatDbChannel = channel as ChatDbChannel
 
@@ -192,8 +192,8 @@ export function registerChatDbIpc(): () => void {
   }
 
   // =========================================================================
-  // Register exactly 36 handlers (23 Phase 5.1A + 11 Phase 5.1B + search +
-  // Phase 5.2B empty-trash)
+  // Register the fixed ChatDb handler set (Phase 5.1A, Phase 5.1B, search,
+  // and Phase 5.2B empty-trash)
   // =========================================================================
 
   // 1. fetch-messages
