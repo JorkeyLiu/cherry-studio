@@ -23,9 +23,47 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { mocks } = vi.hoisted(() => {
   const fileStore = new Map<string, any>()
 
+  // In-memory Dexie `files` table mock, shared with the '@renderer/databases'
+  // module mock below. Defined here (not inside the vi.mock factory) so that
+  // beforeEach can re-apply the database mock implementations explicitly
+  // (LOCK-TEST-3). Vitest 3.x currently falls back to the vi.fn(impl) originals
+  // after vi.resetAllMocks(), so this re-application is defensive: it must not
+  // rely on that fallback persisting across upgrades. Assertions must observe
+  // mutations in mocks.fileStore and the FileLock read-modify-write path must
+  // actually be exercised.
+  const db = {
+    files: {
+      get: vi.fn(async (id: string) => fileStore.get(id) ?? undefined),
+      add: vi.fn(async (file: any) => {
+        fileStore.set(file.id, file)
+      }),
+      update: vi.fn(async (id: string, changes: any) => {
+        const existing = fileStore.get(id)
+        if (existing) {
+          fileStore.set(id, { ...existing, ...changes })
+        }
+      }),
+      delete: vi.fn(async (id: string) => {
+        fileStore.delete(id)
+      }),
+      toArray: vi.fn(async () => Array.from(fileStore.values())),
+      where: vi.fn(() => ({
+        belowOrEqual: vi.fn(() => ({
+          toArray: vi.fn(async () => {
+            return Array.from(fileStore.values()).filter((f: any) => f.count <= 0)
+          })
+        }))
+      })),
+      transaction: vi.fn(async (_mode: string, _table: any, fn: () => Promise<void>) => {
+        await fn()
+      })
+    }
+  }
+
   return {
     mocks: {
       fileStore,
+      db,
       logger: {
         info: vi.fn(),
         warn: vi.fn(),
@@ -68,37 +106,24 @@ vi.mock('../db/types', () => ({
   buildAgentSessionTopicId: vi.fn()
 }))
 
-vi.mock('@renderer/databases', () => {
-  const db = {
-    files: {
-      get: vi.fn(async (id: string) => mocks.fileStore.get(id) ?? undefined),
-      add: vi.fn(async (file: any) => {
-        mocks.fileStore.set(file.id, file)
-      }),
-      update: vi.fn(async (id: string, changes: any) => {
-        const existing = mocks.fileStore.get(id)
-        if (existing) {
-          mocks.fileStore.set(id, { ...existing, ...changes })
-        }
-      }),
-      delete: vi.fn(async (id: string) => {
-        mocks.fileStore.delete(id)
-      }),
-      toArray: vi.fn(async () => Array.from(mocks.fileStore.values())),
-      where: vi.fn(() => ({
-        belowOrEqual: vi.fn(() => ({
-          toArray: vi.fn(async () => {
-            return Array.from(mocks.fileStore.values()).filter((f: any) => f.count <= 0)
-          })
-        }))
-      })),
-      transaction: vi.fn(async (_mode: string, _table: any, fn: () => Promise<void>) => {
-        await fn()
-      })
-    }
-  }
-  return { default: db, db }
-})
+// Narrow mocks for FileManager's heavyweight imports (LOCK-TEST-4). The real
+// '@renderer/i18n' bundles ~3.2MB of locale data (plus i18next init) and
+// '@renderer/utils' pulls in antd/lodash/uuid — none of it is exercised by
+// these concurrency tests, and importing it delays the first dynamic
+// FileManager import by seconds. Matches the existing test mocking style
+// (see listModels.test.ts / ApiService.imageCollection.test.ts).
+vi.mock('@renderer/i18n', () => ({
+  default: { t: (key: string) => key }
+}))
+
+vi.mock('@renderer/utils', () => ({
+  getFileDirectory: (filePath: string) => filePath
+}))
+
+vi.mock('@renderer/databases', () => ({
+  default: mocks.db,
+  db: mocks.db
+}))
 
 vi.stubGlobal('window', {
   api: {
@@ -142,6 +167,36 @@ describe('FileManager concurrency — LOCK-001/002/003/004', () => {
     // Re-establish defaults cleared by resetAllMocks
     mocks.apiFileExists.mockResolvedValue(true)
     mocks.storeGetState.mockReturnValue({ runtime: { filesPath: '/mock/files' } })
+    // LOCK-TEST-3: Explicitly re-establish the database mock implementations.
+    // Vitest 3.x currently falls back to the vi.fn(impl) originals after
+    // resetAllMocks, so this is defensive: it removes reliance on that fallback
+    // persisting across upgrades. Assertions observe mutations in
+    // mocks.fileStore and the FileLock serialization path is actually exercised
+    // (not a vacuous pre-seeded state).
+    mocks.db.files.get.mockImplementation(async (id: string) => mocks.fileStore.get(id) ?? undefined)
+    mocks.db.files.add.mockImplementation(async (file: any) => {
+      mocks.fileStore.set(file.id, file)
+    })
+    mocks.db.files.update.mockImplementation(async (id: string, changes: any) => {
+      const existing = mocks.fileStore.get(id)
+      if (existing) {
+        mocks.fileStore.set(id, { ...existing, ...changes })
+      }
+    })
+    mocks.db.files.delete.mockImplementation(async (id: string) => {
+      mocks.fileStore.delete(id)
+    })
+    mocks.db.files.toArray.mockImplementation(async () => Array.from(mocks.fileStore.values()))
+    mocks.db.files.where.mockImplementation(() => ({
+      belowOrEqual: vi.fn(() => ({
+        toArray: vi.fn(async () => {
+          return Array.from(mocks.fileStore.values()).filter((f: any) => f.count <= 0)
+        })
+      }))
+    }))
+    mocks.db.files.transaction.mockImplementation(async (_mode: string, _table: any, fn: () => Promise<void>) => {
+      await fn()
+    })
   })
 
   // ──────────────────────────────────────────────────────────────────────
