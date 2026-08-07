@@ -6,6 +6,7 @@ import path from 'node:path'
 
 import { loggerService } from '@logger'
 import { audioExts, documentExts, HOME_CHERRY_DIR, imageExts, MB, textExts, videoExts } from '@shared/config/constant'
+import { appIdentity } from '@shared/config/identity'
 import type { FileMetadata, FileType, NotesTreeNode } from '@types'
 import { FILE_TYPE } from '@types'
 import chardet from 'chardet'
@@ -162,7 +163,10 @@ export function getAllFiles(dirPath: string, arrayOfFiles: FileMetadata[] = []):
 }
 
 export function getTempDir() {
-  return path.join(app.getPath('temp'), 'CherryStudio')
+  // Historical default Cherry Studio generic temp root is `CherryStudio`;
+  // Cherry Chat derives its own distinct generic temp root. The BackupManager
+  // temp identity (`cherry-studio`/`cherry-chat`) is a separate contract.
+  return path.join(app.getPath('temp'), appIdentity.genericTempDirName)
 }
 
 export function getFilesDir() {

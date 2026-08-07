@@ -1,5 +1,6 @@
 import { loggerService } from '@logger'
 import { t } from '@main/utils/locales'
+import { appIdentity } from '@shared/config/identity'
 import { IpcChannel } from '@shared/IpcChannel'
 import { app, dialog, session, shell, webContents } from 'electron'
 import { promises as fs } from 'fs'
@@ -11,12 +12,13 @@ const logger = loggerService.withContext('WebviewService')
 
 /**
  * init the useragent of the webview session
- * remove the CherryStudio and Electron from the useragent
+ * remove the app identity product token and Electron from the useragent
  */
 export function initSessionUserAgent() {
   const wvSession = session.fromPartition('persist:webview')
   const originUA = wvSession.getUserAgent()
-  const newUA = originUA.replace(/CherryStudio\/\S+\s/, '').replace(/Electron\/\S+\s/, '')
+  const uaProductToken = new RegExp(`${appIdentity.userAgentProduct}\\/\\S+\\s`)
+  const newUA = originUA.replace(uaProductToken, '').replace(/Electron\/\S+\s/, '')
 
   wvSession.setUserAgent(newUA)
   wvSession.webRequest.onBeforeSendHeaders((details, cb) => {

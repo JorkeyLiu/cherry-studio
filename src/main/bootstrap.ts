@@ -5,7 +5,11 @@ import path from 'path'
 
 import { initAppDataDir } from './utils/init'
 
-app.isPackaged && initAppDataDir()
+// Resolve the runtime userData/profile from application identity before any
+// other consumer reads it. The function internally preserves the historical
+// packaged-only gate for config/portable precedence and applies the
+// Cherry Chat identity base (IDENTITY-002) + refusal guard (IDENTITY-006).
+initAppDataDir()
 
 // 在主进程中复制 appData 中某些一直被占用的文件
 // 在renderer进程还没有启动时，主进程可以复制这些文件到新的appData中

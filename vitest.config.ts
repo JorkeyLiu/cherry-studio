@@ -2,14 +2,23 @@ import { resolve } from 'path'
 import { defineConfig } from 'vitest/config'
 
 import electronViteConfig from './electron.vite.config'
+import { classifyMainBenchFiles, classifyMainTestFiles } from './scripts/vitest-lanes/mainLanes'
 
 const mainConfig = (electronViteConfig as any).main
 const rendererConfig = (electronViteConfig as any).renderer
 
+// Deterministic lane manifests for the main-process suite (LOCK-TEST-001..006):
+// `main` (core) runs every non-native, non-heavy main test on at most 2 thread
+// workers; `main-native` and `main-heavy` each run on a single fork worker so
+// the better-sqlite3 binding and the memory-heavy exhaustive/benchmark suites
+// never run in a thread-pool worker. See scripts/vitest-lanes/mainLanes.ts.
+const mainLanes = classifyMainTestFiles()
+const mainBenchLanes = classifyMainBenchFiles()
+
 export default defineConfig({
   test: {
     projects: [
-      // 主进程单元测试配置
+      // 主进程核心 lane：无 native / 无 heavy 的其余主进程测试，threads 上限 2
       {
         extends: true,
         plugins: mainConfig.plugins,
@@ -20,9 +29,64 @@ export default defineConfig({
           name: 'main',
           environment: 'node',
           setupFiles: ['tests/main.setup.ts'],
-          include: ['src/main/**/*.{test,spec}.{ts,tsx}', 'src/main/**/__tests__/**/*.{test,spec}.{ts,tsx}'],
+          include: mainLanes.core,
+          pool: 'threads',
+          poolOptions: {
+            threads: {
+              maxThreads: 2
+            }
+          },
           benchmark: {
-            include: ['src/main/**/*.bench.{ts,tsx}', 'src/main/**/__tests__/**/*.bench.{ts,tsx}']
+            include: mainBenchLanes.core
+          }
+        }
+      },
+      // 主进程 native lane：直接加载 better-sqlite3、显式 vi.unmock/doUnmock
+      // 真实环境测试、以及 legacy fork-pinned 文件；单 fork worker
+      // （LOCK-ABI-2 —— 原生绑定绝不在线程池 worker 中加载）
+      {
+        extends: true,
+        plugins: mainConfig.plugins,
+        resolve: {
+          alias: mainConfig.resolve.alias
+        },
+        test: {
+          name: 'main-native',
+          environment: 'node',
+          setupFiles: ['tests/main.setup.ts'],
+          include: mainLanes.native,
+          pool: 'forks',
+          poolOptions: {
+            forks: {
+              maxForks: 1
+            }
+          },
+          benchmark: {
+            include: mainBenchLanes.native
+          }
+        }
+      },
+      // 主进程 heavy lane：10k 消息 SQLite 集成 benchmark 与 recoveryV2 的
+      // 236,196 组合穷举，必须独占一个内存受限的单 fork 进程（LOCK-MEM-4）
+      {
+        extends: true,
+        plugins: mainConfig.plugins,
+        resolve: {
+          alias: mainConfig.resolve.alias
+        },
+        test: {
+          name: 'main-heavy',
+          environment: 'node',
+          setupFiles: ['tests/main.setup.ts'],
+          include: mainLanes.heavy,
+          pool: 'forks',
+          poolOptions: {
+            forks: {
+              maxForks: 1
+            }
+          },
+          benchmark: {
+            include: mainBenchLanes.heavy
           }
         }
       },
@@ -40,7 +104,13 @@ export default defineConfig({
           include: ['src/renderer/**/*.{test,spec}.{ts,tsx}', 'src/renderer/**/__tests__/**/*.{test,spec}.{ts,tsx}'],
           benchmark: {
             include: ['src/renderer/**/*.bench.{ts,tsx}', 'src/renderer/**/__tests__/**/*.bench.{ts,tsx}']
-          }
+          },
+          // Renderer-only fork isolation (LOCK-STAB): the Shiki exact-HTML
+          // contract is pinned to a single bounded fork process so its exact
+          // HTML toBe() assertions are isolated from thread-pool contention.
+          // poolMatchGlobs is deprecated and is deliberately retained ONLY
+          // here, scoped to the renderer project — no main-process routing.
+          poolMatchGlobs: [['**/ShikiStreamTokenizer.test.ts', 'forks']]
         }
       },
       // 脚本单元测试配置
@@ -128,36 +198,18 @@ export default defineConfig({
       ]
     },
     testTimeout: 20000,
+    // Root safety caps (LOCK-TEST-005): a direct unfiltered `vitest run` is
+    // bounded to at most 2 thread workers / 1 fork worker per project, so the
+    // old 7-thread + 7-fork worker peak cannot recur. Lane projects keep these
+    // caps; no project raises them.
     pool: 'threads',
     poolOptions: {
       threads: {
-        singleThread: false
+        maxThreads: 2
+      },
+      forks: {
+        maxForks: 1
       }
-    },
-    // Native-module (better-sqlite3) suites run in fork processes so the
-    // Node ABI 137 binding is loaded under process isolation (LOCK-ABI-2 —
-    // real runtime SQL only; markers are never trusted). Thread-pool runs of
-    // the native binding are flaky (SIGSEGV), so every native suite in the
-    // v2 recovery verification scope is pinned to forks. recoveryV2.test.ts
-    // is pure TS but is ALSO pinned to forks (LOCK-MEM-4): its exhaustive
-    // 236,196-combination sweep must run in a single bounded-memory fork
-    // process, not a thread-pool worker. The canonical single-fork command
-    // is documented with the recoveryV2 test itself.
-    poolMatchGlobs: [
-      ['**/promotion/__tests__/execution.test.ts', 'forks'],
-      ['**/promotion/__tests__/recoveryExecutorV2.test.ts', 'forks'],
-      ['**/promotion/__tests__/rollbackV2.test.ts', 'forks'],
-      ['**/promotion/__tests__/rollback.test.ts', 'forks'],
-      ['**/promotion/__tests__/artifactProbe.test.ts', 'forks'],
-      ['**/promotion/__tests__/install.test.ts', 'forks'],
-      ['**/promotion/__tests__/preparation.test.ts', 'forks'],
-      ['**/promotion/__tests__/replacementVerifier.test.ts', 'forks'],
-      ['**/promotion/__tests__/snapshot.test.ts', 'forks'],
-      ['**/promotion/__tests__/recoveryV2.test.ts', 'forks'],
-      // Shiki exact-HTML contract: pin to a single bounded fork process so the
-      // exact HTML toBe() assertions are isolated from thread-pool contention
-      // in full-suite runs (LOCK-STAB).
-      ['**/ShikiStreamTokenizer.test.ts', 'forks']
-    ]
+    }
   }
 })

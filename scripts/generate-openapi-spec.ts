@@ -1,185 +1,236 @@
+import { fileURLToPath } from 'node:url'
+
 import * as fs from 'fs'
 import * as path from 'path'
 import swaggerJSDoc from 'swagger-jsdoc'
 
-const ROOT_DIR = path.resolve(__dirname, '..')
+import { readBuildFlavorFromEnv } from '../packages/shared/config/buildFlavor'
+import { type AppIdentity, resolveAppIdentity } from '../packages/shared/config/identity'
+
+const CURRENT_FILE = fileURLToPath(import.meta.url)
+const ROOT_DIR = path.resolve(path.dirname(CURRENT_FILE), '..')
 const OUTPUT_DIR = path.resolve(ROOT_DIR, 'src/main/apiServer/generated')
 const OUTPUT_FILE = path.resolve(OUTPUT_DIR, 'openapi-spec.json')
 
-const swaggerOptions: swaggerJSDoc.Options = {
-  definition: {
-    openapi: '3.0.0',
-    info: {
-      title: 'Cherry Studio API',
-      version: '1.0.0',
-      description: 'OpenAI-compatible API for Cherry Studio with additional Cherry-specific endpoints',
-      contact: {
-        name: 'Cherry Studio',
-        url: 'https://github.com/CherryHQ/cherry-studio'
-      }
-    },
-    servers: [
-      {
-        url: '/',
-        description: 'Current server'
-      }
-    ],
-    components: {
-      securitySchemes: {
-        BearerAuth: {
-          type: 'http',
-          scheme: 'bearer',
-          bearerFormat: 'JWT',
-          description: 'Use the API key from Cherry Studio settings'
+/**
+ * Build the swagger-jsdoc options for a given application identity.
+ *
+ * Every identity-owned string (info title/description, contact name, bearer
+ * auth hint) comes from the resolved `AppIdentity`, so a `cherry-chat` spec
+ * packages no Cherry Studio product metadata (IDENTITY-002). With the default
+ * identity the produced spec is byte-identical to the historical Cherry Studio
+ * output (IDENTITY-001).
+ */
+export function buildSwaggerOptions(identity: AppIdentity): swaggerJSDoc.Options {
+  return {
+    definition: {
+      openapi: '3.0.0',
+      info: {
+        title: identity.apiTitle,
+        version: '1.0.0',
+        description: `OpenAI-compatible API for ${identity.productName} with additional Cherry-specific endpoints`,
+        contact: {
+          name: identity.productName,
+          url: 'https://github.com/CherryHQ/cherry-studio'
         }
       },
-      schemas: {
-        Error: {
-          type: 'object',
-          properties: {
-            error: {
-              type: 'object',
-              properties: {
-                message: { type: 'string' },
-                type: { type: 'string' },
-                code: { type: 'string' }
-              }
-            }
+      servers: [
+        {
+          url: '/',
+          description: 'Current server'
+        }
+      ],
+      components: {
+        securitySchemes: {
+          BearerAuth: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'JWT',
+            description: `Use the API key from ${identity.productName} settings`
           }
         },
-        ChatMessage: {
-          type: 'object',
-          properties: {
-            role: {
-              type: 'string',
-              enum: ['system', 'user', 'assistant', 'tool']
-            },
-            content: {
-              oneOf: [
-                { type: 'string' },
-                {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      type: { type: 'string' },
-                      text: { type: 'string' },
-                      image_url: {
-                        type: 'object',
-                        properties: {
-                          url: { type: 'string' }
+        schemas: {
+          Error: {
+            type: 'object',
+            properties: {
+              error: {
+                type: 'object',
+                properties: {
+                  message: { type: 'string' },
+                  type: { type: 'string' },
+                  code: { type: 'string' }
+                }
+              }
+            }
+          },
+          ChatMessage: {
+            type: 'object',
+            properties: {
+              role: {
+                type: 'string',
+                enum: ['system', 'user', 'assistant', 'tool']
+              },
+              content: {
+                oneOf: [
+                  { type: 'string' },
+                  {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        type: { type: 'string' },
+                        text: { type: 'string' },
+                        image_url: {
+                          type: 'object',
+                          properties: {
+                            url: { type: 'string' }
+                          }
                         }
                       }
                     }
                   }
-                }
-              ]
-            },
-            name: { type: 'string' },
-            tool_calls: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  id: { type: 'string' },
-                  type: { type: 'string' },
-                  function: {
-                    type: 'object',
-                    properties: {
-                      name: { type: 'string' },
-                      arguments: { type: 'string' }
+                ]
+              },
+              name: { type: 'string' },
+              tool_calls: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    type: { type: 'string' },
+                    function: {
+                      type: 'object',
+                      properties: {
+                        name: { type: 'string' },
+                        arguments: { type: 'string' }
+                      }
                     }
                   }
                 }
               }
             }
-          }
-        },
-        ChatCompletionRequest: {
-          type: 'object',
-          required: ['model', 'messages'],
-          properties: {
-            model: {
-              type: 'string',
-              description: 'The model to use for completion, in format provider:model-id'
-            },
-            messages: {
-              type: 'array',
-              items: { $ref: '#/components/schemas/ChatMessage' }
-            },
-            temperature: {
-              type: 'number',
-              minimum: 0,
-              maximum: 2,
-              default: 1
-            },
-            max_tokens: {
-              type: 'integer',
-              minimum: 1
-            },
-            stream: {
-              type: 'boolean',
-              default: false
-            },
-            tools: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  type: { type: 'string' },
-                  function: {
-                    type: 'object',
-                    properties: {
-                      name: { type: 'string' },
-                      description: { type: 'string' },
-                      parameters: { type: 'object' }
+          },
+          ChatCompletionRequest: {
+            type: 'object',
+            required: ['model', 'messages'],
+            properties: {
+              model: {
+                type: 'string',
+                description: 'The model to use for completion, in format provider:model-id'
+              },
+              messages: {
+                type: 'array',
+                items: { $ref: '#/components/schemas/ChatMessage' }
+              },
+              temperature: {
+                type: 'number',
+                minimum: 0,
+                maximum: 2,
+                default: 1
+              },
+              max_tokens: {
+                type: 'integer',
+                minimum: 1
+              },
+              stream: {
+                type: 'boolean',
+                default: false
+              },
+              tools: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    type: { type: 'string' },
+                    function: {
+                      type: 'object',
+                      properties: {
+                        name: { type: 'string' },
+                        description: { type: 'string' },
+                        parameters: { type: 'object' }
+                      }
                     }
                   }
                 }
               }
             }
-          }
-        },
-        Model: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            object: { type: 'string', enum: ['model'] },
-            created: { type: 'integer' },
-            owned_by: { type: 'string' }
-          }
-        },
-        MCPServer: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            name: { type: 'string' },
-            command: { type: 'string' },
-            args: {
-              type: 'array',
-              items: { type: 'string' }
-            },
-            env: { type: 'object' },
-            disabled: { type: 'boolean' }
+          },
+          Model: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              object: { type: 'string', enum: ['model'] },
+              created: { type: 'integer' },
+              owned_by: { type: 'string' }
+            }
+          },
+          MCPServer: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              name: { type: 'string' },
+              command: { type: 'string' },
+              args: {
+                type: 'array',
+                items: { type: 'string' }
+              },
+              env: { type: 'object' },
+              disabled: { type: 'boolean' }
+            }
           }
         }
-      }
+      },
+      security: [
+        {
+          BearerAuth: []
+        }
+      ]
     },
-    security: [
-      {
-        BearerAuth: []
-      }
+    apis: [
+      path.resolve(ROOT_DIR, 'src/main/apiServer/routes/**/*.ts'),
+      path.resolve(ROOT_DIR, 'src/main/apiServer/app.ts')
     ]
-  },
-  apis: [
-    path.resolve(ROOT_DIR, 'src/main/apiServer/routes/**/*.ts'),
-    path.resolve(ROOT_DIR, 'src/main/apiServer/app.ts')
-  ]
+  }
 }
 
-function generate(): string {
-  const spec = swaggerJSDoc(swaggerOptions) as Record<string, any>
+/**
+ * Generate the OpenAPI spec JSON for an application identity.
+ *
+ * swagger-jsdoc only parses local source files, so this never touches the
+ * network — the focused tests rely on that.
+ */
+export function generate(identity: AppIdentity): string {
+  const spec = swaggerJSDoc(buildSwaggerOptions(identity)) as Record<string, any>
+
+  // The `/` root endpoint (src/main/apiServer/app.ts) serves `name` from
+  // `appIdentity.apiTitle` at runtime, but its JSDoc example is a static
+  // literal. Align the documented example with the resolved identity so a
+  // `cherry-chat` spec does not leak the default product name into packaged
+  // API documentation. For the default flavor the value is identical, so the
+  // default output stays byte-for-byte unchanged.
+  const rootNameSchema =
+    spec.paths?.['/']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties?.name
+  if (rootNameSchema != null) {
+    rootNameSchema.example = identity.apiTitle
+  }
+
   return JSON.stringify(spec, null, 2) + '\n'
+}
+
+/**
+ * Resolve the identity the generated spec must carry.
+ *
+ * This script runs under plain Node/tsx (never through a Vite build), so the
+ * compile-time `__APP_FLAVOR__` define is never injected here. It therefore
+ * resolves the flavor from `process.env.VITE_APP_FLAVOR` through the same pure
+ * resolver the electron-vite config uses (`readBuildFlavorFromEnv`), keeping
+ * the default output byte-for-byte identical to the historical Cherry Studio
+ * spec (IDENTITY-001) while a `cherry-chat` build regenerates the tracked spec
+ * with Cherry Chat metadata (IDENTITY-002).
+ */
+export function resolveSpecIdentity(): AppIdentity {
+  return resolveAppIdentity(readBuildFlavorFromEnv())
 }
 
 function check(content: string): void {
@@ -215,11 +266,18 @@ function write(content: string): void {
   }
 }
 
-const isCheck = process.argv.includes('--check')
-const content = generate()
+// Run as a CLI entry point only. When imported from the focused Vitest tests,
+// `process.argv[1]` is the Vitest runner, not this file, so nothing is written
+// or checked at import time.
+const isMainScript = process.argv[1] != null && path.resolve(process.argv[1]) === CURRENT_FILE
 
-if (isCheck) {
-  check(content)
-} else {
-  write(content)
+if (isMainScript) {
+  const isCheck = process.argv.includes('--check')
+  const content = generate(resolveSpecIdentity())
+
+  if (isCheck) {
+    check(content)
+  } else {
+    write(content)
+  }
 }

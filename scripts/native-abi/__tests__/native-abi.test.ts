@@ -1888,6 +1888,7 @@ describe('preflight call graph (finding F)', () => {
       'test:aicore',
       'test:shared',
       'test:scripts',
+      'test:e2e-utils',
       'bench:main',
       'bench:renderer',
       'bench:aicore',
@@ -1915,6 +1916,14 @@ describe('preflight call graph (finding F)', () => {
     expect(generalInstall).toBeGreaterThanOrEqual(0)
     expect(generalCheck).toBeGreaterThan(generalInstall)
     expect(generalMain).toBeGreaterThan(generalCheck)
+
+    // Finding F2: the e2e-utils focused suite runs in the general-test job,
+    // exactly once, sequenced after the other focused suites (which already
+    // consumed the single native preflight).
+    const generalScripts = generalTest.indexOf('pnpm test:scripts')
+    const generalE2eUtils = generalTest.indexOf('pnpm test:e2e-utils')
+    expect(generalE2eUtils).toBeGreaterThan(generalScripts)
+    expect(generalTest.match(/pnpm test:e2e-utils/g)).toHaveLength(1)
 
     const renderTest = ci.slice(ci.indexOf('render-test:'))
     const renderInstall = renderTest.indexOf('pnpm install')

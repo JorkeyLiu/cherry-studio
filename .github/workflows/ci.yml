@@ -201,6 +201,9 @@ jobs:
       - name: Scripts Test
         run: pnpm test:scripts
 
+      - name: E2E Utils Test
+        run: pnpm test:e2e-utils
+
   render-test:
     runs-on: ubuntu-latest
     needs: changes

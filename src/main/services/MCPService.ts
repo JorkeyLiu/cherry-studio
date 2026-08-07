@@ -35,6 +35,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import { nanoid } from '@reduxjs/toolkit'
 import { HOME_CHERRY_DIR } from '@shared/config/constant'
+import { appIdentity } from '@shared/config/identity'
 import type { MCPProgressEvent } from '@shared/config/types'
 import type { MCPServerLogEntry } from '@shared/config/types'
 import { IpcChannel } from '@shared/IpcChannel'
@@ -303,7 +304,7 @@ class McpService {
     const initPromise = (async () => {
       try {
         // Create new client instance for each connection
-        const client = new Client({ name: 'Cherry Studio', version: app.getVersion() }, { capabilities: {} })
+        const client = new Client({ name: appIdentity.productName, version: app.getVersion() }, { capabilities: {} })
 
         let args = [...(server.args || [])]
 
@@ -337,7 +338,7 @@ class McpService {
               requestInit: {
                 headers: {
                   ...defaultAppHeaders(),
-                  APP: 'Cherry Studio'
+                  APP: appIdentity.productName
                 }
               },
               authProvider

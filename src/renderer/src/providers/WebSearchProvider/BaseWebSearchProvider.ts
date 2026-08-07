@@ -1,5 +1,6 @@
 import type { WebSearchState } from '@renderer/store/websearch'
 import type { WebSearchProvider, WebSearchProviderResponse } from '@renderer/types'
+import { appIdentity } from '@shared/config/identity'
 
 export default abstract class BaseWebSearchProvider {
   // @ts-ignore this
@@ -26,7 +27,7 @@ export default abstract class BaseWebSearchProvider {
   public defaultHeaders() {
     return {
       'HTTP-Referer': 'https://cherry-ai.com',
-      'X-Title': 'Cherry Studio'
+      'X-Title': appIdentity.productName
     }
   }
 

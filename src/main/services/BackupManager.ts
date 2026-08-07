@@ -19,6 +19,7 @@ import { createWriteStream } from 'node:fs'
 import { finished } from 'node:stream/promises'
 
 import { loggerService } from '@logger'
+import { appIdentity } from '@shared/config/identity'
 import { IpcChannel } from '@shared/IpcChannel'
 import type { WebDavConfig } from '@types'
 import type { S3Config } from '@types'
@@ -104,7 +105,7 @@ function validateLocalBackupFileName(fileName: string, destDir: string): string 
 
   // Fallback if everything was stripped
   if (!safeName || safeName.length === 0) {
-    safeName = `cherry-studio-backup-${Date.now()}.zip`
+    safeName = `${appIdentity.tempDirName}-backup-${Date.now()}.zip`
   }
 
   // Enforce length limit
@@ -448,7 +449,7 @@ interface ProgressData {
 }
 
 class BackupManager {
-  private backupDir = path.join(app.getPath('temp'), 'cherry-studio', 'backup')
+  private backupDir = path.join(app.getPath('temp'), appIdentity.tempDirName, 'backup')
 
   // Process-wide async mutex — serialises full backup operations across
   // local/WebDAV/S3 entry points. Prevents staging directory collisions,
@@ -690,30 +691,30 @@ class BackupManager {
   // ---------------------------------------------------------------------------
 
   /**
-   * Ensure the cherry-studio temp base directory exists before mkdtemp.
-   * LOCK-6013: Provider operation roots must exist before mkdtemp to
-   * prevent ENOENT on fresh installs.
+   * Ensure the identity temp base directory (appIdentity.tempDirName) exists
+   * before mkdtemp. LOCK-6013: Provider operation roots must exist before
+   * mkdtemp to prevent ENOENT on fresh installs.
    *
-   * LOCK-6013/6012: After creation, verify the cherry-studio directory
-   * is NOT a symlink and resolves canonically under the OS temp root.
-   * A symlinked base could redirect extraction to an attacker-controlled
-   * directory. If the cherry-studio path is a symlink (race condition:
-   * attacker creates symlink between ensureDir calls), we REJECT it
-   * rather than removing it — removing a raced symlink could delete a
-   * legitimate directory that replaced it in the race window.
+   * LOCK-6013/6012: After creation, verify the identity temp directory is
+   * NOT a symlink and resolves canonically under the OS temp root. A
+   * symlinked base could redirect extraction to an attacker-controlled
+   * directory. If the identity temp path is a symlink (race condition:
+   * attacker creates symlink between ensureDir calls), we REJECT it rather
+   * than removing it — removing a raced symlink could delete a legitimate
+   * directory that replaced it in the race window.
    */
   private static async ensureTempBase(): Promise<string> {
     // LOCK-6012: Canonicalize the OS temp directory to resolve legitimate
     // canonical aliases (e.g. /var → /private/var on macOS) while preserving
     // symlink-escape defense.  fs.realpath on the parent gives us the true
-    // canonical root; we then build cherry-studio under it.
+    // canonical root; we then build the identity temp dir under it.
     const rawTemp = app.getPath('temp')
     await fs.ensureDir(rawTemp)
     const canonicalTemp = await fs.realpath(rawTemp)
-    const basePath = path.join(canonicalTemp, 'cherry-studio')
+    const basePath = path.join(canonicalTemp, appIdentity.tempDirName)
     await fs.ensureDir(basePath)
 
-    // LOCK-6013: Verify the cherry-studio directory is a real directory,
+    // LOCK-6013: Verify the identity temp directory is a real directory,
     // not a symlink. An attacker could race-create a symlink at this path
     // between ensureDir and our check.  We REJECT rather than remove —
     // removing a symlink that was swapped for a real directory by a
@@ -722,7 +723,7 @@ class BackupManager {
     if (baseLstat.isSymbolicLink()) {
       const target = await fs.realpath(basePath).catch(() => 'unknown')
       throw new Error(
-        `[ensureTempBase] cherry-studio temp base "${basePath}" is a symlink pointing to "${target}". ` +
+        `[ensureTempBase] ${appIdentity.tempDirName} temp base "${basePath}" is a symlink pointing to "${target}". ` +
           'LOCK-6013: Refusing to use a symlinked temp base. Remove the symlink manually if ' +
           'it was created by a race condition.'
       )
@@ -818,7 +819,9 @@ class BackupManager {
         // LOCK-6029: Stream only to an exclusive operation workspace inside
         // the accepted destination filesystem. The final name remains absent
         // until complete stream close and atomic publication.
-        publicationWorkspace = await fs.mkdtemp(path.join(acceptedDestination.canonicalPath, '.cherry-studio-backup-'))
+        publicationWorkspace = await fs.mkdtemp(
+          path.join(acceptedDestination.canonicalPath, `.${appIdentity.tempDirName}-backup-`)
+        )
 
         // LOCK-6034: Capture workspace identity (dev/ino) immediately after
         // creation. Used by safeCleanupWorkspace to verify the workspace is
@@ -1139,7 +1142,7 @@ class BackupManager {
     // Finding 5: Serialize entire create+upload+delete through the mutex
     return BackupManager.withBackupMutex(async () => {
       // Finding 5: Unique archive file name per operation
-      const uniqueFilename = this.uniqueArchiveName(webdavConfig.fileName || 'cherry-studio.backup.zip')
+      const uniqueFilename = this.uniqueArchiveName(webdavConfig.fileName || `${appIdentity.tempDirName}.backup.zip`)
 
       // LOCK-6019: Exclusive per-operation root for intermediate archives.
       // The archive is created inside an mkdtemp directory that no other
@@ -1214,7 +1217,7 @@ class BackupManager {
         .replace(/[-:T.Z]/g, '')
         .slice(0, 14)
       // Finding 5: Unique archive file name per operation
-      const baseFilename = s3Config.fileName || `cherry-studio.backup.${deviceName}.${timestamp}.zip`
+      const baseFilename = s3Config.fileName || `${appIdentity.tempDirName}.backup.${deviceName}.${timestamp}.zip`
       const uniqueFilename = this.uniqueArchiveName(baseFilename)
 
       // LOCK-6019: Exclusive per-operation root for intermediate archives.
@@ -1809,7 +1812,7 @@ class BackupManager {
    * @returns Result from restore operation
    */
   async restoreFromWebdav(_: Electron.IpcMainInvokeEvent, webdavConfig: WebDavConfig) {
-    const rawFilename = webdavConfig.fileName || 'cherry-studio.backup.zip'
+    const rawFilename = webdavConfig.fileName || `${appIdentity.tempDirName}.backup.zip`
     const webdavClient = this.getWebDavInstance(webdavConfig)
     // LOCK-6013: Ensure the cherry-studio temp base exists before mkdtemp.
     // On fresh installs the parent directory may not exist yet, causing
@@ -1874,7 +1877,7 @@ class BackupManager {
    * @returns Result from restore operation
    */
   async restoreFromS3(_: Electron.IpcMainInvokeEvent, s3Config: S3Config) {
-    const rawFilename = s3Config.fileName || 'cherry-studio.backup.zip'
+    const rawFilename = s3Config.fileName || `${appIdentity.tempDirName}.backup.zip`
 
     logger.debug(`Starting restore from S3: ${rawFilename}`)
 

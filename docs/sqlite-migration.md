@@ -37,6 +37,8 @@
 > - **L3 Cherry Chat 备份/恢复**：沿用现有 Cherry Studio 已有的用户侧本地/WebDAV/S3 备份与恢复产品行为，并适配 SQLite-authoritative 的 chat.db；与 L2 是不同产品语义（L2 为跨应用 ZIP 兼容导入，L3 为同应用备份/恢复），二者 UX 可复用既有组件/基础设施但不改变其独立性。底层一致性快照由 Phase 1 已集成的 better-sqlite3 online backup 机制提供，属存储层能力而非新的产品操作。
 >
 > **关键边界**：最终 Cherry Chat 以自身空数据启动，显式导入用户选定的 Cherry Studio ZIP；不扫描磁盘、不共享目录、不在启动时静默迁移、无就地升级语义。L2 与 L3 虽未来 UI 组件可能复用，但产品语义相互独立。
+>
+> **应用身份**：应用身份（默认 Cherry Studio 构建不变 / Cherry Chat flavor 的产品名、bundle/app ID、URL 协议、独立 userData/profile、源兼容标识、更新策略、macOS-first 并行安装）由独立 ADR 文档治理：[`docs/cherry-chat-application-identity.md`](./cherry-chat-application-identity.md)（决策锁 IDENTITY-001…006）。本文档的 L1/L2/L3 生命周期、Phase 0–6 状态与历史证据不受影响。
 
 ## 1. 背景与目标
 

@@ -224,7 +224,7 @@ describe('file', () => {
   })
 
   describe('getTempDir', () => {
-    it('should return correct temp directory path', () => {
+    it('should return the historical default temp directory path (CherryStudio)', () => {
       const tempDir = getTempDir()
       expect(tempDir).toBe('/mock/temp/CherryStudio')
     })

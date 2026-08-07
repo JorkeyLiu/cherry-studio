@@ -4,6 +4,8 @@ import path from 'node:path'
 
 import { isLinux, isPortable, isWin } from '@main/constant'
 import { HOME_CHERRY_DIR } from '@shared/config/constant'
+import { appIdentity } from '@shared/config/identity'
+import { findExplicitUserDataDir, isCherryStudioDefaultUserData, resolveUserDataBase } from '@shared/config/userData'
 import { app } from 'electron'
 
 // Please don't import any other modules which is not node/electron built-in modules
@@ -21,17 +23,61 @@ function getConfigDir() {
   return path.join(os.homedir(), HOME_CHERRY_DIR, 'config')
 }
 
+/**
+ * Initialize the runtime userData/profile directory. Runs from `./bootstrap`
+ * BEFORE `@main/config` applies the dev suffix, so both dev and packaged
+ * profiles are derived from the correct identity base.
+ *
+ * Precedence:
+ *   0. explicit `--user-data-dir=<path>` CLI override — Electron applies it
+ *      to `app.getPath('userData')` before JS runs; this function preserves
+ *      the exact value for BOTH flavors instead of overwriting it (the
+ *      previously observed behavior discarded the override for the
+ *      cherry-chat flavor),
+ *   1. flavor-specific configured `appDataPath` from
+ *      `<homedir>/<homeDirName>/config/config.json` (packaged only),
+ *   2. portable `data` directory (packaged only),
+ *   3. identity default: Cherry Chat resolves to its own `Cherry Chat` profile
+ *      (IDENTITY-002); the default Cherry Studio build keeps Electron's own
+ *      derivation untouched (IDENTITY-001).
+ *
+ * IDENTITY-006: a `cherry-chat` profile that would resolve to the known
+ * Cherry Studio default profile is refused at startup — the guard runs on the
+ * FINAL userData value, so a CLI override pointing at `<appData>/Cherry
+ * Studio` also fails closed.
+ */
 export function initAppDataDir() {
-  const appDataPath = getAppDataPathFromConfig()
-  if (appDataPath) {
-    app.setPath('userData', appDataPath)
-    return
+  const explicitUserDataDir = findExplicitUserDataDir(process.argv)
+  const resolution = resolveUserDataBase({
+    identity: appIdentity,
+    appDataRoot: app.getPath('appData'),
+    electronDefaultUserData: app.getPath('userData'),
+    // The flavor-specific config read (and its legacy-migration write) only
+    // runs when packaged, preserving the historical bootstrap gate.
+    configuredAppDataPath: app.isPackaged ? getAppDataPathFromConfig() : null,
+    portableDataDir: isPortable ? path.join(process.env.PORTABLE_EXECUTABLE_DIR || app.getPath('exe'), 'data') : null,
+    explicitUserDataDir,
+    isPackaged: app.isPackaged,
+    isPortable
+  })
+
+  if (resolution.source === 'cli-override') {
+    // Electron applied `--user-data-dir` before JS; preserve the exact value
+    // (defensive re-apply only when something mutated it before bootstrap).
+    if (app.getPath('userData') !== resolution.path) {
+      app.setPath('userData', resolution.path)
+    }
+  } else if (resolution.source !== 'electron-default') {
+    app.setPath('userData', resolution.path)
   }
 
-  if (isPortable) {
-    const portableDir = process.env.PORTABLE_EXECUTABLE_DIR
-    app.setPath('userData', path.join(portableDir || app.getPath('exe'), 'data'))
-    return
+  if (isCherryStudioDefaultUserData(appIdentity, app.getPath('appData'), app.getPath('userData'))) {
+    throw new Error(
+      `[initAppDataDir] Refusing to start Cherry Chat with the Cherry Studio default userData ` +
+        `"${app.getPath('userData')}" (IDENTITY-006). The Cherry Chat profile must be independent; configure a ` +
+        `different appDataPath in the Cherry Chat config, use portable mode, or pass an explicit ` +
+        `--user-data-dir=... override.`
+    )
   }
 }
 

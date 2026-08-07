@@ -15,7 +15,7 @@
  *   No arbitrary write/load thresholds are asserted.
  *
  * Run with:
- *   npx vitest bench --run --project main src/main/services/chatDb/__tests__/sqlite-runtime.perf.bench.ts
+ *   npx vitest bench --run --project main-native src/main/services/chatDb/__tests__/sqlite-runtime.perf.bench.ts
  */
 
 import * as realFs from 'node:fs'

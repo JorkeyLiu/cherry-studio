@@ -3,6 +3,7 @@ import { isWin } from '@main/constant'
 import { getIpCountry } from '@main/utils/ipService'
 import { generateUserAgent } from '@main/utils/systemInfo'
 import { APP_NAME, FeedUrl, UpdateConfigUrl, UpdateMirror, UpgradeChannel } from '@shared/config/constant'
+import { appIdentity } from '@shared/config/identity'
 import { IpcChannel } from '@shared/IpcChannel'
 import type { UpdateInfo } from 'builder-util-runtime'
 import { CancellationToken } from 'builder-util-runtime'
@@ -289,6 +290,17 @@ export default class AppUpdater {
   }
 
   public async checkForUpdates() {
+    // IDENTITY-004: Cherry Chat must not consume the Cherry Studio updater /
+    // release feed. Until an independent release endpoint exists, the updater
+    // is disabled for the cherry-chat flavor — no feed URL is ever resolved.
+    if (!appIdentity.updaterEnabled) {
+      logger.info(`Auto-update is disabled for flavor "${appIdentity.flavor}" (IDENTITY-004). Skipping update check.`)
+      return {
+        currentVersion: app.getVersion(),
+        updateInfo: null
+      }
+    }
+
     void analyticsService.trackAppUpdate()
 
     if (isWin && 'PORTABLE_EXECUTABLE_DIR' in process.env) {

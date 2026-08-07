@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 import { PPIO_APP_SECRET, PPIO_CLIENT_ID, SILICON_CLIENT_ID, TOKENFLUX_HOST } from '@renderer/config/constant'
 import i18n, { getLanguageCode } from '@renderer/i18n'
+import { appIdentity } from '@shared/config/identity'
 
 const logger = loggerService.withContext('Utils:oauth')
 
@@ -62,7 +63,7 @@ export const oauthWithAihubmix = async (setKey) => {
 }
 
 export const oauthWithPPIO = async (setKey) => {
-  const redirectUri = 'cherrystudio://'
+  const redirectUri = appIdentity.protocolUrlScheme
   const authUrl = `https://ppio.com/oauth/authorize?invited_by=JYT9GD&client_id=${PPIO_CLIENT_ID}&scope=api%20openid&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}`
 
   window.open(

@@ -11,7 +11,7 @@
  * Normal `pnpm test` never executes it.
  *
  * Run with:
- *   npx vitest bench --run --project main src/main/services/chatDb/__tests__/search.bench.ts
+ *   npx vitest bench --run --project main-native src/main/services/chatDb/__tests__/search.bench.ts
  *
  * Benchmark corpus:
  * - 10,000 MAIN_TEXT blocks with varied content

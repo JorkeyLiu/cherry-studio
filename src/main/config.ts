@@ -1,10 +1,15 @@
 import { isDev, isWin } from '@main/constant'
+import { applyDevSuffix, findExplicitUserDataDir } from '@shared/config/userData'
 import { app } from 'electron'
 
 import { getDataPath } from './utils'
 
-if (isDev) {
-  app.setPath('userData', app.getPath('userData') + 'Dev')
+if (isDev && !findExplicitUserDataDir(process.argv)) {
+  // Historical dev-profile suffix applied on top of the identity base that
+  // ./bootstrap resolved (Cherry Chat keeps an independent dev profile). An
+  // explicit `--user-data-dir` CLI override is the user's direct instruction
+  // and is preserved verbatim — no `Dev` suffix is appended to it.
+  app.setPath('userData', applyDevSuffix(app.getPath('userData'), isDev))
 }
 
 export const DATA_PATH = getDataPath()

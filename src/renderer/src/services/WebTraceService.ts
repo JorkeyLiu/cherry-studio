@@ -3,10 +3,12 @@ import { convertSpanToSpanEntity, FunctionSpanExporter, FunctionSpanProcessor } 
 import { WebTracer } from '@mcp-trace/trace-web'
 import { trace } from '@opentelemetry/api'
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base'
+import { appIdentity } from '@shared/config/identity'
 
 const logger = loggerService.withContext('WebTraceService')
 
-const TRACER_NAME = 'CherryStudio'
+// Internal telemetry identity — flavor-aware product token (IDENTITY-002).
+const TRACER_NAME = appIdentity.userAgentProduct
 
 class WebTraceService {
   init() {

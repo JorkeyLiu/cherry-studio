@@ -7,6 +7,7 @@ import { visualizer } from 'rollup-plugin-visualizer'
 // assert not supported by biome
 // import pkg from './package.json' assert { type: 'json' }
 import pkg from './package.json'
+import { flavorDefine, readBuildFlavorFromEnv } from './packages/shared/config/buildFlavor'
 import { buildProxyBootstrapPlugin } from './scripts/buildProxyBootstrapPlugin'
 
 const visualizerPlugin = (type: 'renderer' | 'main') => {
@@ -16,8 +17,17 @@ const visualizerPlugin = (type: 'renderer' | 'main') => {
 const isDev = process.env.NODE_ENV === 'development'
 const isProd = process.env.NODE_ENV === 'production'
 
+// Compile-time application flavor baked into every build target (main,
+// preload, renderer) as the statically replaceable `__APP_FLAVOR__` constant.
+// Resolved once from `process.env.VITE_APP_FLAVOR` at config evaluation time;
+// unset/invalid values normalize to the default `cherry-studio` identity
+// (IDENTITY-001). Do not read the flavor via `import.meta.env` at runtime —
+// Vite does not replace dynamic property access (see packages/shared/config/identity.ts).
+const flavorDefineEntries = flavorDefine(readBuildFlavorFromEnv(process.env))
+
 export default defineConfig({
   main: {
+    define: flavorDefineEntries,
     plugins: [
       ...visualizerPlugin('main'),
       buildProxyBootstrapPlugin({
@@ -56,6 +66,7 @@ export default defineConfig({
     }
   },
   preload: {
+    define: flavorDefineEntries,
     plugins: [
       react({
         tsDecorators: true
@@ -85,6 +96,7 @@ export default defineConfig({
     }
   },
   renderer: {
+    define: flavorDefineEntries,
     plugins: [
       (async () => (await import('@tailwindcss/vite')).default())(),
       react({

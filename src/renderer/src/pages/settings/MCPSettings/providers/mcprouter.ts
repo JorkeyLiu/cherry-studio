@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 import { nanoid } from '@reduxjs/toolkit'
 import type { MCPServer } from '@renderer/types'
+import { appIdentity } from '@shared/config/identity'
 import i18next from 'i18next'
 
 const logger = loggerService.withContext('MCPRouterSyncUtils')
@@ -61,7 +62,7 @@ export const syncMCPRouterServers = async (
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
         'HTTP-Referer': 'https://cherry-ai.com',
-        'X-Title': 'Cherry Studio'
+        'X-Title': appIdentity.productName
       },
       body: JSON.stringify({})
     })

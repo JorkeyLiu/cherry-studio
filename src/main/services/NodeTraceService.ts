@@ -4,13 +4,15 @@ import { CacheBatchSpanProcessor, FunctionSpanExporter } from '@mcp-trace/trace-
 import { NodeTracer as MCPNodeTracer } from '@mcp-trace/trace-node/nodeTracer'
 import type { SpanContext } from '@opentelemetry/api'
 import { context, trace } from '@opentelemetry/api'
+import { appIdentity } from '@shared/config/identity'
 import { BrowserWindow, ipcMain } from 'electron'
 import * as path from 'path'
 
 import { ConfigKeys, configManager } from './ConfigManager'
 import { spanCacheService } from './SpanCacheService'
 
-export const TRACER_NAME = 'CherryStudio'
+// Internal telemetry identity — flavor-aware product token (IDENTITY-002).
+export const TRACER_NAME = appIdentity.userAgentProduct
 
 const logger = loggerService.withContext('NodeTraceService')
 

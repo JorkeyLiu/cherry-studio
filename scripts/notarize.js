@@ -1,6 +1,22 @@
 require('dotenv').config()
 const { notarize } = require('@electron/notarize')
 
+/**
+ * Resolve the macOS bundle identifier for notarization from the active
+ * electron-builder packager/appInfo instead of a literal (Phase B / P-B,
+ * IDENTITY-002).
+ *
+ * Under the default Cherry Studio config, `context.packager.appInfo.id`
+ * resolves to `com.kangfenmao.CherryStudio` (IDENTITY-001 preserved); under
+ * the Cherry Chat overlay (`electron-builder.cherry-chat.yml`) it resolves to
+ * `com.jorkeyliu.CherryChat`. Exported as a pure helper so the selection can
+ * be tested without invoking Apple notarization
+ * (scripts/__tests__/notarize.test.ts).
+ */
+exports.resolveAppBundleId = function resolveAppBundleId(context) {
+  return context?.packager?.appInfo?.id
+}
+
 exports.default = async function notarizing(context) {
   if (context.electronPlatformName !== 'darwin') {
     return
@@ -12,10 +28,15 @@ exports.default = async function notarizing(context) {
 
   const appName = context.packager.appInfo.productFilename
   const appPath = `${context.appOutDir}/${appName}.app`
+  const appBundleId = exports.resolveAppBundleId(context)
+
+  if (!appBundleId) {
+    throw new Error('Unable to resolve appBundleId from packager/appInfo for notarization')
+  }
 
   await notarize({
     appPath,
-    appBundleId: 'com.kangfenmao.CherryStudio',
+    appBundleId,
     appleId: process.env.APPLE_ID,
     appleIdPassword: process.env.APPLE_APP_SPECIFIC_PASSWORD,
     teamId: process.env.APPLE_TEAM_ID

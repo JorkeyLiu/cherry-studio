@@ -3,6 +3,7 @@ import { AnalyticsClient } from '@cherrystudio/analytics-client'
 import { loggerService } from '@logger'
 import { generateUserAgent } from '@main/utils/systemInfo'
 import { APP_NAME } from '@shared/config/constant'
+import { appIdentity } from '@shared/config/identity'
 import { app } from 'electron'
 
 import { configManager } from './ConfigManager'
@@ -28,7 +29,7 @@ class AnalyticsService {
 
     this.client = new AnalyticsClient({
       clientId: configManager.getClientId(),
-      channel: 'cherry-studio',
+      channel: appIdentity.analyticsChannel,
       onError: (error) => logger.error('Analytics error:', error),
       headers: {
         'User-Agent': generateUserAgent(),

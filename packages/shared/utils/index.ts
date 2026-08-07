@@ -1,12 +1,16 @@
 import { parse as jsoncParse } from 'jsonc-parser'
 
+import { appIdentity } from '../config/identity'
+
 export * from './api'
 export * from './pdf'
 
 export const defaultAppHeaders = () => {
   return {
     'HTTP-Referer': 'https://cherry-ai.com',
-    'X-Title': 'Cherry Studio'
+    // Identity-like header (OpenAI-compatible providers) — flavor-aware product
+    // name. The Referer URL is an external integration identifier and unchanged.
+    'X-Title': appIdentity.productName
   }
 }
 

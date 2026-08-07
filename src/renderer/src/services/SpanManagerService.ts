@@ -17,6 +17,7 @@ import { ModelSpanEntity } from '@renderer/trace/types/ModelSpanEntity'
 import type { Model, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
+import { appIdentity } from '@shared/config/identity'
 
 const logger = loggerService.withContext('SpanManagerService')
 
@@ -359,7 +360,7 @@ export function withSpanResult<F extends (...args: any) => any>(
 }
 
 export const spanManagerService = new SpanManagerService()
-export const webTracer = trace.getTracer('CherryStudio', '1.0.0')
+export const webTracer = trace.getTracer(appIdentity.userAgentProduct, '1.0.0')
 export const addSpan = spanManagerService.addSpan.bind(spanManagerService)
 export const startTrace = spanManagerService.startTrace.bind(spanManagerService)
 export const endTrace = spanManagerService.endTrace.bind(spanManagerService)

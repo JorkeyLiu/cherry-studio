@@ -1,0 +1,52 @@
+# Cherry Chat macOS arm64 packaging overlay (Phase B / P-B).
+#
+# This file extends the single source-of-truth base config (electron-builder.yml)
+# and overrides ONLY the identity keys owned by the Cherry Chat flavor
+# (IDENTITY-002). The base config stays byte-for-byte unchanged (IDENTITY-001);
+# L2 source-format identifiers are untouched (IDENTITY-003); no Windows/Linux
+# Cherry Chat targets or commands are added (IDENTITY-005).
+#
+# Effective-config semantics below are VERIFIED against the installed
+# electron-builder 26.8.1 loader (app-builder-lib `doMergeConfigs`/`deepAssign`,
+# builder-util `deepAssign`) by scripts/__tests__/electron-builder-cherry-chat.test.ts.
+# Do not "simplify" these two forms:
+#
+#   * `publish` arrays are CONCATENATED by deepAssign (deduplicated by
+#     reference), so `publish: []` would KEEP the inherited Cherry Studio
+#     generic feed (https://releases.cherry-ai.com) — it does not remove it.
+#     `publish: null` is the schema-valid value that REPLACES the inherited
+#     feed. Downstream, PublishManager.getPublishConfigs() returns null for it,
+#     so no app-update.yml / update-info file is written and the repository-info
+#     fallback (which would otherwise resolve this GitHub repo as a feed) never
+#     runs. (IDENTITY-004)
+#   * `protocols` is likewise an array and would be concatenated (registering
+#     BOTH `cherrystudio` and `cherrychat`), so it is declared in the
+#     schema-valid single-Protocol form below, which REPLACES the inherited
+#     entry instead.
+#   * `releaseInfo` is an OBJECT, so deepAssign merges it recursively: the
+#     overlay must null out every inherited key, otherwise the base Cherry
+#     Studio release notes would survive into the effective Chat config.
+#     `releaseInfo: null` is NOT schema-valid (ReleaseInfo is `type: object`,
+#     verified against the installed electron-builder 26.8.1 validator), so the
+#     minimal valid empty override is `releaseNotes: null` below, which
+#     REPLACES the inherited notes key with null (schema-valid; proven by
+#     scripts/__tests__/electron-builder-cherry-chat.test.ts).
+extends: electron-builder.yml
+
+appId: com.jorkeyliu.CherryChat
+productName: Cherry Chat
+
+protocols:
+  name: Cherry Chat
+  schemes:
+    - cherrychat
+
+# No Cherry Studio release feed for Cherry Chat (IDENTITY-004): resolving to
+# null means no publish providers are configured for this build.
+publish: null
+
+# Drop the inherited Cherry Studio release notes (IDENTITY-002): Cherry Chat
+# must not package Cherry Studio's release notes even though `publish: null`
+# already prevents any update-info file from being written.
+releaseInfo:
+  releaseNotes: null

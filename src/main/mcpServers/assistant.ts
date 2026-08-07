@@ -6,6 +6,7 @@ import { loggerService } from '@logger'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Tool } from '@modelcontextprotocol/sdk/types.js'
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js'
+import { appIdentity } from '@shared/config/identity'
 import { app } from 'electron'
 
 const logger = loggerService.withContext('MCPServer:Assistant')
@@ -578,14 +579,40 @@ class AssistantServer {
   }
 
   private async checkUpdate() {
+    const currentVersion = app.getVersion()
+
+    // IDENTITY-004: Cherry Chat must not consume the Cherry Studio release
+    // feed, including user-invoked assistant MCP checks. Until an independent
+    // release endpoint exists, the check is disabled — no GitHub request.
+    if (!appIdentity.updaterEnabled) {
+      logger.info(
+        `Assistant update check is disabled for flavor "${appIdentity.flavor}" (IDENTITY-004). Skipping release check.`
+      )
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                currentVersion,
+                updateCheck: 'disabled',
+                reason: `Release checks are disabled for ${appIdentity.productName} (IDENTITY-004) until an independent release endpoint exists.`
+              },
+              null,
+              2
+            )
+          }
+        ]
+      }
+    }
+
     try {
-      const currentVersion = app.getVersion()
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), 5000)
 
       const response = await fetch('https://api.github.com/repos/CherryHQ/cherry-studio/releases/latest', {
         method: 'GET',
-        headers: { Accept: 'application/vnd.github.v3+json', 'User-Agent': 'CherryStudio' },
+        headers: { Accept: 'application/vnd.github.v3+json', 'User-Agent': appIdentity.userAgentProduct },
         signal: controller.signal
       })
       clearTimeout(timeout)
