@@ -224,9 +224,9 @@ describe('file', () => {
   })
 
   describe('getTempDir', () => {
-    it('should return the historical default temp directory path (CherryStudio)', () => {
+    it('should return the identity generic temp directory path (CherryChat)', () => {
       const tempDir = getTempDir()
-      expect(tempDir).toBe('/mock/temp/CherryStudio')
+      expect(tempDir).toBe('/mock/temp/CherryChat')
     })
   })
 
@@ -240,19 +240,19 @@ describe('file', () => {
   describe('getConfigDir', () => {
     it('should return correct config directory path', () => {
       const configDir = getConfigDir()
-      expect(configDir).toBe('/mock/home/.cherrystudio/config')
+      expect(configDir).toBe('/mock/home/.cherrychat/config')
     })
   })
 
   describe('getAppConfigDir', () => {
     it('should return correct app config directory path', () => {
       const appConfigDir = getAppConfigDir('test-app')
-      expect(appConfigDir).toBe('/mock/home/.cherrystudio/config/test-app')
+      expect(appConfigDir).toBe('/mock/home/.cherrychat/config/test-app')
     })
 
     it('should handle empty app name', () => {
       const appConfigDir = getAppConfigDir('')
-      expect(appConfigDir).toBe('/mock/home/.cherrystudio/config/')
+      expect(appConfigDir).toBe('/mock/home/.cherrychat/config/')
     })
   })
 

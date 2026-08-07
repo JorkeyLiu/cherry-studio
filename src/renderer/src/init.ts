@@ -10,9 +10,9 @@ import store from './store'
 
 loggerService.initWindowSource('mainWindow')
 
-// IDENTITY-002: resolve the main-window title from the build-time identity at
-// startup — the default build keeps `Cherry Studio`, the Cherry Chat build
-// shows `Cherry Chat`. This overrides the shared static HTML title.
+// LOCK-RETIRE-001: Cherry Chat is the single application identity. Resolve the
+// main-window title from the identity-derived constant at startup — the title
+// seam always produces `Cherry Chat` and overrides the shared static HTML title.
 applyMainWindowTitle()
 
 function initKeyv() {

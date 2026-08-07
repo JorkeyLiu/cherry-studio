@@ -17,13 +17,21 @@ on:
         default: false
         type: boolean
 
+# LOCK-RELEASE-FREEZE: Application releases are frozen until an independent
+# endpoint plus signing/notarization decisions exist. This workflow maintains
+# the app-upgrade feed config, which is release-feed machinery tied to the
+# frozen release path (LOCK-UPDATER-004: updater disabled/unconfigured). Its
+# execution is mechanically disabled below; the file is preserved (non-packaging
+# automation) for re-enablement after a release path is approved.
+
 permissions:
   contents: write
 
 jobs:
   update-config:
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'release' && github.event.release.draft == false)
+    # Mechanically frozen (LOCK-RELEASE-FREEZE): this job can never run.
+    if: false
 
     steps:
       - name: Check if should proceed

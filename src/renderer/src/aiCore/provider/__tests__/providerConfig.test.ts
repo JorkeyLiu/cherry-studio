@@ -952,7 +952,7 @@ describe('providerToAiSdkConfig', () => {
       const settings = config.providerSettings
       expect(settings.headers).toBeDefined()
       expect(settings.headers!['HTTP-Referer']).toBe('https://cherry-ai.com')
-      expect(settings.headers!['X-Title']).toBe('Cherry Studio')
+      expect(settings.headers!['X-Title']).toBe('Cherry Chat')
     })
 
     it('merges extra_headers from provider', async () => {

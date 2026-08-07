@@ -11,7 +11,7 @@ import * as path from 'path'
 import { ConfigKeys, configManager } from './ConfigManager'
 import { spanCacheService } from './SpanCacheService'
 
-// Internal telemetry identity — flavor-aware product token (IDENTITY-002).
+// Internal telemetry identity — single-identity product token (LOCK-RETIRE-001).
 export const TRACER_NAME = appIdentity.userAgentProduct
 
 const logger = loggerService.withContext('NodeTraceService')

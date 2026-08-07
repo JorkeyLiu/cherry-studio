@@ -7,7 +7,7 @@ import { appIdentity } from '@shared/config/identity'
 
 const logger = loggerService.withContext('WebTraceService')
 
-// Internal telemetry identity — flavor-aware product token (IDENTITY-002).
+// Internal telemetry identity — single-identity product token (LOCK-RETIRE-001).
 const TRACER_NAME = appIdentity.userAgentProduct
 
 class WebTraceService {

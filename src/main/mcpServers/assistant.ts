@@ -581,12 +581,12 @@ class AssistantServer {
   private async checkUpdate() {
     const currentVersion = app.getVersion()
 
-    // IDENTITY-004: Cherry Chat must not consume the Cherry Studio release
+    // LOCK-UPDATER-004: Cherry Chat must not consume the Cherry Studio release
     // feed, including user-invoked assistant MCP checks. Until an independent
     // release endpoint exists, the check is disabled — no GitHub request.
     if (!appIdentity.updaterEnabled) {
       logger.info(
-        `Assistant update check is disabled for flavor "${appIdentity.flavor}" (IDENTITY-004). Skipping release check.`
+        `Assistant update check is disabled for ${appIdentity.productName} (LOCK-UPDATER-004). Skipping release check.`
       )
       return {
         content: [
@@ -596,7 +596,7 @@ class AssistantServer {
               {
                 currentVersion,
                 updateCheck: 'disabled',
-                reason: `Release checks are disabled for ${appIdentity.productName} (IDENTITY-004) until an independent release endpoint exists.`
+                reason: `Release checks are disabled for ${appIdentity.productName} (LOCK-UPDATER-004) until an independent release endpoint exists.`
               },
               null,
               2

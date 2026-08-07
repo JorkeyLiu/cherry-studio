@@ -1,23 +1,22 @@
 import os from 'node:os'
 import path from 'node:path'
 
-import { resolveAppIdentity as realResolveAppIdentity } from '@shared/config/identity'
+import { appIdentity } from '@shared/config/identity'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ---------------------------------------------------------------------------
 // Regression coverage for the startup userData seam `initAppDataDir()`.
 //
 // The production function is imported fresh for every test (vi.resetModules +
-// dynamic import) so the per-test identity/flavor, Electron app API, platform
-// constants and filesystem are fully isolated — no real home/config/userData
-// path is ever read or written, and environment/module state is restored
-// between tests.
+// dynamic import) so the Electron app API, platform constants and filesystem
+// are fully isolated — no real home/config/userData path is ever read or
+// written, and environment/module state is restored between tests.
 //
-// The locked decisions under test (see docs/cherry-chat-application-identity.md):
-//   IDENTITY-001: default Cherry Studio userData behavior remains unchanged.
-//   IDENTITY-002: Cherry Chat gets independent packaged and dev profiles.
-//   IDENTITY-006: Cherry Chat must fail closed rather than resolve to the
-//                 Cherry Studio default profile.
+// The locked decisions under test (LOCK-RETIRE-001/002, LOCK-PROFILE-006):
+//   - Cherry Chat is the only application identity; the identity default is
+//     always the independent `Cherry Chat` profile.
+//   - The app must fail closed rather than resolve to a Cherry Studio default
+//     profile (`Cherry Studio` or `CherryStudio`).
 // ---------------------------------------------------------------------------
 
 // Per-test mutable state backing the mocked Electron app / platform / fs
@@ -25,15 +24,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // it, while the tests reset it in beforeEach.
 const electronState = vi.hoisted(() => ({
   appDataRoot: '/mock/Application Support',
-  defaultUserData: '/mock/Application Support/Cherry Studio',
-  exePath: '/mock/install/Cherry Studio.app/Contents/MacOS/Cherry Studio',
+  exePath: '/mock/install/Cherry Chat.app/Contents/MacOS/Cherry Chat',
   currentUserData: '/mock/Application Support/Cherry Studio',
   isPackaged: true,
   setPathCalls: [] as Array<[string, string]>,
   reset(): void {
     electronState.appDataRoot = '/mock/Application Support'
-    electronState.defaultUserData = '/mock/Application Support/Cherry Studio'
-    electronState.exePath = '/mock/install/Cherry Studio.app/Contents/MacOS/Cherry Studio'
+    electronState.exePath = '/mock/install/Cherry Chat.app/Contents/MacOS/Cherry Chat'
     electronState.currentUserData = '/mock/Application Support/Cherry Studio'
     electronState.isPackaged = true
     electronState.setPathCalls = []
@@ -86,25 +83,22 @@ const fsState = vi.hoisted(() => ({
 // outside these roots would mean a real user directory was touched.
 const SYNTHETIC_ROOTS = ['/mock/', '/custom/', '/portable/', '/legacy/', '/disposable/']
 
-// Flavor-specific config paths derived from the mocked homedir + identity.
-const DEFAULT_CONFIG_PATH = path.join(os.homedir(), '.cherrystudio', 'config', 'config.json')
-const CHERRY_CHAT_CONFIG_PATH = path.join(os.homedir(), '.cherrychat', 'config', 'config.json')
+// Identity-specific config path derived from the mocked homedir + identity.
+const DEFAULT_CONFIG_PATH = path.join(os.homedir(), appIdentity.homeDirName, 'config', 'config.json')
+
+// The single identity-default Cherry Chat profile under the mocked app-data root.
+const IDENTITY_DEFAULT = path.join(electronState.appDataRoot, appIdentity.userDataDirName)
 
 /**
  * Register the isolated module mocks and import the production seam fresh.
  *
  * `vi.doMock` is intentionally used (not hoisted `vi.mock`) so every dynamic
- * import of `../init` observes the exact per-test flavor/state registered here,
+ * import of `../init` observes the exact per-test state registered here,
  * regardless of the global mocks applied by tests/main.setup.ts.
  */
-async function loadInit(flavor: 'cherry-studio' | 'cherry-chat') {
-  const identity = realResolveAppIdentity(flavor)
-
+async function loadInit() {
   vi.doMock('@shared/config/identity', () => ({
-    appFlavor: identity.flavor,
-    appIdentity: identity,
-    resolveAppIdentity: (f: string | null | undefined) => realResolveAppIdentity(f),
-    APP_FLAVOR_ENV_VAR: 'VITE_APP_FLAVOR'
+    appIdentity
   }))
 
   vi.doMock('@main/constant', () => ({
@@ -174,7 +168,7 @@ async function loadInit(flavor: 'cherry-studio' | 'cherry-chat') {
   return import('../init')
 }
 
-describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', () => {
+describe('initAppDataDir — startup userData wiring (LOCK-RETIRE-001/002, LOCK-PROFILE-006)', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
@@ -197,23 +191,23 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
     delete process.env.PORTABLE_EXECUTABLE_DIR
   })
 
-  it('default packaged, no config, not portable: leaves Electron default userData untouched (IDENTITY-001)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-studio')
+  it('packaged, no config, not portable: resolves to <appData>/Cherry Chat (LOCK-RETIRE-001)', async () => {
+    const { initAppDataDir } = await loadInit()
 
     initAppDataDir()
 
-    expect(electronState.setPathCalls).toEqual([])
-    expect(electronState.currentUserData).toBe(electronState.defaultUserData)
-    // The packaged config gate probed the flavor-specific config and found none.
+    expect(electronState.setPathCalls).toEqual([['userData', IDENTITY_DEFAULT]])
+    expect(electronState.currentUserData).toBe(IDENTITY_DEFAULT)
+    // The packaged config gate probed the identity-specific config and found none.
     expect(fsState.probed).toEqual([DEFAULT_CONFIG_PATH])
     expect(fsState.written).toEqual([])
     // Home resolution went through the mocked homedir, never a real profile.
     expect(os.homedir).toHaveBeenCalled()
   })
 
-  it('default packaged with a configured appDataPath: the configured path wins', async () => {
-    const { initAppDataDir } = await loadInit('cherry-studio')
-    const configured = '/custom/studio-data'
+  it('packaged with a configured appDataPath: the configured path wins', async () => {
+    const { initAppDataDir } = await loadInit()
+    const configured = '/custom/chat-data'
     fsState.configJson = JSON.stringify({
       appDataPath: [{ executablePath: electronState.exePath, dataPath: configured }]
     })
@@ -229,8 +223,8 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
     expect(fsState.written).toEqual([])
   })
 
-  it('default packaged portable: resolves to <portableDir>/data', async () => {
-    const { initAppDataDir } = await loadInit('cherry-studio')
+  it('packaged portable: resolves to <portableDir>/data', async () => {
+    const { initAppDataDir } = await loadInit()
     constantState.isPortable = true
     process.env.PORTABLE_EXECUTABLE_DIR = '/portable/install'
 
@@ -241,7 +235,7 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
   })
 
   it('packaged portable keeps existing precedence: configured path wins over portable', async () => {
-    const { initAppDataDir } = await loadInit('cherry-studio')
+    const { initAppDataDir } = await loadInit()
     constantState.isPortable = true
     process.env.PORTABLE_EXECUTABLE_DIR = '/portable/install'
     const configured = '/custom/data'
@@ -256,8 +250,22 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
     expect(electronState.currentUserData).toBe(configured)
   })
 
-  it('dev default: leaves the base for config.ts suffix handling (config/portable ignored in dev)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-studio')
+  it('dev: establishes <appData>/Cherry Chat before config.ts suffix handling', async () => {
+    const { initAppDataDir } = await loadInit()
+    electronState.isPackaged = false
+
+    initAppDataDir()
+
+    // Base established pre-suffix; src/main/config.ts applies the Dev suffix
+    // on top (covered by the shared applyDevSuffix tests).
+    expect(electronState.setPathCalls).toEqual([['userData', IDENTITY_DEFAULT]])
+    expect(electronState.currentUserData).toBe(IDENTITY_DEFAULT)
+    // The packaged-only gate means the config file was never even probed.
+    expect(fsState.probed).toEqual([])
+  })
+
+  it('dev keeps config/portable ignored (identity default applies)', async () => {
+    const { initAppDataDir } = await loadInit()
     electronState.isPackaged = false
     constantState.isPortable = true
     process.env.PORTABLE_EXECUTABLE_DIR = '/portable/install'
@@ -266,58 +274,18 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
 
     initAppDataDir()
 
-    expect(electronState.setPathCalls).toEqual([])
-    expect(electronState.currentUserData).toBe(electronState.defaultUserData)
-    // The packaged-only gate means the config file was never even probed.
+    expect(electronState.setPathCalls).toEqual([['userData', IDENTITY_DEFAULT]])
+    expect(electronState.currentUserData).toBe(IDENTITY_DEFAULT)
     expect(fsState.probed).toEqual([])
   })
 
-  it('Cherry Chat packaged: sets <appData>/Cherry Chat (IDENTITY-002)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-chat')
-
-    initAppDataDir()
-
-    expect(electronState.setPathCalls).toEqual([['userData', path.join(electronState.appDataRoot, 'Cherry Chat')]])
-    expect(electronState.currentUserData).toBe(path.join(electronState.appDataRoot, 'Cherry Chat'))
-    // The flavor-specific home/config dir (.cherrychat) was probed by the gate.
-    expect(fsState.probed).toEqual([CHERRY_CHAT_CONFIG_PATH])
-  })
-
-  it('Cherry Chat dev: establishes <appData>/Cherry Chat before config.ts suffix handling', async () => {
-    const { initAppDataDir } = await loadInit('cherry-chat')
-    electronState.isPackaged = false
-
-    initAppDataDir()
-
-    // Base established pre-suffix; src/main/config.ts applies the Dev suffix
-    // on top (covered by the shared applyDevSuffix tests).
-    expect(electronState.setPathCalls).toEqual([['userData', path.join(electronState.appDataRoot, 'Cherry Chat')]])
-    expect(electronState.currentUserData).toBe(path.join(electronState.appDataRoot, 'Cherry Chat'))
-    expect(fsState.probed).toEqual([])
-  })
-
-  it('Cherry Chat configured appDataPath is flavor-specific (.cherrychat config)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-chat')
-    const configured = '/custom/chat-data'
-    fsState.configJson = JSON.stringify({
-      appDataPath: [{ executablePath: electronState.exePath, dataPath: configured }]
-    })
-    fsState.existing = new Set([CHERRY_CHAT_CONFIG_PATH, configured])
-
-    initAppDataDir()
-
-    expect(fsState.probed).toContain(CHERRY_CHAT_CONFIG_PATH)
-    expect(electronState.setPathCalls).toEqual([['userData', configured]])
-    expect(electronState.currentUserData).toBe(configured)
-  })
-
-  it('Cherry Chat resolving to the Cherry Studio default userData throws before startup proceeds (IDENTITY-006)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-chat')
+  it('resolving to the Cherry Studio default userData throws before startup proceeds (LOCK-PROFILE-006)', async () => {
+    const { initAppDataDir } = await loadInit()
     const cherryStudioDefault = path.join(electronState.appDataRoot, 'Cherry Studio')
     fsState.configJson = JSON.stringify({
       appDataPath: [{ executablePath: electronState.exePath, dataPath: cherryStudioDefault }]
     })
-    fsState.existing = new Set([CHERRY_CHAT_CONFIG_PATH, cherryStudioDefault])
+    fsState.existing = new Set([DEFAULT_CONFIG_PATH, cherryStudioDefault])
 
     let caught: unknown
     try {
@@ -328,21 +296,21 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
 
     // Fail-closed: the bad resolution is never accepted silently.
     expect(caught).toBeInstanceOf(Error)
-    expect((caught as Error).message).toMatch(/IDENTITY-006/)
+    expect((caught as Error).message).toMatch(/LOCK-PROFILE-006/)
     expect((caught as Error).message).toContain('Cherry Studio')
     expect(electronState.setPathCalls).toEqual([['userData', cherryStudioDefault]])
   })
 
-  it('Cherry Chat resolving to the actual Electron-derived CherryStudio profile throws (IDENTITY-006)', async () => {
+  it('resolving to the actual Electron-derived CherryStudio profile throws (LOCK-PROFILE-006)', async () => {
     // The real Cherry Studio profile on this machine is `<appDataRoot>/CherryStudio`
     // (Electron derives it from the packaged package.json `name`); both the
     // ADR form (`Cherry Studio`) and this actual form must fail closed.
-    const { initAppDataDir } = await loadInit('cherry-chat')
+    const { initAppDataDir } = await loadInit()
     const actualCherryStudioDefault = path.join(electronState.appDataRoot, 'CherryStudio')
     fsState.configJson = JSON.stringify({
       appDataPath: [{ executablePath: electronState.exePath, dataPath: actualCherryStudioDefault }]
     })
-    fsState.existing = new Set([CHERRY_CHAT_CONFIG_PATH, actualCherryStudioDefault])
+    fsState.existing = new Set([DEFAULT_CONFIG_PATH, actualCherryStudioDefault])
 
     let caught: unknown
     try {
@@ -352,21 +320,21 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
     }
 
     expect(caught).toBeInstanceOf(Error)
-    expect((caught as Error).message).toMatch(/IDENTITY-006/)
+    expect((caught as Error).message).toMatch(/LOCK-PROFILE-006/)
     expect((caught as Error).message).toContain('CherryStudio')
     expect(electronState.setPathCalls).toEqual([['userData', actualCherryStudioDefault]])
   })
 
   it('legacy string appDataPath still wins and migrates through the (mocked) config write', async () => {
-    const { initAppDataDir } = await loadInit('cherry-studio')
-    const legacy = '/legacy/studio-data'
+    const { initAppDataDir } = await loadInit()
+    const legacy = '/legacy/chat-data'
     fsState.configJson = JSON.stringify({ appDataPath: legacy })
     fsState.existing = new Set([DEFAULT_CONFIG_PATH, legacy])
 
     initAppDataDir()
 
     expect(electronState.setPathCalls).toEqual([['userData', legacy]])
-    // The migration write only touches the mocked flavor config path.
+    // The migration write only touches the mocked identity config path.
     expect(fsState.written).toHaveLength(1)
     expect(fsState.written[0][0]).toBe(DEFAULT_CONFIG_PATH)
     const migrated = JSON.parse(fsState.written[0][1]) as {
@@ -376,15 +344,15 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
   })
 
   // -------------------------------------------------------------------------
-  // Explicit `--user-data-dir` CLI override (Phase C precedence contract):
+  // Explicit `--user-data-dir` CLI override (highest precedence contract):
   // Electron applies the override to app.getPath('userData') before JS runs;
-  // initAppDataDir() must PRESERVE it for both flavors instead of overwriting
-  // it with the flavor identity default. The IDENTITY-006 guard still runs on
-  // the final value and fails closed for the Cherry Studio default.
+  // initAppDataDir() must PRESERVE it instead of overwriting it with the
+  // identity default. The LOCK-PROFILE-006 guard still runs on the final value
+  // and fails closed for the Cherry Studio default.
   // -------------------------------------------------------------------------
 
-  it('preserves an explicit --user-data-dir for the default flavor packaged (no overwrite)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-studio')
+  it('preserves an explicit --user-data-dir packaged (no overwrite)', async () => {
+    const { initAppDataDir } = await loadInit()
     const cliPath = '/disposable/cli-profile'
     // Electron already applied the override before JS ran.
     electronState.currentUserData = cliPath
@@ -395,25 +363,11 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
     // The explicit override is preserved verbatim — no setPath at all.
     expect(electronState.setPathCalls).toEqual([])
     expect(electronState.currentUserData).toBe(cliPath)
+    expect(electronState.currentUserData).not.toBe(IDENTITY_DEFAULT)
   })
 
-  it('preserves an explicit --user-data-dir for Cherry Chat packaged instead of the identity default', async () => {
-    const { initAppDataDir } = await loadInit('cherry-chat')
-    const cliPath = '/disposable/cli-profile'
-    electronState.currentUserData = cliPath
-    argvState.set(`--user-data-dir=${cliPath}`, '--no-sandbox')
-
-    initAppDataDir()
-
-    // The override survives — previously the cherry-chat identity default
-    // (<appData>/Cherry Chat) overwrote it.
-    expect(electronState.setPathCalls).toEqual([])
-    expect(electronState.currentUserData).toBe(cliPath)
-    expect(electronState.currentUserData).not.toBe(path.join(electronState.appDataRoot, 'Cherry Chat'))
-  })
-
-  it('preserves an explicit --user-data-dir for Cherry Chat dev (base for the suffix gate)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-chat')
+  it('preserves an explicit --user-data-dir in dev (base for the suffix gate)', async () => {
+    const { initAppDataDir } = await loadInit()
     electronState.isPackaged = false
     const cliPath = '/disposable/cli-profile'
     electronState.currentUserData = cliPath
@@ -429,14 +383,14 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
   })
 
   it('explicit --user-data-dir beats the packaged configured appDataPath (CLI > configured)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-chat')
+    const { initAppDataDir } = await loadInit()
     const cliPath = '/disposable/cli-profile'
     const configured = '/custom/chat-data'
-    // A flavor config exists, but the explicit CLI override must win.
+    // A config exists, but the explicit CLI override must win.
     fsState.configJson = JSON.stringify({
       appDataPath: [{ executablePath: electronState.exePath, dataPath: configured }]
     })
-    fsState.existing = new Set([CHERRY_CHAT_CONFIG_PATH, configured])
+    fsState.existing = new Set([DEFAULT_CONFIG_PATH, configured])
     electronState.currentUserData = cliPath
     argvState.set(`--user-data-dir=${cliPath}`, '--no-sandbox')
 
@@ -447,7 +401,7 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
   })
 
   it('explicit --user-data-dir beats portable mode (CLI > portable)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-chat')
+    const { initAppDataDir } = await loadInit()
     const cliPath = '/disposable/cli-profile'
     constantState.isPortable = true
     process.env.PORTABLE_EXECUTABLE_DIR = '/portable/install'
@@ -460,8 +414,8 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
     expect(electronState.currentUserData).toBe(cliPath)
   })
 
-  it('Cherry Chat CLI override pointing at the Cherry Studio default userData still fails closed (IDENTITY-006)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-chat')
+  it('CLI override pointing at the Cherry Studio default userData still fails closed (LOCK-PROFILE-006)', async () => {
+    const { initAppDataDir } = await loadInit()
     const cherryStudioDefault = path.join(electronState.appDataRoot, 'Cherry Studio')
     // Electron applied the CLI override — which points at the forbidden profile.
     electronState.currentUserData = cherryStudioDefault
@@ -475,9 +429,9 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
     }
 
     // Fail-closed: the CLI override is highest precedence for resolution but
-    // never overrides the IDENTITY-006 refusal guard.
+    // never overrides the LOCK-PROFILE-006 refusal guard.
     expect(caught).toBeInstanceOf(Error)
-    expect((caught as Error).message).toMatch(/IDENTITY-006/)
+    expect((caught as Error).message).toMatch(/LOCK-PROFILE-006/)
     expect((caught as Error).message).toContain('Cherry Studio')
     // The override was preserved before the guard fired (no identity-default
     // overwrite), and the refusal guard rejected it.
@@ -485,8 +439,8 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
     expect(electronState.currentUserData).toBe(cherryStudioDefault)
   })
 
-  it('Cherry Chat CLI override pointing at the actual Electron-derived CherryStudio profile still fails closed (IDENTITY-006)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-chat')
+  it('CLI override pointing at the actual Electron-derived CherryStudio profile still fails closed (LOCK-PROFILE-006)', async () => {
+    const { initAppDataDir } = await loadInit()
     const actualCherryStudioDefault = path.join(electronState.appDataRoot, 'CherryStudio')
     // Electron applied the CLI override — which points at the forbidden profile.
     electronState.currentUserData = actualCherryStudioDefault
@@ -500,7 +454,7 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
     }
 
     expect(caught).toBeInstanceOf(Error)
-    expect((caught as Error).message).toMatch(/IDENTITY-006/)
+    expect((caught as Error).message).toMatch(/LOCK-PROFILE-006/)
     expect((caught as Error).message).toContain('CherryStudio')
     // The override was preserved before the guard fired, and the refusal guard
     // rejected the actual Electron-derived profile too.
@@ -509,13 +463,13 @@ describe('initAppDataDir — startup userData wiring (IDENTITY-001/002/006)', ()
   })
 
   it('a non-user-data CLI arg is ignored (no false-positive override)', async () => {
-    const { initAppDataDir } = await loadInit('cherry-chat')
+    const { initAppDataDir } = await loadInit()
     argvState.set('--user-data-dir-adjacent=/disposable/other', '--flag')
 
     initAppDataDir()
 
     // No override detected: the identity default applies as usual.
-    expect(electronState.setPathCalls).toEqual([['userData', path.join(electronState.appDataRoot, 'Cherry Chat')]])
-    expect(electronState.currentUserData).toBe(path.join(electronState.appDataRoot, 'Cherry Chat'))
+    expect(electronState.setPathCalls).toEqual([['userData', IDENTITY_DEFAULT]])
+    expect(electronState.currentUserData).toBe(IDENTITY_DEFAULT)
   })
 })

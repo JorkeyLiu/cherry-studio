@@ -1,5 +1,5 @@
 /**
- * Packaged-app isolation E2E helper (Phase C, IDENTITY-005/006).
+ * Packaged-app isolation E2E helper (Phase C, LOCK-PLATFORM-005/LOCK-PROFILE-006).
  *
  * This helper launches the REAL packaged `Cherry Chat.app` binary
  * (`dist/mac-arm64/Cherry Chat.app/Contents/MacOS/Cherry Chat`) via Playwright
@@ -18,8 +18,7 @@
  * test): the app's own `setAsDefaultProtocolClient` may register the running
  * package with Launch Services as normal app behavior, and the app's
  * `extractRtkBinaries()` writes its bundled rtk binary + `mcp` home dir into
- * the flavor-specific home directory (`~/.cherrychat` for the cherry-chat
- * flavor, `~/.cherrystudio` for the default build) on first run. Neither
+ * the identity-specific home directory (`~/.cherrychat`) on first run. Neither
  * touches the Application Support profiles under test.
  */
 import type { ElectronApplication, Page } from '@playwright/test'
@@ -49,9 +48,8 @@ export function packagedExecutablePath(projectRoot = process.cwd()): string {
   } catch {
     throw new Error(
       `Packaged Cherry Chat executable not found at ${exePath}. ` +
-        'Phase C requires a fresh cherry-chat build + `--dir` package first ' +
-        '(VITE_APP_FLAVOR=cherry-chat electron-vite build && electron-builder --config ' +
-        'electron-builder.cherry-chat.yml --dir --mac --arm64).'
+        'A fresh production build + `--dir` package is required first ' +
+        '(pnpm build && electron-builder --dir --mac --arm64).'
     )
   }
   if (!stat.isFile() || stat.isSymbolicLink()) {
@@ -102,12 +100,12 @@ export function launchPackagedCherryChat(options: {
 
 /**
  * Wait for the main Cherry Chat window and its React root. The window event
- * fires while the shared static HTML title (`Cherry Studio`) is still shown,
+ * fires while the shared static HTML title (`Cherry Chat`) is still shown,
  * so an event-time title predicate can never observe the identity-derived
  * title — instead this waits for the FIRST window event (the main window) and
  * then polls the PAGE for the exact identity-derived title `Cherry Chat`
- * (IDENTITY-002). This is deterministic and never collides with the mini
- * window (`Cherry Studio Quick Assistant`, created after the main window).
+ * (LOCK-RETIRE-001). This is deterministic and never collides with the mini
+ * window (`Cherry Chat Quick Assistant`, created after the main window).
  */
 export async function waitForPackagedMainWindow(app: ElectronApplication): Promise<Page> {
   const page = await app.waitForEvent('window', { timeout: 120000 })
@@ -327,7 +325,7 @@ export function cherryStudioProfilePath(appDataRoot = macAppDataRoot()): string 
  * `app.getName() === 'CherryStudio'` and the real profile lives here). This is
  * the profile a real Cherry Studio install uses, and Phase C must prove it is
  * not mutated. `cherryStudioProfilePath` (with a space) is the ADR
- * IDENTITY-006 guard form; both forms are fingerprinted.
+ * LOCK-PROFILE-006 guard form; both forms are fingerprinted.
  */
 export function actualCherryStudioProfilePath(appDataRoot = macAppDataRoot()): string {
   return path.join(appDataRoot, 'CherryStudio')

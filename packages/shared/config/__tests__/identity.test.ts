@@ -1,35 +1,16 @@
 import { describe, expect, it } from 'vitest'
 
 import { APP_NAME, CHERRYIN_CONFIG, HOME_CHERRY_DIR } from '../constant'
-import { APP_FLAVOR_ENV_VAR, appFlavor, type AppIdentity, appIdentity, resolveAppIdentity } from '../identity'
+import * as identityModule from '../identity'
+import { type AppIdentity, appIdentity } from '../identity'
 
 /**
- * Locked identity values from docs/cherry-chat-application-identity.md.
- * IDENTITY-001: the default Cherry Studio build/identity must remain unchanged.
- * IDENTITY-002: Cherry Chat resolves to product `Cherry Chat`, bundle/app ID
- * `com.jorkeyliu.CherryChat`, protocol `cherrychat://`, independent profile.
+ * Locked identity values from LOCK-RETIRE-001: Cherry Chat is the only target
+ * application identity. LOCK-RETIRE-002: IDENTITY-001 is a retired erroneous
+ * legacy decision — no `cherry-studio` target flavor exists anymore and the
+ * default/unset build identity is always Cherry Chat.
  */
-const LOCKED_DEFAULT_IDENTITY: AppIdentity = {
-  flavor: 'cherry-studio',
-  productName: 'Cherry Studio',
-  appId: 'com.kangfenmao.CherryStudio',
-  protocolScheme: 'cherrystudio',
-  protocolUrlScheme: 'cherrystudio://',
-  protocolDisplayName: 'Cherry Studio',
-  homeDirName: '.cherrystudio',
-  userDataDirName: 'Cherry Studio',
-  genericTempDirName: 'CherryStudio',
-  tempDirName: 'cherry-studio',
-  updaterEnabled: true,
-  analyticsChannel: 'cherry-studio',
-  userAgentProduct: 'CherryStudio',
-  apiTitle: 'Cherry Studio API',
-  linuxClassAndName: 'CherryStudio',
-  crashReporterProductName: 'CherryStudio'
-}
-
-const LOCKED_CHERRY_CHAT_IDENTITY: AppIdentity = {
-  flavor: 'cherry-chat',
+const LOCKED_IDENTITY: AppIdentity = {
   productName: 'Cherry Chat',
   appId: 'com.jorkeyliu.CherryChat',
   protocolScheme: 'cherrychat',
@@ -47,91 +28,63 @@ const LOCKED_CHERRY_CHAT_IDENTITY: AppIdentity = {
   crashReporterProductName: 'CherryChat'
 }
 
-describe('resolveAppIdentity', () => {
-  it('resolves the default Cherry Studio flavor to the locked default identity', () => {
-    expect(resolveAppIdentity(undefined)).toEqual(LOCKED_DEFAULT_IDENTITY)
+describe('single immutable application identity (LOCK-RETIRE-001/002)', () => {
+  it('locks every identity field to the Cherry Chat values', () => {
+    expect(appIdentity).toEqual(LOCKED_IDENTITY)
   })
 
-  it('resolves explicit cherry-studio to the locked default identity', () => {
-    expect(resolveAppIdentity('cherry-studio')).toEqual(LOCKED_DEFAULT_IDENTITY)
+  it('carries the locked product name and bundle/app id', () => {
+    expect(appIdentity.productName).toBe('Cherry Chat')
+    expect(appIdentity.appId).toBe('com.jorkeyliu.CherryChat')
   })
 
-  it('resolves the cherry-chat flavor to the locked Cherry Chat identity', () => {
-    expect(resolveAppIdentity('cherry-chat')).toEqual(LOCKED_CHERRY_CHAT_IDENTITY)
+  it('carries the locked protocol scheme', () => {
+    expect(appIdentity.protocolScheme).toBe('cherrychat')
+    expect(appIdentity.protocolUrlScheme).toBe('cherrychat://')
   })
 
-  it('treats unknown/malformed flavor tokens as the default identity (IDENTITY-001)', () => {
-    expect(resolveAppIdentity(null)).toEqual(LOCKED_DEFAULT_IDENTITY)
-    expect(resolveAppIdentity('')).toEqual(LOCKED_DEFAULT_IDENTITY)
-    expect(resolveAppIdentity('   ')).toEqual(LOCKED_DEFAULT_IDENTITY)
-    expect(resolveAppIdentity('unknown-flavor')).toEqual(LOCKED_DEFAULT_IDENTITY)
+  it('derives independent home/temp/profile identity', () => {
+    expect(appIdentity.homeDirName).toBe('.cherrychat')
+    expect(appIdentity.tempDirName).toBe('cherry-chat')
+    expect(appIdentity.userDataDirName).toBe('Cherry Chat')
+    expect(appIdentity.genericTempDirName).toBe('CherryChat')
   })
 
-  it('is case- and whitespace-insensitive for the explicit flavor token', () => {
-    expect(resolveAppIdentity('Cherry-Chat')).toEqual(LOCKED_CHERRY_CHAT_IDENTITY)
-    expect(resolveAppIdentity('  cherry-chat  ')).toEqual(LOCKED_CHERRY_CHAT_IDENTITY)
-  })
-})
-
-describe('build-time module identity', () => {
-  it('defaults to the Cherry Studio flavor when VITE_APP_FLAVOR is unset (test environment)', () => {
-    expect(appFlavor).toBe('cherry-studio')
-    expect(appIdentity).toEqual(LOCKED_DEFAULT_IDENTITY)
-  })
-
-  it('documents the flavor environment variable name', () => {
-    expect(APP_FLAVOR_ENV_VAR).toBe('VITE_APP_FLAVOR')
+  it('keeps the updater disabled (LOCK-UPDATER-004)', () => {
+    expect(appIdentity.updaterEnabled).toBe(false)
   })
 })
 
-describe('identity-derived shared constants (default flavor)', () => {
-  it('keeps HOME_CHERRY_DIR equal to the current Cherry Studio home directory', () => {
-    expect(HOME_CHERRY_DIR).toBe('.cherrystudio')
+describe('identity-derived shared constants', () => {
+  it('keeps HOME_CHERRY_DIR equal to the Cherry Chat home directory', () => {
+    expect(HOME_CHERRY_DIR).toBe('.cherrychat')
     expect(HOME_CHERRY_DIR).toBe(appIdentity.homeDirName)
   })
 
-  it('keeps APP_NAME equal to the current Cherry Studio product name', () => {
-    expect(APP_NAME).toBe('Cherry Studio')
+  it('keeps APP_NAME equal to the Cherry Chat product name', () => {
+    expect(APP_NAME).toBe('Cherry Chat')
     expect(APP_NAME).toBe(appIdentity.productName)
   })
 
-  it('keeps the CherryIN OAuth redirect URI on the default protocol scheme', () => {
-    expect(CHERRYIN_CONFIG.REDIRECT_URI).toBe('cherrystudio://oauth/callback')
+  it('keeps the CherryIN OAuth redirect URI on the Cherry Chat protocol scheme', () => {
+    expect(CHERRYIN_CONFIG.REDIRECT_URI).toBe('cherrychat://oauth/callback')
     expect(CHERRYIN_CONFIG.REDIRECT_URI.startsWith(appIdentity.protocolUrlScheme)).toBe(true)
-  })
-
-  it('keeps the historical generic temp dir name for the default flavor', () => {
-    expect(appIdentity.genericTempDirName).toBe('CherryStudio')
-    expect(resolveAppIdentity('cherry-chat').genericTempDirName).toBe('CherryChat')
   })
 })
 
-describe('flavor isolation invariants', () => {
-  it('derives distinct home/temp/profile identity for Cherry Chat (IDENTITY-002/006)', () => {
-    const defaultIdentity = resolveAppIdentity('cherry-studio')
-    const chatIdentity = resolveAppIdentity('cherry-chat')
-
-    expect(chatIdentity.homeDirName).not.toBe(defaultIdentity.homeDirName)
-    expect(chatIdentity.tempDirName).not.toBe(defaultIdentity.tempDirName)
-    expect(chatIdentity.userDataDirName).not.toBe(defaultIdentity.userDataDirName)
-    expect(chatIdentity.genericTempDirName).not.toBe(defaultIdentity.genericTempDirName)
-    expect(chatIdentity.appId).not.toBe(defaultIdentity.appId)
-    expect(chatIdentity.protocolScheme).not.toBe(defaultIdentity.protocolScheme)
-    expect(chatIdentity.protocolUrlScheme).not.toBe(defaultIdentity.protocolUrlScheme)
+describe('no cherry-studio target identity remains', () => {
+  it('exposes no flavor selector / fallback API surface', () => {
+    // The retired flavor machinery must not be importable (LOCK-RETIRE-002).
+    expect(Object.keys(identityModule)).toContain('appIdentity')
+    expect(Object.keys(identityModule)).not.toContain('resolveAppIdentity')
+    expect(Object.keys(identityModule)).not.toContain('appFlavor')
+    expect(Object.keys(identityModule)).not.toContain('APP_FLAVOR_ENV_VAR')
+    expect(Object.keys(identityModule)).not.toContain('AppFlavor')
   })
 
-  it('matches the default userData dir to the Electron packaged profile name', () => {
-    expect(resolveAppIdentity('cherry-studio').userDataDirName).toBe('Cherry Studio')
-    expect(resolveAppIdentity('cherry-chat').userDataDirName).toBe('Cherry Chat')
-  })
-
-  it('derives a flavor-specific internal API title', () => {
-    expect(resolveAppIdentity('cherry-studio').apiTitle).toBe('Cherry Studio API')
-    expect(resolveAppIdentity('cherry-chat').apiTitle).toBe('Cherry Chat API')
-  })
-
-  it('disables the updater for Cherry Chat (IDENTITY-004) while the default build keeps it enabled', () => {
-    expect(resolveAppIdentity('cherry-studio').updaterEnabled).toBe(true)
-    expect(resolveAppIdentity('cherry-chat').updaterEnabled).toBe(false)
+  it('has no Cherry Studio identity values anywhere in the module', () => {
+    expect(JSON.stringify(appIdentity)).not.toContain('Cherry Studio')
+    expect(JSON.stringify(appIdentity)).not.toContain('cherrystudio')
+    expect(JSON.stringify(appIdentity)).not.toContain('com.kangfenmao')
   })
 })

@@ -2,7 +2,7 @@ import path from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { resolveAppIdentity } from '../identity'
+import { appIdentity } from '../identity'
 import {
   applyDevSuffix,
   CHERRY_STUDIO_PROTECTED_USER_DATA_NAMES,
@@ -14,13 +14,12 @@ import {
 } from '../userData'
 
 const APPDATA_ROOT = '/mock/Application Support'
-const DEFAULT_ELECTRON_USERDATA = path.join(APPDATA_ROOT, 'Cherry Studio')
+const IDENTITY_DEFAULT = path.join(APPDATA_ROOT, appIdentity.userDataDirName)
 
 function makeInput(overrides: Partial<ResolveUserDataInput> = {}): ResolveUserDataInput {
   return {
-    identity: resolveAppIdentity('cherry-studio'),
+    identity: appIdentity,
     appDataRoot: APPDATA_ROOT,
-    electronDefaultUserData: DEFAULT_ELECTRON_USERDATA,
     configuredAppDataPath: null,
     portableDataDir: null,
     explicitUserDataDir: null,
@@ -30,50 +29,29 @@ function makeInput(overrides: Partial<ResolveUserDataInput> = {}): ResolveUserDa
   }
 }
 
-describe('resolveUserDataBase', () => {
-  it('keeps Electron default userData for the default flavor when nothing is configured', () => {
+describe('resolveUserDataBase — single Cherry Chat identity (LOCK-RETIRE-001)', () => {
+  it('resolves the identity-default Cherry Chat profile when nothing is configured', () => {
     const result = resolveUserDataBase(makeInput())
-    expect(result).toEqual<UserDataResolution>({ path: DEFAULT_ELECTRON_USERDATA, source: 'electron-default' })
+    expect(result).toEqual<UserDataResolution>({ path: IDENTITY_DEFAULT, source: 'identity-default' })
   })
 
-  it('keeps Electron default for the default flavor in dev mode', () => {
-    const result = resolveUserDataBase(makeInput({ isPackaged: false }))
-    expect(result.source).toBe('electron-default')
-    expect(result.path).toBe(DEFAULT_ELECTRON_USERDATA)
-  })
-
-  it('resolves Cherry Chat packaged to its own identity-default profile', () => {
-    const result = resolveUserDataBase(makeInput({ identity: resolveAppIdentity('cherry-chat') }))
-    expect(result).toEqual<UserDataResolution>({
-      path: path.join(APPDATA_ROOT, 'Cherry Chat'),
-      source: 'identity-default'
-    })
-  })
-
-  it('resolves Cherry Chat dev to its own identity-default profile (independent dev base)', () => {
-    const base = resolveUserDataBase(makeInput({ identity: resolveAppIdentity('cherry-chat'), isPackaged: false }))
-    expect(base.path).toBe(path.join(APPDATA_ROOT, 'Cherry Chat'))
+  it('resolves the identity-default profile in dev mode too (independent dev base)', () => {
+    const base = resolveUserDataBase(makeInput({ isPackaged: false }))
+    expect(base.path).toBe(IDENTITY_DEFAULT)
     // The historical dev suffix is applied on top of the base by src/main/config.ts.
-    expect(applyDevSuffix(base.path, true)).toBe(path.join(APPDATA_ROOT, 'Cherry Chat') + 'Dev')
+    expect(applyDevSuffix(base.path, true)).toBe(IDENTITY_DEFAULT + 'Dev')
   })
 
-  it('applies the flavor-specific configured appDataPath before the identity default (Cherry Chat)', () => {
-    const configured = '/custom/cherry-chat-data'
-    const result = resolveUserDataBase(
-      makeInput({ identity: resolveAppIdentity('cherry-chat'), configuredAppDataPath: configured })
-    )
+  it('applies the configured appDataPath before the identity default', () => {
+    const configured = '/custom/chat-data'
+    const result = resolveUserDataBase(makeInput({ configuredAppDataPath: configured }))
     expect(result).toEqual<UserDataResolution>({ path: configured, source: 'configured-path' })
   })
 
-  it('applies portable data dir before the identity default (Cherry Chat portable)', () => {
+  it('applies portable data dir before the identity default', () => {
     const portableDir = '/portable/data'
     const result = resolveUserDataBase(
-      makeInput({
-        identity: resolveAppIdentity('cherry-chat'),
-        configuredAppDataPath: null,
-        isPortable: true,
-        portableDataDir: portableDir
-      })
+      makeInput({ configuredAppDataPath: null, isPortable: true, portableDataDir: portableDir })
     )
     expect(result).toEqual<UserDataResolution>({ path: portableDir, source: 'portable' })
   })
@@ -94,7 +72,7 @@ describe('resolveUserDataBase', () => {
         portableDataDir: '/portable/data'
       })
     )
-    expect(result).toEqual<UserDataResolution>({ path: DEFAULT_ELECTRON_USERDATA, source: 'electron-default' })
+    expect(result).toEqual<UserDataResolution>({ path: IDENTITY_DEFAULT, source: 'identity-default' })
   })
 })
 
@@ -127,43 +105,24 @@ describe('findExplicitUserDataDir', () => {
 describe('resolveUserDataBase — explicit --user-data-dir CLI override (highest precedence)', () => {
   const CLI = '/disposable/cli-profile'
 
-  it('preserves the CLI override for the default flavor packaged', () => {
+  it('preserves the CLI override packaged', () => {
     const result = resolveUserDataBase(makeInput({ explicitUserDataDir: CLI }))
     expect(result).toEqual<UserDataResolution>({ path: CLI, source: 'cli-override' })
-  })
-
-  it('preserves the CLI override for the default flavor in dev mode', () => {
-    const result = resolveUserDataBase(makeInput({ isPackaged: false, explicitUserDataDir: CLI }))
-    expect(result).toEqual<UserDataResolution>({ path: CLI, source: 'cli-override' })
-  })
-
-  it('preserves the CLI override for Cherry Chat packaged instead of the identity default', () => {
-    const result = resolveUserDataBase(
-      makeInput({ identity: resolveAppIdentity('cherry-chat'), explicitUserDataDir: CLI })
-    )
-    expect(result).toEqual<UserDataResolution>({ path: CLI, source: 'cli-override' })
     // The identity-default `Cherry Chat` profile is NOT used.
-    expect(result.path).not.toBe(path.join(APPDATA_ROOT, 'Cherry Chat'))
+    expect(result.path).not.toBe(IDENTITY_DEFAULT)
   })
 
-  it('preserves the CLI override for Cherry Chat dev (no Dev suffix on the override)', () => {
-    const base = resolveUserDataBase(
-      makeInput({ identity: resolveAppIdentity('cherry-chat'), isPackaged: false, explicitUserDataDir: CLI })
-    )
+  it('preserves the CLI override in dev mode (no Dev suffix on the override)', () => {
+    const base = resolveUserDataBase(makeInput({ isPackaged: false, explicitUserDataDir: CLI }))
     expect(base).toEqual<UserDataResolution>({ path: CLI, source: 'cli-override' })
     // The historical Dev suffix is applied by src/main/config.ts ONLY to the
-    // identity base; an explicit CLI override skips the suffix gate entirely
-    // (covered by the config.ts dev-suffix gate test).
+    // identity base; an explicit CLI override skips the suffix gate entirely.
     expect(base.path).toBe(CLI)
   })
 
-  it('beats the flavor-specific configured appDataPath (CLI > configured)', () => {
+  it('beats the configured appDataPath (CLI > configured)', () => {
     const result = resolveUserDataBase(
-      makeInput({
-        identity: resolveAppIdentity('cherry-chat'),
-        configuredAppDataPath: '/custom/chat-data',
-        explicitUserDataDir: CLI
-      })
+      makeInput({ configuredAppDataPath: '/custom/chat-data', explicitUserDataDir: CLI })
     )
     expect(result).toEqual<UserDataResolution>({ path: CLI, source: 'cli-override' })
   })
@@ -176,38 +135,32 @@ describe('resolveUserDataBase — explicit --user-data-dir CLI override (highest
   })
 
   it('keeps a CLI override pointing at the Cherry Studio default resolvable for the guard to reject', () => {
-    // Resolution itself preserves the override; the IDENTITY-006 guard in
+    // Resolution itself preserves the override; the LOCK-PROFILE-006 guard in
     // src/main/utils/init.ts runs AFTER resolution and fails closed.
     const cherryStudioDefault = path.join(APPDATA_ROOT, 'Cherry Studio')
-    const result = resolveUserDataBase(
-      makeInput({ identity: resolveAppIdentity('cherry-chat'), explicitUserDataDir: cherryStudioDefault })
-    )
+    const result = resolveUserDataBase(makeInput({ explicitUserDataDir: cherryStudioDefault }))
     expect(result).toEqual<UserDataResolution>({ path: cherryStudioDefault, source: 'cli-override' })
-    expect(isCherryStudioDefaultUserData(resolveAppIdentity('cherry-chat'), APPDATA_ROOT, result.path)).toBe(true)
+    expect(isCherryStudioDefaultUserData(APPDATA_ROOT, result.path)).toBe(true)
   })
 
   it('keeps a CLI override pointing at the actual Electron-derived CherryStudio profile resolvable for the guard to reject', () => {
-    // The real Cherry Studio profile on this machine is `<appDataRoot>/CherryStudio`
-    // (Electron derives it from the packaged package.json `name`); the guard
-    // must fail closed on this form too (IDENTITY-006).
+    // The real Cherry Studio profile is `<appDataRoot>/CherryStudio`; the guard
+    // must fail closed on this form too (LOCK-PROFILE-006).
     const actualCherryStudioDefault = path.join(APPDATA_ROOT, 'CherryStudio')
-    const result = resolveUserDataBase(
-      makeInput({ identity: resolveAppIdentity('cherry-chat'), explicitUserDataDir: actualCherryStudioDefault })
-    )
+    const result = resolveUserDataBase(makeInput({ explicitUserDataDir: actualCherryStudioDefault }))
     expect(result).toEqual<UserDataResolution>({ path: actualCherryStudioDefault, source: 'cli-override' })
-    expect(isCherryStudioDefaultUserData(resolveAppIdentity('cherry-chat'), APPDATA_ROOT, result.path)).toBe(true)
+    expect(isCherryStudioDefaultUserData(APPDATA_ROOT, result.path)).toBe(true)
   })
 })
 
 describe('applyDevSuffix', () => {
   it('appends the historical Dev suffix only in dev mode', () => {
     expect(applyDevSuffix('/data/Cherry Chat', true)).toBe('/data/Cherry ChatDev')
-    expect(applyDevSuffix('/data/Cherry Studio', true)).toBe('/data/Cherry StudioDev')
     expect(applyDevSuffix('/data/Cherry Chat', false)).toBe('/data/Cherry Chat')
   })
 })
 
-describe('isCherryStudioDefaultUserData', () => {
+describe('isCherryStudioDefaultUserData (LOCK-PROFILE-006)', () => {
   const cherryStudioDefault = path.join(APPDATA_ROOT, 'Cherry Studio')
   // The ACTUAL Electron-derived default profile (package.json `name` is
   // `CherryStudio` — verified empirically on the packaged binary).
@@ -215,48 +168,25 @@ describe('isCherryStudioDefaultUserData', () => {
 
   it('locks BOTH canonical protected profile names in the centralized compatibility list', () => {
     expect(CHERRY_STUDIO_PROTECTED_USER_DATA_NAMES).toEqual(['Cherry Studio', 'CherryStudio'])
-    expect(CHERRY_STUDIO_PROTECTED_USER_DATA_NAMES).toContain(resolveAppIdentity('cherry-studio').userDataDirName)
   })
 
-  it('flags the ADR-form Cherry Studio default profile for the cherry-chat flavor', () => {
-    expect(isCherryStudioDefaultUserData(resolveAppIdentity('cherry-chat'), APPDATA_ROOT, cherryStudioDefault)).toBe(
-      true
-    )
+  it('flags the ADR-form Cherry Studio default profile', () => {
+    expect(isCherryStudioDefaultUserData(APPDATA_ROOT, cherryStudioDefault)).toBe(true)
   })
 
-  it('flags the actual Electron-derived CherryStudio profile for the cherry-chat flavor (IDENTITY-006)', () => {
-    expect(
-      isCherryStudioDefaultUserData(resolveAppIdentity('cherry-chat'), APPDATA_ROOT, actualCherryStudioDefault)
-    ).toBe(true)
+  it('flags the actual Electron-derived CherryStudio profile (LOCK-PROFILE-006)', () => {
+    expect(isCherryStudioDefaultUserData(APPDATA_ROOT, actualCherryStudioDefault)).toBe(true)
   })
 
-  it('does not flag Cherry Chat profiles or custom paths', () => {
-    expect(
-      isCherryStudioDefaultUserData(
-        resolveAppIdentity('cherry-chat'),
-        APPDATA_ROOT,
-        path.join(APPDATA_ROOT, 'Cherry Chat')
-      )
-    ).toBe(false)
-    expect(isCherryStudioDefaultUserData(resolveAppIdentity('cherry-chat'), APPDATA_ROOT, '/custom/data')).toBe(false)
-  })
-
-  it('never flags anything for the default flavor (IDENTITY-001)', () => {
-    expect(isCherryStudioDefaultUserData(resolveAppIdentity('cherry-studio'), APPDATA_ROOT, cherryStudioDefault)).toBe(
-      false
-    )
-    expect(
-      isCherryStudioDefaultUserData(resolveAppIdentity('cherry-studio'), APPDATA_ROOT, actualCherryStudioDefault)
-    ).toBe(false)
-    expect(isCherryStudioDefaultUserData(resolveAppIdentity('cherry-studio'), APPDATA_ROOT, '/custom/data')).toBe(false)
+  it('does not flag the Cherry Chat profile or custom paths', () => {
+    expect(isCherryStudioDefaultUserData(APPDATA_ROOT, IDENTITY_DEFAULT)).toBe(false)
+    expect(isCherryStudioDefaultUserData(APPDATA_ROOT, '/custom/data')).toBe(false)
   })
 
   it('treats path aliases canonically for BOTH protected forms (resolves the comparison)', () => {
-    // /mock/Application Support vs /mock/Application%20Support should not match;
-    // aliased path forms that resolve identically should match on POSIX systems.
     const aliasForm = path.join(APPDATA_ROOT, '.', 'Cherry Studio')
-    expect(isCherryStudioDefaultUserData(resolveAppIdentity('cherry-chat'), APPDATA_ROOT, aliasForm)).toBe(true)
+    expect(isCherryStudioDefaultUserData(APPDATA_ROOT, aliasForm)).toBe(true)
     const aliasNoSpaceForm = path.join(APPDATA_ROOT, '.', 'CherryStudio')
-    expect(isCherryStudioDefaultUserData(resolveAppIdentity('cherry-chat'), APPDATA_ROOT, aliasNoSpaceForm)).toBe(true)
+    expect(isCherryStudioDefaultUserData(APPDATA_ROOT, aliasNoSpaceForm)).toBe(true)
   })
 })

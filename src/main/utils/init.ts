@@ -31,28 +31,24 @@ function getConfigDir() {
  * Precedence:
  *   0. explicit `--user-data-dir=<path>` CLI override — Electron applies it
  *      to `app.getPath('userData')` before JS runs; this function preserves
- *      the exact value for BOTH flavors instead of overwriting it (the
- *      previously observed behavior discarded the override for the
- *      cherry-chat flavor),
- *   1. flavor-specific configured `appDataPath` from
+ *      the exact value instead of overwriting it,
+ *   1. identity-specific configured `appDataPath` from
  *      `<homedir>/<homeDirName>/config/config.json` (packaged only),
  *   2. portable `data` directory (packaged only),
  *   3. identity default: Cherry Chat resolves to its own `Cherry Chat` profile
- *      (IDENTITY-002); the default Cherry Studio build keeps Electron's own
- *      derivation untouched (IDENTITY-001).
+ *      (LOCK-RETIRE-001).
  *
- * IDENTITY-006: a `cherry-chat` profile that would resolve to the known
- * Cherry Studio default profile is refused at startup — the guard runs on the
- * FINAL userData value, so a CLI override pointing at `<appData>/Cherry
- * Studio` also fails closed.
+ * LOCK-PROFILE-006: a userData that would resolve to the known Cherry Studio
+ * default profile is refused at startup — the guard runs on the FINAL userData
+ * value, so a CLI override pointing at `<appData>/Cherry Studio` also fails
+ * closed.
  */
 export function initAppDataDir() {
   const explicitUserDataDir = findExplicitUserDataDir(process.argv)
   const resolution = resolveUserDataBase({
     identity: appIdentity,
     appDataRoot: app.getPath('appData'),
-    electronDefaultUserData: app.getPath('userData'),
-    // The flavor-specific config read (and its legacy-migration write) only
+    // The identity-specific config read (and its legacy-migration write) only
     // runs when packaged, preserving the historical bootstrap gate.
     configuredAppDataPath: app.isPackaged ? getAppDataPathFromConfig() : null,
     portableDataDir: isPortable ? path.join(process.env.PORTABLE_EXECUTABLE_DIR || app.getPath('exe'), 'data') : null,
@@ -67,14 +63,14 @@ export function initAppDataDir() {
     if (app.getPath('userData') !== resolution.path) {
       app.setPath('userData', resolution.path)
     }
-  } else if (resolution.source !== 'electron-default') {
+  } else {
     app.setPath('userData', resolution.path)
   }
 
-  if (isCherryStudioDefaultUserData(appIdentity, app.getPath('appData'), app.getPath('userData'))) {
+  if (isCherryStudioDefaultUserData(app.getPath('appData'), app.getPath('userData'))) {
     throw new Error(
       `[initAppDataDir] Refusing to start Cherry Chat with the Cherry Studio default userData ` +
-        `"${app.getPath('userData')}" (IDENTITY-006). The Cherry Chat profile must be independent; configure a ` +
+        `"${app.getPath('userData')}" (LOCK-PROFILE-006). The Cherry Chat profile must be independent; configure a ` +
         `different appDataPath in the Cherry Chat config, use portable mode, or pass an explicit ` +
         `--user-data-dir=... override.`
     )
@@ -98,11 +94,11 @@ function getAppDataPathFromConfig() {
     if (isLinux && process.env.APPIMAGE) {
       // 如果是 AppImage 打包的应用，直接使用 APPIMAGE 环境变量
       // 这样可以确保获取到正确的可执行文件路径
-      executablePath = path.join(path.dirname(process.env.APPIMAGE), 'cherry-studio.appimage')
+      executablePath = path.join(path.dirname(process.env.APPIMAGE), 'cherry-chat.appimage')
     }
 
     if (isWin && isPortable) {
-      executablePath = path.join(process.env.PORTABLE_EXECUTABLE_DIR || '', 'cherry-studio-portable.exe')
+      executablePath = path.join(process.env.PORTABLE_EXECUTABLE_DIR || '', 'cherry-chat-portable.exe')
     }
 
     let appDataPath = null
@@ -138,12 +134,12 @@ export function updateAppDataConfig(appDataPath: string) {
   const configPath = path.join(configDir, 'config.json')
   let executablePath = app.getPath('exe')
   if (isLinux && process.env.APPIMAGE) {
-    executablePath = path.join(path.dirname(process.env.APPIMAGE), 'cherry-studio.appimage')
+    executablePath = path.join(path.dirname(process.env.APPIMAGE), 'cherry-chat.appimage')
   }
 
   // 如果是 Windows 可移植版本，则使用 PORTABLE_EXECUTABLE_FILE 环境变量
   if (isWin && isPortable) {
-    executablePath = path.join(process.env.PORTABLE_EXECUTABLE_DIR || '', 'cherry-studio-portable.exe')
+    executablePath = path.join(process.env.PORTABLE_EXECUTABLE_DIR || '', 'cherry-chat-portable.exe')
   }
 
   if (!fs.existsSync(configPath)) {

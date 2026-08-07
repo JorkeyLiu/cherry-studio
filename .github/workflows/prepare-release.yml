@@ -13,6 +13,12 @@ on:
   # (workflow_dispatch already restricts to branches with write access,
   # but we guard the job to main to prevent accidental runs from feature branches)
 
+# LOCK-RELEASE-FREEZE: Application releases are frozen until an independent
+# endpoint plus signing/notarization decisions exist. Release preparation is a
+# release-path workflow, so its execution is mechanically disabled below. The
+# file is preserved (non-packaging automation) for re-enablement after a
+# release path is approved; do not re-enable without hub approval.
+
 permissions:
   contents: write
   pull-requests: write
@@ -20,7 +26,8 @@ permissions:
 
 jobs:
   prepare:
-    if: github.ref == 'refs/heads/main'
+    # Mechanically frozen (LOCK-RELEASE-FREEZE): this job can never run.
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Check out Git repository

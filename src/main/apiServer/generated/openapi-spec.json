@@ -1,11 +1,11 @@
 {
   "openapi": "3.0.0",
   "info": {
-    "title": "Cherry Studio API",
+    "title": "Cherry Chat API",
     "version": "1.0.0",
-    "description": "OpenAI-compatible API for Cherry Studio with additional Cherry-specific endpoints",
+    "description": "OpenAI-compatible API for Cherry Chat with additional Cherry-specific endpoints",
     "contact": {
-      "name": "Cherry Studio",
+      "name": "Cherry Chat",
       "url": "https://github.com/CherryHQ/cherry-studio"
     }
   },
@@ -21,7 +21,7 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "JWT",
-        "description": "Use the API key from Cherry Studio settings"
+        "description": "Use the API key from Cherry Chat settings"
       }
     },
     "schemas": {
@@ -1400,7 +1400,7 @@
                   "properties": {
                     "name": {
                       "type": "string",
-                      "example": "Cherry Studio API"
+                      "example": "Cherry Chat API"
                     },
                     "version": {
                       "type": "string",

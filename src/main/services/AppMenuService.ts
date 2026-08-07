@@ -115,9 +115,14 @@ export class AppMenuService {
             }
           },
           {
+            // LOCK-RELEASE-FREEZE: no independent release endpoint exists yet,
+            // so Cherry Chat must not route users to the Cherry Studio release
+            // feed. The item is retained but disabled until such an endpoint
+            // is approved.
             label: appMenu.releases,
+            enabled: false,
             click: () => {
-              void shell.openExternal('https://github.com/CherryHQ/cherry-studio/releases')
+              // Intentionally a no-op while the release route is frozen.
             }
           }
         ]

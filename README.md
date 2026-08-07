@@ -47,7 +47,6 @@
 <div align="center">
 
 [![][github-release-shield]][github-release-link]
-[![][github-nightly-shield]][github-nightly-link]
 [![][github-contributors-shield]][github-contributors-link]
 [![][license-shield]][license-link]
 [![][commercial-shield]][commercial-link]
@@ -310,8 +309,6 @@ Should you require a commercial license that provides an exemption from the AGPL
 
 [github-release-shield]: https://img.shields.io/github/v/release/CherryHQ/cherry-studio?logo=github
 [github-release-link]: https://github.com/CherryHQ/cherry-studio/releases
-[github-nightly-shield]: https://img.shields.io/github/actions/workflow/status/CherryHQ/cherry-studio/nightly-build.yml?label=nightly%20build&logo=github
-[github-nightly-link]: https://github.com/CherryHQ/cherry-studio/actions/workflows/nightly-build.yml
 [github-contributors-shield]: https://img.shields.io/github/contributors/CherryHQ/cherry-studio?logo=github
 [github-contributors-link]: https://github.com/CherryHQ/cherry-studio/graphs/contributors
 

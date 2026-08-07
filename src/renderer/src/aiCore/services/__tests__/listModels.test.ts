@@ -57,7 +57,7 @@ vi.mock('@renderer/utils/provider', () => ({
 }))
 
 vi.mock('@shared/utils', () => ({
-  defaultAppHeaders: () => ({ 'X-App': 'CherryStudio' })
+  defaultAppHeaders: () => ({ 'X-App': 'CherryChat' })
 }))
 
 vi.mock('@renderer/store', () => ({
@@ -573,7 +573,7 @@ describe('listModels', () => {
       expect(requestedUrls.some((url) => url.includes('/publishers/anthropic/models'))).toBe(false)
       expect(requests[0].headers).toMatchObject({
         Authorization: 'Bearer vertex-token',
-        'X-App': 'CherryStudio'
+        'X-App': 'CherryChat'
       })
       expect(models.map((m) => m.id)).toEqual(['gemini-2.5-pro', 'gemini-2.5-flash', 'text-embedding-005'])
       expect(models[0]).toMatchObject({

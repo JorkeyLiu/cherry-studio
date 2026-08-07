@@ -318,7 +318,7 @@ async function waitForMainElectronWindow(electronApp: ElectronApplication): Prom
     predicate: async (window) => {
       try {
         const title = await window.title()
-        return title === 'Cherry Studio' || title.includes('Cherry')
+        return title === 'Cherry Chat' || title.includes('Cherry')
       } catch {
         return false
       }

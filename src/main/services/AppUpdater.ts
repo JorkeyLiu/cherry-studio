@@ -290,11 +290,11 @@ export default class AppUpdater {
   }
 
   public async checkForUpdates() {
-    // IDENTITY-004: Cherry Chat must not consume the Cherry Studio updater /
+    // LOCK-UPDATER-004: Cherry Chat must not consume the Cherry Studio updater /
     // release feed. Until an independent release endpoint exists, the updater
-    // is disabled for the cherry-chat flavor — no feed URL is ever resolved.
+    // is disabled — no feed URL is ever resolved.
     if (!appIdentity.updaterEnabled) {
-      logger.info(`Auto-update is disabled for flavor "${appIdentity.flavor}" (IDENTITY-004). Skipping update check.`)
+      logger.info(`Auto-update is disabled for ${appIdentity.productName} (LOCK-UPDATER-004). Skipping update check.`)
       return {
         currentVersion: app.getVersion(),
         updateInfo: null

@@ -696,7 +696,7 @@
     },
     "authHeaderText": "在授權標頭中使用：",
     "configuration": "設定",
-    "description": "透過 OpenAI 相容的 HTTP API 公開 Cherry Studio 的 AI 功能",
+    "description": "透過 OpenAI 相容的 HTTP API 公開 Cherry Chat 的 AI 功能",
     "documentation": {
       "title": "API 文件"
     },
@@ -3046,12 +3046,12 @@
       "select_other_provider": "選擇其他供應商",
       "setup_hint": "請至少設定一個提供者以獲得最佳體驗",
       "subtitle": "享受頂尖 AI 服務，盡在 CherryIN",
-      "title": "歡迎來到 Cherry Studio"
+      "title": "歡迎來到 Cherry Chat"
     }
   },
   "openclaw": {
     "checking_installation": "正在檢查 OpenClaw 安裝狀態...",
-    "description": "使用 Cherry Studio 服務商為 OpenClaw 提供支援，OpenClaw 是您的個人 AI 助手，可在 WhatsApp、Telegram、Slack、Discord 等平台上使用。",
+    "description": "使用 Cherry Chat 服務商為 OpenClaw 提供支援，OpenClaw 是您的個人 AI 助手，可在 WhatsApp、Telegram、Slack、Discord 等平台上使用。",
     "error": {
       "select_provider_model": "請先選擇服務商和模型"
     },
@@ -3072,7 +3072,7 @@
     "install_progress": "安裝進度",
     "installed_at": "OpenClaw 安裝路徑",
     "migration": {
-      "description": "偵測到 PATH 中存在外部 OpenClaw 安裝，但 Cherry Studio 只使用受管理的 OpenClaw 二進位檔。請安裝受管理版本後繼續。",
+      "description": "偵測到 PATH 中存在外部 OpenClaw 安裝，但 Cherry Chat 只使用受管理的 OpenClaw 二進位檔。請安裝受管理版本後繼續。",
       "install_button": "重新安裝 OpenClaw",
       "title": "OpenClaw 需要更新"
     },
@@ -3089,7 +3089,7 @@
       "title": "模型設定"
     },
     "node_missing": {
-      "description": "OpenClaw 需要 Node.js/npm。請先安裝 Node.js，然後重新啟動 Cherry Studio。",
+      "description": "OpenClaw 需要 Node.js/npm。請先安裝 Node.js，然後重新啟動 Cherry Chat。",
       "download_button": "下載 Node.js",
       "hint": "macOS：brew install node | Windows：從 nodejs.org 下載 LTS 版本",
       "title": "需要 Node.js"
@@ -3896,7 +3896,7 @@
           },
           "description": {
             "0": "劃詞助手需「<strong>輔助使用權限</strong>」才能正常工作。",
-            "1": "請點選「<strong>前往設定</strong>」，並在稍後出現的權限請求對話框中點選「<strong>開啟系統設定</strong>」按鈕，接著在應用程式清單中找到「<strong>Cherry Studio</strong>」，並開啟權限開關。",
+            "1": "請點選「<strong>前往設定</strong>」，並在稍後出現的權限請求對話框中點選「<strong>開啟系統設定</strong>」按鈕，接著在應用程式清單中找到「<strong>Cherry Chat</strong>」，並開啟權限開關。",
             "2": "完成設定後，請再次開啟劃詞助手。"
           },
           "title": "輔助使用權限"
@@ -3908,7 +3908,7 @@
         "title": "應用篩選名單",
         "user_tips": {
           "mac": "請輸入應用程式的 Bundle ID（每行一個、不區分大小寫，可模糊比對）。例如：com.google.Chrome、com.apple.mail 等",
-          "windows": "請輸入應用程式的執行檔名稱（每行一個、不區分大小寫，可模糊比對）。例如：chrome.exe、weixin.exe、Cherry Studio.exe 等"
+          "windows": "請輸入應用程式的執行檔名稱（每行一個、不區分大小寫，可模糊比對）。例如：chrome.exe、weixin.exe、Cherry Chat.exe 等"
         }
       },
       "linux": {
@@ -3920,7 +3920,7 @@
         "wayland_checklist_subtitle": "確認以下條件已滿足，以盡可能優化 Wayland 下的體驗：",
         "wayland_description": "目前為 Wayland 模式，受系統限制，部分桌面環境下工具列只能顯示在螢幕中央，無法跟隨選取文字定位。建議切換到 X11 模式以獲得完整體驗。",
         "wayland_title": "Wayland 模式提示",
-        "xwayland_fail": "未啟用，請使用 `--ozone-platform=x11` 參數啟動 Cherry Studio",
+        "xwayland_fail": "未啟用，請使用 `--ozone-platform=x11` 參數啟動 Cherry Chat",
         "xwayland_label": "XWayland 模式：",
         "xwayland_pass": "已啟用"
       },
@@ -4213,14 +4213,14 @@
             "test_message_received": "收到來自 {{device}} 的 pong",
             "test_message_sent": "已送出 hello world 測試封包"
           },
-          "idle_hint": "掃描已暫停。開始掃描以尋找區域網路中的 Cherry Studio 裝置。",
+          "idle_hint": "掃描已暫停。開始掃描以尋找區域網路中的 Cherry Chat 裝置。",
           "ip_addresses": "IP 位址",
           "last_seen": "上次看到：{{time}}",
           "metadata": "中繼資料",
-          "no_connection_warning": "請在 Cherry Studio 行動裝置開啟區域網路傳輸",
+          "no_connection_warning": "請在 Cherry Chat 行動裝置開啟區域網路傳輸",
           "no_devices": "尚未找到區域網路節點",
           "scan_devices": "掃描裝置",
-          "scanning_hint": "正在掃描區域網路中的 Cherry Studio 裝置...",
+          "scanning_hint": "正在掃描區域網路中的 Cherry Chat 裝置...",
           "send_file": "傳送檔案",
           "status": {
             "completed": "傳輸完成",
@@ -5006,7 +5006,7 @@
       },
       "oauth": {
         "callback": {
-          "message": "關閉此頁面後即可回到 Cherry Studio",
+          "message": "關閉此頁面後即可回到 Cherry Chat",
           "title": "認證成功"
         }
       },

@@ -1,4 +1,3 @@
-import type { AppIdentity } from '@shared/config/identity'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Module-level mocks mirroring the existing AppUpdater.test.ts harness.
@@ -90,58 +89,13 @@ vi.mock('electron-updater', () => ({
   AppUpdater: vi.fn()
 }))
 
-const CHERRY_CHAT_IDENTITY: AppIdentity = {
-  flavor: 'cherry-chat',
-  productName: 'Cherry Chat',
-  appId: 'com.jorkeyliu.CherryChat',
-  protocolScheme: 'cherrychat',
-  protocolUrlScheme: 'cherrychat://',
-  protocolDisplayName: 'Cherry Chat',
-  homeDirName: '.cherrychat',
-  userDataDirName: 'Cherry Chat',
-  genericTempDirName: 'CherryChat',
-  tempDirName: 'cherry-chat',
-  updaterEnabled: false,
-  analyticsChannel: 'cherry-chat',
-  userAgentProduct: 'CherryChat',
-  apiTitle: 'Cherry Chat API',
-  linuxClassAndName: 'CherryChat',
-  crashReporterProductName: 'CherryChat'
-}
-
-const CHERRY_STUDIO_IDENTITY: AppIdentity = {
-  flavor: 'cherry-studio',
-  productName: 'Cherry Studio',
-  appId: 'com.kangfenmao.CherryStudio',
-  protocolScheme: 'cherrystudio',
-  protocolUrlScheme: 'cherrystudio://',
-  protocolDisplayName: 'Cherry Studio',
-  homeDirName: '.cherrystudio',
-  userDataDirName: 'Cherry Studio',
-  genericTempDirName: 'CherryStudio',
-  tempDirName: 'cherry-studio',
-  updaterEnabled: true,
-  analyticsChannel: 'cherry-studio',
-  userAgentProduct: 'CherryStudio',
-  apiTitle: 'Cherry Studio API',
-  linuxClassAndName: 'CherryStudio',
-  crashReporterProductName: 'CherryStudio'
-}
-
-describe('IDENTITY-004 — AppUpdater flavor gate', () => {
+describe('LOCK-UPDATER-004 — AppUpdater identity gate (single Cherry Chat identity)', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
   })
 
-  it('cherry-chat checkForUpdates() returns without any feed/network/update/analytics calls', async () => {
-    vi.doMock('@shared/config/identity', () => ({
-      appFlavor: 'cherry-chat',
-      appIdentity: CHERRY_CHAT_IDENTITY,
-      resolveAppIdentity: vi.fn(() => CHERRY_CHAT_IDENTITY),
-      APP_FLAVOR_ENV_VAR: 'VITE_APP_FLAVOR'
-    }))
-
+  it('checkForUpdates() returns without any feed/network/update/analytics calls', async () => {
     const { default: AppUpdater } = await import('../AppUpdater')
     const { analyticsService } = await import('../AnalyticsService')
     const { autoUpdater } = await import('electron-updater')
@@ -152,39 +106,12 @@ describe('IDENTITY-004 — AppUpdater flavor gate', () => {
 
     expect(result).toEqual({ currentVersion: '1.0.0', updateInfo: null })
 
-    // IDENTITY-004: zero feed/network/update/analytics side effects.
+    // LOCK-UPDATER-004: zero feed/network/update/analytics side effects.
     expect(net.fetch).not.toHaveBeenCalled()
     expect(autoUpdater.setFeedURL).not.toHaveBeenCalled()
     expect(autoUpdater.checkForUpdates).not.toHaveBeenCalled()
     expect(autoUpdater.downloadUpdate).not.toHaveBeenCalled()
     expect(analyticsService.trackAppUpdate).not.toHaveBeenCalled()
     expect(app.getVersion).toHaveBeenCalled()
-  })
-
-  it('cherry-studio checkForUpdates() proceeds to feed resolution (gate is flavor-specific)', async () => {
-    vi.doMock('@shared/config/identity', () => ({
-      appFlavor: 'cherry-studio',
-      appIdentity: CHERRY_STUDIO_IDENTITY,
-      resolveAppIdentity: vi.fn(() => CHERRY_STUDIO_IDENTITY),
-      APP_FLAVOR_ENV_VAR: 'VITE_APP_FLAVOR'
-    }))
-
-    const { default: AppUpdater } = await import('../AppUpdater')
-    const { analyticsService } = await import('../AnalyticsService')
-    const { autoUpdater } = await import('electron-updater')
-    const { net } = await import('electron')
-
-    const updater = new AppUpdater()
-
-    // Feed config fetch fails (HTTP 404) — updater falls back to the default feed URL.
-    vi.mocked(net.fetch).mockResolvedValue({ ok: false, status: 404 } as Response)
-    const result = await updater.checkForUpdates()
-
-    // The default flavor performs the normal feed-resolution flow.
-    expect(net.fetch).toHaveBeenCalled()
-    expect(autoUpdater.setFeedURL).toHaveBeenCalled()
-    expect(autoUpdater.checkForUpdates).toHaveBeenCalled()
-    expect(analyticsService.trackAppUpdate).toHaveBeenCalled()
-    expect(result).toEqual({ currentVersion: '1.0.0', updateInfo: null })
   })
 })

@@ -71,7 +71,7 @@ const WelcomePage: FC<WelcomePageProps> = ({ setStep, setCherryInLoggedIn }) => 
   return (
     <div className="flex h-full w-full flex-col items-center justify-center">
       <div className="flex flex-col items-center gap-6">
-        <img src={CherryStudioLogo} alt="Cherry Studio" className="h-16 w-16 rounded-xl" />
+        <img src={CherryStudioLogo} alt="Cherry Chat" className="h-16 w-16 rounded-xl" />
 
         <div className="flex flex-col items-center gap-2">
           <h1 className="m-0 font-semibold text-(--color-text) text-2xl">{t('onboarding.welcome.title')}</h1>

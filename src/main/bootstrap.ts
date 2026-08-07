@@ -8,7 +8,7 @@ import { initAppDataDir } from './utils/init'
 // Resolve the runtime userData/profile from application identity before any
 // other consumer reads it. The function internally preserves the historical
 // packaged-only gate for config/portable precedence and applies the
-// Cherry Chat identity base (IDENTITY-002) + refusal guard (IDENTITY-006).
+// Cherry Chat identity base (LOCK-RETIRE-001) + refusal guard (LOCK-PROFILE-006).
 initAppDataDir()
 
 // 在主进程中复制 appData 中某些一直被占用的文件

@@ -3,14 +3,11 @@ const { notarize } = require('@electron/notarize')
 
 /**
  * Resolve the macOS bundle identifier for notarization from the active
- * electron-builder packager/appInfo instead of a literal (Phase B / P-B,
- * IDENTITY-002).
+ * electron-builder packager/appInfo instead of a literal (LOCK-RETIRE-001).
  *
- * Under the default Cherry Studio config, `context.packager.appInfo.id`
- * resolves to `com.kangfenmao.CherryStudio` (IDENTITY-001 preserved); under
- * the Cherry Chat overlay (`electron-builder.cherry-chat.yml`) it resolves to
- * `com.jorkeyliu.CherryChat`. Exported as a pure helper so the selection can
- * be tested without invoking Apple notarization
+ * Under the single Cherry Chat base config, `context.packager.appInfo.id`
+ * resolves to `com.jorkeyliu.CherryChat`. Exported as a pure helper so the
+ * resolution can be tested without invoking Apple notarization
  * (scripts/__tests__/notarize.test.ts).
  */
 exports.resolveAppBundleId = function resolveAppBundleId(context) {

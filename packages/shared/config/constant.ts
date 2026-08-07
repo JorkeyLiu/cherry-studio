@@ -229,7 +229,7 @@ export const MIN_WINDOW_HEIGHT = 600
 export const defaultByPassRules = 'localhost,127.0.0.1,::1'
 
 // resources/scripts should be maintained manually
-// Home-directory identity suffix (flavor-aware, see ./identity)
+// Home-directory identity suffix (single-identity, see ./identity)
 export const HOME_CHERRY_DIR = appIdentity.homeDirName
 
 // Git Bash path configuration types

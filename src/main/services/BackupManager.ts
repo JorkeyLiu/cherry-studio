@@ -1814,7 +1814,7 @@ class BackupManager {
   async restoreFromWebdav(_: Electron.IpcMainInvokeEvent, webdavConfig: WebDavConfig) {
     const rawFilename = webdavConfig.fileName || `${appIdentity.tempDirName}.backup.zip`
     const webdavClient = this.getWebDavInstance(webdavConfig)
-    // LOCK-6013: Ensure the cherry-studio temp base exists before mkdtemp.
+    // LOCK-6013: Ensure the cherry-chat temp base exists before mkdtemp.
     // On fresh installs the parent directory may not exist yet, causing
     // ENOENT from mkdtemp.
     const basePath = await BackupManager.ensureTempBase()
@@ -1882,7 +1882,7 @@ class BackupManager {
     logger.debug(`Starting restore from S3: ${rawFilename}`)
 
     const s3Client = this.getS3Storage(s3Config)
-    // LOCK-6013: Ensure the cherry-studio temp base exists before mkdtemp.
+    // LOCK-6013: Ensure the cherry-chat temp base exists before mkdtemp.
     const basePath = await BackupManager.ensureTempBase()
     // LOCK-6012: Create an exclusive operation-owned temp directory for the
     // downloaded file. mkdtemp guarantees atomic unique creation; the
@@ -2062,9 +2062,9 @@ class BackupManager {
    * LOCK-6019: Abandoned upload roots must not leave intermediate archives.
    *
    * Scans all known operation-owned prefixes:
-   *   - cherry-studio/restore/extraction-*
-   *   - cherry-studio/download-*
-   *   - cherry-studio/upload-*
+   *   - cherry-chat/restore/extraction-*
+   *   - cherry-chat/download-*
+   *   - cherry-chat/upload-*
    *
    * Called once at app startup, after handleStartupRestore, before
    * chatDbService.init().

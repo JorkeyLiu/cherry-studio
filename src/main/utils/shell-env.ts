@@ -12,10 +12,9 @@ const logger = loggerService.withContext('ShellEnv')
 const SHELL_ENV_TIMEOUT_MS = 15_000
 
 /**
- * Ensures the app bin directory (flavor-aware `HOME_CHERRY_DIR`, e.g.
- * `~/.cherrystudio/bin` for Cherry Studio, `~/.cherrychat/bin` for Cherry
- * Chat) is appended to the user's PATH while preserving the original key
- * casing and avoiding duplicate segments.
+ * Ensures the app bin directory (identity-specific `HOME_CHERRY_DIR`, e.g.
+ * `~/.cherrychat/bin`) is appended to the user's PATH while preserving the
+ * original key casing and avoiding duplicate segments.
  */
 const appendCherryBinToPath = (env: Record<string, string>) => {
   const pathSeparator = isWin ? ';' : ':'

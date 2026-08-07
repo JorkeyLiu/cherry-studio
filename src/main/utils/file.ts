@@ -164,8 +164,8 @@ export function getAllFiles(dirPath: string, arrayOfFiles: FileMetadata[] = []):
 
 export function getTempDir() {
   // Historical default Cherry Studio generic temp root is `CherryStudio`;
-  // Cherry Chat derives its own distinct generic temp root. The BackupManager
-  // temp identity (`cherry-studio`/`cherry-chat`) is a separate contract.
+  // the single Cherry Chat identity derives its own generic temp root. The
+  // BackupManager temp identity (`cherry-chat`) is a separate contract.
   return path.join(app.getPath('temp'), appIdentity.genericTempDirName)
 }
 

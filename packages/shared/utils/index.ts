@@ -8,8 +8,9 @@ export * from './pdf'
 export const defaultAppHeaders = () => {
   return {
     'HTTP-Referer': 'https://cherry-ai.com',
-    // Identity-like header (OpenAI-compatible providers) — flavor-aware product
-    // name. The Referer URL is an external integration identifier and unchanged.
+    // Identity header (OpenAI-compatible providers) — application identity
+    // product name. The Referer URL is an external integration identifier and
+    // unchanged.
     'X-Title': appIdentity.productName
   }
 }

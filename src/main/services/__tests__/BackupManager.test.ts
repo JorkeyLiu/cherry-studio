@@ -532,7 +532,7 @@ describe('BackupManager LOCK-6012/6013/6014/6019', () => {
   // -------------------------------------------------------------------------
 
   describe('ensureTempBase', () => {
-    it('should call ensureDir on the canonical cherry-studio temp base', async () => {
+    it('should call ensureDir on the canonical cherry-chat temp base', async () => {
       // Mock realpath to simulate macOS /var -> /private/var and /tmp -> /private/tmp alias resolution
       vi.mocked(fs.realpath).mockImplementation(async (p) => {
         const s = String(p)
@@ -544,9 +544,9 @@ describe('BackupManager LOCK-6012/6013/6014/6019', () => {
       const result = await (BM as any).ensureTempBase()
       // Should have called ensureDir on both raw temp and canonical base
       expect(fs.ensureDir).toHaveBeenCalledWith('/tmp')
-      expect(fs.ensureDir).toHaveBeenCalledWith('/private/tmp/cherry-studio')
+      expect(fs.ensureDir).toHaveBeenCalledWith('/private/tmp/cherry-chat')
       // Should return the canonical (realpath-resolved) base
-      expect(result).toBe('/private/tmp/cherry-studio')
+      expect(result).toBe('/private/tmp/cherry-chat')
     })
 
     it('should accept macOS /var -> /private/var canonical alias', async () => {
@@ -562,7 +562,7 @@ describe('BackupManager LOCK-6012/6013/6014/6019', () => {
       const result = await (BM as any).ensureTempBase()
       // The returned path should be the canonical (realpath-resolved) one
       expect(result).toContain('/private/')
-      expect(result).toBe('/private/tmp/cherry-studio')
+      expect(result).toBe('/private/tmp/cherry-chat')
     })
   })
 
@@ -604,7 +604,7 @@ describe('BackupManager LOCK-6012/6013/6014/6019', () => {
   // -------------------------------------------------------------------------
 
   describe('cleanupOrphanedExtractions expanded scope', () => {
-    it('should not throw when scanning cherry-studio base dir', async () => {
+    it('should not throw when scanning cherry-chat base dir', async () => {
       const { BackupManager: BM } = await import('../BackupManager')
       vi.mocked(fs.pathExists).mockResolvedValue(true as never)
       vi.mocked(fs.readdir).mockResolvedValue([] as never)
@@ -664,7 +664,7 @@ describe('BackupManager LOCK-6012/6013/6014/6019', () => {
       // Simulate: canonical temp is /private/tmp, but a symlink makes restoreBase resolve to /attacker
       vi.mocked(fs.realpath).mockImplementation(async (p) => {
         const s = String(p)
-        if (s.includes('cherry-studio/restore')) return '/attacker-controlled' as never
+        if (s.includes('cherry-chat/restore')) return '/attacker-controlled' as never
         return s as never
       })
       vi.mocked(fs.ensureDir).mockResolvedValue(undefined as never)
@@ -696,8 +696,8 @@ describe('BackupManager LOCK-6012/6013/6014/6019', () => {
       } as never)
 
       // Even though the paths differ (/tmp vs /private/tmp), containment holds
-      const basePath = '/private/tmp/cherry-studio'
-      const restoreReal = '/private/tmp/cherry-studio/restore'
+      const basePath = '/private/tmp/cherry-chat'
+      const restoreReal = '/private/tmp/cherry-chat/restore'
       expect(restoreReal.startsWith(basePath + '/')).toBe(true)
     })
   })
@@ -766,7 +766,7 @@ describe('BackupManager LOCK-6012/6013/6014/6019', () => {
       expect(typeof (BM as any).ensureTempBase).toBe('function')
     })
 
-    it('should call lstat on cherry-studio dir to detect symlinks', async () => {
+    it('should call lstat on cherry-chat dir to detect symlinks', async () => {
       const { BackupManager: BM } = await import('../BackupManager')
 
       // Standard mocks — no symlinks
@@ -781,19 +781,19 @@ describe('BackupManager LOCK-6012/6013/6014/6019', () => {
 
       const result = await (BM as any).ensureTempBase()
       expect(typeof result).toBe('string')
-      expect(result).toContain('cherry-studio')
+      expect(result).toContain('cherry-chat')
 
       // Verify lstat was called — proves symlink detection code path is exercised
       expect(fs.lstat).toHaveBeenCalled()
     })
 
-    it('should reject cherry-studio that is a symlink on first check', async () => {
+    it('should reject cherry-chat that is a symlink on first check', async () => {
       const { BackupManager: BM } = await import('../BackupManager')
 
       vi.mocked(fs.realpath).mockImplementation(async (p) => {
         const s = String(p)
         if (s === '/tmp') return '/tmp' as never
-        if (s.includes('cherry-studio') && !s.includes('backup') && !s.includes('staging')) {
+        if (s.includes('cherry-chat') && !s.includes('backup') && !s.includes('staging')) {
           return '/attacker-controlled' as never
         }
         return s as never

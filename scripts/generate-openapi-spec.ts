@@ -4,8 +4,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import swaggerJSDoc from 'swagger-jsdoc'
 
-import { readBuildFlavorFromEnv } from '../packages/shared/config/buildFlavor'
-import { type AppIdentity, resolveAppIdentity } from '../packages/shared/config/identity'
+import { type AppIdentity, appIdentity } from '../packages/shared/config/identity'
 
 const CURRENT_FILE = fileURLToPath(import.meta.url)
 const ROOT_DIR = path.resolve(path.dirname(CURRENT_FILE), '..')
@@ -16,10 +15,8 @@ const OUTPUT_FILE = path.resolve(OUTPUT_DIR, 'openapi-spec.json')
  * Build the swagger-jsdoc options for a given application identity.
  *
  * Every identity-owned string (info title/description, contact name, bearer
- * auth hint) comes from the resolved `AppIdentity`, so a `cherry-chat` spec
- * packages no Cherry Studio product metadata (IDENTITY-002). With the default
- * identity the produced spec is byte-identical to the historical Cherry Studio
- * output (IDENTITY-001).
+ * auth hint) comes from the resolved `AppIdentity`, so the generated spec
+ * carries Cherry Chat metadata only (LOCK-RETIRE-001).
  */
 export function buildSwaggerOptions(identity: AppIdentity): swaggerJSDoc.Options {
   return {
@@ -205,10 +202,8 @@ export function generate(identity: AppIdentity): string {
 
   // The `/` root endpoint (src/main/apiServer/app.ts) serves `name` from
   // `appIdentity.apiTitle` at runtime, but its JSDoc example is a static
-  // literal. Align the documented example with the resolved identity so a
-  // `cherry-chat` spec does not leak the default product name into packaged
-  // API documentation. For the default flavor the value is identical, so the
-  // default output stays byte-for-byte unchanged.
+  // literal. Align the documented example with the identity so the spec does
+  // not leak any other product name into packaged API documentation.
   const rootNameSchema =
     spec.paths?.['/']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties?.name
   if (rootNameSchema != null) {
@@ -221,16 +216,13 @@ export function generate(identity: AppIdentity): string {
 /**
  * Resolve the identity the generated spec must carry.
  *
- * This script runs under plain Node/tsx (never through a Vite build), so the
- * compile-time `__APP_FLAVOR__` define is never injected here. It therefore
- * resolves the flavor from `process.env.VITE_APP_FLAVOR` through the same pure
- * resolver the electron-vite config uses (`readBuildFlavorFromEnv`), keeping
- * the default output byte-for-byte identical to the historical Cherry Studio
- * spec (IDENTITY-001) while a `cherry-chat` build regenerates the tracked spec
- * with Cherry Chat metadata (IDENTITY-002).
+ * This script runs under plain Node/tsx (never through a Vite build). Cherry
+ * Chat is the single application identity, so the spec always carries the
+ * immutable {@link appIdentity} — there is no flavor selection anymore
+ * (LOCK-RETIRE-002).
  */
 export function resolveSpecIdentity(): AppIdentity {
-  return resolveAppIdentity(readBuildFlavorFromEnv())
+  return appIdentity
 }
 
 function check(content: string): void {
