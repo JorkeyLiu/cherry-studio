@@ -9,4 +9,5 @@
 !gh-create-pr
 !gh-pr-review
 !prepare-release
+!ui-verify-change
 !vercel-react-best-practices

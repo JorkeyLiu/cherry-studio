@@ -297,6 +297,13 @@ Several dependencies have patches in `patches/` — be careful when upgrading:
 - Use explicit platform skips for OS-specific behavior
 - See `tests/e2e/README.md` for details
 
+### Implementation-time UI Verification
+
+- When an implementation/review task involves user-visible behavior — verify a UI change, confirm a fix, test changed UI, or decide UI regression coverage — follow the `ui-verify-change` skill (`.agents/skills/ui-verify-change/`). No PR is required; `cherry-pr-test` remains the PR-focused workflow.
+- E2E is risk-based, not mandatory for every UI edit: require Playwright E2E for historically regressing behavior, integrated cross-component workflows, IPC/persistence/lifecycle/native/multi-window behavior, and user-visible contracts meant to stay stable. Prefer Vitest/component tests for isolated stable presentation/logic.
+- Regression evidence requires the fresh-build + shared `tests/e2e` fixture path above; generic browser/CDP/screenshot/dev-mode observation is diagnostic only, never regression proof.
+- Map changed behavior to existing specs first; extend or add a focused spec when the behavior is contract-worthy and uncovered, using the shared fixture.
+
 ## Important Notes
 
 ### Security
