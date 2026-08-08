@@ -475,10 +475,15 @@ export interface DisposableSeedZipOptions {
 export interface DisposableSeedZip {
   /** Absolute path to the produced ZIP (contains IndexedDB/...). */
   zipPath: string
-  /** Disposable `--user-data-dir` root for the seed profile. */
+  /** Exact `--user-data-dir` launch token for the seed profile. */
   profileDir: string
-  /** Dev-suffixed app data dir (holds the Chromium IndexedDB tree). */
-  profileDevDir: string
+  /**
+   * Runtime-validated app data dir (holds the Chromium IndexedDB tree).
+   * Probed from the running seed app via `getAppInfo().appDataPath` and
+   * fail-closed validated against the exact launch token (IMPLEMENTATION-004);
+   * never derived from a `Dev` suffix.
+   */
+  runtimeProfileDir: string
   /** Temp work directory owning the profile and ZIP. */
   workDir: string
   evidence: SeedZipEvidence
@@ -1086,6 +1091,10 @@ export interface ProduceSeedZipOptions {
 
 /**
  * Produce the disposable source ZIP from the closed/flushed seed profile.
+ * `runtimeProfileDir` is the runtime-validated app data dir (the directory
+ * the running seed app reported via `getAppInfo().appDataPath` after
+ * fail-closed ownership validation — IMPLEMENTATION-004), never a `Dev`
+ * derivation of the launch token.
  * Materializes EXACTLY two Chromium subtrees (LOCK-E2 selective-extraction
  * contract):
  *   - `IndexedDB/file__0.indexeddb.leveldb/`   (file origin, .ldb required)
@@ -1102,13 +1111,13 @@ export interface ProduceSeedZipOptions {
  * profile directories (no Electron needed).
  */
 export function produceSeedZip(
-  profileDevDir: string,
+  runtimeProfileDir: string,
   zipPath: string,
   options?: ProduceSeedZipOptions
 ): ProduceSeedZipResult {
-  const idbDir = path.join(profileDevDir, 'IndexedDB')
+  const idbDir = path.join(runtimeProfileDir, 'IndexedDB')
   const originDir = path.join(idbDir, SEED_ORIGIN_DIR)
-  const localStorageLeveldbDir = path.join(profileDevDir, SEED_LOCAL_STORAGE_LEVELDB_DIR)
+  const localStorageLeveldbDir = path.join(runtimeProfileDir, SEED_LOCAL_STORAGE_LEVELDB_DIR)
 
   let ldbFileCount = 0
   try {
@@ -1132,7 +1141,7 @@ export function produceSeedZip(
       `Seed Local Storage leveldb directory "${localStorageLeveldbDir}" does not exist — ` +
         `the ${SEED_PERSIST_KEY} projection was seeded but Chromium did not materialize ` +
         `Local Storage. Profile Local Storage parent: ` +
-        `${fs.existsSync(path.join(profileDevDir, 'Local Storage')) ? 'exists' : 'absent'}`
+        `${fs.existsSync(path.join(runtimeProfileDir, 'Local Storage')) ? 'exists' : 'absent'}`
     )
   }
   const lsFiles = fs.readdirSync(localStorageLeveldbDir)
@@ -1338,6 +1347,146 @@ export async function preflightZipEntries(
 // dirs/ZIP this seed created and verifies absence, throwing on any leftover.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Runtime seed profile ownership (IMPLEMENTATION-004)
+//
+// The seed app is launched with an explicit `--user-data-dir=<token>` and
+// src/main/config.ts preserves an explicit CLI override VERBATIM (no `Dev`
+// suffix — config.devSuffix tests / Phase C precedence: CLI > identity
+// default). The runtime-authoritative profile dir is therefore read from the
+// running seed app (`getAppInfo().appDataPath`) and validated fail-closed
+// against the exact launch token BEFORE any seeding touches the profile. ZIP
+// production and cleanup use the validated runtime path — never a derived
+// `profileDir + 'Dev'` guess.
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonicalize a path that may not exist yet by resolving the nearest existing
+ * ancestor and re-joining the remaining components verbatim. Handles symlinked
+ * roots (macOS /var → /private/var) without requiring the leaf to exist at
+ * probe time (path existence/realpath timing safety).
+ */
+function canonicalizeAllowMissing(p: string): string {
+  if (fs.existsSync(p)) return fs.realpathSync(p)
+  const parent = path.dirname(p)
+  if (parent === p) return p
+  return path.join(canonicalizeAllowMissing(parent), path.basename(p))
+}
+
+/** Result of {@link validateRuntimeSeedProfile} (validated paths are canonical). */
+export interface RuntimeSeedProfileValidation {
+  /** The validated runtime app data dir (canonical form) used for ZIP/cleanup. */
+  readonly runtimeProfileDir: string
+  /** Canonical form of the exact `--user-data-dir` launch token. */
+  readonly canonicalProfileDir: string
+}
+
+/**
+ * IMPLEMENTATION-004: fail closed on runtime seed profile ownership. The
+ * runtime `appDataPath` reported by the running seed app must be the exact
+ * explicit `--user-data-dir` launch token, canonically:
+ *   1. the runtime path's canonical parent equals the canonical owned root;
+ *   2. the runtime path's exact child basename equals the launch token's
+ *      basename;
+ *   3. the canonicalized runtime path equals the canonicalized launch token.
+ * Only EXACT equality is accepted — never prefix/substring ownership checks.
+ * The launch token must itself be a direct canonical child of the owned root.
+ * Throws on any violation; returns the validated canonical runtime profile
+ * dir on success.
+ *
+ * Exported for the focused unit test (pure Node, no Electron).
+ */
+export function validateRuntimeSeedProfile(
+  launchToken: string,
+  ownedRoot: string,
+  runtimePath: string
+): RuntimeSeedProfileValidation {
+  if (typeof runtimePath !== 'string' || runtimePath.length === 0) {
+    throw new Error(`Runtime seed profile path is not a non-empty string: ${JSON.stringify(runtimePath)}`)
+  }
+  if (!path.isAbsolute(runtimePath)) {
+    throw new Error(`Runtime seed profile path must be absolute: ${runtimePath}`)
+  }
+  if (!path.isAbsolute(launchToken)) {
+    throw new Error(`Seed profile launch token must be absolute: ${launchToken}`)
+  }
+
+  const canonicalOwnedRoot = canonicalizeAllowMissing(ownedRoot)
+  const canonicalToken = canonicalizeAllowMissing(launchToken)
+  const canonicalRuntime = canonicalizeAllowMissing(runtimePath)
+
+  // The launch token must itself be a direct canonical child of the owned
+  // root (matches run-ownership's validateProfileLaunchToken contract).
+  if (path.dirname(canonicalToken) !== canonicalOwnedRoot) {
+    throw new Error(
+      `Seed profile launch token "${launchToken}" is not a direct child of the ` +
+        `canonical owned root "${canonicalOwnedRoot}"`
+    )
+  }
+
+  // IMPLEMENTATION-004 check 1: canonical parent equality (exact, never a
+  // prefix/substring ownership check).
+  const canonicalParent = path.dirname(canonicalRuntime)
+  if (canonicalParent !== canonicalOwnedRoot) {
+    throw new Error(
+      `Runtime seed profile ownership VIOLATION: canonical parent "${canonicalParent}" ` +
+        `does not equal the canonical owned root "${canonicalOwnedRoot}" ` +
+        `(runtime appDataPath "${runtimePath}", launch token "${launchToken}")`
+    )
+  }
+
+  // IMPLEMENTATION-004 check 2: exact child basename equality.
+  const runtimeBasename = path.basename(runtimePath)
+  const tokenBasename = path.basename(launchToken)
+  if (runtimeBasename !== tokenBasename) {
+    throw new Error(
+      `Runtime seed profile ownership VIOLATION: runtime basename "${runtimeBasename}" ` +
+        `does not equal the launch token basename "${tokenBasename}" ` +
+        `(runtime appDataPath "${runtimePath}", launch token "${launchToken}")`
+    )
+  }
+
+  // IMPLEMENTATION-004 check 3: the runtime path must be the explicit token
+  // canonically (exact full-path equality).
+  if (canonicalRuntime !== canonicalToken) {
+    throw new Error(
+      `Runtime seed profile ownership VIOLATION: canonical runtime path "${canonicalRuntime}" ` +
+        `does not equal the canonical launch token "${canonicalToken}" ` +
+        `(runtime appDataPath "${runtimePath}", launch token "${launchToken}")`
+    )
+  }
+
+  return { runtimeProfileDir: canonicalRuntime, canonicalProfileDir: canonicalToken }
+}
+
+/**
+ * Probe the runtime appDataPath from the running seed app via the existing
+ * `getAppInfo()` IPC (test-neutral — no production changes). Returns the raw
+ * runtime appDataPath string; ownership validation happens in
+ * {@link validateRuntimeSeedProfile}.
+ */
+async function probeRuntimeAppDataPath(page: Page): Promise<string> {
+  const info = await page.evaluate(async () => {
+    try {
+      const api = (window as any).api
+      const appInfo = await api.getAppInfo()
+      if (!appInfo || typeof appInfo !== 'object') {
+        return { ok: false, error: 'getAppInfo() returned non-object' }
+      }
+      if (typeof appInfo.appDataPath !== 'string' || appInfo.appDataPath.length === 0) {
+        return { ok: false, error: `appDataPath is not a non-empty string: ${typeof appInfo.appDataPath}` }
+      }
+      return { ok: true, appDataPath: appInfo.appDataPath }
+    } catch (err: any) {
+      return { ok: false, error: err?.message ?? String(err) }
+    }
+  })
+  if (!info.ok) {
+    throw new Error(`Failed to probe runtime appDataPath from the seed app: ${info.error}`)
+  }
+  return info.appDataPath
+}
+
 /**
  * Generate a disposable seed ZIP. Owns the seed Electron app lifecycle
  * (launch → seed IndexedDB + Local Storage projection → close/flush) and its
@@ -1363,11 +1512,14 @@ export async function createDisposableSeedZip(
   const withAttachments = options?.withAttachments === true
   const unique = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   // Distinct directories: the work dir owns the produced ZIP, the profile dir
-  // is the Electron --user-data-dir root (app data lands in <profileDir>Dev).
+  // is the Electron --user-data-dir launch token. The runtime app data dir is
+  // NOT assumed — it is probed from the running seed app and validated
+  // fail-closed against the exact token (IMPLEMENTATION-004), then appended to
+  // ownedDirs for ZIP production + cleanup.
   const workDir = path.join(ownedTmpRoot, `${PROFILE_PREFIX}${unique}-work`)
   const profileDir = path.join(ownedTmpRoot, `${PROFILE_PREFIX}${unique}-profile`)
-  const profileDevDir = profileDir + 'Dev'
   const zipPath = path.join(workDir, 'cherry-source-seed.zip')
+  const ownedDirs: string[] = [workDir, profileDir]
 
   fs.mkdirSync(workDir, { recursive: true })
   fs.mkdirSync(profileDir, { recursive: true })
@@ -1376,6 +1528,14 @@ export async function createDisposableSeedZip(
 
   try {
     const launched = await launchSeedApp(profileDir, ownedTmpRoot)
+    // IMPLEMENTATION-004: probe the runtime app data path from the running
+    // seed app BEFORE any seeding touches the profile, and fail closed on
+    // ownership. The validated runtime path is authoritative for ZIP
+    // production and cleanup — never a `profileDir + 'Dev'` derivation.
+    const runtimeProbe = await probeRuntimeAppDataPath(launched.page)
+    const { runtimeProfileDir } = validateRuntimeSeedProfile(profileDir, ownedTmpRoot, runtimeProbe)
+    ownedDirs.push(runtimeProfileDir)
+    console.log(`[E2E] Seed runtime appDataPath validated: ${runtimeProfileDir}`)
     // LOCK-E2-FIX-5: the attachment variant seeds the extra message + file/
     // image blocks + Dexie files rows INSIDE the same IndexedDB seeding pass.
     const attachmentConfig = withAttachments ? buildAttachmentSeedConfig() : undefined
@@ -1405,7 +1565,7 @@ export async function createDisposableSeedZip(
     // deterministic buffers).
     const payloadEntries = withAttachments ? buildAttachmentPayloadEntries() : undefined
     const { originDir, ldbFileCount, localStorageLdbFileCount, dataFilesEntryCount } = produceSeedZip(
-      profileDevDir,
+      runtimeProfileDir,
       zipPath,
       payloadEntries ? { payloadEntries } : undefined
     )
@@ -1426,7 +1586,7 @@ export async function createDisposableSeedZip(
     return {
       zipPath,
       profileDir,
-      profileDevDir,
+      runtimeProfileDir,
       workDir,
       evidence: {
         nativeVersion: seeded.nativeVersion,
@@ -1471,7 +1631,7 @@ export async function createDisposableSeedZip(
         // Always close + exact-token terminate + final verify; only after
         // success remove nested seed artifacts and unregister the profile.
         await closeSeedApp(null, profileDir)
-        await removeOwnedSeedArtifacts([workDir, profileDir, profileDevDir], zipPath)
+        await removeOwnedSeedArtifacts(ownedDirs, zipPath)
         unregisterProfileLaunchToken(profileDir)
       }
     }
@@ -1491,7 +1651,7 @@ export async function createDisposableSeedZip(
     }
     if (cleaned) {
       try {
-        await removeOwnedSeedArtifacts([workDir, profileDir, profileDevDir], zipPath)
+        await removeOwnedSeedArtifacts(ownedDirs, zipPath)
         unregisterProfileLaunchToken(profileDir)
       } catch (cleanupErr: any) {
         cleanupErrors.push(

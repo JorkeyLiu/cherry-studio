@@ -331,7 +331,7 @@ test.describe('Cherry Studio large-container selective-extraction import', () =>
       if (seed) {
         try {
           await seed.cleanup()
-          for (const dir of [seed.workDir, seed.profileDir, seed.profileDevDir]) {
+          for (const dir of [seed.workDir, seed.profileDir, seed.runtimeProfileDir]) {
             if (fs.existsSync(dir)) {
               cleanupErrors.push(`Seed dir still exists after cleanup: ${dir}`)
             }

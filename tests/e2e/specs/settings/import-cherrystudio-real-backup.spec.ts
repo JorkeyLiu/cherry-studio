@@ -1128,7 +1128,8 @@ function classifyRealBackupFailureLines(lines: string[]): RealBackupFailureAggre
 }
 
 /**
- * The app's runtime userData (dev mode appends `Dev`) hosts the winston
+ * The app's runtime userData — the exact explicit `--user-data-dir`
+ * launch token, preserved verbatim (no `Dev` suffix) — hosts the winston
  * `logs/app*.log` files for this disposable profile. Falls back to the
  * fixture base only if the runtime path was never captured.
  */

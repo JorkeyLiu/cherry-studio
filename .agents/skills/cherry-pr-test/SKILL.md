@@ -1,11 +1,11 @@
 ---
 name: cherry-pr-test
-description: Exploratory PR UI validation for Cherry Studio — checks out a PR, runs static analysis, runs relevant existing Playwright E2E specs when available, and launches the Electron app in debug mode for interactive CDP observation. Screenshots/CDP are diagnostic observations, not final regression evidence; standard regression evidence comes from the repo Playwright suite (tests/e2e/README.md).
+description: Exploratory PR UI validation for Cherry Chat — checks out a PR, runs static analysis, runs relevant existing Playwright E2E specs when available, and launches the Electron app in debug mode for interactive CDP observation. Screenshots/CDP are diagnostic observations, not final regression evidence; standard regression evidence comes from the repo Playwright suite (tests/e2e/README.md).
 ---
 
-# Cherry Studio PR Test
+# Cherry Chat PR Test
 
-Exploratory PR UI validation workflow for Cherry Studio. Checks out a PR,
+Exploratory PR UI validation workflow for Cherry Chat. Checks out a PR,
 performs static analysis, runs any relevant existing Playwright E2E spec, and
 launches the Electron app in debug mode for interactive UI observation via
 agent-browser/CDP. Produces an evidence-classified report.
@@ -278,7 +278,6 @@ PR_NUMBER=<NUMBER>
 RUN_ID="$(date +%s)-$$"
 WORK_DIR="/tmp/cherry-pr-${PR_NUMBER}-${RUN_ID}"
 PROFILE_DIR="${WORK_DIR}/profile"
-PROFILE_DEV_DIR="${PROFILE_DIR}Dev"
 LOG_FILE="${WORK_DIR}/debug.log"
 REPORT_DIR="/tmp/cherry-pr-${PR_NUMBER}-${RUN_ID}-report"
 TOKEN="--user-data-dir=${PROFILE_DIR}"
@@ -309,14 +308,6 @@ guard_owned_runtime() {
   fi
   if [ -z "${PROFILE_DIR}" ]; then
     echo "BLOCKER: PROFILE_DIR is empty — refusing to delete or signal anything." >&2
-    exit 1
-  fi
-  if [ -z "${PROFILE_DEV_DIR}" ]; then
-    echo "BLOCKER: PROFILE_DEV_DIR is empty — refusing to delete or signal anything." >&2
-    exit 1
-  fi
-  if [ "${PROFILE_DEV_DIR}" != "${WORK_DIR}/profileDev" ]; then
-    echo "BLOCKER: PROFILE_DEV_DIR '${PROFILE_DEV_DIR}' != \${WORK_DIR}/profileDev" >&2
     exit 1
   fi
   if [ -z "${WORK_DIR}" ]; then
@@ -452,7 +443,7 @@ cleanup_owned_runtime() {
     cp "${LOG_FILE}" "${REPORT_DIR}/debug.log"
   fi
   if [ "${CREATED_PROFILE_DIR}" -eq 1 ]; then
-    rm -rf "${PROFILE_DIR}" "${PROFILE_DEV_DIR}"
+    rm -rf "${PROFILE_DIR}"
   fi
   if [ "${CREATED_WORK_DIR}" -eq 1 ]; then
     rm -rf "${WORK_DIR}"
@@ -481,9 +472,11 @@ fi
 guard_owned_runtime
 
 # Refuse setup if any owned root already exists or is a symlink — never touch
-# a path this invocation did not create. PROFILE_DEV_DIR is included so a
-# pre-existing or symlinked dev profile blocks setup and remains untouched.
-for d in "${WORK_DIR}" "${REPORT_DIR}" "${PROFILE_DIR}" "${PROFILE_DEV_DIR}"; do
+# a path this invocation did not create. PROFILE_DIR is the only profile path
+# this invocation owns (the runtime appDataPath equals it exactly — no Dev
+# suffix), so a pre-existing or symlinked profile blocks setup and remains
+# untouched.
+for d in "${WORK_DIR}" "${REPORT_DIR}" "${PROFILE_DIR}"; do
   if [ -e "${d}" ] || [ -L "${d}" ]; then
     echo "BLOCKER: ${d} already exists or is a symlink — refusing to touch it." >&2
     exit 1
@@ -556,10 +549,12 @@ Save every screenshot to `${REPORT_DIR}/` so it survives cleanup.
    agent-browser --cdp "$WS_URL" navigate http://localhost:5173
    ```
 2. **Verify connection and instance ownership**: identify the main page and
-   confirm the running app is using OUR disposable profile. In dev mode
-   Chromium appends `Dev` to the user-data dir, and on macOS `/tmp` resolves
-   to `/private/tmp`, so normalize both sides before comparing. Require
-   **exact** equality with `${PROFILE_DIR}Dev` — never a substring match:
+   confirm the running app is using OUR disposable profile. The app preserves
+   an explicit `--user-data-dir` override verbatim (`src/main/config.ts` — no
+   `Dev` suffix), so the runtime appDataPath must equal `${PROFILE_DIR}`
+   exactly. On macOS `/tmp` resolves to `/private/tmp`, so normalize both
+   sides before comparing. Require **exact** equality with `${PROFILE_DIR}` —
+   never a substring match:
    ```bash
    normalize_path() {
      local p="$1"
@@ -568,7 +563,7 @@ Save every screenshot to `${REPORT_DIR}/` so it survives cleanup.
      esac
      printf '%s' "${p%/}"
    }
-   EXPECTED_APPDATA="$(normalize_path "${PROFILE_DIR}Dev")"
+   EXPECTED_APPDATA="$(normalize_path "${PROFILE_DIR}")"
    agent-browser tab
    ACTUAL_APPDATA="$(normalize_path "$(agent-browser eval "window.api.getAppInfo().then(i => i.appDataPath)")")"
    if [ "${ACTUAL_APPDATA}" != "${EXPECTED_APPDATA}" ]; then
@@ -703,7 +698,7 @@ set -euo pipefail
 # Recorded values are passed as positional arguments: $1 = PR_NUMBER,
 # $2 = RUN_ID. They are validated before any use, then every path is derived
 # exactly as Phase 6 does. Every delete/signal below is guarded: PR_NUMBER,
-# RUN_ID, TOKEN, PROFILE_DIR, PROFILE_DEV_DIR, WORK_DIR, LOG_FILE and
+# RUN_ID, TOKEN, PROFILE_DIR, WORK_DIR, LOG_FILE and
 # REPORT_DIR must be non-empty, and every path must equal exactly what this
 # invocation derived from PR_NUMBER/RUN_ID under /tmp. REPORT_DIR is validated
 # but never deleted. On any mismatch: abort and report — never guess.
@@ -721,7 +716,6 @@ fi
 
 WORK_DIR="/tmp/cherry-pr-${PR_NUMBER}-${RUN_ID}"
 PROFILE_DIR="${WORK_DIR}/profile"
-PROFILE_DEV_DIR="${PROFILE_DIR}Dev"
 LOG_FILE="${WORK_DIR}/debug.log"
 REPORT_DIR="/tmp/cherry-pr-${PR_NUMBER}-${RUN_ID}-report"
 TOKEN="--user-data-dir=${PROFILE_DIR}"
@@ -745,14 +739,6 @@ guard_owned_runtime() {
   fi
   if [ -z "${PROFILE_DIR}" ]; then
     echo "BLOCKER: PROFILE_DIR is empty — refusing to delete or signal anything." >&2
-    exit 1
-  fi
-  if [ -z "${PROFILE_DEV_DIR}" ]; then
-    echo "BLOCKER: PROFILE_DEV_DIR is empty — refusing to delete or signal anything." >&2
-    exit 1
-  fi
-  if [ "${PROFILE_DEV_DIR}" != "${WORK_DIR}/profileDev" ]; then
-    echo "BLOCKER: PROFILE_DEV_DIR '${PROFILE_DEV_DIR}' != \${WORK_DIR}/profileDev" >&2
     exit 1
   fi
   if [ -z "${WORK_DIR}" ]; then
@@ -896,15 +882,15 @@ fi
 # 2) Only after the successful empty rescan: preserve the report, copy the
 #    runtime log into REPORT_DIR if it exists, then remove ONLY the exact
 #    paths this invocation created (the guard already proved they equal the
-#    expected /tmp paths derived from PR_NUMBER/RUN_ID). In dev mode Chromium
-#    appends 'Dev' to the profile dir, so remove both exact paths
-#    (PROFILE_DIR and PROFILE_DEV_DIR). REPORT_DIR is validated but
+#    expected /tmp paths derived from PR_NUMBER/RUN_ID). The runtime
+#    appDataPath equals PROFILE_DIR exactly (no Dev suffix), so only
+#    PROFILE_DIR is removed. REPORT_DIR is validated but
 #    deliberately never deleted.
 if [ -f "${LOG_FILE}" ]; then
   cp "${LOG_FILE}" "${REPORT_DIR}/debug.log"
   echo "CLEANUP OK: copied runtime log to ${REPORT_DIR}/debug.log"
 fi
-rm -rf "${PROFILE_DIR}" "${PROFILE_DEV_DIR}"
+rm -rf "${PROFILE_DIR}"
 rm -rf "${WORK_DIR}"
 echo "CLEANUP OK: removed ${WORK_DIR}; preserved ${REPORT_DIR}"
 
@@ -1040,9 +1026,10 @@ behavior as missing coverage, and recommend a spec under `tests/e2e/specs`
   `pnpm exec electron-vite dev --remoteDebuggingPort <free-port> -- --user-data-dir=<profile>`),
   and adjust the wait/cleanup tokens accordingly.
 - **Profile isolation scope.** `--user-data-dir` is honored by Electron in dev
-  mode and keeps the session out of the real user profile, but the runtime
-  data path gets a `Dev` suffix (`<profile>Dev`); it is not the packaged-app
-  userData path. Cleanup removes both exact paths.
+  mode and keeps the session out of the real user profile. The app preserves an
+  explicit `--user-data-dir` override verbatim (`src/main/config.ts` — no `Dev`
+  suffix), so the runtime appDataPath equals the exact token; cleanup removes
+  that exact profile dir only.
 - **Interruption window.** The fail-closed trap covers the Phase 6 launch block
   only. If the whole session dies during interactive observation, re-run the
   Phase 8 cleanup block (see Troubleshooting "Interrupted session") instead.

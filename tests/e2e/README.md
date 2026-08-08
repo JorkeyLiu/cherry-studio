@@ -164,14 +164,17 @@ The fixture extends `@playwright/test` with:
 | `userDataDir` | A unique disposable profile dir beneath the owned root (`cherry-e2e-*`); exact-cleaned and root-removed after the test, throwing on cleanup failure |
 | `mockPort` | An ephemeral in-process mock OpenAI-compatible HTTP server (see §6) |
 | `electronApp` | `_electron.launch({ args: ['.', '--user-data-dir=<userDataDir>', '--no-sandbox', '--disable-gpu'], ... })`; closed after the test with a WAL-flush wait; request log cleared |
-| `mainWindow` | The main `Cherry Studio` window, ready for interaction |
+| `mainWindow` | The main `Cherry Chat` window, ready for interaction |
 
 `mainWindow` is fully prepared before your test body runs:
 
 1. **Runtime appData assertion** — probes `window.api.getAppInfo()` and asserts the actual
-   runtime `appDataPath` resolves to the expected disposable `<userDataDir>Dev` path. If a
-   `config.json` redirect ever pointed the app at live user data, the fixture throws a
-   `LOCK-002 VIOLATION` before any mutation.
+   runtime `appDataPath` is the exact disposable `<userDataDir>` (an explicit
+   `--user-data-dir` override is preserved verbatim by `src/main/config.ts` — no `Dev`
+   suffix is applied). Validation is exact canonical parent equality with the owned root
+   plus exact child basename equality (the fixture resolves the parent realpath so macOS
+   `/var` → `/private/var` normalizes). If a `config.json` redirect ever pointed the app at
+   live user data, the fixture throws a `LOCK-002 VIOLATION` before any mutation.
 2. **Onboarding bypass** — clicks Skip and marks onboarding complete.
 3. **Mock provider seed** — dispatches `llm/addProvider` (`mock-openai`) and sets
    `mock-model` as default/quick/translate model, then verifies the store state.

@@ -494,7 +494,7 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
       if (seed) {
         try {
           await seed.cleanup()
-          for (const dir of [seed.workDir, seed.profileDir, seed.profileDevDir]) {
+          for (const dir of [seed.workDir, seed.profileDir, seed.runtimeProfileDir]) {
             if (fs.existsSync(dir)) {
               cleanupErrors.push(`Seed dir still exists after cleanup: ${dir}`)
             }

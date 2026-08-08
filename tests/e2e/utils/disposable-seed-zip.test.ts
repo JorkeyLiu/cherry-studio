@@ -53,7 +53,8 @@ import {
   SEED_ORIGIN_DIR,
   SEED_PERSIST_VERSION,
   SOURCE_IDS,
-  STALE_TOPIC_ASSISTANT_ID
+  STALE_TOPIC_ASSISTANT_ID,
+  validateRuntimeSeedProfile
 } from './disposable-seed-zip'
 
 const tempDirs: string[] = []
@@ -76,12 +77,12 @@ afterEach(() => {
  * Create a synthetic closed/flushed seed profile shape that `produceSeedZip`
  * accepts: an IndexedDB file-origin subtree with at least one .ldb table file
  * and a Local Storage/leveldb subtree with a CURRENT marker. Returns the
- * profile "Dev" directory path.
+ * runtime profile directory path.
  */
-function syntheticProfileDevDir(root: string): string {
-  const profileDevDir = path.join(root, 'profileDev')
-  const originDir = path.join(profileDevDir, 'IndexedDB', SEED_ORIGIN_DIR)
-  const lsDir = path.join(profileDevDir, 'Local Storage', 'leveldb')
+function syntheticRuntimeProfileDir(root: string): string {
+  const runtimeProfileDir = path.join(root, 'runtime-profile')
+  const originDir = path.join(runtimeProfileDir, 'IndexedDB', SEED_ORIGIN_DIR)
+  const lsDir = path.join(runtimeProfileDir, 'Local Storage', 'leveldb')
   fs.mkdirSync(originDir, { recursive: true })
   fs.mkdirSync(lsDir, { recursive: true })
   // IndexedDB: CURRENT + manifest + WAL log + one .ldb table file (Layer 4).
@@ -94,7 +95,7 @@ function syntheticProfileDevDir(root: string): string {
   fs.writeFileSync(path.join(lsDir, 'MANIFEST-000001'), 'manifest')
   fs.writeFileSync(path.join(lsDir, '000003.log'), 'ls-wal-log')
   fs.writeFileSync(path.join(lsDir, '000005.ldb'), 'ls-table-data'.repeat(1024))
-  return profileDevDir
+  return runtimeProfileDir
 }
 
 /** Read the ZIP entry names (independent oracle — node-stream-zip). */
@@ -365,10 +366,10 @@ describe('consumer mirror of the production projection contract (LOCK-PROD-2/3)'
 describe('produceSeedZip (LOCK-E2 exact roots, no Data/)', () => {
   it('zips EXACTLY the IndexedDB and Local Storage/leveldb subtrees', async () => {
     const root = tempDir()
-    const profileDevDir = syntheticProfileDevDir(root)
+    const runtimeProfileDir = syntheticRuntimeProfileDir(root)
     const zipPath = path.join(root, 'seed.zip')
 
-    const result = produceSeedZip(profileDevDir, zipPath)
+    const result = produceSeedZip(runtimeProfileDir, zipPath)
     expect(result.originDir).toBe(SEED_ORIGIN_DIR)
     expect(result.ldbFileCount).toBeGreaterThanOrEqual(1)
     expect(result.localStorageLdbFileCount).toBeGreaterThanOrEqual(1)
@@ -393,40 +394,163 @@ describe('produceSeedZip (LOCK-E2 exact roots, no Data/)', () => {
 
   it('fails closed when the Local Storage backing store is absent (LOCK-E3)', () => {
     const root = tempDir()
-    const profileDevDir = path.join(root, 'profileDev')
-    const originDir = path.join(profileDevDir, 'IndexedDB', SEED_ORIGIN_DIR)
+    const runtimeProfileDir = path.join(root, 'runtime-profile')
+    const originDir = path.join(runtimeProfileDir, 'IndexedDB', SEED_ORIGIN_DIR)
     fs.mkdirSync(originDir, { recursive: true })
     fs.writeFileSync(path.join(originDir, 'CURRENT'), 'MANIFEST-000001\n')
     fs.writeFileSync(path.join(originDir, '000005.ldb'), 'table-data')
 
     const zipPath = path.join(root, 'seed.zip')
-    expect(() => produceSeedZip(profileDevDir, zipPath)).toThrow(/Local Storage leveldb directory/)
+    expect(() => produceSeedZip(runtimeProfileDir, zipPath)).toThrow(/Local Storage leveldb directory/)
     expect(fs.existsSync(zipPath)).toBe(false)
   })
 
   it('fails closed when the Local Storage LevelDB has no CURRENT marker', () => {
     const root = tempDir()
-    const profileDevDir = syntheticProfileDevDir(root)
+    const runtimeProfileDir = syntheticRuntimeProfileDir(root)
     // Corrupt the Local Storage LevelDB: remove CURRENT.
-    fs.rmSync(path.join(profileDevDir, 'Local Storage', 'leveldb', 'CURRENT'))
+    fs.rmSync(path.join(runtimeProfileDir, 'Local Storage', 'leveldb', 'CURRENT'))
 
     const zipPath = path.join(root, 'seed.zip')
-    expect(() => produceSeedZip(profileDevDir, zipPath)).toThrow(/no CURRENT marker/)
+    expect(() => produceSeedZip(runtimeProfileDir, zipPath)).toThrow(/no CURRENT marker/)
     expect(fs.existsSync(zipPath)).toBe(false)
   })
 
   it('fails closed when the IndexedDB origin has no .ldb table file', () => {
     const root = tempDir()
-    const profileDevDir = syntheticProfileDevDir(root)
+    const runtimeProfileDir = syntheticRuntimeProfileDir(root)
     // Remove every IndexedDB .ldb (memtable never flushed → Layer 4 reject).
-    const originDir = path.join(profileDevDir, 'IndexedDB', SEED_ORIGIN_DIR)
+    const originDir = path.join(runtimeProfileDir, 'IndexedDB', SEED_ORIGIN_DIR)
     for (const file of fs.readdirSync(originDir)) {
       if (file.endsWith('.ldb')) fs.rmSync(path.join(originDir, file))
     }
 
     const zipPath = path.join(root, 'seed.zip')
-    expect(() => produceSeedZip(profileDevDir, zipPath)).toThrow(/no \.ldb files/)
+    expect(() => produceSeedZip(runtimeProfileDir, zipPath)).toThrow(/no \.ldb files/)
     expect(fs.existsSync(zipPath)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Runtime seed profile ownership (IMPLEMENTATION-004)
+// ---------------------------------------------------------------------------
+
+describe('validateRuntimeSeedProfile (IMPLEMENTATION-004 fail-closed ownership)', () => {
+  /** One canonical owned root per call (realpath'd so /var → /private/var). */
+  function canonicalOwnedRoot(): string {
+    return fs.realpathSync(tempDir())
+  }
+
+  it('accepts the exact runtime path (runtime appDataPath === launch token)', () => {
+    const root = canonicalOwnedRoot()
+    const token = path.join(root, 'cherry-e2e-seed-token-accept')
+    fs.mkdirSync(token, { recursive: true })
+
+    const result = validateRuntimeSeedProfile(token, root, token)
+
+    expect(result.runtimeProfileDir).toBe(fs.realpathSync(token))
+    expect(result.canonicalProfileDir).toBe(fs.realpathSync(token))
+  })
+
+  it('accepts a runtime path reported through a symlinked parent (macOS /var → /private/var normalization)', () => {
+    const base = fs.realpathSync(os.tmpdir())
+    const root = canonicalOwnedRoot()
+    const token = path.join(root, 'cherry-e2e-seed-token-symlink-parent')
+    fs.mkdirSync(token, { recursive: true })
+
+    // Alias that resolves to the canonical temp base, mirroring macOS where
+    // /var is a symlink to /private/var. Electron may report the runtime
+    // path through the alias form while the owned root is canonical.
+    const alias = fs.mkdtempSync(path.join(base, 'cherry-e2e-alias-'))
+    fs.rmdirSync(alias)
+    fs.symlinkSync(base, alias)
+    tempDirs.push(alias)
+    const runtimePath = path.join(alias, path.basename(root), path.basename(token))
+
+    const result = validateRuntimeSeedProfile(token, root, runtimePath)
+
+    expect(result.runtimeProfileDir).toBe(fs.realpathSync(token))
+  })
+
+  it('rejects a runtime path whose canonical parent is a different owned root', () => {
+    const root = canonicalOwnedRoot()
+    const otherRoot = canonicalOwnedRoot()
+    const token = path.join(root, 'cherry-e2e-seed-token-parent')
+    fs.mkdirSync(token, { recursive: true })
+    const runtimePath = path.join(otherRoot, path.basename(token))
+    fs.mkdirSync(runtimePath, { recursive: true })
+
+    expect(() => validateRuntimeSeedProfile(token, root, runtimePath)).toThrow(/canonical parent/)
+  })
+
+  it('rejects a runtime path with the same parent but a different child token basename', () => {
+    const root = canonicalOwnedRoot()
+    const token = path.join(root, 'cherry-e2e-seed-token-a')
+    fs.mkdirSync(token, { recursive: true })
+    const runtimePath = path.join(root, 'cherry-e2e-seed-token-b')
+    fs.mkdirSync(runtimePath, { recursive: true })
+
+    expect(() => validateRuntimeSeedProfile(token, root, runtimePath)).toThrow(/basename/)
+  })
+
+  it('rejects a runtime path that resolves outside the owned root through a symlinked parent', () => {
+    const base = fs.realpathSync(os.tmpdir())
+    const root = canonicalOwnedRoot()
+    const token = path.join(root, 'cherry-e2e-seed-token-symlink-outside')
+    fs.mkdirSync(token, { recursive: true })
+
+    // Runtime path carries the token basename but its canonical parent is a
+    // directory OUTSIDE the owned root (a config-redirect-shaped mismatch).
+    const outside = fs.mkdtempSync(path.join(base, 'cherry-e2e-outside-'))
+    tempDirs.push(outside)
+    const alias = path.join(root, 'outside-alias')
+    fs.symlinkSync(outside, alias)
+    tempDirs.push(alias)
+    const runtimePath = path.join(alias, path.basename(token))
+
+    expect(() => validateRuntimeSeedProfile(token, root, runtimePath)).toThrow(/canonical parent/)
+  })
+
+  it('rejects a launch token that is not a direct child of the canonical owned root', () => {
+    const root = canonicalOwnedRoot()
+    const otherRoot = canonicalOwnedRoot()
+    const token = path.join(otherRoot, 'cherry-e2e-seed-token-elsewhere')
+    fs.mkdirSync(token, { recursive: true })
+
+    expect(() => validateRuntimeSeedProfile(token, root, token)).toThrow(/not a direct child/)
+  })
+
+  it('rejects a non-absolute or empty runtime path (fail closed)', () => {
+    const root = canonicalOwnedRoot()
+    const token = path.join(root, 'cherry-e2e-seed-token-shape')
+    fs.mkdirSync(token, { recursive: true })
+
+    expect(() => validateRuntimeSeedProfile(token, root, '')).toThrow(/not a non-empty string/)
+    expect(() => validateRuntimeSeedProfile(token, root, 'relative/profile')).toThrow(/must be absolute/)
+  })
+
+  it('uses the validated runtime profile dir to produce the seed ZIP (path use)', async () => {
+    const root = canonicalOwnedRoot()
+    const token = path.join(root, 'cherry-e2e-seed-token-produce')
+    // Build the real IndexedDB + Local Storage structure INSIDE the token so
+    // the validated runtime path is the ZIP source.
+    fs.mkdirSync(path.join(token, 'IndexedDB', SEED_ORIGIN_DIR), { recursive: true })
+    fs.mkdirSync(path.join(token, 'Local Storage', 'leveldb'), { recursive: true })
+    fs.writeFileSync(path.join(token, 'IndexedDB', SEED_ORIGIN_DIR, 'CURRENT'), 'MANIFEST-000001\n')
+    fs.writeFileSync(path.join(token, 'IndexedDB', SEED_ORIGIN_DIR, '000005.ldb'), 'table-data'.repeat(1024))
+    fs.writeFileSync(path.join(token, 'Local Storage', 'leveldb', 'CURRENT'), 'MANIFEST-000001\n')
+    fs.writeFileSync(path.join(token, 'Local Storage', 'leveldb', '000005.ldb'), 'ls-table-data'.repeat(1024))
+
+    const { runtimeProfileDir } = validateRuntimeSeedProfile(token, root, token)
+    const zipPath = path.join(root, 'seed-validated.zip')
+    const result = produceSeedZip(runtimeProfileDir, zipPath)
+
+    expect(result.ldbFileCount).toBeGreaterThanOrEqual(1)
+    expect(result.localStorageLdbFileCount).toBeGreaterThanOrEqual(1)
+    expect(fs.statSync(zipPath).size).toBeGreaterThan(0)
+    const names = await zipEntryNames(zipPath)
+    const originPrefix = `IndexedDB/${SEED_ORIGIN_DIR}/`
+    expect(names.some((n) => n.startsWith(originPrefix) && n.endsWith('.ldb'))).toBe(true)
   })
 })
 
@@ -610,14 +734,14 @@ describe('embedded file bag metadata (LOCK-E2-FIX FileManager realism)', () => {
 describe('produceSeedZip + preflight with Data/Files payloads (LOCK-E2-FIX-4)', () => {
   it('writes Data/Files entries AFTER the Chromium subtrees with exact bytes', async () => {
     const root = tempDir()
-    const profileDevDir = syntheticProfileDevDir(root)
+    const runtimeProfileDir = syntheticRuntimeProfileDir(root)
     const zipPath = path.join(root, 'seed-att.zip')
     const payloads = buildAttachmentPayloadEntries()
 
     // Exactly the three healthy/orphan payloads — NOT the missing file.
     expect(payloads.map((p) => p.name)).toEqual(['f-e2e-att-png.png', 'f-e2e-att-txt.txt', 'f-e2e-att-orphan.txt'])
 
-    const result = produceSeedZip(profileDevDir, zipPath, { payloadEntries: payloads })
+    const result = produceSeedZip(runtimeProfileDir, zipPath, { payloadEntries: payloads })
     expect(result.dataFilesEntryCount).toBe(3)
 
     const names = await zipEntryNames(zipPath)
@@ -642,10 +766,10 @@ describe('produceSeedZip + preflight with Data/Files payloads (LOCK-E2-FIX-4)', 
 
   it('preflight verifies payload inventory, bytes and SHA-256 (LOCK-E2-FIX-4)', async () => {
     const root = tempDir()
-    const profileDevDir = syntheticProfileDevDir(root)
+    const runtimeProfileDir = syntheticRuntimeProfileDir(root)
     const zipPath = path.join(root, 'seed-att.zip')
     const payloads = buildAttachmentPayloadEntries()
-    produceSeedZip(profileDevDir, zipPath, { payloadEntries: payloads })
+    produceSeedZip(runtimeProfileDir, zipPath, { payloadEntries: payloads })
 
     const preflight = await preflightZipEntries(zipPath, SEED_ORIGIN_DIR, {
       allowDataFiles: true,
@@ -673,10 +797,10 @@ describe('produceSeedZip + preflight with Data/Files payloads (LOCK-E2-FIX-4)', 
 
   it('rejects the attachment ZIP when allowDataFiles is false (LOCK-E2 preserved)', async () => {
     const root = tempDir()
-    const profileDevDir = syntheticProfileDevDir(root)
+    const runtimeProfileDir = syntheticRuntimeProfileDir(root)
     const zipPath = path.join(root, 'seed-att.zip')
     const payloads = buildAttachmentPayloadEntries()
-    produceSeedZip(profileDevDir, zipPath, { payloadEntries: payloads })
+    produceSeedZip(runtimeProfileDir, zipPath, { payloadEntries: payloads })
 
     // LOCK-E2: Data/Files is an unrelated root for the default contract.
     await expect(preflightZipEntries(zipPath, SEED_ORIGIN_DIR)).rejects.toThrow(/outside the allowed roots/)
@@ -684,10 +808,10 @@ describe('produceSeedZip + preflight with Data/Files payloads (LOCK-E2-FIX-4)', 
 
   it('fails closed on a missing expected payload', async () => {
     const root = tempDir()
-    const profileDevDir = syntheticProfileDevDir(root)
+    const runtimeProfileDir = syntheticRuntimeProfileDir(root)
     const zipPath = path.join(root, 'seed-att.zip')
     const payloads = buildAttachmentPayloadEntries()
-    produceSeedZip(profileDevDir, zipPath, { payloadEntries: payloads })
+    produceSeedZip(runtimeProfileDir, zipPath, { payloadEntries: payloads })
 
     // Ask for a payload that was never written (the missing file).
     const wrongExpectation = [{ name: 'f-e2e-att-missing.png', bytes: ATTACHMENT_PAYLOADS.png }]
@@ -698,10 +822,10 @@ describe('produceSeedZip + preflight with Data/Files payloads (LOCK-E2-FIX-4)', 
 
   it('fails closed on an unexpected Data/Files entry', async () => {
     const root = tempDir()
-    const profileDevDir = syntheticProfileDevDir(root)
+    const runtimeProfileDir = syntheticRuntimeProfileDir(root)
     const zipPath = path.join(root, 'seed-att.zip')
     const payloads = buildAttachmentPayloadEntries()
-    produceSeedZip(profileDevDir, zipPath, { payloadEntries: payloads })
+    produceSeedZip(runtimeProfileDir, zipPath, { payloadEntries: payloads })
 
     // Same entry count (3) but one expected name swapped for an entry that is
     // NOT in the ZIP → the actual Data/Files entry with no expectation throws.
@@ -713,9 +837,9 @@ describe('produceSeedZip + preflight with Data/Files payloads (LOCK-E2-FIX-4)', 
 
   it('default produceSeedZip writes no Data/Files entries (default fixture unchanged)', async () => {
     const root = tempDir()
-    const profileDevDir = syntheticProfileDevDir(root)
+    const runtimeProfileDir = syntheticRuntimeProfileDir(root)
     const zipPath = path.join(root, 'seed-default.zip')
-    const result = produceSeedZip(profileDevDir, zipPath)
+    const result = produceSeedZip(runtimeProfileDir, zipPath)
     expect(result.dataFilesEntryCount).toBe(0)
 
     const names = await zipEntryNames(zipPath)
