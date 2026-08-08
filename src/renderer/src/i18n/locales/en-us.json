@@ -1107,7 +1107,7 @@
       },
       "collapse": "Collapse",
       "context_count": {
-        "tip": "Context / Max Context"
+        "tip": "Selected / Total Turns"
       },
       "estimated_tokens": {
         "tip": "Estimated tokens"
@@ -1377,14 +1377,9 @@
       },
       "code_wrappable": "Code block wrappable",
       "context_count": {
-        "label": "Context",
-        "tip": "The number of previous conversation turns to keep in the context."
+        "label": "Default Context",
+        "tip": "The number of conversation turns included by default when the context window starts. A manually anchored window can grow beyond this value."
       },
-      "context_window_mode": {
-        "label": "Fixed Context Window",
-        "tip": "When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
-      },
-      "max": "Unlimited",
       "max_tokens": {
         "confirm": "Set max tokens",
         "confirm_content": "Set the maximum number of tokens the model can generate. Need to consider the context limit of the model, otherwise an error will be reported",

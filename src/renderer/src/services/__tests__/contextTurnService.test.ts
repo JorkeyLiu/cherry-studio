@@ -588,4 +588,54 @@ describe('resolveAnchorTurnIndex', () => {
     // User turn (index 1) should win over assistant-only turn (index 0)
     expect(resolveAnchorTurnIndex(turns, 'u1')).toBe(1)
   })
+
+  // --- LOCK-FIX-1: every turn kind resolves back to the exact turn ---
+
+  it('resolves an orphan assistant with askId by its own message id (assistant-first boundary)', () => {
+    // Segment starts with an assistant turn whose user question is absent.
+    const messages = [assistant('a1', 'u1'), user('u2'), assistant('a2', 'u2')]
+    const turns = buildContextTurns(messages)
+
+    // Turn 0: [a1] (key=u1, askId=u1); Turn 1: [u2, a2] (key=u2)
+    expect(turns[0].key).toBe('u1')
+    // The derived anchor key for turn 0 is a1's own message id (not the askId),
+    // and it must resolve back to turn 0.
+    expect(resolveAnchorTurnIndex(turns, 'a1')).toBe(0)
+  })
+
+  it('resolves an orphan assistant without askId by its own message id', () => {
+    const messages = [assistant('a1'), user('u2'), assistant('a2', 'u2')]
+    const turns = buildContextTurns(messages)
+
+    expect(turns[0].key).toBe('a1')
+    expect(resolveAnchorTurnIndex(turns, 'a1')).toBe(0)
+  })
+
+  it('resolves a standalone system turn by its own message id', () => {
+    const messages = [system('s1'), user('u1'), assistant('a1', 'u1')]
+    const turns = buildContextTurns(messages)
+
+    expect(turns[0].key).toBe('s1')
+    expect(resolveAnchorTurnIndex(turns, 's1')).toBe(0)
+  })
+
+  it('exact round-trip: derived key of a non-consecutive assistant turn resolves to that turn, not the earlier user turn', () => {
+    // user u1 turn, then u2, then a2 with the same askId=u1 non-consecutively.
+    const messages = [
+      user('u1'),
+      assistant('a1', 'u1'),
+      user('u2'),
+      assistant('a2', 'u1') // non-consecutive — separate turn keyed by askId u1
+    ]
+    const turns = buildContextTurns(messages)
+
+    // Turn 0: [u1, a1] (key=u1); Turn 1: [u2] (key=u2); Turn 2: [a2] (key=u1)
+    expect(turns[2].key).toBe('u1') // duplicate key value with turn 0
+
+    // A bare askId key 'u1' resolves to the user turn (user-preferred, LOCK-FIX-2)…
+    expect(resolveAnchorTurnIndex(turns, 'u1')).toBe(0)
+    // …but the anchor key DERIVED from turn 2 is a2's own message id, which must
+    // resolve back to turn 2 exactly (LOCK-FIX-1), never sliding to turn 0.
+    expect(resolveAnchorTurnIndex(turns, 'a2')).toBe(2)
+  })
 })

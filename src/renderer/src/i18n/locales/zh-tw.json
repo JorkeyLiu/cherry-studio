@@ -1107,7 +1107,7 @@
       },
       "collapse": "折疊",
       "context_count": {
-        "tip": "上下文數 / 最大上下文數"
+        "tip": "已選 / 總輪數"
       },
       "estimated_tokens": {
         "tip": "預估 Token 數"
@@ -1377,14 +1377,9 @@
       },
       "code_wrappable": "程式碼區塊可自動換行",
       "context_count": {
-        "label": "上下文",
-        "tip": "在上下文中保留的前幾輪對話"
+        "label": "預設上下文",
+        "tip": "上下文視窗起始時預設包含的對話輪數。手動錨定後視窗可隨對話增長而超過此值"
       },
-      "context_window_mode": {
-        "label": "固定上下文視窗",
-        "tip": "開啟後，上下文視窗將固定在指定位置，不再隨對話滑動"
-      },
-      "max": "不限",
       "max_tokens": {
         "confirm": "設定最大 Token 數",
         "confirm_content": "設定單次互動的最大 Token 數，會影響回應內容的長度。請依模型的上下文上限調整，否則可能發生錯誤",

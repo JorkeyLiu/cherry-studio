@@ -227,7 +227,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
                 flex container uses column-reverse, later siblings appear visually
                 above earlier ones — so this divider appears above the boundary group. */}
             {key === contextDividerGroupKey && (
-              <ContextWindowDivider data-context-boundary>
+              <ContextWindowDivider data-context-boundary data-testid="context-boundary">
                 <ContextWindowDividerLine />
                 <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
                 <ContextWindowDividerLine />
@@ -771,51 +771,35 @@ const Messages = ({
             void Promise.resolve(autoRenameTopic(assistant, newTopic.id)).catch((error: unknown) =>
               logger.error('autoRenameTopic failed', error as Error)
             )
-            // Inherit fixed context window anchor (group-key based)
+            // Inherit the context window anchor (group-key based) when the
+            // source topic has an active anchor — position-by-position transfer.
             const assistantSettings = getAssistantSettings(assistant)
-            const sourceEffectiveMode =
-              assistantSettings.contextWindowMode === 'fixed'
-                ? (assistantSettings.topicContextWindowMode?.[topic.id] ?? assistantSettings.contextWindowMode)
-                : 'sliding'
+            const sourceAnchor = assistantSettings.contextWindowAnchor?.[topic.id]
 
-            // Inherit topicContextWindowMode
-            const sourceTopicMode = assistantSettings.topicContextWindowMode?.[topic.id]
-            if (sourceTopicMode) {
-              updateAssistantSettings({
-                topicContextWindowMode: {
-                  ...assistantSettings.topicContextWindowMode,
-                  [newTopic.id]: sourceTopicMode
-                }
-              })
-            }
+            if (sourceAnchor?.kind === 'active') {
+              try {
+                const sourceState = store.getState()
+                const sourceMessageIds = sourceState.messages.messageIdsByTopic[topic.id] || []
+                const sourceEntities = sourceState.messages.entities
+                const sourceGroupList = buildGroupList(sourceMessageIds, (id) => sourceEntities[id])
+                const groupIndex = sourceGroupList.indexOf(sourceAnchor.groupKey)
 
-            if (sourceEffectiveMode === 'fixed') {
-              const sourceAnchor = assistantSettings.fixedWindowAnchor?.[topic.id]
-              if (sourceAnchor?.kind === 'active') {
-                try {
-                  const sourceState = store.getState()
-                  const sourceMessageIds = sourceState.messages.messageIdsByTopic[topic.id] || []
-                  const sourceEntities = sourceState.messages.entities
-                  const sourceGroupList = buildGroupList(sourceMessageIds, (id) => sourceEntities[id])
-                  const groupIndex = sourceGroupList.indexOf(sourceAnchor.groupKey)
+                if (groupIndex >= 0 && sourceGroupList.length > 0) {
+                  const newMessageIds = sourceState.messages.messageIdsByTopic[newTopic.id] || []
+                  const newEntities = sourceState.messages.entities
+                  const newGroupList = buildGroupList(newMessageIds, (id) => newEntities[id])
 
-                  if (groupIndex >= 0 && sourceGroupList.length > 0) {
-                    const newMessageIds = sourceState.messages.messageIdsByTopic[newTopic.id] || []
-                    const newEntities = sourceState.messages.entities
-                    const newGroupList = buildGroupList(newMessageIds, (id) => newEntities[id])
-
-                    if (groupIndex < newGroupList.length) {
-                      updateAssistantSettings({
-                        fixedWindowAnchor: {
-                          ...assistantSettings.fixedWindowAnchor,
-                          [newTopic.id]: { kind: 'active', groupKey: newGroupList[groupIndex] }
-                        }
-                      })
-                    }
+                  if (groupIndex < newGroupList.length) {
+                    updateAssistantSettings({
+                      contextWindowAnchor: {
+                        ...assistantSettings.contextWindowAnchor,
+                        [newTopic.id]: { kind: 'active', groupKey: newGroupList[groupIndex] }
+                      }
+                    })
                   }
-                } catch (error) {
-                  logger.error('[NEW_BRANCH] Failed to inherit fixed context window anchor', error as Error)
                 }
+              } catch (error) {
+                logger.error('[NEW_BRANCH] Failed to inherit context window anchor', error as Error)
               }
             }
 

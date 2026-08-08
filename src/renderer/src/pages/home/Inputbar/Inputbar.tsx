@@ -23,7 +23,13 @@ import {
 } from '@renderer/pages/home/Inputbar/context/InputbarToolsProvider'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { CacheService } from '@renderer/services/CacheService'
-import { computeContextInfo, PREVIEW_DRAFT_SENTINEL } from '@renderer/services/contextInfoService'
+import { computeContextInfo } from '@renderer/services/contextInfoService'
+import { buildContextTurns } from '@renderer/services/contextTurnService'
+import {
+  getTurnAnchorGroupKey,
+  resolveDefaultAnchorIndex,
+  resolveDefaultAnchorPersistence
+} from '@renderer/services/contextWindowService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import FileManager from '@renderer/services/FileManager'
@@ -170,29 +176,15 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   const topicMessages = useTopicMessages(topic.id)
   const loading = useTopicLoading(topic)
 
-  // --- Token estimation (Inputbar-owned, preview-draft-aware) ---
+  // --- Token estimation (Inputbar-owned) ---
 
-  // Stable boolean: a pending draft exists when there is nonblank text OR any
-  // attachment. Either occupies the next-request turn slot, so both must drive
-  // the virtual preview turn (LOCK-004). Toggles only on presence transitions.
-  // computeContextInfo only checks draft truthiness for turn selection, so full
-  // text/attachment detail is not needed here.
-  const hasPreviewDraft = text.trim().length > 0 || files.length > 0
-
-  // Sync: computeContextInfo with previewDraft so a pending draft participates in
-  // turn selection (LOCK-004). A draft occupies a turn slot → a full sliding
-  // window ejects the oldest turn. contextCount reflects the post-draft state;
-  // tokenEstimationMessages excludes the virtual draft turn.
+  // The selected context window is computed by the unified pipeline (single
+  // anchor-to-end mode). A pending draft is NOT part of the turn list, so it is
+  // excluded from the context counts (LOCK-CTX-5); draft tokens are estimated
+  // separately on top of tokenEstimationMessages.
   const previewContextInfo = useMemo(
-    () =>
-      computeContextInfo(
-        topicMessages,
-        assistant,
-        topic.id,
-        hasPreviewDraft ? { previewDraft: PREVIEW_DRAFT_SENTINEL } : undefined
-      ),
-
-    [topicMessages, assistant, topic.id, hasPreviewDraft]
+    () => computeContextInfo(topicMessages, assistant, topic.id),
+    [topicMessages, assistant, topic.id]
   )
 
   // Async, debounced, race-safe estimate: selected history + current draft
@@ -204,7 +196,8 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     files
   })
 
-  // Sync: contextCount from preview-aware computeContextInfo (includes virtual draft turn).
+  // contextCount from computeContextInfo: selected context turns / total turns
+  // in the post-clear segment. A pending draft is excluded from both (LOCK-CTX-5).
   const contextCount = previewContextInfo.contextCount
 
   const dispatch = useAppDispatch()
@@ -339,77 +332,65 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     }
   }, [config.showTokenCount, contextCount, estimateTokenCount, showInputEstimatedTokens])
 
-  const contextWindowMode = useMemo(() => {
-    return getAssistantSettings(assistant).contextWindowMode
-  }, [assistant])
-
-  const topicContextWindowMode = useMemo(() => {
-    const s = getAssistantSettings(assistant)
-    return s.contextWindowMode === 'fixed' ? (s.topicContextWindowMode?.[topic.id] ?? s.contextWindowMode) : 'sliding'
-  }, [assistant, topic.id])
-
-  // 自动锚点 + 不变量守卫
+  // Default-anchor persistence (LOCK-CTX-2, LOCK-CTX-4, LOCK-FIX-3).
+  // When no valid anchor exists for the topic, derive the window start from the
+  // assistant's default context count and persist it as the anchor — finite N
+  // selects the most recent N turns, unlimited selects the first turn of the
+  // post-clear segment. This keeps the derived start stable as the topic grows,
+  // and ensures clearing a manual anchor restores the default window rather
+  // than full history. The pure compute layer applies the identical fallback,
+  // so full history is never transiently sent even before this write lands.
+  // When the post-clear segment has zero turns there is nothing to anchor, so
+  // any stale persisted anchor is removed (matching TokenCount reset behavior);
+  // the pure decision helper returns 'delete' only when an anchor actually
+  // exists, so this effect dispatches at most once and cannot loop.
   useEffect(() => {
     const settings = getAssistantSettings(assistant)
-    const anchor = settings.fixedWindowAnchor?.[topic.id]
-    const topicMode = settings.topicContextWindowMode?.[topic.id]
-    const effectiveMode = settings.contextWindowMode === 'fixed' ? (topicMode ?? settings.contextWindowMode) : 'sliding'
-
-    if (effectiveMode !== 'fixed') return
-
-    // 不变量守卫：fixed 模式下必须有有效锚点
-    if (anchor?.kind === 'active') {
-      // 检查 groupKey 是否有效
-      const isValid = topicMessages.some((m) => m.id === anchor.groupKey && m.role === 'user')
-      if (isValid) return // 有效，无需处理
-
-      // 旧数据恢复：groupKey 指向 assistant 消息
-      const assistantMsg = topicMessages.find((m) => m.id === anchor.groupKey && m.role === 'assistant')
-      if (assistantMsg?.askId) {
-        updateAssistantSettings({
-          fixedWindowAnchor: {
-            ...settings.fixedWindowAnchor,
-            [topic.id]: { kind: 'active', groupKey: assistantMsg.askId }
-          }
-        })
-        return
-      }
-
-      // 都找不到，设到第一条 user 消息
-      const firstUser = topicMessages.find((m) => m.role === 'user')
-      if (firstUser) {
-        updateAssistantSettings({
-          fixedWindowAnchor: { ...settings.fixedWindowAnchor, [topic.id]: { kind: 'active', groupKey: firstUser.id } }
-        })
-      }
+    const decision = resolveDefaultAnchorPersistence(
+      buildContextTurns(topicMessages),
+      settings.contextCount,
+      settings.contextWindowAnchor?.[topic.id]
+    )
+    if (decision.type === 'none') {
       return
     }
 
-    // anchor 为 undefined 或旧数据残留：fixed 模式下无有效锚点，自动修复
-    if (topicMessages.length > 0) {
-      const firstUser = topicMessages.find((m) => m.role === 'user')
-      if (firstUser) {
-        updateAssistantSettings({
-          fixedWindowAnchor: { ...settings.fixedWindowAnchor, [topic.id]: { kind: 'active', groupKey: firstUser.id } }
-        })
-      }
+    const anchors = { ...settings.contextWindowAnchor }
+    if (decision.type === 'delete') {
+      delete anchors[topic.id]
+    } else {
+      anchors[topic.id] = decision.anchor
     }
+    updateAssistantSettings({ contextWindowAnchor: anchors })
   }, [topicMessages, assistant, topic.id, updateAssistantSettings])
 
+  // TokenCount click (LOCK-CTX-3): recompute and persist the default start.
+  // Finite N selects the most recent N turns; null (unlimited) selects the
+  // first turn of the current post-clear context segment. An empty topic clears
+  // any stale anchor (there is nothing to anchor).
   const onUpdateAnchor = useCallback(() => {
     const settings = getAssistantSettings(assistant)
-    const currentMode =
-      settings.contextWindowMode === 'fixed'
-        ? (settings.topicContextWindowMode?.[topic.id] ?? settings.contextWindowMode)
-        : 'sliding'
-    const newMode = currentMode === 'fixed' ? 'sliding' : 'fixed'
-    updateAssistantSettings({
-      topicContextWindowMode: {
-        ...settings.topicContextWindowMode,
-        [topic.id]: newMode
-      }
-    })
-  }, [assistant, topic.id, updateAssistantSettings])
+    const turns = buildContextTurns(topicMessages)
+
+    const anchors = { ...settings.contextWindowAnchor }
+    if (turns.length === 0) {
+      delete anchors[topic.id]
+      updateAssistantSettings({ contextWindowAnchor: anchors })
+      return
+    }
+
+    const derivedIndex = resolveDefaultAnchorIndex(turns, settings.contextCount)
+    if (derivedIndex < 0) {
+      return
+    }
+    const groupKey = getTurnAnchorGroupKey(turns[derivedIndex])
+    if (!groupKey) {
+      return
+    }
+
+    anchors[topic.id] = { kind: 'active', groupKey }
+    updateAssistantSettings({ contextWindowAnchor: anchors })
+  }, [assistant, topic.id, topicMessages, updateAssistantSettings])
 
   const onPause = useCallback(async () => {
     await pauseMessages()
@@ -452,29 +433,12 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     addTopic(newTopic)
     setActiveTopic(newTopic)
 
-    // 固定模式下，新话题默认开启 fixed 模式
-    const settings = getAssistantSettings(assistant)
-    if (settings.contextWindowMode === 'fixed') {
-      updateAssistantSettings({
-        topicContextWindowMode: {
-          ...settings.topicContextWindowMode,
-          [newTopic.id]: 'fixed'
-        }
-        // 不设 fixedWindowAnchor——useEffect 会在首条消息到达时自动补
-      })
-    }
+    // The new topic has no anchor yet; the default-anchor persistence effect
+    // derives one from the assistant's default context count when the first
+    // message arrives (LOCK-CTX-2).
 
     setTimeoutTimer('addNewTopic', () => EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR), 0)
-  }, [
-    addTopic,
-    assistant,
-    assistant.defaultModel,
-    assistant.id,
-    setActiveTopic,
-    setModel,
-    setTimeoutTimer,
-    updateAssistantSettings
-  ])
+  }, [addTopic, assistant, setActiveTopic, setModel, setTimeoutTimer])
 
   const handleRemoveModel = useCallback(
     (modelToRemove: Model) => {
@@ -604,8 +568,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
         <TokenCount
           estimateTokenCount={tokenCountProps.estimateTokenCount}
           contextCount={tokenCountProps.contextCount}
-          contextWindowMode={contextWindowMode}
-          effectiveMode={topicContextWindowMode}
           onUpdateAnchor={onUpdateAnchor}
           onClick={onNewContext}
         />

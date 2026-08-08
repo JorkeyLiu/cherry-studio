@@ -1380,11 +1380,6 @@
         "label": "Context",
         "tip": "Numărul de mesaje anterioare de păstrat în context."
       },
-      "context_window_mode": {
-        "label": "[to be translated]:Fixed Context Window",
-        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
-      },
-      "max": "Nelimitat",
       "max_tokens": {
         "confirm": "Setează tokeni maximi",
         "confirm_content": "Setează numărul maxim de tokeni pe care modelul îi poate genera. Trebuie să iei în considerare limita de context a modelului, altfel va fi raportată o eroare",

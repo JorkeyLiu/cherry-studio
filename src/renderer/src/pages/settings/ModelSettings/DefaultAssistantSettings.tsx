@@ -2,12 +2,14 @@ import { CloseCircleFilled, QuestionCircleOutlined } from '@ant-design/icons'
 import EmojiPicker from '@renderer/components/EmojiPicker'
 import { ResetIcon } from '@renderer/components/Icons'
 import { HStack } from '@renderer/components/Layout'
+import MaxContextCount from '@renderer/components/MaxContextCount'
 import Selector from '@renderer/components/Selector'
 import { TopView } from '@renderer/components/TopView'
 import { DEFAULT_CONTEXTCOUNT, DEFAULT_TEMPERATURE } from '@renderer/config/constant'
 import { useTheme } from '@renderer/context/ThemeProvider'
 import { useDefaultAssistant } from '@renderer/hooks/useAssistant'
 import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/AssistantService'
+import { contextCountToSliderValue, sliderValueToContextCount } from '@renderer/services/contextWindowService'
 import type { AssistantSettings as AssistantSettingsType } from '@renderer/types'
 import { getLeadingEmoji, modalConfirm } from '@renderer/utils'
 import { Button, Col, Divider, Flex, Input, InputNumber, Modal, Popover, Row, Slider, Switch, Tooltip } from 'antd'
@@ -70,11 +72,16 @@ const AssistantSettings: FC = () => {
       }
     }
   const onTemperatureChange = handleChange(setTemperature, (value) => onUpdateAssistantSettings({ temperature: value }))
-  const onContextCountChange = (value: number | null) => {
-    if (value !== null) {
-      setContextCount(value)
-      onUpdateAssistantSettings({ contextCount: value })
-    }
+  const onContextCountChange = (value: number) => {
+    const newValue = sliderValueToContextCount(value)
+    setContextCount(newValue)
+    onUpdateAssistantSettings({ contextCount: newValue })
+  }
+  // LOCK-LAYOUT-4: disabled tooltip, same as AssistantModelSettings — the
+  // persistent title-right readout is always visible, so no redundant tooltip.
+  const formatSliderTooltip = (value?: number) => {
+    if (value === undefined) return ''
+    return value.toString()
   }
   const onMaxTokensChange = handleChange(setMaxTokens, (value) => onUpdateAssistantSettings({ maxTokens: value }))
   const onTopPChange = handleChange(setTopP, (value) => onUpdateAssistantSettings({ topP: value }))
@@ -243,53 +250,29 @@ const AssistantSettings: FC = () => {
         </Row>
       )}
       <Divider style={{ margin: '2px 0' }} />
-      <Row align="middle">
-        <Col span={16}>
+      <HStack alignItems="center" justifyContent="space-between">
+        <HStack alignItems="center" gap={5}>
           <Label>{t('chat.settings.context_count.label')}</Label>
           <Tooltip title={t('chat.settings.context_count.tip')}>
             <QuestionIcon />
           </Tooltip>
-        </Col>
-        <Col span={4} style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
-          <Label style={{ margin: 0, fontSize: 12, whiteSpace: 'nowrap' }}>{t('chat.settings.max')}</Label>
-        </Col>
-        <Col span={4} style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <Switch
-            style={{ marginLeft: 10 }}
-            checked={contextCount === null}
-            onChange={(checked) => {
-              const newValue: number | null = checked ? null : DEFAULT_CONTEXTCOUNT
-              setContextCount(newValue)
-              onUpdateAssistantSettings({ contextCount: newValue })
-            }}
+        </HStack>
+        <MaxContextCount maxContext={contextCount} />
+      </HStack>
+      <Row align="middle" gutter={20} style={{ marginTop: -5, marginBottom: -10 }}>
+        <Col span={24}>
+          <Slider
+            min={1}
+            max={100}
+            onChange={(value) => setContextCount(sliderValueToContextCount(value))}
+            onChangeComplete={onContextCountChange}
+            value={contextCountToSliderValue(contextCount)}
+            marks={{ 1: '1', 25: '25', 50: '50', 75: '75', 100: '∞' }}
+            step={1}
+            tooltip={{ formatter: formatSliderTooltip, open: false }}
           />
         </Col>
       </Row>
-      {contextCount !== null && (
-        <Row align="middle" gutter={20} style={{ marginTop: -5, marginBottom: -10 }}>
-          <Col span={19}>
-            <Slider
-              min={0}
-              max={20}
-              marks={{ 0: '0', 5: '5', 10: '10', 15: '15', 20: '20' }}
-              onChange={setContextCount}
-              onChangeComplete={onContextCountChange}
-              value={typeof contextCount === 'number' ? contextCount : 0}
-              step={1}
-            />
-          </Col>
-          <Col span={5}>
-            <InputNumber
-              min={0}
-              max={20}
-              step={1}
-              value={contextCount}
-              onChange={onContextCountChange}
-              style={{ width: '100%' }}
-            />
-          </Col>
-        </Row>
-      )}
       <Divider style={{ margin: '2px 0' }} />
       <Flex justify="space-between" align="center">
         <HStack alignItems="center">

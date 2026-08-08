@@ -94,15 +94,27 @@ export function buildContextTurns(messages: Message[]): ContextTurn[] {
 /**
  * Locates the index of the anchor turn in the given ContextTurn array.
  *
- * Semantics:
- *   1. Prefer a turn containing a user message whose id equals groupKey.
+ * Resolution order (LOCK-FIX-1, LOCK-FIX-2):
+ *   1. Prefer the turn containing a user message whose id equals groupKey —
+ *      the canonical group key of a user-initiated turn.
  *   2. If no such user turn exists, fall back to the first turn containing
- *      an assistant message whose askId equals groupKey.
- *   3. Return -1 when neither exists.
+ *      an assistant message whose askId equals groupKey — this keeps legacy
+ *      (migration 216) and manually persisted askId anchors resolvable,
+ *      including orphan assistant turns whose user question is absent.
+ *   3. If neither matches, fall back to the turn containing a non-user message
+ *      whose OWN id equals groupKey. This resolves the anchor keys derived for
+ *      orphan-assistant turns (keyed by their own id when askId is missing) and
+ *      standalone system turns (keyed by their own id).
+ *   4. Return -1 when nothing matches.
  *
- * This avoids the ambiguity of matching `ContextTurn.key` directly, which
- * can produce duplicate hits (e.g. an orphan assistant turn and a later
- * user-initiated turn sharing the same key value).
+ * The anchor key derived for every turn kind is exactly what
+ * `getTurnAnchorGroupKey` returns, so rule 3 makes each turn round-trip to
+ * itself. The ordering matters for collisions: a key that is both a user id and
+ * an assistant askId (a non-consecutive assistant referencing an earlier user
+ * question) must NOT be claimed by a generic turn-key match — the existing
+ * preferred user-id / assistant-askId semantics (rules 1-2) always win, and the
+ * generic message-id fallback (rule 3) only ever matches message ids that rules
+ * 1-2 cannot (message ids are unique, so they cannot collide across turns).
  */
 export function resolveAnchorTurnIndex(turns: readonly ContextTurn[], groupKey: string): number {
   // 1. Prefer user-initiated turn: contains a user message with id === groupKey
@@ -110,12 +122,17 @@ export function resolveAnchorTurnIndex(turns: readonly ContextTurn[], groupKey: 
   if (userTurnIdx >= 0) return userTurnIdx
 
   // 2. Fall back: turn containing an assistant message with askId === groupKey
-  const assistantTurnIdx = turns.findIndex((t) =>
+  const assistantAskIdTurnIdx = turns.findIndex((t) =>
     t.messages.some((m) => m.role === 'assistant' && m.askId === groupKey)
   )
-  if (assistantTurnIdx >= 0) return assistantTurnIdx
+  if (assistantAskIdTurnIdx >= 0) return assistantAskIdTurnIdx
 
-  // 3. Not found
+  // 3. Fall back: turn containing a non-user message whose own id === groupKey
+  //    (orphan-assistant turn keyed by its own id, or standalone system turn).
+  const messageIdTurnIdx = turns.findIndex((t) => t.messages.some((m) => m.role !== 'user' && m.id === groupKey))
+  if (messageIdTurnIdx >= 0) return messageIdTurnIdx
+
+  // 4. Not found
   return -1
 }
 

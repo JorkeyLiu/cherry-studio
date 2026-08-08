@@ -21,6 +21,12 @@ describe('MaxContextCount', () => {
     expect(screen.getByText('5')).toBeDefined()
   })
 
+  it('renders "99" for numeric 99 (finite value stays numeric, never ∞)', () => {
+    render(<MaxContextCount maxContext={99} />)
+    expect(screen.getByText('99')).toBeDefined()
+    expect(screen.queryByText('∞')).toBeNull()
+  })
+
   it('renders "0" for numeric 0', () => {
     render(<MaxContextCount maxContext={0} />)
     expect(screen.getByText('0')).toBeDefined()
@@ -39,7 +45,36 @@ describe('MaxContextCount', () => {
     const span = container.querySelector('span')
     expect(span).toBeDefined()
     expect(span!.style.color).toBe('blue')
-    expect(span!.style.fontSize).toBe('16px')
     expect(span!.textContent).toBe('∞')
+  })
+
+  it('renders finite and infinity with identical metric styles (LOCK-LAYOUT-1)', () => {
+    const finite = render(
+      <div style={{ fontSize: '14px', lineHeight: '1.6' }}>
+        <MaxContextCount maxContext={99} />
+      </div>
+    )
+    const infinity = render(
+      <div style={{ fontSize: '14px', lineHeight: '1.6' }}>
+        <MaxContextCount maxContext={null} />
+      </div>
+    )
+    const finiteSpan = finite.container.querySelector('span')!
+    const infinitySpan = infinity.container.querySelector('span')!
+    expect(finiteSpan).toBeDefined()
+    expect(infinitySpan).toBeDefined()
+    expect(finiteSpan.textContent).toBe('99')
+    expect(infinitySpan.textContent).toBe('∞')
+    // LOCK-LAYOUT-1: identical computed inputs for font size, line height,
+    // display and vertical alignment — switching finite ⇄ infinity never
+    // changes the title-row height.
+    for (const prop of ['fontSize', 'lineHeight', 'display', 'verticalAlign'] as const) {
+      expect(getComputedStyle(finiteSpan)[prop]).toBe(getComputedStyle(infinitySpan)[prop])
+    }
+    // Neither branch imposes its own font metrics — both inherit from context.
+    expect(finiteSpan.style.fontSize).toBe('')
+    expect(infinitySpan.style.fontSize).toBe('')
+    finite.unmount()
+    infinity.unmount()
   })
 })

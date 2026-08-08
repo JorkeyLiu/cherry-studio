@@ -3282,15 +3282,18 @@ const migrateConfig = {
   '209': (state: RootState) => {
     try {
       // Migrate fixedWindowAnchorIndex (per-assistant, index-based) to fixedWindowAnchor (per-topic, messageId-based)
+      // NOTE: this legacy migration operates on the OLD persisted schema
+      // (fixedWindowAnchor), which no longer exists on AssistantSettings.
       const migrateAssistant = (assistant: Assistant) => {
-        if (assistant.settings && 'fixedWindowAnchorIndex' in assistant.settings) {
-          delete (assistant.settings as any).fixedWindowAnchorIndex
+        const settings = assistant.settings as any
+        if (settings && 'fixedWindowAnchorIndex' in settings) {
+          delete settings.fixedWindowAnchorIndex
         }
-        if (!assistant.settings?.fixedWindowAnchor) {
+        if (!settings?.fixedWindowAnchor) {
           if (!assistant.settings) {
             assistant.settings = {}
           }
-          assistant.settings.fixedWindowAnchor = {}
+          ;(assistant.settings as any).fixedWindowAnchor = {}
         }
         return assistant
       }
@@ -3345,8 +3348,10 @@ const migrateConfig = {
   '211': (state: RootState) => {
     try {
       // Migrate fixedWindowAnchor from string form to TopicAnchor form (group-granularity)
+      // NOTE: operates on the OLD persisted schema (fixedWindowAnchor).
       const migrateAssistant = (assistant: Assistant) => {
-        const anchorMap = assistant?.settings?.fixedWindowAnchor
+        const settings = assistant?.settings as { fixedWindowAnchor?: Record<string, unknown> } | undefined
+        const anchorMap = settings?.fixedWindowAnchor
         if (!anchorMap) return assistant
         const newMap: Record<string, TopicAnchor | undefined> = {}
         for (const [topicId, value] of Object.entries(anchorMap)) {
@@ -3371,11 +3376,11 @@ const migrateConfig = {
             }
           } else if (typeof value === 'object' && value !== null && 'kind' in value) {
             // 已经是新形态（理论上不会出现，但做幂等保护）—— 保留
-            newMap[topicId] = value
+            newMap[topicId] = value as TopicAnchor
           }
         }
         if (assistant.settings) {
-          assistant.settings.fixedWindowAnchor = newMap
+          ;(assistant.settings as any).fixedWindowAnchor = newMap
         }
         return assistant
       }
@@ -3390,8 +3395,16 @@ const migrateConfig = {
   },
   '212': (state: RootState) => {
     try {
+      // NOTE: operates on the OLD persisted schema (fixedWindowAnchor,
+      // topicContextWindowMode).
       const migrateAssistant = (assistant: Assistant) => {
-        const anchorMap = assistant?.settings?.fixedWindowAnchor
+        const settings = assistant?.settings as
+          | {
+              fixedWindowAnchor?: Record<string, TopicAnchor | undefined>
+              topicContextWindowMode?: Record<string, string>
+            }
+          | undefined
+        const anchorMap = settings?.fixedWindowAnchor
         const modeMap: Record<string, 'fixed' | 'sliding' | undefined> = {}
         if (anchorMap) {
           for (const [topicId, anchor] of Object.entries(anchorMap)) {
@@ -3401,7 +3414,7 @@ const migrateConfig = {
           }
         }
         if (assistant.settings) {
-          assistant.settings.topicContextWindowMode = modeMap
+          ;(assistant.settings as any).topicContextWindowMode = modeMap
         }
         return assistant
       }
@@ -3476,6 +3489,65 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 215 error', error as Error)
+      return state
+    }
+  },
+  '216': (state: RootState) => {
+    try {
+      // Single anchor-to-end context window model (LOCK-CTX-7, LOCK-CTX-8):
+      //  - Rename fixedWindowAnchor → contextWindowAnchor (mode-neutral).
+      //  - Retain legacy anchors ONLY for topics effectively fixed under old
+      //    semantics: assistant global contextWindowMode === 'fixed' and the
+      //    topic override is not 'sliding'. Anchors for effectively sliding
+      //    topics are dropped (the default window derivation takes over).
+      //  - Remove obsolete contextWindowMode / topicContextWindowMode fields.
+      //  - Convert persisted contextCount 0 → 1 (minimum is now 1).
+      type LegacyWindowSettings = {
+        contextCount?: number | null
+        contextWindowMode?: 'fixed' | 'sliding'
+        topicContextWindowMode?: Record<string, 'fixed' | 'sliding' | undefined>
+        fixedWindowAnchor?: Record<string, TopicAnchor | undefined>
+        contextWindowAnchor?: Record<string, TopicAnchor | undefined>
+      }
+      const migrateAssistant = (assistant: Assistant) => {
+        const settings = assistant.settings as LegacyWindowSettings | undefined
+        if (!settings) return assistant
+
+        if (settings.contextCount === 0) {
+          settings.contextCount = 1
+        }
+
+        const globalMode = settings.contextWindowMode
+        const legacyAnchorMap = settings.fixedWindowAnchor
+        const topicModeMap = settings.topicContextWindowMode
+        const newAnchorMap: Record<string, TopicAnchor | undefined> = settings.contextWindowAnchor
+          ? { ...settings.contextWindowAnchor }
+          : {}
+
+        if (legacyAnchorMap) {
+          for (const [topicId, anchor] of Object.entries(legacyAnchorMap)) {
+            if (anchor === undefined || anchor === null) continue
+            const topicMode = topicModeMap?.[topicId]
+            const effectivelyFixed = globalMode === 'fixed' && topicMode !== 'sliding'
+            if (effectivelyFixed) {
+              newAnchorMap[topicId] = anchor
+            }
+          }
+        }
+
+        settings.contextWindowAnchor = newAnchorMap
+        delete settings.contextWindowMode
+        delete settings.topicContextWindowMode
+        delete settings.fixedWindowAnchor
+        return assistant
+      }
+
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
+      logger.info('migrate 216 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 216 error', error as Error)
       return state
     }
   }

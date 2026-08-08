@@ -1107,7 +1107,7 @@
       },
       "collapse": "收起",
       "context_count": {
-        "tip": "上下文数 / 最大上下文数"
+        "tip": "已选 / 总轮数"
       },
       "estimated_tokens": {
         "tip": "预估 Token 数"
@@ -1377,14 +1377,9 @@
       },
       "code_wrappable": "代码块可换行",
       "context_count": {
-        "label": "上下文数",
-        "tip": "要保留在上下文中的对话轮次数，数值越大，上下文越长，消耗的 Token 越多。普通聊天建议 5-10"
+        "label": "默认上下文",
+        "tip": "上下文窗口起始时默认包含的对话轮数。手动锚定后窗口可以随对话增长而超过此值"
       },
-      "context_window_mode": {
-        "label": "固定上下文窗口",
-        "tip": "开启后，上下文窗口将固定在指定位置，不再随对话滑动"
-      },
-      "max": "不限",
       "max_tokens": {
         "confirm": "最大 Token 数",
         "confirm_content": "设置单次交互所用的最大 Token 数，会影响返回结果的长度。要根据模型上下文限制来设置，否则会报错",

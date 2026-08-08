@@ -106,7 +106,6 @@ type MessageMenubarButtonContext = {
   blockEntities: ReturnType<typeof messageBlocksSelectors.selectEntities>
   confirmDeleteMessage: boolean
   confirmRegenerateMessage: boolean
-  contextWindowMode?: 'sliding' | 'fixed'
   copied: boolean
   deleteMessageWithUndo: MessageOperationsHandlers['deleteMessageWithUndo']
   dropdownItems: MenuProps['items']
@@ -174,40 +173,36 @@ const MessageMenubar: FC<Props> = (props) => {
   const { confirmDeleteMessage, confirmRegenerateMessage } = useSettings()
   const { updateAssistantSettings } = useAssistant(assistant.id)
 
-  // Context anchor logic for fixed context window mode
+  // Context anchor control for the single anchor-to-end context window model.
+  // Clicking a user message sets the window start to that turn; clicking the
+  // already-anchored message clears the anchor (which restores the default
+  // window derived from the assistant's default context count — LOCK-CTX-4).
   const assistantSettings = getAssistantSettings(assistant)
-  const effectiveMode =
-    assistantSettings.contextWindowMode === 'fixed'
-      ? (assistantSettings.topicContextWindowMode?.[topic.id] ?? assistantSettings.contextWindowMode)
-      : 'sliding'
-  const contextWindowMode = effectiveMode
   const handleSetContextAnchor = useCallback(() => {
-    if (effectiveMode !== 'fixed') return // 非 fixed 模式不操作
-
     const desiredGroupKey = resolveGroupKey(message)
     if (!desiredGroupKey) return
 
-    const current = assistantSettings.fixedWindowAnchor?.[topic.id]
+    const current = assistantSettings.contextWindowAnchor?.[topic.id]
     if (current?.kind === 'active' && current.groupKey === desiredGroupKey) {
-      // 已经是这个锚点 → 删除锚点，useEffect 不变量守卫会自动回落到首条 user 消息
-      const newAnchor = { ...assistantSettings.fixedWindowAnchor }
+      // 已经是这个锚点 → 删除锚点，默认窗口推导会自动接管
+      const newAnchor = { ...assistantSettings.contextWindowAnchor }
       delete newAnchor[topic.id]
-      updateAssistantSettings({ fixedWindowAnchor: newAnchor })
+      updateAssistantSettings({ contextWindowAnchor: newAnchor })
       return
     }
 
     // 设置新锚点
     updateAssistantSettings({
-      fixedWindowAnchor: {
-        ...assistantSettings.fixedWindowAnchor,
+      contextWindowAnchor: {
+        ...assistantSettings.contextWindowAnchor,
         [topic.id]: { kind: 'active', groupKey: desiredGroupKey }
       }
     })
-  }, [effectiveMode, assistantSettings, topic.id, message, updateAssistantSettings])
+  }, [assistantSettings, topic.id, message, updateAssistantSettings])
 
   const isContextAnchor = useMemo(() => {
     const settings = getAssistantSettings(assistant)
-    const current = settings.fixedWindowAnchor?.[topic.id]
+    const current = settings.contextWindowAnchor?.[topic.id]
     if (current?.kind !== 'active') return false
     return current.groupKey === message.id || (message.role === 'assistant' && current.groupKey === message.askId)
   }, [assistant, topic.id, message.id, message.role, message.askId])
@@ -596,7 +591,6 @@ const MessageMenubar: FC<Props> = (props) => {
     blockEntities,
     confirmDeleteMessage,
     confirmRegenerateMessage,
-    contextWindowMode,
     copied,
     deleteMessageWithUndo,
     dropdownItems,
@@ -1080,14 +1074,18 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       </Tooltip>
     )
   },
-  'context-anchor': ({ contextWindowMode, isContextAnchor, isUserMessage, handleSetContextAnchor, softHoverBg, t }) => {
-    if (contextWindowMode !== 'fixed' || !isUserMessage) {
+  'context-anchor': ({ isContextAnchor, isUserMessage, handleSetContextAnchor, softHoverBg, t }) => {
+    if (!isUserMessage) {
       return null
     }
 
     return (
       <Tooltip title={t('chat.message.set_context_anchor')} mouseEnterDelay={0.8}>
-        <ActionButton className="message-action-button" onClick={handleSetContextAnchor} $softHoverBg={softHoverBg}>
+        <ActionButton
+          className="message-action-button"
+          data-testid="context-anchor-btn"
+          onClick={handleSetContextAnchor}
+          $softHoverBg={softHoverBg}>
           <Anchor size={15} style={isContextAnchor ? { color: 'var(--color-primary)' } : undefined} />
         </ActionButton>
       </Tooltip>

@@ -32,13 +32,6 @@ export function resolveGroupKey(message: Pick<Message, 'role' | 'id' | 'askId'>)
 }
 
 /**
- * 状态机：关闭 fixed 模式（任意 → undefined）。本函数返回 undefined 给调用方存。
- */
-export function disableAnchor(): undefined {
-  return undefined
-}
-
-/**
  * 状态机：消息删除后转移锚点。
  * oldGroupList = 删除前的 buildGroupList
  * newGroupList = 删除后的 buildGroupList
@@ -91,7 +84,7 @@ export function transferAnchorOnDeletion(
 
 /**
  * 删除后对所有 assistant 的 active anchor 进行转移（集成胶水函数）。
- * 遍历 assistants.assistants，对每个有 fixedWindowAnchor[topicId]: active 的，
+ * 遍历 assistants.assistants，对每个有 contextWindowAnchor[topicId]: active 的，
  * 调 transferAnchorOnDeletion，diff 则 dispatch updateAssistantSettings。
  *
  * 注意：此函数含 side-effect（dispatch），放在此文件底部作为集成辅助。
@@ -107,13 +100,13 @@ export function transferAnchorsAfterDeletion(
   const allAssistants = state.assistants.assistants
 
   for (const asst of allAssistants) {
-    const oldAnchor = asst.settings?.fixedWindowAnchor?.[topicId]
+    const oldAnchor = asst.settings?.contextWindowAnchor?.[topicId]
     if (!oldAnchor || oldAnchor.kind !== 'active') continue
 
     const newAnchor = transferAnchorOnDeletion(oldAnchor, oldGroupList, newGroupList)
     if (newAnchor === oldAnchor) continue
 
-    const updatedAnchors = { ...asst.settings?.fixedWindowAnchor }
+    const updatedAnchors = { ...asst.settings?.contextWindowAnchor }
     if (newAnchor) {
       updatedAnchors[topicId] = newAnchor
     } else {
@@ -124,7 +117,7 @@ export function transferAnchorsAfterDeletion(
       updateAssistantSettings({
         assistantId: asst.id,
         settings: {
-          fixedWindowAnchor: updatedAnchors
+          contextWindowAnchor: updatedAnchors
         }
       })
     )

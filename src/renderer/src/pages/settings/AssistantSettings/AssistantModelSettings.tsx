@@ -4,21 +4,16 @@ import CodeEditor from '@renderer/components/CodeEditor'
 import EditableNumber from '@renderer/components/EditableNumber'
 import { DeleteIcon, ResetIcon } from '@renderer/components/Icons'
 import { HStack } from '@renderer/components/Layout'
+import MaxContextCount from '@renderer/components/MaxContextCount'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
 import Selector from '@renderer/components/Selector'
-import { HelpTooltip } from '@renderer/components/TooltipIcons'
 import { DEFAULT_CONTEXTCOUNT, DEFAULT_TEMPERATURE, MAX_TOOL_CALLS, MIN_TOOL_CALLS } from '@renderer/config/constant'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { SettingRow } from '@renderer/pages/settings'
 import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/AssistantService'
-import type {
-  Assistant,
-  AssistantSettingCustomParameters,
-  AssistantSettings,
-  ContextWindowMode,
-  Model
-} from '@renderer/types'
+import { contextCountToSliderValue, sliderValueToContextCount } from '@renderer/services/contextWindowService'
+import type { Assistant, AssistantSettingCustomParameters, AssistantSettings, Model } from '@renderer/types'
 import { modalConfirm } from '@renderer/utils'
 import { Button, Col, Divider, Input, InputNumber, Row, Select, Slider, Switch, Tooltip } from 'antd'
 import { isNull } from 'lodash'
@@ -74,9 +69,6 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
     () => assistant?.settings?.enableTemperature ?? DEFAULT_ASSISTANT_SETTINGS.enableTemperature,
     [assistant?.settings?.enableTemperature]
   )
-  const [contextWindowMode, setContextWindowMode] = useState<ContextWindowMode>(
-    assistant?.settings?.contextWindowMode ?? 'sliding'
-  )
 
   const customParametersRef = useRef(customParameters)
 
@@ -91,10 +83,10 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
     }
   }
 
-  const onContextCountChange = (value) => {
-    if (!isNaN(value as number)) {
-      updateAssistantSettings({ contextCount: value })
-    }
+  const onContextCountChange = (value: number) => {
+    const newValue = sliderValueToContextCount(value)
+    setContextCount(newValue)
+    updateAssistantSettings({ contextCount: newValue })
   }
 
   const onTopPChange = (value) => {
@@ -223,7 +215,6 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
     setTopP(DEFAULT_ASSISTANT_SETTINGS.topP)
     setCustomParameters(DEFAULT_ASSISTANT_SETTINGS.customParameters)
     setMaxToolCalls(DEFAULT_ASSISTANT_SETTINGS.maxToolCalls)
-    setContextWindowMode('sliding')
     updateAssistantSettings(DEFAULT_ASSISTANT_SETTINGS)
   }
   const modelFilter = (model: Model) => !isEmbeddingModel(model) && !isRerankModel(model)
@@ -379,72 +370,37 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
       )}
       <Divider style={{ margin: '10px 0' }} />
 
-      <SettingRow style={{ minHeight: 30 }}>
-        <HStack alignItems="center">
-          <Label>
-            {t('chat.settings.context_window_mode.label')}
-            <HelpTooltip title={t('chat.settings.context_window_mode.tip')} />
-          </Label>
+      <HStack alignItems="center" justifyContent="space-between">
+        <HStack alignItems="center" gap={5}>
+          <Label>{t('chat.settings.context_count.label')}</Label>
+          <Tooltip title={t('chat.settings.context_count.tip')}>
+            <QuestionIcon />
+          </Tooltip>
         </HStack>
-        <Switch
-          checked={contextWindowMode === 'fixed'}
-          onChange={(checked) => {
-            const mode: ContextWindowMode = checked ? 'fixed' : 'sliding'
-            setContextWindowMode(mode)
-            updateAssistantSettings({ contextWindowMode: mode })
-          }}
-        />
-      </SettingRow>
-      <Divider style={{ margin: '10px 0' }} />
-
-      <Row align="middle">
-        <Col span={16}>
-          <Label>
-            {t('chat.settings.context_count.label')}{' '}
-            <Tooltip title={t('chat.settings.context_count.tip')}>
-              <QuestionIcon />
-            </Tooltip>
-          </Label>
-        </Col>
-        <Col span={4} style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
-          <Label style={{ margin: 0, fontSize: 12, whiteSpace: 'nowrap' }}>{t('chat.settings.max')}</Label>
-        </Col>
-        <Col span={4} style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <Switch
-            checked={contextCount === null}
-            size="small"
-            onChange={(checked) => {
-              const newValue: number | null = checked ? null : DEFAULT_CONTEXTCOUNT
-              setContextCount(newValue)
-              updateAssistantSettings({ contextCount: newValue })
-            }}
-          />
+        <MaxContextCount maxContext={contextCount} />
+      </HStack>
+      <Row align="middle" gutter={24}>
+        <Col span={24}>
+          <ContextSliderWrapper>
+            <Slider
+              min={1}
+              max={100}
+              onChange={(value) => setContextCount(sliderValueToContextCount(value))}
+              onChangeComplete={onContextCountChange}
+              value={contextCountToSliderValue(contextCount)}
+              marks={{
+                1: '1',
+                25: '25',
+                50: '50',
+                75: '75',
+                100: '∞'
+              }}
+              step={1}
+              tooltip={{ formatter: formatSliderTooltip, open: false }}
+            />
+          </ContextSliderWrapper>
         </Col>
       </Row>
-      {contextCount !== null && (
-        <Row align="middle" gutter={24}>
-          <Col span={24}>
-            <ContextSliderWrapper>
-              <Slider
-                min={0}
-                max={99}
-                onChange={setContextCount}
-                onChangeComplete={onContextCountChange}
-                value={typeof contextCount === 'number' ? contextCount : 0}
-                marks={{
-                  0: '0',
-                  25: '25',
-                  50: '50',
-                  75: '75',
-                  99: '99'
-                }}
-                step={1}
-                tooltip={{ formatter: formatSliderTooltip, open: false }}
-              />
-            </ContextSliderWrapper>
-          </Col>
-        </Row>
-      )}
       <Divider style={{ margin: '10px 0' }} />
       <SettingRow style={{ minHeight: 30 }}>
         <HStack alignItems="center">

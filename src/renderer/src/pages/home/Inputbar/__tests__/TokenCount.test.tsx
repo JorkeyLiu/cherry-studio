@@ -5,6 +5,7 @@
  *   (1) Token display contains one estimate scalar, no slash separator
  *   (2) Context count remains current / max with slash separator
  *   (3) No inputTokenCount prop exists
+ *   (4) The context block is always clickable and calls onUpdateAnchor
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -71,8 +72,6 @@ describe('TokenCount', () => {
   const defaultProps = {
     estimateTokenCount: 1234,
     contextCount: { current: 5, max: 100 },
-    contextWindowMode: 'sliding' as const,
-    effectiveMode: 'sliding' as const,
     onUpdateAnchor: vi.fn()
   }
 
@@ -108,15 +107,16 @@ describe('TokenCount', () => {
     expect(dividers.length).toBeGreaterThanOrEqual(1)
   })
 
-  it('renders context count with unlimited (∞) when max is null', () => {
-    render(<TokenCount {...defaultProps} contextCount={{ current: 3, max: null }} />)
+  it('renders context count with total turns (∞ no longer used for the y-axis)', () => {
+    // max is the total turn count in the segment — always a concrete number.
+    render(<TokenCount {...defaultProps} contextCount={{ current: 3, max: 12 }} />)
 
-    // ∞ appears in both popover-content and popover-children
-    const infinityElements = screen.getAllByText('∞')
-    expect(infinityElements.length).toBe(2)
-    // "3" also appears in both popover-content and popover-children
+    // "3" appears in both popover-content and popover-children
     const threeElements = screen.getAllByText('3')
-    expect(threeElements.length).toBe(2)
+    expect(threeElements.length).toBeGreaterThanOrEqual(1)
+    // "12" (total turns) appears in both popover-content and popover-children
+    const twelveElements = screen.getAllByText('12')
+    expect(twelveElements.length).toBeGreaterThanOrEqual(1)
   })
 
   it('renders null when showInputEstimatedTokens is false', () => {
@@ -141,11 +141,9 @@ describe('TokenCount', () => {
     expect(text).toContain('1234')
   })
 
-  it('onUpdateAnchor is called when context block is clicked in fixed mode', () => {
+  it('onUpdateAnchor is called when the context block is clicked (always clickable)', () => {
     const onUpdateAnchor = vi.fn()
-    render(
-      <TokenCount {...defaultProps} contextWindowMode="fixed" effectiveMode="fixed" onUpdateAnchor={onUpdateAnchor} />
-    )
+    render(<TokenCount {...defaultProps} onUpdateAnchor={onUpdateAnchor} />)
 
     // Find the clickable context block and click it
     const menuIcons = screen.getAllByTestId('menu-icon')

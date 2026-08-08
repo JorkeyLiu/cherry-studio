@@ -1380,11 +1380,6 @@
         "label": "Número de contexto",
         "tip": "Número de mensagens a serem mantidas no contexto. Quanto maior o número, mais longo será o contexto e mais tokens serão consumidos. Para conversas normais, é recomendado um valor entre 5-10"
       },
-      "context_window_mode": {
-        "label": "[to be translated]:Fixed Context Window",
-        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
-      },
-      "max": "Sem limite",
       "max_tokens": {
         "confirm": "Ativar limite de comprimento da mensagem",
         "confirm_content": "Ao ativar o limite de comprimento da mensagem, o número máximo de tokens usados em uma única interação afetará o comprimento do resultado retornado. É necessário definir de acordo com o limite de contexto do modelo, caso contrário, ocorrerá um erro",

@@ -173,8 +173,6 @@ export const EFFORT_RATIO: EffortRatio = {
   auto: 2
 }
 
-export type ContextWindowMode = 'sliding' | 'fixed'
-
 export type TopicAnchor = { kind: 'active'; groupKey: string }
 
 export type AssistantSettings = {
@@ -204,9 +202,13 @@ export type AssistantSettings = {
   toolUseMode: 'function' | 'prompt'
   maxToolCalls?: number
   enableMaxToolCalls?: boolean
-  contextWindowMode?: ContextWindowMode
-  topicContextWindowMode?: Record<string, 'fixed' | 'sliding' | undefined>
-  fixedWindowAnchor?: Record<string, TopicAnchor | undefined> // { [topicId]: TopicAnchor }
+  /**
+   * Mode-neutral, per-topic anchor for the context window. When an `active`
+   * anchor exists for the topic, the window starts at that turn and grows with
+   * the conversation. When no (valid) anchor exists, the window start is
+   * derived from `contextCount` (the default initial window size).
+   */
+  contextWindowAnchor?: Record<string, TopicAnchor | undefined> // { [topicId]: TopicAnchor }
 }
 
 export type AssistantPreset = Omit<Assistant, 'model'> & {

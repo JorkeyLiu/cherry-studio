@@ -1,4 +1,3 @@
-import { DEFAULT_CONTEXTCOUNT } from '@renderer/config/constant'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import {
   buildContextTurns,
@@ -6,7 +5,8 @@ import {
   resolveAnchorTurnIndex,
   turnsToMessages
 } from '@renderer/services/contextTurnService'
-import type { Assistant, ContextWindowMode, TopicAnchor } from '@renderer/types'
+import { resolveDefaultAnchorIndex } from '@renderer/services/contextWindowService'
+import type { Assistant, TopicAnchor } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import {
   filterAdjacentUserMessaegs,
@@ -19,16 +19,6 @@ import {
 } from '@renderer/utils/messageUtils/filters'
 
 /**
- * Sentinel value passed as `previewDraft` when the caller knows a nonblank
- * draft exists but does not need to transmit the real text. Must be
- * non-whitespace so that `computeContextInfo`'s `.trim()` check passes.
- *
- * Defined here (rather than at the call-site) so that integration tests can
- * exercise the exact value without coupling to component internals.
- */
-export const PREVIEW_DRAFT_SENTINEL = 'preview' as const
-
-/**
  * The single unified pipeline for computing all context-related information.
  *
  * This function is the sole source of truth for:
@@ -38,13 +28,26 @@ export const PREVIEW_DRAFT_SENTINEL = 'preview' as const
  *   - What TokenCount displays (contextCount)
  *
  * Canonical unit: ContextTurn. contextCount, window selection, and boundary
- * all operate on whole turns. The persisted contextCount value is reinterpreted
+ * all operate on whole turns. The persisted contextCount value is interpreted
  * as a turn count (not a message count).
+ *
+ * There is exactly ONE context window model (LOCK-CTX-1): anchor-to-topic-end.
+ *   - A valid manual anchor (`settings.contextWindowAnchor[topicId]`) fixes the
+ *     window start; the window then grows as the topic grows.
+ *   - With no (valid) anchor, the start is derived from the assistant's default
+ *     `contextCount` via `resolveDefaultAnchorIndex` — finite N selects the
+ *     most recent N turns (so full history is never transiently sent), and
+ *     null (unlimited) selects the first turn of the post-clear segment
+ *     (LOCK-CTX-2, LOCK-CTX-4).
+ *
+ * contextCount result (LOCK-CTX-5): `current` = selected real turns, `max` =
+ * total turns in the current post-clear topic segment. Unsent drafts are never
+ * part of the turn list, so they are excluded from both numbers automatically.
  *
  * Pipeline ordering:
  *   1. buildContextTurns — groups post-clear messages into semantic turns
  *      (handles clear filtering + turn construction internally)
- *   2. Turn selection — sliding (last N turns) or fixed (anchor-based)
+ *   2. Turn selection — anchor-to-end, or default derivation when no anchor
  *   3. turnsToMessages — expands selected turns to Message[]
  *   4. filterUsefulMessages — deduplicates retries within assistant groups
  *   5. filterErrorOnlyMessagesWithRelated — removes error-only pairs
@@ -53,14 +56,6 @@ export const PREVIEW_DRAFT_SENTINEL = 'preview' as const
  *   8. filterAfterContextClearMessages — safety pass (no-op after turn expansion)
  *   9. filterEmptyMessages — removes messages without content blocks
  *  10. filterUserRoleStartMessages — trims leading non-user messages
- *
- * Preview draft (LOCK-004):
- *   When `options.previewDraft` is a nonblank string, a virtual user turn is
- *   appended to the turn list before turn selection. This makes a full sliding
- *   window eject the oldest real turn to accommodate the pending message.
- *   The virtual turn is NOT included in output message arrays — draft tokens
- *   are added exactly once by the caller (Inputbar). The virtual turn does
- *   affect contextCount.current to reflect the post-send state.
  *
  * N+2 compensation is removed: selection is by whole turns, so post-selection
  * model filters (steps 4–7) cannot create partial turn boundaries that would
@@ -73,8 +68,7 @@ export const PREVIEW_DRAFT_SENTINEL = 'preview' as const
 export function computeContextInfo(
   messages: Message[],
   assistant: Assistant | undefined,
-  topicId?: string,
-  options?: { previewDraft?: string }
+  topicId?: string
 ): {
   uiMessages: Message[]
   tokenEstimationMessages: Message[]
@@ -90,88 +84,42 @@ export function computeContextInfo(
     }
   }
 
-  // Read raw contextCount before getAssistantSettings normalizes it.
-  // This raw value is what the UI displays as the window capacity.
-  // null means unlimited; finite numeric values are turn counts.
-  const rawContextCount =
-    assistant.settings?.contextCount === undefined ? DEFAULT_CONTEXTCOUNT : assistant.settings.contextCount
-  // Hoisted predicate: null means unlimited.
-  const isUnlimited = rawContextCount === null
-
   const settings = getAssistantSettings(assistant)
+  // contextCount: the default initial window size. null means unlimited.
+  const contextCount = settings.contextCount
 
-  // Compute effective mode (same formula as ConversationService.prepareMessagesForModel)
-  const topicMode = topicId ? settings.topicContextWindowMode?.[topicId] : undefined
-  const effectiveMode: ContextWindowMode =
-    settings.contextWindowMode === 'fixed' ? (topicMode ?? settings.contextWindowMode) : 'sliding'
-
-  const anchor: TopicAnchor | undefined = topicId ? settings.fixedWindowAnchor?.[topicId] : undefined
+  const anchor: TopicAnchor | undefined = topicId ? settings.contextWindowAnchor?.[topicId] : undefined
 
   // --- Step 1: Build turns from post-context-clear messages ---
   const allTurns = buildContextTurns(messages)
+  const totalTurns = allTurns.length
 
-  // --- Preview draft: virtual turn affects turn selection only (LOCK-004) ---
-  // A nonblank pending draft occupies a turn slot so that a full sliding window
-  // ejects the oldest real turn. The virtual turn is never expanded to output
-  // messages — draft content tokens are added exactly once by the caller.
-  const hasDraftPreview = !!(options?.previewDraft && options.previewDraft.trim())
-
-  // --- Step 2: Turn selection ---
-  let selectedRealTurns: readonly ContextTurn[]
-  let boundaryMessageId: string | null = null
-  let currentCount: number
-  let maxCount: number | null
-
-  if (effectiveMode === 'fixed') {
-    if (anchor?.kind === 'active') {
-      const anchorIndex = resolveAnchorTurnIndex(allTurns, anchor.groupKey)
-      if (anchorIndex >= 0) {
-        selectedRealTurns = allTurns.slice(anchorIndex)
-        if (anchorIndex > 0) {
-          boundaryMessageId = selectedRealTurns[0].messages[0].id
-        }
-        currentCount = selectedRealTurns.length + (hasDraftPreview ? 1 : 0)
-      } else {
-        selectedRealTurns = allTurns
-        currentCount = hasDraftPreview ? 1 : 0
-      }
-    } else {
-      // No anchor (undefined or legacy data) — display shows 0 regardless of draft,
-      // model gets all turns so ConversationService receives full filtered history.
-      selectedRealTurns = allTurns
-      currentCount = 0
-    }
-    maxCount = null
+  // --- Step 2: Turn selection (single anchor-to-end mode) ---
+  // A valid manual anchor fixes the window start; the window grows as the
+  // topic grows (LOCK-CTX-1). Without a valid anchor, the start falls back to
+  // the default derivation — finite N selects the most recent N turns,
+  // unlimited selects the first turn of the segment (LOCK-CTX-2, LOCK-CTX-4).
+  let startIndex: number
+  if (anchor?.kind === 'active') {
+    const anchorIndex = resolveAnchorTurnIndex(allTurns, anchor.groupKey)
+    startIndex = anchorIndex >= 0 ? anchorIndex : resolveDefaultAnchorIndex(allTurns, contextCount)
   } else {
-    // Sliding mode: select the last N turns (N = rawContextCount).
-    if (isUnlimited) {
-      selectedRealTurns = allTurns
-      currentCount = allTurns.length + (hasDraftPreview ? 1 : 0)
-      maxCount = null
-    } else {
-      const n = rawContextCount
-      // Total turn count includes the virtual draft turn when previewing.
-      const totalTurns = allTurns.length + (hasDraftPreview ? 1 : 0)
-      if (totalTurns <= n) {
-        // All real turns fit alongside the virtual draft turn.
-        selectedRealTurns = allTurns
-        currentCount = totalTurns
-      } else {
-        // At capacity: the virtual draft turn occupies one slot, so keep n-1 real turns.
-        const realTurnsToKeep = hasDraftPreview ? n - 1 : n
-        selectedRealTurns = allTurns.slice(Math.max(0, allTurns.length - realTurnsToKeep))
-        currentCount = n
-      }
-      maxCount = rawContextCount
-      // Boundary: first message of the first selected real turn, only when older turns exist.
-      if (allTurns.length > selectedRealTurns.length && selectedRealTurns.length > 0) {
-        boundaryMessageId = selectedRealTurns[0].messages[0].id
-      }
-    }
+    startIndex = resolveDefaultAnchorIndex(allTurns, contextCount)
   }
 
+  const selectedRealTurns: readonly ContextTurn[] = startIndex < 0 ? [] : allTurns.slice(startIndex)
+
+  // Boundary divider: first message of the first selected turn, only when
+  // older turns exist before the window start.
+  const boundaryMessageId = startIndex > 0 && selectedRealTurns.length > 0 ? selectedRealTurns[0].messages[0].id : null
+
+  // contextCount (LOCK-CTX-5): current selected turns / total turns in the
+  // post-clear segment. Drafts are never in the turn list, so they are
+  // excluded from both x and y.
+  const currentCount = selectedRealTurns.length
+  const maxCount = totalTurns
+
   // --- Step 3: Expand selected real turns to Message[] ---
-  // The virtual draft turn is never expanded — draft tokens are added by the caller.
   const expandedMessages = turnsToMessages(selectedRealTurns)
 
   // --- Steps 4-7: Model filters ---

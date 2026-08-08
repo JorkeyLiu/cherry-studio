@@ -1,8 +1,23 @@
 import type { TopicAnchor } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { buildGroupList, disableAnchor, resolveGroupKey, transferAnchorOnDeletion } from '../anchorService'
+import {
+  buildGroupList,
+  resolveGroupKey,
+  transferAnchorOnDeletion,
+  transferAnchorsAfterDeletion
+} from '../anchorService'
+
+const updateAssistantSettings = vi.fn()
+
+vi.mock('@renderer/store/assistants', () => ({
+  updateAssistantSettings: (...args: unknown[]) => updateAssistantSettings(...args)
+}))
+
+beforeEach(() => {
+  updateAssistantSettings.mockReset()
+})
 
 // --- Test factories ---
 
@@ -54,14 +69,6 @@ describe('resolveGroupKey', () => {
 
   it('assistant without askId returns null', () => {
     expect(resolveGroupKey(assistant('a1'))).toBeNull()
-  })
-})
-
-// --- disableAnchor ---
-
-describe('disableAnchor', () => {
-  it('returns undefined', () => {
-    expect(disableAnchor()).toBeUndefined()
   })
 })
 
@@ -123,5 +130,65 @@ describe('transferAnchorOnDeletion', () => {
     const oldList = ['u0', 'u1', 'u2']
     const newList = ['u0', 'u1']
     expect(transferAnchorOnDeletion(g('ux'), oldList, newList)).toEqual(g('ux'))
+  })
+})
+
+// --- transferAnchorsAfterDeletion (contextWindowAnchor field) ---
+
+describe('transferAnchorsAfterDeletion', () => {
+  const g = (key: string): TopicAnchor => ({ kind: 'active', groupKey: key })
+  const topicId = 'topic-1'
+
+  const makeGetState = (settings: { contextWindowAnchor?: Record<string, TopicAnchor | undefined> }) => () =>
+    ({
+      assistants: {
+        assistants: [{ id: 'asst-1', settings }]
+      }
+    }) as any
+
+  it('reads and rewrites the renamed contextWindowAnchor field (LOCK-CTX-7)', () => {
+    const getState = makeGetState({
+      contextWindowAnchor: { [topicId]: g('u3') }
+    })
+    const dispatch = vi.fn()
+
+    // Delete u3 (anchor group): old [u1,u2,u3,u4] → new [u1,u2,u4] → transfer to u2.
+    transferAnchorsAfterDeletion(dispatch, getState, topicId, ['u1', 'u2', 'u3', 'u4'], ['u1', 'u2', 'u4'])
+
+    expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
+    expect(updateAssistantSettings).toHaveBeenCalledWith({
+      assistantId: 'asst-1',
+      settings: {
+        contextWindowAnchor: { [topicId]: g('u2') }
+      }
+    })
+    expect(dispatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('removes the topic key when the anchor resolves to undefined', () => {
+    const getState = makeGetState({
+      contextWindowAnchor: { [topicId]: g('u1'), otherTopic: g('u9') }
+    })
+    const dispatch = vi.fn()
+
+    // All groups deleted → anchor becomes undefined → key removed.
+    transferAnchorsAfterDeletion(dispatch, getState, topicId, ['u1'], [])
+
+    expect(updateAssistantSettings).toHaveBeenCalledWith({
+      assistantId: 'asst-1',
+      settings: {
+        contextWindowAnchor: { otherTopic: g('u9') }
+      }
+    })
+  })
+
+  it('skips assistants without an active anchor for the topic', () => {
+    const getState = makeGetState({})
+    const dispatch = vi.fn()
+
+    transferAnchorsAfterDeletion(dispatch, getState, topicId, ['u1', 'u2'], ['u1'])
+
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
   })
 })

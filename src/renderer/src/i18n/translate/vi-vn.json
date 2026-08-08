@@ -1380,11 +1380,6 @@
         "label": "Ngữ cảnh",
         "tip": "Số lượng tin nhắn trước đó cần giữ trong ngữ cảnh."
       },
-      "context_window_mode": {
-        "label": "[to be translated]:Fixed Context Window",
-        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
-      },
-      "max": "Không giới hạn",
       "max_tokens": {
         "confirm": "Đặt số token tối đa",
         "confirm_content": "Đặt số lượng token tối đa mà mô hình có thể tạo ra. Cần xem xét giới hạn ngữ cảnh của mô hình, nếu không sẽ báo lỗi",

@@ -1380,11 +1380,6 @@
         "label": "Контекст",
         "tip": "Количество предыдущих сообщений, которые нужно сохранить в контексте."
       },
-      "context_window_mode": {
-        "label": "[to be translated]:Fixed Context Window",
-        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
-      },
-      "max": "без ограничений",
       "max_tokens": {
         "confirm": "Максимальное количество токенов",
         "confirm_content": "Установить максимальное количество токенов, влияет на длину результата. Нужно учитывать контекст модели, иначе будет ошибка",

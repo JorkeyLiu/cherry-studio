@@ -7,9 +7,8 @@ type Props = {
 }
 
 export default function MaxContextCount({ maxContext, style }: Props) {
-  return maxContext === null ? (
-    <span style={{ fontSize: '16px', ...style }}>∞</span>
-  ) : (
-    <span style={style}>{maxContext.toString()}</span>
-  )
+  // LOCK-LAYOUT-1: both branches render a plain inline span with no font metrics
+  // of their own, so finite and infinity inherit identical font-size, line-height,
+  // display and vertical alignment from their context (no title-row height shift).
+  return <span style={style}>{maxContext === null ? '∞' : maxContext.toString()}</span>
 }

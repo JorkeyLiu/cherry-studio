@@ -1380,11 +1380,6 @@
         "label": "Kontextanzahl",
         "tip": "Anzahl der im Kontext zu behaltenden Nachrichten. Je größer der Wert, desto länger der Kontext und desto mehr Token werden verbraucht. Für normales Chatten wird 5-10 empfohlen"
       },
-      "context_window_mode": {
-        "label": "[to be translated]:Fixed Context Window",
-        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
-      },
-      "max": "Unbegrenzt",
       "max_tokens": {
         "confirm": "Maximale Token-Anzahl",
         "confirm_content": "Legen Sie die maximale Token-Anzahl für eine einzelne Interaktion fest, was die Länge des Ergebnisses beeinflusst. Muss entsprechend der Kontextbeschränkung des Modells eingestellt werden, sonst tritt ein Fehler auf",

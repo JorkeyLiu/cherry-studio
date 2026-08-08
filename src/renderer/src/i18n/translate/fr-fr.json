@@ -1380,11 +1380,6 @@
         "label": "Nombre de contextes",
         "tip": "Nombre de messages à conserver dans le contexte. Plus la valeur est élevée, plus le contexte est long et plus les tokens consommés sont nombreux. Pour une conversation normale, il est recommandé de choisir entre 5 et 10"
       },
-      "context_window_mode": {
-        "label": "[to be translated]:Fixed Context Window",
-        "tip": "[to be translated]:When enabled, the context window will be fixed at a specified position instead of sliding with the conversation"
-      },
-      "max": "Illimité",
       "max_tokens": {
         "confirm": "Activer la limitation de la longueur du message",
         "confirm_content": "Après activation de la limitation de la longueur du message, le nombre maximal de tokens utilisé pour une interaction unique affectera la longueur du résultat renvoyé. Il faut le configurer en fonction des limitations du contexte du modèle, sinon cela génèrera une erreur",
