@@ -325,7 +325,7 @@ export const initialState: SettingsState = {
   webdavHost: '',
   webdavUser: '',
   webdavPass: '',
-  webdavPath: '/cherry-studio',
+  webdavPath: '/cherry-chat',
   webdavAutoSync: false,
   webdavSyncInterval: 0,
   webdavMaxBackups: 0,

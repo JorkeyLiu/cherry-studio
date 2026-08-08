@@ -3140,7 +3140,7 @@
       "stop": "Arrêter OVMS",
       "stopping": "Arrêt en cours"
     },
-    "description": "<div><p>1. Télécharger le modèle OV.</p><p>2. Ajouter le modèle dans 'Manager'.</p><p>Uniquement compatible avec Windows !</p><p>Chemin d'installation d'OVMS : '%USERPROFILE%\\.cherrystudio\\ovms' .</p><p>Veuillez vous référer au <a href=https://github.com/openvinotoolkit/model_server/blob/c55551763d02825829337b62c2dcef9339706f79/docs/deploying_server_baremetal.md>Guide Intel OVMS</a></p></dev>",
+    "description": "<div><p>1. Télécharger le modèle OV.</p><p>2. Ajouter le modèle dans 'Manager'.</p><p>Uniquement compatible avec Windows !</p><p>Chemin d'installation d'OVMS : '%USERPROFILE%\\.cherrychat\\ovms' .</p><p>Veuillez vous référer au <a href=https://github.com/openvinotoolkit/model_server/blob/c55551763d02825829337b62c2dcef9339706f79/docs/deploying_server_baremetal.md>Guide Intel OVMS</a></p></dev>",
     "download": {
       "button": "Télécharger",
       "error": "Échec de la sélection",
@@ -4554,7 +4554,7 @@
         },
         "root": {
           "label": "Répertoire de sauvegarde (optionnel)",
-          "placeholder": "Par exemple : /cherry-studio"
+          "placeholder": "Par exemple : /cherry-chat"
         },
         "secretAccessKey": {
           "label": "Clé d'accès secrète",

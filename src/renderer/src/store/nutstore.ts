@@ -33,7 +33,7 @@ export interface NutstoreState {
 
 const initialState: NutstoreState = {
   nutstoreToken: '',
-  nutstorePath: '/cherry-studio',
+  nutstorePath: '/cherry-chat',
   nutstoreAutoSync: false,
   nutstoreSyncInterval: 0,
   nutstoreSyncState: {

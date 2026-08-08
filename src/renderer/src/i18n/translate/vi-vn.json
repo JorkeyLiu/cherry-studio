@@ -3140,7 +3140,7 @@
       "stop": "Dừng OVMS",
       "stopping": "Dừng lại"
     },
-    "description": "<div><p>1. Tải xuống mô hình OV.</p><p>2. Thêm mô hình vào 'Manager'.</p><p>Chỉ hỗ trợ Windows!</p><p>Đường dẫn cài đặt OVMS: '%USERPROFILE%\\.cherrystudio\\ovms'.</p><p>Vui lòng tham khảo <a href=https://github.com/openvinotoolkit/model_server/blob/c55551763d02825829337b62c2dcef9339706f79/docs/deploying_server_baremetal.md>Hướng dẫn Intel OVMS</a></p></div>",
+    "description": "<div><p>1. Tải xuống mô hình OV.</p><p>2. Thêm mô hình vào 'Manager'.</p><p>Chỉ hỗ trợ Windows!</p><p>Đường dẫn cài đặt OVMS: '%USERPROFILE%\\.cherrychat\\ovms'.</p><p>Vui lòng tham khảo <a href=https://github.com/openvinotoolkit/model_server/blob/c55551763d02825829337b62c2dcef9339706f79/docs/deploying_server_baremetal.md>Hướng dẫn Intel OVMS</a></p></div>",
     "download": {
       "button": "Tải xuống",
       "error": "Lỗi tải xuống",
@@ -4554,7 +4554,7 @@
         },
         "root": {
           "label": "Thư mục sao lưu (Tùy chọn)",
-          "placeholder": "ví dụ: /cherry-studio"
+          "placeholder": "ví dụ: /cherry-chat"
         },
         "secretAccessKey": {
           "label": "Khóa Truy Cập Bí Mật",

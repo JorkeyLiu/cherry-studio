@@ -3140,7 +3140,7 @@
       "stop": "Διακοπή OVMS",
       "stopping": "Διακοπή σε εξέλιξη"
     },
-    "description": "<div><p>1. Λήψη μοντέλου OV.</p><p>2. Προσθήκη μοντέλου στο 'Manager'.</p><p>Υποστηρίζεται μόνο στα Windows!</p><p>Διαδρομή εγκατάστασης OVMS: '%USERPROFILE%\\.cherrystudio\\ovms' .</p><p>Ανατρέξτε στον <a href=https://github.com/openvinotoolkit/model_server/blob/c55551763d02825829337b62c2dcef9339706f79/docs/deploying_server_baremetal.md>Οδηγό Intel OVMS</a></p></div>",
+    "description": "<div><p>1. Λήψη μοντέλου OV.</p><p>2. Προσθήκη μοντέλου στο 'Manager'.</p><p>Υποστηρίζεται μόνο στα Windows!</p><p>Διαδρομή εγκατάστασης OVMS: '%USERPROFILE%\\.cherrychat\\ovms' .</p><p>Ανατρέξτε στον <a href=https://github.com/openvinotoolkit/model_server/blob/c55551763d02825829337b62c2dcef9339706f79/docs/deploying_server_baremetal.md>Οδηγό Intel OVMS</a></p></div>",
     "download": {
       "button": "Λήψη",
       "error": "Η επιλογή απέτυχε",
@@ -4554,7 +4554,7 @@
         },
         "root": {
           "label": "Κατάλογος αντιγράφου ασφαλείας (προαιρετικό)",
-          "placeholder": "Π.χ.: /cherry-studio"
+          "placeholder": "Π.χ.: /cherry-chat"
         },
         "secretAccessKey": {
           "label": "Secret Access Key",

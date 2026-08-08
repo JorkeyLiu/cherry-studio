@@ -43,7 +43,7 @@ function getUserBinDir(): string {
 }
 
 /**
- * Extract bundled rtk binary to ~/.cherrystudio/bin/ if not already present or outdated.
+ * Extract bundled rtk binary to ~/.cherrychat/bin/ if not already present or outdated.
  * Called once at app startup.
  */
 export async function extractRtkBinaries(): Promise<void> {

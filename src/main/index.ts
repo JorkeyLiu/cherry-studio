@@ -352,7 +352,7 @@ if (!app.requestSingleInstanceLock()) {
     powerMonitorService.init()
     analyticsService.init()
 
-    // Extract bundled rtk binary to ~/.cherrystudio/bin/ on first run
+    // Extract bundled rtk binary to ~/.cherrychat/bin/ on first run
     extractRtkBinaries().catch((error) => {
       logger.warn('Failed to extract rtk binaries (non-fatal)', {
         error: error instanceof Error ? error.message : String(error)

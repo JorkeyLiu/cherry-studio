@@ -42,4 +42,29 @@ describe('LOCK-UPDATER-004 — assistant MCP release check (single Cherry Chat i
     // LOCK-UPDATER-004: zero GitHub release/feed/network calls.
     expect(fetchSpy).not.toHaveBeenCalled()
   })
+
+  it('tool descriptions identify the Cherry Chat product name, not Cherry Studio', async () => {
+    const { default: AssistantServer } = await import('../assistant')
+    const server = new AssistantServer()
+
+    // tools/list is registered on the underlying raw Server, keyed by method.
+    const rawServer = (
+      server.mcpServer as unknown as {
+        server: { _requestHandlers: Map<string, (request: unknown) => Promise<unknown>> }
+      }
+    ).server
+    const listToolsHandler = rawServer._requestHandlers.get('tools/list')
+    expect(listToolsHandler).toBeDefined()
+
+    const result = (await listToolsHandler!({ method: 'tools/list', params: {} })) as {
+      tools: { name: string; description: string }[]
+    }
+    const tools = result.tools
+    expect(tools).toHaveLength(2)
+
+    for (const tool of tools) {
+      expect(tool.description).toContain('Cherry Chat')
+      expect(tool.description).not.toContain('Cherry Studio')
+    }
+  })
 })

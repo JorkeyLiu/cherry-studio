@@ -27,6 +27,7 @@ import * as realOs from 'node:os'
 import * as realPath from 'node:path'
 import { crc32 } from 'node:zlib'
 
+import { appIdentity } from '@shared/config/identity'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ---------------------------------------------------------------------------
@@ -884,7 +885,7 @@ describe('BackupManager Production-Path Integration', () => {
       realFs.writeFileSync(fakeDestFile, '')
 
       // Record staging directory count before the failing backup
-      const backupTempBase = realPath.join(realOs.tmpdir(), 'cherry-studio', 'backup')
+      const backupTempBase = realPath.join(realOs.tmpdir(), appIdentity.tempDirName, 'backup')
       const countStagingDirs = (): number => {
         if (!realFs.existsSync(backupTempBase)) return 0
         return realFs.readdirSync(backupTempBase).filter((d) => d.startsWith('staging-')).length
@@ -1318,7 +1319,7 @@ describe('BackupManager Production-Path Integration', () => {
       await expect(bm.restore({} as any, zipPath)).rejects.toThrow()
 
       // Verify no stale extraction dirs remain (cleanup in catch)
-      const restoreBase = realPath.join(realOs.tmpdir(), 'cherry-studio', 'restore')
+      const restoreBase = realPath.join(realOs.tmpdir(), appIdentity.tempDirName, 'restore')
       if (realFs.existsSync(restoreBase)) {
         const entries = realFs.readdirSync(restoreBase, { withFileTypes: true })
         const extractionDirs = entries.filter((e) => e.isDirectory() && e.name.startsWith('extraction-'))
@@ -1328,7 +1329,7 @@ describe('BackupManager Production-Path Integration', () => {
     })
 
     it('cleanupOrphanedExtractions removes stale extraction directories', async () => {
-      const restoreBase = realPath.join(realOs.tmpdir(), 'cherry-studio', 'restore')
+      const restoreBase = realPath.join(realOs.tmpdir(), appIdentity.tempDirName, 'restore')
       realFs.mkdirSync(restoreBase, { recursive: true })
 
       // Create a stale extraction directory (simulating a crashed restore)
@@ -1340,15 +1341,21 @@ describe('BackupManager Production-Path Integration', () => {
       const oldTime = new Date(Date.now() - 2 * 60 * 60 * 1000) // 2 hours ago
       realFs.utimesSync(staleDir, oldTime, oldTime)
 
-      // Run cleanup with 1-hour threshold
-      await BackupManager.cleanupOrphanedExtractions(60 * 60 * 1000)
+      try {
+        // Run cleanup with 1-hour threshold
+        await BackupManager.cleanupOrphanedExtractions(60 * 60 * 1000)
 
-      // Stale dir should be removed
-      expect(realFs.existsSync(staleDir)).toBe(false)
+        // Stale dir should be removed
+        expect(realFs.existsSync(staleDir)).toBe(false)
+      } finally {
+        // Ownership-scoped cleanup: remove the stale dir even if an assertion
+        // fails so it cannot pollute the identity temp root in later runs
+        realFs.rmSync(staleDir, { recursive: true, force: true })
+      }
     })
 
     it('cleanupOrphanedExtractions preserves recent extraction directories', async () => {
-      const restoreBase = realPath.join(realOs.tmpdir(), 'cherry-studio', 'restore')
+      const restoreBase = realPath.join(realOs.tmpdir(), appIdentity.tempDirName, 'restore')
       realFs.mkdirSync(restoreBase, { recursive: true })
 
       // Create a recent extraction directory (active restore)
@@ -1356,14 +1363,17 @@ describe('BackupManager Production-Path Integration', () => {
       realFs.mkdirSync(recentDir, { recursive: true })
       realFs.writeFileSync(realPath.join(recentDir, 'test.txt'), 'recent data')
 
-      // Run cleanup with 1-hour threshold
-      await BackupManager.cleanupOrphanedExtractions(60 * 60 * 1000)
+      try {
+        // Run cleanup with 1-hour threshold
+        await BackupManager.cleanupOrphanedExtractions(60 * 60 * 1000)
 
-      // Recent dir should be preserved
-      expect(realFs.existsSync(recentDir)).toBe(true)
-
-      // Cleanup
-      realFs.rmSync(recentDir, { recursive: true, force: true })
+        // Recent dir should be preserved
+        expect(realFs.existsSync(recentDir)).toBe(true)
+      } finally {
+        // Ownership-scoped cleanup: remove the recent dir even if an assertion
+        // fails so it cannot pollute the identity temp root in later runs
+        realFs.rmSync(recentDir, { recursive: true, force: true })
+      }
     })
 
     it('sanitizeProviderFilename strips traversal from WebDAV/S3 filenames', async () => {
@@ -1563,7 +1573,7 @@ describe('BackupManager Production-Path Integration', () => {
       const bm = new BackupManager()
 
       // Record extraction dirs before
-      const restoreBase = realPath.join(realOs.tmpdir(), 'cherry-studio', 'restore')
+      const restoreBase = realPath.join(realOs.tmpdir(), appIdentity.tempDirName, 'restore')
       const countExtractions = (): number => {
         if (!realFs.existsSync(restoreBase)) return 0
         return realFs.readdirSync(restoreBase).filter((d) => d.startsWith('extraction-')).length

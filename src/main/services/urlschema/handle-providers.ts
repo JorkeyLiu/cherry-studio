@@ -28,7 +28,7 @@ export async function handleProvidersProtocolUrl(url: URL) {
       //   "name": "TokenFlux", // optional
       //   "type": "openai" // optional
       // }
-      // cherrystudio://providers/api-keys?v=1&data={base64Encode(JSON.stringify(jsonConfig))}
+      // cherrychat://providers/api-keys?v=1&data={base64Encode(JSON.stringify(jsonConfig))}
 
       // replace + and / to _ and - because + and / are processed by URLSearchParams
       const processedSearch = url.search.replaceAll('+', '_').replaceAll('/', '-')

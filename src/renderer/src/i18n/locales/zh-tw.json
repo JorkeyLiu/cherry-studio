@@ -3155,7 +3155,7 @@
       "stop": "停止 OVMS",
       "stopping": "停止中"
     },
-    "description": "<div><p>1. 下載 OV 模型。</p><p>2. 在 'Manager' 中新增模型。</p><p>僅支援 Windows！</p><p>OVMS 安裝路徑：'%USERPROFILE%\\.cherrystudio\\ovms' 。</p><p>請參考 <a href=https://github.com/openvinotoolkit/model_server/blob/c55551763d02825829337b62c2dcef9339706f79/docs/deploying_server_baremetal.md>Intel OVMS 指南</a></p></dev>",
+    "description": "<div><p>1. 下載 OV 模型。</p><p>2. 在 'Manager' 中新增模型。</p><p>僅支援 Windows！</p><p>OVMS 安裝路徑：'%USERPROFILE%\\.cherrychat\\ovms' 。</p><p>請參考 <a href=https://github.com/openvinotoolkit/model_server/blob/c55551763d02825829337b62c2dcef9339706f79/docs/deploying_server_baremetal.md>Intel OVMS 指南</a></p></dev>",
     "download": {
       "button": "下載",
       "error": "下載失敗",
@@ -4569,7 +4569,7 @@
         },
         "root": {
           "label": "備份目錄（可選）",
-          "placeholder": "例如：/cherry-studio"
+          "placeholder": "例如：/cherry-chat"
         },
         "secretAccessKey": {
           "label": "Secret Access Key",

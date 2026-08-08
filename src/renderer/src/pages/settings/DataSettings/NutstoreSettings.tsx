@@ -79,8 +79,8 @@ const NutstoreSettings: FC = () => {
           setNutstoreUsername(decrypted.username)
           setNutstorePass(decrypted.access_token)
           if (!nutstorePath) {
-            dispatch(setNutstorePath('/cherry-studio'))
-            setStoragePath('/cherry-studio')
+            dispatch(setNutstorePath('/cherry-chat'))
+            setStoragePath('/cherry-chat')
           }
         }
       }
