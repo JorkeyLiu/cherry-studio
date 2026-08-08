@@ -27,6 +27,34 @@ const BUN_PACKAGES = {
 }
 
 /**
+ * Resolves the directory the binary will be installed into.
+ *
+ * The Electron main process derives the canonical install target from the
+ * application identity contract (`HOME_CHERRY_DIR` in
+ * packages/shared/config/constant, currently `.cherrychat`) and passes it
+ * through the `CHERRY_BIN_DIR` environment variable (see `runInstallScript` in
+ * src/main/utils/process.ts). The runtime binary lookup (`getBinaryPath`,
+ * `MCPService`) resolves the same `~/.cherrychat/bin` directory, so honouring
+ * this bridge keeps installer and runtime in sync.
+ *
+ * For direct invocation without the app bridge (e.g. `node install-bun.js`),
+ * fall back to the current-target home directory. This literal mirrors the
+ * single identity source (`appIdentity.homeDirName`) and is intentionally NOT
+ * used when the app bridge is available.
+ *
+ * @returns {string} Absolute path to the bin directory
+ */
+function resolveBinDir() {
+  const envBinDir = process.env.CHERRY_BIN_DIR
+  if (envBinDir && typeof envBinDir === 'string' && envBinDir.trim().length > 0) {
+    return envBinDir
+  }
+  const fallbackDir = path.join(os.homedir(), '.cherrychat', 'bin')
+  console.warn(`CHERRY_BIN_DIR not set; falling back to direct-invocation default ${fallbackDir}`)
+  return fallbackDir
+}
+
+/**
  * Downloads and extracts the bun binary for the specified platform and architecture
  * @param {string} platform Platform to download for (e.g., 'darwin', 'win32', 'linux')
  * @param {string} arch Architecture to download for (e.g., 'x64', 'arm64')
@@ -47,7 +75,7 @@ async function downloadBunBinary(platform, arch, version = DEFAULT_BUN_VERSION, 
   }
 
   // Create output directory structure
-  const binDir = path.join(os.homedir(), '.cherrystudio', 'bin')
+  const binDir = resolveBinDir()
   // Ensure directories exist
   fs.mkdirSync(binDir, { recursive: true })
 
@@ -165,18 +193,24 @@ async function installBun() {
   return await downloadBunBinary(platform, arch, version, isMusl, isBaseline)
 }
 
-// Run the installation
-installBun()
-  .then((retCode) => {
-    if (retCode === 0) {
-      console.log('Installation successful')
-      process.exit(0)
-    } else {
-      console.error('Installation failed')
-      process.exit(retCode)
-    }
-  })
-  .catch((error) => {
-    console.error('Installation failed:', error)
-    process.exit(100)
-  })
+// Run the installation when executed as the main entry point. Guarding on
+// `require.main === module` keeps the script importable (e.g. by focused
+// tests) without triggering a download.
+if (require.main === module) {
+  installBun()
+    .then((retCode) => {
+      if (retCode === 0) {
+        console.log('Installation successful')
+        process.exit(0)
+      } else {
+        console.error('Installation failed')
+        process.exit(retCode)
+      }
+    })
+    .catch((error) => {
+      console.error('Installation failed:', error)
+      process.exit(100)
+    })
+}
+
+module.exports = { resolveBinDir }

@@ -15,13 +15,28 @@ import getShellEnv, { refreshShellEnv } from './shell-env'
 
 const logger = loggerService.withContext('Utils:Process')
 
+/**
+ * Run an installer script placed in the packaged `resources/scripts` directory.
+ *
+ * The script receives the canonical binary install directory through the
+ * `CHERRY_BIN_DIR` environment variable. The value is derived from the single
+ * application identity contract (`HOME_CHERRY_DIR`), which is exactly the
+ * directory the runtime binary lookup (`getBinaryPath`, `MCPService`) resolves,
+ * so the installer writes binaries where the runtime expects them. Scripts must
+ * not duplicate the home-directory identity literal (USER-SCOPE-011); they may
+ * only fall back for direct invocation without this app bridge.
+ *
+ * @param scriptPath - Installer script file name under `resources/scripts`
+ * @param extraEnv - Additional environment variables for the child process
+ */
 export function runInstallScript(scriptPath: string, extraEnv?: Record<string, string>): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const installScriptPath = path.join(getResourcePath(), 'scripts', scriptPath)
-    logger.info(`Running script at: ${installScriptPath}`)
+    const installBinDir = path.join(os.homedir(), HOME_CHERRY_DIR, 'bin')
+    logger.info(`Running script at: ${installScriptPath}`, { installBinDir })
 
     const nodeProcess = spawn(process.execPath, [installScriptPath], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...extraEnv }
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', CHERRY_BIN_DIR: installBinDir, ...extraEnv }
     })
 
     nodeProcess.stdout.on('data', (data) => {
