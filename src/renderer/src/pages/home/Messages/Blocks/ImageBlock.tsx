@@ -1,6 +1,7 @@
 import { PictureOutlined } from '@ant-design/icons'
 import ImageViewer from '@renderer/components/ImageViewer'
 import FileManager from '@renderer/services/FileManager'
+import { useAppSelector } from '@renderer/store'
 import { type ImageMessageBlock, MessageBlockStatus } from '@renderer/types/newMessage'
 import { isBlockAttachmentUnavailable } from '@renderer/utils/attachmentAvailability'
 import { Skeleton } from 'antd'
@@ -14,6 +15,14 @@ interface Props {
 }
 
 const ImageBlock: React.FC<Props> = ({ block, isSingle = false }) => {
+  // LOCK-IMG-RUNTIME: subscribe NARROWLY to runtime.filesPath so the block
+  // re-renders when useAppInit populates it asynchronously after app init.
+  // React.memo alone would freeze the first render on the empty path; the
+  // store subscription (useSyncExternalStore) is what re-renders this memoized
+  // component. filesPath is '' before app init completes — never construct a
+  // `file://<filesPath>/<id><ext>` URL from an empty root.
+  const filesPath = useAppSelector((state) => state.runtime.filesPath)
+
   if (block.status === MessageBlockStatus.PENDING) {
     return <Skeleton.Image active style={{ width: 200, height: 200 }} />
   }
@@ -28,8 +37,8 @@ const ImageBlock: React.FC<Props> = ({ block, isSingle = false }) => {
   if (block.status === MessageBlockStatus.STREAMING || block.status === MessageBlockStatus.SUCCESS) {
     const images = block.metadata?.generateImageResponse?.images?.length
       ? block.metadata?.generateImageResponse?.images
-      : block?.file
-        ? [`file://${FileManager.getFilePath(block?.file)}`]
+      : block?.file && filesPath.length > 0
+        ? [`file://${filesPath}/${block.file.id}${block.file.ext}`]
         : block?.url
           ? [block.url]
           : []
