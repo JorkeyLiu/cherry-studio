@@ -56,7 +56,7 @@ export class AppService {
   Name=${appIdentity.productName}
   Comment=A powerful AI assistant for producer.
   Exec=${executablePath}
-  Icon=cherrystudio
+  Icon=${appIdentity.linuxClassAndName}
   Terminal=false
   StartupNotify=false
   Categories=Development;Utility;

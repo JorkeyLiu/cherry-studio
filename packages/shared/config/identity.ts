@@ -54,7 +54,10 @@ export interface AppIdentity {
   userAgentProduct: string
   /** Internal OpenAI-compatible API title (served at the API server root / Swagger docs). */
   apiTitle: string
-  /** Linux window class/name switch value. */
+  /**
+   * Linux window class/name switch value. Also the Linux desktop-entry icon
+   * identifier, matching the packaged `linux.executableName` (USER-SCOPE-013).
+   */
   linuxClassAndName: string
   /** Product name reported to the crash reporter. */
   crashReporterProductName: string
