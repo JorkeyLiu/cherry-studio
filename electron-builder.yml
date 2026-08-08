@@ -97,7 +97,10 @@ portable:
 mac:
   entitlementsInherit: build/entitlements.mac.plist
   notarize: false
-  artifactName: ${productName}-${version}-${arch}.${ext}
+  # VERSION-003: the Build ID is injected once per build by the
+  # build-identity wrapper and interpolated via ${env.…}; product version
+  # (${version}) stays the manually maintained 0.1.0 (VERSION-002/004).
+  artifactName: ${productName}-${version}-${env.CHERRY_CHAT_BUILD_ID}-${arch}.${ext}
   extendInfo:
     - NSCameraUsageDescription: Application requests access to the device's camera.
     - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
@@ -127,10 +130,14 @@ rpm:
   # Workaround for electron build issue on rpm package:
   # https://github.com/electron/forge/issues/3594
   fpm: ["--rpm-rpmbuild-define=_build_id_links none"]
-# No `publish` block and no `releaseInfo`/release notes: Cherry Chat does not
-# consume any Cherry Studio feed/release channel (LOCK-UPDATER-004) and no
-# independent release endpoint is approved yet — the updater stays disabled and
-# unconfigured.
+# Updater suppression (LOCK-UPDATER-004 / LOCK-RELEASE-FREEZE): `publish: null`
+# is INTENTIONAL — under installed electron-builder 26.8.1, an undefined/absent
+# `publish` (or `[]`) lets the builder infer a GitHub publish endpoint from the
+# current/future git remote and emit app-update.yml / latest-mac.yml metadata.
+# Explicit null suppresses that inference. It must stay null until an
+# independently reviewed release endpoint is approved; repository creation or
+# remote changes do NOT authorize updater enablement (REPO-MIGRATION-002/003).
+publish: null
 electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/
 beforePack: scripts/before-pack.js

@@ -4016,6 +4016,8 @@
   },
   "settings": {
     "about": {
+      "build_id": "[to be translated]:Build ID",
+      "build_version": "[to be translated]:Build Version",
       "careers": {
         "button": "Vista",
         "title": "Carreras"

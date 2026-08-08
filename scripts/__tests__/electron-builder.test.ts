@@ -13,7 +13,13 @@ import { beforeAll, describe, expect, it } from 'vitest'
  * they verify the actual effective config the ordinary packaging commands
  * consume — not a text-only snapshot. Locks covered: LOCK-RETIRE-001 (Cherry
  * Chat identity only), LOCK-UPDATER-004 (no Cherry Studio feed / release
- * notes), LOCK-PLATFORM-005 (default macOS arm64 command, no flavor selection).
+ * notes; explicit `publish: null` suppresses git-remote repository inference),
+ * LOCK-PLATFORM-005 (default macOS arm64 command, no flavor selection).
+ *
+ * Migration-portability (REPO-MIGRATION-001): these package-contract
+ * assertions describe the CURRENT package.json — they never read Git history,
+ * so they keep passing after the current state becomes a new Cherry Chat
+ * repository.
  */
 
 const REPO_ROOT = process.cwd()
@@ -27,7 +33,24 @@ const { getConfig, validateConfiguration } = requireFromElectronBuilder('app-bui
 const LOCKED_APP_ID = 'com.jorkeyliu.CherryChat'
 const LOCKED_PRODUCT_NAME = 'Cherry Chat'
 const CHERRY_STUDIO_FEED_URL = 'https://releases.cherry-ai.com'
-const ARTIFACT_NAME_TEMPLATE = '${productName}-${version}-${arch}.${ext}'
+// VERSION-003: the per-build Build ID is injected via env macro by the
+// build-identity wrapper; the product version stays `${version}` (0.1.0).
+const ARTIFACT_NAME_TEMPLATE = '${productName}-${version}-${env.CHERRY_CHAT_BUILD_ID}-${arch}.${ext}'
+const BUILD_ID_ENV_NAME = 'CHERRY_CHAT_BUILD_ID'
+
+const IDENTITY_WRAPPER = 'dotenv -- tsx scripts/build-identity.ts --spawn'
+const WRAPPED_PACKAGING_SCRIPTS = new Set([
+  'build:unpack',
+  'build:win',
+  'build:win:x64',
+  'build:win:arm64',
+  'build:mac',
+  'build:mac:arm64',
+  'build:mac:x64',
+  'build:linux',
+  'build:linux:arm64',
+  'build:linux:x64'
+])
 
 interface LockedProtocol {
   name: string
@@ -40,6 +63,7 @@ interface EffectiveBuilderConfig {
   protocols?: LockedProtocol | LockedProtocol[]
   publish?: unknown
   releaseInfo?: { releaseNotes?: string | null } | null
+  buildVersion?: string
   mac?: { artifactName?: string }
   beforePack?: string
   afterSign?: string
@@ -82,21 +106,50 @@ describe('electron-builder base config — single Cherry Chat identity (LOCK-RET
     expect(allSchemes).not.toContain('cherrystudio')
   })
 
-  it('has no publish feed configured (LOCK-UPDATER-004)', () => {
-    expect(config.publish).toBeUndefined()
+  it('suppresses publish with an explicit null — no git-remote inference (LOCK-UPDATER-004)', () => {
+    // Under installed electron-builder 26.8.1 an undefined/absent `publish`
+    // (or `[]`) makes the builder fall back to repository-info inference and
+    // emit app-update.yml / latest-mac.yml metadata. Explicit null suppresses
+    // that. The value must be exactly null — never a configured endpoint.
+    expect(config.publish).toBeNull()
     expect(JSON.stringify(config)).not.toContain(CHERRY_STUDIO_FEED_URL)
   })
 
-  it('has no release notes (LOCK-UPDATER-004)', () => {
-    expect(config.releaseInfo?.releaseNotes).toBeUndefined()
-    expect(JSON.stringify(config)).not.toContain('Cherry Studio 1.9.11')
+  it('writes the suppression explicitly as `publish: null` in the config text', () => {
+    // Text-level lock: the base config must spell out `null` so the
+    // suppression is a deliberate, reviewable statement — not an absent key.
+    const text = readFileSync(join(REPO_ROOT, 'electron-builder.yml'), 'utf8')
+    expect(text).toMatch(/^publish: null\s*$/m)
   })
 
-  it('keeps the packaging hooks and artifact-name template', () => {
+  it('has no release notes and no Cherry Studio identity anywhere (LOCK-UPDATER-004)', () => {
+    // The actual no-releaseInfo guard: releaseInfo is absent, so no release
+    // notes metadata can be emitted into generated artifacts.
+    expect(config.releaseInfo?.releaseNotes).toBeUndefined()
+    // Broad no-Cherry-Studio guard: the whole serialized effective config must
+    // not reference the retired identity anywhere — not productName, appId,
+    // protocol names, artifact templates, or any other field.
+    expect(JSON.stringify(config)).not.toContain('Cherry Studio')
+  })
+
+  it('keeps the packaging hooks and the Build ID artifact-name template (VERSION-003)', () => {
     expect(config.beforePack).toBe('scripts/before-pack.js')
     expect(config.afterSign).toBe('scripts/notarize.js')
     expect(config.artifactBuildCompleted).toBe('scripts/artifact-build-completed.js')
     expect(config.mac?.artifactName).toBe(ARTIFACT_NAME_TEMPLATE)
+    expect(config.mac?.artifactName).toContain(`\${env.${BUILD_ID_ENV_NAME}}`)
+    // Product version macro is preserved: app.getVersion() stays 0.1.0.
+    expect(config.mac?.artifactName).toContain('${version}')
+  })
+
+  it('derives the numeric macOS build version via the beforePack hook, not a static macro (VERSION-003)', () => {
+    // electron-builder does not macro-expand `buildVersion` (AppInfo reads the
+    // config value raw), so the config must NOT carry a `${env.…}` template.
+    // The build-identity wrapper sets CHERRY_CHAT_BUILD_VERSION and
+    // scripts/apply-build-version.js (invoked by beforePack) applies it to
+    // AppInfo so it lands in CFBundleVersion.
+    expect(config.buildVersion).toBeUndefined()
+    expect(config.beforePack).toBe('scripts/before-pack.js')
   })
 
   it('passes the installed electron-builder schema validation', () => {
@@ -113,8 +166,22 @@ describe('package scripts — ordinary default macOS arm64 packaging (LOCK-RETIR
 
   it('keeps the default macOS arm64 build command producing the single identity', () => {
     // The ordinary/default macOS arm64 packaging command exists and selects no
-    // flavor — it now produces Cherry Chat via the base config.
-    expect(pkg.scripts['build:mac:arm64']).toBe('dotenv npm run build && electron-builder --mac --arm64')
+    // flavor — it now produces Cherry Chat via the base config. It is wrapped
+    // by the build-identity wrapper so one build invocation reuses one Build ID
+    // across the electron-vite compile and the electron-builder packaging.
+    expect(pkg.scripts['build:mac:arm64']).toBe(
+      'dotenv -- tsx scripts/build-identity.ts --spawn "npm run build && electron-builder --mac --arm64"'
+    )
+  })
+
+  it('keeps the fast unpacked .app / packaged-E2E build command (COMMAND-002)', () => {
+    // `pnpm build:unpack` is the fast unpacked `.app` helper used as the
+    // packaged-E2E prerequisite (tests/e2e/README.md). It carries the same one
+    // build-identity wrapper as the full macOS build, but targets `--dir`
+    // instead of a distributable DMG/ZIP.
+    expect(pkg.scripts['build:unpack']).toBe(
+      'dotenv -- tsx scripts/build-identity.ts --spawn "npm run build && electron-builder --dir"'
+    )
   })
 
   it('has no dedicated flavor-selection build command (LOCK-RETIRE-002)', () => {
@@ -137,5 +204,78 @@ describe('package metadata — active package and desktop identity are Cherry Ch
   it('carries the Cherry Chat desktop entry name', () => {
     expect(pkg.desktopName).toBe('CherryChat.desktop')
     expect(pkg.desktopName).not.toContain('Studio')
+  })
+})
+
+describe('package contract — migration-portable stable assertions (REPO-MIGRATION-001)', () => {
+  // These assertions describe the CURRENT package.json only. They intentionally
+  // avoid Git history (REPO-MIGRATION-001): after the current state becomes a
+  // new Cherry Chat repository, they must still pass unchanged.
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
+    version: string
+    scripts: Record<string, string>
+    devDependencies: Record<string, string>
+  }
+
+  const REQUIRED_SCRIPTS = [
+    'dev',
+    'build',
+    'build:check',
+    'build:mac:arm64',
+    'build:unpack',
+    'test',
+    'test:scripts',
+    'typecheck',
+    'lint',
+    'format'
+  ]
+
+  const REQUIRED_BUILD_DEPS = ['tsx', 'dotenv-cli', 'electron-builder', 'electron-vite', 'vitest']
+
+  it('keeps the product version at the approved 0.1.0 (VERSION-002)', () => {
+    expect(pkg.version).toBe('0.1.0')
+  })
+
+  it('keeps every required build/test/dev script present', () => {
+    for (const script of REQUIRED_SCRIPTS) {
+      expect(pkg.scripts[script], `${script} must exist`).toBeDefined()
+      expect(pkg.scripts[script].trim(), `${script} must be non-empty`).not.toBe('')
+    }
+  })
+
+  it('wraps every packaging command exactly once and never nests wrappers', () => {
+    for (const name of WRAPPED_PACKAGING_SCRIPTS) {
+      const value = pkg.scripts[name]
+      expect(value, name).toContain('scripts/build-identity.ts --spawn')
+      expect(value.match(/scripts\/build-identity\.ts/g)?.length, `${name} has exactly one wrapper`).toBe(1)
+      expect(value, name).toContain('electron-builder ')
+      expect(value, name).not.toContain('build-identity.ts --spawn "dotenv')
+      // One wrapper per packaging script: the identity wrapper is the leading
+      // command exactly once, followed by the inner compile+package invocation.
+      expect(value, name).toContain(IDENTITY_WRAPPER)
+      expect(value.match(new RegExp(IDENTITY_WRAPPER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))?.length).toBe(1)
+    }
+  })
+
+  it('keeps the fast unpacked command and the full macOS command distinct (COMMAND-001/002)', () => {
+    expect(pkg.scripts['build:unpack']).not.toBe(pkg.scripts['build:mac:arm64'])
+    expect(pkg.scripts['build:unpack']).toContain('electron-builder --dir')
+    expect(pkg.scripts['build:mac:arm64']).toContain('electron-builder --mac --arm64')
+  })
+
+  it('keeps the retired flavor build command absent (LOCK-RETIRE-001/002)', () => {
+    expect(pkg.scripts['build:chat:mac:arm64']).toBeUndefined()
+    expect(Object.keys(pkg.scripts).filter((s) => s.startsWith('build:chat'))).toEqual([])
+  })
+
+  it('keeps the required build devDependencies present', () => {
+    for (const dep of REQUIRED_BUILD_DEPS) {
+      expect(pkg.devDependencies[dep], `${dep} must be present`).toBeDefined()
+    }
+    // TypeScript compiler tooling: `typescript` (tsserver/tsc) plus the
+    // `@typescript/native-preview` package that provides the `tsgo` binary
+    // used by `typecheck:node` / `typecheck:web`.
+    expect(pkg.devDependencies['typescript']).toBeDefined()
+    expect(pkg.devDependencies['@typescript/native-preview']).toBeDefined()
   })
 })

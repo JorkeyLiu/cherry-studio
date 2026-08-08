@@ -65,6 +65,12 @@ never from working-tree files, which may include uncommitted or throwaway artifa
    (`electron .` against `electron-vite` output). A stale or absent build makes tests
    validate old code — never run E2E against a build you did not just produce.
    `pnpm build` = `npm run generate:openapi && npm run typecheck && electron-vite build`.
+3. **`pnpm build:unpack` — for the packaged-isolation spec only.** The Phase C spec
+   (`specs/identity/packaged-isolation.spec.ts`) launches the REAL packaged app
+   (`dist/mac-arm64/Cherry Chat.app`), so it needs the canonical wrapped unpacked
+   build `pnpm build:unpack` (= the build-identity wrapper around
+   `npm run build && electron-builder --dir`) so the packaged artifact carries the
+   per-build Build ID / CFBundleVersion identity.
 
 ### Native ABI prerequisites (better-sqlite3)
 

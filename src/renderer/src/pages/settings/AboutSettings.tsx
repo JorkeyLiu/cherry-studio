@@ -26,6 +26,8 @@ import { SettingContainer, SettingDivider, SettingGroup, SettingRow, SettingTitl
 
 const AboutSettings: FC = () => {
   const [version, setVersion] = useState('')
+  const [buildId, setBuildId] = useState('')
+  const [buildVersion, setBuildVersion] = useState('')
   const [isPortable, setIsPortable] = useState(false)
   const { t } = useTranslation()
   const { autoCheckUpdate, setAutoCheckUpdate, testPlan, setTestPlan, testChannel, setTestChannel } = useSettings()
@@ -67,9 +69,11 @@ const AboutSettings: FC = () => {
   const mailto = async () => {
     const email = 'support@cherry-ai.com'
     const subject = `${APP_NAME} Feedback`
-    const version = (await window.api.getAppInfo()).version
+    const appInfo = await window.api.getAppInfo()
+    const version = appInfo.version
+    const buildId = appInfo.buildId
     const platform = window.electron.process.platform
-    const url = `mailto:${email}?subject=${subject}&body=%0A%0AVersion: ${version} | Platform: ${platform}`
+    const url = `mailto:${email}?subject=${subject}&body=%0A%0AVersion: ${version} | Build: ${buildId} | Platform: ${platform}`
     onOpenWebsite(url)
   }
 
@@ -150,6 +154,8 @@ const AboutSettings: FC = () => {
     void runAsyncFunction(async () => {
       const appInfo = await window.api.getAppInfo()
       setVersion(appInfo.version)
+      setBuildId(appInfo.buildId || '')
+      setBuildVersion(appInfo.buildVersion || '')
       setIsPortable(appInfo.isPortable)
     })
     setAutoCheckUpdate(autoCheckUpdate)
@@ -195,6 +201,18 @@ const AboutSettings: FC = () => {
               <Tag color="cyan" style={{ marginTop: 8 }}>
                 v{version}
               </Tag>
+              {buildId && (
+                <BuildIdentityText>
+                  <span>
+                    {t('settings.about.build_id')}: {buildId}
+                  </span>
+                  {buildVersion && (
+                    <span>
+                      {t('settings.about.build_version')}: {buildVersion}
+                    </span>
+                  )}
+                </BuildIdentityText>
+              )}
             </VersionWrapper>
           </Row>
           {!isPortable && (
@@ -359,6 +377,16 @@ const Description = styled.div`
 `
 
 const CheckUpdateButton = styled(Button)``
+
+const BuildIdentityText = styled.div`
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-2);
+`
 
 const AvatarWrapper = styled.div`
   position: relative;

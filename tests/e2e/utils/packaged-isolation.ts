@@ -48,8 +48,9 @@ export function packagedExecutablePath(projectRoot = process.cwd()): string {
   } catch {
     throw new Error(
       `Packaged Cherry Chat executable not found at ${exePath}. ` +
-        'A fresh production build + `--dir` package is required first ' +
-        '(pnpm build && electron-builder --dir --mac --arm64).'
+        'A fresh wrapped production build + `--dir` package is required first ' +
+        '(pnpm build:unpack — the build-identity wrapper around ' +
+        '`npm run build && electron-builder --dir`).'
     )
   }
   if (!stat.isFile() || stat.isSymbolicLink()) {

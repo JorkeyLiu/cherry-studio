@@ -4031,6 +4031,8 @@
   },
   "settings": {
     "about": {
+      "build_id": "構建 ID",
+      "build_version": "構建版本",
       "careers": {
         "button": "查看",
         "title": "加入我們"

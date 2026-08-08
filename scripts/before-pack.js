@@ -3,6 +3,8 @@ const { execSync } = require('child_process')
 const fs = require('fs')
 const path = require('path')
 const { parse, stringify } = require('yaml')
+const applyBuildVersion = require('./apply-build-version.js').default
+const { assertBuildIdentityEnv } = require('./assert-build-identity-env.js')
 
 const workspaceConfigPath = path.join(__dirname, '..', 'pnpm-workspace.yaml')
 
@@ -53,6 +55,18 @@ const platformToArch = {
 }
 
 exports.default = async function (context) {
+  // VERSION-003 / re-audit Finding A: fail fast on a split identity env
+  // (exactly one of CHERRY_CHAT_BUILD_ID / CHERRY_CHAT_BUILD_VERSION set) so
+  // no artifact can carry inconsistent Build ID / buildVersion metadata. Runs
+  // first, before electron-builder evaluates the artifactName macro or writes
+  // any artifact (packager flow: doPack -> emitBeforePack -> target.build).
+  assertBuildIdentityEnv()
+
+  // VERSION-003: apply the wrapper-provided numeric build version to AppInfo
+  // so it becomes CFBundleVersion (electron-builder does not macro-expand
+  // `buildVersion`; beforePack runs before the macOS plist is written).
+  applyBuildVersion(context)
+
   const arch = context.arch === Arch.arm64 ? 'arm64' : 'x64'
   const platformName = context.packager.platform.name
   const platform = platformToArch[platformName]

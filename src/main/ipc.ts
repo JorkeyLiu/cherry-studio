@@ -125,6 +125,10 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
 
   ipcMain.handle(IpcChannel.App_Info, () => ({
     version: app.getVersion(),
+    // VERSION-003/004: per-build identity — separate fields from the product
+    // version (app.getVersion() stays the package.json 0.1.0).
+    buildId: __BUILD_ID__,
+    buildVersion: __BUILD_VERSION__,
     isPackaged: app.isPackaged,
     appPath: app.getAppPath(),
     filesPath: getFilesDir(),

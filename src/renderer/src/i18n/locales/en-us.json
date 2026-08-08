@@ -4031,6 +4031,8 @@
   },
   "settings": {
     "about": {
+      "build_id": "Build ID",
+      "build_version": "Build Version",
       "careers": {
         "button": "View",
         "title": "Careers"

@@ -544,12 +544,18 @@ export type WebDavConfig = {
 
 export type AppInfo = {
   version: string
+  /** Per-build Build ID (UTC timestamp + short SHA + optional dirty marker). Separate from `version`. */
+  buildId: string
+  /** Numeric macOS build version (CFBundleVersion) for the current build. */
+  buildVersion: string
   isPackaged: boolean
   appPath: string
   configPath: string
   appDataPath: string
   resourcesPath: string
   filesPath: string
+  /** Notes directory; returned by the App_Info handler. */
+  notesPath: string
   logsPath: string
   arch: string
   isPortable: boolean

@@ -62,6 +62,9 @@ const FORBIDDEN_APP_PACKAGING_MARKERS = [
   // GitHub / GitCode release publishing of app assets.
   'ncipollo/release-action',
   'gh release create',
+  // electron-builder publish flag: would trigger app asset upload to a
+  // configured/git-inferred endpoint (LOCK-UPDATER-004 / REPO-MIGRATION-002).
+  '--publish',
   // Retired nightly / v2-preview artifact and feed naming.
   'cherry-studio-nightly',
   'cherry-studio-v2-preview',

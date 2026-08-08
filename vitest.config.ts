@@ -16,6 +16,16 @@ const mainLanes = classifyMainTestFiles()
 const mainBenchLanes = classifyMainBenchFiles()
 
 export default defineConfig({
+  // Compile-time build constants (VERSION-003/004) are injected by
+  // electron.vite.config.ts `define` in real builds. Vitest loads that config
+  // only for its plugins/aliases, so any main-process test importing a module
+  // that references `__BUILD_ID__` / `__BUILD_VERSION__` (e.g. src/main/ipc.ts)
+  // would otherwise hit undefined identifiers. Pin stable test placeholders
+  // through the same `define` convention — runtime semantics are unchanged.
+  define: {
+    __BUILD_ID__: JSON.stringify('test-build-id'),
+    __BUILD_VERSION__: JSON.stringify('0')
+  },
   test: {
     projects: [
       // 主进程核心 lane：无 native / 无 heavy 的其余主进程测试，threads 上限 2

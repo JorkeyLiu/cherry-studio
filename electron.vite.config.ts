@@ -7,6 +7,7 @@ import { visualizer } from 'rollup-plugin-visualizer'
 // assert not supported by biome
 // import pkg from './package.json' assert { type: 'json' }
 import pkg from './package.json'
+import { BUILD_ID_ENV, BUILD_VERSION_ENV, currentBuildIdentity } from './scripts/build-identity'
 import { buildProxyBootstrapPlugin } from './scripts/buildProxyBootstrapPlugin'
 
 const visualizerPlugin = (type: 'renderer' | 'main') => {
@@ -19,6 +20,37 @@ const isProd = process.env.NODE_ENV === 'production'
 // Application identity is a single immutable constant
 // (packages/shared/config/identity.ts, LOCK-RETIRE-001); there is no
 // build-time flavor define anymore (LOCK-RETIRE-002).
+
+// VERSION-003: one build invocation computes the Build ID once (build-identity
+// wrapper sets CHERRY_CHAT_BUILD_ID / CHERRY_CHAT_BUILD_VERSION for the whole
+// spawn tree). When absent (plain `electron-vite build`, `dev`), compute a
+// fallback identity here so the About surface still has a traceable value.
+//
+// A hand-crafted PARTIAL environment (exactly one of the two env halves set)
+// is treated as absent so buildId and buildVersion always come from the SAME
+// single capture and can never disagree (VERSION-003 coherence). This compile
+// side is the only place a partial env is absorbed: on the PACKAGING path a
+// partial env is a hard failure (scripts/assert-build-identity-env.js via the
+// beforePack hook), so no artifact can ever carry a split identity.
+function resolveBuildIdentity(): { buildId: string; macBuildVersion: string } {
+  const envBuildId = process.env[BUILD_ID_ENV]
+  const envBuildVersion = process.env[BUILD_VERSION_ENV]
+  if (envBuildId && envBuildVersion) {
+    return { buildId: envBuildId, macBuildVersion: envBuildVersion }
+  }
+  // Under Vitest this config is loaded only for its plugins/aliases — the
+  // `define` values are never consumed, so never spawn git subprocesses while
+  // test configs load (process.env.VITEST is the Vitest marker).
+  if (process.env.VITEST === 'true') {
+    return { buildId: 'test-build-identity', macBuildVersion: '0' }
+  }
+  // Partial env or no env: compute both halves fresh from ONE captured
+  // timestamp so buildId/buildVersion always agree.
+  const identity = currentBuildIdentity()
+  return { buildId: identity.buildId, macBuildVersion: identity.macBuildVersion }
+}
+
+const buildIdentity = resolveBuildIdentity()
 
 export default defineConfig({
   main: {
@@ -39,6 +71,12 @@ export default defineConfig({
         '@mcp-trace/trace-core': resolve('packages/mcp-trace/trace-core'),
         '@mcp-trace/trace-node': resolve('packages/mcp-trace/trace-node')
       }
+    },
+    define: {
+      // VERSION-004: Build ID / numeric build version are separate fields from
+      // the product version (`app.getVersion()` stays package.json 0.1.0).
+      __BUILD_ID__: JSON.stringify(buildIdentity.buildId),
+      __BUILD_VERSION__: JSON.stringify(buildIdentity.macBuildVersion)
     },
     build: {
       rollupOptions: {
