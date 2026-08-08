@@ -471,8 +471,9 @@ test.describe('Phase 5.4: Topic move and message delete undo/redo', () => {
     const runtimeAppDataPath = getRuntimeAppDataPath()
     expect(runtimeAppDataPath).not.toBeNull()
     const userDataDir = getUserDataDir()
-    const expectedDevName = `${path.basename(userDataDir)}Dev`
-    expect(path.basename(runtimeAppDataPath!)).toBe(expectedDevName)
+    // Explicit --user-data-dir override is preserved verbatim — no Dev suffix.
+    const expectedChildName = path.basename(userDataDir)
+    expect(path.basename(runtimeAppDataPath!)).toBe(expectedChildName)
 
     await electronApp.close()
     await new Promise((resolve) => setTimeout(resolve, 3000))

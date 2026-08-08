@@ -186,7 +186,7 @@ export async function verifyChatDbViaElectronWithRetry(dbPath: string): Promise<
  * Uses the existing getAppInfo() IPC API (test-neutral, no production changes).
  * Sets _runtimeAppDataPath and derives _chatDbPath from it.
  *
- * LOCK-002: Asserts the actual disposable Dev path before any send/seed.
+ * LOCK-002: Asserts the actual disposable profile path before any send/seed.
  */
 async function probeRuntimeAppDataPath(page: Page): Promise<void> {
   const info = await page.evaluate(async () => {
@@ -216,22 +216,28 @@ async function probeRuntimeAppDataPath(page: Page): Promise<void> {
   // Use the raw runtime path (Electron may report /private/var/... which is valid).
   _chatDbPath = path.join(runtimeAppDataPath, 'Data', 'chat.db')
 
-  // LOCK-002: Assert the runtime path matches the expected disposable Dev path.
-  // This ensures no config.json redirect to live user data.
+  // LOCK-002: Assert the runtime path matches the expected disposable path.
+  // The fixture always passes an explicit `--user-data-dir=<userDataDir>` to
+  // the app, and src/main/config.ts preserves an explicit CLI override VERBATIM
+  // — the historical dev `Dev` suffix is skipped when an override is present
+  // (config.devSuffix.test.ts / Phase C precedence: CLI > identity-default).
+  // So the runtime appDataPath must equal the userDataDir exactly, with no
+  // `Dev` suffix. This still detects a config.json redirect to live data:
+  // any redirect would resolve to a different child name or parent.
   // NOTE: macOS resolves /var → /private/var via symlink. We resolve the parent
   // tmpdir (which always exists) and join the child name, since realpathSync
   // fails on non-existent paths.
-  const devDirName = path.basename(_userDataDir) + 'Dev'
+  const expectedChildName = path.basename(_userDataDir)
   const resolvedTmpdir = fs.realpathSync(path.dirname(_userDataDir))
-  const expectedDevPath = path.join(resolvedTmpdir, devDirName)
+  const expectedProfilePath = path.join(resolvedTmpdir, expectedChildName)
   const resolvedRuntime = fs.realpathSync(path.dirname(runtimeAppDataPath))
   const runtimeChildName = path.basename(runtimeAppDataPath)
-  if (resolvedRuntime !== resolvedTmpdir || runtimeChildName !== devDirName) {
+  if (resolvedRuntime !== resolvedTmpdir || runtimeChildName !== expectedChildName) {
     throw new Error(
       `LOCK-002 VIOLATION: Runtime appDataPath "${_runtimeAppDataPath}" ` +
         `(resolved parent: "${resolvedRuntime}", child: "${runtimeChildName}") ` +
-        `does not match expected disposable Dev path "${expectedDevPath}" ` +
-        `(resolved parent: "${resolvedTmpdir}", child: "${devDirName}"). ` +
+        `does not match expected disposable path "${expectedProfilePath}" ` +
+        `(resolved parent: "${resolvedTmpdir}", child: "${expectedChildName}"). ` +
         `A config.json override may be redirecting to live data.`
     )
   }

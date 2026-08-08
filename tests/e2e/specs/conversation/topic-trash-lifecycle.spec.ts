@@ -1149,15 +1149,16 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
       const chatDbPath = getChatDbPath()
       expect(chatDbPath).not.toBeNull()
 
-      // Verify disposable Dev path
+      // Verify disposable profile path (explicit --user-data-dir override is
+      // preserved verbatim — no Dev suffix)
       const userDataDir = getUserDataDir()
-      const devDirName = path.basename(userDataDir) + 'Dev'
+      const childName = path.basename(userDataDir)
       const resolvedTmpdir = fs.realpathSync(path.dirname(userDataDir))
-      const expectedDevPath = path.join(resolvedTmpdir, devDirName)
+      const expectedPath = path.join(resolvedTmpdir, childName)
       const resolvedRuntime = fs.realpathSync(path.dirname(runtimeAppDataPath!))
       const runtimeChildName = path.basename(runtimeAppDataPath!)
       expect(resolvedRuntime).toBe(resolvedTmpdir)
-      expect(runtimeChildName).toBe(devDirName)
+      expect(runtimeChildName).toBe(childName)
 
       // Close Electron and wait for WAL flush
       await electronApp.close()

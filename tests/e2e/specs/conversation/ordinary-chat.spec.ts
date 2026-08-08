@@ -981,17 +981,18 @@ test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
       const chatDbPath = getChatDbPath()
       expect(chatDbPath).not.toBeNull()
 
-      // Verify the expected disposable Dev path was indeed the runtime path
+      // Verify the expected disposable path was indeed the runtime path
+      // (explicit --user-data-dir override is preserved verbatim — no Dev suffix)
       // NOTE: macOS resolves /var → /private/var; compare resolved parents + child name
       const userDataDir = getUserDataDir()
-      const devDirName = path.basename(userDataDir) + 'Dev'
+      const childName = path.basename(userDataDir)
       const resolvedTmpdir = fs.realpathSync(path.dirname(userDataDir))
-      const expectedDevPath = path.join(resolvedTmpdir, devDirName)
+      const expectedPath = path.join(resolvedTmpdir, childName)
       const resolvedRuntime = fs.realpathSync(path.dirname(runtimeAppDataPath!))
       const runtimeChildName = path.basename(runtimeAppDataPath!)
       expect(resolvedRuntime).toBe(resolvedTmpdir)
-      expect(runtimeChildName).toBe(devDirName)
-      console.log(`[Phase 5.4] Runtime path matches expected Dev path: ${expectedDevPath}`)
+      expect(runtimeChildName).toBe(childName)
+      console.log(`[Phase 5.4] Runtime path matches expected disposable path: ${expectedPath}`)
 
       // Close Electron and wait for WAL flush
       await electronApp.close()
@@ -1136,20 +1137,17 @@ test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
     // ═══════════════════════════════════════════════════════════════════
     await test.step('L: Disposable profile cleanup verified', async () => {
       // FINDING 5: Assert the EXACT paths are absent, not just any cherry-e2e-* prefix
+      // Under explicit-override semantics the userData dir IS the exact CLI
+      // token (no Dev suffix), so the base dir is the only profile dir to check.
       const userDataDir = getUserDataDir()
-      const devDir = userDataDir + 'Dev'
-
-      // Both the base dir and the Dev dir should be absent after fixture cleanup
       const baseDirExists = fs.existsSync(userDataDir)
-      const devDirExists = fs.existsSync(devDir)
 
       // Log for diagnostics — cleanup may have already run by the fixture teardown
       console.log(`[Phase 5.4] Post-cleanup check: base=${userDataDir} exists=${baseDirExists}`)
-      console.log(`[Phase 5.4] Post-cleanup check: dev=${devDir} exists=${devDirExists}`)
 
       // These may already be removed by the fixture's userDataDir teardown.
       // The important thing is they are NOT present (cleanup ran).
-      if (baseDirExists || devDirExists) {
+      if (baseDirExists) {
         // If dirs still exist, cleanup hasn't run yet or failed — this is acceptable
         // if the test runner hasn't reached fixture teardown yet, but log it.
         console.warn('[Phase 5.4] WARNING: Disposable dirs still exist — cleanup may not have run')
