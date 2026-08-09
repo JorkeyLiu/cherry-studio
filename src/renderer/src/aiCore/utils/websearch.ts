@@ -113,11 +113,6 @@ export function buildProviderBuiltinWebSearchConfig(
         }
       }
     }
-    case 'cherryin': {
-      const _providerId =
-        { 'openai-response': 'openai', openai: 'openai-chat' }[model?.endpoint_type ?? ''] ?? model?.endpoint_type
-      return buildProviderBuiltinWebSearchConfig(_providerId, webSearchConfig, model)
-    }
     default: {
       return {}
     }

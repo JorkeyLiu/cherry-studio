@@ -7,10 +7,11 @@ export * from './pdf'
 
 export const defaultAppHeaders = () => {
   return {
-    'HTTP-Referer': 'https://cherry-ai.com',
     // Identity header (OpenAI-compatible providers) — application identity
-    // product name. The Referer URL is an external integration identifier and
-    // unchanged.
+    // product name. The historical `HTTP-Referer` attribution header to the
+    // retired platform domain was removed with the upstream platform; no
+    // independent Cherry Chat public domain exists to replace it, so the header
+    // is omitted and `X-Title` carries the identity.
     'X-Title': appIdentity.productName
   }
 }

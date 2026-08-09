@@ -13,7 +13,9 @@ const DEFAULT_FEED_TEMPLATES: Record<UpdateMirror, string> = {
   github: `https://github.com/${GITHUB_REPO}/releases/download/{{tag}}`,
   gitcode: `https://gitcode.com/${GITCODE_REPO}/releases/download/{{tag}}`
 }
-const GITCODE_LATEST_FALLBACK = 'https://releases.cherry-ai.com'
+// The retired gitcode CDN mirror URL was removed with the upstream platform.
+// No independent release endpoint is approved yet, so the gitcode mirror falls
+// back to the gitcode repo template instead of the retired CDN.
 
 interface CliOptions {
   tag?: string
@@ -428,10 +430,13 @@ async function applyChannelUpdate(
       return false
     }
     if (releaseInfo.channel === 'latest' && !availability.gitcode) {
+      // The retired gitcode CDN mirror was removed with the upstream platform.
+      // When the gitcode release page is not ready, keep the gitcode repo
+      // template URL instead of a retired CDN fallback.
       console.warn(
-        `[update-app-upgrade-config] gitcode release page not ready for ${releaseInfo.tag}. Falling back to ${GITCODE_LATEST_FALLBACK}.`
+        `[update-app-upgrade-config] gitcode release page not ready for ${releaseInfo.tag}. Keeping the gitcode repo template feed URL.`
       )
-      feedUrls.gitcode = GITCODE_LATEST_FALLBACK
+      feedUrls.gitcode = applyTemplate(DEFAULT_FEED_TEMPLATES.gitcode, releaseInfo)
     }
   }
 

@@ -2,7 +2,6 @@ import {
   formatOllamaApiHost,
   isAnthropicProvider,
   isAzureOpenAIProvider,
-  isCherryAIProvider,
   isGeminiProvider,
   isOllamaProvider,
   isPerplexityProvider,
@@ -49,7 +48,6 @@ export async function formatProviderApiHost(provider: Provider): Promise<Provide
       match: (p) => p.id === SystemProviderIds.copilot || p.id === SystemProviderIds.github,
       format: (p) => formatApiHost(p.apiHost, false)
     },
-    { match: isCherryAIProvider, format: (p) => formatApiHost(p.apiHost, false) },
     { match: isPerplexityProvider, format: (p) => formatApiHost(p.apiHost, false) },
     { match: isOllamaProvider, format: (p) => formatOllamaApiHost(p.apiHost) },
     { match: isGeminiProvider, format: (p, av) => formatApiHost(p.apiHost, av, 'v1beta') },

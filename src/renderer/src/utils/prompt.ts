@@ -193,7 +193,7 @@ export const replacePromptVariables = async (userSystemPrompt: string, modelName
 
   if (userSystemPrompt.includes('{{model_name}}')) {
     try {
-      const name = modelName || store.getState().llm.defaultModel?.name
+      const name = modelName || store.getState().llm.defaultModel?.name || 'Unknown Model'
       userSystemPrompt = userSystemPrompt.replace(/{{model_name}}/g, name)
     } catch (error) {
       logger.error('Failed to get model name:', error as Error)

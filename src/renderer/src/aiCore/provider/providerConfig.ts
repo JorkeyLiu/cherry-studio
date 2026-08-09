@@ -9,7 +9,6 @@ import {
 } from '@renderer/hooks/useAwsBedrock'
 import { createVertexProvider, isVertexAIConfigured } from '@renderer/hooks/useVertexAI'
 import { getProviderByModel } from '@renderer/services/AssistantService'
-import { getProviderById } from '@renderer/services/ProviderService'
 import store from '@renderer/store'
 import { type Model, type Provider, SystemProviderIds } from '@renderer/types'
 import {
@@ -22,7 +21,6 @@ import {
 import {
   isAnthropicProvider,
   isAzureOpenAIProvider,
-  isCherryAIProvider,
   isGeminiProvider,
   isOllamaProvider,
   isPerplexityProvider,
@@ -82,7 +80,6 @@ export function formatProviderApiHost(provider: Provider): Provider {
       match: (p) => p.id === SystemProviderIds.copilot || p.id === SystemProviderIds.github,
       format: (p) => formatApiHost(p.apiHost, false)
     },
-    { match: isCherryAIProvider, format: (p) => formatApiHost(p.apiHost, false) },
     { match: isPerplexityProvider, format: (p) => formatApiHost(p.apiHost, false) },
     { match: isOllamaProvider, format: (p) => formatOllamaApiHost(p.apiHost) },
     { match: isGeminiProvider, format: (p, av) => formatApiHost(p.apiHost, av, 'v1beta') },
@@ -122,13 +119,11 @@ export function providerToAiSdkConfig(
 
   const builders: ConfigBuilderEntry[] = [
     { match: (p) => p.id === SystemProviderIds.copilot, build: buildCopilotConfig },
-    { match: (p) => p.id === 'cherryai', build: buildCherryAIConfig },
     { match: (p) => p.id === 'anthropic' && p.authType === 'oauth', build: buildAnthropicConfig },
     { match: (p) => isOllamaProvider(p), build: buildOllamaConfig },
     { match: (p) => isAzureOpenAIProvider(p), build: buildAzureConfig },
     { match: (_, id) => id === 'bedrock', build: buildBedrockConfig },
     { match: (_, id) => id === 'google-vertex', build: buildVertexConfig },
-    { match: (_, id) => id === 'cherryin', build: buildCherryinConfig },
     { match: (_, id) => id === 'newapi', build: buildNewApiConfig },
     { match: (_, id) => id === 'aihubmix', build: buildAiHubMixConfig }
   ]
@@ -148,7 +143,13 @@ export function providerToAiSdkConfig(
 // === Public API ===
 
 export function getActualProvider(model: Model): Provider {
-  return adaptProvider({ provider: getProviderByModel(model), model })
+  const provider = getProviderByModel(model)
+  if (!provider) {
+    // Unconfigured model/provider: fail explicitly before any provider/API
+    // invocation.
+    throw new Error('Model provider is not configured')
+  }
+  return adaptProvider({ provider, model })
 }
 
 export function adaptProvider({ provider }: { provider: Provider; model?: Model }): Provider {
@@ -248,43 +249,6 @@ function buildVertexConfig(
     endpoint: ctx.endpoint,
     providerSettings: { ...ctx.baseConfig, baseURL, project, location, googleCredentials: creds }
   } as ProviderConfig<'google-vertex'> | ProviderConfig<'google-vertex-anthropic'>
-}
-
-function buildCherryinConfig(ctx: BuilderContext): ProviderConfig<'cherryin'> {
-  const cherryinProvider = getProviderById(SystemProviderIds.cherryin)
-
-  return {
-    providerId: 'cherryin',
-    endpoint: ctx.endpoint,
-    providerSettings: {
-      ...ctx.baseConfig,
-      endpointType: ctx.model.endpoint_type,
-      anthropicBaseURL: cherryinProvider ? cherryinProvider.anthropicApiHost + '/v1' : undefined,
-      geminiBaseURL: cherryinProvider ? cherryinProvider.apiHost + '/v1beta' : undefined,
-      headers: { ...defaultAppHeaders(), ...ctx.actualProvider.extra_headers }
-    }
-  }
-}
-
-async function buildCherryAIConfig(ctx: BuilderContext): Promise<ProviderConfig<'openai-compatible'>> {
-  return {
-    providerId: 'openai-compatible',
-    endpoint: ctx.endpoint,
-    providerSettings: {
-      ...ctx.baseConfig,
-      name: ctx.actualProvider.id,
-      headers: { ...defaultAppHeaders(), ...ctx.actualProvider.extra_headers },
-      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
-        const signature = await window.api.cherryai.generateSignature({
-          method: 'POST',
-          path: '/chat/completions',
-          query: '',
-          body: init?.body && typeof init.body === 'string' ? JSON.parse(init.body) : undefined
-        })
-        return fetch(input, { ...init, headers: { ...init?.headers, ...signature } })
-      }
-    }
-  }
 }
 
 function formatAzureBaseURL(baseURL: string, forAnthropic: boolean): string {

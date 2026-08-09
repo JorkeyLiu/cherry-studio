@@ -297,7 +297,10 @@ export const getModelSupportedVerbosity = (model: Model | undefined | null): Ope
   return [undefined, ...supportedValues]
 }
 
-export const isGeminiModel = (model: Model) => {
+export const isGeminiModel = (model?: Model) => {
+  if (!model) {
+    return false
+  }
   const modelId = getLowerBaseModelName(model.id)
   return modelId.includes('gemini')
 }
@@ -327,7 +330,10 @@ export const isMaxTemperatureOneModel = (model: Model): boolean => {
 // gates, reasoning behavior, and sampling-parameter filtering all depend on this helper.
 // If upstream repoints either alias to a non-3.x model, revisit this check and the
 // related Gemini UI / reasoning / sampling tests before updating the mapping.
-export const isGemini3Model = (model: Model) => {
+export const isGemini3Model = (model?: Model) => {
+  if (!model) {
+    return false
+  }
   const modelId = getLowerBaseModelName(model.id)
   return modelId.includes('gemini-3') || modelId === 'gemini-flash-latest' || modelId === 'gemini-pro-latest'
 }

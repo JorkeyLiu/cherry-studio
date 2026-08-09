@@ -123,10 +123,7 @@ const SUPPORT_URL_CONTEXT_PROVIDER_TYPES = [
 ] as const satisfies ProviderType[]
 
 export const isSupportUrlContextProvider = (provider: Provider) => {
-  return (
-    SUPPORT_URL_CONTEXT_PROVIDER_TYPES.some((type) => type === provider.type) ||
-    provider.id === SystemProviderIds.cherryin
-  )
+  return SUPPORT_URL_CONTEXT_PROVIDER_TYPES.some((type) => type === provider.type)
 }
 
 const SUPPORT_GEMINI_NATIVE_WEB_SEARCH_PROVIDERS = ['gemini', 'vertexai'] as const satisfies SystemProviderId[]
@@ -137,7 +134,7 @@ export const isGeminiWebSearchProvider = (provider: Provider) => {
 }
 
 export const isNewApiProvider = (provider: Provider) => {
-  return ['new-api', 'cherryin', 'aionly'].includes(provider.id) || provider.type === 'new-api'
+  return ['new-api', 'aionly'].includes(provider.id) || provider.type === 'new-api'
 }
 
 /**
@@ -161,7 +158,6 @@ export function isAwsBedrockProvider(provider: Provider): boolean {
 export {
   isAnthropicProvider,
   isAzureOpenAIProvider,
-  isCherryAIProvider,
   isGeminiProvider,
   isOllamaProvider,
   isPerplexityProvider,

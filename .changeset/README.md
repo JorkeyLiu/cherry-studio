@@ -48,16 +48,15 @@ See `config.json` for the changeset configuration:
 | Package | Description |
 | --- | --- |
 | `@cherrystudio/ai-core` | Unified AI Provider Interface |
-| `@cherrystudio/ai-sdk-provider` | AI SDK provider bundle with CherryIN routing |
 | `@cherrystudio/extension-table-plus` | Table extension for Tiptap |
 
 ### Dependency relationships
 
 ```
-ai-core (peer-depends on) → ai-sdk-provider
+ai-core (peer-depends on) → (none)
 ```
 
-Changeset automatically handles updating peer dependency ranges when `ai-sdk-provider` is published.
+Changeset automatically handles updating internal dependency ranges between packages.
 
 ## CI/CD Integration
 

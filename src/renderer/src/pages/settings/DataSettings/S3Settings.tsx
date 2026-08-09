@@ -1,4 +1,4 @@
-import { FolderOpenOutlined, InfoCircleOutlined, SaveOutlined, SyncOutlined, WarningOutlined } from '@ant-design/icons'
+import { FolderOpenOutlined, SaveOutlined, SyncOutlined, WarningOutlined } from '@ant-design/icons'
 import { HStack } from '@renderer/components/Layout'
 import { S3BackupManager } from '@renderer/components/S3BackupManager'
 import { S3BackupModal, useS3BackupModal } from '@renderer/components/S3Modals'
@@ -60,10 +60,6 @@ const S3Settings: FC = () => {
     }
   }
 
-  const handleTitleClick = () => {
-    window.open('https://docs.cherry-ai.com/data-settings/s3-compatible', '_blank')
-  }
-
   const onMaxBackupsChange = (value: number) => {
     setMaxBackups(value)
     dispatch(setS3Partial({ maxBackups: value }))
@@ -111,12 +107,7 @@ const S3Settings: FC = () => {
 
   return (
     <SettingGroup theme={theme}>
-      <SettingTitle style={{ justifyContent: 'flex-start', gap: 10 }}>
-        {t('settings.data.s3.title.label')}
-        <Tooltip title={t('settings.data.s3.title.tooltip')} placement="right">
-          <InfoCircleOutlined style={{ color: 'var(--color-text-2)', cursor: 'pointer' }} onClick={handleTitleClick} />
-        </Tooltip>
-      </SettingTitle>
+      <SettingTitle style={{ justifyContent: 'flex-start', gap: 10 }}>{t('settings.data.s3.title.label')}</SettingTitle>
       <SettingHelpText>{t('settings.data.s3.title.help')}</SettingHelpText>
       <SettingDivider />
       <SettingRow>

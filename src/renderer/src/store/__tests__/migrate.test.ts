@@ -320,4 +320,252 @@ describe('store migrations', () => {
       expect(settings.fixedWindowAnchor).toBeUndefined()
     })
   })
+
+  describe('migration 217: remove CherryIN/CherryAI platform state', () => {
+    const platformModel = (provider: string, id = 'qwen') => ({ id, name: 'Qwen', provider, group: 'Qwen' })
+    const openaiModel = { id: 'gpt-4', name: 'GPT-4', provider: 'openai' }
+
+    const makeState = () => ({
+      llm: {
+        providers: [
+          { id: 'cherryin', name: 'CherryIN', type: 'openai', apiKey: 'x', apiHost: '', models: [] },
+          { id: 'cherryai', name: 'CherryAI', type: 'openai', apiKey: 'x', apiHost: '', models: [] },
+          { id: 'openai', name: 'OpenAI', type: 'openai', apiKey: 'k', apiHost: '', models: [openaiModel] }
+        ],
+        defaultModel: platformModel('cherryai'),
+        topicNamingModel: platformModel('cherryin'),
+        quickModel: platformModel('cherryai'),
+        translateModel: openaiModel,
+        settings: {
+          cherryIn: { accessToken: 'tok', refreshToken: 'refresh' },
+          ollama: { keepAliveTime: 0 }
+        }
+      },
+      assistants: {
+        defaultAssistant: {
+          model: platformModel('cherryai', 'qwen2'),
+          defaultModel: openaiModel
+        },
+        assistants: [
+          {
+            id: 'a1',
+            model: platformModel('cherryin'),
+            defaultModel: platformModel('cherryai', 'qwen3')
+          },
+          {
+            id: 'a2',
+            model: openaiModel,
+            defaultModel: openaiModel
+          }
+        ],
+        presets: [
+          {
+            id: 'p1',
+            model: platformModel('cherryai', 'qwen4'),
+            defaultModel: platformModel('cherryin', 'qwen5')
+          },
+          {
+            id: 'p2',
+            model: openaiModel
+          }
+        ]
+      },
+      agents: {
+        agents: [
+          {
+            id: 'g1',
+            model: platformModel('cherryai', 'qwen6'),
+            defaultModel: platformModel('cherryin', 'qwen7')
+          }
+        ]
+      },
+      _persist: { version: 216, rehydrated: false }
+    })
+
+    it('removes cherryin and cherryai providers while preserving other providers', async () => {
+      const migrated: any = await migrate(makeState() as any, 217)
+      expect(migrated.llm.providers.map((p: { id: string }) => p.id)).toEqual(['openai'])
+    })
+
+    it('deletes CherryIN credentials from llm.settings', async () => {
+      const migrated: any = await migrate(makeState() as any, 217)
+      expect(migrated.llm.settings.cherryIn).toBeUndefined()
+      expect(migrated.llm.settings.ollama).toEqual({ keepAliveTime: 0 })
+    })
+
+    it('clears only global model slots whose provider is cherryin or cherryai', async () => {
+      const migrated: any = await migrate(makeState() as any, 217)
+      expect(migrated.llm.defaultModel).toBeUndefined()
+      expect(migrated.llm.topicNamingModel).toBeUndefined()
+      expect(migrated.llm.quickModel).toBeUndefined()
+      // Non-platform translateModel is preserved
+      expect(migrated.llm.translateModel).toEqual(openaiModel)
+    })
+
+    it('clears assistant model references owned by the platform and preserves others', async () => {
+      const migrated: any = await migrate(makeState() as any, 217)
+      // defaultAssistant.model is platform-owned -> cleared; defaultModel is openai -> preserved
+      expect(migrated.assistants.defaultAssistant.model).toBeUndefined()
+      expect(migrated.assistants.defaultAssistant.defaultModel).toEqual(openaiModel)
+      // a1 both platform-owned -> cleared
+      expect(migrated.assistants.assistants[0].model).toBeUndefined()
+      expect(migrated.assistants.assistants[0].defaultModel).toBeUndefined()
+      // a2 all openai -> preserved
+      expect(migrated.assistants.assistants[1].model).toEqual(openaiModel)
+      expect(migrated.assistants.assistants[1].defaultModel).toEqual(openaiModel)
+    })
+
+    it('clears legacy agent and preset model references owned by the platform', async () => {
+      const migrated: any = await migrate(makeState() as any, 217)
+      // presets: p1 platform-owned -> cleared, p2 openai -> preserved
+      expect(migrated.assistants.presets[0].model).toBeUndefined()
+      expect(migrated.assistants.presets[0].defaultModel).toBeUndefined()
+      expect(migrated.assistants.presets[1].model).toEqual(openaiModel)
+      // legacy agents: g1 platform-owned -> cleared
+      expect(migrated.agents.agents[0].model).toBeUndefined()
+      expect(migrated.agents.agents[0].defaultModel).toBeUndefined()
+    })
+
+    it('is a no-op for state without platform content', async () => {
+      const state = {
+        llm: {
+          providers: [{ id: 'openai', name: 'OpenAI', type: 'openai', apiKey: 'k', apiHost: '', models: [] }],
+          defaultModel: openaiModel,
+          quickModel: openaiModel,
+          translateModel: openaiModel,
+          settings: { ollama: { keepAliveTime: 0 } }
+        },
+        assistants: {
+          defaultAssistant: { model: openaiModel },
+          assistants: [{ id: 'a1', model: openaiModel }]
+        },
+        _persist: { version: 216, rehydrated: false }
+      }
+      const migrated: any = await migrate(state as any, 217)
+      expect(migrated.llm.providers).toHaveLength(1)
+      expect(migrated.llm.defaultModel).toEqual(openaiModel)
+      expect(migrated.llm.quickModel).toEqual(openaiModel)
+      expect(migrated.llm.translateModel).toEqual(openaiModel)
+      expect(migrated.assistants.assistants[0].model).toEqual(openaiModel)
+    })
+
+    describe('migration 217: scrub platform-owned persisted MCP branding', () => {
+      const makeMCPState = (servers: unknown[]) => ({
+        llm: { providers: [], settings: {} },
+        assistants: { defaultAssistant: {}, assistants: [] },
+        mcp: { servers },
+        _persist: { version: 216, rehydrated: false }
+      })
+
+      it('removes provider: CherryAI and docs.cherry-ai.com reference while preserving other server data', async () => {
+        const server = {
+          id: 's1',
+          name: '@cherry/mcp-auto-install',
+          type: 'inMemory',
+          command: 'npx',
+          args: ['-y', '@mcpmarket/mcp-auto-install'],
+          isActive: true,
+          provider: 'CherryAI',
+          reference: 'https://docs.cherry-ai.com/advanced-basic/mcp/auto-install',
+          installSource: 'builtin',
+          isTrusted: true
+        }
+        const migrated: any = await migrate(makeMCPState([server]) as any, 217)
+        const out = migrated.mcp.servers[0]
+        expect(out.provider).toBeUndefined()
+        expect(out.reference).toBeUndefined()
+        // All non-branding server data is preserved.
+        expect(out.id).toBe('s1')
+        expect(out.name).toBe('@cherry/mcp-auto-install')
+        expect(out.type).toBe('inMemory')
+        expect(out.command).toBe('npx')
+        expect(out.args).toEqual(['-y', '@mcpmarket/mcp-auto-install'])
+        expect(out.isActive).toBe(true)
+        expect(out.installSource).toBe('builtin')
+        expect(out.isTrusted).toBe(true)
+      })
+
+      it('preserves non-platform provider and reference values', async () => {
+        const servers = [
+          { id: 's1', name: 'flomo', provider: 'flomo', reference: 'https://flomoapp.com', isActive: false },
+          { id: 's2', name: 'memory', provider: 'Nowledge', reference: 'https://mem.nowledge.co/', isActive: true }
+        ]
+        const migrated: any = await migrate(makeMCPState(servers) as any, 217)
+        expect(migrated.mcp.servers).toEqual(servers)
+      })
+
+      it('removes only the platform-owned field when the other is not platform-owned', async () => {
+        const providerOnly = {
+          id: 's1',
+          name: 'fetch',
+          provider: 'CherryAI',
+          reference: 'https://github.com/example',
+          isActive: true
+        }
+        const referenceOnly = {
+          id: 's2',
+          name: 'custom',
+          provider: 'ModelScope',
+          reference: 'https://docs.cherry-ai.com/advanced-basic/mcp/auto-install',
+          isActive: false
+        }
+        const migrated: any = await migrate(makeMCPState([providerOnly, referenceOnly]) as any, 217)
+        expect(migrated.mcp.servers[0].provider).toBeUndefined()
+        expect(migrated.mcp.servers[0].reference).toBe('https://github.com/example')
+        expect(migrated.mcp.servers[1].provider).toBe('ModelScope')
+        expect(migrated.mcp.servers[1].reference).toBeUndefined()
+      })
+
+      it('is a no-op for state without platform MCP branding', async () => {
+        const servers = [
+          { id: 's1', name: 'flomo', provider: 'flomo', reference: 'https://flomoapp.com', isActive: false }
+        ]
+        const migrated: any = await migrate(makeMCPState(servers) as any, 217)
+        expect(migrated.mcp.servers).toEqual(servers)
+      })
+
+      it('is idempotent: re-running 217 over an already-migrated MCP state is stable', async () => {
+        const server = {
+          id: 's1',
+          name: '@cherry/mcp-auto-install',
+          type: 'inMemory',
+          isActive: true,
+          provider: 'CherryAI',
+          reference: 'https://docs.cherry-ai.com/advanced-basic/mcp/auto-install',
+          installSource: 'builtin',
+          isTrusted: true
+        }
+        const first: any = await migrate(makeMCPState([server]) as any, 217)
+        const second: any = await migrate(structuredClone(first), 217)
+        expect(second.mcp.servers).toEqual(first.mcp.servers)
+        expect(second.mcp.servers[0].provider).toBeUndefined()
+        expect(second.mcp.servers[0].reference).toBeUndefined()
+      })
+
+      it('removes provider only when exactly CherryAI (case-sensitive)', async () => {
+        const servers = [
+          { id: 's1', name: 'x', provider: 'Cherryai', reference: 'https://other.example.com', isActive: false }
+        ]
+        const migrated: any = await migrate(makeMCPState(servers) as any, 217)
+        expect(migrated.mcp.servers[0].provider).toBe('Cherryai')
+        expect(migrated.mcp.servers[0].reference).toBe('https://other.example.com')
+      })
+
+      it('removes reference only when it points at the exact docs.cherry-ai.com hostname', async () => {
+        const servers = [
+          {
+            id: 's1',
+            name: 'lookalike',
+            provider: 'ModelScope',
+            reference: 'https://docs.cherry-ai.com.evil.example/x',
+            isActive: false
+          },
+          { id: 's2', name: 'plain', provider: 'ModelScope', reference: 'docs.cherry-ai.com/plain', isActive: false }
+        ]
+        const migrated: any = await migrate(makeMCPState(servers) as any, 217)
+        expect(migrated.mcp.servers[0].reference).toBe('https://docs.cherry-ai.com.evil.example/x')
+        expect(migrated.mcp.servers[1].reference).toBe('docs.cherry-ai.com/plain')
+      })
+    })
+  })
 })

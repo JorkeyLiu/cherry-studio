@@ -1,5 +1,4 @@
 import { PushpinOutlined } from '@ant-design/icons'
-import { FreeTrialModelTag } from '@renderer/components/FreeTrialModelTag'
 import ModelTagsWithLabel from '@renderer/components/ModelTagsWithLabel'
 import { TopView } from '@renderer/components/TopView'
 import { DynamicVirtualList, type DynamicVirtualListRef } from '@renderer/components/VirtualList'
@@ -13,7 +12,7 @@ import { classNames, filterModelsByKeywords, getFancyProviderName } from '@rende
 import { getDuplicateModelNames, getModelTags } from '@renderer/utils/model'
 import { Avatar, Divider, Empty, Modal, Tooltip } from 'antd'
 import { first, sortBy } from 'lodash'
-import { Settings2 } from 'lucide-react'
+import { Plus, Settings2 } from 'lucide-react'
 import React, {
   startTransition,
   useCallback,
@@ -128,7 +127,6 @@ const SelectModelPopupView: React.FC<Props> = ({
     (model: Model, provider: Provider, isPinned: boolean, showIdentifier: boolean): FlatListModel => {
       const modelId = getModelUniqId(model)
       const groupName = getFancyProviderName(provider)
-      const isCherryAi = provider.id === 'cherryai'
 
       return {
         key: isPinned ? `${modelId}_pinned` : modelId,
@@ -146,7 +144,6 @@ const SelectModelPopupView: React.FC<Props> = ({
               )}
               {isPinned && <span className="whitespace-nowrap text-[var(--color-text-3)]">| {groupName}</span>}
             </div>
-            {isCherryAi && <FreeTrialModelTag model={model} showLabel={false} />}
           </ModelName>
         ),
         tags: (
@@ -211,7 +208,7 @@ const SelectModelPopupView: React.FC<Props> = ({
 
       if (filteredModels.length === 0) return
 
-      const canNavigateToSettings = provider.id !== 'cherryai' && !!getProviderById(provider.id)
+      const canNavigateToSettings = !!getProviderById(provider.id)
 
       // 添加 provider 分组标题
       items.push({
@@ -311,6 +308,32 @@ const SelectModelPopupView: React.FC<Props> = ({
       }
     },
     [resolve]
+  )
+
+  // Both model selectors expose a discoverable "Add model" action that
+  // navigates to `/settings/provider`, including when no models/providers
+  // exist. The action row stays visible in empty and non-empty lists for parity
+  // with the temporary input-bar selector. It only navigates — it never changes
+  // assistant/temporary model state.
+  const handleAddModel = useCallback(() => {
+    setOpen(false)
+    resolve(undefined)
+    window.navigate('/settings/provider')
+  }, [resolve])
+
+  // Keyboard accessibility: Enter/Space on the action button must activate it.
+  // Stop the event from reaching the window-level list handler (so the keypress
+  // is not hijacked into a model selection) and activate explicitly.
+  // preventDefault cancels the native button click so navigation fires once.
+  const handleAddModelKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        e.stopPropagation()
+        handleAddModel()
+      }
+    },
+    [handleAddModel]
   )
 
   // 处理键盘导航
@@ -496,6 +519,15 @@ const SelectModelPopupView: React.FC<Props> = ({
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />
         </EmptyState>
       )}
+      <Divider style={{ margin: 0, borderBlockStartWidth: 0.5 }} />
+      <AddModelActionRow
+        type="button"
+        data-testid="select-model-add-action"
+        onClick={handleAddModel}
+        onKeyDown={handleAddModelKeyDown}>
+        <Plus size={14} />
+        <span>{t('settings.models.add.add_model')}</span>
+      </AddModelActionRow>
     </Modal>
   )
 }
@@ -609,6 +641,28 @@ const EmptyState = styled.div`
   justify-content: center;
   align-items: center;
   height: 200px;
+`
+
+const AddModelActionRow = styled.button`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 40px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-text-2);
+  transition:
+    background-color 0.1s ease,
+    color 0.1s ease;
+
+  &:hover {
+    background: var(--color-background-mute);
+    color: var(--color-text-1);
+  }
 `
 
 const PinIconWrapper = styled.div.attrs({ className: 'pin-icon' })<{ $isPinned?: boolean }>`

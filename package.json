@@ -5,8 +5,6 @@
   "description": "A powerful AI assistant for producer.",
   "desktopName": "CherryChat.desktop",
   "main": "./out/main/index.js",
-  "author": "support@cherry-ai.com",
-  "homepage": "https://github.com/CherryHQ/cherry-studio",
   "engines": {
     "node": ">=24.11.1"
   },
@@ -38,7 +36,7 @@
     "pulish:artifacts": "cd packages/artifacts && npm publish && cd -",
     "analyze:renderer": "VISUALIZER_RENDERER=true pnpm build",
     "analyze:main": "VISUALIZER_MAIN=true pnpm build",
-    "typecheck": "pnpm --filter @cherrystudio/ai-sdk-provider build && concurrently -n \"node,web,aicore\" -c \"cyan,magenta,yellow\" \"npm run typecheck:node\" \"npm run typecheck:web\" \"pnpm --filter @cherrystudio/ai-core typecheck\"",
+    "typecheck": "concurrently -n \"node,web,aicore\" -c \"cyan,magenta,yellow\" \"npm run typecheck:node\" \"npm run typecheck:web\" \"pnpm --filter @cherrystudio/ai-core typecheck\"",
     "typecheck:node": "tsgo --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsgo --noEmit -p tsconfig.web.json --composite false",
     "i18n:check": "dotenv -e .env -- tsx scripts/check-i18n.ts",
@@ -82,7 +80,7 @@
     "changeset:status": "changeset status",
     "changeset:version": "changeset version && pnpm format",
     "changeset:publish": "changeset publish",
-    "packages:build": "pnpm --filter @cherrystudio/ai-sdk-provider build && pnpm --filter @cherrystudio/ai-core build && pnpm --filter @cherrystudio/extension-table-plus build",
+    "packages:build": "pnpm --filter @cherrystudio/ai-core build && pnpm --filter @cherrystudio/extension-table-plus build",
     "packages:release": "pnpm packages:build && changeset publish",
     "ci:basic-check": "pnpm test:lint && pnpm format:check && pnpm typecheck && pnpm i18n:check && pnpm i18n:hardcoded:strict && pnpm openapi:check && pnpm skills:check",
     "ci:test-check": "pnpm native:check:node && pnpm test:main && pnpm test:renderer && pnpm test:aicore && pnpm test:shared && pnpm test:scripts && pnpm test:e2e-utils",

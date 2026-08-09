@@ -40,7 +40,7 @@
 3. **安装工具链**：安装 Node.js 22、启用 Corepack，并在 `main/` 目录执行 `pnpm install --frozen-lockfile`。
 4. **运行更新脚本**：执行 `pnpm tsx scripts/update-app-upgrade-config.ts --tag <tag> --config ../cs/app-upgrade-config.json --is-prerelease <flag>`。  
    - 脚本会标准化 tag（去掉 `v` 前缀等）、识别渠道、加载 `config/app-upgrade-segments.json` 中的分段规则。  
-   - 校验 prerelease 标志与语义后缀是否匹配、强制锁定的 segment 是否满足、生成镜像的下载地址，并检查 release 是否已经在 GitHub/GitCode 可用（latest 渠道在 GitCode 不可用时会回退到 `https://releases.cherry-ai.com`）。  
+   - 校验 prerelease 标志与语义后缀是否匹配、强制锁定的 segment 是否满足、生成镜像的下载地址，并检查 release 是否已经在 GitHub/GitCode 可用（latest 渠道在 GitCode 不可用时保留 gitcode 仓库模板地址——随上游平台退役，已移除对已退役 gitcode CDN 镜像的回退）。  
    - 更新对应的渠道配置后，脚本会按 semver 排序写回 JSON，并刷新 `lastUpdated`。
 5. **检测变更并创建 PR**：若 `cs/app-upgrade-config.json` 有变更，则创建 `chore/update-app-upgrade-config/<safe_tag>` 分支，提交信息为 `🤖 chore: sync app-upgrade-config for <tag>`，并向 `x-files/app-upgrade-config` 提 PR；无变更则输出提示。
 

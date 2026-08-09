@@ -122,6 +122,11 @@ async function analyzeSearchIntent(
 
   // 获取模型和provider信息
   const model = assistant.model || getDefaultModel()
+  if (!model) {
+    // Unconfigured model slot: fail explicitly before any provider/API access.
+    logger.error('No model configured for search orchestration')
+    return getFallbackResult()
+  }
   const provider = getProviderByModel(model)
 
   if (!provider || isEmpty(provider.apiKey)) {

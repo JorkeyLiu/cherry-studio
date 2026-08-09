@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { APP_NAME, CHERRYIN_CONFIG, HOME_CHERRY_DIR } from '../constant'
+import { APP_NAME, HOME_CHERRY_DIR } from '../constant'
 import * as identityModule from '../identity'
 import { type AppIdentity, appIdentity } from '../identity'
 
@@ -64,11 +64,6 @@ describe('identity-derived shared constants', () => {
   it('keeps APP_NAME equal to the Cherry Chat product name', () => {
     expect(APP_NAME).toBe('Cherry Chat')
     expect(APP_NAME).toBe(appIdentity.productName)
-  })
-
-  it('keeps the CherryIN OAuth redirect URI on the Cherry Chat protocol scheme', () => {
-    expect(CHERRYIN_CONFIG.REDIRECT_URI).toBe('cherrychat://oauth/callback')
-    expect(CHERRYIN_CONFIG.REDIRECT_URI.startsWith(appIdentity.protocolUrlScheme)).toBe(true)
   })
 })
 

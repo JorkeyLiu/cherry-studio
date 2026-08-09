@@ -1,5 +1,11 @@
 import type { Model, SystemProviderId } from '@renderer/types'
 
+/**
+ * @deprecated CherryAI platform was removed. This model is kept solely for
+ * historical migrations 111/194/204 (migrations 1-216 are frozen).
+ * Fresh runtime must NOT use it — default model slots are explicitly
+ * unconfigured (undefined) after migration 217.
+ */
 export const qwenModel: Model = {
   id: 'qwen',
   name: 'Qwen',
@@ -8,6 +14,13 @@ export const qwenModel: Model = {
 }
 
 export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> = {
+  /**
+   * @deprecated Historical-only. The `defaultModel` slot previously carried the
+   * CherryAI qwen default. Fresh runtime no longer reads this key — see
+   * `src/renderer/src/store/llm.ts` (initialized undefined).
+   * Kept for historical migrations 111/194/204 compilation (migrations 1-216
+   * are frozen).
+   */
   defaultModel: [
     // Default assistant model
     qwenModel,
@@ -18,7 +31,6 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
     // Default quick assistant model
     qwenModel
   ],
-  cherryin: [],
   vertexai: [],
   sophnet: [],
   '302ai': [

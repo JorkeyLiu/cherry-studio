@@ -80,6 +80,10 @@ export async function convertFileBlockToTextPart(fileBlock: FileMessageBlock): P
 export async function handleGeminiFileUpload(file: FileMetadata, model: Model): Promise<FilePart | null> {
   try {
     const provider = getProviderByModel(model)
+    if (!provider) {
+      // Unconfigured model/provider: fail explicitly before any provider/API access.
+      return null
+    }
 
     // 检查文件是否已经上传过
     const fileMetadata = await window.api.fileService.retrieve(provider, file.id)
@@ -115,6 +119,10 @@ export async function handleOpenAILargeFileUpload(
   model: Model
 ): Promise<(FilePart & { id?: string }) | null> {
   const provider = getProviderByModel(model)
+  if (!provider) {
+    // Unconfigured model/provider: fail explicitly before any provider/API access.
+    return null
+  }
   // 如果模型为qwen-long系列，文档中要求purpose需要为'file-extract'
   if (['qwen-long', 'qwen-doc'].some((modelName) => model.name.includes(modelName))) {
     file = {
@@ -174,6 +182,10 @@ export async function handleLargeFileUpload(
   model: Model
 ): Promise<(FilePart & { id?: string }) | null> {
   const provider = getProviderByModel(model)
+  if (!provider) {
+    // Unconfigured model/provider: fail explicitly before any provider/API access.
+    return null
+  }
   const aiSdkId = getAiSdkProviderId(provider)
 
   if (['google', 'google-vertex'].includes(aiSdkId)) {
@@ -246,6 +258,10 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
       // 处理MIME类型，特别是jpg->jpeg的转换（Anthropic要求）
       let mediaType = base64Data.mime
       const provider = getProviderByModel(model)
+      if (!provider) {
+        // Unconfigured model/provider: fail explicitly before any provider/API access.
+        return null
+      }
       const aiSdkId = getAiSdkProviderId(provider)
 
       if (aiSdkId === 'anthropic' && mediaType === 'image/jpg') {

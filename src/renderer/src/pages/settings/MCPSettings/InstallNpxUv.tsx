@@ -1,5 +1,5 @@
-import { CheckCircleOutlined, QuestionCircleOutlined, WarningOutlined } from '@ant-design/icons'
-import { Center, VStack } from '@renderer/components/Layout'
+import { CheckCircleOutlined, WarningOutlined } from '@ant-design/icons'
+import { VStack } from '@renderer/components/Layout'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { setIsBunInstalled, setIsUvInstalled } from '@renderer/store/mcp'
 import { Alert, Button } from 'antd'
@@ -101,10 +101,6 @@ const InstallNpxUv: FC<Props> = ({ mini = false }) => {
     }
   }
 
-  const onHelp = () => {
-    window.open('https://docs.cherry-ai.com/advanced-basic/mcp', '_blank')
-  }
-
   return (
     <Container>
       <Alert
@@ -167,11 +163,6 @@ const InstallNpxUv: FC<Props> = ({ mini = false }) => {
           </VStack>
         }
       />
-      <Center>
-        <Button type="link" onClick={onHelp} icon={<QuestionCircleOutlined />}>
-          {t('settings.mcp.installHelp')}
-        </Button>
-      </Center>
     </Container>
   )
 }

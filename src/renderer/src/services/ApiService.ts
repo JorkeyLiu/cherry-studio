@@ -24,6 +24,7 @@ import { isBlockAttachmentUnavailable } from '@renderer/utils/attachmentAvailabi
 import { getErrorMessage, isAbortError } from '@renderer/utils/error'
 import { purifyMarkdownImages } from '@renderer/utils/markdown'
 import { findFileBlocks, findImageBlocks, getMainTextContent } from '@renderer/utils/messageUtils/find'
+import { assertProviderMatchesModel, createNoModelError } from '@renderer/utils/noModelError'
 import { containsSupportedVariables, replacePromptVariables } from '@renderer/utils/prompt'
 import { NOT_SUPPORT_API_KEY_PROVIDER_TYPES, NOT_SUPPORT_API_KEY_PROVIDERS } from '@renderer/utils/provider'
 import { isEmpty, takeRight } from 'lodash'
@@ -47,6 +48,22 @@ import type { StreamProcessorCallbacks } from './StreamProcessingService'
 
 const logger = loggerService.withContext('ApiService')
 const SUMMARY_REQUEST_TIMEOUT_MS = 15_000
+
+/**
+ * Resolve the effective model + provider for an API invocation, failing
+ * explicitly BEFORE any provider/API/network access when the model slot is
+ * unconfigured, its provider cannot be found, or the resolved provider does not
+ * belong to the requested model (stale assistant model). Never silently falls
+ * back to another model or the first provider. Exported only as a test seam.
+ */
+export function resolveModelAndProvider(model: Model | undefined): { model: Model; provider: Provider } {
+  if (!model) {
+    throw createNoModelError()
+  }
+  const provider = getProviderByModel(model)
+  assertProviderMatchesModel(model, provider)
+  return { model, provider }
+}
 
 /**
  * Get the MCP servers to use based on the assistant's MCP mode.
@@ -163,7 +180,7 @@ export async function transformMessagesAndFetch(
 
     // 专用图像生成模型直接走 fetchImageGeneration
     const model = assistant.model || getDefaultModel()
-    if (isDedicatedImageGenerationModel(model)) {
+    if (model && isDedicatedImageGenerationModel(model)) {
       await fetchImageGeneration({
         messages: uiMessages,
         assistant,
@@ -220,16 +237,22 @@ export async function fetchChatCompletion({
     modelName: assistant.model?.name
   })
 
+  // Resolve the model and its provider. Throws before any provider/API/network
+  // access when the model slot is unconfigured.
+  const { model: resolvedModel, provider: resolvedProvider } = resolveModelAndProvider(
+    assistant.model || getDefaultModel()
+  )
+
   // Get base provider and apply API key rotation
   // NOTE: Shallow copy is intentional. Provider objects are not mutated by downstream code.
   // Nested properties (if any) are never modified after creation.
-  const baseProvider = getProviderByModel(assistant.model || getDefaultModel())
+  const baseProvider = resolvedProvider
   const providerWithRotatedKey = {
     ...baseProvider,
     apiKey: getRotatedApiKey(baseProvider)
   }
 
-  const AI = new AiProvider(assistant.model || getDefaultModel(), providerWithRotatedKey)
+  const AI = new AiProvider(resolvedModel, providerWithRotatedKey)
   const provider = AI.getActualProvider()
 
   const mcpTools: MCPTool[] = []
@@ -374,13 +397,19 @@ export async function fetchImageGeneration({
   assistant: Assistant
   onChunkReceived: (chunk: Chunk) => void
 }) {
+  // Resolve the model and its provider. Throws before any provider/API/network
+  // access when the model slot is unconfigured.
+  const { model: resolvedModel, provider: resolvedProvider } = resolveModelAndProvider(
+    assistant.model || getDefaultModel()
+  )
+
   // 创建 AI provider
-  const baseProvider = getProviderByModel(assistant.model || getDefaultModel())
+  const baseProvider = resolvedProvider
   const providerWithRotatedKey = {
     ...baseProvider,
     apiKey: getRotatedApiKey(baseProvider)
   }
-  const aiProvider = new AiProvider(assistant.model || getDefaultModel(), providerWithRotatedKey)
+  const aiProvider = new AiProvider(resolvedModel, providerWithRotatedKey)
 
   onChunkReceived({ type: ChunkType.LLM_RESPONSE_CREATED })
   onChunkReceived({ type: ChunkType.IMAGE_CREATED })
@@ -456,6 +485,11 @@ export async function fetchMessagesSummary({
   let prompt = getStoreSetting('topicNamingPrompt') || i18n.t('prompts.title')
   const model = getQuickModel()
 
+  if (!model) {
+    // Unconfigured model slot: fail explicitly, no provider/API access.
+    return { text: null, error: i18n.t('message.error.enter.model') }
+  }
+
   if (prompt && containsSupportedVariables(prompt)) {
     prompt = await replacePromptVariables(prompt, model.name)
   }
@@ -464,7 +498,7 @@ export async function fetchMessagesSummary({
   const contextMessages = takeRight(messages, 5)
   const provider = getProviderByModel(model)
 
-  if (!hasApiKey(provider)) {
+  if (!provider || !hasApiKey(provider)) {
     return { text: null, error: i18n.t('error.no_api_key') }
   }
 
@@ -571,13 +605,18 @@ export async function fetchNoteSummary({ content, assistant }: { content: string
   const resolvedAssistant = assistant || getDefaultAssistant()
   const model = getQuickModel() || resolvedAssistant.model || getDefaultModel()
 
+  if (!model) {
+    // Unconfigured model slot: fail explicitly, no provider/API access.
+    return null
+  }
+
   if (prompt && containsSupportedVariables(prompt)) {
     prompt = await replacePromptVariables(prompt, model.name)
   }
 
   const provider = getProviderByModel(model)
 
-  if (!hasApiKey(provider)) {
+  if (!provider || !hasApiKey(provider)) {
     return null
   }
 
@@ -675,9 +714,13 @@ export async function fetchGenerate({
   if (!model) {
     model = getDefaultModel()
   }
+  if (!model) {
+    // Unconfigured model slot: fail explicitly, no provider/API access.
+    return ''
+  }
   const provider = getProviderByModel(model)
 
-  if (!hasApiKey(provider)) {
+  if (!provider || !hasApiKey(provider)) {
     return ''
   }
 
@@ -734,9 +777,8 @@ export async function fetchGenerate({
   }
 }
 
-export function hasApiKey(provider: Provider) {
+export function hasApiKey(provider: Provider | undefined) {
   if (!provider) return false
-  if (provider.id === 'cherryai') return true
   if (
     (isSystemProvider(provider) && NOT_SUPPORT_API_KEY_PROVIDERS.includes(provider.id)) ||
     NOT_SUPPORT_API_KEY_PROVIDER_TYPES.includes(provider.type)
@@ -836,7 +878,7 @@ export function checkApiProvider(provider: Provider): void {
 
   if (isEmpty(provider.models)) {
     window.toast.error(i18n.t('message.error.enter.model'))
-    throw new Error(i18n.t('message.error.enter.model'))
+    throw createNoModelError()
   }
 }
 

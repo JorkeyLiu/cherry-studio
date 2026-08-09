@@ -67,7 +67,8 @@ interface Props {
 
 const AssistantSettingsTab = (props: Props) => {
   const { assistant } = useAssistant(props.assistant.id)
-  const { provider } = useProvider(assistant.model.provider)
+  // Model may be explicitly unconfigured (undefined).
+  const { provider } = useProvider(assistant.model?.provider ?? '')
 
   const { messageStyle, fontSize, language } = useSettings()
   const { theme } = useTheme()
@@ -141,11 +142,18 @@ const AssistantSettingsTab = (props: Props) => {
 
   const model = assistant.model || getDefaultModel()
 
+  // An unconfigured or stale model provider is a valid UI state.
+  // `useProvider` may resolve to `undefined` when neither the assistant's
+  // model provider nor the global default provider exists (e.g. after the
+  // CherryIN/CherryAI platform was removed). Every provider-specific check and
+  // render below must guard for that instead of crashing the settings drawer.
   const showOpenAiSettings =
-    isOpenAICompatibleProvider(provider) ||
-    isOpenAIModel(model) ||
-    isSupportServiceTierProvider(provider) ||
-    (isSupportVerbosityModel(model) && isSupportVerbosityProvider(provider))
+    !!model &&
+    !!provider &&
+    (isOpenAICompatibleProvider(provider) ||
+      isOpenAIModel(model) ||
+      isSupportServiceTierProvider(provider) ||
+      (isSupportVerbosityModel(model) && isSupportVerbosityProvider(provider)))
 
   return (
     <Container className="settings-tab">
@@ -157,7 +165,7 @@ const AssistantSettingsTab = (props: Props) => {
           SettingRowTitleSmall={SettingRowTitleSmall}
         />
       )}
-      {isGroqSystemProvider(provider) && (
+      {!!provider && isGroqSystemProvider(provider) && (
         <GroqSettingsGroup SettingGroup={SettingGroup} SettingRowTitleSmall={SettingRowTitleSmall} />
       )}
       <CollapsibleSettingGroup title={t('settings.messages.title')} defaultExpanded={true}>

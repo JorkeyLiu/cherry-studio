@@ -2,7 +2,6 @@ import CodeViewer from '@renderer/components/CodeViewer'
 import GeneralPopup from '@renderer/components/Popups/GeneralPopup'
 import { useCodeStyle } from '@renderer/context/CodeStyleProvider'
 import i18n from '@renderer/i18n'
-import type { DiagnosisContext, DiagnosisResult } from '@renderer/services/ErrorDiagnosisService'
 import type { SerializedAiSdkError, SerializedAiSdkErrorUnion, SerializedError } from '@renderer/types/error'
 import {
   isSerializedAiSdkAPICallError,
@@ -31,19 +30,15 @@ import {
 import { formatAiSdkError, formatError, safeToString } from '@renderer/utils/error'
 import { parseDataUrl } from '@shared/utils'
 import { Button } from 'antd'
-import { CheckCircle, Copy, Loader2, Stethoscope } from 'lucide-react'
+import { Copy } from 'lucide-react'
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import Scrollbar from '../Scrollbar'
-import AIDiagnosisSectionWithStatus from './AIDiagnosisSection'
 
 interface ErrorDetailContentProps {
   error?: SerializedError
-  diagnosisContext?: DiagnosisContext
-  blockId?: string
-  cachedDiagnosis?: DiagnosisResult
 }
 
 const truncateLargeData = (
@@ -506,31 +501,8 @@ const AiSdkError = memo(({ error }: { error: SerializedAiSdkErrorUnion }) => {
 
 // --- Main Content Component ---
 
-const ErrorDetailContent: React.FC<ErrorDetailContentProps> = ({
-  error,
-  diagnosisContext,
-  blockId,
-  cachedDiagnosis
-}) => {
+const ErrorDetailContent: React.FC<ErrorDetailContentProps> = ({ error }) => {
   const { t } = useTranslation()
-  const [diagStatus, setDiagStatus] = useState<'idle' | 'loading' | 'done' | 'error'>(cachedDiagnosis ? 'done' : 'idle')
-  const diagSectionRef = useRef<{ runDiagnosis: () => void }>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-  const isInitialRenderRef = useRef(true)
-
-  // Scroll to bottom when diagnosis status changes, but skip initial render
-  useEffect(() => {
-    if (isInitialRenderRef.current) {
-      isInitialRenderRef.current = false
-      return
-    }
-
-    if (diagStatus !== 'idle') {
-      requestAnimationFrame(() => {
-        containerRef.current?.scrollTo({ top: containerRef.current.scrollHeight, behavior: 'smooth' })
-      })
-    }
-  }, [diagStatus])
 
   const copyErrorDetails = useCallback(() => {
     if (!error) {
@@ -566,58 +538,12 @@ const ErrorDetailContent: React.FC<ErrorDetailContentProps> = ({
     )
   }
 
-  const handleDiagnose = () => {
-    if (diagStatus === 'loading') return
-    setDiagStatus('loading')
-    diagSectionRef.current?.runDiagnosis()
-  }
-
-  const getDiagButtonText = () => {
-    switch (diagStatus) {
-      case 'loading':
-        return t('error.diagnosis.ai_loading') + '...'
-      case 'done':
-        return t('error.diagnosis.ai_done')
-      default:
-        return t('error.diagnosis.ai_button')
-    }
-  }
-
   return (
     <>
-      <ErrorDetailContainer ref={containerRef}>
-        {renderErrorDetails(error)}
-        {diagStatus !== 'idle' && (
-          <AIDiagnosisSectionWithStatus
-            key={blockId ?? error?.message}
-            ref={diagSectionRef}
-            error={error}
-            status={diagStatus}
-            onStatusChange={setDiagStatus}
-            diagnosisContext={diagnosisContext}
-            blockId={blockId}
-            cachedDiagnosis={cachedDiagnosis}
-          />
-        )}
-      </ErrorDetailContainer>
+      <ErrorDetailContainer>{renderErrorDetails(error)}</ErrorDetailContainer>
       <div className="my-2 mt-4 flex justify-end gap-2">
         <Button color="default" icon={<Copy size={14} />} onClick={copyErrorDetails}>
           {t('common.copy')}
-        </Button>
-        <Button
-          type="primary"
-          disabled={diagStatus === 'loading'}
-          icon={
-            diagStatus === 'loading' ? (
-              <Loader2 size={14} className="animate-spin" />
-            ) : diagStatus === 'done' ? (
-              <CheckCircle size={14} />
-            ) : (
-              <Stethoscope size={14} />
-            )
-          }
-          onClick={handleDiagnose}>
-          {getDiagButtonText()}
         </Button>
       </div>
     </>

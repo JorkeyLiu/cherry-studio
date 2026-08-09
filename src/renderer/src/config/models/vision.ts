@@ -186,7 +186,7 @@ export function isDedicatedImageModel(model: Model): boolean {
 // Backward compatible aliases
 export const isDedicatedImageGenerationModel = isDedicatedImageModel
 
-export const isAutoEnableImageGenerationModel = (model: Model): boolean => {
+export const isAutoEnableImageGenerationModel = (model?: Model): boolean => {
   if (!model) return false
 
   const modelId = getLowerBaseModelName(model.id)
@@ -198,7 +198,7 @@ export const isAutoEnableImageGenerationModel = (model: Model): boolean => {
  * @param model
  * @returns
  */
-export function isGenerateImageModel(model: Model): boolean {
+export function isGenerateImageModel(model?: Model): boolean {
   if (!model || isEmbeddingModel(model) || isRerankModel(model)) {
     return false
   }
@@ -224,7 +224,10 @@ export function isGenerateImageModel(model: Model): boolean {
  * @param model
  * @returns
  */
-export function isPureGenerateImageModel(model: Model): boolean {
+export function isPureGenerateImageModel(model?: Model): boolean {
+  if (!model) {
+    return false
+  }
   if (!isGenerateImageModel(model) && !isTextToImageModel(model)) {
     return false
   }
@@ -253,7 +256,7 @@ export function isImageEnhancementModel(model: Model): boolean {
   return IMAGE_ENHANCEMENT_MODELS_REGEX.test(modelId)
 }
 
-export function isVisionModel(model: Model): boolean {
+export function isVisionModel(model?: Model): boolean {
   if (!model || isEmbeddingModel(model) || isRerankModel(model)) {
     return false
   }

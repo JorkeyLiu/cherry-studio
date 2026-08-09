@@ -184,7 +184,7 @@ export function getTranslateModel() {
   return store.getState().llm.translateModel
 }
 
-export function getAssistantProvider(assistant: Assistant): Provider {
+export function getAssistantProvider(assistant: Assistant): Provider | undefined {
   const providers = getStoreProviders()
   const provider = providers.find((p) => p.id === assistant.model?.provider)
   return provider || getDefaultProvider()
@@ -192,22 +192,23 @@ export function getAssistantProvider(assistant: Assistant): Provider {
 
 // FIXME: This function fails in silence.
 // TODO: Refactor it to make it return exactly valid value or null, and update all usage.
-export function getProviderByModel(model?: Model): Provider {
+export function getProviderByModel(model?: Model): Provider | undefined {
   const providers = getStoreProviders()
   const provider = providers.find((p) => p.id === model?.provider)
 
   if (!provider) {
+    // Never silently fall back to the first provider. A missing
+    // model must be detected before provider/API invocation.
     const defaultProvider = providers.find((p) => p.id === getDefaultModel()?.provider)
-    return defaultProvider || providers[0]
+    return defaultProvider
   }
 
   return provider
 }
 
-// FIXME: This function may return undefined but as Provider
 export function getProviderByModelId(modelId?: string) {
   const providers = getStoreProviders()
-  const _modelId = modelId || getDefaultModel().id
+  const _modelId = modelId || getDefaultModel()?.id
   return providers.find((p) => p.models.find((m) => m.id === _modelId)) as Provider
 }
 

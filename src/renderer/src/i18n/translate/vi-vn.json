@@ -743,9 +743,7 @@
     "copy": "Sao chép",
     "cut": "Cắt",
     "delete": "Xóa",
-    "documentation": "Tài liệu",
     "edit": "Chỉnh sửa",
-    "feedback": "Phản hồi",
     "file": "Tập tin",
     "forceReload": "Tải lại bắt buộc",
     "front": "Đưa Tất cả Ra Phía Trước",
@@ -766,7 +764,6 @@
     "undo": "Hoàn tác",
     "unhide": "Hiển thị tất cả",
     "view": "Xem",
-    "website": "Trang web",
     "window": "Cửa sổ",
     "zoom": "Zoom",
     "zoomIn": "Thu phóng",
@@ -1751,9 +1748,6 @@
     "select_folder": "Chọn thư mục",
     "word_document": "Tài liệu Word"
   },
-  "docs": {
-    "title": "Tài liệu"
-  },
   "editMode": {
     "contextMenu": {
       "copy": "[to be translated]:Copy",
@@ -1806,10 +1800,6 @@
     "detail": "Chi tiết lỗi",
     "details": "Chi tiết",
     "diagnosis": {
-      "ai_button": "Chẩn đoán bằng AI",
-      "ai_done": "Chẩn đoán",
-      "ai_loading": "Chẩn đoán",
-      "ai_result": "Kết quả chẩn đoán AI",
       "auth": "Khóa API không hợp lệ, vui lòng kiểm tra và cấu hình lại",
       "content": "Nội dung bị chặn bởi hệ thống an toàn, vui lòng sửa đổi và thử lại",
       "context_length": "Cuộc hội thoại quá dài, vui lòng xóa lịch sử hoặc bắt đầu cuộc trò chuyện mới",
@@ -1820,6 +1810,7 @@
       "model": "Không tìm thấy mô hình hoặc bạn không có quyền truy cập",
       "model_conflict": "Mô hình chẩn đoán giống với mô hình đang gặp lỗi",
       "network": "Không thể kết nối đến máy chủ, hãy kiểm tra cài đặt mạng hoặc proxy",
+      "no_model": "[to be translated]:No model is selected or its provider is not configured, please add a model first",
       "ocr": "Công cụ OCR chưa được khởi tạo, hãy kiểm tra cài đặt OCR",
       "parse": "AI đã trả về phản hồi không hợp lệ, vui lòng thử lại hoặc chuyển sang mô hình khác",
       "payload": "Nội dung yêu cầu quá lớn, vui lòng giảm kích thước tệp hoặc văn bản",
@@ -2016,6 +2007,15 @@
         "description": "Nhập dữ liệu đã bị hủy. Không có thay đổi nào được thực hiện đối với dữ liệu của bạn.",
         "title": "Nhập dữ liệu đã bị hủy"
       },
+      "catalog_recovery": {
+        "description": "[to be translated]:Please wait — the application will reopen shortly.",
+        "error_code": "[to be translated]:Error code",
+        "repair_required": {
+          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
+          "title": "[to be translated]:Data recovery incomplete"
+        },
+        "title": "[to be translated]:Recovering imported data…"
+      },
       "confirm_button": "Bắt đầu nhập dữ liệu",
       "confirm_description": "Thao tác này sẽ thay thế tất cả dữ liệu trò chuyện hiện có bằng dữ liệu từ bản sao lưu Cherry Studio. Hành động này không thể hoàn tác.",
       "confirm_title": "Xác nhận nhập dữ liệu",
@@ -2037,6 +2037,10 @@
         "success": "Nhập dữ liệu thành công! Ứng dụng sẽ khởi động lại.",
         "unsupported": "Nền tảng không được hỗ trợ"
       },
+      "recovered": {
+        "assistant_name": "[to be translated]:Recovered conversations",
+        "topic_name": "[to be translated]:Recovered conversation {{index}}"
+      },
       "select_button": "Chọn tệp",
       "select_file": "Chọn bản sao lưu ZIP Cherry Studio",
       "steps": {
@@ -2054,6 +2058,7 @@
         "description": "Nhập dữ liệu ZIP Cherry Studio hiện chỉ được hỗ trợ trên macOS. Nền tảng hiện tại của bạn chưa được hỗ trợ.",
         "title": "Nền tảng không được hỗ trợ"
       },
+      "untitled_topic": "[to be translated]:Untitled Topic",
       "warning": {
         "description": "Thao tác nhập này sẽ thay thế tất cả dữ liệu trò chuyện hiện có. Đảm bảo bạn có bản sao lưu dữ liệu hiện tại nếu cần.",
         "title": "Thay thế tất cả"
@@ -2356,7 +2361,8 @@
     },
     "attachments": {
       "pasted_image": "Hình ảnh đã dán",
-      "pasted_text": "Văn bản đã dán"
+      "pasted_text": "Văn bản đã dán",
+      "unavailable": "[to be translated]:Attachment unavailable"
     },
     "backup": {
       "failed": "Sao lưu thất bại",
@@ -3016,16 +3022,12 @@
       "title": "Chọn Mô hình Mặc định của Bạn"
     },
     "skip": "Bỏ qua",
-    "toast": {
-      "connected": "Đã kết nối thành công với CherryIN"
-    },
     "welcome": {
-      "login_cherryin": "Đăng nhập bằng CherryIN",
       "or_continue_with": "HOẶC TIẾP TỤC VỚI",
       "other_provider": "Chọn Nhà Cung Cấp Khác",
       "select_other_provider": "Chọn Nhà Cung Cấp Khác",
       "setup_hint": "Vui lòng cấu hình ít nhất một nhà cung cấp để có trải nghiệm tốt nhất",
-      "subtitle": "Tận hưởng các dịch vụ AI hàng đầu với CherryIN",
+      "subtitle": "Tận hưởng các dịch vụ AI hàng đầu với nhà cung cấp của riêng bạn",
       "title": "Chào mừng bạn đến với Cherry Chat"
     }
   },
@@ -3514,7 +3516,6 @@
     "burncloud": "BurnCloud",
     "cephalon": "cephalon",
     "cerebras": "Cerebras AI",
-    "cherryin": "CherryIN",
     "copilot": "GitHub Copilot",
     "dashscope": "Alibaba Cloud",
     "deepseek": "DeepSeek",
@@ -4013,32 +4014,17 @@
     "about": {
       "build_id": "[to be translated]:Build ID",
       "build_version": "[to be translated]:Build Version",
-      "careers": {
-        "button": "Xem",
-        "title": "Sự nghiệp"
-      },
       "checkUpdate": {
         "available": "Cập nhật",
         "label": "Kiểm tra cập nhật"
       },
       "checkingUpdate": "Đang kiểm tra cập nhật...",
-      "contact": {
-        "button": "Email",
-        "title": "Liên hệ"
-      },
       "debug": {
         "open": "Mở",
         "title": "Gỡ lỗi"
       },
       "description": "Một trợ lý AI mạnh mẽ cho nhà sản xuất",
       "downloading": "Đang tải xuống...",
-      "enterprise": {
-        "title": "Doanh nghiệp"
-      },
-      "feedback": {
-        "button": "Phản hồi",
-        "title": "Phản hồi"
-      },
       "label": "Giới thiệu & Phản hồi",
       "releases": {
         "button": "Bản phát hành",
@@ -4050,11 +4036,7 @@
       "title": "Về",
       "updateAvailable": "Đã tìm thấy phiên bản mới {{version}}",
       "updateError": "Lỗi cập nhật",
-      "updateNotAvailable": "Bạn đang sử dụng phiên bản mới nhất",
-      "website": {
-        "button": "Trang web",
-        "title": "Trang web chính thức"
-      }
+      "updateNotAvailable": "Bạn đang sử dụng phiên bản mới nhất"
     },
     "advanced": {
       "auto_switch_to_topics": "Tự động chuyển sang chủ đề",
@@ -4386,7 +4368,6 @@
           "help": "Khi được bật, nội dung xuất ra sẽ bao gồm chuỗi lý do (quá trình suy nghĩ).",
           "title": "Bao gồm Chuỗi Lý luận trong Xuất dữ liệu"
         },
-        "help": "Tài liệu cấu hình Notion",
         "page_name_key": "Trường Tên Tiêu Đề Trang",
         "page_name_key_placeholder": "Nhập tên trường tiêu đề trang, mặc định là Tên",
         "title": "Cài đặt Notion"
@@ -4572,8 +4553,7 @@
         },
         "title": {
           "help": "Các dịch vụ lưu trữ đối tượng tương thích S3, như AWS S3, Cloudflare R2, Aliyun OSS, Tencent COS, v.v.",
-          "label": "Lưu trữ tương thích S3",
-          "tooltip": "Tài liệu cấu hình lưu trữ tương thích S3"
+          "label": "Lưu trữ tương thích S3"
         }
       },
       "siyuan": {
@@ -4593,7 +4573,6 @@
         "root_path_placeholder": "ví dụ: /CherryStudio",
         "title": "Cấu hình Siyuan Note",
         "token": {
-          "help": "Lấy mã thông báo Siyuan Note",
           "label": "Mã thông báo Siyuan Note"
         },
         "token_placeholder": "Vui lòng nhập mã thông báo Siyuan Note"
@@ -4938,7 +4917,6 @@
       "inMemory": "Memoria",
       "install": "Cài đặt",
       "installError": "Không thể cài đặt các phụ thuộc",
-      "installHelp": "Nhận Trợ Giúp Cài Đặt",
       "installSuccess": "Các phụ thuộc đã được cài đặt thành công",
       "jsonFormatError": "Lỗi định dạng JSON",
       "jsonModeHint": "Chỉnh sửa biểu diễn JSON của cấu hình máy chủ MCP. Hãy đảm bảo định dạng chính xác trước khi lưu.",
@@ -5565,13 +5543,6 @@
       "oauth": {
         "balance": "Cân bằng",
         "button": "Iniciar sesión con {{provider}}",
-        "cherryIn": {
-          "description": "Đăng nhập vào CherryIN bằng OAuth 2.0",
-          "logged_in": "Đã đăng nhập qua OAuth",
-          "login_button": "Đăng nhập bằng OAuth",
-          "logout_button": "Keluar",
-          "title": "Đăng nhập OAuth"
-        },
         "connect": "Kết nối {{provider}}",
         "description": "Dịch vụ này được cung cấp bởi <website>{{provider}}</website>",
         "error": "Autentificación fallida",

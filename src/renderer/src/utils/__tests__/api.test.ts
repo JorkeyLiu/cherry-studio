@@ -186,15 +186,15 @@ describe('api', () => {
     })
 
     it('extract OpenAI images generations endpoint', () => {
-      expect(routeToEndpoint('https://open.cherryin.net/v1/images/generations#')).toEqual({
-        baseURL: 'https://open.cherryin.net/v1',
+      expect(routeToEndpoint('https://api.example.com/v1/images/generations#')).toEqual({
+        baseURL: 'https://api.example.com/v1',
         endpoint: 'images/generations'
       })
     })
 
     it('extract Gemini images generation endpoint', () => {
-      expect(routeToEndpoint('https://open.cherryin.net/v1beta/models/imagen-4.0-generate-001:predict#')).toEqual({
-        baseURL: 'https://open.cherryin.net/v1beta/models/imagen-4.0-generate-001',
+      expect(routeToEndpoint('https://api.example.com/v1beta/models/imagen-4.0-generate-001:predict#')).toEqual({
+        baseURL: 'https://api.example.com/v1beta/models/imagen-4.0-generate-001',
         endpoint: 'predict'
       })
     })

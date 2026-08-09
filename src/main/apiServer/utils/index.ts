@@ -301,7 +301,6 @@ const supportsAnthropicEndpoint = (m: Model): boolean =>
 
 export const getProviderAnthropicModelChecker = (providerId: string): ((m: Model) => boolean) => {
   switch (providerId) {
-    case 'cherryin':
     case 'new-api':
       // Both are OpenAI-compatible aggregators that may expose Anthropic-protocol models.
       // Auto-fetched models declare `supported_endpoint_types`; manually added or older

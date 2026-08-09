@@ -34,7 +34,7 @@
   </a>
 </h1>
 <p align="center">
-  <a href="https://github.com/CherryHQ/cherry-studio">English</a> | 中文 | <a href="https://cherry-ai.com">官方网站</a> | <a href="https://docs.cherry-ai.com">文档</a> | <a href="./guides/development.md">开发</a> | <a href="https://github.com/CherryHQ/cherry-studio/issues">反馈</a><br>
+  <a href="https://github.com/CherryHQ/cherry-studio">English</a> | 中文 | <a href="./guides/development.md">开发</a><br>
 </p>
 
 <!-- 题头徽章组合 -->
@@ -74,7 +74,7 @@ Cherry Studio 是一款支持多个大语言模型（LLM）服务商的桌面客
 
 # 📖 使用教程
 
-https://docs.cherry-ai.com
+请参阅仓库内的文档目录与 guides。
 
 # 🌠 界面
 
@@ -246,9 +246,7 @@ https://docs.cherry-ai.com
 
 > 🚧 **公开测试版通知**
 >
-> 企业版目前处于早期公开测试阶段，我们正在积极迭代和优化其功能。我们知道它可能还不够完全稳定。如果您在试用过程中遇到任何问题或有宝贵建议，我们非常感谢您能通过邮件联系我们提供反馈。
-
-**🔗 [Cherry Studio 企业版](https://enterprise.cherry-ai.com)**
+> 企业版目前处于早期公开测试阶段，我们正在积极迭代和优化其功能。我们知道它可能还不够完全稳定。
 
 ## 版本对比
 
@@ -261,10 +259,7 @@ https://docs.cherry-ai.com
 
 ## 获取企业版
 
-我们相信企业版将成为您团队的 AI 生产力引擎。如果您对 Cherry Studio 企业版感兴趣，希望了解更多信息、请求报价或安排演示，请联系我们。
-
-- **商业咨询与购买**：
-  **📧 [bd@cherry-ai.com](mailto:bd@cherry-ai.com)**
+我们相信企业版将成为您团队的 AI 生产力引擎。如果您对 Cherry Studio 企业版感兴趣，希望了解更多信息、请求报价或安排演示，请通过项目官方渠道联系我们。
 
 # 🔗 相关项目
 
@@ -316,6 +311,6 @@ https://docs.cherry-ai.com
 [license-shield]: https://img.shields.io/badge/License-AGPLv3-important.svg?logo=gnu
 [license-link]: https://www.gnu.org/licenses/agpl-3.0
 [commercial-shield]: https://img.shields.io/badge/商用授权-联系-white.svg?logoColor=white&logo=telegram&color=blue
-[commercial-link]: mailto:license@cherry-ai.com?subject=商业授权咨询
+[commercial-link]: https://github.com/CherryHQ/cherry-studio/discussions
 [sponsor-shield]: https://img.shields.io/badge/赞助支持-FF6699.svg?logo=githubsponsors&logoColor=white
 [sponsor-link]: https://github.com/CherryHQ/cherry-studio/blob/main/docs/sponsor.md

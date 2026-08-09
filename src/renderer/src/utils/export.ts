@@ -12,6 +12,7 @@ import { removeSpecialCharactersForFileName } from '@renderer/utils/file'
 import { captureScrollableAsBlob, captureScrollableAsDataURL } from '@renderer/utils/image'
 import { convertMathFormula, markdownToPlainText } from '@renderer/utils/markdown'
 import { getCitationContent, getMainTextContent, getThinkingContent } from '@renderer/utils/messageUtils/find'
+import { appIdentity } from '@shared/config/identity'
 import { markdownToBlocks } from '@tryfabric/martian'
 import dayjs from 'dayjs'
 import DOMPurify from 'dompurify'
@@ -700,7 +701,7 @@ export const exportMarkdownToYuque = async (title: string, content: string): Pro
       headers: {
         'Content-Type': 'application/json',
         'X-Auth-Token': yuqueToken,
-        'User-Agent': 'CherryAI'
+        'User-Agent': appIdentity.userAgentProduct
       },
       body: JSON.stringify({
         title: title,
@@ -722,7 +723,7 @@ export const exportMarkdownToYuque = async (title: string, content: string): Pro
       headers: {
         'Content-Type': 'application/json',
         'X-Auth-Token': yuqueToken,
-        'User-Agent': 'CherryAI'
+        'User-Agent': appIdentity.userAgentProduct
       },
       body: JSON.stringify({
         action: 'appendNode',

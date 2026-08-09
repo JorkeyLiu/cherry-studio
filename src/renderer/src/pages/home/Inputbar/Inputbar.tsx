@@ -275,7 +275,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
 
     const parent = spanManagerService.startTrace(
       { topicId: topic.id, name: 'sendMessage', inputs: text },
-      mentionedModels.length > 0 ? mentionedModels : [assistant.model]
+      mentionedModels.length > 0 ? mentionedModels : assistant.model ? [assistant.model] : []
     )
     void EventEmitter.emit(EVENT_NAMES.SEND_MESSAGE, { topicId: topic.id, traceId: parent?.spanContext().traceId })
 

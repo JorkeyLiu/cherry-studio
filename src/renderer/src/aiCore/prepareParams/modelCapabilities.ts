@@ -26,6 +26,10 @@ function modelSupportValidator(
   }
 ): boolean {
   const provider = getProviderByModel(model)
+  if (!provider) {
+    // Unconfigured model/provider: fail explicitly before any provider/API access.
+    return false
+  }
   const aiSdkId = getAiSdkProviderId(provider)
 
   // 黑名单：命中不支持的模型直接拒绝
@@ -70,6 +74,10 @@ export function supportsLargeFileUpload(model: Model): boolean {
  */
 export function getFileSizeLimit(model: Model, fileType: string | null): number {
   const provider = getProviderByModel(model)
+  if (!provider) {
+    // Unconfigured model/provider: fail explicitly before any provider/API access.
+    return 0
+  }
   const aiSdkId = getAiSdkProviderId(provider)
 
   // Anthropic PDF限制32MB

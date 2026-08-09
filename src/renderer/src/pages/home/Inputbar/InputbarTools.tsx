@@ -35,7 +35,8 @@ import styled from 'styled-components'
 export interface InputbarToolsNewProps {
   scope: InputbarScope
   assistant: Assistant
-  model: Model
+  /** May be explicitly unconfigured (undefined). */
+  model?: Model
   session?: ToolContext['session']
 }
 

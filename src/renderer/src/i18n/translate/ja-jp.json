@@ -743,9 +743,7 @@
     "copy": "コピー",
     "cut": "切る",
     "delete": "削除",
-    "documentation": "ドキュメント",
     "edit": "編集",
-    "feedback": "フィードバック",
     "file": "ファイル",
     "forceReload": "強制再読み込み",
     "front": "すべてを前面に移動",
@@ -766,7 +764,6 @@
     "undo": "元に戻す",
     "unhide": "すべて表示",
     "view": "表示",
-    "website": "ウェブサイト",
     "window": "窓",
     "zoom": "ズーム",
     "zoomIn": "ズームイン",
@@ -1751,9 +1748,6 @@
     "select_folder": "フォルダを選択",
     "word_document": "ワード文書"
   },
-  "docs": {
-    "title": "ドキュメント"
-  },
   "editMode": {
     "contextMenu": {
       "copy": "[to be translated]:Copy",
@@ -1806,10 +1800,6 @@
     "detail": "エラーの詳細",
     "details": "詳細",
     "diagnosis": {
-      "ai_button": "AI 診断",
-      "ai_done": "診断完了",
-      "ai_loading": "診断中",
-      "ai_result": "AI 診断結果",
       "auth": "API Key が無効です。確認して再設定してください",
       "content": "コンテンツがセキュリティシステムによりブロックされました。修正して再試行してください",
       "context_length": "会話が長すぎます。履歴をクリアするか、新しいチャットを開始してください。",
@@ -1820,6 +1810,7 @@
       "model": "モデルが見つからないか、アクセス権がありません",
       "model_conflict": "診断モデルとエラーモデルが同一のため、診断できません",
       "network": "サーバーに接続できません。ネットワークまたはプロキシの設定を確認してください",
+      "no_model": "[to be translated]:No model is selected or its provider is not configured, please add a model first",
       "ocr": "OCR エンジンが初期化されていません。OCR 設定を確認してください",
       "parse": "AIが無効な応答を返しました。再試行するか、別のモデルに切り替えてください。",
       "payload": "リクエスト内容が大きすぎます。ファイルまたはテキストのサイズを減らしてください。",
@@ -2016,6 +2007,15 @@
         "description": "インポートがキャンセルされました。データに変更は加えられませんでした。",
         "title": "インポートキャンセル"
       },
+      "catalog_recovery": {
+        "description": "[to be translated]:Please wait — the application will reopen shortly.",
+        "error_code": "[to be translated]:Error code",
+        "repair_required": {
+          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
+          "title": "[to be translated]:Data recovery incomplete"
+        },
+        "title": "[to be translated]:Recovering imported data…"
+      },
       "confirm_button": "インポート開始",
       "confirm_description": "これにより、既存のすべてのチャットデータがCherry Studioバックアップのデータに置き換えられます。この操作は元に戻せません。",
       "confirm_title": "インポートの確認",
@@ -2037,6 +2037,10 @@
         "success": "インポートが正常に完了しました！アプリケーションが再起動されます。",
         "unsupported": "サポートされていないプラットフォーム"
       },
+      "recovered": {
+        "assistant_name": "[to be translated]:Recovered conversations",
+        "topic_name": "[to be translated]:Recovered conversation {{index}}"
+      },
       "select_button": "ファイルを選択",
       "select_file": "Cherry Studio ZIPバックアップを選択",
       "steps": {
@@ -2054,6 +2058,7 @@
         "description": "Cherry Studio ZIPインポートは現在macOSのみサポートされています。現在のプラットフォームはまだサポートされていません。",
         "title": "サポートされていないプラットフォーム"
       },
+      "untitled_topic": "[to be translated]:Untitled Topic",
       "warning": {
         "description": "このインポートにより、既存のすべてのチャットデータが置き換えられます。必要に応じて、現在のデータのバックアップを取ってください。",
         "title": "すべて置き換え"
@@ -2356,7 +2361,8 @@
     },
     "attachments": {
       "pasted_image": "クリップボード画像",
-      "pasted_text": "クリップボードファイル"
+      "pasted_text": "クリップボードファイル",
+      "unavailable": "[to be translated]:Attachment unavailable"
     },
     "backup": {
       "failed": "バックアップに失敗しました",
@@ -3016,16 +3022,12 @@
       "title": "デフォルトモデルを選択"
     },
     "skip": "スキップ",
-    "toast": {
-      "connected": "CherryINに正常に接続されました"
-    },
     "welcome": {
-      "login_cherryin": "CherryINでログイン",
       "or_continue_with": "または続行",
       "other_provider": "他のプロバイダーを選択",
       "select_other_provider": "他のプロバイダーを選択",
       "setup_hint": "ベストな体験のために、少なくとも1つのプロバイダーを設定してください",
-      "subtitle": "CherryINでトップクラスのAIサービスをお楽しみください",
+      "subtitle": "あなたのプロバイダーでトップクラスのAIサービスをお楽しみください",
       "title": "Cherry Chatへようこそ"
     }
   },
@@ -3514,7 +3516,6 @@
     "burncloud": "BurnCloud",
     "cephalon": "Cephalon",
     "cerebras": "Cerebras AI",
-    "cherryin": "CherryIN",
     "copilot": "GitHub Copilot",
     "dashscope": "Alibaba Cloud",
     "deepseek": "DeepSeek",
@@ -4013,32 +4014,17 @@
     "about": {
       "build_id": "[to be translated]:Build ID",
       "build_version": "[to be translated]:Build Version",
-      "careers": {
-        "button": "表示",
-        "title": "キャリア"
-      },
       "checkUpdate": {
         "available": "今すぐ更新",
         "label": "更新を確認"
       },
       "checkingUpdate": "更新を確認中...",
-      "contact": {
-        "button": "メール",
-        "title": "連絡先"
-      },
       "debug": {
         "open": "開く",
         "title": "デバッグ"
       },
       "description": "クリエイターのための強力なAIアシスタント",
       "downloading": "ダウンロード中...",
-      "enterprise": {
-        "title": "エンタープライズ"
-      },
-      "feedback": {
-        "button": "フィードバック",
-        "title": "フィードバック"
-      },
       "label": "について",
       "releases": {
         "button": "リリース",
@@ -4050,11 +4036,7 @@
       "title": "について",
       "updateAvailable": "新しいバージョン {{version}} が見つかりました",
       "updateError": "更新エラー",
-      "updateNotAvailable": "最新バージョンを使用しています",
-      "website": {
-        "button": "ウェブサイト",
-        "title": "公式ウェブサイト"
-      }
+      "updateNotAvailable": "最新バージョンを使用しています"
     },
     "advanced": {
       "auto_switch_to_topics": "トピックに自動的に切り替える",
@@ -4386,7 +4368,6 @@
           "help": "有効にすると、Notionにエクスポートする際に思考チェーンの内容が含まれます。",
           "title": "エクスポート時に思考チェーンを含める"
         },
-        "help": "Notion 設定ドキュメント",
         "page_name_key": "ページタイトルフィールド名",
         "page_name_key_placeholder": "ページタイトルフィールド名を入力してください。デフォルトは Name です",
         "title": "Notion 設定"
@@ -4572,8 +4553,7 @@
         },
         "title": {
           "help": "AWS S3 APIと互換性のあるオブジェクトストレージサービス（例：AWS S3、Cloudflare R2、Alibaba Cloud OSS、Tencent Cloud COSなど）",
-          "label": "S3互換ストレージ",
-          "tooltip": "S3互換ストレージ設定ガイド"
+          "label": "S3互換ストレージ"
         }
       },
       "siyuan": {
@@ -4593,7 +4573,6 @@
         "root_path_placeholder": "例：/CherryStudio",
         "title": "思源ノート設定",
         "token": {
-          "help": "思源ノート->設定->について で取得",
           "label": "APIトークン"
         },
         "token_placeholder": "思源ノートトークンを入力してください"
@@ -4938,7 +4917,6 @@
       "inMemory": "メモリ",
       "install": "インストール",
       "installError": "依存関係のインストールに失敗しました",
-      "installHelp": "インストールヘルプを取得",
       "installSuccess": "依存関係のインストールに成功しました",
       "jsonFormatError": "JSONフォーマットエラー",
       "jsonModeHint": "MCPサーバー設定のJSON表現を編集します。保存する前に、フォーマットが正しいことを確認してください。",
@@ -5565,13 +5543,6 @@
       "oauth": {
         "balance": "残高",
         "button": "{{provider}} アカウントでログイン",
-        "cherryIn": {
-          "description": "セルフホストしたNew-APIサーバーでOAuth 2.0（PKCE）を使用してログイン",
-          "logged_in": "OAuth経由でログインしました",
-          "login_button": "OAuthでログイン",
-          "logout_button": "ログアウト",
-          "title": "OAuthログイン"
-        },
         "connect": "{{provider}}に接続",
         "description": "本サービスは<website>{{provider}}</website>によって提供されます",
         "error": "認証失敗",

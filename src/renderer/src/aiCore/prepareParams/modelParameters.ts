@@ -195,6 +195,10 @@ export function getMaxTokens(assistant: Assistant, model: Model): number | undef
   }
 
   const provider = getProviderByModel(model)
+  if (!provider) {
+    // Unconfigured model/provider: fail explicitly before any provider/API access.
+    return undefined
+  }
   // Claude 4.6 / Opus 4.7+ use adaptive thinking and do not send budgetTokens, so the
   // AI SDK does not add budget back to maxOutputTokens. Skip the subtraction to avoid
   // incorrectly reducing max_tokens.

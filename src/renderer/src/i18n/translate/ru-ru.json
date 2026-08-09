@@ -743,9 +743,7 @@
     "copy": "Копировать",
     "cut": "Резать",
     "delete": "Удалить",
-    "documentation": "Документация",
     "edit": "Редактировать",
-    "feedback": "Обратная связь",
     "file": "Файл",
     "forceReload": "Принудительная перезагрузка",
     "front": "Показать все поверх других",
@@ -766,7 +764,6 @@
     "undo": "Отменить",
     "unhide": "Показать все",
     "view": "Вид",
-    "website": "Веб-сайт",
     "window": "Окно",
     "zoom": "Zoom",
     "zoomIn": "Увеличить",
@@ -1751,9 +1748,6 @@
     "select_folder": "Выбрать папку",
     "word_document": "Документ Word"
   },
-  "docs": {
-    "title": "Документация"
-  },
   "editMode": {
     "contextMenu": {
       "copy": "[to be translated]:Copy",
@@ -1806,10 +1800,6 @@
     "detail": "Детали ошибки",
     "details": "Подробности",
     "diagnosis": {
-      "ai_button": "ИИ-диагностика",
-      "ai_done": "Диагностировано",
-      "ai_loading": "Диагностика",
-      "ai_result": "Результат ИИ-диагностики",
       "auth": "API-ключ недействителен, проверьте и перенастройте",
       "content": "Содержимое заблокировано системой безопасности, измените и повторите",
       "context_length": "Слишком длинный разговор, пожалуйста, очистите историю или начните новый чат",
@@ -1820,6 +1810,7 @@
       "model": "Модель не найдена или нет доступа",
       "model_conflict": "Модель диагностики совпадает с моделью, вызвавшей ошибку",
       "network": "Не удаётся подключиться к серверу, проверьте настройки сети или прокси",
+      "no_model": "[to be translated]:No model is selected or its provider is not configured, please add a model first",
       "ocr": "Движок OCR не инициализирован, проверьте настройки OCR",
       "parse": "ИИ вернул недопустимый ответ, повторите попытку или смените модель",
       "payload": "Слишком большой объем запроса, уменьшите размер файла или текста.",
@@ -2016,6 +2007,15 @@
         "description": "Импорт был отменён. Изменения в ваши данные не вносились.",
         "title": "Импорт отменён"
       },
+      "catalog_recovery": {
+        "description": "[to be translated]:Please wait — the application will reopen shortly.",
+        "error_code": "[to be translated]:Error code",
+        "repair_required": {
+          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
+          "title": "[to be translated]:Data recovery incomplete"
+        },
+        "title": "[to be translated]:Recovering imported data…"
+      },
       "confirm_button": "Начать импорт",
       "confirm_description": "Это заменит все существующие данные чата данными из резервной копии Cherry Studio. Это действие нельзя отменить.",
       "confirm_title": "Подтверждение импорта",
@@ -2037,6 +2037,10 @@
         "success": "Импорт успешно завершён! Приложение будет перезапущено.",
         "unsupported": "Платформа не поддерживается"
       },
+      "recovered": {
+        "assistant_name": "[to be translated]:Recovered conversations",
+        "topic_name": "[to be translated]:Recovered conversation {{index}}"
+      },
       "select_button": "Выбрать файл",
       "select_file": "Выбрать ZIP-резервную копию Cherry Studio",
       "steps": {
@@ -2054,6 +2058,7 @@
         "description": "Импорт ZIP Cherry Studio в настоящее время поддерживается только на macOS. Ваша текущая платформа пока не поддерживается.",
         "title": "Платформа не поддерживается"
       },
+      "untitled_topic": "[to be translated]:Untitled Topic",
       "warning": {
         "description": "Этот импорт заменит все существующие данные чата. Убедитесь, что у вас есть резервная копия текущих данных при необходимости.",
         "title": "Заменить всё"
@@ -2356,7 +2361,8 @@
     },
     "attachments": {
       "pasted_image": "Вырезанное изображение",
-      "pasted_text": "Вырезанный текст"
+      "pasted_text": "Вырезанный текст",
+      "unavailable": "[to be translated]:Attachment unavailable"
     },
     "backup": {
       "failed": "Создание резервной копии не удалось",
@@ -3016,16 +3022,12 @@
       "title": "Выберите модели по умолчанию"
     },
     "skip": "Пропустить",
-    "toast": {
-      "connected": "Успешно подключено к CherryIN"
-    },
     "welcome": {
-      "login_cherryin": "Войти через CherryIN",
       "or_continue_with": "ИЛИ ПРОДОЛЖИТЬ С",
       "other_provider": "Выбрать других поставщиков",
       "select_other_provider": "Выбрать другого поставщика",
       "setup_hint": "Пожалуйста, настройте хотя бы одного поставщика для лучшего опыта",
-      "subtitle": "Наслаждайтесь услугами ИИ высшего уровня с CherryIN",
+      "subtitle": "Наслаждайтесь услугами ИИ высшего уровня со своими провайдерами",
       "title": "Добро пожаловать в Cherry Chat"
     }
   },
@@ -3514,7 +3516,6 @@
     "burncloud": "BurnCloud",
     "cephalon": "Cephalon",
     "cerebras": "Cerebras AI",
-    "cherryin": "CherryIN",
     "copilot": "GitHub Copilot",
     "dashscope": "Alibaba Cloud",
     "deepseek": "DeepSeek",
@@ -4013,32 +4014,17 @@
     "about": {
       "build_id": "[to be translated]:Build ID",
       "build_version": "[to be translated]:Build Version",
-      "careers": {
-        "button": "Вид",
-        "title": "Карьера"
-      },
       "checkUpdate": {
         "available": "Обновить",
         "label": "Проверить обновления"
       },
       "checkingUpdate": "Проверка обновлений...",
-      "contact": {
-        "button": "Электронная почта",
-        "title": "Контакты"
-      },
       "debug": {
         "open": "Открыть",
         "title": "Отладка"
       },
       "description": "Мощный AI-ассистент для созидания",
       "downloading": "Загрузка...",
-      "enterprise": {
-        "title": "Предприятие"
-      },
-      "feedback": {
-        "button": "Обратная связь",
-        "title": "Обратная связь"
-      },
       "label": "О программе и обратная связь",
       "releases": {
         "button": "Релизы",
@@ -4050,11 +4036,7 @@
       "title": "О программе",
       "updateAvailable": "Найдено новое обновление {{version}}",
       "updateError": "Ошибка обновления",
-      "updateNotAvailable": "Вы используете последнюю версию",
-      "website": {
-        "button": "Сайт",
-        "title": "Официальный сайт"
-      }
+      "updateNotAvailable": "Вы используете последнюю версию"
     },
     "advanced": {
       "auto_switch_to_topics": "Автоматически переключаться на топик",
@@ -4386,7 +4368,6 @@
           "help": "При включении, содержимое цепочки рассуждений будет включено при экспорте в Notion.",
           "title": "Включить цепочку рассуждений при экспорте"
         },
-        "help": "Документация по настройке Notion",
         "page_name_key": "Название поля заголовка страницы",
         "page_name_key_placeholder": "Введите название поля заголовка страницы, по умолчанию Name",
         "title": "Настройки Notion"
@@ -4572,8 +4553,7 @@
         },
         "title": {
           "help": "Сервисы объектного хранения, совместимые с AWS S3 API, такие как AWS S3, Cloudflare R2, Alibaba Cloud OSS, Tencent Cloud COS и т.д.",
-          "label": "S3-совместимое хранилище",
-          "tooltip": "Руководство по настройке S3-совместимого хранилища"
+          "label": "S3-совместимое хранилище"
         }
       },
       "siyuan": {
@@ -4593,7 +4573,6 @@
         "root_path_placeholder": "Например: /CherryStudio",
         "title": "Конфигурация SiYuan Note",
         "token": {
-          "help": "Получите в SiYuan Note -> Настройки -> О программе",
           "label": "API токен"
         },
         "token_placeholder": "Введите токен SiYuan Note"
@@ -4938,7 +4917,6 @@
       "inMemory": "Память",
       "install": "Установить",
       "installError": "Не удалось установить зависимости",
-      "installHelp": "Получить помощь по установке",
       "installSuccess": "Зависимости успешно установлены",
       "jsonFormatError": "Ошибка форматирования JSON",
       "jsonModeHint": "Редактируйте JSON-форматирование конфигурации сервера MCP. Перед сохранением убедитесь, что формат правильный.",
@@ -5565,13 +5543,6 @@
       "oauth": {
         "balance": "Баланс",
         "button": "Войти с {{provider}}",
-        "cherryIn": {
-          "description": "Войдите на ваш собственный сервер New-API с помощью OAuth 2.0 (PKCE)",
-          "logged_in": "Вошёл через OAuth",
-          "login_button": "Войти через OAuth",
-          "logout_button": "Выход",
-          "title": "Вход через OAuth"
-        },
         "connect": "Подключить {{provider}}",
         "description": "Сервис предоставляется <website>{{provider}}</website>",
         "error": "Ошибка аутентификации",

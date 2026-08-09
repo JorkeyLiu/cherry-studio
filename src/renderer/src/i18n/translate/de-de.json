@@ -743,9 +743,7 @@
     "copy": "Kopieren",
     "cut": "Schneiden",
     "delete": "Löschen",
-    "documentation": "Dokumentation",
     "edit": "Bearbeiten",
-    "feedback": "Rückmeldung",
     "file": "Datei",
     "forceReload": "Neu laden erzwingen",
     "front": "Alle in den Vordergrund bringen",
@@ -766,7 +764,6 @@
     "undo": "Rückgängig machen",
     "unhide": "Alle anzeigen",
     "view": "Ansicht",
-    "website": "Website",
     "window": "Fenster",
     "zoom": "Zoom",
     "zoomIn": "Heranzoomen",
@@ -1751,9 +1748,6 @@
     "select_folder": "Ordner auswählen",
     "word_document": "Word-Dokument"
   },
-  "docs": {
-    "title": "Hilfedokumentation"
-  },
   "editMode": {
     "contextMenu": {
       "copy": "[to be translated]:Copy",
@@ -1806,10 +1800,6 @@
     "detail": "Fehlerdetails",
     "details": "Details",
     "diagnosis": {
-      "ai_button": "KI-Diagnose",
-      "ai_done": "Diagnostiziert",
-      "ai_loading": "Wird diagnostiziert",
-      "ai_result": "KI-Diagnoseergebnis",
       "auth": "API-Schlüssel ungültig, bitte überprüfen und neu konfigurieren",
       "content": "Inhalt wurde vom Sicherheitssystem blockiert, bitte ändern und erneut versuchen",
       "context_length": "Unterhaltung zu lang, bitte Verlauf löschen oder einen neuen Chat beginnen",
@@ -1820,6 +1810,7 @@
       "model": "Modell nicht gefunden oder kein Zugriff",
       "model_conflict": "Diagnosemodell ist identisch mit dem fehlerhaften Modell",
       "network": "Verbindung zum Server nicht möglich, Netzwerk- oder Proxy-Einstellungen prüfen",
+      "no_model": "[to be translated]:No model is selected or its provider is not configured, please add a model first",
       "ocr": "OCR-Engine nicht initialisiert, OCR-Einstellungen prüfen",
       "parse": "Die KI hat eine ungültige Antwort zurückgegeben, bitte versuchen Sie es erneut oder wechseln Sie das Modell.",
       "payload": "Anfrageinhalt zu groß, bitte verringern Sie die Datei- oder Textgröße",
@@ -2016,6 +2007,15 @@
         "description": "Der Import wurde abgebrochen. Es wurden keine Änderungen an Ihren Daten vorgenommen.",
         "title": "Import abgebrochen"
       },
+      "catalog_recovery": {
+        "description": "[to be translated]:Please wait — the application will reopen shortly.",
+        "error_code": "[to be translated]:Error code",
+        "repair_required": {
+          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
+          "title": "[to be translated]:Data recovery incomplete"
+        },
+        "title": "[to be translated]:Recovering imported data…"
+      },
       "confirm_button": "Import starten",
       "confirm_description": "Dies wird alle vorhandenen Chat-Daten durch die Daten aus dem Cherry Studio-Backup ersetzen. Diese Aktion kann nicht rückgängig gemacht werden.",
       "confirm_title": "Import bestätigen",
@@ -2037,6 +2037,10 @@
         "success": "Import erfolgreich abgeschlossen! Die Anwendung wird neu gestartet.",
         "unsupported": "Plattform nicht unterstützt"
       },
+      "recovered": {
+        "assistant_name": "[to be translated]:Recovered conversations",
+        "topic_name": "[to be translated]:Recovered conversation {{index}}"
+      },
       "select_button": "Datei auswählen",
       "select_file": "Cherry Studio ZIP-Sicherung auswählen",
       "steps": {
@@ -2054,6 +2058,7 @@
         "description": "Der Cherry Studio ZIP-Import wird derzeit nur auf macOS unterstützt. Ihre aktuelle Plattform wird noch nicht unterstützt.",
         "title": "Plattform nicht unterstützt"
       },
+      "untitled_topic": "[to be translated]:Untitled Topic",
       "warning": {
         "description": "Dieser Import wird alle vorhandenen Chat-Daten ersetzen. Stellen Sie sicher, dass Sie bei Bedarf eine Sicherung Ihrer aktuellen Daten haben.",
         "title": "Alle ersetzen"
@@ -2356,7 +2361,8 @@
     },
     "attachments": {
       "pasted_image": "Bild aus Zwischenablage",
-      "pasted_text": "Datei aus Zwischenablage"
+      "pasted_text": "Datei aus Zwischenablage",
+      "unavailable": "[to be translated]:Attachment unavailable"
     },
     "backup": {
       "failed": "Backup fehlgeschlagen",
@@ -3016,16 +3022,12 @@
       "title": "Wählen Sie Ihre Standardmodelle"
     },
     "skip": "Überspringen",
-    "toast": {
-      "connected": "Erfolgreich mit CherryIN verbunden"
-    },
     "welcome": {
-      "login_cherryin": "Mit CherryIN anmelden",
       "or_continue_with": "ODER WEITER MIT",
       "other_provider": "Andere Anbieter auswählen",
       "select_other_provider": "Wählen Sie einen anderen Anbieter",
       "setup_hint": "Bitte konfigurieren Sie mindestens einen Anbieter für die beste Erfahrung.",
-      "subtitle": "Genießen Sie erstklassige KI-Dienste mit CherryIN",
+      "subtitle": "Genießen Sie erstklassige KI-Dienste mit Ihren eigenen Anbietern",
       "title": "Willkommen bei Cherry Chat"
     }
   },
@@ -3514,7 +3516,6 @@
     "burncloud": "BurnCloud",
     "cephalon": "Cephalon",
     "cerebras": "Cerebras AI",
-    "cherryin": "CherryIN",
     "copilot": "GitHub Copilot",
     "dashscope": "Alibaba Cloud Bailian",
     "deepseek": "DeepSeek",
@@ -4013,32 +4014,17 @@
     "about": {
       "build_id": "[to be translated]:Build ID",
       "build_version": "[to be translated]:Build Version",
-      "careers": {
-        "button": "Ansicht",
-        "title": "Karriere"
-      },
       "checkUpdate": {
         "available": "Jetzt aktualisieren",
         "label": "Auf Updates prüfen"
       },
       "checkingUpdate": "Sucht nach Updates...",
-      "contact": {
-        "button": "E-Mail",
-        "title": "E-Mail-Kontakt"
-      },
       "debug": {
         "open": "Öffnen",
         "title": "Debug-Panel"
       },
       "description": "Ein KI-Assistent für Kreative",
       "downloading": "Update wird heruntergeladen...",
-      "enterprise": {
-        "title": "Unternehmen"
-      },
-      "feedback": {
-        "button": "Feedback",
-        "title": "Feedback"
-      },
       "label": "Über uns",
       "releases": {
         "button": "Anzeigen",
@@ -4050,11 +4036,7 @@
       "title": "Über uns",
       "updateAvailable": "Neue Version {{version}} gefunden",
       "updateError": "Aktualisierungsfehler",
-      "updateNotAvailable": "Ihre Software ist bereits auf dem neuesten Stand",
-      "website": {
-        "button": "Anzeigen",
-        "title": "Offizielle Website"
-      }
+      "updateNotAvailable": "Ihre Software ist bereits auf dem neuesten Stand"
     },
     "advanced": {
       "auto_switch_to_topics": "Automatisch zu Themenansicht wechseln",
@@ -4386,7 +4368,6 @@
           "help": "Nach Aktivierung wird beim Export nach Notion die Gedankenkette eingeschlossen.",
           "title": "Gedankenkette beim Export einschließen"
         },
-        "help": "Notion-Konfigurationsdokumentation",
         "page_name_key": "Seitentitel-Feldname",
         "page_name_key_placeholder": "Bitte Feldnamen für Seitentitel eingeben, Standard ist Name",
         "title": "Notion-Einstellungen"
@@ -4572,8 +4553,7 @@
         },
         "title": {
           "help": "Objektspeicher kompatibel mit AWS S3 API, z. B. AWS S3, Cloudflare R2, Alibaba Cloud OSS, Tencent Cloud COS usw.",
-          "label": "S3-kompatibler Speicher",
-          "tooltip": "Konfigurationsdokumentation für S3-kompatiblen Speicher"
+          "label": "S3-kompatibler Speicher"
         }
       },
       "siyuan": {
@@ -4593,7 +4573,6 @@
         "root_path_placeholder": "z. B.: /CherryStudio",
         "title": "SiYuan-Notizen-Konfiguration",
         "token": {
-          "help": "Erhalten unter SiYuan Notizen -> Einstellungen -> Über",
           "label": "API-Token"
         },
         "token_placeholder": "Bitte SiYuan-Token eingeben"
@@ -4938,7 +4917,6 @@
       "inMemory": "Speicher",
       "install": "Installieren",
       "installError": "Installation der Abhängigkeiten fehlgeschlagen",
-      "installHelp": "Installationshilfe abrufen",
       "installSuccess": "Abhängigkeiten erfolgreich installiert",
       "jsonFormatError": "JSON-Formatierungsfehler",
       "jsonModeHint": "JSON-Darstellung der MCP-Server-Konfiguration. Bitte sicherstellen, dass das Format korrekt ist, bevor gespeichert wird",
@@ -5565,13 +5543,6 @@
       "oauth": {
         "balance": "Guthaben",
         "button": "Mit {{provider}}-Konto anmelden",
-        "cherryIn": {
-          "description": "Melden Sie sich mit Ihrem selbst gehosteten New-API-Server über OAuth 2.0 (PKCE) an.",
-          "logged_in": "Über OAuth angemeldet",
-          "login_button": "Mit OAuth anmelden",
-          "logout_button": "Abmelden",
-          "title": "OAuth-Anmeldung"
-        },
         "connect": "Verbinde {{provider}}",
         "description": "Dienst wird von <website>{{provider}}</website> bereitgestellt",
         "error": "Authentifizierung fehlgeschlagen",

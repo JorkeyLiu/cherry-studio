@@ -35,6 +35,10 @@ const logger = loggerService.withContext('RendererKnowledgeService')
 
 export const getKnowledgeBaseParams = (base: KnowledgeBase): KnowledgeBaseParams => {
   const rerankProvider = getProviderByModel(base.rerankModel)
+  if (!rerankProvider) {
+    // Unconfigured rerank model/provider: fail explicitly before any provider/API access.
+    throw new Error('Rerank model provider is not configured')
+  }
   const aiProvider = new AiProvider(base.model)
   const rerankAiProvider = new AiProvider(rerankProvider)
 

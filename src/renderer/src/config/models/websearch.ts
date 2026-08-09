@@ -36,7 +36,7 @@ export const PERPLEXITY_SEARCH_MODELS = [
   'sonar-deep-research'
 ]
 
-export function isWebSearchModel(model: Model): boolean {
+export function isWebSearchModel(model?: Model): boolean {
   if (!model || isEmbeddingModel(model) || isRerankModel(model) || isTextToImageModel(model)) {
     return false
   }
@@ -124,7 +124,7 @@ export function isWebSearchModel(model: Model): boolean {
   return false
 }
 
-export function isMandatoryWebSearchModel(model: Model): boolean {
+export function isMandatoryWebSearchModel(model?: Model): boolean {
   if (!model) {
     return false
   }
@@ -150,6 +150,10 @@ export function isOpenRouterBuiltInWebSearchModel(model: Model): boolean {
   }
 
   const provider = getProviderByModel(model)
+
+  if (!provider) {
+    return false
+  }
 
   if (provider.id !== 'openrouter') {
     return false

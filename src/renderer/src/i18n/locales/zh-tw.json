@@ -743,9 +743,7 @@
     "copy": "複製",
     "cut": "剪下",
     "delete": "刪除",
-    "documentation": "文件",
     "edit": "編輯",
-    "feedback": "回饋",
     "file": "檔案",
     "forceReload": "強制重新載入",
     "front": "全部置於頂層",
@@ -766,7 +764,6 @@
     "undo": "復原",
     "unhide": "全部顯示",
     "view": "檢視",
-    "website": "網站",
     "window": "視窗",
     "zoom": "縮放",
     "zoomIn": "放大",
@@ -1751,9 +1748,6 @@
     "select_folder": "選擇資料夾",
     "word_document": "Word 文件"
   },
-  "docs": {
-    "title": "說明文件"
-  },
   "editMode": {
     "contextMenu": {
       "copy": "[to be translated]:Copy",
@@ -1806,10 +1800,6 @@
     "detail": "錯誤詳細資訊",
     "details": "詳細資訊",
     "diagnosis": {
-      "ai_button": "AI 診斷",
-      "ai_done": "已診斷",
-      "ai_loading": "正在診斷",
-      "ai_result": "AI 診斷結果",
       "auth": "API Key 無效，請檢查並重新配置",
       "content": "訊息內容被安全系統攔截，請修改後重試",
       "context_length": "對話內容過長，請清除歷史記錄或開啟新對話",
@@ -1820,6 +1810,7 @@
       "model": "模型不存在或你沒有存取權限",
       "model_conflict": "診斷模型與出錯模型相同，無法進行診斷",
       "network": "無法連線到伺服器，請檢查網路或代理設定",
+      "no_model": "未選擇模型或模型服務商未設定，請先新增模型",
       "ocr": "OCR 識別引擎未初始化，請檢查 OCR 設定",
       "parse": "AI 回傳了無效的回應，請重試或切換模型",
       "payload": "請求內容過大，請減少檔案或文字大小",
@@ -3031,16 +3022,12 @@
       "title": "選擇您的預設模型"
     },
     "skip": "跳過",
-    "toast": {
-      "connected": "成功連接到 CherryIN"
-    },
     "welcome": {
-      "login_cherryin": "使用 CherryIN 登入",
       "or_continue_with": "或繼續使用",
       "other_provider": "選擇其他供應商",
       "select_other_provider": "選擇其他供應商",
       "setup_hint": "請至少設定一個提供者以獲得最佳體驗",
-      "subtitle": "享受頂尖 AI 服務，盡在 CherryIN",
+      "subtitle": "設定你自己的服務商，享受頂尖 AI 服務",
       "title": "歡迎來到 Cherry Chat"
     }
   },
@@ -3529,7 +3516,6 @@
     "burncloud": "BurnCloud",
     "cephalon": "Cephalon",
     "cerebras": "Cerebras AI",
-    "cherryin": "CherryIN",
     "copilot": "GitHub Copilot",
     "dashscope": "阿里雲百鍊",
     "deepseek": "深度求索",
@@ -4028,32 +4014,17 @@
     "about": {
       "build_id": "構建 ID",
       "build_version": "構建版本",
-      "careers": {
-        "button": "查看",
-        "title": "加入我們"
-      },
       "checkUpdate": {
         "available": "立即更新",
         "label": "檢查更新"
       },
       "checkingUpdate": "正在檢查更新...",
-      "contact": {
-        "button": "電子郵件",
-        "title": "聯絡方式"
-      },
       "debug": {
         "open": "開啟",
         "title": "除錯面板"
       },
       "description": "一款為創作者而生的強大 AI 助手",
       "downloading": "正在下載...",
-      "enterprise": {
-        "title": "企業版"
-      },
-      "feedback": {
-        "button": "回饋",
-        "title": "回饋"
-      },
       "label": "關於與回饋",
       "releases": {
         "button": "檢視",
@@ -4065,11 +4036,7 @@
       "title": "關於我們",
       "updateAvailable": "發現新版本 {{version}}",
       "updateError": "更新錯誤",
-      "updateNotAvailable": "您正在使用最新版本",
-      "website": {
-        "button": "網站",
-        "title": "官方網站"
-      }
+      "updateNotAvailable": "您正在使用最新版本"
     },
     "advanced": {
       "auto_switch_to_topics": "自動切換到話題",
@@ -4401,7 +4368,6 @@
           "help": "啟用後，匯出到 Notion 時會包含思維鏈內容。",
           "title": "匯出時包含思維鏈"
         },
-        "help": "Notion 說明文件",
         "page_name_key": "頁面標題欄位名稱",
         "page_name_key_placeholder": "請輸入頁面標題欄位名稱，預設為 Name",
         "title": "Notion 設定"
@@ -4587,8 +4553,7 @@
         },
         "title": {
           "help": "與 AWS S3 API 相容的物件儲存服務，例如 AWS S3、Cloudflare R2、阿里雲 OSS、騰訊雲 COS 等",
-          "label": "S3 相容儲存",
-          "tooltip": "S3 相容儲存設定指南"
+          "label": "S3 相容儲存"
         }
       },
       "siyuan": {
@@ -4608,7 +4573,6 @@
         "root_path_placeholder": "例如：/CherryStudio",
         "title": "思源筆記設定",
         "token": {
-          "help": "在思源筆記 → 設定 → 關於中取得",
           "label": "思源筆記權杖"
         },
         "token_placeholder": "請輸入思源筆記權杖"
@@ -4953,7 +4917,6 @@
       "inMemory": "記憶體",
       "install": "安裝",
       "installError": "安裝相依套件失敗",
-      "installHelp": "取得安裝幫助",
       "installSuccess": "相依套件安裝成功",
       "jsonFormatError": "JSON 格式錯誤",
       "jsonModeHint": "編輯 MCP 伺服器設定的 JSON 表示。儲存前請確認格式正確",
@@ -5580,13 +5543,6 @@
       "oauth": {
         "balance": "餘額",
         "button": "使用 {{provider}} 帳號登入",
-        "cherryIn": {
-          "description": "使用 OAuth 2.0 登入 CherryIN",
-          "logged_in": "已透過 OAuth 登入",
-          "login_button": "OAuth 登入",
-          "logout_button": "登出",
-          "title": "OAuth 登入"
-        },
         "connect": "關聯 {{provider}} 帳號",
         "description": "本服務由 <website>{{provider}}</website> 提供",
         "error": "認證失敗",

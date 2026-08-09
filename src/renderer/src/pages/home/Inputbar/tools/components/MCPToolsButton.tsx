@@ -158,12 +158,12 @@ const MCPToolsButton: FC<Props> = ({ quickPanel, setInputValue, resizeTextArea, 
 
       if (update.mcpServers.length > 0 && isGeminiModel(model) && isToolUseModeFunction(assistant)) {
         const provider = getProviderByModel(model)
-        if (isSupportUrlContextProvider(provider) && assistant.enableUrlContext) {
+        if (provider && isSupportUrlContextProvider(provider) && assistant.enableUrlContext) {
           window.toast.warning(t('chat.mcp.warning.url_context'))
           update.enableUrlContext = false
         }
         // Gemini 3+ supports combining built-in tools with function calling
-        if (isGeminiWebSearchProvider(provider) && assistant.enableWebSearch && !isGemini3Model(model)) {
+        if (provider && isGeminiWebSearchProvider(provider) && assistant.enableWebSearch && !isGemini3Model(model)) {
           window.toast.warning(t('chat.mcp.warning.gemini_web_search'))
           update.enableWebSearch = false
         }

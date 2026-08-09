@@ -282,7 +282,7 @@ const HomeWindow: FC<{ draggable?: boolean }> = ({ draggable = true }) => {
         newAssistant.mcpServers = undefined
         newAssistant.knowledge_bases = undefined
         // replace prompt vars
-        newAssistant.prompt = await replacePromptVariables(currentAssistant.prompt, currentAssistant?.model.name)
+        newAssistant.prompt = await replacePromptVariables(currentAssistant.prompt, currentAssistant?.model?.name ?? '')
         // logger.debug('newAssistant', newAssistant)
 
         const { modelMessages, uiMessages } = await ConversationService.prepareMessagesForModel(
@@ -515,7 +515,7 @@ const HomeWindow: FC<{ draggable?: boolean }> = ({ draggable = true }) => {
       return t('miniwindow.input.placeholder.title')
     }
     return t('miniwindow.input.placeholder.empty', {
-      model: quickAssistantId ? currentAssistant.name : currentAssistant.model.name
+      model: quickAssistantId ? currentAssistant.name : (currentAssistant.model?.name ?? currentAssistant.name)
     })
   }, [referenceText, route, t, quickAssistantId, currentAssistant])
 

@@ -24,7 +24,3 @@ export function isVertexProvider(provider: Provider): provider is VertexProvider
 export function isPerplexityProvider(provider: Provider): boolean {
   return provider.id === 'perplexity'
 }
-
-export function isCherryAIProvider(provider: Provider): boolean {
-  return provider.id === 'cherryai'
-}

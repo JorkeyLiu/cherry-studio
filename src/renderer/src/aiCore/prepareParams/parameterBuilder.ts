@@ -126,6 +126,11 @@ export async function buildStreamTextParams(
   const finalSignal = AbortSignal.any(signals)
 
   const model = assistant.model || getDefaultModel()
+  if (!model) {
+    // Unconfigured model slot: fail explicitly before any provider/API
+    // invocation.
+    throw new Error('No model configured')
+  }
   const aiSdkProviderId = getAiSdkProviderId(provider)
 
   // 这三个变量透传出来，交给下面启用插件/中间件

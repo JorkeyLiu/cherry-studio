@@ -60,7 +60,8 @@ export interface ToolDependencies {
 export interface ToolContext {
   scope: InputbarScope
   assistant: Assistant
-  model: Model
+  /** May be explicitly unconfigured (undefined). Tools must tolerate it. */
+  model?: Model
   // Session data for Agent Session scope (only available when scope is TopicType.Session)
   session?: {
     agentId?: string

@@ -18,9 +18,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  *  4. ProviderLink reads NavigationService.navigate at click time (not render
  *     time), so setting navigate after render still works.
  *  5. ProviderLink click passes full provider state from getProviderById.
+ *  6. The header always renders the local deterministic classifier label
+ *     (`classification.i18nKey`) — including for 'unknown' errors — and never
+ *     substitutes an AI-generated summary (no AI diagnosis).
  *
  * If useNavigate or <Link> from react-router-dom are reintroduced,
  * these tests will fail with a Router context error.
+ *
+ * Note: no mock for `@renderer/services/ErrorDiagnosisService` exists here.
+ * The AI diagnosis service is deleted, so if ErrorBlock (or any imported
+ * module) still imported it, the module resolution would fail and every test
+ * below would error — proving the block has no AI diagnosis dependency.
  */
 
 // ── Controllable i18n mock ──────────────────────────────────────────────────
@@ -42,10 +50,6 @@ vi.mock('@renderer/components/ErrorDetailModal', () => ({
   showErrorDetailPopup: vi.fn()
 }))
 
-vi.mock('@renderer/services/ErrorDiagnosisService', () => ({
-  classifyErrorByAI: vi.fn().mockResolvedValue(null)
-}))
-
 const mockProvider = { id: 'openai', name: 'OpenAI' }
 
 vi.mock('@renderer/services/ProviderService', () => ({
@@ -54,16 +58,6 @@ vi.mock('@renderer/services/ProviderService', () => ({
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   removeBlocksThunk: vi.fn()
-}))
-
-vi.mock('@renderer/utils/errorClassifier', () => ({
-  classifyError: vi.fn((error: unknown) => {
-    const msg = (error as { message?: string })?.message || ''
-    if (msg.includes('auth')) {
-      return { category: 'auth', i18nKey: 'error.diagnosis.auth', navTarget: '/settings/provider' }
-    }
-    return { category: 'unknown', i18nKey: 'error.diagnosis.unknown', navTarget: null }
-  })
 }))
 
 vi.mock('antd', () => ({
@@ -164,9 +158,40 @@ describe('ErrorBlock without Router', () => {
     expect(container.textContent).toContain('Something went wrong')
   })
 
-  it('renders "Go to Settings" button whenever navTarget is set, even when navigate is null', () => {
-    const block = makeErrorMessageBlock('auth failed')
+  it('renders the local deterministic classifier label as the header for unknown errors (no AI summary)', () => {
+    // The real classifyError returns category 'unknown' / i18nKey
+    // 'error.diagnosis.unknown' for this message. With AI diagnosis removed,
+    // the header must render exactly the classifier label and never an
+    // AI-generated summary.
+    const block = makeErrorMessageBlock('Something went wrong')
     const message = makeMessage()
+
+    const { getByText } = render(<ErrorBlock block={block} message={message} />)
+
+    expect(getByText('error.diagnosis.unknown')).toBeTruthy()
+    // There is no AI summary source left in the block — nothing else may
+    // replace the classifier label in the header.
+    expect(getByText('error.diagnosis.unknown').textContent).toBe('error.diagnosis.unknown')
+  })
+
+  it('renders the local deterministic classifier label as the header for classified errors', () => {
+    // Real classifier: 'invalid_api_key' message -> auth category.
+    const block = makeErrorMessageBlock('invalid_api_key: key is expired', {
+      error: { name: 'Error', message: 'invalid_api_key: key is expired', stack: null }
+    })
+    // No model/provider on the message: classification must not depend on it.
+    const message = makeMessage({ model: undefined })
+
+    const { getByText } = render(<ErrorBlock block={block} message={message} />)
+
+    expect(getByText('error.diagnosis.auth')).toBeTruthy()
+  })
+
+  it('renders "Go to Settings" button whenever navTarget is set, even when navigate is null', () => {
+    const block = makeErrorMessageBlock('invalid_api_key: key is expired', {
+      error: { name: 'Error', message: 'invalid_api_key: key is expired', stack: null }
+    })
+    const message = makeMessage({ model: undefined })
 
     const { getByText } = render(<ErrorBlock block={block} message={message} />)
 
@@ -176,8 +201,10 @@ describe('ErrorBlock without Router', () => {
   })
 
   it('"Go to Settings" click is a no-op when navigate is null (no crash)', async () => {
-    const block = makeErrorMessageBlock('auth failed')
-    const message = makeMessage()
+    const block = makeErrorMessageBlock('invalid_api_key: key is expired', {
+      error: { name: 'Error', message: 'invalid_api_key: key is expired', stack: null }
+    })
+    const message = makeMessage({ model: undefined })
 
     const { getByText } = render(<ErrorBlock block={block} message={message} />)
     const btn = getByText('error.diagnosis.go_to_settings').closest('button')!
@@ -188,8 +215,10 @@ describe('ErrorBlock without Router', () => {
   })
 
   it('"Go to Settings" uses latest navigate after late initialization', async () => {
-    const block = makeErrorMessageBlock('auth failed')
-    const message = makeMessage()
+    const block = makeErrorMessageBlock('invalid_api_key: key is expired', {
+      error: { name: 'Error', message: 'invalid_api_key: key is expired', stack: null }
+    })
+    const message = makeMessage({ model: undefined })
 
     const { getByText } = render(<ErrorBlock block={block} message={message} />)
     const btn = getByText('error.diagnosis.go_to_settings').closest('button')!
@@ -198,6 +227,39 @@ describe('ErrorBlock without Router', () => {
     NavigationService.navigate = mockNavigate
 
     await userEvent.click(btn)
+    expect(mockNavigate).toHaveBeenCalledWith('/settings/provider')
+  })
+
+  it('renders the no-model classification header with a settings action', () => {
+    // Real fixture: the stable NoModelError name marker plus the translated
+    // message.error.enter.model text, and a message with no model/provider.
+    const block = makeErrorMessageBlock('Please select a model first', {
+      error: { name: 'NoModelError', message: 'Please select a model first', stack: null }
+    })
+    const message = makeMessage({ model: undefined })
+
+    const { getByText } = render(<ErrorBlock block={block} message={message} />)
+
+    expect(getByText('error.diagnosis.no_model')).toBeTruthy()
+    // The generic settings action must be exposed for the no-model category.
+    expect(getByText('error.diagnosis.go_to_settings')).toBeTruthy()
+  })
+
+  it('"Go to Settings" for no-model navigates exactly to /settings/provider', async () => {
+    NavigationService.navigate = mockNavigate
+    const block = makeErrorMessageBlock('Please select a model first', {
+      error: { name: 'NoModelError', message: 'Please select a model first', stack: null }
+    })
+    // No model/provider on the message: the no-model recovery still navigates
+    // to the exact provider settings route.
+    const message = makeMessage({ model: undefined })
+
+    const { getByText } = render(<ErrorBlock block={block} message={message} />)
+    const btn = getByText('error.diagnosis.go_to_settings').closest('button')!
+
+    await userEvent.click(btn)
+
+    expect(mockNavigate).toHaveBeenCalledTimes(1)
     expect(mockNavigate).toHaveBeenCalledWith('/settings/provider')
   })
 })

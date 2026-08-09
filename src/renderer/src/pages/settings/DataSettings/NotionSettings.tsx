@@ -1,4 +1,3 @@
-import { InfoCircleOutlined } from '@ant-design/icons'
 import { Client } from '@notionhq/client'
 import { HStack } from '@renderer/components/Layout'
 import { useTheme } from '@renderer/context/ThemeProvider'
@@ -10,7 +9,7 @@ import {
   setNotionExportReasoning,
   setNotionPageNameKey
 } from '@renderer/store/settings'
-import { Button, Space, Switch, Tooltip } from 'antd'
+import { Button, Space, Switch } from 'antd'
 import { Input } from 'antd'
 import type { FC } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -65,25 +64,13 @@ const NotionSettings: FC = () => {
       })
   }
 
-  const handleNotionTitleClick = () => {
-    window.open('https://docs.cherry-ai.com/advanced-basic/notion', '_blank')
-  }
-
   const handleNotionExportReasoningChange = (checked: boolean) => {
     dispatch(setNotionExportReasoning(checked))
   }
 
   return (
     <SettingGroup theme={theme}>
-      <SettingTitle style={{ justifyContent: 'flex-start', gap: 10 }}>
-        {t('settings.data.notion.title')}
-        <Tooltip title={t('settings.data.notion.help')} placement="right">
-          <InfoCircleOutlined
-            style={{ color: 'var(--color-text-2)', cursor: 'pointer' }}
-            onClick={handleNotionTitleClick}
-          />
-        </Tooltip>
-      </SettingTitle>
+      <SettingTitle style={{ justifyContent: 'flex-start', gap: 10 }}>{t('settings.data.notion.title')}</SettingTitle>
       <SettingDivider />
       <SettingRow>
         <SettingRowTitle>{t('settings.data.notion.database_id')}</SettingRowTitle>

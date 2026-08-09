@@ -91,6 +91,11 @@ type ReasoningEffortOptionalParams = {
 // The function is only for generic provider. May extract some logics to independent provider
 export function getReasoningEffort(assistant: Assistant, model: Model): ReasoningEffortOptionalParams {
   const provider = getProviderByModel(model)
+  if (!provider) {
+    // Unconfigured model/provider: fail explicitly before any provider/API
+    // invocation.
+    throw new Error('Model provider is not configured')
+  }
   const modelId = getLowerBaseModelName(model.id)
   if (provider.id === 'groq') {
     return {}
@@ -389,8 +394,7 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
             incremental_output: true
           }
         // TODO: 支持 new-api类型
-        case SystemProviderIds['new-api']:
-        case SystemProviderIds.cherryin: {
+        case SystemProviderIds['new-api']: {
           return {
             extra_body: {
               thinking: {

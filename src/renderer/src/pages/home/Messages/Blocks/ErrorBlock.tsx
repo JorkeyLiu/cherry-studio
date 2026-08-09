@@ -2,8 +2,6 @@ import { SettingOutlined } from '@ant-design/icons'
 import { showErrorDetailPopup } from '@renderer/components/ErrorDetailModal'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { getHttpMessageLabel, getProviderLabel } from '@renderer/i18n/label'
-import type { DiagnosisResult } from '@renderer/services/ErrorDiagnosisService'
-import { classifyErrorByAI } from '@renderer/services/ErrorDiagnosisService'
 import NavigationService from '@renderer/services/NavigationService'
 import { getProviderById } from '@renderer/services/ProviderService'
 import { useAppDispatch } from '@renderer/store'
@@ -12,13 +10,10 @@ import type { ErrorMessageBlock, Message } from '@renderer/types/newMessage'
 import { classifyError } from '@renderer/utils/errorClassifier'
 import { Button } from 'antd'
 import { AlertTriangle, ChevronRight, X } from 'lucide-react'
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useMemo } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
 
 const HTTP_ERROR_CODES = [400, 401, 403, 404, 429, 500, 502, 503, 504]
-
-// Module-level cache for AI classification to avoid duplicate API calls
-const aiClassifyCache = new Map<string, Promise<string>>()
 
 interface Props {
   block: ErrorMessageBlock
@@ -106,44 +101,10 @@ const ErrorMessage: React.FC<{ block: ErrorMessageBlock }> = ({ block }) => {
 const MessageErrorInfo: React.FC<{ block: ErrorMessageBlock; message: Message }> = ({ block, message }) => {
   const dispatch = useAppDispatch()
   const { setTimeoutTimer } = useTimer()
-  const { t, i18n } = useTranslation()
-  const [aiSummary, setAiSummary] = useState<string>('')
+  const { t } = useTranslation()
 
   const providerId = message.model?.provider ?? (block.error?.providerId as string | undefined)
   const classification = useMemo(() => classifyError(block.error, providerId), [block.error, providerId])
-
-  // AI fallback: when rule-based classification returns 'unknown', ask AI for a one-line summary
-  const errorForAI = block.error
-  useEffect(() => {
-    if (classification.category !== 'unknown' || !errorForAI?.message) return
-    let cancelled = false
-    const cacheKey = `${errorForAI.message}:${i18n.language}`
-    const cached = aiClassifyCache.get(cacheKey)
-    const promise =
-      cached ??
-      classifyErrorByAI(errorForAI, i18n.language).then((summary) => {
-        if (!summary) aiClassifyCache.delete(cacheKey)
-        return summary
-      })
-    if (!cached) aiClassifyCache.set(cacheKey, promise)
-    promise
-      .then((summary) => {
-        if (!cancelled && summary) setAiSummary(summary)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [classification.category, errorForAI, i18n.language])
-
-  const diagnosisContext = useMemo(
-    () => ({
-      errorSource: 'chat' as const,
-      providerName: block.error?.providerId as string | undefined,
-      modelId: block.error?.modelId as string | undefined
-    }),
-    [block.error?.providerId, block.error?.modelId]
-  )
 
   const onRemoveBlock = useCallback(
     (e: React.MouseEvent) => {
@@ -155,10 +116,7 @@ const MessageErrorInfo: React.FC<{ block: ErrorMessageBlock; message: Message }>
 
   const showErrorDetail = () => {
     showErrorDetailPopup({
-      error: block.error,
-      blockId: block.id,
-      cachedDiagnosis: block.metadata?.diagnosis as DiagnosisResult | undefined,
-      diagnosisContext
+      error: block.error
     })
   }
 
@@ -193,7 +151,7 @@ const MessageErrorInfo: React.FC<{ block: ErrorMessageBlock; message: Message }>
           <AlertTriangle size={15} />
         </div>
         <div className="pr-5 font-semibold text-[13px] leading-[1.4]" style={{ color: 'var(--color-status-warning)' }}>
-          {aiSummary || t(classification.i18nKey)}
+          {t(classification.i18nKey)}
         </div>
       </div>
 

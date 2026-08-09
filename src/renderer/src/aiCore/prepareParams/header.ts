@@ -14,6 +14,11 @@ const WEBSEARCH_HEADER = 'web-search-2025-03-05'
 export function addAnthropicHeaders(assistant: Assistant, model: Model): string[] {
   const anthropicHeaders: string[] = []
   const provider = getProviderByModel(model)
+  if (!provider) {
+    // Unconfigured model/provider: fail explicitly before any provider/API
+    // invocation.
+    throw new Error('Model provider is not configured')
+  }
   if (
     isClaude45ReasoningModel(model) &&
     isToolUseModeFunction(assistant) &&

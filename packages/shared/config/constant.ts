@@ -198,8 +198,12 @@ export const MB = 1024 * KB
 export const GB = 1024 * MB
 export const defaultLanguage = 'en-US'
 
+// The retired production feed URL was removed with the upstream platform. The
+// updater is disabled (identity gate) and no independent release endpoint is
+// approved yet, so no gitcode feed URL is configured. Only the current
+// repository's GitHub release fallback remains (this path is unreachable while
+// the updater gate is active).
 export enum FeedUrl {
-  PRODUCTION = 'https://releases.cherry-ai.com',
   GITHUB_LATEST = 'https://github.com/CherryHQ/cherry-studio/releases/latest/download'
 }
 
@@ -238,15 +242,6 @@ export type GitBashPathSource = 'manual' | 'auto'
 export interface GitBashPathInfo {
   path: string | null
   source: GitBashPathSource | null
-}
-
-// CherryIN OAuth configuration
-export const CHERRYIN_CONFIG = {
-  CLIENT_ID: '2a348c87-bae1-4756-a62f-b2e97200fd6d',
-  ALLOWED_HOSTS: ['https://open.cherryin.ai', 'https://open.cherryin.dev'],
-  // Protocol redirect URI follows the application identity scheme (see ./identity)
-  REDIRECT_URI: `${appIdentity.protocolUrlScheme}oauth/callback`,
-  SCOPES: 'openid profile email offline_access balance:read usage:read tokens:read tokens:write'
 }
 
 export const APP_NAME = appIdentity.productName

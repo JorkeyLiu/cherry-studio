@@ -3,6 +3,7 @@ import { convertMessagesToSdkMessages } from '@renderer/aiCore/prepareParams'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
 import type { Assistant } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
+import { createNoModelError } from '@renderer/utils/noModelError'
 import type { ModelMessage } from 'ai'
 import { findLast, isEmpty } from 'lodash'
 
@@ -26,6 +27,13 @@ export class ConversationService {
 
     // Use the unified pipeline — same filtering as computeContextInfo
     const { uiMessages: uiMessagesFromPipeline } = computeContextInfo(messages, assistant, topicId)
+    const model = assistant.model || getDefaultModel()
+    if (!model) {
+      // Unconfigured model slot: emit the stable NoModelError marker so
+      // ErrorBlock classifies it as `no_model` with the provider-settings
+      // recovery action. Same category as the ApiService resolver guard.
+      throw createNoModelError()
+    }
     logger.debug('uiMessagesFromPipeline', uiMessagesFromPipeline)
 
     // Fallback: ensure at least the last user message is present to avoid empty payloads
@@ -35,7 +43,7 @@ export class ConversationService {
     }
 
     return {
-      modelMessages: await convertMessagesToSdkMessages(uiMessages, assistant.model || getDefaultModel()),
+      modelMessages: await convertMessagesToSdkMessages(uiMessages, model),
       uiMessages
     }
   }

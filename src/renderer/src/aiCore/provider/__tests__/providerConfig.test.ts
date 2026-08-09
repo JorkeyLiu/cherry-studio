@@ -61,13 +61,11 @@ vi.mock('@renderer/hooks/useAwsBedrock', () => ({
 
 import type { GoogleVertexProviderSettings } from '@ai-sdk/google-vertex/edge'
 import type { OpenAICompatibleProviderSettings } from '@ai-sdk/openai-compatible'
-import type { CherryInProviderSettings } from '@cherrystudio/ai-sdk-provider'
 import type { GitHubCopilotProviderSettings } from '@opeoginni/github-copilot-openai-compatible'
 import type { ProviderConfig } from '@renderer/aiCore/types'
 import { getAwsBedrockAuthType } from '@renderer/hooks/useAwsBedrock'
 import { isVertexAIConfigured } from '@renderer/hooks/useVertexAI'
 import { getProviderByModel } from '@renderer/services/AssistantService'
-import { getProviderById } from '@renderer/services/ProviderService'
 import type { AwsBedrockAuthType, Model, Provider } from '@renderer/types'
 
 import { COPILOT_DEFAULT_HEADERS } from '../constants'
@@ -94,14 +92,9 @@ const createWindowKeyv = () => {
 interface WindowMockApi {
   copilot?: { getToken: ReturnType<typeof vi.fn> }
   anthropic_oauth?: { getAccessToken: ReturnType<typeof vi.fn> }
-  cherryai?: { generateSignature: ReturnType<typeof vi.fn> }
 }
 
-const setupWindowMock = (options?: {
-  withCopilotToken?: boolean
-  withAnthropicOAuth?: boolean
-  withCherryAI?: boolean
-}) => {
+const setupWindowMock = (options?: { withCopilotToken?: boolean; withAnthropicOAuth?: boolean }) => {
   const api: WindowMockApi = {}
   if (options?.withCopilotToken) {
     api.copilot = {
@@ -111,11 +104,6 @@ const setupWindowMock = (options?: {
   if (options?.withAnthropicOAuth) {
     api.anthropic_oauth = {
       getAccessToken: vi.fn().mockResolvedValue('mock-oauth-token')
-    }
-  }
-  if (options?.withCherryAI) {
-    api.cherryai = {
-      generateSignature: vi.fn().mockResolvedValue({ 'X-Signature': 'mock-sig' })
     }
   }
 
@@ -253,32 +241,6 @@ describe('formatProviderApiHost', () => {
       const result = formatProviderApiHost(provider)
 
       expect(result.apiHost).toBe('https://models.inference.ai.azure.com')
-    })
-  })
-
-  describe('CherryAI provider', () => {
-    it('formats apiHost without appending version', () => {
-      const provider = makeProvider({
-        id: 'cherryai',
-        type: 'openai',
-        apiHost: 'https://api.cherryai.com'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('https://api.cherryai.com')
-    })
-
-    it('handles empty apiHost gracefully', () => {
-      const provider = makeProvider({
-        id: 'cherryai',
-        type: 'openai',
-        apiHost: ''
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('')
     })
   })
 
@@ -565,7 +527,7 @@ describe('adaptProvider', () => {
 
 describe('providerToAiSdkConfig', () => {
   beforeEach(() => {
-    setupWindowMock({ withCopilotToken: true, withAnthropicOAuth: true, withCherryAI: true })
+    setupWindowMock({ withCopilotToken: true, withAnthropicOAuth: true })
     setupStoreMock()
     vi.clearAllMocks()
   })
@@ -603,23 +565,6 @@ describe('providerToAiSdkConfig', () => {
       const settings = config.providerSettings as GitHubCopilotProviderSettings
       expect(settings.headers).toBeDefined()
       expect(settings.headers!['X-Custom']).toBe('value')
-    })
-  })
-
-  describe('CherryAI builder', () => {
-    it('returns openai-compatible with custom fetch for signature', async () => {
-      const provider = makeProvider({
-        id: 'cherryai',
-        type: 'openai',
-        apiHost: 'https://api.cherryai.com'
-      })
-
-      const config = await providerToAiSdkConfig(provider, makeModel('gpt-4', 'cherryai'))
-
-      expect(config.providerId).toBe('openai-compatible')
-      const settings = config.providerSettings as OpenAICompatibleProviderSettings
-      expect(settings.name).toBe('cherryai')
-      expect(typeof settings.fetch).toBe('function')
     })
   })
 
@@ -828,26 +773,6 @@ describe('providerToAiSdkConfig', () => {
     })
   })
 
-  describe('Cherryin builder', () => {
-    it('includes anthropic and gemini base URLs from cherryin provider config', async () => {
-      const cherryinProvider = makeProvider({
-        id: 'cherryin',
-        type: 'openai',
-        apiHost: 'https://api.cherryin.com',
-        anthropicApiHost: 'https://anthropic.cherryin.com'
-      })
-
-      vi.mocked(getProviderById).mockReturnValue(cherryinProvider)
-
-      const config = await providerToAiSdkConfig(cherryinProvider, makeModel('gpt-4', 'cherryin'))
-
-      expect(config.providerId).toBe('cherryin')
-      const settings = config.providerSettings as CherryInProviderSettings
-      expect(settings.anthropicBaseURL).toBe('https://anthropic.cherryin.com/v1')
-      expect(settings.geminiBaseURL).toBe('https://api.cherryin.com/v1beta')
-    })
-  })
-
   describe('NewAPI builder', () => {
     it('passes endpoint_type from model', async () => {
       const provider = makeProvider({
@@ -951,7 +876,10 @@ describe('providerToAiSdkConfig', () => {
 
       const settings = config.providerSettings
       expect(settings.headers).toBeDefined()
-      expect(settings.headers!['HTTP-Referer']).toBe('https://cherry-ai.com')
+      // The stale `HTTP-Referer` attribution header to the retired platform
+      // domain was removed with the upstream platform; X-Title carries the
+      // identity.
+      expect(settings.headers!['HTTP-Referer']).toBeUndefined()
       expect(settings.headers!['X-Title']).toBe('Cherry Chat')
     })
 

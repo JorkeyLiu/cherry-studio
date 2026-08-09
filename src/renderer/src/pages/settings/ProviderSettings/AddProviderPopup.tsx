@@ -24,7 +24,6 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
   const [open, setOpen] = useState(true)
   const [name, setName] = useState(provider?.name || '')
   const [type, setType] = useState<ProviderType>(provider?.type || 'openai')
-  const [displayType, setDisplayType] = useState<string>(provider?.type || 'openai')
   const [logo, setLogo] = useState<string | null>(null)
   const [logoPickerOpen, setLogoPickerOpen] = useState(false)
   const [dropdownOpen, setDropdownOpen] = useState(false)
@@ -246,12 +245,8 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
         </Form.Item>
         <Form.Item label={t('settings.provider.add.type')} style={{ marginBottom: 0 }}>
           <Select
-            value={displayType}
-            onChange={(value: string) => {
-              setDisplayType(value)
-              // special case for cherryin-type, map to new-api internally
-              setType(value === 'cherryin-type' ? 'new-api' : (value as ProviderType))
-            }}
+            value={type}
+            onChange={(value: ProviderType) => setType(value)}
             options={[
               { label: 'OpenAI', value: 'openai' },
               { label: 'OpenAI-Response', value: 'openai-response' },
@@ -259,7 +254,6 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
               { label: 'Anthropic', value: 'anthropic' },
               { label: 'Azure OpenAI', value: 'azure-openai' },
               { label: 'New API', value: 'new-api' },
-              { label: 'CherryIN', value: 'cherryin-type' },
               { label: 'Ollama', value: 'ollama' }
             ]}
           />

@@ -1,5 +1,4 @@
 import { showErrorDetailPopup } from '@renderer/components/ErrorDetailModal'
-import { FreeTrialModelTag } from '@renderer/components/FreeTrialModelTag'
 import { type HealthResult, HealthStatusIndicator } from '@renderer/components/HealthStatusIndicator'
 import { HStack } from '@renderer/components/Layout'
 import ModelIdWithTags from '@renderer/components/ModelIdWithTags'
@@ -82,7 +81,6 @@ const ModelListItem: React.FC<ModelListItemProps> = ({
               overflow: 'hidden'
             }}
           />
-          <FreeTrialModelTag model={model} />
         </HStack>
         <HStack alignItems="center" gap={6}>
           <HealthStatusIndicator

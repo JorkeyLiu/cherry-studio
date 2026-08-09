@@ -743,9 +743,7 @@
     "copy": "Copiază",
     "cut": "Decupează",
     "delete": "Șterge",
-    "documentation": "Documentație",
     "edit": "Editare",
-    "feedback": "Feedback",
     "file": "Fișier",
     "forceReload": "Reîncărcare forțată",
     "front": "Adu toate în față",
@@ -766,7 +764,6 @@
     "undo": "Anulează",
     "unhide": "Afișează toate",
     "view": "Vizualizare",
-    "website": "Site web",
     "window": "Fereastră",
     "zoom": "Zoom",
     "zoomIn": "Mărește",
@@ -1751,9 +1748,6 @@
     "select_folder": "Selectează folderul",
     "word_document": "Document Word"
   },
-  "docs": {
-    "title": "Documentație"
-  },
   "editMode": {
     "contextMenu": {
       "copy": "[to be translated]:Copy",
@@ -1806,10 +1800,6 @@
     "detail": "Detalii eroare",
     "details": "Detalii",
     "diagnosis": {
-      "ai_button": "Diagnostic IA",
-      "ai_done": "Diagnosticat",
-      "ai_loading": "Se diagnostichează",
-      "ai_result": "Rezultatul diagnosticului IA",
       "auth": "Cheie API invalidă, verificați și reconfigurați",
       "content": "Conținut blocat de sistemul de securitate, modificați și reîncercați",
       "context_length": "Conversația este prea lungă, te rugăm să ștergi istoricul sau să începi o conversație nouă",
@@ -1820,6 +1810,7 @@
       "model": "Model negăsit sau fără acces",
       "model_conflict": "Modelul de diagnostic este identic cu modelul cu eroare",
       "network": "Nu se poate conecta la server, verificați setările de rețea sau proxy",
+      "no_model": "[to be translated]:No model is selected or its provider is not configured, please add a model first",
       "ocr": "Motorul OCR nu este inițializat, verificați setările OCR",
       "parse": "IA a returnat un răspuns invalid, vă rugăm să reîncercați sau să schimbați modelul",
       "payload": "Conținutul cererii este prea mare, reduceți dimensiunea fișierului sau a textului.",
@@ -2016,6 +2007,15 @@
         "description": "Importul a fost anulat. Nu s-au efectuat modificări asupra datelor dvs.",
         "title": "Import anulat"
       },
+      "catalog_recovery": {
+        "description": "[to be translated]:Please wait — the application will reopen shortly.",
+        "error_code": "[to be translated]:Error code",
+        "repair_required": {
+          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
+          "title": "[to be translated]:Data recovery incomplete"
+        },
+        "title": "[to be translated]:Recovering imported data…"
+      },
       "confirm_button": "Pornire import",
       "confirm_description": "Acesta va înlocui toate datele de conversație existente cu datele din backupul Cherry Studio. Această acțiune nu poate fi anulată.",
       "confirm_title": "Confirmare import",
@@ -2037,6 +2037,10 @@
         "success": "Importul s-a finalizat cu succes! Aplicația va reporni.",
         "unsupported": "Platformă neacceptată"
       },
+      "recovered": {
+        "assistant_name": "[to be translated]:Recovered conversations",
+        "topic_name": "[to be translated]:Recovered conversation {{index}}"
+      },
       "select_button": "Selectare fișier",
       "select_file": "Selectare backup ZIP Cherry Studio",
       "steps": {
@@ -2054,6 +2058,7 @@
         "description": "Importul ZIP Cherry Studio este momentan acceptat doar pe macOS. Platforma dvs. curentă nu este încă acceptată.",
         "title": "Platformă neacceptată"
       },
+      "untitled_topic": "[to be translated]:Untitled Topic",
       "warning": {
         "description": "Acest import va înlocui toate datele de conversație existente. Asigurați-vă că aveți un backup al datelor curente dacă este necesar.",
         "title": "Înlocuiește tot"
@@ -2356,7 +2361,8 @@
     },
     "attachments": {
       "pasted_image": "Imagine lipită",
-      "pasted_text": "Text lipit"
+      "pasted_text": "Text lipit",
+      "unavailable": "[to be translated]:Attachment unavailable"
     },
     "backup": {
       "failed": "Backup eșuat",
@@ -3016,16 +3022,12 @@
       "title": "Alegeți Modelele Dvs. Implicite"
     },
     "skip": "Sariți",
-    "toast": {
-      "connected": "Conectat cu succes la CherryIN"
-    },
     "welcome": {
-      "login_cherryin": "Conectare cu CherryIN",
       "or_continue_with": "SAU CONTINUAȚI CU",
       "other_provider": "Alegeți alți furnizori",
       "select_other_provider": "Selectați alt furnizor",
       "setup_hint": "Vă rugăm să configurați cel puțin un furnizor pentru cea mai bună experiență",
-      "subtitle": "Bucurați-vă de servicii AI de top cu CherryIN",
+      "subtitle": "Bucurați-vă de servicii AI de top cu propriii furnizori",
       "title": "Bun venit la Cherry Chat"
     }
   },
@@ -3514,7 +3516,6 @@
     "burncloud": "BurnCloud",
     "cephalon": "Cephalon",
     "cerebras": "Cerebras AI",
-    "cherryin": "CherryIN",
     "copilot": "GitHub Copilot",
     "dashscope": "Alibaba Cloud",
     "deepseek": "DeepSeek",
@@ -4013,32 +4014,17 @@
     "about": {
       "build_id": "[to be translated]:Build ID",
       "build_version": "[to be translated]:Build Version",
-      "careers": {
-        "button": "Vedere",
-        "title": "Carieră"
-      },
       "checkUpdate": {
         "available": "Actualizare",
         "label": "Verifică actualizări"
       },
       "checkingUpdate": "Se verifică actualizările...",
-      "contact": {
-        "button": "E-mail",
-        "title": "Contact"
-      },
       "debug": {
         "open": "Deschide",
         "title": "Depanare"
       },
       "description": "Un asistent AI puternic pentru producători",
       "downloading": "Se descarcă...",
-      "enterprise": {
-        "title": "Enterprise"
-      },
-      "feedback": {
-        "button": "Feedback",
-        "title": "Feedback"
-      },
       "label": "Despre și feedback",
       "releases": {
         "button": "Lansări",
@@ -4050,11 +4036,7 @@
       "title": "Despre",
       "updateAvailable": "S-a găsit o nouă versiune {{version}}",
       "updateError": "Eroare actualizare",
-      "updateNotAvailable": "Utilizezi cea mai recentă versiune",
-      "website": {
-        "button": "Site web",
-        "title": "Site oficial"
-      }
+      "updateNotAvailable": "Utilizezi cea mai recentă versiune"
     },
     "advanced": {
       "auto_switch_to_topics": "Comutare automată la subiect",
@@ -4386,7 +4368,6 @@
           "help": "Când este activat, conținutul exportat va include lanțul de raționament (procesul de gândire).",
           "title": "Include lanțul de raționament în export"
         },
-        "help": "Documentație configurare Notion",
         "page_name_key": "Nume câmp titlu pagină",
         "page_name_key_placeholder": "Introdu numele câmpului pentru titlul paginii, implicit este Name",
         "title": "Setări Notion"
@@ -4572,8 +4553,7 @@
         },
         "title": {
           "help": "Servicii de stocare a obiectelor compatibile S3, cum ar fi AWS S3, Cloudflare R2, Aliyun OSS, Tencent COS etc.",
-          "label": "Stocare compatibilă S3",
-          "tooltip": "Documentație configurare stocare compatibilă S3"
+          "label": "Stocare compatibilă S3"
         }
       },
       "siyuan": {
@@ -4593,7 +4573,6 @@
         "root_path_placeholder": "de ex.: /CherryStudio",
         "title": "Configurare SiYuan Note",
         "token": {
-          "help": "Obține token SiYuan Note",
           "label": "Token SiYuan Note"
         },
         "token_placeholder": "Te rugăm să introduci tokenul SiYuan Note"
@@ -4938,7 +4917,6 @@
       "inMemory": "Memorie",
       "install": "Instalează",
       "installError": "Instalarea dependențelor a eșuat",
-      "installHelp": "Obține ajutor pentru instalare",
       "installSuccess": "Dependențe instalate cu succes",
       "jsonFormatError": "Eroare formatare JSON",
       "jsonModeHint": "Editează reprezentarea JSON a configurației serverului MCP. Te rugăm să te asiguri că formatul este corect înainte de salvare.",
@@ -5565,13 +5543,6 @@
       "oauth": {
         "balance": "Sold",
         "button": "Conectare cu {{provider}}",
-        "cherryIn": {
-          "description": "Autentifică-te cu serverul tău auto-găzduit New-API folosind OAuth 2.0 (PKCE)",
-          "logged_in": "Conectat prin OAuth",
-          "login_button": "Conectare cu OAuth",
-          "logout_button": "Deconectare",
-          "title": "Autentificare OAuth"
-        },
         "connect": "Conectează {{provider}}",
         "description": "Acest serviciu este furnizat de <website>{{provider}}</website>",
         "error": "Autentificare eșuată",

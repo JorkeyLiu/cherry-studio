@@ -77,7 +77,7 @@
 - **base 构建即目标**：`electron-builder.yml` 直接携带 Cherry Chat 身份（appId / productName / protocols `cherrychat`），无 overlay、无 `extends`、无 flavor 注入；构建/打包命令不选择 flavor（`electron-builder.test.ts` 用已安装 electron-builder 26.8.1 加载器验证 base 配置语义：appId/productName/protocols 精确锁定、`publish: null`（抑制 git-remote 推断）、无 release notes、schema 校验通过；并断言不存在 `build:chat*` 专用命令）。
 - **退役的 flavor 机制（历史）**：`VITE_APP_FLAVOR` / `__APP_FLAVOR__` 编译期 define（`electron.vite.config.ts`）、`packages/shared/config/buildFlavor.ts`、`electron-builder.cherry-chat.yml` overlay、`scripts/build-chat-mac-arm64.ts` 及配套测试均已删除（LOCK-RETIRE-002）。`env.d.ts` 亦注明不再存在构建期 flavor 选择器。
 - **源码兼容标识不参与身份**：Dexie `CherryStudio`、`persist:cherry-studio` 等按 LOCK-COMPAT-003 保留（§6），`identity.ts` 不携带任何 Cherry Studio 身份值（`identity.test.ts` 断言 `appIdentity` 序列化不含 `Cherry Studio`/`cherrystudio`/`com.kangfenmao`）。
-- **共享常量派生自单一身份**：`APP_NAME`/`HOME_CHERRY_DIR`/`CHERRYIN_CONFIG.REDIRECT_URI` 均从 `appIdentity` 派生（`constant.ts`；`identity.test.ts` 锁定）。
+- **共享常量派生自单一身份**：`APP_NAME`/`HOME_CHERRY_DIR` 均从 `appIdentity` 派生（`constant.ts`；`identity.test.ts` 锁定）。`CHERRYIN_CONFIG.REDIRECT_URI` 曾为同类共享常量（同样由 `appIdentity` 派生、由 `identity.test.ts` 锁定），该不变量已随 CherryIN 平台整体移除而退役：`CHERRYIN_CONFIG` 及其 OAuth 服务（`CherryINOAuthService.ts`）均已删除，本 ADR 保留此历史治理记录。
 
 > **当前证据（config 层）**：`identity.test.ts`（单一不可变身份逐字段锁定 + 无退役 API 面 + 无 Cherry Studio 值）、`userData.test.ts`（`resolveUserDataBase`/`applyDevSuffix`/`isCherryStudioDefaultUserData`）、`init.test.ts`（16 个 `initAppDataDir()` 直连场景，LOCK-RETIRE-001/002 与 LOCK-PROFILE-006 全覆盖）、`electron-builder.test.ts`（base 配置经真实 electron-builder 加载器锁定）、`notarize.test.ts`（bundle ID 动态解析）、`openapi-spec.test.ts`（恒为 Cherry Chat 元数据）、`title.test.ts`（主窗口标题 seam）。打包层证据见 §9（退役后当前证据 + 历史证据行）。
 
@@ -106,7 +106,7 @@
 | 标识符 | 用途 | 证据 |
 |---|---|---|
 | Dexie 数据库名 `CherryStudio` | L2 导入源 IndexedDB 的识别与读取；现有 Dexie files catalog 运行时架构名（post-closure，LOCK-DOC-1） | `src/renderer/src/databases/index.ts`（`new Dexie('CherryStudio')`） |
-| localStorage key `persist:cherry-studio` | redux-persist 持久化（key `cherry-studio`，version 215）；L2 源 Local Storage 导航投影读取 | `src/renderer/src/store/index.ts`（key）；`src/renderer/src/windows/chatImport/entryPoint.ts`（`PERSISTED_STATE_KEY`） |
+| localStorage key `persist:cherry-studio` | redux-persist 持久化（key `cherry-studio`，version 217）；L2 源 Local Storage 导航投影读取 | `src/renderer/src/store/index.ts`（key）；`src/renderer/src/windows/chatImport/entryPoint.ts`（`PERSISTED_STATE_KEY`） |
 | `cherrystudio://` deep link 格式 | 既有功能/源数据格式引用（navigate/providers/mcp-install），非 Cherry Chat 目标身份 | `src/main/services/urlschema/` 处理注释（LOCK-COMPAT-003） |
 | 其他 L2 导入管线消费的源格式标识符 | 兼容契约（如源 IndexedDB file-origin 映射、投影格式） | LOCK-D2：`src/main/services/chatDbImport/importDataPlane.ts`、`tests/e2e/utils/disposable-dev-origin-seed-zip.ts`（`SEED_DB_NAME='CherryStudio'`、`SEED_PERSIST_KEY='persist:cherry-studio'`）；LOCK-E3：`tests/e2e/utils/disposable-seed-zip.ts`（同）；LOCK-PROD-2：`src/renderer/src/windows/chatImport/entryPoint.ts`、`src/main/services/chatDbImport/navigationProjection.ts` |
 | 受保护 profile 名 `Cherry Studio` / `CherryStudio` | LOCK-PROFILE-006 拒绝守卫的兼容保护名（ADR 规范形式 + Electron/包实际派生形式） | `packages/shared/config/userData.ts`（`CHERRY_STUDIO_PROTECTED_USER_DATA_NAMES`） |

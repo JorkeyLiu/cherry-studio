@@ -34,7 +34,7 @@
   </a>
 </h1>
 
-<p align="center">English | <a href="./docs/zh/README.md">中文</a> | <a href="https://cherry-ai.com">Official Site</a> | <a href="https://docs.cherry-ai.com/docs/en-us">Documents</a> | <a href="./docs/en/guides/development.md">Development</a> | <a href="https://github.com/CherryHQ/cherry-studio/issues">Feedback</a><br></p>
+<p align="center">English | <a href="./docs/zh/README.md">中文</a> | <a href="./docs/en/guides/development.md">Development</a><br></p>
 
 <div align="center">
 
@@ -237,7 +237,7 @@ The Enterprise Edition addresses core challenges in team collaboration by centra
 
 ## ✨ Online Demo
 
-**🔗 [Cherry Studio Enterprise](https://enterprise.cherry-ai.com)**
+A public online demo is not currently available.
 
 ## Version Comparison
 
@@ -250,10 +250,7 @@ The Enterprise Edition addresses core challenges in team collaboration by centra
 
 ## Get the Enterprise Edition
 
-We believe the Enterprise Edition will become your team's AI productivity engine. If you are interested in Cherry Studio Enterprise Edition and would like to learn more, request a quote, or schedule a demo, please feel free to contact us.
-
-- **For Business Inquiries & Purchasing**:
-  **📧 [bd@cherry-ai.com](mailto:bd@cherry-ai.com)**
+We believe the Enterprise Edition will become your team's AI productivity engine. If you are interested in Cherry Studio Enterprise Edition and would like to learn more, request a quote, or schedule a demo, please feel free to contact us through the project's official channels.
 
 # 🔗 Related Projects
 
@@ -292,7 +289,7 @@ The Cherry Studio Community Edition is governed by the standard GNU Affero Gener
 
 Use of the Cherry Studio Community Edition for commercial purposes is permitted, subject to full compliance with the terms and conditions of the AGPL-3.0 license.
 
-Should you require a commercial license that provides an exemption from the AGPL-3.0 requirements, please contact us at bd@cherry-ai.com.
+Should you require a commercial license that provides an exemption from the AGPL-3.0 requirements, please contact the project maintainers through the repository's official channels.
 
 <!-- Links & Images -->
 
@@ -317,6 +314,6 @@ Should you require a commercial license that provides an exemption from the AGPL
 [license-shield]: https://img.shields.io/badge/License-AGPLv3-important.svg?logo=gnu
 [license-link]: https://www.gnu.org/licenses/agpl-3.0
 [commercial-shield]: https://img.shields.io/badge/License-Contact-white.svg?logoColor=white&logo=telegram&color=blue
-[commercial-link]: mailto:license@cherry-ai.com?subject=Commercial%20License%20Inquiry
+[commercial-link]: https://github.com/CherryHQ/cherry-studio/discussions
 [sponsor-shield]: https://img.shields.io/badge/Sponsor-FF6699.svg?logo=githubsponsors&logoColor=white
 [sponsor-link]: https://github.com/CherryHQ/cherry-studio/blob/main/docs/sponsor.md

@@ -17,7 +17,6 @@
 import type { PayloadAction } from '@reduxjs/toolkit'
 import { createSlice } from '@reduxjs/toolkit'
 import { isLocalAi } from '@renderer/config/env'
-import { SYSTEM_MODELS } from '@renderer/config/models'
 import { INITIAL_STATE_EXCLUDED_PROVIDER_IDS, SYSTEM_PROVIDERS_CONFIG } from '@renderer/config/providers'
 import type { AwsBedrockAuthType, Model, Provider } from '@renderer/types'
 import { omit, uniqBy } from 'lodash'
@@ -47,28 +46,29 @@ type LlmSettings = {
     apiKey: string
     region: string
   }
-  cherryIn: {
-    accessToken: string
-    refreshToken: string
-  }
 }
 
 export interface LlmState {
   providers: Provider[]
-  defaultModel: Model
+  /**
+   * Explicitly unconfigured model slot. May be undefined until the
+   * user picks a model — callers must handle absence explicitly and must not
+   * silently fall back to another provider/model.
+   */
+  defaultModel?: Model
   /** @deprecated */
-  topicNamingModel: Model
-  quickModel: Model
-  translateModel: Model
+  topicNamingModel?: Model
+  quickModel?: Model
+  translateModel?: Model
   quickAssistantId: string
   settings: LlmSettings
 }
 
 export const initialState: LlmState = {
-  defaultModel: SYSTEM_MODELS.defaultModel[0],
-  topicNamingModel: SYSTEM_MODELS.defaultModel[1],
-  quickModel: SYSTEM_MODELS.defaultModel[1],
-  translateModel: SYSTEM_MODELS.defaultModel[2],
+  defaultModel: undefined,
+  topicNamingModel: undefined,
+  quickModel: undefined,
+  translateModel: undefined,
   quickAssistantId: '',
   providers: Object.values(omit(SYSTEM_PROVIDERS_CONFIG, INITIAL_STATE_EXCLUDED_PROVIDER_IDS)),
   settings: {
@@ -95,10 +95,6 @@ export const initialState: LlmState = {
       secretAccessKey: '',
       apiKey: '',
       region: ''
-    },
-    cherryIn: {
-      accessToken: '',
-      refreshToken: ''
     }
   }
 }
@@ -240,24 +236,6 @@ const llmSlice = createSlice({
     setAwsBedrockRegion: (state, action: PayloadAction<string>) => {
       state.settings.awsBedrock.region = action.payload
     },
-    setCherryInTokens: (state, action: PayloadAction<{ accessToken: string; refreshToken?: string }>) => {
-      if (!state.settings.cherryIn) {
-        state.settings.cherryIn = {
-          accessToken: '',
-          refreshToken: ''
-        }
-      }
-
-      state.settings.cherryIn.accessToken = action.payload.accessToken
-
-      if (action.payload.refreshToken !== undefined) {
-        state.settings.cherryIn.refreshToken = action.payload.refreshToken
-      }
-    },
-    clearCherryInTokens: (state) => {
-      state.settings.cherryIn.accessToken = ''
-      state.settings.cherryIn.refreshToken = ''
-    },
     updateModel: (
       state,
       action: PayloadAction<{
@@ -299,8 +277,6 @@ export const {
   setAwsBedrockSecretAccessKey,
   setAwsBedrockApiKey,
   setAwsBedrockRegion,
-  setCherryInTokens,
-  clearCherryInTokens,
   updateModel
 } = llmSlice.actions
 

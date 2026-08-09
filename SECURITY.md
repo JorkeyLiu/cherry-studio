@@ -56,9 +56,8 @@ We greatly appreciate contributions from the security community and strive to re
 
 ## 🌟 Questions?
 
-For any security-related questions not involving vulnerabilities, please reach out to:  
-**security@cherry-ai.com**
+For any security-related questions not involving vulnerabilities, please open a discussion in the project repository.
 
 ---
 
-Thank you for helping keep Cherry Studio and its users secure!
+Thank you for helping keep Cherry Chat and its users secure!

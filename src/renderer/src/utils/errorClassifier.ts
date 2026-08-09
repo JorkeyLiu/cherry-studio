@@ -1,9 +1,12 @@
 import type { SerializedError } from '@renderer/types/error'
 
+import { isNoModelError } from './noModelError'
+
 export interface ErrorClassification {
   category:
     | 'auth'
     | 'model'
+    | 'no_model'
     | 'quota'
     | 'context_length'
     | 'payload'
@@ -31,6 +34,18 @@ export function classifyError(error?: SerializedError, providerId?: string): Err
   const numStatus = typeof status === 'number' ? status : typeof status === 'string' ? parseInt(status, 10) : undefined
   const msg = ((error.message as string) || '').toLowerCase()
   const providerSuffix = providerId ? `?id=${providerId}` : ''
+
+  // No-model guard thrown locally before any request (model slot unconfigured,
+  // its provider unresolvable, or a stale provider that no longer matches the
+  // requested model). Matched on the stable `name` marker rather than the
+  // translated message, so classification stays locale-independent.
+  if (isNoModelError(error)) {
+    return {
+      category: 'no_model',
+      i18nKey: 'error.diagnosis.no_model',
+      navTarget: `/settings/provider${providerSuffix}`
+    }
+  }
 
   // Auth errors (401/403)
   if (

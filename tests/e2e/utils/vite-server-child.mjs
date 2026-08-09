@@ -110,8 +110,7 @@ function buildRendererConfig(projectRoot) {
       'built-in'
     ),
     '@cherrystudio/ai-core': path.join(projectRoot, 'packages', 'aiCore', 'src'),
-    '@cherrystudio/extension-table-plus': path.join(projectRoot, 'packages', 'extension-table-plus', 'src'),
-    '@cherrystudio/ai-sdk-provider': path.join(projectRoot, 'packages', 'ai-sdk-provider', 'src')
+    '@cherrystudio/extension-table-plus': path.join(projectRoot, 'packages', 'extension-table-plus', 'src')
   }
 
   // Plugins: @vitejs/plugin-react-swc with tsDecorators (from electron.vite.config.ts).

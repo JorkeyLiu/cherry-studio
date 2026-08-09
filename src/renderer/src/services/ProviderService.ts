@@ -26,19 +26,6 @@ export function getProviderByModel(model?: Model) {
   const id = model?.provider
   const provider = getStoreProviders().find((p) => p.id === id)
 
-  if (provider?.id === 'cherryai') {
-    const map = {
-      'Qwen/Qwen3-8B': 'cherryin',
-      'Qwen/Qwen3-Next-80B-A3B-Instruct': 'cherryin'
-    }
-
-    const providerId = map[model?.id as keyof typeof map]
-
-    if (providerId) {
-      return getProviderById(providerId)
-    }
-  }
-
   return provider
 }
 

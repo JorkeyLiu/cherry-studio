@@ -274,8 +274,11 @@ export default class AppUpdater {
     }
 
     logger.info('Failed to fetch update config, falling back to default feed URL')
-    // Fallback: use default feed URL based on mirror
-    const defaultFeedUrl = mirror === UpdateMirror.GITCODE ? FeedUrl.PRODUCTION : FeedUrl.GITHUB_LATEST
+    // The retired production feed URL was removed with the upstream platform;
+    // no independent release endpoint is approved yet, so both mirrors fall
+    // back to the current repository GitHub release URL (this path is
+    // unreachable while the updater gate is active).
+    const defaultFeedUrl = FeedUrl.GITHUB_LATEST
 
     logger.info(`Using fallback feed URL: ${defaultFeedUrl}`)
     this._setChannel(UpgradeChannel.LATEST, defaultFeedUrl)

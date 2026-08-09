@@ -18,7 +18,7 @@ export function isOpenAILLMModel(model?: Model): boolean {
 
 // TODO: only covers GPT and reasoning (o-series) models.
 // Non-chat models (dall-e, whisper, tts, text-embedding-*) are not detected.
-export function isOpenAIModel(model: Model): boolean {
+export function isOpenAIModel(model?: Model): boolean {
   if (!model) {
     return false
   }

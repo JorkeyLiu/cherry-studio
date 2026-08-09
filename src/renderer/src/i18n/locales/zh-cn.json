@@ -743,9 +743,7 @@
     "copy": "复制",
     "cut": "剪切",
     "delete": "删除",
-    "documentation": "文档",
     "edit": "编辑",
-    "feedback": "反馈",
     "file": "文件",
     "forceReload": "强制重新加载",
     "front": "全部置于顶层",
@@ -766,7 +764,6 @@
     "undo": "撤销",
     "unhide": "全部显示",
     "view": "视图",
-    "website": "网站",
     "window": "窗口",
     "zoom": "缩放",
     "zoomIn": "放大",
@@ -1751,9 +1748,6 @@
     "select_folder": "选择文件夹",
     "word_document": "Word 文档"
   },
-  "docs": {
-    "title": "帮助文档"
-  },
   "editMode": {
     "contextMenu": {
       "copy": "复制",
@@ -1806,10 +1800,6 @@
     "detail": "错误详情",
     "details": "详细信息",
     "diagnosis": {
-      "ai_button": "AI 诊断",
-      "ai_done": "已诊断",
-      "ai_loading": "正在诊断",
-      "ai_result": "AI 诊断结果",
       "auth": "API Key 无效，请检查并重新配置",
       "content": "消息内容被安全系统拦截，请修改后重试",
       "context_length": "对话上下文过长，请清理历史消息或开启新对话",
@@ -1820,6 +1810,7 @@
       "model": "模型不存在或你没有访问权限",
       "model_conflict": "诊断模型与出错模型相同，无法进行诊断",
       "network": "无法连接到服务器，请检查网络或代理设置",
+      "no_model": "未选择模型或模型服务商未配置，请先添加模型",
       "ocr": "OCR 识别引擎未初始化，请检查 OCR 设置",
       "parse": "AI 返回的格式异常，请重试或更换模型",
       "payload": "请求内容过大，请减少发送的文件或文本量",
@@ -3031,16 +3022,12 @@
       "title": "选择你的默认模型"
     },
     "skip": "跳过引导",
-    "toast": {
-      "connected": "成功连接 CherryIN"
-    },
     "welcome": {
-      "login_cherryin": "登录 CherryIN",
       "or_continue_with": "或使用其他方式",
       "other_provider": "选择其他服务商",
       "select_other_provider": "选择其他服务商",
       "setup_hint": "请您先至少配置一个服务商，以获得最佳使用体验",
-      "subtitle": "使用 CherryIN 服务商可畅享顶级 AI 服务",
+      "subtitle": "配置你自己的服务商，畅享顶级 AI 服务",
       "title": "欢迎使用 Cherry Chat"
     }
   },
@@ -3529,7 +3516,6 @@
     "burncloud": "BurnCloud",
     "cephalon": "Cephalon",
     "cerebras": "Cerebras AI",
-    "cherryin": "CherryIN",
     "copilot": "GitHub Copilot",
     "dashscope": "阿里云百炼",
     "deepseek": "深度求索",
@@ -4028,32 +4014,17 @@
     "about": {
       "build_id": "构建 ID",
       "build_version": "构建版本",
-      "careers": {
-        "button": "查看",
-        "title": "加入我们"
-      },
       "checkUpdate": {
         "available": "立即更新",
         "label": "检查更新"
       },
       "checkingUpdate": "正在检查更新...",
-      "contact": {
-        "button": "邮件",
-        "title": "邮件联系"
-      },
       "debug": {
         "open": "打开",
         "title": "调试面板"
       },
       "description": "一款为创造者而生的 AI 助手",
       "downloading": "正在下载更新...",
-      "enterprise": {
-        "title": "企业版"
-      },
-      "feedback": {
-        "button": "反馈",
-        "title": "意见反馈"
-      },
       "label": "关于我们",
       "releases": {
         "button": "查看",
@@ -4065,11 +4036,7 @@
       "title": "关于我们",
       "updateAvailable": "发现新版本 {{version}}",
       "updateError": "更新出错",
-      "updateNotAvailable": "你的软件已是最新版本",
-      "website": {
-        "button": "查看",
-        "title": "官方网站"
-      }
+      "updateNotAvailable": "你的软件已是最新版本"
     },
     "advanced": {
       "auto_switch_to_topics": "自动切换到话题",
@@ -4401,7 +4368,6 @@
           "help": "开启后，导出到 Notion 时会包含思维链内容。",
           "title": "导出时包含思维链"
         },
-        "help": "Notion 配置文档",
         "page_name_key": "页面标题字段名",
         "page_name_key_placeholder": "请输入页面标题字段名，默认为 Name",
         "title": "Notion 设置"
@@ -4587,8 +4553,7 @@
         },
         "title": {
           "help": "与AWS S3 API兼容的对象存储服务, 例如AWS S3, Cloudflare R2, 阿里云OSS, 腾讯云COS等",
-          "label": "S3 兼容存储",
-          "tooltip": "S3 兼容存储配置文档"
+          "label": "S3 兼容存储"
         }
       },
       "siyuan": {
@@ -4608,7 +4573,6 @@
         "root_path_placeholder": "例如：/CherryStudio",
         "title": "思源笔记配置",
         "token": {
-          "help": "在思源笔记 -> 设置 -> 关于中获取",
           "label": "API 令牌"
         },
         "token_placeholder": "请输入思源笔记令牌"
@@ -4953,7 +4917,6 @@
       "inMemory": "内存",
       "install": "安装",
       "installError": "安装依赖项失败",
-      "installHelp": "获取安装帮助",
       "installSuccess": "依赖项安装成功",
       "jsonFormatError": "JSON 格式化错误",
       "jsonModeHint": "编辑 MCP 服务器配置的 JSON 表示。保存前请确保格式正确",
@@ -5580,13 +5543,6 @@
       "oauth": {
         "balance": "余额",
         "button": "使用 {{provider}} 账号登录",
-        "cherryIn": {
-          "description": "使用 OAuth 2.0 登录 CherryIN",
-          "logged_in": "已通过 OAuth 登录",
-          "login_button": "OAuth 登录",
-          "logout_button": "退出登录",
-          "title": "OAuth 登录"
-        },
         "connect": "关联 {{provider}} 账号",
         "description": "本服务由 <website>{{provider}}</website> 提供",
         "error": "认证失败",

@@ -3,7 +3,7 @@ import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPop
 import { isLocalAi } from '@renderer/config/env'
 import { isEmbeddingModel, isRerankModel, isWebSearchModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
-import { useProvider } from '@renderer/hooks/useProvider'
+import { useAllProviders } from '@renderer/hooks/useProvider'
 import { getProviderName } from '@renderer/services/ProviderService'
 import type { Assistant, Model } from '@renderer/types'
 import { Button, Tag } from 'antd'
@@ -21,7 +21,12 @@ const SelectModelButton: FC<Props> = ({ assistant }) => {
   const { model, updateAssistant } = useAssistant(assistant.id)
   const { t } = useTranslation()
   const timerRef = useRef<NodeJS.Timeout>(undefined)
-  const provider = useProvider(model?.provider)
+  const allProviders = useAllProviders()
+
+  // An unconfigured model (undefined) is NOT "invalid" — it renders
+  // the neutral "Select Model" text. The invalid tag is reserved for a stale
+  // configured model whose provider can no longer be resolved.
+  const hasResolvableProvider = model ? allProviders.some((p) => p.id === model.provider) : false
 
   const modelFilter = (model: Model) => !isEmbeddingModel(model) && !isRerankModel(model)
 
@@ -62,7 +67,7 @@ const SelectModelButton: FC<Props> = ({ assistant }) => {
         </ModelName>
       </ButtonContent>
       <ChevronsUpDown size={14} color="var(--color-icon)" />
-      {!provider && <Tag color="error">{t('models.invalid_model')}</Tag>}
+      {model && !hasResolvableProvider && <Tag color="error">{t('models.invalid_model')}</Tag>}
     </DropdownButton>
   )
 }

@@ -743,9 +743,7 @@
     "copy": "Copiar",
     "cut": "Corte",
     "delete": "Excluir",
-    "documentation": "Documentação",
     "edit": "Editar",
-    "feedback": "Feedback",
     "file": "Arquivo",
     "forceReload": "Forçar Recarregamento",
     "front": "Trazer Tudo para a Frente",
@@ -766,7 +764,6 @@
     "undo": "Desfazer",
     "unhide": "Mostrar Todos",
     "view": "Visualizar",
-    "website": "Site",
     "window": "Janela",
     "zoom": "Zoom",
     "zoomIn": "Ampliar",
@@ -1751,9 +1748,6 @@
     "select_folder": "Selecionar Pasta",
     "word_document": "Documento do Word"
   },
-  "docs": {
-    "title": "Documentação de Ajuda"
-  },
   "editMode": {
     "contextMenu": {
       "copy": "[to be translated]:Copy",
@@ -1806,10 +1800,6 @@
     "detail": "Detalhes do erro",
     "details": "Detalhes",
     "diagnosis": {
-      "ai_button": "Diagnóstico IA",
-      "ai_done": "Diagnosticado",
-      "ai_loading": "A diagnosticar",
-      "ai_result": "Resultado do diagnóstico IA",
       "auth": "Chave API inválida, por favor verifique e reconfigure",
       "content": "Conteúdo bloqueado pelo sistema de segurança, modifique e tente novamente",
       "context_length": "Conversa muito longa, por favor limpe o histórico ou inicie um novo chat",
@@ -1820,6 +1810,7 @@
       "model": "Modelo não encontrado ou sem acesso",
       "model_conflict": "O modelo de diagnóstico é igual ao modelo com erro",
       "network": "Não é possível ligar ao servidor, verifique as definições de rede ou proxy",
+      "no_model": "[to be translated]:No model is selected or its provider is not configured, please add a model first",
       "ocr": "Motor OCR não inicializado, verifique as definições de OCR",
       "parse": "A IA retornou uma resposta inválida, tente novamente ou mude de modelo",
       "payload": "Conteúdo da solicitação muito grande, reduza o tamanho do arquivo ou do texto",
@@ -2016,6 +2007,15 @@
         "description": "A importação foi cancelada. Nenhuma alteração foi feita nos seus dados.",
         "title": "Importação cancelada"
       },
+      "catalog_recovery": {
+        "description": "[to be translated]:Please wait — the application will reopen shortly.",
+        "error_code": "[to be translated]:Error code",
+        "repair_required": {
+          "description": "[to be translated]:Cherry Studio could not finish restoring your data. No data has been changed. Please restart the application to try again.",
+          "title": "[to be translated]:Data recovery incomplete"
+        },
+        "title": "[to be translated]:Recovering imported data…"
+      },
       "confirm_button": "Iniciar importação",
       "confirm_description": "Isto irá substituir todos os dados de conversa existentes pelos dados do backup do Cherry Studio. Esta ação não pode ser desfeita.",
       "confirm_title": "Confirmar importação",
@@ -2037,6 +2037,10 @@
         "success": "Importação concluída com sucesso! A aplicação será reiniciada.",
         "unsupported": "Plataforma não suportada"
       },
+      "recovered": {
+        "assistant_name": "[to be translated]:Recovered conversations",
+        "topic_name": "[to be translated]:Recovered conversation {{index}}"
+      },
       "select_button": "Selecionar ficheiro",
       "select_file": "Selecionar backup ZIP do Cherry Studio",
       "steps": {
@@ -2054,6 +2058,7 @@
         "description": "A importação ZIP do Cherry Studio é atualmente suportada apenas no macOS. A sua plataforma atual ainda não é suportada.",
         "title": "Plataforma não suportada"
       },
+      "untitled_topic": "[to be translated]:Untitled Topic",
       "warning": {
         "description": "Esta importação irá substituir todos os dados de conversa existentes. Certifique-se de que tem um backup dos seus dados atuais se necessário.",
         "title": "Substituir tudo"
@@ -2356,7 +2361,8 @@
     },
     "attachments": {
       "pasted_image": "Imagem da área de transferência",
-      "pasted_text": "Arquivo da área de transferência"
+      "pasted_text": "Arquivo da área de transferência",
+      "unavailable": "[to be translated]:Attachment unavailable"
     },
     "backup": {
       "failed": "Backup falhou",
@@ -3016,16 +3022,12 @@
       "title": "Escolha Seus Modelos Padrão"
     },
     "skip": "Pular",
-    "toast": {
-      "connected": "Conectado com sucesso ao CherryIN"
-    },
     "welcome": {
-      "login_cherryin": "Entrar com CherryIN",
       "or_continue_with": "OU CONTINUAR COM",
       "other_provider": "Escolher Outros Provedores",
       "select_other_provider": "Selecionar Outro Provedor",
       "setup_hint": "Por favor, configure pelo menos um provedor para a melhor experiência",
-      "subtitle": "Desfrute de serviços de IA de alto nível com CherryIN",
+      "subtitle": "Desfrute de serviços de IA de alto nível com seus próprios provedores",
       "title": "Bem-vindo ao Cherry Chat"
     }
   },
@@ -3514,7 +3516,6 @@
     "burncloud": "BurnCloud",
     "cephalon": "Cephalon",
     "cerebras": "Cerebras AI",
-    "cherryin": "CherryIN",
     "copilot": "GitHub Copiloto",
     "dashscope": "Área de Atuação AliCloud",
     "deepseek": "Busca Profunda",
@@ -4013,32 +4014,17 @@
     "about": {
       "build_id": "[to be translated]:Build ID",
       "build_version": "[to be translated]:Build Version",
-      "careers": {
-        "button": "Visualizar",
-        "title": "Carreiras"
-      },
       "checkUpdate": {
         "available": "Atualizar agora",
         "label": "Verificar atualizações"
       },
       "checkingUpdate": "Verificando atualizações...",
-      "contact": {
-        "button": "E-mail",
-        "title": "Contato por e-mail"
-      },
       "debug": {
         "open": "Abrir",
         "title": "Painel de Depuração"
       },
       "description": "Um assistente de IA criado para criadores",
       "downloading": "Baixando atualizações...",
-      "enterprise": {
-        "title": "Empresa"
-      },
-      "feedback": {
-        "button": "Feedback",
-        "title": "Enviar feedback"
-      },
       "label": "Sobre Nós",
       "releases": {
         "button": "Ver",
@@ -4050,11 +4036,7 @@
       "title": "Sobre nós",
       "updateAvailable": "Nova versão disponível {{version}}",
       "updateError": "Erro ao atualizar",
-      "updateNotAvailable": "Seu software já está atualizado",
-      "website": {
-        "button": "Ver",
-        "title": "Site oficial"
-      }
+      "updateNotAvailable": "Seu software já está atualizado"
     },
     "advanced": {
       "auto_switch_to_topics": "Alternar automaticamente para tópicos",
@@ -4386,7 +4368,6 @@
           "help": "Quando ativado, o conteúdo da cadeia de raciocínio será incluído ao exportar para o Notion.",
           "title": "Incluir cadeia de raciocínio ao exportar"
         },
-        "help": "Documentação de configuração do Notion",
         "page_name_key": "Campo do título da página",
         "page_name_key_placeholder": "Insira o campo do título da página, por padrão é Nome",
         "title": "Configurações do Notion"
@@ -4572,8 +4553,7 @@
         },
         "title": {
           "help": "Serviço de armazenamento de objetos compatível com a API da AWS S3, por exemplo: AWS S3, Cloudflare R2, Alibaba Cloud OSS, Tencent Cloud COS, etc.",
-          "label": "Armazenamento compatível com S3",
-          "tooltip": "Documentação de configuração de armazenamento compatível com S3"
+          "label": "Armazenamento compatível com S3"
         }
       },
       "siyuan": {
@@ -4593,7 +4573,6 @@
         "root_path_placeholder": "Exemplo: /CherryStudio",
         "title": "Configuração do Siyuan Notebook",
         "token": {
-          "help": "Obtenha em Siyuan Notebook -> Configurações -> Sobre",
           "label": "Token da API"
         },
         "token_placeholder": "Por favor, insira o token do Siyuan Notebook"
@@ -4938,7 +4917,6 @@
       "inMemory": "Na Memória",
       "install": "Instalar",
       "installError": "Falha ao instalar dependências",
-      "installHelp": "Obter Ajuda com a Instalação",
       "installSuccess": "Dependências instaladas com sucesso",
       "jsonFormatError": "Erro de formatação JSON",
       "jsonModeHint": "Edite a representação JSON da configuração do servidor MCP. Certifique-se de que o formato está correto antes de salvar.",
@@ -5565,13 +5543,6 @@
       "oauth": {
         "balance": "Saldo",
         "button": "Entrar com a conta {{provider}}",
-        "cherryIn": {
-          "description": "Faça login com seu servidor New-API auto-hospedado usando OAuth 2.0 (PKCE)",
-          "logged_in": "Conectado via OAuth",
-          "login_button": "Entrar com OAuth",
-          "logout_button": "Sair",
-          "title": "Login OAuth"
-        },
         "connect": "Conectar {{provider}}",
         "description": "Este serviço é fornecido por <website>{{provider}}</website>",
         "error": "Falha na autenticação",

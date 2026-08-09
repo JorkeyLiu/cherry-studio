@@ -428,7 +428,6 @@ export class ExtensionRegistry {
 
     // 2. Aggregator fallback: 从 model.provider 段解析真实 provider
     //    e.g., "aihubmix.google" → try "google" → found via google extension
-    //    e.g., "cherryin.gemini" → try "gemini" → found via alias → google extension
     if (typeof modelProvider === 'string') {
       const segments = modelProvider.split('.')
       for (let i = segments.length - 1; i >= 0; i--) {

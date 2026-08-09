@@ -40,7 +40,7 @@ The `x-files/app-upgrade-config/app-upgrade-config.json` file is synchronized by
 3. **Install toolchain** – Node.js 22, Corepack, and frozen pnpm dependencies are installed inside `main/`.
 4. **Run the update script** – `pnpm tsx scripts/update-app-upgrade-config.ts --tag <tag> --config ../cs/app-upgrade-config.json --is-prerelease <flag>` updates the JSON in-place.  
    - The script normalizes the tag (e.g., strips `v` prefix), detects the release channel (`latest`, `rc`, `beta`), and loads segment rules from `config/app-upgrade-segments.json`.  
-   - It validates that prerelease flags and semantic suffixes agree, enforces locked segments, builds mirror feed URLs, and performs release-availability checks (GitHub HEAD request for every channel; GitCode GET for latest channels, falling back to `https://releases.cherry-ai.com` when gitcode is delayed).  
+   - It validates that prerelease flags and semantic suffixes agree, enforces locked segments, builds mirror feed URLs, and performs release-availability checks (GitHub HEAD request for every channel; GitCode GET for latest channels, keeping the gitcode repo template URL when the gitcode release is delayed — the retired gitcode CDN mirror fallback was removed with the upstream platform).  
    - After updating the relevant channel entry, the script rewrites the config with semver-sort order and a new `lastUpdated` timestamp.
 5. **Detect changes + create PR** – if `cs/app-upgrade-config.json` changed, the workflow opens a PR `chore/update-app-upgrade-config/<safe_tag>` against `x-files/app-upgrade-config` with a commit message `🤖 chore: sync app-upgrade-config for <tag>`. Otherwise it logs that no update is required.
 

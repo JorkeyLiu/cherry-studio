@@ -12,7 +12,7 @@ const thinkingTool = defineTool({
   render: ({ assistant, model, quickPanel, session }) => (
     <ThinkingButton
       quickPanel={quickPanel}
-      model={model}
+      model={model!}
       assistantId={assistant.id}
       reasoningEffort={session?.reasoningEffort}
       onReasoningEffortChange={session?.onReasoningEffortChange}

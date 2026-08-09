@@ -743,9 +743,7 @@
     "copy": "Copy",
     "cut": "Cut",
     "delete": "Delete",
-    "documentation": "Documentation",
     "edit": "Edit",
-    "feedback": "Feedback",
     "file": "File",
     "forceReload": "Force Reload",
     "front": "Bring All to Front",
@@ -766,7 +764,6 @@
     "undo": "Undo",
     "unhide": "Show All",
     "view": "View",
-    "website": "Website",
     "window": "Window",
     "zoom": "Zoom",
     "zoomIn": "Zoom In",
@@ -1751,9 +1748,6 @@
     "select_folder": "Select Folder",
     "word_document": "Word Document"
   },
-  "docs": {
-    "title": "Docs"
-  },
   "editMode": {
     "contextMenu": {
       "copy": "Copy",
@@ -1806,10 +1800,6 @@
     "detail": "Error Details",
     "details": "Details",
     "diagnosis": {
-      "ai_button": "AI Diagnosis",
-      "ai_done": "Diagnosed",
-      "ai_loading": "Diagnosing",
-      "ai_result": "AI Diagnosis Result",
       "auth": "API Key is invalid, please check and reconfigure",
       "content": "Content blocked by safety system, please modify and retry",
       "context_length": "Conversation too long, please clear history or start a new chat",
@@ -1820,6 +1810,7 @@
       "model": "Model not found or you don't have access",
       "model_conflict": "Diagnosis model is the same as the failing model",
       "network": "Cannot connect to server, check network or proxy settings",
+      "no_model": "No model is selected or its provider is not configured, please add a model first",
       "ocr": "OCR engine not initialized, check OCR settings",
       "parse": "AI returned an invalid response, please retry or switch model",
       "payload": "Request content too large, please reduce file or text size",
@@ -3031,16 +3022,12 @@
       "title": "Choose Your Default Models"
     },
     "skip": "Skip",
-    "toast": {
-      "connected": "Successfully connected to CherryIN"
-    },
     "welcome": {
-      "login_cherryin": "Login with CherryIN",
       "or_continue_with": "OR CONTINUE WITH",
       "other_provider": "Choose Other Providers",
       "select_other_provider": "Select Other Provider",
       "setup_hint": "Please configure at least one provider for the best experience",
-      "subtitle": "Enjoy top-tier AI services with CherryIN",
+      "subtitle": "Enjoy top-tier AI services with your own providers",
       "title": "Welcome to Cherry Chat"
     }
   },
@@ -3529,7 +3516,6 @@
     "burncloud": "BurnCloud",
     "cephalon": "Cephalon",
     "cerebras": "Cerebras AI",
-    "cherryin": "CherryIN",
     "copilot": "GitHub Copilot",
     "dashscope": "Alibaba Cloud",
     "deepseek": "DeepSeek",
@@ -4028,32 +4014,17 @@
     "about": {
       "build_id": "Build ID",
       "build_version": "Build Version",
-      "careers": {
-        "button": "View",
-        "title": "Careers"
-      },
       "checkUpdate": {
         "available": "Update",
         "label": "Check Update"
       },
       "checkingUpdate": "Checking for updates...",
-      "contact": {
-        "button": "Email",
-        "title": "Contact"
-      },
       "debug": {
         "open": "Open",
         "title": "Debug"
       },
       "description": "A powerful AI assistant for producer",
       "downloading": "Downloading...",
-      "enterprise": {
-        "title": "Enterprise"
-      },
-      "feedback": {
-        "button": "Feedback",
-        "title": "Feedback"
-      },
       "label": "About & Feedback",
       "releases": {
         "button": "Releases",
@@ -4065,11 +4036,7 @@
       "title": "About",
       "updateAvailable": "Found new version {{version}}",
       "updateError": "Update error",
-      "updateNotAvailable": "You are using the latest version",
-      "website": {
-        "button": "Website",
-        "title": "Official Website"
-      }
+      "updateNotAvailable": "You are using the latest version"
     },
     "advanced": {
       "auto_switch_to_topics": "Auto switch to topic",
@@ -4401,7 +4368,6 @@
           "help": "When enabled, exported content will include reasoning chain (thought process).",
           "title": "Include Reasoning Chain in Export"
         },
-        "help": "Notion Configuration Documentation",
         "page_name_key": "Page Title Field Name",
         "page_name_key_placeholder": "Enter page title field name, default is Name",
         "title": "Notion Settings"
@@ -4587,8 +4553,7 @@
         },
         "title": {
           "help": "S3 compatible object storage services, such as AWS S3, Cloudflare R2, Aliyun OSS, Tencent COS, etc.",
-          "label": "S3 Compatible Storage",
-          "tooltip": "S3 Compatible Storage Configuration Document"
+          "label": "S3 Compatible Storage"
         }
       },
       "siyuan": {
@@ -4608,7 +4573,6 @@
         "root_path_placeholder": "e.g.: /CherryStudio",
         "title": "Siyuan Note Configuration",
         "token": {
-          "help": "Get Siyuan Note Token",
           "label": "Siyuan Note Token"
         },
         "token_placeholder": "Please enter Siyuan Note Token"
@@ -4953,7 +4917,6 @@
       "inMemory": "Memory",
       "install": "Install",
       "installError": "Failed to install dependencies",
-      "installHelp": "Get Installation Help",
       "installSuccess": "Dependencies installed successfully",
       "jsonFormatError": "JSON formatting error",
       "jsonModeHint": "Edit the JSON representation of the MCP server configuration. Please ensure the format is correct before saving.",
@@ -5580,13 +5543,6 @@
       "oauth": {
         "balance": "Balance",
         "button": "Login with {{provider}}",
-        "cherryIn": {
-          "description": "Login to CherryIN using OAuth 2.0",
-          "logged_in": "Logged in via OAuth",
-          "login_button": "Login with OAuth",
-          "logout_button": "Logout",
-          "title": "OAuth Login"
-        },
         "connect": "Connect {{provider}}",
         "description": "This service is provided by <website>{{provider}}</website>",
         "error": "Authentication failed",

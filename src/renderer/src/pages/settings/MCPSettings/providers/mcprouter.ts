@@ -61,7 +61,9 @@ export const syncMCPRouterServers = async (
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
-        'HTTP-Referer': 'https://cherry-ai.com',
+        // The historical `HTTP-Referer` attribution header to the retired
+        // platform domain was removed with the upstream platform;
+        // X-Title carries the identity.
         'X-Title': appIdentity.productName
       },
       body: JSON.stringify({})

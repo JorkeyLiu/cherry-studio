@@ -58,6 +58,47 @@ describe('classifyError', () => {
     expect(result.category).toBe('model')
   })
 
+  // No-model (local guard marker thrown before any request)
+  it('classifies the NoModelError name marker as no_model', () => {
+    const result = classifyError(makeError({ name: 'NoModelError', message: 'Please select a model first' }))
+    expect(result.category).toBe('no_model')
+    expect(result.i18nKey).toBe('error.diagnosis.no_model')
+    expect(result.navTarget).toBe('/settings/provider')
+  })
+
+  it('classifies a real serialized NoModelError fixture (name marker, no model/provider) as no_model', () => {
+    // Shape produced by the actual factory + serializeError pipeline: only
+    // name/message/stack, no model or provider context.
+    const error = new Error('Please select a model first')
+    error.name = 'NoModelError'
+    const serialized = { name: error.name, message: error.message, stack: error.stack ?? null }
+
+    const result = classifyError(serialized)
+    expect(result.category).toBe('no_model')
+    expect(result.i18nKey).toBe('error.diagnosis.no_model')
+    // No providerId supplied -> exact settings route without an id suffix.
+    expect(result.navTarget).toBe('/settings/provider')
+  })
+
+  it('classifies a name-only NoModelError fixture even without a message', () => {
+    const result = classifyError({ name: 'NoModelError', message: null, stack: null })
+    expect(result.category).toBe('no_model')
+    expect(result.navTarget).toBe('/settings/provider')
+  })
+
+  it('classifies NoModelError with providerId in navTarget', () => {
+    const result = classifyError(makeError({ name: 'NoModelError', message: 'Please select a model first' }), 'openai')
+    expect(result.category).toBe('no_model')
+    expect(result.navTarget).toBe('/settings/provider?id=openai')
+  })
+
+  it('does not classify the translated no-model message without the stable name marker', () => {
+    // Locale-only matching is intentionally avoided: the same translated
+    // message must not be classified unless the ApiService marker is present.
+    const result = classifyError(makeError({ message: 'Please select a model first' }))
+    expect(result.category).not.toBe('no_model')
+  })
+
   // Quota
   it('classifies 429 as quota', () => {
     const result = classifyError(makeError({ statusCode: 429 }))

@@ -33,13 +33,13 @@ describe('EmbeddingsFactory', () => {
     vi.clearAllMocks()
   })
 
-  it('passes CherryIN model names through without passing dimensions to OpenAI-compatible embeddings', async () => {
+  it('passes custom model names through without passing dimensions to OpenAI-compatible embeddings', async () => {
     const { default: EmbeddingsFactory } = await import('../EmbeddingsFactory')
 
     EmbeddingsFactory.create({
       embedApiClient: createEmbedApiClient({
-        provider: 'cherryin',
-        baseURL: 'https://open.cherryin.ai/v1',
+        provider: 'openai-compatible',
+        baseURL: 'https://api.example.com/v1',
         model: 'baai/bge-m3(free)'
       })
     })
@@ -50,7 +50,7 @@ describe('EmbeddingsFactory', () => {
         apiKey: 'test-key',
         batchSize: 10,
         configuration: expect.objectContaining({
-          baseURL: 'https://open.cherryin.ai/v1'
+          baseURL: 'https://api.example.com/v1'
         })
       })
     )

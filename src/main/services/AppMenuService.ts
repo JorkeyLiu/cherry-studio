@@ -3,7 +3,7 @@ import { windowService } from '@main/services/WindowService'
 import { locales } from '@main/utils/locales'
 import { IpcChannel } from '@shared/IpcChannel'
 import type { MenuItemConstructorOptions } from 'electron'
-import { app, Menu, shell } from 'electron'
+import { app, Menu } from 'electron'
 
 import { configManager } from './ConfigManager'
 export class AppMenuService {
@@ -94,26 +94,12 @@ export class AppMenuService {
         ]
       },
       {
+        // The upstream website/documentation/feedback routes were removed with
+        // the retired platform. No independent Cherry Chat community or docs
+        // endpoint exists yet, so the Help menu only retains the (disabled)
+        // releases entry.
         label: appMenu.help,
         submenu: [
-          {
-            label: appMenu.website,
-            click: () => {
-              void shell.openExternal('https://cherry-ai.com')
-            }
-          },
-          {
-            label: appMenu.documentation,
-            click: () => {
-              void shell.openExternal('https://cherry-ai.com/docs')
-            }
-          },
-          {
-            label: appMenu.feedback,
-            click: () => {
-              void shell.openExternal('https://github.com/CherryHQ/cherry-studio/issues/new/choose')
-            }
-          },
           {
             // LOCK-RELEASE-FREEZE: no independent release endpoint exists yet,
             // so Cherry Chat must not route users to the Cherry Studio release

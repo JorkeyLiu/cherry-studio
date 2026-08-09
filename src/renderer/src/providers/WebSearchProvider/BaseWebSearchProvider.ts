@@ -26,7 +26,9 @@ export default abstract class BaseWebSearchProvider {
 
   public defaultHeaders() {
     return {
-      'HTTP-Referer': 'https://cherry-ai.com',
+      // The historical `HTTP-Referer` attribution header to the retired
+      // platform domain was removed with the upstream platform;
+      // X-Title carries the identity.
       'X-Title': appIdentity.productName
     }
   }

@@ -37,6 +37,22 @@ If the skill is unavailable, directly read `.agents/skills/gh-create-issue/SKILL
 
 ## Development Commands
 
+### Environment Bootstrap (run before any pnpm command)
+
+The repository pins Node 24.11.1 (`.nvmrc` / `.node-version`) and pnpm 10.27.0 (`package.json`). Another Node installation can shadow the pinned one — e.g. a `~/.local/bin/node` shim ahead of the nvm install — and native preflights never rebuild, so a wrong Node version can silently produce an incompatible better-sqlite3 binding. Establish the pinned toolchain before the first `pnpm` command:
+
+1. **Verify versions first** — `node -v` must print `v24.11.1` and `pnpm -v` must print `10.27.0`.
+2. **Activate the pinned Node** — `nvm use` / `fnm use`, or the session-local `PATH` override below.
+3. **Diagnose shadowing** — if `node -v` is still wrong, run `which -a node` to list every Node on `PATH`; a higher-priority installation shadows the pinned one. Re-verify `node -v` after switching.
+4. **Session-local fallback (no shell dotfile changes)** — if nvm/fnm is unavailable or shadowed, prepend the pinned nvm Node for the current session only:
+   ```bash
+   export PATH="$HOME/.nvm/versions/node/v24.11.1/bin:$PATH"
+   node -v  # must print v24.11.1
+   pnpm -v  # must print 10.27.0
+   ```
+   This does not modify `~/.zshrc` and applies only to the current shell session.
+5. **ABI checks are read-only; rebuild only on a failed probe** — run `pnpm native:check:node` before Node test suites and `pnpm native:check:electron` before Electron/dev checks; run `pnpm native:rebuild:node` / `pnpm native:rebuild:electron` only when the matching check fails its real runtime SQL probe. Never rebuild both ABIs at once — switching between Node24 ABI 137 and Electron ABI 145 is explicit and one at a time.
+
 - **Install**: `pnpm install` — Install all project dependencies (requires Node ≥24.11.1, pnpm 10.27.0)
 - **Development**: `pnpm dev` — Runs Electron app in development mode with hot reload
 - **Debug**: `pnpm debug` — Starts with debugging; attach via `chrome://inspect` on port 9222
@@ -50,6 +66,15 @@ If the skill is unavailable, directly read `.agents/skills/gh-create-issue/SKILL
   - `pnpm native:rebuild:node` — explicit node-gyp source build of better-sqlite3 for Node24, then runs `native:check:node` (fails on any failure).
   - `pnpm native:rebuild:electron` — explicit `@electron/rebuild` source build (force, buildFromSource, only better-sqlite3) for Electron, then runs `native:check:electron`.
   - ABI onboarding: `.node-version` / `.nvmrc` are the source of truth for the required Node version. Confirm Node24 is on PATH (`node -v`) before installing — installing under the wrong Node can produce an incompatible binding. Preflights never rebuild: switch explicitly between Node ABI 137 and Electron ABI 145 with `pnpm native:rebuild:node` / `pnpm native:rebuild:electron`.
+  - Runtime split: Node test suites run under Node 24.11.1 (ABI 137); `pnpm dev`, Electron E2E, `pnpm build` and electron-builder packaging run under Electron 41.2.1 (ABI 145). The binding follows whichever ABI was built last, so the checkout is always in one of two states:
+    - **Node test state** — ABI 137. Reach it with `pnpm native:rebuild:node`; required after any Electron build/run.
+    - **Electron dev/build state** — ABI 145. Reach it with `pnpm native:rebuild:electron`; required after any Node test run.
+    Only one ABI is valid at a time: a successful `pnpm test` leaves the binding at ABI 137, so `pnpm dev` immediately after it can fail until the Electron rebuild; the reverse applies after `pnpm build`. Never run both rebuilds in one session.
+  - Copy-paste switch sequences:
+    - Into test state: `pnpm native:rebuild:node && pnpm test`
+    - Into dev state: `pnpm native:rebuild:electron && pnpm dev`
+    - Into build/packaging state: `pnpm native:rebuild:electron && pnpm build` (then run electron-builder / the platform build; the Electron rebuild must come first so the packaged app ships the ABI 145 binding).
+  - `ELECTRON_RUN_AS_NODE=1` is valid only for the controlled `native:check:electron` probe, which runs Electron's embedded Node in node mode to verify the binding. It must not be inherited by a real Electron launch. Before `pnpm dev` / `pnpm debug` / `pnpm start`, verify it is unset; if Electron starts as a headless/CLI process or dev fails to open a window, the variable is leaking from the shell — run `unset ELECTRON_RUN_AS_NODE` in the current session and relaunch. Keep it unset otherwise; never add it to a shell dotfile.
   - Preflight integration: `pnpm start` / `pnpm dev` / `pnpm dev:watch` / `pnpm debug` / `pnpm test:e2e` run `native:check:electron` once before launch; `pnpm test` / `pnpm test:coverage` / `pnpm test:watch` / `pnpm test:ui` / `pnpm bench` / `pnpm ci:test-check` run `native:check:node` once. Focused `test:*` / `bench:*` sub-suite commands are intentionally unguarded (aggregate entry points check once; CI adds one `native:check:node` step per focused-suite test job in `.github/workflows/ci.yml`). `.forge-meta` markers are never trusted as proof (LOCK-ABI-2) — only real runtime SQL counts. Implementation: `scripts/native-abi/`.
 - **Test**: `pnpm test` — preflights Node ABI, then runs all Vitest tests (main + renderer + aiCore + shared + scripts)
   - `pnpm test:main` — Main process tests only (Node environment)
@@ -80,7 +105,6 @@ packages/
   aiCore/        # @cherrystudio/ai-core — AI SDK middleware & provider abstraction
   shared/        # Cross-process types, constants, IPC channel definitions
   mcp-trace/     # OpenTelemetry tracing for MCP operations
-  ai-sdk-provider/  # Custom AI SDK provider implementations
   extension-table-plus/  # TipTap table extension
 ```
 

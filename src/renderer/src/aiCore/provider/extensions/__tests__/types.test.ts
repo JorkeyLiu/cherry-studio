@@ -74,8 +74,7 @@ describe('Auto-Extracted Type System', () => {
         'deepseek',
         'xai',
         'openai-compatible',
-        'openrouter',
-        'cherryin'
+        'openrouter'
       ]
 
       // 运行时验证（确保类型存在）

@@ -2,7 +2,6 @@
   "name": "@cherrystudio/extension-table-plus",
   "description": "table extension for tiptap forked from tiptap/extension-table",
   "version": "3.0.12",
-  "homepage": "https://cherry-ai.com",
   "keywords": ["tiptap", "tiptap extension"],
   "license": "MIT",
   "type": "module",
@@ -73,11 +72,6 @@
   "peerDependencies": {
     "@tiptap/core": "^3.0.9",
     "@tiptap/pm": "^3.0.9"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/CherryHQ/cherry-studio",
-    "directory": "packages/extension-table-plus"
   },
   "scripts": {
     "build": "tsdown",

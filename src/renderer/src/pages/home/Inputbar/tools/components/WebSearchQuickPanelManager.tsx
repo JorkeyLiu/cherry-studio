@@ -114,6 +114,7 @@ export const useWebSearchPanelController = (assistantId: string, quickPanelContr
     }
     // Gemini 3+ supports combining built-in tools with function calling
     if (
+      provider &&
       isGeminiWebSearchProvider(provider) &&
       isGeminiModel(model) &&
       !isGemini3Model(model) &&

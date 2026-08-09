@@ -1586,8 +1586,8 @@ const migrateConfig = {
   '111': (state: RootState) => {
     try {
       if (
-        state.llm.translateModel.provider === 'silicon' &&
-        state.llm.translateModel.id === 'meta-llama/Llama-3.3-70B-Instruct'
+        state.llm.translateModel?.provider === 'silicon' &&
+        state.llm.translateModel?.id === 'meta-llama/Llama-3.3-70B-Instruct'
       ) {
         state.llm.translateModel = SYSTEM_MODELS.defaultModel[2]
       }
@@ -2825,7 +2825,7 @@ const migrateConfig = {
   '183': (state: RootState) => {
     try {
       state.llm.providers.forEach((provider) => {
-        if (provider.id === SystemProviderIds.cherryin) {
+        if (provider.id === 'cherryin') {
           provider.apiHost = 'https://open.cherryin.cc'
           provider.anthropicApiHost = 'https://open.cherryin.cc'
         }
@@ -3548,6 +3548,96 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 216 error', error as Error)
+      return state
+    }
+  },
+  '217': (state: RootState) => {
+    try {
+      // Remove the CherryIN / CherryAI platform:
+      //  - Drop providers whose id is `cherryin` or `cherryai`.
+      //  - Delete CherryIN OAuth credentials from llm.settings.
+      //  - Clear ONLY global / assistant / agent model references owned by the
+      //    platform (model.provider === 'cherryin' | 'cherryai'). All other
+      //    user-configured model references and providers are preserved.
+      //    Cleared slots become explicitly unconfigured (undefined) — the
+      //    fresh state contract.
+      const PLATFORM_PROVIDER_IDS = ['cherryin', 'cherryai']
+      const isPlatformModel = (model?: Model): boolean => !!model && PLATFORM_PROVIDER_IDS.includes(model.provider)
+      const clearIfPlatform = (model?: Model): Model | undefined => (isPlatformModel(model) ? undefined : model)
+
+      state.llm.providers = state.llm.providers.filter((provider) => !PLATFORM_PROVIDER_IDS.includes(provider.id))
+
+      if ((state.llm.settings as { cherryIn?: unknown } | undefined)?.cherryIn !== undefined) {
+        // @ts-ignore cherryIn was removed from the runtime LlmSettings type
+        delete state.llm.settings.cherryIn
+      }
+
+      state.llm.defaultModel = clearIfPlatform(state.llm.defaultModel)
+      state.llm.topicNamingModel = clearIfPlatform(state.llm.topicNamingModel)
+      state.llm.quickModel = clearIfPlatform(state.llm.quickModel)
+      state.llm.translateModel = clearIfPlatform(state.llm.translateModel)
+
+      if (state.assistants?.defaultAssistant) {
+        state.assistants.defaultAssistant.model = clearIfPlatform(state.assistants.defaultAssistant.model)
+        state.assistants.defaultAssistant.defaultModel = clearIfPlatform(state.assistants.defaultAssistant.defaultModel)
+      }
+      state.assistants.assistants.forEach((assistant) => {
+        assistant.model = clearIfPlatform(assistant.model)
+        assistant.defaultModel = clearIfPlatform(assistant.defaultModel)
+      })
+
+      // Legacy agents slice (pre-172) and presets (agents migrated to presets in 172).
+      // @ts-ignore legacy agents slice may exist in old persisted state
+      if (state.agents?.agents) {
+        // @ts-ignore model/defaultModel are not on the legacy Agent type
+        state.agents.agents.forEach((agent: any) => {
+          // @ts-ignore legacy field
+          agent.model = clearIfPlatform(agent.model)
+          // @ts-ignore legacy field
+          agent.defaultModel = clearIfPlatform(agent.defaultModel)
+        })
+      }
+      if (state.assistants?.presets) {
+        state.assistants.presets.forEach((preset) => {
+          // @ts-ignore AssistantPreset does not carry model fields on the runtime type
+          preset.model = clearIfPlatform(preset.model)
+          // @ts-ignore AssistantPreset does not carry model fields on the runtime type
+          preset.defaultModel = clearIfPlatform(preset.defaultModel)
+        })
+      }
+
+      // Scrub platform-owned persisted MCP branding: the removed
+      // CherryAI platform tagged its built-in MCP servers with
+      // `provider: 'CherryAI'` and linked their `reference` to
+      // `docs.cherry-ai.com`. Only those exact platform-owned values are
+      // removed; every other provider/reference value and all other server
+      // data are preserved.
+      if (state.mcp?.servers) {
+        const isCherryAIDocsReference = (reference: unknown): boolean => {
+          if (typeof reference !== 'string') return false
+          try {
+            return new URL(reference).hostname === 'docs.cherry-ai.com'
+          } catch {
+            // Not a parseable URL — not a CherryAI docs link, keep it.
+            return false
+          }
+        }
+        state.mcp.servers = state.mcp.servers.map((server) => {
+          const next = { ...server }
+          if (next.provider === 'CherryAI') {
+            delete next.provider
+          }
+          if (isCherryAIDocsReference(next.reference)) {
+            delete next.reference
+          }
+          return next
+        })
+      }
+
+      logger.info('migrate 217 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 217 error', error as Error)
       return state
     }
   }
