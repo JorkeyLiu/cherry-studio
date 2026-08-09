@@ -8,3 +8,4 @@ vercel-react-best-practices
 cherry-pr-test
 ui-verify-change
 agents-md-authoring
+delivery-validation

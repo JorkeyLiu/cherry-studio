@@ -6,6 +6,7 @@
 !agents-md-authoring
 !cherry-pr-test
 !create-skill
+!delivery-validation
 !gh-create-issue
 !github-workflow
 !prepare-release

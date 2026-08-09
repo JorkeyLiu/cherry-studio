@@ -88,6 +88,11 @@ This includes, as applicable:
   example, git operations require explicit user authorization).
 - **Validation gates** — what must pass before a task is complete (lint, test,
   format, typecheck, generated-file checks).
+- **Validation mechanics are routed, not duplicated** — the root guide states
+  which gates are mandatory and what counts as success (a trustworthy original
+  exit code for the exact worktree state); conditional execution mechanics —
+  timeout budgets, output logging, retry, evidence reuse, cleanup — belong in a
+  dedicated validation skill, never in the root guide.
 - **Environment / runtime constraints** — pinned toolchains, native ABI
   constraints, state-switching rules, anything where a wrong environment
   silently produces wrong results.
@@ -107,6 +112,7 @@ lives, route by these defaults:
 |---|---|
 | Rules every relevant agent must follow unconditionally | root `AGENTS.md` |
 | Conditional / procedural how-to for a class of task | a skill |
+| Conditional validation mechanics (timeout, log, retry, cleanup, evidence reuse) | a dedicated validation skill |
 | Detailed human / reference material (tables, walkthroughs, rationale) | docs |
 | Canonical decision tables, low-dimensional facts, inventories | source or detailed architecture docs |
 | Irreversible / governance decisions (identity, release, platform, migration) | ADRs or their equivalent |
@@ -161,6 +167,10 @@ Before finishing, confirm:
 - Are **responsibilities and authority** clear (who owns what, what is
   authoritative vs. projected)?
 - Are **mandatory rules explicit** rather than implied or buried?
+- Are **conditional validation mechanics routed to a skill** — the guide states
+  which gates are mandatory and the trustworthy-exit-code success standard, while
+  timeout budgets, logging, retry, evidence-reuse, and cleanup procedure live in
+  a dedicated validation skill rather than being duplicated in the root guide?
 - Is content **high value** rather than merely concise? (Would removing it
   change agent behavior?)
 - Are **code-location, detailed, and volatile lists externalized** to
@@ -192,3 +202,7 @@ project):
 - **Two independently maintained contracts**: a root `AGENTS.md` and a separate
   `CLAUDE.md` with different text and no sync mechanism, so agents read
   conflicting instructions depending on which file their tool loads.
+- A **procedural validation dump**: embedding timeout tables, retry matrices, or
+  log-handling procedure in the root guide when a dedicated validation skill
+  owns that detail, so the always-on contract duplicates volatile mechanics and
+  drifts from the skill.

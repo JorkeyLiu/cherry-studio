@@ -32,6 +32,7 @@ Load the matching skill before starting the task. If a referenced skill is missi
 - **Implementation-time UI verification** — use the `ui-verify-change` skill when a task involves user-visible behavior: verify a UI change, confirm a fix, test changed UI, or decide UI regression coverage. No PR is required; this is the PR-focused `github-workflow` companion for implementation-time evidence.
 - **Creating a new skill** — use the `create-skill` skill.
 - **Release preparation** — use the `prepare-release` skill.
+- **Delivery validation** — use the `delivery-validation` skill when running completion gates, pre-commit checks, full tests, E2E/build/packaging, or other long-running validation commands.
 
 ## Environment, Commands, and Native ABI
 
@@ -89,6 +90,12 @@ The single native module is compiled for **either** Node24 (ABI 137) **or** Elec
 - **Typecheck**: `pnpm typecheck` — concurrent TypeScript checks: node + web via `tsgo`, aiCore via its package typecheck command (`tsc --noEmit`)
 - **i18n**: `pnpm i18n:sync` (sync template keys) / `pnpm i18n:translate` (auto-translate missing keys) / `pnpm i18n:check` (validate completeness)
 - **Bundle Analysis**: `pnpm analyze:renderer` / `pnpm analyze:main` — visualize bundle sizes
+
+### Validation gates
+
+- Full `pnpm test` remains part of `pnpm build:check`; focused `test:*` suites supplement, but never replace, the full gate.
+- Each required aggregate gate must produce a trustworthy original exit code for the exact worktree state. Truncated output, printed sub-suite PASS lines, or a timeout/killed/unknown status are not proof of success.
+- Use the `delivery-validation` skill for execution, retry, evidence reuse, and cleanup details.
 
 ## Repository Mental Model
 

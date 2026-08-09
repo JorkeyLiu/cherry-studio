@@ -10,6 +10,8 @@
 !cherry-pr-test/**
 !create-skill/
 !create-skill/**
+!delivery-validation/
+!delivery-validation/**
 !gh-create-issue/
 !gh-create-issue/**
 !github-workflow/
