@@ -148,7 +148,7 @@ Otherwise, ask the user to confirm before proceeding to Step 6.
    git commit -m "chore: release v{version}"
    git push -u origin release/v{version}
    ```
-2. Create the PR using the `gh-create-pr` skill. If the skill tool is unavailable, read `.agents/skills/gh-create-pr/SKILL.md` and follow it manually. In CI (non-interactive) mode, skip interactive confirmation steps and create the PR directly after filling the template.
+2. Create the PR using the `github-workflow` skill. If the skill tool is unavailable, read `.agents/skills/github-workflow/references/pr-create.md` and follow it manually. In CI (non-interactive) mode, skip interactive confirmation steps and create the PR directly after filling the template.
    - Use title: `chore: release v{version}`
    - Use base branch: `main`
    - When filling the PR template, incorporate:

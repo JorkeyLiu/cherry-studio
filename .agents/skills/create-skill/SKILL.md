@@ -13,7 +13,7 @@ Create a new skill in `.agents/skills/<skill-name>/` following the workflow defi
 
 Before creating anything, ask the user:
 
-1. **Skill name**: What should the skill be called? (lowercase, digits, hyphens only, e.g., `gh-create-pr`, `prepare-release`)
+1. **Skill name**: What should the skill be called? (lowercase, digits, hyphens only, e.g., `github-workflow`, `prepare-release`)
 2. **Description**: What should this skill do? Include specific trigger contexts (e.g., "Use when user asks to create PRs")
 3. **Is this a public skill?**: Should it be synced to `.claude/skills/` for shared use? (default: no, private only)
 4. **Test cases** (optional): Does the user want to set up evals for this skill?
@@ -84,7 +84,7 @@ Present the user with:
 ## Naming Rules
 
 - Use lowercase letters, digits, and hyphens only
-- Prefer short, action-oriented names (e.g., `gh-create-pr`)
+- Prefer short, action-oriented names (e.g., `github-workflow`)
 
 ## Public vs Private Skills
 

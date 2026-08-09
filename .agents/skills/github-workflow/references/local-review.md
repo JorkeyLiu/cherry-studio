@@ -41,10 +41,10 @@ Determine the diff to review based on `$ARGUMENTS` and working tree state:
   contents.
 
 If diff is empty → show usage examples and exit:
-`/gh-pr-review` (uncommitted changes or current branch),
-`/gh-pr-review a1b2c3d`, `/gh-pr-review a1b2c3d..e4f5g6h`,
-`/gh-pr-review src/foo.ts`, `/gh-pr-review 123`,
-`/gh-pr-review https://github.com/.../pull/123`.
+`/github-workflow` (uncommitted changes or current branch),
+`/github-workflow a1b2c3d`, `/github-workflow a1b2c3d..e4f5g6h`,
+`/github-workflow src/foo.ts`, `/github-workflow 123`,
+`/github-workflow https://github.com/.../pull/123`.
 
 ---
 

@@ -1,10 +1,10 @@
 # Public skills tracked by skills:sync and skills:check.
 # One skill name per line.
-gh-create-pr
+github-workflow
 prepare-release
 create-skill
 gh-create-issue
-gh-pr-review
 vercel-react-best-practices
 cherry-pr-test
 ui-verify-change
+agents-md-authoring

@@ -1,5 +1,7 @@
 # 🖥️ 开发指南
 
+> AI 编码助手的常驻契约见 [`AGENTS.md`](../../../AGENTS.md)。详细架构参考见 [`docs/architecture.md`](../../architecture.md)。
+
 ## IDE 配置
 
 ### VSCode like

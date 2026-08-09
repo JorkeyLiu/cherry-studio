@@ -12,6 +12,7 @@ is critical for review accuracy.
 | `doc-checklist.md` | Document review checklist |
 | `judgment-matrix.md` | Worth-fixing criteria and special rules |
 | `checklist-evolution.md` | Checklist update flow and rules |
+| `ci-inspection.md` | Check CI status and logs for the PR under review |
 
 ---
 
@@ -41,6 +42,10 @@ If `$ARGUMENTS` is a URL containing `{owner}/{repo}`, verify it matches
 `OWNER_REPO`. If not, inform the user that cross-repo PR review is not
 supported and abort.
 If `STATE` is not `OPEN`, inform the user and exit.
+
+Check CI status via `gh pr checks {number}` and record the results (see
+`ci-inspection.md`). Do not re-run local lint/test/format for a PR review —
+inspect GitHub CI instead.
 
 **If current branch equals `PR_BRANCH` and HEAD equals `HEAD_SHA`**, skip
 worktree creation — the code is already local.

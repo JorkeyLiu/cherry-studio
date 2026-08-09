@@ -1,6 +1,6 @@
 # Diagnosis
 
-Analyze the most recent `/gh-pr-review` session in this conversation to find
+Analyze the most recent `/github-workflow` session in this conversation to find
 defects in the skill files themselves — checklist gaps, ambiguous instructions,
 missing exclusion rules, etc. The goal is to make the skill more accurate and
 reliable, NOT to re-review the project code.
@@ -10,7 +10,7 @@ confirm the exact wording of a rule before suggesting a change.
 
 ## Prerequisites
 
-If no `/gh-pr-review` session exists in the current conversation, inform the
+If no `/github-workflow` session exists in the current conversation, inform the
 user and stop.
 
 ## Analyze

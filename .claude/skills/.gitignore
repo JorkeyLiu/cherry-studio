@@ -3,11 +3,11 @@
 *
 !.gitignore
 !README*.md
+!agents-md-authoring
 !cherry-pr-test
 !create-skill
 !gh-create-issue
-!gh-create-pr
-!gh-pr-review
+!github-workflow
 !prepare-release
 !ui-verify-change
 !vercel-react-best-practices

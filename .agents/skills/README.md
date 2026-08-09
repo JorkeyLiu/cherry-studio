@@ -14,7 +14,7 @@ This directory is the single source of truth for repository skills.
 ## Naming Rules
 
 - Use lowercase letters, digits, and hyphens only.
-- Prefer short, action-oriented names (for example: `gh-create-pr`).
+- Prefer short, action-oriented names (for example: `github-workflow`).
 
 ## Claude Compatibility
 

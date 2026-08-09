@@ -1,17 +1,18 @@
 ---
-name: gh-pr-review
-description: Automated code review for local branches, PRs, commits, and files. Supports single-agent review with interactive fix selection, or multi-agent deep review with reviewer-verifier adversarial mechanism and risk-based auto-fix.
+name: github-workflow
+description: GitHub pull request workflow and code review skill. Use when asked to create/open/update a PR so the assistant reads `.github/pull_request_template.md`, fills every template section, preserves markdown structure exactly, and marks missing data as N/A or None instead of skipping sections. Also use for automated code review of local branches, PRs (by number or URL), commits, and files — single-agent review with interactive fix selection, or multi-agent adversarial review with risk-based auto-fix — plus GitHub CI check/log inspection via `gh` and GitHub CLI workflow decisions.
 ---
 
 <!-- Based on https://github.com/Tencent/tgfx/tree/main/.codebuddy/skills/cr -->
 <!-- Adapted for Claude Code Agent tool and Cherry Studio tech stack -->
 
-# /gh-pr-review — Code Review
+# /github-workflow — GitHub Pull Request Workflow
 
-Automated code review for local branches, PRs, commits, and files. Detects
-review mode from arguments and routes to the appropriate review flow — either
-quick single-agent review with interactive fix selection, or multi-agent
-deep review with risk-based auto-fix.
+Unified skill for creating/updating pull requests and reviewing code. Detects the
+requested mode from the user's intent and `$ARGUMENTS`, then routes to the relevant
+reference flow — PR creation/update with template compliance, quick single-agent
+review with interactive fix selection, multi-agent deep review with risk-based
+auto-fix, or CI/check/log inspection.
 
 All user-facing text matches the user's language. All questions and option
 selections MUST use your interactive dialog tool (e.g. AskUserQuestion) — never
@@ -31,12 +32,14 @@ Run pre-checks, then match the **first** applicable rule top-to-bottom:
 
 | # | Condition | Action |
 |---|-----------|--------|
-| 1 | `$ARGUMENTS` is `diag` | → `references/diagnosis.md` |
-| 2 | `$ARGUMENTS` is a PR number or URL containing `/pull/` | → `references/pr-review.md` |
-| 3 | Agent teams NOT supported | → `references/local-review.md` |
-| 4 | Uncommitted changes exist | → `references/local-review.md` |
-| 5 | On main/master branch | → `references/local-review.md` |
-| 6 | Everything else | → Question below |
+| 1 | User asks to **create/update** a PR (open a PR, edit PR title/body, `prepare-release` handoff) | → `references/pr-create.md` |
+| 2 | User asks to **inspect CI/checks/logs** (`gh pr checks`, `gh pr view`, `gh run view --log-failed`, "why did CI fail") | → `references/ci-inspection.md` |
+| 3 | `$ARGUMENTS` is `diag` | → `references/diagnosis.md` |
+| 4 | `$ARGUMENTS` is a PR number or URL containing `/pull/` | → `references/pr-review.md` |
+| 5 | Agent teams NOT supported | → `references/local-review.md` |
+| 6 | Uncommitted changes exist | → `references/local-review.md` |
+| 7 | On main/master branch | → `references/local-review.md` |
+| 8 | Everything else | → Question below |
 
 Each `→` means: `Read` the target file and follow it as the sole remaining
 instruction. Ignore all sections below. Do NOT review from memory or habit —

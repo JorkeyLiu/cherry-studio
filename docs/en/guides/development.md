@@ -1,5 +1,7 @@
 # 🖥️ Develop
 
+> For the always-on AI coding assistant contract, see [`AGENTS.md`](../../../AGENTS.md). For the detailed architecture reference, see [`docs/architecture.md`](../../architecture.md).
+
 ## IDE Setup
 
 ### VSCode like
