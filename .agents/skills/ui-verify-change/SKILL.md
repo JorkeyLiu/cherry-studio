@@ -43,7 +43,7 @@ Regression evidence comes ONLY from the repository Playwright suite:
   profile, or mock setup
 - a unique disposable user profile
 - mocked external providers and deterministic assertions
-- scoped runs: `pnpm native:check:electron && pnpm playwright test tests/e2e/specs/<spec>.spec.ts`
+- scoped runs: `pnpm test:e2e tests/e2e/specs/<spec>.spec.ts`
   or the full suite: `pnpm test:e2e`
 
 Generic Kilo Playwright, agent-browser, CDP sessions, screenshots, and dev-mode
@@ -82,8 +82,9 @@ Before writing anything:
 
 - Component tier: `pnpm test:renderer` or a scoped `pnpm vitest run <file>`.
 - E2E tier: `pnpm build`, then
-  `pnpm native:check:electron && pnpm playwright test tests/e2e/specs/<spec>.spec.ts`,
-  or `pnpm test:e2e` for the full suite.
+  `pnpm test:e2e tests/e2e/specs/<spec>.spec.ts` (Electron-lane command; it
+  self-ensures the ABI 145 binding — no manual `native:check:electron` prefix
+  is needed), or `pnpm test:e2e` for the full suite.
 - Diagnostics: dev-mode run or browser tooling only to investigate, recorded
   explicitly as diagnostic.
 

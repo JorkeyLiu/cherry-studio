@@ -5,8 +5,9 @@
  * compiled binding is either the Node ABI or the Electron ABI at any moment.
  * This module is the single source of truth for the supported versions and
  * ABIs. Any upgrade to Node / Electron / better-sqlite3 must update these
- * constants together with the docs (`AGENTS.md`, `tests/e2e/README.md`,
- * `docs/sqlite-migration.md`).
+ * constants together with the docs that carry the ABI contract
+ * (`AGENTS.md`, `docs/en/guides/development.md`, `docs/zh/guides/development.md`,
+ * `tests/e2e/README.md`, `docs/sqlite-migration.md`).
  */
 
 /** The only native module whose ABI the repository manages. */

@@ -21,11 +21,18 @@
  * The mocked failure-matrix tests in `query-chat-db-electron.test.ts` are
  * KEPT — this file adds the real-binding proof on top.
  *
- * Prerequisite: the better-sqlite3 native binding must be compiled for the
- * Electron ABI (`pnpm native:check:electron`). When the binding is compiled
- * for Node instead, the Electron child cannot load it and the ABI probe below
- * skips the real-DB assertions with a clear diagnostic (the fixture spec E2E
- * already preflights the Electron ABI before launching).
+ * This file is a Node-lane Vitest unit test (`e2e-utils` project, covered by
+ * the Node-lane `pnpm test` aggregate) — NOT a Playwright E2E spec, and it
+ * never requires a manual Electron ABI preflight (`pnpm native:check:electron`).
+ * It spawns the installed Electron binary (as node) to execute the generated
+ * verify script; the Electron child can load the better-sqlite3 binding only
+ * when the current checkout binding is Electron ABI145. The supported
+ * Node-lane invocations (`pnpm test` / `pnpm test:e2e-utils`) self-ensure the
+ * Node ABI137 binding for the duration of the run, so this file's real-DB
+ * assertions intentionally skip there — a deliberate, non-flaky skip. The
+ * integrated real Electron binding proof is provided by the Playwright E2E
+ * fixture specs under the canonical `pnpm test:e2e`, which self-ensures the
+ * Electron ABI145 lane before launching.
  *
  * Runtime is bounded: a handful of small Electron spawns (~1-2s each) plus
  * per-test cleanup that removes the exact disposable temp dir.

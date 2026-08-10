@@ -38,7 +38,7 @@ Load the matching skill before starting the task. If a referenced skill is missi
 
 ### Environment bootstrap (run before any pnpm command)
 
-The repository pins Node 24.11.1 (`.nvmrc` / `.node-version`) and pnpm 10.27.0 (`package.json`). Another Node installation can shadow the pinned one (e.g., a `~/.local/bin/node` shim ahead of the nvm install), and native preflights never rebuild, so a wrong Node version can silently produce an incompatible better-sqlite3 binding. Establish the pinned toolchain before the first `pnpm` command:
+The repository pins Node 24.11.1 (`.nvmrc` / `.node-version`) and pnpm 10.27.0 (`package.json`). Another Node installation can shadow the pinned one (e.g., a `~/.local/bin/node` shim ahead of the nvm install), and a wrong Node version can silently produce an incompatible better-sqlite3 binding. Establish the pinned toolchain before the first `pnpm` command:
 
 1. **Verify versions first** — `node -v` must print `v24.11.1` and `pnpm -v` must print `10.27.0`.
 2. **Activate the pinned Node** — `nvm use` / `fnm use`, or the session-local `PATH` override below.
@@ -51,25 +51,18 @@ The repository pins Node 24.11.1 (`.nvmrc` / `.node-version`) and pnpm 10.27.0 (
    ```
    This does not modify `~/.zshrc` and applies only to the current shell session.
 
-### Native ABI (better-sqlite3)
+### Native ABI lanes (better-sqlite3)
 
-The single native module is compiled for **either** Node24 (ABI 137) **or** Electron 41.2.1 (ABI 145) — never both at once. Switching is **explicit**; preflights never rebuild. Always run the matching `pnpm native:check:*` first; rebuild only when its real runtime SQL probe fails or when explicitly switching runtime state after a known opposite-ABI build. Implementation: `scripts/native-abi/`.
+The single native module, `better-sqlite3`, is compiled for **either** Node 24 (ABI 137) **or** Electron 41.2.1 (ABI 145) — never both at once. Which ABI is valid is a **package-command runtime lane contract**: it is decided by the lane of the command you run, never inferred from directories, tests, imports, or module graphs, and never switched by hand. The lane machinery lives in `scripts/native-abi/`; canonical commands are wired through it in `package.json`.
 
-- `pnpm native:check:node` — read-only check: the binding must actually create `Database(':memory:')`, run `select 1 as ok`, and close under a supported Node24 (ABI 137). Requires Node ≥24.11.1 on PATH.
-- `pnpm native:check:electron` — read-only check: binding verified under the installed Electron binary (`ELECTRON_RUN_AS_NODE=1`) for Electron 41.2.1 / ABI 145 (darwin arm64).
-- `pnpm native:rebuild:node` — explicit node-gyp source build for Node24, then runs `native:check:node` (fails on any failure).
-- `pnpm native:rebuild:electron` — explicit `@electron/rebuild` source build (force, buildFromSource, only better-sqlite3) for Electron, then runs `native:check:electron`.
-- **Runtime split** — Node test suites run under Node 24.11.1 (ABI 137); `pnpm dev`, Electron E2E, `pnpm build`, and electron-builder packaging run under Electron 41.2.1 (ABI 145). The binding follows whichever ABI was built last, so the checkout is always in one of two states:
-  - **Node test state** (ABI 137) — reach it with `pnpm native:rebuild:node`; required after any Electron build/run.
-  - **Electron dev/build state** (ABI 145) — reach it with `pnpm native:rebuild:electron`; required after any Node test run.
-  Only one ABI is valid at a time: a successful `pnpm test` leaves the binding at ABI 137, so `pnpm dev` immediately after it can fail until the Electron rebuild; the reverse applies after `pnpm build`. Never run both rebuilds in one session.
-- **Copy-paste switch sequences**:
-  - Into test state: `pnpm native:rebuild:node && pnpm test`
-  - Into dev state: `pnpm native:rebuild:electron && pnpm dev`
-  - Into build/packaging state: `pnpm native:rebuild:electron && pnpm build`
-- **`ELECTRON_RUN_AS_NODE=1`** is valid only inside the controlled `native:check:electron` probe. It must not be inherited by a real Electron launch: before `pnpm dev` / `pnpm debug` / `pnpm start`, verify it is unset. If Electron starts as a headless/CLI process or dev fails to open a window, the variable is leaking from the shell — run `unset ELECTRON_RUN_AS_NODE` in the current session and relaunch. Never add it to a shell dotfile.
-- **Preflight integration** — `pnpm start` / `pnpm dev` / `pnpm dev:watch` / `pnpm debug` / `pnpm test:e2e` run `native:check:electron` once before launch; `pnpm test` / `pnpm test:coverage` / `pnpm test:watch` / `pnpm test:ui` / `pnpm bench` / `pnpm ci:test-check` run `native:check:node` once. Focused `test:*` / `bench:*` sub-suite commands are intentionally unguarded (aggregate entry points check once; CI adds one `native:check:node` step per focused-suite job in `.github/workflows/ci.yml`). `.forge-meta` markers are never trusted as proof — only a real runtime SQL probe counts.
-- **ABI onboarding** — `.node-version` / `.nvmrc` are the source of truth for the required Node version. Confirm Node24 is on PATH (`node -v`) before installing; installing under the wrong Node can produce an incompatible binding.
+- **ABI is a runtime lane contract.** `node`-lane commands (`pnpm test`, `test:*`, `test:coverage`, `test:ui`, `test:watch`, `bench:*`, `ci:test-check`) run under Node 24 (ABI 137); `electron`-lane commands (`pnpm dev`, `pnpm dev:watch`, `pnpm start`, `pnpm debug`, `pnpm build`, `build:*`, `analyze:*`, `pnpm test:e2e`) run under Electron 41.2.1 (ABI 145). Neutral commands (`pnpm lint`, `pnpm format`, `pnpm typecheck`, `i18n:*`, `openapi:check`, `skills:check`, `ci:basic-check`) never enter a lane and never switch the binding.
+- **Canonical lane commands self-ensure their lane.** Each lane command probes the binding read-only first and rebuilds only when that probe fails. No manual `native:check:*` / `native:rebuild:*` sequencing is ever needed to reach a lane state.
+- **Local Node lanes restore the Electron ABI 145 default afterwards; CI skips restoration.** After a local `node`-lane run (for example `pnpm test`) the binding is restored to the Electron ABI, so the next dev/build/E2E command needs no manual switching. CI runs skip the restoration step.
+- **Concurrency is serialized per checkout.** Lane commands take a checkout-scoped lock for the duration of the run. A command for the opposite lane started while another lane holds the lock fails fast with a conflict diagnostic — wait for that lane to finish or run its command. The lane is never silently switched under another owner's run.
+- **`pnpm native:check:node` / `pnpm native:check:electron` are pure read-only diagnostics** — use them to inspect or prove the current binding state. **`pnpm native:rebuild:*` are explicit repair/debug tooling** — never routine workflow; a lane command repairs its own lane when its probe fails. Internal `*:run` helpers (`test:run`, `dev:run`, `build:run`, …) are not user/agent entrypoints; always use the canonical public command.
+- **`ELECTRON_RUN_AS_NODE=1`** is valid only inside the controlled Electron probe; never export it in a shell or launch Electron with it.
+- **Only a real runtime SQL probe proves success** — `Database(':memory:')` + `select 1 as ok` + close. `.forge-meta` markers are never trusted.
+- **ABI onboarding** — `.node-version` / `.nvmrc` are the source of truth for the required Node version. Confirm Node 24 is on PATH before installing; installing under the wrong Node can produce an incompatible binding.
 
 ### Commands
 
@@ -78,13 +71,12 @@ The single native module is compiled for **either** Node24 (ABI 137) **or** Elec
 - **Debug**: `pnpm debug` — debugging via `chrome://inspect` on port 9222
 - **Build Check**: `pnpm build:check` — **REQUIRED** before commits (`pnpm lint && pnpm openapi:check && pnpm test`); run `pnpm i18n:sync` first if there are i18n sort issues, `pnpm format` first if there are formatting issues
 - **Full Build**: `pnpm build` — TypeScript typecheck + electron-vite build
-- **Test**: `pnpm test` — preflights Node ABI, then all Vitest tests (main + renderer + aiCore + shared + scripts + e2e-utils)
+- **Test**: `pnpm test` — all Vitest tests under the Node ABI lane (main + renderer + aiCore + shared + scripts + e2e-utils); the lane is self-ensured and the Electron ABI is restored locally afterwards
   - `pnpm test:main` — Main process tests only (Node environment)
   - `pnpm test:renderer` — Renderer process tests only (jsdom environment)
   - `pnpm test:aicore` — aiCore package tests only
-  - `pnpm test:watch`, `pnpm test:coverage` — preflight Node ABI, then Vitest
-  - `pnpm test:e2e` — preflights Electron ABI, then Playwright E2E
-  - Focused suites run without preflight so aggregate runs do not repeat it; run `pnpm native:check:node` first when switching from the Electron binding
+  - `pnpm test:watch`, `pnpm test:coverage` — Vitest under the Node ABI lane
+  - `pnpm test:e2e` — Playwright E2E under the Electron ABI lane
 - **Lint**: `pnpm lint` — oxlint + eslint fix + TypeScript typecheck + i18n check + format check
 - **Format**: `pnpm format` — Biome format + lint (write mode)
 - **Typecheck**: `pnpm typecheck` — concurrent TypeScript checks: node + web via `tsgo`, aiCore via its package typecheck command (`tsc --noEmit`)

@@ -109,7 +109,6 @@ describe('LOCK-RELEASE-FREEZE — no application packaging/publishing workflow r
     expect(ci).toContain('name: CI')
     expect(ci).toContain('pnpm test:main')
     expect(ci).toContain('pnpm test:renderer')
-    expect(ci).toContain('pnpm native:check:node')
   })
 })
 

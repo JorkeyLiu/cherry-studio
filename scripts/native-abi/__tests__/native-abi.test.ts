@@ -1856,47 +1856,152 @@ describe('Node rebuild environment sanitization (LOCK-ABI-5/7)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Finding F: preflight call graph — package.json wiring and CI steps. These
-// assert the contract that aggregate entry points check once, focused sub-suite
-// commands stay unguarded, and CI covers the focused-suite jobs directly.
+// Finding F: package-script lane declaration call graph. Every canonical
+// command declares its runtime lane explicitly through `native:run <lane>`
+// (LOCK-001); aggregates nest through internal helper scripts so nested
+// wrappers inherit the outer lease (LOCK-004) without repeated rebuilds;
+// native:check:* stay pure read-only diagnostics (LOCK-003); neutral commands
+// stay unwrapped (LOCK-005).
 // ---------------------------------------------------------------------------
 
-describe('preflight call graph (finding F)', () => {
+describe('package-script lane declaration call graph (finding F)', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
     scripts: Record<string, string>
   }
   const scripts = pkg.scripts
 
-  it('Electron-bearing entry points preflight native:check:electron once', () => {
-    for (const name of ['start', 'dev', 'dev:watch', 'debug', 'test:e2e']) {
-      expect(scripts[name]).toBeDefined()
-      expect(scripts[name]).toContain('native:check:electron')
-    }
+  it('native:run is the explicit lane wrapper CLI entry', () => {
+    expect(scripts['native:run']).toBe('tsx scripts/native-abi/run-cli.ts')
   })
 
-  it('aggregate Node entry points preflight native:check:node once', () => {
-    for (const name of ['test', 'test:coverage', 'test:watch', 'test:ui', 'bench', 'ci:test-check']) {
-      expect(scripts[name]).toBeDefined()
-      expect(scripts[name]).toContain('native:check:node')
-    }
-  })
-
-  it('focused sub-suite scripts stay unguarded by design (no duplicate checks)', () => {
+  it('Electron canonical commands declare the electron lane through native:run', () => {
     for (const name of [
+      'start',
+      'dev',
+      'dev:watch',
+      'debug',
+      'build',
+      'build:unpack',
+      'build:win',
+      'build:win:x64',
+      'build:win:arm64',
+      'build:mac',
+      'build:mac:arm64',
+      'build:mac:x64',
+      'build:linux',
+      'build:linux:arm64',
+      'build:linux:x64',
+      'test:e2e',
+      'analyze:renderer',
+      'analyze:main'
+    ]) {
+      expect(scripts[name]).toBeDefined()
+      expect(scripts[name]).toContain('native:run electron')
+      expect(scripts[name]).not.toContain('native:run node')
+      // Obsolete manual preflight prefixes are removed from migrated commands.
+      expect(scripts[name]).not.toContain('native:check')
+    }
+  })
+
+  it('Node canonical commands declare the node lane through native:run (each public command works standalone)', () => {
+    for (const name of [
+      'test',
       'test:main',
+      'test:main:core',
+      'test:main:native',
+      'test:main:heavy',
       'test:renderer',
       'test:aicore',
       'test:shared',
       'test:scripts',
       'test:e2e-utils',
+      'test:update',
+      'test:coverage',
+      'test:ui',
+      'test:watch',
+      'bench',
       'bench:main',
+      'bench:main:native',
       'bench:renderer',
       'bench:aicore',
-      'bench:shared'
+      'bench:shared',
+      'ci:test-check'
     ]) {
       expect(scripts[name]).toBeDefined()
+      expect(scripts[name]).toContain('native:run node')
+      expect(scripts[name]).not.toContain('native:run electron')
       expect(scripts[name]).not.toContain('native:check')
     }
+  })
+
+  it('aggregate chains nest through internal helper scripts so nested wrappers inherit the lease (LOCK-004)', () => {
+    // The public aggregate owns the outer lane; the internal `:run` helpers
+    // chain the wrapped public commands, so every nested wrapper executes as a
+    // same-lane nested run (no lock/rebuild/restore/release duplication).
+    expect(scripts['test']).toBe('pnpm native:run node -- pnpm test:run')
+    expect(scripts['test:run']).toBe(
+      'pnpm test:main && pnpm test:renderer && pnpm test:aicore && pnpm test:shared && pnpm test:scripts && pnpm test:e2e-utils'
+    )
+    expect(scripts['test:main']).toBe('pnpm native:run node -- pnpm test:main:run')
+    expect(scripts['test:main:run']).toBe('pnpm test:main:core && pnpm test:main:native && pnpm test:main:heavy')
+    // The CI test aggregate mirrors the local Node aggregate under the same lane.
+    expect(scripts['ci:test-check']).toBe('pnpm native:run node -- pnpm test:run')
+  })
+
+  it('shell-chain Electron commands wrap an internal body helper (build identity + builder stay nested)', () => {
+    expect(scripts['dev']).toBe('pnpm native:run electron -- pnpm dev:run')
+    expect(scripts['dev:run']).toBe('npm run generate:openapi && dotenv electron-vite dev')
+    expect(scripts['build']).toBe('pnpm native:run electron -- pnpm build:run')
+    expect(scripts['build:run']).toBe('npm run generate:openapi && npm run typecheck && electron-vite build')
+    // Packaging keeps calling the public build under the inherited Electron lease.
+    expect(scripts['build:unpack']).toBe(
+      'pnpm native:run electron -- dotenv -- tsx scripts/build-identity.ts --spawn "pnpm build:unpack:run"'
+    )
+    expect(scripts['build:unpack:run']).toBe('npm run build && electron-builder --dir')
+  })
+
+  it('build:check preserves its exact chain; its final pnpm test owns the Node lane', () => {
+    expect(scripts['build:check']).toBe('pnpm lint && pnpm openapi:check && pnpm test')
+  })
+
+  it('neutral commands stay unwrapped (LOCK-005: no ABI switching)', () => {
+    for (const name of [
+      'lint',
+      'format',
+      'format:check',
+      'typecheck',
+      'typecheck:node',
+      'typecheck:web',
+      'i18n:check',
+      'i18n:hardcoded',
+      'i18n:hardcoded:strict',
+      'i18n:sync',
+      'i18n:translate',
+      'i18n:all',
+      'skills:sync',
+      'skills:check',
+      'openapi:check',
+      'generate:openapi',
+      'packages:build',
+      'packages:release',
+      'test:lint',
+      'ci:basic-check',
+      'ci'
+    ]) {
+      expect(scripts[name]).toBeDefined()
+      expect(scripts[name]).not.toContain('native:run')
+      expect(scripts[name]).not.toContain('native:check')
+    }
+  })
+
+  it('native:check:* stay pure read-only diagnostics and native:rebuild:* stay explicit (LOCK-003)', () => {
+    expect(scripts['native:check:node']).toBe('tsx scripts/native-abi/cli.ts check node')
+    expect(scripts['native:check:electron']).toBe('tsx scripts/native-abi/cli.ts check electron')
+    expect(scripts['native:rebuild:node']).toBe('tsx scripts/native-abi/cli.ts rebuild node')
+    expect(scripts['native:rebuild:electron']).toBe('tsx scripts/native-abi/cli.ts rebuild electron')
+    // The diagnostics themselves stay unwrapped: they are never lane runners.
+    expect(scripts['native:check:node']).not.toContain('native:run')
+    expect(scripts['native:check:electron']).not.toContain('native:run')
   })
 
   it('better-sqlite3 is pinned exactly to the locked version (finding A contract)', () => {
@@ -1904,33 +2009,5 @@ describe('preflight call graph (finding F)', () => {
       dependencies: Record<string, string>
     }
     expect(pkgFull.dependencies['better-sqlite3']).toBe(NATIVE_PACKAGE_VERSION)
-  })
-
-  it('CI jobs that call focused suites run one native:check:node before the tests', () => {
-    const ci = fs.readFileSync(path.join(REPO_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')
-
-    const generalTest = ci.slice(ci.indexOf('general-test:'), ci.indexOf('render-test:'))
-    const generalInstall = generalTest.indexOf('pnpm install')
-    const generalCheck = generalTest.indexOf('pnpm native:check:node')
-    const generalMain = generalTest.indexOf('pnpm test:main')
-    expect(generalInstall).toBeGreaterThanOrEqual(0)
-    expect(generalCheck).toBeGreaterThan(generalInstall)
-    expect(generalMain).toBeGreaterThan(generalCheck)
-
-    // Finding F2: the e2e-utils focused suite runs in the general-test job,
-    // exactly once, sequenced after the other focused suites (which already
-    // consumed the single native preflight).
-    const generalScripts = generalTest.indexOf('pnpm test:scripts')
-    const generalE2eUtils = generalTest.indexOf('pnpm test:e2e-utils')
-    expect(generalE2eUtils).toBeGreaterThan(generalScripts)
-    expect(generalTest.match(/pnpm test:e2e-utils/g)).toHaveLength(1)
-
-    const renderTest = ci.slice(ci.indexOf('render-test:'))
-    const renderInstall = renderTest.indexOf('pnpm install')
-    const renderCheck = renderTest.indexOf('pnpm native:check:node')
-    const renderRun = renderTest.indexOf('pnpm test:renderer')
-    expect(renderInstall).toBeGreaterThanOrEqual(0)
-    expect(renderCheck).toBeGreaterThan(renderInstall)
-    expect(renderRun).toBeGreaterThan(renderCheck)
   })
 })

@@ -1672,7 +1672,7 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 
 - Node 单元测试/typecheck/format/lint 全量 gates 需要 **Node ABI137** binding；
 - `pnpm dev` 与 Playwright E2E 需要 **Electron ABI145** binding；
-- 切换只能通过显式命令（LOCK-ABI-3），preflight **永不自动 rebuild**（LOCK-ABI-4）。
+- **运行时 lane 契约（LOCK-ABI-3）**：canonical Node/Electron 命令自我确保所在 lane——先只读 probe binding，仅当真实运行时 SQL probe 证明不匹配时才 rebuild；无需手工 `native:check:*` / `native:rebuild:*` 顺序即可到达 lane 状态（旧「切换只能通过显式命令 / preflight 永不自动 rebuild」表述已被该自我确保语义取代）。`native:check:*` 为只读诊断；`native:rebuild:*` 仅为异常修复/调试。
 
 ### 命令面（`scripts/native-abi/`）
 
@@ -1707,22 +1707,37 @@ Probe 诚实性（finding D）：Node 与 Electron probe 均在 `finally` 中关
 - 工具从不手工写成功 marker；成功的 Electron rebuild 可能留下 tool-written marker，但文档声明其**非权威**（non-authoritative）；
 - 成功 Node rebuild 会移除 stale Electron marker 与 stale `bin/darwin-arm64-145/` 拷贝，避免误导性状态。
 
-### Node → Electron 验证顺序（fail-fast）
+### 运行时 lane 契约（canonical 命令自我确保，2026-08-10 更新）
 
-```text
-pnpm native:rebuild:node      # 切到 Node ABI137（自动 native:check:node）
-pnpm test / pnpm ci:test-check # 最外层 preflight native:check:node 一次
-pnpm native:rebuild:electron  # 切到 Electron ABI145（自动 native:check:electron）
-pnpm start / pnpm dev / pnpm test:e2e  # preflight native:check:electron 一次
-```
+canonical Node/Electron 命令按 **lane 运行时契约** 运行：每个命令自我确保所在
+lane，不再需要任何手工 `native:check:*` / `native:rebuild:*` 顺序（旧的 preflight
+调用图与手工 Node→Electron rebuild 顺序已被自我确保语义取代，finding F/G 的
+「preflight 一次」表述不再适用）：
 
-Preflight 调用图（finding F/G，2026-08-02 修正后）：
-
-- **Electron preflight 一次**：`pnpm start`、`pnpm dev`、`pnpm dev:watch`、`pnpm debug`、`pnpm test:e2e`；
-- **Node preflight 一次**：`pnpm test`、`pnpm test:coverage`、`pnpm test:watch`、`pnpm test:ui`、`pnpm bench`、`pnpm ci:test-check`；
-- **focused 子套件（`test:main`/`test:renderer`/`test:aicore`/`test:shared`/`test:scripts`/`bench:*`）保持无 preflight（by design）**：聚合入口已 check 一次，CI 在 `ci.yml` 的 `general-test` 与 `render-test` job 中于安装之后、测试之前各加**一个** `pnpm native:check:node` step（focused suites 直接调用时覆盖），避免重复 check；
-- E2E 直接 `pnpm playwright test …` 路径：README 中每个直接示例都先执行**一次** `pnpm native:check:electron`（或使用 `test:e2e` wrapper）；
-- 默认外层 shell 若为 Node22（ABI127），`native:check:node` 以清晰信息失败并给出修复命令——必须以受支持的 Node24 在 PATH 上运行。
+- **canonical lane 命令自我确保所在 lane**：每个命令先只读 probe binding，仅当
+  真实 SQL probe 证明不匹配时才 rebuild。Node-lane（ABI137）：`pnpm test`、
+  `test:*`、`test:coverage`、`test:ui`、`test:watch`、`bench:*`、`ci:test-check`；
+  Electron-lane（ABI145）：`pnpm dev`、`pnpm dev:watch`、`pnpm start`、
+  `pnpm debug`、`pnpm build`、`build:*`、`analyze:*`、`pnpm test:e2e`；neutral
+  （不进入 lane、永不切换 binding）：`pnpm lint`、`pnpm format`、`pnpm typecheck`、
+  `i18n:*`、`openapi:check`、`skills:check`、`ci:basic-check`。
+- **本地 Node-lane 之后恢复 Electron ABI145 默认；CI 跳过恢复**：本地 `pnpm test`
+  结束后 binding 恢复为 Electron ABI145，下一个 dev/build/E2E 命令无需手工切换；
+  CI 运行跳过恢复步骤。
+- **并发按 checkout 串行化**：lane 命令持有 checkout 作用域锁；opposite-lane
+  命令在锁被持有时 fail-fast 报冲突（等待该 lane 完成或改跑其命令），绝不在另一
+  个运行者期间静默切换 lane。
+- **check 只读诊断 / rebuild 例外修复**：`pnpm native:check:node` 与
+  `pnpm native:check:electron` 仅用于检查/证明当前 binding 状态；`pnpm native:rebuild:*`
+  是显式修复/调试工具、绝非常规工作流——lane 命令在自身 probe 失败时修复自己的
+  lane。内部 `*:run` helper（`test:run`、`dev:run`、`build:run`、…）不是入口，
+  一律使用 canonical 公开命令。
+- **E2E 入口**：`pnpm test:e2e` 是唯一受支持的 Playwright 入口（Electron-lane，
+  自我确保 ABI145）；scoped 运行 `pnpm test:e2e tests/e2e/specs/<spec>.spec.ts`
+  （路径转发给 Playwright），`--` 后接 Playwright 选项（如 `pnpm test:e2e -- -g "…"`）。
+  直接 `pnpm playwright test` 绕过 lane 管理，不受支持。
+- 默认外层 shell 若为 Node22（ABI127），`native:check:node` 以清晰信息失败并给出
+  修复命令——必须以受支持的 Node24 在 PATH 上运行。
 
 ### 最终状态报告
 

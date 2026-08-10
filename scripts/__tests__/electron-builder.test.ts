@@ -166,12 +166,15 @@ describe('package scripts — ordinary default macOS arm64 packaging (LOCK-RETIR
 
   it('keeps the default macOS arm64 build command producing the single identity', () => {
     // The ordinary/default macOS arm64 packaging command exists and selects no
-    // flavor — it now produces Cherry Chat via the base config. It is wrapped
-    // by the build-identity wrapper so one build invocation reuses one Build ID
-    // across the electron-vite compile and the electron-builder packaging.
+    // flavor — it now produces Cherry Chat via the base config. It runs under
+    // the Electron ABI lane and is wrapped by the build-identity wrapper so one
+    // build invocation reuses one Build ID across the electron-vite compile and
+    // the electron-builder packaging (the compile+package chain lives in the
+    // internal `:run` helper the wrapper spawns).
     expect(pkg.scripts['build:mac:arm64']).toBe(
-      'dotenv -- tsx scripts/build-identity.ts --spawn "npm run build && electron-builder --mac --arm64"'
+      'pnpm native:run electron -- dotenv -- tsx scripts/build-identity.ts --spawn "pnpm build:mac:arm64:run"'
     )
+    expect(pkg.scripts['build:mac:arm64:run']).toBe('npm run build && electron-builder --mac --arm64')
   })
 
   it('keeps the fast unpacked .app / packaged-E2E build command (COMMAND-002)', () => {
@@ -180,8 +183,9 @@ describe('package scripts — ordinary default macOS arm64 packaging (LOCK-RETIR
     // build-identity wrapper as the full macOS build, but targets `--dir`
     // instead of a distributable DMG/ZIP.
     expect(pkg.scripts['build:unpack']).toBe(
-      'dotenv -- tsx scripts/build-identity.ts --spawn "npm run build && electron-builder --dir"'
+      'pnpm native:run electron -- dotenv -- tsx scripts/build-identity.ts --spawn "pnpm build:unpack:run"'
     )
+    expect(pkg.scripts['build:unpack:run']).toBe('npm run build && electron-builder --dir')
   })
 
   it('has no dedicated flavor-selection build command (LOCK-RETIRE-002)', () => {
@@ -248,19 +252,25 @@ describe('package contract — migration-portable stable assertions (REPO-MIGRAT
       const value = pkg.scripts[name]
       expect(value, name).toContain('scripts/build-identity.ts --spawn')
       expect(value.match(/scripts\/build-identity\.ts/g)?.length, `${name} has exactly one wrapper`).toBe(1)
-      expect(value, name).toContain('electron-builder ')
       expect(value, name).not.toContain('build-identity.ts --spawn "dotenv')
       // One wrapper per packaging script: the identity wrapper is the leading
       // command exactly once, followed by the inner compile+package invocation.
       expect(value, name).toContain(IDENTITY_WRAPPER)
       expect(value.match(new RegExp(IDENTITY_WRAPPER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))?.length).toBe(1)
+      // The electron-builder invocation lives in the internal `:run` helper the
+      // wrapper spawns, so the lane runner always executes one explicit command
+      // (never a raw shell chain string).
+      const runHelper = pkg.scripts[`${name}:run`]
+      expect(runHelper, `${name}:run must exist`).toBeDefined()
+      expect(runHelper, `${name}:run must invoke electron-builder`).toContain('electron-builder ')
+      expect(value, name).toContain(`pnpm ${name}:run`)
     }
   })
 
   it('keeps the fast unpacked command and the full macOS command distinct (COMMAND-001/002)', () => {
     expect(pkg.scripts['build:unpack']).not.toBe(pkg.scripts['build:mac:arm64'])
-    expect(pkg.scripts['build:unpack']).toContain('electron-builder --dir')
-    expect(pkg.scripts['build:mac:arm64']).toContain('electron-builder --mac --arm64')
+    expect(pkg.scripts['build:unpack:run']).toContain('electron-builder --dir')
+    expect(pkg.scripts['build:mac:arm64:run']).toContain('electron-builder --mac --arm64')
   })
 
   it('keeps the retired flavor build command absent (LOCK-RETIRE-001/002)', () => {

@@ -10,7 +10,8 @@ reliably, prove trustworthy success, retry only when a cause actually changed,
 and report results honestly. It is the execution companion to the gate policy
 stated in the root `AGENTS.md`: the root guide says *which* gates are required
 and *what counts as success*; this skill covers *how* to run them, including
-budgets, logging, retry, evidence reuse, cleanup, and failure classification.
+ABI lane mechanics, budgets, logging, retry, evidence reuse, cleanup, and
+failure classification.
 
 ## When to use
 
@@ -31,24 +32,64 @@ budgets, logging, retry, evidence reuse, cleanup, and failure classification.
   mandatory and how success is defined. Never silently waive a gate the
   repository declares.
 - `package.json` scripts define exactly what each gate runs (for example,
-  `pnpm build:check` is lint + openapi:check + full test; `pnpm test` is the
-  ABI preflight followed by all Vitest suites).
+  `pnpm build:check` is lint + openapi:check + full test; `pnpm test` runs all
+  Vitest suites under the Node ABI lane).
 - Focused suites supplement, but never replace, the aggregate gates.
 
-## Establish the environment and runtime state first
+## Establish the environment first
 
 - Establish the pinned toolchain (Node 24.11.1, pnpm 10.27.0) using the root
   `AGENTS.md` bootstrap rules before any pnpm command. A shadowing Node
   installation silently produces an incompatible native binding.
-- Check the matching native ABI for the runtime the gate needs:
-  `pnpm native:check:node` for Node test suites, `pnpm native:check:electron`
-  for dev/E2E/build/packaging. Always run the check before any rebuild; rebuild
-  only when the check's real runtime SQL probe fails or when deliberately
-  switching runtime state after a known opposite-ABI build.
-- Aggregate commands with preflight integration (`pnpm test`, `pnpm test:e2e`,
-  `pnpm build:check`) check the ABI once themselves. Focused sub-suite commands
-  are unguarded, so run the matching `native:check:*` first when switching from
-  the other ABI state.
+
+## ABI lanes: canonical commands, not manual switching
+
+ABI state is a package-command runtime lane contract (root `AGENTS.md`): every
+canonical `node`/`electron` lane command self-ensures its own lane, so gate
+execution never sequences manual ABI steps:
+
+- Run the gate's canonical public command directly (`pnpm test`,
+  `pnpm test:e2e`, `pnpm build:check`, …). Each lane command probes the
+  better-sqlite3 binding read-only first and rebuilds only when that probe
+  fails — no `native:check:*` / `native:rebuild:*` prelude is ever required to
+  reach a lane state.
+- The lane wrapper owns all lane mechanics for the duration of the run: the
+  checkout-scoped lock, lane ensure, lease propagation to child processes, the
+  local Electron ABI 145 restoration after a Node lane, deterministic exit
+  codes, and signal cleanup. Gate execution never manages any of it.
+- Local outer `node` lanes restore the Electron ABI 145 default afterwards, so
+  the next dev/build/E2E command needs no manual switching; CI runs skip the
+  restoration step.
+- A local `node`-lane gate can therefore include up to two native rebuild phases
+  depending on the starting ABI: one when the lane ensure probes the binding and
+  finds it in the Electron ABI, and one when the post-command Electron ABI 145
+  restore rebuilds back. Both phases belong to the canonical command — never
+  budget, sequence, or work around them as separate steps, and never promise a
+  fixed rebuild duration.
+- The post-command Electron ABI restore is part of the command, not a trailer:
+  the original exit status is trustworthy only after the restore and lock
+  release finish. Tests may have already printed PASS while the wrapper is still
+  restoring the binding; that does not make the run complete — do not kill it
+  solely because PASS lines appeared.
+- SIGINT/SIGTERM during the wrapper's restoration/release cleanup may be
+  deferred until that cleanup completes; SIGKILL remains the residual kill.
+  Treat an interrupted run as unverified, never as success.
+- A lane command started while the opposite lane holds the checkout lock fails
+  fast with a conflict diagnostic. Treat it as a serialization conflict: wait
+  for the other lane to finish or run its command — never work around the lock.
+- Internal `*:run` helpers (`test:run`, `dev:run`, `build:run`, …) are
+  implementation details, not entrypoints. Always invoke the canonical public
+  command.
+- `pnpm native:check:node` / `pnpm native:check:electron` are pure read-only
+  diagnostics. Use them to inspect or prove the current binding state when
+  classifying an ABI-related failure; never as a required step before a gate.
+- A lane that cannot be ensured (check fails, rebuild fails, or post-rebuild
+  verification fails) exits nonzero with the cause in its failure lines. When
+  the child command itself exited 0 but the wrapper exits nonzero, the lane's
+  Electron restoration or lock release failed — the wrapper prints
+  `restore:`/`release:` diagnostic lines. Report such a result as a
+  restoration/release failure; do not mask it, and treat the environment as
+  requiring repair before a rerun.
 
 ## Evidence identity and freshness
 
@@ -99,6 +140,10 @@ budgets, logging, retry, evidence reuse, cleanup, and failure classification.
 - Increase a budget using trustworthy observed history — your own successful
   runs of the same gate on this machine, or recorded run times from the
   repository — never an undefined "documented bound" or a guess.
+- The full-test budget covers the whole command, including the local lane ensure
+  and post-command Electron ABI restore overhead, so calibrate it from
+  trustworthy observed history of the full run — never hardcode an unsupported
+  new number.
 - This budget table lives here, not in the root `AGENTS.md`; keep the root
   guide free of procedural tables.
 
@@ -132,8 +177,9 @@ A rerun is allowed only after an observed cause changed:
 - A tool/session interruption not caused by the gate (session crash, tool
   failure) left no trustworthy result — rerun the gate against the same
   evidence state.
-- The environment/ABI was corrected (pinned toolchain restored, matching ABI
-  rebuilt) — rerun once after the correction.
+- The environment was corrected — pinned toolchain restored, or the native
+  binding repaired with the explicit `native:rebuild:*` tooling after a real
+  probe/rebuild/restoration failure — rerun once after the correction.
 - A documented or observed transient external failure occurred (network,
   registry, service outage) — rerun once after it clears.
 - The test suite's own retry policy applies — follow the suite's policy.
@@ -189,18 +235,19 @@ implementation rights; report the classification and let the caller decide.
 
 ## Reporting
 
-Report, per gate: runtime/preflight state, command count, the exact command with
-status and duration, the subchecks run, the failure classification (if any),
-evidence freshness (the code surface and worktree state the result applies to;
-when full-gate evidence is reused for a documentation/skill-only change, say so
-and list the structural checks that stand in for a rerun), a Cleanup field
-showing either "cleaned" or "retained (paths + reason)", and the verdict (pass /
-fail / unverified).
+Report, per gate: lane/runtime state (the ABI lane the gate ran under and
+whether a local Electron restoration applied), command count, the exact command
+with status and duration, the subchecks run, the failure classification (if
+any), evidence freshness (the code surface and worktree state the result
+applies to; when full-gate evidence is reused for a documentation/skill-only
+change, say so and list the structural checks that stand in for a rerun), a
+Cleanup field showing either "cleaned" or "retained (paths + reason)", and the
+verdict (pass / fail / unverified).
 
 ## Repository anchors
 
-- Root `AGENTS.md` — mandatory gates, pinned toolchain, native ABI rules,
-  success standard.
+- Root `AGENTS.md` — mandatory gates, pinned toolchain, native ABI lane
+  contract, success standard.
 - `package.json` — exact composition of each gate.
 - `tests/e2e/README.md` — E2E standards (fresh build, shared fixture, unique
   disposable profile, mocked external providers, deterministic assertions).

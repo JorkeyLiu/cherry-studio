@@ -67,10 +67,11 @@ pnpm install
 
 - `.node-version` / `.nvmrc` are the source of truth for the required Node version.
 - Confirm Node24 is on PATH (`node -v`) before `pnpm install`; installing under the wrong Node can produce an incompatible binding.
-- Preflights (`pnpm dev` / `pnpm test` / …) only verify the binding — they never rebuild.
-- Switch explicitly between ABIs when needed:
-  - `pnpm native:rebuild:node` — rebuild for Node24 (ABI 137), then `pnpm native:check:node`
-  - `pnpm native:rebuild:electron` — rebuild for Electron 41.2.1 (ABI 145), then `pnpm native:check:electron`
+- **Public commands manage the ABI lane themselves — no manual check/rebuild prefix is needed.** Node-lane commands (`pnpm test`, `pnpm test:main`, `pnpm test:renderer`, …) self-ensure the Node ABI 137 binding and restore the local Electron ABI 145 default afterwards (CI skips the restoration). Electron-lane commands (`pnpm dev`, `pnpm build`, `pnpm test:e2e`, …) self-ensure the Electron ABI 145 binding. Neutral commands (`pnpm lint`, `pnpm format`, `pnpm typecheck`, …) do not touch the binding.
+- Node and Electron commands are **serialized**: concurrent opposite-lane runs fail deterministically with a clear conflict instead of silently switching the binding.
+- `pnpm native:check:node` / `pnpm native:check:electron` are **read-only diagnostics** (real runtime SQL probe; they never modify the binding).
+- `pnpm native:rebuild:node` / `pnpm native:rebuild:electron` are **explicit repair / debug only** — for a broken binding or a forced fresh build, not daily switching.
+- Do not call the internal `*:run` helper scripts directly (`dev:run`, `test:run`, …) or infer the current ABI from files/imports; use the public commands and `native:check:*`.
 
 ### ENV
 

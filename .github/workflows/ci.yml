@@ -183,12 +183,6 @@ jobs:
       - name: Install Dependencies
         run: pnpm install
 
-      - name: Native ABI check (Node)
-        # Focused suites run without their own preflight (LOCK-ABI finding F/G);
-        # this single read-only check proves the better-sqlite3 binding is the
-        # Node24 ABI137 build before any test process can load it.
-        run: pnpm native:check:node
-
       - name: Main Process Test
         run: pnpm test:main
 
@@ -242,11 +236,6 @@ jobs:
 
       - name: Install Dependencies
         run: pnpm install
-
-      - name: Native ABI check (Node)
-        # The renderer project shares the single better-sqlite3 binding; one
-        # read-only check before the focused suite (LOCK-ABI finding F/G).
-        run: pnpm native:check:node
 
       - name: Renderer Test
         run: pnpm test:renderer

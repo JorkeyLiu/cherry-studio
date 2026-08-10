@@ -59,10 +59,11 @@ pnpm install
 
 - `.node-version` / `.nvmrc` 是所需 Node 版本的权威来源。
 - 执行 `pnpm install` 前请确认 Node24 已在 PATH 中（`node -v`）；在错误的 Node 版本下安装可能产生不兼容的 binding。
-- 预检命令（`pnpm dev` / `pnpm test` 等）只校验 binding，从不重新编译。
-- 需要时显式切换 ABI：
-  - `pnpm native:rebuild:node` — 为 Node24（ABI 137）重新编译，随后 `pnpm native:check:node`
-  - `pnpm native:rebuild:electron` — 为 Electron 41.2.1（ABI 145）重新编译，随后 `pnpm native:check:electron`
+- **公开命令自行管理 ABI lane，无需手动前置 check/rebuild。** Node lane 命令（`pnpm test`、`pnpm test:main`、`pnpm test:renderer` 等）自确保 Node ABI 137 binding，并在本地结束后恢复 Electron ABI 145 默认状态（CI 跳过该恢复）。Electron lane 命令（`pnpm dev`、`pnpm build`、`pnpm test:e2e` 等）自确保 Electron ABI 145 binding。中性命令（`pnpm lint`、`pnpm format`、`pnpm typecheck` 等）不触碰 binding。
+- Node 与 Electron 命令**串行化**：并发的反向 lane 运行会以明确的冲突确定性失败，而不会静默切换 binding。
+- `pnpm native:check:node` / `pnpm native:check:electron` 为**只读诊断**（真实运行时 SQL 探针；绝不修改 binding）。
+- `pnpm native:rebuild:node` / `pnpm native:rebuild:electron` 为**显式修复/调试专用**——仅在 binding 损坏或需要强制全新编译时使用，日常切换请使用公开命令。
+- 不要直接调用内部 `*:run` 辅助脚本（`dev:run`、`test:run` 等），也不要从文件/import 推断当前 ABI；请使用公开命令与 `native:check:*`。
 
 ### 环境变量
 

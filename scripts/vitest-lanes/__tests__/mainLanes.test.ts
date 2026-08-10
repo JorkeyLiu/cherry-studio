@@ -101,17 +101,18 @@ describe('package.json lane scripts (LOCK-TEST-001, 004)', () => {
   const pkg = JSON.parse(readRepoFile('package.json')) as { scripts: Record<string, string> }
   const { scripts } = pkg
 
-  it('test:main executes core -> native -> heavy sequentially', () => {
-    expect(scripts['test:main']).toBe('pnpm test:main:core && pnpm test:main:native && pnpm test:main:heavy')
-    expect(scripts['test:main:core']).toBe('vitest run --project main')
-    expect(scripts['test:main:native']).toBe('vitest run --project main-native')
-    expect(scripts['test:main:heavy']).toBe('vitest run --project main-heavy')
+  it('test:main executes core -> native -> heavy sequentially through the node lane wrapper', () => {
+    expect(scripts['test:main']).toBe('pnpm native:run node -- pnpm test:main:run')
+    expect(scripts['test:main:run']).toBe('pnpm test:main:core && pnpm test:main:native && pnpm test:main:heavy')
+    expect(scripts['test:main:core']).toBe('pnpm native:run node -- vitest run --project main')
+    expect(scripts['test:main:native']).toBe('pnpm native:run node -- vitest run --project main-native')
+    expect(scripts['test:main:heavy']).toBe('pnpm native:run node -- vitest run --project main-heavy')
   })
 
-  it('aggregate test preserves native ABI preflight and chains suites sequentially', () => {
-    expect(scripts['test']).toBe(
+  it('aggregate test declares the node lane and chains suites sequentially through the internal chain helper', () => {
+    expect(scripts['test']).toBe('pnpm native:run node -- pnpm test:run')
+    expect(scripts['test:run']).toBe(
       [
-        'pnpm native:check:node',
         'pnpm test:main',
         'pnpm test:renderer',
         'pnpm test:aicore',
@@ -129,22 +130,23 @@ describe('package.json lane scripts (LOCK-TEST-001, 004)', () => {
   })
 
   it('CI commands keep using pnpm test:main so the bounded lane sequence applies automatically', () => {
-    // .github/workflows/ci.yml and ci:test-check both call `pnpm test:main`,
-    // which now runs the sequential lane chain — no workflow churn required.
+    // .github/workflows/ci.yml and the ci:test-check chain both call
+    // `pnpm test:main` (the latter through the shared test:run helper), which
+    // runs the sequential lane chain — no workflow churn required.
     const ciYml = readRepoFile('.github/workflows/ci.yml')
     expect(ciYml).toContain('pnpm test:main')
-    expect(scripts['ci:test-check']).toContain('pnpm test:main')
+    expect(scripts['ci:test-check']).toContain('pnpm test:run')
+    expect(scripts['test:run']).toContain('pnpm test:main')
   })
 
-  it('CI general-test and ci:test-check each cover the e2e-utils focused suite exactly once', () => {
+  it('CI general-test and the ci:test-check chain each cover the e2e-utils focused suite exactly once', () => {
     // Finding F2: the e2e-utils suite (vitest project `e2e-utils`) must run in
-    // CI through the general-test job AND the ci:test-check chain, alongside
-    // the existing sequential focused suites, never duplicated or dropped.
+    // CI through the general-test job AND the ci:test-check chain (whose shared
+    // test:run body lists it once), alongside the existing sequential focused
+    // suites, never duplicated or dropped.
     const ciYml = readRepoFile('.github/workflows/ci.yml')
     expect(ciYml.match(/pnpm test:e2e-utils/g)).toHaveLength(1)
-    expect(scripts['ci:test-check'].match(/pnpm test:e2e-utils/g)).toHaveLength(1)
-    // The native ABI preflight still gates the aggregate check exactly once.
-    expect(scripts['ci:test-check']).toContain('pnpm native:check:node')
+    expect(scripts['test:run'].match(/pnpm test:e2e-utils/g)).toHaveLength(1)
   })
 })
 
