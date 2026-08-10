@@ -788,13 +788,6 @@
     "edit": {
       "title": "Trợ lý chỉnh sửa"
     },
-    "icon": {
-      "type": "Biểu tượng Trợ lý"
-    },
-    "list": {
-      "showByList": "Liste Görünümü",
-      "showByTags": "Chế độ xem thẻ"
-    },
     "presets": {
       "add": {
         "button": "Thêm vào",
@@ -964,18 +957,6 @@
         "label": "Chế độ Sử dụng Công cụ",
         "prompt": "Lời nhắc"
       }
-    },
-    "tags": {
-      "add": "Thêm thẻ",
-      "delete": "Xóa thẻ",
-      "deleteConfirm": "Bạn có chắc chắn muốn xóa thẻ này không?",
-      "manage": "Quản lý thẻ",
-      "modify": "Sửa Thẻ",
-      "none": "Không có thẻ",
-      "settings": {
-        "title": "Cài đặt thẻ"
-      },
-      "untagged": "Không được gắn thẻ"
     },
     "title": "Trợ lý"
   },
@@ -2744,37 +2725,6 @@
     "xiaoyi": "Tiểu Nghi",
     "zhihu": "Zhihu"
   },
-  "miniwindow": {
-    "alert": {
-      "google_login": "Mẹo: Nếu bạn thấy thông báo 'trình duyệt không được tin cậy' khi đăng nhập vào Google, vui lòng trước tiên đăng nhập qua mini app Google trong danh sách mini app, sau đó mới dùng đăng nhập Google ở các mini app khác"
-    },
-    "clipboard": {
-      "empty": "Bộ nhớ tạm trống"
-    },
-    "feature": {
-      "chat": "Trả lời câu hỏi này",
-      "explanation": "Giải thích",
-      "summary": "Tóm tắt nội dung",
-      "translate": "Dịch văn bản"
-    },
-    "footer": {
-      "backspace_clear": "Nhấn Backspace để xóa",
-      "copy_last_message": "Nhấn C để sao chép",
-      "esc": "ESC để {{action}}",
-      "esc_back": "trả về",
-      "esc_close": "đóng",
-      "esc_pause": "tạm dừng"
-    },
-    "input": {
-      "placeholder": {
-        "empty": "Hỏi {{model}} để được giúp đỡ...",
-        "title": "Bạn muốn làm gì với văn bản này?"
-      }
-    },
-    "tooltip": {
-      "pin": "Giữ cửa sổ ở trên cùng"
-    }
-  },
   "models": {
     "add_parameter": "Thêm tham số",
     "all": "Tất cả",
@@ -2836,7 +2786,6 @@
     }
   },
   "navbar": {
-    "expand": "Mở rộng Hộp thoại",
     "hide_sidebar": "Ẩn thanh bên",
     "show_sidebar": "Hiển thị thanh bên",
     "window": {
@@ -3007,29 +2956,6 @@
       "title": "Thời gian giữ hoạt động"
     },
     "title": "Ollama"
-  },
-  "onboarding": {
-    "privacy": {
-      "accept_and_continue": "[to be translated]:Accept and Continue",
-      "notice": "Bằng cách tiếp tục, bạn xác nhận rằng bạn đã đọc và đồng ý với",
-      "period": ".",
-      "policy": "Chính sách quyền riêng tư"
-    },
-    "select_model": {
-      "change_later": "Bạn có thể thay đổi điều này bất cứ lúc nào trong phần cài đặt",
-      "start": "Bắt đầu",
-      "subtitle": "Chọn mô hình mặc định cho mỗi kịch bản",
-      "title": "Chọn Mô hình Mặc định của Bạn"
-    },
-    "skip": "Bỏ qua",
-    "welcome": {
-      "or_continue_with": "HOẶC TIẾP TỤC VỚI",
-      "other_provider": "Chọn Nhà Cung Cấp Khác",
-      "select_other_provider": "Chọn Nhà Cung Cấp Khác",
-      "setup_hint": "Vui lòng cấu hình ít nhất một nhà cung cấp để có trải nghiệm tốt nhất",
-      "subtitle": "Tận hưởng các dịch vụ AI hàng đầu với nhà cung cấp của riêng bạn",
-      "title": "Chào mừng bạn đến với Cherry Chat"
-    }
   },
   "openclaw": {
     "checking_installation": "Đang kiểm tra cài đặt OpenClaw...",
@@ -4039,18 +3965,9 @@
       "updateNotAvailable": "Bạn đang sử dụng phiên bản mới nhất"
     },
     "advanced": {
-      "auto_switch_to_topics": "Tự động chuyển sang chủ đề",
       "title": "Cài đặt nâng cao"
     },
     "assistant": {
-      "icon": {
-        "type": {
-          "emoji": "Biểu tượng cảm xúc",
-          "label": "Biểu tượng mô hình",
-          "model": "Biểu tượng mô hình",
-          "none": "Ẩn"
-        }
-      },
       "label": "Trợ lý Mặc định",
       "model_params": "Tham số mô hình",
       "title": "Trợ lý Mặc định"
@@ -4702,14 +4619,6 @@
         "select": "Chọn Phông chữ",
         "title": "Cài đặt phông chữ"
       },
-      "navbar": {
-        "position": {
-          "label": "Vị trí thanh điều hướng",
-          "left": "Trái",
-          "top": "Đỉnh"
-        },
-        "title": "Cài đặt thanh điều hướng"
-      },
       "sidebar": {
         "chat": {
           "hiddenMessage": "Trợ lý là các chức năng cơ bản, không được hỗ trợ ẩn"
@@ -5265,9 +5174,6 @@
       "provider_key_overridden": "Đã cập nhật thành công khóa API cho {{provider}}",
       "provider_key_override_confirm": "{{provider}} đã có một khóa API ({{existingKey}}). Bạn có muốn ghi đè bằng khóa mới ({{newKey}}) không?",
       "provider_name": "Tên nhà cung cấp",
-      "quick_assistant_default_tag": "Mặc định",
-      "quick_assistant_model": "Mô hình Trợ lý Nhanh",
-      "quick_assistant_selection": "Chọn Trợ lý",
       "quick_model": {
         "description": "Mô hình được sử dụng cho các tác vụ đơn giản như đặt tên chủ đề và trích xuất từ khóa",
         "label": "Mô hình Nhanh",
@@ -5282,9 +5188,7 @@
       "translate_model": "Mô hình Dịch",
       "translate_model_description": "Mô hình được sử dụng cho dịch vụ dịch thuật",
       "translate_model_prompt_message": "Vui lòng nhập lời nhắc mô hình dịch",
-      "translate_model_prompt_title": "Dịch Mô hình Nhắc",
-      "use_assistant": "Sử dụng Trợ lý",
-      "use_model": "Mô hình Mặc định"
+      "translate_model_prompt_title": "Dịch Mô hình Nhắc"
     },
     "moresetting": {
       "check": {
@@ -5606,13 +5510,6 @@
       },
       "tip": "Hỗ trợ khớp ký tự đại diện (*.test.com, 192.168.0.0/16)"
     },
-    "quickAssistant": {
-      "click_tray_to_show": "Nhấp vào biểu tượng khay để bắt đầu",
-      "enable_quick_assistant": "Bật Trợ lý Nhanh",
-      "read_clipboard_at_startup": "Đọc clipboard khi khởi động",
-      "title": "Trợ lý Nhanh",
-      "use_shortcut_to_show": "Nhấp chuột phải vào biểu tượng khay hoặc sử dụng phím tắt để bắt đầu"
-    },
     "quickPanel": {
       "back": "Quay lại",
       "close": "Đóng",
@@ -5623,20 +5520,6 @@
       "page": "Trang",
       "select": "Chọn",
       "title": "Menú Rápido"
-    },
-    "quickPhrase": {
-      "add": "Thêm cụm từ",
-      "assistant": "Cụm từ Trợ lý",
-      "contentLabel": "Nội dung",
-      "contentPlaceholder": "Vui lòng nhập nội dung cụm từ, hỗ trợ sử dụng biến và nhấn Tab để nhanh chóng định vị biến cần sửa. Ví dụ:  \nHãy giúp tôi lên lộ trình từ ${from} đến ${to} và gửi nó đến ${email}.",
-      "delete": "Xóa cụm từ",
-      "deleteConfirm": "Cụm từ này không thể khôi phục sau khi xóa, tiếp tục?",
-      "edit": "Bearbeite Phrase",
-      "global": "Frases Globales",
-      "locationLabel": "Thêm Vị trí",
-      "title": "Cụm từ nhanh",
-      "titleLabel": "Tiêu đề",
-      "titlePlaceholder": "Vui lòng nhập tiêu đề cụm từ"
     },
     "scheduledTasks": {
       "description": "Quản lý các tác vụ đã lên lịch trên tất cả các tác nhân. Các tác vụ sẽ tự động chạy theo lịch đã cấu hình.",
@@ -5656,7 +5539,6 @@
       "enabled": "Kích hoạt",
       "exit_fullscreen": "Thoát toàn màn hình",
       "label": "Khóa",
-      "mini_window": "Trợ lý Nhanh",
       "new_topic": "Chủ đề mới",
       "press_shortcut": "Nhấn Phím tắt",
       "rename_topic": "Đổi tên chủ đề",
@@ -5865,17 +5747,6 @@
         "title": "Tìm kiếm Web",
         "url_invalid": "Đã nhập một URL không hợp lệ",
         "url_required": "Vui lòng nhập một URL"
-      }
-    },
-    "topic": {
-      "pin_to_top": "Ghim chủ đề lên đầu",
-      "position": {
-        "label": "Vị trí chủ đề",
-        "left": "Trái",
-        "right": "Đúng"
-      },
-      "show": {
-        "time": "Hiển thị thời gian chủ đề"
       }
     },
     "translate": {
@@ -6137,7 +6008,6 @@
   },
   "tray": {
     "quit": "Thôi",
-    "show_mini_window": "Trợ lý Nhanh",
     "show_window": "Hiển thị cửa sổ"
   },
   "update": {

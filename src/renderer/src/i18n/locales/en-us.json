@@ -788,13 +788,6 @@
     "edit": {
       "title": "Edit Assistant"
     },
-    "icon": {
-      "type": "Assistant Icon"
-    },
-    "list": {
-      "showByList": "List View",
-      "showByTags": "Tag View"
-    },
     "presets": {
       "add": {
         "button": "Add to Assistant",
@@ -964,18 +957,6 @@
         "label": "Tool Use Mode",
         "prompt": "Prompt"
       }
-    },
-    "tags": {
-      "add": "Add Tag",
-      "delete": "Delete Tag",
-      "deleteConfirm": "Are you sure to delete this tag?",
-      "manage": "Tag Management",
-      "modify": "Modify Tag",
-      "none": "No tags",
-      "settings": {
-        "title": "Tag Settings"
-      },
-      "untagged": "Untagged"
     },
     "title": "Assistants"
   },
@@ -2744,37 +2725,6 @@
     "xiaoyi": "Xiaoyi",
     "zhihu": "Zhihu"
   },
-  "miniwindow": {
-    "alert": {
-      "google_login": "Tip: If you see a 'browser not trusted' message when logging into Google, please first login through the Google mini app in the mini app list, then use Google login in other mini apps"
-    },
-    "clipboard": {
-      "empty": "Clipboard is empty"
-    },
-    "feature": {
-      "chat": "Answer this question",
-      "explanation": "Explanation",
-      "summary": "Content summary",
-      "translate": "Text translation"
-    },
-    "footer": {
-      "backspace_clear": "Backspace to clear",
-      "copy_last_message": "Press C to copy",
-      "esc": "ESC to {{action}}",
-      "esc_back": "return",
-      "esc_close": "close",
-      "esc_pause": "pause"
-    },
-    "input": {
-      "placeholder": {
-        "empty": "Ask {{model}} for help...",
-        "title": "What do you want to do with this text?"
-      }
-    },
-    "tooltip": {
-      "pin": "Keep Window on Top"
-    }
-  },
   "models": {
     "add_parameter": "Add Parameter",
     "all": "All",
@@ -2836,7 +2786,6 @@
     }
   },
   "navbar": {
-    "expand": "Expand Dialog",
     "hide_sidebar": "Hide Sidebar",
     "show_sidebar": "Show Sidebar",
     "window": {
@@ -3007,29 +2956,6 @@
       "title": "Keep Alive Time"
     },
     "title": "Ollama"
-  },
-  "onboarding": {
-    "privacy": {
-      "accept_and_continue": "Accept and Continue",
-      "notice": "By continuing, you confirm that you have read and agree to the",
-      "period": ".",
-      "policy": "Privacy Policy"
-    },
-    "select_model": {
-      "change_later": "You can change this anytime in settings",
-      "start": "Get Started",
-      "subtitle": "Select default model for each scenario",
-      "title": "Choose Your Default Models"
-    },
-    "skip": "Skip",
-    "welcome": {
-      "or_continue_with": "OR CONTINUE WITH",
-      "other_provider": "Choose Other Providers",
-      "select_other_provider": "Select Other Provider",
-      "setup_hint": "Please configure at least one provider for the best experience",
-      "subtitle": "Enjoy top-tier AI services with your own providers",
-      "title": "Welcome to Cherry Chat"
-    }
   },
   "openclaw": {
     "checking_installation": "Checking OpenClaw installation...",
@@ -4039,18 +3965,9 @@
       "updateNotAvailable": "You are using the latest version"
     },
     "advanced": {
-      "auto_switch_to_topics": "Auto switch to topic",
       "title": "Advanced Settings"
     },
     "assistant": {
-      "icon": {
-        "type": {
-          "emoji": "Emoji Icon",
-          "label": "Model Icon Type",
-          "model": "Model Icon",
-          "none": "Hide"
-        }
-      },
       "label": "Default Assistant",
       "model_params": "Model Parameters",
       "title": "Default Assistant"
@@ -4702,14 +4619,6 @@
         "select": "Select Font",
         "title": "Font Settings"
       },
-      "navbar": {
-        "position": {
-          "label": "Navbar Position",
-          "left": "Left",
-          "top": "Top"
-        },
-        "title": "Navbar Settings"
-      },
       "sidebar": {
         "chat": {
           "hiddenMessage": "Assistants are basic functions, not supported for hiding"
@@ -5265,9 +5174,6 @@
       "provider_key_overridden": "Successfully updated API key for {{provider}}",
       "provider_key_override_confirm": "{{provider}} already has an API key ({{existingKey}}). Do you want to override it with the new key ({{newKey}})?",
       "provider_name": "Provider Name",
-      "quick_assistant_default_tag": "Default",
-      "quick_assistant_model": "Quick Assistant Model",
-      "quick_assistant_selection": "Select Assistant",
       "quick_model": {
         "description": "Model used for simple tasks such as topic naming and keyword extraction",
         "label": "Quick Model",
@@ -5282,9 +5188,7 @@
       "translate_model": "Translate Model",
       "translate_model_description": "Model used for translation service",
       "translate_model_prompt_message": "Please enter the translate model prompt",
-      "translate_model_prompt_title": "Translate Model Prompt",
-      "use_assistant": "Use Assistant",
-      "use_model": "Default Model"
+      "translate_model_prompt_title": "Translate Model Prompt"
     },
     "moresetting": {
       "check": {
@@ -5606,13 +5510,6 @@
       },
       "tip": "Supports wildcard matching (*.test.com, 192.168.0.0/16)"
     },
-    "quickAssistant": {
-      "click_tray_to_show": "Click the tray icon to start",
-      "enable_quick_assistant": "Enable Quick Assistant",
-      "read_clipboard_at_startup": "Read clipboard at startup",
-      "title": "Quick Assistant",
-      "use_shortcut_to_show": "Right-click the tray icon or use shortcuts to start"
-    },
     "quickPanel": {
       "back": "Back",
       "close": "Close",
@@ -5623,20 +5520,6 @@
       "page": "Page",
       "select": "Select",
       "title": "Quick Menu"
-    },
-    "quickPhrase": {
-      "add": "Add Phrase",
-      "assistant": "Assistant Phrases",
-      "contentLabel": "Content",
-      "contentPlaceholder": "Please enter phrase content, support using variables, and press Tab to quickly locate the variable to modify. For example: \nHelp me plan a route from ${from} to ${to}, and send it to ${email}.",
-      "delete": "Delete Phrase",
-      "deleteConfirm": "The phrase cannot be recovered after deletion, continue?",
-      "edit": "Edit Phrase",
-      "global": "Global Phrases",
-      "locationLabel": "Add Location",
-      "title": "Quick Phrases",
-      "titleLabel": "Title",
-      "titlePlaceholder": "Please enter phrase title"
     },
     "scheduledTasks": {
       "description": "Manage scheduled tasks across all agents. Tasks run automatically on the configured schedule.",
@@ -5656,7 +5539,6 @@
       "enabled": "Enable",
       "exit_fullscreen": "Exit Fullscreen",
       "label": "Key",
-      "mini_window": "Quick Assistant",
       "new_topic": "New Topic",
       "press_shortcut": "Press Shortcut",
       "rename_topic": "Rename Topic",
@@ -5865,17 +5747,6 @@
         "title": "Web Search",
         "url_invalid": "Entered an invalid URL",
         "url_required": "Please enter a URL"
-      }
-    },
-    "topic": {
-      "pin_to_top": "Pin Topics to Top",
-      "position": {
-        "label": "Topic position",
-        "left": "Left",
-        "right": "Right"
-      },
-      "show": {
-        "time": "Show topic time"
       }
     },
     "translate": {
@@ -6137,7 +6008,6 @@
   },
   "tray": {
     "quit": "Quit",
-    "show_mini_window": "Quick Assistant",
     "show_window": "Show Window"
   },
   "update": {

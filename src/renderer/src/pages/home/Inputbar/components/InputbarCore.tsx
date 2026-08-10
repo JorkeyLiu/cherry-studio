@@ -26,7 +26,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-import NarrowLayout from '../../Messages/NarrowLayout'
 import AttachmentPreview from '../AttachmentPreview'
 import {
   useInputbarToolsDispatch,
@@ -637,7 +636,7 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   const quickPanelElement = config.enableQuickPanel ? <QuickPanelView setInputText={setText} /> : null
 
   return (
-    <NarrowLayout style={{ width: '100%' }}>
+    <div style={{ width: '100%' }}>
       <Container
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
@@ -694,7 +693,7 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
           </BottomBar>
         </InputBarContainer>
       </Container>
-    </NarrowLayout>
+    </div>
   )
 }
 
@@ -730,9 +729,6 @@ const Container = styled.div`
   position: relative;
   z-index: 2;
   padding: 0 18px 18px 18px;
-  [navbar-position='top'] & {
-    padding: 0 18px 10px 18px;
-  }
 `
 
 const InputBarContainer = styled.div`

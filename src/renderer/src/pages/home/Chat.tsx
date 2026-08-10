@@ -8,7 +8,7 @@ import { QuickPanelProvider } from '@renderer/components/QuickPanel'
 import ResizableHandle from '@renderer/components/ResizableHandle'
 import { isEmbeddingModel, isRerankModel, isWebSearchModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
-import { useNavbarPosition, useSettings } from '@renderer/hooks/useSettings'
+import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
@@ -44,9 +44,8 @@ interface Props {
 const Chat: FC<Props> = (props) => {
   const { assistant, updateAssistant, updateTopic } = useAssistant(props.assistant.id)
   const { t } = useTranslation()
-  const { topicPosition, messageStyle, messageNavigation } = useSettings()
+  const { messageStyle, messageNavigation } = useSettings()
   const { showTopics } = useShowTopics()
-  const { isTopNavbar } = useNavbarPosition()
   const dispatch = useAppDispatch()
 
   const mainRef = React.useRef<HTMLDivElement>(null)
@@ -157,7 +156,7 @@ const Chat: FC<Props> = (props) => {
     firstUpdateOrNoFirstUpdateHandler()
   }
 
-  const mainHeight = isTopNavbar ? 'calc(100vh - var(--navbar-height) - 6px)' : 'calc(100vh - var(--navbar-height))'
+  const mainHeight = 'calc(100vh - var(--navbar-height))'
 
   return (
     <Container id="chat" className={classNames([messageStyle])}>
@@ -174,13 +173,7 @@ const Chat: FC<Props> = (props) => {
             justify="space-between"
             style={{ height: mainHeight, width: '100%' }}>
             <QuickPanelProvider>
-              <ChatNavbar
-                activeAssistant={props.assistant}
-                activeTopic={props.activeTopic}
-                setActiveTopic={props.setActiveTopic}
-                setActiveAssistant={props.setActiveAssistant}
-                position="left"
-              />
+              <ChatNavbar activeAssistant={props.assistant} />
               <div
                 className="flex flex-1 flex-col justify-between"
                 style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
@@ -216,7 +209,7 @@ const Chat: FC<Props> = (props) => {
             </QuickPanelProvider>
           </Main>
         </motion.div>
-        {topicPosition === 'right' && showTopics && (
+        {showTopics && (
           <ResizableHandle
             cssVar="--topic-list-width"
             onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
@@ -224,7 +217,7 @@ const Chat: FC<Props> = (props) => {
           />
         )}
         <AnimatePresence initial={false}>
-          {topicPosition === 'right' && showTopics && (
+          {showTopics && (
             <motion.div
               key="right-tabs"
               initial={{ width: 0, opacity: 0 }}
@@ -255,18 +248,10 @@ const Container = styled.div`
   height: calc(100vh - var(--navbar-height));
   flex: 1;
   overflow: hidden;
-  [navbar-position='top'] & {
-    height: calc(100vh - var(--navbar-height) - 6px);
-    background-color: var(--color-background);
-    border-top-left-radius: 10px;
-    border-bottom-left-radius: 10px;
-  }
 `
 
 const Main = styled(Flex)`
-  [navbar-position='left'] & {
-    height: calc(100vh - var(--navbar-height));
-  }
+  height: calc(100vh - var(--navbar-height));
   transform: translateZ(0);
   position: relative;
 `

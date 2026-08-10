@@ -6,7 +6,13 @@ import { useShortcuts } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { getShortcutLabel } from '@renderer/i18n/label'
 import { useAppDispatch } from '@renderer/store'
-import { initialState, resetShortcuts, toggleShortcut, updateShortcut } from '@renderer/store/shortcuts'
+import {
+  initialState,
+  isRetiredShortcutKey,
+  resetShortcuts,
+  toggleShortcut,
+  updateShortcut
+} from '@renderer/store/shortcuts'
 import type { Shortcut } from '@renderer/types'
 import type { InputRef } from 'antd'
 import { Button, Input, Switch, Table as AntTable, Tooltip } from 'antd'
@@ -27,8 +33,9 @@ const ShortcutSettings: FC = () => {
   const [editingKey, setEditingKey] = useState<string | null>(null)
   const { setTimeoutTimer } = useTimer()
 
-  //if shortcut is not available on all the platforms, block the shortcut here
-  const shortcuts = originalShortcuts
+  // LOCK-006: Quick Assistant (mini window) is removed. Retired keys are hidden
+  // from display/interaction while their persisted rows are retained.
+  const shortcuts = originalShortcuts.filter((s) => !isRetiredShortcutKey(s.key))
 
   const handleClear = (record: Shortcut) => {
     dispatch(

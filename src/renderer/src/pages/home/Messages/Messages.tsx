@@ -89,7 +89,6 @@ import styled from 'styled-components'
 
 import MessageAnchorLine from './MessageAnchorLine'
 import MessageGroup from './MessageGroup'
-import NarrowLayout from './NarrowLayout'
 import Prompt from './Prompt'
 import { MessagesContainer, ScrollContainer } from './shared'
 import TopicSegmentLine from './TopicSegmentLine'
@@ -254,7 +253,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
       ref={scrollContainerRef}
       key={assistant.id}
       onScroll={handleScrollPosition}>
-      <NarrowLayout style={{ display: 'flex', flexDirection: 'column-reverse' }}>
+      <div style={{ display: 'flex', flexDirection: 'column-reverse' }}>
         <InfiniteScroll
           dataLength={displayMessages.length}
           next={loadMoreMessages}
@@ -299,7 +298,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
         </InfiniteScroll>
 
         {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
-      </NarrowLayout>
+      </div>
       {messageNavigation === 'anchor' && <MessageAnchorLine messages={displayMessages} />}
       {isEditMode && <EditModeActionBar />}
     </MessagesContainer>

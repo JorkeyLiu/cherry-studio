@@ -788,13 +788,6 @@
     "edit": {
       "title": "Editează asistentul"
     },
-    "icon": {
-      "type": "Pictogramă asistent"
-    },
-    "list": {
-      "showByList": "Vizualizare listă",
-      "showByTags": "Vizualizare etichete"
-    },
     "presets": {
       "add": {
         "button": "Adaugă la asistent",
@@ -964,18 +957,6 @@
         "label": "Mod utilizare instrumente",
         "prompt": "Prompt"
       }
-    },
-    "tags": {
-      "add": "Adaugă etichetă",
-      "delete": "Șterge eticheta",
-      "deleteConfirm": "Ești sigur că vrei să ștergi această etichetă?",
-      "manage": "Gestionare etichete",
-      "modify": "Modifică eticheta",
-      "none": "Fără etichete",
-      "settings": {
-        "title": "Setări etichete"
-      },
-      "untagged": "Neetichetat"
     },
     "title": "Asistenți"
   },
@@ -2744,37 +2725,6 @@
     "xiaoyi": "Xiaoyi",
     "zhihu": "Zhihu"
   },
-  "miniwindow": {
-    "alert": {
-      "google_login": "Sfat: Dacă vezi un mesaj 'browser not trusted' când te conectezi la Google, te rugăm să te conectezi mai întâi prin mini-aplicația Google din lista de mini-aplicații, apoi să folosești autentificarea Google în alte mini-aplicații"
-    },
-    "clipboard": {
-      "empty": "Clipboardul este gol"
-    },
-    "feature": {
-      "chat": "Răspunde la această întrebare",
-      "explanation": "Explicație",
-      "summary": "Rezumat conținut",
-      "translate": "Traducere text"
-    },
-    "footer": {
-      "backspace_clear": "Backspace pentru a șterge",
-      "copy_last_message": "Apasă C pentru a copia",
-      "esc": "ESC pentru a {{action}}",
-      "esc_back": "reveni",
-      "esc_close": "închide",
-      "esc_pause": "pune pauză"
-    },
-    "input": {
-      "placeholder": {
-        "empty": "Cere ajutor de la {{model}}...",
-        "title": "Ce vrei să faci cu acest text?"
-      }
-    },
-    "tooltip": {
-      "pin": "Menține fereastra deasupra"
-    }
-  },
   "models": {
     "add_parameter": "Adaugă parametru",
     "all": "Toate",
@@ -2836,7 +2786,6 @@
     }
   },
   "navbar": {
-    "expand": "Extinde dialogul",
     "hide_sidebar": "Ascunde bara laterală",
     "show_sidebar": "Afișează bara laterală",
     "window": {
@@ -3007,29 +2956,6 @@
       "title": "Timp menținere conexiune"
     },
     "title": "Ollama"
-  },
-  "onboarding": {
-    "privacy": {
-      "accept_and_continue": "[to be translated]:Accept and Continue",
-      "notice": "Continuând, confirmi că ai citit și ești de acord cu",
-      "period": ".",
-      "policy": "Politica de confidențialitate"
-    },
-    "select_model": {
-      "change_later": "Poți schimba oricând asta din setări.",
-      "start": "Începe",
-      "subtitle": "Selectați modelul implicit pentru fiecare scenariu",
-      "title": "Alegeți Modelele Dvs. Implicite"
-    },
-    "skip": "Sariți",
-    "welcome": {
-      "or_continue_with": "SAU CONTINUAȚI CU",
-      "other_provider": "Alegeți alți furnizori",
-      "select_other_provider": "Selectați alt furnizor",
-      "setup_hint": "Vă rugăm să configurați cel puțin un furnizor pentru cea mai bună experiență",
-      "subtitle": "Bucurați-vă de servicii AI de top cu propriii furnizori",
-      "title": "Bun venit la Cherry Chat"
-    }
   },
   "openclaw": {
     "checking_installation": "Verificare instalare OpenClaw...",
@@ -4039,18 +3965,9 @@
       "updateNotAvailable": "Utilizezi cea mai recentă versiune"
     },
     "advanced": {
-      "auto_switch_to_topics": "Comutare automată la subiect",
       "title": "Setări avansate"
     },
     "assistant": {
-      "icon": {
-        "type": {
-          "emoji": "Pictogramă Emoji",
-          "label": "Tip pictogramă model",
-          "model": "Pictogramă model",
-          "none": "Ascunde"
-        }
-      },
       "label": "Asistent implicit",
       "model_params": "Parametri model",
       "title": "Asistent implicit"
@@ -4702,14 +4619,6 @@
         "select": "Selectează font",
         "title": "Setări font"
       },
-      "navbar": {
-        "position": {
-          "label": "Poziție bară de navigare",
-          "left": "Stânga",
-          "top": "Sus"
-        },
-        "title": "Setări bară de navigare"
-      },
       "sidebar": {
         "chat": {
           "hiddenMessage": "Asistenții sunt funcții de bază, nu se acceptă ascunderea"
@@ -5265,9 +5174,6 @@
       "provider_key_overridden": "S-a actualizat cu succes cheia API pentru {{provider}}",
       "provider_key_override_confirm": "{{provider}} are deja o cheie API ({{existingKey}}). Vrei să o suprascrii cu noua cheie ({{newKey}})?",
       "provider_name": "Nume furnizor",
-      "quick_assistant_default_tag": "Implicit",
-      "quick_assistant_model": "Model asistent rapid",
-      "quick_assistant_selection": "Selectează asistent",
       "quick_model": {
         "description": "Model folosit pentru sarcini simple, cum ar fi numirea subiectelor și extragerea cuvintelor cheie",
         "label": "Model rapid",
@@ -5282,9 +5188,7 @@
       "translate_model": "Model traducere",
       "translate_model_description": "Model folosit pentru serviciul de traducere",
       "translate_model_prompt_message": "Te rugăm să introduci promptul modelului de traducere",
-      "translate_model_prompt_title": "Prompt model traducere",
-      "use_assistant": "Folosește asistent",
-      "use_model": "Model implicit"
+      "translate_model_prompt_title": "Prompt model traducere"
     },
     "moresetting": {
       "check": {
@@ -5606,13 +5510,6 @@
       },
       "tip": "Acceptă potrivirea cu wildcard (*.test.com, 192.168.0.0/16)"
     },
-    "quickAssistant": {
-      "click_tray_to_show": "Fă clic pe pictograma din zona de notificare pentru a începe",
-      "enable_quick_assistant": "Activează Asistentul rapid",
-      "read_clipboard_at_startup": "Citește clipboardul la pornire",
-      "title": "Asistent rapid",
-      "use_shortcut_to_show": "Clic dreapta pe pictograma din zona de notificare sau folosește comenzile rapide pentru a începe"
-    },
     "quickPanel": {
       "back": "Înapoi",
       "close": "Închide",
@@ -5623,20 +5520,6 @@
       "page": "Pagină",
       "select": "Selectează",
       "title": "Meniu rapid"
-    },
-    "quickPhrase": {
-      "add": "Adaugă expresie",
-      "assistant": "Expresii asistent",
-      "contentLabel": "Conținut",
-      "contentPlaceholder": "Te rugăm să introduci conținutul expresiei, poți folosi variabile și poți apăsa Tab pentru a localiza rapid variabila de modificat. De exemplu: \nAjută-mă să planific o rută de la ${from} la ${to} și trimite-o la ${email}.",
-      "delete": "Șterge expresia",
-      "deleteConfirm": "Expresia nu poate fi recuperată după ștergere, continui?",
-      "edit": "Editează expresia",
-      "global": "Expresii globale",
-      "locationLabel": "Adaugă locație",
-      "title": "Expresii rapide",
-      "titleLabel": "Titlu",
-      "titlePlaceholder": "Te rugăm să introduci titlul expresiei"
     },
     "scheduledTasks": {
       "description": "Gestionați sarcinile programate pentru toți agenții. Sarcinile rulează automat conform programului configurat.",
@@ -5656,7 +5539,6 @@
       "enabled": "Activează",
       "exit_fullscreen": "Ieși din ecran complet",
       "label": "Tastă",
-      "mini_window": "Asistent rapid",
       "new_topic": "Subiect nou",
       "press_shortcut": "Apasă comanda rapidă",
       "rename_topic": "Redenumește subiectul",
@@ -5865,17 +5747,6 @@
         "title": "Căutare web",
         "url_invalid": "S-a introdus un URL invalid",
         "url_required": "Te rugăm să introduci un URL"
-      }
-    },
-    "topic": {
-      "pin_to_top": "Fixează subiectele sus",
-      "position": {
-        "label": "Poziție subiect",
-        "left": "Stânga",
-        "right": "Dreapta"
-      },
-      "show": {
-        "time": "Afișează ora subiectului"
       }
     },
     "translate": {
@@ -6137,7 +6008,6 @@
   },
   "tray": {
     "quit": "Ieșire",
-    "show_mini_window": "Asistent rapid",
     "show_window": "Afișează fereastra"
   },
   "update": {

@@ -715,11 +715,13 @@ describe('importControlIpc', () => {
       expect(sqlite.reads).toEqual([])
     })
 
-    it('get-projection rejects a mini-like window sender sharing the broad preload — no SQL read', () => {
+    it('get-projection rejects a non-main window sender sharing the broad preload — no SQL read', () => {
       const sqlite = makeSqliteDouble()
       mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      // LOCK-006: the Quick Assistant mini window is removed; a trace window
+      // stands in as a non-main window that shares the broad preload.
       const miniLikeWindow = createMockWebContents()
-      miniLikeWindow.mainFrame = { id: 2, url: 'file:///miniWindow.html' }
+      miniLikeWindow.mainFrame = { id: 2, url: 'file:///traceWindow.html' }
 
       const result = getProjectionHandler()(eventFromContents(miniLikeWindow))
 
@@ -796,11 +798,13 @@ describe('importControlIpc', () => {
       expect(sqlite.deletes).toEqual([])
     })
 
-    it('ack-projection rejects a mini-like window sender WITHOUT executing SQL', () => {
+    it('ack-projection rejects a non-main window sender WITHOUT executing SQL', () => {
       const sqlite = makeSqliteDouble()
       mockChatDbService.getSqlite.mockReturnValue(sqlite)
+      // LOCK-006: the Quick Assistant mini window is removed; a trace window
+      // stands in as a non-main window that shares the broad preload.
       const miniLikeWindow = createMockWebContents()
-      miniLikeWindow.mainFrame = { id: 2, url: 'file:///miniWindow.html' }
+      miniLikeWindow.mainFrame = { id: 2, url: 'file:///traceWindow.html' }
 
       const result = ackProjectionHandler()(eventFromContents(miniLikeWindow))
 

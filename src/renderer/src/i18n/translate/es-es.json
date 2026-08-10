@@ -788,13 +788,6 @@
     "edit": {
       "title": "Editar Asistente"
     },
-    "icon": {
-      "type": "Ícono del Asistente"
-    },
-    "list": {
-      "showByList": "Mostrar en lista",
-      "showByTags": "Mostrar por etiquetas"
-    },
     "presets": {
       "add": {
         "button": "Añadir al asistente",
@@ -964,18 +957,6 @@
         "label": "Modo de uso de herramientas",
         "prompt": "Palabra de indicación"
       }
-    },
-    "tags": {
-      "add": "Agregar etiqueta",
-      "delete": "Eliminar etiqueta",
-      "deleteConfirm": "¿Está seguro de que desea eliminar esta etiqueta?",
-      "manage": "Gestión de etiquetas",
-      "modify": "Modificar etiqueta",
-      "none": "Aún no hay etiquetas",
-      "settings": {
-        "title": "Configuración de etiquetas"
-      },
-      "untagged": "Sin agrupar"
     },
     "title": "Asistente"
   },
@@ -2744,37 +2725,6 @@
     "xiaoyi": "Xiaoyi",
     "zhihu": "Zhihu"
   },
-  "miniwindow": {
-    "alert": {
-      "google_login": "Sugerencia: si aparece el mensaje de Google \"navegador no confiable\" al iniciar sesión, primero inicie sesión en su cuenta a través de la miniaplicación de Google en la lista de miniaplicaciones, y luego use el inicio de sesión de Google en otras miniaplicaciones"
-    },
-    "clipboard": {
-      "empty": "El portapapeles está vacío"
-    },
-    "feature": {
-      "chat": "Responder a esta pregunta",
-      "explanation": "Explicación",
-      "summary": "Resumen del contenido",
-      "translate": "Traducción de texto"
-    },
-    "footer": {
-      "backspace_clear": "Presione Retroceso para borrar",
-      "copy_last_message": "Presione C para copiar",
-      "esc": "Presione ESC {{action}}",
-      "esc_back": "Volver",
-      "esc_close": "Cerrar ventana",
-      "esc_pause": "Pausa"
-    },
-    "input": {
-      "placeholder": {
-        "empty": "Pregunta a {{model}} para obtener ayuda...",
-        "title": "¿Qué deseas hacer con el texto de abajo?"
-      }
-    },
-    "tooltip": {
-      "pin": "Fijar en la parte superior"
-    }
-  },
   "models": {
     "add_parameter": "Agregar parámetro",
     "all": "Todo",
@@ -2836,7 +2786,6 @@
     }
   },
   "navbar": {
-    "expand": "Expandir cuadro de diálogo",
     "hide_sidebar": "Ocultar barra lateral",
     "show_sidebar": "Mostrar barra lateral",
     "window": {
@@ -3007,29 +2956,6 @@
       "title": "Tiempo de Actividad"
     },
     "title": "Ollama"
-  },
-  "onboarding": {
-    "privacy": {
-      "accept_and_continue": "[to be translated]:Accept and Continue",
-      "notice": "Al continuar, confirmas que has leído y aceptas el",
-      "period": ".",
-      "policy": "Política de Privacidad"
-    },
-    "select_model": {
-      "change_later": "Puedes cambiar esto en cualquier momento desde la configuración.",
-      "start": "Comenzar",
-      "subtitle": "Seleccionar modelo predeterminado para cada escenario",
-      "title": "Elige tus modelos predeterminados"
-    },
-    "skip": "Saltar",
-    "welcome": {
-      "or_continue_with": "O CONTINUAR CON",
-      "other_provider": "Elegir Otros Proveedores",
-      "select_other_provider": "Seleccionar Otro Proveedor",
-      "setup_hint": "Por favor, configura al menos un proveedor para obtener la mejor experiencia.",
-      "subtitle": "Disfruta de servicios de IA de primer nivel con tus propios proveedores",
-      "title": "Bienvenido a Cherry Chat"
-    }
   },
   "openclaw": {
     "checking_installation": "Comprobando la instalación de OpenClaw...",
@@ -4039,18 +3965,9 @@
       "updateNotAvailable": "Tu software ya está actualizado"
     },
     "advanced": {
-      "auto_switch_to_topics": "Cambiar automáticamente a temas",
       "title": "Configuración avanzada"
     },
     "assistant": {
-      "icon": {
-        "type": {
-          "emoji": "Emoji",
-          "label": "Tipo de ícono del modelo",
-          "model": "Ícono del modelo",
-          "none": "No mostrar"
-        }
-      },
       "label": "Asistente predeterminado",
       "model_params": "Parámetros del modelo",
       "title": "Asistente predeterminado"
@@ -4702,14 +4619,6 @@
         "select": "Seleccionar fuente",
         "title": "Configuración de fuente"
       },
-      "navbar": {
-        "position": {
-          "label": "Posición de la barra de navegación",
-          "left": "Izquierda",
-          "top": "Superior"
-        },
-        "title": "Configuración de la barra de navegación"
-      },
       "sidebar": {
         "chat": {
           "hiddenMessage": "El asistente es una función básica y no se puede ocultar"
@@ -5265,9 +5174,6 @@
       "provider_key_overridden": "Clave API de {{provider}} actualizada correctamente",
       "provider_key_override_confirm": "Ya existe una clave API idéntica para {{provider}}, ¿desea sobrescribirla?",
       "provider_name": "Nombre del proveedor",
-      "quick_assistant_default_tag": "Predeterminado",
-      "quick_assistant_model": "Modelo del asistente rápido",
-      "quick_assistant_selection": "Seleccionar asistente",
       "quick_model": {
         "description": "El modelo rápido es utilizado para realizar tareas sencillas como nombrar temas, extraer palabras clave de búsqueda, etc.",
         "label": "Modelo rápido",
@@ -5282,9 +5188,7 @@
       "translate_model": "Modelo de traducción",
       "translate_model_description": "Modelo utilizado para el servicio de traducción",
       "translate_model_prompt_message": "Ingrese las sugerencias del modelo de traducción",
-      "translate_model_prompt_title": "Sugerencias del modelo de traducción",
-      "use_assistant": "Usar asistente",
-      "use_model": "Modelo predeterminado"
+      "translate_model_prompt_title": "Sugerencias del modelo de traducción"
     },
     "moresetting": {
       "check": {
@@ -5606,13 +5510,6 @@
       },
       "tip": "Admite coincidencia parcial (*.test.com, 192.168.0.0/16)"
     },
-    "quickAssistant": {
-      "click_tray_to_show": "Haz clic en el icono de la bandeja para iniciar",
-      "enable_quick_assistant": "Habilitar Asistente Rápido",
-      "read_clipboard_at_startup": "Leer portapapeles al iniciar",
-      "title": "Asistente Rápido",
-      "use_shortcut_to_show": "Haz clic derecho en el icono de la bandeja o usa un atajo de teclado para iniciar"
-    },
     "quickPanel": {
       "back": "Atrás",
       "close": "Cerrar",
@@ -5623,20 +5520,6 @@
       "page": "Página",
       "select": "Seleccionar",
       "title": "Menú de acceso rápido"
-    },
-    "quickPhrase": {
-      "add": "Agregar frase",
-      "assistant": "Frase de asistente",
-      "contentLabel": "Contenido",
-      "contentPlaceholder": "Ingrese el contenido de la frase. Se admite el uso de variables, y luego puede presionar Tab para ubicar rápidamente la variable y modificarla. Por ejemplo: \\nAyúdame a planificar la ruta desde ${desde} hasta ${hasta}, y luego envíala a ${correo}.",
-      "delete": "Eliminar frase",
-      "deleteConfirm": "Una vez eliminada, la frase no podrá recuperarse. ¿Desea continuar?",
-      "edit": "Editar frase",
-      "global": "Frase global",
-      "locationLabel": "Agregar ubicación",
-      "title": "Frases rápidas",
-      "titleLabel": "Título",
-      "titlePlaceholder": "Ingrese el título de la frase"
     },
     "scheduledTasks": {
       "description": "Administrar tareas programadas en todos los agentes. Las tareas se ejecutan automáticamente según el horario configurado.",
@@ -5656,7 +5539,6 @@
       "enabled": "habilitar",
       "exit_fullscreen": "Salir de pantalla completa",
       "label": "Tecla",
-      "mini_window": "Asistente rápido",
       "new_topic": "Nuevo tema",
       "press_shortcut": "Presionar atajo",
       "rename_topic": "Renombrar tema",
@@ -5865,17 +5747,6 @@
         "title": "Búsqueda web",
         "url_invalid": "Se ingresó una URL no válida",
         "url_required": "Es necesario introducir una URL"
-      }
-    },
-    "topic": {
-      "pin_to_top": "Fijar tema en la parte superior",
-      "position": {
-        "label": "Posición del tema",
-        "left": "Izquierda",
-        "right": "Derecha"
-      },
-      "show": {
-        "time": "Mostrar tiempo del tema"
       }
     },
     "translate": {
@@ -6137,7 +6008,6 @@
   },
   "tray": {
     "quit": "Salir",
-    "show_mini_window": "Asistente rápido",
     "show_window": "Mostrar ventana"
   },
   "update": {

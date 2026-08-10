@@ -15,7 +15,8 @@ export { TopicType }
 
 const logger = loggerService.withContext('InputbarToolsRegistry')
 
-export type InputbarScope = TopicType | 'mini-window'
+// LOCK-006: the mini window (and its 'mini-window' inputbar scope) is removed.
+export type InputbarScope = TopicType
 
 export interface InputbarScopeConfig {
   placeholder?: string

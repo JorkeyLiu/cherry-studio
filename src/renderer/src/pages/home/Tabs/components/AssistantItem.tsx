@@ -1,49 +1,27 @@
 import AssistantAvatar from '@renderer/components/Avatar/AssistantAvatar'
 import { CopyIcon, DeleteIcon, EditIcon } from '@renderer/components/Icons'
-import PromptPopup from '@renderer/components/Popups/PromptPopup'
 import { useAssistant, useAssistants } from '@renderer/hooks/useAssistant'
-import { useSettings } from '@renderer/hooks/useSettings'
-import { useTags } from '@renderer/hooks/useTags'
 import AssistantSettingsPopup from '@renderer/pages/settings/AssistantSettings'
-import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import type { Assistant, AssistantsSortType } from '@renderer/types'
+import type { Assistant } from '@renderer/types'
 import { cn, uuid } from '@renderer/utils'
 import { hasTopicPendingRequests } from '@renderer/utils/queue'
 import type { MenuProps } from 'antd'
 import { Dropdown } from 'antd'
 import { omit } from 'lodash'
-import {
-  AlignJustify,
-  ArrowDownAZ,
-  ArrowUpAZ,
-  BrushCleaning,
-  Check,
-  MoreVertical,
-  Plus,
-  Save,
-  Settings2,
-  Smile,
-  Tag,
-  Tags
-} from 'lucide-react'
+import { ArrowDownAZ, ArrowUpAZ, BrushCleaning, MoreVertical, Save } from 'lucide-react'
 import type { FC, PropsWithChildren } from 'react'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import * as tinyPinyin from 'tiny-pinyin'
 
-import AssistantTagsPopup from './AssistantTagsPopup'
-
 interface AssistantItemProps {
   assistant: Assistant
   isActive: boolean
-  sortBy: AssistantsSortType
   onSwitch: (assistant: Assistant) => void
   onDelete: (assistant: Assistant) => void
   onCreateDefaultAssistant: () => void
   addPreset: (agent: any) => void
   copyAssistant: (assistant: Assistant) => void
-  onTagClick?: (tag: string) => void
-  handleSortByChange?: (sortType: AssistantsSortType) => void
   sortByPinyinAsc?: () => void
   sortByPinyinDesc?: () => void
 }
@@ -51,19 +29,15 @@ interface AssistantItemProps {
 const AssistantItem: FC<AssistantItemProps> = ({
   assistant,
   isActive,
-  sortBy,
   onSwitch,
   onDelete,
   addPreset,
   copyAssistant,
-  handleSortByChange,
   sortByPinyinAsc: externalSortByPinyinAsc,
   sortByPinyinDesc: externalSortByPinyinDesc
 }) => {
   const { t } = useTranslation()
-  const { allTags } = useTags()
   const { removeAllTopics } = useAssistant(assistant.id)
-  const { clickAssistantToShowTopic, topicPosition, setAssistantIconType } = useSettings()
   const { assistants, updateAssistants } = useAssistants()
 
   const [isPending, setIsPending] = useState(false)
@@ -97,47 +71,21 @@ const AssistantItem: FC<AssistantItemProps> = ({
       getMenuItems({
         assistant,
         t,
-        allTags,
-        assistants,
-        updateAssistants,
         addPreset,
         copyAssistant,
         onSwitch,
         onDelete,
         removeAllTopics,
-        setAssistantIconType,
-        sortBy,
-        handleSortByChange,
         sortByPinyinAsc,
         sortByPinyinDesc
       }),
-    [
-      assistant,
-      t,
-      allTags,
-      assistants,
-      updateAssistants,
-      addPreset,
-      copyAssistant,
-      onSwitch,
-      onDelete,
-      removeAllTopics,
-      setAssistantIconType,
-      sortBy,
-      handleSortByChange,
-      sortByPinyinAsc,
-      sortByPinyinDesc
-    ]
+    [assistant, t, addPreset, copyAssistant, onSwitch, onDelete, removeAllTopics, sortByPinyinAsc, sortByPinyinDesc]
   )
 
   const handleSwitch = useCallback(async () => {
-    if (clickAssistantToShowTopic) {
-      if (topicPosition === 'left') {
-        void EventEmitter.emit(EVENT_NAMES.SWITCH_TOPIC_SIDEBAR)
-      }
-    }
+    // LOCK-002: topics always render on the right — no sidebar switch needed.
     onSwitch(assistant)
-  }, [clickAssistantToShowTopic, onSwitch, assistant, topicPosition])
+  }, [onSwitch, assistant])
 
   const assistantName = useMemo(() => assistant.name || t('chat.default.name'), [assistant.name, t])
   const fullAssistantName = useMemo(
@@ -191,85 +139,18 @@ const sortAssistantsByPinyin = (assistants: Assistant[], isAscending: boolean) =
   })
 }
 
-// 提取标签相关的操作函数
-const handleTagOperation = (
-  tag: string,
-  assistant: Assistant,
-  assistants: Assistant[],
-  updateAssistants: (assistants: Assistant[]) => void
-) => {
-  const removeTag = () => updateAssistants(assistants.map((a) => (a.id === assistant.id ? { ...a, tags: [] } : a)))
-  const addTag = () => updateAssistants(assistants.map((a) => (a.id === assistant.id ? { ...a, tags: [tag] } : a)))
-  const hasTag = assistant.tags?.includes(tag)
-  hasTag ? removeTag() : addTag()
-}
-
-// 提取创建菜单项的函数
-const createTagMenuItems = (
-  allTags: string[],
-  assistant: Assistant,
-  assistants: Assistant[],
-  updateAssistants: (assistants: Assistant[]) => void,
-  t: (key: string) => string
-): MenuProps['items'] => {
-  const items: MenuProps['items'] = [
-    ...allTags.map((tag) => ({
-      label: tag,
-      icon: assistant.tags?.includes(tag) ? <Check size={14} /> : <Tag size={14} />,
-      key: `all-tag-${tag}`,
-      onClick: () => handleTagOperation(tag, assistant, assistants, updateAssistants)
-    }))
-  ]
-
-  if (allTags.length > 0) {
-    items.push({ type: 'divider' })
-  }
-
-  items.push({
-    label: t('assistants.tags.add'),
-    key: 'new-tag',
-    icon: <Plus size={14} />,
-    onClick: async () => {
-      const tagName = await PromptPopup.show({
-        title: t('assistants.tags.add'),
-        message: ''
-      })
-
-      if (tagName && tagName.trim()) {
-        updateAssistants(assistants.map((a) => (a.id === assistant.id ? { ...a, tags: [tagName.trim()] } : a)))
-      }
-    }
-  })
-
-  if (allTags.length > 0) {
-    items.push({
-      label: t('assistants.tags.manage'),
-      key: 'manage-tags',
-      icon: <Settings2 size={14} />,
-      onClick: () => {
-        void AssistantTagsPopup.show({ title: t('assistants.tags.manage') })
-      }
-    })
-  }
-
-  return items
-}
-
 // 提取创建菜单配置的函数
-function getMenuItems({
+// LOCK-007: icon-type and tag-related items/actions and list/tags view
+// switching are removed; edit, duplicate, clear, save-to-agent, sorting and
+// delete remain. Assistant tags data itself is preserved for compatibility.
+export function getMenuItems({
   assistant,
   t,
-  allTags,
-  assistants,
-  updateAssistants,
   addPreset,
   copyAssistant,
   onSwitch,
   onDelete,
   removeAllTopics,
-  setAssistantIconType,
-  sortBy,
-  handleSortByChange,
   sortByPinyinAsc,
   sortByPinyinDesc
 }): MenuProps['items'] {
@@ -319,43 +200,7 @@ function getMenuItems({
       }
     },
     {
-      label: t('assistants.icon.type'),
-      key: 'icon-type',
-      icon: <Smile size={14} />,
-      children: [
-        {
-          label: t('settings.assistant.icon.type.model'),
-          key: 'model',
-          onClick: () => setAssistantIconType('model')
-        },
-        {
-          label: t('settings.assistant.icon.type.emoji'),
-          key: 'emoji',
-          onClick: () => setAssistantIconType('emoji')
-        },
-        {
-          label: t('settings.assistant.icon.type.none'),
-          key: 'none',
-          onClick: () => setAssistantIconType('none')
-        }
-      ]
-    },
-    {
       type: 'divider'
-    },
-    {
-      label: t('assistants.tags.manage'),
-      key: 'all-tags',
-      icon: <Plus size={14} />,
-      children: createTagMenuItems(allTags, assistant, assistants, updateAssistants, t)
-    },
-    {
-      label: sortBy === 'list' ? t('assistants.list.showByTags') : t('assistants.list.showByList'),
-      key: 'switch-view',
-      icon: sortBy === 'list' ? <Tags size={14} /> : <AlignJustify size={14} />,
-      onClick: () => {
-        sortBy === 'list' ? handleSortByChange?.('tags') : handleSortByChange?.('list')
-      }
     },
     {
       label: t('common.sort.pinyin.asc'),

@@ -83,19 +83,11 @@ async function waitForMainWindow(app: ElectronApplication): Promise<Page> {
 }
 
 /**
- * The `onboarding-completed` localStorage flag survives on the same profile,
- * so onboarding is normally already skipped. This is a bounded safety net:
- * click Skip when the welcome screen is still shown, then re-assert the flag.
+ * LOCK-001: the first-launch onboarding gate is removed — fresh launches enter
+ * the main app directly. The legacy `onboarding-completed` localStorage flag is
+ * inert; kept as a no-op write for profile-format compatibility.
  */
 async function bypassOnboardingIfShown(page: Page): Promise<void> {
-  try {
-    const skipBtn = page.getByText('Skip', { exact: false })
-    await skipBtn.waitFor({ state: 'visible', timeout: 10000 })
-    await skipBtn.click()
-    await page.waitForTimeout(2000)
-  } catch {
-    // Already past onboarding
-  }
   await page.evaluate(() => {
     localStorage.setItem('onboarding-completed', 'true')
   })

@@ -32,3 +32,34 @@ export function sortByEnglishFirst(a: string, b: string): number {
   if (!isAEnglish && isBEnglish) return 1
   return a.localeCompare(b)
 }
+
+/**
+ * LOCK-002: pinned topics always sort/stay at the top. Stable within each
+ * group (pinned and unpinned keep their original relative order).
+ * @template {T} 列表元素类型（需含可选的 pinned 字段）
+ */
+export function sortTopicsPinnedFirst<T extends { pinned?: boolean }>(topics: T[]): T[] {
+  return [...topics].sort((a, b) => {
+    if (a.pinned && !b.pinned) return -1
+    if (!a.pinned && b.pinned) return 1
+    return 0
+  })
+}
+
+/**
+ * LOCK-002: reorder the topic list after a pin/unpin toggle. The updated topic
+ * (with its new `pinned` flag) is placed at the top of its target group, and
+ * every other topic keeps its relative order. The updated topic is excluded
+ * from both stale source groups so it can never appear twice in the result.
+ * @template {T} 列表元素类型（需含 id 与可选的 pinned 字段）
+ */
+export function reorderTopicsForPin<T extends { id: string; pinned?: boolean }>(topics: T[], updatedTopic: T): T[] {
+  const others = topics.filter((topic) => topic.id !== updatedTopic.id)
+  const pinnedTopics = others.filter((topic) => topic.pinned)
+  const unpinnedTopics = others.filter((topic) => !topic.pinned)
+
+  if (updatedTopic.pinned) {
+    return [updatedTopic, ...pinnedTopics, ...unpinnedTopics]
+  }
+  return [...pinnedTopics, updatedTopic, ...unpinnedTopics]
+}

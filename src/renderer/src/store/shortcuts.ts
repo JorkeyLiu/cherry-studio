@@ -41,13 +41,6 @@ const initialState: ShortcutsState = {
       system: true
     },
     {
-      key: 'mini_window',
-      shortcut: ['CommandOrControl', 'E'],
-      editable: true,
-      enabled: false,
-      system: true
-    },
-    {
       key: 'new_topic',
       shortcut: ['CommandOrControl', 'N'],
       editable: true,
@@ -174,3 +167,12 @@ const shortcutsSlice = createSlice({
 export const { updateShortcut, toggleShortcut, resetShortcuts } = shortcutsSlice.actions
 export default shortcutsSlice.reducer
 export { initialState }
+
+/**
+ * LOCK-006: Quick Assistant (mini window) is removed. Persisted shortcut rows
+ * are retained non-destructively (no data-clearing migration), but the retired
+ * key is hidden from the settings display/interaction.
+ */
+export const RETIRED_SHORTCUT_KEYS: ReadonlySet<string> = new Set(['mini_window'])
+
+export const isRetiredShortcutKey = (key: string): boolean => RETIRED_SHORTCUT_KEYS.has(key)

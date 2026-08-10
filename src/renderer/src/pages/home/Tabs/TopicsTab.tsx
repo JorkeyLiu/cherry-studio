@@ -7,7 +7,6 @@ interface Props {
   assistant: Assistant
   activeTopic: Topic
   setActiveTopic: (topic: Topic) => void
-  position: 'left' | 'right'
 }
 
 const TopicsTab: FC<Props> = (props) => {

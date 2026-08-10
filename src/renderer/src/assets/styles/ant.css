@@ -84,14 +84,6 @@
   width: calc(100vw - var(--sidebar-width));
 }
 
-[navbar-position='top'] .minapp-drawer {
-  max-width: 100vw;
-}
-
-[navbar-position='top'] .minapp-drawer .ant-drawer-header {
-  width: 100vw;
-}
-
 .ant-drawer-header {
   /* 普通 drawer header 不应该可拖拽，除非被 minapp-drawer 覆盖 */
   -webkit-app-region: no-drag;

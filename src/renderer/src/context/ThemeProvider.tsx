@@ -1,5 +1,5 @@
 import { isMac, isWin } from '@renderer/config/constant'
-import { useNavbarPosition, useSettings } from '@renderer/hooks/useSettings'
+import { useSettings } from '@renderer/hooks/useSettings'
 import useUserTheme from '@renderer/hooks/useUserTheme'
 import { ThemeMode } from '@renderer/types'
 import { IpcChannel } from '@shared/IpcChannel'
@@ -37,7 +37,6 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
     window.matchMedia('(prefers-color-scheme: dark)').matches ? ThemeMode.dark : ThemeMode.light
   )
   const { initUserTheme } = useUserTheme()
-  const { navbarPosition } = useNavbarPosition()
 
   const toggleTheme = () => {
     const nextTheme = {
@@ -59,7 +58,8 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
       document.body.classList.remove('dark')
       document.body.classList.add('light')
     }
-    document.body.setAttribute('navbar-position', navbarPosition)
+    // LOCK-002: navigation always renders on the left — fixed attribute value.
+    document.body.setAttribute('navbar-position', 'left')
     document.documentElement.lang = language
 
     // if theme is old auto, then set theme to system
@@ -75,7 +75,7 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
       document.body.setAttribute('theme-mode', actualTheme)
       setActualTheme(actualTheme)
     })
-  }, [actualTheme, initUserTheme, language, navbarPosition, setSettedTheme, settedTheme])
+  }, [actualTheme, initUserTheme, language, setSettedTheme, settedTheme])
 
   useEffect(() => {
     tailwindThemeChange(actualTheme)

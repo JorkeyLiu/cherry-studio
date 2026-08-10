@@ -788,13 +788,6 @@
     "edit": {
       "title": "アシスタントを編集"
     },
-    "icon": {
-      "type": "アシスタントアイコン"
-    },
-    "list": {
-      "showByList": "リスト表示",
-      "showByTags": "タグ表示"
-    },
     "presets": {
       "add": {
         "button": "アシスタントに追加",
@@ -964,18 +957,6 @@
         "label": "工具調用方式",
         "prompt": "提示詞"
       }
-    },
-    "tags": {
-      "add": "タグ追加",
-      "delete": "タグ削除",
-      "deleteConfirm": "このタグを削除してもよろしいですか？",
-      "manage": "タグ管理",
-      "modify": "タグ修正",
-      "none": "タグなし",
-      "settings": {
-        "title": "タグ設定"
-      },
-      "untagged": "未分類"
     },
     "title": "アシスタント"
   },
@@ -2744,37 +2725,6 @@
     "xiaoyi": "小藝",
     "zhihu": "知乎直答"
   },
-  "miniwindow": {
-    "alert": {
-      "google_login": "ヒント：Googleログイン時に「信頼できないブラウザ」というメッセージが表示された場合は、先にミニアプリリストのGoogleミニアプリでアカウントログインを完了してから、他のミニアプリでGoogleログインを使用してください"
-    },
-    "clipboard": {
-      "empty": "クリップボードが空です"
-    },
-    "feature": {
-      "chat": "この質問に回答",
-      "explanation": "説明",
-      "summary": "内容要約",
-      "translate": "テキスト翻訳"
-    },
-    "footer": {
-      "backspace_clear": "バックスペースを押してクリアします",
-      "copy_last_message": "C キーを押してコピー",
-      "esc": "ESC キーを押して{{action}}",
-      "esc_back": "戻る",
-      "esc_close": "ウィンドウを閉じる",
-      "esc_pause": "一時停止"
-    },
-    "input": {
-      "placeholder": {
-        "empty": "{{model}} に質問してください...",
-        "title": "下のテキストに対して何をしますか？"
-      }
-    },
-    "tooltip": {
-      "pin": "上部ウィンドウ"
-    }
-  },
   "models": {
     "add_parameter": "パラメータを追加",
     "all": "すべて",
@@ -2836,7 +2786,6 @@
     }
   },
   "navbar": {
-    "expand": "ダイアログを展開",
     "hide_sidebar": "サイドバーを非表示",
     "show_sidebar": "サイドバーを表示",
     "window": {
@@ -3007,29 +2956,6 @@
       "title": "保持時間"
     },
     "title": "Ollama"
-  },
-  "onboarding": {
-    "privacy": {
-      "accept_and_continue": "[to be translated]:Accept and Continue",
-      "notice": "続行することで、あなたは以下を読み、同意したことを確認します。",
-      "period": "。",
-      "policy": "プライバシーポリシー"
-    },
-    "select_model": {
-      "change_later": "いつでも設定で変更できます",
-      "start": "始めましょう",
-      "subtitle": "各シナリオごとのデフォルトモデルを選択",
-      "title": "デフォルトモデルを選択"
-    },
-    "skip": "スキップ",
-    "welcome": {
-      "or_continue_with": "または続行",
-      "other_provider": "他のプロバイダーを選択",
-      "select_other_provider": "他のプロバイダーを選択",
-      "setup_hint": "ベストな体験のために、少なくとも1つのプロバイダーを設定してください",
-      "subtitle": "あなたのプロバイダーでトップクラスのAIサービスをお楽しみください",
-      "title": "Cherry Chatへようこそ"
-    }
   },
   "openclaw": {
     "checking_installation": "OpenClawのインストールを確認しています...",
@@ -4039,18 +3965,9 @@
       "updateNotAvailable": "最新バージョンを使用しています"
     },
     "advanced": {
-      "auto_switch_to_topics": "トピックに自動的に切り替える",
       "title": "詳細設定"
     },
     "assistant": {
-      "icon": {
-        "type": {
-          "emoji": "Emoji アイコン",
-          "label": "モデルアイコンタイプ",
-          "model": "モデルアイコン",
-          "none": "表示しない"
-        }
-      },
       "label": "デフォルトアシスタント",
       "model_params": "モデルパラメータ",
       "title": "デフォルトアシスタント"
@@ -4702,14 +4619,6 @@
         "select": "フォントを選択",
         "title": "フォント設定"
       },
-      "navbar": {
-        "position": {
-          "label": "ナビゲーションバー位置",
-          "left": "左",
-          "top": "上"
-        },
-        "title": "ナビゲーションバー設定"
-      },
       "sidebar": {
         "chat": {
           "hiddenMessage": "アシスタントは基本的な機能であり、非表示はサポートされていません"
@@ -5265,9 +5174,6 @@
       "provider_key_overridden": "{{provider}} の API キーを更新しました",
       "provider_key_override_confirm": "{{provider}} はすでに API キー ({{existingKey}}) を持っています。新しいキー ({{newKey}}) で上書きしますか？",
       "provider_name": "プロバイダー名",
-      "quick_assistant_default_tag": "デフォルト",
-      "quick_assistant_model": "クイックアシスタントモデル",
-      "quick_assistant_selection": "アシスタントを選択します",
       "quick_model": {
         "description": "トピックの命名や検索キーワードの抽出などの簡単なタスクを実行する際に使用されるモデル",
         "label": "高速モデル",
@@ -5282,9 +5188,7 @@
       "translate_model": "翻訳モデル",
       "translate_model_description": "翻訳サービスに使用されるモデル",
       "translate_model_prompt_message": "翻訳モデルのプロンプトを入力してください",
-      "translate_model_prompt_title": "翻訳モデルのプロンプト",
-      "use_assistant": "アシスタントの活用",
-      "use_model": "デフォルトモデル"
+      "translate_model_prompt_title": "翻訳モデルのプロンプト"
     },
     "moresetting": {
       "check": {
@@ -5606,13 +5510,6 @@
       },
       "tip": "ワイルドカード一致をサポート (*.test.com, 192.168.0.0/16)"
     },
-    "quickAssistant": {
-      "click_tray_to_show": "トレイアイコンをクリックして起動",
-      "enable_quick_assistant": "クイックアシスタントを有効にする",
-      "read_clipboard_at_startup": "起動時にクリップボードを読み取る",
-      "title": "クイックアシスタント",
-      "use_shortcut_to_show": "トレイアイコンを右クリックするか、ショートカットキーで起動できます"
-    },
     "quickPanel": {
       "back": "戻る",
       "close": "閉じる",
@@ -5623,20 +5520,6 @@
       "page": "ページ",
       "select": "選択",
       "title": "クイックメニュー"
-    },
-    "quickPhrase": {
-      "add": "フレーズを追加",
-      "assistant": "アシスタントプロンプト",
-      "contentLabel": "内容",
-      "contentPlaceholder": "フレーズの内容を入力してください。変数を使用することもできます。変数を使用する場合は、Tabキーを押して変数を選択し、変数を変更してください。例：\n私の名前は${name}です。",
-      "delete": "フレーズを削除",
-      "deleteConfirm": "削除後は復元できません。続行しますか？",
-      "edit": "フレーズを編集",
-      "global": "グローバルクイックフレーズ",
-      "locationLabel": "追加場所",
-      "title": "クイックフレーズ",
-      "titleLabel": "タイトル",
-      "titlePlaceholder": "フレーズのタイトルを入力してください"
     },
     "scheduledTasks": {
       "description": "すべてのエージェントにわたるスケジュールされたタスクを管理します。タスクは設定されたスケジュールに従って自動的に実行されます。",
@@ -5656,7 +5539,6 @@
       "enabled": "有効化",
       "exit_fullscreen": "フルスクリーンを終了",
       "label": "キー",
-      "mini_window": "クイックアシスタント",
       "new_topic": "新しいトピック",
       "press_shortcut": "ショートカットを押す",
       "rename_topic": "トピックの名前を変更",
@@ -5865,17 +5747,6 @@
         "title": "ウェブ検索",
         "url_invalid": "無効なURLが入力されました",
         "url_required": "URLの入力が必要です"
-      }
-    },
-    "topic": {
-      "pin_to_top": "固定トピックを上部に表示",
-      "position": {
-        "label": "トピックの位置",
-        "left": "左",
-        "right": "右"
-      },
-      "show": {
-        "time": "トピックの時間を表示"
       }
     },
     "translate": {
@@ -6137,7 +6008,6 @@
   },
   "tray": {
     "quit": "終了",
-    "show_mini_window": "クイックアシスタント",
     "show_window": "ウィンドウを表示"
   },
   "update": {

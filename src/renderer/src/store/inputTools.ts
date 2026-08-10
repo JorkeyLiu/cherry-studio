@@ -37,7 +37,7 @@ export const DEFAULT_TOOL_ORDER: ToolOrder = {
     'generate_image',
     'mention_models'
   ],
-  hidden: ['quick_phrases', 'clear_topic', 'toggle_expand', 'new_context']
+  hidden: ['clear_topic', 'toggle_expand', 'new_context']
 }
 
 // Default tool order per scope
@@ -47,10 +47,6 @@ export const DEFAULT_TOOL_ORDER_BY_SCOPE: Record<InputbarScope, ToolOrder> = {
   [TopicType.Chat]: DEFAULT_TOOL_ORDER,
   [TopicType.Session]: {
     visible: ['create_session', 'permission_mode', 'slash_commands', 'attachment'],
-    hidden: []
-  },
-  'mini-window': {
-    visible: ['attachment', 'mention_models', 'quick_phrases'],
     hidden: []
   }
 }

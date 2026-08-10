@@ -154,7 +154,6 @@ src/core/
 The renderer builds multiple HTML entry points (inputs declared in `electron.vite.config.ts`):
 
 - `index.html` — Main application window
-- `miniWindow.html` — Compact floating window (`src/renderer/src/windows/mini/`)
 - `traceWindow.html` — MCP trace viewer (`src/renderer/src/trace/`)
 - `chatImport.html` — L2 ZIP import window (`src/renderer/src/windows/chatImport/`, hidden sandboxed window over the extracted ZIP's IndexedDB)
 

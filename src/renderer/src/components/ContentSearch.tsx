@@ -1,5 +1,4 @@
 import { ActionIconButton } from '@renderer/components/Buttons'
-import NarrowLayout from '@renderer/pages/home/Messages/NarrowLayout'
 import { scrollElementIntoView } from '@renderer/utils'
 import { Tooltip } from 'antd'
 import { debounce } from 'lodash'
@@ -349,7 +348,7 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
         ref={containerRef}
         style={enableContentSearch ? {} : { display: 'none' }}
         $overlayPosition={positionMode === 'absolute' ? 'absolute' : 'static'}>
-        <NarrowLayout style={{ width: '100%' }}>
+        <div style={{ width: '100%' }}>
           <SearchBarContainer $position={positionMode}>
             <InputWrapper>
               <Input
@@ -406,7 +405,7 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
               </ActionIconButton>
             </ToolBar>
           </SearchBarContainer>
-        </NarrowLayout>
+        </div>
         <Placeholder />
       </Container>
     )

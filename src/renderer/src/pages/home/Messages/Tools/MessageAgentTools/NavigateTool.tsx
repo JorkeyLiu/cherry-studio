@@ -27,9 +27,7 @@ const ROUTE_LABELS: Record<string, { icon: string; label: string }> = {
   '/settings/memory': { icon: '🧠', label: 'Memory' },
   '/settings/api-server': { icon: '🌐', label: 'API Server' },
   '/settings/docprocess': { icon: '📄', label: 'Doc Processing' },
-  '/settings/quickphrase': { icon: '⚡', label: 'Quick Phrases' },
   '/settings/shortcut': { icon: '⌨️', label: 'Shortcuts' },
-  '/settings/quickAssistant': { icon: '🪟', label: 'Quick Assistant' },
   '/settings/about': { icon: 'ℹ️', label: 'About' },
 
   // MCP sub-pages

@@ -65,8 +65,6 @@ import VertexAISettings from './VertexAISettings'
 
 interface Props {
   providerId: string
-  /** Whether in onboarding mode for new users */
-  isOnboarding?: boolean
 }
 
 const ANTHROPIC_COMPATIBLE_PROVIDER_IDS = [
@@ -97,7 +95,7 @@ const isAnthropicCompatibleProviderId = (id: string): id is AnthropicCompatibleP
 
 type HostField = 'apiHost' | 'anthropicApiHost'
 
-const ProviderSetting: FC<Props> = ({ providerId, isOnboarding = false }) => {
+const ProviderSetting: FC<Props> = ({ providerId }) => {
   const { provider, updateProvider, models } = useProvider(providerId)
   const allProviders = useAllProviders()
   const { updateProviders } = useProviders()
@@ -138,21 +136,17 @@ const ProviderSetting: FC<Props> = ({ providerId, isOnboarding = false }) => {
   )
 
   // Store callbacks in ref to avoid recreating debounce function when dependencies change
-  const callbacks = { updateProvider, updateWebSearchProviderKey, isOnboarding, providerEnabled: provider.enabled }
+  const callbacks = { updateProvider, updateWebSearchProviderKey }
   const callbacksRef = useRef(callbacks)
   callbacksRef.current = callbacks
 
   const debouncedUpdateApiKey = useMemo(
     () =>
       debounce((value: string) => {
-        const { updateProvider, updateWebSearchProviderKey, isOnboarding, providerEnabled } = callbacksRef.current
+        const { updateProvider, updateWebSearchProviderKey } = callbacksRef.current
         const formattedKey = formatApiKeys(value)
         updateProvider({ apiKey: formattedKey })
         updateWebSearchProviderKey({ apiKey: formattedKey })
-        // Auto-enable provider when apiKey is updated in onboarding mode
-        if (isOnboarding && formattedKey && !providerEnabled) {
-          updateProvider({ enabled: true })
-        }
       }, 150),
     []
   )
@@ -288,11 +282,6 @@ const ProviderSetting: FC<Props> = ({ providerId, isOnboarding = false }) => {
       })
 
       setApiKeyConnectivity((prev) => ({ ...prev, status: HealthStatus.SUCCESS }))
-
-      // Auto-enable provider when API check succeeds in onboarding mode
-      if (isOnboarding && !provider.enabled) {
-        updateProvider({ enabled: true })
-      }
 
       setTimeoutTimer(
         'onCheckApi',

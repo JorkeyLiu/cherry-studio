@@ -135,8 +135,9 @@ const ChatNavigation: FC<ChatNavigationProps> = ({
   const isHoveringNavigationRef = useRef(false)
   const isPointerInTriggerAreaRef = useRef(false)
   const stoppedAtBoundaryRef = useRef(false)
-  const { topicPosition, showTopics } = useSettings()
-  const showRightTopics = topicPosition === 'right' && showTopics
+  const { showTopics } = useSettings()
+  // LOCK-002: topics always render on the right.
+  const showRightTopics = showTopics
 
   const clearHideTimer = useCallback(() => {
     clearTimeoutTimer(timerKey)

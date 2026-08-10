@@ -788,13 +788,6 @@
     "edit": {
       "title": "Assistent bearbeiten"
     },
-    "icon": {
-      "type": "Assistenten-Symbol"
-    },
-    "list": {
-      "showByList": "Listenansicht",
-      "showByTags": "Tag-Ansicht"
-    },
     "presets": {
       "add": {
         "button": "Zu Assistent hinzufügen",
@@ -964,18 +957,6 @@
         "label": "Tool-Aufrufmethode",
         "prompt": "Prompt"
       }
-    },
-    "tags": {
-      "add": "Tag hinzufügen",
-      "delete": "Tag löschen",
-      "deleteConfirm": "Möchten Sie diesen Tag wirklich löschen?",
-      "manage": "Tags verwalten",
-      "modify": "Tag ändern",
-      "none": "Keine Tags vorhanden",
-      "settings": {
-        "title": "Tag-Einstellungen"
-      },
-      "untagged": "Nicht gruppiert"
     },
     "title": "Assistent"
   },
@@ -2744,37 +2725,6 @@
     "xiaoyi": "Xiaoyi",
     "zhihu": "Zhihu Zhida"
   },
-  "miniwindow": {
-    "alert": {
-      "google_login": "Hinweis: Falls Sie beim Google-Login die Meldung \"Nicht vertrauenswürdiger Browser\" erhalten, melden Sie sich bitte zuerst in der Google Mini-App in der Mini-App-Liste an, bevor Sie Google-Login in anderen Mini-Apps verwenden"
-    },
-    "clipboard": {
-      "empty": "Zwischenablage ist leer"
-    },
-    "feature": {
-      "chat": "Diese Frage beantworten",
-      "explanation": "Erklärung",
-      "summary": "Zusammenfassung",
-      "translate": "Textübersetzung"
-    },
-    "footer": {
-      "backspace_clear": "Backspace zum Löschen",
-      "copy_last_message": "C zum Kopieren",
-      "esc": "ESC zum {{action}}",
-      "esc_back": "Zurück",
-      "esc_close": "Schließen",
-      "esc_pause": "Pausieren"
-    },
-    "input": {
-      "placeholder": {
-        "empty": "{{model}} um Hilfe fragen...",
-        "title": "Was möchten Sie mit dem folgenden Text tun"
-      }
-    },
-    "tooltip": {
-      "pin": "Fenster immer im Vordergrund"
-    }
-  },
   "models": {
     "add_parameter": "Parameter hinzufügen",
     "all": "Alle",
@@ -2836,7 +2786,6 @@
     }
   },
   "navbar": {
-    "expand": "Dialog ein-/ausklappen",
     "hide_sidebar": "Seitenleiste ausblenden",
     "show_sidebar": "Seitenleiste einblenden",
     "window": {
@@ -3007,29 +2956,6 @@
       "title": "Aktiv-Haltezeit"
     },
     "title": "Ollama"
-  },
-  "onboarding": {
-    "privacy": {
-      "accept_and_continue": "[to be translated]:Accept and Continue",
-      "notice": "Durch die Fortsetzung bestätigen Sie, dass Sie gelesen haben und zustimmen",
-      "period": ".",
-      "policy": "Datenschutzerklärung"
-    },
-    "select_model": {
-      "change_later": "Sie können dies jederzeit in den Einstellungen ändern.",
-      "start": "Loslegen",
-      "subtitle": "Standardmodell für jedes Szenario auswählen",
-      "title": "Wählen Sie Ihre Standardmodelle"
-    },
-    "skip": "Überspringen",
-    "welcome": {
-      "or_continue_with": "ODER WEITER MIT",
-      "other_provider": "Andere Anbieter auswählen",
-      "select_other_provider": "Wählen Sie einen anderen Anbieter",
-      "setup_hint": "Bitte konfigurieren Sie mindestens einen Anbieter für die beste Erfahrung.",
-      "subtitle": "Genießen Sie erstklassige KI-Dienste mit Ihren eigenen Anbietern",
-      "title": "Willkommen bei Cherry Chat"
-    }
   },
   "openclaw": {
     "checking_installation": "Überprüfe OpenClaw-Installation...",
@@ -4039,18 +3965,9 @@
       "updateNotAvailable": "Ihre Software ist bereits auf dem neuesten Stand"
     },
     "advanced": {
-      "auto_switch_to_topics": "Automatisch zu Themenansicht wechseln",
       "title": "Erweiterte Einstellungen"
     },
     "assistant": {
-      "icon": {
-        "type": {
-          "emoji": "Emoji",
-          "label": "Modellsymboltyp",
-          "model": "Modellsymbol",
-          "none": "Nicht anzeigen"
-        }
-      },
       "label": "Standardassistent",
       "model_params": "Modellparameter",
       "title": "Standardassistent"
@@ -4702,14 +4619,6 @@
         "select": "Schriftart auswählen",
         "title": "Schriftart-Einstellungen"
       },
-      "navbar": {
-        "position": {
-          "label": "Navigationsleistenposition",
-          "left": "Links",
-          "top": "Oben"
-        },
-        "title": "Navigationsleisten-Einstellungen"
-      },
       "sidebar": {
         "chat": {
           "hiddenMessage": "Assistent ist Basisfunktion, kann nicht ausgeblendet werden"
@@ -5265,9 +5174,6 @@
       "provider_key_overridden": "API-Schlüssel für {{provider}} erfolgreich aktualisiert",
       "provider_key_override_confirm": "{{provider}} hat bereits denselben API-Schlüssel, der überschrieben wird?",
       "provider_name": "Dienstanbietername",
-      "quick_assistant_default_tag": "Standard",
-      "quick_assistant_model": "Schnellassistent-Modell",
-      "quick_assistant_selection": "Assistent auswählen",
       "quick_model": {
         "description": "Modell für einfache Aufgaben wie Themenbenennung und Keyword-Extraktion",
         "label": "Schnellmodell",
@@ -5282,9 +5188,7 @@
       "translate_model": "Übersetzungsmodell",
       "translate_model_description": "Modell für Übersetzungsdienst",
       "translate_model_prompt_message": "Bitte Übersetzungsmodell-Prompt eingeben",
-      "translate_model_prompt_title": "Übersetzungsmodell-Prompt",
-      "use_assistant": "Assistent verwenden",
-      "use_model": "Standardmodell"
+      "translate_model_prompt_title": "Übersetzungsmodell-Prompt"
     },
     "moresetting": {
       "check": {
@@ -5606,13 +5510,6 @@
       },
       "tip": "Unterstützt Fuzzy-Matching (*.test.com, 192.168.0.0/16)"
     },
-    "quickAssistant": {
-      "click_tray_to_show": "Klicken auf Tray-Symbol zum Starten",
-      "enable_quick_assistant": "Schnellassistent aktivieren",
-      "read_clipboard_at_startup": "Zwischenablage beim Start lesen",
-      "title": "Schnellassistent",
-      "use_shortcut_to_show": "Rechtsklick auf Tray-Icon oder Shortcut zum Starten"
-    },
     "quickPanel": {
       "back": "Zurück",
       "close": "Schließen",
@@ -5623,20 +5520,6 @@
       "page": "Seite umblättern",
       "select": "Auswählen",
       "title": "Schnellmenü"
-    },
-    "quickPhrase": {
-      "add": "Phrase hinzufügen",
-      "assistant": "Assistenten-Phrasen",
-      "contentLabel": "Inhalt",
-      "contentPlaceholder": "Bitte Phrase-Inhalt eingeben, unterstützt Variablenverwendung, dann Tab-Taste zum schnellen Navigieren zu Variablen für Bearbeitung. Z.B.:\nPlanen Sie eine Route von ${from} nach ${to} und senden Sie sie an ${email}",
-      "delete": "Phrase löschen",
-      "deleteConfirm": "Gelöschte Phrase kann nicht wiederhergestellt werden. Fortfahren?",
-      "edit": "Phrase bearbeiten",
-      "global": "Globale Phrasen",
-      "locationLabel": "Position hinzufügen",
-      "title": "Schnellphrasen",
-      "titleLabel": "Titel",
-      "titlePlaceholder": "Bitte Phrasentitel eingeben"
     },
     "scheduledTasks": {
       "description": "Verwalten Sie geplante Aufgaben über alle Agents hinweg. Aufgaben werden automatisch nach dem konfigurierten Zeitplan ausgeführt.",
@@ -5656,7 +5539,6 @@
       "enabled": "Aktivieren",
       "exit_fullscreen": "Vollbildmodus beenden",
       "label": "Taste",
-      "mini_window": "Schnellassistent",
       "new_topic": "Neues Thema",
       "press_shortcut": "Shortcut drücken",
       "rename_topic": "Thema umbenennen",
@@ -5865,17 +5747,6 @@
         "title": "Websuche",
         "url_invalid": "Ungültige URL eingegeben",
         "url_required": "URL eingeben"
-      }
-    },
-    "topic": {
-      "pin_to_top": "Thema anpinnen",
-      "position": {
-        "label": "Themenposition",
-        "left": "Links",
-        "right": "Rechts"
-      },
-      "show": {
-        "time": "Themenzeit anzeigen"
       }
     },
     "translate": {
@@ -6137,7 +6008,6 @@
   },
   "tray": {
     "quit": "Beenden",
-    "show_mini_window": "Schnellassistent",
     "show_window": "Fenster anzeigen"
   },
   "update": {

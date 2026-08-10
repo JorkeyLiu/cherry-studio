@@ -59,6 +59,9 @@ export type UserTheme = {
 export interface SettingsState {
   showAssistants: boolean
   showTopics: boolean
+  /** @deprecated LOCK-007: the tag-based assistant view switching is removed;
+   *  the assistant list always renders in list form. Inert persisted field
+   *  kept for historical data compatibility. */
   assistantsTabSortType: AssistantsSortType
   sendMessageShortcut: SendMessageShortcut
   language: LanguageVarious
@@ -80,12 +83,24 @@ export interface SettingsState {
   userTheme: UserTheme
   windowStyle: 'transparent' | 'opaque'
   fontSize: number
+  /** @deprecated LOCK-002/003: fixed product behavior — topics always render on
+   *  the right. Inert persisted field kept for historical data compatibility;
+   *  current runtime no longer honors it. */
   topicPosition: 'left' | 'right'
+  /** @deprecated LOCK-002/003: topic time is always shown. Inert persisted
+   *  field kept for historical data compatibility. */
   showTopicTime: boolean
+  /** @deprecated LOCK-002/003: pinned topics always sort to the top. Inert
+   *  persisted field kept for historical data compatibility. */
   pinTopicsToTop: boolean
+  /** @deprecated LOCK-002/003: assistant avatars always use Emoji. Inert
+   *  persisted field kept for historical data compatibility. */
   assistantIconType: AssistantIconType
   pasteLongTextAsFile: boolean
   pasteLongTextThreshold: number
+  /** @deprecated LOCK-002/003: auto-switch to topic sidebar was tied to the
+   *  removed left-topic layout. Inert persisted field kept for historical data
+   *  compatibility. */
   clickAssistantToShowTopic: boolean
   autoCheckUpdate: boolean
   testPlan: boolean
@@ -152,8 +167,8 @@ export interface SettingsState {
     visible: SidebarIcon[]
     disabled: SidebarIcon[]
   }
-  narrowMode: boolean
-  // QuickAssistant
+  /** @deprecated LOCK-006: Quick Assistant removed. Inert persisted fields kept
+   *  for historical data compatibility; no runtime consumer remains. */
   enableQuickAssistant: boolean
   clickTrayToShowQuickAssistant: boolean
   multiModelMessageStyle: MultiModelMessageStyle
@@ -236,7 +251,8 @@ export interface SettingsState {
   s3: S3Config
   // Developer mode
   enableDeveloperMode: boolean
-  // UI
+  /** @deprecated LOCK-002/003: navigation always renders on the left. Inert
+   *  persisted field kept for historical data compatibility. */
   navbarPosition: 'left' | 'top'
   // API Server
   apiServer: ApiServerConfig
@@ -341,7 +357,6 @@ export const initialState: SettingsState = {
     visible: DEFAULT_SIDEBAR_ICONS,
     disabled: []
   },
-  narrowMode: false,
   enableQuickAssistant: false,
   clickTrayToShowQuickAssistant: false,
   readClipboardAtStartup: true,
@@ -462,9 +477,6 @@ const settingsSlice = createSlice({
     toggleShowTopics: (state) => {
       state.showTopics = !state.showTopics
     },
-    setAssistantsTabSortType: (state, action: PayloadAction<AssistantsSortType>) => {
-      state.assistantsTabSortType = action.payload
-    },
     setSendMessageShortcut: (state, action: PayloadAction<SendMessageShortcut>) => {
       state.sendMessageShortcut = action.payload
     },
@@ -524,18 +536,6 @@ const settingsSlice = createSlice({
     },
     setWindowStyle: (state, action: PayloadAction<'transparent' | 'opaque'>) => {
       state.windowStyle = action.payload
-    },
-    setTopicPosition: (state, action: PayloadAction<'left' | 'right'>) => {
-      state.topicPosition = action.payload
-    },
-    setShowTopicTime: (state, action: PayloadAction<boolean>) => {
-      state.showTopicTime = action.payload
-    },
-    setPinTopicsToTop: (state, action: PayloadAction<boolean>) => {
-      state.pinTopicsToTop = action.payload
-    },
-    setAssistantIconType: (state, action: PayloadAction<AssistantIconType>) => {
-      state.assistantIconType = action.payload
     },
     setPasteLongTextAsFile: (state, action: PayloadAction<boolean>) => {
       state.pasteLongTextAsFile = action.payload
@@ -694,18 +694,6 @@ const settingsSlice = createSlice({
         state.sidebarIcons.disabled = action.payload.disabled
       }
     },
-    setNarrowMode: (state, action: PayloadAction<boolean>) => {
-      state.narrowMode = action.payload
-    },
-    setClickTrayToShowQuickAssistant: (state, action: PayloadAction<boolean>) => {
-      state.clickTrayToShowQuickAssistant = action.payload
-    },
-    setEnableQuickAssistant: (state, action: PayloadAction<boolean>) => {
-      state.enableQuickAssistant = action.payload
-    },
-    setReadClipboardAtStartup: (state, action: PayloadAction<boolean>) => {
-      state.readClipboardAtStartup = action.payload
-    },
     setMultiModelMessageStyle: (state, action: PayloadAction<'horizontal' | 'vertical' | 'fold' | 'grid'>) => {
       state.multiModelMessageStyle = action.payload
     },
@@ -860,9 +848,6 @@ const settingsSlice = createSlice({
     setEnableDeveloperMode: (state, action: PayloadAction<boolean>) => {
       state.enableDeveloperMode = action.payload
     },
-    setNavbarPosition: (state, action: PayloadAction<'left' | 'top'>) => {
-      state.navbarPosition = action.payload
-    },
     // API Server actions
     setApiServerEnabled: (state, action: PayloadAction<boolean>) => {
       state.apiServer = {
@@ -901,7 +886,6 @@ export const {
   toggleShowAssistants,
   setShowTopics,
   toggleShowTopics,
-  setAssistantsTabSortType,
   setSendMessageShortcut,
   setLanguage,
   setTargetLanguage,
@@ -921,10 +905,6 @@ export const {
   setUserTheme,
   setFontSize,
   setWindowStyle,
-  setTopicPosition,
-  setShowTopicTime,
-  setPinTopicsToTop,
-  setAssistantIconType,
   setPasteLongTextAsFile,
   setAutoCheckUpdate,
   setTestPlan,
@@ -963,10 +943,6 @@ export const {
   setCustomCss,
   setTopicNamingPrompt,
   setSidebarIcons,
-  setNarrowMode,
-  setClickTrayToShowQuickAssistant,
-  setEnableQuickAssistant,
-  setReadClipboardAtStartup,
   setMultiModelMessageStyle,
   setNotionDatabaseID,
   setNotionApiKey,
@@ -1016,7 +992,6 @@ export const {
   setS3,
   setS3Partial,
   setEnableDeveloperMode,
-  setNavbarPosition,
   setAssistantsWidth,
   setTopicListWidth,
   setShowMessageOutline,

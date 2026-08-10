@@ -1,7 +1,6 @@
 import { isLinux, isMac, isWin } from '@renderer/config/constant'
 import { useFullscreen } from '@renderer/hooks/useFullscreen'
 import useNavBackgroundColor from '@renderer/hooks/useNavBackgroundColor'
-import { useNavbarPosition } from '@renderer/hooks/useSettings'
 import type { FC, PropsWithChildren } from 'react'
 import type { HTMLAttributes } from 'react'
 import styled from 'styled-components'
@@ -10,14 +9,11 @@ import WindowControls from '../WindowControls'
 
 type Props = PropsWithChildren & HTMLAttributes<HTMLDivElement>
 
+// LOCK-002: navigation always renders on the left — the app-level Navbar is
+// always rendered (the former top-navbar branch is removed).
 export const Navbar: FC<Props> = ({ children, ...props }) => {
   const backgroundColor = useNavBackgroundColor()
   const isFullscreen = useFullscreen()
-  const { isTopNavbar } = useNavbarPosition()
-
-  if (isTopNavbar) {
-    return null
-  }
 
   return (
     <NavbarContainer {...props} style={{ backgroundColor }} $isFullScreen={isFullscreen}>

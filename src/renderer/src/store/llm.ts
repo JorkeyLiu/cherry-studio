@@ -60,6 +60,8 @@ export interface LlmState {
   topicNamingModel?: Model
   quickModel?: Model
   translateModel?: Model
+  /** @deprecated LOCK-006: Quick Assistant removed. Inert persisted field kept
+   *  for historical data compatibility; no runtime consumer remains. */
   quickAssistantId: string
   settings: LlmSettings
 }
@@ -197,9 +199,6 @@ const llmSlice = createSlice({
       state.translateModel = action.payload.model
     },
 
-    setQuickAssistantId: (state, action: PayloadAction<string>) => {
-      state.quickAssistantId = action.payload
-    },
     setOllamaKeepAliveTime: (state, action: PayloadAction<number>) => {
       state.settings.ollama.keepAliveTime = action.payload
     },
@@ -264,7 +263,6 @@ export const {
   setDefaultModel,
   setQuickModel,
   setTranslateModel,
-  setQuickAssistantId,
   setOllamaKeepAliveTime,
   setLMStudioKeepAliveTime,
   setGPUStackKeepAliveTime,

@@ -19,7 +19,7 @@ import { useEffect } from 'react'
 
 import { useDefaultModel } from './useAssistant'
 import useFullScreenNotice from './useFullScreenNotice'
-import { useNavbarPosition, useSettings } from './useSettings'
+import { useSettings } from './useSettings'
 import useUpdateHandler from './useUpdateHandler'
 
 const logger = loggerService.withContext('useAppInit')
@@ -37,7 +37,6 @@ export function useAppInit() {
     enableDataCollection,
     privacyPolicyVersion
   } = useSettings()
-  const { isLeftNavbar } = useNavbarPosition()
   const { setDefaultModel, setQuickModel, setTranslateModel } = useDefaultModel()
   const avatar = useLiveQuery(() => db.settings.get('image://avatar'))
   const { theme } = useTheme()
@@ -131,7 +130,7 @@ export function useAppInit() {
     const isMacTransparentWindow = windowStyle === 'transparent' && isMac
 
     window.root.style.background = isMacTransparentWindow ? 'var(--navbar-background-mac)' : 'var(--navbar-background)'
-  }, [windowStyle, theme, isLeftNavbar])
+  }, [windowStyle, theme])
 
   useEffect(() => {
     if (isLocalAi) {

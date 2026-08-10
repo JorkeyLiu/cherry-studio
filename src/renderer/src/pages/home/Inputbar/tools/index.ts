@@ -4,7 +4,6 @@
 import './attachmentTool'
 import './mentionModelsTool'
 import './newTopicTool'
-import './quickPhrasesTool'
 import './thinkingTool'
 import './webSearchTool'
 import './urlContextTool'

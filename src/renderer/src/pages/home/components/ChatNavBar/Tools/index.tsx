@@ -1,17 +1,7 @@
 import EditModeToggle from '@renderer/components/EditModeToggle'
 import { HStack } from '@renderer/components/Layout'
-import NavbarIcon from '@renderer/components/NavbarIcon'
-import SearchPopup from '@renderer/components/Popups/SearchPopup'
-import { modelGenerating } from '@renderer/hooks/useRuntime'
-import { useNavbarPosition, useSettings } from '@renderer/hooks/useSettings'
-import { useShowTopics } from '@renderer/hooks/useStore'
-import { useAppDispatch, useAppSelector } from '@renderer/store'
-import { setNarrowMode } from '@renderer/store/settings'
+import { useAppSelector } from '@renderer/store'
 import type { Assistant } from '@renderer/types'
-import { Tooltip } from 'antd'
-import { PanelLeftClose, PanelRightClose, Search } from 'lucide-react'
-import { useTranslation } from 'react-i18next'
-import { styled } from 'styled-components'
 
 import SettingsButton from './SettingsButton'
 
@@ -19,59 +9,17 @@ interface ToolsProps {
   assistant?: Assistant
 }
 
+// LOCK-002/008: the top-navbar branches (narrow-mode toggle, search, topic
+// panel toggle) are removed with the fixed left-nav layout and narrowMode.
 const Tools = ({ assistant }: ToolsProps) => {
-  const { t } = useTranslation()
-  const { showTopics, toggleShowTopics } = useShowTopics()
-  const { isTopNavbar } = useNavbarPosition()
-  const { topicPosition, narrowMode } = useSettings()
-  const dispatch = useAppDispatch()
   const activeTopicId = useAppSelector((state) => state.runtime.chat.activeTopic?.id)
-
-  const handleNarrowModeToggle = async () => {
-    await modelGenerating()
-    dispatch(setNarrowMode(!narrowMode))
-  }
 
   return (
     <HStack alignItems="center" gap={8}>
       {activeTopicId && <EditModeToggle />}
       <SettingsButton assistant={assistant} />
-      {isTopNavbar && (
-        <Tooltip title={t('navbar.expand')} mouseEnterDelay={0.8}>
-          <NarrowIcon onClick={handleNarrowModeToggle}>
-            <i className="iconfont icon-icon-adaptive-width"></i>
-          </NarrowIcon>
-        </Tooltip>
-      )}
-      {isTopNavbar && (
-        <Tooltip title={t('chat.assistant.search.placeholder')} mouseEnterDelay={0.8}>
-          <NavbarIcon onClick={() => SearchPopup.show()}>
-            <Search size={18} />
-          </NavbarIcon>
-        </Tooltip>
-      )}
-      {isTopNavbar && topicPosition === 'right' && !showTopics && (
-        <Tooltip title={t('navbar.show_sidebar')} mouseEnterDelay={2}>
-          <NavbarIcon onClick={toggleShowTopics}>
-            <PanelLeftClose size={18} />
-          </NavbarIcon>
-        </Tooltip>
-      )}
-      {isTopNavbar && topicPosition === 'right' && showTopics && (
-        <Tooltip title={t('navbar.hide_sidebar')} mouseEnterDelay={2}>
-          <NavbarIcon onClick={toggleShowTopics}>
-            <PanelRightClose size={18} />
-          </NavbarIcon>
-        </Tooltip>
-      )}
     </HStack>
   )
 }
-
-const NarrowIcon = styled(NavbarIcon)`
-  @media (max-width: 1000px) {
-    display: none;
-  }
-`
 
 export default Tools

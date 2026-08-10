@@ -163,7 +163,6 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/renderer/index.html'),
-          miniWindow: resolve(__dirname, 'src/renderer/miniWindow.html'),
           traceWindow: resolve(__dirname, 'src/renderer/traceWindow.html'),
           chatImport: resolve(__dirname, 'src/renderer/src/windows/chatImport/chatImport.html')
         },

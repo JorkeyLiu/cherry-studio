@@ -1,5 +1,5 @@
 import { DraggableList } from '@renderer/components/DraggableList'
-import type { Assistant, AssistantsSortType } from '@renderer/types'
+import type { Assistant } from '@renderer/types'
 import type { FC } from 'react'
 import { useCallback } from 'react'
 
@@ -8,7 +8,6 @@ import AssistantItem from './AssistantItem'
 interface AssistantListProps {
   items: Assistant[]
   activeAssistantId: string
-  sortBy: AssistantsSortType
   onReorder: (newList: Assistant[]) => void
   onDragStart: () => void
   onDragEnd: () => void
@@ -17,7 +16,6 @@ interface AssistantListProps {
   addPreset: (assistant: Assistant) => void
   copyAssistant: (assistant: Assistant) => void
   onCreateDefaultAssistant: () => void
-  handleSortByChange: (sortType: AssistantsSortType) => void
   sortByPinyinAsc: () => void
   sortByPinyinDesc: () => void
 }
@@ -26,7 +24,6 @@ export const AssistantList: FC<AssistantListProps> = (props) => {
   const {
     items,
     activeAssistantId,
-    sortBy,
     onReorder,
     onDragStart,
     onDragEnd,
@@ -35,7 +32,6 @@ export const AssistantList: FC<AssistantListProps> = (props) => {
     addPreset,
     copyAssistant,
     onCreateDefaultAssistant,
-    handleSortByChange,
     sortByPinyinAsc,
     sortByPinyinDesc
   } = props
@@ -47,13 +43,11 @@ export const AssistantList: FC<AssistantListProps> = (props) => {
           key={`assistant-${assistant.id}`}
           assistant={assistant}
           isActive={assistant.id === activeAssistantId}
-          sortBy={sortBy}
           onSwitch={onAssistantSwitch}
           onDelete={onAssistantDelete}
           addPreset={addPreset}
           copyAssistant={copyAssistant}
           onCreateDefaultAssistant={onCreateDefaultAssistant}
-          handleSortByChange={handleSortByChange}
           sortByPinyinAsc={sortByPinyinAsc}
           sortByPinyinDesc={sortByPinyinDesc}
         />
@@ -61,13 +55,11 @@ export const AssistantList: FC<AssistantListProps> = (props) => {
     },
     [
       activeAssistantId,
-      sortBy,
       onAssistantSwitch,
       onAssistantDelete,
       addPreset,
       copyAssistant,
       onCreateDefaultAssistant,
-      handleSortByChange,
       sortByPinyinAsc,
       sortByPinyinDesc
     ]

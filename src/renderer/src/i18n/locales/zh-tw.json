@@ -788,13 +788,6 @@
     "edit": {
       "title": "編輯助手"
     },
-    "icon": {
-      "type": "助手圖示"
-    },
-    "list": {
-      "showByList": "列表顯示",
-      "showByTags": "標籤顯示"
-    },
     "presets": {
       "add": {
         "button": "新增到助手",
@@ -964,18 +957,6 @@
         "label": "工具呼叫方式",
         "prompt": "提示詞"
       }
-    },
-    "tags": {
-      "add": "新增標籤",
-      "delete": "刪除標籤",
-      "deleteConfirm": "確定要刪除這個標籤嗎？",
-      "manage": "標籤管理",
-      "modify": "修改標籤",
-      "none": "暫無標籤",
-      "settings": {
-        "title": "標籤設定"
-      },
-      "untagged": "未分組"
     },
     "title": "助手"
   },
@@ -2744,37 +2725,6 @@
     "xiaoyi": "小藝",
     "zhihu": "知乎直答"
   },
-  "miniwindow": {
-    "alert": {
-      "google_login": "提示：若 Google 登入時顯示「不受信任的瀏覽器」，請先在小程式清單中的 Google 小程式完成帳號登入，再到其他小程式使用 Google 登入。"
-    },
-    "clipboard": {
-      "empty": "剪貼簿為空"
-    },
-    "feature": {
-      "chat": "回答此問題",
-      "explanation": "解釋說明",
-      "summary": "內容總結",
-      "translate": "文字翻譯"
-    },
-    "footer": {
-      "backspace_clear": "按 Backspace 清空",
-      "copy_last_message": "按 C 鍵複製",
-      "esc": "按 ESC {{action}}",
-      "esc_back": "回傳",
-      "esc_close": "關閉視窗",
-      "esc_pause": "暫停"
-    },
-    "input": {
-      "placeholder": {
-        "empty": "詢問 {{model}} 取得幫助...",
-        "title": "你想對下方文字做什麼"
-      }
-    },
-    "tooltip": {
-      "pin": "視窗置頂"
-    }
-  },
   "models": {
     "add_parameter": "新增參數",
     "all": "全部",
@@ -2836,7 +2786,6 @@
     }
   },
   "navbar": {
-    "expand": "伸縮對話框",
     "hide_sidebar": "隱藏側邊欄",
     "show_sidebar": "顯示側邊欄",
     "window": {
@@ -3007,29 +2956,6 @@
       "title": "保持活躍時間"
     },
     "title": "Ollama"
-  },
-  "onboarding": {
-    "privacy": {
-      "accept_and_continue": "同意並繼續",
-      "notice": "繼續即表示你已閱讀並同意",
-      "period": "。",
-      "policy": "隱私政策"
-    },
-    "select_model": {
-      "change_later": "您可以隨時在設定中更改此項目",
-      "start": "開始使用",
-      "subtitle": "為每個情境選擇預設模型",
-      "title": "選擇您的預設模型"
-    },
-    "skip": "跳過",
-    "welcome": {
-      "or_continue_with": "或繼續使用",
-      "other_provider": "選擇其他供應商",
-      "select_other_provider": "選擇其他供應商",
-      "setup_hint": "請至少設定一個提供者以獲得最佳體驗",
-      "subtitle": "設定你自己的服務商，享受頂尖 AI 服務",
-      "title": "歡迎來到 Cherry Chat"
-    }
   },
   "openclaw": {
     "checking_installation": "正在檢查 OpenClaw 安裝狀態...",
@@ -4039,18 +3965,9 @@
       "updateNotAvailable": "您正在使用最新版本"
     },
     "advanced": {
-      "auto_switch_to_topics": "自動切換到話題",
       "title": "進階設定"
     },
     "assistant": {
-      "icon": {
-        "type": {
-          "emoji": "Emoji 表情",
-          "label": "模型圖示類型",
-          "model": "模型圖示",
-          "none": "不顯示"
-        }
-      },
       "label": "預設助手",
       "model_params": "模型參數",
       "title": "預設助手"
@@ -4702,14 +4619,6 @@
         "select": "選擇字型",
         "title": "字型設定"
       },
-      "navbar": {
-        "position": {
-          "label": "導覽列位置",
-          "left": "左側",
-          "top": "頂端"
-        },
-        "title": "導覽列設定"
-      },
       "sidebar": {
         "chat": {
           "hiddenMessage": "助手是基礎功能，不支援隱藏"
@@ -5265,9 +5174,6 @@
       "provider_key_overridden": "成功更新 {{provider}} 的 API 金鑰",
       "provider_key_override_confirm": "{{provider}} 已存在相同 API 金鑰，是否覆蓋？",
       "provider_name": "提供者名稱",
-      "quick_assistant_default_tag": "預設",
-      "quick_assistant_model": "快捷助手模型",
-      "quick_assistant_selection": "選擇助手",
       "quick_model": {
         "description": "用於話題命名、搜尋關鍵字提煉等簡單任務的模型",
         "label": "快速模型",
@@ -5282,9 +5188,7 @@
       "translate_model": "翻譯模型",
       "translate_model_description": "翻譯服務使用的模型",
       "translate_model_prompt_message": "請輸入翻譯模型提示詞",
-      "translate_model_prompt_title": "翻譯模型提示詞",
-      "use_assistant": "使用助手",
-      "use_model": "預設模型"
+      "translate_model_prompt_title": "翻譯模型提示詞"
     },
     "moresetting": {
       "check": {
@@ -5606,13 +5510,6 @@
       },
       "tip": "支援模糊比對（*.test.com，192.168.0.0/16）"
     },
-    "quickAssistant": {
-      "click_tray_to_show": "點選工具列圖示啟動",
-      "enable_quick_assistant": "啟用快捷助手",
-      "read_clipboard_at_startup": "啟動時讀取剪貼簿",
-      "title": "快捷助手",
-      "use_shortcut_to_show": "右鍵點選工具列圖示或使用快捷鍵啟動"
-    },
     "quickPanel": {
       "back": "後退",
       "close": "關閉",
@@ -5623,20 +5520,6 @@
       "page": "翻頁",
       "select": "選擇",
       "title": "快捷選單"
-    },
-    "quickPhrase": {
-      "add": "新增短語",
-      "assistant": "助手提示詞",
-      "contentLabel": "內容",
-      "contentPlaceholder": "請輸入短語內容，支援使用變數，然後按 Tab 鍵可以快速定位到變數進行修改。例如：\n幫我規劃從 ${from} 到 ${to} 的行程，然後傳送到 ${email}",
-      "delete": "刪除短語",
-      "deleteConfirm": "刪除後無法復原，是否繼續？",
-      "edit": "編輯短語",
-      "global": "全域快速短語",
-      "locationLabel": "新增位置",
-      "title": "快捷短語",
-      "titleLabel": "標題",
-      "titlePlaceholder": "請輸入短語標題"
     },
     "scheduledTasks": {
       "description": "管理所有代理的排程任務。任務將依設定好的排程自動執行。",
@@ -5656,7 +5539,6 @@
       "enabled": "啟用",
       "exit_fullscreen": "離開全螢幕",
       "label": "按鍵",
-      "mini_window": "快捷助手",
       "new_topic": "新增話題",
       "press_shortcut": "按下快捷鍵",
       "rename_topic": "重新命名話題",
@@ -5865,17 +5747,6 @@
         "title": "網路搜尋",
         "url_invalid": "輸入了無效的 URL",
         "url_required": "需要輸入 URL"
-      }
-    },
-    "topic": {
-      "pin_to_top": "固定話題置頂",
-      "position": {
-        "label": "話題位置",
-        "left": "左側",
-        "right": "右側"
-      },
-      "show": {
-        "time": "顯示話題時間"
       }
     },
     "translate": {
@@ -6137,7 +6008,6 @@
   },
   "tray": {
     "quit": "結束",
-    "show_mini_window": "快捷助手",
     "show_window": "顯示視窗"
   },
   "update": {

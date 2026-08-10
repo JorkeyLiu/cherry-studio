@@ -5,7 +5,6 @@ export enum QuickPanelReservedSymbol {
   File = 'file',
   KnowledgeBase = '#',
   MentionModels = '@',
-  QuickPhrases = 'quick-phrases',
   Thinking = 'thinking',
   WebSearch = '?',
   Mcp = 'mcp',

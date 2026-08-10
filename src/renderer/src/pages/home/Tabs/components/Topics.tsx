@@ -12,7 +12,6 @@ import { useAssistant, useAssistants } from '@renderer/hooks/useAssistant'
 import { useInPlaceEdit } from '@renderer/hooks/useInPlaceEdit'
 import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
 import { modelGenerating } from '@renderer/hooks/useRuntime'
-import { useSettings } from '@renderer/hooks/useSettings'
 import { finishTopicRenaming, startTopicRenaming, TopicManager } from '@renderer/hooks/useTopic'
 import { fetchMessagesSummary } from '@renderer/services/ApiService'
 import { getDefaultTopic } from '@renderer/services/AssistantService'
@@ -41,6 +40,7 @@ import {
   exportTopicToNotion,
   topicToMarkdown
 } from '@renderer/utils/export'
+import { reorderTopicsForPin, sortTopicsPinnedFirst } from '@renderer/utils/sort'
 import type { MenuProps } from 'antd'
 import { Dropdown, Tooltip } from 'antd'
 import type { ItemType, MenuItemType } from 'antd/es/menu/interface'
@@ -52,7 +52,6 @@ import {
   FolderOpen,
   HelpCircle,
   ListChecks,
-  MenuIcon,
   NotebookPen,
   PackagePlus,
   PinIcon,
@@ -76,15 +75,15 @@ interface Props {
   assistant: Assistant
   activeTopic: Topic
   setActiveTopic: (topic: Topic) => void
-  position: 'left' | 'right'
 }
 
-export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, setActiveTopic, position }) => {
+// LOCK-002: topics always render on the right; topic time is always shown and
+// pinned topics always sort/stay at the top.
+export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, setActiveTopic }) => {
   const { t } = useTranslation()
   const { notesPath } = useNotesSettings()
   const { assistants } = useAssistants()
   const { assistant, addTopic, removeTopic, moveTopic, updateTopic, updateTopics } = useAssistant(_assistant.id)
-  const { showTopicTime, pinTopicsToTop, setTopicPosition, topicPosition } = useSettings()
 
   const logger = useMemo(() => loggerService.withContext('Topics'), [])
 
@@ -93,7 +92,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   const topicFulfilledQuery = useSelector((state: RootState) => state.messages.fulfilledByTopic)
   const newlyRenamedTopics = useSelector((state: RootState) => state.runtime.chat.newlyRenamedTopics)
 
-  const borderRadius = showTopicTime ? 12 : 'var(--list-item-border-radius)'
+  const borderRadius = 12
 
   const [deletingTopicId, setDeletingTopicId] = useState<string | null>(null)
   const deleteTimerRef = useRef<NodeJS.Timeout>(null)
@@ -258,38 +257,20 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         return
       }
 
-      // 只有当 pinTopicsToTop 开启时才重新排序话题。Reorder uses the already
-      // updated topic so the Redux state stays convergent with the pin.
-      if (pinTopicsToTop) {
-        let newIndex = 0
+      // LOCK-002: pinned topics always sort/stay at the top. Reorder uses the
+      // already updated topic so the Redux state stays convergent with the pin.
+      // The updated topic is excluded from the stale source groups, so it can
+      // never appear twice in the reordered list.
+      const reorderedTopics = reorderTopicsForPin(assistant.topics, updatedTopic)
+      updateTopics(reorderedTopics)
 
-        if (updatedTopic.pinned) {
-          // 固定话题：移到固定区域顶部
-          const pinnedTopics = assistant.topics.filter((t) => t.pinned && t.id !== updatedTopic.id)
-          const unpinnedTopics = assistant.topics.filter((t) => !t.pinned)
-
-          const reorderedTopics = [updatedTopic, ...pinnedTopics, ...unpinnedTopics]
-
-          newIndex = 0
-          updateTopics(reorderedTopics)
-        } else {
-          // 取消固定：将话题移到未固定话题的顶部
-          const pinnedTopics = assistant.topics.filter((t) => t.pinned)
-          const unpinnedTopics = assistant.topics.filter((t) => !t.pinned && t.id !== updatedTopic.id)
-
-          const reorderedTopics = [...pinnedTopics, updatedTopic, ...unpinnedTopics]
-
-          newIndex = pinnedTopics.length
-          updateTopics(reorderedTopics)
-        }
-
-        // 延迟滚动到话题位置（等待渲染完成）
-        setTimeout(() => {
-          listRef.current?.scrollToIndex(newIndex, { align: 'auto' })
-        }, 50)
-      }
+      // 延迟滚动到话题位置（等待渲染完成）
+      const newIndex = reorderedTopics.findIndex((t) => t.id === updatedTopic.id)
+      setTimeout(() => {
+        listRef.current?.scrollToIndex(newIndex, { align: 'auto' })
+      }, 50)
     },
-    [assistant.topics, logger, updateTopic, updateTopics, pinTopicsToTop]
+    [assistant.topics, logger, updateTopic, updateTopics]
   )
 
   const onDeleteTopic = useCallback(
@@ -466,23 +447,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         onClick: () => onClearMessages(topic)
       },
       {
-        label: t('settings.topic.position.label'),
-        key: 'topic-position',
-        icon: <MenuIcon size={14} />,
-        children: [
-          {
-            label: t('settings.topic.position.left'),
-            key: 'left',
-            onClick: () => setTopicPosition('left')
-          },
-          {
-            label: t('settings.topic.position.right'),
-            key: 'right',
-            onClick: () => setTopicPosition('right')
-          }
-        ]
-      },
-      {
         label: t('chat.topics.copy.title'),
         key: 'copy',
         icon: <CopyIcon size={14} />,
@@ -646,22 +610,12 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     setActiveTopic,
     onPinTopic,
     onClearMessages,
-    setTopicPosition,
     onMoveTopic,
     onDeleteTopic
   ])
 
-  // Sort topics based on pinned status if pinTopicsToTop is enabled
-  const sortedTopics = useMemo(() => {
-    if (pinTopicsToTop) {
-      return [...assistant.topics].sort((a, b) => {
-        if (a.pinned && !b.pinned) return -1
-        if (!a.pinned && b.pinned) return 1
-        return 0
-      })
-    }
-    return assistant.topics
-  }, [assistant.topics, pinTopicsToTop])
+  // LOCK-002: pinned topics always sort to the top.
+  const sortedTopics = useMemo(() => sortTopicsPinnedFirst(assistant.topics), [assistant.topics])
 
   // Filter topics based on search text (only in manage mode)
   // Supports: case-insensitive, space-separated keywords (all must match)
@@ -684,8 +638,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
       return keywords.every((keyword) => lowerName.includes(keyword))
     })
   }, [sortedTopics, deferredSearchText, isManageMode])
-
-  const singlealone = topicPosition === 'right' && position === 'right'
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
@@ -749,7 +701,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
                 onContextMenu={() => setTargetTopic(topic)}
                 className={classNames(
                   isActive && !isManageMode ? 'active' : '',
-                  singlealone ? 'singlealone' : '',
                   isManageMode && isSelected ? 'selected' : '',
                   isManageMode && !canSelect ? 'disabled' : ''
                 )}
@@ -833,9 +784,8 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
                     {fullTopicPrompt}
                   </TopicPromptText>
                 )}
-                {showTopicTime && (
-                  <TopicTime className="time">{dayjs(topic.createdAt).format('YYYY/MM/DD HH:mm')}</TopicTime>
-                )}
+                {/* LOCK-002: topic time is always shown */}
+                <TopicTime className="time">{dayjs(topic.createdAt).format('YYYY/MM/DD HH:mm')}</TopicTime>
               </TopicListItem>
             </Dropdown>
           )
@@ -927,15 +877,6 @@ const TopicListItem = styled.div`
       &:hover {
         color: var(--color-text-2);
       }
-    }
-  }
-  &.singlealone {
-    &:hover {
-      background-color: var(--color-background-soft);
-    }
-    &.active {
-      background-color: var(--color-background-mute);
-      box-shadow: none;
     }
   }
 

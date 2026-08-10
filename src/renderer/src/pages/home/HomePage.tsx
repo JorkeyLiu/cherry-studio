@@ -1,7 +1,7 @@
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import ResizableHandle from '@renderer/components/ResizableHandle'
 import { useAssistants } from '@renderer/hooks/useAssistant'
-import { useNavbarPosition, useSettings } from '@renderer/hooks/useSettings'
+import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowAssistants, useShowTopics } from '@renderer/hooks/useStore'
 import { useActiveTopic } from '@renderer/hooks/useTopic'
@@ -24,10 +24,10 @@ import HomeTabs from './Tabs'
 
 let _activeAssistant: Assistant
 
+// LOCK-002: navigation always renders on the left, topics always on the right.
 const HomePage: FC = () => {
   const { assistants } = useAssistants()
   const navigate = useNavigate()
-  const { isLeftNavbar } = useNavbarPosition()
 
   const location = useLocation()
   const state = location.state
@@ -36,8 +36,8 @@ const HomePage: FC = () => {
     state?.assistant || _activeAssistant || assistants[0]
   )
   const { activeTopic, setActiveTopic: _setActiveTopic } = useActiveTopic(activeAssistant?.id ?? '', state?.topic)
-  const { showAssistants, showTopics, topicPosition } = useSettings()
-  const { setShowAssistants, toggleShowAssistants } = useShowAssistants()
+  const { showAssistants, showTopics } = useSettings()
+  const { setShowAssistants } = useShowAssistants()
   const { toggleShowTopics } = useShowTopics()
   const dispatch = useDispatch()
   const lastTopicByAssistantRef = useRef<Record<string, string>>({})
@@ -52,11 +52,6 @@ const HomePage: FC = () => {
   _activeAssistant = activeAssistant
 
   useShortcut('toggle_show_assistants', () => {
-    if (topicPosition === 'right') {
-      toggleShowAssistants()
-      return
-    }
-
     if (!showAssistants) {
       setShowAssistants(true)
       requestAnimationFrame(() => {
@@ -69,20 +64,7 @@ const HomePage: FC = () => {
   })
 
   useShortcut('toggle_show_topics', () => {
-    if (topicPosition === 'right') {
-      toggleShowTopics()
-      return
-    }
-
-    if (!showAssistants) {
-      setShowAssistants(true)
-      requestAnimationFrame(() => {
-        void EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR)
-      })
-      return
-    }
-
-    void EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR)
+    toggleShowTopics()
   })
 
   const setActiveAssistant = useCallback(
@@ -128,26 +110,26 @@ const HomePage: FC = () => {
   }, [state])
 
   useEffect(() => {
-    const canMinimize = topicPosition == 'left' ? !showAssistants : !showAssistants && !showTopics
+    // LOCK-002: topics always render on the right; the window can shrink only
+    // when both side panels are hidden.
+    const canMinimize = !showAssistants && !showTopics
     void window.api.window.setMinimumSize(canMinimize ? SECOND_MIN_WINDOW_WIDTH : MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
 
     return () => {
       void window.api.window.resetMinimumSize()
     }
-  }, [showAssistants, showTopics, topicPosition])
+  }, [showAssistants, showTopics])
 
   return (
     <Container id="home-page">
-      {isLeftNavbar && (
-        <Navbar
-          activeAssistant={activeAssistant}
-          activeTopic={activeTopic}
-          setActiveTopic={setActiveTopic}
-          setActiveAssistant={setActiveAssistant}
-          position="left"
-        />
-      )}
-      <ContentContainer id={isLeftNavbar ? 'content-container' : undefined}>
+      <Navbar
+        activeAssistant={activeAssistant}
+        activeTopic={activeTopic}
+        setActiveTopic={setActiveTopic}
+        setActiveAssistant={setActiveAssistant}
+        position="left"
+      />
+      <ContentContainer id="content-container">
         <AnimatePresence initial={false}>
           {showAssistants && (
             <ErrorBoundary>
@@ -188,12 +170,7 @@ const Container = styled.div`
   display: flex;
   flex: 1;
   flex-direction: column;
-  [navbar-position='left'] & {
-    max-width: calc(100vw - var(--sidebar-width));
-  }
-  [navbar-position='top'] & {
-    max-width: 100vw;
-  }
+  max-width: calc(100vw - var(--sidebar-width));
 `
 
 const ContentContainer = styled.div`
@@ -201,10 +178,6 @@ const ContentContainer = styled.div`
   flex: 1;
   flex-direction: row;
   overflow: hidden;
-
-  [navbar-position='top'] & {
-    max-width: calc(100vw - 12px);
-  }
 `
 
 export default HomePage

@@ -32,12 +32,9 @@ const logger = loggerService.withContext('ProviderList')
 
 const BUTTON_WRAPPER_HEIGHT = 50
 
-interface ProviderListProps {
-  /** Whether in onboarding mode for new users */
-  isOnboarding?: boolean
-}
+interface ProviderListProps {}
 
-const ProviderList: FC<ProviderListProps> = ({ isOnboarding = false }) => {
+const ProviderList: FC<ProviderListProps> = () => {
   const [searchParams, setSearchParams] = useSearchParams()
   const providers = useAllProviders()
   const { updateProviders, addProvider, removeProvider, updateProvider } = useProviders()
@@ -427,7 +424,7 @@ const ProviderList: FC<ProviderListProps> = ({ isOnboarding = false }) => {
           </Button>
         </AddButtonWrapper>
       </ProviderListContainer>
-      <ProviderSetting providerId={selectedProvider.id} key={selectedProvider.id} isOnboarding={isOnboarding} />
+      <ProviderSetting providerId={selectedProvider.id} key={selectedProvider.id} />
     </Container>
   )
 }

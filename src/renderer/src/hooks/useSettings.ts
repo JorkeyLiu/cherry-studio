@@ -15,23 +15,19 @@
  * --------------------------------------------------------------------------
  */
 import store, { useAppDispatch, useAppSelector } from '@renderer/store'
-import type { AssistantIconType, SendMessageShortcut, SettingsState } from '@renderer/store/settings'
+import type { SendMessageShortcut, SettingsState } from '@renderer/store/settings'
 import {
-  setAssistantIconType,
   setAutoCheckUpdate as _setAutoCheckUpdate,
   setDisableHardwareAcceleration,
   setEnableDeveloperMode,
   setLaunchOnBoot,
   setLaunchToTray,
-  setNavbarPosition,
-  setPinTopicsToTop,
   setSendMessageShortcut as _setSendMessageShortcut,
   setSidebarIcons,
   setTargetLanguage,
   setTestChannel as _setTestChannel,
   setTestPlan as _setTestPlan,
   setTheme,
-  setTopicPosition,
   setTray as _setTray,
   setTrayOnClose,
   setUseSystemTitleBar as _setUseSystemTitleBar,
@@ -97,12 +93,6 @@ export function useSettings() {
     setTargetLanguage(targetLanguage: TranslateLanguageCode) {
       dispatch(setTargetLanguage(targetLanguage))
     },
-    setTopicPosition(topicPosition: 'left' | 'right') {
-      dispatch(setTopicPosition(topicPosition))
-    },
-    setPinTopicsToTop(pinTopicsToTop: boolean) {
-      dispatch(setPinTopicsToTop(pinTopicsToTop))
-    },
     updateSidebarIcons(icons: { visible: SidebarIcon[]; disabled: SidebarIcon[] }) {
       dispatch(setSidebarIcons(icons))
     },
@@ -111,9 +101,6 @@ export function useSettings() {
     },
     updateSidebarDisabledIcons(icons: SidebarIcon[]) {
       dispatch(setSidebarIcons({ disabled: icons }))
-    },
-    setAssistantIconType(assistantIconType: AssistantIconType) {
-      dispatch(setAssistantIconType(assistantIconType))
     },
     setDisableHardwareAcceleration(disableHardwareAcceleration: boolean) {
       dispatch(setDisableHardwareAcceleration(disableHardwareAcceleration))
@@ -154,16 +141,4 @@ export const useEnableDeveloperMode = () => {
 
 export const getEnableDeveloperMode = () => {
   return store.getState().settings.enableDeveloperMode
-}
-
-export const useNavbarPosition = () => {
-  const navbarPosition = useAppSelector((state) => state.settings.navbarPosition)
-  const dispatch = useAppDispatch()
-
-  return {
-    navbarPosition,
-    isLeftNavbar: navbarPosition === 'left',
-    isTopNavbar: navbarPosition === 'top',
-    setNavbarPosition: (position: 'left' | 'top') => dispatch(setNavbarPosition(position))
-  }
 }

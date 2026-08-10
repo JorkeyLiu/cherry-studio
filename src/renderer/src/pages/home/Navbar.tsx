@@ -1,12 +1,8 @@
 import { Navbar, NavbarCenter, NavbarLeft, NavbarRight } from '@renderer/components/app/Navbar'
 import { HStack } from '@renderer/components/Layout'
 import SearchPopup from '@renderer/components/Popups/SearchPopup'
-import { modelGenerating } from '@renderer/hooks/useRuntime'
-import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowAssistants, useShowTopics } from '@renderer/hooks/useStore'
-import { useAppDispatch } from '@renderer/store'
-import { setNarrowMode } from '@renderer/store/settings'
 import type { Assistant, Topic } from '@renderer/types'
 import { Tooltip } from 'antd'
 import { t } from 'i18next'
@@ -27,20 +23,15 @@ interface Props {
   position: 'left' | 'right'
 }
 
+// LOCK-002: navigation always renders on the left; topics always render on the
+// right and are toggled by the panel icon (narrowMode toggle removed, LOCK-008).
 const HeaderNavbar: FC<Props> = ({ activeAssistant, setActiveAssistant, activeTopic, setActiveTopic }) => {
   const { showAssistants, toggleShowAssistants } = useShowAssistants()
-  const { topicPosition, narrowMode } = useSettings()
   const { showTopics, toggleShowTopics } = useShowTopics()
-  const dispatch = useAppDispatch()
 
   useShortcut('search_message', () => {
     void SearchPopup.show()
   })
-
-  const handleNarrowModeToggle = async () => {
-    await modelGenerating()
-    dispatch(setNarrowMode(!narrowMode))
-  }
 
   const onShowAssistantsDrawer = () => {
     void AssistantsDrawer.show({
@@ -115,19 +106,14 @@ const HeaderNavbar: FC<Props> = ({ activeAssistant, setActiveAssistant, activeTo
               <Search size={18} />
             </NarrowIcon>
           </Tooltip>
-          <Tooltip title={t('navbar.expand')} mouseEnterDelay={0.8}>
-            <NarrowIcon onClick={handleNarrowModeToggle}>
-              <i className="iconfont icon-icon-adaptive-width"></i>
-            </NarrowIcon>
-          </Tooltip>
-          {topicPosition === 'right' && !showTopics && (
+          {!showTopics && (
             <Tooltip title={t('navbar.show_sidebar')} mouseEnterDelay={2}>
               <NavbarIcon onClick={toggleShowTopics}>
                 <PanelLeftClose size={18} />
               </NavbarIcon>
             </Tooltip>
           )}
-          {topicPosition === 'right' && showTopics && (
+          {showTopics && (
             <Tooltip title={t('navbar.hide_sidebar')} mouseEnterDelay={2}>
               <NavbarIcon onClick={toggleShowTopics}>
                 <PanelRightClose size={18} />

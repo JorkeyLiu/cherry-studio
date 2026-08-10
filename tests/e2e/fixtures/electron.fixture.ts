@@ -337,19 +337,11 @@ async function waitForMainElectronWindow(electronApp: ElectronApplication): Prom
 }
 
 /**
- * Bypass onboarding: click "Skip" button on the welcome page, then
- * set localStorage so future loads skip it too.
+ * LOCK-001: the first-launch onboarding gate is removed — fresh launches enter
+ * the main app directly. The legacy `onboarding-completed` localStorage flag is
+ * inert; kept as a no-op write for profile-format compatibility.
  */
 async function bypassOnboarding(page: Page): Promise<void> {
-  try {
-    const skipBtn = page.getByText('Skip', { exact: false })
-    await skipBtn.waitFor({ state: 'visible', timeout: 10000 })
-    await skipBtn.click()
-    await page.waitForTimeout(2000)
-  } catch {
-    // Already past onboarding
-  }
-
   await page.evaluate(() => {
     localStorage.setItem('onboarding-completed', 'true')
   })

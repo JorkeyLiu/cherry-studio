@@ -170,7 +170,7 @@ The fixture extends `@playwright/test` with:
    plus exact child basename equality (the fixture resolves the parent realpath so macOS
    `/var` → `/private/var` normalizes). If a `config.json` redirect ever pointed the app at
    live user data, the fixture throws a `LOCK-002 VIOLATION` before any mutation.
-2. **Onboarding bypass** — clicks Skip and marks onboarding complete.
+2. **Onboarding bypass** — the first-launch onboarding gate is removed (LOCK-001); the fixture writes the inert `onboarding-completed` flag only for profile-format compatibility.
 3. **Mock provider seed** — dispatches `llm/addProvider` (`mock-openai`) and sets
    `mock-model` as default/quick/translate model, then verifies the store state.
 4. **Home readiness, ChatDb IPC readiness, textarea readiness** — verified before the test

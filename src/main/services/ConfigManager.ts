@@ -32,8 +32,6 @@ export enum ConfigKeys {
   TrayOnClose = 'trayOnClose',
   ZoomFactor = 'ZoomFactor',
   Shortcuts = 'shortcuts',
-  ClickTrayToShowQuickAssistant = 'clickTrayToShowQuickAssistant',
-  EnableQuickAssistant = 'enableQuickAssistant',
   AutoUpdate = 'autoUpdate',
   TestPlan = 'testPlan',
   TestChannel = 'testChannel',
@@ -137,22 +135,6 @@ export class ConfigManager {
       ConfigKeys.Shortcuts,
       shortcuts.filter((shortcut) => shortcut.system)
     )
-  }
-
-  getClickTrayToShowQuickAssistant(): boolean {
-    return this.get<boolean>(ConfigKeys.ClickTrayToShowQuickAssistant, false)
-  }
-
-  setClickTrayToShowQuickAssistant(value: boolean) {
-    this.set(ConfigKeys.ClickTrayToShowQuickAssistant, value)
-  }
-
-  getEnableQuickAssistant(): boolean {
-    return this.get(ConfigKeys.EnableQuickAssistant, false)
-  }
-
-  setEnableQuickAssistant(value: boolean) {
-    this.setAndNotify(ConfigKeys.EnableQuickAssistant, value)
   }
 
   getAutoUpdate(): boolean {
