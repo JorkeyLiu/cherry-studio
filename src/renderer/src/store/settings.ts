@@ -58,7 +58,7 @@ export type UserTheme = {
 export interface SettingsState {
   showAssistants: boolean
   showTopics: boolean
-  /** @deprecated LOCK-007: the tag-based assistant view switching is removed;
+  /** @deprecated the tag-based assistant view switching is removed;
    *  the assistant list always renders in list form. Inert persisted field
    *  kept for historical data compatibility. */
   assistantsTabSortType: AssistantsSortType
@@ -70,6 +70,9 @@ export interface SettingsState {
   proxyBypassRules?: string
   userName: string
   userId: string
+  /** @deprecated The show-prompt control is removed from the UI and the Prompt
+   *  always renders. Inert persisted field kept for historical data
+   *  compatibility; current runtime no longer honors it. */
   showPrompt: boolean
   showMessageDivider: boolean
   launchOnBoot: boolean
@@ -80,31 +83,31 @@ export interface SettingsState {
   userTheme: UserTheme
   windowStyle: 'transparent' | 'opaque'
   fontSize: number
-  /** @deprecated LOCK-002/003: fixed product behavior — topics always render on
-   *  the right. Inert persisted field kept for historical data compatibility;
+  /** @deprecated fixed product behavior — topics always render on the right.
+   *  Inert persisted field kept for historical data compatibility;
    *  current runtime no longer honors it. */
   topicPosition: 'left' | 'right'
-  /** @deprecated LOCK-002/003: topic time is always shown. Inert persisted
-   *  field kept for historical data compatibility. */
+  /** @deprecated topic time is always shown. Inert persisted field kept for
+   *  historical data compatibility. */
   showTopicTime: boolean
-  /** @deprecated LOCK-002/003: pinned topics always sort to the top. Inert
-   *  persisted field kept for historical data compatibility. */
+  /** @deprecated pinned topics always sort to the top. Inert persisted field
+   *  kept for historical data compatibility. */
   pinTopicsToTop: boolean
-  /** @deprecated LOCK-002/003: assistant avatars always use Emoji. Inert
-   *  persisted field kept for historical data compatibility. */
+  /** @deprecated assistant avatars always use Emoji. Inert persisted field kept
+   *  for historical data compatibility. */
   assistantIconType: AssistantIconType
   pasteLongTextAsFile: boolean
   pasteLongTextThreshold: number
-  /** @deprecated LOCK-002/003: auto-switch to topic sidebar was tied to the
-   *  removed left-topic layout. Inert persisted field kept for historical data
+  /** @deprecated auto-switch to topic sidebar was tied to the removed
+   *  left-topic layout. Inert persisted field kept for historical data
    *  compatibility. */
   clickAssistantToShowTopic: boolean
   autoCheckUpdate: boolean
   testPlan: boolean
   testChannel: UpgradeChannel
   renderInputMessageAsMarkdown: boolean
-  /** @deprecated LOCK-107: code blocks use a fixed read-only viewer baseline;
-   *  code execution and the editable CodeMirror capability are removed. Inert
+  /** @deprecated code blocks use a fixed read-only viewer baseline; code
+   *  execution and the editable CodeMirror capability are removed. Inert
    *  persisted fields kept for historical data compatibility; migration 218
    *  removes them from persisted state. */
   codePreview: {
@@ -115,11 +118,11 @@ export interface SettingsState {
     themeLight: CodeStyleVarious
     themeDark: CodeStyleVarious
   }
-  /** @deprecated LOCK-105: message style is always bubble; the legacy tri-state
-   *  field is removed from persisted state by migration 218. */
+  /** @deprecated message style is always bubble; the legacy tri-state field is
+   *  removed from persisted state by migration 218. */
   foldDisplayMode: 'expanded' | 'compact'
-  /** @deprecated LOCK-105: conversation navigation is a boolean off/on toggle.
-   *  The legacy tri-state is migrated to boolean in migration 218. */
+  /** @deprecated conversation navigation is a boolean off/on toggle. The
+   *  legacy tri-state is migrated to boolean in migration 218. */
   messageNavigation: boolean
   // 数据目录设置
   skipBackupFile: boolean
@@ -146,14 +149,14 @@ export interface SettingsState {
     visible: SidebarIcon[]
     disabled: SidebarIcon[]
   }
-  /** @deprecated LOCK-006: Quick Assistant removed. Inert persisted fields kept
-   *  for historical data compatibility; no runtime consumer remains. */
+  /** @deprecated Quick Assistant removed. Inert persisted fields kept for
+   *  historical data compatibility; no runtime consumer remains. */
   enableQuickAssistant: boolean
   clickTrayToShowQuickAssistant: boolean
-  /** @deprecated LOCK-105: multi-model answer layout is always fold/tag mode.
-   *  The per-message `multiModelMessageStyle` field remains on the Message
-   *  schema for Cherry Studio import compatibility; this settings-level default
-   *  is removed (migration 218). */
+  /** @deprecated multi-model answer layout is always fold/tag mode. The
+   *  per-message `multiModelMessageStyle` field remains on the Message schema
+   *  for Cherry Studio import compatibility; this settings-level default is
+   *  removed (migration 218). */
   readClipboardAtStartup: boolean
   notionDatabaseID: string | null
   notionApiKey: string | null
@@ -233,8 +236,8 @@ export interface SettingsState {
   s3: S3Config
   // Developer mode
   enableDeveloperMode: boolean
-  /** @deprecated LOCK-002/003: navigation always renders on the left. Inert
-   *  persisted field kept for historical data compatibility. */
+  /** @deprecated navigation always renders on the left. Inert persisted field
+   *  kept for historical data compatibility. */
   navbarPosition: 'left' | 'top'
   // API Server
   apiServer: ApiServerConfig
@@ -290,9 +293,9 @@ export const initialState: SettingsState = {
     themeLight: 'auto',
     themeDark: 'auto'
   },
-  // LOCK-105/106/107: message style is always bubble, math is fixed to KaTeX,
-  // code blocks use the fixed read-only viewer baseline. The former
-  // configurable fields are removed (migration 218).
+  // Message style is always bubble, math is fixed to KaTeX, code blocks use
+  // the fixed read-only viewer baseline. The former configurable fields are
+  // removed (migration 218).
   foldDisplayMode: 'expanded',
   messageNavigation: false,
   skipBackupFile: false,

@@ -7,8 +7,7 @@ import {
   setFontSize,
   setInjectContextTimestamp,
   setMessageNavigation,
-  setShowMessageOutline,
-  setShowPrompt
+  setShowMessageOutline
 } from '@renderer/store/settings'
 import { Switch } from 'antd'
 import { Minus, Plus } from 'lucide-react'
@@ -17,16 +16,17 @@ import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 /**
- * LOCK-101/102/103: compact arrowless message-settings popover (≈272px wide),
- * opened from the navbar Settings2 button. Row order:
- *   1. message font size (stepper 12-22, step 1; clicking the value resets to 14)
- *   2. show prompt
- *   3. show message outline
- *   4. conversation navigation (boolean off/on)
- *   5. inject context timestamp
- *   6. confirm delete
- *   7. confirm regenerate
- * Boolean rows use small switches and changes apply immediately.
+ * Compact arrowless message-settings popover (≈272px wide, owned by the Popover
+ * root), opened from the navbar Settings2 button. Row order:
+ *   1. show message outline
+ *   2. conversation navigation (boolean off/on)
+ *   3. inject context timestamp
+ *   4. confirm delete
+ *   5. confirm regenerate
+ *   6. message font size (stepper 12-22, step 1; clicking the value resets to 14)
+ * Boolean rows use small switches and changes apply immediately. The show-prompt
+ * row is removed; the persisted `showPrompt` setting stays inert for data
+ * compatibility.
  */
 const MessageSettings: FC = () => {
   const { t } = useTranslation()
@@ -34,7 +34,6 @@ const MessageSettings: FC = () => {
 
   const {
     fontSize,
-    showPrompt,
     showMessageOutline,
     messageNavigation,
     injectContextTimestamp,
@@ -49,7 +48,52 @@ const MessageSettings: FC = () => {
   return (
     <Container>
       <SettingRow>
-        <SettingRowTitle>{t('settings.font_size.title')}</SettingRowTitle>
+        <RowTitle>{t('settings.messages.show_message_outline')}</RowTitle>
+        <Switch
+          size="small"
+          checked={showMessageOutline}
+          onChange={(checked) => dispatch(setShowMessageOutline(checked))}
+        />
+      </SettingRow>
+      <SettingDivider />
+      <SettingRow>
+        <RowTitle>{t('settings.messages.navigation.label')}</RowTitle>
+        <Switch
+          size="small"
+          checked={messageNavigation}
+          onChange={(checked) => dispatch(setMessageNavigation(checked))}
+        />
+      </SettingRow>
+      <SettingDivider />
+      <SettingRow>
+        <RowTitle>{t('settings.messages.inject_context_timestamp')}</RowTitle>
+        <Switch
+          size="small"
+          checked={injectContextTimestamp}
+          onChange={(checked) => dispatch(setInjectContextTimestamp(checked))}
+        />
+      </SettingRow>
+      <SettingDivider />
+      <SettingRow>
+        <RowTitle>{t('settings.messages.input.confirm_delete_message')}</RowTitle>
+        <Switch
+          size="small"
+          checked={confirmDeleteMessage}
+          onChange={(checked) => dispatch(setConfirmDeleteMessage(checked))}
+        />
+      </SettingRow>
+      <SettingDivider />
+      <SettingRow>
+        <RowTitle>{t('settings.messages.input.confirm_regenerate_message')}</RowTitle>
+        <Switch
+          size="small"
+          checked={confirmRegenerateMessage}
+          onChange={(checked) => dispatch(setConfirmRegenerateMessage(checked))}
+        />
+      </SettingRow>
+      <SettingDivider />
+      <SettingRow>
+        <RowTitle>{t('settings.font_size.title')}</RowTitle>
         <FontSizeStepper>
           <StepperButton type="button" onClick={decreaseFontSize} aria-label={t('common.decrease')}>
             <Minus size={12} />
@@ -66,68 +110,42 @@ const MessageSettings: FC = () => {
           </StepperButton>
         </FontSizeStepper>
       </SettingRow>
-      <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.messages.prompt')}</SettingRowTitle>
-        <Switch size="small" checked={showPrompt} onChange={(checked) => dispatch(setShowPrompt(checked))} />
-      </SettingRow>
-      <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.messages.show_message_outline')}</SettingRowTitle>
-        <Switch
-          size="small"
-          checked={showMessageOutline}
-          onChange={(checked) => dispatch(setShowMessageOutline(checked))}
-        />
-      </SettingRow>
-      <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.messages.navigation.label')}</SettingRowTitle>
-        <Switch
-          size="small"
-          checked={messageNavigation}
-          onChange={(checked) => dispatch(setMessageNavigation(checked))}
-        />
-      </SettingRow>
-      <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.messages.inject_context_timestamp')}</SettingRowTitle>
-        <Switch
-          size="small"
-          checked={injectContextTimestamp}
-          onChange={(checked) => dispatch(setInjectContextTimestamp(checked))}
-        />
-      </SettingRow>
-      <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.messages.input.confirm_delete_message')}</SettingRowTitle>
-        <Switch
-          size="small"
-          checked={confirmDeleteMessage}
-          onChange={(checked) => dispatch(setConfirmDeleteMessage(checked))}
-        />
-      </SettingRow>
-      <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.messages.input.confirm_regenerate_message')}</SettingRowTitle>
-        <Switch
-          size="small"
-          checked={confirmRegenerateMessage}
-          onChange={(checked) => dispatch(setConfirmRegenerateMessage(checked))}
-        />
-      </SettingRow>
     </Container>
   )
 }
 
 const Container = styled.div`
-  width: 272px;
+  /* Fill the popover inner content (root width 272px minus antd inner
+     padding/border) instead of forcing a wider fixed box that would overflow
+     into a horizontal scrollbar. max-width guards against any outer width
+     change; width: 100% governs. */
+  width: 100%;
+  max-width: 272px;
+  box-sizing: border-box;
   padding: 8px 12px 12px;
   user-select: none;
+  overflow-x: clip;
 
   .ant-divider {
     margin: 8px 0;
   }
+
+  /* Controls keep their natural size when a long localized title wraps; the
+     title absorbs the shrink (RowTitle below). */
+  & .ant-switch {
+    flex-shrink: 0;
+  }
+`
+
+/* Scoped title wrapper — flex-grows into the row, may shrink below its content,
+   and breaks long unbroken localized tokens (`overflow-wrap: anywhere` also
+   lowers the min-content intrinsic size so wrapping actually happens inside the
+   flex row) instead of pushing the popup wider. */
+const RowTitle = styled(SettingRowTitle)`
+  flex: 1;
+  min-width: 0;
+  margin-right: 8px;
+  overflow-wrap: anywhere;
 `
 
 const FontSizeStepper = styled.div`
@@ -135,6 +153,7 @@ const FontSizeStepper = styled.div`
   flex-direction: row;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
 `
 
 const StepperButton = styled.button`

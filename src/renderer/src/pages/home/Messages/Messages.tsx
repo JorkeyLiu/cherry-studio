@@ -10,7 +10,6 @@ import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
 import { useMessageOperations, useTopicLoading, useTopicMessages } from '@renderer/hooks/useMessageOperations'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
-import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
@@ -137,7 +136,6 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   loadMoreMessages,
   registerMessageElement
 }) => {
-  const { showPrompt } = useSettings()
   const { t } = useTranslation()
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
@@ -294,7 +292,8 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           )}
         </InfiniteScroll>
 
-        {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
+        {/* Prompts always render; the persisted showPrompt setting is inert. */}
+        <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />
       </div>
       {isEditMode && <EditModeActionBar />}
     </MessagesContainer>
@@ -690,7 +689,7 @@ const Messages = ({
         newTopic.name = topic.name
 
         try {
-          // LOCK-533: the branch topic must exist in SQLite with its
+          // The branch topic must exist in SQLite with its
           // assistantId before it is exposed to Redux via addTopic below.
           await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id, newTopic.name)
         } catch (error) {
@@ -767,7 +766,7 @@ const Messages = ({
                 updatedAt: new Date().toISOString()
               }
 
-              // LOCK-002: Persist FIRST (SQLite via atomic thunk), THEN update Redux.
+              // Persist FIRST (SQLite via atomic thunk), THEN update Redux.
               // If persistence fails, Redux is untouched — editor can retry.
               // consumeFileCleanupResult is consumed inside updateMessageAndBlocksThunk
               // when blockIdsToDelete are non-empty; for block-only upserts the cleanup
@@ -775,7 +774,7 @@ const Messages = ({
               const cleanup = await dispatch(
                 updateMessageAndBlocksThunk(topic.id, { id: msgBlock.messageId }, [updatedBlock])
               )
-              // LOCK-001: Consume FileCleanupResult exactly once at the caller.
+              // Consume FileCleanupResult exactly once at the caller.
               await consumeFileCleanupResult(cleanup)
 
               // Redux AFTER successful SQLite persistence

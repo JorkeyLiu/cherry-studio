@@ -1,8 +1,8 @@
 /**
- * Focused tests for the input-settings popover (LOCK-109).
+ * Focused tests for the input-settings popover.
  *
  * Verifies:
- *  - the five rows render in the locked order;
+ *  - the five rows render in the specified order;
  *  - the paste-long-text threshold row appears only when paste-long-text is
  *    enabled (and is hidden otherwise);
  *  - toggles dispatch the corresponding actions.
@@ -71,13 +71,13 @@ vi.mock('@renderer/components/EditableNumber', () => ({
 
 import InputbarSettings from '../InputbarSettings'
 
-describe('InputbarSettings (LOCK-109)', () => {
+describe('InputbarSettings', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.useSettings.mockReturnValue({ ...mocks.defaultSettings })
   })
 
-  it('renders the five rows in the locked order with paste-long-text off', () => {
+  it('renders the five rows in the specified order with paste-long-text off', () => {
     render(<InputbarSettings />)
 
     const titles = screen.getAllByTestId('setting-row-title').map((el) => el.textContent)

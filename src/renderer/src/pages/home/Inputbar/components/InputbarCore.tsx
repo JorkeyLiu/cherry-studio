@@ -639,7 +639,7 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
           <BottomBar>
             <LeftSection>
               {leftToolbar}
-              {/* LOCK-109: input-toolbar divider + settings icon/button */}
+              {/* input-toolbar divider + settings icon/button */}
               <Divider type="vertical" style={{ margin: '0 6px' }} />
               <InputbarSettings />
             </LeftSection>

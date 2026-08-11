@@ -1,8 +1,9 @@
 /**
- * Focused tests for the message-settings popover (LOCK-101/102/103).
+ * Focused tests for the message-settings popover.
  *
  * Verifies:
- *  - the compact popover content renders all seven rows in the locked order;
+ *  - the compact popover content renders the six rows in order, with the
+ *    font-size row last and no show-prompt row;
  *  - boolean rows use switches and dispatch the corresponding actions;
  *  - the font-size stepper (12–22, step 1) dispatches on minus/plus and
  *    resets to 14 when the displayed value is activated;
@@ -17,7 +18,6 @@ const mocks = vi.hoisted(() => {
   const dispatch = vi.fn()
   const defaultSettings = {
     fontSize: 14,
-    showPrompt: true,
     showMessageOutline: false,
     messageNavigation: false,
     injectContextTimestamp: false,
@@ -68,43 +68,34 @@ vi.mock('lucide-react', () => ({
 
 import MessageSettings from '../MessageSettings'
 
-describe('MessageSettings (LOCK-102)', () => {
+describe('MessageSettings', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.useSettings.mockReturnValue({ ...mocks.defaultSettings })
   })
 
-  it('renders all seven rows in the locked order', () => {
+  it('renders the six rows in the specified order with font size last and no show-prompt row', () => {
     render(<MessageSettings />)
 
     const titles = screen.getAllByTestId('setting-row-title').map((el) => el.textContent)
     expect(titles).toEqual([
-      'settings.font_size.title',
-      'settings.messages.prompt',
       'settings.messages.show_message_outline',
       'settings.messages.navigation.label',
       'settings.messages.inject_context_timestamp',
       'settings.messages.input.confirm_delete_message',
-      'settings.messages.input.confirm_regenerate_message'
+      'settings.messages.input.confirm_regenerate_message',
+      'settings.font_size.title'
     ])
-  })
-
-  it('toggles showPrompt via a small switch and dispatches setShowPrompt', () => {
-    render(<MessageSettings />)
-
-    const switches = screen.getAllByTestId('switch')
-    // Row 2 is show prompt — the first switch (row 1 is the font-size stepper).
-    fireEvent.click(switches[0])
-
-    expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'settings/setShowPrompt', payload: false })
+    // The show-prompt row is removed from the UI.
+    expect(titles).not.toContain('settings.messages.prompt')
   })
 
   it('toggles conversation navigation and dispatches setMessageNavigation (boolean)', () => {
     render(<MessageSettings />)
 
     const switches = screen.getAllByTestId('switch')
-    // Row 4 is conversation navigation — the third switch.
-    fireEvent.click(switches[2])
+    // Row 2 is conversation navigation — the second switch.
+    fireEvent.click(switches[1])
 
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'settings/setMessageNavigation', payload: true })
   })
@@ -113,12 +104,12 @@ describe('MessageSettings (LOCK-102)', () => {
     render(<MessageSettings />)
 
     const switches = screen.getAllByTestId('switch')
-    // Row 6 is confirm delete — the fifth switch.
-    fireEvent.click(switches[4])
+    // Row 4 is confirm delete — the fourth switch.
+    fireEvent.click(switches[3])
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'settings/setConfirmDeleteMessage', payload: false })
 
-    // Row 7 is confirm regenerate — the sixth switch.
-    fireEvent.click(switches[5])
+    // Row 5 is confirm regenerate — the fifth switch.
+    fireEvent.click(switches[4])
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'settings/setConfirmRegenerateMessage', payload: false })
   })
 
