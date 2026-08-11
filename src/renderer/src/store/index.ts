@@ -22,7 +22,7 @@ import { FLUSH, PAUSE, PERSIST, persistReducer, persistStore, PURGE, REGISTER, R
 import storage from 'redux-persist/lib/storage'
 
 import { applyPendingImportProjection } from '../services/importProjection'
-import { runImportProjectionBoot } from '../services/importProjectionReadiness'
+import { runReduxStoreBoot } from '../services/importProjectionReadiness'
 import storeSyncService from '../services/StoreSyncService'
 import assistants from './assistants'
 import backup from './backup'
@@ -148,24 +148,32 @@ export const persistor = persistStore(store, undefined, () => {
     }, 0)
   }
 
-  // LOCK-001/LOCK-PROJECTION: gate the ordinary chat tree and the
-  // ReduxStoreReady notification on the one-shot L2 navigation projection
-  // settlement. runImportProjectionBoot settles readiness ONLY when the
-  // apply returns applied (true) or verified no-pending (false) without an
-  // API failure; on failure the pending row stays unacked (next-startup
-  // retry) and the tree stays gated so no stale topic load can run before
-  // the imported navigation is projected. dispatch/flush are injected to
-  // keep the apply module free of a static cycle back into this store
-  // module. The callback stays synchronous — the boot promise is
+  // LOCK-003: the rehydrated store is safely selectable the moment
+  // persistStore rehydration completes — signal ReduxStoreReady IMMEDIATELY,
+  // independently of the one-shot projection outcome. Main's startup config
+  // reads consume config slices (settings/llm) which rehydration already
+  // provides; the projection affects navigation/assistants and stays gated
+  // by ImportProjectionReadiness below (LOCK-001/LOCK-PROJECTION).
+  // LOCK-001/LOCK-PROJECTION: the ordinary chat tree remains gated on the
+  // one-shot L2 navigation projection settlement. runReduxStoreBoot fires the
+  // Main notification first, then runImportProjectionBoot settles readiness
+  // ONLY when the apply returns applied (true) or verified no-pending
+  // (false) without an API failure; on failure the pending row stays unacked
+  // (next-startup retry) and the tree stays gated so no stale topic load can
+  // run before the imported navigation is projected. dispatch/flush are
+  // injected to keep the apply module free of a static cycle back into this
+  // store module. The callback stays synchronous — the boot promise is
   // fire-and-forget (no promise is returned to redux-persist); .catch is a
-  // defensive guard because runImportProjectionBoot never rejects.
-  void runImportProjectionBoot({
-    apply: () => applyPendingImportProjection({ dispatch: store.dispatch, flush: handleSaveData }),
+  // defensive guard because runReduxStoreBoot never rejects.
+  void runReduxStoreBoot({
     notifyMain: () => {
-      // Notify main process ONLY after import projection readiness succeeds.
+      // LOCK-003: notify Main right after rehydration — not gated on the
+      // projection. ReduxStoreReady means "the rehydrated store is safely
+      // selectable".
       void window.electron?.ipcRenderer?.invoke(IpcChannel.ReduxStoreReady)
-      logger.info('Redux store ready, notified main process')
-    }
+      logger.info('Redux store rehydrated, notified main process')
+    },
+    apply: () => applyPendingImportProjection({ dispatch: store.dispatch, flush: handleSaveData })
   }).catch((error) => {
     logger.error('Import projection boot failed unexpectedly (retained for retry):', error as Error)
   })

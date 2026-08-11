@@ -11,11 +11,40 @@ import { ipcMain } from 'electron'
 import { apiServer } from '../apiServer'
 import { config } from '../apiServer/config'
 import { loggerService } from './LoggerService'
+import { reduxService } from './ReduxService'
 const logger = loggerService.withContext('ApiServerService')
 
 export class ApiServerService {
   constructor() {
     // Use the new clean implementation
+  }
+
+  /**
+   * LOCK-005 startup auto-start.
+   *
+   * Awaits Redux readiness with NO fixed timeout (the rehydrated renderer
+   * store is safely selectable right after persistStore rehydration,
+   * LOCK-003), then loads the real API config and starts only when enabled.
+   * This removes the previous startup race in which the config was queried
+   * immediately and a slow renderer/projection could force the disabled
+   * fallback for the whole run.
+   *
+   * Remains fire-and-forget relative to global app startup: the caller (main
+   * entry) does not await it, and failures are logged there. Must not start
+   * when `config.enabled` is false.
+   */
+  async startIfEnabled(): Promise<void> {
+    // LOCK-005: the wait below has NO fixed timeout, so a renderer that never
+    // signals ReduxStoreReady would otherwise be silent forever. Log before
+    // waiting so a never-ready renderer is diagnosable from Main's startup log.
+    logger.info('API Server auto-start: waiting for Redux store readiness')
+    await reduxService.waitForReady()
+    const currentConfig = await this.getCurrentConfig()
+    if (!currentConfig.enabled) {
+      logger.info('API Server is disabled — skipping auto-start')
+      return
+    }
+    await this.start()
   }
 
   async start(): Promise<void> {

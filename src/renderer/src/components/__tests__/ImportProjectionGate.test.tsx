@@ -5,7 +5,9 @@
  * until the one-shot L2 navigation projection has safely settled. These
  * tests exercise the REAL gate against the REAL `applyPendingImportProjection`
  * + `runImportProjectionBoot` wiring with deferred IPC/flush/ack timing: the
- * gate closing is never mocked away.
+ * gate closing is never mocked away. The ReduxStoreReady notification is not
+ * part of this flow (LOCK-003): it fires at rehydration via
+ * `runReduxStoreBoot`, independently of the projection.
  */
 
 import { act, render, screen, waitFor } from '@testing-library/react'
@@ -103,7 +105,6 @@ describe('ImportProjectionGate (LOCK-001/LOCK-PROJECTION)', () => {
   it('#1 no pending projection: readiness opens and children render', async () => {
     getProjection.mockResolvedValue({ ok: true, projection: null })
     const flush = vi.fn().mockResolvedValue(undefined)
-    const notifyMain = vi.fn()
 
     render(
       <ImportProjectionGate>
@@ -115,8 +116,7 @@ describe('ImportProjectionGate (LOCK-001/LOCK-PROJECTION)', () => {
 
     await act(async () => {
       await runImportProjectionBoot({
-        apply: () => applyPendingImportProjection({ dispatch, flush }),
-        notifyMain
+        apply: () => applyPendingImportProjection({ dispatch, flush })
       })
     })
 
@@ -125,7 +125,6 @@ describe('ImportProjectionGate (LOCK-001/LOCK-PROJECTION)', () => {
     expect(dispatch).not.toHaveBeenCalled()
     expect(flush).not.toHaveBeenCalled()
     expect(ackProjection).not.toHaveBeenCalled()
-    expect(notifyMain).toHaveBeenCalledTimes(1)
     expect(isImportProjectionReady()).toBe(true)
 
     await waitFor(() => expect(screen.getByTestId('ordinary-tree')).toBeInTheDocument())
@@ -140,8 +139,7 @@ describe('ImportProjectionGate (LOCK-001/LOCK-PROJECTION)', () => {
     ackProjection.mockImplementation(() => new Promise((resolve) => (resolveAck = resolve)))
 
     const boot = runImportProjectionBoot({
-      apply: () => applyPendingImportProjection({ dispatch, flush }),
-      notifyMain: vi.fn()
+      apply: () => applyPendingImportProjection({ dispatch, flush })
     })
 
     render(
@@ -185,8 +183,7 @@ describe('ImportProjectionGate (LOCK-001/LOCK-PROJECTION)', () => {
     expect(screen.queryByTestId('ordinary-tree')).not.toBeInTheDocument()
 
     const result = await runImportProjectionBoot({
-      apply: () => applyPendingImportProjection({ dispatch, flush }),
-      notifyMain: vi.fn()
+      apply: () => applyPendingImportProjection({ dispatch, flush })
     })
 
     expect(result).toBe('failed')
@@ -210,8 +207,7 @@ describe('ImportProjectionGate (LOCK-001/LOCK-PROJECTION)', () => {
     )
 
     const result = await runImportProjectionBoot({
-      apply: () => applyPendingImportProjection({ dispatch, flush }),
-      notifyMain: vi.fn()
+      apply: () => applyPendingImportProjection({ dispatch, flush })
     })
 
     expect(result).toBe('failed')
@@ -226,8 +222,7 @@ describe('ImportProjectionGate (LOCK-001/LOCK-PROJECTION)', () => {
     const flush = vi.fn().mockResolvedValue(undefined)
 
     const boot = runImportProjectionBoot({
-      apply: () => applyPendingImportProjection({ dispatch, flush }),
-      notifyMain: vi.fn()
+      apply: () => applyPendingImportProjection({ dispatch, flush })
     })
 
     render(

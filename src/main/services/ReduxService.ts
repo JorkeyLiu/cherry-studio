@@ -64,6 +64,23 @@ export class ReduxService {
     await Promise.race([this.readyPromise, timeout]).finally(() => clearTimeout(timer))
   }
 
+  /**
+   * Resolve when the rehydrated renderer store is safely selectable
+   * (LOCK-003: ReduxStoreReady is signaled right after persistStore
+   * rehydration, independently of the import projection).
+   *
+   * Unlike `waitForStoreReady` (the bounded wait used by
+   * select/getState/dispatch/batch, capped at `STORE_READY_TIMEOUT`), this
+   * wait has NO fixed timeout. It is intended for startup flows (LOCK-005:
+   * API Server auto-start) that must load the real config instead of falling
+   * back to a disabled default when the renderer is slow. Resolves
+   * idempotently — once ReduxStoreReady arrives, every caller resolves.
+   */
+  async waitForReady(): Promise<void> {
+    if (this.isReady) return
+    await this.readyPromise
+  }
+
   private async getWebContents(): Promise<Electron.WebContents> {
     await this.waitForStoreReady()
 

@@ -384,14 +384,14 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     void runAsyncFunction(async () => {
-      // Start API server if enabled
+      // Start API server if enabled. LOCK-005: auto-start first awaits Redux
+      // readiness without a fixed timeout (the store is selectable right
+      // after rehydration, LOCK-003), then loads the real config — a slow
+      // renderer/import projection can no longer force the disabled fallback
+      // for the whole run. Fire-and-forget relative to global app startup;
+      // failures are logged here, never propagated into startup.
       try {
-        const config = await apiServerService.getCurrentConfig()
-        logger.info('API server config:', config)
-
-        if (config.enabled) {
-          await apiServerService.start()
-        }
+        await apiServerService.startIfEnabled()
       } catch (error: any) {
         logger.error('Failed to check/start API server:', error)
       }

@@ -1,6 +1,7 @@
 /**
- * Renderer boot readiness primitive for the one-shot L2 navigation
- * projection (LOCK-PROD-6, LOCK-001, LOCK-PROJECTION).
+ * Renderer boot readiness primitives for the one-shot L2 navigation
+ * projection (LOCK-PROD-6, LOCK-001, LOCK-PROJECTION) and the Redux
+ * rehydration notification (LOCK-003).
  *
  * The confirmed post-import startup race: the persistStore callback
  * fire-and-forgets `applyPendingImportProjection` while PersistGate releases
@@ -9,13 +10,20 @@
  * BEFORE the pending import projection replaces/flushes/acks the imported
  * navigation — reinserting a stale pre-import topic into SQLite (LOCK-001).
  *
- * This primitive gates the ordinary chat tree: it settles to `ready` ONLY
- * when `applyPendingImportProjection` successfully returns `true` (applied
- * + durably flushed) or `false` (verified no-pending) WITHOUT an API
- * failure. On failure it settles to `failed` — the tree stays gated, the
- * pending row stays unacked for next-startup retry (LOCK-PROJECTION: never
- * mount the ordinary chat tree with stale state), and no infinite retry is
- * attempted.
+ * `ImportProjectionReadiness` gates the ordinary chat tree: it settles to
+ * `ready` ONLY when `applyPendingImportProjection` successfully returns
+ * `true` (applied + durably flushed) or `false` (verified no-pending)
+ * WITHOUT an API failure. On failure it settles to `failed` — the tree stays
+ * gated, the pending row stays unacked for next-startup retry
+ * (LOCK-PROJECTION: never mount the ordinary chat tree with stale state),
+ * and no infinite retry is attempted.
+ *
+ * `ReduxStoreReady` is deliberately NOT coupled to the projection (LOCK-003):
+ * the rehydrated store is safely selectable right after persistStore
+ * rehydration, and Main's startup config reads only consume config slices
+ * (settings/llm). The notification fires immediately in the rehydration
+ * callback via `runReduxStoreBoot`, independently of projection outcome;
+ * the projection continues to gate the ordinary chat tree on its own.
  *
  * The module is deliberately tiny and dependency-free (only @logger) so it
  * carries no import cycle with `@renderer/store` and can be imported by both
@@ -81,22 +89,17 @@ export interface ImportProjectionBootDeps {
    * failure (the pending row is retained for next-startup retry).
    */
   apply: () => Promise<boolean>
-  /**
-   * Main-process `ReduxStoreReady` notification. MUST run only after the
-   * readiness has settled successfully.
-   */
-  notifyMain: () => void
 }
 
 /**
- * LOCK-PROJECTION boot wiring: apply → settle → notify.
+ * LOCK-PROJECTION boot wiring: apply → settle.
  *
- * The ordinary chat tree stays gated and Main is NOT notified until the
- * apply either applied the projection (`true`) or verified none is pending
- * (`false`). On apply failure the pending row stays unacked, readiness
- * settles `failed` (tree stays gated), and the error is logged — the next
- * startup retries. A `notifyMain` failure is a side-channel only: the
- * projection has already settled, so the tree still opens.
+ * The ordinary chat tree stays gated until the apply either applied the
+ * projection (`true`) or verified none is pending (`false`). On apply
+ * failure the pending row stays unacked, readiness settles `failed` (tree
+ * stays gated), and the error is logged — the next startup retries. The
+ * ReduxStoreReady notification is NOT part of this flow (LOCK-003): it is
+ * sent by `runReduxStoreBoot` at rehydration, before this boot runs.
  *
  * Never throws — the caller fire-and-forgets with `.catch` as a defensive
  * guard only.
@@ -112,12 +115,43 @@ export async function runImportProjectionBoot(deps: ImportProjectionBootDeps): P
   }
 
   settleImportProjectionReadiness('ready')
+  logger.info(`Import navigation projection readiness settled (applied=${applied})`)
+  return 'ready'
+}
+
+/** Dependencies injected by the store (post-rehydrate), not imported. */
+export interface ReduxStoreBootDeps {
+  /**
+   * Main-process `ReduxStoreReady` notification. Fired immediately at
+   * rehydration, independently of the projection outcome (LOCK-003). The
+   * call is fire-and-forget in the store; a synchronous throw here is a
+   * logged side-channel only.
+   */
+  notifyMain: () => void
+  /** One-shot projection apply — same contract as `ImportProjectionBootDeps.apply`. */
+  apply: () => Promise<boolean>
+}
+
+/**
+ * LOCK-003 store boot wiring: notify Main → projection boot.
+ *
+ * Runs in the persistStore rehydration callback. The rehydrated store is
+ * safely selectable the moment rehydration completes, so Main is notified
+ * IMMEDIATELY — before and independently of the projection apply — then the
+ * projection boot runs to gate the ordinary chat tree (LOCK-PROJECTION).
+ * Main consumers read config slices only (settings/llm); the projection
+ * affects navigation/assistants and stays gated by `ImportProjectionReadiness`.
+ *
+ * Never throws — a notification failure is a logged side-channel and the
+ * projection boot still runs.
+ */
+export async function runReduxStoreBoot(deps: ReduxStoreBootDeps): Promise<'ready' | 'failed'> {
   try {
     deps.notifyMain()
   } catch (error) {
-    // Side-channel only: the projection settled, so the tree opens regardless.
-    logger.warn('ReduxStoreReady notification failed (projection already settled):', error as Error)
+    // Side-channel only: the store is still selectable; the projection boot
+    // runs regardless.
+    logger.warn('ReduxStoreReady notification failed (store still selectable):', error as Error)
   }
-  logger.info(`Import navigation projection readiness settled (applied=${applied})`)
-  return 'ready'
+  return runImportProjectionBoot({ apply: deps.apply })
 }
