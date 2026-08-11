@@ -5,7 +5,6 @@ import 'remark-github-blockquote-alert/alert.css'
 
 import ImageViewer from '@renderer/components/ImageViewer'
 import MarkdownShadowDOMRenderer from '@renderer/components/MarkdownShadowDOMRenderer'
-import { useSettings } from '@renderer/hooks/useSettings'
 import { useSmoothStream } from '@renderer/hooks/useSmoothStream'
 import type { MainTextMessageBlock, ThinkingMessageBlock, TranslationMessageBlock } from '@renderer/types/newMessage'
 import { removeSvgEmptyLines } from '@renderer/utils/formats'
@@ -15,8 +14,6 @@ import { type FC, memo, useCallback, useEffect, useMemo, useRef, useState } from
 import { useTranslation } from 'react-i18next'
 import ReactMarkdown, { type Components, defaultUrlTransform } from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
-// @ts-ignore rehype-mathjax is not typed
-import rehypeMathjax from 'rehype-mathjax'
 import rehypeRaw from 'rehype-raw'
 import remarkCjkFriendly from 'remark-cjk-friendly'
 import remarkGfm from 'remark-gfm'
@@ -45,8 +42,8 @@ interface Props {
 
 const Markdown: FC<Props> = ({ block, postProcess }) => {
   const { t } = useTranslation()
-  const { mathEngine, mathEnableSingleDollar } = useSettings()
-
+  // LOCK-106: Markdown math rendering is fixed to KaTeX with single-dollar
+  // syntax enabled. The math engine settings are removed.
   const isTrulyDone = 'status' in block && block.status === 'success'
   const [displayedContent, setDisplayedContent] = useState(postProcess ? postProcess(block.content) : block.content)
   const [isStreamDone, setIsStreamDone] = useState(isTrulyDone)
@@ -94,13 +91,12 @@ const Markdown: FC<Props> = ({ block, postProcess }) => {
       [remarkGfm, { singleTilde: false }] as Pluggable,
       [remarkAlert] as Pluggable,
       remarkCjkFriendly,
-      remarkDisableConstructs(['codeIndented'])
+      remarkDisableConstructs(['codeIndented']),
+      // LOCK-106: single-dollar math is always enabled.
+      [remarkMath, { singleDollarTextMath: true }] as Pluggable
     ]
-    if (mathEngine !== 'none') {
-      plugins.push([remarkMath, { singleDollarTextMath: mathEnableSingleDollar }])
-    }
     return plugins
-  }, [mathEngine, mathEnableSingleDollar])
+  }, [])
 
   const messageContent = useMemo(() => {
     if ('status' in block && block.status === 'paused' && isEmpty(block.content)) {
@@ -115,13 +111,10 @@ const Markdown: FC<Props> = ({ block, postProcess }) => {
       plugins.push(rehypeRaw, rehypeScalableSvg)
     }
     plugins.push([rehypeHeadingIds, { prefix: `heading-${block.id}` }])
-    if (mathEngine === 'KaTeX') {
-      plugins.push(rehypeKatex)
-    } else if (mathEngine === 'MathJax') {
-      plugins.push(rehypeMathjax)
-    }
+    // LOCK-106: KaTeX is the fixed math renderer.
+    plugins.push(rehypeKatex)
     return plugins
-  }, [mathEngine, messageContent, block.id])
+  }, [messageContent, block.id])
 
   const components = useMemo(() => {
     return {

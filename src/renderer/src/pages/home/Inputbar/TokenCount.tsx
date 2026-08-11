@@ -1,6 +1,5 @@
 import { HStack, VStack } from '@renderer/components/Layout'
 import MaxContextCount from '@renderer/components/MaxContextCount'
-import { useSettings } from '@renderer/hooks/useSettings'
 import { Divider, Popover } from 'antd'
 import { ArrowUp, MenuIcon } from 'lucide-react'
 import type { FC } from 'react'
@@ -23,12 +22,7 @@ type Props = {
 
 const TokenCount: FC<Props> = ({ estimateTokenCount, contextCount, onUpdateAnchor }) => {
   const { t } = useTranslation()
-  const { showInputEstimatedTokens } = useSettings()
-
-  if (!showInputEstimatedTokens) {
-    return null
-  }
-
+  // LOCK-108: the estimated token display is always enabled (no user setting).
   const PopoverContent = () => {
     return (
       <VStack w="185px" background="100%">

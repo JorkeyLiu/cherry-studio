@@ -1,9 +1,14 @@
 import { LoadingOutlined } from '@ant-design/icons'
 import { loggerService } from '@logger'
+import Selector from '@renderer/components/Selector'
+import { UNKNOWN } from '@renderer/config/translate'
 import { useSettings } from '@renderer/hooks/useSettings'
 import useTranslate from '@renderer/hooks/useTranslate'
+import { SettingDivider, SettingRow, SettingRowTitle } from '@renderer/pages/settings'
 import { translateText } from '@renderer/services/TranslateService'
-import { Button, Tooltip } from 'antd'
+import { useAppDispatch } from '@renderer/store'
+import { setShowTranslateConfirm } from '@renderer/store/settings'
+import { Button, Popover, Switch, Tooltip } from 'antd'
 import { Languages } from 'lucide-react'
 import type { FC } from 'react'
 import { useEffect, useState } from 'react'
@@ -20,11 +25,20 @@ interface Props {
 
 const logger = loggerService.withContext('TranslateButton')
 
+/**
+ * LOCK-110: the target-language and translate-confirm controls live in the
+ * translation button's popover. Both read the existing global settings state,
+ * so the inputbar, message, and text-edit translation flows all share the same
+ * target language and confirmation preference. Translation execution semantics
+ * are unchanged.
+ */
 const TranslateButton: FC<Props> = ({ text, onTranslated, disabled, style, isLoading }) => {
   const { t } = useTranslation()
+  const dispatch = useAppDispatch()
   const [isTranslating, setIsTranslating] = useState(false)
-  const { targetLanguage, showTranslateConfirm } = useSettings()
-  const { getLanguageByLangcode } = useTranslate()
+  const [open, setOpen] = useState(false)
+  const { targetLanguage, showTranslateConfirm, setTargetLanguage } = useSettings()
+  const { translateLanguages, getLanguageByLangcode } = useTranslate()
 
   const translateConfirm = () => {
     if (!showTranslateConfirm) {
@@ -51,6 +65,7 @@ const TranslateButton: FC<Props> = ({ text, onTranslated, disabled, style, isLoa
     try {
       const translatedText = await translateText(text, getLanguageByLangcode(targetLanguage))
       onTranslated(translatedText)
+      setOpen(false)
     } catch (error) {
       logger.error('Translation failed:', error as Error)
       window.toast.error(t('translate.error.failed'))
@@ -63,18 +78,77 @@ const TranslateButton: FC<Props> = ({ text, onTranslated, disabled, style, isLoa
     setIsTranslating(isLoading ?? false)
   }, [isLoading])
 
+  const popoverContent = (
+    <PopoverContent>
+      <SettingRow>
+        <SettingRowTitle>{t('settings.input.target_language.label')}</SettingRowTitle>
+        <Selector
+          size={14}
+          value={targetLanguage}
+          onChange={(value) => setTargetLanguage(value)}
+          placeholder={UNKNOWN.emoji + ' ' + UNKNOWN.label()}
+          options={translateLanguages.map((item) => {
+            return { value: item.langCode, label: item.emoji + ' ' + item.label() }
+          })}
+          style={{ maxWidth: 150 }}
+        />
+      </SettingRow>
+      <SettingDivider />
+      <SettingRow>
+        <SettingRowTitle>{t('settings.input.show_translate_confirm')}</SettingRowTitle>
+        <Switch
+          size="small"
+          checked={showTranslateConfirm}
+          onChange={(checked) => dispatch(setShowTranslateConfirm(checked))}
+        />
+      </SettingRow>
+      <SettingDivider />
+      <TranslateActionButton type="primary" size="small" block onClick={() => void handleTranslate()}>
+        {isTranslating ? <LoadingOutlined spin /> : <Languages size={14} />}
+        <span style={{ marginLeft: 6 }}>{t('chat.translate')}</span>
+      </TranslateActionButton>
+    </PopoverContent>
+  )
+
   return (
-    <Tooltip
+    <Popover
       placement="top"
-      title={t('chat.input.translate', { target_language: getLanguageByLangcode(targetLanguage).label() })}
-      mouseLeaveDelay={0}
-      arrow>
-      <ToolbarButton onClick={handleTranslate} disabled={disabled || isTranslating} style={style} type="text">
-        {isTranslating ? <LoadingOutlined spin /> : <Languages size={18} />}
-      </ToolbarButton>
-    </Tooltip>
+      trigger="click"
+      arrow={false}
+      open={open}
+      onOpenChange={(next) => {
+        if (isTranslating) return
+        setOpen(next)
+      }}
+      content={popoverContent}>
+      <Tooltip
+        placement="top"
+        title={t('chat.input.translate', { target_language: getLanguageByLangcode(targetLanguage).label() })}
+        mouseLeaveDelay={0}
+        arrow>
+        <ToolbarButton onClick={() => setOpen(true)} disabled={disabled || isTranslating} style={style} type="text">
+          {isTranslating ? <LoadingOutlined spin /> : <Languages size={18} />}
+        </ToolbarButton>
+      </Tooltip>
+    </Popover>
   )
 }
+
+const PopoverContent = styled.div`
+  width: 272px;
+  padding: 4px 12px 12px;
+  user-select: none;
+
+  .ant-divider {
+    margin: 8px 0;
+  }
+`
+
+const TranslateActionButton = styled(Button)`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+`
 
 const ToolbarButton = styled(Button)`
   min-width: 30px;

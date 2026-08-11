@@ -16,9 +16,11 @@
  *             - `data-testid="token-count-context"` (TokenCount context block)
  *             - `data-testid="context-anchor-btn"` (menubar anchor button)
  *             - `data-testid="context-boundary"` (divider, data-context-boundary retained)
- * LOCK-E2E-3: contextCount=3 and TokenCount visibility (`showInputEstimatedTokens`)
- *             are configured via controlled Redux setup BEFORE the conversation;
- *             settings-slider behavior is not part of this contract.
+ * LOCK-E2E-3: contextCount=3 is configured via controlled Redux setup BEFORE
+ *             the conversation. TokenCount visibility is always-on (LOCK-108:
+ *             the old `showInputEstimatedTokens` setting is removed — no
+ *             dispatch, no gate); settings-slider behavior is not part of this
+ *             contract.
  * LOCK-E2E-4: messages are sent through the real input UI against the mock
  *             provider (no fabricated conversation messages).
  * LOCK-E2E-5: the integrated contract transitions A–F (asserted below).
@@ -73,9 +75,10 @@ async function getActiveContext(page: import('@playwright/test').Page) {
 }
 
 /**
- * LOCK-E2E-3: configure contextCount=3 and TokenCount visibility via Redux
- * before the conversation begins. This is controlled test setup — the
- * settings-slider behavior is not the contracted feature.
+ * LOCK-E2E-3: configure contextCount=3 via Redux before the conversation
+ * begins. The TokenCount display is always-on (LOCK-108) — the removed
+ * `settings/setShowInputEstimatedTokens` action is intentionally NOT
+ * dispatched, and visibility is asserted at Step 0 as always-on proof.
  */
 async function seedContextConfig(page: import('@playwright/test').Page): Promise<string> {
   const { assistantId } = await getActiveContext(page)
@@ -88,7 +91,6 @@ async function seedContextConfig(page: import('@playwright/test').Page): Promise
         type: 'assistants/updateAssistantSettings',
         payload: { assistantId, settings: { contextCount: 3 } }
       })
-      store.dispatch({ type: 'settings/setShowInputEstimatedTokens', payload: true })
     },
     { assistantId }
   )
@@ -97,12 +99,10 @@ async function seedContextConfig(page: import('@playwright/test').Page): Promise
     const s = (window as any).store.getState()
     const assistant = s.assistants.assistants[0]
     return {
-      contextCount: assistant?.settings?.contextCount,
-      showInputEstimatedTokens: s.settings?.showInputEstimatedTokens
+      contextCount: assistant?.settings?.contextCount
     }
   })
   expect(seeded.contextCount).toBe(3)
-  expect(seeded.showInputEstimatedTokens).toBe(true)
   return assistantId
 }
 
@@ -113,17 +113,20 @@ async function seedContextConfig(page: import('@playwright/test').Page): Promise
 async function uiSendMessage(page: import('@playwright/test').Page, text: string): Promise<void> {
   const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
   await textarea.waitFor({ state: 'visible', timeout: 15000 })
-  await textarea.focus()
 
-  // Real sequential keyboard input: every keystroke goes through React 19's
-  // controlled-textarea onChange, so the value tracker stays in sync. The
-  // previous native-setter + input/change dispatch path desynchronized React's
-  // value tracker and was flaky. LOCK-EVIDENCE: no force click, no arbitrary
-  // sleep, no Redux dispatch, no native-setter bypass.
-  await textarea.pressSequentially(text, { delay: 0 })
+  // Single atomic fill: Playwright focuses the textarea, sets the full value
+  // and dispatches a real input event, which React 19's controlled onChange
+  // (handleTextareaChange → setText) processes — the same mechanism the
+  // committed native-setter specs rely on, without per-keystroke delivery so
+  // the first keystroke cannot be dropped. Repository precedent:
+  // ChatPage.typeMessage fills this input area (tests/e2e/pages/chat.page.ts).
+  // LOCK-EVIDENCE: no force click, no arbitrary sleep, no Redux dispatch, no
+  // native-setter bypass.
+  await textarea.fill(text)
 
-  // Deterministic value check before the real Enter submission — pressSequentially
-  // awaits the final keystroke, so this assertion cannot race the controlled value.
+  // Deterministic value check before the real Enter submission — fill awaits
+  // the input event, and this auto-retrying assertion confirms the controlled
+  // React value rendered the exact full text.
   await expect(textarea).toHaveValue(text, { timeout: 5000 })
   await textarea.press('Enter')
 }
@@ -306,7 +309,7 @@ test.describe('Unified Context Window Contract', () => {
     const tokenCount = page.locator('[data-testid="token-count-context"]')
     const boundary = page.locator('[data-testid="context-boundary"]')
     // ── Step 0: deterministic setup (LOCK-E2E-3) ─────────────────────────
-    await test.step('0: Seed contextCount=3 + TokenCount visibility via Redux', async () => {
+    await test.step('0: Seed contextCount=3 via Redux; assert always-on TokenCount visibility', async () => {
       await seedContextConfig(page)
       const ctx = await getActiveContext(page)
       expect(ctx.topicId).not.toBe('')

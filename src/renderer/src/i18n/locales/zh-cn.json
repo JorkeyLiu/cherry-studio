@@ -1277,9 +1277,6 @@
       }
     },
     "settings": {
-      "code": {
-        "title": "代码块设置"
-      },
       "code_collapsible": "代码块可折叠",
       "code_editor": {
         "autocompletion": "自动补全",
@@ -1560,6 +1557,7 @@
     "current": "当前",
     "cut": "剪切",
     "decline": "拒绝",
+    "decrease": "减少",
     "default": "默认",
     "delete": "删除",
     "delete_confirm": "确定要删除吗？",
@@ -1597,6 +1595,7 @@
     "image_preview": "图片预览",
     "image_url": "图片链接",
     "image_url_or_upload": "输入图片链接或上传文件",
+    "increase": "增加",
     "inspect": "检查",
     "invalid_value": "无效值",
     "knowledge_base": "知识库",
@@ -2438,11 +2437,6 @@
         "horizontal": "横向排列",
         "label": "多模型回答样式",
         "vertical": "纵向堆叠"
-      },
-      "style": {
-        "bubble": "气泡",
-        "label": "消息样式",
-        "plain": "简洁"
       },
       "video": {
         "error": {
@@ -4659,7 +4653,6 @@
       "title": "禁用硬件加速"
     },
     "input": {
-      "auto_translate_with_space": "3 个空格快速翻译",
       "clear": {
         "all": "清除",
         "knowledge_base": "清除选中的知识库",
@@ -4679,17 +4672,6 @@
       "onboot": "开机自动启动",
       "title": "启动",
       "totray": "启动时最小化到托盘"
-    },
-    "math": {
-      "engine": {
-        "label": "数学公式引擎",
-        "none": "无"
-      },
-      "single_dollar": {
-        "label": "启用 $...$",
-        "tip": "渲染单个美元符号 $...$ 包裹的数学公式，默认启用。"
-      },
-      "title": "数学公式设置"
     },
     "mcp": {
       "actions": "操作",
@@ -4948,12 +4930,6 @@
         "label": "消息分割线",
         "tooltip": "不适用于气泡样式消息"
       },
-      "grid_columns": "消息网格展示列数",
-      "grid_popover_trigger": {
-        "click": "点击显示",
-        "hover": "悬停显示",
-        "label": "网格详情触发"
-      },
       "inject_context_timestamp": "注入上下文时间戳",
       "input": {
         "confirm_delete_message": "删除消息前确认",
@@ -4961,25 +4937,16 @@
         "enable_quick_triggers": "启用 / 和 @ 触发快捷菜单",
         "paste_long_text_as_file": "长文本粘贴为文件",
         "paste_long_text_threshold": "长文本长度",
-        "send_shortcuts": "发送快捷键",
-        "show_estimated_tokens": "显示预估 Token 数",
-        "title": "输入设置"
+        "send_shortcuts": "发送快捷键"
       },
       "markdown_rendering_input_message": "Markdown 渲染输入消息",
       "metrics": "首字时延 {{time_first_token_millsec}} ms | 每秒 {{token_speed}} tokens",
-      "model": {
-        "title": "模型设置"
-      },
+      "model": {},
       "navigation": {
-        "anchor": "对话锚点",
-        "buttons": "上下按钮",
-        "label": "对话导航按钮",
-        "none": "不显示"
+        "label": "对话导航按钮"
       },
       "prompt": "显示提示词",
-      "show_message_outline": "显示消息大纲",
-      "title": "消息设置",
-      "use_serif_font": "使用衬线字体"
+      "show_message_outline": "显示消息大纲"
     },
     "miniapps": {
       "cache_change_notice": "更改将在打开的小程序增减至设定值后生效",

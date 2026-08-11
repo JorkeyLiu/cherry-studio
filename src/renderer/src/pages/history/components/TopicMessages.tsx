@@ -3,7 +3,6 @@ import { HStack } from '@renderer/components/Layout'
 import SearchPopup from '@renderer/components/Popups/SearchPopup'
 import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
-import { useSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { getTopicById } from '@renderer/hooks/useTopic'
 import { getAssistantById } from '@renderer/services/AssistantService'
@@ -28,7 +27,6 @@ interface Props extends React.HTMLAttributes<HTMLDivElement> {
 const TopicMessages: FC<Props> = ({ topic: _topic, ...props }) => {
   const navigate = NavigationService.navigate!
   const { handleScroll, containerRef } = useScrollPosition('TopicMessages')
-  const { messageStyle } = useSettings()
   const { setTimeoutTimer } = useTimer()
 
   const [topic, setTopic] = useState<Topic | undefined>(_topic)
@@ -59,9 +57,10 @@ const TopicMessages: FC<Props> = ({ topic: _topic, ...props }) => {
   return (
     <MessageEditingProvider>
       <MessagesContainer {...props} ref={containerRef} onScroll={handleScroll}>
-        <ContainerWrapper className={messageStyle}>
+        {/* LOCK-105: message style is always bubble. */}
+        <ContainerWrapper className="bubble">
           {topic?.messages.map((message) => (
-            <MessageWrapper key={message.id} className={classNames([messageStyle, message.role])}>
+            <MessageWrapper key={message.id} className={classNames(['bubble', message.role])}>
               <MessageItem message={message} topic={topic} hideMenuBar={true} />
               <Button
                 type="text"

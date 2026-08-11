@@ -156,7 +156,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   const { assistant, addTopic, model, setModel, updateAssistant, updateAssistantSettings } = useAssistant(
     initialAssistant.id
   )
-  const { sendMessageShortcut, showInputEstimatedTokens, enableQuickPanelTriggers } = useSettings()
+  const { sendMessageShortcut, enableQuickPanelTriggers } = useSettings()
 
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)
@@ -309,7 +309,10 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   ])
 
   const tokenCountProps = useMemo(() => {
-    if (!config.showTokenCount || estimateTokenCount === undefined || !showInputEstimatedTokens) {
+    // LOCK-108: the estimated input token display has no user setting and is
+    // always enabled under the existing program gates (scope supports a token
+    // count and an estimate exists).
+    if (!config.showTokenCount || estimateTokenCount === undefined) {
       return undefined
     }
 
@@ -317,7 +320,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
       estimateTokenCount,
       contextCount
     }
-  }, [config.showTokenCount, contextCount, estimateTokenCount, showInputEstimatedTokens])
+  }, [config.showTokenCount, contextCount, estimateTokenCount])
 
   // Default-anchor persistence (LOCK-CTX-2, LOCK-CTX-4, LOCK-FIX-3).
   // When no valid anchor exists for the topic, derive the window start from the

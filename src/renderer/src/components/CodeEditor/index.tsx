@@ -126,17 +126,23 @@ const CodeEditor = ({
   expanded = true,
   wrapped = true
 }: CodeEditorProps) => {
-  const { fontSize: _fontSize, codeShowLineNumbers: _lineNumbers, codeEditor } = useSettings()
-  const enableKeymap = useMemo(() => options?.keymap ?? codeEditor.keymap, [options?.keymap, codeEditor.keymap])
+  const { fontSize: _fontSize } = useSettings()
+  // LOCK-107: the message code-block editor path and its settings are removed.
+  // The shared CodeEditor (used by notes, settings pages, MCP editors, etc.)
+  // keeps the previous defaults for its basicSetup options.
+  const enableKeymap = useMemo(() => options?.keymap ?? false, [options?.keymap])
 
-  // 合并 codeEditor 和 options 的 basicSetup，options 优先
+  // 合并固定默认值和 options 的 basicSetup，options 优先
   const basicSetup = useMemo(() => {
     return {
-      lineNumbers: _lineNumbers,
-      ...(codeEditor as BasicSetupOptions),
+      lineNumbers: false,
+      highlightActiveLine: false,
+      foldGutter: false,
+      autocompletion: true,
+      keymap: false,
       ...(options as BasicSetupOptions)
     }
-  }, [codeEditor, _lineNumbers, options])
+  }, [options])
 
   const fontSize = useMemo(() => customFontSize ?? _fontSize - 1, [customFontSize, _fontSize])
 

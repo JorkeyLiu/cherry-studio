@@ -1,25 +1,16 @@
 import { Icon } from '@iconify/react'
-import { loggerService } from '@logger'
 import type { ActionTool } from '@renderer/components/ActionTools'
-import type { CodeEditorHandles } from '@renderer/components/CodeEditor'
-import CodeEditor from '@renderer/components/CodeEditor'
 import {
   CodeToolbar,
   useCopyTool,
   useDownloadTool,
   useExpandTool,
-  useRunTool,
-  useSaveTool,
   useSplitViewTool,
-  useViewSourceTool,
-  useWrapTool
+  useViewSourceTool
 } from '@renderer/components/CodeToolbar'
 import CodeViewer from '@renderer/components/CodeViewer'
-import ImageViewer from '@renderer/components/ImageViewer'
 import type { BasicPreviewHandles } from '@renderer/components/Preview'
 import { MAX_COLLAPSED_CODE_HEIGHT } from '@renderer/config/constant'
-import { useSettings } from '@renderer/hooks/useSettings'
-import { pyodideService } from '@renderer/services/PyodideService'
 import { getExtensionByLanguage } from '@renderer/utils/code-language'
 import { getFileIconName } from '@renderer/utils/fileIconName'
 import { extractHtmlTitle, getFileNameFromHtmlTitle } from '@renderer/utils/formats'
@@ -29,23 +20,20 @@ import { useTranslation } from 'react-i18next'
 import styled, { css } from 'styled-components'
 
 import { SPECIAL_VIEW_COMPONENTS, SPECIAL_VIEWS } from './constants'
-import StatusBar from './StatusBar'
 import type { ViewMode } from './types'
-
-const logger = loggerService.withContext('CodeBlockView')
 
 interface Props {
   children: string
   language: string
-  onSave?: (newContent: string) => void
 }
 
 /**
  * 代码块视图
  *
- * 视图类型：
- * - preview: 预览视图，其中非源代码的是特殊视图
- * - edit: 编辑视图
+ * LOCK-107: code blocks use a simplified fixed baseline — automatic viewer
+ * theme, line numbers enabled, tall code blocks collapsible, wrapping disabled,
+ * image preview tools disabled, read-only viewer only. Code execution and the
+ * editable CodeMirror path are removed.
  *
  * 视图模式：
  * - source: 源代码视图模式
@@ -56,9 +44,8 @@ interface Props {
  * - quick 工具
  * - core 工具
  */
-export const CodeBlockView: React.FC<Props> = memo(({ children, language, onSave }) => {
+export const CodeBlockView: React.FC<Props> = memo(({ children, language }) => {
   const { t } = useTranslation()
-  const { codeEditor, codeExecution, codeImageTools, codeCollapsible, codeWrappable } = useSettings()
 
   const [viewState, setViewState] = useState({
     mode: 'special' as ViewMode,
@@ -84,16 +71,8 @@ export const CodeBlockView: React.FC<Props> = memo(({ children, language, onSave
     })
   }, [])
 
-  const [isRunning, setIsRunning] = useState(false)
-  const [executionResult, setExecutionResult] = useState<{ text: string; image?: string } | null>(null)
-
   const [tools, setTools] = useState<ActionTool[]>([])
 
-  const isExecutable = useMemo(() => {
-    return codeExecution.enabled && language === 'python'
-  }, [codeExecution.enabled, language])
-
-  const sourceViewRef = useRef<CodeEditorHandles>(null)
   const specialViewRef = useRef<BasicPreviewHandles>(null)
 
   const hasSpecialView = useMemo(() => SPECIAL_VIEWS.includes(language), [language])
@@ -102,21 +81,17 @@ export const CodeBlockView: React.FC<Props> = memo(({ children, language, onSave
     return hasSpecialView && viewMode === 'special'
   }, [hasSpecialView, viewMode])
 
+  // LOCK-107 fixed baseline: tall code blocks are collapsible by default and
+  // the user can expand/collapse per block via the toolbar toggle.
+  const codeCollapsible = true
   const [expandOverride, setExpandOverride] = useState(!codeCollapsible)
-  const [wrapOverride, setWrapOverride] = useState(codeWrappable)
 
   // 重置用户操作
   useEffect(() => {
     setExpandOverride(!codeCollapsible)
   }, [codeCollapsible])
 
-  // 重置用户操作
-  useEffect(() => {
-    setWrapOverride(codeWrappable)
-  }, [codeWrappable])
-
   const shouldExpand = useMemo(() => !codeCollapsible || expandOverride, [codeCollapsible, expandOverride])
-  const shouldWrap = useMemo(() => codeWrappable && wrapOverride, [codeWrappable, wrapOverride])
 
   const [sourceScrollHeight, setSourceScrollHeight] = useState(0)
   const expandable = useMemo(() => {
@@ -131,17 +106,12 @@ export const CodeBlockView: React.FC<Props> = memo(({ children, language, onSave
 
   const handleCopySource = useCallback(async () => {
     try {
-      // Prioritize getting content from editor, fallback to children
-      const content = sourceViewRef.current?.getContent?.() ?? children
-      await navigator.clipboard.writeText(content.trimEnd())
+      await navigator.clipboard.writeText(children.trimEnd())
       window.toast.success(t('code_block.copy.success'))
     } catch (error) {
-      logger.error('Failed to copy to clipboard:', { error })
       window.toast.error(t('code_block.copy.failed'))
     }
   }, [children, t])
-  // Note: sourceViewRef not in deps because it's a stable ref,
-  // and getContent reads content in real-time from editorViewRef.current.state.doc
 
   const handleDownloadSource = useCallback(() => {
     let fileName = ''
@@ -159,26 +129,6 @@ export const CodeBlockView: React.FC<Props> = memo(({ children, language, onSave
     const ext = getExtensionByLanguage(language)
     void window.api.file.save(`${fileName}${ext}`, children)
   }, [children, language])
-
-  const handleRunScript = useCallback(() => {
-    setIsRunning(true)
-    setExecutionResult(null)
-
-    pyodideService
-      .runScript(children, {}, codeExecution.timeoutMinutes * 60000)
-      .then((result) => {
-        setExecutionResult(result)
-      })
-      .catch((error) => {
-        logger.error('Unexpected error:', error)
-        setExecutionResult({
-          text: `Unexpected error: ${error.message || 'Unknown error'}`
-        })
-      })
-      .finally(() => {
-        setIsRunning(false)
-      })
-  }, [children, codeExecution.timeoutMinutes])
 
   const showPreviewTools = useMemo(() => {
     return viewMode !== 'source' && hasSpecialView
@@ -200,10 +150,10 @@ export const CodeBlockView: React.FC<Props> = memo(({ children, language, onSave
     setTools
   })
 
-  // 特殊视图的编辑/查看源码按钮，在分屏模式下不可用
+  // 特殊视图的查看源码按钮（只读，LOCK-107: 无编辑路径），在分屏模式下不可用
   useViewSourceTool({
     enabled: hasSpecialView,
-    editable: codeEditor.enabled,
+    editable: false,
     viewMode,
     onViewModeChange: setViewMode,
     setTools
@@ -217,15 +167,7 @@ export const CodeBlockView: React.FC<Props> = memo(({ children, language, onSave
     setTools
   })
 
-  // 运行按钮
-  useRunTool({
-    enabled: isExecutable,
-    isRunning,
-    onRun: handleRunScript,
-    setTools
-  })
-
-  // 源代码视图的展开/折叠按钮
+  // 源代码视图的展开/折叠按钮（LOCK-107: collapsible 基线）
   useExpandTool({
     enabled: !isInSpecialView,
     expanded: shouldExpand,
@@ -234,65 +176,36 @@ export const CodeBlockView: React.FC<Props> = memo(({ children, language, onSave
     setTools
   })
 
-  // 源代码视图的自动换行按钮
-  useWrapTool({
-    enabled: !isInSpecialView,
-    wrapped: shouldWrap,
-    wrappable: codeWrappable,
-    toggle: useCallback(() => setWrapOverride((prev) => !prev), []),
-    setTools
-  })
-
-  // 代码编辑器的保存按钮
-  useSaveTool({
-    enabled: codeEditor.enabled && !isInSpecialView,
-    sourceViewRef,
-    setTools
-  })
-
-  // 源代码视图组件
+  // 源代码视图组件（LOCK-107: 只读 viewer，行号固定开启，不换行）
   const sourceView = useMemo(
-    () =>
-      codeEditor.enabled ? (
-        <CodeEditor
-          className="source-view"
-          ref={sourceViewRef}
-          value={children}
-          language={language}
-          onSave={onSave}
-          onHeightChange={handleHeightChange}
-          maxHeight={`${MAX_COLLAPSED_CODE_HEIGHT}px`}
-          options={{ stream: true }}
-          expanded={shouldExpand}
-          wrapped={shouldWrap}
-        />
-      ) : (
-        <CodeViewer
-          className="source-view"
-          value={children}
-          language={language}
-          onHeightChange={handleHeightChange}
-          expanded={shouldExpand}
-          wrapped={shouldWrap}
-          maxHeight={`${MAX_COLLAPSED_CODE_HEIGHT}px`}
-          onRequestExpand={codeCollapsible ? () => setExpandOverride(true) : undefined}
-        />
-      ),
-    [children, codeCollapsible, codeEditor.enabled, handleHeightChange, language, onSave, shouldExpand, shouldWrap]
+    () => (
+      <CodeViewer
+        className="source-view"
+        value={children}
+        language={language}
+        onHeightChange={handleHeightChange}
+        expanded={shouldExpand}
+        wrapped={false}
+        maxHeight={`${MAX_COLLAPSED_CODE_HEIGHT}px`}
+        options={{ lineNumbers: true }}
+        onRequestExpand={codeCollapsible ? () => setExpandOverride(true) : undefined}
+      />
+    ),
+    [children, codeCollapsible, handleHeightChange, language, shouldExpand]
   )
 
-  // 特殊视图组件映射
+  // 特殊视图组件映射（LOCK-107: image preview tools disabled）
   const specialView = useMemo(() => {
     const SpecialView = SPECIAL_VIEW_COMPONENTS[language as keyof typeof SPECIAL_VIEW_COMPONENTS]
 
     if (!SpecialView) return null
 
     return (
-      <SpecialView ref={specialViewRef} enableToolbar={codeImageTools}>
+      <SpecialView ref={specialViewRef} enableToolbar={false}>
         {children}
       </SpecialView>
     )
-  }, [children, codeImageTools, language])
+  }, [children, language])
 
   const renderHeader = useMemo(() => {
     if (isInSpecialView) {
@@ -329,14 +242,6 @@ export const CodeBlockView: React.FC<Props> = memo(({ children, language, onSave
       {renderHeader}
       <CodeToolbar tools={tools} />
       {renderContent}
-      {isExecutable && executionResult && (
-        <StatusBar>
-          {executionResult.text}
-          {executionResult.image && (
-            <ImageViewer src={executionResult.image} alt="Matplotlib plot" style={{ cursor: 'pointer' }} />
-          )}
-        </StatusBar>
-      )}
     </CodeBlockWrapper>
   )
 })

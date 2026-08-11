@@ -1277,9 +1277,6 @@
       }
     },
     "settings": {
-      "code": {
-        "title": "コード設定"
-      },
       "code_collapsible": "コードブロック折り畳み",
       "code_editor": {
         "autocompletion": "自動補完",
@@ -1560,6 +1557,7 @@
     "current": "現在",
     "cut": "切り取り",
     "decline": "[to be translated]:Decline",
+    "decrease": "[to be translated]:Decrease",
     "default": "デフォルト",
     "delete": "削除",
     "delete_confirm": "削除してもよろしいですか？",
@@ -1597,6 +1595,7 @@
     "image_preview": "画像プレビュー",
     "image_url": "画像URL",
     "image_url_or_upload": "画像のURLを入力するか、ファイルをアップロードしてください",
+    "increase": "[to be translated]:Increase",
     "inspect": "検査",
     "invalid_value": "無効な値",
     "knowledge_base": "ナレッジベース",
@@ -2438,11 +2437,6 @@
         "horizontal": "横並び",
         "label": "複数モデル回答スタイル",
         "vertical": "縦積み"
-      },
-      "style": {
-        "bubble": "バブル",
-        "label": "メッセージスタイル",
-        "plain": "プレーン"
       },
       "video": {
         "error": {
@@ -4659,7 +4653,6 @@
       "title": "ハードウェアアクセラレーションを無効にする"
     },
     "input": {
-      "auto_translate_with_space": "スペースを3回押して翻訳",
       "clear": {
         "all": "クリア",
         "knowledge_base": "選択された知識ベースをクリア",
@@ -4679,17 +4672,6 @@
       "onboot": "起動時に自動で開始",
       "title": "起動",
       "totray": "起動時にトレイに最小化"
-    },
-    "math": {
-      "engine": {
-        "label": "数式エンジン",
-        "none": "なし"
-      },
-      "single_dollar": {
-        "label": "$...$ を有効にする",
-        "tip": "単一のドル記号 $...$ で囲まれた数式をレンダリングします。デフォルトで有効です。"
-      },
-      "title": "数式設定"
     },
     "mcp": {
       "actions": "操作",
@@ -4948,12 +4930,6 @@
         "label": "メッセージ間に区切り線を表示",
         "tooltip": "バブルスタイルのメッセージには適用されません"
       },
-      "grid_columns": "メッセージグリッドの表示列数",
-      "grid_popover_trigger": {
-        "click": "クリックで表示",
-        "hover": "ホバーで表示",
-        "label": "グリッド詳細トリガー"
-      },
       "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "メッセージ削除前に確認",
@@ -4961,25 +4937,16 @@
         "enable_quick_triggers": "/ と @ を有効にしてクイックメニューを表示します。",
         "paste_long_text_as_file": "長いテキストをファイルとして貼り付け",
         "paste_long_text_threshold": "長いテキストの長さ",
-        "send_shortcuts": "送信ショートカット",
-        "show_estimated_tokens": "推定トークン数を表示",
-        "title": "入力設定"
+        "send_shortcuts": "送信ショートカット"
       },
       "markdown_rendering_input_message": "Markdownで入力メッセージをレンダリング",
       "metrics": "最初のトークンまでの時間 {{time_first_token_millsec}}ms | トークン速度 {{token_speed}} tok/sec",
-      "model": {
-        "title": "モデル設定"
-      },
+      "model": {},
       "navigation": {
-        "anchor": "会話アンカー",
-        "buttons": "上下ボタン",
-        "label": "メッセージナビゲーション",
-        "none": "表示しない"
+        "label": "メッセージナビゲーション"
       },
       "prompt": "プロンプト表示",
-      "show_message_outline": "メッセージの概要を表示します",
-      "title": "メッセージ設定",
-      "use_serif_font": "セリフフォントを使用"
+      "show_message_outline": "メッセージの概要を表示します"
     },
     "miniapps": {
       "cache_change_notice": "設定値に達するまでミニアプリの開閉が行われた後に変更が適用されます",

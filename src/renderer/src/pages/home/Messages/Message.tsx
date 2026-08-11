@@ -75,7 +75,7 @@ const MessageItem: FC<Props> = ({
   const { assistant, setModel } = useAssistant(message.assistantId)
   const { isMultiSelectMode } = useChatContext(topic)
   const model = useModel(getMessageModelId(message), message.model?.provider) || message.model
-  const { messageFont, fontSize, messageStyle, showMessageOutline } = useSettings()
+  const { fontSize, showMessageOutline } = useSettings()
   const { editMessageBlocks, resendUserMessageWithEdit } = useMessageOperations(topic)
   const messageContainerRef = useRef<HTMLDivElement>(null)
   const { editingMessageId, startEditing, stopEditing } = useMessageEditing()
@@ -129,7 +129,9 @@ const MessageItem: FC<Props> = ({
   const isAssistantMessage = message.role === 'assistant'
   const isProcessing = isMessageProcessing(message)
   const showMenubar = !hideMenuBar && !isEditing && !isProcessing
-  const shouldReverseFooter = isLastMessage && (messageStyle === 'plain' || isAssistantMessage)
+  // LOCK-105: message style is always bubble; the footer reverses for the
+  // last assistant message.
+  const shouldReverseFooter = isLastMessage && isAssistantMessage
 
   // 编辑模式下点击消息内容区域触发组选择
   const handleMessageClick = useCallback(
@@ -291,7 +293,6 @@ const MessageItem: FC<Props> = ({
             <MessageContentContainer
               className="message-content-container"
               style={{
-                fontFamily: messageFont === 'serif' ? 'var(--font-family-serif)' : 'var(--font-family)',
                 fontSize,
                 overflowY: isHorizontalMultiModelLayout ? 'auto' : 'visible'
               }}>

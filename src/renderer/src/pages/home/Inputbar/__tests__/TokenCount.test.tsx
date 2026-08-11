@@ -18,14 +18,6 @@ vi.mock('react-i18next', () => ({
   })
 }))
 
-const mockShowInputEstimatedTokens = vi.fn(() => true)
-
-vi.mock('@renderer/hooks/useSettings', () => ({
-  useSettings: () => ({
-    showInputEstimatedTokens: mockShowInputEstimatedTokens()
-  })
-}))
-
 vi.mock('antd', () => ({
   Divider: ({ type, style }: any) => <hr data-testid="divider" data-type={type} style={style} />,
   Popover: ({ children, content }: any) => (
@@ -119,10 +111,12 @@ describe('TokenCount', () => {
     expect(twelveElements.length).toBeGreaterThanOrEqual(1)
   })
 
-  it('renders null when showInputEstimatedTokens is false', () => {
-    mockShowInputEstimatedTokens.mockReturnValueOnce(false)
+  it('always renders when called (LOCK-108: no user setting gates the display)', () => {
+    // The old `showInputEstimatedTokens` setting is removed; the component no
+    // longer reads it and must always render its token/context display.
     const { container } = render(<TokenCount {...defaultProps} />)
-    expect(container.innerHTML).toBe('')
+    expect(container.innerHTML).not.toBe('')
+    expect(screen.getByTestId('popover-children')).toBeInTheDocument()
   })
 
   it('popover content shows both context count and estimate', () => {

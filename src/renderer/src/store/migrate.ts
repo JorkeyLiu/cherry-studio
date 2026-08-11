@@ -585,6 +585,7 @@ const migrateConfig = {
   },
   '35': (state: RootState) => {
     try {
+      // @ts-ignore eslint-disable-next-line
       state.settings.mathEngine = 'KaTeX'
       return state
     } catch (error) {
@@ -601,6 +602,7 @@ const migrateConfig = {
   },
   '37': (state: RootState) => {
     try {
+      // @ts-ignore eslint-disable-next-line
       state.settings.messageStyle = 'plain'
       return state
     } catch (error) {
@@ -859,6 +861,7 @@ const migrateConfig = {
   },
   '60': (state: RootState) => {
     try {
+      // @ts-ignore eslint-disable-next-line
       state.settings.multiModelMessageStyle = 'fold'
       return state
     } catch (error) {
@@ -960,7 +963,9 @@ const migrateConfig = {
   '69': (state: RootState) => {
     try {
       addMiniApp(state, 'coze')
+      // @ts-ignore eslint-disable-next-line
       state.settings.gridColumns = 2
+      // @ts-ignore eslint-disable-next-line
       state.settings.gridPopoverTrigger = 'hover'
       return state
     } catch (error) {
@@ -1148,6 +1153,7 @@ const migrateConfig = {
   },
   '83': (state: RootState) => {
     try {
+      // @ts-ignore eslint-disable-next-line
       state.settings.messageNavigation = 'buttons'
       state.settings.launchOnBoot = false
       state.settings.launchToTray = false
@@ -1173,6 +1179,7 @@ const migrateConfig = {
       state.settings.autoCheckUpdate = !state.settings.manualUpdateCheck
       // @ts-ignore eslint-disable-next-line
       delete state.settings.manualUpdateCheck
+      // @ts-ignore eslint-disable-next-line
       state.settings.gridPopoverTrigger = 'click'
       return state
     } catch (error) {
@@ -1426,10 +1433,12 @@ const migrateConfig = {
         verbosity: 'medium'
       }
 
+      // @ts-ignore eslint-disable-next-line
       state.settings.codeExecution = {
         enabled: false,
         timeoutMinutes: 1
       }
+      // @ts-ignore eslint-disable-next-line
       state.settings.codeEditor = {
         enabled: false,
         themeLight: 'auto',
@@ -2092,6 +2101,7 @@ const migrateConfig = {
   },
   '131': (state: RootState) => {
     try {
+      // @ts-ignore eslint-disable-next-line
       state.settings.mathEnableSingleDollar = true
       return state
     } catch (error) {
@@ -2359,6 +2369,7 @@ const migrateConfig = {
   '151': (state: RootState) => {
     try {
       if (state.settings) {
+        // @ts-ignore eslint-disable-next-line
         state.settings.codeFancyBlock = true
       }
       return state
@@ -3653,6 +3664,62 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 217 error', error as Error)
+      return state
+    }
+  },
+  '218': (state: RootState) => {
+    try {
+      // LOCK-104/105/106/107/108: quick-settings consolidation.
+      // Clean obsolete preference fields removed by the consolidation:
+      //  - messageFont (LOCK-104: messages always use the system font)
+      //  - showInputEstimatedTokens (LOCK-108: always enabled, no setting)
+      //  - autoTranslateWithSpace (LOCK-108: triple-space translation removed)
+      //  - mathEngine / mathEnableSingleDollar (LOCK-106: fixed KaTeX)
+      //  - messageStyle (LOCK-105: always bubble)
+      //  - codeExecution / codeEditor / codeShowLineNumbers / codeCollapsible /
+      //    codeWrappable / codeImageTools / codeFancyBlock
+      //    (LOCK-107: fixed read-only viewer baseline)
+      //  - gridColumns / gridPopoverTrigger / multiModelMessageStyle
+      //    (LOCK-105: multi-model layout is always fold/tag mode)
+      // The per-message `multiModelMessageStyle` field on Message entities is
+      // preserved for Cherry Studio import/schema compatibility (LOCK-001).
+      const settings = state.settings as unknown as Record<string, unknown> | undefined
+      if (settings) {
+        const removedFields = [
+          'messageFont',
+          'showInputEstimatedTokens',
+          'autoTranslateWithSpace',
+          'mathEngine',
+          'mathEnableSingleDollar',
+          'messageStyle',
+          'codeExecution',
+          'codeEditor',
+          'codeShowLineNumbers',
+          'codeCollapsible',
+          'codeWrappable',
+          'codeImageTools',
+          'codeFancyBlock',
+          'gridColumns',
+          'gridPopoverTrigger',
+          'multiModelMessageStyle'
+        ] as const
+        for (const field of removedFields) {
+          delete settings[field]
+        }
+
+        // LOCK-105: legacy tri-state navigation → boolean.
+        //   none → false (off), buttons / anchor → true (on).
+        const legacyNavigation = settings.messageNavigation
+        if (typeof legacyNavigation === 'string') {
+          settings.messageNavigation = legacyNavigation !== 'none'
+        } else if (legacyNavigation === undefined || legacyNavigation === null) {
+          settings.messageNavigation = false
+        }
+      }
+      logger.info('migrate 218 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 218 error', error as Error)
       return state
     }
   }

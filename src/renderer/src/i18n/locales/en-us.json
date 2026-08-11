@@ -1277,9 +1277,6 @@
       }
     },
     "settings": {
-      "code": {
-        "title": "Code Block Settings"
-      },
       "code_collapsible": "Code block collapsible",
       "code_editor": {
         "autocompletion": "Autocompletion",
@@ -1560,6 +1557,7 @@
     "current": "Current",
     "cut": "Cut",
     "decline": "Decline",
+    "decrease": "Decrease",
     "default": "Default",
     "delete": "Delete",
     "delete_confirm": "Are you sure you want to delete?",
@@ -1597,6 +1595,7 @@
     "image_preview": "Image preview",
     "image_url": "Image URL",
     "image_url_or_upload": "Enter image URL or upload file",
+    "increase": "Increase",
     "inspect": "Inspect",
     "invalid_value": "Invalid Value",
     "knowledge_base": "Knowledge Base",
@@ -2438,11 +2437,6 @@
         "horizontal": "Side by side",
         "label": "Group style",
         "vertical": "Stacked view"
-      },
-      "style": {
-        "bubble": "Bubble",
-        "label": "Message style",
-        "plain": "Plain"
       },
       "video": {
         "error": {
@@ -4659,7 +4653,6 @@
       "title": "Disable Hardware Acceleration"
     },
     "input": {
-      "auto_translate_with_space": "Quickly translate with 3 spaces",
       "clear": {
         "all": "Clear",
         "knowledge_base": "Clear selected knowledge bases",
@@ -4679,17 +4672,6 @@
       "onboot": "Start Automatically on Boot",
       "title": "Launch",
       "totray": "Minimize to Tray on Launch"
-    },
-    "math": {
-      "engine": {
-        "label": "Math engine",
-        "none": "None"
-      },
-      "single_dollar": {
-        "label": "Enable $...$",
-        "tip": "Render math equations quoted by single dollar signs $...$. Default is enabled."
-      },
-      "title": "Math Settings"
     },
     "mcp": {
       "actions": "Actions",
@@ -4948,12 +4930,6 @@
         "label": "Show divider between messages",
         "tooltip": "Not applicable to bubble-style message"
       },
-      "grid_columns": "Message grid display columns",
-      "grid_popover_trigger": {
-        "click": "Click to display",
-        "hover": "Hover to display",
-        "label": "Grid detail trigger"
-      },
       "inject_context_timestamp": "Inject context timestamp",
       "input": {
         "confirm_delete_message": "Confirm before deleting messages",
@@ -4961,25 +4937,16 @@
         "enable_quick_triggers": "Enable / and @ triggers",
         "paste_long_text_as_file": "Paste long text as file",
         "paste_long_text_threshold": "Paste long text length",
-        "send_shortcuts": "Send shortcuts",
-        "show_estimated_tokens": "Show estimated tokens",
-        "title": "Input Settings"
+        "send_shortcuts": "Send shortcuts"
       },
       "markdown_rendering_input_message": "Markdown render input message",
       "metrics": "{{time_first_token_millsec}}ms to first token | {{token_speed}} tok/sec",
-      "model": {
-        "title": "Model Settings"
-      },
+      "model": {},
       "navigation": {
-        "anchor": "Message Anchor",
-        "buttons": "Navigation Buttons",
-        "label": "Navigation bar",
-        "none": "None"
+        "label": "Navigation bar"
       },
       "prompt": "Show prompt",
-      "show_message_outline": "Show message outline",
-      "title": "Message Settings",
-      "use_serif_font": "Use serif font"
+      "show_message_outline": "Show message outline"
     },
     "miniapps": {
       "cache_change_notice": "Changes will take effect when the number of open mini apps reaches the set value",

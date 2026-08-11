@@ -1,7 +1,6 @@
 import { ClickableFilePath } from '@renderer/components/ClickableFilePath'
 import { CodeBlockView, HtmlArtifactsCard } from '@renderer/components/CodeBlockView'
 import { isWin } from '@renderer/config/constant'
-import { useSettings } from '@renderer/hooks/useSettings'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import store from '@renderer/store'
 import { messageBlocksSelectors } from '@renderer/store/messageBlock'
@@ -29,7 +28,7 @@ const CodeBlock: React.FC<Props> = ({ children, className, node, blockId }) => {
         ? 'svg'
         : detectedLanguage
   }, [children, detectedLanguage])
-  const { codeFancyBlock } = useSettings()
+  // LOCK-107: the fancy HTML code block is always enabled.
 
   // 代码块 id
   const id = useMemo(() => getCodeBlockId(node?.position?.start), [node?.position?.start])
@@ -52,19 +51,13 @@ const CodeBlock: React.FC<Props> = ({ children, className, node, blockId }) => {
   )
 
   if (language !== null) {
-    // Fancy code block
-    if (codeFancyBlock) {
-      if (language === 'html') {
-        const isOpenFence = isOpenFenceBlock(children?.length, languageMatch?.[1]?.length, node?.position)
-        return <HtmlArtifactsCard html={children} onSave={handleSave} isStreaming={isStreaming && isOpenFence} />
-      }
+    // Fancy code block (LOCK-107: always enabled)
+    if (language === 'html') {
+      const isOpenFence = isOpenFenceBlock(children?.length, languageMatch?.[1]?.length, node?.position)
+      return <HtmlArtifactsCard html={children} onSave={handleSave} isStreaming={isStreaming && isOpenFence} />
     }
 
-    return (
-      <CodeBlockView language={language} onSave={handleSave}>
-        {children}
-      </CodeBlockView>
-    )
+    return <CodeBlockView language={language}>{children}</CodeBlockView>
   }
 
   // Detect inline code that looks like an absolute file path (e.g. /Users/foo/bar.tsx)

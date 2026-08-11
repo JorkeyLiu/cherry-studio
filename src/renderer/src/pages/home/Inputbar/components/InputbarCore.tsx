@@ -17,7 +17,7 @@ import { classNames } from '@renderer/utils'
 import { formatQuotedText } from '@renderer/utils/formats'
 import { isSendMessageKeyPressed } from '@renderer/utils/input'
 import { IpcChannel } from '@shared/IpcChannel'
-import { Tooltip } from 'antd'
+import { Divider, Tooltip } from 'antd'
 import TextArea from 'antd/es/input/TextArea'
 import type { TextAreaRef } from 'antd/lib/input/TextArea'
 import { CirclePause, Languages } from 'lucide-react'
@@ -37,6 +37,7 @@ import { usePasteHandler } from '../hooks/usePasteHandler'
 import { getInputbarConfig } from '../registry'
 import SendMessageButton from '../SendMessageButton'
 import type { InputbarScope } from '../types'
+import InputbarSettings from './InputbarSettings'
 
 const logger = loggerService.withContext('InputbarCore')
 
@@ -138,7 +139,6 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
     fontSize,
     pasteLongTextAsFile,
     pasteLongTextThreshold,
-    autoTranslateWithSpace,
     enableQuickPanelTriggers,
     enableSpellCheck
   } = useSettings()
@@ -149,8 +149,6 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   const { getLanguageByLangcode } = useTranslate()
 
   const dispatch = useAppDispatch()
-  const [spaceClickCount, setSpaceClickCount] = useState(0)
-  const spaceClickTimer = useRef<NodeJS.Timeout | null>(null)
   const { searching } = useRuntime()
   const startDragY = useRef<number>(0)
   const startHeight = useRef<number>(0)
@@ -289,23 +287,6 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
           return
         }
       }
-      if (autoTranslateWithSpace && event.key === ' ') {
-        setSpaceClickCount((prev) => prev + 1)
-        if (spaceClickTimer.current) {
-          clearTimeout(spaceClickTimer.current)
-        }
-        spaceClickTimer.current = setTimeout(() => {
-          setSpaceClickCount(0)
-        }, 200)
-
-        if (spaceClickCount === 2) {
-          logger.info('Triple space detected - trigger translation')
-          setSpaceClickCount(0)
-          void translate()
-          return
-        }
-      }
-
       const isEnterPressed = event.key === 'Enter' && !event.nativeEvent.isComposing
       if (isEnterPressed) {
         if (isSendMessageKeyPressed(event, sendMessageShortcut) && !isSendDisabled) {
@@ -326,11 +307,9 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
     },
     [
       inputFocus,
-      autoTranslateWithSpace,
       text.length,
       files.length,
       textareaRef,
-      spaceClickCount,
       translate,
       sendMessageShortcut,
       isSendDisabled,
@@ -582,14 +561,6 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
     }
   }, [handlePaste])
 
-  useEffect(() => {
-    return () => {
-      if (spaceClickTimer.current) {
-        clearTimeout(spaceClickTimer.current)
-      }
-    }
-  }, [])
-
   const rightSectionExtras = useMemo(() => {
     const extras: React.ReactNode[] = []
     extras.push(
@@ -666,7 +637,12 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
           />
 
           <BottomBar>
-            <LeftSection>{leftToolbar}</LeftSection>
+            <LeftSection>
+              {leftToolbar}
+              {/* LOCK-109: input-toolbar divider + settings icon/button */}
+              <Divider type="vertical" style={{ margin: '0 6px' }} />
+              <InputbarSettings />
+            </LeftSection>
             <RightSection>
               {rightToolbar}
               {rightSectionExtras}

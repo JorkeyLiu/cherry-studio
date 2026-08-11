@@ -418,7 +418,6 @@
     "redux-persist": "^6.0.0",
     "reflect-metadata": "0.2.2",
     "rehype-katex": "^7.0.1",
-    "rehype-mathjax": "^7.1.0",
     "rehype-parse": "^9.0.1",
     "rehype-raw": "^7.0.0",
     "rehype-stringify": "^10.0.1",

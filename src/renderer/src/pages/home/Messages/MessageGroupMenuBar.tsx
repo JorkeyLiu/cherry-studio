@@ -1,14 +1,7 @@
-import {
-  ColumnHeightOutlined,
-  ColumnWidthOutlined,
-  FolderOutlined,
-  NumberOutlined,
-  ReloadOutlined
-} from '@ant-design/icons'
+import { ReloadOutlined } from '@ant-design/icons'
 import { HStack } from '@renderer/components/Layout'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
-import type { MultiModelMessageStyle } from '@renderer/store/settings'
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus } from '@renderer/types/newMessage'
@@ -20,11 +13,8 @@ import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import MessageGroupModelList from './MessageGroupModelList'
-import MessageGroupSettings from './MessageGroupSettings'
 
 interface Props {
-  multiModelMessageStyle: MultiModelMessageStyle
-  setMultiModelMessageStyle: (style: MultiModelMessageStyle) => void
   messages: Message[]
   selectMessageId: string
   setSelectedMessage: (message: Message) => void
@@ -32,9 +22,10 @@ interface Props {
   topic: Topic
 }
 
+// LOCK-105: the multi-model group menu bar always renders in fold/tag mode;
+// the horizontal/vertical/grid layout selector and the grid settings popover
+// are removed.
 const MessageGroupMenuBar: FC<Props> = ({
-  multiModelMessageStyle,
-  setMultiModelMessageStyle,
   messages,
   selectMessageId,
   setSelectedMessage,
@@ -78,47 +69,15 @@ const MessageGroupMenuBar: FC<Props> = ({
     }
   }
 
-  const multiModelMessageStyleTextByLayout = {
-    fold: t('message.message.multi_model_style.fold.label'),
-    vertical: t('message.message.multi_model_style.vertical'),
-    horizontal: t('message.message.multi_model_style.horizontal'),
-    grid: t('message.message.multi_model_style.grid')
-  } as const
-
   return (
-    <GroupMenuBar $layout={multiModelMessageStyle} className="group-menu-bar">
+    <GroupMenuBar className="group-menu-bar">
       <HStack style={{ alignItems: 'center', flex: 1, overflow: 'hidden' }}>
-        <LayoutContainer>
-          {(['fold', 'vertical', 'horizontal', 'grid'] as const).map((layout) => (
-            <Tooltip
-              mouseEnterDelay={0.5}
-              key={layout}
-              title={t('message.message.multi_model_style.label') + ': ' + multiModelMessageStyleTextByLayout[layout]}>
-              <LayoutOption
-                $active={multiModelMessageStyle === layout}
-                onClick={() => setMultiModelMessageStyle(layout)}>
-                {layout === 'fold' ? (
-                  <FolderOutlined />
-                ) : layout === 'horizontal' ? (
-                  <ColumnWidthOutlined />
-                ) : layout === 'vertical' ? (
-                  <ColumnHeightOutlined />
-                ) : (
-                  <NumberOutlined />
-                )}
-              </LayoutOption>
-            </Tooltip>
-          ))}
-        </LayoutContainer>
-        {multiModelMessageStyle === 'fold' && (
-          <MessageGroupModelList
-            messages={messages}
-            selectMessageId={selectMessageId}
-            setSelectedMessage={setSelectedMessage}
-            onReorderMessages={onReorderMessages}
-          />
-        )}
-        {multiModelMessageStyle === 'grid' && <MessageGroupSettings />}
+        <MessageGroupModelList
+          messages={messages}
+          selectMessageId={selectMessageId}
+          setSelectedMessage={setSelectedMessage}
+          onReorderMessages={onReorderMessages}
+        />
       </HStack>
       {hasFailedMessages && (
         <Tooltip title={t('message.group.retry_failed')} mouseEnterDelay={0.6}>
@@ -135,7 +94,7 @@ const MessageGroupMenuBar: FC<Props> = ({
   )
 }
 
-const GroupMenuBar = styled.div<{ $layout: MultiModelMessageStyle }>`
+const GroupMenuBar = styled.div`
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -148,23 +107,6 @@ const GroupMenuBar = styled.div<{ $layout: MultiModelMessageStyle }>`
   border: 0.5px solid var(--color-border);
   height: 40px;
   user-select: none;
-`
-
-const LayoutContainer = styled.div`
-  display: flex;
-  gap: 4px;
-  flex-direction: row;
-`
-
-const LayoutOption = styled.div<{ $active: boolean }>`
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background-color: ${({ $active }) => ($active ? 'var(--color-background-soft)' : 'transparent')};
-
-  &:hover {
-    background-color: ${({ $active }) => ($active ? 'var(--color-background-soft)' : 'var(--color-hover)')};
-  }
 `
 
 export default memo(MessageGroupMenuBar)

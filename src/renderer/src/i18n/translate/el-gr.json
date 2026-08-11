@@ -1277,9 +1277,6 @@
       }
     },
     "settings": {
-      "code": {
-        "title": "Ρυθμίσεις μπλοκ κώδικα"
-      },
       "code_collapsible": "Οι κώδικες μπορούν να συμπιεζόνται",
       "code_editor": {
         "autocompletion": "Αυτόματη Συμπλήρωση",
@@ -1560,6 +1557,7 @@
     "current": "Τρέχων",
     "cut": "Κοπή",
     "decline": "[to be translated]:Decline",
+    "decrease": "[to be translated]:Decrease",
     "default": "Προεπιλογή",
     "delete": "Διαγραφή",
     "delete_confirm": "Είστε βέβαιοι ότι θέλετε να διαγράψετε;",
@@ -1597,6 +1595,7 @@
     "image_preview": "Προεπισκόπηση εικόνας",
     "image_url": "Διεύθυνση URL εικόνας",
     "image_url_or_upload": "Εισαγάγετε διεύθυνση URL εικόνας ή ανεβάστε αρχείο",
+    "increase": "[to be translated]:Increase",
     "inspect": "Επιθεώρηση",
     "invalid_value": "Μη έγκυρη τιμή",
     "knowledge_base": "Βάση Γνώσεων",
@@ -2438,11 +2437,6 @@
         "horizontal": "Διάταξη επίπεδης",
         "label": "Στυλ πολλαπλών απαντήσεων μοντέλου",
         "vertical": "Διάταξη κάθετης"
-      },
-      "style": {
-        "bubble": "Αερογεύματα",
-        "label": "Στυλ μηνύματος",
-        "plain": "Απλός"
       },
       "video": {
         "error": {
@@ -4659,7 +4653,6 @@
       "title": "Απενεργοποίηση επιτάχυνσης υλικού"
     },
     "input": {
-      "auto_translate_with_space": "Μετάφραση με τρεις γρήγορες πιστώσεις",
       "clear": {
         "all": "Εκκαθάριση",
         "knowledge_base": "Εκκαθάριση επιλεγμένων βάσεων γνώσης",
@@ -4679,17 +4672,6 @@
       "onboot": "Αυτόματη εκκίνηση κατά την εκκίνηση του συστήματος",
       "title": "Εκκίνηση",
       "totray": "Εισαγωγή στην συνδρομή κατά την εκκίνηση"
-    },
-    "math": {
-      "engine": {
-        "label": "Μηχανισμός μαθηματικών τύπων",
-        "none": "κανένα"
-      },
-      "single_dollar": {
-        "label": "ενεργοποίηση $...$",
-        "tip": "Επεξεργασία μαθηματικών τύπων που περικλείονται σε ένα μόνο σύμβολο δολαρίου $...$, προεπιλογή ενεργοποιημένη."
-      },
-      "title": "Ρύθμιση μαθηματικών τύπων"
     },
     "mcp": {
       "actions": "Ενέργειες",
@@ -4948,12 +4930,6 @@
         "label": "Διαχωριστική γραμμή μηνυμάτων",
         "tooltip": "Δεν ισχύει για μηνύματα με στυλ φυσαλίδας"
       },
-      "grid_columns": "Αριθμός στήλων γριλ μηνυμάτων",
-      "grid_popover_trigger": {
-        "click": "Εμφάνιση κλικ",
-        "hover": "Εμφάνιση επιστροφής",
-        "label": "Καταγραφή στοιχείων στο grid"
-      },
       "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "Επιβεβαίωση πριν τη διαγραφή μηνύματος",
@@ -4961,25 +4937,16 @@
         "enable_quick_triggers": "Ενεργοποίηση των '/' και '@' για γρήγορη πρόσβαση σε μενού",
         "paste_long_text_as_file": "Επικόλληση μεγάλου κειμένου ως αρχείο",
         "paste_long_text_threshold": "Όριο μεγάλου κειμένου",
-        "send_shortcuts": "Συντάγματα αποστολής",
-        "show_estimated_tokens": "Εμφάνιση εκτιμώμενου αριθμού token",
-        "title": "Ρυθμίσεις εισαγωγής"
+        "send_shortcuts": "Συντάγματα αποστολής"
       },
       "markdown_rendering_input_message": "Markdown Rendering Input Message",
       "metrics": "Χρόνος πρώτου χαρακτήρα {{time_first_token_millsec}}ms | {{token_speed}} tokens ανά δευτερόλεπτο",
-      "model": {
-        "title": "Ρυθμίσεις μοντέλου"
-      },
+      "model": {},
       "navigation": {
-        "anchor": "Ancre συζητήσεων",
-        "buttons": "Πάνω και κάτω κουμπιά",
-        "label": "Κουμπιά πλοήγησης συζητήσεων",
-        "none": "Χωρίς εμφάνιση"
+        "label": "Κουμπιά πλοήγησης συζητήσεων"
       },
       "prompt": "Λήμμα προτροπής",
-      "show_message_outline": "Εμφάνιση πλαισίου μηνύματος",
-      "title": "Ρυθμίσεις μηνυμάτων",
-      "use_serif_font": "Χρήση μορφής Serif"
+      "show_message_outline": "Εμφάνιση πλαισίου μηνύματος"
     },
     "miniapps": {
       "cache_change_notice": "Η αλλαγή θα τεθεί σε ισχύ αφού το πλήθος των ανοιχτών μικροπρογραμμάτων φτάσει τη ρυθμισμένη τιμή",

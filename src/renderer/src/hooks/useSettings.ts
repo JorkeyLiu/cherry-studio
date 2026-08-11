@@ -114,8 +114,10 @@ export function useSettings() {
 }
 
 export function useMessageStyle() {
-  const { messageStyle } = useSettings()
-  const isBubbleStyle = messageStyle === 'bubble'
+  // LOCK-105: message style is always bubble; the plain layout and the
+  // messageStyle setting are removed. The hook remains as a stable
+  // compatibility surface for existing consumers.
+  const isBubbleStyle = true
 
   return {
     isBubbleStyle

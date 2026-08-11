@@ -1277,9 +1277,6 @@
       }
     },
     "settings": {
-      "code": {
-        "title": "Cài Đặt Khối Mã"
-      },
       "code_collapsible": "Khối mã có thể thu gọn",
       "code_editor": {
         "autocompletion": "Tự động hoàn thành",
@@ -1560,6 +1557,7 @@
     "current": "Hiện tại",
     "cut": "Cắt",
     "decline": "[to be translated]:Decline",
+    "decrease": "[to be translated]:Decrease",
     "default": "Mặc định",
     "delete": "Xóa",
     "delete_confirm": "Bạn có chắc chắn muốn xóa không?",
@@ -1597,6 +1595,7 @@
     "image_preview": "Xem trước hình ảnh",
     "image_url": "URL hình ảnh",
     "image_url_or_upload": "Nhập URL hình ảnh hoặc tải tệp lên",
+    "increase": "[to be translated]:Increase",
     "inspect": "Kiểm tra",
     "invalid_value": "Giá trị không hợp lệ",
     "knowledge_base": "Cơ sở tri thức",
@@ -2438,11 +2437,6 @@
         "horizontal": "Cạnh nhau",
         "label": "Phong cách nhóm",
         "vertical": "Chế độ xem chồng"
-      },
-      "style": {
-        "bubble": "Bong bóng",
-        "label": "Kiểu tin nhắn",
-        "plain": "Trơn"
       },
       "video": {
         "error": {
@@ -4659,7 +4653,6 @@
       "title": "Tắt Tăng tốc Phần cứng"
     },
     "input": {
-      "auto_translate_with_space": "Dịch nhanh với 3 dấu cách",
       "clear": {
         "all": "Rõ ràng",
         "knowledge_base": "Xóa các cơ sở kiến thức đã chọn",
@@ -4679,17 +4672,6 @@
       "onboot": "Tự động khởi động khi bật máy",
       "title": "Khởi chạy",
       "totray": "Thu nhỏ vào khay hệ thống khi khởi chạy"
-    },
-    "math": {
-      "engine": {
-        "label": "Công cụ toán học",
-        "none": "Không"
-      },
-      "single_dollar": {
-        "label": "Kích hoạt $...$",
-        "tip": "Hiển thị các phương trình toán học được đặt trong cặp dấu đô la đơn $...$. Mặc định được bật."
-      },
-      "title": "Cài đặt Toán học"
     },
     "mcp": {
       "actions": "Hành động",
@@ -4948,12 +4930,6 @@
         "label": "Hiển thị đường phân cách giữa các tin nhắn",
         "tooltip": "Không áp dụng cho tin nhắn kiểu bong bóng"
       },
-      "grid_columns": "Cột hiển thị lưới tin nhắn",
-      "grid_popover_trigger": {
-        "click": "Kliknout pro zobrazení",
-        "hover": "Di chuột để hiển thị",
-        "label": "Kích hoạt chi tiết lưới"
-      },
       "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "Xác nhận trước khi xóa tin nhắn",
@@ -4961,25 +4937,16 @@
         "enable_quick_triggers": "Kích hoạt các kích hoạt / và @",
         "paste_long_text_as_file": "Dán văn bản dài dưới dạng tệp",
         "paste_long_text_threshold": "I’m ready—please provide the long text you’d like translated.",
-        "send_shortcuts": "Gửi phím tắt",
-        "show_estimated_tokens": "Hiển thị số token ước tính",
-        "title": "Cài đặt đầu vào"
+        "send_shortcuts": "Gửi phím tắt"
       },
       "markdown_rendering_input_message": "Tin nhắn nhập Markdown kết xuất",
       "metrics": "{{time_first_token_millsec}}ms até o primeiro token | {{token_speed}} tok/seg",
-      "model": {
-        "title": "Cài đặt mô hình"
-      },
+      "model": {},
       "navigation": {
-        "anchor": "Neo Tin Nhắn",
-        "buttons": "Các Nút Điều Hướng",
-        "label": "Thanh điều hướng",
-        "none": ""
+        "label": "Thanh điều hướng"
       },
       "prompt": "Mostrar indicación",
-      "show_message_outline": "Hiển thị dàn bộ tin nhắn",
-      "title": "Cài đặt tin nhắn",
-      "use_serif_font": "Dùng phông chữ có chân"
+      "show_message_outline": "Hiển thị dàn bộ tin nhắn"
     },
     "miniapps": {
       "cache_change_notice": "Các thay đổi sẽ có hiệu lực khi số lượng ứng dụng mini đang mở đạt đến giá trị đã đặt",

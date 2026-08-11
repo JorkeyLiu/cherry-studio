@@ -3,18 +3,15 @@ import Scrollbar from '@renderer/components/Scrollbar'
 import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
-import { useSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { useAppDispatch } from '@renderer/store'
-import type { MultiModelMessageStyle } from '@renderer/store/settings'
 import { reorderMessageGroupThunk } from '@renderer/store/thunk/messageGroupReorder'
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { classNames } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
-import { Popover } from 'antd'
-import type { ComponentProps, WheelEvent as ReactWheelEvent } from 'react'
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import type { ComponentProps } from 'react'
+import { memo, useCallback, useEffect, useMemo } from 'react'
 import styled from 'styled-components'
 
 import MessageItem from './Message'
@@ -35,25 +32,17 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
 
   // Hooks
   const { editMessage } = useMessageOperations(topic)
-  const { multiModelMessageStyle: multiModelMessageStyleSetting, gridColumns, gridPopoverTrigger } = useSettings()
   const { isMultiSelectMode } = useChatContext(topic)
   const { setTimeoutTimer } = useTimer()
   const dispatch = useAppDispatch()
 
   const isGrouped = messageLength > 1 && messages.every((m) => m.role === 'assistant')
 
-  // States
-  const [_multiModelMessageStyle, setMultiModelMessageStyle] = useState<MultiModelMessageStyle>(
-    messages[0].multiModelMessageStyle || multiModelMessageStyleSetting
-  )
-
-  // 对于单模型消息，采用简单的样式，避免 overflow 影响内部的 sticky 效果
-  const multiModelMessageStyle = useMemo(
-    () => (messageLength < 2 ? 'fold' : _multiModelMessageStyle),
-    [_multiModelMessageStyle, messageLength]
-  )
-
-  const isGrid = multiModelMessageStyle === 'grid'
+  // LOCK-105: multi-model answer layout is always fold/tag mode. The runtime
+  // no longer renders horizontal/vertical/grid layouts; the per-message
+  // `multiModelMessageStyle` field is preserved for Cherry Studio
+  // import/schema compatibility only (LOCK-001).
+  const multiModelMessageStyle = 'fold'
 
   const selectedMessageId = useMemo(() => {
     if (messages.length === 1) return messages[0]?.id
@@ -142,39 +131,12 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
     }
   }, [messages])
 
-  const handleHorizontalGroupWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
-    const target = event.target as HTMLElement | null
-    if (target?.closest('.message-content-container')) {
-      return
-    }
-
-    const groupContainer = event.currentTarget
-    const contentContainers = Array.from(groupContainer.querySelectorAll<HTMLElement>('.message-content-container'))
-    const hasInnerVerticalScroll = contentContainers.some(
-      (contentContainer) => contentContainer.scrollHeight > contentContainer.clientHeight + 1
-    )
-    const hasHorizontalScroll = groupContainer.scrollWidth > groupContainer.clientWidth + 1
-    const horizontalDelta = Math.abs(event.deltaX) > 0 ? event.deltaX : event.shiftKey ? event.deltaY : 0
-
-    if (horizontalDelta !== 0 && hasHorizontalScroll) {
-      event.preventDefault()
-      event.stopPropagation()
-      groupContainer.scrollLeft += horizontalDelta
-      return
-    }
-
-    if (hasInnerVerticalScroll) {
-      event.preventDefault()
-      event.stopPropagation()
-    }
-  }, [])
-
   const renderMessage = useCallback(
     (message: Message & { index: number }) => {
-      const isGridGroupMessage = isGrid && message.role === 'assistant' && isGrouped
       const messageProps = {
         isGrouped,
-        isHorizontalMultiModelLayout: multiModelMessageStyle === 'horizontal',
+        // LOCK-105: horizontal multi-model layout is removed.
+        isHorizontalMultiModelLayout: false,
         message,
         topic,
         index: message.index,
@@ -182,7 +144,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         onGroupClick
       } satisfies ComponentProps<typeof MessageItem>
 
-      const messageContent = (
+      return (
         <MessageWrapper
           id={`message-${message.id}`}
           key={message.id}
@@ -199,38 +161,8 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
           />
         </MessageWrapper>
       )
-
-      if (isGridGroupMessage) {
-        return (
-          <Popover
-            key={message.id}
-            destroyOnHidden
-            content={
-              <MessageWrapper
-                className={classNames([
-                  'in-popover',
-                  {
-                    [multiModelMessageStyle]: message.role === 'assistant' && messages.length > 1,
-                    selected: message.id === selectedMessageId
-                  }
-                ])}>
-                <MessageItem onUpdateUseful={onUpdateUseful} {...messageProps} />
-              </MessageWrapper>
-            }
-            trigger={gridPopoverTrigger}
-            styles={{
-              root: { maxWidth: '60vw', overflowY: 'auto', zIndex: 1000 },
-              body: { padding: 2 }
-            }}>
-            {messageContent}
-          </Popover>
-        )
-      }
-
-      return messageContent
     },
     [
-      isGrid,
       isGrouped,
       topic,
       multiModelMessageStyle,
@@ -238,7 +170,6 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
       selectedMessageId,
       onUpdateUseful,
       groupContextMessageId,
-      gridPopoverTrigger,
       isEditMode,
       onGroupClick
     ]
@@ -249,22 +180,11 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
       <GroupContainer
         id={groupId ? `message-group-${groupId}` : undefined}
         className={classNames([multiModelMessageStyle])}>
-        <GridContainer
-          $count={messageLength}
-          $gridColumns={gridColumns}
-          className={classNames([multiModelMessageStyle, { 'multi-select-mode': isMultiSelectMode }])}
-          onWheelCapture={multiModelMessageStyle === 'horizontal' ? handleHorizontalGroupWheel : undefined}>
+        <GridContainer className={classNames([multiModelMessageStyle, { 'multi-select-mode': isMultiSelectMode }])}>
           {messages.map(renderMessage)}
         </GridContainer>
         {isGrouped && (
           <MessageGroupMenuBar
-            multiModelMessageStyle={multiModelMessageStyle}
-            setMultiModelMessageStyle={(style) => {
-              setMultiModelMessageStyle(style)
-              messages.forEach((message) => {
-                void editMessage(message.id, { multiModelMessageStyle: style })
-              })
-            }}
             messages={messages}
             selectMessageId={selectedMessageId}
             setSelectedMessage={setSelectedMessage}
@@ -278,51 +198,26 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
 }
 
 const GroupContainer = styled.div`
-  &.horizontal,
-  &.grid {
-    padding: 4px 10px;
-    .group-menu-bar {
-      margin-left: 0;
-      margin-right: 0;
-    }
-  }
   &.multi-select-mode {
     padding: 5px 10px;
   }
-
 `
 
-const GridContainer = styled(Scrollbar)<{ $count: number; $gridColumns: number }>`
+const GridContainer = styled(Scrollbar)`
   width: 100%;
   display: grid;
   overflow-y: visible;
   gap: 16px;
 
-  &.horizontal {
-    padding-bottom: 4px;
-    grid-template-columns: repeat(${({ $count }) => $count}, minmax(420px, 1fr));
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-  &.fold,
-  &.vertical {
+  // LOCK-105: fold/tag is the only runtime layout.
+  &.fold {
     grid-template-columns: repeat(1, minmax(0, 1fr));
     gap: 8px;
-  }
-  &.grid {
-    grid-template-columns: repeat(
-      ${({ $count, $gridColumns }) => ($count > 1 ? $gridColumns || 2 : 1)},
-      minmax(0, 1fr)
-    );
-    grid-template-rows: auto;
   }
 
   &.multi-select-mode {
     grid-template-columns: repeat(1, minmax(0, 1fr));
     gap: 10px;
-    .grid {
-      height: auto;
-    }
     .message {
       border: 0.5px solid var(--color-border);
       border-radius: 10px;
@@ -338,68 +233,9 @@ const GridContainer = styled(Scrollbar)<{ $count: number; $gridColumns: number }
   }
 `
 
-interface MessageWrapperProps {
-  $isInPopover?: boolean
-}
-
-const MessageWrapper = styled.div<MessageWrapperProps>`
-  &.horizontal {
-    padding: 1px;
-    overflow-y: visible;
-    .message {
-      height: 100%;
-      border: 0.5px solid var(--color-border);
-      border-radius: 10px;
-    }
-    .message-content-container {
-      flex: 1;
-      padding-left: 0;
-      max-height: calc(100vh - 350px);
-      overflow-y: auto !important;
-      margin-right: -10px;
-    }
-    .MessageFooter {
-      margin-left: 0;
-      margin-top: 2px;
-      margin-bottom: 2px;
-    }
-  }
-  &.grid {
-    display: block;
-    height: 300px;
-    overflow-y: hidden;
-    border: 0.5px solid var(--color-border);
-    border-radius: 10px;
-    cursor: pointer;
-    .message {
-      height: 100%;
-    }
-    .message-content-container {
-      overflow: hidden;
-      padding-left: 0;
-      flex: 1;
-      pointer-events: none;
-    }
-    .MessageFooter {
-      margin-left: 0;
-      margin-top: 2px;
-      margin-bottom: 2px;
-    }
-  }
-  &.in-popover {
-    height: auto;
-    border: none;
-    max-height: 50vh;
-    overflow-y: auto;
-    cursor: default;
-    .message-content-container {
-      padding-left: 0;
-      pointer-events: auto;
-    }
-    .MessageFooter {
-      margin-left: 0;
-    }
-  }
+// LOCK-105: fold/tag is the only runtime multi-model layout. The horizontal /
+// grid / in-popover wrapper styles are removed.
+const MessageWrapper = styled.div`
   &.fold {
     display: none;
     &.selected {

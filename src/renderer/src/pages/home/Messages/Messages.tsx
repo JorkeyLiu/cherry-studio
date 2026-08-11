@@ -85,7 +85,6 @@ import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
 
-import MessageAnchorLine from './MessageAnchorLine'
 import MessageGroup from './MessageGroup'
 import Prompt from './Prompt'
 import { MessagesContainer, ScrollContainer } from './shared'
@@ -138,7 +137,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   loadMoreMessages,
   registerMessageElement
 }) => {
-  const { showPrompt, messageNavigation } = useSettings()
+  const { showPrompt } = useSettings()
   const { t } = useTranslation()
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
@@ -297,7 +296,6 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
 
         {showPrompt && <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />}
       </div>
-      {messageNavigation === 'anchor' && <MessageAnchorLine messages={displayMessages} />}
       {isEditMode && <EditModeActionBar />}
     </MessagesContainer>
   )

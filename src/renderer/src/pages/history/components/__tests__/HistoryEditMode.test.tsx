@@ -48,7 +48,7 @@ vi.mock('@renderer/hooks/useScrollPosition', () => ({
 }))
 
 vi.mock('@renderer/hooks/useSettings', () => ({
-  useSettings: () => ({ messageStyle: 'plain' })
+  useSettings: () => ({})
 }))
 
 vi.mock('@renderer/hooks/useTimer', () => ({

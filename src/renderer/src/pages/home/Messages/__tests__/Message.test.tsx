@@ -72,9 +72,7 @@ vi.mock('@renderer/hooks/useModel', () => ({
 
 vi.mock('@renderer/hooks/useSettings', () => ({
   useSettings: () => ({
-    messageFont: 'system',
     fontSize: 14,
-    messageStyle: 'plain',
     showMessageOutline: false
   })
 }))

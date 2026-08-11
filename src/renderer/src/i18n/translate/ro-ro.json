@@ -1277,9 +1277,6 @@
       }
     },
     "settings": {
-      "code": {
-        "title": "Setări blocuri de cod"
-      },
       "code_collapsible": "Bloc de cod restrâns",
       "code_editor": {
         "autocompletion": "Completare automată",
@@ -1560,6 +1557,7 @@
     "current": "Curent",
     "cut": "Decupează",
     "decline": "[to be translated]:Decline",
+    "decrease": "[to be translated]:Decrease",
     "default": "Implicit",
     "delete": "Șterge",
     "delete_confirm": "Ești sigur că vrei să ștergi?",
@@ -1597,6 +1595,7 @@
     "image_preview": "Previzualizare imagine",
     "image_url": "URL imagine",
     "image_url_or_upload": "Introdu URL-ul imaginii sau încarcă fișierul",
+    "increase": "[to be translated]:Increase",
     "inspect": "Inspectează",
     "invalid_value": "Valoare invalidă",
     "knowledge_base": "Bază de cunoștințe",
@@ -2438,11 +2437,6 @@
         "horizontal": "Alăturat",
         "label": "Stil grup",
         "vertical": "Vizualizare stivuită"
-      },
-      "style": {
-        "bubble": "Bulă",
-        "label": "Stil mesaj",
-        "plain": "Simplu"
       },
       "video": {
         "error": {
@@ -4659,7 +4653,6 @@
       "title": "Dezactivează accelerarea hardware"
     },
     "input": {
-      "auto_translate_with_space": "Tradu rapid cu 3 spații",
       "clear": {
         "all": "Golește",
         "knowledge_base": "Golește bazele de cunoștințe selectate",
@@ -4679,17 +4672,6 @@
       "onboot": "Pornește automat la pornirea sistemului",
       "title": "Lansare",
       "totray": "Minimizează în zona de notificare la pornire"
-    },
-    "math": {
-      "engine": {
-        "label": "Motor matematic",
-        "none": "Niciunul"
-      },
-      "single_dollar": {
-        "label": "Activează $...$",
-        "tip": "Randează ecuațiile matematice citate prin semne unice de dolar $...$. Implicit este activat."
-      },
-      "title": "Setări matematice"
     },
     "mcp": {
       "actions": "Acțiuni",
@@ -4948,12 +4930,6 @@
         "label": "Afișează divizor între mesaje",
         "tooltip": "Nu se aplică mesajelor stil bulă"
       },
-      "grid_columns": "Coloane afișare grilă mesaje",
-      "grid_popover_trigger": {
-        "click": "Fă clic pentru a afișa",
-        "hover": "Plasează cursorul pentru a afișa",
-        "label": "Declanșator detaliu grilă"
-      },
       "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "Confirmă înainte de ștergerea mesajelor",
@@ -4961,25 +4937,16 @@
         "enable_quick_triggers": "Activează declanșatoarele / și @",
         "paste_long_text_as_file": "Lipește text lung ca fișier",
         "paste_long_text_threshold": "Lungime lipire text lung",
-        "send_shortcuts": "Comenzi rapide trimitere",
-        "show_estimated_tokens": "Afișează numărul estimat de tokeni",
-        "title": "Setări intrare"
+        "send_shortcuts": "Comenzi rapide trimitere"
       },
       "markdown_rendering_input_message": "Randare Markdown mesaj intrare",
       "metrics": "{{time_first_token_millsec}}ms până la primul token | {{token_speed}} tok/sec",
-      "model": {
-        "title": "Setări model"
-      },
+      "model": {},
       "navigation": {
-        "anchor": "Ancoră mesaj",
-        "buttons": "Butoane navigare",
-        "label": "Bară navigare",
-        "none": "Niciunul"
+        "label": "Bară navigare"
       },
       "prompt": "Afișează prompt",
-      "show_message_outline": "Afișează conturul mesajului",
-      "title": "Setări mesaje",
-      "use_serif_font": "Folosește font serif"
+      "show_message_outline": "Afișează conturul mesajului"
     },
     "miniapps": {
       "cache_change_notice": "Modificările vor intra în vigoare când numărul de mini-aplicații deschise atinge valoarea setată",

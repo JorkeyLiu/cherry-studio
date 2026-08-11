@@ -120,9 +120,8 @@ describe('ThinkingBlock', () => {
   beforeEach(async () => {
     vi.useFakeTimers()
 
-    // Default mock implementations
+    // Default mock implementations (LOCK-104: no messageFont — system font only)
     mockUseSettings.mockReturnValue({
-      messageFont: 'sans-serif',
       fontSize: 14,
       thoughtAutoCollapse: false
     })
@@ -275,7 +274,6 @@ describe('ThinkingBlock', () => {
     it('should respect auto-collapse setting for initial state', () => {
       // Test expanded by default (auto-collapse disabled)
       mockUseSettings.mockReturnValue({
-        messageFont: 'sans-serif',
         fontSize: 14,
         thoughtAutoCollapse: false
       })
@@ -289,7 +287,6 @@ describe('ThinkingBlock', () => {
 
       // Test collapsed by default (auto-collapse enabled)
       mockUseSettings.mockReturnValue({
-        messageFont: 'sans-serif',
         fontSize: 14,
         thoughtAutoCollapse: true
       })
@@ -302,7 +299,6 @@ describe('ThinkingBlock', () => {
 
     it('should auto-collapse when thinking completes if setting enabled', () => {
       mockUseSettings.mockReturnValue({
-        messageFont: 'sans-serif',
         fontSize: 14,
         thoughtAutoCollapse: true
       })
@@ -322,24 +318,16 @@ describe('ThinkingBlock', () => {
     })
   })
 
-  describe('font and styling', () => {
-    it('should apply font settings to thinking content', () => {
+  describe('font and styling (LOCK-104: system font, configurable size)', () => {
+    it('should apply the configured font size to thinking content', () => {
       const testCases = [
-        {
-          settings: { messageFont: 'serif', fontSize: 16 },
-          expectedFont: 'var(--font-family-serif)',
-          expectedSize: '16px'
-        },
-        {
-          settings: { messageFont: 'sans-serif', fontSize: 14 },
-          expectedFont: 'var(--font-family)',
-          expectedSize: '14px'
-        }
+        { fontSize: 16, expectedSize: '16px' },
+        { fontSize: 14, expectedSize: '14px' }
       ]
 
-      testCases.forEach(({ settings, expectedFont, expectedSize }) => {
+      testCases.forEach(({ fontSize, expectedSize }) => {
         mockUseSettings.mockReturnValue({
-          ...settings,
+          fontSize,
           thoughtAutoCollapse: false
         })
 
@@ -351,9 +339,10 @@ describe('ThinkingBlock', () => {
         const styledDiv = contentContainer.querySelector('div')
 
         expect(styledDiv).toHaveStyle({
-          fontFamily: expectedFont,
           fontSize: expectedSize
         })
+        // LOCK-104: no font-family override — messages always use the system font
+        expect(styledDiv).not.toHaveStyle({ fontFamily: 'var(--font-family-serif)' })
 
         unmount()
       })

@@ -6,11 +6,6 @@ exports[`CodeBlock > rendering > should render a snapshot 1`] = `
     <code>
       console.log("hello world")
     </code>
-    <button
-      type="button"
-    >
-      Save
-    </button>
   </div>
 </div>
 `;

@@ -1277,9 +1277,6 @@
       }
     },
     "settings": {
-      "code": {
-        "title": "Codeblock-Einstellungen"
-      },
       "code_collapsible": "Codeblöcke einklappbar",
       "code_editor": {
         "autocompletion": "Autovervollständigung",
@@ -1560,6 +1557,7 @@
     "current": "Aktuell",
     "cut": "Ausschneiden",
     "decline": "[to be translated]:Decline",
+    "decrease": "[to be translated]:Decrease",
     "default": "Standard",
     "delete": "Löschen",
     "delete_confirm": "Möchten Sie wirklich löschen?",
@@ -1597,6 +1595,7 @@
     "image_preview": "Bildvorschau",
     "image_url": "Bild-URL",
     "image_url_or_upload": "Gib Bild-URL ein oder lade Datei hoch",
+    "increase": "[to be translated]:Increase",
     "inspect": "Prüfen",
     "invalid_value": "Ungültiger Wert",
     "knowledge_base": "Wissensdatenbank",
@@ -2438,11 +2437,6 @@
         "horizontal": "Horizontale Anordnung",
         "label": "Mehrmodell-Antwortstil",
         "vertical": "Vertikale Stapel"
-      },
-      "style": {
-        "bubble": "Sprechblase",
-        "label": "Nachrichtenstil",
-        "plain": "Schlicht"
       },
       "video": {
         "error": {
@@ -4659,7 +4653,6 @@
       "title": "Hardwarebeschleunigung deaktivieren"
     },
     "input": {
-      "auto_translate_with_space": "Mit 3 Leerzeichen schnell übersetzen",
       "clear": {
         "all": "Löschen",
         "knowledge_base": "Ausgewählte Wissensdatenbank leeren",
@@ -4679,17 +4672,6 @@
       "onboot": "Beim Systemstart automatisch starten",
       "title": "Starten",
       "totray": "Beim Start ins Tray minimieren"
-    },
-    "math": {
-      "engine": {
-        "label": "Mathematikformel-Engine",
-        "none": "Keine"
-      },
-      "single_dollar": {
-        "label": "$...$ aktivieren",
-        "tip": "Rendert Mathematikformeln in $...$, standardmäßig aktiviert."
-      },
-      "title": "Mathematikformel-Einstellungen"
     },
     "mcp": {
       "actions": "Aktionen",
@@ -4948,12 +4930,6 @@
         "label": "Nachrichtentrennlinie",
         "tooltip": "Nicht für Blasenstil-Nachrichten"
       },
-      "grid_columns": "Anzahl Spalten im Nachrichtenraster",
-      "grid_popover_trigger": {
-        "click": "Klicken zum Anzeigen",
-        "hover": "Bei Hover anzeigen",
-        "label": "Raster-Details-Trigger"
-      },
       "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "Vor Löschen von Nachrichten bestätigen",
@@ -4961,25 +4937,16 @@
         "enable_quick_triggers": "Aktivieren / und @ für Schnellmenü-Trigger",
         "paste_long_text_as_file": "Langen Text als Datei einfügen",
         "paste_long_text_threshold": "Länge langer Text",
-        "send_shortcuts": "Senden-Shortcut",
-        "show_estimated_tokens": "Geschätzte Token-Anzahl anzeigen",
-        "title": "Eingabeeinstellungen"
+        "send_shortcuts": "Senden-Shortcut"
       },
       "markdown_rendering_input_message": "Markdown-Rendering-Eingabenachricht",
       "metrics": "Erste Zeichen-Verzögerung {{time_first_token_millsec}} ms | pro Sekunde {{token_speed}} Token",
-      "model": {
-        "title": "Modelleinstellungen"
-      },
+      "model": {},
       "navigation": {
-        "anchor": "Gesprächsanker",
-        "buttons": "Auf/Ab-Schaltflächen",
-        "label": "Gesprächsnavigation-Schaltflächen",
-        "none": "Nicht anzeigen"
+        "label": "Gesprächsnavigation-Schaltflächen"
       },
       "prompt": "Prompt anzeigen",
-      "show_message_outline": "Nachrichtenübersicht anzeigen",
-      "title": "Nachrichteneinstellungen",
-      "use_serif_font": "Serifenschrift verwenden"
+      "show_message_outline": "Nachrichtenübersicht anzeigen"
     },
     "miniapps": {
       "cache_change_notice": "Änderung wird wirksam wenn Anzahl geöffneter Mini-Apps auf festgelegten Wert angepasst wird",

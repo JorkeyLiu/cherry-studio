@@ -12,14 +12,12 @@ const mocks = vi.hoisted(() => ({
   getCodeBlockId: vi.fn(),
   isOpenFenceBlock: vi.fn(),
   selectById: vi.fn(),
-  useSettings: vi.fn().mockReturnValue({ codeFancyBlock: true }),
+  useSettings: vi.fn().mockReturnValue({}),
   isWin: false,
-  CodeBlockView: vi.fn(({ onSave, children }) => (
+  // LOCK-107: the standard code block is a read-only viewer — no onSave wiring.
+  CodeBlockView: vi.fn(({ children }) => (
     <div>
       <code>{children}</code>
-      <button type="button" onClick={() => onSave('new code content')}>
-        Save
-      </button>
     </div>
   )),
   HtmlArtifactsCard: vi.fn(({ onSave, html }) => (
@@ -159,23 +157,18 @@ describe('CodeBlock', () => {
   })
 
   describe('save', () => {
-    it('should call EventEmitter with correct payload when saving a standard code block', () => {
+    it('renders the standard code block as a read-only viewer with no save wiring (LOCK-107)', () => {
       render(<CodeBlock {...defaultProps} />)
 
-      // Simulate clicking the save button inside the mocked CodeBlockView
-      const saveButton = screen.getByText('Save')
-      fireEvent.click(saveButton)
-
-      // Verify getCodeBlockId was called
-      expect(mocks.getCodeBlockId).toHaveBeenCalledWith(defaultProps.node.position.start)
-
-      // Verify EventEmitter.emit was called
-      expect(mocks.EventEmitter.emit).toHaveBeenCalledOnce()
-      expect(mocks.EventEmitter.emit).toHaveBeenCalledWith('EDIT_CODE_BLOCK', {
-        msgBlockId: 'test-msg-block-id',
-        codeBlockId: 'test-code-block-id',
-        newContent: 'new code content'
-      })
+      // The standard block renders through the read-only viewer…
+      expect(screen.getByText('console.log("hello world")')).toBeInTheDocument()
+      expect(mocks.CodeBlockView).toHaveBeenCalledWith(
+        expect.objectContaining({ language: 'javascript', children: 'console.log("hello world")' }),
+        undefined
+      )
+      // …and no onSave prop is passed, so no EDIT_CODE_BLOCK event is emitted.
+      expect(Object.keys(mocks.CodeBlockView.mock.calls[0][0])).not.toContain('onSave')
+      expect(mocks.EventEmitter.emit).not.toHaveBeenCalled()
     })
 
     it('should call EventEmitter with correct payload when saving an HTML block', () => {

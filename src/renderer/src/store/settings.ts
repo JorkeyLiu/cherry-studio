@@ -24,7 +24,6 @@ import type {
   AssistantsSortType,
   CodeStyleVarious,
   LanguageVarious,
-  MathEngine,
   OpenAIServiceTier,
   S3Config,
   SidebarIcon,
@@ -73,8 +72,6 @@ export interface SettingsState {
   userId: string
   showPrompt: boolean
   showMessageDivider: boolean
-  messageFont: 'system' | 'serif'
-  showInputEstimatedTokens: boolean
   launchOnBoot: boolean
   launchToTray: boolean
   trayOnClose: boolean
@@ -106,21 +103,10 @@ export interface SettingsState {
   testPlan: boolean
   testChannel: UpgradeChannel
   renderInputMessageAsMarkdown: boolean
-  // 代码执行
-  codeExecution: {
-    enabled: boolean
-    timeoutMinutes: number
-  }
-  codeEditor: {
-    enabled: boolean
-    themeLight: string
-    themeDark: string
-    highlightActiveLine: boolean
-    foldGutter: boolean
-    autocompletion: boolean
-    keymap: boolean
-  }
-  /** @deprecated use codeViewer instead */
+  /** @deprecated LOCK-107: code blocks use a fixed read-only viewer baseline;
+   *  code execution and the editable CodeMirror capability are removed. Inert
+   *  persisted fields kept for historical data compatibility; migration 218
+   *  removes them from persisted state. */
   codePreview: {
     themeLight: CodeStyleVarious
     themeDark: CodeStyleVarious
@@ -129,18 +115,12 @@ export interface SettingsState {
     themeLight: CodeStyleVarious
     themeDark: CodeStyleVarious
   }
-  codeShowLineNumbers: boolean
-  codeCollapsible: boolean
-  codeWrappable: boolean
-  codeImageTools: boolean
-  codeFancyBlock: boolean
-  mathEngine: MathEngine
-  mathEnableSingleDollar: boolean
-  messageStyle: 'plain' | 'bubble'
+  /** @deprecated LOCK-105: message style is always bubble; the legacy tri-state
+   *  field is removed from persisted state by migration 218. */
   foldDisplayMode: 'expanded' | 'compact'
-  gridColumns: number
-  gridPopoverTrigger: 'hover' | 'click'
-  messageNavigation: 'none' | 'buttons' | 'anchor'
+  /** @deprecated LOCK-105: conversation navigation is a boolean off/on toggle.
+   *  The legacy tri-state is migrated to boolean in migration 218. */
+  messageNavigation: boolean
   // 数据目录设置
   skipBackupFile: boolean
   // webdav 配置 host, user, pass, path
@@ -154,7 +134,6 @@ export interface SettingsState {
   webdavSkipBackupFile: boolean
   webdavDisableStream: boolean
   translateModelPrompt: string
-  autoTranslateWithSpace: boolean
   showTranslateConfirm: boolean
   enableTopicNaming: boolean
   customCss: string
@@ -171,7 +150,10 @@ export interface SettingsState {
    *  for historical data compatibility; no runtime consumer remains. */
   enableQuickAssistant: boolean
   clickTrayToShowQuickAssistant: boolean
-  multiModelMessageStyle: MultiModelMessageStyle
+  /** @deprecated LOCK-105: multi-model answer layout is always fold/tag mode.
+   *  The per-message `multiModelMessageStyle` field remains on the Message
+   *  schema for Cherry Studio import compatibility; this settings-level default
+   *  is removed (migration 218). */
   readClipboardAtStartup: boolean
   notionDatabaseID: string | null
   notionApiKey: string | null
@@ -262,8 +244,6 @@ export interface SettingsState {
   topicListWidth: number
 }
 
-export type MultiModelMessageStyle = 'horizontal' | 'vertical' | 'fold' | 'grid'
-
 export const initialState: SettingsState = {
   showAssistants: true,
   showTopics: true,
@@ -278,8 +258,6 @@ export const initialState: SettingsState = {
   userId: uuid(),
   showPrompt: true,
   showMessageDivider: true,
-  messageFont: 'system',
-  showInputEstimatedTokens: false,
   launchOnBoot: false,
   launchToTray: false,
   trayOnClose: true,
@@ -303,19 +281,6 @@ export const initialState: SettingsState = {
   testPlan: false,
   testChannel: UpgradeChannel.LATEST,
   renderInputMessageAsMarkdown: false,
-  codeExecution: {
-    enabled: false,
-    timeoutMinutes: 1
-  },
-  codeEditor: {
-    enabled: false,
-    themeLight: 'auto',
-    themeDark: 'auto',
-    highlightActiveLine: false,
-    foldGutter: false,
-    autocompletion: true,
-    keymap: false
-  },
   /** @deprecated use codeViewer instead */
   codePreview: {
     themeLight: 'auto',
@@ -325,18 +290,11 @@ export const initialState: SettingsState = {
     themeLight: 'auto',
     themeDark: 'auto'
   },
-  codeShowLineNumbers: false,
-  codeCollapsible: false,
-  codeWrappable: false,
-  codeImageTools: false,
-  codeFancyBlock: true,
-  mathEngine: 'KaTeX',
-  mathEnableSingleDollar: true,
-  messageStyle: 'plain',
+  // LOCK-105/106/107: message style is always bubble, math is fixed to KaTeX,
+  // code blocks use the fixed read-only viewer baseline. The former
+  // configurable fields are removed (migration 218).
   foldDisplayMode: 'expanded',
-  gridColumns: 2,
-  gridPopoverTrigger: 'click',
-  messageNavigation: 'none',
+  messageNavigation: false,
   skipBackupFile: false,
   webdavHost: '',
   webdavUser: '',
@@ -348,7 +306,6 @@ export const initialState: SettingsState = {
   webdavSkipBackupFile: false,
   webdavDisableStream: false,
   translateModelPrompt: TRANSLATE_PROMPT,
-  autoTranslateWithSpace: false,
   showTranslateConfirm: true,
   enableTopicNaming: true,
   customCss: '',
@@ -360,7 +317,6 @@ export const initialState: SettingsState = {
   enableQuickAssistant: false,
   clickTrayToShowQuickAssistant: false,
   readClipboardAtStartup: true,
-  multiModelMessageStyle: 'horizontal',
   notionDatabaseID: '',
   notionApiKey: '',
   notionPageNameKey: 'Name',
@@ -504,12 +460,6 @@ const settingsSlice = createSlice({
     setShowMessageDivider: (state, action: PayloadAction<boolean>) => {
       state.showMessageDivider = action.payload
     },
-    setMessageFont: (state, action: PayloadAction<'system' | 'serif'>) => {
-      state.messageFont = action.payload
-    },
-    setShowInputEstimatedTokens: (state, action: PayloadAction<boolean>) => {
-      state.showInputEstimatedTokens = action.payload
-    },
     setLaunchOnBoot: (state, action: PayloadAction<boolean>) => {
       state.launchOnBoot = action.payload
     },
@@ -585,48 +535,6 @@ const settingsSlice = createSlice({
     setWebdavDisableStream: (state, action: PayloadAction<boolean>) => {
       state.webdavDisableStream = action.payload
     },
-    setCodeExecution: (state, action: PayloadAction<{ enabled?: boolean; timeoutMinutes?: number }>) => {
-      if (action.payload.enabled !== undefined) {
-        state.codeExecution.enabled = action.payload.enabled
-      }
-      if (action.payload.timeoutMinutes !== undefined) {
-        state.codeExecution.timeoutMinutes = action.payload.timeoutMinutes
-      }
-    },
-    setCodeEditor: (
-      state,
-      action: PayloadAction<{
-        enabled?: boolean
-        themeLight?: string
-        themeDark?: string
-        highlightActiveLine?: boolean
-        foldGutter?: boolean
-        autocompletion?: boolean
-        keymap?: boolean
-      }>
-    ) => {
-      if (action.payload.enabled !== undefined) {
-        state.codeEditor.enabled = action.payload.enabled
-      }
-      if (action.payload.themeLight !== undefined) {
-        state.codeEditor.themeLight = action.payload.themeLight
-      }
-      if (action.payload.themeDark !== undefined) {
-        state.codeEditor.themeDark = action.payload.themeDark
-      }
-      if (action.payload.highlightActiveLine !== undefined) {
-        state.codeEditor.highlightActiveLine = action.payload.highlightActiveLine
-      }
-      if (action.payload.foldGutter !== undefined) {
-        state.codeEditor.foldGutter = action.payload.foldGutter
-      }
-      if (action.payload.autocompletion !== undefined) {
-        state.codeEditor.autocompletion = action.payload.autocompletion
-      }
-      if (action.payload.keymap !== undefined) {
-        state.codeEditor.keymap = action.payload.keymap
-      }
-    },
     setCodeViewer: (state, action: PayloadAction<{ themeLight?: string; themeDark?: string }>) => {
       if (action.payload.themeLight !== undefined) {
         state.codeViewer.themeLight = action.payload.themeLight
@@ -635,44 +543,11 @@ const settingsSlice = createSlice({
         state.codeViewer.themeDark = action.payload.themeDark
       }
     },
-    setCodeShowLineNumbers: (state, action: PayloadAction<boolean>) => {
-      state.codeShowLineNumbers = action.payload
-    },
-    setCodeCollapsible: (state, action: PayloadAction<boolean>) => {
-      state.codeCollapsible = action.payload
-    },
-    setCodeWrappable: (state, action: PayloadAction<boolean>) => {
-      state.codeWrappable = action.payload
-    },
-    setCodeImageTools: (state, action: PayloadAction<boolean>) => {
-      state.codeImageTools = action.payload
-    },
-    setCodeFancyBlock: (state, action: PayloadAction<boolean>) => {
-      state.codeFancyBlock = action.payload
-    },
-    setMathEngine: (state, action: PayloadAction<MathEngine>) => {
-      state.mathEngine = action.payload
-    },
-    setMathEnableSingleDollar: (state, action: PayloadAction<boolean>) => {
-      state.mathEnableSingleDollar = action.payload
-    },
     setFoldDisplayMode: (state, action: PayloadAction<'expanded' | 'compact'>) => {
       state.foldDisplayMode = action.payload
     },
-    setGridColumns: (state, action: PayloadAction<number>) => {
-      state.gridColumns = action.payload
-    },
-    setGridPopoverTrigger: (state, action: PayloadAction<'hover' | 'click'>) => {
-      state.gridPopoverTrigger = action.payload
-    },
-    setMessageStyle: (state, action: PayloadAction<'plain' | 'bubble'>) => {
-      state.messageStyle = action.payload
-    },
     setTranslateModelPrompt: (state, action: PayloadAction<string>) => {
       state.translateModelPrompt = action.payload
-    },
-    setAutoTranslateWithSpace: (state, action: PayloadAction<boolean>) => {
-      state.autoTranslateWithSpace = action.payload
     },
     setShowTranslateConfirm: (state, action: PayloadAction<boolean>) => {
       state.showTranslateConfirm = action.payload
@@ -693,9 +568,6 @@ const settingsSlice = createSlice({
       if (action.payload.disabled) {
         state.sidebarIcons.disabled = action.payload.disabled
       }
-    },
-    setMultiModelMessageStyle: (state, action: PayloadAction<'horizontal' | 'vertical' | 'fold' | 'grid'>) => {
-      state.multiModelMessageStyle = action.payload
     },
     setNotionDatabaseID: (state, action: PayloadAction<string>) => {
       state.notionDatabaseID = action.payload
@@ -751,7 +623,7 @@ const settingsSlice = createSlice({
     setJoplinExportReasoning: (state, action: PayloadAction<boolean>) => {
       state.joplinExportReasoning = action.payload
     },
-    setMessageNavigation: (state, action: PayloadAction<'none' | 'buttons' | 'anchor'>) => {
+    setMessageNavigation: (state, action: PayloadAction<boolean>) => {
       state.messageNavigation = action.payload
     },
     setDefaultObsidianVault: (state, action: PayloadAction<string>) => {
@@ -895,8 +767,6 @@ export const {
   setUserName,
   setShowPrompt,
   setShowMessageDivider,
-  setMessageFont,
-  setShowInputEstimatedTokens,
   setLaunchOnBoot,
   setLaunchToTray,
   setTrayOnClose,
@@ -921,29 +791,15 @@ export const {
   setWebdavMaxBackups,
   setWebdavSkipBackupFile,
   setWebdavDisableStream,
-  setCodeExecution,
-  setCodeEditor,
   setCodeViewer,
-  setCodeShowLineNumbers,
-  setCodeCollapsible,
-  setCodeWrappable,
-  setCodeImageTools,
-  setCodeFancyBlock,
-  setMathEngine,
-  setMathEnableSingleDollar,
   setFoldDisplayMode,
-  setGridColumns,
-  setGridPopoverTrigger,
-  setMessageStyle,
   setTranslateModelPrompt,
-  setAutoTranslateWithSpace,
   setShowTranslateConfirm,
   setEnableTopicNaming,
   setPasteLongTextThreshold,
   setCustomCss,
   setTopicNamingPrompt,
   setSidebarIcons,
-  setMultiModelMessageStyle,
   setNotionDatabaseID,
   setNotionApiKey,
   setNotionPageNameKey,

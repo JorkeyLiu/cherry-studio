@@ -107,7 +107,6 @@ vi.mock('remark-gfm', () => ({ __esModule: true, default: vi.fn() }))
 vi.mock('remark-cjk-friendly', () => ({ __esModule: true, default: vi.fn() }))
 vi.mock('remark-math', () => ({ __esModule: true, default: vi.fn() }))
 vi.mock('rehype-katex', () => ({ __esModule: true, default: vi.fn() }))
-vi.mock('rehype-mathjax', () => ({ __esModule: true, default: vi.fn() }))
 vi.mock('rehype-raw', () => ({ __esModule: true, default: vi.fn() }))
 
 // Mock custom plugins
@@ -154,8 +153,8 @@ describe('Markdown', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
 
-    // Default settings
-    mockUseSettings.mockReturnValue({ mathEngine: 'KaTeX', mathEnableSingleDollar: true })
+    // LOCK-106: math settings are removed; Markdown no longer reads useSettings.
+    mockUseSettings.mockReturnValue({})
     mockUseTranslation.mockReturnValue({
       t: (key: string) => (key === 'message.chat.completion.paused' ? 'Paused' : key)
     })
@@ -275,31 +274,22 @@ describe('Markdown', () => {
     })
   })
 
-  describe('math engine configuration', () => {
-    it('should configure KaTeX when mathEngine is KaTeX', () => {
-      mockUseSettings.mockReturnValue({ mathEngine: 'KaTeX', mathEnableSingleDollar: true })
-
+  describe('math rendering (LOCK-106: fixed KaTeX + single-dollar)', () => {
+    it('should render with the fixed KaTeX configuration', () => {
       render(<Markdown block={createMainTextBlock()} />)
 
-      // Component should render successfully with KaTeX configuration
+      // Component should render successfully with the fixed KaTeX configuration
       expect(screen.getByTestId('markdown-content')).toBeInTheDocument()
     })
 
-    it('should configure MathJax when mathEngine is MathJax', () => {
-      mockUseSettings.mockReturnValue({ mathEngine: 'MathJax', mathEnableSingleDollar: true })
+    it('does not depend on any math engine setting', () => {
+      // Markdown no longer reads a math engine setting; the mock is cleared so
+      // any accidental useSettings access in the component would fail.
+      mockUseSettings.mockClear()
 
       render(<Markdown block={createMainTextBlock()} />)
 
-      // Component should render successfully with MathJax configuration
-      expect(screen.getByTestId('markdown-content')).toBeInTheDocument()
-    })
-
-    it('should not load math plugins when mathEngine is none', () => {
-      mockUseSettings.mockReturnValue({ mathEngine: 'none', mathEnableSingleDollar: true })
-
-      render(<Markdown block={createMainTextBlock()} />)
-
-      // Component should render successfully without math plugins
+      expect(mockUseSettings).not.toHaveBeenCalled()
       expect(screen.getByTestId('markdown-content')).toBeInTheDocument()
     })
   })
@@ -378,17 +368,15 @@ describe('Markdown', () => {
       expect(screen.getByTestId('markdown-content')).toHaveTextContent('Updated')
     })
 
-    it('should re-render when math engine changes', () => {
-      mockUseSettings.mockReturnValue({ mathEngine: 'KaTeX', mathEnableSingleDollar: true })
+    it('should re-render when the block changes', () => {
       const { rerender } = render(<Markdown block={createMainTextBlock()} />)
 
       expect(screen.getByTestId('markdown-content')).toBeInTheDocument()
 
-      mockUseSettings.mockReturnValue({ mathEngine: 'MathJax', mathEnableSingleDollar: true })
-      rerender(<Markdown block={createMainTextBlock()} />)
+      rerender(<Markdown block={createMainTextBlock({ content: 'Updated content' })} />)
 
-      // Should still render correctly with new math engine
-      expect(screen.getByTestId('markdown-content')).toBeInTheDocument()
+      // Should still render correctly with the new block
+      expect(screen.getByTestId('markdown-content')).toHaveTextContent('Updated content')
     })
   })
 })

@@ -9,7 +9,6 @@ import { debounce } from 'lodash'
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import type { ThemedToken } from 'shiki/core'
 import styled from 'styled-components'
-
 const logger = loggerService.withContext('CodeViewer')
 
 interface SavedSelection {
@@ -87,7 +86,7 @@ const CodeViewer = ({
   wrapped = true,
   onRequestExpand
 }: CodeViewerProps) => {
-  const { codeShowLineNumbers: _lineNumbers, fontSize: _fontSize } = useSettings()
+  const { fontSize: _fontSize } = useSettings()
   const { getShikiPreProperties, isShikiThemeDark } = useCodeStyle()
   const shikiThemeRef = useRef<HTMLDivElement>(null)
   const scrollerRef = useRef<HTMLDivElement>(null)
@@ -104,7 +103,8 @@ const CodeViewer = ({
   }, [])
 
   const fontSize = useMemo(() => customFontSize ?? _fontSize - 1, [customFontSize, _fontSize])
-  const lineNumbers = useMemo(() => options?.lineNumbers ?? _lineNumbers, [options?.lineNumbers, _lineNumbers])
+  // LOCK-107: line numbers are always enabled in the fixed viewer baseline.
+  const lineNumbers = useMemo(() => options?.lineNumbers ?? true, [options?.lineNumbers])
 
   const rawLines = useMemo(() => (typeof value === 'string' ? value.trimEnd().split('\n') : []), [value])
 

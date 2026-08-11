@@ -37,7 +37,7 @@ const TopicContent = ({ assistant }: TopicContentProps) => {
           <SelectModelButton assistant={assistant} />
         </div>
       </HorizontalScrollContainer>
-      <Tools assistant={assistant} />
+      <Tools />
     </>
   )
 }

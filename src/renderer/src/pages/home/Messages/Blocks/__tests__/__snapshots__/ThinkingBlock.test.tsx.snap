@@ -82,7 +82,7 @@ exports[`ThinkingBlock > basic rendering > should match snapshot 1`] = `
     >
       <div
         class="c1"
-        style="font-family: var(--font-family); font-size: 14px;"
+        style="font-size: 14px;"
       >
         <div
           data-mouse-enter-delay="0.8"

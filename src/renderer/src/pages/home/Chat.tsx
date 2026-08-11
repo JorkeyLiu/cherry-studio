@@ -16,7 +16,6 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { useAppDispatch } from '@renderer/store'
 import { setTopicListWidth } from '@renderer/store/settings'
 import type { Assistant, Model, Topic } from '@renderer/types'
-import { classNames } from '@renderer/utils'
 import { Flex } from 'antd'
 import { debounce } from 'lodash'
 import { AnimatePresence, motion } from 'motion/react'
@@ -44,7 +43,9 @@ interface Props {
 const Chat: FC<Props> = (props) => {
   const { assistant, updateAssistant, updateTopic } = useAssistant(props.assistant.id)
   const { t } = useTranslation()
-  const { messageStyle, messageNavigation } = useSettings()
+  // LOCK-105: message style is always bubble; messageNavigation is a boolean
+  // off/on toggle for the conversation navigation buttons.
+  const { messageNavigation } = useSettings()
   const { showTopics } = useShowTopics()
   const dispatch = useAppDispatch()
 
@@ -159,7 +160,8 @@ const Chat: FC<Props> = (props) => {
   const mainHeight = 'calc(100vh - var(--navbar-height))'
 
   return (
-    <Container id="chat" className={classNames([messageStyle])}>
+    // LOCK-105: message style is always bubble.
+    <Container id="chat" className="bubble">
       <HStack>
         <motion.div
           layout
@@ -193,7 +195,7 @@ const Chat: FC<Props> = (props) => {
                   includeUser={filterIncludeUser}
                   onIncludeUserChange={userOutlinedItemClickHandler}
                 />
-                {messageNavigation === 'buttons' && (
+                {messageNavigation && (
                   <ChatNavigation
                     containerId="messages"
                     scrollToMessageById={(id) => messagesRef.current?.scrollToMessageById(id)}

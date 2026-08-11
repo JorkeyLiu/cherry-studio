@@ -568,4 +568,85 @@ describe('store migrations', () => {
       })
     })
   })
+
+  describe('migration 218: quick-settings consolidation cleanup', () => {
+    const makeState = (settings: Record<string, any> = {}) => ({
+      settings,
+      _persist: { version: 217, rehydrated: false }
+    })
+
+    const legacySettings = {
+      messageFont: 'serif',
+      showInputEstimatedTokens: true,
+      autoTranslateWithSpace: true,
+      mathEngine: 'MathJax',
+      mathEnableSingleDollar: false,
+      messageStyle: 'plain',
+      codeExecution: { enabled: true, timeoutMinutes: 5 },
+      codeEditor: { enabled: true },
+      codeShowLineNumbers: false,
+      codeCollapsible: false,
+      codeWrappable: true,
+      codeImageTools: true,
+      codeFancyBlock: false,
+      gridColumns: 4,
+      gridPopoverTrigger: 'hover',
+      multiModelMessageStyle: 'grid',
+      messageNavigation: 'buttons',
+      fontSize: 14,
+      showPrompt: true
+    }
+
+    it('removes all obsolete preference fields', async () => {
+      const migrated: any = await migrate(makeState({ ...legacySettings }) as any, 218)
+
+      const settings = migrated.settings
+      expect(settings.messageFont).toBeUndefined()
+      expect(settings.showInputEstimatedTokens).toBeUndefined()
+      expect(settings.autoTranslateWithSpace).toBeUndefined()
+      expect(settings.mathEngine).toBeUndefined()
+      expect(settings.mathEnableSingleDollar).toBeUndefined()
+      expect(settings.messageStyle).toBeUndefined()
+      expect(settings.codeExecution).toBeUndefined()
+      expect(settings.codeEditor).toBeUndefined()
+      expect(settings.codeShowLineNumbers).toBeUndefined()
+      expect(settings.codeCollapsible).toBeUndefined()
+      expect(settings.codeWrappable).toBeUndefined()
+      expect(settings.codeImageTools).toBeUndefined()
+      expect(settings.codeFancyBlock).toBeUndefined()
+      expect(settings.gridColumns).toBeUndefined()
+      expect(settings.gridPopoverTrigger).toBeUndefined()
+      expect(settings.multiModelMessageStyle).toBeUndefined()
+      // Unrelated settings are preserved
+      expect(settings.fontSize).toBe(14)
+      expect(settings.showPrompt).toBe(true)
+    })
+
+    it('maps legacy navigation buttons/anchor to true and none to false', async () => {
+      const buttons: any = await migrate(makeState({ messageNavigation: 'buttons' }) as any, 218)
+      expect(buttons.settings.messageNavigation).toBe(true)
+
+      const anchor: any = await migrate(makeState({ messageNavigation: 'anchor' }) as any, 218)
+      expect(anchor.settings.messageNavigation).toBe(true)
+
+      const none: any = await migrate(makeState({ messageNavigation: 'none' }) as any, 218)
+      expect(none.settings.messageNavigation).toBe(false)
+    })
+
+    it('defaults missing navigation to false', async () => {
+      const migrated: any = await migrate(makeState({}) as any, 218)
+      expect(migrated.settings.messageNavigation).toBe(false)
+    })
+
+    it('preserves an already-boolean navigation unchanged', async () => {
+      const migrated: any = await migrate(makeState({ messageNavigation: true }) as any, 218)
+      expect(migrated.settings.messageNavigation).toBe(true)
+    })
+
+    it('is a no-op for state without settings', async () => {
+      const state = { _persist: { version: 217, rehydrated: false } }
+      const migrated: any = await migrate(state as any, 218)
+      expect(migrated.settings).toBeUndefined()
+    })
+  })
 })

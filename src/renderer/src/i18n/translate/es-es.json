@@ -1277,9 +1277,6 @@
       }
     },
     "settings": {
-      "code": {
-        "title": "Configuración de bloques de código"
-      },
       "code_collapsible": "Bloques de código plegables",
       "code_editor": {
         "autocompletion": "Autocompletado",
@@ -1560,6 +1557,7 @@
     "current": "Actual",
     "cut": "Cortar",
     "decline": "[to be translated]:Decline",
+    "decrease": "[to be translated]:Decrease",
     "default": "Predeterminado",
     "delete": "Eliminar",
     "delete_confirm": "¿Está seguro de que desea eliminarlo?",
@@ -1597,6 +1595,7 @@
     "image_preview": "Vista previa de imagen",
     "image_url": "URL de la imagen",
     "image_url_or_upload": "Introduce la URL de la imagen o sube un archivo",
+    "increase": "[to be translated]:Increase",
     "inspect": "Inspeccionar",
     "invalid_value": "Valor inválido",
     "knowledge_base": "Base de conocimiento",
@@ -2438,11 +2437,6 @@
         "horizontal": "Disposición horizontal",
         "label": "Estilo de respuesta multi-modelo",
         "vertical": "Pila vertical"
-      },
-      "style": {
-        "bubble": "Burbuja",
-        "label": "Estilo de mensaje",
-        "plain": "Simple"
       },
       "video": {
         "error": {
@@ -4659,7 +4653,6 @@
       "title": "Deshabilitar aceleración por hardware"
     },
     "input": {
-      "auto_translate_with_space": "Traducir con tres espacios rápidos",
       "clear": {
         "all": "Limpiar",
         "knowledge_base": "Limpiar bases de conocimiento seleccionadas",
@@ -4679,17 +4672,6 @@
       "onboot": "Iniciar automáticamente al encender",
       "title": "Inicio",
       "totray": "Minimizar a la bandeja al iniciar"
-    },
-    "math": {
-      "engine": {
-        "label": "Motor de fórmulas matemáticas",
-        "none": "sin contenido"
-      },
-      "single_dollar": {
-        "label": "habilitar $...$",
-        "tip": "Renderiza fórmulas matemáticas encerradas entre un único símbolo de dólar $...$, habilitado por defecto."
-      },
-      "title": "Configuración de fórmulas matemáticas"
     },
     "mcp": {
       "actions": "Acciones",
@@ -4948,12 +4930,6 @@
         "label": "Separador de mensajes",
         "tooltip": "No aplicable para mensajes de estilo burbuja"
       },
-      "grid_columns": "Número de columnas en la cuadrícula de mensajes",
-      "grid_popover_trigger": {
-        "click": "Mostrar al hacer clic",
-        "hover": "Mostrar al pasar el ratón",
-        "label": "Desencadenante de detalles de cuadrícula"
-      },
       "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "Confirmar antes de eliminar mensaje",
@@ -4961,25 +4937,16 @@
         "enable_quick_triggers": "Habilitar menú rápido con '/' y '@'",
         "paste_long_text_as_file": "Pegar texto largo como archivo",
         "paste_long_text_threshold": "Límite de longitud de texto largo",
-        "send_shortcuts": "Atajos de teclado para enviar",
-        "show_estimated_tokens": "Mostrar número estimado de tokens",
-        "title": "Configuración de entrada"
+        "send_shortcuts": "Atajos de teclado para enviar"
       },
       "markdown_rendering_input_message": "Renderizar mensajes de entrada en Markdown",
       "metrics": "Retraso inicial {{time_first_token_millsec}}ms | {{token_speed}} tokens por segundo",
-      "model": {
-        "title": "Configuración del modelo"
-      },
+      "model": {},
       "navigation": {
-        "anchor": "Ancla de conversación",
-        "buttons": "Botones arriba y abajo",
-        "label": "Botón de navegación de conversación",
-        "none": "No mostrar"
+        "label": "Botón de navegación de conversación"
       },
       "prompt": "Palabra de indicación",
-      "show_message_outline": "Mostrar esquema del mensaje",
-      "title": "Configuración de mensajes",
-      "use_serif_font": "Usar fuente serif"
+      "show_message_outline": "Mostrar esquema del mensaje"
     },
     "miniapps": {
       "cache_change_notice": "Los cambios surtirán efecto cuando el número de miniaplicaciones abiertas aumente o disminuya hasta alcanzar el valor configurado",

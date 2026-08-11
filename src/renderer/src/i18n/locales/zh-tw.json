@@ -1277,9 +1277,6 @@
       }
     },
     "settings": {
-      "code": {
-        "title": "程式碼區塊"
-      },
       "code_collapsible": "程式碼區塊可折疊",
       "code_editor": {
         "autocompletion": "自動完成",
@@ -1560,6 +1557,7 @@
     "current": "目前",
     "cut": "剪下",
     "decline": "拒絕",
+    "decrease": "減少",
     "default": "預設",
     "delete": "刪除",
     "delete_confirm": "確定要刪除嗎？",
@@ -1597,6 +1595,7 @@
     "image_preview": "圖片預覽",
     "image_url": "圖片網址",
     "image_url_or_upload": "輸入圖片網址或上傳檔案",
+    "increase": "增加",
     "inspect": "檢查",
     "invalid_value": "無效值",
     "knowledge_base": "知識庫",
@@ -2438,11 +2437,6 @@
         "horizontal": "橫向排列",
         "label": "多模型回答樣式",
         "vertical": "縱向堆疊"
-      },
-      "style": {
-        "bubble": "氣泡",
-        "label": "訊息樣式",
-        "plain": "簡潔"
       },
       "video": {
         "error": {
@@ -4659,7 +4653,6 @@
       "title": "停用硬體加速"
     },
     "input": {
-      "auto_translate_with_space": "快速敲擊 3 次空格翻譯",
       "clear": {
         "all": "清除",
         "knowledge_base": "清除選中的知識庫",
@@ -4679,17 +4672,6 @@
       "onboot": "開機自動啟動",
       "title": "啟動",
       "totray": "啟動時最小化到系統匣"
-    },
-    "math": {
-      "engine": {
-        "label": "數學公式引擎",
-        "none": "無"
-      },
-      "single_dollar": {
-        "label": "啟用 $...$",
-        "tip": "渲染單個美元符號 $...$ 包裹的數學公式，預設啟用。"
-      },
-      "title": "數學公式設定"
     },
     "mcp": {
       "actions": "操作",
@@ -4948,12 +4930,6 @@
         "label": "訊息間顯示分隔線",
         "tooltip": "不適用於氣泡樣式訊息"
       },
-      "grid_columns": "訊息網格展示列數",
-      "grid_popover_trigger": {
-        "click": "點選顯示",
-        "hover": "停留顯示",
-        "label": "網格詳細資訊觸發"
-      },
       "inject_context_timestamp": "注入上下文時間戳",
       "input": {
         "confirm_delete_message": "刪除訊息前確認",
@@ -4961,25 +4937,16 @@
         "enable_quick_triggers": "啟用 / 和 @ 觸發快捷選單",
         "paste_long_text_as_file": "將長文字貼上為檔案",
         "paste_long_text_threshold": "長文字長度",
-        "send_shortcuts": "傳送快捷鍵",
-        "show_estimated_tokens": "顯示預估 Token 數",
-        "title": "輸入設定"
+        "send_shortcuts": "傳送快捷鍵"
       },
       "markdown_rendering_input_message": "Markdown 渲染輸入訊息",
       "metrics": "首字延遲 {{time_first_token_millsec}} ms | 每秒 {{token_speed}} tokens",
-      "model": {
-        "title": "模型設定"
-      },
+      "model": {},
       "navigation": {
-        "anchor": "對話錨點",
-        "buttons": "上下按鈕",
-        "label": "訊息導覽",
-        "none": "不顯示"
+        "label": "訊息導覽"
       },
       "prompt": "提示詞顯示",
-      "show_message_outline": "顯示訊息大綱",
-      "title": "訊息設定",
-      "use_serif_font": "使用襯線字型"
+      "show_message_outline": "顯示訊息大綱"
     },
     "miniapps": {
       "cache_change_notice": "變更會在開啟的小程式數量調整至設定值後生效",

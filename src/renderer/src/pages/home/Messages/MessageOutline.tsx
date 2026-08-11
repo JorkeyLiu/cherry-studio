@@ -75,14 +75,14 @@ const MessageOutline: FC<MessageOutlineProps> = ({ message }) => {
     if (messageContentContainer) {
       const headingElement = messageContentContainer.querySelector<HTMLElement>(`#${id}`)
       if (headingElement) {
-        const scrollBlock = ['horizontal', 'grid'].includes(message.multiModelMessageStyle ?? '') ? 'nearest' : 'start'
-        scrollIntoView(headingElement, { behavior: 'smooth', block: scrollBlock, container: 'nearest' })
+        // LOCK-105: multi-model messages always render in fold/tag mode, so
+        // headings always scroll to the start of the target element.
+        scrollIntoView(headingElement, { behavior: 'smooth', block: 'start', container: 'nearest' })
       }
     }
   }
 
-  // 暂时不支持 grid，因为在锚点滚动时会导致渲染错位
-  if (message.multiModelMessageStyle === 'grid' || !headings.length) return null
+  if (!headings.length) return null
 
   return (
     <MessageOutlineContainer ref={messageOutlineContainerRef}>

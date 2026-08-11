@@ -19,7 +19,8 @@ interface Props {
 const ThinkingBlock: React.FC<Props> = ({ block }) => {
   const [copied, setCopied] = useTemporaryValue(false, 2000)
   const { t } = useTranslation()
-  const { messageFont, fontSize, thoughtAutoCollapse } = useSettings()
+  // LOCK-104: messages use the system font (fontSize remains user-configurable).
+  const { fontSize, thoughtAutoCollapse } = useSettings()
   const [activeKey, setActiveKey] = useState<'thought' | ''>(thoughtAutoCollapse ? '' : 'thought')
 
   const isThinking = useMemo(() => block.status === MessageBlockStatus.STREAMING, [block.status])
@@ -75,7 +76,6 @@ const ThinkingBlock: React.FC<Props> = ({ block }) => {
             //  FIXME: 临时兼容
             <ThinkingContent
               style={{
-                fontFamily: messageFont === 'serif' ? 'var(--font-family-serif)' : 'var(--font-family)',
                 fontSize
               }}>
               {!isThinking && (

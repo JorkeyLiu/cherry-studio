@@ -1277,9 +1277,6 @@
       }
     },
     "settings": {
-      "code": {
-        "title": "Configurações de Bloco de Código"
-      },
       "code_collapsible": "Bloco de código colapsável",
       "code_editor": {
         "autocompletion": "Conclusão automática",
@@ -1560,6 +1557,7 @@
     "current": "Atual",
     "cut": "Cortar",
     "decline": "[to be translated]:Decline",
+    "decrease": "[to be translated]:Decrease",
     "default": "Padrão",
     "delete": "Excluir",
     "delete_confirm": "Tem certeza de que deseja excluir?",
@@ -1597,6 +1595,7 @@
     "image_preview": "Pré-visualização da imagem",
     "image_url": "URL da imagem",
     "image_url_or_upload": "Insira o URL da imagem ou carregue o arquivo",
+    "increase": "[to be translated]:Increase",
     "inspect": "Verificar",
     "invalid_value": "Valor inválido",
     "knowledge_base": "Base de Conhecimento",
@@ -2438,11 +2437,6 @@
         "horizontal": "Arranjo horizontal",
         "label": "Estilo de resposta multi-modelo",
         "vertical": "Pilha vertical"
-      },
-      "style": {
-        "bubble": "Bolha",
-        "label": "Estilo da mensagem",
-        "plain": "Simples"
       },
       "video": {
         "error": {
@@ -4659,7 +4653,6 @@
       "title": "Desativar aceleração de hardware"
     },
     "input": {
-      "auto_translate_with_space": "Traduzir com três espaços rápidos",
       "clear": {
         "all": "Limpar",
         "knowledge_base": "Limpar base de conhecimento selecionada",
@@ -4679,17 +4672,6 @@
       "onboot": "Iniciar automaticamente ao ligar",
       "title": "Inicialização",
       "totray": "Minimizar para bandeja ao iniciar"
-    },
-    "math": {
-      "engine": {
-        "label": "Motor de fórmulas matemáticas",
-        "none": "sem conteúdo"
-      },
-      "single_dollar": {
-        "label": "ativar $...$",
-        "tip": "Renderiza fórmulas matemáticas delimitadas por um único sinal de dólar $...$, habilitado por padrão."
-      },
-      "title": "Configuração de fórmulas matemáticas"
     },
     "mcp": {
       "actions": "Ações",
@@ -4948,12 +4930,6 @@
         "label": "Divisor de mensagens",
         "tooltip": "Não aplicável a mensagens de estilo bolha"
       },
-      "grid_columns": "Número de colunas da grade de mensagens",
-      "grid_popover_trigger": {
-        "click": "Clique para mostrar",
-        "hover": "Passe o mouse para mostrar",
-        "label": "Disparador de detalhes da grade"
-      },
       "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "confirmar antes de excluir a mensagem",
@@ -4961,25 +4937,16 @@
         "enable_quick_triggers": "Ativar menu rápido com '/' e '@'",
         "paste_long_text_as_file": "Colar texto longo como arquivo",
         "paste_long_text_threshold": "Limite de texto longo",
-        "send_shortcuts": "Atalhos de envio",
-        "show_estimated_tokens": "Mostrar número estimado de tokens",
-        "title": "Configurações de entrada"
+        "send_shortcuts": "Atalhos de envio"
       },
       "markdown_rendering_input_message": "Renderização de markdown na entrada de mensagens",
       "metrics": "Atraso inicial {{time_first_token_millsec}}ms | Taxa de token por segundo {{token_speed}} tokens",
-      "model": {
-        "title": "Configurações de modelo"
-      },
+      "model": {},
       "navigation": {
-        "anchor": "Ancoragem de conversa",
-        "buttons": "Botões de cima e de baixo",
-        "label": "Botão de navegação de conversa",
-        "none": "Não mostrar"
+        "label": "Botão de navegação de conversa"
       },
       "prompt": "Exibir palavra-chave",
-      "show_message_outline": "Exibir esboço da mensagem",
-      "title": "Configurações de mensagem",
-      "use_serif_font": "Usar fonte serif"
+      "show_message_outline": "Exibir esboço da mensagem"
     },
     "miniapps": {
       "cache_change_notice": "As alterações entrarão em vigor após a abertura ou remoção dos mini aplicativos até atingir o número definido",

@@ -1277,9 +1277,6 @@
       }
     },
     "settings": {
-      "code": {
-        "title": "Paramètres des blocs de code"
-      },
       "code_collapsible": "Blocs de code pliables",
       "code_editor": {
         "autocompletion": "Complétion automatique",
@@ -1560,6 +1557,7 @@
     "current": "Actuel",
     "cut": "Couper",
     "decline": "[to be translated]:Decline",
+    "decrease": "[to be translated]:Decrease",
     "default": "Défaut",
     "delete": "Supprimer",
     "delete_confirm": "Êtes-vous sûr de vouloir supprimer ?",
@@ -1597,6 +1595,7 @@
     "image_preview": "Aperçu de l'image",
     "image_url": "URL de l'image",
     "image_url_or_upload": "Entrez l'URL de l'image ou téléchargez un fichier",
+    "increase": "[to be translated]:Increase",
     "inspect": "Vérifier",
     "invalid_value": "valeur invalide",
     "knowledge_base": "Base de connaissances",
@@ -2438,11 +2437,6 @@
         "horizontal": "Disposition horizontale",
         "label": "Style de réponse multi-modèle",
         "vertical": "Disposition verticale"
-      },
-      "style": {
-        "bubble": "Bulles",
-        "label": "Style du message",
-        "plain": "Simplifié"
       },
       "video": {
         "error": {
@@ -4659,7 +4653,6 @@
       "title": "Désactiver l'accélération matérielle"
     },
     "input": {
-      "auto_translate_with_space": "Traduire en frappant rapidement 3 fois l'espace",
       "clear": {
         "all": "Effacer",
         "knowledge_base": "Effacer les bases de connaissances sélectionnées",
@@ -4679,17 +4672,6 @@
       "onboot": "Démarrer automatiquement au démarrage",
       "title": "Démarrage",
       "totray": "Minimiser dans la barre d'état système au démarrage"
-    },
-    "math": {
-      "engine": {
-        "label": "Moteur de formules mathématiques",
-        "none": "Aucun"
-      },
-      "single_dollar": {
-        "label": "activer $...$",
-        "tip": "Rendu des formules mathématiques encapsulées par un seul symbole dollar $...$, activé par défaut."
-      },
-      "title": "Configuration des formules mathématiques"
     },
     "mcp": {
       "actions": "Actions",
@@ -4948,12 +4930,6 @@
         "label": "Séparateur de messages",
         "tooltip": "Non applicable aux messages de style bulle"
       },
-      "grid_columns": "Nombre de colonnes de la grille de messages",
-      "grid_popover_trigger": {
-        "click": "Afficher au clic",
-        "hover": "Afficher au survol",
-        "label": "Déclencheur de popover de la grille"
-      },
       "inject_context_timestamp": "[to be translated]:Inject context timestamp",
       "input": {
         "confirm_delete_message": "Confirmer avant de supprimer le message",
@@ -4961,25 +4937,16 @@
         "enable_quick_triggers": "Activer les menus rapides avec '/' et '@'",
         "paste_long_text_as_file": "Coller le texte long sous forme de fichier",
         "paste_long_text_threshold": "Seuil de longueur de texte",
-        "send_shortcuts": "Raccourcis d'envoi",
-        "show_estimated_tokens": "Afficher le nombre estimatif de tokens",
-        "title": "Paramètres d'entrée"
+        "send_shortcuts": "Raccourcis d'envoi"
       },
       "markdown_rendering_input_message": "Rendu Markdown des messages d'entrée",
       "metrics": "Latence initiale {{time_first_token_millsec}}ms | Vitesse de tokenisation {{token_speed}} tokens/s",
-      "model": {
-        "title": "Paramètres du modèle"
-      },
+      "model": {},
       "navigation": {
-        "anchor": "Ancre de conversation",
-        "buttons": "Boutons haut/bas",
-        "label": "Bouton de navigation des conversations",
-        "none": "Ne pas afficher"
+        "label": "Bouton de navigation des conversations"
       },
       "prompt": "Mot-clé d'affichage",
-      "show_message_outline": "Afficher le plan du message",
-      "title": "Paramètres des messages",
-      "use_serif_font": "Utiliser une police serif"
+      "show_message_outline": "Afficher le plan du message"
     },
     "miniapps": {
       "cache_change_notice": "Les modifications prendront effet après l'ajout ou la suppression d'applications ouvertes jusqu'à atteindre la valeur définie",

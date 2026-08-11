@@ -1,6 +1,6 @@
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
-import { createEvent, fireEvent, render } from '@testing-library/react'
+import { render } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -12,12 +12,7 @@ const mocks = vi.hoisted(() => ({
   setTimeoutTimer: vi.fn(),
   useChatContext: vi.fn().mockReturnValue({ isMultiSelectMode: false }),
   useSettings: vi.fn().mockReturnValue({
-    multiModelMessageStyle: 'horizontal',
-    gridColumns: 2,
-    gridPopoverTrigger: 'click',
-    messageFont: 'system',
     fontSize: 14,
-    messageStyle: 'plain',
     showMessageOutline: false
   }),
   EventEmitter: {
@@ -212,114 +207,45 @@ const createMessage = (id: string, index: number, multiModelMessageStyle: Messag
     index
   }) as unknown as Message & { index: number }
 
-const setElementSize = (
-  element: Element,
-  dimensions: Partial<{
-    clientHeight: number
-    clientWidth: number
-    scrollHeight: number
-    scrollLeft: number
-    scrollWidth: number
-  }>
-) => {
-  for (const [key, value] of Object.entries(dimensions)) {
-    Object.defineProperty(element, key, {
-      configurable: true,
-      value,
-      writable: true
-    })
-  }
-}
-
 describe('MessageGroup', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
-  it('keeps vertical scrolling inside the message content area for horizontal layout', () => {
+  it('renders multi-model groups in fold/tag mode (LOCK-105: always fold)', () => {
     const messages = [createMessage('msg-1', 0, 'horizontal'), createMessage('msg-2', 1, 'horizontal')]
     const topic = { id: 'topic-1' } as Topic
 
     const { container } = render(<MessageGroup messages={messages} topic={topic} />)
 
-    const outerWrapper = document.getElementById('message-msg-1')
-    expect(outerWrapper).not.toBeNull()
-    expect(getComputedStyle(outerWrapper!).overflowY).toBe('visible')
+    // The runtime layout is always fold — even when the persisted per-message
+    // multiModelMessageStyle field says otherwise (import compatibility).
+    const groupContainer = container.querySelector('#message-group-ask-1')
+    expect(groupContainer).not.toBeNull()
+    expect(groupContainer!.className).toContain('fold')
 
-    const contentContainer = container.querySelector('#message-msg-1 .message-content-container')
-    expect(contentContainer).not.toBeNull()
-    expect(getComputedStyle(contentContainer as HTMLElement).overflowY).toBe('auto')
+    // In fold mode only the selected message is visible (display: inline-block)
+    const selectedWrapper = document.getElementById('message-msg-1')
+    expect(selectedWrapper).not.toBeNull()
+    expect(getComputedStyle(selectedWrapper!).display).toBe('inline-block')
 
-    const horizontalGroup = outerWrapper!.parentElement as HTMLElement
-    expect(getComputedStyle(horizontalGroup).overflowX).toBe('auto')
-    expect(getComputedStyle(horizontalGroup).overflowY).toBe('hidden')
+    const hiddenWrapper = document.getElementById('message-msg-2')
+    expect(hiddenWrapper).not.toBeNull()
+    expect(getComputedStyle(hiddenWrapper!).display).toBe('none')
   })
 
-  it('prevents vertical wheel on non-content areas from bubbling to the outer chat scroll in horizontal layout', () => {
-    const parentWheel = vi.fn()
-    const messages = [createMessage('msg-1', 0, 'horizontal'), createMessage('msg-2', 1, 'horizontal')]
-    const topic = { id: 'topic-1' } as Topic
-
-    const { container } = render(
-      <div onWheel={parentWheel}>
-        <MessageGroup messages={messages} topic={topic} />
-      </div>
-    )
-
-    const outerWrapper = container.querySelector('#message-msg-1') as HTMLElement
-    const horizontalGroup = outerWrapper.parentElement as HTMLElement
-    const contentContainers = container.querySelectorAll('.message-content-container')
-
-    expect(horizontalGroup).not.toBeNull()
-    expect(contentContainers).toHaveLength(2)
-
-    contentContainers.forEach((contentContainer) => {
-      setElementSize(contentContainer, {
-        clientHeight: 300,
-        scrollHeight: 600
-      })
-    })
-
-    const wheelEvent = createEvent.wheel(horizontalGroup, { deltaY: 120 })
-    fireEvent(horizontalGroup, wheelEvent)
-
-    expect(parentWheel).not.toHaveBeenCalled()
-  })
-
-  it('supports horizontal wheel scrolling on non-content areas in horizontal layout', () => {
-    const messages = [createMessage('msg-1', 0, 'horizontal'), createMessage('msg-2', 1, 'horizontal')]
+  it('renders the fold/tag group menu bar (MessageGroupModelList) for grouped assistant messages', () => {
+    const messages = [createMessage('msg-1', 0, 'fold'), createMessage('msg-2', 1, 'fold')]
     const topic = { id: 'topic-1' } as Topic
 
     const { container } = render(<MessageGroup messages={messages} topic={topic} />)
 
-    const outerWrapper = container.querySelector('#message-msg-1') as HTMLElement
-    const horizontalGroup = outerWrapper.parentElement as HTMLElement
-    expect(horizontalGroup).not.toBeNull()
-
-    setElementSize(horizontalGroup, {
-      clientWidth: 500,
-      scrollLeft: 0,
-      scrollWidth: 1000
-    })
-
-    const wheelEvent = createEvent.wheel(horizontalGroup, { deltaX: 160 })
-    fireEvent(horizontalGroup, wheelEvent)
-
-    expect(horizontalGroup.scrollLeft).toBe(160)
+    // MessageGroupMenuBar is mocked to render a "menu" marker.
+    expect(container.querySelector('.group-menu-bar')).not.toBeNull()
   })
 
-  it('preserves visible content overflow for non-horizontal layouts', () => {
-    mocks.useSettings.mockReturnValue({
-      multiModelMessageStyle: 'vertical',
-      gridColumns: 2,
-      gridPopoverTrigger: 'click',
-      messageFont: 'system',
-      fontSize: 14,
-      messageStyle: 'plain',
-      showMessageOutline: false
-    })
-
-    const messages = [createMessage('msg-1', 0, 'vertical'), createMessage('msg-2', 1, 'vertical')]
+  it('preserves visible content overflow for the fold layout', () => {
+    const messages = [createMessage('msg-1', 0, 'fold'), createMessage('msg-2', 1, 'fold')]
     const topic = { id: 'topic-1' } as Topic
 
     const { container } = render(<MessageGroup messages={messages} topic={topic} />)

@@ -1,37 +1,37 @@
-import type { Assistant } from '@renderer/types'
-import { Drawer, Tooltip } from 'antd'
+import { Popover, Tooltip } from 'antd'
 import { t } from 'i18next'
 import { Settings2 } from 'lucide-react'
 import type { FC } from 'react'
 import { useState } from 'react'
 
 import NavbarIcon from '../../../../../components/NavbarIcon'
-import { AssistantSettingsTab } from './SettingsTab'
+import MessageSettings from './MessageSettings'
 
-interface Props {
-  assistant?: Assistant
-}
-
-const SettingsButton: FC<Props> = ({ assistant }) => {
+/**
+ * LOCK-101: the independent quick-settings Drawer / AssistantSettingsTab
+ * surface is removed. The navbar Settings2 button now opens a compact
+ * arrowless message-settings Popover (~272px wide) near the message area.
+ */
+const SettingsButton: FC = () => {
   const [settingsOpen, setSettingsOpen] = useState(false)
 
   return (
-    <>
+    <Popover
+      placement="bottom"
+      trigger="click"
+      arrow={false}
+      open={settingsOpen}
+      onOpenChange={setSettingsOpen}
+      content={<MessageSettings />}
+      styles={{
+        root: { width: 272 }
+      }}>
       <Tooltip title={t('settings.title')} mouseEnterDelay={0.8}>
         <NavbarIcon onClick={() => setSettingsOpen(true)}>
           <Settings2 size={18} />
         </NavbarIcon>
       </Tooltip>
-      <Drawer
-        placement="right"
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        width="var(--assistant-settings-width, 275px)"
-        closable={false}
-        styles={{ body: { padding: 0, paddingTop: 'var(--navbar-height)' } }}>
-        {assistant && <AssistantSettingsTab assistant={assistant} />}
-      </Drawer>
-    </>
+    </Popover>
   )
 }
 
