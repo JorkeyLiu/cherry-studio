@@ -372,20 +372,6 @@ function topicItem(page: import('@playwright/test').Page, topicId: string) {
   return page.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
 }
 
-async function clickAssistantsTab(page: import('@playwright/test').Page): Promise<void> {
-  const tab = page.getByRole('button', { name: 'Assistants', exact: false })
-  await tab.waitFor({ state: 'visible', timeout: 10000 })
-  await tab.click()
-  await page.waitForTimeout(300)
-}
-
-async function clickTopicsTab(page: import('@playwright/test').Page): Promise<void> {
-  const tab = page.getByRole('button', { name: 'Topics', exact: false })
-  await tab.waitFor({ state: 'visible', timeout: 10000 })
-  await tab.click()
-  await page.waitForTimeout(300)
-}
-
 /**
  * Wait until the main window is usable again after the in-process reload:
  * #root attached, Redux store defined, home ready.
@@ -422,7 +408,8 @@ async function waitForImportedNavigationInRedux(page: import('@playwright/test')
 
 /** Sidebar/topic UI presence after the same-PID reload (LOCK-LUI3). */
 async function assertImportedNavigationUI(page: import('@playwright/test').Page): Promise<void> {
-  await clickAssistantsTab(page)
+  // LOCK-NAV: the assistant list panel always renders; no tab switching.
+  await expect(page.locator('.assistants-tab')).toBeVisible()
   await expect(
     page.locator('[class*="home-tabs"]').getByText(PROJECTION_ASSISTANTS.first.name, { exact: true }).first(),
     'first imported assistant must be visible after the reload'
@@ -432,7 +419,8 @@ async function assertImportedNavigationUI(page: import('@playwright/test').Page)
     'second imported assistant must be visible after the reload'
   ).toBeVisible()
 
-  await clickTopicsTab(page)
+  // LOCK-NAV: the topics list panel always renders beside the assistant list.
+  await expect(page.locator('.topics-tab')).toBeVisible()
   const item = topicItem(page, SOURCE_IDS.topic)
   await expect(item, 'the imported topic must be visible in the topic list after the reload').toBeVisible()
   await expect(item, 'the imported topic must carry its projected name').toContainText(PROJECTION_TOPICS.visible.name)

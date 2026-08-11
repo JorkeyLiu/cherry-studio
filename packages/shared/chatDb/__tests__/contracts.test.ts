@@ -15,7 +15,7 @@ import {
 
 describe('chatDbContracts', () => {
   const expectedChannels = [
-    // Original 14 commands
+    // Original 13 commands
     'chatdb:fetch-messages',
     'chatdb:get-raw-topic',
     'chatdb:topic-exists',
@@ -29,7 +29,6 @@ describe('chatDbContracts', () => {
     'chatdb:update-single-block',
     'chatdb:bulk-add-blocks',
     'chatdb:delete-blocks',
-    'chatdb:clear-messages',
     // Phase 5.1A: segment + reorder + file-reference commands
     'chatdb:list-segments',
     'chatdb:upsert-segment',
@@ -51,7 +50,6 @@ describe('chatDbContracts', () => {
     'chatdb:reset-messages-for-resend',
     'chatdb:delete-messages-with-segments',
     'chatdb:paste-messages-to-topic',
-    'chatdb:clear-topic-with-segments',
     // Phase 5.1B-2: search
     'chatdb:search-messages',
     // Phase 5.2B: atomic assistant empty-trash
@@ -246,14 +244,6 @@ describe('validateChatDbRequest — valid payloads', () => {
     expect(() =>
       validateChatDbRequest('chatdb:delete-blocks', {
         blockIds: ['blk-1', 'blk-2']
-      })
-    ).not.toThrow()
-  })
-
-  it('clear-messages: { topicId }', () => {
-    expect(() =>
-      validateChatDbRequest('chatdb:clear-messages', {
-        topicId: 'topic-1'
       })
     ).not.toThrow()
   })
@@ -475,10 +465,6 @@ describe('validateChatDbRequest — valid payloads', () => {
         insertIndex: 0
       })
     ).not.toThrow()
-  })
-
-  it('clear-topic-with-segments: { topicId }', () => {
-    expect(() => validateChatDbRequest('chatdb:clear-topic-with-segments', { topicId: 't1' })).not.toThrow()
   })
 
   // Phase 5.3: ownership transfer + assistant reset
@@ -826,10 +812,6 @@ describe('validateChatDbRequest — invalid payloads', () => {
     ).toThrow(ValidationError)
   })
 
-  it('clear-topic-with-segments: rejects missing topicId', () => {
-    expect(() => validateChatDbRequest('chatdb:clear-topic-with-segments', {})).toThrow(ValidationError)
-  })
-
   // Phase 5.3: ownership transfer + assistant reset invalid payloads
   it('transfer-topic-ownership: rejects missing topicId', () => {
     expect(() => validateChatDbRequest('chatdb:transfer-topic-ownership', { assistantId: 'a1' })).toThrow(
@@ -1154,19 +1136,6 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() => validateChatDbResult('chatdb:delete-blocks', { ok: true, value: null })).toThrow(ValidationError)
   })
 
-  it('clear-messages: valid FileCleanupResult', () => {
-    expect(() =>
-      validateChatDbResult('chatdb:clear-messages', {
-        ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {} }
-      })
-    ).not.toThrow()
-  })
-
-  it('clear-messages: rejects null value (FileCleanupResult required)', () => {
-    expect(() => validateChatDbResult('chatdb:clear-messages', { ok: true, value: null })).toThrow(ValidationError)
-  })
-
   // Phase 5.1A: segment commands
   it('list-segments: empty array', () => {
     expect(() => validateChatDbResult('chatdb:list-segments', { ok: true, value: [] })).not.toThrow()
@@ -1446,15 +1415,6 @@ describe('validateChatDbResult — valid success envelopes', () => {
       })
     ).not.toThrow()
   })
-
-  it('clear-topic-with-segments: returns file cleanup result', () => {
-    expect(() =>
-      validateChatDbResult('chatdb:clear-topic-with-segments', {
-        ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } }
-      })
-    ).not.toThrow()
-  })
 })
 
 // ===========================================================================
@@ -1506,10 +1466,6 @@ describe('validateChatDbResult — invalid envelopes', () => {
 
   it('rejects void result with non-null value for delete-message', () => {
     expect(() => validateChatDbResult('chatdb:delete-message', { ok: true, value: {} })).toThrow(ValidationError)
-  })
-
-  it('rejects void result with non-null value for clear-messages', () => {
-    expect(() => validateChatDbResult('chatdb:clear-messages', { ok: true, value: [] })).toThrow(ValidationError)
   })
 
   it('rejects topic-exists with non-boolean value', () => {
@@ -1848,7 +1804,7 @@ describe('fetch-messages success-value plain-object and cardinality (LOCK-LB-8/7
 
 describe('coverage consistency', () => {
   const allChannels = [
-    // Original 14 commands
+    // Original 13 commands
     'chatdb:fetch-messages',
     'chatdb:get-raw-topic',
     'chatdb:topic-exists',
@@ -1862,7 +1818,6 @@ describe('coverage consistency', () => {
     'chatdb:update-single-block',
     'chatdb:bulk-add-blocks',
     'chatdb:delete-blocks',
-    'chatdb:clear-messages',
     // Phase 5.1A: segment + reorder + file-reference commands
     'chatdb:list-segments',
     'chatdb:upsert-segment',
@@ -1890,7 +1845,6 @@ describe('coverage consistency', () => {
     'chatdb:reset-messages-for-resend',
     'chatdb:delete-messages-with-segments',
     'chatdb:paste-messages-to-topic',
-    'chatdb:clear-topic-with-segments',
     // Phase 5.1B-2: search
     'chatdb:search-messages'
   ] as const

@@ -2,7 +2,6 @@ import { loggerService } from '@logger'
 import { createSelector } from '@reduxjs/toolkit'
 import { deleteSingleMessage } from '@renderer/services/ClipboardService'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
-import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { appendMessageTrace, pauseTrace, restartTrace } from '@renderer/services/SpanManagerService'
 import { estimateUserPromptUsage } from '@renderer/services/TokenService'
 import store, { type RootState, useAppDispatch, useAppSelector } from '@renderer/store'
@@ -10,7 +9,6 @@ import { updateOneBlock } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
 import {
   appendAssistantResponseThunk,
-  clearTopicMessagesThunk,
   cloneMessagesToNewTopicThunk,
   deleteSingleMessageThunk,
   initiateTranslationThunk,
@@ -132,25 +130,6 @@ export function useMessageOperations(topic: Topic) {
     },
     [dispatch, topic.id]
   )
-
-  /**
-   * 清除当前或指定主题的所有消息。 / Clears all messages for the current or specified topic.
-   * Dispatches clearTopicMessagesThunk.
-   */
-  const clearTopicMessages = useCallback(
-    async (_topicId?: string) => {
-      const topicIdToClear = _topicId || topic.id
-      await dispatch(clearTopicMessagesThunk(topicIdToClear))
-    },
-    [dispatch, topic.id]
-  )
-
-  /**
-   * 发出事件以表示创建新上下文（清空消息 UI）。 / Emits an event to signal creating a new context (clearing messages UI).
-   */
-  const createNewContext = useCallback(async () => {
-    void EventEmitter.emit(EVENT_NAMES.NEW_CONTEXT)
-  }, [])
 
   const displayCount = useAppSelector(selectNewDisplayCount)
 
@@ -517,8 +496,6 @@ export function useMessageOperations(topic: Topic) {
     regenerateAssistantMessage,
     resendUserMessageWithEdit,
     appendAssistantResponse,
-    createNewContext,
-    clearTopicMessages,
     pauseMessages,
     resumeMessage,
     getTranslationUpdater,

@@ -22,6 +22,7 @@ import { FLUSH, PAUSE, PERSIST, persistReducer, persistStore, PURGE, REGISTER, R
 import storage from 'redux-persist/lib/storage'
 
 import { applyPendingImportProjection } from '../services/importProjection'
+import { runImportProjectionBoot } from '../services/importProjectionReadiness'
 import storeSyncService from '../services/StoreSyncService'
 import assistants from './assistants'
 import backup from './backup'
@@ -147,19 +148,27 @@ export const persistor = persistStore(store, undefined, () => {
     }, 0)
   }
 
-  // LOCK-PROD-6: apply the one-shot L2 navigation projection (idempotent).
-  // Runs after Redux rehydration on every startup; a crash before the ack
-  // leaves the row pending so the apply retries on the next startup. A
-  // failure is logged and the pending row is retained for retry — never a
-  // startup blocker. dispatch/flush are injected to keep the apply module
-  // free of a static cycle back into this store module.
-  void applyPendingImportProjection({ dispatch: store.dispatch, flush: handleSaveData }).catch((error) => {
-    logger.error('Failed to apply pending import navigation projection (retained for retry):', error as Error)
+  // LOCK-001/LOCK-PROJECTION: gate the ordinary chat tree and the
+  // ReduxStoreReady notification on the one-shot L2 navigation projection
+  // settlement. runImportProjectionBoot settles readiness ONLY when the
+  // apply returns applied (true) or verified no-pending (false) without an
+  // API failure; on failure the pending row stays unacked (next-startup
+  // retry) and the tree stays gated so no stale topic load can run before
+  // the imported navigation is projected. dispatch/flush are injected to
+  // keep the apply module free of a static cycle back into this store
+  // module. The callback stays synchronous — the boot promise is
+  // fire-and-forget (no promise is returned to redux-persist); .catch is a
+  // defensive guard because runImportProjectionBoot never rejects.
+  void runImportProjectionBoot({
+    apply: () => applyPendingImportProjection({ dispatch: store.dispatch, flush: handleSaveData }),
+    notifyMain: () => {
+      // Notify main process ONLY after import projection readiness succeeds.
+      void window.electron?.ipcRenderer?.invoke(IpcChannel.ReduxStoreReady)
+      logger.info('Redux store ready, notified main process')
+    }
+  }).catch((error) => {
+    logger.error('Import projection boot failed unexpectedly (retained for retry):', error as Error)
   })
-
-  // Notify main process that Redux store is ready
-  void window.electron?.ipcRenderer?.invoke(IpcChannel.ReduxStoreReady)
-  logger.info('Redux store ready, notified main process')
 })
 
 export const useAppDispatch = useDispatch.withTypes<AppDispatch>()

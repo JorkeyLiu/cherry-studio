@@ -203,7 +203,9 @@ test.describe('Cherry Studio dev-origin ZIP import with same-PID in-process relo
         await topicExistsInRedux(page, MARKER.topic),
         `marker ${MARKER.topic} must be in Redux before import`
       ).toBe(true)
-      await clickTopicsTab(page)
+      // LOCK-NAV: the topics list panel always renders; assert its readiness
+      // instead of switching to a Topics tab.
+      await expect(page.locator('.topics-tab')).toBeVisible()
       await expect(
         topicItem(page, MARKER.topic),
         `marker topic must be visible in the sidebar before import`
@@ -624,20 +626,6 @@ function messageContainer(page: import('@playwright/test').Page, messageId: stri
   return page.locator(`[data-message-id="${messageId}"]`)
 }
 
-async function clickAssistantsTab(page: import('@playwright/test').Page): Promise<void> {
-  const tab = page.getByRole('button', { name: 'Assistants', exact: false })
-  await tab.waitFor({ state: 'visible', timeout: 10000 })
-  await tab.click()
-  await page.waitForTimeout(300)
-}
-
-async function clickTopicsTab(page: import('@playwright/test').Page): Promise<void> {
-  const tab = page.getByRole('button', { name: 'Topics', exact: false })
-  await tab.waitFor({ state: 'visible', timeout: 10000 })
-  await tab.click()
-  await page.waitForTimeout(300)
-}
-
 /**
  * Wait until the main window is usable again after the in-process reload:
  * #root attached, Redux store defined, home ready.
@@ -752,13 +740,15 @@ function assertImportedNavigation(nav: NavigationSnapshot): void {
 
 /** Sidebar/topic UI presence assertions (LOCK-UI3: visible interactions). */
 async function assertImportedNavigationUI(page: import('@playwright/test').Page): Promise<void> {
-  await clickAssistantsTab(page)
+  // LOCK-NAV: the assistant list panel always renders; no tab switching.
+  await expect(page.locator('.assistants-tab')).toBeVisible()
   await expect(
     page.locator('[class*="home-tabs"]').getByText(DEV_NAV_METADATA.assistant.name, { exact: true }).first(),
     'imported assistant must be visible in the sidebar'
   ).toBeVisible()
 
-  await clickTopicsTab(page)
+  // LOCK-NAV: the topics list panel always renders beside the assistant list.
+  await expect(page.locator('.topics-tab')).toBeVisible()
   const item = topicItem(page, DEV_NAV_METADATA.topic.id)
   await expect(item, 'the imported topic must be visible in the topic list').toBeVisible()
   await expect(item, 'the imported topic must carry its projected name').toContainText(DEV_NAV_METADATA.topic.name)
@@ -770,17 +760,20 @@ async function assertImportedNavigationUI(page: import('@playwright/test').Page)
 
 /**
  * Open the imported conversation through the visible sidebar: activate the
- * imported assistant, switch to the Topics tab, and open the dev-origin topic.
+ * imported assistant, then open the dev-origin topic from the always-rendered
+ * topics panel (LOCK-NAV — no tab switching).
  */
 async function openImportedTopic(page: import('@playwright/test').Page): Promise<void> {
-  await clickAssistantsTab(page)
+  // LOCK-NAV: the assistant list panel always renders; no tab switching.
+  await expect(page.locator('.assistants-tab')).toBeVisible()
   const assistantName = page
     .locator('[class*="home-tabs"]')
     .getByText(DEV_NAV_METADATA.assistant.name, { exact: true })
     .first()
   await assistantName.waitFor({ state: 'visible', timeout: 10000 })
   await assistantName.click()
-  await clickTopicsTab(page)
+  // LOCK-NAV: the topics list panel always renders beside the assistant list.
+  await expect(page.locator('.topics-tab')).toBeVisible()
   const item = topicItem(page, DEV_NAV_METADATA.topic.id)
   await item.waitFor({ state: 'visible', timeout: 10000 })
   await item.click()

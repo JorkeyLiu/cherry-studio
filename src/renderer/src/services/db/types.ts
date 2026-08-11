@@ -13,8 +13,6 @@ export interface MessageExchange {
     message: Message
     blocks: MessageBlock[]
   }
-  // For agent sessions
-  agentSessionId?: string
 }
 
 /**
@@ -95,11 +93,6 @@ export interface MessageDataSource {
 
   // ============ Batch Operations ============
   /**
-   * Clear all messages in a topic
-   */
-  clearMessages(topicId: string): Promise<FileCleanupResult>
-
-  /**
    * Check if topic exists
    */
   topicExists(topicId: string): Promise<boolean>
@@ -123,25 +116,4 @@ export interface MessageDataSource {
    * Update multiple file reference counts
    */
   updateFileCounts?(files: Array<{ id: string; delta: number; deleteIfZero?: boolean }>): Promise<void>
-}
-
-/**
- * Type guard to check if a topic ID is for an agent session
- */
-export function isAgentSessionTopicId(topicId: string): boolean {
-  return topicId.startsWith('agent-session:')
-}
-
-/**
- * Extract session ID from agent session topic ID
- */
-export function extractSessionId(topicId: string): string {
-  return topicId.replace('agent-session:', '')
-}
-
-/**
- * Build agent session topic ID from session ID
- */
-export function buildAgentSessionTopicId(sessionId: string): string {
-  return `agent-session:${sessionId}`
 }

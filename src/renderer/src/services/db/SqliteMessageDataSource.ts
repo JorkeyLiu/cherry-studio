@@ -5,7 +5,9 @@
  * to Main-side ChatDbAggregateService via named IPC methods.
  *
  * Design:
- * - Constructor injection of a narrow typed ChatDbApi; defaults to window.api.chatDb.
+ * - Constructor injection of a narrow typed ChatDbApi; the bridge is resolved
+ *   lazily at method-call time (injected ?? window.api?.chatDb), never in the
+ *   constructor, so isolated renderer contexts without window.api stay safe.
  * - Each method calls exactly one named bridge method and unwraps ChatDbResult.
  * - Structured failure throws ChatDbResultError; transport rejection propagates unchanged.
  * - No retry, no fallback, no second method calls.
@@ -24,10 +26,6 @@ import type {
   BulkAddBlocksRequest,
   ChatDbError,
   ChatDbResult,
-  ClearMessagesRequest,
-  ClearMessagesResponse,
-  ClearTopicWithSegmentsRequest,
-  ClearTopicWithSegmentsResponse,
   CloneMessagesToTopicRequest,
   CloneMessagesToTopicResponse,
   CountFileRefsByFileRequest,
@@ -111,7 +109,6 @@ export interface ChatDbApi {
   updateSingleBlock(request: UpdateSingleBlockRequest): Promise<ChatDbResult<null>>
   bulkAddBlocks(request: BulkAddBlocksRequest): Promise<ChatDbResult<null>>
   deleteBlocks(request: DeleteBlocksRequest): Promise<ChatDbResult<DeleteBlocksResponse>>
-  clearMessages(request: ClearMessagesRequest): Promise<ChatDbResult<ClearMessagesResponse>>
   // Phase 5.1A: segment commands
   listSegments(request: ListSegmentsRequest): Promise<ChatDbResult<ListSegmentsResponse>>
   upsertSegment(request: UpsertSegmentRequest): Promise<ChatDbResult<UpsertSegmentResponse>>
@@ -147,7 +144,6 @@ export interface ChatDbApi {
     request: DeleteMessagesWithSegmentsRequest
   ): Promise<ChatDbResult<DeleteMessagesWithSegmentsResponse>>
   pasteMessagesToTopic(request: PasteMessagesToTopicRequest): Promise<ChatDbResult<PasteMessagesToTopicResponse>>
-  clearTopicWithSegments(request: ClearTopicWithSegmentsRequest): Promise<ChatDbResult<ClearTopicWithSegmentsResponse>>
   // Phase 5.2A: search (read-only)
   searchMessages(request: SearchMessagesRequest): Promise<ChatDbResult<SearchMessagesResponse>>
 }
@@ -229,14 +225,34 @@ function unwrap<T>(result: ChatDbResult<T>): T {
 /**
  * SQLite-backed MessageDataSource using the ChatDb preload bridge.
  *
- * Constructor injection allows testing without the actual preload context.
- * Defaults to window.api.chatDb in production.
+ * The ChatDb bridge API is resolved lazily at method-call time: a
+ * constructor-injected API is preferred, otherwise `window.api?.chatDb` is
+ * read on each call. Construction never touches `window.api`, so isolated
+ * renderer contexts (e.g. chatImport) that do not expose the ordinary preload
+ * bridge can evaluate this module safely. An actual SQLite method call
+ * without any available bridge throws a clear, deterministic error.
  */
 export class SqliteMessageDataSource implements MessageDataSource {
-  private readonly api: ChatDbApi
+  /** Optional injected bridge (tests / non-preload contexts). */
+  private readonly injectedApi?: ChatDbApi
 
   constructor(api?: ChatDbApi) {
-    this.api = api ?? (window as any).api.chatDb
+    this.injectedApi = api
+  }
+
+  /**
+   * Resolve the ChatDb bridge API at method-call time.
+   *
+   * Prefers the constructor-injected API; otherwise falls back to
+   * `window.api?.chatDb`. Throws a clear, deterministic error when neither is
+   * available — a missing API must fail loudly, never silently no-op.
+   */
+  private get api(): ChatDbApi {
+    const resolved = this.injectedApi ?? (typeof window !== 'undefined' ? (window as any)?.api?.chatDb : undefined)
+    if (!resolved) {
+      throw new Error('ChatDb API unavailable: window.api.chatDb is not exposed in this window')
+    }
+    return resolved
   }
 
   // ============ Read Operations ============
@@ -359,13 +375,6 @@ export class SqliteMessageDataSource implements MessageDataSource {
   }
 
   // ============ Batch Operations ============
-
-  async clearMessages(topicId: string): Promise<FileCleanupResult> {
-    const request: ClearMessagesRequest = cloneForWire({ topicId })
-    const result = unwrap(await this.api.clearMessages(request))
-    dispatchTopicUpdatedAt(topicId)
-    return result
-  }
 
   async topicExists(topicId: string): Promise<boolean> {
     const request: TopicExistsRequest = cloneForWire({ topicId })
@@ -541,13 +550,6 @@ export class SqliteMessageDataSource implements MessageDataSource {
   ): Promise<FileCleanupResult> {
     const request: PasteMessagesToTopicRequest = cloneForWire({ topicId, entries, insertIndex })
     const result = unwrap(await this.api.pasteMessagesToTopic(request))
-    dispatchTopicUpdatedAt(topicId)
-    return result
-  }
-
-  async clearTopicWithSegments(topicId: string): Promise<FileCleanupResult> {
-    const request: ClearTopicWithSegmentsRequest = cloneForWire({ topicId })
-    const result = unwrap(await this.api.clearTopicWithSegments(request))
     dispatchTopicUpdatedAt(topicId)
     return result
   }

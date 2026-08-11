@@ -25,6 +25,7 @@ import type { SearchMessagesRequest, SearchMessagesResponse } from '@shared/chat
 import type Database from 'better-sqlite3'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
+import { spanCacheService } from '../SpanCacheService'
 import type { FileReferenceData, MessageBlockData } from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
 import type { ChatDbRepositories } from './repository/factory'
@@ -517,41 +518,6 @@ export class ChatDbAggregateService {
     }, `deleteBlocks(${blockIds.length} blocks)`)
   }
 
-  /**
-   * Clear all messages from a topic. Missing topic: no-op.
-   * Retains topic. Clears messages, blocks/references via FK cascade,
-   * and topic segments. Never touches Dexie file counts.
-   *
-   * Cascade chain (FK ON DELETE CASCADE):
-   * - delete messages → blocks cascade → file_references cascade
-   * - delete topic_segment_messages (by message FK cascade)
-   * - clearTopic also explicitly deletes topic_segments + topic_segment_messages
-   *
-   * No explicit fileRefs.deleteByMessage — relies on cascade and
-   * repository segment cleanup. The old call was semantically wrong:
-   * by the time it executed, messages/blocks were already deleted by
-   * clearTopic, so the subquery-based delete was targeting already-cascaded rows.
-   */
-  clearMessages(topicId: string): ChatDbResult<FileCleanupResult> {
-    return wrapResult(() => {
-      return this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
-
-        // Check topic exists
-        const topic = repos.topics.getById(topicId)
-        if (!topic.found) return { affectedFileIds: [], remainingReferenceCounts: {} }
-        const messages = repos.messages.listByTopic(topicId)
-        const affectedFileIds = collectAffectedFileIds(repos.fileRefs.listByMessages(messages.map((m) => m.id)))
-
-        // clearTopic cascades: deletes messages (→ blocks cascade via FK,
-        // → file_references cascade via FK, → topic_segment_messages cascade
-        // via message FK), and topic_segments + topic_segment_messages.
-        repos.messages.clearTopic(topicId)
-        return buildFileCleanupResult(repos, affectedFileIds)
-      })
-    }, `clearMessages(${topicId})`)
-  }
-
   // =========================================================================
   // Phase 5.1A: Segment commands
   // =========================================================================
@@ -921,7 +887,9 @@ export class ChatDbAggregateService {
    */
   hardDeleteTopic(topicId: string): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      return this.db.transaction((tx) => {
+      // LOCK-004: exact deleted topic IDs are collected inside the transaction.
+      const deletedTopicIds: string[] = []
+      const cleanup = this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
         // Check topic exists
@@ -929,6 +897,7 @@ export class ChatDbAggregateService {
         if (!existing.found) {
           return { affectedFileIds: [], remainingReferenceCounts: {} }
         }
+        deletedTopicIds.push(topicId)
 
         // Collect affected file IDs before cascade deletion
         const messages = repos.messages.listByTopic(topicId)
@@ -943,6 +912,14 @@ export class ChatDbAggregateService {
         // Compute remaining counts after cascade
         return buildFileCleanupResult(repos, affectedFileIds)
       })
+
+      // LOCK-004: clean ordinary-chat traces after the DB commit, using the
+      // exact deleted topic IDs. Cleanup failure is logged and non-fatal; it
+      // never changes the returned committed result. A failed transaction
+      // throws before this point, so post-commit cleanup is never reached.
+      this.cleanDeletedTopicTraces(deletedTopicIds)
+
+      return cleanup
     }, `hardDeleteTopic(${topicId})`)
   }
 
@@ -1000,6 +977,9 @@ export class ChatDbAggregateService {
       // purge. A failed transaction rolls back and emits no warning.
       let invalidMarkerCount = 0
 
+      // LOCK-004: exact deleted topic IDs collected inside the transaction.
+      const deletedTopicIds: string[] = []
+
       const cleanup = this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
@@ -1034,6 +1014,8 @@ export class ChatDbAggregateService {
             const ids = collectAffectedFileIds(refs)
             allAffectedFileIds.push(...ids)
 
+            deletedTopicIds.push(topic.id)
+
             // FK cascade: hard delete
             repos.topics.hardDelete(topic.id)
           }
@@ -1046,6 +1028,12 @@ export class ChatDbAggregateService {
         const uniqueAffectedIds = [...new Set(allAffectedFileIds)]
         return buildFileCleanupResult(repos, uniqueAffectedIds)
       })
+
+      // LOCK-004: clean ordinary-chat traces after the DB commit for the exact
+      // purged topic IDs. Cleanup failure is logged and non-fatal; it never
+      // changes the returned committed result. A failed transaction throws
+      // before this point, so post-commit cleanup is never reached.
+      this.cleanDeletedTopicTraces(deletedTopicIds)
 
       // LOCK-TRASH-7: exactly one count-only warning after a successful
       // purge, only when invalid markers were observed. No IDs, marker
@@ -1074,7 +1062,10 @@ export class ChatDbAggregateService {
    */
   emptyTrashTopics(assistantId: string): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      return this.db.transaction((tx) => {
+      // LOCK-004: exact deleted topic IDs collected inside the transaction.
+      const deletedTopicIds: string[] = []
+
+      const cleanup = this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
         const allAffectedFileIds: string[] = []
@@ -1094,6 +1085,8 @@ export class ChatDbAggregateService {
             const refs = repos.fileRefs.listByMessages(messageIds)
             allAffectedFileIds.push(...collectAffectedFileIds(refs))
 
+            deletedTopicIds.push(topic.id)
+
             // FK cascade: hard delete
             repos.topics.hardDelete(topic.id)
           }
@@ -1106,6 +1099,14 @@ export class ChatDbAggregateService {
         const uniqueAffectedIds = [...new Set(allAffectedFileIds)]
         return buildFileCleanupResult(repos, uniqueAffectedIds)
       })
+
+      // LOCK-004: clean ordinary-chat traces after the DB commit for the exact
+      // emptied topic IDs. Cleanup failure is logged and non-fatal; it never
+      // changes the returned committed result. A failed transaction throws
+      // before this point, so post-commit cleanup is never reached.
+      this.cleanDeletedTopicTraces(deletedTopicIds)
+
+      return cleanup
     }, `emptyTrashTopics(${assistantId})`)
   }
 
@@ -1129,7 +1130,11 @@ export class ChatDbAggregateService {
     replacementTopicId: string
   ): ChatDbResult<{ cleanup: FileCleanupResult; replacementTopic: JsonObject }> {
     return wrapResult(() => {
-      return this.db.transaction((tx) => {
+      // LOCK-004: exact hard-deleted topic IDs are collected inside the
+      // transaction; the replacement topic is excluded from both deletion
+      // and trace cleanup.
+      const deletedTopicIds: string[] = []
+      const result = this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         const affectedFileIds: string[] = []
         let activeCursor: string | undefined
@@ -1147,6 +1152,7 @@ export class ChatDbAggregateService {
             if (topic.assistantId !== assistantId || topic.id === replacementTopicId) continue
             const messageIds = repos.messages.listByTopic(topic.id).map((message) => message.id)
             affectedFileIds.push(...collectAffectedFileIds(repos.fileRefs.listByMessages(messageIds)))
+            deletedTopicIds.push(topic.id)
             repos.topics.hardDelete(topic.id)
           }
           activeCursor = activePage.nextCursor
@@ -1160,6 +1166,15 @@ export class ChatDbAggregateService {
           replacementTopic: topicToWireFull(replacementTopic)
         }
       })
+
+      // LOCK-004: clean ordinary-chat traces after the DB commit for the exact
+      // hard-deleted topic IDs (the replacement topic is excluded). Cleanup
+      // failure is logged and non-fatal; it never changes the returned
+      // committed result. A failed transaction throws before this point, so
+      // post-commit cleanup is never reached.
+      this.cleanDeletedTopicTraces(deletedTopicIds)
+
+      return result
     }, `resetAssistantTopics(${assistantId})`)
   }
 
@@ -1462,41 +1477,6 @@ export class ChatDbAggregateService {
     }, `pasteMessagesToTopic(${topicId}, ${entries.length} entries)`)
   }
 
-  /**
-   * Clear all messages, blocks/file_refs, memberships, and segments
-   * for a topic atomically. Returns file cleanup facts.
-   *
-   * This is an enhanced clearMessages that returns structured
-   * file cleanup information for caller-side deletion decisions.
-   *
-   * Atomicity: one root SQLite transaction.
-   */
-  clearTopicWithSegments(topicId: string): ChatDbResult<FileCleanupResult> {
-    return wrapResult(() => {
-      return this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
-
-        // Check topic exists
-        const topic = repos.topics.getById(topicId)
-        if (!topic.found) {
-          return { affectedFileIds: [], remainingReferenceCounts: {} }
-        }
-
-        // Collect affected file IDs before cascade
-        const messages = repos.messages.listByTopic(topicId)
-        const messageIds = messages.map((m) => m.id)
-        const refs = repos.fileRefs.listByMessages(messageIds)
-        const affectedFileIds = collectAffectedFileIds(refs)
-
-        // clearTopic cascades: messages → blocks → file_references,
-        // and also deletes topic_segments + topic_segment_messages
-        repos.messages.clearTopic(topicId)
-
-        return buildFileCleanupResult(repos, affectedFileIds)
-      })
-    }, `clearTopicWithSegments(${topicId})`)
-  }
-
   // =========================================================================
   // Phase 5.1B-2: Search
   // =========================================================================
@@ -1524,6 +1504,37 @@ export class ChatDbAggregateService {
   // =========================================================================
   // Internal helpers
   // =========================================================================
+
+  /**
+   * LOCK-004: clean ordinary-chat traces for permanently deleted topics AFTER
+   * the DB transaction has committed. Uses the exact deleted topic IDs
+   * collected inside the mutation. Each cleanup failure is caught, logged via
+   * loggerService, and is non-fatal — it never changes the already-committed
+   * result. A failed transaction never reaches this helper: the mutation
+   * throws before post-commit cleanup, so this is only ever called after a
+   * successful commit. Soft deletes must NOT call this helper.
+   */
+  private cleanDeletedTopicTraces(deletedTopicIds: string[]): void {
+    for (const topicId of deletedTopicIds) {
+      try {
+        void spanCacheService.cleanTopic(topicId).catch((error: unknown) => {
+          loggerService
+            .withContext('ChatDbAggregate')
+            .error(
+              `Trace cleanup failed for permanently deleted topic ${topicId}:`,
+              error instanceof Error ? error : new Error(String(error))
+            )
+        })
+      } catch (error) {
+        loggerService
+          .withContext('ChatDbAggregate')
+          .error(
+            `Trace cleanup failed for permanently deleted topic ${topicId}:`,
+            error instanceof Error ? error : new Error(String(error))
+          )
+      }
+    }
+  }
 
   /**
    * Sync file references for file/image blocks.

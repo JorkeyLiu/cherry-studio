@@ -940,17 +940,6 @@
         "xhigh": "Très élevée",
         "xhigh_description": "Raisonnement de très haut niveau"
       },
-      "regular_phrases": {
-        "add": "Добавить фразу",
-        "contentLabel": "Содержание",
-        "contentPlaceholder": "Введите содержание фразы. Поддерживаются переменные, после этого нажмите Tab для быстрого перехода к переменной и изменения её значения. Например:\\n Планируй маршрут из ${from} в ${to}, а затем отправь его на ${email}.",
-        "delete": "Удалить фразу",
-        "deleteConfirm": "Вы уверены, что хотите удалить эту фразу?",
-        "edit": "Редактировать фразу",
-        "title": "Популярные фразы",
-        "titleLabel": "Заголовок",
-        "titlePlaceholder": "Введите заголовок"
-      },
       "title": "Paramètres de l'assistant",
       "tool_use_mode": {
         "function": "Fonction",
@@ -1013,11 +1002,6 @@
         "title": "Nouveau sujet"
       }
     },
-    "alerts": {
-      "create_agent": "Créer un agent pour commencer",
-      "create_session": "Créer une session",
-      "select_agent": "Sélectionnez un agent"
-    },
     "artifacts": {
       "button": {
         "download": "Télécharger",
@@ -1078,58 +1062,25 @@
     },
     "input": {
       "auto_resize": "Ajustement automatique de la hauteur",
-      "clear": {
-        "content": "Êtes-vous sûr de vouloir effacer tous les messages de la conversation actuelle ?",
-        "label": "Effacer le message {{Command}}",
-        "title": "Effacer le message"
-      },
-      "collapse": "Récupérer",
       "context_count": {
         "tip": "Nombre de contextes / Nombre maximal de contextes"
       },
       "estimated_tokens": {
         "tip": "Estimation du nombre de tokens"
       },
-      "expand": "Développer",
       "file_error": "Erreur lors du traitement du fichier",
       "file_not_supported": "Le modèle ne prend pas en charge ce type de fichier",
       "file_not_supported_count": "{{count}} fichiers non pris en charge",
       "generate_image": "Générer une image",
       "generate_image_not_supported": "Le modèle ne supporte pas la génération d'images",
       "knowledge_base": "Base de connaissances",
-      "new": {
-        "context": "Effacer le contexte {{Command}}"
-      },
-      "new_session": "Nouvelle Session {{Command}}",
       "new_topic": "Nouveau sujet {{Command}}",
       "paste_text_file_confirm": "Coller dans la zone de saisie ?",
       "pause": "Pause",
       "placeholder": "Entrez votre message ici...",
       "placeholder_without_triggers": "Tapez votre message ici, appuyez sur {{key}} pour envoyer",
-      "resource_panel": {
-        "categories": {
-          "agents": "Agents",
-          "files": "Fichiers",
-          "skills": "Compétences"
-        },
-        "description": "Sélectionner parmi les fichiers, les agents ou les compétences",
-        "loading": "Chargement...",
-        "no_file_found": {
-          "description": "Aucun fichier disponible dans les répertoires accessibles",
-          "label": "Aucun fichier trouvé"
-        },
-        "no_items_found": {
-          "description": "Aucun fichier, agent ou compétence disponible",
-          "label": "Aucun élément trouvé"
-        },
-        "title": "Ressources"
-      },
       "send": "Envoyer",
       "settings": "Paramètres",
-      "slash_commands": {
-        "description": "Commandes slash de session d'agent",
-        "title": "Commandes Slash"
-      },
       "thinking": {
         "budget_exceeds_max": "Le budget de réflexion dépasse le nombre maximum de tokens",
         "label": "Pensée",
@@ -1386,9 +1337,6 @@
     "thinking": "En réflexion",
     "topics": {
       "auto_rename": "Générer un nom de sujet",
-      "clear": {
-        "title": "Effacer le message"
-      },
       "copy": {
         "image": "Copier sous forme d'image",
         "md": "Copier sous forme de Markdown",
@@ -5533,7 +5481,6 @@
       "action": "Action",
       "actions": "操作",
       "clear_shortcut": "Effacer raccourci clavier",
-      "clear_topic": "Vider les messages",
       "copy_last_message": "Copier le dernier message",
       "edit_last_user_message": "Éditer le dernier message utilisateur",
       "enabled": "activer",
@@ -5552,7 +5499,6 @@
       "show_settings": "Ouvrir les paramètres",
       "title": "Raccourcis",
       "toggle_edit_mode": "[to be translated]:Toggle Edit Mode",
-      "toggle_new_context": "Effacer le contexte",
       "toggle_show_assistants": "Basculer l'affichage des assistants",
       "toggle_show_topics": "Basculer l'affichage des sujets",
       "zoom_in": "Agrandir l'interface",

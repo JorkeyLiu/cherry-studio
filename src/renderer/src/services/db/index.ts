@@ -16,23 +16,14 @@
  */
 /**
  * Unified data access layer for messages
- * Provides a consistent API for accessing messages from different sources
- * (Dexie/IndexedDB for regular chats, IPC/Backend for agent sessions)
+ * Provides a consistent API for accessing messages from the SQLite chat DB
+ * (via IPC to Main-side ChatDbAggregateService).
  */
 
 // Export main service
-export type { DbSourceType } from './DbService'
 export { DbService, dbService } from './DbService'
 
 // Export types
-export type { MessageDataSource, MessageExchange } from './types'
-export {
-  buildAgentSessionTopicId,
-  extractSessionId,
-  isAgentSessionTopicId
-} from './types'
-
-// Export implementations (for testing or direct access if needed)
-export { AgentMessageDataSource } from './AgentMessageDataSource'
 export type { ChatDbApi } from './SqliteMessageDataSource'
 export { ChatDbResultError, SqliteMessageDataSource } from './SqliteMessageDataSource'
+export type { MessageDataSource, MessageExchange } from './types'

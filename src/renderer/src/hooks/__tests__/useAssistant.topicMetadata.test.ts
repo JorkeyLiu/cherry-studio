@@ -54,7 +54,7 @@ vi.mock('@renderer/store/llm', () => ({
 }))
 
 vi.mock('@renderer/hooks/useTopic', () => ({
-  TopicManager: { softRemoveTopic: vi.fn(), restoreTopic: vi.fn(), getTopic: vi.fn() }
+  TopicManager: { removeTopic: vi.fn() }
 }))
 
 vi.mock('@renderer/services/db/topicMetadataPersist', () => ({
@@ -65,10 +65,6 @@ vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
   ensureOrdinaryTopicOwnership: vi.fn(),
   softDeleteOrdinaryTopic: vi.fn(),
   restoreOrdinaryTopic: vi.fn()
-}))
-
-vi.mock('@renderer/utils/agentSession', () => ({
-  isAgentSessionTopicId: (id: string) => id.startsWith('agent-session:')
 }))
 
 vi.mock('react-i18next', () => ({

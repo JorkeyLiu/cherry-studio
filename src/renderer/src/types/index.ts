@@ -26,7 +26,6 @@ export * from './ocr'
 export * from './plugin'
 export * from './provider'
 export * from './serialize'
-export * from './skill'
 
 export type McpMode = 'disabled' | 'auto' | 'manual'
 
@@ -54,7 +53,6 @@ export type Assistant = {
   mcpMode?: McpMode
   mcpServers?: MCPServer[]
   knowledgeRecognition?: 'off' | 'on'
-  regularPhrases?: QuickPhrase[] // Added for regular phrase
   tags?: string[] // 助手标签
   enableMemory?: boolean
   // for translate. 更好的做法是定义base assistant，把 Assistant 作为多种不同定义 assistant 的联合类型，但重构代价太大
@@ -276,8 +274,7 @@ export type Metrics = {
 }
 
 export enum TopicType {
-  Chat = 'chat',
-  Session = 'session'
+  Chat = 'chat'
 }
 
 export type Topic = {

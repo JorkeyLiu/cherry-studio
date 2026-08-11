@@ -16,8 +16,6 @@ export interface InputbarToolsState {
   mentionedModels: Model[]
   /** Selected knowledge base items */
   selectedKnowledgeBases: KnowledgeBase[]
-  /** Whether the inputbar is expanded */
-  isExpanded: boolean
 
   /** Whether image files can be added (derived state) */
   couldAddImageFile: boolean
@@ -78,14 +76,10 @@ export interface InputbarToolsDispatch {
   setFiles: React.Dispatch<React.SetStateAction<FileMetadata[]>>
   setMentionedModels: React.Dispatch<React.SetStateAction<Model[]>>
   setSelectedKnowledgeBases: React.Dispatch<React.SetStateAction<KnowledgeBase[]>>
-  setIsExpanded: React.Dispatch<React.SetStateAction<boolean>>
 
   /** Parent component actions */
   resizeTextArea: () => void
   addNewTopic: () => void
-  clearTopic: () => void
-  onNewContext: () => void
-  toggleExpanded: (nextState?: boolean) => void
 
   /** Text manipulation (avoids putting text state in Context) */
   onTextChange: (updater: string | ((prev: string) => string)) => void
@@ -146,17 +140,13 @@ interface InputbarToolsProviderProps {
     files: FileMetadata[]
     mentionedModels: Model[]
     selectedKnowledgeBases: KnowledgeBase[]
-    isExpanded: boolean
     couldAddImageFile: boolean
     extensions: string[]
   }>
   actions: {
     resizeTextArea: () => void
     addNewTopic: () => void
-    clearTopic: () => void
-    onNewContext: () => void
     onTextChange: (updater: string | ((prev: string) => string)) => void
-    toggleExpanded: (nextState?: boolean) => void
   }
 }
 
@@ -167,7 +157,6 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
   const [selectedKnowledgeBases, setSelectedKnowledgeBases] = useState<KnowledgeBase[]>(
     initialState?.selectedKnowledgeBases || []
   )
-  const [isExpanded, setIsExpanded] = useState(initialState?.isExpanded || false)
 
   // Derived state (internal management)
   const [couldAddImageFile, setCouldAddImageFile] = useState(initialState?.couldAddImageFile || false)
@@ -234,10 +223,7 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
     () => ({
       resizeTextArea: () => actionsRef.current.resizeTextArea(),
       addNewTopic: () => actionsRef.current.addNewTopic(),
-      clearTopic: () => actionsRef.current.clearTopic(),
-      onNewContext: () => actionsRef.current.onNewContext(),
-      onTextChange: (updater: string | ((prev: string) => string)) => actionsRef.current.onTextChange(updater),
-      toggleExpanded: (nextState?: boolean) => actionsRef.current.toggleExpanded(nextState)
+      onTextChange: (updater: string | ((prev: string) => string)) => actionsRef.current.onTextChange(updater)
     }),
     []
   )
@@ -248,20 +234,11 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
       files,
       mentionedModels,
       selectedKnowledgeBases,
-      isExpanded,
       couldAddImageFile,
       couldMentionNotVisionModel,
       extensions
     }),
-    [
-      files,
-      mentionedModels,
-      selectedKnowledgeBases,
-      isExpanded,
-      couldAddImageFile,
-      couldMentionNotVisionModel,
-      extensions
-    ]
+    [files, mentionedModels, selectedKnowledgeBases, couldAddImageFile, couldMentionNotVisionModel, extensions]
   )
 
   // Tools Registry API (stable references for tool buttons)
@@ -289,7 +266,6 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
       setFiles,
       setMentionedModels,
       setSelectedKnowledgeBases,
-      setIsExpanded,
 
       // Stable actions
       ...stableActions,

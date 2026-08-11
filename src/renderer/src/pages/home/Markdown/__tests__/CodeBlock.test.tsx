@@ -71,7 +71,7 @@ vi.mock('@renderer/config/constant', () => ({
 }))
 
 // Mock ClickableFilePath
-vi.mock('@renderer/pages/home/Messages/Tools/MessageAgentTools/ClickableFilePath', () => ({
+vi.mock('@renderer/components/ClickableFilePath', () => ({
   ClickableFilePath: ({ path }: { path: string }) => <span data-testid="clickable-file-path">{path}</span>
 }))
 

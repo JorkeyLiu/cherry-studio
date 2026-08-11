@@ -10,10 +10,8 @@ export interface ToolApprovalState {
   isWaiting: boolean
   /** Whether the tool is currently executing after approval */
   isExecuting: boolean
-  /** Whether a submission is in progress (Agent only) */
+  /** Whether a submission is in progress */
   isSubmitting: boolean
-  /** Tool input from permission request (Agent only) */
-  input?: Record<string, unknown>
 }
 
 /**
@@ -28,30 +26,20 @@ export interface ToolApprovalActions {
   autoApprove?: () => void | Promise<void>
 }
 
-export interface UseToolApprovalOptions {
-  /** Force a specific approval type */
-  forceType?: 'mcp' | 'agent'
-}
-
 /**
- * Unified hook for tool approval - automatically selects between MCP and Agent approval
- * based on the tool type in the block metadata.
+ * Unified hook for tool approval for MCP tool blocks.
  *
  * @param block - The tool message block
- * @param options - Optional configuration
  * @returns Unified approval state and actions
  */
-export function useToolApproval(
-  block: ToolMessageBlock,
-  _options: UseToolApprovalOptions = {}
-): ToolApprovalState & ToolApprovalActions {
+export function useToolApproval(block: ToolMessageBlock): ToolApprovalState & ToolApprovalActions {
   const mcpApproval = useMcpToolApproval(block)
 
   return mcpApproval
 }
 
 /**
- * Determine if a block needs approval (either MCP or Agent)
+ * Determine if a block needs MCP approval
  */
 export function isBlockWaitingApproval(block: ToolMessageBlock): boolean {
   return block.metadata?.rawMcpToolResponse?.status === 'pending'

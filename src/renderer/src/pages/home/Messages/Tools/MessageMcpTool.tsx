@@ -20,12 +20,6 @@ import styled from 'styled-components'
 
 import { useToolApproval } from './hooks/useToolApproval'
 import {
-  getEffectiveStatus,
-  SkeletonSpan,
-  ToolStatusIndicator,
-  TruncatedIndicator
-} from './MessageAgentTools/GenericTools'
-import {
   ArgKey,
   ArgsSection,
   ArgsSectionTitle,
@@ -34,6 +28,7 @@ import {
   formatArgValue,
   ResponseSection
 } from './shared/ArgsTable'
+import { getEffectiveStatus, SkeletonSpan, ToolStatusIndicator, TruncatedIndicator } from './shared/GenericTools'
 import { truncateOutput } from './shared/truncateOutput'
 import ToolApprovalActionsComponent from './ToolApprovalActions'
 

@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next'
 import { Provider } from 'react-redux'
 import { PersistGate } from 'redux-persist/integration/react'
 
+import ImportProjectionGate from './components/ImportProjectionGate'
 import TopViewContainer from './components/TopView'
 import AntdProvider from './context/AntdProvider'
 import { CodeStyleProvider } from './context/CodeStyleProvider'
@@ -162,9 +163,19 @@ function App(): React.ReactElement {
                   <PersistGate loading={null} persistor={persistor}>
                     <SidebarWidthInitializer />
                     <CatalogHandoffBoundary>
-                      <TopViewContainer>
-                        <Router />
-                      </TopViewContainer>
+                      {/* LOCK-001/LOCK-PROJECTION: the ordinary chat tree must
+                          not mount until the one-shot L2 navigation projection
+                          has safely settled (applied or verified no-pending),
+                          so stale redux-persist navigation can never prime
+                          messages before the imported navigation replaces it.
+                          Kept INSIDE CatalogHandoffBoundary: the catalog
+                          handoff listener must still register at App mount in
+                          every window (LOCK-BRIDGE-1). */}
+                      <ImportProjectionGate>
+                        <TopViewContainer>
+                          <Router />
+                        </TopViewContainer>
+                      </ImportProjectionGate>
                     </CatalogHandoffBoundary>
                   </PersistGate>
                 </CodeStyleProvider>

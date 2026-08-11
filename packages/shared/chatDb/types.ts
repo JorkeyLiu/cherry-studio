@@ -182,12 +182,6 @@ export interface DeleteBlocksRequest {
 }
 export type DeleteBlocksResponse = FileCleanupResult
 
-/** @see IpcChannel.ChatDb_ClearMessages */
-export interface ClearMessagesRequest {
-  topicId: string
-}
-export type ClearMessagesResponse = FileCleanupResult
-
 // ---------------------------------------------------------------------------
 // Command response DTOs
 // ---------------------------------------------------------------------------
@@ -504,14 +498,6 @@ export interface PasteMessagesToTopicRequest {
 /** @see IpcChannel.ChatDb_PasteMessagesToTopic */
 export type PasteMessagesToTopicResponse = FileCleanupResult
 
-/** @see IpcChannel.ChatDb_ClearTopicWithSegments */
-export interface ClearTopicWithSegmentsRequest {
-  topicId: string
-}
-
-/** @see IpcChannel.ChatDb_ClearTopicWithSegments */
-export type ClearTopicWithSegmentsResponse = FileCleanupResult
-
 // ---------------------------------------------------------------------------
 // Search command DTOs (Phase 5.1B-2)
 // ---------------------------------------------------------------------------
@@ -590,7 +576,6 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:update-single-block': { request: UpdateSingleBlockRequest; response: null }
   'chatdb:bulk-add-blocks': { request: BulkAddBlocksRequest; response: null }
   'chatdb:delete-blocks': { request: DeleteBlocksRequest; response: null }
-  'chatdb:clear-messages': { request: ClearMessagesRequest; response: null }
   // Phase 5.1A: segment commands
   'chatdb:list-segments': { request: ListSegmentsRequest; response: ListSegmentsResponse }
   'chatdb:upsert-segment': { request: UpsertSegmentRequest; response: UpsertSegmentResponse }
@@ -635,10 +620,6 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:paste-messages-to-topic': {
     request: PasteMessagesToTopicRequest
     response: PasteMessagesToTopicResponse
-  }
-  'chatdb:clear-topic-with-segments': {
-    request: ClearTopicWithSegmentsRequest
-    response: ClearTopicWithSegmentsResponse
   }
   // Phase 5.1B-2: search
   'chatdb:search-messages': {

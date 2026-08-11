@@ -54,11 +54,10 @@ import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import { clearPendingNavigate, getPendingNavigate, getUserMessage } from '@renderer/services/MessagesService'
+import { clearPendingNavigate, getPendingNavigate } from '@renderer/services/MessagesService'
 import store, { useAppDispatch } from '@renderer/store'
 import { messageBlocksSelectors, updateOneBlock } from '@renderer/store/messageBlock'
-import { newMessagesActions } from '@renderer/store/newMessage'
-import { saveMessageAndBlocksToDB, updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
+import { updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import type { Assistant, Topic } from '@renderer/types'
 import type { MessageBlock } from '@renderer/types/newMessage'
 import { type Message, MessageBlockType } from '@renderer/types/newMessage'
@@ -80,8 +79,7 @@ import {
   useLayoutEffect,
   useMemo,
   useReducer,
-  useRef,
-  useState
+  useRef
 } from 'react'
 import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
@@ -317,7 +315,6 @@ const Messages = ({
     containerRef: scrollContainerRef,
     handleScroll: handleScrollPosition,
     getSavedPosition,
-    clearSavedPosition,
     savePosition
   } = useScrollPosition(`topic-${topic.id}`)
   const [viewportState, reduceViewport] = useReducer(messageViewportReducer, null, createMessageViewportState)
@@ -326,15 +323,13 @@ const Messages = ({
   const hasMoreNewer = viewportState.window?.hasMoreNewer ?? false
   const isLoadingMore = viewportState.loading.older
   const isLoadingNewer = viewportState.loading.newer
-  const [isProcessingContext, setIsProcessingContext] = useState(false)
 
   const { addTopic, updateAssistantSettings } = useAssistant(assistant.id)
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const messages = useTopicMessages(topic.id)
   const isTopicLoading = useTopicLoading(topic)
-  const { displayCount, clearTopicMessages, deleteMessage, createTopicBranch, editMessage } =
-    useMessageOperations(topic)
+  const { displayCount, createTopicBranch, editMessage } = useMessageOperations(topic)
   const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
 
   const { isMultiSelectMode, handleSelectMessage } = useChatContext(topic)
@@ -578,7 +573,7 @@ const Messages = ({
    *
    * Only call this from user-initiated navigation entry points
    * (button clicks, keyboard shortcuts, message navigation).
-   * Internal triggers (SEND_MESSAGE, NEW_CONTEXT, bootstrap restore)
+   * Internal triggers (SEND_MESSAGE, bootstrap restore)
    * must use `navigate` directly without persistence.
    */
   const navigateAndSave = useCallback(
@@ -617,7 +612,7 @@ const Messages = ({
     navigateAndSave({ kind: 'bottom', source: 'imperative' })
   }, [navigateAndSave])
 
-  /** Internal auto-scroll without persistence — for SEND_MESSAGE / NEW_CONTEXT. */
+  /** Internal auto-scroll without persistence — for SEND_MESSAGE. */
   const autoScrollToBottom = useCallback(() => {
     void navigate({ kind: 'bottom', source: 'imperative' })
   }, [navigate])
@@ -675,34 +670,10 @@ const Messages = ({
     nextUserMessage
   }))
 
-  const clearTopic = useCallback(
-    async (data: Topic) => {
-      if (data && data.id !== topic.id) {
-        await clearTopicMessages(data.id)
-        return
-      }
-
-      await clearTopicMessages()
-      clearTimeoutTimer('loadMoreMessages')
-      clearTimeoutTimer('loadNewerMessages')
-      viewportDispatch({ type: 'topic/reset', window: createLatestMessageWindow([], displayCount) })
-      clearSavedPosition()
-    },
-    [clearTimeoutTimer, clearTopicMessages, topic.id, clearSavedPosition, displayCount, viewportDispatch]
-  )
-
   useEffect(() => {
     const unsubscribes = [
       EventEmitter.on(EVENT_NAMES.SEND_MESSAGE, autoScrollToBottom),
       EventEmitter.on(EVENT_NAMES.SCROLL_TO_BOTTOM, scrollToBottom),
-      EventEmitter.on(EVENT_NAMES.CLEAR_MESSAGES, async (data: Topic) => {
-        window.modal.confirm({
-          title: t('chat.input.clear.title'),
-          content: t('chat.input.clear.content'),
-          centered: true,
-          onOk: () => clearTopic(data)
-        })
-      }),
       EventEmitter.on(EVENT_NAMES.COPY_TOPIC_IMAGE, async () => {
         await captureScrollableAsBlob(scrollContainerRef, async (blob) => {
           if (blob) {
@@ -714,34 +685,6 @@ const Messages = ({
         const imageData = await captureScrollableAsDataURL(scrollContainerRef)
         if (imageData) {
           void window.api.file.saveImage(removeSpecialCharactersForFileName(topic.name), imageData)
-        }
-      }),
-      EventEmitter.on(EVENT_NAMES.NEW_CONTEXT, async () => {
-        if (isProcessingContext) return
-        setIsProcessingContext(true)
-
-        try {
-          const messages = messagesRef.current
-
-          if (messages.length === 0) {
-            return
-          }
-
-          const lastMessage = last(messages)
-
-          if (lastMessage?.type === 'clear') {
-            await deleteMessage(lastMessage.id)
-            autoScrollToBottom()
-            return
-          }
-
-          const { message: clearMessage } = getUserMessage({ assistant, topic, type: 'clear' })
-          dispatch(newMessagesActions.addMessage({ topicId: topic.id, message: clearMessage }))
-          await saveMessageAndBlocksToDB(topic.id, clearMessage, [])
-
-          autoScrollToBottom()
-        } finally {
-          setIsProcessingContext(false)
         }
       }),
       EventEmitter.on(EVENT_NAMES.NEW_BRANCH, async (messageId: string) => {
@@ -872,7 +815,7 @@ const Messages = ({
 
     return () => unsubscribes.forEach((unsub) => unsub())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assistant, dispatch, scrollToBottom, autoScrollToBottom, navigate, savePosition, topic, isProcessingContext])
+  }, [assistant, dispatch, scrollToBottom, autoScrollToBottom, navigate, savePosition, topic])
 
   /**
    * Unified topic bootstrap: determines the initial navigation intent with strict priority.
@@ -1070,7 +1013,7 @@ const Messages = ({
   })
 
   useShortcut('edit_last_user_message', () => {
-    const lastUserMessage = messagesRef.current.findLast((m) => m.role === 'user' && m.type !== 'clear')
+    const lastUserMessage = messagesRef.current.findLast((m) => m.role === 'user')
     if (lastUserMessage) {
       void EventEmitter.emit(EVENT_NAMES.EDIT_MESSAGE, lastUserMessage.id)
     }

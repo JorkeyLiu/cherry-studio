@@ -10,11 +10,3 @@ export type InputBarToolType =
   | 'mcp_tools'
   | 'generate_image'
   | 'mention_models'
-  | 'clear_topic'
-  | 'toggle_expand'
-  | 'new_context'
-  // Agent Session tools
-  | 'create_session'
-  | 'slash_commands'
-  | 'activity_directory'
-  | 'permission_mode'

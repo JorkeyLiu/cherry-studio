@@ -105,20 +105,6 @@ const initialState: ShortcutsState = {
       system: false
     },
     {
-      key: 'clear_topic',
-      shortcut: ['CommandOrControl', 'L'],
-      editable: true,
-      enabled: true,
-      system: false
-    },
-    {
-      key: 'toggle_new_context',
-      shortcut: ['CommandOrControl', 'K'],
-      editable: true,
-      enabled: true,
-      system: false
-    },
-    {
       key: 'select_model',
       shortcut: ['CommandOrControl', 'Shift', 'M'],
       editable: true,
@@ -172,7 +158,11 @@ export { initialState }
  * LOCK-006: Quick Assistant (mini window) is removed. Persisted shortcut rows
  * are retained non-destructively (no data-clearing migration), but the retired
  * key is hidden from the settings display/interaction.
+ *
+ * LOCK-003/LOCK-006: clear_topic (clear-messages) and toggle_new_context
+ * (new-context) are retired end-to-end. Historical migrate.ts rows are retained,
+ * but the keys are hidden via this set.
  */
-export const RETIRED_SHORTCUT_KEYS: ReadonlySet<string> = new Set(['mini_window'])
+export const RETIRED_SHORTCUT_KEYS: ReadonlySet<string> = new Set(['mini_window', 'clear_topic', 'toggle_new_context'])
 
 export const isRetiredShortcutKey = (key: string): boolean => RETIRED_SHORTCUT_KEYS.has(key)

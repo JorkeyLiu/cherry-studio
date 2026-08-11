@@ -11,10 +11,6 @@ vi.mock('@renderer/store', () => ({
   }
 }))
 
-vi.mock('@renderer/utils/agentSession', () => ({
-  isAgentSessionTopicId: (id: string) => id.startsWith('agent-session:')
-}))
-
 vi.mock('../SqliteMessageDataSource', () => ({
   SqliteMessageDataSource: class {
     updateTopicMetadata = mockUpdateTopicMetadata
@@ -149,14 +145,5 @@ describe('persistTopicMetadata (Phase 5.2B)', () => {
     mockUpdateTopicMetadata.mockRejectedValue(transportError)
 
     await expect(persistTopicMetadata(next)).rejects.toBe(transportError)
-  })
-
-  it('bypasses SQLite for agent-session topic IDs (LOCK-521/529)', async () => {
-    const agentTopic = makeTopic({ id: 'agent-session:abc-123' })
-    setPrevTopic(agentTopic)
-
-    await persistTopicMetadata(agentTopic)
-
-    expect(mockUpdateTopicMetadata).not.toHaveBeenCalled()
   })
 })

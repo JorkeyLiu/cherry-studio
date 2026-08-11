@@ -46,17 +46,6 @@ const system = (id: string): Message => ({
   blocks: []
 })
 
-const clear = (id: string): Message => ({
-  id,
-  role: 'user',
-  type: 'clear',
-  assistantId: 'assistant-1',
-  topicId: 'topic-1',
-  createdAt: '2026-07-23T00:00:00.000Z',
-  status: UserMessageStatus.SUCCESS,
-  blocks: []
-})
-
 // ---------------------------------------------------------------------------
 // buildContextTurns
 // ---------------------------------------------------------------------------
@@ -234,52 +223,6 @@ describe('buildContextTurns', () => {
     expect(turns[2].messages).toEqual([messages[3]])
   })
 
-  // --- Clear message filtering ---
-
-  it('filters clear messages and everything before them', () => {
-    const messages = [user('u0'), assistant('a0', 'u0'), clear('clear1'), user('u1'), assistant('a1', 'u1')]
-    const turns = buildContextTurns(messages)
-
-    // u0 and a0 are before the clear → filtered out
-    expect(turns).toHaveLength(1)
-    expect(turns[0].key).toBe('u1')
-    expect(turns[0].messages).toEqual([messages[3], messages[4]])
-  })
-
-  it('last clear message wins when multiple clears exist', () => {
-    const messages = [
-      user('u0'),
-      assistant('a0', 'u0'),
-      clear('clear1'),
-      user('u1'),
-      assistant('a1', 'u1'),
-      clear('clear2'),
-      user('u2'),
-      assistant('a2', 'u2')
-    ]
-    const turns = buildContextTurns(messages)
-
-    // Only messages after the last clear (clear2) remain
-    expect(turns).toHaveLength(1)
-    expect(turns[0].key).toBe('u2')
-    expect(turns[0].messages).toEqual([messages[6], messages[7]])
-  })
-
-  it('clear at the end returns empty turns', () => {
-    const messages = [user('u1'), assistant('a1', 'u1'), clear('clear1')]
-    const turns = buildContextTurns(messages)
-
-    expect(turns).toEqual([])
-  })
-
-  it('clear at the start preserves all messages after it', () => {
-    const messages = [clear('clear1'), user('u1'), assistant('a1', 'u1')]
-    const turns = buildContextTurns(messages)
-
-    expect(turns).toHaveLength(1)
-    expect(turns[0].key).toBe('u1')
-  })
-
   // --- Preserve chronological order ---
 
   it('preserves chronological order of all messages within turns', () => {
@@ -428,34 +371,27 @@ describe('turnsToMessages', () => {
     expect(turnsToMessages(turns)).toEqual(messages)
   })
 
-  it('roundtrip: buildContextTurns → turnsToMessages preserves all non-clear messages', () => {
-    const messages = [user('u1'), assistant('a1', 'u1'), clear('clear1'), user('u2'), assistant('a2', 'u2'), user('u3')]
+  it('roundtrip: buildContextTurns → turnsToMessages preserves all messages in order', () => {
+    const messages = [user('u1'), assistant('a1', 'u1'), user('u2'), assistant('a2', 'u2'), user('u3')]
     const turns = buildContextTurns(messages)
     const roundtripped = turnsToMessages(turns)
 
-    // Only u2, a2, u3 survive clear filtering
-    expect(roundtripped).toEqual([messages[3], messages[4], messages[5]])
+    expect(roundtripped).toEqual(messages)
   })
 
   it('roundtrip: buildContextTurns → turnsToMessages preserves user, assistant, and system messages', () => {
-    const messages = [
-      system('s1'),
-      user('u1'),
-      assistant('a1', 'u1'),
-      clear('clear1'),
-      system('s2'),
-      user('u2'),
-      assistant('a2', 'u2')
-    ]
+    const messages = [system('s1'), user('u1'), assistant('a1', 'u1'), system('s2'), user('u2'), assistant('a2', 'u2')]
     const turns = buildContextTurns(messages)
     const roundtripped = turnsToMessages(turns)
 
-    // Post-clear: s2, u2, a2 survive; s1, u1, a1 are before clear
-    expect(roundtripped).toEqual([messages[4], messages[5], messages[6]])
-    // Verify system message is a standalone turn
-    expect(turns[0].key).toBe('s2')
+    expect(roundtripped).toEqual(messages)
+    // Verify system messages are standalone turns
+    expect(turns[0].key).toBe('s1')
     expect(turns[0].messages).toHaveLength(1)
     expect(turns[0].messages[0].role).toBe('system')
+    expect(turns[2].key).toBe('s2')
+    expect(turns[2].messages).toHaveLength(1)
+    expect(turns[2].messages[0].role).toBe('system')
   })
 
   it('subset selection: picks specific turns and flattens correctly', () => {

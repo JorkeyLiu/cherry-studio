@@ -108,8 +108,8 @@ async function createTopicFromUI(page: Page, assistantId: string, expectedCount:
 async function createSecondAssistantViaUI(page: Page): Promise<{ id: string; name: string }> {
   const before = await getState(page)
   const assistantName = `E2E Move Target ${Date.now()}`
-  const assistantsTab = page.getByRole('button', { name: 'Assistants', exact: true })
-  await assistantsTab.click()
+  // LOCK-NAV: the assistant list panel always renders; no tab switching needed.
+  await expect(page.locator('.assistants-tab')).toBeVisible()
   await page.getByRole('button', { name: 'Add Assistant', exact: true }).click()
   const search = page.getByPlaceholder('Search assistants...')
   await search.fill(assistantName)
@@ -132,16 +132,22 @@ async function createSecondAssistantViaUI(page: Page): Promise<{ id: string; nam
   return { id: created.id, name: assistantName }
 }
 
-async function switchToAssistantViaUI(page: Page, assistantName: string): Promise<void> {
-  const assistantsTab = page.getByRole('button', { name: 'Assistants', exact: true })
-  await assistantsTab.click()
+/**
+ * LOCK-NAV: activate an assistant by clicking its row in the always-rendered
+ * assistant list panel. There is no Assistants tab to switch to.
+ */
+async function activateAssistantViaUI(page: Page, assistantName: string): Promise<void> {
+  await expect(page.locator('.assistants-tab')).toBeVisible()
   await page.getByText(assistantName, { exact: true }).first().click()
   await page.waitForTimeout(500)
 }
 
-async function switchToTopicsViaUI(page: Page): Promise<void> {
-  await page.getByRole('button', { name: 'Topics', exact: true }).click()
-  await page.waitForTimeout(300)
+/**
+ * LOCK-NAV: the topics list panel always renders beside the assistant list;
+ * assert its readiness instead of switching to a Topics tab.
+ */
+async function assertTopicsPanelReady(page: Page): Promise<void> {
+  await expect(page.locator('.topics-tab')).toBeVisible()
 }
 
 function queryRows(dbPath: string, sql: string): any[] {
@@ -320,7 +326,7 @@ test.describe('Phase 5.4: Topic move and message delete undo/redo', () => {
     const source = initial.assistants[0]
     if (!source) throw new Error('Default assistant is unavailable')
 
-    await switchToTopicsViaUI(page)
+    await assertTopicsPanelReady(page)
     const topicToMove = source.topics[0]
     if (!topicToMove) throw new Error('Default topic is unavailable')
     const secondTopicId = await createTopicFromUI(page, source.id, source.topicIds.length + 1)
@@ -340,8 +346,8 @@ test.describe('Phase 5.4: Topic move and message delete undo/redo', () => {
     expect(beforeMoveRows[0]).toMatchObject({ id: secondTopicId, assistant_id: source.id, deleted_at: null })
 
     const secondAssistant = await createSecondAssistantViaUI(page)
-    await switchToAssistantViaUI(page, source.name)
-    await switchToTopicsViaUI(page)
+    await activateAssistantViaUI(page, source.name)
+    await assertTopicsPanelReady(page)
 
     const sourceTopicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${secondTopicId}"]`)
     await sourceTopicItem.waitFor({ state: 'visible' })
@@ -376,15 +382,15 @@ test.describe('Phase 5.4: Topic move and message delete undo/redo', () => {
     expect(moveRows).toHaveLength(1)
     expect(moveRows[0]).toMatchObject({ id: secondTopicId, assistant_id: secondAssistant.id, deleted_at: null })
 
-    await switchToAssistantViaUI(page, secondAssistant.name)
-    await switchToTopicsViaUI(page)
+    await activateAssistantViaUI(page, secondAssistant.name)
+    await assertTopicsPanelReady(page)
     await expect(page.locator(`[data-testid="topic-item"][data-topic-id="${secondTopicId}"]`)).toBeVisible()
-    await switchToAssistantViaUI(page, source.name)
-    await switchToTopicsViaUI(page)
+    await activateAssistantViaUI(page, source.name)
+    await assertTopicsPanelReady(page)
     await expect(page.locator(`[data-testid="topic-item"][data-topic-id="${secondTopicId}"]`)).toHaveCount(0)
 
-    await switchToAssistantViaUI(page, secondAssistant.name)
-    await switchToTopicsViaUI(page)
+    await activateAssistantViaUI(page, secondAssistant.name)
+    await assertTopicsPanelReady(page)
     await page.locator(`[data-testid="topic-item"][data-topic-id="${secondTopicId}"]`).click()
     await page.reload({ waitUntil: 'domcontentloaded' })
     await page.waitForFunction(

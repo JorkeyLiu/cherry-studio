@@ -67,7 +67,6 @@ export function __testSetPendingNavigate(pending: PendingNavigate | null): void 
 }
 
 export {
-  filterAfterContextClearMessages,
   filterEmptyMessages,
   filterErrorOnlyMessagesWithRelated,
   filterMessages,

@@ -177,7 +177,9 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
         await topicExistsInRedux(page, MARKER.topic),
         `marker ${MARKER.topic} must be in Redux before import`
       ).toBe(true)
-      await clickTopicsTab(page)
+      // LOCK-NAV: the topics list panel always renders; assert its readiness
+      // instead of switching to a Topics tab.
+      await expect(page.locator('.topics-tab')).toBeVisible()
       await expect(
         topicItem(page, MARKER.topic),
         `marker topic must be visible in the sidebar before import`
@@ -325,13 +327,65 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
         topicItem(page, MARKER.topic),
         `marker topic ${MARKER.topic} must be gone from the sidebar`
       ).toHaveCount(0)
+
+      // --- 6b. LOCK-EVIDENCE: direct on-disk generation comparison ----------
+      // Compare the Main IPC view against DIRECT readonly SQL reads of the
+      // LIVE `Data/chat.db` and the retained `chat.db.pre-import-backup` at
+      // this exact post-reload point, so the failing generation is identified
+      // empirically (LOCK-009: Main IPC and on-disk live DB must agree after
+      // reopen). LOCK-001: replace-all must leave imported source only in the
+      // live DB; the backup retains the old baseline/marker. Uses the EXISTING
+      // shared `queryChatDbViaElectron` fixture helper — no production
+      // instrumentation (LOCK-EVIDENCE). The diagnostic helper surfaces the
+      // exact query outcome code when the live DB is held by the running app
+      // (BUSY/LOCKED) instead of swallowing it.
+      const liveSnapshot = readTopicIdSnapshot(chatDbPath!)
+      const backupSnapshot = readTopicIdSnapshot(path.join(dataDir, ROLLBACK_SNAPSHOT_FILENAME))
+      const liveDesc = describeTopicIdSnapshot('live Data/chat.db', liveSnapshot)
+      const backupDesc = describeTopicIdSnapshot('chat.db.pre-import-backup', backupSnapshot)
+      console.log(`[E2E] Direct on-disk topic generations — ${liveDesc}; ${backupDesc}`)
+
+      expect(liveSnapshot.ok, `live chat.db direct read failed — ${liveDesc}`).toBe(true)
+      if (liveSnapshot.ok) {
+        expect(
+          liveSnapshot.topicIds.includes(SOURCE_IDS.topic),
+          `live chat.db must contain the imported source topic ${SOURCE_IDS.topic} — ${liveDesc}`
+        ).toBe(true)
+        expect(
+          liveSnapshot.topicIds.includes(BASELINE.topic),
+          `live chat.db must NOT contain the baseline topic ${BASELINE.topic} after replace-all — ${liveDesc}`
+        ).toBe(false)
+        expect(
+          liveSnapshot.topicIds.includes(MARKER.topic),
+          `live chat.db must NOT contain the marker topic ${MARKER.topic} after replace-all — ${liveDesc}`
+        ).toBe(false)
+      }
+
+      expect(backupSnapshot.ok, `pre-import backup direct read failed — ${backupDesc}`).toBe(true)
+      if (backupSnapshot.ok) {
+        expect(
+          backupSnapshot.topicIds.includes(BASELINE.topic),
+          `pre-import backup must retain the baseline topic ${BASELINE.topic} — ${backupDesc}`
+        ).toBe(true)
+        expect(
+          backupSnapshot.topicIds.includes(MARKER.topic),
+          `pre-import backup must retain the marker topic ${MARKER.topic} — ${backupDesc}`
+        ).toBe(true)
+        expect(
+          backupSnapshot.topicIds.includes(SOURCE_IDS.topic),
+          `pre-import backup must NOT contain the imported source topic ${SOURCE_IDS.topic} — ${backupDesc}`
+        ).toBe(false)
+      }
+
       const markerAfterSql = await page.evaluate(
         (topicId) => (window as any).api.chatDb.topicExists({ topicId }),
         MARKER.topic
       )
-      expect(markerAfterSql?.value, `marker topic ${MARKER.topic} must be gone from SQLite after replace-all`).toBe(
-        false
-      )
+      expect(
+        markerAfterSql?.value,
+        `marker topic ${MARKER.topic} must be gone from SQLite after replace-all; ` +
+          `IPC topicExists=${String(markerAfterSql?.value)} — ${liveDesc}; ${backupDesc}`
+      ).toBe(false)
 
       // Imported navigation: assistants order/names + visible topic metadata.
       // LOCK-TF1: BEFORE any send, createdAt AND updatedAt must equal the
@@ -599,20 +653,6 @@ function messageContainer(page: import('@playwright/test').Page, messageId: stri
   return page.locator(`[data-message-id="${messageId}"]`)
 }
 
-async function clickAssistantsTab(page: import('@playwright/test').Page): Promise<void> {
-  const tab = page.getByRole('button', { name: 'Assistants', exact: false })
-  await tab.waitFor({ state: 'visible', timeout: 10000 })
-  await tab.click()
-  await page.waitForTimeout(300)
-}
-
-async function clickTopicsTab(page: import('@playwright/test').Page): Promise<void> {
-  const tab = page.getByRole('button', { name: 'Topics', exact: false })
-  await tab.waitFor({ state: 'visible', timeout: 10000 })
-  await tab.click()
-  await page.waitForTimeout(300)
-}
-
 /**
  * Wait until the main window is usable again after the in-process reload or a
  * same-profile relaunch: #root attached, Redux store defined, home ready.
@@ -736,7 +776,8 @@ function assertImportedNavigation(nav: NavigationSnapshot, expectedUpdatedAt: st
 
 /** Sidebar/topic UI presence assertions (LOCK-UI4: visible interactions). */
 async function assertImportedNavigationUI(page: import('@playwright/test').Page): Promise<void> {
-  await clickAssistantsTab(page)
+  // LOCK-NAV: the assistant list panel always renders; no tab switching.
+  await expect(page.locator('.assistants-tab')).toBeVisible()
   await expect(
     page.locator('[class*="home-tabs"]').getByText(PROJECTION_ASSISTANTS.first.name, { exact: true }).first(),
     'first imported assistant must be visible in the sidebar'
@@ -746,7 +787,8 @@ async function assertImportedNavigationUI(page: import('@playwright/test').Page)
     'second imported assistant must be visible in the sidebar'
   ).toBeVisible()
 
-  await clickTopicsTab(page)
+  // LOCK-NAV: the topics list panel always renders beside the assistant list.
+  await expect(page.locator('.topics-tab')).toBeVisible()
   const item = topicItem(page, SOURCE_IDS.topic)
   await expect(item, 'the imported topic must be visible in the topic list').toBeVisible()
   await expect(item, 'the imported topic must carry its projected name').toContainText(PROJECTION_TOPICS.visible.name)
@@ -758,17 +800,20 @@ async function assertImportedNavigationUI(page: import('@playwright/test').Page)
 
 /**
  * Open the imported conversation through the visible sidebar: activate the
- * first imported assistant, switch to the Topics tab, and open t-e2e-1.
+ * first imported assistant, then open t-e2e-1 from the always-rendered
+ * topics panel (LOCK-NAV — no tab switching).
  */
 async function openImportedTopic(page: import('@playwright/test').Page): Promise<void> {
-  await clickAssistantsTab(page)
+  // LOCK-NAV: the assistant list panel always renders; no tab switching.
+  await expect(page.locator('.assistants-tab')).toBeVisible()
   const assistantName = page
     .locator('[class*="home-tabs"]')
     .getByText(PROJECTION_ASSISTANTS.first.name, { exact: true })
     .first()
   await assistantName.waitFor({ state: 'visible', timeout: 10000 })
   await assistantName.click()
-  await clickTopicsTab(page)
+  // LOCK-NAV: the topics list panel always renders beside the assistant list.
+  await expect(page.locator('.topics-tab')).toBeVisible()
   const item = topicItem(page, SOURCE_IDS.topic)
   await item.waitFor({ state: 'visible', timeout: 10000 })
   await item.click()
@@ -1020,6 +1065,51 @@ async function waitForAssistantResponseComplete(
 // ---------------------------------------------------------------------------
 // Helpers — SQLite evidence
 // ---------------------------------------------------------------------------
+
+/**
+ * LOCK-EVIDENCE: deterministic direct on-disk topic-ID snapshot of a chat.db
+ * file through the EXISTING shared Electron readonly query helper
+ * (`queryChatDbViaElectron`) — no production instrumentation.
+ *
+ * Non-throwing by design: a direct read of the LIVE chat.db while the running
+ * app holds it can be blocked (BUSY/LOCKED), and the exact outcome code must
+ * surface in the assertion message instead of a bare throw. Fails closed on
+ * every failure code — never `rows ?? []` (LOCK-QDB-5).
+ */
+type TopicIdSnapshot = { ok: true; topicIds: string[] } | { ok: false; failure: string }
+
+function readTopicIdSnapshot(dbPath: string): TopicIdSnapshot {
+  const result = queryChatDbViaElectron(dbPath, 'SELECT id FROM topics ORDER BY id')
+  if (!result.ok) {
+    return {
+      ok: false,
+      failure: `direct SQL read failed (code=${result.code}, attempt=${result.attempt}, elapsedMs=${result.elapsedMs})`
+    }
+  }
+  return {
+    ok: true,
+    topicIds: Array.from(result.rows)
+      .map((r) => String(r.id))
+      .sort()
+  }
+}
+
+/**
+ * Render a compact diagnostic line for one direct on-disk topic-ID snapshot:
+ * the full sorted topic-id set plus per-generation membership (source /
+ * baseline / marker), so the failing generation is identifiable from the
+ * assertion output alone.
+ */
+function describeTopicIdSnapshot(label: string, snapshot: TopicIdSnapshot): string {
+  if (!snapshot.ok) return `${label}: ${snapshot.failure}`
+  const generation = (id: string): string => (snapshot.topicIds.includes(id) ? 'present' : 'absent')
+  return (
+    `${label}: topicIds=[${snapshot.topicIds.join(', ')}] ` +
+    `source(${SOURCE_IDS.topic})=${generation(SOURCE_IDS.topic)}, ` +
+    `baseline(${BASELINE.topic})=${generation(BASELINE.topic)}, ` +
+    `marker(${MARKER.topic})=${generation(MARKER.topic)}`
+  )
+}
 
 function queryRows(dbPath: string, sql: string): Array<Record<string, unknown>> {
   const result = queryChatDbViaElectron(dbPath, sql)

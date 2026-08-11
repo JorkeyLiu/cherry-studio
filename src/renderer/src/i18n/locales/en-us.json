@@ -940,17 +940,6 @@
         "xhigh": "Extra High",
         "xhigh_description": "Extra high level reasoning"
       },
-      "regular_phrases": {
-        "add": "Add Phrase",
-        "contentLabel": "Content",
-        "contentPlaceholder": "Please enter phrase content, support using variables, and press Tab to quickly locate the variable to modify. For example: \nHelp me plan a route from ${from} to ${to}, and send it to ${email}.",
-        "delete": "Delete Phrase",
-        "deleteConfirm": "Are you sure to delete this phrase?",
-        "edit": "Edit Phrase",
-        "title": "Regular Phrase",
-        "titleLabel": "Title",
-        "titlePlaceholder": "Enter title"
-      },
       "title": "Assistant Settings",
       "tool_use_mode": {
         "function": "Function",
@@ -1013,11 +1002,6 @@
         "title": "New Topic"
       }
     },
-    "alerts": {
-      "create_agent": "Create an agent to get started",
-      "create_session": "Create a session",
-      "select_agent": "Select an agent"
-    },
     "artifacts": {
       "button": {
         "download": "Download",
@@ -1078,58 +1062,25 @@
     },
     "input": {
       "auto_resize": "Auto resize height",
-      "clear": {
-        "content": "Do you want to clear all messages of the current topic?",
-        "label": "Clear {{Command}}",
-        "title": "Clear all messages?"
-      },
-      "collapse": "Collapse",
       "context_count": {
         "tip": "Selected / Total Turns"
       },
       "estimated_tokens": {
         "tip": "Estimated tokens"
       },
-      "expand": "Expand",
       "file_error": "Error processing file",
       "file_not_supported": "Model does not support this file type",
       "file_not_supported_count": "{{count}} files are not supported",
       "generate_image": "Generate image",
       "generate_image_not_supported": "The model does not support generating images.",
       "knowledge_base": "Knowledge Base",
-      "new": {
-        "context": "Clear Context {{Command}}"
-      },
-      "new_session": "New Session {{Command}}",
       "new_topic": "New Topic {{Command}}",
       "paste_text_file_confirm": "Paste into input bar?",
       "pause": "Pause",
       "placeholder": "Type your message here, press {{key}} to send - @ to Select Model, / to Include Tools",
       "placeholder_without_triggers": "Type your message here, press {{key}} to send",
-      "resource_panel": {
-        "categories": {
-          "agents": "Agents",
-          "files": "Files",
-          "skills": "Skills"
-        },
-        "description": "Select from files, agents, or skills",
-        "loading": "Loading...",
-        "no_file_found": {
-          "description": "No files available in accessible directories",
-          "label": "No File Found"
-        },
-        "no_items_found": {
-          "description": "No files, agents, or skills available",
-          "label": "No Items Found"
-        },
-        "title": "Resources"
-      },
       "send": "Send",
       "settings": "Settings",
-      "slash_commands": {
-        "description": "Agent session slash commands",
-        "title": "Slash Commands"
-      },
       "thinking": {
         "budget_exceeds_max": "Thinking budget exceeds the maximum token number",
         "label": "Thinking",
@@ -1386,9 +1337,6 @@
     "thinking": "Thinking ({{seconds}} seconds)",
     "topics": {
       "auto_rename": "Auto Rename",
-      "clear": {
-        "title": "Clear Messages"
-      },
       "copy": {
         "image": "Copy as image",
         "md": "Copy as markdown",
@@ -5533,7 +5481,6 @@
       "action": "Action",
       "actions": "operation",
       "clear_shortcut": "Clear Shortcut",
-      "clear_topic": "Clear Messages",
       "copy_last_message": "Copy Last Message",
       "edit_last_user_message": "Edit Last User Message",
       "enabled": "Enable",
@@ -5552,7 +5499,6 @@
       "show_settings": "Open Settings",
       "title": "Keyboard Shortcuts",
       "toggle_edit_mode": "Toggle Edit Mode",
-      "toggle_new_context": "Clear Context",
       "toggle_show_assistants": "Toggle Assistants",
       "toggle_show_topics": "Toggle Topics",
       "zoom_in": "Zoom In",

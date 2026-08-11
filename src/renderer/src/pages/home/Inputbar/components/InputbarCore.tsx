@@ -127,8 +127,8 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   forceEnableQuickPanelTriggers
 }) => {
   const config = useMemo(() => getInputbarConfig(scope), [scope])
-  const { files, isExpanded } = useInputbarToolsState()
-  const { setFiles, setIsExpanded, toolsRegistry, triggers } = useInputbarToolsDispatch()
+  const { files } = useInputbarToolsState()
+  const { setFiles, toolsRegistry, triggers } = useInputbarToolsDispatch()
   const { setExtensions } = useInputbarToolsInternalDispatch()
   const isEmpty = text.trim().length === 0
   const [inputFocus, setInputFocus] = useState(false)
@@ -197,15 +197,6 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   useEffect(() => {
     setExtensions(supportedExts)
   }, [setExtensions, supportedExts])
-
-  const handleToggleExpanded = useCallback(
-    (nextState?: boolean) => {
-      const target = typeof nextState === 'boolean' ? nextState : !isExpanded
-      setIsExpanded(target)
-      focusTextarea()
-    },
-    [focusTextarea, setIsExpanded, isExpanded]
-  )
 
   const translate = useCallback(async () => {
     if (isTranslating) {
@@ -315,12 +306,6 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
         }
       }
 
-      if (isExpanded && event.key === 'Escape') {
-        event.stopPropagation()
-        handleToggleExpanded()
-        return
-      }
-
       const isEnterPressed = event.key === 'Enter' && !event.nativeEvent.isComposing
       if (isEnterPressed) {
         if (isSendMessageKeyPressed(event, sendMessageShortcut) && !isSendDisabled) {
@@ -342,13 +327,11 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
     [
       inputFocus,
       autoTranslateWithSpace,
-      isExpanded,
       text.length,
       files.length,
       textareaRef,
       spaceClickCount,
       translate,
-      handleToggleExpanded,
       sendMessageShortcut,
       isSendDisabled,
       handleSendMessage,
@@ -645,9 +628,7 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
         className={classNames('inputbar')}>
         {pinnedContent}
         {quickPanelElement}
-        <InputBarContainer
-          id="inputbar"
-          className={classNames('inputbar-container', isDragging && 'file-dragging', isExpanded && 'expanded')}>
+        <InputBarContainer id="inputbar" className={classNames('inputbar-container', isDragging && 'file-dragging')}>
           <DragHandle onMouseDown={handleDragStart}>
             <HolderOutlined style={{ fontSize: 12 }} />
           </DragHandle>

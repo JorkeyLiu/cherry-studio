@@ -1,10 +1,9 @@
 /**
  * ClipboardService.deleteSingleMessage — Phase 5.3 live caller tests.
  *
- * LOCK-001: ordinary deletion commits DB first via deleteMessagesFromDB
+ * LOCK-001: deletion commits DB first via deleteMessagesFromDB
  * (which uses deleteMessagesWithSegments returning FileCleanupResult),
  * consumes cleanup exactly once post-commit, then mutates Redux/files.
- * Agent topics return empty cleanup (no FileManager interaction).
  * DB failure leaves Redux/files unchanged.
  */
 
@@ -218,24 +217,6 @@ describe('ClipboardService.deleteSingleMessage', () => {
     expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'removeMessages' }))
     // Cleanup not consumed
     expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
-  })
-
-  it('agent topic returns empty cleanup (no FileManager interaction)', async () => {
-    const agentMsg = createUserMessage({ id: 'agent-msg-1', topicId: 'agent-session:s-1' })
-    storeState.messages.entities = { 'agent-msg-1': agentMsg }
-    storeState.messages.messageIdsByTopic = { 'agent-session:s-1': ['agent-msg-1'] }
-    storeState.messageBlocks.entities = {}
-
-    mocks.selectMessagesForTopic.mockReturnValue([agentMsg])
-    mocks.deleteMessagesFromDB.mockResolvedValue(emptyCleanup)
-
-    const { deleteSingleMessage } = await import('../ClipboardService')
-    const dispatch = vi.fn()
-
-    await deleteSingleMessage(dispatch, () => storeState as any, 'agent-session:s-1', agentMsg)
-
-    // Cleanup consumed with empty result (agent path returns empty)
-    expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(emptyCleanup)
   })
 
   it('does NOT call dbService.updateFileCount after consumeFileCleanupResult (LOCK-P5.3-1)', async () => {

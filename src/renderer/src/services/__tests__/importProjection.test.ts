@@ -295,20 +295,18 @@ describe('applyPendingImportProjection (LOCK-PROD-6)', () => {
     expect(ackProjection).not.toHaveBeenCalled()
   })
 
-  it('does not dispatch or ack when the projection read fails', async () => {
+  it('throws on a failed projection read — no dispatch, no flush, no ack (LOCK-PROJECTION)', async () => {
     getProjection.mockResolvedValue({ ok: false, error: 'read failed' })
-    const applied = await applyPendingImportProjection({ dispatch, flush })
-    expect(applied).toBe(false)
+    await expect(applyPendingImportProjection({ dispatch, flush })).rejects.toThrow('Navigation projection read failed')
     expect(dispatch).not.toHaveBeenCalled()
     expect(flush).not.toHaveBeenCalled()
     expect(ackProjection).not.toHaveBeenCalled()
   })
 
-  it('is a no-op when the cherryImport IPC bridge is unavailable', async () => {
+  it('throws when the cherryImport IPC bridge is unavailable — never a valid no-pending (LOCK-PROJECTION)', async () => {
     const api = (window as unknown as { api?: Record<string, unknown> }).api
     if (api) delete api.cherryImport
-    const applied = await applyPendingImportProjection({ dispatch, flush })
-    expect(applied).toBe(false)
+    await expect(applyPendingImportProjection({ dispatch, flush })).rejects.toThrow(/IPC bridge unavailable/)
     expect(dispatch).not.toHaveBeenCalled()
     expect(ackProjection).not.toHaveBeenCalled()
   })

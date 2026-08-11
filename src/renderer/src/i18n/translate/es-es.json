@@ -940,17 +940,6 @@
         "xhigh": "Extra Alta",
         "xhigh_description": "Razonamiento de extra alto nivel"
       },
-      "regular_phrases": {
-        "add": "Agregar frase",
-        "contentLabel": "Contenido",
-        "contentPlaceholder": "Por favor, introduzca el contenido de la frase. Puede usar variables y luego presionar Tab para navegar rápidamente a las variables y modificarlas. Por ejemplo: \\nAyúdame a planificar una ruta desde ${from} hasta ${to}, y luego envíala a ${email}.",
-        "delete": "Eliminar frase",
-        "deleteConfirm": "¿Está seguro de que desea eliminar esta frase?",
-        "edit": "Editar frase",
-        "title": "Frases comunes",
-        "titleLabel": "Título",
-        "titlePlaceholder": "Ingrese el título"
-      },
       "title": "Configuración del Asistente",
       "tool_use_mode": {
         "function": "Función",
@@ -1013,11 +1002,6 @@
         "title": "Crear nuevo tema"
       }
     },
-    "alerts": {
-      "create_agent": "Crea un agente para empezar",
-      "create_session": "Crear una sesión",
-      "select_agent": "Selecciona un agente"
-    },
     "artifacts": {
       "button": {
         "download": "Descargar",
@@ -1078,58 +1062,25 @@
     },
     "input": {
       "auto_resize": "Ajuste automático de altura",
-      "clear": {
-        "content": "¿Estás seguro de que quieres eliminar todos los mensajes de la sesión actual?",
-        "label": "Limpiar mensajes {{Command}}",
-        "title": "Limpiar mensajes"
-      },
-      "collapse": "Colapsar",
       "context_count": {
         "tip": "Número de contextos / Número máximo de contextos"
       },
       "estimated_tokens": {
         "tip": "Número estimado de tokens"
       },
-      "expand": "Expandir",
       "file_error": "Error al procesar el archivo",
       "file_not_supported": "El modelo no admite este tipo de archivo",
       "file_not_supported_count": "{{count}} archivos no soportados",
       "generate_image": "Generar imagen",
       "generate_image_not_supported": "El modelo no soporta la generación de imágenes",
       "knowledge_base": "Base de conocimientos",
-      "new": {
-        "context": "Limpiar contexto {{Command}}"
-      },
-      "new_session": "Nueva Sesión {{Command}}",
       "new_topic": "Nuevo tema {{Command}}",
       "paste_text_file_confirm": "¿Pegar en el cuadro de entrada?",
       "pause": "Pausar",
       "placeholder": "Escribe aquí tu mensaje...",
       "placeholder_without_triggers": "Escribe tu mensaje aquí, presiona {{key}} para enviar",
-      "resource_panel": {
-        "categories": {
-          "agents": "Agentes",
-          "files": "Archivos",
-          "skills": "Habilidades"
-        },
-        "description": "Selecciona entre archivos, agentes o habilidades",
-        "loading": "Cargando...",
-        "no_file_found": {
-          "description": "No hay archivos disponibles en los directorios accesibles",
-          "label": "No se encontró ningún archivo"
-        },
-        "no_items_found": {
-          "description": "Sin archivos, agentes o habilidades disponibles",
-          "label": "No se encontraron elementos"
-        },
-        "title": "Recursos"
-      },
       "send": "Enviar",
       "settings": "Configuración",
-      "slash_commands": {
-        "description": "Comandos de sesión de agente con barra",
-        "title": "Comandos de barra"
-      },
       "thinking": {
         "budget_exceeds_max": "El presupuesto de pensamiento excede el número máximo de tokens",
         "label": "Pensando",
@@ -1386,9 +1337,6 @@
     "thinking": "Pensando",
     "topics": {
       "auto_rename": "Generar nombre de tema",
-      "clear": {
-        "title": "Limpiar mensajes"
-      },
       "copy": {
         "image": "Copiar como imagen",
         "md": "Copiar como Markdown",
@@ -5533,7 +5481,6 @@
       "action": "Acción",
       "actions": "operación",
       "clear_shortcut": "Borrar atajo",
-      "clear_topic": "Vaciar mensaje",
       "copy_last_message": "Copiar el último mensaje",
       "edit_last_user_message": "Editar último mensaje de usuario",
       "enabled": "habilitar",
@@ -5552,7 +5499,6 @@
       "show_settings": "Abrir configuración",
       "title": "Atajos",
       "toggle_edit_mode": "[to be translated]:Toggle Edit Mode",
-      "toggle_new_context": "Limpiar contexto",
       "toggle_show_assistants": "Alternar visibilidad de asistentes",
       "toggle_show_topics": "Alternar visibilidad de temas",
       "zoom_in": "Ampliar interfaz",

@@ -36,6 +36,19 @@ vi.mock('@renderer/store', () => ({
   useAppSelector: () => ({ settings: {} })
 }))
 
+// The real ImportProjectionGate is exercised; the readiness singleton is
+// pre-settled to `ready` so the gate renders the ordinary tree immediately.
+// The gate's gating/failure behavior is covered by
+// ImportProjectionGate.test.tsx.
+vi.mock('@renderer/services/importProjectionReadiness', () => ({
+  isImportProjectionReady: () => true,
+  getImportProjectionReadinessState: () => 'ready' as const,
+  subscribeImportProjectionReadiness: () => () => undefined,
+  settleImportProjectionReadiness: vi.fn(),
+  resetImportProjectionReadiness: vi.fn(),
+  runImportProjectionBoot: vi.fn()
+}))
+
 vi.mock('@tanstack/react-query', () => {
   class MockQueryClient {
     defaultOptions = {}

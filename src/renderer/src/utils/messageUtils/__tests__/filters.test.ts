@@ -6,7 +6,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createErrorBlock, createMainTextBlock, createMessage } from '../create'
 import {
   filterAdjacentUserMessaegs,
-  filterAfterContextClearMessages,
   filterEmptyMessages,
   filterErrorOnlyMessagesWithRelated,
   filterLastAssistantMessage,
@@ -40,53 +39,6 @@ describe('Message Filter Utils', () => {
   beforeEach(() => {
     mockStore = createMockStore()
     vi.clearAllMocks()
-  })
-
-  describe('filterAfterContextClearMessages', () => {
-    it('should return all messages when no clear marker exists', () => {
-      const msg1 = createMessage('user', 'topic-1', 'assistant-1', { id: 'msg-1' })
-      const msg2 = createMessage('assistant', 'topic-1', 'assistant-1', { id: 'msg-2' })
-      const messages = [msg1, msg2]
-
-      const result = filterAfterContextClearMessages(messages)
-
-      expect(result).toEqual(messages)
-      expect(result).toHaveLength(2)
-    })
-
-    it('should return only messages after the last clear marker', () => {
-      const msg1 = createMessage('user', 'topic-1', 'assistant-1', { id: 'msg-1' })
-      const clearMsg = createMessage('user', 'topic-1', 'assistant-1', { id: 'clear-1', type: 'clear' })
-      const msg2 = createMessage('user', 'topic-1', 'assistant-1', { id: 'msg-2' })
-      const msg3 = createMessage('assistant', 'topic-1', 'assistant-1', { id: 'msg-3' })
-
-      const result = filterAfterContextClearMessages([msg1, clearMsg, msg2, msg3])
-
-      expect(result).toHaveLength(2)
-      expect(result[0].id).toBe('msg-2')
-      expect(result[1].id).toBe('msg-3')
-    })
-
-    it('should handle multiple clear markers', () => {
-      const msg1 = createMessage('user', 'topic-1', 'assistant-1', { id: 'msg-1' })
-      const clear1 = createMessage('user', 'topic-1', 'assistant-1', { id: 'clear-1', type: 'clear' })
-      const msg2 = createMessage('user', 'topic-1', 'assistant-1', { id: 'msg-2' })
-      const clear2 = createMessage('user', 'topic-1', 'assistant-1', { id: 'clear-2', type: 'clear' })
-      const msg3 = createMessage('user', 'topic-1', 'assistant-1', { id: 'msg-3' })
-
-      const result = filterAfterContextClearMessages([msg1, clear1, msg2, clear2, msg3])
-
-      expect(result).toHaveLength(1)
-      expect(result[0].id).toBe('msg-3')
-    })
-
-    it('should return empty array when only clear marker exists', () => {
-      const clearMsg = createMessage('user', 'topic-1', 'assistant-1', { id: 'clear-1', type: 'clear' })
-
-      const result = filterAfterContextClearMessages([clearMsg])
-
-      expect(result).toHaveLength(0)
-    })
   })
 
   describe('filterUserRoleStartMessages', () => {

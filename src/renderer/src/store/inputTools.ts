@@ -16,8 +16,6 @@
  */
 import type { PayloadAction } from '@reduxjs/toolkit'
 import { createSlice } from '@reduxjs/toolkit'
-import type { InputbarScope } from '@renderer/pages/home/Inputbar/types'
-import { TopicType } from '@renderer/types'
 import type { InputBarToolType } from '@renderer/types/chat'
 
 type ToolOrder = {
@@ -37,29 +35,16 @@ export const DEFAULT_TOOL_ORDER: ToolOrder = {
     'generate_image',
     'mention_models'
   ],
-  hidden: ['clear_topic', 'toggle_expand', 'new_context']
-}
-
-// Default tool order per scope
-// Note: New tools not listed here will auto-show at the end.
-// Tools are filtered by visibleInScopes first, so this only controls order/visibility of available tools.
-export const DEFAULT_TOOL_ORDER_BY_SCOPE: Record<InputbarScope, ToolOrder> = {
-  [TopicType.Chat]: DEFAULT_TOOL_ORDER,
-  [TopicType.Session]: {
-    visible: ['create_session', 'permission_mode', 'slash_commands', 'attachment'],
-    hidden: []
-  }
+  hidden: []
 }
 
 type InputToolsState = {
   toolOrder: ToolOrder
-  sessionToolOrder: ToolOrder
   isCollapsed: boolean
 }
 
 const initialState: InputToolsState = {
   toolOrder: DEFAULT_TOOL_ORDER,
-  sessionToolOrder: DEFAULT_TOOL_ORDER_BY_SCOPE[TopicType.Session],
   isCollapsed: true
 }
 
@@ -67,12 +52,8 @@ const inputToolsSlice = createSlice({
   name: 'inputTools',
   initialState,
   reducers: {
-    setToolOrder: (state, action: PayloadAction<{ scope: InputbarScope; toolOrder: ToolOrder }>) => {
-      if (action.payload.scope === TopicType.Session) {
-        state.sessionToolOrder = action.payload.toolOrder
-      } else {
-        state.toolOrder = action.payload.toolOrder
-      }
+    setToolOrder: (state, action: PayloadAction<{ toolOrder: ToolOrder }>) => {
+      state.toolOrder = action.payload.toolOrder
     },
     setIsCollapsed: (state, action: PayloadAction<boolean>) => {
       state.isCollapsed = action.payload
@@ -82,9 +63,9 @@ const inputToolsSlice = createSlice({
 
 export const { setToolOrder, setIsCollapsed } = inputToolsSlice.actions
 
-// Selector to get tool order for a specific scope
-export const selectToolOrderForScope = (state: { inputTools: InputToolsState }, scope: InputbarScope): ToolOrder => {
-  return scope === TopicType.Session ? state.inputTools.sessionToolOrder : state.inputTools.toolOrder
+// Selector to get tool order for the (single) ordinary Chat scope
+export const selectToolOrder = (state: { inputTools: InputToolsState }): ToolOrder => {
+  return state.inputTools.toolOrder
 }
 
 export default inputToolsSlice.reducer

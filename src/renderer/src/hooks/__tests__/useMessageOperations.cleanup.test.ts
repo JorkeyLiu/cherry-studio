@@ -35,7 +35,6 @@ vi.mock('@renderer/store/thunk/messageThunk', () => ({
   updateMessageAndBlocksThunk: mocks.updateMessageAndBlocksThunk,
   deleteSingleMessageThunk: vi.fn(),
   appendAssistantResponseThunk: vi.fn(),
-  clearTopicMessagesThunk: vi.fn(),
   cloneMessagesToNewTopicThunk: vi.fn(),
   initiateTranslationThunk: vi.fn(),
   regenerateAssistantResponseThunk: vi.fn(),

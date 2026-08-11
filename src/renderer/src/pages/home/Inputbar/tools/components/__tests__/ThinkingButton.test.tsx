@@ -171,7 +171,6 @@ const createAssistant = (overrides: Partial<Assistant> = {}): Assistant => ({
   mcpMode: 'disabled' as const,
   mcpServers: [],
   knowledgeRecognition: 'off' as const,
-  regularPhrases: [],
   tags: [],
   enableMemory: false,
   content: '',

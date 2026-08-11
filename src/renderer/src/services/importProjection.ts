@@ -181,20 +181,26 @@ export interface ImportProjectionApplyDeps {
  * apply or flush fails.
  *
  * Returns `true` when a projection was applied and durably flushed; `false`
- * when none was pending. Throws when the apply/flush failed — the caller
- * should leave the pending row untouched so the next startup retries.
+ * ONLY when none was pending (a verified no-pending — never a failure).
+ * Throws on every API failure (bridge unavailable, projection read failure,
+ * flush failure, or an IPC transport rejection) so the caller can distinguish
+ * "nothing to apply" from "cannot know / could not apply" — LOCK-PROJECTION:
+ * the ordinary chat tree must not mount while the pending state is unknown,
+ * and the pending row must stay unacked so the next startup retries.
  */
 export async function applyPendingImportProjection(deps: ImportProjectionApplyDeps): Promise<boolean> {
   const api = (window as { api?: { cherryImport?: { getProjection(): unknown; ackProjection(): unknown } } }).api
   if (!api?.cherryImport) {
-    getLogger().warn('cherryImport IPC bridge unavailable — projection apply skipped')
-    return false
+    // The bridge is unavailable — we cannot verify whether a projection is
+    // pending, so this is an API failure (throws), NOT a valid no-pending.
+    throw new Error('cherryImport IPC bridge unavailable — projection apply skipped')
   }
 
   const result = await api.cherryImport.getProjection()
   if (!result || typeof result !== 'object' || (result as { ok?: boolean }).ok !== true) {
-    getLogger().warn('Navigation projection read failed — leaving pending row for next startup')
-    return false
+    // A failed read is an API failure (throws), NOT a valid no-pending — the
+    // pending row is retained for next-startup retry.
+    throw new Error('Navigation projection read failed — leaving pending row for next startup')
   }
   const projection = (result as { projection: ImportNavigationProjection | null }).projection
   if (!projection) {

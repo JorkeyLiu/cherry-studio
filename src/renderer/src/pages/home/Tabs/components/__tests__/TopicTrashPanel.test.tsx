@@ -2,8 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  listOrdinaryTrashTopics: vi.fn(),
-  getTrashTopics: vi.fn()
+  listOrdinaryTrashTopics: vi.fn()
 }))
 
 vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
@@ -16,16 +15,6 @@ vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
     if (a.id !== b.id) return a.id < b.id ? 1 : -1
     return 0
   }
-}))
-
-vi.mock('@renderer/hooks/useTopic', () => ({
-  TopicManager: {
-    getTrashTopics: mocks.getTrashTopics
-  }
-}))
-
-vi.mock('@renderer/utils/agentSession', () => ({
-  isAgentSessionTopicId: (id: string) => id.startsWith('agent-session:')
 }))
 
 vi.mock('@renderer/utils', () => ({
@@ -54,9 +43,6 @@ const trashTopic = (id: string, deletedAt = '2026-01-02T00:00:00.000Z') => ({
 describe('TopicTrashPanel', () => {
   beforeEach(() => {
     mocks.listOrdinaryTrashTopics.mockReset()
-    mocks.getTrashTopics.mockReset()
-    // Default: no Dexie trash unless a test provides it.
-    mocks.getTrashTopics.mockResolvedValue([])
   })
 
   it('refreshes trash count from the SQLite-backed list when refreshVersion changes', async () => {
@@ -89,12 +75,10 @@ describe('TopicTrashPanel', () => {
     expect(mocks.listOrdinaryTrashTopics).toHaveBeenLastCalledWith('assistant-1')
   })
 
-  it('merges agent-session Dexie trash with ordinary SQLite trash in deletedAt DESC order (LOCK-521)', async () => {
-    mocks.listOrdinaryTrashTopics.mockResolvedValue([trashTopic('topic-ordinary', '2026-01-02T00:00:00.000Z')])
-    mocks.getTrashTopics.mockResolvedValue([
-      trashTopic('agent-session:s-1', '2026-01-03T00:00:00.000Z'),
-      // Ordinary Dexie leftover: must be strictly filtered out.
-      trashTopic('topic-dexie-leftover', '2026-01-05T00:00:00.000Z')
+  it('renders SQLite trash rows in deletedAt DESC order (LOCK-523)', async () => {
+    mocks.listOrdinaryTrashTopics.mockResolvedValue([
+      trashTopic('topic-old', '2026-01-02T00:00:00.000Z'),
+      trashTopic('topic-new', '2026-01-03T00:00:00.000Z')
     ])
 
     render(
@@ -110,40 +94,15 @@ describe('TopicTrashPanel', () => {
     await waitFor(() => expect(screen.getByText('chat.topics.trash.label:2')).toBeInTheDocument())
     fireEvent.click(screen.getByText('chat.topics.trash.label:2'))
 
-    await waitFor(() => expect(screen.getByText('Deleted topic agent-session:s-1')).toBeInTheDocument())
-    expect(screen.getByText('Deleted topic topic-ordinary')).toBeInTheDocument()
-    expect(screen.queryByText('Deleted topic topic-dexie-leftover')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('Deleted topic topic-new')).toBeInTheDocument())
+    expect(screen.getByText('Deleted topic topic-old')).toBeInTheDocument()
 
-    // Deterministic order: newer deletedAt (agent row) first.
+    // Deterministic order: newer deletedAt first.
     const names = screen
       .getAllByText(/Deleted topic /)
       .map((el) => el.textContent)
       .filter((text) => text !== null)
-    expect(names).toEqual(['Deleted topic agent-session:s-1', 'Deleted topic topic-ordinary'])
-  })
-
-  it('agent trash rows expose the same restore/delete actions (routed by ID upstream)', async () => {
-    mocks.listOrdinaryTrashTopics.mockResolvedValue([])
-    mocks.getTrashTopics.mockResolvedValue([trashTopic('agent-session:s-1', '2026-01-03T00:00:00.000Z')])
-    const onRestore = vi.fn().mockResolvedValue(undefined)
-
-    render(
-      <TopicTrashPanel
-        assistantId="assistant-1"
-        refreshVersion={0}
-        onRestore={onRestore}
-        onPermanentDelete={vi.fn()}
-        onEmptyTrash={vi.fn()}
-      />
-    )
-
-    await waitFor(() => expect(screen.getByText('chat.topics.trash.label:1')).toBeInTheDocument())
-    fireEvent.click(screen.getByText('chat.topics.trash.label:1'))
-    await waitFor(() => expect(screen.getByText('Deleted topic agent-session:s-1')).toBeInTheDocument())
-
-    fireEvent.click(screen.getByTitle('chat.topics.trash.restore'))
-
-    await waitFor(() => expect(onRestore).toHaveBeenCalledExactlyOnceWith('agent-session:s-1'))
+    expect(names).toEqual(['Deleted topic topic-new', 'Deleted topic topic-old'])
   })
 
   it('removes the row only after the awaited restore callback succeeds (LOCK-528)', async () => {

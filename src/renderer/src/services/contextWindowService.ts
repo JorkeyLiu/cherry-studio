@@ -12,7 +12,7 @@ import type { TopicAnchor } from '@renderer/types'
  * assistant's default context count (`contextCount`):
  *
  *   - finite N  → start at the most recent N turns (never sends more than N)
- *   - null (∞)  → start at the first turn of the current post-clear segment
+ *   - null (∞)  → start at the first turn of the topic
  *
  * The derivation is kept here as a pure function so the UI can persist the
  * derived start as an anchor while the pure compute layer applies the exact
@@ -24,13 +24,13 @@ import type { TopicAnchor } from '@renderer/types'
  *
  * Semantics:
  *   - Empty turn list → -1 (nothing to anchor).
- *   - `contextCount === null` (unlimited) → 0 (first turn of the post-clear
- *     segment, i.e. the whole segment).
+ *   - `contextCount === null` (unlimited) → 0 (first turn of the topic,
+ *     i.e. the whole topic).
  *   - Finite `contextCount` → the turn that leaves at most N turns selected;
  *     clamped to a minimum of 1 (min context count is 1) and to the first
  *     turn when the topic has fewer turns than N.
  *
- * @param turns chronological turns of the current post-clear segment
+ * @param turns chronological turns of the topic
  * @param contextCount the assistant's default context count (null = unlimited)
  */
 export function resolveDefaultAnchorIndex(turns: readonly ContextTurn[], contextCount: number | null): number {
@@ -70,11 +70,11 @@ export function getTurnAnchorGroupKey(turn: ContextTurn): string | null {
 
 /**
  * Pure decision for the default-anchor persistence effect (LOCK-CTX-2, LOCK-CTX-4,
- * LOCK-FIX-3). Given the post-clear turns, the assistant's default context count
+ * LOCK-FIX-3). Given the topic turns, the assistant's default context count
  * and the currently persisted anchor, decide whether the effect must write an
  * anchor, delete a stale anchor, or do nothing:
  *
- *   1. Empty post-clear segment → nothing can be anchored: delete any persisted
+ *   1. Empty topic turn list → nothing can be anchored: delete any persisted
  *      anchor, matching TokenCount reset behavior. Deleting only when an anchor
  *      actually exists is what prevents a dispatch loop (one write, then none).
  *   2. A valid active anchor (resolvable to a turn) is authoritative → no write.

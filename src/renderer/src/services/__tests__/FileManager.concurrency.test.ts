@@ -95,17 +95,6 @@ vi.mock('../db/SqliteMessageDataSource', () => ({
   SqliteMessageDataSource: vi.fn().mockImplementation(() => ({}))
 }))
 
-vi.mock('../db/AgentMessageDataSource', () => ({
-  AgentMessageDataSource: vi.fn().mockImplementation(() => ({
-    getStreamingCacheInfo: vi.fn()
-  }))
-}))
-
-vi.mock('../db/types', () => ({
-  isAgentSessionTopicId: vi.fn().mockReturnValue(false),
-  buildAgentSessionTopicId: vi.fn()
-}))
-
 // Narrow mocks for FileManager's heavyweight imports (LOCK-TEST-4). The real
 // '@renderer/i18n' bundles ~3.2MB of locale data (plus i18next init) and
 // '@renderer/utils' pulls in antd/lodash/uuid — none of it is exercised by

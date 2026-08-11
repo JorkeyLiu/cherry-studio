@@ -29,8 +29,6 @@ import type {
   BulkAddBlocksRequest,
   ChatDbChannel,
   ChatDbResult,
-  ClearMessagesRequest,
-  ClearTopicWithSegmentsRequest,
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   DeleteBlocksRequest,
@@ -261,117 +259,107 @@ export function registerChatDbIpc(): () => void {
     return agg.deleteBlocks(req.blockIds)
   })
 
-  // 14. clear-messages
-  handleCommand(IpcChannel.ChatDb_ClearMessages, (agg, req: ClearMessagesRequest) => {
-    return agg.clearMessages(req.topicId)
-  })
-
-  // 15. list-segments (Phase 5.1A)
+  // 14. list-segments (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_ListSegments, (agg, req: ListSegmentsRequest) => {
     return agg.listSegments(req.topicId)
   })
 
-  // 16. upsert-segment (Phase 5.1A)
+  // 15. upsert-segment (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_UpsertSegment, (agg, req: UpsertSegmentRequest) => {
     return agg.upsertSegment(req.segmentId, req.topicId, req.name, req.messageIds, req.color)
   })
 
-  // 17. update-segment-metadata (Phase 5.1A)
+  // 16. update-segment-metadata (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_UpdateSegmentMetadata, (agg, req: UpdateSegmentMetadataRequest) => {
     return agg.updateSegmentMetadata(req.segmentId, req.name, req.color)
   })
 
-  // 18. delete-segment (Phase 5.1A)
+  // 17. delete-segment (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_DeleteSegment, (agg, req: DeleteSegmentRequest) => {
     return agg.deleteSegment(req.segmentId)
   })
 
-  // 19. replace-segment-membership (Phase 5.1A)
+  // 18. replace-segment-membership (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_ReplaceSegmentMembership, (agg, req: ReplaceSegmentMembershipRequest) => {
     return agg.replaceSegmentMembership(req.segmentId, req.messageIds)
   })
 
-  // 20. reorder-messages (Phase 5.1A)
+  // 19. reorder-messages (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_ReorderMessages, (agg, req: ReorderMessagesRequest) => {
     return agg.reorderMessages(req.topicId, req.messageIds)
   })
 
-  // 21. list-file-refs-by-file (Phase 5.1A, read-only)
+  // 20. list-file-refs-by-file (Phase 5.1A, read-only)
   handleCommand(IpcChannel.ChatDb_ListFileRefsByFile, (agg, req: ListFileRefsByFileRequest) => {
     return agg.listFileRefsByFile(req.fileId)
   })
 
-  // 22. count-file-refs-by-file (Phase 5.1A, read-only)
+  // 21. count-file-refs-by-file (Phase 5.1A, read-only)
   handleCommand(IpcChannel.ChatDb_CountFileRefsByFile, (agg, req: CountFileRefsByFileRequest) => {
     return agg.countFileRefsByFile(req.fileId)
   })
 
-  // 23. list-blocks-by-file (Phase 5.1A, read-only)
+  // 22. list-blocks-by-file (Phase 5.1A, read-only)
   handleCommand(IpcChannel.ChatDb_ListBlocksByFile, (agg, req: ListBlocksByFileRequest) => {
     return agg.listBlocksByFile(req.fileId)
   })
 
-  // 24. update-topic-metadata (Phase 5.1B)
+  // 23. update-topic-metadata (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_UpdateTopicMetadata, (agg, req: UpdateTopicMetadataRequest) => {
     return agg.updateTopicMetadata(req.topicId, req.name, req.pinned, req.prompt, req.isNameManuallyEdited)
   })
 
-  // 25. soft-delete-topic (Phase 5.1B)
+  // 24. soft-delete-topic (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_SoftDeleteTopic, (agg, req: SoftDeleteTopicRequest) => {
     return agg.softDeleteTopic(req.topicId, req.name)
   })
 
-  // 26. restore-topic (Phase 5.1B)
+  // 25. restore-topic (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_RestoreTopic, (agg, req: RestoreTopicRequest) => {
     return agg.restoreTopic(req.topicId)
   })
 
-  // 27. list-trash-topics (Phase 5.1B)
+  // 26. list-trash-topics (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_ListTrashTopics, (agg, req: ListTrashTopicsRequest) => {
     return agg.listTrashTopics(req.assistantId, req.limit, req.cursor)
   })
 
-  // 28. hard-delete-topic (Phase 5.1B)
+  // 27. hard-delete-topic (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_HardDeleteTopic, (agg, req: HardDeleteTopicRequest) => {
     return agg.hardDeleteTopic(req.topicId)
   })
 
-  // 29. purge-expired-topics (Phase 5.1B)
+  // 28. purge-expired-topics (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_PurgeExpiredTopics, (agg, req: PurgeExpiredTopicsRequest) => {
     return agg.purgeExpiredTopics(req.cutoffTimestamp)
   })
 
-  // 30. clone-messages-to-topic (Phase 5.1B)
+  // 29. clone-messages-to-topic (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_CloneMessagesToTopic, (agg, req: CloneMessagesToTopicRequest) => {
     return agg.cloneMessagesToTopic(req.targetTopicId, req.entries, req.assistantId)
   })
 
-  // 31. reset-messages-for-resend (Phase 5.1B)
+  // 30. reset-messages-for-resend (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_ResetMessagesForResend, (agg, req: ResetMessagesForResendRequest) => {
     return agg.resetMessagesForResend(req.topicId, req.messages, req.blockIdsToDelete)
   })
 
-  // 32. delete-messages-with-segments (Phase 5.1B)
+  // 31. delete-messages-with-segments (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_DeleteMessagesWithSegments, (agg, req: DeleteMessagesWithSegmentsRequest) => {
     return agg.deleteMessagesWithSegments(req.topicId, req.messageIds)
   })
 
-  // 33. paste-messages-to-topic (Phase 5.1B)
+  // 32. paste-messages-to-topic (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_PasteMessagesToTopic, (agg, req: PasteMessagesToTopicRequest) => {
     return agg.pasteMessagesToTopic(req.topicId, req.entries, req.insertIndex)
   })
 
-  // 34. clear-topic-with-segments (Phase 5.1B)
-  handleCommand(IpcChannel.ChatDb_ClearTopicWithSegments, (agg, req: ClearTopicWithSegmentsRequest) => {
-    return agg.clearTopicWithSegments(req.topicId)
-  })
-
-  // 35. search-messages (Phase 5.1B-2)
+  // 33. search-messages (Phase 5.1B-2)
   handleCommand(IpcChannel.ChatDb_SearchMessages, (agg, req: SearchMessagesRequest) => {
     return agg.searchMessages(req)
   })
 
-  // 36. empty-trash-topics (Phase 5.2B, LOCK-531)
+  // 35. empty-trash-topics (Phase 5.2B, LOCK-531)
   handleCommand(IpcChannel.ChatDb_EmptyTrashTopics, (agg, req: EmptyTrashTopicsRequest) => {
     return agg.emptyTrashTopics(req.assistantId)
   })

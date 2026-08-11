@@ -156,8 +156,6 @@ const MessageAnchorLine: FC<MessageLineProps> = ({ messages }) => {
           const username = removeLeadingEmoji(getUserName(message))
           const content = getMainTextContent(message)
 
-          if (message.type === 'clear') return null
-
           return (
             <MessageItem
               key={message.id}

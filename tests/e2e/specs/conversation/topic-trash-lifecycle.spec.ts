@@ -687,12 +687,11 @@ test.describe('Phase 5.4: Topic Trash Lifecycle', () => {
     let topicCName: string
     let firstAssistantId: string
 
-    await test.step('B1: Switch to Topics tab and send baseline message', async () => {
-      // The sidebar defaults to the Assistants tab; switch to Topics tab first
-      const topicsTab = page.getByRole('button', { name: 'Topics', exact: false })
-      await topicsTab.waitFor({ state: 'visible', timeout: 10000 })
-      await topicsTab.click()
-      await page.waitForTimeout(500)
+    await test.step('B1: Assert fixed panels and send baseline message', async () => {
+      // LOCK-NAV: the left panel always renders assistants and the right panel
+      // always renders topics; there is no tab switching to perform.
+      await expect(page.locator('.assistants-tab')).toBeVisible()
+      await expect(page.locator('.topics-tab')).toBeVisible()
 
       const ctx = await getActiveContext(page)
       defaultTopicId = ctx.topicId

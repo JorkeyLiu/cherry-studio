@@ -5,8 +5,6 @@ import type { SpanContext } from '@opentelemetry/api'
 import type {
   AppendMessageRequest,
   BulkAddBlocksRequest,
-  ClearMessagesRequest,
-  ClearTopicWithSegmentsRequest,
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   DeleteBlocksRequest,
@@ -639,7 +637,6 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_UpdateSingleBlock, request),
     bulkAddBlocks: (request: BulkAddBlocksRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_BulkAddBlocks, request),
     deleteBlocks: (request: DeleteBlocksRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteBlocks, request),
-    clearMessages: (request: ClearMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_ClearMessages, request),
     // Phase 5.1A: segment commands
     listSegments: (request: ListSegmentsRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_ListSegments, request),
     upsertSegment: (request: UpsertSegmentRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_UpsertSegment, request),
@@ -686,8 +683,6 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessagesWithSegments, request),
     pasteMessagesToTopic: (request: PasteMessagesToTopicRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_PasteMessagesToTopic, request),
-    clearTopicWithSegments: (request: ClearTopicWithSegmentsRequest) =>
-      ipcRenderer.invoke(IpcChannel.ChatDb_ClearTopicWithSegments, request),
     // Phase 5.1B-2: search
     searchMessages: (request: SearchMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_SearchMessages, request)
   }

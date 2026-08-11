@@ -2,7 +2,7 @@
  * SqliteMessageDataSource Tests — using injected API spies.
  *
  * Covers:
- * - All 23 methods map to the intended named method/request
+ * - All 21 methods map to the intended named method/request
  * - fetch forceReload omitted
  * - raw null→undefined
  * - append -1 omitted, valid index included
@@ -20,10 +20,6 @@ import type {
   AppendMessageRequest,
   BulkAddBlocksRequest,
   ChatDbResult,
-  ClearMessagesRequest,
-  ClearMessagesResponse,
-  ClearTopicWithSegmentsRequest,
-  ClearTopicWithSegmentsResponse,
   CloneMessagesToTopicRequest,
   CloneMessagesToTopicResponse,
   CountFileRefsByFileRequest,
@@ -81,7 +77,7 @@ import type {
   UpsertSegmentResponse
 } from '@shared/chatDb'
 import { fail, ok } from '@shared/chatDb'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ChatDbResultError, SqliteMessageDataSource } from '../SqliteMessageDataSource'
 
@@ -154,15 +150,12 @@ function makeApiSpy() {
     resetMessagesForResend:
       vi.fn<(request: ResetMessagesForResendRequest) => Promise<ChatDbResult<ResetMessagesForResendResponse>>>(),
     deleteBlocks: vi.fn<(request: DeleteBlocksRequest) => Promise<ChatDbResult<DeleteBlocksResponse>>>(),
-    clearMessages: vi.fn<(request: ClearMessagesRequest) => Promise<ChatDbResult<ClearMessagesResponse>>>(),
     deleteMessagesWithSegments:
       vi.fn<
         (request: DeleteMessagesWithSegmentsRequest) => Promise<ChatDbResult<DeleteMessagesWithSegmentsResponse>>
       >(),
     pasteMessagesToTopic:
       vi.fn<(request: PasteMessagesToTopicRequest) => Promise<ChatDbResult<PasteMessagesToTopicResponse>>>(),
-    clearTopicWithSegments:
-      vi.fn<(request: ClearTopicWithSegmentsRequest) => Promise<ChatDbResult<ClearTopicWithSegmentsResponse>>>(),
     // Phase 5.2A: search
     searchMessages: vi.fn<(request: SearchMessagesRequest) => Promise<ChatDbResult<SearchMessagesResponse>>>()
   }
@@ -298,12 +291,6 @@ describe('SqliteMessageDataSource', () => {
       api.deleteBlocks.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
       await ds.deleteBlocks(['b-1', 'b-2'])
       expect(api.deleteBlocks).toHaveBeenCalledWith({ blockIds: ['b-1', 'b-2'] })
-    })
-
-    it('clearMessages calls api.clearMessages', async () => {
-      api.clearMessages.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
-      await ds.clearMessages('topic-1')
-      expect(api.clearMessages).toHaveBeenCalledWith({ topicId: 'topic-1' })
     })
 
     // ---- Phase 5.1A: segment commands ----
@@ -863,16 +850,6 @@ describe('SqliteMessageDataSource', () => {
       expect(mockDispatch).toHaveBeenCalledOnce()
       expect(result.affectedFileIds).toEqual([])
     })
-
-    it('clearTopicWithSegments calls api and dispatches', async () => {
-      api.clearTopicWithSegments.mockResolvedValue(
-        successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } })
-      )
-      const result = await ds.clearTopicWithSegments('t-1')
-      expect(api.clearTopicWithSegments).toHaveBeenCalledOnce()
-      expect(mockDispatch).toHaveBeenCalledOnce()
-      expect(result.affectedFileIds).toEqual(['f1'])
-    })
   })
 
   // =========================================================================
@@ -1010,11 +987,6 @@ describe('SqliteMessageDataSource', () => {
       await dispatchesAfter(() => ds.deleteMessages('t-1', ['m-1']))
     })
 
-    it('dispatches after clearMessages', async () => {
-      api.clearMessages.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
-      await dispatchesAfter(() => ds.clearMessages('t-1'))
-    })
-
     it('does NOT dispatch after fetchMessages', async () => {
       api.fetchMessages.mockResolvedValue(successResult({ messages: [], blocks: [] }))
       await doesNotDispatchAfter(() => ds.fetchMessages('t-1'))
@@ -1078,6 +1050,84 @@ describe('SqliteMessageDataSource', () => {
 
     it('does not have updateFileCounts method', () => {
       expect((ds as any).updateFileCounts).toBeUndefined()
+    })
+  })
+
+  // =========================================================================
+  // Constructor / API resolution (chatImport isolation fix)
+  //
+  // Regression: constructing the data source inside an isolated renderer that
+  // does NOT expose the ordinary preload bridge (e.g. chatImport exposes only
+  // window.chatImport) must not throw. The bridge is resolved lazily at
+  // method-call time, and a missing bridge fails loudly with a deterministic
+  // error only when an actual SQLite method is invoked.
+  // =========================================================================
+
+  describe('constructor / API resolution (chatImport isolation)', () => {
+    // renderer.setup.ts stubs globalThis.api (jsdom: window === globalThis).
+    // Capture that exact stub and restore it after every test so sibling
+    // suites stay isolated from window.api mutations.
+    const setupWindowApi = (window as any).api
+
+    afterEach(() => {
+      ;(window as any).api = setupWindowApi
+    })
+
+    it('constructs successfully when window.api is absent (no injection)', () => {
+      ;(window as any).api = undefined
+      expect(() => new SqliteMessageDataSource()).not.toThrow()
+    })
+
+    it('constructs successfully when window.api exists but has no chatDb', () => {
+      ;(window as any).api = { file: {} }
+      expect(() => new SqliteMessageDataSource()).not.toThrow()
+    })
+
+    it('throws the clear unavailable-API error only when a method is called', async () => {
+      ;(window as any).api = undefined
+      const ds = new SqliteMessageDataSource()
+      await expect(ds.fetchMessages('t-1')).rejects.toThrow(
+        'ChatDb API unavailable: window.api.chatDb is not exposed in this window'
+      )
+    })
+
+    it('throws the same deterministic error for every method', async () => {
+      ;(window as any).api = undefined
+      const ds = new SqliteMessageDataSource()
+      const message = 'ChatDb API unavailable: window.api.chatDb is not exposed in this window'
+      await expect(ds.fetchMessages('t-1')).rejects.toThrow(message)
+      await expect(ds.topicExists('t-1')).rejects.toThrow(message)
+      await expect(ds.appendMessage('t-1', { id: 'm-1' } as any, [])).rejects.toThrow(message)
+    })
+
+    it('never dispatches or falls back when the bridge is missing', async () => {
+      ;(window as any).api = undefined
+      mockDispatch.mockClear()
+      const ds = new SqliteMessageDataSource()
+      await expect(ds.softDeleteTopic('t-1')).rejects.toThrow('ChatDb API unavailable')
+      expect(mockDispatch).not.toHaveBeenCalled()
+      expect(api.updateMessage).not.toHaveBeenCalled()
+    })
+
+    it('resolves window.api.chatDb when no API is injected', async () => {
+      const windowApi = makeApiSpy()
+      ;(window as any).api = { chatDb: windowApi }
+      const ds = new SqliteMessageDataSource()
+      windowApi.fetchMessages.mockResolvedValue(successResult({ messages: [], blocks: [] }))
+      await ds.fetchMessages('t-1')
+      expect(windowApi.fetchMessages).toHaveBeenCalledOnce()
+      expect(windowApi.fetchMessages).toHaveBeenCalledWith({ topicId: 't-1' })
+    })
+
+    it('prefers the injected API over window.api.chatDb', async () => {
+      const injected = makeApiSpy()
+      const windowApi = makeApiSpy()
+      ;(window as any).api = { chatDb: windowApi }
+      const ds = new SqliteMessageDataSource(injected)
+      injected.fetchMessages.mockResolvedValue(successResult({ messages: [], blocks: [] }))
+      await ds.fetchMessages('t-1')
+      expect(injected.fetchMessages).toHaveBeenCalledOnce()
+      expect(windowApi.fetchMessages).not.toHaveBeenCalled()
     })
   })
 })

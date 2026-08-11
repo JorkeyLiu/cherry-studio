@@ -54,7 +54,7 @@ import { isEmpty } from 'lodash'
 import { createMigrate } from 'redux-persist'
 
 import type { RootState } from '.'
-import { DEFAULT_TOOL_ORDER, DEFAULT_TOOL_ORDER_BY_SCOPE } from './inputTools'
+import { DEFAULT_TOOL_ORDER } from './inputTools'
 import { initialState as llmInitialState, moveProvider } from './llm'
 import { mcpSlice } from './mcp'
 import { initialState as notesInitialState } from './note'
@@ -2671,9 +2671,18 @@ const migrateConfig = {
   },
   '173': (state: RootState) => {
     try {
-      // Migrate toolOrder from global state to scope-based state
-      if (state.inputTools && !state.inputTools.sessionToolOrder) {
-        state.inputTools.sessionToolOrder = DEFAULT_TOOL_ORDER_BY_SCOPE.session
+      // Migrate toolOrder from global state to scope-based state.
+      // Historical: persisted Session-scope tool order default. The Agent
+      // Session scope is retired, so the historical literal is inlined and the
+      // field is only written to persisted state from older versions.
+      const inputTools = state.inputTools as unknown as {
+        sessionToolOrder?: { visible: string[]; hidden: string[] }
+      }
+      if (state.inputTools && !inputTools.sessionToolOrder) {
+        inputTools.sessionToolOrder = {
+          visible: ['create_session', 'permission_mode', 'slash_commands', 'attachment'],
+          hidden: []
+        }
       }
       return state
     } catch (error) {
@@ -3233,7 +3242,13 @@ const migrateConfig = {
   },
   '206': (state: RootState) => {
     try {
-      const { sessionToolOrder } = state.inputTools
+      // Historical: reconcile the retired Session-scope tool order with the
+      // permission_mode entry. Preserved for persisted state from older
+      // versions; the Agent Session scope itself is retired.
+      const inputTools = state.inputTools as unknown as {
+        sessionToolOrder?: { visible: string[]; hidden: string[] }
+      }
+      const { sessionToolOrder } = inputTools
       const permissionModeKey = 'permission_mode'
       if (
         sessionToolOrder &&

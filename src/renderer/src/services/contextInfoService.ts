@@ -10,7 +10,6 @@ import type { Assistant, TopicAnchor } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import {
   filterAdjacentUserMessaegs,
-  filterAfterContextClearMessages,
   filterEmptyMessages,
   filterErrorOnlyMessagesWithRelated,
   filterLastAssistantMessage,
@@ -37,25 +36,23 @@ import {
  *   - With no (valid) anchor, the start is derived from the assistant's default
  *     `contextCount` via `resolveDefaultAnchorIndex` — finite N selects the
  *     most recent N turns (so full history is never transiently sent), and
- *     null (unlimited) selects the first turn of the post-clear segment
- *     (LOCK-CTX-2, LOCK-CTX-4).
+ *     null (unlimited) selects the first turn of the topic (LOCK-CTX-2,
+ *     LOCK-CTX-4).
  *
  * contextCount result (LOCK-CTX-5): `current` = selected real turns, `max` =
- * total turns in the current post-clear topic segment. Unsent drafts are never
- * part of the turn list, so they are excluded from both numbers automatically.
+ * total turns in the topic. Unsent drafts are never part of the turn list, so
+ * they are excluded from both numbers automatically.
  *
  * Pipeline ordering:
- *   1. buildContextTurns — groups post-clear messages into semantic turns
- *      (handles clear filtering + turn construction internally)
+ *   1. buildContextTurns — groups all topic turns into semantic turns
  *   2. Turn selection — anchor-to-end, or default derivation when no anchor
  *   3. turnsToMessages — expands selected turns to Message[]
  *   4. filterUsefulMessages — deduplicates retries within assistant groups
  *   5. filterErrorOnlyMessagesWithRelated — removes error-only pairs
  *   6. filterLastAssistantMessage — removes trailing assistant message
  *   7. filterAdjacentUserMessaegs — removes adjacent duplicate user messages
- *   8. filterAfterContextClearMessages — safety pass (no-op after turn expansion)
- *   9. filterEmptyMessages — removes messages without content blocks
- *  10. filterUserRoleStartMessages — trims leading non-user messages
+ *   8. filterEmptyMessages — removes messages without content blocks
+ *   9. filterUserRoleStartMessages — trims leading non-user messages
  *
  * N+2 compensation is removed: selection is by whole turns, so post-selection
  * model filters (steps 4–7) cannot create partial turn boundaries that would
@@ -90,7 +87,7 @@ export function computeContextInfo(
 
   const anchor: TopicAnchor | undefined = topicId ? settings.contextWindowAnchor?.[topicId] : undefined
 
-  // --- Step 1: Build turns from post-context-clear messages ---
+  // --- Step 1: Build turns from all topic messages ---
   const allTurns = buildContextTurns(messages)
   const totalTurns = allTurns.length
 
@@ -98,7 +95,7 @@ export function computeContextInfo(
   // A valid manual anchor fixes the window start; the window grows as the
   // topic grows (LOCK-CTX-1). Without a valid anchor, the start falls back to
   // the default derivation — finite N selects the most recent N turns,
-  // unlimited selects the first turn of the segment (LOCK-CTX-2, LOCK-CTX-4).
+  // unlimited selects the first turn of the topic (LOCK-CTX-2, LOCK-CTX-4).
   let startIndex: number
   if (anchor?.kind === 'active') {
     const anchorIndex = resolveAnchorTurnIndex(allTurns, anchor.groupKey)
@@ -114,8 +111,8 @@ export function computeContextInfo(
   const boundaryMessageId = startIndex > 0 && selectedRealTurns.length > 0 ? selectedRealTurns[0].messages[0].id : null
 
   // contextCount (LOCK-CTX-5): current selected turns / total turns in the
-  // post-clear segment. Drafts are never in the turn list, so they are
-  // excluded from both x and y.
+  // topic. Drafts are never in the turn list, so they are excluded from both x
+  // and y.
   const currentCount = selectedRealTurns.length
   const maxCount = totalTurns
 
@@ -130,15 +127,13 @@ export function computeContextInfo(
   const withoutTrailingAssistant = filterLastAssistantMessage(withoutErrorOnlyPairs)
   const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
 
-  // --- Steps 8-10: Post-filter cleanup ---
-  const contextClearFiltered = filterAfterContextClearMessages(withoutAdjacentUsers)
-  const nonEmptyMessages = filterEmptyMessages(contextClearFiltered)
+  // --- Steps 8-9: Post-filter cleanup ---
+  const nonEmptyMessages = filterEmptyMessages(withoutAdjacentUsers)
   const uiMessages = filterUserRoleStartMessages(nonEmptyMessages)
 
   // tokenEstimationMessages: retains trailing assistant for token estimation.
   const tokenWithoutAdjacentUsers = filterAdjacentUserMessaegs(withoutErrorOnlyPairs)
-  const tokenContextClearFiltered = filterAfterContextClearMessages(tokenWithoutAdjacentUsers)
-  const tokenNonEmptyMessages = filterEmptyMessages(tokenContextClearFiltered)
+  const tokenNonEmptyMessages = filterEmptyMessages(tokenWithoutAdjacentUsers)
   const tokenEstimationMessages = filterUserRoleStartMessages(tokenNonEmptyMessages)
 
   return {

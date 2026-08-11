@@ -1,6 +1,6 @@
 import styled from 'styled-components'
 
-import { SkeletonSpan } from '../MessageAgentTools/GenericTools'
+import { SkeletonSpan } from './GenericTools'
 
 /**
  * Format argument value for display in table

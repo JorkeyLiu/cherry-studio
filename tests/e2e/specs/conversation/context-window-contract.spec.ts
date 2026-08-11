@@ -113,21 +113,17 @@ async function seedContextConfig(page: import('@playwright/test').Page): Promise
 async function uiSendMessage(page: import('@playwright/test').Page, text: string): Promise<void> {
   const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
   await textarea.waitFor({ state: 'visible', timeout: 15000 })
-  await textarea.click()
+  await textarea.focus()
 
-  await page.evaluate(
-    ({ selector, text }) => {
-      const el = document.querySelector(selector) as HTMLTextAreaElement
-      if (!el) throw new Error('Textarea not found')
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
-      if (!nativeSetter) throw new Error('No native textarea setter')
-      nativeSetter.call(el, text)
-      el.dispatchEvent(new Event('input', { bubbles: true }))
-      el.dispatchEvent(new Event('change', { bubbles: true }))
-    },
-    { selector: '.inputbar textarea, textarea[placeholder]', text }
-  )
+  // Real sequential keyboard input: every keystroke goes through React 19's
+  // controlled-textarea onChange, so the value tracker stays in sync. The
+  // previous native-setter + input/change dispatch path desynchronized React's
+  // value tracker and was flaky. LOCK-EVIDENCE: no force click, no arbitrary
+  // sleep, no Redux dispatch, no native-setter bypass.
+  await textarea.pressSequentially(text, { delay: 0 })
 
+  // Deterministic value check before the real Enter submission — pressSequentially
+  // awaits the final keystroke, so this assertion cannot race the controlled value.
   await expect(textarea).toHaveValue(text, { timeout: 5000 })
   await textarea.press('Enter')
 }

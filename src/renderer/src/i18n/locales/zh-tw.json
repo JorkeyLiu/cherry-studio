@@ -940,17 +940,6 @@
         "xhigh": "極力思考",
         "xhigh_description": "超高階推理"
       },
-      "regular_phrases": {
-        "add": "新增短語",
-        "contentLabel": "內容",
-        "contentPlaceholder": "請輸入短語內容，支援使用變數，然後按 Tab 鍵可以快速定位到變數進行修改。例如：\n幫我規劃從 ${from} 到 ${to} 的行程，然後傳送到 ${email}",
-        "delete": "刪除短語",
-        "deleteConfirm": "確定要刪除這個短語嗎？",
-        "edit": "編輯短語",
-        "title": "常用短語",
-        "titleLabel": "標題",
-        "titlePlaceholder": "輸入標題"
-      },
       "title": "助手設定",
       "tool_use_mode": {
         "function": "函式",
@@ -1013,11 +1002,6 @@
         "title": "新增話題"
       }
     },
-    "alerts": {
-      "create_agent": "建立 Agent 以開始",
-      "create_session": "建立工作階段",
-      "select_agent": "選擇一個智能體"
-    },
     "artifacts": {
       "button": {
         "download": "下載",
@@ -1078,58 +1062,25 @@
     },
     "input": {
       "auto_resize": "自動調整高度",
-      "clear": {
-        "content": "您想要清除目前話題的所有訊息嗎？",
-        "label": "清除 {{Command}}",
-        "title": "清除所有訊息？"
-      },
-      "collapse": "折疊",
       "context_count": {
         "tip": "已選 / 總輪數"
       },
       "estimated_tokens": {
         "tip": "預估 Token 數"
       },
-      "expand": "展開",
       "file_error": "檔案處理錯誤",
       "file_not_supported": "模型不支援此檔案類型",
       "file_not_supported_count": "{{count}} 個檔案不被支援",
       "generate_image": "產生圖片",
       "generate_image_not_supported": "模型不支援產生圖片",
       "knowledge_base": "知識庫",
-      "new": {
-        "context": "清除上下文 {{Command}}"
-      },
-      "new_session": "新工作階段 {{Command}}",
       "new_topic": "新話題 {{Command}}",
       "paste_text_file_confirm": "貼到輸入框？",
       "pause": "暫停",
       "placeholder": "在此輸入您的訊息，按 {{key}} 傳送 - @ 選擇模型，/ 包含工具",
       "placeholder_without_triggers": "在此輸入您的訊息，按 {{key}} 傳送",
-      "resource_panel": {
-        "categories": {
-          "agents": "智能體",
-          "files": "檔案",
-          "skills": "技能"
-        },
-        "description": "從檔案、智能體或技能中選擇",
-        "loading": "載入中...",
-        "no_file_found": {
-          "description": "可存取目錄中無可用檔案",
-          "label": "找不到檔案"
-        },
-        "no_items_found": {
-          "description": "沒有可用的檔案、智能體或技能",
-          "label": "未找到項目"
-        },
-        "title": "資源"
-      },
       "send": "傳送",
       "settings": "設定",
-      "slash_commands": {
-        "description": "Agent 工作階段斜線指令",
-        "title": "斜線指令"
-      },
       "thinking": {
         "budget_exceeds_max": "思考預算超過最大 Token 數",
         "label": "思考",
@@ -1386,9 +1337,6 @@
     "thinking": "思考中（用時 {{seconds}} 秒）",
     "topics": {
       "auto_rename": "自動重新命名",
-      "clear": {
-        "title": "清空訊息"
-      },
       "copy": {
         "image": "複製為圖片",
         "md": "複製為 Markdown",
@@ -5533,7 +5481,6 @@
       "action": "操作",
       "actions": "操作",
       "clear_shortcut": "清除快捷鍵",
-      "clear_topic": "清除所有訊息",
       "copy_last_message": "複製上一則訊息",
       "edit_last_user_message": "編輯最後一則使用者訊息",
       "enabled": "啟用",
@@ -5552,7 +5499,6 @@
       "show_settings": "開啟設定",
       "title": "快捷鍵",
       "toggle_edit_mode": "切換編輯模式",
-      "toggle_new_context": "清除上下文",
       "toggle_show_assistants": "切換助手顯示",
       "toggle_show_topics": "切換話題顯示",
       "zoom_in": "放大介面",

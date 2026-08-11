@@ -12,7 +12,6 @@ import { ProviderSpecificError } from '@renderer/types/provider-specific-error'
 import { formatErrorMessage, isAbortError } from '@renderer/utils/error'
 import type { IdleTimeoutHandle } from '@renderer/utils/IdleTimeoutController'
 import { convertLinks, flushLinkConverterBuffer } from '@renderer/utils/linkConverter'
-import type { ClaudeCodeRawValue } from '@shared/types/claude-code'
 import { AISDKError, type TextStreamPart, type ToolSet } from 'ai'
 
 import { ToolCallChunkHandler } from './handleToolCallChunk'
@@ -28,11 +27,8 @@ export class AiSdkToChunkAdapter {
   private accumulate: boolean | undefined
   private isFirstChunk = true
   private enableWebSearch: boolean = false
-  private onSessionUpdate?: (sessionId: string) => void
   private responseStartTimestamp: number | null = null
   private firstTokenTimestamp: number | null = null
-  private hasTextContent = false
-  private getSessionWasCleared?: () => boolean
   private providerId?: string
   private idleTimeout?: IdleTimeoutHandle
 
@@ -41,16 +37,12 @@ export class AiSdkToChunkAdapter {
     mcpTools: MCPTool[] = [],
     accumulate?: boolean,
     enableWebSearch?: boolean,
-    onSessionUpdate?: (sessionId: string) => void,
-    getSessionWasCleared?: () => boolean,
     providerId?: string,
     idleTimeout?: IdleTimeoutHandle
   ) {
     this.toolCallHandler = new ToolCallChunkHandler(onChunk, mcpTools)
     this.accumulate = accumulate
     this.enableWebSearch = enableWebSearch || false
-    this.onSessionUpdate = onSessionUpdate
-    this.getSessionWasCleared = getSessionWasCleared
     this.providerId = providerId
     this.idleTimeout = idleTimeout
   }
@@ -73,9 +65,9 @@ export class AiSdkToChunkAdapter {
    */
   async processStream(aiSdkResult: any): Promise<string> {
     // The stream is the single source of truth for abort handling.
-    // Both AI SDK (resilient stream) and the agent pipeline (withAbortStreamPart)
-    // guarantee: abort → enqueue { type: 'abort' } → close gracefully.
-    // convertAndEmitChunk processes the abort part and emits ChunkType.ERROR → onError.
+    // The AI SDK (resilient stream) guarantees: abort → enqueue { type: 'abort' }
+    // → close gracefully. convertAndEmitChunk processes the abort part and
+    // emits ChunkType.ERROR → onError.
     if (aiSdkResult.fullStream) {
       await this.readFullStream(aiSdkResult.fullStream)
     }
@@ -109,7 +101,6 @@ export class AiSdkToChunkAdapter {
     this.responseStartTimestamp = Date.now()
     // Reset state at the start of stream
     this.isFirstChunk = true
-    this.hasTextContent = false
 
     try {
       while (true) {
@@ -175,19 +166,6 @@ export class AiSdkToChunkAdapter {
   ) {
     logger.silly(`AI SDK chunk type: ${chunk.type}`, chunk)
     switch (chunk.type) {
-      case 'raw': {
-        const agentRawMessage = chunk.rawValue as ClaudeCodeRawValue
-        if (agentRawMessage.type === 'init' && agentRawMessage.session_id) {
-          this.onSessionUpdate?.(agentRawMessage.session_id)
-        } else if (agentRawMessage.type === 'compact' && agentRawMessage.session_id) {
-          this.onSessionUpdate?.(agentRawMessage.session_id)
-        }
-        this.onChunk({
-          type: ChunkType.RAW,
-          content: agentRawMessage
-        })
-        break
-      }
       // === 文本相关事件 ===
       case 'text-start':
         // 如果有未完成的思考内容，先生成 THINKING_COMPLETE
@@ -198,7 +176,6 @@ export class AiSdkToChunkAdapter {
         })
         break
       case 'text-delta': {
-        this.hasTextContent = true
         const processedText = chunk.text || ''
         let finalText: string
 
@@ -352,25 +329,6 @@ export class AiSdkToChunkAdapter {
       }
 
       case 'finish': {
-        // Check if session was cleared (e.g., /clear command) and no text was output
-        const sessionCleared = this.getSessionWasCleared?.() ?? false
-        if (sessionCleared && !this.hasTextContent) {
-          // Inject a "context cleared" message for the user
-          const clearMessage = '✨ Context cleared. Starting fresh conversation.'
-          this.onChunk({
-            type: ChunkType.TEXT_START
-          })
-          this.onChunk({
-            type: ChunkType.TEXT_DELTA,
-            text: clearMessage
-          })
-          this.onChunk({
-            type: ChunkType.TEXT_COMPLETE,
-            text: clearMessage
-          })
-          final.text = clearMessage
-        }
-
         const usage = {
           completion_tokens: chunk.totalUsage?.outputTokens || 0,
           prompt_tokens: chunk.totalUsage?.inputTokens || 0,

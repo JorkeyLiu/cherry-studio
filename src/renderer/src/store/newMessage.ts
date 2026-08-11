@@ -198,16 +198,6 @@ export const messagesSlice = createSlice({
         messagesAdapter.updateOne(state, { id: messageId, changes: otherUpdates })
       }
     },
-    clearTopicMessages(state, action: PayloadAction<string>) {
-      const topicId = action.payload
-      const idsToRemove = state.messageIdsByTopic[topicId] || []
-      if (idsToRemove.length > 0) {
-        messagesAdapter.removeMany(state, idsToRemove)
-      }
-      delete state.messageIdsByTopic[topicId]
-      state.loadingByTopic[topicId] = false
-      state.fulfilledByTopic[topicId] = false
-    },
     removeMessage(state, action: PayloadAction<RemoveMessagePayload>) {
       const { topicId, messageId } = action.payload
       const currentTopicIds = state.messageIdsByTopic[topicId]

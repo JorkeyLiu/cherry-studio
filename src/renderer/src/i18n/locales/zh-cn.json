@@ -940,17 +940,6 @@
         "xhigh": "穷究",
         "xhigh_description": "超高强度推理"
       },
-      "regular_phrases": {
-        "add": "添加短语",
-        "contentLabel": "内容",
-        "contentPlaceholder": "请输入短语内容，支持使用变量，然后按 Tab 键可以快速定位到变量进行修改。比如：\n帮我规划从 ${from} 到 ${to} 的路线，然后发送到 ${email}",
-        "delete": "删除短语",
-        "deleteConfirm": "确定要删除这个短语吗？",
-        "edit": "编辑短语",
-        "title": "常用短语",
-        "titleLabel": "标题",
-        "titlePlaceholder": "输入标题"
-      },
       "title": "助手设置",
       "tool_use_mode": {
         "function": "函数",
@@ -1013,11 +1002,6 @@
         "title": "新建话题"
       }
     },
-    "alerts": {
-      "create_agent": "请创建一个智能体以开始使用",
-      "create_session": "请创建会话",
-      "select_agent": "请选择智能体"
-    },
     "artifacts": {
       "button": {
         "download": "下载",
@@ -1078,58 +1062,25 @@
     },
     "input": {
       "auto_resize": "自动调整高度",
-      "clear": {
-        "content": "确定要清除当前会话所有消息吗？",
-        "label": "清空消息 {{Command}}",
-        "title": "清空消息"
-      },
-      "collapse": "收起",
       "context_count": {
         "tip": "已选 / 总轮数"
       },
       "estimated_tokens": {
         "tip": "预估 Token 数"
       },
-      "expand": "展开",
       "file_error": "文件处理出错",
       "file_not_supported": "模型不支持此文件类型",
       "file_not_supported_count": "{{count}} 个文件不被支持",
       "generate_image": "生成图片",
       "generate_image_not_supported": "模型不支持生成图片",
       "knowledge_base": "知识库",
-      "new": {
-        "context": "清除上下文 {{Command}}"
-      },
-      "new_session": "新会话 {{Command}}",
       "new_topic": "新话题 {{Command}}",
       "paste_text_file_confirm": "粘贴到输入框？",
       "pause": "暂停",
       "placeholder": "在这里输入消息，按 {{key}} 发送 - @ 选择模型， / 选择工具",
       "placeholder_without_triggers": "在这里输入消息，按 {{key}} 发送",
-      "resource_panel": {
-        "categories": {
-          "agents": "Agents",
-          "files": "文件",
-          "skills": "Skills"
-        },
-        "description": "从文件、Agents 或 Skills 中选择",
-        "loading": "加载中...",
-        "no_file_found": {
-          "description": "可访问目录中没有可用文件",
-          "label": "未找到文件"
-        },
-        "no_items_found": {
-          "description": "没有可用的文件、Agents 或 Skills",
-          "label": "未找到项目"
-        },
-        "title": "资源"
-      },
       "send": "发送",
       "settings": "设置",
-      "slash_commands": {
-        "description": "代理会话斜杠命令",
-        "title": "斜杠命令"
-      },
       "thinking": {
         "budget_exceeds_max": "思考预算超过最大 Token 数",
         "label": "思考",
@@ -1386,9 +1337,6 @@
     "thinking": "思考中（用时 {{seconds}} 秒）",
     "topics": {
       "auto_rename": "生成话题名",
-      "clear": {
-        "title": "清空消息"
-      },
       "copy": {
         "image": "复制为图片",
         "md": "复制为 Markdown",
@@ -5533,7 +5481,6 @@
       "action": "操作",
       "actions": "操作",
       "clear_shortcut": "清除快捷键",
-      "clear_topic": "清空消息",
       "copy_last_message": "复制上一条消息",
       "edit_last_user_message": "编辑最后一条用户消息",
       "enabled": "启用",
@@ -5552,7 +5499,6 @@
       "show_settings": "打开设置",
       "title": "快捷键",
       "toggle_edit_mode": "切换编辑模式",
-      "toggle_new_context": "清除上下文",
       "toggle_show_assistants": "切换助手显示",
       "toggle_show_topics": "切换话题显示",
       "zoom_in": "放大界面",

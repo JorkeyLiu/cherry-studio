@@ -37,32 +37,27 @@ interface MutableContextTurn {
  * Builds ContextTurns from chronological messages.
  *
  * Construction rules:
- *   1. Clear messages (type === 'clear') and everything before the last one
- *      are excluded. This logic is intentionally inlined rather than imported
- *      from filters.ts to keep this module dependency-light and store-free.
- *   2. A user message starts a new turn keyed by its own id.
- *   3. An assistant message with askId matching the current turn's key
+ *   1. A user message starts a new turn keyed by its own id.
+ *   2. An assistant message with askId matching the current turn's key
  *      joins that turn (consecutive retry).
- *   4. An assistant message with a different or missing askId starts a
+ *   3. An assistant message with a different or missing askId starts a
  *      new turn: keyed by askId if present, otherwise by its own id.
- *   5. Adjacent user messages each start their own separate turn.
- *   6. A system message produces a standalone single-message turn keyed by
+ *   4. Adjacent user messages each start their own separate turn.
+ *   5. A system message produces a standalone single-message turn keyed by
  *      its own id, so that no product messages are lost.
- *   7. Only consecutive messages may join; non-consecutive same askId
+ *   6. Only consecutive messages may join; non-consecutive same askId
  *      creates a separate turn.
+ *
+ * All real turns in the topic participate — there is no clear-marker
+ * trimming at this layer.
  *
  * This is a pure function with no side effects and no store dependencies.
  */
 export function buildContextTurns(messages: Message[]): ContextTurn[] {
-  // Exclude clear messages and everything before the last clear.
-  // Inlined intentionally — importing filters.ts would pull in store dependencies.
-  const clearIndex = messages.findLastIndex((m) => m.type === 'clear')
-  const afterClear = clearIndex === -1 ? messages : messages.slice(clearIndex + 1)
-
   const turns: MutableContextTurn[] = []
   let currentTurnKey: string | null = null
 
-  for (const message of afterClear) {
+  for (const message of messages) {
     if (message.role === 'system') {
       // System messages are standalone turns — each keyed by its own id.
       // This ensures no product messages are silently dropped.

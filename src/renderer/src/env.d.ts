@@ -1,6 +1,5 @@
 /// <reference types="vite/client" />
 
-import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk'
 import type KeyvStorage from '@kangfenmao/keyv-storage'
 import type { HookAPI } from 'antd/es/modal/useModal'
 import type { NavigateFunction } from 'react-router-dom'
@@ -44,15 +43,6 @@ declare global {
       warning: typeof warning
       info: typeof info
       loading: typeof loading
-    }
-    agentTools: {
-      respondToPermission: (payload: {
-        requestId: string
-        behavior: 'allow' | 'deny'
-        updatedInput?: Record<string, unknown>
-        message?: string
-        updatedPermissions?: PermissionUpdate[]
-      }) => Promise<{ success: boolean }>
     }
   }
 }

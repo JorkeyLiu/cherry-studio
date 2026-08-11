@@ -99,8 +99,8 @@ export type MessageNavigationResult = 'success' | 'not-found' | 'cancelled'
  * persistence. Returns true only for 'success' — callers use this to decide
  * whether to persist after any navigation transaction.
  *
- * Callers that must NOT persist (SEND_MESSAGE, NEW_CONTEXT) simply skip this
- * check entirely by using `navigate()` directly without persistence.
+ * Callers that must NOT persist (SEND_MESSAGE) simply skip this check entirely
+ * by using `navigate()` directly without persistence.
  */
 export const shouldPersistNavigationResult = (result: MessageNavigationResult): boolean => result === 'success'
 
@@ -188,13 +188,13 @@ export const resolveAdjacentUserMessage = (
 
   if (direction === 'newer') {
     for (let i = currentIndex + 1; i < messages.length; i++) {
-      if (messages[i].role === 'user' && messages[i].type !== 'clear') {
+      if (messages[i].role === 'user') {
         return messages[i].id
       }
     }
   } else {
     for (let i = currentIndex - 1; i >= 0; i--) {
-      if (messages[i].role === 'user' && messages[i].type !== 'clear') {
+      if (messages[i].role === 'user') {
         return messages[i].id
       }
     }

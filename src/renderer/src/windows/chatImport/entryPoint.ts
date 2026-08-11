@@ -698,17 +698,23 @@ export function buildSourceReadStats(): SourceReadStats {
 // ---------------------------------------------------------------------------
 
 /**
- * Open the source Dexie instance for reading (dynamic import of the singleton
- * module). When a prior page closed it (R-11) or discovery has not run yet,
- * this re-imports and reopens so the next read always holds a live handle
- * (LOCK-RP3 — ensure-open-before-read).
+ * Open the source Dexie instance for reading (dynamic import of the canonical
+ * side-effect-minimal schema module). When a prior page closed it (R-11) or
+ * discovery has not run yet, this re-imports and reopens so the next read
+ * always holds a live handle (LOCK-RP3 — ensure-open-before-read).
+ *
+ * The schema module (`databases/dbSchema.ts`) is deliberately imported instead
+ * of the `@renderer/databases` barrel so the hidden sandboxed window only loads
+ * the Dexie schema + (lazily) the v5/v7/v8 upgrade code — never the main
+ * renderer bundle, i18n, LoggerService, or any other window.api/window.electron
+ * side effect (structural isolation).
  */
 async function openDb(): Promise<unknown> {
   if (db) return db
   const { db: cherryDbInstance } = await withTimeout(
-    import('@renderer/databases/index'),
+    import('@renderer/databases/dbSchema'),
     60_000,
-    'dynamic import of databases/index timed out after 60s'
+    'dynamic import of databases/dbSchema timed out after 60s'
   )
   db = cherryDbInstance
   await withTimeout(db.open(), 30_000, 'db.open() timed out after 30s')

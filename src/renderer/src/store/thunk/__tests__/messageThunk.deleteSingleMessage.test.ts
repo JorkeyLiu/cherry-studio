@@ -1,9 +1,8 @@
 /**
  * deleteSingleMessageThunk — Phase 5.3 blocker fixes.
  *
- * LOCK-001: ordinary single deletion commits DB first, consumes FileCleanupResult
+ * LOCK-001: single deletion commits DB first, consumes FileCleanupResult
  * exactly once, then mutates Redux. Failures leave Redux/files unchanged.
- * Agent topics preserve existing cleanupMultipleBlocks behavior.
  */
 
 import type { Message } from '@renderer/types/newMessage'
@@ -15,9 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     deleteMessagesWithSegments: vi.fn(),
-    deleteMessage: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
-    removeMessageFromSegmentsThunk: vi.fn().mockReturnValue(() => {}),
     removeMessages: vi.fn((p: unknown) => ({ type: 'removeMessages', p })),
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'removeManyBlocks', p })),
     transferAnchorsAfterDeletion: vi.fn(),
@@ -42,11 +39,9 @@ vi.mock('@logger', () => ({
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     deleteMessagesWithSegments: mocks.deleteMessagesWithSegments,
-    deleteMessage: mocks.deleteMessage,
     resetMessagesForResend: vi.fn(),
     updateMessageAndBlocks: vi.fn(),
     updateMessage: vi.fn(),
-    clearMessages: vi.fn(),
     fetchMessages: vi.fn(),
     listBlocksByFile: vi.fn(),
     deleteBlocks: vi.fn()
@@ -59,11 +54,6 @@ vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
   softDeleteOrdinaryTopic: vi.fn()
 }))
 
-vi.mock('@renderer/utils/agentSession', () => ({
-  isAgentSessionTopicId: (id: string) => id.startsWith('agent-session:'),
-  extractAgentSessionIdFromTopicId: (id: string) => id.replace('agent-session:', '')
-}))
-
 vi.mock('@renderer/services/anchorService', () => ({
   buildGroupList: mocks.buildGroupList,
   transferAnchorsAfterDeletion: mocks.transferAnchorsAfterDeletion
@@ -74,7 +64,7 @@ vi.mock('@renderer/store/assistants', () => ({
 }))
 
 vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
-  removeMessageFromSegmentsThunk: mocks.removeMessageFromSegmentsThunk
+  loadTopicSegmentsThunk: vi.fn()
 }))
 
 vi.mock('@renderer/utils/queue', () => ({
@@ -200,7 +190,7 @@ describe('deleteSingleMessageThunk', () => {
 
       // DB commit FIRST
       expect(mocks.deleteMessagesWithSegments).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1', 'asst-1'])
-      // consumeFileCleanupResult called exactly once (not in cleanupMultipleBlocks)
+      // consumeFileCleanupResult called exactly once
       expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(emptyCleanup)
     })
 
@@ -254,27 +244,6 @@ describe('deleteSingleMessageThunk', () => {
       // Redux should NOT be mutated on failure
       expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'removeMessages' }))
       expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
-    })
-  })
-
-  describe('agent topic: preserves existing behavior', () => {
-    it('uses deleteMessage (not deleteMessagesWithSegments) for agent topics', { timeout: 60_000 }, async () => {
-      const agentMsg = createMessage({ id: 'agent-msg-1', topicId: 'agent-session:s-1' })
-      storeState.messages.entities = { 'agent-msg-1': agentMsg }
-      storeState.messages.messageIdsByTopic = { 'agent-session:s-1': ['agent-msg-1'] }
-      ;(storeState as any).messageBlocks = { entities: {} }
-      mocks.selectMessagesForTopic.mockReturnValue([agentMsg])
-      mocks.buildGroupList.mockReturnValue([])
-      mocks.deleteMessage.mockResolvedValue(undefined)
-
-      const { deleteSingleMessageThunk } = await import('../messageThunk')
-      const dispatch = vi.fn()
-
-      await deleteSingleMessageThunk('agent-session:s-1', 'agent-msg-1')(dispatch, () => storeState as any)
-
-      // Agent path: uses per-message deleteMessage, NOT deleteMessagesWithSegments
-      expect(mocks.deleteMessage).toHaveBeenCalled()
-      expect(mocks.deleteMessagesWithSegments).not.toHaveBeenCalled()
     })
   })
 })

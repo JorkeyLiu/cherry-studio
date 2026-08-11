@@ -122,11 +122,11 @@ describe('getTurnAnchorGroupKey', () => {
 describe('resolveDefaultAnchorPersistence', () => {
   const twoUserTurns: ContextTurn[] = [turn('u1', [userMsg('u1')]), turn('u2', [userMsg('u2')])]
 
-  it('empty post-clear segment with a persisted anchor → delete (LOCK-FIX-3)', () => {
+  it('empty topic turn list with a persisted anchor → delete (LOCK-FIX-3)', () => {
     expect(resolveDefaultAnchorPersistence([], 5, { kind: 'active', groupKey: 'u1' })).toEqual({ type: 'delete' })
   })
 
-  it('empty post-clear segment without an anchor → none (single-dispatch guard, no loop)', () => {
+  it('empty topic turn list without an anchor → none (single-dispatch guard, no loop)', () => {
     expect(resolveDefaultAnchorPersistence([], 5, undefined)).toEqual({ type: 'none' })
   })
 

@@ -18,7 +18,6 @@ import styled from 'styled-components'
 
 import BlockErrorFallback from './BlockErrorFallback'
 import CitationBlock from './CitationBlock'
-import CompactBlock from './CompactBlock'
 import ErrorBlock from './ErrorBlock'
 import FileBlock from './FileBlock'
 import ImageBlock from './ImageBlock'
@@ -336,9 +335,6 @@ const MessageBlockRenderer: React.FC<Props> = ({ blocks, message }) => {
             break
           case MessageBlockType.VIDEO:
             blockComponent = <VideoBlock key={block.id} block={block} />
-            break
-          case MessageBlockType.COMPACT:
-            blockComponent = <CompactBlock key={block.id} block={block} />
             break
           default:
             logger.warn('Unsupported block type in MessageBlockRenderer:', (block as any).type, block)

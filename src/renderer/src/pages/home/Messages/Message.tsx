@@ -17,10 +17,8 @@ import { classNames, cn } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { isMessageProcessing } from '@renderer/utils/messageUtils/is'
 import { estimateMessageBlocksUsage } from '@renderer/utils/messageUtils/usage'
-import { Divider } from 'antd'
 import type { Dispatch, FC, SetStateAction } from 'react'
 import React, { memo, useCallback, useEffect, useRef } from 'react'
-import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import MessageContent from './MessageContent'
@@ -74,7 +72,6 @@ const MessageItem: FC<Props> = ({
   isEditMode = false,
   onGroupClick
 }) => {
-  const { t } = useTranslation()
   const { assistant, setModel } = useAssistant(message.assistantId)
   const { isMultiSelectMode } = useChatContext(topic)
   const model = useModel(getMessageModelId(message), message.model?.provider) || message.model
@@ -253,20 +250,6 @@ const MessageItem: FC<Props> = ({
     }
   }, [message.id, startEditing])
 
-  if (message.type === 'clear') {
-    return (
-      <NewContextMessage
-        className="clear-context-divider"
-        onClick={() => {
-          void EventEmitter.emit(EVENT_NAMES.NEW_CONTEXT)
-        }}>
-        <Divider dashed style={{ padding: '0 20px' }} plain>
-          {t('chat.message.new.context')}
-        </Divider>
-      </NewContextMessage>
-    )
-  }
-
   return (
     <WrapperContainer isMultiSelectMode={isMultiSelectMode}>
       <MessageContainer
@@ -391,11 +374,6 @@ const MessageFooter = styled.div`
   margin-left: 46px;
   margin-top: 3px;
   user-select: none;
-`
-
-const NewContextMessage = styled.div`
-  cursor: pointer;
-  flex: 1;
 `
 
 export default memo(MessageItem)

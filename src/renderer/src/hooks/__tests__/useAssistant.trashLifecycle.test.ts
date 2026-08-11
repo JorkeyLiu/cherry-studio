@@ -13,9 +13,7 @@ const { mocks } = vi.hoisted(() => ({
     ensureOrdinaryTopicOwnership: vi.fn(),
     softDeleteOrdinaryTopic: vi.fn(),
     restoreOrdinaryTopic: vi.fn(),
-    softRemoveTopic: vi.fn(),
-    restoreTopic: vi.fn(),
-    getTopic: vi.fn(),
+    removeTopic: vi.fn(),
     getDefaultTopic: vi.fn(),
     resetOrdinaryAssistantTopics: vi.fn()
   }
@@ -69,9 +67,7 @@ vi.mock('@renderer/store/llm', () => ({
 
 vi.mock('@renderer/hooks/useTopic', () => ({
   TopicManager: {
-    softRemoveTopic: mocks.softRemoveTopic,
-    restoreTopic: mocks.restoreTopic,
-    getTopic: mocks.getTopic
+    removeTopic: mocks.removeTopic
   }
 }))
 
@@ -84,10 +80,6 @@ vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
   softDeleteOrdinaryTopic: mocks.softDeleteOrdinaryTopic,
   restoreOrdinaryTopic: mocks.restoreOrdinaryTopic,
   resetOrdinaryAssistantTopics: mocks.resetOrdinaryAssistantTopics
-}))
-
-vi.mock('@renderer/utils/agentSession', () => ({
-  isAgentSessionTopicId: (id: string) => id.startsWith('agent-session:')
 }))
 
 vi.mock('react-i18next', () => ({
@@ -156,22 +148,6 @@ describe('useAssistant trash lifecycle (Phase 5.2B)', () => {
       await result.current.removeTopic(topic)
 
       expect(mocks.softDeleteOrdinaryTopic).toHaveBeenCalledExactlyOnceWith('t-1', 'Topic')
-      expect(mocks.softRemoveTopic).not.toHaveBeenCalled()
-      expect(mockDispatch).toHaveBeenCalledWith({
-        type: 'removeTopic',
-        p: { assistantId: 'a-1', topic }
-      })
-    })
-
-    it('keeps agent-session topics on Dexie and bypasses SQLite (LOCK-521)', async () => {
-      mocks.softRemoveTopic.mockResolvedValue(undefined)
-      const { result } = renderHook(() => useAssistant('a-1'))
-      const topic = makeTopic({ id: 'agent-session:s-1' })
-
-      await result.current.removeTopic(topic)
-
-      expect(mocks.softRemoveTopic).toHaveBeenCalledExactlyOnceWith(topic)
-      expect(mocks.softDeleteOrdinaryTopic).not.toHaveBeenCalled()
       expect(mockDispatch).toHaveBeenCalledWith({
         type: 'removeTopic',
         p: { assistantId: 'a-1', topic }
@@ -184,8 +160,6 @@ describe('useAssistant trash lifecycle (Phase 5.2B)', () => {
 
       await expect(result.current.removeTopic(makeTopic())).rejects.toThrow('SQLITE_FAILURE')
       expect(mockDispatch).not.toHaveBeenCalled()
-      // No Dexie fallback (LOCK-524).
-      expect(mocks.softRemoveTopic).not.toHaveBeenCalled()
     })
   })
 
@@ -198,7 +172,6 @@ describe('useAssistant trash lifecycle (Phase 5.2B)', () => {
       await result.current.restoreTopic('t-1')
 
       expect(mocks.restoreOrdinaryTopic).toHaveBeenCalledExactlyOnceWith('t-1')
-      expect(mocks.restoreTopic).not.toHaveBeenCalled()
       expect(mockDispatch).toHaveBeenCalledWith({
         type: 'addTopicFromTrash',
         p: { assistantId: 'a-1', topic: restored }
@@ -220,22 +193,6 @@ describe('useAssistant trash lifecycle (Phase 5.2B)', () => {
 
       await expect(result.current.restoreTopic('t-1')).rejects.toThrow('SQLITE_FAILURE')
       expect(mockDispatch).not.toHaveBeenCalled()
-    })
-
-    it('keeps agent-session restore on Dexie (LOCK-521)', async () => {
-      const agentTopic = makeTopic({ id: 'agent-session:s-1', deletedAt: '2026-01-03T00:00:00.000Z' })
-      mocks.getTopic.mockResolvedValue(agentTopic)
-      // restoreTopic now returns the restored topic directly (LOCK-003)
-      mocks.restoreTopic.mockResolvedValue({ ...agentTopic, deletedAt: undefined })
-      const { result } = renderHook(() => useAssistant('a-1'))
-
-      await result.current.restoreTopic('agent-session:s-1')
-
-      expect(mocks.restoreTopic).toHaveBeenCalledExactlyOnceWith('agent-session:s-1')
-      expect(mocks.restoreOrdinaryTopic).not.toHaveBeenCalled()
-      const dispatched = mockDispatch.mock.calls.at(-1)?.[0]
-      expect(dispatched.type).toBe('addTopicFromTrash')
-      expect(dispatched.p.topic.deletedAt).toBeUndefined()
     })
   })
 

@@ -349,7 +349,6 @@ export enum IpcChannel {
   ChatDb_UpdateSingleBlock = 'chatdb:update-single-block',
   ChatDb_BulkAddBlocks = 'chatdb:bulk-add-blocks',
   ChatDb_DeleteBlocks = 'chatdb:delete-blocks',
-  ChatDb_ClearMessages = 'chatdb:clear-messages',
 
   // Phase 5.1A — segment, reorder, and file-reference relationship queries
   ChatDb_ListSegments = 'chatdb:list-segments',
@@ -380,7 +379,6 @@ export enum IpcChannel {
   ChatDb_ResetMessagesForResend = 'chatdb:reset-messages-for-resend',
   ChatDb_DeleteMessagesWithSegments = 'chatdb:delete-messages-with-segments',
   ChatDb_PasteMessagesToTopic = 'chatdb:paste-messages-to-topic',
-  ChatDb_ClearTopicWithSegments = 'chatdb:clear-topic-with-segments',
 
   // Phase 5.1B-2 — search
   ChatDb_SearchMessages = 'chatdb:search-messages',

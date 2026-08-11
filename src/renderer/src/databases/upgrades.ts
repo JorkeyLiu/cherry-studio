@@ -13,20 +13,35 @@
  * - Contribution Hold: https://github.com/CherryHQ/cherry-studio/issues/10954
  * - v2 Refactor PR   : https://github.com/CherryHQ/cherry-studio/pull/10162
  * --------------------------------------------------------------------------
+ *
+ * Historical Dexie schema upgrades (v5/v7/v8).
+ *
+ * This module is evaluated ONLY when an old-version source database actually
+ * needs one of these upgrades (the schema module lazy-imports it). It must
+ * therefore stay side-effect-free for the isolated chatImport renderer: it has
+ * NO runtime dependencies on `@renderer/config/translate`, i18n, LoggerService,
+ * lodash, `utils/messageUtils/create`, or `@renderer/types` (value exports).
+ * Migration-local constants and the side-effect-free helpers in
+ * `./migrationHelpers` preserve the exact historical migration output shapes
+ * (block ids/status/type/timestamps/content/error/citation/file/tool/
+ * translation and language codes). The only runtime import left is the
+ * side-effect-free `./migrationHelpers`; the enum values it once took from
+ * `@renderer/types/newMessage` are now migration-local `as const` literals with
+ * narrow type assertions at this module's interface boundary.
  */
-import { loggerService } from '@logger'
-import { LanguagesEnum } from '@renderer/config/translate'
+// Type-only imports only — every `@renderer/types` / `@renderer/types/newMessage`
+// import below is erased at build time, so this module (and its lazy chunk)
+// has no runtime dependency on the main renderer bundle.
 import type { LegacyMessage as OldMessage, Topic, TranslateLanguageCode } from '@renderer/types'
-import { FILE_TYPE, WEB_SEARCH_SOURCE } from '@renderer/types' // Import FileTypes enum
 import type {
+  AssistantMessageStatus,
   BaseMessageBlock,
   CitationMessageBlock,
   Message as NewMessage,
-  MessageBlock
+  MessageBlock,
+  MessageBlockStatus
 } from '@renderer/types/newMessage'
-import { AssistantMessageStatus, MessageBlockStatus } from '@renderer/types/newMessage'
 import type { Transaction } from 'dexie'
-import { isEmpty } from 'lodash'
 
 import {
   createCitationBlock,
@@ -37,9 +52,79 @@ import {
   createThinkingBlock,
   createToolBlock,
   createTranslationBlock
-} from '../utils/messageUtils/create'
+} from './migrationHelpers'
 
-const logger = loggerService.withContext('Database:Upgrades')
+/**
+ * Migration-local no-op logger. The original code routed through the main
+ * renderer's LoggerService, which is unusable (and unsafe) inside the isolated
+ * chatImport window. Call sites are preserved structurally; this keeps the
+ * upgrades module free of any LoggerService/window.electron dependency.
+ */
+const logger = {
+  info: (..._args: unknown[]) => {},
+  warn: (..._args: unknown[]) => {},
+  error: (..._args: unknown[]) => {}
+}
+
+/**
+ * Migration-local block status constants — exact string values of the
+ * `MessageBlockStatus` enum (`@renderer/types/newMessage`), declared as
+ * `as const` literals. The per-member type assertion is the narrow interface
+ * boundary that satisfies the nominal string enum typing (string literals are
+ * not assignable to string enums) without a runtime enum import; the cast is
+ * erased at build time.
+ */
+const BLOCK_STATUS = {
+  PROCESSING: 'processing' as MessageBlockStatus.PROCESSING,
+  SUCCESS: 'success' as MessageBlockStatus.SUCCESS,
+  ERROR: 'error' as MessageBlockStatus.ERROR,
+  PAUSED: 'paused' as MessageBlockStatus.PAUSED
+} as const
+
+/**
+ * Migration-local message status constants — exact string values of the
+ * `AssistantMessageStatus` enum, declared as `as const` literals (narrow
+ * per-member type assertion at the interface boundary; erased at build time).
+ * `NewMessage['status']` is exactly the union of both status enums.
+ */
+const MESSAGE_STATUS = {
+  PROCESSING: 'processing' as AssistantMessageStatus.PROCESSING,
+  PENDING: 'pending' as AssistantMessageStatus.PENDING,
+  SEARCHING: 'searching' as AssistantMessageStatus.SEARCHING,
+  SUCCESS: 'success' as AssistantMessageStatus.SUCCESS,
+  PAUSED: 'paused' as AssistantMessageStatus.PAUSED,
+  ERROR: 'error' as AssistantMessageStatus.ERROR
+} as const
+
+/**
+ * Migration-local value of `FILE_TYPE.IMAGE` (`@renderer/types`), preserved
+ * verbatim so the historical v7 image/file split is byte-identical.
+ */
+const IMAGE_FILE_TYPE = 'image'
+
+/**
+ * Migration-local subset of `WEB_SEARCH_SOURCE` (`@renderer/types`) used by the
+ * historical v7 citation mapping. Values are preserved verbatim.
+ */
+const WEB_SEARCH_SOURCE = {
+  WEBSEARCH: 'websearch',
+  OPENAI_RESPONSE: 'openai-response',
+  OPENROUTER: 'openrouter',
+  GEMINI: 'gemini',
+  ZHIPU: 'zhipu'
+} as const
+
+/**
+ * Migration-local `lodash/isEmpty` equivalent, preserving the exact semantics
+ * used by the historical v7 error-block guard (`isEmpty(oldMessage.content)`).
+ */
+function isEmpty(value: unknown): boolean {
+  if (value === null || value === undefined) return true
+  if (typeof value === 'string') return value.length === 0
+  if (Array.isArray(value)) return value.length === 0
+  if (typeof value === 'object') return Object.keys(value).length === 0
+  return false
+}
 
 export async function upgradeToV5(tx: Transaction): Promise<void> {
   const topics = await tx.table('topics').toArray()
@@ -82,7 +167,7 @@ export async function upgradeToV5(tx: Transaction): Promise<void> {
 function mapOldStatusToBlockStatus(oldStatus: OldMessage['status']): MessageBlockStatus {
   // Handle statuses that need mapping
   if (oldStatus === 'sending' || oldStatus === 'pending' || oldStatus === 'searching') {
-    return MessageBlockStatus.PROCESSING
+    return BLOCK_STATUS.PROCESSING
   }
   // For success, paused, error, the values match MessageBlockStatus
   if (oldStatus === 'success' || oldStatus === 'paused' || oldStatus === 'error') {
@@ -90,13 +175,13 @@ function mapOldStatusToBlockStatus(oldStatus: OldMessage['status']): MessageBloc
     return oldStatus as MessageBlockStatus
   }
   // Default fallback for any unexpected old status
-  return MessageBlockStatus.PROCESSING
+  return BLOCK_STATUS.PROCESSING
 }
 
 function mapOldStatusToNewMessageStatus(oldStatus: OldMessage['status']): NewMessage['status'] {
   // Handle statuses that need mapping
   if (oldStatus === 'pending' || oldStatus === 'sending') {
-    return AssistantMessageStatus.PENDING
+    return MESSAGE_STATUS.PENDING
   }
   // For sending, success, paused, error, the values match NewMessage['status']
   if (oldStatus === 'searching' || oldStatus === 'success' || oldStatus === 'paused' || oldStatus === 'error') {
@@ -104,7 +189,7 @@ function mapOldStatusToNewMessageStatus(oldStatus: OldMessage['status']): NewMes
     return oldStatus as NewMessage['status']
   }
   // Default fallback
-  return AssistantMessageStatus.PROCESSING
+  return MESSAGE_STATUS.PROCESSING
 }
 
 // --- UPDATED UPGRADE FUNCTION for Version 7 ---
@@ -136,7 +221,7 @@ export async function upgradeToV7(tx: Transaction): Promise<void> {
         const block = createThinkingBlock(oldMessage.id, oldMessage.reasoning_content, {
           createdAt: oldMessage.createdAt,
           thinking_millsec: oldMessage?.metrics?.time_thinking_millsec,
-          status: MessageBlockStatus.SUCCESS // Thinking block is complete content
+          status: BLOCK_STATUS.SUCCESS // Thinking block is complete content
         })
         blocksToCreate.push(block)
         messageBlockIds.push(block.id)
@@ -148,7 +233,7 @@ export async function upgradeToV7(tx: Transaction): Promise<void> {
         oldMessage.metadata.mcpTools.forEach((mcpTool) => {
           const block = createToolBlock(oldMessage.id, mcpTool.id, {
             // Determine status based on original tool status
-            status: MessageBlockStatus.SUCCESS,
+            status: BLOCK_STATUS.SUCCESS,
             content: mcpTool.response,
             error:
               mcpTool.status !== 'done'
@@ -177,7 +262,7 @@ export async function upgradeToV7(tx: Transaction): Promise<void> {
       if (oldMessage.translatedContent?.trim()) {
         const block = createTranslationBlock(oldMessage.id, oldMessage.translatedContent, 'unknown', {
           createdAt: oldMessage.createdAt,
-          status: MessageBlockStatus.SUCCESS // Translation block is complete content
+          status: BLOCK_STATUS.SUCCESS // Translation block is complete content
         })
         blocksToCreate.push(block)
         messageBlockIds.push(block.id)
@@ -186,18 +271,18 @@ export async function upgradeToV7(tx: Transaction): Promise<void> {
       // 4. File Blocks (Non-Image) and Image Blocks (from Files) (Status is SUCCESS)
       if (oldMessage.files?.length) {
         oldMessage.files.forEach((file) => {
-          if (file.type === FILE_TYPE.IMAGE) {
+          if (file.type === IMAGE_FILE_TYPE) {
             const block = createImageBlock(oldMessage.id, {
               file: file,
               createdAt: oldMessage.createdAt,
-              status: MessageBlockStatus.SUCCESS
+              status: BLOCK_STATUS.SUCCESS
             })
             blocksToCreate.push(block)
             messageBlockIds.push(block.id)
           } else {
             const block = createFileBlock(oldMessage.id, file, {
               createdAt: oldMessage.createdAt,
-              status: MessageBlockStatus.SUCCESS
+              status: BLOCK_STATUS.SUCCESS
             })
             blocksToCreate.push(block)
             messageBlockIds.push(block.id)
@@ -210,7 +295,7 @@ export async function upgradeToV7(tx: Transaction): Promise<void> {
         const block = createImageBlock(oldMessage.id, {
           metadata: { generateImageResponse: oldMessage.metadata.generateImage },
           createdAt: oldMessage.createdAt,
-          status: MessageBlockStatus.SUCCESS
+          status: BLOCK_STATUS.SUCCESS
         })
         blocksToCreate.push(block)
         messageBlockIds.push(block.id)
@@ -269,7 +354,7 @@ export async function upgradeToV7(tx: Transaction): Promise<void> {
           citationDataToCreate as Omit<CitationMessageBlock, keyof BaseMessageBlock | 'type'>,
           {
             createdAt: oldMessage.createdAt,
-            status: MessageBlockStatus.SUCCESS
+            status: BLOCK_STATUS.SUCCESS
           }
         )
         blocksToCreate.push(block)
@@ -288,7 +373,7 @@ export async function upgradeToV7(tx: Transaction): Promise<void> {
             },
             {
               createdAt: oldMessage.createdAt,
-              status: MessageBlockStatus.ERROR // Error block status is ERROR
+              status: BLOCK_STATUS.ERROR // Error block status is ERROR
             }
           )
           blocksToCreate.push(block)
@@ -361,10 +446,9 @@ export async function upgradeToV8(tx: Transaction): Promise<void> {
   }
 
   const settingsTable = tx.table('settings')
-  const defaultPair: [TranslateLanguageCode, TranslateLanguageCode] = [
-    LanguagesEnum.enUS.langCode,
-    LanguagesEnum.zhCN.langCode
-  ]
+  // Migration-local constants replacing `LanguagesEnum.enUS.langCode` and
+  // `LanguagesEnum.zhCN.langCode` (`@renderer/config/translate` → i18n chain).
+  const defaultPair: [TranslateLanguageCode, TranslateLanguageCode] = ['en-us', 'zh-cn']
   const originSource = (await settingsTable.get('translate:source:language'))?.value
   const originTarget = (await settingsTable.get('translate:target:language'))?.value
   const originPair = (await settingsTable.get('translate:bidirectional:pair'))?.value
@@ -375,14 +459,14 @@ export async function upgradeToV8(tx: Transaction): Promise<void> {
   } else {
     newSource = langMap[originSource]
     if (!newSource) {
-      newSource = LanguagesEnum.enUS.langCode
+      newSource = 'en-us'
     }
   }
 
   logger.info('originTarget: %o', originTarget)
   newTarget = langMap[originTarget]
   if (!newTarget) {
-    newTarget = LanguagesEnum.zhCN.langCode
+    newTarget = 'zh-cn'
   }
 
   logger.info('originPair: %o', originPair)

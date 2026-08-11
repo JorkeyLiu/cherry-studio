@@ -64,7 +64,6 @@ vi.mock('@renderer/services/AssistantService.ts', () => ({
       topics: [],
       messages: [],
       type: 'assistant',
-      regularPhrases: [],
       settings: {}
     }
   }

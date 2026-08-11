@@ -1,18 +1,10 @@
-import { loggerService } from '@logger'
 import db from '@renderer/databases'
-import store from '@renderer/store'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type { FileCleanupResult } from '@shared/chatDb'
 
 import { fileLock } from '../FileLock'
-import { AgentMessageDataSource } from './AgentMessageDataSource'
 import { SqliteMessageDataSource } from './SqliteMessageDataSource'
 import type { MessageDataSource } from './types'
-import { buildAgentSessionTopicId, isAgentSessionTopicId } from './types'
-
-const logger = loggerService.withContext('DbService')
-
-export type DbSourceType = 'sqlite' | 'agent'
 
 interface FileCountSource {
   updateFileCount(fileId: string, delta: number, deleteIfZero?: boolean): Promise<void>
@@ -44,39 +36,23 @@ const fileCountSource: FileCountSource = {
 class DbService implements MessageDataSource {
   private static instance: DbService
   private readonly ordinarySource = new SqliteMessageDataSource()
-  private readonly agentSource = new AgentMessageDataSource()
 
   static getInstance(): DbService {
     if (!DbService.instance) DbService.instance = new DbService()
     return DbService.instance
   }
 
-  private source(topicId: string): MessageDataSource {
-    if (isAgentSessionTopicId(topicId)) {
-      logger.silly(`Using AgentMessageDataSource for topic ${topicId}`)
-      return this.agentSource
-    }
-    return this.ordinarySource
-  }
-
-  private resolveMessageTopicId(messageId: string): string | undefined {
-    const message = store.getState().messages.entities[messageId]
-    if (message) return message.topicId
-    const agentInfo = this.agentSource.getStreamingCacheInfo(messageId)
-    return agentInfo ? buildAgentSessionTopicId(agentInfo.sessionId) : undefined
-  }
-
   fetchMessages(topicId: string, forceReload?: boolean) {
-    return this.source(topicId).fetchMessages(topicId, forceReload)
+    return this.ordinarySource.fetchMessages(topicId, forceReload)
   }
   getRawTopic(topicId: string) {
-    return this.source(topicId).getRawTopic(topicId)
+    return this.ordinarySource.getRawTopic(topicId)
   }
   appendMessage(topicId: string, message: Message, blocks: MessageBlock[], insertIndex?: number) {
-    return this.source(topicId).appendMessage(topicId, message, blocks, insertIndex)
+    return this.ordinarySource.appendMessage(topicId, message, blocks, insertIndex)
   }
   updateMessage(topicId: string, messageId: string, updates: Partial<Message>) {
-    return this.source(topicId).updateMessage(topicId, messageId, updates)
+    return this.ordinarySource.updateMessage(topicId, messageId, updates)
   }
   updateMessageAndBlocks(
     topicId: string,
@@ -84,42 +60,27 @@ class DbService implements MessageDataSource {
     blocks: MessageBlock[],
     blockIdsToDelete: string[] = []
   ): Promise<FileCleanupResult> {
-    return this.source(topicId).updateMessageAndBlocks(topicId, updates, blocks, blockIdsToDelete)
+    return this.ordinarySource.updateMessageAndBlocks(topicId, updates, blocks, blockIdsToDelete)
   }
   deleteMessage(topicId: string, messageId: string) {
-    return this.source(topicId).deleteMessage(topicId, messageId)
+    return this.ordinarySource.deleteMessage(topicId, messageId)
   }
   deleteMessages(topicId: string, messageIds: string[]) {
-    return this.source(topicId).deleteMessages(topicId, messageIds)
-  }
-  clearMessages(topicId: string) {
-    return this.source(topicId).clearMessages(topicId)
+    return this.ordinarySource.deleteMessages(topicId, messageIds)
   }
   topicExists(topicId: string) {
-    return this.source(topicId).topicExists(topicId)
+    return this.ordinarySource.topicExists(topicId)
   }
   ensureTopic(topicId: string, assistantId?: string, name?: string | null) {
     return this.ordinarySource.ensureTopic(topicId, assistantId, name)
   }
 
-  async updateBlocks(blocks: MessageBlock[]): Promise<void> {
-    const agentBlocks: MessageBlock[] = []
-    const ordinaryBlocks: MessageBlock[] = []
-    for (const block of blocks) {
-      const topicId = this.resolveMessageTopicId(block.messageId)
-      if (topicId && isAgentSessionTopicId(topicId)) agentBlocks.push(block)
-      else ordinaryBlocks.push(block)
-    }
-    if (agentBlocks.length) await this.agentSource.updateBlocks(agentBlocks)
-    if (ordinaryBlocks.length) await this.ordinarySource.updateBlocks(ordinaryBlocks)
+  updateBlocks(blocks: MessageBlock[]): Promise<void> {
+    return this.ordinarySource.updateBlocks(blocks)
   }
 
   updateSingleBlock(blockId: string, updates: Partial<MessageBlock>) {
-    const block = store.getState().messageBlocks.entities[blockId]
-    const topicId = block ? this.resolveMessageTopicId(block.messageId) : undefined
-    return topicId && isAgentSessionTopicId(topicId)
-      ? this.agentSource.updateSingleBlock(blockId, updates)
-      : this.ordinarySource.updateSingleBlock(blockId, updates)
+    return this.ordinarySource.updateSingleBlock(blockId, updates)
   }
   bulkAddBlocks(blocks: MessageBlock[]) {
     return this.ordinarySource.bulkAddBlocks(blocks)
@@ -147,9 +108,6 @@ class DbService implements MessageDataSource {
   }
   hardDeleteTopic(topicId: string) {
     return this.ordinarySource.hardDeleteTopic(topicId)
-  }
-  clearTopicWithSegments(topicId: string) {
-    return this.ordinarySource.clearTopicWithSegments(topicId)
   }
   transferTopicOwnership(topicId: string, assistantId: string) {
     return this.ordinarySource.transferTopicOwnership(topicId, assistantId)
@@ -208,12 +166,6 @@ class DbService implements MessageDataSource {
   }
   updateFileCounts(files: Array<{ id: string; delta: number; deleteIfZero?: boolean }>) {
     return fileCountSource.updateFileCounts(files)
-  }
-  isAgentSession(topicId: string) {
-    return isAgentSessionTopicId(topicId)
-  }
-  getSourceType(topicId: string): DbSourceType {
-    return isAgentSessionTopicId(topicId) ? 'agent' : 'sqlite'
   }
 }
 

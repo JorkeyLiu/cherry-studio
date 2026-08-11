@@ -18,6 +18,15 @@ vi.unmock('node:crypto')
 
 vi.mock('@main/config', () => ({ DATA_PATH: '/mock/data' }))
 
+// LOCK-004: mock the SpanCacheService singleton so permanent-delete trace
+// cleanup can be asserted without touching a real trace directory.
+const { mockCleanTopic } = vi.hoisted(() => ({
+  mockCleanTopic: vi.fn()
+}))
+vi.mock('../../SpanCacheService', () => ({
+  spanCacheService: { cleanTopic: mockCleanTopic }
+}))
+
 import { loggerService } from '@logger'
 import { ERR_VALIDATION, isSuccess, MAX_ARRAY_LENGTH, validateChatDbResult } from '@shared/chatDb'
 import Database from 'better-sqlite3'
@@ -97,6 +106,7 @@ describe('ChatDbAggregateService', () => {
     db = wrapDrizzle(sqlite)
     runMigrations(db, sqlite)
     agg = new ChatDbAggregateService(db)
+    mockCleanTopic.mockReset().mockResolvedValue(undefined)
   })
 
   afterEach(() => {
@@ -775,38 +785,6 @@ describe('ChatDbAggregateService', () => {
   })
 
   // =========================================================================
-  // clear-messages
-  // =========================================================================
-
-  describe('clearMessages', () => {
-    it('clears messages, blocks/references, and segments but retains topic', () => {
-      const topicId = `t-${uid()}`
-      const msg = makeMessageJson(topicId)
-      const blk = makeBlockJson(msg.id as string)
-
-      agg.appendMessage(topicId, msg as any, [blk as any])
-
-      const result = agg.clearMessages(topicId)
-      expect(result.ok).toBe(true)
-
-      // Topic still exists
-      const exists = agg.topicExists(topicId)
-      expect(exists.ok).toBe(true)
-      expect(okValue(exists)).toBe(true)
-
-      // Messages and blocks are gone
-      const fetched = agg.fetchMessages(topicId)
-      expect(okValue(fetched).messages).toHaveLength(0)
-      expect(okValue(fetched).blocks).toHaveLength(0)
-    })
-
-    it('no-op for missing topic', () => {
-      const result = agg.clearMessages('nonexistent')
-      expect(result.ok).toBe(true)
-    })
-  })
-
-  // =========================================================================
   // File reference projection
   // =========================================================================
 
@@ -1082,7 +1060,7 @@ describe('ChatDbAggregateService', () => {
   })
 
   // =========================================================================
-  // deleteBlocks cascade / clearMessages cascade
+  // deleteBlocks cascade
   // =========================================================================
 
   describe('deleteBlocks cascade', () => {
@@ -1124,63 +1102,6 @@ describe('ChatDbAggregateService', () => {
       const fetched = agg.fetchMessages(topicId)
       expect(okValue(fetched).blocks).toHaveLength(1)
       expect(okValue(fetched).messages[0].blocks).toEqual([blk2.id])
-    })
-  })
-
-  describe('clearMessages cascade', () => {
-    it('clears messages, blocks, file_references, and segments; retains topic', () => {
-      const topicId = `t-${uid()}`
-      const msg = makeMessageJson(topicId)
-      const fileBlock = makeBlockJson(msg.id as string, 'file', {
-        file: { id: 'file-1', name: 'test.pdf', path: '/test.pdf', type: 'application/pdf' }
-      })
-
-      agg.appendMessage(topicId, msg as any, [fileBlock as any])
-
-      // Verify data exists
-      const before = agg.fetchMessages(topicId)
-      expect(okValue(before).messages).toHaveLength(1)
-      expect(okValue(before).blocks).toHaveLength(1)
-
-      // Clear all messages
-      const result = agg.clearMessages(topicId)
-      expect(result.ok).toBe(true)
-
-      // Topic still exists
-      const exists = agg.topicExists(topicId)
-      expect(exists.ok).toBe(true)
-      expect(okValue(exists)).toBe(true)
-
-      // Messages, blocks, and references are gone
-      const after = agg.fetchMessages(topicId)
-      expect(okValue(after).messages).toHaveLength(0)
-      expect(okValue(after).blocks).toHaveLength(0)
-    })
-
-    it('no-op for missing topic', () => {
-      const result = agg.clearMessages('nonexistent')
-      expect(result.ok).toBe(true)
-    })
-
-    it('clearing a topic with multiple messages removes all data', () => {
-      const topicId = `t-${uid()}`
-      const msg1 = makeMessageJson(topicId)
-      const msg2 = makeMessageJson(topicId)
-      const blk1 = makeBlockJson(msg1.id as string)
-      const blk2 = makeBlockJson(msg2.id as string)
-
-      agg.appendMessage(topicId, msg1 as any, [blk1 as any])
-      agg.appendMessage(topicId, msg2 as any, [blk2 as any])
-
-      const before = agg.fetchMessages(topicId)
-      expect(okValue(before).messages).toHaveLength(2)
-      expect(okValue(before).blocks).toHaveLength(2)
-
-      agg.clearMessages(topicId)
-
-      const after = agg.fetchMessages(topicId)
-      expect(okValue(after).messages).toHaveLength(0)
-      expect(okValue(after).blocks).toHaveLength(0)
     })
   })
 
@@ -2096,6 +2017,196 @@ describe('ChatDbAggregateService', () => {
   })
 
   // =========================================================================
+  // LOCK-004: permanent-delete trace cleanup
+  // =========================================================================
+
+  describe('permanent-delete trace cleanup (LOCK-004)', () => {
+    it('hardDeleteTopic: cleans traces for the exact deleted topic ID after commit', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+
+      const result = agg.hardDeleteTopic(topicId)
+      expect(result.ok).toBe(true)
+
+      expect(mockCleanTopic).toHaveBeenCalledOnce()
+      expect(mockCleanTopic).toHaveBeenCalledWith(topicId)
+    })
+
+    it('hardDeleteTopic: performs no cleanup for an absent topic (nothing deleted)', () => {
+      const result = agg.hardDeleteTopic('nonexistent')
+      expect(result.ok).toBe(true)
+      expect(mockCleanTopic).not.toHaveBeenCalled()
+    })
+
+    it('hardDeleteTopic: performs no cleanup when the transaction aborts', () => {
+      const topicId = `t-${uid()}`
+      const message = makeMessageJson(topicId)
+      agg.appendMessage(topicId, message as any, [])
+      agg.softDeleteTopic(topicId)
+
+      sqlite.exec(`
+        CREATE TEMP TRIGGER abort_trace_cleanup_test
+        BEFORE DELETE ON topics
+        WHEN OLD.id = '${topicId}'
+        BEGIN
+          SELECT RAISE(ABORT, 'trigger-forced abort for LOCK-004 cleanup test');
+        END;
+      `)
+
+      try {
+        const result = agg.hardDeleteTopic(topicId)
+        expect(result.ok).toBe(false)
+        expect(mockCleanTopic).not.toHaveBeenCalled()
+      } finally {
+        sqlite.exec('DROP TRIGGER IF EXISTS abort_trace_cleanup_test')
+      }
+    })
+
+    it('hardDeleteTopic: a failed trace cleanup is logged and non-fatal (result unchanged)', async () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+
+      const errorSpy = vi.spyOn(loggerService, 'error').mockImplementation(() => undefined)
+      mockCleanTopic.mockRejectedValue(new Error('trace fs error'))
+
+      const result = agg.hardDeleteTopic(topicId)
+      expect(result.ok).toBe(true)
+      // Topic still deleted despite the cleanup failure
+      expect(okValue(agg.topicExists(topicId))).toBe(false)
+      expect(mockCleanTopic).toHaveBeenCalledWith(topicId)
+
+      // The cleanup rejection is caught by the fire-and-forget promise chain,
+      // which settles on a microtask; flush the microtask queue, then assert
+      // the failure was logged and non-fatal.
+      await vi.waitFor(() => expect(errorSpy).toHaveBeenCalled())
+      expect(errorSpy).toHaveBeenCalledWith(
+        `Trace cleanup failed for permanently deleted topic ${topicId}:`,
+        expect.any(Error)
+      )
+      errorSpy.mockRestore()
+    })
+
+    it('emptyTrashTopics: cleans traces for every emptied topic ID (bulk)', () => {
+      const a1 = `t-${uid()}`
+      const a2 = `t-${uid()}`
+      agg.ensureTopic(a1, 'assistant-1')
+      agg.ensureTopic(a2, 'assistant-1')
+      agg.softDeleteTopic(a1)
+      agg.softDeleteTopic(a2)
+
+      const result = agg.emptyTrashTopics('assistant-1')
+      expect(result.ok).toBe(true)
+
+      expect(mockCleanTopic).toHaveBeenCalledTimes(2)
+      expect(mockCleanTopic).toHaveBeenCalledWith(a1)
+      expect(mockCleanTopic).toHaveBeenCalledWith(a2)
+    })
+
+    it('purgeExpiredTopics: cleans traces for every purged topic ID (bulk)', () => {
+      const t1 = `t-${uid()}`
+      const t2 = `t-${uid()}`
+      agg.ensureTopic(t1)
+      agg.ensureTopic(t2)
+      agg.softDeleteTopic(t1)
+      agg.softDeleteTopic(t2)
+
+      // Cutoff in the future catches both soft-deleted topics.
+      const cutoff = new Date(Date.now() + 60_000).toISOString()
+      const result = agg.purgeExpiredTopics(cutoff)
+      expect(result.ok).toBe(true)
+
+      expect(mockCleanTopic).toHaveBeenCalledTimes(2)
+      expect(mockCleanTopic).toHaveBeenCalledWith(t1)
+      expect(mockCleanTopic).toHaveBeenCalledWith(t2)
+    })
+
+    it('softDeleteTopic: does NOT clean traces (soft delete preserves messages/traces)', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+
+      const result = agg.softDeleteTopic(topicId)
+      expect(result.ok).toBe(true)
+      expect(mockCleanTopic).not.toHaveBeenCalled()
+    })
+
+    it('resetAssistantTopics: cleans traces for the exact hard-deleted topic IDs (bulk)', () => {
+      const deletedA = `t-del-a-${uid()}`
+      const deletedB = `t-del-b-${uid()}`
+      const trash = `t-del-trash-${uid()}`
+      const foreign = `t-foreign-${uid()}`
+      const replacementTopicId = `t-repl-${uid()}`
+      agg.ensureTopic(deletedA, 'assistant-1')
+      agg.ensureTopic(deletedB, 'assistant-1')
+      agg.ensureTopic(trash, 'assistant-1')
+      agg.softDeleteTopic(trash)
+      agg.ensureTopic(foreign, 'assistant-2')
+      agg.ensureTopic(replacementTopicId, 'assistant-1')
+
+      const result = agg.resetAssistantTopics('assistant-1', replacementTopicId)
+      expect(result.ok).toBe(true)
+      expect(okValue(result).replacementTopic.id).toBe(replacementTopicId)
+
+      // Active and trash topics owned by the assistant are hard-deleted and
+      // their traces cleaned; the replacement topic and foreign topics are not.
+      expect(okValue(agg.topicExists(replacementTopicId))).toBe(true)
+      expect(okValue(agg.topicExists(foreign))).toBe(true)
+      expect(okValue(agg.topicExists(deletedA))).toBe(false)
+      expect(okValue(agg.topicExists(deletedB))).toBe(false)
+      expect(okValue(agg.topicExists(trash))).toBe(false)
+
+      expect(mockCleanTopic).toHaveBeenCalledTimes(3)
+      expect(mockCleanTopic).toHaveBeenCalledWith(deletedA)
+      expect(mockCleanTopic).toHaveBeenCalledWith(deletedB)
+      expect(mockCleanTopic).toHaveBeenCalledWith(trash)
+      expect(mockCleanTopic).not.toHaveBeenCalledWith(replacementTopicId)
+      expect(mockCleanTopic).not.toHaveBeenCalledWith(foreign)
+    })
+
+    it('resetAssistantTopics: never cleans traces for the replacement topic', () => {
+      const replacementTopicId = `t-repl-${uid()}`
+      const deleted = `t-del-${uid()}`
+      agg.ensureTopic(deleted, 'assistant-r')
+      agg.ensureTopic(replacementTopicId, 'assistant-r')
+
+      const result = agg.resetAssistantTopics('assistant-r', replacementTopicId)
+      expect(result.ok).toBe(true)
+
+      // The replacement topic survives the reset; the other topic is gone.
+      expect(okValue(agg.topicExists(replacementTopicId))).toBe(true)
+      expect(okValue(agg.topicExists(deleted))).toBe(false)
+
+      // Only the hard-deleted topic's trace is cleaned — never the replacement.
+      expect(mockCleanTopic).toHaveBeenCalledTimes(1)
+      expect(mockCleanTopic).toHaveBeenCalledWith(deleted)
+      expect(mockCleanTopic).not.toHaveBeenCalledWith(replacementTopicId)
+    })
+
+    it('resetAssistantTopics: performs no cleanup when the transaction aborts', () => {
+      const topicId = `t-${uid()}`
+      const replacementTopicId = `t-repl-${uid()}`
+      agg.ensureTopic(topicId, 'assistant-r')
+      agg.appendMessage(topicId, makeMessageJson(topicId) as any, [])
+
+      sqlite.exec(`
+        CREATE TEMP TRIGGER abort_trace_cleanup_reset_test
+        BEFORE DELETE ON topics
+        WHEN OLD.id = '${topicId}'
+        BEGIN
+          SELECT RAISE(ABORT, 'trigger-forced abort for resetAssistantTopics LOCK-004 cleanup test');
+        END;
+      `)
+
+      try {
+        const result = agg.resetAssistantTopics('assistant-r', replacementTopicId)
+        expect(result.ok).toBe(false)
+        expect(mockCleanTopic).not.toHaveBeenCalled()
+      } finally {
+        sqlite.exec('DROP TRIGGER IF EXISTS abort_trace_cleanup_reset_test')
+      }
+    })
+  })
+
+  // =========================================================================
   // L2 imported-trash five-day retention baseline (LOCK-TRASH-1..10)
   // =========================================================================
 
@@ -2592,33 +2703,6 @@ describe('ChatDbAggregateService', () => {
       expect(fetched.messages.length).toBe(2)
       expect(fetched.messages[0].id).toBe(msg2.id)
       expect(fetched.messages[1].id).toBe(msg1.id)
-    })
-
-    it('clearTopicWithSegments: clears everything and returns cleanup', () => {
-      const topicId = `t-${uid()}`
-      const msg = makeMessageJson(topicId)
-      const msgId = msg.id as string
-      const fileBlock = makeBlockJson(msgId, 'file', {
-        file: { id: 'file-1', name: 'test.pdf', path: '/test.pdf', type: 'application/pdf' }
-      })
-      agg.appendMessage(topicId, msg as any, [fileBlock as any])
-      agg.upsertSegment(`seg-${uid()}`, topicId, 'seg', [msgId], undefined)
-
-      const result = agg.clearTopicWithSegments(topicId)
-      expect(result.ok).toBe(true)
-      const cleanup = okValue(result)
-      expect(cleanup.affectedFileIds).toContain('file-1')
-      expect(cleanup.remainingReferenceCounts['file-1']).toBe(0)
-      // Topic still exists but empty
-      const fetched = okValue(agg.fetchMessages(topicId))
-      expect(fetched.messages.length).toBe(0)
-    })
-
-    it('clearTopicWithSegments: returns empty cleanup for absent topic', () => {
-      const result = agg.clearTopicWithSegments('nonexistent')
-      expect(result.ok).toBe(true)
-      const cleanup = okValue(result)
-      expect(cleanup.affectedFileIds).toEqual([])
     })
 
     // =========================================================================

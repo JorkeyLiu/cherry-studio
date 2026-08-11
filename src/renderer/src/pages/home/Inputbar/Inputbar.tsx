@@ -48,7 +48,6 @@ import {
   TopicType
 } from '@renderer/types'
 import type { MessageInputBaseParams } from '@renderer/types/newMessage'
-import { delay } from '@renderer/utils'
 import { getSendMessageShortcutLabel } from '@renderer/utils/input'
 import { documentExts, imageExts, textExts } from '@shared/config/constant'
 import type { FC } from 'react'
@@ -86,10 +85,7 @@ interface Props {
 type ProviderActionHandlers = {
   resizeTextArea: () => void
   addNewTopic: () => void
-  clearTopic: () => void
-  onNewContext: () => void
   onTextChange: (updater: string | ((prev: string) => string)) => void
-  toggleExpanded: (nextState?: boolean) => void
 }
 
 interface InputbarInnerProps extends Props {
@@ -100,10 +96,7 @@ const Inputbar: FC<Props> = ({ assistant: initialAssistant, setActiveTopic, topi
   const actionsRef = useRef<ProviderActionHandlers>({
     resizeTextArea: () => {},
     addNewTopic: () => {},
-    clearTopic: () => {},
-    onNewContext: () => {},
-    onTextChange: () => {},
-    toggleExpanded: () => {}
+    onTextChange: () => {}
   })
 
   const [initialMentionedModels] = useState(() => getValidatedCachedModels(initialAssistant.id))
@@ -113,7 +106,6 @@ const Inputbar: FC<Props> = ({ assistant: initialAssistant, setActiveTopic, topi
       files: [] as FileMetadata[],
       mentionedModels: initialMentionedModels,
       selectedKnowledgeBases: initialAssistant.knowledge_bases ?? [],
-      isExpanded: false,
       couldAddImageFile: false,
       extensions: [] as string[]
     }),
@@ -126,10 +118,7 @@ const Inputbar: FC<Props> = ({ assistant: initialAssistant, setActiveTopic, topi
       actions={{
         resizeTextArea: () => actionsRef.current.resizeTextArea(),
         addNewTopic: () => actionsRef.current.addNewTopic(),
-        clearTopic: () => actionsRef.current.clearTopic(),
-        onNewContext: () => actionsRef.current.onNewContext(),
-        onTextChange: (updater) => actionsRef.current.onTextChange(updater),
-        toggleExpanded: (next) => actionsRef.current.toggleExpanded(next)
+        onTextChange: (updater) => actionsRef.current.onTextChange(updater)
       }}>
       <InputbarInner
         assistant={initialAssistant}
@@ -157,8 +146,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     textareaRef,
     resize: resizeTextArea,
     focus: focusTextarea,
-    setExpanded,
-    isExpanded: textareaIsExpanded,
     customHeight,
     setCustomHeight
   } = useTextareaResize({
@@ -396,24 +383,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     await pauseMessages()
   }, [pauseMessages])
 
-  const clearTopic = useCallback(async () => {
-    if (loading) {
-      await onPause()
-      await delay(1)
-    }
-
-    void EventEmitter.emit(EVENT_NAMES.CLEAR_MESSAGES, topic)
-    focusTextarea()
-  }, [focusTextarea, loading, onPause, topic])
-
-  const onNewContext = useCallback(() => {
-    if (loading) {
-      void onPause()
-      return
-    }
-    void EventEmitter.emit(EVENT_NAMES.NEW_CONTEXT)
-  }, [loading, onPause])
-
   const addNewTopic = useCallback(async () => {
     const newTopic = getDefaultTopic(assistant.id)
 
@@ -456,25 +425,13 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     [assistant, setSelectedKnowledgeBases, updateAssistant]
   )
 
-  const handleToggleExpanded = useCallback(
-    (nextState?: boolean) => {
-      const target = typeof nextState === 'boolean' ? nextState : !textareaIsExpanded
-      setExpanded(target)
-      focusTextarea()
-    },
-    [focusTextarea, setExpanded, textareaIsExpanded]
-  )
-
   useEffect(() => {
     actionsRef.current = {
       resizeTextArea,
       addNewTopic,
-      clearTopic,
-      onNewContext,
-      onTextChange: setText,
-      toggleExpanded: handleToggleExpanded
+      onTextChange: setText
     }
-  }, [resizeTextArea, addNewTopic, clearTopic, onNewContext, setText, handleToggleExpanded, actionsRef])
+  }, [resizeTextArea, addNewTopic, setText, actionsRef])
 
   useShortcut(
     'new_topic',
@@ -485,11 +442,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     },
     { preventDefault: true, enableOnFormTags: true }
   )
-
-  useShortcut('clear_topic', clearTopic, {
-    preventDefault: true,
-    enableOnFormTags: true
-  })
 
   useEffect(() => {
     const unsubscribes = [EventEmitter.on(EVENT_NAMES.ADD_NEW_TOPIC, addNewTopic)]
@@ -569,7 +521,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
           estimateTokenCount={tokenCountProps.estimateTokenCount}
           contextCount={tokenCountProps.contextCount}
           onUpdateAnchor={onUpdateAnchor}
-          onClick={onNewContext}
         />
       )}
     </>

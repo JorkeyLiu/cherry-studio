@@ -417,22 +417,4 @@ describe('resolveVisibleBaseline', () => {
       expect(resolveVisibleBaseline(container, 'down')).toBe('u2')
     })
   })
-
-  // -----------------------------------------------------------------------
-  // 7. clear-type message exclusion
-  // -----------------------------------------------------------------------
-  describe('clear messages', () => {
-    it('clear messages rendered as .clear-context-divider do not match message-user selector', () => {
-      // In real DOM, clear messages render as NewContextMessage (not MessageContainer),
-      // so they won't have .message-user class. This test verifies the selector invariant.
-      const container = buildContainer([
-        {
-          className: 'clear-context-divider',
-          childRect: rect(100, 200),
-          dataset: { messageId: 'clear-1' }
-        }
-      ])
-      expect(resolveVisibleBaseline(container, 'up')).toBeNull()
-    })
-  })
 })

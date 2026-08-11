@@ -940,17 +940,6 @@
         "xhigh": "超高",
         "xhigh_description": "超高度な推論"
       },
-      "regular_phrases": {
-        "add": "プロンプトを追加",
-        "contentLabel": "内容",
-        "contentPlaceholder": "フレーズの内容を入力してください。変数を使用することもできます。変数を使用する場合は、Tabキーを押して変数を選択し、変数を変更してください。例：\n私の名前は${name}です。",
-        "delete": "プロンプトを削除",
-        "deleteConfirm": "このプロンプトを削除してもよろしいですか？",
-        "edit": "プロンプトを編集",
-        "title": "定型プロンプト",
-        "titleLabel": "タイトル",
-        "titlePlaceholder": "タイトルを入力"
-      },
       "title": "アシスタント設定",
       "tool_use_mode": {
         "function": "関数",
@@ -1013,11 +1002,6 @@
         "title": "新しいトピック"
       }
     },
-    "alerts": {
-      "create_agent": "開始するにはエージェントを作成してください",
-      "create_session": "セッションを作成",
-      "select_agent": "エージェントを選択してください"
-    },
     "artifacts": {
       "button": {
         "download": "ダウンロード",
@@ -1078,58 +1062,25 @@
     },
     "input": {
       "auto_resize": "高さを自動調整",
-      "clear": {
-        "content": "現在のトピックのすべてのメッセージをクリアしますか？",
-        "label": "クリア {{Command}}",
-        "title": "すべてのメッセージをクリアしますか？"
-      },
-      "collapse": "折りたたむ",
       "context_count": {
         "tip": "コンテキスト数 / 最大コンテキスト数"
       },
       "estimated_tokens": {
         "tip": "推定トークン数"
       },
-      "expand": "展開",
       "file_error": "ファイル処理エラー",
       "file_not_supported": "モデルはこのファイルタイプをサポートしません",
       "file_not_supported_count": "{{count}} 個のファイルはサポートされていません",
       "generate_image": "画像を生成する",
       "generate_image_not_supported": "モデルは画像の生成をサポートしていません。",
       "knowledge_base": "ナレッジベース",
-      "new": {
-        "context": "コンテキストをクリア {{Command}}"
-      },
-      "new_session": "新しいセッション {{Command}}",
       "new_topic": "新しいトピック {{Command}}",
       "paste_text_file_confirm": "入力欄に貼り付けますか？",
       "pause": "一時停止",
       "placeholder": "ここにメッセージを入力し、{{key}} を押して送信...",
       "placeholder_without_triggers": "ここにメッセージを入力し、{{key}} を押して送信...",
-      "resource_panel": {
-        "categories": {
-          "agents": "エージェント",
-          "files": "ファイル",
-          "skills": "スキル"
-        },
-        "description": "ファイル、エージェント、またはスキルから選択",
-        "loading": "読み込み中...",
-        "no_file_found": {
-          "description": "アクセス可能なディレクトリに利用可能なファイルがありません",
-          "label": "ファイルが見つかりません"
-        },
-        "no_items_found": {
-          "description": "ファイル、エージェント、スキルは利用できません",
-          "label": "アイテムが見つかりません"
-        },
-        "title": "リソース"
-      },
       "send": "送信",
       "settings": "設定",
-      "slash_commands": {
-        "description": "エージェントセッションスラッシュコマンド",
-        "title": "スラッシュコマンド"
-      },
       "thinking": {
         "budget_exceeds_max": "思考予算が最大トークン数を超えました",
         "label": "思考",
@@ -1386,9 +1337,6 @@
     "thinking": "思考中（用時 {{seconds}} 秒）",
     "topics": {
       "auto_rename": "自動リネーム",
-      "clear": {
-        "title": "メッセージをクリア"
-      },
       "copy": {
         "image": "画像としてコピー",
         "md": "Markdownとしてコピー",
@@ -5533,7 +5481,6 @@
       "action": "操作",
       "actions": "操作",
       "clear_shortcut": "ショートカットをクリア",
-      "clear_topic": "メッセージを消去",
       "copy_last_message": "最後のメッセージをコピー",
       "edit_last_user_message": "最後のユーザーメッセージを編集",
       "enabled": "有効化",
@@ -5552,7 +5499,6 @@
       "show_settings": "設定を開く",
       "title": "ショートカット",
       "toggle_edit_mode": "[to be translated]:Toggle Edit Mode",
-      "toggle_new_context": "コンテキストをクリア",
       "toggle_show_assistants": "アシスタントの表示を切り替え",
       "toggle_show_topics": "トピックの表示を切り替え",
       "zoom_in": "ズームイン",

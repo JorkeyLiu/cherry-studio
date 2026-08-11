@@ -491,27 +491,14 @@ async function waitForMainWindowReady(page: import('@playwright/test').Page): Pr
   )
 }
 
-async function clickAssistantsTab(page: import('@playwright/test').Page): Promise<void> {
-  const tab = page.getByRole('button', { name: 'Assistants', exact: false })
-  await tab.waitFor({ state: 'visible', timeout: 10000 })
-  await tab.click()
-  await page.waitForTimeout(300)
-}
-
-async function clickTopicsTab(page: import('@playwright/test').Page): Promise<void> {
-  const tab = page.getByRole('button', { name: 'Topics', exact: false })
-  await tab.waitFor({ state: 'visible', timeout: 10000 })
-  await tab.click()
-  await page.waitForTimeout(300)
-}
-
 /**
  * LOCK-REAL5: at least one imported active topic is visible in the real topic
  * list, clickable, and carries historical message/block PRESENCE — counts
  * only, never content.
  */
 async function assertImportedTopicVisibleAndClickable(page: import('@playwright/test').Page): Promise<void> {
-  await clickAssistantsTab(page)
+  // LOCK-NAV: the assistant list panel always renders; no tab switching.
+  await expect(page.locator('.assistants-tab')).toBeVisible()
   const assistantRows = page.locator('.assistants-tab .draggable-list-container > div')
   const assistantCount = await assistantRows.count()
   expect(assistantCount, 'at least one imported assistant row must render in the sidebar').toBeGreaterThanOrEqual(1)
@@ -520,9 +507,10 @@ async function assertImportedTopicVisibleAndClickable(page: import('@playwright/
   // no names, no IDs).
   let topicItems: ReturnType<import('@playwright/test').Page['locator']> | null = null
   for (let i = 0; i < assistantCount; i++) {
-    await clickAssistantsTab(page)
     await assistantRows.nth(i).click()
-    await clickTopicsTab(page)
+    // LOCK-NAV: the topics list panel always renders beside the assistant
+    // list; assert its readiness after activating the assistant row.
+    await expect(page.locator('.topics-tab')).toBeVisible()
     const items = page.locator('[data-testid="topic-item"]')
     if ((await items.count()) >= 1) {
       topicItems = items

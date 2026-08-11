@@ -47,7 +47,6 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       currentGroup = { askId: msg.id, messages: [msg], startIndex: i }
       groups.push(currentGroup)
     }
-    // 'clear' 类型消息忽略或作为独立组
   }
 
   return groups

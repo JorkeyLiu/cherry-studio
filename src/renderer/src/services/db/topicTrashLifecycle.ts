@@ -6,8 +6,6 @@
  * consumes FileCleanupResult after committed destructive mutations.
  *
  * Contract:
- * - LOCK-521: only ordinary-chat topics go through here; agent-session topics
- *   keep their existing Dexie lifecycle at the caller boundary.
  * - LOCK-523: trash order is deletedAt DESC then id (Main-side); the purge
  *   cutoff is a caller-generated strict ISO timestamp — no Main timer.
  * - LOCK-524: no Dexie fallback and no renderer sequence of independent IPC
@@ -26,14 +24,27 @@
 import { loggerService } from '@logger'
 import FileManager from '@renderer/services/FileManager'
 import type { Topic } from '@renderer/types'
-import { isAgentSessionTopicId } from '@renderer/utils/agentSession'
 import type { FileCleanupResult, TopicWire } from '@shared/chatDb'
 
 import { SqliteMessageDataSource } from './SqliteMessageDataSource'
 
 const logger = loggerService.withContext('topicTrashLifecycle')
 
-const sqliteSource = new SqliteMessageDataSource()
+let sqliteSource: SqliteMessageDataSource | undefined
+
+/**
+ * Lazy singleton for the SQLite source.
+ *
+ * Constructing at module evaluation time triggers an evaluation-time circular
+ * dependency (topicTrashLifecycle → SqliteMessageDataSource → store →
+ * assistants → AssistantService → topicTrashLifecycle) where the class export
+ * is still undefined. Constructing on first use, after every module in the
+ * cycle has finished evaluating, preserves singleton-like reuse.
+ */
+function getSqliteSource(): SqliteMessageDataSource {
+  sqliteSource ??= new SqliteMessageDataSource()
+  return sqliteSource
+}
 
 /** Trash retention in days. Matches the previous Dexie purge policy. */
 export const TRASH_RETENTION_DAYS = 5
@@ -109,24 +120,18 @@ export async function consumeFileCleanupResult(result: FileCleanupResult): Promi
  * (LOCK-533): the topic must exist in SQLite with its assistantId BEFORE it
  * is exposed in Redux. Main-side ensure is create-only, so an existing
  * topic's assistant binding is never overwritten.
- *
- * Agent-session topic IDs are bypassed: agent creation keeps its existing
- * Dexie/backend path unchanged (LOCK-521).
  */
 export async function ensureOrdinaryTopicOwnership(
   topicId: string,
   assistantId: string,
   name?: string | null
 ): Promise<void> {
-  if (isAgentSessionTopicId(topicId)) {
-    return
-  }
-  await sqliteSource.ensureTopic(topicId, assistantId, name)
+  await getSqliteSource().ensureTopic(topicId, assistantId, name)
 }
 
 /** Soft-delete an ordinary-chat topic in SQLite. No Dexie writes. */
 export async function softDeleteOrdinaryTopic(topicId: string, name?: string | null): Promise<void> {
-  await sqliteSource.softDeleteTopic(topicId, name)
+  await getSqliteSource().softDeleteTopic(topicId, name)
 }
 
 /**
@@ -139,7 +144,7 @@ export async function softDeleteOrdinaryTopic(topicId: string, name?: string | n
  * case no Redux update may occur.
  */
 export async function restoreOrdinaryTopic(topicId: string): Promise<Topic | undefined> {
-  const restoredWire = await sqliteSource.restoreTopic(topicId)
+  const restoredWire = await getSqliteSource().restoreTopic(topicId)
   if (restoredWire === null) {
     return undefined
   }
@@ -159,7 +164,7 @@ export async function listOrdinaryTrashTopics(assistantId?: string): Promise<Top
   const topics: Topic[] = []
   let cursor: string | undefined
   do {
-    const page = await sqliteSource.listTrashTopics(assistantId, TRASH_PAGE_LIMIT, cursor)
+    const page = await getSqliteSource().listTrashTopics(assistantId, TRASH_PAGE_LIMIT, cursor)
     for (const item of page.items) {
       topics.push(topicWireToTopic(item))
     }
@@ -178,7 +183,7 @@ export async function listOrdinaryTrashTopics(assistantId?: string): Promise<Top
  * failure propagates and no cleanup is attempted.
  */
 export async function hardDeleteOrdinaryTopic(topicId: string): Promise<void> {
-  const cleanup = await sqliteSource.hardDeleteTopic(topicId)
+  const cleanup = await getSqliteSource().hardDeleteTopic(topicId)
   await consumeFileCleanupResult(cleanup)
 }
 
@@ -190,7 +195,7 @@ export async function hardDeleteOrdinaryTopic(topicId: string): Promise<void> {
  * renderer list+loop of hard deletes.
  */
 export async function emptyOrdinaryTrash(assistantId: string): Promise<void> {
-  const cleanup = await sqliteSource.emptyTrashTopics(assistantId)
+  const cleanup = await getSqliteSource().emptyTrashTopics(assistantId)
   await consumeFileCleanupResult(cleanup)
 }
 
@@ -198,7 +203,7 @@ export async function resetOrdinaryAssistantTopics(
   assistantId: string,
   replacementTopicId: string
 ): Promise<{ replacementTopic: Topic; cleanup: FileCleanupResult }> {
-  const result = await sqliteSource.resetAssistantTopics(assistantId, replacementTopicId)
+  const result = await getSqliteSource().resetAssistantTopics(assistantId, replacementTopicId)
   await consumeFileCleanupResult(result.cleanup)
   return { replacementTopic: topicWireToTopic(result.replacementTopic), cleanup: result.cleanup }
 }
@@ -208,15 +213,14 @@ export async function resetOrdinaryAssistantTopics(
  * generated strict ISO cutoff (LOCK-523), then consume the cleanup result.
  */
 export async function purgeExpiredOrdinaryTopics(now: Date = new Date()): Promise<void> {
-  const cleanup = await sqliteSource.purgeExpiredTopics(buildPurgeCutoffTimestamp(now))
+  const cleanup = await getSqliteSource().purgeExpiredTopics(buildPurgeCutoffTimestamp(now))
   await consumeFileCleanupResult(cleanup)
 }
 
 /**
  * Deterministic trash display order (LOCK-523): deletedAt DESC with id DESC
- * tie-break, matching the Main-side SQLite ordering. Used when merging the
- * agent-session Dexie trash rows with the ordinary SQLite trash rows so one
- * panel shows both lifecycles in one deterministic order (LOCK-521).
+ * tie-break, matching the Main-side SQLite ordering. Used when sorting the
+ * SQLite trash rows so the panel shows one deterministic order.
  */
 export function compareTrashTopicsForDisplay(a: Topic, b: Topic): number {
   const aDeletedAt = a.deletedAt ?? ''

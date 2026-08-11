@@ -17,8 +17,6 @@ import type {
   AppendMessageRequest,
   BulkAddBlocksRequest,
   ChatDbChannel,
-  ClearMessagesRequest,
-  ClearTopicWithSegmentsRequest,
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   DeleteBlocksRequest,
@@ -392,16 +390,6 @@ const deleteBlocksContract: ChatDbContract = {
     validateStringArray(req.blockIds, 'request.blockIds')
   },
   validateResult: fileCleanupResultValidator('chatdb:delete-blocks')
-}
-
-const clearMessagesContract: ChatDbContract = {
-  allowedKeys: keySet('topicId'),
-  validate(value: unknown): void {
-    validateRequest(value, clearMessagesContract.allowedKeys)
-    const req = value as ClearMessagesRequest
-    validateNonEmptyString(req.topicId, 'request.topicId')
-  },
-  validateResult: fileCleanupResultValidator('chatdb:clear-messages')
 }
 
 // ---------------------------------------------------------------------------
@@ -989,16 +977,6 @@ const pasteMessagesToTopicContract: ChatDbContract = {
   validateResult: fileCleanupResultValidator('chatdb:paste-messages-to-topic')
 }
 
-const clearTopicWithSegmentsContract: ChatDbContract = {
-  allowedKeys: keySet('topicId'),
-  validate(value: unknown): void {
-    validateRequest(value, clearTopicWithSegmentsContract.allowedKeys)
-    const req = value as ClearTopicWithSegmentsRequest
-    validateNonEmptyString(req.topicId, 'request.topicId')
-  },
-  validateResult: fileCleanupResultValidator('chatdb:clear-topic-with-segments')
-}
-
 // ---------------------------------------------------------------------------
 // Phase 5.1B-2: Search contract
 // ---------------------------------------------------------------------------
@@ -1191,7 +1169,6 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:update-single-block': updateSingleBlockContract,
   'chatdb:bulk-add-blocks': bulkAddBlocksContract,
   'chatdb:delete-blocks': deleteBlocksContract,
-  'chatdb:clear-messages': clearMessagesContract,
   // Phase 5.1A: segment commands
   'chatdb:list-segments': listSegmentsContract,
   'chatdb:upsert-segment': upsertSegmentContract,
@@ -1220,7 +1197,6 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:reset-messages-for-resend': resetMessagesForResendContract,
   'chatdb:delete-messages-with-segments': deleteMessagesWithSegmentsContract,
   'chatdb:paste-messages-to-topic': pasteMessagesToTopicContract,
-  'chatdb:clear-topic-with-segments': clearTopicWithSegmentsContract,
   // Phase 5.1B-2: search
   'chatdb:search-messages': searchMessagesContract
 })

@@ -1,9 +1,8 @@
 /**
  * resendMessageThunk / regenerateAssistantResponseThunk — Phase 5.3 blocker fixes.
  *
- * LOCK-001: ordinary resend/regenerate must NOT call cleanupMultipleBlocks.
- * File cleanup is handled exclusively by consumeFileCleanupResult. Redux block
- * removal uses cancelThrottledBlockUpdate + removeManyBlocks directly.
+ * LOCK-001: resend/regenerate consumes FileCleanupResult exactly once.
+ * Redux block removal uses cancelThrottledBlockUpdate + removeManyBlocks directly.
  */
 
 import type { Message } from '@renderer/types/newMessage'
@@ -16,7 +15,6 @@ const { mocks } = vi.hoisted(() => ({
   mocks: {
     resetMessagesForResend: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
-    cleanupMultipleBlocks: vi.fn(),
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'removeManyBlocks', p })),
     selectMessagesForTopic: vi.fn(),
     dispatch: vi.fn()
@@ -43,19 +41,6 @@ vi.mock('@renderer/services/db', () => ({
 
 vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
   consumeFileCleanupResult: mocks.consumeFileCleanupResult
-}))
-
-vi.mock('@renderer/store/thunk/messageThunk', async () => {
-  const actual = await vi.importActual('../messageThunk')
-  return {
-    ...actual,
-    cleanupMultipleBlocks: mocks.cleanupMultipleBlocks
-  }
-})
-
-vi.mock('@renderer/utils/agentSession', () => ({
-  isAgentSessionTopicId: (id: string) => id.startsWith('agent-session:'),
-  extractAgentSessionIdFromTopicId: (id: string) => id.replace('agent-session:', '')
 }))
 
 vi.mock('@renderer/store/assistants', () => ({
@@ -162,7 +147,7 @@ describe('resendMessageThunk — no legacy double cleanup (LOCK-001)', () => {
     }
   })
 
-  it('does NOT call cleanupMultipleBlocks after consumeFileCleanupResult', { timeout: 60_000 }, async () => {
+  it('consumes FileCleanupResult exactly once on resend', { timeout: 60_000 }, async () => {
     const userMsg = createUserMessage()
     const asstMsg = createMessage()
 
@@ -184,8 +169,6 @@ describe('resendMessageThunk — no legacy double cleanup (LOCK-001)', () => {
       () => storeState as any
     )
 
-    // cleanupMultipleBlocks must NOT be called in the ordinary path
-    expect(mocks.cleanupMultipleBlocks).not.toHaveBeenCalled()
     // consumeFileCleanupResult called exactly once
     expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(emptyCleanup)
   })
@@ -228,15 +211,18 @@ describe('regenerateAssistantResponseThunk — no legacy double cleanup (LOCK-00
     }
   })
 
-  it('does NOT call cleanupMultipleBlocks after consumeFileCleanupResult', { timeout: 60_000 }, async () => {
+  it('consumes FileCleanupResult exactly once on regenerate', { timeout: 60_000 }, async () => {
+    const userMsg = createUserMessage()
     const asstMsg = createMessage({ id: 'asst-1', blocks: ['block-1', 'block-2'] })
 
     storeState.messages.entities = {
-      'asst-1': asstMsg
+      'asst-1': asstMsg,
+      'user-msg-1': userMsg
     }
     storeState.messages.messageIdsByTopic = {
-      'topic-1': ['asst-1']
+      'topic-1': ['user-msg-1', 'asst-1']
     }
+    mocks.selectMessagesForTopic.mockReturnValue([userMsg, asstMsg])
     mocks.resetMessagesForResend.mockResolvedValue(emptyCleanup)
 
     const { regenerateAssistantResponseThunk } = await import('../messageThunk')
@@ -247,8 +233,8 @@ describe('regenerateAssistantResponseThunk — no legacy double cleanup (LOCK-00
       () => storeState as any
     )
 
-    // cleanupMultipleBlocks must NOT be called in the ordinary path
-    expect(mocks.cleanupMultipleBlocks).not.toHaveBeenCalled()
+    // consumeFileCleanupResult called exactly once
+    expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(emptyCleanup)
   })
 })
 

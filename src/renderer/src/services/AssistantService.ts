@@ -79,7 +79,6 @@ export function getDefaultAssistant(): Assistant {
     topics: [getDefaultTopic('default')],
     messages: [],
     type: 'assistant',
-    regularPhrases: [], // Added regularPhrases
     settings: DEFAULT_ASSISTANT_SETTINGS
   }
 }
@@ -274,7 +273,6 @@ export async function createAssistantFromAgent(agent: AssistantPreset) {
     topics: [topic],
     model: agent.defaultModel,
     type: 'assistant',
-    regularPhrases: agent.regularPhrases || [], // Ensured regularPhrases
     settings: agent.settings || DEFAULT_ASSISTANT_SETTINGS
   }
 

@@ -550,15 +550,14 @@ describe('resolveBootstrapDecision', () => {
 })
 
 describe('resolveAdjacentUserMessage', () => {
-  const msg = (id: string, role: Message['role'] = 'user', type?: 'clear'): Message => ({
+  const msg = (id: string, role: Message['role'] = 'user'): Message => ({
     id,
     role,
     assistantId: 'assistant',
     topicId: 'topic',
     createdAt: '2026-07-19T00:00:00.000Z',
     status: role === 'user' ? UserMessageStatus.SUCCESS : AssistantMessageStatus.SUCCESS,
-    blocks: [],
-    ...(type ? { type } : {})
+    blocks: []
   })
 
   it('finds next user message in a multi-model assistant topic', () => {
@@ -595,22 +594,6 @@ describe('resolveAdjacentUserMessage', () => {
   it('returns null at true last boundary (newest user message)', () => {
     const sequence: Message[] = [msg('u1'), msg('a1', 'assistant'), msg('u2')]
     expect(resolveAdjacentUserMessage(sequence, 'u2', 'newer')).toBeNull()
-  })
-
-  it('skips clear-type user messages', () => {
-    const sequence: Message[] = [
-      msg('u1'),
-      msg('clear1', 'user', 'clear'),
-      msg('u2'),
-      msg('a1', 'assistant'),
-      msg('u3')
-    ]
-    // newer from u1 should skip clear1 and find u2
-    expect(resolveAdjacentUserMessage(sequence, 'u1', 'newer')).toBe('u2')
-    // older from u3 should skip a1 and find u2
-    expect(resolveAdjacentUserMessage(sequence, 'u3', 'older')).toBe('u2')
-    // older from u2 should skip clear1 and find u1
-    expect(resolveAdjacentUserMessage(sequence, 'u2', 'older')).toBe('u1')
   })
 
   it('handles single user message topic — returns null in both directions', () => {

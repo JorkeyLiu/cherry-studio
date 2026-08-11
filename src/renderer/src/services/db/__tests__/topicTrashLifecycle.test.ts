@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
+    sqliteSourceConstructCount: 0,
     ensureTopic: vi.fn(),
     softDeleteTopic: vi.fn(),
     restoreTopic: vi.fn(),
@@ -29,6 +30,9 @@ vi.mock('@logger', () => ({
 
 vi.mock('../SqliteMessageDataSource', () => ({
   SqliteMessageDataSource: class {
+    constructor() {
+      mocks.sqliteSourceConstructCount += 1
+    }
     ensureTopic = mocks.ensureTopic
     softDeleteTopic = mocks.softDeleteTopic
     restoreTopic = mocks.restoreTopic
@@ -37,10 +41,6 @@ vi.mock('../SqliteMessageDataSource', () => ({
     purgeExpiredTopics = mocks.purgeExpiredTopics
     emptyTrashTopics = mocks.emptyTrashTopics
   }
-}))
-
-vi.mock('@renderer/utils/agentSession', () => ({
-  isAgentSessionTopicId: (id: string) => id.startsWith('agent-session:')
 }))
 
 vi.mock('@renderer/services/FileManager', () => ({
@@ -87,6 +87,25 @@ const page = (items: unknown[], nextCursor?: string) => ({
 describe('topicTrashLifecycle (Phase 5.2B)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  describe('module-load safety', () => {
+    it('constructs the SQLite source lazily on first use, not at module evaluation', async () => {
+      // This file statically imports the module above, so any eager
+      // `new SqliteMessageDataSource()` at module evaluation would already
+      // have run before this first test and incremented the counter.
+      // Regression: the source must be constructed only on first use, which
+      // breaks the store → assistants → AssistantService → topicTrashLifecycle
+      // evaluation-time cycle.
+      expect(mocks.sqliteSourceConstructCount).toBe(0)
+
+      mocks.softDeleteTopic.mockResolvedValue(undefined)
+      await softDeleteOrdinaryTopic('t-lazy', 'Named topic')
+
+      // Constructed exactly once and reused (singleton-like).
+      expect(mocks.sqliteSourceConstructCount).toBe(1)
+      expect(mocks.softDeleteTopic).toHaveBeenCalledExactlyOnceWith('t-lazy', 'Named topic')
+    })
   })
 
   describe('softDeleteOrdinaryTopic', () => {
@@ -147,12 +166,6 @@ describe('topicTrashLifecycle (Phase 5.2B)', () => {
       await ensureOrdinaryTopicOwnership('t-1', 'a-1', 'Named topic')
 
       expect(mocks.ensureTopic).toHaveBeenCalledExactlyOnceWith('t-1', 'a-1', 'Named topic')
-    })
-
-    it('bypasses agent-session topic IDs entirely (LOCK-521)', async () => {
-      await ensureOrdinaryTopicOwnership('agent-session:s-1', 'a-1')
-
-      expect(mocks.ensureTopic).not.toHaveBeenCalled()
     })
 
     it('propagates failure so callers do not expose the topic in Redux (LOCK-528)', async () => {
@@ -350,14 +363,14 @@ describe('topicTrashLifecycle (Phase 5.2B)', () => {
     it('orders deletedAt DESC with id DESC tie-break (LOCK-523)', () => {
       const topics = [
         topicWireToTopic(wire('t-1', { deletedAt: '2026-01-02T00:00:00.000Z' })),
-        topicWireToTopic(wire('agent-session:s-1', { deletedAt: '2026-01-03T00:00:00.000Z' })),
+        topicWireToTopic(wire('t-3', { deletedAt: '2026-01-03T00:00:00.000Z' })),
         topicWireToTopic(wire('t-2', { deletedAt: '2026-01-03T00:00:00.000Z' })),
         topicWireToTopic(wire('t-0', { deletedAt: '2026-01-04T00:00:00.000Z' }))
       ]
 
       const sorted = [...topics].sort(compareTrashTopicsForDisplay)
 
-      expect(sorted.map((t) => t.id)).toEqual(['t-0', 't-2', 'agent-session:s-1', 't-1'])
+      expect(sorted.map((t) => t.id)).toEqual(['t-0', 't-3', 't-2', 't-1'])
     })
 
     it('sorts topics without deletedAt last', () => {

@@ -940,17 +940,6 @@
         "xhigh": "Extra hoch",
         "xhigh_description": "Extra hohes Denkvermögen"
       },
-      "regular_phrases": {
-        "add": "Phrase hinzufügen",
-        "contentLabel": "Inhalt",
-        "contentPlaceholder": "Bitte geben Sie den Phraseninhalt ein. Sie können Variablen verwenden und dann die Tab-Taste drücken, um schnell zu Variablen zu navigieren und sie zu ändern. Zum Beispiel:\nPlanen Sie mir eine Route von ${from} nach ${to} und senden Sie sie an ${email}",
-        "delete": "Phrase löschen",
-        "deleteConfirm": "Möchten Sie diese Phrase wirklich löschen?",
-        "edit": "Phrase bearbeiten",
-        "title": "Häufig verwendete Phrasen",
-        "titleLabel": "Titel",
-        "titlePlaceholder": "Titel eingeben"
-      },
       "title": "Assistenteneinstellungen",
       "tool_use_mode": {
         "function": "Funktion",
@@ -1013,11 +1002,6 @@
         "title": "Neues Thema erstellen"
       }
     },
-    "alerts": {
-      "create_agent": "Erstellen Sie einen Agenten, um loszulegen.",
-      "create_session": "Erstelle eine Sitzung",
-      "select_agent": "Wählen Sie einen Agenten"
-    },
     "artifacts": {
       "button": {
         "download": "Herunterladen",
@@ -1078,58 +1062,25 @@
     },
     "input": {
       "auto_resize": "Höhe automatisch anpassen",
-      "clear": {
-        "content": "Möchten Sie wirklich alle Nachrichten der aktuellen Sitzung löschen?",
-        "label": "Nachrichten leeren {{Command}}",
-        "title": "Nachrichten leeren"
-      },
-      "collapse": "Einklappen",
       "context_count": {
         "tip": "Kontextanzahl / Maximale Kontextanzahl"
       },
       "estimated_tokens": {
         "tip": "Geschätzte Token-Anzahl"
       },
-      "expand": "Ausklappen",
       "file_error": "Fehler bei der Dateiverarbeitung",
       "file_not_supported": "Modell unterstützt diesen Dateityp nicht",
       "file_not_supported_count": "{{count}} Dateien werden nicht unterstützt",
       "generate_image": "Bild generieren",
       "generate_image_not_supported": "Modell unterstützt keine Bildgenerierung",
       "knowledge_base": "Wissensdatenbank",
-      "new": {
-        "context": "Kontext löschen {{Command}}"
-      },
-      "new_session": "Neue Sitzung {{Command}}",
       "new_topic": "Neues Thema {{Command}}",
       "paste_text_file_confirm": "In Eingabefeld einfügen?",
       "pause": "Pause",
       "placeholder": "Geben Sie hier eine Nachricht ein, drücken Sie {{key}} zum Senden - @ für Modellauswahl, / für Tools",
       "placeholder_without_triggers": "Geben Sie hier eine Nachricht ein, drücken Sie {{key}} zum Senden",
-      "resource_panel": {
-        "categories": {
-          "agents": "Agenten",
-          "files": "Dateien",
-          "skills": "Fähigkeiten"
-        },
-        "description": "Wählen Sie aus Dateien, Agenten oder Fähigkeiten",
-        "loading": "Laden...",
-        "no_file_found": {
-          "description": "Keine Dateien in zugänglichen Verzeichnissen verfügbar",
-          "label": "Keine Datei gefunden"
-        },
-        "no_items_found": {
-          "description": "Keine Dateien, Agenten oder Fähigkeiten verfügbar",
-          "label": "Keine Artikel gefunden"
-        },
-        "title": "Ressourcen"
-      },
       "send": "Senden",
       "settings": "Einstellungen",
-      "slash_commands": {
-        "description": "Agent-Session-Slash-Befehle",
-        "title": "Schrägstrich-Befehle"
-      },
       "thinking": {
         "budget_exceeds_max": "Denkbudget übersteigt maximale Token-Anzahl",
         "label": "Denken",
@@ -1386,9 +1337,6 @@
     "thinking": "Denkt ({{seconds}} Sekunden)",
     "topics": {
       "auto_rename": "Themenname generieren",
-      "clear": {
-        "title": "Nachrichten leeren"
-      },
       "copy": {
         "image": "Als Bild kopieren",
         "md": "Als Markdown kopieren",
@@ -5533,7 +5481,6 @@
       "action": "Aktionen",
       "actions": "Aktionen",
       "clear_shortcut": "Shortcut löschen",
-      "clear_topic": "Nachricht leeren",
       "copy_last_message": "Letzte Nachricht kopieren",
       "edit_last_user_message": "Letzte Benutzernachricht bearbeiten",
       "enabled": "Aktivieren",
@@ -5552,7 +5499,6 @@
       "show_settings": "Einstellungen öffnen",
       "title": "Shortcut",
       "toggle_edit_mode": "[to be translated]:Toggle Edit Mode",
-      "toggle_new_context": "Kontext löschen",
       "toggle_show_assistants": "Assistentenanzeige umschalten",
       "toggle_show_topics": "Themenanzeige umschalten",
       "zoom_in": "Oberfläche vergrößern",

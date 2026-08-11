@@ -430,13 +430,6 @@ describe('Repository Tests', () => {
       expect(() => messagesRepo.replaceOrder('topic-1', ['msg-inc1'])).toThrow('Incomplete')
     })
 
-    it('clearTopic deletes all messages', () => {
-      messagesRepo.create(makeMessage({ id: 'msg-cl1', topicId: 'topic-1' }))
-      messagesRepo.create(makeMessage({ id: 'msg-cl2', topicId: 'topic-1' }))
-      expect(messagesRepo.clearTopic('topic-1').affected).toBe(2)
-      expect(messagesRepo.countByTopic('topic-1')).toBe(0)
-    })
-
     it('deleteMany', () => {
       messagesRepo.create(makeMessage({ id: 'msg-dm1', topicId: 'topic-1' }))
       messagesRepo.create(makeMessage({ id: 'msg-dm2', topicId: 'topic-1' }))
@@ -1056,16 +1049,6 @@ describe('Repository Tests', () => {
 
       messagesRepo.deleteMany(['esm-1', 'esm-2'])
       expect(segmentsRepo.getById('esm-seg').found).toBe(false)
-    })
-
-    it('clearTopic removes all segments', () => {
-      messagesRepo.create(makeMessage({ id: 'ct-1', topicId: 'topic-1' }))
-      messagesRepo.create(makeMessage({ id: 'ct-2', topicId: 'topic-1' }))
-      segmentsRepo.create(makeSegment({ id: 'ct-seg', topicId: 'topic-1' }))
-      segmentsRepo.addMessages('ct-seg', ['ct-1', 'ct-2'])
-
-      messagesRepo.clearTopic('topic-1')
-      expect(segmentsRepo.getById('ct-seg').found).toBe(false)
     })
 
     it('non-empty segment survives message deletion', () => {

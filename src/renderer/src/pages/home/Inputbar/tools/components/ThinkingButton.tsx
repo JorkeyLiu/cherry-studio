@@ -31,27 +31,16 @@ interface Props {
   quickPanel: ToolQuickPanelApi
   model: Model
   assistantId: string
-  // Controlled mode: external state management (for agent sessions)
-  reasoningEffort?: ThinkingOption
-  onReasoningEffortChange?: (option: ThinkingOption) => void
 }
 
-const ThinkingButton: FC<Props> = ({
-  quickPanel,
-  model,
-  assistantId,
-  reasoningEffort: controlledEffort,
-  onReasoningEffortChange
-}): ReactElement => {
+const ThinkingButton: FC<Props> = ({ quickPanel, model, assistantId }): ReactElement => {
   const { t } = useTranslation()
   const quickPanelHook = useQuickPanel()
-  const isControlled = controlledEffort !== undefined
   const { assistant, updateAssistantSettings } = useAssistant(assistantId)
 
   const currentReasoningEffort = useMemo(() => {
-    if (isControlled) return controlledEffort
     return assistant.settings?.reasoning_effort || 'none'
-  }, [isControlled, controlledEffort, assistant.settings?.reasoning_effort])
+  }, [assistant.settings?.reasoning_effort])
 
   // 确定当前模型支持的选项类型
   const modelType = useMemo(() => getThinkModelType(model), [model])
@@ -72,11 +61,6 @@ const ThinkingButton: FC<Props> = ({
   const onThinkingChange = useCallback(
     (option: ThinkingOption) => {
       const isEnabled = option !== 'none'
-
-      if (isControlled) {
-        onReasoningEffortChange?.(option)
-        return
-      }
 
       if (!isEnabled) {
         const modelKey = getModelReasoningEffortKey(model)
@@ -109,15 +93,7 @@ const ThinkingButton: FC<Props> = ({
         qwenThinkMode: true
       })
     },
-    [
-      isControlled,
-      onReasoningEffortChange,
-      updateAssistantSettings,
-      assistant.enableWebSearch,
-      assistant.settings?.reasoning_effort_by_model,
-      model,
-      t
-    ]
+    [updateAssistantSettings, assistant.enableWebSearch, assistant.settings?.reasoning_effort_by_model, model, t]
   )
 
   const reasoningEffortOptionLabelMap = {

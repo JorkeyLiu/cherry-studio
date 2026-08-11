@@ -82,7 +82,6 @@ vi.mock('@renderer/services/db', () => ({
     deleteMessage: vi.fn(),
     resetMessagesForResend: vi.fn(),
     fetchMessages: vi.fn().mockResolvedValue({ messages: [], blocks: [] }),
-    clearMessages: vi.fn(),
     deleteMessagesWithSegments: vi.fn(),
     deleteBlocks: vi.fn(),
     listBlocksByFile: vi.fn()
@@ -95,11 +94,6 @@ vi.mock('@renderer/services/db/DbService', () => ({
       updateMessageAndBlocks: vi.fn()
     })
   }
-}))
-
-vi.mock('@renderer/utils/agentSession', () => ({
-  isAgentSessionTopicId: () => false,
-  extractAgentSessionIdFromTopicId: () => undefined
 }))
 
 vi.mock('@renderer/utils/queue', () => ({

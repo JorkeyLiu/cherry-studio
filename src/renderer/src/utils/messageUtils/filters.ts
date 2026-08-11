@@ -12,11 +12,11 @@ import { isEmpty } from 'lodash'
 // const logger = loggerService.withContext('Utils.filter')
 
 /**
- * Filters out messages of type '@' or 'clear' and messages without main text content.
+ * Filters out messages of type '@' and messages without main text content.
  */
 export const filterMessages = (messages: Message[]) => {
   return messages
-    .filter((message) => !['@', 'clear'].includes(message.type!))
+    .filter((message) => !['@'].includes(message.type!))
     .filter((message) => {
       const state = store.getState()
       const mainTextBlock = message.blocks
@@ -24,19 +24,6 @@ export const filterMessages = (messages: Message[]) => {
         .find((block) => block?.type === MessageBlockType.MAIN_TEXT)
       return !isEmpty((mainTextBlock as any)?.content?.trim()) // Type assertion needed
     })
-}
-
-/**
- * Filters messages to include only those after the last 'clear' type message.
- */
-export function filterAfterContextClearMessages(messages: Message[]): Message[] {
-  const clearIndex = messages.findLastIndex((message) => message.type === 'clear')
-
-  if (clearIndex === -1) {
-    return messages
-  }
-
-  return messages.slice(clearIndex + 1)
 }
 
 /**

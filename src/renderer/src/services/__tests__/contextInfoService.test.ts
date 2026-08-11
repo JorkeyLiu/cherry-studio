@@ -7,8 +7,8 @@
  * and the window grows as the topic grows. Without a valid anchor, the start is
  * derived from the assistant's default context count (LOCK-CTX-2, LOCK-CTX-4):
  * finite N selects the most recent N turns, null (∞) selects the first turn of
- * the post-clear segment. contextCount result = selected turns / total turns in
- * the post-clear segment, excluding drafts (LOCK-CTX-5).
+ * the topic. contextCount result = selected turns / total turns in the topic,
+ * excluding drafts (LOCK-CTX-5).
  *
  * Canonical unit: ContextTurn. contextCount.current and contextCount.max count
  * turns (not messages). The boundary divider marks the first message of the
@@ -73,11 +73,10 @@ vi.mock('@renderer/services/AssistantService', () => ({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-const msg = (id: string, role: Message['role'] = 'user', askId?: string, type?: 'clear'): Message => ({
+const msg = (id: string, role: Message['role'] = 'user', askId?: string): Message => ({
   id,
   role,
   askId,
-  type,
   assistantId: 'assistant-1',
   topicId: 'topic-1',
   createdAt: '2026-07-19T00:00:00.000Z',
@@ -91,11 +90,10 @@ const msgWithBlock = (
   id: string,
   role: Message['role'] = 'user',
   askId?: string,
-  type?: 'clear',
   store: ReturnType<typeof createMockStore> = mockStore
 ): Message => {
   const blockId = `block-${id}`
-  const m = msg(id, role, askId, type)
+  const m = msg(id, role, askId)
   m.blocks = [blockId]
   // Dispatch the block entity into the mock store so filterEmptyMessages can find it
   store.dispatch(
@@ -204,7 +202,7 @@ describe('computeContextInfo', () => {
       expect(result.uiMessages[0]?.id).toBe('m18')
     })
 
-    it('null (unlimited) selects the whole post-clear segment', () => {
+    it('null (unlimited) selects the whole topic', () => {
       // 10 turns, unlimited → window = turns 0..9, no boundary, current === max.
       const messages = withBlocks(twentyMessages)
       const result = computeContextInfo(messages, assistantWith({ contextCount: null }), TOPIC_ID)
@@ -366,7 +364,7 @@ describe('computeContextInfo', () => {
   })
 
   describe('context count semantics (LOCK-CTX-5)', () => {
-    it('current = selected turns, max = total turns in the post-clear segment', () => {
+    it('current = selected turns, max = total turns in the topic', () => {
       // 10 turns, manual anchor at turn index 7 (groupKey m14) → 3 selected / 10 total.
       const result = computeContextInfo(
         twentyMessages,
@@ -377,21 +375,6 @@ describe('computeContextInfo', () => {
         TOPIC_ID
       )
       expect(result.contextCount).toEqual({ current: 3, max: 10 })
-    })
-
-    it('turns before the last clear message are excluded from both current and max', () => {
-      // u0..a1 before clear, then clear, then 4 turns after (m0..m7).
-      const messages = [
-        msgWithBlock('pre0'),
-        msgWithBlock('pre1', 'assistant', 'pre0'),
-        msg('clear-1', 'user', undefined, 'clear'),
-        ...withBlocks(makeMessages(8))
-      ]
-      const result = computeContextInfo(messages, assistantWith({ contextCount: 5 }), TOPIC_ID)
-      // 4 post-clear turns all fit within N=5.
-      expect(result.contextCount).toEqual({ current: 4, max: 4 })
-      expect(result.boundaryMessageId).toBeNull()
-      expect(result.uiMessages[0]?.id).toBe('m0')
     })
 
     it('counts semantic turns, not messages', () => {

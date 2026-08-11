@@ -14,7 +14,7 @@ import { handleMessageStream } from '@renderer/trace/dataHandler/MessageStreamHa
 import { handleStream } from '@renderer/trace/dataHandler/StreamHandler'
 import type { EndSpanParams, StartSpanParams } from '@renderer/trace/types/ModelSpanEntity'
 import { ModelSpanEntity } from '@renderer/trace/types/ModelSpanEntity'
-import type { Model, Topic } from '@renderer/types'
+import type { Model } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { appIdentity } from '@shared/config/identity'
@@ -374,7 +374,4 @@ export const restartTrace = spanManagerService.restartTrace.bind(spanManagerServ
 
 EventEmitter.on(EVENT_NAMES.SEND_MESSAGE, ({ topicId, traceId }) => {
   void window.api.trace.openWindow(topicId, traceId, false)
-})
-EventEmitter.on(EVENT_NAMES.CLEAR_MESSAGES, (topic: Topic) => {
-  void window.api.trace.cleanTopic(topic.id)
 })

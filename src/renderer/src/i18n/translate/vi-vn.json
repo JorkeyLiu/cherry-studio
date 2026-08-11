@@ -940,17 +940,6 @@
         "xhigh": "Cao đặc biệt",
         "xhigh_description": "Lý luận cấp độ cực cao"
       },
-      "regular_phrases": {
-        "add": "Thêm Cụm từ",
-        "contentLabel": "Nội dung",
-        "contentPlaceholder": "Vui lòng nhập nội dung cụm từ, hỗ trợ sử dụng biến và nhấn Tab để nhanh chóng định vị biến cần sửa. Ví dụ:  \nHãy giúp tôi lên lộ trình từ ${from} đến ${to} và gửi nó đến ${email}.",
-        "delete": "Xóa cụm từ",
-        "deleteConfirm": "Bạn có chắc chắn muốn xóa cụm từ này không?",
-        "edit": "Chỉnh sửa cụm từ",
-        "title": "Cụm từ thông dụng",
-        "titleLabel": "Tiêu đề",
-        "titlePlaceholder": "Nhập tiêu đề"
-      },
       "title": "Cài đặt Trợ lý",
       "tool_use_mode": {
         "function": "Chức năng",
@@ -1013,11 +1002,6 @@
         "title": "Chủ đề mới"
       }
     },
-    "alerts": {
-      "create_agent": "Tạo một tác nhân để bắt đầu",
-      "create_session": "Tạo một phiên",
-      "select_agent": "Chọn một đại lý"
-    },
     "artifacts": {
       "button": {
         "download": "Tải xuống",
@@ -1078,58 +1062,25 @@
     },
     "input": {
       "auto_resize": "Tự động điều chỉnh chiều cao",
-      "clear": {
-        "content": "Bạn có muốn xóa tất cả tin nhắn của chủ đề hiện tại không?",
-        "label": "Xóa {{Lệnh}}",
-        "title": "Xóa tất cả tin nhắn?"
-      },
-      "collapse": "Thu gọn",
       "context_count": {
         "tip": "Ngữ cảnh / Ngữ cảnh tối đa"
       },
       "estimated_tokens": {
         "tip": "Tokens estimados"
       },
-      "expand": "Mở rộng",
       "file_error": "Lỗi khi xử lý tệp",
       "file_not_supported": "Mô hình không hỗ trợ loại tệp này",
       "file_not_supported_count": "{{count}} tệp không được hỗ trợ",
       "generate_image": "Tạo hình ảnh",
       "generate_image_not_supported": "Mô hình không hỗ trợ tạo hình ảnh.",
       "knowledge_base": "Cơ sở tri thức",
-      "new": {
-        "context": "Clear Context"
-      },
-      "new_session": "Phiên mới {{Command}}",
       "new_topic": "Chủ đề mới {{Command}}",
       "paste_text_file_confirm": "Dán vào thanh nhập liệu?",
       "pause": "Tạm dừng",
       "placeholder": "Nhập tin nhắn của bạn ở đây, nhấn {{key}} để gửi - @ để Chọn Mô hình, / để Bao gồm Công cụ",
       "placeholder_without_triggers": "Nhập tin nhắn của bạn ở đây, nhấn {{key}} để gửi",
-      "resource_panel": {
-        "categories": {
-          "agents": "Đặc vụ",
-          "files": "Tệp tin",
-          "skills": "Kỹ năng"
-        },
-        "description": "Chọn từ tệp, tác nhân hoặc kỹ năng",
-        "loading": "Đang tải...",
-        "no_file_found": {
-          "description": "Không có tệp nào có sẵn trong các thư mục có thể truy cập",
-          "label": "Không tìm thấy tệp"
-        },
-        "no_items_found": {
-          "description": "Không có tệp nào, đại lý hoặc kỹ năng nào có sẵn",
-          "label": "Không tìm thấy mục nào"
-        },
-        "title": "Tài nguyên"
-      },
       "send": "Gửi",
       "settings": "Cài đặt",
-      "slash_commands": {
-        "description": "Lệnh gạch chéo phiên làm việc của tác nhân",
-        "title": "Lệnh gạch chéo"
-      },
       "thinking": {
         "budget_exceeds_max": "Ngân sách suy nghĩ vượt quá số lượng token tối đa",
         "label": "Pensamiento",
@@ -1386,9 +1337,6 @@
     "thinking": "Đang suy nghĩ ({{seconds}} giây)",
     "topics": {
       "auto_rename": "Umbenennen automatisieren",
-      "clear": {
-        "title": "Tin nhắn rõ ràng"
-      },
       "copy": {
         "image": "Sao chép dưới dạng hình ảnh",
         "md": "Sao chép dưới dạng markdown",
@@ -5533,7 +5481,6 @@
       "action": "Hành động",
       "actions": "hoạt động",
       "clear_shortcut": "Phím tắt rõ ràng",
-      "clear_topic": "Tin nhắn rõ ràng",
       "copy_last_message": "Sao tin nhắn cuối cùng",
       "edit_last_user_message": "Chỉnh sửa tin nhắn cuối cùng của người dùng",
       "enabled": "Kích hoạt",
@@ -5552,7 +5499,6 @@
       "show_settings": "Mở Cài đặt",
       "title": "Phím tắt",
       "toggle_edit_mode": "[to be translated]:Toggle Edit Mode",
-      "toggle_new_context": "Ngữ cảnh rõ ràng",
       "toggle_show_assistants": "Bật Trợ lý",
       "toggle_show_topics": "Chuyển đổi chủ đề",
       "zoom_in": "Phóng to",

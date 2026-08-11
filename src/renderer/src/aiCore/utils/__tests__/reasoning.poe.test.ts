@@ -66,7 +66,6 @@ describe('Poe Provider Reasoning Support', () => {
     topics: [],
     messages: [],
     type: 'assistant',
-    regularPhrases: [],
     settings: {
       reasoning_effort,
       maxTokens

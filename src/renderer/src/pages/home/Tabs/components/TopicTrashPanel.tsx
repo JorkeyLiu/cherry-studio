@@ -1,8 +1,6 @@
-import { TopicManager } from '@renderer/hooks/useTopic'
 import { compareTrashTopicsForDisplay, listOrdinaryTrashTopics } from '@renderer/services/db/topicTrashLifecycle'
 import type { Topic } from '@renderer/types'
 import { cn } from '@renderer/utils'
-import { isAgentSessionTopicId } from '@renderer/utils/agentSession'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { RotateCcw, Trash2 } from 'lucide-react'
@@ -38,17 +36,10 @@ export const TopicTrashPanel: React.FC<TopicTrashPanelProps> = ({
     setLoading(true)
     try {
       // Phase 5.2B: ordinary trash listing is SQLite-backed and complete
-      // (cursor pages are drained inside the read, LOCK-530). Agent-session
-      // trash stays Dexie-backed (LOCK-521) and remains visible here:
-      // strictly filter the Dexie rows to agent-session IDs so ordinary
-      // Dexie leftovers never resurface next to their SQLite counterparts.
-      const [ordinaryTopics, dexieTrash] = await Promise.all([
-        listOrdinaryTrashTopics(assistantId),
-        TopicManager.getTrashTopics(assistantId)
-      ])
-      const agentTopics = dexieTrash.filter((topic) => isAgentSessionTopicId(topic.id))
-      // Deterministic merged order: deletedAt DESC, id DESC (LOCK-523).
-      setTrashTopics([...ordinaryTopics, ...agentTopics].sort(compareTrashTopicsForDisplay))
+      // (cursor pages are drained inside the read, LOCK-530).
+      const ordinaryTopics = await listOrdinaryTrashTopics(assistantId)
+      // Deterministic display order: deletedAt DESC, id DESC (LOCK-523).
+      setTrashTopics([...ordinaryTopics].sort(compareTrashTopicsForDisplay))
     } catch {
       // silently fail, keep current state
     } finally {

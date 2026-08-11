@@ -10,7 +10,6 @@ import type {
   InputbarScope,
   ToolActionKey,
   ToolActionMap,
-  ToolContext,
   ToolDefinition,
   ToolOrderConfig,
   ToolQuickPanelApi,
@@ -20,7 +19,7 @@ import type {
 } from '@renderer/pages/home/Inputbar/types'
 import { getToolsForScope } from '@renderer/pages/home/Inputbar/types'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
-import { selectToolOrderForScope, setIsCollapsed, setToolOrder } from '@renderer/store/inputTools'
+import { selectToolOrder, setIsCollapsed, setToolOrder } from '@renderer/store/inputTools'
 import type { Assistant, Model } from '@renderer/types'
 import type { InputBarToolType } from '@renderer/types/chat'
 import { classNames } from '@renderer/utils'
@@ -37,7 +36,6 @@ export interface InputbarToolsNewProps {
   assistant: Assistant
   /** May be explicitly unconfigured (undefined). */
   model?: Model
-  session?: ToolContext['session']
 }
 
 interface ToolConfig {
@@ -51,7 +49,7 @@ const DraggablePortal = ({ children, isDragging }: { children: React.ReactNode; 
   return isDragging ? createPortal(children, document.body) : children
 }
 
-const InputbarTools = ({ scope, assistant, model, session }: InputbarToolsNewProps) => {
+const InputbarTools = ({ scope, assistant, model }: InputbarToolsNewProps) => {
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
   const toolsContext = useInputbarTools()
@@ -76,14 +74,14 @@ const InputbarTools = ({ scope, assistant, model, session }: InputbarToolsNewPro
     [toolsContext.toolsRegistry]
   )
 
-  const reduxToolOrder = useAppSelector((state) => selectToolOrderForScope(state, scope))
+  const reduxToolOrder = useAppSelector((state) => selectToolOrder(state))
   const isCollapse = useAppSelector((state) => state.inputTools.isCollapsed)
   const [targetTool, setTargetTool] = useState<ToolConfig | null>(null)
 
   // Get tools for current scope
   const availableTools = useMemo(() => {
-    return getToolsForScope(scope, { assistant, model, session })
-  }, [scope, assistant, model, session])
+    return getToolsForScope(scope, { assistant, model })
+  }, [scope, assistant, model])
 
   // Get tool order for current scope
   const toolOrder = useMemo(() => {
@@ -122,7 +120,6 @@ const InputbarTools = ({ scope, assistant, model, session }: InputbarToolsNewPro
         scope,
         assistant,
         model,
-        session,
         state,
         actions,
         quickPanel,
@@ -130,7 +127,7 @@ const InputbarTools = ({ scope, assistant, model, session }: InputbarToolsNewPro
         t
       } as ToolRenderContext<S, A>
     },
-    [assistant, model, quickPanelContext, scope, session, t, toolsContext, getQuickPanelApiForTool]
+    [assistant, model, quickPanelContext, scope, t, toolsContext, getQuickPanelApiForTool]
   )
 
   // Build tool metadata (without rendering)
@@ -244,10 +241,10 @@ const InputbarTools = ({ scope, assistant, model, session }: InputbarToolsNewPro
         newToolOrder.visible.push(toolKey)
       }
 
-      dispatch(setToolOrder({ scope, toolOrder: newToolOrder }))
+      dispatch(setToolOrder({ toolOrder: newToolOrder }))
       setTargetTool(null)
     },
-    [dispatch, scope, toolOrder]
+    [dispatch, toolOrder]
   )
 
   const handleDragEnd = (result: DropResult) => {
@@ -278,7 +275,7 @@ const InputbarTools = ({ scope, assistant, model, session }: InputbarToolsNewPro
       newToolOrder[destArray].splice(destination.index, 0, removed)
     }
 
-    dispatch(setToolOrder({ scope, toolOrder: newToolOrder }))
+    dispatch(setToolOrder({ toolOrder: newToolOrder }))
   }
 
   const getMenuItems = useMemo(() => {

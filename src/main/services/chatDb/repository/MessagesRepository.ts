@@ -3,12 +3,12 @@
  *
  * Ordering guarantees:
  * - sort_order is zero-based dense within each topic.
- * - All mutating operations (append, insertAt, upsertAt, delete, deleteMany,
- *   clearTopic) normalize sibling orders transactionally.
+ * - All mutating operations (append, insertAt, upsertAt, delete, deleteMany)
+ *   normalize sibling orders transactionally.
  * - replaceOrder uses direct sequential assignment (no fixed-offset hack).
  *
  * Segment cleanup:
- * - delete, deleteMany, and clearTopic remove segments that become empty.
+ * - delete, deleteMany remove segments that become empty.
  *
  * Identity protection:
  * - update rejects attempts to change id or topicId.
@@ -454,23 +454,6 @@ export class MessagesRepository {
         this.cleanupEmptySegmentsInTx(tx, topicId)
       }
       return { affected: total }
-    })
-  }
-
-  /**
-   * Clear all messages from a topic. Removes empty segments.
-   */
-  clearTopic(topicId: string): AffectedCount {
-    return this.db.transaction((tx) => {
-      const result = tx.delete(messages).where(eq(messages.topicId, topicId)).run()
-      // After clearing all messages, delete all segments for this topic
-      tx.delete(topicSegmentMessages)
-        .where(
-          sql`${topicSegmentMessages.segmentId} IN (SELECT id FROM ${topicSegments} WHERE ${topicSegments.topicId} = ${topicId})`
-        )
-        .run()
-      tx.delete(topicSegments).where(eq(topicSegments.topicId, topicId)).run()
-      return { affected: result.changes }
     })
   }
 

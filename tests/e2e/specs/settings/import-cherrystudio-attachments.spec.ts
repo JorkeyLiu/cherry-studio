@@ -217,7 +217,9 @@ test.describe('Cherry Studio synthetic-ZIP attachment import', () => {
         await topicExistsInRedux(page, MARKER.topic),
         `marker ${MARKER.topic} must be in Redux before import`
       ).toBe(true)
-      await clickTopicsTab(page)
+      // LOCK-NAV: the topics list panel always renders; assert its readiness
+      // instead of switching to a Topics tab.
+      await expect(page.locator('.topics-tab')).toBeVisible()
       await expect(
         topicItem(page, MARKER.topic),
         'marker topic must be visible in the sidebar before import'
@@ -702,20 +704,6 @@ function messageContainer(page: Page, messageId: string) {
   return page.locator(`[data-message-id="${messageId}"]`)
 }
 
-async function clickAssistantsTab(page: Page): Promise<void> {
-  const tab = page.getByRole('button', { name: 'Assistants', exact: false })
-  await tab.waitFor({ state: 'visible', timeout: 10000 })
-  await tab.click()
-  await page.waitForTimeout(300)
-}
-
-async function clickTopicsTab(page: Page): Promise<void> {
-  const tab = page.getByRole('button', { name: 'Topics', exact: false })
-  await tab.waitFor({ state: 'visible', timeout: 10000 })
-  await tab.click()
-  await page.waitForTimeout(300)
-}
-
 /**
  * Wait until the main window is usable again after the in-process reload or a
  * same-profile relaunch: #root attached, Redux store defined, home ready.
@@ -750,14 +738,16 @@ async function waitForImportedNavigationInRedux(page: Page): Promise<void> {
 
 /** Open the imported conversation through the visible sidebar. */
 async function openImportedTopic(page: Page): Promise<void> {
-  await clickAssistantsTab(page)
+  // LOCK-NAV: the assistant list panel always renders; no tab switching.
+  await expect(page.locator('.assistants-tab')).toBeVisible()
   const assistantName = page
     .locator('[class*="home-tabs"]')
     .getByText(PROJECTION_ASSISTANTS.first.name, { exact: true })
     .first()
   await assistantName.waitFor({ state: 'visible', timeout: 10000 })
   await assistantName.click()
-  await clickTopicsTab(page)
+  // LOCK-NAV: the topics list panel always renders beside the assistant list.
+  await expect(page.locator('.topics-tab')).toBeVisible()
   const item = topicItem(page, SOURCE_IDS.topic)
   await item.waitFor({ state: 'visible', timeout: 10000 })
   await item.click()

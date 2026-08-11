@@ -35,7 +35,6 @@ import { setDefaultModel, setQuickModel, setTranslateModel } from '@renderer/sto
 import type { Assistant, AssistantSettings, Model, ThinkingOption, Topic } from '@renderer/types'
 import { getModelReasoningEffortKey } from '@renderer/types'
 import { uuid } from '@renderer/utils'
-import { isAgentSessionTopicId } from '@renderer/utils/agentSession'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -44,7 +43,6 @@ import { TopicManager } from './useTopic'
 /**
  * Establish SQLite ownership for every ordinary topic of a new assistant
  * BEFORE the assistant (and its topics) is exposed in Redux (LOCK-533).
- * Agent-session topics are bypassed inside the helper (LOCK-521).
  */
 async function ensureAssistantTopicsOwnership(assistant: Assistant): Promise<void> {
   for (const topic of assistant.topics ?? []) {
@@ -234,27 +232,12 @@ export function useAssistant(id: string) {
     model,
     addTopic: (topic: Topic) => dispatch(addTopic({ assistantId: assistant.id, topic })),
     removeTopic: async (topic: Topic) => {
-      // Phase 5.2B: ordinary-chat soft delete goes through SQLite (LOCK-521/524);
-      // agent-session topics keep their existing Dexie behavior. The mutation
-      // must succeed before the Redux mutation runs (LOCK-528).
-      if (isAgentSessionTopicId(topic.id)) {
-        await TopicManager.softRemoveTopic(topic)
-      } else {
-        await softDeleteOrdinaryTopic(topic.id, topic.name)
-      }
+      // Phase 5.2B: ordinary-chat soft delete goes through SQLite (LOCK-521/524).
+      // The mutation must succeed before the Redux mutation runs (LOCK-528).
+      await softDeleteOrdinaryTopic(topic.id, topic.name)
       dispatch(removeTopic({ assistantId: assistant.id, topic }))
     },
     restoreTopic: async (topicId: string) => {
-      // Phase 5.2B: agent-session restore stays on Dexie (LOCK-521/003).
-      // TopicManager.restoreTopic now returns the restored topic from Dexie
-      // even when absent from Redux.
-      if (isAgentSessionTopicId(topicId)) {
-        const restoredTopic = await TopicManager.restoreTopic(topicId)
-        if (restoredTopic) {
-          dispatch(addTopicFromTrash({ assistantId: assistant.id, topic: restoredTopic }))
-        }
-        return
-      }
       // Ordinary restore is ONE atomic Main command that returns the
       // restored row (LOCK-532); Redux is updated only with that returned
       // row after the mutation succeeded (LOCK-528).
@@ -264,11 +247,6 @@ export function useAssistant(id: string) {
       }
     },
     moveTopic: async (topic: Topic, toAssistant: Assistant) => {
-      if (isAgentSessionTopicId(topic.id)) {
-        dispatch(addTopic({ assistantId: toAssistant.id, topic: { ...topic, assistantId: toAssistant.id } }))
-        dispatch(removeTopic({ assistantId: assistant.id, topic }))
-        return
-      }
       await dbService.transferTopicOwnership(topic.id, toAssistant.id)
       dispatch(addTopic({ assistantId: toAssistant.id, topic: { ...topic, assistantId: toAssistant.id } }))
       dispatch(removeTopic({ assistantId: assistant.id, topic }))
@@ -276,7 +254,7 @@ export function useAssistant(id: string) {
     updateTopic: async (topic: Topic) => {
       // Phase 5.2B: persist metadata to SQLite before Redux mutation.
       // SQLite must succeed first (LOCK-528); a failed call throws and leaves
-      // Redux unchanged. Agent-session topics bypass SQLite internally.
+      // Redux unchanged.
       await persistTopicMetadata(topic)
       dispatch(updateTopic({ assistantId: assistant.id, topic }))
     },
@@ -284,11 +262,6 @@ export function useAssistant(id: string) {
     removeAllTopics: async () => {
       const requestedReplacement = getDefaultTopic(assistant.id)
       const { replacementTopic } = await resetOrdinaryAssistantTopics(assistant.id, requestedReplacement.id)
-      for (const topic of assistant.topics) {
-        if (isAgentSessionTopicId(topic.id)) {
-          await TopicManager.removeTopic(topic.id)
-        }
-      }
       dispatch(updateTopics({ assistantId: assistant.id, topics: [replacementTopic] }))
     },
     setModel: useCallback(

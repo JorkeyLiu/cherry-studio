@@ -166,6 +166,22 @@ export default defineConfig({
           traceWindow: resolve(__dirname, 'src/renderer/traceWindow.html'),
           chatImport: resolve(__dirname, 'src/renderer/src/windows/chatImport/chatImport.html')
         },
+        output: {
+          // Dexie structural isolation (LOCK-001): force ONLY the canonical
+          // Dexie schema module into a dedicated standalone shared chunk so the
+          // chatImport hidden renderer can dynamic-import it without evaluating
+          // the main renderer bundle. The matcher is deliberately narrow — only
+          // this exact module (normalized POSIX id); `upgrades.ts` and
+          // `migrationHelpers.ts` are NOT assigned, so the lazy historical
+          // upgrade code keeps its own chunk (loaded only when a v5/v7/v8
+          // upgrade is actually needed).
+          manualChunks(id) {
+            if (id.replace(/\\/g, '/').endsWith('/src/renderer/src/databases/dbSchema.ts')) {
+              return 'databases-schema'
+            }
+            return undefined
+          }
+        },
         onwarn(warning, warn) {
           if (warning.code === 'COMMONJS_VARIABLE_IN_ESM') return
           warn(warning)

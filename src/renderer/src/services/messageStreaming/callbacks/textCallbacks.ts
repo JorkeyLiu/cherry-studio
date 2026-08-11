@@ -15,18 +15,10 @@ interface TextCallbacksDependencies {
   assistantMsgId: string
   getCitationBlockId: () => string | null
   getCitationBlockIdFromTool: () => string | null
-  handleCompactTextComplete?: (text: string, mainTextBlockId: string | null) => Promise<boolean>
 }
 
 export const createTextCallbacks = (deps: TextCallbacksDependencies) => {
-  const {
-    blockManager,
-    getState,
-    assistantMsgId,
-    getCitationBlockId,
-    getCitationBlockIdFromTool,
-    handleCompactTextComplete
-  } = deps
+  const { blockManager, getState, assistantMsgId, getCitationBlockId, getCitationBlockIdFromTool } = deps
 
   // 内部维护的状态
   let mainTextBlockId: string | null = null
@@ -83,9 +75,6 @@ export const createTextCallbacks = (deps: TextCallbacksDependencies) => {
           metadata: thoughtSignature ? { thoughtSignature } : undefined
         }
         blockManager.smartBlockUpdate(mainTextBlockId, changes, MessageBlockType.MAIN_TEXT, true)
-        if (handleCompactTextComplete) {
-          await handleCompactTextComplete(finalText, mainTextBlockId)
-        }
         // Clear thoughtSignature after block is complete
         currentThoughtSignature = undefined
         mainTextBlockId = null

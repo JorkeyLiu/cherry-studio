@@ -24,12 +24,9 @@ import {
 } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
-import store from '@renderer/store'
 import { newMessagesActions } from '@renderer/store/newMessage'
-import { setGenerating } from '@renderer/store/runtime'
 import type { Assistant, Topic } from '@renderer/types'
 import { classNames, removeSpecialCharactersForFileName } from '@renderer/utils'
-import { isAgentSessionTopicId } from '@renderer/utils/agentSession'
 import { copyTopicAsMarkdown, copyTopicAsPlainText } from '@renderer/utils/copy'
 import {
   exportMarkdownToJoplin,
@@ -47,7 +44,6 @@ import type { ItemType, MenuItemType } from 'antd/es/menu/interface'
 import dayjs from 'dayjs'
 import { findIndex } from 'lodash'
 import {
-  BrushCleaning,
   CheckSquare,
   FolderOpen,
   HelpCircle,
@@ -139,10 +135,8 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   // Purge expired trash topics on first mount
   useEffect(() => {
     // Phase 5.2B: ordinary-chat purge runs against SQLite with a renderer
-    // generated strict ISO cutoff (LOCK-523). The Dexie purge below is kept
-    // only for agent-session topics and pre-migration Dexie rows (LOCK-521).
+    // generated strict ISO cutoff (LOCK-523).
     purgeExpiredOrdinaryTopics().catch((err) => logger.error('Failed to purge expired ordinary topics:', err))
-    TopicManager.purgeExpiredTopics().catch((err) => logger.error('Failed to purge expired topics:', err))
   }, [logger])
 
   const isRenaming = useCallback(
@@ -173,32 +167,16 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
 
   const handleRestoreTopic = useCallback(
     async (topicId: string) => {
-      // Phase 5.2B: classify at the boundary (LOCK-521). Ordinary restore is
-      // SQLite; agent-session restore keeps its Dexie behavior.
-      if (isAgentSessionTopicId(topicId)) {
-        // LOCK-003: use restored Dexie row directly; no second Redux lookup.
-        const restoredTopic = await TopicManager.restoreTopic(topicId)
-        if (restoredTopic) {
-          addTopic(restoredTopic)
-        }
-      } else {
-        // LOCK-532: one atomic Main command returns the restored row; only
-        // that returned row is exposed to Redux (never a stale snapshot).
-        const restoredTopic = await restoreOrdinaryTopic(topicId)
-        if (restoredTopic) {
-          addTopic(restoredTopic)
-        }
+      // LOCK-532: one atomic Main command returns the restored row; only
+      // that returned row is exposed to Redux (never a stale snapshot).
+      const restoredTopic = await restoreOrdinaryTopic(topicId)
+      if (restoredTopic) {
+        addTopic(restoredTopic)
       }
       refreshTrashTopics()
     },
     [addTopic, refreshTrashTopics]
   )
-
-  const onClearMessages = useCallback((topic: Topic) => {
-    // window.keyv.set(EVENT_NAMES.CHAT_COMPLETION_PAUSED, true)
-    store.dispatch(setGenerating(false))
-    void EventEmitter.emit(EVENT_NAMES.CLEAR_MESSAGES, topic)
-  }, [])
 
   const createPersistedReplacement = useCallback(async () => {
     const newTopic = getDefaultTopic(assistant.id)
@@ -441,12 +419,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         }
       },
       {
-        label: t('chat.topics.clear.title'),
-        key: 'clear-messages',
-        icon: <BrushCleaning size={14} />,
-        onClick: () => onClearMessages(topic)
-      },
-      {
         label: t('chat.topics.copy.title'),
         key: 'copy',
         icon: <CopyIcon size={14} />,
@@ -609,7 +581,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     activeTopic.id,
     setActiveTopic,
     onPinTopic,
-    onClearMessages,
     onMoveTopic,
     onDeleteTopic
   ])
@@ -812,12 +783,8 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         onRestore={handleRestoreTopic}
         onPermanentDelete={async (topicId) => {
           // Phase 5.2B: ordinary hard delete commits in SQLite first, then the
-          // cleanup result is consumed (LOCK-525). Agent-session stays Dexie.
-          if (isAgentSessionTopicId(topicId)) {
-            await TopicManager.removeTopic(topicId)
-          } else {
-            await hardDeleteOrdinaryTopic(topicId)
-          }
+          // cleanup result is consumed (LOCK-525).
+          await hardDeleteOrdinaryTopic(topicId)
           refreshTrashTopics()
         }}
         onEmptyTrash={async () => {
@@ -825,14 +792,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
             // Phase 5.2B: ordinary trash is emptied in ONE atomic Main SQLite
             // transaction with one aggregate cleanup result (LOCK-531).
             await emptyOrdinaryTrash(assistant.id)
-            // Agent-session trash keeps its Dexie lifecycle (LOCK-521) and is
-            // emptied through the existing per-topic Dexie removal.
-            const dexieTrash = await TopicManager.getTrashTopics(assistant.id)
-            for (const trashed of dexieTrash) {
-              if (isAgentSessionTopicId(trashed.id)) {
-                await TopicManager.removeTopic(trashed.id)
-              }
-            }
           } finally {
             // Reconcile the panel with the persisted state even when a
             // mutation failed part-way (LOCK-528).

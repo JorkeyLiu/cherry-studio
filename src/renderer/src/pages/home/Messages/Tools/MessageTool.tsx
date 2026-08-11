@@ -1,8 +1,6 @@
 import type { NormalToolResponse } from '@renderer/types'
 import type { ToolMessageBlock } from '@renderer/types/newMessage'
 
-import { MessageAgentTools } from './MessageAgentTools'
-import { AgentToolsType } from './MessageAgentTools/types'
 import { MessageKnowledgeSearchToolTitle } from './MessageKnowledgeSearch'
 import { MessageMemorySearchToolTitle } from './MessageMemorySearch'
 import { MessageWebSearchToolTitle } from './MessageWebSearch'
@@ -11,15 +9,6 @@ interface Props {
   block: ToolMessageBlock
 }
 const builtinToolsPrefix = 'builtin_'
-const agentMcpToolsPrefix = 'mcp__'
-const agentTools = Object.values(AgentToolsType)
-
-const isAgentTool = (toolName: AgentToolsType) => {
-  if (agentTools.includes(toolName) || toolName.startsWith(agentMcpToolsPrefix)) {
-    return true
-  }
-  return false
-}
 
 const ChooseTool = (toolResponse: NormalToolResponse): React.ReactNode | null => {
   let toolName = toolResponse.tool.name
@@ -37,8 +26,6 @@ const ChooseTool = (toolResponse: NormalToolResponse): React.ReactNode | null =>
       default:
         return null
     }
-  } else if (isAgentTool(toolName as AgentToolsType)) {
-    return <MessageAgentTools toolResponse={toolResponse} />
   }
   return null
 }
