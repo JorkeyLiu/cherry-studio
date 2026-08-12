@@ -85,7 +85,9 @@ import type {
   UpsertSegmentRequest,
   UpsertSegmentResponse
 } from '@shared/chatDb'
+import { elapsedMs } from '@shared/diagnostics/sendTiming'
 
+import { consumeNextAppendDiagnostics, logAppendDiagnostic, type SendDiagnosticsContext } from './sendTimingDiagnostics'
 import type { MessageDataSource } from './types'
 
 // ---------------------------------------------------------------------------
@@ -285,15 +287,74 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   // ============ Write Operations ============
 
-  async appendMessage(topicId: string, message: Message, blocks: MessageBlock[], insertIndex?: number): Promise<void> {
+  async appendMessage(
+    topicId: string,
+    message: Message,
+    blocks: MessageBlock[],
+    insertIndex?: number,
+    sendContext?: SendDiagnosticsContext
+  ): Promise<void> {
+    // LOCK-004: when this append belongs to the ordinary send path, consume
+    // the ordinal from the CALLER'S OWN send context so renderer + main logs
+    // share the correct correlation id even when sends overlap or append
+    // callers interleave. Callers without a context (uninstrumented append
+    // paths) attach no diagnostics and emit no timing logs.
+    const sendDiagnostics = consumeNextAppendDiagnostics(sendContext)
+    const correlationId = sendDiagnostics?.correlationId
+    const ordinal = sendDiagnostics?.ordinal
+    const isDiagnosedAppend = correlationId !== undefined
+
+    const t0 = performance.now()
     const sanitizedIndex = sanitizeInsertIndex(insertIndex)
     const request: AppendMessageRequest = {
       topicId,
       message: cloneForWire(message as unknown as JsonObject),
       blocks: cloneForWire(blocks as unknown as JsonObject[]),
-      ...(sanitizedIndex !== undefined && { insertIndex: sanitizedIndex })
+      ...(sanitizedIndex !== undefined && { insertIndex: sanitizedIndex }),
+      ...(isDiagnosedAppend && { diagnostics: sendDiagnostics })
     }
-    unwrap(await this.api.appendMessage(request))
+    const serializeDurationMs = elapsedMs(t0)
+    if (isDiagnosedAppend) {
+      logAppendDiagnostic('renderer.append.serialize', serializeDurationMs, {
+        correlationId,
+        ordinal,
+        ok: true,
+        messageIdPresent: typeof message?.id === 'string' && message.id.length > 0,
+        blockCount: blocks.length
+      })
+    }
+
+    const tIpc = performance.now()
+    let result: ChatDbResult<null>
+    try {
+      result = await this.api.appendMessage(request)
+    } catch (error) {
+      // Transport rejection propagates unchanged; timing still recorded.
+      if (isDiagnosedAppend) {
+        logAppendDiagnostic('renderer.append.ipc', elapsedMs(tIpc), {
+          correlationId,
+          ordinal,
+          ok: false
+        })
+      }
+      throw error
+    }
+    if (isDiagnosedAppend) {
+      logAppendDiagnostic('renderer.append.ipc', elapsedMs(tIpc), {
+        correlationId,
+        ordinal,
+        ok: result.ok === true
+      })
+    }
+
+    unwrap(result)
+    if (isDiagnosedAppend) {
+      logAppendDiagnostic('renderer.append.total', elapsedMs(t0), {
+        correlationId,
+        ordinal,
+        ok: true
+      })
+    }
     dispatchTopicUpdatedAt(topicId)
   }
 

@@ -3,6 +3,7 @@ import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type { FileCleanupResult } from '@shared/chatDb'
 
 import { fileLock } from '../FileLock'
+import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
 import { SqliteMessageDataSource } from './SqliteMessageDataSource'
 import type { MessageDataSource } from './types'
 
@@ -48,8 +49,14 @@ class DbService implements MessageDataSource {
   getRawTopic(topicId: string) {
     return this.ordinarySource.getRawTopic(topicId)
   }
-  appendMessage(topicId: string, message: Message, blocks: MessageBlock[], insertIndex?: number) {
-    return this.ordinarySource.appendMessage(topicId, message, blocks, insertIndex)
+  appendMessage(
+    topicId: string,
+    message: Message,
+    blocks: MessageBlock[],
+    insertIndex?: number,
+    sendContext?: SendDiagnosticsContext
+  ) {
+    return this.ordinarySource.appendMessage(topicId, message, blocks, insertIndex, sendContext)
   }
   updateMessage(topicId: string, messageId: string, updates: Partial<Message>) {
     return this.ordinarySource.updateMessage(topicId, messageId, updates)

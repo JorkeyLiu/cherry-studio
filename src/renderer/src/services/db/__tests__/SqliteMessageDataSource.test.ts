@@ -16,6 +16,7 @@
  * - SQLite datasource structurally has no file-count methods
  */
 
+import { loggerService } from '@logger'
 import type {
   AppendMessageRequest,
   BulkAddBlocksRequest,
@@ -77,8 +78,10 @@ import type {
   UpsertSegmentResponse
 } from '@shared/chatDb'
 import { fail, ok } from '@shared/chatDb'
+import { resetDiagnosticCounters } from '@shared/diagnostics/sendTiming'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { createSendDiagnosticsContext } from '../sendTimingDiagnostics'
 import { ChatDbResultError, SqliteMessageDataSource } from '../SqliteMessageDataSource'
 
 // ---------------------------------------------------------------------------
@@ -1128,6 +1131,165 @@ describe('SqliteMessageDataSource', () => {
       await ds.fetchMessages('t-1')
       expect(injected.fetchMessages).toHaveBeenCalledOnce()
       expect(windowApi.fetchMessages).not.toHaveBeenCalled()
+    })
+  })
+
+  // =========================================================================
+  // Send-timing diagnostics (LOCK-001/003/004)
+  // =========================================================================
+
+  describe('append send-timing diagnostics', () => {
+    let infoSpy: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      resetDiagnosticCounters()
+      infoSpy = vi.spyOn(loggerService, 'info').mockImplementation(() => {})
+    })
+
+    afterEach(() => {
+      infoSpy.mockRestore()
+      resetDiagnosticCounters()
+    })
+
+    const userMsg = { id: 'm-1', role: 'user', content: 'hi' } as any
+    const userBlk = { id: 'b-1', messageId: 'm-1', type: 'main_text', content: 'hi' } as any
+
+    it('omits diagnostics and timing logs when no send context is supplied', async () => {
+      api.appendMessage.mockResolvedValue(successResult(null))
+      await ds.appendMessage('topic-1', userMsg, [userBlk])
+
+      const req = api.appendMessage.mock.calls[0][0]
+      expect(req.diagnostics).toBeUndefined()
+      const diagnosticLogs = infoSpy.mock.calls.filter((call) => String(call[0]).includes('[diagnostics]'))
+      expect(diagnosticLogs).toHaveLength(0)
+    })
+
+    it('attaches correlationId + ordinal (1 then 2) for the two appends of one send', async () => {
+      api.appendMessage.mockResolvedValue(successResult(null))
+      const sendContext = createSendDiagnosticsContext()
+
+      await ds.appendMessage('topic-1', userMsg, [userBlk], undefined, sendContext)
+      await ds.appendMessage('topic-1', { ...userMsg, id: 'm-2' }, [], undefined, sendContext)
+
+      const firstReq = api.appendMessage.mock.calls[0][0]
+      const secondReq = api.appendMessage.mock.calls[1][0]
+      expect(firstReq.diagnostics).toEqual({ correlationId: sendContext.correlationId, ordinal: 1 })
+      expect(secondReq.diagnostics).toEqual({ correlationId: sendContext.correlationId, ordinal: 2 })
+    })
+
+    it('keeps correlation ids and ordinals separate across overlapping sends (LOCK-004)', async () => {
+      // Two sends (ctxA, ctxB) interleave their append IPC round trips; each
+      // append must consume from its OWN context and never cross-attribute.
+      let resolveA: (v: ChatDbResult<null>) => void
+      let resolveB: (v: ChatDbResult<null>) => void
+      const gateA = new Promise<ChatDbResult<null>>((r) => {
+        resolveA = r
+      })
+      const gateB = new Promise<ChatDbResult<null>>((r) => {
+        resolveB = r
+      })
+      api.appendMessage.mockReturnValueOnce(gateA).mockReturnValueOnce(gateB).mockResolvedValue(successResult(null))
+
+      const ctxA = createSendDiagnosticsContext()
+      const ctxB = createSendDiagnosticsContext()
+
+      const pA1 = ds.appendMessage('topic-1', { ...userMsg, id: 'a1' }, [], undefined, ctxA)
+      const pB1 = ds.appendMessage('topic-1', { ...userMsg, id: 'b1' }, [], undefined, ctxB)
+      const pB2 = ds.appendMessage('topic-1', { ...userMsg, id: 'b2' }, [], undefined, ctxB)
+      const pA2 = ds.appendMessage('topic-1', { ...userMsg, id: 'a2' }, [], undefined, ctxA)
+
+      resolveA!(successResult(null))
+      resolveB!(successResult(null))
+      await Promise.all([pA1, pB1, pB2, pA2])
+
+      const diags = api.appendMessage.mock.calls.map((c) => c[0].diagnostics)
+      expect(diags[0]).toEqual({ correlationId: ctxA.correlationId, ordinal: 1 })
+      expect(diags[1]).toEqual({ correlationId: ctxB.correlationId, ordinal: 1 })
+      expect(diags[2]).toEqual({ correlationId: ctxB.correlationId, ordinal: 2 })
+      expect(diags[3]).toEqual({ correlationId: ctxA.correlationId, ordinal: 2 })
+      // The two correlation ids are distinct.
+      expect(ctxA.correlationId).not.toBe(ctxB.correlationId)
+    })
+
+    it('emits bounded stage logs whose correlation metadata matches the request diagnostics', async () => {
+      api.appendMessage.mockResolvedValue(successResult(null))
+      const sendContext = createSendDiagnosticsContext()
+
+      await ds.appendMessage('topic-1', userMsg, [userBlk], undefined, sendContext)
+
+      const req = api.appendMessage.mock.calls[0][0]
+      const diagCalls = infoSpy.mock.calls.filter((call) => String(call[0]).includes('[diagnostics]'))
+      expect(diagCalls.length).toBeGreaterThanOrEqual(3)
+      const stages = diagCalls.map((call) => String(call[0]).replace('[diagnostics] ', ''))
+      expect(stages).toContain('renderer.append.serialize')
+      expect(stages).toContain('renderer.append.ipc')
+      expect(stages).toContain('renderer.append.total')
+
+      for (const call of diagCalls) {
+        const data = call[1] as Record<string, unknown>
+        expect(data.correlationId).toBe(req.diagnostics?.correlationId)
+        expect(data.ordinal).toBe(req.diagnostics?.ordinal)
+        expect(data.ok).toBe(true)
+        expect(typeof data.durationMs).toBe('number')
+        // Never logs message content or raw request objects.
+        const serialized = JSON.stringify(data)
+        expect(serialized).not.toContain('hi')
+        expect(serialized).not.toContain('content')
+        expect(serialized).not.toContain('m-1')
+      }
+    })
+
+    it('logs ok=false and propagates transport rejection without replacing it', async () => {
+      const transportError = new Error('IPC transport failed')
+      api.appendMessage.mockRejectedValue(transportError)
+      const sendContext = createSendDiagnosticsContext()
+
+      await expect(ds.appendMessage('topic-1', userMsg, [userBlk], undefined, sendContext)).rejects.toThrow(
+        'IPC transport failed'
+      )
+
+      const diagCalls = infoSpy.mock.calls.filter((call) => String(call[0]).includes('[diagnostics]'))
+      const ipcFail = diagCalls.find((call) => String(call[0]).includes('renderer.append.ipc'))
+      expect(ipcFail).toBeDefined()
+      expect((ipcFail![1] as Record<string, unknown>).ok).toBe(false)
+    })
+
+    it('logs ok=false on structured failure and still throws ChatDbResultError', async () => {
+      api.appendMessage.mockResolvedValue(failureResult('ERR_STORAGE', 'db failed'))
+      const sendContext = createSendDiagnosticsContext()
+
+      await expect(ds.appendMessage('topic-1', userMsg, [userBlk], undefined, sendContext)).rejects.toThrow(
+        ChatDbResultError
+      )
+
+      const diagCalls = infoSpy.mock.calls.filter((call) => String(call[0]).includes('[diagnostics]'))
+      const ipcFail = diagCalls.find((call) => String(call[0]).includes('renderer.append.ipc'))
+      expect(ipcFail).toBeDefined()
+      expect((ipcFail![1] as Record<string, unknown>).ok).toBe(false)
+      // No success total log after a failed append.
+      expect(diagCalls.some((call) => String(call[0]).includes('renderer.append.total'))).toBe(false)
+    })
+
+    it('bounds volume to the first few sends per stage (LOCK-003)', async () => {
+      api.appendMessage.mockResolvedValue(successResult(null))
+      const sendContext = createSendDiagnosticsContext()
+      // 12 appends (6 sends) → only the first 6 per stage are logged.
+      for (let i = 0; i < 12; i++) {
+        await ds.appendMessage('topic-1', { ...userMsg, id: `m-${i}` }, [], undefined, sendContext)
+      }
+      const serializeLogs = infoSpy.mock.calls.filter((call) => String(call[0]).includes('renderer.append.serialize'))
+      expect(serializeLogs.length).toBeLessThanOrEqual(6)
+    })
+
+    it('a later uninstrumented append is never attributed to a prior send context', async () => {
+      api.appendMessage.mockResolvedValue(successResult(null))
+      const sendContext = createSendDiagnosticsContext()
+      await ds.appendMessage('topic-1', userMsg, [userBlk], undefined, sendContext)
+      // Same caller, no context → no diagnostics, no attribution.
+      await ds.appendMessage('topic-1', { ...userMsg, id: 'm-2' }, [])
+
+      const secondReq = api.appendMessage.mock.calls[1][0]
+      expect(secondReq.diagnostics).toBeUndefined()
     })
   })
 })

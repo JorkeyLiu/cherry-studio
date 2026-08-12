@@ -34,9 +34,12 @@ import { getAllFiles, sanitizeFilename } from '@main/utils/file'
 import { TraceMethod } from '@mcp-trace/trace-core'
 import { MB } from '@shared/config/constant'
 import type { LoaderReturn } from '@shared/config/types'
+import { elapsedMs, MAX_COLD_PATH_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
 import { IpcChannel } from '@shared/IpcChannel'
 import type { FileMetadata, KnowledgeBaseParams, KnowledgeItem, KnowledgeSearchResult } from '@types'
 import { v4 as uuidv4 } from 'uuid'
+
+import { logMainDiagnostic } from './diagnostics'
 
 const logger = loggerService.withContext('MainKnowledgeService')
 
@@ -241,9 +244,14 @@ class KnowledgeService {
     documentCount
   }: KnowledgeBaseParams): Promise<RAGApplication> => {
     if (this.ragApplications.has(id)) {
+      logMainDiagnostic('knowledge.ragInit', 0, MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        cached: true,
+        ok: true
+      })
       return this.ragApplications.get(id)!
     }
 
+    const t0 = performance.now()
     let ragApplication: RAGApplication
     const embeddings = new Embeddings({
       embedApiClient,
@@ -262,7 +270,15 @@ class KnowledgeService {
         .setSearchResultCount(documentCount || 30)
         .build()
       this.ragApplications.set(id, ragApplication)
+      logMainDiagnostic('knowledge.ragInit', elapsedMs(t0), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        cached: false,
+        ok: true
+      })
     } catch (e) {
+      logMainDiagnostic('knowledge.ragInit', elapsedMs(t0), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        cached: false,
+        ok: false
+      })
       logger.error('Failed to create RAGApplication:', e as Error)
       throw new Error(`Failed to create RAGApplication: ${e}`)
     }
@@ -667,8 +683,29 @@ class KnowledgeService {
     _: Electron.IpcMainInvokeEvent,
     { search, base }: { search: string; base: KnowledgeBaseParams }
   ): Promise<KnowledgeSearchResult[]> {
-    const ragApplication = await this.getRagApplication(base)
-    return await ragApplication.search(search)
+    const t0 = performance.now()
+    let ragApplication: RAGApplication
+    try {
+      ragApplication = await this.getRagApplication(base)
+    } catch (error) {
+      logMainDiagnostic('knowledge.search', elapsedMs(t0), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        ok: false
+      })
+      throw error
+    }
+    try {
+      const results = await ragApplication.search(search)
+      logMainDiagnostic('knowledge.search', elapsedMs(t0), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        resultCount: results.length,
+        ok: true
+      })
+      return results
+    } catch (error) {
+      logMainDiagnostic('knowledge.search', elapsedMs(t0), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        ok: false
+      })
+      throw error
+    }
   }
 
   @TraceMethod({ spanName: 'rerank', tag: 'Knowledge' })

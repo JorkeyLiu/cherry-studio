@@ -1,9 +1,11 @@
 import { loggerService } from '@logger'
+import { elapsedMs, MAX_COLD_PATH_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
 import { app, net, safeStorage } from 'electron'
 import fs from 'fs'
 import path from 'path'
 
 import { getConfigDir } from '../utils/file'
+import { logMainDiagnostic } from './diagnostics'
 
 const logger = loggerService.withContext('CopilotService')
 
@@ -239,6 +241,7 @@ class CopilotService {
     _: Electron.IpcMainInvokeEvent,
     headers?: Record<string, string>
   ): Promise<CopilotTokenResponse> => {
+    const t0 = performance.now()
     try {
       this.updateHeaders(headers)
 
@@ -257,8 +260,14 @@ class CopilotService {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`)
       }
 
+      logMainDiagnostic('copilot.tokenRetrieval', elapsedMs(t0), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        ok: true
+      })
       return (await response.json()) as CopilotTokenResponse
     } catch (error) {
+      logMainDiagnostic('copilot.tokenRetrieval', elapsedMs(t0), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        ok: false
+      })
       logger.error('Failed to get Copilot token:', error as Error)
       throw new CopilotServiceError('无法获取Copilot令牌，请重新授权', error)
     }

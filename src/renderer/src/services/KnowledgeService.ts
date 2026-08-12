@@ -23,10 +23,12 @@ import { routeToEndpoint } from '@renderer/utils'
 import type { ExtractResults } from '@renderer/utils/extract'
 import { createCitationBlock } from '@renderer/utils/messageUtils/create'
 import { isAzureOpenAIProvider, isGeminiProvider } from '@renderer/utils/provider'
+import { elapsedMs } from '@shared/diagnostics/sendTiming'
 import type { ModelMessage, UserModelMessage } from 'ai'
 import { isEmpty } from 'lodash'
 
 import { getProviderByModel } from './AssistantService'
+import { logColdPathDiagnostic } from './db/sendTimingDiagnostics'
 import FileManager from './FileManager'
 import type { BlockManager } from './messageStreaming'
 import { estimateTextTokens } from './TokenService'
@@ -376,47 +378,71 @@ export const injectUserMessageWithKnowledgeSearchPrompt = async ({
   setCitationBlockId: (blockId: string) => void
 }) => {
   if (assistant.knowledge_bases?.length && modelMessages.length > 0) {
-    const lastUserMessage = modelMessages[modelMessages.length - 1]
-    const isUserMessage = lastUserMessage.role === 'user'
+    // LOCK-001/003: bounded cold-path timing for the whole knowledge
+    // retrieval+inject boundary. The query text and references are NEVER
+    // logged; only the duration, knowledge-base count, result count, and ok.
+    const t0 = performance.now()
+    const knowledgeBaseCount = assistant.knowledge_bases.length
+    try {
+      const lastUserMessage = modelMessages[modelMessages.length - 1]
+      const isUserMessage = lastUserMessage.role === 'user'
 
-    if (!isUserMessage) {
-      return
-    }
-
-    const knowledgeReferences = await getKnowledgeReferences({
-      assistant,
-      lastUserMessage,
-      topicId: topicId
-    })
-
-    if (knowledgeReferences.length === 0) {
-      return
-    }
-
-    await createKnowledgeReferencesBlock({
-      assistantMsgId,
-      knowledgeReferences,
-      blockManager,
-      setCitationBlockId
-    })
-
-    const question = getMessageContent(lastUserMessage) || ''
-    const references = JSON.stringify(knowledgeReferences, null, 2)
-
-    const knowledgeSearchPrompt = REFERENCE_PROMPT.replace('{question}', question).replace('{references}', references)
-
-    if (typeof lastUserMessage.content === 'string') {
-      lastUserMessage.content = knowledgeSearchPrompt
-    } else if (Array.isArray(lastUserMessage.content)) {
-      const textPart = lastUserMessage.content.find((part) => part.type === 'text')
-      if (textPart) {
-        textPart.text = knowledgeSearchPrompt
-      } else {
-        lastUserMessage.content.push({
-          type: 'text',
-          text: knowledgeSearchPrompt
-        })
+      if (!isUserMessage) {
+        return
       }
+
+      const knowledgeReferences = await getKnowledgeReferences({
+        assistant,
+        lastUserMessage,
+        topicId: topicId
+      })
+
+      if (knowledgeReferences.length === 0) {
+        logColdPathDiagnostic('renderer.knowledge.inject', elapsedMs(t0), {
+          knowledgeBaseCount,
+          resultCount: 0,
+          ok: true
+        })
+        return
+      }
+
+      await createKnowledgeReferencesBlock({
+        assistantMsgId,
+        knowledgeReferences,
+        blockManager,
+        setCitationBlockId
+      })
+
+      const question = getMessageContent(lastUserMessage) || ''
+      const references = JSON.stringify(knowledgeReferences, null, 2)
+
+      const knowledgeSearchPrompt = REFERENCE_PROMPT.replace('{question}', question).replace('{references}', references)
+
+      if (typeof lastUserMessage.content === 'string') {
+        lastUserMessage.content = knowledgeSearchPrompt
+      } else if (Array.isArray(lastUserMessage.content)) {
+        const textPart = lastUserMessage.content.find((part) => part.type === 'text')
+        if (textPart) {
+          textPart.text = knowledgeSearchPrompt
+        } else {
+          lastUserMessage.content.push({
+            type: 'text',
+            text: knowledgeSearchPrompt
+          })
+        }
+      }
+
+      logColdPathDiagnostic('renderer.knowledge.inject', elapsedMs(t0), {
+        knowledgeBaseCount,
+        resultCount: knowledgeReferences.length,
+        ok: true
+      })
+    } catch (error) {
+      logColdPathDiagnostic('renderer.knowledge.inject', elapsedMs(t0), {
+        knowledgeBaseCount,
+        ok: false
+      })
+      throw error
     }
   }
 }

@@ -1,6 +1,8 @@
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type { FileCleanupResult } from '@shared/chatDb'
 
+import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
+
 /**
  * Message exchange data structure for persisting user-assistant conversations
  */
@@ -39,9 +41,19 @@ export interface MessageDataSource {
 
   // ============ Write Operations ============
   /**
-   * Append a single message with its blocks
+   * Append a single message with its blocks.
+   *
+   * `sendContext` is optional diagnostic-only correlation metadata (LOCK-004):
+   * when supplied by the ordinary send path, the append consumes the next
+   * ordinal from that send's own context. It never affects persistence.
    */
-  appendMessage(topicId: string, message: Message, blocks: MessageBlock[], insertIndex?: number): Promise<void>
+  appendMessage(
+    topicId: string,
+    message: Message,
+    blocks: MessageBlock[],
+    insertIndex?: number,
+    sendContext?: SendDiagnosticsContext
+  ): Promise<void>
 
   /**
    * Update an existing message

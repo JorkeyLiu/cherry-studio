@@ -38,6 +38,7 @@ import { HOME_CHERRY_DIR } from '@shared/config/constant'
 import { appIdentity } from '@shared/config/identity'
 import type { MCPProgressEvent } from '@shared/config/types'
 import type { MCPServerLogEntry } from '@shared/config/types'
+import { elapsedMs, MAX_COLD_PATH_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
 import { IpcChannel } from '@shared/IpcChannel'
 import { buildFunctionCallToolName } from '@shared/mcp'
 import { defaultAppHeaders } from '@shared/utils'
@@ -59,6 +60,7 @@ import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 
 import { CacheService } from './CacheService'
+import { logMainDiagnostic } from './diagnostics'
 import DxtService from './DxtService'
 import { CallBackServer } from './mcp/oauth/callback'
 import { McpOAuthClientProvider } from './mcp/oauth/provider'
@@ -886,8 +888,38 @@ class McpService {
     }
   }
 
+  /**
+   * Non-sensitive transport category for MCP timing diagnostics (LOCK-002:
+   * never logs command, args, environment, baseUrl, or headers).
+   */
+  private classifyServerType(server: MCPServer): string {
+    if (isBuiltinMCPServer(server)) {
+      return 'inMemory'
+    }
+    if (server.type) {
+      return server.type
+    }
+    return server.baseUrl ? 'streamableHttp' : 'stdio'
+  }
+
   private async listToolsImpl(server: MCPServer): Promise<MCPTool[]> {
-    const client = await this.initClient(server)
+    const serverType = this.classifyServerType(server)
+    let client: Client
+    const tInit = performance.now()
+    try {
+      client = await this.initClient(server)
+      logMainDiagnostic('mcp.initClient', elapsedMs(tInit), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        serverType,
+        ok: true
+      })
+    } catch (error) {
+      logMainDiagnostic('mcp.initClient', elapsedMs(tInit), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        serverType,
+        ok: false
+      })
+      throw error
+    }
+    const tTools = performance.now()
     try {
       const { tools } = await client.listTools()
       const serverTools: MCPTool[] = []
@@ -904,8 +936,17 @@ class McpService {
         serverTools.push(serverTool)
         getServerLogger(server).debug(`Listing tools`, { tool: serverTool })
       })
+      logMainDiagnostic('mcp.listTools', elapsedMs(tTools), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        serverType,
+        toolCount: serverTools.length,
+        ok: true
+      })
       return serverTools
     } catch (error: unknown) {
+      logMainDiagnostic('mcp.listTools', elapsedMs(tTools), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        serverType,
+        ok: false
+      })
       getServerLogger(server).error(`Failed to list tools`, error as Error)
       throw error
     }

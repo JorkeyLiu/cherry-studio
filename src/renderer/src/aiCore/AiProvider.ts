@@ -2,12 +2,15 @@ import { createExecutor } from '@cherrystudio/ai-core'
 import type { generateImageResult } from '@cherrystudio/ai-core/core/runtime/types'
 import { loggerService } from '@logger'
 import { getEnableDeveloperMode } from '@renderer/hooks/useSettings'
+import { logColdPathDiagnostic } from '@renderer/services/db/sendTimingDiagnostics'
 import { addSpan, endSpan } from '@renderer/services/SpanManagerService'
 import type { StartSpanParams } from '@renderer/trace/types/ModelSpanEntity'
 import type { Assistant, EditImageParams, GenerateImageParams, Model, Provider } from '@renderer/types'
+import { SystemProviderIds } from '@renderer/types'
 import type { StreamTextParams } from '@renderer/types/aiCoreTypes'
 import { getLowerBaseModelName } from '@renderer/utils'
 import { buildClaudeCodeSystemModelMessage } from '@shared/anthropic'
+import { elapsedMs } from '@shared/diagnostics/sendTiming'
 
 import AiSdkToChunkAdapter from './chunk/AiSdkToChunkAdapter'
 import { buildPlugins } from './plugins/PluginBuilder'
@@ -17,6 +20,20 @@ import type { AppProviderSettingsMap, CompletionsResult, ProviderConfig } from '
 import type { AiSdkMiddlewareConfig } from './types/middlewareConfig'
 
 const logger = loggerService.withContext('AiProvider')
+
+/**
+ * Non-sensitive category for provider cold-path timing diagnostics
+ * (LOCK-002: never logs apiKey, token values, or custom provider settings).
+ */
+function classifyProviderConfigCategory(provider: Provider): string {
+  if (provider.id === SystemProviderIds.copilot) {
+    return 'copilot'
+  }
+  if (provider.id === SystemProviderIds.anthropic && provider.authType === 'oauth') {
+    return 'anthropic-oauth'
+  }
+  return 'other'
+}
 
 export type AiProviderConfig = AiSdkMiddlewareConfig & {
   assistant: Assistant
@@ -102,14 +119,29 @@ export default class AiProvider {
 
     // Config is now set in constructor, ApiService handles key rotation before passing provider
     if (!this.config) {
-      // If config wasn't set in constructor (when provider only), generate it now
-      this.config = await Promise.resolve(providerToAiSdkConfig(this.actualProvider, this.model))
+      // If config wasn't set in constructor (when provider only), generate it now.
+      // LOCK-001/003: bounded cold-path timing for provider config building
+      // (includes Copilot token retrieval / Anthropic OAuth for those types).
+      const tConfig = performance.now()
+      try {
+        this.config = await Promise.resolve(providerToAiSdkConfig(this.actualProvider, this.model))
+        logColdPathDiagnostic('renderer.provider.configBuild', elapsedMs(tConfig), {
+          category: classifyProviderConfigCategory(this.actualProvider),
+          ok: true
+        })
+      } catch (error) {
+        logColdPathDiagnostic('renderer.provider.configBuild', elapsedMs(tConfig), {
+          category: classifyProviderConfigCategory(this.actualProvider),
+          ok: false
+        })
+        throw error
+      }
     }
     logger.debug('Using provider config for completions', this.config)
 
     // 注意：模型对象将由 createExecutor 内部处理，不再需要预先创建
 
-    if (this.actualProvider.id === 'anthropic' && this.actualProvider.authType === 'oauth') {
+    if (this.actualProvider.id === SystemProviderIds.anthropic && this.actualProvider.authType === 'oauth') {
       // 类型守卫：确保 system 是 string、Array 或 undefined
       const system = params.system
       let systemParam: string | Array<any> | undefined
@@ -241,11 +273,28 @@ export default class AiProvider {
     })
 
     // 用构建好的插件数组创建executor
-    const executor = await createExecutor<AppProviderSettingsMap>(
-      providerConfig.providerId,
-      providerConfig.providerSettings,
-      plugins
-    )
+    // LOCK-001/003: bounded cold-path timing for provider executor creation.
+    const tExecutor = performance.now()
+    let executor: Awaited<ReturnType<typeof createExecutor<AppProviderSettingsMap>>>
+    try {
+      executor = await createExecutor<AppProviderSettingsMap>(
+        providerConfig.providerId,
+        providerConfig.providerSettings,
+        plugins
+      )
+      logColdPathDiagnostic('renderer.provider.executorCreate', elapsedMs(tExecutor), {
+        category: classifyProviderConfigCategory(this.actualProvider),
+        providerId: providerConfig.providerId,
+        ok: true
+      })
+    } catch (error) {
+      logColdPathDiagnostic('renderer.provider.executorCreate', elapsedMs(tExecutor), {
+        category: classifyProviderConfigCategory(this.actualProvider),
+        providerId: providerConfig.providerId,
+        ok: false
+      })
+      throw error
+    }
 
     // 创建带有中间件的执行器
     if (middlewareConfig.onChunk) {

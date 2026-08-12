@@ -7,10 +7,13 @@ import path from 'node:path'
 
 import { loggerService } from '@logger'
 import { getConfigDir } from '@main/utils/file'
+import { elapsedMs, MAX_COLD_PATH_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
 import * as crypto from 'crypto'
 import { net, shell } from 'electron'
 import { promises } from 'fs'
 import { dirname } from 'path'
+
+import { logMainDiagnostic } from './diagnostics'
 
 const logger = loggerService.withContext('AnthropicOAuth')
 
@@ -133,22 +136,38 @@ class AnthropicService extends Error {
 
   // 7. Get valid access token (refresh if needed)
   public async getValidAccessToken(): Promise<string | null> {
-    const creds = await this.loadCredentials()
-    if (!creds) return null
-
-    // If token is still valid, return it
-    if (creds.expires_at > Date.now() + 60000) {
-      // 1 minute buffer
-      return creds.access_token
-    }
-
-    // Otherwise, refresh it
+    const t0 = performance.now()
+    let refreshed = false
+    let tokenObtained = false
     try {
-      const newCreds = await this.refreshAccessToken(creds.refresh_token)
-      await this.saveCredentials(newCreds)
-      return newCreds.access_token
-    } catch {
-      return null
+      const creds = await this.loadCredentials()
+      if (!creds) return null
+
+      // If token is still valid, return it
+      if (creds.expires_at > Date.now() + 60000) {
+        // 1 minute buffer
+        tokenObtained = true
+        return creds.access_token
+      }
+
+      // Otherwise, refresh it
+      refreshed = true
+      try {
+        const newCreds = await this.refreshAccessToken(creds.refresh_token)
+        await this.saveCredentials(newCreds)
+        tokenObtained = true
+        return newCreds.access_token
+      } catch {
+        return null
+      }
+    } finally {
+      // LOCK-001/003: bounded timing log fires on every path (token read,
+      // valid-token fast path, refresh success/failure) without changing
+      // behavior. Never logs the token itself.
+      logMainDiagnostic('anthropic.oauthToken', elapsedMs(t0), MAX_COLD_PATH_DIAGNOSTIC_LOGS, {
+        refreshed,
+        ok: tokenObtained
+      })
     }
   }
 

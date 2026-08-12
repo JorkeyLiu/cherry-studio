@@ -27,6 +27,7 @@ import { findFileBlocks, findImageBlocks, getMainTextContent } from '@renderer/u
 import { assertProviderMatchesModel, createNoModelError } from '@renderer/utils/noModelError'
 import { containsSupportedVariables, replacePromptVariables } from '@renderer/utils/prompt'
 import { NOT_SUPPORT_API_KEY_PROVIDER_TYPES, NOT_SUPPORT_API_KEY_PROVIDERS } from '@renderer/utils/provider'
+import { elapsedMs } from '@shared/diagnostics/sendTiming'
 import { isEmpty, takeRight } from 'lodash'
 
 import type { AiProviderConfig } from '../aiCore'
@@ -40,6 +41,7 @@ import {
   getQuickModel
 } from './AssistantService'
 import { ConversationService } from './ConversationService'
+import { logColdPathDiagnostic } from './db/sendTimingDiagnostics'
 import { injectUserMessageWithKnowledgeSearchPrompt } from './KnowledgeService'
 import type { BlockManager } from './messageStreaming'
 import type { StreamProcessorCallbacks } from './StreamProcessingService'
@@ -121,22 +123,38 @@ export async function fetchMcpTools(assistant: Assistant) {
   const enabledMCPs = getMcpServersForAssistant(assistant)
 
   if (enabledMCPs && enabledMCPs.length > 0) {
+    // LOCK-001/003: bounded cold-path timing for the renderer→main MCP tool
+    // discovery round trip. Never logs server names/args/env.
+    const t0 = performance.now()
     try {
       const toolPromises = enabledMCPs.map(async (mcpServer: MCPServer) => {
         try {
           const tools = await window.api.mcp.listTools(mcpServer)
           return tools.filter((tool: any) => !mcpServer.disabledTools?.includes(tool.name))
         } catch (error) {
+          // Per-server failure: log and swallow exactly as before, but rethrow
+          // so the settled result records the failure for the diagnostic.
           logger.error(`Error fetching tools from MCP server ${mcpServer.name}:`, error as Error)
-          return []
+          throw error
         }
       })
       const results = await Promise.allSettled(toolPromises)
+      const failedCount = results.filter((result) => result.status === 'rejected').length
       mcpTools = results
         .filter((result): result is PromiseFulfilledResult<MCPTool[]> => result.status === 'fulfilled')
         .map((result) => result.value)
         .flat()
+      logColdPathDiagnostic('renderer.mcp.listTools', elapsedMs(t0), {
+        serverCount: enabledMCPs.length,
+        toolCount: mcpTools.length,
+        failedCount,
+        ok: failedCount === 0
+      })
     } catch (toolError) {
+      logColdPathDiagnostic('renderer.mcp.listTools', elapsedMs(t0), {
+        serverCount: enabledMCPs.length,
+        ok: false
+      })
       logger.error('Error fetching MCP tools:', toolError as Error)
     }
   }
