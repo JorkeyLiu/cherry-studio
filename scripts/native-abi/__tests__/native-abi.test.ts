@@ -1892,6 +1892,7 @@ describe('package-script lane declaration call graph (finding F)', () => {
       'build:linux:arm64',
       'build:linux:x64',
       'test:e2e',
+      'ui:observe',
       'analyze:renderer',
       'analyze:main'
     ]) {

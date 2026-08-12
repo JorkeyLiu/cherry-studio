@@ -78,6 +78,8 @@
     "test:ui": "pnpm native:run node -- vitest --ui",
     "test:watch": "pnpm native:run node -- vitest",
     "test:e2e": "pnpm native:run electron -- pnpm playwright test",
+    "ui:observe": "pnpm native:run electron -- pnpm ui:observe:run",
+    "ui:observe:run": "tsx scripts/ui-observe/cli.ts",
     "test:lint": "oxlint --deny-warnings && eslint . --ext .js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts --cache",
     "test:scripts": "pnpm native:run node -- vitest scripts",
     "lint": "oxlint --fix && eslint . --ext .js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts --fix --cache && pnpm typecheck && pnpm i18n:check && pnpm format",
