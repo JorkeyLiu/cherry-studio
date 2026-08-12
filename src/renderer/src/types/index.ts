@@ -201,10 +201,12 @@ export type AssistantSettings = {
   maxToolCalls?: number
   enableMaxToolCalls?: boolean
   /**
-   * Mode-neutral, per-topic anchor for the context window. When an `active`
-   * anchor exists for the topic, the window starts at that turn and grows with
-   * the conversation. When no (valid) anchor exists, the window start is
-   * derived from `contextCount` (the default initial window size).
+   * Mode-neutral, per-topic anchor for the context window. Holds ONLY a
+   * user-specified context start: when an `active` anchor exists for the
+   * topic, the window starts at that turn and grows with the conversation.
+   * When no (valid) anchor exists, the window start is derived dynamically
+   * from `contextCount` (the default initial window size) and the current
+   * messages — a derived default is projection, never persisted here.
    */
   contextWindowAnchor?: Record<string, TopicAnchor | undefined> // { [topicId]: TopicAnchor }
 }

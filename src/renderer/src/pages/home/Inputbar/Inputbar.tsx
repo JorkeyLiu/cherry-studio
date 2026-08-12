@@ -21,15 +21,9 @@ import {
   useInputbarToolsInternalDispatch,
   useInputbarToolsState
 } from '@renderer/pages/home/Inputbar/context/InputbarToolsProvider'
-import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
+import { getDefaultTopic } from '@renderer/services/AssistantService'
 import { CacheService } from '@renderer/services/CacheService'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
-import { buildContextTurns } from '@renderer/services/contextTurnService'
-import {
-  getTurnAnchorGroupKey,
-  resolveDefaultAnchorIndex,
-  resolveDefaultAnchorPersistence
-} from '@renderer/services/contextWindowService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import FileManager from '@renderer/services/FileManager'
@@ -56,6 +50,7 @@ import { useTranslation } from 'react-i18next'
 
 import TopicSegmentDrawer from '../Messages/TopicSegmentDrawer'
 import { InputbarCore } from './components/InputbarCore'
+import { useContextWindowAnchor } from './hooks/useContextWindowAnchor'
 import { usePromptTokenEstimate } from './hooks/usePromptTokenEstimate'
 import InputbarTools from './InputbarTools'
 import KnowledgeBaseInput from './KnowledgeBaseInput'
@@ -322,65 +317,15 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     }
   }, [config.showTokenCount, contextCount, estimateTokenCount])
 
-  // Default-anchor persistence (LOCK-CTX-2, LOCK-CTX-4, LOCK-FIX-3).
-  // When no valid anchor exists for the topic, derive the window start from the
-  // assistant's default context count and persist it as the anchor — finite N
-  // selects the most recent N turns, unlimited selects the first turn of the
-  // post-clear segment. This keeps the derived start stable as the topic grows,
-  // and ensures clearing a manual anchor restores the default window rather
-  // than full history. The pure compute layer applies the identical fallback,
-  // so full history is never transiently sent even before this write lands.
-  // When the post-clear segment has zero turns there is nothing to anchor, so
-  // any stale persisted anchor is removed (matching TokenCount reset behavior);
-  // the pure decision helper returns 'delete' only when an anchor actually
-  // exists, so this effect dispatches at most once and cannot loop.
-  useEffect(() => {
-    const settings = getAssistantSettings(assistant)
-    const decision = resolveDefaultAnchorPersistence(
-      buildContextTurns(topicMessages),
-      settings.contextCount,
-      settings.contextWindowAnchor?.[topic.id]
-    )
-    if (decision.type === 'none') {
-      return
-    }
-
-    const anchors = { ...settings.contextWindowAnchor }
-    if (decision.type === 'delete') {
-      delete anchors[topic.id]
-    } else {
-      anchors[topic.id] = decision.anchor
-    }
-    updateAssistantSettings({ contextWindowAnchor: anchors })
-  }, [topicMessages, assistant, topic.id, updateAssistantSettings])
-
-  // TokenCount click (LOCK-CTX-3): recompute and persist the default start.
-  // Finite N selects the most recent N turns; null (unlimited) selects the
-  // first turn of the current post-clear context segment. An empty topic clears
-  // any stale anchor (there is nothing to anchor).
-  const onUpdateAnchor = useCallback(() => {
-    const settings = getAssistantSettings(assistant)
-    const turns = buildContextTurns(topicMessages)
-
-    const anchors = { ...settings.contextWindowAnchor }
-    if (turns.length === 0) {
-      delete anchors[topic.id]
-      updateAssistantSettings({ contextWindowAnchor: anchors })
-      return
-    }
-
-    const derivedIndex = resolveDefaultAnchorIndex(turns, settings.contextCount)
-    if (derivedIndex < 0) {
-      return
-    }
-    const groupKey = getTurnAnchorGroupKey(turns[derivedIndex])
-    if (!groupKey) {
-      return
-    }
-
-    anchors[topic.id] = { kind: 'active', groupKey }
-    updateAssistantSettings({ contextWindowAnchor: anchors })
-  }, [assistant, topic.id, topicMessages, updateAssistantSettings])
+  // Context-window anchor control (explicit-anchor semantics): the persisted
+  // `contextWindowAnchor` holds ONLY a user-specified context start. The
+  // Inputbar never persists a derived default and never synchronizes anchors
+  // to message loading or message-list changes — a transient empty topic on
+  // startup cannot mutate a persisted explicit anchor. The only Inputbar
+  // mutation is reset (TokenCount click): delete the explicit entry so the
+  // existing default computation (assistant contextCount + current messages)
+  // determines the effective start.
+  const { onResetAnchor } = useContextWindowAnchor(assistant, topic.id, updateAssistantSettings)
 
   const onPause = useCallback(async () => {
     await pauseMessages()
@@ -405,9 +350,9 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     addTopic(newTopic)
     setActiveTopic(newTopic)
 
-    // The new topic has no anchor yet; the default-anchor persistence effect
-    // derives one from the assistant's default context count when the first
-    // message arrives (LOCK-CTX-2).
+    // The new topic has no explicit anchor yet; the default window start is
+    // derived dynamically from the assistant's default context count as
+    // messages arrive — defaults are never persisted.
 
     setTimeoutTimer('addNewTopic', () => EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR), 0)
   }, [addTopic, assistant, setActiveTopic, setModel, setTimeoutTimer])
@@ -523,7 +468,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
         <TokenCount
           estimateTokenCount={tokenCountProps.estimateTokenCount}
           contextCount={tokenCountProps.contextCount}
-          onUpdateAnchor={onUpdateAnchor}
+          onResetAnchor={onResetAnchor}
         />
       )}
     </>

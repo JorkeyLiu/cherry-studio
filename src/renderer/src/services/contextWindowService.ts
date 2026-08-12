@@ -1,5 +1,4 @@
 import type { ContextTurn } from '@renderer/services/contextTurnService'
-import { resolveAnchorTurnIndex } from '@renderer/services/contextTurnService'
 import type { TopicAnchor } from '@renderer/types'
 
 /**
@@ -8,15 +7,17 @@ import type { TopicAnchor } from '@renderer/types'
  *
  * There is exactly one context window model: anchor-to-topic-end. When a valid
  * manual anchor exists, the window starts at that turn and grows as the topic
- * grows. When no (valid) anchor exists, the window start is derived from the
- * assistant's default context count (`contextCount`):
+ * grows. When no (valid) anchor exists, the window start is derived dynamically
+ * from the assistant's default context count (`contextCount`):
  *
  *   - finite N  → start at the most recent N turns (never sends more than N)
  *   - null (∞)  → start at the first turn of the topic
  *
- * The derivation is kept here as a pure function so the UI can persist the
- * derived start as an anchor while the pure compute layer applies the exact
- * same fallback immediately — full history is never transiently sent.
+ * LOCK-CTX-1: `contextWindowAnchor[topicId]` holds ONLY a user-specified
+ * context start — a derived default is projection, never persisted state. This
+ * module therefore contains no persistence decision for derived defaults; the
+ * compute layer derives the default start on every call from the current
+ * messages and the assistant's `contextCount`.
  */
 
 /**
@@ -45,65 +46,27 @@ export function resolveDefaultAnchorIndex(turns: readonly ContextTurn[], context
 }
 
 /**
- * Derives the persisted `TopicAnchor.groupKey` for the given turn — the key that
- * `resolveAnchorTurnIndex` resolves back to EXACTLY this turn (LOCK-FIX-1):
+ * Reset decision for the TokenCount interaction. Deleting the explicit anchor
+ * for `topicId` makes the effective context start fall back to the dynamic
+ * default derivation (assistant `contextCount` + current messages).
  *
- *   - user-initiated turn → the user message id (the canonical group key)
- *   - any other turn      → the first message's OWN id (the assistant or system
- *     message id). The message id is used rather than an askId so the key stays
- *     unique even when an askId references a user message that also appears in an
- *     earlier turn — a derived anchor can therefore never slide to a different
- *     turn (the askId semantics remain supported in the resolver for legacy and
- *     manual anchors).
+ * The `changed` flag is `true` only when an explicit entry actually existed, so
+ * callers dispatch at most once and never churn on absent anchors. This helper
+ * strictly deletes — it never creates or replaces an anchor.
  *
- * Returns null only for an empty turn (never produced by buildContextTurns), in
- * which case no anchor should be persisted.
+ * @param anchors the persisted per-topic anchor map (may be undefined/absent)
+ * @param topicId the topic whose explicit designation is being reset
  */
-export function getTurnAnchorGroupKey(turn: ContextTurn): string | null {
-  const userMessage = turn.messages.find((m) => m.role === 'user')
-  if (userMessage) {
-    return userMessage.id
+export function resolveAnchorReset(
+  anchors: Record<string, TopicAnchor | undefined> | undefined,
+  topicId: string
+): { changed: boolean; anchors: Record<string, TopicAnchor | undefined> } {
+  const next = { ...anchors }
+  if (!(topicId in next)) {
+    return { changed: false, anchors: next }
   }
-  const firstMessage = turn.messages[0]
-  return firstMessage ? firstMessage.id : null
-}
-
-/**
- * Pure decision for the default-anchor persistence effect (LOCK-CTX-2, LOCK-CTX-4,
- * LOCK-FIX-3). Given the topic turns, the assistant's default context count
- * and the currently persisted anchor, decide whether the effect must write an
- * anchor, delete a stale anchor, or do nothing:
- *
- *   1. Empty topic turn list → nothing can be anchored: delete any persisted
- *      anchor, matching TokenCount reset behavior. Deleting only when an anchor
- *      actually exists is what prevents a dispatch loop (one write, then none).
- *   2. A valid active anchor (resolvable to a turn) is authoritative → no write.
- *   3. Otherwise derive the default start and persist it, unless it already
- *      matches the persisted anchor.
- */
-export function resolveDefaultAnchorPersistence(
-  turns: readonly ContextTurn[],
-  contextCount: number | null,
-  currentAnchor: TopicAnchor | undefined
-): { type: 'none' } | { type: 'delete' } | { type: 'persist'; anchor: TopicAnchor } {
-  if (turns.length === 0) {
-    return currentAnchor ? { type: 'delete' } : { type: 'none' }
-  }
-  if (currentAnchor?.kind === 'active' && resolveAnchorTurnIndex(turns, currentAnchor.groupKey) >= 0) {
-    return { type: 'none' }
-  }
-  const derivedIndex = resolveDefaultAnchorIndex(turns, contextCount)
-  if (derivedIndex < 0) {
-    return { type: 'none' }
-  }
-  const groupKey = getTurnAnchorGroupKey(turns[derivedIndex])
-  if (!groupKey) {
-    return { type: 'none' }
-  }
-  if (currentAnchor?.kind === 'active' && currentAnchor.groupKey === groupKey) {
-    return { type: 'none' }
-  }
-  return { type: 'persist', anchor: { kind: 'active', groupKey } }
+  delete next[topicId]
+  return { changed: true, anchors: next }
 }
 
 /**

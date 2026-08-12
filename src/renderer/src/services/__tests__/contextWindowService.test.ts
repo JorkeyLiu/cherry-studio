@@ -2,21 +2,21 @@
  * Tests for the pure, mode-neutral context-window derivation helpers
  * (LOCK-CTX-1, LOCK-CTX-2, LOCK-CTX-3, LOCK-CTX-9):
  *   - resolveDefaultAnchorIndex: default window start from contextCount
- *   - getTurnAnchorGroupKey: anchor group key for a turn
+ *   - resolveAnchorReset: TokenCount reset deletes the explicit anchor
+ *     entry — the only Inputbar anchor mutation
  *   - contextCountToSliderValue / sliderValueToContextCount: identical
  *     slider semantics on both assistant setting surfaces (1..99 finite,
  *     endpoint 100 → ∞ → null)
  */
 import type { ContextTurn } from '@renderer/services/contextTurnService'
-import { buildContextTurns, resolveAnchorTurnIndex } from '@renderer/services/contextTurnService'
+import type { TopicAnchor } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { describe, expect, it } from 'vitest'
 
 import {
   contextCountToSliderValue,
-  getTurnAnchorGroupKey,
+  resolveAnchorReset,
   resolveDefaultAnchorIndex,
-  resolveDefaultAnchorPersistence,
   sliderValueToContextCount
 } from '../contextWindowService'
 
@@ -25,8 +25,6 @@ import {
 const userMsg = (id: string): Message => ({ id, role: 'user' }) as unknown as Message
 
 const assistantMsg = (id: string, askId?: string): Message => ({ id, role: 'assistant', askId }) as unknown as Message
-
-const systemMsg = (id: string): Message => ({ id, role: 'system' }) as unknown as Message
 
 const turn = (key: string, messages: Message[]): ContextTurn => ({ key, messages })
 
@@ -67,112 +65,46 @@ describe('resolveDefaultAnchorIndex', () => {
   })
 })
 
-// --- getTurnAnchorGroupKey ---
+// --- resolveAnchorReset (TokenCount reset — delete the explicit entry) ---
 
-describe('getTurnAnchorGroupKey', () => {
-  it('prefers the user message id inside the turn', () => {
-    const t = turn('ask-1', [userMsg('u1'), assistantMsg('a1', 'u1')])
-    expect(getTurnAnchorGroupKey(t)).toBe('u1')
+describe('resolveAnchorReset', () => {
+  const topicA = 'topic-a'
+  const topicB = 'topic-b'
+  const anchorA: TopicAnchor = { kind: 'active', groupKey: 'u1' }
+  const anchorB: TopicAnchor = { kind: 'active', groupKey: 'u9' }
+
+  it('deletes the explicit anchor entry for the topic (reset removes designation)', () => {
+    const decision = resolveAnchorReset({ [topicA]: anchorA, [topicB]: anchorB }, topicA)
+    expect(decision.changed).toBe(true)
+    expect(decision.anchors[topicA]).toBeUndefined()
+    // Other topics' explicit anchors are untouched.
+    expect(decision.anchors[topicB]).toEqual(anchorB)
   })
 
-  it('uses the assistant message id for assistant-initiated turns (never the colliding askId)', () => {
-    // The turn is keyed by its askId ('ask-7'), but the derived anchor key is the
-    // assistant message's OWN id — unique, so the anchor cannot slide to another
-    // turn sharing the same askId value (LOCK-FIX-1, LOCK-FIX-2).
-    const t = turn('ask-7', [assistantMsg('a7', 'ask-7')])
-    expect(getTurnAnchorGroupKey(t)).toBe('a7')
+  it('never creates an entry when the topic has no explicit anchor (no churn)', () => {
+    const anchors = { [topicB]: anchorB }
+    const decision = resolveAnchorReset(anchors, topicA)
+    expect(decision.changed).toBe(false)
+    expect(decision.anchors).toEqual(anchors)
   })
 
-  it('uses the system message id for a standalone system turn', () => {
-    const t = turn('s1', [systemMsg('s1')])
-    expect(getTurnAnchorGroupKey(t)).toBe('s1')
+  it('handles an absent anchor map as a no-op (nothing to delete)', () => {
+    const decision = resolveAnchorReset(undefined, topicA)
+    expect(decision.changed).toBe(false)
+    expect(decision.anchors).toEqual({})
+    expect(decision.anchors[topicA]).toBeUndefined()
   })
 
-  it('returns null for an empty turn', () => {
-    expect(getTurnAnchorGroupKey(turn('k', []))).toBeNull()
+  it('reset is strictly deletion — it never creates or replaces an anchor', () => {
+    const decision = resolveAnchorReset({}, topicA)
+    expect(decision.changed).toBe(false)
+    expect(decision.anchors[topicA]).toBeUndefined()
   })
 
-  it('round-trips every turn kind back to the exact turn (LOCK-FIX-1)', () => {
-    // Realistic messages covering all four turn kinds buildContextTurns produces:
-    // user-initiated, assistant-initiated (orphan with askId), orphan without
-    // askId, standalone system, and a non-consecutive assistant whose askId
-    // collides with an earlier user turn's key.
-    const messages: Message[] = [
-      userMsg('u1'),
-      assistantMsg('a1', 'u1'), // joins turn 0 (user-initiated)
-      assistantMsg('a2', 'u2'), // assistant-initiated (orphan, user u2 not yet present)
-      assistantMsg('a3'), // orphan assistant without askId
-      systemMsg('s1'), // standalone system turn
-      userMsg('u2'),
-      assistantMsg('a4', 'u2'), // joins turn 4 (user-initiated)
-      assistantMsg('a5', 'u1') // non-consecutive — separate turn sharing askId u1
-    ]
-    const turns = buildContextTurns(messages)
-
-    turns.forEach((t, index) => {
-      const key = getTurnAnchorGroupKey(t)
-      expect(key).not.toBeNull()
-      expect(resolveAnchorTurnIndex(turns, key as string)).toBe(index)
-    })
-  })
-})
-
-// --- resolveDefaultAnchorPersistence (default-anchor persistence effect decision) ---
-
-describe('resolveDefaultAnchorPersistence', () => {
-  const twoUserTurns: ContextTurn[] = [turn('u1', [userMsg('u1')]), turn('u2', [userMsg('u2')])]
-
-  it('empty topic turn list with a persisted anchor → delete (LOCK-FIX-3)', () => {
-    expect(resolveDefaultAnchorPersistence([], 5, { kind: 'active', groupKey: 'u1' })).toEqual({ type: 'delete' })
-  })
-
-  it('empty topic turn list without an anchor → none (single-dispatch guard, no loop)', () => {
-    expect(resolveDefaultAnchorPersistence([], 5, undefined)).toEqual({ type: 'none' })
-  })
-
-  it('a valid active anchor is authoritative → none (no rewrite churn)', () => {
-    expect(resolveDefaultAnchorPersistence(twoUserTurns, 1, { kind: 'active', groupKey: 'u1' })).toEqual({
-      type: 'none'
-    })
-  })
-
-  it('a resolvable orphan/system anchor is authoritative too (LOCK-FIX-1)', () => {
-    // Without the message-id resolution rule this anchor would be unresolvable
-    // and the effect would re-derive + rewrite the anchor on every render.
-    const orphanTurns: ContextTurn[] = [turn('a1', [assistantMsg('a1')]), turn('s1', [systemMsg('s1')])]
-    expect(resolveDefaultAnchorPersistence(orphanTurns, null, { kind: 'active', groupKey: 'a1' })).toEqual({
-      type: 'none'
-    })
-    expect(resolveDefaultAnchorPersistence(orphanTurns, null, { kind: 'active', groupKey: 's1' })).toEqual({
-      type: 'none'
-    })
-  })
-
-  it('persists the derived default anchor when none exists', () => {
-    expect(resolveDefaultAnchorPersistence(twoUserTurns, 1, undefined)).toEqual({
-      type: 'persist',
-      anchor: { kind: 'active', groupKey: 'u2' }
-    })
-  })
-
-  it('persists the derived anchor when the current anchor is stale (unresolvable)', () => {
-    expect(resolveDefaultAnchorPersistence(twoUserTurns, 1, { kind: 'active', groupKey: 'ghost' })).toEqual({
-      type: 'persist',
-      anchor: { kind: 'active', groupKey: 'u2' }
-    })
-  })
-
-  it('no-op when the persisted anchor already equals the derived key', () => {
-    expect(resolveDefaultAnchorPersistence(twoUserTurns, 1, { kind: 'active', groupKey: 'u2' })).toEqual({
-      type: 'none'
-    })
-  })
-
-  it('null (unlimited) derives the first turn of the segment', () => {
-    expect(resolveDefaultAnchorPersistence(twoUserTurns, null, undefined)).toEqual({
-      type: 'persist',
-      anchor: { kind: 'active', groupKey: 'u1' }
-    })
+  it('is pure — the input anchor map is not mutated', () => {
+    const input = { [topicA]: anchorA }
+    resolveAnchorReset(input, topicA)
+    expect(input).toEqual({ [topicA]: anchorA })
   })
 })
 

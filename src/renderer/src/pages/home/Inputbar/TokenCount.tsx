@@ -14,13 +14,16 @@ type Props = {
    */
   contextCount: { current: number; max: number | null }
   /**
-   * Click recomputes and persists the default window start derived from the
-   * assistant's default context count (LOCK-CTX-3).
+   * Click resets the explicit context anchor by DELETING the
+   * `contextWindowAnchor[topicId]` entry; the effective context start then
+   * falls back to the dynamic default derivation (assistant contextCount +
+   * current messages). The reset never recomputes or persists a derived
+   * default (LOCK-CTX-3).
    */
-  onUpdateAnchor?: () => void
+  onResetAnchor?: () => void
 } & React.HTMLAttributes<HTMLDivElement>
 
-const TokenCount: FC<Props> = ({ estimateTokenCount, contextCount, onUpdateAnchor }) => {
+const TokenCount: FC<Props> = ({ estimateTokenCount, contextCount, onResetAnchor }) => {
   const { t } = useTranslation()
   // LOCK-108: the estimated token display is always enabled (no user setting).
   const PopoverContent = () => {
@@ -48,7 +51,7 @@ const TokenCount: FC<Props> = ({ estimateTokenCount, contextCount, onUpdateAncho
   const contextCountBlock = (
     <HStack
       style={{ alignItems: 'center', cursor: 'pointer' }}
-      onClick={onUpdateAnchor}
+      onClick={onResetAnchor}
       data-testid="token-count-context">
       <MenuIcon size={12} className="icon" />
       {contextCount.current}

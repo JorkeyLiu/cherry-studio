@@ -102,9 +102,9 @@ export function buildContextTurns(messages: Message[]): ContextTurn[] {
  *      standalone system turns (keyed by their own id).
  *   4. Return -1 when nothing matches.
  *
- * The anchor key derived for every turn kind is exactly what
- * `getTurnAnchorGroupKey` returns, so rule 3 makes each turn round-trip to
- * itself. The ordering matters for collisions: a key that is both a user id and
+ * The anchor key derived for every turn kind is exactly a message id within
+ * that turn, so the resolver makes each turn round-trip to itself. The
+ * ordering matters for collisions: a key that is both a user id and
  * an assistant askId (a non-consecutive assistant referencing an earlier user
  * question) must NOT be claimed by a generic turn-key match — the existing
  * preferred user-id / assistant-askId semantics (rules 1-2) always win, and the

@@ -5,7 +5,7 @@
  *   (1) Token display contains one estimate scalar, no slash separator
  *   (2) Context count remains current / max with slash separator
  *   (3) No inputTokenCount prop exists
- *   (4) The context block is always clickable and calls onUpdateAnchor
+ *   (4) The context block is always clickable and calls onResetAnchor
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -64,7 +64,7 @@ describe('TokenCount', () => {
   const defaultProps = {
     estimateTokenCount: 1234,
     contextCount: { current: 5, max: 100 },
-    onUpdateAnchor: vi.fn()
+    onResetAnchor: vi.fn()
   }
 
   it('renders estimate as a single scalar — no slash separator in token display', () => {
@@ -135,9 +135,9 @@ describe('TokenCount', () => {
     expect(text).toContain('1234')
   })
 
-  it('onUpdateAnchor is called when the context block is clicked (always clickable)', () => {
-    const onUpdateAnchor = vi.fn()
-    render(<TokenCount {...defaultProps} onUpdateAnchor={onUpdateAnchor} />)
+  it('onResetAnchor is called when the context block is clicked (always clickable)', () => {
+    const onResetAnchor = vi.fn()
+    render(<TokenCount {...defaultProps} onResetAnchor={onResetAnchor} />)
 
     // Find the clickable context block and click it
     const menuIcons = screen.getAllByTestId('menu-icon')
@@ -145,7 +145,7 @@ describe('TokenCount', () => {
     // Click the parent hstack of the menu icon
     const contextBlock = menuIcons[0].closest('[data-testid="hstack"]')!
     fireEvent.click(contextBlock)
-    expect(onUpdateAnchor).toHaveBeenCalledTimes(1)
+    expect(onResetAnchor).toHaveBeenCalledTimes(1)
   })
 
   it('does not accept or render inputTokenCount — prop removed', () => {
