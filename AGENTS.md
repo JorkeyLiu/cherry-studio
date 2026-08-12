@@ -185,3 +185,4 @@ Cherry Chat is one product defined by governance, not by strings: an Electron ap
 - [SQLite migration governance](docs/sqlite-migration.md) — canonical governance for SQLite chat authority and L2 Cherry Studio ZIP compatibility import.
 - [tests/e2e/README.md](tests/e2e/README.md) — Playwright E2E standards and fixture usage.
 - [docs/en/guides/logging.md](docs/en/guides/logging.md) and [docs/en/guides/i18n.md](docs/en/guides/i18n.md) — logging and i18n developer guides.
+- [Performance program](docs/performance-program.md) — living cross-session source for performance baselines, workstreams, evidence levels, and session handoffs; read it to resume the performance optimization effort.
