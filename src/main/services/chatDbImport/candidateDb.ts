@@ -581,14 +581,13 @@ export class CandidateDbResource {
   }
 
   /**
-   * LOCK-FTS-3: defer the migration-003 derived search projection on this
-   * candidate — atomically drop the three sync triggers, the FTS table, and
-   * the normalized table (index auto-drops) so bulk import page writes pay
+   * LOCK-FTS-3: defer the derived search projection on this candidate —
+   * atomically drop the three sync triggers, the FTS table, and the
+   * normalized table (index auto-drops) so bulk import page writes pay
    * NO per-row trigger/FTS maintenance. Must be called immediately after
    * initialize() and before any page write. Fail closed: any error throws
-   * and the candidate must be discarded. migration_state 003 remains
-   * recorded; the projection is rebuilt exactly once before seal
-   * (LOCK-FTS-4).
+   * and the candidate must be discarded. migration_state remains recorded;
+   * the projection is rebuilt exactly once before seal (LOCK-FTS-4).
    */
   deferFtsProjection(): void {
     this.assertInitialized()
@@ -639,7 +638,7 @@ export class CandidateDbResource {
     if (this.state === 'sealed' || this.state === 'discarded') return
 
     // LOCK-LIFE-2: seal succeeds ONLY when the deferred projection was
-    // rebuilt (or was never deferred — migration 003 leaves it intact).
+    // rebuilt (or was never deferred — the migrations leave it intact).
     const ftsState = this.ftsProjection.getState()
     if (ftsState === 'deferred' || ftsState === 'failed') {
       logger.error(

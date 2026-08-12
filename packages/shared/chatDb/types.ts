@@ -106,6 +106,20 @@ export interface EnsureTopicRequest {
   name?: string | null
 }
 
+/**
+ * Optional diagnostic-only correlation metadata for one append (LOCK-004).
+ *
+ * Carried on AppendMessageRequest ONLY to correlate renderer and main timing
+ * logs for a single append/send. Never contains message content, prompts,
+ * keys, or any user data — only an opaque id and a 1-based ordinal.
+ */
+export interface AppendDiagnostics {
+  /** Opaque per-send correlation id shared by renderer and main log entries. */
+  correlationId?: string
+  /** 1-based append ordinal within the send (1 = user message, 2 = assistant message). */
+  ordinal?: number
+}
+
 /** @see IpcChannel.ChatDb_AppendMessage */
 export interface AppendMessageRequest {
   topicId: string
@@ -115,6 +129,8 @@ export interface AppendMessageRequest {
   blocks: JsonObject[]
   /** Optional insertion index (zero-based). Absent = append at end. */
   insertIndex?: number
+  /** Optional diagnostic-only correlation metadata. Ignored for persistence. */
+  diagnostics?: AppendDiagnostics
 }
 
 /** @see IpcChannel.ChatDb_UpdateMessage */

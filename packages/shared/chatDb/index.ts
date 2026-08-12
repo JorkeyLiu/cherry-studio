@@ -10,6 +10,7 @@
 
 // Types — wire DTOs, result envelope, command map
 export type {
+  AppendDiagnostics,
   AppendMessageRequest,
   BulkAddBlocksRequest,
   ChatDbChannel,

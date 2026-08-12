@@ -152,7 +152,7 @@ function checkMigrationCompatibility(sqlite: Database.Database): ReadonlyChatDbV
  * and NOT the full candidate content recompute — that stays
  * CandidateVerifier-only (LOCK-SP-2/3). Checks, in order:
  *
- *   1. required objects: the migration-003 normalized table, its message_id
+ *   1. required objects: the derived normalized table, its message_id
  *      index, the FTS5 table, and the three sync triggers must all exist in
  *      sqlite_master with the exact expected type (names from the migration
  *      constants — single source of truth, LOCK-FTS-2);
@@ -164,7 +164,7 @@ function checkMigrationCompatibility(sqlite: Database.Database): ReadonlyChatDbV
  *
  * Safe sub-codes are fixed constants (optionally with the missing object
  * name appended) — never content, paths, or SQL. Rejects
- * migration_state-003-with-missing-objects.
+ * migration_state-applied-with-missing-objects.
  */
 function checkSearchProjection(sqlite: Database.Database): ReadonlyChatDbValidationFailure | null {
   const required: ReadonlyArray<{ name: string; type: 'table' | 'index' | 'trigger' }> = [

@@ -3,18 +3,19 @@
  * better-sqlite3 tests (LOCK-FTS-1..7).
  *
  * Coverage:
- * - Object inventory: migration 003 creates the normalized table + index +
+ * - Object inventory: migrations create the normalized table + index +
  *   FTS table + 3 sync triggers (LOCK-FTS-2/6).
- * - Migration assembly identity: migration 003's sql array is assembled
- *   from the exported shared constants — no duplicated strings, no array
- *   index reliance (LOCK-FTS-2).
- * - Migration equivalence: a migration-003-applied DB and a
+ * - Migration assembly identity: migration 003 is frozen (MIGRATION_003_*
+ *   constants); migration 004 and DERIVED_PROJECTION_REBUILD_SQL are
+ *   assembled from the exported shared constants — no duplicated strings,
+ *   no array index reliance (LOCK-FTS-2).
+ * - Migration equivalence: a migration-004-applied DB and a
  *   deferred+rebuilt DB produce byte-identical derived-object schemas and
  *   identical behavioral results after identical post-rebuild writes
  *   (LOCK-FTS-6).
  * - Drop order + deferral inventory (LOCK-FTS-3): defer() removes triggers
  *   → FTS → normalized (+ its index) atomically; message_blocks intact;
- *   migration_state 003 remains recorded.
+ *   migration_state 004 remains recorded.
  * - Canonical writes while deferred (LOCK-FTS-3): page-style inserts
  *   succeed with ZERO derived rows written.
  * - Rebuild + trigger restoration (LOCK-FTS-4/6): counts match the
@@ -63,6 +64,14 @@ import {
   MESSAGE_BLOCKS_NORMALIZED_MESSAGE_ID_INDEX,
   MESSAGE_BLOCKS_NORMALIZED_TABLE,
   MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER,
+  MIGRATION_003_BACKFILL_MESSAGE_BLOCKS_FTS_SQL,
+  MIGRATION_003_BACKFILL_MESSAGE_BLOCKS_NORMALIZED_SQL,
+  MIGRATION_003_CREATE_MESSAGE_BLOCKS_FTS_SQL,
+  MIGRATION_003_CREATE_MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER_SQL,
+  MIGRATION_003_CREATE_MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER_SQL,
+  MIGRATION_003_CREATE_MESSAGE_BLOCKS_NORMALIZED_MESSAGE_ID_INDEX_SQL,
+  MIGRATION_003_CREATE_MESSAGE_BLOCKS_NORMALIZED_SQL,
+  MIGRATION_003_CREATE_MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER_SQL,
   MIGRATIONS,
   registerChatDbNormalize,
   runMigrations
@@ -197,10 +206,10 @@ describe('CandidateFtsProjection — deferred search projection maintenance', ()
   // LOCK-FTS-2: single source of truth + migration equivalence
   // -------------------------------------------------------------------------
 
-  it('migration 003 creates the full derived-object inventory (LOCK-FTS-2/6)', () => {
+  it('migration 004 creates the full derived-object inventory (LOCK-FTS-2/6)', () => {
     const sqlite = openTestDb(realPath.join(tempDir, 'chat.db'))
     const applied = applyAllMigrations(sqlite)
-    expect(applied).toBe(3)
+    expect(applied).toBe(4)
 
     expectDerivedPresent(sqlite)
     expect(tableNames(sqlite)).toContain(MESSAGE_BLOCKS_NORMALIZED_TABLE)
@@ -209,12 +218,66 @@ describe('CandidateFtsProjection — deferred search projection maintenance', ()
     sqlite.close()
   })
 
-  it('migration 003 sql is assembled from the exported shared constants (LOCK-FTS-2)', () => {
+  it('migration 003 is frozen; migration 004 + rebuild are assembled from the shared constants (LOCK-FTS-2)', () => {
     const m003 = MIGRATIONS.find((m) => m.key === '003_fts5_normalized_search')
     expect(m003).toBeDefined()
-    // Assembly identity: the migration array is EXACTLY the shared constants
-    // in order — no duplicated strings, no reliance on the array index.
+    // Frozen migration 003 stays byte-identical to its released statements.
     expect(m003!.sql).toEqual([
+      MIGRATION_003_CREATE_MESSAGE_BLOCKS_NORMALIZED_SQL,
+      MIGRATION_003_CREATE_MESSAGE_BLOCKS_NORMALIZED_MESSAGE_ID_INDEX_SQL,
+      MIGRATION_003_CREATE_MESSAGE_BLOCKS_FTS_SQL,
+      MIGRATION_003_BACKFILL_MESSAGE_BLOCKS_NORMALIZED_SQL,
+      MIGRATION_003_BACKFILL_MESSAGE_BLOCKS_FTS_SQL,
+      MIGRATION_003_CREATE_MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER_SQL,
+      MIGRATION_003_CREATE_MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER_SQL,
+      MIGRATION_003_CREATE_MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER_SQL
+    ])
+
+    const m004 = MIGRATIONS.find((m) => m.key === '004_fts_rowid_identity')
+    expect(m004).toBeDefined()
+    // Migration 004 uses the rowid-identity create/backfill/trigger constants
+    // for the NORMALIZED table only (LOCK-002): the existing-003 path never
+    // drops/recreates/backfills the FTS virtual table — parity-verified
+    // preflight keeps it physically intact, then only normalized is rebuilt
+    // and the current triggers are installed.
+    expect(m004!.sql).toEqual([
+      `DROP TRIGGER IF EXISTS ${MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER}`,
+      `DROP TRIGGER IF EXISTS ${MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER}`,
+      `DROP TRIGGER IF EXISTS ${MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER}`,
+      `ALTER TABLE message_blocks_normalized RENAME TO message_blocks_normalized_mig_old`,
+      CREATE_MESSAGE_BLOCKS_NORMALIZED_SQL,
+      `INSERT INTO message_blocks_normalized (rowid, block_id, message_id, normalized_content)
+       SELECT rowid, block_id, message_id, normalized_content
+       FROM message_blocks_normalized_mig_old`,
+      `DROP TABLE message_blocks_normalized_mig_old`,
+      CREATE_MESSAGE_BLOCKS_NORMALIZED_MESSAGE_ID_INDEX_SQL,
+      CREATE_MESSAGE_BLOCKS_NORMALIZED_INSERT_TRIGGER_SQL,
+      CREATE_MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER_SQL,
+      CREATE_MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER_SQL
+    ])
+    // LOCK-002: the 004 SQL body never REBUILDS the FTS table — no DROP, no
+    // CREATE VIRTUAL TABLE, and no FTS BACKFILL constant (the rowid-addressable
+    // triggers still legitimately reference message_blocks_fts in their bodies,
+    // including their per-row INSERT).
+    const m004SqlJoined = m004!.sql.join(' ')
+    expect(m004SqlJoined).not.toContain('DROP TABLE IF EXISTS message_blocks_fts')
+    expect(m004SqlJoined).not.toContain('CREATE VIRTUAL TABLE')
+    expect(m004!.sql).not.toContain(CREATE_MESSAGE_BLOCKS_FTS_SQL)
+    expect(m004!.sql).not.toContain(BACKFILL_MESSAGE_BLOCKS_FTS_SQL)
+    // LOCK-001/003: 004 carries a parity preflight wired into runMigrations.
+    expect(typeof m004!.preflight).toBe('function')
+
+    // LOCK-004: the import-candidate rebuild path STILL creates/backfills the
+    // current normalized+FTS schema from scratch where the projection was
+    // deliberately deferred — never a no-op.
+    expect(DERIVED_PROJECTION_REBUILD_SQL).toContain(CREATE_MESSAGE_BLOCKS_NORMALIZED_SQL)
+    expect(DERIVED_PROJECTION_REBUILD_SQL).toContain(CREATE_MESSAGE_BLOCKS_FTS_SQL)
+    expect(DERIVED_PROJECTION_REBUILD_SQL).toContain(BACKFILL_MESSAGE_BLOCKS_NORMALIZED_SQL)
+    expect(DERIVED_PROJECTION_REBUILD_SQL).toContain(BACKFILL_MESSAGE_BLOCKS_FTS_SQL)
+
+    // Rebuild = drops + the same rowid-identity create/backfill/trigger
+    // constants in order (single source of truth, migration-004 generation).
+    expect(DERIVED_PROJECTION_REBUILD_SQL.slice(5)).toEqual([
       CREATE_MESSAGE_BLOCKS_NORMALIZED_SQL,
       CREATE_MESSAGE_BLOCKS_NORMALIZED_MESSAGE_ID_INDEX_SQL,
       CREATE_MESSAGE_BLOCKS_FTS_SQL,
@@ -224,12 +287,10 @@ describe('CandidateFtsProjection — deferred search projection maintenance', ()
       CREATE_MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER_SQL,
       CREATE_MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER_SQL
     ])
-    // Rebuild = drops + the same create/backfill/trigger constants in order.
-    expect(DERIVED_PROJECTION_REBUILD_SQL.slice(5)).toEqual(m003!.sql)
   })
 
-  it('a deferred+rebuilt DB is schema- and behavior-equivalent to a migration-003-applied DB (LOCK-FTS-6)', () => {
-    // DB-A: trigger-maintained (migration 003 only).
+  it('a deferred+rebuilt DB is schema- and behavior-equivalent to a migration-004-applied DB (LOCK-FTS-6)', () => {
+    // DB-A: trigger-maintained (migrations 001-004).
     const sqliteA = openTestDb(realPath.join(tempDir, 'a.db'))
     applyAllMigrations(sqliteA)
     seedCanonicalData(sqliteA)
@@ -243,8 +304,8 @@ describe('CandidateFtsProjection — deferred search projection maintenance', ()
     seedCanonicalData(sqliteB)
     helperB.rebuild()
 
-    // Byte-identical derived-object schemas (LOCK-FTS-6: no migration bump,
-    // rebuild reproduces the exact migration-003 applied schema).
+    // Byte-identical derived-object schemas (LOCK-FTS-6: rebuild reproduces
+    // the exact migration-004 applied schema).
     const masterA = derivedMasterRows(sqliteA)
     const masterB = derivedMasterRows(sqliteB)
     expect(masterA).toEqual(masterB)
@@ -298,10 +359,10 @@ describe('CandidateFtsProjection — deferred search projection maintenance', ()
 
     // Canonical tables untouched.
     expect((sqlite.prepare('SELECT COUNT(*) AS n FROM message_blocks').get() as { n: number }).n).toBe(4)
-    // migration_state 003 remains recorded: explicit rebuild is mandatory.
+    // migration_state 004 remains recorded: explicit rebuild is mandatory.
     expect(
       (
-        sqlite.prepare("SELECT COUNT(*) AS n FROM migration_state WHERE key = '003_fts5_normalized_search'").get() as {
+        sqlite.prepare("SELECT COUNT(*) AS n FROM migration_state WHERE key = '004_fts_rowid_identity'").get() as {
           n: number
         }
       ).n

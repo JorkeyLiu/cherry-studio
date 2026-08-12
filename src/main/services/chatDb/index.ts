@@ -3,6 +3,7 @@ import * as path from 'node:path'
 
 import { loggerService } from '@logger'
 import { DATA_PATH } from '@main/config'
+import { elapsedMs } from '@shared/diagnostics/sendTiming'
 import Database from 'better-sqlite3'
 import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
 
@@ -17,6 +18,7 @@ import {
 } from './maintenanceCoordination'
 import { registerChatDbNormalize, runMigrations } from './migration'
 import * as schema from './schema'
+import { emitStartupDiagnostics, emitStartupFailureDiagnostics } from './startupDiagnostics'
 
 const logger = loggerService.withContext('ChatDbService')
 
@@ -186,123 +188,148 @@ class ChatDbService {
     // generation will have advanced and we must not publish handles.
     const gen = this.generation
 
-    // Ensure directory exists
-    if (!fs.existsSync(this.dbDir)) {
-      fs.mkdirSync(this.dbDir, { recursive: true })
-    }
+    // LOCK-003: bounded, once-per-process startup timings + metadata.
+    // Stage timings are collected here and emitted after init succeeds (or
+    // as a bounded failure diagnostic when init fails). Diagnostics never
+    // throw and never change error behavior (LOCK-001).
+    const tStart = performance.now()
+    const stageTimings: Record<string, number> = {}
 
-    logger.info(`Opening database at ${this.dbPath}`)
-
-    // --- Open raw better-sqlite3 connection ---
-    // Use a local variable so we can clean up on supersede without
-    // touching the instance field (which close() may have nulled).
-    const sqlite = new Database(this.dbPath)
-
-    // --- Generation check after open (close may have run before open) ---
-    if (gen !== this.generation) {
-      try {
-        sqlite.close()
-      } catch {
-        // Best-effort cleanup of superseded handle
-      }
-      throw new Error('ChatDbService init was superseded by close()')
-    }
-
-    // --- Restore validation BEFORE journal_mode=WAL ---
-    // If a restore marker exists, integrity-check MUST run before any
-    // pragma or mutation (WAL creation could mask corruption). Failure
-    // persists repair state, closes handles, rejects init. Propagates
-    // marker-write failures (setRepairRequired does NOT suppress them).
-    const restorePending = this.isRestorePending()
-    if (restorePending) {
-      logger.info('Restore marker detected — running pre-pragma integrity check...')
-
-      let integrity: { ok: boolean; error?: string }
-      try {
-        const result = sqlite.pragma('integrity_check', { simple: true }) as string
-        integrity = result === 'ok' ? { ok: true } : { ok: false, error: result }
-      } catch (error) {
-        integrity = {
-          ok: false,
-          error: `Integrity check threw: ${error instanceof Error ? error.message : String(error)}`
-        }
+    try {
+      // Ensure directory exists
+      if (!fs.existsSync(this.dbDir)) {
+        fs.mkdirSync(this.dbDir, { recursive: true })
       }
 
-      if (!integrity.ok) {
-        logger.error(`Pre-pragma integrity check FAILED: ${integrity.error}`)
+      logger.info(`Opening database at ${this.dbPath}`)
 
-        // Persist repair state — propagate marker-write failures
-        this.setRepairRequired()
+      // --- Open raw better-sqlite3 connection ---
+      // Use a local variable so we can clean up on supersede without
+      // touching the instance field (which close() may have nulled).
+      const tOpen = performance.now()
+      const sqlite = new Database(this.dbPath)
+      stageTimings['chatdb.init.open'] = elapsedMs(tOpen)
 
-        // Close handles (best-effort)
+      // --- Generation check after open (close may have run before open) ---
+      if (gen !== this.generation) {
         try {
           sqlite.close()
         } catch {
-          // Best-effort during error recovery
+          // Best-effort cleanup of superseded handle
+        }
+        throw new Error('ChatDbService init was superseded by close()')
+      }
+
+      // --- Restore validation BEFORE journal_mode=WAL ---
+      // If a restore marker exists, integrity-check MUST run before any
+      // pragma or mutation (WAL creation could mask corruption). Failure
+      // persists repair state, closes handles, rejects init. Propagates
+      // marker-write failures (setRepairRequired does NOT suppress them).
+      const restorePending = this.isRestorePending()
+      if (restorePending) {
+        logger.info('Restore marker detected — running pre-pragma integrity check...')
+
+        let integrity: { ok: boolean; error?: string }
+        try {
+          const result = sqlite.pragma('integrity_check', { simple: true }) as string
+          integrity = result === 'ok' ? { ok: true } : { ok: false, error: result }
+        } catch (error) {
+          integrity = {
+            ok: false,
+            error: `Integrity check threw: ${error instanceof Error ? error.message : String(error)}`
+          }
         }
 
-        throw new Error(
-          `Post-restore integrity check failed: ${integrity.error}. ` + 'Database marked as repair-required.'
-        )
+        if (!integrity.ok) {
+          logger.error(`Pre-pragma integrity check FAILED: ${integrity.error}`)
+
+          // Persist repair state — propagate marker-write failures
+          this.setRepairRequired()
+
+          // Close handles (best-effort)
+          try {
+            sqlite.close()
+          } catch {
+            // Best-effort during error recovery
+          }
+
+          throw new Error(
+            `Post-restore integrity check failed: ${integrity.error}. ` + 'Database marked as repair-required.'
+          )
+        }
+
+        logger.info('Pre-pragma integrity check passed — clearing restore marker')
+        const markerPath = path.join(this.dbDir, RESTORE_MARKER_FILENAME)
+        try {
+          fs.unlinkSync(markerPath)
+        } catch {
+          logger.warn('Failed to remove restore marker (non-fatal)')
+        }
       }
 
-      logger.info('Pre-pragma integrity check passed — clearing restore marker')
-      const markerPath = path.join(this.dbDir, RESTORE_MARKER_FILENAME)
-      try {
-        fs.unlinkSync(markerPath)
-      } catch {
-        logger.warn('Failed to remove restore marker (non-fatal)')
+      // --- Generation check before pragma mutation ---
+      if (gen !== this.generation) {
+        try {
+          sqlite.close()
+        } catch {
+          // Best-effort cleanup of superseded handle
+        }
+        throw new Error('ChatDbService init was superseded by close()')
       }
-    }
 
-    // --- Generation check before pragma mutation ---
-    if (gen !== this.generation) {
-      try {
-        sqlite.close()
-      } catch {
-        // Best-effort cleanup of superseded handle
+      // --- Pragmas for performance and correctness ---
+      // These run AFTER restore validation so a corrupt restored DB
+      // never reaches WAL creation.
+      const tPragma = performance.now()
+      sqlite.pragma('journal_mode = WAL')
+      sqlite.pragma('foreign_keys = ON')
+      sqlite.pragma('synchronous = NORMAL')
+      sqlite.pragma('busy_timeout = 5000')
+      stageTimings['chatdb.init.pragma'] = elapsedMs(tPragma)
+
+      // --- Wrap with Drizzle ORM ---
+      const db = drizzle(sqlite, { schema })
+
+      // --- Generation check before publishing handles ---
+      if (gen !== this.generation) {
+        try {
+          sqlite.close()
+        } catch {
+          // Best-effort cleanup of superseded handle
+        }
+        throw new Error('ChatDbService init was superseded by close()')
       }
-      throw new Error('ChatDbService init was superseded by close()')
-    }
 
-    // --- Pragmas for performance and correctness ---
-    // These run AFTER restore validation so a corrupt restored DB
-    // never reaches WAL creation.
-    sqlite.pragma('journal_mode = WAL')
-    sqlite.pragma('foreign_keys = ON')
-    sqlite.pragma('synchronous = NORMAL')
-    sqlite.pragma('busy_timeout = 5000')
+      // --- Publish handles (atomic from this point) ---
+      this.sqlite = sqlite
+      this.db = db
 
-    // --- Wrap with Drizzle ORM ---
-    const db = drizzle(sqlite, { schema })
+      // --- Register chatdb_normalize scalar function for FTS5 triggers ---
+      // This must run BEFORE migrations so that migration 003's backfill
+      // and triggers can use it. Uses the shared helper (LOCK-5126).
+      // Safe to skip if the raw handle doesn't support function() (mocked envs).
+      registerChatDbNormalize(sqlite)
 
-    // --- Generation check before publishing handles ---
-    if (gen !== this.generation) {
-      try {
-        sqlite.close()
-      } catch {
-        // Best-effort cleanup of superseded handle
+      // --- Run pending migrations ---
+      const tMigrate = performance.now()
+      const appliedCount = runMigrations(this.db, sqlite)
+      stageTimings['chatdb.init.migrate'] = elapsedMs(tMigrate)
+      if (appliedCount > 0) {
+        logger.info(`Applied ${appliedCount} migration(s)`)
       }
-      throw new Error('ChatDbService init was superseded by close()')
+
+      // LOCK-002/003: one-time startup metadata + stage timings using the
+      // existing live handle (read-only PRAGMAs) and the existing DB path
+      // only for file stat metadata. Never logs the path or file content.
+      emitStartupDiagnostics(sqlite, this.dbPath, stageTimings, elapsedMs(tStart))
+
+      logger.info('ChatDbService initialised')
+    } catch (error) {
+      // LOCK-003: bounded failure diagnostic; never swallows or replaces
+      // the original init error (LOCK-001).
+      emitStartupFailureDiagnostics(this.dbPath, stageTimings, elapsedMs(tStart))
+      throw error
     }
-
-    // --- Publish handles (atomic from this point) ---
-    this.sqlite = sqlite
-    this.db = db
-
-    // --- Register chatdb_normalize scalar function for FTS5 triggers ---
-    // This must run BEFORE migrations so that migration 003's backfill
-    // and triggers can use it. Uses the shared helper (LOCK-5126).
-    // Safe to skip if the raw handle doesn't support function() (mocked envs).
-    registerChatDbNormalize(sqlite)
-
-    // --- Run pending migrations ---
-    const appliedCount = runMigrations(this.db, sqlite)
-    if (appliedCount > 0) {
-      logger.info(`Applied ${appliedCount} migration(s)`)
-    }
-
-    logger.info('ChatDbService initialised')
   }
 
   /**

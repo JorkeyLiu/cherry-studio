@@ -35,6 +35,7 @@ import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
 import { ChatDbAggregateService } from '../ChatDbAggregateService'
 import { reconstructBlock } from '../domain/codec'
 import { runMigrations } from '../migration'
+import { MessagesRepository } from '../repository/MessagesRepository'
 import * as schema from '../schema'
 
 function makeTempDir(): string {
@@ -226,6 +227,53 @@ describe('ChatDbAggregateService', () => {
       expect(okValue(fetched).messages).toHaveLength(2)
       expect(okValue(fetched).messages[0].id).toBe(msg1.id)
       expect(okValue(fetched).messages[0].content).toBe('Updated')
+    })
+
+    it('accepts optional diagnostic correlation metadata without changing semantics', () => {
+      const topicId = `t-${uid()}`
+      const msgJson = makeMessageJson(topicId)
+      const blkJson = makeBlockJson(msgJson.id as string)
+
+      // Diagnostics are diagnostic-only; persistence semantics are unchanged.
+      const result = agg.appendMessage(topicId, msgJson as any, [blkJson as any], undefined, {
+        correlationId: 'snd-test-1',
+        ordinal: 1
+      })
+      expect(result.ok).toBe(true)
+
+      const fetched = agg.fetchMessages(topicId)
+      expect(okValue(fetched).messages).toHaveLength(1)
+      expect(okValue(fetched).messages[0].id).toBe(msgJson.id)
+      expect(okValue(fetched).blocks).toHaveLength(1)
+    })
+
+    it('returns the original structured failure when a diagnosed append fails', () => {
+      // Force the transaction's file-reference stage to abort with a temp
+      // trigger; the original failure must surface as a typed failure
+      // envelope unchanged — diagnostics never swallow or replace errors.
+      const topicId = `t-${uid()}`
+      const msgJson = makeMessageJson(topicId)
+      const fileBlk = makeBlockJson(msgJson.id as string, 'file', {
+        file: { id: 'file-fail', name: 'fail.pdf', path: '/fail.pdf', type: 'application/pdf' }
+      })
+
+      sqlite.exec(`
+        CREATE TEMP TRIGGER IF NOT EXISTS abort_file_ref_insert
+        BEFORE INSERT ON file_references
+        BEGIN
+          SELECT RAISE(ABORT, 'trigger-forced abort for diagnostics test');
+        END
+      `)
+      try {
+        const result = agg.appendMessage(topicId, msgJson as any, [fileBlk as any], undefined, {
+          correlationId: 'snd-test-fail',
+          ordinal: 1
+        })
+        expect(result.ok).toBe(false)
+        expect((result as { error?: { code?: string } }).error?.code).toBeTruthy()
+      } finally {
+        sqlite.exec('DROP TRIGGER IF EXISTS TEMP.abort_file_ref_insert')
+      }
     })
   })
 
@@ -2644,6 +2692,35 @@ describe('ChatDbAggregateService', () => {
       expect(result.ok).toBe(true)
     })
 
+    it('cloneMessagesToTopic: cloned MAIN_TEXT content is FTS-searchable in the target topic (LOCK-003)', () => {
+      const sourceTopic = `t-src-${uid()}`
+      const targetTopic = `t-dst-${uid()}`
+      const msgId = `m-${uid()}`
+      const blkId = `b-${uid()}`
+      // A distinctive term (> 3 chars → FTS trigram path, not the LIKE fallback).
+      const content = 'QuasarNebulaPrime telemetry archive'
+
+      const result = agg.cloneMessagesToTopic(targetTopic, [
+        {
+          message: makeMessageJson(sourceTopic, { id: msgId, content }),
+          blocks: [makeBlockJson(msgId, 'main_text', { id: blkId, content })]
+        }
+      ] as any)
+      expect(result.ok).toBe(true)
+
+      // Search requires the raw sqlite handle; the base `agg` fixture does not
+      // carry one, so create an aggregate bound to the same connection.
+      const searchAgg = new ChatDbAggregateService(db, sqlite)
+      const search = searchAgg.searchMessages({
+        keywords: 'QuasarNebulaPrime',
+        matchMode: 'substring',
+        sortOrder: 'newest'
+      })
+      expect(search.ok).toBe(true)
+      const items = okValue(search).items
+      expect(items.some((i) => i.blockId === blkId && i.messageId === msgId && i.topicId === targetTopic)).toBe(true)
+    })
+
     it('resetMessagesForResend: resets messages and deletes blocks', () => {
       const topicId = `t-${uid()}`
       const msg = makeMessageJson(topicId)
@@ -2757,6 +2834,225 @@ describe('ChatDbAggregateService', () => {
       // After successful deletion, topic should be empty
       const fetched = okValue(agg.fetchMessages(topicId))
       expect(fetched.messages.length).toBe(0)
+    })
+  })
+
+  // =========================================================================
+  // cloneMessagesToTopic — linear batch semantics (LOCK-002)
+  // =========================================================================
+
+  describe('cloneMessagesToTopic: linear batch semantics', () => {
+    it('large batch inserts with exact dense ordering, block order, askId and file refs', () => {
+      const topicId = `t-${uid()}`
+      const MSG_COUNT = 600
+      const entries: Array<{ message: Record<string, unknown>; blocks: Record<string, unknown>[] }> = []
+      const userMessageIds: string[] = []
+      for (let i = 0; i < MSG_COUNT; i++) {
+        const isUser = i % 2 === 0
+        const msgId = `m-${uid()}`
+        if (isUser) userMessageIds.push(msgId)
+        const message = makeMessageJson(topicId, {
+          id: msgId,
+          role: isUser ? 'user' : 'assistant',
+          content: `content-${i}`,
+          ...(isUser ? {} : { askId: userMessageIds[userMessageIds.length - 1] })
+        })
+        const blocks: Record<string, unknown>[] = [makeBlockJson(msgId, 'main_text', { content: `block-${i}-0` })]
+        if (i % 100 === 0) {
+          blocks.push(
+            makeBlockJson(msgId, 'file', {
+              file: { id: `file-${i}`, name: `f${i}.pdf`, path: `/f${i}.pdf`, type: 'application/pdf' }
+            })
+          )
+        }
+        entries.push({ message, blocks })
+      }
+
+      const result = agg.cloneMessagesToTopic(topicId, entries as any)
+      expect(result.ok).toBe(true)
+
+      const fetched = okValue(agg.fetchMessages(topicId))
+      const msgs = fetched.messages as any[]
+      expect(msgs).toHaveLength(MSG_COUNT)
+      // Exact dense sort_order 0..599 in entry order.
+      msgs.forEach((m: any, idx: number) => {
+        expect(m.sortOrder).toBe(idx)
+        expect(m.content).toBe(`content-${idx}`)
+      })
+      // askId remap output preserved: each assistant message references the
+      // cloned user message supplied on the wire.
+      for (let i = 1; i < msgs.length; i += 2) {
+        expect(msgs[i].role).toBe('assistant')
+        expect(msgs[i].askId).toBe(msgs[i - 1].id)
+      }
+      // Block ownership + per-message block order preserved.
+      const blocksByMessage = new Map<string, any[]>()
+      for (const b of fetched.blocks as any[]) {
+        const arr = blocksByMessage.get(b.messageId) ?? []
+        arr.push(b)
+        blocksByMessage.set(b.messageId, arr)
+      }
+      expect(fetched.blocks).toHaveLength(MSG_COUNT + 6)
+      for (let i = 0; i < MSG_COUNT; i++) {
+        const msg = msgs[i]
+        const ownBlocks = blocksByMessage.get(msg.id) ?? []
+        expect(ownBlocks[0].content).toBe(`block-${i}-0`)
+        expect(ownBlocks[0].messageId).toBe(msg.id)
+      }
+      // File-reference projection for the 6 file blocks.
+      const refs = sqlite.prepare('SELECT block_id, file_id FROM file_references').all() as any[]
+      expect(refs).toHaveLength(6)
+      expect(
+        refs
+          .map((r) => r.file_id)
+          .sort()
+          .map((f: string) => Number(f.split('-')[1]))
+      ).toEqual([0, 100, 200, 300, 400, 500])
+    })
+
+    it('appends after existing target messages without disturbing their order', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+      const existingIds: string[] = []
+      for (let i = 0; i < 3; i++) {
+        const msg = makeMessageJson(topicId, { content: `existing-${i}` })
+        existingIds.push(msg.id as string)
+        agg.appendMessage(topicId, msg as any, [])
+      }
+
+      const entries = Array.from({ length: 5 }, (_, i) => ({
+        message: makeMessageJson(topicId, { content: `clone-${i}` }),
+        blocks: [] as Record<string, unknown>[]
+      }))
+      const result = agg.cloneMessagesToTopic(topicId, entries as any)
+      expect(result.ok).toBe(true)
+
+      const msgs = okValue(agg.fetchMessages(topicId)).messages as any[]
+      expect(msgs).toHaveLength(8)
+      expect(msgs.map((m) => m.content)).toEqual([
+        'existing-0',
+        'existing-1',
+        'existing-2',
+        'clone-0',
+        'clone-1',
+        'clone-2',
+        'clone-3',
+        'clone-4'
+      ])
+      expect(msgs.map((m) => m.sortOrder)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+      expect(msgs.slice(0, 3).map((m) => m.id)).toEqual(existingIds)
+    })
+
+    it('duplicate new ID within one request inserts once and applies later metadata (per-entry loop parity)', () => {
+      const topicId = `t-${uid()}`
+      const dupId = `m-${uid()}`
+      const result = agg.cloneMessagesToTopic(topicId, [
+        { message: makeMessageJson(topicId, { id: dupId, content: 'first' }), blocks: [] },
+        { message: makeMessageJson(topicId, { id: dupId, content: 'second' }), blocks: [] }
+      ] as any)
+      expect(result.ok).toBe(true)
+      const msgs = okValue(agg.fetchMessages(topicId)).messages as any[]
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].id).toBe(dupId)
+      // Last write wins for metadata, matching the previous per-entry loop.
+      expect(msgs[0].content).toBe('second')
+    })
+
+    it('phase-4 block upserts keep original request order on cross-entry block-ID collisions (audit F1)', () => {
+      const topicId = `t-${uid()}`
+      // Existing same-topic message with no blocks yet.
+      const existingMsg = makeMessageJson(topicId)
+      agg.appendMessage(topicId, existingMsg as any, [])
+
+      const sharedBlockId = `b-${uid()}`
+      const newMsg = makeMessageJson(topicId, { content: 'new message' })
+
+      // Request order is [existing entry, new entry] sharing ONE block ID.
+      // The legacy per-entry loop upserted the EXISTING entry's block first
+      // (creating it under the existing message), so the second upsert hits
+      // the reparent guard and reports the EXISTING message as the block
+      // owner. The batched `[...new, ...existing]` order would upsert the
+      // NEW entry's block first and report the NEW message instead — the
+      // reparent error message therefore proves Phase 4 ran in original
+      // request order (audit F1).
+      const result = agg.cloneMessagesToTopic(topicId, [
+        {
+          message: makeMessageJson(topicId, { id: existingMsg.id }),
+          blocks: [makeBlockJson(existingMsg.id as string, 'main_text', { id: sharedBlockId, content: 'existing' })]
+        },
+        {
+          message: newMsg,
+          blocks: [makeBlockJson(newMsg.id as string, 'main_text', { id: sharedBlockId, content: 'new' })]
+        }
+      ] as any)
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.error.message).toContain(`belongs to message ${existingMsg.id}`)
+        expect(result.error.message).not.toContain(`belongs to message ${newMsg.id}`)
+      }
+      // Whole transaction rolled back — no messages, no blocks were added.
+      const fetched = okValue(agg.fetchMessages(topicId))
+      expect(fetched.messages).toHaveLength(1)
+      expect(fetched.messages[0].id).toBe(existingMsg.id)
+      expect(fetched.blocks).toHaveLength(0)
+    })
+
+    it('large batch performs ZERO message-order normalizations on a healthy topic (LOCK-002 fast path)', () => {
+      const topicId = `t-${uid()}`
+      const entries = Array.from({ length: 600 }, (_, i) => ({
+        message: makeMessageJson(topicId, { content: `n-${i}` }),
+        blocks: [] as Record<string, unknown>[]
+      }))
+      const normalizeSpy = vi.spyOn(MessagesRepository.prototype as any, 'normalizeOrdersInTx')
+      try {
+        const result = agg.cloneMessagesToTopic(topicId, entries as any)
+        expect(result.ok).toBe(true)
+        // The old per-entry append path normalized the whole topic 600 times
+        // (O(M²) UPDATEs). The batch path now proves the topic is already
+        // dense zero-based and appends at MAX+1 with ZERO sibling UPDATEs
+        // (LOCK-002) — no normalization is needed for a healthy topic.
+        const topicNormalizes = normalizeSpy.mock.calls.filter(([, id]) => id === topicId)
+        expect(topicNormalizes).toHaveLength(0)
+        const msgs = okValue(agg.fetchMessages(topicId)).messages as any[]
+        expect(msgs).toHaveLength(600)
+        expect(msgs.map((m) => m.sortOrder)).toEqual(Array.from({ length: 600 }, (_, i) => i))
+      } finally {
+        normalizeSpy.mockRestore()
+      }
+    })
+
+    it('genuine rollback: large batch reverts all messages/blocks/refs on trigger failure', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+
+      sqlite.exec(`
+        CREATE TEMP TRIGGER IF NOT EXISTS abort_file_ref_clone_batch
+        BEFORE INSERT ON file_references
+        BEGIN
+          SELECT RAISE(ABORT, 'trigger-forced abort for clone batch rollback test');
+        END
+      `)
+
+      try {
+        const entries = Array.from({ length: 300 }, (_, i) => {
+          const msg = makeMessageJson(topicId, { content: `rb-${i}` })
+          const fileBlk = makeBlockJson(msg.id as string, 'file', {
+            file: { id: `rb-file-${i}`, name: `r${i}.pdf`, path: `/r${i}.pdf`, type: 'application/pdf' }
+          })
+          return { message: msg, blocks: [fileBlk] }
+        })
+        const result = agg.cloneMessagesToTopic(topicId, entries as any)
+        expect(result.ok).toBe(false)
+
+        // Everything rolled back — no messages, no blocks, no refs.
+        const fetched = agg.fetchMessages(topicId)
+        expect(okValue(fetched).messages).toHaveLength(0)
+        expect(okValue(fetched).blocks).toHaveLength(0)
+        const refCount = (sqlite.prepare('SELECT COUNT(*) AS c FROM file_references').get() as any).c
+        expect(refCount).toBe(0)
+      } finally {
+        sqlite.exec('DROP TRIGGER IF EXISTS TEMP.abort_file_ref_clone_batch')
+      }
     })
   })
 

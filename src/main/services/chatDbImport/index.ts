@@ -228,7 +228,7 @@ export interface ImportSession {
 export interface CandidateResourceLike {
   initialize(): Promise<void>
   /**
-   * LOCK-FTS-3: defer the migration-003 derived search projection on the
+   * LOCK-FTS-3: defer the derived search projection on the
    * candidate (drop triggers → FTS table → normalized table atomically) so
    * bulk page writes pay NO per-row trigger/FTS maintenance. Called by the
    * orchestrator immediately after initialize(), before any page write.
@@ -1070,7 +1070,7 @@ export async function startImport(zipPath: string, options?: StartImportOptions)
           // Attach before awaiting init so cancel/dispose can discard it.
           session.candidate = candidate
           await candidate.initialize()
-          // LOCK-FTS-3: defer the migration-003 derived search projection
+          // LOCK-FTS-3: defer the derived search projection
           // (drop triggers → FTS → normalized atomically) BEFORE any page
           // write so L2 bulk import does not pay per-row trigger/FTS
           // maintenance. Fail closed: an error enters the error lifecycle.

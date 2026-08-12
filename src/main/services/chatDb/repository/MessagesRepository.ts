@@ -5,6 +5,10 @@
  * - sort_order is zero-based dense within each topic.
  * - All mutating operations (append, insertAt, upsertAt, delete, deleteMany)
  *   normalize sibling orders transactionally.
+ * - Tail appends (append, appendMany) use the LOCK-002 fast path: a dense
+ *   zero-based topic is proven with one aggregate query and appended at
+ *   MAX+1 with ZERO sibling UPDATEs; sparse/corrupt legacy order is
+ *   detected by the same query and repaired with the legacy normalization.
  * - replaceOrder uses direct sequential assignment (no fixed-offset hack).
  *
  * Segment cleanup:
@@ -33,6 +37,7 @@ import {
   fromDrizzleResult,
   type GetResult,
   insertAtId,
+  inspectDenseZeroBasedOrder,
   loadOrderedIds,
   moveId,
   notFound,
@@ -207,6 +212,74 @@ export class MessagesRepository {
   }
 
   /**
+   * Append many messages at the end of their topics in ONE batch.
+   *
+   * Semantics are the batch analog of {@link append}: for each affected
+   * topic, the base order is computed once from `MAX(sort_order)+1`, the
+   * messages are inserted with sequential orders, and the topic is
+   * normalized at most once (LOCK-002 fast path: a topic that is ALREADY
+   * dense zero-based gets ZERO sibling UPDATEs; only sparse/corrupt legacy
+   * topics fall back to a single linear normalization pass). This replaces
+   * M per-message full-topic normalizations (O(M²) UPDATEs) with at most
+   * one repair per topic (O(M) UPDATEs only when corrupt + M inserts).
+   */
+  appendMany(items: MessageData[]): MessageData[] {
+    if (items.length === 0) return []
+    return this.db.transaction((tx) => {
+      // Group by topic first so each topic's base order + density is read
+      // exactly once (audit F5): topic existence is asserted once per
+      // DISTINCT topic, not per item, keeping the same first-failure
+      // behavior as before (the first distinct missing topic throws).
+      const byTopic = new Map<string, MessageData[]>()
+      for (const item of items) {
+        const list = byTopic.get(item.topicId)
+        if (list) {
+          list.push(item)
+        } else {
+          byTopic.set(item.topicId, [item])
+        }
+      }
+      for (const topicId of byTopic.keys()) {
+        this.assertTopicExists(topicId)
+      }
+      const topicStates = new Map<string, { maxOrder: number; dense: boolean }>()
+      for (const topicId of byTopic.keys()) {
+        // LOCK-002 + audit F4: ONE aggregate query both proves pre-insert
+        // density and yields MAX(sort_order), so appendMany never runs a
+        // standalone MAX query next to the density proof. Dense topics
+        // append at MAX+1 with zero sibling UPDATEs; corrupt/sparse topics
+        // keep the legacy single normalization repair below.
+        const { maxOrder, dense } = inspectDenseZeroBasedOrder(tx, messages, messages.topicId, topicId)
+        topicStates.set(topicId, { maxOrder, dense })
+      }
+      for (const [topicId, topicItems] of byTopic) {
+        let next = topicStates.get(topicId)!.maxOrder + 1
+        for (const item of topicItems) {
+          const values = toInsertValues({ ...item, sortOrder: next })
+          tx.insert(messages)
+            .values(values as any)
+            .run()
+          next++
+        }
+      }
+      // Normalize ONLY topics that were not already dense (LOCK-002: corrupt
+      // order is repaired; healthy order is never rewritten).
+      for (const [topicId, state] of topicStates) {
+        if (!state.dense) {
+          this.normalizeOrdersInTx(tx, topicId)
+        }
+      }
+      return items.map((item) =>
+        fromDrizzleResult<MessageData>(
+          tx.select().from(messages).where(eq(messages.id, item.id)).get() ?? ({} as any),
+          'messages',
+          item.id
+        )
+      )
+    })
+  }
+
+  /**
    * Create a message. Phase 2: normalizes sibling orders to ensure density.
    */
   create(data: MessageData): MessageData {
@@ -225,20 +298,32 @@ export class MessagesRepository {
     })
   }
 
+  /**
+   * Append one message at the end of its topic.
+   *
+   * LOCK-002 fast path: when the topic's existing order is ALREADY dense
+   * zero-based (proven by one aggregate query — `inspectDenseZeroBasedOrder`),
+   * the new row takes `MAX(sort_order)+1` and NO sibling UPDATE runs. A
+   * sparse/corrupt legacy topic is detected by the same query and falls
+   * back to the legacy full normalization repair — corruption is never
+   * silently preserved. Audit F4: the same single aggregate also yields
+   * MAX(sort_order), so no standalone MAX query runs next to the density
+   * proof.
+   */
   append(data: MessageData): MessageData {
     this.assertTopicExists(data.topicId)
     return this.db.transaction((tx) => {
-      const maxOrder = tx
-        .select({ max: sql<number>`COALESCE(MAX(${messages.sortOrder}), -1)` })
-        .from(messages)
-        .where(eq(messages.topicId, data.topicId))
-        .get()
-      const newOrder = (maxOrder?.max ?? -1) + 1
+      const { dense, maxOrder } = inspectDenseZeroBasedOrder(tx, messages, messages.topicId, data.topicId)
+      const newOrder = maxOrder + 1
       const values = toInsertValues({ ...data, sortOrder: newOrder })
       tx.insert(messages)
         .values(values as any)
         .run()
-      this.normalizeOrdersInTx(tx, data.topicId)
+      // LOCK-002: prove pre-insert density; skip normalization on healthy
+      // tail appends (zero sibling UPDATEs), repair sparse/corrupt topics.
+      if (!dense) {
+        this.normalizeOrdersInTx(tx, data.topicId)
+      }
       return fromDrizzleResult<MessageData>(
         tx.select().from(messages).where(eq(messages.id, data.id)).get() ?? ({} as any),
         'messages',

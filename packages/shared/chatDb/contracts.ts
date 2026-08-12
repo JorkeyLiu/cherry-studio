@@ -244,7 +244,7 @@ const ensureTopicContract: ChatDbContract = {
 }
 
 const appendMessageContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'message', 'blocks', 'insertIndex'),
+  allowedKeys: keySet('topicId', 'message', 'blocks', 'insertIndex', 'diagnostics'),
   validate(value: unknown): void {
     validateRequest(value, appendMessageContract.allowedKeys)
     const req = value as AppendMessageRequest
@@ -267,6 +267,42 @@ const appendMessageContract: ChatDbContract = {
     }
     if (req.insertIndex !== undefined) {
       validateIndex(req.insertIndex, 'request.insertIndex')
+    }
+    // LOCK-004: optional diagnostic-only correlation metadata. JSON-safety is
+    // already enforced by validateRequest; only shape/type bounds are needed
+    // here. Never validated against message content.
+    if (req.diagnostics !== undefined) {
+      const diag = req.diagnostics
+      if (diag === null || typeof diag !== 'object' || Array.isArray(diag)) {
+        throw new ValidationError('request.diagnostics', 'Expected an object')
+      }
+      for (const key of Object.keys(diag)) {
+        if (key !== 'correlationId' && key !== 'ordinal') {
+          throw new ValidationError(`request.diagnostics.${key}`, `Unknown property '${key}'`)
+        }
+      }
+      if (diag.correlationId !== undefined) {
+        if (
+          typeof diag.correlationId !== 'string' ||
+          diag.correlationId.length === 0 ||
+          diag.correlationId.length > 64
+        ) {
+          throw new ValidationError(
+            'request.diagnostics.correlationId',
+            'Expected a non-empty string up to 64 characters'
+          )
+        }
+      }
+      if (diag.ordinal !== undefined) {
+        if (
+          typeof diag.ordinal !== 'number' ||
+          !Number.isInteger(diag.ordinal) ||
+          diag.ordinal < 1 ||
+          diag.ordinal > 100
+        ) {
+          throw new ValidationError('request.diagnostics.ordinal', 'Expected a positive integer up to 100')
+        }
+      }
     }
   },
   validateResult: voidResult('chatdb:append-message')

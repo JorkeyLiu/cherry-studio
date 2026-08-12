@@ -22,8 +22,37 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // ---------------------------------------------------------------------------
 
 // Hoisted mocks
-const { mockLogger, mockSqliteInstances, MockDatabase, appliedMigrationKeys } = vi.hoisted(() => {
+const { mockLogger, mockSqliteInstances, MockDatabase, appliedMigrationKeys, makeMockStatement } = vi.hoisted(() => {
   const appliedMigrationKeys: string[] = []
+
+  /**
+   * Migration 004 preflight fixture contract (LOCK-001/002/003):
+   * `verifyFtsRowidParity` executes the parity/count/MATCH-smoke queries on
+   * the RAW better-sqlite3 handle via `prepare(sql).get()`, so the mocked
+   * handle must provide that capability exactly like a real Database. The
+   * mocked database is EMPTY (the drizzle mock tracks migration keys only,
+   * it never creates tables), so every parity count is zero and the smoke
+   * MATCH finds no document — the preflight passes and migration 004
+   * proceeds, mirroring a fresh production DB.
+   */
+  function makeMockStatement(sql: string): any {
+    if (sql === MIGRATION_004_PARITY_FTS_OUTER_SQL) {
+      return { get: vi.fn(() => ({ fts_without_normalized: 0, block_id_mismatch: 0, content_mismatch: 0 })) }
+    }
+    if (
+      sql === MIGRATION_004_PARITY_NORMALIZED_COUNT_SQL ||
+      sql === MIGRATION_004_PARITY_FTS_COUNT_SQL ||
+      sql === MIGRATION_004_PARITY_CANONICAL_COUNT_SQL
+    ) {
+      return { get: vi.fn(() => ({ n: 0 })) }
+    }
+    if (sql === MIGRATION_004_FTS_SMOKE_SQL) {
+      // Empty FTS index — the smoke MATCH matches no document (stmt.get() → undefined).
+      return { get: vi.fn(() => undefined) }
+    }
+    return { get: vi.fn(() => undefined), all: vi.fn(() => []), run: vi.fn(() => ({ changes: 0 })) }
+  }
+
   return {
     mockLogger: {
       info: vi.fn(),
@@ -33,12 +62,14 @@ const { mockLogger, mockSqliteInstances, MockDatabase, appliedMigrationKeys } = 
     },
     mockSqliteInstances: [] as any[],
     appliedMigrationKeys,
+    makeMockStatement,
     MockDatabase: vi.fn().mockImplementation(() => {
       const instance = {
         pragma: vi.fn((sql: string, _opts?: any) => {
           if (sql === 'integrity_check') return 'ok'
           return null
         }),
+        prepare: vi.fn((sql: string) => makeMockStatement(sql)),
         close: vi.fn(),
         backup: vi.fn(() => ({ run: vi.fn() })),
         function: vi.fn()
@@ -188,6 +219,8 @@ vi.mock('node:fs', () => ({
 // Import after mocks
 // ---------------------------------------------------------------------------
 
+import { resetDiagnosticCounters } from '@shared/diagnostics/sendTiming'
+
 import { BetterSqlite3BackupAdapter, ChatDbBackup } from '../backup'
 import { ChatDbService, chatDbService } from '../index'
 import {
@@ -198,7 +231,15 @@ import {
   MaintenanceBusyError,
   type PromotionLeaseHandle
 } from '../maintenanceCoordination'
-import { MIGRATIONS, runMigrations } from '../migration'
+import {
+  MIGRATION_004_FTS_SMOKE_SQL,
+  MIGRATION_004_PARITY_CANONICAL_COUNT_SQL,
+  MIGRATION_004_PARITY_FTS_COUNT_SQL,
+  MIGRATION_004_PARITY_FTS_OUTER_SQL,
+  MIGRATION_004_PARITY_NORMALIZED_COUNT_SQL,
+  MIGRATIONS,
+  runMigrations
+} from '../migration'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -229,6 +270,7 @@ describe('ChatDbService', () => {
     appliedMigrationKeys.length = 0
     clearMemfs()
     resetSingletonState()
+    resetDiagnosticCounters()
   })
 
   afterEach(() => {
@@ -326,6 +368,7 @@ describe('ChatDbService', () => {
             if (sql === 'integrity_check') return 'ok'
             return null
           }),
+          prepare: vi.fn((sql: string) => makeMockStatement(sql)),
           close: vi.fn(),
           backup: vi.fn(() => ({ run: vi.fn() }))
         }
@@ -689,11 +732,12 @@ describe('BetterSqlite3BackupAdapter', () => {
 // ---------------------------------------------------------------------------
 
 describe('Migration registry', () => {
-  it('should have exactly three migrations (001 + 002 + 003)', () => {
-    expect(MIGRATIONS).toHaveLength(3)
+  it('should have exactly four migrations (001 + 002 + 003 + 004)', () => {
+    expect(MIGRATIONS).toHaveLength(4)
     expect(MIGRATIONS[0].key).toBe('001_initial_schema')
     expect(MIGRATIONS[1].key).toBe('002_corrective_schema')
     expect(MIGRATIONS[2].key).toBe('003_fts5_normalized_search')
+    expect(MIGRATIONS[3].key).toBe('004_fts_rowid_identity')
   })
 
   it('001_initial_schema should have SQL statements', () => {
@@ -1272,5 +1316,87 @@ describe('ChatDbService promotion-owned live lifecycle (LOCK-4422)', () => {
       expect(memfs['/mock/phase443-fixedpath/chat.db.repair']).toBeDefined()
       expect(memfs['/arbitrary/path/chat.db.repair']).toBeUndefined()
     })
+  })
+})
+
+// =========================================================================
+// 12. Startup diagnostics (LOCK-001/002/003)
+//
+// Top-level describe: the singleton must be closed and the once-per-process
+// diagnostic counters reset before every test, because init tests in earlier
+// describes would otherwise consume the budgets and leave the singleton open.
+// =========================================================================
+
+describe('Startup diagnostics', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockSqliteInstances.length = 0
+    appliedMigrationKeys.length = 0
+    clearMemfs()
+    resetSingletonState()
+    resetDiagnosticCounters()
+  })
+
+  afterEach(() => {
+    resetSingletonState()
+  })
+
+  it('emits one-time startup stage + metadata logs after successful init', async () => {
+    await chatDbService.init()
+
+    const infoText = mockLogger.info.mock.calls.map((call: any[]) => String(call[0] ?? '')).join('\n')
+    expect(infoText).toContain('[diagnostics] chatdb.init.open')
+    expect(infoText).toContain('[diagnostics] chatdb.init.pragma')
+    expect(infoText).toContain('[diagnostics] chatdb.init.migrate')
+    expect(infoText).toContain('[diagnostics] chatdb.startup.metadata')
+
+    const metadataCall = mockLogger.info.mock.calls.find((call: any[]) =>
+      String(call[0]).includes('chatdb.startup.metadata')
+    )
+    const data = metadataCall?.[1] as Record<string, unknown> | undefined
+    expect(data).toBeDefined()
+    expect(data!.success).toBe(true)
+    // Failure-safe in this mocked env: missing stat → safe null, and the
+    // mocked pragma returns null → safe unknown. Never throws.
+    expect(data).toHaveProperty('dbSizeBucket')
+    expect(data).toHaveProperty('walPresent', false)
+    expect(data!.sqlite).toBeDefined()
+
+    // Privacy: diagnostic logs never include the DB path or its directory
+    // components (other non-diagnostic lifecycle logs may mention it).
+    const diagText = mockLogger.info.mock.calls
+      .map((call: any[]) => String(call[0] ?? ''))
+      .filter((text: string) => text.includes('[diagnostics]'))
+      .join('\n')
+    expect(diagText).not.toContain('/mock/data')
+    expect(diagText).not.toContain('chat.db')
+    expect(JSON.stringify(data)).not.toContain('/mock')
+  })
+
+  it('emits stage timings only once per process lifetime (bounded, LOCK-003)', async () => {
+    // Two full init cycles in one process → only the first emits.
+    await chatDbService.init()
+    chatDbService.close()
+    vi.clearAllMocks()
+    await chatDbService.init()
+
+    const infoText = mockLogger.info.mock.calls.map((call: any[]) => String(call[0] ?? '')).join('\n')
+    expect(infoText).not.toContain('[diagnostics] chatdb.startup.metadata')
+    expect(infoText).not.toContain('[diagnostics] chatdb.init.open')
+  })
+
+  it('emits a bounded failure diagnostic when init fails without swallowing the error', async () => {
+    MockDatabase.mockImplementationOnce(() => {
+      throw new Error('Simulated DB open failure')
+    })
+
+    await expect(chatDbService.init()).rejects.toThrow('Simulated DB open failure')
+
+    const infoText = mockLogger.info.mock.calls.map((call: any[]) => String(call[0] ?? '')).join('\n')
+    expect(infoText).toContain('[diagnostics] chatdb.init.failed')
+    const failedCall = mockLogger.info.mock.calls.find((call: any[]) => String(call[0]).includes('chatdb.init.failed'))
+    const data = failedCall?.[1] as Record<string, unknown> | undefined
+    expect(data).toBeDefined()
+    expect(data!.success).toBe(false)
   })
 })

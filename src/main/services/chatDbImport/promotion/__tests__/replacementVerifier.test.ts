@@ -325,7 +325,7 @@ describe('verifyReplacement', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Derived search projection gate (LOCK-SP-5/7) — migration_state 003 stays
+  // Derived search projection gate (LOCK-SP-5/7) — migration_state stays
   // recorded, so the migration gate passes and ONLY the lightweight
   // `search-projection` gate fires.
   // -------------------------------------------------------------------------
@@ -359,8 +359,9 @@ describe('verifyReplacement', () => {
   })
 
   it('still verifies the pristine replacement through the new gate (search-projection passes)', () => {
-    // The pristine live DB is trigger-maintained by migration 003: the
-    // derived objects + counts + messageId parity + MATCH smoke all pass.
+    // The pristine live DB is trigger-maintained by the current migrations
+    // (migration-004 generation): the derived objects + counts + messageId
+    // parity + MATCH smoke all pass.
     expect(run().ok).toBe(true)
   })
 

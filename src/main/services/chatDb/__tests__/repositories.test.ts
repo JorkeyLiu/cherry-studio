@@ -439,6 +439,133 @@ describe('Repository Tests', () => {
     it('empty createMany returns empty', () => {
       expect(messagesRepo.createMany([])).toEqual([])
     })
+
+    it('appendMany appends all items at the end with dense orders', () => {
+      messagesRepo.create(makeMessage({ id: 'am-e1', topicId: 'topic-1', sortOrder: 0 }))
+      messagesRepo.create(makeMessage({ id: 'am-e2', topicId: 'topic-1', sortOrder: 1 }))
+      const created = messagesRepo.appendMany([
+        makeMessage({ id: 'am-n1', topicId: 'topic-1' }),
+        makeMessage({ id: 'am-n2', topicId: 'topic-1' }),
+        makeMessage({ id: 'am-n3', topicId: 'topic-1' })
+      ])
+      expect(created.map((m) => m.id)).toEqual(['am-n1', 'am-n2', 'am-n3'])
+      const list = messagesRepo.listByTopic('topic-1')
+      expect(list.map((m) => m.id)).toEqual(['am-e1', 'am-e2', 'am-n1', 'am-n2', 'am-n3'])
+      expect(list.map((m) => m.sortOrder)).toEqual([0, 1, 2, 3, 4])
+    })
+
+    it('appendMany normalizes corrupt existing orders in one batch', () => {
+      sqlite
+        .prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, ?, ?)`)
+        .run('am-bad1', 'topic-1', 'user', -10)
+      sqlite
+        .prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, ?, ?)`)
+        .run('am-bad2', 'topic-1', 'user', 500)
+      messagesRepo.appendMany([
+        makeMessage({ id: 'am-ok1', topicId: 'topic-1' }),
+        makeMessage({ id: 'am-ok2', topicId: 'topic-1' })
+      ])
+      const list = messagesRepo.listByTopic('topic-1')
+      expect(list.map((m) => m.sortOrder)).toEqual([0, 1, 2, 3])
+      // New messages sort after the corrupt existing rows (entry order).
+      expect(list.map((m) => m.id)).toEqual(['am-bad1', 'am-bad2', 'am-ok1', 'am-ok2'])
+    })
+
+    it('appendMany empty returns empty', () => {
+      expect(messagesRepo.appendMany([])).toEqual([])
+    })
+
+    it('appendMany handles multiple topics independently', () => {
+      topicsRepo.create(makeTopic({ id: 'topic-2', name: 'Topic 2' }))
+      messagesRepo.create(makeMessage({ id: 'mt-a', topicId: 'topic-1', sortOrder: 0 }))
+      messagesRepo.appendMany([
+        makeMessage({ id: 'mt-b', topicId: 'topic-1' }),
+        makeMessage({ id: 'mt-c', topicId: 'topic-1' }),
+        makeMessage({ id: 'mt-x', topicId: 'topic-2' })
+      ])
+      expect(messagesRepo.listByTopic('topic-1').map((m) => m.sortOrder)).toEqual([0, 1, 2])
+      expect(messagesRepo.listByTopic('topic-2').map((m) => m.id)).toEqual(['mt-x'])
+      expect(messagesRepo.listByTopic('topic-2').map((m) => m.sortOrder)).toEqual([0])
+    })
+
+    it('appendMany performs ZERO full-topic normalizations on a healthy dense topic (LOCK-002 fast path)', () => {
+      // Seed via raw SQL so no repository normalization happens before the
+      // batch — the spy then counts only the appendMany normalization.
+      sqlite
+        .prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, ?, ?)`)
+        .run('once-e', 'topic-1', 'user', 0)
+      const normalizeSpy = vi.spyOn(MessagesRepository.prototype as any, 'normalizeOrdersInTx')
+      try {
+        messagesRepo.appendMany(
+          Array.from({ length: 100 }, (_, i) => makeMessage({ id: `once-n${i}`, topicId: 'topic-1' }))
+        )
+        // The topic was already dense zero-based, so the whole 100-item batch
+        // appends at MAX+1.. with ZERO sibling UPDATEs (the old code ran 100
+        // per-item normalizations, then 1 batch normalization; the LOCK-002
+        // fast path proves density with one aggregate query and skips repair).
+        expect(normalizeSpy).not.toHaveBeenCalled()
+        expect(messagesRepo.listByTopic('topic-1')).toHaveLength(101)
+        expect(messagesRepo.listByTopic('topic-1').map((m) => m.sortOrder)).toEqual(
+          Array.from({ length: 101 }, (_, i) => i)
+        )
+      } finally {
+        normalizeSpy.mockRestore()
+      }
+    })
+
+    it('appendMany performs exactly ONE full-topic normalization on a corrupt topic (repair, LOCK-002)', () => {
+      sqlite
+        .prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, ?, ?)`)
+        .run('corrupt-a', 'topic-1', 'user', 0)
+      sqlite
+        .prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, ?, ?)`)
+        .run('corrupt-b', 'topic-1', 'user', 500) // gap → not dense
+      const normalizeSpy = vi.spyOn(MessagesRepository.prototype as any, 'normalizeOrdersInTx')
+      try {
+        messagesRepo.appendMany([
+          makeMessage({ id: 'corrupt-n1', topicId: 'topic-1' }),
+          makeMessage({ id: 'corrupt-n2', topicId: 'topic-1' })
+        ])
+        // The corrupt topic is repaired exactly once for the whole batch.
+        const topicNormalizes = normalizeSpy.mock.calls.filter(([, topicId]) => topicId === 'topic-1')
+        expect(topicNormalizes).toHaveLength(1)
+        expect(messagesRepo.listByTopic('topic-1').map((m) => m.sortOrder)).toEqual([0, 1, 2, 3])
+        expect(messagesRepo.listByTopic('topic-1').map((m) => m.id)).toEqual([
+          'corrupt-a',
+          'corrupt-b',
+          'corrupt-n1',
+          'corrupt-n2'
+        ])
+      } finally {
+        normalizeSpy.mockRestore()
+      }
+    })
+
+    it('appendMany asserts topic existence once per distinct topic (audit F5)', () => {
+      const spy = vi.spyOn(MessagesRepository.prototype as any, 'assertTopicExists')
+      try {
+        messagesRepo.appendMany([
+          makeMessage({ id: 'f5-a', topicId: 'topic-1' }),
+          makeMessage({ id: 'f5-b', topicId: 'topic-1' }),
+          makeMessage({ id: 'f5-c', topicId: 'topic-1' })
+        ])
+        expect(spy).toHaveBeenCalledTimes(1)
+        expect(spy).toHaveBeenCalledWith('topic-1')
+      } finally {
+        spy.mockRestore()
+      }
+    })
+
+    it('appendMany rejects a missing distinct topic before any insert (audit F5)', () => {
+      expect(() =>
+        messagesRepo.appendMany([
+          makeMessage({ id: 'f5-m1', topicId: 'missing-topic' }),
+          makeMessage({ id: 'f5-ok', topicId: 'topic-1' })
+        ])
+      ).toThrow('Topic missing-topic does not exist')
+      // Fail-fast: the valid-topic item in the same batch was never inserted.
+      expect(messagesRepo.countByTopic('topic-1')).toBe(0)
+    })
   })
 
   // ===========================================================================
@@ -883,6 +1010,106 @@ describe('Repository Tests', () => {
       messagesRepo.append(makeMessage({ id: 'bad-4', topicId: 'topic-1' }))
       const list = messagesRepo.listByTopic('topic-1')
       expect(list.map((m) => m.sortOrder)).toEqual([0, 1, 2, 3])
+    })
+
+    it('healthy tail append performs ZERO sibling sort_order UPDATEs (LOCK-002 fast path)', () => {
+      // Deterministic statement-count proof: a TEMP trigger records every
+      // sort_order UPDATE on messages. A healthy dense topic must not trigger
+      // a single one — the append is a lone INSERT.
+      sqlite.exec('CREATE TABLE sort_update_log (n INTEGER)')
+      sqlite.exec(`
+        CREATE TEMP TRIGGER trg_sort_update_log
+        AFTER UPDATE OF sort_order ON messages
+        BEGIN
+          INSERT INTO sort_update_log (n) VALUES (1);
+        END
+      `)
+      try {
+        // Build a dense 600-row topic via raw inserts (0..599).
+        const seedStmt = sqlite.prepare(
+          `INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, 'user', ?)`
+        )
+        for (let i = 0; i < 600; i++) seedStmt.run(`fp-${i}`, 'topic-1', i)
+
+        // Append must succeed and record zero sibling updates.
+        const appended = messagesRepo.append(makeMessage({ id: 'fp-600', topicId: 'topic-1' }))
+        expect(appended.sortOrder).toBe(600)
+        const logCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM sort_update_log').get() as { n: number }).n
+        expect(logCount).toBe(0)
+
+        // Dense zero-based order preserved.
+        const list = messagesRepo.listByTopic('topic-1')
+        expect(list).toHaveLength(601)
+        expect(list.map((m) => m.sortOrder)).toEqual(Array.from({ length: 601 }, (_, i) => i))
+        expect(list[600].id).toBe('fp-600')
+      } finally {
+        sqlite.exec('DROP TRIGGER IF EXISTS TEMP.trg_sort_update_log')
+      }
+    })
+
+    it('healthy appendMany performs ZERO sibling sort_order UPDATEs (LOCK-002 fast path)', () => {
+      sqlite.exec('CREATE TABLE sort_update_log (n INTEGER)')
+      sqlite.exec(`
+        CREATE TEMP TRIGGER trg_sort_update_log
+        AFTER UPDATE OF sort_order ON messages
+        BEGIN
+          INSERT INTO sort_update_log (n) VALUES (1);
+        END
+      `)
+      try {
+        const seedStmt = sqlite.prepare(
+          `INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, 'user', ?)`
+        )
+        for (let i = 0; i < 600; i++) seedStmt.run(`fam-${i}`, 'topic-1', i)
+
+        messagesRepo.appendMany(
+          Array.from({ length: 20 }, (_, i) => makeMessage({ id: `fam-n${i}`, topicId: 'topic-1' }))
+        )
+        const logCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM sort_update_log').get() as { n: number }).n
+        expect(logCount).toBe(0)
+        const list = messagesRepo.listByTopic('topic-1')
+        expect(list).toHaveLength(620)
+        expect(list.map((m) => m.sortOrder)).toEqual(Array.from({ length: 620 }, (_, i) => i))
+      } finally {
+        sqlite.exec('DROP TRIGGER IF EXISTS TEMP.trg_sort_update_log')
+      }
+    })
+
+    it('corrupt topic tail append repairs via sibling sort_order UPDATEs and ends dense (LOCK-002)', () => {
+      sqlite.exec('CREATE TABLE sort_update_log (n INTEGER)')
+      sqlite.exec(`
+        CREATE TEMP TRIGGER trg_sort_update_log
+        AFTER UPDATE OF sort_order ON messages
+        BEGIN
+          INSERT INTO sort_update_log (n) VALUES (1);
+        END
+      `)
+      try {
+        // Sparse + duplicate legacy order: [0, 0, 2, 500].
+        sqlite
+          .prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, 'user', ?)`)
+          .run('cor-1', 'topic-1', 0)
+        sqlite
+          .prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, 'user', ?)`)
+          .run('cor-2', 'topic-1', 0)
+        sqlite
+          .prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, 'user', ?)`)
+          .run('cor-3', 'topic-1', 2)
+        sqlite
+          .prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, 'user', ?)`)
+          .run('cor-4', 'topic-1', 500)
+
+        const appended = messagesRepo.append(makeMessage({ id: 'cor-5', topicId: 'topic-1' }))
+        expect(appended.sortOrder).toBe(4) // dense position after repair
+        const logCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM sort_update_log').get() as { n: number }).n
+        expect(logCount).toBeGreaterThan(0) // repair did rewrite siblings
+
+        const list = messagesRepo.listByTopic('topic-1')
+        expect(list.map((m) => m.id)).toEqual(['cor-1', 'cor-2', 'cor-3', 'cor-4', 'cor-5'])
+        expect(list.map((m) => m.sortOrder)).toEqual([0, 1, 2, 3, 4])
+      } finally {
+        sqlite.exec('DROP TRIGGER IF EXISTS TEMP.trg_sort_update_log')
+      }
     })
 
     it('insertAt beginning (index=0)', () => {
@@ -1625,6 +1852,38 @@ describe('Repository Tests', () => {
       expect(list.map((m) => m.sortOrder)).toEqual([0, 1])
 
       sqlite.exec('DROP TRIGGER IF EXISTS abort_after_insert')
+    })
+
+    it('appendMany rollback preserves original state', () => {
+      messagesRepo.create(makeMessage({ id: 'rb-a1', topicId: 'topic-1', sortOrder: 0 }))
+      messagesRepo.create(makeMessage({ id: 'rb-a2', topicId: 'topic-1', sortOrder: 1 }))
+
+      // Trigger allows rb-an1 insert to succeed, then aborts on rb-an2.
+      // This proves the first insert completed before the second aborted,
+      // and the single batch transaction rollback undoes both.
+      sqlite.exec(`
+        CREATE TEMPORARY TRIGGER IF NOT EXISTS abort_append_many
+        AFTER INSERT ON messages
+        WHEN NEW.id = 'rb-an2'
+        BEGIN
+          SELECT RAISE(ABORT, 'intentional abort');
+        END
+      `)
+
+      expect(() =>
+        messagesRepo.appendMany([
+          makeMessage({ id: 'rb-an1', topicId: 'topic-1' }),
+          makeMessage({ id: 'rb-an2', topicId: 'topic-1' })
+        ])
+      ).toThrow()
+
+      // Original data must be unchanged — rb-an1 insert was rolled back
+      expect(messagesRepo.countByTopic('topic-1')).toBe(2)
+      const list = messagesRepo.listByTopic('topic-1')
+      expect(list.map((m) => m.id)).toEqual(['rb-a1', 'rb-a2'])
+      expect(list.map((m) => m.sortOrder)).toEqual([0, 1])
+
+      sqlite.exec('DROP TRIGGER IF EXISTS abort_append_many')
     })
 
     it('upsertMany rollback preserves original state', () => {

@@ -961,8 +961,8 @@ export class CandidateVerifier {
   // -------------------------------------------------------------------------
 
   /**
-   * Required migration-003 derived objects (LOCK-FTS-2 single source: names
-   * come from the migration constants, never duplicated strings).
+   * Required derived search-projection objects (LOCK-FTS-2 single source:
+   * names come from the migration constants, never duplicated strings).
    */
   private readonly SEARCH_PROJECTION_OBJECTS: ReadonlyArray<{
     readonly name: string
@@ -1148,7 +1148,7 @@ export class CandidateVerifier {
       // Both projections are streamed in the SAME deterministic order
       // (block_id, normalized_content under SQLite BINARY collation) and
       // merged row-by-row with the injective length-prefixed key. The
-      // normalized side is scanned by its block_id primary key (index
+      // normalized side is scanned via its block_id unique index (index
       // keyset, O(log n + chunk) per chunk); the FTS side is streamed from a
       // single ORDER BY statement (one bounded SQLite temp sort — external
       // sort, never a quadratic keyset re-scan) via a bounded chunk buffer
@@ -1357,11 +1357,11 @@ export class CandidateVerifier {
   }
 
   /**
-   * Bounded chunked keyset cursor over the normalized projection's PRIMARY
-   * KEY (block_id, LOCK-SP-3): index-backed keyset pagination
+   * Bounded chunked keyset cursor over the normalized projection's UNIQUE
+   * block_id index (LOCK-SP-3): index-backed keyset pagination
    * (O(log n + chunk) per chunk — never quadratic), O(chunkSize) rows in
    * memory, cursor-index buffering, one abort checkpoint per chunk. The
-   * normalized table's block_id primary key makes `ORDER BY block_id` the
+   * normalized table's UNIQUE block_id index makes `ORDER BY block_id` the
    * SAME order as the FTS stream's `ORDER BY block_id, normalized_content`.
    */
   private scanNormalizedProjectionRows(sqlite: Database.Database): {

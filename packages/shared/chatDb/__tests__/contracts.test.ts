@@ -915,9 +915,9 @@ describe('contract allowedKeys', () => {
     expect(keys).toEqual(new Set(['topicId']))
   })
 
-  it('append-message has exactly topicId, message, blocks, insertIndex', () => {
+  it('append-message has exactly topicId, message, blocks, insertIndex, diagnostics', () => {
     const keys = getContract('chatdb:append-message').allowedKeys
-    expect(keys).toEqual(new Set(['topicId', 'message', 'blocks', 'insertIndex']))
+    expect(keys).toEqual(new Set(['topicId', 'message', 'blocks', 'insertIndex', 'diagnostics']))
   })
 
   it('update-message-and-blocks has exactly topicId, messageUpdates, blocksToUpdate, blockIdsToDelete', () => {
@@ -1026,6 +1026,105 @@ describe('block objects require messageId', () => {
         updates: { content: 'new' }
       })
     ).not.toThrow()
+  })
+})
+
+// ===========================================================================
+// append-message: optional diagnostics correlation metadata (LOCK-004)
+// ===========================================================================
+
+describe('append-message diagnostics correlation metadata', () => {
+  const baseRequest = {
+    topicId: 't1',
+    message: { id: 'm1', content: 'hi' },
+    blocks: [{ id: 'b1', messageId: 'm1', content: 'hi' }]
+  }
+
+  it('accepts a full diagnostics object with correlationId and ordinal', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:append-message', {
+        ...baseRequest,
+        diagnostics: { correlationId: 'snd-abc-123', ordinal: 1 }
+      })
+    ).not.toThrow()
+  })
+
+  it('accepts diagnostics with only correlationId (ordinal absent)', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:append-message', {
+        ...baseRequest,
+        diagnostics: { correlationId: 'snd-abc-123' }
+      })
+    ).not.toThrow()
+  })
+
+  it('accepts diagnostics with only ordinal (correlationId absent)', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:append-message', {
+        ...baseRequest,
+        diagnostics: { ordinal: 2 }
+      })
+    ).not.toThrow()
+  })
+
+  it('rejects diagnostics with unknown properties', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:append-message', {
+        ...baseRequest,
+        diagnostics: { correlationId: 'snd-abc', message: 'leak' }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects empty correlationId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:append-message', {
+        ...baseRequest,
+        diagnostics: { correlationId: '' }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects over-length correlationId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:append-message', {
+        ...baseRequest,
+        diagnostics: { correlationId: 'x'.repeat(65) }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('rejects non-integer, zero, negative, or oversized ordinal', () => {
+    for (const ordinal of [0, -1, 1.5, 101, '1']) {
+      expect(() =>
+        validateChatDbRequest('chatdb:append-message', {
+          ...baseRequest,
+          diagnostics: { ordinal }
+        })
+      ).toThrow(ValidationError)
+    }
+  })
+
+  it('rejects non-object diagnostics and null diagnostics', () => {
+    for (const diagnostics of ['snd-abc', 1, true, null, ['snd-abc']]) {
+      expect(() =>
+        validateChatDbRequest('chatdb:append-message', {
+          ...baseRequest,
+          diagnostics
+        })
+      ).toThrow(ValidationError)
+    }
+  })
+
+  it('rejects diagnostics on non-append channels (allowedKeys not widened)', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-message', {
+        topicId: 't1',
+        messageId: 'm1',
+        updates: { content: 'x' },
+        diagnostics: { correlationId: 'snd-abc' }
+      })
+    ).toThrow(ValidationError)
   })
 })
 

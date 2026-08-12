@@ -65,9 +65,11 @@ import type {
   UpsertSegmentRequest
 } from '@shared/chatDb'
 import { ERR_VALIDATION, fail, validateChatDbRequest, validateChatDbResult } from '@shared/chatDb'
+import { elapsedMs, MAX_APPEND_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
 import { IpcChannel } from '@shared/IpcChannel'
 import { ipcMain } from 'electron'
 
+import { logMainDiagnostic } from '../diagnostics'
 import { ChatDbAggregateService } from './ChatDbAggregateService'
 import { internalStorageFailure, mapErrorToResult, validateConstructedResult } from './errors'
 import { chatDbService } from './index'
@@ -141,48 +143,81 @@ export function registerChatDbIpc(): () => void {
     const chatDbChannel = channel as ChatDbChannel
 
     const handler = async (_event: Electron.IpcMainInvokeEvent, request: unknown): Promise<ChatDbResult<any>> => {
-      // Step 1: Validate request against contract
+      // LOCK-001/003/004: bounded append-handler timing (correlation-gated).
+      // Fires on success AND failure without changing the result. Correlation
+      // metadata is captured ONLY after the request passes validation, so a
+      // malformed diagnostics payload never emits a timing log and never
+      // echoes unvalidated values (LOCK-002).
+      const isAppendChannel = channel === IpcChannel.ChatDb_AppendMessage
+      const t0 = performance.now()
+      let appendOutcomeOk = false
+      let appendCorrelationId: string | undefined
+      let appendOrdinal: number | undefined
       try {
-        validateChatDbRequest(chatDbChannel, request)
-      } catch (validationError) {
-        const message = validationError instanceof Error ? validationError.message : String(validationError)
-        logger.warn(`[${channel}] Request validation failed: ${message}`)
-        const result = fail(ERR_VALIDATION, message, false)
+        // Step 1: Validate request against contract
+        try {
+          validateChatDbRequest(chatDbChannel, request)
+        } catch (validationError) {
+          const message = validationError instanceof Error ? validationError.message : String(validationError)
+          logger.warn(`[${channel}] Request validation failed: ${message}`)
+          const result = fail(ERR_VALIDATION, message, false)
+          validateConstructedResult(result, channel)
+          return result
+        }
+
+        // LOCK-004: capture validated correlation metadata for the timing log.
+        // Only reached after validation, so diagnostics values are contract
+        // shaped (string correlationId / positive integer ordinal).
+        if (isAppendChannel) {
+          const appendDiag = (request as AppendMessageRequest)?.diagnostics
+          appendCorrelationId = appendDiag?.correlationId
+          appendOrdinal = appendDiag?.ordinal
+        }
+
+        // Step 2: Get aggregate service (may fail if DB unavailable)
+        let aggregate: ChatDbAggregateService
+        try {
+          aggregate = getAggregate()
+        } catch (error) {
+          const result = mapErrorToResult(error, `${channel}/init`)
+          validateConstructedResult(result, channel)
+          return result
+        }
+
+        // Step 3: Execute command
+        const result = execute(aggregate, request)
+        appendOutcomeOk = result.ok === true
+
+        // Step 4: Validate constructed result via shared contract validator
+        try {
+          validateChatDbResult(chatDbChannel, result)
+        } catch (resultValidationError) {
+          // Aggregate constructed an invalid result — internal programming error.
+          // Return a valid ERR_STORAGE failure envelope instead.
+          const reason =
+            resultValidationError instanceof Error ? resultValidationError.message : String(resultValidationError)
+          const fallback = internalStorageFailure(channel, `Invalid result envelope: ${reason}`)
+          // Validate the fallback itself is well-formed
+          validateConstructedResult(fallback, channel)
+          return fallback
+        }
+
+        // Also run the basic structural check (defense in depth)
         validateConstructedResult(result, channel)
+
         return result
+      } finally {
+        // LOCK-004: correlate with the renderer's IPC round-trip via the
+        // same opaque correlation id; bounded to the first few appends.
+        // Only string correlation ids (the contract shape) trigger logging.
+        if (isAppendChannel && typeof appendCorrelationId === 'string' && appendCorrelationId.length > 0) {
+          logMainDiagnostic('main.append.handler', elapsedMs(t0), MAX_APPEND_DIAGNOSTIC_LOGS, {
+            correlationId: appendCorrelationId,
+            ordinal: appendOrdinal,
+            ok: appendOutcomeOk
+          })
+        }
       }
-
-      // Step 2: Get aggregate service (may fail if DB unavailable)
-      let aggregate: ChatDbAggregateService
-      try {
-        aggregate = getAggregate()
-      } catch (error) {
-        const result = mapErrorToResult(error, `${channel}/init`)
-        validateConstructedResult(result, channel)
-        return result
-      }
-
-      // Step 3: Execute command
-      const result = execute(aggregate, request)
-
-      // Step 4: Validate constructed result via shared contract validator
-      try {
-        validateChatDbResult(chatDbChannel, result)
-      } catch (resultValidationError) {
-        // Aggregate constructed an invalid result — internal programming error.
-        // Return a valid ERR_STORAGE failure envelope instead.
-        const reason =
-          resultValidationError instanceof Error ? resultValidationError.message : String(resultValidationError)
-        const fallback = internalStorageFailure(channel, `Invalid result envelope: ${reason}`)
-        // Validate the fallback itself is well-formed
-        validateConstructedResult(fallback, channel)
-        return fallback
-      }
-
-      // Also run the basic structural check (defense in depth)
-      validateConstructedResult(result, channel)
-
-      return result
     }
 
     ipcMain.handle(channel, handler)
@@ -216,7 +251,7 @@ export function registerChatDbIpc(): () => void {
 
   // 5. append-message
   handleCommand(IpcChannel.ChatDb_AppendMessage, (agg, req: AppendMessageRequest) => {
-    return agg.appendMessage(req.topicId, req.message, req.blocks, req.insertIndex)
+    return agg.appendMessage(req.topicId, req.message, req.blocks, req.insertIndex, req.diagnostics)
   })
 
   // 6. update-message

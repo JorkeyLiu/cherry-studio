@@ -3,11 +3,11 @@
  * (LOCK-FTS-1..6).
  *
  * Problem (profiled): during L2 bulk import, per-page `message_blocks`
- * writes grow from ~0.26s to 16–41s/page SOLELY because migration 003's
- * triggers + FTS5 trigram virtual table maintain the derived projection
- * synchronously per row. With the derived objects absent, writes stay at
- * ~0.1s/page. `migration_state` records 003, so an explicit rebuild is
- * mandatory before the candidate is sealed.
+ * writes grow from ~0.26s to 16–41s/page SOLELY because the derived
+ * projection's sync triggers + FTS5 trigram virtual table maintain the
+ * projection synchronously per row. With the derived objects absent, writes
+ * stay at ~0.1s/page. `migration_state` records the applied migrations, so
+ * an explicit rebuild is mandatory before the candidate is sealed.
  *
  * Solution: this candidate-local helper owns an explicit state machine that
  * defers (drops) the derived projection at candidate initialization and
@@ -26,7 +26,7 @@
  * - LOCK-FTS-3: defer() runs after migrations and atomically drops the
  *   three triggers, then the FTS table, then the normalized table (its
  *   index auto-drops). Fail closed: any error throws and leaves the
- *   candidate in a state the session discards; migration_state 003 remains
+ *   candidate in a state the session discards; migration_state remains
  *   recorded.
  * - LOCK-FTS-4: rebuild() is atomic (one transaction) and exactly once:
  *   drop-if-exists in safe order → recreate normalized table/index/FTS →
@@ -39,7 +39,7 @@
  *   so retries and new candidates have independent state.
  * - LOCK-FTS-6: post-rebuild insert/update/delete trigger behavior is
  *   restored and search semantics match a trigger-maintained DB; the
- *   rebuild executes the byte-identical migration 003 DDL/backfill
+ *   rebuild executes the current migration-004-generation DDL/backfill
  *   constants (no schema migration version bump).
  * - LOCK-PRIV: logs carry only fixed phase/error contexts, never
  *   content/IDs.
@@ -102,13 +102,13 @@ export class CandidateFtsProjection {
   }
 
   /**
-   * LOCK-FTS-3: atomically drop the migration-003 derived objects on the
-   * candidate DB — three triggers first, then the FTS table, then the
+   * LOCK-FTS-3: atomically drop the derived search-projection objects on
+   * the candidate DB — three triggers first, then the FTS table, then the
    * normalized table (its message_id index auto-drops). Must run AFTER
    * migrations and BEFORE any page write. Fail closed: any error throws,
    * the transaction rolls back, and the helper enters the terminal `failed`
-   * state (the caller must discard the candidate). migration_state 003
-   * remains recorded.
+   * state (the caller must discard the candidate). migration_state remains
+   * recorded.
    *
    * Exactly-once (LOCK-FTS-5): throws if already deferred/rebuilt/failed.
    *

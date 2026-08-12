@@ -7,7 +7,7 @@
  * Phase 2: central ordered-list algorithm + sortOrder patch rejection.
  */
 
-import { asc, eq } from 'drizzle-orm'
+import { asc, eq, sql } from 'drizzle-orm'
 
 import { decodeJson, encodeJson } from '../domain/codec'
 import { applyOverflowPatch, type RowPatchResult } from '../domain/mappers'
@@ -262,6 +262,57 @@ export function loadOrderedIds(tx: any, table: any, parentCol: any, parentId: st
     .orderBy(asc(table.sortOrder), asc(table.id))
     .all()
     .map((r: any) => r.id as string)
+}
+
+/** Result of a dense-zero-based-order inspection (audit F4). */
+export interface DenseOrderInspection {
+  /** True when every sibling already holds dense zero-based sort_order. */
+  dense: boolean
+  /** Current MAX(sort_order) in the sibling set (-1 when empty). */
+  maxOrder: number
+}
+
+/**
+ * Prove that every sibling of `parentId` already holds a dense zero-based
+ * sort_order (0..n-1, no duplicates, no gaps) and return the current
+ * MAX(sort_order) from the SAME single aggregate query (audit F4) — callers
+ * no longer run a separate MAX query alongside the density proof.
+ *
+ * This is the O(1)-write fast-path gate for tail appends (LOCK-002): when
+ * the topic is already dense, the appended row can take `maxOrder + 1` and
+ * NO sibling UPDATE is required. The single SELECT reads only the
+ * `(parent, sort_order)` index — zero writes, zero per-row UPDATEs — and the
+ * caller repairs (assignDenseOrders) when `dense` is false, so corrupt or
+ * sparse legacy order is never silently preserved.
+ *
+ * Dense zero-based ⟺ COUNT(*) = COUNT(DISTINCT sort_order) (no duplicates)
+ *   AND MIN(sort_order) = 0 (zero-based) AND MAX(sort_order) = COUNT(*) - 1
+ *   (no gaps). An empty sibling set is trivially dense (maxOrder -1).
+ *
+ * Must be called inside a transaction (read snapshot consistent with the
+ * append that follows).
+ */
+export function inspectDenseZeroBasedOrder(
+  tx: any,
+  table: any,
+  parentCol: any,
+  parentId: string
+): DenseOrderInspection {
+  const row = tx
+    .select({
+      cnt: sql<number>`count(*)`,
+      distinctCnt: sql<number>`count(distinct ${table.sortOrder})`,
+      maxOrder: sql<number>`coalesce(max(${table.sortOrder}), -1)`,
+      minOrder: sql<number>`coalesce(min(${table.sortOrder}), 0)`
+    })
+    .from(table)
+    .where(eq(parentCol, parentId))
+    .get()
+  if (!row) return { dense: true, maxOrder: -1 }
+  return {
+    dense: row.cnt === row.distinctCnt && row.minOrder === 0 && row.maxOrder === row.cnt - 1,
+    maxOrder: row.maxOrder
+  }
 }
 
 /**

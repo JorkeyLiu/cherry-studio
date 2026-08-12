@@ -73,6 +73,7 @@ vi.mock('@logger', () => ({
   }
 }))
 
+import { resetDiagnosticCounters } from '@shared/diagnostics/sendTiming'
 import { IpcChannel } from '@shared/IpcChannel'
 
 import { registerChatDbIpc } from '../ipc'
@@ -84,6 +85,7 @@ describe('ChatDb IPC Registration', () => {
     handlers.clear()
     vi.clearAllMocks()
     mockIsInitialised.mockReturnValue(false)
+    resetDiagnosticCounters()
   })
 
   afterEach(() => {
@@ -661,5 +663,131 @@ describe('ChatDb IPC Registration', () => {
     expect(warnText).toContain('Request validation failed')
     expect(warnText).not.toContain(formatSentinel)
     expect(warnText).not.toContain(dateSentinel)
+  })
+
+  // =========================================================================
+  // Append-handler timing diagnostics (LOCK-001/003/004)
+  // =========================================================================
+
+  describe('append handler diagnostics', () => {
+    it('forwards diagnostics to the aggregate and emits a correlated handler timing log', async () => {
+      // DB not initialised → UNAVAILABLE failure path; the handler timing log
+      // must still fire (ok=false) with the request's correlation metadata,
+      // without replacing the returned failure envelope.
+      mockIsInitialised.mockReturnValue(false)
+      disposer = registerChatDbIpc()
+
+      const handler = handlers.get(IpcChannel.ChatDb_AppendMessage)!
+      const result = await handler(
+        {},
+        {
+          topicId: 't-1',
+          message: { id: 'm-1' },
+          blocks: [],
+          diagnostics: { correlationId: 'snd-ipc-1', ordinal: 1 }
+        }
+      )
+
+      // Original envelope unchanged (UNAVAILABLE, not VALIDATION_ERROR).
+      expect(result.ok).toBe(false)
+      expect(result.error.code).toBe('UNAVAILABLE')
+
+      const diagText = mockLoggerContext.info.mock.calls.map((args) => String(args[0] ?? '')).join('\n')
+      expect(diagText).toContain('[diagnostics] main.append.handler')
+      const handlerCall = mockLoggerContext.info.mock.calls.find((args) =>
+        String(args[0]).includes('main.append.handler')
+      )!
+      const data = handlerCall[1] as Record<string, unknown>
+      expect(data.correlationId).toBe('snd-ipc-1')
+      expect(data.ordinal).toBe(1)
+      expect(data.ok).toBe(false)
+      expect(typeof data.durationMs).toBe('number')
+      // Never logs message content or raw request objects.
+      expect(JSON.stringify(data)).not.toContain('m-1')
+    })
+
+    it('accepts valid diagnostics on append-message (no VALIDATION_ERROR)', async () => {
+      disposer = registerChatDbIpc()
+
+      const handler = handlers.get(IpcChannel.ChatDb_AppendMessage)!
+      const result = await handler(
+        {},
+        {
+          topicId: 't-1',
+          message: { id: 'm-1' },
+          blocks: [],
+          diagnostics: { correlationId: 'snd-ipc-2', ordinal: 2 }
+        }
+      )
+
+      // Validation passes; failure (if any) comes from DB availability, never
+      // from the diagnostics metadata shape.
+      expect(result.ok).toBe(false)
+      expect(result.error.code).not.toBe('VALIDATION_ERROR')
+    })
+
+    it('rejects malformed diagnostics shape as VALIDATION_ERROR without a timing log', async () => {
+      disposer = registerChatDbIpc()
+
+      const handler = handlers.get(IpcChannel.ChatDb_AppendMessage)!
+      const result = await handler(
+        {},
+        {
+          topicId: 't-1',
+          message: { id: 'm-1' },
+          blocks: [],
+          diagnostics: { correlationId: 123 }
+        }
+      )
+
+      expect(result.ok).toBe(false)
+      expect(result.error.code).toBe('VALIDATION_ERROR')
+      const diagText = mockLoggerContext.info.mock.calls.map((args) => String(args[0] ?? '')).join('\n')
+      expect(diagText).not.toContain('main.append.handler')
+    })
+
+    it('rejects valid string correlationId with invalid ordinal without a timing log', async () => {
+      // LOCK-002: a valid correlation id must not let an invalid (arbitrary)
+      // ordinal reach the timing log — diagnostics are captured only after
+      // request validation succeeds.
+      disposer = registerChatDbIpc()
+
+      const handler = handlers.get(IpcChannel.ChatDb_AppendMessage)!
+      const result = await handler(
+        {},
+        {
+          topicId: 't-1',
+          message: { id: 'm-1' },
+          blocks: [],
+          diagnostics: { correlationId: 'snd-ipc-3', ordinal: 'not-a-number' }
+        }
+      )
+
+      expect(result.ok).toBe(false)
+      expect(result.error.code).toBe('VALIDATION_ERROR')
+      const diagText = mockLoggerContext.info.mock.calls.map((args) => String(args[0] ?? '')).join('\n')
+      expect(diagText).not.toContain('main.append.handler')
+      // The supplied values must not be echoed anywhere in the log.
+      expect(diagText).not.toContain('snd-ipc-3')
+      expect(diagText).not.toContain('not-a-number')
+    })
+
+    it('emits no handler timing log for appends without correlation metadata', async () => {
+      mockIsInitialised.mockReturnValue(false)
+      disposer = registerChatDbIpc()
+
+      const handler = handlers.get(IpcChannel.ChatDb_AppendMessage)!
+      await handler(
+        {},
+        {
+          topicId: 't-1',
+          message: { id: 'm-1' },
+          blocks: []
+        }
+      )
+
+      const diagText = mockLoggerContext.info.mock.calls.map((args) => String(args[0] ?? '')).join('\n')
+      expect(diagText).not.toContain('main.append.handler')
+    })
   })
 })

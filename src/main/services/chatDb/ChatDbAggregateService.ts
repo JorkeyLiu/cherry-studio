@@ -19,14 +19,16 @@
  */
 
 import { loggerService } from '@logger'
-import type { FileCleanupResult, FileReferenceWire, JsonObject, SegmentWire } from '@shared/chatDb'
+import type { AppendDiagnostics, FileCleanupResult, FileReferenceWire, JsonObject, SegmentWire } from '@shared/chatDb'
 import type { ChatDbResult } from '@shared/chatDb'
 import type { SearchMessagesRequest, SearchMessagesResponse } from '@shared/chatDb'
+import { elapsedMs, MAX_APPEND_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
 import type Database from 'better-sqlite3'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
+import { logMainDiagnostic } from '../diagnostics'
 import { spanCacheService } from '../SpanCacheService'
-import type { FileReferenceData, MessageBlockData } from './domain/types'
+import type { FileReferenceData, MessageBlockData, MessageData } from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
 import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
@@ -178,61 +180,108 @@ export class ChatDbAggregateService {
    * - New message at valid insertIndex, else append at end.
    * - Existing message ID preserves current position.
    * - Full supplied blocks are upserted, ordered, and references synced.
+   *
+   * `diagnostics` is optional diagnostic-only correlation metadata
+   * (LOCK-004); it never affects persistence semantics. When present, bounded
+   * timing logs distinguish wire→domain conversion from the synchronous
+   * SQLite transaction (LOCK-001/003).
    */
   appendMessage(
     topicId: string,
     messageJson: JsonObject,
     blocksJson: JsonObject[],
-    insertIndex?: number
+    insertIndex?: number,
+    diagnostics?: AppendDiagnostics
   ): ChatDbResult<null> {
-    return wrapResult(() => {
-      // Convert wire → domain
-      const messageData = wireToMessage(messageJson)
-      messageData.topicId = topicId // Ensure consistency
-      const blockDataList = blocksJson.map(wireToBlock)
+    const correlationId = diagnostics?.correlationId
+    const ordinal = diagnostics?.ordinal
+    const isDiagnosedAppend = typeof correlationId === 'string' && correlationId.length > 0
+    const t0 = performance.now()
+    let convertDurationMs = 0
+    let txDurationMs = 0
+    let outcomeOk = false
 
-      // Validate block ownership: all blocks must reference this message
-      for (const block of blockDataList) {
-        block.messageId = messageData.id // Enforce consistency
-      }
+    const result = wrapResult(() => {
+      try {
+        // Convert wire → domain
+        const tConvert = performance.now()
+        const messageData = wireToMessage(messageJson)
+        messageData.topicId = topicId // Ensure consistency
+        const blockDataList = blocksJson.map(wireToBlock)
 
-      return this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
+        // Validate block ownership: all blocks must reference this message
+        for (const block of blockDataList) {
+          block.messageId = messageData.id // Enforce consistency
+        }
+        convertDurationMs = elapsedMs(tConvert)
 
-        // Ensure topic exists
-        repos.topics.ensure(topicId)
+        const tTx = performance.now()
+        const txResult = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
 
-        // Check if message already exists
-        const existing = repos.messages.getById(messageData.id)
+          // Ensure topic exists
+          repos.topics.ensure(topicId)
 
-        if (existing.found) {
-          // Existing ID: preserve current position (update metadata only)
-          const patch = wireToMessagePatch(messageJson)
-          delete patch.id
-          delete patch.topicId
-          delete patch.sortOrder
-          if (Object.keys(patch).length > 0) {
-            repos.messages.update(topicId, messageData.id, patch)
-          }
-        } else {
-          // New message: insert at index or append
-          if (insertIndex !== undefined) {
-            repos.messages.insertAt(messageData, insertIndex)
+          // Check if message already exists
+          const existing = repos.messages.getById(messageData.id)
+
+          if (existing.found) {
+            // Existing ID: preserve current position (update metadata only)
+            const patch = wireToMessagePatch(messageJson)
+            delete patch.id
+            delete patch.topicId
+            delete patch.sortOrder
+            if (Object.keys(patch).length > 0) {
+              repos.messages.update(topicId, messageData.id, patch)
+            }
           } else {
-            repos.messages.append(messageData)
+            // New message: insert at index or append
+            if (insertIndex !== undefined) {
+              repos.messages.insertAt(messageData, insertIndex)
+            } else {
+              repos.messages.append(messageData)
+            }
           }
-        }
 
-        // Upsert blocks (preserves existing order for existing blocks)
-        if (blockDataList.length > 0) {
-          repos.blocks.upsertMany(blockDataList)
+          // Upsert blocks (preserves existing order for existing blocks)
+          if (blockDataList.length > 0) {
+            repos.blocks.upsertMany(blockDataList)
 
-          // Sync file references for file/image blocks
-          this.syncFileReferences(repos, blockDataList)
+            // Sync file references for file/image blocks
+            this.syncFileReferences(repos, blockDataList)
+          }
+          return null
+        })
+        txDurationMs = elapsedMs(tTx)
+        outcomeOk = true
+        return txResult
+      } catch (error) {
+        outcomeOk = false
+        throw error
+      } finally {
+        // LOCK-001/003/004: bounded timing logs fire on success AND failure
+        // without swallowing or replacing the original error.
+        if (isDiagnosedAppend) {
+          logMainDiagnostic('main.append.convert', convertDurationMs, MAX_APPEND_DIAGNOSTIC_LOGS, {
+            correlationId,
+            ordinal,
+            ok: outcomeOk
+          })
+          logMainDiagnostic('main.append.tx', txDurationMs, MAX_APPEND_DIAGNOSTIC_LOGS, {
+            correlationId,
+            ordinal,
+            ok: outcomeOk
+          })
+          logMainDiagnostic('main.append.aggregate', elapsedMs(t0), MAX_APPEND_DIAGNOSTIC_LOGS, {
+            correlationId,
+            ordinal,
+            ok: outcomeOk,
+            blockCount: blocksJson.length
+          })
         }
-        return null
-      })
+      }
     }, `appendMessage(${topicId}, ${messageJson.id})`)
+    return result
   }
 
   /**
@@ -1189,7 +1238,19 @@ export class ChatDbAggregateService {
    *
    * Rejects any existing message ID that is owned by a different topic.
    *
-   * Atomicity: one root SQLite transaction (LOCK-5106).
+   * Linear batch semantics (LOCK-002): all NEW messages are converted and
+   * classified first, then inserted in ONE `appendMany` batch with a single
+   * final dense-order normalization per topic — never one per-message
+   * full-topic normalization. Existing (same-topic) entries preserve their
+   * position and only receive a metadata patch, exactly as before.
+   *
+   * Phase-4 block side effects (block upserts + file-reference syncs) run
+   * in the ORIGINAL request entry order (audit F1): the new/existing
+   * classification never reorders them into new-before-existing, so rare
+   * cross-entry block-ID collisions keep the same last-writer as the legacy
+   * per-entry loop.
+   *
+   * Atomicity: one root SQLite transaction (LOCK-001).
    */
   cloneMessagesToTopic(
     targetTopicId: string,
@@ -1203,6 +1264,26 @@ export class ChatDbAggregateService {
         // Ensure target topic exists
         repos.topics.ensure(targetTopicId, assistantId)
 
+        // Phase 1 — convert every entry, enforce block ownership, and
+        // classify as new vs existing. Cross-topic ownership and duplicate
+        // new IDs are resolved here, before any write, so the first invalid
+        // entry aborts the whole transaction exactly as the per-entry loop
+        // did (error precedence is unchanged).
+        const newMessages: MessageData[] = []
+        const newMessageIds = new Set<string>()
+        const existingPlans: Array<{
+          message: MessageData
+          blocks: MessageBlockData[]
+          patch: Record<string, unknown>
+        }> = []
+        // Phase-4 side-effect order (audit F1): every entry's blocks in the
+        // ORIGINAL request order. Upserting blocks + syncing file references
+        // in `[...newEntryPlans, ...existingPlans]` order would move all NEW
+        // entries' block side effects before EXISTING entries', changing the
+        // last-writer for rare cross-entry block-ID collisions vs the legacy
+        // per-entry loop.
+        const phase4Plans: Array<{ message: MessageData; blocks: MessageBlockData[] }> = []
+
         for (const entry of entries) {
           const messageData = wireToMessage(entry.message)
           messageData.topicId = targetTopicId
@@ -1212,6 +1293,11 @@ export class ChatDbAggregateService {
           for (const block of blockDataList) {
             block.messageId = messageData.id
           }
+
+          const patch = wireToMessagePatch(entry.message)
+          delete patch.id
+          delete patch.topicId
+          delete patch.sortOrder
 
           // Check if message already exists
           const existing = repos.messages.getById(messageData.id)
@@ -1225,22 +1311,43 @@ export class ChatDbAggregateService {
               )
             }
             // Same topic: preserve position, update metadata only
-            const patch = wireToMessagePatch(entry.message)
-            delete patch.id
-            delete patch.topicId
-            delete patch.sortOrder
-            if (Object.keys(patch).length > 0) {
-              repos.messages.update(targetTopicId, messageData.id, patch)
-            }
+            existingPlans.push({ message: messageData, blocks: blockDataList, patch })
+          } else if (newMessageIds.has(messageData.id)) {
+            // Duplicate new ID within one request: the first occurrence is
+            // inserted; later occurrences follow the established update path.
+            existingPlans.push({ message: messageData, blocks: blockDataList, patch })
           } else {
-            // New: append at end
-            repos.messages.append(messageData)
+            // New: append at end (batched)
+            newMessageIds.add(messageData.id)
+            newMessages.push(messageData)
           }
+          // Phase 4 runs in original entry order regardless of the
+          // new/existing split above (audit F1).
+          phase4Plans.push({ message: messageData, blocks: blockDataList })
+        }
 
-          // Upsert blocks + sync file references
-          if (blockDataList.length > 0) {
-            repos.blocks.upsertMany(blockDataList)
-            this.syncFileReferences(repos, blockDataList)
+        // Phase 2 — batch-insert all new messages (single linear normalize).
+        if (newMessages.length > 0) {
+          repos.messages.appendMany(newMessages)
+        }
+
+        // Phase 3 — metadata patches for existing rows and in-request
+        // duplicates (applied after the batch insert so duplicate entries
+        // patch the just-inserted row, matching the per-entry loop).
+        for (const plan of existingPlans) {
+          if (Object.keys(plan.patch).length > 0) {
+            repos.messages.update(targetTopicId, plan.message.id, plan.patch)
+          }
+        }
+
+        // Phase 4 — upsert blocks + sync file references for ALL entries in
+        // ORIGINAL request order (audit F1: the new/existing classification
+        // must not reorder block side effects, so rare cross-entry block-ID
+        // collisions keep the legacy per-entry loop's last-writer).
+        for (const plan of phase4Plans) {
+          if (plan.blocks.length > 0) {
+            repos.blocks.upsertMany(plan.blocks)
+            this.syncFileReferences(repos, plan.blocks)
           }
         }
       })
