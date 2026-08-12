@@ -7,6 +7,12 @@
  *
  * Request validation: logs method, URL, parsed body shape, and asserts
  * the body contains the expected `model` and `messages` array.
+ *
+ * Slow-stream mode (LOCK-004 streaming-responsiveness spec): when the last
+ * user message content contains `__E2E_SLOW_STREAM__`, the chat completion is
+ * streamed word-by-word with an inter-chunk delay so the spec has a real
+ * interaction window while the response is still streaming. This is opt-in and
+ * deterministic; no existing spec uses the marker.
  */
 import * as http from 'http'
 
@@ -24,6 +30,25 @@ export interface MockRequestEntry {
   timestamp: number
   /** Monotonically increasing sequence number for operation-specific matching. */
   sequence: number
+}
+
+/** Opt-in marker for the slow/long streaming mode used by the streaming-responsiveness spec. */
+export const SLOW_STREAM_MARKER = '__E2E_SLOW_STREAM__'
+
+/** Inter-chunk delay for the slow streaming mode. */
+const SLOW_STREAM_CHUNK_DELAY_MS = 60
+
+/** Number of paragraphs in the slow streaming reply (must overflow the chat viewport). */
+const SLOW_STREAM_PARAGRAPHS = 150
+
+/**
+ * Deterministic long reply for the slow streaming mode. The tail marker lets
+ * the spec assert that the very end of the response was rendered (no
+ * truncation) after completion.
+ */
+export function getSlowStreamReply(model: string): string {
+  const paragraphs = Array.from({ length: SLOW_STREAM_PARAGRAPHS }, (_, i) => `paragraph-${i} filler words`)
+  return `[Mock ${model}] Slow stream started.\n\n${paragraphs.join('\n\n')}\n\ntail-marker-END`
 }
 
 const requestLog = createMonotonicRequestLog<Omit<MockRequestEntry, 'sequence'>>()
@@ -161,6 +186,54 @@ function buildChatCompletionChunks(body: Record<string, unknown>) {
   return { id, chunks }
 }
 
+/**
+ * Long, slow streaming response (LOCK-004). One SSE chunk per paragraph with a
+ * fixed delay, so the app receives content over several seconds — the spec can
+ * interact with the UI while the response is still streaming.
+ */
+function buildSlowChatCompletionChunks(model: string) {
+  const reply = getSlowStreamReply(model)
+  const id = `chatcmpl-mock-${Date.now()}`
+  const created = Math.floor(Date.now() / 1000)
+
+  const chunks: Array<Record<string, unknown>> = []
+  // Paragraph-granularity chunks that concatenate back to the exact reply.
+  const paragraphs = reply.split('\n\n')
+
+  for (let i = 0; i < paragraphs.length; i++) {
+    chunks.push({
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: i === 0 ? { role: 'assistant', content: paragraphs[i] } : { content: `\n\n${paragraphs[i]}` },
+          finish_reason: null
+        }
+      ]
+    })
+  }
+
+  // Final chunk with stop reason (no content delta)
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: 'stop'
+      }
+    ]
+  })
+
+  return { id, chunks }
+}
+
 function createMockServer(): Promise<MockServerPort> {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
@@ -229,15 +302,43 @@ function createMockServer(): Promise<MockServerPort> {
           }
 
           if (parsed.stream) {
-            // Streaming SSE response
-            const { chunks } = buildChatCompletionChunks(parsed)
+            // LOCK-004: opt-in slow/long streaming mode for the
+            // streaming-responsiveness spec (interaction window mid-stream).
+            const lastUserContent = messages
+              .filter((m: Record<string, unknown>) => m.role === 'user' && typeof m.content === 'string')
+              .map((m: Record<string, unknown>) => m.content as string)
+              .at(-1)
+            const slowStream = typeof lastUserContent === 'string' && lastUserContent.includes(SLOW_STREAM_MARKER)
+            const model = (parsed.model as string) || 'mock-model'
+
             res.writeHead(200, {
               'Content-Type': 'text/event-stream',
               'Cache-Control': 'no-cache',
               Connection: 'keep-alive'
             })
 
-            for (const chunk of chunks) {
+            if (slowStream) {
+              const { chunks } = buildSlowChatCompletionChunks(model)
+              let i = 0
+              const timer = setInterval(() => {
+                res.write(`data: ${JSON.stringify(chunks[i])}\n\n`)
+                i += 1
+                if (i >= chunks.length) {
+                  clearInterval(timer)
+                  res.write('data: [DONE]\n\n')
+                  res.end()
+                }
+              }, SLOW_STREAM_CHUNK_DELAY_MS)
+              // Client disconnect / response error mid-stream: stop the timer,
+              // never write to a closed socket (avoids unhandled 'error'/'close'
+              // events).
+              res.on('close', () => clearInterval(timer))
+              res.on('error', () => clearInterval(timer))
+              return
+            }
+
+            const { chunks: fastChunks } = buildChatCompletionChunks(parsed)
+            for (const chunk of fastChunks) {
               res.write(`data: ${JSON.stringify(chunk)}\n\n`)
             }
             res.write('data: [DONE]\n\n')

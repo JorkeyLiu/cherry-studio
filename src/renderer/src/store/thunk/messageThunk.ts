@@ -20,6 +20,7 @@ import { getModel } from '@renderer/hooks/useModel'
 import { buildGroupList, transferAnchorsAfterDeletion } from '@renderer/services/anchorService'
 import { transformMessagesAndFetch } from '@renderer/services/ApiService'
 import { dbService } from '@renderer/services/db'
+import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
@@ -242,7 +243,8 @@ const dispatchMultiModelResponses = async (
   topicId: string,
   triggeringMessage: Message, // userMessage or messageToResend
   assistant: Assistant,
-  mentionedModels: Model[]
+  mentionedModels: Model[],
+  sendContext?: SendDiagnosticsContext // LOCK-004: per-send correlation context
 ) => {
   const assistantMessageStubs: Message[] = []
   const tasksToQueue: { assistantConfig: Assistant; messageStub: Message }[] = []
@@ -265,7 +267,7 @@ const dispatchMultiModelResponses = async (
   // LOCK-005: Persist all stubs via appendMessage BEFORE Redux dispatch
   // and queueing. Failures must not expose unpersisted stubs.
   for (const stub of assistantMessageStubs) {
-    await saveMessageAndBlocksToDB(topicId, stub, [])
+    await saveMessageAndBlocksToDB(topicId, stub, [], -1, sendContext)
   }
 
   // Now safe to dispatch to Redux
@@ -400,13 +402,18 @@ const fetchAndProcessAssistantResponseImpl = async (
 export const sendMessage =
   (userMessage: Message, userMessageBlocks: MessageBlock[], assistant: Assistant, topicId: Topic['id']) =>
   async (dispatch: AppDispatch, getState: () => RootState) => {
+    // LOCK-004: one correlation context per send, threaded explicitly through
+    // this send's user and assistant append calls. Ordinals are 1 for the user
+    // append and 2+ for assistant stubs/multi-model appends of THIS send only;
+    // overlapping sends never share or clobber each other's context.
+    const sendContext = createSendDiagnosticsContext()
     try {
       if (userMessage.blocks.length === 0) {
         logger.warn('sendMessage: No blocks in the provided message.')
         return
       }
 
-      await saveMessageAndBlocksToDB(topicId, userMessage, userMessageBlocks)
+      await saveMessageAndBlocksToDB(topicId, userMessage, userMessageBlocks, -1, sendContext)
       dispatch(newMessagesActions.addMessage({ topicId, message: userMessage }))
       if (userMessageBlocks.length > 0) {
         dispatch(upsertManyBlocks(userMessageBlocks))
@@ -418,14 +425,22 @@ export const sendMessage =
       const mentionedModels = userMessage.mentions
 
       if (mentionedModels && mentionedModels.length > 0) {
-        await dispatchMultiModelResponses(dispatch, getState, topicId, userMessage, assistant, mentionedModels)
+        await dispatchMultiModelResponses(
+          dispatch,
+          getState,
+          topicId,
+          userMessage,
+          assistant,
+          mentionedModels,
+          sendContext
+        )
       } else {
         const assistantMessage = createAssistantMessage(assistant.id, topicId, {
           askId: userMessage.id,
           model: assistant.model,
           traceId: userMessage.traceId
         })
-        await saveMessageAndBlocksToDB(topicId, assistantMessage, [])
+        await saveMessageAndBlocksToDB(topicId, assistantMessage, [], -1, sendContext)
         dispatch(
           newMessagesActions.addMessage({
             topicId,
@@ -1176,11 +1191,23 @@ export const cloneMessagesToNewTopicThunk =
       }
 
       // 5. Update Database (Atomic Transaction)
+      // Entry assembly is O(M+B): group cloned blocks by message ID once
+      // instead of filtering the whole block list per message (O(M·B)).
+      // Block order within each message is preserved (array push order).
+      const blocksByMessageId = new Map<string, MessageBlock[]>()
+      for (const block of clonedBlocks) {
+        const list = blocksByMessageId.get(block.messageId)
+        if (list) {
+          list.push(block)
+        } else {
+          blocksByMessageId.set(block.messageId, [block])
+        }
+      }
       await dbService.cloneMessagesToTopic(
         newTopic.id,
         clonedMessages.map((message) => ({
           message,
-          blocks: clonedBlocks.filter((block) => block.messageId === message.id)
+          blocks: blocksByMessageId.get(message.id) ?? []
         })),
         newTopic.assistantId
       )
@@ -1428,12 +1455,18 @@ export const deleteMessagesFromDB = async (topicId: string, messageIds: string[]
 
 /**
  * Save a message and its blocks to database
+ *
+ * `sendContext` is optional diagnostic-only correlation metadata (LOCK-004):
+ * the ordinary send path threads its own per-send context through so each
+ * append carries the correct correlation id/ordinal. Callers that omit it
+ * (resend, regenerate, insert, channel) stay uninstrumented.
  */
 export const saveMessageAndBlocksToDB = async (
   topicId: string,
   message: Message,
   blocks: MessageBlock[],
-  messageIndex: number = -1
+  messageIndex: number = -1,
+  sendContext?: SendDiagnosticsContext
 ): Promise<void> => {
   try {
     const blockIds = blocks.map((block) => block.id)
@@ -1442,7 +1475,7 @@ export const saveMessageAndBlocksToDB = async (
 
     const messageWithBlocks = shouldSyncBlocks ? { ...message, blocks: blockIds } : message
     // Direct call without conditional logic, now with messageIndex
-    await dbService.appendMessage(topicId, messageWithBlocks, blocks, messageIndex)
+    await dbService.appendMessage(topicId, messageWithBlocks, blocks, messageIndex, sendContext)
     logger.silly('Saved message and blocks via DbService', {
       topicId,
       messageId: message.id,

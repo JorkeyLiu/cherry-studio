@@ -21,18 +21,6 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
     chunkQueueRef.current = [...chunkQueueRef.current, ...(chars || [])]
   }, [])
 
-  const reset = useCallback(
-    (newText = '') => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current)
-      }
-      chunkQueueRef.current = []
-      displayedTextRef.current = newText
-      onUpdate(newText)
-    },
-    [onUpdate]
-  )
-
   const renderLoop = useCallback(
     (currentTime: number) => {
       // 1. 如果队列为空
@@ -78,6 +66,26 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
       }
     },
     [streamDone, onUpdate, minDelay]
+  )
+
+  const reset = useCallback(
+    (newText = '') => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current)
+        animationFrameRef.current = null
+      }
+      chunkQueueRef.current = []
+      displayedTextRef.current = newText
+      onUpdate(newText)
+      // Re-arm the render loop when the stream is still active: chunks added
+      // after a reset (e.g. a block switch mid-stream) must still be rendered
+      // with no loss. When the stream is done, reset is terminal — the caller
+      // (Markdown) flushes the authoritative final content directly.
+      if (!streamDone) {
+        animationFrameRef.current = requestAnimationFrame(renderLoop)
+      }
+    },
+    [onUpdate, streamDone, renderLoop]
   )
 
   useEffect(() => {

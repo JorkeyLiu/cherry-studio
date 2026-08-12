@@ -94,6 +94,38 @@ export const messageBlocksSelectors = messageBlocksAdapter.getSelectors<RootStat
   (state) => state.messageBlocks // Ensure this matches the key in the root reducer
 )
 
+// Stable empty reference so selectors returning no blocks never change identity.
+const EMPTY_MESSAGE_BLOCKS: MessageBlock[] = []
+
+/**
+ * Selector scoped to a specific set of block IDs (e.g. one message's `blocks`).
+ *
+ * Unlike `messageBlocksSelectors.selectEntities`, this returns only the
+ * entities for the requested IDs, so consumers can pair it with `shallowEqual`
+ * in `useSelector` and avoid re-rendering when an unrelated block (another
+ * message's streaming block) is committed to the store. The result array keeps
+ * the requested order and drops IDs that are not yet in the store.
+ */
+export const selectMessageBlocksByIds = createSelector(
+  [
+    (state: RootState) => state.messageBlocks.entities,
+    (_state: RootState, blockIds: readonly string[] | undefined) => blockIds
+  ],
+  (entities, blockIds): MessageBlock[] => {
+    if (!blockIds || blockIds.length === 0) {
+      return EMPTY_MESSAGE_BLOCKS
+    }
+    const result: MessageBlock[] = []
+    for (const blockId of blockIds) {
+      const entity = entities[blockId]
+      if (entity) {
+        result.push(entity)
+      }
+    }
+    return result
+  }
+)
+
 // --- Selector Integration --- START
 
 // Selector to get the raw block entity by ID

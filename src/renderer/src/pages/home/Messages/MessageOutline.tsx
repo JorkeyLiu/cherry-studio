@@ -1,12 +1,12 @@
 import Scrollbar from '@renderer/components/Scrollbar'
 import type { RootState } from '@renderer/store'
-import { messageBlocksSelectors } from '@renderer/store/messageBlock'
+import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
 import type { Message } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { scrollIntoView } from '@renderer/utils/dom'
 import type { FC } from 'react'
 import React, { useMemo, useRef } from 'react'
-import { useSelector } from 'react-redux'
+import { shallowEqual, useSelector } from 'react-redux'
 import remarkParse from 'remark-parse'
 import styled from 'styled-components'
 import { unified } from 'unified'
@@ -25,12 +25,14 @@ interface HeadingItem {
 }
 
 const MessageOutline: FC<MessageOutlineProps> = ({ message }) => {
-  const blockEntities = useSelector((state: RootState) => messageBlocksSelectors.selectEntities(state))
+  // LOCK-003: Subscribe only to this message's blocks instead of the whole
+  // entity map; `shallowEqual` prevents re-renders when unrelated streaming
+  // blocks commit, so heading re-parsing is scoped to this message's own
+  // main-text content changes.
+  const messageBlocks = useSelector((state: RootState) => selectMessageBlocksByIds(state, message.blocks), shallowEqual)
 
   const headings: HeadingItem[] = useMemo(() => {
-    const mainTextBlocks = message.blocks
-      .map((blockId) => blockEntities[blockId])
-      .filter((b) => b?.type === MessageBlockType.MAIN_TEXT)
+    const mainTextBlocks = messageBlocks.filter((b) => b?.type === MessageBlockType.MAIN_TEXT)
 
     if (!mainTextBlocks?.length) return []
 
@@ -62,7 +64,7 @@ const MessageOutline: FC<MessageOutlineProps> = ({ message }) => {
     })
 
     return result
-  }, [message.blocks, blockEntities])
+  }, [messageBlocks])
 
   const miniLevel = useMemo(() => {
     return headings.length ? Math.min(...headings.map((heading) => heading.level)) : 1
