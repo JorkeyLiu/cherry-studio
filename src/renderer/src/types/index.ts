@@ -171,7 +171,12 @@ export const EFFORT_RATIO: EffortRatio = {
   auto: 2
 }
 
-export type TopicAnchor = { kind: 'active'; groupKey: string }
+/**
+ * Optional persisted user context-start override for a topic. This is the ONLY
+ * anchor-adjacent state that is persisted: a user-specified context start.
+ * A derived/resolved anchor is projection, never stored here.
+ */
+export type ContextStartOverride = { kind: 'active'; groupKey: string }
 
 export type AssistantSettings = {
   maxTokens?: number
@@ -201,14 +206,14 @@ export type AssistantSettings = {
   maxToolCalls?: number
   enableMaxToolCalls?: boolean
   /**
-   * Mode-neutral, per-topic anchor for the context window. Holds ONLY a
-   * user-specified context start: when an `active` anchor exists for the
+   * Optional per-topic user context-start override. Holds ONLY a
+   * user-specified context start: when an `active` override exists for the
    * topic, the window starts at that turn and grows with the conversation.
-   * When no (valid) anchor exists, the window start is derived dynamically
+   * When no (valid) override exists, the window start is derived dynamically
    * from `contextCount` (the default initial window size) and the current
-   * messages — a derived default is projection, never persisted here.
+   * messages — a derived anchor is projection, never persisted here.
    */
-  contextWindowAnchor?: Record<string, TopicAnchor | undefined> // { [topicId]: TopicAnchor }
+  contextStartOverride?: Record<string, ContextStartOverride | undefined> // { [topicId]: ContextStartOverride }
 }
 
 export type AssistantPreset = Omit<Assistant, 'model'> & {

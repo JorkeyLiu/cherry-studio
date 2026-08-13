@@ -9,7 +9,12 @@ import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, UserMessageStatus } from '@renderer/types/newMessage'
 import { describe, expect, it } from 'vitest'
 
-import { buildContextTurns, resolveAnchorTurnIndex, turnsToMessages } from '../contextTurnService'
+import {
+  buildContextTurns,
+  isMessageInContextTurn,
+  resolveAnchorTurnIndex,
+  turnsToMessages
+} from '../contextTurnService'
 
 // ---------------------------------------------------------------------------
 // Test factories — minimal Message objects, no store dependency
@@ -525,7 +530,7 @@ describe('resolveAnchorTurnIndex', () => {
     expect(resolveAnchorTurnIndex(turns, 'u1')).toBe(1)
   })
 
-  // --- LOCK-FIX-1: every turn kind resolves back to the exact turn ---
+  // --- Every turn kind resolves back to the exact turn ---
 
   it('resolves an orphan assistant with askId by its own message id (assistant-first boundary)', () => {
     // Segment starts with an assistant turn whose user question is absent.
@@ -568,10 +573,57 @@ describe('resolveAnchorTurnIndex', () => {
     // Turn 0: [u1, a1] (key=u1); Turn 1: [u2] (key=u2); Turn 2: [a2] (key=u1)
     expect(turns[2].key).toBe('u1') // duplicate key value with turn 0
 
-    // A bare askId key 'u1' resolves to the user turn (user-preferred, LOCK-FIX-2)…
+    // A bare askId key 'u1' resolves to the user turn (user-preferred)…
     expect(resolveAnchorTurnIndex(turns, 'u1')).toBe(0)
     // …but the anchor key DERIVED from turn 2 is a2's own message id, which must
-    // resolve back to turn 2 exactly (LOCK-FIX-1), never sliding to turn 0.
+    // resolve back to turn 2 exactly, never sliding to turn 0.
     expect(resolveAnchorTurnIndex(turns, 'a2')).toBe(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isMessageInContextTurn (per-message anchor membership)
+// ---------------------------------------------------------------------------
+
+describe('isMessageInContextTurn', () => {
+  it('user message matches its own id (canonical user turn key)', () => {
+    expect(isMessageInContextTurn(user('u1'), 'u1')).toBe(true)
+    expect(isMessageInContextTurn(user('u1'), 'u2')).toBe(false)
+  })
+
+  it('assistant message matches its askId', () => {
+    expect(isMessageInContextTurn(assistant('a1', 'u1'), 'u1')).toBe(true)
+    expect(isMessageInContextTurn(assistant('a1', 'u1'), 'a1')).toBe(false)
+  })
+
+  it('orphan assistant (no askId) matches its own message id', () => {
+    expect(isMessageInContextTurn(assistant('a1'), 'a1')).toBe(true)
+    expect(isMessageInContextTurn(assistant('a1'), 'u1')).toBe(false)
+  })
+
+  it('system message matches its own id', () => {
+    expect(isMessageInContextTurn(system('s1'), 's1')).toBe(true)
+    expect(isMessageInContextTurn(system('s1'), 'u1')).toBe(false)
+  })
+
+  it('returns false for a null/undefined anchor key (no anchor — empty window)', () => {
+    expect(isMessageInContextTurn(user('u1'), null)).toBe(false)
+    expect(isMessageInContextTurn(user('u1'), undefined)).toBe(false)
+  })
+
+  it('round-trips with buildContextTurns start keys for every turn kind', () => {
+    const messages = [system('s1'), user('u1'), assistant('a1', 'u1'), assistant('orphan'), user('u2')]
+    const turns = buildContextTurns(messages)
+    // Every turn's canonical key marks exactly its own first message as in-turn.
+    for (const turn of turns) {
+      const first = turn.messages[0]
+      expect(isMessageInContextTurn(first, turn.key)).toBe(true)
+      // A user in another turn is never in this turn.
+      for (const other of messages) {
+        if (other.id !== first.id && other.role === 'user') {
+          expect(isMessageInContextTurn(other, turn.key)).toBe(false)
+        }
+      }
+    }
   })
 })

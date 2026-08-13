@@ -3,79 +3,93 @@
  *
  * Binds the historically drifting integrated user behavior to the approved
  * explicit-anchor semantics:
- *   - `contextWindowAnchor[topicId]` holds ONLY a user-specified context
- *     start. With no explicit anchor the window start is derived DYNAMICALLY
- *     from the assistant's default contextCount (finite N → the latest N
- *     turns; null → the first turn) — a derived default is projection, never
- *     persisted state.
- *   - A resolvable explicit anchor wins and the window grows with the topic
- *     (anchor-to-end, LOCK-CTX-1).
- *   - TokenCount reset DELETES the explicit anchor; the effective start then
- *     falls back to the dynamic default derivation.
- *   - Manual anchor set/clear via the message menubar anchor button.
+ *   - `contextStartOverride[topicId]` holds ONLY a user-specified context
+ *     start. With no override the window start is derived DYNAMICALLY from the
+ *     assistant's default contextCount (finite N → the latest N turns; null →
+ *     the first turn) — a derived anchor is projection, never persisted state.
+ *   - A resolvable override wins and the window grows with the topic
+ *     (anchor-to-topic-end).
+ *   - TokenCount reset DELETES the override; the effective start then falls
+ *     back to the dynamic default derivation.
+ *   - Manual override set/clear via the message menubar anchor button.
  *   - Context boundary divider rendering (`data-testid="context-boundary"`).
- *   - Focused restart regression (separate scenario): a persisted explicit
- *     anchor survives a full close + same-profile relaunch untouched —
- *     transient empty/loading startup states never mutate it. The restart
- *     scenario anchors a NON-default position (LOCK-005: the second user
- *     turn, while the derived default is the first turn), so a reintroduced
- *     delete-and-rederive at startup fails the persisted groupKey assertion
- *     deterministically.
+ *   - Anchor-icon invariant: for every tested non-empty user-led state exactly
+ *     ONE rendered anchor icon is highlighted and it corresponds to the
+ *     expected context-start group — the single resolved anchor of the window
+ *     (derived default, user override, override clear/reset). The exactly-one
+ *     visible-button invariant is scoped to user-led topics because anchor
+ *     buttons render only on user messages; the semantic resolved anchor
+ *     remains universal for every non-empty window regardless of message role.
+ *     Override-state checks remain separate (the icon reflects the resolved
+ *     anchor, not the settings input).
+ *   - Persistence of the override field across app relaunch is NOT a
+ *     context-anchor E2E contract: it is ordinary settings persistence,
+ *     covered by store behavior tests and the migration 219 unit tests
+ *     (`contextWindowAnchor` → `contextStartOverride` field evolution).
  *
- * LOCK-E2E-1: fresh `pnpm build` + repository Electron Playwright fixture
- *             only. No generic CDP/dev-mode browser verification as evidence.
- * LOCK-E2E-2: minimal stable selectors added in production:
- *             - `data-testid="token-count-context"` (TokenCount context block)
- *             - `data-testid="context-anchor-btn"` (menubar anchor button)
- *             - `data-testid="context-boundary"` (divider, data-context-boundary retained)
- * LOCK-E2E-3: contextCount=3 is configured via controlled Redux setup BEFORE
- *             the conversation. TokenCount visibility is always-on (LOCK-108:
- *             the old `showInputEstimatedTokens` setting is removed — no
- *             dispatch, no gate); settings-slider behavior is not part of this
- *             contract.
- * LOCK-E2E-4: messages are sent through the real input UI against the mock
- *             provider (no fabricated conversation messages).
- * LOCK-E2E-5: the integrated contract transitions A–F (asserted below).
- * LOCK-E2E-6: primary evidence is user-visible UI (TokenCount text, boundary
- *             visibility, anchor-button interactions); Redux is the secondary
- *             oracle for deterministic setup and anchor identity.
- * LOCK-E2E-7: selectors use test IDs / roles / structural scoping, never
- *             translation-coupled strings or generated message IDs.
- * LOCK-E2E-8: one scenario with test.step; no slider geometry or unrelated
- *             UI coverage.
+ * Evidence rules:
+ *   - Fresh `pnpm build` + repository Electron Playwright fixture only. No
+ *     generic CDP/dev-mode browser verification as evidence.
+ *   - Minimal stable selectors added in production:
+ *     - `data-testid="token-count-context"` (TokenCount context block)
+ *     - `data-testid="context-anchor-btn"` (menubar anchor button)
+ *     - `data-testid="context-boundary"` (divider, data-context-boundary retained)
+ *     - `data-context-anchor-active` (resolved-anchor highlight state
+ *       attribute on the anchor button)
+ *   - contextCount=3 is configured via controlled Redux setup BEFORE the
+ *     conversation. TokenCount visibility is always-on (the old
+ *     `showInputEstimatedTokens` setting is removed — no dispatch, no gate);
+ *     settings-slider behavior is not part of this contract.
+ *   - Messages are sent through the real input UI against the mock provider
+ *     (no fabricated conversation messages).
+ *   - The integrated contract transitions A–F (asserted below).
+ *   - Primary evidence is user-visible UI (TokenCount text, boundary
+ *     visibility, anchor-button interactions); Redux is the secondary oracle
+ *     for deterministic setup and anchor identity.
+ *   - Selectors use test IDs / roles / structural scoping, never
+ *     translation-coupled strings or generated message IDs.
+ *   - One scenario with test.step; no slider geometry or unrelated UI
+ *     coverage.
  *
- * LOCK-E2E-REQUEST-1: focused secondary request assertions after the manual
- *             anchor (Step C) and after the reset + next send (Step E) prove
- *             the model receives exactly the selected user-turn subset implied
- *             by the UI window.
- * LOCK-E2E-REQUEST-2: UI interactions / TokenCount / divider remain the
- *             primary evidence; the request-log assertion is a secondary
- *             integrated oracle.
- * LOCK-E2E-REQUEST-3: assert stable semantic content (the known unique user
- *             prompts), not generated ids or the complete provider payload
- *             shape. System/provider-required messages are allowed; the
- *             ordered user-role content subset is compared.
- * LOCK-E2E-REQUEST-4: with the explicit anchor at turn 1 (Step C), the 5th
- *             request includes ALL user prompts (full history — anchored
- *             growth). After the reset (Step E), the 6th request must include
- *             the latest 3 prompts (turns 4,5,6) and EXCLUDE turns 1–3 — the
- *             dynamic default window actually applied. One exact
- *             request-boundary assertion per step is sufficient.
- * LOCK-E2E-REQUEST-5: no broad shared helper extraction in this task —
- *             duplication is accepted.
- * LOCK-E2E-REQUEST-6: ZIP/import files, fixture logic, renderer context
- *             algorithm, and governance files are untouched.
- * Restart coverage note: the restart scenario reuses the established
- * same-profile relaunch helper (`relaunchSameProfile`) + exact-token cleanup
- * (LOCK-625), matching the L2 import specs — no harness redesign. The manual
- * anchor is placed on the SECOND user turn (LOCK-005): with contextCount=3
- * and two turns the derived default start is the FIRST turn, so the anchored
- * groupKey is provably distinct from any delete-and-rederive outcome.
+ * Anchor-icon oracle:
+ *   - The anchor-icon invariant is asserted with a helper that counts RENDERED
+ *     `data-context-anchor-active="true"` buttons and compares the single
+ *     highlighted message id against the expected context-start group. The
+ *     expected group is computed from Redux (user override when
+ *     active+resolvable, otherwise the contextCount-derived default start over
+ *     user turns), mirroring `computeContextInfo` for user-led topics.
+ *   - The invariant is asserted at every tested non-empty transition
+ *     (within-count start, sliding default after overflow, user override
+ *     set/clear, reset, anchored growth).
+ *
+ * Request-level oracle:
+ *   - Focused secondary request assertions after the manual anchor (Step C)
+ *     and after the reset + next send (Step E) prove the model receives
+ *     exactly the selected user-turn subset implied by the UI window.
+ *   - UI interactions / TokenCount / divider remain the primary evidence; the
+ *     request-log assertion is a secondary integrated oracle.
+ *   - Assert stable semantic content (the known unique user prompts), not
+ *     generated ids or the complete provider payload shape. System/provider-
+ *     required messages are allowed; the ordered user-role content subset is
+ *     compared.
+ *   - With the override at turn 1 (Step C), the 5th request includes ALL user
+ *     prompts (full history — anchored growth). After the reset (Step E), the
+ *     6th request must include the latest 3 prompts (turns 4,5,6) and EXCLUDE
+ *     turns 1–3 — the dynamic default window actually applied. One exact
+ *     request-boundary assertion per step is sufficient.
+ *   - No broad shared helper extraction in this task — duplication is
+ *     accepted.
+ *   - ZIP/import files, fixture logic, renderer context algorithm, and
+ *     governance files are untouched.
+ *
+ * Persistence coverage: the `contextStartOverride` field persists through
+ * ordinary settings store behavior, and the migration 219 unit tests prove
+ * the `contextWindowAnchor` → `contextStartOverride` field evolution. Neither
+ * is re-proven here — the same-profile relaunch scenario and its helper
+ * machinery were removed because persistence is not a separate
+ * anchor-specific E2E contract.
  */
 import { expect, findProductRequestAfter, getRequestSequence, test } from '../../fixtures/electron.fixture'
-import { closeElectronWithExactCleanup } from '../../utils/electron-cleanup'
-import { findProcessesByUserDataDir, terminateProcessesByUserDataDir } from '../../utils/process-cleanup'
-import { relaunchSameProfile } from '../../utils/restart-electron-profile'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -96,8 +110,8 @@ async function getActiveContext(page: import('@playwright/test').Page) {
 }
 
 /**
- * LOCK-E2E-3: configure contextCount=3 via Redux before the conversation
- * begins. The TokenCount display is always-on (LOCK-108) — the removed
+ * Configure contextCount=3 via Redux before the conversation begins. The
+ * TokenCount display is always-on — the removed
  * `settings/setShowInputEstimatedTokens` action is intentionally NOT
  * dispatched, and visibility is asserted at Step 0 as always-on proof.
  */
@@ -141,7 +155,7 @@ async function uiSendMessage(page: import('@playwright/test').Page, text: string
   // committed native-setter specs rely on, without per-keystroke delivery so
   // the first keystroke cannot be dropped. Repository precedent:
   // ChatPage.typeMessage fills this input area (tests/e2e/pages/chat.page.ts).
-  // LOCK-EVIDENCE: no force click, no arbitrary sleep, no Redux dispatch, no
+  // Determinism: no force click, no arbitrary sleep, no Redux dispatch, no
   // native-setter bypass.
   await textarea.fill(text)
 
@@ -250,14 +264,116 @@ async function getNthUserMessageId(page: import('@playwright/test').Page, topicI
   )
 }
 
-/** Persisted anchor groupKey for the topic, or null. */
+/** User context-start override groupKey for the topic from Redux settings
+ *  (policy input), or null. Read immediately after set/clear to clarify the
+ *  policy-input semantics — not a restart-persistence contract. */
 async function getAnchorGroupKey(page: import('@playwright/test').Page, topicId: string): Promise<string | null> {
   return page.evaluate((topicId: string) => {
     const s = (window as any).store.getState()
     const assistant = s.assistants.assistants[0]
-    const anchor = assistant?.settings?.contextWindowAnchor?.[topicId]
-    return anchor?.kind === 'active' ? anchor.groupKey : null
+    const override = assistant?.settings?.contextStartOverride?.[topicId]
+    return override?.kind === 'active' ? override.groupKey : null
   }, topicId)
+}
+
+/**
+ * Ids of the RENDERED user messages whose anchor button carries
+ * `data-context-anchor-active="true"` — the resolved-anchor projection.
+ * The attribute is present on the button regardless of hover opacity, so the
+ * query is deterministic without hovering. Anchor buttons render only on user
+ * messages, so this query is inherently a user-led topic surface.
+ */
+async function getHighlightedAnchorIds(page: import('@playwright/test').Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const ids: string[] = []
+    const buttons = document.querySelectorAll('[data-testid="context-anchor-btn"][data-context-anchor-active="true"]')
+    for (const button of buttons) {
+      const container = button.closest('[data-message-id]')
+      const id = container?.getAttribute('data-message-id') || ''
+      if (id) ids.push(id)
+    }
+    return ids
+  })
+}
+
+/**
+ * Expected resolved anchor group key for a user-led topic, mirroring
+ * `computeContextInfo` from Redux state: an active+resolvable user override
+ * wins; otherwise the default derivation (finite N → the user turn leaving at
+ * most N user turns selected; null → the first user turn). Returns null for an
+ * empty topic.
+ *
+ * The contextCount normalization mirrors the runtime `getAssistantSettings`
+ * semantics: `undefined` falls back to the finite runtime default (25), and
+ * only an explicit `null` means unlimited. The scenario seeds contextCount=3
+ * before the conversation (asserted in `seedContextConfig`), so this fallback
+ * keeps the oracle runtime-aligned even if the seed were ever omitted.
+ */
+async function getExpectedAnchorGroupKey(
+  page: import('@playwright/test').Page,
+  topicId: string
+): Promise<string | null> {
+  return page.evaluate((topicId: string) => {
+    const s = (window as any).store.getState()
+    const assistant = s.assistants.assistants[0]
+    const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] || []
+    const entities = s.messages?.entities || {}
+    const userIds = ids.filter((id) => entities[id]?.role === 'user')
+    if (userIds.length === 0) return null
+
+    const override = assistant?.settings?.contextStartOverride?.[topicId]
+    if (override?.kind === 'active' && userIds.includes(override.groupKey)) {
+      return override.groupKey
+    }
+
+    // Runtime-aligned normalization (matches `getAssistantSettings`): an
+    // undefined contextCount is the finite runtime default (25); only an
+    // explicit null is unlimited (first user turn).
+    const rawContextCount = assistant?.settings?.contextCount
+    const contextCount = rawContextCount === undefined ? 25 : rawContextCount
+    if (contextCount === null) {
+      return userIds[0] ?? null
+    }
+    const n = Math.max(1, Math.floor(contextCount))
+    const startIndex = Math.max(0, userIds.length - n)
+    return userIds[startIndex] ?? null
+  }, topicId)
+}
+
+/**
+ * Unified anchor-icon invariant, scoped to user-led topics: for a non-empty
+ * user-led state exactly ONE rendered anchor button is highlighted, and it
+ * corresponds to the expected context-start group. The exactly-one visible
+ * button is a user-led UI invariant because anchor buttons render only on user
+ * messages; the semantic resolved anchor itself remains universal for every
+ * non-empty window. Persisted-override assertions stay separate.
+ */
+async function expectExactlyOneAnchor(
+  page: import('@playwright/test').Page,
+  topicId: string,
+  timeout = 15000
+): Promise<void> {
+  await expect(async () => {
+    const highlighted = await getHighlightedAnchorIds(page)
+    if (highlighted.length !== 1) {
+      throw new Error(
+        `expected exactly 1 highlighted anchor button on the user-led topic, got ${highlighted.length}: ${JSON.stringify(highlighted)}`
+      )
+    }
+    const expected = await getExpectedAnchorGroupKey(page, topicId)
+    if (expected === null) {
+      throw new Error('expected a resolved anchor for a non-empty user-led topic, got null')
+    }
+    if (highlighted[0] !== expected) {
+      throw new Error(`highlighted anchor button ${highlighted[0]} != expected context-start group ${expected}`)
+    }
+  }).toPass({ timeout })
+}
+
+/** Empty-window invariant: no resolved anchor → no highlighted anchor icon. */
+async function expectNoAnchor(page: import('@playwright/test').Page): Promise<void> {
+  const highlighted = await getHighlightedAnchorIds(page)
+  expect(highlighted.length).toBe(0)
 }
 
 /** Click the menubar anchor button of a specific user message (real hover). */
@@ -288,7 +404,7 @@ async function expectTokenCount(
 
 /**
  * Extract the ordered string contents of the user-role messages from a
- * product request (LOCK-E2E-REQUEST-3). Compares stable semantic content
+ * product request. Compares stable semantic content
  * only — never generated ids or the complete provider payload shape.
  * System/provider-required messages are ignored; only the ordered user-role
  * subset is compared. If a provider payload wraps content as multimodal
@@ -325,7 +441,7 @@ test.describe('Unified Context Window Contract', () => {
 
     const tokenCount = page.locator('[data-testid="token-count-context"]')
     const boundary = page.locator('[data-testid="context-boundary"]')
-    // ── Step 0: deterministic setup (LOCK-E2E-3) ─────────────────────────
+    // ── Step 0: deterministic setup (seeded contextCount=3) ──────────────
     await test.step('0: Seed contextCount=3 via Redux; assert always-on TokenCount visibility', async () => {
       await seedContextConfig(page)
       const ctx = await getActiveContext(page)
@@ -333,11 +449,13 @@ test.describe('Unified Context Window Contract', () => {
 
       // TokenCount block must be visible before any conversation message.
       await expect(tokenCount).toBeVisible({ timeout: 15000 })
-      // Topic must be fresh: zero messages.
+      // Topic must be fresh: zero messages → empty window has no anchor.
       const msgCount = await page.evaluate((topicId: string) => {
         return (window as any).store.getState().messages.messageIdsByTopic[topicId]?.length || 0
       }, ctx.topicId)
       expect(msgCount).toBe(0)
+      // An empty window has no resolved anchor → no highlighted icon.
+      await expectNoAnchor(page)
       console.log(`[E2E][ContextWindow] Setup complete: topic=${ctx.topicId}, contextCount=3`)
     })
 
@@ -354,21 +472,25 @@ test.describe('Unified Context Window Contract', () => {
         await uiSendMessage(page, text)
         assistantCount = await waitForAssistantResponseComplete(page, topicId, assistantCount)
 
-        // Real request reached the mock provider (LOCK-E2E-4).
+        // Real request reached the mock provider.
         const productReq = findProductRequestAfter(seq)
         expect(productReq).not.toBeNull()
         expect((productReq!.parsed as any)?.messages).toContainEqual({ role: 'user', content: text })
 
-        // With no explicit anchor the window derives dynamically from
+        // With no explicit override the window derives dynamically from
         // contextCount=3: while history <= 3 the whole topic is selected
         // (turn/turn, no boundary).
         await expectTokenCount(page, turn, turn)
         await expect(boundary).toHaveCount(0)
+
+        // Within-count states keep the FIRST user turn as the single
+        // resolved anchor (start never moves while history <= N).
+        await expectExactlyOneAnchor(page, topicId)
       }
 
       // 4th turn: dynamic default slides to the latest 3 turns → 3/4 with a
-      // boundary divider. The derived default is NEVER persisted:
-      // the Redux anchor entry must stay absent.
+      // boundary divider. The derived anchor is NEVER persisted:
+      // the Redux override entry must stay absent.
       const seq = getRequestSequence()
       await uiSendMessage(page, 'Context contract turn 4')
       assistantCount = await waitForAssistantResponseComplete(page, topicId, assistantCount)
@@ -377,7 +499,11 @@ test.describe('Unified Context Window Contract', () => {
       await expectTokenCount(page, 3, 4)
       await expect(boundary).toBeVisible({ timeout: 15000 })
       expect(await getAnchorGroupKey(page, topicId)).toBeNull()
-      console.log('[E2E][ContextWindow] Step A passed: 3/4, boundary visible, no persisted anchor')
+      // Within-count start (turns 1–3) anchors the FIRST user turn;
+      // after overflow the sliding default anchors the SECOND user turn.
+      // Exactly one highlighted anchor matches the expected start group.
+      await expectExactlyOneAnchor(page, topicId)
+      console.log('[E2E][ContextWindow] Step A passed: 3/4, boundary visible, no persisted override')
     })
 
     // ── Step B: manual anchor on the first user turn → 4/4, no boundary ──
@@ -393,6 +519,9 @@ test.describe('Unified Context Window Contract', () => {
 
       const anchorNow = await getAnchorGroupKey(page, topicId)
       expect(anchorNow).toBe(firstUserId)
+      // The user override at the first turn resolves to the SAME anchor the
+      // default derivation produced before the click (origin independence).
+      await expectExactlyOneAnchor(page, topicId)
       console.log('[E2E][ContextWindow] Step B passed: 4/4, no boundary')
     })
 
@@ -405,9 +534,9 @@ test.describe('Unified Context Window Contract', () => {
       const productReq = findProductRequestAfter(seq)
       expect(productReq).not.toBeNull()
 
-      // LOCK-E2E-REQUEST-1/4: with the explicit anchor at turn 1, the 5th
+      // With the explicit anchor at turn 1, the 5th
       // request delivers ALL five user prompts (full history — anchored
-      // growth, LOCK-CTX-1). The anchor must be unchanged.
+      // growth). The anchor must be unchanged.
       const userPrompts = getRequestUserPrompts(productReq)
       expect(userPrompts).toEqual([
         'Context contract turn 1',
@@ -422,19 +551,22 @@ test.describe('Unified Context Window Contract', () => {
 
       const anchorNow = await getAnchorGroupKey(page, topicId)
       expect(anchorNow).toBe(firstUserId)
+      // Anchored growth: the resolved anchor stays at the first user turn.
+      await expectExactlyOneAnchor(page, topicId)
       console.log('[E2E][ContextWindow] Step C passed: 5/5, anchor fixed, full history delivered')
     })
 
-    // ── Step D: TokenCount reset → delete explicit → dynamic 3/5 ─────────
-    await test.step('D: TokenCount reset deletes the explicit anchor → 3/5, boundary back, anchor null', async () => {
+    // ── Step D: TokenCount reset → delete override → dynamic 3/5 ─────────
+    await test.step('D: TokenCount reset deletes the override → 3/5, boundary back, override null', async () => {
       await tokenCount.click()
       await expectTokenCount(page, 3, 5)
       await expect(boundary).toBeVisible({ timeout: 15000 })
 
-      // Reset REMOVES the explicit designation; the effective start is then
-      // derived dynamically from contextCount=3.
+      // Reset REMOVES the user designation; the effective start is then
+      // derived dynamically from contextCount=3 → anchor = third user turn.
       expect(await getAnchorGroupKey(page, topicId)).toBeNull()
-      console.log('[E2E][ContextWindow] Step D passed: 3/5, boundary visible, explicit anchor deleted')
+      await expectExactlyOneAnchor(page, topicId)
+      console.log('[E2E][ContextWindow] Step D passed: 3/5, boundary visible, override deleted')
     })
 
     // ── Step E: 6th turn after reset → dynamic 3/6; request excludes 1–3 ─
@@ -446,7 +578,7 @@ test.describe('Unified Context Window Contract', () => {
       const productReq = findProductRequestAfter(seq)
       expect(productReq).not.toBeNull()
 
-      // LOCK-E2E-REQUEST-1/4: after the reset, the 6th request must deliver
+      // After the reset, the 6th request must deliver
       // exactly the dynamic default window: the latest 3 prompts (turns 4,5,6)
       // and EXCLUDE turns 1–3.
       const userPrompts = getRequestUserPrompts(productReq)
@@ -455,6 +587,8 @@ test.describe('Unified Context Window Contract', () => {
       await expectTokenCount(page, 3, 6)
       await expect(boundary).toBeVisible({ timeout: 15000 })
       expect(await getAnchorGroupKey(page, topicId)).toBeNull()
+      // Dynamic default after reset + growth: anchor = the fourth user turn.
+      await expectExactlyOneAnchor(page, topicId)
       console.log('[E2E][ContextWindow] Step E passed: 3/6, request user subset = turns 4-6')
     })
 
@@ -465,27 +599,31 @@ test.describe('Unified Context Window Contract', () => {
       // the latest 5 groups — user turns 2–6 — while turn 1 is virtualized
       // out of the DOM and no longer reachable. The manual set/clear contract
       // must be proven against a rendered, deterministic anchor: the second
-      // user turn (the same non-default position LOCK-005 relies on).
+      // user turn — a non-default position inside the rendered window.
       const secondUserId = await getNthUserMessageId(page, topicId, 2)
       expect(secondUserId).not.toBe('')
       expect(secondUserId).not.toBe(firstUserId)
 
-      // Set: explicit anchor at turn 2 → window turns 2–6 = 5/6. Turn 1 sits
+      // Set: override at turn 2 → window turns 2–6 = 5/6. Turn 1 sits
       // above the anchored start, so the context boundary divider renders
       // (turn 2's group is inside the display window, so the divider appears).
       await clickContextAnchor(page, secondUserId)
       await expectTokenCount(page, 5, 6)
       await expect(boundary).toBeVisible({ timeout: 15000 })
       expect(await getAnchorGroupKey(page, topicId)).toBe(secondUserId)
+      // User override at turn 2 → the single resolved anchor is turn 2.
+      await expectExactlyOneAnchor(page, topicId)
       console.log('[E2E][ContextWindow] Step F (set): 5/6, boundary visible before turn 2')
 
-      // Clear: clicking the same anchored turn again deletes the explicit
+      // Clear: clicking the same overridden turn again deletes the override
       // entry; the dynamic default derivation takes over → 3/6 with the
       // boundary back at the latest-3 window.
       await clickContextAnchor(page, secondUserId)
       await expectTokenCount(page, 3, 6)
       await expect(boundary).toBeVisible({ timeout: 15000 })
       expect(await getAnchorGroupKey(page, topicId)).toBeNull()
+      // Override clear → default derivation → anchor = the fourth user turn.
+      await expectExactlyOneAnchor(page, topicId)
       console.log('[E2E][ContextWindow] Step F passed: clear → 3/6, boundary restored')
     })
 
@@ -494,117 +632,5 @@ test.describe('Unified Context Window Contract', () => {
       return (window as any).store.getState().messages.messageIdsByTopic[topicId]?.length || 0
     }, topicId)
     expect(finalMessageCount).toBe(12)
-  })
-
-  // ---------------------------------------------------------------------------
-  // Restart regression: a persisted explicit anchor must survive a full close +
-  // same-profile relaunch untouched. The historical bug deleted the anchor while
-  // startup messages were still empty and then overwrote it with a derived
-  // default once messages loaded; this scenario proves neither mutation happens.
-  // ---------------------------------------------------------------------------
-  test('explicit anchor survives a same-profile restart; startup does not mutate it', async ({
-    mainWindow,
-    electronApp,
-    userDataDir,
-    ownedTmpRoot,
-    mockPort
-  }) => {
-    test.setTimeout(300000)
-    const page = mainWindow
-    const boundary = page.locator('[data-testid="context-boundary"]')
-
-    let topicId = ''
-    let relaunched: Awaited<ReturnType<typeof relaunchSameProfile>> | null = null
-
-    try {
-      // ── Phase 1: conversation with a manual explicit anchor ──────────────
-      await seedContextConfig(page)
-      const ctx = await getActiveContext(page)
-      topicId = ctx.topicId
-      expect(topicId).not.toBe('')
-
-      let assistantCount = 0
-      for (let turn = 1; turn <= 2; turn++) {
-        const seq = getRequestSequence()
-        const text = `Restart anchor turn ${turn}`
-        await uiSendMessage(page, text)
-        assistantCount = await waitForAssistantResponseComplete(page, topicId, assistantCount)
-        const productReq = findProductRequestAfter(seq)
-        expect(productReq).not.toBeNull()
-      }
-
-      const firstUserId = await getFirstUserMessageId(page, topicId)
-      expect(firstUserId).not.toBe('')
-
-      // LOCK-005: manual explicit anchor on the SECOND user turn — a position
-      // provably different from the derived default. With contextCount=3 and
-      // two turns the derived default start is the FIRST turn; anchoring the
-      // second turn yields a window of 1/2 with a boundary divider before it.
-      // A reintroduced startup delete-and-rederive would re-anchor to the
-      // first turn, so the persisted groupKey assertion after relaunch fails
-      // deterministically.
-      const secondUserId = await getNthUserMessageId(page, topicId, 2)
-      expect(secondUserId).not.toBe('')
-      expect(secondUserId).not.toBe(firstUserId)
-
-      await clickContextAnchor(page, secondUserId)
-      await expectTokenCount(page, 1, 2)
-      await expect(boundary).toBeVisible({ timeout: 15000 })
-      expect(await getAnchorGroupKey(page, topicId)).toBe(secondUserId)
-
-      // ── Phase 2: full app close + same-profile relaunch (LOCK-625) ───────
-      await closeElectronWithExactCleanup(userDataDir, {
-        close: () => electronApp.close(),
-        findExactProcesses: findProcessesByUserDataDir,
-        terminateExactProcesses: (profileDir) => terminateProcessesByUserDataDir(profileDir, null)
-      })
-      await new Promise((resolve) => setTimeout(resolve, 3000))
-
-      relaunched = await relaunchSameProfile({ userDataDir, ownedTmpRoot, mockPort })
-      const rpage = relaunched.page
-
-      // The relaunched app rehydrates the same default assistant/topic.
-      const afterCtx = await getActiveContext(rpage)
-      expect(afterCtx.topicId).toBe(topicId)
-
-      // ── Phase 3: regression proof — the explicit anchor survived and was
-      // not mutated by the startup empty/loading message states ─────────────
-      // The persisted groupKey must remain the EXACT second-turn id (LOCK-005).
-      // Any reintroduced delete-and-rederive would re-derive the default start
-      // (the first turn) and fail this assertion deterministically.
-      const anchorAfterRestart = await getAnchorGroupKey(rpage, topicId)
-      expect(anchorAfterRestart).toBe(secondUserId)
-
-      // UI projection: the anchored window is 1/2 with a boundary divider
-      // before the second turn.
-      await expectTokenCount(rpage, 1, 2)
-      await expect(rpage.locator('[data-testid="context-boundary"]')).toBeVisible({ timeout: 15000 })
-
-      // Anchor-to-end growth survives the restart: a new turn keeps the
-      // explicit anchor fixed → 2/3, boundary still visible.
-      const seq = getRequestSequence()
-      await uiSendMessage(rpage, 'Restart anchor turn 3')
-      await waitForAssistantResponseComplete(rpage, topicId, 2)
-      await expectTokenCount(rpage, 2, 3)
-      await expect(rpage.locator('[data-testid="context-boundary"]')).toBeVisible({ timeout: 15000 })
-      expect(await getAnchorGroupKey(rpage, topicId)).toBe(secondUserId)
-      const productReq = findProductRequestAfter(seq)
-      expect(productReq).not.toBeNull()
-    } finally {
-      // Close the spec-launched relaunched instance by exact token.
-      if (relaunched) {
-        try {
-          await closeElectronWithExactCleanup(userDataDir, {
-            close: () => relaunched!.app.close(),
-            findExactProcesses: findProcessesByUserDataDir,
-            terminateExactProcesses: (profileDir) => terminateProcessesByUserDataDir(profileDir, null)
-          })
-        } catch (error) {
-          console.log(
-            `[E2E][ContextWindow] relaunched app cleanup failed: ${error instanceof Error ? error.message : String(error)}`
-          )
-        }
-      }
-    }
   })
 })

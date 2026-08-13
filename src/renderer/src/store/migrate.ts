@@ -34,10 +34,10 @@ import { defaultPreprocessProviders } from '@renderer/store/preprocess'
 import type {
   Assistant,
   BuiltinOcrProvider,
+  ContextStartOverride,
   Model,
   Provider,
   ProviderApiOptions,
-  TopicAnchor,
   TranslateLanguageCode,
   WebSearchProvider
 } from '@renderer/types'
@@ -3373,13 +3373,13 @@ const migrateConfig = {
   },
   '211': (state: RootState) => {
     try {
-      // Migrate fixedWindowAnchor from string form to TopicAnchor form (group-granularity)
+      // Migrate fixedWindowAnchor from string form to ContextStartOverride form (group-granularity)
       // NOTE: operates on the OLD persisted schema (fixedWindowAnchor).
       const migrateAssistant = (assistant: Assistant) => {
         const settings = assistant?.settings as { fixedWindowAnchor?: Record<string, unknown> } | undefined
         const anchorMap = settings?.fixedWindowAnchor
         if (!anchorMap) return assistant
-        const newMap: Record<string, TopicAnchor | undefined> = {}
+        const newMap: Record<string, ContextStartOverride | undefined> = {}
         for (const [topicId, value] of Object.entries(anchorMap)) {
           if (value === undefined || value === null) {
             // 未开 fixed —— 保持 undefined（不存键）
@@ -3388,7 +3388,7 @@ const migrateConfig = {
           if (typeof value === 'string') {
             if (value === '') {
               // 旧 sentinel 空字符串 → vacant (legacy, runtime degrades gracefully)
-              newMap[topicId] = { kind: 'vacant' } as unknown as TopicAnchor
+              newMap[topicId] = { kind: 'vacant' } as unknown as ContextStartOverride
             } else {
               // 尝试查找该 id 对应的消息，判断是 user 还是 assistant
               const message = (state as any).messages?.entities?.[value]
@@ -3402,7 +3402,7 @@ const migrateConfig = {
             }
           } else if (typeof value === 'object' && value !== null && 'kind' in value) {
             // 已经是新形态（理论上不会出现，但做幂等保护）—— 保留
-            newMap[topicId] = value as TopicAnchor
+            newMap[topicId] = value as ContextStartOverride
           }
         }
         if (assistant.settings) {
@@ -3426,7 +3426,7 @@ const migrateConfig = {
       const migrateAssistant = (assistant: Assistant) => {
         const settings = assistant?.settings as
           | {
-              fixedWindowAnchor?: Record<string, TopicAnchor | undefined>
+              fixedWindowAnchor?: Record<string, ContextStartOverride | undefined>
               topicContextWindowMode?: Record<string, string>
             }
           | undefined
@@ -3520,7 +3520,7 @@ const migrateConfig = {
   },
   '216': (state: RootState) => {
     try {
-      // Single anchor-to-end context window model (LOCK-CTX-7, LOCK-CTX-8):
+      // Single anchor-to-end context window model:
       //  - Rename fixedWindowAnchor → contextWindowAnchor (mode-neutral).
       //  - Retain legacy anchors ONLY for topics effectively fixed under old
       //    semantics: assistant global contextWindowMode === 'fixed' and the
@@ -3532,8 +3532,8 @@ const migrateConfig = {
         contextCount?: number | null
         contextWindowMode?: 'fixed' | 'sliding'
         topicContextWindowMode?: Record<string, 'fixed' | 'sliding' | undefined>
-        fixedWindowAnchor?: Record<string, TopicAnchor | undefined>
-        contextWindowAnchor?: Record<string, TopicAnchor | undefined>
+        fixedWindowAnchor?: Record<string, ContextStartOverride | undefined>
+        contextWindowAnchor?: Record<string, ContextStartOverride | undefined>
       }
       const migrateAssistant = (assistant: Assistant) => {
         const settings = assistant.settings as LegacyWindowSettings | undefined
@@ -3546,7 +3546,7 @@ const migrateConfig = {
         const globalMode = settings.contextWindowMode
         const legacyAnchorMap = settings.fixedWindowAnchor
         const topicModeMap = settings.topicContextWindowMode
-        const newAnchorMap: Record<string, TopicAnchor | undefined> = settings.contextWindowAnchor
+        const newAnchorMap: Record<string, ContextStartOverride | undefined> = settings.contextWindowAnchor
           ? { ...settings.contextWindowAnchor }
           : {}
 
@@ -3669,20 +3669,20 @@ const migrateConfig = {
   },
   '218': (state: RootState) => {
     try {
-      // LOCK-104/105/106/107/108: quick-settings consolidation.
+      // Quick-settings consolidation.
       // Clean obsolete preference fields removed by the consolidation:
-      //  - messageFont (LOCK-104: messages always use the system font)
-      //  - showInputEstimatedTokens (LOCK-108: always enabled, no setting)
-      //  - autoTranslateWithSpace (LOCK-108: triple-space translation removed)
-      //  - mathEngine / mathEnableSingleDollar (LOCK-106: fixed KaTeX)
-      //  - messageStyle (LOCK-105: always bubble)
+      //  - messageFont (messages always use the system font)
+      //  - showInputEstimatedTokens (always enabled, no setting)
+      //  - autoTranslateWithSpace (triple-space translation removed)
+      //  - mathEngine / mathEnableSingleDollar (fixed KaTeX)
+      //  - messageStyle (always bubble)
       //  - codeExecution / codeEditor / codeShowLineNumbers / codeCollapsible /
       //    codeWrappable / codeImageTools / codeFancyBlock
-      //    (LOCK-107: fixed read-only viewer baseline)
+      //    (fixed read-only viewer baseline)
       //  - gridColumns / gridPopoverTrigger / multiModelMessageStyle
-      //    (LOCK-105: multi-model layout is always fold/tag mode)
+      //    (multi-model layout is always fold/tag mode)
       // The per-message `multiModelMessageStyle` field on Message entities is
-      // preserved for Cherry Studio import/schema compatibility (LOCK-001).
+      // preserved for Cherry Studio import/schema compatibility.
       const settings = state.settings as unknown as Record<string, unknown> | undefined
       if (settings) {
         const removedFields = [
@@ -3707,7 +3707,7 @@ const migrateConfig = {
           delete settings[field]
         }
 
-        // LOCK-105: legacy tri-state navigation → boolean.
+        // Legacy tri-state navigation → boolean.
         //   none → false (off), buttons / anchor → true (on).
         const legacyNavigation = settings.messageNavigation
         if (typeof legacyNavigation === 'string') {
@@ -3720,6 +3720,46 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 218 error', error as Error)
+      return state
+    }
+  },
+  '219': (state: RootState) => {
+    try {
+      // Unified context-anchor domain model:
+      //  - Rename the persisted per-topic context-window anchor field
+      //    `contextWindowAnchor` → `contextStartOverride` (override
+      //    terminology: only an optional USER context start is persisted;
+      //    a derived/resolved anchor is projection, never stored).
+      //  - Preserve every override map verbatim (no reshaping of entries).
+      //  - For both-fields states the target (`contextStartOverride`) wins
+      //    per topic; topics present only in the legacy map are filled from
+      //    the legacy map.
+      //  - Delete the legacy key. When neither field exists the assistant is
+      //    left untouched (no empty `contextStartOverride` is created).
+      //  - Idempotent: re-running over an already-migrated state is a no-op.
+      const migrateAssistant = (assistant: Assistant) => {
+        const settings = assistant.settings as
+          | {
+              contextWindowAnchor?: Record<string, ContextStartOverride | undefined>
+              contextStartOverride?: Record<string, ContextStartOverride | undefined>
+            }
+          | undefined
+        if (!settings) return assistant
+        const legacyMap = settings.contextWindowAnchor
+        const targetMap = settings.contextStartOverride
+        if (!legacyMap && !targetMap) return assistant
+        // target wins per topic; legacy fills topics missing from target.
+        settings.contextStartOverride = { ...legacyMap, ...targetMap }
+        delete settings.contextWindowAnchor
+        return assistant
+      }
+
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
+      logger.info('migrate 219 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 219 error', error as Error)
       return state
     }
   }

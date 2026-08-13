@@ -15,8 +15,10 @@ import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
 import { useEnableDeveloperMode, useMessageStyle, useSettings } from '@renderer/hooks/useSettings'
 import { useTemporaryValue } from '@renderer/hooks/useTemporaryValue'
 import useTranslate from '@renderer/hooks/useTranslate'
+import { useAnchorGroupKey } from '@renderer/pages/home/Messages/anchorGroupContext'
 import { resolveGroupKey } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
+import { isMessageInContextTurn } from '@renderer/services/contextTurnService'
 import { getMessageTitle } from '@renderer/services/MessagesService'
 import { translateText } from '@renderer/services/TranslateService'
 import type { RootState } from '@renderer/store'
@@ -173,39 +175,45 @@ const MessageMenubar: FC<Props> = (props) => {
   const { confirmDeleteMessage, confirmRegenerateMessage } = useSettings()
   const { updateAssistantSettings } = useAssistant(assistant.id)
 
-  // Context anchor control for the single anchor-to-end context window model.
-  // Clicking a user message sets the window start to that turn; clicking the
-  // already-anchored message clears the anchor (which restores the default
-  // window derived from the assistant's default context count — LOCK-CTX-4).
+  // Context start override control for the single anchor-to-end context window
+  // model. Clicking a user message persists an override at that
+  // turn's position (freeze); clicking an already-overridden message clears the
+  // override (the effective anchor then derives from the assistant's default
+  // context count). Only the persisted override map is read here;
+  // the resolved anchor projection is independent (see `isContextAnchor`).
   const assistantSettings = getAssistantSettings(assistant)
   const handleSetContextAnchor = useCallback(() => {
     const desiredGroupKey = resolveGroupKey(message)
     if (!desiredGroupKey) return
 
-    const current = assistantSettings.contextWindowAnchor?.[topic.id]
+    const current = assistantSettings.contextStartOverride?.[topic.id]
     if (current?.kind === 'active' && current.groupKey === desiredGroupKey) {
-      // 已经是这个锚点 → 删除锚点，默认窗口推导会自动接管
-      const newAnchor = { ...assistantSettings.contextWindowAnchor }
-      delete newAnchor[topic.id]
-      updateAssistantSettings({ contextWindowAnchor: newAnchor })
+      // 已经是这个 override → 删除，默认窗口推导会自动接管
+      const newOverride = { ...assistantSettings.contextStartOverride }
+      delete newOverride[topic.id]
+      updateAssistantSettings({ contextStartOverride: newOverride })
       return
     }
 
-    // 设置新锚点
+    // 设置新 override
     updateAssistantSettings({
-      contextWindowAnchor: {
-        ...assistantSettings.contextWindowAnchor,
+      contextStartOverride: {
+        ...assistantSettings.contextStartOverride,
         [topic.id]: { kind: 'active', groupKey: desiredGroupKey }
       }
     })
   }, [assistantSettings, topic.id, message, updateAssistantSettings])
 
-  const isContextAnchor = useMemo(() => {
-    const settings = getAssistantSettings(assistant)
-    const current = settings.contextWindowAnchor?.[topic.id]
-    if (current?.kind !== 'active') return false
-    return current.groupKey === message.id || (message.role === 'assistant' && current.groupKey === message.askId)
-  }, [assistant, topic.id, message.id, message.role, message.askId])
+  // Anchor-icon highlight: the button is active iff this message's
+  // turn is the single resolved anchor of the context window. The resolved
+  // anchor comes from the Messages-scoped projection of `computeContextInfo`
+  // (`anchorGroupKey`) — NOT from persisted override/source state. The semantic
+  // resolved anchor is universal; the exactly-one *visible* highlighted button
+  // is a user-led UI invariant because this anchor button renders only on user
+  // messages. The visual position may remain unchanged while origin (default vs
+  // override) changes.
+  const anchorGroupKey = useAnchorGroupKey()
+  const isContextAnchor = useMemo(() => isMessageInContextTurn(message, anchorGroupKey), [message, anchorGroupKey])
 
   // const loading = useTopicLoading(topic)
 
@@ -1084,6 +1092,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
         <ActionButton
           className="message-action-button"
           data-testid="context-anchor-btn"
+          data-context-anchor-active={isContextAnchor ? 'true' : 'false'}
           onClick={handleSetContextAnchor}
           $softHoverBg={softHoverBg}>
           <Anchor size={15} style={isContextAnchor ? { color: 'var(--color-primary)' } : undefined} />

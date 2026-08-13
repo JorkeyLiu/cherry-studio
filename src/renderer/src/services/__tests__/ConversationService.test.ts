@@ -16,7 +16,8 @@ vi.mock('@renderer/services/contextInfoService', () => ({
     uiMessages: [],
     tokenEstimationMessages: [],
     boundaryMessageId: null,
-    contextCount: { current: 0, max: null }
+    contextCount: { current: 0, max: null },
+    anchorGroupKey: null
   }))
 }))
 
@@ -58,7 +59,8 @@ describe('ConversationService.prepareMessagesForModel — no-model branch', () =
       uiMessages: [{ id: 'm-user', role: 'user', content: 'hello' } as unknown as Message],
       tokenEstimationMessages: [],
       boundaryMessageId: null,
-      contextCount: { current: 0, max: null }
+      contextCount: { current: 0, max: null },
+      anchorGroupKey: null
     })
     await expect(ConversationService.prepareMessagesForModel([userMessage], assistant)).rejects.toMatchObject({
       name: NO_MODEL_ERROR_NAME

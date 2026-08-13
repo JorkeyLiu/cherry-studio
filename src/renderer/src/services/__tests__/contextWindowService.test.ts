@@ -1,21 +1,22 @@
 /**
  * Tests for the pure, mode-neutral context-window derivation helpers
- * (LOCK-CTX-1, LOCK-CTX-2, LOCK-CTX-3, LOCK-CTX-9):
+ * (single anchor-to-topic-end model, default derivation, reset semantics,
+ * slider mapping):
  *   - resolveDefaultAnchorIndex: default window start from contextCount
- *   - resolveAnchorReset: TokenCount reset deletes the explicit anchor
- *     entry — the only Inputbar anchor mutation
+ *   - resolveContextStartOverrideReset: TokenCount reset deletes the persisted
+ *     user context-start override — the only Inputbar override mutation
  *   - contextCountToSliderValue / sliderValueToContextCount: identical
  *     slider semantics on both assistant setting surfaces (1..99 finite,
  *     endpoint 100 → ∞ → null)
  */
 import type { ContextTurn } from '@renderer/services/contextTurnService'
-import type { TopicAnchor } from '@renderer/types'
+import type { ContextStartOverride } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { describe, expect, it } from 'vitest'
 
 import {
   contextCountToSliderValue,
-  resolveAnchorReset,
+  resolveContextStartOverrideReset,
   resolveDefaultAnchorIndex,
   sliderValueToContextCount
 } from '../contextWindowService'
@@ -65,50 +66,50 @@ describe('resolveDefaultAnchorIndex', () => {
   })
 })
 
-// --- resolveAnchorReset (TokenCount reset — delete the explicit entry) ---
+// --- resolveContextStartOverrideReset (TokenCount reset — delete the override) ---
 
-describe('resolveAnchorReset', () => {
+describe('resolveContextStartOverrideReset', () => {
   const topicA = 'topic-a'
   const topicB = 'topic-b'
-  const anchorA: TopicAnchor = { kind: 'active', groupKey: 'u1' }
-  const anchorB: TopicAnchor = { kind: 'active', groupKey: 'u9' }
+  const overrideA: ContextStartOverride = { kind: 'active', groupKey: 'u1' }
+  const overrideB: ContextStartOverride = { kind: 'active', groupKey: 'u9' }
 
-  it('deletes the explicit anchor entry for the topic (reset removes designation)', () => {
-    const decision = resolveAnchorReset({ [topicA]: anchorA, [topicB]: anchorB }, topicA)
+  it('deletes the override entry for the topic (reset removes designation)', () => {
+    const decision = resolveContextStartOverrideReset({ [topicA]: overrideA, [topicB]: overrideB }, topicA)
     expect(decision.changed).toBe(true)
-    expect(decision.anchors[topicA]).toBeUndefined()
-    // Other topics' explicit anchors are untouched.
-    expect(decision.anchors[topicB]).toEqual(anchorB)
+    expect(decision.overrides[topicA]).toBeUndefined()
+    // Other topics' overrides are untouched.
+    expect(decision.overrides[topicB]).toEqual(overrideB)
   })
 
-  it('never creates an entry when the topic has no explicit anchor (no churn)', () => {
-    const anchors = { [topicB]: anchorB }
-    const decision = resolveAnchorReset(anchors, topicA)
+  it('never creates an entry when the topic has no override (no churn)', () => {
+    const overrides = { [topicB]: overrideB }
+    const decision = resolveContextStartOverrideReset(overrides, topicA)
     expect(decision.changed).toBe(false)
-    expect(decision.anchors).toEqual(anchors)
+    expect(decision.overrides).toEqual(overrides)
   })
 
-  it('handles an absent anchor map as a no-op (nothing to delete)', () => {
-    const decision = resolveAnchorReset(undefined, topicA)
+  it('handles an absent override map as a no-op (nothing to delete)', () => {
+    const decision = resolveContextStartOverrideReset(undefined, topicA)
     expect(decision.changed).toBe(false)
-    expect(decision.anchors).toEqual({})
-    expect(decision.anchors[topicA]).toBeUndefined()
+    expect(decision.overrides).toEqual({})
+    expect(decision.overrides[topicA]).toBeUndefined()
   })
 
-  it('reset is strictly deletion — it never creates or replaces an anchor', () => {
-    const decision = resolveAnchorReset({}, topicA)
+  it('reset is strictly deletion — it never creates or replaces an override', () => {
+    const decision = resolveContextStartOverrideReset({}, topicA)
     expect(decision.changed).toBe(false)
-    expect(decision.anchors[topicA]).toBeUndefined()
+    expect(decision.overrides[topicA]).toBeUndefined()
   })
 
-  it('is pure — the input anchor map is not mutated', () => {
-    const input = { [topicA]: anchorA }
-    resolveAnchorReset(input, topicA)
-    expect(input).toEqual({ [topicA]: anchorA })
+  it('is pure — the input override map is not mutated', () => {
+    const input = { [topicA]: overrideA }
+    resolveContextStartOverrideReset(input, topicA)
+    expect(input).toEqual({ [topicA]: overrideA })
   })
 })
 
-// --- Slider semantics (LOCK-CTX-9) ---
+// --- Slider semantics ---
 
 describe('slider semantics', () => {
   describe('contextCountToSliderValue', () => {

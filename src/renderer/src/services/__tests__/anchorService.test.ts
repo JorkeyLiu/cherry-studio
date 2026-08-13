@@ -1,4 +1,4 @@
-import type { TopicAnchor } from '@renderer/types'
+import type { ContextStartOverride } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -75,7 +75,7 @@ describe('resolveGroupKey', () => {
 // --- transferAnchorOnDeletion ---
 
 describe('transferAnchorOnDeletion', () => {
-  const g = (key: string): TopicAnchor => ({ kind: 'active', groupKey: key })
+  const g = (key: string): ContextStartOverride => ({ kind: 'active', groupKey: key })
 
   it('active anchor not in deletion set → unchanged', () => {
     const oldList = ['u1', 'u2', 'u3']
@@ -133,22 +133,22 @@ describe('transferAnchorOnDeletion', () => {
   })
 })
 
-// --- transferAnchorsAfterDeletion (contextWindowAnchor field) ---
+// --- transferAnchorsAfterDeletion (contextStartOverride field) ---
 
 describe('transferAnchorsAfterDeletion', () => {
-  const g = (key: string): TopicAnchor => ({ kind: 'active', groupKey: key })
+  const g = (key: string): ContextStartOverride => ({ kind: 'active', groupKey: key })
   const topicId = 'topic-1'
 
-  const makeGetState = (settings: { contextWindowAnchor?: Record<string, TopicAnchor | undefined> }) => () =>
+  const makeGetState = (settings: { contextStartOverride?: Record<string, ContextStartOverride | undefined> }) => () =>
     ({
       assistants: {
         assistants: [{ id: 'asst-1', settings }]
       }
     }) as any
 
-  it('reads and rewrites the renamed contextWindowAnchor field (LOCK-CTX-7)', () => {
+  it('reads and rewrites the renamed contextStartOverride field', () => {
     const getState = makeGetState({
-      contextWindowAnchor: { [topicId]: g('u3') }
+      contextStartOverride: { [topicId]: g('u3') }
     })
     const dispatch = vi.fn()
 
@@ -159,7 +159,7 @@ describe('transferAnchorsAfterDeletion', () => {
     expect(updateAssistantSettings).toHaveBeenCalledWith({
       assistantId: 'asst-1',
       settings: {
-        contextWindowAnchor: { [topicId]: g('u2') }
+        contextStartOverride: { [topicId]: g('u2') }
       }
     })
     expect(dispatch).toHaveBeenCalledTimes(1)
@@ -167,7 +167,7 @@ describe('transferAnchorsAfterDeletion', () => {
 
   it('removes the topic key when the anchor resolves to undefined', () => {
     const getState = makeGetState({
-      contextWindowAnchor: { [topicId]: g('u1'), otherTopic: g('u9') }
+      contextStartOverride: { [topicId]: g('u1'), otherTopic: g('u9') }
     })
     const dispatch = vi.fn()
 
@@ -177,7 +177,7 @@ describe('transferAnchorsAfterDeletion', () => {
     expect(updateAssistantSettings).toHaveBeenCalledWith({
       assistantId: 'asst-1',
       settings: {
-        contextWindowAnchor: { otherTopic: g('u9') }
+        contextStartOverride: { otherTopic: g('u9') }
       }
     })
   })

@@ -1,23 +1,26 @@
 import type { ContextTurn } from '@renderer/services/contextTurnService'
-import type { TopicAnchor } from '@renderer/types'
+import type { ContextStartOverride } from '@renderer/types'
 
 /**
  * Pure, mode-neutral context-window helpers shared by the compute layer
  * (computeContextInfo), the settings UI, and focused tests.
  *
  * There is exactly one context window model: anchor-to-topic-end. When a valid
- * manual anchor exists, the window starts at that turn and grows as the topic
- * grows. When no (valid) anchor exists, the window start is derived dynamically
- * from the assistant's default context count (`contextCount`):
+ * user context-start override exists, the window starts at that turn and grows
+ * as the topic grows. When no (valid) override exists, the window start is
+ * derived dynamically from the assistant's default context count
+ * (`contextCount`):
  *
  *   - finite N  → start at the most recent N turns (never sends more than N)
  *   - null (∞)  → start at the first turn of the topic
  *
- * LOCK-CTX-1: `contextWindowAnchor[topicId]` holds ONLY a user-specified
- * context start — a derived default is projection, never persisted state. This
- * module therefore contains no persistence decision for derived defaults; the
- * compute layer derives the default start on every call from the current
- * messages and the assistant's `contextCount`.
+ * The resolved anchor is the single expression of the effective window start
+ * (derived by `computeContextInfo` as `anchorGroupKey`); the persisted
+ * `contextStartOverride[topicId]` holds ONLY a user-specified context start —
+ * a derived anchor is projection, never persisted state. This module therefore
+ * contains no persistence decision for derived anchors; the compute layer
+ * derives the effective start on every call from the current messages and the
+ * assistant's `contextCount` (plus a valid user override when present).
  */
 
 /**
@@ -46,32 +49,33 @@ export function resolveDefaultAnchorIndex(turns: readonly ContextTurn[], context
 }
 
 /**
- * Reset decision for the TokenCount interaction. Deleting the explicit anchor
- * for `topicId` makes the effective context start fall back to the dynamic
- * default derivation (assistant `contextCount` + current messages).
+ * Reset decision for the TokenCount interaction. Deleting the persisted user
+ * context-start override for `topicId` makes the effective context start fall
+ * back to the dynamic derivation (assistant `contextCount` + current messages);
+ * the resolved anchor is recomputed by `computeContextInfo`, never stored here.
  *
  * The `changed` flag is `true` only when an explicit entry actually existed, so
- * callers dispatch at most once and never churn on absent anchors. This helper
- * strictly deletes — it never creates or replaces an anchor.
+ * callers dispatch at most once and never churn on absent overrides. This helper
+ * strictly deletes — it never creates or replaces an override.
  *
- * @param anchors the persisted per-topic anchor map (may be undefined/absent)
- * @param topicId the topic whose explicit designation is being reset
+ * @param overrides the persisted per-topic override map (may be undefined/absent)
+ * @param topicId the topic whose user context-start override is being reset
  */
-export function resolveAnchorReset(
-  anchors: Record<string, TopicAnchor | undefined> | undefined,
+export function resolveContextStartOverrideReset(
+  overrides: Record<string, ContextStartOverride | undefined> | undefined,
   topicId: string
-): { changed: boolean; anchors: Record<string, TopicAnchor | undefined> } {
-  const next = { ...anchors }
+): { changed: boolean; overrides: Record<string, ContextStartOverride | undefined> } {
+  const next = { ...overrides }
   if (!(topicId in next)) {
-    return { changed: false, anchors: next }
+    return { changed: false, overrides: next }
   }
   delete next[topicId]
-  return { changed: true, anchors: next }
+  return { changed: true, overrides: next }
 }
 
 /**
  * Slider position for a persisted context count (identical semantics on both
- * assistant setting surfaces — LOCK-CTX-9):
+ * assistant setting surfaces):
  *
  *   - finite 1..99 → the same number
  *   - null (unlimited) → endpoint 100, displayed as ∞

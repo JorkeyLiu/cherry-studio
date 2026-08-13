@@ -9,23 +9,23 @@ import styled from 'styled-components'
 type Props = {
   estimateTokenCount: number
   /**
-   * LOCK-CTX-5: current = selected context turns, max = total turns in the
+   * current = selected context turns, max = total turns in the
    * current post-clear topic segment. Drafts are excluded from both.
    */
   contextCount: { current: number; max: number | null }
   /**
-   * Click resets the explicit context anchor by DELETING the
-   * `contextWindowAnchor[topicId]` entry; the effective context start then
-   * falls back to the dynamic default derivation (assistant contextCount +
-   * current messages). The reset never recomputes or persists a derived
-   * default (LOCK-CTX-3).
+   * Click resets the persisted user context-start override by DELETING the
+   * `contextStartOverride[topicId]` entry; the effective context start (the
+   * resolved anchor) then falls back to the dynamic default derivation
+   * (assistant contextCount + current messages). The reset never recomputes or
+   * persists a derived anchor.
    */
   onResetAnchor?: () => void
 } & React.HTMLAttributes<HTMLDivElement>
 
 const TokenCount: FC<Props> = ({ estimateTokenCount, contextCount, onResetAnchor }) => {
   const { t } = useTranslation()
-  // LOCK-108: the estimated token display is always enabled (no user setting).
+  // The estimated token display is always enabled (no user setting).
   const PopoverContent = () => {
     return (
       <VStack w="185px" background="100%">

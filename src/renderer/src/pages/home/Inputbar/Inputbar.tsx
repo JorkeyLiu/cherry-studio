@@ -50,7 +50,7 @@ import { useTranslation } from 'react-i18next'
 
 import TopicSegmentDrawer from '../Messages/TopicSegmentDrawer'
 import { InputbarCore } from './components/InputbarCore'
-import { useContextWindowAnchor } from './hooks/useContextWindowAnchor'
+import { useContextStartOverride } from './hooks/useContextStartOverride'
 import { usePromptTokenEstimate } from './hooks/usePromptTokenEstimate'
 import InputbarTools from './InputbarTools'
 import KnowledgeBaseInput from './KnowledgeBaseInput'
@@ -162,7 +162,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
 
   // The selected context window is computed by the unified pipeline (single
   // anchor-to-end mode). A pending draft is NOT part of the turn list, so it is
-  // excluded from the context counts (LOCK-CTX-5); draft tokens are estimated
+  // excluded from the context counts; draft tokens are estimated
   // separately on top of tokenEstimationMessages.
   const previewContextInfo = useMemo(
     () => computeContextInfo(topicMessages, assistant, topic.id),
@@ -170,7 +170,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   )
 
   // Async, debounced, race-safe estimate: selected history + current draft
-  // (text + attachments) combined into one scalar (LOCK-001, LOCK-005, LOCK-009).
+  // (text + attachments) combined into one scalar.
   const estimateTokenCount = usePromptTokenEstimate({
     assistant,
     tokenEstimationMessages: previewContextInfo.tokenEstimationMessages,
@@ -179,7 +179,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   })
 
   // contextCount from computeContextInfo: selected context turns / total turns
-  // in the post-clear segment. A pending draft is excluded from both (LOCK-CTX-5).
+  // in the post-clear segment. A pending draft is excluded from both.
   const contextCount = previewContextInfo.contextCount
 
   const dispatch = useAppDispatch()
@@ -304,7 +304,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   ])
 
   const tokenCountProps = useMemo(() => {
-    // LOCK-108: the estimated input token display has no user setting and is
+    // The estimated input token display has no user setting and is
     // always enabled under the existing program gates (scope supports a token
     // count and an estimate exists).
     if (!config.showTokenCount || estimateTokenCount === undefined) {
@@ -317,15 +317,15 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     }
   }, [config.showTokenCount, contextCount, estimateTokenCount])
 
-  // Context-window anchor control (explicit-anchor semantics): the persisted
-  // `contextWindowAnchor` holds ONLY a user-specified context start. The
-  // Inputbar never persists a derived default and never synchronizes anchors
+  // Context-window anchor control (override semantics): the persisted
+  // `contextStartOverride` holds ONLY a user-specified context start. The
+  // Inputbar never persists a derived anchor and never synchronizes overrides
   // to message loading or message-list changes — a transient empty topic on
-  // startup cannot mutate a persisted explicit anchor. The only Inputbar
-  // mutation is reset (TokenCount click): delete the explicit entry so the
+  // startup cannot mutate a persisted override. The only Inputbar
+  // mutation is reset (TokenCount click): delete the override entry so the
   // existing default computation (assistant contextCount + current messages)
   // determines the effective start.
-  const { onResetAnchor } = useContextWindowAnchor(assistant, topic.id, updateAssistantSettings)
+  const { onResetOverride } = useContextStartOverride(assistant, topic.id, updateAssistantSettings)
 
   const onPause = useCallback(async () => {
     await pauseMessages()
@@ -335,8 +335,8 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     const newTopic = getDefaultTopic(assistant.id)
 
     try {
-      // LOCK-533: the ordinary topic must exist in SQLite with its
-      // assistantId before any Redux exposure (LOCK-528: persistence first).
+      // The ordinary topic must exist in SQLite with its
+      // assistantId before any Redux exposure (persistence first).
       await ensureOrdinaryTopicOwnership(newTopic.id, assistant.id, newTopic.name)
     } catch (error) {
       logger.error('Failed to establish SQLite ownership for new topic', error as Error)
@@ -468,7 +468,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
         <TokenCount
           estimateTokenCount={tokenCountProps.estimateTokenCount}
           contextCount={tokenCountProps.contextCount}
-          onResetAnchor={onResetAnchor}
+          onResetAnchor={onResetOverride}
         />
       )}
     </>

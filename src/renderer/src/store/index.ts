@@ -84,7 +84,7 @@ const persistedReducer = persistReducer(
   {
     key: 'cherry-studio',
     storage,
-    version: 218,
+    version: 219,
     blacklist: [
       'runtime',
       'messages',
@@ -148,13 +148,13 @@ export const persistor = persistStore(store, undefined, () => {
     }, 0)
   }
 
-  // LOCK-003: the rehydrated store is safely selectable the moment
+  // The rehydrated store is safely selectable the moment
   // persistStore rehydration completes — signal ReduxStoreReady IMMEDIATELY,
   // independently of the one-shot projection outcome. Main's startup config
   // reads consume config slices (settings/llm) which rehydration already
   // provides; the projection affects navigation/assistants and stays gated
-  // by ImportProjectionReadiness below (LOCK-001/LOCK-PROJECTION).
-  // LOCK-001/LOCK-PROJECTION: the ordinary chat tree remains gated on the
+  // by ImportProjectionReadiness below.
+  // The ordinary chat tree remains gated on the
   // one-shot L2 navigation projection settlement. runReduxStoreBoot fires the
   // Main notification first, then runImportProjectionBoot settles readiness
   // ONLY when the apply returns applied (true) or verified no-pending
@@ -167,7 +167,7 @@ export const persistor = persistStore(store, undefined, () => {
   // defensive guard because runReduxStoreBoot never rejects.
   void runReduxStoreBoot({
     notifyMain: () => {
-      // LOCK-003: notify Main right after rehydration — not gated on the
+      // Notify Main right after rehydration — not gated on the
       // projection. ReduxStoreReady means "the rehydrated store is safely
       // selectable".
       void window.electron?.ipcRenderer?.invoke(IpcChannel.ReduxStoreReady)

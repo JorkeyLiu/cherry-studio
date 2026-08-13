@@ -84,6 +84,7 @@ import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
 
+import { AnchorGroupProvider } from './anchorGroupContext'
 import MessageGroup from './MessageGroup'
 import Prompt from './Prompt'
 import { MessagesContainer, ScrollContainer } from './shared'
@@ -344,10 +345,12 @@ const Messages = ({
   const savedRestoreHandledRef = useRef(false)
   const bootstrapPhaseRef = useRef<BootstrapPhase>('idle')
 
-  // Unified context info: boundary message ID and context count from the same pipeline
-  // that ConversationService uses to prepare messages for the model.
+  // Unified context info: boundary message ID, context count, and the single
+  // resolved anchor from the same pipeline that ConversationService uses to
+  // prepare messages for the model.
   const contextInfo = useMemo(() => computeContextInfo(messages, assistant, topic.id), [messages, assistant, topic.id])
   const contextBoundaryMessageId = contextInfo.boundaryMessageId
+  const anchorGroupKey = contextInfo.anchorGroupKey
 
   const viewportDispatch = reduceViewport
 
@@ -710,18 +713,20 @@ const Messages = ({
             void Promise.resolve(autoRenameTopic(assistant, newTopic.id)).catch((error: unknown) =>
               logger.error('autoRenameTopic failed', error as Error)
             )
-            // Inherit the context window anchor (group-key based) when the
-            // source topic has an active anchor — position-by-position transfer.
+            // Inherit the user context-start override (group-key based) when the
+            // source topic has an active override — position-by-position transfer.
+            // Only the persisted override is manipulated; the branch topic's
+            // resolved anchor is derived by computeContextInfo on every render.
             const assistantSettings = getAssistantSettings(assistant)
-            const sourceAnchor = assistantSettings.contextWindowAnchor?.[topic.id]
+            const sourceOverride = assistantSettings.contextStartOverride?.[topic.id]
 
-            if (sourceAnchor?.kind === 'active') {
+            if (sourceOverride?.kind === 'active') {
               try {
                 const sourceState = store.getState()
                 const sourceMessageIds = sourceState.messages.messageIdsByTopic[topic.id] || []
                 const sourceEntities = sourceState.messages.entities
                 const sourceGroupList = buildGroupList(sourceMessageIds, (id) => sourceEntities[id])
-                const groupIndex = sourceGroupList.indexOf(sourceAnchor.groupKey)
+                const groupIndex = sourceGroupList.indexOf(sourceOverride.groupKey)
 
                 if (groupIndex >= 0 && sourceGroupList.length > 0) {
                   const newMessageIds = sourceState.messages.messageIdsByTopic[newTopic.id] || []
@@ -730,15 +735,15 @@ const Messages = ({
 
                   if (groupIndex < newGroupList.length) {
                     updateAssistantSettings({
-                      contextWindowAnchor: {
-                        ...assistantSettings.contextWindowAnchor,
+                      contextStartOverride: {
+                        ...assistantSettings.contextStartOverride,
                         [newTopic.id]: { kind: 'active', groupKey: newGroupList[groupIndex] }
                       }
                     })
                   }
                 }
               } catch (error) {
-                logger.error('[NEW_BRANCH] Failed to inherit context window anchor', error as Error)
+                logger.error('[NEW_BRANCH] Failed to inherit context start override', error as Error)
               }
             }
 
@@ -1022,25 +1027,27 @@ const Messages = ({
 
   return (
     <EditModeProvider topicId={topic.id} scrollToGroup={scrollToGroup} visibleGroupIds={visibleGroupIds}>
-      <MessagesContent
-        assistant={assistant}
-        topic={topic}
-        scrollContainerRef={scrollContainerRef}
-        handleScrollPosition={handleScroll}
-        displayMessages={displayMessages}
-        contextBoundaryMessageId={contextBoundaryMessageId}
-        hasMore={hasMore}
-        isLoadingMore={isLoadingMore}
-        isLoadingNewer={isLoadingNewer}
-        loadMoreMessages={loadMoreMessages}
-        registerMessageElement={registerMessageElement}
-      />
-      <SelectionBox
-        isMultiSelectMode={isMultiSelectMode}
-        scrollContainerRef={scrollContainerRef}
-        messageElements={messageElements.current}
-        handleSelectMessage={handleSelectMessage}
-      />
+      <AnchorGroupProvider anchorGroupKey={anchorGroupKey}>
+        <MessagesContent
+          assistant={assistant}
+          topic={topic}
+          scrollContainerRef={scrollContainerRef}
+          handleScrollPosition={handleScroll}
+          displayMessages={displayMessages}
+          contextBoundaryMessageId={contextBoundaryMessageId}
+          hasMore={hasMore}
+          isLoadingMore={isLoadingMore}
+          isLoadingNewer={isLoadingNewer}
+          loadMoreMessages={loadMoreMessages}
+          registerMessageElement={registerMessageElement}
+        />
+        <SelectionBox
+          isMultiSelectMode={isMultiSelectMode}
+          scrollContainerRef={scrollContainerRef}
+          messageElements={messageElements.current}
+          handleSelectMessage={handleSelectMessage}
+        />
+      </AnchorGroupProvider>
     </EditModeProvider>
   )
 }

@@ -89,7 +89,7 @@ export function buildContextTurns(messages: Message[]): ContextTurn[] {
 /**
  * Locates the index of the anchor turn in the given ContextTurn array.
  *
- * Resolution order (LOCK-FIX-1, LOCK-FIX-2):
+ * Resolution order:
  *   1. Prefer the turn containing a user message whose id equals groupKey —
  *      the canonical group key of a user-initiated turn.
  *   2. If no such user turn exists, fall back to the first turn containing
@@ -129,6 +129,30 @@ export function resolveAnchorTurnIndex(turns: readonly ContextTurn[], groupKey: 
 
   // 4. Not found
   return -1
+}
+
+/**
+ * Determines whether a message belongs to the turn whose canonical group key is
+ * `groupKey` (the resolved anchor key).
+ *
+ * This is the per-message inverse of {@link resolveAnchorTurnIndex}: it derives
+ * the message's own turn key exactly as {@link buildContextTurns} does —
+ *   - user and system messages are keyed by their own id,
+ *   - assistant messages are keyed by `askId`, falling back to their own id
+ *     when `askId` is absent (orphan assistant turn).
+ *
+ * The message is in the anchor turn iff its derived key equals `groupKey`.
+ */
+export function isMessageInContextTurn(
+  message: Pick<Message, 'role' | 'id' | 'askId'>,
+  groupKey: string | null | undefined
+): boolean {
+  if (groupKey === null || groupKey === undefined) {
+    return false
+  }
+  const messageTurnKey =
+    message.role === 'user' || message.role === 'system' ? message.id : (message.askId ?? message.id)
+  return messageTurnKey === groupKey
 }
 
 /**

@@ -53,7 +53,7 @@ export const DEFAULT_ASSISTANT_SETTINGS = {
   toolUseMode: 'function',
   maxToolCalls: 20,
   enableMaxToolCalls: true,
-  contextWindowAnchor: {}
+  contextStartOverride: {}
 } as const satisfies AssistantSettings
 
 /**
@@ -252,7 +252,7 @@ export const getAssistantSettings = (assistant: Assistant): AssistantSettings =>
     defaultModel: assistant?.defaultModel ?? DEFAULT_ASSISTANT_SETTINGS.defaultModel,
     reasoning_effort: assistant?.settings?.reasoning_effort ?? DEFAULT_ASSISTANT_SETTINGS.reasoning_effort,
     customParameters: assistant?.settings?.customParameters ?? DEFAULT_ASSISTANT_SETTINGS.customParameters,
-    contextWindowAnchor: assistant?.settings?.contextWindowAnchor ?? DEFAULT_ASSISTANT_SETTINGS.contextWindowAnchor
+    contextStartOverride: assistant?.settings?.contextStartOverride ?? DEFAULT_ASSISTANT_SETTINGS.contextStartOverride
   }
 }
 
@@ -276,7 +276,7 @@ export async function createAssistantFromAgent(agent: AssistantPreset) {
     settings: agent.settings || DEFAULT_ASSISTANT_SETTINGS
   }
 
-  // LOCK-533/528: the default topic must exist in SQLite with its
+  // The default topic must exist in SQLite with its
   // assistantId before the assistant (and topic) is exposed in Redux.
   await ensureOrdinaryTopicOwnership(topic.id, assistantId, topic.name)
 

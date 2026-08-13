@@ -6,7 +6,7 @@ import {
   turnsToMessages
 } from '@renderer/services/contextTurnService'
 import { resolveDefaultAnchorIndex } from '@renderer/services/contextWindowService'
-import type { Assistant, TopicAnchor } from '@renderer/types'
+import type { Assistant, ContextStartOverride } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import {
   filterAdjacentUserMessaegs,
@@ -25,21 +25,28 @@ import {
  *   - Which messages the token estimator uses (tokenEstimationMessages — retains trailing assistant)
  *   - Where the context window boundary divider should render (boundaryMessageId)
  *   - What TokenCount displays (contextCount)
+ *   - The single resolved anchor of the context window (anchorGroupKey)
  *
  * Canonical unit: ContextTurn. contextCount, window selection, and boundary
  * all operate on whole turns. The persisted contextCount value is interpreted
  * as a turn count (not a message count).
  *
- * There is exactly ONE context window model (LOCK-CTX-1): anchor-to-topic-end.
- *   - A valid manual anchor (`settings.contextWindowAnchor[topicId]`) fixes the
- *     window start; the window then grows as the topic grows.
- *   - With no (valid) anchor, the start is derived from the assistant's default
+ * There is exactly ONE context window model: anchor-to-topic-end.
+ *   - A valid user context-start override (`settings.contextStartOverride[topicId]`)
+ *     fixes the window start; the window then grows as the topic grows.
+ *   - With no (valid) override, the start is derived from the assistant's default
  *     `contextCount` via `resolveDefaultAnchorIndex` — finite N selects the
  *     most recent N turns (so full history is never transiently sent), and
- *     null (unlimited) selects the first turn of the topic (LOCK-CTX-2,
- *     LOCK-CTX-4).
+ *     null (unlimited) selects the first turn of the topic.
  *
- * contextCount result (LOCK-CTX-5): `current` = selected real turns, `max` =
+ * Anchor semantics: every non-empty resolved context window
+ * has exactly one anchor — the canonical group key of the start turn
+ * (`anchorGroupKey = allTurns[startIndex].key`). Empty windows (no assistant or
+ * no turns) have `anchorGroupKey === null`. Automatic/default calculation, user
+ * override, override deletion, and deletion transfer are all mechanisms that
+ * determine this same resolved position; origin is not part of anchor semantics.
+ *
+ * contextCount result: `current` = selected real turns, `max` =
  * total turns in the topic. Unsent drafts are never part of the turn list, so
  * they are excluded from both numbers automatically.
  *
@@ -71,13 +78,17 @@ export function computeContextInfo(
   tokenEstimationMessages: Message[]
   boundaryMessageId: string | null
   contextCount: { current: number; max: number | null }
+  /** Canonical resolved anchor: the start turn's group key, or null for an
+   *  empty/undefined window. Sole expression of the effective window start. */
+  anchorGroupKey: string | null
 } {
   if (!assistant) {
     return {
       uiMessages: [],
       tokenEstimationMessages: [],
       boundaryMessageId: null,
-      contextCount: { current: 0, max: null }
+      contextCount: { current: 0, max: null },
+      anchorGroupKey: null
     }
   }
 
@@ -85,21 +96,21 @@ export function computeContextInfo(
   // contextCount: the default initial window size. null means unlimited.
   const contextCount = settings.contextCount
 
-  const anchor: TopicAnchor | undefined = topicId ? settings.contextWindowAnchor?.[topicId] : undefined
+  const override: ContextStartOverride | undefined = topicId ? settings.contextStartOverride?.[topicId] : undefined
 
   // --- Step 1: Build turns from all topic messages ---
   const allTurns = buildContextTurns(messages)
   const totalTurns = allTurns.length
 
   // --- Step 2: Turn selection (single anchor-to-end mode) ---
-  // A valid manual anchor fixes the window start; the window grows as the
-  // topic grows (LOCK-CTX-1). Without a valid anchor, the start falls back to
+  // A valid user override fixes the window start; the window grows as the
+  // topic grows. Without a valid override, the start falls back to
   // the default derivation — finite N selects the most recent N turns,
-  // unlimited selects the first turn of the topic (LOCK-CTX-2, LOCK-CTX-4).
+  // unlimited selects the first turn of the topic.
   let startIndex: number
-  if (anchor?.kind === 'active') {
-    const anchorIndex = resolveAnchorTurnIndex(allTurns, anchor.groupKey)
-    startIndex = anchorIndex >= 0 ? anchorIndex : resolveDefaultAnchorIndex(allTurns, contextCount)
+  if (override?.kind === 'active') {
+    const overrideIndex = resolveAnchorTurnIndex(allTurns, override.groupKey)
+    startIndex = overrideIndex >= 0 ? overrideIndex : resolveDefaultAnchorIndex(allTurns, contextCount)
   } else {
     startIndex = resolveDefaultAnchorIndex(allTurns, contextCount)
   }
@@ -110,7 +121,12 @@ export function computeContextInfo(
   // older turns exist before the window start.
   const boundaryMessageId = startIndex > 0 && selectedRealTurns.length > 0 ? selectedRealTurns[0].messages[0].id : null
 
-  // contextCount (LOCK-CTX-5): current selected turns / total turns in the
+  // Anchor: the canonical group key of the start turn. Empty
+  // windows have no anchor. Automatic/default calculation, user override,
+  // override deletion, and deletion transfer all resolve to this same key.
+  const anchorGroupKey = startIndex >= 0 ? allTurns[startIndex].key : null
+
+  // contextCount: current selected turns / total turns in the
   // topic. Drafts are never in the turn list, so they are excluded from both x
   // and y.
   const currentCount = selectedRealTurns.length
@@ -140,6 +156,7 @@ export function computeContextInfo(
     uiMessages,
     tokenEstimationMessages,
     boundaryMessageId,
-    contextCount: { current: currentCount, max: maxCount }
+    contextCount: { current: currentCount, max: maxCount },
+    anchorGroupKey
   }
 }

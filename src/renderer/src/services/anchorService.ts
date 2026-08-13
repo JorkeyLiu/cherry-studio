@@ -1,6 +1,6 @@
 import type { RootState } from '@renderer/store'
 import { updateAssistantSettings } from '@renderer/store/assistants'
-import type { TopicAnchor } from '@renderer/types'
+import type { ContextStartOverride } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 
 /**
@@ -32,14 +32,14 @@ export function resolveGroupKey(message: Pick<Message, 'role' | 'id' | 'askId'>)
 }
 
 /**
- * 状态机：消息删除后转移锚点。
+ * 状态机：消息删除后转移用户 context-start override。
  * oldGroupList = 删除前的 buildGroupList
  * newGroupList = 删除后的 buildGroupList
  * 规则：
- *   - 若 anchor 不是 active，返回原值
- *   - 若 anchor.groupKey 仍在 newGroupList 中，返回原 active（不动）
- *   - 若 anchor.groupKey 已被删除：
- *       - oldGroupList 中找不到 groupKey → 返回原 anchor（异常保护）
+ *   - 若 override 不是 active，返回原值
+ *   - 若 override.groupKey 仍在 newGroupList 中，返回原 active（不动）
+ *   - 若 override.groupKey 已被删除：
+ *       - oldGroupList 中找不到 groupKey → 返回原 override（异常保护）
  *       - newIndex = oldIndex - 1（落到更旧的组）
  *       - newGroupList 为空 → undefined（等待 useEffect 守卫自动修复）
  *       - newIndex < 0（删首组）且 newGroupList 非空 → active(newGroupList[0])
@@ -47,25 +47,25 @@ export function resolveGroupKey(message: Pick<Message, 'role' | 'id' | 'askId'>)
  * 本函数不读 redux，纯函数。
  */
 export function transferAnchorOnDeletion(
-  oldAnchor: TopicAnchor,
+  oldOverride: ContextStartOverride,
   oldGroupList: string[],
   newGroupList: string[]
-): TopicAnchor | undefined {
-  if (oldAnchor.kind !== 'active') {
-    return oldAnchor
+): ContextStartOverride | undefined {
+  if (oldOverride.kind !== 'active') {
+    return oldOverride
   }
 
-  const { groupKey } = oldAnchor
+  const { groupKey } = oldOverride
 
-  // anchor.groupKey 仍在 newGroupList 中，不动
+  // override.groupKey 仍在 newGroupList 中，不动
   if (newGroupList.includes(groupKey)) {
-    return oldAnchor
+    return oldOverride
   }
 
   // 异常：oldGroupList 不含 groupKey（理论上不可能），返回原值
   const oldIndex = oldGroupList.indexOf(groupKey)
   if (oldIndex === -1) {
-    return oldAnchor
+    return oldOverride
   }
 
   // newGroupList 为空 → undefined（等待 useEffect 守卫自动修复）
@@ -83,8 +83,8 @@ export function transferAnchorOnDeletion(
 }
 
 /**
- * 删除后对所有 assistant 的 active anchor 进行转移（集成胶水函数）。
- * 遍历 assistants.assistants，对每个有 contextWindowAnchor[topicId]: active 的，
+ * 删除后对所有 assistant 的 active context-start override 进行转移（集成胶水函数）。
+ * 遍历 assistants.assistants，对每个有 contextStartOverride[topicId]: active 的，
  * 调 transferAnchorOnDeletion，diff 则 dispatch updateAssistantSettings。
  *
  * 注意：此函数含 side-effect（dispatch），放在此文件底部作为集成辅助。
@@ -100,24 +100,24 @@ export function transferAnchorsAfterDeletion(
   const allAssistants = state.assistants.assistants
 
   for (const asst of allAssistants) {
-    const oldAnchor = asst.settings?.contextWindowAnchor?.[topicId]
-    if (!oldAnchor || oldAnchor.kind !== 'active') continue
+    const oldOverride = asst.settings?.contextStartOverride?.[topicId]
+    if (!oldOverride || oldOverride.kind !== 'active') continue
 
-    const newAnchor = transferAnchorOnDeletion(oldAnchor, oldGroupList, newGroupList)
-    if (newAnchor === oldAnchor) continue
+    const newOverride = transferAnchorOnDeletion(oldOverride, oldGroupList, newGroupList)
+    if (newOverride === oldOverride) continue
 
-    const updatedAnchors = { ...asst.settings?.contextWindowAnchor }
-    if (newAnchor) {
-      updatedAnchors[topicId] = newAnchor
+    const updatedOverrides = { ...asst.settings?.contextStartOverride }
+    if (newOverride) {
+      updatedOverrides[topicId] = newOverride
     } else {
-      delete updatedAnchors[topicId]
+      delete updatedOverrides[topicId]
     }
 
     dispatch(
       updateAssistantSettings({
         assistantId: asst.id,
         settings: {
-          contextWindowAnchor: updatedAnchors
+          contextStartOverride: updatedOverrides
         }
       })
     )
