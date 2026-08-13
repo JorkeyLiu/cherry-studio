@@ -3,7 +3,7 @@
  * context-menu "Auto Rename") generated topic naming through the repaired
  * message-read path.
  *
- * Contract under test (LOCK-002):
+ * Contract under test:
  *   messages persisted in Main SQLite -> typed IPC -> renderer messages
  *   projection -> TopicManager.getTopicMessages -> summary request ->
  *   topic metadata persistence (SQLite name update, then Redux).
@@ -37,15 +37,16 @@
  * the structured summary-shape check, so a streaming chat request can never
  * be misclassified as a summary request.
  *
- * Manual-path strengthening (auditor finding): the automatic naming settles
+ * Manual-path strengthening: the automatic naming settles
  * on the same deterministic mock title, so the manual test first renames the
  * topic to a distinct stable pre-manual name via the ordinary manual text
  * rename — that rename is deterministic test setup ONLY, never the asserted
  * behavior. The manual name/UI/SQLite assertions then pass only if the manual
  * Auto Rename handler applies and persists its own summary result.
  *
- * LOCK-001: shared fixture / disposable profile / seeded mock provider only.
- * LOCK-004: Redux-only dispatches are NOT persistence evidence — the final
+ * Fixture/mock/profile requirements: shared fixture, disposable profile, and the
+ * seeded mock provider only.
+ * Evidence scope: Redux-only dispatches are NOT persistence evidence — the final
  * name is proven in SQLite after shutdown.
  */
 import * as fs from 'fs'
@@ -278,7 +279,7 @@ async function waitForGeneratedTopicName(
  * summary conversation: a JSON array string of structured messages (starts
  * with `[{` / contains the `mainText` field).
  *
- * Discrimination (auditor finding): chat requests are streaming
+ * Discrimination rationale: chat requests are streaming
  * (`stream: true` in the actual request body) and are rejected on that real
  * request metadata BEFORE the shape check, so a streaming chat request can
  * never be misclassified as a summary. Summary requests are non-streaming
@@ -312,10 +313,10 @@ function findSummaryRequest(afterSequence: number) {
 }
 
 /**
- * Durable proof (LOCK-004): close the app, then query chat.db read-only via
+ * Durable proof: close the app, then query chat.db read-only via
  * the Electron binary and assert the persisted topic name equals the Redux
  * name and contains the mock-generated marker. Also proves the disposable
- * profile is the runtime profile (LOCK-001).
+ * profile is the runtime profile.
  */
 async function assertTopicNamePersistedInSqlite(
   electronApp: import('@playwright/test').ElectronApplication,
