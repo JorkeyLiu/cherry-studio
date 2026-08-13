@@ -17,7 +17,11 @@
 import { loggerService } from '@logger'
 import { AiSdkToChunkAdapter } from '@renderer/aiCore/chunk/AiSdkToChunkAdapter'
 import { getModel } from '@renderer/hooks/useModel'
-import { buildGroupList, transferAnchorsAfterDeletion } from '@renderer/services/anchorService'
+import {
+  buildGroupList,
+  ensureTopicAnchorEstablished,
+  transferAnchorsAfterDeletion
+} from '@renderer/services/anchorService'
 import { transformMessagesAndFetch } from '@renderer/services/ApiService'
 import { dbService } from '@renderer/services/db'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
@@ -284,6 +288,39 @@ const dispatchMultiModelResponses = async (
 }
 
 // --- End Helper Function ---
+
+/**
+ * Build the writable request snapshot from the caller-provided assistant and
+ * the fresh Redux assistant.
+ *
+ * `origAssistant` is the snapshot captured by the caller (`sendMessage`,
+ * multi-model mention, append-model, grouped resend/regenerate). It may carry
+ * caller-specific request configuration — above all a per-request `model`
+ * override — that must survive into the actual request. `freshAssistant` is
+ * the assistant re-read from the store, carrying the just-persisted settings
+ * surface (`contextWindowAnchor`, `contextCount`) that the first request must
+ * resolve (docs/context-window.md CW-6).
+ *
+ * The merge retains every caller request field and replaces ONLY the
+ * Redux-owned settings surface with the fresh values, so the first request
+ * observes the same anchor as TokenCount/divider while caller model overrides
+ * are preserved. The returned object is an independent top-level snapshot —
+ * never the frozen Redux object — because request preparation
+ * (ApiService.transformMessagesAndFetch) writes `assistant.prompt`.
+ */
+export const mergeRequestAssistantSnapshot = (
+  origAssistant: Assistant,
+  freshAssistant: Assistant,
+  topicId: string
+): Assistant => {
+  const topic = freshAssistant.topics.find((t) => t.id === topicId)
+  return {
+    ...origAssistant,
+    settings: freshAssistant.settings,
+    prompt: topic?.prompt ? `${freshAssistant.prompt}\n${topic.prompt}` : freshAssistant.prompt
+  }
+}
+
 // 发送和处理助手响应的实现函数，话题提示词在此拼接
 const fetchAndProcessAssistantResponseImpl = async (
   dispatch: AppDispatch,
@@ -292,10 +329,20 @@ const fetchAndProcessAssistantResponseImpl = async (
   origAssistant: Assistant,
   assistantMessage: Message // Pass the prepared assistant message (new or reset)
 ) => {
-  const topic = origAssistant.topics.find((t) => t.id === topicId)
-  const assistant = topic?.prompt
-    ? { ...origAssistant, prompt: `${origAssistant.prompt}\n${topic.prompt}` }
-    : origAssistant
+  // Re-read the assistant from the store: the caller may have captured a
+  // snapshot that predates the first-establishment anchor dispatch in
+  // `sendMessage`. Using the fresh settings guarantees the first request,
+  // TokenCount, and divider all resolve the same just-persisted anchor
+  // (docs/context-window.md CW-6). Falls back to the captured assistant when
+  // the id is not in the store (default-assistant edge cases).
+  const freshAssistant = getState().assistants.assistants.find((asst) => asst.id === origAssistant.id) ?? origAssistant
+  // The request snapshot is a narrow merge: every caller request field
+  // (multi-model mention, append-model, grouped resend/regenerate model
+  // overrides) is retained from `origAssistant`, while only the Redux-owned
+  // settings surface is refreshed with the fresh store values (the
+  // just-persisted anchor, docs/context-window.md CW-6). The result is an
+  // independently writable top-level object — never the frozen Redux one.
+  const assistant = mergeRequestAssistantSnapshot(origAssistant, freshAssistant, topicId)
   const assistantMsgId = assistantMessage.id
   let callbacks: StreamProcessorCallbacks = {}
   try {
@@ -419,6 +466,15 @@ export const sendMessage =
         dispatch(upsertManyBlocks(userMessageBlocks))
       }
       dispatch(updateTopicUpdatedAt({ topicId }))
+
+      // First establishment: after the user message is persisted and added to
+      // Redux, idempotently persist the topic anchor when it is absent or
+      // unresolvable (docs/context-window.md §6). A valid anchor is never
+      // recalculated; an empty topic never receives an anchor. This runs
+      // BEFORE the assistant response is queued so the first request resolves
+      // the same persisted anchor even though its captured assistant snapshot
+      // predates this dispatch.
+      ensureTopicAnchorEstablished(dispatch, getState, assistant.id, topicId)
 
       const queue = getTopicQueue(topicId)
 
@@ -1370,6 +1426,20 @@ export const loadTopicMessagesThunk =
     // Skip if already cached with valid data and not forcing reload
     const cachedIds = state.messages.messageIdsByTopic[topicId]
     if (!forceReload && cachedIds && cachedIds.length > 0) {
+      // Compatibility repair (docs/context-window.md §10): a NON-EMPTY cached
+      // topic (messages already in Redux, e.g. a fresh branch pre-populated
+      // by cloneMessagesToNewTopicThunk) that lacks a valid anchor must still
+      // receive exactly-once initialization before the cached early return.
+      // Valid anchors are never recalculated; empty cached topics stay
+      // anchorless (they fall through to the fetch path). Same bounded
+      // load-completion hook as the fetch path below — never a render effect.
+      const cachedState = getState()
+      const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
+        asst.topics.some((t) => t.id === topicId)
+      )
+      if (cachedTopicOwner) {
+        ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+      }
       return
     }
 
@@ -1389,6 +1459,19 @@ export const loadTopicMessagesThunk =
         dispatch(upsertManyBlocks(blocks))
       }
       dispatch(newMessagesActions.messagesReceived({ topicId, messages }))
+
+      // Compatibility repair (docs/context-window.md §10): after a successful
+      // topic message load into Redux, initialize a missing/unresolvable
+      // anchor exactly once from the loaded real turns + the assistant's
+      // current `contextCount`. Valid anchors are never recalculated; a
+      // startup with a valid anchor dispatches nothing; empty topics stay
+      // anchorless. This is a bounded load-completion hook — never a render
+      // effect.
+      const loadedState = getState()
+      const topicOwner = loadedState.assistants.assistants.find((asst) => asst.topics.some((t) => t.id === topicId))
+      if (topicOwner) {
+        ensureTopicAnchorEstablished(dispatch, getState, topicOwner.id, topicId)
+      }
 
       // Load topic segments for this topic
       void dispatch(loadTopicSegmentsThunk(topicId))

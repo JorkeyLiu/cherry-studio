@@ -14,16 +14,16 @@ type Props = {
    */
   contextCount: { current: number; max: number | null }
   /**
-   * Click resets the persisted user context-start override by DELETING the
-   * `contextStartOverride[topicId]` entry; the effective context start (the
-   * resolved anchor) then falls back to the dynamic default derivation
-   * (assistant contextCount + current messages). The reset never recomputes or
-   * persists a derived anchor.
+   * Click re-anchors the topic to the CURRENT default window position (based
+   * on the current topic turns + the assistant's current `contextCount`) and
+   * persists it as `contextWindowAnchor[topicId]`. The interaction never
+   * leaves a non-empty initialized topic anchorless; an empty topic is a
+   * no-op.
    */
-  onResetAnchor?: () => void
+  onReanchor?: () => void
 } & React.HTMLAttributes<HTMLDivElement>
 
-const TokenCount: FC<Props> = ({ estimateTokenCount, contextCount, onResetAnchor }) => {
+const TokenCount: FC<Props> = ({ estimateTokenCount, contextCount, onReanchor }) => {
   const { t } = useTranslation()
   // The estimated token display is always enabled (no user setting).
   const PopoverContent = () => {
@@ -49,10 +49,7 @@ const TokenCount: FC<Props> = ({ estimateTokenCount, contextCount, onResetAnchor
   }
 
   const contextCountBlock = (
-    <HStack
-      style={{ alignItems: 'center', cursor: 'pointer' }}
-      onClick={onResetAnchor}
-      data-testid="token-count-context">
+    <HStack style={{ alignItems: 'center', cursor: 'pointer' }} onClick={onReanchor} data-testid="token-count-context">
       <MenuIcon size={12} className="icon" />
       {contextCount.current}
       <SlashSeparatorSpan>/</SlashSeparatorSpan>

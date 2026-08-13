@@ -53,7 +53,7 @@ export const DEFAULT_ASSISTANT_SETTINGS = {
   toolUseMode: 'function',
   maxToolCalls: 20,
   enableMaxToolCalls: true,
-  contextStartOverride: {}
+  contextWindowAnchor: {}
 } as const satisfies AssistantSettings
 
 /**
@@ -252,7 +252,7 @@ export const getAssistantSettings = (assistant: Assistant): AssistantSettings =>
     defaultModel: assistant?.defaultModel ?? DEFAULT_ASSISTANT_SETTINGS.defaultModel,
     reasoning_effort: assistant?.settings?.reasoning_effort ?? DEFAULT_ASSISTANT_SETTINGS.reasoning_effort,
     customParameters: assistant?.settings?.customParameters ?? DEFAULT_ASSISTANT_SETTINGS.customParameters,
-    contextStartOverride: assistant?.settings?.contextStartOverride ?? DEFAULT_ASSISTANT_SETTINGS.contextStartOverride
+    contextWindowAnchor: assistant?.settings?.contextWindowAnchor ?? DEFAULT_ASSISTANT_SETTINGS.contextWindowAnchor
   }
 }
 

@@ -12,7 +12,11 @@ import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { SettingRow } from '@renderer/pages/settings'
 import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/AssistantService'
-import { contextCountToSliderValue, sliderValueToContextCount } from '@renderer/services/contextWindowService'
+import {
+  buildSettingsResetPatch,
+  contextCountToSliderValue,
+  sliderValueToContextCount
+} from '@renderer/services/contextWindowService'
 import type { Assistant, AssistantSettingCustomParameters, AssistantSettings, Model } from '@renderer/types'
 import { modalConfirm } from '@renderer/utils'
 import { Button, Col, Divider, Input, InputNumber, Row, Select, Slider, Switch, Tooltip } from 'antd'
@@ -215,7 +219,9 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
     setTopP(DEFAULT_ASSISTANT_SETTINGS.topP)
     setCustomParameters(DEFAULT_ASSISTANT_SETTINGS.customParameters)
     setMaxToolCalls(DEFAULT_ASSISTANT_SETTINGS.maxToolCalls)
-    updateAssistantSettings(DEFAULT_ASSISTANT_SETTINGS)
+    // Generic settings reset changes defaults, never topic anchors
+    // (docs/context-window.md CW-1): the per-topic anchor map is preserved.
+    updateAssistantSettings(buildSettingsResetPatch(assistant.settings, DEFAULT_ASSISTANT_SETTINGS))
   }
   const modelFilter = (model: Model) => !isEmbeddingModel(model) && !isRerankModel(model)
 

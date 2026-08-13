@@ -803,4 +803,177 @@ describe('store migrations', () => {
       expect(migrated.settings.messageNavigation).toBe(false)
     })
   })
+
+  describe('migration 220: contextStartOverride → contextWindowAnchor (stable anchor)', () => {
+    const anchor = { kind: 'active', groupKey: 'u1' } as const
+    const override = { kind: 'active', groupKey: 'u7' } as const
+    const makeState = (
+      assistants: Array<Record<string, any>>,
+      defaultAssistant: Record<string, any> = { settings: { contextCount: 5 } }
+    ) => ({
+      assistants: {
+        defaultAssistant,
+        assistants
+      },
+      _persist: { version: 219, rehydrated: false }
+    })
+
+    it('renames the legacy field for the default assistant and regular assistants', async () => {
+      const state = makeState([{ settings: { contextCount: 5, contextStartOverride: { topicA: anchor } } }], {
+        settings: { contextCount: 5, contextStartOverride: { topicA: anchor, topicB: override } }
+      })
+      const migrated: any = await migrate(state as any, 220)
+
+      expect(migrated.assistants.defaultAssistant.settings.contextWindowAnchor).toEqual({
+        topicA: anchor,
+        topicB: override
+      })
+      expect(migrated.assistants.defaultAssistant.settings.contextStartOverride).toBeUndefined()
+      expect(migrated.assistants.assistants[0].settings.contextWindowAnchor).toEqual({ topicA: anchor })
+      expect(migrated.assistants.assistants[0].settings.contextStartOverride).toBeUndefined()
+    })
+
+    it('preserves the anchor map verbatim (no reshaping of entries)', async () => {
+      const state = makeState([
+        { settings: { contextCount: 5, contextStartOverride: { topicA: anchor, topicC: undefined } } }
+      ])
+      const migrated: any = await migrate(state as any, 220)
+      const anchors = migrated.assistants.assistants[0].settings.contextWindowAnchor
+      expect(anchors.topicA).toEqual(anchor)
+      expect('topicC' in anchors).toBe(true)
+      expect(anchors.topicC).toBeUndefined()
+    })
+
+    it('deletes the legacy key', async () => {
+      const state = makeState([{ settings: { contextCount: 5, contextStartOverride: { topicA: anchor } } }])
+      const migrated: any = await migrate(state as any, 220)
+      const settings = migrated.assistants.assistants[0].settings
+      expect(settings.contextStartOverride).toBeUndefined()
+      expect(settings.contextWindowAnchor).toEqual({ topicA: anchor })
+    })
+
+    it('for both-fields states the target wins per topic and legacy fills missing topics', async () => {
+      const state = makeState([
+        {
+          settings: {
+            contextCount: 5,
+            // legacy has topicA and topicB; target has topicB (newer) and topicC
+            contextStartOverride: { topicA: anchor, topicB: anchor },
+            contextWindowAnchor: { topicB: override, topicC: override }
+          }
+        }
+      ])
+      const migrated: any = await migrate(state as any, 220)
+      const anchors = migrated.assistants.assistants[0].settings.contextWindowAnchor
+      expect(anchors.topicA).toEqual(anchor) // filled from legacy (missing in target)
+      expect(anchors.topicB).toEqual(override) // target wins per topic
+      expect(anchors.topicC).toEqual(override) // target-only topic preserved
+    })
+
+    it('does not create a target field when neither legacy nor target state exists', async () => {
+      const state = makeState([{ settings: { contextCount: 5 } }])
+      const migrated: any = await migrate(state as any, 220)
+      const settings = migrated.assistants.assistants[0].settings
+      expect(settings.contextWindowAnchor).toBeUndefined()
+      expect(settings.contextStartOverride).toBeUndefined()
+    })
+
+    it('handles assistants without settings gracefully', async () => {
+      const state = makeState([{}])
+      const migrated: any = await migrate(state as any, 220)
+      expect(migrated.assistants.assistants[0].settings).toBeUndefined()
+    })
+
+    it('is idempotent: re-running 220 over an already-migrated state is stable', async () => {
+      const state = makeState([
+        {
+          settings: {
+            contextCount: 5,
+            contextStartOverride: { topicA: anchor, topicB: anchor },
+            contextWindowAnchor: { topicB: override }
+          }
+        }
+      ])
+
+      const first: any = await migrate(structuredClone(state) as any, 220)
+      const second: any = await migrate(structuredClone(first), 220)
+
+      expect(second).toEqual(first)
+      const anchors = second.assistants.assistants[0].settings.contextWindowAnchor
+      expect(anchors.topicA).toEqual(anchor)
+      expect(anchors.topicB).toEqual(override)
+      expect(second.assistants.assistants[0].settings.contextStartOverride).toBeUndefined()
+    })
+
+    it('migrates the default assistant settings too', async () => {
+      const state = makeState([], {
+        settings: { contextCount: 5, contextStartOverride: { topicA: anchor } }
+      })
+      const migrated: any = await migrate(state as any, 220)
+      expect(migrated.assistants.defaultAssistant.settings.contextWindowAnchor).toEqual({ topicA: anchor })
+      expect(migrated.assistants.defaultAssistant.settings.contextStartOverride).toBeUndefined()
+    })
+
+    it('218 → 220 chain: 219 rename round-trips into the stable contextWindowAnchor field', async () => {
+      // 219 historically renamed contextWindowAnchor → contextStartOverride;
+      // 220 renames back. All anchor values survive the round trip unchanged.
+      const anchor219 = { kind: 'active', groupKey: 'u5' } as const
+      const state = {
+        assistants: {
+          defaultAssistant: { settings: { contextCount: 5, contextWindowAnchor: { topicA: anchor219 } } },
+          assistants: [{ settings: { contextCount: 5, contextWindowAnchor: { topicA: anchor219 } } }]
+        },
+        _persist: { version: 218, rehydrated: false }
+      }
+
+      const migrated: any = await migrate(state as any, 220)
+
+      expect(migrated.assistants.defaultAssistant.settings.contextWindowAnchor).toEqual({ topicA: anchor219 })
+      expect(migrated.assistants.defaultAssistant.settings.contextStartOverride).toBeUndefined()
+      expect(migrated.assistants.assistants[0].settings.contextWindowAnchor).toEqual({ topicA: anchor219 })
+      expect(migrated.assistants.assistants[0].settings.contextStartOverride).toBeUndefined()
+    })
+
+    it('215 → 220 chain: legacy fixedWindowAnchor flows through 216/219/220 into contextWindowAnchor', async () => {
+      // The full historical chain: 216 converts fixedWindowAnchor →
+      // contextWindowAnchor (effectively-fixed only), 219 renames to
+      // contextStartOverride, 220 renames back to contextWindowAnchor. Anchor
+      // values are preserved end-to-end.
+      const anchor216 = { kind: 'active', groupKey: 'u9' } as const
+      const state = {
+        assistants: {
+          defaultAssistant: {
+            settings: {
+              contextCount: 0,
+              contextWindowMode: 'fixed',
+              topicContextWindowMode: { topicA: 'fixed' },
+              fixedWindowAnchor: { topicA: anchor216 }
+            }
+          },
+          assistants: [{ settings: { contextCount: 5 } }]
+        },
+        llm: { providers: [], settings: {} },
+        settings: {},
+        _persist: { version: 215, rehydrated: false }
+      }
+
+      const migrated: any = await migrate(state as any, 220)
+
+      const defaultSettings = migrated.assistants.defaultAssistant.settings
+      // 216: contextCount 0 → 1; effectively-fixed anchor retained.
+      expect(defaultSettings.contextCount).toBe(1)
+      expect(defaultSettings.fixedWindowAnchor).toBeUndefined()
+      expect(defaultSettings.contextWindowMode).toBeUndefined()
+      // 219 → 220: field evolution round-trips; the anchor value is preserved.
+      expect(defaultSettings.contextStartOverride).toBeUndefined()
+      expect(defaultSettings.contextWindowAnchor.topicA).toEqual(anchor216)
+      // Regular assistant: 216 historically emits an EMPTY contextWindowAnchor
+      // for every assistant with settings, which 219/220 preserve verbatim.
+      expect(migrated.assistants.assistants[0].settings.contextWindowAnchor).toEqual({})
+      expect(migrated.assistants.assistants[0].settings.contextStartOverride).toBeUndefined()
+      expect(migrated.assistants.assistants[0].settings.contextCount).toBe(5)
+      // 218: quick-settings cleanup ran on the settings slice.
+      expect(migrated.settings.messageNavigation).toBe(false)
+    })
+  })
 })

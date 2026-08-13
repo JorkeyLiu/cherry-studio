@@ -5,8 +5,8 @@ import {
   resolveAnchorTurnIndex,
   turnsToMessages
 } from '@renderer/services/contextTurnService'
-import { resolveDefaultAnchorIndex } from '@renderer/services/contextWindowService'
-import type { Assistant, ContextStartOverride } from '@renderer/types'
+import { isResolvableAnchor, resolveDefaultAnchorIndex } from '@renderer/services/contextWindowService'
+import type { Assistant } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import {
   filterAdjacentUserMessaegs,
@@ -31,19 +31,24 @@ import {
  * all operate on whole turns. The persisted contextCount value is interpreted
  * as a turn count (not a message count).
  *
- * There is exactly ONE context window model: anchor-to-topic-end.
- *   - A valid user context-start override (`settings.contextStartOverride[topicId]`)
- *     fixes the window start; the window then grows as the topic grows.
- *   - With no (valid) override, the start is derived from the assistant's default
- *     `contextCount` via `resolveDefaultAnchorIndex` — finite N selects the
- *     most recent N turns (so full history is never transiently sent), and
- *     null (unlimited) selects the first turn of the topic.
+ * There is exactly ONE context window model: stable anchor-to-topic-end
+ * (`docs/context-window.md`).
+ *   - A valid persisted anchor (`settings.contextWindowAnchor[topicId]`) fixes
+ *     the window start; the window then grows as the topic grows.
+ *   - With no (valid) persisted anchor — an empty topic, an uninitialized
+ *     topic, or an invalid legacy anchor — the start falls back to the
+ *     default-derived position from the assistant's default `contextCount`
+ *     via `resolveDefaultAnchorIndex`. This fallback is a safety projection
+ *     only for uninitialized/invalid states; it is NOT an ongoing sliding
+ *     policy. First establishment and compatibility repair persist a real
+ *     anchor at this position so the fallback does not drive steady-state
+ *     behavior.
  *
  * Anchor semantics: every non-empty resolved context window
  * has exactly one anchor — the canonical group key of the start turn
  * (`anchorGroupKey = allTurns[startIndex].key`). Empty windows (no assistant or
- * no turns) have `anchorGroupKey === null`. Automatic/default calculation, user
- * override, override deletion, and deletion transfer are all mechanisms that
+ * no turns) have `anchorGroupKey === null`. The persisted anchor, first
+ * establishment, re-anchor, and deletion transfer are all mechanisms that
  * determine this same resolved position; origin is not part of anchor semantics.
  *
  * contextCount result: `current` = selected real turns, `max` =
@@ -93,24 +98,23 @@ export function computeContextInfo(
   }
 
   const settings = getAssistantSettings(assistant)
-  // contextCount: the default initial window size. null means unlimited.
+  // contextCount: the assistant default/initial/reset window size (turn count).
+  // null means unlimited. Changing it never moves an existing anchor (CW-1).
   const contextCount = settings.contextCount
-
-  const override: ContextStartOverride | undefined = topicId ? settings.contextStartOverride?.[topicId] : undefined
 
   // --- Step 1: Build turns from all topic messages ---
   const allTurns = buildContextTurns(messages)
   const totalTurns = allTurns.length
 
-  // --- Step 2: Turn selection (single anchor-to-end mode) ---
-  // A valid user override fixes the window start; the window grows as the
-  // topic grows. Without a valid override, the start falls back to
-  // the default derivation — finite N selects the most recent N turns,
-  // unlimited selects the first turn of the topic.
+  // --- Step 2: Turn selection (single stable anchor-to-end mode) ---
+  // A valid persisted anchor fixes the window start; the window grows as the
+  // topic grows. Without a valid anchor (empty/uninitialized/invalid legacy
+  // state) the start falls back to the default-derived position — a safety
+  // projection, never an ongoing sliding policy.
   let startIndex: number
-  if (override?.kind === 'active') {
-    const overrideIndex = resolveAnchorTurnIndex(allTurns, override.groupKey)
-    startIndex = overrideIndex >= 0 ? overrideIndex : resolveDefaultAnchorIndex(allTurns, contextCount)
+  const persistedAnchor = topicId ? settings.contextWindowAnchor?.[topicId] : undefined
+  if (isResolvableAnchor(persistedAnchor, allTurns)) {
+    startIndex = resolveAnchorTurnIndex(allTurns, persistedAnchor.groupKey)
   } else {
     startIndex = resolveDefaultAnchorIndex(allTurns, contextCount)
   }
@@ -122,8 +126,9 @@ export function computeContextInfo(
   const boundaryMessageId = startIndex > 0 && selectedRealTurns.length > 0 ? selectedRealTurns[0].messages[0].id : null
 
   // Anchor: the canonical group key of the start turn. Empty
-  // windows have no anchor. Automatic/default calculation, user override,
-  // override deletion, and deletion transfer all resolve to this same key.
+  // windows have no anchor. The persisted anchor, first establishment,
+  // re-anchor, and deletion transfer all resolve to this same key; the anchor
+  // is the single expression of the effective window start.
   const anchorGroupKey = startIndex >= 0 ? allTurns[startIndex].key : null
 
   // contextCount: current selected turns / total turns in the

@@ -172,11 +172,13 @@ export const EFFORT_RATIO: EffortRatio = {
 }
 
 /**
- * Optional persisted user context-start override for a topic. This is the ONLY
- * anchor-adjacent state that is persisted: a user-specified context start.
- * A derived/resolved anchor is projection, never stored here.
+ * The persisted stable context-window anchor for a topic: the group key of the
+ * start turn of the context window (anchor-to-topic-end). This is persisted
+ * per-topic state, NOT an override and NOT a rendering projection — every
+ * consumer (anchor highlight, TokenCount, boundary divider, model request)
+ * resolves from this same stored value.
  */
-export type ContextStartOverride = { kind: 'active'; groupKey: string }
+export type ContextWindowAnchor = { kind: 'active'; groupKey: string }
 
 export type AssistantSettings = {
   maxTokens?: number
@@ -206,14 +208,13 @@ export type AssistantSettings = {
   maxToolCalls?: number
   enableMaxToolCalls?: boolean
   /**
-   * Optional per-topic user context-start override. Holds ONLY a
-   * user-specified context start: when an `active` override exists for the
-   * topic, the window starts at that turn and grows with the conversation.
-   * When no (valid) override exists, the window start is derived dynamically
-   * from `contextCount` (the default initial window size) and the current
-   * messages — a derived anchor is projection, never persisted here.
+   * Persisted stable per-topic context-window anchor map. `contextWindowAnchor[topicId]`
+   * is the group key of the start turn of the topic's context window; a
+   * non-empty initialized topic has exactly one anchor (CW-2/CW-3). Changing
+   * `contextCount` never moves an existing anchor; the anchor moves only
+   * through the explicit transitions listed in `docs/context-window.md`.
    */
-  contextStartOverride?: Record<string, ContextStartOverride | undefined> // { [topicId]: ContextStartOverride }
+  contextWindowAnchor?: Record<string, ContextWindowAnchor | undefined> // { [topicId]: ContextWindowAnchor }
 }
 
 export type AssistantPreset = Omit<Assistant, 'model'> & {

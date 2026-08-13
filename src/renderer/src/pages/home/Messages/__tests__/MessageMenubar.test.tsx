@@ -4,19 +4,29 @@
  * Anchor-icon semantics:
  *   - The highlight (`data-context-anchor-active`) is derived ONLY from the
  *     resolved anchor projection (`anchorGroupKey` from the Messages-scoped
- *     AnchorGroupProvider) — never from persisted override/source state.
+ *     AnchorGroupProvider) — never from persisted anchor/source state.
  *     A non-empty user-led topic has exactly one highlighted anchor button.
- *   - Clicking the button reads ONLY the persisted `contextStartOverride` to
- *     decide set vs clear: no override at the key → persist an
- *     override at that position; an override already at that key → clear it.
+ *   - Clicking the button writes ONLY the persisted `contextWindowAnchor`
+ *     through the real `resolveMessageAnchorDecision` decision helper
+ *     (docs/context-window.md §8): clicking a non-anchored turn moves the
+ *     anchor there; clicking the CURRENT anchored turn re-anchors to the
+ *     current default window position (from the current `contextCount`) —
+ *     the interaction never leaves a non-empty initialized topic anchorless.
  *
  * The heavy menubar surface is mocked; the anchor button, the real
- * AnchorGroupProvider, and the real click writer semantics are exercised.
+ * AnchorGroupProvider, the real turn builder, and the real click decision
+ * semantics are exercised.
  */
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest' // ── Mocks (hoisted) ────────────────────────────────────────────────────────
+
+const { mocks } = vi.hoisted(() => ({
+  mocks: {
+    selectMessagesForTopic: vi.fn(() => [] as Message[])
+  }
+}))
 
 vi.mock('@logger', () => ({
   loggerService: {
@@ -76,10 +86,12 @@ vi.mock('@renderer/hooks/useTranslate', () => ({
 }))
 
 vi.mock('@renderer/services/AssistantService', () => ({
-  DEFAULT_ASSISTANT_SETTINGS: { contextCount: 25, contextStartOverride: {} },
-  getAssistantSettings: (assistant: { settings?: { contextStartOverride?: Record<string, unknown> } }) => ({
-    contextCount: 25,
-    contextStartOverride: assistant?.settings?.contextStartOverride ?? {}
+  DEFAULT_ASSISTANT_SETTINGS: { contextCount: 25, contextWindowAnchor: {} },
+  getAssistantSettings: (assistant: {
+    settings?: { contextCount?: number | null; contextWindowAnchor?: Record<string, unknown> }
+  }) => ({
+    contextCount: assistant.settings?.contextCount === undefined ? 25 : assistant.settings.contextCount,
+    contextWindowAnchor: assistant?.settings?.contextWindowAnchor ?? {}
   }),
   getDefaultAssistant: () => ({ id: 'asst-1', settings: { contextCount: 25 } }),
   getDefaultTopic: () => ({ id: 'topic-1', assistantId: 'asst-1' })
@@ -103,7 +115,7 @@ vi.mock('@renderer/store/messageBlock', () => ({
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
-  selectMessagesForTopic: () => []
+  selectMessagesForTopic: mocks.selectMessagesForTopic
 }))
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
@@ -207,12 +219,12 @@ const makeUserMessage = (id: string): Message =>
     status: 'success'
   }) as unknown as Message
 
-const makeAssistant = (override?: { kind: 'active'; groupKey: string }): Assistant =>
+const makeAssistant = (anchor?: { kind: 'active'; groupKey: string }, contextCount: number | null = 25): Assistant =>
   ({
     id: 'asst-1',
     settings: {
-      contextCount: 25,
-      contextStartOverride: override ? { 'topic-1': override } : {}
+      contextCount,
+      contextWindowAnchor: anchor ? { 'topic-1': anchor } : {}
     }
   }) as unknown as Assistant
 
@@ -240,11 +252,13 @@ const renderMenubar = (message: Message, assistant: Assistant, anchorGroupKey: s
 describe('MessageMenubar context-anchor button', () => {
   beforeEach(() => {
     updateAssistantSettingsMock.mockReset()
+    mocks.selectMessagesForTopic.mockReset()
+    mocks.selectMessagesForTopic.mockReturnValue([])
   })
 
   it('highlights exactly the rendered user turn matching the resolved anchor', () => {
     const message = makeUserMessage('u2')
-    // Resolved anchor is turn key 'u2' (derived default), no persisted override.
+    // Resolved anchor is turn key 'u2' (default-derived position), no persisted anchor.
     const assistant = makeAssistant()
     renderMenubar(message, assistant, 'u2')
 
@@ -261,10 +275,10 @@ describe('MessageMenubar context-anchor button', () => {
     expect(anchorBtn.getAttribute('data-context-anchor-active')).toBe('false')
   })
 
-  it('highlight is independent of persisted override state (visual projection only)', () => {
-    // The user override targets u1, but the RESOLVED anchor (from the resolver
+  it('highlight is independent of persisted anchor state (visual projection only)', () => {
+    // The persisted anchor targets u1, but the RESOLVED anchor (from the resolver
     // projection) is u2 — the icon follows the resolved anchor, not the stored
-    // override. Visual position may differ from the persisted origin.
+    // anchor. Visual position may differ from the persisted origin.
     const message = makeUserMessage('u2')
     const assistant = makeAssistant({ kind: 'active', groupKey: 'u1' })
     renderMenubar(message, assistant, 'u2')
@@ -281,47 +295,75 @@ describe('MessageMenubar context-anchor button', () => {
     expect(anchorBtn.getAttribute('data-context-anchor-active')).toBe('false')
   })
 
-  it('clicking a non-overridden user turn persists an override at that position (freeze)', () => {
+  it('clicking a non-anchored user turn moves the persisted anchor to that turn', () => {
     const message = makeUserMessage('u3')
     const assistant = makeAssistant({ kind: 'active', groupKey: 'u1' })
+    mocks.selectMessagesForTopic.mockReturnValue([makeUserMessage('u1'), makeUserMessage('u3')])
     renderMenubar(message, assistant, 'u3')
 
     fireEvent.click(screen.getByTestId('context-anchor-btn'))
 
     expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1)
     expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
-      contextStartOverride: {
+      contextWindowAnchor: {
         'topic-1': { kind: 'active', groupKey: 'u3' }
       }
     })
   })
 
-  it('clicking a user turn already carrying the override clears it', () => {
+  it('clicking the CURRENT anchored turn re-anchors to the current default window position', () => {
+    // Current anchor is u3; with contextCount=25 and turns [u1,u2,u3] the
+    // default window position is the FIRST turn (u1). Clicking the anchored
+    // turn re-anchors to u1 — it never clears the anchor.
     const message = makeUserMessage('u3')
     const assistant = makeAssistant({ kind: 'active', groupKey: 'u3' })
+    mocks.selectMessagesForTopic.mockReturnValue([makeUserMessage('u1'), makeUserMessage('u2'), makeUserMessage('u3')])
     renderMenubar(message, assistant, 'u3')
 
     fireEvent.click(screen.getByTestId('context-anchor-btn'))
 
     expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1)
     expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
-      contextStartOverride: {}
+      contextWindowAnchor: {
+        'topic-1': { kind: 'active', groupKey: 'u1' }
+      }
     })
   })
 
-  it('clicking the resolved DERIVED anchor persists an override at the same position (freeze)', () => {
-    // No persisted override; the resolved anchor is u2. Clicking the resolved
-    // anchor freezes it: the same position, now with a persisted override.
+  it('clicking a resolved default-derived anchor persists it at the same position (freeze)', () => {
+    // No persisted anchor; the resolved anchor is u2 (default-derived). Clicking
+    // the resolved anchor persists it at the same position.
     const message = makeUserMessage('u2')
     const assistant = makeAssistant()
+    mocks.selectMessagesForTopic.mockReturnValue([makeUserMessage('u1'), makeUserMessage('u2')])
     renderMenubar(message, assistant, 'u2')
 
     fireEvent.click(screen.getByTestId('context-anchor-btn'))
 
     expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1)
     expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
-      contextStartOverride: {
+      contextWindowAnchor: {
         'topic-1': { kind: 'active', groupKey: 'u2' }
+      }
+    })
+  })
+
+  it('clicking an unresolvable/stale turn re-anchors to the current default position', () => {
+    // The clicked message u9 is not part of the current turns; the interaction
+    // must never leave a non-empty initialized topic anchorless, so it
+    // re-anchors to the current default position (contextCount=1 → last turn
+    // u3, a different position from the current anchor u1).
+    const message = makeUserMessage('u9')
+    const assistant = makeAssistant({ kind: 'active', groupKey: 'u1' }, 1)
+    mocks.selectMessagesForTopic.mockReturnValue([makeUserMessage('u1'), makeUserMessage('u2'), makeUserMessage('u3')])
+    renderMenubar(message, assistant, 'u1')
+
+    fireEvent.click(screen.getByTestId('context-anchor-btn'))
+
+    expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1)
+    expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
+      contextWindowAnchor: {
+        'topic-1': { kind: 'active', groupKey: 'u3' }
       }
     })
   })

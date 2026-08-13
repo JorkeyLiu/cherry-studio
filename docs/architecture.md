@@ -2,7 +2,7 @@
 
 This is the detailed architecture reference for the Cherry Chat codebase. The top-level [AGENTS.md](../AGENTS.md) guide is the always-on repository contract and keeps the awareness-level rules; this document carries the full detailed tables (services, directories, Redux slices, AI Core layering, database, IPC, multi-window, tracing, tech stack, source compatibility).
 
-Governance is owned by the canonical decision documents, not restated as canonical here: the [Application Identity ADR](./cherry-chat-application-identity.md) (Cherry Chat identity, compatibility boundary, updater/release freeze, platform scope) and the [SQLite migration governance](./sqlite-migration.md) (SQLite chat authority, L2 Cherry Studio ZIP compatibility import). This reference links those documents instead of duplicating their decision tables.
+Governance is owned by the canonical decision documents, not restated as canonical here: the [Application Identity ADR](./cherry-chat-application-identity.md) (Cherry Chat identity, compatibility boundary, updater/release freeze, platform scope), the [SQLite migration governance](./sqlite-migration.md) (SQLite chat authority, L2 Cherry Studio ZIP compatibility import), and the [Context window governance](./context-window.md) (stable topic context anchor, allowed anchor transitions, compatibility repair, persistence boundary). This reference links those documents instead of duplicating their decision tables.
 
 ## Contents
 
@@ -93,7 +93,7 @@ Slices (redux-persist enabled):
 
 | Slice | State |
 |---|---|
-| `assistants` | AI assistant configurations |
+| `assistants` | AI assistant configurations (including the default `contextCount` and the per-topic context-window anchor — see [Context window governance](./context-window.md)) |
 | `settings` | App-wide settings |
 | `llm` | LLM provider/model configs |
 | `mcp` | MCP server configs |

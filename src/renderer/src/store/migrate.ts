@@ -34,7 +34,7 @@ import { defaultPreprocessProviders } from '@renderer/store/preprocess'
 import type {
   Assistant,
   BuiltinOcrProvider,
-  ContextStartOverride,
+  ContextWindowAnchor,
   Model,
   Provider,
   ProviderApiOptions,
@@ -3373,13 +3373,13 @@ const migrateConfig = {
   },
   '211': (state: RootState) => {
     try {
-      // Migrate fixedWindowAnchor from string form to ContextStartOverride form (group-granularity)
+      // Migrate fixedWindowAnchor from string form to ContextWindowAnchor form (group-granularity)
       // NOTE: operates on the OLD persisted schema (fixedWindowAnchor).
       const migrateAssistant = (assistant: Assistant) => {
         const settings = assistant?.settings as { fixedWindowAnchor?: Record<string, unknown> } | undefined
         const anchorMap = settings?.fixedWindowAnchor
         if (!anchorMap) return assistant
-        const newMap: Record<string, ContextStartOverride | undefined> = {}
+        const newMap: Record<string, ContextWindowAnchor | undefined> = {}
         for (const [topicId, value] of Object.entries(anchorMap)) {
           if (value === undefined || value === null) {
             // 未开 fixed —— 保持 undefined（不存键）
@@ -3388,7 +3388,7 @@ const migrateConfig = {
           if (typeof value === 'string') {
             if (value === '') {
               // 旧 sentinel 空字符串 → vacant (legacy, runtime degrades gracefully)
-              newMap[topicId] = { kind: 'vacant' } as unknown as ContextStartOverride
+              newMap[topicId] = { kind: 'vacant' } as unknown as ContextWindowAnchor
             } else {
               // 尝试查找该 id 对应的消息，判断是 user 还是 assistant
               const message = (state as any).messages?.entities?.[value]
@@ -3402,7 +3402,7 @@ const migrateConfig = {
             }
           } else if (typeof value === 'object' && value !== null && 'kind' in value) {
             // 已经是新形态（理论上不会出现，但做幂等保护）—— 保留
-            newMap[topicId] = value as ContextStartOverride
+            newMap[topicId] = value as ContextWindowAnchor
           }
         }
         if (assistant.settings) {
@@ -3426,7 +3426,7 @@ const migrateConfig = {
       const migrateAssistant = (assistant: Assistant) => {
         const settings = assistant?.settings as
           | {
-              fixedWindowAnchor?: Record<string, ContextStartOverride | undefined>
+              fixedWindowAnchor?: Record<string, ContextWindowAnchor | undefined>
               topicContextWindowMode?: Record<string, string>
             }
           | undefined
@@ -3532,8 +3532,8 @@ const migrateConfig = {
         contextCount?: number | null
         contextWindowMode?: 'fixed' | 'sliding'
         topicContextWindowMode?: Record<string, 'fixed' | 'sliding' | undefined>
-        fixedWindowAnchor?: Record<string, ContextStartOverride | undefined>
-        contextWindowAnchor?: Record<string, ContextStartOverride | undefined>
+        fixedWindowAnchor?: Record<string, ContextWindowAnchor | undefined>
+        contextWindowAnchor?: Record<string, ContextWindowAnchor | undefined>
       }
       const migrateAssistant = (assistant: Assistant) => {
         const settings = assistant.settings as LegacyWindowSettings | undefined
@@ -3546,7 +3546,7 @@ const migrateConfig = {
         const globalMode = settings.contextWindowMode
         const legacyAnchorMap = settings.fixedWindowAnchor
         const topicModeMap = settings.topicContextWindowMode
-        const newAnchorMap: Record<string, ContextStartOverride | undefined> = settings.contextWindowAnchor
+        const newAnchorMap: Record<string, ContextWindowAnchor | undefined> = settings.contextWindowAnchor
           ? { ...settings.contextWindowAnchor }
           : {}
 
@@ -3740,8 +3740,8 @@ const migrateConfig = {
       const migrateAssistant = (assistant: Assistant) => {
         const settings = assistant.settings as
           | {
-              contextWindowAnchor?: Record<string, ContextStartOverride | undefined>
-              contextStartOverride?: Record<string, ContextStartOverride | undefined>
+              contextWindowAnchor?: Record<string, ContextWindowAnchor | undefined>
+              contextStartOverride?: Record<string, ContextWindowAnchor | undefined>
             }
           | undefined
         if (!settings) return assistant
@@ -3760,6 +3760,48 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 219 error', error as Error)
+      return state
+    }
+  },
+  '220': (state: RootState) => {
+    try {
+      // Stable context-window anchor model (docs/context-window.md):
+      //  - Rename the persisted per-topic context-window anchor field
+      //    `contextStartOverride` → `contextWindowAnchor`. The persisted value
+      //    is the STABLE topic context start (CW-2), not an override/projection.
+      //  - Preserve every anchor map verbatim (no reshaping of entries).
+      //  - For both-fields states the target (`contextWindowAnchor`) wins per
+      //    topic; topics present only in the legacy map are filled from the
+      //    legacy map.
+      //  - Delete the legacy key. When neither field exists the assistant is
+      //    left untouched (no empty `contextWindowAnchor` is created).
+      //  - Idempotent: re-running over an already-migrated state is a no-op.
+      //  - Historical migrations 216/219 keep their original semantics; this
+      //    migration is the field-evolution counterpart of 219 (inverse
+      //    direction) and never reshapes anchor entries.
+      const migrateAssistant = (assistant: Assistant) => {
+        const settings = assistant.settings as
+          | {
+              contextWindowAnchor?: Record<string, ContextWindowAnchor | undefined>
+              contextStartOverride?: Record<string, ContextWindowAnchor | undefined>
+            }
+          | undefined
+        if (!settings) return assistant
+        const legacyMap = settings.contextStartOverride
+        const targetMap = settings.contextWindowAnchor
+        if (!legacyMap && !targetMap) return assistant
+        // target wins per topic; legacy fills topics missing from target.
+        settings.contextWindowAnchor = { ...legacyMap, ...targetMap }
+        delete settings.contextStartOverride
+        return assistant
+      }
+
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
+      logger.info('migrate 220 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 220 error', error as Error)
       return state
     }
   }

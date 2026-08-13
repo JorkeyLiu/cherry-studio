@@ -50,7 +50,7 @@ import { useTranslation } from 'react-i18next'
 
 import TopicSegmentDrawer from '../Messages/TopicSegmentDrawer'
 import { InputbarCore } from './components/InputbarCore'
-import { useContextStartOverride } from './hooks/useContextStartOverride'
+import { useContextWindowAnchor } from './hooks/useContextWindowAnchor'
 import { usePromptTokenEstimate } from './hooks/usePromptTokenEstimate'
 import InputbarTools from './InputbarTools'
 import KnowledgeBaseInput from './KnowledgeBaseInput'
@@ -317,15 +317,15 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     }
   }, [config.showTokenCount, contextCount, estimateTokenCount])
 
-  // Context-window anchor control (override semantics): the persisted
-  // `contextStartOverride` holds ONLY a user-specified context start. The
-  // Inputbar never persists a derived anchor and never synchronizes overrides
+  // Context-window anchor control (stable anchor semantics): the persisted
+  // `contextWindowAnchor[topicId]` is the stable topic context start. The
+  // Inputbar never derives or persists a window position except through the
+  // explicit TokenCount re-anchor interaction, and never synchronizes anchors
   // to message loading or message-list changes — a transient empty topic on
-  // startup cannot mutate a persisted override. The only Inputbar
-  // mutation is reset (TokenCount click): delete the override entry so the
-  // existing default computation (assistant contextCount + current messages)
-  // determines the effective start.
-  const { onResetOverride } = useContextStartOverride(assistant, topic.id, updateAssistantSettings)
+  // startup cannot mutate a persisted anchor. The only Inputbar mutation is
+  // re-anchor (TokenCount click): move the anchor to the CURRENT default
+  // window position (current topic turns + current `contextCount`).
+  const { onReanchor } = useContextWindowAnchor(assistant, topic.id, topicMessages, updateAssistantSettings)
 
   const onPause = useCallback(async () => {
     await pauseMessages()
@@ -350,9 +350,10 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     addTopic(newTopic)
     setActiveTopic(newTopic)
 
-    // The new topic has no explicit anchor yet; the default window start is
-    // derived dynamically from the assistant's default context count as
-    // messages arrive — defaults are never persisted.
+    // A new topic starts empty and anchorless (empty topics have no anchor,
+    // docs/context-window.md I-1). The persisted anchor is established exactly
+    // once when the first user message makes the topic non-empty, at the
+    // default window position — it is never derived dynamically per render.
 
     setTimeoutTimer('addNewTopic', () => EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR), 0)
   }, [addTopic, assistant, setActiveTopic, setModel, setTimeoutTimer])
@@ -468,7 +469,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
         <TokenCount
           estimateTokenCount={tokenCountProps.estimateTokenCount}
           contextCount={tokenCountProps.contextCount}
-          onResetAnchor={onResetOverride}
+          onReanchor={onReanchor}
         />
       )}
     </>

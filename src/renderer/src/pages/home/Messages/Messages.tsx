@@ -47,7 +47,7 @@ import {
   reconcileMessageWindow
 } from '@renderer/pages/home/Messages/messageWindow'
 import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
-import { buildGroupList } from '@renderer/services/anchorService'
+import { buildGroupList, ensureTopicAnchorEstablished, inheritAnchorForBranch } from '@renderer/services/anchorService'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
@@ -713,38 +713,46 @@ const Messages = ({
             void Promise.resolve(autoRenameTopic(assistant, newTopic.id)).catch((error: unknown) =>
               logger.error('autoRenameTopic failed', error as Error)
             )
-            // Inherit the user context-start override (group-key based) when the
-            // source topic has an active override — position-by-position transfer.
-            // Only the persisted override is manipulated; the branch topic's
-            // resolved anchor is derived by computeContextInfo on every render.
+            // Branch inheritance (docs/context-window.md §9): the new branch
+            // deterministically inherits the parent topic's persisted anchor
+            // by position (group-list index transfer), never by recomputing
+            // from `contextCount`. An out-of-range parent position clamps to
+            // the branch's last available group (nearest available
+            // predecessor). Only the persisted anchor map is manipulated; the
+            // branch topic's resolved anchor projection is derived by
+            // computeContextInfo on every render.
             const assistantSettings = getAssistantSettings(assistant)
-            const sourceOverride = assistantSettings.contextStartOverride?.[topic.id]
+            const sourceAnchor = assistantSettings.contextWindowAnchor?.[topic.id]
 
-            if (sourceOverride?.kind === 'active') {
-              try {
-                const sourceState = store.getState()
-                const sourceMessageIds = sourceState.messages.messageIdsByTopic[topic.id] || []
-                const sourceEntities = sourceState.messages.entities
-                const sourceGroupList = buildGroupList(sourceMessageIds, (id) => sourceEntities[id])
-                const groupIndex = sourceGroupList.indexOf(sourceOverride.groupKey)
+            try {
+              const sourceState = store.getState()
+              const sourceMessageIds = sourceState.messages.messageIdsByTopic[topic.id] || []
+              const sourceEntities = sourceState.messages.entities
+              const sourceGroupList = buildGroupList(sourceMessageIds, (id) => sourceEntities[id])
+              const newMessageIds = sourceState.messages.messageIdsByTopic[newTopic.id] || []
+              const newEntities = sourceState.messages.entities
+              const newGroupList = buildGroupList(newMessageIds, (id) => newEntities[id])
 
-                if (groupIndex >= 0 && sourceGroupList.length > 0) {
-                  const newMessageIds = sourceState.messages.messageIdsByTopic[newTopic.id] || []
-                  const newEntities = sourceState.messages.entities
-                  const newGroupList = buildGroupList(newMessageIds, (id) => newEntities[id])
-
-                  if (groupIndex < newGroupList.length) {
-                    updateAssistantSettings({
-                      contextStartOverride: {
-                        ...assistantSettings.contextStartOverride,
-                        [newTopic.id]: { kind: 'active', groupKey: newGroupList[groupIndex] }
-                      }
-                    })
+              const inheritedAnchor = inheritAnchorForBranch(sourceAnchor, sourceGroupList, newGroupList)
+              if (inheritedAnchor) {
+                // Persist the inherited branch anchor FIRST (synchronous Redux
+                // dispatch) so the establishment pass below resolves it.
+                updateAssistantSettings({
+                  contextWindowAnchor: {
+                    ...assistantSettings.contextWindowAnchor,
+                    [newTopic.id]: inheritedAnchor
                   }
-                }
-              } catch (error) {
-                logger.error('[NEW_BRANCH] Failed to inherit context start override', error as Error)
+                })
               }
+
+              // A non-empty branch that could not inherit (missing/invalid
+              // source anchor) must still receive a persisted anchor
+              // immediately: establish at the default window position.
+              // Empty branches and branches with a just-inherited valid
+              // anchor are idempotent no-ops (docs/context-window.md §10).
+              ensureTopicAnchorEstablished(dispatch, store.getState, assistant.id, newTopic.id)
+            } catch (error) {
+              logger.error('[NEW_BRANCH] Failed to inherit context window anchor', error as Error)
             }
 
             window.toast.success(t('chat.message.new.branch.created'))

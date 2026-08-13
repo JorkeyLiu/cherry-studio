@@ -9,7 +9,11 @@ import { DEFAULT_CONTEXTCOUNT, DEFAULT_TEMPERATURE } from '@renderer/config/cons
 import { useTheme } from '@renderer/context/ThemeProvider'
 import { useDefaultAssistant } from '@renderer/hooks/useAssistant'
 import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/AssistantService'
-import { contextCountToSliderValue, sliderValueToContextCount } from '@renderer/services/contextWindowService'
+import {
+  buildSettingsResetPatch,
+  contextCountToSliderValue,
+  sliderValueToContextCount
+} from '@renderer/services/contextWindowService'
 import type { AssistantSettings as AssistantSettingsType } from '@renderer/types'
 import { getLeadingEmoji, modalConfirm } from '@renderer/utils'
 import { Button, Col, Divider, Flex, Input, InputNumber, Modal, Popover, Row, Slider, Switch, Tooltip } from 'antd'
@@ -95,9 +99,11 @@ const AssistantSettings: FC = () => {
     setTopP(1)
     setEnableTopP(false)
     setToolUseMode('function')
+    // Generic settings reset changes defaults, never topic anchors
+    // (docs/context-window.md CW-1): the per-topic anchor map is preserved.
     updateDefaultAssistant({
       ...defaultAssistant,
-      settings: { ...DEFAULT_ASSISTANT_SETTINGS }
+      settings: buildSettingsResetPatch(defaultAssistant.settings, DEFAULT_ASSISTANT_SETTINGS)
     })
   }
 

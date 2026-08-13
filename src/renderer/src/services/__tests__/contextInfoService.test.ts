@@ -3,19 +3,21 @@
  * context boundary, context count, the single resolved anchor, and filtered UI
  * messages in a single pipeline.
  *
- * There is exactly ONE context window model: anchor-to-topic-end.
- * A valid user context-start override (`contextStartOverride[topicId]`) fixes
- * the window start and the window grows as the topic grows. Without a valid
- * override, the start is derived from the assistant's default context count:
+ * There is exactly ONE context window model: stable anchor-to-topic-end
+ * (docs/context-window.md).
+ * A valid persisted anchor (`contextWindowAnchor[topicId]`) fixes the window
+ * start and the window grows as the topic grows. Without a valid persisted
+ * anchor (empty / uninitialized / invalid legacy state) the start falls back to
+ * the default-derived position from the assistant's default context count:
  * finite N selects the most recent N turns, null (∞)
- * selects the first turn of the topic. contextCount result = selected turns /
- * total turns in the topic, excluding drafts.
+ * selects the first turn of the topic. The fallback is a safety projection for
+ * uninitialized/invalid states only — it is NOT an ongoing sliding policy.
  *
  * Anchor semantics: every non-empty resolved window has
  * exactly one anchor — `anchorGroupKey` = the start turn's canonical group key
  * (`allTurns[startIndex].key`). Empty windows (no assistant, no turns) have
- * `anchorGroupKey === null`. Default derivation, user override, override
- * deletion, and deletion transfer all resolve to this same key.
+ * `anchorGroupKey === null`. The persisted anchor, first establishment,
+ * re-anchor, and deletion transfer all resolve to this same key.
  *
  * Canonical unit: ContextTurn. contextCount.current and contextCount.max count
  * turns (not messages). The boundary divider marks the first message of the
@@ -29,7 +31,8 @@
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { messageBlocksSlice } from '@renderer/store/messageBlock'
-import type { Assistant, ContextStartOverride } from '@renderer/types'
+import type { ContextWindowAnchor } from '@renderer/types'
+import type { Assistant } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockType, UserMessageStatus } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -60,11 +63,11 @@ vi.mock('@renderer/services/AssistantService', () => ({
   getAssistantSettings: (assistant: {
     settings?: {
       contextCount?: number | null
-      contextStartOverride?: Record<string, ContextStartOverride>
+      contextWindowAnchor?: Record<string, ContextWindowAnchor>
     }
   }) => ({
     contextCount: assistant.settings?.contextCount === undefined ? 25 : assistant.settings.contextCount,
-    contextStartOverride: assistant.settings?.contextStartOverride ?? {}
+    contextWindowAnchor: assistant.settings?.contextWindowAnchor ?? {}
   }),
   getDefaultAssistant: () => ({
     id: 'assistant-default',
@@ -116,7 +119,7 @@ const msgWithBlock = (
 
 const assistantWith = (settings: {
   contextCount: number | null
-  contextStartOverride?: Record<string, ContextStartOverride>
+  contextWindowAnchor?: Record<string, ContextWindowAnchor>
 }): Assistant =>
   ({
     id: 'assistant-1',
@@ -182,7 +185,7 @@ describe('computeContextInfo', () => {
     })
   })
 
-  describe('default derivation with no anchor', () => {
+  describe('default-derived fallback with no persisted anchor (uninitialized state)', () => {
     it('finite contextCount selects the most recent N turns and never more than N', () => {
       // 10 turns, default N=5 → window = turns 5..9 (5 turns), boundary at m10.
       const messages = withBlocks(twentyMessages)
@@ -238,7 +241,7 @@ describe('computeContextInfo', () => {
     })
   })
 
-  describe('manual anchor', () => {
+  describe('stable persisted anchor', () => {
     it('valid anchor fixes the window start; boundary marks the first selected turn', () => {
       // 10 turns, anchor at user message m8 (turn index 4) → window = turns 4..9.
       const messages = withBlocks(twentyMessages)
@@ -246,14 +249,14 @@ describe('computeContextInfo', () => {
         messages,
         assistantWith({
           contextCount: 5,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 'm8' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm8' } }
         }),
         TOPIC_ID
       )
       expect(result.boundaryMessageId).toBe('m8')
       expect(result.contextCount).toEqual({ current: 6, max: 10 })
       expect(result.uiMessages[0]?.id).toBe('m8')
-      // Resolved anchor is the same key whether derived or user-overridden.
+      // Resolved anchor is the same key whether derived or persisted.
       expect(result.anchorGroupKey).toBe('m8')
     })
 
@@ -262,7 +265,7 @@ describe('computeContextInfo', () => {
         twentyMessages,
         assistantWith({
           contextCount: 5,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 'm0' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm0' } }
         }),
         TOPIC_ID
       )
@@ -283,23 +286,91 @@ describe('computeContextInfo', () => {
         grownMessages,
         assistantWith({
           contextCount: 5,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 'm8' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm8' } }
         }),
         TOPIC_ID
       )
       expect(result.contextCount).toEqual({ current: 10, max: 14 })
     })
+
+    it('changing contextCount alone never moves a valid persisted anchor (CW-1)', () => {
+      const anchored = computeContextInfo(
+        twentyMessages,
+        assistantWith({
+          contextCount: 1,
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm8' } }
+        }),
+        TOPIC_ID
+      )
+      const afterDefaultChange = computeContextInfo(
+        twentyMessages,
+        assistantWith({
+          contextCount: null,
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm8' } }
+        }),
+        TOPIC_ID
+      )
+      expect(afterDefaultChange.anchorGroupKey).toBe(anchored.anchorGroupKey)
+      expect(afterDefaultChange.anchorGroupKey).toBe('m8')
+      // The window still starts at the anchor and grows to the topic end.
+      expect(afterDefaultChange.contextCount).toEqual({ current: 6, max: 10 })
+    })
+
+    it('new messages grow the window but never move a valid anchor (CW-3)', () => {
+      const before = computeContextInfo(
+        twentyMessages,
+        assistantWith({
+          contextCount: 1,
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm8' } }
+        }),
+        TOPIC_ID
+      )
+      const appended = makeMessages(8).map((m) => ({
+        ...m,
+        id: `x${m.id}`,
+        askId: m.askId ? `x${m.askId}` : undefined
+      }))
+      const after = computeContextInfo(
+        [...twentyMessages, ...appended],
+        assistantWith({
+          contextCount: 1,
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm8' } }
+        }),
+        TOPIC_ID
+      )
+      expect(after.anchorGroupKey).toBe('m8')
+      expect(after.contextCount.max).toBe(14)
+      expect(after.contextCount.current).toBeGreaterThan(before.contextCount.current)
+    })
+
+    it('anchorGroupKey, window, boundary, and request messages share one startIndex (CW-6)', () => {
+      // Anchor at m8 (turn 4) with contextCount=1 — the window must NOT slide to
+      // the most recent 1 turn; it starts at the anchored turn.
+      const messages = withBlocks(twentyMessages)
+      const result = computeContextInfo(
+        messages,
+        assistantWith({
+          contextCount: 1,
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm8' } }
+        }),
+        TOPIC_ID
+      )
+      expect(result.anchorGroupKey).toBe('m8')
+      expect(result.boundaryMessageId).toBe('m8')
+      expect(result.contextCount).toEqual({ current: 6, max: 10 })
+      expect(result.uiMessages[0]?.id).toBe('m8')
+    })
   })
 
-  describe('invalid anchor fallback', () => {
-    it('anchor whose turn no longer exists falls back to the default derivation', () => {
+  describe('invalid / legacy anchor fallback', () => {
+    it('anchor whose turn no longer exists falls back to the default-derived position', () => {
       // groupKey 'ghost' does not resolve → finite default N=5 → most recent 5 turns.
       const messages = withBlocks(twentyMessages)
       const result = computeContextInfo(
         messages,
         assistantWith({
           contextCount: 5,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 'ghost' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'ghost' } }
         }),
         TOPIC_ID
       )
@@ -314,7 +385,7 @@ describe('computeContextInfo', () => {
         twentyMessages,
         assistantWith({
           contextCount: 5,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 'm12' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm12' } }
         }),
         TOPIC_ID
       )
@@ -324,38 +395,38 @@ describe('computeContextInfo', () => {
   })
 
   describe('resolved anchor invariants', () => {
-    it('derived default start yields the start turn canonical key as anchorGroupKey', () => {
+    it('default-derived start yields the start turn canonical key as anchorGroupKey', () => {
       // 10 turns, default N=3 → start turn index 7 = [m14,m15] → key m14.
       const result = computeContextInfo(twentyMessages, assistantWith({ contextCount: 3 }), TOPIC_ID)
       expect(result.contextCount).toEqual({ current: 3, max: 10 })
       expect(result.anchorGroupKey).toBe('m14')
     })
 
-    it('a user override at the derived position resolves to the SAME anchorGroupKey (origin independence)', () => {
-      // No override: default N=3 → start turn key m14.
+    it('a persisted anchor at the derived position resolves to the SAME anchorGroupKey (origin independence)', () => {
+      // No anchor: default N=3 → start turn key m14.
       const derived = computeContextInfo(twentyMessages, assistantWith({ contextCount: 3 }), TOPIC_ID)
-      // With an override pinned to the same position: same resolved anchor.
-      const overridden = computeContextInfo(
+      // With a persisted anchor pinned to the same position: same resolved anchor.
+      const anchored = computeContextInfo(
         twentyMessages,
         assistantWith({
           contextCount: 3,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 'm14' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm14' } }
         }),
         TOPIC_ID
       )
       expect(derived.anchorGroupKey).toBe('m14')
-      expect(overridden.anchorGroupKey).toBe('m14')
-      expect(overridden.anchorGroupKey).toBe(derived.anchorGroupKey)
+      expect(anchored.anchorGroupKey).toBe('m14')
+      expect(anchored.anchorGroupKey).toBe(derived.anchorGroupKey)
     })
 
-    it('deletion transfer override at a moved position changes anchorGroupKey to the transferred key', () => {
-      // Override at m8 (turn 4). Deleting earlier turns shifts the window start:
-      // simulate a transferred override at turn 2 (groupKey m4) → anchor = m4.
+    it('deletion-transferred anchor at a moved position changes anchorGroupKey to the transferred key', () => {
+      // Anchor at m8 (turn 4). Deleting earlier turns shifts the window start:
+      // simulate a transferred anchor at turn 2 (groupKey m4) → anchor = m4.
       const result = computeContextInfo(
         twentyMessages,
         assistantWith({
           contextCount: 5,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 'm4' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm4' } }
         }),
         TOPIC_ID
       )
@@ -363,12 +434,12 @@ describe('computeContextInfo', () => {
       expect(result.anchorGroupKey).toBe('m4')
     })
 
-    it('an unresolvable override falls back to the default and reports the DEFAULT anchor', () => {
+    it('an unresolvable anchor falls back to the default and reports the DEFAULT anchor', () => {
       const result = computeContextInfo(
         twentyMessages,
         assistantWith({
           contextCount: 3,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 'ghost' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'ghost' } }
         }),
         TOPIC_ID
       )
@@ -401,14 +472,14 @@ describe('computeContextInfo', () => {
     })
   })
 
-  describe('default-derived anchors for every turn kind', () => {
-    // These verify that a persisted derived anchor for a non-user boundary turn
+  describe('persisted anchors for every turn kind', () => {
+    // These verify that a persisted anchor for a non-user boundary turn
     // (assistant-first / orphan assistant / system) RESOLVES and therefore grows
     // with the topic. Pre-fix these keys were unresolvable, so the window fell
     // back to the default derivation every render and SLID (most-recent-N) as the
-    // topic grew instead of staying fixed at the derived start.
+    // topic grew instead of staying fixed at the persisted start.
 
-    it('assistant-first boundary (orphan with askId): persisted derived anchor grows with the topic', () => {
+    it('assistant-first boundary (orphan with askId): persisted anchor grows with the topic', () => {
       // Segment starts with an orphan assistant whose user question is absent.
       // With contextCount=1 and a single initial turn, the default anchor is
       // derived from turn 0 → groupKey = the assistant's own message id 'a0'.
@@ -417,7 +488,7 @@ describe('computeContextInfo', () => {
         grown,
         assistantWith({
           contextCount: 1,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 'a0' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'a0' } }
         }),
         TOPIC_ID
       )
@@ -428,13 +499,13 @@ describe('computeContextInfo', () => {
       expect(result.boundaryMessageId).toBeNull()
     })
 
-    it('orphan assistant boundary (no askId): persisted derived anchor grows with the topic', () => {
+    it('orphan assistant boundary (no askId): persisted anchor grows with the topic', () => {
       const grown = [msg('a0', 'assistant'), ...makeMessages(4)]
       const result = computeContextInfo(
         grown,
         assistantWith({
           contextCount: 1,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 'a0' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'a0' } }
         }),
         TOPIC_ID
       )
@@ -442,13 +513,13 @@ describe('computeContextInfo', () => {
       expect(result.boundaryMessageId).toBeNull()
     })
 
-    it('system boundary: persisted derived anchor grows with the topic', () => {
+    it('system boundary: persisted anchor grows with the topic', () => {
       const grown = [msg('s0', 'system'), ...makeMessages(4)]
       const result = computeContextInfo(
         grown,
         assistantWith({
           contextCount: 1,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 's0' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 's0' } }
         }),
         TOPIC_ID
       )
@@ -464,7 +535,7 @@ describe('computeContextInfo', () => {
         twentyMessages,
         assistantWith({
           contextCount: 5,
-          contextStartOverride: { [TOPIC_ID]: { kind: 'active', groupKey: 'm14' } }
+          contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'm14' } }
         }),
         TOPIC_ID
       )

@@ -1,6 +1,11 @@
+import { getAssistantSettings } from '@renderer/services/AssistantService'
+import { buildContextTurns } from '@renderer/services/contextTurnService'
+import type { ContextWindowAnchorMap } from '@renderer/services/contextWindowService'
+import { resolveAnchorEstablishDecision } from '@renderer/services/contextWindowService'
 import type { RootState } from '@renderer/store'
 import { updateAssistantSettings } from '@renderer/store/assistants'
-import type { ContextStartOverride } from '@renderer/types'
+import { selectMessagesForTopic } from '@renderer/store/newMessage'
+import type { ContextWindowAnchor } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 
 /**
@@ -32,43 +37,43 @@ export function resolveGroupKey(message: Pick<Message, 'role' | 'id' | 'askId'>)
 }
 
 /**
- * 状态机：消息删除后转移用户 context-start override。
+ * 状态机：消息删除后转移 topic 锚点（`contextWindowAnchor[topicId]`）。
  * oldGroupList = 删除前的 buildGroupList
  * newGroupList = 删除后的 buildGroupList
- * 规则：
- *   - 若 override 不是 active，返回原值
- *   - 若 override.groupKey 仍在 newGroupList 中，返回原 active（不动）
- *   - 若 override.groupKey 已被删除：
- *       - oldGroupList 中找不到 groupKey → 返回原 override（异常保护）
+ * 规则（docs/context-window.md §9，确定性契约）：
+ *   - 若锚点不是 active，返回原值
+ *   - 若锚点 groupKey 仍在 newGroupList 中，返回原 active（不动）
+ *   - 若锚点 groupKey 已被删除：
+ *       - oldGroupList 中找不到 groupKey → 返回原锚点（异常保护）
  *       - newIndex = oldIndex - 1（落到更旧的组）
- *       - newGroupList 为空 → undefined（等待 useEffect 守卫自动修复）
+ *       - newGroupList 为空（topic 变空）→ undefined（空 topic 无锚点，I-1）
  *       - newIndex < 0（删首组）且 newGroupList 非空 → active(newGroupList[0])
  *       - newIndex >= 0 → active(newGroupList[newIndex])
  * 本函数不读 redux，纯函数。
  */
 export function transferAnchorOnDeletion(
-  oldOverride: ContextStartOverride,
+  oldAnchor: ContextWindowAnchor,
   oldGroupList: string[],
   newGroupList: string[]
-): ContextStartOverride | undefined {
-  if (oldOverride.kind !== 'active') {
-    return oldOverride
+): ContextWindowAnchor | undefined {
+  if (oldAnchor.kind !== 'active') {
+    return oldAnchor
   }
 
-  const { groupKey } = oldOverride
+  const { groupKey } = oldAnchor
 
-  // override.groupKey 仍在 newGroupList 中，不动
+  // 锚点 groupKey 仍在 newGroupList 中，不动
   if (newGroupList.includes(groupKey)) {
-    return oldOverride
+    return oldAnchor
   }
 
   // 异常：oldGroupList 不含 groupKey（理论上不可能），返回原值
   const oldIndex = oldGroupList.indexOf(groupKey)
   if (oldIndex === -1) {
-    return oldOverride
+    return oldAnchor
   }
 
-  // newGroupList 为空 → undefined（等待 useEffect 守卫自动修复）
+  // newGroupList 为空（topic 变空）→ undefined（空 topic 无锚点）
   if (newGroupList.length === 0) {
     return undefined
   }
@@ -83,8 +88,8 @@ export function transferAnchorOnDeletion(
 }
 
 /**
- * 删除后对所有 assistant 的 active context-start override 进行转移（集成胶水函数）。
- * 遍历 assistants.assistants，对每个有 contextStartOverride[topicId]: active 的，
+ * 删除后对所有 assistant 的 active topic 锚点进行转移（集成胶水函数）。
+ * 遍历 assistants.assistants，对每个有 contextWindowAnchor[topicId]: active 的，
  * 调 transferAnchorOnDeletion，diff 则 dispatch updateAssistantSettings。
  *
  * 注意：此函数含 side-effect（dispatch），放在此文件底部作为集成辅助。
@@ -100,25 +105,117 @@ export function transferAnchorsAfterDeletion(
   const allAssistants = state.assistants.assistants
 
   for (const asst of allAssistants) {
-    const oldOverride = asst.settings?.contextStartOverride?.[topicId]
-    if (!oldOverride || oldOverride.kind !== 'active') continue
+    const oldAnchor = asst.settings?.contextWindowAnchor?.[topicId]
+    if (!oldAnchor || oldAnchor.kind !== 'active') continue
 
-    const newOverride = transferAnchorOnDeletion(oldOverride, oldGroupList, newGroupList)
-    if (newOverride === oldOverride) continue
+    const newAnchor = transferAnchorOnDeletion(oldAnchor, oldGroupList, newGroupList)
+    if (newAnchor === oldAnchor) continue
 
-    const updatedOverrides = { ...asst.settings?.contextStartOverride }
-    if (newOverride) {
-      updatedOverrides[topicId] = newOverride
+    const updatedAnchors: ContextWindowAnchorMap = { ...asst.settings?.contextWindowAnchor }
+    if (newAnchor) {
+      updatedAnchors[topicId] = newAnchor
     } else {
-      delete updatedOverrides[topicId]
+      delete updatedAnchors[topicId]
     }
 
     dispatch(
       updateAssistantSettings({
         assistantId: asst.id,
         settings: {
-          contextStartOverride: updatedOverrides
+          contextWindowAnchor: updatedAnchors
         }
+      })
+    )
+  }
+}
+
+/**
+ * Branch anchor inheritance (docs/context-window.md §9, CW-4 · 分支继承):
+ * deterministically maps the parent topic's persisted anchor into a new
+ * branch by position (group-list index transfer), never by recomputing from
+ * `contextCount`.
+ *
+ * Rules:
+ *   - Source anchor missing or not active → `undefined` (nothing to inherit).
+ *   - Source anchor groupKey absent from `sourceGroupList` (invalid source
+ *     anchor) → `undefined`.
+ *   - Empty branch group list → `undefined` (empty topics have no anchor,
+ *     I-1).
+ *   - In-range index (`sourceIndex < branchGroupList.length`) → maps the
+ *     parent position into the branch by index.
+ *   - Out-of-range index (`sourceIndex >= branchGroupList.length`, the branch
+ *     is a strict prefix of the source) → clamped to the branch's LAST
+ *     available group — the nearest available predecessor (CW-FIX-1). A
+ *     non-empty branch always receives a persisted anchor; it never silently
+ *     stays anchorless.
+ *
+ * Pure function: no store access, no dispatch.
+ */
+export function inheritAnchorForBranch(
+  sourceAnchor: ContextWindowAnchor | undefined,
+  sourceGroupList: string[],
+  branchGroupList: string[]
+): ContextWindowAnchor | undefined {
+  if (sourceAnchor?.kind !== 'active') {
+    return undefined
+  }
+  if (branchGroupList.length === 0) {
+    return undefined
+  }
+  const sourceIndex = sourceGroupList.indexOf(sourceAnchor.groupKey)
+  if (sourceIndex === -1) {
+    return undefined
+  }
+  if (sourceIndex < branchGroupList.length) {
+    return { kind: 'active', groupKey: branchGroupList[sourceIndex] }
+  }
+  // Out-of-range: clamp to the branch's last available group (nearest
+  // available predecessor).
+  return { kind: 'active', groupKey: branchGroupList[branchGroupList.length - 1] }
+}
+
+/**
+ * First-establishment / compatibility-repair dispatch glue (idempotent,
+ * exactly-once per topic).
+ *
+ * Reads the topic's current real turns and the assistant's current
+ * `contextCount` from the store, resolves the establish/repair decision, and
+ * dispatches `updateAssistantSettings` only when the anchor was missing or
+ * unresolvable. A valid persisted anchor is never recalculated, and an empty
+ * topic never receives an anchor. Ordinary startup with a valid anchor
+ * dispatches nothing.
+ *
+ * This is the bounded hook for:
+ *   - first establishment in `sendMessage` (after the user message is
+ *     persisted + added to Redux), and
+ *   - compatibility repair after a successful topic message load/import into
+ *     Redux (`loadTopicMessagesThunk`) — on BOTH the fetch path (after
+ *     `messagesReceived`) and the cached path (a non-empty cached topic whose
+ *     messages are already in Redux, e.g. a fresh branch pre-populated by
+ *     `cloneMessagesToNewTopicThunk`).
+ *
+ * Note: contains a side-effect (dispatch); it is the integration glue kept
+ * separate from the pure decision helpers in `contextWindowService`.
+ */
+export function ensureTopicAnchorEstablished(
+  dispatch: (action: { type: string; payload?: unknown }) => void,
+  getState: () => RootState,
+  assistantId: string,
+  topicId: string
+): void {
+  const state = getState()
+  const assistant = state.assistants.assistants.find((asst) => asst.id === assistantId)
+  if (!assistant) {
+    return
+  }
+  const settings = getAssistantSettings(assistant)
+  const turns = buildContextTurns(selectMessagesForTopic(state, topicId))
+  const decision = resolveAnchorEstablishDecision(settings.contextWindowAnchor, topicId, turns, settings.contextCount)
+  if (decision.changed) {
+    dispatch(
+      updateAssistantSettings({
+        assistantId,
+        settings: { contextWindowAnchor: decision.anchorMap }
       })
     )
   }

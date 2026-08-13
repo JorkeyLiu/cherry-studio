@@ -18,7 +18,8 @@ import useTranslate from '@renderer/hooks/useTranslate'
 import { useAnchorGroupKey } from '@renderer/pages/home/Messages/anchorGroupContext'
 import { resolveGroupKey } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
-import { isMessageInContextTurn } from '@renderer/services/contextTurnService'
+import { buildContextTurns, isMessageInContextTurn } from '@renderer/services/contextTurnService'
+import { resolveMessageAnchorDecision } from '@renderer/services/contextWindowService'
 import { getMessageTitle } from '@renderer/services/MessagesService'
 import { translateText } from '@renderer/services/TranslateService'
 import type { RootState } from '@renderer/store'
@@ -175,33 +176,29 @@ const MessageMenubar: FC<Props> = (props) => {
   const { confirmDeleteMessage, confirmRegenerateMessage } = useSettings()
   const { updateAssistantSettings } = useAssistant(assistant.id)
 
-  // Context start override control for the single anchor-to-end context window
-  // model. Clicking a user message persists an override at that
-  // turn's position (freeze); clicking an already-overridden message clears the
-  // override (the effective anchor then derives from the assistant's default
-  // context count). Only the persisted override map is read here;
-  // the resolved anchor projection is independent (see `isContextAnchor`).
+  // Context-window anchor control for the single stable anchor-to-end model
+  // (docs/context-window.md §8). Clicking a user message moves the persisted
+  // topic anchor to that turn; clicking the CURRENT anchored turn re-anchors
+  // to the current default window position (from the assistant's current
+  // `contextCount`) — the interaction never leaves a non-empty initialized
+  // topic anchorless. Only the persisted anchor map is read here; the
+  // resolved anchor highlight projection is independent (see `isContextAnchor`).
   const assistantSettings = getAssistantSettings(assistant)
   const handleSetContextAnchor = useCallback(() => {
     const desiredGroupKey = resolveGroupKey(message)
     if (!desiredGroupKey) return
 
-    const current = assistantSettings.contextStartOverride?.[topic.id]
-    if (current?.kind === 'active' && current.groupKey === desiredGroupKey) {
-      // 已经是这个 override → 删除，默认窗口推导会自动接管
-      const newOverride = { ...assistantSettings.contextStartOverride }
-      delete newOverride[topic.id]
-      updateAssistantSettings({ contextStartOverride: newOverride })
-      return
+    const turns = buildContextTurns(selectMessagesForTopic(store.getState(), topic.id))
+    const decision = resolveMessageAnchorDecision(
+      assistantSettings.contextWindowAnchor,
+      topic.id,
+      turns,
+      desiredGroupKey,
+      assistantSettings.contextCount
+    )
+    if (decision.changed) {
+      updateAssistantSettings({ contextWindowAnchor: decision.anchorMap })
     }
-
-    // 设置新 override
-    updateAssistantSettings({
-      contextStartOverride: {
-        ...assistantSettings.contextStartOverride,
-        [topic.id]: { kind: 'active', groupKey: desiredGroupKey }
-      }
-    })
   }, [assistantSettings, topic.id, message, updateAssistantSettings])
 
   // Anchor-icon highlight: the button is active iff this message's
