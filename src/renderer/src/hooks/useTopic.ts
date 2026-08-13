@@ -6,6 +6,7 @@ import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecy
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import store from '@renderer/store'
 import { updateTopic } from '@renderer/store/assistants'
+import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import { setNewlyRenamedTopics, setRenamingTopics } from '@renderer/store/runtime'
 import { loadTopicMessagesThunk } from '@renderer/store/thunk/messageThunk'
 import type { Assistant, Topic } from '@renderer/types'
@@ -208,9 +209,9 @@ export const TopicManager = {
 
     await store.dispatch(loadTopicMessagesThunk(id))
 
-    // 获取更新后的话题
-    const updatedTopic = await TopicManager.getTopic(id)
-    return updatedTopic?.messages || []
+    // 从 messages 投影按序读取（SQLite -> typed IPC -> messages Redux），
+    // assistants 中的 topic.messages 已被 reducers 剥离，不能作为消息来源
+    return selectMessagesForTopic(store.getState(), id)
   },
 
   async removeTopic(id: string) {
