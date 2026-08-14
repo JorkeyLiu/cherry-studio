@@ -1158,6 +1158,252 @@ describe('Repository Tests', () => {
       )
     })
 
+    // =====================================================================
+    // insertManyAt — PERF-100 batch middle insertion
+    // =====================================================================
+    describe('insertManyAt (PERF-100 batch)', () => {
+      function seedDenseTopic(count: number, idPrefix: string): string[] {
+        const ids: string[] = []
+        const stmt = sqlite.prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, 'user', ?)`)
+        for (let i = 0; i < count; i++) {
+          const id = `${idPrefix}-${i}`
+          ids.push(id)
+          stmt.run(id, 'topic-1', i)
+        }
+        return ids
+      }
+
+      it('empty input returns empty and performs no writes', () => {
+        const created = messagesRepo.insertManyAt([], 0)
+        expect(created).toEqual([])
+        expect(messagesRepo.countByTopic('topic-1')).toBe(0)
+      })
+
+      it('beginning (index=0) preserves batch order', () => {
+        seedDenseTopic(2, 'ibm')
+        messagesRepo.insertManyAt(
+          [makeMessage({ id: 'ibm-new1', topicId: 'topic-1' }), makeMessage({ id: 'ibm-new2', topicId: 'topic-1' })],
+          0
+        )
+        const list = messagesRepo.listByTopic('topic-1')
+        expect(list.map((m) => m.id)).toEqual(['ibm-new1', 'ibm-new2', 'ibm-0', 'ibm-1'])
+        expect(list.map((m) => m.sortOrder)).toEqual([0, 1, 2, 3])
+      })
+
+      it('true middle index: exact order with dense zero-based sort_order', () => {
+        seedDenseTopic(10, 'imd')
+        const inserted = messagesRepo.insertManyAt(
+          Array.from({ length: 3 }, (_, i) => makeMessage({ id: `imd-new${i}`, topicId: 'topic-1', content: `n${i}` })),
+          4
+        )
+        expect(inserted).toHaveLength(3)
+        const list = messagesRepo.listByTopic('topic-1')
+        expect(list.map((m) => m.id)).toEqual([
+          'imd-0',
+          'imd-1',
+          'imd-2',
+          'imd-3',
+          'imd-new0',
+          'imd-new1',
+          'imd-new2',
+          'imd-4',
+          'imd-5',
+          'imd-6',
+          'imd-7',
+          'imd-8',
+          'imd-9'
+        ])
+        expect(list.map((m) => m.sortOrder)).toEqual(Array.from({ length: 13 }, (_, i) => i))
+      })
+
+      it('end (index=count) and beyond-length clamp append at the end', () => {
+        seedDenseTopic(3, 'iem')
+        messagesRepo.insertManyAt(
+          [makeMessage({ id: 'iem-new1', topicId: 'topic-1' }), makeMessage({ id: 'iem-new2', topicId: 'topic-1' })],
+          3
+        )
+        messagesRepo.insertManyAt([makeMessage({ id: 'iem-new3', topicId: 'topic-1' })], 999)
+        const list = messagesRepo.listByTopic('topic-1')
+        expect(list.map((m) => m.id)).toEqual(['iem-0', 'iem-1', 'iem-2', 'iem-new1', 'iem-new2', 'iem-new3'])
+        expect(list.map((m) => m.sortOrder)).toEqual([0, 1, 2, 3, 4, 5])
+      })
+
+      it('healthy dense topic performs ZERO normalizations and exactly the shifted-sibling UPDATEs (LOCK-002 fast path)', () => {
+        const normalizeSpy = vi.spyOn(MessagesRepository.prototype as any, 'normalizeOrdersInTx')
+        sqlite.exec('CREATE TABLE sort_update_log (n INTEGER)')
+        sqlite.exec(`
+          CREATE TEMP TRIGGER trg_sort_update_log_im
+          AFTER UPDATE OF sort_order ON messages
+          BEGIN
+            INSERT INTO sort_update_log (n) VALUES (1);
+          END
+        `)
+        try {
+          seedDenseTopic(600, 'fim')
+          messagesRepo.insertManyAt(
+            Array.from({ length: 20 }, (_, i) => makeMessage({ id: `fim-new${i}`, topicId: 'topic-1' })),
+            250
+          )
+          // Healthy topic: no full-topic normalization pass at all.
+          expect(normalizeSpy).not.toHaveBeenCalled()
+          // Exactly the siblings at/after the index were shifted (350 rows),
+          // plus the 20 inserts — no per-row normalization UPDATEs.
+          const logCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM sort_update_log').get() as { n: number }).n
+          expect(logCount).toBe(600 - 250)
+          const list = messagesRepo.listByTopic('topic-1')
+          expect(list).toHaveLength(620)
+          expect(list.map((m) => m.sortOrder)).toEqual(Array.from({ length: 620 }, (_, i) => i))
+        } finally {
+          normalizeSpy.mockRestore()
+          sqlite.exec('DROP TRIGGER IF EXISTS TEMP.trg_sort_update_log_im')
+          sqlite.exec('DROP TABLE IF EXISTS sort_update_log')
+        }
+      })
+
+      it('sparse/duplicate legacy order: exactly ONE dense-order repair pass ends in renderer splice order (PERF-100 F1)', () => {
+        // Sparse + duplicate legacy order: [0, 0, 2, 500] (ids cim-1..cim-4).
+        // Renderer pre-batch order (sort_order ASC, id ASC):
+        // [cim-1, cim-2, cim-3, cim-4]. Inserting 2 at index 1 must splice to
+        // [cim-1, cim-new1, cim-new2, cim-2, cim-3, cim-4] — the second
+        // duplicate-order prefix row must NOT be re-sorted ahead of the new
+        // entries by id (the audit F1 divergence).
+        const stmt = sqlite.prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, 'user', ?)`)
+        stmt.run('cim-1', 'topic-1', 0)
+        stmt.run('cim-2', 'topic-1', 0)
+        stmt.run('cim-3', 'topic-1', 2)
+        stmt.run('cim-4', 'topic-1', 500)
+        sqlite.exec('CREATE TABLE sort_update_log (n INTEGER)')
+        sqlite.exec(`
+          CREATE TEMP TRIGGER trg_sort_update_log_f1
+          AFTER UPDATE OF sort_order ON messages
+          BEGIN
+            INSERT INTO sort_update_log (n) VALUES (1);
+          END
+        `)
+        try {
+          messagesRepo.insertManyAt(
+            [makeMessage({ id: 'cim-new1', topicId: 'topic-1' }), makeMessage({ id: 'cim-new2', topicId: 'topic-1' })],
+            1
+          )
+          // Exactly ONE dense-order repair pass (one UPDATE per row: 4 existing
+          // + 2 new) and ZERO shift-by-count UPDATEs on the sparse branch.
+          const updateCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM sort_update_log').get() as { n: number }).n
+          expect(updateCount).toBe(6)
+          const list = messagesRepo.listByTopic('topic-1')
+          expect(list.map((m) => m.id)).toEqual(['cim-1', 'cim-new1', 'cim-new2', 'cim-2', 'cim-3', 'cim-4'])
+          expect(list.map((m) => m.sortOrder)).toEqual([0, 1, 2, 3, 4, 5])
+        } finally {
+          sqlite.exec('DROP TRIGGER IF EXISTS TEMP.trg_sort_update_log_f1')
+          sqlite.exec('DROP TABLE IF EXISTS sort_update_log')
+        }
+      })
+
+      it('regression: multiple duplicate legacy ties straddling the boundary still end in the renderer splice order (PERF-100 F1)', () => {
+        // Legacy orders [0, 0, 0, 5, 2] over ids f1-0..f1-4. Renderer
+        // pre-batch order: f1-0(0), f1-1(0), f1-2(0), f1-4(2), f1-3(5).
+        // The boundary element at index 2 (f1-2) holds order 0 < 2, so a
+        // shifted-value repair would keep it before the new rows; the splice
+        // must move the new rows to [f1-0, f1-1, new0, new1, f1-2, f1-4, f1-3].
+        const stmt = sqlite.prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, 'user', ?)`)
+        stmt.run('f1-0', 'topic-1', 0)
+        stmt.run('f1-1', 'topic-1', 0)
+        stmt.run('f1-2', 'topic-1', 0)
+        stmt.run('f1-3', 'topic-1', 5)
+        stmt.run('f1-4', 'topic-1', 2)
+
+        messagesRepo.insertManyAt(
+          [makeMessage({ id: 'f1-new0', topicId: 'topic-1' }), makeMessage({ id: 'f1-new1', topicId: 'topic-1' })],
+          2
+        )
+        const list = messagesRepo.listByTopic('topic-1')
+        expect(list.map((m) => m.id)).toEqual(['f1-0', 'f1-1', 'f1-new0', 'f1-new1', 'f1-2', 'f1-4', 'f1-3'])
+        expect(list.map((m) => m.sortOrder)).toEqual([0, 1, 2, 3, 4, 5, 6])
+      })
+
+      it('sparse/duplicate legacy order: duplicate new IDs in one batch roll back the whole batch leaving order untouched (PERF-100 F1)', () => {
+        const stmt = sqlite.prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, 'user', ?)`)
+        stmt.run('f1r-1', 'topic-1', 0)
+        stmt.run('f1r-2', 'topic-1', 0)
+        stmt.run('f1r-3', 'topic-1', 2)
+        stmt.run('f1r-4', 'topic-1', 500)
+
+        expect(() =>
+          messagesRepo.insertManyAt(
+            [makeMessage({ id: 'f1r-dup', topicId: 'topic-1' }), makeMessage({ id: 'f1r-dup', topicId: 'topic-1' })],
+            1
+          )
+        ).toThrow()
+        // Whole batch rolled back: no inserts, legacy order untouched.
+        const list = messagesRepo.listByTopic('topic-1')
+        expect(list.map((m) => m.id)).toEqual(['f1r-1', 'f1r-2', 'f1r-3', 'f1r-4'])
+        expect(list.map((m) => m.sortOrder)).toEqual([0, 0, 2, 500])
+      })
+
+      it('duplicate IDs within one batch violate the PRIMARY KEY and roll back the whole batch', () => {
+        seedDenseTopic(2, 'idm')
+        const dupId = `idm-dup`
+        expect(() =>
+          messagesRepo.insertManyAt(
+            [makeMessage({ id: dupId, topicId: 'topic-1' }), makeMessage({ id: dupId, topicId: 'topic-1' })],
+            0
+          )
+        ).toThrow()
+        // Whole batch rolled back: nothing was inserted, orders unchanged.
+        const list = messagesRepo.listByTopic('topic-1')
+        expect(list.map((m) => m.id)).toEqual(['idm-0', 'idm-1'])
+        expect(list.map((m) => m.sortOrder)).toEqual([0, 1])
+      })
+
+      it('handles multiple topics independently with per-topic clamping', () => {
+        topicsRepo.create(makeTopic({ id: 'topic-2' }))
+        seedDenseTopic(2, 'mt1')
+        const stmt = sqlite.prepare(`INSERT INTO messages (id, topic_id, role, sort_order) VALUES (?, ?, 'user', ?)`)
+        stmt.run('mt2-0', 'topic-2', 0)
+        stmt.run('mt2-1', 'topic-2', 1)
+
+        messagesRepo.insertManyAt(
+          [makeMessage({ id: 'mt1-new', topicId: 'topic-1' }), makeMessage({ id: 'mt2-new', topicId: 'topic-2' })],
+          1
+        )
+        const t1 = messagesRepo.listByTopic('topic-1')
+        expect(t1.map((m) => m.id)).toEqual(['mt1-0', 'mt1-new', 'mt1-1'])
+        expect(t1.map((m) => m.sortOrder)).toEqual([0, 1, 2])
+        const t2 = messagesRepo.listByTopic('topic-2')
+        expect(t2.map((m) => m.id)).toEqual(['mt2-0', 'mt2-new', 'mt2-1'])
+        expect(t2.map((m) => m.sortOrder)).toEqual([0, 1, 2])
+      })
+
+      it('asserts topic existence once per distinct topic (audit F5)', () => {
+        const assertSpy = vi.spyOn(MessagesRepository.prototype as any, 'assertTopicExists')
+        try {
+          messagesRepo.insertManyAt(
+            [
+              makeMessage({ id: 'ae-1', topicId: 'topic-1' }),
+              makeMessage({ id: 'ae-2', topicId: 'topic-1' }),
+              makeMessage({ id: 'ae-3', topicId: 'topic-1' })
+            ],
+            0
+          )
+          expect(assertSpy).toHaveBeenCalledTimes(1)
+        } finally {
+          assertSpy.mockRestore()
+        }
+      })
+
+      it('rejects non-finite/non-integer/negative index via clampIndex conventions', () => {
+        seedDenseTopic(2, 'rim')
+        expect(() => messagesRepo.insertManyAt([makeMessage({ id: 'rim-new', topicId: 'topic-1' })], -1)).toThrow(
+          'Must be >= 0'
+        )
+        expect(() => messagesRepo.insertManyAt([makeMessage({ id: 'rim-new', topicId: 'topic-1' })], 1.5)).toThrow(
+          'Must be an integer'
+        )
+        expect(() => messagesRepo.insertManyAt([makeMessage({ id: 'rim-new', topicId: 'topic-1' })], Infinity)).toThrow(
+          'Must be a finite number'
+        )
+      })
+    })
+
     it('delete normalizes sibling orders', () => {
       messagesRepo.create(makeMessage({ id: 'dn-1', topicId: 'topic-1', sortOrder: 0 }))
       messagesRepo.create(makeMessage({ id: 'dn-2', topicId: 'topic-1', sortOrder: 1 }))

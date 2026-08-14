@@ -31,7 +31,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   const groupId = messages[0]?.askId || messages[0]?.id
 
   // Hooks
-  const { editMessage } = useMessageOperations(topic)
+  const { editMessage, selectAnswerMessage } = useMessageOperations(topic)
   const { isMultiSelectMode } = useChatContext(topic)
   const { setTimeoutTimer } = useTimer()
   const dispatch = useAppDispatch()
@@ -55,11 +55,16 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
 
   const setSelectedMessage = useCallback(
     (message: Message) => {
-      // 前一个
-      void editMessage(selectedMessageId, { foldSelected: false })
-      // 当前选中的消息
-      void editMessage(message.id, { foldSelected: true })
+      // PERF-100: ONE logical selection = ONE atomic Main SQLite command +
+      // ONE plural Redux commit + exactly one updateTopicUpdatedAt dispatch.
+      // The full answer group is this group's message IDs (group coherence is
+      // the caller's responsibility); Main persists exactly one foldSelected
+      // =true among them atomically, rejecting missing/cross-topic IDs.
+      const groupMessageIds = messages.map((m) => m.id)
+      void selectAnswerMessage(message.id, groupMessageIds)
 
+      // LOCK-105/PERF-100: the 200ms setTimeoutTimer smooth-scroll contract
+      // is preserved exactly — do not optimize, remove, or retime it.
       setTimeoutTimer(
         'setSelectedMessage',
         () => {
@@ -71,7 +76,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         200
       )
     },
-    [editMessage, selectedMessageId, setTimeoutTimer]
+    [messages, selectAnswerMessage, setTimeoutTimer]
   )
   // NOTE: registerMessageElement logic is kept for future use (currently not used for navigation)
   useEffect(() => {
@@ -176,7 +181,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   )
 
   return (
-    <MessageEditingProvider>
+    <MessageEditingProvider resetToken={isEditMode}>
       <GroupContainer
         id={groupId ? `message-group-${groupId}` : undefined}
         className={classNames([multiModelMessageStyle])}>

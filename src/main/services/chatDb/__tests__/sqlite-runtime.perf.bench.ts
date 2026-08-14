@@ -46,6 +46,12 @@ import * as schema from '../schema'
 // Re-export for metric-helpers.test.ts
 export { mean, opsPerSec, percentile, sortTimings, sum } from './benchMetrics'
 import { mean, opsPerSec, percentile, sortTimings, sum } from './benchMetrics'
+import {
+  BENCH_RESULT_SCHEMA_VERSION,
+  type BenchmarkResult,
+  collectEnvironmentMetadata,
+  emitBenchmarkResultAfterSuccessfulTasks
+} from './benchResult'
 
 // ---------------------------------------------------------------------------
 // Cleanup — registered early so temp files are removed even on setup failure
@@ -493,14 +499,86 @@ if (!coldThresholdPass) {
 }
 
 // ---------------------------------------------------------------------------
+// PERF-001 machine-readable result artifact (schema v1) — the result DATA is
+// built here (after every correctness check and the cold-open gate passed —
+// a failed gate aborts before reaching this point), but the artifact is
+// WRITTEN only by the file-level afterAll below, and only when every
+// registered tinybench task completed successfully (audit F1). The tinybench
+// tasks below are comparison output; the authoritative metrics and gates for
+// this benchmark are the ones recorded here (docs/performance-program.md
+// §5.1).
+// ---------------------------------------------------------------------------
+
+const sqliteRuntimeBenchmarkResult: BenchmarkResult = {
+  schemaVersion: BENCH_RESULT_SCHEMA_VERSION,
+  benchmark: {
+    id: 'chatdb-sqlite-runtime',
+    name: 'SQLite runtime — message load, write throughput, cold open',
+    scale: {
+      topics: TOPIC_COUNT,
+      messagesPerTopic: MESSAGES_PER_TOPIC,
+      totalMessages: TOTAL_MESSAGES,
+      blocks: blockDataList.length,
+      loadWarmupRounds: LOAD_WARMUP_ROUNDS,
+      loadMeasureRounds: LOAD_MEASURE_ROUNDS,
+      writeBatchSize: WRITE_BATCH_SIZE,
+      writeWarmupOps: WRITE_WARMUP_OPS,
+      writeMeasureOps: WRITE_MEASURE_OPS,
+      coldOpenRuns: COLD_OPEN_RUNS
+    }
+  },
+  environment: collectEnvironmentMetadata({ command: 'pnpm bench:main:native' }),
+  metrics: [
+    { id: 'load.p50', name: 'Message load p50', value: loadP50, unit: 'ms' },
+    { id: 'load.p95', name: 'Message load p95', value: loadP95, unit: 'ms' },
+    { id: 'load.p99', name: 'Message load p99', value: loadP99, unit: 'ms' },
+    { id: 'load.mean', name: 'Message load mean', value: loadMean, unit: 'ms' },
+    { id: 'load.min', name: 'Message load min', value: loadMin, unit: 'ms' },
+    { id: 'load.max', name: 'Message load max', value: loadMax, unit: 'ms' },
+    { id: 'write.meanMs', name: 'Write mean per op', value: writeMeanMs, unit: 'ms' },
+    { id: 'write.p50', name: 'Write p50', value: percentile(writeSorted, 50), unit: 'ms' },
+    { id: 'write.p95', name: 'Write p95', value: percentile(writeSorted, 95), unit: 'ms' },
+    { id: 'write.min', name: 'Write min', value: writeSorted[0], unit: 'ms' },
+    { id: 'write.max', name: 'Write max', value: writeSorted[writeSorted.length - 1], unit: 'ms' },
+    { id: 'write.opsPerSec', name: 'Write batch ops/sec', value: writeOpsPerSec, unit: 'ops/s' },
+    { id: 'write.msgsPerSec', name: 'Write messages/sec', value: writeMsgsPerSec, unit: 'msgs/s' },
+    { id: 'write.totalOps', name: 'Write measured ops', value: writeTotalOps },
+    { id: 'coldOpen.p50', name: 'Cold DB open p50', value: coldP50, unit: 'ms' },
+    { id: 'coldOpen.p95', name: 'Cold DB open p95', value: coldP95, unit: 'ms' },
+    { id: 'coldOpen.mean', name: 'Cold DB open mean', value: coldMean, unit: 'ms' },
+    { id: 'coldOpen.min', name: 'Cold DB open min', value: coldMin, unit: 'ms' },
+    { id: 'coldOpen.max', name: 'Cold DB open max', value: coldMax, unit: 'ms' }
+  ],
+  gates: [
+    {
+      id: 'parity.corpus',
+      name: 'Corpus parity — topic/message/block counts and load samples',
+      kind: 'correctness',
+      passed: parityErrors.length === 0,
+      detail: `${TOPIC_COUNT} topics, ${TOTAL_MESSAGES} messages, ${blockDataList.length} blocks verified`
+    },
+    {
+      id: 'cold-open.sanity',
+      name: 'Cold-open runs completed without errors',
+      kind: 'correctness',
+      passed: coldOpenErrors.length === 0,
+      detail: `${COLD_OPEN_RUNS}/${COLD_OPEN_RUNS} runs clean`
+    },
+    {
+      id: 'cold-open.p95-500ms',
+      name: 'Cold DB open p95 < 500ms (LOCK-5.4.3)',
+      kind: 'threshold',
+      passed: coldThresholdPass,
+      detail: `p95=${coldP95.toFixed(2)}ms vs <500ms documented threshold`
+    }
+  ]
+}
+
+// ---------------------------------------------------------------------------
 // Vitest bench tasks — standard tinybench comparison output
 // ---------------------------------------------------------------------------
 
 describe('SQLite runtime — message load (5 topics × 200 msgs)', () => {
-  afterAll(() => {
-    cleanup()
-  })
-
   bench(
     'listByTopic + listByMessages (full topic load)',
     () => {
@@ -553,4 +631,18 @@ describe('SQLite runtime — write throughput', () => {
     },
     { warmupIterations: 2, iterations: 5 }
   )
+})
+
+// File-level afterAll: Vitest bench mode runs file-level hooks but NOT
+// describe-level hooks, and the artifact gate must observe every bench task
+// in BOTH describes above — so emission + cleanup live here. The write is
+// gated on ALL registered tasks completing with state 'pass' (audit F1); a
+// silently swallowed throwing task stays at 'run' and suppresses the
+// artifact. Cleanup is idempotent with the exit hook registered above.
+afterAll((suite) => {
+  const artifactPath = emitBenchmarkResultAfterSuccessfulTasks(suite, sqliteRuntimeBenchmarkResult)
+  if (artifactPath !== null) {
+    console.log(`Result artifact: ${artifactPath}`)
+  }
+  cleanup()
 })

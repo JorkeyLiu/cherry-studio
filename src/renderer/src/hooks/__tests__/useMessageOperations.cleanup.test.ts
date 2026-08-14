@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   dispatch: vi.fn(),
   getState: vi.fn(),
   updateMessageAndBlocksThunk: vi.fn(),
+  selectAnswerMessageThunk: vi.fn(),
   consumeFileCleanupResult: vi.fn(),
   estimateMessageBlocksUsage: vi.fn()
 }))
@@ -33,6 +34,7 @@ vi.mock('@renderer/utils/messageUtils/usage', () => ({
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   updateMessageAndBlocksThunk: mocks.updateMessageAndBlocksThunk,
+  selectAnswerMessageThunk: mocks.selectAnswerMessageThunk,
   deleteSingleMessageThunk: vi.fn(),
   appendAssistantResponseThunk: vi.fn(),
   cloneMessagesToNewTopicThunk: vi.fn(),
@@ -143,6 +145,22 @@ describe('useMessageOperations atomic cleanup callers', () => {
 
     expect(onCommit).toHaveBeenCalledExactlyOnceWith(['block-1'])
     expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(cleanup)
+  })
+
+  it('selectAnswerMessage dispatches ONE atomic selection thunk with the full group (PERF-100 navigation path)', async () => {
+    mocks.selectAnswerMessageThunk.mockReturnValue({ type: 'select-answer-message' })
+    mocks.dispatch.mockResolvedValue({ type: 'select-answer-message' })
+
+    const { useMessageOperations } = await import('../useMessageOperations')
+    const { result } = renderHook(() => useMessageOperations({ id: 'topic-1' } as any))
+
+    await result.current.selectAnswerMessage('a-2', ['a-1', 'a-2', 'a-3'])
+
+    // The caller-facing wrapper forwards the target + the FULL answer group
+    // to the DB-first thunk — never two per-message editMessage writes.
+    expect(mocks.selectAnswerMessageThunk).toHaveBeenCalledTimes(1)
+    expect(mocks.selectAnswerMessageThunk).toHaveBeenCalledWith('topic-1', 'a-2', ['a-1', 'a-2', 'a-3'])
+    expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'select-answer-message' })
   })
 
   it('notifies the caller before a later resend trace failure', async () => {

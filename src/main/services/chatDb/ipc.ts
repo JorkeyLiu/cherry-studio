@@ -53,6 +53,7 @@ import type {
   ResetMessagesForResendRequest,
   RestoreTopicRequest,
   SearchMessagesRequest,
+  SelectAnswerMessageRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   TransferTopicOwnershipRequest,
@@ -262,6 +263,13 @@ export function registerChatDbIpc(): () => void {
   // 7. update-message-and-blocks
   handleCommand(IpcChannel.ChatDb_UpdateMessageAndBlocks, (agg, req: UpdateMessageAndBlocksRequest) => {
     return agg.updateMessageAndBlocks(req.topicId, req.messageUpdates, req.blocksToUpdate, req.blockIdsToDelete)
+  })
+
+  // 7b. select-answer-message (PERF-100): one atomic multi-model answer
+  // selection — validates topic ownership of every supplied ID and persists
+  // exactly one foldSelected=true in one Main transaction.
+  handleCommand(IpcChannel.ChatDb_SelectAnswerMessage, (agg, req: SelectAnswerMessageRequest) => {
+    return agg.selectAnswerMessage(req.topicId, req.selectedMessageId, req.messageIds)
   })
 
   // 8. delete-message

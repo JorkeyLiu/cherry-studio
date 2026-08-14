@@ -73,6 +73,7 @@ export type {
   SearchMessagesResponse,
   SearchResultItem,
   SegmentWire,
+  SelectAnswerMessageRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   TopicWire,

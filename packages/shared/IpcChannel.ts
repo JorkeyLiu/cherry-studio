@@ -343,6 +343,8 @@ export enum IpcChannel {
   ChatDb_AppendMessage = 'chatdb:append-message',
   ChatDb_UpdateMessage = 'chatdb:update-message',
   ChatDb_UpdateMessageAndBlocks = 'chatdb:update-message-and-blocks',
+  // PERF-100: one atomic multi-model answer-tab selection (foldSelected group switch)
+  ChatDb_SelectAnswerMessage = 'chatdb:select-answer-message',
   ChatDb_DeleteMessage = 'chatdb:delete-message',
   ChatDb_DeleteMessages = 'chatdb:delete-messages',
   ChatDb_UpdateBlocks = 'chatdb:update-blocks',

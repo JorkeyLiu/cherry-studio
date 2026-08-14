@@ -15,6 +15,7 @@ import {
   regenerateAssistantResponseThunk,
   resendMessageThunk,
   resendUserMessageWithEditThunk,
+  selectAnswerMessageThunk,
   updateMessageAndBlocksThunk,
   updateTranslationBlockThunk
 } from '@renderer/store/thunk/messageThunk'
@@ -115,6 +116,30 @@ export function useMessageOperations(topic: Topic) {
       // For block-only upserts (no blockIdsToDelete), the result is empty
       // and consumed trivially.
       await consumeFileCleanupResult(cleanup)
+    },
+    [dispatch, topic.id]
+  )
+
+  /**
+   * PERF-100: switch the selected answer within one multi-model answer group.
+   *
+   * ONE logical selection = ONE atomic Main SQLite command (validates topic
+   * ownership of every supplied ID, persists exactly one foldSelected=true)
+   * + ONE plural Redux commit + exactly one updateTopicUpdatedAt dispatch.
+   * On DB failure the error propagates and Redux is untouched.
+   *
+   * @param messageId        The message to select (foldSelected=true).
+   * @param groupMessageIds  The FULL answer-group message IDs (caller-owned
+   *                         group coherence; Main enforces topic ownership +
+   *                         unique set + selected inclusion).
+   */
+  const selectAnswerMessage = useCallback(
+    async (messageId: string, groupMessageIds: string[]) => {
+      if (!topic?.id) {
+        logger.error('[selectAnswerMessage] Topic prop is not valid.')
+        return
+      }
+      await dispatch(selectAnswerMessageThunk(topic.id, messageId, groupMessageIds))
     },
     [dispatch, topic.id]
   )
@@ -492,6 +517,7 @@ export function useMessageOperations(topic: Topic) {
     deleteMessage,
     deleteMessageWithUndo,
     editMessage,
+    selectAnswerMessage,
     resendMessage,
     regenerateAssistantMessage,
     resendUserMessageWithEdit,

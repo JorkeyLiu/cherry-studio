@@ -615,6 +615,199 @@ describe('ChatDbAggregateService', () => {
   })
 
   // =========================================================================
+  // select-answer-message (PERF-100) — one atomic multi-model answer selection
+  // =========================================================================
+
+  describe('selectAnswerMessage', () => {
+    it('persists exactly one foldSelected=true among the supplied group atomically', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const m1 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: true })
+      const m2 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: false })
+      const m3 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: false })
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+      agg.appendMessage(topicId, m3 as any, [])
+
+      const result = agg.selectAnswerMessage(topicId, m2.id as string, [
+        m1.id as string,
+        m2.id as string,
+        m3.id as string
+      ])
+      expect(result.ok).toBe(true)
+
+      const fetched = okValue(agg.fetchMessages(topicId))
+      const byId = new Map(fetched.messages.map((m) => [m.id, m]))
+      expect(byId.get(m1.id as string)?.foldSelected).toBe(false)
+      expect(byId.get(m2.id as string)?.foldSelected).toBe(true)
+      expect(byId.get(m3.id as string)?.foldSelected).toBe(false)
+      // Exactly one true across the whole topic.
+      const selected = fetched.messages.filter((m) => m.foldSelected === true)
+      expect(selected).toHaveLength(1)
+      expect(selected[0].id).toBe(m2.id)
+    })
+
+    it('rejects a missing message in the group with NO partial write (rollback)', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const m1 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: true })
+      const m2 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: false })
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+
+      const result = agg.selectAnswerMessage(topicId, m2.id as string, [
+        m1.id as string,
+        m2.id as string,
+        'missing-msg'
+      ])
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('NOT_FOUND')
+
+      // No partial write: m1 must still be selected and m2 unselected.
+      const fetched = okValue(agg.fetchMessages(topicId))
+      const byId = new Map(fetched.messages.map((m) => [m.id, m]))
+      expect(byId.get(m1.id as string)?.foldSelected).toBe(true)
+      expect(byId.get(m2.id as string)?.foldSelected).toBe(false)
+    })
+
+    it('rejects a cross-topic message with NO partial write (ownership validation)', () => {
+      const topicIdA = `t-${uid()}`
+      const topicIdB = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const a1 = makeMessageJson(topicIdA, { role: 'assistant', askId, foldSelected: true })
+      const a2 = makeMessageJson(topicIdA, { role: 'assistant', askId, foldSelected: false })
+      const foreign = makeMessageJson(topicIdB, { role: 'assistant', askId, foldSelected: false })
+      agg.appendMessage(topicIdA, a1 as any, [])
+      agg.appendMessage(topicIdA, a2 as any, [])
+      agg.appendMessage(topicIdB, foreign as any, [])
+
+      const result = agg.selectAnswerMessage(topicIdA, a2.id as string, [
+        a1.id as string,
+        a2.id as string,
+        foreign.id as string
+      ])
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('NOT_FOUND')
+
+      const fetched = okValue(agg.fetchMessages(topicIdA))
+      const byId = new Map(fetched.messages.map((m) => [m.id, m]))
+      expect(byId.get(a1.id as string)?.foldSelected).toBe(true)
+      expect(byId.get(a2.id as string)?.foldSelected).toBe(false)
+    })
+
+    it('rejects duplicate IDs in the group (defense in depth)', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const m1 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: true })
+      const m2 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: false })
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+
+      const result = agg.selectAnswerMessage(topicId, m2.id as string, [
+        m1.id as string,
+        m2.id as string,
+        m2.id as string
+      ])
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('CONFLICT_ERROR')
+    })
+
+    it('rejects selected not in the supplied group', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const m1 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: true })
+      const m2 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: false })
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+
+      const result = agg.selectAnswerMessage(topicId, 'not-in-group', [m1.id as string, m2.id as string])
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('CONFLICT_ERROR')
+    })
+
+    it('preserves message content/order/other overflow — selection-only update', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const m1 = makeMessageJson(topicId, {
+        role: 'assistant',
+        askId,
+        foldSelected: true,
+        content: 'First answer',
+        modelId: 'model-x',
+        useful: true
+      })
+      const m2 = makeMessageJson(topicId, {
+        role: 'assistant',
+        askId,
+        foldSelected: false,
+        content: 'Second answer',
+        modelId: 'model-y',
+        useful: false
+      })
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+
+      const result = agg.selectAnswerMessage(topicId, m2.id as string, [m1.id as string, m2.id as string])
+      expect(result.ok).toBe(true)
+
+      const fetched = okValue(agg.fetchMessages(topicId))
+      const byId = new Map(fetched.messages.map((m) => [m.id, m]))
+      const m1After = byId.get(m1.id as string)!
+      const m2After = byId.get(m2.id as string)!
+      expect(m1After.foldSelected).toBe(false)
+      expect(m2After.foldSelected).toBe(true)
+      // Content, model, and other overflow fields are untouched.
+      expect(m1After.content).toBe('First answer')
+      expect(m2After.content).toBe('Second answer')
+      expect(m1After.modelId).toBe('model-x')
+      expect(m2After.modelId).toBe('model-y')
+      expect(m1After.useful).toBe(true)
+      expect(m2After.useful).toBe(false)
+      // Order is preserved (m1 then m2).
+      expect(fetched.messages.map((m) => m.id)).toEqual([m1.id, m2.id])
+    })
+
+    it('genuine rollback: a trigger-forced failure reverts EVERY group write', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const m1 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: true })
+      const m2 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: false })
+      const m3 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: false })
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+      agg.appendMessage(topicId, m3 as any, [])
+
+      // Abort the whole transaction when the SECOND row is updated — proving
+      // the first row's foldSelected write is rolled back too.
+      sqlite.exec(`
+        CREATE TEMP TRIGGER abort_select_answer_rollback_test
+        AFTER UPDATE OF extra ON messages
+        WHEN NEW.id = '${m2.id}' AND NEW.topic_id = '${topicId}'
+        BEGIN
+          SELECT RAISE(ABORT, 'trigger-forced abort for selectAnswerMessage rollback test');
+        END
+      `)
+      try {
+        const result = agg.selectAnswerMessage(topicId, m3.id as string, [
+          m1.id as string,
+          m2.id as string,
+          m3.id as string
+        ])
+        expect(result.ok).toBe(false)
+      } finally {
+        sqlite.exec('DROP TRIGGER IF EXISTS TEMP.abort_select_answer_rollback_test')
+      }
+
+      // NO partial write: m1 keeps foldSelected=true, m2/m3 keep false.
+      const fetched = okValue(agg.fetchMessages(topicId))
+      const byId = new Map(fetched.messages.map((m) => [m.id, m]))
+      expect(byId.get(m1.id as string)?.foldSelected).toBe(true)
+      expect(byId.get(m2.id as string)?.foldSelected).toBe(false)
+      expect(byId.get(m3.id as string)?.foldSelected).toBe(false)
+    })
+  })
+
+  // =========================================================================
   // delete-message
   // =========================================================================
 
@@ -2780,6 +2973,163 @@ describe('ChatDbAggregateService', () => {
       expect(fetched.messages.length).toBe(2)
       expect(fetched.messages[0].id).toBe(msg2.id)
       expect(fetched.messages[1].id).toBe(msg1.id)
+    })
+
+    // =========================================================================
+    // PERF-100: pasteMessagesToTopic batch semantics
+    // =========================================================================
+
+    it('pasteMessagesToTopic: batch middle insertion preserves exact order, block order, and file refs (PERF-100)', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+      // 10 existing messages (5 user + 5 assistant groups).
+      const existingIds: string[] = []
+      for (let i = 0; i < 5; i++) {
+        const userMsg = makeMessageJson(topicId, { id: `p100-u${i}`, content: `existing-u${i}` })
+        const asstMsg = makeMessageJson(topicId, {
+          id: `p100-a${i}`,
+          role: 'assistant',
+          askId: userMsg.id,
+          content: `existing-a${i}`
+        })
+        existingIds.push(userMsg.id as string, asstMsg.id as string)
+        agg.appendMessage(topicId, userMsg as any, [])
+        agg.appendMessage(topicId, asstMsg as any, [])
+      }
+
+      // Paste 3 groups at the true middle (index 6): 6 above / 4 below.
+      const entries: Array<{ message: Record<string, unknown>; blocks: Record<string, unknown>[] }> = []
+      const pastedUserIds: string[] = []
+      for (let i = 0; i < 3; i++) {
+        const userId = `p100-pu${i}`
+        pastedUserIds.push(userId)
+        const userMsg = makeMessageJson(topicId, { id: userId, content: `pasted-u${i}` })
+        const userBlock = makeBlockJson(userId, 'main_text', { content: `pasted-ub-${i}` })
+        const fileBlock = makeBlockJson(userId, 'file', {
+          file: { id: `p100-file-${i}`, name: `f${i}.pdf`, path: `/f${i}.pdf`, type: 'application/pdf' }
+        })
+        const asstMsg = makeMessageJson(topicId, {
+          id: `p100-pa${i}`,
+          role: 'assistant',
+          askId: userId,
+          content: `pasted-a${i}`
+        })
+        const asstBlock = makeBlockJson(`p100-pa${i}`, 'main_text', { content: `pasted-ab-${i}` })
+        entries.push({ message: userMsg, blocks: [userBlock, fileBlock] })
+        entries.push({ message: asstMsg, blocks: [asstBlock] })
+      }
+
+      const result = agg.pasteMessagesToTopic(topicId, entries as any, 6)
+      expect(result.ok).toBe(true)
+
+      const fetched = okValue(agg.fetchMessages(topicId))
+      const msgs = fetched.messages as any[]
+      expect(msgs).toHaveLength(16)
+      // Exact dense sort_order 0..15 in topic order.
+      msgs.forEach((m, idx) => expect(m.sortOrder).toBe(idx))
+      // Exact order: existing 0..5, then the 6 pasted messages in array order,
+      // then existing 6..9.
+      const expectedOrder = [
+        'p100-u0',
+        'p100-a0',
+        'p100-u1',
+        'p100-a1',
+        'p100-u2',
+        'p100-a2',
+        'p100-pu0',
+        'p100-pa0',
+        'p100-pu1',
+        'p100-pa1',
+        'p100-pu2',
+        'p100-pa2',
+        'p100-u3',
+        'p100-a3',
+        'p100-u4',
+        'p100-a4'
+      ]
+      expect(msgs.map((m) => m.id)).toEqual(expectedOrder)
+      // askId remap preserved.
+      for (let i = 6; i < 12; i += 2) {
+        expect(msgs[i].role).toBe('user')
+        expect(msgs[i + 1].role).toBe('assistant')
+        expect(msgs[i + 1].askId).toBe(msgs[i].id)
+      }
+      // Block ownership + per-message block order preserved (user blocks then file block).
+      const blocksByMessage = new Map<string, any[]>()
+      for (const b of fetched.blocks as any[]) {
+        const arr = blocksByMessage.get(b.messageId) ?? []
+        arr.push(b)
+        blocksByMessage.set(b.messageId, arr)
+      }
+      for (let i = 0; i < 3; i++) {
+        const ownBlocks = blocksByMessage.get(`p100-pu${i}`) ?? []
+        expect(ownBlocks).toHaveLength(2)
+        expect(ownBlocks[0].content).toBe(`pasted-ub-${i}`)
+        expect(ownBlocks[0].type).toBe('main_text')
+        expect(ownBlocks[0].messageId).toBe(`p100-pu${i}`)
+        expect(ownBlocks[1].type).toBe('file')
+        expect(ownBlocks[1].messageId).toBe(`p100-pu${i}`)
+        expect(blocksByMessage.get(`p100-pa${i}`)![0]!.content).toBe(`pasted-ab-${i}`)
+      }
+      // File-reference projection for the 3 pasted file blocks.
+      const refs = sqlite.prepare('SELECT block_id, file_id FROM file_references').all() as any[]
+      expect(refs).toHaveLength(3)
+      expect(
+        refs
+          .map((r) => r.file_id)
+          .sort()
+          .map((f: string) => Number(f.split('-')[2]))
+      ).toEqual([0, 1, 2])
+    })
+
+    it('pasteMessagesToTopic: uses ONE insertManyAt batch and ZERO normalizations on a healthy topic (PERF-100)', () => {
+      const topicId = `t-${uid()}`
+      agg.ensureTopic(topicId)
+      for (let i = 0; i < 40; i++) {
+        agg.appendMessage(topicId, makeMessageJson(topicId, { content: `base-${i}` }) as any, [])
+      }
+      const insertManySpy = vi.spyOn(MessagesRepository.prototype as any, 'insertManyAt')
+      const normalizeSpy = vi.spyOn(MessagesRepository.prototype as any, 'normalizeOrdersInTx')
+      try {
+        const entries = Array.from({ length: 6 }, (_, i) => ({
+          message: makeMessageJson(topicId, { content: `paste-${i}` }),
+          blocks: [] as Record<string, unknown>[]
+        }))
+        const result = agg.pasteMessagesToTopic(topicId, entries as any, 20)
+        expect(result.ok).toBe(true)
+        // The whole paste is ONE batch primitive call.
+        expect(insertManySpy).toHaveBeenCalledTimes(1)
+        const [batchItems, batchIndex] = insertManySpy.mock.calls[0] as [unknown[], number]
+        expect(batchItems).toHaveLength(6)
+        expect(batchIndex).toBe(20)
+        // Healthy dense topic: no full-topic normalization pass at all.
+        const topicNormalizes = normalizeSpy.mock.calls.filter(([, id]) => id === topicId)
+        expect(topicNormalizes).toHaveLength(0)
+        const msgs = okValue(agg.fetchMessages(topicId)).messages as any[]
+        expect(msgs).toHaveLength(46)
+        expect(msgs.map((m) => m.sortOrder)).toEqual(Array.from({ length: 46 }, (_, i) => i))
+        expect(msgs[20].content).toBe('paste-0')
+        expect(msgs[25].content).toBe('paste-5')
+        expect(msgs[26].content).toBe('base-20')
+      } finally {
+        insertManySpy.mockRestore()
+        normalizeSpy.mockRestore()
+      }
+    })
+
+    it('pasteMessagesToTopic: duplicate new IDs within one request insert once and apply later metadata (per-entry loop parity)', () => {
+      const topicId = `t-${uid()}`
+      const dupId = `m-${uid()}`
+      const result = agg.pasteMessagesToTopic(topicId, [
+        { message: makeMessageJson(topicId, { id: dupId, content: 'first' }), blocks: [] },
+        { message: makeMessageJson(topicId, { id: dupId, content: 'second' }), blocks: [] }
+      ] as any)
+      expect(result.ok).toBe(true)
+      const msgs = okValue(agg.fetchMessages(topicId)).messages as any[]
+      expect(msgs).toHaveLength(1)
+      expect(msgs[0].id).toBe(dupId)
+      // Last write wins for metadata, matching the previous per-entry loop.
+      expect(msgs[0].content).toBe('second')
     })
 
     // =========================================================================

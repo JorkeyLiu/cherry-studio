@@ -29,6 +29,7 @@ import type {
   ResetMessagesForResendRequest,
   RestoreTopicRequest,
   SearchMessagesRequest,
+  SelectAnswerMessageRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   TransferTopicOwnershipRequest,
@@ -630,6 +631,9 @@ const api = {
     updateMessage: (request: UpdateMessageRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_UpdateMessage, request),
     updateMessageAndBlocks: (request: UpdateMessageAndBlocksRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_UpdateMessageAndBlocks, request),
+    // PERF-100: one atomic multi-model answer-tab selection
+    selectAnswerMessage: (request: SelectAnswerMessageRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_SelectAnswerMessage, request),
     deleteMessage: (request: DeleteMessageRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessage, request),
     deleteMessages: (request: DeleteMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessages, request),
     updateBlocks: (request: UpdateBlocksRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_UpdateBlocks, request),

@@ -1,7 +1,5 @@
 import { loggerService } from '@logger'
-import ContextMenu from '@renderer/components/ContextMenu'
 import EditModeActionBar from '@renderer/components/EditModeActionBar'
-import EditModeContextMenu from '@renderer/components/EditModeContextMenu'
 import { LoadingIcon } from '@renderer/components/Icons'
 import { LOAD_MORE_COUNT } from '@renderer/config/constant'
 import { EditModeProvider, useEditMode } from '@renderer/context/EditModeContext'
@@ -85,6 +83,7 @@ import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
 
 import { AnchorGroupProvider } from './anchorGroupContext'
+import MessageContextMenu from './MessageContextMenu'
 import MessageGroup from './MessageGroup'
 import Prompt from './Prompt'
 import { MessagesContainer, ScrollContainer } from './shared'
@@ -258,39 +257,21 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           scrollableTarget="messages"
           inverse
           style={{ overflow: 'visible' }}>
-          {isEditMode ? (
-            <EditModeContextMenu topicId={topic.id}>
-              <ScrollContainer>
-                {isLoadingNewer && (
-                  <LoaderContainer>
-                    <LoadingIcon color="var(--color-text-2)" />
-                  </LoaderContainer>
-                )}
-                {renderMessageSegments()}
-                {isLoadingMore && (
-                  <LoaderContainer>
-                    <LoadingIcon color="var(--color-text-2)" />
-                  </LoaderContainer>
-                )}
-              </ScrollContainer>
-            </EditModeContextMenu>
-          ) : (
-            <ContextMenu>
-              <ScrollContainer>
-                {isLoadingNewer && (
-                  <LoaderContainer>
-                    <LoadingIcon color="var(--color-text-2)" />
-                  </LoaderContainer>
-                )}
-                {renderMessageSegments()}
-                {isLoadingMore && (
-                  <LoaderContainer>
-                    <LoadingIcon color="var(--color-text-2)" />
-                  </LoaderContainer>
-                )}
-              </ScrollContainer>
-            </ContextMenu>
-          )}
+          <MessageContextMenu topicId={topic.id}>
+            <ScrollContainer>
+              {isLoadingNewer && (
+                <LoaderContainer>
+                  <LoadingIcon color="var(--color-text-2)" />
+                </LoaderContainer>
+              )}
+              {renderMessageSegments()}
+              {isLoadingMore && (
+                <LoaderContainer>
+                  <LoadingIcon color="var(--color-text-2)" />
+                </LoaderContainer>
+              )}
+            </ScrollContainer>
+          </MessageContextMenu>
         </InfiniteScroll>
 
         {/* Prompts always render; the persisted showPrompt setting is inert. */}
@@ -327,7 +308,7 @@ const Messages = ({
   const dispatch = useAppDispatch()
   const messages = useTopicMessages(topic.id)
   const isTopicLoading = useTopicLoading(topic)
-  const { displayCount, createTopicBranch, editMessage } = useMessageOperations(topic)
+  const { displayCount, createTopicBranch, selectAnswerMessage } = useMessageOperations(topic)
   const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
 
   const { isMultiSelectMode, handleSelectMessage } = useChatContext(topic)
@@ -432,7 +413,12 @@ const Messages = ({
   /**
    * Switch foldSelected for the message group containing the target message.
    * Used by the centralized NAVIGATE_TO_MESSAGE handler to unfold hidden messages.
-   * Awaits all editMessage calls so the caller can wait for the UI to update.
+   * Awaits the atomic selection so the caller can wait for the UI to update.
+   *
+   * PERF-100: ONE logical selection = ONE atomic Main SQLite command + ONE
+   * plural Redux commit + exactly one updateTopicUpdatedAt dispatch — the
+   * previous per-message editMessage loop (one IPC + one Redux commit per
+   * group member) is replaced by a single validated Main transaction.
    */
   const selectMessageForFold = useCallback(
     async (messageId: string) => {
@@ -443,15 +429,19 @@ const Messages = ({
       const groupMessages = allMessages.filter((m) => m.role === 'assistant' && m.askId === targetMessage.askId)
       if (groupMessages.length <= 1) return
 
-      await Promise.all(groupMessages.map((m) => editMessage(m.id, { foldSelected: m.id === messageId })))
+      await selectAnswerMessage(
+        messageId,
+        groupMessages.map((m) => m.id)
+      )
     },
-    [editMessage]
+    [selectAnswerMessage]
   )
 
   useEffect(() => {
     // Only bump generation on topic switch, not on every messages change.
-    // This prevents selectMessageForFold (which calls editMessage → messages update)
-    // from cancelling an in-flight navigation.
+    // This prevents selectMessageForFold (which commits the foldSelected
+    // group update → messages change) from cancelling an in-flight
+    // navigation.
     if (prevTopicIdRef.current !== topic.id) {
       prevTopicIdRef.current = topic.id
       savedRestoreHandledRef.current = false

@@ -3,12 +3,17 @@
  *
  * Ordering guarantees:
  * - sort_order is zero-based dense within each topic.
- * - All mutating operations (append, insertAt, upsertAt, delete, deleteMany)
- *   normalize sibling orders transactionally.
+ * - All mutating operations (append, insertAt, upsertAt, delete, deleteMany,
+ *   insertManyAt) normalize sibling orders transactionally.
  * - Tail appends (append, appendMany) use the LOCK-002 fast path: a dense
  *   zero-based topic is proven with one aggregate query and appended at
  *   MAX+1 with ZERO sibling UPDATEs; sparse/corrupt legacy order is
  *   detected by the same query and repaired with the legacy normalization.
+ * - insertManyAt uses the LOCK-002 batch fast path for middle insertion:
+ *   one sibling shift-by-count (`sort_order += M` for every sibling at or
+ *   after the clamped index) plus M row inserts; a healthy dense topic
+ *   receives ZERO normalization UPDATEs, and only a sparse/corrupt legacy
+ *   topic falls back to exactly ONE dense-order repair pass.
  * - replaceOrder uses direct sequential assignment (no fixed-offset hack).
  *
  * Segment cleanup:
@@ -349,6 +354,119 @@ export class MessagesRepository {
         tx.select().from(messages).where(eq(messages.id, data.id)).get() ?? ({} as any),
         'messages',
         data.id
+      )
+    })
+  }
+
+  /**
+   * Insert many messages at a specific index in ONE batch (PERF-100).
+   *
+   * Batch analog of {@link insertAt} with the LOCK-002 fast path: for each
+   * affected topic, the pre-insert density and row count are proven by ONE
+   * aggregate query, the index is clamped to [0, count], every existing
+   * sibling at or after the index is shifted by exactly the batch size with
+   * ONE `sort_order = sort_order + M` UPDATE (never per-item shifts), and the
+   * new rows take the vacated `index..index+M-1` orders in array order — so
+   * a healthy dense topic requires ZERO normalization UPDATEs. Only a
+   * sparse/corrupt legacy topic falls back to exactly ONE dense-order repair
+   * pass (`assignDenseOrders`) after the inserts, so corruption is never
+   * silently preserved.
+   *
+   * Audit F1: the sparse/corrupt repair does NOT re-sort the shifted rows by
+   * `(sort_order, id)`. Instead it captures the renderer's pre-batch ordered
+   * list (`loadOrderedIds`: sort_order ASC, id ASC), splices the new IDs at
+   * the clamped index in input order, and assigns dense orders from that
+   * EXACT list — prefix + new entries + suffix. Duplicate legacy sort_order
+   * ties can otherwise straddle the insert boundary and re-sort new/existing
+   * rows together by id, diverging from the renderer's ordered-list splice.
+   *
+   * This replaces M per-message `insertAt` calls (M sibling shifts + M
+   * full-topic normalizations = O(M·N) UPDATEs) with one shift-by-count
+   * (O(N-index) UPDATEs) + M inserts (+ O(N) only when repairing corrupt
+   * legacy order).
+   *
+   * Semantics:
+   * - Empty input returns [] and performs no writes.
+   * - Insertion positions are preserved in array order: item i lands at
+   *   clamped index + i.
+   * - Append (index >= count), middle, beginning (0), and end (count) all
+   *   clamp through the existing `clampIndex` error conventions.
+   * - Duplicate IDs within the batch violate the PRIMARY KEY and abort the
+   *   whole transaction (same rollback convention as `insertAt`); the
+   *   aggregate classifies in-request duplicates before calling this.
+   * - Topic existence is asserted once per DISTINCT topic before any write
+   *   (audit F5), keeping the same first-failure behavior as `appendMany`.
+   */
+  insertManyAt(items: MessageData[], index: number): MessageData[] {
+    if (items.length === 0) return []
+    return this.db.transaction((tx) => {
+      // Group by topic first so each topic's density + count are read exactly
+      // once (audit F5): topic existence is asserted once per DISTINCT topic.
+      const byTopic = new Map<string, MessageData[]>()
+      for (const item of items) {
+        const list = byTopic.get(item.topicId)
+        if (list) {
+          list.push(item)
+        } else {
+          byTopic.set(item.topicId, [item])
+        }
+      }
+      for (const topicId of byTopic.keys()) {
+        this.assertTopicExists(topicId)
+      }
+      // LOCK-002 + audit F4: ONE aggregate query proves pre-insert density
+      // and yields both MAX(sort_order) and the row count, so the batch never
+      // runs a standalone MAX/count query next to the density proof.
+      const topicStates = new Map<string, { count: number; dense: boolean }>()
+      for (const topicId of byTopic.keys()) {
+        const { dense, count } = inspectDenseZeroBasedOrder(tx, messages, messages.topicId, topicId)
+        topicStates.set(topicId, { count, dense })
+      }
+      for (const [topicId, topicItems] of byTopic) {
+        const state = topicStates.get(topicId)!
+        const clamped = clampIndex(index, state.count)
+        const batchSize = topicItems.length
+        // Sparse/corrupt legacy order (audit F1): capture the renderer's
+        // pre-batch ordered list (sort_order ASC, id ASC) BEFORE any write so
+        // the repair below can reproduce the renderer's pre-batch splice —
+        // prefix + new entries in input order + suffix. Relying on the shifted
+        // sort_order values instead would let duplicate legacy ties straddling
+        // the insert boundary re-sort new/existing rows together by id.
+        const preSpliceIds = state.dense ? null : loadOrderedIds(tx, messages, messages.topicId, topicId)
+        if (state.dense) {
+          // ONE sibling shift-by-count: every existing sibling at/after the
+          // clamped index moves down by exactly the batch size. On a healthy
+          // dense topic this leaves orders `index..index+M-1` free for the new
+          // rows and preserves density with zero per-row UPDATE logic.
+          tx.run(
+            sql`UPDATE ${messages} SET sort_order = sort_order + ${batchSize} WHERE ${messages.topicId} = ${topicId} AND ${messages.sortOrder} >= ${clamped}`
+          )
+        }
+        let next = clamped
+        for (const item of topicItems) {
+          const values = toInsertValues({ ...item, sortOrder: next })
+          tx.insert(messages)
+            .values(values as any)
+            .run()
+          next++
+        }
+        // Normalize ONLY topics that were not already dense (LOCK-002: corrupt
+        // order is repaired by the single pass; healthy order is never
+        // rewritten — zero normalization UPDATEs). The repair assigns dense
+        // orders from the exact pre-batch splice list, so Main's final row
+        // order matches the renderer's ordered-list splice.
+        if (preSpliceIds) {
+          const expectedIds = [...preSpliceIds]
+          expectedIds.splice(clamped, 0, ...topicItems.map((item) => item.id))
+          assignDenseOrders(tx, messages, expectedIds)
+        }
+      }
+      return items.map((item) =>
+        fromDrizzleResult<MessageData>(
+          tx.select().from(messages).where(eq(messages.id, item.id)).get() ?? ({} as any),
+          'messages',
+          item.id
+        )
       )
     })
   }

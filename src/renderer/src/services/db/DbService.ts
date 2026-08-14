@@ -1,6 +1,6 @@
 import db from '@renderer/databases'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
-import type { FileCleanupResult } from '@shared/chatDb'
+import type { FileCleanupResult, MessageBlockEntry } from '@shared/chatDb'
 
 import { fileLock } from '../FileLock'
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
@@ -69,11 +69,17 @@ class DbService implements MessageDataSource {
   ): Promise<FileCleanupResult> {
     return this.ordinarySource.updateMessageAndBlocks(topicId, updates, blocks, blockIdsToDelete)
   }
+  selectAnswerMessage(topicId: string, selectedMessageId: string, messageIds: string[]): Promise<void> {
+    return this.ordinarySource.selectAnswerMessage(topicId, selectedMessageId, messageIds)
+  }
   deleteMessage(topicId: string, messageId: string) {
     return this.ordinarySource.deleteMessage(topicId, messageId)
   }
   deleteMessages(topicId: string, messageIds: string[]) {
     return this.ordinarySource.deleteMessages(topicId, messageIds)
+  }
+  pasteMessagesToTopic(topicId: string, entries: MessageBlockEntry[], insertIndex?: number) {
+    return this.ordinarySource.pasteMessagesToTopic(topicId, entries, insertIndex)
   }
   topicExists(topicId: string) {
     return this.ordinarySource.topicExists(topicId)

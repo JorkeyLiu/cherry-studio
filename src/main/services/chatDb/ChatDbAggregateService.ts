@@ -398,6 +398,63 @@ export class ChatDbAggregateService {
   }
 
   /**
+   * PERF-100: one logical multi-model answer-tab selection.
+   *
+   * ONE root better-sqlite3 transaction performs the WHOLE selection:
+   * 1. Defense-in-depth uniqueness re-check (contract already rejects).
+   * 2. Load and validate EVERY supplied message belongs to the topic —
+   *    a missing or cross-topic ID throws a typed error and aborts the
+   *    transaction (no partial write).
+   * 3. Persist `foldSelected` for every supplied message: `true` for the
+   *    selected message, `false` for every other supplied ID — exactly one
+   *    selected message among the supplied group, atomically.
+   *
+   * Group coherence (which IDs form one answer group) is the caller's
+   * responsibility: the renderer supplies the full answer-group set. This
+   * aggregate intentionally does NOT invent askId/role coherence validation
+   * (legacy data cannot reliably prove it) — topic ownership + unique set +
+   * selected inclusion are the enforceable invariants.
+   *
+   * No timestamps/content/order changes: `foldSelected` is an existing
+   * persisted UI overflow field and the only field touched.
+   */
+  selectAnswerMessage(topicId: string, selectedMessageId: string, messageIds: string[]): ChatDbResult<null> {
+    return wrapResult(() => {
+      // Defense-in-depth (the shared contract already rejects duplicates and
+      // missing selected). Fail early on programmer error before any write.
+      const uniqueIds = new Set(messageIds)
+      if (uniqueIds.size !== messageIds.length) {
+        throw new ChatDbConflictError('Duplicate message IDs in the answer-group selection')
+      }
+      if (!messageIds.includes(selectedMessageId)) {
+        throw new ChatDbConflictError(`Selected message ${selectedMessageId} is not in the supplied answer group`)
+      }
+
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        // Phase 1 — validate ownership of every supplied message BEFORE any
+        // write. A missing or cross-topic ID aborts the whole transaction.
+        for (const id of messageIds) {
+          const existing = repos.messages.getInTopic(id, topicId)
+          if (!existing.found) {
+            throw new ChatDbNotFoundError(`Message ${id} does not belong to topic ${topicId}`)
+          }
+        }
+
+        // Phase 2 — persist exactly one selected message atomically:
+        // foldSelected=true for the selected, false for every other supplied
+        // ID. The overflow delta merge preserves all other message fields.
+        for (const id of messageIds) {
+          repos.messages.update(topicId, id, { overflow: { foldSelected: id === selectedMessageId } })
+        }
+
+        return null
+      })
+    }, `selectAnswerMessage(${topicId})`)
+  }
+
+  /**
    * Delete a single message. Only deletes if owned by the specified topic.
    * Missing/foreign IDs: no-op.
    */
@@ -1509,6 +1566,22 @@ export class ChatDbAggregateService {
    * Returns file cleanup facts: affectedFileIds (from prior refs on
    * existing blocks that were replaced) and remainingReferenceCounts.
    *
+   * Linear batch semantics (PERF-100 / LOCK-002): all NEW messages are
+   * converted and classified first, then inserted in ONE
+   * `messages.insertManyAt` batch — one sibling shift-by-count plus at most
+   * one dense-order repair per topic — never M per-message `insertAt` calls
+   * (M sibling shifts + M full-topic normalizations). Existing (same-topic)
+   * entries preserve their position and only receive a metadata patch, and
+   * in-request duplicate new IDs resolve exactly as before (first occurrence
+   * inserts, later occurrences take the update path), so error precedence
+   * and last-writer behavior are unchanged.
+   *
+   * Phase-4 block side effects (block upserts + file-reference syncs, and
+   * the prior-ref harvest for existing-message entries) run in the ORIGINAL
+   * request entry order (audit F1): the new/existing classification never
+   * reorders them, so rare cross-entry block-ID collisions keep the same
+   * last-writer and harvest timing as the legacy per-entry loop.
+   *
    * Atomicity: one root SQLite transaction.
    */
   pasteMessagesToTopic(
@@ -1523,10 +1596,24 @@ export class ChatDbAggregateService {
         // Ensure topic exists
         repos.topics.ensure(topicId)
 
-        const allAffectedFileIds: string[] = []
+        // Compute the starting insert position (append at end when absent)
+        const resolvedInsertIndex = insertIndex !== undefined ? insertIndex : repos.messages.listByTopic(topicId).length
 
-        // Compute the starting insert position
-        let nextIndex = insertIndex !== undefined ? insertIndex : repos.messages.listByTopic(topicId).length
+        // Phase 1 — convert every entry, enforce block ownership, and
+        // classify as new vs existing. Cross-topic ownership and duplicate
+        // new IDs are resolved here, before any write, so the first invalid
+        // entry aborts the whole transaction exactly as the per-entry loop
+        // did (error precedence is unchanged).
+        const newMessages: MessageData[] = []
+        const newMessageIds = new Set<string>()
+        const existingPlans: Array<{ id: string; patch: Record<string, unknown> }> = []
+        // Phase-4 side-effect order (audit F1): every entry's blocks in the
+        // ORIGINAL request order. `harvest` is true only for entries whose
+        // message already existed (or is an in-request duplicate — which the
+        // legacy loop observed as "existing" by the time it reached them),
+        // matching the legacy loop's prior-ref harvest timing exactly.
+        const phase4Plans: Array<{ blocks: MessageBlockData[]; harvest: boolean }> = []
+        const allAffectedFileIds: string[] = []
 
         for (const entry of entries) {
           const messageData = wireToMessage(entry.message)
@@ -1537,6 +1624,11 @@ export class ChatDbAggregateService {
           for (const block of blockDataList) {
             block.messageId = messageData.id
           }
+
+          const patch = wireToMessagePatch(entry.message)
+          delete patch.id
+          delete patch.topicId
+          delete patch.sortOrder
 
           // Check if message already exists
           const existing = repos.messages.getById(messageData.id)
@@ -1549,32 +1641,54 @@ export class ChatDbAggregateService {
                   `cannot paste into topic ${topicId}`
               )
             }
-            // Existing: preserve position, update metadata
-            const patch = wireToMessagePatch(entry.message)
-            delete patch.id
-            delete patch.topicId
-            delete patch.sortOrder
-            if (Object.keys(patch).length > 0) {
-              repos.messages.update(topicId, messageData.id, patch)
-            }
-
-            // Harvest prior file references for existing blocks before sync
-            for (const block of blockDataList) {
-              const priorRefs = repos.fileRefs.listByBlock(block.id)
-              const priorFileIds = collectAffectedFileIds(priorRefs)
-              allAffectedFileIds.push(...priorFileIds)
-            }
+            // Existing: preserve position, update metadata only
+            existingPlans.push({ id: messageData.id, patch })
+            phase4Plans.push({ blocks: blockDataList, harvest: true })
+          } else if (newMessageIds.has(messageData.id)) {
+            // Duplicate new ID within one request: the first occurrence is
+            // inserted; later occurrences follow the established update path
+            // (the legacy loop saw the just-inserted row and took the
+            // existing branch, including its prior-ref harvest).
+            existingPlans.push({ id: messageData.id, patch })
+            phase4Plans.push({ blocks: blockDataList, harvest: true })
           } else {
-            // New: insert at position
-            repos.messages.insertAt(messageData, nextIndex)
-            nextIndex++
+            // New: batch-insert at the resolved index in array order
+            newMessageIds.add(messageData.id)
+            newMessages.push(messageData)
+            phase4Plans.push({ blocks: blockDataList, harvest: false })
           }
+        }
 
-          // Upsert blocks + sync file references
-          if (blockDataList.length > 0) {
-            repos.blocks.upsertMany(blockDataList)
-            this.syncFileReferences(repos, blockDataList)
+        // Phase 2 — batch-insert all new messages (ONE sibling shift-by-count
+        // plus at most one dense-order repair; PERF-100).
+        if (newMessages.length > 0) {
+          repos.messages.insertManyAt(newMessages, resolvedInsertIndex)
+        }
+
+        // Phase 3 — metadata patches for existing rows and in-request
+        // duplicates (applied after the batch insert so duplicate entries
+        // patch the just-inserted row, matching the per-entry loop).
+        for (const plan of existingPlans) {
+          if (Object.keys(plan.patch).length > 0) {
+            repos.messages.update(topicId, plan.id, plan.patch)
           }
+        }
+
+        // Phase 4 — harvest prior refs (existing-message entries only), then
+        // upsert blocks + sync file references for ALL entries in ORIGINAL
+        // request order (audit F1: the new/existing classification must not
+        // reorder block side effects, so rare cross-entry block-ID collisions
+        // keep the legacy per-entry loop's last-writer and harvest timing).
+        for (const plan of phase4Plans) {
+          if (plan.blocks.length === 0) continue
+          if (plan.harvest) {
+            for (const block of plan.blocks) {
+              const priorRefs = repos.fileRefs.listByBlock(block.id)
+              allAffectedFileIds.push(...collectAffectedFileIds(priorRefs))
+            }
+          }
+          repos.blocks.upsertMany(plan.blocks)
+          this.syncFileReferences(repos, plan.blocks)
         }
 
         // Deduplicate affected IDs and compute remaining counts

@@ -88,6 +88,18 @@ interface RemoveMessagesPayload {
   messageIds: string[]
 }
 
+/**
+ * PERF-100: one plural foldSelected commit for one logical answer-tab
+ * selection. Commits every patch of one logical selection in ONE reducer
+ * action via the adapter's `updateMany` (single store notification) while
+ * preserving message order/IDs. Purpose-bounded: no blockInstruction
+ * handling, no topic-list mutation.
+ */
+interface UpdateManyMessagesPayload {
+  topicId: string
+  updates: Array<{ messageId: string; updates: Partial<Message> }>
+}
+
 // Payload for inserting a message at a specific index
 interface InsertMessageAtIndexPayload {
   topicId: string
@@ -197,6 +209,22 @@ export const messagesSlice = createSlice({
       } else {
         messagesAdapter.updateOne(state, { id: messageId, changes: otherUpdates })
       }
+    },
+    /**
+     * PERF-100: one plural foldSelected commit for one logical answer-tab
+     * selection. The DB-first thunk calls this exactly once after the atomic
+     * Main command succeeds — a single store notification commits every
+     * patch (adapter `updateMany`, order/IDs preserved) instead of one
+     * `updateMessage` dispatch per message.
+     */
+    updateManyMessages(state, action: PayloadAction<UpdateManyMessagesPayload>) {
+      const { updates } = action.payload
+      messagesAdapter.updateMany(
+        state,
+        updates
+          .map(({ messageId, updates: changes }) => ({ id: messageId, changes }))
+          .filter((entry) => state.entities[entry.id] !== undefined)
+      )
     },
     removeMessage(state, action: PayloadAction<RemoveMessagePayload>) {
       const { topicId, messageId } = action.payload

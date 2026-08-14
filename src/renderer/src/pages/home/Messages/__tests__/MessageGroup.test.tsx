@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   editMessage: vi.fn(),
   editMessageBlocks: vi.fn(),
+  selectAnswerMessage: vi.fn(),
   resendUserMessageWithEdit: vi.fn(),
   scrollIntoView: vi.fn(),
   setTimeoutTimer: vi.fn(),
@@ -20,13 +21,17 @@ const mocks = vi.hoisted(() => ({
     off: vi.fn(),
     emit: vi.fn()
   },
+  lastMenuBarProps: undefined as { setSelectedMessage?: (message: Message) => void } | undefined,
   MessageEditingProvider: vi.fn(({ children }: { children: ReactNode }) => <>{children}</>),
   useMessageEditing: vi.fn().mockReturnValue({
     editingMessageId: null,
     startEditing: vi.fn(),
     stopEditing: vi.fn()
   }),
-  MessageGroupMenuBar: vi.fn(() => <div className="group-menu-bar">menu</div>),
+  MessageGroupMenuBar: vi.fn((props: { setSelectedMessage?: (message: Message) => void }) => {
+    mocks.lastMenuBarProps = props
+    return <div className="group-menu-bar">menu</div>
+  }),
   HorizontalScrollContainer: vi.fn(({ children }: { children: ReactNode }) => <div>{children}</div>),
   MessageContent: vi.fn(() => <div style={{ minHeight: 600 }}>Long message content</div>),
   MessageEditor: vi.fn(() => <div>editor</div>),
@@ -103,6 +108,7 @@ vi.mock('@renderer/hooks/useMessageOperations', () => ({
   useMessageOperations: () => ({
     editMessage: mocks.editMessage,
     editMessageBlocks: mocks.editMessageBlocks,
+    selectAnswerMessage: mocks.selectAnswerMessage,
     resendUserMessageWithEdit: mocks.resendUserMessageWithEdit
   })
 }))
@@ -253,5 +259,56 @@ describe('MessageGroup', () => {
     const contentContainer = container.querySelector('#message-msg-1 .message-content-container')
     expect(contentContainer).not.toBeNull()
     expect(getComputedStyle(contentContainer as HTMLElement).overflowY).toBe('visible')
+  })
+
+  it('passes the edit-mode flag as the inline editor reset token (PERF-100)', () => {
+    const messages = [createMessage('msg-1', 0, 'fold')]
+    const topic = { id: 'topic-1' } as Topic
+
+    const { rerender } = render(<MessageGroup messages={messages} topic={topic} isEditMode={false} />)
+
+    const lastCallProps = mocks.MessageEditingProvider.mock.calls.at(-1)
+    expect(lastCallProps?.[0]).toMatchObject({ resetToken: false })
+
+    rerender(<MessageGroup messages={messages} topic={topic} isEditMode={true} />)
+
+    const lastCallPropsAfterToggle = mocks.MessageEditingProvider.mock.calls.at(-1)
+    expect(lastCallPropsAfterToggle?.[0]).toMatchObject({ resetToken: true })
+  })
+
+  it('selects a message via ONE atomic answer-group command (PERF-100) and preserves the 200ms scroll timer', () => {
+    const messages = [
+      { ...createMessage('msg-1', 0, 'fold'), foldSelected: true },
+      { ...createMessage('msg-2', 1, 'fold'), foldSelected: false }
+    ] as unknown as (Message & { index: number })[]
+    const topic = { id: 'topic-1' } as Topic
+
+    render(<MessageGroup messages={messages} topic={topic} />)
+
+    // Invoke the real setSelectedMessage callback through the menu bar props.
+    const setSelectedMessage = mocks.lastMenuBarProps?.setSelectedMessage
+    expect(setSelectedMessage).toBeDefined()
+    setSelectedMessage!(messages[1])
+
+    // ONE atomic selection call with the FULL answer group — never two
+    // per-message editMessage writes.
+    expect(mocks.selectAnswerMessage).toHaveBeenCalledTimes(1)
+    expect(mocks.selectAnswerMessage).toHaveBeenCalledWith('msg-2', ['msg-1', 'msg-2'])
+    expect(mocks.editMessage).not.toHaveBeenCalled()
+
+    // The 200ms setTimeoutTimer smooth-scroll contract is preserved exactly.
+    expect(mocks.setTimeoutTimer).toHaveBeenCalledTimes(1)
+    const [timerKey, timerCallback, delay] = mocks.setTimeoutTimer.mock.calls[0]
+    expect(timerKey).toBe('setSelectedMessage')
+    expect(delay).toBe(200)
+    expect(typeof timerCallback).toBe('function')
+
+    // The timer callback dispatches a smooth scroll into view on the target.
+    mocks.setTimeoutTimer.mock.calls[0][1]()
+    expect(mocks.scrollIntoView).toHaveBeenCalledWith(expect.anything(), {
+      behavior: 'smooth',
+      block: 'start',
+      container: 'nearest'
+    })
   })
 })

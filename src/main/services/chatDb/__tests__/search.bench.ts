@@ -47,6 +47,12 @@ import { drizzle } from 'drizzle-orm/better-sqlite3'
 import { registerChatDbNormalize, runMigrations } from '../migration'
 import { SearchRepository } from '../repository/SearchRepository'
 import * as schema from '../schema'
+import {
+  BENCH_RESULT_SCHEMA_VERSION,
+  type BenchmarkResult,
+  collectEnvironmentMetadata,
+  emitBenchmarkResultAfterSuccessfulTasks
+} from './benchResult'
 import { generateCorpus, hybridSearchAll, likeSearch, QUERY_FIXTURES } from './searchBenchHarness'
 
 // ---------------------------------------------------------------------------
@@ -196,14 +202,62 @@ console.log(
 )
 
 // ---------------------------------------------------------------------------
+// PERF-001 machine-readable result artifact (schema v1) — the result DATA is
+// built here (after the parity gate passed and the timings were collected),
+// but the artifact is WRITTEN only by the file-level afterAll below, and only
+// when every registered tinybench task completed successfully (audit F1).
+// Parity/threshold failures already aborted collection before this point, so
+// no artifact can be produced by a failed run (docs/performance-program.md
+// §5.1). The tinybench tasks below are comparison output; the authoritative
+// metrics and gates for this benchmark are the ones recorded here.
+// ---------------------------------------------------------------------------
+
+const searchBenchmarkResult: BenchmarkResult = {
+  schemaVersion: BENCH_RESULT_SCHEMA_VERSION,
+  benchmark: {
+    id: 'chatdb-search-10k',
+    name: 'Search — 10k corpus LIKE vs hybrid FTS',
+    scale: {
+      blocks: 10_000,
+      queryFixtures: QUERY_FIXTURES.length,
+      warmupRounds: WARMUP_ROUNDS,
+      measureRounds: MEASURE_ROUNDS,
+      pageSize: 100
+    }
+  },
+  environment: collectEnvironmentMetadata({ command: 'pnpm bench:main:native' }),
+  metrics: [
+    { id: 'like.p50', name: 'LIKE baseline p50', value: likeP50, unit: 'ms' },
+    { id: 'like.p95', name: 'LIKE baseline p95', value: likeP95, unit: 'ms' },
+    { id: 'like.mean', name: 'LIKE baseline mean', value: likeMean, unit: 'ms' },
+    { id: 'fts.p50', name: 'Hybrid FTS p50', value: ftsP50, unit: 'ms' },
+    { id: 'fts.p95', name: 'Hybrid FTS p95', value: ftsP95, unit: 'ms' },
+    { id: 'fts.mean', name: 'Hybrid FTS mean', value: ftsMean, unit: 'ms' },
+    { id: 'speedup.p50', name: 'LIKE/FTS speedup p50', value: likeP50 / ftsP50, unit: 'x' },
+    { id: 'speedup.p95', name: 'LIKE/FTS speedup p95', value: likeP95 / ftsP95, unit: 'x' }
+  ],
+  gates: [
+    {
+      id: 'parity.ordered',
+      name: 'Full ordered block-ID parity across all cursor pages',
+      kind: 'correctness',
+      passed: parityErrors.length === 0,
+      detail: `${QUERY_FIXTURES.length}/${QUERY_FIXTURES.length} fixtures passed complete ordered parity`
+    },
+    {
+      id: 'parity.no-duplicates',
+      name: 'No duplicate block IDs across cursor pages',
+      kind: 'correctness',
+      passed: parityErrors.length === 0
+    }
+  ]
+}
+
+// ---------------------------------------------------------------------------
 // Vitest bench tasks — standard tinybench comparison output
 // ---------------------------------------------------------------------------
 
 describe('search 10k corpus — LIKE vs hybrid FTS (10 query fixtures)', () => {
-  afterAll(() => {
-    cleanup()
-  })
-
   bench(
     'normalized LIKE full-scan baseline',
     () => {
@@ -228,4 +282,17 @@ describe('search 10k corpus — LIKE vs hybrid FTS (10 query fixtures)', () => {
     },
     { warmupIterations: 2, iterations: 5 }
   )
+})
+
+// File-level afterAll: Vitest bench mode runs file-level hooks but NOT
+// describe-level hooks, and the artifact gate must observe every bench task
+// above — so emission + cleanup live here. The write is gated on ALL
+// registered tasks completing with state 'pass' (audit F1); a silently
+// swallowed throwing task stays at 'run' and suppresses the artifact.
+afterAll((suite) => {
+  const artifactPath = emitBenchmarkResultAfterSuccessfulTasks(suite, searchBenchmarkResult)
+  if (artifactPath !== null) {
+    console.log(`Result artifact: ${artifactPath}`)
+  }
+  cleanup()
 })

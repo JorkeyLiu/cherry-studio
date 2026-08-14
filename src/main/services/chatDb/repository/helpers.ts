@@ -270,6 +270,8 @@ export interface DenseOrderInspection {
   dense: boolean
   /** Current MAX(sort_order) in the sibling set (-1 when empty). */
   maxOrder: number
+  /** Current sibling row count (0 when empty). Same single aggregate query as the density proof. */
+  count: number
 }
 
 /**
@@ -308,10 +310,11 @@ export function inspectDenseZeroBasedOrder(
     .from(table)
     .where(eq(parentCol, parentId))
     .get()
-  if (!row) return { dense: true, maxOrder: -1 }
+  if (!row) return { dense: true, maxOrder: -1, count: 0 }
   return {
     dense: row.cnt === row.distinctCnt && row.minOrder === 0 && row.maxOrder === row.cnt - 1,
-    maxOrder: row.maxOrder
+    maxOrder: row.maxOrder,
+    count: row.cnt
   }
 }
 

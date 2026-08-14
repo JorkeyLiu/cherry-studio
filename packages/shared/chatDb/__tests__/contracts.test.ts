@@ -23,6 +23,8 @@ describe('chatDbContracts', () => {
     'chatdb:append-message',
     'chatdb:update-message',
     'chatdb:update-message-and-blocks',
+    // PERF-100: one atomic multi-model answer-tab selection
+    'chatdb:select-answer-message',
     'chatdb:delete-message',
     'chatdb:delete-messages',
     'chatdb:update-blocks',
@@ -189,6 +191,26 @@ describe('validateChatDbRequest — valid payloads', () => {
         topicId: 'topic-1',
         messageUpdates: { id: 'msg-1', content: 'updated' },
         blocksToUpdate: [{ id: 'blk-1', messageId: 'msg-1', content: 'new' }]
+      })
+    ).not.toThrow()
+  })
+
+  it('select-answer-message: minimal valid group with selected included once', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', {
+        topicId: 'topic-1',
+        selectedMessageId: 'a-2',
+        messageIds: ['a-1', 'a-2', 'a-3']
+      })
+    ).not.toThrow()
+  })
+
+  it('select-answer-message: single-message group is valid', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', {
+        topicId: 'topic-1',
+        selectedMessageId: 'a-1',
+        messageIds: ['a-1']
       })
     ).not.toThrow()
   })
@@ -571,6 +593,98 @@ describe('validateChatDbRequest — invalid payloads', () => {
     ).toThrow(ValidationError)
   })
 
+  // PERF-100: select-answer-message invalid payloads
+  it('select-answer-message: rejects missing topicId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', {
+        selectedMessageId: 'a-1',
+        messageIds: ['a-1']
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects missing selectedMessageId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', {
+        topicId: 't1',
+        messageIds: ['a-1']
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects non-array messageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', {
+        topicId: 't1',
+        selectedMessageId: 'a-1',
+        messageIds: 'a-1'
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects empty messageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', {
+        topicId: 't1',
+        selectedMessageId: 'a-1',
+        messageIds: []
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects empty-string or non-string messageIds', () => {
+    for (const messageIds of [[''], [42], [null], [undefined]]) {
+      expect(() =>
+        validateChatDbRequest('chatdb:select-answer-message', {
+          topicId: 't1',
+          selectedMessageId: 'a-1',
+          messageIds
+        })
+      ).toThrow(ValidationError)
+    }
+  })
+
+  it('select-answer-message: rejects duplicate messageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', {
+        topicId: 't1',
+        selectedMessageId: 'a-1',
+        messageIds: ['a-1', 'a-2', 'a-1']
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects selected missing from messageIds (zero occurrences)', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', {
+        topicId: 't1',
+        selectedMessageId: 'a-9',
+        messageIds: ['a-1', 'a-2']
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects selected appearing more than once', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', {
+        topicId: 't1',
+        selectedMessageId: 'a-2',
+        messageIds: ['a-1', 'a-2', 'a-2']
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects unknown keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', {
+        topicId: 't1',
+        selectedMessageId: 'a-1',
+        messageIds: ['a-1'],
+        foldSelected: true
+      })
+    ).toThrow(ValidationError)
+  })
+
   it('delete-messages: rejects non-string array', () => {
     expect(() =>
       validateChatDbRequest('chatdb:delete-messages', {
@@ -888,6 +1002,18 @@ describe('JSON round-trip', () => {
     expect(roundTripped).toEqual(original)
   })
 
+  it('select-answer-message survives round-trip', () => {
+    const original = {
+      topicId: 'topic-1',
+      selectedMessageId: 'a-2',
+      messageIds: ['a-1', 'a-2', 'a-3']
+    }
+
+    const roundTripped = JSON.parse(JSON.stringify(original))
+    expect(() => validateChatDbRequest('chatdb:select-answer-message', roundTripped)).not.toThrow()
+    expect(roundTripped).toEqual(original)
+  })
+
   it('fetch-messages response shape round-trips', () => {
     const response = {
       messages: [
@@ -923,6 +1049,11 @@ describe('contract allowedKeys', () => {
   it('update-message-and-blocks has exactly topicId, messageUpdates, blocksToUpdate, blockIdsToDelete', () => {
     const keys = getContract('chatdb:update-message-and-blocks').allowedKeys
     expect(keys).toEqual(new Set(['topicId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete']))
+  })
+
+  it('select-answer-message has exactly topicId, selectedMessageId, messageIds', () => {
+    const keys = getContract('chatdb:select-answer-message').allowedKeys
+    expect(keys).toEqual(new Set(['topicId', 'selectedMessageId', 'messageIds']))
   })
 
   it('ensure-topic has topicId, assistantId, and name keys', () => {
@@ -1185,6 +1316,16 @@ describe('validateChatDbResult — valid success envelopes', () => {
 
   it('update-message: null value', () => {
     expect(() => validateChatDbResult('chatdb:update-message', { ok: true, value: null })).not.toThrow()
+  })
+
+  it('select-answer-message: null value (void command)', () => {
+    expect(() => validateChatDbResult('chatdb:select-answer-message', { ok: true, value: null })).not.toThrow()
+  })
+
+  it('select-answer-message: rejects non-null success value', () => {
+    expect(() => validateChatDbResult('chatdb:select-answer-message', { ok: true, value: 'unexpected' })).toThrow(
+      ValidationError
+    )
   })
 
   it('update-message-and-blocks: valid FileCleanupResult', () => {
@@ -1911,6 +2052,8 @@ describe('coverage consistency', () => {
     'chatdb:append-message',
     'chatdb:update-message',
     'chatdb:update-message-and-blocks',
+    // PERF-100: one atomic multi-model answer-tab selection
+    'chatdb:select-answer-message',
     'chatdb:delete-message',
     'chatdb:delete-messages',
     'chatdb:update-blocks',

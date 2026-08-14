@@ -993,8 +993,21 @@ export const appendAssistantResponseThunk =
         })
       )
 
-      void dispatch(updateMessageAndBlocksThunk(topicId, { id: existingAssistantMessageId, foldSelected: false }, []))
-      void dispatch(updateMessageAndBlocksThunk(topicId, { id: newAssistantMessageStub.id, foldSelected: true }, []))
+      // 4b. PERF-100: the same selected-answer invariant — the newly appended
+      // response becomes the group's single selection. The stub was persisted
+      // (saveMessageAndBlocksToDB) and committed to Redux above, so the full
+      // answer group is resolvable here. ONE atomic select-answer-message
+      // command + ONE plural Redux commit replaces the two fire-and-forget
+      // updateMessageAndBlocks writes below, preserving fire-and-forget
+      // lifecycle semantics (the processing queue starts immediately).
+      // The aggregate enforces topic ownership + unique set + selected
+      // inclusion; group coherence comes from the shared askId.
+      const selectState = getState()
+      const answerGroupIds = (selectState.messages.messageIdsByTopic[topicId] || [])
+        .map((id) => selectState.messages.entities[id])
+        .filter((m): m is Message => !!m && m.role === 'assistant' && m.askId === askId)
+        .map((m) => m.id)
+      void dispatch(selectAnswerMessageThunk(topicId, newAssistantMessageStub.id, answerGroupIds))
 
       // 5. Prepare and queue the processing task
       const assistantConfigForThisCall = {
@@ -1365,6 +1378,44 @@ export const updateMessageAndBlocksThunk =
     dispatch(updateTopicUpdatedAt({ topicId }))
 
     return cleanup
+  }
+
+/**
+ * PERF-100: switch the selected answer within one multi-model answer group.
+ *
+ * DB-first, single-commit:
+ * 1. ONE `selectAnswerMessage` ChatDb command → ONE Main root SQLite
+ *    transaction validates topic ownership of every supplied message ID and
+ *    persists exactly one foldSelected=true atomically (no partial write).
+ *    The data source dispatches `updateTopicUpdatedAt` exactly once on
+ *    success — this thunk must NOT dispatch it again.
+ * 2. On success, ONE plural `updateManyMessages` Redux dispatch commits every
+ *    foldSelected patch in a single store notification.
+ * 3. On DB failure the error propagates and NO Redux commit happens.
+ *
+ * The caller supplies the FULL answer-group message IDs; group coherence is
+ * the caller's responsibility (Main enforces topic ownership + unique set +
+ * selected inclusion only).
+ */
+export const selectAnswerMessageThunk =
+  (topicId: string, selectedMessageId: string, messageIds: string[]) =>
+  async (dispatch: AppDispatch): Promise<void> => {
+    // 1. Atomic SQLite persistence (DB-first, LOCK-001). The Main command
+    // rejects missing/cross-topic IDs atomically; on failure the error
+    // propagates and Redux is never touched.
+    await dbService.selectAnswerMessage(topicId, selectedMessageId, messageIds)
+
+    // 2. ONE plural Redux commit for the whole logical selection.
+    dispatch(
+      newMessagesActions.updateManyMessages({
+        topicId,
+        updates: messageIds.map((messageId) => ({
+          messageId,
+          updates: { foldSelected: messageId === selectedMessageId }
+        }))
+      })
+    )
+    // updateTopicUpdatedAt is dispatched exactly once by the data source.
   }
 
 export const removeBlocksThunk =

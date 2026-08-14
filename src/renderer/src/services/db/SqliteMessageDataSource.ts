@@ -71,6 +71,7 @@ import type {
   RestoreTopicResponse,
   SearchMessagesRequest,
   SearchMessagesResponse,
+  SelectAnswerMessageRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   TopicWire,
@@ -105,6 +106,8 @@ export interface ChatDbApi {
   appendMessage(request: AppendMessageRequest): Promise<ChatDbResult<null>>
   updateMessage(request: UpdateMessageRequest): Promise<ChatDbResult<null>>
   updateMessageAndBlocks(request: UpdateMessageAndBlocksRequest): Promise<ChatDbResult<FileCleanupResult>>
+  // PERF-100: one atomic multi-model answer-tab selection
+  selectAnswerMessage(request: SelectAnswerMessageRequest): Promise<ChatDbResult<null>>
   deleteMessage(request: DeleteMessageRequest): Promise<ChatDbResult<null>>
   deleteMessages(request: DeleteMessagesRequest): Promise<ChatDbResult<null>>
   updateBlocks(request: UpdateBlocksRequest): Promise<ChatDbResult<null>>
@@ -388,6 +391,23 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const result = unwrap(await this.api.updateMessageAndBlocks(request))
     dispatchTopicUpdatedAt(topicId)
     return result
+  }
+
+  /**
+   * PERF-100: one atomic multi-model answer-tab selection.
+   *
+   * ONE named bridge call to the Main `selectAnswerMessage` command (ONE
+   * root SQLite transaction validating topic ownership of every supplied ID
+   * and persisting exactly one foldSelected=true). Unwraps ChatDbResult,
+   * throws ChatDbResultError on structured failure, propagates transport
+   * rejection unchanged. No retry, no fallback. Dispatches
+   * `updateTopicUpdatedAt` exactly once after success — the calling thunk
+   * must NOT dispatch it again for the same logical selection.
+   */
+  async selectAnswerMessage(topicId: string, selectedMessageId: string, messageIds: string[]): Promise<void> {
+    const request: SelectAnswerMessageRequest = cloneForWire({ topicId, selectedMessageId, messageIds })
+    unwrap(await this.api.selectAnswerMessage(request))
+    dispatchTopicUpdatedAt(topicId)
   }
 
   async deleteMessage(topicId: string, messageId: string): Promise<void> {

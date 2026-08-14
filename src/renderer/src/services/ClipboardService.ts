@@ -5,7 +5,7 @@ import type { AppDispatch, RootState } from '@renderer/store'
 import { clearClipboard, setClipboard } from '@renderer/store/clipboard'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
-import { deleteMessagesFromDB, saveMessageAndBlocksToDB } from '@renderer/store/thunk/messageThunk'
+import { deleteMessagesFromDB } from '@renderer/store/thunk/messageThunk'
 import {
   collectSegmentSnapshots,
   collectWholeSelectedSegmentsForClipboard,
@@ -25,6 +25,7 @@ import type {
 import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import type { TopicSegment } from '@renderer/types/topicSegment'
+import type { MessageBlockEntry } from '@shared/chatDb'
 import { v4 as uuidv4 } from 'uuid'
 
 import { buildGroupList, transferAnchorsAfterDeletion } from './anchorService'
@@ -288,6 +289,14 @@ export function cutMessages(
 /**
  * Paste clipboard content into the target topic at the position after targetMessageId.
  * Returns the number of message groups pasted.
+ *
+ * PERF-100 batch semantics: instead of M awaited per-message append IPCs
+ * (each with its own transaction + sibling shift + full-topic normalization)
+ * and M `insertMessageAtIndex` Redux commits, the insertion phase performs
+ * exactly ONE `pasteMessagesToTopic` batch IPC (one Main transaction, one
+ * `insertManyAt` sibling shift-by-count, at most one normalization) and ONE
+ * ordered `messagesReceived` projection commit. Clipboard/undo/file/segment
+ * semantics are unchanged.
  */
 export async function pasteMessages(
   dispatch: AppDispatch,
@@ -306,6 +315,9 @@ export async function pasteMessages(
   // Sort items by their original position to preserve document order
   const items = [...rawItems].sort((a, b) => a.positionIndex - b.positionIndex)
 
+  // Pre-batch ordered target message projection (captured BEFORE any DB or
+  // Redux mutation; used both for the insert index and to derive the exact
+  // post-batch ordered list for the single projection commit).
   const targetMessages = selectMessagesForTopic(state, targetTopicId)
 
   // Calculate insertion position
@@ -313,6 +325,8 @@ export async function pasteMessages(
   if (targetMessageId) {
     insertIndex = calculateInsertIndex(targetMessages, targetMessageId)
   }
+  // Clamp to the same range the Main batch primitive clamps to ([0, count]).
+  const clampedInsertIndex = Math.max(0, Math.min(insertIndex, targetMessages.length))
 
   // Track file reference deltas for undo
   const fileReferenceDeltas: Array<{ fileId: string; delta: number }> = []
@@ -347,6 +361,9 @@ export async function pasteMessages(
 
   // ID mapping: original message ID → new message ID
   const idMapping = new Map<string, string>()
+
+  // Ordered batch entries for the ONE `pasteMessagesToTopic` call.
+  const entries: Array<{ message: Message; blocks: MessageBlock[] }> = []
 
   for (const item of items) {
     // First pass: generate new IDs for all messages in the group
@@ -403,34 +420,67 @@ export async function pasteMessages(
         }
       }
 
-      // DB-first: Persist to DB before dispatching to Redux
-      try {
-        await saveMessageAndBlocksToDB(targetTopicId, newMessage, clonedBlocksForMsg, insertIndex)
-
-        // Dispatch to Redux only after DB write succeeds
-        dispatch(
-          newMessagesActions.insertMessageAtIndex({
-            topicId: targetTopicId,
-            message: newMessage,
-            index: insertIndex
-          })
-        )
-
-        // Upsert blocks to Redux
-        if (clonedBlocksForMsg.length > 0) {
-          dispatch(upsertManyBlocks(clonedBlocksForMsg))
-        }
-
-        allInsertedMessages.push(newMessage)
-        allInsertedBlocks.push(...clonedBlocksForMsg)
-        insertedMessageIds.push(newMsgId)
-
-        insertIndex++
-      } catch (error) {
-        logger.error('[pasteMessages] Failed to save message to DB', error as Error)
-        throw new Error(`[pasteMessages] DB write failed for message ${newMsgId}`)
-      }
+      entries.push({ message: newMessage, blocks: clonedBlocksForMsg })
+      allInsertedMessages.push(newMessage)
+      allInsertedBlocks.push(...clonedBlocksForMsg)
+      insertedMessageIds.push(newMsgId)
     }
+  }
+
+  // Active-topic projection precondition (correctness fix): this guard is a
+  // PURE renderer-state check against persistence — it runs BEFORE the DB
+  // batch call so a topic-switch race cannot commit pasted rows and then fail
+  // before renderer projection. Projection still occurs only after DB success
+  // (DB-first unchanged).
+  //
+  // `pasteMessages` is only reachable from edit-mode in the ACTIVE topic
+  // (useEditMode.handlePaste ← EditModeProvider topic.id in the Messages
+  // view), so `targetTopicId` === `state.messages.currentTopicId` always
+  // holds here. `messagesReceived` replaces `messageIdsByTopic[topicId]` with
+  // the supplied ordered list AND sets `currentTopicId = topicId`; under this
+  // precondition the active-topic side effect is a no-op, making the single
+  // ordered projection commit safe. The assertion makes the precondition
+  // mechanical: a future non-active-topic call fails loudly instead of
+  // silently re-pointing the active topic.
+  //
+  // Bounded projection contract (same as the existing `messageGroupReorder`
+  // `messagesReceived` usage): the list is a consistent pre-batch snapshot
+  // spliced with the regenerated IDs at the clamped index, so any message a
+  // NON-paste path appends to this same topic during the single batch IPC
+  // round-trip is not carried into the replacement list. The paste runs under
+  // the edit-mode `isProcessing` lock and targets only the active topic, so
+  // the exposure window is one IPC round-trip — the identical bounded
+  // contract the reorder projection already established.
+  const activeTopicId = getState().messages.currentTopicId
+  if (activeTopicId !== targetTopicId) {
+    logger.error(
+      `[pasteMessages] messagesReceived active-topic precondition failed: target ${targetTopicId}, active ${String(activeTopicId)}`
+    )
+    throw new Error(
+      `[pasteMessages] cannot project paste into non-active topic ${targetTopicId} (active: ${String(activeTopicId)})`
+    )
+  }
+
+  // DB-first (LOCK-001): ONE atomic batch insertion BEFORE any Redux commit.
+  // If the batch fails, Redux is never touched and nothing is projected.
+  try {
+    await dbService.pasteMessagesToTopic(targetTopicId, entries as unknown as MessageBlockEntry[], clampedInsertIndex)
+  } catch (error) {
+    logger.error('[pasteMessages] Failed to persist paste batch to DB', error as Error)
+    throw new Error(`[pasteMessages] DB batch write failed for ${entries.length} entries`)
+  }
+
+  // ONE ordered projection commit: splice the regenerated message IDs into
+  // the pre-batch ordered list at the SAME clamped insertion index the Main
+  // batch used (all batch entries land at that index in array order, so the
+  // spliced list is the exact post-batch order).
+  const postBatchMessages = [...targetMessages]
+  postBatchMessages.splice(clampedInsertIndex, 0, ...allInsertedMessages)
+  dispatch(newMessagesActions.messagesReceived({ topicId: targetTopicId, messages: postBatchMessages }))
+
+  // ONE block commit for all pasted blocks (after the message projection).
+  if (allInsertedBlocks.length > 0) {
+    dispatch(upsertManyBlocks(allInsertedBlocks))
   }
 
   // Increment file reference counts for pasted content
@@ -529,7 +579,7 @@ export async function pasteMessages(
   // Create undo action
   // Calculate anchor: first non-pasted message after the paste region
   const finalTargetMessages = selectMessagesForTopic(getState(), targetTopicId)
-  const afterInsertIndex = insertIndex
+  const afterInsertIndex = clampedInsertIndex
   const insertedIdSet = new Set(insertedMessageIds)
   const anchorMessageId = findAnchorAfterPosition(finalTargetMessages, afterInsertIndex, insertedIdSet)
 
@@ -540,7 +590,7 @@ export async function pasteMessages(
       timestamp: Date.now(),
       targetTopicId: targetTopicId,
       insertedMessageIds,
-      targetInsertPositionIndex: insertIndex - insertedMessageIds.length,
+      targetInsertPositionIndex: clampedInsertIndex,
       targetAnchorMessageId: anchorMessageId,
       sourceTopicId,
       sourceGroupAnchors,
@@ -558,7 +608,7 @@ export async function pasteMessages(
       timestamp: Date.now(),
       targetTopicId: targetTopicId,
       insertedMessageIds,
-      targetInsertPositionIndex: insertIndex - insertedMessageIds.length,
+      targetInsertPositionIndex: clampedInsertIndex,
       targetAnchorMessageId: anchorMessageId,
       targetSegmentSnapshots,
       pastedMessagesSnapshot: allInsertedMessages,
@@ -568,7 +618,7 @@ export async function pasteMessages(
     dispatch(pushUndoAction(undoAction))
   }
 
-  logger.info(`[pasteMessages] Pasted ${items.length} groups at index ${insertIndex - insertedMessageIds.length}`)
+  logger.info(`[pasteMessages] Pasted ${items.length} groups at index ${clampedInsertIndex}`)
   return items.length
 }
 

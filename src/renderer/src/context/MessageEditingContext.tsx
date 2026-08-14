@@ -9,8 +9,30 @@ interface MessageEditingContextType {
 
 const MessageEditingContext = createContext<MessageEditingContextType | null>(null)
 
-export function MessageEditingProvider({ children }: { children: ReactNode }) {
+interface MessageEditingProviderProps {
+  children: ReactNode
+  /**
+   * When this value changes, any active inline editor is closed. This is the
+   * mode-toggle reset: MessageGroup passes its boolean edit-mode flag
+   * (`isEditMode`) so entering/leaving edit mode never leaves an editor active
+   * across the toggle (replaces the remount side effect removed by PERF-100).
+   * Optional: consumers that never toggle edit mode (history previews, search
+   * results) omit it.
+   */
+  resetToken?: boolean
+}
+
+export function MessageEditingProvider({ children, resetToken }: MessageEditingProviderProps) {
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
+  const [prevResetToken, setPrevResetToken] = useState(resetToken)
+
+  // Adjust state during render (React's documented prop-derived reset): when
+  // the reset token changes, drop any active editor synchronously so the
+  // message subtree is never remounted to close it.
+  if (prevResetToken !== resetToken) {
+    setPrevResetToken(resetToken)
+    setEditingMessageId(null)
+  }
 
   const startEditing = (messageId: string) => {
     setEditingMessageId(messageId)

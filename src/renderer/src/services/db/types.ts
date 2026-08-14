@@ -1,5 +1,5 @@
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
-import type { FileCleanupResult } from '@shared/chatDb'
+import type { FileCleanupResult, MessageBlockEntry } from '@shared/chatDb'
 
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
 
@@ -73,6 +73,21 @@ export interface MessageDataSource {
   ): Promise<FileCleanupResult>
 
   /**
+   * PERF-100: switch the selected answer within one multi-model answer group.
+   *
+   * ONE Main SQLite transaction validates that every supplied `messageIds`
+   * belongs to the topic (missing/cross-topic rejects the whole operation,
+   * no partial write), then persists `foldSelected=true` for
+   * `selectedMessageId` and `foldSelected=false` for every other supplied
+   * ID — exactly one selected message among the group, atomically.
+   *
+   * The caller supplies the FULL answer-group IDs; group coherence is the
+   * caller's responsibility. Dispatches `updateTopicUpdatedAt` exactly once
+   * after a successful selection (the thunk must NOT dispatch it again).
+   */
+  selectAnswerMessage(topicId: string, selectedMessageId: string, messageIds: string[]): Promise<void>
+
+  /**
    * Delete a single message and its blocks
    */
   deleteMessage(topicId: string, messageId: string): Promise<void>
@@ -81,6 +96,16 @@ export interface MessageDataSource {
    * Delete multiple messages and their blocks
    */
   deleteMessages(topicId: string, messageIds: string[]): Promise<void>
+
+  /**
+   * Atomically insert an ordered batch of message+block entries at a
+   * position in one Main SQLite transaction (PERF-100 batch paste).
+   *
+   * Entries are inserted at `insertIndex` (zero-based; absent = append at
+   * end) in array order. Existing messages keep their position and only
+   * receive a metadata patch. Returns the aggregate FileCleanupResult.
+   */
+  pasteMessagesToTopic(topicId: string, entries: MessageBlockEntry[], insertIndex?: number): Promise<FileCleanupResult>
 
   // ============ Block Operations ============
   /**

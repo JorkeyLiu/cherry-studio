@@ -158,6 +158,30 @@ export interface UpdateMessageAndBlocksRequest {
   blockIdsToDelete?: string[]
 }
 
+/**
+ * @see IpcChannel.ChatDb_SelectAnswerMessage
+ *
+ * PERF-100: one logical multi-model answer-tab selection.
+ *
+ * The renderer supplies the FULL answer-group message IDs for the logical
+ * selection. Main validates (topic ownership of every supplied ID, no
+ * duplicates, selected included) and persists `foldSelected` for every
+ * supplied message in ONE atomic transaction: `true` for the selected
+ * message, `false` for every other supplied ID. No partial write; a missing
+ * or cross-topic ID rejects the whole operation.
+ *
+ * Group coherence (which IDs form one answer group) is the CALLER's
+ * responsibility — the aggregate intentionally does not invent askId/role
+ * coherence validation that could break legacy data.
+ */
+export interface SelectAnswerMessageRequest {
+  topicId: string
+  /** The message to select (`foldSelected=true`). Must be in `messageIds`. */
+  selectedMessageId: string
+  /** Full answer-group message IDs; non-empty, unique, includes the selected. */
+  messageIds: string[]
+}
+
 /** @see IpcChannel.ChatDb_DeleteMessage */
 export interface DeleteMessageRequest {
   topicId: string
@@ -586,6 +610,8 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:append-message': { request: AppendMessageRequest; response: null }
   'chatdb:update-message': { request: UpdateMessageRequest; response: null }
   'chatdb:update-message-and-blocks': { request: UpdateMessageAndBlocksRequest; response: FileCleanupResult }
+  // PERF-100: one atomic multi-model answer selection (foldSelected group switch)
+  'chatdb:select-answer-message': { request: SelectAnswerMessageRequest; response: null }
   'chatdb:delete-message': { request: DeleteMessageRequest; response: null }
   'chatdb:delete-messages': { request: DeleteMessagesRequest; response: null }
   'chatdb:update-blocks': { request: UpdateBlocksRequest; response: null }

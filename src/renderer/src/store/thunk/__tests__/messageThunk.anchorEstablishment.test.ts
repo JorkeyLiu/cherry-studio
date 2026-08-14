@@ -68,6 +68,7 @@ vi.mock('@renderer/services/db', () => ({
     deleteMessagesWithSegments: vi.fn(),
     resetMessagesForResend: vi.fn(),
     updateMessageAndBlocks: vi.fn(),
+    selectAnswerMessage: vi.fn().mockResolvedValue(undefined),
     updateMessage: vi.fn(),
     listBlocksByFile: vi.fn(),
     deleteBlocks: vi.fn()

@@ -41,6 +41,7 @@ import type {
   ResetMessagesForResendRequest,
   RestoreTopicRequest,
   SearchMessagesRequest,
+  SelectAnswerMessageRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   TransferTopicOwnershipRequest,
@@ -320,6 +321,54 @@ const updateMessageContract: ChatDbContract = {
     validateNoIdentityFields(req.updates, new Set(['id', 'topicId', 'sortOrder']), 'request.updates')
   },
   validateResult: voidResult('chatdb:update-message')
+}
+
+/**
+ * PERF-100: one logical multi-model answer-tab selection.
+ *
+ * Request invariants enforced at the shared boundary:
+ * - `topicId` and `selectedMessageId` are non-empty strings.
+ * - `messageIds` is a non-empty array of non-empty strings.
+ * - `messageIds` contains NO duplicates (unique set).
+ * - `selectedMessageId` appears in `messageIds` EXACTLY once.
+ * - No extra fields.
+ *
+ * Result is a void command (null success value).
+ */
+const selectAnswerMessageContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'selectedMessageId', 'messageIds'),
+  validate(value: unknown): void {
+    validateRequest(value, selectAnswerMessageContract.allowedKeys)
+    const req = value as SelectAnswerMessageRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateNonEmptyString(req.selectedMessageId, 'request.selectedMessageId')
+    if (!Array.isArray(req.messageIds)) {
+      throw new ValidationError('request.messageIds', 'Expected an array of message IDs')
+    }
+    if (req.messageIds.length === 0) {
+      throw new ValidationError('request.messageIds', 'Answer-group message IDs must not be empty')
+    }
+    const seen = new Set<string>()
+    let selectedCount = 0
+    for (let i = 0; i < req.messageIds.length; i++) {
+      const id = req.messageIds[i]
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new ValidationError(`request.messageIds[${i}]`, 'Expected a non-empty string')
+      }
+      if (seen.has(id)) {
+        throw new ValidationError(`request.messageIds[${i}]`, `Duplicate answer-group message ID at index ${i}`)
+      }
+      seen.add(id)
+      if (id === req.selectedMessageId) selectedCount += 1
+    }
+    if (selectedCount !== 1) {
+      throw new ValidationError(
+        'request.selectedMessageId',
+        `Selected message must appear in messageIds exactly once (found ${selectedCount})`
+      )
+    }
+  },
+  validateResult: voidResult('chatdb:select-answer-message')
 }
 
 const updateMessageAndBlocksContract: ChatDbContract = {
@@ -1199,6 +1248,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:append-message': appendMessageContract,
   'chatdb:update-message': updateMessageContract,
   'chatdb:update-message-and-blocks': updateMessageAndBlocksContract,
+  // PERF-100: one atomic multi-model answer selection (foldSelected group switch)
+  'chatdb:select-answer-message': selectAnswerMessageContract,
   'chatdb:delete-message': deleteMessageContract,
   'chatdb:delete-messages': deleteMessagesContract,
   'chatdb:update-blocks': updateBlocksContract,

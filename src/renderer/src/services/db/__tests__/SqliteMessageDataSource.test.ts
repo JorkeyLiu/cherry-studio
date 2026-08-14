@@ -64,6 +64,7 @@ import type {
   RestoreTopicResponse,
   SearchMessagesRequest,
   SearchMessagesResponse,
+  SelectAnswerMessageRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   UpdateBlocksRequest,
@@ -117,12 +118,12 @@ function makeApiSpy() {
     updateMessage: vi.fn<(request: UpdateMessageRequest) => Promise<ChatDbResult<null>>>(),
     updateMessageAndBlocks:
       vi.fn<(request: UpdateMessageAndBlocksRequest) => Promise<ChatDbResult<FileCleanupResult>>>(),
+    selectAnswerMessage: vi.fn<(request: SelectAnswerMessageRequest) => Promise<ChatDbResult<null>>>(),
     deleteMessage: vi.fn<(request: DeleteMessageRequest) => Promise<ChatDbResult<null>>>(),
     deleteMessages: vi.fn<(request: DeleteMessagesRequest) => Promise<ChatDbResult<null>>>(),
     updateBlocks: vi.fn<(request: UpdateBlocksRequest) => Promise<ChatDbResult<null>>>(),
     updateSingleBlock: vi.fn<(request: UpdateSingleBlockRequest) => Promise<ChatDbResult<null>>>(),
     bulkAddBlocks: vi.fn<(request: BulkAddBlocksRequest) => Promise<ChatDbResult<null>>>(),
-    // Phase 5.1A
     listSegments: vi.fn<(request: ListSegmentsRequest) => Promise<ChatDbResult<ListSegmentsResponse>>>(),
     upsertSegment: vi.fn<(request: UpsertSegmentRequest) => Promise<ChatDbResult<UpsertSegmentResponse>>>(),
     updateSegmentMetadata:
@@ -252,6 +253,24 @@ describe('SqliteMessageDataSource', () => {
       expect(req.messageUpdates.topicId).toBeUndefined()
       expect(req.messageUpdates.sortOrder).toBeUndefined()
       expect(req.messageUpdates.content).toBe('updated')
+    })
+
+    it('selectAnswerMessage calls api.selectAnswerMessage with the closed request (PERF-100)', async () => {
+      api.selectAnswerMessage.mockResolvedValue(successResult(null))
+      await ds.selectAnswerMessage('topic-1', 'a-2', ['a-1', 'a-2', 'a-3'])
+      expect(api.selectAnswerMessage).toHaveBeenCalledOnce()
+      expect(api.selectAnswerMessage).toHaveBeenCalledWith({
+        topicId: 'topic-1',
+        selectedMessageId: 'a-2',
+        messageIds: ['a-1', 'a-2', 'a-3']
+      })
+    })
+
+    it('selectAnswerMessage propagates structured failure as ChatDbResultError', async () => {
+      api.selectAnswerMessage.mockResolvedValue(failureResult('NOT_FOUND', 'Message does not belong to topic'))
+      await expect(ds.selectAnswerMessage('topic-1', 'a-2', ['a-1', 'a-2', 'a-3'])).rejects.toBeInstanceOf(
+        ChatDbResultError
+      )
     })
 
     it('deleteMessage calls api.deleteMessage', async () => {
@@ -978,6 +997,22 @@ describe('SqliteMessageDataSource', () => {
     it('dispatches after updateMessageAndBlocks', async () => {
       api.updateMessageAndBlocks.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
       await dispatchesAfter(() => ds.updateMessageAndBlocks('t-1', { id: 'm-1' } as any, []))
+    })
+
+    it('dispatches EXACTLY ONCE after selectAnswerMessage (PERF-100 one timestamp per logical selection)', async () => {
+      api.selectAnswerMessage.mockResolvedValue(successResult(null))
+      await dispatchesAfter(() => ds.selectAnswerMessage('t-1', 'a-2', ['a-1', 'a-2', 'a-3']))
+    })
+
+    it('does NOT dispatch when selectAnswerMessage fails (no commit on DB failure)', async () => {
+      api.selectAnswerMessage.mockResolvedValue(failureResult('NOT_FOUND', 'Message does not belong to topic'))
+      mockDispatch.mockClear()
+      try {
+        await ds.selectAnswerMessage('t-1', 'a-2', ['a-1', 'a-2', 'a-3'])
+      } catch {
+        // expected
+      }
+      expect(mockDispatch).not.toHaveBeenCalled()
     })
 
     it('dispatches after deleteMessage', async () => {
