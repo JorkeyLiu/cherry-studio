@@ -88,6 +88,7 @@
     "bench": "pnpm native:run node -- vitest bench --run",
     "bench:main": "pnpm native:run node -- vitest bench --run --project main --project main-native --project main-heavy",
     "bench:main:native": "pnpm native:run node -- vitest bench --run --project main-native",
+    "bench:search-stage": "SEARCH_STAGE_BENCH=1 SEARCH_BENCH_SCALE=50k pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/searchStage.bench.ts",
     "bench:renderer": "pnpm native:run node -- vitest bench --run --project renderer",
     "bench:aicore": "pnpm native:run node -- vitest bench --run --project aiCore",
     "bench:shared": "pnpm native:run node -- vitest bench --run --project shared",
