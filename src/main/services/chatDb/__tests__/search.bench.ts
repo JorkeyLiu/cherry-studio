@@ -1,15 +1,16 @@
 /**
- * Search Benchmark — Deterministic Corpus (1k / 10k) LIKE vs FTS Comparison
+ * Search Benchmark — Deterministic Corpus (1k / 10k / 50k) LIKE vs FTS Comparison
  *
  * LOCK-5129: Reports p50/p95 for normalized LIKE scan and hybrid FTS
  * candidate path on a deterministic corpus. Correctness parity is mandatory
  * and verified BEFORE any timing. No unstable absolute CI thresholds.
  *
- * PERF-004 first slice: the corpus profile is parameterized and selected via
- * the SEARCH_BENCH_SCALE environment variable — `1k` (fast deterministic
- * scale) or `10k` (pre-existing scale). Unset/empty selects the 10k default,
- * so `pnpm bench:main:native` behaves exactly as before. Both profiles carry
- * their scale in the schema-v1 artifact (`benchmark.scale.blocks` +
+ * PERF-004: the corpus profile is parameterized and selected via the
+ * SEARCH_BENCH_SCALE environment variable — `1k` (fast deterministic scale),
+ * `10k` (pre-existing scale, the unset/empty default), or `50k` (explicit
+ * on-demand only — never part of the default command, so `pnpm
+ * bench:main:native` behaves exactly as before). Each profile carries its
+ * scale in the schema-v1 artifact (`benchmark.scale.blocks` +
  * `scale.profileCode`, and the profile-specific benchmark id). Unknown
  * profile values fail loudly at load time; the benchmark never silently
  * measures a different scale than requested.
@@ -17,9 +18,10 @@
  * Run with:
  *   npx vitest bench --run --project main-native src/main/services/chatDb/__tests__/search.bench.ts           # 10k (default)
  *   SEARCH_BENCH_SCALE=1k npx vitest bench --run --project main-native src/main/services/chatDb/__tests__/search.bench.ts
+ *   SEARCH_BENCH_SCALE=50k npx vitest bench --run --project main-native src/main/services/chatDb/__tests__/search.bench.ts   # on-demand only
  *
  * Benchmark corpus (per profile):
- * - 1,000 or 10,000 MAIN_TEXT blocks with varied content
+ * - 1,000, 10,000, or 50,000 MAIN_TEXT blocks with varied content
  * - Mix of ASCII, CJK, markdown, long/short content
  * - 10 representative query fixtures
  *

@@ -166,11 +166,11 @@ describe('benchSummaryCli', () => {
 
 // ---------------------------------------------------------------------------
 // PERF-004 F1/F3 regression: the CLI forms one cross-scale family from real
-// emitter profile ids (chatdb-search-1k + chatdb-search-10k), with a blocks
-// curve and no profileCode axis.
+// emitter profile ids (chatdb-search-1k + chatdb-search-10k +
+// chatdb-search-50k), with a blocks curve and no profileCode axis.
 // ---------------------------------------------------------------------------
 
-function realSearchResult(profileKey: '1k' | '10k', likeP50: number): BenchmarkResult {
+function realSearchResult(profileKey: keyof typeof SEARCH_BENCH_PROFILES, likeP50: number): BenchmarkResult {
   const profile = SEARCH_BENCH_PROFILES[profileKey]
   return {
     schemaVersion: BENCH_RESULT_SCHEMA_VERSION,
@@ -210,13 +210,14 @@ describe('benchSummaryCli — real PERF-004 profile ids form one family', () => 
     familyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-summary-cli-family-'))
     writeBenchmarkResult(realSearchResult('1k', 1.35), { dir: familyDir, fileName: 'chatdb-search-1k-run.json' })
     writeBenchmarkResult(realSearchResult('10k', 12.5), { dir: familyDir, fileName: 'chatdb-search-10k-run.json' })
+    writeBenchmarkResult(realSearchResult('50k', 200), { dir: familyDir, fileName: 'chatdb-search-50k-run.json' })
   })
 
   afterAll(() => {
     fs.rmSync(familyDir, { recursive: true, force: true })
   })
 
-  it('reports one chatdb-search family series with a blocks curve containing both points', () => {
+  it('reports one chatdb-search family series with a blocks curve containing all three points and a knee', () => {
     const writers = io()
     const result = benchSummaryCli(['--dir', familyDir], writers, { cwd: familyDir })
     expect(result.code).toBe(0)
@@ -239,13 +240,14 @@ describe('benchSummaryCli — real PERF-004 profile ids form one family', () => 
     expect(parsed.series).toHaveLength(2)
     const likeP50 = parsed.series.find((s) => s.metricId === 'like.p50')
     expect(likeP50?.benchmarkId).toBe('chatdb-search')
-    expect(likeP50?.runs).toBe(2)
-    expect(likeP50?.scalePoints).toBe(2)
+    expect(likeP50?.runs).toBe(3)
+    expect(likeP50?.scalePoints).toBe(3)
     if (likeP50?.curve.kind === 'curve') {
       expect(likeP50.curve.curve.axis).toBe('blocks')
-      expect(likeP50.curve.curve.points.map((p) => p.scale)).toEqual([1000, 10_000])
+      expect(likeP50.curve.curve.points.map((p) => p.scale)).toEqual([1000, 10_000, 50_000])
       expect(likeP50.curve.curve.direction).toBe('increasing')
     }
-    expect(likeP50?.knee.kind).toBe('insufficient')
+    // Three points → a single interior knee inspection candidate (index 1).
+    expect(likeP50?.knee.kind).toBe('reported')
   })
 })

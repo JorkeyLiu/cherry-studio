@@ -4,9 +4,9 @@
  *
  * Covers the accepted/rejected file contract, deterministic grouping of
  * comparable metrics by scale, directional curve labels, run variance
- * (sufficient and explicit insufficient data), the simple knee candidate,
- * confounded scale handling, determinism of the whole report, and the
- * privacy guard (forbidden leaf keys never enter the analysis).
+ * (sufficient and explicit insufficient data), the spacing-aware knee
+ * candidate, confounded scale handling, determinism of the whole report, and
+ * the privacy guard (forbidden leaf keys never enter the analysis).
  *
  * Runs in the `scripts` Vitest project (real node modules — the scripts
  * project has no fs mocks). Valid artifacts are written through the real
@@ -296,7 +296,13 @@ describe('summarizeBenchmarkDirectory — valid multi-scale data', () => {
     if (speedup.curve.kind === 'curve') expect(speedup.curve.curve.direction).toBe('increasing')
   })
 
-  it('reports a knee candidate at the maximum absolute second difference', () => {
+  it('reports the single interior knee candidate with the spacing-aware slope-change magnitude', () => {
+    // Points (1000, 3), (2000, 3.2), (10_000, 12). With exactly three points
+    // there is only one interior inspection candidate (index 1). Its magnitude
+    // is the adjacent piecewise-linear slope change:
+    //   right slope (2k→10k span) - left slope (1k→2k span)
+    // = (12 - 3.2) / (10_000 - 2_000) - (3.2 - 3) / (2_000 - 1_000)
+    // = 8.8/8000 - 0.2/1000
     const likeP50 = seriesOf(report(), 'like.p50')
     expect(likeP50.knee).toEqual({
       kind: 'reported',
@@ -304,7 +310,7 @@ describe('summarizeBenchmarkDirectory — valid multi-scale data', () => {
         index: 1,
         scale: 2000,
         value: 3.2,
-        secondDifference: 12 - 2 * 3.2 + 3 // (12-3.2) - (3.2-3) = 8.6
+        slopeChange: (12 - 3.2) / (10_000 - 2_000) - (3.2 - 3) / (2_000 - 1_000)
       }
     })
   })
@@ -474,13 +480,14 @@ describe('confounded and non-monotonic curves', () => {
   })
 
   it('resolves knee ties to the lowest scale point', () => {
-    // Values 0,1,3,4: second differences at interior indices 1 and 2 are
-    // +1 and -1 (equal magnitude); the lower-scale interior point wins.
+    // Nonuniform spacing (1000, 2000, 4000, 10_000) with slopes 1 → 3 → 5:
+    // the adjacent slope change at interior indices 1 and 2 is +2 and +2
+    // (equal magnitude); the lower-scale interior point wins.
     const points = [
       { scale: { blocks: 1000 }, value: 0 },
-      { scale: { blocks: 2000 }, value: 1 },
-      { scale: { blocks: 3000 }, value: 3 },
-      { scale: { blocks: 10_000 }, value: 4 }
+      { scale: { blocks: 2000 }, value: 1000 },
+      { scale: { blocks: 4000 }, value: 7000 },
+      { scale: { blocks: 10_000 }, value: 37_000 }
     ]
     const curve = computeCurve(points)
     expect(curve.kind).toBe('curve')
@@ -488,7 +495,39 @@ describe('confounded and non-monotonic curves', () => {
       expect(curve.curve.direction).toBe('increasing')
       expect(computeKnee(curve)).toEqual({
         kind: 'reported',
-        candidate: { index: 1, scale: 2000, value: 1, secondDifference: 3 - 2 * 1 + 0 }
+        candidate: {
+          index: 1,
+          scale: 2000,
+          value: 1000,
+          slopeChange: (7000 - 1000) / (4000 - 2000) - (1000 - 0) / (2000 - 1000)
+        }
+      })
+    }
+  })
+
+  it('reports a signed slope change for a strictly decreasing curve', () => {
+    // Points (1000, 3000), (2000, 2000), (4000, 1000) are strictly decreasing,
+    // so the monotonic knee gate accepts the single interior candidate
+    // (index 1). Left slope (1k→2k span) = (2000-3000)/1000 = -1; right slope
+    // (2k→4k span) = (1000-2000)/2000 = -0.5; the signed slope change
+    // (right − left) is +0.5 — the curve flattens as it descends.
+    const points = [
+      { scale: { blocks: 1000 }, value: 3000 },
+      { scale: { blocks: 2000 }, value: 2000 },
+      { scale: { blocks: 4000 }, value: 1000 }
+    ]
+    const curve = computeCurve(points)
+    expect(curve.kind).toBe('curve')
+    if (curve.kind === 'curve') {
+      expect(curve.curve.direction).toBe('decreasing')
+      expect(computeKnee(curve)).toEqual({
+        kind: 'reported',
+        candidate: {
+          index: 1,
+          scale: 2000,
+          value: 2000,
+          slopeChange: 0.5
+        }
       })
     }
   })
@@ -539,7 +578,7 @@ describe('series identity includes unit', () => {
  * to reproduce pre-PERF-004 "old" artifacts.
  */
 function realSearchArtifact(
-  profileKey: '1k' | '10k',
+  profileKey: keyof typeof SEARCH_BENCH_PROFILES,
   likeP50: number,
   ftsP50: number,
   scaleOverrides: { profileCode?: boolean; extraKey?: [string, number] } = {}
@@ -583,13 +622,14 @@ function realSearchArtifact(
 describe('deriveBenchmarkFamily (PERF-004 F1)', () => {
   it('maps every real profile id to the single search family', () => {
     const ids = Object.values(SEARCH_BENCH_PROFILES).map((profile) => profile.id)
-    expect(ids).toHaveLength(2)
+    expect(ids).toHaveLength(3)
     for (const id of ids) expect(deriveBenchmarkFamily(id)).toBe('chatdb-search')
   })
 
   it('maps to the family exactly when SEARCH_BENCH_PROFILES has at least one declared profile', () => {
     expect(SEARCH_BENCH_PROFILES['1k'].id).toBe('chatdb-search-1k')
     expect(SEARCH_BENCH_PROFILES['10k'].id).toBe('chatdb-search-10k')
+    expect(SEARCH_BENCH_PROFILES['50k'].id).toBe('chatdb-search-50k')
     expect(SEARCH_BENCH_FAMILY_ID).toBe('chatdb-search')
   })
 
@@ -678,6 +718,121 @@ describe('real 1k + 10k artifacts form one cross-scale family curve (PERF-004 F1
     const r = summarizeBenchmarkDirectory(dir)
     for (const series of r.series) {
       for (const variance of series.variance) expect(variance.scale.profileCode).toBeUndefined()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Real 1k + 10k + 50k emitter-shaped artifacts — one family, one blocks
+// curve, and a corrected spacing-aware knee (PERF-004 second slice)
+// ---------------------------------------------------------------------------
+
+describe('real 1k + 10k + 50k artifacts form one family with a spacing-aware knee (PERF-004)', () => {
+  /** Values exactly on a straight line through the nonuniform 1k/10k/50k x spacing. */
+  let lineDir: string
+  /** Values with a genuine change in adjacent slope at the 10k interior point. */
+  let kneeDir: string
+
+  beforeAll(() => {
+    lineDir = freshSubdir('real-family-3k-line')
+    // likeP50 = 0.001 * blocks → exactly on a line: (1k, 1), (10k, 10), (50k, 50).
+    writeValidInto(lineDir, realSearchArtifact('1k', 1, 0.5), 'line-1k.json')
+    writeValidInto(lineDir, realSearchArtifact('10k', 10, 5), 'line-10k.json')
+    writeValidInto(lineDir, realSearchArtifact('50k', 50, 25), 'line-50k.json')
+
+    kneeDir = freshSubdir('real-family-3k-knee')
+    // 1.35 → 12.5 is a shallow 1k→10k slope; 12.5 → 200 is a much steeper
+    // 10k→50k slope, so the adjacent slope change at the 10k point is nonzero.
+    writeValidInto(kneeDir, realSearchArtifact('1k', 1.35, 0.8), 'knee-1k.json')
+    writeValidInto(kneeDir, realSearchArtifact('10k', 12.5, 4.9), 'knee-10k.json')
+    writeValidInto(kneeDir, realSearchArtifact('50k', 200, 40), 'knee-50k.json')
+  })
+
+  it('groups all three real profile ids into one chatdb-search family series per metric', () => {
+    const r = summarizeBenchmarkDirectory(kneeDir)
+    const likeP50 = seriesOf(r, 'like.p50')
+    expect(likeP50.benchmarkId).toBe('chatdb-search')
+    expect(likeP50.runs).toBe(3)
+    expect(likeP50.scalePoints).toBe(3)
+    // 8 metrics × 3 profiles, all under one family.
+    expect(r.series.filter((s) => s.benchmarkId === 'chatdb-search')).toHaveLength(8)
+    for (const series of r.series) expect(series.runs).toBe(3)
+  })
+
+  it('reports a blocks curve with all three real scale points ascending', () => {
+    const likeP50 = seriesOf(summarizeBenchmarkDirectory(kneeDir), 'like.p50')
+    expect(likeP50.curve).toEqual({
+      kind: 'curve',
+      curve: {
+        axis: 'blocks',
+        points: [
+          { scale: 1000, value: 1.35 },
+          { scale: 10_000, value: 12.5 },
+          { scale: 50_000, value: 200 }
+        ],
+        direction: 'increasing'
+      }
+    })
+  })
+
+  it('does not treat profileCode as a dimension axis across all three profiles', () => {
+    const r = summarizeBenchmarkDirectory(kneeDir)
+    for (const series of r.series) {
+      if (series.curve.kind === 'curve') expect(series.curve.curve.axis).toBe('blocks')
+    }
+  })
+
+  it('a straight line at nonuniform 1k/10k/50k spacing produces exactly zero knee magnitude', () => {
+    const likeP50 = seriesOf(summarizeBenchmarkDirectory(lineDir), 'like.p50')
+    expect(likeP50.knee).toEqual({
+      kind: 'reported',
+      candidate: {
+        index: 1,
+        scale: 10_000,
+        value: 10,
+        slopeChange: 0
+      }
+    })
+    // All derived linear metrics stay (effectively) zero-magnitude too;
+    // the multiplier products round identically on both adjacent slopes.
+    for (const id of ['like.p95', 'like.mean', 'fts.p50', 'fts.p95', 'fts.mean']) {
+      const series = seriesOf(summarizeBenchmarkDirectory(lineDir), id)
+      expect(series.knee.kind).toBe('reported')
+      if (series.knee.kind === 'reported') {
+        expect(series.knee.candidate.index).toBe(1)
+        expect(series.knee.candidate.scale).toBe(10_000)
+        expect(series.knee.candidate.slopeChange).toBeCloseTo(0, 12)
+      }
+    }
+  })
+
+  it('reports the deterministic interior knee candidate for a genuine slope change', () => {
+    const likeP50 = seriesOf(summarizeBenchmarkDirectory(kneeDir), 'like.p50')
+    const expectedSlopeChange = (200 - 12.5) / (50_000 - 10_000) - (12.5 - 1.35) / (10_000 - 1_000)
+    expect(likeP50.knee).toEqual({
+      kind: 'reported',
+      candidate: {
+        index: 1,
+        scale: 10_000,
+        value: 12.5,
+        slopeChange: expectedSlopeChange
+      }
+    })
+    expect(expectedSlopeChange).toBeGreaterThan(0.003)
+  })
+
+  it('is deterministic across repeated runs for the three-point set', () => {
+    const first = JSON.stringify(summarizeBenchmarkDirectory(kneeDir))
+    const second = JSON.stringify(summarizeBenchmarkDirectory(kneeDir))
+    expect(second).toBe(first)
+  })
+
+  it('never embeds profileCode in reported variance scale records for the 50k point', () => {
+    const r = summarizeBenchmarkDirectory(kneeDir)
+    for (const series of r.series) {
+      const fifty = series.variance.find((v) => v.scale.blocks === 50_000)
+      expect(fifty).toBeDefined()
+      if (fifty !== undefined) expect(fifty.scale.profileCode).toBeUndefined()
     }
   })
 })

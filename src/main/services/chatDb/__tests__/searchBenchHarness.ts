@@ -71,18 +71,21 @@ export const MIXED_CORPUS = [
 export const ALL_CORPUS = [...ASCII_CORPUS, ...CJK_CORPUS, ...MARKDOWN_CORPUS, ...MIXED_CORPUS]
 
 // ---------------------------------------------------------------------------
-// Benchmark scale profiles (PERF-004 first slice)
+// Benchmark scale profiles (PERF-004)
 //
 // The search benchmark runs one deterministic corpus profile per invocation,
-// selected via the SEARCH_BENCH_SCALE environment variable. Both profiles are
-// fast LOCK-007 deterministic scales; no timing threshold is attached to them
-// (cold-open <500ms remains the only committed threshold). The unset/empty
-// default is the pre-existing 10k profile, so `pnpm bench:main:native`
-// behaves exactly as before. Unknown values fail loudly instead of silently
-// measuring a different scale than requested.
+// selected via the SEARCH_BENCH_SCALE environment variable. The 1k/10k
+// profiles are fast LOCK-007 deterministic scales; 50k is an explicit
+// on-demand profile (larger, slower corpus) that is never part of the default
+// command and never runs unless SEARCH_BENCH_SCALE=50k is requested. No timing
+// threshold is attached to any profile (cold-open <500ms remains the only
+// committed threshold). The unset/empty default is the pre-existing 10k
+// profile, so `pnpm bench:main:native` behaves exactly as before. Unknown
+// values fail loudly instead of silently measuring a different scale than
+// requested; 120k and any other dimension are out of scope.
 // ---------------------------------------------------------------------------
 
-export type SearchBenchProfileKey = '1k' | '10k'
+export type SearchBenchProfileKey = '1k' | '10k' | '50k'
 
 export interface SearchBenchProfile {
   /** Deterministic corpus block count passed to generateCorpus(). */
@@ -107,6 +110,12 @@ export const SEARCH_BENCH_PROFILES: Record<SearchBenchProfileKey, SearchBenchPro
     id: 'chatdb-search-10k',
     name: 'Search — 10k corpus LIKE vs hybrid FTS',
     profileCode: 1
+  },
+  '50k': {
+    blocks: 50_000,
+    id: 'chatdb-search-50k',
+    name: 'Search — 50k corpus LIKE vs hybrid FTS',
+    profileCode: 2
   }
 }
 

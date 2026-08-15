@@ -11,7 +11,10 @@
  *     flat / non-monotonic), only when exactly one scale dimension varies;
  *   - run variance at identical scale points (descriptive statistics only);
  *   - a simple knee candidate, only when the curve is monotonic and has at
- *     least three distinct scale points.
+ *     least three distinct scale points. The reported magnitude is the
+ *     spacing-aware change in adjacent piecewise-linear slope (value units
+ *     per scale unit, e.g. ms/block), so a straight line at nonuniform
+ *     1k/10k/50k spacing yields exactly zero and is never a knee.
  *
  * Family identity (PERF-004 F1): the PERF-004 search benchmark emits one
  * artifact id per corpus profile (`chatdb-search-1k`, `chatdb-search-10k`).
@@ -146,8 +149,14 @@ export interface KneeCandidate {
   index: number
   scale: number
   value: number
-  /** Value-space second difference at this point (raw, unnormalized). */
-  secondDifference: number
+  /**
+   * Spacing-aware change in adjacent piecewise-linear slope at this point:
+   * ((v[i+1]-v[i])/(x[i+1]-x[i])) - ((v[i]-v[i-1])/(x[i]-x[i-1])). Units are
+   * the metric value unit per scale unit (e.g. ms/block). Exactly zero for a
+   * straight line, including at nonuniform scale spacing — unlike a raw value
+   * second difference, which is not zero when the x spacing differs.
+   */
+  slopeChange: number
 }
 
 export type KneeResult = { kind: 'reported'; candidate: KneeCandidate } | { kind: 'insufficient'; reason: string }
@@ -544,12 +553,16 @@ export function computeScalePointVariance(scale: Record<string, number>, values:
 }
 
 /**
- * Simple knee candidate: the point of maximum absolute value-space second
- * difference along the curve. Reported only when the curve is monotonic
- * (increasing or decreasing) with at least three distinct scale points;
- * otherwise explicit insufficient data. Raw value-space second differences
- * are scale-spacing-sensitive — the candidate is a pointer for inspection,
- * not a finding. Ties resolve to the lowest scale point.
+ * Simple knee candidate: the point of maximum absolute change in adjacent
+ * piecewise-linear slope along the curve (spacing-aware: right slope minus
+ * left slope, where each slope is (v delta)/(x delta)). Reported only when
+ * the curve is monotonic (increasing or decreasing) with at least three
+ * distinct scale points; otherwise explicit insufficient data. The magnitude
+ * is measured in value units per scale unit, so a straight line at nonuniform
+ * 1k/10k/50k spacing yields exactly zero and is never a knee — the candidate
+ * is a pointer for inspection, not a finding. With exactly three points there
+ * is a single interior inspection candidate (no location discrimination).
+ * Ties resolve to the lowest scale point.
  */
 export function computeKnee(curve: CurveResult): KneeResult {
   if (curve.kind !== 'curve') {
@@ -567,20 +580,27 @@ export function computeKnee(curve: CurveResult): KneeResult {
   }
 
   let bestIndex = -1
-  let bestSecond = Number.NEGATIVE_INFINITY
+  let bestSlopeChange = Number.NEGATIVE_INFINITY
   for (let i = 1; i < points.length - 1; i++) {
-    const second = points[i + 1].value - 2 * points[i].value + points[i - 1].value
-    if (Math.abs(second) > bestSecond) {
-      bestSecond = Math.abs(second)
+    const leftSlope = (points[i].value - points[i - 1].value) / (points[i].scale - points[i - 1].scale)
+    const rightSlope = (points[i + 1].value - points[i].value) / (points[i + 1].scale - points[i].scale)
+    const change = rightSlope - leftSlope
+    if (Math.abs(change) > bestSlopeChange) {
+      bestSlopeChange = Math.abs(change)
       bestIndex = i
     }
   }
+
+  const leftSlope =
+    (points[bestIndex].value - points[bestIndex - 1].value) / (points[bestIndex].scale - points[bestIndex - 1].scale)
+  const rightSlope =
+    (points[bestIndex + 1].value - points[bestIndex].value) / (points[bestIndex + 1].scale - points[bestIndex].scale)
 
   const candidate: KneeCandidate = {
     index: bestIndex,
     scale: points[bestIndex].scale,
     value: points[bestIndex].value,
-    secondDifference: points[bestIndex + 1].value - 2 * points[bestIndex].value + points[bestIndex - 1].value
+    slopeChange: rightSlope - leftSlope
   }
   return { kind: 'reported', candidate }
 }
