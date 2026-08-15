@@ -1,20 +1,25 @@
 /**
- * Search Benchmark — 10k Corpus LIKE vs FTS Comparison
+ * Search Benchmark — Deterministic Corpus (1k / 10k) LIKE vs FTS Comparison
  *
  * LOCK-5129: Reports p50/p95 for normalized LIKE scan and hybrid FTS
- * candidate path on deterministic 10k corpus. Correctness parity is
- * mandatory and verified BEFORE any timing. No unstable absolute CI
- * thresholds.
+ * candidate path on a deterministic corpus. Correctness parity is mandatory
+ * and verified BEFORE any timing. No unstable absolute CI thresholds.
  *
- * Discovery: this file matches the repository `*.bench.ts` convention and is
- * only collected by `vitest bench` (see vitest.config.ts benchmark.include).
- * Normal `pnpm test` never executes it.
+ * PERF-004 first slice: the corpus profile is parameterized and selected via
+ * the SEARCH_BENCH_SCALE environment variable — `1k` (fast deterministic
+ * scale) or `10k` (pre-existing scale). Unset/empty selects the 10k default,
+ * so `pnpm bench:main:native` behaves exactly as before. Both profiles carry
+ * their scale in the schema-v1 artifact (`benchmark.scale.blocks` +
+ * `scale.profileCode`, and the profile-specific benchmark id). Unknown
+ * profile values fail loudly at load time; the benchmark never silently
+ * measures a different scale than requested.
  *
  * Run with:
- *   npx vitest bench --run --project main-native src/main/services/chatDb/__tests__/search.bench.ts
+ *   npx vitest bench --run --project main-native src/main/services/chatDb/__tests__/search.bench.ts           # 10k (default)
+ *   SEARCH_BENCH_SCALE=1k npx vitest bench --run --project main-native src/main/services/chatDb/__tests__/search.bench.ts
  *
- * Benchmark corpus:
- * - 10,000 MAIN_TEXT blocks with varied content
+ * Benchmark corpus (per profile):
+ * - 1,000 or 10,000 MAIN_TEXT blocks with varied content
  * - Mix of ASCII, CJK, markdown, long/short content
  * - 10 representative query fixtures
  *
@@ -53,11 +58,22 @@ import {
   collectEnvironmentMetadata,
   emitBenchmarkResultAfterSuccessfulTasks
 } from './benchResult'
-import { generateCorpus, hybridSearchAll, likeSearch, QUERY_FIXTURES } from './searchBenchHarness'
+import {
+  generateCorpus,
+  hybridSearchAll,
+  likeSearch,
+  QUERY_FIXTURES,
+  resolveSearchBenchScale,
+  SEARCH_BENCH_PROFILES,
+  SEARCH_BENCH_SCALE_ENV
+} from './searchBenchHarness'
 
 // ---------------------------------------------------------------------------
-// Setup — deterministic 10k corpus
+// Setup — deterministic corpus (profile-selected scale, PERF-004)
 // ---------------------------------------------------------------------------
+
+const scaleKey = resolveSearchBenchScale(process.env[SEARCH_BENCH_SCALE_ENV])
+const profile = SEARCH_BENCH_PROFILES[scaleKey]
 
 const tempDir = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'chatdb-bench-'))
 const sqlite = new Database(realPath.join(tempDir, 'chat.db'))
@@ -70,7 +86,7 @@ registerChatDbNormalize(sqlite)
 runMigrations(drizzle(sqlite, { schema }), sqlite)
 
 const buildStart = performance.now()
-generateCorpus(sqlite, 10_000)
+generateCorpus(sqlite, profile.blocks)
 const buildTime = performance.now() - buildStart
 
 const normalizedSize = sqlite.prepare('SELECT COUNT(*) as count FROM message_blocks_normalized').get() as {
@@ -80,7 +96,8 @@ const ftsSize = sqlite.prepare('SELECT COUNT(*) as count FROM message_blocks_fts
 
 console.log(
   `\n=== Benchmark Corpus ===\n` +
-    `Blocks: 10,000\n` +
+    `Profile: ${scaleKey} (${SEARCH_BENCH_SCALE_ENV}=${scaleKey})\n` +
+    `Blocks: ${profile.blocks.toLocaleString('en-US')}\n` +
     `Normalized rows: ${normalizedSize.count}\n` +
     `FTS rows: ${ftsSize.count}\n` +
     `Build time: ${buildTime.toFixed(1)}ms`
@@ -215,10 +232,11 @@ console.log(
 const searchBenchmarkResult: BenchmarkResult = {
   schemaVersion: BENCH_RESULT_SCHEMA_VERSION,
   benchmark: {
-    id: 'chatdb-search-10k',
-    name: 'Search — 10k corpus LIKE vs hybrid FTS',
+    id: profile.id,
+    name: profile.name,
     scale: {
-      blocks: 10_000,
+      blocks: profile.blocks,
+      profileCode: profile.profileCode,
       queryFixtures: QUERY_FIXTURES.length,
       warmupRounds: WARMUP_ROUNDS,
       measureRounds: MEASURE_ROUNDS,
@@ -257,7 +275,7 @@ const searchBenchmarkResult: BenchmarkResult = {
 // Vitest bench tasks — standard tinybench comparison output
 // ---------------------------------------------------------------------------
 
-describe('search 10k corpus — LIKE vs hybrid FTS (10 query fixtures)', () => {
+describe(`search ${scaleKey} corpus — LIKE vs hybrid FTS (${QUERY_FIXTURES.length} query fixtures)`, () => {
   bench(
     'normalized LIKE full-scan baseline',
     () => {

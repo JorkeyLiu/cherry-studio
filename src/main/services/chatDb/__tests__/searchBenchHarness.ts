@@ -70,6 +70,74 @@ export const MIXED_CORPUS = [
 
 export const ALL_CORPUS = [...ASCII_CORPUS, ...CJK_CORPUS, ...MARKDOWN_CORPUS, ...MIXED_CORPUS]
 
+// ---------------------------------------------------------------------------
+// Benchmark scale profiles (PERF-004 first slice)
+//
+// The search benchmark runs one deterministic corpus profile per invocation,
+// selected via the SEARCH_BENCH_SCALE environment variable. Both profiles are
+// fast LOCK-007 deterministic scales; no timing threshold is attached to them
+// (cold-open <500ms remains the only committed threshold). The unset/empty
+// default is the pre-existing 10k profile, so `pnpm bench:main:native`
+// behaves exactly as before. Unknown values fail loudly instead of silently
+// measuring a different scale than requested.
+// ---------------------------------------------------------------------------
+
+export type SearchBenchProfileKey = '1k' | '10k'
+
+export interface SearchBenchProfile {
+  /** Deterministic corpus block count passed to generateCorpus(). */
+  blocks: number
+  /** Stable artifact/baseline identity — embedded in the artifact file name. */
+  id: string
+  /** Human-readable benchmark name carried in the schema-v1 artifact. */
+  name: string
+  /** Numeric profile code recorded in the schema-v1 `scale.profileCode` key. */
+  profileCode: number
+}
+
+export const SEARCH_BENCH_PROFILES: Record<SearchBenchProfileKey, SearchBenchProfile> = {
+  '1k': {
+    blocks: 1_000,
+    id: 'chatdb-search-1k',
+    name: 'Search — 1k corpus LIKE vs hybrid FTS',
+    profileCode: 0
+  },
+  '10k': {
+    blocks: 10_000,
+    id: 'chatdb-search-10k',
+    name: 'Search — 10k corpus LIKE vs hybrid FTS',
+    profileCode: 1
+  }
+}
+
+/** Environment variable that selects the search benchmark corpus profile. */
+export const SEARCH_BENCH_SCALE_ENV = 'SEARCH_BENCH_SCALE'
+
+/** Default profile = the pre-existing 10k scale (command compatibility). */
+export const DEFAULT_SEARCH_BENCH_SCALE: SearchBenchProfileKey = '10k'
+
+/**
+ * Deterministically resolve a SEARCH_BENCH_SCALE value to a profile key.
+ *
+ * - `undefined` / empty / whitespace-only → the default 10k profile (the
+ *   pre-existing behavior of the benchmark).
+ * - A declared profile key (after trimming) → that profile, always the same
+ *   key for the same input.
+ * - Anything else → throws with the list of valid profiles. An unknown value
+ *   never falls back silently, because a benchmark run that measures a
+ *   different scale than the operator requested would produce a misleading
+ *   artifact.
+ */
+export function resolveSearchBenchScale(value: string | undefined): SearchBenchProfileKey {
+  if (value === undefined || value.trim().length === 0) return DEFAULT_SEARCH_BENCH_SCALE
+  const key = value.trim()
+  if (key in SEARCH_BENCH_PROFILES) return key as SearchBenchProfileKey
+  throw new Error(
+    `SEARCH_BENCH_SCALE must be one of: ${Object.keys(SEARCH_BENCH_PROFILES).join(', ')} ` +
+      `(got '${value}'). The default profile is '${DEFAULT_SEARCH_BENCH_SCALE}'.`
+  )
+}
+
 /**
  * Deterministic corpus generation: `count` MAIN_TEXT blocks cycling through
  * ASCII/CJK/markdown/mixed content with monotonically increasing timestamps.
