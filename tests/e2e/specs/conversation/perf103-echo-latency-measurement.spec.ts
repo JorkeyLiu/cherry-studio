@@ -60,6 +60,43 @@
  *     (t0 → first `.message-user` marker DOM commit), `reduxToDomMs`
  *     (Redux commit → DOM commit, always >= 0 on the monotonic page clock).
  *
+ * Attribution slice (PERF-103 extension, measurement-only; `scale
+ * .attributionDefinitionCode = 1`): the same run additionally records browser
+ * long-task and rAF frame-cadence observations over the measured interval
+ * [reduxCommitAt, domCommitAt], so the aggregate `reduxToDom` span can be read
+ * as a SINGLE BLOCKING TASK vs MULTI-TASK/SCHEDULER GAPS without claiming any
+ * React pass-level attribution (a fresh first-message render needs at least two
+ * React commits — the viewport window is applied in a passive effect — but
+ * that fact is context, not a gate):
+ *   - A `PerformanceObserver('longtask')` records every long task (>= 50 ms)
+ *     with `startTime`/`duration` on the page clock (PERF-102 pattern). Each
+ *     task's overlap with the measured interval is CLIPPED to
+ *     [reduxCommitAt, domCommitAt]; tasks that overhang the interval edges
+ *     contribute only the clipped part. Unsupported observers are recorded as a
+ *     numeric support flag (0) — never a failure. The observer callback only
+ *     pushes bounded records; it never does heavy work inside the interval.
+ *   - A bounded rAF recorder (frame timestamps, capped at 4096, drop after
+ *     cap) provides frame-cadence evidence: the maximum frame delta over frame
+ *     intervals spanning [reduxCommitAt, domCommitAt]. rAF is frame cadence,
+ *     NOT a render-pass duration — a large delta can be a single blocking task
+ *     OR a scheduler gap; it is never claimed as React work.
+ *   - The DOM endpoint records WHICH mechanism resolved it: the MutationObserver
+ *     callback is pre-layout/pre-paint; the bounded 5 ms poll fallback may be
+ *     post-layout and 5 ms-quantized. The recorded endpoint source makes that
+ *     honesty machine-readable (`attribution.mutationResolved*`).
+ *   - After both endpoints resolve, a single bounded macrotask yield allows the
+ *     long-task observer's delivery queue to flush before the clipped values
+ *     are derived and the observer is detached (best-effort checkpoint; a long
+ *     task still running at detach is never observed — documented bias).
+ *
+ * Attribution instrumentation disclosure (audit F2): the long-task observer
+ * and the rAF frame recorder are NEWLY ADDED in this attribution extension —
+ * they did not exist in the earlier PERF-103 baseline run. All timings in this
+ * artifact (including the three baseline duration grids) are therefore freshly
+ * measured under the added instrumentation; any cross-artifact delta vs the
+ * earlier PERF-103 baseline is machine/run state (fresh build, runtime
+ * variance), not regression evidence.
+ *
  * Correctness gates run BEFORE the timing is admitted to the measured series
  * (warmups satisfy the same correctness; any failure aborts the test and
  * produces NO artifact — audit F1-style gate):
@@ -86,6 +123,22 @@
  *     the safe canonical command.
  *   - privacy.schemaV1 — metrics/gates/scale carry only numbers and fixed
  *     strings (closed schema set, enforced at write time).
+ *   - instrumentation.complete — every measured sample's instrumentation
+ *     record is complete and finite: endpoint source in {mutation, poll},
+ *     longtask support flag in {0, 1}, interval-overlap long-task count an
+ *     integer >= 0, clipped overlap total/max and max frame delta finite >= 0,
+ *     and the overlap invariants hold (max <= total; (count > 0) ===
+ *     (total > 0) === (max > 0); an unsupported observer records zero overlap).
+ *     Nothing is gated on long tasks existing, frame values, or mutation
+ *     winning.
+ *   - instrumentation.cleanupEndpoint — every returned record documents that
+ *     the `finally` cleanup completed (store unsubscribed, MutationObserver +
+ *     PerformanceObserver disconnected, rAF cancelled; `cleanupDone` true is
+ *     structural for any returned record — a cleanup failure throws before the
+ *     record is returned and aborts without an artifact, so this gate does NOT
+ *     independently detect cleanup-path execution), and exactly one endpoint
+ *     source is claimed per sample (single-claim recorder) so the recorded
+ *     mutation-vs-poll source is honest.
  *
  * Sample isolation:
  *   - Every sample uses a fresh EMPTY topic, so the measured send is always
@@ -104,7 +157,8 @@
  *
  * Instrumentation boundary (PERF-LOCK-006/008):
  *   - All instrumentation lives in the test page context only (store.subscribe
- *     listener + MutationObserver + bounded poll + synthetic native input and
+ *     listener + MutationObserver + bounded poll + PerformanceObserver
+ *     ('longtask') + bounded rAF frame recorder + synthetic native input and
  *     Enter events through the app's real registered handlers). No production
  *     code is changed, no application instrumentation is added, no Main-
  *     process wiring is touched, no mock behavior is changed.
@@ -167,11 +221,72 @@ const SCALE = {
   /** Bounded endpoint-resolution fallback poll (ms) — the MutationObserver is primary. */
   observerFallbackMs: 5,
   /** Echo definition revision (this file's endpoint contract). */
-  echoDefinitionCode: 1
+  echoDefinitionCode: 1,
+  /**
+   * Attribution definition revision (numeric-only scale addition): the
+   * page-context long-task + rAF frame-delta observation contract over the
+   * [reduxCommitAt, domCommitAt] interval (clipped overlaps, endpoint-source
+   * recording, bounded frame recorder).
+   */
+  attributionDefinitionCode: 1
 } as const
 
 /** Numeric profile identity recorded in the scale map (single closed profile). */
 const PROFILE_CODE = 0
+
+// ---------------------------------------------------------------------------
+// Metric/gate identity contract — static, in-spec enforced at Phase 3
+// ---------------------------------------------------------------------------
+
+/** Statistical suffixes shared by every duration grid. */
+const STAT_SUFFIXES = ['p50', 'p95', 'mean', 'min', 'max'] as const
+
+/** The three baseline duration-grid prefixes (preserved verbatim). */
+const BASELINE_STAT_PREFIXES = ['echo.reduxCommit', 'echo.firstRender', 'echo.reduxToDom'] as const
+
+/**
+ * The original PERF-103 baseline metric id set (16): 3 grids x 5 stats + the
+ * measured-sample count. Every id must remain present unchanged in the
+ * artifact (baseline identity preserved as subset).
+ */
+const BASELINE_METRIC_IDS: readonly string[] = [
+  ...BASELINE_STAT_PREFIXES.flatMap((prefix) => STAT_SUFFIXES.map((suffix) => `${prefix}.${suffix}`)),
+  'echo.samples'
+]
+
+/** The original PERF-103 baseline gate id set (8), preserved verbatim. */
+const BASELINE_GATE_IDS: readonly string[] = [
+  'echo.renderSignal',
+  'echo.requestCount',
+  'echo.reduxToDomOrder',
+  'content.exactReply',
+  'main.parity',
+  'samples.completed',
+  'environment.abi145',
+  'privacy.schemaV1'
+]
+
+/** Attribution duration grids (p50/p95/mean/min/max each) for the L3 slice. */
+const ATTRIBUTION_GRID_PREFIXES: readonly string[] = [
+  'attribution.longtaskOverlapTotalMs',
+  'attribution.longtaskOverlapMaxMs',
+  'attribution.frameDeltaMaxMs'
+]
+
+/** Count/ratio sample-series metrics: 3 series x {count, ratio}. */
+const ATTRIBUTION_SAMPLE_SERIES_METRIC_COUNT = 6
+
+/** Exact deterministic count of new attribution metrics (15 grids + 6 series). */
+const ATTRIBUTION_METRIC_COUNT =
+  ATTRIBUTION_GRID_PREFIXES.length * STAT_SUFFIXES.length + ATTRIBUTION_SAMPLE_SERIES_METRIC_COUNT
+
+/** New correctness gates for the instrumentation slice (fixed set). */
+const ATTRIBUTION_GATE_IDS: readonly string[] = ['instrumentation.complete', 'instrumentation.cleanupEndpoint']
+
+const BASELINE_METRIC_COUNT = BASELINE_METRIC_IDS.length
+const BASELINE_GATE_COUNT = BASELINE_GATE_IDS.length
+const TOTAL_METRIC_COUNT = BASELINE_METRIC_COUNT + ATTRIBUTION_METRIC_COUNT
+const TOTAL_GATE_COUNT = BASELINE_GATE_COUNT + ATTRIBUTION_GATE_IDS.length
 
 /** Stable artifact/baseline identity (schema v1 `benchmark.id`, artifact file name). */
 const BENCHMARK_ID = 'perf103-echo-latency'
@@ -407,7 +522,15 @@ async function readMainTopicSettled(page: Page, topicId: string): Promise<MainPa
 // Timed measurement — page-context instrumentation + measured send
 // ---------------------------------------------------------------------------
 
-/** One measured echo sample (all timings on the single page clock, ms). */
+/**
+ * One measured echo sample (all timings on the single page clock, ms).
+ *
+ * Baseline fields (`tSend`/`reduxCommitMs`/`firstRenderMs`/`reduxToDomMs`)
+ * are unchanged from the PERF-103 baseline slice. The attribution fields are
+ * L3 page-context observations over the measured interval
+ * [reduxCommitAt, domCommitAt] — browser long-task pressure (clipped) and rAF
+ * frame-cadence evidence. They never claim React pass-level attribution.
+ */
 interface EchoSample {
   /** Page-clock send anchor: `performance.now()` sampled in the same synchronous task as the synthetic Enter keydown. */
   tSend: number
@@ -417,19 +540,37 @@ interface EchoSample {
   firstRenderMs: number
   /** Redux commit -> first `.message-user` DOM commit (same page clock; always >= 0). */
   reduxToDomMs: number
+  /** Which mechanism resolved the first `.message-user` marker DOM commit: the MutationObserver callback (pre-layout/pre-paint) or the bounded poll fallback (post-layout, 5ms-quantized). Single-claim: only the FIRST resolver records its source. */
+  endpointSource: 'mutation' | 'poll'
+  /** 1 when a `PerformanceObserver('longtask')` was installed, 0 when unsupported (honest numeric support flag, never a failure). */
+  longtaskSupported: number
+  /** Count of long tasks whose clipped overlap with [reduxCommitAt, domCommitAt] is > 0. 0 when none (or the observer is unsupported). */
+  intervalOverlapLongtaskCount: number
+  /** Sum of the clipped overlaps of the interval-overlapping long tasks (each task clipped to [reduxCommitAt, domCommitAt]). */
+  longtaskOverlapTotalMs: number
+  /** Largest single clipped long-task overlap inside [reduxCommitAt, domCommitAt]. */
+  longtaskOverlapMaxMs: number
+  /** Max rAF frame delta over frame intervals spanning [reduxCommitAt, domCommitAt] (frame-cadence evidence — a single blocking task vs multi-task/scheduler gaps; NOT a render-pass duration). */
+  frameDeltaMaxMs: number
+  /** True when the finally-path cleanup (unsubscribe, disconnects, rAF cancel) completed before the record was returned. */
+  cleanupDone: boolean
 }
 
 /**
  * Measure ONE echo send end-to-end. Installs all page-context instrumentation
- * (a synchronous store.subscribe Redux-commit observer and a MutationObserver
- * DOM-commit observer with the bounded 5ms poll fallback), sets the message
- * text through the native setter + input event (React controlled value
- * commits → the send button enables), then samples t0 in the same task as the
- * synthetic Enter keydown — the app's REAL Inputbar handler runs the
- * production `sendMessage` thunk. The evaluate resolves when BOTH the Redux
- * commit (one user message for the active sample topic) and the first
- * `.message-user` marker DOM commit have been observed, then detaches all
- * instrumentation and returns the bounded record.
+ * (a synchronous store.subscribe Redux-commit observer, a MutationObserver
+ * DOM-commit observer with the bounded 5ms poll fallback, a
+ * `PerformanceObserver('longtask')` and a bounded rAF frame recorder — ALL
+ * BEFORE t0), sets the message text through the native setter + input event
+ * (React controlled value commits → the send button enables), then samples t0
+ * in the same task as the synthetic Enter keydown — the app's REAL Inputbar
+ * handler runs the production `sendMessage` thunk. The evaluate resolves when
+ * BOTH the Redux commit (one user message for the active sample topic) and the
+ * first `.message-user` marker DOM commit have been observed, allows one
+ * bounded macrotask delivery checkpoint for the long-task observer, derives
+ * the interval-clipped long-task and frame-delta values over
+ * [reduxCommitAt, domCommitAt], detaches all instrumentation in the `finally`
+ * path, and returns the bounded record with `cleanupDone` set.
  */
 function measureEchoSend(
   page: Page,
@@ -467,22 +608,73 @@ function measureEchoSend(
     // The endpoint is the first `.message-user` element whose text carries
     // the sample marker. The marker is per-sample unique, so a transitional
     // stale node from a previous topic can never match. The MutationObserver
-    // is primary; the bounded 5ms poll is the fallback for edge cases where
-    // the signal lands between mutations.
+    // callback is primary (pre-layout/pre-paint); the bounded 5ms poll is the
+    // fallback for edge cases where the signal lands between mutations
+    // (post-layout, 5ms-quantized). The recorder is SINGLE-CLAIM: the first
+    // resolver (observer callback or poll) records `endpointSource`; the other
+    // then no-ops because `domCommitAt` is already >= 0 — so the recorded
+    // source is exactly the mechanism that actually resolved the endpoint.
     let domCommitAt = -1
-    const checkDomCommit = (): boolean => {
+    let endpointSource: 'mutation' | 'poll' = 'poll'
+    const resolveDomCommit = (source: 'mutation' | 'poll', claim: boolean): boolean => {
       if (domCommitAt >= 0) return true
       for (const el of document.querySelectorAll('#messages .message-user')) {
         if ((el.textContent ?? '').includes(markerText)) {
           domCommitAt = performance.now()
+          if (claim) endpointSource = source
           return true
         }
       }
       return false
     }
-    const observer = new MutationObserver(checkDomCommit)
+    const observer = new MutationObserver(() => {
+      resolveDomCommit('mutation', true)
+    })
     observer.observe(messagesEl, { subtree: true, childList: true, characterData: true })
-    checkDomCommit()
+    // Initial pre-check: never claims an endpoint source (it cannot match —
+    // the marker is sent only after this point — but the claim flag keeps the
+    // recorder honest even in a pathological match).
+    resolveDomCommit('poll', false)
+    const checkDomCommit = (): boolean => resolveDomCommit('poll', true)
+
+    // ---- Long tasks (installed BEFORE t0; PERF-102 pattern) ---------------
+    // Records every long task (>= 50 ms) as startTime + duration on the page
+    // clock. The observer only pushes bounded records — no heavy work inside
+    // the measured interval. An unsupported observer records the numeric
+    // support flag 0 and zero overlap; it is never a failure. The callback
+    // fires asynchronously, so after the endpoints resolve the evaluate yields
+    // one macrotask (delivery checkpoint) before deriving the clipped values.
+    const longTasks: Array<{ startTime: number; duration: number }> = []
+    let perfObserver: PerformanceObserver | null = null
+    let longtaskSupported = 0
+    try {
+      perfObserver = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          longTasks.push({ startTime: entry.startTime, duration: entry.duration })
+        }
+      })
+      perfObserver.observe({ entryTypes: ['longtask'] })
+      longtaskSupported = 1
+    } catch {
+      perfObserver = null
+    }
+
+    // ---- Bounded rAF frame recorder (installed BEFORE t0) -----------------
+    // Records frame timestamps (`performance.now()` in each rAF callback).
+    // Bounded at MAX_FRAME_SAMPLES (drop-after-cap); the cap covers ~68s at
+    // 60fps, far beyond the worst-case echo watchdog (30s). The callback is
+    // a timestamp push — negligible per-frame work. Frame deltas are derived
+    // AFTER the measured interval and restricted to frame intervals spanning
+    // [reduxCommitAt, domCommitAt]; rAF is frame-cadence evidence only, never
+    // a render-pass duration.
+    const MAX_FRAME_SAMPLES = 4096
+    const frameTimestamps: number[] = []
+    let rafId = 0
+    const frameLoop = (): void => {
+      if (frameTimestamps.length < MAX_FRAME_SAMPLES) frameTimestamps.push(performance.now())
+      rafId = requestAnimationFrame(frameLoop)
+    }
+    rafId = requestAnimationFrame(frameLoop)
 
     // Bounded setTimeout-poll helper (5ms granularity — the fallback path).
     const waitFor = (predicate: () => boolean, timeoutMs: number, label: string): Promise<void> =>
@@ -496,6 +688,8 @@ function measureEchoSend(
         poll()
       })
 
+    let cleanupDone = false
+    let record: Omit<EchoSample, 'cleanupDone'> | null = null
     try {
       // ---- Set the message text; wait for the React commit (send enabled) --
       nativeSet.call(textarea, markerText)
@@ -526,16 +720,72 @@ function measureEchoSend(
       const bothReady = (): boolean => checkReduxCommit() && checkDomCommit()
       await waitFor(bothReady, echoTimeoutMs, 'echo completion (redux user-message commit + .message-user DOM commit)')
 
-      return {
+      // ---- Long-task delivery checkpoint (best-effort, outside the interval)
+      // A single bounded macrotask yield lets the long-task observer deliver
+      // any completed-but-undelivered entries (Chromium delivers observer
+      // buffers as a task) before the clipped values are derived and the
+      // observer is detached. A long task STILL RUNNING at detach is never
+      // observed — documented bias, cannot be fixed without extending the
+      // measured window.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      // ---- Derive interval-clipped long-task overlap ----------------------
+      // The measured interval is [reduxCommitAt, domCommitAt]. Each task's
+      // overlap is clipped to that interval: a task overhanging either edge
+      // contributes only the clipped part; a task fully outside contributes 0.
+      let intervalOverlapLongtaskCount = 0
+      let longtaskOverlapTotalMs = 0
+      let longtaskOverlapMaxMs = 0
+      for (const task of longTasks) {
+        const overlapStart = Math.max(task.startTime, reduxCommitAt)
+        const overlapEnd = Math.min(task.startTime + task.duration, domCommitAt)
+        const clipped = Math.max(0, overlapEnd - overlapStart)
+        if (clipped > 0) {
+          intervalOverlapLongtaskCount += 1
+          longtaskOverlapTotalMs += clipped
+          longtaskOverlapMaxMs = Math.max(longtaskOverlapMaxMs, clipped)
+        }
+      }
+
+      // ---- Derive max interval-spanning rAF frame delta --------------------
+      // A frame delta `cur - prev` spans the measured interval when its frame
+      // interval overlaps [reduxCommitAt, domCommitAt] (half-open overlap
+      // convention). The max spanning delta is the largest single frame gap
+      // inside the window — the frame-cadence signature of one long blocking
+      // task vs several short gaps. rAF is cadence evidence, not render-pass
+      // duration; when no frame interval spans the window the value is 0.
+      let frameDeltaMaxMs = 0
+      for (let i = 1; i < frameTimestamps.length; i++) {
+        const prev = frameTimestamps[i - 1]
+        const cur = frameTimestamps[i]
+        if (cur > reduxCommitAt && prev < domCommitAt) {
+          frameDeltaMaxMs = Math.max(frameDeltaMaxMs, cur - prev)
+        }
+      }
+
+      record = {
         tSend: t0,
         reduxCommitMs: reduxCommitAt - t0,
         firstRenderMs: domCommitAt - t0,
-        reduxToDomMs: domCommitAt - reduxCommitAt
+        reduxToDomMs: domCommitAt - reduxCommitAt,
+        endpointSource,
+        longtaskSupported,
+        intervalOverlapLongtaskCount,
+        longtaskOverlapTotalMs,
+        longtaskOverlapMaxMs,
+        frameDeltaMaxMs
       }
     } finally {
       unsubscribe()
       observer.disconnect()
+      if (perfObserver) perfObserver.disconnect()
+      cancelAnimationFrame(rafId)
+      cleanupDone = true
     }
+    // Reached only when the try block completed AND the finally cleanup
+    // completed (a cleanup throw propagates before this line and rejects the
+    // evaluate, producing no sample and no artifact — fail-closed).
+    return { ...record!, cleanupDone }
   }, args)
 }
 
@@ -574,10 +824,11 @@ async function waitForAssistantCompletion(page: Page, topicId: string, timeoutMs
  * recorded (the timing endpoint is deliberately narrower — the Redux + DOM
  * echo commits). Throws on failure, which aborts the test and produces no
  * artifact. Covers: finite non-negative timings + redux-to-dom ordering, the
- * Redux projection (exactly 1 user + 1 assistant, exact user marker block,
- * exact assistant reply), exactly one product streaming request per sample,
- * and the Main SQLite parity (2 topic-owned messages, one block each, all
- * success).
+ * PERF-103 attribution instrumentation record (completeness, finiteness,
+ * endpoint-source closedness, support-flag honesty, cleanup), the Redux
+ * projection (exactly 1 user + 1 assistant, exact user marker block, exact
+ * assistant reply), exactly one product streaming request per sample, and the
+ * Main SQLite parity (2 topic-owned messages, one block each, all success).
  */
 async function assertSampleCorrectness(
   page: Page,
@@ -605,6 +856,64 @@ async function assertSampleCorrectness(
     sample.reduxToDomMs,
     `sample ${sampleIndex}: reduxToDomMs must be >= 0 (the .message-user DOM commit cannot precede the Redux user-message commit on the same page clock; observed ${sample.reduxToDomMs})`
   ).toBeGreaterThanOrEqual(0)
+
+  // ---- PERF-103 attribution instrumentation (completeness + finiteness) ----
+  // The instrumentation record must be complete and finite for every sample.
+  // Nothing here gates on long tasks existing, frame values, or which endpoint
+  // won — only on the record being honest and well-formed.
+  expect(
+    sample.endpointSource === 'mutation' || sample.endpointSource === 'poll',
+    `sample ${sampleIndex}: endpointSource must be the closed set {mutation, poll} (observed ${sample.endpointSource})`
+  ).toBe(true)
+  expect(
+    sample.longtaskSupported === 0 || sample.longtaskSupported === 1,
+    `sample ${sampleIndex}: longtaskSupported must be the numeric support flag 0 or 1 (observed ${sample.longtaskSupported})`
+  ).toBe(true)
+  expect(
+    Number.isInteger(sample.intervalOverlapLongtaskCount) && sample.intervalOverlapLongtaskCount >= 0,
+    `sample ${sampleIndex}: intervalOverlapLongtaskCount must be an integer >= 0 (observed ${sample.intervalOverlapLongtaskCount})`
+  ).toBe(true)
+  expect(
+    Number.isFinite(sample.longtaskOverlapTotalMs) && sample.longtaskOverlapTotalMs >= 0,
+    `sample ${sampleIndex}: longtaskOverlapTotalMs must be finite and >= 0 (observed ${sample.longtaskOverlapTotalMs})`
+  ).toBe(true)
+  expect(
+    Number.isFinite(sample.longtaskOverlapMaxMs) && sample.longtaskOverlapMaxMs >= 0,
+    `sample ${sampleIndex}: longtaskOverlapMaxMs must be finite and >= 0 (observed ${sample.longtaskOverlapMaxMs})`
+  ).toBe(true)
+  expect(
+    sample.longtaskOverlapMaxMs,
+    `sample ${sampleIndex}: the max clipped overlap cannot exceed the clipped overlap total (observed max ${sample.longtaskOverlapMaxMs} vs total ${sample.longtaskOverlapTotalMs})`
+  ).toBeLessThanOrEqual(sample.longtaskOverlapTotalMs + 1e-9)
+  expect(
+    Number.isFinite(sample.frameDeltaMaxMs) && sample.frameDeltaMaxMs >= 0,
+    `sample ${sampleIndex}: frameDeltaMaxMs must be finite and >= 0 (observed ${sample.frameDeltaMaxMs})`
+  ).toBe(true)
+  // Count/total/max must agree: an overlapping task exists exactly when the
+  // clipped total and max are positive.
+  const anyOverlap = sample.intervalOverlapLongtaskCount > 0
+  const totalPositive = sample.longtaskOverlapTotalMs > 0
+  const maxPositive = sample.longtaskOverlapMaxMs > 0
+  expect(
+    anyOverlap === totalPositive && anyOverlap === maxPositive,
+    `sample ${sampleIndex}: (overlap count > 0) must equal (total > 0) and (max > 0) (count ${sample.intervalOverlapLongtaskCount}, total ${sample.longtaskOverlapTotalMs}, max ${sample.longtaskOverlapMaxMs})`
+  ).toBe(true)
+  // An unsupported observer can never record overlap (machine-readable
+  // honesty of the support flag).
+  if (sample.longtaskSupported === 0) {
+    expect(
+      sample.intervalOverlapLongtaskCount === 0 && sample.longtaskOverlapTotalMs === 0,
+      `sample ${sampleIndex}: an unsupported long-task observer must record zero overlap (count ${sample.intervalOverlapLongtaskCount}, total ${sample.longtaskOverlapTotalMs})`
+    ).toBe(true)
+  }
+  // Every returned record is structurally post-finally: the cleanup must have
+  // completed before the record exists (a cleanup failure throws and aborts
+  // without an artifact), so cleanupDone=true documents the completed finally
+  // cleanup — it is not an independent cleanup-path detection.
+  expect(
+    sample.cleanupDone,
+    `sample ${sampleIndex}: the returned record must document completed finally cleanup (cleanupDone must be true)`
+  ).toBe(true)
 
   // ---- Redux projection ----------------------------------------------------
   const state = await readSampleState(page, topicId)
@@ -715,6 +1024,13 @@ async function runSample(
     acc.reduxCommit.push(sample.reduxCommitMs)
     acc.firstRender.push(sample.firstRenderMs)
     acc.reduxToDom.push(sample.reduxToDomMs)
+    // PERF-103 attribution slice series (L3; measured samples only).
+    acc.longtaskOverlapTotal.push(sample.longtaskOverlapTotalMs)
+    acc.longtaskOverlapMax.push(sample.longtaskOverlapMaxMs)
+    acc.frameDeltaMax.push(sample.frameDeltaMaxMs)
+    acc.longtaskSupportedSamples += sample.longtaskSupported
+    if (sample.endpointSource === 'mutation') acc.mutationResolvedSamples += 1
+    if (sample.intervalOverlapLongtaskCount > 0) acc.longtaskOverlapSamples += 1
     acc.samples += 1
   }
   return sample
@@ -927,9 +1243,25 @@ async function attachLifecycleDiagnostic(testInfo: TestInfo, electronApp: Electr
 
 /** Accumulated measured-sample timing series (warmups never enter these). */
 interface SampleAccumulator {
+  /** Baseline series: t0 -> Redux user-message commit. */
   reduxCommit: number[]
+  /** Baseline series: t0 -> first `.message-user` marker DOM commit. */
   firstRender: number[]
+  /** Baseline series: Redux commit -> first `.message-user` marker DOM commit. */
   reduxToDom: number[]
+  /** Attribution series: per-sample sum of interval-clipped long-task overlaps over [reduxCommitAt, domCommitAt]. */
+  longtaskOverlapTotal: number[]
+  /** Attribution series: per-sample max interval-clipped long-task overlap. */
+  longtaskOverlapMax: number[]
+  /** Attribution series: per-sample max rAF frame delta over frame intervals spanning the measured interval. */
+  frameDeltaMax: number[]
+  /** Count of measured samples whose PerformanceObserver('longtask') was supported. */
+  longtaskSupportedSamples: number
+  /** Count of measured samples whose DOM endpoint resolved via the MutationObserver callback (pre-layout/pre-paint). */
+  mutationResolvedSamples: number
+  /** Count of measured samples with at least one interval-clipped long-task overlap. */
+  longtaskOverlapSamples: number
+  /** Count of measured samples accumulated. */
   samples: number
 }
 
@@ -954,6 +1286,15 @@ function statsMetrics(prefix: string, label: string, values: number[]): Benchmar
     { id: `${prefix}.min`, name: `${label} min`, value: s.min, unit: 'ms' },
     { id: `${prefix}.max`, name: `${label} max`, value: s.max, unit: 'ms' }
   ]
+}
+
+function countMetric(id: string, name: string, value: number): BenchmarkMetric {
+  return { id, name, value, unit: 'count' }
+}
+
+/** Fraction (0..1) of measured samples, deterministic over the fixed sample count. */
+function ratioMetric(id: string, name: string, count: number): BenchmarkMetric {
+  return { id, name, value: count / SCALE.measuredSamples, unit: 'ratio' }
 }
 
 /** Build the schema v1 artifact (only ever called after the full pass). */
@@ -1000,7 +1341,7 @@ function buildBenchmarkResult(acc: SampleAccumulator, environment: BenchmarkResu
       name: 'all samples completed with full correctness; measured series finite',
       kind: 'correctness',
       passed: true,
-      detail: `${SCALE.warmupSamples} warmup + ${SCALE.measuredSamples} measured samples completed with full correctness; all ${SCALE.measuredSamples} measured samples recorded finite non-negative reduxCommitMs/firstRenderMs/reduxToDomMs values`
+      detail: `${SCALE.warmupSamples} warmup + ${SCALE.measuredSamples} measured samples completed with full correctness; all ${SCALE.measuredSamples} measured samples recorded finite non-negative reduxCommitMs/firstRenderMs/reduxToDomMs values and complete finite attribution records (clipped long-task overlap total/max, max frame delta, endpoint source, support flag, cleanup)`
     },
     {
       id: 'environment.abi145',
@@ -1016,6 +1357,20 @@ function buildBenchmarkResult(acc: SampleAccumulator, environment: BenchmarkResu
       passed: true,
       detail:
         'metrics/gates/scale carry only numbers and fixed strings; no message/reply text, marker text, credentials, paths, message/topic/ask IDs, or raw DB sizes (enforced at write time)'
+    },
+    {
+      id: 'instrumentation.complete',
+      name: 'every measured sample produced a complete finite instrumentation record',
+      kind: 'correctness',
+      passed: true,
+      detail: `${SCALE.measuredSamples}/${SCALE.measuredSamples} measured samples: endpointSource in {mutation, poll}, longtaskSupported in {0, 1}, intervalOverlapLongtaskCount an integer >= 0, longtaskOverlapTotalMs/MaxMs/frameDeltaMaxMs finite and >= 0, max clipped overlap <= clipped overlap total, (overlap count > 0) === (total > 0) === (max > 0), and unsupported observers record zero overlap (no gate on long tasks existing, frame values, or which endpoint won)`
+    },
+    {
+      id: 'instrumentation.cleanupEndpoint',
+      name: 'every returned record documents finally cleanup completed; the resolving endpoint is recorded honestly (mutation vs bounded poll)',
+      kind: 'correctness',
+      passed: true,
+      detail: `${SCALE.measuredSamples}/${SCALE.measuredSamples} measured samples: every returned record documents cleanupDone=true (the finally cleanup — store.subscribe unsubscribed, MutationObserver + PerformanceObserver disconnected, rAF cancelled — completed before the record was returned; a cleanup failure throws and aborts without an artifact, so this is structural for returned records, not an independent cleanup-path check); single-claim endpoint recorder (exactly one source per sample); ${acc.longtaskSupportedSamples}/${SCALE.measuredSamples} longtask-supported samples, ${acc.mutationResolvedSamples}/${SCALE.measuredSamples} mutation-resolved samples, ${acc.longtaskOverlapSamples}/${SCALE.measuredSamples} samples with an interval-clipped long-task overlap`
     }
   ]
 
@@ -1030,7 +1385,8 @@ function buildBenchmarkResult(acc: SampleAccumulator, environment: BenchmarkResu
         measuredSamples: SCALE.measuredSamples,
         messagesPerTopic: SCALE.messagesPerTopic,
         observerFallbackMs: SCALE.observerFallbackMs,
-        echoDefinitionCode: SCALE.echoDefinitionCode
+        echoDefinitionCode: SCALE.echoDefinitionCode,
+        attributionDefinitionCode: SCALE.attributionDefinitionCode
       }
     },
     environment,
@@ -1050,7 +1406,61 @@ function buildBenchmarkResult(acc: SampleAccumulator, environment: BenchmarkResu
         'Redux sample user-message commit -> first .message-user DOM commit (same page clock)',
         acc.reduxToDom
       ),
-      { id: 'echo.samples', name: 'Measured echo sample count', value: acc.samples, unit: 'count' }
+      { id: 'echo.samples', name: 'Measured echo sample count', value: acc.samples, unit: 'count' },
+      // ---- PERF-103 attribution slice metrics (L3, measurement-only) -------
+      // Page-context browser long-task + rAF frame-cadence observations over
+      // the measured interval [reduxCommitAt, domCommitAt]. These distinguish
+      // a SINGLE BLOCKING TASK from MULTI-TASK/SCHEDULER GAPS during
+      // Redux commit -> first user-message DOM commit; they never claim React
+      // pass-level attribution (no React Profiler, no layout/paint claim).
+      // A sample with a single dominant long task shows count ~= 1 and
+      // total ~= max; several short tasks show total >> max; scheduler gaps
+      // with no long task show zero overlap but a large max frame delta.
+      ...statsMetrics(
+        'attribution.longtaskOverlapTotalMs',
+        'Interval-clipped long-task overlap total per sample: sum over [reduxCommitAt, domCommitAt] of max(0, min(taskEnd, domCommitAt) - max(taskStart, reduxCommitAt)) for long tasks (>= 50ms) overlapping the measured interval; zero when the observer is unsupported or no task overlaps',
+        acc.longtaskOverlapTotal
+      ),
+      ...statsMetrics(
+        'attribution.longtaskOverlapMaxMs',
+        'Max interval-clipped long-task overlap per sample (the single largest blocking-task overlap inside [reduxCommitAt, domCommitAt]; ~= total for one dominant task, << total for multi-task pressure)',
+        acc.longtaskOverlapMax
+      ),
+      ...statsMetrics(
+        'attribution.frameDeltaMaxMs',
+        'Max rAF frame delta per sample over frame intervals spanning [reduxCommitAt, domCommitAt] (frame-cadence evidence — a single blocking task vs multi-task/scheduler gaps; NOT a render-pass duration)',
+        acc.frameDeltaMax
+      ),
+      countMetric(
+        'attribution.longtaskSupportedCount',
+        'Samples where the PerformanceObserver(longtask) instrument was supported',
+        acc.longtaskSupportedSamples
+      ),
+      ratioMetric(
+        'attribution.longtaskSupportedRatio',
+        'Fraction of measured samples where the long-task observer was supported',
+        acc.longtaskSupportedSamples
+      ),
+      countMetric(
+        'attribution.mutationResolvedCount',
+        'Samples whose first .message-user marker DOM commit was resolved by the MutationObserver callback (pre-layout/pre-paint endpoint)',
+        acc.mutationResolvedSamples
+      ),
+      ratioMetric(
+        'attribution.mutationResolvedRatio',
+        'Fraction of measured samples resolved by the MutationObserver endpoint (vs the bounded poll fallback)',
+        acc.mutationResolvedSamples
+      ),
+      countMetric(
+        'attribution.longtaskOverlapSampleCount',
+        'Samples with at least one interval-clipped long-task overlap inside [reduxCommitAt, domCommitAt]',
+        acc.longtaskOverlapSamples
+      ),
+      ratioMetric(
+        'attribution.longtaskOverlapSampleRatio',
+        'Fraction of measured samples with at least one interval-clipped long-task overlap',
+        acc.longtaskOverlapSamples
+      )
     ],
     gates: correctness
   }
@@ -1081,7 +1491,18 @@ test.describe('PERF-103 echo-latency measurement', () => {
       const assistantId = await page.evaluate(() => (window as any).store.getState().assistants?.assistants?.[0]?.id)
       expect(assistantId, 'the fixture must provide a default assistant').toBeTruthy()
 
-      const acc: SampleAccumulator = { reduxCommit: [], firstRender: [], reduxToDom: [], samples: 0 }
+      const acc: SampleAccumulator = {
+        reduxCommit: [],
+        firstRender: [],
+        reduxToDom: [],
+        longtaskOverlapTotal: [],
+        longtaskOverlapMax: [],
+        frameDeltaMax: [],
+        longtaskSupportedSamples: 0,
+        mutationResolvedSamples: 0,
+        longtaskOverlapSamples: 0,
+        samples: 0
+      }
 
       // ---- Phase 1: warmup samples (full correctness, excluded from metrics) --
       await test.step('Phase 1: warmup echo samples (correctness, excluded from metrics)', async () => {
@@ -1092,7 +1513,12 @@ test.describe('PERF-103 echo-latency measurement', () => {
           const sample = await runSample(page, { topicId, markerText: marker, sampleIndex: w, record: false, acc })
           console.log(
             `[E2E][PERF-103] warmup sample ${w}: reduxCommit=${sample.reduxCommitMs.toFixed(1)}ms, ` +
-              `firstRender=${sample.firstRenderMs.toFixed(1)}ms, reduxToDom=${sample.reduxToDomMs.toFixed(1)}ms`
+              `firstRender=${sample.firstRenderMs.toFixed(1)}ms, reduxToDom=${sample.reduxToDomMs.toFixed(1)}ms, ` +
+              `endpointMutation=${sample.endpointSource === 'mutation' ? 1 : 0}, ` +
+              `ltSupported=${sample.longtaskSupported}, ltOverlapCount=${sample.intervalOverlapLongtaskCount}, ` +
+              `ltOverlapTotal=${sample.longtaskOverlapTotalMs.toFixed(1)}ms, ` +
+              `ltOverlapMax=${sample.longtaskOverlapMaxMs.toFixed(1)}ms, ` +
+              `frameMax=${sample.frameDeltaMaxMs.toFixed(1)}ms`
           )
         }
         console.log(
@@ -1109,7 +1535,12 @@ test.describe('PERF-103 echo-latency measurement', () => {
           const sample = await runSample(page, { topicId, markerText: marker, sampleIndex: s, record: true, acc })
           console.log(
             `[E2E][PERF-103] sample ${s}: reduxCommit=${sample.reduxCommitMs.toFixed(1)}ms, ` +
-              `firstRender=${sample.firstRenderMs.toFixed(1)}ms, reduxToDom=${sample.reduxToDomMs.toFixed(1)}ms`
+              `firstRender=${sample.firstRenderMs.toFixed(1)}ms, reduxToDom=${sample.reduxToDomMs.toFixed(1)}ms, ` +
+              `endpointMutation=${sample.endpointSource === 'mutation' ? 1 : 0}, ` +
+              `ltSupported=${sample.longtaskSupported}, ltOverlapCount=${sample.intervalOverlapLongtaskCount}, ` +
+              `ltOverlapTotal=${sample.longtaskOverlapTotalMs.toFixed(1)}ms, ` +
+              `ltOverlapMax=${sample.longtaskOverlapMaxMs.toFixed(1)}ms, ` +
+              `frameMax=${sample.frameDeltaMaxMs.toFixed(1)}ms`
           )
         }
         console.log(
@@ -1148,6 +1579,54 @@ test.describe('PERF-103 echo-latency measurement', () => {
           result.metrics.every((m) => Number.isFinite(m.value)),
           'every metric value must be finite'
         ).toBe(true)
+
+        // ---- PERF-103 attribution identity contract (static, in-spec) -------
+        // The baseline identity is preserved as an exact subset (16 metrics /
+        // 8 gates, ids verbatim); the attribution slice adds an exact
+        // deterministic count of L3 metrics and correctness gates. No
+        // threshold gate exists anywhere in this file.
+        expect(
+          result.metrics.length,
+          `total metric count must be exactly ${TOTAL_METRIC_COUNT} (${BASELINE_METRIC_COUNT} baseline + ${ATTRIBUTION_METRIC_COUNT} attribution L3; observed ${result.metrics.length})`
+        ).toBe(TOTAL_METRIC_COUNT)
+        expect(
+          result.gates.length,
+          `total gate count must be exactly ${TOTAL_GATE_COUNT} (${BASELINE_GATE_COUNT} baseline + ${ATTRIBUTION_GATE_IDS.length} attribution; observed ${result.gates.length})`
+        ).toBe(TOTAL_GATE_COUNT)
+        expect(
+          result.metrics.length - BASELINE_METRIC_COUNT,
+          'the exact new attribution metric count must be deterministic'
+        ).toBe(ATTRIBUTION_METRIC_COUNT)
+        expect(
+          result.gates.length - BASELINE_GATE_COUNT,
+          'the exact new attribution gate count must be deterministic'
+        ).toBe(ATTRIBUTION_GATE_IDS.length)
+        for (const id of BASELINE_METRIC_IDS) {
+          expect(metricIds, `baseline metric id must remain present unchanged: ${id}`).toContain(id)
+        }
+        for (const id of BASELINE_GATE_IDS) {
+          expect(gateIds, `baseline gate id must remain present unchanged: ${id}`).toContain(id)
+        }
+        const expectedAttributionIds: string[] = [
+          ...ATTRIBUTION_GRID_PREFIXES.flatMap((prefix) => STAT_SUFFIXES.map((suffix) => `${prefix}.${suffix}`)),
+          'attribution.longtaskSupportedCount',
+          'attribution.longtaskSupportedRatio',
+          'attribution.mutationResolvedCount',
+          'attribution.mutationResolvedRatio',
+          'attribution.longtaskOverlapSampleCount',
+          'attribution.longtaskOverlapSampleRatio'
+        ]
+        for (const id of expectedAttributionIds) {
+          expect(metricIds, `attribution metric id must be present: ${id}`).toContain(id)
+        }
+        for (const id of ATTRIBUTION_GATE_IDS) {
+          expect(gateIds, `attribution gate id must be present: ${id}`).toContain(id)
+        }
+        // The scale carries the numeric-only attribution definition code.
+        expect(
+          result.benchmark.scale.attributionDefinitionCode,
+          'the scale must carry the numeric attribution definition code'
+        ).toBe(SCALE.attributionDefinitionCode)
 
         const artifactPath = writeBenchmarkResult(result)
         expect(fs.existsSync(artifactPath), 'artifact must exist after a passing run').toBe(true)
