@@ -8,11 +8,17 @@
  *
  *   - gate + scale + round validation (deterministic, fail-loud on unknown
  *     input so a misconfigured run can never measure the wrong thing),
- *   - the deterministic per-fixture metric grid builder (stages, whole/like,
- *     fidelity, candidate/exact counts),
+ *   - the deterministic per-fixture metric grid builder (stages, fetch
+ *     sub-phases, whole/like, fidelity, fetch attribution, candidate/exact
+ *     counts),
  *   - the fidelity arithmetic (per-round stageSum-minus-whole deltas;
  *     `parseKeywords` is excluded from the stage sum and therefore absorbed
  *     into the delta — no parse timing is added),
+ *   - the fetch attribution arithmetic (per-round subphaseSum-minus-fetch
+ *     deltas: `fetch-prepare + fetch-execute-materialize + fetch-assemble −
+ *     fetch` for the same round — the split covers exactly the production
+ *     fetch work, so the delta quantifies the split/measurement boundary
+ *     overhead; no work is excluded),
  *   - the sample-count fail-fast guard that runs before artifact construction.
  *
  * This file is intentionally NOT a *.test.ts / *.bench.ts file so it is never
@@ -106,8 +112,36 @@ export const SEARCH_STAGE_COMMAND = 'pnpm bench:search-stage'
 /** The three individually timed stages, in measurement order. */
 export const SEARCH_STAGE_TIMED_STAGES = ['collect', 'filter', 'fetch'] as const
 
+/**
+ * The three individually timed fetchResults sub-phases, in measurement order.
+ *
+ * Naming is deliberately non-overclaiming (PERF-LOCK-003): the phases are
+ * measured as separate windows inside a bench-only reproduction of the
+ * production no-cursor fetch path, and sorting itself remains inside the
+ * SQLite execute/order window (`fetch-execute-materialize`) — there is no
+ * separate candidate-sort measurement.
+ */
+export const SEARCH_STAGE_FETCH_SUB_PHASES = ['fetch-prepare', 'fetch-execute-materialize', 'fetch-assemble'] as const
+
+/**
+ * Derived fetch attribution group id: per-round
+ * `(fetch-prepare + fetch-execute-materialize + fetch-assemble) − fetch` —
+ * the split overhead over the whole bridge fetch call, reported as a
+ * diagnostic delta (finite, may be negative; never a threshold).
+ */
+export const SEARCH_STAGE_FETCH_ATTRIBUTION_GROUP = 'fetch-attribution-delta'
+
 /** Every per-fixture timing group, in deterministic metric row order. */
-export const SEARCH_STAGE_GROUPS = ['collect', 'filter', 'fetch', 'whole', 'like', 'fidelity'] as const
+export const SEARCH_STAGE_GROUPS = [
+  'collect',
+  'filter',
+  'fetch',
+  ...SEARCH_STAGE_FETCH_SUB_PHASES,
+  SEARCH_STAGE_FETCH_ATTRIBUTION_GROUP,
+  'whole',
+  'like',
+  'fidelity'
+] as const
 
 /** Stats emitted per fixture/group, in deterministic row order. */
 export const SEARCH_STAGE_STATS = ['p50', 'p95', 'mean', 'max'] as const
@@ -120,6 +154,9 @@ export interface StageRoundSamples {
   collect: number[]
   filter: number[]
   fetch: number[]
+  'fetch-prepare': number[]
+  'fetch-execute-materialize': number[]
+  'fetch-assemble': number[]
   whole: number[]
   like: number[]
 }
@@ -158,6 +195,44 @@ export function deriveFidelitySamples(samples: StageRoundSamples): number[] {
   return whole.map((_, index) => collect[index] + filter[index] + fetch[index] - whole[index])
 }
 
+/**
+ * Per-round fetch attribution deltas:
+ * `(fetch-prepare + fetch-execute-materialize + fetch-assemble) − fetch` for
+ * the same round. The three sub-phase windows reproduce exactly the
+ * production no-cursor fetch work (statement preparation, SQLite
+ * execute/order + native row materialization, post-return JS result
+ * assembly), so the delta quantifies the split/measurement boundary overhead
+ * — nothing is excluded from the sum. Values are finite and may be negative
+ * when the warm split windows beat the pooled bridge fetch call. Fails loudly
+ * on length mismatch so a truncated measurement can never produce a
+ * misleading metric.
+ */
+export function deriveFetchAttributionSamples(samples: StageRoundSamples): number[] {
+  const { fetch, 'fetch-prepare': prepare, 'fetch-execute-materialize': execute, 'fetch-assemble': assemble } = samples
+  if (prepare.length !== fetch.length || execute.length !== fetch.length || assemble.length !== fetch.length) {
+    throw new Error(
+      'deriveFetchAttributionSamples: fetch sub-phase sample arrays must all have the same length as the fetch samples'
+    )
+  }
+  return fetch.map((_, index) => prepare[index] + execute[index] + assemble[index] - fetch[index])
+}
+
+/**
+ * Resolve the per-round sample array for a group: derived groups (`fidelity`,
+ * `fetch-attribution-delta`) are computed from their source windows, every
+ * other group is stored directly on the samples.
+ */
+export function groupSampleValues(group: SearchStageGroup, samples: StageRoundSamples): number[] {
+  switch (group) {
+    case 'fidelity':
+      return deriveFidelitySamples(samples)
+    case SEARCH_STAGE_FETCH_ATTRIBUTION_GROUP:
+      return deriveFetchAttributionSamples(samples)
+    default:
+      return samples[group]
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Metric grid builder
 // ---------------------------------------------------------------------------
@@ -185,6 +260,14 @@ function groupLabel(group: SearchStageGroup): string {
       return 'applyExactFilter'
     case 'fetch':
       return 'fetchResults'
+    case 'fetch-prepare':
+      return 'fetchResults statement preparation (ids array, dynamic IN SQL build, prepare)'
+    case 'fetch-execute-materialize':
+      return 'fetchResults SQLite execute/order + native row materialization'
+    case 'fetch-assemble':
+      return 'fetchResults post-return JS result assembly (hasMore/slice/map/cursor/response)'
+    case 'fetch-attribution-delta':
+      return 'fetch attribution subphaseSum-minus-fetch (split boundary overhead + cache-warmth gradient)'
     case 'whole':
       return 'whole search()'
     case 'like':
@@ -196,9 +279,11 @@ function groupLabel(group: SearchStageGroup): string {
 
 /**
  * Build the per-fixture stage metric rows in deterministic order: fixtures in
- * the order given, then groups (`collect`, `filter`, `fetch`, `whole`,
- * `like`, `fidelity`), then stats (`p50`, `p95`, `mean`, `max`), followed by
- * the two non-sensitive numeric context count rows. Metric ids are
+ * the order given, then groups (`collect`, `filter`, `fetch`, the three fetch
+ * sub-phases `fetch-prepare` / `fetch-execute-materialize` / `fetch-assemble`,
+ * the derived `fetch-attribution-delta`, `whole`, `like`, `fidelity`), then
+ * stats (`p50`, `p95`, `mean`, `max`), followed by the two non-sensitive
+ * numeric context count rows. Metric ids are
  * `fixture.<fixtureId>.<group>.<stat>` (timing rows, unit `ms`) and
  * `fixture.<fixtureId>.<candidateCount|exactCount>` (unitless context rows);
  * they are unique by construction. Missing fixture entries, empty sample
@@ -222,7 +307,7 @@ export function buildSearchStageMetrics(
       throw new Error(`buildSearchStageMetrics: no samples recorded for fixture '${fixture.id}'`)
     }
     for (const group of SEARCH_STAGE_GROUPS) {
-      const values = group === 'fidelity' ? deriveFidelitySamples(fixtureSamples) : fixtureSamples[group]
+      const values = groupSampleValues(group, fixtureSamples)
       const stats = computeTimingStats(values)
       for (const stat of SEARCH_STAGE_STATS) {
         metrics.push({
@@ -271,10 +356,11 @@ export interface SearchStageSampleValidation {
 /**
  * Fail-fast completeness guard: every fixture must have exactly
  * `expectedCount` measured samples for every timed stage (`collect`, `filter`,
- * `fetch`), for `whole` and `like`, and — via the fidelity derivation — for
- * `fidelity`, before any artifact is built. Wired into the bench file after
- * the measure rounds and before result construction, so a truncated or
- * partial measurement aborts instead of emitting a misleading artifact.
+ * `fetch`), for the three fetch sub-phases, for `whole` and `like`, and — via
+ * the derived groups — for `fidelity` and `fetch-attribution-delta`, before
+ * any artifact is built. Wired into the bench file after the measure rounds
+ * and before result construction, so a truncated or partial measurement
+ * aborts instead of emitting a misleading artifact.
  *
  * Returns the recorded validation outcome (the verified fixture ids and
  * groups plus the exact expected count) so the artifact's `samples.complete`
@@ -297,7 +383,7 @@ export function assertSearchStageSampleCounts(
       )
     }
     for (const group of SEARCH_STAGE_GROUPS) {
-      const values = group === 'fidelity' ? deriveFidelitySamples(fixtureSamples) : fixtureSamples[group]
+      const values = groupSampleValues(group, fixtureSamples)
       const count = values.length
       if (count !== expectedCount) {
         throw new Error(

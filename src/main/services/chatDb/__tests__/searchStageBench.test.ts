@@ -1,9 +1,10 @@
 /**
  * Focused pure tests for the search stage attribution benchmark helpers
- * (searchStageBench.ts): env gate / scale / round validation, the 260-row
- * deterministic metric grid (10 fixtures × 26 rows), id uniqueness/order and
- * finite-value invariants, stage fidelity arithmetic, sample-count fail-fast,
- * and the default skip (no-side-effect) semantics where testable.
+ * (searchStageBench.ts): env gate / scale / round validation, the 420-row
+ * deterministic metric grid (10 fixtures × 42 rows), id uniqueness/order and
+ * finite-value invariants, stage fidelity arithmetic, fetch sub-phase
+ * attribution arithmetic, sample-count fail-fast, and the default skip
+ * (no-side-effect) semantics where testable.
  *
  * Pure logic — imports no native module and performs no filesystem work, so
  * mainLanes.ts classifies it into the core lane (`pnpm test:main:core`).
@@ -17,12 +18,16 @@ import { computeTimingStats, type SearchFixtureDescriptor } from './searchBenchM
 import {
   assertSearchStageSampleCounts,
   buildSearchStageMetrics,
+  deriveFetchAttributionSamples,
   deriveFidelitySamples,
+  groupSampleValues,
   resolveSearchStageGate,
   resolveSearchStageScale,
   SEARCH_STAGE_BENCH_ID,
   SEARCH_STAGE_BENCH_NAME,
   SEARCH_STAGE_COMMAND,
+  SEARCH_STAGE_FETCH_ATTRIBUTION_GROUP,
+  SEARCH_STAGE_FETCH_SUB_PHASES,
   SEARCH_STAGE_FIXTURES,
   SEARCH_STAGE_GROUPS,
   SEARCH_STAGE_MEASURE_ROUNDS,
@@ -41,7 +46,9 @@ type MutableFixtureSamples = Map<string, StageRoundSamples>
 /**
  * Deterministic 50-sample grid for the 10 real fixtures with distinct values
  * per group so stats are exact and every row is distinguishable. Fidelity
- * (collect + filter + fetch − whole) is positive overall and exact.
+ * (collect + filter + fetch − whole) is positive overall and exact; fetch
+ * attribution (fetch-prepare + fetch-execute-materialize + fetch-assemble −
+ * fetch) is likewise exact per round.
  */
 function fixtureSamples(): MutableFixtureSamples {
   const samples: MutableFixtureSamples = new Map()
@@ -51,6 +58,11 @@ function fixtureSamples(): MutableFixtureSamples {
       collect: Array.from({ length: SEARCH_STAGE_MEASURE_ROUNDS }, (_, i) => base + i),
       filter: Array.from({ length: SEARCH_STAGE_MEASURE_ROUNDS }, (_, i) => base + i + 0.25),
       fetch: Array.from({ length: SEARCH_STAGE_MEASURE_ROUNDS }, (_, i) => base + i + 0.5),
+      // Binary-exact fractions so the derived attribution stats are exact too
+      // (0.125 + 0.25 + 0.375 − 0.5 = 0.25 is representable without drift).
+      'fetch-prepare': Array.from({ length: SEARCH_STAGE_MEASURE_ROUNDS }, (_, i) => base + i + 0.125),
+      'fetch-execute-materialize': Array.from({ length: SEARCH_STAGE_MEASURE_ROUNDS }, (_, i) => base + i + 0.25),
+      'fetch-assemble': Array.from({ length: SEARCH_STAGE_MEASURE_ROUNDS }, (_, i) => base + i + 0.375),
       whole: Array.from({ length: SEARCH_STAGE_MEASURE_ROUNDS }, (_, i) => base + i + 1),
       like: Array.from({ length: SEARCH_STAGE_MEASURE_ROUNDS }, (_, i) => base + i + 2)
     })
@@ -67,7 +79,7 @@ function fixtureCounts(): Map<string, { candidateCount: number; exactCount: numb
   return counts
 }
 
-/** Expected 260 metric ids in fixture-major / group / stat order, then counts. */
+/** Expected 420 metric ids in fixture-major / group / stat order, then counts. */
 const EXPECTED_IDS: string[] = SEARCH_STAGE_FIXTURES.flatMap((fixture) => [
   ...SEARCH_STAGE_GROUPS.flatMap((group) => SEARCH_STAGE_STATS.map((stat) => `fixture.${fixture.id}.${group}.${stat}`)),
   `fixture.${fixture.id}.candidateCount`,
@@ -134,9 +146,22 @@ describe('resolveSearchStageScale (50k-only diagnostic)', () => {
     expect(SEARCH_BENCH_PROFILES['10k']).toBeDefined()
   })
 
-  it('declares the fixed vocabulary (3 timed stages, 6 groups, 4 stats)', () => {
+  it('declares the fixed vocabulary (3 timed stages, 3 fetch sub-phases, 10 groups, 4 stats)', () => {
     expect(SEARCH_STAGE_TIMED_STAGES).toEqual(['collect', 'filter', 'fetch'])
-    expect(SEARCH_STAGE_GROUPS).toEqual(['collect', 'filter', 'fetch', 'whole', 'like', 'fidelity'])
+    expect(SEARCH_STAGE_FETCH_SUB_PHASES).toEqual(['fetch-prepare', 'fetch-execute-materialize', 'fetch-assemble'])
+    expect(SEARCH_STAGE_FETCH_ATTRIBUTION_GROUP).toBe('fetch-attribution-delta')
+    expect(SEARCH_STAGE_GROUPS).toEqual([
+      'collect',
+      'filter',
+      'fetch',
+      'fetch-prepare',
+      'fetch-execute-materialize',
+      'fetch-assemble',
+      'fetch-attribution-delta',
+      'whole',
+      'like',
+      'fidelity'
+    ])
     expect(SEARCH_STAGE_STATS).toEqual(['p50', 'p95', 'mean', 'max'])
   })
 })
@@ -147,6 +172,9 @@ describe('deriveFidelitySamples', () => {
       collect: [10, 20],
       filter: [5, 5],
       fetch: [3, 3],
+      'fetch-prepare': [1, 1],
+      'fetch-execute-materialize': [1, 1],
+      'fetch-assemble': [1, 1],
       whole: [15, 30],
       like: [999, 999]
     }
@@ -158,6 +186,9 @@ describe('deriveFidelitySamples', () => {
       collect: [1],
       filter: [1],
       fetch: [1],
+      'fetch-prepare': [1],
+      'fetch-execute-materialize': [1],
+      'fetch-assemble': [1],
       whole: [5],
       like: [1]
     }
@@ -169,6 +200,9 @@ describe('deriveFidelitySamples', () => {
       collect: [1, 2],
       filter: [1],
       fetch: [1],
+      'fetch-prepare': [1],
+      'fetch-execute-materialize': [1],
+      'fetch-assemble': [1],
       whole: [1],
       like: [1]
     }
@@ -176,11 +210,55 @@ describe('deriveFidelitySamples', () => {
   })
 })
 
+describe('deriveFetchAttributionSamples', () => {
+  it('computes per-round (prepare + execute-materialize + assemble) - fetch deltas', () => {
+    const samples: StageRoundSamples = {
+      collect: [1],
+      filter: [1],
+      fetch: [10, 20],
+      'fetch-prepare': [2, 5],
+      'fetch-execute-materialize': [5, 10],
+      'fetch-assemble': [2, 4],
+      whole: [1],
+      like: [1]
+    }
+    expect(deriveFetchAttributionSamples(samples)).toEqual([-1, -1])
+  })
+
+  it('allows finite negative deltas (warm split windows can beat the pooled fetch call)', () => {
+    const samples: StageRoundSamples = {
+      collect: [1],
+      filter: [1],
+      fetch: [5],
+      'fetch-prepare': [1],
+      'fetch-execute-materialize': [2],
+      'fetch-assemble': [1],
+      whole: [1],
+      like: [1]
+    }
+    expect(deriveFetchAttributionSamples(samples)).toEqual([-1])
+  })
+
+  it('fails loudly on a sub-phase/fetch length mismatch (truncated measurement)', () => {
+    const samples: StageRoundSamples = {
+      collect: [1],
+      filter: [1],
+      fetch: [1, 2],
+      'fetch-prepare': [1],
+      'fetch-execute-materialize': [1, 2],
+      'fetch-assemble': [1, 2],
+      whole: [1],
+      like: [1]
+    }
+    expect(() => deriveFetchAttributionSamples(samples)).toThrow(/must all have the same length as the fetch samples/)
+  })
+})
+
 describe('buildSearchStageMetrics', () => {
-  it('builds exactly 260 rows for the 10 real fixtures (10 × (6×4 stats + 2 counts))', () => {
+  it('builds exactly 420 rows for the 10 real fixtures (10 × (10×4 stats + 2 counts))', () => {
     expect(SEARCH_STAGE_FIXTURES).toHaveLength(10)
     const metrics = buildSearchStageMetrics(SEARCH_STAGE_FIXTURES, fixtureSamples(), fixtureCounts())
-    expect(metrics).toHaveLength(260)
+    expect(metrics).toHaveLength(420)
   })
 
   it('emits deterministic ids in fixture-major / group / stat / count order', () => {
@@ -212,7 +290,7 @@ describe('buildSearchStageMetrics', () => {
     for (const fixture of SEARCH_STAGE_FIXTURES) {
       const fixtureSamples = samples.get(fixture.id)!
       for (const group of SEARCH_STAGE_GROUPS) {
-        const values = group === 'fidelity' ? deriveFidelitySamples(fixtureSamples) : fixtureSamples[group]
+        const values = groupSampleValues(group, fixtureSamples)
         const stats = computeTimingStats(values)
         for (const stat of SEARCH_STAGE_STATS) {
           const row = metrics.find((m) => m.id === `fixture.${fixture.id}.${group}.${stat}`)
@@ -233,11 +311,44 @@ describe('buildSearchStageMetrics', () => {
     ])
   })
 
+  it('spot-checks exact fetch attribution stats for the first fixture (2i + 0.25 over i=0..49)', () => {
+    const metrics = buildSearchStageMetrics(SEARCH_STAGE_FIXTURES, fixtureSamples(), fixtureCounts())
+    const attribution = metrics.filter((m) => m.id.startsWith('fixture.simple-ascii.fetch-attribution-delta.'))
+    expect(attribution.map((m) => [m.id, m.value])).toEqual([
+      ['fixture.simple-ascii.fetch-attribution-delta.p50', 48.25],
+      ['fixture.simple-ascii.fetch-attribution-delta.p95', 94.25],
+      ['fixture.simple-ascii.fetch-attribution-delta.mean', 49.25],
+      ['fixture.simple-ascii.fetch-attribution-delta.max', 98.25]
+    ])
+  })
+
+  it('spot-checks the fetch sub-phase rows for the first fixture', () => {
+    const metrics = buildSearchStageMetrics(SEARCH_STAGE_FIXTURES, fixtureSamples(), fixtureCounts())
+    const prepare = metrics.find((m) => m.id === 'fixture.simple-ascii.fetch-prepare.p95')
+    const execute = metrics.find((m) => m.id === 'fixture.simple-ascii.fetch-execute-materialize.p50')
+    const assemble = metrics.find((m) => m.id === 'fixture.simple-ascii.fetch-assemble.max')
+    expect(prepare?.value).toBe(47.125)
+    expect(execute?.value).toBe(24.25)
+    expect(assemble?.value).toBe(49.375)
+  })
+
   it('names rows deterministically with fixture, group label, and stat', () => {
     const metrics = buildSearchStageMetrics(SEARCH_STAGE_FIXTURES, fixtureSamples(), fixtureCounts())
     const byId = new Map(metrics.map((m) => [m.id, m.name]))
     expect(byId.get('fixture.simple-ascii.collect.p50')).toBe('Fixture simple-ascii collectCandidates p50')
     expect(byId.get('fixture.simple-ascii.fetch.max')).toBe('Fixture simple-ascii fetchResults max')
+    expect(byId.get('fixture.simple-ascii.fetch-prepare.p95')).toBe(
+      'Fixture simple-ascii fetchResults statement preparation (ids array, dynamic IN SQL build, prepare) p95'
+    )
+    expect(byId.get('fixture.simple-ascii.fetch-execute-materialize.p50')).toBe(
+      'Fixture simple-ascii fetchResults SQLite execute/order + native row materialization p50'
+    )
+    expect(byId.get('fixture.simple-ascii.fetch-assemble.mean')).toBe(
+      'Fixture simple-ascii fetchResults post-return JS result assembly (hasMore/slice/map/cursor/response) mean'
+    )
+    expect(byId.get('fixture.simple-ascii.fetch-attribution-delta.max')).toBe(
+      'Fixture simple-ascii fetch attribution subphaseSum-minus-fetch (split boundary overhead + cache-warmth gradient) max'
+    )
     expect(byId.get('fixture.simple-ascii.whole.p95')).toBe('Fixture simple-ascii whole search() p95')
     expect(byId.get('fixture.simple-ascii.like.mean')).toBe('Fixture simple-ascii LIKE baseline mean')
     expect(byId.get('fixture.simple-ascii.fidelity.p50')).toBe(
@@ -292,6 +403,9 @@ describe('buildSearchStageMetrics', () => {
       collect: [1],
       filter: [1],
       fetch: [1],
+      'fetch-prepare': [1],
+      'fetch-execute-materialize': [1],
+      'fetch-assemble': [1],
       whole: [1],
       like: [1]
     })
@@ -343,14 +457,24 @@ describe('assertSearchStageSampleCounts', () => {
     )
   })
 
-  it('guards the derived fidelity group length as well', () => {
+  it('fails when a fetch sub-phase input is truncated (fail-fast before metric build)', () => {
     const samples = fixtureSamples()
-    // Fidelity is derived from collect/filter/fetch/whole, so its length is
-    // implied by the stage lengths; the guard still verifies it explicitly
-    // and records it in the validated groups.
+    const technical = samples.get('technical')!
+    technical['fetch-execute-materialize'] = technical['fetch-execute-materialize'].slice(0, 49)
+    expect(() => assertSearchStageSampleCounts(SEARCH_STAGE_FIXTURES, samples, 50)).toThrow(
+      /fixture 'technical' group 'fetch-execute-materialize' has 49 samples, expected exactly 50/
+    )
+  })
+
+  it('guards the derived fidelity and fetch attribution group lengths as well', () => {
+    const samples = fixtureSamples()
+    // Fidelity and fetch attribution are derived from their source windows,
+    // so their lengths are implied by the stage/sub-phase lengths; the guard
+    // still verifies them explicitly and records them in the validated groups.
     const outcome = assertSearchStageSampleCounts(SEARCH_STAGE_FIXTURES, samples, 50)
     expect(outcome.ok).toBe(true)
     expect(outcome.verifiedGroups).toContain('fidelity')
+    expect(outcome.verifiedGroups).toContain('fetch-attribution-delta')
   })
 })
 
@@ -391,7 +515,7 @@ describe('stage-shaped schema-v1 artifact (closed contract)', () => {
       gates: [
         { id: 'parity.ordered', name: 'Ordered parity', kind: 'correctness', passed: true },
         { id: 'parity.no-duplicates', name: 'No duplicates', kind: 'correctness', passed: true },
-        { id: 'parity.bridge-vs-search', name: 'Bridge parity', kind: 'correctness', passed: true },
+        { id: 'parity.bridge-vs-search', name: 'Bridge + fetch split parity', kind: 'correctness', passed: true },
         {
           id: 'samples.complete',
           name: `Exactly ${SEARCH_STAGE_MEASURE_ROUNDS} samples per fixture/stage`,
@@ -465,9 +589,9 @@ describe('stage-shaped schema-v1 artifact (closed contract)', () => {
     expect(JSON.stringify(stageResult())).not.toContain('Lorem ipsum')
   })
 
-  it('records exactly 260 finite unique metrics and the deterministic scale', () => {
+  it('records exactly 420 finite unique metrics and the deterministic scale', () => {
     const result = stageResult()
-    expect(result.metrics).toHaveLength(260)
+    expect(result.metrics).toHaveLength(420)
     const ids = result.metrics.map((m) => m.id)
     expect(new Set(ids).size).toBe(ids.length)
     for (const metric of result.metrics) {

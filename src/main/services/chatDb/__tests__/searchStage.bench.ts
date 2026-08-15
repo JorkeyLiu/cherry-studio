@@ -33,7 +33,18 @@
  *      3. bridge   — parseKeywords (not timed individually) then the three
  *                    timed stages collectCandidates / applyExactFilter /
  *                    fetchResults in exact production order with the same
- *                    newest/pageSize-100/no-cursor parameters.
+ *                    newest/pageSize-100/no-cursor parameters;
+ *      4. fetch split — immediately after the bridge `fetchResults` window,
+ *         the same filtered set is re-fetched through a bench-only
+ *         `fetchResultsSplit` helper that reproduces the production no-cursor
+ *         fetch query/result assembly and records three separate windows:
+ *         `fetch-prepare` (ids array + dynamic IN SQL build + prepare()),
+ *         `fetch-execute-materialize` (the statement.all() call: SQLite
+ *         execute/order + native row materialization), and `fetch-assemble`
+ *         (hasMore/slice/map/cursor-encode/response construction). Sorting is
+ *         intentionally NOT measured as a separate candidate-sort window — it
+ *         happens inside the SQLite ORDER BY within
+ *         `fetch-execute-materialize`.
  *    `whole` and `like` are recorded in the same round as the stages so the
  *    fidelity metric is a same-round comparison.
  *  - Fidelity = per-round (collect + filter + fetch) − whole; it quantifies
@@ -45,11 +56,20 @@
  *    the stage samples and the whole sample share comparable cache warmth.
  *    Stage sub-work inside the FTS/LIKE candidate loops and the batch
  *    IN-query loop remains intentionally indivisible.
+ *  - Fetch attribution = per-round (fetch-prepare + fetch-execute-materialize
+ *    + fetch-assemble) − fetch; the split covers exactly the production fetch
+ *    work, so the delta quantifies the split/measurement boundary overhead
+ *    (finite, may be negative). The split response is parity-checked against
+ *    the production bridge fetchResults (ordered items, cursor, hasMore,
+ *    totalCount) BEFORE timing; the split helper only implements the
+ *    no-cursor path the benchmark actually measures and fails loudly on any
+ *    other input.
  *  - 5 warmup rounds + 50 measured rounds per fixture; the exact sample
  *    counts are asserted BEFORE any metric or artifact is built (fail-fast).
  *  - Complete ordered parity (hybrid cursor-drained vs LIKE baseline, all
- *    10 fixtures, no duplicates) plus bridge-vs-search first-page parity run
- *    BEFORE any timing; a failure aborts with no artifact.
+ *    10 fixtures, no duplicates) plus bridge-vs-search first-page parity and
+ *    fetch-split-vs-bridge first-page parity run BEFORE any timing; a failure
+ *    aborts with no artifact.
  *  - Candidate/exact counts are recorded as non-sensitive numeric context
  *    metrics; message content and paths are never represented.
  *
@@ -76,7 +96,7 @@ vi.mock('@main/config', () => ({
   DATA_PATH: '/mock/data'
 }))
 
-import type { SearchMessagesResponse } from '@shared/chatDb'
+import type { SearchMessagesResponse, SearchResultItem } from '@shared/chatDb'
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 
@@ -100,6 +120,7 @@ import {
 import {
   assertSearchStageSampleCounts,
   buildSearchStageMetrics,
+  deriveFetchAttributionSamples,
   resolveSearchStageGate,
   resolveSearchStageScale,
   SEARCH_STAGE_BENCH_ENV,
@@ -194,6 +215,7 @@ if (!stageEnabled) {
       pageSize: number,
       cursor: { createdAt: string; messageId: string; blockId: string } | null
     ): SearchMessagesResponse
+    encodeCursor(createdAt: string, messageId: string, blockId: string): string
   }
 
   /** Single cast exposing the exact production prototype methods; no wrapper. */
@@ -204,11 +226,124 @@ if (!stageEnabled) {
   const bridge = stageBridge(searchRepo)
 
   // -------------------------------------------------------------------------
+  // Fetch split — bench-only reproduction of the no-cursor fetch path
+  // -------------------------------------------------------------------------
+
+  /** The three separate timing windows recorded by `fetchResultsSplit`. */
+  interface FetchSplitTiming {
+    prepareMs: number
+    executeMaterializeMs: number
+    assembleMs: number
+  }
+
+  interface FetchSplitOutcome {
+    /** Full first-page response — parity-verified against the bridge fetchResults. */
+    response: SearchMessagesResponse
+    timing: FetchSplitTiming
+  }
+
+  /**
+   * Bench-only reproduction of the private SearchRepository.fetchResults
+   * no-cursor path, split into three honest timing windows:
+   *
+   *  1. `prepare` — ids array, sort direction, dynamic IN SQL build, and
+   *     `prepare()` (statement preparation);
+   *  2. `execute-materialize` — the `statement.all()` call: SQLite execute +
+   *     ORDER BY + LIMIT and native row materialization;
+   *  3. `assemble` — hasMore/slice/map/cursor-encode/response construction
+   *     (post-return JS result assembly).
+   *
+   * The query text, bind order, and response shape mirror the production
+   * no-cursor branch exactly (encodeCursor is the real production method via
+   * the bridge), so the sum of the three windows covers the same work as the
+   * whole bridge `fetchResults` call and the per-round delta
+   * `(prepare + execute-materialize + assemble) − fetch` is a faithful split
+   * overhead measurement. Sorting is inside the SQLite ORDER BY within the
+   * execute-materialize window — there is no separate candidate-sort window.
+   * Only the no-cursor path is reproduced (the benchmark never uses a cursor);
+   * any other input fails loudly instead of silently measuring a different
+   * path. The empty-ids short circuit mirrors production exactly.
+   */
+  function fetchResultsSplit(
+    sqlite: Database.Database,
+    encodeCursor: (createdAt: string, messageId: string, blockId: string) => string,
+    blockIds: Set<string>,
+    sortOrder: 'newest' | 'oldest',
+    pageSize: number,
+    cursor: { createdAt: string; messageId: string; blockId: string } | null
+  ): FetchSplitOutcome {
+    if (cursor !== null) {
+      throw new Error('fetchResultsSplit: only the no-cursor path is reproduced (the benchmark never uses a cursor)')
+    }
+    const prepareStart = performance.now()
+    const idsArray = Array.from(blockIds)
+    if (idsArray.length === 0) {
+      const prepareMs = performance.now() - prepareStart
+      return {
+        response: { items: [], hasMore: false, totalCount: 0 },
+        timing: { prepareMs, executeMaterializeMs: 0, assembleMs: 0 }
+      }
+    }
+    const sortDir = sortOrder === 'newest' ? 'DESC' : 'ASC'
+    // Mirrors SearchRepository.fetchResults base query verbatim.
+    const baseQuery = `
+      SELECT
+        nb.block_id,
+        nb.message_id,
+        m.topic_id,
+        t.name AS topic_name,
+        mb.content AS raw_content,
+        m.created_at AS message_created_at
+      FROM message_blocks_normalized nb
+      INNER JOIN message_blocks mb ON nb.block_id = mb.id
+      INNER JOIN messages m ON nb.message_id = m.id
+      INNER JOIN topics t ON m.topic_id = t.id
+      WHERE nb.block_id IN (${idsArray.map(() => '?').join(',')})
+    `
+    const query = `${baseQuery} ORDER BY m.created_at ${sortDir}, m.id ${sortDir}, nb.block_id ${sortDir} LIMIT ?`
+    const statement = sqlite.prepare(query)
+    const prepareMs = performance.now() - prepareStart
+
+    const executeStart = performance.now()
+    const rows = statement.all(...idsArray, pageSize + 1) as Array<{
+      block_id: string
+      message_id: string
+      topic_id: string
+      topic_name: string | null
+      raw_content: string
+      message_created_at: string | null
+    }>
+    const executeMaterializeMs = performance.now() - executeStart
+
+    const assembleStart = performance.now()
+    const hasMore = rows.length > pageSize
+    const pagedRows = hasMore ? rows.slice(0, pageSize) : rows
+    const items: SearchResultItem[] = pagedRows.map((row) => ({
+      blockId: row.block_id,
+      messageId: row.message_id,
+      topicId: row.topic_id,
+      topicName: row.topic_name,
+      rawContent: row.raw_content,
+      messageCreatedAt: row.message_created_at
+    }))
+    let nextCursor: string | undefined
+    if (hasMore && items.length > 0) {
+      const last = items[items.length - 1]
+      nextCursor = encodeCursor(last.messageCreatedAt ?? '', last.messageId, last.blockId)
+    }
+    const response: SearchMessagesResponse = { items, nextCursor, hasMore, totalCount: blockIds.size }
+    const assembleMs = performance.now() - assembleStart
+
+    return { response, timing: { prepareMs, executeMaterializeMs, assembleMs } }
+  }
+
+  // -------------------------------------------------------------------------
   // Correctness parity — mandatory, runs BEFORE any timing
   // -------------------------------------------------------------------------
 
   const parityErrors: string[] = []
   const bridgeParityErrors: string[] = []
+  const splitParityErrors: string[] = []
   for (const fixture of QUERY_FIXTURES) {
     // Complete hybrid results across ALL cursor pages (pageSize clamp = 100)
     const hybridResults = hybridSearchAll(searchRepo, fixture.keywords, fixture.matchMode)
@@ -247,24 +382,57 @@ if (!stageEnabled) {
     if (
       bridgeIds.length !== prodIds.length ||
       bridgeIds.some((id, idx) => id !== prodIds[idx]) ||
+      bridgePage.nextCursor !== prodPage.nextCursor ||
       bridgePage.totalCount !== prodPage.totalCount
     ) {
       bridgeParityErrors.push(
         `${fixture.name}: bridge recomposition mismatch vs production search ` +
-          `(bridge=${bridgeIds.length}/${bridgePage.totalCount}, prod=${prodIds.length}/${prodPage.totalCount})`
+          `(bridge=${bridgeIds.length}/${bridgePage.totalCount} cursor=${bridgePage.nextCursor ?? 'none'}, ` +
+          `prod=${prodIds.length}/${prodPage.totalCount} cursor=${prodPage.nextCursor ?? 'none'})`
+      )
+    }
+
+    // The fetch split must preserve the full first-page response semantics of
+    // the same bridge fetchResults call: ordered items, cursor, hasMore,
+    // totalCount. This proves the split reproduces the production no-cursor
+    // fetch path exactly enough for the attribution delta to be meaningful.
+    const splitOutcome = fetchResultsSplit(
+      sqlite,
+      bridge.encodeCursor,
+      filtered,
+      'newest',
+      SEARCH_STAGE_PAGE_SIZE,
+      null
+    )
+    const splitPage = splitOutcome.response
+    const splitIds = splitPage.items.map((item) => item.blockId)
+    if (
+      splitIds.length !== bridgeIds.length ||
+      splitIds.some((id, idx) => id !== bridgeIds[idx]) ||
+      splitPage.hasMore !== bridgePage.hasMore ||
+      splitPage.totalCount !== bridgePage.totalCount ||
+      splitPage.nextCursor !== bridgePage.nextCursor
+    ) {
+      splitParityErrors.push(
+        `${fixture.name}: fetch split mismatch vs bridge fetchResults ` +
+          `(split=${splitIds.length}/${splitPage.totalCount} more=${splitPage.hasMore}, ` +
+          `bridge=${bridgeIds.length}/${bridgePage.totalCount} more=${bridgePage.hasMore})`
       )
     }
   }
 
-  if (parityErrors.length > 0 || bridgeParityErrors.length > 0) {
+  if (parityErrors.length > 0 || bridgeParityErrors.length > 0 || splitParityErrors.length > 0) {
     cleanup()
     throw new Error(
       `Benchmark aborted — correctness parity failed BEFORE timing:\n` +
-        [...parityErrors, ...bridgeParityErrors].join('\n')
+        [...parityErrors, ...bridgeParityErrors, ...splitParityErrors].join('\n')
     )
   }
 
-  console.log(`Parity: ${QUERY_FIXTURES.length}/${QUERY_FIXTURES.length} fixtures passed complete ordered parity`)
+  console.log(
+    `Parity: ${QUERY_FIXTURES.length}/${QUERY_FIXTURES.length} fixtures passed complete ordered parity; ` +
+      `bridge recomposition and fetch split first page (items/cursor/hasMore/totalCount) match production search`
+  )
 
   // -------------------------------------------------------------------------
   // Measurement — fixed interleaving, per round per fixture
@@ -272,7 +440,16 @@ if (!stageEnabled) {
 
   const samples = new Map<string, StageRoundSamples>()
   for (const fixture of QUERY_FIXTURES) {
-    samples.set(fixture.name, { collect: [], filter: [], fetch: [], whole: [], like: [] })
+    samples.set(fixture.name, {
+      collect: [],
+      filter: [],
+      fetch: [],
+      'fetch-prepare': [],
+      'fetch-execute-materialize': [],
+      'fetch-assemble': [],
+      whole: [],
+      like: []
+    })
   }
   const counts = new Map<string, { candidateCount: number[]; exactCount: number[] }>()
   for (const fixture of QUERY_FIXTURES) {
@@ -293,7 +470,9 @@ if (!stageEnabled) {
   }
 
   // Measure — fixed interleaving per round/fixture: whole search() →
-  // likeSearch → bridge stages (parseKeywords → collect → filter → fetch).
+  // likeSearch → bridge stages (parseKeywords → collect → filter → fetch) →
+  // fetch split (prepare → execute-materialize → assemble) on the same
+  // filtered set, so the attribution delta is a same-round comparison.
   for (let round = 0; round < SEARCH_STAGE_MEASURE_ROUNDS; round++) {
     for (const fixture of QUERY_FIXTURES) {
       const fixtureSamples = samples.get(fixture.name)!
@@ -324,6 +503,22 @@ if (!stageEnabled) {
       const fetchStart = performance.now()
       bridge.fetchResults(filtered, 'newest', SEARCH_STAGE_PAGE_SIZE, null)
       fixtureSamples.fetch.push(performance.now() - fetchStart)
+
+      // The fetch split measures the same filtered set in three separate
+      // windows immediately after the whole bridge fetch window (comparable
+      // cache warmth); the split response is thrown away here — parity was
+      // proven before timing.
+      const splitOutcome = fetchResultsSplit(
+        sqlite,
+        bridge.encodeCursor,
+        filtered,
+        'newest',
+        SEARCH_STAGE_PAGE_SIZE,
+        null
+      )
+      fixtureSamples['fetch-prepare'].push(splitOutcome.timing.prepareMs)
+      fixtureSamples['fetch-execute-materialize'].push(splitOutcome.timing.executeMaterializeMs)
+      fixtureSamples['fetch-assemble'].push(splitOutcome.timing.assembleMs)
 
       // Counts are read OUTSIDE the timed windows (O(1) Set.size).
       fixtureCounts.candidateCount.push(candidates.size)
@@ -369,11 +564,17 @@ if (!stageEnabled) {
       `  ${fixture.name.padEnd(15)} collect ${summary(fixtureSamples.collect).padEnd(28)}` +
       `filter ${summary(fixtureSamples.filter).padEnd(28)}` +
       `fetch ${summary(fixtureSamples.fetch)}` +
-      `  (candidates=${fixtureCounts.candidateCount[0]}, exact=${fixtureCounts.exactCount[0]})`
+      `  (candidates=${fixtureCounts.candidateCount[0]}, exact=${fixtureCounts.exactCount[0]})\n` +
+      `  ${' '.repeat(15)} prep ${summary(fixtureSamples['fetch-prepare']).padEnd(28)}` +
+      `exec ${summary(fixtureSamples['fetch-execute-materialize']).padEnd(28)}` +
+      `asm ${summary(fixtureSamples['fetch-assemble'])}  ` +
+      `fetchSplitΔ=${summary(deriveFetchAttributionSamples(fixtureSamples))}`
     )
   }).join('\n')
 
-  console.log(`\n=== Stage attribution (${SEARCH_STAGE_MEASURE_ROUNDS} rounds/fixture) ===\n${stageLines}`)
+  console.log(
+    `\n=== Stage attribution + fetch split (${SEARCH_STAGE_MEASURE_ROUNDS} rounds/fixture) ===\n${stageLines}`
+  )
 
   // -------------------------------------------------------------------------
   // Schema-v1 artifact (closed contract) — built here, written only by the
@@ -425,9 +626,13 @@ if (!stageEnabled) {
       },
       {
         id: 'parity.bridge-vs-search',
-        name: 'Bridge recomposition first page and totalCount match production search',
+        name: 'Bridge recomposition and fetch split first page match production search (ordered items, cursor, hasMore, totalCount)',
         kind: 'correctness',
-        passed: bridgeParityErrors.length === 0
+        passed: bridgeParityErrors.length === 0 && splitParityErrors.length === 0,
+        detail:
+          bridgeParityErrors.length === 0 && splitParityErrors.length === 0
+            ? `bridge recomposition and fetch split first page match production search for all ${QUERY_FIXTURES.length} fixtures`
+            : [...bridgeParityErrors, ...splitParityErrors].join('; ')
       },
       {
         id: 'samples.complete',
