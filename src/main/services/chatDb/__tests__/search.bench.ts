@@ -31,6 +31,9 @@
  * - Correctness parity: identical block IDs and order across ALL cursor pages
  * - Index size and build timing
  * - p50/p95/mean per method + speedups (LOCK-5129 evidence)
+ * - Per-fixture p50/p95/mean/max rows (80 L3 metrics: 10 fixtures × 2 methods
+ *   × 4 stats) that attribute the pooled p95 tail to concrete query fixtures
+ *   (measurement-only; the 8 pooled aggregate metrics are unchanged)
  */
 
 import * as realFs from 'node:fs'
@@ -69,6 +72,7 @@ import {
   SEARCH_BENCH_PROFILES,
   SEARCH_BENCH_SCALE_ENV
 } from './searchBenchHarness'
+import { assertFixtureSampleCounts, buildPerFixtureSearchMetrics, computeTimingStats } from './searchBenchMetrics'
 
 // ---------------------------------------------------------------------------
 // Setup — deterministic corpus (profile-selected scale, PERF-004)
@@ -164,6 +168,16 @@ const WARMUP_ROUNDS = 3
 const MEASURE_ROUNDS = 10
 const likeTimings: number[] = []
 const ftsTimings: number[] = []
+// Per-fixture samples keyed by the stable ASCII fixture id (`fixture.name`),
+// filled in the exact same measure sequence as the pooled arrays below.
+const perFixtureTimings = new Map<string, { like: number[]; fts: number[] }>()
+for (const fixture of QUERY_FIXTURES) {
+  perFixtureTimings.set(fixture.name, { like: [], fts: [] })
+}
+
+// Stable ASCII fixture descriptors (fixture id = `fixture.name`) consumed by
+// the per-fixture metric construction helpers.
+const searchFixtures = QUERY_FIXTURES.map((fixture) => ({ id: fixture.name, name: fixture.name }))
 
 // Warmup
 for (let i = 0; i < WARMUP_ROUNDS; i++) {
@@ -184,7 +198,9 @@ for (let round = 0; round < MEASURE_ROUNDS; round++) {
     // LIKE baseline
     const likeStart = performance.now()
     likeSearch(sqlite, fixture.keywords, fixture.matchMode)
-    likeTimings.push(performance.now() - likeStart)
+    const likeElapsed = performance.now() - likeStart
+    likeTimings.push(likeElapsed)
+    perFixtureTimings.get(fixture.name)!.like.push(likeElapsed)
 
     // FTS hybrid
     const ftsStart = performance.now()
@@ -194,9 +210,15 @@ for (let round = 0; round < MEASURE_ROUNDS; round++) {
       sortOrder: 'newest',
       pageSize: 100
     })
-    ftsTimings.push(performance.now() - ftsStart)
+    const ftsElapsed = performance.now() - ftsStart
+    ftsTimings.push(ftsElapsed)
+    perFixtureTimings.get(fixture.name)!.fts.push(ftsElapsed)
   }
 }
+
+// Fail-fast completeness guard: every fixture/method must have exactly
+// MEASURE_ROUNDS samples before any per-fixture metric or artifact is built.
+assertFixtureSampleCounts(searchFixtures, perFixtureTimings, MEASURE_ROUNDS)
 
 function percentile(arr: number[], p: number): number {
   const sorted = [...arr].sort((a, b) => a - b)
@@ -211,25 +233,45 @@ const ftsP95 = percentile(ftsTimings, 95)
 const likeMean = likeTimings.reduce((a, b) => a + b, 0) / likeTimings.length
 const ftsMean = ftsTimings.reduce((a, b) => a + b, 0) / ftsTimings.length
 
+// Per-fixture p50/p95 attribution (pooled tail → concrete fixtures). Samples
+// are guaranteed complete by assertFixtureSampleCounts above.
+const perFixtureLines = QUERY_FIXTURES.map((fixture) => {
+  const samples = perFixtureTimings.get(fixture.name)!
+  const like = computeTimingStats(samples.like)
+  const fts = computeTimingStats(samples.fts)
+  return (
+    `  ${fixture.name.padEnd(15)} LIKE p50=${like.p50.toFixed(2)} p95=${like.p95.toFixed(2)}` +
+    `  FTS p50=${fts.p50.toFixed(2)} p95=${fts.p95.toFixed(2)}`
+  )
+}).join('\n')
+
 console.log(
   `\n=== Performance Results (LOCK-5129) ===\n` +
     `LIKE baseline:  p50=${likeP50.toFixed(2)}ms  p95=${likeP95.toFixed(2)}ms  mean=${likeMean.toFixed(2)}ms\n` +
     `FTS hybrid:     p50=${ftsP50.toFixed(2)}ms  p95=${ftsP95.toFixed(2)}ms  mean=${ftsMean.toFixed(2)}ms\n` +
     `Speedup (p50):  ${(likeP50 / ftsP50).toFixed(2)}x\n` +
     `Speedup (p95):  ${(likeP95 / ftsP95).toFixed(2)}x\n` +
-    `Samples: ${likeTimings.length} per method`
+    `Samples: ${likeTimings.length} per method\n` +
+    `Per-fixture p50/p95 (ms):\n${perFixtureLines}`
 )
 
 // ---------------------------------------------------------------------------
 // PERF-001 machine-readable result artifact (schema v1) — the result DATA is
-// built here (after the parity gate passed and the timings were collected),
-// but the artifact is WRITTEN only by the file-level afterAll below, and only
-// when every registered tinybench task completed successfully (audit F1).
+// built here (after the parity gate passed, the timings were collected, and
+// the per-fixture sample completeness guard succeeded), but the artifact is
+// WRITTEN only by the file-level afterAll below, and only when every
+// registered tinybench task completed successfully (audit F1).
 // Parity/threshold failures already aborted collection before this point, so
 // no artifact can be produced by a failed run (docs/performance-program.md
 // §5.1). The tinybench tasks below are comparison output; the authoritative
 // metrics and gates for this benchmark are the ones recorded here.
 // ---------------------------------------------------------------------------
+
+// 80 L3 per-fixture rows (10 fixtures × 2 methods × 4 stats) appended after
+// the 8 pooled aggregate metrics. Fixture ids are the stable ASCII fixture
+// names; order is fixture-major, method (like, fts), stat (p50, p95, mean,
+// max). Sample completeness was asserted above, so every value is finite.
+const perFixtureMetrics = buildPerFixtureSearchMetrics(searchFixtures, perFixtureTimings)
 
 const searchBenchmarkResult: BenchmarkResult = {
   schemaVersion: BENCH_RESULT_SCHEMA_VERSION,
@@ -254,7 +296,8 @@ const searchBenchmarkResult: BenchmarkResult = {
     { id: 'fts.p95', name: 'Hybrid FTS p95', value: ftsP95, unit: 'ms' },
     { id: 'fts.mean', name: 'Hybrid FTS mean', value: ftsMean, unit: 'ms' },
     { id: 'speedup.p50', name: 'LIKE/FTS speedup p50', value: likeP50 / ftsP50, unit: 'x' },
-    { id: 'speedup.p95', name: 'LIKE/FTS speedup p95', value: likeP95 / ftsP95, unit: 'x' }
+    { id: 'speedup.p95', name: 'LIKE/FTS speedup p95', value: likeP95 / ftsP95, unit: 'x' },
+    ...perFixtureMetrics
   ],
   gates: [
     {
