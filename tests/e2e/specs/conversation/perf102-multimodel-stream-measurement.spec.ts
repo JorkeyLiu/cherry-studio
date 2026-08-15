@@ -56,8 +56,72 @@
  *     (p50/p95/mean/max + count; always finite), RESET at tSend so the series
  *     covers the measured send-to-completion window only — pre-send setup
  *     frames (topic activation, text-commit waits) never enter the metric.
- *   - Aggregate long tasks: a PerformanceObserver('longtask') records durations
- *     (count/total/max/p95; zero when no long task occurs — metrics stay finite).
+ *   - Aggregate long tasks: a PerformanceObserver('longtask') records each
+ *     entry's startTime + duration (count/total/max/p95; zero when no long task
+ *     occurs — metrics stay finite) and buckets each entry into one of three
+ *     non-overlapping phases (see Attribution slice below).
+ *   - Attribution slice (PERF-102 diagnostic, measurement-only): the fused
+ *     send-to-completion window is separated into a send→request-arrival span,
+ *     a Redux→DOM first-commit span, a per-stream Redux completion span, an
+ *     N-way Redux overlap span, and phase-bucketed long-task pressure:
+ *     - tSend also samples a runner-comparable WALL-clock anchor (`Date.now()`,
+ *       same synchronous page task), so the mock request log's existing
+ *       per-request wall timestamps (unchanged mock scheduling) yield
+ *       `fanout.firstRequestArrival` (first of the N arrivals, wall send
+ *       anchor-relative) and `fanout.requestSpread` (first-to-last arrival
+ *       spread).
+ *     - The visible stream's Redux first-content and DOM `.markdown`
+ *       first-content commit times share ONE page clock, so
+ *       `presentation.firstCommitDelta` = DOM − Redux is the store-commit →
+ *       first-visible-content render lag for the one visible fold stream.
+ *     - Per-stream Redux completion span `completionMs − firstContentMs`
+ *       (`stream.redux.duration`) and the per-sample time during which >= 2
+ *       streams were alive simultaneously in Redux (`stream.redux.overlap`;
+ *       exactly 0 for N=1 — the measure of {t : alive(t) >= 2}).
+ *     - Long tasks are assigned deterministically by `startTime` to exactly one
+ *       of setup (observed pre-send: startTime < tSend), steady [tSend,
+ *       firstCompletion) and completion [firstCompletion, observation end] —
+ *       half-open boundary convention: a task whose startTime equals a boundary
+ *       belongs to the phase that starts at that boundary. Bucket counts sum
+ *       exactly to the aggregate long-task series (no double counting, no
+ *       gaps). The setup bucket is the OBSERVED pre-send set — the observer
+ *       installs before tSend, so every recorded pre-send task is genuine
+ *       pre-send work; it is not an enforced [tInstall, tSend) range.
+ *     - The completion bucket is POST-FIRST-COMPLETION pressure, NOT post-all-
+ *       stream completion processing: its window starts at the FIRST stream's
+ *       Redux success and ends only after ALL N streams succeed, so
+ *       `longtask.completion.*` contains the first stream's completion
+ *       processing PLUS the remaining streams' streaming tail (the steady work
+ *       that continues past the first completion until the last stream lands).
+ *     - Assistant-stub subphase (this slice, measurement-only): the
+ *       send→first-request-arrival span is decomposed with test-side Redux
+ *       observations of the N assistant stubs. The production
+ *       `dispatchMultiModelResponses` path persists the N stubs to SQLite
+ *       sequentially, then dispatches `addMessage` for each stub, then enqueues
+ *       the N requests — so the stub records expose whether the send→arrival
+ *       delay concentrates before/through the stub commits or after the last
+ *       one:
+ *       - A store.subscribe scan (the same one that records the block series)
+ *         records the FIRST appearance of each assistant message in the Redux
+ *         messages slice — its `addMessage` dispatch, in which the reducer
+ *         indexes the topic in the SAME reducer run — once per assistant
+ *         (deduped, one timestamp per assistant), on the page clock. The stub
+ *         carries no content block yet (role 'assistant', status pending,
+ *         blocks []), so this is strictly earlier than the block first-content
+ *         records.
+ *       - `stub.sendToFirstCommit` = first stub commit − tSend (pure page-clock
+ *         delta); `stub.commitSpread` = last − first stub commit (exactly 0 for
+ *         N=1); `stub.lastCommitToFirstRequest` = first request arrival −
+ *         wall-projected last stub commit, where the projection reuses the
+ *         existing paired (tSend, tSendWall) anchor sampled in ONE synchronous
+ *         page task: tStubWall = tSendWall + (tStubPage − tSend). The
+ *         projection is validated fail-closed by an anchor-stability invariant
+ *         (the renderer page↔wall offset at tSend and at tComplete must agree
+ *         within a narrowly justified clock-domain tolerance).
+ *       - These metrics LOCATE cost around the assistant-stub phase
+ *         (before/through the stub commits vs after the last one); they CANNOT
+ *         distinguish renderer dispatch cost from the IPC/SQLite persistence
+ *         underneath — no Main/IPC instrumentation exists (measurement-only).
  *
  * Correctness gates run BEFORE artifact acceptance/emission (a failure aborts
  * the test and produces NO artifact, audit F1-style gate, §5.1). The per-sample
@@ -126,7 +190,12 @@
  *     from the sample topic's `messageIdsByTopic` as they appear). The set
  *     starts empty on the fresh empty topic — the documented brief bootstrap:
  *     nothing is recorded before the send creates the sample's first message,
- *     and prior samples' blocks/elements are never scanned.
+ *     and prior samples' blocks/elements are iterated by the scans but never
+ *     recorded or retained (the retained series grow only with sample-owned
+ *     message ids). The assistant-stub observer shares the same store.subscribe
+ *     scan and is scoped the same way (it reads only the current sample topic's
+ *     `messageIdsByTopic` index, so a prior sample's assistant messages are
+ *     never recorded; each assistant id is recorded at most once).
  *   - The rAF frame-delta series is reset at tSend so `frame.delta` measures
  *     send-to-completion cadence only; the frame loop doubles as the once-per-
  *     frame DOM scan drain (see Measurement model).
@@ -273,9 +342,6 @@ function resolveScaleProfile(): ScaleProfile {
 
 /** Canonical safe command recorded in the artifact (no path segments, audit F3). */
 const CANONICAL_COMMAND = 'pnpm test:e2e'
-
-/** Fixed synthetic seed timestamps (deterministic, non-sensitive). */
-const SEED_CREATED_AT = '2026-08-14T00:00:00.000Z'
 
 /** The provider hosting the fixture's default model + the registered mention models. */
 const MOCK_PROVIDER_ID = 'mock-openai'
@@ -654,9 +720,12 @@ async function readVisibleDomSettled(page: Page, visibleMessageId: string): Prom
  * belongs to this sample. The `stream === true` discriminator is the
  * established topic-auto-naming convention: non-streaming summary/naming
  * requests (which never fire for the custom-named sample topics, but must stay
- * excluded defensively) can never be misclassified as a fanout stream.
+ * excluded defensively) can never be misclassified as a fanout stream. Each
+ * entry also carries the mock server's existing wall-clock request timestamp
+ * (`Date.now()`, unchanged mock scheduling) so the attribution slice can derive
+ * send→request-arrival spans against the runner-comparable wall anchor.
  */
-function sampleFanoutRequests(afterSequence: number): Array<{ model: string; stream: boolean }> {
+function sampleFanoutRequests(afterSequence: number): Array<{ model: string; stream: boolean; timestamp: number }> {
   return getRequestLog()
     .filter(
       (entry) =>
@@ -667,7 +736,8 @@ function sampleFanoutRequests(afterSequence: number): Array<{ model: string; str
     )
     .map((entry) => ({
       model: String(entry.parsed?.model ?? ''),
-      stream: entry.parsed?.stream === true
+      stream: entry.parsed?.stream === true,
+      timestamp: entry.timestamp
     }))
 }
 
@@ -687,15 +757,42 @@ interface DomMessageSeries {
   series: Array<{ t: number; len: number }>
 }
 
+/** One observed long-task entry: startTime (page clock) + duration. */
+interface LongTaskEntry {
+  startTime: number
+  duration: number
+}
+
+/**
+ * One assistant-stub observation: the FIRST appearance of an assistant message
+ * in the Redux messages slice (its production `addMessage` dispatch), scoped to
+ * the sample topic. One record per assistant — deduped at the recorder, so the
+ * count is exactly the number of distinct assistants observed.
+ */
+interface StubCommit {
+  /** The assistant MESSAGE id (the Redux message id of the assistant message), not an assistant participant id. */
+  assistantMessageId: string
+  /** Page-clock first-appearance time (`performance.now()`, same clock as tSend). */
+  t: number
+}
+
 /** Bounded record returned by the instrumentation evaluate. */
 interface InstrumentationResult {
+  /** Page-clock send anchor: `performance.now()` sampled in the same synchronous task as the synthetic Enter keydown. */
   tSend: number
+  /** Runner-comparable wall-clock send anchor: `Date.now()` sampled in the same synchronous task as tSend. */
+  tSendWall: number
+  /** Page-clock completion anchor: sampled after the completion poll resolved (all streams success). */
   tComplete: number
+  /** Wall-clock completion anchor: `Date.now()` sampled in the same synchronous task as tComplete (anchor-stability check). */
+  tCompleteWall: number
   redux: ReduxBlockSeries[]
   dom: DomMessageSeries[]
   inputProbes: Array<{ latencyMs: number }>
-  longTasks: number[]
+  longTasks: LongTaskEntry[]
   frameDeltas: number[]
+  /** Assistant-stub subphase: first-appearance page-clock time per assistant (once each). */
+  stubCommits: StubCommit[]
   completion: { messageCount: number; assistantCount: number }
 }
 
@@ -770,9 +867,29 @@ function measureMultiModelSend(
         }
         reduxBlocks.get(blockId)!.series.push({ t, len, status })
       }
+      // ---- Assistant-stub first-appearance observation (deduped) ------------
+      // The production `dispatchMultiModelResponses` path persists the N stubs
+      // to SQLite sequentially, THEN dispatches `addMessage` per stub, THEN
+      // enqueues the N requests — so the first appearance of each assistant
+      // message in the messages slice marks its stub commit. The reducer adds
+      // the message id to `messageIdsByTopic` in the SAME reducer run, so the
+      // post-dispatch state already indexes the new assistant; scanning only
+      // the current sample topic's index keeps the observation sample-scoped
+      // (prior samples' assistants are never recorded). Recorded ONCE per
+      // assistant id — one timestamp per assistant, page clock, strictly after
+      // tSend (the send that creates the stubs dispatches after the anchor).
+      const stubCommits = new Map<string, number>()
       const handleStoreUpdate = (): void => {
         adoptSampleMessageIds()
         const s = store.getState()
+        const topicMessageIds: string[] = s?.messages?.messageIdsByTopic?.[topicId] ?? []
+        for (const id of topicMessageIds) {
+          const key = String(id)
+          if (stubCommits.has(key)) continue
+          const msg = s.messages?.entities?.[key]
+          if (!msg || String(msg.role ?? '') !== 'assistant') continue
+          stubCommits.set(key, performance.now())
+        }
         const blocks = s?.messageBlocks?.entities ?? {}
         for (const block of Object.values(blocks) as any[]) {
           if (!block || block.type !== 'main_text') continue
@@ -820,11 +937,20 @@ function measureMultiModelSend(
       scanDom()
 
       // ---- Long tasks (finite even when none occur) -------------------------
-      const longTasks: number[] = []
+      // Each entry records startTime + duration so the phase bucketing can run
+      // deterministically in the test process against the derived phase
+      // boundaries (setup/steady/completion, see Attribution slice in the spec
+      // header). No long task can be observed before the observer exists, so
+      // the setup bucket is exactly the observed pre-send window: every task
+      // recorded with startTime < tSend is genuine pre-send work (the setup
+      // bucket is not an enforced [tInstall, tSend) range).
+      const longTasks: LongTaskEntry[] = []
       let perfObserver: PerformanceObserver | null = null
       try {
         perfObserver = new PerformanceObserver((list) => {
-          for (const entry of list.getEntries()) longTasks.push(entry.duration)
+          for (const entry of list.getEntries()) {
+            longTasks.push({ startTime: entry.startTime, duration: entry.duration })
+          }
         })
         perfObserver.observe({ entryTypes: ['longtask'] })
       } catch {
@@ -936,6 +1062,12 @@ function measureMultiModelSend(
       )
 
       const tSend = performance.now()
+      // Runner-comparable wall-clock anchor sampled in this SAME synchronous
+      // task as tSend (and before the synthetic Enter keydown below): the mock
+      // server's existing request-log timestamps are `Date.now()` wall-clock
+      // values, so send→request-arrival deltas are meaningful only against a
+      // wall-clock anchor taken at the exact send dispatch.
+      const tSendWall = Date.now()
       // Reset the frame cadence at tSend so the frame-delta series represents
       // the measured send-to-completion window ONLY (audit F3): pre-send setup
       // frames (topic activation, text-commit wait, instrumentation install)
@@ -971,14 +1103,22 @@ function measureMultiModelSend(
       }
 
       const tComplete = performance.now()
+      // Wall-clock completion anchor sampled in the SAME synchronous task as
+      // tComplete — the anchor-stability invariant compares the page↔wall
+      // offset at tSend and here to bound the wall projection's drift across
+      // the measured window (see `assertStubSubphaseValid`).
+      const tCompleteWall = Date.now()
       return {
         tSend,
+        tSendWall,
         tComplete,
+        tCompleteWall,
         redux: Array.from(reduxBlocks.values()).map(({ messageId, series }) => ({ messageId, series })),
         dom: Array.from(domSeries.entries()).map(([messageId, { series }]) => ({ messageId, series })),
         inputProbes,
         longTasks,
         frameDeltas,
+        stubCommits: Array.from(stubCommits.entries()).map(([assistantMessageId, t]) => ({ assistantMessageId, t })),
         completion: {
           messageCount: (store.getState().messages?.messageIdsByTopic?.[topicId] ?? []).length,
           assistantCount: topicAssistantIds().length
@@ -1049,6 +1189,24 @@ function maxSimultaneousStreams(timings: Array<{ firstContentMs: number; complet
   return max
 }
 
+/**
+ * Redux N-way overlap duration: the per-sample time during which at least two
+ * streams were alive in Redux simultaneously. Each stream contributes the
+ * interval [firstContentMs, completionMs) on the shared page clock; the overlap
+ * is the measure of {t : alive(t) >= 2}, which equals the total alive time
+ * minus the overall span: `max(0, Σ(eᵢ − sᵢ) − (max eᵢ − min sᵢ))`. The clamp
+ * makes non-contiguous unions (impossible for the near-synchronous fanout here,
+ * but a deterministic safety net) yield 0 rather than a negative value. Exactly
+ * 0 for N=1 (a single stream has no overlap). Deterministic and finite for any
+ * finite input.
+ */
+function reduxOverlapDurationMs(timings: Array<{ firstContentMs: number; completionMs: number }>): number {
+  if (timings.length < 2) return 0
+  const span = Math.max(...timings.map((t) => t.completionMs)) - Math.min(...timings.map((t) => t.firstContentMs))
+  const totalAlive = timings.reduce((acc, t) => acc + (t.completionMs - t.firstContentMs), 0)
+  return Math.max(0, totalAlive - span)
+}
+
 /** Accumulated sample metrics across the whole profile run. */
 interface SampleAccumulator {
   reduxFirstContent: number[]
@@ -1059,7 +1217,26 @@ interface SampleAccumulator {
   visibleDomCommitIntervals: number[]
   inputLatencies: number[]
   longTasks: number[]
+  longTaskSetup: number[]
+  longTaskSteady: number[]
+  longTaskCompletion: number[]
   frameDeltas: number[]
+  /** Attribution slice: send wall anchor -> first fanout request arrival. */
+  fanoutFirstRequestArrival: number[]
+  /** Attribution slice: wall-clock spread between first and last fanout arrivals. */
+  fanoutRequestSpread: number[]
+  /** Attribution slice: visible stream Redux first content -> DOM first content (same page clock). */
+  presentationFirstCommitDelta: number[]
+  /** Attribution slice: per-stream Redux first-content -> completion duration. */
+  reduxStreamDuration: number[]
+  /** Attribution slice: per-sample time with >= 2 streams alive in Redux (0 for N=1). */
+  reduxOverlap: number[]
+  /** Assistant-stub subphase: send -> first assistant stub Redux commit (page clock). */
+  stubSendToFirstCommit: number[]
+  /** Assistant-stub subphase: first -> last assistant stub Redux commit spread (exactly 0 for N=1). */
+  stubCommitSpread: number[]
+  /** Assistant-stub subphase: last assistant stub Redux commit -> first request arrival (wall-projected via the paired send anchor). */
+  stubLastCommitToFirstRequest: number[]
 }
 
 function emptyAccumulator(): SampleAccumulator {
@@ -1072,7 +1249,18 @@ function emptyAccumulator(): SampleAccumulator {
     visibleDomCommitIntervals: [],
     inputLatencies: [],
     longTasks: [],
-    frameDeltas: []
+    longTaskSetup: [],
+    longTaskSteady: [],
+    longTaskCompletion: [],
+    frameDeltas: [],
+    fanoutFirstRequestArrival: [],
+    fanoutRequestSpread: [],
+    presentationFirstCommitDelta: [],
+    reduxStreamDuration: [],
+    reduxOverlap: [],
+    stubSendToFirstCommit: [],
+    stubCommitSpread: [],
+    stubLastCommitToFirstRequest: []
   }
 }
 
@@ -1096,7 +1284,12 @@ async function assertSampleCorrectness(
   }
 ): Promise<{
   reduxTimings: StreamTiming[]
-  visibleFirstContentMs: number
+  /** Absolute page-clock Redux first-content commit of the visible stream. */
+  visibleReduxFirstContentMs: number
+  /** Absolute page-clock DOM `.markdown` first-content commit of the visible stream. */
+  visibleDomFirstContentMs: number
+  /** The sample topic's assistant message ids (authoritative Redux projection; stub-scope set check). */
+  assistantIds: string[]
 }> {
   const { profile, sampleIndex, topicId, expectedModelIds, expectedReplies, result, fanoutRequests } = args
   const n = profile.mentionModelCount
@@ -1255,9 +1448,317 @@ async function assertSampleCorrectness(
     `sample ${sampleIndex}: the visible stream must have a finite DOM first-content time`
   ).toBe(true)
 
+  // ---- Visible-stream Redux timing (attribution: Redux -> DOM first commit) --
+  // The attribution slice compares the visible stream's Redux first-content
+  // commit with its DOM `.markdown` first-content commit on the SAME page clock
+  // (`presentation.firstCommitDelta` = DOM − Redux). The visible stream is the
+  // first-mentioned model's assistant, whose timing sits in reduxTimings at the
+  // assistantMessages index.
+  const visibleAssistantIndex = assistantMessages.findIndex((m) => m.modelId === visibleModelId)
+  const visibleReduxTiming = reduxTimings[visibleAssistantIndex]
+  expect(visibleReduxTiming, `sample ${sampleIndex}: the visible stream must have a derived Redux timing`).toBeTruthy()
+  expect(
+    Number.isFinite(visibleReduxTiming!.firstContentMs),
+    `sample ${sampleIndex}: the visible stream must have a finite Redux first-content time`
+  ).toBe(true)
+
   // The Redux/DOM series timestamps are absolute `performance.now()` values on
   // the same clock as `result.tSend` — the send-relative duration is the delta.
-  return { reduxTimings, visibleFirstContentMs: visibleDomTiming.firstContentMs - result.tSend }
+  return {
+    reduxTimings,
+    visibleReduxFirstContentMs: visibleReduxTiming!.firstContentMs,
+    visibleDomFirstContentMs: visibleDomTiming.firstContentMs,
+    assistantIds: assistantMessages.map((m) => m.id)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Attribution slice — per-sample derivation + deterministic validation
+// ---------------------------------------------------------------------------
+
+/** One per-sample attribution record for the diagnostic metrics. */
+interface SampleAttribution {
+  /** Wall clock: tSendWall → first of the N fanout request arrivals (mock request log). */
+  firstRequestArrivalMs: number
+  /** Wall clock: first → last fanout request arrival spread. */
+  requestSpreadMs: number
+  /** Page clock: visible stream Redux first content → DOM first content. */
+  firstCommitDeltaMs: number
+  /** Page clock: per-stream Redux first content → completion duration. */
+  reduxStreamDurations: number[]
+  /** Page clock: per-sample time with >= 2 streams alive in Redux (0 for N=1). */
+  reduxOverlapMs: number
+  /** Long-task durations bucketed deterministically by startTime. */
+  longTasksByPhase: { setup: number[]; steady: number[]; completion: number[] }
+  /** Assistant-stub subphase, page clock: send -> first assistant stub Redux commit. */
+  stubSendToFirstCommitMs: number
+  /** Assistant-stub subphase, page clock: first -> last assistant stub commit spread (exactly 0 for N=1). */
+  stubCommitSpreadMs: number
+  /**
+   * Assistant-stub subphase, cross-domain: last assistant stub Redux commit ->
+   * first request arrival. The last stub commit's page-clock time is projected
+   * onto the wall timeline with the paired (tSend, tSendWall) anchor sampled in
+   * ONE synchronous page task: tStubWall = tSendWall + (tStubPage − tSend), so
+   * the metric equals (first request arrival − tSendWall) − (last stub − tSend)
+   * — a difference of two send-relative intervals, one per clock domain, whose
+   * comparability is enforced by the anchor-stability invariant.
+   */
+  stubLastCommitToFirstRequestMs: number
+}
+
+/**
+ * Phase boundaries (single page `performance.now()` clock, all from the
+ * recorded sample) and their documented convention:
+ *
+ *   setup:      observed pre-send tasks (startTime < tSend) — pre-send
+ *               renderer work; the observer installs before tSend, so this is
+ *               the observed pre-send set, not an enforced [tInstall, tSend)
+ *               range
+ *   steady:     [tSend, firstCompletion)            — send + streaming window
+ *   completion: [firstCompletion, observation end]  — POST-FIRST-COMPLETION
+ *               pressure: the first stream's completion processing plus the
+ *               remaining streams' streaming tail until all N streams complete
+ *
+ * `firstCompletion` = min over the sample's N streams of the Redux completion
+ * time (the first stream whose block reached status 'success'). The observation
+ * end is AFTER ALL N streams reach success (the completion poll resolves only
+ * when every stream is success), so the completion bucket must NOT be read as
+ * post-all-stream completion pressure — it is the post-FIRST-completion
+ * remainder of the measured window. The boundary convention is half-open: a
+ * long task whose `startTime` equals a boundary belongs to the phase that
+ * STARTS at that boundary (e.g. startTime === tSend is steady). The completion
+ * phase is effectively closed at the observation end because the observer
+ * detaches in the evaluate's `finally` block immediately after the completion
+ * poll resolves — every observed task has startTime < the detach point, so the
+ * three buckets cover the observed set exactly (no double counting, no gaps).
+ */
+function bucketLongTasksByPhase(
+  longTasks: LongTaskEntry[],
+  tSend: number,
+  firstCompletionMs: number
+): { setup: number[]; steady: number[]; completion: number[] } {
+  const setup: number[] = []
+  const steady: number[] = []
+  const completion: number[] = []
+  for (const task of longTasks) {
+    if (task.startTime < tSend) setup.push(task.duration)
+    else if (task.startTime < firstCompletionMs) steady.push(task.duration)
+    else completion.push(task.duration)
+  }
+  return { setup, steady, completion }
+}
+
+/**
+ * Derive the full per-sample attribution record. All request-arrival values
+ * come from the mock request log's EXISTING per-request wall timestamps
+ * (`Date.now()`) against the runner-comparable wall send anchor `tSendWall` —
+ * no mock scheduling, timestamps, or server behavior is changed. All
+ * presentation/Redux values come from the recorded page-clock series. The
+ * assistant-stub values come from the stub first-appearance observations
+ * (page clock) plus the paired anchor for the cross-domain metric.
+ */
+function deriveSampleAttribution(
+  result: InstrumentationResult,
+  reduxTimings: StreamTiming[],
+  fanoutRequests: Array<{ model: string; stream: boolean; timestamp: number }>,
+  visibleReduxFirstContentMs: number,
+  visibleDomFirstContentMs: number,
+  stubCommits: StubCommit[]
+): SampleAttribution {
+  const requestTimes = fanoutRequests.map((r) => r.timestamp)
+  const firstRequestArrivalMs = Math.min(...requestTimes) - result.tSendWall
+  const requestSpreadMs = Math.max(...requestTimes) - Math.min(...requestTimes)
+  const firstCompletionMs = Math.min(...reduxTimings.map((t) => t.completionMs))
+  const stubTimes = stubCommits.map((c) => c.t)
+  const firstStubCommitMs = Math.min(...stubTimes)
+  const lastStubCommitMs = Math.max(...stubTimes)
+  return {
+    firstRequestArrivalMs,
+    requestSpreadMs,
+    firstCommitDeltaMs: visibleDomFirstContentMs - visibleReduxFirstContentMs,
+    reduxStreamDurations: reduxTimings.map((t) => t.completionMs - t.firstContentMs),
+    reduxOverlapMs: reduxOverlapDurationMs(reduxTimings),
+    longTasksByPhase: bucketLongTasksByPhase(result.longTasks, result.tSend, firstCompletionMs),
+    stubSendToFirstCommitMs: firstStubCommitMs - result.tSend,
+    stubCommitSpreadMs: lastStubCommitMs - firstStubCommitMs,
+    stubLastCommitToFirstRequestMs: firstRequestArrivalMs - (lastStubCommitMs - result.tSend)
+  }
+}
+
+/**
+ * Deterministic per-sample validation of the attribution metrics. Every
+ * assertion here is fail-closed: a violation aborts the test and produces no
+ * artifact. The invariants:
+ *   - every fanout request timestamp is finite, and every arrival is at or
+ *     after the wall send anchor (a fanout request cannot arrive before the
+ *     send that dispatches it; the anchor is sampled in the same synchronous
+ *     task as the synthetic Enter keydown, strictly before the dispatch);
+ *   - the visible stream's DOM first-content commit cannot precede its Redux
+ *     first-content commit on the same monotonic page clock (the DOM renders
+ *     from the store state, so the delta is >= 0);
+ *   - per-stream Redux durations and the overlap are finite; overlap is
+ *     exactly 0 for N=1 and >= 0 for N>1;
+ *   - the phase buckets partition the observed long-task series exactly (their
+ *     counts sum to the aggregate), and every observed task has finite
+ *     startTime/duration.
+ */
+function assertAttributionValid(
+  sampleIndex: number,
+  n: number,
+  result: InstrumentationResult,
+  attribution: SampleAttribution,
+  fanoutRequests: Array<{ model: string; stream: boolean; timestamp: number }>
+): void {
+  expect(
+    fanoutRequests.every((r) => Number.isFinite(r.timestamp)),
+    `sample ${sampleIndex}: every fanout request timestamp must be finite (mock request log)`
+  ).toBe(true)
+  expect(
+    fanoutRequests.every((r) => r.timestamp >= result.tSendWall),
+    `sample ${sampleIndex}: no fanout request may arrive before the wall send anchor`
+  ).toBe(true)
+  expect(
+    Number.isFinite(attribution.firstRequestArrivalMs) && attribution.firstRequestArrivalMs >= 0,
+    `sample ${sampleIndex}: fanout.firstRequestArrival must be a finite non-negative value (send wall anchor -> first request arrival)`
+  ).toBe(true)
+  expect(
+    Number.isFinite(attribution.requestSpreadMs) && attribution.requestSpreadMs >= 0,
+    `sample ${sampleIndex}: fanout.requestSpread must be a finite non-negative value (first -> last request arrival)`
+  ).toBe(true)
+  expect(
+    Number.isFinite(attribution.firstCommitDeltaMs) && attribution.firstCommitDeltaMs >= 0,
+    `sample ${sampleIndex}: presentation.firstCommitDelta must be finite and >= 0 (DOM first content cannot precede the Redux first content on the same page clock)`
+  ).toBe(true)
+  expect(
+    attribution.reduxStreamDurations.every((d) => Number.isFinite(d) && d >= 0),
+    `sample ${sampleIndex}: every Redux stream duration must be finite and >= 0`
+  ).toBe(true)
+  expect(
+    Number.isFinite(attribution.reduxOverlapMs) && attribution.reduxOverlapMs >= 0,
+    `sample ${sampleIndex}: stream.redux.overlap must be finite and >= 0`
+  ).toBe(true)
+  if (n === 1) {
+    expect(
+      attribution.reduxOverlapMs,
+      `sample ${sampleIndex}: stream.redux.overlap must be exactly 0 for N=1 (a single stream has no overlap)`
+    ).toBe(0)
+  }
+  const bucketCount =
+    attribution.longTasksByPhase.setup.length +
+    attribution.longTasksByPhase.steady.length +
+    attribution.longTasksByPhase.completion.length
+  expect(
+    bucketCount,
+    `sample ${sampleIndex}: long-task phase buckets must partition the aggregate series exactly (no double counting, no gaps)`
+  ).toBe(result.longTasks.length)
+  expect(
+    result.longTasks.every((t) => Number.isFinite(t.startTime) && Number.isFinite(t.duration) && t.duration > 0),
+    `sample ${sampleIndex}: every observed long task must have finite startTime and a positive finite duration`
+  ).toBe(true)
+}
+
+/**
+ * Narrowly justified clock-domain tolerance for the assistant-stub wall
+ * projection (ms). `stub.lastCommitToFirstRequest` subtracts a page-clock
+ * offset (stub commit time − tSend, renderer `performance.now()`) from a
+ * wall-clock offset (first request arrival − tSendWall, `Date.now()`): the
+ * projection tStubWall = tSendWall + (tStubPage − tSend) is exact only while
+ * the renderer page↔wall offset stays constant. 25 ms bounds the renderer's
+ * OWN page↔wall drift (how far the renderer's `Date.now()` can move relative
+ * to its `performance.now()` across the measured window); it does NOT validate
+ * any inter-process skew. The same-host renderer/runner wall-clock offset is
+ * ASSUMED negligible: the runner reads the mock request log's `Date.now()`
+ * wall timestamps on the same machine as the measured renderer, and this
+ * invariant never samples the runner's clock. A wall-clock step larger than
+ * this fails the sample fail-closed (the wall-relative derivation would be
+ * untrustworthy). The tolerance can never mask a structural ordering anomaly:
+ * the production path enqueues the N requests only AFTER the last
+ * `addMessage` dispatch, so a true last-stub→first-request violation would
+ * manifest at tens of milliseconds or more.
+ */
+const CLOCK_DOMAIN_TOLERANCE_MS = 25
+
+/**
+ * Deterministic per-sample validation of the assistant-stub subphase metrics.
+ * Every assertion is fail-closed: a violation aborts the test and produces no
+ * artifact. The invariants:
+ *   - exactly N unique assistant stub commits, one per expected assistant: the
+ *     recorded set equals the sample topic's authoritative assistant MESSAGE
+ *     id set (no duplicates, no missing stubs, no cross-sample records — a
+ *     prior sample's assistants are never observed);
+ *   - every stub commit is finite and at/after tSend (the send that creates
+ *     the stubs dispatches after the anchor; recorder and anchor share one
+ *     monotonic page clock);
+ *   - ordering first ≤ last ≤ first request: the spread is >= 0 and exactly 0
+ *     for N=1; the last stub commit's wall projection cannot follow the first
+ *     request arrival beyond the narrow clock-domain tolerance;
+ *   - the paired page/wall anchor is stable across the measured window
+ *     (|offset(tComplete) − offset(tSend)| <= tolerance) — the soundness
+ *     precondition of the wall projection;
+ *   - the three derived metrics are finite.
+ */
+function assertStubSubphaseValid(
+  sampleIndex: number,
+  n: number,
+  result: InstrumentationResult,
+  attribution: SampleAttribution,
+  fanoutRequests: Array<{ model: string; stream: boolean; timestamp: number }>,
+  assistantIds: string[]
+): void {
+  const stubIds = result.stubCommits.map((c) => c.assistantMessageId)
+  expect(
+    stubIds.length,
+    `sample ${sampleIndex}: the assistant-stub observer must record exactly ${n} unique assistant stub commits (observed ${stubIds.length})`
+  ).toBe(n)
+  expect(
+    [...stubIds].sort(),
+    `sample ${sampleIndex}: the recorded stub ids must equal the sample topic's assistant message id set exactly (no duplicates, no cross-sample records)`
+  ).toEqual([...assistantIds].sort())
+  expect(
+    result.stubCommits.every((c) => Number.isFinite(c.t) && c.t >= result.tSend),
+    `sample ${sampleIndex}: every assistant stub commit must be finite and at/after the send anchor (same page clock)`
+  ).toBe(true)
+  expect(
+    Number.isFinite(attribution.stubSendToFirstCommitMs) && attribution.stubSendToFirstCommitMs >= 0,
+    `sample ${sampleIndex}: stub.sendToFirstCommit must be a finite non-negative value (send -> first assistant stub Redux commit, same page clock)`
+  ).toBe(true)
+  expect(
+    Number.isFinite(attribution.stubCommitSpreadMs) && attribution.stubCommitSpreadMs >= 0,
+    `sample ${sampleIndex}: stub.commitSpread must be a finite non-negative value (first -> last assistant stub commit)`
+  ).toBe(true)
+  if (n === 1) {
+    expect(
+      attribution.stubCommitSpreadMs,
+      `sample ${sampleIndex}: stub.commitSpread must be exactly 0 for N=1 (a single assistant stub: first === last)`
+    ).toBe(0)
+  }
+  // Ordering: last stub commit (wall-projected via the paired send anchor) at
+  // or before the first request arrival, within the narrow clock-domain
+  // tolerance. Recomputed from the RAW records (request log wall timestamps +
+  // stub page-clock times against the paired anchors) so the invariant does
+  // not merely re-trust the derivation: lastStubSendRelativeMs <=
+  // firstRequestArrivalMs + tolerance.
+  const requestTimes = fanoutRequests.map((r) => r.timestamp)
+  const firstRequestArrivalMs = Math.min(...requestTimes) - result.tSendWall
+  const lastStubSendRelativeMs = Math.max(...result.stubCommits.map((c) => c.t)) - result.tSend
+  expect(
+    lastStubSendRelativeMs,
+    `sample ${sampleIndex}: the last assistant stub commit cannot follow the first request arrival beyond the clock-domain tolerance (last stub ${lastStubSendRelativeMs.toFixed(2)} ms vs first request arrival ${firstRequestArrivalMs.toFixed(2)} ms after send, tolerance ${CLOCK_DOMAIN_TOLERANCE_MS} ms)`
+  ).toBeLessThanOrEqual(firstRequestArrivalMs + CLOCK_DOMAIN_TOLERANCE_MS)
+  expect(
+    Number.isFinite(attribution.stubLastCommitToFirstRequestMs) &&
+      attribution.stubLastCommitToFirstRequestMs >= -CLOCK_DOMAIN_TOLERANCE_MS,
+    `sample ${sampleIndex}: stub.lastCommitToFirstRequest must be finite and >= -${CLOCK_DOMAIN_TOLERANCE_MS} ms (last assistant stub commit cannot follow the first request arrival beyond the clock-domain tolerance; observed ${attribution.stubLastCommitToFirstRequestMs.toFixed(2)} ms)`
+  ).toBe(true)
+  // Anchor-stability: the renderer page↔wall offset sampled at tSend and at
+  // tComplete (each pair in ONE synchronous page task) must agree within the
+  // tolerance — the projection's soundness precondition across the window.
+  const offsetAtSend = result.tSendWall - result.tSend
+  const offsetAtComplete = result.tCompleteWall - result.tComplete
+  expect(
+    Math.abs(offsetAtComplete - offsetAtSend),
+    `sample ${sampleIndex}: the paired page/wall anchor must be stable across the measured window (|offset(tComplete) - offset(tSend)| <= ${CLOCK_DOMAIN_TOLERANCE_MS} ms; observed ${Math.abs(offsetAtComplete - offsetAtSend).toFixed(2)} ms) — the wall projection's soundness precondition`
+  ).toBeLessThanOrEqual(CLOCK_DOMAIN_TOLERANCE_MS)
 }
 
 // ---------------------------------------------------------------------------
@@ -1492,6 +1993,38 @@ function countMetric(id: string, name: string, value: number): BenchmarkMetric {
   return { id, name, value, unit: 'count' }
 }
 
+/**
+ * One long-task phase bucket (setup/steady/completion): count/total/max/p95 in
+ * the local `longtask.*` aggregate style. Zero values keep every metric finite
+ * when a phase observes no long task. Phase definitions (boundaries on the
+ *  single page clock, documented in `bucketLongTasksByPhase`): setup =
+ *  observed pre-send tasks (startTime < tSend; the observer installs before
+ *  tSend, so this is the observed pre-send set, not an enforced
+ *  [tInstall, tSend) range), steady = [tSend, firstCompletion), completion =
+ *  [firstCompletion, observation end]. The completion bucket is
+ * POST-FIRST-COMPLETION pressure, not post-all-stream completion processing:
+ * observation ends only after ALL N streams succeed, so `longtask.completion.*`
+ * carries the first stream's completion processing PLUS the remaining streams'
+ * streaming tail until the last stream completes.
+ */
+function longTaskPhaseMetrics(
+  phase: 'setup' | 'steady' | 'completion',
+  label: string,
+  durations: number[]
+): BenchmarkMetric[] {
+  const count = durations.length
+  const total = durations.reduce((a, b) => a + b, 0)
+  const max = count > 0 ? Math.max(...durations) : 0
+  const sorted = sortTimings(durations)
+  const p95 = count > 0 ? percentile(sorted, 95) : 0
+  return [
+    countMetric(`longtask.${phase}.count`, `${label} long task count`, count),
+    { id: `longtask.${phase}.totalMs`, name: `${label} long task total`, value: total, unit: 'ms' },
+    { id: `longtask.${phase}.maxMs`, name: `${label} long task max`, value: max, unit: 'ms' },
+    { id: `longtask.${phase}.p95Ms`, name: `${label} long task p95`, value: p95, unit: 'ms' }
+  ]
+}
+
 function buildBenchmarkResult(
   acc: SampleAccumulator,
   environment: BenchmarkResult['environment'],
@@ -1569,7 +2102,7 @@ function buildBenchmarkResult(
       name: 'all samples completed with finite timing metrics',
       kind: 'correctness',
       passed: true,
-      detail: `${samples}/${samples} samples completed; per-stream Redux first-content, DOM first-content and commit intervals, input latency probes, long tasks and frame deltas recorded as finite values (zero-long-task runs keep metrics finite)`
+      detail: `${samples}/${samples} samples completed; per-stream Redux first-content, DOM first-content and commit intervals, input latency probes, long tasks, frame deltas, fanout request arrival/spread, presentation first-commit delta, Redux stream duration/overlap, setup/steady/completion long-task phase buckets and assistant-stub subphase metrics (send->first stub commit, stub commit spread, last stub commit->first request arrival) all recorded as finite values (zero-long-task runs keep metrics finite; phase buckets partition the aggregate series exactly)`
     },
     {
       id: 'environment.abi145',
@@ -1655,6 +2188,59 @@ function buildBenchmarkResult(
         'Renderer input latency probe count (during overlap)',
         acc.inputLatencies.length
       ),
+      // ---- Attribution slice metrics (measurement-only, L3 provisional) ----
+      ...statsMetrics(
+        'fanout.firstRequestArrival',
+        'Send wall-clock anchor -> first of the N product chat-completion requests arriving at the mock server (mock request log existing wall timestamps, unchanged mock scheduling)',
+        acc.fanoutFirstRequestArrival
+      ),
+      ...statsMetrics(
+        'fanout.requestSpread',
+        'Wall-clock spread between the first and last of the N fanout request arrivals at the mock server',
+        acc.fanoutRequestSpread
+      ),
+      ...statsMetrics(
+        'presentation.firstCommitDelta',
+        'Visible fold stream Redux first block-content commit -> DOM .markdown first-content commit (same page clock; store-commit -> first-visible-content render lag)',
+        acc.presentationFirstCommitDelta
+      ),
+      ...statsMetrics(
+        'stream.redux.duration',
+        'Per-stream Redux first-content -> completion duration (stream-alive time in Redux)',
+        acc.reduxStreamDuration
+      ),
+      ...statsMetrics(
+        'stream.redux.overlap',
+        'Per-sample time during which >= 2 streams were alive in Redux simultaneously (measure of {t : alive(t) >= 2}; exactly 0 for N=1)',
+        acc.reduxOverlap
+      ),
+      // ---- Assistant-stub subphase metrics (measurement-only, L3 provisional) --
+      // These LOCATE cost around the assistant-stub phase (before/through the
+      // stub commits vs after the last one); they cannot distinguish renderer
+      // dispatch cost from the IPC/SQLite persistence underneath (no Main/IPC
+      // instrumentation exists).
+      ...statsMetrics(
+        'stub.sendToFirstCommit',
+        'Send page-clock anchor -> first assistant stub Redux message commit (store.subscribe-sampled first appearance of an assistant message in the messages slice; locates cost around the assistant-stub phase, cannot distinguish renderer dispatch from IPC/SQLite persistence underneath)',
+        acc.stubSendToFirstCommit
+      ),
+      ...statsMetrics(
+        'stub.commitSpread',
+        'Assistant stub Redux commit spread: first -> last of the N stub commits in the messages slice (exactly 0 for N=1)',
+        acc.stubCommitSpread
+      ),
+      ...statsMetrics(
+        'stub.lastCommitToFirstRequest',
+        'Last assistant stub Redux commit -> first of the N product chat-completion request arrivals at the mock server (wall-projected via the paired page/wall send anchor; locates cost after the last stub commit, cannot distinguish renderer dispatch from IPC/SQLite persistence underneath)',
+        acc.stubLastCommitToFirstRequest
+      ),
+      ...longTaskPhaseMetrics('setup', 'Setup-phase (pre-send) long task', acc.longTaskSetup),
+      ...longTaskPhaseMetrics('steady', 'Steady-phase (send -> first completion) long task', acc.longTaskSteady),
+      ...longTaskPhaseMetrics(
+        'completion',
+        "Post-first-completion long task (first completion -> observation end: first stream completion processing + remaining streams' streaming tail until all N streams complete)",
+        acc.longTaskCompletion
+      ),
       countMetric('longtask.count', 'Aggregate long task count', longTaskCount),
       { id: 'longtask.totalMs', name: 'Aggregate long task total', value: longTaskTotal, unit: 'ms' },
       { id: 'longtask.maxMs', name: 'Aggregate long task max', value: longTaskMax, unit: 'ms' },
@@ -1731,7 +2317,12 @@ test.describe('PERF-102 concurrent multi-model stream measurement', () => {
           })
 
           const fanoutRequests = sampleFanoutRequests(seqBefore)
-          const { reduxTimings, visibleFirstContentMs } = await assertSampleCorrectness(page, {
+          const {
+            reduxTimings,
+            visibleReduxFirstContentMs,
+            visibleDomFirstContentMs,
+            assistantIds: sampleAssistantIds
+          } = await assertSampleCorrectness(page, {
             profile,
             sampleIndex: s,
             topicId,
@@ -1740,6 +2331,18 @@ test.describe('PERF-102 concurrent multi-model stream measurement', () => {
             result,
             fanoutRequests
           })
+
+          // ---- Attribution slice: derive + deterministically validate -------
+          const attribution = deriveSampleAttribution(
+            result,
+            reduxTimings,
+            fanoutRequests,
+            visibleReduxFirstContentMs,
+            visibleDomFirstContentMs,
+            result.stubCommits
+          )
+          assertAttributionValid(s, profile.mentionModelCount, result, attribution, fanoutRequests)
+          assertStubSubphaseValid(s, profile.mentionModelCount, result, attribution, fanoutRequests, sampleAssistantIds)
 
           // Accumulate metrics (per-stream + visible-stream + aggregates).
           // First-content series are absolute `performance.now()` timestamps on
@@ -1758,13 +2361,24 @@ test.describe('PERF-102 concurrent multi-model stream measurement', () => {
             acc.domFirstContent.push(timing.firstContentMs - result.tSend)
             acc.domCommitIntervals.push(...timing.commitIntervals)
             if (domEntry.messageId === stateForDom.messages.find((m) => m.modelId === expectedModelIds[0])?.id) {
-              acc.visibleDomFirstContent.push(visibleFirstContentMs)
+              acc.visibleDomFirstContent.push(visibleDomFirstContentMs - result.tSend)
               acc.visibleDomCommitIntervals.push(...timing.commitIntervals)
             }
           }
           acc.inputLatencies.push(...result.inputProbes.map((p) => p.latencyMs))
-          acc.longTasks.push(...result.longTasks)
+          acc.longTasks.push(...result.longTasks.map((t) => t.duration))
+          acc.longTaskSetup.push(...attribution.longTasksByPhase.setup)
+          acc.longTaskSteady.push(...attribution.longTasksByPhase.steady)
+          acc.longTaskCompletion.push(...attribution.longTasksByPhase.completion)
           acc.frameDeltas.push(...result.frameDeltas)
+          acc.fanoutFirstRequestArrival.push(attribution.firstRequestArrivalMs)
+          acc.fanoutRequestSpread.push(attribution.requestSpreadMs)
+          acc.presentationFirstCommitDelta.push(attribution.firstCommitDeltaMs)
+          acc.reduxStreamDuration.push(...attribution.reduxStreamDurations)
+          acc.reduxOverlap.push(attribution.reduxOverlapMs)
+          acc.stubSendToFirstCommit.push(attribution.stubSendToFirstCommitMs)
+          acc.stubCommitSpread.push(attribution.stubCommitSpreadMs)
+          acc.stubLastCommitToFirstRequest.push(attribution.stubLastCommitToFirstRequestMs)
           totals = {
             reduxEvents: totals.reduxEvents + result.redux.reduce((a, b) => a + b.series.length, 0),
             domEvents: totals.domEvents + result.dom.reduce((a, b) => a + b.series.length, 0),
@@ -1778,7 +2392,17 @@ test.describe('PERF-102 concurrent multi-model stream measurement', () => {
               `${result.redux.reduce((a, b) => a + b.series.length, 0)} redux commits, ` +
               `${result.dom.reduce((a, b) => a + b.series.length, 0)} dom commits, ` +
               `${result.inputProbes.length} input probes, ${result.longTasks.length} long tasks, ` +
-              `${result.frameDeltas.length} frames`
+              `${result.frameDeltas.length} frames, ` +
+              `reqArrival=${attribution.firstRequestArrivalMs.toFixed(1)}ms, ` +
+              `reqSpread=${attribution.requestSpreadMs.toFixed(1)}ms, ` +
+              `firstCommitDelta=${attribution.firstCommitDeltaMs.toFixed(1)}ms, ` +
+              `reduxOverlap=${attribution.reduxOverlapMs.toFixed(1)}ms, ` +
+              `stubSendToFirst=${attribution.stubSendToFirstCommitMs.toFixed(1)}ms, ` +
+              `stubSpread=${attribution.stubCommitSpreadMs.toFixed(1)}ms, ` +
+              `stubLastToReq=${attribution.stubLastCommitToFirstRequestMs.toFixed(1)}ms, ` +
+              `ltSetup=${attribution.longTasksByPhase.setup.length}, ` +
+              `ltSteady=${attribution.longTasksByPhase.steady.length}, ` +
+              `ltCompletion=${attribution.longTasksByPhase.completion.length}`
           )
         }
       })
