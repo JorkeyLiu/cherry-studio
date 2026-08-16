@@ -191,7 +191,8 @@ describe('package.json main bench scripts (bench lane audit)', () => {
       'src/main/services/chatDb/__tests__/search.bench.ts',
       'src/main/services/chatDb/__tests__/searchStage.bench.ts',
       'src/main/services/chatDb/__tests__/searchStagePlan.bench.ts',
-      'src/main/services/chatDb/__tests__/sqlite-runtime.perf.bench.ts'
+      'src/main/services/chatDb/__tests__/sqlite-runtime.perf.bench.ts',
+      'src/main/services/chatDb/__tests__/streamPersistDifferential.bench.ts'
     ])
     for (const scriptName of ['bench:main', 'bench:main:native']) {
       expect(scripts[scriptName]).toBeDefined()

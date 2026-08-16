@@ -75,6 +75,7 @@ export type {
   SegmentWire,
   SelectAnswerMessageRequest,
   SoftDeleteTopicRequest,
+  StreamWriteDiagnostics,
   TopicExistsRequest,
   TopicWire,
   TransferTopicOwnershipRequest,

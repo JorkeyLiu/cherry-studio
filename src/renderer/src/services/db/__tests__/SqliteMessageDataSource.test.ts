@@ -301,6 +301,24 @@ describe('SqliteMessageDataSource', () => {
       expect(req.updates.content).toBe('updated')
     })
 
+    it('updateSingleBlock forwards an explicitly supplied stream diagnostic context', async () => {
+      api.updateSingleBlock.mockResolvedValue(successResult(null))
+      await ds.updateSingleBlock('blk-1', { content: 'updated' } as any, {
+        correlationId: 'stm-e2e-1-abc',
+        ordinal: 1
+      })
+      const req = api.updateSingleBlock.mock.calls[0][0]
+      expect(req.diagnostics).toEqual({ correlationId: 'stm-e2e-1-abc', ordinal: 1 })
+    })
+
+    it('updateBlocks forwards an explicitly supplied stream diagnostic context', async () => {
+      api.updateBlocks.mockResolvedValue(successResult(null))
+      const blk = { id: 'b-1', messageId: 'm-1', type: 'main_text', content: 'x' } as any
+      await ds.updateBlocks([blk], { correlationId: 'stm-e2e-2-abc', ordinal: 2 })
+      const req = api.updateBlocks.mock.calls[0][0]
+      expect(req.diagnostics).toEqual({ correlationId: 'stm-e2e-2-abc', ordinal: 2 })
+    })
+
     it('bulkAddBlocks calls api.bulkAddBlocks', async () => {
       api.bulkAddBlocks.mockResolvedValue(successResult(null))
       const blk = { id: 'b-1', messageId: 'm-1', type: 'main_text' } as any

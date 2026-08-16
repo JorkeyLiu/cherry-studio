@@ -73,6 +73,7 @@ import type {
   SearchMessagesResponse,
   SelectAnswerMessageRequest,
   SoftDeleteTopicRequest,
+  StreamWriteDiagnostics,
   TopicExistsRequest,
   TopicWire,
   UpdateBlocksRequest,
@@ -89,6 +90,7 @@ import type {
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
 
 import { consumeNextAppendDiagnostics, logAppendDiagnostic, type SendDiagnosticsContext } from './sendTimingDiagnostics'
+import { recordStreamAttrRendererRecord, resolveStreamWriteDiagnostics } from './streamTimingDiagnostics'
 import type { MessageDataSource } from './types'
 
 // ---------------------------------------------------------------------------
@@ -424,20 +426,165 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   // ============ Block Operations ============
 
-  async updateBlocks(blocks: MessageBlock[]): Promise<void> {
+  async updateBlocks(blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics): Promise<void> {
+    // PERF-STREAM-ATTR-001: resolve the per-call correlation context (explicit
+    // context wins; otherwise auto-created when the renderer switch is on;
+    // otherwise undefined — inert). Never affects persistence semantics.
+    const ctx = resolveStreamWriteDiagnostics(streamDiag)
+    const channel = 'chatdb:update-blocks'
+    const t0 = performance.now()
+    const tSerialize = performance.now()
     const request: UpdateBlocksRequest = {
-      blocks: cloneForWire(blocks as unknown as JsonObject[])
+      blocks: cloneForWire(blocks as unknown as JsonObject[]),
+      ...(ctx && { diagnostics: ctx })
     }
-    unwrap(await this.api.updateBlocks(request))
+    const blockCount = request.blocks.length
+    const serializeDurationMs = elapsedMs(tSerialize)
+    const tIpc = performance.now()
+    let result: ChatDbResult<null>
+    try {
+      result = await this.api.updateBlocks(request)
+    } catch (error) {
+      // Transport rejection: timing still recorded, then rethrown unchanged.
+      if (ctx) {
+        recordStreamAttrRendererRecord({
+          channel,
+          stage: 'renderer.serialize',
+          correlationId: ctx.correlationId,
+          ordinal: ctx.ordinal,
+          durationMs: serializeDurationMs,
+          ok: false,
+          blockCount
+        })
+        recordStreamAttrRendererRecord({
+          channel,
+          stage: 'renderer.ipc',
+          correlationId: ctx.correlationId,
+          ordinal: ctx.ordinal,
+          durationMs: elapsedMs(tIpc),
+          ok: false,
+          blockCount
+        })
+        recordStreamAttrRendererRecord({
+          channel,
+          stage: 'renderer.total',
+          correlationId: ctx.correlationId,
+          ordinal: ctx.ordinal,
+          durationMs: elapsedMs(t0),
+          ok: false,
+          blockCount
+        })
+      }
+      throw error
+    }
+    if (ctx) {
+      recordStreamAttrRendererRecord({
+        channel,
+        stage: 'renderer.serialize',
+        correlationId: ctx.correlationId,
+        ordinal: ctx.ordinal,
+        durationMs: serializeDurationMs,
+        ok: result.ok === true,
+        blockCount
+      })
+      recordStreamAttrRendererRecord({
+        channel,
+        stage: 'renderer.ipc',
+        correlationId: ctx.correlationId,
+        ordinal: ctx.ordinal,
+        durationMs: elapsedMs(tIpc),
+        ok: result.ok === true,
+        blockCount
+      })
+      recordStreamAttrRendererRecord({
+        channel,
+        stage: 'renderer.total',
+        correlationId: ctx.correlationId,
+        ordinal: ctx.ordinal,
+        durationMs: elapsedMs(t0),
+        ok: result.ok === true,
+        blockCount
+      })
+    }
+    unwrap(result)
     // No topicUpdatedAt dispatch — block-only operation
   }
 
-  async updateSingleBlock(blockId: string, updates: Partial<MessageBlock>): Promise<void> {
+  async updateSingleBlock(
+    blockId: string,
+    updates: Partial<MessageBlock>,
+    streamDiag?: StreamWriteDiagnostics
+  ): Promise<void> {
+    const ctx = resolveStreamWriteDiagnostics(streamDiag)
+    const channel = 'chatdb:update-single-block'
+    const t0 = performance.now()
+    const tSerialize = performance.now()
     const request: UpdateSingleBlockRequest = {
       blockId,
-      updates: cloneForWire(updates as unknown as JsonObject)
+      updates: cloneForWire(updates as unknown as JsonObject),
+      ...(ctx && { diagnostics: ctx })
     }
-    unwrap(await this.api.updateSingleBlock(request))
+    const serializeDurationMs = elapsedMs(tSerialize)
+    const tIpc = performance.now()
+    let result: ChatDbResult<null>
+    try {
+      result = await this.api.updateSingleBlock(request)
+    } catch (error) {
+      if (ctx) {
+        recordStreamAttrRendererRecord({
+          channel,
+          stage: 'renderer.serialize',
+          correlationId: ctx.correlationId,
+          ordinal: ctx.ordinal,
+          durationMs: serializeDurationMs,
+          ok: false
+        })
+        recordStreamAttrRendererRecord({
+          channel,
+          stage: 'renderer.ipc',
+          correlationId: ctx.correlationId,
+          ordinal: ctx.ordinal,
+          durationMs: elapsedMs(tIpc),
+          ok: false
+        })
+        recordStreamAttrRendererRecord({
+          channel,
+          stage: 'renderer.total',
+          correlationId: ctx.correlationId,
+          ordinal: ctx.ordinal,
+          durationMs: elapsedMs(t0),
+          ok: false
+        })
+      }
+      throw error
+    }
+    if (ctx) {
+      recordStreamAttrRendererRecord({
+        channel,
+        stage: 'renderer.serialize',
+        correlationId: ctx.correlationId,
+        ordinal: ctx.ordinal,
+        durationMs: serializeDurationMs,
+        ok: result.ok === true
+      })
+      recordStreamAttrRendererRecord({
+        channel,
+        stage: 'renderer.ipc',
+        correlationId: ctx.correlationId,
+        ordinal: ctx.ordinal,
+        durationMs: elapsedMs(tIpc),
+        ok: result.ok === true
+      })
+      recordStreamAttrRendererRecord({
+        channel,
+        stage: 'renderer.total',
+        correlationId: ctx.correlationId,
+        ordinal: ctx.ordinal,
+        durationMs: elapsedMs(t0),
+        ok: result.ok === true
+      })
+    }
+    unwrap(result)
     // No topicUpdatedAt dispatch — block-only operation
   }
 

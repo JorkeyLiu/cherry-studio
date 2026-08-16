@@ -26,6 +26,13 @@ interface ImportMeta {
 }
 
 declare global {
+  /**
+   * PERF-STREAM-ATTR-001 measurement switch inlined at build time
+   * (electron.vite.config.ts / vitest.config.ts `define`); 'true'/'false'
+   * string. Default builds inline 'false' — the renderer collector stays inert.
+   */
+  const __PERF_STREAM_ATTR__: string
+
   interface Window {
     root: HTMLElement
     modal: HookAPI

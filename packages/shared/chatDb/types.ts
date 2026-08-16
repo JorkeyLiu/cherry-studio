@@ -194,10 +194,34 @@ export interface DeleteMessagesRequest {
   messageIds: string[]
 }
 
+/**
+ * Optional measurement-only correlation metadata for streaming persistence
+ * writes (update-single-block / update-blocks; PERF-STREAM-ATTR-001,
+ * LOCK-STREAM-ATTR-001).
+ *
+ * Carried on UpdateSingleBlockRequest / UpdateBlocksRequest ONLY to pair
+ * renderer-side timing records with the Main-side handler/transaction timing
+ * of the SAME call. Never affects persistence semantics. Never contains
+ * message content, prompts, keys, or any user data — only an opaque id and a
+ * 1-based ordinal. Absent (the default) = no measurement correlation for that
+ * call.
+ */
+export interface StreamWriteDiagnostics {
+  /** Opaque per-call correlation id shared by renderer and main records. */
+  correlationId?: string
+  /** 1-based ordinal within the measured streaming write session. */
+  ordinal?: number
+}
+
 /** @see IpcChannel.ChatDb_UpdateBlocks */
 export interface UpdateBlocksRequest {
   /** Block entities to upsert. Each must contain `id` and `messageId`. */
   blocks: JsonObject[]
+  /**
+   * Optional measurement-only correlation metadata. Ignored for persistence;
+   * carries only an opaque id + ordinal (LOCK-STREAM-ATTR-001).
+   */
+  diagnostics?: StreamWriteDiagnostics
 }
 
 /** @see IpcChannel.ChatDb_UpdateSingleBlock */
@@ -208,6 +232,11 @@ export interface UpdateSingleBlockRequest {
    * Must NOT change id or messageId.
    */
   updates: JsonObject
+  /**
+   * Optional measurement-only correlation metadata. Ignored for persistence;
+   * carries only an opaque id + ordinal (LOCK-STREAM-ATTR-001).
+   */
+  diagnostics?: StreamWriteDiagnostics
 }
 
 /** @see IpcChannel.ChatDb_BulkAddBlocks */

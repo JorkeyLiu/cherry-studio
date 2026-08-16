@@ -1,5 +1,5 @@
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
-import type { FileCleanupResult, MessageBlockEntry } from '@shared/chatDb'
+import type { FileCleanupResult, MessageBlockEntry, StreamWriteDiagnostics } from '@shared/chatDb'
 
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
 
@@ -110,13 +110,23 @@ export interface MessageDataSource {
   // ============ Block Operations ============
   /**
    * Update multiple blocks
+   *
+   * `streamDiag` is optional measurement-only correlation metadata
+   * (PERF-STREAM-ATTR-001); never affects persistence.
    */
-  updateBlocks(blocks: MessageBlock[]): Promise<void>
+  updateBlocks(blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics): Promise<void>
 
   /**
    * Update single block
+   *
+   * `streamDiag` is optional measurement-only correlation metadata
+   * (PERF-STREAM-ATTR-001); never affects persistence.
    */
-  updateSingleBlock?(blockId: string, updates: Partial<MessageBlock>): Promise<void>
+  updateSingleBlock?(
+    blockId: string,
+    updates: Partial<MessageBlock>,
+    streamDiag?: StreamWriteDiagnostics
+  ): Promise<void>
 
   /**
    * Bulk add blocks (for cloning operations)

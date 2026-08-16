@@ -1060,6 +1060,16 @@ describe('contract allowedKeys', () => {
     const keys = getContract('chatdb:ensure-topic').allowedKeys
     expect(keys).toEqual(new Set(['topicId', 'assistantId', 'name']))
   })
+
+  it('update-blocks has exactly blocks and diagnostics', () => {
+    const keys = getContract('chatdb:update-blocks').allowedKeys
+    expect(keys).toEqual(new Set(['blocks', 'diagnostics']))
+  })
+
+  it('update-single-block has exactly blockId, updates, and diagnostics', () => {
+    const keys = getContract('chatdb:update-single-block').allowedKeys
+    expect(keys).toEqual(new Set(['blockId', 'updates', 'diagnostics']))
+  })
 })
 
 // ===========================================================================
@@ -1256,6 +1266,111 @@ describe('append-message diagnostics correlation metadata', () => {
         diagnostics: { correlationId: 'snd-abc' }
       })
     ).toThrow(ValidationError)
+  })
+})
+
+// ===========================================================================
+// streaming write channels: optional diagnostics correlation metadata
+// (PERF-STREAM-ATTR-001, LOCK-STREAM-ATTR-001)
+// ===========================================================================
+
+describe('streaming write diagnostics correlation metadata', () => {
+  const singleBlockBase = {
+    blockId: 'b1',
+    updates: { content: 'new' }
+  }
+  const blocksBase = {
+    blocks: [{ id: 'b1', messageId: 'm1', content: 'hi' }]
+  }
+
+  it('update-single-block accepts a full diagnostics object', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-single-block', {
+        ...singleBlockBase,
+        diagnostics: { correlationId: 'snd-abc-123', ordinal: 1 }
+      })
+    ).not.toThrow()
+  })
+
+  it('update-single-block accepts diagnostics with only correlationId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-single-block', {
+        ...singleBlockBase,
+        diagnostics: { correlationId: 'snd-abc-123' }
+      })
+    ).not.toThrow()
+  })
+
+  it('update-blocks accepts a full diagnostics object', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-blocks', {
+        ...blocksBase,
+        diagnostics: { correlationId: 'snd-abc-123', ordinal: 2 }
+      })
+    ).not.toThrow()
+  })
+
+  it('update-blocks accepts diagnostics with only ordinal', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-blocks', {
+        ...blocksBase,
+        diagnostics: { ordinal: 3 }
+      })
+    ).not.toThrow()
+  })
+
+  it('update-single-block rejects diagnostics with unknown properties', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-single-block', {
+        ...singleBlockBase,
+        diagnostics: { correlationId: 'snd-abc', message: 'leak' }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('update-blocks rejects empty correlationId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-blocks', {
+        ...blocksBase,
+        diagnostics: { correlationId: '' }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('update-single-block rejects over-length correlationId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:update-single-block', {
+        ...singleBlockBase,
+        diagnostics: { correlationId: 'x'.repeat(65) }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('update-blocks rejects non-integer, zero, negative, or oversized ordinal', () => {
+    for (const ordinal of [0, -1, 1.5, 101, '1']) {
+      expect(() =>
+        validateChatDbRequest('chatdb:update-blocks', {
+          ...blocksBase,
+          diagnostics: { ordinal }
+        })
+      ).toThrow(ValidationError)
+    }
+  })
+
+  it('update-single-block rejects non-object diagnostics and null diagnostics', () => {
+    for (const diagnostics of ['snd-abc', 1, true, null, ['snd-abc']]) {
+      expect(() =>
+        validateChatDbRequest('chatdb:update-single-block', {
+          ...singleBlockBase,
+          diagnostics
+        })
+      ).toThrow(ValidationError)
+    }
+  })
+
+  it('absents diagnostics preserves the exact prior accepted shapes', () => {
+    expect(() => validateChatDbRequest('chatdb:update-single-block', singleBlockBase)).not.toThrow()
+    expect(() => validateChatDbRequest('chatdb:update-blocks', blocksBase)).not.toThrow()
   })
 })
 

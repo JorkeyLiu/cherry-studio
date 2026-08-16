@@ -24,7 +24,12 @@ export default defineConfig({
   // through the same `define` convention — runtime semantics are unchanged.
   define: {
     __BUILD_ID__: JSON.stringify('test-build-id'),
-    __BUILD_VERSION__: JSON.stringify('0')
+    __BUILD_VERSION__: JSON.stringify('0'),
+    // PERF-STREAM-ATTR-001: renderer measurement switch, test-injectable via
+    // the same env the measurement build/run uses (default inert).
+    __PERF_STREAM_ATTR__: JSON.stringify(
+      process.env.PERF_STREAM_ATTR === '1' || process.env.PERF_STREAM_ATTR === 'true' ? 'true' : 'false'
+    )
   },
   test: {
     projects: [

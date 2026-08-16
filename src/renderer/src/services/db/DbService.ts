@@ -1,6 +1,6 @@
 import db from '@renderer/databases'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
-import type { FileCleanupResult, MessageBlockEntry } from '@shared/chatDb'
+import type { FileCleanupResult, MessageBlockEntry, StreamWriteDiagnostics } from '@shared/chatDb'
 
 import { fileLock } from '../FileLock'
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
@@ -88,12 +88,12 @@ class DbService implements MessageDataSource {
     return this.ordinarySource.ensureTopic(topicId, assistantId, name)
   }
 
-  updateBlocks(blocks: MessageBlock[]): Promise<void> {
-    return this.ordinarySource.updateBlocks(blocks)
+  updateBlocks(blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics): Promise<void> {
+    return this.ordinarySource.updateBlocks(blocks, streamDiag)
   }
 
-  updateSingleBlock(blockId: string, updates: Partial<MessageBlock>) {
-    return this.ordinarySource.updateSingleBlock(blockId, updates)
+  updateSingleBlock(blockId: string, updates: Partial<MessageBlock>, streamDiag?: StreamWriteDiagnostics) {
+    return this.ordinarySource.updateSingleBlock(blockId, updates, streamDiag)
   }
   bulkAddBlocks(blocks: MessageBlock[]) {
     return this.ordinarySource.bulkAddBlocks(blocks)

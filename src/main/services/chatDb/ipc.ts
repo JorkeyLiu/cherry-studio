@@ -74,6 +74,7 @@ import { logMainDiagnostic } from '../diagnostics'
 import { ChatDbAggregateService } from './ChatDbAggregateService'
 import { internalStorageFailure, mapErrorToResult, validateConstructedResult } from './errors'
 import { chatDbService } from './index'
+import { recordStreamAttrRecord } from './streamingMeasure'
 
 const logger = loggerService.withContext('ChatDbIpc')
 
@@ -150,10 +151,18 @@ export function registerChatDbIpc(): () => void {
       // malformed diagnostics payload never emits a timing log and never
       // echoes unvalidated values (LOCK-002).
       const isAppendChannel = channel === IpcChannel.ChatDb_AppendMessage
+      // PERF-STREAM-ATTR-001: the streaming persistence write channels are
+      // measurement-gated the same way (LOCK-STREAM-ATTR-001/003): only a
+      // validated, closed-field diagnostics payload triggers a bounded record.
+      const isStreamWriteChannel =
+        channel === IpcChannel.ChatDb_UpdateSingleBlock || channel === IpcChannel.ChatDb_UpdateBlocks
       const t0 = performance.now()
       let appendOutcomeOk = false
       let appendCorrelationId: string | undefined
       let appendOrdinal: number | undefined
+      let streamOutcomeOk = false
+      let streamCorrelationId: string | undefined
+      let streamOrdinal: number | undefined
       try {
         // Step 1: Validate request against contract
         try {
@@ -174,6 +183,12 @@ export function registerChatDbIpc(): () => void {
           appendCorrelationId = appendDiag?.correlationId
           appendOrdinal = appendDiag?.ordinal
         }
+        // Same closed-shape rule for the streaming write channels.
+        if (isStreamWriteChannel) {
+          const streamDiag = (request as UpdateSingleBlockRequest | UpdateBlocksRequest)?.diagnostics
+          streamCorrelationId = streamDiag?.correlationId
+          streamOrdinal = streamDiag?.ordinal
+        }
 
         // Step 2: Get aggregate service (may fail if DB unavailable)
         let aggregate: ChatDbAggregateService
@@ -188,6 +203,7 @@ export function registerChatDbIpc(): () => void {
         // Step 3: Execute command
         const result = execute(aggregate, request)
         appendOutcomeOk = result.ok === true
+        streamOutcomeOk = result.ok === true
 
         // Step 4: Validate constructed result via shared contract validator
         try {
@@ -216,6 +232,19 @@ export function registerChatDbIpc(): () => void {
             correlationId: appendCorrelationId,
             ordinal: appendOrdinal,
             ok: appendOutcomeOk
+          })
+        }
+        // PERF-STREAM-ATTR-001: bounded measurement records for the streaming
+        // write channels (LOCK-STREAM-ATTR-001/003/005). Inert unless the
+        // measurement switch is enabled; fires on success AND failure.
+        if (isStreamWriteChannel && typeof streamCorrelationId === 'string' && streamCorrelationId.length > 0) {
+          recordStreamAttrRecord({
+            channel,
+            stage: 'main.handler',
+            correlationId: streamCorrelationId,
+            ordinal: streamOrdinal,
+            durationMs: elapsedMs(t0),
+            ok: streamOutcomeOk
           })
         }
       }
@@ -284,12 +313,12 @@ export function registerChatDbIpc(): () => void {
 
   // 10. update-blocks
   handleCommand(IpcChannel.ChatDb_UpdateBlocks, (agg, req: UpdateBlocksRequest) => {
-    return agg.updateBlocks(req.blocks)
+    return agg.updateBlocks(req.blocks, req.diagnostics)
   })
 
   // 11. update-single-block
   handleCommand(IpcChannel.ChatDb_UpdateSingleBlock, (agg, req: UpdateSingleBlockRequest) => {
-    return agg.updateSingleBlock(req.blockId, req.updates)
+    return agg.updateSingleBlock(req.blockId, req.updates, req.diagnostics)
   })
 
   // 12. bulk-add-blocks

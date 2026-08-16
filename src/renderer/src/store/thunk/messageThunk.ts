@@ -25,6 +25,11 @@ import {
 import { transformMessagesAndFetch } from '@renderer/services/ApiService'
 import { dbService } from '@renderer/services/db'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
+import {
+  createStreamWriteDiagnosticsContext,
+  isStreamAttrRendererMeasureEnabled,
+  recordStreamAttrRendererRecord
+} from '@renderer/services/db/streamTimingDiagnostics'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
@@ -49,7 +54,8 @@ import {
   resetAssistantMessage
 } from '@renderer/utils/messageUtils/create'
 import { getTopicQueue, waitForTopicQueue } from '@renderer/utils/queue'
-import type { FileCleanupResult } from '@shared/chatDb'
+import type { FileCleanupResult, StreamWriteDiagnostics } from '@shared/chatDb'
+import { elapsedMs } from '@shared/diagnostics/sendTiming'
 import { defaultAppHeaders } from '@shared/utils'
 import type { TextStreamPart } from 'ai'
 import { t } from 'i18next'
@@ -145,6 +151,15 @@ const blockUpdateRafs = new LRUCache<string, number>({
 })
 
 /**
+ * PERF-STREAM-ATTR-001 (LOCK-STREAM-ATTR-001/003): per-block arrival timestamps
+ * consumed by the throttled flush to measure renderer-side scheduling delay
+ * (content arrival → DB write flush). Writes are measurement-only records —
+ * the map is populated/touched ONLY when the renderer collector is enabled,
+ * so default bundles never allocate or mutate it.
+ */
+const blockThrottleArrivals = new Map<string, number>()
+
+/**
  * 获取或创建消息块专用的节流函数。
  */
 const getBlockThrottler = (id: string) => {
@@ -161,7 +176,28 @@ const getBlockThrottler = (id: string) => {
       })
 
       blockUpdateRafs.set(id, rafId)
-      await updateSingleBlock(id, blockUpdate)
+
+      // PERF-STREAM-ATTR-001 (LOCK-STREAM-ATTR-001/003/005): measurement-only
+      // schedule-delay record + per-flush correlation context threaded to the
+      // DB write so renderer schedule/serialize/IPC records pair with the
+      // Main-side records of the same call. Inert when the switch is off.
+      let streamDiag: StreamWriteDiagnostics | undefined
+      if (isStreamAttrRendererMeasureEnabled()) {
+        streamDiag = createStreamWriteDiagnosticsContext()
+        const arrival = blockThrottleArrivals.get(id)
+        if (arrival !== undefined) {
+          recordStreamAttrRendererRecord({
+            channel: 'chatdb:update-single-block',
+            stage: 'renderer.schedule',
+            correlationId: streamDiag.correlationId,
+            ordinal: streamDiag.ordinal,
+            durationMs: elapsedMs(arrival),
+            ok: true
+          })
+        }
+        blockThrottleArrivals.delete(id)
+      }
+      await updateSingleBlock(id, blockUpdate, streamDiag)
     }, 150)
 
     blockUpdateThrottlers.set(id, throttler)
@@ -174,6 +210,9 @@ const getBlockThrottler = (id: string) => {
  * 更新单个消息块。
  */
 export const throttledBlockUpdate = (id: string, blockUpdate: any) => {
+  if (isStreamAttrRendererMeasureEnabled()) {
+    blockThrottleArrivals.set(id, performance.now())
+  }
   const throttler = getBlockThrottler(id)
   // store.dispatch(updateOneBlock({ id, changes: blockUpdate }))
   throttler(blockUpdate)
@@ -194,6 +233,8 @@ export const cancelThrottledBlockUpdate = (id: string) => {
     throttler.cancel()
     blockUpdateThrottlers.delete(id)
   }
+
+  blockThrottleArrivals.delete(id)
 }
 
 // 新增: 通用的、非节流的函数，用于保存消息和块的更新到数据库
@@ -1642,9 +1683,13 @@ export const updateMessage = async (topicId: string, messageId: string, updates:
 /**
  * Update a single message block
  */
-export const updateSingleBlock = async (blockId: string, updates: Partial<MessageBlock>): Promise<void> => {
+export const updateSingleBlock = async (
+  blockId: string,
+  updates: Partial<MessageBlock>,
+  streamDiag?: StreamWriteDiagnostics
+): Promise<void> => {
   try {
-    await dbService.updateSingleBlock(blockId, updates)
+    await dbService.updateSingleBlock(blockId, updates, streamDiag)
     logger.silly('Updated single block via DbService', { blockId })
   } catch (error) {
     logger.error('Failed to update single block:', { blockId, error })
@@ -1668,9 +1713,9 @@ export const bulkAddBlocks = async (blocks: MessageBlock[]): Promise<void> => {
 /**
  * Update multiple message blocks (upsert operation)
  */
-export const updateBlocks = async (blocks: MessageBlock[]): Promise<void> => {
+export const updateBlocks = async (blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics): Promise<void> => {
   try {
-    await dbService.updateBlocks(blocks)
+    await dbService.updateBlocks(blocks, streamDiag)
     logger.silly('Updated blocks via DbService', { count: blocks.length })
   } catch (error) {
     logger.error('Failed to update blocks:', { count: blocks.length, error })

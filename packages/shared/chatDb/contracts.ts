@@ -421,11 +421,43 @@ const deleteMessagesContract: ChatDbContract = {
   validateResult: voidResult('chatdb:delete-messages')
 }
 
+/**
+ * Shared validation for optional measurement-only correlation metadata
+ * (PERF-STREAM-ATTR-001, LOCK-STREAM-ATTR-001). Mirrors the append-message
+ * `diagnostics` validation (LOCK-004): JSON-safety is already enforced by
+ * `validateRequest`; only shape/type bounds are checked here. Never validated
+ * against message content. Rejects unknown properties, so a future field
+ * never silently passes an old validator.
+ */
+function validateStreamWriteDiagnostics(diagnostics: unknown, at = 'request.diagnostics'): void {
+  if (diagnostics === undefined) return
+  if (diagnostics === null || typeof diagnostics !== 'object' || Array.isArray(diagnostics)) {
+    throw new ValidationError(at, 'Expected an object')
+  }
+  const diag = diagnostics as Record<string, unknown>
+  for (const key of Object.keys(diag)) {
+    if (key !== 'correlationId' && key !== 'ordinal') {
+      throw new ValidationError(`${at}.${key}`, `Unknown property '${key}'`)
+    }
+  }
+  if (diag.correlationId !== undefined) {
+    if (typeof diag.correlationId !== 'string' || diag.correlationId.length === 0 || diag.correlationId.length > 64) {
+      throw new ValidationError(`${at}.correlationId`, 'Expected a non-empty string up to 64 characters')
+    }
+  }
+  if (diag.ordinal !== undefined) {
+    if (typeof diag.ordinal !== 'number' || !Number.isInteger(diag.ordinal) || diag.ordinal < 1 || diag.ordinal > 100) {
+      throw new ValidationError(`${at}.ordinal`, 'Expected a positive integer up to 100')
+    }
+  }
+}
+
 const updateBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('blocks'),
+  allowedKeys: keySet('blocks', 'diagnostics'),
   validate(value: unknown): void {
     validateRequest(value, updateBlocksContract.allowedKeys)
     const req = value as UpdateBlocksRequest
+    validateStreamWriteDiagnostics(req.diagnostics)
     // Validate blocks is a proper array before iteration
     const blocks = validateJsonObjectArray(req.blocks, 'request.blocks')
     // Blocks are full entities: require both id and messageId, reject reparenting
@@ -438,11 +470,12 @@ const updateBlocksContract: ChatDbContract = {
 }
 
 const updateSingleBlockContract: ChatDbContract = {
-  allowedKeys: keySet('blockId', 'updates'),
+  allowedKeys: keySet('blockId', 'updates', 'diagnostics'),
   validate(value: unknown): void {
     validateRequest(value, updateSingleBlockContract.allowedKeys)
     const req = value as UpdateSingleBlockRequest
     validateNonEmptyString(req.blockId, 'request.blockId')
+    validateStreamWriteDiagnostics(req.diagnostics)
     // updates is a partial patch, not a full block — no messageId required
     validateJsonObject(req.updates, 'request.updates')
     // Reject identity/reparenting fields at the shared request boundary

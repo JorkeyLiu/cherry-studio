@@ -36,6 +36,10 @@
 - **下一实验/分析目标**（候选，未授权）：并发 fanout 成本与渲染竞争的分离归因；或双 150ms 节流结构的静态/运行时检查。**未授权不执行**（进一步仪器化须新显式范围决策）。
 - **验收框架**：关闭要求并行窄流可视流畅度的已接受用户可见结果 + 需要时集成实现 + 匹配边界回归证据。
 - **已批准校准候选（approved · provisional/unverified · non-threshold）**：流式持久化拖累 `<10%`、渲染长任务无持续性 `>50ms` 为已批准但**未验证**的暂定参考值——**非通过/失败 gate、非当前基线**；重测并记录 artifact 前不得当作事实（PERF-LOCK-003，`performance-measurement.md` §7）。
+- **测量切片状态（PERF-STREAM-ATTR-001 · 已完成 · 不关闭本产品问题）**：measurement-only 切片（默认开关 inert，LOCK-STREAM-ATTR-001）已落地并完成受控测量，产出 artifact 家族 `chatdb-stream-persist-*`（LOCK-STREAM-ATTR-004）。按 LOCK-STREAM-ATTR-006 双面互补——
+  1. **生产构建 E2E**：真实 renderer/IPC/Main 流式写路径（`chatdb:update-single-block` 稳态 + `chatdb:update-blocks` 完成 flush），以 opaque correlation id 配对 renderer 侧 schedule/serialize/IPC/total 与 Main 侧 handler/aggregate/convert/tx，并分类 changed-vs-unchanged 计数；正确性/parity/completeness 为 L1 gate，计时为 **L3 方向性非阈值**。
+  2. **Node 确定性差分**：临时 DB 上 trigger-on vs base-only 的 SQLite 投影差分（growth/nochange/completion 三 profile），量化为**方向性差分估计**，非直接 trigger 内部剖析、非根因。
+  **诚实边界/重叠说明**：`renderer.ipc − main.handler` 为 IPC 开销**估计**（renderer 往返含 IPC 传输 + Main 队列 + Main handler，减去 Main 自身 handler 后仅剩传输/调度部分）；trigger 投影成本仅在 Node 差分量测、不在 E2E 直接量测（真实计时无法分离 trigger 体与 UPDATE）；unchanged 写仍触发内容 trigger（unchanged 块仍计入 trigger 成本）。**不把任何 L3 数值当阈值/基线，本切片不关闭 §2.2 的 `Open` 产品问题，不改变任何生产行为/模式/迁移/索引/cadence/阈值**（LOCK-STREAM-ATTR-001/002/005）。归属仍为方向性；明确未知项（见上）不变。
 
 ### 2.3 PERF-ECHO — 消息回显（Open）
 

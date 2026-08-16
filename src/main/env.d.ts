@@ -6,6 +6,11 @@
 declare const __BUILD_ID__: string
 declare const __BUILD_VERSION__: string
 
+// PERF-STREAM-ATTR-001 measurement switch inlined at build time
+// (electron.vite.config.ts / vitest.config.ts `define`); 'true'/'false'
+// string. Default builds inline 'false' — the Main collector stays inert.
+declare const __PERF_STREAM_ATTR__: string
+
 interface ImportMetaEnv {
   VITE_MAIN_BUNDLE_ID: string
 }
