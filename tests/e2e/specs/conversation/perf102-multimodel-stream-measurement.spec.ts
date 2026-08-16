@@ -1,7 +1,7 @@
 /**
  * PERF-102 concurrent multi-model stream measurement (production-build Playwright E2E).
  *
- * Purpose (docs/performance-program.md §16, PERF-102 measurement-first slice):
+ * Purpose (docs/performance-workstreams.md §2.2, PERF-STREAMING measurement slice):
  *   Deterministic, bounded, correctness-first measurements of the AMPLIFICATION
  *   caused by N concurrent multi-model streams on the ONE visible fold-mode
  *   stream and renderer responsiveness, against a FRESH production build via
@@ -12,7 +12,7 @@
  *   genuinely concurrent), the fold layout displays the first selected answer
  *   while every stream updates Redux + the rendered (hidden and visible)
  *   message DOM. This slice is MEASUREMENT-ONLY: no runtime optimization, no
- *   threshold, no root-cause attribution (PERF-LOCK-004/005/007, §16 next unit).
+ *   threshold, no root-cause attribution (PERF-LOCK-004/005/007, docs/performance-workstreams.md §4).
  *
  * Profiles (PERF102_SCALE; unset/empty = n1). Exactly three explicit profiles:
  *   - n1 (profileCode 0, benchmark id perf102-multimodel-stream-n1): N=1
@@ -124,7 +124,7 @@
  *         underneath — no Main/IPC instrumentation exists (measurement-only).
  *
  * Correctness gates run BEFORE artifact acceptance/emission (a failure aborts
- * the test and produces NO artifact, audit F1-style gate, §5.1). The per-sample
+ * the test and produces NO artifact, audit F1-style gate, docs/performance-measurement.md §3). The per-sample
  * gates run AFTER the timing record — the ordering contract is gates → artifact,
  * not gates → timing:
  *   - fanout.requestCount — exactly N product chat-completion requests, one per
@@ -169,12 +169,12 @@
  *     un-select sample 1's mentions (audit blocker). Each sample then selects
  *     exactly N models in a fresh empty topic.
  *
- * Evidence classification (PERF-LOCK-003 / §6):
+ * Evidence classification (PERF-LOCK-003 / docs/performance-measurement.md §2):
  *   - Deterministic L1 regression evidence when run on a fresh build with the
  *     standard fixture; the numeric metrics remain L3 provisional values until
- *     re-measured per §7. No thresholds are asserted.
+ *     re-measured per docs/performance-measurement.md §7. No thresholds are asserted.
  *
- * Instrumentation boundary (PERF-LOCK-006/008, §16 non-goals):
+ * Instrumentation boundary (PERF-LOCK-006/008, docs/performance-program.md §1.2 non-goals):
  *   - All instrumentation lives in the test page context only (store.subscribe
  *     listener, MutationObserver, PerformanceObserver, rAF loop, synthetic
  *     input/Enter events through the app's real registered handlers). No

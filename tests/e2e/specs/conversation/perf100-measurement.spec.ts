@@ -1,21 +1,21 @@
 /**
  * PERF-100 post-fix batch measurement (production-build Playwright E2E).
  *
- * Purpose (docs/performance-program.md §16):
+ * Purpose (completed production outcome, docs/performance-workstreams.md §3):
  *   Deterministic, bounded, correctness-first measurements for the three
  *   PERF-100 message-interaction paths, run against a FRESH production build
  *   via the standard shared E2E fixture:
- *     1. edit-mode entry/exit  (renderer-only subtree remount, §10.2)
+ *     1. edit-mode entry/exit  (renderer-only subtree remount)
  *     2. multi-message middle insertion via the Redux clipboard copy/paste
  *        keyboard flow (ONE atomic `pasteMessagesToTopic` batch IPC + one
- *        ordered `messagesReceived` projection commit, §10.2)
+ *        ordered `messagesReceived` projection commit)
  *     3. multi-model answer-tab switching (two `updateMessageAndBlocks`
- *        writes, fold/tag render switch, 200ms smooth-scroll floor, §10.2)
+ *        writes, fold/tag render switch, 200ms smooth-scroll floor)
  *   Output is a machine-readable PERF-001 schema v1 JSON summary artifact
  *   (src/main/services/chatDb/__tests__/benchResult.ts) written to the
  *   gitignored `test-results/bench-results/` directory AFTER the test passes.
  *
- * Scale profiles (S0 middle-list scale-curve parameterization, §16):
+ * Scale profiles (S0 middle-list scale-curve parameterization, docs/performance-measurement.md §5):
  *   - The DEFAULT profile (no `PERF100_SCALE` env) is the quick fixture: the
  *     original workload/metrics/sample counts/artifact id (`perf100-measurement`)
  *     unchanged — edit 5 samples over 8 messages, paste 3 samples over 10
@@ -45,15 +45,15 @@
  *     (`paste.loadedMiddleGeometry`, `answerTab.loadedTopicGeometry`) are
  *     additive for all profiles.
  *
- * Evidence classification (PERF-LOCK-003 / §6):
+ * Evidence classification (PERF-LOCK-003 / docs/performance-measurement.md §2):
  *   - Deterministic L1 regression evidence when run on a fresh build with the
  *     standard fixture; the numeric metrics remain provisional (L3-style
- *     values) until re-measured per §7 — no approved thresholds are asserted
+ *     values) until re-measured per docs/performance-measurement.md §7 — no approved thresholds are asserted
  *     here (only the committed cold-open <500ms gate exists; PERF-100 has
- *     none, PERF-LOCK-005/§5).
+ *     none, PERF-LOCK-005 / docs/performance-measurement.md §7).
  *   - `pnpm ui:observe` is diagnostic only and is NOT a substitute (LOCK-005).
  *
- * Instrumentation boundary (PERF-LOCK-006/008, §16 non-goals):
+ * Instrumentation boundary (PERF-LOCK-006/008, docs/performance-program.md §1.2 non-goals):
  *   - All instrumentation is installed and removed inside the test page
  *     context only: `store.subscribe` listeners, a MutationObserver, a
  *     temporary `Element.prototype.scrollIntoView` wrapper, and synthetic DOM
@@ -77,7 +77,7 @@
  *     across the entity map, DB deltas via fetchMessages). Timings are
  *     reported as renderer-observable AGGREGATES that may include
  *     serialization/main/SQLite — no internal attribution is claimed
- *     (§16, PERF-100 locked decision).
+ *     (message-interaction locked decision).
  *
  * Serialization rule: `page.evaluate`/`electronApp.evaluate` callbacks are
  * serialized WITHOUT module closures — every value a callback reads must
@@ -102,7 +102,7 @@
  * Correctness-first and privacy:
  *   - Every sample asserts its correctness gates BEFORE its timing is
  *     recorded; any failure aborts the test, which means the artifact is only
- *     ever written after the full pass (audit F1-style gate, §5.1).
+ *     ever written after the full pass (audit F1-style gate, docs/performance-measurement.md §3).
  *   - No message contents, credentials, attachments, user paths, raw DB
  *     sizes, profile data, model IDs, ask IDs or other sensitive identifiers
  *     enter the metrics/gates/scale — only numbers and fixed non-sensitive

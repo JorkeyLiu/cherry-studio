@@ -1,7 +1,7 @@
 /**
  * PERF-103 echo-latency measurement (production-build Playwright E2E).
  *
- * Purpose (docs/performance-program.md, PERF-103 measurement-first slice,
+ * Purpose (docs/performance-workstreams.md §2.3, PERF-ECHO measurement slice,
  * amplification priority = echo, the first user-visible send latency path):
  *   Deterministic, bounded, correctness-first measurements of the USER-VISIBLE
  *   SEND ECHO: from the same-task Enter dispatch on the real inputbar textarea
@@ -150,10 +150,10 @@
  *     sample, so no sample ever starts with an in-flight stream; the Main
  *     parity settle additionally confirms the final SQLite write landed.
  *
- * Evidence classification (PERF-LOCK-003 / §6):
+ * Evidence classification (PERF-LOCK-003 / docs/performance-measurement.md §2):
  *   - Deterministic L1 regression evidence when run on a fresh build with the
  *     standard fixture; the numeric metrics remain L3 provisional values until
- *     re-measured per §7. No thresholds are asserted.
+ *     re-measured per docs/performance-measurement.md §7. No thresholds are asserted.
  *
  * Instrumentation boundary (PERF-LOCK-006/008):
  *   - All instrumentation lives in the test page context only (store.subscribe

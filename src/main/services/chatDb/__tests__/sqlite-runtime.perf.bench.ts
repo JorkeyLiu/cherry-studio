@@ -505,8 +505,8 @@ if (!coldThresholdPass) {
 // WRITTEN only by the file-level afterAll below, and only when every
 // registered tinybench task completed successfully (audit F1). The tinybench
 // tasks below are comparison output; the authoritative metrics and gates for
-// this benchmark are the ones recorded here (docs/performance-program.md
-// §5.1).
+// this benchmark are the ones recorded here (docs/performance-measurement.md
+// §3).
 // ---------------------------------------------------------------------------
 
 const sqliteRuntimeBenchmarkResult: BenchmarkResult = {

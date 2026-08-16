@@ -1,14 +1,14 @@
 /**
  * PERF-101 cache-miss topic-switch measurement (production-build Playwright E2E).
  *
- * Purpose (docs/performance-program.md §16, PERF-101 measurement-first slice +
+ * Purpose (docs/performance-workstreams.md §2.1, PERF-TOPIC-SWITCH measurement slice +
  * orthogonal S0 matrix extension):
  *   Deterministic, bounded, correctness-first measurements of the CACHE-MISS
  *   topic-switch path — the full-topic Main load + IPC + renderer upsert +
  *   full-topic window/context work (`loadTopicMessagesThunk` →
  *   `dbService.fetchMessages` → `upsertManyBlocks` + `messagesReceived` →
  *   `createLatestMessageWindow` / `reconcileMessageWindow`, `computeContextInfo`,
- *   §10.2) — against a FRESH production build via the standard shared E2E
+ *   topic-switch cost model (docs/performance-workstreams.md §2.1)) — against a FRESH production build via the standard shared E2E
  *   fixture. The measured metric is click-to-first-useful-render: from the
  *   real sidebar topic-item click to the first deterministic target-content
  *   DOM signal proving the target topic's REAL content committed (not a
@@ -20,7 +20,7 @@
  *   existing diagonal/full-topic profiles (N4/W10, N20/W20, N100/W100) keep
  *   their exact meaning. This slice is MEASUREMENT-ONLY:
  *   no runtime optimization, no threshold, and no fix direction is implied
- *   (PERF-LOCK-004/005/007, §16 next unit).
+ *   (PERF-LOCK-004/005/007, docs/performance-workstreams.md §4).
  *
  * Cache-miss precondition (proven per sample BEFORE timing):
  *   - The target topic is persisted in Main (SQLite via the typed ChatDb
@@ -94,16 +94,16 @@
  *   The scale map records profile + topic message count (N) / sample count /
  *   visible window (W = displayCount) / rendered window size (min(N,W)) — the
  *   topic-count vs visible-window distinction is preserved and now separated
- *   (§8).
+ *   (docs/performance-measurement.md §5).
  *
- * Evidence classification (PERF-LOCK-003 / §6):
+ * Evidence classification (PERF-LOCK-003 / docs/performance-measurement.md §2):
  *   - Deterministic L1 regression evidence when run on a fresh build with the
  *     standard fixture; the numeric metrics remain L3 provisional values until
- *     re-measured per §7. No thresholds are asserted (the only committed
+ *     re-measured per docs/performance-measurement.md §7. No thresholds are asserted (the only committed
  *     threshold remains the cold-open <500ms gate; PERF-101 has none,
- *     PERF-LOCK-005/§7).
+ *     PERF-LOCK-005 / docs/performance-measurement.md §7).
  *
- * Instrumentation boundary (PERF-LOCK-006/008, §16 non-goals):
+ * Instrumentation boundary (PERF-LOCK-006/008, docs/performance-program.md §1.2 non-goals):
  *   - All instrumentation lives in the test page context only: a
  *     `store.subscribe` listener and a MutationObserver installed inside
  *     `page.evaluate`. No production code is changed, no application
@@ -132,7 +132,7 @@
  *     timing capture, and each sample's timing is admitted to the
  *     samples/artifact ONLY after those gates pass; any failure aborts the
  *     test, so the artifact is only written after the full pass (audit
- *     F1-style gate, §5.1).
+ *     F1-style gate, docs/performance-measurement.md §3).
  *   - No message contents, credentials, paths, raw DB sizes, profile data,
  *     model IDs or other sensitive identifiers enter metrics/gates/scale —
  *     only numbers and fixed non-sensitive strings (schema v1 closed set,

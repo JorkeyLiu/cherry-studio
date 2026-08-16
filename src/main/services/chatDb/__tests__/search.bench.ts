@@ -262,8 +262,8 @@ console.log(
 // WRITTEN only by the file-level afterAll below, and only when every
 // registered tinybench task completed successfully (audit F1).
 // Parity/threshold failures already aborted collection before this point, so
-// no artifact can be produced by a failed run (docs/performance-program.md
-// §5.1). The tinybench tasks below are comparison output; the authoritative
+// no artifact can be produced by a failed run (docs/performance-measurement.md
+// §3). The tinybench tasks below are comparison output; the authoritative
 // metrics and gates for this benchmark are the ones recorded here.
 // ---------------------------------------------------------------------------
 
