@@ -6,7 +6,7 @@
 >
 > ✅ **集成同步门（Baseline Sync Gate，Done/已合并/已验证）**：integration 分支（`05a401b711`）已集成同步进 migration 分支（pre-merge HEAD `5d50499e80`）；合并自动解决、无兼容性编辑；审计无阻塞/无代码发现，验证全部通过（format 无改动；lint exit 0 / 112 known warnings；typecheck 通过；`pnpm test` 265 文件 / 5664 通过 / 72 跳过 / 0 失败；聚焦测试 201 renderer + 822 chatDb/import）。Phase 4.4 既有架构未改变；合并后统一的 Renderer/context/type/Redux 结构已作为 Phase 5 实施基线。详见 Section 9「集成同步门（Baseline Sync Gate）」与决策日志。
 > **分支**：`jorkey/refactor/sqlite-migration`
-> **最后更新**：2026-08-05
+> **最后更新**：2026-08-16
 > **Owner**：Personal fork（jorkeyliu）
 >
 > ⚠️ **ADR-8 策略更正（2026-07-20）**：Phase 4+ 的产品策略已更正为**外部应用兼容性导入**模型。原 in-place Dexie→SQLite shadow/cutover 模型已正式废弃。详见 Section 6 A-8。
@@ -320,6 +320,12 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 - JSON `extra` 字段用于扩展属性，避免 schema 频繁变更
 - ~~文件引用首期仅迁移元数据，不迁移文件内容~~ → **已 superseded（2026-08-05，post-closure L2 attachment/file 兼容修复，LOCK-DOC-1）**：L2 导入现同时迁移物理 payload（canonical `Files/<id><ext>`）+ Dexie `files` catalog（`files-catalog.json` handoff）；SQLite `file_references` 仍为 block-linked 快照行（关系 + 查询索引），不建 canonical files 表
 - 预留索引：`messages(topic_id, sort_order)`，`message_blocks(message_id, sort_order)`，`topic_segments(topic_id, sort_order)`，`file_references(message_id)`，`file_references(file_id)`
+
+### 当前 Schema 评估与 PowerSync No-Go 边界（2026-08-16 追加）
+
+**当前评估**：现有关系化 spine（`topics`/`messages`/`message_blocks`/`topic_segments`/`file_references` + 外键关系）对**设备本地聊天权威**而言**本质上健全**。消息顺序由应用层 `sort_order` 显式管理（app-enforced ordering），扩展/兼容性字段经 JSON `extra` 承载（兼容性 overflow），搜索由 migration 003 派生 FTS（`message_blocks_normalized`/`message_blocks_fts` + 触发器，candidate-only）作为候选加速器——FTS 为派生结构，非权威语义源。残余**兼容性债务与性能风险**仍然存在，但此处仅记录事实，不做全面风险清单；详细性能发现见 [`docs/performance-workstreams.md`](./performance-workstreams.md)，不在本文档展开。
+
+**PowerSync No-Go 边界**：PowerSync spike No-Go 仅限定于**零生产变更的集成目标**——其 managed views / 连接所有权与现有 FTS / 触发器 / 直接 repository 访问冲突。**该结论不否定现有 SQLite 关系化设计本身**：关系化 spine 的健全性与 PowerSync 集成可行性是两件独立的事，不应将集成不兼容误读为当前关系模型的缺陷。此记录不做任何 vendor 决策。
 
 ---
 
