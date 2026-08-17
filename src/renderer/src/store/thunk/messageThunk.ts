@@ -80,6 +80,16 @@ import { loadTopicSegmentsThunk } from './topicSegmentThunk'
 
 const logger = loggerService.withContext('MessageThunk')
 
+/**
+ * Maximum cadence/throttle window for per-block Redux/persistence updates
+ * (LOCK-STREAM-CADENCE-001). Kept as a distinct named constant from the
+ * Markdown parse cadence (MARKDOWN_PARSE_CADENCE_MS) so each gate can evolve
+ * independently. Actual update cadence depends on chunk arrival timing,
+ * throttle implementation, and commit scheduling — not all updates within
+ * this window will produce a visible state change.
+ */
+const BLOCK_UPDATE_THROTTLE_MS = 50
+
 const finishTopicLoading = async (topicId: string) => {
   await waitForTopicQueue(topicId)
   store.dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
@@ -198,7 +208,7 @@ const getBlockThrottler = (id: string) => {
         blockThrottleArrivals.delete(id)
       }
       await updateSingleBlock(id, blockUpdate, streamDiag)
-    }, 150)
+    }, BLOCK_UPDATE_THROTTLE_MS)
 
     blockUpdateThrottlers.set(id, throttler)
   }

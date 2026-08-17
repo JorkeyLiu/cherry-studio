@@ -25,24 +25,88 @@
 - **验收框架**：关闭要求点击→首次可用渲染的已接受用户可见结果 + 需要时集成实现 + 匹配边界回归证据。**不把 L3 数值当阈值**。
 - **已批准校准候选（approved · provisional/unverified · non-threshold）**：300 轮话题切换/加载 `<1–2s` 为已批准但**未验证**的暂定参考值——**非通过/失败 gate、非当前基线**；重测并记录 artifact 前不得当作事实（PERF-LOCK-003，`performance-measurement.md` §7）。
 
-### 2.2 PERF-STREAMING — 流式 / 多模型输出（Open）
+### 2.2 PERF-STREAMING — 流式输出块状批次到达（Open）
 
-- **产品问题状态**：`Open`。用户报告并行多条窄流输出时可视流畅度不佳（L4 报告，未复现为当前基线）。
+- **产品问题状态**：`Open`。主要产品症状为**单流可视输出以块状批次到达**（非逐字符平滑呈现）；并发多流放大为次要/延迟关联，未与单流块状批次直接关联前保持 defer。
+- **主要症状定义**：单流场景下，用户可见文本更新非逐字符连续到达，而是以明显批次/块状出现——更新间隔远大于单字符渲染预期，形成视觉停顿-跳跃感。并发放大未在本阶段归入主要症状（defer，见明确未知项）。
 - **历史测量资产**：legacy `PERF-102`（并发多模型流放大测量：首切片 + 归因诊断切片 + assistant-stub 子阶段切片）——**证据身份**，非关闭。已测 N=1→2→3 下可见流 first-content 与 renderer 长任务/帧尾端呈**方向性放大**（L3 方向性观察），但**归属未知**；归因切片把到达段定位到顺序式 assistant-stub 持久化/请求准备/本地传输，**不能把成本归属到 IPC/SQLite**；进一步拆分需跨测量-only 边界的 Main/IPC/SQLite 仪器化（未授权）。
+
+#### 2.2.1 当前证据与候选状态
+
+> **诚实边界**：以下所有数值均为 **L3 方向性/非阈值、dirty-worktree 证据**。L1 为正确性/gate/exit code 层面。不把 L3 数值当形式化基线或通用阈值。候选成功不关闭产品问题；产品问题保持 `Open` 直至用户可见验收满足。
+
+**测量实验状态**：PERF-STREAM-CADENCE-001 测量实验已完成；50ms 候选已集成供用户评估；候选未达 `Protected` 或 `Done`；产品问题 PERF-STREAMING 保持 `Open`。
+
+**150ms 对比条件（历史 cadence）**
+
+| 指标 | 值 |
+|---|---|
+| 可见更新 interval p50 | 152.4ms |
+| 可见更新 interval mean | 150.41ms |
+| chars/update p50 | 65 |
+| chars/update mean | 63.47 |
+| Redux interval p50 | 152.8ms |
+| DOM/Redux ratio mean | 1.027 |
+| Long tasks | 15 / 1153ms |
+| Long task overlap | 0 |
+| Frame p95 | 15.7ms |
+
+**50ms 候选（当前候选 · 无架构改动）**
+
+| 指标 | 值 |
+|---|---|
+| 可见更新 interval p50 | 54.3ms |
+| 可见更新 interval mean | 50.77ms |
+| chars/update p50 | 23 |
+| chars/update mean | 21.79 |
+| Redux interval p50 | 55.8ms |
+| DOM/Redux ratio mean | 1.209 |
+| Long tasks | 14 / 1158ms |
+| Long task overlap | 0 |
+| Frame p95 | 16.6ms |
+
+- **候选解释**：50ms 候选将 Redux/persistence throttle 与 Markdown parse cadence 分离并统一为 50ms，visible interval p50 从 ~152ms 降至 ~54ms，字符粒度从 ~65 chars/update 降至 ~23 chars/update。Frame p95 与 long task 总量在两次运行间稳定（15.7ms vs 16.6ms / 1153ms vs 1158ms），未观察到帧级差异。DOM/Redux ratio 从 1.027 升至 1.209，方向性观察，需更宽设备/负载确认。**上述数值为单台 dirty-worktree L3 方向性证据**——不构成形式化基线，不证明无回归。
+
+**Responsiveness E2E（正确性门控）**
+
+- `tests/e2e/specs/conversation/streaming-responsiveness.spec.ts`：L1 正确性门控通过（scroll/input/exact completion）。此为 L1 正确性验证，非流式平滑度验收。当前 cadence 模型见上文候选说明。
+
+**持久化归因（PERF-STREAM-ATTR-001 补充数据点）**
+
+| 指标 | 值 |
+|---|---|
+| 写模式 | 304 single-block + 8 batch writes |
+| Content states | 306 |
+| Steady unchanged | 0 |
+| Completion unchanged | 4 |
+| Renderer IPC p50 | ≈1.4ms |
+| Main tx p50 | ≈1.0ms |
+
+- **持久化解释**：单流持久化路径以 single-block 写为主（304/312），batch write 仅在 completion flush 时触发。Renderer IPC p50 约 1.4ms，Main tx p50 约 1.0ms——持久化本身不构成单流块状批次的主导成本载体。此为方向性观察，非根因排除。
+
+**已拒绝实验**：隐藏非选中处理回答的 Markdown 渲染延迟实验——集成被拒绝，实现已完整回退。§2.2 产品问题保持 `Open`。
+
 - **有界成本模型/假设（不声称根因）**：代码证据指向两个候选成本载体——
-  1. **流式双 150ms**：`MARKDOWN_PARSE_CADENCE_MS = 150` 的块提交/Markdown 解析 cadence 与 `useSmoothStream.ts` 逐字符呈现并存，构成双节流节奏候选（放大背景，非根因）。
-  2. **全内容处理**：流式期间对已接收全文内容的重处理（渲染长任务、全量计算）在 N 并发时放大——L3 方向性观察，非根因。
-- **明确未知项**：N 并发放大的确切归属（fanout 成本 vs 渲染竞争 vs 调度延迟 vs 测量负载）；双 150ms 是否构成实际冗余；多模型流与单流的差异边界；用户频率数据。
-- **下一实验/分析目标**（候选，未授权）：并发 fanout 成本与渲染竞争的分离归因；或双 150ms 节流结构的静态/运行时检查。**未授权不执行**（进一步仪器化须新显式范围决策）。
-- **验收框架**：关闭要求并行窄流可视流畅度的已接受用户可见结果 + 需要时集成实现 + 匹配边界回归证据。
+  1. **流式 cadence 节流**：`MARKDOWN_PARSE_CADENCE_MS`（原 150ms）的块提交/Markdown 解析 cadence 与 `useSmoothStream.ts` 逐字符呈现并存。50ms 候选将 cadence 降至 50ms 后 visible interval 随之降低，**方向性支持 cadence 为主要节流因子**（非根因确认）。
+  2. **全内容处理**：流式期间对已接收全文内容的重处理（渲染长任务、全量计算）——当前 L3 证据中 long task 总量与帧 p95 在对比条件/候选间稳定，**未观察到 cadence 变更对长任务的显著影响**（方向性，非排除）。
+- **明确未知项**：
+  1. **用户可见平滑度验收**：50ms cadence 下块状批次是否在用户可接受范围内——需 Main/用户实际感知确认，数值不替代体验判断。
+  2. **更广设备/负载验证**：当前证据限于单台 dirty-worktree 运行；不同硬件/GPU/负载下的帧率与感知表现未知。
+  3. **并发多流放大**：N>1 下 50ms cadence 的行为（是否出现 cadence 竞争或放大）——deferred，未与单流块状批次直接关联前不纳入主要症状。
+  4. **chars/update 粒度的用户感知**：23 chars/update 是否产生新的可察觉批次感——需用户确认。
+  5. **DOM/Redux ratio 升高的含义**：1.027→1.209 的方向性变化是否在更宽场景下一致，是否影响感知。
+- **下一实验/分析目标**：
+  1. **（优先）用户可见平滑度确认**：Main/用户在 50ms 候选下实际感知单流输出是否平滑可接受——此为关闭产品问题的必要前提。
+  2. **（条件）更广设备验证**：在用户确认平滑度可接受后，于不同硬件/负载条件下复测以确认无设备级回归。
+  3. **（deferred）并发多流 50ms 行为**：仅在并发放大与单流块状批次建立直接关联后推进。
+- **验收框架**：关闭要求单流可视输出平滑度的已接受用户可见结果 + 需要时集成实现 + 匹配边界回归证据。**不把 L3 数值当阈值**。
 - **已批准校准候选（approved · provisional/unverified · non-threshold）**：流式持久化拖累 `<10%`、渲染长任务无持续性 `>50ms` 为已批准但**未验证**的暂定参考值——**非通过/失败 gate、非当前基线**；重测并记录 artifact 前不得当作事实（PERF-LOCK-003，`performance-measurement.md` §7）。
-- **测量切片状态（PERF-STREAM-ATTR-001 · 已完成 · 不关闭本产品问题）**：measurement-only 切片（默认开关 inert，LOCK-STREAM-ATTR-001）已落地并完成受控测量，产出 artifact 家族 `chatdb-stream-persist-*`（LOCK-STREAM-ATTR-004）。按 LOCK-STREAM-ATTR-006 双面互补——
+- **测量切片状态（PERF-STREAM-ATTR-001 · 已完成 · 不关闭本产品问题）**：measurement-only 切片（默认开关 inert，LOCK-STREAM-ATTR-001）已落地并完成受控测量。按 LOCK-STREAM-ATTR-006 双面互补——
   1. **生产构建 E2E**：真实 renderer/IPC/Main 流式写路径（`chatdb:update-single-block` 稳态 + `chatdb:update-blocks` 完成 flush），以 opaque correlation id 配对 renderer 侧 schedule/serialize/IPC/total 与 Main 侧 handler/aggregate/convert/tx，并分类 changed-vs-unchanged 计数；正确性/parity/completeness 为 L1 gate，计时为 **L3 方向性非阈值**。
   2. **Node 确定性差分**：临时 DB 上 trigger-on vs base-only 的 SQLite 投影差分（growth/nochange/completion 三 profile），量化为**方向性差分估计**，非直接 trigger 内部剖析、非根因。
   **诚实边界/重叠说明**：`renderer.ipc − main.handler` 为 IPC 开销**估计**（renderer 往返含 IPC 传输 + Main 队列 + Main handler，减去 Main 自身 handler 后仅剩传输/调度部分）；trigger 投影成本仅在 Node 差分量测、不在 E2E 直接量测（真实计时无法分离 trigger 体与 UPDATE）；unchanged 写仍触发内容 trigger（unchanged 块仍计入 trigger 成本）。**不把任何 L3 数值当阈值/基线，本切片不关闭 §2.2 的 `Open` 产品问题，不改变任何生产行为/模式/迁移/索引/cadence/阈值**（LOCK-STREAM-ATTR-001/002/005）。归属仍为方向性；明确未知项（见上）不变。
-  - **测量切片状态（PERF-STREAM-ATTR-002 · 已完成 · 不关闭本产品问题）**：measurement-only 渲染归因切片（默认 `test.skip`，LOCK-STREAM-RENDER-005 默认关闭，plain `pnpm test:e2e` 保持 green）已落地并完成受控测量，产出 artifact 家族 `chatdb-stream-render-e2e-n1/n2/n3`（LOCK-STREAM-RENDER-005，schema v1 不变）。复用 legacy PERF-102 的 page-context observer 模式与产品路径（真实 mention-model 多流 + 确定性 slow-stream mock），不改动 PERF-102 的 artifact id/既有声明（LOCK-STREAM-RENDER-004），**无生产源码改动、无 150ms cadence 改动、无 Markdown/render/viewport/Redux/持久化行为改动、无 React memoization/重构**（LOCK-STREAM-RENDER-001）。测量 N=1/2/3 稳态 renderer 放大（每助手 Redux 块内容提交、`.markdown` DOM 解析内容提交、调度包含式 Redux→next-DOM 提交间隔、累计内容体积轴、long task、帧间隔、输入延迟探针）；`render.reduxToDom.interval` 为**调度包含式聚合渲染/提交间隔、非 Markdown parse CPU**（LOCK-STREAM-RENDER-006）；smooth-stream 配对非 1:1，用文档化 next-DOM/单调配对规则 + 正确性 gate；稳态区间排除 completion-tail（final-flush 边界）；完成 batch-tail 归属与 DB/Main/IPC 优化不在范围（LOCK-STREAM-RENDER-002）。**诚实边界/重叠说明**：long task 时长与阶段间隔重叠、**从不求和**（LOCK-STREAM-RENDER-006）；内容体积放大比（accumulated/final）≈31× 为**每流独立**的近常数（N 同时缩放 accumulated 与 final），跨 N 数值为 dirty-worktree L3 方向性、非阈值/非基线（LOCK-STREAM-RENDER-003）；N=1→2→3 方向性观察（重测值，跨运行方差明显，L3 非基线）：per-assistant Redux first-content 均值 472→852→1040 ms、longtask 总量 2291→4084→4481 ms——单调放大方向与初测一致，绝对数值为脏工作树 L3 方向性、非根因归属。**不把任何 L3 数值当阈值/基线，本切片不关闭 §2.2 的 `Open` 产品问题，不改变任何生产行为**（LOCK-STREAM-RENDER-001/003）。归属仍为方向性；明确未知项（见上）不变。
-  - **测量切片状态（PERF-STREAM-ATTR-003 · 已完成 · 不关闭本产品问题）**：measurement-only 观察者负载控制切片（默认 `test.skip`，LOCK-OBSERVER-003 默认关闭，plain `pnpm test:e2e` 保持 green）已落地并完成受控测量，产出 artifact 家族 `chatdb-stream-render-observer-e2e-{scan|noscan}-n1/n2/n3`（LOCK-OBSERVER-002，schema v1 不变）。使用与 ATTR-002 相同的生产构建 + 确定性 N=1/2/3 多模型 workload，对比 scan（单次 DOM 遍历同时记录 DOM 系列并累计 textContent 字节数）与 noscan（仅 MutationObserver dirty 信号 + 同 rAF 调度/观察者生命周期）两种 treatment，量化 ATTR-002 DOM 观察者自身负载。共同因果指标（Redux first-content/commit interval/content axes、longtask phases/total、frame deltas、input latency）；scan-only 机制指标（scan invocations/time/bytes）；noscan 排除 DOM-first-content/reduxToDom/pairing 因果比较（LOCK-OBSERVER-004）。**单次运行对比（dirty-worktree L3 方向性，不构成形式化噪声底）**：N1 scan vs noscan — Redux first-content p50 302.5ms vs 296.4ms、longtask steady total 1095ms vs 1316ms、frame delta p50 均为 13.9ms、input latency p50 8.0ms vs 8.6ms、frame count 1999 vs 2000；N2 — Redux first-content p50 453.3ms vs 422.6ms、longtask steady total 1469ms vs 1223ms、frame count 1977 vs 1995；N3 — Redux first-content p50 570.7ms vs 605.2ms、longtask steady total 1534ms vs 1722ms、frame count 1966 vs 1963。单次运行不足以确立一致的 treatment 效应或形式化噪声界；跨 N 数值无稳定方向性偏差。scan 机制开销（修正后含单次遍历 byte 累计）：N1 扫描 203 次/总 7.3ms/382k 字节、N2 扫描 281 次/总 20.2ms/1.18M 字节、N3 扫描 384 次/总 31.6ms/2.49M 字节——随 N 增长但绝对量小。**诚实边界**：dirty-worktree L3 非阈值/非基线（LOCK-OBSERVER-005）；每个 treatment×profile 仅一次 artifact 运行，跨运行方差与形式化噪声界未知；scan 机制开销随 N 增长但绝对值小。**不把任何 L3 数值当阈值/基线，本切片不关闭 §2.2 的 `Open` 产品问题，不改变任何生产行为**（LOCK-OBSERVER-001/005）。归属仍为方向性；明确未知项（见上）不变。
-- **实验记录（已拒绝 · 已完整回退 · 不关闭本产品问题）**：隐藏非选中处理回答的 Markdown 渲染延迟实验正确性验证通过，机制层 DOM 提交在 N2/N3 约减少 47%/65%，但同形 A/B 未发现超出 N1 无处理噪声底的任何用户可见公共指标收益；reveal 重挂载会重放入场动画/状态。集成被拒绝，实现已完整回退。数值为 L3 方向性非阈值，§2.2 产品问题保持 `Open`。
+  - **测量切片状态（PERF-STREAM-ATTR-002 · 已完成 · 不关闭本产品问题）**：measurement-only 渲染归因切片（默认 `test.skip`，LOCK-STREAM-RENDER-005 默认关闭，plain `pnpm test:e2e` 保持 green）已落地并完成受控测量。复用 legacy PERF-102 的 page-context observer 模式与产品路径（真实 mention-model 多流 + 确定性 slow-stream mock），不改动 PERF-102 的 artifact id/既有声明（LOCK-STREAM-RENDER-004），**无生产源码改动、无 cadence 改动、无 Markdown/render/viewport/Redux/持久化行为改动、无 React memoization/重构**（LOCK-STREAM-RENDER-001）。测量 N=1/2/3 稳态 renderer 放大（每助手 Redux 块内容提交、`.markdown` DOM 解析内容提交、调度包含式 Redux→next-DOM 提交间隔、累计内容体积轴、long task、帧间隔、输入延迟探针）；`render.reduxToDom.interval` 为**调度包含式聚合渲染/提交间隔、非 Markdown parse CPU**（LOCK-STREAM-RENDER-006）；smooth-stream 配对非 1:1，用文档化 next-DOM/单调配对规则 + 正确性 gate；稳态区间排除 completion-tail（final-flush 边界）；完成 batch-tail 归属与 DB/Main/IPC 优化不在范围（LOCK-STREAM-RENDER-002）。**诚实边界/重叠说明**：long task 时长与阶段间隔重叠、**从不求和**（LOCK-STREAM-RENDER-006）；内容体积放大比（accumulated/final）≈31× 为**每流独立**的近常数（N 同时缩放 accumulated 与 final），跨 N 数值为 dirty-worktree L3 方向性、非阈值/非基线（LOCK-STREAM-RENDER-003）；N=1→2→3 方向性观察（重测值，跨运行方差明显，L3 非基线）：per-assistant Redux first-content 均值 472→852→1040 ms、longtask 总量 2291→4084→4481 ms——单调放大方向与初测一致，绝对数值为脏工作树 L3 方向性、非根因归属。**不把任何 L3 数值当阈值/基线，本切片不关闭 §2.2 的 `Open` 产品问题，不改变任何生产行为**（LOCK-STREAM-RENDER-001/003）。归属仍为方向性；明确未知项（见上）不变。
+  - **测量切片状态（PERF-STREAM-ATTR-003 · 已完成 · 不关闭本产品问题）**：measurement-only 观察者负载控制切片（默认 `test.skip`，LOCK-OBSERVER-003 默认关闭，plain `pnpm test:e2e` 保持 green）已落地并完成受控测量。使用与 ATTR-002 相同的生产构建 + 确定性 N=1/2/3 多模型 workload，对比 scan（单次 DOM 遍历同时记录 DOM 系列并累计 textContent 字节数）与 noscan（仅 MutationObserver dirty 信号 + 同 rAF 调度/观察者生命周期）两种 treatment，量化 ATTR-002 DOM 观察者自身负载。共同因果指标（Redux first-content/commit interval/content axes、longtask phases/total、frame deltas、input latency）；scan-only 机制指标（scan invocations/time/bytes）；noscan 排除 DOM-first-content/reduxToDom/pairing 因果比较（LOCK-OBSERVER-004）。**单次运行对比（dirty-worktree L3 方向性，不构成形式化噪声底）**：N1 scan vs noscan — Redux first-content p50 302.5ms vs 296.4ms、longtask steady total 1095ms vs 1316ms、frame delta p50 均为 13.9ms、input latency p50 8.0ms vs 8.6ms、frame count 1999 vs 2000；N2 — Redux first-content p50 453.3ms vs 422.6ms、longtask steady total 1469ms vs 1223ms、frame count 1977 vs 1995；N3 — Redux first-content p50 570.7ms vs 605.2ms、longtask steady total 1534ms vs 1722ms、frame count 1966 vs 1963。单次运行不足以确立一致的 treatment 效应或形式化噪声界；跨 N 数值无稳定方向性偏差。scan 机制开销（修正后含单次遍历 byte 累计）：N1 扫描 203 次/总 7.3ms/382k 字节、N2 扫描 281 次/总 20.2ms/1.18M 字节、N3 扫描 384 次/总 31.6ms/2.49M 字节——随 N 增长但绝对量小。**诚实边界**：dirty-worktree L3 非阈值/非基线（LOCK-OBSERVER-005）；每个 treatment×profile 仅一次 artifact 运行，跨运行方差与形式化噪声界未知；scan 机制开销随 N 增长但绝对值小。**不把任何 L3 数值当阈值/基线，本切片不关闭 §2.2 的 `Open` 产品问题，不改变任何生产行为**（LOCK-OBSERVER-001/005）。归属仍为方向性；明确未知项（见上）不变。
 
 ### 2.3 PERF-ECHO — 消息回显（Open）
 

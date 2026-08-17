@@ -162,7 +162,7 @@ describe('Markdown streaming (LOCK-004)', () => {
       vi.advanceTimersByTime(300)
     })
 
-    // 12 frames happened; the parse cadence (150ms) must keep the full-text
+    // 12 frames happened; the parse cadence (50ms) must keep the full-text
     // parse count far below the frame count.
     expect(md.children.length).toBeGreaterThan(0)
     expect(md.children.length).toBeLessThan(6)
@@ -189,9 +189,13 @@ describe('Markdown streaming (LOCK-004)', () => {
     })
 
     // Content reset: the new stream no longer extends the old one.
+    // The reset must flush immediately so the new content is visible before
+    // any timers or status transitions can mask a stale reset.
     act(() => {
       rerender(<Markdown block={makeBlock('block-1', 'brand new answer', MessageBlockStatus.STREAMING)} />)
     })
+    expect(lastRendered()).toBe('brand new answer')
+
     act(() => {
       vi.advanceTimersByTime(16 * 40)
     })
@@ -208,5 +212,138 @@ describe('Markdown streaming (LOCK-004)', () => {
   it('renders the paused label for an empty paused block', () => {
     render(<Markdown block={makeBlock('block-1', '', MessageBlockStatus.PAUSED)} />)
     expect(screen.getByTestId('markdown-children')).toHaveTextContent('message.chat.completion.paused')
+  })
+
+  it('does not fire a parse commit within the first 50ms cadence window', () => {
+    const { rerender } = render(<Markdown block={makeBlock('block-1', 'start', MessageBlockStatus.STREAMING)} />)
+    const countAtMount = md.children.length
+
+    // Stream a delta; the cadence effect should schedule a trailing timer, not
+    // an immediate parse commit, because elapsed < 50ms.
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', 'start delta', MessageBlockStatus.STREAMING)} />)
+    })
+    act(() => {
+      vi.advanceTimersByTime(40)
+    })
+
+    // No parse commit should have fired inside the 50ms cadence window.
+    expect(md.children.length).toBe(countAtMount)
+
+    // After the full 50ms cadence window, the trailing timer fires and a
+    // parse commit is scheduled. Let enough time pass for both the cadence
+    // timer to fire and the smooth stream to fully drain, then verify the
+    // rendered text matches the latest streamed content.
+    act(() => {
+      vi.advanceTimersByTime(20)
+    })
+    // Allow transition flush.
+    act(() => {
+      vi.advanceTimersByTime(0)
+    })
+    expect(md.children.length).toBeGreaterThan(countAtMount)
+
+    // Advance further so the smooth stream fully drains remaining queued text.
+    act(() => {
+      vi.advanceTimersByTime(200)
+    })
+    expect(lastRendered()).toBe('start delta')
+  })
+
+  it('preserves paused content and prevents stale timer overwrite, then resumes correctly', () => {
+    const { rerender } = render(
+      <Markdown block={makeBlock('block-1', 'streaming content', MessageBlockStatus.STREAMING)} />
+    )
+    md.children.length = 0
+
+    // Stream within the <50ms cadence window so the trailing timer is pending
+    // but has not yet fired.
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', 'streaming content extra', MessageBlockStatus.STREAMING)} />)
+    })
+    act(() => {
+      vi.advanceTimersByTime(30)
+    })
+
+    // Pause the stream. This sets isStreamDone=true, which causes the cadence
+    // effect to flush block.content as the authoritative final text and arms
+    // the completion guard against stale trailing timers.
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', 'streaming content extra', MessageBlockStatus.PAUSED)} />)
+    })
+    act(() => {
+      vi.advanceTimersByTime(0)
+    })
+
+    // The paused content must be the latest block content, not stale
+    // mid-stream text from the smooth stream queue.
+    const pausedContent = lastRendered()
+    expect(pausedContent).toBe('streaming content extra')
+
+    // Fire any surviving trailing timers — the completion guard must refuse
+    // to overwrite the paused content with stale text.
+    act(() => {
+      vi.advanceTimersByTime(300)
+    })
+    expect(lastRendered()).toBe('streaming content extra')
+
+    // Resume streaming with appended content. The delta is computed from the
+    // previous block content and fed into the smooth stream.
+    act(() => {
+      rerender(
+        <Markdown block={makeBlock('block-1', 'streaming content extra resumed', MessageBlockStatus.STREAMING)} />
+      )
+    })
+
+    // Let the cadence timer fire and transition flush so the new content is
+    // committed to the parsed content state.
+    act(() => {
+      vi.advanceTimersByTime(60)
+    })
+    act(() => {
+      vi.advanceTimersByTime(0)
+    })
+
+    // Complete the resumed stream and flush final content.
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', 'streaming content extra resumed', MessageBlockStatus.SUCCESS)} />)
+    })
+    act(() => {
+      vi.advanceTimersByTime(100)
+    })
+
+    // The final rendered text must be the resumed content, not the earlier
+    // paused content overwritten by a stale timer.
+    expect(lastRendered()).toBe('streaming content extra resumed')
+  })
+
+  it('flushes exact final content when stream completes during a cadence window', () => {
+    const { rerender } = render(<Markdown block={makeBlock('block-1', 'partial', MessageBlockStatus.STREAMING)} />)
+
+    // Stream more content, then immediately complete — within <50ms of the
+    // last content change. The trailing cadence timer is still pending.
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', 'partial extended tail', MessageBlockStatus.STREAMING)} />)
+    })
+    act(() => {
+      vi.advanceTimersByTime(30)
+    })
+
+    // Completion: the urgent final flush must render exact final content.
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', 'partial extended tail', MessageBlockStatus.SUCCESS)} />)
+    })
+    act(() => {
+      vi.advanceTimersByTime(100)
+    })
+
+    expect(lastRendered()).toBe('partial extended tail')
+
+    // Fire any surviving trailing timers after completion — the guard must
+    // refuse to overwrite the final content.
+    act(() => {
+      vi.advanceTimersByTime(300)
+    })
+    expect(lastRendered()).toBe('partial extended tail')
   })
 })

@@ -35,12 +35,14 @@ const ALLOWED_ELEMENTS =
 const DISALLOWED_ELEMENTS = ['iframe', 'script']
 
 /**
- * Bounded cadence for the expensive full Markdown parse/render while a block
- * is streaming (LOCK-004). Aligned with the existing 150ms block-commit
- * throttle in messageThunk so visible progress stays at the committed cadence
- * instead of re-parsing the full accumulated text on every animation frame.
+ * Maximum cadence window for the expensive full Markdown parse/render while a
+ * block is streaming (LOCK-004). Kept as a distinct named constant from the
+ * per-block Redux/persistence throttle (messageThunk BLOCK_UPDATE_THROTTLE_MS)
+ * so each gate can evolve independently. Actual update cadence depends on
+ * chunk arrival timing, requestAnimationFrame, React scheduler, and render
+ * cost — not all updates within this window will produce a visible commit.
  */
-const MARKDOWN_PARSE_CADENCE_MS = 150
+const MARKDOWN_PARSE_CADENCE_MS = 50
 
 interface Props {
   // message: Message & { content: string }

@@ -126,7 +126,7 @@ describe('Markdown streaming cadence race (LOCK-001)', () => {
     expect(deferred.scheduled.length).toBe(0)
 
     // Pre-advance the fake clock so the first cadence opportunity takes the
-    // immediate (>=150ms elapsed) path instead of the trailing-timer path —
+    // immediate (>=50ms elapsed) path instead of the trailing-timer path —
     // mirroring the real app where performance.now() is wall-clock. The queue
     // is empty at mount, so no content is drained by this advance.
     act(() => {
@@ -178,7 +178,7 @@ describe('Markdown streaming cadence race (LOCK-001)', () => {
     const { rerender } = render(<Markdown block={makeBlock('block-1', partial, MessageBlockStatus.STREAMING)} />)
 
     // Stream more content and let the smooth stream drain partially so a
-    // TRAILING cadence timer is pending (elapsed < 150ms at the drain). The
+    // TRAILING cadence timer is pending (elapsed < 50ms at the drain). The
     // setTimeout spy proves the trailing-timer path was actually taken —
     // otherwise this test would be vacuous.
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
