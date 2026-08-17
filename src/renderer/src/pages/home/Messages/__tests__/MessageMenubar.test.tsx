@@ -111,7 +111,8 @@ vi.mock('@renderer/store', () => ({
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
-  messageBlocksSelectors: { selectEntities: () => ({}) }
+  messageBlocksSelectors: { selectEntities: () => ({}) },
+  selectMessageBlocksByIds: () => []
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
@@ -191,7 +192,8 @@ vi.mock('react-redux', () => ({
           siyuan: false
         }
       }
-    })
+    }),
+  shallowEqual: (a: unknown, b: unknown) => a === b
 }))
 
 vi.mock('./messageBranch', () => ({

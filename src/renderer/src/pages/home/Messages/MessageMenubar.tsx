@@ -24,12 +24,12 @@ import { getMessageTitle } from '@renderer/services/MessagesService'
 import { translateText } from '@renderer/services/TranslateService'
 import type { RootState } from '@renderer/store'
 import store, { useAppDispatch } from '@renderer/store'
-import { messageBlocksSelectors } from '@renderer/store/messageBlock'
+import { messageBlocksSelectors, selectMessageBlocksByIds } from '@renderer/store/messageBlock'
 import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import { insertMessagesThunk, removeBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import { TraceIcon } from '@renderer/trace/pages/Component'
 import type { Assistant, Model, Topic, TranslateLanguage } from '@renderer/types'
-import { type Message, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
+import { type Message, type MessageBlock, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { captureScrollableAsBlob, captureScrollableAsDataURL, classNames } from '@renderer/utils'
 import { abortCompletion } from '@renderer/utils/abortController'
 import { copyMessageAsPlainText } from '@renderer/utils/copy'
@@ -75,7 +75,7 @@ import {
 import type { Dispatch, FC, ReactNode, SetStateAction } from 'react'
 import { Fragment, memo, useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useSelector } from 'react-redux'
+import { shallowEqual, useSelector } from 'react-redux'
 import styled from 'styled-components'
 
 import { emitNewBranch } from './messageBranch'
@@ -277,17 +277,28 @@ const MessageMenubar: FC<Props> = (props) => {
     startEditing(message.id)
   }, [message.id, startEditing])
 
-  const blockEntities = useSelector(messageBlocksSelectors.selectEntities)
+  // LOCK-MENUBAR-002: Subscribe only to this message's blocks instead of the
+  // whole entity map. `shallowEqual` prevents re-renders when an unrelated
+  // streaming block commits to the store.
+  const ownBlocks = useSelector((state: RootState) => selectMessageBlocksByIds(state, message.blocks), shallowEqual)
+
+  // Derive a stable block-ID→entity map for consumers that still index by ID
+  // (translate copy/close handlers, inspect-data handler).
+  const blockEntities = useMemo(() => {
+    const map: Record<string, MessageBlock> = {}
+    for (const block of ownBlocks) {
+      map[block.id] = block
+    }
+    return map
+  }, [ownBlocks])
 
   const isTranslating = useMemo(() => {
-    const translationBlock = message.blocks
-      .map((blockId) => blockEntities[blockId])
-      .find((block) => block?.type === MessageBlockType.TRANSLATION)
+    const translationBlock = ownBlocks.find((block) => block.type === MessageBlockType.TRANSLATION)
     return (
       translationBlock?.status === MessageBlockStatus.STREAMING ||
       translationBlock?.status === MessageBlockStatus.PROCESSING
     )
-  }, [message.blocks, blockEntities])
+  }, [ownBlocks])
 
   const handleTranslate = useCallback(
     async (language: TranslateLanguage) => {
