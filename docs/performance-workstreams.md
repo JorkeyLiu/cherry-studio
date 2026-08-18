@@ -16,14 +16,22 @@
 ### 2.1 PERF-TOPIC-SWITCH — 话题切换（Open）
 
 - **产品问题状态**：`Open`。用户报告点击切换话题到首次可用渲染存在延迟（L4 报告，未复现为当前基线）。
-- **历史测量资产**：legacy `PERF-101`（缓存未命中话题切换测量：对角线 + 正交六点部分网格）与缓存命中重复切换扩展 `perf101-cache-hit-repeat-switch.spec.ts`——**证据身份**，非关闭。既有 S0 六点证据显示：固定生产默认窗口 W=10 时话题规模 N20→N100 非单调（未见持续话题规模放大）；固定 N=100 时窗口 W10→W50→W100 强增长。2026-08-18 的 post-opt fresh production-build cache-hit repeat-switch E2E 通过：N20/W10 repeat-render p50 `166.7ms`，N20/W20 `297.8ms`，N100/W10 `171.1ms`；对应 pre-opt p50 为 `173.4ms`、`362.2ms`、`176.5ms`。**L1 为正确性/完整性通过，数值为 L3 方向性证据，非阈值、非根因归属**。首次 post-opt 运行出现的 spike 未复现，分类为 L3 noise，不作为回归结论。
+- **历史测量资产**：legacy `PERF-101`（缓存未命中话题切换测量：对角线 + 正交六点部分网格）与缓存命中重复切换扩展 `perf101-cache-hit-repeat-switch.spec.ts`——**证据身份**，非关闭。既有 S0 六点证据显示：固定生产默认窗口 W=10 时话题规模 N20→N100 非单调（未见持续话题规模放大）；固定 N=100 时窗口 W10→W50→W100 强增长。**L1 为正确性/完整性通过，数值为 L3 方向性证据，非阈值、非根因归属**。
+- **已完成实现切片（Phase 2B · renderer 边界 · 不等于产品关闭）**：
+  1. **共享上下文投影**：`Chat.tsx` 对 Messages/Inputbar 计算**单个共享 `computeContextInfo` 投影**（同一 memo 身份 `[topic messages, topic blocks, assistant, topic id]`），并只订阅 active-topic 消息引用的块（`useTopicReferencedBlocks` = `selectMessageBlocksByIds` + `shallowEqual`）——块-only 更新使投影失效、无关块提交不失效；request-time `ConversationService`/`baseCallbacks` 调用保持独立。
+  2. **窗口投影去重**：`MessageWindow` 携带 constructor 创建的 `displayGroups`；`messageViewportProjection.ts` 在**不重新分组** `displayMessages` 的前提下保持旧 newest-group-first、组内顺序、Fragment-key 后缀与 viewport-local index 语义。
+  3. **Phase 2A 默认-off 阶段归因**：`PERF_PHASE_ATTR` 构建期仪器化（closed `PhaseStage` union、512 有界环形缓冲、opaque correlation ID、DOM 端点冻结快照、fail-closed 完整性、cache-miss/cache-hit 分离系列、schema v1 输出、默认构建/E2E inert）——持久契约见 `performance-measurement.md` §6.1。
+  **审计**：独立审计通过（两个 blocker 已修复）；残余可接受风险为**无直接 full-Chat memo wiring 测试**，selector（`useTopicReferencedBlocks`）与纯计算（`computeContextInfo`、`projectMessageViewportGroups`）已分别覆盖。
+- **L1 验证（最终代码表面）**：启用 + 默认-off 共九个生产命令 exit 0，合计 35 个 focused E2E 测试通过；启用态全部 gates（正确性/parity/privacy/completeness/schema/ABI）通过；默认-off 9 tests pass 且**无 phase 指标泄漏**；验证全程 source/test/config 身份保持不变。聚合 `pnpm format` / `pnpm lint` / `pnpm test` 通过（4286 passed / 3 skipped），ABI145 已恢复。
+- **L3 Phase 2B 证据（dirty-worktree · 非阈值 · 非基线 · 非根因）**：cache-hit repeat-switch p50 在**两次同机 dirty-worktree 运行**中观测范围为 —— N20/W10 `144.3–164.0ms`、N20/W20 `232.1–265.8ms`、N100/W10 `132.7–172.9ms`。一次启用归因运行的 phase 分解 p50（**单次启用运行，非跨运行汇总**）：DOM endpoint `108.9 / 168.4 / 118.4ms`、render computation `12.4 / 22.2 / 13.1ms`、window lifecycle `0.1ms`（对应 N20/W10 / N20/W20 / N100/W10）。形状边界：**W 增长仍方向性可见**（N20/W20 高于 N20/W10 且范围不重叠）；**固定 W 下 N20→N100 无持续增长**（N100/W10 与 N20/W10 范围重叠）；跨运行方差显著且不受控——范围与形状仅作方向判断，**不构成回归或收益声明**；phase span total 为捕获时长之和、非端到端、可与 DOM endpoint 重叠/超出（LOCK-2A-008）。
+- **已评估但未实施（LOCK-005）**：**Markdown parse cache 因缺乏直接 parse-CPU 证据而被跳过**（不得据此声称 parse CPU 已被测量）；**topic-key 移除与虚拟化仍未批准/未实现**。
 - **有界成本模型/假设（不声称根因）**：代码证据指向两个候选成本载体——
   1. **话题切换冷挂载**：缓存未命中切换路径穿越全话题 Main 加载 + IPC（`loadTopicMessagesThunk` → `dbService.fetchMessages` 全量 `listByTopic` + `listByMessages`）与 renderer 侧重复全话题计算（`createLatestMessageWindow`/`reconcileMessageWindow`、`computeContextInfo`）。
   2. **Markdown 可见窗口缩放**：已测数据中固定 N 下可见窗口 W 的强增长（164→529→858 ms）指向可见窗口渲染 fanout/重挂载成本，但**未做根因归属**。
-- **方向性根因解释（不升级为根因确认）**：cache-hit repeat-switch 的固定 N 对照中，W20 明显高于 W10，而 N20/W10 与 N100/W10 接近；post-opt 仍保持这一形状，方向性支持 **W-bound renderer remount/render work** 为主要可见成本轴，且在固定 W 下未见 N 的持续放大。`anchorService` 的 active-resolvable fast path 减少了切换时不必要的上下文构建；其对该 W-bound 形状的贡献仍未被单独隔离。
-- **测量条件与命令（2026-08-18）**：fresh production build 后使用 `PERF101_CACHE_HIT=1 PERF101_SCALE=n20-w10 pnpm test:e2e -- tests/e2e/specs/conversation/perf101-cache-hit-repeat-switch.spec.ts`、`PERF101_CACHE_HIT=1 PERF101_SCALE=s0-20 pnpm test:e2e -- tests/e2e/specs/conversation/perf101-cache-hit-repeat-switch.spec.ts`、`PERF101_CACHE_HIT=1 PERF101_SCALE=n100-w10 pnpm test:e2e -- tests/e2e/specs/conversation/perf101-cache-hit-repeat-switch.spec.ts`；`n20-w10`、`s0-20`、`n100-w10` 与 cache-miss `PERF-101` profile aliases 共享。每个 profile 使用 3 个 samples；每个样本的确定性话题数据在测量点击前通过 typed ChatDb bridge 逐消息 `appendMessage` 完成，seed setup 不计入 click→render measured interval；L1 correctness/parity/privacy/ABI gates 全部通过，schema v1 本地 artifact 写入既有 `test-results/bench-results/` 约定位置。数值按 `p50/p95/mean` 契约记录；本段仅保留 p50 方向性摘要。
-- **明确未知项**：大话题规模（300+）与受控内容复杂度下的行为；内容复杂度轴；用户频率数据；O(N) 全话题工作与 O(W) 窗口渲染 fanout 的独立归属；fast path 对用户可见结果的单独贡献；跨运行噪声界。
-- **下一实验/分析目标**（候选，未授权）：N300/W10 与受控内容复杂度规模的按需测量，或 renderer 窗口侧缩放的结构归因。**未授权不执行**。
+- **方向性根因解释（不升级为根因确认）**：cache-hit repeat-switch 的固定 N 对照中，W20 明显高于 W10，而 N20/W10 与 N100/W10 接近；post-2B 仍保持这一形状，方向性支持 **W-bound renderer remount/render work** 为主要可见成本轴，且在固定 W 下未见 N 的持续放大。`anchorService` 的 active-resolvable fast path 减少了切换时不必要的上下文构建；Phase 2B 移除 renderer 侧重复的 `createMessageViewportGroupModel(displayMessages)` 分组与重复 `computeContextInfo`。单次启用归因运行的阶段分解显示被捕获的 render computation（12.4–22.2ms）与 window lifecycle（0.1ms）相对 DOM endpoint（108.9–168.4ms）为小量——endpoint 为自 correlation 起点捕获的包含式时长，**非**对未捕获路径（Main/IPC/React 调度/parse）的根因归属；各改动的单独贡献仍未被隔离。
+- **测量条件与命令（2026-08-18）**：fresh production build 后使用 `PERF101_CACHE_HIT=1 PERF101_SCALE=n20-w10 pnpm test:e2e -- tests/e2e/specs/conversation/perf101-cache-hit-repeat-switch.spec.ts`、`PERF101_CACHE_HIT=1 PERF101_SCALE=s0-20 pnpm test:e2e -- tests/e2e/specs/conversation/perf101-cache-hit-repeat-switch.spec.ts`、`PERF101_CACHE_HIT=1 PERF101_SCALE=n100-w10 pnpm test:e2e -- tests/e2e/specs/conversation/perf101-cache-hit-repeat-switch.spec.ts`；`n20-w10`、`s0-20`、`n100-w10` 与 cache-miss `PERF-101` profile aliases 共享。每个 profile 使用 3 个 samples；每个样本的确定性话题数据在测量点击前通过 typed ChatDb bridge 逐消息 `appendMessage` 完成，seed setup 不计入 click→render measured interval；L1 correctness/parity/privacy/ABI gates 全部通过。数值按 `p50/p95/mean` 契约记录；本段仅保留 p50 方向性摘要。阶段归因子切片（topic 路径）仅在 `PERF_PHASE_ATTR=1 pnpm build` 启用构建下发射 phase metrics（默认构建/E2E inert），经 `cacheMiss.phase.*` / `cacheHit.phase.*` 分离系列写入 schema v1 artifact（`performance-measurement.md` §6.1）。
+- **明确未知项**：大话题规模（300+）与受控内容复杂度下的行为；内容复杂度轴；用户频率数据；O(N) 全话题工作与 O(W) 窗口渲染 fanout 的独立归属；fast path、共享投影与窗口投影去重对用户可见结果的单独贡献；Markdown parse 的 CPU 贡献（parse cache 因缺乏直接 parse-CPU 证据未实施，LOCK-005）；topic-key 移除与虚拟化的可行性/收益（未批准，LOCK-005）；跨运行噪声界。
+- **下一实验/分析目标**（候选，未授权）：N300/W10 与受控内容复杂度规模的按需测量，或 renderer 窗口侧缩放的结构归因（parse cache / topic-key 移除 / 虚拟化须先有直接 parse-CPU 或结构证据并获得显式批准，LOCK-005）。**未授权不执行**。
 - **验收框架**：关闭要求点击→首次可用渲染的已接受用户可见结果 + 需要时集成实现 + 匹配边界回归证据。**不把 L3 数值当阈值**。
 - **已批准校准候选（approved · provisional/unverified · non-threshold）**：300 轮话题切换/加载 `<1–2s` 为已批准但**未验证**的暂定参考值——**非通过/失败 gate、非当前基线**；重测并记录 artifact 前不得当作事实（PERF-LOCK-003，`performance-measurement.md` §7）。
 
@@ -114,13 +122,13 @@
 
 - **产品问题状态**：`Open`。回显延迟为用户可见交互路径（测量基线已建立，但问题未关闭）。
 - **历史测量资产**：legacy `PERF-103`（回显延迟测量基线 + interval-scoped 归因扩展 + 本地 viewport 收敛实验）与 batch-seeded high-turn 扩展 `perf103-high-turn-echo-measurement.spec.ts`——**证据身份**，非关闭。`reduxToDom` 在既有测量中占 `firstRender` 的 58–64% 并主导已测分割（方向性观察）；over `[reduxCommitAt, domCommitAt]` 区间 20/20 样本具**恰一个 interval-overlapping 长任务**（单阻塞长任务覆盖该区间，方向性观察）。`<50ms/<100ms` 参考值保持**未验证参考**，不按通过/失败阈值对待。本地 viewport 收敛实验因可测量收益未获证明而被拒绝并完整回退、无生产提交。
-- **已完成实现切片（不等于产品关闭）**：`anchorService` 增加 active-resolvable fast path，避免已可解析 anchor 再次构建 context turns；`useSmoothStream`/`Markdown` 在 completed block 路径绕过 smooth-stream reset/animation-frame 生命周期，直接提交 authoritative final content。实现保持 renderer 边界，不改变 Main SQLite authority、IPC 契约或持久化语义。
-- **测量条件与命令（2026-08-18）**：fresh production build 后，empty profile 使用 `pnpm test:e2e -- tests/e2e/specs/conversation/perf103-echo-latency-measurement.spec.ts`；batch-seeded profiles 使用 `PERF103_HIGH_TURN=1 PERF103_HIGH_TURN_TURNS=20 pnpm test:e2e -- tests/e2e/specs/conversation/perf103-high-turn-echo-measurement.spec.ts` 与 `PERF103_HIGH_TURN=1 PERF103_HIGH_TURN_TURNS=100 pnpm test:e2e -- tests/e2e/specs/conversation/perf103-high-turn-echo-measurement.spec.ts`。PERF-ECHO 的 prior-turn history 是通过 typed ChatDb bridge batch-seeded；不是 sequential-send pressure。每次通过运行输出 schema v1 本地 artifact 到既有 `test-results/bench-results/` 约定位置。
-- **方向性结果（p50/p95/mean，单位 ms；L1 gate 通过，数值 L3）**：pre-opt empty 为 `reduxCommit 44.5/56.4/42.8`、`firstRender 113.1/143.8/113.5`、`reduxToDom 68.5/92.1/70.7`；post-opt empty 为 `42.3/56.3/43.8`、`110.0/142.5/111.4`、`63.2/80.0/65.2`。pre-opt 20 prior turns 为 `88.4/118.6/91.2`、`249.1/316.9/245.6`、`160.7/198.3/154.3`；post-opt 20 为 `88.2/103.6/88.9`、`231.0/268.9/229.7`、`143.8/163.6/145.8`。post-opt 100 为 `93.6/117.3/93.7`、`268.8/322.5/270.1`、`164.6/208.3/165.5`，无 pre-opt 100 对照。方向性上，empty 保持近似稳定，20 prior turns 的 firstRender/reduxToDom 改善且 p95 收窄，100 prior turns 没有显示出超出当前 renderer work 形状的异常跳变；这些数字不构成阈值、基线或回归判定。
-- **方向性根因解释（不升级为根因确认）**：echo full-topic pre/post 对照把主要可见工作仍定位在 renderer 的 full-topic message/viewport lifecycle；20 prior turns 的 post-opt 改善与 completed-block no-RAF 生命周期及 anchor fast path 的实现方向一致，但现有切片不能把收益分别归因到两个改动，也没有证明消除所有冗余 React work。`reduxCommit` 基本稳定，不能据此把成本归属到 Main/IPC/SQLite。
+- **已完成实现切片（不等于产品关闭）**：`anchorService` 增加 active-resolvable fast path，避免已可解析 anchor 再次构建 context turns；`useSmoothStream`/`Markdown` 在 completed block 路径绕过 smooth-stream reset/animation-frame 生命周期，直接提交 authoritative final content。Phase 2B 追加 renderer 边界切片：`Chat.tsx` 单一共享 `computeContextInfo` 投影（Messages/Inputbar 共用一次计算 + 仅订阅 active-topic 引用块，`useTopicReferencedBlocks`）与 `MessageWindow` constructor 级 `displayGroups` + `messageViewportProjection.ts`（保持旧视口投影语义、无重新分组）；echo 路径经 `echo.sharedContextInfo`/`echo.visibleGroupModel`/`echo.windowCreate`/`echo.windowReconcile`/`echo.domEndpoint` 阶段归因（默认-off `PERF_PHASE_ATTR`，持久契约见 `performance-measurement.md` §6.1）。实现保持 renderer 边界，不改变 Main SQLite authority、IPC 契约、持久化语义、50ms cadence 或 context-window/anchor 治理。
+- **测量条件与命令（2026-08-18）**：fresh production build 后，empty profile 使用 `pnpm test:e2e -- tests/e2e/specs/conversation/perf103-echo-latency-measurement.spec.ts`；batch-seeded profiles 使用 `PERF103_HIGH_TURN=1 PERF103_HIGH_TURN_TURNS=20 pnpm test:e2e -- tests/e2e/specs/conversation/perf103-high-turn-echo-measurement.spec.ts` 与 `PERF103_HIGH_TURN=1 PERF103_HIGH_TURN_TURNS=100 pnpm test:e2e -- tests/e2e/specs/conversation/perf103-high-turn-echo-measurement.spec.ts`。PERF-ECHO 的 prior-turn history 是通过 typed ChatDb bridge batch-seeded；不是 sequential-send pressure。Phase 2A 阶段归因仅在 `PERF_PHASE_ATTR=1 pnpm build` 启用构建下发射（`phase.*` 系列，27 metric IDs）；**high-turn spec 不发射 Phase 2A 阶段分解**，阶段分解由 PERF-103 standard（empty profile）路径捕获；默认构建/E2E 保持 inert。
+- **方向性结果（p50，单位 ms；L1 gate 通过，数值 L3 · dirty-worktree · 非阈值/非基线/非根因）**：PERF-103 standard（empty profile）p50 在**两次同机 dirty-worktree 运行**中观测范围为 `reduxCommit 27.1–33.1`、`firstRender 70.2–87.2`、`reduxToDom 42.4–52.7`；一次启用归因运行的 phase 分解 p50（**单次启用运行**）为 `userAction 13.1`、`renderComputation 0`、`windowLifecycle 0`、`DOM endpoint 83.5`——**phase span total 为捕获时长之和、非端到端，可与 DOM endpoint 重叠/超出**（LOCK-2A-008）。High-turn（batch-seeded）p50 观测范围：20 prior `52.5–77.1 / 150.8–199.8 / 96.2–122.7`、100 prior `50.3–71.7 / 140.1–202.4 / 91.4–130.7`（reduxCommit/firstRender/reduxToDom）；**每次运行内 20→100 保持近似平坦/无放大**，而跨运行绝对方差显著且不受控——范围与形状仅作方向判断，不构成阈值、基线或回归判定；每样本 Redux→DOM 仍被一个主导重叠长任务方向性覆盖。
+- **方向性根因解释（不升级为根因确认）**：echo full-topic pre/post 对照把主要可见工作仍定位在 renderer 的 full-topic message/viewport lifecycle；post-2B 的共享投影与窗口投影去重、completed-block no-RAF 生命周期及 anchor fast path 均与该定位方向一致，但现有切片不能把收益分别归因到各改动，也没有证明消除所有冗余 React work。`reduxCommit` 相对稳定，不能据此把成本归属到 Main/IPC/SQLite；单次启用运行 phase 分解中 `renderComputation 0` / `windowLifecycle 0`、DOM endpoint 为主导项（方向性观察，非对未捕获路径的根因归属）。
 - **PERF103 harness 效率结果（不作为产品延迟证据）**：batch-seeded PERF103 将真实 UI sends 从 `212` 降至 `12`，单次运行从约 `222s` 降至 `41.6s`；这是测量 harness 效率改善，不是产品 latency 改善或回归证据。
-- **回归覆盖（2026-08-18）**：post-opt `tests/e2e/specs/conversation/streaming-responsiveness.spec.ts` fresh production-build E2E 通过；focused renderer coverage 通过 `useSmoothStream.test.ts`、`Markdown.streaming.test.tsx`，anchor coverage 通过 `anchorService.test.ts`。这些是 L1 正确性/边界回归证据，不把 timing 数值升级为阈值，也不替代用户可见验收。
-- **明确未知项**：单阻塞长任务内的具体阶段归属（无 whole-echo/React-pass 归属）；anchor fast path 与 completed-block no-RAF 的独立收益；300 prior turns / 300-turn evidence；更广设备与负载下的方向是否稳定；跨运行噪声界；用户是否接受当前回显结果；匹配边界的长期回归保护尚未记录。
+- **回归覆盖（2026-08-18）**：post-opt `tests/e2e/specs/conversation/streaming-responsiveness.spec.ts` fresh production-build E2E 通过；focused renderer coverage 通过 `useSmoothStream.test.ts`、`Markdown.streaming.test.tsx`，anchor coverage 通过 `anchorService.test.ts`；Phase 2B 覆盖通过 `contextInfoService.test.ts`（共享投影契约）、`useTopicReferencedBlocks.test.tsx`、`messageViewportProjection.test.ts`、`messageWindow.test.ts`。**Phase 2A/2B L1 验证（最终代码表面）**：九个生产命令（启用 + 默认-off）exit 0，35 个 focused E2E 测试通过，启用 gates 全过、默认-off 无 phase 泄漏；聚合 `pnpm format` / `pnpm lint` / `pnpm test` 通过（4286 passed / 3 skipped），ABI145 恢复。这些是 L1 正确性/边界回归证据，不把 timing 数值升级为阈值，也不替代用户可见验收。
+- **明确未知项**：单阻塞长任务内的具体阶段归属（无 whole-echo/React-pass 归属）；anchor fast path、completed-block no-RAF 与 Phase 2B 共享投影/窗口投影去重的独立收益；300 prior turns / 300-turn evidence；更广设备与负载下的方向是否稳定；跨运行噪声界；用户是否接受当前回显结果；匹配边界的长期回归保护尚未记录（Phase 2B 残余风险：无直接 full-Chat memo wiring 测试，selector 与纯计算已分别覆盖）。
 - **下一实验/分析目标**（候选，未授权）：对 Redux→DOM 区间内单阻塞长任务的阶段级归属，或一个新的受控 viewport 收敛实验（须证明消除实际冗余 commit/work，不接受仅推进端点的 display-only fallback）。
 - **验收框架**：关闭要求回显延迟的已接受用户可见结果 + 需要时集成实现 + 匹配边界回归证据；候选修复必须证明消除实际冗余工作。
 
@@ -150,6 +158,144 @@
 - **建议推进顺序（推荐上下文 · 非授权 · 不构成优先级决策）**：① 归因测量（M1/M2/M3/M7）→ ② 低风险 DB 优化 → ③ 串行 renderer 工作流 → ④ 语义性 DB 决策 → ⑤ 同步使能。此顺序仅为**推荐上下文**，不批准任何实现/测量优先级。
 - **验收框架**：关闭须满足已接受的用户可见/数据健康结果 + 需要时集成实现 + 匹配边界回归证据（`performance-program.md` §8）；任何 schema/迁移/搜索语义改动走 ADR 决策点（PERF-LOCK-008）。**不把 L3 数值当阈值**（PERF-LOCK-003）。
 
+### 2.5 PERF-RENDER-FLOW — 渲染器可见子树 fanout/lifecycle 优化（Approved）
+
+- **工作流状态**：`Approved`（范围已批准，ID 与优先级锁定；未激活——新会话激活，`Active` 同一层级唯一）。
+- **产品问题关联**：PERF-TOPIC-SWITCH 与 PERF-ECHO 的共享 renderer 侧渲染成本轴（用户可感知的切换/回显延迟中 renderer lifecycle 部分）。
+- **目标**：提升用户感知的话题切换与回显流体性——减少可见子树的 mount/render/effect work count，方向性改善端点用户可见延迟。
+
+#### 战术操作循环（Tactical Operating Loop）
+
+执行 `performance-program.md` §4A 定义的高流战术循环，适用于 renderer-only presentation/local-state 安全区（§9A）：
+
+1. **代码路径追踪**：沿静态地图追踪用户关键路径（见候选队列下方的静态放大事实）。
+2. **候选短列**：每次最多 1–3 个高置信度放大候选（从候选队列中选取）。
+3. **最小可逆实验**：实现最小单变量可逆候选；renderer 安全区内直接执行。
+4. **廉价证据**：使用最廉价的充分聚焦测试——mount/render count、effect invocation count、focused user-visible 端点观察。
+5. **保留或回退**：产生可观测减少且方向正确的保留；否则完全回退。
+6. **批量集成验证**：保留的候选在集成时批量执行 fresh 生产构建 E2E 与聚合 gate（`pnpm format`/`pnpm lint`/`pnpm test`），而非每个实验前执行。
+
+#### 决策权利（Decision Rights）
+
+- 子活动独立执行高流循环；Active 唯一性保持在父工作流层级。
+- 跨越 §9 任一治理边界时停止并走 ADR（PERF-LOCK-008）。
+- 不允许：speculative bulk memoization sweep、声称证据层级升级（§7 不变）。
+- 本工作流不授权：topic-key removal（`key={activeTopic.id}`）、virtualization、Markdown parse cache——这些须单独显式批准。
+
+#### 候选队列（Candidate Queue）
+
+不超过三个初始审计候选。每个候选为静态信号假设——代码审计/计数/观察是 provisional probe 证据，可证明实际工作消除方向并决定保留/回退，但不能自行设置 Experiment/Integrated/Protected/Done 状态（见下方生命周期权限）：
+
+| 候选 | 范围 | 保留条件 |
+|---|---|---|
+| **A: topic-key remount boundary** | `key={activeTopic.id}` 触发的全子树 remount 生命周期爆炸半径 | 证明 key 是实际放大因子（remount count 高且可减少）；否则回退 |
+| **B: MessageGroup/projected-array identity** | 静态分析显示 projected array identity 在 switch/echo 路径下可能不稳定，潜在 defeat MessageGroup memo；此为候选信号，非已确认因果 | 证明 unchanged-item render count 下降且端点方向不恶化；否则回退 |
+| **C: selector/effect fanout** | MessageItem/Blocks/Markdown 的 per-message/per-block Redux subscription 与 per-Markdown lifecycle effects | 证明 selector notification/effect invocation 减少且内容/流式/上下文正确性不变；否则回退 |
+
+- **group-model O(N) rebuilding** 作为二级事实仅在材料时检查——当前测量的 render computation（12.4–22.2ms）相对 DOM endpoint 为小量，不作为首要候选。
+
+#### 具体探针程序（Concrete Probe Procedures）
+
+每个候选的探针程序轻量、候选局部、不创建通用框架：
+
+**A: topic-key remount boundary**
+1. 固定 profile：cache-hit topic switch，W10 与 W20 各一次。
+2. Before/after 或 control 计数：一次 switch 中 Message/Block/Markdown 组件的 mount/unmount 次数。
+3. 聚焦断言：语义 lifecycle state（anchor、scroll position、streaming state）在 switch 后保持正确。
+4. 端点：切换后首次可用渲染时间，仅方向性。
+5. 保留条件：mount count 下降且断言通过、端点方向不恶化。
+
+**B: MessageGroup/projected-array identity**
+1. 固定 profile：一次 cache-hit switch + 一次 optimistic echo。
+2. 计数：unchanged visible MessageGroup/MessageItem 在 switch/echo 后的 re-render 次数（before/after 或 control）。
+3. 保留条件：unchanged-item render count 下降且端点方向不恶化。
+
+**C: selector/effect fanout**
+1. 固定 profile：与 A/B 相同的 cache-hit switch 与 echo 动作。
+2. 计数：相关 selector notification 次数与 effect invocation/cleanup 次数（before/after 或 control）。
+3. 保留条件：notification/effect count 下降且内容/流式/上下文正确性不变。
+
+#### 探针记录（Minimal Probe Record）
+
+每次探针仅记录以下最小记录，无需 schema artifact 或 committed numeric threshold：
+
+| 字段 | 内容 |
+|---|---|
+| 候选 ID | A / B / C |
+| 代码变更 | 简述修改了什么 |
+| 固定动作/profile | cache-hit switch W10/W20 或 echo，空 profile |
+| Before/after work count | mount/render/notification/effect count 的 before 与 after |
+| 聚焦断言结果 | PASS/FAIL（语义正确性断言） |
+| 端点方向 | 改善/持平/恶化（方向性，非数值阈值） |
+| Keep/revert | 保留或回退 |
+
+#### 生命周期权限（Lifecycle Permissions）
+
+Probe evidence（代码审计/counter/focused observation）为 **Candidate 阶段** provisional 证据。它可：
+- 决定保留或回退（→ 回退到 Candidate 或进入 Experiment 规划）。
+- 为 Experiment planning 提供方向。
+
+它不可：
+- 自行将状态推进到 Experiment/Integrated/Protected/Done。
+- 替代 production E2E 或 aggregate gate 作为集成验证。
+
+状态推进仍受 `performance-program.md` §5 生命周期与 §8 关闭规则约束。
+
+#### 集成 gate（Integration Gate）
+
+Batch fresh production E2E + aggregate gates（`pnpm format`/`pnpm lint`/`pnpm test`）是**集成检查**，在保留候选进入集成时执行。它不自动关闭产品问题（§2.1/§2.3 的 `Open` 状态不受 probe 结果影响）。
+
+保留的候选在以下时机批量执行验证：
+- 候选被保留且进入集成阶段时
+- 跨越保护边界前
+
+#### 并行隔离规则（Parallel Isolation Rule）
+
+- **默认顺序**：A/B/C 探针按顺序执行（A→B→C）。
+- **并行允许条件**：仅在 isolated worktree/build/disposable profile 且 writes/instrumentation 不重叠时允许并行探针。并行不意味着共享状态或跨候选因果依赖。
+- **Active 唯一性**：保持在父工作流层级；并行探针不创建额外 Active 工作流。
+
+#### 停止/升级条件（Stop / Escalation）
+
+以下任一条件触发停止，回到 Main/用户决策：
+
+1. 变更跨越 §9 任一治理边界（ADR 级，PERF-LOCK-008）。
+2. 候选间无法通过静态分析区分主次。
+3. 实验结果模糊——方向不确定。
+4. 回归风险高。
+5. 候选需要新的通用测量框架——不构建新框架，除非升级条件满足。
+
+#### 非目标（Non-Goals）
+
+- 不构建新的通用测量框架（除非升级条件触发）。
+- 不做无边界的 speculative bulk memoization/optimization sweep。
+- 不声称证据层级升级（§7 层级约束不变）。
+- 不授权 topic-key removal、virtualization、Markdown parse cache——须单独显式批准。
+- 不改变 Main SQLite authority、IPC 契约、持久化语义、跨进程/跨窗口/lifecycle/原生边界。
+- 不创建 ADR 权威。
+- 不设定阈值（PERF-LOCK-003）。
+
+#### 静态放大事实（候选来源 · 非根因确认）
+
+以下为静态分析识别的候选放大事实，是候选不是根因确认：
+
+1. **Key-based full subtree remount**：`key={activeTopic.id}` 在话题切换时触发 Messages 全子树卸载/重挂载，生命周期爆炸半径覆盖所有可见 MessageGroup/MessageItem/Blocks/Markdown。
+2. **Unstable projected group-array identity**：`projectMessageViewportGroups` 每次返回新 array 引用，may weaken MessageGroup memo；probe 需确认 switch/echo 路径下 unchanged-group re-render 是否因此增加。
+3. **Full group-model rebuild on latest reconciliation**：每次 reconciliation 重建全量 group model（O(N) per message/block）。
+4. **Per-message/block Redux subscriptions**：MessageItem/Blocks 层级的独立 Redux selector 导致 granular re-render。
+5. **Per-Markdown lifecycle effects**：Markdown 组件的 lifecycle effect（parse/syntax highlight 等）在 remount 时重新触发。
+
+#### 激活说明（Activation Note for Next Session）
+
+新会话激活时：
+1. 确认当前 `Active` 唯一性未被占用。
+2. 将 `PERF-RENDER-FLOW` 状态从 `Approved` 改为 `Active`。
+3. 按 A→B→C 顺序逐个执行探针：代码审计 → 具体探针程序 → 最小记录 → keep/revert。
+4. 仅在 isolated worktree/build/disposable profile 且无 writes/instrumentation 重叠时允许并行。
+5. 保留的候选进入 Experiment 规划（不自行跳级）；集成时批量执行生产 E2E + aggregate gate。
+
+- **优先级定位**：优先于 PERF-DB-HEALTH（Planned）方向——renderer 可见子树 fanout/lifecycle 是当前用户感知延迟的高放大轴。
+
 ## 3. 已完成的生产优化成果摘要（Completed Production Outcomes）
 
 以下为实际合并的生产优化组（非详细运行历史；完整交付记录由 Git 历史承担）。对应 legacy 测量资产仅作证据身份引用。
@@ -162,6 +308,8 @@
 | 回显/完成块 renderer 生命周期 | 已可解析 anchor 走 active-resolvable fast path；completed Markdown block 绕过 smooth-stream reset/RAF 生命周期并直接提交最终内容 | 已集成 | `anchorService.test.ts`、`useSmoothStream.test.ts`、`Markdown.streaming.test.tsx` + fresh 生产构建回显/streaming-responsiveness E2E |
 
 > 生产基线资产：`PERF-002` 已建立**首批 committed-state machine-readable 参考基线**（schema v1 artifacts，gitignored 本地 deliverable）——数值为 **L3 非阈值参考基线**，唯一已提交阈值仍为冷开 `<500ms`（`performance-measurement.md` §7）。`PERF-001` 已落地 schema v1 结果契约；`PERF-004` 首切片已落地 FTS 1k/10k 快速确定性参数化与只读 schema-v1 artifact 曲线/方差/knee 方向性消费者。以上均为测量/基础设施成果，不关闭本文件 §2 的任何 Open 产品问题。
+>
+> **Phase 2B 状态说明**：Phase 2B 的 renderer 投影切片（共享 `computeContextInfo` 投影 + `MessageWindow` constructor 级 `displayGroups`/`messageViewportProjection.ts`）当前为**已实现、未合并提交**状态（dirty worktree），记录于 §2.1/§2.3「已完成实现切片」；其 L1/L3 证据均为 dirty-worktree 证据（LOCK-003）。进入上表「实际合并」语义须待提交/合并后由 Git 历史承载。
 
 ## 4. 关闭条件与推进规则
 

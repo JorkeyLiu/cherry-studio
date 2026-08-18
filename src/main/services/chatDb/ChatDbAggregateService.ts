@@ -34,6 +34,7 @@ import type Database from 'better-sqlite3'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { logMainDiagnostic } from '../diagnostics'
+import { isPhaseAttrMainEnabled, recordMainPhaseDuration } from '../phaseTimingDiagnostics'
 import { spanCacheService } from '../SpanCacheService'
 import type { FileReferenceData, MessageBlockData, MessageData } from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
@@ -204,6 +205,7 @@ export class ChatDbAggregateService {
     const correlationId = diagnostics?.correlationId
     const ordinal = diagnostics?.ordinal
     const isDiagnosedAppend = typeof correlationId === 'string' && correlationId.length > 0
+    const phasePath = isPhaseAttrMainEnabled() ? ('echo' as const) : undefined
     const t0 = performance.now()
     let convertDurationMs = 0
     let txDurationMs = 0
@@ -286,6 +288,9 @@ export class ChatDbAggregateService {
             ok: outcomeOk,
             blockCount: blocksJson.length
           })
+        }
+        if (phasePath && correlationId && ordinal === 1) {
+          recordMainPhaseDuration(correlationId, phasePath, 'echo.mainAppend', elapsedMs(t0))
         }
       }
     }, `appendMessage(${topicId}, ${messageJson.id})`)

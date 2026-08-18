@@ -61,7 +61,7 @@
  *   No message contents, credentials, paths, raw DB sizes, profile data,
  *   model IDs, or other sensitive identifiers enter the artifact.
  */
-import type { Page } from '@playwright/test'
+import type { ElectronApplication, Page } from '@playwright/test'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -75,6 +75,16 @@ import {
   writeBenchmarkResult
 } from '../../../../src/main/services/chatDb/__tests__/benchResult'
 import { expect, test } from '../../fixtures/electron.fixture'
+import {
+  aggregateWindowLifecycleStages,
+  collectWindowLifecycleAggregate,
+  deriveTopicPhaseMetrics,
+  phaseAttrEnabled,
+  phaseDuration,
+  sampleCorrelationId,
+  type FrozenPhaseSnapshot,
+  validateTopicPhaseSnapshot
+} from '../../utils/perfPhaseAttribution'
 
 // ---------------------------------------------------------------------------
 // Opt-in gate — default-off (LOCK-002)
@@ -174,6 +184,68 @@ const CANONICAL_COMMAND = 'pnpm test:e2e'
 
 /** Fixed synthetic seed timestamps (deterministic, non-sensitive). */
 const SEED_CREATED_AT = '2026-08-14T00:00:00.000Z'
+
+// ---------------------------------------------------------------------------
+// Metric identity contract — static, in-spec enforced at Phase 4
+// ---------------------------------------------------------------------------
+
+/** Statistical suffixes shared by every duration grid. */
+const STAT_SUFFIXES = ['p50', 'p95', 'mean', 'min', 'max'] as const
+
+/** Baseline metric IDs (20): 4 grids × 5 stats. */
+const BASELINE_METRIC_IDS: readonly string[] = [
+  ...[
+    'cacheMiss.firstUsefulRender',
+    'cacheMiss.loadCommit',
+    'cacheHit.repeatSwitchRender',
+    'cacheHit.activationCommit'
+  ].flatMap((prefix) => STAT_SUFFIXES.map((suffix) => `${prefix}.${suffix}`))
+]
+
+/** Baseline metric count (20). */
+const BASELINE_METRIC_COUNT = BASELINE_METRIC_IDS.length
+
+/**
+ * Phase 2A cache-miss subsegment metric IDs (22) emitted when PERF_PHASE_ATTR=1.
+ * LOCK-2A-010: cache-miss and cache-hit use SEPARATE metric IDs.
+ */
+const CACHE_MISS_PHASE_METRIC_IDS: readonly string[] = [
+  ...['cacheMiss.phase.span.renderComputation', 'cacheMiss.phase.span.windowLifecycle'].flatMap((prefix) =>
+    STAT_SUFFIXES.map((suffix) => `${prefix}.${suffix}`)
+  ),
+  'cacheMiss.phase.windowLifecycleStageCount',
+  ...['cacheMiss.phase.endpoint.domEndpoint', 'cacheMiss.phase.span.total'].flatMap((prefix) =>
+    STAT_SUFFIXES.map((suffix) => `${prefix}.${suffix}`)
+  ),
+  'cacheMiss.phase.samples'
+] as const
+
+/**
+ * Phase 2A cache-hit subsegment metric IDs (22) emitted when PERF_PHASE_ATTR=1.
+ * LOCK-2A-010: cache-miss and cache-hit use SEPARATE metric IDs.
+ */
+const CACHE_HIT_PHASE_METRIC_IDS: readonly string[] = [
+  ...['cacheHit.phase.span.renderComputation', 'cacheHit.phase.span.windowLifecycle'].flatMap((prefix) =>
+    STAT_SUFFIXES.map((suffix) => `${prefix}.${suffix}`)
+  ),
+  'cacheHit.phase.windowLifecycleStageCount',
+  ...['cacheHit.phase.endpoint.domEndpoint', 'cacheHit.phase.span.total'].flatMap((prefix) =>
+    STAT_SUFFIXES.map((suffix) => `${prefix}.${suffix}`)
+  ),
+  'cacheHit.phase.samples'
+] as const
+
+/** Phase metric count per path: 2 × statsMetrics(5) + 1 count + 2 × statsMetrics(5) + 1 count = 22. */
+const PHASE_METRIC_COUNT_PER_PATH = CACHE_MISS_PHASE_METRIC_IDS.length
+
+/** Total phase metric count when both paths are enabled: 22 + 22 = 44. */
+const TOTAL_PHASE_METRIC_COUNT = CACHE_MISS_PHASE_METRIC_IDS.length + CACHE_HIT_PHASE_METRIC_IDS.length
+
+/** Total metric count in disabled mode (no phase metrics). */
+const DISABLED_TOTAL_METRIC_COUNT = BASELINE_METRIC_COUNT
+
+/** Total metric count in enabled mode (baseline + phase for both paths). */
+const ENABLED_TOTAL_METRIC_COUNT = BASELINE_METRIC_COUNT + TOTAL_PHASE_METRIC_COUNT
 
 // ---------------------------------------------------------------------------
 // Seed factories — deterministic synthetic topics via the typed ChatDb bridge
@@ -552,6 +624,112 @@ interface SwitchSample {
   firstUsefulRenderMs: number
   /** Click -> activation commit: message-count commit (cache-miss) or currentTopicId activation (cache-hit). */
   activationCommitMs: number
+  /**
+   * Phase 2A (PERF-PHASE-001, default-inert): page-clock timestamps for
+   * subsegment derivation. All -1 when phase attribution is not enabled.
+   */
+}
+
+/**
+ * Phase 2A subsegment accumulator (PERF-PHASE-001, default-inert).
+ * Only populated when PERF_PHASE_ATTR=1 is set; otherwise remains at initial
+ * zero/empty values so the existing aggregate metrics are unaffected.
+ *
+ * LOCK-2A-008: metrics are explicit function-span aggregates (sum of
+ * durations) with sum/count semantics. No interval is derived unless both
+ * endpoints are directly captured on the same clock.
+ *
+ * LOCK-2A-010: cache-miss and cache-hit use SEPARATE accumulators, sample
+ * counts, and metric IDs — no mixed path series.
+ *
+ * LOCK-2A-009: window lifecycle stages may appear multiple times in a
+ * sample (windowReset + windowApply + windowReconcile). The accumulator
+ * tracks ALL matching stages with per-stage counts and sums.
+ */
+interface PhaseSubsegmentAccumulator {
+  /** Per-sample: messagesMount + contextInfo + visibleGroupModel span sum (direct function durations). */
+  renderComputationSpanMs: number[]
+  /** Per-sample: sum of all matching window lifecycle stage durations (windowReset + windowApply + windowReconcile). */
+  windowLifecycleSpanMs: number[]
+  /** Per-sample: total window lifecycle stage occurrences (may exceed 1 when stages repeat). */
+  windowLifecycleStageCount: number[]
+  /** Per-sample: topic.domEndpoint direct endpoint duration (NOT a derived interval). */
+  domEndpointMs: number[]
+  /** Per-sample: total span sum of selected renderer-clock stage durations (sum-of-durations, NOT an endpoint interval). */
+  totalSpanMs: number[]
+  /** Count of samples with valid phase data. */
+  samples: number
+}
+
+function createPhaseAccumulator(): PhaseSubsegmentAccumulator {
+  return {
+    renderComputationSpanMs: [],
+    windowLifecycleSpanMs: [],
+    windowLifecycleStageCount: [],
+    domEndpointMs: [],
+    totalSpanMs: [],
+    samples: 0
+  }
+}
+
+async function collectTopicPhase(
+  page: Page,
+  accumulator: PhaseSubsegmentAccumulator | undefined,
+  correlationId: string,
+  path: 'topic-cache-miss' | 'topic-cache-hit'
+): Promise<void> {
+  if (!accumulator) return
+  // LOCK-2A-007: read the frozen snapshot captured at the DOM endpoint
+  // inside the page evaluate. This ensures later assistant/reconciliation
+  // records never enter the sample — the snapshot is frozen at the exact
+  // DOM endpoint moment before any async IPC can respond. No live fallback
+  // is permitted.
+  const snapshot: FrozenPhaseSnapshot | null = await page.evaluate(
+    () => (globalThis as any).__perf101PhaseSnapshot ?? null
+  )
+  if (!snapshot) throw new Error(`phase snapshot unavailable for ${path} — no live fallback permitted`)
+  const problems = validateTopicPhaseSnapshot(snapshot, path)
+  if (problems.length > 0) throw new Error(`phase completeness failed for ${path}: ${problems.join('; ')}`)
+  // LOCK-2A-008: honest span naming — each metric is an explicit
+  // function-span aggregate (sum of durations) with a .count, NOT a
+  // derived endpoint interval.
+  // LOCK-2A-009: collect ALL matching window lifecycle stages with
+  // per-stage counts and sums rather than selecting only the first.
+  const metrics = deriveTopicPhaseMetrics(snapshot.state, correlationId, path)
+  accumulator.renderComputationSpanMs.push(metrics.renderComputationSpanMs)
+  accumulator.windowLifecycleSpanMs.push(metrics.windowLifecycleSpanMs)
+  accumulator.windowLifecycleStageCount.push(metrics.windowLifecycleStageCount)
+  accumulator.domEndpointMs.push(metrics.domEndpointMs)
+  accumulator.totalSpanMs.push(metrics.totalSpanMs)
+  accumulator.samples += 1
+  // Clean up the snapshot after collection
+  await page.evaluate(() => {
+    delete (globalThis as any).__perf101PhaseSnapshot
+  })
+}
+
+async function setActivePhase(page: Page, correlationId: string, path: 'topic-cache-miss' | 'topic-cache-hit') {
+  await page.evaluate(
+    ({ correlationId, path }) => {
+      ;(globalThis as any).__perfPhaseAttrReset?.()
+      const setter = (globalThis as any).__perfPhaseAttrSetActive
+      if (typeof setter !== 'function') throw new Error('phase attribution renderer seam unavailable')
+      setter(correlationId, path)
+    },
+    { correlationId, path }
+  )
+}
+
+async function resetMainPhaseState(electronApp: ElectronApplication): Promise<void> {
+  await electronApp.evaluate(() => (globalThis as any).__perfPhaseAttrResetMain?.())
+}
+
+async function readPhaseState(page: Page) {
+  return page.evaluate(() => (globalThis as any).__perfPhaseAttrRead?.() ?? null)
+}
+
+async function clearPhase(page: Page) {
+  await page.evaluate(() => (globalThis as any).__perfPhaseAttrClearActive?.())
 }
 
 /**
@@ -574,10 +752,19 @@ function measureTopicSwitch(
   marker: string,
   expectedCount: number,
   expectedVisibleCount: number,
-  commitMode: 'message-count' | 'topic-activation'
+  commitMode: 'message-count' | 'topic-activation',
+  _phaseAttr: boolean
 ): Promise<SwitchSample> {
   return page.evaluate(
-    async ({ targetTopicId, boundaryMessageId, marker, expectedCount, expectedVisibleCount, commitMode }) => {
+    async ({
+      targetTopicId,
+      boundaryMessageId,
+      marker,
+      expectedCount,
+      expectedVisibleCount,
+      commitMode,
+      phaseAttr
+    }) => {
       const store = (window as any).store
       const messagesEl = document.getElementById('messages')
       const item = document.querySelector<HTMLElement>(`[data-testid="topic-item"][data-topic-id="${targetTopicId}"]`)
@@ -624,6 +811,7 @@ function measureTopicSwitch(
             })()
 
       const t0 = performance.now()
+      ;(globalThis as any).__perfPhaseAttrMarkAction?.()
       item.click()
 
       try {
@@ -649,6 +837,19 @@ function measureTopicSwitch(
             settled = true
             clearTimeout(timeout)
             observer.disconnect()
+            // LOCK-2A-007: snapshot and close the active phase correlation at
+            // the DOM endpoint. This freezes the correlation so that later
+            // assistant/reconciliation records never enter the sample. The
+            // snapshot is captured inside the page evaluate at the exact DOM
+            // endpoint moment, before any async IPC can respond.
+            if (phaseAttr) {
+              const snapshotFn = (globalThis as any).__perfPhaseAttrSnapshot
+              const closeFn = (globalThis as any).__perfPhaseAttrClose
+              if (typeof snapshotFn === 'function' && typeof closeFn === 'function') {
+                ;(globalThis as any).__perf101PhaseSnapshot = snapshotFn()
+                closeFn()
+              }
+            }
             resolve(t)
           }
           const observer = new MutationObserver(() => {
@@ -670,7 +871,7 @@ function measureTopicSwitch(
         unsubscribe()
       }
     },
-    { targetTopicId, boundaryMessageId, marker, expectedCount, expectedVisibleCount, commitMode }
+    { targetTopicId, boundaryMessageId, marker, expectedCount, expectedVisibleCount, commitMode, phaseAttr: _phaseAttr }
   )
 }
 
@@ -731,6 +932,10 @@ function statsMetrics(prefix: string, label: string, values: number[]): Benchmar
   ]
 }
 
+function countMetric(id: string, name: string, value: number): BenchmarkMetric {
+  return { id, name, value, unit: 'count' }
+}
+
 interface PhaseSamples {
   cacheMissFirstUsefulRender: number[]
   cacheMissLoadCommit: number[]
@@ -741,10 +946,28 @@ interface PhaseSamples {
 function buildBenchmarkResult(
   samples: PhaseSamples,
   environment: BenchmarkResult['environment'],
-  profile: ScaleProfile
+  profile: ScaleProfile,
+  missPhaseAcc?: PhaseSubsegmentAccumulator,
+  hitPhaseAcc?: PhaseSubsegmentAccumulator
 ): BenchmarkResult {
   const n = profile.samplesPerProfile
   const renderedCount = visibleWindowMessageCount(profile.targetTopicMessageCount, profile.rendererDisplayCount)
+
+  // LOCK-2A-011: sample-count gates — when phase attribution is enabled,
+  // the actual phase sample count MUST equal the expected contract exactly.
+  // Zero samples when enabled is a gate failure, not an inert skip.
+  // Disabled mode (phaseAcc undefined or samples === 0 with no phaseAttr
+  // context) remains explicitly separate and emits no phase metrics.
+  if (missPhaseAcc) {
+    if (missPhaseAcc.samples !== n) {
+      throw new Error(`cache-miss phase sample count mismatch: expected ${n}, got ${missPhaseAcc.samples}`)
+    }
+  }
+  if (hitPhaseAcc) {
+    if (hitPhaseAcc.samples !== n) {
+      throw new Error(`cache-hit phase sample count mismatch: expected ${n}, got ${hitPhaseAcc.samples}`)
+    }
+  }
 
   const correctness: BenchmarkGate[] = [
     {
@@ -862,7 +1085,84 @@ function buildBenchmarkResult(
         'cacheHit.activationCommit',
         'Cache-hit repeat-switch click -> topic activation commit (currentTopicId change, measured independently from render)',
         samples.cacheHitLoadCommit
-      )
+      ),
+      // ---- Phase 2A subsegment metrics (PERF-PHASE-001, default-inert) ----
+      // Only emitted when PERF_PHASE_ATTR=1 is set; the phaseAcc is empty
+      // otherwise and these produce zero/empty series.
+      // LOCK-2A-008: All names are honest function-span aggregates (sum of
+      // durations) with sum/count semantics, NOT derived endpoint intervals.
+      // LOCK-2A-010: cache-miss and cache-hit use SEPARATE metric IDs and
+      // sample counts — no mixed path series.
+      // domEndpoint is a directly captured endpoint duration on the renderer
+      // clock. No idle/gap time is inferred from span sums.
+      ...(missPhaseAcc && missPhaseAcc.samples > 0
+        ? [
+            ...statsMetrics(
+              'cacheMiss.phase.span.renderComputation',
+              'Cache-miss render-computation span sum: messagesMount + contextInfo + visibleGroupModel (sum of direct function durations, NOT an endpoint interval)',
+              missPhaseAcc.renderComputationSpanMs
+            ),
+            ...statsMetrics(
+              'cacheMiss.phase.span.windowLifecycle',
+              'Cache-miss window-lifecycle span: sum of all matching windowReset/windowApply/windowReconcile durations (sum of direct function durations, NOT a derived interval)',
+              missPhaseAcc.windowLifecycleSpanMs
+            ),
+            countMetric(
+              'cacheMiss.phase.windowLifecycleStageCount',
+              'Cache-miss total window lifecycle stage occurrences per sample (sum of all window stage invocations; may exceed 1 when stages repeat)',
+              missPhaseAcc.windowLifecycleStageCount.reduce((s, v) => s + v, 0) / missPhaseAcc.samples
+            ),
+            ...statsMetrics(
+              'cacheMiss.phase.endpoint.domEndpoint',
+              'Cache-miss domEndpoint: directly captured renderer-clock endpoint duration (the user-visible DOM commit; NOT a derived interval)',
+              missPhaseAcc.domEndpointMs
+            ),
+            ...statsMetrics(
+              'cacheMiss.phase.span.total',
+              'Cache-miss total span sum: sum of selected renderer-clock stage durations (sum-of-durations, NOT an endpoint interval; no separately validated Main-clock span)',
+              missPhaseAcc.totalSpanMs
+            ),
+            countMetric(
+              'cacheMiss.phase.samples',
+              'Cache-miss samples with valid phase subsegment data',
+              missPhaseAcc.samples
+            )
+          ]
+        : []),
+      ...(hitPhaseAcc && hitPhaseAcc.samples > 0
+        ? [
+            ...statsMetrics(
+              'cacheHit.phase.span.renderComputation',
+              'Cache-hit render-computation span sum: messagesMount + contextInfo + visibleGroupModel (sum of direct function durations, NOT an endpoint interval)',
+              hitPhaseAcc.renderComputationSpanMs
+            ),
+            ...statsMetrics(
+              'cacheHit.phase.span.windowLifecycle',
+              'Cache-hit window-lifecycle span: sum of all matching windowReset/windowApply/windowReconcile durations (sum of direct function durations, NOT a derived interval)',
+              hitPhaseAcc.windowLifecycleSpanMs
+            ),
+            countMetric(
+              'cacheHit.phase.windowLifecycleStageCount',
+              'Cache-hit total window lifecycle stage occurrences per sample (sum of all window stage invocations; may exceed 1 when stages repeat)',
+              hitPhaseAcc.windowLifecycleStageCount.reduce((s, v) => s + v, 0) / hitPhaseAcc.samples
+            ),
+            ...statsMetrics(
+              'cacheHit.phase.endpoint.domEndpoint',
+              'Cache-hit domEndpoint: directly captured renderer-clock endpoint duration (the user-visible DOM commit; NOT a derived interval)',
+              hitPhaseAcc.domEndpointMs
+            ),
+            ...statsMetrics(
+              'cacheHit.phase.span.total',
+              'Cache-hit total span sum: sum of selected renderer-clock stage durations (sum-of-durations, NOT an endpoint interval; no separately validated Main-clock span)',
+              hitPhaseAcc.totalSpanMs
+            ),
+            countMetric(
+              'cacheHit.phase.samples',
+              'Cache-hit samples with valid phase subsegment data',
+              hitPhaseAcc.samples
+            )
+          ]
+        : [])
     ],
     gates: correctness
   }
@@ -892,6 +1192,15 @@ describeBlock('PERF-101 cache-hit repeat-switch measurement', () => {
       cacheHitRepeatSwitchRender: [],
       cacheHitLoadCommit: []
     }
+
+    // Phase 2A: default-inert phase subsegment accumulators (LOCK-2A-001/010).
+    // When disabled, pass no accumulators — the builder emits no phase
+    // metrics and skips the exact-count gate (LOCK-2A-011).
+    // LOCK-2A-010: cache-miss and cache-hit use SEPARATE accumulators, sample
+    // counts, and metric IDs — no mixed path series.
+    const phaseEnabled = phaseAttrEnabled()
+    const missPhaseAcc = phaseEnabled ? createPhaseAccumulator() : undefined
+    const hitPhaseAcc = phaseEnabled ? createPhaseAccumulator() : undefined
 
     const sourceId = 'p101ch-src-topic'
     const sourceSeeds = buildGroupSeeds(sourceId, assistantId!, SCALE.sourceTopicGroups, 0)
@@ -945,6 +1254,11 @@ describeBlock('PERF-101 cache-hit repeat-switch measurement', () => {
         const item = page.locator(`[data-testid="topic-item"][data-topic-id="${targetId}"]`)
         await item.waitFor({ state: 'visible', timeout: 15000 })
 
+        const missCorrelationId = sampleCorrelationId('p101ch-miss', s)
+        if (phaseEnabled) {
+          await resetMainPhaseState(electronApp)
+          await setActivePhase(page, missCorrelationId, 'topic-cache-miss')
+        }
         const cacheMissSample = await measureTopicSwitch(
           page,
           targetId,
@@ -952,7 +1266,8 @@ describeBlock('PERF-101 cache-hit repeat-switch measurement', () => {
           marker!,
           expectedCount,
           expectedVisibleCount,
-          'message-count'
+          'message-count',
+          phaseEnabled
         )
 
         // Post-timing correctness gates for cache-miss
@@ -982,6 +1297,11 @@ describeBlock('PERF-101 cache-hit repeat-switch measurement', () => {
         samples.cacheMissFirstUsefulRender.push(cacheMissSample.firstUsefulRenderMs)
         samples.cacheMissLoadCommit.push(cacheMissSample.activationCommitMs)
 
+        if (phaseEnabled) {
+          await collectTopicPhase(page, missPhaseAcc, missCorrelationId, 'topic-cache-miss')
+          await clearPhase(page)
+        }
+
         console.log(
           `[E2E][PERF-101-CH] sample ${s} cache-miss: ` +
             `firstUsefulRender=${cacheMissSample.firstUsefulRenderMs.toFixed(1)}ms, ` +
@@ -995,6 +1315,11 @@ describeBlock('PERF-101 cache-hit repeat-switch measurement', () => {
         await assertCacheHitPrecondition(page, targetId, expectedCount)
 
         // -- E. Measure cache-hit repeat switch --
+        const hitCorrelationId = sampleCorrelationId('p101ch-hit', s)
+        if (phaseEnabled) {
+          await resetMainPhaseState(electronApp)
+          await setActivePhase(page, hitCorrelationId, 'topic-cache-hit')
+        }
         const cacheHitSample = await measureTopicSwitch(
           page,
           targetId,
@@ -1002,7 +1327,8 @@ describeBlock('PERF-101 cache-hit repeat-switch measurement', () => {
           marker!,
           expectedCount,
           expectedVisibleCount,
-          'topic-activation'
+          'topic-activation',
+          phaseEnabled
         )
 
         // Post-timing correctness gates for cache-hit
@@ -1031,6 +1357,11 @@ describeBlock('PERF-101 cache-hit repeat-switch measurement', () => {
         samples.cacheHitRepeatSwitchRender.push(cacheHitSample.firstUsefulRenderMs)
         samples.cacheHitLoadCommit.push(cacheHitSample.activationCommitMs)
 
+        if (phaseEnabled) {
+          await collectTopicPhase(page, hitPhaseAcc, hitCorrelationId, 'topic-cache-hit')
+          await clearPhase(page)
+        }
+
         console.log(
           `[E2E][PERF-101-CH] sample ${s} cache-hit: ` +
             `repeatSwitchRender=${cacheHitSample.firstUsefulRenderMs.toFixed(1)}ms, ` +
@@ -1057,7 +1388,30 @@ describeBlock('PERF-101 cache-hit repeat-switch measurement', () => {
         abiLane: 'electron',
         abi: appRuntime.abiModules
       }
-      const result = buildBenchmarkResult(samples, environment, profile)
+      const result = buildBenchmarkResult(samples, environment, profile, missPhaseAcc, hitPhaseAcc)
+
+      // ---- Metric identity contract (static, in-spec) ----------------------
+      // Disabled mode: 20 baseline metric IDs. Enabled mode: 20 baseline + 22
+      // cache-miss phase + 22 cache-hit phase = 64. No threshold gate exists.
+      const metricIds = result.metrics.map((m) => m.id)
+      expect(new Set(metricIds).size, 'all metric ids must be unique').toBe(metricIds.length)
+      const expectedMetricCount = phaseEnabled ? ENABLED_TOTAL_METRIC_COUNT : DISABLED_TOTAL_METRIC_COUNT
+      expect(
+        result.metrics.length,
+        `total metric count must be exactly ${expectedMetricCount} (disabled=${DISABLED_TOTAL_METRIC_COUNT}, enabled=${ENABLED_TOTAL_METRIC_COUNT}; phaseEnabled=${phaseEnabled}; observed ${result.metrics.length})`
+      ).toBe(expectedMetricCount)
+      for (const id of BASELINE_METRIC_IDS) {
+        expect(metricIds, `baseline metric id must remain present unchanged: ${id}`).toContain(id)
+      }
+      if (phaseEnabled) {
+        for (const id of CACHE_MISS_PHASE_METRIC_IDS) {
+          expect(metricIds, `cache-miss phase metric id must be present when enabled: ${id}`).toContain(id)
+        }
+        for (const id of CACHE_HIT_PHASE_METRIC_IDS) {
+          expect(metricIds, `cache-hit phase metric id must be present when enabled: ${id}`).toContain(id)
+        }
+      }
+
       const artifactPath = writeBenchmarkResult(result)
       expect(fs.existsSync(artifactPath), 'artifact must exist after a passing run').toBe(true)
       console.log(
@@ -1065,5 +1419,46 @@ describeBlock('PERF-101 cache-hit repeat-switch measurement', () => {
           `(N${profile.targetTopicMessageCount}/W${profile.rendererDisplayCount}, profile ${profile.kind}, code ${profile.profileCode})`
       )
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Static metric identity contract tests (no Electron, no fixtures)
+// ---------------------------------------------------------------------------
+
+test.describe('PERF-101-CH metric identity contract (static)', () => {
+  test('disabled mode: 20 baseline metric IDs', () => {
+    expect(BASELINE_METRIC_COUNT).toBe(20)
+    expect(new Set(BASELINE_METRIC_IDS).size, 'baseline metric ids must be unique').toBe(BASELINE_METRIC_IDS.length)
+  })
+
+  test('enabled mode: 64 metric IDs (20 baseline + 22 cache-miss phase + 22 cache-hit phase)', () => {
+    const enabledMetricIds = [...BASELINE_METRIC_IDS, ...CACHE_MISS_PHASE_METRIC_IDS, ...CACHE_HIT_PHASE_METRIC_IDS]
+    expect(enabledMetricIds.length).toBe(ENABLED_TOTAL_METRIC_COUNT)
+    expect(new Set(enabledMetricIds).size, 'enabled metric ids must be unique').toBe(enabledMetricIds.length)
+  })
+
+  test('phase metric counts per path are deterministic (22 each)', () => {
+    expect(PHASE_METRIC_COUNT_PER_PATH).toBe(22)
+    expect(CACHE_MISS_PHASE_METRIC_IDS.length).toBe(22)
+    expect(CACHE_HIT_PHASE_METRIC_IDS.length).toBe(22)
+    expect(TOTAL_PHASE_METRIC_COUNT).toBe(44)
+  })
+
+  test('cache-miss and cache-hit phase IDs are disjoint', () => {
+    const missSet = new Set(CACHE_MISS_PHASE_METRIC_IDS)
+    for (const id of CACHE_HIT_PHASE_METRIC_IDS) {
+      expect(missSet.has(id), `cache-hit phase id must not overlap cache-miss: ${id}`).toBe(false)
+    }
+  })
+
+  test('phase IDs are disjoint from baseline IDs', () => {
+    const baselineSet = new Set(BASELINE_METRIC_IDS)
+    for (const id of CACHE_MISS_PHASE_METRIC_IDS) {
+      expect(baselineSet.has(id), `cache-miss phase id must not overlap baseline: ${id}`).toBe(false)
+    }
+    for (const id of CACHE_HIT_PHASE_METRIC_IDS) {
+      expect(baselineSet.has(id), `cache-hit phase id must not overlap baseline: ${id}`).toBe(false)
+    }
   })
 })

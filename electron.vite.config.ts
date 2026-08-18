@@ -73,6 +73,20 @@ function resolveStreamAttrDefine(): string {
 }
 const streamAttrDefine = resolveStreamAttrDefine()
 
+// PERF-PHASE-001: phase attribution is a separate build-time switch. Plain
+// builds inline `false`; malformed non-empty values fail loudly at config load.
+function resolvePhaseAttrDefine(): string {
+  const value = process.env.PERF_PHASE_ATTR
+  if (value === undefined || value.trim().length === 0) return 'false'
+  const normalized = value.trim().toLowerCase()
+  if (normalized === '1' || normalized === 'true') return 'true'
+  throw new Error(
+    `PERF_PHASE_ATTR must be '1'/'true' to enable or unset/empty to skip (got '${value}'). ` +
+      'Enable only for the documented measurement build.'
+  )
+}
+const phaseAttrDefine = resolvePhaseAttrDefine()
+
 export default defineConfig({
   main: {
     plugins: [
@@ -101,7 +115,8 @@ export default defineConfig({
       // PERF-STREAM-ATTR-001: inlined Main-process measurement switch, derived
       // from the SAME build env as the renderer switch so the two processes
       // are guaranteed consistent in a measurement build (LOCK-STREAM-ATTR-001).
-      __PERF_STREAM_ATTR__: JSON.stringify(streamAttrDefine)
+      __PERF_STREAM_ATTR__: JSON.stringify(streamAttrDefine),
+      __PERF_PHASE_ATTR__: JSON.stringify(phaseAttrDefine)
     },
     build: {
       rollupOptions: {
@@ -162,7 +177,8 @@ export default defineConfig({
     ],
     define: {
       // PERF-STREAM-ATTR-001: inlined measurement switch (see above).
-      __PERF_STREAM_ATTR__: JSON.stringify(streamAttrDefine)
+      __PERF_STREAM_ATTR__: JSON.stringify(streamAttrDefine),
+      __PERF_PHASE_ATTR__: JSON.stringify(phaseAttrDefine)
     },
     resolve: {
       alias: {

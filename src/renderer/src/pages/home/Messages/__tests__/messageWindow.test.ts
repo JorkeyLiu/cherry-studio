@@ -173,4 +173,127 @@ describe('messageWindow', () => {
     expect(ids(reconciledAgain)).toEqual(['m3', 'm2', 'm1', 'm0'])
     expect(reconciledAgain.hasMoreNewer).toBe(true)
   })
+
+  describe('displayGroups (Phase 2B)', () => {
+    it('createLatestMessageWindow populates displayGroups matching the sliced groups', () => {
+      const messages = [
+        message('u0'),
+        message('a0', 'assistant', 'ask'),
+        message('a1', 'assistant', 'ask'),
+        message('u1'),
+        message('u2')
+      ]
+      const window = createLatestMessageWindow(messages, 2)
+
+      // displayGroups should contain the sliced viewport groups
+      expect(window.displayGroups.length).toBe(window.groupCount)
+      // Each group's messages should flatten to the same IDs as displayMessages (reversed)
+      const flattenedGroupIds = window.displayGroups
+        .flatMap((g) => g.messages)
+        .map((m) => m.id)
+        .reverse()
+      expect(flattenedGroupIds).toEqual(ids(window))
+    })
+
+    it('empty window carries an empty displayGroups array', () => {
+      const window = createLatestMessageWindow([], 3)
+      expect(window.displayGroups).toEqual([])
+      expect(window.displayMessages).toEqual([])
+    })
+
+    it('createOldestMessageWindow populates displayGroups consistently', () => {
+      const window = createOldestMessageWindow(users(8), 3)
+      expect(window.displayGroups.length).toBe(3)
+      const flattenedGroupIds = window.displayGroups
+        .flatMap((g) => g.messages)
+        .map((m) => m.id)
+        .reverse()
+      expect(flattenedGroupIds).toEqual(ids(window))
+    })
+
+    it('createTargetMessageWindow populates displayGroups for target navigation', () => {
+      const window = createTargetMessageWindow(users(50), 'm20', 10, 19)
+      expect(window.displayGroups.length).toBe(window.groupCount)
+      const flattenedGroupIds = window.displayGroups
+        .flatMap((g) => g.messages)
+        .map((m) => m.id)
+        .reverse()
+      expect(flattenedGroupIds).toEqual(ids(window))
+    })
+
+    it('expandMessageWindowOlder populates displayGroups with expanded range', () => {
+      const messages = users(10)
+      const middle = createTargetMessageWindow(messages, 'm5', 1, 1)
+      const older = expandMessageWindowOlder(messages, middle, 2)
+      expect(older.displayGroups.length).toBe(older.groupCount)
+      const flattenedGroupIds = older.displayGroups
+        .flatMap((g) => g.messages)
+        .map((m) => m.id)
+        .reverse()
+      expect(flattenedGroupIds).toEqual(ids(older))
+    })
+
+    it('expandMessageWindowNewer populates displayGroups with expanded range', () => {
+      const messages = users(10)
+      const middle = createTargetMessageWindow(messages, 'm5', 1, 1)
+      const newer = expandMessageWindowNewer(messages, middle, 2)
+      expect(newer.displayGroups.length).toBe(newer.groupCount)
+      const flattenedGroupIds = newer.displayGroups
+        .flatMap((g) => g.messages)
+        .map((m) => m.id)
+        .reverse()
+      expect(flattenedGroupIds).toEqual(ids(newer))
+    })
+
+    it('reconcileMessageWindow populates displayGroups for latest edge', () => {
+      const previous = users(6)
+      const current = createLatestMessageWindow(previous, 3)
+      const next = [...previous, message('m6'), message('m7')]
+      const reconciled = reconcileMessageWindow(next, previous, current)
+      expect(reconciled.displayGroups.length).toBe(reconciled.groupCount)
+      const flattenedGroupIds = reconciled.displayGroups
+        .flatMap((g) => g.messages)
+        .map((m) => m.id)
+        .reverse()
+      expect(flattenedGroupIds).toEqual(ids(reconciled))
+    })
+
+    it('reconcileMessageWindow populates displayGroups for fixed edge', () => {
+      const previous = users(8)
+      const current = createTargetMessageWindow(previous, 'm3', 1, 1)
+      const next = [
+        ...previous.slice(0, 3),
+        { ...previous[3], createdAt: '2026-07-19T01:00:00.000Z' },
+        ...previous.slice(4),
+        message('m8')
+      ]
+      const reconciled = reconcileMessageWindow(next, previous, current)
+      expect(reconciled.displayGroups.length).toBe(reconciled.groupCount)
+      const flattenedGroupIds = reconciled.displayGroups
+        .flatMap((g) => g.messages)
+        .map((m) => m.id)
+        .reverse()
+      expect(flattenedGroupIds).toEqual(ids(reconciled))
+    })
+
+    it('group keys in displayGroups are stable across window operations', () => {
+      const messages = [
+        message('u0'),
+        message('a0', 'assistant', 'ask'),
+        message('a1', 'assistant', 'ask'),
+        message('u1'),
+        message('a2', 'assistant', 'ask2'),
+        message('u2')
+      ]
+      const latest = createLatestMessageWindow(messages, 3)
+      const expanded = expandMessageWindowOlder(messages, latest, 1)
+
+      // Group keys for overlapping messages should be the same
+      const latestKeys = new Set(latest.displayGroups.map((g) => g.key))
+      const expandedKeys = new Set(expanded.displayGroups.map((g) => g.key))
+      for (const key of latestKeys) {
+        expect(expandedKeys.has(key)).toBe(true)
+      }
+    })
+  })
 })

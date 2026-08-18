@@ -29,6 +29,20 @@ export default defineConfig({
     // the same env the measurement build/run uses (default inert).
     __PERF_STREAM_ATTR__: JSON.stringify(
       process.env.PERF_STREAM_ATTR === '1' || process.env.PERF_STREAM_ATTR === 'true' ? 'true' : 'false'
+    ),
+    // PERF-PHASE-001: strict contract — unset/empty=false, '1'/'true'=true,
+    // other nonempty=throw (matches Electron/shared resolvePhaseAttrGate).
+    __PERF_PHASE_ATTR__: JSON.stringify(
+      (() => {
+        const value = process.env.PERF_PHASE_ATTR
+        if (value === undefined || value.trim().length === 0) return 'false'
+        const normalized = value.trim().toLowerCase()
+        if (normalized === '1' || normalized === 'true') return 'true'
+        throw new Error(
+          `PERF_PHASE_ATTR must be '1'/'true' to enable or unset/empty to skip (got '${value}'). ` +
+            'Enable only through the documented measurement build/run.'
+        )
+      })()
     )
   },
   test: {
@@ -178,6 +192,11 @@ export default defineConfig({
       // E2E utility tests (non-Electron, non-Playwright unit tests)
       {
         extends: true,
+        resolve: {
+          alias: {
+            '@shared': resolve('packages/shared')
+          }
+        },
         test: {
           name: 'e2e-utils',
           environment: 'node',

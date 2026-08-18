@@ -10,6 +10,7 @@ declare const __BUILD_VERSION__: string
 // (electron.vite.config.ts / vitest.config.ts `define`); 'true'/'false'
 // string. Default builds inline 'false' — the Main collector stays inert.
 declare const __PERF_STREAM_ATTR__: string
+declare const __PERF_PHASE_ATTR__: string
 
 interface ImportMetaEnv {
   VITE_MAIN_BUNDLE_ID: string

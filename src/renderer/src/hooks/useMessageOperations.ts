@@ -5,7 +5,7 @@ import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecy
 import { appendMessageTrace, pauseTrace, restartTrace } from '@renderer/services/SpanManagerService'
 import { estimateUserPromptUsage } from '@renderer/services/TokenService'
 import store, { type RootState, useAppDispatch, useAppSelector } from '@renderer/store'
-import { updateOneBlock } from '@renderer/store/messageBlock'
+import { selectMessageBlocksByIds, updateOneBlock } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
 import {
   appendAssistantResponseThunk,
@@ -25,7 +25,8 @@ import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage
 import { abortCompletion } from '@renderer/utils/abortController'
 import { estimateMessageBlocksUsage } from '@renderer/utils/messageUtils/usage'
 import { difference, throttle } from 'lodash'
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
+import { shallowEqual } from 'react-redux'
 
 const logger = loggerService.withContext('UseMessageOperations')
 
@@ -533,6 +534,24 @@ export function useMessageOperations(topic: Topic) {
 
 export const useTopicMessages = (topicId: string) => {
   return useAppSelector((state) => selectMessagesForTopic(state, topicId))
+}
+
+/**
+ * Phase 2B freshness dependency for the Chat-level shared context projection.
+ *
+ * computeContextInfo reads message blocks through block-dependent filters
+ * (filterEmptyMessages, filterErrorOnlyMessagesWithRelated), so a block-only
+ * Redux update (updateOneBlock) can change the projection output without
+ * changing the topic message array. This hook subscribes ONLY to the blocks
+ * referenced by the topic's messages — `selectMessageBlocksByIds` +
+ * `shallowEqual` keep the subscription silent while an unrelated block (e.g.
+ * another topic's streaming block) commits, so the shared projection is not
+ * recomputed for block changes it cannot read.
+ */
+export const useTopicReferencedBlocks = (topicId: string): MessageBlock[] => {
+  const topicMessages = useTopicMessages(topicId)
+  const topicBlockIds = useMemo(() => topicMessages.flatMap((m) => m.blocks ?? []), [topicMessages])
+  return useAppSelector((state) => selectMessageBlocksByIds(state, topicBlockIds), shallowEqual)
 }
 
 export const useTopicLoading = (topic: Topic) => {

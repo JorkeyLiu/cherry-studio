@@ -565,4 +565,89 @@ describe('computeContextInfo', () => {
       expect(result.tokenEstimationMessages.some((m) => m.id === 'm19')).toBe(true)
     })
   })
+
+  describe('shared projection contract (Phase 2B)', () => {
+    it('the single shared call provides every field Messages consumes (boundary, anchor, counts, ui messages)', () => {
+      const messages = withBlocks(twentyMessages)
+      const assistant = assistantWith({ contextCount: 5 })
+
+      // Chat-level shared projection: one plain call, no diagnostics stage.
+      const shared = computeContextInfo(messages, assistant, TOPIC_ID)
+
+      expect(shared.boundaryMessageId).not.toBeNull()
+      expect(shared.anchorGroupKey).not.toBeNull()
+      expect(shared.contextCount.current).toBeGreaterThan(0)
+      expect(shared.contextCount.max).toBe(twentyMessages.length / 2)
+      expect(shared.uiMessages.length).toBeGreaterThan(0)
+      // uiMessages are the model-facing messages (trailing assistant removed).
+      expect(shared.uiMessages.some((m) => m.id === 'm19')).toBe(false)
+    })
+
+    it('the single shared call provides every field Inputbar consumes (token estimation + counts)', () => {
+      const messages = withBlocks(twentyMessages)
+      const assistant = assistantWith({ contextCount: 3 })
+
+      const shared = computeContextInfo(messages, assistant, TOPIC_ID)
+
+      // tokenEstimationMessages retains the trailing assistant for estimation.
+      expect(shared.tokenEstimationMessages.length).toBeGreaterThan(0)
+      expect(shared.tokenEstimationMessages.some((m) => m.id === 'm19')).toBe(true)
+      expect(shared.contextCount).toEqual({ current: 3, max: 10 })
+    })
+
+    it('shared projection recomputes on relevant primitive changes (assistant contextCount)', () => {
+      const messages = withBlocks(twentyMessages)
+      const assistant5 = assistantWith({ contextCount: 5 })
+      const assistant3 = assistantWith({ contextCount: 3 })
+
+      const result5 = computeContextInfo(messages, assistant5, TOPIC_ID)
+      const result3 = computeContextInfo(messages, assistant3, TOPIC_ID)
+
+      // Different contextCount should produce different contextCount.current
+      expect(result5.contextCount.current).not.toBe(result3.contextCount.current)
+    })
+
+    it('block-only store updates alter the shared projection output (same topic message array)', () => {
+      // A message whose MAIN_TEXT block is empty is filtered out by
+      // filterEmptyMessages. Filling the block through a block-only store
+      // update (updateOneBlock) must change what the projection produces while
+      // the topic message array stays identical — the Chat-level memo therefore
+      // needs the topic-referenced-blocks dependency (LOCK-004).
+      const userBlockId = 'block-u1'
+      mockStore.dispatch(
+        messageBlocksSlice.actions.upsertOneBlock({
+          id: userBlockId,
+          type: MessageBlockType.MAIN_TEXT,
+          content: '   ',
+          messageId: 'u1'
+        } as any)
+      )
+      const userMsg = { ...msg('u1'), blocks: [userBlockId] }
+      const messages = [userMsg, msgWithBlock('a1', 'assistant', 'u1')]
+      const assistant = assistantWith({ contextCount: null })
+
+      const emptyResult = computeContextInfo(messages, assistant, TOPIC_ID)
+      // Empty user message is filtered out; the assistant-only remainder is
+      // trimmed to nothing by filterUserRoleStartMessages.
+      expect(emptyResult.uiMessages).toEqual([])
+      expect(emptyResult.tokenEstimationMessages.map((m) => m.id)).toEqual(['a1'])
+      // Turn-based fields are message-driven and therefore unaffected.
+      expect(emptyResult.contextCount).toEqual({ current: 1, max: 1 })
+
+      // Block-only Redux update: same message array, changed block content.
+      mockStore.dispatch(
+        messageBlocksSlice.actions.updateOneBlock({
+          id: userBlockId,
+          changes: { content: 'now has content' }
+        })
+      )
+
+      const filledResult = computeContextInfo(messages, assistant, TOPIC_ID)
+      expect(filledResult.uiMessages.map((m) => m.id)).toEqual(['u1'])
+      expect(filledResult.tokenEstimationMessages.map((m) => m.id)).toEqual(['u1', 'a1'])
+      expect(filledResult.uiMessages).not.toEqual(emptyResult.uiMessages)
+      // The turn counts are identical — the change is purely block-driven.
+      expect(filledResult.contextCount).toEqual(emptyResult.contextCount)
+    })
+  })
 })

@@ -32,6 +32,7 @@ declare global {
    * string. Default builds inline 'false' — the renderer collector stays inert.
    */
   const __PERF_STREAM_ATTR__: string
+  const __PERF_PHASE_ATTR__: string
 
   interface Window {
     root: HTMLElement

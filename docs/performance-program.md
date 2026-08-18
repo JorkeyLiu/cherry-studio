@@ -65,6 +65,43 @@
 
 清单任一环节缺失，结论只按已建立证据分层表述，不升级（PERF-LOCK-003、§7）。
 
+## 4A. 高流战术循环（High-Flow Tactical Loop）
+
+**证据链是断言升级要求，不是强制串行工作队列。** 证据链的六个环节定义的是：当要升级断言强度（从方向性到已验证回归）时，必须具备哪些证据环节。它不要求每次实验都从头走完全部环节——尤其是 renderer 安全区内的可逆候选实验，可以在更轻量的证据门槛下快速验证或否决。
+
+### 高流战术循环定义
+
+适用于 renderer-only presentation/local-state 安全区内的候选探测（不跨越 §9 列出的治理边界）：
+
+```
+(1) 追踪用户关键代码路径/设计
+(2) 通过静态分析短列 1–3 个高置信度放大候选
+(3) 实现最小可逆单变量实验（renderer 安全区内直接执行）
+(4) 使用最廉价的充分聚焦测试/计数/观察证明实际工作消除与用户可见方向
+(5) 保留或完全回退
+(6) 在集成/保护边界批量执行生产 E2E 与聚合 gate，而非每个实验前执行
+```
+
+**关键语义**：
+- **(3) 的"直接执行"**仅限 renderer-only presentation/local-state 安全区——不跨越 §9 任一治理边界。跨越任何边界仍停止并走 ADR（PERF-LOCK-008）。
+- **(4) 的"最廉价充分证据"**指：能证明方向的最小证据——count/counter、focused render/mount 计数、单次 user-visible 端点观察——不要求完整基准链或生产 E2E 作为前置条件。
+- **(6) 的批量 gate**在以下时机执行：候选已被保留（非回退）、进入集成阶段、或跨越保护边界。不要求每个候选实验前执行全量验证。
+- 不允许：无边界的 speculative bulk memoization/optimization sweep、声称证据升级（§7 证据层级不变）。
+
+### 工业级归因的正当条件
+
+以下情况应诉诸完整证据链与工业级归因，而非高流循环：
+
+1. 候选之间无法通过静态分析区分主次。
+2. 变更跨越时钟/进程边界（如 Main/IPC/SQLite）。
+3. 实验结果仍然模糊——无法判断方向。
+4. 回归风险高（跨 authority/persistence/contract 边界）。
+5. 持久度量契约本身就是交付物。
+
+### 工作流内子活动
+
+同一 Approved/Active 工作流下可定义多个子活动（candidate probes），各子活动独立执行高流循环。Active 唯一性保持在**父工作流层级**——子活动的独立探测不违反 Active 唯一性约束。子活动默认顺序执行；仅在 isolated worktree/build/disposable profile 且 writes/instrumentation 不重叠时允许并行（见 `performance-workstreams.md` §2.5 并行隔离规则）。
+
 ## 5. 假设驱动生命周期（Hypothesis-Driven Lifecycle）
 
 每个工作流沿以下生命周期推进；每步分配稳定 ID（`performance-workstreams.md`）并伴随对应证据：
@@ -137,6 +174,21 @@ Problem Open → Cost Model → Attributed → Candidate → Experiment → Inte
 5. 兼容语义变更（Cherry Studio 兼容导入、FTS/搜索正确性、身份/兼容标识）。
 6. 平台 / 发布范围变更（macOS-arm64-first 之外或发布冻结面）。
 7. 性能优化建议本身要求上述变更——先 ADR 后实现，不得以性能为名绕过治理。
+
+### 9A. Renderer 安全区（Renderer Safe-Zone）
+
+Renderer-only presentation/local-state 变更，只要不跨越以下任一边界，不需要 ADR：
+
+- 运行时职责/权威移动（§9.1）
+- 持久化或迁移语义变更（§9.2）
+- 生命周期/多窗口/原生能力变更（§9.3）
+- 遥测隐私边界变更（§9.4）
+- 兼容语义变更（§9.5）
+- 平台/发布范围变更（§9.6）
+
+**安全区内的操作**包括但不限于：React 组件 memo 策略调整、selector 粒度优化、渲染子树结构重排、projected array identity 稳定化、effect/subscription fanout 缩减——只要这些改动不改变以上任何边界的语义。
+
+跨越上述任一边界仍须停止并走 ADR（PERF-LOCK-008），不论变更幅度大小。
 
 ## 10. 相关文档
 

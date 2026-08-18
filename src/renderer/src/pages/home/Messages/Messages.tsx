@@ -14,7 +14,7 @@ import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { findFirstVisibleMessage } from '@renderer/pages/home/Messages/domVisibility'
 import { branchFromMessage } from '@renderer/pages/home/Messages/messageBranch'
-import { createMessageViewportGroupModel } from '@renderer/pages/home/Messages/messageGroups'
+import type { MessageViewportGroup } from '@renderer/pages/home/Messages/messageGroups'
 import {
   applyColumnReverseScroll,
   type BootstrapPhase,
@@ -28,6 +28,7 @@ import {
   runMessageNavigationTransaction,
   shouldPersistNavigationResult
 } from '@renderer/pages/home/Messages/messageNavigation'
+import { projectMessageViewportGroups } from '@renderer/pages/home/Messages/messageViewportProjection'
 import {
   createMessageViewportState,
   type MessageViewportLoadDirection,
@@ -47,11 +48,16 @@ import {
 import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
 import { buildGroupList, ensureTopicAnchorEstablished, inheritAnchorForBranch } from '@renderer/services/anchorService'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
-import { computeContextInfo } from '@renderer/services/contextInfoService'
+import type { computeContextInfo } from '@renderer/services/contextInfoService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { clearPendingNavigate, getPendingNavigate } from '@renderer/services/MessagesService'
+import {
+  currentPhaseCorrelation,
+  recordPhaseDurationForCorrelation,
+  recordPhaseEndpoint
+} from '@renderer/services/phaseTimingDiagnostics'
 import store, { useAppDispatch } from '@renderer/store'
 import { messageBlocksSelectors, updateOneBlock } from '@renderer/store/messageBlock'
 import { updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
@@ -96,6 +102,9 @@ interface MessagesProps {
   setActiveTopic: (topic: Topic) => void
   onComponentUpdate?(): void
   onFirstUpdate?(): void
+  /** Shared context projection computed once at Chat level (Phase 2B).
+   *  Messages consumes boundaryMessageId and anchorGroupKey from this result. */
+  sharedContextInfo: ReturnType<typeof computeContextInfo>
 }
 
 export interface MessagesHandle {
@@ -115,6 +124,7 @@ interface MessagesContentProps {
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
   handleScrollPosition: () => void
   displayMessages: Message[]
+  displayGroups: MessageViewportGroup[]
   contextBoundaryMessageId: string | null
   hasMore: boolean
   isLoadingMore: boolean
@@ -129,6 +139,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   scrollContainerRef,
   handleScrollPosition,
   displayMessages,
+  displayGroups,
   contextBoundaryMessageId,
   hasMore,
   isLoadingMore,
@@ -142,16 +153,26 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
   useClipboardKeyboard()
 
-  // NOTE: displayMessages is reversed, so each group's messages must be restored to chronological order for rendering.
+  // NOTE: displayGroups are pre-computed chronological groups from the window.
+  // They are projected through the old effective viewport projection — newest
+  // group first (column-reverse), oldest-first message order within each group,
+  // old-format Fragment keys, and viewport-local displayMessages indices — so
+  // the rendered projection is identical to the pre-2B MessagesContent while
+  // the duplicate createMessageViewportGroupModel(displayMessages) call is gone.
   const groupedMessages = useMemo(() => {
-    return createMessageViewportGroupModel(displayMessages).groups.map(
-      (group) =>
-        [
-          group.key,
-          group.messages.map((message, offset) => ({ ...message, index: group.range.start + offset })).toReversed()
-        ] as const
-    )
-  }, [displayMessages])
+    const active = currentPhaseCorrelation()
+    const startedAt = active ? performance.now() : 0
+    const result = projectMessageViewportGroups(displayMessages, displayGroups)
+    if (active && displayMessages.length > 0) {
+      recordPhaseDurationForCorrelation(
+        active.correlationId,
+        active.path,
+        active.path === 'echo' ? 'echo.visibleGroupModel' : 'topic.visibleGroupModel',
+        performance.now() - startedAt
+      )
+    }
+    return result
+  }, [displayGroups, displayMessages])
 
   // 将消息按是否选中分段，用于连续选中消息的包裹
   const messageSegments = useMemo(() => {
@@ -288,7 +309,8 @@ const Messages = ({
   topic,
   setActiveTopic,
   onComponentUpdate,
-  onFirstUpdate
+  onFirstUpdate,
+  sharedContextInfo
 }: MessagesProps & { ref?: React.RefObject<MessagesHandle | null> }) => {
   const {
     containerRef: scrollContainerRef,
@@ -298,6 +320,7 @@ const Messages = ({
   } = useScrollPosition(`topic-${topic.id}`)
   const [viewportState, reduceViewport] = useReducer(messageViewportReducer, null, createMessageViewportState)
   const displayMessages = useMemo(() => viewportState.window?.displayMessages ?? [], [viewportState.window])
+  const displayGroups = useMemo(() => viewportState.window?.displayGroups ?? [], [viewportState.window])
   const hasMore = viewportState.window?.hasMoreOlder ?? false
   const hasMoreNewer = viewportState.window?.hasMoreNewer ?? false
   const isLoadingMore = viewportState.loading.older
@@ -310,6 +333,8 @@ const Messages = ({
   const isTopicLoading = useTopicLoading(topic)
   const { displayCount, createTopicBranch, selectAnswerMessage } = useMessageOperations(topic)
   const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
+  const phaseAtRender = currentPhaseCorrelation()
+  const phaseRenderStartedAt = phaseAtRender ? performance.now() : 0
 
   const { isMultiSelectMode, handleSelectMessage } = useChatContext(topic)
 
@@ -318,6 +343,14 @@ const Messages = ({
   const previousMessagesRef = useRef<Message[]>(messages)
   const viewportStateRef = useRef(viewportState)
   const viewportCommitWaiterRef = useRef(createViewportCommitWaiter<typeof viewportState>())
+  /** PERF-101: per-correlation one-shot guard for topic.messagesMount.
+   *  The useLayoutEffect dependency array includes phaseAtRender (a new
+   *  object reference on every render when phase is active) and
+   *  phaseRenderStartedAt (performance.now() on every render), causing
+   *  the effect to fire more than once per topic window application.
+   *  This ref tracks the last correlationId for which messagesMount was
+   *  recorded; duplicate records for the same correlation are skipped. */
+  const messagesMountCorrelationRef = useRef<string | undefined>(undefined)
   useLayoutEffect(() => {
     viewportStateRef.current = viewportState
     viewportCommitWaiterRef.current.notify(viewportState)
@@ -329,7 +362,8 @@ const Messages = ({
   // Unified context info: boundary message ID, context count, and the single
   // resolved anchor from the same pipeline that ConversationService uses to
   // prepare messages for the model.
-  const contextInfo = useMemo(() => computeContextInfo(messages, assistant, topic.id), [messages, assistant, topic.id])
+  // Phase 2B: This is now the shared projection computed once at Chat level.
+  const contextInfo = sharedContextInfo
   const contextBoundaryMessageId = contextInfo.boundaryMessageId
   const anchorGroupKey = contextInfo.anchorGroupKey
 
@@ -392,6 +426,21 @@ const Messages = ({
     messagesRef.current = messages
   }, [messages])
 
+  useLayoutEffect(() => {
+    if (phaseAtRender?.path === 'topic-cache-miss' || phaseAtRender?.path === 'topic-cache-hit') {
+      // PERF-101 one-shot guard: only record once per correlation.
+      if (messagesMountCorrelationRef.current !== phaseAtRender.correlationId) {
+        messagesMountCorrelationRef.current = phaseAtRender.correlationId
+        recordPhaseDurationForCorrelation(
+          phaseAtRender.correlationId,
+          phaseAtRender.path,
+          'topic.messagesMount',
+          performance.now() - phaseRenderStartedAt
+        )
+      }
+    }
+  }, [phaseAtRender, phaseRenderStartedAt])
+
   useEffect(() => {
     const viewportCommitWaiter = viewportCommitWaiterRef.current
 
@@ -443,18 +492,38 @@ const Messages = ({
     // group update → messages change) from cancelling an in-flight
     // navigation.
     if (prevTopicIdRef.current !== topic.id) {
+      const active = currentPhaseCorrelation()
+      const startedAt = active ? performance.now() : 0
       prevTopicIdRef.current = topic.id
       savedRestoreHandledRef.current = false
       bootstrapPhaseRef.current = 'idle'
       clearTimeoutTimer('loadMoreMessages')
       clearTimeoutTimer('loadNewerMessages')
       viewportDispatch({ type: 'topic/reset', window: createLatestMessageWindow([], displayCount) })
+      if (active) {
+        recordPhaseDurationForCorrelation(
+          active.correlationId,
+          active.path,
+          active.path === 'echo' ? 'echo.windowCreate' : 'topic.windowReset',
+          performance.now() - startedAt
+        )
+      }
       return
     }
 
     // Scenario 1: First load
     if (!viewportStateRef.current.window?.displayMessages.length) {
+      const active = currentPhaseCorrelation()
+      const startedAt = active ? performance.now() : 0
       applyMessageWindow(createLatestMessageWindow(messages, displayCount))
+      if (active) {
+        recordPhaseDurationForCorrelation(
+          active.correlationId,
+          active.path,
+          active.path === 'echo' ? 'echo.windowCreate' : 'topic.windowApply',
+          performance.now() - startedAt
+        )
+      }
       return
     }
 
@@ -464,7 +533,17 @@ const Messages = ({
     const currentWindow = viewportStateRef.current.window
     if (!currentWindow) return
     const currentDisplayMessages = currentWindow.displayMessages
+    const active = currentPhaseCorrelation()
+    const startedAt = active ? performance.now() : 0
     const reconciledWindow = reconcileMessageWindow(messages, previousMessagesRef.current, currentWindow)
+    if (active) {
+      recordPhaseDurationForCorrelation(
+        active.correlationId,
+        active.path,
+        active.path === 'echo' ? 'echo.windowReconcile' : 'topic.windowReconcile',
+        performance.now() - startedAt
+      )
+    }
     const newDisplayMessages = reconciledWindow.displayMessages
 
     if (!areMessageArraysIdentical(currentDisplayMessages, newDisplayMessages) || currentWindow !== reconciledWindow) {
@@ -472,6 +551,12 @@ const Messages = ({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, displayCount])
+
+  useEffect(() => {
+    if (displayMessages.length === 0) return
+    const active = currentPhaseCorrelation()
+    if (active) recordPhaseEndpoint(active.path === 'echo' ? 'echo.domEndpoint' : 'topic.domEndpoint')
+  }, [displayMessages])
 
   useEffect(() => {
     previousMessagesRef.current = messages
@@ -585,16 +670,7 @@ const Messages = ({
 
   // 已渲染的消息组 id 集合，用于限制键盘选择范围
   const visibleGroupIds = useMemo(() => {
-    return new Set(
-      displayMessages
-        .map((m) => {
-          if (m.role === 'assistant') {
-            return m.askId ?? m.id
-          }
-          return m.id
-        })
-        .filter(Boolean)
-    )
+    return new Set(displayMessages.map((m) => (m.role === 'assistant' ? (m.askId ?? m.id) : m.id)).filter(Boolean))
   }, [displayMessages])
 
   // NOTE: 如果设置为平滑滚动会导致滚动条无法跟随生成的新消息保持在底部位置
@@ -1020,7 +1096,15 @@ const Messages = ({
   })
 
   useEffect(() => {
-    requestAnimationFrame(() => onComponentUpdate?.())
+    requestAnimationFrame(() => {
+      onComponentUpdate?.()
+    })
+    // LOCK-2A-007: the domEndpoint record is written exclusively by the
+    // displayMessages effect above — this component-update effect does NOT
+    // write a domEndpoint record. The two effects serve different purposes:
+    // displayMessages is the real non-empty visible subtree boundary used
+    // by the E2E endpoint; onComponentUpdate is a general component update
+    // signal that may fire independently.
   }, [onComponentUpdate])
 
   return (
@@ -1032,6 +1116,7 @@ const Messages = ({
           scrollContainerRef={scrollContainerRef}
           handleScrollPosition={handleScroll}
           displayMessages={displayMessages}
+          displayGroups={displayGroups}
           contextBoundaryMessageId={contextBoundaryMessageId}
           hasMore={hasMore}
           isLoadingMore={isLoadingMore}

@@ -17,6 +17,7 @@
  *   validates JSON safety, rejects unsupported types.
  */
 
+import { currentPhaseCorrelation, recordPhaseDurationForCorrelation } from '@renderer/services/phaseTimingDiagnostics'
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
@@ -343,6 +344,17 @@ export class SqliteMessageDataSource implements MessageDataSource {
         })
       }
       throw error
+    }
+    if (ordinal === 1) {
+      const active = currentPhaseCorrelation()
+      if (active) {
+        recordPhaseDurationForCorrelation(
+          active.correlationId,
+          active.path,
+          'echo.userAppendIpc',
+          performance.now() - tIpc
+        )
+      }
     }
     if (isDiagnosedAppend) {
       logAppendDiagnostic('renderer.append.ipc', elapsedMs(tIpc), {

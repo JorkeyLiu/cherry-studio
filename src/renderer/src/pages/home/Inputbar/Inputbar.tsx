@@ -23,7 +23,7 @@ import {
 } from '@renderer/pages/home/Inputbar/context/InputbarToolsProvider'
 import { getDefaultTopic } from '@renderer/services/AssistantService'
 import { CacheService } from '@renderer/services/CacheService'
-import { computeContextInfo } from '@renderer/services/contextInfoService'
+import type { computeContextInfo } from '@renderer/services/contextInfoService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import FileManager from '@renderer/services/FileManager'
@@ -75,6 +75,9 @@ interface Props {
   assistant: Assistant
   setActiveTopic: (topic: Topic) => void
   topic: Topic
+  /** Shared context projection computed once at Chat level (Phase 2B).
+   *  Inputbar consumes tokenEstimationMessages and contextCount from this result. */
+  sharedContextInfo: ReturnType<typeof computeContextInfo>
 }
 
 type ProviderActionHandlers = {
@@ -87,7 +90,7 @@ interface InputbarInnerProps extends Props {
   actionsRef: React.RefObject<ProviderActionHandlers>
 }
 
-const Inputbar: FC<Props> = ({ assistant: initialAssistant, setActiveTopic, topic }) => {
+const Inputbar: FC<Props> = ({ assistant: initialAssistant, setActiveTopic, topic, sharedContextInfo }) => {
   const actionsRef = useRef<ProviderActionHandlers>({
     resizeTextArea: () => {},
     addNewTopic: () => {},
@@ -119,13 +122,20 @@ const Inputbar: FC<Props> = ({ assistant: initialAssistant, setActiveTopic, topi
         assistant={initialAssistant}
         setActiveTopic={setActiveTopic}
         topic={topic}
+        sharedContextInfo={sharedContextInfo}
         actionsRef={actionsRef}
       />
     </InputbarToolsProvider>
   )
 }
 
-const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, setActiveTopic, topic, actionsRef }) => {
+const InputbarInner: FC<InputbarInnerProps> = ({
+  assistant: initialAssistant,
+  setActiveTopic,
+  topic,
+  sharedContextInfo,
+  actionsRef
+}) => {
   const scope = topic.type ?? TopicType.Chat
   const config = getInputbarConfig(scope)
 
@@ -164,10 +174,8 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
   // anchor-to-end mode). A pending draft is NOT part of the turn list, so it is
   // excluded from the context counts; draft tokens are estimated
   // separately on top of tokenEstimationMessages.
-  const previewContextInfo = useMemo(
-    () => computeContextInfo(topicMessages, assistant, topic.id),
-    [topicMessages, assistant, topic.id]
-  )
+  // Phase 2B: This is now the shared projection computed once at Chat level.
+  const previewContextInfo = sharedContextInfo
 
   // Async, debounced, race-safe estimate: selected history + current draft
   // (text + attachments) combined into one scalar.

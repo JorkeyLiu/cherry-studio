@@ -8,11 +8,14 @@ import { QuickPanelProvider } from '@renderer/components/QuickPanel'
 import ResizableHandle from '@renderer/components/ResizableHandle'
 import { isEmbeddingModel, isRerankModel, isWebSearchModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
+import { useTopicMessages, useTopicReferencedBlocks } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
+import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
+import { currentPhaseCorrelation, recordPhaseDurationForCorrelation } from '@renderer/services/phaseTimingDiagnostics'
 import { useAppDispatch } from '@renderer/store'
 import { setTopicListWidth } from '@renderer/store/settings'
 import type { Assistant, Model, Topic } from '@renderer/types'
@@ -20,7 +23,7 @@ import { Flex } from 'antd'
 import { debounce } from 'lodash'
 import { AnimatePresence, motion } from 'motion/react'
 import type { FC } from 'react'
-import React, { useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import { useHotkeys } from 'react-hotkeys-hook'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
@@ -55,6 +58,42 @@ const Chat: FC<Props> = (props) => {
   const [filterIncludeUser, setFilterIncludeUser] = useState(false)
 
   const { setTimeoutTimer } = useTimer()
+
+  // --- Shared context projection (Phase 2B) ---
+  // Both Messages and Inputbar previously computed computeContextInfo independently
+  // with identical inputs. This single memo computes once for the shared
+  // [topic messages, topic blocks, assistant, topic id] identity and provides
+  // all fields needed by both consumers. ConversationService/baseCallbacks
+  // calls remain independent.
+  //
+  // The topic-blocks dependency exists because computeContextInfo reads message
+  // blocks through block-dependent filters (filterEmptyMessages /
+  // filterErrorOnlyMessagesWithRelated): a block-only Redux update (updateOneBlock)
+  // can change the projection without changing the topic message array.
+  // useTopicReferencedBlocks subscribes only to active-topic referenced blocks
+  // (selectMessageBlocksByIds + shallowEqual), so unrelated block commits do
+  // not invalidate this projection.
+  //
+  // PERF_PHASE_ATTR: the active correlation path selects the single honest stage
+  // for the one shared computation — echo.sharedContextInfo on the echo path and
+  // topic.contextInfo on topic-switch paths. No second computeContextInfo call is
+  // ever made for diagnostics; outside measurement mode this wraps nothing.
+  const topicMessages = useTopicMessages(props.activeTopic.id)
+  const topicBlocks = useTopicReferencedBlocks(props.activeTopic.id)
+  const sharedContextInfo = useMemo(() => {
+    const active = currentPhaseCorrelation()
+    const startedAt = active ? performance.now() : 0
+    const result = computeContextInfo(topicMessages, assistant, props.activeTopic.id)
+    if (active && topicMessages.length > 0) {
+      recordPhaseDurationForCorrelation(
+        active.correlationId,
+        active.path,
+        active.path === 'echo' ? 'echo.sharedContextInfo' : 'topic.contextInfo',
+        performance.now() - startedAt
+      )
+    }
+    return result
+  }, [topicMessages, topicBlocks, assistant, props.activeTopic.id])
 
   useHotkeys('esc', () => {
     contentSearchRef.current?.disable()
@@ -187,6 +226,7 @@ const Chat: FC<Props> = (props) => {
                   setActiveTopic={props.setActiveTopic}
                   onComponentUpdate={messagesComponentUpdateHandler}
                   onFirstUpdate={messagesComponentFirstUpdateHandler}
+                  sharedContextInfo={sharedContextInfo}
                 />
                 <ContentSearch
                   ref={contentSearchRef}
@@ -206,7 +246,12 @@ const Chat: FC<Props> = (props) => {
                     nextUserMessage={(id) => messagesRef.current?.nextUserMessage(id)}
                   />
                 )}
-                <Inputbar assistant={assistant} setActiveTopic={props.setActiveTopic} topic={props.activeTopic} />
+                <Inputbar
+                  assistant={assistant}
+                  setActiveTopic={props.setActiveTopic}
+                  topic={props.activeTopic}
+                  sharedContextInfo={sharedContextInfo}
+                />
               </div>
             </QuickPanelProvider>
           </Main>

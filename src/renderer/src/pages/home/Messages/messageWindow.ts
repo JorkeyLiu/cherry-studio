@@ -1,6 +1,10 @@
 import type { Message } from '@renderer/types/newMessage'
 
-import { createMessageViewportGroupModel, type MessageViewportGroupModel } from './messageGroups'
+import {
+  createMessageViewportGroupModel,
+  type MessageViewportGroup,
+  type MessageViewportGroupModel
+} from './messageGroups'
 
 export interface MessageGroupRange {
   /** Inclusive index of the visually oldest group in chronological source order. */
@@ -15,6 +19,9 @@ export interface MessageWindow {
   edge: 'latest' | 'fixed'
   /** Messages in newest-to-oldest order, as consumed by the column-reverse view. */
   displayMessages: Message[]
+  /** Sliced visual groups in chronological order, pre-computed from the range.
+   *  Consumed directly by MessagesContent to avoid redundant group-model regrouping. */
+  displayGroups: MessageViewportGroup[]
   groupCapacity: number
   groupCount: number
   hasMoreOlder: boolean
@@ -34,6 +41,7 @@ const createWindowFromRange = (
       range: null,
       edge,
       displayMessages: [],
+      displayGroups: [],
       groupCapacity: Math.max(0, groupCapacity),
       groupCount: 0,
       hasMoreOlder: false,
@@ -52,6 +60,7 @@ const createWindowFromRange = (
     range: { oldestGroupIndex, newestGroupIndex },
     edge,
     displayMessages: chronologicalMessages.toReversed(),
+    displayGroups: groups,
     groupCapacity: Math.max(0, groupCapacity),
     groupCount: groups.length,
     hasMoreOlder: oldestGroupIndex > 0,

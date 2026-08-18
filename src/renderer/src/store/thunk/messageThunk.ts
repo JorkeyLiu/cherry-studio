@@ -33,6 +33,7 @@ import {
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
+import { currentPhaseCorrelation, recordPhaseDuration } from '@renderer/services/phaseTimingDiagnostics'
 import { endSpan } from '@renderer/services/SpanManagerService'
 import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/services/StreamProcessingService'
 import store from '@renderer/store'
@@ -512,7 +513,10 @@ export const sendMessage =
       }
 
       await saveMessageAndBlocksToDB(topicId, userMessage, userMessageBlocks, -1, sendContext)
+      const phase = currentPhaseCorrelation()
+      const dispatchStartedAt = performance.now()
       dispatch(newMessagesActions.addMessage({ topicId, message: userMessage }))
+      if (phase) recordPhaseDuration('echo.userDispatch', dispatchStartedAt, phase.path)
       if (userMessageBlocks.length > 0) {
         dispatch(upsertManyBlocks(userMessageBlocks))
       }

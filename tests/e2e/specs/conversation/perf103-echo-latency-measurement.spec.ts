@@ -188,21 +188,27 @@
  *     therefore killed by the generic test timeout, not a per-wait
  *     diagnostic — still fail-closed, still emits NO artifact.
  */
+import type { ElectronApplication, Page, TestInfo } from '@playwright/test'
 import * as fs from 'fs'
 import * as path from 'path'
 
-import type { ElectronApplication, Page, TestInfo } from '@playwright/test'
-
+import { mean, percentile, sortTimings } from '../../../../src/main/services/chatDb/__tests__/benchMetrics'
 import {
+  BENCH_RESULT_SCHEMA_VERSION,
   type BenchmarkGate,
   type BenchmarkMetric,
   type BenchmarkResult,
-  BENCH_RESULT_SCHEMA_VERSION,
   collectEnvironmentMetadata,
   writeBenchmarkResult
 } from '../../../../src/main/services/chatDb/__tests__/benchResult'
-import { mean, percentile, sortTimings } from '../../../../src/main/services/chatDb/__tests__/benchMetrics'
 import { expect, getRequestLog, getRequestSequence, test } from '../../fixtures/electron.fixture'
+import {
+  deriveEchoPhaseMetrics,
+  phaseAttrEnabled,
+  sampleCorrelationId,
+  type FrozenPhaseSnapshot,
+  validateEchoPhaseSnapshot
+} from '../../utils/perfPhaseAttribution'
 
 // ---------------------------------------------------------------------------
 // Deterministic bounded scale (recorded verbatim in the artifact's scale map)
@@ -283,10 +289,43 @@ const ATTRIBUTION_METRIC_COUNT =
 /** New correctness gates for the instrumentation slice (fixed set). */
 const ATTRIBUTION_GATE_IDS: readonly string[] = ['instrumentation.complete', 'instrumentation.cleanupEndpoint']
 
+/** Exact deterministic attribution metric ID set (21): 3 grids × 5 stats + 6 count/ratio. */
+const ATTRIBUTION_EXPECTED_IDS: readonly string[] = [
+  ...ATTRIBUTION_GRID_PREFIXES.flatMap((prefix) => STAT_SUFFIXES.map((suffix) => `${prefix}.${suffix}`)),
+  'attribution.longtaskSupportedCount',
+  'attribution.longtaskSupportedRatio',
+  'attribution.mutationResolvedCount',
+  'attribution.mutationResolvedRatio',
+  'attribution.longtaskOverlapSampleCount',
+  'attribution.longtaskOverlapSampleRatio'
+]
+
 const BASELINE_METRIC_COUNT = BASELINE_METRIC_IDS.length
 const BASELINE_GATE_COUNT = BASELINE_GATE_IDS.length
-const TOTAL_METRIC_COUNT = BASELINE_METRIC_COUNT + ATTRIBUTION_METRIC_COUNT
+const DISABLED_TOTAL_METRIC_COUNT = BASELINE_METRIC_COUNT + ATTRIBUTION_METRIC_COUNT
 const TOTAL_GATE_COUNT = BASELINE_GATE_COUNT + ATTRIBUTION_GATE_IDS.length
+
+/**
+ * Phase 2A subsegment metric IDs emitted when PERF_PHASE_ATTR=1 is enabled.
+ * Exactly 27 metrics: 5 statsMetrics prefixes × 5 stat suffixes + 2
+ * countMetrics. These are NOT emitted in disabled mode.
+ */
+const PHASE_METRIC_IDS: readonly string[] = [
+  ...['phase.span.userAction', 'phase.span.renderComputation', 'phase.span.windowLifecycle'].flatMap((prefix) =>
+    STAT_SUFFIXES.map((suffix) => `${prefix}.${suffix}`)
+  ),
+  'phase.windowLifecycleStageCount',
+  ...['phase.endpoint.domEndpoint', 'phase.span.total'].flatMap((prefix) =>
+    STAT_SUFFIXES.map((suffix) => `${prefix}.${suffix}`)
+  ),
+  'phase.samples'
+] as const
+
+/** Deterministic phase metric count: 5 statsMetrics × 3 prefixes + 1 count + 5 statsMetrics × 2 prefixes + 1 count = 27. */
+const PHASE_METRIC_COUNT = PHASE_METRIC_IDS.length
+
+/** Total metric count when phase attribution is enabled (37 baseline/attribution + 27 phase). */
+const ENABLED_TOTAL_METRIC_COUNT = DISABLED_TOTAL_METRIC_COUNT + PHASE_METRIC_COUNT
 
 /** Stable artifact/baseline identity (schema v1 `benchmark.id`, artifact file name). */
 const BENCHMARK_ID = 'perf103-echo-latency'
@@ -574,9 +613,15 @@ interface EchoSample {
  */
 function measureEchoSend(
   page: Page,
-  args: { topicId: string; markerText: string; echoTimeoutMs: number; textCommitTimeoutMs: number }
+  args: {
+    topicId: string
+    markerText: string
+    echoTimeoutMs: number
+    textCommitTimeoutMs: number
+    _phaseAttr: boolean
+  }
 ): Promise<EchoSample> {
-  return page.evaluate(async ({ topicId, markerText, echoTimeoutMs, textCommitTimeoutMs }) => {
+  return page.evaluate(async ({ topicId, markerText, echoTimeoutMs, textCommitTimeoutMs, _phaseAttr: phaseAttr }) => {
     const store = (window as any).store
     const textarea = document.querySelector('.inputbar textarea') as HTMLTextAreaElement | null
     if (!textarea) throw new Error('measureEchoSend: inputbar textarea not found')
@@ -712,6 +757,7 @@ function measureEchoSend(
 
       // ---- t0 in the same page task as the synthetic Enter dispatch -------
       const t0 = performance.now()
+      ;(globalThis as any).__perfPhaseAttrMarkAction?.()
       textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
 
       // Resolve on BOTH signals: the Redux user-message commit and the first
@@ -719,6 +765,20 @@ function measureEchoSend(
       // store state, so reduxCommitAt is strictly at or before domCommitAt).
       const bothReady = (): boolean => checkReduxCommit() && checkDomCommit()
       await waitFor(bothReady, echoTimeoutMs, 'echo completion (redux user-message commit + .message-user DOM commit)')
+
+      // LOCK-2A-007: snapshot and close the active phase correlation at the
+      // echo DOM endpoint. This freezes the correlation so that later
+      // assistant/reconciliation records never enter the sample. The
+      // snapshot is captured inside the page evaluate at the exact DOM
+      // endpoint moment, before any async IPC can respond.
+      if (phaseAttr) {
+        const snapshotFn = (globalThis as any).__perfPhaseAttrSnapshot
+        const closeFn = (globalThis as any).__perfPhaseAttrClose
+        if (typeof snapshotFn === 'function' && typeof closeFn === 'function') {
+          ;(globalThis as any).__perf103PhaseSnapshot = snapshotFn()
+          closeFn()
+        }
+      }
 
       // ---- Long-task delivery checkpoint (best-effort, outside the interval)
       // A single bounded macrotask yield lets the long-task observer deliver
@@ -999,15 +1059,29 @@ async function assertSampleCorrectness(
 /** Run one full sample: measure echo, wait completion, assert correctness. */
 async function runSample(
   page: Page,
-  args: { topicId: string; markerText: string; sampleIndex: number; record: boolean; acc: SampleAccumulator }
+  electronApp: ElectronApplication,
+  args: {
+    topicId: string
+    markerText: string
+    sampleIndex: number
+    record: boolean
+    acc: SampleAccumulator
+    phaseAcc: PhaseSubsegmentAccumulator | undefined
+    phaseAttr: boolean
+  }
 ): Promise<EchoSample> {
-  const { topicId, markerText, sampleIndex, record, acc } = args
+  const { topicId, markerText, sampleIndex, record, acc, phaseAcc, phaseAttr } = args
   const seqBefore = getRequestSequence()
+  if (phaseAttr) {
+    await resetMainPhaseState(electronApp)
+    await setActivePhase(page, sampleCorrelationId('p103', sampleIndex))
+  }
   const sample = await measureEchoSend(page, {
     topicId,
     markerText,
     echoTimeoutMs: WATCHDOG.echoMs,
-    textCommitTimeoutMs: WATCHDOG.textCommitMs
+    textCommitTimeoutMs: WATCHDOG.textCommitMs,
+    _phaseAttr: phaseAttr
   })
   // The exact deterministic mock completion must land before the correctness
   // gates (and before the next sample starts) — no in-flight stream.
@@ -1033,6 +1107,9 @@ async function runSample(
     if (sample.intervalOverlapLongtaskCount > 0) acc.longtaskOverlapSamples += 1
     acc.samples += 1
   }
+  if (phaseAttr && phaseAcc)
+    await collectEchoPhase(page, electronApp, phaseAcc, sampleCorrelationId('p103', sampleIndex), record)
+  if (phaseAttr) await page.evaluate(() => (globalThis as any).__perfPhaseAttrClearActive?.())
   return sample
 }
 
@@ -1265,6 +1342,105 @@ interface SampleAccumulator {
   samples: number
 }
 
+/**
+ * Phase 2A subsegment accumulator (PERF-PHASE-001, default-inert).
+ * Only populated when PERF_PHASE_ATTR=1 is set; otherwise remains at initial
+ * zero/empty values so the existing aggregate metrics are unaffected.
+ *
+ * LOCK-2A-008: metrics are explicit function-span aggregates with honest
+ * sum/count semantics; no interval is derived unless both endpoints are
+ * directly captured on the same clock.
+ *
+ * LOCK-2A-009: window lifecycle stages may appear multiple times in a
+ * sample (windowCreate + windowReconcile). The accumulator tracks ALL
+ * matching stages with per-stage counts and sums.
+ */
+interface PhaseSubsegmentAccumulator {
+  /** Per-sample: userAppendIpc + userDispatch span sum (direct function durations). */
+  userActionSpanMs: number[]
+  /** Per-sample: sharedContextInfo + visibleGroupModel span sum. */
+  renderComputationSpanMs: number[]
+  /** Per-sample: sum of all matching window lifecycle stage durations (windowCreate + windowReconcile). */
+  windowLifecycleSpanMs: number[]
+  /** Per-sample: total window lifecycle stage occurrences (may exceed 1 when stages repeat). */
+  windowLifecycleStageCount: number[]
+  /** Per-sample: echo.domEndpoint direct endpoint duration (NOT a derived interval). */
+  domEndpointMs: number[]
+  /** Per-sample: total span sum of selected renderer-clock stage durations (sum-of-durations, NOT an endpoint interval). */
+  totalSpanMs: number[]
+  /** Count of samples with valid phase data. */
+  samples: number
+}
+
+function createPhaseAccumulator(): PhaseSubsegmentAccumulator {
+  return {
+    userActionSpanMs: [],
+    renderComputationSpanMs: [],
+    windowLifecycleSpanMs: [],
+    windowLifecycleStageCount: [],
+    domEndpointMs: [],
+    totalSpanMs: [],
+    samples: 0
+  }
+}
+
+async function setActivePhase(page: Page, correlationId: string): Promise<void> {
+  await page.evaluate((correlationId) => {
+    ;(globalThis as any).__perfPhaseAttrReset?.()
+    const setter = (globalThis as any).__perfPhaseAttrSetActive
+    if (typeof setter !== 'function') throw new Error('phase attribution renderer seam unavailable')
+    setter(correlationId, 'echo')
+  }, correlationId)
+}
+
+async function readMainPhaseState(electronApp: ElectronApplication) {
+  return electronApp.evaluate(() => (globalThis as any).__perfPhaseAttrReadMain?.() ?? null)
+}
+
+async function resetMainPhaseState(electronApp: ElectronApplication): Promise<void> {
+  await electronApp.evaluate(() => (globalThis as any).__perfPhaseAttrResetMain?.())
+}
+
+async function collectEchoPhase(
+  page: Page,
+  electronApp: ElectronApplication,
+  accumulator: PhaseSubsegmentAccumulator,
+  correlationId: string,
+  includeMetric: boolean
+): Promise<void> {
+  // LOCK-2A-007: read the frozen snapshot captured at the DOM endpoint
+  // inside the page evaluate. This ensures later assistant/reconciliation
+  // records never enter the sample — the snapshot is frozen at the exact
+  // DOM endpoint moment before any async IPC can respond. No live fallback
+  // is permitted.
+  const snapshot: FrozenPhaseSnapshot | null = await page.evaluate(
+    () => (globalThis as any).__perf103PhaseSnapshot ?? null
+  )
+  if (!snapshot) throw new Error('echo phase snapshot unavailable — no live fallback permitted')
+  const mainState = await readMainPhaseState(electronApp)
+  const problems = validateEchoPhaseSnapshot(snapshot, mainState)
+  if (problems.length > 0) throw new Error(`echo phase completeness failed: ${problems.join('; ')}`)
+  if (!includeMetric) return
+  // LOCK-2A-008: honest span naming — each metric is an explicit
+  // function-span aggregate (sum of durations) with a .count, NOT a
+  // derived endpoint interval. The domEndpoint is a directly captured
+  // endpoint duration.
+  // LOCK-2A-009: collect ALL matching window lifecycle stages with
+  // per-stage counts and sums rather than selecting only the first.
+  const metrics = deriveEchoPhaseMetrics(snapshot.state, correlationId)
+  accumulator.userActionSpanMs.push(metrics.userActionSpanMs)
+  accumulator.renderComputationSpanMs.push(metrics.renderComputationSpanMs)
+  accumulator.windowLifecycleSpanMs.push(metrics.windowLifecycleSpanMs)
+  accumulator.windowLifecycleStageCount.push(metrics.windowLifecycleStageCount)
+  accumulator.domEndpointMs.push(metrics.domEndpointMs)
+  accumulator.totalSpanMs.push(metrics.totalSpanMs)
+  accumulator.samples += 1
+  // Clean up the snapshot after collection
+  await page.evaluate(() => {
+    delete (globalThis as any).__perf103PhaseSnapshot
+  })
+}
+
 function summarize(values: number[]): { p50: number; p95: number; mean: number; min: number; max: number } {
   const finite = values.filter((v) => Number.isFinite(v))
   const sorted = sortTimings(finite)
@@ -1298,8 +1474,24 @@ function ratioMetric(id: string, name: string, count: number): BenchmarkMetric {
 }
 
 /** Build the schema v1 artifact (only ever called after the full pass). */
-function buildBenchmarkResult(acc: SampleAccumulator, environment: BenchmarkResult['environment']): BenchmarkResult {
+function buildBenchmarkResult(
+  acc: SampleAccumulator,
+  environment: BenchmarkResult['environment'],
+  phaseAcc?: PhaseSubsegmentAccumulator
+): BenchmarkResult {
   const totalSamples = SCALE.warmupSamples + SCALE.measuredSamples
+
+  // LOCK-2A-011: sample-count gates — when phase attribution is enabled,
+  // the actual phase sample count MUST equal the expected contract exactly.
+  // Zero samples when enabled is a gate failure, not an inert skip.
+  // Disabled mode (phaseAcc undefined or samples === 0 with no phaseAttr
+  // context) remains explicitly separate and emits no phase metrics.
+  if (phaseAcc) {
+    if (phaseAcc.samples !== SCALE.measuredSamples) {
+      throw new Error(`echo phase sample count mismatch: expected ${SCALE.measuredSamples}, got ${phaseAcc.samples}`)
+    }
+  }
+
   const correctness: BenchmarkGate[] = [
     {
       id: 'echo.renderSignal',
@@ -1460,7 +1652,49 @@ function buildBenchmarkResult(acc: SampleAccumulator, environment: BenchmarkResu
         'attribution.longtaskOverlapSampleRatio',
         'Fraction of measured samples with at least one interval-clipped long-task overlap',
         acc.longtaskOverlapSamples
-      )
+      ),
+      // ---- Phase 2A subsegment metrics (PERF-PHASE-001, default-inert) ----
+      // Only emitted when PERF_PHASE_ATTR=1 is set; the phaseAcc is empty
+      // otherwise and these produce zero/empty series.
+      // LOCK-2A-008: All names are honest function-span aggregates (sum of
+      // durations) with sum/count semantics, NOT derived endpoint intervals.
+      // domEndpoint is a directly captured endpoint duration on the renderer
+      // clock. No idle/gap time is inferred from span sums.
+      ...(phaseAcc && phaseAcc.samples > 0
+        ? [
+            ...statsMetrics(
+              'phase.span.userAction',
+              'Echo user-action span sum: userAppendIpc + userDispatch (sum of direct function durations, NOT an endpoint interval)',
+              phaseAcc.userActionSpanMs
+            ),
+            ...statsMetrics(
+              'phase.span.renderComputation',
+              'Echo render-computation span sum: sharedContextInfo + visibleGroupModel (sum of direct function durations, NOT an endpoint interval)',
+              phaseAcc.renderComputationSpanMs
+            ),
+            ...statsMetrics(
+              'phase.span.windowLifecycle',
+              'Echo window-lifecycle span: sum of all matching windowCreate/windowReconcile durations (sum of direct function durations, NOT a derived interval)',
+              phaseAcc.windowLifecycleSpanMs
+            ),
+            countMetric(
+              'phase.windowLifecycleStageCount',
+              'Echo total window lifecycle stage occurrences per sample (sum of all window stage invocations; may exceed 1 when stages repeat)',
+              phaseAcc.windowLifecycleStageCount.reduce((s, v) => s + v, 0) / phaseAcc.samples
+            ),
+            ...statsMetrics(
+              'phase.endpoint.domEndpoint',
+              'Echo domEndpoint: directly captured renderer-clock endpoint duration (the user-visible DOM commit; NOT a derived interval)',
+              phaseAcc.domEndpointMs
+            ),
+            ...statsMetrics(
+              'phase.span.total',
+              'Echo total span sum: sum of selected renderer-clock stage durations (sum-of-durations, NOT an endpoint interval; excludes separately validated echo.mainAppend Main-clock span)',
+              phaseAcc.totalSpanMs
+            ),
+            countMetric('phase.samples', 'Samples with valid phase subsegment data', phaseAcc.samples)
+          ]
+        : [])
     ],
     gates: correctness
   }
@@ -1504,13 +1738,27 @@ test.describe('PERF-103 echo-latency measurement', () => {
         samples: 0
       }
 
+      // Phase 2A: default-inert phase subsegment accumulator (LOCK-2A-001).
+      // When disabled, pass no accumulator — the builder emits no phase
+      // metrics and skips the exact-count gate (LOCK-2A-011).
+      const phaseEnabled = phaseAttrEnabled()
+      const phaseAcc = phaseEnabled ? createPhaseAccumulator() : undefined
+
       // ---- Phase 1: warmup samples (full correctness, excluded from metrics) --
       await test.step('Phase 1: warmup echo samples (correctness, excluded from metrics)', async () => {
         for (let w = 0; w < SCALE.warmupSamples; w++) {
           const topicId = `p103-warmup-${w}`
           const marker = markerFor(w)
           await createAndActivateTopic(page, topicId, `P103 Warmup ${w}`, assistantId!)
-          const sample = await runSample(page, { topicId, markerText: marker, sampleIndex: w, record: false, acc })
+          const sample = await runSample(page, electronApp, {
+            topicId,
+            markerText: marker,
+            sampleIndex: w,
+            record: false,
+            acc,
+            phaseAcc,
+            phaseAttr: phaseEnabled
+          })
           console.log(
             `[E2E][PERF-103] warmup sample ${w}: reduxCommit=${sample.reduxCommitMs.toFixed(1)}ms, ` +
               `firstRender=${sample.firstRenderMs.toFixed(1)}ms, reduxToDom=${sample.reduxToDomMs.toFixed(1)}ms, ` +
@@ -1532,7 +1780,15 @@ test.describe('PERF-103 echo-latency measurement', () => {
           const topicId = `p103-sample-${s}`
           const marker = markerFor(s + SCALE.warmupSamples)
           await createAndActivateTopic(page, topicId, `P103 Sample ${s}`, assistantId!)
-          const sample = await runSample(page, { topicId, markerText: marker, sampleIndex: s, record: true, acc })
+          const sample = await runSample(page, electronApp, {
+            topicId,
+            markerText: marker,
+            sampleIndex: s,
+            record: true,
+            acc,
+            phaseAcc,
+            phaseAttr: phaseEnabled
+          })
           console.log(
             `[E2E][PERF-103] sample ${s}: reduxCommit=${sample.reduxCommitMs.toFixed(1)}ms, ` +
               `firstRender=${sample.firstRenderMs.toFixed(1)}ms, reduxToDom=${sample.reduxToDomMs.toFixed(1)}ms, ` +
@@ -1566,7 +1822,7 @@ test.describe('PERF-103 echo-latency measurement', () => {
           abiLane: 'electron',
           abi: appRuntime.abiModules
         }
-        const result = buildBenchmarkResult(acc, environment)
+        const result = buildBenchmarkResult(acc, environment, phaseAcc)
 
         // In-spec validation before the writer: metric/gate id uniqueness and
         // finite values (the writer enforces the closed schema + finiteness,
@@ -1580,47 +1836,61 @@ test.describe('PERF-103 echo-latency measurement', () => {
           'every metric value must be finite'
         ).toBe(true)
 
-        // ---- PERF-103 attribution identity contract (static, in-spec) -------
-        // The baseline identity is preserved as an exact subset (16 metrics /
-        // 8 gates, ids verbatim); the attribution slice adds an exact
-        // deterministic count of L3 metrics and correctness gates. No
-        // threshold gate exists anywhere in this file.
+        // ---- PERF-103 identity contract (static, in-spec) --------------------
+        // Disabled mode: baseline identity (16 metrics / 8 gates) plus the
+        // attribution slice (21 metrics / 2 gates) = 37 metrics / 10 gates.
+        // Enabled mode: the above PLUS 27 phase subsegment metrics = 64
+        // metrics / 10 gates (gates are unchanged by phase attribution).
+        const expectedMetricCount = phaseEnabled ? ENABLED_TOTAL_METRIC_COUNT : DISABLED_TOTAL_METRIC_COUNT
+        const expectedMetricIdSet = phaseEnabled
+          ? [...BASELINE_METRIC_IDS, ...ATTRIBUTION_EXPECTED_IDS, ...PHASE_METRIC_IDS]
+          : [...BASELINE_METRIC_IDS, ...ATTRIBUTION_EXPECTED_IDS]
         expect(
           result.metrics.length,
-          `total metric count must be exactly ${TOTAL_METRIC_COUNT} (${BASELINE_METRIC_COUNT} baseline + ${ATTRIBUTION_METRIC_COUNT} attribution L3; observed ${result.metrics.length})`
-        ).toBe(TOTAL_METRIC_COUNT)
+          `total metric count must be exactly ${expectedMetricCount} (disabled=${DISABLED_TOTAL_METRIC_COUNT}, enabled=${ENABLED_TOTAL_METRIC_COUNT}; phaseEnabled=${phaseEnabled}; observed ${result.metrics.length})`
+        ).toBe(expectedMetricCount)
         expect(
           result.gates.length,
           `total gate count must be exactly ${TOTAL_GATE_COUNT} (${BASELINE_GATE_COUNT} baseline + ${ATTRIBUTION_GATE_IDS.length} attribution; observed ${result.gates.length})`
         ).toBe(TOTAL_GATE_COUNT)
-        expect(
-          result.metrics.length - BASELINE_METRIC_COUNT,
-          'the exact new attribution metric count must be deterministic'
-        ).toBe(ATTRIBUTION_METRIC_COUNT)
+        if (phaseEnabled) {
+          expect(
+            result.metrics.length - DISABLED_TOTAL_METRIC_COUNT,
+            'when enabled, the exact phase metric count must be deterministic'
+          ).toBe(PHASE_METRIC_COUNT)
+        } else {
+          expect(
+            result.metrics.length - BASELINE_METRIC_COUNT,
+            'the exact new attribution metric count must be deterministic'
+          ).toBe(ATTRIBUTION_METRIC_COUNT)
+        }
         expect(
           result.gates.length - BASELINE_GATE_COUNT,
           'the exact new attribution gate count must be deterministic'
         ).toBe(ATTRIBUTION_GATE_IDS.length)
+        // ---- Closed expected-ID-set: every emitted id must be in the contract
+        for (const id of metricIds) {
+          expect(expectedMetricIdSet, `emitted metric id must be in the expected set: ${id}`).toContain(id)
+        }
+        expect(metricIds.length, 'the emitted metric count must match the expected ID set size').toBe(
+          expectedMetricIdSet.length
+        )
         for (const id of BASELINE_METRIC_IDS) {
           expect(metricIds, `baseline metric id must remain present unchanged: ${id}`).toContain(id)
         }
         for (const id of BASELINE_GATE_IDS) {
           expect(gateIds, `baseline gate id must remain present unchanged: ${id}`).toContain(id)
         }
-        const expectedAttributionIds: string[] = [
-          ...ATTRIBUTION_GRID_PREFIXES.flatMap((prefix) => STAT_SUFFIXES.map((suffix) => `${prefix}.${suffix}`)),
-          'attribution.longtaskSupportedCount',
-          'attribution.longtaskSupportedRatio',
-          'attribution.mutationResolvedCount',
-          'attribution.mutationResolvedRatio',
-          'attribution.longtaskOverlapSampleCount',
-          'attribution.longtaskOverlapSampleRatio'
-        ]
-        for (const id of expectedAttributionIds) {
+        for (const id of ATTRIBUTION_EXPECTED_IDS) {
           expect(metricIds, `attribution metric id must be present: ${id}`).toContain(id)
         }
         for (const id of ATTRIBUTION_GATE_IDS) {
           expect(gateIds, `attribution gate id must be present: ${id}`).toContain(id)
+        }
+        if (phaseEnabled) {
+          for (const id of PHASE_METRIC_IDS) {
+            expect(metricIds, `phase metric id must be present when enabled: ${id}`).toContain(id)
+          }
         }
         // The scale carries the numeric-only attribution definition code.
         expect(
@@ -1654,5 +1924,47 @@ test.describe('PERF-103 echo-latency measurement', () => {
       // after a full process death (the dispose evaluate is swallowed).
       await disposeLifecycleTape(electronApp)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Static metric/gate identity contract tests (no Electron, no fixtures)
+// ---------------------------------------------------------------------------
+
+test.describe('PERF-103 metric identity contract (static)', () => {
+  test('disabled mode: 37 metric IDs and 10 gate IDs', () => {
+    const disabledMetricIds = [...BASELINE_METRIC_IDS, ...ATTRIBUTION_EXPECTED_IDS]
+    expect(disabledMetricIds.length).toBe(DISABLED_TOTAL_METRIC_COUNT)
+    expect(new Set(disabledMetricIds).size, 'disabled metric ids must be unique').toBe(disabledMetricIds.length)
+    expect(BASELINE_GATE_IDS.length + ATTRIBUTION_GATE_IDS.length).toBe(TOTAL_GATE_COUNT)
+  })
+
+  test('enabled mode: 64 metric IDs and 10 gate IDs', () => {
+    const enabledMetricIds = [...BASELINE_METRIC_IDS, ...ATTRIBUTION_EXPECTED_IDS, ...PHASE_METRIC_IDS]
+    expect(enabledMetricIds.length).toBe(ENABLED_TOTAL_METRIC_COUNT)
+    expect(new Set(enabledMetricIds).size, 'enabled metric ids must be unique').toBe(enabledMetricIds.length)
+    // Gates are unchanged by phase attribution
+    expect(BASELINE_GATE_IDS.length + ATTRIBUTION_GATE_IDS.length).toBe(TOTAL_GATE_COUNT)
+  })
+
+  test('PHASE_METRIC_IDS count is deterministic (27)', () => {
+    expect(PHASE_METRIC_COUNT).toBe(27)
+    expect(PHASE_METRIC_IDS.length).toBe(27)
+  })
+
+  test('phase metric IDs are disjoint from baseline and attribution IDs', () => {
+    const baselineAndAttr = new Set([...BASELINE_METRIC_IDS, ...ATTRIBUTION_EXPECTED_IDS])
+    for (const id of PHASE_METRIC_IDS) {
+      expect(baselineAndAttr.has(id), `phase id must not overlap baseline/attribution: ${id}`).toBe(false)
+    }
+  })
+
+  test('disabled subset is strict subset of enabled', () => {
+    const disabled = new Set([...BASELINE_METRIC_IDS, ...ATTRIBUTION_EXPECTED_IDS])
+    const enabled = new Set([...BASELINE_METRIC_IDS, ...ATTRIBUTION_EXPECTED_IDS, ...PHASE_METRIC_IDS])
+    for (const id of disabled) {
+      expect(enabled.has(id), `disabled id must be in enabled set: ${id}`).toBe(true)
+    }
+    expect(enabled.size - disabled.size).toBe(PHASE_METRIC_COUNT)
   })
 })
