@@ -1284,11 +1284,16 @@ describe('SqliteMessageDataSource', () => {
         expect(data.ordinal).toBe(req.diagnostics?.ordinal)
         expect(data.ok).toBe(true)
         expect(typeof data.durationMs).toBe('number')
-        // Never logs message content or raw request objects.
-        const serialized = JSON.stringify(data)
-        expect(serialized).not.toContain('hi')
-        expect(serialized).not.toContain('content')
-        expect(serialized).not.toContain('m-1')
+        // Never logs message content or raw request objects. Exclude the
+        // intentionally opaque correlation metadata so content checks cannot
+        // collide with a generated correlation id.
+        const payload = Object.fromEntries(Object.entries(data).filter(([key]) => key !== 'correlationId'))
+        expect(JSON.stringify(payload)).not.toContain(userMsg.content)
+        expect(JSON.stringify(payload)).not.toContain(userMsg.id)
+        expect(payload).not.toHaveProperty('content')
+        expect(payload).not.toHaveProperty('message')
+        expect(payload).not.toHaveProperty('blocks')
+        expect(payload).not.toHaveProperty('request')
       }
     })
 

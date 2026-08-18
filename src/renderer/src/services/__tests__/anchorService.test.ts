@@ -10,10 +10,12 @@ import {
   transferAnchorOnDeletion,
   transferAnchorsAfterDeletion
 } from '../anchorService'
+import * as contextTurnService from '../contextTurnService'
 
 const updateAssistantSettings = vi.fn()
 const selectMessagesForTopic = vi.fn()
 const getAssistantSettings = vi.fn()
+const buildContextTurnsSpy = vi.spyOn(contextTurnService, 'buildContextTurns')
 
 vi.mock('@renderer/store/assistants', () => ({
   updateAssistantSettings: (...args: unknown[]) => updateAssistantSettings(...args)
@@ -31,6 +33,7 @@ beforeEach(() => {
   updateAssistantSettings.mockReset()
   selectMessagesForTopic.mockReset()
   getAssistantSettings.mockReset()
+  buildContextTurnsSpy.mockClear()
 })
 
 // --- Test factories ---
@@ -38,6 +41,8 @@ beforeEach(() => {
 const user = (id: string): Message => ({ id, role: 'user' }) as unknown as Message
 
 const assistant = (id: string, askId?: string): Message => ({ id, role: 'assistant', askId }) as unknown as Message
+
+const system = (id: string): Message => ({ id, role: 'system' }) as unknown as Message
 
 // --- buildGroupList ---
 
@@ -298,6 +303,8 @@ describe('ensureTopicAnchorEstablished', () => {
     ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(buildContextTurnsSpy).toHaveBeenCalledTimes(1)
     expect(updateAssistantSettings).toHaveBeenCalledWith({
       assistantId: 'asst-1',
       settings: {
@@ -317,6 +324,64 @@ describe('ensureTopicAnchorEstablished', () => {
     expect(dispatch).not.toHaveBeenCalled()
   })
 
+  it('accepts an assistant askId anchor without building context turns', () => {
+    selectMessagesForTopic.mockReturnValue([
+      user('u1'),
+      assistant('a1', 'u1'),
+      user('u2'),
+      assistant('orphan-a1', 'orphan-ask-1')
+    ])
+    const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('orphan-ask-1') } })
+    const dispatch = vi.fn()
+
+    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(buildContextTurnsSpy).not.toHaveBeenCalled()
+  })
+
+  it('accepts a system message own-id anchor without building context turns', () => {
+    selectMessagesForTopic.mockReturnValue([system('system-1'), user('u1'), assistant('a1', 'u1')])
+    const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('system-1') } })
+    const dispatch = vi.fn()
+
+    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(buildContextTurnsSpy).not.toHaveBeenCalled()
+  })
+
+  it('accepts an orphan assistant own-id anchor without building context turns', () => {
+    selectMessagesForTopic.mockReturnValue([assistant('orphan-a1'), user('u1'), assistant('a1', 'u1')])
+    const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('orphan-a1') } })
+    const dispatch = vi.fn()
+
+    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(buildContextTurnsSpy).not.toHaveBeenCalled()
+  })
+
+  it('preserves user-id precedence when a key also appears as an assistant askId', () => {
+    selectMessagesForTopic.mockReturnValue([
+      user('shared-key'),
+      assistant('a1', 'shared-key'),
+      user('u2'),
+      assistant('retry-a1', 'shared-key')
+    ])
+    const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('shared-key') } })
+    const dispatch = vi.fn()
+
+    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(buildContextTurnsSpy).not.toHaveBeenCalled()
+  })
+
   it('repairs an unresolvable legacy anchor exactly once', () => {
     selectMessagesForTopic.mockReturnValue([user('u1'), assistant('a1', 'u1'), user('u2'), assistant('a2', 'u2')])
     const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('ghost') } })
@@ -325,6 +390,46 @@ describe('ensureTopicAnchorEstablished', () => {
     ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(buildContextTurnsSpy).toHaveBeenCalledTimes(1)
+    expect(updateAssistantSettings).toHaveBeenCalledWith({
+      assistantId: 'asst-1',
+      settings: {
+        contextWindowAnchor: { [topicId]: g('u1') }
+      }
+    })
+  })
+
+  it('repairs a stale deleted askId anchor through the full path', () => {
+    selectMessagesForTopic.mockReturnValue([user('u1'), assistant('a1', 'u1'), user('u2'), assistant('a2', 'u2')])
+    const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('deleted-ask-id') } })
+    const dispatch = vi.fn()
+
+    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+
+    expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(buildContextTurnsSpy).toHaveBeenCalledTimes(1)
+    expect(updateAssistantSettings).toHaveBeenCalledWith({
+      assistantId: 'asst-1',
+      settings: {
+        contextWindowAnchor: { [topicId]: g('u1') }
+      }
+    })
+  })
+
+  it('repairs a non-active legacy anchor through the full path', () => {
+    selectMessagesForTopic.mockReturnValue([user('u1'), assistant('a1', 'u1')])
+    const getState = makeGetState({
+      contextWindowAnchor: { [topicId]: { kind: 'vacant' } as unknown as ContextWindowAnchor }
+    })
+    const dispatch = vi.fn()
+
+    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+
+    expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(buildContextTurnsSpy).toHaveBeenCalledTimes(1)
     expect(updateAssistantSettings).toHaveBeenCalledWith({
       assistantId: 'asst-1',
       settings: {

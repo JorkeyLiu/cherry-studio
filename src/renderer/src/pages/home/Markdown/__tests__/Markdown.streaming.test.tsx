@@ -95,6 +95,7 @@ describe('Markdown streaming (LOCK-004)', () => {
 
   afterEach(() => {
     vi.runOnlyPendingTimers()
+    vi.restoreAllMocks()
     vi.useRealTimers()
   })
 
@@ -123,6 +124,38 @@ describe('Markdown streaming (LOCK-004)', () => {
     expect(lastRendered()).toBe(finalContent)
   })
 
+  it.each([
+    MessageBlockStatus.PENDING,
+    MessageBlockStatus.PROCESSING,
+    MessageBlockStatus.SUCCESS,
+    MessageBlockStatus.ERROR,
+    MessageBlockStatus.PAUSED
+  ])('renders exact initial and updated content without scheduling frames for %s', (status) => {
+    const requestAnimationFrameSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
+    const initialContent = `Initial content for ${status}`
+    const updatedContent = `Updated content for ${status}`
+    const { rerender } = render(<Markdown block={makeBlock('block-1', initialContent, status)} />)
+
+    expect(lastRendered()).toBe(initialContent)
+
+    expect(requestAnimationFrameSpy).not.toHaveBeenCalled()
+
+    act(() => {
+      rerender(<Markdown block={makeBlock('block-1', updatedContent, status)} />)
+    })
+
+    expect(requestAnimationFrameSpy).not.toHaveBeenCalled()
+    expect(lastRendered()).toBe(updatedContent)
+  })
+
+  it('starts the smooth-stream frame loop for active streaming content', () => {
+    const requestAnimationFrameSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
+
+    render(<Markdown block={makeBlock('block-1', 'Streaming', MessageBlockStatus.STREAMING)} />)
+
+    expect(requestAnimationFrameSpy).toHaveBeenCalled()
+  })
+
   it('flushes the exact final content when completion arrives before the stream drains', () => {
     const finalContent = 'alpha beta gamma delta epsilon zeta'
     const partial = 'alpha beta gamma'
@@ -141,6 +174,43 @@ describe('Markdown streaming (LOCK-004)', () => {
 
     expect(lastRendered()).toBe(finalContent)
   })
+
+  it.each([MessageBlockStatus.ERROR, MessageBlockStatus.PAUSED])(
+    'cancels stale stream work and renders exact final content for streaming to %s',
+    (status) => {
+      const finalContent = `Authoritative final content for ${status}`
+      const streamedContent = `${finalContent} with queued stale tail`
+      const requestAnimationFrameSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
+      const cancelAnimationFrameSpy = vi.spyOn(globalThis, 'cancelAnimationFrame')
+      const { rerender } = render(
+        <Markdown block={makeBlock('block-1', 'Initial stream', MessageBlockStatus.STREAMING)} />
+      )
+
+      act(() => {
+        rerender(<Markdown block={makeBlock('block-1', streamedContent, MessageBlockStatus.STREAMING)} />)
+      })
+      act(() => {
+        vi.advanceTimersByTime(16)
+      })
+
+      expect(requestAnimationFrameSpy).toHaveBeenCalled()
+
+      act(() => {
+        rerender(<Markdown block={makeBlock('block-1', finalContent, status)} />)
+      })
+
+      expect(cancelAnimationFrameSpy).toHaveBeenCalled()
+      expect(screen.getByTestId('markdown-children').textContent).toBe(finalContent)
+
+      const renderCountAfterTransition = md.children.length
+      act(() => {
+        vi.advanceTimersByTime(500)
+      })
+
+      expect(md.children.length).toBe(renderCountAfterTransition)
+      expect(screen.getByTestId('markdown-children').textContent).toBe(finalContent)
+    }
+  )
 
   it('bounds full Markdown parse/render updates below the frame rate while streaming', () => {
     const { rerender } = render(<Markdown block={makeBlock('block-1', 'start', MessageBlockStatus.STREAMING)} />)

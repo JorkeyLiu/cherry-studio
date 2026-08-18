@@ -16,11 +16,13 @@
 ### 2.1 PERF-TOPIC-SWITCH — 话题切换（Open）
 
 - **产品问题状态**：`Open`。用户报告点击切换话题到首次可用渲染存在延迟（L4 报告，未复现为当前基线）。
-- **历史测量资产**：legacy `PERF-101`（缓存未命中话题切换测量：对角线 + 正交六点部分网格）——**证据身份**，非关闭。既有 S0 六点证据显示：固定生产默认窗口 W=10 时话题规模 N20→N100 非单调（未见持续话题规模放大）；固定 N=100 时窗口 W10→W50→W100 强增长——**L3 方向性证据，非阈值、非根因归属**。L4 秒级报告未在 S0 复现（大话题/复杂内容案例未覆盖）。
+- **历史测量资产**：legacy `PERF-101`（缓存未命中话题切换测量：对角线 + 正交六点部分网格）与缓存命中重复切换扩展 `perf101-cache-hit-repeat-switch.spec.ts`——**证据身份**，非关闭。既有 S0 六点证据显示：固定生产默认窗口 W=10 时话题规模 N20→N100 非单调（未见持续话题规模放大）；固定 N=100 时窗口 W10→W50→W100 强增长。2026-08-18 的 post-opt fresh production-build cache-hit repeat-switch E2E 通过：N20/W10 repeat-render p50 `166.7ms`，N20/W20 `297.8ms`，N100/W10 `171.1ms`；对应 pre-opt p50 为 `173.4ms`、`362.2ms`、`176.5ms`。**L1 为正确性/完整性通过，数值为 L3 方向性证据，非阈值、非根因归属**。首次 post-opt 运行出现的 spike 未复现，分类为 L3 noise，不作为回归结论。
 - **有界成本模型/假设（不声称根因）**：代码证据指向两个候选成本载体——
   1. **话题切换冷挂载**：缓存未命中切换路径穿越全话题 Main 加载 + IPC（`loadTopicMessagesThunk` → `dbService.fetchMessages` 全量 `listByTopic` + `listByMessages`）与 renderer 侧重复全话题计算（`createLatestMessageWindow`/`reconcileMessageWindow`、`computeContextInfo`）。
   2. **Markdown 可见窗口缩放**：已测数据中固定 N 下可见窗口 W 的强增长（164→529→858 ms）指向可见窗口渲染 fanout/重挂载成本，但**未做根因归属**。
-- **明确未知项**：大话题规模（300+，LOCK-007 按需）与受控内容复杂度下的行为；内容复杂度轴；用户频率数据；O(N) 全话题工作与 O(W) 窗口渲染 fanout 的分离归属（残余分离需更多受控规模点）。
+- **方向性根因解释（不升级为根因确认）**：cache-hit repeat-switch 的固定 N 对照中，W20 明显高于 W10，而 N20/W10 与 N100/W10 接近；post-opt 仍保持这一形状，方向性支持 **W-bound renderer remount/render work** 为主要可见成本轴，且在固定 W 下未见 N 的持续放大。`anchorService` 的 active-resolvable fast path 减少了切换时不必要的上下文构建；其对该 W-bound 形状的贡献仍未被单独隔离。
+- **测量条件与命令（2026-08-18）**：fresh production build 后使用 `PERF101_CACHE_HIT=1 PERF101_SCALE=n20-w10 pnpm test:e2e -- tests/e2e/specs/conversation/perf101-cache-hit-repeat-switch.spec.ts`、`PERF101_CACHE_HIT=1 PERF101_SCALE=s0-20 pnpm test:e2e -- tests/e2e/specs/conversation/perf101-cache-hit-repeat-switch.spec.ts`、`PERF101_CACHE_HIT=1 PERF101_SCALE=n100-w10 pnpm test:e2e -- tests/e2e/specs/conversation/perf101-cache-hit-repeat-switch.spec.ts`；`n20-w10`、`s0-20`、`n100-w10` 与 cache-miss `PERF-101` profile aliases 共享。每个 profile 使用 3 个 samples；每个样本的确定性话题数据在测量点击前通过 typed ChatDb bridge 逐消息 `appendMessage` 完成，seed setup 不计入 click→render measured interval；L1 correctness/parity/privacy/ABI gates 全部通过，schema v1 本地 artifact 写入既有 `test-results/bench-results/` 约定位置。数值按 `p50/p95/mean` 契约记录；本段仅保留 p50 方向性摘要。
+- **明确未知项**：大话题规模（300+）与受控内容复杂度下的行为；内容复杂度轴；用户频率数据；O(N) 全话题工作与 O(W) 窗口渲染 fanout 的独立归属；fast path 对用户可见结果的单独贡献；跨运行噪声界。
 - **下一实验/分析目标**（候选，未授权）：N300/W10 与受控内容复杂度规模的按需测量，或 renderer 窗口侧缩放的结构归因。**未授权不执行**。
 - **验收框架**：关闭要求点击→首次可用渲染的已接受用户可见结果 + 需要时集成实现 + 匹配边界回归证据。**不把 L3 数值当阈值**。
 - **已批准校准候选（approved · provisional/unverified · non-threshold）**：300 轮话题切换/加载 `<1–2s` 为已批准但**未验证**的暂定参考值——**非通过/失败 gate、非当前基线**；重测并记录 artifact 前不得当作事实（PERF-LOCK-003，`performance-measurement.md` §7）。
@@ -111,9 +113,14 @@
 ### 2.3 PERF-ECHO — 消息回显（Open）
 
 - **产品问题状态**：`Open`。回显延迟为用户可见交互路径（测量基线已建立，但问题未关闭）。
-- **历史测量资产**：legacy `PERF-103`（回显延迟测量基线 + interval-scoped 归因扩展 + 本地 viewport 收敛实验）——**证据身份**，非关闭。已测回显三段分割（reduxCommit / firstRender / reduxToDom）中 **reduxToDom 占 firstRender 的 58–64%** 并主导已测分割（方向性观察）；over `[reduxCommitAt, domCommitAt]` 区间 20/20 样本具**恰一个 interval-overlapping 长任务**（单阻塞长任务覆盖该区间，方向性观察）。`<50ms/<100ms` 参考值保持**未验证参考**，不按通过/失败阈值对待。本地 viewport 收敛实验因可测量收益未获证明而被拒绝并完整回退、无生产提交。
-- **有界成本模型/假设（不声称根因）**：代码证据指向**可见消息 viewport 渲染链**——回显从 Redux 提交到首个 `.message-user` DOM commit 之间存在单一阻塞长任务（方向性观察）；静态证据显示 fresh 首次消息 viewport 需空 pass + passive-effect 窗口应用 + 消息 pass（冗余 commit/work 候选，未证明收益）。
-- **明确未知项**：单阻塞长任务内的具体阶段归属（无 whole-echo/React-pass 归属）；viewport 生命周期修复能否消除实际冗余 commit/work；跨运行基线差异非回归证据，需受控复测。
+- **历史测量资产**：legacy `PERF-103`（回显延迟测量基线 + interval-scoped 归因扩展 + 本地 viewport 收敛实验）与 batch-seeded high-turn 扩展 `perf103-high-turn-echo-measurement.spec.ts`——**证据身份**，非关闭。`reduxToDom` 在既有测量中占 `firstRender` 的 58–64% 并主导已测分割（方向性观察）；over `[reduxCommitAt, domCommitAt]` 区间 20/20 样本具**恰一个 interval-overlapping 长任务**（单阻塞长任务覆盖该区间，方向性观察）。`<50ms/<100ms` 参考值保持**未验证参考**，不按通过/失败阈值对待。本地 viewport 收敛实验因可测量收益未获证明而被拒绝并完整回退、无生产提交。
+- **已完成实现切片（不等于产品关闭）**：`anchorService` 增加 active-resolvable fast path，避免已可解析 anchor 再次构建 context turns；`useSmoothStream`/`Markdown` 在 completed block 路径绕过 smooth-stream reset/animation-frame 生命周期，直接提交 authoritative final content。实现保持 renderer 边界，不改变 Main SQLite authority、IPC 契约或持久化语义。
+- **测量条件与命令（2026-08-18）**：fresh production build 后，empty profile 使用 `pnpm test:e2e -- tests/e2e/specs/conversation/perf103-echo-latency-measurement.spec.ts`；batch-seeded profiles 使用 `PERF103_HIGH_TURN=1 PERF103_HIGH_TURN_TURNS=20 pnpm test:e2e -- tests/e2e/specs/conversation/perf103-high-turn-echo-measurement.spec.ts` 与 `PERF103_HIGH_TURN=1 PERF103_HIGH_TURN_TURNS=100 pnpm test:e2e -- tests/e2e/specs/conversation/perf103-high-turn-echo-measurement.spec.ts`。PERF-ECHO 的 prior-turn history 是通过 typed ChatDb bridge batch-seeded；不是 sequential-send pressure。每次通过运行输出 schema v1 本地 artifact 到既有 `test-results/bench-results/` 约定位置。
+- **方向性结果（p50/p95/mean，单位 ms；L1 gate 通过，数值 L3）**：pre-opt empty 为 `reduxCommit 44.5/56.4/42.8`、`firstRender 113.1/143.8/113.5`、`reduxToDom 68.5/92.1/70.7`；post-opt empty 为 `42.3/56.3/43.8`、`110.0/142.5/111.4`、`63.2/80.0/65.2`。pre-opt 20 prior turns 为 `88.4/118.6/91.2`、`249.1/316.9/245.6`、`160.7/198.3/154.3`；post-opt 20 为 `88.2/103.6/88.9`、`231.0/268.9/229.7`、`143.8/163.6/145.8`。post-opt 100 为 `93.6/117.3/93.7`、`268.8/322.5/270.1`、`164.6/208.3/165.5`，无 pre-opt 100 对照。方向性上，empty 保持近似稳定，20 prior turns 的 firstRender/reduxToDom 改善且 p95 收窄，100 prior turns 没有显示出超出当前 renderer work 形状的异常跳变；这些数字不构成阈值、基线或回归判定。
+- **方向性根因解释（不升级为根因确认）**：echo full-topic pre/post 对照把主要可见工作仍定位在 renderer 的 full-topic message/viewport lifecycle；20 prior turns 的 post-opt 改善与 completed-block no-RAF 生命周期及 anchor fast path 的实现方向一致，但现有切片不能把收益分别归因到两个改动，也没有证明消除所有冗余 React work。`reduxCommit` 基本稳定，不能据此把成本归属到 Main/IPC/SQLite。
+- **PERF103 harness 效率结果（不作为产品延迟证据）**：batch-seeded PERF103 将真实 UI sends 从 `212` 降至 `12`，单次运行从约 `222s` 降至 `41.6s`；这是测量 harness 效率改善，不是产品 latency 改善或回归证据。
+- **回归覆盖（2026-08-18）**：post-opt `tests/e2e/specs/conversation/streaming-responsiveness.spec.ts` fresh production-build E2E 通过；focused renderer coverage 通过 `useSmoothStream.test.ts`、`Markdown.streaming.test.tsx`，anchor coverage 通过 `anchorService.test.ts`。这些是 L1 正确性/边界回归证据，不把 timing 数值升级为阈值，也不替代用户可见验收。
+- **明确未知项**：单阻塞长任务内的具体阶段归属（无 whole-echo/React-pass 归属）；anchor fast path 与 completed-block no-RAF 的独立收益；300 prior turns / 300-turn evidence；更广设备与负载下的方向是否稳定；跨运行噪声界；用户是否接受当前回显结果；匹配边界的长期回归保护尚未记录。
 - **下一实验/分析目标**（候选，未授权）：对 Redux→DOM 区间内单阻塞长任务的阶段级归属，或一个新的受控 viewport 收敛实验（须证明消除实际冗余 commit/work，不接受仅推进端点的 display-only fallback）。
 - **验收框架**：关闭要求回显延迟的已接受用户可见结果 + 需要时集成实现 + 匹配边界回归证据；候选修复必须证明消除实际冗余工作。
 
@@ -152,6 +159,7 @@
 | 编辑模式进入/退出 | 编辑模式不再重挂载可见消息子树（renderer-only 稳定宿主 + 显式 `resetToken`） | 已集成 | renderer 测试 + fresh 生产构建 E2E（编辑 gate） |
 | 多消息中部插入（粘贴） | 逐条串行 IPC 改为批量插入（单次 `insertManyAt` 稠密 zero normalization + 单 renderer 提交） | 已集成 | fresh 生产构建 E2E（粘贴 gate） |
 | 多模型答案标签切换 | 两次 DB-first foldSelected 写入收敛为单原子 `select-answer-message` 契约（单事务 + 单 plural Redux 提交） | 已集成 | 新增契约/聚合/IPC/Redux 测试 + fresh 生产构建 E2E |
+| 回显/完成块 renderer 生命周期 | 已可解析 anchor 走 active-resolvable fast path；completed Markdown block 绕过 smooth-stream reset/RAF 生命周期并直接提交最终内容 | 已集成 | `anchorService.test.ts`、`useSmoothStream.test.ts`、`Markdown.streaming.test.tsx` + fresh 生产构建回显/streaming-responsiveness E2E |
 
 > 生产基线资产：`PERF-002` 已建立**首批 committed-state machine-readable 参考基线**（schema v1 artifacts，gitignored 本地 deliverable）——数值为 **L3 非阈值参考基线**，唯一已提交阈值仍为冷开 `<500ms`（`performance-measurement.md` §7）。`PERF-001` 已落地 schema v1 结果契约；`PERF-004` 首切片已落地 FTS 1k/10k 快速确定性参数化与只读 schema-v1 artifact 曲线/方差/knee 方向性消费者。以上均为测量/基础设施成果，不关闭本文件 §2 的任何 Open 产品问题。
 

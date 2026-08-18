@@ -165,4 +165,70 @@ describe('useSmoothStream', () => {
     runSingleFrame(1070)
     expect(onUpdate).toHaveBeenCalledTimes(2)
   })
+
+  it('does not schedule frames when disabled', () => {
+    const onUpdate = vi.fn()
+    renderHook(() => useSmoothStream({ onUpdate, streamDone: true, enabled: false, initialText: 'final' }))
+
+    expect(rafStub).not.toHaveBeenCalled()
+    expect(raf.callbacks.size).toBe(0)
+  })
+
+  it('starts scheduling frames when enabled after a completed mount', () => {
+    const onUpdate = vi.fn()
+    const { rerender } = renderHook(
+      ({ enabled, done }) => useSmoothStream({ onUpdate, streamDone: done, enabled, initialText: 'final' }),
+      { initialProps: { enabled: false, done: true } }
+    )
+
+    expect(raf.callbacks.size).toBe(0)
+
+    rerender({ enabled: true, done: false })
+
+    expect(rafStub).toHaveBeenCalledTimes(1)
+    expect(raf.callbacks.size).toBe(1)
+  })
+
+  it('cancels the pending stream and drops stale content across disable and re-enable', () => {
+    const onUpdate = vi.fn()
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useSmoothStream({ onUpdate, streamDone: false, enabled, minDelay: 0, initialText: '' }),
+      { initialProps: { enabled: true } }
+    )
+    const pendingFrameId = [...raf.callbacks.keys()][0]
+    const staleCallback = raf.callbacks.get(pendingFrameId)
+
+    act(() => {
+      result.current.addChunk('stale content')
+    })
+
+    act(() => {
+      rerender({ enabled: false })
+    })
+
+    expect(cafStub).toHaveBeenCalledWith(pendingFrameId)
+    expect(raf.callbacks.size).toBe(0)
+    expect(onUpdate).not.toHaveBeenCalled()
+
+    act(() => {
+      rerender({ enabled: true })
+    })
+
+    const reenabledFrameId = [...raf.callbacks.keys()][0]
+    expect(reenabledFrameId).not.toBe(pendingFrameId)
+    expect(raf.callbacks.size).toBe(1)
+
+    act(() => {
+      staleCallback?.(1016)
+    })
+    expect(onUpdate).not.toHaveBeenCalled()
+
+    act(() => {
+      result.current.addChunk('fresh content')
+    })
+    advanceFrames(30)
+
+    expect(onUpdate).toHaveBeenLastCalledWith('fresh content')
+    expect(onUpdate.mock.calls.flat().every((call) => !String(call).includes('stale'))).toBe(true)
+  })
 })

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef } from 'react'
 interface UseSmoothStreamOptions {
   onUpdate: (text: string) => void
   streamDone: boolean
+  enabled?: boolean
   minDelay?: number
   initialText?: string
 }
@@ -10,7 +11,13 @@ interface UseSmoothStreamOptions {
 const languages = ['en-US', 'de-DE', 'es-ES', 'zh-CN', 'zh-TW', 'ja-JP', 'ru-RU', 'el-GR', 'fr-FR', 'pt-PT', 'ro-RO']
 const segmenter = new Intl.Segmenter(languages)
 
-export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialText = '' }: UseSmoothStreamOptions) => {
+export const useSmoothStream = ({
+  onUpdate,
+  streamDone,
+  enabled = true,
+  minDelay = 10,
+  initialText = ''
+}: UseSmoothStreamOptions) => {
   const chunkQueueRef = useRef<string[]>([])
   const animationFrameRef = useRef<number | null>(null)
   const displayedTextRef = useRef<string>(initialText)
@@ -70,7 +77,7 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
 
   const reset = useCallback(
     (newText = '') => {
-      if (animationFrameRef.current) {
+      if (animationFrameRef.current !== null) {
         cancelAnimationFrame(animationFrameRef.current)
         animationFrameRef.current = null
       }
@@ -81,24 +88,41 @@ export const useSmoothStream = ({ onUpdate, streamDone, minDelay = 10, initialTe
       // after a reset (e.g. a block switch mid-stream) must still be rendered
       // with no loss. When the stream is done, reset is terminal — the caller
       // (Markdown) flushes the authoritative final content directly.
-      if (!streamDone) {
+      if (enabled && !streamDone) {
         animationFrameRef.current = requestAnimationFrame(renderLoop)
       }
     },
-    [onUpdate, streamDone, renderLoop]
+    [enabled, onUpdate, streamDone, renderLoop]
   )
 
   useEffect(() => {
+    if (!enabled) {
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current)
+        animationFrameRef.current = null
+      }
+      chunkQueueRef.current = []
+      return
+    }
+
     // 启动渲染循环
     animationFrameRef.current = requestAnimationFrame(renderLoop)
 
     // 组件卸载时清理
     return () => {
-      if (animationFrameRef.current) {
+      if (animationFrameRef.current !== null) {
         cancelAnimationFrame(animationFrameRef.current)
+        animationFrameRef.current = null
       }
     }
-  }, [renderLoop])
+  }, [enabled, renderLoop])
+
+  useEffect(() => {
+    if (!enabled) {
+      chunkQueueRef.current = []
+      displayedTextRef.current = initialText
+    }
+  }, [enabled, initialText])
 
   return { addChunk, reset }
 }

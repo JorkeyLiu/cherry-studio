@@ -183,6 +183,7 @@ const Markdown: FC<Props> = ({ block, postProcess }) => {
   const { addChunk, reset } = useSmoothStream({
     onUpdate,
     streamDone: isStreamDone,
+    enabled: block.status === 'streaming',
     initialText: block.content
   })
 
@@ -199,19 +200,30 @@ const Markdown: FC<Props> = ({ block, postProcess }) => {
     const isDifferentBlock = block.id !== prevBlockIdRef.current
 
     const isContentReset = oldContent && newContent && !newContent.startsWith(oldContent)
+    const isStreaming = block.status === 'streaming'
 
     if (isDifferentBlock || isContentReset) {
-      reset(newContent)
+      const flushed = postProcess ? postProcess(newContent) : newContent
+      if (isStreaming) {
+        reset(newContent)
+      } else {
+        // Completed blocks bypass the smooth-stream lifecycle entirely. Their
+        // final content is already authoritative and should be committed
+        // directly without re-arming a stream reset or animation frame.
+        setDisplayedContent(flushed)
+      }
       // Block switch/reset must render immediately: flush parsed content now
       // (synchronously, not transitioned) so transitions and resets are exact.
-      const flushed = postProcess ? postProcess(newContent) : newContent
       lastParsedTextRef.current = flushed
       lastParseAtRef.current = performance.now()
       setParsedContent(flushed)
     } else {
       const delta = newContent.substring(oldContent.length)
-      if (delta) {
+      if (delta && isStreaming) {
         addChunk(delta)
+      } else if (!isStreaming) {
+        const flushed = postProcess ? postProcess(newContent) : newContent
+        setDisplayedContent(flushed)
       }
     }
 
@@ -219,7 +231,6 @@ const Markdown: FC<Props> = ({ block, postProcess }) => {
     prevBlockIdRef.current = block.id
 
     // 更新 stream 状态
-    const isStreaming = block.status === 'streaming'
     setIsStreamDone(!isStreaming)
     streamDoneRef.current = !isStreaming
   }, [block.content, block.id, block.status, addChunk, reset, postProcess])

@@ -175,6 +175,28 @@ export function inheritAnchorForBranch(
 }
 
 /**
+ * Checks the persisted anchor against the topic messages without constructing
+ * context turns. The predicates intentionally mirror `isResolvableAnchor`:
+ * user ids, assistant askIds, and non-user message ids are all valid anchor
+ * keys.
+ */
+function isActiveAnchorResolvableInMessages(
+  anchor: ContextWindowAnchor | undefined,
+  messages: readonly Message[]
+): anchor is ContextWindowAnchor {
+  if (anchor?.kind !== 'active') {
+    return false
+  }
+
+  return messages.some(
+    (message) =>
+      (message.role === 'user' && message.id === anchor.groupKey) ||
+      (message.role === 'assistant' && message.askId === anchor.groupKey) ||
+      (message.role !== 'user' && message.id === anchor.groupKey)
+  )
+}
+
+/**
  * First-establishment / compatibility-repair dispatch glue (idempotent,
  * exactly-once per topic).
  *
@@ -209,7 +231,12 @@ export function ensureTopicAnchorEstablished(
     return
   }
   const settings = getAssistantSettings(assistant)
-  const turns = buildContextTurns(selectMessagesForTopic(state, topicId))
+  const messages = selectMessagesForTopic(state, topicId)
+  if (isActiveAnchorResolvableInMessages(settings.contextWindowAnchor?.[topicId], messages)) {
+    return
+  }
+
+  const turns = buildContextTurns(messages)
   const decision = resolveAnchorEstablishDecision(settings.contextWindowAnchor, topicId, turns, settings.contextCount)
   if (decision.changed) {
     dispatch(
