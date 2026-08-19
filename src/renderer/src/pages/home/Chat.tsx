@@ -220,7 +220,6 @@ const Chat: FC<Props> = (props) => {
                 style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
                 <Messages
                   ref={messagesRef}
-                  key={props.activeTopic.id}
                   assistant={assistant}
                   topic={props.activeTopic}
                   setActiveTopic={props.setActiveTopic}

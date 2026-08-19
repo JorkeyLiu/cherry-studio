@@ -12,6 +12,7 @@ import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
+import { useTopicTransition } from '@renderer/hooks/useTopicTransition'
 import { findFirstVisibleMessage } from '@renderer/pages/home/Messages/domVisibility'
 import { branchFromMessage } from '@renderer/pages/home/Messages/messageBranch'
 import type { MessageViewportGroup } from '@renderer/pages/home/Messages/messageGroups'
@@ -355,9 +356,46 @@ const Messages = ({
     viewportStateRef.current = viewportState
     viewportCommitWaiterRef.current.notify(viewportState)
   }, [viewportState])
-  const prevTopicIdRef = useRef(topic.id)
   const savedRestoreHandledRef = useRef(false)
   const bootstrapPhaseRef = useRef<BootstrapPhase>('idle')
+  // S3.1 Blocker 4 correction: onFirstUpdateFiredRef must be declared before
+  // useTopicTransition so the resetOnFirstUpdate callback can reference it.
+  const onFirstUpdateFiredRef = useRef(false)
+
+  // S3.1 Blocker 1 correction: viewportDispatch must be declared before
+  // useTopicTransition consumes it, avoiding TDZ (temporal dead zone).
+  const viewportDispatch = reduceViewport
+
+  // S3.1: transition epoch — incremented on every topic transition (including
+  // A→B→A revisits) so async completion guards can reject stale callbacks even
+  // when the same topic ID reappears. A closure-captured topic.id guard alone
+  // fails for A→B→A because the old closure's topic.id matches the revisited
+  // topic.id.
+  const transitionEpochRef = useRef(0)
+
+  // S3.1: Explicit topic transition coordinator. Detects topic prop changes
+  // and orchestrates deterministic cleanup: viewport reset (generation advance,
+  // stale rejection), timer clearing, bootstrap phase reset, and saved-restore
+  // flag reset. The component remains mounted across topic changes — no
+  // key-driven remount.
+  useTopicTransition({
+    topicId: topic.id,
+    viewportDispatch,
+    resetBootstrapPhase: () => {
+      bootstrapPhaseRef.current = 'idle'
+    },
+    clearTimers: () => {
+      clearTimeoutTimer('loadMoreMessages')
+      clearTimeoutTimer('loadNewerMessages')
+    },
+    resetSavedRestore: () => {
+      savedRestoreHandledRef.current = false
+    },
+    resetOnFirstUpdate: () => {
+      onFirstUpdateFiredRef.current = false
+    },
+    transitionEpochRef
+  })
 
   // Unified context info: boundary message ID, context count, and the single
   // resolved anchor from the same pipeline that ConversationService uses to
@@ -366,8 +404,6 @@ const Messages = ({
   const contextInfo = sharedContextInfo
   const contextBoundaryMessageId = contextInfo.boundaryMessageId
   const anchorGroupKey = contextInfo.anchorGroupKey
-
-  const viewportDispatch = reduceViewport
 
   const waitForNavigationCommit = useCallback((token: MessageViewportNavigationToken, generation: number) => {
     return viewportCommitWaiterRef.current.wait(viewportStateRef.current, (committedState) => {
@@ -487,29 +523,10 @@ const Messages = ({
   )
 
   useEffect(() => {
-    // Only bump generation on topic switch, not on every messages change.
-    // This prevents selectMessageForFold (which commits the foldSelected
-    // group update → messages change) from cancelling an in-flight
-    // navigation.
-    if (prevTopicIdRef.current !== topic.id) {
-      const active = currentPhaseCorrelation()
-      const startedAt = active ? performance.now() : 0
-      prevTopicIdRef.current = topic.id
-      savedRestoreHandledRef.current = false
-      bootstrapPhaseRef.current = 'idle'
-      clearTimeoutTimer('loadMoreMessages')
-      clearTimeoutTimer('loadNewerMessages')
-      viewportDispatch({ type: 'topic/reset', window: createLatestMessageWindow([], displayCount) })
-      if (active) {
-        recordPhaseDurationForCorrelation(
-          active.correlationId,
-          active.path,
-          active.path === 'echo' ? 'echo.windowCreate' : 'topic.windowReset',
-          performance.now() - startedAt
-        )
-      }
-      return
-    }
+    // S3.1: Topic change detection is now owned by useTopicTransition.
+    // This effect handles only window application for the current topic:
+    //   Scenario 1: First load (empty viewport → apply latest window)
+    //   Scenario 2: Reconcile existing window against updated messages
 
     // Scenario 1: First load
     if (!viewportStateRef.current.window?.displayMessages.length) {
@@ -653,7 +670,13 @@ const Messages = ({
    */
   const navigateAndSave = useCallback(
     (intent: MessageNavigationIntent) => {
+      // S3.1 Blocker 2 correction: capture the transition epoch at invocation
+      // so a topic change during the async navigation suppresses persistence.
+      // Without this, savePosition would write to the new topic's scroll key,
+      // overwriting its position with stale data from the previous topic.
+      const saveEpoch = transitionEpochRef.current
       void navigate(intent).then((result) => {
+        if (transitionEpochRef.current !== saveEpoch) return
         if (shouldPersistNavigationResult(result)) savePosition()
       })
     },
@@ -876,14 +899,29 @@ const Messages = ({
         }
       ),
       EventEmitter.on(EVENT_NAMES.NAVIGATE_TO_MESSAGE, async (messageId: string) => {
+        // S3.1: Capture epoch for stale-completion rejection. The viewport
+        // token invalidation from topic/reset already protects navigate(),
+        // but this adds defense in depth for the post-navigation persistence.
+        const navEpoch = transitionEpochRef.current
         const { source, result } = await handlePendingNavigateEvent(topic.id, messageId, {
           getPending: getPendingNavigate,
-          clearPending: clearPendingNavigate,
+          // S3.1 Blocker 1 correction: epoch-guard the clear so a stale
+          // matched event completion cannot consume a current-transition
+          // pending identity.
+          clearPending: (expected) => {
+            if (transitionEpochRef.current !== navEpoch) return false
+            return clearPendingNavigate(expected)
+          },
           navigate,
           onDone: () => {
+            if (transitionEpochRef.current !== navEpoch) return
             bootstrapPhaseRef.current = 'done'
           }
         })
+        if (transitionEpochRef.current !== navEpoch) {
+          void source
+          return
+        }
         if (shouldPersistNavigationResult(result)) savePosition()
         void source
       })
@@ -916,7 +954,12 @@ const Messages = ({
     if (decision.action === 'pending') {
       const pending = getPendingNavigate()!
       bootstrapPhaseRef.current = 'pending-in-flight'
+      // S3.1 Blocker 1 correction: capture the transition epoch at bootstrap
+      // start. If the topic changes before the async navigation completes (even
+      // to the same topic ID — A→B→A), the stale completion is rejected.
+      const bootstrapEpoch = transitionEpochRef.current
       void navigate(decision.intent).then((result) => {
+        if (transitionEpochRef.current !== bootstrapEpoch) return
         if (result !== 'cancelled') {
           clearPendingNavigate(pending)
           bootstrapPhaseRef.current = 'done'
@@ -931,21 +974,26 @@ const Messages = ({
     // action === 'restore'
     savedRestoreHandledRef.current = true
     bootstrapPhaseRef.current = 'done'
-    void navigate(decision.intent)
+    // S3.1 Blocker 1 correction: capture the transition epoch for the restore
+    // navigation so a stale completion does not persist under the wrong epoch.
+    const restoreEpoch = transitionEpochRef.current
+    void navigate(decision.intent).then((result) => {
+      if (transitionEpochRef.current !== restoreEpoch) return
+      if (shouldPersistNavigationResult(result)) savePosition()
+    })
   }, [isTopicLoading, messages, navigate, savePosition, topic.id, getSavedPosition])
 
-  // Token estimation is now owned by Inputbar (which has draft text for preview).
-  // Preserve onFirstUpdate: signals that Messages has rendered with valid context.
-  // Guarded with a ref so it fires exactly once per mount (topic key resets on switch).
-  // This preserves the prior intended first-update behavior where the callback
-  // executes once after Messages has valid context, not on every contextInfo change.
-  const onFirstUpdateFiredRef = useRef(false)
+  // S3.1 Blocker 4: onFirstUpdate fires once per topic, not once ever.
+  // useTopicTransition resets onFirstUpdateFiredRef via resetOnFirstUpdate
+  // when the topic prop changes, allowing the effect to fire again for
+  // the new topic. topic.id is a dependency so the effect re-runs after
+  // the useLayoutEffect flag reset, letting the ref check see false.
   useEffect(() => {
     if (!onFirstUpdateFiredRef.current) {
       onFirstUpdateFiredRef.current = true
       onFirstUpdate?.()
     }
-  }, [contextInfo, onFirstUpdate])
+  }, [contextInfo, onFirstUpdate, topic.id])
 
   const loadMoreMessages = useCallback(() => {
     const currentState = viewportStateRef.current
