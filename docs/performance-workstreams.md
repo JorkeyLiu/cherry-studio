@@ -158,9 +158,9 @@
 - **建议推进顺序（推荐上下文 · 非授权 · 不构成优先级决策）**：① 归因测量（M1/M2/M3/M7）→ ② 低风险 DB 优化 → ③ 串行 renderer 工作流 → ④ 语义性 DB 决策 → ⑤ 同步使能。此顺序仅为**推荐上下文**，不批准任何实现/测量优先级。
 - **验收框架**：关闭须满足已接受的用户可见/数据健康结果 + 需要时集成实现 + 匹配边界回归证据（`performance-program.md` §8）；任何 schema/迁移/搜索语义改动走 ADR 决策点（PERF-LOCK-008）。**不把 L3 数值当阈值**（PERF-LOCK-003）。
 
-### 2.5 PERF-RENDER-FLOW — 渲染器可见子树 fanout/lifecycle 优化（Approved）
+### 2.5 PERF-RENDER-FLOW — 渲染器可见子树 fanout/lifecycle 优化（Paused）
 
-- **工作流状态**：`Approved`（范围已批准，ID 与优先级锁定；未激活——新会话激活，`Active` 同一层级唯一）。
+- **工作流状态**：`Paused`。候选队列已耗尽（A 延迟/未授权，B/C 已完全回退），停止条件已满足。恢复条件：Main/用户对新的有界候选或范围决策的显式批准。暂停期间不推进任何探针或实现。
 - **产品问题关联**：PERF-TOPIC-SWITCH 与 PERF-ECHO 的共享 renderer 侧渲染成本轴（用户可感知的切换/回显延迟中 renderer lifecycle 部分）。
 - **目标**：提升用户感知的话题切换与回显流体性——减少可见子树的 mount/render/effect work count，方向性改善端点用户可见延迟。
 
@@ -192,6 +192,7 @@
 | **B: MessageGroup/projected-array identity** | 静态分析显示 projected array identity 在 switch/echo 路径下可能不稳定，潜在 defeat MessageGroup memo；此为候选信号，非已确认因果 | 证明 unchanged-item render count 下降且端点方向不恶化；否则回退 |
 | **C: selector/effect fanout** | MessageItem/Blocks/Markdown 的 per-message/per-block Redux subscription 与 per-Markdown lifecycle effects | 证明 selector notification/effect invocation 减少且内容/流式/上下文正确性不变；否则回退 |
 
+- **当前状态**：所有候选均已非活跃——A（topic-key remount boundary）未授权/延迟，无移除/结构实验被批准；B（MessageGroup/projected-array identity）的 work-count reduction 未转化为端点方向改善，已完全回退；C（selector/effect fanout）的 narrow subscription 已完全回退——安全修正需要 broader action/reasoning ownership 变更，超出 approved single-variable experiment 范围。任何候选均不得推进至 Experiment/Integrated/Protected/Done 状态。
 - **group-model O(N) rebuilding** 作为二级事实仅在材料时检查——当前测量的 render computation（12.4–22.2ms）相对 DOM endpoint 为小量，不作为首要候选。
 
 #### 具体探针程序（Concrete Probe Procedures）
@@ -251,7 +252,7 @@ Batch fresh production E2E + aggregate gates（`pnpm format`/`pnpm lint`/`pnpm t
 
 #### 并行隔离规则（Parallel Isolation Rule）
 
-- **默认顺序**：A/B/C 探针按顺序执行（A→B→C）。
+- **当前状态**：工作流 `Paused`，不执行任何探针。以下为恢复后的规则记录。
 - **并行允许条件**：仅在 isolated worktree/build/disposable profile 且 writes/instrumentation 不重叠时允许并行探针。并行不意味着共享状态或跨候选因果依赖。
 - **Active 唯一性**：保持在父工作流层级；并行探针不创建额外 Active 工作流。
 
@@ -285,14 +286,14 @@ Batch fresh production E2E + aggregate gates（`pnpm format`/`pnpm lint`/`pnpm t
 4. **Per-message/block Redux subscriptions**：MessageItem/Blocks 层级的独立 Redux selector 导致 granular re-render。
 5. **Per-Markdown lifecycle effects**：Markdown 组件的 lifecycle effect（parse/syntax highlight 等）在 remount 时重新触发。
 
-#### 激活说明（Activation Note for Next Session）
+#### 暂停状态说明（Paused State Note）
 
-新会话激活时：
-1. 确认当前 `Active` 唯一性未被占用。
-2. 将 `PERF-RENDER-FLOW` 状态从 `Approved` 改为 `Active`。
-3. 按 A→B→C 顺序逐个执行探针：代码审计 → 具体探针程序 → 最小记录 → keep/revert。
-4. 仅在 isolated worktree/build/disposable profile 且无 writes/instrumentation 重叠时允许并行。
-5. 保留的候选进入 Experiment 规划（不自行跳级）；集成时批量执行生产 E2E + aggregate gate。
+工作流当前 `Paused`，以下为历史上下文，不构成执行指令：
+
+1. A（topic-key remount boundary）静态确认为高 blast-radius 候选，但无移除/结构实验被授权——延迟。
+2. B（MessageGroup/projected-array identity）work-count reduction 未转化为端点方向改善——已完全回退。
+3. C（selector/effect fanout）narrow subscription 已完全回退——安全修正需 broader action/reasoning ownership 变更，超出范围。
+4. 候选队列已耗尽；恢复需 Main/用户对新的有界候选或范围决策的显式批准。
 
 - **优先级定位**：优先于 PERF-DB-HEALTH（Planned）方向——renderer 可见子树 fanout/lifecycle 是当前用户感知延迟的高放大轴。
 
