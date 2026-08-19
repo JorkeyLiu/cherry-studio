@@ -3,7 +3,7 @@
 > **Document status**: **Approved Strategy (program-level)**. This document owns the architecture evolution program: strategic intent, approved locks, target qualities, debt registry, phased evolution, and decision triggers. It is not an ADR; it does not create new governance authority for identity, release, platform, SQLite migration, or context-window governance — those remain authoritative in their existing documents.
 > **Authority boundary**: Architecture correctness, elegance, unity, and long-term evolvability lead. Performance symptoms expose architecture debt; performance remains validation evidence, not the sole design objective. Future startup speed and bounded memory are architecture enablement goals. Sync is future compatibility only, vendor-neutral, and must adapt to the application architecture — never the reverse.
 > **Relation to current architecture reference**: [`architecture.md`](./architecture.md) describes implemented reality only. This program describes the target evolution path. The two must not be confused; `architecture.md` must not be edited to describe unimplemented target state.
-> **Last updated**: 2026-08-19 (Phase 2 documentary completion)
+> **Last updated**: 2026-08-19 (S3.1 implementation recording)
 > **Owner**: Architecture evolution program (cross-cutting)
 
 ---
@@ -163,7 +163,7 @@ Debt items are classified as:
 | Item | Classification | Evidence |
 |---|---|---|
 | 50ms cadence throttle is the primary streaming cadence limiter | Candidate consequence | PERF-STREAMING cadence evidence |
-| `key={activeTopic.id}` triggers full subtree remount on topic switch | Observed structure | Static analysis; PERF-RENDER-FLOW candidate A |
+| `key={activeTopic.id}` triggers full subtree remount on topic switch | **Resolved (S3.1)** | Implemented by S3.1 (stable host, no key-driven remount); commit `0dabf3d9fb` |
 | Per-message/per-block Redux subscriptions cause granular re-render | Observed structure | PERF-RENDER-FLOW candidate C |
 | Markdown parse CPU contribution unknown | Open decision | No direct parse-CPU measurement exists |
 
@@ -229,7 +229,7 @@ The following characterizes the implemented reality as observed, not the target 
 |---|---|---|
 | Chat persistence | Main SQLite is authoritative; renderer never holds a SQLite connection; typed IPC is the only data path | Authority boundary (unchanged) |
 | Topic data loading | `loadTopicMessagesThunk` → `dbService.fetchMessages` performs full-topic fetch; no windowed/incremental path exists | Current data path |
-| Renderer projection | Messages keyed by `topicId`; component tree remounts on topic change via `key={activeTopic.id}` | Current implementation evidence |
+| Renderer projection | Messages host is stable (no `key`-driven remount); `useTopicTransition` owns layout-phase viewport reset, topic-scoped timer/flag cleanup, and transition-epoch stale-completion coordination; existing `useScrollPosition` owns outgoing scroll persistence; existing topic activation/bootstrap path owns topic loading and scroll restoration/bootstrap | Current implementation evidence (S3.1 implemented 2026-08-19) |
 | Viewport state | Local viewport reducer already has `topicGeneration` / navigation / load guards; viewport state is keyed by topic | Current implementation evidence |
 | Scroll position | Topic-keyed device-local state; no cross-topic leakage observed | Current implementation evidence |
 | Background streams | Active generation/streaming persists across topic switches; not aborted by navigation | Current implementation evidence |
@@ -364,7 +364,7 @@ Phase 2 decisions are reviewed against ARCH-005 sync-ready properties:
 
 ### Phase 3: Stable Render/State/Action Graph
 
-**Entry criteria**: Phase 2 ownership model complete; explicit approval required. The structural entry criterion (documented ownership model) is satisfied by Phase 2 completion (2026-08-19), but Phase 3 remains **not activated** — explicit approval is required before any implementation begins.
+**Entry criteria**: Phase 2 ownership model complete; explicit approval required. The structural entry criterion (documented ownership model) is satisfied by Phase 2 completion (2026-08-19). Phase 3 is **partially activated** — S3.1 is implemented (2026-08-19); S3.2–S3.5 are not activated; S3.2–S3.4 prerequisites are satisfied by S3.1; S3.5 remains independent.
 **Content**:
 - Establish a stable, well-defined graph of render dependencies, state subscriptions, and action handlers.
 - Reduce unnecessary component remounts and re-renders through structural clarity (not speculative memoization sweeps).
@@ -374,15 +374,27 @@ Phase 2 decisions are reviewed against ARCH-005 sync-ready properties:
 **Dependencies**: Phase 2 complete.
 **Implementation slices** (in dependency order; each independently testable and rollback-bounded):
 
-| Slice | Description | Prerequisites | Acceptance evidence | Rollback boundary |
-|---|---|---|---|---|
-| **S3.1** Stable host / transition coordinator | Establish stable conversation host that persists across topic changes; implement topic transition coordinator managing deactivate/save → viewport reset → activate/load sequence | None | Topic switch no longer remounts full subtree; PERF-TOPIC-SWITCH latency improvement; no behavioral regression in topic navigation | Revert host component to current remount-on-key behavior; remove transition coordinator; all data unchanged |
-| **S3.2** Viewport / scroll cleanup | Move viewport state and scroll position to explicit topic-scoped lifecycle managed by transition coordinator; remove implicit viewport carryover | S3.1 | Scroll position correctly saved/restored per topic; no cross-topic scroll leakage; viewport reset on fresh topic activation | Restore viewport reducer to current implicit behavior; scroll state is device-local, no authority impact |
-| **S3.3** Stable ID render boundaries / history-live-tail layering | Establish message/block render boundaries using stable IDs; implement history and live-tail as render layers of one entity projection | S3.1 | Render output is identical for same data; live streaming renders correctly in tail layer; history renders correctly in history layer; no double-render or missing messages | Remove layer separation; revert to current single-path rendering; entity projection unchanged |
-| **S3.4** Action controller / event-time state resolution | Introduce action controller that resolves current Assistant and request state at event time; replace implicit state capture with event-time resolution | S3.1 | Actions (regenerate, edit, answer-switch) resolve correct state; no stale-state bugs; no behavioral change in happy path | Remove action controller; restore implicit state capture; no IPC or authority changes |
-| **S3.5** Lazy activation | Activate ContentSearch on invocation; activate edit capability on edit-mode activation; activate optional drawers on opening; preserve Inputbar and viewport immediate availability | None (independent) | ContentSearch not mounted until invoked; edit subscriptions activate on demand; optional panels deferred; Inputbar/viewport always available; no functional regression | Restore eager mounting of all components; no data or authority changes |
+| Slice | Description | Prerequisites | Acceptance evidence | Rollback boundary | Status / provenance |
+|---|---|---|---|---|---|
+| **S3.1** Stable host / transition coordinator | Establish stable conversation host that persists across topic changes; `useTopicTransition` owns layout-phase viewport reset, topic-scoped timer/flag cleanup, and transition-epoch stale-completion coordination; existing `useScrollPosition` owns outgoing scroll persistence; existing topic activation/bootstrap path owns topic loading and scroll restoration/bootstrap | None | Topic switch no longer remounts full subtree; no behavioral regression in topic navigation | Revert host component to current remount-on-key behavior; remove transition coordinator; all data unchanged | **Implemented** (commit `0dabf3d9fb`, 2026-08-19; `pnpm build:check` exit 0 9605 passed/75 skipped; fresh `pnpm build` exit 0; topic-switch E2E 6 passed/1 fixture-conditioned skip) |
+| **S3.2** Viewport / scroll cleanup | Move viewport state and scroll position to explicit topic-scoped lifecycle managed by transition coordinator; remove implicit viewport carryover | S3.1 (prerequisite satisfied) | Scroll position correctly saved/restored per topic; no cross-topic scroll leakage; viewport reset on fresh topic activation | Restore viewport reducer to current implicit behavior; scroll state is device-local, no authority impact | Not activated |
+| **S3.3** Stable ID render boundaries / history-live-tail layering | Establish message/block render boundaries using stable IDs; implement history and live-tail as render layers of one entity projection | S3.1 (prerequisite satisfied) | Render output is identical for same data; live streaming renders correctly in tail layer; history renders correctly in history layer; no double-render or missing messages | Remove layer separation; revert to current single-path rendering; entity projection unchanged | Not activated |
+| **S3.4** Action controller / event-time state resolution | Introduce action controller that resolves current Assistant and request state at event time; replace implicit state capture with event-time resolution | S3.1 (prerequisite satisfied) | Actions (regenerate, edit, answer-switch) resolve correct state; no stale-state bugs; no behavioral change in happy path | Remove action controller; restore implicit state capture; no IPC or authority changes | Not activated |
+| **S3.5** Lazy activation | Activate ContentSearch on invocation; activate edit capability on edit-mode activation; activate optional drawers on opening; preserve Inputbar and viewport immediate availability | None (independent) | ContentSearch not mounted until invoked; edit subscriptions activate on demand; optional panels deferred; Inputbar/viewport always available; no functional regression | Restore eager mounting of all components; no data or authority changes | Not activated |
 
 **Note**: Each slice is independently testable and rollback-safe. Slices do not cross authority, persistence, IPC, or governance boundaries. No schema, IPC contract, context-window, or identity changes are included.
+
+#### S3.1 Implementation Record (2026-08-19)
+
+**Behavior**: Stable `Messages` host component persists across topic changes (removed `key={activeTopic.id}` remount pattern). `useTopicTransition` owns layout-phase viewport reset, topic-scoped timer/flag cleanup, and transition-epoch stale-completion coordination. Existing `useScrollPosition` owns outgoing scroll persistence. Existing topic activation/bootstrap path owns topic loading and scroll restoration/bootstrap. Layout-phase reset applied.
+
+**Preserved boundaries**: Main SQLite authority unchanged; no IPC contract changes; no schema changes; no context-window governance changes; no identity/compatibility changes. Renderer-local lifecycle only — does not cross any governed boundary.
+
+**Tests/validation**: `pnpm build:check` exit 0 (9605 passed/75 skipped). Fresh `pnpm build` exit 0. Topic-switch E2E exact paths 6 passed/1 fixture-conditioned explicit skip.
+
+**Rollback**: Revert host component to remount-on-key behavior; remove `useTopicTransition` and transition coordinator; all data unchanged.
+
+**Non-claims**: S3.1 does not close PERF-TOPIC-SWITCH, PERF-ECHO, or PERF-RENDER-FLOW as product problems. Existing recorded L3 performance values are pre-S3.1 directional reference observations unless explicitly remeasured. PERF-TOPIC-SWITCH latency improvement is not yet measured post-S3.1.
 **Relationship to performance**: This phase supersedes PERF-RENDER-FLOW's tactical candidate queue (A/B/C candidates). The conversation ownership and lifecycle design in Phase 2 identifies the root structural causes that the tactical loop could not isolate; Phase 3 owns production conversation restructuring.
 
 ### Phase 4: Bounded Memory and Cache
@@ -592,7 +604,7 @@ Each phase has acceptance criteria defined in §6. Acceptance requires:
 |---|---|---|
 | Conversation ownership model specifics | Phase 2 | **Resolved** (2026-08-19; see §2.2–§2.6) |
 | Lazy activation boundaries | Phase 2 | **Resolved** (2026-08-19; see §2.6) |
-| Render/state/action graph structure | Phase 3 | Open (depends on Phase 2; entry criterion satisfied, not activated) |
+| Render/state/action graph structure | Phase 3 | **Partially resolved** (S3.1 implemented; S3.2–S3.5 not activated; S3.2–S3.4 prerequisites satisfied by S3.1) |
 | Cache invalidation rules and bounds | Phase 4 | Open |
 | Retention/eviction policy design | Phase 4 | Open (design/documentation responsibility only) |
 | Windowed fetch semantics | Phase 5 | Open |
