@@ -3,7 +3,7 @@
 > **Document status**: **Approved Strategy (program-level)**. This document owns the architecture evolution program: strategic intent, approved locks, target qualities, debt registry, phased evolution, and decision triggers. It is not an ADR; it does not create new governance authority for identity, release, platform, SQLite migration, or context-window governance — those remain authoritative in their existing documents.
 > **Authority boundary**: Architecture correctness, elegance, unity, and long-term evolvability lead. Performance symptoms expose architecture debt; performance remains validation evidence, not the sole design objective. Future startup speed and bounded memory are architecture enablement goals. Sync is future compatibility only, vendor-neutral, and must adapt to the application architecture — never the reverse.
 > **Relation to current architecture reference**: [`architecture.md`](./architecture.md) describes implemented reality only. This program describes the target evolution path. The two must not be confused; `architecture.md` must not be edited to describe unimplemented target state.
-> **Last updated**: 2026-08-19
+> **Last updated**: 2026-08-19 (Phase 2 documentary completion)
 > **Owner**: Architecture evolution program (cross-cutting)
 
 ---
@@ -113,7 +113,7 @@ These are the structural qualities the evolution program aims to establish. They
 ### 3.7 Bounded caches
 
 - Caches (renderer memo, topic cache, context window) have clear invalidation rules and size bounds.
-- Cachemiss paths are explicit and measurable.
+- Cache-miss paths are explicit and measurable.
 - Cache state is not authoritative — it is a performance optimization over authority.
 
 ### 3.8 Device-local-state separation
@@ -216,21 +216,155 @@ Phases have dependency relationships but must not pretend all are sequential or 
 
 ### Phase 2: Conversation Ownership and Lifecycle
 
+**Status**: **Complete** (documentary/design phase). Approved 2026-08-19. This phase delivered the ownership model, topic transition contract, render graph design, and action/request ownership specification. No production implementation is authorized by this completion; Phase 3 carries implementation.
 **Entry criteria**: Phase 1 complete; explicit approval for conversation lifecycle study.
-**Content**:
-- Define conversation component ownership model: which components own which state, lifecycle, and subscriptions.
-- Establish clear boundaries between Main-process authority, renderer projection, and preload capability surface.
-- Identify lazy activation boundaries: which components can be deferred until needed.
-- Map the conversation lifecycle from topic selection through first render, streaming, completion, and topic switch.
-
-**Exit criteria**: Documented ownership model with lazy activation boundaries; no code changes until explicit approval.
 **Dependencies**: Phase 1 complete.
-**Provenance note**: The Phase 2A/2B labels in `performance-workstreams.md` refer to pre-program historical renderer-boundary measurement and implementation slices (stage attribution instrumentation, shared context projection, window projection deduplication). Those slices are predecessors that produced evidence and partial renderer-side improvements; they do not constitute, satisfy, or authorize architecture Phase 2. Architecture Phase 2 remains incomplete — its exit criteria (documented ownership model with lazy activation boundaries) have not been met.
+**Exit criteria** (satisfied): Documented ownership model, topic transition model, render graph decisions, action ownership model, and lazy activation boundaries — all delivered below. Phase 2 completion does not claim code implementation; `architecture.md` remains the current reality reference only.
+
+#### 2.1 Current-state evidence summary
+
+The following characterizes the implemented reality as observed, not the target state:
+
+| Aspect | Implemented reality | Label |
+|---|---|---|
+| Chat persistence | Main SQLite is authoritative; renderer never holds a SQLite connection; typed IPC is the only data path | Authority boundary (unchanged) |
+| Topic data loading | `loadTopicMessagesThunk` → `dbService.fetchMessages` performs full-topic fetch; no windowed/incremental path exists | Current data path |
+| Renderer projection | Messages keyed by `topicId`; component tree remounts on topic change via `key={activeTopic.id}` | Current implementation evidence |
+| Viewport state | Local viewport reducer already has `topicGeneration` / navigation / load guards; viewport state is keyed by topic | Current implementation evidence |
+| Scroll position | Topic-keyed device-local state; no cross-topic leakage observed | Current implementation evidence |
+| Background streams | Active generation/streaming persists across topic switches; not aborted by navigation | Current implementation evidence |
+| Session projections | Messages/blocks for opened topics accumulate as renderer session projections in Redux | Current implementation evidence |
+| ContentSearch | Mounted hidden; always present in component tree despite not being visible | Current implementation evidence |
+| Inputbar | Essential UI; always mounted and available | Current implementation evidence |
+| EditMode | Provider and subscriptions always present regardless of active edit state | Current implementation evidence |
+| Data access | Full-topic fetch is the only data path; no pagination or windowed fetch exists | Current data path |
+
+#### 2.2 Target state classification and ownership
+
+| Domain | Target owner | Invariant |
+|---|---|---|
+| Authoritative chat data | Main SQLite (via typed IPC) | Single source of truth; never duplicated or overridden by renderer state |
+| Renderer entity projection | Redux topic messages/blocks store | Derived from authority; disposable and rebuildable; never authoritative |
+| Active-topic viewport / navigation / scroll | Renderer viewport reducer (topic-keyed) | Device-local UI state; reset on explicit topic activation; no cross-topic carryover |
+| Live request / stream transient state | Request pipeline (topic/message-scoped) | Transient; not persisted as chat authority; survives topic switch when request is active |
+| Derived render / context projection | Renderer memoized computations | Rebuilt from entity projection; disposable; not stored as separate authority |
+| Device-local UI state | Redux config / local preferences | Clearly separated from shareable state (§3.8); never treated as authoritative chat data |
+| Action / request context | Action controller (event-time resolution) | Resolves current Assistant and request state at event time; no event sourcing or command logs |
+
+#### 2.3 Topic transition model
+
+| Step | Owner | Invariant |
+|---|---|---|
+| **Activate request** | Renderer navigation handler | Explicit user intent or programmatic activation; carries target topic ID; no implicit transition |
+| **Old-topic deactivate / save** | Viewport reducer | Save viewport scroll position and generation state under outgoing topic key; dispose transient viewport state; no authority mutation |
+| **Generation advance / stale rejection** | Request pipeline | Active generation for old topic continues or is explicitly cancelled based on request-scoped lifecycle; topic switch does not automatically abort background generation |
+| **Viewport reset** | Viewport reducer | Reset viewport to initial state for new topic (scroll top, generation marker, load state) under new topic key |
+| **Projection activation / load** | Redux topic store | Activate or load entity projection for new topic; full-topic fetch remains current data path until Phase 5 |
+| **Scroll restore / bootstrap** | Viewport reducer | Restore saved scroll position if topic was previously visited; otherwise bootstrap to initial state (bottom for new conversations, top for historical review) |
+| **Ready** | Conversation host | Emit ready signal when projection is loaded and viewport is settled; UI becomes interactive |
+| **Request-stream independence** | Request pipeline | Any active request/stream is scoped to its originating topic and message IDs; topic transition does not terminate or redirect in-flight streams |
+
+#### 2.4 Stable render graph decisions
+
+| Decision | Target | Rationale |
+|---|---|---|
+| **Stable host** | Conversation host component remains mounted across topic changes; does not remount on topic switch | Eliminates full-subtree teardown/rebuild cost; preserves in-flight DOM state for streams |
+| **ID boundaries** | Topic ID is the primary boundary for entity projection scoping; message/block IDs are sub-boundaries within a topic | Clear ownership: topic-scoped stores own entity projections; message-scoped state is transient |
+| **Derived group membership** | Message group assignment (user/assistant, answer selection) is derived from entity projection at render time | Not stored as separate authority; rebuildable from message metadata |
+| **Local subscriptions** | Components subscribe to the narrowest possible slice of entity projection; subscriptions are topic-scoped | Reduces re-render blast radius; subscription cleanup on topic deactivation |
+| **Stable history / live-tail layers** | History (completed messages) and live tail (streaming message) are render layers of one disposable projection | Not separate stores or authorities; same entity projection, different presentation treatment |
+| **Local reactivation for edit / answer switch** | Edit mode and answer-switch activate locally within the stable host; no full remount | Edit capability is scoped to the message being edited; answer switch re-renders selection within existing projection |
+
+#### 2.5 Action ownership model
+
+```
+UI intent (with message/topic IDs)
+  → event-time state resolution (action controller)
+    → request/action owner (resolves current Assistant, request state)
+      → authoritative mutation or stream initiation (Main / request pipeline)
+        → projection update (Redux entity projection)
+```
+
+- Presentation emits intent commands carrying message ID, topic ID, and action type.
+- The action controller resolves current state at event time — no event sourcing, command logs, or replay infrastructure.
+- The request/action owner determines whether the action is valid given current Assistant state, request lifecycle, and topic context.
+- Authoritative mutations flow through typed IPC to Main SQLite; stream initiation flows through the request pipeline.
+- Projection updates are derived from authority changes; they are never the source of truth.
+
+#### 2.6 Lazy activation boundaries
+
+| Component / capability | Activation trigger | Rationale |
+|---|---|---|
+| ContentSearch | Invocation (user opens search) | Not needed until search is requested; currently mounted hidden (wasteful) |
+| Edit capability | Edit-mode activation (user enters edit on a message) | Subscriptions and edit state are always present; actual edit UI/behavior activates on demand |
+| Optional drawers / panels | User opens the specific panel | Not essential for conversation flow; defers cost |
+| Inputbar | Immediate (always available) | Essential for user interaction; cannot be deferred |
+| Active viewport | Immediate (always available) | Essential for conversation display; cannot be deferred |
+
+Existing conditional/lazy behavior in the codebase should be preserved; this model defines the target boundaries, not a rewrite mandate.
+
+#### 2.7 Future phase requirements (no policy selection)
+
+Phase 2 completion identifies the following as requirements for later phases. No policies, interfaces, or implementations are selected here.
+
+**Phase 4 (Bounded Memory and Cache) requirements**:
+- Renderer-side entity projection cache must have clear invalidation rules and size bounds.
+- Viewport scroll-position cache must be bounded per topic.
+- Context info computation cache must have explicit invalidation on authority change.
+- Cache-miss paths must be explicit and measurable.
+
+**Phase 5 (Data-Access Contract) requirements**:
+- Full-topic fetch must be replaceable with windowed/paginated fetch for visible messages.
+- Cache-join semantics must be defined for context info computation.
+- Incremental load paths must be specified for topic activation.
+
+**Phase 7 (Startup Architecture) requirements**:
+- Lazy activation of conversation components (ContentSearch, edit, optional panels) must reduce initial mount cost.
+- Conversation host stability must not prevent independent boot-service optimization tracks.
+
+#### 2.8 Sync compatibility review
+
+Phase 2 decisions are reviewed against ARCH-005 sync-ready properties:
+
+| ARCH-005 property | Phase 2 contribution | Status |
+|---|---|---|
+| Clear authority boundaries | Ownership model establishes single owner per domain (§2.2) | Established (documentary) |
+| Stable IDs | Topic/message/block IDs are the boundary model; no ID changes proposed | Preserved |
+| Typed explicit commands | Action model uses typed intent commands (§2.5); no new IPC channels proposed | Preserved |
+| Atomic/idempotent mutations | No mutation changes; authority remains Main SQLite | Preserved (unchanged) |
+| Deterministic ordering | No ordering changes | Preserved (unchanged) |
+| Stable/final checkpoints | Transient vs. stable distinction identified; checkpoint enforcement is a cross-phase target constraint routing to appropriate existing governance | Identified (not enforced) |
+| Disposable projections | Entity projections are disposable by design (§2.2, §2.4) | Established (documentary) |
+| Bounded caches | Requirements identified (§2.7); bounds not yet defined | Deferred to Phase 4 |
+| Device-local-state separation | Viewport/scroll identified as device-local; separation preserved | Established (documentary) |
+
+**Sync prohibition**: No sync schema, metadata, tombstone, conflict engine, vendor adapter, transport, account/E2EE/attachment decision, or production sync path is authorized. Phase 2 does not create any sync infrastructure.
+
+#### 2.9 Governance/decision gate clarification
+
+**Renderer-local lifecycle is not a decision gate trigger.** The conversation lifecycle design in Phase 2 (topic transitions, viewport state, render graph stability) is Renderer-local component and state lifecycle. It does not cross authority, persistence, migration, IPC contract, context-window, native/multi-window, identity/compatibility, or release/platform boundaries. This design does not itself require a decision gate.
+
+**Decision gate: work must stop if later implementation crosses these boundaries**:
+
+| Boundary | Trigger example | Required action |
+|---|---|---|
+| Authority (chat data ownership) | Any change moving chat authority out of Main SQLite | ADR required before implementation |
+| Persistence / migration | Schema changes, new columns, migration steps | SQLite migration governance decision |
+| IPC / contract | New IPC channels, changed payload types, preload surface changes | Stop before implementation; perform coordinated shared-contract review across shared types/channel definitions, preload exposure, and Main handlers; obtain explicit architecture/program approval for the contract change; formal ADR required only when an existing authoritative governance owner/process requires it; coordinated both-side edits mandatory |
+| Context window | Changes to anchor semantics, `contextCount` behavior | Context window governance review |
+| Native / multi-window | Window lifecycle changes, native capability exposure | Governance decision required |
+| Identity / compatibility | Changes to database names, persistence keys, import schema | Application Identity governance decision |
+| Release / platform | Release scope, platform-specific behavior | Application Identity governance decision |
+| Sync boundary | Any sync infrastructure, metadata, or transport | Sync governance owner documents (`sync-mvp.md` / `sync-powersync-spike.md`); Phase 8 is the future decision/activation phase, not an authority |
+
+**Architectural "lifecycle" in decision gate context means** app/window/native lifecycle or another governed boundary, not ordinary Renderer component/topic lifecycle.
+
+**Provenance note**: The Phase 2A/2B labels in `performance-workstreams.md` refer to pre-program historical renderer-boundary measurement and implementation slices (stage attribution instrumentation, shared context projection, window projection deduplication). Those slices are predecessors that produced evidence and partial renderer-side improvements; they do not constitute, satisfy, or authorize architecture Phase 2.
 **Relationship to performance**: PERF-TOPIC-SWITCH and PERF-ECHO are acceptance surfaces for this phase. When conversation ownership/lifecycle changes resolve the structural debt, those product problems may close. Performance evidence drives prioritization; architecture changes are validated by performance outcomes.
 
 ### Phase 3: Stable Render/State/Action Graph
 
-**Entry criteria**: Phase 2 ownership model approved; explicit approval.
+**Entry criteria**: Phase 2 ownership model complete; explicit approval required. The structural entry criterion (documented ownership model) is satisfied by Phase 2 completion (2026-08-19), but Phase 3 remains **not activated** — explicit approval is required before any implementation begins.
 **Content**:
 - Establish a stable, well-defined graph of render dependencies, state subscriptions, and action handlers.
 - Reduce unnecessary component remounts and re-renders through structural clarity (not speculative memoization sweeps).
@@ -238,19 +372,31 @@ Phases have dependency relationships but must not pretend all are sequential or 
 
 **Exit criteria**: Documented render/state/action graph with reduced remount blast radius; validated by PERF-TOPIC-SWITCH/PERF-ECHO acceptance criteria.
 **Dependencies**: Phase 2 complete.
-**Relationship to performance**: This phase supersedes PERF-RENDER-FLOW's tactical candidate queue (A/B/C candidates). The conversation lifecycle refactoring in Phase 2 addresses the root structural causes that the tactical loop could not isolate.
+**Implementation slices** (in dependency order; each independently testable and rollback-bounded):
+
+| Slice | Description | Prerequisites | Acceptance evidence | Rollback boundary |
+|---|---|---|---|---|
+| **S3.1** Stable host / transition coordinator | Establish stable conversation host that persists across topic changes; implement topic transition coordinator managing deactivate/save → viewport reset → activate/load sequence | None | Topic switch no longer remounts full subtree; PERF-TOPIC-SWITCH latency improvement; no behavioral regression in topic navigation | Revert host component to current remount-on-key behavior; remove transition coordinator; all data unchanged |
+| **S3.2** Viewport / scroll cleanup | Move viewport state and scroll position to explicit topic-scoped lifecycle managed by transition coordinator; remove implicit viewport carryover | S3.1 | Scroll position correctly saved/restored per topic; no cross-topic scroll leakage; viewport reset on fresh topic activation | Restore viewport reducer to current implicit behavior; scroll state is device-local, no authority impact |
+| **S3.3** Stable ID render boundaries / history-live-tail layering | Establish message/block render boundaries using stable IDs; implement history and live-tail as render layers of one entity projection | S3.1 | Render output is identical for same data; live streaming renders correctly in tail layer; history renders correctly in history layer; no double-render or missing messages | Remove layer separation; revert to current single-path rendering; entity projection unchanged |
+| **S3.4** Action controller / event-time state resolution | Introduce action controller that resolves current Assistant and request state at event time; replace implicit state capture with event-time resolution | S3.1 | Actions (regenerate, edit, answer-switch) resolve correct state; no stale-state bugs; no behavioral change in happy path | Remove action controller; restore implicit state capture; no IPC or authority changes |
+| **S3.5** Lazy activation | Activate ContentSearch on invocation; activate edit capability on edit-mode activation; activate optional drawers on opening; preserve Inputbar and viewport immediate availability | None (independent) | ContentSearch not mounted until invoked; edit subscriptions activate on demand; optional panels deferred; Inputbar/viewport always available; no functional regression | Restore eager mounting of all components; no data or authority changes |
+
+**Note**: Each slice is independently testable and rollback-safe. Slices do not cross authority, persistence, IPC, or governance boundaries. No schema, IPC contract, context-window, or identity changes are included.
+**Relationship to performance**: This phase supersedes PERF-RENDER-FLOW's tactical candidate queue (A/B/C candidates). The conversation ownership and lifecycle design in Phase 2 identifies the root structural causes that the tactical loop could not isolate; Phase 3 owns production conversation restructuring.
 
 ### Phase 4: Bounded Memory and Cache
 
-**Entry criteria**: Phase 2 complete (conversation lifecycle refactoring enables bounded state); explicit approval.
+**Entry criteria**: Phase 2 complete (conversation ownership/lifecycle design enables bounded state); explicit approval.
 **Content**:
 - Establish cache invalidation rules and size bounds for renderer-side caches.
 - Define bounded state for conversation components: maximum loaded messages, viewport window bounds, context cache limits.
 - Ensure cache-miss paths are explicit and measurable.
+- Define retention/eviction policy design: bounds, invalidation triggers, retention periods, eviction strategies, rebuild requirements, and cache-miss handling requirements. This is a design/documentation responsibility only — no implementation of retention/eviction is authorized by Phase 4.
 
-**Exit criteria**: Documented cache/memory model with bounds; validated by memory acceptance criteria (bounded renderer state, cache invalidation rules, cache-miss path measurability).
+**Exit criteria**: Documented cache/memory model with bounds, documented retention/eviction policy design (bounds, invalidation, retention, eviction, rebuild, cache-miss requirements); validated by memory acceptance criteria (bounded renderer state, cache invalidation rules, cache-miss path measurability).
 **Dependencies**: Phase 2 complete.
-**Startup/memory relationship**: Conversation refactor directly enables lazy activation and bounded state. However, app boot services, Redux rehydration, Dexie initialization, SQLite cold open, bundle loading, and background windows remain separate tracks — they are not blocked by or dependent on conversation lifecycle changes.
+**Startup/memory relationship**: Conversation ownership/lifecycle design directly enables lazy activation and bounded state. However, app boot services, Redux rehydration, Dexie initialization, SQLite cold open, bundle loading, and background windows remain separate tracks — they are not blocked by or dependent on conversation lifecycle changes.
 
 ### Phase 5: Data-Access Contract
 
@@ -279,22 +425,22 @@ Phases have dependency relationships but must not pretend all are sequential or 
 
 ### Phase 7: Startup Architecture
 
-**Entry criteria**: Phase 2 complete (conversation lifecycle enables lazy activation); explicit approval.
+**Entry criteria**: Phase 2 complete (conversation ownership/lifecycle design enables lazy activation); explicit approval. Conversation-startup validation depends on relevant Phase 3 activation slice/completion; independent boot tracks can proceed after explicit approval.
 **Content**:
-- Implement lazy activation of conversation components.
+- Validate and integrate the startup effects of Phase 3 conversation activation (ContentSearch on invocation, edit capability on mode activation, optional panels/drawers on opening).
 - Optimize app boot services, Redux rehydration, Dexie initialization, SQLite cold open, bundle loading.
 - Address background window lifecycle.
 
-**Exit criteria**: Startup improvements validated by startup acceptance criteria (lazy activation functional, boot service ordering optimized, bundle loading improved). The existing cold-open `<500ms` threshold is owned by the performance measurement contract (`performance-measurement.md` §7), not created by this program.
-**Dependencies**: Phase 2 complete for conversation-related startup; app boot services are independent tracks.
-**Startup/memory relationship**: This phase addresses startup through both conversation lifecycle (Phase 2 dependency) and independent boot optimization tracks. The boot tracks (Redux rehydration, Dexie, SQLite cold open, bundle loading, background windows) can proceed independently of conversation refactoring.
+**Exit criteria**: Startup improvements validated by startup acceptance criteria (conversation-startup integration verified, boot service ordering optimized, bundle loading improved). The existing cold-open `<500ms` threshold is owned by the performance measurement contract (`performance-measurement.md` §7), not created by this program.
+**Dependencies**: Phase 2 complete for conversation-related startup validation; Phase 3 conversation activation slice/completion for conversation-startup integration; app boot services are independent tracks.
+**Startup/memory relationship**: This phase addresses startup through both conversation-startup validation (Phase 3 dependency) and independent boot optimization tracks. The boot tracks (Redux rehydration, Dexie, SQLite cold open, bundle loading, background windows) can proceed independently of conversation refactoring.
 
 ### Phase 8: Future Sync Decision
 
 **Entry criteria**: Phases 2-5 provide sufficient structural foundation; explicit governance decision to pursue sync.
 **Content**:
 - Make vendor-neutral sync architecture decisions (cross-device authority, conflict resolution, transport).
-- Implement sync-readiness structural properties (ARCH-005) without optimizing for any specific vendor.
+- Assess and document remaining vendor-neutral sync-readiness decisions and validation requirements against ARCH-005; any production implementation requires separate explicit governance approval.
 - Production sync implementation only after governance approval.
 
 **Exit criteria**: Sync architecture decisions documented; sync-readiness validated against ARCH-005 qualities.
@@ -326,13 +472,13 @@ These are read-only diagnostic measurements. They do not require governance/ADR 
 | **Full-topic/windowed fetch/cache joins** | Data-access contract implementation | Phase 5 approved; may require schema awareness |
 | **M4** FTS storage deduplication | Volume and write-amplification measurement + potential schema change | ADR for any schema change |
 | **M5** File dual-state consistency | Consistency convergence diagnostic | ADR if resolution touches schema or authority boundaries |
-| **M6** Sync metadata gap | Schema impact analysis | ADR; analysis only, no schema建 |
+| **M6** Sync metadata gap | Schema impact analysis | ADR; analysis only, no schema changes |
 
 ---
 
 ## 8. Startup/Memory Relationship
 
-Conversation lifecycle refactoring (Phase 2) directly enables:
+Conversation ownership and lifecycle design (Phase 2) directly enables:
 - **Lazy activation**: Components that currently mount eagerly can be deferred until needed.
 - **Bounded state**: Conversation state can be scoped and garbage-collected when topics switch.
 
@@ -363,15 +509,15 @@ The architecture evolution program aims to establish these structural properties
 
 | Property | Status | Phase |
 |---|---|---|
-| Clear authority boundaries | In progress (debt registry) | Phase 2 |
+| Clear authority boundaries | Established (documentary; Phase 2 §2.2) | Phase 2 |
 | Stable IDs | Partially established (application-level text/UUID IDs preserved through refactor; cross-device identity/revision is Phase 8 open decision) | Existing + Phase 8 |
 | Typed explicit commands | Implemented (IPC channels, ChatDbAggregateService) | Existing |
 | Atomic/idempotent mutations | Partially implemented (transactions, INSERT OR REPLACE) | Phase 5/6 |
 | Deterministic ordering | Implemented (dense sort_order) | Existing |
-| Stable/final checkpoints | Partially established (current local persistence may include intermediate states; target boundary between transient and stable is not yet a fully implemented invariant) | Phase 2/5 |
-| Disposable projections | Partially identified (debt registry) | Phase 3 |
+| Stable/final checkpoints | Identified (Phase 2 §2.8; enforcement is a cross-phase target constraint routing to appropriate existing governance) | Cross-phase constraint |
+| Disposable projections | Established (documentary; Phase 2 §2.2, §2.4) | Phase 2 |
 | Bounded caches | Not yet bounded | Phase 4 |
-| Device-local-state separation | Partially identified (debt registry) | Phase 2 |
+| Device-local-state separation | Established (documentary; Phase 2 §2.2, §2.6) | Phase 2 |
 
 ### 9.3 Must preserve / should enable / must defer / prohibited
 
@@ -401,26 +547,36 @@ The PowerSync No-Go (see [`sync-powersync-spike.md`](./sync-powersync-spike.md))
 
 ## 10. ADR/Decision Trigger Map
 
-### 10.1 When ADR is required
+### 10.1 Decision gate: when work must stop
 
-Architecture evolution must stop and trigger an ADR when:
+Architecture evolution must stop and obtain the appropriate governance or architecture decision before crossing any of the following governed boundaries. This list is mandatory and exhaustive for the boundaries governed by existing authoritative documents:
 
-1. A change would move runtime authority (e.g., chat authority leaving Main SQLite).
-2. A change would alter persistence or migration semantics.
-3. A change would affect lifecycle, multi-window, or native capabilities.
-4. A change would modify compatibility semantics (Cherry Studio import, FTS/search correctness, identity identifiers).
-5. A change would affect platform or release scope.
-6. A performance optimization requires the above changes — ADR first, implementation second.
+1. **Runtime authority**: Any change moving chat authority out of Main SQLite → stop; ADR required before implementation.
+2. **Persistence/migration/schema**: Any change altering persistence semantics, schema structure, or migration steps (governed by `sqlite-migration.md`) → stop; SQLite migration governance decision required.
+3. **Shared IPC/preload/cross-process contract semantics**: Any change to IPC channels, payload types, or preload surface (`contextBridge`) → stop before implementation; perform coordinated shared-contract review across shared types/channel definitions, preload exposure, and Main handlers; obtain explicit architecture/program approval for the contract change; formal ADR required only when an existing authoritative governance owner/process requires it; coordinated both-side edits mandatory.
+4. **Context-window semantics**: Any change to anchor semantics or `contextCount` behavior (governed by `context-window.md`) → stop; context window governance review required.
+5. **Native/app/window/multi-window lifecycle**: Any change to window lifecycle, native capability exposure, or app lifecycle → stop; governance decision required.
+6. **Identity/compatibility**: Any change to database names, persistence keys, import schema, or compatibility identifiers (governed by `cherry-chat-application-identity.md`) → stop; Application Identity governance decision required.
+7. **Release/platform**: Any change affecting release scope or platform-specific behavior (governed by `cherry-chat-application-identity.md`) → stop; Application Identity governance decision required.
+8. **Sync boundary**: Any sync infrastructure, metadata, or transport → stop; sync governance owner documents (`sync-mvp.md` / `sync-powersync-spike.md`) are the authority; Phase 8 is the future decision/activation phase, not an authority.
+
+A formal ADR is required where the authoritative owner document or process mandates it (e.g., schema/migration changes, identity/release/platform decisions, context-window governance changes). The mandatory rule is the decision gate itself — not every governed-boundary crossing automatically produces a new ADR artifact; the artifact form follows whatever the authoritative owner requires.
+
+**Ordinary Renderer component/topic lifecycle is not a decision gate trigger.** The conversation lifecycle design in Phase 2 (topic transitions, viewport state, render graph stability) is Renderer-local component and state lifecycle. It does not cross any of the governed boundaries above. Component mount/unmount, topic-scoped state, and presentation-layer refactoring remain program-level concerns that do not require a decision gate unless they cross a governed boundary.
 
 ### 10.2 Decision phases and triggers
 
 | Decision | Trigger | Governance |
 |---|---|---|
-| Schema changes (FTS, indexes, new columns) | Phase 6 or M4/M5/M6 | SQLite migration governance ADR |
-| Sync vendor/transport/account/E2EE | Phase 8 | Separate sync governance |
-| Identity/release/platform changes | Any phase | Application Identity ADR |
-| Context window anchor semantics | Phase 2 or 3 | Context window governance |
-| Conversation ownership model | Phase 2 | This program (architecture evolution) |
+| Runtime authority (chat data ownership) | Any phase | ADR required before implementation |
+| Persistence/migration/schema changes | Any phase | SQLite migration governance decision |
+| Shared IPC/preload/cross-process contract semantics | Any phase | Stop before implementation; coordinated shared-contract review; architecture/program approval; formal ADR only when existing governance requires it; coordinated both-side edits mandatory |
+| Context window anchor semantics | Any phase | Context window governance review |
+| Native/app/window/multi-window lifecycle | Any phase | Governance decision required |
+| Identity/compatibility changes | Any phase | Application Identity governance decision |
+| Release/platform changes | Any phase | Application Identity governance decision |
+| Sync vendor/transport/account/E2EE | Phase 8 | Sync governance owner documents (`sync-mvp.md` / `sync-powersync-spike.md`); Phase 8 is the future decision/activation phase |
+| Conversation ownership model | Phase 2 | **Resolved** (this program; see §2.2–§2.6) |
 
 ### 10.3 Acceptance model
 
@@ -434,10 +590,11 @@ Each phase has acceptance criteria defined in §6. Acceptance requires:
 
 | Decision | Phase | Status |
 |---|---|---|
-| Conversation ownership model specifics | Phase 2 | Open (study required) |
-| Lazy activation boundaries | Phase 2 | Open (depends on ownership model) |
-| Render/state/action graph structure | Phase 3 | Open (depends on Phase 2) |
+| Conversation ownership model specifics | Phase 2 | **Resolved** (2026-08-19; see §2.2–§2.6) |
+| Lazy activation boundaries | Phase 2 | **Resolved** (2026-08-19; see §2.6) |
+| Render/state/action graph structure | Phase 3 | Open (depends on Phase 2; entry criterion satisfied, not activated) |
 | Cache invalidation rules and bounds | Phase 4 | Open |
+| Retention/eviction policy design | Phase 4 | Open (design/documentation responsibility only) |
 | Windowed fetch semantics | Phase 5 | Open |
 | Specific index/query optimizations | Phase 6 | Depends on M1/M2/M3 diagnostics |
 | File dual-state resolution | Phase 6 | Depends on M5 diagnostic |
