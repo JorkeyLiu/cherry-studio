@@ -100,7 +100,7 @@
 
 ### 工作流内子活动
 
-同一 Approved/Active 工作流下可定义多个子活动（candidate probes），各子活动独立执行高流循环。Active 唯一性保持在**父工作流层级**——子活动的独立探测不违反 Active 唯一性约束。子活动默认顺序执行；仅在 isolated worktree/build/disposable profile 且 writes/instrumentation 不重叠时允许并行（见 `performance-workstreams.md` §2.5 并行隔离规则）。
+同一 Approved/Active 工作流下可定义多个子活动（candidate probes），各子活动独立执行高流循环。Active 唯一性保持在**父工作流层级**——子活动的独立探测不违反 Active 唯一性约束。子活动默认顺序执行；仅在 isolated worktree/build/disposable profile 且 writes/instrumentation 不重叠时允许并行。并行隔离的具体执行规则由 strategic-orchestration skill 或等效协调机制管辖。
 
 ## 5. 假设驱动生命周期（Hypothesis-Driven Lifecycle）
 
@@ -143,14 +143,23 @@ Problem Open → Cost Model → Attributed → Candidate → Experiment → Inte
 
 ## 7. 证据原则（Evidence Principles）
 
-证据类型不可互换（PERF-LOCK-003）。判断回归、验收、优先级时按下表引用证据；完整层级见 `performance-measurement.md` §2：
+证据类型不可互换（PERF-LOCK-003）。判断回归、验收、优先级时引用证据；完整层级与定义见 [`performance-measurement.md`](./performance-measurement.md) §2。以下为性能工作的使用要点：
 
-- **L1 仓库可验证回归证据**：fresh 生产构建或确定性临时库上由仓库内命令产生的确定性断言。**唯一可进入"已验证"的证据**。
-- **L2 诊断性证据**：观察性、非断言的运行时信息（`ui:observe`、CDP、截图）。仅定位。
-- **L3 手工基准证据**：本地手动运行基准的数值输出（未提交为阈值）。仅方向判断，需按测量契约重测确认。
-- **L4 用户报告历史结果**：无 artifact 支撑的数值/声明。**不可作为当前基线**。
+- **L1 仓库可验证回归证据**：唯一可进入"已验证"的证据。用于集成契约级/结构级回归判断。
+- **L2 诊断性证据**：仅用于问题定位（`ui:observe`、CDP、截图），不构成回归或验收判断。
+- **L3 手工基准证据**：仅用于方向判断；须按测量契约重测确认后方可升级。
+- **L4 用户报告历史结果**：不可作为当前基线。
 
 一次生产构建 E2E 运行可同时产生 **L1 确定性证据**（正确性 gate、结构断言、退出码）与 **L3 暂定数值**（p50/p95 等机器可读输出）——两者并存但不可互换。证据须与所跨边界匹配（AGENTS.md「Evidence and Judgment」）。
+
+### 7A. 架构演进交接规则（Architecture Evolution Handoff）
+
+当性能证据暴露的结构性债务需要变更**所有权、生命周期或数据契约**时，该工作进入 [Architecture Evolution Program](./architecture-evolution-program.md) 而非继续在性能补丁循环中扩展。具体规则：
+
+- **触发条件**：性能工作流中出现以下任一情况——变更涉及运行时职责/权威移动、持久化/迁移语义变更、生命周期/多窗口/原生能力变更、兼容语义变更——即停止实现，走 ADR 决策点（PERF-LOCK-008），并将工作交由架构演进程序接管。
+- **接受表面**：PERF-TOPIC-SWITCH 和 PERF-ECHO 是架构演进程序的接受表面（`performance-workstreams.md` §2.1/§2.3）；当对话所有权/生命周期重构解决结构性债务时，这些问题可能关闭。
+- **已取代**：PERF-RENDER-FLOW 的战术候选队列已被架构演进程序取代（`performance-workstreams.md` §2.5）。
+- **性能程序不成为架构权威**：性能工作流提出方向和证据，架构决策权属于架构演进程序和 ADR 流程。
 
 ## 8. 完成与关闭规则（Completion / Closure Rules）
 
@@ -194,5 +203,6 @@ Renderer-only presentation/local-state 变更，只要不跨越以下任一边�
 
 - **测量契约（持久）**：[`performance-measurement.md`](./performance-measurement.md) — 固定工具链/lane、证据层级、schema v1、artifact 存储/隐私/保留、规模维度、harness 清单、阈值策略。
 - **当前可行动状态（可变）**：[`performance-workstreams.md`](./performance-workstreams.md) — 开放工作流（PERF-TOPIC-SWITCH / PERF-STREAMING / PERF-ECHO）、证据、有界成本模型/假设、未知项、下一实验目标、验收框架。
+- **架构演进程序**：[`architecture-evolution-program.md`](./architecture-evolution-program.md) — 架构正确性/优雅性/统一性引领；性能债务交接入口；Phase 2/3 为 PERF-TOPIC-SWITCH/PERF-ECHO 接受表面。
 - **治理**：[`sqlite-migration.md`](./sqlite-migration.md)、[`cherry-chat-application-identity.md`](./cherry-chat-application-identity.md)、[`architecture.md`](./architecture.md)。
 - **根代理规则**：根 [`AGENTS.md`](../AGENTS.md)「Detailed References」发现本文件。

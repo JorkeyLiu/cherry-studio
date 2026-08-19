@@ -6,6 +6,23 @@ This directory contains the project documentation in multiple languages.
 
 ---
 
+## Governance & Architecture
+
+| Document | Role |
+|---|---|
+| [Architecture Evolution Program](./architecture-evolution-program.md) | Canonical architecture evolution program: strategic intent, approved locks, target qualities, debt registry, phased evolution, decision triggers |
+| [Architecture Reference](./architecture.md) | Implemented architecture reference (current reality only; target state in the evolution program) |
+| [Application Identity ADR](./cherry-chat-application-identity.md) | Identity, compatibility boundary, updater/release freeze, platform scope |
+| [SQLite Migration Governance](./sqlite-migration.md) | SQLite chat authority, L2 Cherry Studio ZIP compatibility import, migration process |
+| [Context Window Governance](./context-window.md) | Stable topic context anchor, allowed anchor transitions, compatibility repair, persistence boundary |
+| [Performance Program](./performance-program.md) | Performance methodology entry (amplification-first, hypothesis-driven lifecycle, evidence principles) |
+| [Performance Measurement](./performance-measurement.md) | Persistent measurement contract (toolchain, evidence hierarchy, schema v1, thresholds) |
+| [Performance Workstreams](./performance-workstreams.md) | Current actionable performance state (open product problems, evidence, acceptance framework) |
+| [Sync MVP Proposal](./sync-mvp.md) | Synchronization first-phase boundary (scope, data surface, open decisions) |
+| [PowerSync Spike Plan](./sync-powersync-spike.md) | PowerSync disposable spike: No-Go conclusion, historical evidence, vendor-specific (not a target constraint) |
+
+---
+
 ## Languages / 语言
 
 - **[中文文档](./zh/README.md)** - Chinese Documentation

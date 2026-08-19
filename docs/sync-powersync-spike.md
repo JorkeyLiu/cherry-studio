@@ -253,6 +253,7 @@ PowerSync managed 表是 **JSON-backed view**（`sqlite_master.type='view'`，�
 - **No-Go 的唯一决定性触发是 G-3**（managed-table-as-view 材料限制需生产写入/schema 改动 → N-2 / SYNC-001 确定性映射）。按 §8：材料限制无法在 spike 内非阻塞绕开 → **No-Go**。
 - **G-2 与 G-6 的服务半侧按 §5.2 延后**（service-dependent，受控手工/非自动化 gate），**不是失败原因**：G-2 的"本地回路向服务投递"与 G-6 的"服务端重放/幂等"离线不可证，属延后项而非判据失败；其 local 半侧（捕获/排除、local upsert 收敛）均为 proven。
 - 精确含义：PowerSync 的本地 raw-table 写面与直接写入边界已被清晰刻画，但"值得正式选型评估"所需的 schema 适配（G-3）在零生产改动约束下**无法建立**，故 No-Go。
+- **No-Go 解释边界**：此 No-Go 是**vendor/约束特定**的——它记录了 PowerSync 在当前"零生产改动"约束下不可行。它**不是**目标架构约束：目标架构演进程序（[`architecture-evolution-program.md`](./architecture-evolution-program.md) ARCH-004）明确要求目标架构不得为 PowerSync 优化或受其约束。未来同步决策必须基于架构演进程序的目标架构品质（§3），保持 vendor 中立。
 
 ### 12.7 仅存的服务 / 打包未知项（Remaining Unknowns）
 

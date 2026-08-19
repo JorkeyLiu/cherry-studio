@@ -3,7 +3,8 @@
 > **文档状态**：**Proposal / Draft（提案草案）**。本文档是 Cherry Chat **多客户端实时同步**第一阶段的**边界锁定文档**：只锁定"做什么、不做什么、什么仍是开放决策"，**不锁定技术选型、不锁定生产 schema、不锁定跨设备权威架构**。任何生产代码改动、生产依赖安装、schema 变更、vendor 承诺或隐私政策变更都必须由后续获得授权的实现阶段执行，MVP 提案本身不产生此类产物（一次性 PowerSync spike 的依赖只存在于可丢弃 harness，已按 [spike 计划](./sync-powersync-spike.md) §9 处置）。
 > **决策锁（durable IDs）**：SYNC-001 … SYNC-004（§12 决策表；本阶段四个已批准边界）。
 > **关联**：设备本地 SQLite 聊天权威由 [SQLite migration governance](./sqlite-migration.md) 治理；应用身份/发布/平台由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理；上下文窗口语义由 [Context window governance](./context-window.md) 治理。PowerSync 可行性实验见 [PowerSync spike 计划](./sync-powersync-spike.md)。**本文档不改变、不重述上述治理域的既有边界**，也不修改 [PRIVACY.md](../PRIVACY.md) 现行文本。
-> **最后更新**：2026-08-16
+> **架构关系**：应用架构演进程序（[`architecture-evolution-program.md`](./architecture-evolution-program.md)）拥有架构正确性、优雅性、统一性与长期可演进性的决策权。同步相关架构约束见 ARCH-003（架构优先/ vendor 中立）、ARCH-004（PowerSync No-Go）、ARCH-005（同步就绪性质）、ARCH-006（无同步实现授权）。
+> **最后更新**：2026-08-19
 > **Owner**：Personal fork（jorkeyliu）
 > **关联分支**：MVP 提案为纯文档产物，不新建实现分支；一次性 PowerSync spike 在独立实验分支执行，harness 已按 [spike 计划](./sync-powersync-spike.md) §9 处置。
 
@@ -106,7 +107,7 @@
         └──────────────────────┘
 ```
 
-- **设备侧**：sync engine 位于 **Main 进程**（与聊天权威同侧），只读取稳定/最终块检查点；不读取流式 token 中间态（SYNC-004），不触碰凭据/派生 FTS/UI 状态等排除域（SYNC-003）。
+- **设备侧（illustrative/open placement）**：拓扑示意中 sync engine 画在 **Main 进程**（与聊天权威同侧），这是**示意性放置，不是已批准的进程归属决策**——sync engine 的实际进程位置、是否引入独立进程、以及任何 authority 转移均属开放决策，不由本提案锁定。sync engine 只读取稳定/最终块检查点；不读取流式 token 中间态（SYNC-004），不触碰凭据/派生 FTS/UI 状态等排除域（SYNC-003）。
 - **服务端**：拓扑/托管形式（云服务 vs 自托管）属开放决策（§13），本节仅以"sync backend"占位。
 - **要点**：该拓扑把"同步"定位为**检查点事件驱动的协调层**，叠加在设备本地权威之上，而非替代设备本地权威（SYNC-002）。
 
@@ -161,6 +162,7 @@
 > 以下描述的是**当前 `chat.db` 模型客观上能/不能为同步提供什么**，是供后续决策参考的现状证据，**不是架构决策，也不代表任何 sync 能力存在**。它不改写 [SQLite migration governance](./sqlite-migration.md) 或 [Context window governance](./context-window.md) 的任何边界，也不断言 SQLite 存在缺陷——只是说明现有模型尚未为同步内建原语。
 
 - **没有可作同步版本的修订原语**：`topics` / `messages` / `message_blocks` / `topic_segments` 虽有 `updated_at`（nullable TEXT）字段，但**并非每条写路径都会维护它**——它由调用方透传、可为空，不作为自动更新的版本戳，因此**不能把 `updated_at` 当作可靠的同步版本**。当前 schema **不存在** revision、sync cursor、outbox、inbox 或 tombstone 任何一类的同步元数据列/表。
+- **当前本地持久化可能包含中间状态**：本地流式持久化行为可能将中间状态写入数据库（取决于现有实现）。只有稳定/最终块检查点才是未来同步的候选（SYNC-004）；中间状态不是同步事件。架构演进程序（§3.5）将此边界作为目标兼容性品质来建立。
 - **删除是硬删除且级联**：外键均为 `ON DELETE CASCADE`——删除 `topics` 会级联删除其 `messages`、`message_blocks`、`topic_segments`（及关联成员/文件引用行）；删除 `messages` 级联其 `message_blocks` 与 `file_references`。**当前不存在保留删除记录（tombstone / 删除保留）的机制**，未来实现同步前必须先定义 tombstone / 删除保留语义，否则远端删除无法安全传播。
 - **`file_path` 是设备本地路径**：`file_references.file_path` 记录设备本地绝对路径，**绝不进入同步通道**（设备路径泄漏风险，见 §3 排除表）。文件权威（canonical file identity）与附件范围**保持开放**，与开放决策 O-4 关联。
 

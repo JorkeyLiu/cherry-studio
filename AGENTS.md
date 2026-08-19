@@ -181,6 +181,7 @@ Cherry Chat is one product defined by governance, not by strings: an Electron ap
 ## Detailed References
 
 - [docs/architecture.md](docs/architecture.md) — detailed architecture reference: main services, renderer directories, Redux slices, AI Core layering, database detail, IPC, multi-window, tracing, tech stack, source compatibility.
+- [Architecture evolution program](docs/architecture-evolution-program.md) — target evolution strategy, qualities, technical debt, phases, and decision routing; `architecture.md` documents implemented state.
 - [Application Identity ADR](docs/cherry-chat-application-identity.md) — canonical governance for Cherry Chat identity, compatibility boundary, updater/release freeze, and platform scope.
 - [SQLite migration governance](docs/sqlite-migration.md) — canonical governance for SQLite chat authority and L2 Cherry Studio ZIP compatibility import.
 - [Context window governance](docs/context-window.md) — canonical governance for the stable topic context anchor, `contextCount` semantics, allowed anchor transitions, compatibility repair, and persistence boundary; read it before changing context-window behavior.

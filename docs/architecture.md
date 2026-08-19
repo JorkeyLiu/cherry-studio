@@ -1,4 +1,6 @@
-# Cherry Chat Architecture Reference
+# Cherry Chat Architecture Reference — Implemented Reality
+
+> **Scope**: This document describes **implemented architecture only** — what exists in the codebase today. It does not describe target architecture, planned evolution, or unimplemented design decisions. For the architecture evolution program (target qualities, phased evolution, debt registry), see [`architecture-evolution-program.md`](./architecture-evolution-program.md).
 
 This is the detailed architecture reference for the Cherry Chat codebase. The top-level [AGENTS.md](../AGENTS.md) guide is the always-on repository contract and keeps the awareness-level rules; this document carries the full detailed tables (services, directories, Redux slices, AI Core layering, database, IPC, multi-window, tracing, tech stack, source compatibility).
 
