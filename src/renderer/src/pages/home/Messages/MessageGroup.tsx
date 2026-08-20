@@ -2,6 +2,7 @@ import { loggerService } from '@logger'
 import Scrollbar from '@renderer/components/Scrollbar'
 import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
 import { useChatContext } from '@renderer/hooks/useChatContext'
+import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { useAppDispatch } from '@renderer/store'
@@ -31,7 +32,8 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   const groupId = messages[0]?.askId || messages[0]?.id
 
   // Hooks
-  const { editMessage, selectAnswerMessage } = useMessageOperations(topic)
+  const { editMessage } = useMessageOperations(topic)
+  const { selectAnswer } = useMessageActionController()
   const { isMultiSelectMode } = useChatContext(topic)
   const { setTimeoutTimer } = useTimer()
   const dispatch = useAppDispatch()
@@ -55,13 +57,10 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
 
   const setSelectedMessage = useCallback(
     (message: Message) => {
-      // PERF-100: ONE logical selection = ONE atomic Main SQLite command +
-      // ONE plural Redux commit + exactly one updateTopicUpdatedAt dispatch.
-      // The full answer group is this group's message IDs (group coherence is
-      // the caller's responsibility); Main persists exactly one foldSelected
-      // =true among them atomically, rejecting missing/cross-topic IDs.
-      const groupMessageIds = messages.map((m) => m.id)
-      void selectAnswerMessage(message.id, groupMessageIds)
+      // S3.4: explicit target IDs resolved at event time to the latest
+      // complete answer group. No captured messages array is used so a
+      // projection update that expands the group is observed.
+      void selectAnswer({ topicId: topic.id, messageId: message.id })
 
       // LOCK-105/PERF-100: the 200ms setTimeoutTimer smooth-scroll contract
       // is preserved exactly — do not optimize, remove, or retime it.
@@ -76,7 +75,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         200
       )
     },
-    [messages, selectAnswerMessage, setTimeoutTimer]
+    [selectAnswer, topic.id, setTimeoutTimer]
   )
   // NOTE: registerMessageElement logic is kept for future use (currently not used for navigation)
   useEffect(() => {

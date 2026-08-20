@@ -10,6 +10,7 @@ import type { MessageMenubarButtonId, MessageMenubarScope } from '@renderer/conf
 import { DEFAULT_MESSAGE_MENUBAR_SCOPE, getMessageMenubarConfig } from '@renderer/config/registry/messageMenubar'
 import { useMessageEditing } from '@renderer/context/MessageEditingContext'
 import { useAssistant } from '@renderer/hooks/useAssistant'
+import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
 import { useEnableDeveloperMode, useMessageStyle, useSettings } from '@renderer/hooks/useSettings'
@@ -113,7 +114,7 @@ type MessageMenubarButtonContext = {
   deleteMessageWithUndo: MessageOperationsHandlers['deleteMessageWithUndo']
   dropdownItems: MenuProps['items']
   enableDeveloperMode: boolean
-  handleResendUserMessage: (messageUpdate?: Message) => Promise<void>
+  handleResendUserMessage: () => Promise<void>
   handleSetContextAnchor: () => void
   handleTraceUserMessage: () => void | Promise<void>
   handleTranslate: (language: TranslateLanguage) => Promise<void>
@@ -162,14 +163,9 @@ const MessageMenubar: FC<Props> = (props) => {
   const [showDeleteTooltip, setShowDeleteTooltip] = useState(false)
   const { translateLanguages } = useTranslate()
   // const assistantModel = assistant?.model
-  const {
-    deleteMessageWithUndo,
-    resendMessage,
-    regenerateAssistantMessage,
-    getTranslationUpdater,
-    appendAssistantResponse,
-    removeMessageBlock
-  } = useMessageOperations(topic)
+  const { deleteMessageWithUndo, getTranslationUpdater, appendAssistantResponse, removeMessageBlock } =
+    useMessageOperations(topic)
+  const { resendUser, regenerateAssistant } = useMessageActionController()
 
   const { isBubbleStyle } = useMessageStyle()
   const { enableDeveloperMode } = useEnableDeveloperMode()
@@ -264,12 +260,9 @@ const MessageMenubar: FC<Props> = (props) => {
     window.toast.success(t('chat.message.insert.success'))
   }, [dispatch, topic.id, message.id, assistant.id, t])
 
-  const handleResendUserMessage = useCallback(
-    async (messageUpdate?: Message) => {
-      await resendMessage(messageUpdate ?? message, assistant)
-    },
-    [assistant, message, resendMessage]
-  )
+  const handleResendUserMessage = useCallback(async () => {
+    await resendUser({ topicId: topic.id, messageId: message.id })
+  }, [message.id, resendUser, topic.id])
 
   const { startEditing } = useMessageEditing()
 
@@ -540,15 +533,9 @@ const MessageMenubar: FC<Props> = (props) => {
     topic.name
   ])
 
-  const onRegenerate = async () => {
-    // No need to reset or edit the message anymore
-    // const selectedModel = isGrouped ? model : assistantModel
-    // const _message = resetAssistantMessage(message, selectedModel)
-    // editMessage(message.id, { ..._message }) // REMOVED
-
-    // Call the function from the hook
-    void regenerateAssistantMessage(message, assistant)
-  }
+  const onRegenerate = useCallback(async () => {
+    void regenerateAssistant({ topicId: topic.id, messageId: message.id })
+  }, [regenerateAssistant, topic.id, message.id])
 
   // 按条件筛选能够提及的模型，该函数仅在isAssistantMessage时会用到
   const mentionModelFilter = useMemo(() => {

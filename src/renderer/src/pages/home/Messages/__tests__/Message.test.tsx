@@ -66,6 +66,16 @@ vi.mock('@renderer/hooks/useMessageOperations', () => ({
   })
 }))
 
+vi.mock('@renderer/hooks/useMessageActionController', () => ({
+  useMessageActionController: () => ({
+    editSave: vi.fn().mockResolvedValue(true),
+    resendWithEdit: vi.fn().mockResolvedValue(true),
+    regenerateAssistant: vi.fn(),
+    resendUser: vi.fn(),
+    selectAnswer: vi.fn()
+  })
+}))
+
 vi.mock('@renderer/hooks/useModel', () => ({
   useModel: () => null
 }))

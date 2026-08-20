@@ -126,7 +126,18 @@ const mocks = vi.hoisted(() => {
     // Must be called after each rerender to advance the modeled ref.
     simulatePassiveKeyUpdate: (key: string) => {
       scrollKeyRef.current = key
-    }
+    },
+
+    // S3.4: Stable action-controller mocks — isolated at the same boundary as
+    // the suite's existing useMessageOperations mocks. Messages.tsx newly
+    // imports useMessageActionController (expanding the real dependency graph
+    // to include @renderer/config/constant#isMac); mocking here restores the
+    // transition-isolated setup without broadening the narrow constant mock.
+    selectAnswer: vi.fn().mockResolvedValue(undefined),
+    regenerateAssistant: vi.fn().mockResolvedValue(undefined),
+    resendUser: vi.fn().mockResolvedValue(undefined),
+    editSave: vi.fn().mockResolvedValue(true),
+    resendWithEdit: vi.fn().mockResolvedValue(true)
   }
 })
 
@@ -170,6 +181,16 @@ vi.mock('@renderer/hooks/useMessageOperations', () => ({
     displayCount: 20,
     createTopicBranch: vi.fn(),
     selectAnswerMessage: vi.fn()
+  })
+}))
+
+vi.mock('@renderer/hooks/useMessageActionController', () => ({
+  useMessageActionController: () => ({
+    selectAnswer: mocks.selectAnswer,
+    regenerateAssistant: mocks.regenerateAssistant,
+    resendUser: mocks.resendUser,
+    editSave: mocks.editSave,
+    resendWithEdit: mocks.resendWithEdit
   })
 }))
 

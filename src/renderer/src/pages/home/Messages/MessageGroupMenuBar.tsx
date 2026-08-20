@@ -1,7 +1,7 @@
 import { ReloadOutlined } from '@ant-design/icons'
 import { HStack } from '@renderer/components/Layout'
-import { useAssistant } from '@renderer/hooks/useAssistant'
-import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
+import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
+import store from '@renderer/store'
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus } from '@renderer/types/newMessage'
@@ -33,8 +33,7 @@ const MessageGroupMenuBar: FC<Props> = ({
   topic
 }) => {
   const { t } = useTranslation()
-  const { regenerateAssistantMessage } = useMessageOperations(topic)
-  const { assistant } = useAssistant(messages[0]?.assistantId)
+  const { regenerateAssistant } = useMessageActionController()
 
   const isFailedMessage = (m: Message) => {
     if (m.role !== 'assistant') return false
@@ -58,11 +57,17 @@ const MessageGroupMenuBar: FC<Props> = ({
   const hasFailedMessages = messages.some((m) => isFailedMessage(m) && !isTransmittingMessage(m))
 
   const handleRetryAll = async () => {
-    const candidates = messages.filter((m) => isFailedMessage(m) && !isTransmittingMessage(m))
-
-    for (const msg of candidates) {
+    // Event-time status: re-read each explicit ID from store before checking.
+    // Do not subscribe the component; do not retry newly added IDs not in
+    // the explicit rendered group.
+    const explicitIds = messages.map((m) => m.id)
+    for (const id of explicitIds) {
+      const latest = store.getState().messages.entities[id] as Message | undefined
+      if (!latest) continue
+      if (latest.topicId !== topic.id) continue
+      if (!isFailedMessage(latest) || isTransmittingMessage(latest)) continue
       try {
-        await regenerateAssistantMessage(msg, assistant)
+        await regenerateAssistant({ topicId: topic.id, messageId: id })
       } catch (e) {
         // swallow per-item errors to continue others
       }

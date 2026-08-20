@@ -6,6 +6,7 @@ import { EditModeProvider, useEditMode } from '@renderer/context/EditModeContext
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
+import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
 import { useMessageOperations, useTopicLoading, useTopicMessages } from '@renderer/hooks/useMessageOperations'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
@@ -344,7 +345,8 @@ const Messages = ({
   const dispatch = useAppDispatch()
   const messages = useTopicMessages(topic.id)
   const isTopicLoading = useTopicLoading(topic)
-  const { displayCount, createTopicBranch, selectAnswerMessage } = useMessageOperations(topic)
+  const { displayCount, createTopicBranch } = useMessageOperations(topic)
+  const { selectAnswer } = useMessageActionController()
   const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
   const phaseAtRender = currentPhaseCorrelation()
   const phaseRenderStartedAt = phaseAtRender ? performance.now() : 0
@@ -514,28 +516,17 @@ const Messages = ({
   /**
    * Switch foldSelected for the message group containing the target message.
    * Used by the centralized NAVIGATE_TO_MESSAGE handler to unfold hidden messages.
-   * Awaits the atomic selection so the caller can wait for the UI to update.
+   * Event-time resolution via controller — explicit IDs only; no ref-derived
+   * group array. Preserves imperative navigation/scroll exactly.
    *
    * PERF-100: ONE logical selection = ONE atomic Main SQLite command + ONE
-   * plural Redux commit + exactly one updateTopicUpdatedAt dispatch — the
-   * previous per-message editMessage loop (one IPC + one Redux commit per
-   * group member) is replaced by a single validated Main transaction.
+   * plural Redux commit + exactly one updateTopicUpdatedAt dispatch.
    */
   const selectMessageForFold = useCallback(
     async (messageId: string) => {
-      const allMessages = messagesRef.current
-      const targetMessage = allMessages.find((m) => m.id === messageId)
-      if (!targetMessage || !targetMessage.askId || targetMessage.role !== 'assistant') return
-
-      const groupMessages = allMessages.filter((m) => m.role === 'assistant' && m.askId === targetMessage.askId)
-      if (groupMessages.length <= 1) return
-
-      await selectAnswerMessage(
-        messageId,
-        groupMessages.map((m) => m.id)
-      )
+      await selectAnswer({ topicId: topic.id, messageId })
     },
-    [selectAnswerMessage]
+    [selectAnswer, topic.id]
   )
 
   useEffect(() => {

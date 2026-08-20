@@ -113,6 +113,16 @@ vi.mock('@renderer/hooks/useMessageOperations', () => ({
   })
 }))
 
+vi.mock('@renderer/hooks/useMessageActionController', () => ({
+  useMessageActionController: () => ({
+    selectAnswer: mocks.selectAnswerMessage,
+    regenerateAssistant: vi.fn(),
+    resendUser: vi.fn(),
+    editSave: vi.fn(),
+    resendWithEdit: vi.fn()
+  })
+}))
+
 vi.mock('@renderer/hooks/useModel', () => ({
   useModel: () => null
 }))
@@ -290,10 +300,11 @@ describe('MessageGroup', () => {
     expect(setSelectedMessage).toBeDefined()
     setSelectedMessage!(messages[1])
 
-    // ONE atomic selection call with the FULL answer group — never two
-    // per-message editMessage writes.
+    // S3.4: ONE atomic selection via event-time resolved group — explicit
+    // target IDs only, never the captured messages array. Controller derives
+    // the complete group from Redux at event time.
     expect(mocks.selectAnswerMessage).toHaveBeenCalledTimes(1)
-    expect(mocks.selectAnswerMessage).toHaveBeenCalledWith('msg-2', ['msg-1', 'msg-2'])
+    expect(mocks.selectAnswerMessage).toHaveBeenCalledWith({ topicId: 'topic-1', messageId: 'msg-2' })
     expect(mocks.editMessage).not.toHaveBeenCalled()
 
     // The 200ms setTimeoutTimer smooth-scroll contract is preserved exactly.

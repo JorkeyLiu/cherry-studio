@@ -4,7 +4,7 @@ import { useOptionalEditMode } from '@renderer/context/EditModeContext'
 import { useMessageEditing } from '@renderer/context/MessageEditingContext'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
-import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
+import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
 import { useModel } from '@renderer/hooks/useModel'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
@@ -16,7 +16,6 @@ import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { classNames, cn } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { isMessageProcessing } from '@renderer/utils/messageUtils/is'
-import { estimateMessageBlocksUsage } from '@renderer/utils/messageUtils/usage'
 import type { Dispatch, FC, SetStateAction } from 'react'
 import React, { memo, useCallback, useEffect, useRef } from 'react'
 import styled from 'styled-components'
@@ -76,7 +75,7 @@ const MessageItem: FC<Props> = ({
   const { isMultiSelectMode } = useChatContext(topic)
   const model = useModel(getMessageModelId(message), message.model?.provider) || message.model
   const { fontSize, showMessageOutline } = useSettings()
-  const { editMessageBlocks, resendUserMessageWithEdit } = useMessageOperations(topic)
+  const { editSave, resendWithEdit } = useMessageActionController()
   const messageContainerRef = useRef<HTMLDivElement>(null)
   const { editingMessageId, startEditing, stopEditing } = useMessageEditing()
   const { setTimeoutTimer } = useTimer()
@@ -96,29 +95,26 @@ const MessageItem: FC<Props> = ({
 
   const handleEditSave = useCallback(
     async (blocks: MessageBlock[], onCommit: (blockIds: readonly string[]) => void) => {
-      // LOCK-003: Rethrow on failure so MessageEditor can reset isProcessing
-      // and keep the editor open for retry. No catch here — error propagates
-      // to MessageEditor.handleSave's catch block.
-      // LOCK-002: Compute usage from ALL edited blocks including file/image
-      // metadata in the same atomic patch — no separate void editMessage.
-      const editedUsage = await estimateMessageBlocksUsage(blocks)
-      const extraUpdates: Partial<Message> & Pick<Message, 'id'> = editedUsage
-        ? { id: message.id, usage: editedUsage }
-        : { id: message.id }
-      await editMessageBlocks(message.id, blocks, extraUpdates, onCommit)
+      const ok = await editSave({ topicId: topic.id, messageId: message.id }, blocks, onCommit)
+      if (ok === false) {
+        // missing/cross-topic target must not silently close the editor;
+        // propagate so MessageEditor keeps processing state for retry
+        throw new Error(`[handleEditSave] missing target ${message.id}`)
+      }
       stopEditing()
     },
-    [message, editMessageBlocks, stopEditing]
+    [editSave, topic.id, message.id, stopEditing]
   )
 
   const handleEditResend = useCallback(
     async (blocks: MessageBlock[], onCommit: (blockIds: readonly string[]) => void) => {
-      // LOCK-003: Rethrow on failure so MessageEditor can reset isProcessing
-      // and keep the editor open for retry.
-      await resendUserMessageWithEdit(message, blocks, assistant, onCommit)
+      const ok = await resendWithEdit({ topicId: topic.id, messageId: message.id }, blocks, onCommit)
+      if (ok === false) {
+        throw new Error(`[handleEditResend] missing target ${message.id}`)
+      }
       stopEditing()
     },
-    [message, resendUserMessageWithEdit, assistant, stopEditing]
+    [resendWithEdit, topic.id, message.id, stopEditing]
   )
 
   const handleEditCancel = useCallback(() => {
