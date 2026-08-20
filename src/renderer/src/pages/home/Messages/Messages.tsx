@@ -92,6 +92,7 @@ import styled from 'styled-components'
 import { AnchorGroupProvider } from './anchorGroupContext'
 import MessageContextMenu from './MessageContextMenu'
 import MessageGroup from './MessageGroup'
+import { buildRenderLayers, buildRenderSegments, deriveStableGroupId } from './messageRenderLayers'
 import Prompt from './Prompt'
 import { MessagesContainer, ScrollContainer } from './shared'
 import TopicSegmentLine from './TopicSegmentLine'
@@ -175,29 +176,20 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     return result
   }, [displayGroups, displayMessages])
 
-  // 将消息按是否选中分段，用于连续选中消息的包裹
-  const messageSegments = useMemo(() => {
-    const segments: Array<{ selected: boolean; items: typeof groupedMessages }> = []
+  // S3.3: Stable render layers — edit-mode segmentation runs first,
+  // each segment is then classified live/history, then contiguous runs of
+  // the same kind are merged into layer runs. Selection segments are never
+  // split at a history/live boundary; a mixed segment is live if any group is live.
+  const messageSegments = useMemo(
+    () => buildRenderSegments(groupedMessages, isEditMode, selectedGroupIds),
+    [groupedMessages, isEditMode, selectedGroupIds]
+  )
 
-    for (const [key, groupMessages] of groupedMessages) {
-      const groupAskId = groupMessages[0]?.askId || groupMessages[0]?.id || ''
-      const selected = isEditMode && selectedGroupIds.includes(groupAskId)
+  const layerRuns = useMemo(() => buildRenderLayers(messageSegments), [messageSegments])
 
-      const lastSeg = segments[segments.length - 1]
-      if (lastSeg && lastSeg.selected === selected) {
-        lastSeg.items.push([key, groupMessages])
-      } else {
-        segments.push({ selected, items: [[key, groupMessages]] })
-      }
-    }
-
-    return segments
-  }, [groupedMessages, isEditMode, selectedGroupIds])
-
-  // Context window boundary: find the group key where the boundary message renders.
-  // The boundary message ID is computed from the full topic messages (not the display
-  // window) by the parent Messages component, using the same filter pipeline as
-  // ConversationService.filterMessagesPipeline.
+  // Context window boundary: find the legacy projected group key where the boundary message renders.
+  // The legacy key is retained for context-divider semantics while stable entity-derived
+  // keys are used for React reconciliation (LOCK-S3.3-007).
   const contextDividerGroupKey = useMemo(() => {
     if (!contextBoundaryMessageId) return null
     for (const [key, groupMessages] of groupedMessages) {
@@ -212,51 +204,71 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   const renderMessageSegments = () => {
     const result: React.ReactNode[] = []
 
-    for (const seg of messageSegments) {
-      const content = seg.items.map(([key, groupMessages]) => {
-        const firstMsg = groupMessages[0]
-        const segment = firstMsg ? isMessageInSegment(firstMsg.id) : undefined
-        const isFirst = firstMsg ? !!isMessageFirstInSegment(firstMsg.id) : false
-        const lastMsg = groupMessages[groupMessages.length - 1]
-        const isLast = lastMsg ? !!isMessageLastInSegment(lastMsg.id) : false
+    // LOCK-S3.3-FIX-003: no outer React key whose identity changes with layer
+    // membership/composition. Groups/selection blocks are stable entity-derived
+    // siblings so overlapping history DOM survives live updates, live→history
+    // transitions, and viewport expansion. Layer kind/run identity is exposed
+    // only via data-* on existing elements (LOCK-S3.3-FIX-004).
+    for (const layer of layerRuns) {
+      for (const seg of layer.segments) {
+        const kind = seg.isLive ? 'live' : 'history'
+        const content = seg.items.map(([legacyKey, groupMessages]) => {
+          const firstMsg = groupMessages[0]
+          const segment = firstMsg ? isMessageInSegment(firstMsg.id) : undefined
+          const isFirst = firstMsg ? !!isMessageFirstInSegment(firstMsg.id) : false
+          const lastMsg = groupMessages[groupMessages.length - 1]
+          const isLast = lastMsg ? !!isMessageLastInSegment(lastMsg.id) : false
+          const stableGroupId = deriveStableGroupId(groupMessages as readonly Message[])
 
-        return (
-          <Fragment key={key}>
-            <div style={{ position: 'relative' }}>
-              {segment && (
-                <TopicSegmentLine
-                  segment={segment}
-                  isFirst={isFirst}
-                  isLast={isLast}
-                  messageCount={isFirst ? segment.messageIds.length : undefined}
+          return (
+            <Fragment key={stableGroupId}>
+              <div
+                style={{ position: 'relative' }}
+                data-layer-kind={kind}
+                data-stable-group-id={stableGroupId}
+                data-layer-run-id={layer.stableLayerId}>
+                {segment && (
+                  <TopicSegmentLine
+                    segment={segment}
+                    isFirst={isFirst}
+                    isLast={isLast}
+                    messageCount={isFirst ? segment.messageIds.length : undefined}
+                  />
+                )}
+                <MessageGroup
+                  messages={groupMessages}
+                  topic={topic}
+                  registerMessageElement={registerMessageElement}
+                  isEditMode={isEditMode}
+                  onGroupClick={handleGroupClick}
                 />
+              </div>
+              {/* Divider uses the retained legacy projected key for semantics;
+                  reconciliation uses stableGroupId above. */}
+              {legacyKey === contextDividerGroupKey && (
+                <ContextWindowDivider data-context-boundary data-testid="context-boundary">
+                  <ContextWindowDividerLine />
+                  <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
+                  <ContextWindowDividerLine />
+                </ContextWindowDivider>
               )}
-              <MessageGroup
-                messages={groupMessages}
-                topic={topic}
-                registerMessageElement={registerMessageElement}
-                isEditMode={isEditMode}
-                onGroupClick={handleGroupClick}
-              />
-            </div>
-            {/* Divider renders after the message group in DOM. Because the parent
-                flex container uses column-reverse, later siblings appear visually
-                above earlier ones — so this divider appears above the boundary group. */}
-            {key === contextDividerGroupKey && (
-              <ContextWindowDivider data-context-boundary data-testid="context-boundary">
-                <ContextWindowDividerLine />
-                <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
-                <ContextWindowDividerLine />
-              </ContextWindowDivider>
-            )}
-          </Fragment>
-        )
-      })
+            </Fragment>
+          )
+        })
 
-      if (seg.selected) {
-        result.push(<SelectionBlock key={`sel-${result.length}`}>{content}</SelectionBlock>)
-      } else {
-        result.push(content)
+        if (seg.selected) {
+          result.push(
+            <SelectionBlock
+              key={seg.stableSegmentId}
+              data-layer-kind={kind}
+              data-stable-segment-id={seg.stableSegmentId}
+              data-layer-run-id={layer.stableLayerId}>
+              {content}
+            </SelectionBlock>
+          )
+        } else {
+          result.push(...content)
+        }
       }
     }
 

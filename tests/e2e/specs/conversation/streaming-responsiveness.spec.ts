@@ -183,6 +183,43 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     console.log(`[E2E] Interactions completed while still streaming: ${midStream!.content.length} chars in`)
 
     // ═══════════════════════════════════════════════════════════════════
+    // 4b. S3.3 LAYER CONTRACT — simultaneous history/live, single host, no duplicate/missing (mid-stream)
+    // ═══════════════════════════════════════════════════════════════════
+    await expect(page.locator('#messages')).toHaveCount(1)
+    const midLayerKinds = await page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>('[data-layer-kind]')).map((el) =>
+        el.getAttribute('data-layer-kind')
+      )
+    )
+    expect(midLayerKinds).toContain('history')
+    expect(midLayerKinds).toContain('live')
+    console.log(`[E2E] Mid-stream layer kinds: ${midLayerKinds.join(',')}`)
+
+    const midStableGroups = await page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>('[data-stable-group-id]')).map((el) =>
+        el.getAttribute('data-stable-group-id')
+      )
+    )
+    expect(midStableGroups.length).toBeGreaterThan(1)
+    expect(new Set(midStableGroups).size).toBe(midStableGroups.length)
+    const midMessageIds = await page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>('[data-message-id]')).map(
+        (el) => el.getAttribute('data-message-id')!
+      )
+    )
+    expect(new Set(midMessageIds).size).toBe(midMessageIds.length)
+    // No duplicate/missing: groups and messages counts align with rendered uniqueness
+    console.log(`[E2E] Mid-stream groups=${midStableGroups.length} messages=${midMessageIds.length}`)
+
+    // Capture mid-stream history stable id for final transition check
+    const midHistoryStableIds = await page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>('[data-layer-kind="history"][data-stable-group-id]')).map(
+        (el) => el.getAttribute('data-stable-group-id')!
+      )
+    )
+    expect(midHistoryStableIds.length).toBeGreaterThan(0)
+
+    // ═══════════════════════════════════════════════════════════════════
     // 5. COMPLETION — exact final content, no truncation
     // ═══════════════════════════════════════════════════════════════════
     const expectedReply = getSlowStreamReply(MODEL)
@@ -223,5 +260,37 @@ test.describe('Streaming responsiveness (LOCK-004)', () => {
     const markdown = assistantMarkdown(page)
     await expect(markdown).toContainText('tail-marker-END', { timeout: 10000 })
     await expect(markdown).toContainText(`paragraph-${149}`, { timeout: 10000 })
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 6. S3.3 FINAL LIVE→HISTORY TRANSITION — single stable host, all history, history DOM preserved
+    // ═══════════════════════════════════════════════════════════════════
+    await expect(page.locator('#messages')).toHaveCount(1)
+    const finalLayerKinds = await page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>('[data-layer-kind]')).map((el) =>
+        el.getAttribute('data-layer-kind')
+      )
+    )
+    // After completion the streaming tail must have transitioned to history; no live markers remain
+    expect(finalLayerKinds.length).toBeGreaterThan(0)
+    expect(finalLayerKinds.every((k) => k === 'history')).toBe(true)
+    console.log(`[E2E] Final layer kinds: ${finalLayerKinds.join(',')}`)
+
+    const finalStableGroups = await page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>('[data-stable-group-id]')).map((el) =>
+        el.getAttribute('data-stable-group-id')
+      )
+    )
+    expect(new Set(finalStableGroups).size).toBe(finalStableGroups.length)
+    // Mid-stream history groups must still be present with same stable ids (no remount-loss)
+    for (const hid of midHistoryStableIds) {
+      expect(finalStableGroups).toContain(hid)
+    }
+    const finalMessageIds = await page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>('[data-message-id]')).map(
+        (el) => el.getAttribute('data-message-id')!
+      )
+    )
+    expect(new Set(finalMessageIds).size).toBe(finalMessageIds.length)
+    console.log(`[E2E] Final groups=${finalStableGroups.length} messages=${finalMessageIds.length}`)
   })
 })
