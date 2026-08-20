@@ -26,6 +26,18 @@ vi.mock('@renderer/hooks/useEditMode', () => ({
   }))
 }))
 
+// S3.5: EditModeProvider now reads editMode.enabled via useAppSelector (light gate).
+// Mock the store hooks so these unit tests remain Provider-free and deterministic.
+vi.mock('@renderer/store', async () => {
+  const actual: any = await vi.importActual('@renderer/store')
+  return {
+    ...actual,
+    useAppSelector: vi.fn((selector: any) => selector({ editMode: { enabled: false } })),
+    useAppDispatch: () => vi.fn(),
+    default: actual.default
+  }
+})
+
 const { EditModeProvider, useEditMode, useOptionalEditMode } = await import('../EditModeContext')
 
 // ── Helper components ───────────────────────────────────────────────────────

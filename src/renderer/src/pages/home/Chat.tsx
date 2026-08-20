@@ -56,8 +56,25 @@ const Chat: FC<Props> = (props) => {
   const contentSearchRef = React.useRef<ContentSearchRef>(null)
   const messagesRef = React.useRef<MessagesHandle>(null)
   const [filterIncludeUser, setFilterIncludeUser] = useState(false)
+  // S3.5: ContentSearch is parent-owned lazy activation — zero instance before invocation.
+  const [isContentSearchActive, setIsContentSearchActive] = useState(false)
+  const [pendingSearchText, setPendingSearchText] = useState<string | undefined>(undefined)
+  const isSearchActiveRef = React.useRef(isContentSearchActive)
+  React.useEffect(() => {
+    isSearchActiveRef.current = isContentSearchActive
+  }, [isContentSearchActive])
 
-  const { setTimeoutTimer } = useTimer()
+  const firstUpdateCompletedRef = React.useRef(false)
+  const userToggleRaf1Ref = React.useRef<number | null>(null)
+  const userToggleRaf2Ref = React.useRef<number | null>(null)
+  const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
+
+  // Reset first-update flag when topic switches; cancel any pending first-update debounce/timer.
+  React.useEffect(() => {
+    firstUpdateCompletedRef.current = false
+    // Clear pending firstUpdate timer if any (owned via useTimer)
+    clearTimeoutTimer('messagesComponentFirstUpdateHandler')
+  }, [props.activeTopic.id, clearTimeoutTimer])
 
   // --- Shared context projection (Phase 2B) ---
   // Both Messages and Inputbar previously computed computeContextInfo independently
@@ -95,14 +112,41 @@ const Chat: FC<Props> = (props) => {
     return result
   }, [topicMessages, topicBlocks, assistant, props.activeTopic.id])
 
+  const enableContentSearch = React.useCallback((initialText?: string) => {
+    if (isSearchActiveRef.current) {
+      // Already mounted — forward imperatively without losing focus/text.
+      contentSearchRef.current?.enable(initialText)
+    } else {
+      setPendingSearchText(initialText)
+      isSearchActiveRef.current = true
+      setIsContentSearchActive(true)
+    }
+  }, [])
+
+  const disableContentSearch = React.useCallback(() => {
+    if (isSearchActiveRef.current) {
+      // Clear any queued initial text and unmount. ContentSearch also clears highlights on unmount.
+      setPendingSearchText(undefined)
+      try {
+        ;(globalThis as any).CSS?.highlights?.clear?.()
+      } catch {}
+      isSearchActiveRef.current = false
+      setIsContentSearchActive(false)
+    } else {
+      try {
+        ;(globalThis as any).CSS?.highlights?.clear?.()
+      } catch {}
+    }
+  }, [])
+
   useHotkeys('esc', () => {
-    contentSearchRef.current?.disable()
+    disableContentSearch()
   })
 
   useShortcut('search_message_in_chat', () => {
     try {
       const selectedText = window.getSelection()?.toString().trim()
-      contentSearchRef.current?.enable(selectedText)
+      enableContentSearch(selectedText)
     } catch (error) {
       logger.error('Error enabling content search:', error as Error)
     }
@@ -164,37 +208,63 @@ const Chat: FC<Props> = (props) => {
     }
   }
 
-  const userOutlinedItemClickHandler = () => {
-    setFilterIncludeUser(!filterIncludeUser)
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
+  const userOutlinedItemClickHandler = React.useCallback(() => {
+    setFilterIncludeUser((prev) => !prev)
+    if (userToggleRaf1Ref.current != null) cancelAnimationFrame(userToggleRaf1Ref.current)
+    if (userToggleRaf2Ref.current != null) cancelAnimationFrame(userToggleRaf2Ref.current)
+    userToggleRaf1Ref.current = requestAnimationFrame(() => {
+      userToggleRaf2Ref.current = requestAnimationFrame(() => {
         setTimeoutTimer(
           'userOutlinedItemClickHandler',
           () => {
-            contentSearchRef.current?.search()
-            contentSearchRef.current?.focus()
+            // S3.5: Only invoke search when the lazy search is active; otherwise this would implicitly mount it.
+            if (!isSearchActiveRef.current) return
+            if (!contentSearchRef.current) return
+            contentSearchRef.current.search()
+            contentSearchRef.current.focus()
           },
           0
         )
       })
     })
-  }
+  }, [setTimeoutTimer])
 
-  let firstUpdateCompleted = false
-  const firstUpdateOrNoFirstUpdateHandler = debounce(() => {
-    contentSearchRef.current?.silentSearch()
-  }, 10)
+  const firstUpdateOrNoFirstUpdateHandler = React.useMemo(
+    () =>
+      debounce(() => {
+        if (!isSearchActiveRef.current) return
+        if (!contentSearchRef.current) return
+        contentSearchRef.current.silentSearch()
+      }, 10),
+    []
+  )
 
-  const messagesComponentUpdateHandler = () => {
-    if (firstUpdateCompleted) {
+  React.useEffect(() => {
+    return () => {
+      firstUpdateOrNoFirstUpdateHandler.cancel()
+      if (userToggleRaf1Ref.current != null) cancelAnimationFrame(userToggleRaf1Ref.current)
+      if (userToggleRaf2Ref.current != null) cancelAnimationFrame(userToggleRaf2Ref.current)
+      clearTimeoutTimer('userOutlinedItemClickHandler')
+      clearTimeoutTimer('messagesComponentFirstUpdateHandler')
+    }
+  }, [firstUpdateOrNoFirstUpdateHandler, clearTimeoutTimer])
+
+  const messagesComponentUpdateHandler = React.useCallback(() => {
+    if (firstUpdateCompletedRef.current) {
       firstUpdateOrNoFirstUpdateHandler()
     }
-  }
+  }, [firstUpdateOrNoFirstUpdateHandler])
 
-  const messagesComponentFirstUpdateHandler = () => {
-    setTimeoutTimer('messagesComponentFirstUpdateHandler', () => (firstUpdateCompleted = true), 300)
+  const messagesComponentFirstUpdateHandler = React.useCallback(() => {
+    setTimeoutTimer(
+      'messagesComponentFirstUpdateHandler',
+      () => {
+        firstUpdateCompletedRef.current = true
+      },
+      300
+    )
     firstUpdateOrNoFirstUpdateHandler()
-  }
+  }, [firstUpdateOrNoFirstUpdateHandler, setTimeoutTimer])
 
   const mainHeight = 'calc(100vh - var(--navbar-height))'
 
@@ -227,13 +297,17 @@ const Chat: FC<Props> = (props) => {
                   onFirstUpdate={messagesComponentFirstUpdateHandler}
                   sharedContextInfo={sharedContextInfo}
                 />
-                <ContentSearch
-                  ref={contentSearchRef}
-                  searchTarget={mainRef as React.RefObject<HTMLElement>}
-                  filter={contentSearchFilter}
-                  includeUser={filterIncludeUser}
-                  onIncludeUserChange={userOutlinedItemClickHandler}
-                />
+                {isContentSearchActive && (
+                  <ContentSearch
+                    ref={contentSearchRef}
+                    searchTarget={mainRef as React.RefObject<HTMLElement>}
+                    filter={contentSearchFilter}
+                    includeUser={filterIncludeUser}
+                    onIncludeUserChange={userOutlinedItemClickHandler}
+                    initialText={pendingSearchText}
+                    onClose={disableContentSearch}
+                  />
+                )}
                 {messageNavigation && (
                   <ChatNavigation
                     containerId="messages"

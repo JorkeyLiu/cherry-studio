@@ -27,6 +27,15 @@ interface Props {
    * 搜索条定位方式
    */
   positionMode?: 'fixed' | 'absolute' | 'sticky'
+  /**
+   * S3.5: Parent-owned activation.
+   * When ContentSearch is mounted it is always active; unmount is owned by the parent.
+   * initialText is applied on mount (queue of imperative enable before mount).
+   * onClose is called when the search requests to close (Escape/close button) so the
+   * parent can unmount. The component also clears highlights on unmount.
+   */
+  initialText?: string
+  onClose?: () => void
 }
 
 enum SearchCompletedState {
@@ -52,6 +61,21 @@ const escapeRegExp = (string: string): string => {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // $& means the whole matched string
 }
 
+const safeClearHighlights = () => {
+  try {
+    ;(globalThis as any).CSS?.highlights?.clear?.()
+  } catch {}
+}
+
+const safeSetHighlight = (name: string, highlight: any) => {
+  try {
+    ;(globalThis as any).CSS?.highlights?.set?.(name, highlight)
+  } catch {}
+}
+
+const hasHighlightAPI = () =>
+  typeof (globalThis as any).Highlight !== 'undefined' && !!(globalThis as any).CSS?.highlights
+
 const findRangesInTarget = (
   target: HTMLElement,
   filter: NodeFilter,
@@ -59,7 +83,7 @@ const findRangesInTarget = (
   isCaseSensitive: boolean,
   isWholeWord: boolean
 ): Range[] => {
-  CSS.highlights.clear()
+  safeClearHighlights()
   const ranges: Range[] = []
 
   const escapedSearchText = escapeRegExp(searchText)
@@ -135,7 +159,16 @@ const findRangesInTarget = (
 // eslint-disable-next-line @eslint-react/no-forward-ref
 export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
   (
-    { searchTarget, filter, includeUser = false, onIncludeUserChange, showUserToggle = true, positionMode = 'fixed' },
+    {
+      searchTarget,
+      filter,
+      includeUser = false,
+      onIncludeUserChange,
+      showUserToggle = true,
+      positionMode = 'fixed',
+      initialText,
+      onClose
+    },
     ref
   ) => {
     const target: HTMLElement | null = (() => {
@@ -147,7 +180,11 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     })()
     const containerRef = React.useRef<HTMLDivElement>(null)
     const searchInputRef = React.useRef<HTMLInputElement>(null)
-    const [enableContentSearch, setEnableContentSearch] = useState(false)
+    // S3.5: Dual mode — parent-owned lazy (Chat) vs legacy hidden (RichEditor).
+    // Chat passes onClose + initialText and owns mount: when mounted it is always visible, disable unmounts.
+    // RichEditor does not pass onClose: legacy behavior retains internal enable flag and display:none until imperative enable.
+    const isParentOwned = Boolean(onClose)
+    const [enableContentSearch, setEnableContentSearch] = useState(() => isParentOwned)
     const [searchCompleted, setSearchCompleted] = useState(SearchCompletedState.NotSearched)
     const [isCaseSensitive, setIsCaseSensitive] = useState(false)
     const [isWholeWord, setIsWholeWord] = useState(false)
@@ -157,7 +194,7 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     const { t } = useTranslation()
 
     const resetSearch = useCallback(() => {
-      CSS.highlights.clear()
+      safeClearHighlights()
       setAllRanges([])
       setSearchCompleted(SearchCompletedState.NotSearched)
     }, [])
@@ -165,18 +202,19 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     const locateByIndex = useCallback(
       (shouldScroll = true) => {
         // 清理旧的高亮
-        CSS.highlights.clear()
+        safeClearHighlights()
 
         if (allRanges.length > 0) {
+          if (!hasHighlightAPI()) return
           // 1. 创建并注册所有匹配项的高亮
-          const allMatchesHighlight = new Highlight(...allRanges)
-          CSS.highlights.set('search-matches', allMatchesHighlight)
+          const allMatchesHighlight = new (globalThis as any).Highlight(...allRanges)
+          safeSetHighlight('search-matches', allMatchesHighlight)
 
           // 2. 如果有当前项，为其创建并注册一个特殊的高亮
           if (currentIndex !== -1 && allRanges[currentIndex]) {
             const currentMatchRange = allRanges[currentIndex]
-            const currentMatchHighlight = new Highlight(currentMatchRange)
-            CSS.highlights.set('current-match', currentMatchHighlight)
+            const currentMatchHighlight = new (globalThis as any).Highlight(currentMatchRange)
+            safeSetHighlight('current-match', currentMatchHighlight)
 
             // 3. 将当前项滚动到视图中
             // 获取第一个文本节点的父元素来进行滚动
@@ -204,28 +242,49 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
       [target, filter, isCaseSensitive, isWholeWord]
     )
 
+    const rafIdsRef = useRef<number[]>([])
+
+    const trackRaf = (id: number) => {
+      rafIdsRef.current.push(id)
+    }
+
     const implementation = useMemo(
       () => ({
         disable: () => {
-          setEnableContentSearch(false)
-          CSS.highlights.clear()
+          safeClearHighlights()
+          setAllRanges([])
+          setSearchCompleted(SearchCompletedState.NotSearched)
+          setCurrentIndex(-1)
+          if (isParentOwned) {
+            // S3.5: Parent-owned unmount. Notify parent; parent will unmount this component.
+            onClose?.()
+          } else {
+            setEnableContentSearch(false)
+          }
         },
-        enable: (initialText?: string) => {
-          setEnableContentSearch(true)
+        enable: (nextText?: string) => {
+          if (!isParentOwned) {
+            setEnableContentSearch(true)
+          }
+          // S3.5: Already mounted (parent-owned) or now enabled (legacy) — apply text/focus/search.
           if (searchInputRef.current) {
             const inputEl = searchInputRef.current
-            if (initialText && initialText.trim().length > 0) {
-              inputEl.value = initialText
-              requestAnimationFrame(() => {
-                inputEl.focus()
-                inputEl.select()
-                search(false)
-              })
+            if (nextText && nextText.trim().length > 0) {
+              inputEl.value = nextText
+              trackRaf(
+                requestAnimationFrame(() => {
+                  inputEl.focus()
+                  inputEl.select()
+                  search(false)
+                })
+              )
             } else {
-              requestAnimationFrame(() => {
-                inputEl.focus()
-                inputEl.select()
-              })
+              trackRaf(
+                requestAnimationFrame(() => {
+                  inputEl.focus()
+                  inputEl.select()
+                })
+              )
             }
           }
         },
@@ -254,10 +313,16 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
           searchInputRef.current?.focus()
         }
       }),
-      [allRanges.length, locateByIndex, search]
+      [allRanges.length, locateByIndex, search, isParentOwned, onClose]
     )
 
     const _searchHandlerDebounce = useMemo(() => debounce(implementation.search, 300), [implementation.search])
+
+    useEffect(() => {
+      return () => {
+        _searchHandlerDebounce.cancel()
+      }
+    }, [_searchHandlerDebounce])
 
     const searchHandler = useCallback(() => {
       _searchHandlerDebounce()
@@ -299,7 +364,7 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     )
 
     const searchInputFocus = useCallback(() => {
-      requestAnimationFrame(() => searchInputRef.current?.focus())
+      trackRaf(requestAnimationFrame(() => searchInputRef.current?.focus()))
     }, [])
 
     const userOutlinedButtonOnClick = useCallback(() => {
@@ -308,6 +373,44 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     }, [includeUser, onIncludeUserChange, searchInputFocus])
 
     useImperativeHandle(ref, () => implementation, [implementation])
+
+    // S3.5: Apply parent-provided initialText on mount (handles imperative invocation across mount boundary).
+    // For parent-owned mode the component is always visible; for legacy mode an initialText also enables the search.
+    useEffect(() => {
+      if (initialText && initialText.trim().length > 0 && searchInputRef.current) {
+        if (!isParentOwned) setEnableContentSearch(true)
+        const inputEl = searchInputRef.current
+        inputEl.value = initialText
+        trackRaf(
+          requestAnimationFrame(() => {
+            // Guard unmounted search instance
+            if (!searchInputRef.current) return
+            inputEl.focus()
+            inputEl.select()
+            search(false)
+          })
+        )
+      } else if (isParentOwned) {
+        trackRaf(
+          requestAnimationFrame(() => {
+            searchInputRef.current?.focus()
+            searchInputRef.current?.select()
+          })
+        )
+      }
+      // Only on mount — initialText is the mount-time queue.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
+
+    // S3.5: Clear highlights on unmount so no stale ranges survive the lazy window.
+    useEffect(() => {
+      return () => {
+        safeClearHighlights()
+        _searchHandlerDebounce.cancel()
+        rafIdsRef.current.forEach((id) => cancelAnimationFrame(id))
+        rafIdsRef.current = []
+      }
+    }, [_searchHandlerDebounce])
 
     useEffect(() => {
       locateByIndex()
@@ -346,10 +449,11 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     return (
       <Container
         ref={containerRef}
-        style={enableContentSearch ? {} : { display: 'none' }}
+        data-testid="content-search-host"
+        style={isParentOwned ? undefined : enableContentSearch ? {} : { display: 'none' }}
         $overlayPosition={positionMode === 'absolute' ? 'absolute' : 'static'}>
         <div style={{ width: '100%' }}>
-          <SearchBarContainer $position={positionMode}>
+          <SearchBarContainer $position={positionMode} data-testid="content-search">
             <InputWrapper>
               <Input
                 ref={searchInputRef}
