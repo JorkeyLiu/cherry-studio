@@ -43,6 +43,50 @@ const mocks = vi.hoisted(() => {
   // intents to exercise the bootstrap path.
   let pendingNavigate: { messageId: string; topicId: string } | null = null
 
+  // S3.2: key-aware scroll position store. Mirrors production keyv:
+  // keys are `scroll:<scrollKey>`, values are { scrollTop, anchorId, isAtBottom }.
+  const scrollKeyStore = new Map<string, unknown>()
+
+  // S3.2: Modeled scrollKeyRef — models the production useScrollPosition hook's
+  // scrollKeyRef. The production hook updates scrollKeyRef.current inside
+  // useEffect (passive), NOT during render. When useTopicTransition's
+  // useLayoutEffect calls savePosition(), scrollKeyRef.current still holds the
+  // PREVIOUS render's key. Tests must call simulatePassiveKeyUpdate() after each
+  // rerender to advance the ref, matching real passive-effect timing.
+  const scrollKeyRef = { current: '' }
+
+  // S3.2: Stable function references. Messages.tsx has savePosition and
+  // getSavedPosition in useEffect dependency arrays. If these are new
+  // closures each render, the effect re-runs every render causing hangs.
+  // Using vi.fn() here gives stable references that also track call counts.
+  const savePositionSpy = vi.fn(() => {
+    // Write to scrollKeyStore under scrollKeyRef.current.
+    // At layout-effect time, scrollKeyRef.current still holds the OLD key
+    // because the passive effect hasn't updated it yet.
+    const storeKey = `scroll:${scrollKeyRef.current}`
+    const container = scrollContainerRef.current
+    if (!container) return
+    const scrollTop = container.scrollTop
+    scrollKeyStore.set(storeKey, {
+      scrollTop,
+      anchorId: null,
+      isAtBottom: Math.abs(scrollTop) <= 50
+    })
+  })
+
+  const getSavedPositionSpy = vi.fn((): { scrollTop: number; anchorId: string | null; isAtBottom: boolean } | null => {
+    // Read from scrollKeyStore under scrollKeyRef.current (the modeled ref).
+    // At layout-effect time, this still holds the OLD key.
+    const val = scrollKeyStore.get(`scroll:${scrollKeyRef.current}`)
+    if (val && typeof val === 'object' && 'scrollTop' in val) {
+      return val as { scrollTop: number; anchorId: string | null; isAtBottom: boolean }
+    }
+    return null
+  })
+
+  // Mock refs to track (used by the mock factory and tests)
+  const scrollContainerRef: { current: HTMLElement | null } = { current: null }
+
   return {
     getPendingNavigate: vi.fn(() => pendingNavigate),
     clearPendingNavigate: vi.fn(() => true),
@@ -50,10 +94,16 @@ const mocks = vi.hoisted(() => {
       pendingNavigate = value
     },
 
-    // useScrollPosition — controlled mock so we can inspect savePosition calls
-    // and avoid the real keyv/store dependency.
-    savePosition: vi.fn(),
-    getSavedPosition: vi.fn((): { scrollTop: number; anchorId: string | null; isAtBottom: boolean } | null => null),
+    // useScrollPosition — stable vi.fn() references that also write/read
+    // from scrollKeyStore. The spy tracks call count (used by S3.1
+    // epoch-guard tests) and the store write/read provides key-aware
+    // behavior (used by S3.2 key-aware tests).
+    savePosition: savePositionSpy,
+    getSavedPosition: getSavedPositionSpy,
+
+    // S3.2: key-aware infrastructure — exposed for setup/teardown/assertion
+    scrollKeyStore,
+    scrollKeyRef,
 
     // useTimer mock
     setTimeoutTimer: vi.fn((_name: string, fn: () => void, _ms: number) => fn()),
@@ -70,9 +120,26 @@ const mocks = vi.hoisted(() => {
     topicMessages: [] as Message[],
 
     // Mock refs to track
-    scrollContainerRef: { current: null }
+    scrollContainerRef,
+
+    // S3.2: Simulate the production useEffect that updates scrollKeyRef.current.
+    // Must be called after each rerender to advance the modeled ref.
+    simulatePassiveKeyUpdate: (key: string) => {
+      scrollKeyRef.current = key
+    }
   }
 })
+
+/**
+ * S3.2: Create a mock scroll container with a controllable scrollTop.
+ * In production, useScrollPosition reads containerRef.current.scrollTop.
+ * The mock matches: savePosition reads scrollContainerRef.current.scrollTop.
+ */
+function createMockContainer(scrollTop: number): HTMLDivElement {
+  const el = document.createElement('div')
+  Object.defineProperty(el, 'scrollTop', { value: scrollTop, writable: true, configurable: true })
+  return el
+}
 
 // ---------------------------------------------------------------------------
 // Module mocks — keep useTopicTransition, useReducer, viewportReducer REAL
@@ -107,13 +174,32 @@ vi.mock('@renderer/hooks/useMessageOperations', () => ({
 }))
 
 vi.mock('@renderer/hooks/useScrollPosition', () => ({
-  default: (_key: string) => ({
-    containerRef: mocks.scrollContainerRef,
-    handleScroll: vi.fn(),
-    getSavedPosition: mocks.getSavedPosition,
-    clearSavedPosition: vi.fn(),
-    savePosition: mocks.savePosition
-  })
+  default: (_key: string) => {
+    // S3.2: Model production useScrollPosition key timing.
+    //
+    // The production hook updates scrollKeyRef.current inside useEffect
+    // (passive), so when useTopicTransition's useLayoutEffect calls
+    // savePosition(), scrollKeyRef.current still holds the PREVIOUS
+    // render's key.
+    //
+    // We do NOT update scrollKeyRef here (in the factory call, which runs
+    // during render). The test must call mocks.simulatePassiveKeyUpdate(key)
+    // after each rerender to advance the ref — matching real passive-effect
+    // timing. This ensures savePosition() always reads the stale ref value
+    // at layout-effect time.
+    //
+    // IMPORTANT: savePosition and getSavedPosition are stable references
+    // (mocks.savePosition and mocks.getSavedPosition — vi.fn() instances
+    // defined once in vi.hoisted). Messages.tsx has them in useEffect
+    // dependency arrays; new closures each render would cause infinite loops.
+    return {
+      containerRef: mocks.scrollContainerRef,
+      handleScroll: vi.fn(),
+      getSavedPosition: mocks.getSavedPosition,
+      clearSavedPosition: vi.fn(),
+      savePosition: mocks.savePosition
+    }
+  }
 }))
 
 vi.mock('@renderer/hooks/useShortcuts', () => ({
@@ -369,6 +455,255 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     mocks.savePosition.mockClear()
     resolveTransactionControlled = null
     pendingTransactionResolvers.length = 0
+    // S3.2: Clear key-aware scroll store and reset key ref
+    mocks.scrollKeyStore.clear()
+    mocks.scrollKeyRef.current = ''
+  })
+
+  // -----------------------------------------------------------------------
+  // S3.2: Explicit old-topic scroll save ordering
+  //
+  // useTopicTransition now calls saveOldTopicScrollPosition (mapped to
+  // useScrollPosition.savePosition) BEFORE topic/reset, so the old topic's
+  // scroll position is snapshotted to the old key before any transition
+  // state changes. This replaces the implicit passive cleanup in
+  // useScrollPosition's key-change effect.
+  // -----------------------------------------------------------------------
+
+  it('S3.2: savePosition is called before topic/reset on A→B transition', () => {
+    const topicA = makeTopic('topic-a')
+    const topicB = makeTopic('topic-b')
+    const assistant = makeAssistant()
+
+    render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+
+    // Advance key ref to match topic A (simulates passive useEffect)
+    mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
+
+    // savePosition should not be called on initial render
+    mocks.savePosition.mockClear()
+
+    // Switch topic — savePosition must be called during the transition
+    // (before viewport reset, timers, etc.)
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+
+    rerender(
+      <Messages
+        assistant={assistant}
+        topic={topicB}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+
+    // S3.2: savePosition must have been called exactly once for the old topic
+    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
+  })
+
+  it('S3.2: A→B→A saves each topic scroll independently (no cross-topic contamination)', () => {
+    const topicA = makeTopic('topic-a')
+    const topicB = makeTopic('topic-b')
+    const assistant = makeAssistant()
+
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+
+    // Advance key ref to match topic A
+    mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
+    mocks.savePosition.mockClear()
+
+    // A → B: saves topic A's scroll
+    rerender(
+      <Messages
+        assistant={assistant}
+        topic={topicB}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
+
+    // Advance key ref to match topic B
+    mocks.simulatePassiveKeyUpdate(`topic-${topicB.id}`)
+
+    // B → A: saves topic B's scroll
+    rerender(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    expect(mocks.savePosition).toHaveBeenCalledTimes(2)
+  })
+
+  // -----------------------------------------------------------------------
+  // S3.2 Blocker 2 correction: Key-aware mounted integration test.
+  //
+  // Proves that A→B writes only the old A key and A→B→A preserves
+  // independent keys through the mock's real scrollKeyStore. The mock
+  // models production useScrollPosition key timing: scrollKeyRef is updated
+  // by a simulated passive effect AFTER render, so savePosition (called by
+  // useTopicTransition's useLayoutEffect) reads the stale ref — the OLD key.
+  //
+  // Uses distinct nonzero scrollTop values (-150 for A, -300 for B) and
+  // mock containers to prove each key retains its own value with no
+  // cross-topic contamination.
+  // -----------------------------------------------------------------------
+
+  it('S3.2 Blocker 2: key-aware — A→B writes only old A key; A→B→A preserves independent keys', () => {
+    const topicA = makeTopic('topic-a')
+    const topicB = makeTopic('topic-b')
+    const assistant = makeAssistant()
+
+    // Messages component calls useScrollPosition(`topic-${topic.id}`),
+    // so the actual keys are 'topic-topic-a' and 'topic-topic-b'.
+    const keyA = `topic-${topicA.id}`
+    const keyB = `topic-${topicB.id}`
+    const storeKeyA = `scroll:${keyA}`
+    const storeKeyB = `scroll:${keyB}`
+
+    // Render with topic A — useScrollPosition(keyA) called.
+    // Factory does NOT update scrollKeyRef (passive effect deferred).
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+
+    // Simulate passive effect: advance scrollKeyRef to keyA.
+    mocks.simulatePassiveKeyUpdate(keyA)
+
+    // Set up mock container with topic A's scroll position.
+    mocks.scrollContainerRef.current = createMockContainer(-150)
+
+    mocks.savePosition.mockClear()
+
+    // A → B: useScrollPosition(keyB) called.
+    // Factory does NOT update scrollKeyRef (passive effect deferred).
+    // useTopicTransition's useLayoutEffect fires during rerender:
+    //   1. Calls savePosition() — reads scrollKeyRef.current = keyA (stale!)
+    //   2. Writes { scrollTop: -150 } to scrollKeyStore['scroll:keyA']
+    //   3. Increments epoch, dispatches topic/reset, etc.
+    // After rerender: passive effect advances scrollKeyRef to keyB.
+    rerender(
+      <Messages
+        assistant={assistant}
+        topic={topicB}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+
+    // savePosition called once — writes to OLD key (keyA) with A's scrollTop
+    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
+    const aWrite = mocks.scrollKeyStore.get(storeKeyA)
+    expect(aWrite).toBeDefined()
+    expect((aWrite as any).scrollTop).toBe(-150)
+    expect((aWrite as any).isAtBottom).toBe(false)
+
+    // NEW key (keyB) must NOT have been written by the transition save
+    const bWrite = mocks.scrollKeyStore.get(storeKeyB)
+    expect(bWrite).toBeUndefined()
+
+    // Simulate passive effect: advance scrollKeyRef to keyB.
+    mocks.simulatePassiveKeyUpdate(keyB)
+
+    // Set up mock container with topic B's distinct scroll position.
+    mocks.scrollContainerRef.current = createMockContainer(-300)
+
+    // B → A: useScrollPosition(keyA) called.
+    // useTopicTransition's useLayoutEffect fires:
+    //   1. Calls savePosition() — reads scrollKeyRef.current = keyB (stale!)
+    //   2. Writes { scrollTop: -300 } to scrollKeyStore['scroll:keyB']
+    rerender(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+
+    // savePosition called twice total — second call writes to old key (keyB)
+    expect(mocks.savePosition).toHaveBeenCalledTimes(2)
+    const bWrite2 = mocks.scrollKeyStore.get(storeKeyB)
+    expect(bWrite2).toBeDefined()
+    expect((bWrite2 as any).scrollTop).toBe(-300)
+    expect((bWrite2 as any).isAtBottom).toBe(false)
+
+    // keyA still has its original value — no cross-contamination
+    const aStill = mocks.scrollKeyStore.get(storeKeyA)
+    expect((aStill as any).scrollTop).toBe(-150)
+
+    // Simulate passive effect: advance scrollKeyRef back to keyA.
+    mocks.simulatePassiveKeyUpdate(keyA)
+
+    // Both keys exist independently in the store
+    expect(mocks.scrollKeyStore.size).toBe(2)
+    expect(mocks.scrollKeyStore.has(storeKeyA)).toBe(true)
+    expect(mocks.scrollKeyStore.has(storeKeyB)).toBe(true)
+  })
+
+  it('S3.2: same-topic re-render does NOT call savePosition', () => {
+    const topicA = makeTopic('topic-a')
+    const assistant = makeAssistant()
+
+    render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+
+    mocks.savePosition.mockClear()
+
+    // Re-render with same topic — no transition, no save
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+
+    rerender(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+
+    expect(mocks.savePosition).not.toHaveBeenCalled()
   })
 
   it('preserves component identity across topic prop changes (no remount)', () => {
@@ -575,9 +910,15 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // handlePendingNavigateEvent has called deps.navigate().
     await act(async () => {})
 
+    // S3.2: Reset mock after initial render so we can distinguish the
+    // transition coordinator's explicit savePosition from any stale calls.
+    mocks.savePosition.mockClear()
+
     // Before resolving the navigation, transition A → B (epoch incremented).
     // The epoch-guarded clearPending callback captures navEpoch at handler
     // start (0) and checks transitionEpochRef.current at call time.
+    // S3.2: useTopicTransition calls saveOldTopicScrollPosition before
+    // topic/reset, so savePosition is called once for the old topic.
     await act(async () => {
       rerender(
         <Messages
@@ -602,8 +943,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // S3.1 Blocker 1: stale clearPending must NOT have been called
     expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
-    // S3.1 Blocker 1: stale savePosition must NOT have been called
-    expect(mocks.savePosition).not.toHaveBeenCalled()
+    // S3.2: savePosition called exactly once — from the transition coordinator's
+    // explicit old-topic scroll save. The stale completion must NOT add a call.
+    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
   })
 
   it('S3.1 Blocker 1: NAVIGATE_TO_MESSAGE same-epoch completion clears pending and persists', async () => {
@@ -664,7 +1006,11 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     await act(async () => {})
 
+    // S3.2: Reset mock after initial render
+    mocks.savePosition.mockClear()
+
     // Transition A → B before the navigation resolves
+    // S3.2: useTopicTransition calls saveOldTopicScrollPosition before topic/reset
     await act(async () => {
       rerender(
         <Messages
@@ -684,8 +1030,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     await handlerPromise
 
-    // S3.1 Blocker 2: stale savePosition must NOT have been called
-    expect(mocks.savePosition).not.toHaveBeenCalled()
+    // S3.2: savePosition called exactly once — from the transition coordinator's
+    // explicit old-topic scroll save. The stale completion must NOT add a call.
+    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
   })
 
   it('S3.1 Blocker 2: NAVIGATE_TO_MESSAGE same-epoch savePosition persists', async () => {
@@ -742,7 +1089,10 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     await act(async () => {})
 
-    // Transition A → B (epoch 1)
+    // S3.2: Reset mock after initial render
+    mocks.savePosition.mockClear()
+
+    // Transition A → B (epoch 1) — savePosition called once for old topic A
     await act(async () => {
       rerender(
         <Messages
@@ -754,8 +1104,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       )
     })
 
-    // B → A (epoch 2) — bootstrap detects matching pending and starts a new
-    // transaction (promise #2), which overwrites resolveTransactionControlled.
+    // B → A (epoch 2) — savePosition called once for old topic B;
+    // bootstrap detects matching pending and starts a new transaction
+    // (promise #2), which overwrites resolveTransactionControlled.
     await act(async () => {
       rerender(
         <Messages
@@ -785,7 +1136,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // Epoch-0 handler is stale at epoch 2: must NOT clear or persist
     expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
-    expect(mocks.savePosition).not.toHaveBeenCalled()
+    // S3.2: savePosition called exactly twice — once per transition coordinator
+    // call (A→B and B→A). The stale epoch-0 handler must NOT add calls.
+    expect(mocks.savePosition).toHaveBeenCalledTimes(2)
   })
 
   // -----------------------------------------------------------------------
@@ -819,7 +1172,11 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     await act(async () => {})
 
-    // Transition A → B (epoch incremented to 1)
+    // S3.2: Reset mock after initial render
+    mocks.savePosition.mockClear()
+
+    // Transition A → B (epoch incremented to 1) — savePosition called once
+    // for old topic A by the transition coordinator
     await act(async () => {
       rerender(
         <Messages
@@ -838,8 +1195,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // Stale: clearPendingNavigate must NOT have been called
     expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
-    // Stale: savePosition must NOT have been called
-    expect(mocks.savePosition).not.toHaveBeenCalled()
+    // S3.2: savePosition called exactly once — from the transition coordinator.
+    // The stale bootstrap completion must NOT add a call.
+    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
   })
 
   it('S3.1 Blocker 1: pending bootstrap same-epoch completion clears pending and persists', async () => {
@@ -894,7 +1252,10 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     await act(async () => {})
 
-    // A → B (epoch 1)
+    // S3.2: Reset mock after initial render
+    mocks.savePosition.mockClear()
+
+    // A → B (epoch 1) — savePosition called once for old topic A
     await act(async () => {
       rerender(
         <Messages
@@ -906,8 +1267,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       )
     })
 
-    // B → A (epoch 2) — bootstrap detects matching pending and starts new
-    // navigation (resolver index 1)
+    // B → A (epoch 2) — savePosition called once for old topic B;
+    // bootstrap detects matching pending and starts new navigation
+    // (resolver index 1)
     await act(async () => {
       rerender(
         <Messages
@@ -930,8 +1292,10 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // clearPendingNavigate called exactly once (epoch-2 bootstrap only)
     expect(mocks.clearPendingNavigate).toHaveBeenCalledTimes(1)
-    // savePosition called exactly once (epoch-2 bootstrap only)
-    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
+    // S3.2: savePosition called exactly three times — two from transition
+    // coordinators (A→B, B→A) and one from the epoch-2 bootstrap completion.
+    // The stale epoch-0 completion must NOT add a call.
+    expect(mocks.savePosition).toHaveBeenCalledTimes(3)
   })
 
   // -----------------------------------------------------------------------
@@ -966,7 +1330,10 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     await act(async () => {})
 
-    // Transition A → B (epoch 1)
+    // S3.2: Reset mock after initial render
+    mocks.savePosition.mockClear()
+
+    // Transition A → B (epoch 1) — savePosition called once for old topic A
     await act(async () => {
       rerender(
         <Messages
@@ -983,8 +1350,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       pendingTransactionResolvers[0]?.('success')
     })
 
-    // Stale: savePosition must NOT have been called
-    expect(mocks.savePosition).not.toHaveBeenCalled()
+    // S3.2: savePosition called exactly once — from the transition coordinator.
+    // The stale bootstrap completion must NOT add a call.
+    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
   })
 
   it('S3.1 Blocker 2: saved restore same-epoch completion persists', async () => {
@@ -1053,7 +1421,10 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     expect(pendingTransactionResolvers.length).toBe(1)
 
-    // Transition A → B (epoch 1)
+    // S3.2: Reset mock after initial render + scrollToBottom
+    mocks.savePosition.mockClear()
+
+    // Transition A → B (epoch 1) — savePosition called once for old topic A
     await act(async () => {
       rerender(
         <Messages
@@ -1071,8 +1442,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       pendingTransactionResolvers[0]?.('success')
     })
 
-    // Stale: savePosition must NOT have been called
-    expect(mocks.savePosition).not.toHaveBeenCalled()
+    // S3.2: savePosition called exactly once — from the transition coordinator.
+    // The stale scrollToBottom completion must NOT add a call.
+    expect(mocks.savePosition).toHaveBeenCalledTimes(1)
   })
 
   it('S3.1 Blocker 2: imperative scrollToBottom same-epoch completion persists', async () => {

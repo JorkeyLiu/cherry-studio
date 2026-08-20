@@ -374,10 +374,13 @@ const Messages = ({
   const transitionEpochRef = useRef(0)
 
   // S3.1: Explicit topic transition coordinator. Detects topic prop changes
-  // and orchestrates deterministic cleanup: viewport reset (generation advance,
-  // stale rejection), timer clearing, bootstrap phase reset, and saved-restore
-  // flag reset. The component remains mounted across topic changes — no
-  // key-driven remount.
+  // and orchestrates deterministic cleanup: save old-topic scroll position,
+  // viewport reset (generation advance, stale rejection), timer clearing,
+  // bootstrap phase reset, and saved-restore flag reset. The component
+  // remains mounted across topic changes — no key-driven remount.
+  // S3.2: saveOldTopicScrollPosition is called explicitly before topic/reset
+  // so the old topic's scroll is snapshotted to the old key before any
+  // transition state changes.
   useTopicTransition({
     topicId: topic.id,
     viewportDispatch,
@@ -394,7 +397,8 @@ const Messages = ({
     resetOnFirstUpdate: () => {
       onFirstUpdateFiredRef.current = false
     },
-    transitionEpochRef
+    transitionEpochRef,
+    saveOldTopicScrollPosition: savePosition
   })
 
   // Unified context info: boundary message ID, context count, and the single

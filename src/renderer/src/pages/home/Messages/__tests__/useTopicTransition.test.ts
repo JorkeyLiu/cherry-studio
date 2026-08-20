@@ -23,7 +23,8 @@ describe('useTopicTransition', () => {
     resetBootstrapPhase: vi.fn(),
     clearTimers: vi.fn(),
     resetSavedRestore: vi.fn(),
-    resetOnFirstUpdate: vi.fn()
+    resetOnFirstUpdate: vi.fn(),
+    saveOldTopicScrollPosition: vi.fn()
   })
 
   it('does not fire on initial render (no topic change)', () => {
@@ -74,7 +75,7 @@ describe('useTopicTransition', () => {
     expect(epochRef.current).toBe(1)
   })
 
-  it('calls callbacks in deterministic order: viewport → timers → bootstrap → savedRestore → onFirstUpdate', () => {
+  it('calls callbacks in deterministic order: save → viewport → timers → bootstrap → savedRestore → onFirstUpdate', () => {
     const callOrder: string[] = []
     const epochRef = { current: 0 }
     const callbacks = {
@@ -82,7 +83,8 @@ describe('useTopicTransition', () => {
       resetBootstrapPhase: vi.fn(() => callOrder.push('bootstrap')),
       clearTimers: vi.fn(() => callOrder.push('timers')),
       resetSavedRestore: vi.fn(() => callOrder.push('savedRestore')),
-      resetOnFirstUpdate: vi.fn(() => callOrder.push('onFirstUpdate'))
+      resetOnFirstUpdate: vi.fn(() => callOrder.push('onFirstUpdate')),
+      saveOldTopicScrollPosition: vi.fn(() => callOrder.push('save'))
     }
 
     const { rerender } = renderHook(
@@ -98,7 +100,7 @@ describe('useTopicTransition', () => {
 
     rerender({ topicId: 'topic-b' })
 
-    expect(callOrder).toEqual(['viewport', 'timers', 'bootstrap', 'savedRestore', 'onFirstUpdate'])
+    expect(callOrder).toEqual(['save', 'viewport', 'timers', 'bootstrap', 'savedRestore', 'onFirstUpdate'])
   })
 
   it('does not re-fire when topicId stays the same across re-renders', () => {
@@ -163,6 +165,7 @@ describe('useTopicTransition', () => {
           clearTimers: vi.fn(),
           resetSavedRestore: vi.fn(),
           resetOnFirstUpdate: vi.fn(),
+          saveOldTopicScrollPosition: vi.fn(),
           transitionEpochRef: epochRef
         }),
       { initialProps: { topicId: 'topic-a' } }
@@ -208,6 +211,7 @@ describe('useTopicTransition', () => {
           clearTimers: vi.fn(),
           resetSavedRestore: vi.fn(),
           resetOnFirstUpdate: vi.fn(),
+          saveOldTopicScrollPosition: vi.fn(),
           transitionEpochRef: epochRef
         }),
       { initialProps: { topicId: 'topic-a' } }
