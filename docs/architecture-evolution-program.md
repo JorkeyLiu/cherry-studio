@@ -3,7 +3,7 @@
 > **Document status**: **Approved Strategy (program-level)**. This document owns the architecture evolution program: strategic intent, approved locks, target qualities, debt registry, phased evolution, and decision triggers. It is not an ADR; it does not create new governance authority for identity, release, platform, SQLite migration, or context-window governance — those remain authoritative in their existing documents.
 > **Authority boundary**: Architecture correctness, elegance, unity, and long-term evolvability lead. Performance symptoms expose architecture debt; performance remains validation evidence, not the sole design objective. Future startup speed and bounded memory are architecture enablement goals. Sync is future compatibility only, vendor-neutral, and must adapt to the application architecture — never the reverse.
 > **Relation to current architecture reference**: [`architecture.md`](./architecture.md) describes implemented reality only. This program describes the target evolution path. The two must not be confused; `architecture.md` must not be edited to describe unimplemented target state.
-> **Last updated**: 2026-08-20 (S3.5 implementation recording — commit `917a3bb7f31db771f8a083011fe3f1af97e6b8f8`)
+> **Last updated**: 2026-08-20 (post-S3.5 acceptance-surface measurement — clean commit `bfc1c61713a689275324c85a4cafa23b35040abc`, dirty=false)
 > **Owner**: Architecture evolution program (cross-cutting)
 
 ---
@@ -364,13 +364,13 @@ Phase 2 decisions are reviewed against ARCH-005 sync-ready properties:
 
 ### Phase 3: Stable Render/State/Action Graph
 
-**Entry criteria**: Phase 2 ownership model complete; explicit approval required. The structural entry criterion (documented ownership model) is satisfied by Phase 2 completion (2026-08-19). Phase 3 implementation slices are **complete** — S3.1, S3.2, S3.3, S3.4, and S3.5 implemented (S3.1: 2026-08-19, commit `0dabf3d9fb`; S3.2: 2026-08-20, commit `992e51624a`; S3.3: 2026-08-20, commit `b215df77c1`; S3.4: 2026-08-20, commit `00e76dd05c`; S3.5: 2026-08-20, commit `917a3bb7f3` / `917a3bb7f31db771f8a083011fe3f1af97e6b8f8`); S3.4 prerequisite satisfied by S3.1; S3.5 remains independent. Phase 3 is implementation-complete; acceptance validation (PERF-TOPIC-SWITCH/PERF-ECHO) remains pending and is not claimed by slice completion.
+**Entry criteria**: Phase 2 ownership model complete; explicit approval required. The structural entry criterion (documented ownership model) is satisfied by Phase 2 completion (2026-08-19). Phase 3 implementation slices are **complete** — S3.1, S3.2, S3.3, S3.4, and S3.5 implemented (S3.1: 2026-08-19, commit `0dabf3d9fb`; S3.2: 2026-08-20, commit `992e51624a`; S3.3: 2026-08-20, commit `b215df77c1`; S3.4: 2026-08-20, commit `00e76dd05c`; S3.5: 2026-08-20, commit `917a3bb7f3` / `917a3bb7f31db771f8a083011fe3f1af97e6b8f8`); S3.4 prerequisite satisfied by S3.1; S3.5 remains independent. Phase 3 is implementation-complete; post-S3.5 acceptance-surface measurement was executed 2026-08-20 on clean commit `bfc1c61713a689275324c85a4cafa23b35040abc` dirty=false (see measurement record below); measurement completion is not acceptance completion; PERF-TOPIC-SWITCH/PERF-ECHO remain Open with no committed threshold; Phase 3 exit remains pending.
 **Content**:
 - Establish a stable, well-defined graph of render dependencies, state subscriptions, and action handlers.
 - Reduce unnecessary component remounts and re-renders through structural clarity (not speculative memoization sweeps).
 - Stabilize projected array identities and memo boundaries through ownership, not patches.
 
-**Exit criteria**: Documented render/state/action graph with reduced remount blast radius; validated by PERF-TOPIC-SWITCH/PERF-ECHO acceptance criteria.
+**Exit criteria**: Documented render/state/action graph with reduced remount blast radius; validated by PERF-TOPIC-SWITCH/PERF-ECHO acceptance criteria. Exit not claimed — measurement record below is L3 directional observation only, not acceptance completion; PERF-TOPIC-SWITCH/PERF-ECHO remain Open, no threshold, closure pending.
 **Dependencies**: Phase 2 complete.
 **Implementation slices** (in dependency order; each independently testable and rollback-bounded):
 
@@ -452,6 +452,30 @@ Phase 2 decisions are reviewed against ARCH-005 sync-ready properties:
 **Non-claims**: S3.5 does not close PERF-TOPIC-SWITCH, PERF-ECHO, PERF-RENDER-FLOW, or any performance workstream/threshold/workstream closure, Phase 7, or sync. No performance threshold is claimed or measured as closed by this slice. No measured performance improvement is claimed. Existing recorded L3 performance values remain directional reference unless explicitly remeasured. Phase 3 exit criteria remain pending despite all implementation slices being complete.
 
 **Relationship to performance**: S3.5 is lifecycle correctness (lazy activation and subscription gating) within the stable-host graph; it does not claim latency or memory improvement. Performance remains validation evidence and requires dedicated measurement under `performance-measurement.md`; Phase 3 implementation-complete does not imply acceptance satisfied.
+
+#### Post-S3.5 Acceptance-Surface Measurement Record (2026-08-20 — clean commit `bfc1c61713a689275324c85a4cafa23b35040abc`, dirty=false)
+
+Measurement completion is not acceptance completion. PERF-TOPIC-SWITCH and PERF-ECHO remain Open; no committed numeric threshold exists; L1 correctness gates passed, L3 timings are directional observations only; accepted user-visible performance/closure triad is not established.
+
+**Execution**: Fresh `pnpm build` exit 0. Six canonical focused runs exit 0 on clean commit `bfc1c61713a689275324c85a4cafa23b35040abc` dirty=false, Electron ABI 145, no `PERF_PHASE_ATTR` overlay. All expected samples complete. No closure, no threshold pass/fail, no baseline adoption, no root-cause, no improvement/regression claim.
+
+**Matrix (exactly six runs)**: Three PERF-101 cache-hit repeat-switch scales (N20/W10, N20/W20, N100/W10) + one PERF-103 standard echo run + two PERF-103 high-turn runs (20 and 100 prior turns). No unrelated specs are part of this matrix.
+
+**Gates**: PERF-101 11/11 per scale (correctness/parity/privacy/completeness/schema/ABI); PERF-103 10/10 per run (correctness/parity/completeness/ABI). L1 correctness gates passed; L3 timings are directional observations only. Final artifacts are gitignored local evidence; persistence beyond that is not claimed.
+
+**PERF-101 cache-hit repeat-switch (3 samples/scale, values p50/p95/mean ms)**:
+- N20/W10 — cacheMiss.firstUsefulRender 191.4/196.3/191.0; cacheHit.repeatSwitchRender 126.7/138.7/128.6; cacheMiss.loadCommit 71.9/83.9/71.6; cacheHit.activationCommit 29.9/31.8/29.4
+- N20/W20 — cacheMiss.firstUsefulRender 384.8/418.6/392.6; cacheHit.repeatSwitchRender 250.5/290.4/260.6; cacheMiss.loadCommit 125.7/140.0/112.1; cacheHit.activationCommit 33.6/35.9/33.2
+- N100/W10 — cacheMiss.firstUsefulRender 189.8/253.7/203.6; cacheHit.repeatSwitchRender 153.1/154.6/144.4; cacheMiss.loadCommit 70.0/93.7/71.7; cacheHit.activationCommit 34.0/35.1/32.3
+
+**PERF-103 echo (values p50/p95/mean ms)**:
+- Standard (20 measured +2 warmup) — reduxCommit 35.1/40.6/35.2; firstRender 90.7/105.7/91.3; reduxToDom 55.2/66.4/56.1
+- High-turn 20 (10 measured +2 warmup) — reduxCommit 60.2/66.7/61.3; firstRender 164.8/180.2/165.0; reduxToDom 105.2/113.5/103.7; assistantFirstVisible 485.9/782.2/513.4; streamCompletion 486.9/783.5/514.6
+- High-turn 100 (10 measured +2 warmup) — reduxCommit 64.9/91.3/67.4; firstRender 167.2/239.9/180.4; reduxToDom 109.2/148.6/113.0; assistantFirstVisible 517.8/882.4/564.3; streamCompletion 521.6/885.9/567.4
+
+**Non-claims**: Historical pre-S3.1 dirty-worktree ranges preserved as directional/non-baseline reference, not replaced. This record is L3 directional evidence only; not baseline adoption, not threshold, not root cause, not Phase 3 exit, not workstream closure, not Phase 7, not sync.
+
+**Authority**: No document authority change; `performance-program.md` and `performance-measurement.md` unchanged per scope restriction (only these two documents updated).
 
 ### Phase 4: Bounded Memory and Cache
 
@@ -660,7 +684,7 @@ Each phase has acceptance criteria defined in §6. Acceptance requires:
 |---|---|---|
 | Conversation ownership model specifics | Phase 2 | **Resolved** (2026-08-19; see §2.2–§2.6) |
 | Lazy activation boundaries | Phase 2 | **Resolved** (2026-08-19; see §2.6) |
-| Render/state/action graph structure | Phase 3 | **Implementation slices complete; acceptance pending** (S3.1, S3.2, S3.3, S3.4, and S3.5 implemented; S3.4 prerequisite satisfied by S3.1; PERF-TOPIC-SWITCH/PERF-ECHO acceptance not yet validated) |
+| Render/state/action graph structure | Phase 3 | **Implementation slices complete; acceptance pending** (S3.1, S3.2, S3.3, S3.4, and S3.5 implemented; S3.4 prerequisite satisfied by S3.1; post-S3.5 acceptance-surface measurement executed 2026-08-20 on clean commit `bfc1c61713a689275324c85a4cafa23b35040abc` dirty=false — six canonical focused runs exit 0, L1 pass, L3 directional only, no `PERF_PHASE_ATTR` overlay; measurement completion is not acceptance completion; PERF-TOPIC-SWITCH/PERF-ECHO remain Open, no threshold, closure pending) |
 | Cache invalidation rules and bounds | Phase 4 | Open |
 | Retention/eviction policy design | Phase 4 | Open (design/documentation responsibility only) |
 | Windowed fetch semantics | Phase 5 | Open |
