@@ -157,7 +157,8 @@ Problem Open → Cost Model → Attributed → Candidate → Experiment → Inte
 当性能证据暴露的结构性债务需要变更**所有权、生命周期或数据契约**时，该工作进入 [Architecture Evolution Program](./architecture-evolution-program.md) 而非继续在性能补丁循环中扩展。具体规则：
 
 - **触发条件**：性能工作流中出现以下任一情况——变更涉及运行时职责/权威移动、持久化/迁移语义变更、生命周期/多窗口/原生能力变更、兼容语义变更——即停止实现，走 ADR 决策点（PERF-LOCK-008），并将工作交由架构演进程序接管。
-- **接受表面**：PERF-TOPIC-SWITCH 和 PERF-ECHO 是架构演进程序的接受表面（`performance-workstreams.md` §2.1/§2.3）；当对话所有权/生命周期重构解决结构性债务时，这些问题可能关闭。
+- **架构-性能政策（ARCH-009..011 镜像）**：架构重构追求结构更优且自然更快；性能测量记录重构的自然结果——架构推进不以绝对性能指标/阈值为常规门槛，也不要求直接的自然性能提升方可前进（ARCH-009）。但在受控同态对比（controlled same-state comparison）下可复现的实质性回退（material degradation）是对架构正确性的反证，必须在阶段退出前完成归因与处置：修复、经论证接受的权衡，或保持阶段 Open（ARCH-010）。剩余性能问题作为独立的重基线/重评估性能工作在重构后另行处置；架构关闭不等同于关闭 PERF 产品问题（ARCH-011）。
+- **工作流重分类（2026-08-21）**：PERF-TOPIC-SWITCH 和 PERF-ECHO 原为架构接受表面，现重分类为**架构重构后的独立参考/重评估工作流**（`performance-workstreams.md` §2.1/§2.3），保持 **Open 且不阻塞架构阶段关闭**（ARCH-011）；其既有 `bfc1c61713a689275324c85a4cafa23b35040abc`（2026-08-20，clean）与新增 `4df885d4d7fc055c2a2c5c742dfad79ff82ab991`（2026-08-21，clean）均为 **L3 方向性参考**，按 ARCH-012 保留溯源且不被重标为阈值/基线；由于不存在受控同态前后对比，不作改进/回退断言。
 - **已取代**：PERF-RENDER-FLOW 的战术候选队列已被架构演进程序取代（`performance-workstreams.md` §2.5）。
 - **性能程序不成为架构权威**：性能工作流提出方向和证据，架构决策权属于架构演进程序和 ADR 流程。
 
@@ -168,9 +169,10 @@ Problem Open → Cost Model → Attributed → Candidate → Experiment → Inte
    - **已接受的用户可见结果**（用户/Main 接受该问题已按预期解决，或显式接受为未复现/不可证伪并保持 Open）；
    - **需要时集成实现**（若根因归属后需要修复，候选实现已集成）；
    - **匹配边界的回归证据**（Protect 阶段已建立相应断言/E2E）。
-3. **未解决的用户可见问题保持 Open**：topic 切换、流式/多模型输出、消息回显当前为 Open 产品问题（`performance-workstreams.md`），其既有 PERF-101/102/103 测量资产仅是**证据**，不是关闭。
-4. **不把 L3 数值当作阈值/根因**：除非经显式校准决策并提交阈值，否则数值保持暂定（PERF-LOCK-003；唯一已提交阈值见测量契约 §7）。
-5. **关闭不自动激活**任何新工作流：后续激活须 Main/用户显式授权（Active 同一层级唯一）。
+3. **未解决的用户可见问题保持 Open**：topic 切换、流式/多模型输出、消息回显当前为 Open 产品问题（`performance-workstreams.md`），其既有 PERF-101/102/103 测量资产仅是**证据**，不是关闭。架构重构后的剩余问题另行重基线/重评估，架构关闭不关闭它们（ARCH-011）。
+4. **不把 L3 数值当作阈值/根因**：除非经显式校准决策并提交阈值，否则数值保持暂定（PERF-LOCK-003；唯一已提交阈值见测量契约 §7）。历史 `bfc1c61713a689275324c85a4cafa23b35040abc` 与新增 `4df885d4d7fc055c2a2c5c742dfad79ff82ab991` 的 L3 均为方向性参考，保留溯源且不被重标为阈值/基线（ARCH-012）。
+5. **受控回退挑战规则（ARCH-010）**：常规架构阶段不以绝对阈值为门槛（ARCH-009），但在受控同态对比下可复现的实质性回退属于架构正确性反证，必须在退出前完成归因与处置（修复 / 经论证接受的权衡 / 保持 Open），否则不得关闭。
+6. **关闭不自动激活**任何新工作流：后续激活须 Main/用户显式授权（Active 同一层级唯一）。
 
 ## 9. ADR 触发条件（ADR Triggers）
 
@@ -203,6 +205,6 @@ Renderer-only presentation/local-state 变更，只要不跨越以下任一边�
 
 - **测量契约（持久）**：[`performance-measurement.md`](./performance-measurement.md) — 固定工具链/lane、证据层级、schema v1、artifact 存储/隐私/保留、规模维度、harness 清单、阈值策略。
 - **当前可行动状态（可变）**：[`performance-workstreams.md`](./performance-workstreams.md) — 开放工作流（PERF-TOPIC-SWITCH / PERF-STREAMING / PERF-ECHO）、证据、有界成本模型/假设、未知项、下一实验目标、验收框架。
-- **架构演进程序**：[`architecture-evolution-program.md`](./architecture-evolution-program.md) — 架构正确性/优雅性/统一性引领；性能债务交接入口；Phase 2/3 为 PERF-TOPIC-SWITCH/PERF-ECHO 接受表面。
+- **架构演进程序**：[`architecture-evolution-program.md`](./architecture-evolution-program.md) — 架构正确性/优雅性/统一性引领；性能债务交接入口；Phase 3 于 2026-08-21 基于结构/治理/功能证据关闭（ARCH-009/ARCH-010），PERF-TOPIC-SWITCH/PERF-ECHO 重分类为独立重构后参考/重评估工作流（ARCH-011，Open 非阻塞）；测量溯源 bfc1c617 + 4df885d 均为 L3 方向性（ARCH-012）。
 - **治理**：[`sqlite-migration.md`](./sqlite-migration.md)、[`cherry-chat-application-identity.md`](./cherry-chat-application-identity.md)、[`architecture.md`](./architecture.md)。
 - **根代理规则**：根 [`AGENTS.md`](../AGENTS.md)「Detailed References」发现本文件。
