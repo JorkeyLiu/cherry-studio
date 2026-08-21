@@ -188,6 +188,7 @@ describe('package.json main bench scripts (bench lane audit)', () => {
   it('aggregate and native bench commands each resolve the main bench files exactly once', () => {
     const allBench = enumerateMainBenchFiles().sort()
     expect(allBench).toEqual([
+      'src/main/services/chatDb/__tests__/logicalPayload.bench.ts',
       'src/main/services/chatDb/__tests__/search.bench.ts',
       'src/main/services/chatDb/__tests__/searchStage.bench.ts',
       'src/main/services/chatDb/__tests__/searchStagePlan.bench.ts',

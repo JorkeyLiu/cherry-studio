@@ -3,7 +3,7 @@
 > **Document status**: **Approved Strategy (program-level)**. This document owns the architecture evolution program: strategic intent, approved locks, target qualities, debt registry, phased evolution, and decision triggers. It is not an ADR; it does not create new governance authority for identity, release, platform, SQLite migration, or context-window governance — those remain authoritative in their existing documents.
 > **Authority boundary**: Architecture correctness, elegance, unity, and long-term evolvability lead. Performance symptoms expose architecture debt; performance remains validation evidence, not the sole design objective. Architecture refactoring seeks structurally better and naturally faster architecture; performance measurements record the natural result. No absolute performance metric/target is a routine phase gate and architecture does not require direct natural performance improvement to progress; reproducible material degradation under a controlled same-state comparison is architecture-correctness counterevidence and must be attributed/disposed before phase exit. Future startup speed and bounded memory are architecture enablement goals but do not override correctness (ARCH-002). Sync is future compatibility only, vendor-neutral, and must adapt to the application architecture — never the reverse.
 > **Relation to current architecture reference**: [`architecture.md`](./architecture.md) describes implemented reality only. This program describes the target evolution path. The two must not be confused; `architecture.md` must not be edited to describe unimplemented target state.
-> **Last updated**: 2026-08-21 — Phase 3 structurally Complete/Closed on structural/governance/functional evidence; 4df885d directional measurement appended alongside bfc1c617 provenance (both clean, dirty=false); PERF-TOPIC-SWITCH/ECHO reclassified as independent post-refactor reference/reassessment workstreams (remain Open, non-blocking); Phase 4/5 exits remain Open for independent calibration/contract/implementation gates; ARCH-009..ARCH-012 policy locks applied
+> **Last updated**: 2026-08-21 — Phase 3 structurally Complete/Closed on structural/governance/functional evidence; 4df885d directional measurement appended alongside bfc1c617 provenance (both clean, dirty=false); PERF-TOPIC-SWITCH/ECHO reclassified as independent post-refactor reference/reassessment workstreams (remain Open, non-blocking); Phase 4/5 exits remain Open for independent calibration/contract/implementation gates; ARCH-009..ARCH-012 policy locks applied; Phase 5 §5.13 bounded study record appended (documentation-only, exit remains Open, LOCK-P5-001..005)
 > **Owner**: Architecture evolution program (cross-cutting)
 
 ---
@@ -733,10 +733,10 @@ Phase 4 reviewed against ARCH-005 sync-ready properties and governance boundarie
 
 ### Phase 5: Data-Access Contract
 
-**Status**: **Design study complete (2026-08-20) — documentation only; exit Open (pending gates in §5.12). No implementation authorized.**
+**Status**: **Design study complete (2026-08-20) — documentation only; exit Open (pending gates in §5.12–§5.13). No implementation authorized.** Bounded study record in §5.13 (2026-08-21, LOCK-P5-001..005).
 **Entry criteria**: Phase 1 complete; Phase 2 ownership/lifecycle complete (2026-08-19); Phase 4 bounded-memory design complete (2026-08-20) as beneficial input; explicit approval. Entry satisfied — Phase 2 and Phase 4 designs are complete documentation. DB-health diagnostics (M1/M2/M3/M7) are independent on-demand diagnostics and do not gate this design phase. M4/M5/M6 remain governance-gated and are not activated by this program.
 **Content**: Define the data-access contract: stable-ID-anchored windowed read intents, deterministic `sort_order`→`id` return ordering, completeness semantics (whole-topic / window / message-answer-group / context closure), renderer-local generation applicability, separate viewport vs context projections, and mutation/stream/cache rules. This phase is **design/documentation only** — no implementation, code, schema, IPC, pagination implementation, sync metadata, or `architecture.md` current-reality edits are authorized.
-**Exit criteria**: Documented data-access contract (§5.1–§5.11) with read intents, response guarantees, completeness types, lifecycle/state machine, semantic matrix, context contract, mutation/stream/cache rules, error/retry/concurrency, observability/L1/L3 plan, decision triggers/non-goals, and sync review; validated by topic-switch and context acceptance criteria design (not measured). Exit not claimed — see §5.12.
+**Exit criteria**: Documented data-access contract (§5.1–§5.13) with read intents, response guarantees, completeness types, lifecycle/state machine, semantic matrix, context contract, mutation/stream/cache rules, error/retry/concurrency, observability/L1/L3 plan, decision triggers/non-goals, sync review, and bounded study record (§5.13); validated by topic-switch and context acceptance criteria design (not measured). Exit not claimed — see §5.12–§5.13.
 **Dependencies**: Phase 2 complete; Phase 4 complete (capacity defaults and evictable/pinned tiering are authoritative inputs). Benefits from Phase 3 stable-host work for viewport projection stability. No new dependency on Phase 6; Phase 6 is downstream.
 **DB-health sequencing**: M1/M2/M3/M7 are independent read-only diagnostics that can run on demand and do not gate this design. Full-topic/windowed fetch/cache-join target semantics are defined here at contract level; implementation is Phase 6 candidate. M4/M5/M6 require governance/ADR and are not activated by this program.
 
@@ -761,10 +761,10 @@ Phase 4 reviewed against ARCH-005 sync-ready properties and governance boundarie
 
 | Aspect | Current observed structure | Evidence / location | Label |
 |---|---|---|---|
-| Topic load path | `loadTopicMessagesThunk` → `dbService.fetchMessages` → typed IPC → **one Main transaction** `listByTopic` + `listByMessages` → renderer **whole-topic** projection | `loadTopicMessagesThunk`, `dbService.fetchMessages`, `ChatDbAggregateService` `listByTopic`/`listByMessages` | Current data path — whole-topic only |
+| Topic load path | `loadTopicMessagesThunk` → `dbService.fetchMessages` → typed IPC → `ChatDbAggregateService.fetchMessages` **one Main transaction** invoking `MessagesRepository.listByTopic` / `BlocksRepository.listByMessages` → renderer **whole-topic** projection | `loadTopicMessagesThunk`, `dbService.fetchMessages`, `ChatDbAggregateService.fetchMessages` with `MessagesRepository.listByTopic` / `BlocksRepository.listByMessages` | Current data path — whole-topic only |
 | Projection handling | Render store holds the fetched whole-topic projection as the single source for viewport, context, and display groups; no windowed/incremental/replacement path exists | Redux topic `messages`/`blocks`/`segments`; `createLatestMessageWindow`, `computeContextInfo`, display grouping | Current — full projection assumed |
 | Consumer assumption | Viewport windowing, context-info computation, and message-group rendering **assume a complete whole-topic projection is resident**; cache-miss join for context is not defined because miss is whole-topic until Phase 4 completeness marker | `computeContextInfo` on `[topic messages, topic blocks, assistant, topic id]`; `reconcileMessageWindow` history/live layers | Current — full-projection consumers |
-| Ordering artifact | Dense `sort_order` is **rewritten** by middle insert (`insertAt`/`insertManyAt` shift), delete, and explicit reorder; ordering is `sort_order` then `id` within a single transaction response but **not stable across mutations** for old tuple cursors | `MessagesRepository.ts` `insertAt`/`insertManyAt`/reorder; debt registry §4.3 | Current — deterministic intra-response order, unstable cross-mutation cursor |
+| Ordering artifact | Dense `sort_order` is **rewritten** by middle insert (`insertAt`/`insertManyAt` shift), delete, and explicit reorder; ordering is `sort_order` then `id` within a single transaction response but **not stable across mutations** for old tuple cursors | `MessagesRepository.ts` `insertAt`/`insertManyAt`/`replaceOrder`; debt registry §4.3 | Current — deterministic intra-response order, unstable cross-mutation cursor |
 | Revision / snapshot | **No authority revision, snapshot, or linearizability** exists for chat reads; each typed IPC fetch is an independent transaction; no cross-request snapshot is provided | SQLite transaction per fetch; no revision column or snapshot token in current IPC | Current — no revision/snapshot |
 | Windowed fetch | **No windowed/paginated fetch** for visible messages only; no `around-anchor` or `around-message` window; no stable-ID-anchored paging contract | Absence in `dbService.fetchMessages`; §4.3 debt registry | Current — not windowed |
 | Context join | Context anchor-to-end is computed **in renderer** from the whole-topic projection; no authority-side context closure window exists | `computeContextInfo`; `context-window.md` anchor semantics | Current — renderer-computed |
@@ -1067,7 +1067,7 @@ Incremental delta (former R-07) used `fromGeneration` as an authority delta curs
 
 | Locked decision / audit remedy | Where addressed |
 |---|---|
-| ARCH-001..008 unchanged | §5.1 row 1; §5.11 sync review |
+| ARCH-001..008 unchanged | §1.2/§1.3 and §5.1 (row 1 cites ARCH-008); §5.11 sync review |
 | Documentation/design only; no implementation | §5.1; §5.12 rollback |
 | Main SQLite sole authority; disposable projection | §5.1; §5.3; §5.8 |
 | Stable IDs anchor; `sort_order`→`id` order; no tuple-cursor/revision/snapshot/linearizability claim | §5.1; §5.4 guarantees table; §5.12 non-claims |
@@ -1081,6 +1081,55 @@ Incremental delta (former R-07) used `fromGeneration` as an authority delta curs
 | **Window/closure eviction granularity not locked in Phase 5; deferred coherently to Phase 6; invariant retains no partial-entity eviction within admitted semantic unit** | §5.8 whole-topic vs window row; §5.11 non-goals; §5.12 non-claims |
 | **Rollback restores pre-slice implementation only; never endorses renderer authority over authoritative mutations** (S6.2 corrected) | §5.12 rollback; §6 S6.2 |
 | Design study complete but exit Open; Phase 3 Closed, Phase 4/5/Phase 6/ARCH-011 PERF Open; Phase 6 unauthorized | §5.12; §6 Phase 6 status |
+
+#### 5.13 Phase 5 Study Record — Bounded Documentation Study (2026-08-21)
+
+**Record status**: **Documentation-only study complete; no implementation authorized** (LOCK-P5-001). **Main SQLite authority, stable-ID anchors, `sort_order`→`id` intra-response ordering, renderer-local generation applicability-only, no `fromGeneration` delta cursor** (LOCK-P5-002). **Phase 5 exit and all three gates remain Open** (LOCK-P5-003). **`architecture.md` and governance owners unchanged** (LOCK-P5-004). **No deferred payload/channel/SQL/window-size/cap/eviction granularity choice selected** (LOCK-P5-005).
+
+**Current surfaces (observed — not target)**:
+- Topic load: `loadTopicMessagesThunk` → `dbService.fetchMessages` → typed IPC → `ChatDbAggregateService.fetchMessages` **one Main transaction** invoking `MessagesRepository.listByTopic` / `BlocksRepository.listByMessages` → renderer **whole-topic** projection (single source for viewport/context/groups).
+- Consumers assume whole-topic resident (`computeContextInfo`, `reconcileMessageWindow`, display grouping); no windowed/incremental/replacement path.
+- Dense `sort_order` rewritten by middle insert/delete/reorder; deterministic order is `sort_order`→`id` only within one authority transaction; no revision/snapshot/linearizability.
+- No windowed fetch (`around anchor/message`, latest window), no authority-side context closure window; context anchor-to-end computed in renderer from whole-topic.
+- Empty-topic completeness is implicit (`cachedIds.length > 0` early-return), not explicit empty-topic marker; current `dbService.fetchMessages` (messages/blocks only) plus separate/unawaited segment load does not satisfy target R-01 `whole-topic` (chat-data ∧ segment) resident completeness.
+- Failures per-fetch; no single-flight/serialize contract enforced at data-access layer.
+
+**R-02..R-06 matrix (target contract, not implementation)**:
+
+| Intent | Coverage target | Completeness produced | Counting unit | Anchor stability | Generation interaction |
+|---|---|---|---|---|---|
+| R-02 Latest window | Latest N in deterministic order | `window` (tail N, bounds declared) | complete rendered/message groups | topic ID stable | new generation → re-anchor latest |
+| R-03 Window around stable anchor | Neighborhood of anchor (±K) | `window` (around anchor, bounds declared) | complete rendered/message groups | anchor message ID stable | structural mutation → old window not trusted |
+| R-04 Window around message (search-hit) | Around hit message | `window` (around hit, bounds declared) | complete rendered/message groups | hit message ID stable | hit deleted → not-found |
+| R-05 Answer-group window | All members of answer group, authority-resolved | `answer-group` (member set declared) | messages in complete group | message/group ID stable | membership may change → re-resolve from authority |
+| R-06 Context closure | Anchor-to-end closed range (stable anchor through newest, independent of current `contextCount`; `contextCount` is initialization/re-anchor provenance only) | `context closure` (anchor-to-end, bounds declared) | complete context turns | anchor ID stable (renderer-owned) | structural mutation → re-close; `contextCount` change alone does not resize/invalidate |
+
+Ordering for all: `sort_order`→`id` within single authority transaction; no tuple-cursor stability across mutations; no revision/snapshot/linearizability; stale generation discarded before any join/action; no `fromGeneration` delta cursor (former R-07 removed; deferred to Phase 6 without generation authority cursor, §5.1/§5.4/§5.5).
+
+**Coordinated review surfaces (implementation requires stop + review before any code)**:
+- Shared IPC/preload/cross-process contract: any new read intent (R-02..R-06), payload-shape/completeness-typing change, or authority-aware target action (group resolve, anchor-based positioning, hit-window) → coordinated shared-contract review across shared types/channel definitions, preload exposure, and Main handlers; architecture/program approval; formal ADR only when governance requires; both-side edits mandatory (§5.11 / §10.1).
+- Persistence/migration/schema: any revision/snapshot/tombstone/column or `sort_order` semantics change → SQLite migration governance (ADR).
+- Context-window semantics: any anchor/`contextCount`/repair change → `context-window.md` review.
+- Identity/compatibility, release/platform, native/multi-window, sync boundary per §10.1 — no change introduced here.
+
+**Test implications (contract-level, no implementation test claimed)**:
+- **L1 (correctness gates, design)**: typed completeness present on every response (no masquerading; `window` bounds declared; empty explicit); `sort_order`→`id` ordering verified per response; stable-ID re-anchor after structural mutations (no tuple-cursor carry); generation applicability stale-discard before any join/action; authoritative-deletion invalidation of all completeness types before any join/action; answer-group authority-resolved; context closure separate from viewport window.
+- **L3 (directional observation only)**: window/closure hit/miss, miss latency, canonical logical bytes, generation advance/stale-discard, single-flight/serialize depth, scroll/viewport/context metrics, pinned vs evictable working-set logical bytes + heap-amplification ratio (§5.10). No threshold/baseline/improvement claim; L3 is calibration input for Phase 6.
+- Current test surfaces remain **whole-topic** (`fetchMessages` path); windowed/closure/group paths are **contract-only** and have no implementation test coverage in this record. Future Phase 6 implementation must add focused contract tests per intent and generation-scoped cache-join tests.
+
+**Open gates (exit remains Open, §5.12)**:
+1. **Coordinated shared-contract review** of target read intents (R-02..R-06) and authority-aware actions — not satisfied.
+2. **Calibration** of window/closure/pinned-working-set sizing under Phase 4 B-01/B-02 canonical logical-bytes + heap-amplification and unlimited-context measurement — not performed.
+3. **Data-access acceptance criteria validation** per §5.10 (scoped window/closure reads with defined counting units, typed completeness with validated semantic derivation, deterministic `sort_order`→`id` with stable-ID anchoring and no generation-based deltas, separate viewport/context projections with renderer-owned anchor, pinned streams with structural vs content-only invalidation, deferred window eviction granularity with no partial-entity eviction within admitted semantic unit) — not demonstrated.
+- Phase 3 remains **Structurally Closed 2026-08-21**; Phase 4 exit remains **Open** for independent calibration/implementation; PERF-TOPIC-SWITCH/PERF-ECHO remain **Open as independent post-refactor workstreams (non-blocking, ARCH-011)**; Phase 6 remains **unauthorized candidate**.
+
+**Preserved boundaries and non-claims**:
+- ARCH-001..008 unchanged (§1.2/§1.3 and §5.1 row 1 cites ARCH-008; §5.11 sync review); no governance change; sync prohibitions preserved (ARCH-006).
+- `architecture.md` unchanged (implemented reality only, ARCH-008); identity/SQLite-migration/context-window compatibility/release/platform owners unchanged (§10.5).
+- R-01 `whole-topic` remains **chat-data ∧ segment for same generation** (explicit empty markers, jointly validated, published atomically); chat-data/segment alone are component/staging markers, not new R intents; `window` never satisfies `whole-topic`; generic `whole-topic` label never implicitly satisfies `answer-group`/`context closure` without derived/validated closure (§5.3/§5.6).
+- No payload field, channel name, SQL window clause, N/K/window-cap, global cap, or eviction granularity selected; Phase 6 owns selection (LOCK-P5-005).
+- No revision/tombstone/sync metadata, no snapshot/linearizability, no tuple-cursor safety claim, no `listByTopicPage` sufficiency under concurrent mutation claim (§5.1/§5.12).
+- No schema/IPC/code change; no sync schema/metadata/transport/vendor decision; no performance threshold/baseline.
 
 ### Phase 6: DB-Health Implementation (Candidate — Not Authorized)
 
@@ -1275,7 +1324,7 @@ Each phase has acceptance criteria defined in §6. Acceptance requires:
 | Render/state/action graph structure | Phase 3 | **Structurally Complete / Closed 2026-08-21** (S3.1, S3.2, S3.3, S3.4, S3.5 implemented; S3.4 prerequisite satisfied by S3.1; measurements on clean `bfc1c61713a689275324c85a4cafa23b35040abc` 2026-08-20 and clean `4df885d4d7fc055c2a2c5c742dfad79ff82ab991` 2026-08-21 both dirty=false — each six canonical focused runs exit 0, L1 pass (PERF-101 11/11 per scale / PERF-103 10/10 per run for bfc1c617 matrix; PERF-101 11/11 ×3 scales ×3 samples and PERF-103 10/10 ×3 runs with standard 20 + high-turn 10+10 samples for 4df885d), L3 directional only, no `PERF_PHASE_ATTR` overlay, no controlled same-state improvement/regression claim; PERF-TOPIC-SWITCH/PERF-ECHO reclassified as independent post-refactor reference/reassessment workstreams per ARCH-011 and remain Open (non-blocking)) |
 | Cache invalidation rules and bounds | Phase 4 | **Design study complete (2026-08-20); exit Open** — bounds documented as capacity defaults pending calibration and implementation; see §4.5–§4.6 |
 | Retention/eviction policy design | Phase 4 | **Design study complete (2026-08-20); exit Open** — design/documentation only; pending gates in §4.12 |
-| Data-access contract (read intents, completeness, ordering, context, mutation/stream) | Phase 5 | **Design study complete (2026-08-20); exit Open** — windowed/closure/answer-group intents (R-02..R-06), typed completeness, stable-ID anchoring, `sort_order`→`id` ordering, separate viewport/context projections, and lifecycle/concurrency defined in §5.1–§5.11; implementation requires coordinated IPC review; see §5.12 |
+| Data-access contract (read intents, completeness, ordering, context, mutation/stream) | Phase 5 | **Design study complete (2026-08-20); exit Open** — windowed/closure/answer-group intents (R-02..R-06), typed completeness, stable-ID anchoring, `sort_order`→`id` ordering, separate viewport/context projections, and lifecycle/concurrency defined in §5.1–§5.11 with bounded study record in §5.13 (documentation-only, no implementation, LOCK-P5-001..005); implementation requires coordinated IPC review; see §5.12–§5.13 |
 | Specific index/query optimizations | Phase 6 | **Candidate slice S6.4 — not authorized**; depends on M1/M2/M3 diagnostics; requires ADR if schema/index change |
 | File dual-state resolution | Phase 6 | **Candidate slice S6.5 — not authorized**; depends on M5 diagnostic; requires ADR if schema/authority boundary |
 | FTS storage deduplication | Phase 6 | **Candidate slice S6.5 — not authorized**; depends on M4 measurement; requires ADR if schema change |
