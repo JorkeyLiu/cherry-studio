@@ -3,7 +3,7 @@
 > **Document status**: **Approved Strategy (program-level)**. This document owns the architecture evolution program: strategic intent, approved locks, target qualities, debt registry, phased evolution, and decision triggers. It is not an ADR; it does not create new governance authority for identity, release, platform, SQLite migration, or context-window governance — those remain authoritative in their existing documents.
 > **Authority boundary**: Architecture correctness, elegance, unity, and long-term evolvability lead. Performance symptoms expose architecture debt; performance remains validation evidence, not the sole design objective. Architecture refactoring seeks structurally better and naturally faster architecture; performance measurements record the natural result. No absolute performance metric/target is a routine phase gate and architecture does not require direct natural performance improvement to progress; reproducible material degradation under a controlled same-state comparison is architecture-correctness counterevidence and must be attributed/disposed before phase exit. Future startup speed and bounded memory are architecture enablement goals but do not override correctness (ARCH-002). Sync is future compatibility only, vendor-neutral, and must adapt to the application architecture — never the reverse.
 > **Relation to current architecture reference**: [`architecture.md`](./architecture.md) describes implemented reality only. This program describes the target evolution path. The two must not be confused; `architecture.md` must not be edited to describe unimplemented target state.
-> **Last updated**: 2026-08-22 — Phase 4 §4.9a acceptance-evidence surface map appended (documentation-only validation planning; maps each §4.9 criterion to its demonstration surface and current evidence status; no criterion is fully demonstrable today; adopts nothing); prior record unchanged: Phase 4 C-01/C-02 calibration evidence appended as §4.13 (measurement-only, synthetic, directional, non-adoption; C-02 exit 0 on clean `52bbfbf124417a7c699c6c89c0ec718185517c96` dirty=false; retained C-01 exit 0 with artifact-recorded dirty=true — dirtiness limited to the approved documentation edits); **Phase 4/5 exits remain Open** — a passing calibration run does not close them; harnesses registered in `performance-measurement.md` §6; prior records unchanged: Phase 3 structurally Complete/Closed on structural/governance/functional evidence; 4df885d directional measurement appended alongside bfc1c617 provenance (both clean, dirty=false); PERF-TOPIC-SWITCH/ECHO reclassified as independent post-refactor reference/reassessment workstreams (remain Open, non-blocking); ARCH-009..ARCH-012 policy locks applied; Phase 5 §5.13 bounded study record appended (documentation-only, LOCK-P5-001..005)
+> **Last updated**: 2026-08-22 — Phase 5 §5.14 coordinated shared-contract review record appended (R-02/R-03 window reads; review-only, adopts nothing, selects no values; approval decision outstanding); prior record unchanged: 2026-08-22 — Phase 4 §4.9a acceptance-evidence surface map appended (documentation-only validation planning; maps each §4.9 criterion to its demonstration surface and current evidence status; no criterion is fully demonstrable today; adopts nothing); prior record unchanged: Phase 4 C-01/C-02 calibration evidence appended as §4.13 (measurement-only, synthetic, directional, non-adoption; C-02 exit 0 on clean `52bbfbf124417a7c699c6c89c0ec718185517c96` dirty=false; retained C-01 exit 0 with artifact-recorded dirty=true — dirtiness limited to the approved documentation edits); **Phase 4/5 exits remain Open** — a passing calibration run does not close them; harnesses registered in `performance-measurement.md` §6; prior records unchanged: Phase 3 structurally Complete/Closed on structural/governance/functional evidence; 4df885d directional measurement appended alongside bfc1c617 provenance (both clean, dirty=false); PERF-TOPIC-SWITCH/ECHO reclassified as independent post-refactor reference/reassessment workstreams (remain Open, non-blocking); ARCH-009..ARCH-012 policy locks applied; Phase 5 §5.13 bounded study record appended (documentation-only, LOCK-P5-001..005)
 > **Owner**: Architecture evolution program (cross-cutting)
 
 ---
@@ -1169,6 +1169,55 @@ Ordering for all: `sort_order`→`id` within single authority transaction; no tu
 - No payload field, channel name, SQL window clause, N/K/window-cap, global cap, or eviction granularity selected; Phase 6 owns selection (LOCK-P5-005).
 - No revision/tombstone/sync metadata, no snapshot/linearizability, no tuple-cursor safety claim, no `listByTopicPage` sufficiency under concurrent mutation claim (§5.1/§5.12).
 - No schema/IPC/code change; no sync schema/metadata/transport/vendor decision; no performance threshold/baseline.
+
+#### 5.14 Coordinated shared-contract review record — R-02/R-03 window reads (2026-08-22)
+
+**Review status**: **Review-only; documentation-only.** This review is performed per the program's mandatory stop/review obligation for any new read intent: the coordinated shared-contract review must span all three required surfaces jointly — shared types/channel definitions, preload exposure, and Main handlers — plus, for gap assessment, the renderer consumption layer that would receive the result. This record executes that review against current reality for the R-02 latest-window and R-03 around-anchor window intents and documents it as evidence. It **adopts nothing and selects nothing**: no payload field, channel name, SQL clause, N/K/window-cap value, or eviction granularity is chosen, and no implementation is authorized. The coordinated-review precondition of the data-access exit gate is hereby executed and documented; **explicit architecture/program approval remains outstanding, and all Phase 4/5 exits remain Open**.
+
+**Table A — Current-reality inventory** (observed structure only, not target):
+
+| Layer | Current state | Reference |
+|---|---|---|
+| Shared channel/type | `chatdb:fetch-messages`; request carries `{ topicId }` only; response is `{ messages, blocks }` JSON arrays | `packages/shared/chatDb/types.ts:87-89`, `258-262`, `635` |
+| Shared validation | Allowed-keys admits exactly `topicId`; any added request key is rejected at the boundary; result profile caps strings and the blocks aggregate | `packages/shared/chatDb/contracts.ts:139-145`, `146-183` |
+| Preload | Forwards the request unchanged on `window.api.chatDb.fetchMessages` | `src/preload/index.ts:625-626` |
+| Main handler | Per-call aggregate service, single root transaction per invocation | `src/main/services/chatDb/ipc.ts:262-265`; `ChatDbAggregateService.ts:100-133` |
+| Repository SQL | Both queries return the full topic's rows (messages filtered by `topic_id`; blocks selected via `message_id IN (topic's message IDs)`), `ORDER BY sort_order ASC id ASC`, no LIMIT; composite indexes `(topicId, sortOrder)` / `(messageId, sortOrder)` back them | `repository/MessagesRepository.ts:159-167`; `repository/BlocksRepository.ts:89-105`; `schema/index.ts:52,75` |
+| Renderer thunk | Cache early-return infers completeness from non-empty cached IDs; publishes blocks then wholesale-replaces the topic ID list; segments loaded separately and unawaited | `store/thunk/messageThunk.ts:1525-1590` |
+| Projection stores | `messagesReceived` replaces the ordered ID list (replace-not-merge); blocks upsert-many | `store/newMessage.ts:133-139`; `store/messageBlock.ts:82-91` |
+| Windowing on the read path | Absent end-to-end — no window parameter in the request type, validator, preload surface, or SQL | Rows above |
+| Dormant pagination machinery below contract | Repository-level keyset pagination over `(sort_order, id)` with typed cursors; unit-test callers only; no aggregate/IPC exposure | `repository/MessagesRepository.ts:169-208`; `domain/cursor.ts:24-83` |
+
+**Table B — Requirement status checklist** (status against current reality; evidence basis cites Table A rows):
+
+| Requirement | Status against current reality | Evidence basis |
+|---|---|---|
+| Ordering authority `sort_order`→`id` | Satisfied at SQL level for both queries | A5 |
+| Stable-ID anchoring | Structurally available (IDs are primary keys); tuple-cursor machinery exists but design excludes it as anchor | A9 + intent norms |
+| Typed `window` completeness | Absent; response carries no marker or bounds | A1 |
+| Declared bounds in response | Absent | A1 |
+| Counting unit of complete rendered/message groups | Not representable today (whole-topic only; group reconstruction happens renderer-side) | A7 |
+| No window masquerading as whole-topic | Trivially satisfied while only whole-topic intent exists; consumer inference mechanism absent | A6/A7 |
+| Segment component not required unless joined | Current separate/unawaited segment load is compatible; coupling flagged | A6/A7 |
+| Generation applicability tagging | Absent on the wire; renderer-local transition epochs exist and are semantics-compatible (applicability-only) | A6 |
+| Explicit not-found / empty-topic distinction | Gap: an absent topic currently returns empty arrays | A4 |
+| Coverage-check cache join (bounds fully cover requested range) | Gap: early-return uses a non-empty-IDs heuristic | A6 |
+| Re-anchor by stable ID after structural mutation / bounds-not-cursors | No mechanism; behaviorally safe today because only whole-topic intent exists | A6/A9 |
+| Concurrent same-topic window reads serialize | N/A until windowed reads exist | intent norms |
+
+**Findings**:
+
+1. **F1 — Any windowed read is necessarily a coordinated both-side contract change.** A request extension is rejected by the frozen allowed-keys validator; types/channels/preload/handlers are single-file chokepoints that also serve mutation and streaming contracts (`types.ts` command map; the IPC channel enum block; the single preload literal bridge; the generic handler wrapper in `ipc.ts`). Shared contract tests pin fetch-messages behavior and would be edited together with the contract.
+2. **F2 — Main-local dormant keyset pagination seam exists unused.** It has test-only callers. The design explicitly makes no sufficiency claim for it under concurrent dense-order mutation and excludes tuple cursors as anchors; it is infrastructure precedent, not a conformant contract primitive.
+3. **F3 — Envelope precedent exists on adjacent channels.** Trash listing accepts limit/cursor; search accepts pageSize/cursor and returns nextCursor/hasMore. Recorded as fact, not a selection.
+4. **F4 — Consumer-side collision.** The wholesale-replace reducer and the non-empty-IDs completeness heuristic cannot install or reason about partial windows; remedy is deferred to implementation, not selected here.
+5. **F5 — Secondary direct call sites bypass the thunk assuming whole-topic semantics** (`services/SpanManagerService.ts:143`; `pages/history/components/SearchResults.tsx:390`) plus `TopicManager.getTopicMessages` and HistoryPage dispatch sites. This is a migration-surface inventory for any future slice, not defects today.
+6. **F6 — `getRawTopic` duplicates the read shape non-transactionally.** Its scope divergence is undocumented; listed for a future implementation-scope decision.
+
+**Carried-forward unknowns**:
+
+- Whether mini/trace-viewer windows dispatch the load thunk at runtime was not traced.
+- The intended consumer of the dormant pagination seam is unstated by any comment.
 
 ### Phase 6: DB-Health Implementation (Candidate — Not Authorized)
 
