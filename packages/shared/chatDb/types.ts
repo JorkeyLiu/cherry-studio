@@ -252,6 +252,68 @@ export interface DeleteBlocksRequest {
 export type DeleteBlocksResponse = FileCleanupResult
 
 // ---------------------------------------------------------------------------
+// Windowed read DTOs (S6.1 R-02/R-03)
+// ---------------------------------------------------------------------------
+
+/** Latest window — tail N messages (R-02). */
+export interface FetchMessagesLatestWindowRequest {
+  kind: 'latest'
+  topicId: string
+  /** Number of latest messages to return. Caller-provided, bounded 1..100. */
+  limit: number
+}
+
+/** Around window — neighborhood of a stable anchor (R-03). */
+export interface FetchMessagesAroundWindowRequest {
+  kind: 'around'
+  topicId: string
+  /** Stable anchor message ID. */
+  anchorMessageId: string
+  /** Messages before the anchor. Caller-provided, bounded 1..100. */
+  before: number
+  /** Messages after the anchor. Caller-provided, bounded 1..100. */
+  after: number
+}
+
+/** Discriminated window request for typed window reads. */
+export type FetchMessagesWindowRequest = FetchMessagesLatestWindowRequest | FetchMessagesAroundWindowRequest
+
+/** Typed window metadata — distinct from whole-topic completeness. */
+export interface FetchMessagesWindowMeta {
+  /** Which window intent was served. */
+  kind: 'latest' | 'around'
+  /** Completeness is always 'window' — never masquerades as 'whole-topic'. */
+  completeness: 'window'
+  /** Topic that was read. */
+  topicId: string
+  /** Anchor for around windows, null/absent for latest. */
+  anchorMessageId?: string | null
+  /** Echo of the caller's bounded counts. */
+  requested: {
+    limit?: number
+    before?: number
+    after?: number
+  }
+  /** First returned message ID, or null when no messages. */
+  firstMessageId: string | null
+  /** Last returned message ID, or null when no messages. */
+  lastMessageId: string | null
+  /** Number of messages returned. */
+  returnedCount: number
+  /** True when messages exist before the returned window in deterministic order. */
+  hasMoreBefore: boolean
+  /** True when messages exist after the returned window in deterministic order. */
+  hasMoreAfter: boolean
+}
+
+/** @see IpcChannel.ChatDb_FetchMessagesWindow */
+export interface FetchMessagesWindowResponse {
+  messages: JsonObject[]
+  blocks: JsonObject[]
+  window: FetchMessagesWindowMeta
+}
+
+// ---------------------------------------------------------------------------
 // Command response DTOs
 // ---------------------------------------------------------------------------
 
@@ -633,6 +695,7 @@ export interface ChatDbCommandMap {
 export interface ChatDbCommands extends ChatDbCommandMap {
   // Original 14 commands
   'chatdb:fetch-messages': { request: FetchMessagesRequest; response: FetchMessagesResponse }
+  'chatdb:fetch-messages-window': { request: FetchMessagesWindowRequest; response: FetchMessagesWindowResponse }
   'chatdb:get-raw-topic': { request: GetRawTopicRequest; response: GetRawTopicResponse }
   'chatdb:topic-exists': { request: TopicExistsRequest; response: boolean }
   'chatdb:ensure-topic': { request: EnsureTopicRequest; response: null }

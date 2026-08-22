@@ -39,6 +39,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
+  FetchMessagesWindowRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
   ListBlocksByFileRequest,
@@ -262,6 +263,11 @@ export function registerChatDbIpc(): () => void {
   // 1. fetch-messages
   handleCommand(IpcChannel.ChatDb_FetchMessages, (agg, req: FetchMessagesRequest) => {
     return agg.fetchMessages(req.topicId)
+  })
+
+  // 1b. fetch-messages-window (S6.1 R-02/R-03 typed window)
+  handleCommand(IpcChannel.ChatDb_FetchMessagesWindow, (agg, req: FetchMessagesWindowRequest) => {
+    return agg.fetchMessagesWindow(req)
   })
 
   // 2. get-raw-topic

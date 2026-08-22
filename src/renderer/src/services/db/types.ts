@@ -1,5 +1,11 @@
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
-import type { FileCleanupResult, MessageBlockEntry, StreamWriteDiagnostics } from '@shared/chatDb'
+import type {
+  FetchMessagesWindowRequest,
+  FetchMessagesWindowResponse,
+  FileCleanupResult,
+  MessageBlockEntry,
+  StreamWriteDiagnostics
+} from '@shared/chatDb'
 
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
 
@@ -148,6 +154,13 @@ export interface MessageDataSource {
    * Create or ensure topic exists
    */
   ensureTopic(topicId: string, assistantId?: string, name?: string | null): Promise<void>
+
+  /**
+   * Typed windowed read — R-02 latest / R-03 around (S6.1).
+   * Returns authoritative window with complete message+block groups and typed metadata.
+   * Missing topic / missing anchor → throws ChatDbResultError (ERR_NOT_FOUND).
+   */
+  fetchMessagesWindow?(request: FetchMessagesWindowRequest): Promise<FetchMessagesWindowResponse>
 
   // ============ File Operations (Optional) ============
 

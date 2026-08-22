@@ -15,6 +15,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
+  FetchMessagesWindowRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
   ListBlocksByFileRequest,
@@ -624,6 +625,8 @@ const api = {
   },
   chatDb: {
     fetchMessages: (request: FetchMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_FetchMessages, request),
+    fetchMessagesWindow: (request: FetchMessagesWindowRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_FetchMessagesWindow, request),
     getRawTopic: (request: GetRawTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_GetRawTopic, request),
     topicExists: (request: TopicExistsRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_TopicExists, request),
     ensureTopic: (request: EnsureTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_EnsureTopic, request),

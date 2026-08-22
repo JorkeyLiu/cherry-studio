@@ -337,6 +337,7 @@ export enum IpcChannel {
   // Maps 1:1 to ChatDbAggregateService capabilities (renderer → Main).
   // updateFileCount(s) excluded — stays in Dexie/FileManager.
   ChatDb_FetchMessages = 'chatdb:fetch-messages',
+  ChatDb_FetchMessagesWindow = 'chatdb:fetch-messages-window',
   ChatDb_GetRawTopic = 'chatdb:get-raw-topic',
   ChatDb_TopicExists = 'chatdb:topic-exists',
   ChatDb_EnsureTopic = 'chatdb:ensure-topic',

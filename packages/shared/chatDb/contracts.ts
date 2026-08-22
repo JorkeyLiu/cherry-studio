@@ -27,6 +27,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchMessagesRequest,
+  FetchMessagesWindowRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
   ListBlocksByFileRequest,
@@ -1265,6 +1266,229 @@ const searchMessagesContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// S6.1: Windowed read contract — R-02 latest / R-03 around (typed window)
+// ---------------------------------------------------------------------------
+
+function validateBoundedCount(value: unknown, path: string): void {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 1 || value > 100) {
+    throw new ValidationError(path, 'Expected an integer between 1 and 100')
+  }
+}
+
+const FETCH_MESSAGES_WINDOW_VALUE_KEYS = new Set(['messages', 'blocks', 'window'])
+const FETCH_MESSAGES_WINDOW_META_KEYS = new Set([
+  'kind',
+  'completeness',
+  'topicId',
+  'anchorMessageId',
+  'requested',
+  'firstMessageId',
+  'lastMessageId',
+  'returnedCount',
+  'hasMoreBefore',
+  'hasMoreAfter'
+])
+const FETCH_MESSAGES_WINDOW_REQUESTED_KEYS = new Set(['limit', 'before', 'after'])
+
+const fetchMessagesWindowContract: ChatDbContract = {
+  allowedKeys: keySet('kind', 'topicId', 'limit', 'anchorMessageId', 'before', 'after'),
+  validate(value: unknown): void {
+    validateRequest(value, fetchMessagesWindowContract.allowedKeys)
+    const req = value as FetchMessagesWindowRequest & Record<string, unknown>
+    if (req.kind !== 'latest' && req.kind !== 'around') {
+      throw new ValidationError('request.kind', 'Expected "latest" or "around"')
+    }
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    if (req.kind === 'latest') {
+      if ('anchorMessageId' in req || 'before' in req || 'after' in req) {
+        throw new ValidationError('request', 'Latest window must not contain anchorMessageId, before, or after')
+      }
+      if (req.limit === undefined) {
+        throw new ValidationError('request.limit', 'Expected an integer between 1 and 100')
+      }
+      validateBoundedCount(req.limit, 'request.limit')
+    } else {
+      // around
+      if ('limit' in req) {
+        throw new ValidationError('request', 'Around window must not contain limit')
+      }
+      validateNonEmptyString(req.anchorMessageId as unknown as string, 'request.anchorMessageId')
+      if (req.before === undefined) {
+        throw new ValidationError('request.before', 'Expected an integer between 1 and 100')
+      }
+      if (req.after === undefined) {
+        throw new ValidationError('request.after', 'Expected an integer between 1 and 100')
+      }
+      validateBoundedCount(req.before, 'request.before')
+      validateBoundedCount(req.after, 'request.after')
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:fetch-messages-window', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:fetch-messages-window] Expected object with messages, blocks, window'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:fetch-messages-window] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!FETCH_MESSAGES_WINDOW_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:fetch-messages-window] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      // messages / blocks
+      validateJsonObjectArray(v.messages, 'result.value.messages')
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+      // window meta
+      if (v.window === null || typeof v.window !== 'object' || Array.isArray(v.window)) {
+        throw new ValidationError('result.value.window', '[chatdb:fetch-messages-window] Expected window object')
+      }
+      const w = v.window as Record<string, unknown>
+      for (const key of Object.keys(w)) {
+        if (!FETCH_MESSAGES_WINDOW_META_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.window.${key}`,
+            `[chatdb:fetch-messages-window] Unknown key in window: "${key}"`
+          )
+        }
+      }
+      if (w.kind !== 'latest' && w.kind !== 'around') {
+        throw new ValidationError(
+          'result.value.window.kind',
+          '[chatdb:fetch-messages-window] Expected "latest" or "around"'
+        )
+      }
+      if (w.completeness !== 'window') {
+        throw new ValidationError(
+          'result.value.window.completeness',
+          '[chatdb:fetch-messages-window] Expected completeness "window"'
+        )
+      }
+      validateNonEmptyString(w.topicId, 'result.value.window.topicId')
+      if (w.anchorMessageId !== undefined && w.anchorMessageId !== null) {
+        validateNonEmptyString(w.anchorMessageId, 'result.value.window.anchorMessageId')
+      }
+      if (w.requested === null || typeof w.requested !== 'object' || Array.isArray(w.requested)) {
+        throw new ValidationError(
+          'result.value.window.requested',
+          '[chatdb:fetch-messages-window] Expected requested object'
+        )
+      }
+      const rq = w.requested as Record<string, unknown>
+      for (const key of Object.keys(rq)) {
+        if (!FETCH_MESSAGES_WINDOW_REQUESTED_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.window.requested.${key}`,
+            `[chatdb:fetch-messages-window] Unknown key in requested: "${key}"`
+          )
+        }
+      }
+      // LOCK-S6.1-003/004: strict per-kind requested validation — reject
+      // kind/requested mismatch, empty requested, or missing required bounds.
+      if (w.kind === 'latest') {
+        if (!('limit' in rq)) {
+          throw new ValidationError(
+            'result.value.window.requested.limit',
+            '[chatdb:fetch-messages-window] Latest window must have requested.limit'
+          )
+        }
+        if ('before' in rq || 'after' in rq) {
+          throw new ValidationError(
+            'result.value.window.requested',
+            '[chatdb:fetch-messages-window] Latest window must not have before/after'
+          )
+        }
+        validateBoundedCount(rq.limit, 'result.value.window.requested.limit')
+        if (Object.keys(rq).length !== 1) {
+          throw new ValidationError(
+            'result.value.window.requested',
+            '[chatdb:fetch-messages-window] Latest window requested must have exactly limit'
+          )
+        }
+      } else {
+        // around
+        if (!('before' in rq) || !('after' in rq)) {
+          throw new ValidationError(
+            'result.value.window.requested',
+            '[chatdb:fetch-messages-window] Around window must have requested.before and requested.after'
+          )
+        }
+        if ('limit' in rq) {
+          throw new ValidationError(
+            'result.value.window.requested',
+            '[chatdb:fetch-messages-window] Around window must not have limit'
+          )
+        }
+        validateBoundedCount(rq.before, 'result.value.window.requested.before')
+        validateBoundedCount(rq.after, 'result.value.window.requested.after')
+        if (Object.keys(rq).length !== 2) {
+          throw new ValidationError(
+            'result.value.window.requested',
+            '[chatdb:fetch-messages-window] Around window requested must have exactly before and after'
+          )
+        }
+      }
+      if (w.firstMessageId !== null) {
+        validateNonEmptyString(w.firstMessageId, 'result.value.window.firstMessageId')
+      }
+      if (w.lastMessageId !== null) {
+        validateNonEmptyString(w.lastMessageId, 'result.value.window.lastMessageId')
+      }
+      if (
+        typeof w.returnedCount !== 'number' ||
+        !Number.isFinite(w.returnedCount) ||
+        !Number.isInteger(w.returnedCount) ||
+        w.returnedCount < 0
+      ) {
+        throw new ValidationError(
+          'result.value.window.returnedCount',
+          '[chatdb:fetch-messages-window] Expected non-negative integer returnedCount'
+        )
+      }
+      if (typeof w.hasMoreBefore !== 'boolean') {
+        throw new ValidationError(
+          'result.value.window.hasMoreBefore',
+          '[chatdb:fetch-messages-window] Expected boolean hasMoreBefore'
+        )
+      }
+      if (typeof w.hasMoreAfter !== 'boolean') {
+        throw new ValidationError(
+          'result.value.window.hasMoreAfter',
+          '[chatdb:fetch-messages-window] Expected boolean hasMoreAfter'
+        )
+      }
+      // Consistency: empty implies null bounds
+      if (w.returnedCount === 0) {
+        if (w.firstMessageId !== null || w.lastMessageId !== null) {
+          throw new ValidationError(
+            'result.value.window',
+            '[chatdb:fetch-messages-window] Empty window must have null first/lastMessageId'
+          )
+        }
+      } else {
+        if (w.firstMessageId === null || w.lastMessageId === null) {
+          throw new ValidationError(
+            'result.value.window',
+            '[chatdb:fetch-messages-window] Non-empty window must have first/lastMessageId'
+          )
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Contract registry — exact channel → contract mapping
 // ---------------------------------------------------------------------------
 
@@ -1318,7 +1542,9 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:delete-messages-with-segments': deleteMessagesWithSegmentsContract,
   'chatdb:paste-messages-to-topic': pasteMessagesToTopicContract,
   // Phase 5.1B-2: search
-  'chatdb:search-messages': searchMessagesContract
+  'chatdb:search-messages': searchMessagesContract,
+  // S6.1: windowed reads
+  'chatdb:fetch-messages-window': fetchMessagesWindowContract
 })
 
 /**

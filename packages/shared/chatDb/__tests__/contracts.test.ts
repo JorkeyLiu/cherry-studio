@@ -58,7 +58,9 @@ describe('chatDbContracts', () => {
     'chatdb:empty-trash-topics',
     // Phase 5.3: ownership transfer + assistant reset
     'chatdb:transfer-topic-ownership',
-    'chatdb:reset-assistant-topics'
+    'chatdb:reset-assistant-topics',
+    // S6.1: windowed reads
+    'chatdb:fetch-messages-window'
   ]
 
   it('has entries for all expected channels', () => {
@@ -2203,7 +2205,9 @@ describe('coverage consistency', () => {
     'chatdb:delete-messages-with-segments',
     'chatdb:paste-messages-to-topic',
     // Phase 5.1B-2: search
-    'chatdb:search-messages'
+    'chatdb:search-messages',
+    // S6.1: windowed reads
+    'chatdb:fetch-messages-window'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {

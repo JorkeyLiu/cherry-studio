@@ -43,6 +43,8 @@ import type {
   EnsureTopicRequest,
   FetchMessagesRequest,
   FetchMessagesResponse,
+  FetchMessagesWindowRequest,
+  FetchMessagesWindowResponse,
   FileCleanupResult,
   GetRawTopicRequest,
   GetRawTopicResponse,
@@ -103,6 +105,7 @@ import type { MessageDataSource } from './types'
 
 export interface ChatDbApi {
   fetchMessages(request: FetchMessagesRequest): Promise<ChatDbResult<FetchMessagesResponse>>
+  fetchMessagesWindow?(request: FetchMessagesWindowRequest): Promise<ChatDbResult<FetchMessagesWindowResponse>>
   getRawTopic(request: GetRawTopicRequest): Promise<ChatDbResult<GetRawTopicResponse>>
   topicExists(request: TopicExistsRequest): Promise<ChatDbResult<boolean>>
   ensureTopic(request: EnsureTopicRequest): Promise<ChatDbResult<null>>
@@ -792,6 +795,21 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const result = unwrap(await this.api.pasteMessagesToTopic(request))
     dispatchTopicUpdatedAt(topicId)
     return result
+  }
+
+  // ============ Windowed reads (S6.1 R-02/R-03) ============
+
+  async fetchMessagesWindow(request: FetchMessagesWindowRequest): Promise<FetchMessagesWindowResponse> {
+    if (!this.api.fetchMessagesWindow) {
+      throw new Error('ChatDb API unavailable: window read not exposed')
+    }
+    const wireRequest = cloneForWire(request as unknown as JsonObject) as unknown as FetchMessagesWindowRequest
+    const result = unwrap(await this.api.fetchMessagesWindow(wireRequest))
+    return {
+      messages: result.messages as unknown as Message[],
+      blocks: result.blocks as unknown as MessageBlock[],
+      window: result.window
+    } as unknown as FetchMessagesWindowResponse
   }
 
   // ============ Search (Phase 5.2A, read-only) ============

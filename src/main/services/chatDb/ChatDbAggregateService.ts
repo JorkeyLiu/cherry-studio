@@ -21,6 +21,8 @@
 import { loggerService } from '@logger'
 import type {
   AppendDiagnostics,
+  FetchMessagesWindowRequest,
+  FetchMessagesWindowResponse,
   FileCleanupResult,
   FileReferenceWire,
   JsonObject,
@@ -65,6 +67,7 @@ import {
 // ---------------------------------------------------------------------------
 
 export type FetchMessagesResult = { messages: JsonObject[]; blocks: JsonObject[] }
+export type FetchMessagesWindowResult = FetchMessagesWindowResponse
 export type GetRawTopicResult = { id: string; messages: JsonObject[] } | null
 
 // ---------------------------------------------------------------------------
@@ -130,6 +133,110 @@ export class ChatDbAggregateService {
         return { messages: messagesWithBlocks, blocks: wireBlocks }
       })
     }, `fetchMessages(${topicId})`)
+  }
+
+  /**
+   * Typed windowed read — R-02 latest / R-03 around (S6.1).
+   *
+   * One authoritative SQLite transaction:
+   * - Deterministic order: sort_order ASC, id ASC with id tie-break.
+   * - Stable-ID anchoring for around reads; no tuple cursors.
+   * - Complete message+block groups returned.
+   * - Window metadata declares intent, bounds, and hasMore flags; completeness is 'window'.
+   * - Missing topic → ERR_NOT_FOUND; missing anchor → ERR_NOT_FOUND; empty topic → empty window success.
+   */
+  fetchMessagesWindow(request: FetchMessagesWindowRequest): ChatDbResult<FetchMessagesWindowResponse> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(request.topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+        }
+        const allMessages = repos.messages.listByTopic(request.topicId)
+        const total = allMessages.length
+
+        let windowMessages: typeof allMessages
+        let hasMoreBefore = false
+        let hasMoreAfter = false
+        let firstMessageId: string | null = null
+        let lastMessageId: string | null = null
+
+        if (request.kind === 'latest') {
+          if (total === 0) {
+            windowMessages = []
+          } else {
+            const start = Math.max(0, total - request.limit)
+            windowMessages = allMessages.slice(start)
+            hasMoreBefore = start > 0
+            hasMoreAfter = false
+          }
+          firstMessageId = windowMessages.length > 0 ? windowMessages[0].id : null
+          lastMessageId = windowMessages.length > 0 ? windowMessages[windowMessages.length - 1].id : null
+          const ids = windowMessages.map((m) => m.id)
+          const blockDataMap = repos.blocks.listByMessages(ids)
+          const allBlocks: MessageBlockData[] = []
+          for (const id of ids) allBlocks.push(...(blockDataMap.get(id) ?? []))
+          const wireMessages = messagesToWire(windowMessages)
+          const wireBlocks = blocksToWire(allBlocks)
+          const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
+          return {
+            messages: messagesWithBlocks,
+            blocks: wireBlocks,
+            window: {
+              kind: 'latest',
+              completeness: 'window' as const,
+              topicId: request.topicId,
+              anchorMessageId: null,
+              requested: { limit: request.limit },
+              firstMessageId,
+              lastMessageId,
+              returnedCount: windowMessages.length,
+              hasMoreBefore,
+              hasMoreAfter
+            }
+          }
+        } else {
+          // around
+          const anchorIdx = allMessages.findIndex((m) => m.id === request.anchorMessageId)
+          if (anchorIdx === -1) {
+            throw new ChatDbNotFoundError(
+              `Anchor message ${request.anchorMessageId} does not belong to topic ${request.topicId}`
+            )
+          }
+          const start = Math.max(0, anchorIdx - request.before)
+          const endExclusive = Math.min(total, anchorIdx + request.after + 1)
+          windowMessages = allMessages.slice(start, endExclusive)
+          hasMoreBefore = start > 0
+          hasMoreAfter = endExclusive < total
+          firstMessageId = windowMessages.length > 0 ? windowMessages[0].id : null
+          lastMessageId = windowMessages.length > 0 ? windowMessages[windowMessages.length - 1].id : null
+          const ids = windowMessages.map((m) => m.id)
+          const blockDataMap = repos.blocks.listByMessages(ids)
+          const allBlocks: MessageBlockData[] = []
+          for (const id of ids) allBlocks.push(...(blockDataMap.get(id) ?? []))
+          const wireMessages = messagesToWire(windowMessages)
+          const wireBlocks = blocksToWire(allBlocks)
+          const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
+          return {
+            messages: messagesWithBlocks,
+            blocks: wireBlocks,
+            window: {
+              kind: 'around',
+              completeness: 'window' as const,
+              topicId: request.topicId,
+              anchorMessageId: request.anchorMessageId,
+              requested: { before: request.before, after: request.after },
+              firstMessageId,
+              lastMessageId,
+              returnedCount: windowMessages.length,
+              hasMoreBefore,
+              hasMoreAfter
+            }
+          }
+        }
+      })
+    }, `fetchMessagesWindow(${request.topicId}, ${request.kind})`)
   }
 
   /**

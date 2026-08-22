@@ -1,6 +1,12 @@
 import db from '@renderer/databases'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
-import type { FileCleanupResult, MessageBlockEntry, StreamWriteDiagnostics } from '@shared/chatDb'
+import type {
+  FetchMessagesWindowRequest,
+  FetchMessagesWindowResponse,
+  FileCleanupResult,
+  MessageBlockEntry,
+  StreamWriteDiagnostics
+} from '@shared/chatDb'
 
 import { fileLock } from '../FileLock'
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
@@ -45,6 +51,10 @@ class DbService implements MessageDataSource {
 
   fetchMessages(topicId: string, forceReload?: boolean) {
     return this.ordinarySource.fetchMessages(topicId, forceReload)
+  }
+  fetchMessagesWindow(request: FetchMessagesWindowRequest): Promise<FetchMessagesWindowResponse> {
+    if (!this.ordinarySource.fetchMessagesWindow) throw new Error('fetchMessagesWindow unavailable')
+    return this.ordinarySource.fetchMessagesWindow(request)
   }
   getRawTopic(topicId: string) {
     return this.ordinarySource.getRawTopic(topicId)
