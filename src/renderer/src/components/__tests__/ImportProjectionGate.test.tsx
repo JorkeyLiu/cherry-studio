@@ -14,8 +14,25 @@ import { act, render, screen, waitFor } from '@testing-library/react'
 import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { fetchMessagesMock } = vi.hoisted(() => ({
-  fetchMessagesMock: vi.fn().mockResolvedValue({ messages: [], blocks: [] })
+const { fetchMessagesWindowMock } = vi.hoisted(() => ({
+  fetchMessagesWindowMock: vi
+    .fn()
+    .mockImplementation(async (request: { kind: string; topicId: string; limit: number }) => ({
+      messages: [],
+      blocks: [],
+      window: {
+        kind: 'latest' as const,
+        completeness: 'window' as const,
+        topicId: request.topicId,
+        anchorMessageId: null,
+        requested: { limit: request.limit },
+        firstMessageId: null,
+        lastMessageId: null,
+        returnedCount: 0,
+        hasMoreBefore: false,
+        hasMoreAfter: false
+      }
+    }))
 }))
 
 // The real store module is heavy and its persistStore callback would settle
@@ -30,8 +47,10 @@ vi.mock('@renderer/store', () => ({
 
 // The IPC-bound message-load seam the race depends on: gate closed ⇒ never
 // called; gate open ⇒ ordinary priming resumes (LOCK-009).
+// S6.1 R-02: ordinary topic load now uses fetchMessagesWindow latest bootstrap
+// with fail-closed validation and no whole-topic fallback.
 vi.mock('@renderer/services/db', () => ({
-  dbService: { fetchMessages: fetchMessagesMock }
+  dbService: { fetchMessagesWindow: fetchMessagesWindowMock }
 }))
 
 import { applyPendingImportProjection } from '@renderer/services/importProjection'
@@ -88,7 +107,24 @@ describe('ImportProjectionGate (LOCK-001/LOCK-PROJECTION)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     resetImportProjectionReadiness()
-    fetchMessagesMock.mockReset().mockResolvedValue({ messages: [], blocks: [] })
+    fetchMessagesWindowMock
+      .mockReset()
+      .mockImplementation(async (request: { kind: string; topicId: string; limit: number }) => ({
+        messages: [],
+        blocks: [],
+        window: {
+          kind: 'latest' as const,
+          completeness: 'window' as const,
+          topicId: request.topicId,
+          anchorMessageId: null,
+          requested: { limit: request.limit },
+          firstMessageId: null,
+          lastMessageId: null,
+          returnedCount: 0,
+          hasMoreBefore: false,
+          hasMoreAfter: false
+        }
+      }))
     getProjection.mockReset()
     ackProjection.mockReset().mockResolvedValue({ ok: true })
     const api = (window as unknown as { api?: Record<string, unknown> }).api ?? {}
@@ -234,7 +270,7 @@ describe('ImportProjectionGate (LOCK-001/LOCK-PROJECTION)', () => {
     // never mounts, so the stale topic is never primed.
     await waitFor(() => expect(getProjection).toHaveBeenCalledTimes(1))
     expect(screen.queryByTestId('priming-probe')).not.toBeInTheDocument()
-    expect(fetchMessagesMock).not.toHaveBeenCalled()
+    expect(fetchMessagesWindowMock).not.toHaveBeenCalled()
 
     // Projection completes (replace-all → flush → ack) → the tree opens.
     resolveProjection({ ok: true, projection: makeProjection() })
@@ -243,7 +279,13 @@ describe('ImportProjectionGate (LOCK-001/LOCK-PROJECTION)', () => {
     })
     expect(isImportProjectionReady()).toBe(true)
     await waitFor(() => expect(screen.getByTestId('priming-probe')).toBeInTheDocument())
-    // Ordinary priming resumes after the gate opens (LOCK-009).
-    await waitFor(() => expect(fetchMessagesMock).toHaveBeenCalledWith('t-stale-pre-import'))
+    // Ordinary priming resumes after the gate opens (LOCK-009) via R-02
+    // latest-window bootstrap — fail-closed, no whole-topic fallback.
+    await waitFor(() =>
+      expect(fetchMessagesWindowMock).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'latest', topicId: 't-stale-pre-import', limit: 20 })
+      )
+    )
+    expect(fetchMessagesWindowMock).toHaveBeenCalledTimes(1)
   })
 })

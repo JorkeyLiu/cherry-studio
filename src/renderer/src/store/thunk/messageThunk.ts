@@ -16,7 +16,9 @@
  */
 import { loggerService } from '@logger'
 import { AiSdkToChunkAdapter } from '@renderer/aiCore/chunk/AiSdkToChunkAdapter'
+import { INITIAL_MESSAGES_COUNT } from '@renderer/config/constant'
 import { getModel } from '@renderer/hooks/useModel'
+import { setLatestWindowCompleteness } from '@renderer/pages/home/Messages/messageWindow'
 import {
   buildGroupList,
   ensureTopicAnchorEstablished,
@@ -36,6 +38,7 @@ import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
 import { currentPhaseCorrelation, recordPhaseDuration } from '@renderer/services/phaseTimingDiagnostics'
 import { endSpan } from '@renderer/services/SpanManagerService'
 import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/services/StreamProcessingService'
+import { isValidWindowResponse } from '@renderer/services/windowCoverage'
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
 import { type Assistant, type FileMetadata, type Model, type Topic } from '@renderer/types'
@@ -55,7 +58,12 @@ import {
   resetAssistantMessage
 } from '@renderer/utils/messageUtils/create'
 import { getTopicQueue, waitForTopicQueue } from '@renderer/utils/queue'
-import type { FileCleanupResult, StreamWriteDiagnostics } from '@shared/chatDb'
+import type {
+  FetchMessagesWindowRequest,
+  FetchMessagesWindowResponse,
+  FileCleanupResult,
+  StreamWriteDiagnostics
+} from '@shared/chatDb'
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
 import { defaultAppHeaders } from '@shared/utils'
 import type { TextStreamPart } from 'ai'
@@ -1519,8 +1527,32 @@ export const removeBlocksThunk =
 //以下内容从原 messageThunk.v2.ts 迁移过来，原文件已经删除
 //原因：v2.ts并不是v2数据重构的一部分，而相关命名对v2重构造成重大误解，故两文件合并，以消除误解
 
+// S6.1 helpers — R-02/R-03 sizing and validation (shared)
+
+function clampWindowLimit(raw: unknown): number {
+  const n = typeof raw === 'number' ? Math.floor(raw) : INITIAL_MESSAGES_COUNT
+  if (!Number.isFinite(n)) return INITIAL_MESSAGES_COUNT
+  return Math.min(100, Math.max(1, n))
+}
+
+// Re-export shared validator for tests and consumers; local alias preserves prior import path.
+export const validateWindowResponse = isValidWindowResponse
+
+// S6.1 same-topic stale-bootstrap guard — module-private monotonic sequence plus per-topic latest token.
+// Prevents overlapping loadTopicMessagesThunk(topicId) latest responses from publishing out of order.
+// Viewport generation cannot be reused because bootstrap runs outside Messages.
+let loadTopicMessagesRequestSeq = 0
+const latestLoadTopicMessagesRequestByTopic = new Map<string, number>()
+
 /**
- * Load messages for a topic using unified DbService
+ * Load messages for a topic using windowed reads (S6.1 R-02 latest).
+ *
+ * Cold bootstrap uses the existing renderer sizing (displayCount / INITIAL_MESSAGES_COUNT,
+ * clamped to the 1..100 validation bounds) for the latest window limit. Only a
+ * validated complete window response is staged: blocks then messages are published
+ * atomically after stale-topic check. Malformed/mismatched or stale responses
+ * fail closed via the existing error path — never masquerading as whole-topic
+ * data and never falling back to whole-topic fetch.
  */
 export const loadTopicMessagesThunk =
   (topicId: string, forceReload: boolean = false) =>
@@ -1552,15 +1584,58 @@ export const loadTopicMessagesThunk =
     try {
       dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
 
-      const { messages, blocks } = await dbService.fetchMessages(topicId)
+      const limitRaw = getState().messages.displayCount ?? INITIAL_MESSAGES_COUNT
+      const limit = clampWindowLimit(limitRaw)
+      const request: FetchMessagesWindowRequest = { kind: 'latest', topicId, limit }
 
-      logger.silly('Loaded messages via DbService', {
+      const requestSeq = ++loadTopicMessagesRequestSeq
+      latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
+
+      const response: FetchMessagesWindowResponse = await dbService.fetchMessagesWindow(request)
+
+      // S6.1 same-topic stale-bootstrap guard: discard when topic's latest token no longer matches.
+      // Must run before validation, completeness-map update, or staged publication.
+      if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== requestSeq) {
+        logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (superseded same-topic request)`)
+        return
+      }
+
+      // Stale discard after await — topic changed via concurrent activation
+      // Allow null initial currentTopicId (first load) to pass; only discard when
+      // currentTopicId is non-null and differs from the requested topic (test
+      // mocks use vi.fn dispatch that does not mutate state).
+      const currentId = getState().messages.currentTopicId
+      if (currentId !== null && currentId !== undefined && currentId !== topicId) {
+        logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (current moved)`)
+        return
+      }
+
+      if (!validateWindowResponse(request, response)) {
+        logger.error(`[loadTopicMessagesThunk] malformed window response for ${topicId}`, {
+          window: response.window
+        } as unknown as Error)
+        throw new Error('malformed window response')
+      }
+
+      logger.silly('Loaded window via DbService', {
         topicId,
-        messageCount: messages.length,
-        blockCount: blocks.length
+        kind: response.window.kind,
+        returnedCount: response.window.returnedCount,
+        hasMoreBefore: response.window.hasMoreBefore,
+        hasMoreAfter: response.window.hasMoreAfter
       })
 
-      // Update Redux state with fetched data
+      // Retain authoritative completeness for the renderer viewport model
+      // (Messages bootstrap reads this to keep hasMoreOlder/hasMoreNewer from
+      // validated Main response instead of deriving false from the partial list).
+      setLatestWindowCompleteness(topicId, {
+        hasMoreBefore: response.window.hasMoreBefore,
+        hasMoreAfter: response.window.hasMoreAfter
+      })
+
+      // Atomic staged publication: only publish validated complete window
+      const blocks = response.blocks as unknown as MessageBlock[]
+      const messages = response.messages as unknown as Message[]
       if (blocks.length > 0) {
         dispatch(upsertManyBlocks(blocks))
       }

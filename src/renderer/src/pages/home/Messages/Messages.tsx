@@ -41,9 +41,12 @@ import {
   type MessageViewportScrollToken
 } from '@renderer/pages/home/Messages/messageViewportReducer'
 import {
+  clampWindowCount,
   createLatestMessageWindow,
   expandMessageWindowNewer,
   expandMessageWindowOlder,
+  getLatestWindowCompleteness,
+  mergeWindowIntoTopic,
   type MessageWindow,
   reconcileMessageWindow
 } from '@renderer/pages/home/Messages/messageWindow'
@@ -60,8 +63,10 @@ import {
   recordPhaseDurationForCorrelation,
   recordPhaseEndpoint
 } from '@renderer/services/phaseTimingDiagnostics'
+import { isValidWindowResponse, isWindowCovering } from '@renderer/services/windowCoverage'
 import store, { useAppDispatch } from '@renderer/store'
-import { messageBlocksSelectors, updateOneBlock } from '@renderer/store/messageBlock'
+import { messageBlocksSelectors, updateOneBlock, upsertManyBlocks } from '@renderer/store/messageBlock'
+import { newMessagesActions } from '@renderer/store/newMessage'
 import { updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import type { Assistant, Topic } from '@renderer/types'
 import type { MessageBlock } from '@renderer/types/newMessage'
@@ -75,6 +80,7 @@ import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
+import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse } from '@shared/chatDb'
 import { last } from 'lodash'
 import {
   Fragment,
@@ -357,6 +363,8 @@ const Messages = ({
   const messagesRef = useRef<Message[]>(messages)
   const previousMessagesRef = useRef<Message[]>(messages)
   const viewportStateRef = useRef(viewportState)
+  // S6.1: per-topic last window cache for coverage checks (fail-closed, generation-owned)
+  const windowCacheRef = useRef<Map<string, FetchMessagesWindowResponse>>(new Map())
   const viewportCommitWaiterRef = useRef(createViewportCommitWaiter<typeof viewportState>())
   /** PERF-101: per-correlation one-shot guard for topic.messagesMount.
    *  The useLayoutEffect dependency array includes phaseAtRender (a new
@@ -370,6 +378,10 @@ const Messages = ({
     viewportStateRef.current = viewportState
     viewportCommitWaiterRef.current.notify(viewportState)
   }, [viewportState])
+  // S6.1: clear per-topic window cache on topic change / generation reset
+  useEffect(() => {
+    windowCacheRef.current.clear()
+  }, [topic.id, viewportState.topicGeneration])
   const savedRestoreHandledRef = useRef(false)
   const bootstrapPhaseRef = useRef<BootstrapPhase>('idle')
   // S3.1 Blocker 4 correction: onFirstUpdateFiredRef must be declared before
@@ -535,11 +547,16 @@ const Messages = ({
     //   Scenario 1: First load (empty viewport → apply latest window)
     //   Scenario 2: Reconcile existing window against updated messages
 
-    // Scenario 1: First load
+    // Scenario 1: First load — authoritative completeness retained from validated latest response
     if (!viewportStateRef.current.window?.displayMessages.length) {
       const active = currentPhaseCorrelation()
       const startedAt = active ? performance.now() : 0
-      applyMessageWindow(createLatestMessageWindow(messages, displayCount))
+      const completeness = getLatestWindowCompleteness(topic.id)
+      const authoritative =
+        completeness !== undefined
+          ? { hasMoreBefore: completeness.hasMoreBefore, hasMoreAfter: completeness.hasMoreAfter }
+          : undefined
+      applyMessageWindow(createLatestMessageWindow(messages, displayCount, authoritative))
       if (active) {
         recordPhaseDurationForCorrelation(
           active.correlationId,
@@ -1007,116 +1024,257 @@ const Messages = ({
     if (!canHandleUserViewportScroll(currentState) || !currentState.window?.hasMoreOlder || currentState.loading.older)
       return
 
+    const anchorId = currentState.window?.oldestMessageId
+    if (!anchorId) {
+      logger.warn('[loadMoreMessages] missing stable anchor for R-03 around')
+      return
+    }
+
     const loadToken = {}
     const topicGeneration = currentState.topicGeneration
+    const topicIdAtStart = topic.id
     viewportDispatch({ type: 'load/start', direction: 'older', token: loadToken })
 
     const container = scrollContainerRef.current
     const anchor = findFirstVisibleMessage(container, messageElements.current)
 
+    const before = clampWindowCount(LOAD_MORE_COUNT)
+    const after = 1
+    const request: FetchMessagesWindowRequest = {
+      kind: 'around',
+      topicId: topicIdAtStart,
+      anchorMessageId: anchorId,
+      before,
+      after
+    }
+
+    // S6.1 coverage check — fail-closed: only reuse cached window if it fully covers the request for current topic/generation
+    const cachedWindow = windowCacheRef.current.get(topicIdAtStart)
+    if (cachedWindow && isWindowCovering(cachedWindow, request, topicIdAtStart)) {
+      logger.silly('[loadMoreMessages] coverage hit, still fetching for authoritative window' as never)
+    }
+
     setTimeoutTimer(
       'loadMoreMessages',
-      () => {
+      async () => {
         if (!isCurrentLoad('older', loadToken, topicGeneration)) return
-        const allMessages = messagesRef.current
-        const currentWindow = viewportStateRef.current.window
-        if (!currentWindow) {
-          viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
-          return
-        }
-        const olderWindow = expandMessageWindowOlder(allMessages, currentWindow, LOAD_MORE_COUNT)
+        try {
+          const { dbService } = await import('@renderer/services/db')
+          const response = await dbService.fetchMessagesWindow(request)
 
-        viewportDispatch({
-          type: 'load/finish',
-          direction: 'older',
-          token: loadToken,
-          topicGeneration,
-          window: olderWindow
-        })
+          // stale discard — topic changed or generation advanced
+          if (topic.id !== topicIdAtStart) {
+            viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+            return
+          }
+          if (viewportStateRef.current.topicGeneration !== topicGeneration) {
+            viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+            return
+          }
+          if (!isCurrentLoad('older', loadToken, topicGeneration)) return
 
-        if (anchor) {
-          requestAnimationFrame(async () => {
-            if (!isCurrentLoad('older', loadToken, topicGeneration)) return
-            if (container && anchor.element && anchor.element.isConnected) {
-              const newRect = anchor.element.getBoundingClientRect()
-              const delta = newRect.top - anchor.rect.top
-              if (Math.abs(delta) > 1) {
-                const scrollToken = {}
-                if (!(await beginScroll('anchoring', scrollToken))) return
-                if (!isCurrentLoad('older', loadToken, topicGeneration) || !anchor.element.isConnected) {
-                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                  return
-                }
-                container.scrollTop += delta
-                requestAnimationFrame(() => {
-                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                })
-              }
-            }
+          if (!isValidWindowResponse(request, response as unknown as FetchMessagesWindowResponse)) {
+            logger.error(
+              '[loadMoreMessages] malformed window response, fail-closed',
+              response.window as unknown as Error
+            )
+            viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+            return
+          }
+          if (response.window.topicId !== topicIdAtStart || response.window.kind !== 'around') {
+            logger.error('[loadMoreMessages] window topic/kind mismatch, fail-closed')
+            viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+            return
+          }
+
+          // atomic staged publication: validate first, then merge
+          windowCacheRef.current.set(topicIdAtStart, response as unknown as FetchMessagesWindowResponse)
+          const blocks = response.blocks as unknown as MessageBlock[]
+          const incoming = response.messages as unknown as Message[]
+          const existing = messagesRef.current
+          const merged = mergeWindowIntoTopic(existing, incoming, anchorId)
+
+          if (blocks.length > 0) {
+            dispatch(upsertManyBlocks(blocks))
+          }
+          // install merged ordered list as single Redux transition
+          dispatch(newMessagesActions.messagesReceived({ topicId: topicIdAtStart, messages: merged }))
+
+          const currentWindow = viewportStateRef.current.window
+          if (!currentWindow) {
+            viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+            return
+          }
+          const olderWindow = expandMessageWindowOlder(merged, currentWindow, LOAD_MORE_COUNT, {
+            hasMoreBefore: response.window.hasMoreBefore,
+            hasMoreAfter: currentWindow.hasMoreNewer
           })
+
+          viewportDispatch({
+            type: 'load/finish',
+            direction: 'older',
+            token: loadToken,
+            topicGeneration,
+            window: olderWindow
+          })
+
+          if (anchor) {
+            requestAnimationFrame(async () => {
+              if (!isCurrentLoad('older', loadToken, topicGeneration)) return
+              if (container && anchor.element && anchor.element.isConnected) {
+                const newRect = anchor.element.getBoundingClientRect()
+                const delta = newRect.top - anchor.rect.top
+                if (Math.abs(delta) > 1) {
+                  const scrollToken = {}
+                  if (!(await beginScroll('anchoring', scrollToken))) return
+                  if (!isCurrentLoad('older', loadToken, topicGeneration) || !anchor.element.isConnected) {
+                    viewportDispatch({ type: 'scroll/end', token: scrollToken })
+                    return
+                  }
+                  container.scrollTop += delta
+                  requestAnimationFrame(() => {
+                    viewportDispatch({ type: 'scroll/end', token: scrollToken })
+                  })
+                }
+              }
+            })
+          }
+        } catch (err) {
+          logger.error('[loadMoreMessages] window fetch failed, fail-closed', err as Error)
+          if (isCurrentLoad('older', loadToken, topicGeneration)) {
+            viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+          }
         }
       },
       50
     )
-  }, [beginScroll, isCurrentLoad, setTimeoutTimer, scrollContainerRef, viewportDispatch])
+  }, [beginScroll, dispatch, isCurrentLoad, setTimeoutTimer, scrollContainerRef, topic.id, viewportDispatch])
 
   const loadNewerMessages = useCallback(() => {
     const currentState = viewportStateRef.current
     if (!canHandleUserViewportScroll(currentState) || !currentState.window?.hasMoreNewer || currentState.loading.newer)
       return
 
+    const anchorId = currentState.window?.newestMessageId
+    if (!anchorId) {
+      logger.warn('[loadNewerMessages] missing stable anchor for R-03 around')
+      return
+    }
+
     const loadToken = {}
     const topicGeneration = currentState.topicGeneration
+    const topicIdAtStart = topic.id
     viewportDispatch({ type: 'load/start', direction: 'newer', token: loadToken })
 
     const container = scrollContainerRef.current
     const anchor = findFirstVisibleMessage(container, messageElements.current)
 
+    const before = 1
+    const after = clampWindowCount(LOAD_MORE_COUNT)
+    const request: FetchMessagesWindowRequest = {
+      kind: 'around',
+      topicId: topicIdAtStart,
+      anchorMessageId: anchorId,
+      before,
+      after
+    }
+
+    const cachedWindow = windowCacheRef.current.get(topicIdAtStart)
+    if (cachedWindow && isWindowCovering(cachedWindow, request, topicIdAtStart)) {
+      logger.silly('[loadNewerMessages] coverage hit' as never)
+    }
+
     setTimeoutTimer(
       'loadNewerMessages',
-      () => {
+      async () => {
         if (!isCurrentLoad('newer', loadToken, topicGeneration)) return
-        const allMessages = messagesRef.current
-        const currentWindow = viewportStateRef.current.window
-        if (!currentWindow) {
-          viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
-          return
-        }
-        const newerWindow = expandMessageWindowNewer(allMessages, currentWindow, LOAD_MORE_COUNT)
+        try {
+          const { dbService } = await import('@renderer/services/db')
+          const response = await dbService.fetchMessagesWindow(request)
 
-        viewportDispatch({
-          type: 'load/finish',
-          direction: 'newer',
-          token: loadToken,
-          topicGeneration,
-          window: newerWindow
-        })
+          if (topic.id !== topicIdAtStart) {
+            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
+            return
+          }
+          if (viewportStateRef.current.topicGeneration !== topicGeneration) {
+            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
+            return
+          }
+          if (!isCurrentLoad('newer', loadToken, topicGeneration)) return
 
-        if (anchor) {
-          requestAnimationFrame(async () => {
-            if (!isCurrentLoad('newer', loadToken, topicGeneration)) return
-            if (container && anchor.element && anchor.element.isConnected) {
-              const newRect = anchor.element.getBoundingClientRect()
-              const delta = newRect.top - anchor.rect.top
-              if (Math.abs(delta) > 1) {
-                const scrollToken = {}
-                if (!(await beginScroll('anchoring', scrollToken))) return
-                if (!isCurrentLoad('newer', loadToken, topicGeneration) || !anchor.element.isConnected) {
-                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                  return
-                }
-                container.scrollTop += delta
-                requestAnimationFrame(() => {
-                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                })
-              }
-            }
+          if (!isValidWindowResponse(request, response as unknown as FetchMessagesWindowResponse)) {
+            logger.error(
+              '[loadNewerMessages] malformed window response, fail-closed',
+              response.window as unknown as Error
+            )
+            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
+            return
+          }
+          if (response.window.topicId !== topicIdAtStart || response.window.kind !== 'around') {
+            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
+            return
+          }
+
+          windowCacheRef.current.set(topicIdAtStart, response as unknown as FetchMessagesWindowResponse)
+          const blocks = response.blocks as unknown as MessageBlock[]
+          const incoming = response.messages as unknown as Message[]
+          const existing = messagesRef.current
+          const merged = mergeWindowIntoTopic(existing, incoming, anchorId)
+
+          if (blocks.length > 0) {
+            dispatch(upsertManyBlocks(blocks))
+          }
+          dispatch(newMessagesActions.messagesReceived({ topicId: topicIdAtStart, messages: merged }))
+
+          const currentWindow = viewportStateRef.current.window
+          if (!currentWindow) {
+            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
+            return
+          }
+          const newerWindow = expandMessageWindowNewer(merged, currentWindow, LOAD_MORE_COUNT, {
+            hasMoreBefore: currentWindow.hasMoreOlder,
+            hasMoreAfter: response.window.hasMoreAfter
           })
+
+          viewportDispatch({
+            type: 'load/finish',
+            direction: 'newer',
+            token: loadToken,
+            topicGeneration,
+            window: newerWindow
+          })
+
+          if (anchor) {
+            requestAnimationFrame(async () => {
+              if (!isCurrentLoad('newer', loadToken, topicGeneration)) return
+              if (container && anchor.element && anchor.element.isConnected) {
+                const newRect = anchor.element.getBoundingClientRect()
+                const delta = newRect.top - anchor.rect.top
+                if (Math.abs(delta) > 1) {
+                  const scrollToken = {}
+                  if (!(await beginScroll('anchoring', scrollToken))) return
+                  if (!isCurrentLoad('newer', loadToken, topicGeneration) || !anchor.element.isConnected) {
+                    viewportDispatch({ type: 'scroll/end', token: scrollToken })
+                    return
+                  }
+                  container.scrollTop += delta
+                  requestAnimationFrame(() => {
+                    viewportDispatch({ type: 'scroll/end', token: scrollToken })
+                  })
+                }
+              }
+            })
+          }
+        } catch (err) {
+          logger.error('[loadNewerMessages] window fetch failed, fail-closed', err as Error)
+          if (isCurrentLoad('newer', loadToken, topicGeneration)) {
+            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
+          }
         }
       },
       50
     )
-  }, [beginScroll, isCurrentLoad, setTimeoutTimer, scrollContainerRef, viewportDispatch])
+  }, [beginScroll, dispatch, isCurrentLoad, setTimeoutTimer, scrollContainerRef, topic.id, viewportDispatch])
 
   const handleScroll = useCallback(() => {
     const currentState = viewportStateRef.current

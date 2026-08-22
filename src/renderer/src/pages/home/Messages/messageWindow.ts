@@ -28,13 +28,17 @@ export interface MessageWindow {
   hasMoreNewer: boolean
   oldestMessageId?: string
   newestMessageId?: string
+  /** Authoritative completeness from validated Main window, retained for pagination. */
+  authoritativeHasMoreBefore?: boolean
+  authoritativeHasMoreAfter?: boolean
 }
 
 const createWindowFromRange = (
   model: MessageViewportGroupModel,
   range: MessageGroupRange | null,
   groupCapacity: number,
-  edge: MessageWindow['edge']
+  edge: MessageWindow['edge'],
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
 ): MessageWindow => {
   if (!range || model.groups.length === 0) {
     return {
@@ -44,17 +48,23 @@ const createWindowFromRange = (
       displayGroups: [],
       groupCapacity: Math.max(0, groupCapacity),
       groupCount: 0,
-      hasMoreOlder: false,
-      hasMoreNewer: false
+      hasMoreOlder: authoritative?.hasMoreBefore ?? false,
+      hasMoreNewer: authoritative?.hasMoreAfter ?? false,
+      authoritativeHasMoreBefore: authoritative?.hasMoreBefore,
+      authoritativeHasMoreAfter: authoritative?.hasMoreAfter
     }
   }
 
   const oldestGroupIndex = Math.max(0, range.oldestGroupIndex)
   const newestGroupIndex = Math.min(model.groups.length - 1, range.newestGroupIndex)
-  if (oldestGroupIndex > newestGroupIndex) return createWindowFromRange(model, null, groupCapacity, edge)
+  if (oldestGroupIndex > newestGroupIndex) return createWindowFromRange(model, null, groupCapacity, edge, authoritative)
 
   const groups = model.groups.slice(oldestGroupIndex, newestGroupIndex + 1)
   const chronologicalMessages = groups.flatMap((group) => group.messages)
+
+  const hasMoreOlder = authoritative?.hasMoreBefore !== undefined ? authoritative.hasMoreBefore : oldestGroupIndex > 0
+  const hasMoreNewer =
+    authoritative?.hasMoreAfter !== undefined ? authoritative.hasMoreAfter : newestGroupIndex < model.groups.length - 1
 
   return {
     range: { oldestGroupIndex, newestGroupIndex },
@@ -63,17 +73,24 @@ const createWindowFromRange = (
     displayGroups: groups,
     groupCapacity: Math.max(0, groupCapacity),
     groupCount: groups.length,
-    hasMoreOlder: oldestGroupIndex > 0,
-    hasMoreNewer: newestGroupIndex < model.groups.length - 1,
+    hasMoreOlder,
+    hasMoreNewer,
     oldestMessageId: chronologicalMessages[0]?.id,
-    newestMessageId: chronologicalMessages.at(-1)?.id
+    newestMessageId: chronologicalMessages.at(-1)?.id,
+    authoritativeHasMoreBefore: authoritative?.hasMoreBefore,
+    authoritativeHasMoreAfter: authoritative?.hasMoreAfter
   }
 }
 
-export const createLatestMessageWindow = (messages: Message[], groupCapacity: number): MessageWindow => {
+export const createLatestMessageWindow = (
+  messages: Message[],
+  groupCapacity: number,
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
+): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
   const capacity = Math.max(0, groupCapacity)
-  if (capacity === 0 || model.groups.length === 0) return createWindowFromRange(model, null, capacity, 'latest')
+  if (capacity === 0 || model.groups.length === 0)
+    return createWindowFromRange(model, null, capacity, 'latest', authoritative)
 
   return createWindowFromRange(
     model,
@@ -82,7 +99,8 @@ export const createLatestMessageWindow = (messages: Message[], groupCapacity: nu
       newestGroupIndex: model.groups.length - 1
     },
     capacity,
-    'latest'
+    'latest',
+    authoritative
   )
 }
 
@@ -90,10 +108,15 @@ export const createLatestMessageWindow = (messages: Message[], groupCapacity: nu
  * Creates a window anchored at the oldest groups in the topic.
  * Used by the unified 'top' navigation intent.
  */
-export const createOldestMessageWindow = (messages: Message[], groupCapacity: number): MessageWindow => {
+export const createOldestMessageWindow = (
+  messages: Message[],
+  groupCapacity: number,
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
+): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
   const capacity = Math.max(0, groupCapacity)
-  if (capacity === 0 || model.groups.length === 0) return createWindowFromRange(model, null, capacity, 'fixed')
+  if (capacity === 0 || model.groups.length === 0)
+    return createWindowFromRange(model, null, capacity, 'fixed', authoritative)
 
   return createWindowFromRange(
     model,
@@ -102,7 +125,8 @@ export const createOldestMessageWindow = (messages: Message[], groupCapacity: nu
       newestGroupIndex: Math.min(model.groups.length - 1, capacity - 1)
     },
     capacity,
-    'fixed'
+    'fixed',
+    authoritative
   )
 }
 
@@ -114,12 +138,13 @@ export const createTargetMessageWindow = (
   messages: Message[],
   targetMessageId: string,
   visuallyOlderGroupCount: number,
-  visuallyNewerGroupCount: number
+  visuallyNewerGroupCount: number,
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
 ): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
   const capacity = Math.max(0, visuallyOlderGroupCount) + 1 + Math.max(0, visuallyNewerGroupCount)
   const targetGroup = model.messageIdToGroup.get(targetMessageId)
-  if (!targetGroup) return createWindowFromRange(model, null, capacity, 'fixed')
+  if (!targetGroup) return createWindowFromRange(model, null, capacity, 'fixed', authoritative)
 
   const targetGroupIndex = model.groups.indexOf(targetGroup)
   let oldestGroupIndex = Math.max(0, targetGroupIndex - Math.max(0, visuallyOlderGroupCount))
@@ -134,7 +159,7 @@ export const createTargetMessageWindow = (
     newestGroupIndex = Math.min(model.groups.length - 1, newestGroupIndex + missingCount)
   }
 
-  return createWindowFromRange(model, { oldestGroupIndex, newestGroupIndex }, capacity, 'fixed')
+  return createWindowFromRange(model, { oldestGroupIndex, newestGroupIndex }, capacity, 'fixed', authoritative)
 }
 
 const getRangeFromDisplayMessages = (model: MessageViewportGroupModel, displayMessages: Message[]) => {
@@ -153,31 +178,62 @@ const getRangeFromDisplayMessages = (model: MessageViewportGroupModel, displayMe
 export const expandMessageWindowOlder = (
   messages: Message[],
   currentWindow: MessageWindow,
-  additionalGroupCount: number
+  additionalGroupCount: number,
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
 ): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
   const currentRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
-  if (!currentRange) return createLatestMessageWindow(messages, additionalGroupCount)
+  if (!currentRange) {
+    const fallbackAuth = {
+      hasMoreBefore: authoritative?.hasMoreBefore ?? currentWindow.authoritativeHasMoreBefore,
+      hasMoreAfter: authoritative?.hasMoreAfter ?? currentWindow.authoritativeHasMoreAfter
+    }
+    const cleanAuth =
+      fallbackAuth.hasMoreBefore === undefined && fallbackAuth.hasMoreAfter === undefined ? undefined : fallbackAuth
+    return createLatestMessageWindow(messages, additionalGroupCount, cleanAuth)
+  }
 
   const addedCount = Math.max(0, additionalGroupCount)
+  const effectiveAuth = {
+    hasMoreBefore: authoritative?.hasMoreBefore ?? currentWindow.authoritativeHasMoreBefore,
+    hasMoreAfter: authoritative?.hasMoreAfter ?? currentWindow.authoritativeHasMoreAfter
+  }
+  const cleanAuth =
+    effectiveAuth.hasMoreBefore === undefined && effectiveAuth.hasMoreAfter === undefined ? undefined : effectiveAuth
   return createWindowFromRange(
     model,
     { ...currentRange, oldestGroupIndex: Math.max(0, currentRange.oldestGroupIndex - addedCount) },
     currentWindow.groupCapacity + addedCount,
-    currentWindow.edge
+    currentWindow.edge,
+    cleanAuth
   )
 }
 
 export const expandMessageWindowNewer = (
   messages: Message[],
   currentWindow: MessageWindow,
-  additionalGroupCount: number
+  additionalGroupCount: number,
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
 ): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
   const currentRange = getRangeFromDisplayMessages(model, currentWindow.displayMessages)
-  if (!currentRange) return createLatestMessageWindow(messages, additionalGroupCount)
+  if (!currentRange) {
+    const fallbackAuth = {
+      hasMoreBefore: authoritative?.hasMoreBefore ?? currentWindow.authoritativeHasMoreBefore,
+      hasMoreAfter: authoritative?.hasMoreAfter ?? currentWindow.authoritativeHasMoreAfter
+    }
+    const cleanAuth =
+      fallbackAuth.hasMoreBefore === undefined && fallbackAuth.hasMoreAfter === undefined ? undefined : fallbackAuth
+    return createLatestMessageWindow(messages, additionalGroupCount, cleanAuth)
+  }
 
   const addedCount = Math.max(0, additionalGroupCount)
+  const effectiveAuth = {
+    hasMoreBefore: authoritative?.hasMoreBefore ?? currentWindow.authoritativeHasMoreBefore,
+    hasMoreAfter: authoritative?.hasMoreAfter ?? currentWindow.authoritativeHasMoreAfter
+  }
+  const cleanAuth =
+    effectiveAuth.hasMoreBefore === undefined && effectiveAuth.hasMoreAfter === undefined ? undefined : effectiveAuth
   return createWindowFromRange(
     model,
     {
@@ -185,7 +241,8 @@ export const expandMessageWindowNewer = (
       newestGroupIndex: Math.min(model.groups.length - 1, currentRange.newestGroupIndex + addedCount)
     },
     currentWindow.groupCapacity + addedCount,
-    currentWindow.edge
+    currentWindow.edge,
+    cleanAuth
   )
 }
 
@@ -196,8 +253,16 @@ export const reconcileMessageWindow = (
   currentWindow: MessageWindow
 ): MessageWindow => {
   const capacity = currentWindow.groupCapacity
+  const auth =
+    currentWindow.authoritativeHasMoreBefore !== undefined || currentWindow.authoritativeHasMoreAfter !== undefined
+      ? {
+          hasMoreBefore: currentWindow.authoritativeHasMoreBefore,
+          hasMoreAfter: currentWindow.authoritativeHasMoreAfter
+        }
+      : undefined
+  const cleanAuth = auth?.hasMoreBefore === undefined && auth?.hasMoreAfter === undefined ? undefined : auth
   if (currentWindow.edge === 'latest') {
-    return createLatestMessageWindow(messages, capacity)
+    return createLatestMessageWindow(messages, capacity, cleanAuth)
   }
 
   const model = createMessageViewportGroupModel(messages)
@@ -209,9 +274,9 @@ export const reconcileMessageWindow = (
     const previousModel = createMessageViewportGroupModel(previousMessages)
     const previousRange = currentWindow.range
     if (!previousRange || previousModel.groups.length === 0) {
-      return createWindowFromRange(model, null, capacity, 'fixed')
+      return createWindowFromRange(model, null, capacity, 'fixed', cleanAuth)
     }
-    return createWindowFromRange(model, previousRange, capacity, 'fixed')
+    return createWindowFromRange(model, previousRange, capacity, 'fixed', cleanAuth)
   }
 
   let oldestGroupIndex = Math.min(...retainedIndexes)
@@ -224,5 +289,60 @@ export const reconcileMessageWindow = (
   newestGroupIndex += addedNewer
   oldestGroupIndex = Math.max(0, oldestGroupIndex - (missingCount - addedNewer))
 
-  return createWindowFromRange(model, { oldestGroupIndex, newestGroupIndex }, capacity, 'fixed')
+  return createWindowFromRange(model, { oldestGroupIndex, newestGroupIndex }, capacity, 'fixed', cleanAuth)
+}
+
+// --- S6.1 helpers transplanted from Messages.tsx (single production implementation) ---
+
+export function mergeWindowIntoTopic(existing: Message[], incoming: Message[], anchorId: string): Message[] {
+  const existingIds = new Set(existing.map((m) => m.id))
+  const newIds = incoming.filter((m) => !existingIds.has(m.id))
+  if (newIds.length === 0) return existing
+
+  const anchorIdxExisting = existing.findIndex((m) => m.id === anchorId)
+  const anchorIdxIncoming = incoming.findIndex((m) => m.id === anchorId)
+  if (anchorIdxIncoming === -1) return existing
+
+  const beforeIncoming = incoming.slice(0, anchorIdxIncoming).filter((m) => !existingIds.has(m.id))
+  const afterIncoming = incoming.slice(anchorIdxIncoming + 1).filter((m) => !existingIds.has(m.id))
+
+  if (anchorIdxExisting === -1) {
+    return [...beforeIncoming, ...existing, ...afterIncoming]
+  }
+
+  const result = [...existing]
+  result.splice(anchorIdxExisting, 0, ...beforeIncoming)
+  const newAnchorPos = result.findIndex((m) => m.id === anchorId)
+  result.splice(newAnchorPos + 1, 0, ...afterIncoming)
+  return result
+}
+
+export function clampWindowCount(n: number): number {
+  return Math.min(100, Math.max(1, Math.floor(n) || 1))
+}
+
+// Authoritative latest-window completeness store (renderer-only, per-topic.
+// Populated by loadTopicMessagesThunk after validated latest response;
+// consumed by Messages bootstrap to retain hasMoreBefore/hasMoreAfter.)
+const latestWindowCompletenessByTopic = new Map<string, { hasMoreBefore: boolean; hasMoreAfter: boolean }>()
+
+export function setLatestWindowCompleteness(
+  topicId: string,
+  completeness: { hasMoreBefore: boolean; hasMoreAfter: boolean }
+): void {
+  latestWindowCompletenessByTopic.set(topicId, completeness)
+}
+
+export function getLatestWindowCompleteness(
+  topicId: string
+): { hasMoreBefore: boolean; hasMoreAfter: boolean } | undefined {
+  return latestWindowCompletenessByTopic.get(topicId)
+}
+
+export function clearLatestWindowCompleteness(topicId: string): void {
+  latestWindowCompletenessByTopic.delete(topicId)
+}
+
+export function clearAllLatestWindowCompleteness(): void {
+  latestWindowCompletenessByTopic.clear()
 }

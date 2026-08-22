@@ -65,6 +65,22 @@ vi.mock('@renderer/services/db', () => ({
   dbService: {
     appendMessage: mocks.appendMessage,
     fetchMessages: vi.fn(),
+    fetchMessagesWindow: vi.fn(async (req: any) => ({
+      messages: [],
+      blocks: [],
+      window: {
+        kind: req.kind,
+        completeness: 'window',
+        topicId: req.topicId,
+        anchorMessageId: req.anchorMessageId ?? null,
+        requested: req.kind === 'latest' ? { limit: req.limit } : { before: req.before, after: req.after },
+        firstMessageId: null,
+        lastMessageId: null,
+        returnedCount: 0,
+        hasMoreBefore: false,
+        hasMoreAfter: false
+      }
+    })),
     deleteMessagesWithSegments: vi.fn(),
     resetMessagesForResend: vi.fn(),
     updateMessageAndBlocks: vi.fn(),
@@ -632,8 +648,24 @@ describe('messageThunk anchor hooks', () => {
 
   describe('loadTopicMessagesThunk compatibility repair', () => {
     it('runs the repair AFTER messagesReceived for the topic-owning assistant', async () => {
+      // window fetch already mocked to empty window by default; explicit mock keeps compat
       const { dbService } = await import('@renderer/services/db')
-      vi.mocked(dbService.fetchMessages).mockResolvedValue({ messages: [], blocks: [] })
+      vi.mocked(dbService.fetchMessagesWindow).mockResolvedValue({
+        messages: [],
+        blocks: [],
+        window: {
+          kind: 'latest',
+          completeness: 'window',
+          topicId: 'topic-1',
+          anchorMessageId: null,
+          requested: { limit: 20 },
+          firstMessageId: null,
+          lastMessageId: null,
+          returnedCount: 0,
+          hasMoreBefore: false,
+          hasMoreAfter: false
+        }
+      } as any)
 
       const { loadTopicMessagesThunk } = await import('../messageThunk')
       const dispatch = vi.fn()
@@ -676,7 +708,22 @@ describe('messageThunk anchor hooks', () => {
     it('an EMPTY cached topic is not treated as cached — falls through to the fetch path', async () => {
       storeState.messages.messageIdsByTopic['topic-1'] = []
       const { dbService } = await import('@renderer/services/db')
-      vi.mocked(dbService.fetchMessages).mockResolvedValue({ messages: [], blocks: [] })
+      vi.mocked(dbService.fetchMessagesWindow).mockResolvedValue({
+        messages: [],
+        blocks: [],
+        window: {
+          kind: 'latest',
+          completeness: 'window',
+          topicId: 'topic-1',
+          anchorMessageId: null,
+          requested: { limit: 20 },
+          firstMessageId: null,
+          lastMessageId: null,
+          returnedCount: 0,
+          hasMoreBefore: false,
+          hasMoreAfter: false
+        }
+      } as any)
 
       const { loadTopicMessagesThunk } = await import('../messageThunk')
       const dispatch = vi.fn()
@@ -697,7 +744,22 @@ describe('messageThunk anchor hooks', () => {
     it('skips repair when no assistant owns the topic', async () => {
       storeState.assistants.assistants = []
       const { dbService } = await import('@renderer/services/db')
-      vi.mocked(dbService.fetchMessages).mockResolvedValue({ messages: [], blocks: [] })
+      vi.mocked(dbService.fetchMessagesWindow).mockResolvedValue({
+        messages: [],
+        blocks: [],
+        window: {
+          kind: 'latest',
+          completeness: 'window',
+          topicId: 'topic-1',
+          anchorMessageId: null,
+          requested: { limit: 20 },
+          firstMessageId: null,
+          lastMessageId: null,
+          returnedCount: 0,
+          hasMoreBefore: false,
+          hasMoreAfter: false
+        }
+      } as any)
 
       const { loadTopicMessagesThunk } = await import('../messageThunk')
       const dispatch = vi.fn()

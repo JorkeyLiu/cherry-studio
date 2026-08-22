@@ -24,6 +24,25 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     fetchMessages: vi.fn(),
+    fetchMessagesWindow: vi.fn(async (req: any) => {
+      const limit = req.limit ?? 10
+      return {
+        messages: [],
+        blocks: [],
+        window: {
+          kind: 'latest',
+          completeness: 'window',
+          topicId: req.topicId,
+          anchorMessageId: null,
+          requested: { limit },
+          firstMessageId: null,
+          lastMessageId: null,
+          returnedCount: 0,
+          hasMoreBefore: false,
+          hasMoreAfter: false
+        }
+      }
+    }),
     messagesReceived: vi.fn((p: unknown) => ({ type: 'newMessages/messagesReceived', payload: p })),
     setTopicLoading: vi.fn((p: unknown) => ({ type: 'newMessages/setTopicLoading', payload: p })),
     setTopicFulfilled: vi.fn((p: unknown) => ({ type: 'newMessages/setTopicFulfilled', payload: p })),
@@ -95,6 +114,7 @@ vi.mock('@renderer/services/AssistantService', () => ({
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     fetchMessages: mocks.fetchMessages,
+    fetchMessagesWindow: mocks.fetchMessagesWindow,
     appendMessage: vi.fn(),
     deleteMessagesWithSegments: vi.fn(),
     resetMessagesForResend: vi.fn(),
@@ -184,6 +204,7 @@ describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', (
 
     // Cached path: no refetch, no messagesReceived.
     expect(mocks.fetchMessages).not.toHaveBeenCalled()
+    expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
     expect(mocks.messagesReceived).not.toHaveBeenCalled()
 
     // Repair writes the anchor through the ordinary settings dispatch.
@@ -208,6 +229,7 @@ describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', (
     await loadTopicMessagesThunk('topic-1')(dispatch, getState)
 
     expect(mocks.fetchMessages).not.toHaveBeenCalled()
+    expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
     // Valid persisted anchor (u1, resolvable in the cached turns) is left
     // untouched — exactly-once repair never recalcules a valid anchor.
     expect(mocks.updateAssistantSettings).not.toHaveBeenCalled()
@@ -227,6 +249,7 @@ describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', (
     await loadTopicMessagesThunk('topic-1')(dispatch, getState)
 
     expect(mocks.fetchMessages).not.toHaveBeenCalled()
+    expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
     expect(mocks.updateAssistantSettings).toHaveBeenCalledTimes(1)
     expect(mocks.updateAssistantSettings).toHaveBeenCalledWith({
       assistantId: 'asst-1',
@@ -236,7 +259,7 @@ describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', (
 
   it('an EMPTY cached topic falls through to the fetch path and never receives an anchor', async () => {
     storeState = makeStoreState({ contextCount: 1 }, [])
-    mocks.fetchMessages.mockResolvedValue({ messages: [], blocks: [] })
+    // empty topic via window fetch already mocked to return empty window
 
     const { loadTopicMessagesThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
@@ -246,7 +269,7 @@ describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', (
 
     // Empty cached topic is not "cached" — the fetch path runs and the empty
     // topic stays anchorless (I-1).
-    expect(mocks.fetchMessages).toHaveBeenCalled()
+    expect(mocks.fetchMessagesWindow).toHaveBeenCalled()
     expect(mocks.messagesReceived).toHaveBeenCalled()
     expect(mocks.updateAssistantSettings).not.toHaveBeenCalled()
   })
