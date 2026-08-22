@@ -8,8 +8,8 @@ import * as path from 'path'
 async function globalSetup() {
   console.log('Running global setup...')
 
-  // Create test results directories
-  const resultsDir = path.join(process.cwd(), 'test-results')
+  // Create test results directories (scoped to Playwright output; bench-results remains sibling)
+  const resultsDir = path.join(process.cwd(), 'test-results', 'playwright')
   const screenshotsDir = path.join(resultsDir, 'screenshots')
 
   if (!fs.existsSync(screenshotsDir)) {

@@ -92,6 +92,7 @@
     "bench:search-stage-plan": "SEARCH_STAGE_PLAN_BENCH=1 SEARCH_BENCH_SCALE=50k pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/searchStagePlan.bench.ts",
     "bench:stream-persist": "STREAM_PERSIST_BENCH=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/streamPersistDifferential.bench.ts",
     "bench:logical-payload": "pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/logicalPayload.bench.ts",
+    "bench:pinned-working-set": "pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/pinnedWorkingSet.bench.ts",
     "bench:renderer": "pnpm native:run node -- vitest bench --run --project renderer",
     "bench:aicore": "pnpm native:run node -- vitest bench --run --project aiCore",
     "bench:shared": "pnpm native:run node -- vitest bench --run --project shared",

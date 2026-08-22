@@ -33,7 +33,7 @@ export default defineConfig({
   globalSetup: './tests/e2e/global-setup.ts',
 
   // Output directory for test artifacts
-  outputDir: './test-results',
+  outputDir: './test-results/playwright',
 
   // Shared settings for all tests
   use: {

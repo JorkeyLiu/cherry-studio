@@ -41,7 +41,7 @@ export abstract class BasePage {
    * Take a screenshot for debugging.
    */
   async takeScreenshot(name: string): Promise<void> {
-    const screenshotsDir = path.join(process.cwd(), 'test-results', 'screenshots')
+    const screenshotsDir = path.join(process.cwd(), 'test-results', 'playwright', 'screenshots')
     if (!fs.existsSync(screenshotsDir)) {
       fs.mkdirSync(screenshotsDir, { recursive: true })
     }
