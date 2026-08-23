@@ -17,6 +17,7 @@ import styled from 'styled-components'
 
 import MessageItem from './Message'
 import MessageGroupMenuBar from './MessageGroupMenuBar'
+import { deriveStableGroupId } from './messageRenderLayers'
 
 const logger = loggerService.withContext('MessageGroup')
 interface Props {
@@ -29,7 +30,11 @@ interface Props {
 
 const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = false, onGroupClick }: Props) => {
   const messageLength = messages.length
-  const groupId = messages[0]?.askId || messages[0]?.id
+  const stableGroupId = useMemo(() => deriveStableGroupId(messages), [messages])
+  const domGroupId = useMemo(() => {
+    if (!stableGroupId || stableGroupId === 'group:empty') return undefined
+    return `message-group-${stableGroupId.replace(/[:|]/g, (ch) => (ch === ':' ? '-' : '_'))}`
+  }, [stableGroupId])
 
   // Hooks
   const { editMessage } = useMessageOperations(topic)
@@ -181,9 +186,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
 
   return (
     <MessageEditingProvider resetToken={isEditMode}>
-      <GroupContainer
-        id={groupId ? `message-group-${groupId}` : undefined}
-        className={classNames([multiModelMessageStyle])}>
+      <GroupContainer id={domGroupId} className={classNames([multiModelMessageStyle])}>
         <GridContainer className={classNames([multiModelMessageStyle, { 'multi-select-mode': isMultiSelectMode }])}>
           {messages.map(renderMessage)}
         </GridContainer>

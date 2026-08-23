@@ -252,26 +252,37 @@ export interface DeleteBlocksRequest {
 export type DeleteBlocksResponse = FileCleanupResult
 
 // ---------------------------------------------------------------------------
-// Windowed read DTOs (S6.1 R-02/R-03)
+// Windowed read DTOs (S6.1 R-02/R-03 — S6.2a bounded group correction)
 // ---------------------------------------------------------------------------
 
-/** Latest window — tail N messages (R-02). */
+/**
+ * Latest window — tail N complete viewport groups (R-02).
+ * Count is complete groups, not raw messages: consecutive assistant messages
+ * sharing a non-empty askId are one group; all other messages are singleton
+ * groups (canonical viewport group per getMessageGroupSemanticKey).
+ * `returnedCount` remains message-row count; `limit` bounded 1..100.
+ */
 export interface FetchMessagesLatestWindowRequest {
   kind: 'latest'
   topicId: string
-  /** Number of latest messages to return. Caller-provided, bounded 1..100. */
+  /** Number of latest viewport groups to return. Caller-provided, bounded 1..100. */
   limit: number
 }
 
-/** Around window — neighborhood of a stable anchor (R-03). */
+/**
+ * Around window — neighborhood of a stable anchor (R-03).
+ * `before`/`after` count complete viewport groups adjacent to the anchor's
+ * entire group (never splits a consecutive same-askId assistant run).
+ * `returnedCount` remains message-row count; `before`/`after` bounded 1..100.
+ */
 export interface FetchMessagesAroundWindowRequest {
   kind: 'around'
   topicId: string
   /** Stable anchor message ID. */
   anchorMessageId: string
-  /** Messages before the anchor. Caller-provided, bounded 1..100. */
+  /** Viewport groups before the anchor's group. Caller-provided, bounded 1..100. */
   before: number
-  /** Messages after the anchor. Caller-provided, bounded 1..100. */
+  /** Viewport groups after the anchor's group. Caller-provided, bounded 1..100. */
   after: number
 }
 
@@ -298,7 +309,7 @@ export interface FetchMessagesWindowMeta {
   firstMessageId: string | null
   /** Last returned message ID, or null when no messages. */
   lastMessageId: string | null
-  /** Number of messages returned. */
+  /** Number of messages returned (message-row count; group count intent is in requested). */
   returnedCount: number
   /** True when messages exist before the returned window in deterministic order. */
   hasMoreBefore: boolean

@@ -162,12 +162,13 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
   useClipboardKeyboard()
 
-  // NOTE: displayGroups are pre-computed chronological groups from the window.
-  // They are projected through the old effective viewport projection — newest
-  // group first (column-reverse), oldest-first message order within each group,
-  // old-format Fragment keys, and viewport-local displayMessages indices — so
-  // the rendered projection is identical to the pre-2B MessagesContent while
-  // the duplicate createMessageViewportGroupModel(displayMessages) call is gone.
+  // Canonical viewport projection (S6.2a): displayGroups are precomputed
+  // canonical groups (consecutive assistant messages sharing a non-empty askId
+  // form one group; all other messages are singleton groups). Projection is
+  // one-to-one (no cross-run merge/split), newest group first (column-reverse
+  // outer), oldest message first within each group, viewport-local indices
+  // (0 = newest in displayMessages), and canonical keys (group.key) with
+  // stable entity-derived Fragment keys.
   const groupedMessages = useMemo(() => {
     const active = currentPhaseCorrelation()
     const startedAt = active ? performance.now() : 0

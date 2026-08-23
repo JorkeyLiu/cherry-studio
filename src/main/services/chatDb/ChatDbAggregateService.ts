@@ -141,14 +141,20 @@ export class ChatDbAggregateService {
   }
 
   /**
-   * Typed windowed read — R-02 latest / R-03 around (S6.1).
+   * Typed windowed read — R-02 latest / R-03 around (S6.1; group-corrected for viewport).
+   *
+   * Counting unit for viewport windows is complete rendered/message groups
+   * (consecutive assistant messages sharing a non-empty askId form one group;
+   * all other messages are singleton groups, matching renderer
+   * getMessageGroupSemanticKey / createMessageViewportGroupModel).
    *
    * One authoritative SQLite transaction:
    * - Deterministic order: sort_order ASC, id ASC with id tie-break.
    * - Stable-ID anchoring for around reads; no tuple cursors.
-   * - Complete message+block groups returned.
+   * - Complete groups returned (never split a consecutive same-askId assistant run).
    * - Window metadata declares intent, bounds, and hasMore flags; completeness is 'window'.
    * - Missing topic → ERR_NOT_FOUND; missing anchor → ERR_NOT_FOUND; empty topic → empty window success.
+   * - hasMoreBefore/After derived from group boundaries, not raw message indexes.
    */
   fetchMessagesWindow(request: FetchMessagesWindowRequest): ChatDbResult<FetchMessagesWindowResponse> {
     return wrapResult(() => {
@@ -161,6 +167,31 @@ export class ChatDbAggregateService {
         const allMessages = repos.messages.listByTopic(request.topicId)
         const total = allMessages.length
 
+        const computeGroups = (
+          msgs: typeof allMessages
+        ): Array<{ semanticKey: string; start: number; end: number }> => {
+          if (msgs.length === 0) return []
+          const groups: Array<{ semanticKey: string; start: number; end: number }> = []
+          const keyFor = (m: (typeof msgs)[number]): string => {
+            const askId = (m as unknown as { askId: string | null }).askId
+            if (m.role === 'assistant' && typeof askId === 'string' && askId.length > 0) {
+              return `assistant:${askId}`
+            }
+            return `message:${m.role ?? ''}:${m.id}`
+          }
+          let curKey = keyFor(msgs[0])
+          let curStart = 0
+          for (let i = 1; i < msgs.length; i++) {
+            const k = keyFor(msgs[i])
+            if (k === curKey) continue
+            groups.push({ semanticKey: curKey, start: curStart, end: i - 1 })
+            curKey = k
+            curStart = i
+          }
+          groups.push({ semanticKey: curKey, start: curStart, end: msgs.length - 1 })
+          return groups
+        }
+
         let windowMessages: typeof allMessages
         let hasMoreBefore = false
         let hasMoreAfter = false
@@ -170,10 +201,24 @@ export class ChatDbAggregateService {
         if (request.kind === 'latest') {
           if (total === 0) {
             windowMessages = []
+            hasMoreBefore = false
+            hasMoreAfter = false
           } else {
-            const start = Math.max(0, total - request.limit)
-            windowMessages = allMessages.slice(start)
-            hasMoreBefore = start > 0
+            const groups = computeGroups(allMessages)
+            const totalGroups = groups.length
+            let startGroupIdx: number
+            let endGroupIdx: number
+            if (request.limit >= totalGroups) {
+              startGroupIdx = 0
+              endGroupIdx = totalGroups - 1
+            } else {
+              startGroupIdx = totalGroups - request.limit
+              endGroupIdx = totalGroups - 1
+            }
+            const startMsgIdx = groups[startGroupIdx].start
+            const endExclusive = groups[endGroupIdx].end + 1
+            windowMessages = allMessages.slice(startMsgIdx, endExclusive)
+            hasMoreBefore = startGroupIdx > 0
             hasMoreAfter = false
           }
           firstMessageId = windowMessages.length > 0 ? windowMessages[0].id : null
@@ -202,18 +247,33 @@ export class ChatDbAggregateService {
             }
           }
         } else {
-          // around
+          // around — anchor plus N complete groups before and after the anchor's group
           const anchorIdx = allMessages.findIndex((m) => m.id === request.anchorMessageId)
           if (anchorIdx === -1) {
             throw new ChatDbNotFoundError(
               `Anchor message ${request.anchorMessageId} does not belong to topic ${request.topicId}`
             )
           }
-          const start = Math.max(0, anchorIdx - request.before)
-          const endExclusive = Math.min(total, anchorIdx + request.after + 1)
-          windowMessages = allMessages.slice(start, endExclusive)
-          hasMoreBefore = start > 0
-          hasMoreAfter = endExclusive < total
+          const groups = computeGroups(allMessages)
+          let anchorGroupIdx = -1
+          for (let gi = 0; gi < groups.length; gi++) {
+            if (anchorIdx >= groups[gi].start && anchorIdx <= groups[gi].end) {
+              anchorGroupIdx = gi
+              break
+            }
+          }
+          if (anchorGroupIdx === -1) {
+            throw new ChatDbNotFoundError(
+              `Anchor message ${request.anchorMessageId} does not belong to topic ${request.topicId}`
+            )
+          }
+          const startGroupIdx = Math.max(0, anchorGroupIdx - request.before)
+          const endGroupIdx = Math.min(groups.length - 1, anchorGroupIdx + request.after)
+          const startMsgIdx = groups[startGroupIdx].start
+          const endExclusive = groups[endGroupIdx].end + 1
+          windowMessages = allMessages.slice(startMsgIdx, endExclusive)
+          hasMoreBefore = startGroupIdx > 0
+          hasMoreAfter = endGroupIdx < groups.length - 1
           firstMessageId = windowMessages.length > 0 ? windowMessages[0].id : null
           lastMessageId = windowMessages.length > 0 ? windowMessages[windowMessages.length - 1].id : null
           const ids = windowMessages.map((m) => m.id)

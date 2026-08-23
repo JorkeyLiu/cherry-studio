@@ -212,6 +212,12 @@ vi.mock('../MessageOutline', () => ({
 }))
 
 const { default: MessageGroup } = await import('../MessageGroup')
+const { deriveStableGroupId } = await import('../messageRenderLayers')
+
+const toDomGroupId = (ids: string[]) => {
+  const gid = deriveStableGroupId(ids.map((id) => ({ id }) as Message))
+  return `message-group-${gid.replace(/[:|]/g, (ch: string) => (ch === ':' ? '-' : '_'))}`
+}
 
 const createMessage = (id: string, index: number, multiModelMessageStyle: Message['multiModelMessageStyle']) =>
   ({
@@ -236,7 +242,8 @@ describe('MessageGroup', () => {
 
     // The runtime layout is always fold — even when the persisted per-message
     // multiModelMessageStyle field says otherwise (import compatibility).
-    const groupContainer = container.querySelector('#message-group-ask-1')
+    const expectedDomId = toDomGroupId(messages.map((m) => m.id))
+    const groupContainer = container.querySelector(`#${CSS.escape(expectedDomId)}`)
     expect(groupContainer).not.toBeNull()
     expect(groupContainer!.className).toContain('fold')
 
@@ -321,5 +328,52 @@ describe('MessageGroup', () => {
       block: 'start',
       container: 'nearest'
     })
+  })
+
+  it('separate same-askId groups produce unique deterministic outer DOM ids (S6.2a duplicate-id fix)', () => {
+    // Two separate groups sharing the same askId must not collide on outer DOM id
+    const groupA = [createMessage('a0', 0, 'fold'), createMessage('a1', 1, 'fold')]
+    const groupB = [createMessage('a2', 2, 'fold'), createMessage('a3', 3, 'fold')]
+    // Ensure both groups share the same askId but have distinct membership
+    expect(groupA[0].askId).toBe(groupB[0].askId)
+
+    const topic = { id: 'topic-1' } as Topic
+    const { container: containerA } = render(<MessageGroup messages={groupA} topic={topic} />)
+    const { container: containerB } = render(<MessageGroup messages={groupB} topic={topic} />)
+
+    const expectedA = toDomGroupId(groupA.map((m) => m.id))
+    const expectedB = toDomGroupId(groupB.map((m) => m.id))
+    expect(expectedA).not.toBe(expectedB)
+
+    const elA = containerA.querySelector(`#${CSS.escape(expectedA)}`)
+    const elB = containerB.querySelector(`#${CSS.escape(expectedB)}`)
+    expect(elA).not.toBeNull()
+    expect(elB).not.toBeNull()
+
+    // Direct duplicate old askId selector would have collided; new ids are membership-derived and unique
+    const allDomIds = [expectedA, expectedB]
+    expect(new Set(allDomIds).size).toBe(2)
+
+    // Stable ids are valid and deterministic: re-rendering same membership yields same DOM id
+    const { container: containerA2 } = render(<MessageGroup messages={groupA} topic={topic} />)
+    const elA2 = containerA2.querySelector(`#${CSS.escape(expectedA)}`)
+    expect(elA2).not.toBeNull()
+  })
+
+  it('outer DOM id is stableGroupId-derived and valid (no duplicate even for singleton groups)', () => {
+    const solo1 = [createMessage('solo-1', 0, 'fold')] as unknown as (Message & { index: number })[]
+    solo1[0].askId = undefined
+    solo1[0].role = 'user'
+    const solo2 = [createMessage('solo-2', 1, 'fold')] as unknown as (Message & { index: number })[]
+    solo2[0].askId = undefined
+    solo2[0].role = 'user'
+    const topic = { id: 'topic-1' } as Topic
+    const { container: c1 } = render(<MessageGroup messages={solo1} topic={topic} />)
+    const { container: c2 } = render(<MessageGroup messages={solo2} topic={topic} />)
+    const id1 = toDomGroupId(solo1.map((m) => m.id))
+    const id2 = toDomGroupId(solo2.map((m) => m.id))
+    expect(id1).not.toBe(id2)
+    expect(c1.querySelector(`#${CSS.escape(id1)}`)).not.toBeNull()
+    expect(c2.querySelector(`#${CSS.escape(id2)}`)).not.toBeNull()
   })
 })
