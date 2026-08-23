@@ -314,6 +314,30 @@ export interface FetchMessagesWindowResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Answer-group READ DTOs (S6.2b R-05)
+// ---------------------------------------------------------------------------
+
+/** @see IpcChannel.ChatDb_FetchAnswerGroup — additive READ for authoritative answer-group. */
+export interface FetchAnswerGroupRequest {
+  topicId: string
+  anchorMessageId: string
+}
+
+/** @see IpcChannel.ChatDb_FetchAnswerGroup */
+export interface FetchAnswerGroupResponse {
+  /** Completeness is always 'answer-group' — never masquerades as 'window' or 'whole-topic'. */
+  completeness: 'answer-group'
+  /** Echo of the request topicId. */
+  topicId: string
+  /** Echo of the request anchorMessageId. */
+  anchorMessageId: string
+  /** askId of the anchor assistant message. */
+  askId: string
+  /** Complete ordered answer-group message IDs (sort_order ASC, id ASC). */
+  messageIds: string[]
+}
+
+// ---------------------------------------------------------------------------
 // Command response DTOs
 // ---------------------------------------------------------------------------
 
@@ -574,6 +598,49 @@ export interface ResetAssistantTopicsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Branch by stable anchor DTOs (S6.2c-1)
+// ---------------------------------------------------------------------------
+
+/** @see IpcChannel.ChatDb_BranchMessagesToTopic — Main-authoritative branch by stable anchor */
+export interface BranchMessagesToTopicRequest {
+  sourceTopicId: string
+  targetTopicId: string
+  anchorMessageId: string
+  assistantId?: string
+}
+
+/** @see IpcChannel.ChatDb_BranchMessagesToTopic */
+export interface BranchMessagesToTopicResponse {
+  messages: JsonObject[]
+  blocks: JsonObject[]
+}
+
+// ---------------------------------------------------------------------------
+// S6.2c-2: insert after stable anchor (additive, Main-authoritative)
+// ---------------------------------------------------------------------------
+
+/**
+ * @see IpcChannel.ChatDb_InsertMessagesAfterAnchor — Main-authoritative insert after stable anchor
+ *
+ * One atomic Main transaction:
+ * - Validates topic/anchor membership (anchor must belong to topic).
+ * - Resolves ordered authority messages sort_order ASC, id ASC.
+ * - Advances past contiguous assistant messages with same non-empty ask_id as anchor
+ *   (group-tail insertion) when anchor is assistant with askId.
+ * - Inserts supplied entries atomically with existing dense-order logic.
+ * No numeric insertIndex in request.
+ */
+export interface InsertMessagesAfterAnchorRequest {
+  topicId: string
+  afterMessageId: string
+  /** Ordered entries to insert. Inserted after anchor/group tail in array order. */
+  entries: MessageBlockEntry[]
+}
+
+/** @see IpcChannel.ChatDb_InsertMessagesAfterAnchor */
+export type InsertMessagesAfterAnchorResponse = FileCleanupResult
+
+// ---------------------------------------------------------------------------
 // Compound mutation DTOs (Phase 5.1B)
 // ---------------------------------------------------------------------------
 
@@ -738,6 +805,16 @@ export interface ChatDbCommands extends ChatDbCommandMap {
     response: TransferTopicOwnershipResponse
   }
   'chatdb:reset-assistant-topics': { request: ResetAssistantTopicsRequest; response: ResetAssistantTopicsResponse }
+  // S6.2c-1: Main-authoritative branch by stable anchor
+  'chatdb:branch-messages-to-topic': {
+    request: BranchMessagesToTopicRequest
+    response: BranchMessagesToTopicResponse
+  }
+  // S6.2c-2: Main-authoritative insert after stable anchor
+  'chatdb:insert-messages-after-anchor': {
+    request: InsertMessagesAfterAnchorRequest
+    response: InsertMessagesAfterAnchorResponse
+  }
   // Phase 5.1B: compound mutations
   'chatdb:clone-messages-to-topic': {
     request: CloneMessagesToTopicRequest
@@ -760,6 +837,8 @@ export interface ChatDbCommands extends ChatDbCommandMap {
     request: SearchMessagesRequest
     response: SearchMessagesResponse
   }
+  // S6.2b R-05: authoritative answer-group READ
+  'chatdb:fetch-answer-group': { request: FetchAnswerGroupRequest; response: FetchAnswerGroupResponse }
 }
 
 /** All valid ChatDb command channel strings. */

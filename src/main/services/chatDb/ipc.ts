@@ -26,6 +26,7 @@
 import { loggerService } from '@logger'
 import type {
   AppendMessageRequest,
+  BranchMessagesToTopicRequest,
   BulkAddBlocksRequest,
   ChatDbChannel,
   ChatDbResult,
@@ -38,10 +39,12 @@ import type {
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
+  FetchAnswerGroupRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
@@ -270,6 +273,11 @@ export function registerChatDbIpc(): () => void {
     return agg.fetchMessagesWindow(req)
   })
 
+  // 1c. fetch-answer-group (S6.2b R-05 authoritative answer-group READ)
+  handleCommand(IpcChannel.ChatDb_FetchAnswerGroup, (agg, req: FetchAnswerGroupRequest) => {
+    return agg.fetchAnswerGroup(req)
+  })
+
   // 2. get-raw-topic
   handleCommand(IpcChannel.ChatDb_GetRawTopic, (agg, req: GetRawTopicRequest) => {
     return agg.getRawTopic(req.topicId)
@@ -412,6 +420,11 @@ export function registerChatDbIpc(): () => void {
     return agg.purgeExpiredTopics(req.cutoffTimestamp)
   })
 
+  // 29b. branch-messages-to-topic (S6.2c-1): stable anchor, atomic prefix clone
+  handleCommand(IpcChannel.ChatDb_BranchMessagesToTopic, (agg, req: BranchMessagesToTopicRequest) => {
+    return agg.branchMessagesToTopic(req.sourceTopicId, req.targetTopicId, req.anchorMessageId, req.assistantId)
+  })
+
   // 29. clone-messages-to-topic (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_CloneMessagesToTopic, (agg, req: CloneMessagesToTopicRequest) => {
     return agg.cloneMessagesToTopic(req.targetTopicId, req.entries, req.assistantId)
@@ -430,6 +443,11 @@ export function registerChatDbIpc(): () => void {
   // 32. paste-messages-to-topic (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_PasteMessagesToTopic, (agg, req: PasteMessagesToTopicRequest) => {
     return agg.pasteMessagesToTopic(req.topicId, req.entries, req.insertIndex)
+  })
+
+  // 32b. insert-messages-after-anchor (S6.2c-2): stable anchor, atomic insert
+  handleCommand(IpcChannel.ChatDb_InsertMessagesAfterAnchor, (agg, req: InsertMessagesAfterAnchorRequest) => {
+    return agg.insertMessagesAfterAnchor(req.topicId, req.afterMessageId, req.entries)
   })
 
   // 33. search-messages (Phase 5.1B-2)

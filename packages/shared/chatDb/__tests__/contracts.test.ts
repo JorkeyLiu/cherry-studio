@@ -60,7 +60,13 @@ describe('chatDbContracts', () => {
     'chatdb:transfer-topic-ownership',
     'chatdb:reset-assistant-topics',
     // S6.1: windowed reads
-    'chatdb:fetch-messages-window'
+    'chatdb:fetch-messages-window',
+    // S6.2b R-05: authoritative answer-group READ
+    'chatdb:fetch-answer-group',
+    // S6.2c-1: branch by stable anchor
+    'chatdb:branch-messages-to-topic',
+    // S6.2c-2: Main-authoritative insert after stable anchor
+    'chatdb:insert-messages-after-anchor'
   ]
 
   it('has entries for all expected channels', () => {
@@ -2156,6 +2162,347 @@ describe('fetch-messages success-value plain-object and cardinality (LOCK-LB-8/7
 })
 
 // ===========================================================================
+// S6.2b R-05: fetch-answer-group contract
+// ===========================================================================
+
+describe('fetch-answer-group contract (S6.2b R-05)', () => {
+  it('fetch-answer-group: accepts minimal valid request', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-answer-group', { topicId: 't1', anchorMessageId: 'a1' })
+    ).not.toThrow()
+  })
+
+  it('fetch-answer-group: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:fetch-answer-group', { anchorMessageId: 'a1' } as any)).toThrow(
+      ValidationError
+    )
+  })
+
+  it('fetch-answer-group: rejects missing anchorMessageId', () => {
+    expect(() => validateChatDbRequest('chatdb:fetch-answer-group', { topicId: 't1' } as any)).toThrow(ValidationError)
+  })
+
+  it('fetch-answer-group: rejects empty-string ids', () => {
+    expect(() => validateChatDbRequest('chatdb:fetch-answer-group', { topicId: '', anchorMessageId: 'a1' })).toThrow(
+      ValidationError
+    )
+    expect(() => validateChatDbRequest('chatdb:fetch-answer-group', { topicId: 't1', anchorMessageId: '' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('fetch-answer-group: rejects unknown keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-answer-group', {
+        topicId: 't1',
+        anchorMessageId: 'a1',
+        extra: 'nope'
+      } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-answer-group: accepts valid result with completeness answer-group', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-answer-group', {
+        ok: true,
+        value: {
+          completeness: 'answer-group',
+          topicId: 't1',
+          anchorMessageId: 'a2',
+          askId: 'ask-1',
+          messageIds: ['a1', 'a2', 'a3']
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('fetch-answer-group: rejects result missing completeness', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-answer-group', {
+        ok: true,
+        value: { topicId: 't1', anchorMessageId: 'a2', askId: 'ask-1', messageIds: ['a2'] } as any
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-answer-group: rejects wrong completeness', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-answer-group', {
+        ok: true,
+        value: {
+          completeness: 'window' as any,
+          topicId: 't1',
+          anchorMessageId: 'a2',
+          askId: 'ask-1',
+          messageIds: ['a2']
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-answer-group: rejects messageIds not including anchor', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-answer-group', {
+        ok: true,
+        value: {
+          completeness: 'answer-group',
+          topicId: 't1',
+          anchorMessageId: 'a2',
+          askId: 'ask-1',
+          messageIds: ['a1', 'a3']
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-answer-group: rejects duplicate messageIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-answer-group', {
+        ok: true,
+        value: {
+          completeness: 'answer-group',
+          topicId: 't1',
+          anchorMessageId: 'a2',
+          askId: 'ask-1',
+          messageIds: ['a2', 'a2']
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-answer-group: rejects empty messageIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-answer-group', {
+        ok: true,
+        value: {
+          completeness: 'answer-group',
+          topicId: 't1',
+          anchorMessageId: 'a2',
+          askId: 'ask-1',
+          messageIds: []
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-answer-group: rejects unknown keys in result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-answer-group', {
+        ok: true,
+        value: {
+          completeness: 'answer-group',
+          topicId: 't1',
+          anchorMessageId: 'a2',
+          askId: 'ask-1',
+          messageIds: ['a2'],
+          extra: 'nope'
+        } as any
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-answer-group: rejects empty askId', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-answer-group', {
+        ok: true,
+        value: {
+          completeness: 'answer-group',
+          topicId: 't1',
+          anchorMessageId: 'a2',
+          askId: '',
+          messageIds: ['a2']
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
+describe('branch-messages-to-topic contract (S6.2c-1)', () => {
+  it('branch-messages-to-topic: accepts minimal valid request', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:branch-messages-to-topic', {
+        sourceTopicId: 't-src',
+        targetTopicId: 't-dst',
+        anchorMessageId: 'm-anchor'
+      })
+    ).not.toThrow()
+  })
+
+  it('branch-messages-to-topic: accepts request with optional assistantId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:branch-messages-to-topic', {
+        sourceTopicId: 't-src',
+        targetTopicId: 't-dst',
+        anchorMessageId: 'm-anchor',
+        assistantId: 'a-1'
+      })
+    ).not.toThrow()
+  })
+
+  it('branch-messages-to-topic: rejects missing sourceTopicId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:branch-messages-to-topic', {
+        targetTopicId: 't-dst',
+        anchorMessageId: 'm-anchor'
+      } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('branch-messages-to-topic: rejects empty anchorMessageId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:branch-messages-to-topic', {
+        sourceTopicId: 't-src',
+        targetTopicId: 't-dst',
+        anchorMessageId: ''
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('branch-messages-to-topic: rejects unknown keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:branch-messages-to-topic', {
+        sourceTopicId: 't-src',
+        targetTopicId: 't-dst',
+        anchorMessageId: 'm-anchor',
+        extra: 'nope'
+      } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('branch-messages-to-topic: rejects numeric index in request (no index field allowed)', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:branch-messages-to-topic', {
+        sourceTopicId: 't-src',
+        targetTopicId: 't-dst',
+        anchorMessageId: 'm-anchor',
+        branchPointIndex: 2
+      } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('branch-messages-to-topic: accepts valid result with messages and blocks', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:branch-messages-to-topic', {
+        ok: true,
+        value: { messages: [], blocks: [] }
+      })
+    ).not.toThrow()
+  })
+
+  it('branch-messages-to-topic: rejects result with unknown keys', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:branch-messages-to-topic', {
+        ok: true,
+        value: { messages: [], blocks: [], extra: 'nope' } as any
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('branch-messages-to-topic: rejects result with non-array messages', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:branch-messages-to-topic', {
+        ok: true,
+        value: { messages: 'not-array' as any, blocks: [] }
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
+describe('insert-messages-after-anchor contract (S6.2c-2)', () => {
+  it('insert-messages-after-anchor: accepts minimal valid batch request', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:insert-messages-after-anchor', {
+        topicId: 't-1',
+        afterMessageId: 'm-anchor',
+        entries: [{ message: { id: 'm-new' }, blocks: [] }]
+      })
+    ).not.toThrow()
+  })
+
+  it('insert-messages-after-anchor: accepts two-entry batch (user+assistant)', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:insert-messages-after-anchor', {
+        topicId: 't-1',
+        afterMessageId: 'm-anchor',
+        entries: [
+          { message: { id: 'm-u1', topicId: 't-1' }, blocks: [{ id: 'b-u1', messageId: 'm-u1' }] },
+          { message: { id: 'm-a1', topicId: 't-1' }, blocks: [{ id: 'b-a1', messageId: 'm-a1' }] }
+        ]
+      })
+    ).not.toThrow()
+  })
+
+  it('insert-messages-after-anchor: rejects missing topicId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:insert-messages-after-anchor', {
+        afterMessageId: 'm-anchor',
+        entries: [{ message: { id: 'm-new' }, blocks: [] }]
+      } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('insert-messages-after-anchor: rejects empty afterMessageId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:insert-messages-after-anchor', {
+        topicId: 't-1',
+        afterMessageId: '',
+        entries: [{ message: { id: 'm-new' }, blocks: [] }]
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('insert-messages-after-anchor: rejects empty entries', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:insert-messages-after-anchor', {
+        topicId: 't-1',
+        afterMessageId: 'm-anchor',
+        entries: []
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('insert-messages-after-anchor: rejects unknown keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:insert-messages-after-anchor', {
+        topicId: 't-1',
+        afterMessageId: 'm-anchor',
+        entries: [{ message: { id: 'm-new' }, blocks: [] }],
+        insertIndex: 2
+      } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('insert-messages-after-anchor: rejects numeric index field (no insertIndex allowed)', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:insert-messages-after-anchor', {
+        topicId: 't-1',
+        afterMessageId: 'm-anchor',
+        entries: [{ message: { id: 'm-new' }, blocks: [] }],
+        extra: 'nope'
+      } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('insert-messages-after-anchor: accepts valid FileCleanupResult result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:insert-messages-after-anchor', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).not.toThrow()
+  })
+
+  it('insert-messages-after-anchor: rejects result with malformed affectedFileIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:insert-messages-after-anchor', {
+        ok: true,
+        value: { affectedFileIds: 'not-array' as any, remainingReferenceCounts: {} }
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
+// ===========================================================================
 // Coverage consistency: every command must have both request and result validation
 // ===========================================================================
 
@@ -2207,7 +2554,13 @@ describe('coverage consistency', () => {
     // Phase 5.1B-2: search
     'chatdb:search-messages',
     // S6.1: windowed reads
-    'chatdb:fetch-messages-window'
+    'chatdb:fetch-messages-window',
+    // S6.2b R-05: authoritative answer-group READ
+    'chatdb:fetch-answer-group',
+    // S6.2c-1: branch by stable anchor
+    'chatdb:branch-messages-to-topic',
+    // S6.2c-2: insert after stable anchor
+    'chatdb:insert-messages-after-anchor'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {
@@ -2229,7 +2582,7 @@ describe('coverage consistency', () => {
   })
 
   it('all channels are tested for result validation (positive)', () => {
-    // This test documents that all 23 channels have result validation tests above.
+    // This test documents that all 24 channels have result validation tests above.
     // If a new channel is added, this list must be updated.
     const testedChannels = new Set(allChannels)
     for (const channel of Object.keys(chatDbContracts)) {

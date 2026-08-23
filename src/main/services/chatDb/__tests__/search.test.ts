@@ -37,6 +37,7 @@ vi.mock('@main/config', () => ({
   DATA_PATH: '/mock/data'
 }))
 
+import { validateChatDbResult } from '@shared/chatDb'
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 
@@ -765,5 +766,165 @@ describe('SearchRepository — LIKE baseline parity (small deterministic corpus)
     const counts = QUERY_FIXTURES.map((f) => likeSearch(sqlite, f.keywords, f.matchMode).length)
     expect(Math.max(...counts)).toBeGreaterThan(20)
     expect(counts.some((c) => c > 0)).toBe(true)
+  })
+})
+
+// ===========================================================================
+// STORAGE_ERROR envelope regression (LOCK-SEARCH-001/002/003)
+//
+// Root cause: SearchRepository.fetchResults always returned { nextCursor:
+// undefined } when hasMore=false. validateChatDbResult walks JSON and throws
+// at result.value.nextCursor (undefined is not valid JSON); IPC maps this to
+// [STORAGE_ERROR]. Fix: omit optional nextCursor when undefined, matching
+// existing aggregate patterns (listTrashTopics). This suite proves real search
+// semantics remain correct via repository + shared IPC envelope validation and
+// covers the deterministic seeded phrase `search-hit-content-00005` in both
+// whole-word and substring modes without STORAGE_ERROR.
+// ===========================================================================
+
+describe('SearchRepository — STORAGE_ERROR envelope regression (single-hit/final-page)', () => {
+  let tempDir: string
+  let sqlite: Database.Database
+  let searchRepo: SearchRepository
+
+  beforeEach(() => {
+    tempDir = makeTempDir()
+    const dbPath = realPath.join(tempDir, 'chat.db')
+    sqlite = openTestDb(dbPath)
+    setupTestDb(sqlite)
+    searchRepo = new SearchRepository(sqlite)
+  })
+
+  afterEach(() => {
+    sqlite.close()
+    rmrf(tempDir)
+  })
+
+  function seedDeterministicHit(): void {
+    insertTopic(sqlite, 't-r04', 'R04 Topic')
+    insertMessage(sqlite, 'm-r04-00005', 't-r04', '2026-01-01T00:05:00.000Z')
+    insertBlock(sqlite, 'b-r04-00005', 'm-r04-00005', 'main_text', 'search-hit-content-00005')
+    // Add non-matching blocks to prove isolation and totalCount semantics
+    insertMessage(sqlite, 'm-r04-other', 't-r04', '2026-01-01T00:06:00.000Z')
+    insertBlock(sqlite, 'b-r04-other', 'm-r04-other', 'main_text', 'unrelated content for isolation')
+  }
+
+  it('single-hit final page omits nextCursor (no undefined property) and passes shared envelope validation — substring', () => {
+    seedDeterministicHit()
+    const result = searchRepo.search({
+      keywords: 'search-hit-content-00005',
+      matchMode: 'substring',
+      sortOrder: 'newest'
+    })
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0].blockId).toBe('b-r04-00005')
+    expect(result.items[0].rawContent).toBe('search-hit-content-00005')
+    expect(result.hasMore).toBe(false)
+    expect(result.totalCount).toBe(1)
+    expect('nextCursor' in result).toBe(false)
+    expect(result.nextCursor).toBeUndefined()
+    expect(JSON.stringify(result)).not.toContain('nextCursor')
+    expect(() => validateChatDbResult('chatdb:search-messages', { ok: true, value: result })).not.toThrow()
+  })
+
+  it('single-hit final page omits nextCursor and passes shared envelope validation — whole-word', () => {
+    seedDeterministicHit()
+    const result = searchRepo.search({
+      keywords: 'search-hit-content-00005',
+      matchMode: 'whole-word',
+      sortOrder: 'newest'
+    })
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0].blockId).toBe('b-r04-00005')
+    expect(result.hasMore).toBe(false)
+    expect(result.totalCount).toBe(1)
+    expect('nextCursor' in result).toBe(false)
+    expect(JSON.stringify(result)).not.toContain('nextCursor')
+    expect(() => validateChatDbResult('chatdb:search-messages', { ok: true, value: result })).not.toThrow()
+  })
+
+  it('final page of multi-page walk omits nextCursor and validates; first page emits canonical base64url cursor', () => {
+    insertTopic(sqlite, 't-page', 'Paging Topic')
+    for (let i = 0; i < 3; i++) {
+      const msgId = `m-page-${i}`
+      const blockId = `b-page-${i}`
+      insertMessage(sqlite, msgId, 't-page', `2026-01-01T00:0${i}:00.000Z`)
+      insertBlock(sqlite, blockId, msgId, 'main_text', 'cursor regression token')
+    }
+    const page1 = searchRepo.search({
+      keywords: 'cursor regression token',
+      matchMode: 'substring',
+      sortOrder: 'newest',
+      pageSize: 1
+    })
+    expect(page1.items).toHaveLength(1)
+    expect(page1.hasMore).toBe(true)
+    expect(page1.totalCount).toBe(3)
+    expect('nextCursor' in page1).toBe(true)
+    expect(typeof page1.nextCursor).toBe('string')
+    expect(page1.nextCursor!.length).toBeGreaterThan(0)
+    expect(page1.nextCursor).toMatch(/^[A-Za-z0-9_-]+$/)
+    expect(() => validateChatDbResult('chatdb:search-messages', { ok: true, value: page1 })).not.toThrow()
+
+    const page2 = searchRepo.search({
+      keywords: 'cursor regression token',
+      matchMode: 'substring',
+      sortOrder: 'newest',
+      pageSize: 1,
+      cursor: page1.nextCursor
+    })
+    expect(page2.items).toHaveLength(1)
+    expect(page2.hasMore).toBe(true)
+    expect('nextCursor' in page2).toBe(true)
+    expect(() => validateChatDbResult('chatdb:search-messages', { ok: true, value: page2 })).not.toThrow()
+
+    const page3 = searchRepo.search({
+      keywords: 'cursor regression token',
+      matchMode: 'substring',
+      sortOrder: 'newest',
+      pageSize: 1,
+      cursor: page2.nextCursor
+    })
+    expect(page3.items).toHaveLength(1)
+    expect(page3.hasMore).toBe(false)
+    expect(page3.totalCount).toBe(3)
+    expect('nextCursor' in page3).toBe(false)
+    expect(page3.nextCursor).toBeUndefined()
+    expect(JSON.stringify(page3)).not.toContain('nextCursor')
+    expect(() => validateChatDbResult('chatdb:search-messages', { ok: true, value: page3 })).not.toThrow()
+
+    // No overlap across pages
+    const ids = new Set([page1.items[0].blockId, page2.items[0].blockId, page3.items[0].blockId])
+    expect(ids.size).toBe(3)
+  })
+
+  it('empty result omits nextCursor and validates', () => {
+    insertTopic(sqlite, 't-empty', 'Empty Topic')
+    insertMessage(sqlite, 'm-empty', 't-empty', '2026-01-01T00:01:00.000Z')
+    insertBlock(sqlite, 'b-empty', 'm-empty', 'main_text', 'some unrelated content')
+    const result = searchRepo.search({
+      keywords: 'no-such-token-xyz-00005',
+      matchMode: 'substring',
+      sortOrder: 'newest'
+    })
+    expect(result.items).toHaveLength(0)
+    expect(result.hasMore).toBe(false)
+    expect(result.totalCount).toBe(0)
+    expect('nextCursor' in result).toBe(false)
+    expect(() => validateChatDbResult('chatdb:search-messages', { ok: true, value: result })).not.toThrow()
+  })
+
+  it('intentional FTS errors still propagate (not swallowed to empty)', () => {
+    insertTopic(sqlite, 't-fts', 'FTS Topic')
+    insertMessage(sqlite, 'm-fts', 't-fts', '2026-01-01T00:01:00.000Z')
+    insertBlock(sqlite, 'b-fts', 'm-fts', 'main_text', 'hello world fts error case')
+    sqlite.exec('DROP TABLE message_blocks_fts')
+    expect(() =>
+      searchRepo.search({
+        keywords: 'hello',
+        matchMode: 'substring',
+        sortOrder: 'newest'
+      })
+    ).toThrow()
   })
 })

@@ -42,18 +42,22 @@ const SearchMessage: FC<Props> = ({ message, ...props }) => {
 
   return (
     <MessageEditingProvider>
-      <MessagesContainer {...props}>
+      <MessagesContainer data-testid="search-message-view" {...props}>
         <ContainerWrapper>
           <MessageItem message={message} topic={topic} hideMenuBar={true} />
           <Button
             type="text"
             size="middle"
+            data-testid="search-message-locate"
             style={{ color: 'var(--color-text-3)', position: 'absolute', right: 16, top: 16 }}
             onClick={() => locateToMessage(navigate, message)}
             icon={<Forward size={16} />}
           />
           <HStack mt="10px" justifyContent="center">
-            <Button onClick={() => locateToMessage(navigate, message)} icon={<Forward size={16} />}>
+            <Button
+              data-testid="search-message-locate-primary"
+              onClick={() => locateToMessage(navigate, message)}
+              icon={<Forward size={16} />}>
               {t('history.locate.message')}
             </Button>
           </HStack>

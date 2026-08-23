@@ -1,5 +1,6 @@
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
+  FetchAnswerGroupResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FileCleanupResult,
@@ -144,6 +145,35 @@ export interface MessageDataSource {
    */
   deleteBlocks(blockIds: string[]): Promise<FileCleanupResult>
 
+  // ============ Branch by stable anchor (S6.2c-1) ============
+  /**
+   * Branch messages up to an anchor (inclusive) from source to target atomically in Main.
+   * Validates source exists and anchor belongs to source; ensures target; clones prefix with fresh IDs,
+   * remapping askId exactly as renderer branch behavior. Returns actual cloned wire for projection.
+   * Missing/cross-topic anchor fails with no partial target writes.
+   */
+  branchMessagesToTopic?(
+    sourceTopicId: string,
+    targetTopicId: string,
+    anchorMessageId: string,
+    assistantId?: string
+  ): Promise<{ messages: Message[]; blocks: MessageBlock[] }>
+
+  // ============ Insert after stable anchor (S6.2c-2) ============
+  /**
+   * Insert entries after a stable anchor (group-tail aware) atomically in Main.
+   * Validates topic/anchor membership, resolves ordered authority order
+   * (sort_order ASC, id ASC), advances past contiguous assistant group tail
+   * when anchor is assistant with askId, then inserts entries with dense-order logic.
+   * No numeric insertIndex in request. Fail closed with no partial writes.
+   * Dispatches updateTopicUpdatedAt exactly once after success.
+   */
+  insertMessagesAfterAnchor?(
+    topicId: string,
+    afterMessageId: string,
+    entries: MessageBlockEntry[]
+  ): Promise<FileCleanupResult>
+
   // ============ Batch Operations ============
   /**
    * Check if topic exists
@@ -161,6 +191,14 @@ export interface MessageDataSource {
    * Missing topic / missing anchor → throws ChatDbResultError (ERR_NOT_FOUND).
    */
   fetchMessagesWindow?(request: FetchMessagesWindowRequest): Promise<FetchMessagesWindowResponse>
+
+  /**
+   * Authoritative answer-group READ — S6.2b R-05.
+   * Returns complete ordered answer-group for an anchor assistant message.
+   * Missing topic/anchor/cross-topic/anchor without usable askId → throws ChatDbResultError (NOT_FOUND).
+   * No mutation, no timestamp dispatch.
+   */
+  fetchAnswerGroup?(topicId: string, anchorMessageId: string): Promise<FetchAnswerGroupResponse>
 
   // ============ File Operations (Optional) ============
 

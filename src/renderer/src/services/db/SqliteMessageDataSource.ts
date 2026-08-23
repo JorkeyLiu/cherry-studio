@@ -24,6 +24,8 @@ import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { cloneForWire } from '@renderer/utils/jsonWire'
 import type {
   AppendMessageRequest,
+  BranchMessagesToTopicRequest,
+  BranchMessagesToTopicResponse,
   BulkAddBlocksRequest,
   ChatDbError,
   ChatDbResult,
@@ -41,6 +43,8 @@ import type {
   EmptyTrashTopicsRequest,
   EmptyTrashTopicsResponse,
   EnsureTopicRequest,
+  FetchAnswerGroupRequest,
+  FetchAnswerGroupResponse,
   FetchMessagesRequest,
   FetchMessagesResponse,
   FetchMessagesWindowRequest,
@@ -50,6 +54,8 @@ import type {
   GetRawTopicResponse,
   HardDeleteTopicRequest,
   HardDeleteTopicResponse,
+  InsertMessagesAfterAnchorRequest,
+  InsertMessagesAfterAnchorResponse,
   JsonObject,
   ListBlocksByFileRequest,
   ListBlocksByFileResponse,
@@ -106,6 +112,11 @@ import type { MessageDataSource } from './types'
 export interface ChatDbApi {
   fetchMessages(request: FetchMessagesRequest): Promise<ChatDbResult<FetchMessagesResponse>>
   fetchMessagesWindow?(request: FetchMessagesWindowRequest): Promise<ChatDbResult<FetchMessagesWindowResponse>>
+  fetchAnswerGroup?(request: FetchAnswerGroupRequest): Promise<ChatDbResult<FetchAnswerGroupResponse>>
+  branchMessagesToTopic?(request: BranchMessagesToTopicRequest): Promise<ChatDbResult<BranchMessagesToTopicResponse>>
+  insertMessagesAfterAnchor?(
+    request: InsertMessagesAfterAnchorRequest
+  ): Promise<ChatDbResult<InsertMessagesAfterAnchorResponse>>
   getRawTopic(request: GetRawTopicRequest): Promise<ChatDbResult<GetRawTopicResponse>>
   topicExists(request: TopicExistsRequest): Promise<ChatDbResult<boolean>>
   ensureTopic(request: EnsureTopicRequest): Promise<ChatDbResult<null>>
@@ -760,6 +771,56 @@ export class SqliteMessageDataSource implements MessageDataSource {
     return unwrap(await this.api.resetAssistantTopics(cloneForWire({ assistantId, replacementTopicId })))
   }
 
+  // ============ S6.2c-1: Branch by stable anchor (additive) ============
+
+  async branchMessagesToTopic(
+    sourceTopicId: string,
+    targetTopicId: string,
+    anchorMessageId: string,
+    assistantId?: string
+  ): Promise<{ messages: Message[]; blocks: MessageBlock[] }> {
+    if (!this.api.branchMessagesToTopic) {
+      throw new Error('ChatDb API unavailable: branchMessagesToTopic not exposed')
+    }
+    const request: BranchMessagesToTopicRequest = cloneForWire({
+      sourceTopicId,
+      targetTopicId,
+      anchorMessageId,
+      assistantId
+    })
+    const result = unwrap(await this.api.branchMessagesToTopic(request))
+    dispatchTopicUpdatedAt(targetTopicId)
+    return {
+      messages: result.messages as unknown as Message[],
+      blocks: result.blocks as unknown as MessageBlock[]
+    }
+  }
+
+  // ============ S6.2c-2: Insert after stable anchor (additive, Main-authoritative) ============
+
+  /**
+   * Insert entries after a stable anchor (group-tail aware) in ONE Main transaction.
+   *
+   * Validates topic/anchor membership in Main, resolves ordered authority order
+   * (sort_order ASC, id ASC), advances past contiguous assistant group tail,
+   * then inserts entries atomically with existing dense-order logic.
+   * No numeric insertIndex in request; failures are closed with no partial writes.
+   * Dispatches updateTopicUpdatedAt exactly once after success.
+   */
+  async insertMessagesAfterAnchor(
+    topicId: string,
+    afterMessageId: string,
+    entries: MessageBlockEntry[]
+  ): Promise<FileCleanupResult> {
+    if (!this.api.insertMessagesAfterAnchor) {
+      throw new Error('ChatDb API unavailable: insertMessagesAfterAnchor not exposed')
+    }
+    const request: InsertMessagesAfterAnchorRequest = cloneForWire({ topicId, afterMessageId, entries })
+    const result = unwrap(await this.api.insertMessagesAfterAnchor(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
+  }
+
   // ============ Compound Mutations (Phase 5.1B) ============
 
   async cloneMessagesToTopic(targetTopicId: string, entries: MessageBlockEntry[], assistantId?: string): Promise<void> {
@@ -810,6 +871,24 @@ export class SqliteMessageDataSource implements MessageDataSource {
       blocks: result.blocks as unknown as MessageBlock[],
       window: result.window
     } as unknown as FetchMessagesWindowResponse
+  }
+
+  // ============ Answer-group READ (S6.2b R-05, read-only) ============
+
+  /**
+   * Fetch the authoritative answer-group for an anchor assistant message.
+   *
+   * One Main SQLite transaction validates topic/anchor membership and anchor
+   * role/askId, then resolves the complete group (sort_order ASC, id ASC).
+   * No mutation, no timestamp dispatch, no fallback. Structured failure
+   * throws ChatDbResultError; transport rejection propagates unchanged.
+   */
+  async fetchAnswerGroup(topicId: string, anchorMessageId: string): Promise<FetchAnswerGroupResponse> {
+    if (!this.api.fetchAnswerGroup) {
+      throw new Error('ChatDb API unavailable: answer-group read not exposed')
+    }
+    const request: FetchAnswerGroupRequest = cloneForWire({ topicId, anchorMessageId })
+    return unwrap(await this.api.fetchAnswerGroup(request))
   }
 
   // ============ Search (Phase 5.2A, read-only) ============

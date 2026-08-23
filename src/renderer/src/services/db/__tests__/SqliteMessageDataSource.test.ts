@@ -986,6 +986,78 @@ describe('SqliteMessageDataSource', () => {
   })
 
   // =========================================================================
+  // S6.2b R-05: fetchAnswerGroup (authoritative READ)
+  // =========================================================================
+
+  describe('S6.2b R-05: fetchAnswerGroup', () => {
+    const answerGroupResponse = {
+      completeness: 'answer-group' as const,
+      topicId: 't1',
+      anchorMessageId: 'a2',
+      askId: 'ask-1',
+      messageIds: ['a1', 'a2', 'a3']
+    }
+
+    it('calls api.fetchAnswerGroup with exact stable request', async () => {
+      ;(api as any).fetchAnswerGroup = vi.fn().mockResolvedValue(successResult(answerGroupResponse))
+      await ds.fetchAnswerGroup('t1', 'a2')
+      expect((api as any).fetchAnswerGroup).toHaveBeenCalledOnce()
+      expect((api as any).fetchAnswerGroup).toHaveBeenCalledWith({ topicId: 't1', anchorMessageId: 'a2' })
+    })
+
+    it('returns the unwrapped response value', async () => {
+      ;(api as any).fetchAnswerGroup = vi.fn().mockResolvedValue(successResult(answerGroupResponse))
+      const result = await ds.fetchAnswerGroup('t1', 'a2')
+      expect(result).toEqual(answerGroupResponse)
+    })
+
+    it('structured failure throws ChatDbResultError without retry or fallback', async () => {
+      ;(api as any).fetchAnswerGroup = vi
+        .fn()
+        .mockResolvedValue(failureResult('NOT_FOUND', 'Anchor has no actionable group'))
+      try {
+        await ds.fetchAnswerGroup('t1', 'missing')
+        expect.fail('Should have thrown')
+      } catch (e) {
+        expect(e).toBeInstanceOf(ChatDbResultError)
+        expect((e as ChatDbResultError).code).toBe('NOT_FOUND')
+      }
+      expect((api as any).fetchAnswerGroup).toHaveBeenCalledOnce()
+      expect(api.fetchMessages).not.toHaveBeenCalled()
+      expect(api.selectAnswerMessage).not.toHaveBeenCalled()
+    })
+
+    it('transport rejection propagates unchanged', async () => {
+      ;(api as any).fetchAnswerGroup = vi.fn().mockRejectedValue(new Error('IPC transport failed'))
+      await expect(ds.fetchAnswerGroup('t1', 'a2')).rejects.toThrow('IPC transport failed')
+    })
+
+    it('does NOT dispatch topic timestamp update (read-only)', async () => {
+      mockDispatch.mockClear()
+      ;(api as any).fetchAnswerGroup = vi.fn().mockResolvedValue(successResult(answerGroupResponse))
+      await ds.fetchAnswerGroup('t1', 'a2')
+      expect(mockDispatch).not.toHaveBeenCalled()
+    })
+
+    it('does NOT dispatch when fetchAnswerGroup fails', async () => {
+      mockDispatch.mockClear()
+      ;(api as any).fetchAnswerGroup = vi.fn().mockResolvedValue(failureResult('NOT_FOUND', 'no group'))
+      try {
+        await ds.fetchAnswerGroup('t1', 'missing')
+      } catch {
+        // expected
+      }
+      expect(mockDispatch).not.toHaveBeenCalled()
+    })
+
+    it('rejects locally on unsupported JSON values via cloneForWire', async () => {
+      ;(api as any).fetchAnswerGroup = vi.fn().mockResolvedValue(successResult(answerGroupResponse))
+      await expect(ds.fetchAnswerGroup('t1', BigInt(42) as unknown as string)).rejects.toThrow(TypeError)
+      expect((api as any).fetchAnswerGroup).not.toHaveBeenCalled()
+    })
+  })
+
+  // =========================================================================
   // updateTopicUpdatedAt dispatch parity
   // =========================================================================
 

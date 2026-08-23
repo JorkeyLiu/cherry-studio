@@ -808,6 +808,201 @@ describe('ChatDbAggregateService', () => {
   })
 
   // =========================================================================
+  // fetch-answer-group (S6.2b R-05) — authoritative READ
+  // =========================================================================
+
+  describe('fetchAnswerGroup', () => {
+    it('returns complete ordered group for anchor even when only subset is present', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const otherAskId = `ask-${uid()}`
+      const m1 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: false })
+      const m2 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: true })
+      const m3 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: false })
+      const mOther = makeMessageJson(topicId, { role: 'assistant', askId: otherAskId })
+      const mUser = makeMessageJson(topicId, { role: 'user', askId: undefined })
+      // Insert out-of-order to verify deterministic sort_order ASC, id ASC ordering
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, mOther as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+      agg.appendMessage(topicId, mUser as any, [])
+      agg.appendMessage(topicId, m3 as any, [])
+
+      const result = agg.fetchAnswerGroup({ topicId, anchorMessageId: m2.id as string })
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(result.value.completeness).toBe('answer-group')
+      expect(result.value.topicId).toBe(topicId)
+      expect(result.value.anchorMessageId).toBe(m2.id)
+      expect(result.value.askId).toBe(askId)
+      // Deterministic order: sort_order ASC, id ASC — our append order defines sort_order, so group order equals append order filtered
+      expect(result.value.messageIds).toEqual([m1.id, m2.id, m3.id])
+    })
+
+    it('orders by sort_order ASC, id ASC for equal sort_order ties', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      // Use deterministic ids where lexical order is known and opposite to insertion order,
+      // then force truly equal sort_order via direct DB write to prove id ASC tie-break.
+      const base = uid()
+      const idAaa = `m-aaa-${base}`
+      const idZzz = `m-zzz-${base}`
+      const mZzz = makeMessageJson(topicId, { id: idZzz, role: 'assistant', askId })
+      const mAaa = makeMessageJson(topicId, { id: idAaa, role: 'assistant', askId })
+      // Insert in reverse lexical order: zzz first, aaa second
+      agg.appendMessage(topicId, mZzz as any, [])
+      agg.appendMessage(topicId, mAaa as any, [])
+      // Force equal sort_order through test DB (repository has no equal-sort API) — literal tie condition
+      const equalOrder = 42
+      sqlite.prepare('UPDATE messages SET sort_order = ? WHERE id IN (?, ?)').run(equalOrder, idZzz, idAaa)
+      const result = agg.fetchAnswerGroup({ topicId, anchorMessageId: idZzz })
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      // Literal expected: id ASC tie-break, so aaa before zzz regardless of insertion order
+      expect(result.value.messageIds).toEqual([idAaa, idZzz])
+      // Also verify anchor zzz still present and ordering is deterministic from other anchor
+      const resultFromAaa = agg.fetchAnswerGroup({ topicId, anchorMessageId: idAaa })
+      expect(resultFromAaa.ok).toBe(true)
+      if (!resultFromAaa.ok) return
+      expect(resultFromAaa.value.messageIds).toEqual([idAaa, idZzz])
+    })
+
+    it('fails with NOT_FOUND when topic is missing', () => {
+      const result = agg.fetchAnswerGroup({ topicId: 'missing-topic', anchorMessageId: 'any' })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('NOT_FOUND')
+    })
+
+    it('fails with NOT_FOUND when anchor is missing', () => {
+      const topicId = `t-${uid()}`
+      agg.appendMessage(topicId, makeMessageJson(topicId, { role: 'assistant', askId: `ask-${uid()}` }) as any, [])
+      const result = agg.fetchAnswerGroup({ topicId, anchorMessageId: 'missing-anchor' })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('NOT_FOUND')
+    })
+
+    it('fails with NOT_FOUND for cross-topic anchor (ownership)', () => {
+      const topicA = `t-${uid()}`
+      const topicB = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const mA = makeMessageJson(topicA, { role: 'assistant', askId })
+      const mB = makeMessageJson(topicB, { role: 'assistant', askId })
+      agg.appendMessage(topicA, mA as any, [])
+      agg.appendMessage(topicB, mB as any, [])
+      const result = agg.fetchAnswerGroup({ topicId: topicA, anchorMessageId: mB.id as string })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('NOT_FOUND')
+    })
+
+    it('fails with NOT_FOUND when anchor is not assistant', () => {
+      const topicId = `t-${uid()}`
+      const userMsg = makeMessageJson(topicId, { role: 'user', askId: undefined })
+      agg.appendMessage(topicId, userMsg as any, [])
+      const result = agg.fetchAnswerGroup({ topicId, anchorMessageId: userMsg.id as string })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('NOT_FOUND')
+    })
+
+    it('fails with NOT_FOUND when anchor has no askId (empty/missing)', () => {
+      const topicId = `t-${uid()}`
+      const mNoAsk = makeMessageJson(topicId, { role: 'assistant', askId: '' })
+      // makeMessageJson may coerce empty askId to null; ensure we test missing/empty
+      // For missing, we delete askId
+      delete (mNoAsk as any).askId
+      agg.appendMessage(topicId, mNoAsk as any, [])
+      const result = agg.fetchAnswerGroup({ topicId, anchorMessageId: mNoAsk.id as string })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('NOT_FOUND')
+      // Also test empty string case via explicit empty
+      const topicId2 = `t-${uid()}`
+      const mEmptyAsk = makeMessageJson(topicId2, { role: 'assistant', askId: '' })
+      // If helper strips empty, force empty string via direct insert
+      agg.appendMessage(topicId2, mEmptyAsk as any, [])
+      const result2 = agg.fetchAnswerGroup({ topicId: topicId2, anchorMessageId: mEmptyAsk.id as string })
+      expect(result2.ok).toBe(false)
+      if (!result2.ok) expect(result2.error.code).toBe('NOT_FOUND')
+    })
+
+    it('preserves imported/dangling askId equality semantics (group by string equality)', () => {
+      const topicId = `t-${uid()}`
+      const danglingAskId = `dangling-${uid()}`
+      const m1 = makeMessageJson(topicId, { role: 'assistant', askId: danglingAskId })
+      const m2 = makeMessageJson(topicId, { role: 'assistant', askId: danglingAskId })
+      const m3 = makeMessageJson(topicId, { role: 'assistant', askId: `other-${uid()}` })
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+      agg.appendMessage(topicId, m3 as any, [])
+      const result = agg.fetchAnswerGroup({ topicId, anchorMessageId: m1.id as string })
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(result.value.messageIds).toEqual([m1.id, m2.id])
+    })
+
+    it('does not mutate or create timestamps — read-only', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const m1 = makeMessageJson(topicId, {
+        role: 'assistant',
+        askId,
+        foldSelected: false,
+        content: 'c1',
+        status: 'success'
+      })
+      const m2 = makeMessageJson(topicId, {
+        role: 'assistant',
+        askId,
+        foldSelected: false,
+        content: 'c2',
+        status: 'success'
+      })
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+      const before = okValue(agg.fetchMessages(topicId))
+      const beforeSnap = before.messages.map((m: any) => ({
+        id: m.id,
+        foldSelected: m.foldSelected,
+        askId: m.askId,
+        content: m.content,
+        status: m.status,
+        createdAt: m.createdAt,
+        updatedAt: m.updatedAt,
+        sortOrder: m.sortOrder
+      }))
+      const beforeCounts = { messages: before.messages.length, blocks: before.blocks.length }
+      const result = agg.fetchAnswerGroup({ topicId, anchorMessageId: m1.id as string })
+      expect(result.ok).toBe(true)
+      const after = okValue(agg.fetchMessages(topicId))
+      const afterSnap = after.messages.map((m: any) => ({
+        id: m.id,
+        foldSelected: m.foldSelected,
+        askId: m.askId,
+        content: m.content,
+        status: m.status,
+        createdAt: m.createdAt,
+        updatedAt: m.updatedAt,
+        sortOrder: m.sortOrder
+      }))
+      expect(afterSnap).toEqual(beforeSnap)
+      expect(after.messages.length).toBe(beforeCounts.messages)
+      expect(after.blocks.length).toBe(beforeCounts.blocks)
+    })
+
+    it('returns uniqueness and anchor inclusion invariants', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const m1 = makeMessageJson(topicId, { role: 'assistant', askId })
+      const m2 = makeMessageJson(topicId, { role: 'assistant', askId })
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+      const result = agg.fetchAnswerGroup({ topicId, anchorMessageId: m2.id as string })
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(new Set(result.value.messageIds).size).toBe(result.value.messageIds.length)
+      expect(result.value.messageIds).toContain(m2.id)
+    })
+  })
+
+  // =========================================================================
   // delete-message
   // =========================================================================
 

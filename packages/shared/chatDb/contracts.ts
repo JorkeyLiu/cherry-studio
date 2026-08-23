@@ -15,6 +15,7 @@
 
 import type {
   AppendMessageRequest,
+  BranchMessagesToTopicRequest,
   BulkAddBlocksRequest,
   ChatDbChannel,
   CloneMessagesToTopicRequest,
@@ -26,10 +27,12 @@ import type {
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
+  FetchAnswerGroupRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
@@ -1059,6 +1062,52 @@ const cloneMessagesToTopicContract: ChatDbContract = {
   validateResult: voidResult('chatdb:clone-messages-to-topic')
 }
 
+const branchMessagesToTopicContract: ChatDbContract = {
+  allowedKeys: keySet('sourceTopicId', 'targetTopicId', 'anchorMessageId', 'assistantId'),
+  validate(value: unknown): void {
+    validateRequest(value, branchMessagesToTopicContract.allowedKeys)
+    const req = value as BranchMessagesToTopicRequest
+    validateNonEmptyString(req.sourceTopicId, 'request.sourceTopicId')
+    validateNonEmptyString(req.targetTopicId, 'request.targetTopicId')
+    validateNonEmptyString(req.anchorMessageId, 'request.anchorMessageId')
+    if (req.assistantId !== undefined) {
+      validateNonEmptyString(req.assistantId, 'request.assistantId')
+    }
+  },
+  validateResult(result: unknown): void {
+    // Mirrors fetch-messages success shape: { messages: JsonObject[], blocks: JsonObject[] }
+    validateResultEnvelope(result, 'chatdb:branch-messages-to-topic', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:branch-messages-to-topic] Expected object with "messages" and "blocks"'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:branch-messages-to-topic] Success value must be a plain object'
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!FETCH_MESSAGES_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:branch-messages-to-topic] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateJsonObjectArray(v.messages, 'result.value.messages')
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+    }
+  }
+}
+
 const resetMessagesForResendContract: ChatDbContract = {
   allowedKeys: keySet('topicId', 'messages', 'blockIdsToDelete'),
   validate(value: unknown): void {
@@ -1489,6 +1538,104 @@ const fetchMessagesWindowContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// S6.2b R-05: Answer-group READ contract — authoritative fetch-answer-group
+// ---------------------------------------------------------------------------
+
+const FETCH_ANSWER_GROUP_VALUE_KEYS = new Set(['completeness', 'topicId', 'anchorMessageId', 'askId', 'messageIds'])
+
+const fetchAnswerGroupContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'anchorMessageId'),
+  validate(value: unknown): void {
+    validateRequest(value, fetchAnswerGroupContract.allowedKeys)
+    const req = value as FetchAnswerGroupRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateNonEmptyString(req.anchorMessageId, 'request.anchorMessageId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:fetch-answer-group')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:fetch-answer-group] Expected object with completeness, topicId, anchorMessageId, askId, messageIds'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:fetch-answer-group] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!FETCH_ANSWER_GROUP_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:fetch-answer-group] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      if (v.completeness !== 'answer-group') {
+        throw new ValidationError(
+          'result.value.completeness',
+          '[chatdb:fetch-answer-group] Expected completeness "answer-group"'
+        )
+      }
+      validateNonEmptyString(v.topicId, 'result.value.topicId')
+      validateNonEmptyString(v.anchorMessageId, 'result.value.anchorMessageId')
+      validateNonEmptyString(v.askId, 'result.value.askId')
+      if (!Array.isArray(v.messageIds)) {
+        throw new ValidationError('result.value.messageIds', '[chatdb:fetch-answer-group] Expected array of messageIds')
+      }
+      if (v.messageIds.length === 0) {
+        throw new ValidationError('result.value.messageIds', '[chatdb:fetch-answer-group] messageIds must not be empty')
+      }
+      const seen = new Set<string>()
+      let anchorFound = false
+      for (let i = 0; i < (v.messageIds as unknown[]).length; i++) {
+        const id = (v.messageIds as unknown[])[i]
+        if (typeof id !== 'string' || id.length === 0) {
+          throw new ValidationError(`result.value.messageIds[${i}]`, 'Expected a non-empty string')
+        }
+        if (seen.has(id)) {
+          throw new ValidationError(
+            `result.value.messageIds[${i}]`,
+            `[chatdb:fetch-answer-group] Duplicate messageId at index ${i}`
+          )
+        }
+        seen.add(id)
+        if (id === v.anchorMessageId) anchorFound = true
+      }
+      if (!anchorFound) {
+        throw new ValidationError(
+          'result.value.messageIds',
+          '[chatdb:fetch-answer-group] messageIds must include anchorMessageId'
+        )
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// S6.2c-2: Insert after stable anchor contract — Main-authoritative
+// ---------------------------------------------------------------------------
+
+const insertMessagesAfterAnchorContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'afterMessageId', 'entries'),
+  validate(value: unknown): void {
+    validateRequest(value, insertMessagesAfterAnchorContract.allowedKeys)
+    const req = value as InsertMessagesAfterAnchorRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateNonEmptyString(req.afterMessageId, 'request.afterMessageId')
+    validateEntries(req.entries, 'request.entries')
+    if (req.entries.length === 0) {
+      throw new ValidationError('request.entries', 'entries must not be empty')
+    }
+  },
+  validateResult: fileCleanupResultValidator('chatdb:insert-messages-after-anchor')
+}
+
+// ---------------------------------------------------------------------------
 // Contract registry — exact channel → contract mapping
 // ---------------------------------------------------------------------------
 
@@ -1536,6 +1683,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:empty-trash-topics': emptyTrashTopicsContract,
   'chatdb:transfer-topic-ownership': transferTopicOwnershipContract,
   'chatdb:reset-assistant-topics': resetAssistantTopicsContract,
+  // S6.2c-1: branch by stable anchor (additive, keeps old clone path intact)
+  'chatdb:branch-messages-to-topic': branchMessagesToTopicContract,
   // Phase 5.1B: compound mutations
   'chatdb:clone-messages-to-topic': cloneMessagesToTopicContract,
   'chatdb:reset-messages-for-resend': resetMessagesForResendContract,
@@ -1544,7 +1693,11 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   // Phase 5.1B-2: search
   'chatdb:search-messages': searchMessagesContract,
   // S6.1: windowed reads
-  'chatdb:fetch-messages-window': fetchMessagesWindowContract
+  'chatdb:fetch-messages-window': fetchMessagesWindowContract,
+  // S6.2b R-05: authoritative answer-group READ
+  'chatdb:fetch-answer-group': fetchAnswerGroupContract,
+  // S6.2c-2: Main-authoritative insert after stable anchor
+  'chatdb:insert-messages-after-anchor': insertMessagesAfterAnchorContract
 })
 
 /**

@@ -15,7 +15,7 @@ import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { useTopicTransition } from '@renderer/hooks/useTopicTransition'
 import { findFirstVisibleMessage } from '@renderer/pages/home/Messages/domVisibility'
-import { branchFromMessage } from '@renderer/pages/home/Messages/messageBranch'
+import { branchFromAnchorMessage } from '@renderer/pages/home/Messages/messageBranch'
 import type { MessageViewportGroup } from '@renderer/pages/home/Messages/messageGroups'
 import {
   applyColumnReverseScroll,
@@ -351,7 +351,7 @@ const Messages = ({
   const dispatch = useAppDispatch()
   const messages = useTopicMessages(topic.id)
   const isTopicLoading = useTopicLoading(topic)
-  const { displayCount, createTopicBranch } = useMessageOperations(topic)
+  const { displayCount, createTopicBranchByAnchor } = useMessageOperations(topic)
   const { selectAnswer } = useMessageActionController()
   const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
   const phaseAtRender = currentPhaseCorrelation()
@@ -813,10 +813,10 @@ const Messages = ({
           return
         }
 
-        await branchFromMessage(messagesRef.current, messageId, {
-          createBranch: async (branchEndpoint) => {
+        await branchFromAnchorMessage(messagesRef.current, messageId, {
+          createBranchByAnchor: async (anchorId) => {
             addTopic(newTopic)
-            return await createTopicBranch(topic.id, branchEndpoint, newTopic)
+            return await createTopicBranchByAnchor(topic.id, anchorId, newTopic)
           },
           onMessageNotFound: () => {
             logger.error(`[NEW_BRANCH] Message not found: ${messageId}`)

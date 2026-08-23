@@ -390,7 +390,7 @@ export class SearchRepository {
 
     return {
       items,
-      nextCursor,
+      ...(nextCursor !== undefined && { nextCursor }),
       hasMore,
       totalCount: blockIds.size
     }

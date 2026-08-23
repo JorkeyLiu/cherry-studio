@@ -13,7 +13,7 @@ import { updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { estimateMessageBlocksUsage } from '@renderer/utils/messageUtils/usage'
-import { useCallback } from 'react'
+import { useCallback, useRef } from 'react'
 
 const logger = loggerService.withContext('useMessageActionController')
 
@@ -25,6 +25,7 @@ const logger = loggerService.withContext('useMessageActionController')
  */
 export function useMessageActionController() {
   const dispatch = useAppDispatch()
+  const selectSeqRef = useRef(0)
 
   const regenerateAssistant = useCallback(
     async (target: ActionTarget) => {
@@ -58,9 +59,19 @@ export function useMessageActionController() {
 
   const selectAnswer = useCallback(
     async (target: ActionTarget) => {
-      const resolved = messageActionController.resolveAnswerGroup(target)
+      selectSeqRef.current += 1
+      const mySeq = selectSeqRef.current
+      const resolved = await messageActionController.fetchAuthoritativeAnswerGroup(target)
       if (!resolved) {
-        logger.warn(`[selectAnswer] invalid target ${target.topicId}/${target.messageId}`)
+        logger.warn(
+          `[selectAnswer] invalid target or authoritative group unavailable ${target.topicId}/${target.messageId}`
+        )
+        return
+      }
+      if (mySeq !== selectSeqRef.current) {
+        logger.warn(
+          `[selectAnswer] stale selection discarded ${target.topicId}/${target.messageId} seq ${mySeq} vs ${selectSeqRef.current}`
+        )
         return
       }
       await dispatch(selectAnswerMessageThunk(target.topicId, target.messageId, resolved.groupIds))

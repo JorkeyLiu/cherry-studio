@@ -82,6 +82,7 @@ const HistoryPage: FC = () => {
     <Container>
       <HStack style={{ padding: '0 12px', marginTop: 8 }}>
         <Input
+          data-testid="history-search-input"
           prefix={
             stack.length > 1 ? (
               <SearchIcon className="back-icon" onClick={goBack}>

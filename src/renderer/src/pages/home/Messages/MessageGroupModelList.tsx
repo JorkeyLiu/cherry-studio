@@ -65,6 +65,8 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
             <AvatarWrapper
               className="avatar-wrapper"
               $isSelected={message.id === selectMessageId}
+              data-testid="answer-group-selector"
+              data-message-id={message.id}
               onClick={() => {
                 setSelectedMessage(message)
               }}>
@@ -78,6 +80,8 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
       return (
         <SegmentedItem
           $isSelected={message.id === selectMessageId}
+          data-testid="answer-group-selector"
+          data-message-id={message.id}
           onClick={() => {
             setSelectedMessage(message)
           }}>

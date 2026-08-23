@@ -18,9 +18,13 @@
  * updateFileCount(s) stays in Dexie/FileManager; not called here.
  */
 
+import { randomUUID } from 'node:crypto'
+
 import { loggerService } from '@logger'
 import type {
   AppendDiagnostics,
+  FetchAnswerGroupRequest,
+  FetchAnswerGroupResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FileCleanupResult,
@@ -68,6 +72,7 @@ import {
 
 export type FetchMessagesResult = { messages: JsonObject[]; blocks: JsonObject[] }
 export type FetchMessagesWindowResult = FetchMessagesWindowResponse
+export type FetchAnswerGroupResult = FetchAnswerGroupResponse
 export type GetRawTopicResult = { id: string; messages: JsonObject[] } | null
 
 // ---------------------------------------------------------------------------
@@ -237,6 +242,191 @@ export class ChatDbAggregateService {
         }
       })
     }, `fetchMessagesWindow(${request.topicId}, ${request.kind})`)
+  }
+
+  /**
+   * S6.2b R-05: authoritative answer-group READ.
+   *
+   * One authoritative SQLite transaction:
+   * - Validates topic exists, anchor belongs to topic, anchor role is
+   *   assistant with non-empty askId — all fail as NOT_FOUND (no actionable group).
+   * - Resolves complete group: all same-topic assistant messages with equal
+   *   askId in deterministic sort_order ASC, id ASC.
+   * - Returns completeness:'answer-group', echoes topicId/anchorMessageId,
+   *   includes askId and ordered messageIds. No mutation, no size/cursor fields.
+   */
+  fetchAnswerGroup(request: FetchAnswerGroupRequest): ChatDbResult<FetchAnswerGroupResponse> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(request.topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+        }
+        const anchor = repos.messages.getInTopic(request.anchorMessageId, request.topicId)
+        if (!anchor.found) {
+          throw new ChatDbNotFoundError(
+            `Anchor message ${request.anchorMessageId} does not belong to topic ${request.topicId}`
+          )
+        }
+        const askId = anchor.data.askId
+        if (anchor.data.role !== 'assistant' || typeof askId !== 'string' || askId.length === 0) {
+          throw new ChatDbNotFoundError(`Anchor message ${request.anchorMessageId} has no actionable answer group`)
+        }
+        const allMessages = repos.messages.listByTopic(request.topicId)
+        const groupIds = allMessages.filter((m) => m.role === 'assistant' && m.askId === askId).map((m) => m.id)
+        if (!groupIds.includes(request.anchorMessageId)) {
+          throw new ChatDbNotFoundError(`Anchor message ${request.anchorMessageId} has no actionable answer group`)
+        }
+        if (groupIds.length === 0) {
+          throw new ChatDbNotFoundError(`Anchor message ${request.anchorMessageId} has no actionable answer group`)
+        }
+        return {
+          completeness: 'answer-group' as const,
+          topicId: request.topicId,
+          anchorMessageId: request.anchorMessageId,
+          askId,
+          messageIds: groupIds
+        }
+      })
+    }, `fetchAnswerGroup(${request.topicId}, ${request.anchorMessageId})`)
+  }
+
+  /**
+   * S6.2c-2: Resolve anchor → group-tail insert index.
+   *
+   * One authoritative helper for Main:
+   * - Ordered authority messages sort_order ASC, id ASC (via listByTopic).
+   * - Validates anchor membership; advances past contiguous assistant messages
+   *   with same non-empty ask_id as anchor when existing behavior requires
+   *   group-tail insertion (anchor role assistant + askId).
+   * - Returns resolved insertIndex (anchor-group tail + 1).
+   * Factored for reuse + testability; no renderer state.
+   */
+  private resolveInsertIndexAfterAnchor(orderedMessages: MessageData[], anchor: MessageData): number {
+    const anchorIdx = orderedMessages.findIndex((m) => m.id === anchor.id)
+    if (anchorIdx === -1) {
+      throw new ChatDbNotFoundError(`Anchor message ${anchor.id} does not belong to its topic`)
+    }
+    let tailIdx = anchorIdx
+    const askId = (anchor as any).askId as string | undefined
+    if (anchor.role === 'assistant' && typeof askId === 'string' && askId.length > 0) {
+      for (let i = anchorIdx + 1; i < orderedMessages.length; i++) {
+        const cur = orderedMessages[i]
+        if (cur.role === 'assistant' && (cur as any).askId === askId) {
+          tailIdx = i
+        } else {
+          break
+        }
+      }
+    }
+    return tailIdx + 1
+  }
+
+  /**
+   * S6.2c-2: Main-authoritative insert after stable anchor.
+   *
+   * One atomic Main SQLite transaction:
+   * - Validates topic exists, anchor belongs to topic.
+   * - Resolves ordered authority messages and group-tail index atomically.
+   * - Inserts supplied entries with existing dense-order repository logic
+   *   (batch insertManyAt, existing IDs preserve position).
+   * - Upserts blocks + syncs file references in original entry order.
+   * - Fail closed: validation/read/write errors throw typed envelope, no partial publication.
+   * - Returns FileCleanupResult (empty for pure inserts; prior refs harvested for existing IDs).
+   */
+  insertMessagesAfterAnchor(
+    topicId: string,
+    afterMessageId: string,
+    entries: Array<{ message: JsonObject; blocks: JsonObject[] }>
+  ): ChatDbResult<FileCleanupResult> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        // Validate topic exists
+        const topic = repos.topics.getById(topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+        }
+        // Validate anchor membership
+        const anchorRes = repos.messages.getInTopic(afterMessageId, topicId)
+        if (!anchorRes.found) {
+          throw new ChatDbNotFoundError(`Anchor message ${afterMessageId} does not belong to topic ${topicId}`)
+        }
+        const anchorData = anchorRes.data
+
+        // Ordered authority snapshot + group-tail resolution (single transaction, no second read)
+        const orderedMessages = repos.messages.listByTopic(topicId)
+        const resolvedInsertIndex = this.resolveInsertIndexAfterAnchor(orderedMessages, anchorData)
+
+        // Phase 1 — convert every entry, enforce block ownership, classify new vs existing
+        const newMessages: MessageData[] = []
+        const newMessageIds = new Set<string>()
+        const existingPlans: Array<{ id: string; patch: Record<string, unknown> }> = []
+        const phase4Plans: Array<{ blocks: MessageBlockData[]; harvest: boolean }> = []
+        const allAffectedFileIds: string[] = []
+
+        for (const entry of entries) {
+          const messageData = wireToMessage(entry.message)
+          messageData.topicId = topicId
+          const blockDataList = entry.blocks.map(wireToBlock)
+          for (const block of blockDataList) {
+            block.messageId = messageData.id
+          }
+          const patch = wireToMessagePatch(entry.message)
+          delete patch.id
+          delete patch.topicId
+          delete patch.sortOrder
+
+          const existing = repos.messages.getById(messageData.id)
+          if (existing.found) {
+            if (existing.data.topicId !== topicId) {
+              throw new ChatDbConflictError(
+                `Message ${messageData.id} belongs to topic ${existing.data.topicId}, cannot insert into topic ${topicId}`
+              )
+            }
+            existingPlans.push({ id: messageData.id, patch })
+            phase4Plans.push({ blocks: blockDataList, harvest: true })
+          } else if (newMessageIds.has(messageData.id)) {
+            existingPlans.push({ id: messageData.id, patch })
+            phase4Plans.push({ blocks: blockDataList, harvest: true })
+          } else {
+            newMessageIds.add(messageData.id)
+            newMessages.push(messageData)
+            phase4Plans.push({ blocks: blockDataList, harvest: false })
+          }
+        }
+
+        // Phase 2 — batch-insert all new messages at resolved anchor group tail
+        if (newMessages.length > 0) {
+          repos.messages.insertManyAt(newMessages, resolvedInsertIndex)
+        }
+
+        // Phase 3 — metadata patches for existing rows / in-request duplicates
+        for (const plan of existingPlans) {
+          if (Object.keys(plan.patch).length > 0) {
+            repos.messages.update(topicId, plan.id, plan.patch)
+          }
+        }
+
+        // Phase 4 — harvest prior refs (existing entries only), then upsert blocks + sync file refs in ORIGINAL order
+        for (const plan of phase4Plans) {
+          if (plan.blocks.length === 0) continue
+          if (plan.harvest) {
+            for (const block of plan.blocks) {
+              const priorRefs = repos.fileRefs.listByBlock(block.id)
+              allAffectedFileIds.push(...collectAffectedFileIds(priorRefs))
+            }
+          }
+          repos.blocks.upsertMany(plan.blocks)
+          this.syncFileReferences(repos, plan.blocks)
+        }
+
+        const uniqueAffectedIds = [...new Set(allAffectedFileIds)].sort()
+        return buildFileCleanupResult(repos, uniqueAffectedIds)
+      })
+    }, `insertMessagesAfterAnchor(${topicId}, ${afterMessageId}, ${entries.length} entries)`)
   }
 
   /**
@@ -1577,6 +1767,128 @@ export class ChatDbAggregateService {
    *
    * Atomicity: one root SQLite transaction (LOCK-001).
    */
+  /**
+   * S6.2c-1: Main-authoritative branch by stable message anchor.
+   *
+   * One atomic Main DB transaction:
+   * - validates source topic exists
+   * - ensures target (create-only, compat)
+   * - validates anchor belongs to source
+   * - loads source ordered by sort_order ASC, id ASC (listByTopic)
+   * - selects prefix through anchor inclusive
+   * - clones messages/blocks with fresh IDs preserving order/content/status/overflow/file refs
+   * - remaps askId exactly as renderer branch behavior (to cloned parent when included, otherwise unset)
+   * - inserts into target atomically using dense order semantics (appendMany)
+   * - returns actual cloned wire messages/blocks for renderer projection, no hidden second read
+   *
+   * Missing/cross-topic anchor fails explicitly with no target partial writes (transaction rollback).
+   * Empty prefix impossible because anchor inclusive.
+   */
+  branchMessagesToTopic(
+    sourceTopicId: string,
+    targetTopicId: string,
+    anchorMessageId: string,
+    assistantId?: string
+  ): ChatDbResult<{ messages: JsonObject[]; blocks: JsonObject[] }> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+
+        // Validate source exists
+        const srcTopic = repos.topics.getById(sourceTopicId)
+        if (!srcTopic.found) {
+          throw new ChatDbNotFoundError(`Topic ${sourceTopicId} does not exist`)
+        }
+
+        // Ensure target (create-only)
+        repos.topics.ensure(targetTopicId, assistantId)
+
+        // Validate anchor belongs to source
+        const anchor = repos.messages.getInTopic(anchorMessageId, sourceTopicId)
+        if (!anchor.found) {
+          throw new ChatDbNotFoundError(`Anchor message ${anchorMessageId} does not belong to topic ${sourceTopicId}`)
+        }
+
+        // Load source ordered deterministic
+        const allMessages = repos.messages.listByTopic(sourceTopicId)
+        const anchorIdx = allMessages.findIndex((m) => m.id === anchorMessageId)
+        if (anchorIdx === -1) {
+          throw new ChatDbNotFoundError(`Anchor message ${anchorMessageId} does not belong to topic ${sourceTopicId}`)
+        }
+        const prefixMessages = allMessages.slice(0, anchorIdx + 1)
+        const prefixIds = prefixMessages.map((m) => m.id)
+        const blockMap = repos.blocks.listByMessages(prefixIds)
+
+        // Fresh ID generation preserving order
+        const idMap = new Map<string, string>()
+        for (const m of prefixMessages) {
+          idMap.set(m.id, randomUUID())
+        }
+
+        const newMessages: MessageData[] = []
+        const allNewBlocks: MessageBlockData[] = []
+
+        for (const oldMsg of prefixMessages) {
+          const newId = idMap.get(oldMsg.id)!
+          let newAskId: string | null | undefined
+          if (oldMsg.role === 'assistant' && oldMsg.askId) {
+            const mapped = idMap.get(oldMsg.askId)
+            if (mapped) newAskId = mapped
+            else newAskId = null
+          } else {
+            newAskId = oldMsg.askId ?? null
+            // For assistant messages whose askId was unset, keep null; for user messages, askId is null
+            if (oldMsg.role === 'assistant' && newAskId === null && oldMsg.askId) {
+              // already handled above (outside prefix) -> null
+            }
+            // For non-assistant, preserve original askId (usually null)
+            // But if original had askId and is assistant case already handled
+          }
+
+          // Clone message data: shallow copy, replace id/topicId/askId, preserve overflow and all columns except sortOrder (appendMany reassigns)
+          const cloned: MessageData = {
+            ...oldMsg,
+            id: newId,
+            topicId: targetTopicId,
+            askId: oldMsg.role === 'assistant' ? newAskId : (oldMsg.askId ?? null)
+          }
+          // Preserve overflow object reference safety: ensure overflow is cloned
+          cloned.overflow = { ...oldMsg.overflow }
+          newMessages.push(cloned)
+
+          const oldBlocks = blockMap.get(oldMsg.id) ?? []
+          // Preserve block order as stored (already sorted by sort_order ASC, id ASC via listByMessages ordering)
+          for (const oldBlk of oldBlocks) {
+            const newBlkId = randomUUID()
+            const clonedBlk: MessageBlockData = {
+              ...oldBlk,
+              id: newBlkId,
+              messageId: newId,
+              overflow: { ...oldBlk.overflow }
+            }
+            allNewBlocks.push(clonedBlk)
+          }
+        }
+
+        // Insert atomically using existing dense order semantics
+        if (newMessages.length > 0) {
+          repos.messages.appendMany(newMessages)
+        }
+        if (allNewBlocks.length > 0) {
+          // Group by new message for deterministic upsert order (original prefix order preserved)
+          repos.blocks.upsertMany(allNewBlocks)
+          this.syncFileReferences(repos, allNewBlocks)
+        }
+
+        // Build wire response for renderer projection (no second read)
+        const wireMessages = messagesToWire(newMessages)
+        const wireBlocks = blocksToWire(allNewBlocks)
+        const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
+        return { messages: messagesWithBlocks, blocks: wireBlocks }
+      })
+    }, `branchMessagesToTopic(${sourceTopicId} -> ${targetTopicId}, anchor=${anchorMessageId})`)
+  }
+
   cloneMessagesToTopic(
     targetTopicId: string,
     entries: Array<{ message: JsonObject; blocks: JsonObject[] }>,

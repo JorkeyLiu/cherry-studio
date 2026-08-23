@@ -102,7 +102,7 @@ const HeaderNavbar: FC<Props> = ({ activeAssistant, setActiveAssistant, activeTo
         <HStack alignItems="center" gap={6}>
           <UpdateAppButton />
           <Tooltip title={t('chat.assistant.search.placeholder')} mouseEnterDelay={0.8}>
-            <NarrowIcon onClick={() => SearchPopup.show()}>
+            <NarrowIcon data-testid="navbar-search-button" onClick={() => SearchPopup.show()}>
               <Search size={18} />
             </NarrowIcon>
           </Tooltip>

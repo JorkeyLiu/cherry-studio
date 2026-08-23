@@ -294,6 +294,30 @@ export const reconcileMessageWindow = (
 
 // --- S6.1 helpers transplanted from Messages.tsx (single production implementation) ---
 
+/**
+ * Canonical disjoint authoritative window union by stable ID with deterministic sort.
+ * Deduplicates by stable `id`, preserves all resident tail entries, adds any new
+ * incoming entries, and sorts deterministically: ascending `sortOrder` when present,
+ * tie-broken by lexicographic `id`, otherwise lexicographic `id` only.
+ * Used by R-04 search-hit navigation when the anchor is not resident.
+ */
+export function unionWindowMessages(existing: Message[], incoming: Message[]): Message[] {
+  const existingIds = new Set(existing.map((m) => m.id))
+  const newIncoming = incoming.filter((m) => !existingIds.has(m.id))
+  if (newIncoming.length === 0) return existing
+  const combined = [...existing, ...newIncoming]
+  const hasSortOrder = combined.some((m) => typeof (m as any).sortOrder === 'number')
+  if (hasSortOrder) {
+    return combined.slice().sort((a: any, b: any) => {
+      const sa = typeof a.sortOrder === 'number' ? a.sortOrder : Number.MAX_SAFE_INTEGER
+      const sb = typeof b.sortOrder === 'number' ? b.sortOrder : Number.MAX_SAFE_INTEGER
+      if (sa !== sb) return sa - sb
+      return a.id.localeCompare(b.id)
+    })
+  }
+  return combined.slice().sort((a, b) => a.id.localeCompare(b.id))
+}
+
 export function mergeWindowIntoTopic(existing: Message[], incoming: Message[], anchorId: string): Message[] {
   const existingIds = new Set(existing.map((m) => m.id))
   const newIds = incoming.filter((m) => !existingIds.has(m.id))

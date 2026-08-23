@@ -62,6 +62,7 @@ import type {
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FileCleanupResult,
+  JsonObject,
   StreamWriteDiagnostics
 } from '@shared/chatDb'
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
@@ -1097,13 +1098,129 @@ export const appendAssistantResponseThunk =
   }
 
 /**
- * Inserts a pair of user and assistant messages after a specified message.
- * Creates messages with default content and persists to DB and Redux.
- * @param topicId The ID of the topic
- * @param afterMessageId The ID of the message after which to insert
- * @param assistantId The ID of the assistant
+ * S6.2c-2: Main-authoritative insert after stable anchor.
+ *
+ * Eliminates renderer-window-relative insertIndex calculation for the primary
+ * message insertion path. Main resolves the stable afterMessageId anchor and
+ * assistant answer-group tail atomically before inserting (no numeric insertIndex
+ * in request). Preserve two-message user+assistant behavior and askId semantics.
+ * Fail closed: no Redux publication if Main fails.
+ *
+ * Compatibility: the positional appendMessage path remains unchanged for
+ * compatibility; this thunk is the primary migrated path.
  */
 export const insertMessagesThunk =
+  (topicId: string, afterMessageId: string, assistantId: string) =>
+  async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
+    const now = new Date().toISOString()
+
+    // Create user message with block
+    const userMessageId = uuid()
+    const userBlockId = uuid()
+    const userBlock: MessageBlock = {
+      id: userBlockId,
+      messageId: userMessageId,
+      type: MessageBlockType.MAIN_TEXT,
+      content: t('chat.message.insert.newUserMessage'),
+      status: MessageBlockStatus.SUCCESS,
+      createdAt: now
+    }
+    const userMessage: Message = {
+      id: userMessageId,
+      role: 'user',
+      assistantId,
+      topicId,
+      createdAt: now,
+      status: UserMessageStatus.SUCCESS,
+      blocks: [userBlockId]
+    }
+
+    // Create assistant message with block
+    const assistantMessageId = uuid()
+    const assistantBlockId = uuid()
+    const assistantBlock: MessageBlock = {
+      id: assistantBlockId,
+      messageId: assistantMessageId,
+      type: MessageBlockType.MAIN_TEXT,
+      content: t('chat.message.insert.newAssistantMessage'),
+      status: MessageBlockStatus.SUCCESS,
+      createdAt: now
+    }
+    const assistantMessage: Message = {
+      id: assistantMessageId,
+      role: 'assistant',
+      assistantId,
+      topicId,
+      createdAt: now,
+      status: AssistantMessageStatus.SUCCESS,
+      blocks: [assistantBlockId],
+      askId: userMessageId
+    }
+
+    try {
+      // Primary path: Main-authoritative batch insert after stable anchor (no renderer index)
+      await dbService.insertMessagesAfterAnchor(topicId, afterMessageId, [
+        {
+          message: userMessage as unknown as JsonObject,
+          blocks: [userBlock as unknown as JsonObject]
+        },
+        {
+          message: assistantMessage as unknown as JsonObject,
+          blocks: [assistantBlock as unknown as JsonObject]
+        }
+      ])
+
+      // Publish to Redux only after Main success (fail closed, no partial)
+      dispatch(upsertOneBlock(userBlock))
+      dispatch(upsertOneBlock(assistantBlock))
+
+      // Local projection insertion: best-effort window-relative placement for immediate UI.
+      // Authority order is already correct in Main; this projection step does not affect authority.
+      const state = getState()
+      const topicMessages = selectMessagesForTopic(state, topicId)
+      let insertIndex: number | null = null
+      if (topicMessages && topicMessages.length > 0) {
+        const afterIdx = topicMessages.findIndex((msg) => msg.id === afterMessageId)
+        if (afterIdx !== -1) {
+          let tail = afterIdx
+          const afterMsg = topicMessages[afterIdx]
+          if (afterMsg?.role === 'assistant' && afterMsg.askId) {
+            for (let i = afterIdx + 1; i < topicMessages.length; i++) {
+              if (topicMessages[i].role === 'assistant' && topicMessages[i].askId === afterMsg.askId) {
+                tail = i
+              } else {
+                break
+              }
+            }
+          }
+          insertIndex = tail + 1
+        }
+      }
+      if (insertIndex !== null) {
+        dispatch(newMessagesActions.insertMessageAtIndex({ topicId, message: userMessage, index: insertIndex }))
+        dispatch(
+          newMessagesActions.insertMessageAtIndex({ topicId, message: assistantMessage, index: insertIndex + 1 })
+        )
+      } else {
+        // Anchor outside current window/projection: append at end for immediate local visibility;
+        // authoritative window will converge on next fetch/window read.
+        dispatch(newMessagesActions.addMessage({ topicId, message: userMessage }))
+        dispatch(newMessagesActions.addMessage({ topicId, message: assistantMessage }))
+      }
+
+      logger.info(`[insertMessagesThunk] Inserted messages after ${afterMessageId} via Main-authoritative anchor`)
+    } catch (error) {
+      logger.error(`[insertMessagesThunk] Error inserting messages:`, error as Error)
+      throw error
+    }
+  }
+
+/**
+ * Compatibility-only: renderer-window-relative insert via positional appendMessage.
+ * Preserved for backward compatibility; not the primary S6.2c-2 path.
+ * New code must use insertMessagesThunk (anchor-based).
+ */
+export const insertMessagesThunkLegacy =
   (topicId: string, afterMessageId: string, assistantId: string) =>
   async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
     try {
@@ -1111,19 +1228,16 @@ export const insertMessagesThunk =
       const topicMessages = selectMessagesForTopic(state, topicId)
 
       if (!topicMessages || topicMessages.length === 0) {
-        logger.error(`[insertMessagesThunk] Topic ${topicId} not found or is empty.`)
+        logger.error(`[insertMessagesThunkLegacy] Topic ${topicId} not found or is empty.`)
         return
       }
 
-      // Find the index of the message after which to insert
       const afterMessageIndex = topicMessages.findIndex((msg) => msg.id === afterMessageId)
       if (afterMessageIndex === -1) {
-        logger.error(`[insertMessagesThunk] Message ${afterMessageId} not found in topic ${topicId}.`)
+        logger.error(`[insertMessagesThunkLegacy] Message ${afterMessageId} not found in topic ${topicId}.`)
         return
       }
 
-      // If the clicked message is part of a multi-model assistant group (has askId),
-      // insert after the LAST message in the same group to avoid splitting the group
       let insertIndex = afterMessageIndex + 1
       const afterMessage = topicMessages[afterMessageIndex]
       if (afterMessage?.role === 'assistant' && afterMessage.askId) {
@@ -1137,7 +1251,6 @@ export const insertMessagesThunk =
       }
       const now = new Date().toISOString()
 
-      // Create user message with block
       const userMessageId = uuid()
       const userBlockId = uuid()
       const userBlock: MessageBlock = {
@@ -1158,7 +1271,6 @@ export const insertMessagesThunk =
         blocks: [userBlockId]
       }
 
-      // Create assistant message with block
       const assistantMessageId = uuid()
       const assistantBlockId = uuid()
       const assistantBlock: MessageBlock = {
@@ -1180,34 +1292,82 @@ export const insertMessagesThunk =
         askId: userMessageId
       }
 
-      // Add blocks to Redux
       dispatch(upsertOneBlock(userBlock))
       dispatch(upsertOneBlock(assistantBlock))
 
-      // Insert messages to Redux at the correct position
-      dispatch(
-        newMessagesActions.insertMessageAtIndex({
-          topicId,
-          message: userMessage,
-          index: insertIndex
-        })
-      )
-      dispatch(
-        newMessagesActions.insertMessageAtIndex({
-          topicId,
-          message: assistantMessage,
-          index: insertIndex + 1
-        })
-      )
+      dispatch(newMessagesActions.insertMessageAtIndex({ topicId, message: userMessage, index: insertIndex }))
+      dispatch(newMessagesActions.insertMessageAtIndex({ topicId, message: assistantMessage, index: insertIndex + 1 }))
 
-      // Persist to database
       await saveMessageAndBlocksToDB(topicId, userMessage, [userBlock], insertIndex)
       await saveMessageAndBlocksToDB(topicId, assistantMessage, [assistantBlock], insertIndex + 1)
 
-      logger.info(`[insertMessagesThunk] Inserted messages after ${afterMessageId} at index ${insertIndex}`)
+      logger.info(`[insertMessagesThunkLegacy] Inserted messages after ${afterMessageId} at index ${insertIndex}`)
     } catch (error) {
-      logger.error(`[insertMessagesThunk] Error inserting messages:`, error as Error)
+      logger.error(`[insertMessagesThunkLegacy] Error inserting messages:`, error as Error)
       throw error
+    }
+  }
+
+/**
+ * S6.2c-1: Main-authoritative branch by stable anchor.
+ *
+ * Resolves the source prefix through a stable anchor in Main SQLite and clones it
+ * atomically into the target topic. No renderer slice/index, no window-relative
+ * computation. Returns the actual cloned wire for projection.
+ */
+export const branchMessagesToTopicThunk =
+  (sourceTopicId: string, anchorMessageId: string, newTopic: Topic) =>
+  async (dispatch: AppDispatch, _getState: () => RootState): Promise<boolean> => {
+    if (!newTopic || !newTopic.id) {
+      logger.error(`[branchMessagesToTopicThunk] Invalid newTopic provided.`)
+      return false
+    }
+    try {
+      const { messages: clonedMessages, blocks: clonedBlocks } = await dbService.branchMessagesToTopic(
+        sourceTopicId,
+        newTopic.id,
+        anchorMessageId,
+        newTopic.assistantId
+      )
+
+      // File count parity (same as old path): bump Dexie file counts for file/image blocks
+      const filesToUpdateCount: FileMetadata[] = []
+      for (const block of clonedBlocks) {
+        if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
+          const fileInfo = block.file
+          if (fileInfo) filesToUpdateCount.push(fileInfo)
+        }
+      }
+      if (filesToUpdateCount.length > 0) {
+        const uniqueFiles = [...new Map(filesToUpdateCount.map((f) => [f.id, f])).values()]
+        for (const file of uniqueFiles) {
+          await updateFileCount(file.id, 1, false)
+        }
+      }
+
+      if (clonedMessages.length > 0) {
+        dispatch(
+          newMessagesActions.messagesReceived({
+            topicId: newTopic.id,
+            messages: clonedMessages
+          })
+        )
+      } else {
+        // Anchor inclusive guarantees at least one message; empty is a no-op success without dispatch
+        dispatch(
+          newMessagesActions.messagesReceived({
+            topicId: newTopic.id,
+            messages: []
+          })
+        )
+      }
+      if (clonedBlocks.length > 0) {
+        dispatch(upsertManyBlocks(clonedBlocks))
+      }
+      return true
+    } catch (error) {
+      logger.error(`[branchMessagesToTopicThunk] Failed to branch messages:`, error as Error)
+      return false
     }
   }
 

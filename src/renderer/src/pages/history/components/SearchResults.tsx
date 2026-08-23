@@ -1,18 +1,31 @@
 import { loggerService } from '@logger'
 import { LoadingIcon } from '@renderer/components/Icons'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
+import {
+  NAVIGATION_VISUALLY_NEWER_GROUPS,
+  NAVIGATION_VISUALLY_OLDER_GROUPS
+} from '@renderer/pages/home/Messages/messageNavigation'
+import {
+  clampWindowCount,
+  mergeWindowIntoTopic,
+  unionWindowMessages
+} from '@renderer/pages/home/Messages/messageWindow'
 import { dbService } from '@renderer/services/db'
 import { ChatDbResultError, SqliteMessageDataSource } from '@renderer/services/db/SqliteMessageDataSource'
+import { isValidWindowResponse } from '@renderer/services/windowCoverage'
+import store from '@renderer/store'
 import { selectTopicsMap } from '@renderer/store/assistants'
+import { upsertManyBlocks } from '@renderer/store/messageBlock'
+import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
 import type { Topic } from '@renderer/types'
-import type { Message } from '@renderer/types/newMessage'
+import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import {
   buildKeywordRegexes,
   buildKeywordUnionRegex,
   type KeywordMatchMode,
   splitKeywordsToTerms
 } from '@renderer/utils/keywordSearch'
-import type { SearchResultItem } from '@shared/chatDb'
+import type { FetchMessagesWindowRequest, SearchResultItem } from '@shared/chatDb'
 import { normalizeText, stripMarkdownFormatting } from '@shared/searchTextNormalization'
 import { List, Pagination, Segmented, Spin, Typography } from 'antd'
 import type { FC } from 'react'
@@ -385,15 +398,96 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
     [storeTopicsMap, onTopicClick, t]
   )
 
+  // R-04: authoritative around-window search-hit navigation. No whole-topic fetch.
+  // Uses existing chatdb:fetch-messages-window around contract with validation and
+  // stable-ID merge before invoking the existing navigation transaction.
+  const searchHitGenerationRef = useRef(0)
   const handleMessageClick = useCallback(
     async (item: SearchResultItem) => {
-      const { messages } = await dbService.fetchMessages(item.topicId)
-      const message = messages.find((m) => m.id === item.messageId)
-      if (!message) {
-        window.toast.error(t('history.error.message_not_found'))
-        return
+      const generation = ++searchHitGenerationRef.current
+      const topicId = item.topicId
+      const anchorId = item.messageId
+      const before = clampWindowCount(NAVIGATION_VISUALLY_OLDER_GROUPS)
+      const after = clampWindowCount(NAVIGATION_VISUALLY_NEWER_GROUPS)
+      const request: FetchMessagesWindowRequest = {
+        kind: 'around',
+        topicId,
+        anchorMessageId: anchorId,
+        before,
+        after
       }
-      onMessageClick(message)
+      try {
+        const response = await dbService.fetchMessagesWindow(request)
+        if (generation !== searchHitGenerationRef.current) return
+        if (!isValidWindowResponse(request, response)) {
+          logger.error('[SearchResults] malformed window response', response.window as unknown as Error)
+          window.toast.error(t('history.error.message_not_found'))
+          return
+        }
+        if (
+          response.window.topicId !== topicId ||
+          response.window.kind !== 'around' ||
+          response.window.anchorMessageId !== anchorId
+        ) {
+          logger.error('[SearchResults] window topic/kind/anchor mismatch')
+          window.toast.error(t('history.error.message_not_found'))
+          return
+        }
+        const existingMessages = selectMessagesForTopic(store.getState(), topicId)
+        const incomingMessages = response.messages as unknown as Message[]
+        const incomingBlocks = response.blocks as unknown as MessageBlock[]
+
+        // Merge by stable ID without wholesale replacement or loss of resident projection.
+        // Reuse existing mergeWindowIntoTopic when anchor is resident; handle disjoint
+        // window (anchor not in existing) via canonical sorted union helper.
+        let merged: Message[]
+        const anchorInExisting = existingMessages.some((m) => m.id === anchorId)
+        if (anchorInExisting) {
+          merged = mergeWindowIntoTopic(existingMessages, incomingMessages, anchorId)
+        } else {
+          if (!incomingMessages.some((m) => m.id === anchorId)) {
+            logger.error('[SearchResults] anchor missing in window response')
+            window.toast.error(t('history.error.message_not_found'))
+            return
+          }
+          merged = unionWindowMessages(existingMessages, incomingMessages)
+        }
+
+        if (generation !== searchHitGenerationRef.current) return
+        if (!merged.some((m) => m.id === anchorId)) {
+          logger.error('[SearchResults] anchor missing after merge')
+          window.toast.error(t('history.error.message_not_found'))
+          return
+        }
+        // Atomic staged publication: validate first, then merge, then publish blocks+messages.
+        if (incomingBlocks.length > 0) {
+          store.dispatch(upsertManyBlocks(incomingBlocks))
+        }
+        if (generation !== searchHitGenerationRef.current) return
+        store.dispatch(newMessagesActions.messagesReceived({ topicId, messages: merged }))
+        const message = merged.find((m) => m.id === anchorId)
+        if (!message) {
+          window.toast.error(t('history.error.message_not_found'))
+          return
+        }
+        if (generation !== searchHitGenerationRef.current) return
+        onMessageClick(message)
+      } catch (error) {
+        if (generation !== searchHitGenerationRef.current) return
+        if (error instanceof ChatDbResultError) {
+          const code = error.code
+          if (code === 'NOT_FOUND' || code === 'ERR_NOT_FOUND' || code === 'TOPIC_NOT_FOUND') {
+            logger.warn('[SearchResults] search-hit NOT_FOUND', error as Error)
+            window.toast.error(t('history.error.message_not_found'))
+            return
+          }
+          logger.error('[SearchResults] search-hit ChatDbResultError', error as Error)
+          window.toast.error(t('history.error.message_not_found'))
+          return
+        }
+        logger.error('[SearchResults] search-hit window fetch failed', error as Error)
+        window.toast.error(t('history.error.message_not_found'))
+      }
     },
     [onMessageClick, t]
   )
@@ -490,7 +584,11 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
                 onClick={() => handleTopicClick(item.topicId)}>
                 {item.topicName ?? ''}
               </Title>
-              <div style={{ cursor: 'pointer' }} onClick={() => void handleMessageClick(item)}>
+              <div
+                data-testid="search-result-hit"
+                data-message-id={item.messageId}
+                style={{ cursor: 'pointer' }}
+                onClick={() => void handleMessageClick(item)}>
                 <Text style={{ whiteSpace: 'pre-line' }}>{highlightText(snippet)}</Text>
               </div>
               <SearchResultTime>

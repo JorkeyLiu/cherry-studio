@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   storeGetState: vi.fn(),
+  dbFetchAnswerGroup: vi.fn(),
   merge: vi.fn((orig: any, fresh: any, _topicId: string) => ({
     ...orig,
     settings: fresh.settings,
@@ -31,7 +32,14 @@ vi.mock('@renderer/store/thunk/messageThunk', () => ({
   mergeRequestAssistantSnapshot: mocks.merge
 }))
 
+vi.mock('@renderer/services/db/DbService', () => ({
+  dbService: {
+    fetchAnswerGroup: mocks.dbFetchAnswerGroup
+  }
+}))
+
 import {
+  fetchAuthoritativeAnswerGroup,
   resolveAnswerGroup,
   resolveAssistantSnapshot,
   resolveAssistantSnapshotForMessage,
@@ -317,5 +325,102 @@ describe('messageActionController — S3.4 event-time resolution', () => {
     })
     const group = resolveAnswerGroup({ topicId: 'topic-1', messageId: 'a-2' })
     expect(group!.groupIds).toEqual(['a-1', 'a-2', 'a-3'])
+  })
+
+  describe('fetchAuthoritativeAnswerGroup — S6.2b R-05 authoritative READ', () => {
+    it('returns authoritative group even when renderer has only subset (partial window)', async () => {
+      const askId = 'ask-1'
+      const a2 = makeMessage({ id: 'a-2', topicId: 'topic-1', role: 'assistant', askId })
+      // Renderer window has only a2 (partial), but Main will return full group [a1,a2,a3]
+      mocks.storeGetState.mockReturnValue({
+        messages: {
+          entities: { 'a-2': a2 },
+          messageIdsByTopic: { 'topic-1': ['a-2'] }
+        },
+        assistants: { assistants: [] },
+        messageBlocks: { entities: {} }
+      })
+      mocks.dbFetchAnswerGroup.mockResolvedValue({
+        completeness: 'answer-group' as const,
+        topicId: 'topic-1',
+        anchorMessageId: 'a-2',
+        askId,
+        messageIds: ['a-1', 'a-2', 'a-3']
+      })
+      const result = await fetchAuthoritativeAnswerGroup({ topicId: 'topic-1', messageId: 'a-2' })
+      expect(result).not.toBeNull()
+      expect(result!.groupIds).toEqual(['a-1', 'a-2', 'a-3'])
+      expect(mocks.dbFetchAnswerGroup).toHaveBeenCalledWith('topic-1', 'a-2')
+      // No fallback to partial renderer group — Main group is used even though renderer had only subset
+      expect(result!.groupIds).not.toEqual(['a-2'])
+    })
+
+    it('returns null on NOT_FOUND and does not fallback to partial inference', async () => {
+      mocks.storeGetState.mockReturnValue({
+        messages: {
+          entities: {
+            'a-1': makeMessage({ id: 'a-1', topicId: 'topic-1', role: 'assistant', askId: 'ask-1' }),
+            'a-2': makeMessage({ id: 'a-2', topicId: 'topic-1', role: 'assistant', askId: 'ask-1' })
+          },
+          messageIdsByTopic: { 'topic-1': ['a-1', 'a-2'] }
+        },
+        assistants: { assistants: [] },
+        messageBlocks: { entities: {} }
+      })
+      mocks.dbFetchAnswerGroup.mockRejectedValue(new Error('NOT_FOUND: Anchor has no actionable group'))
+      const result = await fetchAuthoritativeAnswerGroup({ topicId: 'topic-1', messageId: 'a-2' })
+      expect(result).toBeNull()
+      // Ensure no partial group is returned despite renderer having a partial group available
+      expect(result).not.toEqual(expect.objectContaining({ groupIds: ['a-1', 'a-2'] }))
+    })
+
+    it('returns null on transport error without fallback', async () => {
+      mocks.storeGetState.mockReturnValue({
+        messages: { entities: {}, messageIdsByTopic: {} },
+        assistants: { assistants: [] },
+        messageBlocks: { entities: {} }
+      })
+      mocks.dbFetchAnswerGroup.mockRejectedValue(new Error('IPC transport failed'))
+      const result = await fetchAuthoritativeAnswerGroup({ topicId: 'topic-1', messageId: 'a-2' })
+      expect(result).toBeNull()
+    })
+
+    it('returns null on echo mismatch (topicId/anchorMessageId)', async () => {
+      const a2 = makeMessage({ id: 'a-2', topicId: 'topic-1', role: 'assistant', askId: 'ask-1' })
+      mocks.storeGetState.mockReturnValue({
+        messages: { entities: { 'a-2': a2 }, messageIdsByTopic: { 'topic-1': ['a-2'] } },
+        assistants: { assistants: [] },
+        messageBlocks: { entities: {} }
+      })
+      mocks.dbFetchAnswerGroup.mockResolvedValue({
+        completeness: 'answer-group' as const,
+        topicId: 'topic-1',
+        anchorMessageId: 'different-anchor',
+        askId: 'ask-1',
+        messageIds: ['a-1', 'a-2']
+      })
+      const result = await fetchAuthoritativeAnswerGroup({ topicId: 'topic-1', messageId: 'a-2' })
+      expect(result).toBeNull()
+    })
+
+    it('synthesizes placeholder targetMessage when renderer window is partial and anchor missing locally', async () => {
+      // Renderer window is empty (anchor not in projection), but Main will still return group
+      mocks.storeGetState.mockReturnValue({
+        messages: { entities: {}, messageIdsByTopic: { 'topic-1': [] } },
+        assistants: { assistants: [] },
+        messageBlocks: { entities: {} }
+      })
+      mocks.dbFetchAnswerGroup.mockResolvedValue({
+        completeness: 'answer-group' as const,
+        topicId: 'topic-1',
+        anchorMessageId: 'a-2',
+        askId: 'ask-1',
+        messageIds: ['a-1', 'a-2', 'a-3']
+      })
+      const result = await fetchAuthoritativeAnswerGroup({ topicId: 'topic-1', messageId: 'a-2' })
+      expect(result).not.toBeNull()
+      expect(result!.targetMessage.id).toBe('a-2')
+      expect(result!.groupIds).toEqual(['a-1', 'a-2', 'a-3'])
+    })
   })
 })

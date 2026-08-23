@@ -361,13 +361,13 @@ const MessageMenubar: FC<Props> = (props) => {
           ]
         : []),
       {
-        label: t('chat.message.new.branch.label'),
+        label: <span data-testid="message-branch-btn">{t('chat.message.new.branch.label')}</span>,
         key: 'new-branch',
         icon: <Split size={15} />,
         onClick: onNewBranch
       },
       {
-        label: t('chat.message.insert.label'),
+        label: <span data-testid="message-insert-btn">{t('chat.message.insert.label')}</span>,
         key: 'insert-message',
         icon: <MessageSquarePlus size={15} />,
         onClick: onInsertMessages
@@ -1102,7 +1102,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
 
     return (
       <Dropdown menu={{ items: dropdownItems }} trigger={['click']} placement="topRight">
-        <ActionButton className="message-action-button" $softHoverBg={softHoverBg}>
+        <ActionButton className="message-action-button" data-testid="message-more-menu-btn" $softHoverBg={softHoverBg}>
           <Menu size={19} />
         </ActionButton>
       </Dropdown>

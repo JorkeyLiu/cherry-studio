@@ -4,6 +4,7 @@ import type { SpanEntity, TokenUsage } from '@mcp-trace/trace-core'
 import type { SpanContext } from '@opentelemetry/api'
 import type {
   AppendMessageRequest,
+  BranchMessagesToTopicRequest,
   BulkAddBlocksRequest,
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
@@ -14,10 +15,12 @@ import type {
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
+  FetchAnswerGroupRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
@@ -627,6 +630,8 @@ const api = {
     fetchMessages: (request: FetchMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_FetchMessages, request),
     fetchMessagesWindow: (request: FetchMessagesWindowRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchMessagesWindow, request),
+    fetchAnswerGroup: (request: FetchAnswerGroupRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_FetchAnswerGroup, request),
     getRawTopic: (request: GetRawTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_GetRawTopic, request),
     topicExists: (request: TopicExistsRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_TopicExists, request),
     ensureTopic: (request: EnsureTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_EnsureTopic, request),
@@ -681,6 +686,12 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_TransferTopicOwnership, request),
     resetAssistantTopics: (request: ResetAssistantTopicsRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_ResetAssistantTopics, request),
+    // S6.2c-1: branch by stable anchor (additive, keeps old clone intact)
+    branchMessagesToTopic: (request: BranchMessagesToTopicRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_BranchMessagesToTopic, request),
+    // S6.2c-2: insert after stable anchor (additive, keeps old append intact)
+    insertMessagesAfterAnchor: (request: InsertMessagesAfterAnchorRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_InsertMessagesAfterAnchor, request),
     // Phase 5.1B: compound mutations
     cloneMessagesToTopic: (request: CloneMessagesToTopicRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_CloneMessagesToTopic, request),

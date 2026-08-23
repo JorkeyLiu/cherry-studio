@@ -377,6 +377,12 @@ export enum IpcChannel {
   ChatDb_TransferTopicOwnership = 'chatdb:transfer-topic-ownership',
   ChatDb_ResetAssistantTopics = 'chatdb:reset-assistant-topics',
 
+  // S6.2c-1 — Main-authoritative branch by stable anchor
+  ChatDb_BranchMessagesToTopic = 'chatdb:branch-messages-to-topic',
+
+  // S6.2c-2 — Main-authoritative insert after stable anchor
+  ChatDb_InsertMessagesAfterAnchor = 'chatdb:insert-messages-after-anchor',
+
   // Phase 5.1B — compound mutations
   ChatDb_CloneMessagesToTopic = 'chatdb:clone-messages-to-topic',
   ChatDb_ResetMessagesForResend = 'chatdb:reset-messages-for-resend',
@@ -385,6 +391,9 @@ export enum IpcChannel {
 
   // Phase 5.1B-2 — search
   ChatDb_SearchMessages = 'chatdb:search-messages',
+
+  // S6.2b R-05 — authoritative answer-group READ
+  ChatDb_FetchAnswerGroup = 'chatdb:fetch-answer-group',
 
   // ChatImport — import-only IPC for Phase 4 source-reader pipeline.
   // Independent of the ChatDb_* channels. Prefix: chat-import:*

@@ -1,6 +1,7 @@
 import db from '@renderer/databases'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
+  FetchAnswerGroupResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FileCleanupResult,
@@ -55,6 +56,10 @@ class DbService implements MessageDataSource {
   fetchMessagesWindow(request: FetchMessagesWindowRequest): Promise<FetchMessagesWindowResponse> {
     if (!this.ordinarySource.fetchMessagesWindow) throw new Error('fetchMessagesWindow unavailable')
     return this.ordinarySource.fetchMessagesWindow(request)
+  }
+  fetchAnswerGroup(topicId: string, anchorMessageId: string): Promise<FetchAnswerGroupResponse> {
+    if (!this.ordinarySource.fetchAnswerGroup) throw new Error('fetchAnswerGroup unavailable')
+    return this.ordinarySource.fetchAnswerGroup(topicId, anchorMessageId)
   }
   getRawTopic(topicId: string) {
     return this.ordinarySource.getRawTopic(topicId)
@@ -171,6 +176,15 @@ class DbService implements MessageDataSource {
   updateSegmentMetadata(segmentId: string, name?: string | null, color?: string | null) {
     return this.ordinarySource.updateSegmentMetadata(segmentId, name, color)
   }
+  branchMessagesToTopic(sourceTopicId: string, targetTopicId: string, anchorMessageId: string, assistantId?: string) {
+    if (!this.ordinarySource.branchMessagesToTopic) throw new Error('branchMessagesToTopic unavailable')
+    return this.ordinarySource.branchMessagesToTopic(sourceTopicId, targetTopicId, anchorMessageId, assistantId)
+  }
+  insertMessagesAfterAnchor(topicId: string, afterMessageId: string, entries: MessageBlockEntry[]) {
+    if (!this.ordinarySource.insertMessagesAfterAnchor) throw new Error('insertMessagesAfterAnchor unavailable')
+    return this.ordinarySource.insertMessagesAfterAnchor(topicId, afterMessageId, entries)
+  }
+
   cloneMessagesToTopic(targetTopicId: string, entries: Array<{ message: any; blocks: any[] }>, assistantId?: string) {
     return this.ordinarySource.cloneMessagesToTopic(targetTopicId, entries, assistantId)
   }

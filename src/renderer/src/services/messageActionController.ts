@@ -1,4 +1,5 @@
 import { loggerService } from '@logger'
+import { dbService } from '@renderer/services/db/DbService'
 import store from '@renderer/store'
 import { mergeRequestAssistantSnapshot } from '@renderer/store/thunk/messageThunk'
 import type { Assistant, Model } from '@renderer/types'
@@ -100,6 +101,52 @@ export function resolveAnswerGroup(target: ActionTarget): ResolvedAnswerGroup | 
 }
 
 /**
+ * S6.2b R-05: authoritative answer-group READ.
+ *
+ * Resolves the complete answer group from Main SQLite via
+ * `chatdb:fetch-answer-group`. Validates topic/anchor membership and
+ * anchor role/askId in ONE Main transaction, then returns the authoritative
+ * ordered messageIds (sort_order ASC, id ASC). No renderer fallback to
+ * partial projection.
+ *
+ * Failure (missing topic/anchor, cross-topic, anchor without usable askId,
+ * transport error, or echo mismatch) returns null so the caller makes
+ * NO mutation and NO Redux partial update.
+ */
+export async function fetchAuthoritativeAnswerGroup(target: ActionTarget): Promise<ResolvedAnswerGroup | null> {
+  try {
+    const result = await dbService.fetchAnswerGroup(target.topicId, target.messageId)
+    if (result.topicId !== target.topicId || result.anchorMessageId !== target.messageId) {
+      logger.warn(
+        `[fetchAuthoritativeAnswerGroup] echo mismatch ${target.topicId}/${target.messageId} vs ${result.topicId}/${result.anchorMessageId}`
+      )
+      return null
+    }
+    if (!result.messageIds.includes(target.messageId)) {
+      logger.warn(`[fetchAuthoritativeAnswerGroup] anchor missing from returned group ${target.messageId}`)
+      return null
+    }
+    // Preserve the existing ResolvedAnswerGroup shape for compatibility:
+    // targetMessage is best-effort local; if the renderer window is partial
+    // and the anchor is somehow missing locally, synthesize a minimal placeholder
+    // so the authoritative group can still be used (Main already validated).
+    let targetMessage = resolveMessageEntity(target)
+    if (!targetMessage) {
+      targetMessage = {
+        id: target.messageId,
+        topicId: target.topicId,
+        askId: result.askId,
+        role: 'assistant'
+      } as unknown as Message
+    }
+    return { targetMessage, groupIds: result.messageIds }
+  } catch (e) {
+    logger.silly(`[fetchAuthoritativeAnswerGroup] failed ${target.topicId}/${target.messageId}`, e as Error)
+    return null
+  }
+}
+
+/**
  * High-level resolvers that combine the primitives above.
  * Return null on invalid/missing/cross-topic targets so callers preserve
  * current rejection/error behavior (no dispatch, no Redux mutation).
@@ -137,6 +184,7 @@ export const messageActionController = {
   resolveAssistantSnapshot,
   resolveAssistantSnapshotForMessage,
   resolveAnswerGroup,
+  fetchAuthoritativeAnswerGroup,
   resolveRegenerateForAssistant,
   resolveResendForUser,
   resolveEditTarget

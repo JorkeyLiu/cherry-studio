@@ -9,6 +9,7 @@ import { selectMessageBlocksByIds, updateOneBlock } from '@renderer/store/messag
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
 import {
   appendAssistantResponseThunk,
+  branchMessagesToTopicThunk,
   cloneMessagesToNewTopicThunk,
   deleteSingleMessageThunk,
   initiateTranslationThunk,
@@ -303,6 +304,20 @@ export function useMessageOperations(topic: Topic) {
   )
 
   /**
+   * S6.2c-1 primary path: branch by stable anchor (Main-authoritative).
+   * No window-relative index/slice — sends anchorMessageId directly to Main.
+   */
+  const createTopicBranchByAnchor = useCallback(
+    (sourceTopicId: string, anchorMessageId: string, newTopic: Topic) => {
+      logger.info(
+        `Branching messages from topic ${sourceTopicId} at anchor ${anchorMessageId} to new topic ${newTopic.id}`
+      )
+      return dispatch(branchMessagesToTopicThunk(sourceTopicId, anchorMessageId, newTopic))
+    },
+    [dispatch]
+  )
+
+  /**
    * 创建一个主题分支，克隆消息到新主题。
    * Creates a topic branch by cloning messages to a new topic.
    * @param sourceTopicId 源主题ID / Source topic ID
@@ -527,6 +542,7 @@ export function useMessageOperations(topic: Topic) {
     resumeMessage,
     getTranslationUpdater,
     createTopicBranch,
+    createTopicBranchByAnchor,
     editMessageBlocks,
     removeMessageBlock
   }
