@@ -15,13 +15,11 @@
  *   completeness=window, returnedCount/first/last consistency, deterministic
  *   order/no duplicate IDs, and hasMore flags. This is NOT renderer merge/scroll
  *   UI proof.
- *
- * Missing coverage (intentionally not faked):
- * - R-03 renderer merge / InfiniteScroll scroll-triggered UI remains uncovered.
- *   This spec does NOT dispatch `messageBlocks/upsertManyBlocks` or
- *   `newMessages/messagesReceived` and does NOT treat a raw contract call as UI
- *   proof. Any future R-03 UI regression must add a deterministic scroll/trigger
- *   E2E that proves Redux/DOM growth via the production path.
+ * - R-03 renderer merge — INTEGRATED UI evidence: real topic activation followed by
+ *   a real scroll event on the existing `#messages` container to the inverse
+ *   threshold (`Math.min(0, clientHeight - scrollHeight)`), production
+ *   InfiniteScroll → around → mergeWindowIntoTopic → Redux/DOM growth. No
+ *   synthetic dispatch, no spacer, no instrumentation.
  *
  * Governing constraints:
  * - Uses standard fixture (fresh production build, disposable profile, mock provider).
@@ -30,7 +28,9 @@
  *   validation bounds, not new defaults; no R-04/R-05/R-06, no new fields/SQL/cursors.
  * - No wrapper/monkey-patching of `window.api.chatDb.fetchMessagesWindow`,
  *   `window.electron.ipcRenderer`, or legacy `fetchMessages`; no call-count asserts
- *   from ineffective wrappers; no fixed sleeps; no synthetic Redux publication.
+ *   from ineffective wrappers; no synthetic Redux publication. UI scroll uses the
+ *   real container and bubbling Event('scroll'); only the throttle wait uses a
+ *   bounded waitForTimeout(350).
  * - No production source/docs edits, no fixture-global edits, no new selectors.
  */
 
@@ -279,12 +279,13 @@ test.describe('windowed reads: latest and around', () => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'R-03 CONTRACT-ONLY: real window.api.chatDb.fetchMessagesWindow({kind:around}) through preload/Main. Does NOT prove renderer merge/scroll UI — that coverage is missing and must not be faked via synthetic dispatch.'
+        'R-03 CONTRACT-ONLY: real window.api.chatDb.fetchMessagesWindow({kind:around}) through preload/Main. Does NOT prove renderer merge/scroll UI — that is proven by the companion integrated test "R-03 renderer merge — real scroll triggers around and merges into Redux/DOM" below in this same spec; this contract test must not use synthetic dispatch.'
     })
     // Explicit comment for report-facing classification: this test is contract-only.
-    // Missing R-03 UI coverage: scroll-triggered InfiniteScroll → around request →
-    // Redux/DOM merge is not proven here; a future deterministic UI trigger spec
-    // is required for R-03 renderer projection regression.
+    // Scroll-triggered InfiniteScroll → around request → Redux/DOM merge is not
+    // proven by this contract test; it is proven by the integrated renderer test
+    // "R-03 renderer merge — real scroll triggers around and merges into Redux/DOM"
+    // below in this spec. This scoping does not claim broader Phase closure.
 
     const page = mainWindow
     const liveAssistantId = await prepareDisplayCountAndAssistant(page)
@@ -411,5 +412,304 @@ test.describe('windowed reads: latest and around', () => {
         { timeout: 1500 }
       )
       .toBe(DISPLAY_LIMIT)
+  })
+
+  test('R-03 renderer merge — real scroll triggers around and merges into Redux/DOM', async ({ mainWindow }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'R-03 INTEGRATED UI: real #messages scroll to inverse threshold → InfiniteScroll next → around → mergeWindowIntoTopic → Redux/DOM growth. No synthetic dispatch, no spacer, no instrumentation.'
+    })
+
+    const page = mainWindow
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page)
+    const topicId = `window-r03-ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+    await seedWindowTopic(page, liveAssistantId, topicId)
+    await activateTopicAndWaitForBootstrap(page, topicId)
+
+    // Pre-state: real Redux/DOM/scroll geometry and contract hasMoreBefore
+    const preState = await page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] ?? []
+      const domIds: string[] = Array.from(document.querySelectorAll('#messages [data-message-id]')).map(
+        (el) => (el as HTMLElement).getAttribute('data-message-id') || ''
+      )
+      const el = document.getElementById('messages') as HTMLElement | null
+      const geom = el ? { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, scrollTop: el.scrollTop } : null
+      const domCount = document.querySelectorAll('#messages [data-message-id]').length
+      return { ids, domIds, geom, domCount }
+    }, topicId)
+
+    expect(
+      preState.ids.length,
+      `pre Redux length expected ${DISPLAY_LIMIT}, got ${preState.ids.length} ids=${JSON.stringify(preState.ids)}`
+    ).toBe(DISPLAY_LIMIT)
+    expect(preState.domCount, `pre DOM count expected ${DISPLAY_LIMIT}, got ${preState.domCount}`).toBe(DISPLAY_LIMIT)
+    expect(preState.domIds.length).toBe(DISPLAY_LIMIT)
+
+    const expectedTailIds: string[] = []
+    for (let i = SYNTHETIC_TOTAL - DISPLAY_LIMIT; i < SYNTHETIC_TOTAL; i++) {
+      expectedTailIds.push(`${topicId}-msg-${pad(i, 5)}`)
+    }
+    expect(preState.ids).toEqual(expectedTailIds)
+    expect([...preState.domIds].sort()).toEqual([...expectedTailIds].sort())
+
+    expect(preState.geom, '#messages geometry must exist').toBeTruthy()
+    const preGeom = preState.geom!
+    // Content must naturally overflow (no spacer); scrollHeight > clientHeight is required for the inverse threshold to be <0
+    expect(
+      preGeom.scrollHeight > preGeom.clientHeight,
+      `expected overflow: scrollHeight(${preGeom.scrollHeight}) > clientHeight(${preGeom.clientHeight})`
+    ).toBe(true)
+
+    const preLatest = await page.evaluate(
+      async ({ topicId, limit }: { topicId: string; limit: number }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.fetchMessagesWindow({ kind: 'latest', topicId, limit })
+      },
+      { topicId, limit: DISPLAY_LIMIT }
+    )
+    expect(preLatest.ok, `latest contract failed ${JSON.stringify(preLatest)}`).toBe(true)
+    expect((preLatest.value as any).window.hasMoreBefore).toBe(true)
+    expect((preLatest.value as any).window.hasMoreAfter).toBe(false)
+
+    const preOldestAnchorId = preState.ids[0]
+    const expectedPreOldest = `${topicId}-msg-${pad(SYNTHETIC_TOTAL - DISPLAY_LIMIT, 5)}`
+    expect(preOldestAnchorId).toBe(expectedPreOldest)
+    expect(preState.domIds).toContain(preOldestAnchorId)
+
+    // Trigger older loading via real scroll on existing #messages (no spacer, no fake callback)
+    // Production semantics: Messages.tsx:1027 uses oldestMessageId as request anchor, while
+    // Messages.tsx:1039 captures the first actually visible message via findFirstVisibleMessage
+    // and Messages.tsx:1121-1141 stabilizes newRect.top - oldRect.top by adjusting container.scrollTop.
+    // The correct behavioral proxy is the first visible message's offset relative to #messages.
+    const scrollInfo = await page.evaluate(() => {
+      const el = document.getElementById('messages') as HTMLElement | null
+      if (!el) throw new Error('#messages not found')
+      const targetTop = Math.min(0, el.clientHeight - el.scrollHeight)
+      const before = { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
+      el.scrollTop = targetTop
+      el.dispatchEvent(new Event('scroll', { bubbles: true }))
+      const after = { scrollTop: el.scrollTop, clientHeight: el.clientHeight, scrollHeight: el.scrollHeight }
+      return { targetTop, before, after }
+    })
+
+    // The element must reach the inverse threshold (allow small tolerance for clamping)
+    expect(
+      Math.abs(scrollInfo.after.scrollTop - scrollInfo.targetTop) <= 12,
+      `scrollTop after dispatch ${scrollInfo.after.scrollTop} should be near targetTop ${scrollInfo.targetTop} (before=${JSON.stringify(scrollInfo.before)} after=${JSON.stringify(scrollInfo.after)})`
+    ).toBe(true)
+
+    // Ensure scroll geometry is settled before reading the visible anchor (single rAF, no unbounded sleep).
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+
+    // Production-aligned visible anchor capture: after threshold scroll but before throttle/merge.
+    // Mirrors findFirstVisibleMessage (src/renderer/src/pages/home/Messages/domVisibility.ts): filter display:none, zero-height,
+    // no positive intersection with container rect, choose element whose rect.top is closest
+    // to container rect.top. Record container-relative offset (rect.top - containerRect.top).
+    const visibleAnchor = await page.evaluate(() => {
+      const container = document.getElementById('messages') as HTMLElement | null
+      if (!container) return null
+      const containerRect = container.getBoundingClientRect()
+      const candidates = Array.from(container.querySelectorAll('[data-message-id]')) as HTMLElement[]
+      let closest: {
+        id: string
+        offset: number
+        containerTop: number
+        rectTop: number
+      } | null = null
+      let minDistance = Infinity
+      for (const el of candidates) {
+        if (window.getComputedStyle(el).display === 'none') continue
+        const rect = el.getBoundingClientRect()
+        if (rect.height === 0) continue
+        const visibleHeight = Math.min(rect.bottom, containerRect.bottom) - Math.max(rect.top, containerRect.top)
+        if (visibleHeight <= 0) continue
+        const distance = Math.abs(rect.top - containerRect.top)
+        if (distance < minDistance) {
+          const id = el.getAttribute('data-message-id') || ''
+          if (!id) continue
+          minDistance = distance
+          closest = {
+            id,
+            offset: rect.top - containerRect.top,
+            containerTop: containerRect.top,
+            rectTop: rect.top
+          }
+        }
+      }
+      return closest
+    })
+
+    expect(
+      visibleAnchor,
+      'visible anchor must be found after threshold scroll (findFirstVisibleMessage semantics: filtered [data-message-id] closest to container top)'
+    ).toBeTruthy()
+
+    // Throttle wait — InfiniteScroll/debounce requires at least 300ms before the around request fires
+    await page.waitForTimeout(350)
+
+    // Wait for real Redux/DOM projection to grow beyond the initial window via production merge path
+    await page.waitForFunction(
+      ({ topicId, preLen }: { topicId: string; preLen: number }) => {
+        const s = (window as any).store.getState()
+        const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] ?? []
+        return Array.isArray(ids) && ids.length > preLen
+      },
+      { topicId, preLen: DISPLAY_LIMIT },
+      { timeout: 15000 }
+    )
+
+    // Ideally exactly one LOAD_MORE around load → 40 messages (20 + 20 older)
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(
+            (topicId: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[topicId]?.length ?? 0,
+            topicId
+          ),
+        { timeout: 15000 }
+      )
+      .toBe(DISPLAY_LIMIT + LOAD_MORE)
+
+    await page.waitForFunction(
+      (expected: number) => document.querySelectorAll('#messages [data-message-id]').length === expected,
+      DISPLAY_LIMIT + LOAD_MORE,
+      {
+        timeout: 15000
+      }
+    )
+
+    const postState = await page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] ?? []
+      const domIds: string[] = Array.from(document.querySelectorAll('#messages [data-message-id]')).map(
+        (el) => (el as HTMLElement).getAttribute('data-message-id') || ''
+      )
+      const el = document.getElementById('messages') as HTMLElement | null
+      const geom = el ? { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, scrollTop: el.scrollTop } : null
+      const domCount = document.querySelectorAll('#messages [data-message-id]').length
+      return { ids, domIds, geom, domCount }
+    }, topicId)
+
+    expect(
+      postState.ids.length,
+      `post Redux length expected ${DISPLAY_LIMIT + LOAD_MORE}, got ${postState.ids.length}`
+    ).toBe(DISPLAY_LIMIT + LOAD_MORE)
+    expect(postState.domCount).toBe(DISPLAY_LIMIT + LOAD_MORE)
+    expect(postState.domIds.length).toBe(DISPLAY_LIMIT + LOAD_MORE)
+
+    // Newly loaded IDs are 00010..00029, complete visible 00010..00049
+    const expectedNewIds: string[] = []
+    for (let i = SYNTHETIC_TOTAL - DISPLAY_LIMIT - LOAD_MORE; i < SYNTHETIC_TOTAL - DISPLAY_LIMIT; i++) {
+      expectedNewIds.push(`${topicId}-msg-${pad(i, 5)}`)
+    }
+    const expectedAllIds: string[] = []
+    for (let i = SYNTHETIC_TOTAL - DISPLAY_LIMIT - LOAD_MORE; i < SYNTHETIC_TOTAL; i++) {
+      expectedAllIds.push(`${topicId}-msg-${pad(i, 5)}`)
+    }
+    expect(expectedNewIds).toEqual(Array.from({ length: LOAD_MORE }, (_, k) => `${topicId}-msg-${pad(10 + k, 5)}`))
+    expect(expectedAllIds).toEqual(
+      Array.from({ length: DISPLAY_LIMIT + LOAD_MORE }, (_, k) => `${topicId}-msg-${pad(10 + k, 5)}`)
+    )
+
+    // Every newly loaded ID must now be present and the full set must match
+    for (const nid of expectedNewIds) {
+      expect(postState.ids, `missing newly loaded id ${nid} in ${JSON.stringify(postState.ids)}`).toContain(nid)
+    }
+    expect(postState.ids).toEqual(expectedAllIds)
+
+    // Redux order ascending by numeric suffix and no duplicates; DOM equals Redux set
+    expect(new Set(postState.ids).size, `duplicate ids in ${JSON.stringify(postState.ids)}`).toBe(postState.ids.length)
+    const toNum = (id: string) => Number(id.split('-').pop())
+    for (let i = 1; i < postState.ids.length; i++) {
+      expect(
+        toNum(postState.ids[i]),
+        `order break at ${i}: ${postState.ids[i - 1]} -> ${postState.ids[i]}`
+      ).toBeGreaterThan(toNum(postState.ids[i - 1]))
+    }
+    expect(new Set(postState.domIds).size, `duplicate DOM ids ${JSON.stringify(postState.domIds)}`).toBe(
+      postState.domIds.length
+    )
+    expect([...postState.domIds].sort()).toEqual([...postState.ids].sort())
+
+    // hasMoreBefore remains true (still 0..9 older remain), hasMoreAfter remains false (still at newest)
+    const postLatest = await page.evaluate(
+      async ({ topicId, limit }: { topicId: string; limit: number }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.fetchMessagesWindow({ kind: 'latest', topicId, limit })
+      },
+      { topicId, limit: DISPLAY_LIMIT }
+    )
+    expect(postLatest.ok).toBe(true)
+    expect((postLatest.value as any).window.hasMoreBefore).toBe(true)
+    expect((postLatest.value as any).window.hasMoreAfter).toBe(false)
+
+    // Anchor/viewport invariants: pre-load oldest remains present, scroll not reset to newest-bottom, anchor in DOM
+    expect(postState.ids, `pre-oldest anchor ${preOldestAnchorId} missing after merge`).toContain(preOldestAnchorId)
+    expect(postState.domIds, `pre-oldest anchor not in DOM after merge`).toContain(preOldestAnchorId)
+    const anchorStillConnected = await page.evaluate((anchorId: string) => {
+      const el = document.getElementById(`message-${anchorId}`)
+      return !!el && el.isConnected
+    }, preOldestAnchorId)
+    expect(anchorStillConnected, `anchor element message-${preOldestAnchorId} should remain connected`).toBe(true)
+
+    expect(postState.geom, 'post geometry missing').toBeTruthy()
+    const postGeom = postState.geom!
+    // Not reset to newest-bottom (0): scrollTop must remain near the inverse threshold, i.e. negative / far from 0
+    expect(
+      Math.abs(postGeom.scrollTop) > 20,
+      `scrollTop should not be reset to bottom 0, got ${postGeom.scrollTop} targetTop ${scrollInfo.targetTop}`
+    ).toBe(true)
+    // Remains at/near target (allow anchoring delta up to ~150px, but must not have jumped to 0)
+    expect(
+      Math.abs(postGeom.scrollTop - scrollInfo.targetTop) < 200,
+      `post scrollTop ${postGeom.scrollTop} should stay near targetTop ${scrollInfo.targetTop} (visible anchor ${visibleAnchor!.id} preOffset ${visibleAnchor!.offset})`
+    ).toBe(true)
+
+    // Production-aligned viewport stability: container-relative offset of the first visible
+    // message must remain stable within a small layout-tolerant bound. Mirrors
+    // src/renderer/src/pages/home/Messages/domVisibility.ts findFirstVisibleMessage (display:none / zero-height / intersection filter,
+    // closest rect.top to container top) and Messages.tsx:1121-1141 anchoring
+    // (delta = newRect.top - oldRect.top compensated via container.scrollTop).
+    const postVisible = await page.evaluate((anchorId: string) => {
+      const container = document.getElementById('messages') as HTMLElement | null
+      if (!container) return null
+      const containerRect = container.getBoundingClientRect()
+      const el =
+        (Array.from(container.querySelectorAll('[data-message-id]')).find(
+          (element) => element.getAttribute('data-message-id') === anchorId
+        ) as HTMLElement | null) ?? (document.getElementById(`message-${anchorId}`) as HTMLElement | null)
+      const target = el
+      if (!target || !target.isConnected)
+        return {
+          connected: false,
+          offset: null as number | null,
+          containerTop: containerRect.top,
+          rectTop: null as number | null
+        }
+      const rect = target.getBoundingClientRect()
+      return {
+        connected: true,
+        offset: rect.top - containerRect.top,
+        containerTop: containerRect.top,
+        rectTop: rect.top
+      }
+    }, visibleAnchor!.id)
+
+    expect(postVisible, 'post visible anchor probe missing').toBeTruthy()
+    expect(postVisible!.connected, `visible anchor message-${visibleAnchor!.id} should remain connected`).toBe(true)
+    // Container rect top must remain stable for offset comparison to be meaningful
+    expect(
+      Math.abs(postVisible!.containerTop - visibleAnchor!.containerTop) <= 4,
+      `container top shifted excessively: pre ${visibleAnchor!.containerTop} post ${postVisible!.containerTop}`
+    ).toBe(true)
+    expect(postVisible!.offset !== null, `visible anchor offset missing for ${visibleAnchor!.id}`).toBe(true)
+    // Layout-tolerant bound 32px (not viewport-sized): allows font/layout jitter but catches full-viewport jump
+    expect(
+      Math.abs((postVisible!.offset as number) - visibleAnchor!.offset) <= 32,
+      `visible anchor container-relative offset moved excessively: pre ${visibleAnchor!.offset} (id ${visibleAnchor!.id} rectTop ${visibleAnchor!.rectTop}) post ${postVisible!.offset} (rectTop ${postVisible!.rectTop}) containerTop pre ${visibleAnchor!.containerTop} post ${postVisible!.containerTop} clientHeight ${postGeom.clientHeight}`
+    ).toBe(true)
   })
 })
