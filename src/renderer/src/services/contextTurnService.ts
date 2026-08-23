@@ -47,6 +47,11 @@ interface MutableContextTurn {
  *      its own id, so that no product messages are lost.
  *   6. Only consecutive messages may join; non-consecutive same askId
  *      creates a separate turn.
+ *   7. Any other role (null, unknown, 'tool', etc.) is ignored for turn
+ *      construction — it does not create a turn and does not advance the
+ *      current turn key. The message remains in authority order for
+ *      closure slicing but is not a context-turn. This matches Main's
+ *      authoritative grouping and preserves deterministic alignment.
  *
  * All real turns in the topic participate — there is no clear-marker
  * trimming at this layer.
@@ -80,6 +85,11 @@ export function buildContextTurns(messages: Message[]): ContextTurn[] {
         }
         turns.push({ key: currentTurnKey, messages: [message] })
       }
+    } else {
+      // Unknown / nullable role (e.g., null, 'tool', empty): ignored for turn construction.
+      // Persists in authority order but does not affect context-turn semantics.
+      // Explicitly matches Main's authoritative grouping (ChatDbAggregateService.fetchContextClosure).
+      continue
     }
   }
 
@@ -122,9 +132,12 @@ export function resolveAnchorTurnIndex(turns: readonly ContextTurn[], groupKey: 
   )
   if (assistantAskIdTurnIdx >= 0) return assistantAskIdTurnIdx
 
-  // 3. Fall back: turn containing a non-user message whose own id === groupKey
-  //    (orphan-assistant turn keyed by its own id, or standalone system turn).
-  const messageIdTurnIdx = turns.findIndex((t) => t.messages.some((m) => m.role !== 'user' && m.id === groupKey))
+  // 3. Fall back: turn containing a recognized non-user message (assistant/system only)
+  //    whose own id === groupKey (orphan-assistant turn keyed by its own id, or standalone system turn).
+  // LOCK-R06-005: nullable/unknown/tool roles never create turns and cannot resolve as own-id anchors
+  const messageIdTurnIdx = turns.findIndex((t) =>
+    t.messages.some((m) => (m.role === 'assistant' || m.role === 'system') && m.id === groupKey)
+  )
   if (messageIdTurnIdx >= 0) return messageIdTurnIdx
 
   // 4. Not found
@@ -150,9 +163,15 @@ export function isMessageInContextTurn(
   if (groupKey === null || groupKey === undefined) {
     return false
   }
-  const messageTurnKey =
-    message.role === 'user' || message.role === 'system' ? message.id : (message.askId ?? message.id)
-  return messageTurnKey === groupKey
+  // LOCK-R06-005: only recognized roles participate in turn membership; unknown/null/tool never belongs
+  if (message.role === 'user' || message.role === 'system') {
+    return message.id === groupKey
+  }
+  if (message.role === 'assistant') {
+    const messageTurnKey = message.askId ?? message.id
+    return messageTurnKey === groupKey
+  }
+  return false
 }
 
 /**

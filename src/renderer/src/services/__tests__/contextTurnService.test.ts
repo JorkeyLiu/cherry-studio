@@ -627,3 +627,75 @@ describe('isMessageInContextTurn', () => {
     }
   })
 })
+
+describe('LOCK-R06-005: unknown/null/tool roles are ignored for turn membership and anchor resolution', () => {
+  it('isMessageInContextTurn returns false for null/tool/unknown/empty roles even when id matches groupKey', () => {
+    const cases: Array<{ role: any; id: string }> = [
+      { role: null, id: 'x-null' },
+      { role: 'tool', id: 'x-tool' },
+      { role: 'unknown', id: 'x-unknown' },
+      { role: '', id: 'x-empty' },
+      { role: undefined, id: 'x-undef' }
+    ]
+    for (const c of cases) {
+      const msg: any = { id: c.id, role: c.role, askId: 'u1' }
+      expect(isMessageInContextTurn(msg, c.id)).toBe(false)
+      expect(isMessageInContextTurn(msg, 'u1')).toBe(false)
+    }
+    // valid roles still correctly resolve
+    expect(isMessageInContextTurn(user('u1'), 'u1')).toBe(true)
+    expect(isMessageInContextTurn(assistant('a1', 'u1'), 'u1')).toBe(true)
+    expect(isMessageInContextTurn(system('s1'), 's1')).toBe(true)
+    expect(isMessageInContextTurn(assistant('a1'), 'a1')).toBe(true)
+  })
+
+  it('resolveAnchorTurnIndex ignores unknown-role turns and never resolves their id', () => {
+    // buildContextTurns ignores unknown roles, so they produce no turn
+    const unknownMsg: any = {
+      id: 'x-null',
+      role: null,
+      assistantId: 'a1',
+      topicId: 't1',
+      createdAt: '2026-07-23T00:00:00.000Z',
+      status: UserMessageStatus.SUCCESS,
+      blocks: []
+    }
+    const toolMsg: any = {
+      id: 'x-tool',
+      role: 'tool',
+      assistantId: 'a1',
+      topicId: 't1',
+      createdAt: '2026-07-23T00:00:00.000Z',
+      status: UserMessageStatus.SUCCESS,
+      blocks: []
+    }
+    // Mix unknown rows between valid turns: they should not create turns nor be resolvable
+    const messages: Message[] = [user('u1'), unknownMsg, toolMsg, assistant('a1', 'u1'), user('u2')]
+    const turns = buildContextTurns(messages as any)
+    // Turns should be only user u1 + assistant a1 merged, and user u2 => 2 turns, no unknown turns
+    expect(turns).toHaveLength(2)
+    // Unknown ids must not resolve
+    expect(resolveAnchorTurnIndex(turns, 'x-null')).toBe(-1)
+    expect(resolveAnchorTurnIndex(turns, 'x-tool')).toBe(-1)
+    // Valid still resolves
+    expect(resolveAnchorTurnIndex(turns, 'u1')).toBe(0)
+    expect(resolveAnchorTurnIndex(turns, 'u2')).toBe(1)
+  })
+
+  it('buildContextTurns ignores unknown roles and preserves consecutive assistant grouping', () => {
+    const unknownNull: any = {
+      id: 'x-null',
+      role: null,
+      assistantId: 'a1',
+      topicId: 't1',
+      createdAt: '2026-07-23T00:00:00.000Z',
+      status: UserMessageStatus.SUCCESS,
+      blocks: []
+    }
+    const messages: Message[] = [user('u1'), unknownNull, assistant('a1', 'u1')]
+    const turns = buildContextTurns(messages as any)
+    // a1 with askId u1 should still join u1 despite unknown row in between (ignored for turn construction)
+    expect(turns).toHaveLength(1)
+    expect(turns[0].messages.map((m) => m.id)).toEqual(['u1', 'a1'])
+  })
+})

@@ -1,3 +1,4 @@
+import type * as SqliteMessageDataSourceModule from '@renderer/services/db/SqliteMessageDataSource'
 import type { ContextWindowAnchor } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -12,28 +13,83 @@ import {
 } from '../anchorService'
 import * as contextTurnService from '../contextTurnService'
 
-const updateAssistantSettings = vi.fn()
-const selectMessagesForTopic = vi.fn()
-const getAssistantSettings = vi.fn()
+const { mocks: anchorMocks } = vi.hoisted(() => ({
+  mocks: {
+    updateAssistantSettings: vi.fn(),
+    selectMessagesForTopic: vi.fn(),
+    getAssistantSettings: vi.fn(),
+    fetchContextClosure: vi.fn()
+  }
+}))
+const updateAssistantSettings = anchorMocks.updateAssistantSettings
+const selectMessagesForTopic = anchorMocks.selectMessagesForTopic
+const getAssistantSettings = anchorMocks.getAssistantSettings
+const fetchContextClosureMock = anchorMocks.fetchContextClosure
 const buildContextTurnsSpy = vi.spyOn(contextTurnService, 'buildContextTurns')
 
 vi.mock('@renderer/store/assistants', () => ({
-  updateAssistantSettings: (...args: unknown[]) => updateAssistantSettings(...args)
+  default: (state: unknown = {}) => state,
+  updateAssistantSettings: (...args: unknown[]) => anchorMocks.updateAssistantSettings(...args),
+  updateTopicUpdatedAt: (...args: unknown[]) => ({ type: 'updateTopicUpdatedAt', payload: args[0] })
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
-  selectMessagesForTopic: (...args: unknown[]) => selectMessagesForTopic(...args)
+  default: (state: unknown = {}) => state,
+  selectMessagesForTopic: (...args: unknown[]) => anchorMocks.selectMessagesForTopic(...args),
+  newMessagesActions: {
+    messagesReceived: vi.fn(),
+    setTopicLoading: vi.fn(),
+    setCurrentTopicId: vi.fn(),
+    addMessage: vi.fn()
+  }
 }))
 
 vi.mock('@renderer/services/AssistantService', () => ({
-  getAssistantSettings: (...args: unknown[]) => getAssistantSettings(...args)
+  getAssistantSettings: (...args: unknown[]) => anchorMocks.getAssistantSettings(...args),
+  getDefaultAssistant: vi.fn(() => ({ id: 'default', settings: {} }))
 }))
+
+vi.mock('@renderer/services/db', () => ({
+  dbService: {
+    fetchContextClosure: (...args: unknown[]) => anchorMocks.fetchContextClosure(...args)
+  }
+}))
+
+vi.mock('@renderer/store', () => ({
+  default: {
+    dispatch: vi.fn(),
+    getState: vi.fn(() => ({ assistants: { assistants: [] }, messages: { entities: {}, messageIdsByTopic: {} } }))
+  },
+  useAppDispatch: () => vi.fn()
+}))
+
+vi.mock('@renderer/services/db/topicMetadataPersist', () => ({
+  ensureOrdinaryTopicOwnership: vi.fn().mockResolvedValue(undefined)
+}))
+
+vi.mock('@renderer/hooks/useAssistant', () => ({
+  useAssistant: vi.fn(),
+  useAssistants: vi.fn()
+}))
+
+vi.mock('@renderer/services/db/SqliteMessageDataSource', async () => {
+  const actual = await vi.importActual<typeof SqliteMessageDataSourceModule>(
+    '@renderer/services/db/SqliteMessageDataSource'
+  )
+  return { ...actual }
+})
 
 beforeEach(() => {
   updateAssistantSettings.mockReset()
   selectMessagesForTopic.mockReset()
   getAssistantSettings.mockReset()
   buildContextTurnsSpy.mockClear()
+  fetchContextClosureMock.mockReset()
+  // By default, authority probe fails closed only for active anchor not in viewport.
+  // Ghost tests override to NOT_FOUND; valid-outside-viewport overrides to success.
+  fetchContextClosureMock.mockRejectedValue(
+    Object.assign(new Error('NOT_FOUND'), { code: 'NOT_FOUND', name: 'ChatDbResultError' })
+  )
 })
 
 // --- Test factories ---
@@ -288,7 +344,7 @@ describe('ensureTopicAnchorEstablished', () => {
     }))
   })
 
-  it('establishes the default-derived anchor for a non-empty topic with no anchor', () => {
+  it('establishes the default-derived anchor for a non-empty topic with no anchor', async () => {
     // Turns: u1/u2/u3 (user-led). contextCount=2 → default position is u2.
     selectMessagesForTopic.mockReturnValue([
       user('u1'),
@@ -300,7 +356,7 @@ describe('ensureTopicAnchorEstablished', () => {
     const getState = makeGetState({})
     const dispatch = vi.fn()
 
-    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
     expect(dispatch).toHaveBeenCalledTimes(1)
@@ -313,18 +369,18 @@ describe('ensureTopicAnchorEstablished', () => {
     })
   })
 
-  it('never recalculates a valid persisted anchor (idempotent no-op)', () => {
+  it('never recalculates a valid persisted anchor (idempotent no-op)', async () => {
     selectMessagesForTopic.mockReturnValue([user('u1'), assistant('a1', 'u1'), user('u2'), assistant('a2', 'u2')])
     const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('u1') } })
     const dispatch = vi.fn()
 
-    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
   })
 
-  it('accepts an assistant askId anchor without building context turns', () => {
+  it('accepts an assistant askId anchor without building context turns', async () => {
     selectMessagesForTopic.mockReturnValue([
       user('u1'),
       assistant('a1', 'u1'),
@@ -334,38 +390,38 @@ describe('ensureTopicAnchorEstablished', () => {
     const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('orphan-ask-1') } })
     const dispatch = vi.fn()
 
-    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
     expect(buildContextTurnsSpy).not.toHaveBeenCalled()
   })
 
-  it('accepts a system message own-id anchor without building context turns', () => {
+  it('accepts a system message own-id anchor without building context turns', async () => {
     selectMessagesForTopic.mockReturnValue([system('system-1'), user('u1'), assistant('a1', 'u1')])
     const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('system-1') } })
     const dispatch = vi.fn()
 
-    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
     expect(buildContextTurnsSpy).not.toHaveBeenCalled()
   })
 
-  it('accepts an orphan assistant own-id anchor without building context turns', () => {
+  it('accepts an orphan assistant own-id anchor without building context turns', async () => {
     selectMessagesForTopic.mockReturnValue([assistant('orphan-a1'), user('u1'), assistant('a1', 'u1')])
     const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('orphan-a1') } })
     const dispatch = vi.fn()
 
-    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
     expect(buildContextTurnsSpy).not.toHaveBeenCalled()
   })
 
-  it('preserves user-id precedence when a key also appears as an assistant askId', () => {
+  it('preserves user-id precedence when a key also appears as an assistant askId', async () => {
     selectMessagesForTopic.mockReturnValue([
       user('shared-key'),
       assistant('a1', 'shared-key'),
@@ -375,19 +431,19 @@ describe('ensureTopicAnchorEstablished', () => {
     const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('shared-key') } })
     const dispatch = vi.fn()
 
-    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
     expect(buildContextTurnsSpy).not.toHaveBeenCalled()
   })
 
-  it('repairs an unresolvable legacy anchor exactly once', () => {
+  it('repairs an unresolvable legacy anchor exactly once', async () => {
     selectMessagesForTopic.mockReturnValue([user('u1'), assistant('a1', 'u1'), user('u2'), assistant('a2', 'u2')])
     const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('ghost') } })
     const dispatch = vi.fn()
 
-    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
     expect(dispatch).toHaveBeenCalledTimes(1)
@@ -400,12 +456,12 @@ describe('ensureTopicAnchorEstablished', () => {
     })
   })
 
-  it('repairs a stale deleted askId anchor through the full path', () => {
+  it('repairs a stale deleted askId anchor through the full path', async () => {
     selectMessagesForTopic.mockReturnValue([user('u1'), assistant('a1', 'u1'), user('u2'), assistant('a2', 'u2')])
     const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('deleted-ask-id') } })
     const dispatch = vi.fn()
 
-    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
     expect(dispatch).toHaveBeenCalledTimes(1)
@@ -418,14 +474,14 @@ describe('ensureTopicAnchorEstablished', () => {
     })
   })
 
-  it('repairs a non-active legacy anchor through the full path', () => {
+  it('repairs a non-active legacy anchor through the full path', async () => {
     selectMessagesForTopic.mockReturnValue([user('u1'), assistant('a1', 'u1')])
     const getState = makeGetState({
       contextWindowAnchor: { [topicId]: { kind: 'vacant' } as unknown as ContextWindowAnchor }
     })
     const dispatch = vi.fn()
 
-    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
     expect(dispatch).toHaveBeenCalledTimes(1)
@@ -438,23 +494,197 @@ describe('ensureTopicAnchorEstablished', () => {
     })
   })
 
-  it('empty topic never receives an anchor (no dispatch)', () => {
+  it('empty topic never receives an anchor (no dispatch)', async () => {
     selectMessagesForTopic.mockReturnValue([])
     const getState = makeGetState({})
     const dispatch = vi.fn()
 
-    ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
 
     expect(updateAssistantSettings).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
   })
 
-  it('unknown assistant id is a silent no-op', () => {
+  it('unknown assistant id is a silent no-op', async () => {
     const getState = makeGetState({})
     const dispatch = vi.fn()
 
-    ensureTopicAnchorEstablished(dispatch, getState, 'missing-assistant', topicId)
+    await ensureTopicAnchorEstablished(dispatch, getState, 'missing-assistant', topicId)
 
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
+  // --- R-06 regression: viewport truncation must not recompute valid early anchor ---
+  it('preserves a valid early active anchor outside a 20-row viewport (authority success)', async () => {
+    // Simulate 50-row topic, viewport is tail 20 (msg-00030..00049), early anchor msg-00000.
+    const viewport: Message[] = []
+    for (let i = 30; i < 50; i++) {
+      const id = `msg-${String(i).padStart(5, '0')}`
+      viewport.push(user(id))
+      viewport.push(assistant(`a-${id}`, id))
+    }
+    selectMessagesForTopic.mockReturnValue(viewport)
+    const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('msg-00000') } })
+    const dispatch = vi.fn()
+    fetchContextClosureMock.mockResolvedValueOnce({
+      messages: [{ id: 'msg-00000' }],
+      blocks: [],
+      closure: { topicId, anchorGroupKey: 'msg-00000', completeness: 'context-closure' }
+    } as any)
+
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+
+    expect(fetchContextClosureMock).toHaveBeenCalledWith({ topicId, anchorGroupKey: 'msg-00000' })
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
+  it('ghost active anchor outside viewport still repairs to deterministic default (authority NOT_FOUND)', async () => {
+    const viewport: Message[] = []
+    for (let i = 30; i < 50; i++) {
+      const id = `msg-${String(i).padStart(5, '0')}`
+      viewport.push(user(id))
+    }
+    // viewport has 20 user turns (30..49), contextCount=2 → default is msg-00048 (second-last)
+    selectMessagesForTopic.mockReturnValue(viewport)
+    const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('ghost-outside') } })
+    const dispatch = vi.fn()
+    fetchContextClosureMock.mockRejectedValueOnce(Object.assign(new Error('NOT_FOUND'), { code: 'NOT_FOUND' }))
+
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+
+    expect(fetchContextClosureMock).toHaveBeenCalledWith({ topicId, anchorGroupKey: 'ghost-outside' })
+    expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
+    expect(buildContextTurnsSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('transport failure for active anchor outside viewport fails closed (no spurious repair)', async () => {
+    const viewport: Message[] = [user('u20'), assistant('a20', 'u20'), user('u21')]
+    selectMessagesForTopic.mockReturnValue(viewport)
+    const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('msg-00000') } })
+    const dispatch = vi.fn()
+    fetchContextClosureMock.mockRejectedValueOnce(new Error('IPC fail'))
+
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+
+    expect(fetchContextClosureMock).toHaveBeenCalled()
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
+  it('missing anchor initializes once from viewport (no authority probe)', async () => {
+    selectMessagesForTopic.mockReturnValue([user('u1'), assistant('a1', 'u1'), user('u2')])
+    const getState = makeGetState({})
+    const dispatch = vi.fn()
+    fetchContextClosureMock.mockClear()
+
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+
+    expect(fetchContextClosureMock).not.toHaveBeenCalled()
+    expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
+  })
+
+  // --- R-06 stale-repair guard: post-await re-read and in-flight dedup ---
+  it('ghost probe that resolves after a newer anchor update does not overwrite (stale post-await guard)', async () => {
+    const viewport = [user('u1'), assistant('a1', 'u1'), user('u2'), assistant('a2', 'u2'), user('u3')]
+    selectMessagesForTopic.mockReturnValue(viewport)
+    const ghostState = makeGetState({ contextWindowAnchor: { [topicId]: g('ghost') } })
+    const updatedState = makeGetState({ contextWindowAnchor: { [topicId]: g('u2') } })
+    let getStateCalls = 0
+    const getState = vi.fn(() => {
+      getStateCalls++
+      return getStateCalls === 1 ? ghostState() : updatedState()
+    })
+    // Defer the authority probe so we can mutate state before it resolves.
+    let rejectProbe!: (e: unknown) => void
+    fetchContextClosureMock.mockImplementation(
+      () =>
+        new Promise((_res, rej) => {
+          rejectProbe = rej
+        })
+    )
+    const dispatch = vi.fn()
+    const p = ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    // Let the probe start.
+    await Promise.resolve()
+    expect(fetchContextClosureMock).toHaveBeenCalledWith({ topicId, anchorGroupKey: 'ghost' })
+    // Simulate NOT_FOUND ghost result after concurrent anchor update.
+    rejectProbe(Object.assign(new Error('NOT_FOUND'), { code: 'NOT_FOUND' }))
+    await p
+    // Fresh anchor is u2, differs from probed ghost → must not overwrite.
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
+  it('ghost probe that resolves after anchor becomes viewport-resolvable does not dispatch', async () => {
+    // Initial viewport missing ghost, but after concurrent update the ghost becomes resolvable
+    // via new messages (or anchor changed to a resolvable key). We simulate fresh anchor still ghost
+    // but fresh messages now contain ghost (became resolvable).
+    const initialViewport = [user('u1'), assistant('a1', 'u1'), user('u2')]
+    const freshViewport = [user('u1'), assistant('a1', 'u1'), user('ghost'), assistant('a-ghost', 'ghost')]
+    let selectCalls = 0
+    selectMessagesForTopic.mockImplementation(() => {
+      selectCalls++
+      // First call in task (initial check) uses initialViewport; second call (fresh re-read) uses freshViewport
+      return selectCalls === 1 ? initialViewport : freshViewport
+    })
+    const ghostState = makeGetState({ contextWindowAnchor: { [topicId]: g('ghost') } })
+    const getState = vi.fn(() => ghostState())
+    let rejectProbe!: (e: unknown) => void
+    fetchContextClosureMock.mockImplementation(
+      () =>
+        new Promise((_res, rej) => {
+          rejectProbe = rej
+        })
+    )
+    const dispatch = vi.fn()
+    const p = ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await Promise.resolve()
+    rejectProbe(Object.assign(new Error('NOT_FOUND'), { code: 'NOT_FOUND' }))
+    await p
+    // Fresh messages now resolve ghost → repair must be suppressed.
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
+  it('two overlapping ghost establishment calls produce at most one repair dispatch (in-flight dedup)', async () => {
+    const viewport = [user('u1'), assistant('a1', 'u1'), user('u2'), assistant('a2', 'u2')]
+    selectMessagesForTopic.mockReturnValue(viewport)
+    const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('ghost') } })
+    let rejectProbe!: (e: unknown) => void
+    fetchContextClosureMock.mockImplementation(
+      () =>
+        new Promise((_res, rej) => {
+          rejectProbe = rej
+        })
+    )
+    const dispatch = vi.fn()
+    const p1 = ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    const p2 = ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    await Promise.resolve()
+    // Only one authority probe should have been issued.
+    expect(fetchContextClosureMock).toHaveBeenCalledTimes(1)
+    rejectProbe(Object.assign(new Error('NOT_FOUND'), { code: 'NOT_FOUND' }))
+    await Promise.all([p1, p2])
+    // At most one repair dispatch across both callers (dedup or post-await no-op).
+    expect(updateAssistantSettings.mock.calls.length).toBeLessThanOrEqual(1)
+    expect(dispatch.mock.calls.length).toBeLessThanOrEqual(1)
+  })
+
+  it('sequential ghost repair is idempotent — second call after repair is no-op', async () => {
+    const viewport = [user('u1'), assistant('a1', 'u1'), user('u2'), assistant('a2', 'u2')]
+    selectMessagesForTopic.mockReturnValue(viewport)
+    const ghostState = makeGetState({ contextWindowAnchor: { [topicId]: g('ghost') } })
+    const repairedState = makeGetState({ contextWindowAnchor: { [topicId]: g('u1') } })
+    fetchContextClosureMock.mockRejectedValue(Object.assign(new Error('NOT_FOUND'), { code: 'NOT_FOUND' }))
+    const dispatch = vi.fn()
+    await ensureTopicAnchorEstablished(dispatch, ghostState, 'asst-1', topicId)
+    expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
+    updateAssistantSettings.mockClear()
+    dispatch.mockClear()
+    // Second call with already-repaired anchor (u1 resolvable in same viewport) → no-op.
+    await ensureTopicAnchorEstablished(dispatch, repairedState, 'asst-1', topicId)
     expect(updateAssistantSettings).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
   })

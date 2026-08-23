@@ -1,6 +1,8 @@
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
   FetchAnswerGroupResponse,
+  FetchContextClosureRequest,
+  FetchContextClosureResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FileCleanupResult,
@@ -199,6 +201,14 @@ export interface MessageDataSource {
    * No mutation, no timestamp dispatch.
    */
   fetchAnswerGroup?(topicId: string, anchorMessageId: string): Promise<FetchAnswerGroupResponse>
+
+  /**
+   * Authoritative context closure READ — S6.3 R-06.
+   * Returns anchor-through-newest slice for a renderer-owned anchorGroupKey.
+   * Missing topic/unresolvable anchor → throws ChatDbResultError (NOT_FOUND).
+   * Distinct completeness 'context-closure', no cap, no hasMore.
+   */
+  fetchContextClosure?(request: FetchContextClosureRequest): Promise<FetchContextClosureResponse>
 
   // ============ File Operations (Optional) ============
 

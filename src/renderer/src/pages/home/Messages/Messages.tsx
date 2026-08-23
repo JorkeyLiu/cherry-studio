@@ -864,7 +864,7 @@ const Messages = ({
               // immediately: establish at the default window position.
               // Empty branches and branches with a just-inherited valid
               // anchor are idempotent no-ops (docs/context-window.md §10).
-              ensureTopicAnchorEstablished(dispatch, store.getState, assistant.id, newTopic.id)
+              void ensureTopicAnchorEstablished(dispatch, store.getState, assistant.id, newTopic.id)
             } catch (error) {
               logger.error('[NEW_BRANCH] Failed to inherit context window anchor', error as Error)
             }

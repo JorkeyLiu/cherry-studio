@@ -349,6 +349,40 @@ export interface FetchAnswerGroupResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Context closure DTOs (S6.3 R-06 — additive typed read from renderer-owned anchor)
+// ---------------------------------------------------------------------------
+
+/** @see IpcChannel.ChatDb_FetchContextClosure — additive READ for authoritative context closure. */
+export interface FetchContextClosureRequest {
+  topicId: string
+  /** Renderer-owned persisted ContextWindowAnchor groupKey. */
+  anchorGroupKey: string
+}
+
+/** Typed closure metadata — distinct from window/answer-group/whole-topic completeness. */
+export interface FetchContextClosureMeta {
+  /** Completeness is always 'context-closure' — never masquerades as window/answer-group/whole-topic. */
+  completeness: 'context-closure'
+  /** Topic that was read. */
+  topicId: string
+  /** Echo of the request anchorGroupKey. */
+  anchorGroupKey: string
+  /** First returned message ID, or null when no messages. */
+  firstMessageId: string | null
+  /** Last returned message ID, or null when no messages. */
+  lastMessageId: string | null
+  /** Number of messages returned. */
+  returnedCount: number
+}
+
+/** @see IpcChannel.ChatDb_FetchContextClosure */
+export interface FetchContextClosureResponse {
+  messages: JsonObject[]
+  blocks: JsonObject[]
+  closure: FetchContextClosureMeta
+}
+
+// ---------------------------------------------------------------------------
 // Command response DTOs
 // ---------------------------------------------------------------------------
 
@@ -850,6 +884,8 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   }
   // S6.2b R-05: authoritative answer-group READ
   'chatdb:fetch-answer-group': { request: FetchAnswerGroupRequest; response: FetchAnswerGroupResponse }
+  // S6.3 R-06: authoritative context closure READ (anchor through newest)
+  'chatdb:fetch-context-closure': { request: FetchContextClosureRequest; response: FetchContextClosureResponse }
 }
 
 /** All valid ChatDb command channel strings. */

@@ -2,6 +2,8 @@ import db from '@renderer/databases'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
   FetchAnswerGroupResponse,
+  FetchContextClosureRequest,
+  FetchContextClosureResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FileCleanupResult,
@@ -60,6 +62,10 @@ class DbService implements MessageDataSource {
   fetchAnswerGroup(topicId: string, anchorMessageId: string): Promise<FetchAnswerGroupResponse> {
     if (!this.ordinarySource.fetchAnswerGroup) throw new Error('fetchAnswerGroup unavailable')
     return this.ordinarySource.fetchAnswerGroup(topicId, anchorMessageId)
+  }
+  fetchContextClosure(request: FetchContextClosureRequest): Promise<FetchContextClosureResponse> {
+    if (!this.ordinarySource.fetchContextClosure) throw new Error('fetchContextClosure unavailable')
+    return this.ordinarySource.fetchContextClosure(request)
   }
   getRawTopic(topicId: string) {
     return this.ordinarySource.getRawTopic(topicId)

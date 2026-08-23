@@ -395,6 +395,9 @@ export enum IpcChannel {
   // S6.2b R-05 — authoritative answer-group READ
   ChatDb_FetchAnswerGroup = 'chatdb:fetch-answer-group',
 
+  // S6.3 R-06 — authoritative context closure READ (anchor through newest)
+  ChatDb_FetchContextClosure = 'chatdb:fetch-context-closure',
+
   // ChatImport — import-only IPC for Phase 4 source-reader pipeline.
   // Independent of the ChatDb_* channels. Prefix: chat-import:*
   ChatImport_Ready = 'chat-import:ready',

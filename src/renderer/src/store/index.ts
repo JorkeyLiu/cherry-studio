@@ -15,12 +15,14 @@
  * --------------------------------------------------------------------------
  */
 import { loggerService } from '@logger'
+import type { Middleware } from '@reduxjs/toolkit'
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
 import { IpcChannel } from '@shared/IpcChannel'
 import { useDispatch, useSelector, useStore } from 'react-redux'
 import { FLUSH, PAUSE, PERSIST, persistReducer, persistStore, PURGE, REGISTER, REHYDRATE } from 'redux-persist'
 import storage from 'redux-persist/lib/storage'
 
+import * as closureCache from '../services/contextClosure'
 import { applyPendingImportProjection } from '../services/importProjection'
 import { runReduxStoreBoot } from '../services/importProjectionReadiness'
 import storeSyncService from '../services/StoreSyncService'
@@ -116,6 +118,35 @@ storeSyncService.setOptions({
   syncList: ['assistants/', 'settings/', 'llm/', 'selectionStore/', 'note/', 'topicSegments/']
 })
 
+/**
+ * R-06 closure freshness invalidation middleware.
+ * Authoritative renderer publication/mutation paths for messages/blocks bump
+ * the per-topic closure generation and invalidate cached closure entries.
+ * Conservative: block-only changes invalidate all cached topics (full closure
+ * includes blocks); message actions invalidate their topic only.
+ * This gives same-length/outside-viewport mutations a generation signal
+ * without a new IPC protocol. Generation check before cache publication
+ * and before cache use ensures stale data is never claimed.
+ */
+const closureInvalidationMiddleware: Middleware = () => (next) => (action: any) => {
+  const result = next(action)
+  try {
+    const type = typeof action?.type === 'string' ? (action.type as string) : ''
+    if (type.startsWith('newMessages/')) {
+      const topicId = action.payload?.topicId as string | undefined
+      if (typeof topicId === 'string' && topicId.length > 0) {
+        closureCache.bumpAndInvalidate(topicId)
+      }
+    } else if (type.startsWith('messageBlocks/')) {
+      // Block mutations may affect any closure's block association — conservatively invalidate all
+      closureCache.bumpAndInvalidateAll()
+    }
+  } catch {
+    // invalidation is best-effort; never break dispatch
+  }
+  return result
+}
+
 const store = configureStore({
   // @ts-ignore store type is unknown
   reducer: persistedReducer as typeof rootReducer,
@@ -124,7 +155,9 @@ const store = configureStore({
       serializableCheck: {
         ignoredActions: [FLUSH, REHYDRATE, PAUSE, PERSIST, PURGE, REGISTER]
       }
-    }).concat(storeSyncService.createMiddleware())
+    })
+      .concat(storeSyncService.createMiddleware())
+      .concat(closureInvalidationMiddleware)
   },
   devTools: true
 })

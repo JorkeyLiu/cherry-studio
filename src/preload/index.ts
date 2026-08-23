@@ -16,6 +16,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
+  FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
   GetRawTopicRequest,
@@ -632,6 +633,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchMessagesWindow, request),
     fetchAnswerGroup: (request: FetchAnswerGroupRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchAnswerGroup, request),
+    fetchContextClosure: (request: FetchContextClosureRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_FetchContextClosure, request),
     getRawTopic: (request: GetRawTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_GetRawTopic, request),
     topicExists: (request: TopicExistsRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_TopicExists, request),
     ensureTopic: (request: EnsureTopicRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_EnsureTopic, request),

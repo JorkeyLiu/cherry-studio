@@ -28,6 +28,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
+  FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
   GetRawTopicRequest,
@@ -1617,6 +1618,140 @@ const fetchAnswerGroupContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// S6.3 R-06: Context closure READ — anchor through newest (distinct completeness)
+// ---------------------------------------------------------------------------
+
+const FETCH_CONTEXT_CLOSURE_VALUE_KEYS = new Set(['messages', 'blocks', 'closure'])
+const FETCH_CONTEXT_CLOSURE_CLOSURE_KEYS = new Set([
+  'completeness',
+  'topicId',
+  'anchorGroupKey',
+  'firstMessageId',
+  'lastMessageId',
+  'returnedCount'
+])
+
+const fetchContextClosureContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'anchorGroupKey'),
+  validate(value: unknown): void {
+    validateRequest(value, fetchContextClosureContract.allowedKeys)
+    const req = value as FetchContextClosureRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateNonEmptyString(req.anchorGroupKey, 'request.anchorGroupKey')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:fetch-context-closure', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:fetch-context-closure] Expected object with messages, blocks, closure'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:fetch-context-closure] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!FETCH_CONTEXT_CLOSURE_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:fetch-context-closure] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateJsonObjectArray(v.messages, 'result.value.messages')
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+      if (v.closure === null || typeof v.closure !== 'object' || Array.isArray(v.closure)) {
+        throw new ValidationError('result.value.closure', '[chatdb:fetch-context-closure] Expected closure object')
+      }
+      const cProto = Object.getPrototypeOf(v.closure)
+      if (cProto !== Object.prototype && cProto !== null) {
+        throw new ValidationError(
+          'result.value.closure',
+          '[chatdb:fetch-context-closure] Success closure must be a plain object'
+        )
+      }
+      const c = v.closure as Record<string, unknown>
+      for (const key of Object.keys(c)) {
+        if (!FETCH_CONTEXT_CLOSURE_CLOSURE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.closure.${key}`,
+            `[chatdb:fetch-context-closure] Unknown key in closure: "${key}"`
+          )
+        }
+      }
+      if (c.completeness !== 'context-closure') {
+        throw new ValidationError(
+          'result.value.closure.completeness',
+          '[chatdb:fetch-context-closure] Expected completeness "context-closure"'
+        )
+      }
+      validateNonEmptyString(c.topicId, 'result.value.closure.topicId')
+      validateNonEmptyString(c.anchorGroupKey, 'result.value.closure.anchorGroupKey')
+      if (c.firstMessageId !== null) {
+        validateNonEmptyString(c.firstMessageId, 'result.value.closure.firstMessageId')
+      }
+      if (c.lastMessageId !== null) {
+        validateNonEmptyString(c.lastMessageId, 'result.value.closure.lastMessageId')
+      }
+      if (
+        typeof c.returnedCount !== 'number' ||
+        !Number.isFinite(c.returnedCount) ||
+        !Number.isInteger(c.returnedCount) ||
+        c.returnedCount < 0
+      ) {
+        throw new ValidationError(
+          'result.value.closure.returnedCount',
+          '[chatdb:fetch-context-closure] Expected non-negative integer returnedCount'
+        )
+      }
+      const msgs = v.messages as unknown[]
+      if (c.returnedCount !== msgs.length) {
+        throw new ValidationError(
+          'result.value.closure.returnedCount',
+          '[chatdb:fetch-context-closure] returnedCount must equal messages length'
+        )
+      }
+      // S6.3 audit: a valid anchor-based closure must never be an empty success.
+      // Missing topic or unresolved anchor is typed NOT_FOUND; an empty success
+      // with supplied anchorGroupKey / null bounds is always a contract violation.
+      if (c.returnedCount === 0) {
+        throw new ValidationError(
+          'result.value.closure.returnedCount',
+          '[chatdb:fetch-context-closure] Empty closure with supplied anchorGroupKey is not a valid success; use NOT_FOUND'
+        )
+      }
+      if (c.firstMessageId === null || c.lastMessageId === null) {
+        throw new ValidationError(
+          'result.value.closure',
+          '[chatdb:fetch-context-closure] Non-empty closure must have first/lastMessageId'
+        )
+      }
+      {
+        const firstId = (msgs[0] as Record<string, unknown>).id
+        const lastId = (msgs[msgs.length - 1] as Record<string, unknown>).id
+        if (c.firstMessageId !== firstId) {
+          throw new ValidationError(
+            'result.value.closure.firstMessageId',
+            '[chatdb:fetch-context-closure] firstMessageId must match first message id'
+          )
+        }
+        if (c.lastMessageId !== lastId) {
+          throw new ValidationError(
+            'result.value.closure.lastMessageId',
+            '[chatdb:fetch-context-closure] lastMessageId must match last message id'
+          )
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // S6.2c-2: Insert after stable anchor contract — Main-authoritative
 // ---------------------------------------------------------------------------
 
@@ -1696,6 +1831,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:fetch-messages-window': fetchMessagesWindowContract,
   // S6.2b R-05: authoritative answer-group READ
   'chatdb:fetch-answer-group': fetchAnswerGroupContract,
+  // S6.3 R-06: authoritative context closure READ (anchor through newest)
+  'chatdb:fetch-context-closure': fetchContextClosureContract,
   // S6.2c-2: Main-authoritative insert after stable anchor
   'chatdb:insert-messages-after-anchor': insertMessagesAfterAnchorContract
 })

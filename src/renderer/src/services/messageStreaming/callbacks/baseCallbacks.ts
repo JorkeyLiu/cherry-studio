@@ -1,6 +1,8 @@
 import { loggerService } from '@logger'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import i18n from '@renderer/i18n'
+import { getAssistantSettings } from '@renderer/services/AssistantService'
+import { computeClosureFingerprint, getFreshValidatedClosure } from '@renderer/services/contextClosure'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { NotificationService } from '@renderer/services/NotificationService'
@@ -236,7 +238,16 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
 
       if (status === 'success' && finalAssistantMsg) {
         const orderedMsgs = selectMessagesForTopic(finalStateOnComplete, topicId)
-        const { uiMessages } = computeContextInfo(orderedMsgs, assistant, topicId)
+        let contextMsgs = orderedMsgs
+        const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[topicId]?.groupKey ?? null
+        if (anchorGroupKey) {
+          const currentFp = computeClosureFingerprint(orderedMsgs as any)
+          const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFp)
+          if (fresh) {
+            contextMsgs = fresh.messages as any
+          }
+        }
+        const { uiMessages } = computeContextInfo(contextMsgs, assistant, topicId)
         const finalContextWithAssistant = [...uiMessages, finalAssistantMsg]
 
         const possibleBlockId = findBlockIdForCompletion(finalAssistantMsg)

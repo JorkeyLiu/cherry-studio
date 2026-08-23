@@ -40,6 +40,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
+  FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
   GetRawTopicRequest,
@@ -276,6 +277,11 @@ export function registerChatDbIpc(): () => void {
   // 1c. fetch-answer-group (S6.2b R-05 authoritative answer-group READ)
   handleCommand(IpcChannel.ChatDb_FetchAnswerGroup, (agg, req: FetchAnswerGroupRequest) => {
     return agg.fetchAnswerGroup(req)
+  })
+
+  // 1d. fetch-context-closure (S6.3 R-06 authoritative context closure READ)
+  handleCommand(IpcChannel.ChatDb_FetchContextClosure, (agg, req: FetchContextClosureRequest) => {
+    return agg.fetchContextClosure(req)
   })
 
   // 2. get-raw-topic

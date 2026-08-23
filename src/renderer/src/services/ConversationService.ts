@@ -1,5 +1,7 @@
 import { loggerService } from '@logger'
 import { convertMessagesToSdkMessages } from '@renderer/aiCore/prepareParams'
+import { getAssistantSettings } from '@renderer/services/AssistantService'
+import { computeClosureFingerprint, getFreshValidatedClosure } from '@renderer/services/contextClosure'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
 import type { Assistant } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
@@ -25,8 +27,21 @@ export class ConversationService {
       }
     }
 
+    // R-06: attempt freshness-gated closure cache for single resolver semantics (centralized helper).
+    // Structural + anchor + generation/fingerprint freshness; fail-closed to viewport when freshness cannot be proven.
+    let contextMessages: Message[] = messages
+    if (topicId) {
+      const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[topicId]?.groupKey ?? null
+      if (anchorGroupKey) {
+        const currentFp = computeClosureFingerprint(messages as any)
+        const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFp)
+        if (fresh) {
+          contextMessages = fresh.messages as unknown as Message[]
+        }
+      }
+    }
     // Use the unified pipeline — same filtering as computeContextInfo
-    const { uiMessages: uiMessagesFromPipeline } = computeContextInfo(messages, assistant, topicId)
+    const { uiMessages: uiMessagesFromPipeline } = computeContextInfo(contextMessages, assistant, topicId)
     const model = assistant.model || getDefaultModel()
     if (!model) {
       // Unconfigured model slot: emit the stable NoModelError marker so

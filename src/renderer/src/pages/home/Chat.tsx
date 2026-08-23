@@ -8,15 +8,19 @@ import { QuickPanelProvider } from '@renderer/components/QuickPanel'
 import ResizableHandle from '@renderer/components/ResizableHandle'
 import { isEmbeddingModel, isRerankModel, isWebSearchModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
+import { useContextClosure } from '@renderer/hooks/useContextClosure'
 import { useTopicMessages, useTopicReferencedBlocks } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
+import { getAssistantSettings } from '@renderer/services/AssistantService'
+import { computeClosureFingerprint, getFreshValidatedClosure } from '@renderer/services/contextClosure'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { currentPhaseCorrelation, recordPhaseDurationForCorrelation } from '@renderer/services/phaseTimingDiagnostics'
-import { useAppDispatch } from '@renderer/store'
+import { useAppDispatch, useAppSelector } from '@renderer/store'
+import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
 import { setTopicListWidth } from '@renderer/store/settings'
 import type { Assistant, Model, Topic } from '@renderer/types'
 import { Flex } from 'antd'
@@ -26,6 +30,7 @@ import type { FC } from 'react'
 import React, { useMemo, useState } from 'react'
 import { useHotkeys } from 'react-hotkeys-hook'
 import { useTranslation } from 'react-i18next'
+import { shallowEqual } from 'react-redux'
 import styled from 'styled-components'
 
 import ChatNavbar from './components/ChatNavBar'
@@ -97,11 +102,31 @@ const Chat: FC<Props> = (props) => {
   // ever made for diagnostics; outside measurement mode this wraps nothing.
   const topicMessages = useTopicMessages(props.activeTopic.id)
   const topicBlocks = useTopicReferencedBlocks(props.activeTopic.id)
+  const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[props.activeTopic.id]?.groupKey ?? null
+  const { closure } = useContextClosure(props.activeTopic.id, anchorGroupKey)
+  // R-06: closure-sourced rows feed shared computeContextInfo when fresh; viewport remains for viewport groups.
+  // Centralized helper combines structural + anchor + full-closure freshness (generation + fingerprint); fail-closed to viewport.
+  const currentFingerprint = useMemo(() => computeClosureFingerprint(topicMessages as any), [topicMessages])
+  const contextClosureMessages = useMemo(() => {
+    void closure // keep hook subscription; actual freshness is gated via centralized helper reading cache
+    const fresh = getFreshValidatedClosure(props.activeTopic.id, anchorGroupKey, currentFingerprint)
+    if (fresh) return fresh.messages as any
+    return null
+  }, [props.activeTopic.id, anchorGroupKey, currentFingerprint, closure])
+  const contextSourceMessages = contextClosureMessages ?? topicMessages
+  // Subscribe to closure-referenced blocks when closure is active so filterEmptyMessages invalidation covers closure blocks
+  const closureBlockIds = useMemo(
+    () => (contextClosureMessages ? contextClosureMessages.flatMap((m: any) => (m.blocks ?? []) as string[]) : []),
+    [contextClosureMessages]
+  )
+  const closureBlocks = useAppSelector((state) => selectMessageBlocksByIds(state, closureBlockIds), shallowEqual)
+  // Use closure blocks for memo invalidation when closure active; otherwise use viewport blocks
+  const activeBlocksForContext = contextClosureMessages ? closureBlocks : topicBlocks
   const sharedContextInfo = useMemo(() => {
     const active = currentPhaseCorrelation()
     const startedAt = active ? performance.now() : 0
-    const result = computeContextInfo(topicMessages, assistant, props.activeTopic.id)
-    if (active && topicMessages.length > 0) {
+    const result = computeContextInfo(contextSourceMessages, assistant, props.activeTopic.id)
+    if (active && contextSourceMessages.length > 0) {
       recordPhaseDurationForCorrelation(
         active.correlationId,
         active.path,
@@ -110,7 +135,7 @@ const Chat: FC<Props> = (props) => {
       )
     }
     return result
-  }, [topicMessages, topicBlocks, assistant, props.activeTopic.id])
+  }, [contextSourceMessages, activeBlocksForContext, assistant, props.activeTopic.id])
 
   const enableContentSearch = React.useCallback((initialText?: string) => {
     if (isSearchActiveRef.current) {

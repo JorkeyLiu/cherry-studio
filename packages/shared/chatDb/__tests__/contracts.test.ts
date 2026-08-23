@@ -66,7 +66,9 @@ describe('chatDbContracts', () => {
     // S6.2c-1: branch by stable anchor
     'chatdb:branch-messages-to-topic',
     // S6.2c-2: Main-authoritative insert after stable anchor
-    'chatdb:insert-messages-after-anchor'
+    'chatdb:insert-messages-after-anchor',
+    // S6.3 R-06: authoritative context closure READ
+    'chatdb:fetch-context-closure'
   ]
 
   it('has entries for all expected channels', () => {
@@ -2560,7 +2562,9 @@ describe('coverage consistency', () => {
     // S6.2c-1: branch by stable anchor
     'chatdb:branch-messages-to-topic',
     // S6.2c-2: insert after stable anchor
-    'chatdb:insert-messages-after-anchor'
+    'chatdb:insert-messages-after-anchor',
+    // S6.3 R-06: authoritative context closure READ
+    'chatdb:fetch-context-closure'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {

@@ -1057,6 +1057,56 @@ describe('SqliteMessageDataSource', () => {
     })
   })
 
+  // S6.3 R-06: fetchContextClosure (authoritative READ)
+  describe('S6.3 R-06: fetchContextClosure', () => {
+    const closureResponse = {
+      messages: [{ id: 'u1' }, { id: 'a1' }] as any,
+      blocks: [] as any,
+      closure: {
+        completeness: 'context-closure' as const,
+        topicId: 't1',
+        anchorGroupKey: 'u1',
+        firstMessageId: 'u1',
+        lastMessageId: 'a1',
+        returnedCount: 2
+      }
+    }
+    it('calls api.fetchContextClosure with exact request', async () => {
+      ;(api as any).fetchContextClosure = vi.fn().mockResolvedValue(successResult(closureResponse))
+      await ds.fetchContextClosure({ topicId: 't1', anchorGroupKey: 'u1' })
+      expect((api as any).fetchContextClosure).toHaveBeenCalledOnce()
+      expect((api as any).fetchContextClosure).toHaveBeenCalledWith({ topicId: 't1', anchorGroupKey: 'u1' })
+    })
+    it('returns unwrapped closure', async () => {
+      ;(api as any).fetchContextClosure = vi.fn().mockResolvedValue(successResult(closureResponse))
+      const res = await ds.fetchContextClosure({ topicId: 't1', anchorGroupKey: 'u1' })
+      expect(res).toEqual(closureResponse)
+    })
+    it('structured failure throws ChatDbResultError', async () => {
+      ;(api as any).fetchContextClosure = vi.fn().mockResolvedValue(failureResult('NOT_FOUND', 'no anchor'))
+      await expect(ds.fetchContextClosure({ topicId: 't1', anchorGroupKey: 'missing' })).rejects.toBeInstanceOf(
+        ChatDbResultError
+      )
+    })
+    it('transport rejection propagates', async () => {
+      ;(api as any).fetchContextClosure = vi.fn().mockRejectedValue(new Error('IPC fail'))
+      await expect(ds.fetchContextClosure({ topicId: 't1', anchorGroupKey: 'u1' })).rejects.toThrow('IPC fail')
+    })
+    it('does NOT dispatch timestamp (read-only)', async () => {
+      mockDispatch.mockClear()
+      ;(api as any).fetchContextClosure = vi.fn().mockResolvedValue(successResult(closureResponse))
+      await ds.fetchContextClosure({ topicId: 't1', anchorGroupKey: 'u1' })
+      expect(mockDispatch).not.toHaveBeenCalled()
+    })
+    it('rejects on unsupported JSON via cloneForWire', async () => {
+      ;(api as any).fetchContextClosure = vi.fn().mockResolvedValue(successResult(closureResponse))
+      await expect(ds.fetchContextClosure({ topicId: 't1', anchorGroupKey: BigInt(1) as any })).rejects.toThrow(
+        TypeError
+      )
+      expect((api as any).fetchContextClosure).not.toHaveBeenCalled()
+    })
+  })
+
   // =========================================================================
   // updateTopicUpdatedAt dispatch parity
   // =========================================================================

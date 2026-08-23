@@ -538,7 +538,7 @@ export const sendMessage =
       // BEFORE the assistant response is queued so the first request resolves
       // the same persisted anchor even though its captured assistant snapshot
       // predates this dispatch.
-      ensureTopicAnchorEstablished(dispatch, getState, assistant.id, topicId)
+      await ensureTopicAnchorEstablished(dispatch, getState, assistant.id, topicId)
 
       const queue = getTopicQueue(topicId)
 
@@ -1736,7 +1736,7 @@ export const loadTopicMessagesThunk =
         asst.topics.some((t) => t.id === topicId)
       )
       if (cachedTopicOwner) {
-        ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+        await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
       }
       return
     }
@@ -1811,7 +1811,7 @@ export const loadTopicMessagesThunk =
       const loadedState = getState()
       const topicOwner = loadedState.assistants.assistants.find((asst) => asst.topics.some((t) => t.id === topicId))
       if (topicOwner) {
-        ensureTopicAnchorEstablished(dispatch, getState, topicOwner.id, topicId)
+        await ensureTopicAnchorEstablished(dispatch, getState, topicOwner.id, topicId)
       }
 
       // Load topic segments for this topic

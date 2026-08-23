@@ -25,6 +25,8 @@ import type {
   AppendDiagnostics,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
+  FetchContextClosureRequest,
+  FetchContextClosureResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FileCleanupResult,
@@ -73,6 +75,7 @@ import {
 export type FetchMessagesResult = { messages: JsonObject[]; blocks: JsonObject[] }
 export type FetchMessagesWindowResult = FetchMessagesWindowResponse
 export type FetchAnswerGroupResult = FetchAnswerGroupResponse
+export type FetchContextClosureResult = FetchContextClosureResponse
 export type GetRawTopicResult = { id: string; messages: JsonObject[] } | null
 
 // ---------------------------------------------------------------------------
@@ -350,6 +353,127 @@ export class ChatDbAggregateService {
         }
       })
     }, `fetchAnswerGroup(${request.topicId}, ${request.anchorMessageId})`)
+  }
+
+  /**
+   * S6.3 R-06: authoritative context closure READ (anchorGroupKey through newest).
+   *
+   * One authoritative SQLite transaction:
+   * - Validates topic exists; missing topic → NOT_FOUND.
+   * - Builds context turns deterministically from authority order
+   *   (sort_order ASC, id ASC) with renderer-equivalent semantics:
+   *   user starts a turn keyed by user id; consecutive assistant messages
+   *   with matching non-empty askId join; assistant without askId or with
+   *   non-matching askId and system messages are singleton turns; nullable/
+   *   unknown roles are ignored for turn construction (matches renderer
+   *   buildContextTurns which only groups system/user/assistant).
+   * - Resolves anchorGroupKey using context-turn semantics in deterministic
+   *   authority order: first user message id match, otherwise assistant
+   *   non-empty askId match, otherwise non-user message id match.
+   *   Unresolved anchor → NOT_FOUND. Main never writes/repairs the anchor.
+   * - Returns rows from the first message of the resolved turn through the
+   *   newest row, ordered sort_order ASC, id ASC, with complete message/block
+   *   relations. No viewport cap, no hasMore, completeness is 'context-closure'.
+   */
+  fetchContextClosure(request: FetchContextClosureRequest): ChatDbResult<FetchContextClosureResponse> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(request.topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+        }
+        const allMessages = repos.messages.listByTopic(request.topicId)
+        // Build context turns deterministically in authority order.
+        type ContextTurn = { key: string; messages: MessageData[] }
+        const turns: ContextTurn[] = []
+        let currentTurnKey: string | null = null
+        for (const msg of allMessages) {
+          const role = msg.role
+          const askId = (msg as unknown as { askId: string | null }).askId
+          if (role === 'system') {
+            currentTurnKey = msg.id
+            turns.push({ key: currentTurnKey, messages: [msg] })
+          } else if (role === 'user') {
+            currentTurnKey = msg.id
+            turns.push({ key: currentTurnKey, messages: [msg] })
+          } else if (role === 'assistant') {
+            if (askId && askId === currentTurnKey) {
+              // Consecutive assistant with askId matching current turn → join
+              turns[turns.length - 1].messages.push(msg)
+            } else {
+              if (askId) {
+                currentTurnKey = askId
+              } else {
+                currentTurnKey = msg.id
+              }
+              turns.push({ key: currentTurnKey, messages: [msg] })
+            }
+          } else {
+            // Nullable/unknown persisted role (null, '', 'tool', 'generic', etc.):
+            // ignored for turn construction. Matches renderer buildContextTurns which
+            // only groups system/user/assistant and silently drops other roles.
+            // Policy is local and explicit: no turn, no currentTurnKey advance.
+            // The raw message remains in authority-ordered closure slice but does
+            // not affect context-turn semantics or anchor resolution.
+            continue
+          }
+        }
+
+        // Resolve anchorGroupKey using context-turn semantics in deterministic authority order.
+        const anchorKey = request.anchorGroupKey
+        let anchorTurnIdx = -1
+        // 1. Prefer user message id match (canonical user-initiated turn)
+        anchorTurnIdx = turns.findIndex((t) => t.messages.some((m) => m.role === 'user' && m.id === anchorKey))
+        if (anchorTurnIdx === -1) {
+          // 2. Fall back to assistant non-empty askId match (orphan or legacy askId anchor)
+          anchorTurnIdx = turns.findIndex((t) =>
+            t.messages.some((m) => m.role === 'assistant' && m.askId === anchorKey)
+          )
+        }
+        if (anchorTurnIdx === -1) {
+          // 3. Fall back to non-user message id match (orphan assistant own-id or standalone system)
+          anchorTurnIdx = turns.findIndex((t) => t.messages.some((m) => m.role !== 'user' && m.id === anchorKey))
+        }
+        if (anchorTurnIdx === -1) {
+          throw new ChatDbNotFoundError(`Anchor groupKey ${anchorKey} does not belong to topic ${request.topicId}`)
+        }
+
+        const anchorTurn = turns[anchorTurnIdx]
+        const anchorStartId = anchorTurn.messages[0].id
+        const anchorStartIdx = allMessages.findIndex((m) => m.id === anchorStartId)
+        if (anchorStartIdx === -1) {
+          throw new ChatDbNotFoundError(`Anchor groupKey ${anchorKey} does not belong to topic ${request.topicId}`)
+        }
+
+        const closureMessages = allMessages.slice(anchorStartIdx)
+        const closureIds = closureMessages.map((m) => m.id)
+        const blockMap = repos.blocks.listByMessages(closureIds)
+        const allBlocks: MessageBlockData[] = []
+        for (const id of closureIds) {
+          allBlocks.push(...(blockMap.get(id) ?? []))
+        }
+        const wireMessages = messagesToWire(closureMessages)
+        const wireBlocks = blocksToWire(allBlocks)
+        const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
+
+        const firstMessageId = closureMessages.length > 0 ? closureMessages[0].id : null
+        const lastMessageId = closureMessages.length > 0 ? closureMessages[closureMessages.length - 1].id : null
+
+        return {
+          messages: messagesWithBlocks,
+          blocks: wireBlocks,
+          closure: {
+            completeness: 'context-closure' as const,
+            topicId: request.topicId,
+            anchorGroupKey: request.anchorGroupKey,
+            firstMessageId,
+            lastMessageId,
+            returnedCount: closureMessages.length
+          }
+        }
+      })
+    }, `fetchContextClosure(${request.topicId}, ${request.anchorGroupKey})`)
   }
 
   /**

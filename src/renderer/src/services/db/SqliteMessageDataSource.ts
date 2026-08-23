@@ -45,6 +45,8 @@ import type {
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
+  FetchContextClosureRequest,
+  FetchContextClosureResponse,
   FetchMessagesRequest,
   FetchMessagesResponse,
   FetchMessagesWindowRequest,
@@ -113,6 +115,7 @@ export interface ChatDbApi {
   fetchMessages(request: FetchMessagesRequest): Promise<ChatDbResult<FetchMessagesResponse>>
   fetchMessagesWindow?(request: FetchMessagesWindowRequest): Promise<ChatDbResult<FetchMessagesWindowResponse>>
   fetchAnswerGroup?(request: FetchAnswerGroupRequest): Promise<ChatDbResult<FetchAnswerGroupResponse>>
+  fetchContextClosure?(request: FetchContextClosureRequest): Promise<ChatDbResult<FetchContextClosureResponse>>
   branchMessagesToTopic?(request: BranchMessagesToTopicRequest): Promise<ChatDbResult<BranchMessagesToTopicResponse>>
   insertMessagesAfterAnchor?(
     request: InsertMessagesAfterAnchorRequest
@@ -889,6 +892,30 @@ export class SqliteMessageDataSource implements MessageDataSource {
     }
     const request: FetchAnswerGroupRequest = cloneForWire({ topicId, anchorMessageId })
     return unwrap(await this.api.fetchAnswerGroup(request))
+  }
+
+  // ============ Context closure READ (S6.3 R-06, read-only) ============
+
+  /**
+   * Fetch the authoritative context closure for a renderer-owned anchorGroupKey.
+   *
+   * One Main SQLite transaction validates topic/anchor membership and resolves
+   * the anchor turn, then returns the slice from the first message of that
+   * turn through newest with complete blocks. Completeness is always
+   * 'context-closure'. No mutation, no timestamp dispatch, no fallback.
+   * Structured failure throws ChatDbResultError; transport rejection propagates unchanged.
+   */
+  async fetchContextClosure(request: FetchContextClosureRequest): Promise<FetchContextClosureResponse> {
+    if (!this.api.fetchContextClosure) {
+      throw new Error('ChatDb API unavailable: context-closure read not exposed')
+    }
+    const wireRequest = cloneForWire(request as unknown as JsonObject) as unknown as FetchContextClosureRequest
+    const result = unwrap(await this.api.fetchContextClosure(wireRequest))
+    return {
+      messages: result.messages as unknown as FetchContextClosureResponse['messages'],
+      blocks: result.blocks as unknown as FetchContextClosureResponse['blocks'],
+      closure: result.closure
+    } as unknown as FetchContextClosureResponse
   }
 
   // ============ Search (Phase 5.2A, read-only) ============

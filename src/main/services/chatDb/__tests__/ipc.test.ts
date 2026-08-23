@@ -13,6 +13,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+vi.unmock('node:fs')
+vi.unmock('node:os')
+vi.unmock('node:path')
+vi.unmock('node:crypto')
+
 // Mock electron's ipcMain — must use vi.hoisted for mock data accessible in factory
 const { handlers, mockHandle, mockRemoveHandler } = vi.hoisted(() => {
   const h = new Map<string, (...args: any[]) => any>()
@@ -35,15 +40,17 @@ vi.mock('electron', () => ({
 }))
 
 // Mock ChatDbService
-const { mockIsInitialised, mockGetDatabase } = vi.hoisted(() => ({
+const { mockIsInitialised, mockGetDatabase, mockGetSqlite } = vi.hoisted(() => ({
   mockIsInitialised: vi.fn(() => false),
-  mockGetDatabase: vi.fn()
+  mockGetDatabase: vi.fn(),
+  mockGetSqlite: vi.fn()
 }))
 
 vi.mock('../index', () => ({
   chatDbService: {
     isInitialised: mockIsInitialised,
-    getDatabase: mockGetDatabase
+    getDatabase: mockGetDatabase,
+    getSqlite: mockGetSqlite
   }
 }))
 
@@ -73,6 +80,10 @@ vi.mock('@logger', () => ({
   }
 }))
 
+import * as realFs from 'node:fs'
+import * as realOs from 'node:os'
+import * as realPath from 'node:path'
+
 import { resetDiagnosticCounters } from '@shared/diagnostics/sendTiming'
 import { IpcChannel } from '@shared/IpcChannel'
 
@@ -98,7 +109,7 @@ describe('ChatDb IPC Registration', () => {
 
   it('registers exactly 40 handlers', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
   })
 
   // =========================================================================
@@ -160,7 +171,9 @@ describe('ChatDb IPC Registration', () => {
       // S6.2c-1: branch by stable anchor
       IpcChannel.ChatDb_BranchMessagesToTopic,
       // S6.2c-2: insert after stable anchor
-      IpcChannel.ChatDb_InsertMessagesAfterAnchor
+      IpcChannel.ChatDb_InsertMessagesAfterAnchor,
+      // S6.3 R-06: authoritative context closure READ
+      IpcChannel.ChatDb_FetchContextClosure
     ]
 
     for (const channel of expectedChannels) {
@@ -174,11 +187,11 @@ describe('ChatDb IPC Registration', () => {
 
   it('disposer removes all handlers', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
 
     disposer()
     expect(handlers.size).toBe(0)
-    expect(mockRemoveHandler).toHaveBeenCalledTimes(41)
+    expect(mockRemoveHandler).toHaveBeenCalledTimes(42)
   })
 
   // =========================================================================
@@ -468,6 +481,135 @@ describe('ChatDb IPC Registration', () => {
     expect(result).not.toMatchObject({ ok: false, error: { code: 'VALIDATION_ERROR' } })
   })
 
+  it('fetch-context-closure rejects malformed request at the IPC boundary (S6.3 R-06)', async () => {
+    disposer = registerChatDbIpc()
+
+    const handler = handlers.get(IpcChannel.ChatDb_FetchContextClosure)!
+    // Missing anchorGroupKey → contract rejects before dispatch
+    const missingAnchor = await handler({}, { topicId: 't-1' } as any)
+    expect(missingAnchor.ok).toBe(false)
+    expect(missingAnchor.error.code).toBe('VALIDATION_ERROR')
+
+    // Empty anchorGroupKey → validation error
+    const emptyAnchor = await handler({}, { topicId: 't-1', anchorGroupKey: '' } as any)
+    expect(emptyAnchor.ok).toBe(false)
+    expect(emptyAnchor.error.code).toBe('VALIDATION_ERROR')
+
+    // Unknown field → validation error
+    const unknownField = await handler({}, { topicId: 't-1', anchorGroupKey: 'g1', unknown: 1 } as any)
+    expect(unknownField.ok).toBe(false)
+    expect(unknownField.error.code).toBe('VALIDATION_ERROR')
+
+    // Non-plain object request → validation error
+    const notObject = await handler({}, 'not-an-object' as any)
+    expect(notObject.ok).toBe(false)
+    expect(notObject.error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('fetch-context-closure valid request reaches unavailable-database path (S6.3 R-06)', async () => {
+    mockIsInitialised.mockReturnValue(false)
+    disposer = registerChatDbIpc()
+
+    const handler = handlers.get(IpcChannel.ChatDb_FetchContextClosure)!
+    const result = await handler({}, { topicId: 't-1', anchorGroupKey: 'g1' })
+
+    // Validation passes; DB not initialised → UNAVAILABLE, never VALIDATION_ERROR
+    expect(result.ok).toBe(false)
+    expect(result.error.code).toBe('UNAVAILABLE')
+    expect(result.error.retryable).toBe(false)
+    expect(result).not.toMatchObject({ ok: false, error: { code: 'VALIDATION_ERROR' } })
+  })
+
+  it('fetch-context-closure initialized-db path validates a real closure envelope (S6.3 R-06)', async () => {
+    // Real SQLite in-memory DB with migrations — harness supports it without broad setup
+    // via the same better-sqlite3/drizzle stack used by contextClosure.test.ts.
+    const betterSqlite3Mod = await import('better-sqlite3')
+    const Database: any = (betterSqlite3Mod as any).default ?? betterSqlite3Mod
+    const { drizzle } = await import('drizzle-orm/better-sqlite3')
+    const { runMigrations } = await import('../migration')
+    const schema = await import('../schema')
+    const { validateChatDbResult } = await import('@shared/chatDb')
+
+    const tmpDir = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'chatdb-ipc-closure-'))
+    const dbPath = realPath.join(tmpDir, 'test.db')
+    const sqlite = new Database(dbPath)
+    sqlite.pragma('journal_mode = WAL')
+    sqlite.pragma('foreign_keys = ON')
+    const db = drizzle(sqlite, { schema })
+    runMigrations(db, sqlite)
+
+    // Seed a minimal topic with one user turn and one assistant turn
+    const { ChatDbAggregateService: Agg } = await import('../ChatDbAggregateService')
+    const agg = new Agg(db, sqlite)
+    const topicId = 't-ipc-closure'
+    // Ensure topic exists via direct append (ensures topic)
+    const msgU1 = {
+      id: 'u1',
+      topicId,
+      role: 'user',
+      content: 'u1',
+      status: 'success',
+      createdAt: new Date().toISOString()
+    }
+    const msgA1 = {
+      id: 'a1',
+      topicId,
+      role: 'assistant',
+      askId: 'u1',
+      content: 'a1',
+      status: 'success',
+      createdAt: new Date().toISOString()
+    }
+    const blockU1 = {
+      id: 'b-u1',
+      messageId: 'u1',
+      type: 'main_text',
+      content: 'b-u1',
+      status: 'success',
+      createdAt: new Date().toISOString()
+    }
+    const blockA1 = {
+      id: 'b-a1',
+      messageId: 'a1',
+      type: 'main_text',
+      content: 'b-a1',
+      status: 'success',
+      createdAt: new Date().toISOString()
+    }
+    agg.appendMessage(topicId, msgU1 as any, [blockU1 as any])
+    agg.appendMessage(topicId, msgA1 as any, [blockA1 as any])
+
+    mockIsInitialised.mockReturnValue(true)
+    mockGetDatabase.mockReturnValue(db as any)
+    mockGetSqlite.mockReturnValue(sqlite)
+    disposer = registerChatDbIpc()
+
+    const handler = handlers.get(IpcChannel.ChatDb_FetchContextClosure)!
+    const result = await handler({}, { topicId, anchorGroupKey: 'u1' })
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.value.closure.completeness).toBe('context-closure')
+      expect(result.value.closure.topicId).toBe(topicId)
+      expect(result.value.closure.anchorGroupKey).toBe('u1')
+      expect(result.value.closure.returnedCount).toBe(2)
+      expect(result.value.closure.firstMessageId).toBe('u1')
+      expect(result.value.closure.lastMessageId).toBe('a1')
+      expect(result.value.messages.map((m: any) => m.id)).toEqual(['u1', 'a1'])
+      // Must pass shared contract validation
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', result)).not.toThrow()
+    }
+
+    // Cleanup
+    try {
+      sqlite.close()
+    } catch {}
+    realFs.rmSync(tmpDir, { recursive: true, force: true })
+    mockIsInitialised.mockReturnValue(false)
+    mockGetDatabase.mockReset()
+    mockGetSqlite.mockReset()
+  })
+
   // =========================================================================
   // Result envelope structure
   // =========================================================================
@@ -546,7 +688,7 @@ describe('ChatDb IPC Registration', () => {
   it('uses ipcMain.handle for registration', () => {
     disposer = registerChatDbIpc()
 
-    expect(mockHandle).toHaveBeenCalledTimes(41)
+    expect(mockHandle).toHaveBeenCalledTimes(42)
     for (const call of mockHandle.mock.calls) {
       expect(typeof call[0]).toBe('string')
       expect(typeof call[1]).toBe('function')
@@ -627,14 +769,14 @@ describe('ChatDb IPC Registration', () => {
 
   it('preserves exactly 40 registrations after multiple calls', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
 
     // Call disposer, re-register
     disposer()
     expect(handlers.size).toBe(0)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
   })
 
   // =========================================================================
@@ -643,15 +785,15 @@ describe('ChatDb IPC Registration', () => {
 
   it('re-registration disposes prior handlers before installing new ones', () => {
     const disposer1 = registerChatDbIpc()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
 
     // Register again without calling disposer1 — should auto-dispose
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
 
     // disposer1 is now stale — calling it should be a no-op
     disposer1()
-    expect(handlers.size).toBe(41) // still 40
+    expect(handlers.size).toBe(42) // still 40
 
     // The current disposer works
     disposer()
@@ -663,11 +805,11 @@ describe('ChatDb IPC Registration', () => {
 
     // Re-register — disposer1 becomes stale
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
 
     // Stale disposer1 is a no-op
     disposer1()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
 
     // Active disposer still works
     disposer()
@@ -676,19 +818,19 @@ describe('ChatDb IPC Registration', () => {
 
   it('three sequential registrations produce exactly 40 handlers each time', () => {
     const d1 = registerChatDbIpc()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
 
     const d2 = registerChatDbIpc()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
 
     // Stale discarders are no-ops
     d1()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
     d2()
-    expect(handlers.size).toBe(41)
+    expect(handlers.size).toBe(42)
 
     // Active disposer works
     disposer()

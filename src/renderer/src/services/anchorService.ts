@@ -2,6 +2,8 @@ import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { buildContextTurns } from '@renderer/services/contextTurnService'
 import type { ContextWindowAnchorMap } from '@renderer/services/contextWindowService'
 import { resolveAnchorEstablishDecision } from '@renderer/services/contextWindowService'
+import { dbService } from '@renderer/services/db'
+import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
 import type { RootState } from '@renderer/store'
 import { updateAssistantSettings } from '@renderer/store/assistants'
 import { selectMessagesForTopic } from '@renderer/store/newMessage'
@@ -207,6 +209,18 @@ function isActiveAnchorResolvableInMessages(
  * topic never receives an anchor. Ordinary startup with a valid anchor
  * dispatches nothing.
  *
+ * Viewport-aware authority distinction (R-06 fix): when an active anchor is
+ * not resolvable in the current viewport projection (truncated latest window,
+ * e.g. 20 rows of a 50-row topic), viewport absence alone is not proof of
+ * invalidity. The helper probes the authoritative Main closure via the
+ * existing typed `fetchContextClosure` read path: a successful closure read
+ * proves the anchor exists somewhere in the authoritative topic and the
+ * viewport miss is preserved without repair; a NOT_FOUND proves a ghost
+ * anchor and the deterministic default repair proceeds. Transport failures
+ * fail closed (preserve current anchor, no spurious repair). Missing or
+ * non-active anchors skip the probe and go directly to the deterministic
+ * repair path. Empty topics still remain anchorless.
+ *
  * This is the bounded hook for:
  *   - first establishment in `sendMessage` (after the user message is
  *     persisted + added to Redux), and
@@ -219,31 +233,132 @@ function isActiveAnchorResolvableInMessages(
  * Note: contains a side-effect (dispatch); it is the integration glue kept
  * separate from the pure decision helpers in `contextWindowService`.
  */
-export function ensureTopicAnchorEstablished(
+// In-flight deduplication: coalesce overlapping establishment calls for the same assistant/topic.
+// The guard is local to anchorService; it does not change public anchor semantics.
+// The post-await re-read guard below is the required stale-repair protection — this
+// in-flight map is the smallest additional mechanism to make overlapping ghosts at-most-once.
+const inFlightRepairs = new Map<string, Promise<void>>()
+
+export async function ensureTopicAnchorEstablished(
   dispatch: (action: { type: string; payload?: unknown }) => void,
   getState: () => RootState,
   assistantId: string,
   topicId: string
-): void {
-  const state = getState()
-  const assistant = state.assistants.assistants.find((asst) => asst.id === assistantId)
-  if (!assistant) {
-    return
+): Promise<void> {
+  const key = `${assistantId}:${topicId}`
+  const existing = inFlightRepairs.get(key)
+  if (existing) {
+    return existing
   }
-  const settings = getAssistantSettings(assistant)
-  const messages = selectMessagesForTopic(state, topicId)
-  if (isActiveAnchorResolvableInMessages(settings.contextWindowAnchor?.[topicId], messages)) {
-    return
-  }
+  const task = (async (): Promise<void> => {
+    const state = getState()
+    const assistant = state.assistants.assistants.find((asst) => asst.id === assistantId)
+    if (!assistant) {
+      return
+    }
+    const settings = getAssistantSettings(assistant)
+    const messages = selectMessagesForTopic(state, topicId)
+    const activeAnchor = settings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+    if (isActiveAnchorResolvableInMessages(activeAnchor, messages)) {
+      return
+    }
 
-  const turns = buildContextTurns(messages)
-  const decision = resolveAnchorEstablishDecision(settings.contextWindowAnchor, topicId, turns, settings.contextCount)
-  if (decision.changed) {
-    dispatch(
-      updateAssistantSettings({
-        assistantId,
-        settings: { contextWindowAnchor: decision.anchorMap }
-      })
-    )
+    const anchorForProbe = settings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+    if (anchorForProbe?.kind === 'active') {
+      const probedGroupKey = anchorForProbe.groupKey
+      // Active but outside viewport — distinguish ghost from valid out-of-viewport.
+      try {
+        if (typeof dbService?.fetchContextClosure === 'function') {
+          await dbService.fetchContextClosure({ topicId, anchorGroupKey: probedGroupKey })
+          // Authoritative anchor exists → valid out-of-viewport, preserve.
+          // Re-read current anchor before preserving: if it changed during the probe,
+          // do not overwrite the newer value (still preserve by returning without dispatch).
+          const freshState = getState()
+          const freshAssistant = freshState.assistants.assistants.find((asst) => asst.id === assistantId)
+          if (!freshAssistant) {
+            return
+          }
+          const freshSettings = getAssistantSettings(freshAssistant)
+          const freshAnchor = freshSettings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+          if (freshAnchor?.kind !== 'active' || freshAnchor.groupKey !== probedGroupKey) {
+            return
+          }
+          const freshMessages = selectMessagesForTopic(freshState, topicId)
+          if (isActiveAnchorResolvableInMessages(freshAnchor, freshMessages)) {
+            return
+          }
+          return
+        }
+      } catch (e) {
+        const code = (e as { code?: unknown })?.code
+        const codeStr = typeof code === 'string' ? code : String(code ?? '')
+        const msgStr = e instanceof Error ? e.message : String(e ?? '')
+        const isNotFound =
+          (e instanceof ChatDbResultError && (e.code === 'NOT_FOUND' || e.code.includes('NOT_FOUND'))) ||
+          codeStr.includes('NOT_FOUND') ||
+          msgStr.includes('NOT_FOUND')
+        if (isNotFound) {
+          // Ghost anchor — fall through to deterministic repair only after
+          // re-reading current state. This prevents a stale pre-await snapshot
+          // from overwriting a newer anchor established concurrently.
+          const freshState = getState()
+          const freshAssistant = freshState.assistants.assistants.find((asst) => asst.id === assistantId)
+          if (!freshAssistant) {
+            return
+          }
+          const freshSettings = getAssistantSettings(freshAssistant)
+          const freshAnchor = freshSettings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+          if (freshAnchor?.kind !== 'active' || freshAnchor.groupKey !== probedGroupKey) {
+            return
+          }
+          const freshMessages = selectMessagesForTopic(freshState, topicId)
+          if (isActiveAnchorResolvableInMessages(freshAnchor, freshMessages)) {
+            return
+          }
+          if (freshMessages.length === 0) {
+            return
+          }
+          const freshTurns = buildContextTurns(freshMessages)
+          const decision = resolveAnchorEstablishDecision(
+            freshSettings.contextWindowAnchor,
+            topicId,
+            freshTurns,
+            freshSettings.contextCount
+          )
+          if (decision.changed) {
+            dispatch(
+              updateAssistantSettings({
+                assistantId,
+                settings: { contextWindowAnchor: decision.anchorMap }
+              })
+            )
+          }
+          return
+        } else {
+          // Transport/unknown failure — fail closed, preserve current anchor.
+          // Re-read guard: if anchor changed during probe, still preserve (no dispatch).
+          return
+        }
+      }
+    }
+
+    const turns = buildContextTurns(messages)
+    const decision = resolveAnchorEstablishDecision(settings.contextWindowAnchor, topicId, turns, settings.contextCount)
+    if (decision.changed) {
+      dispatch(
+        updateAssistantSettings({
+          assistantId,
+          settings: { contextWindowAnchor: decision.anchorMap }
+        })
+      )
+    }
+  })()
+  inFlightRepairs.set(key, task)
+  try {
+    await task
+  } finally {
+    if (inFlightRepairs.get(key) === task) {
+      inFlightRepairs.delete(key)
+    }
   }
 }
