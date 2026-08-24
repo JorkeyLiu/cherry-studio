@@ -90,6 +90,7 @@
     "bench:main:native": "pnpm native:run node -- vitest bench --run --project main-native",
     "bench:search-stage": "SEARCH_STAGE_BENCH=1 SEARCH_BENCH_SCALE=50k pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/searchStage.bench.ts",
     "bench:search-stage-plan": "SEARCH_STAGE_PLAN_BENCH=1 SEARCH_BENCH_SCALE=50k pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/searchStagePlan.bench.ts",
+    "bench:sort-order-shift": "SORT_ORDER_SHIFT_BENCH=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/sortOrderShift.bench.ts",
     "bench:stream-persist": "STREAM_PERSIST_BENCH=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/streamPersistDifferential.bench.ts",
     "bench:logical-payload": "pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/logicalPayload.bench.ts",
     "bench:pinned-working-set": "pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/pinnedWorkingSet.bench.ts",
