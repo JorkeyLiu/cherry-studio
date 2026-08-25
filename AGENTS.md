@@ -17,7 +17,7 @@ This is the canonical, always-on repository contract for AI coding assistants wo
 - **Log centrally**: Route all logging through `loggerService` with the right context — no `console.log`.
 - **Research via subagent**: Lean on subagent research for external docs, APIs, news, and references.
 - **Always propose before executing**: Before making any changes, clearly explain your planned approach and wait for explicit user approval to ensure alignment and prevent unwanted modifications.
-- **Lint, test, and format before completion**: Coding tasks are only complete after `pnpm lint`, `pnpm test`, and `pnpm format` succeed.
+- **Lint, test, and format before completion**: Coding and code-surface tasks are only complete after `pnpm lint`, `pnpm test`, and `pnpm format` succeed. Pure documentation/governance-only changes outside the gate input surface follow the Validation gates docs-only policy with focused structural checks instead.
 - **No autonomous Git operations**: Do not commit, amend, push, create PRs, or rewrite Git history unless the user explicitly authorizes that operation. User authorization is required even after implementation and validation complete; the conventional commit and signoff rules below apply only to explicitly authorized commits.
 - **Write conventional commits**: Commit small, focused changes using Conventional Commit messages (e.g., `feat:`, `fix:`, `refactor:`, `docs:`).
 - **Sign commits**: Use `git commit --signoff` as required by contributor guidelines.
@@ -69,7 +69,7 @@ The single native module, `better-sqlite3`, is compiled for **either** Node 24 (
 - **Install**: `pnpm install` — all project dependencies (requires Node ≥24.11.1, pnpm 10.27.0)
 - **Development**: `pnpm dev` — Electron app in development mode with hot reload
 - **Debug**: `pnpm debug` — debugging via `chrome://inspect` on port 9222
-- **Build Check**: `pnpm build:check` — **REQUIRED** before commits (`pnpm lint && pnpm openapi:check && pnpm test`); run `pnpm i18n:sync` first if there are i18n sort issues, `pnpm format` first if there are formatting issues
+- **Build Check**: `pnpm build:check` — **REQUIRED** before code-surface commits (`pnpm lint && pnpm openapi:check && pnpm test`); pure documentation/governance-only changes outside the gate input surface follow the exception defined in Validation gates; run `pnpm i18n:sync` first if there are i18n sort issues, `pnpm format` first if there are formatting issues
 - **Full Build**: `pnpm build` — TypeScript typecheck + electron-vite build
 - **Test**: `pnpm test` — all Vitest tests under the Node ABI lane (main + renderer + aiCore + shared + scripts + e2e-utils); the lane is self-ensured and the Electron ABI is restored locally afterwards
   - `pnpm test:main` — Main process tests only (Node environment)
@@ -89,6 +89,7 @@ The single native module, `better-sqlite3`, is compiled for **either** Node 24 (
 - Full `pnpm test` remains part of `pnpm build:check`; focused `test:*` suites supplement, but never replace, the full gate.
 - Each required aggregate gate must produce a trustworthy original exit code for the exact worktree state. Truncated output, printed sub-suite PASS lines, or a timeout/killed/unknown status are not proof of success.
 - Use the `delivery-validation` skill for execution, retry, evidence reuse, and cleanup details.
+- Pure documentation/governance-only changes (e.g., `AGENTS.md`, `docs/`, skills markdown, governance ADRs) may skip `pnpm format`, `pnpm lint`, `pnpm test`, and `pnpm build:check` only when no gate inputs changed — no source, tests, config, package scripts, lockfiles/dependencies, generated contracts, i18n inputs, or API specs. Such changes still require `git diff --check`, intended-file/status/diff inspection, and relevant link/reference/section/symlink/skills checks (including `CLAUDE.md` symlink where applicable). Valid trustworthy full-gate evidence for the unchanged code surface may be reused; if no valid evidence exists, run the full gates. All other changes remain subject to `pnpm format`, `pnpm lint`, `pnpm test`, and `pnpm build:check`.
 
 ## Repository Mental Model
 
