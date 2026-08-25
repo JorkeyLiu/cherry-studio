@@ -769,7 +769,7 @@ describe('SearchResults (SQLite search)', () => {
       expect(calledMsg.id).toBe('message-1')
     })
 
-    it('stale/cancel: a second rapid click discards the first fetch result (no double publish, no whole-topic)', async () => {
+    it('stale/cancel under per-topic FIFO serialization: a second rapid click queues behind the in-flight read; only the latest generation publishes (no double publish, no whole-topic)', async () => {
       const anchor1 = makeItem(1)
       const deferred1 = (() => {
         let resolve!: (v: any) => void
@@ -806,18 +806,26 @@ describe('SearchResults (SQLite search)', () => {
       searchMessagesMock.mockResolvedValue(makeResponse([anchor1]))
       const { onMessageClick } = renderComponent('hello')
       await waitFor(() => expect(screen.getAllByTestId('result-item')).toHaveLength(1))
-      // fire first click
+      // fire first click — read 1 starts and holds the per-topic FIFO queue
       fireEvent.click(screen.getByText('hello'))
       await new Promise((r) => setTimeout(r, 0))
-      // second rapid click bumps generation
+      expect(fetchMessagesWindowMock).toHaveBeenCalledTimes(1)
+      // second rapid click bumps generation but its around-read is serialized
+      // behind read 1: the second dbService.fetchMessagesWindow call must not
+      // start while read 1 is still in flight (real windowReadQueue consumer)
       fireEvent.click(screen.getByText('hello'))
-      // Resolve second (newer generation) first — should publish
+      await new Promise((r) => setTimeout(r, 0))
+      expect(fetchMessagesWindowMock).toHaveBeenCalledTimes(1)
+      // Pre-resolve both responses. FIFO advances the queue only after read 1
+      // settles: read 1 (older generation) is discarded by the generation guard,
+      // then read 2 starts, consumes the already-resolved win2, and publishes.
+      deferred1.resolve(win1)
       deferred2.resolve(win2)
+      await waitFor(() => expect(fetchMessagesWindowMock).toHaveBeenCalledTimes(2))
       await waitFor(() => expect(onMessageClick).toHaveBeenCalledTimes(1))
       expect((onMessageClick as any).mock.calls[0][0].id).toBe('message-1')
       const dispatchCallsAfterSecond = storeDispatchMock.mock.calls.length
-      // Now resolve stale first — must be ignored (no additional dispatch or callback)
-      deferred1.resolve(win1)
+      // No further publication or navigation after both reads have settled
       await new Promise((r) => setTimeout(r, 0))
       expect(onMessageClick).toHaveBeenCalledTimes(1)
       expect(storeDispatchMock.mock.calls.length).toBe(dispatchCallsAfterSecond)

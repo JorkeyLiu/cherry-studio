@@ -86,6 +86,7 @@ import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
+import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
 import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse } from '@shared/chatDb'
 import { last } from 'lodash'
 import {
@@ -1113,7 +1114,14 @@ const Messages = ({
         if (!isCurrentLoad('older', loadToken, topicGeneration)) return
         try {
           const { dbService } = await import('@renderer/services/db')
-          const response = await dbService.fetchMessagesWindow(request)
+          // Phase 5 bounded slice: same-topic window reads are FIFO-serialized
+          // via runTopicWindowRead (bootstrap latest + around pagination share
+          // the per-topic queue). All existing stale-discard guards below
+          // (topic/generation/deletion/isCurrentLoad) are unchanged — the
+          // serializer only orders execution of the IPC read.
+          const response = await runTopicWindowRead(topicIdAtStart, request.kind, () =>
+            dbService.fetchMessagesWindow(request)
+          )
 
           // stale discard — topic changed, generation advanced, or deleted during fetch
           if (topic.id !== topicIdAtStart) {
@@ -1251,7 +1259,14 @@ const Messages = ({
         if (!isCurrentLoad('newer', loadToken, topicGeneration)) return
         try {
           const { dbService } = await import('@renderer/services/db')
-          const response = await dbService.fetchMessagesWindow(request)
+          // Phase 5 bounded slice: same-topic window reads are FIFO-serialized
+          // via runTopicWindowRead (bootstrap latest + around pagination share
+          // the per-topic queue). All existing stale-discard guards below
+          // (topic/generation/deletion/isCurrentLoad) are unchanged — the
+          // serializer only orders execution of the IPC read.
+          const response = await runTopicWindowRead(topicIdAtStart, request.kind, () =>
+            dbService.fetchMessagesWindow(request)
+          )
 
           if (topic.id !== topicIdAtStart) {
             viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })

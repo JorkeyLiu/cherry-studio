@@ -63,6 +63,7 @@ import {
   resetAssistantMessage
 } from '@renderer/utils/messageUtils/create'
 import { getTopicQueue, waitForTopicQueue } from '@renderer/utils/queue'
+import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
 import type {
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
@@ -1766,7 +1767,14 @@ export const loadTopicMessagesThunk =
       latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
       const deletionGenAtStart = captureDeletionGeneration(topicId)
 
-      const response: FetchMessagesWindowResponse = await dbService.fetchMessagesWindow(request)
+      // Phase 5 bounded slice: same-topic window reads are FIFO-serialized
+      // per topic by runTopicWindowRead (latest bootstrap + around pagination
+      // share the same per-topic queue). Stale-token discard below still
+      // applies — the serializer only orders execution, it never coalesces
+      // distinct reads and never changes validation/publication semantics.
+      const response: FetchMessagesWindowResponse = await runTopicWindowRead(topicId, request.kind, () =>
+        dbService.fetchMessagesWindow(request)
+      )
 
       // S6.1 same-topic stale-bootstrap guard: discard when topic's latest token no longer matches.
       // Must run before validation, completeness-map update, or staged publication.

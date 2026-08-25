@@ -97,6 +97,15 @@ vi.mock('@renderer/utils/queue', () => ({
   waitForTopicQueue: vi.fn()
 }))
 
+// Phase 5 bounded slice: the per-topic FIFO serializer is exercised directly
+// in utils/__tests__/windowReadQueue.test.ts. Here it executes the read
+// immediately so the S6.1 stale-token guard keeps validating overlapping
+// same-topic completion (the historical out-of-order case that serialization
+// makes structurally impossible in production).
+vi.mock('@renderer/utils/windowReadQueue', () => ({
+  runTopicWindowRead: (_topicId: string, _kind: string, read: () => unknown) => read()
+}))
+
 vi.mock('@renderer/hooks/useModel', () => ({ getModel: vi.fn() }))
 
 vi.mock('@renderer/services/ApiService', () => ({ transformMessagesAndFetch: vi.fn() }))

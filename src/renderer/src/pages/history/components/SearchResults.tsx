@@ -32,6 +32,7 @@ import {
   type KeywordMatchMode,
   splitKeywordsToTerms
 } from '@renderer/utils/keywordSearch'
+import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
 import type { FetchMessagesWindowRequest, SearchResultItem } from '@shared/chatDb'
 import { normalizeText, stripMarkdownFormatting } from '@shared/searchTextNormalization'
 import { List, Pagination, Segmented, Spin, Typography } from 'antd'
@@ -547,7 +548,12 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
       }
       const deletionGenAtStart = captureDeletionGeneration(topicId)
       try {
-        const response = await dbService.fetchMessagesWindow(request)
+        // Phase 5 bounded slice: search-hit around reads share the same per-topic
+        // FIFO serializer as the latest bootstrap (loadTopicMessagesThunk) and the
+        // Messages older/newer pagination — same-topic window reads can never
+        // overlap or complete out of order. All generation/deletion guards below
+        // are unchanged; the serializer only orders execution of the IPC read.
+        const response = await runTopicWindowRead(topicId, request.kind, () => dbService.fetchMessagesWindow(request))
         if (isDeletionStale(topicId, deletionGenAtStart)) return
         if (generation !== searchHitGenerationRef.current) return
         if (!isValidWindowResponse(request, response)) {
