@@ -23,6 +23,7 @@ import { randomUUID } from 'node:crypto'
 import { loggerService } from '@logger'
 import type {
   AppendDiagnostics,
+  EmptyTrashTopicsResponse,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
   FetchContextClosureRequest,
@@ -31,9 +32,13 @@ import type {
   FetchMessagesWindowResponse,
   FileCleanupResult,
   FileReferenceWire,
+  HardDeleteTopicResponse,
   JsonObject,
+  PurgeExpiredTopicsResponse,
+  ResetAssistantTopicsResponse,
   SegmentWire,
-  StreamWriteDiagnostics
+  StreamWriteDiagnostics,
+  TopicWire
 } from '@shared/chatDb'
 import type { ChatDbResult } from '@shared/chatDb'
 import type { SearchMessagesRequest, SearchMessagesResponse } from '@shared/chatDb'
@@ -1633,7 +1638,7 @@ export class ChatDbAggregateService {
    *
    * Missing topic: no-op with empty cleanup result.
    */
-  hardDeleteTopic(topicId: string): ChatDbResult<FileCleanupResult> {
+  hardDeleteTopic(topicId: string): ChatDbResult<HardDeleteTopicResponse> {
     return wrapResult(() => {
       // LOCK-004: exact deleted topic IDs are collected inside the transaction.
       const deletedTopicIds: string[] = []
@@ -1643,7 +1648,7 @@ export class ChatDbAggregateService {
         // Check topic exists
         const existing = repos.topics.getById(topicId)
         if (!existing.found) {
-          return { affectedFileIds: [], remainingReferenceCounts: {} }
+          return { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
         }
         deletedTopicIds.push(topicId)
 
@@ -1667,7 +1672,7 @@ export class ChatDbAggregateService {
       // throws before this point, so post-commit cleanup is never reached.
       this.cleanDeletedTopicTraces(deletedTopicIds)
 
-      return cleanup
+      return { ...cleanup, deletedTopicIds: [...deletedTopicIds] }
     }, `hardDeleteTopic(${topicId})`)
   }
 
@@ -1701,7 +1706,7 @@ export class ChatDbAggregateService {
    * - LOCK-PRIV-TRASH: the cutoff value never appears in the validation
    *   message, the wrapResult context, or any log — fixed static text only.
    */
-  purgeExpiredTopics(cutoffTimestamp: string): ChatDbResult<FileCleanupResult> {
+  purgeExpiredTopics(cutoffTimestamp: string): ChatDbResult<PurgeExpiredTopicsResponse> {
     return wrapResult(() => {
       // LOCK-TRASH-10/13: the cutoff is caller-generated and shared-validated
       // at the IPC boundary; a fail-safe strict parse here rejects an invalid
@@ -1795,7 +1800,7 @@ export class ChatDbAggregateService {
           )
       }
 
-      return cleanup
+      return { ...cleanup, deletedTopicIds: [...deletedTopicIds] }
     }, `purgeExpiredTopics()`)
   }
 
@@ -1808,7 +1813,7 @@ export class ChatDbAggregateService {
    * aggregate FileCleanupResult. Any mid-operation failure rolls back the
    * entire transaction — no partial commit.
    */
-  emptyTrashTopics(assistantId: string): ChatDbResult<FileCleanupResult> {
+  emptyTrashTopics(assistantId: string): ChatDbResult<EmptyTrashTopicsResponse> {
     return wrapResult(() => {
       // LOCK-004: exact deleted topic IDs collected inside the transaction.
       const deletedTopicIds: string[] = []
@@ -1854,7 +1859,7 @@ export class ChatDbAggregateService {
       // before this point, so post-commit cleanup is never reached.
       this.cleanDeletedTopicTraces(deletedTopicIds)
 
-      return cleanup
+      return { ...cleanup, deletedTopicIds: [...deletedTopicIds] }
     }, `emptyTrashTopics(${assistantId})`)
   }
 
@@ -1873,10 +1878,7 @@ export class ChatDbAggregateService {
     }, `transferTopicOwnership(${topicId}, ${assistantId})`)
   }
 
-  resetAssistantTopics(
-    assistantId: string,
-    replacementTopicId: string
-  ): ChatDbResult<{ cleanup: FileCleanupResult; replacementTopic: JsonObject }> {
+  resetAssistantTopics(assistantId: string, replacementTopicId: string): ChatDbResult<ResetAssistantTopicsResponse> {
     return wrapResult(() => {
       // LOCK-004: exact hard-deleted topic IDs are collected inside the
       // transaction; the replacement topic is excluded from both deletion
@@ -1911,7 +1913,8 @@ export class ChatDbAggregateService {
         const replacementTopic = repos.topics.ensure(replacementTopicId, assistantId)
         return {
           cleanup: buildFileCleanupResult(repos, [...new Set(affectedFileIds)]),
-          replacementTopic: topicToWireFull(replacementTopic)
+          replacementTopic: topicToWireFull(replacementTopic) as unknown as TopicWire,
+          deletedTopicIds: [...deletedTopicIds]
         }
       })
 

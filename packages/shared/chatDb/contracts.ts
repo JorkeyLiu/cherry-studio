@@ -950,6 +950,37 @@ function fileCleanupResultValidator(channel: string): (result: unknown) => void 
   }
 }
 
+/** Result validator for deletion responses that include exact deletedTopicIds. */
+function deletionCleanupResultValidator(channel: string): (result: unknown) => void {
+  return (result: unknown): void => {
+    validateResultEnvelope(result, channel)
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      if (obj.value === null || typeof obj.value !== 'object' || Array.isArray(obj.value)) {
+        throw new ValidationError(
+          'result.value',
+          `[${channel}] Expected FileCleanupResult with deletedTopicIds, got ${obj.value === null ? 'null' : typeof obj.value}`
+        )
+      }
+      const v = obj.value as Record<string, unknown>
+      validateStringArray(v.affectedFileIds, `result.value.affectedFileIds`)
+      validateJsonObject(v.remainingReferenceCounts, `result.value.remainingReferenceCounts`)
+      const counts = v.remainingReferenceCounts as Record<string, unknown>
+      for (const key of Object.keys(counts)) {
+        if (key.length === 0) {
+          throw new ValidationError(
+            `result.value.remainingReferenceCounts`,
+            `[${channel}] remainingReferenceCounts key must be a non-empty string`
+          )
+        }
+        validateNonNegativeInteger(counts[key], `result.value.remainingReferenceCounts.${key}`)
+      }
+      // Exact authoritative deleted IDs — string array, may be empty, never null/undefined, unknown keys rejected at envelope level already
+      validateStringArray(v.deletedTopicIds, `result.value.deletedTopicIds`)
+    }
+  }
+}
+
 const hardDeleteTopicContract: ChatDbContract = {
   allowedKeys: keySet('topicId'),
   validate(value: unknown): void {
@@ -957,7 +988,7 @@ const hardDeleteTopicContract: ChatDbContract = {
     const req = value as HardDeleteTopicRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
   },
-  validateResult: fileCleanupResultValidator('chatdb:hard-delete-topic')
+  validateResult: deletionCleanupResultValidator('chatdb:hard-delete-topic')
 }
 
 const purgeExpiredTopicsContract: ChatDbContract = {
@@ -967,7 +998,7 @@ const purgeExpiredTopicsContract: ChatDbContract = {
     const req = value as PurgeExpiredTopicsRequest
     validateIso8601Timestamp(req.cutoffTimestamp, 'request.cutoffTimestamp')
   },
-  validateResult: fileCleanupResultValidator('chatdb:purge-expired-topics')
+  validateResult: deletionCleanupResultValidator('chatdb:purge-expired-topics')
 }
 
 const emptyTrashTopicsContract: ChatDbContract = {
@@ -978,7 +1009,7 @@ const emptyTrashTopicsContract: ChatDbContract = {
     validateNonEmptyString(req.assistantId, 'request.assistantId')
   },
   // LOCK-531: one aggregate FileCleanupResult for the whole transaction.
-  validateResult: fileCleanupResultValidator('chatdb:empty-trash-topics')
+  validateResult: deletionCleanupResultValidator('chatdb:empty-trash-topics')
 }
 
 const transferTopicOwnershipContract: ChatDbContract = {
@@ -1022,6 +1053,17 @@ const resetAssistantTopicsContract: ChatDbContract = {
       throw new ValidationError('result.replacementTopic', '[chatdb:reset-assistant-topics] Expected TopicWire object')
     }
     validateTopicWireValueFields(replacement as Record<string, unknown>, 'chatdb:reset-assistant-topics')
+    // Exact authoritative deleted IDs — empty allowed, never undefined
+    validateStringArray(result.deletedTopicIds, 'result.value.deletedTopicIds')
+    // replacement topic must never be invalidated — enforce at the shared
+    // contract boundary so a malformed envelope is fail-closed
+    const replacementId = (replacement as Record<string, unknown>).id as string
+    if ((result.deletedTopicIds as string[]).includes(replacementId)) {
+      throw new ValidationError(
+        'result.value.deletedTopicIds',
+        '[chatdb:reset-assistant-topics] deletedTopicIds must not contain replacementTopic.id'
+      )
+    }
   }
 }
 

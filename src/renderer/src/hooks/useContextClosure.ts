@@ -9,6 +9,7 @@ import {
   setCachedContextClosureWithFingerprint
 } from '@renderer/services/contextClosure'
 import { dbService } from '@renderer/services/db'
+import { captureDeletionGeneration, isDeletionStale } from '@renderer/services/topicDeletionInvalidation'
 import store, { useAppDispatch } from '@renderer/store'
 import { upsertManyBlocks } from '@renderer/store/messageBlock'
 import { selectMessagesForTopic } from '@renderer/store/newMessage'
@@ -80,14 +81,17 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
     // Need to fetch
     const seq = ++seqRef.current
     const request: FetchContextClosureRequest = { topicId, anchorGroupKey }
-    // Capture generation + fingerprint + global block epoch at fetch start for in-flight publication guard (covers uncached topics with active fetches)
+    // Capture generation + fingerprint + global block epoch + deletion generation at fetch start for in-flight publication guard (covers uncached topics with active fetches and hard-deletion)
     const generationAtFetch = getClosureLoadGeneration(topicId)
     const fingerprintAtFetch = currentFingerprint
     const globalAtFetch = getGlobalBlockGeneration()
+    const deletionGenAtFetch = captureDeletionGeneration(topicId)
     setLoading(true)
     void (async () => {
       try {
         const response = await dbService.fetchContextClosure(request)
+        // Deletion generation stale discard before validation — hard deletion invalidates before publication
+        if (isDeletionStale(topicId, deletionGenAtFetch)) return
         // Fail-closed validation together with block/message refs
         if (!isValidContextClosureResponse(request, response)) {
           if (seq === seqRef.current && topicRef.current === topicId && anchorRef.current === anchorGroupKey) {
@@ -108,6 +112,7 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
         const curGenNow = getClosureLoadGeneration(topicId)
         if (curGenNow !== generationAtFetch) return
         if (getGlobalBlockGeneration() !== globalAtFetch) return
+        if (isDeletionStale(topicId, deletionGenAtFetch)) return
         const curFpNow = computeClosureFingerprint(selectMessagesForTopic(store.getState(), topicId) as any)
         if (curFpNow !== fingerprintAtFetch && curFpNow !== 'empty' && fingerprintAtFetch !== 'empty') {
           return
@@ -117,6 +122,7 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
         const genBeforePublish = getClosureLoadGeneration(topicId)
         if (genBeforePublish !== generationAtFetch) return
         if (getGlobalBlockGeneration() !== globalAtFetch) return
+        if (isDeletionStale(topicId, deletionGenAtFetch)) return
         if (response.blocks.length > 0) {
           dispatch(upsertManyBlocks(response.blocks as any))
         }

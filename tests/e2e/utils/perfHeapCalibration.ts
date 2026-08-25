@@ -61,13 +61,37 @@ export interface C02HeapProfile {
   applicabilityGeneration: number
 }
 
-/** Bounded default profile — small enough for disposable E2E profile, large enough for delta. */
+/** Bounded default profile — small enough for disposable E2E profile, large enough for delta. Segment-free so denominator aligns with production materialization. */
 export const DEFAULT_C02_HEAP_PROFILE: C02HeapProfile = {
   syntheticTopics: 2,
   syntheticMessagesPerTopic: 100,
   blockContentBytes: 2048,
-  segmentCountPerTopic: 1,
+  segmentCountPerTopic: 0,
   applicabilityGeneration: 0
+}
+
+/**
+ * Production latest-window projection cap — mirrors renderer clampWindowLimit
+ * (src/renderer/src/store/thunk/messageThunk.ts: clampWindowLimit 1..100 and
+ * src/renderer/src/pages/home/Messages/messageWindow.ts: clampWindowCount).
+ * Calibration must measure the actual production projection (100), not invent a
+ * larger window. Logical payload remains full synthetic (150 for large) while
+ * expected visible/DOM/group counts are the latest-window count
+ * Math.min(syntheticMessagesPerTopic, 100) through the 1..100 clamp.
+ */
+export const C02_PRODUCTION_WINDOW_MIN = 1
+export const C02_PRODUCTION_WINDOW_MAX = 100
+
+/** Expected visible/projected count for a profile — production latest-window count. */
+export function c02ExpectedVisibleCount(profile: Pick<C02HeapProfile, 'syntheticMessagesPerTopic'>): number {
+  const n = Math.floor(profile.syntheticMessagesPerTopic)
+  if (!Number.isFinite(n)) return C02_PRODUCTION_WINDOW_MAX
+  return Math.min(C02_PRODUCTION_WINDOW_MAX, Math.max(C02_PRODUCTION_WINDOW_MIN, n))
+}
+
+/** Expected projected total messages/blocks for a profile (topics × latest-window per topic). */
+export function c02ExpectedProjectedTotal(profile: C02HeapProfile): number {
+  return profile.syntheticTopics * c02ExpectedVisibleCount(profile)
 }
 
 /**
@@ -81,16 +105,141 @@ export function c02HeapGateEnabled(): boolean {
 }
 
 /**
- * Resolve the calibration profile from env. Throws on unsupported non-empty value
- * (fail-loud before any measurement). Empty/unset is handled by the spec's skip,
- * so this throws only when called with an explicit value that is not '1'/'true'.
+ * Resolve the calibration profile from env. Fail-closed single-profile resolver.
+ * Delegates to the canonical plural resolver and requires exactly one profile;
+ * matrix selectors ("all"/"matrix" or comma lists with >1 entry) are rejected
+ * explicitly — use resolveC02HeapProfiles for matrix mode. This removes the
+ * prior contradictory semantics where singular returned default for "all"/"matrix".
+ * Throws on empty, unknown, duplicate, or empty-comma-token input (fail-loud).
+ * Empty/unset is fail-closed when called directly; caller (spec) controls
+ * default-off skip via c02HeapGateEnabled before calling.
  */
 export function resolveC02HeapProfile(): C02HeapProfile {
+  const profiles = resolveC02HeapProfiles()
+  if (profiles.length !== 1) {
+    const raw = (process.env[PERF_C02_HEAP_ENV] ?? '').trim().toLowerCase()
+    throw new Error(
+      `[PERF-C02] singular resolver expects exactly one profile (1/true or single short/full id), got ${profiles.length} from ${PERF_C02_HEAP_ENV}="${raw}" — use resolveC02HeapProfiles for "all"/"matrix" or comma lists`
+    )
+  }
+  return profiles[0]!.profile
+}
+
+/** Deterministic multi-profile matrix for calibration — varied topic/message/block/segment shapes.
+ * C-02 profiles are segment-free (segmentCountPerTopic=0) so canonical logical
+ * bytes denominator aligns with entities actually materialized/verified in the
+ * production path (messages+blocks via ChatDb ensureTopic/pasteMessages). No
+ * unsupported segment persistence is invented.
+ */
+export const C02_HEAP_PROFILE_IDS = {
+  small: 'c02-small-v1',
+  default: 'c02-default-v1',
+  large: 'c02-large-v1',
+  boundary: 'c02-boundary-v1'
+} as const
+
+/** Short-name aliases for selector grammar — maps short name to full id (lowercase). */
+export const C02_HEAP_SHORT_NAME_MAP: Record<string, string> = {
+  small: C02_HEAP_PROFILE_IDS.small,
+  default: C02_HEAP_PROFILE_IDS.default,
+  large: C02_HEAP_PROFILE_IDS.large,
+  boundary: C02_HEAP_PROFILE_IDS.boundary
+}
+
+export const C02_HEAP_PROFILES: Record<string, C02HeapProfile> = {
+  [C02_HEAP_PROFILE_IDS.small]: {
+    syntheticTopics: 1,
+    syntheticMessagesPerTopic: 50,
+    blockContentBytes: 1024,
+    segmentCountPerTopic: 0,
+    applicabilityGeneration: 0
+  },
+  [C02_HEAP_PROFILE_IDS.default]: {
+    syntheticTopics: 2,
+    syntheticMessagesPerTopic: 100,
+    blockContentBytes: 2048,
+    segmentCountPerTopic: 0,
+    applicabilityGeneration: 0
+  },
+  [C02_HEAP_PROFILE_IDS.large]: {
+    syntheticTopics: 3,
+    syntheticMessagesPerTopic: 150,
+    blockContentBytes: 4096,
+    segmentCountPerTopic: 0,
+    applicabilityGeneration: 0
+  },
+  [C02_HEAP_PROFILE_IDS.boundary]: {
+    syntheticTopics: 2,
+    syntheticMessagesPerTopic: 30,
+    blockContentBytes: 512,
+    segmentCountPerTopic: 0,
+    applicabilityGeneration: 0
+  }
+}
+
+/** Deterministic definition order for matrix — do not rely on Object iteration order. */
+export const C02_HEAP_PROFILE_ORDER: string[] = [
+  C02_HEAP_PROFILE_IDS.small,
+  C02_HEAP_PROFILE_IDS.default,
+  C02_HEAP_PROFILE_IDS.large,
+  C02_HEAP_PROFILE_IDS.boundary
+]
+
+export function getC02HeapProfileMatrix(): Array<{ id: string; profile: C02HeapProfile }> {
+  return C02_HEAP_PROFILE_ORDER.map((id) => ({ id, profile: C02_HEAP_PROFILES[id]! }))
+}
+
+/**
+ * Selector grammar (one grammar, fail-closed, enforced):
+ * - "1" | "true" => [default] (backward compat, single-profile)
+ * - "all" | "matrix" => all deterministic profiles in definition order
+ * - one short or full profile id (e.g. "small" or "c02-small-v1") => single profile
+ * - comma-separated list of short names or full ids (e.g. "small,large" or
+ *   "c02-small-v1,c02-large-v1" or mixed) => explicit subset in caller's
+ *   order after normalization. Short names are lowercased aliases to full ids.
+ * Throws on empty input (fail-closed when called directly), unknown id,
+ * duplicate normalized id, or any empty comma token (",small", "small,",
+ * "small,,large") — no silent filtering/dedup. Ordering for "all"/"matrix"
+ * is definition order; for comma lists it is caller order (deterministic).
+ * Trimming and lowercasing are applied per token.
+ */
+export function resolveC02HeapProfiles(): Array<{ id: string; profile: C02HeapProfile }> {
   const raw = (process.env[PERF_C02_HEAP_ENV] ?? '').trim().toLowerCase()
-  if (raw === '1' || raw === 'true') return DEFAULT_C02_HEAP_PROFILE
-  throw new Error(
-    `[PERF-C02] unsupported ${PERF_C02_HEAP_ENV}="${raw}" — expected "1" or "true" (unset/empty = spec skipped by default)`
-  )
+  if (raw.length === 0) {
+    throw new Error(
+      `[PERF-C02] empty ${PERF_C02_HEAP_ENV}="${raw}" — expected "1", "true", "all", "matrix", or comma-separated ids/short-names (${C02_HEAP_PROFILE_ORDER.join(',')} or ${Object.keys(C02_HEAP_SHORT_NAME_MAP).join(',')}) (unset/empty = spec skipped by caller)`
+    )
+  }
+  if (raw === '1' || raw === 'true') return [{ id: C02_HEAP_PROFILE_IDS.default, profile: DEFAULT_C02_HEAP_PROFILE }]
+  if (raw === 'all' || raw === 'matrix') return getC02HeapProfileMatrix()
+  // Generic token parsing: handles single id and comma-separated lists uniformly.
+  // Fail closed on any empty comma token (no filtering).
+  const rawTokens = raw.split(',')
+  const hasEmptyToken = rawTokens.some((s) => s.trim().length === 0)
+  if (hasEmptyToken) {
+    throw new Error(
+      `[PERF-C02] empty profile token in selector "${raw}" — empty comma token rejected (e.g. ",small", "small,", "small,,large")`
+    )
+  }
+  const tokens = rawTokens.map((s) => s.trim().toLowerCase())
+  if (tokens.length === 0) throw new Error(`[PERF-C02] no profiles resolved from "${raw}"`)
+  const resolved: Array<{ id: string; profile: C02HeapProfile }> = []
+  const seen = new Set<string>()
+  for (const tok of tokens) {
+    const normalized = C02_HEAP_SHORT_NAME_MAP[tok] ?? tok
+    const found = C02_HEAP_PROFILES[normalized]
+    if (!found) {
+      throw new Error(
+        `[PERF-C02] unknown profile id "${tok}" (unsupported) — known full ids: ${C02_HEAP_PROFILE_ORDER.join(',')} short names: ${Object.keys(C02_HEAP_SHORT_NAME_MAP).join(',')}`
+      )
+    }
+    if (seen.has(normalized)) {
+      throw new Error(`[PERF-C02] duplicate profile id "${tok}" (normalized "${normalized}") — duplicates rejected`)
+    }
+    seen.add(normalized)
+    resolved.push({ id: normalized, profile: found })
+  }
+  return resolved
 }
 
 // ---------------------------------------------------------------------------
@@ -107,11 +256,16 @@ function pad(n: number, width: number): string {
  * identical to C-01 logical payload calibration.
  */
 export function buildC02SyntheticTopics(profile: C02HeapProfile): LogicalPayloadTopicInput[] {
+  return buildC02SyntheticTopicsWithPrefix(profile, 'c02-heap-topic')
+}
+
+/** Prefix-aware variant for multi-profile matrix (deterministic per profile, isolated ids). */
+export function buildC02SyntheticTopicsWithPrefix(profile: C02HeapProfile, prefix: string): LogicalPayloadTopicInput[] {
   const topics: LogicalPayloadTopicInput[] = []
   for (let t = 0; t < profile.syntheticTopics; t++) {
     topics.push(
       createSyntheticTopic({
-        topicId: `c02-heap-topic-${pad(t, 2)}`,
+        topicId: `${prefix}-${pad(t, 2)}`,
         messageCount: profile.syntheticMessagesPerTopic,
         blockContentSize: profile.blockContentBytes,
         segmentCount: profile.segmentCountPerTopic,
@@ -274,7 +428,7 @@ export type HeapPrecisionLabel = 'precise' | 'bucketed' | 'unsupported'
 
 export function detectHeapPrecisionLabel(argv: string[], method: string): HeapPrecisionLabel {
   if (method === 'unsupported' || method !== RENDERER_HEAP_METHOD) return 'unsupported'
-  const hasFlag = argv.some((a) => a.includes('enable-precise-memory-info'))
+  const hasFlag = argv.some((a) => a === '--enable-precise-memory-info')
   return hasFlag ? 'precise' : 'bucketed'
 }
 
@@ -372,6 +526,41 @@ export function buildC02ScaleMap(
     heapMethodCode: code,
     heapPrecisionCode: precisionCode
   }
+}
+
+export interface C02MultiScaleMap extends C02ScaleMap {
+  profileCount: number
+  profileIdCode: number
+}
+
+/** Numeric ids for C02 profile ids — finite, for schema-v1 scale fields. */
+export const C02_PROFILE_ID_CODE: Record<string, number> = {
+  [C02_HEAP_PROFILE_IDS.small]: 0,
+  [C02_HEAP_PROFILE_IDS.default]: 1,
+  [C02_HEAP_PROFILE_IDS.large]: 2,
+  [C02_HEAP_PROFILE_IDS.boundary]: 3
+}
+
+export function buildC02MultiScaleMap(
+  profiles: Array<{ id: string; profile: C02HeapProfile }>,
+  heapMethod: string,
+  heapPrecisionLabel: HeapPrecisionLabel = 'unsupported'
+): Record<string, number> {
+  const base = buildC02ScaleMap(profiles[0]?.profile ?? DEFAULT_C02_HEAP_PROFILE, heapMethod, heapPrecisionLabel)
+  const map: Record<string, number> = {
+    ...base,
+    profileCount: profiles.length,
+    profileIdCode: C02_PROFILE_ID_CODE[profiles[0]?.id ?? C02_HEAP_PROFILE_IDS.default] ?? -1
+  }
+  for (const entry of profiles) {
+    const prefix = entry.id.replace(/-/g, '_')
+    map[`${prefix}_topics`] = entry.profile.syntheticTopics
+    map[`${prefix}_messagesPerTopic`] = entry.profile.syntheticMessagesPerTopic
+    map[`${prefix}_blockContentBytes`] = entry.profile.blockContentBytes
+    map[`${prefix}_segmentCountPerTopic`] = entry.profile.segmentCountPerTopic
+    map[`${prefix}_messagesTotal`] = entry.profile.syntheticTopics * entry.profile.syntheticMessagesPerTopic
+  }
+  return map
 }
 
 // ---------------------------------------------------------------------------

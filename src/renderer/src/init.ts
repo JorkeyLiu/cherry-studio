@@ -5,6 +5,7 @@ import { applyMainWindowTitle } from './config/title'
 import { startAutoSync } from './services/BackupService'
 import { startNutstoreAutoSync } from './services/NutstoreService'
 import storeSyncService from './services/StoreSyncService'
+import { subscribeTopicDeletionEvents } from './services/topicDeletionSubscription'
 import { webTraceService } from './services/WebTraceService'
 import store from './store'
 
@@ -37,6 +38,10 @@ function initStoreSync() {
   storeSyncService.subscribe()
 }
 
+function initTopicDeletionSubscription() {
+  subscribeTopicDeletionEvents()
+}
+
 function initWebTrace() {
   webTraceService.init()
 }
@@ -44,4 +49,5 @@ function initWebTrace() {
 initKeyv()
 initAutoSync()
 initStoreSync()
+initTopicDeletionSubscription()
 initWebTrace()

@@ -597,7 +597,10 @@ export interface HardDeleteTopicRequest {
 }
 
 /** @see IpcChannel.ChatDb_HardDeleteTopic */
-export type HardDeleteTopicResponse = FileCleanupResult
+export interface HardDeleteTopicResponse extends FileCleanupResult {
+  /** Exact topic IDs hard-deleted inside the authoritative transaction. Empty when none deleted. */
+  deletedTopicIds: string[]
+}
 
 /** @see IpcChannel.ChatDb_PurgeExpiredTopics */
 export interface PurgeExpiredTopicsRequest {
@@ -609,7 +612,10 @@ export interface PurgeExpiredTopicsRequest {
 }
 
 /** @see IpcChannel.ChatDb_PurgeExpiredTopics */
-export type PurgeExpiredTopicsResponse = FileCleanupResult
+export interface PurgeExpiredTopicsResponse extends FileCleanupResult {
+  /** Exact topic IDs purged inside the authoritative transaction. Empty when none purged. */
+  deletedTopicIds: string[]
+}
 
 /**
  * @see IpcChannel.ChatDb_EmptyTrashTopics
@@ -623,7 +629,10 @@ export interface EmptyTrashTopicsRequest {
 }
 
 /** @see IpcChannel.ChatDb_EmptyTrashTopics */
-export type EmptyTrashTopicsResponse = FileCleanupResult
+export interface EmptyTrashTopicsResponse extends FileCleanupResult {
+  /** Exact topic IDs emptied inside the authoritative transaction. Empty when none deleted. */
+  deletedTopicIds: string[]
+}
 
 export interface TransferTopicOwnershipRequest {
   topicId: string
@@ -640,6 +649,8 @@ export interface ResetAssistantTopicsRequest {
 export interface ResetAssistantTopicsResponse {
   cleanup: FileCleanupResult
   replacementTopic: TopicWire
+  /** Exact topic IDs hard-deleted inside the authoritative transaction (replacement excluded). Empty when none deleted. */
+  deletedTopicIds: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +897,21 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:fetch-answer-group': { request: FetchAnswerGroupRequest; response: FetchAnswerGroupResponse }
   // S6.3 R-06: authoritative context closure READ (anchor through newest)
   'chatdb:fetch-context-closure': { request: FetchContextClosureRequest; response: FetchContextClosureResponse }
+}
+
+// ---------------------------------------------------------------------------
+// Topic deletion event — Main → all renderers (Phase 5 authoritative)
+// ---------------------------------------------------------------------------
+
+/**
+ * Authoritative Main → renderer push event for permanent deletions.
+ * Carries the exact topic IDs that were hard-deleted in the committed
+ * Main transaction. Never guessed, never partial. Empty array is not
+ * broadcast (no-op).
+ */
+export interface TopicDeletionEvent {
+  /** Exact topic IDs hard-deleted inside the authoritative transaction. */
+  deletedTopicIds: string[]
 }
 
 /** All valid ChatDb command channel strings. */

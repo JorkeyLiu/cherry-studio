@@ -9,6 +9,12 @@ import { getAssistantById } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { isGenerating, locateToMessage } from '@renderer/services/MessagesService'
 import NavigationService from '@renderer/services/NavigationService'
+import {
+  captureDeletionGeneration,
+  getDeletionGeneration,
+  isDeletionStale,
+  subscribeDeletionGeneration
+} from '@renderer/services/topicDeletionInvalidation'
 import type { Topic } from '@renderer/types'
 import { classNames, runAsyncFunction } from '@renderer/utils'
 import { Button, Divider, Empty } from 'antd'
@@ -34,11 +40,69 @@ const TopicMessages: FC<Props> = ({ topic: _topic, ...props }) => {
   useEffect(() => {
     if (!_topic) return
 
+    const topicId = _topic.id
+    const captured = captureDeletionGeneration(topicId)
+
+    // Fail-closed before async fetch: already deleted topic must not publish
+    if (getDeletionGeneration(topicId) !== 0 || isDeletionStale(topicId, captured)) {
+      setTopic(undefined)
+      return
+    }
+
+    let cancelled = false
+
     void runAsyncFunction(async () => {
-      const topic = await getTopicById(_topic.id)
-      setTopic(topic)
+      const fetched = await getTopicById(topicId)
+      if (cancelled) return
+      // Topic identity check plus deletion staleness/current state before publish
+      const fetchedId = (fetched as Topic | undefined)?.id
+      if (fetchedId !== topicId) {
+        return
+      }
+      if (isDeletionStale(topicId, captured) || getDeletionGeneration(topicId) !== 0) {
+        return
+      }
+      setTopic(fetched)
     })
+
+    return () => {
+      cancelled = true
+    }
   }, [_topic])
+
+  // LOCK-004: invalidate local topic projection on permanent deletion.
+  // Per-topic generation subscription; clears immediately when generation advances.
+  // Soft-delete never bumps so projection is preserved. Preserves unrelated topics.
+  useEffect(() => {
+    if (!_topic?.id) return
+    const topicId = _topic.id
+    const clear = () => setTopic(undefined)
+    // Immediate check: already-deleted topic never renders
+    if (getDeletionGeneration(topicId) !== 0) {
+      clear()
+      return subscribeDeletionGeneration(topicId, () => {
+        if (getDeletionGeneration(topicId) !== 0) clear()
+      })
+    }
+    const captured = captureDeletionGeneration(topicId)
+    // Re-check for deletion during window between capture and subscribe
+    if (isDeletionStale(topicId, captured)) {
+      clear()
+      return subscribeDeletionGeneration(topicId, () => {
+        if (getDeletionGeneration(topicId) !== 0 || isDeletionStale(topicId, captured)) clear()
+      })
+    }
+    const unsub = subscribeDeletionGeneration(topicId, () => {
+      if (getDeletionGeneration(topicId) !== 0 || isDeletionStale(topicId, captured)) {
+        clear()
+      }
+    })
+    // Race around registration
+    if (getDeletionGeneration(topicId) !== 0 || isDeletionStale(topicId, captured)) {
+      clear()
+    }
+    return unsub
+  }, [_topic?.id])
 
   const isEmpty = (topic?.messages || []).length === 0
 

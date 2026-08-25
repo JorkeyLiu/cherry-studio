@@ -1,4 +1,10 @@
 import { HStack } from '@renderer/components/Layout'
+import {
+  captureDeletionGeneration,
+  getDeletionGeneration,
+  isDeletionStale,
+  subscribeDeletionGeneration
+} from '@renderer/services/topicDeletionInvalidation'
 import { useAppDispatch } from '@renderer/store'
 import { loadTopicMessagesThunk } from '@renderer/store/thunk/messageThunk'
 import type { Topic } from '@renderer/types'
@@ -69,6 +75,50 @@ const HistoryPage: FC = () => {
     setStack(['topics', 'search', 'message'])
     setMessage(message)
   }
+
+  // LOCK-004: invalidate selected History message when its topic is
+  // permanently deleted. Uses per-topic generation subscription; soft-delete
+  // never bumps so selection is preserved. Clears local message and route
+  // without global Redux clearing. Current-state-safe: if deletion already
+  // occurred before subscription (generation nonzero), synchronously clears
+  // stale selection. The callback is idempotent.
+  useEffect(() => {
+    if (!message?.topicId) return
+    const topicId = message.topicId
+    const clear = () => {
+      setMessage(undefined)
+      _message = undefined
+      setStack((prev) => prev.filter((r) => r !== 'message'))
+      _stack = _stack.filter((r) => r !== 'message')
+    }
+    // Immediate check: already-deleted topic never renders
+    if (getDeletionGeneration(topicId) !== 0) {
+      clear()
+      // Still subscribe for cleanup symmetry; immediate helper will invoke
+      // again idempotently, which is safe.
+      return subscribeDeletionGeneration(topicId, () => {
+        if (getDeletionGeneration(topicId) !== 0) clear()
+      })
+    }
+    const captured = captureDeletionGeneration(topicId)
+    // Re-check captured vs current for deletion during request window
+    if (isDeletionStale(topicId, captured)) {
+      clear()
+      return subscribeDeletionGeneration(topicId, () => {
+        if (getDeletionGeneration(topicId) !== 0 || isDeletionStale(topicId, captured)) clear()
+      })
+    }
+    const unsub = subscribeDeletionGeneration(topicId, () => {
+      if (getDeletionGeneration(topicId) !== 0 || isDeletionStale(topicId, captured)) {
+        clear()
+      }
+    })
+    // Race around registration: deletion could occur between capture and subscribe
+    if (getDeletionGeneration(topicId) !== 0 || isDeletionStale(topicId, captured)) {
+      clear()
+    }
+    return unsub
+  }, [message?.topicId])
 
   const isShow = (route: Route) => (last(stack) === route ? 'flex' : 'none')
 

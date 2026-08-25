@@ -18,6 +18,7 @@
  */
 
 import { currentPhaseCorrelation, recordPhaseDurationForCorrelation } from '@renderer/services/phaseTimingDiagnostics'
+import { invalidateTopicsDeletion } from '@renderer/services/topicDeletionInvalidation'
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
@@ -743,25 +744,37 @@ export class SqliteMessageDataSource implements MessageDataSource {
     return unwrap(await this.api.listTrashTopics(request))
   }
 
-  async hardDeleteTopic(topicId: string): Promise<FileCleanupResult> {
+  async hardDeleteTopic(topicId: string): Promise<HardDeleteTopicResponse> {
     const request: HardDeleteTopicRequest = cloneForWire({ topicId })
     const result = unwrap(await this.api.hardDeleteTopic(request))
+    // Invalidate only after successful authoritative deletion, using exact IDs
+    if (result.deletedTopicIds.length > 0) {
+      invalidateTopicsDeletion(result.deletedTopicIds)
+    }
     dispatchTopicUpdatedAt(topicId)
     return result
   }
 
-  async purgeExpiredTopics(cutoffTimestamp: string): Promise<FileCleanupResult> {
+  async purgeExpiredTopics(cutoffTimestamp: string): Promise<PurgeExpiredTopicsResponse> {
     const request: PurgeExpiredTopicsRequest = cloneForWire({ cutoffTimestamp })
-    return unwrap(await this.api.purgeExpiredTopics(request))
+    const result = unwrap(await this.api.purgeExpiredTopics(request))
+    if (result.deletedTopicIds.length > 0) {
+      invalidateTopicsDeletion(result.deletedTopicIds)
+    }
+    return result
   }
 
   /**
    * Empty an assistant's trash in ONE atomic Main transaction (LOCK-531).
    * Returns the single aggregate FileCleanupResult of the transaction.
    */
-  async emptyTrashTopics(assistantId: string): Promise<FileCleanupResult> {
+  async emptyTrashTopics(assistantId: string): Promise<EmptyTrashTopicsResponse> {
     const request: EmptyTrashTopicsRequest = cloneForWire({ assistantId })
-    return unwrap(await this.api.emptyTrashTopics(request))
+    const result = unwrap(await this.api.emptyTrashTopics(request))
+    if (result.deletedTopicIds.length > 0) {
+      invalidateTopicsDeletion(result.deletedTopicIds)
+    }
+    return result
   }
 
   async transferTopicOwnership(topicId: string, assistantId: string): Promise<void> {
@@ -771,7 +784,11 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   async resetAssistantTopics(assistantId: string, replacementTopicId: string): Promise<ResetAssistantTopicsResponse> {
     if (!this.api.resetAssistantTopics) throw new Error('resetAssistantTopics is unavailable')
-    return unwrap(await this.api.resetAssistantTopics(cloneForWire({ assistantId, replacementTopicId })))
+    const result = unwrap(await this.api.resetAssistantTopics(cloneForWire({ assistantId, replacementTopicId })))
+    if (result.deletedTopicIds.length > 0) {
+      invalidateTopicsDeletion(result.deletedTopicIds)
+    }
+    return result
   }
 
   // ============ S6.2c-1: Branch by stable anchor (additive) ============

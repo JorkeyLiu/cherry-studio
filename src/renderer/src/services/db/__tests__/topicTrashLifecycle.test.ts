@@ -180,7 +180,8 @@ describe('topicTrashLifecycle (Phase 5.2B)', () => {
     it('is ONE atomic Main command; consumes the single aggregate cleanup result', async () => {
       mocks.emptyTrashTopics.mockResolvedValue({
         affectedFileIds: ['f-0', 'f-1'],
-        remainingReferenceCounts: { 'f-0': 0, 'f-1': 2 }
+        remainingReferenceCounts: { 'f-0': 0, 'f-1': 2 },
+        deletedTopicIds: ['t-e1', 't-e2']
       })
       mocks.deleteFile.mockResolvedValue(undefined)
 
@@ -292,7 +293,7 @@ describe('topicTrashLifecycle (Phase 5.2B)', () => {
       const order: string[] = []
       mocks.hardDeleteTopic.mockImplementation(async () => {
         order.push('sqlite')
-        return { affectedFileIds: ['f-0'], remainingReferenceCounts: { 'f-0': 0 } }
+        return { affectedFileIds: ['f-0'], remainingReferenceCounts: { 'f-0': 0 }, deletedTopicIds: ['t-1'] }
       })
       mocks.deleteFile.mockImplementation(async () => {
         order.push('cleanup')
@@ -307,7 +308,8 @@ describe('topicTrashLifecycle (Phase 5.2B)', () => {
     it('does not clean up when remaining count > 0', async () => {
       mocks.hardDeleteTopic.mockResolvedValue({
         affectedFileIds: ['f-0'],
-        remainingReferenceCounts: { 'f-0': 3 }
+        remainingReferenceCounts: { 'f-0': 3 },
+        deletedTopicIds: ['t-1']
       })
 
       await hardDeleteOrdinaryTopic('t-1')
@@ -329,7 +331,8 @@ describe('topicTrashLifecycle (Phase 5.2B)', () => {
       const now = new Date('2026-07-28T12:00:00.000Z')
       mocks.purgeExpiredTopics.mockResolvedValue({
         affectedFileIds: ['f-0'],
-        remainingReferenceCounts: { 'f-0': 0 }
+        remainingReferenceCounts: { 'f-0': 0 },
+        deletedTopicIds: ['t-purge-1', 't-purge-2']
       })
       mocks.deleteFile.mockResolvedValue(undefined)
 

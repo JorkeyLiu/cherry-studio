@@ -63,6 +63,12 @@ import {
   recordPhaseDurationForCorrelation,
   recordPhaseEndpoint
 } from '@renderer/services/phaseTimingDiagnostics'
+import {
+  captureDeletionGeneration,
+  getDeletionGeneration,
+  isDeletionStale,
+  subscribeDeletionGeneration
+} from '@renderer/services/topicDeletionInvalidation'
 import { isValidWindowResponse, isWindowCovering } from '@renderer/services/windowCoverage'
 import store, { useAppDispatch } from '@renderer/store'
 import { messageBlocksSelectors, updateOneBlock, upsertManyBlocks } from '@renderer/store/messageBlock'
@@ -399,6 +405,47 @@ const Messages = ({
   // fails for A→B→A because the old closure's topic.id matches the revisited
   // topic.id.
   const transitionEpochRef = useRef(0)
+
+  // Deletion epoch subscription — synchronously invalidate the mounted viewport
+  // projection for this topic when authoritative hard deletion advances.
+  // Clears the per-topic window cache, cancels pending timers/commit waiters,
+  // and resets the local viewport window to an empty valid state while
+  // advancing navigation/topic generations so stale local callbacks cannot
+  // re-publish deleted content. Per-topic only; unrelated topics untouched.
+  // Soft delete never bumps; failure preserves. Timers/waiters use existing
+  // seams: clearTimeoutTimer for loadMoreMessages/loadNewerMessages and
+  // viewportCommitWaiterRef.cancelAll for pending navigation commits.
+  // Residual: if a timer callback already entered the queue before clear,
+  // its generation/captured-deletion checks still discard before publication.
+  useEffect(() => {
+    const topicIdAtSubscribe = topic.id
+    // Current-state-safe invalidation: if deletion already occurred before
+    // subscription (generation nonzero), synchronously invalidate the local
+    // viewport projection so no stale window is ever rendered. Otherwise
+    // subscribe and re-check immediately around registration. Callback is
+    // idempotent (topic/reset, cache delete, timer clear).
+    const invalidate = () => {
+      windowCacheRef.current.delete(topicIdAtSubscribe)
+      clearTimeoutTimer('loadMoreMessages')
+      clearTimeoutTimer('loadNewerMessages')
+      viewportCommitWaiterRef.current.cancelAll()
+      viewportDispatch({ type: 'topic/reset' })
+    }
+    if (getDeletionGeneration(topicIdAtSubscribe) !== 0) {
+      invalidate()
+      return subscribeDeletionGeneration(topicIdAtSubscribe, () => {
+        invalidate()
+      })
+    }
+    const unsub = subscribeDeletionGeneration(topicIdAtSubscribe, () => {
+      invalidate()
+    })
+    // Re-check immediately after registration for race between check and subscribe
+    if (getDeletionGeneration(topicIdAtSubscribe) !== 0) {
+      invalidate()
+    }
+    return unsub
+  }, [topic.id, clearTimeoutTimer, viewportDispatch])
 
   // S3.1: Explicit topic transition coordinator. Detects topic prop changes
   // and orchestrates deterministic cleanup: save old-topic scroll position,
@@ -1034,6 +1081,7 @@ const Messages = ({
     const loadToken = {}
     const topicGeneration = currentState.topicGeneration
     const topicIdAtStart = topic.id
+    const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
     viewportDispatch({ type: 'load/start', direction: 'older', token: loadToken })
 
     const container = scrollContainerRef.current
@@ -1050,6 +1098,10 @@ const Messages = ({
     }
 
     // S6.1 coverage check — fail-closed: only reuse cached window if it fully covers the request for current topic/generation
+    // Topic-deletion epoch check at local join boundary: discarding cached window if deleted during lifetime
+    if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) {
+      windowCacheRef.current.delete(topicIdAtStart)
+    }
     const cachedWindow = windowCacheRef.current.get(topicIdAtStart)
     if (cachedWindow && isWindowCovering(cachedWindow, request, topicIdAtStart)) {
       logger.silly('[loadMoreMessages] coverage hit, still fetching for authoritative window' as never)
@@ -1063,12 +1115,16 @@ const Messages = ({
           const { dbService } = await import('@renderer/services/db')
           const response = await dbService.fetchMessagesWindow(request)
 
-          // stale discard — topic changed or generation advanced
+          // stale discard — topic changed, generation advanced, or deleted during fetch
           if (topic.id !== topicIdAtStart) {
             viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
             return
           }
           if (viewportStateRef.current.topicGeneration !== topicGeneration) {
+            viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+            return
+          }
+          if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) {
             viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
             return
           }
@@ -1165,6 +1221,7 @@ const Messages = ({
     const loadToken = {}
     const topicGeneration = currentState.topicGeneration
     const topicIdAtStart = topic.id
+    const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
     viewportDispatch({ type: 'load/start', direction: 'newer', token: loadToken })
 
     const container = scrollContainerRef.current
@@ -1180,6 +1237,9 @@ const Messages = ({
       after
     }
 
+    if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) {
+      windowCacheRef.current.delete(topicIdAtStart)
+    }
     const cachedWindow = windowCacheRef.current.get(topicIdAtStart)
     if (cachedWindow && isWindowCovering(cachedWindow, request, topicIdAtStart)) {
       logger.silly('[loadNewerMessages] coverage hit' as never)
@@ -1198,6 +1258,10 @@ const Messages = ({
             return
           }
           if (viewportStateRef.current.topicGeneration !== topicGeneration) {
+            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
+            return
+          }
+          if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) {
             viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
             return
           }

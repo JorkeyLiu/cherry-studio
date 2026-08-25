@@ -748,3 +748,27 @@ function validateChatDbError(error: unknown, channel: string): void {
     validateJsonObject(err.details, 'result.error.details')
   }
 }
+
+/**
+ * Validate a TopicDeletionEvent payload (Main → renderer push).
+ *
+ * Closed-set: only `deletedTopicIds` allowed. Rejects unknown keys,
+ * non-array, empty strings, and non-JSON-safe values.
+ */
+export function validateTopicDeletionEvent(value: unknown): void {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError('event', 'TopicDeletionEvent must be a plain object')
+  }
+  const obj = value as Record<string, unknown>
+  const allowed = new Set(['deletedTopicIds'])
+  for (const key of Object.keys(obj)) {
+    if (!allowed.has(key)) {
+      throw new ValidationError(`event.${key}`, `Unknown property '${key}'`)
+    }
+  }
+  if (!('deletedTopicIds' in obj)) {
+    throw new ValidationError('event.deletedTopicIds', 'Missing required field "deletedTopicIds"')
+  }
+  validateJsonValue(obj, 'event')
+  validateStringArray(obj.deletedTopicIds, 'event.deletedTopicIds')
+}

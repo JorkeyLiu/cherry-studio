@@ -638,5 +638,124 @@ export function createSyntheticOversizedSingleProfile(): LogicalPayloadTopicInpu
 export const SYNTHETIC_PROFILE_IDS = {
   countFirst: 'synthetic-count-first-v1',
   byteFirst: 'synthetic-byte-first-v1',
-  oversizedSingle: 'synthetic-oversized-single-v1'
+  oversizedSingle: 'synthetic-oversized-single-v1',
+  boundaryExact: 'synthetic-boundary-exact-v1',
+  bothBound: 'synthetic-both-bound-v1',
+  variedShape: 'synthetic-varied-shape-v1',
+  byteBoundary: 'synthetic-byte-boundary-v1',
+  b02ExactEquality: 'synthetic-b02-exact-equality-v1'
 } as const
+
+/** 8 topics × 10 msgs each ~ ~1.5 KiB per topic → aggregate <32 MiB, count exactly at B-01 limit => none (boundary) */
+export function createSyntheticBoundaryExactProfile(): LogicalPayloadTopicInput[] {
+  const topics: LogicalPayloadTopicInput[] = []
+  for (let t = 0; t < 8; t++) {
+    topics.push(
+      createSyntheticTopic({
+        topicId: `synthetic-boundary-exact-topic-${pad(t, 2)}`,
+        messageCount: 10,
+        blockContentSize: 1024,
+        segmentCount: 1
+      })
+    )
+  }
+  return topics
+}
+
+/** 9 topics × 550 msgs × 16 KiB content → both count and byte bound (count 9>8 and aggregate >32 MiB) */
+export function createSyntheticBothBoundProfile(): LogicalPayloadTopicInput[] {
+  const topics: LogicalPayloadTopicInput[] = []
+  for (let t = 0; t < 9; t++) {
+    topics.push(
+      createSyntheticTopic({
+        topicId: `synthetic-both-bound-topic-${pad(t, 2)}`,
+        messageCount: 550,
+        blockContentSize: 16 * 1024,
+        segmentCount: 0
+      })
+    )
+  }
+  return topics
+}
+
+/** 3 topics with varied message/block/segment shapes — exercises small/medium/large mix, segment variations */
+export function createSyntheticVariedShapeProfile(): LogicalPayloadTopicInput[] {
+  const specs: Array<{ messages: number; blockSize: number; segments: number; includeSortOrder?: boolean }> = [
+    { messages: 5, blockSize: 256, segments: 0 },
+    { messages: 15, blockSize: 2048, segments: 2 },
+    { messages: 25, blockSize: 4096, segments: 5, includeSortOrder: false }
+  ]
+  return specs.map((s, idx) =>
+    createSyntheticTopic({
+      topicId: `synthetic-varied-shape-topic-${pad(idx, 2)}`,
+      messageCount: s.messages,
+      blockContentSize: s.blockSize,
+      segmentCount: s.segments,
+      includeSortOrder: s.includeSortOrder ?? true
+    })
+  )
+}
+
+/** 2 topics × 1 message × 1024 B — small byte payload, both bounds none, exercises minimal shape */
+export function createSyntheticByteBoundarySmallProfile(): LogicalPayloadTopicInput[] {
+  const topics: LogicalPayloadTopicInput[] = []
+  for (let t = 0; t < 2; t++) {
+    topics.push(
+      createSyntheticTopic({
+        topicId: `synthetic-byte-boundary-topic-${pad(t, 2)}`,
+        messageCount: 1,
+        blockContentSize: 1024,
+        segmentCount: 0
+      })
+    )
+  }
+  return topics
+}
+
+/**
+ * Exact B-02 equality: 1 topic × 1 message where canonical bytes == 32 MiB exactly.
+ * Computed dynamically: base overhead with empty content plus needed filler to hit
+ * B02_MAX_BYTES. Verifies that equality is NOT byte-bound (strict > threshold).
+ * Deterministic, fail-closed if calibration fails.
+ */
+export function createSyntheticB02ExactEqualityProfile(): LogicalPayloadTopicInput[] {
+  const topicId = 'synthetic-b02-exact-topic-00'
+  const base = createSyntheticTopic({
+    topicId,
+    messageCount: 1,
+    blockContentSize: 0,
+    segmentCount: 0
+  })
+  const { byteLength: baseBytes } = canonicalizeLogicalPayload(base)
+  const needed = B02_MAX_BYTES - baseBytes
+  if (!Number.isFinite(needed) || needed <= 0) {
+    throw new Error(`b02 exact equality calibration failed: baseBytes=${baseBytes} needed=${needed}`)
+  }
+  const exact = createSyntheticTopic({
+    topicId,
+    messageCount: 1,
+    blockContentSize: needed,
+    segmentCount: 0
+  })
+  const { byteLength } = canonicalizeLogicalPayload(exact)
+  if (byteLength !== B02_MAX_BYTES) {
+    throw new Error(
+      `b02 exact equality calibration failed: expected ${B02_MAX_BYTES} got ${byteLength} (needed ${needed})`
+    )
+  }
+  return [exact]
+}
+
+/** Enumerate all deterministic calibration profiles for matrix runs (preserves original 3 as subset). */
+export function getLogicalPayloadProfileMatrix(): Array<{ id: string; topics: LogicalPayloadTopicInput[] }> {
+  return [
+    { id: SYNTHETIC_PROFILE_IDS.countFirst, topics: createSyntheticCountFirstProfile() },
+    { id: SYNTHETIC_PROFILE_IDS.byteFirst, topics: createSyntheticByteFirstProfile() },
+    { id: SYNTHETIC_PROFILE_IDS.oversizedSingle, topics: createSyntheticOversizedSingleProfile() },
+    { id: SYNTHETIC_PROFILE_IDS.boundaryExact, topics: createSyntheticBoundaryExactProfile() },
+    { id: SYNTHETIC_PROFILE_IDS.bothBound, topics: createSyntheticBothBoundProfile() },
+    { id: SYNTHETIC_PROFILE_IDS.variedShape, topics: createSyntheticVariedShapeProfile() },
+    { id: SYNTHETIC_PROFILE_IDS.byteBoundary, topics: createSyntheticByteBoundarySmallProfile() },
+    { id: SYNTHETIC_PROFILE_IDS.b02ExactEquality, topics: createSyntheticB02ExactEqualityProfile() }
+  ]
+}

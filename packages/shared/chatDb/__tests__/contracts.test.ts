@@ -1457,7 +1457,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:update-message-and-blocks', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -1492,7 +1492,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:delete-blocks', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -1655,7 +1655,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:empty-trash-topics', {
         ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } }
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 }, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -1664,7 +1664,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:empty-trash-topics', {
         ok: true,
-        value: { affectedFileIds: 'f1', remainingReferenceCounts: {} }
+        value: { affectedFileIds: 'f1', remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -1691,7 +1691,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['f1', 'f2'], remainingReferenceCounts: { f1: 0, f2: 1 } }
+        value: { affectedFileIds: ['f1', 'f2'], remainingReferenceCounts: { f1: 0, f2: 1 }, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -1700,7 +1700,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -1709,7 +1709,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:purge-expired-topics', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -1725,7 +1725,8 @@ describe('validateChatDbResult — valid success envelopes', () => {
         ok: true,
         value: {
           cleanup: { affectedFileIds: [], remainingReferenceCounts: {} },
-          replacementTopic: { id: 't1', name: 'New' }
+          replacementTopic: { id: 't1', name: 'New' },
+          deletedTopicIds: []
         }
       })
     ).not.toThrow()
@@ -1744,7 +1745,37 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:reset-assistant-topics', {
         ok: true,
-        value: { cleanup: { affectedFileIds: [], remainingReferenceCounts: {} }, replacementTopic: null }
+        value: {
+          cleanup: { affectedFileIds: [], remainingReferenceCounts: {} },
+          replacementTopic: null,
+          deletedTopicIds: []
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reset-assistant-topics: valid result with deletedTopicIds excluding replacementTopic.id', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reset-assistant-topics', {
+        ok: true,
+        value: {
+          cleanup: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } },
+          replacementTopic: { id: 't-new', name: 'New' },
+          deletedTopicIds: ['t-old-1', 't-old-2']
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('reset-assistant-topics: rejects malformed envelope where deletedTopicIds contains replacementTopic.id', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reset-assistant-topics', {
+        ok: true,
+        value: {
+          cleanup: { affectedFileIds: [], remainingReferenceCounts: {} },
+          replacementTopic: { id: 't-new', name: 'New' },
+          deletedTopicIds: ['t-old-1', 't-new']
+        }
       })
     ).toThrow(ValidationError)
   })
@@ -1758,7 +1789,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:reset-messages-for-resend', {
         ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } }
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 }, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -1767,7 +1798,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:delete-messages-with-segments', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -1776,7 +1807,7 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:paste-messages-to-topic', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -2489,7 +2520,7 @@ describe('insert-messages-after-anchor contract (S6.2c-2)', () => {
     expect(() =>
       validateChatDbResult('chatdb:insert-messages-after-anchor', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -2498,7 +2529,7 @@ describe('insert-messages-after-anchor contract (S6.2c-2)', () => {
     expect(() =>
       validateChatDbResult('chatdb:insert-messages-after-anchor', {
         ok: true,
-        value: { affectedFileIds: 'not-array' as any, remainingReferenceCounts: {} }
+        value: { affectedFileIds: 'not-array' as any, remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -2935,7 +2966,11 @@ describe('FileCleanupResult — affectedFileIds element validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['file-1', 'file-2'], remainingReferenceCounts: { 'file-1': 0, 'file-2': 1 } }
+        value: {
+          affectedFileIds: ['file-1', 'file-2'],
+          remainingReferenceCounts: { 'file-1': 0, 'file-2': 1 },
+          deletedTopicIds: []
+        }
       })
     ).not.toThrow()
   })
@@ -2944,7 +2979,7 @@ describe('FileCleanupResult — affectedFileIds element validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -2953,7 +2988,7 @@ describe('FileCleanupResult — affectedFileIds element validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: [42], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [42], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -2962,7 +2997,7 @@ describe('FileCleanupResult — affectedFileIds element validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: [true], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [true], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -2971,7 +3006,7 @@ describe('FileCleanupResult — affectedFileIds element validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: [null], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [null], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -2980,7 +3015,7 @@ describe('FileCleanupResult — affectedFileIds element validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: [''], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [''], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -2989,7 +3024,7 @@ describe('FileCleanupResult — affectedFileIds element validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: [{ id: 'f1' }], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [{ id: 'f1' }], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -2998,7 +3033,7 @@ describe('FileCleanupResult — affectedFileIds element validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: 'not-array', remainingReferenceCounts: {} }
+        value: { affectedFileIds: 'not-array', remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -3009,7 +3044,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } }
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 }, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -3018,7 +3053,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['f1', 'f2'], remainingReferenceCounts: { f1: 5, f2: 100 } }
+        value: { affectedFileIds: ['f1', 'f2'], remainingReferenceCounts: { f1: 5, f2: 100 }, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -3027,7 +3062,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
       })
     ).not.toThrow()
   })
@@ -3036,7 +3071,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: [] }
+        value: { affectedFileIds: [], remainingReferenceCounts: [], deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -3045,7 +3080,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: null }
+        value: { affectedFileIds: [], remainingReferenceCounts: null, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -3054,7 +3089,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: 'bad' }
+        value: { affectedFileIds: [], remainingReferenceCounts: 'bad', deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -3063,7 +3098,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: -1 } }
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: -1 }, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -3072,7 +3107,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 1.5 } }
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 1.5 }, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -3081,7 +3116,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: NaN } }
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: NaN }, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -3090,7 +3125,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: Infinity } }
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: Infinity }, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -3099,7 +3134,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 'zero' } }
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 'zero' }, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -3108,7 +3143,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: true } }
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: true }, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -3117,7 +3152,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: null } }
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: null }, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })
@@ -3126,7 +3161,7 @@ describe('FileCleanupResult — remainingReferenceCounts validation', () => {
     expect(() =>
       validateChatDbResult('chatdb:hard-delete-topic', {
         ok: true,
-        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { '': 0 } }
+        value: { affectedFileIds: ['f1'], remainingReferenceCounts: { '': 0 }, deletedTopicIds: [] }
       })
     ).toThrow(ValidationError)
   })

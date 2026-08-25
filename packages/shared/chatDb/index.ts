@@ -90,6 +90,7 @@ export type {
   SelectAnswerMessageRequest,
   SoftDeleteTopicRequest,
   StreamWriteDiagnostics,
+  TopicDeletionEvent,
   TopicExistsRequest,
   TopicWire,
   TransferTopicOwnershipRequest,
@@ -149,6 +150,7 @@ export {
   validateRequest,
   validateResultEnvelope,
   validateStringArray,
+  validateTopicDeletionEvent,
   ValidationError
 } from './validation'
 

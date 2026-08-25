@@ -92,12 +92,30 @@ import {
   writeBenchmarkResult
 } from '../../../../src/main/services/chatDb/__tests__/benchResult'
 import { expect, test } from '../../fixtures/electron.fixture'
+import { closeElectronWithExactCleanup } from '../../utils/electron-cleanup'
 import {
+  assertChatDbReady,
+  assertTextareaReady,
+  bypassOnboarding,
+  launchElectronApp,
+  seedMockProvider,
+  waitForHomeReady,
+  waitForMainElectronWindow
+} from '../../utils/prepare-app'
+import { findProcessesByUserDataDir, terminateProcessesByUserDataDir } from '../../utils/process-cleanup'
+import { probeAndAssertRuntimeAppData } from '../../utils/runtime-app-data'
+import { createOwnedTmpRoot, removeOwnedTmpRoot, validateProfileLaunchToken } from '../../utils/run-ownership'
+import {
+  buildC02MultiScaleMap,
   buildC02ScaleMap,
   buildC02SyntheticTopics,
+  buildC02SyntheticTopicsWithPrefix,
   C02_BENCHMARK_ID,
   C02_BENCHMARK_NAME,
   c02HeapGateEnabled,
+  C02_PRODUCTION_WINDOW_MAX,
+  c02ExpectedVisibleCount,
+  c02ExpectedProjectedTotal,
   canonicalBytesForTopics,
   classifyEffectiveHeapDeltaInformative,
   computeHeapAmplification,
@@ -105,6 +123,7 @@ import {
   detectHeapPrecisionLabel,
   RENDERER_HEAP_METHOD,
   resolveC02HeapProfile,
+  resolveC02HeapProfiles,
   validateHeapSample,
   validateLogicalBytes,
   validateSyntheticTopics,
@@ -119,6 +138,30 @@ import {
 
 /** Safe canonical command recorded in artifact (no path segments). */
 const CANONICAL_COMMAND = 'pnpm test:e2e'
+
+/**
+ * Bounded matrix timeout — calibration harness only, directional non-policy.
+ * Single-profile (default) retains Playwright default 60s (60000).
+ * Four-profile isolated matrix (C02_HEAP_CALIBRATION=all) launches 4 disposable
+ * Electron apps/profiles sequentially with independent Redux/heap sampling; observed
+ * 60s default timed out after 2/4 profiles (small+default) while launching large/boundary.
+ * 300s (5 min) is explicit, bounded, truthful budget for the 4× isolated workload:
+ * ~60s per profile for launch + production Redux projection + precise heap sampling + cleanup,
+ * with headroom for CI variance and strict per-profile gates retained.
+ * No separate threshold/policy/baseline adoption; matrix remains opt-in, directional only.
+ */
+const C02_MATRIX_TIMEOUT_MS = 300_000
+
+/**
+ * Bounded matrix helper wait — isolated production Redux projection only.
+ * Single-profile retains the existing fixed 30s helper wait (legacy semantics).
+ * Matrix large profile (3×150×4096B) observed to exceed 30s in an isolated
+ * `page.waitForFunction` Redux wait; 60s is explicit, bounded, truthful
+ * for the largest existing profile without making waits unbounded or globally
+ * excessive. Used only when the matrix harness drives `activateReduxProjection`.
+ * No production source, profile size, gate, or artifact change.
+ */
+const C02_MATRIX_WAIT_TIMEOUT_MS = 60_000
 
 // ---------------------------------------------------------------------------
 // Renderer heap sampling — actual renderer process via performance.memory
@@ -199,7 +242,9 @@ async function sampleRendererHeap(page: Page): Promise<RendererHeapSample | null
  */
 async function activateReduxProjection(
   page: Page,
-  profile: C02HeapProfile
+  profile: C02HeapProfile,
+  topicPrefix = 'c02-heap-topic',
+  opts?: { waitTimeoutMs?: number }
 ): Promise<{
   rendererLogicalBytes: number
   topicsCreated: number
@@ -226,6 +271,7 @@ async function activateReduxProjection(
 }> {
   const pad = (n: number, w: number): string => String(n).padStart(w, '0')
   // Build deterministic synthetic topics locally (same shape as before for ChatDb)
+  // topicPrefix allows multi-profile matrix to use isolated ids (e.g. c02-small-topic, c02-large-topic)
   const topics: Array<{
     topicId: string
     messages: Array<Record<string, unknown>>
@@ -234,7 +280,7 @@ async function activateReduxProjection(
   const content = 'a'.repeat(profile.blockContentBytes)
   let messageTotal = 0
   for (let t = 0; t < profile.syntheticTopics; t++) {
-    const topicId = `c02-heap-topic-${pad(t, 2)}`
+    const topicId = `${topicPrefix}-${pad(t, 2)}`
     const messages: Array<Record<string, unknown>> = []
     const blocks: Array<Record<string, unknown>> = []
     for (let i = 0; i < profile.syntheticMessagesPerTopic; i++) {
@@ -457,7 +503,15 @@ async function activateReduxProjection(
   }
 
   const lastTopicId = topics[topics.length - 1]?.topicId ?? ''
-  const expectedVisible = Math.min(profile.syntheticMessagesPerTopic, desiredDisplayCount)
+  // Production latest-window clamp (1..100) — calibration measures actual production
+  // projection, not invented larger window. Large profile retains 150 messages logically
+  // (canonicalBytes deterministically on full 150) but latest window projects 100.
+  // Use shared helper mirroring clampWindowLimit/max 100 for consistent expected counts.
+  const expectedVisible = c02ExpectedVisibleCount(profile)
+  const expectedProjectedTotal = c02ExpectedProjectedTotal(profile)
+  // Matrix-only bounded wait for the largest existing profile (3×150×4096B).
+  // Single-profile retains legacy 30s; matrix caller passes C02_MATRIX_WAIT_TIMEOUT_MS (60s).
+  const helperWaitTimeoutMs = opts?.waitTimeoutMs ?? 30_000
 
   // Step 3: canonical activation via existing rendered topic-item clicks — one click per synthetic topic
   // so all synthetic topics become resident in Redux via the production loadTopicMessagesThunk path
@@ -502,8 +556,8 @@ async function activateReduxProjection(
           const loading = s.messages?.loadingByTopic?.[topicId]
           return Array.isArray(ids) && ids.length === expected && loading !== true
         },
-        { topicId, expected: profile.syntheticMessagesPerTopic },
-        { timeout: 30000 }
+        { topicId, expected: expectedVisible },
+        { timeout: helperWaitTimeoutMs }
       )
     } catch (e) {
       return {
@@ -536,7 +590,7 @@ async function activateReduxProjection(
           return scopedData === expected && globalData === expected
         },
         { topicId, expected: expectedVisible },
-        { timeout: 30000 }
+        { timeout: helperWaitTimeoutMs }
       )
     } catch (e) {
       return {
@@ -611,7 +665,11 @@ async function activateReduxProjection(
     },
     topics.map((t) => t.topicId)
   )
-  const reduxVerified = reduxInfo.reduxMessages === messageTotal && reduxInfo.reduxBlocks >= messageTotal
+  // Latest-window projection: Redux holds windowed count (e.g. 100 for large 150) while
+  // canonical logicalBytes retain full 150 per topic as retained payload denominator.
+  // Large therefore demonstrates truncated projection (hasMoreBefore true via window completeness).
+  const reduxVerified =
+    reduxInfo.reduxMessages === expectedProjectedTotal && reduxInfo.reduxBlocks >= expectedProjectedTotal
 
   // Observe derived projections via actual rendered DOM (production path) — final-topic-scoped, boundary-explicit.
   // Authoritative proof is strictly #messages [data-*] production selectors; [id^="message-"] is diagnostic-only and never satisfies complete.
@@ -1087,7 +1145,7 @@ function buildBenchmarkResult(
       name: 'final clicked synthetic topic owns the measured #messages DOM — #messages [data-message-id] scoped to final topic equals global and expectedVisible (no global stale count or [id^="message-"] satisfies complete)',
       kind: 'correctness',
       passed: allocation.projectionStats.finalTopicDomProof,
-      detail: `finalTopicDomProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}; scoped=${allocation.projectionStats.displayMessages}, global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages}, expectedVisible=${profile.syntheticMessagesPerTopic} (min(N,W)), finalTopic must be ${profile.syntheticTopics - 1}th synthetic topic (c02-heap-topic-${String(profile.syntheticTopics - 1).padStart(2, '0')}); strict #messages [data-message-id] only, [id^="message-"] diagnostic-only excluded`
+      detail: `finalTopicDomProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}; scoped=${allocation.projectionStats.displayMessages}, global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages}, expectedVisible=${c02ExpectedVisibleCount(profile)} (min(N, productionWindow ${C02_PRODUCTION_WINDOW_MAX}) — large retains 150 logically but projects 100), finalTopic must be ${profile.syntheticTopics - 1}th synthetic topic (c02-heap-topic-${String(profile.syntheticTopics - 1).padStart(2, '0')}); strict #messages [data-message-id] only, [id^="message-"] diagnostic-only excluded`
     },
     {
       id: 'projection.contextBoundaryExplicit',
@@ -1139,6 +1197,171 @@ function buildBenchmarkResult(
   }
 }
 
+function buildMultiBenchmarkResult(
+  environment: BenchmarkResult['environment'],
+  entries: Array<{
+    profileId: string
+    profile: C02HeapProfile
+    logicalBytes: number
+    rendererLogicalBytes: number
+    heapBefore: RendererHeapSample
+    heapAfter: RendererHeapSample
+    allocation: {
+      topicsCreated: number
+      messagesCreated: number
+      blocksCreated: number
+      usedTypedPath: boolean
+      reduxVerified: boolean
+      projectionStats: {
+        reduxMessages: number
+        reduxBlocks: number
+        groupCount: number
+        displayMessages: number
+        anchorGroupKey: string | null
+        contextBoundaryPresent: boolean
+        finalTopicDomProof: boolean
+        groupExactMatched?: boolean
+        groupsWithFinalTopic?: number
+        globalDisplayMessages?: number
+      }
+      productionPath: string
+      productionPathComplete?: boolean
+    }
+    informativeness: { informative: boolean; reason: string }
+    precision: HeapPrecisionLabel
+  }>
+): BenchmarkResult {
+  const allMetrics: BenchmarkMetric[] = []
+  const allGates: BenchmarkGate[] = []
+  const profileCount = entries.length
+  const firstHeapMethod = entries[0]?.heapBefore.method ?? RENDERER_HEAP_METHOD
+  const firstPrecision = entries[0]?.precision ?? 'unsupported'
+  const scale = buildC02MultiScaleMap(
+    entries.map((e) => ({ id: e.profileId, profile: e.profile })),
+    firstHeapMethod,
+    firstPrecision
+  )
+  for (const entry of entries) {
+    const prefix = entry.profileId.replace(/-/g, '_')
+    const amplification = computeHeapAmplification(entry.heapBefore, entry.heapAfter, entry.logicalBytes)
+    const effectiveInformative = entry.informativeness.informative && entry.precision === 'precise'
+    const effectiveDeltaRatio = effectiveInformative ? amplification.deltaRatio : 0
+    const effectiveAbsoluteRatio = effectiveInformative ? amplification.absoluteRatio : 0
+    allMetrics.push(
+      {
+        id: `${prefix}.logical.bytes`,
+        name: `${entry.profileId} canonical logical payload bytes (phase4-logical-payload-v1, directional synthetic)`,
+        value: entry.logicalBytes,
+        unit: 'bytes'
+      },
+      {
+        id: `${prefix}.heap.delta`,
+        name: `${entry.profileId} renderer heap delta bytes (directional synthetic; 0/negative/bucketed inconclusive)`,
+        value: amplification.heapDeltaBytes,
+        unit: 'bytes'
+      },
+      {
+        id: `${prefix}.heap.deltaInformative`,
+        name: `${entry.profileId} heap delta informativeness (1=effective precise positive, 0=inconclusive)`,
+        value: effectiveInformative ? 1 : 0,
+        unit: 'count'
+      },
+      {
+        id: `${prefix}.heap.amplification.deltaRatio`,
+        name: `${entry.profileId} heap amplification deltaRatio (valid only when deltaInformative=1)`,
+        value: effectiveDeltaRatio,
+        unit: 'ratio'
+      },
+      {
+        id: `${prefix}.heap.amplification.absoluteRatio`,
+        name: `${entry.profileId} heap amplification absoluteRatio (valid only when deltaInformative=1)`,
+        value: effectiveAbsoluteRatio,
+        unit: 'ratio'
+      },
+      {
+        id: `${prefix}.synthetic.topics`,
+        name: `${entry.profileId} synthetic topics`,
+        value: entry.allocation.topicsCreated,
+        unit: 'count'
+      },
+      {
+        id: `${prefix}.synthetic.messages`,
+        name: `${entry.profileId} synthetic messages`,
+        value: entry.allocation.messagesCreated,
+        unit: 'count'
+      },
+      {
+        id: `${prefix}.projection.groups`,
+        name: `${entry.profileId} derived groups via #messages [data-stable-group-id]`,
+        value: entry.allocation.projectionStats.groupCount,
+        unit: 'count'
+      },
+      {
+        id: `${prefix}.projection.displayMessages`,
+        name: `${entry.profileId} displayMessages via #messages [data-message-id] scoped to final topic`,
+        value: entry.allocation.projectionStats.displayMessages,
+        unit: 'count'
+      },
+      {
+        id: `${prefix}.calibration.complete`,
+        name: `${entry.profileId} authoritative calibration complete (effective heap AND productionPath complete)`,
+        value: effectiveInformative && !!entry.allocation.productionPathComplete ? 1 : 0,
+        unit: 'count'
+      },
+      {
+        id: `${prefix}.heap.used.before`,
+        name: `${entry.profileId} heap used before`,
+        value: entry.heapBefore.usedJSHeapSize,
+        unit: 'bytes'
+      },
+      {
+        id: `${prefix}.heap.used.after`,
+        name: `${entry.profileId} heap used after`,
+        value: entry.heapAfter.usedJSHeapSize,
+        unit: 'bytes'
+      }
+    )
+    const authoritativeComplete = effectiveInformative && !!entry.allocation.productionPathComplete
+    allGates.push(
+      {
+        id: `${prefix}.heap.deltaInformative`,
+        name: `${entry.profileId} heap delta informativeness — effective (precision===precise && finite positive)`,
+        kind: 'correctness',
+        passed: effectiveInformative,
+        detail: effectiveInformative
+          ? `${entry.profileId} delta ${amplification.heapDeltaBytes} precise informative`
+          : `${entry.profileId} inconclusive: ${entry.informativeness.reason}; precision=${entry.precision}`
+      },
+      {
+        id: `${prefix}.calibration.complete`,
+        name: `${entry.profileId} authoritative calibration complete — effective heap AND #messages proof`,
+        kind: 'correctness',
+        passed: authoritativeComplete,
+        detail: `profile ${entry.profileId}: authoritativeComplete=${authoritativeComplete ? 1 : 0} effective=${effectiveInformative ? 1 : 0} productionPathComplete=${entry.allocation.productionPathComplete ? 1 : 0}`
+      }
+    )
+  }
+  const allComplete = allGates.filter((g) => g.id.endsWith('.calibration.complete')).every((g) => g.passed)
+  allGates.push({
+    id: 'calibration.matrix.complete',
+    name: 'matrix calibration complete — all profiles effective heap AND productionPath complete (relation across multiple profiles)',
+    kind: 'correctness',
+    passed: allComplete,
+    detail: `matrix profileCount=${profileCount} allComplete=${allComplete ? 1 : 0} — each profile uses existing production activation path and precise memory sampling (directional synthetic)`
+  })
+  return {
+    schemaVersion: BENCH_RESULT_SCHEMA_VERSION,
+    benchmark: {
+      id: C02_BENCHMARK_ID,
+      name: `${C02_BENCHMARK_NAME} (matrix, directional synthetic)`,
+      scale: scale as unknown as Record<string, number>
+    },
+    environment,
+    metrics: allMetrics,
+    gates: allGates
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Spec — default-off, opt-in, inert to normal runs
 // ---------------------------------------------------------------------------
@@ -1147,219 +1370,420 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
   // Default-off: plain `pnpm test:e2e` stays green. Opt-in only.
   test.skip(!c02HeapGateEnabled(), 'C02 heap calibration is opt-in: set C02_HEAP_CALIBRATION=1 to run')
 
-  test('samples actual renderer heap and emits schema-v1 directional artifact', async ({ mainWindow, electronApp }) => {
-    // Resolve profile (fail-loud on bad env — no silent skip)
-    const profile = resolveC02HeapProfile()
-
-    // Deterministic synthetic topics — canonical logical bytes (phase4-logical-payload-v1)
-    const syntheticTopics = buildC02SyntheticTopics(profile)
-    const synthProblems = validateSyntheticTopics(syntheticTopics)
-    expect(synthProblems, `synthetic topics must canonicalize: ${synthProblems.join('; ')}`).toEqual([])
-    const logicalBytes = canonicalBytesForTopics(syntheticTopics)
-    expect(validateLogicalBytes(logicalBytes), 'canonical logical bytes must be finite positive').toEqual([])
-
-    // Sample heap BEFORE activation — actual renderer process
-    const heapBefore = await sampleRendererHeap(mainWindow)
-    const beforeProblems = validateHeapSample(heapBefore)
-    if (heapBefore === null) {
-      // Fail closed: actual renderer heap API unavailable — no artifact, explicit blocker
-      throw new Error(
-        `[PERF-C02] heap calibration unsupported: performance.memory not available in this renderer/Chromium build (method=${RENDERER_HEAP_METHOD}). No artifact emitted. This is the expected blocker when the renderer heap cannot be sampled without production changes; do not substitute a Node main-native heap proxy.`
-      )
-    }
-    expect(beforeProblems, `heap before sample must be valid: ${beforeProblems.join('; ')}`).toEqual([])
-
-    // Activate Redux projection via existing production path + actual rendered Chat derivation
-    const allocation = await activateReduxProjection(mainWindow, profile)
-    if (allocation.failedBlocker) {
-      throw new Error(
-        `[PERF-C02] heap calibration blocked: ${allocation.failedBlocker}. No artifact emitted — this is fail-closed per decision rights; do not retain detached holder or Node proxy.`
-      )
-    }
-    expect(allocation.topicsCreated, 'synthetic topics must be created in renderer').toBe(profile.syntheticTopics)
-    expect(allocation.messagesCreated, 'synthetic messages must be created in renderer').toBe(
-      profile.syntheticTopics * profile.syntheticMessagesPerTopic
-    )
-    expect(allocation.reduxVerified, 'Redux entity projection must be verified resident (messages + blocks)').toBe(true)
-    // Cross-check: synthetic topic is registered in assistants state with live assistant ID (acceptance 1)
-    const finalTopicId = syntheticTopics[syntheticTopics.length - 1]!.topicId
-    const assistantCheck = await mainWindow.evaluate((topicId) => {
-      const s = (window as unknown as Record<string, unknown>).store as
-        | { getState: () => Record<string, unknown> }
-        | undefined
-      const state = s?.getState() as Record<string, unknown> | undefined
-      const assistants = ((state?.assistants as Record<string, unknown> | undefined)?.assistants ?? []) as Array<{
-        id: string
-        topics: Array<{ id: string }>
-      }>
-      for (const a of assistants) {
-        if (a.topics.some((t) => t.id === topicId)) return { found: true, assistantId: a.id }
+  test('samples actual renderer heap and emits schema-v1 directional artifact', async ({
+    mainWindow,
+    electronApp,
+    mockPort
+  }) => {
+    // Resolve profiles (fail-loud on bad env — no silent skip). Single-profile "1"/"true" preserved; matrix via "all"/"matrix".
+    const profiles = (() => {
+      try {
+        return resolveC02HeapProfiles()
+      } catch {
+        return [{ id: 'c02-default-v1', profile: resolveC02HeapProfile() }]
       }
-      return { found: false, assistantId: null }
-    }, finalTopicId)
-    expect(
-      assistantCheck.found,
-      'measured synthetic topic must be registered in assistants state with live assistant ID'
-    ).toBe(true)
-
-    // Final-topic DOM proof — strict #messages production selectors must own the measured DOM; fallback/global stale counts never satisfy.
-    // Audit lock: productionPath complete only when final-topic identity inside #messages, exact expected #messages DOM messages/groups,
-    // and context-boundary inside #messages with final-topic-owned anchor all pass; [id^="message-"] fallback and global queries cannot satisfy it.
-    // Authoritative calibration complete additionally requires effective precise heap (checked after heap sampling).
-    expect(
-      allocation.projectionStats.finalTopicDomProof,
-      `final-topic DOM proof must be true for ${finalTopicId} via #messages [data-message-id]: scoped ${allocation.projectionStats.displayMessages} vs global ${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages} vs expected ${Math.min(profile.syntheticMessagesPerTopic, profile.syntheticMessagesPerTopic)} (scoped===global===expected inside #messages required; global/stale or [id^="message-"] fallback is not proof)`
-    ).toBe(true)
-    expect(
-      allocation.projectionStats.groupCount,
-      `stable group count inside #messages must be exact expectedVisible (${Math.min(profile.syntheticMessagesPerTopic, profile.syntheticMessagesPerTopic)}) via #messages [data-stable-group-id] — arbitrary non-zero fallback cannot produce complete evidence; global [data-stable-group-id] never authoritative`
-    ).toBe(Math.min(profile.syntheticMessagesPerTopic, profile.syntheticMessagesPerTopic))
-    expect(
-      allocation.projectionStats.groupsWithFinalTopic,
-      `groups must demonstrably belong to final topic ${finalTopicId} via #messages [data-stable-group-id]/[data-message-id] (groupsWithFinalTopic === expectedVisible); [id^="message-"] descendant never satisfies`
-    ).toBe(Math.min(profile.syntheticMessagesPerTopic, profile.syntheticMessagesPerTopic))
-    expect(
-      allocation.projectionStats.contextBoundaryPresent,
-      '#messages [data-context-boundary] must be present explicitly inside #messages — absent or global boundary outside #messages is not converted to first group as fake anchor; partial/inconclusive when absent'
-    ).toBe(true)
-    expect(
-      allocation.projectionStats.anchorGroupKey !== null &&
-        allocation.projectionStats.anchorGroupKey.includes(finalTopicId),
-      `context boundary anchor must be resolvable inside #messages and final-topic-owned (predecessor #messages [data-stable-group-id] containing ${finalTopicId}) when boundary present — anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'}`
-    ).toBe(true)
-    expect(
-      !!allocation.productionPathComplete,
-      `productionPath must be complete — locked detail: ${allocation.productionPath}`
-    ).toBe(true)
-    expect(
-      allocation.productionPath.includes('productionPath complete'),
-      `productionPath detail must contain "productionPath complete" marker: ${allocation.productionPath}`
-    ).toBe(true)
-
-    // Small settle after deterministic waits already performed inside activation (React commit)
-    await mainWindow.waitForTimeout(250)
-
-    // Sample heap AFTER activation — actual renderer process
-    const heapAfter = await sampleRendererHeap(mainWindow)
-    const afterProblems = validateHeapSample(heapAfter)
-    if (heapAfter === null) {
-      throw new Error(
-        `[PERF-C02] heap calibration unsupported after allocation: performance.memory became unavailable. No artifact emitted.`
-      )
+    })()
+    const isMatrix = profiles.length > 1
+    if (isMatrix) {
+      // Bounded harness budget for the observed 4-profile isolated workload. Applies
+      // before any isolated app launch/activation so the timeout governs the full matrix;
+      // single-profile retains Playwright default 60s (no elevation here).
+      test.setTimeout(C02_MATRIX_TIMEOUT_MS)
     }
-    expect(afterProblems, `heap after sample must be valid: ${afterProblems.join('; ')}`).toEqual([])
 
-    // Amplification computed separately from logical bytes (never conflated)
-    const amplification = computeHeapAmplification(heapBefore, heapAfter, logicalBytes)
-    expect(Number.isFinite(amplification.deltaRatio), 'amplification deltaRatio must be finite (L3 directional)').toBe(
-      true
-    )
-    expect(
-      Number.isFinite(amplification.absoluteRatio),
-      'amplification absoluteRatio must be finite (L3 directional)'
-    ).toBe(true)
+    if (!isMatrix) {
+      const profile = profiles[0]!.profile
 
-    // Detect precision via argv flag (opt-in precise launch reflects in electron process argv)
-    const appArgv = await electronApp.evaluate(() => process.argv as string[])
-    const precisionLabel: HeapPrecisionLabel = detectHeapPrecisionLabel(appArgv, heapBefore.method)
+      // Deterministic synthetic topics — canonical logical bytes (phase4-logical-payload-v1)
+      const syntheticTopics = buildC02SyntheticTopics(profile)
+      const synthProblems = validateSyntheticTopics(syntheticTopics)
+      expect(synthProblems, `synthetic topics must canonicalize: ${synthProblems.join('; ')}`).toEqual([])
+      const logicalBytes = canonicalBytesForTopics(syntheticTopics)
+      expect(validateLogicalBytes(logicalBytes), 'canonical logical bytes must be finite positive').toEqual([])
 
-    // Classify delta informativeness — single authoritative definition effective = precise && finite positive
-    const baseInformativeness = classifyEffectiveHeapDeltaInformative(amplification.heapDeltaBytes, precisionLabel)
-    // Authoritative calibration complete strictly requires effective precise heap — fail closed if inconclusive
-    expect(
-      precisionLabel,
-      `heap precision must be precise for authoritative complete — precision=${precisionLabel} is bucketed/inconclusive and never yields complete calibration evidence`
-    ).toBe('precise')
-    expect(
-      baseInformativeness.informative,
-      `effective heap must be informative (precision===precise && finite positive delta) — ${baseInformativeness.reason}; precision=${precisionLabel}, delta=${amplification.heapDeltaBytes} is inconclusive and cannot yield complete calibration evidence (raw heap.delta remains diagnostic, ratios 0)`
-    ).toBe(true)
-
-    // Correctness gates — no thresholds, only completeness/parity/privacy + informativeness
-    // Verify the typed ChatDb path preserved authority (fetchMessages) where used
-    if (allocation.usedTypedPath) {
-      for (const t of syntheticTopics) {
-        const fetched = await mainWindow.evaluate(async (topicId) => {
-          const api = (window as unknown as Record<string, unknown>).api as Record<string, unknown> | undefined
-          const chatDb = api?.chatDb as Record<string, (arg: unknown) => Promise<unknown>> | undefined
-          if (!chatDb || typeof chatDb.fetchMessages !== 'function') return null
-          return chatDb.fetchMessages({ topicId })
-        }, t.topicId)
-        // fetchMessages returns { ok, value: { messages, blocks }} — verify shape minimally
-        expect(fetched, `typed path parity: fetchMessages must return a value for ${t.topicId}`).not.toBeNull()
+      // Sample heap BEFORE activation — actual renderer process
+      const heapBefore = await sampleRendererHeap(mainWindow)
+      const beforeProblems = validateHeapSample(heapBefore)
+      if (heapBefore === null) {
+        // Fail closed: actual renderer heap API unavailable — no artifact, explicit blocker
+        throw new Error(
+          `[PERF-C02] heap calibration unsupported: performance.memory not available in this renderer/Chromium build (method=${RENDERER_HEAP_METHOD}). No artifact emitted. This is the expected blocker when the renderer heap cannot be sampled without production changes; do not substitute a Node main-native heap proxy.`
+        )
       }
-    }
+      expect(beforeProblems, `heap before sample must be valid: ${beforeProblems.join('; ')}`).toEqual([])
 
-    // Build and validate schema-v1 artifact — directional/synthetic labeled
-    // Collect reproducibility metadata; override abi/node from the real Electron main process
-    // (the test runner is Node, but the measured runtime is the Electron app).
-    const appRuntime = await electronApp.evaluate(() => ({
-      node: process.version,
-      abiModules: String(process.versions.modules)
-    }))
-    expect(appRuntime.abiModules, 'the measured runtime must be the Electron ABI 145 binding').toBe('145')
-    const environment: BenchmarkResult['environment'] = {
-      ...collectEnvironmentMetadata({ command: CANONICAL_COMMAND }),
-      node: appRuntime.node,
-      abiLane: 'electron',
-      abi: appRuntime.abiModules
-    }
+      // Activate Redux projection via existing production path + actual rendered Chat derivation
+      const allocation = await activateReduxProjection(mainWindow, profile)
+      if (allocation.failedBlocker) {
+        throw new Error(
+          `[PERF-C02] heap calibration blocked: ${allocation.failedBlocker}. No artifact emitted — this is fail-closed per decision rights; do not retain detached holder or Node proxy.`
+        )
+      }
+      expect(allocation.topicsCreated, 'synthetic topics must be created in renderer').toBe(profile.syntheticTopics)
+      expect(allocation.messagesCreated, 'synthetic messages must be created in renderer').toBe(
+        profile.syntheticTopics * profile.syntheticMessagesPerTopic
+      )
+      expect(allocation.reduxVerified, 'Redux entity projection must be verified resident (messages + blocks)').toBe(
+        true
+      )
+      // Cross-check: synthetic topic is registered in assistants state with live assistant ID (acceptance 1)
+      const finalTopicId = syntheticTopics[syntheticTopics.length - 1]!.topicId
+      const assistantCheck = await mainWindow.evaluate((topicId) => {
+        const s = (window as unknown as Record<string, unknown>).store as
+          | { getState: () => Record<string, unknown> }
+          | undefined
+        const state = s?.getState() as Record<string, unknown> | undefined
+        const assistants = ((state?.assistants as Record<string, unknown> | undefined)?.assistants ?? []) as Array<{
+          id: string
+          topics: Array<{ id: string }>
+        }>
+        for (const a of assistants) {
+          if (a.topics.some((t) => t.id === topicId)) return { found: true, assistantId: a.id }
+        }
+        return { found: false, assistantId: null }
+      }, finalTopicId)
+      expect(
+        assistantCheck.found,
+        'measured synthetic topic must be registered in assistants state with live assistant ID'
+      ).toBe(true)
 
-    const result = buildBenchmarkResult(
-      environment,
-      profile,
-      logicalBytes,
-      allocation.rendererLogicalBytes,
-      heapBefore,
-      heapAfter,
-      allocation,
-      baseInformativeness,
-      precisionLabel
-    )
-    // Authoritative artifact status — complete requires effective precise heap AND #messages production DOM proof
-    const calibMetric = result.metrics.find((m) => m.id === 'calibration.complete')
-    expect(
-      calibMetric?.value,
-      `authoritative calibration.complete metric must be 1 (effective heap + #messages proof) — got ${calibMetric?.value}; invalid heap or fallback/global DOM never yields complete`
-    ).toBe(1)
-    const calibGate = result.gates.find((g) => g.id === 'calibration.complete')
-    expect(calibGate?.passed, `calibration.complete gate must pass — ${calibGate?.detail ?? 'missing detail'}`).toBe(
-      true
-    )
-    const prodCompleteGate = result.gates.find((g) => g.id === 'productionPath.complete')
-    expect(
-      prodCompleteGate?.passed,
-      `productionPath.complete gate (authoritative) must pass — requires effective heap + #messages proof: ${prodCompleteGate?.detail ?? 'missing'}`
-    ).toBe(true)
-    const allocationGate = result.gates.find((g) => g.id === 'allocation.resident')
-    expect(
-      allocationGate?.passed,
-      `allocation.resident gate (authoritative) must pass — requires effective heap + #messages proof`
-    ).toBe(true)
+      // Final-topic DOM proof — strict #messages production selectors must own the measured DOM; fallback/global stale counts never satisfy.
+      // Audit lock: productionPath complete only when final-topic identity inside #messages, exact expected #messages DOM messages/groups,
+      // and context-boundary inside #messages with final-topic-owned anchor all pass; [id^="message-"] fallback and global queries cannot satisfy it.
+      // Authoritative calibration complete additionally requires effective precise heap (checked after heap sampling).
+      const expectedSingleVisible = c02ExpectedVisibleCount(profile)
+      expect(
+        allocation.projectionStats.finalTopicDomProof,
+        `final-topic DOM proof must be true for ${finalTopicId} via #messages [data-message-id]: scoped ${allocation.projectionStats.displayMessages} vs global ${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages} vs expected ${expectedSingleVisible} (min(N, productionWindow ${C02_PRODUCTION_WINDOW_MAX}) — retains 150 logically but projects 100 for large; scoped===global===expected inside #messages required; global/stale or [id^="message-"] fallback is not proof)`
+      ).toBe(true)
+      expect(
+        allocation.projectionStats.groupCount,
+        `stable group count inside #messages must be exact expectedVisible (${expectedSingleVisible}) via #messages [data-stable-group-id] — arbitrary non-zero fallback cannot produce complete evidence; global [data-stable-group-id] never authoritative`
+      ).toBe(expectedSingleVisible)
+      expect(
+        allocation.projectionStats.groupsWithFinalTopic,
+        `groups must demonstrably belong to final topic ${finalTopicId} via #messages [data-stable-group-id]/[data-message-id] (groupsWithFinalTopic === expectedVisible ${expectedSingleVisible}); [id^="message-"] descendant never satisfies`
+      ).toBe(expectedSingleVisible)
+      expect(
+        allocation.projectionStats.contextBoundaryPresent,
+        '#messages [data-context-boundary] must be present explicitly inside #messages — absent or global boundary outside #messages is not converted to first group as fake anchor; partial/inconclusive when absent'
+      ).toBe(true)
+      expect(
+        allocation.projectionStats.anchorGroupKey !== null &&
+          allocation.projectionStats.anchorGroupKey.includes(finalTopicId),
+        `context boundary anchor must be resolvable inside #messages and final-topic-owned (predecessor #messages [data-stable-group-id] containing ${finalTopicId}) when boundary present — anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'}`
+      ).toBe(true)
+      expect(
+        !!allocation.productionPathComplete,
+        `productionPath must be complete — locked detail: ${allocation.productionPath}`
+      ).toBe(true)
+      expect(
+        allocation.productionPath.includes('productionPath complete'),
+        `productionPath detail must contain "productionPath complete" marker: ${allocation.productionPath}`
+      ).toBe(true)
 
-    // Privacy: no content/credentials/paths — enforced by schema validator at write time
-    const artifactPath = writeBenchmarkResult(result)
-    expect(fs.existsSync(artifactPath), 'artifact must exist after a passing run').toBe(true)
-    console.log(`[PERF-C02] heap calibration artifact: ${path.basename(artifactPath)}`)
-    // Log effective values (0 when inconclusive, not valid amplification)
-    const effectiveDeltaRatio = baseInformativeness.informative ? amplification.deltaRatio : 0
-    const effectiveAbsoluteRatio = baseInformativeness.informative ? amplification.absoluteRatio : 0
-    console.log(
-      `[PERF-C02] directional synthetic: logicalBytes=${logicalBytes}, heapDelta=${amplification.heapDeltaBytes} (raw diagnostic), effective deltaRatio=${effectiveDeltaRatio.toFixed(3)}, effective absoluteRatio=${effectiveAbsoluteRatio.toFixed(3)}, method=${heapBefore.method}, precision=${precisionLabel}, effectiveInformative=${baseInformativeness.informative}`
-    )
-    if (!baseInformativeness.informative) {
+      // Small settle after deterministic waits already performed inside activation (React commit)
+      await mainWindow.waitForTimeout(250)
+
+      // Sample heap AFTER activation — actual renderer process
+      const heapAfter = await sampleRendererHeap(mainWindow)
+      const afterProblems = validateHeapSample(heapAfter)
+      if (heapAfter === null) {
+        throw new Error(
+          `[PERF-C02] heap calibration unsupported after allocation: performance.memory became unavailable. No artifact emitted.`
+        )
+      }
+      expect(afterProblems, `heap after sample must be valid: ${afterProblems.join('; ')}`).toEqual([])
+
+      // Amplification computed separately from logical bytes (never conflated)
+      const amplification = computeHeapAmplification(heapBefore, heapAfter, logicalBytes)
+      expect(
+        Number.isFinite(amplification.deltaRatio),
+        'amplification deltaRatio must be finite (L3 directional)'
+      ).toBe(true)
+      expect(
+        Number.isFinite(amplification.absoluteRatio),
+        'amplification absoluteRatio must be finite (L3 directional)'
+      ).toBe(true)
+
+      // Detect precision via argv flag (opt-in precise launch reflects in electron process argv)
+      const appArgv = await electronApp.evaluate(() => process.argv as string[])
+      const precisionLabel: HeapPrecisionLabel = detectHeapPrecisionLabel(appArgv, heapBefore.method)
+
+      // Classify delta informativeness — single authoritative definition effective = precise && finite positive
+      const baseInformativeness = classifyEffectiveHeapDeltaInformative(amplification.heapDeltaBytes, precisionLabel)
+      // Authoritative calibration complete strictly requires effective precise heap — fail closed if inconclusive
+      expect(
+        precisionLabel,
+        `heap precision must be precise for authoritative complete — precision=${precisionLabel} is bucketed/inconclusive and never yields complete calibration evidence`
+      ).toBe('precise')
+      expect(
+        baseInformativeness.informative,
+        `effective heap must be informative (precision===precise && finite positive delta) — ${baseInformativeness.reason}; precision=${precisionLabel}, delta=${amplification.heapDeltaBytes} is inconclusive and cannot yield complete calibration evidence (raw heap.delta remains diagnostic, ratios 0)`
+      ).toBe(true)
+
+      // Correctness gates — no thresholds, only completeness/parity/privacy + informativeness
+      // Verify the typed ChatDb path preserved authority (fetchMessages) where used
+      if (allocation.usedTypedPath) {
+        for (const t of syntheticTopics) {
+          const fetched = await mainWindow.evaluate(async (topicId) => {
+            const api = (window as unknown as Record<string, unknown>).api as Record<string, unknown> | undefined
+            const chatDb = api?.chatDb as Record<string, (arg: unknown) => Promise<unknown>> | undefined
+            if (!chatDb || typeof chatDb.fetchMessages !== 'function') return null
+            return chatDb.fetchMessages({ topicId })
+          }, t.topicId)
+          // fetchMessages returns { ok, value: { messages, blocks }} — verify shape minimally
+          expect(fetched, `typed path parity: fetchMessages must return a value for ${t.topicId}`).not.toBeNull()
+        }
+      }
+
+      // Build and validate schema-v1 artifact — directional/synthetic labeled
+      // Collect reproducibility metadata; override abi/node from the real Electron main process
+      // (the test runner is Node, but the measured runtime is the Electron app).
+      const appRuntime = await electronApp.evaluate(() => ({
+        node: process.version,
+        abiModules: String(process.versions.modules)
+      }))
+      expect(appRuntime.abiModules, 'the measured runtime must be the Electron ABI 145 binding').toBe('145')
+      const environment: BenchmarkResult['environment'] = {
+        ...collectEnvironmentMetadata({ command: CANONICAL_COMMAND }),
+        node: appRuntime.node,
+        abiLane: 'electron',
+        abi: appRuntime.abiModules
+      }
+
+      const result = buildBenchmarkResult(
+        environment,
+        profile,
+        logicalBytes,
+        allocation.rendererLogicalBytes,
+        heapBefore,
+        heapAfter,
+        allocation,
+        baseInformativeness,
+        precisionLabel
+      )
+      // Authoritative artifact status — complete requires effective precise heap AND #messages production DOM proof
+      const calibMetric = result.metrics.find((m) => m.id === 'calibration.complete')
+      expect(
+        calibMetric?.value,
+        `authoritative calibration.complete metric must be 1 (effective heap + #messages proof) — got ${calibMetric?.value}; invalid heap or fallback/global DOM never yields complete`
+      ).toBe(1)
+      const calibGate = result.gates.find((g) => g.id === 'calibration.complete')
+      expect(calibGate?.passed, `calibration.complete gate must pass — ${calibGate?.detail ?? 'missing detail'}`).toBe(
+        true
+      )
+      const prodCompleteGate = result.gates.find((g) => g.id === 'productionPath.complete')
+      expect(
+        prodCompleteGate?.passed,
+        `productionPath.complete gate (authoritative) must pass — requires effective heap + #messages proof: ${prodCompleteGate?.detail ?? 'missing'}`
+      ).toBe(true)
+      const allocationGate = result.gates.find((g) => g.id === 'allocation.resident')
+      expect(
+        allocationGate?.passed,
+        `allocation.resident gate (authoritative) must pass — requires effective heap + #messages proof`
+      ).toBe(true)
+
+      // Privacy: no content/credentials/paths — enforced by schema validator at write time
+      const artifactPath = writeBenchmarkResult(result)
+      expect(fs.existsSync(artifactPath), 'artifact must exist after a passing run').toBe(true)
+      console.log(`[PERF-C02] heap calibration artifact: ${path.basename(artifactPath)}`)
+      // Log effective values (0 when inconclusive, not valid amplification)
+      const effectiveDeltaRatio = baseInformativeness.informative ? amplification.deltaRatio : 0
+      const effectiveAbsoluteRatio = baseInformativeness.informative ? amplification.absoluteRatio : 0
       console.log(
-        `[PERF-C02] INCONCLUSIVE: ${baseInformativeness.reason}; precision=${precisionLabel}. Raw heap.delta remains diagnostic but amplification ratios are 0 (not valid evidence). Not amplification 0.`
+        `[PERF-C02] directional synthetic: logicalBytes=${logicalBytes}, heapDelta=${amplification.heapDeltaBytes} (raw diagnostic), effective deltaRatio=${effectiveDeltaRatio.toFixed(3)}, effective absoluteRatio=${effectiveAbsoluteRatio.toFixed(3)}, method=${heapBefore.method}, precision=${precisionLabel}, effectiveInformative=${baseInformativeness.informative}`
+      )
+      if (!baseInformativeness.informative) {
+        console.log(
+          `[PERF-C02] INCONCLUSIVE: ${baseInformativeness.reason}; precision=${precisionLabel}. Raw heap.delta remains diagnostic but amplification ratios are 0 (not valid evidence). Not amplification 0.`
+        )
+      }
+      console.log(
+        `[PERF-C02] MEASURED AUTHORITY: Redux entity projection (messages entity + messageIdsByTopic + blocks entity) + derived viewport/group/context via actual rendered DOM (groups=${allocation.projectionStats.groupCount} exact=${allocation.projectionStats.groupExactMatched ? 1 : 0}, display scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages} groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}, finalTopicProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}) — productionPath: ${allocation.productionPath}`
+      )
+      console.log(
+        `[PERF-C02] PRODUCTION PROJECTION PATH (canonical): assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required, clamped to latest-window ${C02_PRODUCTION_WINDOW_MAX}) → [data-testid="topic-item"][data-topic-id="${finalTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/#messages [data-message-id]/#messages [data-context-boundary]; productionPath=${allocation.productionPath}; productionPathComplete=${allocation.productionPathComplete ? 1 : 0} authoritativeCalibrationComplete=${baseInformativeness.informative && !!allocation.productionPathComplete ? 1 : 0} (requires precise && finite positive delta + final-topic-owned #messages proof) groups exact ${allocation.projectionStats.groupCount}/${c02ExpectedVisibleCount(profile)} via #messages [data-stable-group-id] (logical retained ${profile.syntheticMessagesPerTopic} per topic, projected ${c02ExpectedVisibleCount(profile)}) contextBoundaryInsideMessages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'} finalTopicOwned=${allocation.projectionStats.anchorGroupKey?.includes(finalTopicId) ? 1 : 0} (fallback [id^="message-"]/global never satisfies; [data-context-boundary] must be inside #messages with final-topic anchor)`
+      )
+      console.log(
+        `[PERF-C02] NOTE: values are directional/synthetic from deterministic synthetic projection (${profile.syntheticTopics} topics × ${profile.syntheticMessagesPerTopic} msgs × ${profile.blockContentBytes}B), not production baseline/threshold/policy/real user-data distribution.`
+      )
+    } else {
+      // Multi-profile matrix — INDEPENDENT per-profile isolation via fresh
+      // disposable profile/app/session per profile using existing E2E ownership
+      // (createOwnedTmpRoot / launchElectronApp / probeAndAssertRuntimeAppData
+      // / bypassOnboarding / seedMockProvider / waitForHomeReady / closeElectronWithExactCleanup).
+      // Sequential profiles in one app share Redux/persisted state and contaminate
+      // heap deltas — fresh profile/app per profile is required for independent
+      // delta measurement. Each profile's canonical logical bytes denominator is
+      // segment-free (segmentCount 0) so it aligns with entities actually
+      // materialized/verified (messages+blocks only).
+      const entries: Array<{
+        profileId: string
+        profile: C02HeapProfile
+        logicalBytes: number
+        rendererLogicalBytes: number
+        heapBefore: RendererHeapSample
+        heapAfter: RendererHeapSample
+        allocation: Awaited<ReturnType<typeof activateReduxProjection>>
+        informativeness: { informative: boolean; reason: string }
+        precision: HeapPrecisionLabel
+      }> = []
+      const effectiveMockPort = mockPort
+      for (const entry of profiles) {
+        const prefix = `c02-${entry.id}-topic`
+        const syntheticTopics = buildC02SyntheticTopicsWithPrefix(entry.profile, prefix)
+        const synthProblems = validateSyntheticTopics(syntheticTopics)
+        expect(
+          synthProblems,
+          `synthetic topics must canonicalize for ${entry.id}: ${synthProblems.join('; ')}`
+        ).toEqual([])
+        const logicalBytes = canonicalBytesForTopics(syntheticTopics)
+        expect(
+          validateLogicalBytes(logicalBytes),
+          `canonical logical bytes must be finite positive for ${entry.id}`
+        ).toEqual([])
+
+        const isolatedRoot = createOwnedTmpRoot()
+        const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        const isolatedUserDataDir = `${isolatedRoot}/c02-isolated-${entry.id}-${token}`
+        validateProfileLaunchToken(isolatedRoot, isolatedUserDataDir, true)
+        let isolatedApp: import('@playwright/test').ElectronApplication | null = null
+        let isolatedWindow: import('@playwright/test').Page | null = null
+        try {
+          isolatedApp = await launchElectronApp({ userDataDir: isolatedUserDataDir, ownedTmpRoot: isolatedRoot })
+          isolatedWindow = await waitForMainElectronWindow(isolatedApp)
+          const probed = await probeAndAssertRuntimeAppData(isolatedWindow, isolatedUserDataDir)
+          void probed
+          await bypassOnboarding(isolatedWindow)
+          await seedMockProvider(isolatedWindow, effectiveMockPort)
+          await waitForHomeReady(isolatedWindow)
+          await assertChatDbReady(isolatedWindow)
+          await assertTextareaReady(isolatedWindow)
+
+          const heapBefore = await sampleRendererHeap(isolatedWindow)
+          const beforeProblems = validateHeapSample(heapBefore)
+          if (heapBefore === null) {
+            throw new Error(
+              `[PERF-C02] heap calibration unsupported for profile ${entry.id}: performance.memory not available. No artifact emitted.`
+            )
+          }
+          expect(
+            beforeProblems,
+            `heap before sample must be valid for ${entry.id}: ${beforeProblems.join('; ')}`
+          ).toEqual([])
+
+          const allocation = await activateReduxProjection(isolatedWindow, entry.profile, prefix, {
+            waitTimeoutMs: C02_MATRIX_WAIT_TIMEOUT_MS
+          })
+          if (allocation.failedBlocker) {
+            throw new Error(
+              `[PERF-C02] heap calibration blocked for profile ${entry.id}: ${allocation.failedBlocker}. No artifact emitted.`
+            )
+          }
+          expect(allocation.topicsCreated, `synthetic topics must be created for ${entry.id}`).toBe(
+            entry.profile.syntheticTopics
+          )
+          expect(allocation.messagesCreated, `synthetic messages must be created for ${entry.id}`).toBe(
+            entry.profile.syntheticTopics * entry.profile.syntheticMessagesPerTopic
+          )
+          expect(allocation.reduxVerified, `Redux entity projection must be verified for ${entry.id}`).toBe(true)
+
+          const finalTopicId = syntheticTopics[syntheticTopics.length - 1]!.topicId
+          expect(
+            allocation.projectionStats.finalTopicDomProof,
+            `final-topic DOM proof must be true for ${entry.id} ${finalTopicId}`
+          ).toBe(true)
+          expect(!!allocation.productionPathComplete, `productionPath must be complete for ${entry.id}`).toBe(true)
+
+          await isolatedWindow.waitForTimeout(250)
+          const heapAfter = await sampleRendererHeap(isolatedWindow)
+          const afterProblems = validateHeapSample(heapAfter)
+          if (heapAfter === null) {
+            throw new Error(
+              `[PERF-C02] heap calibration unsupported after allocation for ${entry.id}: performance.memory became unavailable. No artifact emitted.`
+            )
+          }
+          expect(afterProblems, `heap after sample must be valid for ${entry.id}: ${afterProblems.join('; ')}`).toEqual(
+            []
+          )
+
+          const appArgv = await isolatedApp.evaluate(() => process.argv as string[])
+          const precisionLabel: HeapPrecisionLabel = detectHeapPrecisionLabel(appArgv, heapBefore.method)
+          const amplification = computeHeapAmplification(heapBefore, heapAfter, logicalBytes)
+          const baseInformativeness = classifyEffectiveHeapDeltaInformative(
+            amplification.heapDeltaBytes,
+            precisionLabel
+          )
+          expect(precisionLabel, `heap precision must be precise for ${entry.id} — precision=${precisionLabel}`).toBe(
+            'precise'
+          )
+          expect(
+            baseInformativeness.informative,
+            `effective heap must be informative for ${entry.id} — ${baseInformativeness.reason}`
+          ).toBe(true)
+
+          entries.push({
+            profileId: entry.id,
+            profile: entry.profile,
+            logicalBytes,
+            rendererLogicalBytes: allocation.rendererLogicalBytes,
+            heapBefore,
+            heapAfter,
+            allocation,
+            informativeness: baseInformativeness,
+            precision: precisionLabel
+          })
+          console.log(
+            `[PERF-C02] matrix profile ${entry.id}: isolated profile ${isolatedUserDataDir} logicalBytes=${logicalBytes}, heapDelta=${amplification.heapDeltaBytes}, deltaRatio=${amplification.deltaRatio.toFixed(3)}, precision=${precisionLabel}`
+          )
+        } finally {
+          try {
+            if (isolatedApp) {
+              await closeElectronWithExactCleanup(isolatedUserDataDir, {
+                close: () => isolatedApp!.close(),
+                findExactProcesses: findProcessesByUserDataDir,
+                terminateExactProcesses: (dir) => terminateProcessesByUserDataDir(dir, null)
+              })
+            }
+          } catch (e) {
+            throw new Error(
+              `[PERF-C02] matrix isolation cleanup failed for ${entry.id} (${isolatedUserDataDir}): ${e instanceof Error ? e.message : String(e)}`
+            )
+          } finally {
+            try {
+              await removeOwnedTmpRoot(isolatedRoot, [isolatedUserDataDir])
+            } catch (e) {
+              throw new Error(
+                `[PERF-C02] matrix isolation root cleanup failed for ${entry.id} (${isolatedRoot}): ${e instanceof Error ? e.message : String(e)}`
+              )
+            }
+          }
+        }
+      }
+
+      const appRuntime = await electronApp.evaluate(() => ({
+        node: process.version,
+        abiModules: String(process.versions.modules)
+      }))
+      expect(appRuntime.abiModules, 'the measured runtime must be the Electron ABI 145 binding').toBe('145')
+      const environment: BenchmarkResult['environment'] = {
+        ...collectEnvironmentMetadata({ command: CANONICAL_COMMAND }),
+        node: appRuntime.node,
+        abiLane: 'electron',
+        abi: appRuntime.abiModules
+      }
+      const result = buildMultiBenchmarkResult(environment, entries)
+      for (const m of result.metrics) {
+        expect(Number.isFinite(m.value), `metric ${m.id} must be finite`).toBe(true)
+      }
+      const matrixGate = result.gates.find((g) => g.id === 'calibration.matrix.complete')
+      expect(matrixGate?.passed, `matrix calibration gate must pass — ${matrixGate?.detail ?? 'missing'}`).toBe(true)
+      const artifactPath = writeBenchmarkResult(result)
+      expect(fs.existsSync(artifactPath), 'artifact must exist after matrix run').toBe(true)
+      console.log(
+        `[PERF-C02] heap calibration matrix artifact: ${path.basename(artifactPath)} with ${entries.length} profiles — directional synthetic, not adopted`
       )
     }
-    console.log(
-      `[PERF-C02] MEASURED AUTHORITY: Redux entity projection (messages entity + messageIdsByTopic + blocks entity) + derived viewport/group/context via actual rendered DOM (groups=${allocation.projectionStats.groupCount} exact=${allocation.projectionStats.groupExactMatched ? 1 : 0}, display scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages} groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}, finalTopicProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}) — productionPath: ${allocation.productionPath}`
-    )
-    console.log(
-      `[PERF-C02] PRODUCTION PROJECTION PATH (canonical): assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id="${finalTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/#messages [data-message-id]/#messages [data-context-boundary]; productionPath=${allocation.productionPath}; productionPathComplete=${allocation.productionPathComplete ? 1 : 0} authoritativeCalibrationComplete=${baseInformativeness.informative && !!allocation.productionPathComplete ? 1 : 0} (requires precise && finite positive delta + final-topic-owned #messages proof) groups exact ${allocation.projectionStats.groupCount}/${Math.min(profile.syntheticMessagesPerTopic, profile.syntheticMessagesPerTopic)} via #messages [data-stable-group-id] contextBoundaryInsideMessages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'} finalTopicOwned=${allocation.projectionStats.anchorGroupKey?.includes(finalTopicId) ? 1 : 0} (fallback [id^="message-"]/global never satisfies; [data-context-boundary] must be inside #messages with final-topic anchor)`
-    )
-    console.log(
-      `[PERF-C02] NOTE: values are directional/synthetic from deterministic synthetic projection (${profile.syntheticTopics} topics × ${profile.syntheticMessagesPerTopic} msgs × ${profile.blockContentBytes}B), not production baseline/threshold/policy/real user-data distribution.`
-    )
   })
 })

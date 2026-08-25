@@ -8,6 +8,12 @@ import {
   buildC02SyntheticTopics,
   buildC02ScaleMap,
   C02_BENCHMARK_ID,
+  C02_HEAP_PROFILE_IDS,
+  C02_HEAP_PROFILES,
+  C02_PRODUCTION_WINDOW_MAX,
+  C02_PRODUCTION_WINDOW_MIN,
+  c02ExpectedVisibleCount,
+  c02ExpectedProjectedTotal,
   c02HeapGateEnabled,
   canonicalBytesForTopic,
   canonicalBytesForTopics,
@@ -314,14 +320,35 @@ describe('classifyEffectiveHeapDeltaInformative — single authoritative definit
 })
 
 describe('detectHeapPrecisionLabel', () => {
-  it('returns precise when argv contains enable-precise-memory-info', () => {
+  it('returns precise only with exact --enable-precise-memory-info token', () => {
     expect(
       detectHeapPrecisionLabel(['electron', '--enable-precise-memory-info', '--no-sandbox'], RENDERER_HEAP_METHOD)
     ).toBe('precise')
+    expect(detectHeapPrecisionLabel(['--enable-precise-memory-info'], RENDERER_HEAP_METHOD)).toBe('precise')
   })
 
   it('returns bucketed when flag absent but method available', () => {
     expect(detectHeapPrecisionLabel(['electron', '--no-sandbox'], RENDERER_HEAP_METHOD)).toBe('bucketed')
+    expect(detectHeapPrecisionLabel([], RENDERER_HEAP_METHOD)).toBe('bucketed')
+  })
+
+  it('returns bucketed for substring and variant forms — exact token required', () => {
+    expect(detectHeapPrecisionLabel(['electron', '--enable-precise-memory-info-foo'], RENDERER_HEAP_METHOD)).toBe(
+      'bucketed'
+    )
+    expect(detectHeapPrecisionLabel(['electron', 'enable-precise-memory-info'], RENDERER_HEAP_METHOD)).toBe('bucketed')
+    expect(detectHeapPrecisionLabel(['electron', '--enable-precise-memory-info=true'], RENDERER_HEAP_METHOD)).toBe(
+      'bucketed'
+    )
+    expect(detectHeapPrecisionLabel(['electron', '--enable-precise-memory-info '], RENDERER_HEAP_METHOD)).toBe(
+      'bucketed'
+    )
+    expect(detectHeapPrecisionLabel(['electron', '--foo-enable-precise-memory-info'], RENDERER_HEAP_METHOD)).toBe(
+      'bucketed'
+    )
+    expect(detectHeapPrecisionLabel(['electron', '--ENABLE-PRECISE-MEMORY-INFO'], RENDERER_HEAP_METHOD)).toBe(
+      'bucketed'
+    )
   })
 
   it('returns unsupported when method unsupported', () => {
@@ -330,6 +357,11 @@ describe('detectHeapPrecisionLabel', () => {
 
   it('returns unsupported when method not performance.memory', () => {
     expect(detectHeapPrecisionLabel(['electron'], 'other')).toBe('unsupported')
+  })
+
+  it('returns unsupported regardless of flag when method is not performance.memory', () => {
+    expect(detectHeapPrecisionLabel(['--enable-precise-memory-info'], 'unsupported')).toBe('unsupported')
+    expect(detectHeapPrecisionLabel(['--enable-precise-memory-info'], 'other')).toBe('unsupported')
   })
 })
 
@@ -356,6 +388,45 @@ describe('buildC02ScaleMap', () => {
   it('maps unsupported method to -1', () => {
     const map = buildC02ScaleMap(DEFAULT_C02_HEAP_PROFILE, 'unsupported')
     expect(map.heapMethodCode).toBe(-1)
+  })
+})
+
+describe('c02ExpectedVisibleCount — production latest-window clamp 1..100 (calibration must measure actual projection)', () => {
+  it('mirrors production clampWindowLimit max 100', () => {
+    expect(C02_PRODUCTION_WINDOW_MAX).toBe(100)
+    expect(C02_PRODUCTION_WINDOW_MIN).toBe(1)
+  })
+
+  it('caps large profile 150 to 100 while retaining logical payload 150', () => {
+    const large = C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.large]!
+    expect(large.syntheticMessagesPerTopic).toBe(150)
+    expect(c02ExpectedVisibleCount(large)).toBe(100)
+    expect(c02ExpectedProjectedTotal(large)).toBe(large.syntheticTopics * 100)
+    // canonical logical bytes remain on full 150 (retained payload), not truncated
+    const topics = buildC02SyntheticTopics(large)
+    const logical = canonicalBytesForTopics(topics)
+    expect(logical).toBeGreaterThan(0)
+    // Logical for large must be > logical for default 100 (proves retained > projected)
+    const defaultTopics = buildC02SyntheticTopics(C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.default]!)
+    expect(logical).toBeGreaterThan(canonicalBytesForTopics(defaultTopics))
+  })
+
+  it('leaves small/default/boundary within cap unchanged (50→50, 100→100, 30→30)', () => {
+    expect(c02ExpectedVisibleCount(C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.small]!)).toBe(50)
+    expect(c02ExpectedVisibleCount(C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.default]!)).toBe(100)
+    expect(c02ExpectedVisibleCount(C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.boundary]!)).toBe(30)
+    expect(c02ExpectedProjectedTotal(C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.small]!)).toBe(50)
+    expect(c02ExpectedProjectedTotal(C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.default]!)).toBe(200)
+    expect(c02ExpectedProjectedTotal(C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.boundary]!)).toBe(60)
+  })
+
+  it('clamps edge values to 1..100 contract', () => {
+    expect(c02ExpectedVisibleCount({ syntheticMessagesPerTopic: 0 } as any)).toBe(1)
+    expect(c02ExpectedVisibleCount({ syntheticMessagesPerTopic: 1 } as any)).toBe(1)
+    expect(c02ExpectedVisibleCount({ syntheticMessagesPerTopic: 100 } as any)).toBe(100)
+    expect(c02ExpectedVisibleCount({ syntheticMessagesPerTopic: 101 } as any)).toBe(100)
+    expect(c02ExpectedVisibleCount({ syntheticMessagesPerTopic: 150 } as any)).toBe(100)
+    expect(c02ExpectedVisibleCount({ syntheticMessagesPerTopic: 1000 } as any)).toBe(100)
   })
 })
 

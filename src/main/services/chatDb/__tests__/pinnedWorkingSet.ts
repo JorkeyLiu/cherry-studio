@@ -347,3 +347,143 @@ export function buildPinnedWorkingSetScaleMap(): Record<string, number> {
   }
   return scale
 }
+
+// ---------------------------------------------------------------------------
+// Multi-profile matrix — shows relation across multiple deterministic profiles
+// ---------------------------------------------------------------------------
+
+export interface PinnedWorkingSetMatrixDefinition {
+  id: string
+  pinned: PinnedWorkingSetPartitionConfig
+  evictable: PinnedWorkingSetPartitionConfig
+  unlimited: PinnedWorkingSetPartitionConfig
+}
+
+export const PINNED_WORKING_SET_MATRICES: PinnedWorkingSetMatrixDefinition[] = [
+  {
+    id: 'matrix-standard-v1',
+    pinned: PINNED_PARTITION_CONFIG,
+    evictable: EVICTABLE_PARTITION_CONFIG,
+    unlimited: UNLIMITED_CONTEXT_CONFIG
+  },
+  {
+    id: 'matrix-small-v1',
+    pinned: {
+      label: 'synthetic-pinned-small-v1',
+      topics: 2,
+      messagesPerTopic: 10,
+      blockContentSize: 512,
+      segmentCountPerTopic: 0,
+      generation: 0,
+      topicPrefix: 'pws-small-pinned-topic'
+    },
+    evictable: {
+      label: 'synthetic-evictable-small-v1',
+      topics: 3,
+      messagesPerTopic: 10,
+      blockContentSize: 512,
+      segmentCountPerTopic: 0,
+      generation: 0,
+      topicPrefix: 'pws-small-evictable-topic'
+    },
+    unlimited: {
+      label: 'synthetic-unlimited-small-v1',
+      topics: 2,
+      messagesPerTopic: 60,
+      blockContentSize: 2048,
+      segmentCountPerTopic: 0,
+      generation: 0,
+      topicPrefix: 'pws-small-unlimited-topic'
+    }
+  },
+  {
+    id: 'matrix-large-v1',
+    pinned: {
+      label: 'synthetic-pinned-large-v1',
+      topics: 4,
+      messagesPerTopic: 40,
+      blockContentSize: 2048,
+      segmentCountPerTopic: 1,
+      generation: 0,
+      topicPrefix: 'pws-large-pinned-topic'
+    },
+    evictable: {
+      label: 'synthetic-evictable-large-v1',
+      topics: 6,
+      messagesPerTopic: 40,
+      blockContentSize: 2048,
+      segmentCountPerTopic: 0,
+      generation: 0,
+      topicPrefix: 'pws-large-evictable-topic'
+    },
+    unlimited: {
+      label: 'synthetic-unlimited-large-v1',
+      topics: 4,
+      messagesPerTopic: 200,
+      blockContentSize: 8192,
+      segmentCountPerTopic: 0,
+      generation: 0,
+      topicPrefix: 'pws-large-unlimited-topic'
+    }
+  }
+]
+
+export function computePinnedWorkingSetAccountingForMatrix(
+  matrix: PinnedWorkingSetMatrixDefinition
+): PinnedWorkingSetAccounting {
+  const pinnedBuilt = buildPartition(matrix.pinned)
+  const evictableBuilt = buildPartition(matrix.evictable)
+  const unlimitedBuilt = buildPartition(matrix.unlimited)
+
+  const pinned = toPartitionAccounting(matrix.pinned.label, pinnedBuilt.topics)
+  const evictable = toPartitionAccounting(matrix.evictable.label, evictableBuilt.topics)
+  const combinedTopics = [...pinnedBuilt.topics, ...evictableBuilt.topics]
+  const combined = toPartitionAccounting(`${matrix.id}-combined`, combinedTopics)
+  const unlimited = toPartitionAccounting(matrix.unlimited.label, unlimitedBuilt.topics)
+
+  const expectedCombined = pinned.aggregateBytes + evictable.aggregateBytes
+  const combinedCheck = combined.aggregateBytes === expectedCombined
+  if (!combinedCheck) {
+    throw new Error(
+      `pinned working-set matrix ${matrix.id} sum mismatch: pinned(${pinned.aggregateBytes}) + evictable(${evictable.aggregateBytes}) = ${expectedCombined} but combined is ${combined.aggregateBytes}`
+    )
+  }
+  if (
+    !Number.isFinite(unlimited.aggregateBytes) ||
+    !Number.isFinite(pinned.aggregateBytes) ||
+    pinned.aggregateBytes === 0
+  ) {
+    throw new Error(`matrix ${matrix.id}: enlargement ratio requires finite positive pinned bytes`)
+  }
+  const enlargementRatio = unlimited.aggregateBytes / pinned.aggregateBytes
+  if (!Number.isFinite(enlargementRatio) || enlargementRatio <= 0) {
+    throw new Error(`matrix ${matrix.id}: enlargement ratio is non-finite/non-positive: ${enlargementRatio}`)
+  }
+  return { pinned, evictable, combined, unlimited, enlargementRatio, combinedCheck }
+}
+
+export function computeAllPinnedWorkingSetAccountings(): Array<{
+  matrixId: string
+  accounting: PinnedWorkingSetAccounting
+}> {
+  return PINNED_WORKING_SET_MATRICES.map((m) => ({
+    matrixId: m.id,
+    accounting: computePinnedWorkingSetAccountingForMatrix(m)
+  }))
+}
+
+export function buildMultiMatrixScaleMap(): Record<string, number> {
+  const base = buildPinnedWorkingSetScaleMap()
+  const scale: Record<string, number> = { ...base }
+  for (const m of PINNED_WORKING_SET_MATRICES) {
+    const prefix = m.id.replace(/-/g, '_')
+    scale[`${prefix}_pinnedTopics`] = m.pinned.topics
+    scale[`${prefix}_evictableTopics`] = m.evictable.topics
+    scale[`${prefix}_combinedTopics`] = m.pinned.topics + m.evictable.topics
+    scale[`${prefix}_unlimitedTopics`] = m.unlimited.topics
+    scale[`${prefix}_pinnedMessagesPerTopic`] = m.pinned.messagesPerTopic
+    scale[`${prefix}_unlimitedMessagesPerTopic`] = m.unlimited.messagesPerTopic
+  }
+  scale['matrixCount'] = PINNED_WORKING_SET_MATRICES.length
+  return scale
+}

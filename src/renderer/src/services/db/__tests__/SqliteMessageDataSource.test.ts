@@ -784,24 +784,28 @@ describe('SqliteMessageDataSource', () => {
 
     it('hardDeleteTopic calls api and dispatches', async () => {
       api.hardDeleteTopic.mockResolvedValue(
-        successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } })
+        successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 }, deletedTopicIds: ['t-1'] })
       )
       const result = await ds.hardDeleteTopic('t-1')
       expect(api.hardDeleteTopic).toHaveBeenCalledOnce()
       expect(mockDispatch).toHaveBeenCalledOnce()
       expect(result.affectedFileIds).toEqual(['f1'])
+      expect(result.deletedTopicIds).toEqual(['t-1'])
     })
 
     it('purgeExpiredTopics calls api', async () => {
-      api.purgeExpiredTopics.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
+      api.purgeExpiredTopics.mockResolvedValue(
+        successResult({ affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] })
+      )
       const result = await ds.purgeExpiredTopics('2025-01-01T00:00:00.000Z')
       expect(api.purgeExpiredTopics).toHaveBeenCalledOnce()
       expect(result.affectedFileIds).toEqual([])
+      expect(result.deletedTopicIds).toEqual([])
     })
 
     it('emptyTrashTopics is ONE api call returning the aggregate cleanup (LOCK-531)', async () => {
       api.emptyTrashTopics.mockResolvedValue(
-        successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } })
+        successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 }, deletedTopicIds: ['t-a'] })
       )
       const result = await ds.emptyTrashTopics('a-1')
       expect(api.emptyTrashTopics).toHaveBeenCalledOnce()

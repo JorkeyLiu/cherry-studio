@@ -38,6 +38,11 @@ import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
 import { currentPhaseCorrelation, recordPhaseDuration } from '@renderer/services/phaseTimingDiagnostics'
 import { endSpan } from '@renderer/services/SpanManagerService'
 import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/services/StreamProcessingService'
+import {
+  captureDeletionGeneration,
+  getDeletionGeneration,
+  isDeletionStale
+} from '@renderer/services/topicDeletionInvalidation'
 import { isValidWindowResponse } from '@renderer/services/windowCoverage'
 import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
@@ -1724,21 +1729,30 @@ export const loadTopicMessagesThunk =
     // Skip if already cached with valid data and not forcing reload
     const cachedIds = state.messages.messageIdsByTopic[topicId]
     if (!forceReload && cachedIds && cachedIds.length > 0) {
-      // Compatibility repair (docs/context-window.md §10): a NON-EMPTY cached
-      // topic (messages already in Redux, e.g. a fresh branch pre-populated
-      // by cloneMessagesToNewTopicThunk) that lacks a valid anchor must still
-      // receive exactly-once initialization before the cached early return.
-      // Valid anchors are never recalculated; empty cached topics stay
-      // anchorless (they fall through to the fetch path). Same bounded
-      // load-completion hook as the fetch path below — never a render effect.
-      const cachedState = getState()
-      const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
-        asst.topics.some((t) => t.id === topicId)
-      )
-      if (cachedTopicOwner) {
-        await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+      // Deletion generation-aware guard: pre-deletion projections cannot satisfy a load.
+      // If a permanent deletion has advanced generation for this topic, fall through
+      // to the fetch path (which will discard stale via capture/isDeletionStale checks)
+      // rather than returning stale cached entities.
+      const deletionGen = getDeletionGeneration(topicId)
+      if (deletionGen !== 0) {
+        // fall through to fetch — do not early return on potentially stale cache
+      } else {
+        // Compatibility repair (docs/context-window.md §10): a NON-EMPTY cached
+        // topic (messages already in Redux, e.g. a fresh branch pre-populated
+        // by cloneMessagesToNewTopicThunk) that lacks a valid anchor must still
+        // receive exactly-once initialization before the cached early return.
+        // Valid anchors are never recalculated; empty cached topics stay
+        // anchorless (they fall through to the fetch path). Same bounded
+        // load-completion hook as the fetch path below — never a render effect.
+        const cachedState = getState()
+        const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
+          asst.topics.some((t) => t.id === topicId)
+        )
+        if (cachedTopicOwner) {
+          await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+        }
+        return
       }
-      return
     }
 
     try {
@@ -1750,6 +1764,7 @@ export const loadTopicMessagesThunk =
 
       const requestSeq = ++loadTopicMessagesRequestSeq
       latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
+      const deletionGenAtStart = captureDeletionGeneration(topicId)
 
       const response: FetchMessagesWindowResponse = await dbService.fetchMessagesWindow(request)
 
@@ -1767,6 +1782,12 @@ export const loadTopicMessagesThunk =
       const currentId = getState().messages.currentTopicId
       if (currentId !== null && currentId !== undefined && currentId !== topicId) {
         logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (current moved)`)
+        return
+      }
+
+      // Deletion generation stale discard — hard deletion invalidates before validation/publication
+      if (isDeletionStale(topicId, deletionGenAtStart)) {
+        logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (deleted during fetch)`)
         return
       }
 

@@ -1,5 +1,6 @@
 import { createAsyncThunk } from '@reduxjs/toolkit'
 import { dbService } from '@renderer/services/db'
+import { captureDeletionGeneration, isDeletionStale } from '@renderer/services/topicDeletionInvalidation'
 import {
   addSegment,
   clearSegmentsForTopic,
@@ -39,11 +40,14 @@ export const syncSegmentsAfterMessageDeletion = async (
 export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch: AppDispatch }>(
   'topicSegments/loadForTopic',
   async (topicId: string, { dispatch }) => {
+    const capturedDeletionGeneration = captureDeletionGeneration(topicId)
     // Clear stale segment IDs for this topic before loading fresh data
     dispatch(clearSegmentsForTopic(topicId))
+    const segments = await dbService.listSegments(topicId)
+    if (isDeletionStale(topicId, capturedDeletionGeneration)) return
     dispatch(
       loadSegments(
-        (await dbService.listSegments(topicId)).map((segment) => ({
+        segments.map((segment) => ({
           ...segment,
           name: segment.name ?? '',
           color: segment.color ?? undefined,

@@ -36,6 +36,7 @@ import type {
   SearchMessagesRequest,
   SelectAnswerMessageRequest,
   SoftDeleteTopicRequest,
+  TopicDeletionEvent,
   TopicExistsRequest,
   TransferTopicOwnershipRequest,
   UpdateBlocksRequest,
@@ -705,7 +706,17 @@ const api = {
     pasteMessagesToTopic: (request: PasteMessagesToTopicRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_PasteMessagesToTopic, request),
     // Phase 5.1B-2: search
-    searchMessages: (request: SearchMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_SearchMessages, request)
+    searchMessages: (request: SearchMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_SearchMessages, request),
+    // Phase 5 authoritative deletion event — Main → all renderers (typed, validated in renderer)
+    onTopicDeleted: (callback: (event: TopicDeletionEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: TopicDeletionEvent) => {
+        callback(data)
+      }
+      ipcRenderer.on(IpcChannel.ChatDb_TopicDeleted, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.ChatDb_TopicDeleted, listener)
+      }
+    }
   }
 }
 

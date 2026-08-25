@@ -2264,6 +2264,7 @@ describe('ChatDbAggregateService', () => {
       const cleanup = okValue(result)
       expect(cleanup.affectedFileIds).toContain('file-1')
       expect(cleanup.remainingReferenceCounts['file-1']).toBe(0)
+      expect(cleanup.deletedTopicIds).toEqual([topicId])
       // Topic no longer exists
       expect(okValue(agg.topicExists(topicId))).toBe(false)
     })
@@ -2273,6 +2274,7 @@ describe('ChatDbAggregateService', () => {
       expect(result.ok).toBe(true)
       const cleanup = okValue(result)
       expect(cleanup.affectedFileIds).toEqual([])
+      expect(cleanup.deletedTopicIds).toEqual([])
     })
 
     it('hardDeleteTopic: rolls back the topic cascade when SQLite aborts', () => {
@@ -2365,6 +2367,7 @@ describe('ChatDbAggregateService', () => {
       const cleanup = okValue(result)
       expect(cleanup.affectedFileIds).toContain('file-a1')
       expect(cleanup.remainingReferenceCounts['file-a1']).toBe(0)
+      expect(cleanup.deletedTopicIds).toEqual([trashedA1])
 
       expect(okValue(agg.topicExists(trashedA1))).toBe(false)
       expect(okValue(agg.topicExists(trashedA2))).toBe(true)
@@ -2389,12 +2392,13 @@ describe('ChatDbAggregateService', () => {
       // One aggregate result: deduplicated file IDs across topics.
       expect(cleanup.affectedFileIds).toEqual(['file-shared'])
       expect(cleanup.remainingReferenceCounts['file-shared']).toBe(0)
+      expect(new Set(cleanup.deletedTopicIds)).toEqual(new Set([t1, t2]))
     })
 
     it('emptyTrashTopics: empty cleanup when the assistant has no trash', () => {
       const result = agg.emptyTrashTopics('assistant-without-trash')
       expect(result.ok).toBe(true)
-      expect(okValue(result)).toEqual({ affectedFileIds: [], remainingReferenceCounts: {} })
+      expect(okValue(result)).toEqual({ affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] })
     })
 
     it('genuine rollback: emptyTrashTopics reverts ALL deletions on trigger failure (LOCK-531)', () => {
@@ -2581,6 +2585,8 @@ describe('ChatDbAggregateService', () => {
       const result = agg.resetAssistantTopics('assistant-1', replacementTopicId)
       expect(result.ok).toBe(true)
       expect(okValue(result).replacementTopic.id).toBe(replacementTopicId)
+      expect(new Set(okValue(result).deletedTopicIds)).toEqual(new Set([deletedA, deletedB, trash]))
+      expect(okValue(result).deletedTopicIds).not.toContain(replacementTopicId)
 
       // Active and trash topics owned by the assistant are hard-deleted and
       // their traces cleaned; the replacement topic and foreign topics are not.
@@ -2606,6 +2612,7 @@ describe('ChatDbAggregateService', () => {
 
       const result = agg.resetAssistantTopics('assistant-r', replacementTopicId)
       expect(result.ok).toBe(true)
+      expect(okValue(result).deletedTopicIds).toEqual([deleted])
 
       // The replacement topic survives the reset; the other topic is gone.
       expect(okValue(agg.topicExists(replacementTopicId))).toBe(true)

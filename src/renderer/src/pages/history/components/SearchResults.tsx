@@ -12,6 +12,13 @@ import {
 } from '@renderer/pages/home/Messages/messageWindow'
 import { dbService } from '@renderer/services/db'
 import { ChatDbResultError, SqliteMessageDataSource } from '@renderer/services/db/SqliteMessageDataSource'
+import {
+  captureDeletionGeneration,
+  getDeletionGeneration,
+  getDeletionGenerationsSnapshot,
+  isDeletionStale,
+  subscribeDeletionGeneration
+} from '@renderer/services/topicDeletionInvalidation'
 import { isValidWindowResponse } from '@renderer/services/windowCoverage'
 import store from '@renderer/store'
 import { selectTopicsMap } from '@renderer/store/assistants'
@@ -264,6 +271,9 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
           // End of results — no further cursor available.
           return
         }
+        // LOCK-004: capture topic deletion generations before the IPC so a
+        // hard deletion during the fetch can be detected per-topic.
+        const deletionSnapshot = getDeletionGenerationsSnapshot()
         const response = await dataSource.searchMessages({
           keywords: params.keywords,
           matchMode: params.matchMode,
@@ -275,7 +285,58 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
           // Stale response — a newer search session started; discard.
           return
         }
-        const displayItems: DisplayResult[] = response.items.map((item) => ({
+        // Filter items whose topic was permanently deleted during the fetch.
+        // Uses the snapshot captured before the request; current generation
+        // advance means the topic is stale. Preserves non-deleted topics.
+        let itemsForPage = response.items
+        const originalCount = itemsForPage.length
+        if (originalCount > 0) {
+          itemsForPage = itemsForPage.filter((item) => {
+            // Reject already-deleted topics regardless of snapshot: Main search
+            // can return deleted topics (ChatDbAggregateService). Current
+            // generation nonzero means the topic was deleted before this
+            // fetch, even if the snapshot already captured the bumped value.
+            if (getDeletionGeneration(item.topicId) !== 0) return false
+            const captured = deletionSnapshot.get(item.topicId) ?? 0
+            return !isDeletionStale(item.topicId, captured)
+          })
+          // If the entire page was for deleted topics, discard the
+          // response without publishing. Do not advance page/cursor state
+          // for this stale page; the loop will terminate or, if the
+          // caller requested a further page, will attempt the next cursor
+          // on the next iteration only if we still have a valid cursor.
+          if (itemsForPage.length === 0 && originalCount > 0) {
+            // Entire page stale — do not publish. Advance cursor at the
+            // current page index (not pageIndex+1) so the next iteration
+            // uses the returned nextCursor exactly once and cannot repeat
+            // the same cursor indefinitely. We did not consume a page slot.
+            const nextCursor = response.hasMore ? response.nextCursor : undefined
+            cursorsRef.current[pageIndex] = nextCursor
+            // If this was the only page and we now have no pages, clear
+            // state to hide stale publication.
+            if (pagesRef.current.length === 0) {
+              setPages([])
+              setTotalCount(0)
+              setHasNextCursor(nextCursor !== undefined)
+            } else {
+              setHasNextCursor(nextCursor !== undefined)
+            }
+            // If the discarded page was the target, stop without
+            // satisfying targetPageIndex — caller will see no stale page.
+            if (pagesRef.current.length <= targetPageIndex && nextCursor === undefined) {
+              return
+            }
+            // Try to fetch the next page to satisfy targetPageIndex if
+            // a cursor exists; otherwise discard and return.
+            if (nextCursor === undefined) {
+              return
+            }
+            // Continue loop to fetch next page for the same target index
+            // (since we did not consume a page slot).
+            continue
+          }
+        }
+        const displayItems: DisplayResult[] = itemsForPage.map((item) => ({
           item,
           snippet: buildSearchSnippet(item.rawContent, params.terms, params.matchMode)
         }))
@@ -283,7 +344,10 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
         const nextCursor = response.hasMore ? response.nextCursor : undefined
         cursorsRef.current[pageIndex + 1] = nextCursor
         setPages(pagesRef.current)
-        setTotalCount(response.totalCount)
+        // Adjust totalCount for the stale items removed from this page
+        const staleRemoved = originalCount - itemsForPage.length
+        const adjustedTotal = Math.max(0, response.totalCount - staleRemoved)
+        setTotalCount(adjustedTotal)
         setHasNextCursor(nextCursor !== undefined)
         // A successful active-generation response supersedes any stale
         // pagination error (e.g. a failed next-page fetch that was later
@@ -388,6 +452,11 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
 
   const handleTopicClick = useCallback(
     (topicId: string) => {
+      // Prevent navigating to a deleted topic via stale search hit.
+      if (isDeletionStale(topicId, 0) || getDeletionGeneration(topicId) !== 0) {
+        window.toast.error(t('history.error.topic_not_found'))
+        return
+      }
       const topic = storeTopicsMap.get(topicId)
       if (!topic) {
         window.toast.error(t('history.error.topic_not_found'))
@@ -398,14 +467,74 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
     [storeTopicsMap, onTopicClick, t]
   )
 
+  // LOCK-004: prune already-loaded search pages when their topic is
+  // permanently deleted. Uses per-topic generation subscription; soft-delete
+  // never bumps so no pruning occurs. Each listener filters its topic's
+  // items from every cached page, preserving non-deleted topics.
+  // Current-state-safe: already-deleted topics (generation nonzero before
+  // subscription) are pruned synchronously; immediate helper invoke is
+  // idempotent. Re-check around registration covers the gap.
+  useEffect(() => {
+    if (pages.length === 0) return
+    const topicIds = new Set<string>()
+    for (const page of pages) {
+      for (const entry of page) {
+        topicIds.add(entry.item.topicId)
+      }
+    }
+    if (topicIds.size === 0) return
+    const pruneTopic = (tid: string) => {
+      let removed = 0
+      const nextPages = pagesRef.current.map((page) =>
+        page.filter((entry) => {
+          if (entry.item.topicId !== tid) return true
+          return false
+        })
+      )
+      for (let i = 0; i < pagesRef.current.length; i += 1) {
+        removed += pagesRef.current[i].length - nextPages[i].length
+      }
+      if (removed === 0) return
+      pagesRef.current = nextPages
+      setPages([...nextPages])
+      setTotalCount((prev) => Math.max(0, prev - removed))
+    }
+    // Immediate prune for topics already deleted before subscription
+    for (const tid of Array.from(topicIds)) {
+      if (getDeletionGeneration(tid) !== 0) {
+        pruneTopic(tid)
+      }
+    }
+    const unsubs: Array<() => void> = []
+    for (const tid of Array.from(topicIds)) {
+      const unsub = subscribeDeletionGeneration(tid, () => {
+        pruneTopic(tid)
+      })
+      unsubs.push(unsub)
+      // Race around registration: deletion could have happened between
+      // immediate prune and subscribe
+      if (getDeletionGeneration(tid) !== 0) {
+        pruneTopic(tid)
+      }
+    }
+    return () => {
+      for (const fn of unsubs) fn()
+    }
+  }, [pages])
+
   // R-04: authoritative around-window search-hit navigation. No whole-topic fetch.
   // Uses existing chatdb:fetch-messages-window around contract with validation and
   // stable-ID merge before invoking the existing navigation transaction.
   const searchHitGenerationRef = useRef(0)
   const handleMessageClick = useCallback(
     async (item: SearchResultItem) => {
-      const generation = ++searchHitGenerationRef.current
       const topicId = item.topicId
+      // Fail-closed: do not navigate into a permanently deleted topic
+      if (isDeletionStale(topicId, 0) || getDeletionGeneration(topicId) !== 0) {
+        window.toast.error(t('history.error.message_not_found'))
+        return
+      }
+      const generation = ++searchHitGenerationRef.current
       const anchorId = item.messageId
       const before = clampWindowCount(NAVIGATION_VISUALLY_OLDER_GROUPS)
       const after = clampWindowCount(NAVIGATION_VISUALLY_NEWER_GROUPS)
@@ -416,8 +545,10 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
         before,
         after
       }
+      const deletionGenAtStart = captureDeletionGeneration(topicId)
       try {
         const response = await dbService.fetchMessagesWindow(request)
+        if (isDeletionStale(topicId, deletionGenAtStart)) return
         if (generation !== searchHitGenerationRef.current) return
         if (!isValidWindowResponse(request, response)) {
           logger.error('[SearchResults] malformed window response', response.window as unknown as Error)
@@ -453,6 +584,7 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
           merged = unionWindowMessages(existingMessages, incomingMessages)
         }
 
+        if (isDeletionStale(topicId, deletionGenAtStart)) return
         if (generation !== searchHitGenerationRef.current) return
         if (!merged.some((m) => m.id === anchorId)) {
           logger.error('[SearchResults] anchor missing after merge')
@@ -460,9 +592,14 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
           return
         }
         // Atomic staged publication: validate first, then merge, then publish blocks+messages.
+        // Deletion generation re-checked immediately before each publication/navigation step
+        // so a hard delete during the fetch cannot resurrect deleted messages/blocks.
+        if (isDeletionStale(topicId, deletionGenAtStart)) return
+        if (generation !== searchHitGenerationRef.current) return
         if (incomingBlocks.length > 0) {
           store.dispatch(upsertManyBlocks(incomingBlocks))
         }
+        if (isDeletionStale(topicId, deletionGenAtStart)) return
         if (generation !== searchHitGenerationRef.current) return
         store.dispatch(newMessagesActions.messagesReceived({ topicId, messages: merged }))
         const message = merged.find((m) => m.id === anchorId)
@@ -470,9 +607,11 @@ const SearchResults: FC<Props> = ({ keywords, onMessageClick, onTopicClick, ...p
           window.toast.error(t('history.error.message_not_found'))
           return
         }
+        if (isDeletionStale(topicId, deletionGenAtStart)) return
         if (generation !== searchHitGenerationRef.current) return
         onMessageClick(message)
       } catch (error) {
+        if (isDeletionStale(topicId, deletionGenAtStart)) return
         if (generation !== searchHitGenerationRef.current) return
         if (error instanceof ChatDbResultError) {
           const code = error.code

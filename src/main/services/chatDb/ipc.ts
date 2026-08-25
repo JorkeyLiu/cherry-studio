@@ -70,10 +70,16 @@ import type {
   UpdateTopicMetadataRequest,
   UpsertSegmentRequest
 } from '@shared/chatDb'
-import { ERR_VALIDATION, fail, validateChatDbRequest, validateChatDbResult } from '@shared/chatDb'
+import {
+  ERR_VALIDATION,
+  fail,
+  validateChatDbRequest,
+  validateChatDbResult,
+  validateTopicDeletionEvent
+} from '@shared/chatDb'
 import { elapsedMs, MAX_APPEND_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
 import { IpcChannel } from '@shared/IpcChannel'
-import { ipcMain } from 'electron'
+import { BrowserWindow, ipcMain } from 'electron'
 
 import { logMainDiagnostic } from '../diagnostics'
 import { ChatDbAggregateService } from './ChatDbAggregateService'
@@ -96,6 +102,47 @@ let activeRegistrationId = 0
  * Null if no registration is active.
  */
 let activeDisposer: (() => void) | null = null
+
+// ---------------------------------------------------------------------------
+// Authoritative deletion broadcast — Main → all renderer windows
+// ---------------------------------------------------------------------------
+
+const DELETION_BROADCAST_CHANNELS: ReadonlySet<string> = new Set([
+  IpcChannel.ChatDb_HardDeleteTopic,
+  IpcChannel.ChatDb_PurgeExpiredTopics,
+  IpcChannel.ChatDb_EmptyTrashTopics,
+  IpcChannel.ChatDb_ResetAssistantTopics
+])
+
+function broadcastTopicDeletion(deletedTopicIds: string[], _senderWebContentsId?: number): void {
+  if (!Array.isArray(deletedTopicIds) || deletedTopicIds.length === 0) return
+  const payload = { deletedTopicIds: [...deletedTopicIds] }
+  try {
+    validateTopicDeletionEvent(payload)
+  } catch {
+    logger.warn(`[broadcastTopicDeletion] invalid payload, skipping broadcast`)
+    return
+  }
+  for (const win of BrowserWindow.getAllWindows()) {
+    try {
+      if (win.isDestroyed()) continue
+      const wc = win.webContents
+      if (!wc || wc.isDestroyed()) continue
+      wc.send(IpcChannel.ChatDb_TopicDeleted, payload)
+    } catch {
+      // best-effort, never throw
+    }
+  }
+}
+
+function extractDeletedTopicIds(resultValue: unknown): string[] | undefined {
+  if (!resultValue || typeof resultValue !== 'object' || Array.isArray(resultValue)) return undefined
+  const v = resultValue as Record<string, unknown>
+  if (!('deletedTopicIds' in v)) return undefined
+  const ids = v.deletedTopicIds
+  if (!Array.isArray(ids)) return undefined
+  return ids as string[]
+}
 
 // ---------------------------------------------------------------------------
 // Channel → aggregate method mapping
@@ -226,6 +273,16 @@ export function registerChatDbIpc(): () => void {
 
         // Also run the basic structural check (defense in depth)
         validateConstructedResult(result, channel)
+
+        // Authoritative deletion broadcast — only after successful transaction/result validation
+        // and only for hard-deletion channels with non-empty exact IDs.
+        if (result.ok === true && DELETION_BROADCAST_CHANNELS.has(channel)) {
+          const ids = extractDeletedTopicIds((result as { value: unknown }).value)
+          if (ids && ids.length > 0) {
+            const senderId = _event.sender?.id
+            broadcastTopicDeletion(ids, senderId)
+          }
+        }
 
         return result
       } finally {
