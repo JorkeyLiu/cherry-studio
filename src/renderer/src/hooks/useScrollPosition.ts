@@ -1,4 +1,11 @@
 import { findFirstVisibleMessageId } from '@renderer/pages/home/Messages/domVisibility'
+import {
+  handleScrollSnapshotCleared,
+  handleScrollSnapshotRead,
+  handleScrollSnapshotSaved,
+  isScrollSnapshotInvalidated
+} from '@renderer/services/scrollSnapshotCache'
+import { subscribeDeletionGeneration } from '@renderer/services/topicDeletionInvalidation'
 import { throttle } from 'lodash'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 
@@ -29,15 +36,40 @@ export default function useScrollPosition(key: string, throttleWait?: number) {
   const persistScrollPosition = useMemo(
     () =>
       throttle((snapshot: SavedScrollPosition) => {
-        window.keyv.set(scrollKeyRef.current, snapshot)
+        const k = scrollKeyRef.current
+        if (isScrollSnapshotInvalidated(k)) {
+          try {
+            window.keyv.remove(k)
+          } catch {}
+          return
+        }
+        window.keyv.set(k, snapshot)
+        handleScrollSnapshotSaved(k)
       }, throttleWait ?? 100),
     [throttleWait]
   )
+
+  // Durably block pending trailing writes for hard-deleted topics: subscribe to
+  // authoritative deletion generation and cancel any pending throttle trailing
+  // when the topic is hard-deleted. Hard-delete also marks the scroll key as
+  // invalidated in the cache so late flushes cannot recreate the snapshot.
+  const topicIdForDeletion = useMemo(() => {
+    if (!key.startsWith('topic-')) return null
+    return key.slice('topic-'.length)
+  }, [key])
+
+  useEffect(() => {
+    if (!topicIdForDeletion) return
+    return subscribeDeletionGeneration(topicIdForDeletion, () => {
+      persistScrollPosition.cancel()
+    })
+  }, [topicIdForDeletion, persistScrollPosition])
 
   // Update scrollKeyRef on key change. On cleanup (key change or unmount),
   // flush the pending trailing snapshot to the OLD key (scrollKeyRef still
   // points to it), then cancel to prevent any subsequent timer from firing.
   // This ensures the user's last scroll position is not lost on topic switch.
+  // Flush respects invalidation so a hard-deleted key is not recreated.
   useEffect(() => {
     scrollKeyRef.current = scrollKey
     return () => {
@@ -63,22 +95,27 @@ export default function useScrollPosition(key: string, throttleWait?: number) {
 
   const getSavedPosition = useCallback((): SavedScrollPosition | null => {
     const saved = window.keyv.get(scrollKeyRef.current)
+    let result: SavedScrollPosition | null = null
     if (saved && typeof saved === 'object' && 'scrollTop' in saved) {
       // Support legacy saved positions without isAtBottom
       if (!('isAtBottom' in saved)) {
-        return { ...(saved as Omit<SavedScrollPosition, 'isAtBottom'>), isAtBottom: false }
+        result = { ...(saved as Omit<SavedScrollPosition, 'isAtBottom'>), isAtBottom: false }
+      } else {
+        result = saved as SavedScrollPosition
       }
-      return saved as SavedScrollPosition
+    } else if (typeof saved === 'number') {
+      // Backward compatibility: if saved is a plain number
+      result = { scrollTop: saved, anchorId: null, isAtBottom: false }
     }
-    // Backward compatibility: if saved is a plain number
-    if (typeof saved === 'number') {
-      return { scrollTop: saved, anchorId: null, isAtBottom: false }
+    if (result !== null) {
+      handleScrollSnapshotRead(scrollKeyRef.current)
     }
-    return null
+    return result
   }, [])
 
   const clearSavedPosition = useCallback(() => {
     window.keyv.remove(scrollKeyRef.current)
+    handleScrollSnapshotCleared(scrollKeyRef.current)
   }, [])
 
   /**
@@ -92,6 +129,14 @@ export default function useScrollPosition(key: string, throttleWait?: number) {
   const savePosition = useCallback(() => {
     persistScrollPosition.cancel()
 
+    const k = scrollKeyRef.current
+    if (isScrollSnapshotInvalidated(k)) {
+      try {
+        window.keyv.remove(k)
+      } catch {}
+      return
+    }
+
     const container = containerRef.current
     if (!container) return
 
@@ -102,7 +147,8 @@ export default function useScrollPosition(key: string, throttleWait?: number) {
       isAtBottom: Math.abs(scrollTop) <= BOTTOM_THRESHOLD
     }
 
-    window.keyv.set(scrollKeyRef.current, snapshot)
+    window.keyv.set(k, snapshot)
+    handleScrollSnapshotSaved(k)
   }, [persistScrollPosition])
 
   return { containerRef, handleScroll, getSavedPosition, clearSavedPosition, savePosition }

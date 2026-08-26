@@ -24,6 +24,7 @@ import {
   clearLatestWindowCompleteness
 } from '@renderer/pages/home/Messages/messageWindow'
 import { bumpAndInvalidate, clearCachedContextClosure } from '@renderer/services/contextClosure'
+import { removeScrollSnapshotsForTopicIds } from '@renderer/services/scrollSnapshotCache'
 import store from '@renderer/store'
 import { removeManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
@@ -113,6 +114,11 @@ export function bumpDeletionGeneration(topicId: string): number {
 export function invalidateTopicDeletion(topicId: string): void {
   bumpDeletionGeneration(topicId)
   purgeResidentProjectionsForTopics([topicId])
+  try {
+    removeScrollSnapshotsForTopicIds([topicId])
+  } catch {
+    // best-effort; scroll snapshot cleanup must not throw
+  }
 }
 
 export function invalidateTopicsDeletion(topicIds: string[]): void {
@@ -123,6 +129,11 @@ export function invalidateTopicsDeletion(topicIds: string[]): void {
     bumpDeletionGeneration(id)
   }
   purgeResidentProjectionsForTopics(valid)
+  try {
+    removeScrollSnapshotsForTopicIds(valid)
+  } catch {
+    // best-effort; scroll snapshot cleanup must not throw
+  }
 }
 
 /**

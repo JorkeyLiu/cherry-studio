@@ -4,6 +4,7 @@ import { loggerService } from '@logger'
 import { applyMainWindowTitle } from './config/title'
 import { startAutoSync } from './services/BackupService'
 import { startNutstoreAutoSync } from './services/NutstoreService'
+import { initScrollSnapshotCache } from './services/scrollSnapshotCache'
 import storeSyncService from './services/StoreSyncService'
 import { subscribeTopicDeletionEvents } from './services/topicDeletionSubscription'
 import { webTraceService } from './services/WebTraceService'
@@ -19,6 +20,12 @@ applyMainWindowTitle()
 function initKeyv() {
   window.keyv = new KeyvStorage()
   void window.keyv.init()
+  // B-07: enforce bounded scroll snapshot cache at startup (TTL then LRU)
+  try {
+    initScrollSnapshotCache()
+  } catch {
+    // best-effort; renderer-local only
+  }
 }
 
 function initAutoSync() {
