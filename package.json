@@ -106,6 +106,7 @@
     "changeset:publish": "changeset publish",
     "packages:build": "pnpm --filter @cherrystudio/ai-core build && pnpm --filter @cherrystudio/extension-table-plus build",
     "packages:release": "pnpm packages:build && changeset publish",
+    "verify:changed": "tsx scripts/verify-changed.ts",
     "ci:basic-check": "pnpm test:lint && pnpm format:check && pnpm typecheck && pnpm i18n:check && pnpm i18n:hardcoded:strict && pnpm openapi:check && pnpm skills:check",
     "ci:test-check": "pnpm native:run node -- pnpm test:run",
     "ci": "pnpm ci:basic-check && pnpm ci:test-check"

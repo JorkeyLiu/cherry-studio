@@ -35,6 +35,21 @@ failure classification.
   `pnpm build:check` is lint + openapi:check + full test; `pnpm test` runs all
   Vitest suites under the Node ABI lane).
 - Focused suites supplement, but never replace, the aggregate gates.
+- **Non-duplication (LOCK-VG-001):** `pnpm build:check` already runs lint +
+  openapi:check + full test for the exact worktree state. Do **not** run
+  `pnpm format`, `pnpm lint`, and `pnpm test` separately before
+  `pnpm build:check` — run `build:check` **once** per exact worktree state.
+  A passing `pnpm build:check` is sufficient aggregate evidence and proves its
+  nested gates, so do not immediately repeat those nested gates.
+- **Fast-feedback boundary (LOCK-VG-002/003):** `pnpm verify:changed` is
+  renderer-only local feedback, **never a completion gate, never a substitute
+  for `pnpm build:check`, and never CI proof**. It is strict renderer-only:
+  any Main/preload/shared/package/config/scripts/unknown path must fail closed
+  with instruction to run `pnpm build:check`; no partial green result. It enters
+  the canonical Node ABI lane via `pnpm native:run node -- ...` and includes
+  untracked renderer files; docs-only/no-renderer-change sets exit 0 as a
+  no-op without claiming validation proof. CI's path-filter matrix and full
+  jobs remain unchanged.
 
 ## Establish the environment first
 
@@ -151,6 +166,10 @@ execution never sequences manual ABI steps:
 
 - Run each aggregate gate once per evidence state. Do not rerun a gate solely
   to inspect its output.
+- **Do not duplicate gates:** a passing `pnpm build:check` already proves lint,
+  openapi:check, and full test for that exact worktree state. Do not run
+  `pnpm format`, `pnpm lint`, or `pnpm test` separately before `pnpm build:check`
+  for the same state — that wastes time without changing evidence.
 - For output-heavy commands, redirect stdout/stderr to a session-owned log in
   the session-designated temp area outside the worktree, and capture the
   producer's numeric exit status in the same shell invocation.
