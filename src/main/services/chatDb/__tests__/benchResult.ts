@@ -500,6 +500,23 @@ export function allBenchTasksCompletedSuccessfully(suite: BenchResultSuiteLike):
 }
 
 /**
+ * True when every gate in the result passed. An empty gate set is treated as
+ * not passing so a missing gate set cannot silently enable emission.
+ */
+export function allGatesPassed(result: BenchmarkResult): boolean {
+  return result.gates.length > 0 && result.gates.every((gate) => gate.passed)
+}
+
+/**
+ * True when both the Vitest bench-task gate and the calibration-gate set
+ * passed. Used as the eligibility predicate for fail-closed artifact
+ * emission — a single failing correctness gate must prevent artifact creation.
+ */
+export function shouldEmitBenchmarkResult(suite: BenchResultSuiteLike, result: BenchmarkResult): boolean {
+  return allBenchTasksCompletedSuccessfully(suite) && allGatesPassed(result)
+}
+
+/**
  * Emit the result artifact only when every registered benchmark task in the
  * suite completed successfully. Wire this into a file-level Vitest `afterAll`
  * hook (describe-level hooks do not run in bench mode) so the artifact is
@@ -513,6 +530,23 @@ export function emitBenchmarkResultAfterSuccessfulTasks(
   options: WriteBenchmarkResultOptions = {}
 ): string | null {
   if (!allBenchTasksCompletedSuccessfully(suite)) {
+    return null
+  }
+  return writeBenchmarkResult(result, options)
+}
+
+/**
+ * Emit the result artifact only when every registered benchmark task completed
+ * successfully AND every calibration gate in the result passed. This is the
+ * fail-closed path for calibration harnesses: a failed gate must not produce
+ * an artifact even when tasks completed. Returns null when either gate fails.
+ */
+export function emitBenchmarkResultAfterSuccessfulTasksAndGates(
+  suite: BenchResultSuiteLike,
+  result: BenchmarkResult,
+  options: WriteBenchmarkResultOptions = {}
+): string | null {
+  if (!shouldEmitBenchmarkResult(suite, result)) {
     return null
   }
   return writeBenchmarkResult(result, options)
