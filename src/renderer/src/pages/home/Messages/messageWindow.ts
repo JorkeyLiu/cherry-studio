@@ -6,6 +6,17 @@ import {
   type MessageViewportGroupModel
 } from './messageGroups'
 
+/**
+ * Renderer-local bounded viewport capacity calibration default (Phase 4 B-06).
+ * Disposable projection bound; not a product threshold and requires calibration.
+ * Reversible: only affects viewport projection, authoritative Redux entities and Main SQLite unchanged.
+ */
+export const MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT = 200
+
+/** Alias preserving B-06 calibration naming for external reference. */
+export const MESSAGE_WINDOW_BOUNDED_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT =
+  MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
+
 export interface MessageGroupRange {
   /** Inclusive index of the visually oldest group in chronological source order. */
   oldestGroupIndex: number
@@ -31,6 +42,22 @@ export interface MessageWindow {
   /** Authoritative completeness from validated Main window, retained for pagination. */
   authoritativeHasMoreBefore?: boolean
   authoritativeHasMoreAfter?: boolean
+  /**
+   * Renderer-local bounded viewport observability (B-06 calibration, disposable).
+   * Lightweight metadata for testing/observability without logging subsystem.
+   */
+  boundedViewportObservability?: {
+    /** B-06 calibration default capacity (not a product threshold). */
+    calibrationDefault: number
+    /** Effective bounded capacity applied (capped at calibration default). */
+    boundedCapacity: number
+    /** Whether the last construction/expansion trimmed opposite edge to stay bounded. */
+    didTrim: boolean
+    /** Number of groups trimmed from opposite edge (0 when not trimmed). */
+    trimmedGroups: number
+    /** Edge that was trimmed, if any. */
+    trimmedEdge: 'older' | 'newer' | null
+  }
 }
 
 const createWindowFromRange = (
@@ -38,47 +65,84 @@ const createWindowFromRange = (
   range: MessageGroupRange | null,
   groupCapacity: number,
   edge: MessageWindow['edge'],
-  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
+  authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean },
+  observability?: MessageWindow['boundedViewportObservability']
 ): MessageWindow => {
+  const boundedCapacity = Math.min(Math.max(0, groupCapacity), MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
+  const calibrationDefault = MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
+  const buildObservability = (
+    didTrim: boolean,
+    trimmedGroups: number,
+    trimmedEdge: 'older' | 'newer' | null
+  ): MessageWindow['boundedViewportObservability'] => ({
+    calibrationDefault,
+    boundedCapacity,
+    didTrim,
+    trimmedGroups,
+    trimmedEdge
+  })
+
   if (!range || model.groups.length === 0) {
     return {
       range: null,
       edge,
       displayMessages: [],
       displayGroups: [],
-      groupCapacity: Math.max(0, groupCapacity),
+      groupCapacity: boundedCapacity,
       groupCount: 0,
       hasMoreOlder: authoritative?.hasMoreBefore ?? false,
       hasMoreNewer: authoritative?.hasMoreAfter ?? false,
       authoritativeHasMoreBefore: authoritative?.hasMoreBefore,
-      authoritativeHasMoreAfter: authoritative?.hasMoreAfter
+      authoritativeHasMoreAfter: authoritative?.hasMoreAfter,
+      boundedViewportObservability: observability ?? buildObservability(false, 0, null)
     }
   }
 
   const oldestGroupIndex = Math.max(0, range.oldestGroupIndex)
   const newestGroupIndex = Math.min(model.groups.length - 1, range.newestGroupIndex)
-  if (oldestGroupIndex > newestGroupIndex) return createWindowFromRange(model, null, groupCapacity, edge, authoritative)
+  if (oldestGroupIndex > newestGroupIndex)
+    return createWindowFromRange(model, null, boundedCapacity, edge, authoritative, observability)
 
   const groups = model.groups.slice(oldestGroupIndex, newestGroupIndex + 1)
   const chronologicalMessages = groups.flatMap((group) => group.messages)
 
-  const hasMoreOlder = authoritative?.hasMoreBefore !== undefined ? authoritative.hasMoreBefore : oldestGroupIndex > 0
-  const hasMoreNewer =
-    authoritative?.hasMoreAfter !== undefined ? authoritative.hasMoreAfter : newestGroupIndex < model.groups.length - 1
+  // Authoritative-defined precedence when no bounded trim occurred: explicit false is preserved.
+  // When bounded trimming creates a traversable local edge, derived true may surface only on the trimmed edge.
+  const derivedHasMoreOlder = oldestGroupIndex > 0
+  const derivedHasMoreNewer = newestGroupIndex < model.groups.length - 1
+  const hasMoreOlder = (() => {
+    if (authoritative?.hasMoreBefore === true) return true
+    if (authoritative?.hasMoreBefore === false) {
+      return observability?.didTrim === true && observability?.trimmedEdge === 'older' && derivedHasMoreOlder
+        ? true
+        : false
+    }
+    return derivedHasMoreOlder
+  })()
+  const hasMoreNewer = (() => {
+    if (authoritative?.hasMoreAfter === true) return true
+    if (authoritative?.hasMoreAfter === false) {
+      return observability?.didTrim === true && observability?.trimmedEdge === 'newer' && derivedHasMoreNewer
+        ? true
+        : false
+    }
+    return derivedHasMoreNewer
+  })()
 
   return {
     range: { oldestGroupIndex, newestGroupIndex },
     edge,
     displayMessages: chronologicalMessages.toReversed(),
     displayGroups: groups,
-    groupCapacity: Math.max(0, groupCapacity),
+    groupCapacity: boundedCapacity,
     groupCount: groups.length,
     hasMoreOlder,
     hasMoreNewer,
     oldestMessageId: chronologicalMessages[0]?.id,
     newestMessageId: chronologicalMessages.at(-1)?.id,
     authoritativeHasMoreBefore: authoritative?.hasMoreBefore,
-    authoritativeHasMoreAfter: authoritative?.hasMoreAfter
+    authoritativeHasMoreAfter: authoritative?.hasMoreAfter,
+    boundedViewportObservability: observability ?? buildObservability(false, 0, null)
   }
 }
 
@@ -88,17 +152,18 @@ export const createLatestMessageWindow = (
   authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
 ): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
-  const capacity = Math.max(0, groupCapacity)
-  if (capacity === 0 || model.groups.length === 0)
-    return createWindowFromRange(model, null, capacity, 'latest', authoritative)
+  const rawCapacity = Math.max(0, groupCapacity)
+  const boundedCapacity = Math.min(rawCapacity, MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
+  if (boundedCapacity === 0 || model.groups.length === 0)
+    return createWindowFromRange(model, null, boundedCapacity, 'latest', authoritative)
 
   return createWindowFromRange(
     model,
     {
-      oldestGroupIndex: Math.max(0, model.groups.length - capacity),
+      oldestGroupIndex: Math.max(0, model.groups.length - boundedCapacity),
       newestGroupIndex: model.groups.length - 1
     },
-    capacity,
+    boundedCapacity,
     'latest',
     authoritative
   )
@@ -114,17 +179,18 @@ export const createOldestMessageWindow = (
   authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
 ): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
-  const capacity = Math.max(0, groupCapacity)
-  if (capacity === 0 || model.groups.length === 0)
-    return createWindowFromRange(model, null, capacity, 'fixed', authoritative)
+  const rawCapacity = Math.max(0, groupCapacity)
+  const boundedCapacity = Math.min(rawCapacity, MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
+  if (boundedCapacity === 0 || model.groups.length === 0)
+    return createWindowFromRange(model, null, boundedCapacity, 'fixed', authoritative)
 
   return createWindowFromRange(
     model,
     {
       oldestGroupIndex: 0,
-      newestGroupIndex: Math.min(model.groups.length - 1, capacity - 1)
+      newestGroupIndex: Math.min(model.groups.length - 1, boundedCapacity - 1)
     },
-    capacity,
+    boundedCapacity,
     'fixed',
     authoritative
   )
@@ -142,14 +208,26 @@ export const createTargetMessageWindow = (
   authoritative?: { hasMoreBefore?: boolean; hasMoreAfter?: boolean }
 ): MessageWindow => {
   const model = createMessageViewportGroupModel(messages)
-  const capacity = Math.max(0, visuallyOlderGroupCount) + 1 + Math.max(0, visuallyNewerGroupCount)
+  const rawCapacity = Math.max(0, visuallyOlderGroupCount) + 1 + Math.max(0, visuallyNewerGroupCount)
+  const boundedCapacity = Math.min(rawCapacity, MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
+  // When raw capacity exceeds bound, newer-first deterministic reduction while preserving anchor.
+  let effectiveOlder = Math.max(0, visuallyOlderGroupCount)
+  let effectiveNewer = Math.max(0, visuallyNewerGroupCount)
+  if (rawCapacity > boundedCapacity) {
+    // Deterministic: trim newer first, then older, to keep anchor visible.
+    const excess = rawCapacity - boundedCapacity
+    const trimNewer = Math.min(effectiveNewer, excess)
+    effectiveNewer -= trimNewer
+    const remaining = excess - trimNewer
+    effectiveOlder = Math.max(0, effectiveOlder - remaining)
+  }
   const targetGroup = model.messageIdToGroup.get(targetMessageId)
-  if (!targetGroup) return createWindowFromRange(model, null, capacity, 'fixed', authoritative)
+  if (!targetGroup) return createWindowFromRange(model, null, boundedCapacity, 'fixed', authoritative)
 
   const targetGroupIndex = model.groups.indexOf(targetGroup)
-  let oldestGroupIndex = Math.max(0, targetGroupIndex - Math.max(0, visuallyOlderGroupCount))
-  let newestGroupIndex = Math.min(model.groups.length - 1, targetGroupIndex + Math.max(0, visuallyNewerGroupCount))
-  let missingCount = capacity - (newestGroupIndex - oldestGroupIndex + 1)
+  let oldestGroupIndex = Math.max(0, targetGroupIndex - effectiveOlder)
+  let newestGroupIndex = Math.min(model.groups.length - 1, targetGroupIndex + effectiveNewer)
+  let missingCount = boundedCapacity - (newestGroupIndex - oldestGroupIndex + 1)
 
   if (missingCount > 0) {
     const availableOlder = oldestGroupIndex
@@ -159,7 +237,7 @@ export const createTargetMessageWindow = (
     newestGroupIndex = Math.min(model.groups.length - 1, newestGroupIndex + missingCount)
   }
 
-  return createWindowFromRange(model, { oldestGroupIndex, newestGroupIndex }, capacity, 'fixed', authoritative)
+  return createWindowFromRange(model, { oldestGroupIndex, newestGroupIndex }, boundedCapacity, 'fixed', authoritative)
 }
 
 const getRangeFromDisplayMessages = (model: MessageViewportGroupModel, displayMessages: Message[]) => {
@@ -200,12 +278,49 @@ export const expandMessageWindowOlder = (
   }
   const cleanAuth =
     effectiveAuth.hasMoreBefore === undefined && effectiveAuth.hasMoreAfter === undefined ? undefined : effectiveAuth
+  const calibrationDefault = MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
+  const desiredOldest = Math.max(0, currentRange.oldestGroupIndex - addedCount)
+  const provisionalOldest = desiredOldest
+  const provisionalNewest = currentRange.newestGroupIndex
+  const provisionalCount = provisionalNewest - provisionalOldest + 1
+  if (provisionalCount > calibrationDefault) {
+    const trimmedGroups = provisionalCount - calibrationDefault
+    const boundedNewest = provisionalNewest - trimmedGroups
+    const boundedCapacity = calibrationDefault
+    const observability: MessageWindow['boundedViewportObservability'] = {
+      calibrationDefault,
+      boundedCapacity,
+      didTrim: true,
+      trimmedGroups,
+      trimmedEdge: 'newer'
+    }
+    return createWindowFromRange(
+      model,
+      { oldestGroupIndex: provisionalOldest, newestGroupIndex: boundedNewest },
+      boundedCapacity,
+      currentWindow.edge,
+      cleanAuth,
+      observability
+    )
+  }
+  const boundedCapacity = Math.min(
+    currentWindow.groupCapacity + addedCount,
+    MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
+  )
+  const observability: MessageWindow['boundedViewportObservability'] = {
+    calibrationDefault,
+    boundedCapacity,
+    didTrim: false,
+    trimmedGroups: 0,
+    trimmedEdge: null
+  }
   return createWindowFromRange(
     model,
-    { ...currentRange, oldestGroupIndex: Math.max(0, currentRange.oldestGroupIndex - addedCount) },
-    currentWindow.groupCapacity + addedCount,
+    { ...currentRange, oldestGroupIndex: desiredOldest },
+    boundedCapacity,
     currentWindow.edge,
-    cleanAuth
+    cleanAuth,
+    observability
   )
 }
 
@@ -234,15 +349,52 @@ export const expandMessageWindowNewer = (
   }
   const cleanAuth =
     effectiveAuth.hasMoreBefore === undefined && effectiveAuth.hasMoreAfter === undefined ? undefined : effectiveAuth
+  const calibrationDefault = MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
+  const desiredNewest = Math.min(model.groups.length - 1, currentRange.newestGroupIndex + addedCount)
+  const provisionalOldest = currentRange.oldestGroupIndex
+  const provisionalNewest = desiredNewest
+  const provisionalCount = provisionalNewest - provisionalOldest + 1
+  if (provisionalCount > calibrationDefault) {
+    const trimmedGroups = provisionalCount - calibrationDefault
+    const boundedOldest = provisionalOldest + trimmedGroups
+    const boundedCapacity = calibrationDefault
+    const observability: MessageWindow['boundedViewportObservability'] = {
+      calibrationDefault,
+      boundedCapacity,
+      didTrim: true,
+      trimmedGroups,
+      trimmedEdge: 'older'
+    }
+    return createWindowFromRange(
+      model,
+      { oldestGroupIndex: boundedOldest, newestGroupIndex: provisionalNewest },
+      boundedCapacity,
+      currentWindow.edge,
+      cleanAuth,
+      observability
+    )
+  }
+  const boundedCapacity = Math.min(
+    currentWindow.groupCapacity + addedCount,
+    MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT
+  )
+  const observability: MessageWindow['boundedViewportObservability'] = {
+    calibrationDefault,
+    boundedCapacity,
+    didTrim: false,
+    trimmedGroups: 0,
+    trimmedEdge: null
+  }
   return createWindowFromRange(
     model,
     {
       ...currentRange,
-      newestGroupIndex: Math.min(model.groups.length - 1, currentRange.newestGroupIndex + addedCount)
+      newestGroupIndex: desiredNewest
     },
-    currentWindow.groupCapacity + addedCount,
+    boundedCapacity,
     currentWindow.edge,
-    cleanAuth
+    cleanAuth,
+    observability
   )
 }
 
@@ -252,7 +404,8 @@ export const reconcileMessageWindow = (
   previousMessages: Message[],
   currentWindow: MessageWindow
 ): MessageWindow => {
-  const capacity = currentWindow.groupCapacity
+  const rawCapacity = currentWindow.groupCapacity
+  const capacity = Math.min(rawCapacity, MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT)
   const auth =
     currentWindow.authoritativeHasMoreBefore !== undefined || currentWindow.authoritativeHasMoreAfter !== undefined
       ? {
@@ -276,20 +429,63 @@ export const reconcileMessageWindow = (
     if (!previousRange || previousModel.groups.length === 0) {
       return createWindowFromRange(model, null, capacity, 'fixed', cleanAuth)
     }
-    return createWindowFromRange(model, previousRange, capacity, 'fixed', cleanAuth)
+    // Clamp previous range to bounded capacity deterministically (trim newer edge if needed).
+    let boundedRange = previousRange
+    const rangeCount = previousRange.newestGroupIndex - previousRange.oldestGroupIndex + 1
+    if (rangeCount > capacity) {
+      const trimmedGroups = rangeCount - capacity
+      boundedRange = {
+        oldestGroupIndex: previousRange.oldestGroupIndex,
+        newestGroupIndex: previousRange.newestGroupIndex - trimmedGroups
+      }
+      const observability: MessageWindow['boundedViewportObservability'] = {
+        calibrationDefault: MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT,
+        boundedCapacity: capacity,
+        didTrim: true,
+        trimmedGroups,
+        trimmedEdge: 'newer'
+      }
+      return createWindowFromRange(model, boundedRange, capacity, 'fixed', cleanAuth, observability)
+    }
+    return createWindowFromRange(model, boundedRange, capacity, 'fixed', cleanAuth)
   }
 
   let oldestGroupIndex = Math.min(...retainedIndexes)
   let newestGroupIndex = Math.max(...retainedIndexes)
+  let didTrim = false
+  let trimmedGroups = 0
+  let trimmedEdge: 'older' | 'newer' | null = null
   if (newestGroupIndex - oldestGroupIndex + 1 > capacity) {
+    const excess = newestGroupIndex - oldestGroupIndex + 1 - capacity
     oldestGroupIndex = newestGroupIndex - capacity + 1
+    didTrim = true
+    trimmedGroups = excess
+    trimmedEdge = 'older'
   }
   const missingCount = Math.max(0, capacity - (newestGroupIndex - oldestGroupIndex + 1))
   const addedNewer = Math.min(model.groups.length - 1 - newestGroupIndex, missingCount)
   newestGroupIndex += addedNewer
   oldestGroupIndex = Math.max(0, oldestGroupIndex - (missingCount - addedNewer))
 
-  return createWindowFromRange(model, { oldestGroupIndex, newestGroupIndex }, capacity, 'fixed', cleanAuth)
+  const observability: MessageWindow['boundedViewportObservability'] =
+    didTrim || trimmedGroups > 0
+      ? {
+          calibrationDefault: MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT,
+          boundedCapacity: capacity,
+          didTrim,
+          trimmedGroups,
+          trimmedEdge
+        }
+      : undefined
+
+  return createWindowFromRange(
+    model,
+    { oldestGroupIndex, newestGroupIndex },
+    capacity,
+    'fixed',
+    cleanAuth,
+    observability
+  )
 }
 
 // --- S6.1 helpers transplanted from Messages.tsx (single production implementation) ---
