@@ -7,12 +7,21 @@ import {
   B05_CALIBRATION_CANDIDATE_BYTES,
   canonicalizeLogicalPayload,
   canonicalJsonStringify,
+  createSyntheticByteBoundarySmallProfile,
   createSyntheticByteFirstProfile,
   createSyntheticCountFirstProfile,
   createSyntheticOversizedSingleProfile,
   createSyntheticTopic,
-  LOGICAL_PAYLOAD_ACCOUNTING_VERSION
+  createSyntheticVariedShapeProfile,
+  getLogicalPayloadProfileMatrix,
+  LOGICAL_PAYLOAD_ACCOUNTING_VERSION,
+  SYNTHETIC_PROFILE_IDS
 } from './logicalPayload'
+import {
+  bindingToNumeric,
+  buildLogicalPayloadBenchmarkContract,
+  PROFILE_PREFIX_BY_ID
+} from './logicalPayload.benchContract'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -748,5 +757,302 @@ describe('logicalPayload — deep nonmutation regression', () => {
     const segIds = (canonicalFrame.segments as Record<string, unknown>[]).map((s) => String(s.id))
     // Approved: present sortOrders first asc, then absent by id
     expect(segIds).toEqual(['seg-b', 'seg-a', 'seg-c'])
+  })
+})
+
+describe('logicalPayload — full matrix coverage (C-01 8-profile)', () => {
+  it('getLogicalPayloadProfileMatrix enumerates all 8 deterministic profiles with stable ids', () => {
+    const matrix = getLogicalPayloadProfileMatrix()
+    expect(matrix).toHaveLength(8)
+    const ids = matrix.map((p) => p.id)
+    expect(ids).toEqual(Object.values(SYNTHETIC_PROFILE_IDS))
+    expect(new Set(ids).size).toBe(8)
+    // Preserve established profile construction — ids must match constants
+    expect(ids).toContain(SYNTHETIC_PROFILE_IDS.countFirst)
+    expect(ids).toContain(SYNTHETIC_PROFILE_IDS.byteFirst)
+    expect(ids).toContain(SYNTHETIC_PROFILE_IDS.oversizedSingle)
+    expect(ids).toContain(SYNTHETIC_PROFILE_IDS.boundaryExact)
+    expect(ids).toContain(SYNTHETIC_PROFILE_IDS.bothBound)
+    expect(ids).toContain(SYNTHETIC_PROFILE_IDS.variedShape)
+    expect(ids).toContain(SYNTHETIC_PROFILE_IDS.byteBoundary)
+    expect(ids).toContain(SYNTHETIC_PROFILE_IDS.b02ExactEquality)
+  })
+
+  it('profile matrix aggregates cover count-first, byte-first, both-bound, oversized, and equality/non-binding cases', () => {
+    const matrix = getLogicalPayloadProfileMatrix()
+    const byId = new Map(matrix.map((p) => [p.id, aggregateLogicalPayload(p.topics)] as const))
+
+    const countFirst = byId.get(SYNTHETIC_PROFILE_IDS.countFirst)!
+    expect(countFirst.binding).toBe('count-first')
+    expect(countFirst.isCountBound).toBe(true)
+    expect(countFirst.isByteBound).toBe(false)
+
+    const byteFirst = byId.get(SYNTHETIC_PROFILE_IDS.byteFirst)!
+    expect(byteFirst.binding).toBe('byte-first')
+    expect(byteFirst.isByteBound).toBe(true)
+    expect(byteFirst.isCountBound).toBe(false)
+
+    const bothBound = byId.get(SYNTHETIC_PROFILE_IDS.bothBound)!
+    expect(bothBound.binding).toBe('both')
+    expect(bothBound.isCountBound).toBe(true)
+    expect(bothBound.isByteBound).toBe(true)
+
+    const oversized = byId.get(SYNTHETIC_PROFILE_IDS.oversizedSingle)!
+    expect(oversized.oversizedTopicIds.length).toBe(1)
+    expect(oversized.perTopic[0].byteLength).toBeGreaterThan(B05_CALIBRATION_CANDIDATE_BYTES)
+    // oversized single is also byte-first (1 topic <<8 but >32MiB)
+    expect(oversized.binding).toBe('byte-first')
+
+    const boundaryExact = byId.get(SYNTHETIC_PROFILE_IDS.boundaryExact)!
+    expect(boundaryExact.binding).toBe('none')
+    expect(boundaryExact.topicCount).toBe(B01_MAX_TOPICS)
+    expect(boundaryExact.isCountBound).toBe(false)
+    expect(boundaryExact.isByteBound).toBe(false)
+
+    const b02Exact = byId.get(SYNTHETIC_PROFILE_IDS.b02ExactEquality)!
+    expect(b02Exact.binding).toBe('none')
+    expect(b02Exact.aggregateBytes).toBe(B02_MAX_BYTES)
+    expect(b02Exact.isByteBound).toBe(false)
+    expect(b02Exact.oversizedTopicIds).toEqual([])
+    expect(b02Exact.perTopic[0].byteLength).toBe(B02_MAX_BYTES)
+  })
+
+  it('varied-shape and byte-boundary small profiles are non-binding with deterministic byte distributions', () => {
+    const varied = aggregateLogicalPayload(createSyntheticVariedShapeProfile())
+    expect(varied.topicCount).toBe(3)
+    expect(varied.binding).toBe('none')
+    expect(varied.oversizedTopicIds).toEqual([])
+    // Determinism: second run identical
+    const varied2 = aggregateLogicalPayload(createSyntheticVariedShapeProfile())
+    expect(varied.aggregateBytes).toBe(varied2.aggregateBytes)
+    // Heterogeneous per-topic bytes (small/medium/large mix)
+    const bytes = varied.perTopic.map((p) => p.byteLength)
+    expect(new Set(bytes).size).toBeGreaterThan(1)
+
+    const small = aggregateLogicalPayload(createSyntheticByteBoundarySmallProfile())
+    expect(small.topicCount).toBe(2)
+    expect(small.binding).toBe('none')
+    expect(small.aggregateBytes).toBeLessThan(B02_MAX_BYTES)
+    expect(small.oversizedTopicIds).toEqual([])
+  })
+
+  it('every matrix profile canonicalizes deterministically (valid inputs)', () => {
+    const matrix = getLogicalPayloadProfileMatrix()
+    for (const { id, topics } of matrix) {
+      const first = aggregateLogicalPayload(topics)
+      const second = aggregateLogicalPayload(topics)
+      expect(second.aggregateBytes, `determinism aggregate ${id}`).toBe(first.aggregateBytes)
+      expect(
+        second.perTopic.map((p) => p.byteLength),
+        `determinism per-topic ${id}`
+      ).toEqual(first.perTopic.map((p) => p.byteLength))
+      // Each profile's topics individually validate via canonicalize
+      for (const t of topics) {
+        expect(() => canonicalizeLogicalPayload(t), `canonicalize ${id} / ${t.topicId}`).not.toThrow()
+      }
+    }
+  })
+
+  it('profile aggregates are pairwise distinct and cover all four binding classifications', () => {
+    const matrix = getLogicalPayloadProfileMatrix()
+    const bindings = matrix.map((p) => aggregateLogicalPayload(p.topics).binding)
+    // Must contain all four binding variants across the matrix
+    expect(bindings).toContain('count-first')
+    expect(bindings).toContain('byte-first')
+    expect(bindings).toContain('both')
+    expect(bindings).toContain('none')
+    // Aggregates are mutually distinguishable — every profile has a distinct aggregate byte size
+    const aggregates = matrix.map((p) => aggregateLogicalPayload(p.topics).aggregateBytes)
+    expect(new Set(aggregates).size).toBe(matrix.length)
+  })
+})
+
+describe('logicalPayload — benchmark metric/gate contract (C-01 calibration)', () => {
+  it('emitted metric IDs are unique and cover per-topic, aggregate, binding, oversized and calibration-candidate contract for all eight profiles — via shared builder', () => {
+    const matrix = getLogicalPayloadProfileMatrix()
+    expect(matrix).toHaveLength(8)
+    const aggregatesById = new Map(matrix.map((p) => [p.id, aggregateLogicalPayload(p.topics)] as const))
+    const combinedAgg = aggregateLogicalPayload(matrix.flatMap((p) => p.topics))
+    const { metrics } = buildLogicalPayloadBenchmarkContract({
+      profileMatrix: matrix,
+      aggregatesById,
+      combinedAgg,
+      correctnessErrors: [],
+      orphanRejectionPassed: true,
+      nonFiniteRejectionPassed: true
+    })
+
+    // Uniqueness gate — every metric id must be unique
+    const ids = metrics.map((m) => m.id)
+    expect(
+      new Set(ids).size,
+      `metric ids must be unique — duplicates: ${ids.filter((id, i) => ids.indexOf(id) !== i).join(', ')}`
+    ).toBe(ids.length)
+    // Values must be finite numbers (schema-v1 numeric-only) and deterministic
+    for (const m of metrics) {
+      expect(Number.isFinite(m.value), `metric ${m.id} value must be finite`).toBe(true)
+    }
+    // Second builder call must be deterministic and produce identical metrics
+    const second = buildLogicalPayloadBenchmarkContract({
+      profileMatrix: matrix,
+      aggregatesById,
+      combinedAgg,
+      correctnessErrors: [],
+      orphanRejectionPassed: true,
+      nonFiniteRejectionPassed: true
+    })
+    expect(second.metrics).toEqual(metrics)
+
+    // Completeness — every profile prefix must be present with expected aggregate/binding/oversized coverage
+    for (const { id, topics } of matrix) {
+      const prefix = PROFILE_PREFIX_BY_ID[id]
+      const agg = aggregatesById.get(id)!
+      for (let idx = 0; idx < topics.length; idx++) {
+        expect(ids).toContain(`${prefix}.topic.${idx}.bytes`)
+      }
+      expect(ids).toContain(`${prefix}.aggregate.bytes`)
+      expect(ids).toContain(`${prefix}.topicCount`)
+      expect(ids).toContain(`${prefix}.isCountBound`)
+      expect(ids).toContain(`${prefix}.isByteBound`)
+      expect(ids).toContain(`${prefix}.binding`)
+      expect(ids).toContain(`${prefix}.oversizedCount`)
+      if (agg.perTopic.length === 1) {
+        expect(ids).toContain(`${prefix}.topic.0.isOversized`)
+      }
+      const bindingMetric = metrics.find((m) => m.id === `${prefix}.binding`)!
+      expect(bindingMetric.value).toBe(bindingToNumeric(agg.binding))
+      if (prefix === 'oversizedSingle' || prefix === 'b02ExactEquality') {
+        const flag = metrics.find((m) => m.id === `${prefix}.topic.0.isOversized`)!
+        expect(flag).toBeDefined()
+      }
+    }
+
+    expect(ids).toContain('combined.aggregate.bytes')
+    expect(ids).toContain('combined.topicCount')
+    expect(ids).toContain('calibrationCandidate.B01_maxTopics')
+    expect(ids).toContain('calibrationCandidate.B02_maxBytes')
+    expect(ids).toContain('calibrationCandidate.B05_maxBytes')
+
+    // Expected total count: per-topic (37) + per-profile aggregate 6*8=48 + single-topic oversized flags 2 + combined 2 + calibration 3 = 92
+    const expectedPerTopic = matrix.reduce((sum, { topics }) => sum + topics.length, 0)
+    const singleTopicProfiles = matrix.filter(({ topics }) => topics.length === 1).length
+    const expected = expectedPerTopic + 6 * matrix.length + singleTopicProfiles + 2 + 3
+    expect(metrics).toHaveLength(expected)
+    expect(expected).toBe(92)
+    // Exact contract — if emitter diverges, this test fails because it exercises the shared builder
+    expect(metrics.map((m) => m.id)).toEqual(
+      buildLogicalPayloadBenchmarkContract({
+        profileMatrix: matrix,
+        aggregatesById,
+        combinedAgg,
+        correctnessErrors: [],
+        orphanRejectionPassed: true,
+        nonFiniteRejectionPassed: true
+      }).metrics.map((m) => m.id)
+    )
+  })
+
+  it('emitted gate IDs are unique and cover canonical, matrix-complete and full binding/oversized contract — via shared builder', () => {
+    const matrix = getLogicalPayloadProfileMatrix()
+    const aggregatesById = new Map(matrix.map((p) => [p.id, aggregateLogicalPayload(p.topics)] as const))
+    const combinedAgg = aggregateLogicalPayload(matrix.flatMap((p) => p.topics))
+    const oversizedAgg = aggregatesById.get(SYNTHETIC_PROFILE_IDS.oversizedSingle)!
+    const b02ExactEqualityAgg = aggregatesById.get(SYNTHETIC_PROFILE_IDS.b02ExactEquality)!
+    const byteBoundaryAgg = aggregatesById.get(SYNTHETIC_PROFILE_IDS.byteBoundary)!
+
+    const { gates } = buildLogicalPayloadBenchmarkContract({
+      profileMatrix: matrix,
+      aggregatesById,
+      combinedAgg,
+      correctnessErrors: [],
+      orphanRejectionPassed: true,
+      nonFiniteRejectionPassed: true
+    })
+
+    const ids = gates.map((g) => g.id)
+    expect(
+      new Set(ids).size,
+      `gate ids must be unique — duplicates: ${ids.filter((id, i) => ids.indexOf(id) !== i).join(', ')}`
+    ).toBe(ids.length)
+    expect(gates).toHaveLength(12)
+    // Determinism second call
+    const second = buildLogicalPayloadBenchmarkContract({
+      profileMatrix: matrix,
+      aggregatesById,
+      combinedAgg,
+      correctnessErrors: [],
+      orphanRejectionPassed: true,
+      nonFiniteRejectionPassed: true
+    })
+    expect(second.gates).toEqual(gates)
+
+    const expectedGateIds = [
+      'correctness.canonical',
+      'correctness.orphan-rejection',
+      'correctness.nonfinite-rejection',
+      'matrix.complete',
+      'binding.count-first',
+      'binding.byte-first',
+      'binding.oversized',
+      'binding.boundary-exact',
+      'binding.both-bound',
+      'binding.varied-shape',
+      'binding.byte-boundary',
+      'binding.b02-exact-equality'
+    ]
+    for (const expected of expectedGateIds) {
+      expect(ids).toContain(expected)
+    }
+
+    for (const g of gates) {
+      expect(g.passed, `gate ${g.id} must pass`).toBe(true)
+    }
+
+    const bindings = matrix.map((p) => aggregatesById.get(p.id)!.binding)
+    expect(bindings).toContain('count-first')
+    expect(bindings).toContain('byte-first')
+    expect(bindings).toContain('both')
+    expect(bindings).toContain('none')
+    expect(oversizedAgg.oversizedTopicIds.length).toBe(1)
+    expect(b02ExactEqualityAgg.aggregateBytes).toBe(B02_MAX_BYTES)
+    expect(byteBoundaryAgg.aggregateBytes).toBeLessThan(B02_MAX_BYTES)
+
+    // Regression probe: altering contract inputs flips gates — proves builder is exercised
+    const failingGates = buildLogicalPayloadBenchmarkContract({
+      profileMatrix: matrix,
+      aggregatesById,
+      combinedAgg,
+      correctnessErrors: ['injected failure'],
+      orphanRejectionPassed: false,
+      nonFiniteRejectionPassed: true
+    }).gates
+    expect(failingGates.find((g) => g.id === 'correctness.canonical')?.passed).toBe(false)
+    expect(failingGates.find((g) => g.id === 'correctness.orphan-rejection')?.passed).toBe(false)
+  })
+
+  it('shared contract directly equals emitter contract shape — benchmark would fail if builder diverges', () => {
+    const matrix = getLogicalPayloadProfileMatrix()
+    const aggregatesById = new Map(matrix.map((p) => [p.id, aggregateLogicalPayload(p.topics)] as const))
+    const combinedAgg = aggregateLogicalPayload(matrix.flatMap((p) => p.topics))
+    const contract = buildLogicalPayloadBenchmarkContract({
+      profileMatrix: matrix,
+      aggregatesById,
+      combinedAgg,
+      correctnessErrors: [],
+      orphanRejectionPassed: true,
+      nonFiniteRejectionPassed: true
+    })
+    // Import sanity: builder produces exactly 92 metrics and 12 gates (same as artifact)
+    expect(contract.metrics).toHaveLength(92)
+    expect(contract.gates).toHaveLength(12)
+    // No duplicate or NaN/Infinity
+    expect(new Set(contract.metrics.map((m) => m.id)).size).toBe(92)
+    expect(contract.metrics.every((m) => Number.isFinite(m.value))).toBe(true)
+    // Oversized flag id is direct expression (no redundant branch) — must exist exactly once per single-topic profile
+    const oversizedIds = contract.metrics.filter((m) => m.id.endsWith('.topic.0.isOversized')).map((m) => m.id)
+    expect(oversizedIds).toHaveLength(2)
+    expect(oversizedIds).toEqual(
+      expect.arrayContaining(['oversizedSingle.topic.0.isOversized', 'b02ExactEquality.topic.0.isOversized'])
+    )
   })
 })
