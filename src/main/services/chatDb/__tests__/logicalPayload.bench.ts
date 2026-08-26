@@ -22,23 +22,23 @@ vi.unmock('node:os')
 vi.unmock('node:path')
 vi.unmock('node:crypto')
 
-import {
-  BENCH_RESULT_SCHEMA_VERSION,
-  type BenchmarkResult,
-  collectEnvironmentMetadata,
-  emitBenchmarkResultAfterSuccessfulTasks
-} from './benchResult'
+import { utf8ByteLength } from '@shared/chatDb'
 import {
   aggregateLogicalPayload,
   B01_MAX_TOPICS,
   B02_MAX_BYTES,
   B05_CALIBRATION_CANDIDATE_BYTES,
   canonicalizeLogicalPayload,
-  createSyntheticTopic,
-  getLogicalPayloadProfileMatrix,
-  LOGICAL_PAYLOAD_ACCOUNTING_VERSION,
-  SYNTHETIC_PROFILE_IDS
-} from './logicalPayload'
+  LOGICAL_PAYLOAD_ACCOUNTING_VERSION
+} from '@shared/chatDb/logicalPayload'
+
+import {
+  BENCH_RESULT_SCHEMA_VERSION,
+  type BenchmarkResult,
+  collectEnvironmentMetadata,
+  emitBenchmarkResultAfterSuccessfulTasks
+} from './benchResult'
+import { createSyntheticTopic, getLogicalPayloadProfileMatrix, SYNTHETIC_PROFILE_IDS } from './logicalPayload'
 import { buildLogicalPayloadBenchmarkContract } from './logicalPayload.benchContract'
 
 // ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ try {
   if (canonicalJson.includes(': ') || canonicalJson.includes(', ')) {
     correctnessErrors.push('probe: canonical JSON contains whitespace')
   }
-  if (byteLength !== Buffer.byteLength(canonicalJson, 'utf8')) {
+  if (byteLength !== utf8ByteLength(canonicalJson)) {
     correctnessErrors.push('probe: byteLength mismatch')
   }
   const second = canonicalizeLogicalPayload(probe)

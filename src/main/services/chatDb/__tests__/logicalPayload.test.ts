@@ -1,5 +1,3 @@
-import { describe, expect, it } from 'vitest'
-
 import {
   aggregateLogicalPayload,
   B01_MAX_TOPICS,
@@ -7,6 +5,11 @@ import {
   B05_CALIBRATION_CANDIDATE_BYTES,
   canonicalizeLogicalPayload,
   canonicalJsonStringify,
+  LOGICAL_PAYLOAD_ACCOUNTING_VERSION
+} from '@shared/chatDb/logicalPayload'
+import { describe, expect, it } from 'vitest'
+
+import {
   createSyntheticByteBoundarySmallProfile,
   createSyntheticByteFirstProfile,
   createSyntheticCountFirstProfile,
@@ -14,7 +17,6 @@ import {
   createSyntheticTopic,
   createSyntheticVariedShapeProfile,
   getLogicalPayloadProfileMatrix,
-  LOGICAL_PAYLOAD_ACCOUNTING_VERSION,
   SYNTHETIC_PROFILE_IDS
 } from './logicalPayload'
 import {

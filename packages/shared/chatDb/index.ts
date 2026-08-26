@@ -157,6 +157,24 @@ export {
 // Validation types
 export type { JsonProfileBytes, JsonValidationProfile, ResultEnvelopeValidationOptions } from './validation'
 
+// Logical payload canonical accounting (shared pure, browser-and-Node compatible)
+export type {
+  AggregateAccounting,
+  CanonicalPayloadResult,
+  LogicalPayloadCompleteness,
+  LogicalPayloadTopicInput,
+  PerTopicAccounting
+} from './logicalPayload'
+export {
+  aggregateLogicalPayload,
+  B01_MAX_TOPICS,
+  B02_MAX_BYTES,
+  B05_CALIBRATION_CANDIDATE_BYTES,
+  canonicalizeLogicalPayload,
+  canonicalJsonStringify,
+  LOGICAL_PAYLOAD_ACCOUNTING_VERSION
+} from './logicalPayload'
+
 // Command contracts
 export type { ChatDbContract } from './contracts'
 export { chatDbContracts, getContract, validateChatDbRequest, validateChatDbResult } from './contracts'

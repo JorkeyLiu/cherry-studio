@@ -9,6 +9,7 @@
  * Measurement-only, no production source invoked. All assertions are pure.
  */
 
+import { aggregateLogicalPayload, B02_MAX_BYTES } from '@shared/chatDb/logicalPayload'
 import { describe, expect, it } from 'vitest'
 
 // C-02 helpers are E2E utils but pure — import via relative path that works in Node lane
@@ -28,8 +29,6 @@ import {
   resolveC02HeapProfiles
 } from '../../../../../tests/e2e/utils/perfHeapCalibration'
 import {
-  aggregateLogicalPayload,
-  B02_MAX_BYTES,
   createSyntheticB02ExactEqualityProfile,
   createSyntheticBothBoundProfile,
   createSyntheticBoundaryExactProfile,

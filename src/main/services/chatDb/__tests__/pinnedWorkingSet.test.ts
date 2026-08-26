@@ -1,3 +1,4 @@
+import { aggregateLogicalPayload, canonicalizeLogicalPayload } from '@shared/chatDb/logicalPayload'
 import { describe, expect, it } from 'vitest'
 
 import { BENCH_RESULT_SCHEMA_VERSION, collectEnvironmentMetadata, validateBenchmarkResult } from './benchResult'
@@ -6,7 +7,7 @@ import {
   emitBenchmarkResultAfterSuccessfulTasksAndGates,
   shouldEmitBenchmarkResult
 } from './benchResult'
-import { aggregateLogicalPayload, canonicalizeLogicalPayload, createSyntheticTopic } from './logicalPayload'
+import { createSyntheticTopic } from './logicalPayload'
 import {
   assertFiniteMetricValue,
   buildMultiMatrixScaleMap,

@@ -28,10 +28,11 @@
 import {
   aggregateLogicalPayload,
   canonicalizeLogicalPayload,
-  createSyntheticTopic,
   LOGICAL_PAYLOAD_ACCOUNTING_VERSION,
   type LogicalPayloadTopicInput
-} from './logicalPayload'
+} from '@shared/chatDb/logicalPayload'
+
+import { createSyntheticTopic } from './logicalPayload'
 
 // ---------------------------------------------------------------------------
 // Synthetic matrix — directional, non-adopting calibration inputs

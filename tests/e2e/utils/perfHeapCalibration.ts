@@ -24,9 +24,9 @@
 import {
   aggregateLogicalPayload,
   canonicalizeLogicalPayload,
-  createSyntheticTopic,
   type LogicalPayloadTopicInput
-} from '../../../src/main/services/chatDb/__tests__/logicalPayload'
+} from '@shared/chatDb/logicalPayload'
+import { createSyntheticTopic } from '../../../src/main/services/chatDb/__tests__/logicalPayload'
 
 // ---------------------------------------------------------------------------
 // Env gate — opt-in, inert to normal app/test behavior

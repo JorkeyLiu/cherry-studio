@@ -31,8 +31,11 @@ vi.unmock('node:os')
 vi.unmock('node:path')
 vi.unmock('node:crypto')
 
+import { utf8ByteLength } from '@shared/chatDb'
+import { canonicalizeLogicalPayload } from '@shared/chatDb/logicalPayload'
+
 import { collectEnvironmentMetadata, emitBenchmarkResultAfterSuccessfulTasksAndGates } from './benchResult'
-import { canonicalizeLogicalPayload, createSyntheticTopic } from './logicalPayload'
+import { createSyntheticTopic } from './logicalPayload'
 import {
   assertFiniteMetricValue,
   buildMultiMatrixScaleMap,
@@ -58,7 +61,7 @@ try {
   if (canonicalJson.includes(': ') || canonicalJson.includes(', ')) {
     correctnessErrors.push('probe: canonical JSON contains whitespace')
   }
-  if (byteLength !== Buffer.byteLength(canonicalJson, 'utf8')) {
+  if (byteLength !== utf8ByteLength(canonicalJson)) {
     correctnessErrors.push('probe: byteLength mismatch')
   }
   const second = canonicalizeLogicalPayload(probe)

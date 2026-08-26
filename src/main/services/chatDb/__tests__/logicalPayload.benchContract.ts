@@ -8,9 +8,11 @@
  * threshold, or persistence behavior.
  */
 
+import type { aggregateLogicalPayload } from '@shared/chatDb/logicalPayload'
+import { B01_MAX_TOPICS, B02_MAX_BYTES, B05_CALIBRATION_CANDIDATE_BYTES } from '@shared/chatDb/logicalPayload'
+
 import type { BenchmarkGate, BenchmarkMetric } from './benchResult'
-import type { aggregateLogicalPayload, getLogicalPayloadProfileMatrix } from './logicalPayload'
-import { B01_MAX_TOPICS, B02_MAX_BYTES, B05_CALIBRATION_CANDIDATE_BYTES, SYNTHETIC_PROFILE_IDS } from './logicalPayload'
+import { type getLogicalPayloadProfileMatrix, SYNTHETIC_PROFILE_IDS } from './logicalPayload'
 
 export const PROFILE_PREFIX_BY_ID: Record<string, string> = {
   [SYNTHETIC_PROFILE_IDS.countFirst]: 'countFirst',
