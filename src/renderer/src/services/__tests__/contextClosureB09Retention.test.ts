@@ -11,11 +11,8 @@ import {
   getCurrentClosureGeneration,
   getFreshValidatedClosure,
   getGlobalBlockGeneration,
-  pruneInactiveContextClosures,
   resetAllClosureStateForTests,
-  retainActiveContextClosure,
-  setCachedContextClosureWithFingerprint,
-  trimContextClosureCacheToActiveTopic
+  setCachedContextClosureWithFingerprint
 } from '@renderer/services/contextClosure'
 import type { FetchContextClosureResponse } from '@shared/chatDb'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -117,20 +114,6 @@ describe('B-09 active-topic-only retention (contextClosure)', () => {
     expect(getCachedClosureGeneration(tActive)).toBe(cachedGenBefore)
     expect(getGlobalBlockGeneration()).toBe(globalBefore)
     expect(getFreshValidatedClosure(tActive, 'u1', fp)).not.toBeNull()
-  })
-
-  it('aliases retain/prune/trim behave identically', () => {
-    const fp = computeClosureFingerprint([{ id: 'u1', role: 'user', topicId: 'ta', blocks: [] }] as any)
-    setCachedContextClosureWithFingerprint('ta', makeResp('ta', 'u1'), fp)
-    setCachedContextClosureWithFingerprint('tb', makeResp('tb', 'u1'), fp)
-    retainActiveContextClosure('ta')
-    expect(getAllCachedTopicIds()).toEqual(['ta'])
-    setCachedContextClosureWithFingerprint('tb', makeResp('tb', 'u1'), fp)
-    pruneInactiveContextClosures('ta')
-    expect(getAllCachedTopicIds()).toEqual(['ta'])
-    setCachedContextClosureWithFingerprint('tb', makeResp('tb', 'u1'), fp)
-    trimContextClosureCacheToActiveTopic('ta')
-    expect(getAllCachedTopicIds()).toEqual(['ta'])
   })
 
   it('evicted inactive causes cache miss/fallback; republish after eviction succeeds and remains single', () => {

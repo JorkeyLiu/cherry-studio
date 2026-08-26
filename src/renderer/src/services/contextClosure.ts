@@ -252,11 +252,6 @@ export function enforceContextClosureRetention(activeTopicId: string): void {
   }
 }
 
-/** Alias for symmetry with pruning terminology. */
-export const retainActiveContextClosure = enforceContextClosureRetention
-export const pruneInactiveContextClosures = enforceContextClosureRetention
-export const trimContextClosureCacheToActiveTopic = enforceContextClosureRetention
-
 export function resetAllClosureStateForTests(): void {
   closureCache.clear()
   closureFingerprints.clear()
