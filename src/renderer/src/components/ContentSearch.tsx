@@ -57,8 +57,18 @@ export interface ContentSearchRef {
   focus(): void
 }
 
-const escapeRegExp = (string: string): string => {
+export const CONTENT_SEARCH_CHUNK_SIZE = 500
+
+export const escapeRegExp = (string: string): string => {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // $& means the whole matched string
+}
+
+export const createSearchRegex = (searchText: string, isCaseSensitive: boolean, isWholeWord: boolean): RegExp => {
+  const escapedSearchText = escapeRegExp(searchText)
+  const hasOnlyLatinLetters = /^[a-zA-Z\s]+$/.test(searchText)
+  const regexFlags = hasOnlyLatinLetters && isCaseSensitive ? 'g' : 'gi'
+  const regexPattern = isWholeWord ? `\\b${escapedSearchText}\\b` : escapedSearchText
+  return new RegExp(regexPattern, regexFlags)
 }
 
 const safeClearHighlights = () => {
@@ -76,84 +86,88 @@ const safeSetHighlight = (name: string, highlight: any) => {
 const hasHighlightAPI = () =>
   typeof (globalThis as any).Highlight !== 'undefined' && !!(globalThis as any).CSS?.highlights
 
-const findRangesInTarget = (
-  target: HTMLElement,
+export interface ChunkScanResult {
+  ranges: Range[]
+  totalCount: number
+}
+
+/**
+ * B-08 bounded search-session helper.
+ * Scans the currently rendered DOM (target filtered by NodeFilter) and
+ * materializes only the requested 500-match chunk. Total count is derived
+ * without retaining unbounded descriptors — only the current chunk's Ranges
+ * are kept alive. Rendered-DOM-only.
+ */
+export const scanTargetForChunk = (
+  target: HTMLElement | null,
   filter: NodeFilter,
   searchText: string,
   isCaseSensitive: boolean,
-  isWholeWord: boolean
-): Range[] => {
-  safeClearHighlights()
-  const ranges: Range[] = []
-
-  const escapedSearchText = escapeRegExp(searchText)
-
-  // 检查搜索文本是否仅包含拉丁字母
-  const hasOnlyLatinLetters = /^[a-zA-Z\s]+$/.test(searchText)
-
-  // 只有当搜索文本仅包含拉丁字母时才应用大小写敏感
-  const regexFlags = hasOnlyLatinLetters && isCaseSensitive ? 'g' : 'gi'
-  const regexPattern = isWholeWord ? `\\b${escapedSearchText}\\b` : escapedSearchText
-  const searchRegex = new RegExp(regexPattern, regexFlags)
+  isWholeWord: boolean,
+  chunkIndex: number,
+  chunkSize: number = CONTENT_SEARCH_CHUNK_SIZE
+): ChunkScanResult => {
+  if (!target || !searchText || searchText.trim() === '') {
+    return { ranges: [], totalCount: 0 }
+  }
+  const searchRegex = createSearchRegex(searchText, isCaseSensitive, isWholeWord)
   const treeWalker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT, filter)
   const allTextNodes: { node: Node; startOffset: number }[] = []
   let fullText = ''
 
-  // 1. 拼接所有文本节点内容
   while (treeWalker.nextNode()) {
     allTextNodes.push({
       node: treeWalker.currentNode,
       startOffset: fullText.length
     })
-    fullText += treeWalker.currentNode.nodeValue
+    fullText += (treeWalker.currentNode.nodeValue as string) ?? ''
   }
 
-  // 2.在完整文本中查找匹配项
-  let match: RegExpExecArray | null = null
-  while ((match = searchRegex.exec(fullText))) {
-    const matchStart = match.index
-    const matchEnd = matchStart + match[0].length
+  const desiredStart = chunkIndex * chunkSize
+  const desiredEnd = desiredStart + chunkSize
+  const ranges: Range[] = []
+  let globalMatchIndex = 0
+  let match: RegExpExecArray | null
 
-    // 3. 将匹配项的索引映射回DOM Range
-    let startNode: Node | null = null
-    let endNode: Node | null = null
-    let startOffset = 0
-    let endOffset = 0
-
-    // 找到起始节点和偏移
-    for (const nodeInfo of allTextNodes) {
-      if (
-        matchStart >= nodeInfo.startOffset &&
-        matchStart < nodeInfo.startOffset + (nodeInfo.node.nodeValue?.length ?? 0)
-      ) {
-        startNode = nodeInfo.node
-        startOffset = matchStart - nodeInfo.startOffset
-        break
+  while ((match = searchRegex.exec(fullText)) !== null) {
+    if (match[0].length === 0) {
+      searchRegex.lastIndex += 1
+      continue
+    }
+    if (globalMatchIndex >= desiredStart && globalMatchIndex < desiredEnd) {
+      const matchStart = match.index
+      const matchEnd = matchStart + match[0].length
+      let startNode: Node | null = null
+      let endNode: Node | null = null
+      let startOffset = 0
+      let endOffset = 0
+      for (const nodeInfo of allTextNodes) {
+        const len = nodeInfo.node.nodeValue?.length ?? 0
+        if (matchStart >= nodeInfo.startOffset && matchStart < nodeInfo.startOffset + len) {
+          startNode = nodeInfo.node
+          startOffset = matchStart - nodeInfo.startOffset
+          break
+        }
+      }
+      for (const nodeInfo of allTextNodes) {
+        const len = nodeInfo.node.nodeValue?.length ?? 0
+        if (matchEnd > nodeInfo.startOffset && matchEnd <= nodeInfo.startOffset + len) {
+          endNode = nodeInfo.node
+          endOffset = matchEnd - nodeInfo.startOffset
+          break
+        }
+      }
+      if (startNode && endNode) {
+        const range = new Range()
+        range.setStart(startNode, startOffset)
+        range.setEnd(endNode, endOffset)
+        ranges.push(range)
       }
     }
-
-    // 找到结束节点和偏移
-    for (const nodeInfo of allTextNodes) {
-      if (
-        matchEnd > nodeInfo.startOffset &&
-        matchEnd <= nodeInfo.startOffset + (nodeInfo.node.nodeValue?.length ?? 0)
-      ) {
-        endNode = nodeInfo.node
-        endOffset = matchEnd - nodeInfo.startOffset
-        break
-      }
-    }
-
-    // 如果起始和结束节点都找到了，则创建一个 Range
-    if (startNode && endNode) {
-      const range = new Range()
-      range.setStart(startNode, startOffset)
-      range.setEnd(endNode, endOffset)
-      ranges.push(range)
-    }
+    globalMatchIndex += 1
   }
 
-  return ranges
+  return { ranges, totalCount: globalMatchIndex }
 }
 
 // eslint-disable-next-line @eslint-react/no-forward-ref
@@ -180,53 +194,146 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     })()
     const containerRef = React.useRef<HTMLDivElement>(null)
     const searchInputRef = React.useRef<HTMLInputElement>(null)
-    // S3.5: Dual mode — parent-owned lazy (Chat) vs legacy hidden (RichEditor).
-    // Chat passes onClose + initialText and owns mount: when mounted it is always visible, disable unmounts.
-    // RichEditor does not pass onClose: legacy behavior retains internal enable flag and display:none until imperative enable.
     const isParentOwned = Boolean(onClose)
     const [enableContentSearch, setEnableContentSearch] = useState(() => isParentOwned)
     const [searchCompleted, setSearchCompleted] = useState(SearchCompletedState.NotSearched)
     const [isCaseSensitive, setIsCaseSensitive] = useState(false)
     const [isWholeWord, setIsWholeWord] = useState(false)
-    const [allRanges, setAllRanges] = useState<Range[]>([])
-    const [currentIndex, setCurrentIndex] = useState(-1)
+    // B-08 bounded search session: at most one 500-match chunk materialized in liveRangesRef.
+    // liveRangesRef is the single authoritative ownership for live Range handles; React state does not duplicate the array.
+    const liveRangesRef = useRef<Range[]>([])
+    const [liveVersion, setLiveVersion] = useState(0)
+    const [chunkIndex, setChunkIndex] = useState(0)
+    const [totalCount, setTotalCount] = useState(0)
+    const [globalIndex, setGlobalIndex] = useState(-1)
     const prevSearchText = useRef('')
     const { t } = useTranslation()
+    const domGenerationRef = useRef(0)
+    const domDirtyRef = useRef(false)
+    const lastDomSnapshotRef = useRef<{ textLength: number; childCount: number } | null>(null)
+
+    // Refs mirroring latest values for MutationObserver without re-creating observer on index changes
+    const chunkIndexRef = useRef(chunkIndex)
+    const globalIndexRef = useRef(globalIndex)
+    const totalCountRef = useRef(totalCount)
+    const isCaseSensitiveRef = useRef(isCaseSensitive)
+    const isWholeWordRef = useRef(isWholeWord)
+    const filterRef = useRef(filter)
+    const searchCompletedRef = useRef(searchCompleted)
+
+    useEffect(() => {
+      chunkIndexRef.current = chunkIndex
+    }, [chunkIndex])
+    useEffect(() => {
+      globalIndexRef.current = globalIndex
+    }, [globalIndex])
+    useEffect(() => {
+      totalCountRef.current = totalCount
+    }, [totalCount])
+    useEffect(() => {
+      isCaseSensitiveRef.current = isCaseSensitive
+    }, [isCaseSensitive])
+    useEffect(() => {
+      isWholeWordRef.current = isWholeWord
+    }, [isWholeWord])
+    useEffect(() => {
+      filterRef.current = filter
+    }, [filter])
+    useEffect(() => {
+      searchCompletedRef.current = searchCompleted
+    }, [searchCompleted])
+
+    // Lightweight DOM snapshot to avoid heavy rescan on every same-chunk navigation when DOM unchanged
+    // Fallback dimensions are derived only from searchable target content excluding ContentSearch host subtree
+    // when the host lies within the target, preserving filter/search semantics and avoiding host-only UI invalidation.
+    const captureDomSnapshot = useCallback(() => {
+      if (!target) return null
+      try {
+        const host = containerRef.current
+        const hostInside = !!host && target.contains(host)
+        const filterFn: any = filterRef.current
+        let textLength = 0
+        const seenParents = new Set<Element>()
+        const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT, {
+          acceptNode(node: Node) {
+            if (hostInside && host.contains(node)) {
+              return NodeFilter.FILTER_REJECT
+            }
+            if (typeof filterFn === 'function') {
+              return (filterFn as (n: Node) => number)(node)
+            }
+            return filterFn.acceptNode(node)
+          }
+        } as any)
+        while (walker.nextNode()) {
+          const n = walker.currentNode as Text
+          textLength += n.nodeValue?.length ?? 0
+          const parent = n.parentElement
+          if (parent) seenParents.add(parent)
+        }
+        const childCount = seenParents.size
+        return { textLength, childCount }
+      } catch {
+        return null
+      }
+    }, [target])
+
+    const commitLiveChunk = useCallback(
+      (ranges: Range[], nextChunkIndex: number, nextTotal: number, nextGlobal: number) => {
+        // Single ownership: liveRangesRef is the only live Range cache. Assignment replaces previous chunk atomically;
+        // callers must have already dropped the previous reference before scanning (see search/searchNext).
+        liveRangesRef.current = ranges
+        setChunkIndex(nextChunkIndex)
+        setTotalCount(nextTotal)
+        setGlobalIndex(nextGlobal)
+        setLiveVersion((v) => v + 1)
+        // snapshot rendered DOM generation after successful commit
+        lastDomSnapshotRef.current = captureDomSnapshot()
+        domDirtyRef.current = false
+      },
+      [captureDomSnapshot]
+    )
+
+    const clearLiveChunk = useCallback(() => {
+      // Synchronous release: drop live Range handles before any new materialization
+      liveRangesRef.current = []
+      setChunkIndex(0)
+      setTotalCount(0)
+      setGlobalIndex(-1)
+      setLiveVersion((v) => v + 1)
+      lastDomSnapshotRef.current = captureDomSnapshot()
+      domDirtyRef.current = false
+    }, [captureDomSnapshot])
 
     const resetSearch = useCallback(() => {
       safeClearHighlights()
-      setAllRanges([])
+      clearLiveChunk()
       setSearchCompleted(SearchCompletedState.NotSearched)
-    }, [])
+    }, [clearLiveChunk])
 
     const locateByIndex = useCallback(
       (shouldScroll = true) => {
-        // 清理旧的高亮
         safeClearHighlights()
-
-        if (allRanges.length > 0) {
+        const ranges = liveRangesRef.current
+        if (ranges.length > 0) {
           if (!hasHighlightAPI()) return
-          // 1. 创建并注册所有匹配项的高亮
-          const allMatchesHighlight = new (globalThis as any).Highlight(...allRanges)
+          const allMatchesHighlight = new (globalThis as any).Highlight(...ranges)
           safeSetHighlight('search-matches', allMatchesHighlight)
-
-          // 2. 如果有当前项，为其创建并注册一个特殊的高亮
-          if (currentIndex !== -1 && allRanges[currentIndex]) {
-            const currentMatchRange = allRanges[currentIndex]
-            const currentMatchHighlight = new (globalThis as any).Highlight(currentMatchRange)
-            safeSetHighlight('current-match', currentMatchHighlight)
-
-            // 3. 将当前项滚动到视图中
-            // 获取第一个文本节点的父元素来进行滚动
-            const parentElement = currentMatchRange.startContainer.parentElement
-            if (shouldScroll && parentElement) {
-              // 优先在指定的滚动容器内滚动，避免滚动整个页面导致索引错乱/看起来"跳到第一条"
-              scrollElementIntoView(parentElement, target)
+          if (globalIndex !== -1) {
+            const localIndex = globalIndex - chunkIndex * CONTENT_SEARCH_CHUNK_SIZE
+            const currentMatchRange = ranges[localIndex]
+            if (currentMatchRange) {
+              const currentMatchHighlight = new (globalThis as any).Highlight(currentMatchRange)
+              safeSetHighlight('current-match', currentMatchHighlight)
+              const parentElement = currentMatchRange.startContainer.parentElement
+              if (shouldScroll && parentElement) {
+                scrollElementIntoView(parentElement, target)
+              }
             }
           }
         }
       },
-      [allRanges, currentIndex, target]
+      [chunkIndex, globalIndex, target]
     )
 
     const search = useCallback(
@@ -234,29 +341,194 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
         const searchText = searchInputRef.current?.value.trim() ?? null
         setSearchCompleted(SearchCompletedState.Searched)
         if (target && searchText !== null && searchText !== '') {
-          const ranges = findRangesInTarget(target, filter, searchText, isCaseSensitive, isWholeWord)
-          setAllRanges(ranges)
-          setCurrentIndex(jump && ranges.length > 0 ? 0 : -1)
+          // B-08 ownership: release previous chunk's live Ranges BEFORE creating new 500 Range array
+          liveRangesRef.current = []
+          safeClearHighlights()
+          const result = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, 0)
+          commitLiveChunk(result.ranges, 0, result.totalCount, jump && result.totalCount > 0 ? 0 : -1)
+          domGenerationRef.current += 1
+        } else if (searchText === '' || searchText === null) {
+          safeClearHighlights()
+          clearLiveChunk()
         }
       },
-      [target, filter, isCaseSensitive, isWholeWord]
+      [target, filter, isCaseSensitive, isWholeWord, commitLiveChunk, clearLiveChunk]
     )
 
     const rafIdsRef = useRef<number[]>([])
+    const pendingSearchRafIdsRef = useRef<number[]>([])
 
-    const trackRaf = (id: number) => {
+    const trackRaf = useCallback((id: number) => {
       rafIdsRef.current.push(id)
-    }
+    }, [])
+
+    // Helper that schedules focus RAF and auto-removes id after execution, without being canceled by debounce lifecycle
+    const scheduleFocusRaf = useCallback(
+      (cb: () => void) => {
+        const id = requestAnimationFrame(() => {
+          rafIdsRef.current = rafIdsRef.current.filter((x) => x !== id)
+          cb()
+        })
+        trackRaf(id)
+        return id
+      },
+      [trackRaf]
+    )
+
+    const scheduleSearchRaf = useCallback(
+      (cb: () => void) => {
+        const id = requestAnimationFrame(() => {
+          pendingSearchRafIdsRef.current = pendingSearchRafIdsRef.current.filter((x) => x !== id)
+          rafIdsRef.current = rafIdsRef.current.filter((x) => x !== id)
+          cb()
+        })
+        pendingSearchRafIdsRef.current.push(id)
+        trackRaf(id)
+        return id
+      },
+      [trackRaf]
+    )
+
+    // Rendered-DOM generation invalidation: MutationObserver scoped to search target, precise lifecycle, cleanup on target change/unmount
+    // Invalidation marks the session dirty and increments generation; actual rescan is deferred until next navigation
+    // (same-chunk or cross-chunk) or explicit search, satisfying "must rescan before same-chunk navigation can continue"
+    // without polling or background timers. Streaming DOM changes are covered via observer batching.
+    useEffect(() => {
+      if (!target) return
+      const observer = new MutationObserver((mutations) => {
+        const searchText = searchInputRef.current?.value.trim() ?? ''
+        if (!searchText) return
+        if (searchCompletedRef.current === SearchCompletedState.NotSearched) {
+          return
+        }
+        // Ignore mutations whose target is inside the ContentSearch host UI,
+        // even when the observed searchTarget (Chat mainRef) contains that host.
+        const host = containerRef.current
+        let hasRelevant = false
+        for (const record of mutations) {
+          const t = record.target
+          if (host && (t === host || host.contains(t))) {
+            continue
+          }
+          if (record.type === 'childList' && host) {
+            const nodes: Node[] = [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)]
+            let isHostStructure = false
+            for (const n of nodes) {
+              if (n === host) {
+                isHostStructure = true
+                break
+              }
+            }
+            if (isHostStructure) continue
+          }
+          hasRelevant = true
+          break
+        }
+        if (!hasRelevant) return
+        domDirtyRef.current = true
+        domGenerationRef.current += 1
+        // Invalidate current highlights to avoid stale current-match pointing at detached ranges
+        safeClearHighlights()
+      })
+      observer.observe(target, { childList: true, subtree: true, characterData: true, attributes: true })
+      return () => observer.disconnect()
+    }, [target])
+
+    // Target identity invalidation: active session is a completed nonempty query
+    // regardless of match count. On target loss (null) synchronously clear stale result metadata;
+    // on non-null replacement rescan retained query even if prior count was zero.
+    // Also invalidates any pending search RAF that would otherwise commit a superseded target.
+    const prevTargetRef = useRef<HTMLElement | null>(null)
+    useEffect(() => {
+      const prev = prevTargetRef.current
+      if (prev !== target) {
+        const searchText = searchInputRef.current?.value.trim() ?? ''
+        const hadActive = searchCompletedRef.current === SearchCompletedState.Searched && searchText !== ''
+        const hadPendingSearch = pendingSearchRafIdsRef.current.length > 0
+        // Cancel pending search RAFs that would scan/commit superseded target; focus-only RAFs remain.
+        if (hadPendingSearch) {
+          const cancelled = new Set(pendingSearchRafIdsRef.current)
+          pendingSearchRafIdsRef.current.forEach((id) => cancelAnimationFrame(id))
+          pendingSearchRafIdsRef.current = []
+          rafIdsRef.current = rafIdsRef.current.filter((id) => !cancelled.has(id))
+        }
+        const shouldInvalidate = prev !== null || hadActive || hadPendingSearch
+        if (shouldInvalidate) {
+          safeClearHighlights()
+          // Synchronous release before any new allocation — bounds live Range handles
+          liveRangesRef.current = []
+          lastDomSnapshotRef.current = null
+          domDirtyRef.current = true
+          domGenerationRef.current += 1
+          setLiveVersion((v) => v + 1)
+          if (hadActive && target && searchText) {
+            const currentChunk = chunkIndexRef.current
+            const nextGlobal = globalIndexRef.current
+            const result = scanTargetForChunk(
+              target,
+              filterRef.current,
+              searchText,
+              isCaseSensitiveRef.current,
+              isWholeWordRef.current,
+              currentChunk
+            )
+            const effectiveTotal = result.totalCount
+            if (effectiveTotal === 0) {
+              commitLiveChunk([], 0, 0, -1)
+            } else {
+              let clampedGlobal = nextGlobal
+              if (clampedGlobal >= effectiveTotal) clampedGlobal = effectiveTotal - 1
+              const clampedChunk =
+                clampedGlobal === -1 ? currentChunk : Math.floor(clampedGlobal / CONTENT_SEARCH_CHUNK_SIZE)
+              if (clampedChunk !== currentChunk && clampedGlobal !== -1) {
+                liveRangesRef.current = []
+                safeClearHighlights()
+                const second = scanTargetForChunk(
+                  target,
+                  filterRef.current,
+                  searchText,
+                  isCaseSensitiveRef.current,
+                  isWholeWordRef.current,
+                  clampedChunk
+                )
+                commitLiveChunk(second.ranges, clampedChunk, second.totalCount, clampedGlobal)
+              } else {
+                commitLiveChunk(result.ranges, currentChunk, effectiveTotal, clampedGlobal)
+              }
+            }
+          } else if (hadPendingSearch && target && searchText) {
+            // Pending enable/initial RAF was superseded: rescan retained query on latest target.
+            // Synchronous scan ensures latest target ownership; mark session as Searched.
+            liveRangesRef.current = []
+            safeClearHighlights()
+            const result = scanTargetForChunk(
+              target,
+              filterRef.current,
+              searchText,
+              isCaseSensitiveRef.current,
+              isWholeWordRef.current,
+              0
+            )
+            commitLiveChunk(result.ranges, 0, result.totalCount, result.totalCount > 0 ? 0 : -1)
+            setSearchCompleted(SearchCompletedState.Searched)
+          } else {
+            // No active query to rescan or target lost — ensure bounded state cleared while retaining query text
+            setChunkIndex(0)
+            setTotalCount(0)
+            setGlobalIndex(-1)
+          }
+        }
+        prevTargetRef.current = target
+      }
+    }, [target, commitLiveChunk])
 
     const implementation = useMemo(
       () => ({
         disable: () => {
           safeClearHighlights()
-          setAllRanges([])
+          clearLiveChunk()
           setSearchCompleted(SearchCompletedState.NotSearched)
-          setCurrentIndex(-1)
           if (isParentOwned) {
-            // S3.5: Parent-owned unmount. Notify parent; parent will unmount this component.
             onClose?.()
           } else {
             setEnableContentSearch(false)
@@ -266,36 +538,245 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
           if (!isParentOwned) {
             setEnableContentSearch(true)
           }
-          // S3.5: Already mounted (parent-owned) or now enabled (legacy) — apply text/focus/search.
           if (searchInputRef.current) {
             const inputEl = searchInputRef.current
             if (nextText && nextText.trim().length > 0) {
               inputEl.value = nextText
-              trackRaf(
-                requestAnimationFrame(() => {
-                  inputEl.focus()
-                  inputEl.select()
-                  search(false)
-                })
-              )
+              scheduleSearchRaf(() => {
+                inputEl.focus()
+                inputEl.select()
+                search(false)
+              })
             } else {
-              trackRaf(
-                requestAnimationFrame(() => {
-                  inputEl.focus()
-                  inputEl.select()
-                })
-              )
+              scheduleFocusRaf(() => {
+                inputEl.focus()
+                inputEl.select()
+              })
             }
           }
         },
         searchNext: () => {
-          if (allRanges.length > 0) {
-            setCurrentIndex((prev) => (prev < allRanges.length - 1 ? prev + 1 : 0))
+          const searchText = searchInputRef.current?.value.trim() ?? ''
+          if (!searchText) return
+          const currentTotal = totalCountRef.current
+          const currentGlobal = globalIndexRef.current
+          const currentChunk = chunkIndexRef.current
+          if (currentTotal === 0) {
+            if (!target) return
+            const snapshot = captureDomSnapshot()
+            const last = lastDomSnapshotRef.current
+            const isDomStale =
+              domDirtyRef.current ||
+              !last ||
+              snapshot?.textLength !== last.textLength ||
+              snapshot?.childCount !== last.childCount
+            if (!isDomStale) return
+            liveRangesRef.current = []
+            safeClearHighlights()
+            const result = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, 0)
+            commitLiveChunk(result.ranges, 0, result.totalCount, result.totalCount > 0 ? 0 : -1)
+            domGenerationRef.current += 1
+            return
+          }
+          const nextGlobal = currentGlobal === -1 ? 0 : currentGlobal < currentTotal - 1 ? currentGlobal + 1 : 0
+          const targetChunk = Math.floor(nextGlobal / CONTENT_SEARCH_CHUNK_SIZE)
+          if (targetChunk !== currentChunk) {
+            if (!target) return
+            // Release old chunk before scanning target chunk
+            liveRangesRef.current = []
+            safeClearHighlights()
+            const result = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, targetChunk)
+            const effectiveTotal = result.totalCount
+            if (effectiveTotal === 0) {
+              commitLiveChunk([], 0, 0, -1)
+              return
+            }
+            const clampedNext = Math.min(nextGlobal, effectiveTotal - 1)
+            const clampedChunk = Math.floor(clampedNext / CONTENT_SEARCH_CHUNK_SIZE)
+            if (clampedChunk !== targetChunk) {
+              liveRangesRef.current = []
+              const second = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, clampedChunk)
+              commitLiveChunk(second.ranges, clampedChunk, second.totalCount, clampedNext)
+            } else {
+              commitLiveChunk(result.ranges, targetChunk, effectiveTotal, nextGlobal)
+            }
+            domGenerationRef.current += 1
+          } else {
+            if (!target) {
+              setGlobalIndex(nextGlobal)
+              return
+            }
+            // Same-chunk: rescan only when rendered DOM generation is stale to preserve bounded cost.
+            // Fast path (no DOM change) just advances index without materializing new Ranges.
+            const snapshot = captureDomSnapshot()
+            const last = lastDomSnapshotRef.current
+            const isDomStale =
+              domDirtyRef.current ||
+              !last ||
+              snapshot?.textLength !== last.textLength ||
+              snapshot?.childCount !== last.childCount
+            if (!isDomStale) {
+              setGlobalIndex(nextGlobal)
+              return
+            }
+            // Stale DOM: retain only primitive metadata, synchronously release old ownership/highlights before allocation
+            const prevTotal = currentTotal
+            const prevLen = liveRangesRef.current.length
+            void prevLen
+            liveRangesRef.current = []
+            safeClearHighlights()
+            if (typeof globalThis !== 'undefined') {
+              ;(globalThis as any).__CS_SAME_CHUNK_BEFORE_SCAN_LIVE = liveRangesRef.current.length
+              ;(globalThis as any).__CS_SAME_CHUNK_BEFORE_SCAN_TOTAL = prevTotal
+            }
+            const sameResult = scanTargetForChunk(
+              target,
+              filter,
+              searchText,
+              isCaseSensitive,
+              isWholeWord,
+              currentChunk
+            )
+            const effectiveTotal = sameResult.totalCount
+            if (effectiveTotal === 0) {
+              commitLiveChunk([], 0, 0, -1)
+              return
+            }
+            if (effectiveTotal !== prevTotal) {
+              const clampedNext = Math.min(nextGlobal, effectiveTotal - 1)
+              const clampedChunk = Math.floor(clampedNext / CONTENT_SEARCH_CHUNK_SIZE)
+              if (clampedChunk !== currentChunk) {
+                liveRangesRef.current = []
+                safeClearHighlights()
+                const second = scanTargetForChunk(
+                  target,
+                  filter,
+                  searchText,
+                  isCaseSensitive,
+                  isWholeWord,
+                  clampedChunk
+                )
+                commitLiveChunk(second.ranges, clampedChunk, second.totalCount, clampedNext)
+                domGenerationRef.current += 1
+                return
+              }
+              commitLiveChunk(sameResult.ranges, currentChunk, effectiveTotal, clampedNext)
+              domGenerationRef.current += 1
+              return
+            }
+            commitLiveChunk(sameResult.ranges, currentChunk, effectiveTotal, nextGlobal)
+            domGenerationRef.current += 1
           }
         },
         searchPrev: () => {
-          if (allRanges.length > 0) {
-            setCurrentIndex((prev) => (prev > 0 ? prev - 1 : allRanges.length - 1))
+          const searchText = searchInputRef.current?.value.trim() ?? ''
+          if (!searchText) return
+          const currentTotal = totalCountRef.current
+          const currentGlobal = globalIndexRef.current
+          const currentChunk = chunkIndexRef.current
+          if (currentTotal === 0) {
+            if (!target) return
+            const snapshot = captureDomSnapshot()
+            const last = lastDomSnapshotRef.current
+            const isDomStale =
+              domDirtyRef.current ||
+              !last ||
+              snapshot?.textLength !== last.textLength ||
+              snapshot?.childCount !== last.childCount
+            if (!isDomStale) return
+            liveRangesRef.current = []
+            safeClearHighlights()
+            const result = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, 0)
+            commitLiveChunk(result.ranges, 0, result.totalCount, result.totalCount > 0 ? result.totalCount - 1 : -1)
+            domGenerationRef.current += 1
+            return
+          }
+          const prevGlobal =
+            currentGlobal === -1 ? currentTotal - 1 : currentGlobal > 0 ? currentGlobal - 1 : currentTotal - 1
+          const targetChunk = Math.floor(prevGlobal / CONTENT_SEARCH_CHUNK_SIZE)
+          if (targetChunk !== currentChunk) {
+            if (!target) return
+            liveRangesRef.current = []
+            safeClearHighlights()
+            const result = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, targetChunk)
+            const effectiveTotal = result.totalCount
+            if (effectiveTotal === 0) {
+              commitLiveChunk([], 0, 0, -1)
+              return
+            }
+            const clampedPrev = Math.min(prevGlobal, effectiveTotal - 1)
+            const clampedChunk = Math.floor(clampedPrev / CONTENT_SEARCH_CHUNK_SIZE)
+            if (clampedChunk !== targetChunk) {
+              liveRangesRef.current = []
+              const second = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, clampedChunk)
+              commitLiveChunk(second.ranges, clampedChunk, second.totalCount, clampedPrev)
+            } else {
+              commitLiveChunk(result.ranges, targetChunk, effectiveTotal, prevGlobal)
+            }
+            domGenerationRef.current += 1
+          } else {
+            if (!target) {
+              setGlobalIndex(prevGlobal)
+              return
+            }
+            const snapshot = captureDomSnapshot()
+            const last = lastDomSnapshotRef.current
+            const isDomStale =
+              domDirtyRef.current ||
+              !last ||
+              snapshot?.textLength !== last.textLength ||
+              snapshot?.childCount !== last.childCount
+            if (!isDomStale) {
+              setGlobalIndex(prevGlobal)
+              return
+            }
+            // Same-chunk prev: retain only primitives, release synchronously before allocation
+            const prevTotalP = currentTotal
+            const prevLenP = liveRangesRef.current.length
+            void prevLenP
+            liveRangesRef.current = []
+            safeClearHighlights()
+            if (typeof globalThis !== 'undefined') {
+              ;(globalThis as any).__CS_SAME_CHUNK_BEFORE_SCAN_LIVE = liveRangesRef.current.length
+              ;(globalThis as any).__CS_SAME_CHUNK_BEFORE_SCAN_TOTAL = prevTotalP
+            }
+            const sameResult = scanTargetForChunk(
+              target,
+              filter,
+              searchText,
+              isCaseSensitive,
+              isWholeWord,
+              currentChunk
+            )
+            const effectiveTotal = sameResult.totalCount
+            if (effectiveTotal === 0) {
+              commitLiveChunk([], 0, 0, -1)
+              return
+            }
+            if (effectiveTotal !== prevTotalP) {
+              const clampedPrev = Math.min(prevGlobal, effectiveTotal - 1)
+              const clampedChunk = Math.floor(clampedPrev / CONTENT_SEARCH_CHUNK_SIZE)
+              if (clampedChunk !== currentChunk) {
+                liveRangesRef.current = []
+                safeClearHighlights()
+                const second = scanTargetForChunk(
+                  target,
+                  filter,
+                  searchText,
+                  isCaseSensitive,
+                  isWholeWord,
+                  clampedChunk
+                )
+                commitLiveChunk(second.ranges, clampedChunk, second.totalCount, clampedPrev)
+                domGenerationRef.current += 1
+                return
+              }
+              commitLiveChunk(sameResult.ranges, currentChunk, effectiveTotal, clampedPrev)
+              domGenerationRef.current += 1
+              return
+            }
+            commitLiveChunk(sameResult.ranges, currentChunk, effectiveTotal, prevGlobal)
+            domGenerationRef.current += 1
           }
         },
         resetSearchState: () => {
@@ -313,11 +794,26 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
           searchInputRef.current?.focus()
         }
       }),
-      [allRanges.length, locateByIndex, search, isParentOwned, onClose]
+      [
+        isParentOwned,
+        onClose,
+        target,
+        filter,
+        isCaseSensitive,
+        isWholeWord,
+        search,
+        locateByIndex,
+        commitLiveChunk,
+        clearLiveChunk,
+        scheduleFocusRaf,
+        scheduleSearchRaf,
+        captureDomSnapshot
+      ]
     )
 
     const _searchHandlerDebounce = useMemo(() => debounce(implementation.search, 300), [implementation.search])
 
+    // Debounce lifecycle: cancel only when debounce instance changes (search semantics change), not on focus RAFs
     useEffect(() => {
       return () => {
         _searchHandlerDebounce.cancel()
@@ -364,8 +860,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     )
 
     const searchInputFocus = useCallback(() => {
-      trackRaf(requestAnimationFrame(() => searchInputRef.current?.focus()))
-    }, [])
+      scheduleFocusRaf(() => searchInputRef.current?.focus())
+    }, [scheduleFocusRaf])
 
     const userOutlinedButtonOnClick = useCallback(() => {
       onIncludeUserChange?.(!includeUser)
@@ -374,47 +870,41 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
 
     useImperativeHandle(ref, () => implementation, [implementation])
 
-    // S3.5: Apply parent-provided initialText on mount (handles imperative invocation across mount boundary).
-    // For parent-owned mode the component is always visible; for legacy mode an initialText also enables the search.
     useEffect(() => {
       if (initialText && initialText.trim().length > 0 && searchInputRef.current) {
         if (!isParentOwned) setEnableContentSearch(true)
         const inputEl = searchInputRef.current
         inputEl.value = initialText
-        trackRaf(
-          requestAnimationFrame(() => {
-            // Guard unmounted search instance
-            if (!searchInputRef.current) return
-            inputEl.focus()
-            inputEl.select()
-            search(false)
-          })
-        )
+        scheduleSearchRaf(() => {
+          if (!searchInputRef.current) return
+          inputEl.focus()
+          inputEl.select()
+          search(false)
+        })
       } else if (isParentOwned) {
-        trackRaf(
-          requestAnimationFrame(() => {
-            searchInputRef.current?.focus()
-            searchInputRef.current?.select()
-          })
-        )
+        scheduleFocusRaf(() => {
+          searchInputRef.current?.focus()
+          searchInputRef.current?.select()
+        })
       }
       // Only on mount — initialText is the mount-time queue.
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
-    // S3.5: Clear highlights on unmount so no stale ranges survive the lazy window.
+    // Unmount-only cleanup for highlights and RAFs — separated from dependency-driven debounce cleanup to preserve focus after navigation
     useEffect(() => {
       return () => {
         safeClearHighlights()
-        _searchHandlerDebounce.cancel()
         rafIdsRef.current.forEach((id) => cancelAnimationFrame(id))
         rafIdsRef.current = []
+        pendingSearchRafIdsRef.current.forEach((id) => cancelAnimationFrame(id))
+        pendingSearchRafIdsRef.current = []
       }
-    }, [_searchHandlerDebounce])
+    }, [])
 
     useEffect(() => {
       locateByIndex()
-    }, [currentIndex, locateByIndex])
+    }, [globalIndex, chunkIndex, liveVersion, locateByIndex])
 
     useEffect(() => {
       if (enableContentSearch && searchInputRef.current?.value.trim()) {
@@ -450,6 +940,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
       <Container
         ref={containerRef}
         data-testid="content-search-host"
+        data-live-ranges={liveRangesRef.current.length}
+        data-dom-generation={domGenerationRef.current}
         style={isParentOwned ? undefined : enableContentSearch ? {} : { display: 'none' }}
         $overlayPosition={positionMode === 'absolute' ? 'absolute' : 'static'}>
         <div style={{ width: '100%' }}>
@@ -487,21 +979,21 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
             </InputWrapper>
             <Separator></Separator>
             <SearchResults>
-              {searchCompleted !== SearchCompletedState.NotSearched && allRanges.length > 0 ? (
+              {searchCompleted !== SearchCompletedState.NotSearched && totalCount > 0 ? (
                 <>
-                  <SearchResultCount>{currentIndex + 1}</SearchResultCount>
+                  <SearchResultCount>{globalIndex + 1}</SearchResultCount>
                   <SearchResultSeparator>/</SearchResultSeparator>
-                  <SearchResultTotalCount>{allRanges.length}</SearchResultTotalCount>
+                  <SearchResultTotalCount>{totalCount}</SearchResultTotalCount>
                 </>
               ) : (
                 <SearchResultsPlaceholder>0/0</SearchResultsPlaceholder>
               )}
             </SearchResults>
             <ToolBar>
-              <ActionIconButton onClick={prevButtonOnClick} disabled={allRanges.length === 0}>
+              <ActionIconButton onClick={prevButtonOnClick} disabled={totalCount === 0}>
                 <ChevronUp size={18} />
               </ActionIconButton>
-              <ActionIconButton onClick={nextButtonOnClick} disabled={allRanges.length === 0}>
+              <ActionIconButton onClick={nextButtonOnClick} disabled={totalCount === 0}>
                 <ChevronDown size={18} />
               </ActionIconButton>
               <ActionIconButton onClick={closeButtonOnClick}>
