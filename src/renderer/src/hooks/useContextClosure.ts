@@ -2,6 +2,7 @@ import { useTopicMessages } from '@renderer/hooks/useMessageOperations'
 import {
   bumpAndInvalidate,
   computeClosureFingerprint,
+  enforceContextClosureRetention,
   getClosureLoadGeneration,
   getFreshValidatedClosure,
   getGlobalBlockGeneration,
@@ -48,8 +49,17 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
     anchorRef.current = anchorGroupKey
   }, [topicId, anchorGroupKey])
 
+  // B-09: active-topic-only retention — on activation, atomically prune inactive closures/fingerprints/generations
+  useEffect(() => {
+    if (!topicId) return
+    enforceContextClosureRetention(topicId)
+  }, [topicId])
+
   // Load or reuse closure with full-closure freshness gate
   useEffect(() => {
+    if (topicId) {
+      enforceContextClosureRetention(topicId)
+    }
     if (!topicId || !anchorGroupKey) {
       setClosure(null)
       return

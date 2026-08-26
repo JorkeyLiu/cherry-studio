@@ -226,6 +226,37 @@ export function clearAllContextClosureCache(): void {
   // loadGenerations and globalBlockGeneration preserved for generation continuity; use resetAllClosureStateForTests to fully reset
 }
 
+/**
+ * B-09: Enforce active-topic-only retention for context-closure cache.
+ *
+ * On activation of a topic, atomically removes cached closures,
+ * fingerprints and cached generations for all other topics while
+ * preserving per-topic load generations and the global block generation.
+ * Does not invalidate/bump the active cache merely due to trimming;
+ * in-flight stale publication protection (generation/global checks) remains intact.
+ */
+export function enforceContextClosureRetention(activeTopicId: string): void {
+  if (!activeTopicId || typeof activeTopicId !== 'string') return
+  // Collect union of keys to ensure no orphan fingerprint/generation retained without closure
+  const toInspect = new Set<string>([
+    ...closureCache.keys(),
+    ...closureFingerprints.keys(),
+    ...cachedGenerations.keys()
+  ])
+  for (const id of toInspect) {
+    if (id !== activeTopicId) {
+      closureCache.delete(id)
+      closureFingerprints.delete(id)
+      cachedGenerations.delete(id)
+    }
+  }
+}
+
+/** Alias for symmetry with pruning terminology. */
+export const retainActiveContextClosure = enforceContextClosureRetention
+export const pruneInactiveContextClosures = enforceContextClosureRetention
+export const trimContextClosureCacheToActiveTopic = enforceContextClosureRetention
+
 export function resetAllClosureStateForTests(): void {
   closureCache.clear()
   closureFingerprints.clear()
