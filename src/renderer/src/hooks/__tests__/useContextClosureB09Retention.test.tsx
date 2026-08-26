@@ -31,7 +31,7 @@ const {
     dispatchMock: vi.fn(),
     getStateMock: vi.fn(),
     upsertManyBlocksMock: vi.fn((blocks: unknown) => ({ type: 'messageBlocks/upsertManyBlocks', payload: blocks })),
-    selectMessagesForTopicMock: vi.fn((state: unknown, topicId: string) => messagesForTopicMap.get(topicId) ?? []),
+    selectMessagesForTopicMock: vi.fn((_state: unknown, topicId: string) => messagesForTopicMap.get(topicId) ?? []),
     captureDeletionGenerationMock: vi.fn(() => 0),
     isDeletionStaleMock: vi.fn(() => false),
     topicMessagesMap,
