@@ -788,7 +788,12 @@ describe('SqliteMessageDataSource', () => {
       )
       const result = await ds.hardDeleteTopic('t-1')
       expect(api.hardDeleteTopic).toHaveBeenCalledOnce()
-      expect(mockDispatch).toHaveBeenCalledOnce()
+      // Intentional resident-registry deletion lifecycle dispatches + topic updatedAt dispatch
+      expect(mockDispatch).toHaveBeenCalledTimes(2)
+      const callTypes = mockDispatch.mock.calls.map((c: any[]) => c[0]?.type)
+      expect(callTypes).toEqual(
+        expect.arrayContaining(['residentRegistry/invalidateForDeletion', 'assistants/updateTopicUpdatedAt'])
+      )
       expect(result.affectedFileIds).toEqual(['f1'])
       expect(result.deletedTopicIds).toEqual(['t-1'])
     })

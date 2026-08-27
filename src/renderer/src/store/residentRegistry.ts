@@ -72,8 +72,9 @@ const residentRegistrySlice = createSlice({
         }
         return
       }
+      // Standalone segment path must never establish or preserve a joint-resident claim
+      // (LOCK-302). Only the same-generation staged joint publication may set residentTopic.
       entry.segments = true
-      entry.residentTopic = entry.chatData && entry.segments
     }
   },
   extraReducers: (builder) => {

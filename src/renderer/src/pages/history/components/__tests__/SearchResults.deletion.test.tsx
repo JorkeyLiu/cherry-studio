@@ -311,10 +311,19 @@ describe('SearchResults deletion during around-window fetch (focused)', () => {
     await waitFor(() => expect(fetchMessagesWindowMock).toHaveBeenCalledTimes(1))
 
     // Must not publish blocks/messages nor navigate for deleted topic
+    // Intentional resident-registry deletion lifecycle dispatches occur on hard deletion (invalidateForDeletion)
     expect(upsertManyBlocksMock).not.toHaveBeenCalled()
     expect(messagesReceivedMock).not.toHaveBeenCalled()
     expect(onMessageClick).not.toHaveBeenCalled()
-    expect(storeDispatchMock).not.toHaveBeenCalled()
+    // Stale discard must still hold for messages/blocks even though resident invalidation dispatches occurred
+    const nonResidentCalls = storeDispatchMock.mock.calls.filter(
+      ([a]: any) => a?.type !== 'residentRegistry/invalidateForDeletion' && a?.type !== 'residentRegistry/resetAll'
+    )
+    expect(nonResidentCalls.length).toBe(0)
+    const residentInvalidations = storeDispatchMock.mock.calls.filter(
+      ([a]: any) => a?.type === 'residentRegistry/invalidateForDeletion'
+    )
+    expect(residentInvalidations.length).toBeGreaterThanOrEqual(1)
   })
 
   it('preserves normal non-deleted around-window response: stages blocks/messages and navigates', async () => {

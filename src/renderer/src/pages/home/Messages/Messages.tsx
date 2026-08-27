@@ -1083,6 +1083,9 @@ const Messages = ({
     const topicGeneration = currentState.topicGeneration
     const topicIdAtStart = topic.id
     const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
+    const residentGenAtStart = (store.getState() as any)?.residentRegistry?.entries?.[topicIdAtStart]
+      ?.applicabilityGeneration as number | undefined
+    const capturedResidentGen = residentGenAtStart ?? 0
     viewportDispatch({ type: 'load/start', direction: 'older', token: loadToken })
 
     const container = scrollContainerRef.current
@@ -1123,7 +1126,7 @@ const Messages = ({
             dbService.fetchMessagesWindow(request)
           )
 
-          // stale discard — topic changed, generation advanced, or deleted during fetch
+          // stale discard — topic changed, generation advanced, or deleted during fetch, or resident generation advanced
           if (topic.id !== topicIdAtStart) {
             viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
             return
@@ -1133,6 +1136,12 @@ const Messages = ({
             return
           }
           if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) {
+            viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+            return
+          }
+          const currentResidentGen = (store.getState() as any)?.residentRegistry?.entries?.[topicIdAtStart]
+            ?.applicabilityGeneration as number | undefined
+          if ((currentResidentGen ?? 0) !== capturedResidentGen) {
             viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
             return
           }
@@ -1230,6 +1239,9 @@ const Messages = ({
     const topicGeneration = currentState.topicGeneration
     const topicIdAtStart = topic.id
     const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
+    const residentGenAtStart = (store.getState() as any)?.residentRegistry?.entries?.[topicIdAtStart]
+      ?.applicabilityGeneration as number | undefined
+    const capturedResidentGen = residentGenAtStart ?? 0
     viewportDispatch({ type: 'load/start', direction: 'newer', token: loadToken })
 
     const container = scrollContainerRef.current
@@ -1277,6 +1289,12 @@ const Messages = ({
             return
           }
           if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) {
+            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
+            return
+          }
+          const currentResidentGen = (store.getState() as any)?.residentRegistry?.entries?.[topicIdAtStart]
+            ?.applicabilityGeneration as number | undefined
+          if ((currentResidentGen ?? 0) !== capturedResidentGen) {
             viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
             return
           }

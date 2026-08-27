@@ -489,4 +489,52 @@ describe('resident lifecycle joint publication', () => {
     expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
     expect(mocks.listSegments).toHaveBeenCalledTimes(1)
   })
+
+  it('empty complete topic is valid resident cache hit (absent index vs empty array distinction)', async () => {
+    const { loadTopicMessagesThunk } = await import('../messageThunk')
+    // empty present index (present empty array) with resident true -> hit, no fetch
+    storeState.messages.messageIdsByTopic['t-empty'] = []
+    storeState.residentRegistry.entries['t-empty'] = {
+      chatData: true,
+      segments: true,
+      residentTopic: true,
+      applicabilityGeneration: 1
+    }
+    storeState.messages.currentTopicId = 't-empty'
+    const dispatch = vi.fn((action: any) => {
+      if (typeof action === 'function') return action(dispatch, () => storeState)
+      return action
+    })
+    const getState = () => storeState
+    mocks.fetchMessagesWindow.mockClear()
+    mocks.listSegments.mockClear()
+    await loadTopicMessagesThunk('t-empty')(dispatch, getState as any)
+    expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
+    expect(mocks.listSegments).not.toHaveBeenCalled()
+
+    // absent index (undefined) even with no resident -> miss (fetch)
+    delete storeState.messages.messageIdsByTopic['t-missing']
+    delete storeState.residentRegistry.entries['t-missing']
+    mocks.fetchMessagesWindow.mockClear()
+    mocks.listSegments.mockClear()
+    await loadTopicMessagesThunk('t-missing')(dispatch, () => ({
+      ...storeState,
+      messages: { ...storeState.messages, messageIdsByTopic: { ...storeState.messages.messageIdsByTopic } }
+    }))
+    // missing index falls through to fetch regardless of resident
+    expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
+
+    // present empty array but not resident -> miss (must refetch)
+    storeState.messages.messageIdsByTopic['t-empty-not-resident'] = []
+    storeState.residentRegistry.entries['t-empty-not-resident'] = {
+      chatData: false,
+      segments: false,
+      residentTopic: false,
+      applicabilityGeneration: 1
+    }
+    mocks.fetchMessagesWindow.mockClear()
+    mocks.listSegments.mockClear()
+    await loadTopicMessagesThunk('t-empty-not-resident')(dispatch, getState as any)
+    expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
+  })
 })

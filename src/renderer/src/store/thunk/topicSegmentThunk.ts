@@ -32,12 +32,23 @@ export const syncSegmentsAfterMessageDeletion = async (
   }
 }
 
+let loadTopicSegmentsSeq = 0
+const latestSegmentLoadByTopic = new Map<string, number>()
+
 export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch: AppDispatch; state: RootState }>(
   'topicSegments/loadForTopic',
-  async (topicId: string, { dispatch }) => {
+  async (topicId: string, { dispatch, getState }) => {
     const capturedDeletionGeneration = captureDeletionGeneration(topicId)
+    const capturedApplicabilityGeneration: number =
+      (getState() as any)?.residentRegistry?.entries?.[topicId]?.applicabilityGeneration ?? 0
+    const requestSeq = ++loadTopicSegmentsSeq
+    latestSegmentLoadByTopic.set(topicId, requestSeq)
     const segmentsRaw = await dbService.listSegments(topicId)
     if (isDeletionStale(topicId, capturedDeletionGeneration)) return
+    if (latestSegmentLoadByTopic.get(topicId) !== requestSeq) return
+    const currentApplicabilityGeneration: number =
+      (getState() as any)?.residentRegistry?.entries?.[topicId]?.applicabilityGeneration ?? 0
+    if (currentApplicabilityGeneration !== capturedApplicabilityGeneration) return
     const segments = segmentsRaw.map((segment) => ({
       ...segment,
       name: segment.name ?? '',
@@ -45,7 +56,16 @@ export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch:
       createdAt: segment.createdAt ?? new Date().toISOString(),
       updatedAt: segment.updatedAt ?? new Date().toISOString()
     }))
-    // Atomic replacement — no eager clear before paired payload is valid
+    // Just-before-publication stale check — ensures no newer generation slipped in
+    if (isDeletionStale(topicId, capturedDeletionGeneration)) return
+    if (latestSegmentLoadByTopic.get(topicId) !== requestSeq) return
+    if (
+      ((getState() as any)?.residentRegistry?.entries?.[topicId]?.applicabilityGeneration ?? 0) !==
+      capturedApplicabilityGeneration
+    )
+      return
+    // Atomic replacement — no eager clear before paired payload is valid.
+    // Never marks joint residency alone (LOCK-302); only updates segment projection.
     dispatch(replaceSegmentsForTopic({ topicId, segments }))
     dispatch(markSegmentsLoaded(topicId))
   }

@@ -82,6 +82,7 @@ import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '../newMessage'
 import { bumpGeneration, publishResidentComplete } from '../residentRegistry'
+import { replaceSegmentsForTopic } from '../topicSegment'
 // import {
 //   bulkAddBlocksV2,
 //   deleteMessageFromDBV2,
@@ -1728,9 +1729,12 @@ export const loadTopicMessagesThunk =
     dispatch(newMessagesActions.setCurrentTopicId(topicId))
 
     // Cache-hit requires resident completeness for same generation including empty markers.
-    // Any component absence or generation mismatch is a miss.
+    // Any component absence or generation mismatch is a miss. Registry presence/residency,
+    // not messageIds.length, decides eligibility — empty complete topics are valid hits.
+    // Distinction between absent index (miss) and present empty array (hit if resident) is preserved.
     const cachedIds = state.messages.messageIdsByTopic[topicId]
-    if (!forceReload && cachedIds && cachedIds.length > 0) {
+    const hasCachedIndex = cachedIds !== undefined
+    if (!forceReload && hasCachedIndex) {
       const deletionGen = getDeletionGeneration(topicId)
       if (deletionGen !== 0) {
         // fall through to fetch — do not early return on potentially stale cache
@@ -1738,29 +1742,34 @@ export const loadTopicMessagesThunk =
         const registry = (getState() as any).residentRegistry
         if (!registry) {
           // Test environment without registry slice (legacy tests) — preserve legacy hit semantics
-          const cachedState = getState()
-          const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
-            asst.topics.some((t) => t.id === topicId)
-          )
-          if (cachedTopicOwner) {
-            await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+          // Legacy: only non-empty cached topics are hits; empty falls through to fetch
+          if (cachedIds.length > 0) {
+            const cachedState = getState()
+            const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
+              asst.topics.some((t) => t.id === topicId)
+            )
+            if (cachedTopicOwner) {
+              await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+            }
+            return
           }
-          return
-        }
-        const residentEntry = registry.entries?.[topicId]
-        const isResidentHit =
-          !!residentEntry && residentEntry.residentTopic && residentEntry.chatData && residentEntry.segments
-        if (isResidentHit) {
-          const cachedState = getState()
-          const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
-            asst.topics.some((t) => t.id === topicId)
-          )
-          if (cachedTopicOwner) {
-            await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+          // empty legacy -> miss, fall through
+        } else {
+          const residentEntry = registry.entries?.[topicId]
+          const isResidentHit =
+            !!residentEntry && residentEntry.residentTopic && residentEntry.chatData && residentEntry.segments
+          if (isResidentHit) {
+            const cachedState = getState()
+            const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
+              asst.topics.some((t) => t.id === topicId)
+            )
+            if (cachedTopicOwner) {
+              await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+            }
+            return
           }
-          return
+          // miss -> fall through to staged fetch (including absent vs empty distinction preserved)
         }
-        // miss -> fall through to staged fetch
       }
     }
 
@@ -1864,6 +1873,16 @@ export const loadTopicMessagesThunk =
             segments
           })
         )
+        // Preserve existing topicSegments/ StoreSync projection behavior when joint publication
+        // updates segments, without broadcasting/syncing resident registry lifecycle state itself.
+        // The joint publication atomically updates local segments via its extraReducer; a separate
+        // syncable topicSegments/ action carries the same segments across windows via StoreSync.
+        // Local duplicate is idempotent (same segments).
+        try {
+          dispatch(replaceSegmentsForTopic({ topicId, segments }))
+        } catch {
+          // best-effort StoreSync projection; never break joint publication
+        }
       } else {
         // Legacy fallback for test environments without registry slice — preserve old two-dispatch path
         const blocks = response!.blocks as unknown as MessageBlock[]

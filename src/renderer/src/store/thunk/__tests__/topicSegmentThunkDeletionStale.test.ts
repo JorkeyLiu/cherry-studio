@@ -149,4 +149,144 @@ describe('loadTopicSegmentsThunk stale discard', () => {
     const replaceCalls = dispatch.mock.calls.filter((c: any[]) => c[0]?.type === replaceSegmentsForTopic.type)
     expect(replaceCalls.length).toBe(1)
   })
+
+  it('concurrent standalone segment loads: only latest publishes, stale token discarded before publication (just-before-publication check)', async () => {
+    const topicId = 't-concurrent-segments'
+    const segmentsA = [
+      {
+        id: 'seg-a',
+        topicId,
+        name: 'A',
+        messageIds: [],
+        color: undefined,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      }
+    ]
+    const segmentsB = [
+      {
+        id: 'seg-b',
+        topicId,
+        name: 'B',
+        messageIds: [],
+        color: undefined,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      }
+    ]
+    let resolveA: (v: typeof segmentsA) => void
+    let resolveB: (v: typeof segmentsB) => void
+    const pendingA = new Promise<typeof segmentsA>((res) => {
+      resolveA = res
+    })
+    const pendingB = new Promise<typeof segmentsB>((res) => {
+      resolveB = res
+    })
+    mockListSegments.mockReturnValueOnce(pendingA).mockReturnValueOnce(pendingB)
+
+    const { loadTopicSegmentsThunk } = await import('../topicSegmentThunk')
+    const dispatchA = vi.fn()
+    const dispatchB = vi.fn()
+    // Both start with same generation and deletion gen 0
+    const pA = (loadTopicSegmentsThunk as any)(topicId)(
+      dispatchA,
+      () => ({ residentRegistry: { entries: {} } }) as any,
+      undefined
+    )
+    const pB = (loadTopicSegmentsThunk as any)(topicId)(
+      dispatchB,
+      () => ({ residentRegistry: { entries: {} } }) as any,
+      undefined
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // Resolve B first (newer token) — should publish
+    resolveB!(segmentsB as any)
+    await pB
+    const replaceB = dispatchB.mock.calls.filter((c: any[]) => c[0]?.type === replaceSegmentsForTopic.type)
+    expect(replaceB.length).toBe(1)
+    expect(replaceB[0][0].payload.segments[0].id).toBe('seg-b')
+
+    // Now resolve A (stale token) — must be discarded just-before-publication, even though deletionGen unchanged
+    resolveA!(segmentsA as any)
+    await pA
+    const replaceA = dispatchA.mock.calls.filter((c: any[]) => c[0]?.type === replaceSegmentsForTopic.type)
+    expect(replaceA.length).toBe(0)
+  })
+
+  it('standalone segment load does not establish or preserve false joint residency (LOCK-302)', async () => {
+    const topicId = 't-residency-standalone'
+    const segments = [
+      {
+        id: 'seg-standalone',
+        topicId,
+        name: 'Solo',
+        messageIds: [],
+        color: undefined,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      }
+    ]
+    mockListSegments.mockResolvedValue(segments as any)
+    const { default: residentRegistryReducer, bumpGeneration } = await import('@renderer/store/residentRegistry')
+    const { configureStore } = await import('@reduxjs/toolkit')
+    const store = configureStore({ reducer: { residentRegistry: residentRegistryReducer } })
+    // bump to gen 1 with chatData false
+    store.dispatch(bumpGeneration(topicId))
+    const genBefore = (store.getState() as any).residentRegistry.entries[topicId].applicabilityGeneration
+    expect(genBefore).toBe(1)
+    expect((store.getState() as any).residentRegistry.entries[topicId].residentTopic).toBe(false)
+
+    const { loadTopicSegmentsThunk } = await import('../topicSegmentThunk')
+    // standalone load at same generation should set segments true but NOT resident
+    await (loadTopicSegmentsThunk as any)(topicId)(store.dispatch as any, store.getState as any, undefined)
+    const entry = (store.getState() as any).residentRegistry.entries[topicId]
+    expect(entry.segments).toBe(true)
+    expect(entry.residentTopic).toBe(false)
+    expect(entry.chatData).toBe(false)
+    expect(entry.applicabilityGeneration).toBe(1)
+  })
+
+  it('standalone segment load discards when resident applicabilityGeneration advances before publication', async () => {
+    const topicId = 't-gen-stale-segment'
+    const segments = [
+      {
+        id: 'seg-gen',
+        topicId,
+        name: 'Gen',
+        messageIds: [],
+        color: undefined,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      }
+    ]
+    let resolveList: (v: typeof segments) => void
+    const pending = new Promise<typeof segments>((res) => {
+      resolveList = res
+    })
+    mockListSegments.mockReturnValue(pending as any)
+
+    const { default: residentRegistryReducer, bumpGeneration } = await import('@renderer/store/residentRegistry')
+    const { configureStore } = await import('@reduxjs/toolkit')
+    const store = configureStore({ reducer: { residentRegistry: residentRegistryReducer } })
+    store.dispatch(bumpGeneration(topicId))
+    const capturedGen = (store.getState() as any).residentRegistry.entries[topicId].applicabilityGeneration
+    expect(capturedGen).toBe(1)
+
+    const { loadTopicSegmentsThunk } = await import('../topicSegmentThunk')
+    // Use dynamic getState that reflects store after bump
+    const dispatchSpy = vi.fn((a: any) => store.dispatch(a))
+    const getStateSpy = () => store.getState() as any
+    const promise = (loadTopicSegmentsThunk as any)(topicId)(dispatchSpy as any, getStateSpy as any, undefined)
+    await Promise.resolve()
+    // bump generation before resolve (simulating concurrent joint bump)
+    store.dispatch(bumpGeneration(topicId))
+    expect((store.getState() as any).residentRegistry.entries[topicId].applicabilityGeneration).toBe(2)
+    resolveList!(segments as any)
+    await promise
+    // Should be discarded due to generation mismatch — no replace dispatched beyond the spy's resident bumps
+    const replaceCalls = dispatchSpy.mock.calls.filter((c: any[]) => c[0]?.type === replaceSegmentsForTopic.type)
+    expect(replaceCalls.length).toBe(0)
+  })
 })
