@@ -34,6 +34,36 @@ export interface ScrollSnapshotIndexEntry {
 // keys must not recreate snapshots after authoritative hard delete.
 const invalidatedTopicScrollKeys = new Set<string>()
 
+// ---------------------------------------------------------------------------
+// B-07 local scalar diagnostics — renderer-local, no content/keys retained
+// ---------------------------------------------------------------------------
+
+export interface ScrollSnapshotEnforcementDiagnostics {
+  /** Raw persisted index-array length before repair/sync/canonicalization */
+  indexCountBefore: number
+  /** Post-enforcement index count (after TTL/LRU) */
+  indexCountAfter: number
+  /** Count of expired entries successfully removed (Keyv remove returned !== false and did not throw) */
+  expiredRemoved: number
+  /** Count of LRU entries successfully evicted (Keyv remove returned !== false and did not throw) */
+  lruEvicted: number
+  /** Whether index was missing or malformed (required rebuild/repair) */
+  didRebuild: boolean
+}
+
+export interface ScrollSnapshotDiagnostics {
+  /** Current valid index count (filtered) */
+  indexCount: number
+  /** Calibration max count (256) */
+  maxCount: number
+  /** Calibration TTL ms */
+  ttlMs: number
+  /** Last enforcement outcome, null until first enforcement */
+  lastEnforcement: ScrollSnapshotEnforcementDiagnostics | null
+}
+
+let lastEnforcement: ScrollSnapshotEnforcementDiagnostics | null = null
+
 function getKeyv(): any {
   if (typeof window === 'undefined') return undefined
   return (window as unknown as { keyv?: any }).keyv
@@ -187,6 +217,16 @@ export function enforceScrollSnapshotBounds(now = Date.now()): void {
   const keyv = getKeyv()
   if (!keyv || typeof keyv.remove !== 'function') return
 
+  // Raw pre-enforcement count captured before repair/sync/canonicalization (no durable format change)
+  let rawBefore = 0
+  try {
+    const raw = loadIndexRaw()
+    if (Array.isArray(raw)) rawBefore = raw.length
+    else rawBefore = 0
+  } catch {
+    rawBefore = 0
+  }
+
   const meta = getScrollSnapshotIndexWithRepairMeta()
   let index = meta.index
   const hadMalformed = meta.hadMalformed
@@ -258,16 +298,20 @@ export function enforceScrollSnapshotBounds(now = Date.now()): void {
     }
   }
 
+  // Count only successful Keyv removals (false return or throw = not removed)
+  let expiredRemoved = 0
   for (const e of expired) {
     try {
-      keyv.remove(e.key)
+      const res = keyv.remove(e.key)
+      if (res !== false) expiredRemoved += 1
     } catch {
-      // best-effort
+      // best-effort: not counted
     }
   }
 
   let working = remaining
   let evicted = false
+  let lruEvicted = 0
 
   if (working.length > SCROLL_SNAPSHOT_MAX_COUNT) {
     // Deterministic LRU: sort by lastAccess asc, then key asc (locale-independent)
@@ -280,13 +324,27 @@ export function enforceScrollSnapshotBounds(now = Date.now()): void {
     const toKeep = working.slice(toEvictCount)
     for (const e of toEvict) {
       try {
-        keyv.remove(e.key)
+        const res = keyv.remove(e.key)
+        if (res !== false) lruEvicted += 1
       } catch {
-        // best-effort
+        // best-effort: not counted
       }
     }
     working = toKeep
     evicted = true
+  }
+
+  // Record local scalar diagnostics before persistence decision (raw/success semantics)
+  {
+    const didRebuild = hadMalformed || indexWasNull
+    const indexCountAfter = working.length
+    lastEnforcement = {
+      indexCountBefore: rawBefore,
+      indexCountAfter,
+      expiredRemoved,
+      lruEvicted,
+      didRebuild
+    }
   }
 
   // Determine if we need to persist: any structural change
@@ -530,6 +588,35 @@ export function initScrollSnapshotCache(now = Date.now()): void {
   }
 }
 
+/**
+ * B-07 local scalar diagnostics getters — renderer-local, no sensitive values
+ */
+
+export function getScrollSnapshotDiagnostics(): ScrollSnapshotDiagnostics {
+  let indexCount = 0
+  try {
+    const idx = getScrollSnapshotIndex()
+    if (Array.isArray(idx)) indexCount = idx.length
+    else indexCount = 0
+  } catch {
+    indexCount = 0
+  }
+  return {
+    indexCount,
+    maxCount: SCROLL_SNAPSHOT_MAX_COUNT,
+    ttlMs: SCROLL_SNAPSHOT_TTL_MS,
+    lastEnforcement: lastEnforcement ? { ...lastEnforcement } : null
+  }
+}
+
+export function getScrollSnapshotEnforcementDiagnostics(): ScrollSnapshotEnforcementDiagnostics | null {
+  return lastEnforcement ? { ...lastEnforcement } : null
+}
+
+export function resetScrollSnapshotDiagnosticsForTests(): void {
+  lastEnforcement = null
+}
+
 /** Test helpers */
 
 export function resetScrollSnapshotCacheForTests(): void {
@@ -540,6 +627,8 @@ export function resetScrollSnapshotCacheForTests(): void {
     } catch {}
   }
   invalidatedTopicScrollKeys.clear()
+  // Integrate diagnostics reset for test isolation (does not affect Keyv format)
+  lastEnforcement = null
 }
 
 export function resetInvalidatedScrollSnapshotsForTests(): void {

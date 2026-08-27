@@ -7,6 +7,16 @@ import React, { useCallback, useEffect, useImperativeHandle, useMemo, useRef, us
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
+import {
+  createContentSearchSessionOwnerId,
+  incrementRescanCount,
+  recordContentSearchClear,
+  recordContentSearchCommit,
+  recordContentSearchInvalidation,
+  releaseContentSearchSessionIfOwned,
+  setContentSearchDomGeneration
+} from './contentSearchDiagnostics'
+
 interface Props {
   children?: React.ReactNode
   searchTarget: React.RefObject<React.ReactNode> | React.RefObject<HTMLElement> | HTMLElement
@@ -211,6 +221,12 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     const domGenerationRef = useRef(0)
     const domDirtyRef = useRef(false)
     const lastDomSnapshotRef = useRef<{ textLength: number; childCount: number } | null>(null)
+    // B-08 owner protocol: numeric owner created once per instance; commit claims only active/newer owner; no mount-time claim
+    // Lazy initialization avoids allocating an ID on every render (preserves sessionCounter monotonic budget)
+    const ownerIdRef = useRef<number>(null as unknown as number)
+    if ((ownerIdRef.current as unknown) === null) {
+      ownerIdRef.current = createContentSearchSessionOwnerId()
+    }
 
     // Refs mirroring latest values for MutationObserver without re-creating observer on index changes
     const chunkIndexRef = useRef(chunkIndex)
@@ -290,6 +306,14 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
         // snapshot rendered DOM generation after successful commit
         lastDomSnapshotRef.current = captureDomSnapshot()
         domDirtyRef.current = false
+        // B-08 diagnostics: owner-aware commit only after successful installation, preserves release-before-allocation
+        recordContentSearchCommit(
+          ownerIdRef.current,
+          ranges.length,
+          nextChunkIndex,
+          nextTotal,
+          domGenerationRef.current
+        )
       },
       [captureDomSnapshot]
     )
@@ -303,6 +327,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
       setLiveVersion((v) => v + 1)
       lastDomSnapshotRef.current = captureDomSnapshot()
       domDirtyRef.current = false
+      // B-08 diagnostics: active-owner-only clear, never claims ownership
+      recordContentSearchClear(ownerIdRef.current, domGenerationRef.current)
     }, [captureDomSnapshot])
 
     const resetSearch = useCallback(() => {
@@ -347,6 +373,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
           const result = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, 0)
           commitLiveChunk(result.ranges, 0, result.totalCount, jump && result.totalCount > 0 ? 0 : -1)
           domGenerationRef.current += 1
+          // B-08 diagnostics: sync generation through committed/active owner only after successful commit
+          setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
         } else if (searchText === '' || searchText === null) {
           safeClearHighlights()
           clearLiveChunk()
@@ -427,6 +455,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
         if (!hasRelevant) return
         domDirtyRef.current = true
         domGenerationRef.current += 1
+        // B-08 diagnostics: owner-aware invalidation on relevant DOM mutation
+        recordContentSearchInvalidation(ownerIdRef.current, domGenerationRef.current)
         // Invalidate current highlights to avoid stale current-match pointing at detached ranges
         safeClearHighlights()
       })
@@ -460,6 +490,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
           lastDomSnapshotRef.current = null
           domDirtyRef.current = true
           domGenerationRef.current += 1
+          // B-08 diagnostics: owner-aware invalidation on target identity change
+          recordContentSearchInvalidation(ownerIdRef.current, domGenerationRef.current)
           setLiveVersion((v) => v + 1)
           if (hadActive && target && searchText) {
             const currentChunk = chunkIndexRef.current
@@ -496,6 +528,7 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
                 commitLiveChunk(result.ranges, currentChunk, effectiveTotal, clampedGlobal)
               }
             }
+            incrementRescanCount(ownerIdRef.current)
           } else if (hadPendingSearch && target && searchText) {
             // Pending enable/initial RAF was superseded: rescan retained query on latest target.
             // Synchronous scan ensures latest target ownership; mark session as Searched.
@@ -511,11 +544,14 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
             )
             commitLiveChunk(result.ranges, 0, result.totalCount, result.totalCount > 0 ? 0 : -1)
             setSearchCompleted(SearchCompletedState.Searched)
+            incrementRescanCount(ownerIdRef.current)
           } else {
             // No active query to rescan or target lost — ensure bounded state cleared while retaining query text
             setChunkIndex(0)
             setTotalCount(0)
             setGlobalIndex(-1)
+            // B-08 diagnostics: active-owner-only clear for target loss without active query
+            recordContentSearchClear(ownerIdRef.current, domGenerationRef.current)
           }
         }
         prevTargetRef.current = target
@@ -576,6 +612,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
             const result = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, 0)
             commitLiveChunk(result.ranges, 0, result.totalCount, result.totalCount > 0 ? 0 : -1)
             domGenerationRef.current += 1
+            setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+            incrementRescanCount(ownerIdRef.current)
             return
           }
           const nextGlobal = currentGlobal === -1 ? 0 : currentGlobal < currentTotal - 1 ? currentGlobal + 1 : 0
@@ -589,6 +627,9 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
             const effectiveTotal = result.totalCount
             if (effectiveTotal === 0) {
               commitLiveChunk([], 0, 0, -1)
+              domGenerationRef.current += 1
+              setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+              incrementRescanCount(ownerIdRef.current)
               return
             }
             const clampedNext = Math.min(nextGlobal, effectiveTotal - 1)
@@ -601,6 +642,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
               commitLiveChunk(result.ranges, targetChunk, effectiveTotal, nextGlobal)
             }
             domGenerationRef.current += 1
+            setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+            incrementRescanCount(ownerIdRef.current)
           } else {
             if (!target) {
               setGlobalIndex(nextGlobal)
@@ -640,6 +683,9 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
             const effectiveTotal = sameResult.totalCount
             if (effectiveTotal === 0) {
               commitLiveChunk([], 0, 0, -1)
+              domGenerationRef.current += 1
+              setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+              incrementRescanCount(ownerIdRef.current)
               return
             }
             if (effectiveTotal !== prevTotal) {
@@ -658,14 +704,20 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
                 )
                 commitLiveChunk(second.ranges, clampedChunk, second.totalCount, clampedNext)
                 domGenerationRef.current += 1
+                setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+                incrementRescanCount(ownerIdRef.current)
                 return
               }
               commitLiveChunk(sameResult.ranges, currentChunk, effectiveTotal, clampedNext)
               domGenerationRef.current += 1
+              setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+              incrementRescanCount(ownerIdRef.current)
               return
             }
             commitLiveChunk(sameResult.ranges, currentChunk, effectiveTotal, nextGlobal)
             domGenerationRef.current += 1
+            setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+            incrementRescanCount(ownerIdRef.current)
           }
         },
         searchPrev: () => {
@@ -689,6 +741,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
             const result = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, 0)
             commitLiveChunk(result.ranges, 0, result.totalCount, result.totalCount > 0 ? result.totalCount - 1 : -1)
             domGenerationRef.current += 1
+            setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+            incrementRescanCount(ownerIdRef.current)
             return
           }
           const prevGlobal =
@@ -702,6 +756,9 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
             const effectiveTotal = result.totalCount
             if (effectiveTotal === 0) {
               commitLiveChunk([], 0, 0, -1)
+              domGenerationRef.current += 1
+              setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+              incrementRescanCount(ownerIdRef.current)
               return
             }
             const clampedPrev = Math.min(prevGlobal, effectiveTotal - 1)
@@ -714,6 +771,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
               commitLiveChunk(result.ranges, targetChunk, effectiveTotal, prevGlobal)
             }
             domGenerationRef.current += 1
+            setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+            incrementRescanCount(ownerIdRef.current)
           } else {
             if (!target) {
               setGlobalIndex(prevGlobal)
@@ -751,6 +810,9 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
             const effectiveTotal = sameResult.totalCount
             if (effectiveTotal === 0) {
               commitLiveChunk([], 0, 0, -1)
+              domGenerationRef.current += 1
+              setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+              incrementRescanCount(ownerIdRef.current)
               return
             }
             if (effectiveTotal !== prevTotalP) {
@@ -769,14 +831,20 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
                 )
                 commitLiveChunk(second.ranges, clampedChunk, second.totalCount, clampedPrev)
                 domGenerationRef.current += 1
+                setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+                incrementRescanCount(ownerIdRef.current)
                 return
               }
               commitLiveChunk(sameResult.ranges, currentChunk, effectiveTotal, clampedPrev)
               domGenerationRef.current += 1
+              setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+              incrementRescanCount(ownerIdRef.current)
               return
             }
             commitLiveChunk(sameResult.ranges, currentChunk, effectiveTotal, prevGlobal)
             domGenerationRef.current += 1
+            setContentSearchDomGeneration(ownerIdRef.current, domGenerationRef.current)
+            incrementRescanCount(ownerIdRef.current)
           }
         },
         resetSearchState: () => {
@@ -892,6 +960,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     }, [])
 
     // Unmount-only cleanup for highlights and RAFs — separated from dependency-driven debounce cleanup to preserve focus after navigation
+    // B-08 owner protocol: capture stable owner ID and release only if currently owning diagnostic snapshot
+    const ownerIdAtUnmountRef = useRef(ownerIdRef.current)
     useEffect(() => {
       return () => {
         safeClearHighlights()
@@ -899,6 +969,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
         rafIdsRef.current = []
         pendingSearchRafIdsRef.current.forEach((id) => cancelAnimationFrame(id))
         pendingSearchRafIdsRef.current = []
+        // B-08 diagnostics: release only if this instance owns the active snapshot
+        releaseContentSearchSessionIfOwned(ownerIdAtUnmountRef.current)
       }
     }, [])
 

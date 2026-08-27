@@ -141,6 +141,10 @@ const closureFingerprints = new Map<string, string>()
 // Generation snapshot stored at cache publication time (full-closure freshness, covers outside-viewport same-length mutations)
 const cachedGenerations = new Map<string, number>()
 // Global epoch for block mutations: advances even when no cache entry exists (covers uncached in-flight fetches)
+// B-09 local diagnostics: bounded scalar hit/miss counters (renderer-local, no content retention)
+let closureCacheHitCount = 0
+let closureCacheMissCount = 0
+
 let globalBlockGeneration = 0
 
 /**
@@ -259,6 +263,17 @@ export function resetAllClosureStateForTests(): void {
   loadGenerations.clear()
   globalLoadSeq = 0
   globalBlockGeneration = 0
+  closureCacheHitCount = 0
+  closureCacheMissCount = 0
+}
+
+/**
+ * B-09 local diagnostics: resettable hit/miss counters without clearing cache.
+ * Test-safe, local-only, no persistence or IPC.
+ */
+export function resetContextClosureDiagnosticsForTests(): void {
+  closureCacheHitCount = 0
+  closureCacheMissCount = 0
 }
 
 /**
@@ -315,6 +330,8 @@ export function nextGlobalLoadSeq(): number {
  * empty, or freshness cannot be proven (generation mismatch or fingerprint mismatch).
  * Callers must fallback to viewport when null.
  *
+ * B-09 local diagnostics: increments hit/miss counters (bounded scalars, no content).
+ *
  * @param topicId current topic
  * @param anchorGroupKey current renderer anchor (null => null)
  * @param currentFingerprint optional current viewport fingerprint for same-length visible mutation detection; generation alone covers outside-viewport
@@ -324,17 +341,30 @@ export function getFreshValidatedClosure(
   anchorGroupKey: string | null,
   currentFingerprint?: string | null
 ): FetchContextClosureResponse | null {
-  if (!anchorGroupKey) return null
+  if (!anchorGroupKey) {
+    closureCacheMissCount += 1
+    return null
+  }
   const cached = closureCache.get(topicId) ?? null
-  if (!cached) return null
-  if (!isValidContextClosureResponse({ topicId, anchorGroupKey }, cached)) return null
+  if (!cached) {
+    closureCacheMissCount += 1
+    return null
+  }
+  if (!isValidContextClosureResponse({ topicId, anchorGroupKey }, cached)) {
+    closureCacheMissCount += 1
+    return null
+  }
   // Full-closure freshness: generation must match snapshot at cache time
   const curGen = loadGenerations.get(topicId) ?? 0
   const storedGen = cachedGenerations.get(topicId)
   if (storedGen !== undefined) {
-    if (storedGen !== curGen) return null
+    if (storedGen !== curGen) {
+      closureCacheMissCount += 1
+      return null
+    }
   } else if (curGen !== 0) {
     // No snapshot but generation advanced => cannot prove freshness
+    closureCacheMissCount += 1
     return null
   }
   // Viewport fingerprint freshness (same-length visible mutations)
@@ -348,9 +378,40 @@ export function getFreshValidatedClosure(
       storedFp ?? undefined
     )
   ) {
+    closureCacheMissCount += 1
     return null
   }
+  closureCacheHitCount += 1
   return cached
+}
+
+/**
+ * B-09 local diagnostics snapshot: bounded scalar counters and retained count.
+ * Local-only, no message content, paths, credentials, or sizes.
+ */
+export interface ContextClosureDiagnostics {
+  /** Bounded scalar: cache hits since last reset */
+  hitCount: number
+  /** Bounded scalar: cache misses since last reset */
+  missCount: number
+  /** Total accesses (hit + miss) */
+  totalAccessCount: number
+  /** Current retained topic count (active-topic-only retention) */
+  retainedTopicCount: number
+  /** Calibration max retained topics (B-09 active-topic-only) */
+  maxRetainedTopics: number
+}
+
+export const CONTEXT_CLOSURE_MAX_RETAINED_TOPICS = 1
+
+export function getContextClosureDiagnostics(): ContextClosureDiagnostics {
+  return {
+    hitCount: closureCacheHitCount,
+    missCount: closureCacheMissCount,
+    totalAccessCount: closureCacheHitCount + closureCacheMissCount,
+    retainedTopicCount: closureCache.size,
+    maxRetainedTopics: CONTEXT_CLOSURE_MAX_RETAINED_TOPICS
+  }
 }
 
 /**
