@@ -84,9 +84,6 @@ import * as fs from 'fs'
 import * as path from 'path'
 
 import {
-  BENCH_RESULT_SCHEMA_VERSION,
-  type BenchmarkGate,
-  type BenchmarkMetric,
   type BenchmarkResult,
   collectEnvironmentMetadata,
   writeBenchmarkResult
@@ -106,21 +103,24 @@ import { findProcessesByUserDataDir, terminateProcessesByUserDataDir } from '../
 import { probeAndAssertRuntimeAppData } from '../../utils/runtime-app-data'
 import { createOwnedTmpRoot, removeOwnedTmpRoot, validateProfileLaunchToken } from '../../utils/run-ownership'
 import {
-  buildC02MultiScaleMap,
-  buildC02ScaleMap,
+  buildC02BenchmarkResult,
+  buildC02MixedBenchmarkResult,
+  buildC02MixedSyntheticTopics,
+  buildC02MixedSyntheticTopicsWithPrefix,
+  buildC02MultiBenchmarkResult,
   buildC02SyntheticTopics,
   buildC02SyntheticTopicsWithPrefix,
-  C02_BENCHMARK_ID,
-  C02_BENCHMARK_NAME,
+  c02ExpectedProjectedTotalForTopics,
+  c02ExpectedVisibleCountForTopic,
   c02HeapGateEnabled,
+  c02MixedTotalMessages,
   C02_PRODUCTION_WINDOW_MAX,
-  c02ExpectedVisibleCount,
-  c02ExpectedProjectedTotal,
+  c02PerTopicExpectedVisibleCounts,
   canonicalBytesForTopics,
   classifyEffectiveHeapDeltaInformative,
   computeHeapAmplification,
-  DEFAULT_C02_HEAP_PROFILE,
   detectHeapPrecisionLabel,
+  isC02MixedHeapProfile,
   RENDERER_HEAP_METHOD,
   resolveC02HeapProfile,
   resolveC02HeapProfiles,
@@ -128,7 +128,9 @@ import {
   validateLogicalBytes,
   validateSyntheticTopics,
   type C02HeapProfile,
+  type C02MixedHeapProfile,
   type HeapPrecisionLabel,
+  type LogicalPayloadTopicInput,
   type RendererHeapSample
 } from '../../utils/perfHeapCalibration'
 
@@ -242,8 +244,7 @@ async function sampleRendererHeap(page: Page): Promise<RendererHeapSample | null
  */
 async function activateReduxProjection(
   page: Page,
-  profile: C02HeapProfile,
-  topicPrefix = 'c02-heap-topic',
+  syntheticTopics: LogicalPayloadTopicInput[],
   opts?: { waitTimeoutMs?: number }
 ): Promise<{
   rendererLogicalBytes: number
@@ -269,47 +270,42 @@ async function activateReduxProjection(
   productionPathComplete?: boolean
   failedBlocker?: string
 }> {
-  const pad = (n: number, w: number): string => String(n).padStart(w, '0')
-  // Build deterministic synthetic topics locally (same shape as before for ChatDb)
-  // topicPrefix allows multi-profile matrix to use isolated ids (e.g. c02-small-topic, c02-large-topic)
+  // Single-source canonical activation: use the exact syntheticTopics already
+  // constructed for canonicalBytesForTopics (same IDs/prefixes/payload). No
+  // independent profile-based reconstruction — the canonical objects are the sole
+  // message/block source for typed UI/IPC payloads.
+  if (!Array.isArray(syntheticTopics) || syntheticTopics.length === 0) {
+    return {
+      rendererLogicalBytes: 0,
+      topicsCreated: 0,
+      messagesCreated: 0,
+      blocksCreated: 0,
+      usedTypedPath: false,
+      reduxVerified: false,
+      projectionStats: {
+        reduxMessages: 0,
+        reduxBlocks: 0,
+        groupCount: 0,
+        displayMessages: 0,
+        anchorGroupKey: null,
+        contextBoundaryPresent: false,
+        finalTopicDomProof: false
+      },
+      productionPath: 'blocked: syntheticTopics empty — no canonical input to activate',
+      failedBlocker:
+        'syntheticTopics empty: activation requires the same non-empty canonical topics used for canonicalBytesForTopics'
+    }
+  }
   const topics: Array<{
     topicId: string
     messages: Array<Record<string, unknown>>
     blocks: Array<Record<string, unknown>>
-  }> = []
-  const content = 'a'.repeat(profile.blockContentBytes)
-  let messageTotal = 0
-  for (let t = 0; t < profile.syntheticTopics; t++) {
-    const topicId = `${topicPrefix}-${pad(t, 2)}`
-    const messages: Array<Record<string, unknown>> = []
-    const blocks: Array<Record<string, unknown>> = []
-    for (let i = 0; i < profile.syntheticMessagesPerTopic; i++) {
-      const msgId = `${topicId}-msg-${pad(i, 5)}`
-      const blockId = `${topicId}-block-${pad(i, 5)}`
-      messages.push({
-        id: msgId,
-        topicId,
-        role: i % 2 === 0 ? 'user' : 'assistant',
-        assistantId: `assistant-${pad(i % 3, 2)}`,
-        createdAt: '2025-01-01T00:00:00.000Z',
-        updatedAt: '2025-01-01T00:00:00.000Z',
-        status: 'success',
-        blocks: [blockId],
-        sortOrder: i
-      })
-      blocks.push({
-        id: blockId,
-        messageId: msgId,
-        type: 'main_text',
-        content,
-        status: 'success',
-        createdAt: '2025-01-01T00:00:00.000Z',
-        updatedAt: '2025-01-01T00:00:00.000Z'
-      })
-    }
-    topics.push({ topicId, messages, blocks })
-    messageTotal += messages.length
-  }
+  }> = syntheticTopics.map((t) => ({
+    topicId: t.topicId,
+    messages: t.messages as Array<Record<string, unknown>>,
+    blocks: t.blocks as Array<Record<string, unknown>>
+  }))
+  const messageTotal = syntheticTopics.reduce((acc, t) => acc + t.messages.length, 0)
 
   // Clean any legacy detached holder if present (must not be measured authority).
   await page.evaluate(() => {
@@ -470,9 +466,11 @@ async function activateReduxProjection(
   usedTypedPath = true
 
   // Step 2: set display count with existing newMessages/setDisplayCount if required
-  // Bounded synthetic projection: each topic has syntheticMessagesPerTopic messages;
-  // default displayCount is 10, so raise to the per-topic count to render the full window.
-  const desiredDisplayCount = profile.syntheticMessagesPerTopic
+  // Bounded synthetic projection: each canonical topic has messages.length messages;
+  // default displayCount is 10, so raise to the max per-topic count to render the full window.
+  // Heterogeneous distributions use max per-topic messageCount — derived strictly from
+  // the same canonical syntheticTopics that feed canonicalBytesForTopics.
+  const desiredDisplayCount = Math.max(...syntheticTopics.map((t) => t.messages.length))
   if (desiredDisplayCount !== 10) {
     await page.evaluate((capacity) => {
       const store = (window as any).store
@@ -506,9 +504,12 @@ async function activateReduxProjection(
   // Production latest-window clamp (1..100) — calibration measures actual production
   // projection, not invented larger window. Large profile retains 150 messages logically
   // (canonicalBytes deterministically on full 150) but latest window projects 100.
-  // Use shared helper mirroring clampWindowLimit/max 100 for consistent expected counts.
-  const expectedVisible = c02ExpectedVisibleCount(profile)
-  const expectedProjectedTotal = c02ExpectedProjectedTotal(profile)
+  // Use shared canonical-topic helpers for per-topic expected counts under the clamp.
+  // Each topic wait derives its own expected from its specific canonical topic;
+  // final-topic-specific expected retained only for final ownership checks.
+  const perTopicExpectedVisible = c02PerTopicExpectedVisibleCounts(syntheticTopics)
+  const expectedProjectedTotal = c02ExpectedProjectedTotalForTopics(syntheticTopics)
+  const expectedVisibleFinal = c02ExpectedVisibleCountForTopic(syntheticTopics[syntheticTopics.length - 1]!)
   // Matrix-only bounded wait for the largest existing profile (3×150×4096B).
   // Single-profile retains legacy 30s; matrix caller passes C02_MATRIX_WAIT_TIMEOUT_MS (60s).
   const helperWaitTimeoutMs = opts?.waitTimeoutMs ?? 30_000
@@ -516,11 +517,13 @@ async function activateReduxProjection(
   // Step 3: canonical activation via existing rendered topic-item clicks — one click per synthetic topic
   // so all synthetic topics become resident in Redux via the production loadTopicMessagesThunk path
   // (HomePage → useActiveTopic → loadTopicMessagesThunk). Each click waits deterministically for
-  // Redux IDs, loading false, and FINAL-TOPIC-SCOPED DOM proof (existing [data-message-id]/[id^="message-"]
-  // attributes tied to the clicked synthetic topic id) before proceeding. No global count can satisfy
-  // completeness — the final topic must demonstrably own the measured DOM.
-  for (const topic of topics) {
+  // Redux IDs, loading false, and topic-scoped DOM proof (existing [data-message-id]
+  // attributes tied to the clicked synthetic topic id) with per-topic expected count under the production window clamp.
+  // No global count can satisfy completeness — the final topic must demonstrably own the measured DOM.
+  for (let topicIdx = 0; topicIdx < topics.length; topicIdx++) {
+    const topic = topics[topicIdx]!
     const topicId = topic.topicId
+    const topicExpected = perTopicExpectedVisible[topicIdx]!
     try {
       const item = page.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
       await item.waitFor({ state: 'attached', timeout: 15000 })
@@ -556,7 +559,7 @@ async function activateReduxProjection(
           const loading = s.messages?.loadingByTopic?.[topicId]
           return Array.isArray(ids) && ids.length === expected && loading !== true
         },
-        { topicId, expected: expectedVisible },
+        { topicId, expected: topicExpected },
         { timeout: helperWaitTimeoutMs }
       )
     } catch (e) {
@@ -583,13 +586,14 @@ async function activateReduxProjection(
     try {
       await page.waitForFunction(
         ({ topicId, expected }) => {
-          // Strict final-topic DOM proof: only production #messages [data-message-id] selectors.
+          // Strict topic-scoped DOM proof: only production #messages [data-message-id] selectors.
           // [id^="message-"] is diagnostic-only and never satisfies authoritative wait/complete.
+          // Per-topic expected ensures heterogeneous 20/50/100/150 shapes do not timeout on early topics.
           const globalData = document.querySelectorAll('#messages [data-message-id]').length
           const scopedData = document.querySelectorAll(`#messages [data-message-id^="${topicId}-msg-"]`).length
           return scopedData === expected && globalData === expected
         },
-        { topicId, expected: expectedVisible },
+        { topicId, expected: topicExpected },
         { timeout: helperWaitTimeoutMs }
       )
     } catch (e) {
@@ -610,7 +614,7 @@ async function activateReduxProjection(
           finalTopicDomProof: false
         },
         productionPath: 'blocked: DOM message count wait timed out after topic-item click',
-        failedBlocker: `DOM #messages [data-message-id] scoped wait failed for ${topicId}: expected ${expectedVisible} visible messages owned by that topic (global===scoped===expected); [id^="message-"] is diagnostic-only and not authoritative: ${e instanceof Error ? e.message : String(e)}`
+        failedBlocker: `DOM #messages [data-message-id] scoped wait failed for ${topicId}: expected ${topicExpected} visible messages owned by that topic (global===scoped===expected); [id^="message-"] is diagnostic-only and not authoritative: ${e instanceof Error ? e.message : String(e)}`
       }
     }
   }
@@ -621,7 +625,7 @@ async function activateReduxProjection(
   try {
     await page.waitForFunction(
       (expected) => document.querySelectorAll('#messages [data-stable-group-id]').length === expected,
-      expectedVisible,
+      expectedVisibleFinal,
       { timeout: 15000 }
     )
     groupExactMatched = true
@@ -763,9 +767,10 @@ async function activateReduxProjection(
   // exact expected DOM counts, and explicit context boundary inside #messages with final-topic-owned anchor all pass.
   // Fallback [id^="message-"], global document queries, or arbitrary non-zero fallbacks never satisfy complete.
   const finalTopicDomProof =
-    domStats.domDisplayMessagesScoped === expectedVisible && domStats.domDisplayMessagesGlobal === expectedVisible
-  const groupCountExact = domStats.domGroupCount === expectedVisible
-  const groupOwnershipProof = domStats.groupsWithFinalTopic === expectedVisible && groupCountExact
+    domStats.domDisplayMessagesScoped === expectedVisibleFinal &&
+    domStats.domDisplayMessagesGlobal === expectedVisibleFinal
+  const groupCountExact = domStats.domGroupCount === expectedVisibleFinal
+  const groupOwnershipProof = domStats.groupsWithFinalTopic === expectedVisibleFinal && groupCountExact
   const anchorOwnedByFinalTopic = domStats.anchorGroupKey !== null && domStats.anchorGroupKey.includes(lastTopicId)
   const contextEvidenceOk =
     domStats.contextBoundaryPresent &&
@@ -777,7 +782,7 @@ async function activateReduxProjection(
 
   let productionPathDetail: string
   if (productionPathComplete) {
-    productionPathDetail = `canonical user path complete: assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id="${lastTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/[data-message-id]/[data-context-boundary]; productionPath complete — finalTopic=${lastTopicId} owns #messages DOM (scoped ${domStats.domDisplayMessagesScoped}/${expectedVisible}, global ${domStats.domDisplayMessagesGlobal}/${expectedVisible} via #messages [data-message-id]), groups exact ${domStats.domGroupCount}/${expectedVisible} (owned ${domStats.groupsWithFinalTopic}/${expectedVisible} via #messages [data-stable-group-id]), contextBoundary inside #messages anchor=${domStats.anchorGroupKey} (final-topic-owned, [id^="message-"] fallback diagnostic-only excluded)`
+    productionPathDetail = `canonical user path complete: assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id="${lastTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/[data-message-id]/[data-context-boundary]; productionPath complete — finalTopic=${lastTopicId} owns #messages DOM (scoped ${domStats.domDisplayMessagesScoped}/${expectedVisibleFinal}, global ${domStats.domDisplayMessagesGlobal}/${expectedVisibleFinal} via #messages [data-message-id]), groups exact ${domStats.domGroupCount}/${expectedVisibleFinal} (owned ${domStats.groupsWithFinalTopic}/${expectedVisibleFinal} via #messages [data-stable-group-id]), contextBoundary inside #messages anchor=${domStats.anchorGroupKey} (final-topic-owned, [id^="message-"] fallback diagnostic-only excluded)`
   } else {
     const reasons: string[] = []
     if (!reduxVerified)
@@ -786,15 +791,15 @@ async function activateReduxProjection(
       )
     if (!finalTopicDomProof)
       reasons.push(
-        `final-topic DOM proof failed for ${lastTopicId} (scoped ${domStats.domDisplayMessagesScoped}/${expectedVisible}, global ${domStats.domDisplayMessagesGlobal}/${expectedVisible} — global/stale or partial cannot satisfy complete)`
+        `final-topic DOM proof failed for ${lastTopicId} (scoped ${domStats.domDisplayMessagesScoped}/${expectedVisibleFinal}, global ${domStats.domDisplayMessagesGlobal}/${expectedVisibleFinal} — global/stale or partial cannot satisfy complete)`
       )
     if (!groupCountExact)
       reasons.push(
-        `group count not exact (observed ${domStats.domGroupCount}/${expectedVisible} — arbitrary non-zero fallback cannot satisfy complete; diagnostic groupsWithFinalTopic=${domStats.groupsWithFinalTopic})`
+        `group count not exact (observed ${domStats.domGroupCount}/${expectedVisibleFinal} — arbitrary non-zero fallback cannot satisfy complete; diagnostic groupsWithFinalTopic=${domStats.groupsWithFinalTopic})`
       )
     else if (!groupOwnershipProof)
       reasons.push(
-        `group ownership failed (groupsWithFinalTopic ${domStats.groupsWithFinalTopic}/${expectedVisible} — groups do not demonstrably belong to final topic)`
+        `group ownership failed (groupsWithFinalTopic ${domStats.groupsWithFinalTopic}/${expectedVisibleFinal} — groups do not demonstrably belong to final topic)`
       )
     if (!domStats.contextBoundaryPresent)
       reasons.push(
@@ -893,476 +898,6 @@ async function activateReduxProjection(
 }
 
 // ---------------------------------------------------------------------------
-// Artifact construction — schema v1, directional/synthetic labeled
-// ---------------------------------------------------------------------------
-
-function buildBenchmarkResult(
-  environment: BenchmarkResult['environment'],
-  profile: C02HeapProfile,
-  logicalBytes: number,
-  rendererLogicalBytes: number,
-  heapBefore: RendererHeapSample,
-  heapAfter: RendererHeapSample,
-  allocation: {
-    topicsCreated: number
-    messagesCreated: number
-    blocksCreated: number
-    usedTypedPath: boolean
-    reduxVerified: boolean
-    projectionStats: {
-      reduxMessages: number
-      reduxBlocks: number
-      groupCount: number
-      displayMessages: number
-      anchorGroupKey: string | null
-      contextBoundaryPresent: boolean
-      finalTopicDomProof: boolean
-      groupExactMatched?: boolean
-      groupsWithFinalTopic?: number
-      globalDisplayMessages?: number
-    }
-    productionPath: string
-    productionPathComplete?: boolean
-  },
-  informativeness: { informative: boolean; reason: string },
-  precision: HeapPrecisionLabel
-): BenchmarkResult {
-  const amplification = computeHeapAmplification(heapBefore, heapAfter, logicalBytes)
-  const scale = buildC02ScaleMap(profile, heapBefore.method, precision)
-  // Single authoritative definition: effective = (precision === 'precise') && finite positive delta
-  // Use ONE value for metric, gate, and ratio emission. Bucketed positive deltas are inconclusive.
-  const effectiveInformative = informativeness.informative && precision === 'precise'
-  const deltaInformativeMetric = effectiveInformative ? 1 : 0
-  // Ratio emission: raw heap.delta remains diagnostic, but amplification ratios are valid ONLY when effective
-  const effectiveDeltaRatio = effectiveInformative ? amplification.deltaRatio : 0
-  const effectiveAbsoluteRatio = effectiveInformative ? amplification.absoluteRatio : 0
-
-  const metrics: BenchmarkMetric[] = [
-    // Canonical logical payload — phase4-logical-payload-v1, separate from heap
-    {
-      id: 'logical.bytes',
-      name: 'canonical logical payload bytes (phase4-logical-payload-v1, directional synthetic)',
-      value: logicalBytes,
-      unit: 'bytes'
-    },
-    {
-      id: 'logical.bytes.rendererEstimate',
-      name: 'renderer TextEncoder JSON estimate bytes (directional parity, non-canonical)',
-      value: rendererLogicalBytes,
-      unit: 'bytes'
-    },
-    // Actual renderer heap samples — separate axis, performance.memory
-    {
-      id: 'heap.used.before',
-      name: 'renderer heap used before allocation (performance.memory usedJSHeapSize, directional)',
-      value: heapBefore.usedJSHeapSize,
-      unit: 'bytes'
-    },
-    {
-      id: 'heap.used.after',
-      name: 'renderer heap used after resident Redux projection allocation (performance.memory usedJSHeapSize, directional)',
-      value: heapAfter.usedJSHeapSize,
-      unit: 'bytes'
-    },
-    {
-      id: 'heap.total.after',
-      name: 'renderer heap total after allocation (performance.memory totalJSHeapSize, directional)',
-      value: heapAfter.totalJSHeapSize,
-      unit: 'bytes'
-    },
-    {
-      id: 'heap.limit',
-      name: 'renderer heap limit (performance.memory jsHeapSizeLimit, directional)',
-      value: heapAfter.jsHeapSizeLimit,
-      unit: 'bytes'
-    },
-    {
-      id: 'heap.delta',
-      name: 'renderer heap delta bytes (after - before, directional synthetic; 0/negative/bucketed is inconclusive, not amplification 0 — raw diagnostic)',
-      value: amplification.heapDeltaBytes,
-      unit: 'bytes'
-    },
-    {
-      id: 'heap.deltaInformative',
-      name: 'heap delta informativeness gate value (1=effective informative precise positive delta, 0=inconclusive zero/negative/non-finite/bucketed — single definition precision===precise && finite positive)',
-      value: deltaInformativeMetric,
-      unit: 'count'
-    },
-    // Heap amplification — valid ONLY when effectiveInformative; otherwise 0 (inconclusive, not amplification 0)
-    {
-      id: 'heap.amplification.deltaRatio',
-      name: 'heap amplification deltaRatio = heapDelta / logicalBytes (directional synthetic, valid ONLY when deltaInformative=1; 0 when inconclusive — bucketed positive remains 0, not valid amplification)',
-      value: effectiveDeltaRatio,
-      unit: 'ratio'
-    },
-    {
-      id: 'heap.amplification.absoluteRatio',
-      name: 'heap amplification absoluteRatio = heapUsedAfter / logicalBytes (directional synthetic, valid ONLY when deltaInformative=1; 0 when inconclusive)',
-      value: effectiveAbsoluteRatio,
-      unit: 'ratio'
-    },
-    // Counts for context (not thresholds)
-    {
-      id: 'synthetic.topics',
-      name: 'synthetic topics created (directional)',
-      value: allocation.topicsCreated,
-      unit: 'count'
-    },
-    {
-      id: 'synthetic.messages',
-      name: 'synthetic messages created (directional)',
-      value: allocation.messagesCreated,
-      unit: 'count'
-    },
-    {
-      id: 'synthetic.blocks',
-      name: 'synthetic blocks created (directional, Redux messageBlocks entity)',
-      value: allocation.blocksCreated,
-      unit: 'count'
-    },
-    {
-      id: 'projection.reduxMessages',
-      name: 'Redux messages entity count verified resident (directional)',
-      value: allocation.projectionStats.reduxMessages,
-      unit: 'count'
-    },
-    {
-      id: 'projection.reduxBlocks',
-      name: 'Redux blocks entity count verified resident (directional)',
-      value: allocation.projectionStats.reduxBlocks,
-      unit: 'count'
-    },
-    {
-      id: 'projection.groups',
-      name: 'derived viewport groups count via actual rendered DOM #messages [data-stable-group-id] (directional, production Messages.tsx) — exact expectedVisible required for complete; global [data-stable-group-id] never authoritative',
-      value: allocation.projectionStats.groupCount,
-      unit: 'count'
-    },
-    {
-      id: 'projection.displayMessages',
-      name: 'derived displayMessages window count via actual rendered DOM #messages [data-message-id] scoped to final synthetic topic (directional, production Messages.tsx) — exact expectedVisible required for complete; [id^="message-"] is diagnostic-only',
-      value: allocation.projectionStats.displayMessages,
-      unit: 'count'
-    },
-    {
-      id: 'projection.displayMessagesGlobal',
-      name: 'global displayMessages count via actual rendered DOM #messages [data-message-id] (must equal scoped for final-topic proof; mismatch indicates stale/partial projection; global [id^="message-"] never authoritative)',
-      value: allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages,
-      unit: 'count'
-    },
-    {
-      id: 'projection.groupsWithFinalTopic',
-      name: 'groups containing final synthetic topic messages via #messages [data-stable-group-id]/[data-message-id] ownership proof; must equal exact expectedVisible for complete; [id^="message-"] descendant never satisfies',
-      value: allocation.projectionStats.groupsWithFinalTopic ?? 0,
-      unit: 'count'
-    },
-    {
-      id: 'projection.finalTopicDomProof',
-      name: 'final-topic DOM ownership proof via #messages [data-message-id] (1= scoped===global===expectedVisible for final clicked topic inside #messages, 0= stale/global/partial — complete requires 1; [id^="message-"] never satisfies)',
-      value: allocation.projectionStats.finalTopicDomProof ? 1 : 0,
-      unit: 'count'
-    },
-    {
-      id: 'projection.contextBoundaryPresent',
-      name: 'context boundary presence via #messages [data-context-boundary] inside #messages with final-topic-owned anchor (1= present inside #messages with resolvable final-topic anchor, 0= absent/global/fallback — explicit, not inferred; complete requires 1)',
-      value: allocation.projectionStats.contextBoundaryPresent ? 1 : 0,
-      unit: 'count'
-    },
-    {
-      id: 'projection.productionPathComplete',
-      name: 'productionPath complete flag via #messages production selectors only (1= Redux verified + final-topic ownership inside #messages + exact groups + boundary inside #messages with final-topic anchor; 0= partial/inconclusive — fallback [id^="message-"]/global cannot satisfy complete)',
-      value: allocation.productionPathComplete ? 1 : 0,
-      unit: 'count'
-    },
-    {
-      id: 'calibration.complete',
-      name: 'authoritative calibration complete — effective precise heap AND productionPath complete (1= precision===precise && finite positive delta && #messages final-topic DOM/groups/boundary proof; 0= inconclusive; invalid heap never yields complete)',
-      value: effectiveInformative && !!allocation.productionPathComplete ? 1 : 0,
-      unit: 'count'
-    }
-  ]
-
-  const deltaGatePassed = effectiveInformative
-  const deltaGateDetail = effectiveInformative
-    ? `directional synthetic: heapDelta=${amplification.heapDeltaBytes} is finite positive with precision=${precision} (argv --enable-precise-memory-info present) — effective informative (precision===precise && finite positive) for directional amplification; deltaRatio=${effectiveDeltaRatio.toFixed(3)} valid`
-    : `directional synthetic: heapDelta=${amplification.heapDeltaBytes} is INCONCLUSIVE — ${informativeness.reason}; precision=${precision}. Effective requires precision===precise && finite positive delta. Zero/negative/non-finite or bucketed (precision!=precise) delta is inconclusive and ratios are 0 (not valid amplification, raw heap.delta remains diagnostic). See heap.deltaInformative metric.`
-  // Authoritative calibration complete: strictly requires BOTH effective precise heap AND final-topic-owned #messages DOM/projection proof.
-  // Fallback [id^="message-"], global selectors, or bucketed/inconclusive heap never satisfy complete.
-  const authoritativeComplete = effectiveInformative && !!allocation.productionPathComplete
-
-  const gates: BenchmarkGate[] = [
-    {
-      id: 'synthetic.datasetComplete',
-      name: 'synthetic dataset complete via canonicalization (phase4-logical-payload-v1)',
-      kind: 'correctness',
-      passed: true,
-      detail: `directional synthetic: ${allocation.topicsCreated} topics, ${allocation.messagesCreated} messages, ${allocation.blocksCreated} blocks, logicalBytes=${logicalBytes} (canonical), typedPath=${allocation.usedTypedPath} (existing ChatDb ensureTopic/pasteMessages/fetchMessages) → Redux entity projection verified=${allocation.reduxVerified} (messages entity + messageIdsByTopic + blocks entity)`
-    },
-    {
-      id: 'heap.sampleAvailable',
-      name: 'actual renderer heap sampled via performance.memory (renderer process, not Node proxy)',
-      kind: 'correctness',
-      passed: true,
-      detail: `directional synthetic: method=${heapBefore.method}, precision=${precision}, before=${heapBefore.usedJSHeapSize}, after=${heapAfter.usedJSHeapSize}, delta=${amplification.heapDeltaBytes} (least invasive Chromium API; no Node process.memoryUsage proxy; opt-in --enable-precise-memory-info when C02 enabled)`
-    },
-    {
-      id: 'heap.deltaInformative',
-      name: 'heap delta informativeness — effective (precision===precise && finite positive delta); zero/bucketed/negative/non-finite is never amplification 0 evidence (evidence-informativeness gate, not product threshold)',
-      kind: 'correctness',
-      passed: deltaGatePassed,
-      detail: deltaGateDetail
-    },
-    {
-      id: 'heap.precision',
-      name: 'heap precision mode detected via argv --enable-precise-memory-info (inconclusive when bucketed, not amplification 0)',
-      kind: 'correctness',
-      passed: precision === 'precise',
-      detail: `directional synthetic: precision=${precision} (precise requires opt-in launch flag; bucketed values are quantized and zero delta is inconclusive; effective requires precise+finite positive). Heap amplification ratios are 0 when not effective.`
-    },
-    {
-      id: 'logical.bytesFinite',
-      name: 'canonical logical bytes finite and positive (separate axis from heap)',
-      kind: 'correctness',
-      passed: true,
-      detail: `directional synthetic: logicalBytes=${logicalBytes} (phase4-logical-payload-v1), rendererEstimate=${rendererLogicalBytes} — heap amplification reported separately, not conflated`
-    },
-    {
-      id: 'allocation.resident',
-      name: 'Redux entity projection + derived viewport/group/context via actual rendered Chat path — authoritative calibration complete requires effective heap AND productionPath (exact final-topic ownership inside #messages + exact groups inside #messages + boundary inside #messages with final-topic anchor) (renderer heap)',
-      kind: 'correctness',
-      passed: authoritativeComplete,
-      detail: `directional synthetic: Redux projection — ${allocation.projectionStats.reduxMessages} messages, ${allocation.projectionStats.reduxBlocks} blocks; derived DOM — ${allocation.projectionStats.groupCount} groups (#messages [data-stable-group-id]) exact=${allocation.projectionStats.groupExactMatched ?? false}, displayMessages scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages} (finalTopicProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0} via #messages [data-message-id]), groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}; contextBoundaryPresent inside #messages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'} (must be final-topic-owned, [id^="message-"] diagnostic-only); productionPath=${allocation.productionPath}; productionPathComplete=${allocation.productionPathComplete ? 1 : 0}; effectiveInformative=${effectiveInformative ? 1 : 0} (precision=${precision}, delta=${amplification.heapDeltaBytes}); authoritativeComplete=${authoritativeComplete ? 1 : 0} (requires precise && finite positive delta && #messages proof; fallback/global never satisfies; invalid heap never yields complete). Detached holder removed; heap cost is renderer entity + production-derived projections when authoritative complete, otherwise Redux entity only and derived counts are inconclusive.`
-    },
-    {
-      id: 'productionPath.complete',
-      name: 'productionPath complete lock — final clicked synthetic topic owns #messages DOM (scoped===global===expected via #messages [data-message-id]), exact #messages group count, and [data-context-boundary] inside #messages with final-topic-owned resolvable anchor (no fallback/global satisfies complete)',
-      kind: 'correctness',
-      passed: authoritativeComplete,
-      detail: `productionPathComplete=${allocation.productionPathComplete ? 1 : 0}; effectiveInformative=${effectiveInformative ? 1 : 0} (precision=${precision}, delta=${amplification.heapDeltaBytes}); authoritativeComplete=${authoritativeComplete ? 1 : 0}; ${allocation.productionPath} — locked: authoritative complete requires BOTH effective precise heap (precision===precise && finite positive delta) AND #messages production selectors proof; fallback [id^="message-"]/global stale DOM or bucketed delta never satisfies complete (see perf-c02-heap-calibration.spec.ts activateReduxProjection).`
-    },
-    {
-      id: 'projection.finalTopicOwnership',
-      name: 'final clicked synthetic topic owns the measured #messages DOM — #messages [data-message-id] scoped to final topic equals global and expectedVisible (no global stale count or [id^="message-"] satisfies complete)',
-      kind: 'correctness',
-      passed: allocation.projectionStats.finalTopicDomProof,
-      detail: `finalTopicDomProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}; scoped=${allocation.projectionStats.displayMessages}, global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages}, expectedVisible=${c02ExpectedVisibleCount(profile)} (min(N, productionWindow ${C02_PRODUCTION_WINDOW_MAX}) — large retains 150 logically but projects 100), finalTopic must be ${profile.syntheticTopics - 1}th synthetic topic (c02-heap-topic-${String(profile.syntheticTopics - 1).padStart(2, '0')}); strict #messages [data-message-id] only, [id^="message-"] diagnostic-only excluded`
-    },
-    {
-      id: 'projection.contextBoundaryExplicit',
-      name: 'context boundary presence is explicit via #messages [data-context-boundary] inside #messages with final-topic-owned anchor — absent/global/outside is not converted to first group as fake anchor (partial/inconclusive when absent)',
-      kind: 'correctness',
-      passed:
-        allocation.projectionStats.contextBoundaryPresent &&
-        allocation.projectionStats.anchorGroupKey !== null &&
-        (allocation.projectionStats.anchorGroupKey?.includes(
-          `c02-heap-topic-${String(profile.syntheticTopics - 1).padStart(2, '0')}`
-        ) ??
-          false),
-      detail: `contextBoundaryPresent inside #messages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0}, anchorGroupKey=${allocation.projectionStats.anchorGroupKey ?? 'null'} finalTopicOwned=${(allocation.projectionStats.anchorGroupKey?.includes(`c02-heap-topic-${String(profile.syntheticTopics - 1).padStart(2, '0')}`) ?? false) ? 1 : 0}; when absent or outside #messages or not final-topic-owned the artifact is partial/inconclusive and does not infer first [data-stable-group-id] as anchor; global [data-context-boundary] outside #messages never satisfies`
-    },
-    {
-      id: 'calibration.complete',
-      name: 'authoritative calibration complete — effective precise heap (precision===precise && finite positive delta) AND final-topic-owned #messages production DOM with exact groups and explicit context boundary inside #messages (invalid heap or fallback/global DOM never yields complete)',
-      kind: 'correctness',
-      passed: authoritativeComplete,
-      detail: `authoritativeComplete=${authoritativeComplete ? 1 : 0}; effectiveInformative=${effectiveInformative ? 1 : 0} (precision=${precision}, delta=${amplification.heapDeltaBytes}), productionPathComplete=${allocation.productionPathComplete ? 1 : 0} (finalTopicProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}, groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}, contextInsideMessages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0}); complete evidence strictly requires precise && finite positive heap delta AND #messages [data-message-id]/[data-stable-group-id]/[data-context-boundary] with final-topic-owned anchor — zero/negative/non-finite/bucketed deltas, [id^="message-"] fallback, or global selectors are inconclusive`
-    },
-    {
-      id: 'environment.abi145',
-      name: 'measured runtime is Electron ABI 145 lane with safe canonical command',
-      kind: 'correctness',
-      passed: true,
-      detail: `abiLane=electron, abi=${environment.abi}, command=${environment.command} (no path segments)`
-    },
-    {
-      id: 'privacy.schemaV1',
-      name: 'artifact complies with PERF-001 schema v1 closed set (no content/credential/path/raw DB size)',
-      kind: 'correctness',
-      passed: true,
-      detail:
-        'directional synthetic: metrics/gates/scale carry only numbers and fixed strings; no message content, credentials, paths, model IDs, ask IDs, or raw DB sizes (enforced at write time)'
-    }
-  ]
-
-  return {
-    schemaVersion: BENCH_RESULT_SCHEMA_VERSION,
-    benchmark: {
-      id: C02_BENCHMARK_ID,
-      name: C02_BENCHMARK_NAME,
-      scale: scale as unknown as Record<string, number>
-    },
-    environment,
-    metrics,
-    gates
-  }
-}
-
-function buildMultiBenchmarkResult(
-  environment: BenchmarkResult['environment'],
-  entries: Array<{
-    profileId: string
-    profile: C02HeapProfile
-    logicalBytes: number
-    rendererLogicalBytes: number
-    heapBefore: RendererHeapSample
-    heapAfter: RendererHeapSample
-    allocation: {
-      topicsCreated: number
-      messagesCreated: number
-      blocksCreated: number
-      usedTypedPath: boolean
-      reduxVerified: boolean
-      projectionStats: {
-        reduxMessages: number
-        reduxBlocks: number
-        groupCount: number
-        displayMessages: number
-        anchorGroupKey: string | null
-        contextBoundaryPresent: boolean
-        finalTopicDomProof: boolean
-        groupExactMatched?: boolean
-        groupsWithFinalTopic?: number
-        globalDisplayMessages?: number
-      }
-      productionPath: string
-      productionPathComplete?: boolean
-    }
-    informativeness: { informative: boolean; reason: string }
-    precision: HeapPrecisionLabel
-  }>
-): BenchmarkResult {
-  const allMetrics: BenchmarkMetric[] = []
-  const allGates: BenchmarkGate[] = []
-  const profileCount = entries.length
-  const firstHeapMethod = entries[0]?.heapBefore.method ?? RENDERER_HEAP_METHOD
-  const firstPrecision = entries[0]?.precision ?? 'unsupported'
-  const scale = buildC02MultiScaleMap(
-    entries.map((e) => ({ id: e.profileId, profile: e.profile })),
-    firstHeapMethod,
-    firstPrecision
-  )
-  for (const entry of entries) {
-    const prefix = entry.profileId.replace(/-/g, '_')
-    const amplification = computeHeapAmplification(entry.heapBefore, entry.heapAfter, entry.logicalBytes)
-    const effectiveInformative = entry.informativeness.informative && entry.precision === 'precise'
-    const effectiveDeltaRatio = effectiveInformative ? amplification.deltaRatio : 0
-    const effectiveAbsoluteRatio = effectiveInformative ? amplification.absoluteRatio : 0
-    allMetrics.push(
-      {
-        id: `${prefix}.logical.bytes`,
-        name: `${entry.profileId} canonical logical payload bytes (phase4-logical-payload-v1, directional synthetic)`,
-        value: entry.logicalBytes,
-        unit: 'bytes'
-      },
-      {
-        id: `${prefix}.heap.delta`,
-        name: `${entry.profileId} renderer heap delta bytes (directional synthetic; 0/negative/bucketed inconclusive)`,
-        value: amplification.heapDeltaBytes,
-        unit: 'bytes'
-      },
-      {
-        id: `${prefix}.heap.deltaInformative`,
-        name: `${entry.profileId} heap delta informativeness (1=effective precise positive, 0=inconclusive)`,
-        value: effectiveInformative ? 1 : 0,
-        unit: 'count'
-      },
-      {
-        id: `${prefix}.heap.amplification.deltaRatio`,
-        name: `${entry.profileId} heap amplification deltaRatio (valid only when deltaInformative=1)`,
-        value: effectiveDeltaRatio,
-        unit: 'ratio'
-      },
-      {
-        id: `${prefix}.heap.amplification.absoluteRatio`,
-        name: `${entry.profileId} heap amplification absoluteRatio (valid only when deltaInformative=1)`,
-        value: effectiveAbsoluteRatio,
-        unit: 'ratio'
-      },
-      {
-        id: `${prefix}.synthetic.topics`,
-        name: `${entry.profileId} synthetic topics`,
-        value: entry.allocation.topicsCreated,
-        unit: 'count'
-      },
-      {
-        id: `${prefix}.synthetic.messages`,
-        name: `${entry.profileId} synthetic messages`,
-        value: entry.allocation.messagesCreated,
-        unit: 'count'
-      },
-      {
-        id: `${prefix}.projection.groups`,
-        name: `${entry.profileId} derived groups via #messages [data-stable-group-id]`,
-        value: entry.allocation.projectionStats.groupCount,
-        unit: 'count'
-      },
-      {
-        id: `${prefix}.projection.displayMessages`,
-        name: `${entry.profileId} displayMessages via #messages [data-message-id] scoped to final topic`,
-        value: entry.allocation.projectionStats.displayMessages,
-        unit: 'count'
-      },
-      {
-        id: `${prefix}.calibration.complete`,
-        name: `${entry.profileId} authoritative calibration complete (effective heap AND productionPath complete)`,
-        value: effectiveInformative && !!entry.allocation.productionPathComplete ? 1 : 0,
-        unit: 'count'
-      },
-      {
-        id: `${prefix}.heap.used.before`,
-        name: `${entry.profileId} heap used before`,
-        value: entry.heapBefore.usedJSHeapSize,
-        unit: 'bytes'
-      },
-      {
-        id: `${prefix}.heap.used.after`,
-        name: `${entry.profileId} heap used after`,
-        value: entry.heapAfter.usedJSHeapSize,
-        unit: 'bytes'
-      }
-    )
-    const authoritativeComplete = effectiveInformative && !!entry.allocation.productionPathComplete
-    allGates.push(
-      {
-        id: `${prefix}.heap.deltaInformative`,
-        name: `${entry.profileId} heap delta informativeness — effective (precision===precise && finite positive)`,
-        kind: 'correctness',
-        passed: effectiveInformative,
-        detail: effectiveInformative
-          ? `${entry.profileId} delta ${amplification.heapDeltaBytes} precise informative`
-          : `${entry.profileId} inconclusive: ${entry.informativeness.reason}; precision=${entry.precision}`
-      },
-      {
-        id: `${prefix}.calibration.complete`,
-        name: `${entry.profileId} authoritative calibration complete — effective heap AND #messages proof`,
-        kind: 'correctness',
-        passed: authoritativeComplete,
-        detail: `profile ${entry.profileId}: authoritativeComplete=${authoritativeComplete ? 1 : 0} effective=${effectiveInformative ? 1 : 0} productionPathComplete=${entry.allocation.productionPathComplete ? 1 : 0}`
-      }
-    )
-  }
-  const allComplete = allGates.filter((g) => g.id.endsWith('.calibration.complete')).every((g) => g.passed)
-  allGates.push({
-    id: 'calibration.matrix.complete',
-    name: 'matrix calibration complete — all profiles effective heap AND productionPath complete (relation across multiple profiles)',
-    kind: 'correctness',
-    passed: allComplete,
-    detail: `matrix profileCount=${profileCount} allComplete=${allComplete ? 1 : 0} — each profile uses existing production activation path and precise memory sampling (directional synthetic)`
-  })
-  return {
-    schemaVersion: BENCH_RESULT_SCHEMA_VERSION,
-    benchmark: {
-      id: C02_BENCHMARK_ID,
-      name: `${C02_BENCHMARK_NAME} (matrix, directional synthetic)`,
-      scale: scale as unknown as Record<string, number>
-    },
-    environment,
-    metrics: allMetrics,
-    gates: allGates
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Spec — default-off, opt-in, inert to normal runs
 // ---------------------------------------------------------------------------
 
@@ -1392,10 +927,15 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
     }
 
     if (!isMatrix) {
-      const profile = profiles[0]!.profile
+      const entry = profiles[0]!
+      const profile = entry.profile
+      const isMixedSingle = isC02MixedHeapProfile(profile)
 
       // Deterministic synthetic topics — canonical logical bytes (phase4-logical-payload-v1)
-      const syntheticTopics = buildC02SyntheticTopics(profile)
+      // Mixed single must use heterogeneous mixed builder so C02_HEAP_CALIBRATION=mixed-* creates true heterogeneous workload.
+      const syntheticTopics = isMixedSingle
+        ? buildC02MixedSyntheticTopicsWithPrefix(profile as C02MixedHeapProfile, 'c02-mixed-topic')
+        : buildC02SyntheticTopics(profile as C02HeapProfile)
       const synthProblems = validateSyntheticTopics(syntheticTopics)
       expect(synthProblems, `synthetic topics must canonicalize: ${synthProblems.join('; ')}`).toEqual([])
       const logicalBytes = canonicalBytesForTopics(syntheticTopics)
@@ -1413,16 +953,29 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
       expect(beforeProblems, `heap before sample must be valid: ${beforeProblems.join('; ')}`).toEqual([])
 
       // Activate Redux projection via existing production path + actual rendered Chat derivation
-      const allocation = await activateReduxProjection(mainWindow, profile)
+      // Bounded correction: pass the exact same syntheticTopics used for canonicalBytesForTopics
+      // (single source) — no prefix default/mutation; IDs match accounting.
+      const allocation = await activateReduxProjection(mainWindow, syntheticTopics)
       if (allocation.failedBlocker) {
         throw new Error(
           `[PERF-C02] heap calibration blocked: ${allocation.failedBlocker}. No artifact emitted — this is fail-closed per decision rights; do not retain detached holder or Node proxy.`
         )
       }
-      expect(allocation.topicsCreated, 'synthetic topics must be created in renderer').toBe(profile.syntheticTopics)
-      expect(allocation.messagesCreated, 'synthetic messages must be created in renderer').toBe(
-        profile.syntheticTopics * profile.syntheticMessagesPerTopic
-      )
+      if (isMixedSingle) {
+        const mixed = profile as C02MixedHeapProfile
+        expect(allocation.topicsCreated, 'synthetic topics must be created in renderer (mixed)').toBe(
+          mixed.topicSpecs.length
+        )
+        expect(allocation.messagesCreated, 'synthetic messages must be created in renderer (mixed)').toBe(
+          c02MixedTotalMessages(mixed)
+        )
+      } else {
+        const uniform = profile as C02HeapProfile
+        expect(allocation.topicsCreated, 'synthetic topics must be created in renderer').toBe(uniform.syntheticTopics)
+        expect(allocation.messagesCreated, 'synthetic messages must be created in renderer').toBe(
+          uniform.syntheticTopics * uniform.syntheticMessagesPerTopic
+        )
+      }
       expect(allocation.reduxVerified, 'Redux entity projection must be verified resident (messages + blocks)').toBe(
         true
       )
@@ -1451,7 +1004,7 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
       // Audit lock: productionPath complete only when final-topic identity inside #messages, exact expected #messages DOM messages/groups,
       // and context-boundary inside #messages with final-topic-owned anchor all pass; [id^="message-"] fallback and global queries cannot satisfy it.
       // Authoritative calibration complete additionally requires effective precise heap (checked after heap sampling).
-      const expectedSingleVisible = c02ExpectedVisibleCount(profile)
+      const expectedSingleVisible = c02ExpectedVisibleCountForTopic(syntheticTopics[syntheticTopics.length - 1]!)
       expect(
         allocation.projectionStats.finalTopicDomProof,
         `final-topic DOM proof must be true for ${finalTopicId} via #messages [data-message-id]: scoped ${allocation.projectionStats.displayMessages} vs global ${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages} vs expected ${expectedSingleVisible} (min(N, productionWindow ${C02_PRODUCTION_WINDOW_MAX}) — retains 150 logically but projects 100 for large; scoped===global===expected inside #messages required; global/stale or [id^="message-"] fallback is not proof)`
@@ -1552,17 +1105,29 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
         abi: appRuntime.abiModules
       }
 
-      const result = buildBenchmarkResult(
-        environment,
-        profile,
-        logicalBytes,
-        allocation.rendererLogicalBytes,
-        heapBefore,
-        heapAfter,
-        allocation,
-        baseInformativeness,
-        precisionLabel
-      )
+      const result = isMixedSingle
+        ? buildC02MixedBenchmarkResult(
+            environment,
+            profile as C02MixedHeapProfile,
+            logicalBytes,
+            allocation.rendererLogicalBytes,
+            heapBefore,
+            heapAfter,
+            allocation,
+            baseInformativeness,
+            precisionLabel
+          )
+        : buildC02BenchmarkResult(
+            environment,
+            profile as C02HeapProfile,
+            logicalBytes,
+            allocation.rendererLogicalBytes,
+            heapBefore,
+            heapAfter,
+            allocation,
+            baseInformativeness,
+            precisionLabel
+          )
       // Authoritative artifact status — complete requires effective precise heap AND #messages production DOM proof
       const calibMetric = result.metrics.find((m) => m.id === 'calibration.complete')
       expect(
@@ -1603,11 +1168,19 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
         `[PERF-C02] MEASURED AUTHORITY: Redux entity projection (messages entity + messageIdsByTopic + blocks entity) + derived viewport/group/context via actual rendered DOM (groups=${allocation.projectionStats.groupCount} exact=${allocation.projectionStats.groupExactMatched ? 1 : 0}, display scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages} groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}, finalTopicProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}) — productionPath: ${allocation.productionPath}`
       )
       console.log(
-        `[PERF-C02] PRODUCTION PROJECTION PATH (canonical): assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required, clamped to latest-window ${C02_PRODUCTION_WINDOW_MAX}) → [data-testid="topic-item"][data-topic-id="${finalTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/#messages [data-message-id]/#messages [data-context-boundary]; productionPath=${allocation.productionPath}; productionPathComplete=${allocation.productionPathComplete ? 1 : 0} authoritativeCalibrationComplete=${baseInformativeness.informative && !!allocation.productionPathComplete ? 1 : 0} (requires precise && finite positive delta + final-topic-owned #messages proof) groups exact ${allocation.projectionStats.groupCount}/${c02ExpectedVisibleCount(profile)} via #messages [data-stable-group-id] (logical retained ${profile.syntheticMessagesPerTopic} per topic, projected ${c02ExpectedVisibleCount(profile)}) contextBoundaryInsideMessages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'} finalTopicOwned=${allocation.projectionStats.anchorGroupKey?.includes(finalTopicId) ? 1 : 0} (fallback [id^="message-"]/global never satisfies; [data-context-boundary] must be inside #messages with final-topic anchor)`
+        `[PERF-C02] PRODUCTION PROJECTION PATH (canonical): assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required, clamped to latest-window ${C02_PRODUCTION_WINDOW_MAX}) → [data-testid="topic-item"][data-topic-id="${finalTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/#messages [data-message-id]/#messages [data-context-boundary]; productionPath=${allocation.productionPath}; productionPathComplete=${allocation.productionPathComplete ? 1 : 0} authoritativeCalibrationComplete=${baseInformativeness.informative && !!allocation.productionPathComplete ? 1 : 0} (requires precise && finite positive delta + final-topic-owned #messages proof) groups exact ${allocation.projectionStats.groupCount}/${expectedSingleVisible} via #messages [data-stable-group-id] (logical retained ${isMixedSingle ? c02MixedTotalMessages(profile as C02MixedHeapProfile) + ' total' : (profile as C02HeapProfile).syntheticMessagesPerTopic + ' per topic'} , projected ${expectedSingleVisible}) contextBoundaryInsideMessages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'} finalTopicOwned=${allocation.projectionStats.anchorGroupKey?.includes(finalTopicId) ? 1 : 0} (fallback [id^="message-"]/global never satisfies; [data-context-boundary] must be inside #messages with final-topic anchor)`
       )
-      console.log(
-        `[PERF-C02] NOTE: values are directional/synthetic from deterministic synthetic projection (${profile.syntheticTopics} topics × ${profile.syntheticMessagesPerTopic} msgs × ${profile.blockContentBytes}B), not production baseline/threshold/policy/real user-data distribution.`
-      )
+      if (isMixedSingle) {
+        const mixed = profile as C02MixedHeapProfile
+        console.log(
+          `[PERF-C02] NOTE: values are directional/synthetic from deterministic MIXED synthetic projection (${mixed.topicSpecs.length} topics heterogeneous ${mixed.topicSpecs.map((s) => s.messageCount + '×' + s.blockContentBytes + 'B').join(', ')}), not production baseline/threshold/policy/real user-data distribution.`
+        )
+      } else {
+        const uniform = profile as C02HeapProfile
+        console.log(
+          `[PERF-C02] NOTE: values are directional/synthetic from deterministic synthetic projection (${uniform.syntheticTopics} topics × ${uniform.syntheticMessagesPerTopic} msgs × ${uniform.blockContentBytes}B), not production baseline/threshold/policy/real user-data distribution.`
+        )
+      }
     } else {
       // Multi-profile matrix — INDEPENDENT per-profile isolation via fresh
       // disposable profile/app/session per profile using existing E2E ownership
@@ -1620,7 +1193,7 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
       // materialized/verified (messages+blocks only).
       const entries: Array<{
         profileId: string
-        profile: C02HeapProfile
+        profile: C02HeapProfile | C02MixedHeapProfile
         logicalBytes: number
         rendererLogicalBytes: number
         heapBefore: RendererHeapSample
@@ -1632,7 +1205,10 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
       const effectiveMockPort = mockPort
       for (const entry of profiles) {
         const prefix = `c02-${entry.id}-topic`
-        const syntheticTopics = buildC02SyntheticTopicsWithPrefix(entry.profile, prefix)
+        const isMixedEntry = isC02MixedHeapProfile(entry.profile)
+        const syntheticTopics = isMixedEntry
+          ? buildC02MixedSyntheticTopicsWithPrefix(entry.profile as C02MixedHeapProfile, prefix)
+          : buildC02SyntheticTopicsWithPrefix(entry.profile as C02HeapProfile, prefix)
         const synthProblems = validateSyntheticTopics(syntheticTopics)
         expect(
           synthProblems,
@@ -1673,7 +1249,8 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
             `heap before sample must be valid for ${entry.id}: ${beforeProblems.join('; ')}`
           ).toEqual([])
 
-          const allocation = await activateReduxProjection(isolatedWindow, entry.profile, prefix, {
+          // Bounded correction: pass the exact same syntheticTopics used for canonicalBytesForTopics
+          const allocation = await activateReduxProjection(isolatedWindow, syntheticTopics, {
             waitTimeoutMs: C02_MATRIX_WAIT_TIMEOUT_MS
           })
           if (allocation.failedBlocker) {
@@ -1681,12 +1258,23 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
               `[PERF-C02] heap calibration blocked for profile ${entry.id}: ${allocation.failedBlocker}. No artifact emitted.`
             )
           }
-          expect(allocation.topicsCreated, `synthetic topics must be created for ${entry.id}`).toBe(
-            entry.profile.syntheticTopics
-          )
-          expect(allocation.messagesCreated, `synthetic messages must be created for ${entry.id}`).toBe(
-            entry.profile.syntheticTopics * entry.profile.syntheticMessagesPerTopic
-          )
+          if (isMixedEntry) {
+            const mixed = entry.profile as C02MixedHeapProfile
+            expect(allocation.topicsCreated, `synthetic topics must be created for ${entry.id} (mixed)`).toBe(
+              mixed.topicSpecs.length
+            )
+            expect(allocation.messagesCreated, `synthetic messages must be created for ${entry.id} (mixed)`).toBe(
+              c02MixedTotalMessages(mixed)
+            )
+          } else {
+            const uniform = entry.profile as C02HeapProfile
+            expect(allocation.topicsCreated, `synthetic topics must be created for ${entry.id}`).toBe(
+              uniform.syntheticTopics
+            )
+            expect(allocation.messagesCreated, `synthetic messages must be created for ${entry.id}`).toBe(
+              uniform.syntheticTopics * uniform.syntheticMessagesPerTopic
+            )
+          }
           expect(allocation.reduxVerified, `Redux entity projection must be verified for ${entry.id}`).toBe(true)
 
           const finalTopicId = syntheticTopics[syntheticTopics.length - 1]!.topicId
@@ -1773,7 +1361,7 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
         abiLane: 'electron',
         abi: appRuntime.abiModules
       }
-      const result = buildMultiBenchmarkResult(environment, entries)
+      const result = buildC02MultiBenchmarkResult(environment, entries)
       for (const m of result.metrics) {
         expect(Number.isFinite(m.value), `metric ${m.id} must be finite`).toBe(true)
       }

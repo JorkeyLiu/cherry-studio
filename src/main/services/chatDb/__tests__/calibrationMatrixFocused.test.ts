@@ -22,8 +22,10 @@ import {
   C02_HEAP_PROFILES,
   C02_HEAP_SHORT_NAME_MAP,
   C02_PROFILE_ID_CODE,
+  type C02HeapProfile,
   detectHeapPrecisionLabel,
   getC02HeapProfileMatrix,
+  isC02MixedHeapProfile,
   RENDERER_HEAP_METHOD,
   resolveC02HeapProfile,
   resolveC02HeapProfiles
@@ -264,7 +266,8 @@ describe('C-02 singular resolver — full id acceptance and matrix rejection', (
   it('singular resolver accepts bare full id', () => {
     withEnv('c02-small-v1', () => {
       const p = resolveC02HeapProfile()
-      expect(p.syntheticTopics).toBe(C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.small].syntheticTopics)
+      expect(isC02MixedHeapProfile(p)).toBe(false)
+      expect((p as C02HeapProfile).syntheticTopics).toBe(C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.small].syntheticTopics)
     })
     withEnv('c02-default-v1', () => {
       const p = resolveC02HeapProfile()
@@ -272,11 +275,13 @@ describe('C-02 singular resolver — full id acceptance and matrix rejection', (
     })
     withEnv('c02-large-v1', () => {
       const p = resolveC02HeapProfile()
-      expect(p.syntheticTopics).toBe(3)
+      expect(isC02MixedHeapProfile(p)).toBe(false)
+      expect((p as C02HeapProfile).syntheticTopics).toBe(3)
     })
     withEnv('c02-boundary-v1', () => {
       const p = resolveC02HeapProfile()
-      expect(p.syntheticTopics).toBe(2)
+      expect(isC02MixedHeapProfile(p)).toBe(false)
+      expect((p as C02HeapProfile).syntheticTopics).toBe(2)
     })
   })
 
@@ -287,7 +292,8 @@ describe('C-02 singular resolver — full id acceptance and matrix rejection', (
     })
     withEnv('large', () => {
       const p = resolveC02HeapProfile()
-      expect(p.syntheticTopics).toBe(C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.large].syntheticTopics)
+      expect(isC02MixedHeapProfile(p)).toBe(false)
+      expect((p as C02HeapProfile).syntheticTopics).toBe(C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.large].syntheticTopics)
     })
   })
 
