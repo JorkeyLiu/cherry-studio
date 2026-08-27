@@ -63,18 +63,27 @@ const residentRegistrySlice = createSlice({
     markSegmentsLoaded(state, action: PayloadAction<string>) {
       const topicId = action.payload
       const entry = state.entries[topicId]
+      // Standalone segment replacement must invalidate the joint completeness claim
+      // and advance applicabilityGeneration (LOCK-302). Only a same-generation
+      // staged validated chat-data+segment pair may establish or retain
+      // joint residency; standalone success leaves the topic non-resident
+      // until the next paired joint republish.
       if (!entry) {
         state.entries[topicId] = {
           chatData: false,
           segments: true,
           residentTopic: false,
-          applicabilityGeneration: 0
+          applicabilityGeneration: 1
         }
         return
       }
-      // Standalone segment path must never establish or preserve a joint-resident claim
-      // (LOCK-302). Only the same-generation staged joint publication may set residentTopic.
-      entry.segments = true
+      const nextGen = (entry.applicabilityGeneration ?? 0) + 1
+      state.entries[topicId] = {
+        chatData: false,
+        segments: true,
+        residentTopic: false,
+        applicabilityGeneration: nextGen
+      }
     }
   },
   extraReducers: (builder) => {
@@ -114,3 +123,26 @@ export const selectGeneration = (state: { residentRegistry: ResidentRegistryStat
 
 // Helpers for non-Redux contexts (tests) — direct map access is via Redux state
 export const isResidentTopic = (entry: ResidentEntry | undefined): boolean => !!entry?.residentTopic
+
+/**
+ * Production guarded publication check for the single joint resident-complete action.
+ * Returns true if the joint publication should be discarded (stale/missing entry
+ * or generation mismatch). Extracted so the same guard can be exercised by the
+ * root reducer and by integration tests without duplicating logic.
+ */
+export const shouldDiscardJointPublish = (state: unknown, payload: unknown): boolean => {
+  const p = payload as Partial<JointPublishPayload> | undefined
+  const topicId = p?.topicId
+  const generation = p?.generation
+  const entry = (state as any)?.residentRegistry?.entries?.[topicId as string]
+  const currentGen: number | undefined = entry?.applicabilityGeneration
+  if (
+    typeof topicId !== 'string' ||
+    typeof generation !== 'number' ||
+    entry === undefined ||
+    currentGen !== generation
+  ) {
+    return true
+  }
+  return false
+}

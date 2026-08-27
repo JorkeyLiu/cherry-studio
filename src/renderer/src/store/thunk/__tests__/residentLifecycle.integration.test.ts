@@ -16,7 +16,8 @@ import newMessagesReducer from '@renderer/store/newMessage'
 import residentRegistryReducer, {
   bumpGeneration,
   JOINT_PUBLISH_COMPLETE,
-  publishResidentComplete
+  publishResidentComplete,
+  shouldDiscardJointPublish
 } from '@renderer/store/residentRegistry'
 import topicSegmentReducer from '@renderer/store/topicSegment'
 import type { FetchMessagesWindowResponse } from '@shared/chatDb'
@@ -46,7 +47,8 @@ function makeWindowResponse(topicId: string, messages: Array<{ id: string }>): F
   } as unknown as FetchMessagesWindowResponse
 }
 
-// replicate rootReducer stale-generation guard from store/index.ts
+// production guarded publication — exercises the same shouldDiscardJointPublish
+// helper used by the real store/index.ts rootReducer, without duplicating the guard
 const appReducer = combineReducers({
   messages: newMessagesReducer,
   messageBlocks: messageBlocksReducer,
@@ -55,21 +57,12 @@ const appReducer = combineReducers({
 })
 const rootReducer: typeof appReducer = (state, action: any) => {
   if (action?.type === JOINT_PUBLISH_COMPLETE) {
-    const payload = action.payload as { topicId: string; generation: number; windowResponse: any }
-    const topicId: string | undefined = payload?.topicId
-    const generation: number | undefined = payload?.generation
-    const windowResponse = payload?.windowResponse
-    const entry = (state as any)?.residentRegistry?.entries?.[topicId]
-    const currentGen: number | undefined = entry?.applicabilityGeneration
-    if (
-      typeof topicId !== 'string' ||
-      typeof generation !== 'number' ||
-      entry === undefined ||
-      currentGen !== generation
-    ) {
+    if (shouldDiscardJointPublish(state, action.payload)) {
       return state as any
     }
     try {
+      const windowResponse = action.payload?.windowResponse
+      const topicId = action.payload?.topicId as string
       if (windowResponse?.window) {
         setLatestWindowCompleteness(topicId, {
           hasMoreBefore: !!windowResponse.window.hasMoreBefore,

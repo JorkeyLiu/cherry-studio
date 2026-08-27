@@ -239,13 +239,14 @@ describe('loadTopicSegmentsThunk stale discard', () => {
     expect((store.getState() as any).residentRegistry.entries[topicId].residentTopic).toBe(false)
 
     const { loadTopicSegmentsThunk } = await import('../topicSegmentThunk')
-    // standalone load at same generation should set segments true but NOT resident
+    // standalone load at same generation must set segments true, keep non-resident,
+    // and advance generation so the previous joint claim cannot cache-hit
     await (loadTopicSegmentsThunk as any)(topicId)(store.dispatch as any, store.getState as any, undefined)
     const entry = (store.getState() as any).residentRegistry.entries[topicId]
     expect(entry.segments).toBe(true)
     expect(entry.residentTopic).toBe(false)
     expect(entry.chatData).toBe(false)
-    expect(entry.applicabilityGeneration).toBe(1)
+    expect(entry.applicabilityGeneration).toBe(2)
   })
 
   it('standalone segment load discards when resident applicabilityGeneration advances before publication', async () => {
@@ -288,5 +289,179 @@ describe('loadTopicSegmentsThunk stale discard', () => {
     // Should be discarded due to generation mismatch — no replace dispatched beyond the spy's resident bumps
     const replaceCalls = dispatchSpy.mock.calls.filter((c: any[]) => c[0]?.type === replaceSegmentsForTopic.type)
     expect(replaceCalls.length).toBe(0)
+  })
+
+  it('BLOCKER: standalone segment replacement invalidates prior joint residency, blocks cache-hit until next joint republish', async () => {
+    const topicId = 't-blocker-standalone'
+    const segStandalone = {
+      id: 'seg-standalone-blocker',
+      topicId,
+      name: 'SoloBlocker',
+      messageIds: [],
+      color: undefined,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z'
+    }
+    mockListSegments.mockResolvedValue([segStandalone] as any)
+
+    const {
+      default: residentRegistryReducer,
+      bumpGeneration,
+      publishResidentComplete,
+      shouldDiscardJointPublish,
+      JOINT_PUBLISH_COMPLETE
+    } = await import('@renderer/store/residentRegistry')
+    const { default: newMessagesReducer } = await import('@renderer/store/newMessage')
+    const { default: messageBlocksReducer } = await import('@renderer/store/messageBlock')
+    const { default: topicSegmentReducer } = await import('@renderer/store/topicSegment')
+    const { combineReducers, configureStore } = await import('@reduxjs/toolkit')
+    const { setLatestWindowCompleteness } = await import('@renderer/pages/home/Messages/messageWindow')
+
+    const appReducerLocal = combineReducers({
+      messages: newMessagesReducer,
+      messageBlocks: messageBlocksReducer,
+      topicSegments: topicSegmentReducer,
+      residentRegistry: residentRegistryReducer
+    })
+    const rootReducerLocal: typeof appReducerLocal = (state, action: any) => {
+      if (action?.type === JOINT_PUBLISH_COMPLETE) {
+        if (shouldDiscardJointPublish(state, action.payload)) return state as any
+        try {
+          const wr = action.payload?.windowResponse
+          const tid = action.payload?.topicId as string
+          if (wr?.window)
+            setLatestWindowCompleteness(tid, {
+              hasMoreBefore: !!wr.window.hasMoreBefore,
+              hasMoreAfter: !!wr.window.hasMoreAfter
+            })
+        } catch {}
+      }
+      return appReducerLocal(state, action)
+    }
+    const store = configureStore({ reducer: rootReducerLocal })
+
+    // Establish joint residency via real publishResidentComplete path (same as production)
+    store.dispatch(bumpGeneration(topicId))
+    const gen1 = (store.getState() as any).residentRegistry.entries[topicId].applicabilityGeneration as number
+    expect(gen1).toBe(1)
+    const windowResponse: any = {
+      messages: [{ id: 'm-joint-1', topicId, role: 'user', blocks: [] }] as any,
+      blocks: [] as any,
+      window: {
+        topicId,
+        kind: 'latest',
+        completeness: 'window',
+        anchorMessageId: null,
+        requested: { limit: 10 },
+        firstMessageId: 'm-joint-1',
+        lastMessageId: 'm-joint-1',
+        returnedCount: 1,
+        hasMoreBefore: false,
+        hasMoreAfter: false
+      }
+    }
+    const jointSegments: any[] = [
+      {
+        id: 'seg-joint-1',
+        topicId,
+        name: 'Joint',
+        messageIds: [],
+        color: undefined,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+    ]
+    store.dispatch(publishResidentComplete({ topicId, generation: gen1, windowResponse, segments: jointSegments }))
+    const entryJoint = (store.getState() as any).residentRegistry.entries[topicId]
+    expect(entryJoint.residentTopic).toBe(true)
+    expect(entryJoint.chatData).toBe(true)
+    expect(entryJoint.segments).toBe(true)
+    expect(entryJoint.applicabilityGeneration).toBe(1)
+    // cache-hit would succeed here (resident true, has index)
+    expect((store.getState() as any).messages.messageIdsByTopic[topicId]).toEqual(['m-joint-1'])
+
+    // Standalone segment replacement via real thunk path — must invalidate joint claim and bump generation
+    const { loadTopicSegmentsThunk } = await import('../topicSegmentThunk')
+    await (loadTopicSegmentsThunk as any)(topicId)(store.dispatch as any, store.getState as any, undefined)
+
+    const entryAfterStandalone = (store.getState() as any).residentRegistry.entries[topicId]
+    expect(entryAfterStandalone.residentTopic).toBe(false)
+    expect(entryAfterStandalone.chatData).toBe(false)
+    expect(entryAfterStandalone.segments).toBe(true)
+    expect(entryAfterStandalone.applicabilityGeneration).toBe(2)
+    // segments projection updated to standalone value, but messages projection unchanged
+    expect((store.getState() as any).topicSegments.segmentsByTopic[topicId]).toEqual(['seg-standalone-blocker'])
+    expect((store.getState() as any).messages.messageIdsByTopic[topicId]).toEqual(['m-joint-1'])
+    // cache-hit must now be MISS — loadTopicMessagesThunk would not hit because resident false
+    // prove by checking guard directly
+    const isHit = !!entryAfterStandalone.residentTopic && entryAfterStandalone.chatData && entryAfterStandalone.segments
+    expect(isHit).toBe(false)
+
+    // stale joint publish at old generation must be discarded (no overwrite, no residency restore)
+    const staleWindow: any = {
+      messages: [{ id: 'm-stale', topicId, role: 'user', blocks: [] }] as any,
+      blocks: [] as any,
+      window: {
+        topicId,
+        kind: 'latest',
+        completeness: 'window',
+        anchorMessageId: null,
+        requested: { limit: 10 },
+        firstMessageId: 'm-stale',
+        lastMessageId: 'm-stale',
+        returnedCount: 1,
+        hasMoreBefore: false,
+        hasMoreAfter: false
+      }
+    }
+    const beforeMessages = structuredClone((store.getState() as any).messages.messageIdsByTopic[topicId])
+    const beforeSegments = structuredClone((store.getState() as any).topicSegments.segmentsByTopic[topicId])
+    store.dispatch(
+      publishResidentComplete({ topicId, generation: gen1, windowResponse: staleWindow, segments: jointSegments })
+    )
+    expect((store.getState() as any).messages.messageIdsByTopic[topicId]).toEqual(beforeMessages)
+    expect((store.getState() as any).topicSegments.segmentsByTopic[topicId]).toEqual(beforeSegments)
+    expect((store.getState() as any).residentRegistry.entries[topicId].residentTopic).toBe(false)
+    expect((store.getState() as any).messages.entities['m-stale']).toBeUndefined()
+
+    // Next paired joint at current generation restores residency and allows cache-hit
+    const gen2 = (store.getState() as any).residentRegistry.entries[topicId].applicabilityGeneration as number
+    expect(gen2).toBe(2)
+    const windowResponse2: any = {
+      messages: [{ id: 'm-joint-2', topicId, role: 'user', blocks: [] }] as any,
+      blocks: [] as any,
+      window: {
+        topicId,
+        kind: 'latest',
+        completeness: 'window',
+        anchorMessageId: null,
+        requested: { limit: 10 },
+        firstMessageId: 'm-joint-2',
+        lastMessageId: 'm-joint-2',
+        returnedCount: 1,
+        hasMoreBefore: false,
+        hasMoreAfter: false
+      }
+    }
+    const jointSegments2: any[] = [
+      {
+        id: 'seg-joint-2',
+        topicId,
+        name: 'Joint2',
+        messageIds: [],
+        color: undefined,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+    ]
+    store.dispatch(
+      publishResidentComplete({ topicId, generation: gen2, windowResponse: windowResponse2, segments: jointSegments2 })
+    )
+    const entryRestored = (store.getState() as any).residentRegistry.entries[topicId]
+    expect(entryRestored.residentTopic).toBe(true)
+    expect(entryRestored.chatData).toBe(true)
+    expect(entryRestored.segments).toBe(true)
+    expect((store.getState() as any).messages.messageIdsByTopic[topicId]).toEqual(['m-joint-2'])
+    expect((store.getState() as any).topicSegments.segmentsByTopic[topicId]).toEqual(['seg-joint-2'])
   })
 })

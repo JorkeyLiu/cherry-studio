@@ -45,7 +45,7 @@ import note from './note'
 import nutstore from './nutstore'
 import ocr from './ocr'
 import preprocess from './preprocess'
-import residentRegistryReducer, { JOINT_PUBLISH_COMPLETE } from './residentRegistry'
+import residentRegistryReducer, { JOINT_PUBLISH_COMPLETE, shouldDiscardJointPublish } from './residentRegistry'
 import runtime from './runtime'
 import settings from './settings'
 import shortcuts from './shortcuts'
@@ -87,22 +87,13 @@ const appReducer = combineReducers({
 
 const rootReducer: typeof appReducer = (state, action: any) => {
   if (action?.type === JOINT_PUBLISH_COMPLETE) {
-    const payload = action.payload as { topicId: string; generation: number; windowResponse: any }
-    const topicId: string | undefined = payload?.topicId
-    const generation: number | undefined = payload?.generation
-    const windowResponse = payload?.windowResponse
-    const entry = (state as any)?.residentRegistry?.entries?.[topicId]
-    const currentGen: number | undefined = entry?.applicabilityGeneration
-    if (
-      typeof topicId !== 'string' ||
-      typeof generation !== 'number' ||
-      entry === undefined ||
-      currentGen !== generation
-    ) {
+    if (shouldDiscardJointPublish(state, action.payload)) {
       // stale or missing registry entry — discard joint publication atomically
       return state as any
     }
     try {
+      const windowResponse = action.payload?.windowResponse
+      const topicId = action.payload?.topicId as string
       if (windowResponse?.window) {
         setLatestWindowCompleteness(topicId, {
           hasMoreBefore: !!windowResponse.window.hasMoreBefore,

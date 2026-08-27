@@ -59,6 +59,10 @@ import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecy
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { clearPendingNavigate, getPendingNavigate } from '@renderer/services/MessagesService'
 import {
+  captureResidentGeneration,
+  shouldDiscardPaginationForResident
+} from '@renderer/services/paginationResidentGuard'
+import {
   currentPhaseCorrelation,
   recordPhaseDurationForCorrelation,
   recordPhaseEndpoint
@@ -1083,9 +1087,7 @@ const Messages = ({
     const topicGeneration = currentState.topicGeneration
     const topicIdAtStart = topic.id
     const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
-    const residentGenAtStart = (store.getState() as any)?.residentRegistry?.entries?.[topicIdAtStart]
-      ?.applicabilityGeneration as number | undefined
-    const capturedResidentGen = residentGenAtStart ?? 0
+    const capturedResidentGen = captureResidentGeneration(() => store.getState(), topicIdAtStart)
     viewportDispatch({ type: 'load/start', direction: 'older', token: loadToken })
 
     const container = scrollContainerRef.current
@@ -1139,9 +1141,8 @@ const Messages = ({
             viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
             return
           }
-          const currentResidentGen = (store.getState() as any)?.residentRegistry?.entries?.[topicIdAtStart]
-            ?.applicabilityGeneration as number | undefined
-          if ((currentResidentGen ?? 0) !== capturedResidentGen) {
+          const currentResidentGen = captureResidentGeneration(() => store.getState(), topicIdAtStart)
+          if (shouldDiscardPaginationForResident(capturedResidentGen, currentResidentGen)) {
             viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
             return
           }
@@ -1239,9 +1240,7 @@ const Messages = ({
     const topicGeneration = currentState.topicGeneration
     const topicIdAtStart = topic.id
     const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
-    const residentGenAtStart = (store.getState() as any)?.residentRegistry?.entries?.[topicIdAtStart]
-      ?.applicabilityGeneration as number | undefined
-    const capturedResidentGen = residentGenAtStart ?? 0
+    const capturedResidentGen = captureResidentGeneration(() => store.getState(), topicIdAtStart)
     viewportDispatch({ type: 'load/start', direction: 'newer', token: loadToken })
 
     const container = scrollContainerRef.current
@@ -1292,9 +1291,8 @@ const Messages = ({
             viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
             return
           }
-          const currentResidentGen = (store.getState() as any)?.residentRegistry?.entries?.[topicIdAtStart]
-            ?.applicabilityGeneration as number | undefined
-          if ((currentResidentGen ?? 0) !== capturedResidentGen) {
+          const currentResidentGen = captureResidentGeneration(() => store.getState(), topicIdAtStart)
+          if (shouldDiscardPaginationForResident(capturedResidentGen, currentResidentGen)) {
             viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
             return
           }
