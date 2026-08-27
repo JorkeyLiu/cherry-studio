@@ -36,6 +36,12 @@ import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecy
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
 import { currentPhaseCorrelation, recordPhaseDuration } from '@renderer/services/phaseTimingDiagnostics'
+import {
+  recordResidentReadDiscard,
+  recordResidentReadHit,
+  recordResidentReadMiss,
+  recordStagedLatency
+} from '@renderer/services/residentReadDiagnostics'
 import { endSpan } from '@renderer/services/SpanManagerService'
 import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/services/StreamProcessingService'
 import {
@@ -1732,6 +1738,7 @@ export const loadTopicMessagesThunk =
     // Any component absence or generation mismatch is a miss. Registry presence/residency,
     // not messageIds.length, decides eligibility — empty complete topics are valid hits.
     // Distinction between absent index (miss) and present empty array (hit if resident) is preserved.
+    // Diagnostics: bounded scalar hit/miss reason counters, no IDs/content retained.
     const cachedIds = state.messages.messageIdsByTopic[topicId]
     const hasCachedIndex = cachedIds !== undefined
     if (!forceReload && hasCachedIndex) {
@@ -1744,6 +1751,7 @@ export const loadTopicMessagesThunk =
           // Test environment without registry slice (legacy tests) — preserve legacy hit semantics
           // Legacy: only non-empty cached topics are hits; empty falls through to fetch
           if (cachedIds.length > 0) {
+            recordResidentReadHit()
             const cachedState = getState()
             const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
               asst.topics.some((t) => t.id === topicId)
@@ -1753,12 +1761,13 @@ export const loadTopicMessagesThunk =
             }
             return
           }
-          // empty legacy -> miss, fall through
+          // empty legacy -> miss, fall through (reason captured below)
         } else {
           const residentEntry = registry.entries?.[topicId]
           const isResidentHit =
             !!residentEntry && residentEntry.residentTopic && residentEntry.chatData && residentEntry.segments
           if (isResidentHit) {
+            recordResidentReadHit()
             const cachedState = getState()
             const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
               asst.topics.some((t) => t.id === topicId)
@@ -1769,6 +1778,37 @@ export const loadTopicMessagesThunk =
             return
           }
           // miss -> fall through to staged fetch (including absent vs empty distinction preserved)
+        }
+      }
+    }
+
+    // Record bounded miss reason for the actual staged-fetch decision (no IDs retained)
+    // Forced takes precedence, then missing index, deletion pending, then completeness checks.
+    {
+      if (forceReload) {
+        recordResidentReadMiss('forced')
+      } else if (!hasCachedIndex) {
+        recordResidentReadMiss('noIndex')
+      } else {
+        const deletionGenForMiss = getDeletionGeneration(topicId)
+        if (deletionGenForMiss !== 0) {
+          recordResidentReadMiss('deletion')
+        } else {
+          const registryForMiss = (getState() as any).residentRegistry
+          if (!registryForMiss) {
+            // legacy empty (non-empty would have returned hit above)
+            recordResidentReadMiss('legacyEmpty')
+          } else {
+            const entryForMiss = registryForMiss.entries?.[topicId]
+            if (!entryForMiss) {
+              recordResidentReadMiss('noEntry')
+            } else if (!entryForMiss.residentTopic || !entryForMiss.chatData || !entryForMiss.segments) {
+              recordResidentReadMiss('incomplete')
+            } else {
+              // Should have been hit above; fallback generic
+              recordResidentReadMiss('incomplete')
+            }
+          }
         }
       }
     }
@@ -1799,26 +1839,38 @@ export const loadTopicMessagesThunk =
 
       let response: FetchMessagesWindowResponse
       let segmentsRaw: any[]
+      const stagedStartMs = typeof performance !== 'undefined' ? performance.now() : Date.now()
+      let stagedSuccess = false
       try {
         ;[response, segmentsRaw] = await Promise.all([windowPromise, segmentsPromise])
+        stagedSuccess = true
       } catch (e) {
+        const stagedEndFail = typeof performance !== 'undefined' ? performance.now() : Date.now()
+        recordStagedLatency(Math.max(0, stagedEndFail - stagedStartMs), false)
         logger.error(`[loadTopicMessagesThunk] staged fetch failed for ${topicId}:`, e as Error)
         throw e
+      }
+      {
+        const stagedEndMs = typeof performance !== 'undefined' ? performance.now() : Date.now()
+        recordStagedLatency(Math.max(0, stagedEndMs - stagedStartMs), stagedSuccess)
       }
 
       // Validate stale/deletion/current-topic/request-sequence and generation still current
       if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== requestSeq) {
+        recordResidentReadDiscard('superseded')
         logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (superseded same-topic request)`)
         return
       }
 
       const currentId = getState().messages.currentTopicId
       if (currentId !== null && currentId !== undefined && currentId !== topicId) {
+        recordResidentReadDiscard('currentMoved')
         logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (current moved)`)
         return
       }
 
       if (isDeletionStale(topicId, deletionGenAtStart)) {
+        recordResidentReadDiscard('deletedDuringFetch')
         logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (deleted during fetch)`)
         return
       }
@@ -1826,11 +1878,13 @@ export const loadTopicMessagesThunk =
       const currentGeneration = ((getState() as any).residentRegistry?.entries?.[topicId]?.applicabilityGeneration ??
         0) as number
       if (currentGeneration !== generation) {
+        recordResidentReadDiscard('generationMismatch')
         logger.warn(`[loadTopicMessagesThunk] stale generation discard for ${topicId} (generation mismatch)`)
         return
       }
 
       if (!validateWindowResponse(request, response!)) {
+        recordResidentReadDiscard('malformed')
         logger.error(`[loadTopicMessagesThunk] malformed window response for ${topicId}`, {
           window: (response as any)?.window
         } as unknown as Error)
