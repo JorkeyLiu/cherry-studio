@@ -325,7 +325,7 @@ Measurements for Phase 3 were directional L3 reference (clean 50-message / high-
 
 ### 6.5 Phase 4: Bounded Memory and Cache
 
-- **Status**: **Design study complete (2026-08-20) — documentation only; exit Open** pending calibration and implementation acceptance.
+- **Status**: **Lifecycle foundation implemented (2026-08-27) — renderer resident-topic completeness/applicability-generation registry + same-generation staged joint publication via one dispatch; no B-01–B-05 retention/eviction/TTL/LRU/pin policy, capacity defaults, or heap thresholds adopted; exit remains Open** (design study complete 2026-08-20; foundation groundwork only).
 - **Entry**: Phase 2 complete; explicit approval.
 - **Content**: Cache invalidation rules, size bounds, retention/eviction design for renderer-side caches; bounded state for resident projections, viewport window, scroll snapshots, ContentSearch handles, context-info memo; measured pinned working set.
 - **Exit**: Must demonstrate bounded evictable caches, explicit pinned exception, invalidation rules, and measurable miss paths. Not claimed.
@@ -333,8 +333,8 @@ Measurements for Phase 3 were directional L3 reference (clean 50-message / high-
 
 #### 6.5.1 Design constraints
 
-- Design/documentation only; no code, schema, IPC, or `architecture.md` edit.
-- Evictable caches bounded; active/pinned working set excluded but measured.
+- Lifecycle foundation is code (resident registry + staged joint publication) but remains groundwork only — no retention/eviction/TTL/LRU/pin policy, no B-01–B-05 capacity/byte enforcement, no IPC/schema, no persistence/sync of registry, no UI behavior adopted.
+- Evictable caches bounded (target design); active/pinned working set excluded but measured.
 - Context-window and request-stream semantics preserved; pinned topics never evicted.
 - Phase 3 structurally Closed (ARCH-009/010); PERF workstreams Open (ARCH-011).
 - Main SQLite authoritative; renderer projection disposable; whole-topic eviction atomic.
@@ -404,7 +404,7 @@ Required metrics: resident topic count (evictable vs pinned), logical bytes per-
 
 #### 6.5.9 Acceptance disposition
 
-Phase 4 exit remains Open. Bounded evictable caches, staged same-generation publication, TTL->oversized->LRU ordering, whole-topic atomic eviction, viewport/scroll/search bounds, and complete cache-miss/eviction observability have not been demonstrated under exercised workload. Directional synthetic calibrations (C-01 logical payload, pinned working-set, C-02 heap) demonstrate harness correctness and partition-sum accounting only; no capacity default is adopted. Single oversized topic binding and enlargement ratios (e.g., ~14-18x unlimited vs bounded) are directional only.
+Phase 4 exit remains Open. Lifecycle foundation (non-persisted per-topic `chatData`/`segments`/`residentTopic = chatData && segments` + monotonic `applicabilityGeneration` registry; same-generation staged joint publication of latest-window chat-data plus segments via one dispatch; deletion advance/clear before purge; fail-closed staged discard) is implemented; no retention/eviction/TTL/LRU/pin policy, no B-01–B-05 capacity/byte enforcement, no canonical accounting usage in runtime, no IPC/schema/persistence/UI changes are adopted. Bounded evictable caches, TTL->oversized->LRU ordering, whole-topic atomic eviction, viewport/scroll/search bounds, and complete cache-miss/eviction observability have not been demonstrated under exercised workload. Directional synthetic calibrations (C-01 logical payload, pinned working-set, C-02 heap) demonstrate harness correctness and partition-sum accounting only; no capacity default is adopted. Single oversized topic binding and enlargement ratios (e.g., ~14-18x unlimited vs bounded) are directional only.
 
 ### 6.6 Phase 5: Data-Access Contract
 

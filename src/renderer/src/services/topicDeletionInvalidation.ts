@@ -28,6 +28,10 @@ import { removeScrollSnapshotsForTopicIds } from '@renderer/services/scrollSnaps
 import store from '@renderer/store'
 import { removeManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
+import {
+  invalidateForDeletion as invalidateResidentForDeletion,
+  resetAllResidentRegistry
+} from '@renderer/store/residentRegistry'
 import { clearSegmentsForTopic } from '@renderer/store/topicSegment'
 
 const deletionGenerations = new Map<string, number>()
@@ -99,6 +103,12 @@ export function bumpDeletionGeneration(topicId: string): number {
   deletionGenerations.set(topicId, next)
   // Invalidate renderer projections for this topic atomically.
   clearLatestWindowCompleteness(topicId)
+  // Advance resident lifecycle generation and clear completeness before Redux purge
+  try {
+    store.dispatch(invalidateResidentForDeletion(topicId))
+  } catch {
+    // best-effort; resident invalidation must not throw
+  }
   // bumpAndInvalidate clears closure cache and advances its generation; for
   // topics with no cached entry, explicit clear ensures no phantom hit.
   try {
@@ -231,6 +241,11 @@ export function captureDeletionGeneration(topicId: string): number {
 export function resetAllDeletionGenerationsForTests(): void {
   deletionGenerations.clear()
   deletionListeners.clear()
+  try {
+    store.dispatch(resetAllResidentRegistry())
+  } catch {
+    // best-effort
+  }
 }
 
 /** For tests/diagnostics: clear all and window/closure (not part of product flow). */
@@ -238,6 +253,11 @@ export function resetAllDeletionStateForTests(): void {
   deletionGenerations.clear()
   deletionListeners.clear()
   clearAllLatestWindowCompleteness()
+  try {
+    store.dispatch(resetAllResidentRegistry())
+  } catch {
+    // best-effort
+  }
 }
 
 /** For tests: reset only the generation subscription state. */

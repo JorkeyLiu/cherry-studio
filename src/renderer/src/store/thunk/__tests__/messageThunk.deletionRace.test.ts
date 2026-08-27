@@ -26,11 +26,14 @@ const { mocks } = vi.hoisted(() => ({
   mocks: {
     ensureTopicAnchorEstablished: vi.fn(),
     fetchMessagesWindow: vi.fn(),
+    listSegments: vi.fn(),
     fetchMessages: vi.fn(),
     messagesReceived: vi.fn((p: unknown) => ({ type: 'newMessages/messagesReceived', payload: p })),
     setTopicLoading: vi.fn((p: unknown) => ({ type: 'newMessages/setTopicLoading', payload: p })),
     setCurrentTopicId: vi.fn((p: unknown) => ({ type: 'newMessages/setCurrentTopicId', payload: p })),
     upsertManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/upsertManyBlocks', payload: p })),
+    bumpGeneration: vi.fn((p: unknown) => ({ type: 'residentRegistry/bumpGeneration', payload: p })),
+    publishResidentComplete: vi.fn((p: unknown) => ({ type: 'resident/jointPublishComplete', payload: p })),
     loadTopicSegmentsThunk: vi.fn(() => () => Promise.resolve()),
     updateTopicUpdatedAt: vi.fn()
   }
@@ -62,6 +65,7 @@ vi.mock('@renderer/services/anchorService', () => ({
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     fetchMessagesWindow: mocks.fetchMessagesWindow,
+    listSegments: mocks.listSegments,
     fetchMessages: mocks.fetchMessages,
     appendMessage: vi.fn(),
     deleteMessagesWithSegments: vi.fn(),
@@ -94,6 +98,16 @@ vi.mock('@renderer/store/index', () => ({
   default: { dispatch: vi.fn(), getState: () => ({}) as any },
   useAppDispatch: () => vi.fn()
 }))
+
+vi.mock('@renderer/store/residentRegistry', async () => {
+  const actual = await vi.importActual<any>('@renderer/store/residentRegistry')
+  return {
+    ...actual,
+    bumpGeneration: mocks.bumpGeneration,
+    publishResidentComplete: mocks.publishResidentComplete,
+    JOINT_PUBLISH_COMPLETE: 'resident/jointPublishComplete'
+  }
+})
 
 vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
   loadTopicSegmentsThunk: mocks.loadTopicSegmentsThunk
@@ -199,10 +213,35 @@ describe('loadTopicMessagesThunk latest in-flight deletion race (focused)', () =
         currentTopicId: 't1',
         displayCount: 10
       },
-      messageBlocks: { entities: {} }
+      messageBlocks: { entities: {} },
+      residentRegistry: { entries: {} }
     }
+    mocks.listSegments.mockResolvedValue([])
+    mocks.bumpGeneration.mockImplementation((topicId: unknown) => {
+      const tid = topicId as string
+      const prev = storeState.residentRegistry.entries[tid]
+      const next = (prev?.applicabilityGeneration ?? 0) + 1
+      storeState.residentRegistry.entries[tid] = {
+        chatData: false,
+        segments: false,
+        residentTopic: false,
+        applicabilityGeneration: next
+      }
+      return { type: 'residentRegistry/bumpGeneration', payload: tid }
+    })
+    mocks.publishResidentComplete.mockImplementation((payload: unknown) => {
+      const p = payload as any
+      const entry = storeState.residentRegistry.entries[p.topicId]
+      if (entry && entry.applicabilityGeneration === p.generation) {
+        entry.chatData = true
+        entry.segments = true
+        entry.residentTopic = true
+      }
+      return { type: 'resident/jointPublishComplete', payload: p }
+    })
     const { resetAllDeletionGenerationsForTests } = await import('@renderer/services/topicDeletionInvalidation')
     resetAllDeletionGenerationsForTests()
+    storeState.residentRegistry.entries = {}
     const { clearAllLatestWindowCompleteness } = await import('@renderer/pages/home/Messages/messageWindow')
     clearAllLatestWindowCompleteness()
   })
@@ -261,10 +300,8 @@ describe('loadTopicMessagesThunk latest in-flight deletion race (focused)', () =
       resolveFetch!(validRes)
       await promise
 
-      // Fail-closed: stale response discarded/not re-published — no Redux/block publication, no segment dispatch, no anchor, no completeness
-      expect(mocks.messagesReceived).not.toHaveBeenCalled()
-      expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
-      expect(mocks.loadTopicSegmentsThunk).not.toHaveBeenCalled()
+      // Fail-closed: stale response discarded/not re-published — no joint publication, no anchor
+      expect(mocks.publishResidentComplete).not.toHaveBeenCalled()
       expect(mocks.ensureTopicAnchorEstablished).not.toHaveBeenCalled()
       expect(getLatestWindowCompleteness('t1')).toBeUndefined()
 
@@ -283,7 +320,6 @@ describe('loadTopicMessagesThunk latest in-flight deletion race (focused)', () =
   it('soft-delete (no bump) still publishes valid latest response', { timeout: 60_000 }, async () => {
     const { loadTopicMessagesThunk } = await import('../messageThunk')
     const { getDeletionGeneration } = await import('@renderer/services/topicDeletionInvalidation')
-    const { getLatestWindowCompleteness } = await import('@renderer/pages/home/Messages/messageWindow')
 
     let resolveFetch: (v: FetchMessagesWindowResponse) => void
     mocks.fetchMessagesWindow.mockImplementation(
@@ -309,7 +345,9 @@ describe('loadTopicMessagesThunk latest in-flight deletion race (focused)', () =
     resolveFetch!(validRes)
     await promise
 
-    expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
-    expect(getLatestWindowCompleteness('t1')).toEqual({ hasMoreBefore: false, hasMoreAfter: false })
+    expect(mocks.publishResidentComplete).toHaveBeenCalledTimes(1)
+    const payload = mocks.publishResidentComplete.mock.calls[0][0] as any
+    expect(payload.topicId).toBe('t1')
+    expect(payload.windowResponse.messages[0].id).toBe('m-soft-0')
   })
 })

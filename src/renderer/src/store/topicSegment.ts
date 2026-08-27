@@ -1,6 +1,8 @@
 import { createEntityAdapter, createSlice, type PayloadAction } from '@reduxjs/toolkit'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 
+import { publishResidentComplete } from './residentRegistry'
+
 const topicSegmentAdapter = createEntityAdapter<TopicSegment>()
 
 interface TopicSegmentsState {
@@ -57,12 +59,34 @@ const topicSegmentSlice = createSlice({
       const ids = state.segmentsByTopic[topicId] || []
       topicSegmentAdapter.removeMany(state.segments, ids)
       delete state.segmentsByTopic[topicId]
+    },
+    replaceSegmentsForTopic: (state, action: PayloadAction<{ topicId: string; segments: TopicSegment[] }>) => {
+      const { topicId, segments } = action.payload
+      const oldIds = state.segmentsByTopic[topicId] || []
+      topicSegmentAdapter.removeMany(state.segments, oldIds)
+      topicSegmentAdapter.upsertMany(state.segments, segments)
+      state.segmentsByTopic[topicId] = segments.map((s) => s.id)
     }
+  },
+  extraReducers: (builder) => {
+    builder.addCase(publishResidentComplete, (state, action) => {
+      const { topicId, segments } = action.payload
+      const oldIds = state.segmentsByTopic[topicId] || []
+      topicSegmentAdapter.removeMany(state.segments, oldIds)
+      topicSegmentAdapter.upsertMany(state.segments, segments)
+      state.segmentsByTopic[topicId] = segments.map((s) => s.id)
+    })
   }
 })
 
-export const { addSegment, updateSegment, removeSegment, loadSegments, clearSegmentsForTopic } =
-  topicSegmentSlice.actions
+export const {
+  addSegment,
+  updateSegment,
+  removeSegment,
+  loadSegments,
+  clearSegmentsForTopic,
+  replaceSegmentsForTopic
+} = topicSegmentSlice.actions
 
 export const topicSegmentSelectors = topicSegmentAdapter.getSelectors<{
   topicSegments: TopicSegmentsState

@@ -682,7 +682,8 @@ describe('messageThunk anchor hooks', () => {
         'asst-1',
         'topic-1'
       )
-      expect(mocks.loadTopicSegmentsThunk).toHaveBeenCalled()
+      // Joint publication now loads segments atomically; no separate fire-and-forget segment load
+      expect(mocks.loadTopicSegmentsThunk).not.toHaveBeenCalled()
     })
 
     it('runs repair for a NON-EMPTY cached topic before the cached early return (no refetch)', async () => {

@@ -21,6 +21,8 @@ import { createEntityAdapter, createSlice } from '@reduxjs/toolkit'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 
+import { publishResidentComplete } from './residentRegistry'
+
 const logger = loggerService.withContext('newMessage')
 
 // 1. Create the Adapter
@@ -306,6 +308,17 @@ export const messagesSlice = createSlice({
         messagesAdapter.updateOne(state, { id: messageId, changes })
       }
     }
+  },
+  extraReducers: (builder) => {
+    builder.addCase(publishResidentComplete, (state, action) => {
+      const { topicId, windowResponse } = action.payload
+      const messages = windowResponse.messages as unknown as Message[]
+      // Root wrapper already validated generation; publish atomically
+      // @ts-ignore adapter false positive
+      messagesAdapter.upsertMany(state as any, messages as any)
+      state.messageIdsByTopic[topicId] = messages.map((m) => m.id)
+      state.currentTopicId = topicId
+    })
   }
 })
 

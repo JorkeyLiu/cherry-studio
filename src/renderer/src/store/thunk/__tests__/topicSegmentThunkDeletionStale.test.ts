@@ -8,7 +8,7 @@ import {
   invalidateTopicsDeletion,
   resetAllDeletionGenerationsForTests
 } from '@renderer/services/topicDeletionInvalidation'
-import { clearSegmentsForTopic, loadSegments } from '@renderer/store/topicSegment'
+import { clearSegmentsForTopic, loadSegments, replaceSegmentsForTopic } from '@renderer/store/topicSegment'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { mockListSegments } = vi.hoisted(() => ({
@@ -56,13 +56,12 @@ describe('loadTopicSegmentsThunk stale discard', () => {
     // Kick off thunk but do not await yet — captureDeletionGeneration happens synchronously at start
     const promise = (loadTopicSegmentsThunk as any)(topicId)(dispatch, () => ({}) as any, undefined)
 
-    // Ensure clear was dispatched before fetch resolves (thunk clears stale ids first)
-    // Wait a tick to allow the thunk to reach await
+    // No eager clear before paired payload is valid — dispatch should not have cleared yet
     await Promise.resolve()
-    expect(dispatch).toHaveBeenCalledWith(clearSegmentsForTopic(topicId))
+    expect(dispatch).not.toHaveBeenCalledWith(clearSegmentsForTopic(topicId))
     expect(mockListSegments).toHaveBeenCalledWith(topicId)
-    // Only clear so far, not loadSegments
-    const callsBefore = dispatch.mock.calls.filter((c: any[]) => c[0]?.type === loadSegments.type).length
+    // Only fetch so far, no replace yet
+    const callsBefore = dispatch.mock.calls.filter((c: any[]) => c[0]?.type === replaceSegmentsForTopic.type).length
     expect(callsBefore).toBe(0)
 
     // Capture should have been taken before fetch; now bump generation to simulate hard deletion
@@ -75,7 +74,10 @@ describe('loadTopicSegmentsThunk stale discard', () => {
     resolveList!(segments as any)
     await promise
 
-    // loadSegments must NOT have been dispatched because generation advanced
+    // replaceSegmentsForTopic must NOT have been dispatched because generation advanced
+    const replaceCalls = dispatch.mock.calls.filter((c: any[]) => c[0]?.type === replaceSegmentsForTopic.type)
+    expect(replaceCalls.length).toBe(0)
+    // also no legacy loadSegments
     const loadCalls = dispatch.mock.calls.filter((c: any[]) => c[0]?.type === loadSegments.type)
     expect(loadCalls.length).toBe(0)
   })
@@ -99,11 +101,15 @@ describe('loadTopicSegmentsThunk stale discard', () => {
     const dispatch = vi.fn()
     await (loadTopicSegmentsThunk as any)(topicId)(dispatch, () => ({}) as any, undefined)
 
-    expect(dispatch).toHaveBeenCalledWith(clearSegmentsForTopic(topicId))
-    // loadSegments should have been called with mapped segments (name/color normalized)
-    const loadCalls = dispatch.mock.calls.filter((c: any[]) => c[0]?.type === loadSegments.type)
-    expect(loadCalls.length).toBe(1)
-    expect(loadCalls[0][0].payload).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'seg-2', topicId })]))
+    // Atomic replacement — single replaceSegmentsForTopic dispatch after fetch, no eager clear
+    const replaceCalls = dispatch.mock.calls.filter((c: any[]) => c[0]?.type === replaceSegmentsForTopic.type)
+    expect(replaceCalls.length).toBe(1)
+    expect(replaceCalls[0][0].payload.segments).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'seg-2', topicId })])
+    )
+    expect(replaceCalls[0][0].payload.topicId).toBe(topicId)
+    // legacy clear/load not used
+    expect(dispatch).not.toHaveBeenCalledWith(clearSegmentsForTopic(topicId))
   })
 
   it('stale check is per-topic: other topic generation does not discard', async () => {
@@ -140,7 +146,7 @@ describe('loadTopicSegmentsThunk stale discard', () => {
     await promise
 
     // Should still dispatch because topicId's generation did not advance
-    const loadCalls = dispatch.mock.calls.filter((c: any[]) => c[0]?.type === loadSegments.type)
-    expect(loadCalls.length).toBe(1)
+    const replaceCalls = dispatch.mock.calls.filter((c: any[]) => c[0]?.type === replaceSegmentsForTopic.type)
+    expect(replaceCalls.length).toBe(1)
   })
 })

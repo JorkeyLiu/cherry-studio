@@ -24,6 +24,7 @@ import type { CitationMessageBlock, MessageBlock } from '@renderer/types/newMess
 import { MessageBlockType } from '@renderer/types/newMessage'
 
 import type { RootState } from './index' // 确认 RootState 从 store/index.ts 导出
+import { publishResidentComplete } from './residentRegistry'
 
 // Create a simplified type for the entity adapter to avoid circular type issues
 type MessageBlockEntity = MessageBlock
@@ -74,8 +75,16 @@ export const messageBlocksSlice = createSlice({
     },
     // 注意：如果只想更新现有块，也可以使用 `updateOne`
     updateOneBlock: messageBlocksAdapter.updateOne // 期望 { id: EntityId, changes: Partial<MessageBlock> }
+  },
+  extraReducers: (builder) => {
+    builder.addCase(publishResidentComplete, (state, action) => {
+      const { windowResponse } = action.payload
+      const blocks = windowResponse.blocks as unknown as MessageBlock[]
+      if (blocks.length > 0) {
+        messageBlocksAdapter.upsertMany(state as any, blocks as any)
+      }
+    })
   }
-  // 如果需要处理其他 slice 的 action，可以在这里添加 extraReducers。
 })
 
 // 4. 导出 Actions 和 Reducer

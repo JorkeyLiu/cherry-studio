@@ -22,6 +22,7 @@ import { useDispatch, useSelector, useStore } from 'react-redux'
 import { FLUSH, PAUSE, PERSIST, persistReducer, persistStore, PURGE, REGISTER, REHYDRATE } from 'redux-persist'
 import storage from 'redux-persist/lib/storage'
 
+import { setLatestWindowCompleteness } from '../pages/home/Messages/messageWindow'
 import * as closureCache from '../services/contextClosure'
 import { applyPendingImportProjection } from '../services/importProjection'
 import { runReduxStoreBoot } from '../services/importProjectionReadiness'
@@ -44,6 +45,7 @@ import note from './note'
 import nutstore from './nutstore'
 import ocr from './ocr'
 import preprocess from './preprocess'
+import residentRegistryReducer, { JOINT_PUBLISH_COMPLETE } from './residentRegistry'
 import runtime from './runtime'
 import settings from './settings'
 import shortcuts from './shortcuts'
@@ -55,7 +57,7 @@ import websearch from './websearch'
 
 const logger = loggerService.withContext('Store')
 
-const rootReducer = combineReducers({
+const appReducer = combineReducers({
   assistants,
   backup,
   nutstore,
@@ -79,8 +81,40 @@ const rootReducer = combineReducers({
   clipboard,
   editMode,
   undoStack,
-  topicSegments: topicSegment
+  topicSegments: topicSegment,
+  residentRegistry: residentRegistryReducer
 })
+
+const rootReducer: typeof appReducer = (state, action: any) => {
+  if (action?.type === JOINT_PUBLISH_COMPLETE) {
+    const payload = action.payload as { topicId: string; generation: number; windowResponse: any }
+    const topicId: string | undefined = payload?.topicId
+    const generation: number | undefined = payload?.generation
+    const windowResponse = payload?.windowResponse
+    const entry = (state as any)?.residentRegistry?.entries?.[topicId]
+    const currentGen: number | undefined = entry?.applicabilityGeneration
+    if (
+      typeof topicId !== 'string' ||
+      typeof generation !== 'number' ||
+      entry === undefined ||
+      currentGen !== generation
+    ) {
+      // stale or missing registry entry — discard joint publication atomically
+      return state as any
+    }
+    try {
+      if (windowResponse?.window) {
+        setLatestWindowCompleteness(topicId, {
+          hasMoreBefore: !!windowResponse.window.hasMoreBefore,
+          hasMoreAfter: !!windowResponse.window.hasMoreAfter
+        })
+      }
+    } catch {
+      // best-effort window completeness; never break dispatch
+    }
+  }
+  return appReducer(state, action)
+}
 
 const persistedReducer = persistReducer(
   {
@@ -96,7 +130,8 @@ const persistedReducer = persistReducer(
       'clipboard',
       'editMode',
       'undoStack',
-      'topicSegments'
+      'topicSegments',
+      'residentRegistry'
     ],
     migrate
   },

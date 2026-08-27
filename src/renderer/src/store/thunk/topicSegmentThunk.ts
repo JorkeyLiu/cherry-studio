@@ -1,13 +1,8 @@
 import { createAsyncThunk } from '@reduxjs/toolkit'
 import { dbService } from '@renderer/services/db'
 import { captureDeletionGeneration, isDeletionStale } from '@renderer/services/topicDeletionInvalidation'
-import {
-  addSegment,
-  clearSegmentsForTopic,
-  loadSegments,
-  removeSegment,
-  updateSegment
-} from '@renderer/store/topicSegment'
+import { markSegmentsLoaded } from '@renderer/store/residentRegistry'
+import { addSegment, removeSegment, replaceSegmentsForTopic, updateSegment } from '@renderer/store/topicSegment'
 import type { ClipboardSegmentSnapshot, SegmentSnapshot } from '@renderer/types/editMode'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
@@ -37,25 +32,22 @@ export const syncSegmentsAfterMessageDeletion = async (
   }
 }
 
-export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch: AppDispatch }>(
+export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch: AppDispatch; state: RootState }>(
   'topicSegments/loadForTopic',
   async (topicId: string, { dispatch }) => {
     const capturedDeletionGeneration = captureDeletionGeneration(topicId)
-    // Clear stale segment IDs for this topic before loading fresh data
-    dispatch(clearSegmentsForTopic(topicId))
-    const segments = await dbService.listSegments(topicId)
+    const segmentsRaw = await dbService.listSegments(topicId)
     if (isDeletionStale(topicId, capturedDeletionGeneration)) return
-    dispatch(
-      loadSegments(
-        segments.map((segment) => ({
-          ...segment,
-          name: segment.name ?? '',
-          color: segment.color ?? undefined,
-          createdAt: segment.createdAt ?? new Date().toISOString(),
-          updatedAt: segment.updatedAt ?? new Date().toISOString()
-        }))
-      )
-    )
+    const segments = segmentsRaw.map((segment) => ({
+      ...segment,
+      name: segment.name ?? '',
+      color: segment.color ?? undefined,
+      createdAt: segment.createdAt ?? new Date().toISOString(),
+      updatedAt: segment.updatedAt ?? new Date().toISOString()
+    }))
+    // Atomic replacement — no eager clear before paired payload is valid
+    dispatch(replaceSegmentsForTopic({ topicId, segments }))
+    dispatch(markSegmentsLoaded(topicId))
   }
 )
 

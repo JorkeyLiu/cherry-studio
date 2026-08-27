@@ -91,7 +91,7 @@ windows/         # Multi-window entry points (mini, chat import)
 
 ## Redux Store (`src/renderer/src/store/`)
 
-Slices (redux-persist enabled):
+Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded from StoreSync — see below):
 
 | Slice | State |
 |---|---|
@@ -105,6 +105,7 @@ Slices (redux-persist enabled):
 | `websearch` | Web search settings |
 | `shortcuts` | Keyboard shortcuts |
 | `tabs` | Tab management |
+| `residentRegistry` | Renderer-local non-persisted per-topic completeness (`chatData`, `segments`, `residentTopic = chatData && segments`) and monotonic `applicabilityGeneration`; staged joint publication of latest-window chat-data plus segments via one dispatch (`resident/jointPublishComplete`) — lifecycle foundation only, no B-01–B-05 retention/eviction/TTL/LRU/pin policy, capacity defaults, or heap thresholds adopted (Phase 4 groundwork) |
 
 ## Database Layer
 

@@ -18,10 +18,13 @@ const { mocks } = vi.hoisted(() => ({
     ensureTopicAnchorEstablished: vi.fn(),
     fetchMessagesWindow: vi.fn(),
     fetchMessages: vi.fn(),
+    listSegments: vi.fn(),
     messagesReceived: vi.fn((p: unknown) => ({ type: 'newMessages/messagesReceived', payload: p })),
     setTopicLoading: vi.fn((p: unknown) => ({ type: 'newMessages/setTopicLoading', payload: p })),
     setCurrentTopicId: vi.fn((p: unknown) => ({ type: 'newMessages/setCurrentTopicId', payload: p })),
     upsertManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/upsertManyBlocks', payload: p })),
+    bumpGeneration: vi.fn((p: unknown) => ({ type: 'residentRegistry/bumpGeneration', payload: p })),
+    publishResidentComplete: vi.fn((p: unknown) => ({ type: 'resident/jointPublishComplete', payload: p })),
     loadTopicSegmentsThunk: vi.fn(() => () => Promise.resolve()),
     updateTopicUpdatedAt: vi.fn()
   }
@@ -53,6 +56,7 @@ vi.mock('@renderer/services/anchorService', () => ({
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     fetchMessagesWindow: mocks.fetchMessagesWindow,
+    listSegments: mocks.listSegments,
     fetchMessages: mocks.fetchMessages,
     appendMessage: vi.fn(),
     deleteMessagesWithSegments: vi.fn(),
@@ -85,6 +89,16 @@ vi.mock('@renderer/store/index', () => ({
   default: { dispatch: vi.fn(), getState: () => ({}) as any },
   useAppDispatch: () => vi.fn()
 }))
+
+vi.mock('@renderer/store/residentRegistry', async () => {
+  const actual = await vi.importActual<any>('@renderer/store/residentRegistry')
+  return {
+    ...actual,
+    bumpGeneration: mocks.bumpGeneration,
+    publishResidentComplete: mocks.publishResidentComplete,
+    JOINT_PUBLISH_COMPLETE: 'resident/jointPublishComplete'
+  }
+})
 
 vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
   loadTopicSegmentsThunk: mocks.loadTopicSegmentsThunk
@@ -206,8 +220,32 @@ describe('S6.1 windowed bootstrap (R-02) and around history (R-03)', () => {
         currentTopicId: 't1',
         displayCount: 10
       },
-      messageBlocks: { entities: {} }
+      messageBlocks: { entities: {} },
+      residentRegistry: { entries: {} }
     }
+    mocks.listSegments.mockResolvedValue([])
+    mocks.bumpGeneration.mockImplementation((topicId: unknown) => {
+      const tid = topicId as string
+      const prev = storeState.residentRegistry.entries[tid]
+      const next = (prev?.applicabilityGeneration ?? 0) + 1
+      storeState.residentRegistry.entries[tid] = {
+        chatData: false,
+        segments: false,
+        residentTopic: false,
+        applicabilityGeneration: next
+      }
+      return { type: 'residentRegistry/bumpGeneration', payload: tid }
+    })
+    mocks.publishResidentComplete.mockImplementation((payload: unknown) => {
+      const p = payload as any
+      const entry = storeState.residentRegistry.entries[p.topicId]
+      if (entry && entry.applicabilityGeneration === p.generation) {
+        entry.chatData = true
+        entry.segments = true
+        entry.residentTopic = true
+      }
+      return { type: 'resident/jointPublishComplete', payload: p }
+    })
     // default successful window for bootstrap
     mocks.fetchMessagesWindow.mockImplementation(async (req: FetchMessagesWindowRequest) => {
       if (req.kind === 'latest') {
@@ -247,14 +285,20 @@ describe('S6.1 windowed bootstrap (R-02) and around history (R-03)', () => {
     }
   )
 
-  it('bootstrap publishes validated window atomically (blocks + messagesReceived)', { timeout: 60_000 }, async () => {
+  it('bootstrap publishes validated window atomically (joint publish)', { timeout: 60_000 }, async () => {
     const { loadTopicMessagesThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
     const getState = () => storeState
     await loadTopicMessagesThunk('t1')(dispatch, getState)
-    // window validated, so messagesReceived dispatched, no whole-topic fallback
-    expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
-    expect(mocks.messagesReceived).toHaveBeenCalledWith(expect.objectContaining({ topicId: 't1' }))
+    // window validated, so joint publish dispatched once, no whole-topic fallback
+    expect(mocks.publishResidentComplete).toHaveBeenCalledTimes(1)
+    expect(mocks.publishResidentComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ topicId: 't1', generation: expect.any(Number) })
+    )
+    const payload = mocks.publishResidentComplete.mock.calls[0][0] as any
+    expect(payload.windowResponse).toBeDefined()
+    expect(payload.segments).toBeDefined()
+    expect(storeState.residentRegistry.entries['t1'].residentTopic).toBe(true)
     expect(mocks.fetchMessages).not.toHaveBeenCalled()
   })
 
@@ -410,9 +454,7 @@ describe('S6.1 windowed bootstrap (R-02) and around history (R-03)', () => {
     { timeout: 60_000 },
     async () => {
       const { loadTopicMessagesThunk } = await import('../messageThunk')
-      const { getLatestWindowCompleteness, clearAllLatestWindowCompleteness } = await import(
-        '@renderer/pages/home/Messages/messageWindow'
-      )
+      const { clearAllLatestWindowCompleteness } = await import('@renderer/pages/home/Messages/messageWindow')
       clearAllLatestWindowCompleteness()
       // ensure empty topic — fetch path, not cached early-return
       storeState.messages.messageIdsByTopic = { t1: [] }
@@ -452,41 +494,37 @@ describe('S6.1 windowed bootstrap (R-02) and around history (R-03)', () => {
         { id: 'b-fresh', messageId: 'm-fresh-0', type: 'main_text', content: 'fresh' } as any
       ]
 
-      // Resolve newest first (out-of-order) — only newest must publish
+      // Resolve newest first (out-of-order) — only newest must publish via joint
       deferreds[1].resolve(resFresh)
       await p2
 
-      expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
-      expect(mocks.messagesReceived).toHaveBeenCalledWith(
-        expect.objectContaining({
-          topicId: 't1',
-          messages: expect.arrayContaining([expect.objectContaining({ id: 'm-fresh-0' })])
-        })
+      expect(mocks.publishResidentComplete).toHaveBeenCalledTimes(1)
+      const freshPayload = mocks.publishResidentComplete.mock.calls[0][0] as any
+      expect(freshPayload.topicId).toBe('t1')
+      expect(freshPayload.windowResponse.messages).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: 'm-fresh-0' })])
       )
-      expect(mocks.upsertManyBlocks).toHaveBeenCalledTimes(1)
-      expect(mocks.upsertManyBlocks).toHaveBeenCalledWith(
+      expect(freshPayload.windowResponse.blocks).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: 'b-fresh' })])
       )
-      expect(getLatestWindowCompleteness('t1')).toEqual({ hasMoreBefore: false, hasMoreAfter: true })
       expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledTimes(1)
       // No stale ids leaked into published payload
-      expect(mocks.messagesReceived).not.toHaveBeenCalledWith(
+      expect(mocks.publishResidentComplete).not.toHaveBeenCalledWith(
         expect.objectContaining({
-          messages: expect.arrayContaining([expect.objectContaining({ id: 'm-stale-0' })])
+          windowResponse: expect.objectContaining({
+            messages: expect.arrayContaining([expect.objectContaining({ id: 'm-stale-0' })])
+          })
         })
       )
 
       // Now resolve stale — must be discarded before validation/completeness/publication/anchor
-      mocks.messagesReceived.mockClear()
-      mocks.upsertManyBlocks.mockClear()
+      mocks.publishResidentComplete.mockClear()
       mocks.ensureTopicAnchorEstablished.mockClear()
       deferreds[0].resolve(resStale)
       await p1
 
-      expect(mocks.messagesReceived).not.toHaveBeenCalled()
-      expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
+      expect(mocks.publishResidentComplete).not.toHaveBeenCalled()
       expect(mocks.ensureTopicAnchorEstablished).not.toHaveBeenCalled()
-      expect(getLatestWindowCompleteness('t1')).toEqual({ hasMoreBefore: false, hasMoreAfter: true })
 
       // Loading cleanup still runs for both (finally)
       const loadingFalseDispatches = dispatch.mock.calls.filter(

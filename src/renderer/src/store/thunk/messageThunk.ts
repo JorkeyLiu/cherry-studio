@@ -81,7 +81,7 @@ import { LRUCache } from 'lru-cache'
 import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '../newMessage'
-import { loadTopicSegmentsThunk } from './topicSegmentThunk'
+import { bumpGeneration, publishResidentComplete } from '../residentRegistry'
 // import {
 //   bulkAddBlocksV2,
 //   deleteMessageFromDBV2,
@@ -1727,37 +1727,50 @@ export const loadTopicMessagesThunk =
 
     dispatch(newMessagesActions.setCurrentTopicId(topicId))
 
-    // Skip if already cached with valid data and not forcing reload
+    // Cache-hit requires resident completeness for same generation including empty markers.
+    // Any component absence or generation mismatch is a miss.
     const cachedIds = state.messages.messageIdsByTopic[topicId]
     if (!forceReload && cachedIds && cachedIds.length > 0) {
-      // Deletion generation-aware guard: pre-deletion projections cannot satisfy a load.
-      // If a permanent deletion has advanced generation for this topic, fall through
-      // to the fetch path (which will discard stale via capture/isDeletionStale checks)
-      // rather than returning stale cached entities.
       const deletionGen = getDeletionGeneration(topicId)
       if (deletionGen !== 0) {
         // fall through to fetch — do not early return on potentially stale cache
       } else {
-        // Compatibility repair (docs/context-window.md §10): a NON-EMPTY cached
-        // topic (messages already in Redux, e.g. a fresh branch pre-populated
-        // by cloneMessagesToNewTopicThunk) that lacks a valid anchor must still
-        // receive exactly-once initialization before the cached early return.
-        // Valid anchors are never recalculated; empty cached topics stay
-        // anchorless (they fall through to the fetch path). Same bounded
-        // load-completion hook as the fetch path below — never a render effect.
-        const cachedState = getState()
-        const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
-          asst.topics.some((t) => t.id === topicId)
-        )
-        if (cachedTopicOwner) {
-          await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+        const registry = (getState() as any).residentRegistry
+        if (!registry) {
+          // Test environment without registry slice (legacy tests) — preserve legacy hit semantics
+          const cachedState = getState()
+          const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
+            asst.topics.some((t) => t.id === topicId)
+          )
+          if (cachedTopicOwner) {
+            await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+          }
+          return
         }
-        return
+        const residentEntry = registry.entries?.[topicId]
+        const isResidentHit =
+          !!residentEntry && residentEntry.residentTopic && residentEntry.chatData && residentEntry.segments
+        if (isResidentHit) {
+          const cachedState = getState()
+          const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
+            asst.topics.some((t) => t.id === topicId)
+          )
+          if (cachedTopicOwner) {
+            await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+          }
+          return
+        }
+        // miss -> fall through to staged fetch
       }
     }
 
     try {
       dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
+
+      // Capture/bump per-topic applicability generation before both reads
+      dispatch(bumpGeneration(topicId))
+      const generation = ((getState() as any).residentRegistry?.entries?.[topicId]?.applicabilityGeneration ??
+        0) as number
 
       const limitRaw = getState().messages.displayCount ?? INITIAL_MESSAGES_COUNT
       const limit = clampWindowLimit(limitRaw)
@@ -1767,87 +1780,107 @@ export const loadTopicMessagesThunk =
       latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
       const deletionGenAtStart = captureDeletionGeneration(topicId)
 
-      // Phase 5 bounded slice: same-topic window reads are FIFO-serialized
-      // per topic by runTopicWindowRead (latest bootstrap + around pagination
-      // share the same per-topic queue). Stale-token discard below still
-      // applies — the serializer only orders execution, it never coalesces
-      // distinct reads and never changes validation/publication semantics.
-      const response: FetchMessagesWindowResponse = await runTopicWindowRead(topicId, request.kind, () =>
+      // Stage both latest window and segments under same generation
+      const windowPromise: Promise<FetchMessagesWindowResponse> = runTopicWindowRead(topicId, request.kind, () =>
         dbService.fetchMessagesWindow(request)
       )
+      const segmentsPromise: Promise<any[]> = (
+        dbService.listSegments ? dbService.listSegments(topicId) : Promise.resolve([])
+      ) as Promise<any[]>
 
-      // S6.1 same-topic stale-bootstrap guard: discard when topic's latest token no longer matches.
-      // Must run before validation, completeness-map update, or staged publication.
+      let response: FetchMessagesWindowResponse
+      let segmentsRaw: any[]
+      try {
+        ;[response, segmentsRaw] = await Promise.all([windowPromise, segmentsPromise])
+      } catch (e) {
+        logger.error(`[loadTopicMessagesThunk] staged fetch failed for ${topicId}:`, e as Error)
+        throw e
+      }
+
+      // Validate stale/deletion/current-topic/request-sequence and generation still current
       if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== requestSeq) {
         logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (superseded same-topic request)`)
         return
       }
 
-      // Stale discard after await — topic changed via concurrent activation
-      // Allow null initial currentTopicId (first load) to pass; only discard when
-      // currentTopicId is non-null and differs from the requested topic (test
-      // mocks use vi.fn dispatch that does not mutate state).
       const currentId = getState().messages.currentTopicId
       if (currentId !== null && currentId !== undefined && currentId !== topicId) {
         logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (current moved)`)
         return
       }
 
-      // Deletion generation stale discard — hard deletion invalidates before validation/publication
       if (isDeletionStale(topicId, deletionGenAtStart)) {
         logger.warn(`[loadTopicMessagesThunk] stale window discard for ${topicId} (deleted during fetch)`)
         return
       }
 
-      if (!validateWindowResponse(request, response)) {
+      const currentGeneration = ((getState() as any).residentRegistry?.entries?.[topicId]?.applicabilityGeneration ??
+        0) as number
+      if (currentGeneration !== generation) {
+        logger.warn(`[loadTopicMessagesThunk] stale generation discard for ${topicId} (generation mismatch)`)
+        return
+      }
+
+      if (!validateWindowResponse(request, response!)) {
         logger.error(`[loadTopicMessagesThunk] malformed window response for ${topicId}`, {
-          window: response.window
+          window: (response as any)?.window
         } as unknown as Error)
         throw new Error('malformed window response')
       }
 
       logger.silly('Loaded window via DbService', {
         topicId,
-        kind: response.window.kind,
-        returnedCount: response.window.returnedCount,
-        hasMoreBefore: response.window.hasMoreBefore,
-        hasMoreAfter: response.window.hasMoreAfter
+        kind: response!.window.kind,
+        returnedCount: response!.window.returnedCount,
+        hasMoreBefore: response!.window.hasMoreBefore,
+        hasMoreAfter: response!.window.hasMoreAfter
       })
 
-      // Retain authoritative completeness for the renderer viewport model
-      // (Messages bootstrap reads this to keep hasMoreOlder/hasMoreNewer from
-      // validated Main response instead of deriving false from the partial list).
-      setLatestWindowCompleteness(topicId, {
-        hasMoreBefore: response.window.hasMoreBefore,
-        hasMoreAfter: response.window.hasMoreAfter
-      })
+      const segments = segmentsRaw.map((segment: any) => ({
+        ...segment,
+        name: segment.name ?? '',
+        color: segment.color ?? undefined,
+        createdAt: segment.createdAt ?? new Date().toISOString(),
+        updatedAt: segment.updatedAt ?? new Date().toISOString()
+      }))
 
-      // Atomic staged publication: only publish validated complete window
-      const blocks = response.blocks as unknown as MessageBlock[]
-      const messages = response.messages as unknown as Message[]
-      if (blocks.length > 0) {
-        dispatch(upsertManyBlocks(blocks))
+      const hasRegistry = !!(getState() as any).residentRegistry
+      // Retain authoritative completeness for viewport model (both joint and legacy paths)
+      try {
+        setLatestWindowCompleteness(topicId, {
+          hasMoreBefore: response!.window.hasMoreBefore,
+          hasMoreAfter: response!.window.hasMoreAfter
+        })
+      } catch {
+        // best-effort
       }
-      dispatch(newMessagesActions.messagesReceived({ topicId, messages }))
+      if (hasRegistry) {
+        // Single controlled Redux publication consumed by relevant projection slices and registry
+        dispatch(
+          publishResidentComplete({
+            topicId,
+            generation,
+            windowResponse: response!,
+            segments
+          })
+        )
+      } else {
+        // Legacy fallback for test environments without registry slice — preserve old two-dispatch path
+        const blocks = response!.blocks as unknown as MessageBlock[]
+        const messages = response!.messages as unknown as Message[]
+        if (blocks.length > 0) {
+          dispatch(upsertManyBlocks(blocks as any))
+        }
+        dispatch(newMessagesActions.messagesReceived({ topicId, messages } as any))
+      }
 
-      // Compatibility repair (docs/context-window.md §10): after a successful
-      // topic message load into Redux, initialize a missing/unresolvable
-      // anchor exactly once from the loaded real turns + the assistant's
-      // current `contextCount`. Valid anchors are never recalculated; a
-      // startup with a valid anchor dispatches nothing; empty topics stay
-      // anchorless. This is a bounded load-completion hook — never a render
-      // effect.
       const loadedState = getState()
       const topicOwner = loadedState.assistants.assistants.find((asst) => asst.topics.some((t) => t.id === topicId))
       if (topicOwner) {
         await ensureTopicAnchorEstablished(dispatch, getState, topicOwner.id, topicId)
       }
-
-      // Load topic segments for this topic
-      void dispatch(loadTopicSegmentsThunk(topicId))
     } catch (error) {
       logger.error(`Failed to load messages for topic ${topicId}:`, error as Error)
-      // Could dispatch an error action here if needed
     } finally {
       dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
     }
