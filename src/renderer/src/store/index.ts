@@ -86,19 +86,21 @@ const appReducer = combineReducers({
 })
 
 /**
- * Centralized LOCK-302 resident lifecycle invalidation for unpaired segment
+ * Centralized resident lifecycle invalidation for unpaired segment
  * projection mutations. Distinguishes paired joint publication from standalone
  * changes and respects the local sync follow-up exemption.
  *
  * - Only `resident/jointPublishComplete` may establish or retain residency.
  * - Every unpaired structural segment change must advance generation and make
- *   residentTopic false (LOCK-302).
+ *   residentTopic false atomically in the same dispatch.
  * - Inbound StoreSync actions carry `meta.fromSync:true`; they must
- *   invalidate the receiving window's resident claim.
- * - Local joint follow-up `replaceSegmentsForTopic` dispatched solely for
- *   StoreSync projection after a paired publish carries
- *   `meta.isJointFollowUp:true` and must NOT invalidate the originating
- *   window; inbound copies (fromSync:true) still invalidate.
+ *   invalidate the receiving window's resident claim — fromSync precedence
+ *   overrides any joint follow-up flag.
+ * - The ONLY local exemption is the exact paired
+ *   `topicSegments/replaceSegmentsForTopic` with `meta.isJointFollowUp:true`
+ *   and `meta.fromSync:false`, dispatched solely for StoreSync projection
+ *   after a paired publish. All other structural action types carrying
+ *   `isJointFollowUp` must still invalidate.
  * - Metadata-only `updateSegment` (no `messageIds` in changes) does not affect
  *   structural completeness and is exempt. All other segment membership/
  *   availability mutations are structural.
@@ -164,20 +166,17 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
     }
   }
 
-  // Centralized unpaired segment invalidation (LOCK-302) — capture before
+  // Centralized unpaired segment invalidation — capture before
   // projection is mutated so remove/update can resolve topicId from prior state.
   let segmentAffected: string[] | null = null
   let shouldInvalidateSegments = false
   if (typeof action?.type === 'string' && action.type.startsWith('topicSegments/')) {
     const isFromSync = !!action?.meta?.fromSync
     const isJointFollowUp = !!action?.meta?.isJointFollowUp
-    // console.log('[root] segment action', action.type, 'fromSync', isFromSync, 'joint', isJointFollowUp, 'payload', action.payload)
-    if (!isFromSync && isJointFollowUp) {
-      segmentAffected = []
-    } else if (action.type === 'topicSegments/replaceSegmentsForTopic' && !isFromSync) {
-      // Local standalone replace is handled by loadTopicSegmentsThunk's
-      // markSegmentsLoaded dispatch (single generation bump). Skip central here
-      // to avoid double bump; inbound (fromSync) still invalidates via central.
+    const isLocalPairedReplaceFollowUp =
+      !isFromSync && isJointFollowUp && action.type === 'topicSegments/replaceSegmentsForTopic'
+    if (isLocalPairedReplaceFollowUp) {
+      // exact exemption: only local paired replaceSegmentsForTopic follow-up
       segmentAffected = []
     } else {
       const ids = getSegmentAffectedTopicIds(state, action)

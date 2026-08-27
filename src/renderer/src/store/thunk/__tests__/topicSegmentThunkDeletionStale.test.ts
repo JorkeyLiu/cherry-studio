@@ -229,9 +229,10 @@ describe('loadTopicSegmentsThunk stale discard', () => {
       }
     ]
     mockListSegments.mockResolvedValue(segments as any)
-    const { default: residentRegistryReducer, bumpGeneration } = await import('@renderer/store/residentRegistry')
+    const { bumpGeneration } = await import('@renderer/store/residentRegistry')
+    const { rootReducer } = await import('@renderer/store')
     const { configureStore } = await import('@reduxjs/toolkit')
-    const store = configureStore({ reducer: { residentRegistry: residentRegistryReducer } })
+    const store = configureStore({ reducer: rootReducer })
     // bump to gen 1 with chatData false
     store.dispatch(bumpGeneration(topicId))
     const genBefore = (store.getState() as any).residentRegistry.entries[topicId].applicabilityGeneration
@@ -240,7 +241,7 @@ describe('loadTopicSegmentsThunk stale discard', () => {
 
     const { loadTopicSegmentsThunk } = await import('../topicSegmentThunk')
     // standalone load at same generation must set segments true, keep non-resident,
-    // and advance generation so the previous joint claim cannot cache-hit
+    // and advance generation via centralized same-dispatch invalidation so the previous joint claim cannot cache-hit
     await (loadTopicSegmentsThunk as any)(topicId)(store.dispatch as any, store.getState as any, undefined)
     const entry = (store.getState() as any).residentRegistry.entries[topicId]
     expect(entry.segments).toBe(true)
@@ -304,41 +305,10 @@ describe('loadTopicSegmentsThunk stale discard', () => {
     }
     mockListSegments.mockResolvedValue([segStandalone] as any)
 
-    const {
-      default: residentRegistryReducer,
-      bumpGeneration,
-      publishResidentComplete,
-      shouldDiscardJointPublish,
-      JOINT_PUBLISH_COMPLETE
-    } = await import('@renderer/store/residentRegistry')
-    const { default: newMessagesReducer } = await import('@renderer/store/newMessage')
-    const { default: messageBlocksReducer } = await import('@renderer/store/messageBlock')
-    const { default: topicSegmentReducer } = await import('@renderer/store/topicSegment')
-    const { combineReducers, configureStore } = await import('@reduxjs/toolkit')
-    const { setLatestWindowCompleteness } = await import('@renderer/pages/home/Messages/messageWindow')
-
-    const appReducerLocal = combineReducers({
-      messages: newMessagesReducer,
-      messageBlocks: messageBlocksReducer,
-      topicSegments: topicSegmentReducer,
-      residentRegistry: residentRegistryReducer
-    })
-    const rootReducerLocal: typeof appReducerLocal = (state, action: any) => {
-      if (action?.type === JOINT_PUBLISH_COMPLETE) {
-        if (shouldDiscardJointPublish(state, action.payload)) return state as any
-        try {
-          const wr = action.payload?.windowResponse
-          const tid = action.payload?.topicId as string
-          if (wr?.window)
-            setLatestWindowCompleteness(tid, {
-              hasMoreBefore: !!wr.window.hasMoreBefore,
-              hasMoreAfter: !!wr.window.hasMoreAfter
-            })
-        } catch {}
-      }
-      return appReducerLocal(state, action)
-    }
-    const store = configureStore({ reducer: rootReducerLocal })
+    const { bumpGeneration, publishResidentComplete } = await import('@renderer/store/residentRegistry')
+    const { rootReducer } = await import('@renderer/store')
+    const { configureStore } = await import('@reduxjs/toolkit')
+    const store = configureStore({ reducer: rootReducer })
 
     // Establish joint residency via real publishResidentComplete path (same as production)
     store.dispatch(bumpGeneration(topicId))

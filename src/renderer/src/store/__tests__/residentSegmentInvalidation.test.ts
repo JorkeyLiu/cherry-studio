@@ -233,22 +233,122 @@ describe('resident segment invalidation — centralized LOCK-302', () => {
     expect(entry.applicabilityGeneration).toBe(beforeGen + 1)
   })
 
-  it('local standalone replaceSegmentsForTopic via load path centrality delegates to markSegmentsLoaded (single bump)', async () => {
-    // This test proves the thunk's standalone load still invalidates via mark, and central skips local replace to avoid double
-    // Simulate via direct dispatch sequence: replace + mark
+  it('local standalone replaceSegmentsForTopic invalidates immediately in same dispatch', () => {
+    // standalone replace must invalidate atomically in same root dispatch, single bump, no observable resident true
     const gen = establishResident('t-replace')
     const seg = makeSegment('seg-replace-new', 't-replace')
-    // dispatch replace (local standalone without joint flag) — central skips, so no bump yet
     store.dispatch(replaceSegmentsForTopic({ topicId: 't-replace', segments: [seg] }) as any)
-    let entry = (store.getState() as any).residentRegistry.entries['t-replace']
-    expect(entry.applicabilityGeneration).toBe(gen) // still gen, not yet bumped by central
-    expect(entry.residentTopic).toBe(true) // still resident until mark
-    // mark does the single bump
-    const { markSegmentsLoaded } = await import('@renderer/store/residentRegistry')
-    store.dispatch(markSegmentsLoaded('t-replace'))
-    entry = (store.getState() as any).residentRegistry.entries['t-replace']
+    const entry = (store.getState() as any).residentRegistry.entries['t-replace']
     expect(entry.residentTopic).toBe(false)
+    expect(entry.chatData).toBe(false)
+    expect(entry.segments).toBe(true)
     expect(entry.applicabilityGeneration).toBe(gen + 1)
+    // projection updated
+    expect((store.getState() as any).topicSegments.segmentsByTopic['t-replace']).toEqual(['seg-replace-new'])
+  })
+
+  it('narrow exemption: only local paired replaceSegmentsForTopic with isJointFollowUp retains residency; other structural actions with isJointFollowUp still invalidate', () => {
+    // addSegment with isJointFollowUp must still invalidate (not exempt)
+    const genAdd = establishResident('t-exempt-add')
+    const segAdd = makeSegment('seg-exempt-add', 't-exempt-add')
+    store.dispatch({ ...addSegment(segAdd), meta: { isJointFollowUp: true } } as any)
+    let entry = (store.getState() as any).residentRegistry.entries['t-exempt-add']
+    expect(entry.residentTopic).toBe(false)
+    expect(entry.applicabilityGeneration).toBe(genAdd + 1)
+
+    // removeSegment with isJointFollowUp must still invalidate
+    establishResident('t-exempt-remove')
+    const segRem = makeSegment('seg-exempt-rem', 't-exempt-remove')
+    store.dispatch(addSegment(segRem) as any)
+    // re-establish after add
+    const genRemove2 = (store.getState() as any).residentRegistry.entries['t-exempt-remove'].applicabilityGeneration
+    const wrRem = makeWindowResponse('t-exempt-remove', [{ id: 'm-t-exempt-remove' }])
+    store.dispatch(
+      publishResidentComplete({
+        topicId: 't-exempt-remove',
+        generation: genRemove2,
+        windowResponse: wrRem,
+        segments: [segRem]
+      })
+    )
+    const beforeRemove = (store.getState() as any).residentRegistry.entries['t-exempt-remove'].applicabilityGeneration
+    store.dispatch({ ...removeSegment('seg-exempt-rem'), meta: { isJointFollowUp: true } } as any)
+    entry = (store.getState() as any).residentRegistry.entries['t-exempt-remove']
+    expect(entry.residentTopic).toBe(false)
+    expect(entry.applicabilityGeneration).toBe(beforeRemove + 1)
+
+    // updateSegment structural (messageIds) with isJointFollowUp must still invalidate
+    establishResident('t-exempt-update')
+    const segUp = makeSegment('seg-exempt-up', 't-exempt-update', ['m1'])
+    store.dispatch(addSegment(segUp) as any)
+    const genUpdate2 = (store.getState() as any).residentRegistry.entries['t-exempt-update'].applicabilityGeneration
+    const wrUp = makeWindowResponse('t-exempt-update', [{ id: 'm-t-exempt-update' }])
+    store.dispatch(
+      publishResidentComplete({
+        topicId: 't-exempt-update',
+        generation: genUpdate2,
+        windowResponse: wrUp,
+        segments: [segUp]
+      })
+    )
+    const beforeUpdate = (store.getState() as any).residentRegistry.entries['t-exempt-update'].applicabilityGeneration
+    store.dispatch({
+      ...updateSegment({ id: 'seg-exempt-up', changes: { messageIds: ['m2'] } }),
+      meta: { isJointFollowUp: true }
+    } as any)
+    entry = (store.getState() as any).residentRegistry.entries['t-exempt-update']
+    expect(entry.residentTopic).toBe(false)
+    expect(entry.applicabilityGeneration).toBe(beforeUpdate + 1)
+
+    // metadata-only updateSegment with isJointFollowUp must remain exempt (non-structural)
+    const genMeta = (store.getState() as any).residentRegistry.entries['t-exempt-update'].applicabilityGeneration
+    const wrMeta = makeWindowResponse('t-exempt-update', [{ id: 'm-t-exempt-update' }])
+    store.dispatch(
+      publishResidentComplete({
+        topicId: 't-exempt-update',
+        generation: genMeta,
+        windowResponse: wrMeta,
+        segments: [{ ...segUp, messageIds: ['m2'] }]
+      })
+    )
+    const beforeMeta = (store.getState() as any).residentRegistry.entries['t-exempt-update'].applicabilityGeneration
+    store.dispatch({
+      ...updateSegment({ id: 'seg-exempt-up', changes: { name: 'NewName' } }),
+      meta: { isJointFollowUp: true }
+    } as any)
+    entry = (store.getState() as any).residentRegistry.entries['t-exempt-update']
+    expect(entry.residentTopic).toBe(true)
+    expect(entry.applicabilityGeneration).toBe(beforeMeta)
+
+    // loadSegments with isJointFollowUp must still invalidate
+    establishResident('t-exempt-load')
+    const segLoad = makeSegment('seg-exempt-load', 't-exempt-load')
+    const beforeLoad = (store.getState() as any).residentRegistry.entries['t-exempt-load'].applicabilityGeneration
+    store.dispatch({ ...loadSegments([segLoad]), meta: { isJointFollowUp: true } } as any)
+    entry = (store.getState() as any).residentRegistry.entries['t-exempt-load']
+    expect(entry.residentTopic).toBe(false)
+    expect(entry.applicabilityGeneration).toBe(beforeLoad + 1)
+
+    // clearSegmentsForTopic with isJointFollowUp must still invalidate
+    establishResident('t-exempt-clear')
+    const beforeClear = (store.getState() as any).residentRegistry.entries['t-exempt-clear'].applicabilityGeneration
+    store.dispatch({ ...clearSegmentsForTopic('t-exempt-clear'), meta: { isJointFollowUp: true } } as any)
+    entry = (store.getState() as any).residentRegistry.entries['t-exempt-clear']
+    expect(entry.residentTopic).toBe(false)
+    expect(entry.applicabilityGeneration).toBe(beforeClear + 1)
+
+    // replaceSegmentsForTopic inbound with isJointFollowUp must still invalidate (fromSync precedence)
+    establishResident('t-exempt-inbound-joint')
+    const segInbound = makeSegment('seg-exempt-inbound', 't-exempt-inbound-joint')
+    const beforeInbound = (store.getState() as any).residentRegistry.entries['t-exempt-inbound-joint']
+      .applicabilityGeneration
+    store.dispatch({
+      ...replaceSegmentsForTopic({ topicId: 't-exempt-inbound-joint', segments: [segInbound] }),
+      meta: { fromSync: true, isJointFollowUp: true }
+    } as any)
+    entry = (store.getState() as any).residentRegistry.entries['t-exempt-inbound-joint']
+    expect(entry.residentTopic).toBe(false)
+    expect(entry.applicabilityGeneration).toBe(beforeInbound + 1)
   })
 
   it('inbound structural mutations via StoreSync (add/remove/update) invalidate receiving window', () => {

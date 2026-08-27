@@ -1,7 +1,6 @@
 import { createAsyncThunk } from '@reduxjs/toolkit'
 import { dbService } from '@renderer/services/db'
 import { captureDeletionGeneration, isDeletionStale } from '@renderer/services/topicDeletionInvalidation'
-import { markSegmentsLoaded } from '@renderer/store/residentRegistry'
 import { addSegment, removeSegment, replaceSegmentsForTopic, updateSegment } from '@renderer/store/topicSegment'
 import type { ClipboardSegmentSnapshot, SegmentSnapshot } from '@renderer/types/editMode'
 import type { TopicSegment } from '@renderer/types/topicSegment'
@@ -65,9 +64,10 @@ export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch:
     )
       return
     // Atomic replacement — no eager clear before paired payload is valid.
-    // Never marks joint residency alone (LOCK-302); only updates segment projection.
+    // Never marks joint residency alone; only updates segment projection.
+    // Standalone replacement invalidates resident state atomically via centralized
+    // rootReducer in the same dispatch — no follow-up mark dispatch.
     dispatch(replaceSegmentsForTopic({ topicId, segments }))
-    dispatch(markSegmentsLoaded(topicId))
   }
 )
 
