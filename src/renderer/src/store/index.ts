@@ -85,7 +85,66 @@ const appReducer = combineReducers({
   residentRegistry: residentRegistryReducer
 })
 
-const rootReducer: typeof appReducer = (state, action: any) => {
+/**
+ * Centralized LOCK-302 resident lifecycle invalidation for unpaired segment
+ * projection mutations. Distinguishes paired joint publication from standalone
+ * changes and respects the local sync follow-up exemption.
+ *
+ * - Only `resident/jointPublishComplete` may establish or retain residency.
+ * - Every unpaired structural segment change must advance generation and make
+ *   residentTopic false (LOCK-302).
+ * - Inbound StoreSync actions carry `meta.fromSync:true`; they must
+ *   invalidate the receiving window's resident claim.
+ * - Local joint follow-up `replaceSegmentsForTopic` dispatched solely for
+ *   StoreSync projection after a paired publish carries
+ *   `meta.isJointFollowUp:true` and must NOT invalidate the originating
+ *   window; inbound copies (fromSync:true) still invalidate.
+ * - Metadata-only `updateSegment` (no `messageIds` in changes) does not affect
+ *   structural completeness and is exempt. All other segment membership/
+ *   availability mutations are structural.
+ */
+export function getSegmentAffectedTopicIds(state: any, action: any): string[] | null {
+  const type: string = action?.type ?? ''
+  if (type === 'topicSegments/addSegment') {
+    const tid = action.payload?.topicId
+    return typeof tid === 'string' && tid.length > 0 ? [tid] : []
+  }
+  if (type === 'topicSegments/removeSegment') {
+    const segId = action.payload
+    if (typeof segId !== 'string') return []
+    const seg = state?.topicSegments?.segments?.entities?.[segId]
+    if (seg?.topicId) return [seg.topicId]
+    return []
+  }
+  if (type === 'topicSegments/updateSegment') {
+    const { id, changes } = action.payload ?? {}
+    if (!changes || typeof changes !== 'object') return []
+    // Metadata-only (name/color/updatedAt) does not affect membership/availability
+    if (!('messageIds' in changes)) return []
+    const seg = state?.topicSegments?.segments?.entities?.[id]
+    if (seg?.topicId) return [seg.topicId]
+    if (typeof changes?.topicId === 'string') return [changes.topicId]
+    return []
+  }
+  if (type === 'topicSegments/loadSegments') {
+    const segs = action.payload
+    if (!Array.isArray(segs)) return []
+    const set = new Set<string>()
+    for (const s of segs) if (typeof s?.topicId === 'string') set.add(s.topicId)
+    return [...set]
+  }
+  if (type === 'topicSegments/clearSegmentsForTopic') {
+    const tid = action.payload
+    return typeof tid === 'string' && tid.length > 0 ? [tid] : []
+  }
+  if (type === 'topicSegments/replaceSegmentsForTopic') {
+    const tid = action.payload?.topicId
+    return typeof tid === 'string' && tid.length > 0 ? [tid] : []
+  }
+  return null
+}
+
+export const rootReducer: typeof appReducer = (state, action: any) => {
   if (action?.type === JOINT_PUBLISH_COMPLETE) {
     if (shouldDiscardJointPublish(state, action.payload)) {
       // stale or missing registry entry — discard joint publication atomically
@@ -104,7 +163,60 @@ const rootReducer: typeof appReducer = (state, action: any) => {
       // best-effort window completeness; never break dispatch
     }
   }
-  return appReducer(state, action)
+
+  // Centralized unpaired segment invalidation (LOCK-302) — capture before
+  // projection is mutated so remove/update can resolve topicId from prior state.
+  let segmentAffected: string[] | null = null
+  let shouldInvalidateSegments = false
+  if (typeof action?.type === 'string' && action.type.startsWith('topicSegments/')) {
+    const isFromSync = !!action?.meta?.fromSync
+    const isJointFollowUp = !!action?.meta?.isJointFollowUp
+    // console.log('[root] segment action', action.type, 'fromSync', isFromSync, 'joint', isJointFollowUp, 'payload', action.payload)
+    if (!isFromSync && isJointFollowUp) {
+      segmentAffected = []
+    } else if (action.type === 'topicSegments/replaceSegmentsForTopic' && !isFromSync) {
+      // Local standalone replace is handled by loadTopicSegmentsThunk's
+      // markSegmentsLoaded dispatch (single generation bump). Skip central here
+      // to avoid double bump; inbound (fromSync) still invalidates via central.
+      segmentAffected = []
+    } else {
+      const ids = getSegmentAffectedTopicIds(state, action)
+      if (ids !== null) {
+        segmentAffected = ids
+        shouldInvalidateSegments = ids.length > 0
+      }
+    }
+  }
+
+  const nextState = appReducer(state, action)
+
+  if (shouldInvalidateSegments && segmentAffected && segmentAffected.length > 0) {
+    try {
+      const prevEntries = (nextState as any).residentRegistry?.entries ?? {}
+      const newEntries: Record<string, any> = { ...prevEntries }
+      for (const tid of segmentAffected) {
+        const prev = prevEntries[tid]
+        const nextGen = (prev?.applicabilityGeneration ?? 0) + 1
+        newEntries[tid] = {
+          chatData: false,
+          segments: true,
+          residentTopic: false,
+          applicabilityGeneration: nextGen
+        }
+      }
+      return {
+        ...nextState,
+        residentRegistry: {
+          ...(nextState as any).residentRegistry,
+          entries: newEntries
+        }
+      } as any
+    } catch {
+      // invalidation is best-effort; never break dispatch
+    }
+  }
+
+  return nextState
 }
 
 const persistedReducer = persistReducer(

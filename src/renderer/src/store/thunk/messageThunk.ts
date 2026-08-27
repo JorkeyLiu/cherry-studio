@@ -1877,9 +1877,13 @@ export const loadTopicMessagesThunk =
         // updates segments, without broadcasting/syncing resident registry lifecycle state itself.
         // The joint publication atomically updates local segments via its extraReducer; a separate
         // syncable topicSegments/ action carries the same segments across windows via StoreSync.
-        // Local duplicate is idempotent (same segments).
+        // Local duplicate is idempotent (same segments) and must not invalidate the
+        // originating window's just-established residency — inbound StoreSync copies
+        // (meta.fromSync:true) still invalidate receiving windows (LOCK-302).
         try {
-          dispatch(replaceSegmentsForTopic({ topicId, segments }))
+          const syncAction = replaceSegmentsForTopic({ topicId, segments }) as any
+          syncAction.meta = { ...syncAction.meta, isJointFollowUp: true }
+          dispatch(syncAction)
         } catch {
           // best-effort StoreSync projection; never break joint publication
         }
