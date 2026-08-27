@@ -8,6 +8,7 @@
  * Phase 4 exit remains Open; this is exercised-workload/observability evidence only.
  */
 
+import { configureStore } from '@reduxjs/toolkit'
 import { ContentSearch, type ContentSearchRef } from '@renderer/components/ContentSearch'
 import {
   createContentSearchSessionOwnerId,
@@ -37,7 +38,7 @@ import {
   resetContextClosureDiagnosticsForTests,
   setCachedContextClosureWithFingerprint
 } from '@renderer/services/contextClosure'
-import { getB06Diagnostics, getPhase4Snapshot } from '@renderer/services/phase4Observability'
+import { getB06Diagnostics, getPhase4BoundScalars, getPhase4Snapshot } from '@renderer/services/phase4Observability'
 import {
   enforceScrollSnapshotBounds,
   getScrollSnapshotDiagnostics,
@@ -46,9 +47,17 @@ import {
   resetScrollSnapshotDiagnosticsForTests,
   SCROLL_SNAPSHOT_TTL_MS
 } from '@renderer/services/scrollSnapshotCache'
+import residentRegistryReducer, {
+  bumpGeneration,
+  clearEntry as clearResidentEntry,
+  invalidateForDeletion,
+  publishResidentComplete,
+  resetAllResidentRegistry,
+  shouldDiscardJointPublish
+} from '@renderer/store/residentRegistry'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, UserMessageStatus } from '@renderer/types/newMessage'
-import type { FetchContextClosureResponse } from '@shared/chatDb'
+import type { FetchContextClosureResponse, FetchMessagesWindowResponse } from '@shared/chatDb'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -893,5 +902,237 @@ describe('Phase 4 mixed-workload observability (B-06/B-07/B-08/B-09)', () => {
     expect(serialized).not.toContain('database')
 
     document.body.removeChild(target)
+  })
+
+  it('coherent integration: B-06/B-07/B-08/B-09 bounded diagnostics alongside resident complete -> generation advance/incomplete -> stale rejection -> deletion/clear', async () => {
+    // Helper for resident joint publication window response (renderer-local, no IPC)
+    const makeResidentWindowResponse = (topicId: string, ids: string[]): FetchMessagesWindowResponse => {
+      const returnedCount = ids.length
+      return {
+        messages: ids.map((id) => ({ id, topicId })) as unknown as FetchMessagesWindowResponse['messages'],
+        blocks: [] as unknown as FetchMessagesWindowResponse['blocks'],
+        window: {
+          kind: 'latest',
+          completeness: 'window',
+          topicId,
+          anchorMessageId: null,
+          requested: { limit: 10 },
+          firstMessageId: returnedCount > 0 ? ids[0] : null,
+          lastMessageId: returnedCount > 0 ? ids[returnedCount - 1] : null,
+          returnedCount,
+          hasMoreBefore: false,
+          hasMoreAfter: false
+        }
+      } as unknown as FetchMessagesWindowResponse
+    }
+
+    // B-06: bounded viewport window under pressure (max 200 groups, opposite-edge trim)
+    const msgs = users(500)
+    let win = createLatestMessageWindow(msgs, 500)
+    expect(win.groupCount).toBeLessThanOrEqual(200)
+    win = expandMessageWindowOlder(msgs, win, 80)
+    expect(win.groupCount).toBeLessThanOrEqual(200)
+    const b06Now = getB06Diagnostics(win)
+    expect(b06Now).not.toBeNull()
+    expect(b06Now!.calibrationDefault).toBe(200)
+    expect(b06Now!.groupCount).toBeLessThanOrEqual(200)
+
+    // B-07: scroll index stays bounded <=256 with observable enforcement
+    const now = Date.now()
+    for (let i = 0; i < 60; i++) {
+      const k = `scroll:topic-int-${String(i).padStart(2, '0')}`
+      store.set(k, { scrollTop: -i, anchorId: null, isAtBottom: false })
+      handleScrollSnapshotSaved(k, now + i * 5)
+    }
+    expect(getScrollSnapshotDiagnostics().indexCount).toBeLessThanOrEqual(256)
+    expect(getScrollSnapshotDiagnostics().maxCount).toBe(256)
+
+    // B-09: active-topic-only retention (max 1) with hit/miss counters
+    resetContextClosureDiagnosticsForTests()
+    for (let i = 0; i < 4; i++) {
+      const tid = `t-b09-int-${i}`
+      const fp = computeClosureFingerprint([{ id: 'u1', role: 'user', topicId: tid, blocks: [] }] as any)
+      setCachedContextClosureWithFingerprint(tid, makeResp(tid, 'u1'), fp)
+    }
+    enforceContextClosureRetention('t-b09-int-2')
+    expect(getContextClosureDiagnostics().retainedTopicCount).toBeLessThanOrEqual(1)
+    expect(getContextClosureDiagnostics().maxRetainedTopics).toBe(1)
+    const fpHit = computeClosureFingerprint([{ id: 'u1', role: 'user', topicId: 't-b09-int-2', blocks: [] }] as any)
+    expect(getFreshValidatedClosure('t-b09-int-2', 'u1', fpHit)).not.toBeNull() // hit
+    expect(getFreshValidatedClosure('t-b09-int-2', 'wrong-anchor', fpHit)).toBeNull() // miss
+    const b09Mid = getContextClosureDiagnostics()
+    expect(b09Mid.hitCount).toBe(1)
+    expect(b09Mid.missCount).toBe(1)
+
+    // B-08: bounded disposable session — at most one 500 live-Range chunk, lightweight count metadata
+    const b08Owner = createContentSearchSessionOwnerId()
+    recordContentSearchCommit(b08Owner, 500, 0, 1200, 1)
+    expect(getContentSearchDiagnostics().liveRangeCount).toBeLessThanOrEqual(500)
+    expect(getContentSearchDiagnostics().maxLiveRanges).toBe(500)
+    expect(getContentSearchDiagnostics().totalCount).toBe(1200)
+
+    // Resident lifecycle: renderer-local registry via pure reducer (no persistence/IPC/StoreSync)
+    const residentStore = configureStore({ reducer: { residentRegistry: residentRegistryReducer } })
+    const residentEntries = (): Record<string, any> =>
+      (residentStore.getState() as any).residentRegistry.entries as Record<string, any>
+
+    // Initial: empty resident state, but B-06/B-07/B-08/B-09 still bounded via coherent snapshot
+    let snap = getPhase4Snapshot(win, residentEntries())
+    expect(snap.resident.entryCount).toBe(0)
+    expect(snap.resident.residentCount).toBe(0)
+    expect(snap.resident.incompleteCount).toBe(0)
+    expect(snap.resident.maxGeneration).toBe(0)
+    expect(snap.b06!.groupCount).toBeLessThanOrEqual(200)
+    expect(snap.b07.indexCount).toBeLessThanOrEqual(256)
+    expect(snap.b08.liveRangeCount).toBeLessThanOrEqual(500)
+    expect(snap.b09.retainedTopicCount).toBeLessThanOrEqual(1)
+    let scalars = getPhase4BoundScalars(win, residentEntries())
+    expect(scalars.residentEntryCount).toBe(0)
+    expect(scalars.b06GroupCount).toBeLessThanOrEqual(200)
+    expect(scalars.b07IndexCount).toBeLessThanOrEqual(256)
+
+    // Complete: two topics staged jointly for same generation (residentTopic = chatData && segments)
+    residentStore.dispatch(bumpGeneration('t-res-A'))
+    const genA1 = residentEntries()['t-res-A'].applicabilityGeneration as number
+    expect(genA1).toBe(1)
+    residentStore.dispatch(
+      publishResidentComplete({
+        topicId: 't-res-A',
+        generation: genA1,
+        windowResponse: makeResidentWindowResponse('t-res-A', ['m1']),
+        segments: []
+      })
+    )
+    residentStore.dispatch(bumpGeneration('t-res-B'))
+    const genB1 = residentEntries()['t-res-B'].applicabilityGeneration as number
+    residentStore.dispatch(
+      publishResidentComplete({
+        topicId: 't-res-B',
+        generation: genB1,
+        windowResponse: makeResidentWindowResponse('t-res-B', ['m2']),
+        segments: []
+      })
+    )
+    snap = getPhase4Snapshot(win, residentEntries())
+    expect(snap.resident.entryCount).toBe(2)
+    expect(snap.resident.residentCount).toBe(2)
+    expect(snap.resident.chatDataCount).toBe(2)
+    expect(snap.resident.segmentsCount).toBe(2)
+    expect(snap.resident.incompleteCount).toBe(0)
+    expect(snap.resident.maxGeneration).toBe(1)
+    // Coherent B bounds still hold alongside resident complete
+    expect(snap.b06!.groupCount).toBeLessThanOrEqual(200)
+    expect(snap.b08.liveRangeCount).toBeLessThanOrEqual(500)
+    expect(snap.b09.retainedTopicCount).toBeLessThanOrEqual(1)
+    // Privacy: snapshot contains bounded scalars only, no per-topic collections or content
+    expect(JSON.stringify(snap.resident)).not.toContain('t-res-A')
+    expect(JSON.stringify(snap)).not.toContain('credential')
+    expect(JSON.stringify(snap)).not.toContain('path')
+
+    // Generation advance -> incomplete: bump makes entry incomplete and maxGeneration advances
+    residentStore.dispatch(bumpGeneration('t-res-A'))
+    const genA2 = residentEntries()['t-res-A'].applicabilityGeneration as number
+    expect(genA2).toBe(2)
+    snap = getPhase4Snapshot(win, residentEntries())
+    expect(snap.resident.entryCount).toBe(2)
+    expect(snap.resident.residentCount).toBe(1)
+    expect(snap.resident.incompleteCount).toBe(1)
+    expect(snap.resident.chatDataCount).toBe(1)
+    expect(snap.resident.segmentsCount).toBe(1)
+    expect(snap.resident.maxGeneration).toBe(2)
+    scalars = getPhase4BoundScalars(win, residentEntries())
+    expect(scalars.residentResidentCount).toBe(1)
+    expect(scalars.residentIncompleteCount).toBe(1)
+    expect(scalars.residentMaxGeneration).toBe(2)
+    expect(scalars.b06GroupCount).toBeLessThanOrEqual(200)
+    expect(scalars.b07IndexCount).toBeLessThanOrEqual(256)
+    expect(scalars.b08LiveRangeCount).toBeLessThanOrEqual(500)
+    expect(scalars.b09Retained).toBeLessThanOrEqual(1)
+
+    // Stale publication rejection: older generation must be discarded, diagnostics unchanged
+    const stalePayload = {
+      topicId: 't-res-A',
+      generation: genA1,
+      windowResponse: makeResidentWindowResponse('t-res-A', ['m-stale']),
+      segments: []
+    }
+    expect(shouldDiscardJointPublish(residentStore.getState(), stalePayload)).toBe(true)
+    const beforeStale = getPhase4Snapshot(win, residentEntries()).resident
+    residentStore.dispatch(publishResidentComplete(stalePayload as any))
+    const afterStale = getPhase4Snapshot(win, residentEntries()).resident
+    expect(afterStale).toEqual(beforeStale)
+    expect(afterStale.residentCount).toBe(1)
+    expect(afterStale.maxGeneration).toBe(2)
+    // Correct generation republish restores resident
+    expect(
+      shouldDiscardJointPublish(residentStore.getState(), {
+        topicId: 't-res-A',
+        generation: genA2,
+        windowResponse: makeResidentWindowResponse('t-res-A', ['m-good']),
+        segments: []
+      })
+    ).toBe(false)
+    residentStore.dispatch(
+      publishResidentComplete({
+        topicId: 't-res-A',
+        generation: genA2,
+        windowResponse: makeResidentWindowResponse('t-res-A', ['m-good']),
+        segments: []
+      })
+    )
+    expect(getPhase4Snapshot(win, residentEntries()).resident.residentCount).toBe(2)
+    expect(getPhase4Snapshot(win, residentEntries()).resident.incompleteCount).toBe(0)
+
+    // Deletion/clear transitions: advance before purge, then clear
+    const genBBeforeDeletion = residentEntries()['t-res-B'].applicabilityGeneration
+    residentStore.dispatch(invalidateForDeletion('t-res-B'))
+    const genBAfterDeletion = residentEntries()['t-res-B'].applicabilityGeneration
+    expect(genBAfterDeletion).toBe(genBBeforeDeletion + 1)
+    expect(residentEntries()['t-res-B'].residentTopic).toBe(false)
+    expect(residentEntries()['t-res-B'].chatData).toBe(false)
+    expect(residentEntries()['t-res-B'].segments).toBe(false)
+    snap = getPhase4Snapshot(win, residentEntries())
+    // invalidateForDeletion keeps entry but makes it incomplete with generation+1
+    expect(snap.resident.entryCount).toBe(2)
+    expect(snap.resident.residentCount).toBe(1)
+    expect(snap.resident.incompleteCount).toBe(1)
+    expect(snap.resident.maxGeneration).toBe(2)
+    expect(snap.b06!.groupCount).toBeLessThanOrEqual(200)
+    expect(snap.b07.indexCount).toBeLessThanOrEqual(256)
+
+    residentStore.dispatch(clearResidentEntry('t-res-B'))
+    expect(residentEntries()['t-res-B']).toBeUndefined()
+    snap = getPhase4Snapshot(win, residentEntries())
+    expect(snap.resident.entryCount).toBe(1)
+    expect(snap.resident.residentCount).toBe(1)
+    expect(snap.resident.incompleteCount).toBe(0)
+
+    residentStore.dispatch(resetAllResidentRegistry())
+    snap = getPhase4Snapshot(win, residentEntries())
+    expect(snap.resident.entryCount).toBe(0)
+    expect(snap.resident.residentCount).toBe(0)
+    expect(snap.resident.incompleteCount).toBe(0)
+    expect(snap.resident.maxGeneration).toBe(0)
+    scalars = getPhase4BoundScalars(win, residentEntries())
+    expect(scalars.residentEntryCount).toBe(0)
+    expect(scalars.residentResidentCount).toBe(0)
+    expect(scalars.b06GroupCount).toBeLessThanOrEqual(200)
+    expect(scalars.b07IndexCount).toBeLessThanOrEqual(256)
+    expect(scalars.b08LiveRangeCount).toBeLessThanOrEqual(500)
+    expect(scalars.b09Retained).toBeLessThanOrEqual(1)
+
+    // Final privacy/boundedness: coherent snapshot contains only scalars, no data retention
+    const serializedFinal = JSON.stringify(getPhase4Snapshot(win, residentEntries()))
+    expect(serializedFinal).not.toContain('m1')
+    expect(serializedFinal).not.toContain('m-stale')
+    expect(serializedFinal).not.toContain('m-good')
+    expect(Object.keys(getPhase4Snapshot(win, residentEntries()).resident).sort()).toEqual(
+      ['chatDataCount', 'entryCount', 'incompleteCount', 'maxGeneration', 'residentCount', 'segmentsCount'].sort()
+    )
+    expect(JSON.stringify(getContentSearchDiagnostics())).not.toContain('<div')
+
+    // Cleanup B-08 owner to avoid leaking diagnostics for subsequent tests
+    releaseContentSearchSessionIfOwned(b08Owner)
+    expect(getContentSearchDiagnostics().liveRangeCount).toBe(0)
   })
 })
