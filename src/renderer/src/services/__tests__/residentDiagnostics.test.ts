@@ -12,8 +12,10 @@ import { getResidentDiagnostics, getResidentDiagnosticsFromState } from '@render
 import type { ResidentEntry } from '@renderer/store/residentRegistry'
 import residentRegistryReducer, {
   bumpGeneration,
+  clearEntry as clearResidentEntry,
   markSegmentsLoaded,
   publishResidentComplete,
+  resetAllResidentRegistry,
   shouldDiscardJointPublish
 } from '@renderer/store/residentRegistry'
 import type { FetchMessagesWindowResponse } from '@shared/chatDb'
@@ -367,5 +369,130 @@ describe('residentDiagnostics pure adapter — bounded scalars, read-only', () =
     expect(emptySnap.resident.entryCount).toBe(0)
     // restore
     ;(window as any).store = prev
+  })
+
+  it('clearing highest-generation entry recomputes maxGeneration and resetAll clears all derived resident scalars', () => {
+    const store = configureStore({ reducer: { residentRegistry: residentRegistryReducer } })
+
+    // surviving lower-generation resident entry (gen 1)
+    store.dispatch(bumpGeneration('t-survivor'))
+    const survivorGen = (store.getState() as any).residentRegistry.entries['t-survivor']
+      .applicabilityGeneration as number
+    expect(survivorGen).toBe(1)
+    store.dispatch(
+      publishResidentComplete({
+        topicId: 't-survivor',
+        generation: survivorGen,
+        windowResponse: makeWindowResponse('t-survivor', [{ id: 'm-survivor' }]),
+        segments: []
+      })
+    )
+
+    // removable highest-generation resident entry (gen 3)
+    store.dispatch(bumpGeneration('t-high'))
+    store.dispatch(bumpGeneration('t-high'))
+    store.dispatch(bumpGeneration('t-high'))
+    const highGen = (store.getState() as any).residentRegistry.entries['t-high'].applicabilityGeneration as number
+    expect(highGen).toBe(3)
+    store.dispatch(
+      publishResidentComplete({
+        topicId: 't-high',
+        generation: highGen,
+        windowResponse: makeWindowResponse('t-high', [{ id: 'm-high' }]),
+        segments: []
+      })
+    )
+
+    // before: both complete/observable, different generations
+    const before = getResidentDiagnostics(entriesFromStore(store))
+    const beforeFromState = getResidentDiagnosticsFromState(store.getState())
+    expect(before).toEqual(beforeFromState)
+    expect(before.entryCount).toBe(2)
+    expect(before.residentCount).toBe(2)
+    expect(before.chatDataCount).toBe(2)
+    expect(before.segmentsCount).toBe(2)
+    expect(before.incompleteCount).toBe(0)
+    expect(before.maxGeneration).toBe(3)
+    expect(before.incompleteCount).toBe(before.entryCount - before.residentCount)
+    // Phase4 composition reflects same before state
+    const snapBefore = getPhase4Snapshot(null, entriesFromStore(store))
+    expect(snapBefore.resident).toEqual(before)
+    const scalarsBefore = getPhase4BoundScalars(null, entriesFromStore(store))
+    expect(scalarsBefore.residentEntryCount).toBe(2)
+    expect(scalarsBefore.residentResidentCount).toBe(2)
+    expect(scalarsBefore.residentChatDataCount).toBe(2)
+    expect(scalarsBefore.residentSegmentsCount).toBe(2)
+    expect(scalarsBefore.residentIncompleteCount).toBe(0)
+    expect(scalarsBefore.residentMaxGeneration).toBe(3)
+
+    // clear highest-generation entry via public slice action path
+    store.dispatch(clearResidentEntry('t-high'))
+    expect(entriesFromStore(store)['t-high']).toBeUndefined()
+    const afterClear = getResidentDiagnostics(entriesFromStore(store))
+    const afterClearFromState = getResidentDiagnosticsFromState(store.getState())
+    expect(afterClear).toEqual(afterClearFromState)
+    expect(afterClear.entryCount).toBe(1)
+    expect(afterClear.entryCount).toBeLessThan(before.entryCount)
+    expect(afterClear.maxGeneration).toBe(survivorGen)
+    expect(afterClear.maxGeneration).toBeLessThan(before.maxGeneration)
+    expect(afterClear.residentCount).toBe(1)
+    expect(afterClear.chatDataCount).toBe(1)
+    expect(afterClear.segmentsCount).toBe(1)
+    expect(afterClear.incompleteCount).toBe(0)
+    expect(afterClear.incompleteCount).toBe(afterClear.entryCount - afterClear.residentCount)
+    // privacy: bounded scalar-only, no per-topic collections or sensitive payload
+    const serializedClear = JSON.stringify(afterClear)
+    expect(serializedClear).not.toContain('t-survivor')
+    expect(serializedClear).not.toContain('t-high')
+    expect(serializedClear).not.toContain('path')
+    expect(serializedClear).not.toContain('credential')
+    expect(Object.keys(afterClear).sort()).toEqual(
+      ['chatDataCount', 'entryCount', 'incompleteCount', 'maxGeneration', 'residentCount', 'segmentsCount'].sort()
+    )
+    // Phase4 composition after clear remains coherent and recomputed
+    const snapAfterClear = getPhase4Snapshot(null, entriesFromStore(store))
+    expect(snapAfterClear.resident).toEqual(afterClear)
+    expect(snapAfterClear.resident.maxGeneration).toBe(1)
+    const scalarsAfterClear = getPhase4BoundScalars(null, entriesFromStore(store))
+    expect(scalarsAfterClear.residentEntryCount).toBe(1)
+    expect(scalarsAfterClear.residentMaxGeneration).toBe(1)
+    expect(scalarsAfterClear.residentResidentCount).toBe(1)
+    expect(scalarsAfterClear.residentIncompleteCount).toBe(0)
+    expect(scalarsAfterClear.residentChatDataCount).toBe(1)
+    expect(scalarsAfterClear.residentSegmentsCount).toBe(1)
+
+    // resetAll clears all derived resident scalars to zero
+    store.dispatch(resetAllResidentRegistry())
+    const afterReset = getResidentDiagnostics(entriesFromStore(store))
+    const afterResetFromState = getResidentDiagnosticsFromState(store.getState())
+    expect(afterReset).toEqual(afterResetFromState)
+    expect(afterReset).toEqual({
+      entryCount: 0,
+      residentCount: 0,
+      chatDataCount: 0,
+      segmentsCount: 0,
+      incompleteCount: 0,
+      maxGeneration: 0
+    })
+    expect(Object.keys(afterReset).sort()).toEqual(
+      ['chatDataCount', 'entryCount', 'incompleteCount', 'maxGeneration', 'residentCount', 'segmentsCount'].sort()
+    )
+    const serializedReset = JSON.stringify(afterReset)
+    expect(serializedReset).not.toContain('t-survivor')
+    expect(serializedReset).not.toContain('entries')
+    // Phase4 snapshot/bound scalars composition after reset
+    const snapAfterReset = getPhase4Snapshot(null, entriesFromStore(store))
+    expect(snapAfterReset.resident).toEqual(afterReset)
+    expect(snapAfterReset.resident.entryCount).toBe(0)
+    expect(snapAfterReset.resident.maxGeneration).toBe(0)
+    const scalarsAfterReset = getPhase4BoundScalars(null, entriesFromStore(store))
+    expect(scalarsAfterReset.residentEntryCount).toBe(0)
+    expect(scalarsAfterReset.residentResidentCount).toBe(0)
+    expect(scalarsAfterReset.residentChatDataCount).toBe(0)
+    expect(scalarsAfterReset.residentSegmentsCount).toBe(0)
+    expect(scalarsAfterReset.residentIncompleteCount).toBe(0)
+    expect(scalarsAfterReset.residentMaxGeneration).toBe(0)
+    // pure adapter: global diagnostics also zero when entries cleared
+    expect(getResidentDiagnosticsFromState(store.getState())).toEqual(afterReset)
   })
 })
