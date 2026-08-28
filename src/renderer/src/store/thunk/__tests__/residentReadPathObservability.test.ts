@@ -917,4 +917,471 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
       expect(v === null || typeof v === 'number').toBe(true)
     }
   })
+
+  it('cumulative thunk-driven derived scalars remain exact and mirror snapshot/bound composition, staged failure does not discard, privacy-safe', async () => {
+    const { getResidentReadDiagnostics, resetResidentReadDiagnosticsForTests } = await import(
+      '@renderer/services/residentReadDiagnostics'
+    )
+    const { getPhase4Snapshot, getPhase4BoundScalars } = await import('@renderer/services/phase4Observability')
+    const { loadTopicMessagesThunk } = await import('../messageThunk')
+    const { resetAllDeletionGenerationsForTests } = await import('@renderer/services/topicDeletionInvalidation')
+
+    resetResidentReadDiagnosticsForTests()
+    resetAllDeletionGenerationsForTests()
+    mocks.publishResidentComplete.mockClear()
+
+    // Unique topic IDs per spec to avoid module-global request sequence collision
+    const hitId = 't-cum-hit-unique-1'
+    const forcedId = 't-cum-forced-unique-2'
+    const noIndexId = 't-cum-noindex-unique-3'
+    const failId = 't-cum-fail-unique-4'
+    const discardId = 't-cum-discard-unique-5'
+
+    const dispatch = vi.fn((a: unknown) => {
+      if (typeof a === 'function') return (a as any)(dispatch, () => storeState)
+      return a
+    })
+    const getState = () => storeState
+
+    // Ensure clean slate for unique IDs
+    for (const id of [hitId, forcedId, noIndexId, failId, discardId]) {
+      delete storeState.messages.messageIdsByTopic[id]
+      delete storeState.residentRegistry.entries[id]
+    }
+    storeState.messages.currentTopicId = null
+
+    // Save original mock impls to restore reliably
+    const defaultFetchImpl = async (req: FetchMessagesWindowRequest) => {
+      const msgs = [{ id: `m-${req.topicId}`, topicId: req.topicId, blocks: [] }]
+      return makeWindowResponse(req, msgs as any)
+    }
+    const defaultListImpl = async () => [] as any[]
+
+    mocks.fetchMessagesWindow.mockImplementation(defaultFetchImpl as any)
+    mocks.listSegments.mockImplementation(defaultListImpl as any)
+
+    try {
+      // 1) resident hit — no staged fetch, no publication
+      storeState.messages.messageIdsByTopic[hitId] = ['m-0', 'm-1']
+      storeState.residentRegistry.entries[hitId] = {
+        chatData: true,
+        segments: true,
+        residentTopic: true,
+        applicabilityGeneration: 1
+      }
+      storeState.messages.currentTopicId = hitId
+      mocks.fetchMessagesWindow.mockClear()
+      mocks.listSegments.mockClear()
+      mocks.publishResidentComplete.mockClear()
+      await loadTopicMessagesThunk(hitId)(dispatch, getState as any)
+      expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
+      expect(mocks.listSegments).not.toHaveBeenCalled()
+      {
+        const d = getResidentReadDiagnostics()
+        expect(d.hitCount).toBe(1)
+        expect(d.missCount).toBe(0)
+        expect(d.totalRequests).toBe(1)
+        expect(d.stagedCount).toBe(0)
+        expect(d.discardedCount).toBe(0)
+      }
+      expect(
+        mocks.publishResidentComplete.mock.calls.filter(
+          (c: unknown[]) => (c[0] as { topicId?: string })?.topicId === hitId
+        ).length
+      ).toBe(0)
+
+      // 2) forced staged success — missForced + staged success + publication
+      storeState.messages.messageIdsByTopic[forcedId] = ['m-0']
+      storeState.residentRegistry.entries[forcedId] = {
+        chatData: true,
+        segments: true,
+        residentTopic: true,
+        applicabilityGeneration: 1
+      }
+      mocks.fetchMessagesWindow.mockClear()
+      mocks.listSegments.mockClear()
+      mocks.publishResidentComplete.mockClear()
+      mocks.fetchMessagesWindow.mockImplementation(defaultFetchImpl as any)
+      mocks.listSegments.mockImplementation(defaultListImpl as any)
+      await loadTopicMessagesThunk(forcedId, true)(dispatch, getState as any)
+      {
+        const d = getResidentReadDiagnostics()
+        expect(d.missForced).toBe(1)
+        expect(d.missCount).toBe(1)
+        expect(d.stagedCount).toBe(1)
+        expect(d.stagedSuccessCount).toBe(1)
+        expect(d.stagedFailedCount).toBe(0)
+      }
+      expect(
+        mocks.publishResidentComplete.mock.calls.filter(
+          (c: unknown[]) => (c[0] as { topicId?: string })?.topicId === forcedId
+        ).length
+      ).toBe(1)
+
+      // 3) no-index staged success — missNoIndex + staged success + publication
+      delete storeState.messages.messageIdsByTopic[noIndexId]
+      delete storeState.residentRegistry.entries[noIndexId]
+      mocks.fetchMessagesWindow.mockClear()
+      mocks.listSegments.mockClear()
+      mocks.publishResidentComplete.mockClear()
+      await loadTopicMessagesThunk(noIndexId)(dispatch, getState as any)
+      {
+        const d = getResidentReadDiagnostics()
+        expect(d.missNoIndex).toBe(1)
+        expect(d.missCount).toBe(2)
+        expect(d.stagedCount).toBe(2)
+        expect(d.stagedSuccessCount).toBe(2)
+      }
+      expect(
+        mocks.publishResidentComplete.mock.calls.filter(
+          (c: unknown[]) => (c[0] as { topicId?: string })?.topicId === noIndexId
+        ).length
+      ).toBe(1)
+
+      // 4) staged failure — miss + staged failure, no discarded, no publication, LOCK-005
+      delete storeState.messages.messageIdsByTopic[failId]
+      delete storeState.residentRegistry.entries[failId]
+      const beforeFail = getResidentReadDiagnostics()
+      mocks.fetchMessagesWindow.mockRejectedValueOnce(new Error('cum staged fail'))
+      mocks.listSegments.mockResolvedValueOnce([])
+      mocks.publishResidentComplete.mockClear()
+      await loadTopicMessagesThunk(failId)(dispatch, getState as any)
+      {
+        const d = getResidentReadDiagnostics()
+        expect(d.stagedCount - beforeFail.stagedCount).toBe(1)
+        expect(d.stagedFailedCount - beforeFail.stagedFailedCount).toBe(1)
+        expect(d.stagedSuccessCount - beforeFail.stagedSuccessCount).toBe(0)
+        expect(d.discardedCount - beforeFail.discardedCount).toBe(0)
+        expect((d as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
+        // staged latency finite/non-negative, internally consistent
+        expect(Number.isFinite(d.stagedTotalMs)).toBe(true)
+        expect(Number.isFinite(d.stagedMaxMs)).toBe(true)
+        expect(d.stagedTotalMs).toBeGreaterThanOrEqual(0)
+        expect(d.stagedMaxMs).toBeGreaterThanOrEqual(0)
+        expect(d.stagedLastMs).not.toBeNull()
+        expect(Number.isFinite(d.stagedLastMs!)).toBe(true)
+        expect(d.stagedLastMs! >= 0).toBe(true)
+      }
+      expect(
+        mocks.publishResidentComplete.mock.calls.filter(
+          (c: unknown[]) => (c[0] as { topicId?: string })?.topicId === failId
+        ).length
+      ).toBe(0)
+      // restore default impl after once-reject
+      mocks.fetchMessagesWindow.mockImplementation(defaultFetchImpl as any)
+      mocks.listSegments.mockImplementation(defaultListImpl as any)
+
+      // 5) post-stage discard — generationMismatch (deterministic, preferred over superseded)
+      delete storeState.messages.messageIdsByTopic[discardId]
+      delete storeState.residentRegistry.entries[discardId]
+      let resolveW: (v: unknown) => void
+      let resolveS: (v: unknown) => void
+      mocks.fetchMessagesWindow.mockImplementation(
+        () => new Promise((resolve) => (resolveW = resolve as unknown as (v: unknown) => void))
+      )
+      mocks.listSegments.mockImplementation(
+        () => new Promise((resolve) => (resolveS = resolve as unknown as (v: unknown) => void))
+      )
+      mocks.publishResidentComplete.mockClear()
+      const p = loadTopicMessagesThunk(discardId)(dispatch, getState as any)
+      await Promise.resolve()
+      await Promise.resolve()
+      // bump generation to stale captured generation
+      const entry = storeState.residentRegistry.entries[discardId]
+      if (entry) entry.applicabilityGeneration += 1
+      const req: FetchMessagesWindowRequest = {
+        kind: 'latest',
+        topicId: discardId,
+        limit: 10
+      } as unknown as FetchMessagesWindowRequest
+      resolveW!(makeWindowResponse(req, [{ id: 'm-0', topicId: discardId, blocks: [] } as any]))
+      resolveS!([])
+      await p
+      {
+        const d = getResidentReadDiagnostics()
+        expect(d.discardedGenerationMismatch).toBe(1)
+        expect(d.discardedCount).toBe(1)
+        // staged still counts success for discarded attempt
+        expect(d.stagedCount).toBe(4)
+        expect(d.stagedSuccessCount).toBe(3)
+        expect(d.stagedFailedCount).toBe(1)
+      }
+      expect(
+        mocks.publishResidentComplete.mock.calls.filter(
+          (c: unknown[]) => (c[0] as { topicId?: string })?.topicId === discardId
+        ).length
+      ).toBe(0)
+
+      // Final cumulative identities — exact
+      const diag = getResidentReadDiagnostics()
+      // totalRequests = hitCount + missCount
+      expect(diag.totalRequests).toBe(diag.hitCount + diag.missCount)
+      expect(diag.hitCount).toBe(1)
+      // missCount equals six miss-reason sum
+      expect(diag.missCount).toBe(
+        diag.missForced +
+          diag.missNoIndex +
+          diag.missDeletion +
+          diag.missLegacyEmpty +
+          diag.missNoEntry +
+          diag.missIncomplete
+      )
+      expect(diag.missCount).toBe(4)
+      expect(diag.missForced).toBe(1)
+      // stagedCount = stagedSuccessCount + stagedFailedCount
+      expect(diag.stagedCount).toBe(diag.stagedSuccessCount + diag.stagedFailedCount)
+      expect(diag.stagedCount).toBe(4)
+      expect(diag.stagedSuccessCount).toBe(3)
+      expect(diag.stagedFailedCount).toBe(1)
+      // discardedCount equals five discard-reason sum
+      expect(diag.discardedCount).toBe(
+        diag.discardedSuperseded +
+          diag.discardedCurrentMoved +
+          diag.discardedDeletedDuringFetch +
+          diag.discardedGenerationMismatch +
+          diag.discardedMalformed
+      )
+      expect(diag.discardedCount).toBe(1)
+      expect(diag.discardedGenerationMismatch).toBe(1)
+      // staged total/max/last/avg finite and internally consistent
+      expect(Number.isFinite(diag.stagedTotalMs)).toBe(true)
+      expect(Number.isFinite(diag.stagedMaxMs)).toBe(true)
+      expect(diag.stagedTotalMs).toBeGreaterThanOrEqual(0)
+      expect(diag.stagedMaxMs).toBeGreaterThanOrEqual(0)
+      expect(diag.stagedLastMs).not.toBeNull()
+      expect(Number.isFinite(diag.stagedLastMs!)).toBe(true)
+      expect(diag.stagedLastMs! >= 0).toBe(true)
+      expect(diag.stagedAvgMs).not.toBeNull()
+      expect(Number.isFinite(diag.stagedAvgMs!)).toBe(true)
+      expect(diag.stagedAvgMs! >= 0).toBe(true)
+      // avg = total / count (tolerance for floating)
+      expect(Math.abs(diag.stagedAvgMs! - diag.stagedTotalMs / diag.stagedCount)).toBeLessThan(1e-6)
+      expect(diag.stagedMaxMs >= diag.stagedLastMs!).toBe(true)
+      expect(diag.stagedTotalMs >= diag.stagedMaxMs).toBe(true)
+      // snapshot and bound scalar composition mirror diagnostics
+      const snap = getPhase4Snapshot(null)
+      expect(snap.residentRead).toEqual(diag)
+      expect(snap.residentRead.hitCount).toBe(diag.hitCount)
+      expect(snap.residentRead.missCount).toBe(diag.missCount)
+      expect(snap.residentRead.totalRequests).toBe(diag.totalRequests)
+      expect(snap.residentRead.stagedCount).toBe(diag.stagedCount)
+      expect(snap.residentRead.stagedSuccessCount).toBe(diag.stagedSuccessCount)
+      expect(snap.residentRead.stagedFailedCount).toBe(diag.stagedFailedCount)
+      expect(snap.residentRead.stagedTotalMs).toBe(diag.stagedTotalMs)
+      expect(snap.residentRead.stagedMaxMs).toBe(diag.stagedMaxMs)
+      expect(snap.residentRead.stagedLastMs).toBe(diag.stagedLastMs)
+      expect(snap.residentRead.stagedAvgMs).toBe(diag.stagedAvgMs)
+      expect(snap.residentRead.discardedCount).toBe(diag.discardedCount)
+      const scalars = getPhase4BoundScalars(null)
+      expect(scalars.readHitCount).toBe(diag.hitCount)
+      expect(scalars.readMissCount).toBe(diag.missCount)
+      expect(scalars.readTotalRequests).toBe(diag.totalRequests)
+      expect(scalars.readMissForced).toBe(diag.missForced)
+      expect(scalars.readMissNoIndex).toBe(diag.missNoIndex)
+      expect(scalars.readStagedCount).toBe(diag.stagedCount)
+      expect(scalars.readStagedSuccessCount).toBe(diag.stagedSuccessCount)
+      expect(scalars.readStagedFailedCount).toBe(diag.stagedFailedCount)
+      expect(scalars.readStagedTotalMs).toBe(diag.stagedTotalMs)
+      expect(scalars.readStagedMaxMs).toBe(diag.stagedMaxMs)
+      expect(scalars.readStagedLastMs).toBe(diag.stagedLastMs)
+      expect(scalars.readStagedAvgMs).toBe(diag.stagedAvgMs)
+      expect(scalars.readDiscardedCount).toBe(diag.discardedCount)
+      expect(scalars.readDiscardedGenerationMismatch).toBe(diag.discardedGenerationMismatch)
+      // scalar-only and privacy-safe
+      for (const v of Object.values(diag)) {
+        expect(v === null || typeof v === 'number').toBe(true)
+        if (typeof v === 'number') {
+          expect(Number.isFinite(v)).toBe(true)
+          expect(v).toBeGreaterThanOrEqual(0)
+        }
+      }
+      for (const v of Object.values(snap.residentRead)) {
+        expect(v === null || typeof v === 'number').toBe(true)
+      }
+      const diagJson = JSON.stringify(diag)
+      const snapJson = JSON.stringify(snap.residentRead)
+      for (const id of [hitId, forcedId, noIndexId, failId, discardId]) {
+        expect(diagJson).not.toContain(id)
+        expect(snapJson).not.toContain(id)
+      }
+      expect(diagJson).not.toContain('m-0')
+      expect(snapJson).not.toContain('m-0')
+      // no unknown/fetchFailed counter leakage
+      expect((diag as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
+      expect((diag as unknown as Record<string, unknown>).missUnknown).toBeUndefined()
+      expect((snap.residentRead as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
+    } finally {
+      // Restore deferred/mock implementations and reset diagnostics/deletion generations in cleanup
+      mocks.fetchMessagesWindow.mockImplementation(defaultFetchImpl as any)
+      mocks.listSegments.mockImplementation(defaultListImpl as any)
+      mocks.publishResidentComplete.mockClear()
+      for (const id of [hitId, forcedId, noIndexId, failId, discardId]) {
+        delete storeState.messages.messageIdsByTopic[id]
+        delete storeState.residentRegistry.entries[id]
+      }
+      storeState.messages.currentTopicId = null
+      resetResidentReadDiagnosticsForTests()
+      resetAllDeletionGenerationsForTests()
+    }
+  })
+
+  it('unknown/empty/null miss and discard reasons are ignored, closed taxonomy, negative staged latency clamped, scalar shape remains bounded', async () => {
+    const {
+      getResidentReadDiagnostics,
+      resetResidentReadDiagnosticsForTests,
+      recordResidentReadMiss,
+      recordResidentReadDiscard,
+      recordStagedLatency
+    } = await import('@renderer/services/residentReadDiagnostics')
+    const { getPhase4Snapshot, getPhase4BoundScalars } = await import('@renderer/services/phase4Observability')
+    const { resetAllDeletionGenerationsForTests } = await import('@renderer/services/topicDeletionInvalidation')
+
+    resetResidentReadDiagnosticsForTests()
+    resetAllDeletionGenerationsForTests()
+
+    const before = getResidentReadDiagnostics()
+    // Closed taxonomy: unknown/undefined/empty/null miss and discard values must not change counters
+    ;(recordResidentReadMiss as unknown as (r: unknown) => void)('unknown')
+    ;(recordResidentReadMiss as unknown as (r: unknown) => void)(undefined)
+    ;(recordResidentReadMiss as unknown as (r: unknown) => void)(null)
+    ;(recordResidentReadMiss as unknown as (r: unknown) => void)('')
+    ;(recordResidentReadMiss as unknown as (r: unknown) => void)('fetchFailed')
+    ;(recordResidentReadMiss as unknown as (r: unknown) => void)('bogus')
+    ;(recordResidentReadMiss as unknown as (r: unknown) => void)(123 as unknown)
+    ;(recordResidentReadDiscard as unknown as (r: unknown) => void)('unknown')
+    ;(recordResidentReadDiscard as unknown as (r: unknown) => void)(undefined)
+    ;(recordResidentReadDiscard as unknown as (r: unknown) => void)(null)
+    ;(recordResidentReadDiscard as unknown as (r: unknown) => void)('')
+    ;(recordResidentReadDiscard as unknown as (r: unknown) => void)('fetchFailed')
+    ;(recordResidentReadDiscard as unknown as (r: unknown) => void)('bogus')
+    ;(recordResidentReadDiscard as unknown as (r: unknown) => void)(123 as unknown)
+
+    const afterUnknown = getResidentReadDiagnostics()
+    // No existing counters change
+    expect(afterUnknown).toEqual(before)
+    expect(afterUnknown.hitCount).toBe(before.hitCount)
+    expect(afterUnknown.missCount).toBe(before.missCount)
+    expect(afterUnknown.missForced).toBe(before.missForced)
+    expect(afterUnknown.missNoIndex).toBe(before.missNoIndex)
+    expect(afterUnknown.missDeletion).toBe(before.missDeletion)
+    expect(afterUnknown.missLegacyEmpty).toBe(before.missLegacyEmpty)
+    expect(afterUnknown.missNoEntry).toBe(before.missNoEntry)
+    expect(afterUnknown.missIncomplete).toBe(before.missIncomplete)
+    expect(afterUnknown.stagedCount).toBe(before.stagedCount)
+    expect(afterUnknown.stagedSuccessCount).toBe(before.stagedSuccessCount)
+    expect(afterUnknown.stagedFailedCount).toBe(before.stagedFailedCount)
+    expect(afterUnknown.discardedCount).toBe(before.discardedCount)
+    expect(afterUnknown.discardedSuperseded).toBe(before.discardedSuperseded)
+    expect(afterUnknown.discardedCurrentMoved).toBe(before.discardedCurrentMoved)
+    expect(afterUnknown.discardedDeletedDuringFetch).toBe(before.discardedDeletedDuringFetch)
+    expect(afterUnknown.discardedGenerationMismatch).toBe(before.discardedGenerationMismatch)
+    expect(afterUnknown.discardedMalformed).toBe(before.discardedMalformed)
+    // No unknown or fetchFailed counter appears
+    expect((afterUnknown as unknown as Record<string, unknown>).missUnknown).toBeUndefined()
+    expect((afterUnknown as unknown as Record<string, unknown>).missFetchFailed).toBeUndefined()
+    expect((afterUnknown as unknown as Record<string, unknown>).discardedUnknown).toBeUndefined()
+    expect((afterUnknown as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
+    expect((afterUnknown as unknown as Record<string, unknown>).unknown).toBeUndefined()
+    // Scalar shape remains closed — exactly the defined diagnostics keys
+    const expectedKeys = [
+      'hitCount',
+      'missCount',
+      'totalRequests',
+      'missForced',
+      'missNoIndex',
+      'missDeletion',
+      'missLegacyEmpty',
+      'missNoEntry',
+      'missIncomplete',
+      'stagedCount',
+      'stagedSuccessCount',
+      'stagedFailedCount',
+      'stagedTotalMs',
+      'stagedMaxMs',
+      'stagedLastMs',
+      'stagedAvgMs',
+      'discardedCount',
+      'discardedSuperseded',
+      'discardedCurrentMoved',
+      'discardedDeletedDuringFetch',
+      'discardedGenerationMismatch',
+      'discardedMalformed'
+    ].sort()
+    expect(Object.keys(afterUnknown).sort()).toEqual(expectedKeys)
+    // Scalar-only, finite/non-negative
+    for (const v of Object.values(afterUnknown)) {
+      expect(v === null || typeof v === 'number').toBe(true)
+      if (typeof v === 'number') {
+        expect(Number.isFinite(v)).toBe(true)
+        expect(v).toBeGreaterThanOrEqual(0)
+      }
+    }
+
+    // Negative staged latency input proves non-negative clamping while preserving staged identity
+    const beforeStaged = getResidentReadDiagnostics()
+    ;(recordStagedLatency as unknown as (n: unknown, s: unknown) => void)(-100, true)
+    const afterStaged = getResidentReadDiagnostics()
+    expect(afterStaged.stagedCount - beforeStaged.stagedCount).toBe(1)
+    expect(afterStaged.stagedSuccessCount - beforeStaged.stagedSuccessCount).toBe(1)
+    expect(afterStaged.stagedFailedCount - beforeStaged.stagedFailedCount).toBe(0)
+    // Duration clamped to 0 — total and max unchanged, last is 0
+    expect(afterStaged.stagedTotalMs).toBe(beforeStaged.stagedTotalMs)
+    expect(afterStaged.stagedMaxMs).toBe(beforeStaged.stagedMaxMs)
+    expect(afterStaged.stagedLastMs).toBe(0)
+    expect(Number.isFinite(afterStaged.stagedTotalMs)).toBe(true)
+    expect(Number.isFinite(afterStaged.stagedMaxMs)).toBe(true)
+    // Exact staged identity preserved
+    expect(afterStaged.stagedCount).toBe(afterStaged.stagedSuccessCount + afterStaged.stagedFailedCount)
+    expect(afterStaged.stagedAvgMs).not.toBeNull()
+    expect(Number.isFinite(afterStaged.stagedAvgMs!)).toBe(true)
+    expect(afterStaged.stagedAvgMs! >= 0).toBe(true)
+    expect(Math.abs(afterStaged.stagedAvgMs! - afterStaged.stagedTotalMs / afterStaged.stagedCount)).toBeLessThan(1e-6)
+    // Also verify derived identities still hold after clamped latency
+    expect(afterStaged.totalRequests).toBe(afterStaged.hitCount + afterStaged.missCount)
+    expect(afterStaged.missCount).toBe(
+      afterStaged.missForced +
+        afterStaged.missNoIndex +
+        afterStaged.missDeletion +
+        afterStaged.missLegacyEmpty +
+        afterStaged.missNoEntry +
+        afterStaged.missIncomplete
+    )
+    expect(afterStaged.discardedCount).toBe(
+      afterStaged.discardedSuperseded +
+        afterStaged.discardedCurrentMoved +
+        afterStaged.discardedDeletedDuringFetch +
+        afterStaged.discardedGenerationMismatch +
+        afterStaged.discardedMalformed
+    )
+    // Snapshot and bound scalar composition mirror diagnostics after guard
+    const snap = getPhase4Snapshot(null)
+    expect(snap.residentRead).toEqual(afterStaged)
+    const scalars = getPhase4BoundScalars(null)
+    expect(scalars.readHitCount).toBe(afterStaged.hitCount)
+    expect(scalars.readMissCount).toBe(afterStaged.missCount)
+    expect(scalars.readTotalRequests).toBe(afterStaged.totalRequests)
+    expect(scalars.readStagedCount).toBe(afterStaged.stagedCount)
+    expect(scalars.readStagedSuccessCount).toBe(afterStaged.stagedSuccessCount)
+    expect(scalars.readStagedFailedCount).toBe(afterStaged.stagedFailedCount)
+    expect(scalars.readStagedTotalMs).toBe(afterStaged.stagedTotalMs)
+    expect(scalars.readStagedMaxMs).toBe(afterStaged.stagedMaxMs)
+    expect(scalars.readStagedLastMs).toBe(afterStaged.stagedLastMs)
+    expect(scalars.readStagedAvgMs).toBe(afterStaged.stagedAvgMs)
+    expect(scalars.readDiscardedCount).toBe(afterStaged.discardedCount)
+    // No leakage of unknown keys in snapshot/scalars
+    expect((snap.residentRead as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
+    expect((snap.residentRead as unknown as Record<string, unknown>).missUnknown).toBeUndefined()
+    for (const v of Object.values(snap.residentRead)) {
+      expect(v === null || typeof v === 'number').toBe(true)
+    }
+
+    // Cleanup for test isolation
+    resetResidentReadDiagnosticsForTests()
+    resetAllDeletionGenerationsForTests()
+    const afterReset = getResidentReadDiagnostics()
+    expect(afterReset.hitCount).toBe(0)
+    expect(afterReset.missCount).toBe(0)
+    expect(afterReset.stagedCount).toBe(0)
+    expect(afterReset.discardedCount).toBe(0)
+  })
 })
