@@ -90,6 +90,171 @@ export const DEFAULT_C02_HEAP_PROFILE: C02HeapProfile = {
 export const C02_PRODUCTION_WINDOW_MIN = 1
 export const C02_PRODUCTION_WINDOW_MAX = 100
 
+/**
+ * Default context turn count that governs the divider boundary in production
+ * (src/renderer/src/config/constant.ts DEFAULT_CONTEXTCOUNT = 25).
+ * Mirrored here for harness-only whole-topic validation — no production behavior
+ * change, no threshold adoption. A whole-topic window at or below this count has
+ * no divider by design (computeContextInfo boundaryMessageId null when startIndex 0).
+ */
+export const C02_DEFAULT_CONTEXTCOUNT = 25
+
+/**
+ * Whether the final-topic window is a whole-topic window where no divider is
+ * expected by design. Pure, deterministic, harness-only.
+ * Valid only for positive integer counts in 1..C02_DEFAULT_CONTEXTCOUNT (25).
+ * Non-finite, non-integer, zero, negative, or >25 are not whole-topic.
+ */
+export function isC02WholeTopicWindow(expectedVisibleFinal: number): boolean {
+  return (
+    Number.isFinite(expectedVisibleFinal) &&
+    Number.isInteger(expectedVisibleFinal) &&
+    expectedVisibleFinal >= C02_PRODUCTION_WINDOW_MIN &&
+    expectedVisibleFinal <= C02_DEFAULT_CONTEXTCOUNT
+  )
+}
+
+/**
+ * Collision-safe exact topic ownership matcher appropriate to the generated
+ * stable-id grammar (phase4 logical payload + messageRenderLayers stable ids).
+ *
+ * Topic ids are `${prefix}-${pad}` (e.g. c02-heap-topic-01, c02-mixed-topic-03,
+ * c02-c02-small-v1-topic-00). Message ids are `${topicId}-msg-${pad}`.
+ * Group stable ids encode messages as `${len}:${msgId}|${len}:${msgId}`.
+ * Anchor group keys are stable group ids or synthetic `${topicId}-group-...`.
+ *
+ * Valid ownership requires topicId appears as an exact token with boundary:
+ * before char is start, `:`, `|`, or non-alphanumeric, and after char is
+ * `-`, `:`, `|`, `_`, or end. This prevents substring collisions like
+ * `c02-heap-topic-01` matching inside `c02-heap-topic-011` where the next
+ * char is `1` (alphanumeric) rather than a boundary.
+ *
+ * Pure, deterministic, reusable for uniform/mixed/matrix builders and spec.
+ */
+export function isC02ExactTopicOwned(anchor: string | null, topicId: string): boolean {
+  if (anchor === null || typeof anchor !== 'string' || typeof topicId !== 'string') return false
+  if (anchor.length === 0 || topicId.length === 0) return false
+  let idx = anchor.indexOf(topicId)
+  while (idx !== -1) {
+    const beforeChar = idx > 0 ? anchor[idx - 1] : ''
+    const beforeOk =
+      idx === 0 ||
+      beforeChar === ':' ||
+      beforeChar === '|' ||
+      beforeChar === '-' ||
+      beforeChar === '_' ||
+      !/[A-Za-z0-9]/.test(beforeChar)
+    const afterIdx = idx + topicId.length
+    const afterChar = afterIdx < anchor.length ? anchor[afterIdx] : ''
+    const afterOk =
+      afterIdx === anchor.length || afterChar === '-' || afterChar === ':' || afterChar === '|' || afterChar === '_'
+    if (beforeOk && afterOk) return true
+    idx = anchor.indexOf(topicId, idx + 1)
+  }
+  return false
+}
+
+/**
+ * Small reusable pure derivation for effective heap informativeness.
+ * Single authoritative definition: (precision === 'precise') && finite positive measured heap delta.
+ * Callers must not trust a supplied boolean; derive from measured delta + precision.
+ */
+export function deriveEffectiveHeapInformative(heapDeltaBytes: number, precision: HeapPrecisionLabel): boolean {
+  return isEffectiveHeapDeltaInformative(heapDeltaBytes, precision)
+}
+
+/**
+ * Pure derivation for exact group validity from observed scalar counts.
+ * Caller booleans are diagnostic only; validity is groupCount === expectedVisible.
+ */
+export function deriveGroupCountExact(groupCount: number, expectedVisible: number): boolean {
+  return groupCount === expectedVisible
+}
+
+/**
+ * Pure derivation for final-topic DOM validity from observed scalar counts.
+ * Validity is scoped === expectedVisible && global === expectedVisible inside #messages.
+ * Missing/null/non-finite global count is inconclusive and must not be converted to scoped equality (fail-closed).
+ * Caller booleans are diagnostic only.
+ */
+export function deriveFinalTopicDomProof(
+  displayMessages: number,
+  globalDisplayMessages: number,
+  expectedVisible: number
+): boolean {
+  if (
+    !Number.isFinite(displayMessages) ||
+    !Number.isFinite(globalDisplayMessages) ||
+    !Number.isFinite(expectedVisible)
+  ) {
+    return false
+  }
+  return displayMessages === expectedVisible && globalDisplayMessages === expectedVisible
+}
+
+export interface C02ProductionPathEvidence {
+  reduxVerified: boolean
+  finalTopicDomProof: boolean
+  groupCountExact: boolean
+  groupOwnershipProof: boolean
+  contextBoundaryPresent: boolean
+  contextBoundaryInsideMessages: boolean
+  anchorGroupKey: string | null
+  lastTopicId: string
+  expectedVisibleFinal: number
+}
+
+/**
+ * Narrow harness predicate correction for context evidence.
+ * Whole-topic mode (positive integer 1..DEFAULT_CONTEXTCOUNT) is decisive and
+ * valid ONLY with no divider anywhere (both flags false) and null anchor.
+ * Any divider (inside or global outside) is invalid for whole-topic.
+ * Partial-window mode requires divider inside #messages with final-topic-owned anchor.
+ * Invalid counts (non-finite, non-integer, <1, >100) are always false.
+ * A divider outside #messages is invalid in either branch (LOCK-004).
+ */
+export function isC02ContextEvidenceValid(evidence: {
+  contextBoundaryPresent: boolean
+  contextBoundaryInsideMessages: boolean
+  anchorGroupKey: string | null
+  lastTopicId: string
+  expectedVisibleFinal: number
+}): boolean {
+  const v = evidence.expectedVisibleFinal
+  const isValidCount =
+    Number.isFinite(v) && Number.isInteger(v) && v >= C02_PRODUCTION_WINDOW_MIN && v <= C02_PRODUCTION_WINDOW_MAX
+  if (!isValidCount) return false
+  const wholeTopic = isC02WholeTopicWindow(v)
+  if (wholeTopic) {
+    // Decisive whole-topic branch — no divider anywhere, null anchor
+    return (
+      !evidence.contextBoundaryPresent && !evidence.contextBoundaryInsideMessages && evidence.anchorGroupKey === null
+    )
+  }
+  // Partial window — strict divider inside #messages with final-topic-owned anchor (exact, collision-safe)
+  const anchorOwnedByFinalTopic = isC02ExactTopicOwned(evidence.anchorGroupKey, evidence.lastTopicId)
+  return (
+    evidence.contextBoundaryPresent &&
+    evidence.contextBoundaryInsideMessages &&
+    evidence.anchorGroupKey !== null &&
+    anchorOwnedByFinalTopic
+  )
+}
+
+/**
+ * Full productionPath completeness predicate — combines Redux/DOM ownership
+ * with the narrow context-evidence correction. Pure, deterministic.
+ */
+export function isC02ProductionPathComplete(evidence: C02ProductionPathEvidence): boolean {
+  return (
+    evidence.reduxVerified &&
+    evidence.finalTopicDomProof &&
+    evidence.groupCountExact &&
+    evidence.groupOwnershipProof &&
+    isC02ContextEvidenceValid(evidence)
+  )
+}
+
 /** Expected visible/projected count for a profile — production latest-window count. */
 export function c02ExpectedVisibleCount(profile: Pick<C02HeapProfile, 'syntheticMessagesPerTopic'>): number {
   const n = Math.floor(profile.syntheticMessagesPerTopic)
@@ -966,10 +1131,12 @@ export interface C02AllocationForArtifact {
     displayMessages: number
     anchorGroupKey: string | null
     contextBoundaryPresent: boolean
+    /** Strict inside-messages signal — mandatory fail-closed per LOCK-004; whole-topic (1..25) requires no divider anywhere + null anchor, partial requires divider inside #messages + final-owned anchor. */
+    contextBoundaryInsideMessages: boolean
     finalTopicDomProof: boolean
     groupExactMatched?: boolean
     groupsWithFinalTopic?: number
-    globalDisplayMessages?: number
+    globalDisplayMessages: number
   }
   productionPath: string
   productionPathComplete?: boolean
@@ -992,12 +1159,66 @@ export function buildC02BenchmarkResult(
   informativeness: { informative: boolean; reason: string },
   precision: HeapPrecisionLabel
 ): BenchmarkResult {
+  if (typeof allocation.projectionStats.contextBoundaryInsideMessages !== 'boolean') {
+    throw new Error(
+      '[PERF-C02] fail-closed: contextBoundaryInsideMessages is required (boolean) — whole-topic windows (1..25) require no divider anywhere + null anchor; partial windows require divider inside #messages + final-owned anchor (LOCK-004)'
+    )
+  }
   const amplification = computeHeapAmplification(heapBefore, heapAfter, logicalBytes)
   const scale = buildC02ScaleMap(profile, heapBefore.method, precision)
-  const effectiveInformative = informativeness.informative && precision === 'precise'
+  // Derive effective informativeness from measured heap delta + precision — caller boolean is diagnostic only (fail-closed)
+  const effectiveInformative = deriveEffectiveHeapInformative(amplification.heapDeltaBytes, precision)
+  void informativeness
   const deltaInformativeMetric = effectiveInformative ? 1 : 0
   const effectiveDeltaRatio = effectiveInformative ? amplification.deltaRatio : 0
   const effectiveAbsoluteRatio = effectiveInformative ? amplification.absoluteRatio : 0
+
+  const expectedVisible = c02ExpectedVisibleCount(profile)
+  const expectedTopicSuffix = `c02-heap-topic-${String(profile.syntheticTopics - 1).padStart(2, '0')}`
+  const anchorFinalTopicOwned = isC02ExactTopicOwned(allocation.projectionStats.anchorGroupKey, expectedTopicSuffix)
+  const lastTopicIdForContext = expectedTopicSuffix
+  const contextBoundaryInsideMessagesForGate = allocation.projectionStats.contextBoundaryInsideMessages
+  const contextEvidenceValid = isC02ContextEvidenceValid({
+    contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
+    contextBoundaryInsideMessages: contextBoundaryInsideMessagesForGate,
+    anchorGroupKey: allocation.projectionStats.anchorGroupKey,
+    lastTopicId: lastTopicIdForContext,
+    expectedVisibleFinal: expectedVisible
+  })
+  // Derive DOM/group validity from observed scalar counts — caller booleans are diagnostic only (fail-closed)
+  const derivedFinalTopicDomProof = deriveFinalTopicDomProof(
+    allocation.projectionStats.displayMessages,
+    allocation.projectionStats.globalDisplayMessages,
+    expectedVisible
+  )
+  const derivedGroupCountExact = deriveGroupCountExact(allocation.projectionStats.groupCount, expectedVisible)
+  const derivedGroupOwnershipProof =
+    (allocation.projectionStats.groupsWithFinalTopic ?? 0) === expectedVisible && derivedGroupCountExact
+  const derivedProductionPathComplete = isC02ProductionPathComplete({
+    reduxVerified: allocation.reduxVerified,
+    finalTopicDomProof: derivedFinalTopicDomProof,
+    groupCountExact: derivedGroupCountExact,
+    groupOwnershipProof: derivedGroupOwnershipProof,
+    contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
+    contextBoundaryInsideMessages: allocation.projectionStats.contextBoundaryInsideMessages,
+    anchorGroupKey: allocation.projectionStats.anchorGroupKey,
+    lastTopicId: lastTopicIdForContext,
+    expectedVisibleFinal: expectedVisible
+  })
+  const effectiveProductionPathComplete = derivedProductionPathComplete
+  void allocation.productionPathComplete
+  const authoritativeComplete = effectiveInformative && effectiveProductionPathComplete
+  const safeHeapDeltaCategory = deriveSafeHeapDeltaCategory(
+    amplification.heapDeltaBytes,
+    precision,
+    effectiveInformative
+  )
+  const safeHeapMethodLabel = deriveSafeHeapMethodLabel(heapBefore.method)
+  const safeProductionPathStage = deriveSafeProductionPathStage(effectiveProductionPathComplete)
+  const deltaGateDetail = effectiveInformative
+    ? `directional synthetic: heapDelta=${amplification.heapDeltaBytes} is finite positive with precision=${precision} (argv --enable-precise-memory-info present) — category=${safeHeapDeltaCategory} — effective informative (precision===precise && finite positive) for directional amplification; deltaRatio=${effectiveDeltaRatio.toFixed(3)} valid`
+    : `directional synthetic: heapDelta=${amplification.heapDeltaBytes} is INCONCLUSIVE — category=${safeHeapDeltaCategory}; precision=${precision}. Effective requires precision===precise && finite positive delta. Zero/negative/non-finite or bucketed (precision!=precise) delta is inconclusive and ratios are 0 (not valid amplification, raw heap.delta remains diagnostic). See heap.deltaInformative metric.`
+  const deltaGatePassed = effectiveInformative
 
   const metrics: BenchmarkMetric[] = [
     {
@@ -1105,7 +1326,9 @@ export function buildC02BenchmarkResult(
     {
       id: 'projection.displayMessagesGlobal',
       name: 'global displayMessages count via actual rendered DOM #messages [data-message-id] (must equal scoped for final-topic proof; mismatch indicates stale/partial projection; global [id^="message-"] never authoritative)',
-      value: allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages,
+      value: Number.isFinite(allocation.projectionStats.globalDisplayMessages)
+        ? allocation.projectionStats.globalDisplayMessages
+        : 0,
       unit: 'count'
     },
     {
@@ -1116,47 +1339,29 @@ export function buildC02BenchmarkResult(
     },
     {
       id: 'projection.finalTopicDomProof',
-      name: 'final-topic DOM ownership proof via #messages [data-message-id] (1= scoped===global===expectedVisible for final clicked topic inside #messages, 0= stale/global/partial — complete requires 1; [id^="message-"] never satisfies)',
-      value: allocation.projectionStats.finalTopicDomProof ? 1 : 0,
+      name: 'final-topic DOM ownership proof via #messages [data-message-id] (1= scoped===global===expectedVisible for final clicked topic inside #messages, 0= stale/global/partial — complete requires 1; [id^="message-"] never satisfies — derived from counts, caller ignored fail-closed)',
+      value: derivedFinalTopicDomProof ? 1 : 0,
       unit: 'count'
     },
     {
       id: 'projection.contextBoundaryPresent',
-      name: 'context boundary presence via #messages [data-context-boundary] inside #messages with final-topic-owned anchor (1= present inside #messages with resolvable final-topic anchor, 0= absent/global/fallback — explicit, not inferred; complete requires 1)',
+      name: 'context boundary inside #messages mandatory signal per LOCK-004 — whole-topic windows (1..25) require no divider anywhere + null anchor (valid 0), partial windows require divider inside #messages + final-owned anchor (valid 1); outside/global invalid; explicit inside signal mandatory (fail-closed)',
       value: allocation.projectionStats.contextBoundaryPresent ? 1 : 0,
       unit: 'count'
     },
     {
       id: 'projection.productionPathComplete',
-      name: 'productionPath complete flag via #messages production selectors only (1= Redux verified + final-topic ownership inside #messages + exact groups + boundary inside #messages with final-topic anchor; 0= partial/inconclusive — fallback [id^="message-"]/global cannot satisfy complete)',
-      value: allocation.productionPathComplete ? 1 : 0,
+      name: 'productionPath complete derived from evidence predicate (LOCK-004) — whole-topic (1..25) no-divider/null-anchor branch and partial inside-divider/final-owned branch; 1= derived predicate true (Redux verified + final-topic ownership + exact groups + valid context per branch), 0= partial/inconclusive — caller bool cannot override invalid evidence (fail-closed)',
+      value: effectiveProductionPathComplete ? 1 : 0,
       unit: 'count'
     },
     {
       id: 'calibration.complete',
-      name: 'authoritative calibration complete — effective precise heap AND productionPath complete (1= precision===precise && finite positive delta && #messages final-topic DOM/groups/boundary proof; 0= inconclusive; invalid heap never yields complete)',
-      value: effectiveInformative && !!allocation.productionPathComplete ? 1 : 0,
+      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal; invalid heap or invalid/omitted inside signal never yields complete)',
+      value: authoritativeComplete ? 1 : 0,
       unit: 'count'
     }
   ]
-
-  const deltaGatePassed = effectiveInformative
-  const safeHeapDeltaCategory = deriveSafeHeapDeltaCategory(
-    amplification.heapDeltaBytes,
-    precision,
-    effectiveInformative
-  )
-  const safeHeapMethodLabel = deriveSafeHeapMethodLabel(heapBefore.method)
-  const safeProductionPathStage = deriveSafeProductionPathStage(allocation.productionPathComplete)
-  const deltaGateDetail = effectiveInformative
-    ? `directional synthetic: heapDelta=${amplification.heapDeltaBytes} is finite positive with precision=${precision} (argv --enable-precise-memory-info present) — category=${safeHeapDeltaCategory} — effective informative (precision===precise && finite positive) for directional amplification; deltaRatio=${effectiveDeltaRatio.toFixed(3)} valid`
-    : `directional synthetic: heapDelta=${amplification.heapDeltaBytes} is INCONCLUSIVE — category=${safeHeapDeltaCategory}; precision=${precision}. Effective requires precision===precise && finite positive delta. Zero/negative/non-finite or bucketed (precision!=precise) delta is inconclusive and ratios are 0 (not valid amplification, raw heap.delta remains diagnostic). See heap.deltaInformative metric.`
-  const authoritativeComplete = effectiveInformative && !!allocation.productionPathComplete
-  const expectedVisible = c02ExpectedVisibleCount(profile)
-  const expectedTopicSuffix = `c02-heap-topic-${String(profile.syntheticTopics - 1).padStart(2, '0')}`
-  const anchorFinalTopicOwned =
-    allocation.projectionStats.anchorGroupKey !== null &&
-    allocation.projectionStats.anchorGroupKey.includes(expectedTopicSuffix)
 
   const gates: BenchmarkGate[] = [
     {
@@ -1196,41 +1401,38 @@ export function buildC02BenchmarkResult(
     },
     {
       id: 'allocation.resident',
-      name: 'Redux entity projection + derived viewport/group/context via actual rendered Chat path — authoritative calibration complete requires effective heap AND productionPath (exact final-topic ownership inside #messages + exact groups inside #messages + boundary inside #messages with final-topic anchor) (renderer heap)',
+      name: 'Redux entity projection + derived viewport/group/context via actual rendered Chat path — authoritative calibration complete requires effective heap AND derived productionPath (LOCK-004 branches: whole-topic 1..25 no-divider/null-anchor OR partial inside-divider/final-owned) (renderer heap)',
       kind: 'correctness',
       passed: authoritativeComplete,
-      detail: `directional synthetic: Redux projection — ${allocation.projectionStats.reduxMessages} messages, ${allocation.projectionStats.reduxBlocks} blocks; derived DOM — ${allocation.projectionStats.groupCount} groups (#messages [data-stable-group-id]) exact=${allocation.projectionStats.groupExactMatched ?? false}, displayMessages scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages} (finalTopicProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0} via #messages [data-message-id]), groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}; contextBoundaryPresent inside #messages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0} (must be final-topic-owned, [id^="message-"] diagnostic-only); stage=${safeProductionPathStage}; productionPathComplete=${allocation.productionPathComplete ? 1 : 0}; effectiveInformative=${effectiveInformative ? 1 : 0} (precision=${precision}, delta=${amplification.heapDeltaBytes}); authoritativeComplete=${authoritativeComplete ? 1 : 0} (requires precise && finite positive delta && #messages proof; fallback/global never satisfies; invalid heap never yields complete). Detached holder removed; heap cost is renderer entity + production-derived projections when authoritative complete, otherwise Redux entity only and derived counts are inconclusive.`
+      detail: `directional synthetic: Redux projection — ${allocation.projectionStats.reduxMessages} messages, ${allocation.projectionStats.reduxBlocks} blocks; derived DOM — ${allocation.projectionStats.groupCount} groups (#messages [data-stable-group-id]) exact=${derivedGroupCountExact ? 1 : 0} (derived groupCount=${allocation.projectionStats.groupCount} vs expectedVisible=${expectedVisible}, caller ${allocation.projectionStats.groupExactMatched ?? 'undef'} ignored fail-closed), displayMessages scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages} (finalTopicProof=${derivedFinalTopicDomProof ? 1 : 0} derived scoped/global vs expectedVisible, caller ${allocation.projectionStats.finalTopicDomProof ? 1 : 0} ignored fail-closed via #messages [data-message-id]), groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}; contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${allocation.projectionStats.contextBoundaryInsideMessages ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0} (exact boundary-safe isC02ExactTopicOwned); stage=${safeProductionPathStage}; derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed); effectiveInformative=${effectiveInformative ? 1 : 0} (derived measured delta=${amplification.heapDeltaBytes} precision=${precision}, caller ${informativeness.informative ? 1 : 0} ignored fail-closed); authoritativeComplete=${authoritativeComplete ? 1 : 0} (requires precise && finite positive delta && valid LOCK-004 context branch; fallback/global never satisfies; invalid heap or omitted inside signal never yields complete). Detached holder removed; heap cost is renderer entity + production-derived projections when authoritative complete, otherwise Redux entity only and derived counts are inconclusive.`
     },
     {
       id: 'productionPath.complete',
-      name: 'productionPath complete lock — final clicked synthetic topic owns #messages DOM (scoped===global===expected via #messages [data-message-id]), exact #messages group count, and [data-context-boundary] inside #messages with final-topic-owned resolvable anchor (no fallback/global satisfies complete)',
+      name: 'productionPath complete derived from evidence predicate (LOCK-004) — whole-topic (1..25) no-divider/null-anchor branch and partial inside-divider/final-owned branch — final clicked topic owns #messages DOM with valid context per branch (no fallback/global satisfies)',
       kind: 'correctness',
       passed: authoritativeComplete,
-      detail: `productionPathComplete=${allocation.productionPathComplete ? 1 : 0}; effectiveInformative=${effectiveInformative ? 1 : 0} (precision=${precision}, delta=${amplification.heapDeltaBytes}); authoritativeComplete=${authoritativeComplete ? 1 : 0}; stage=${safeProductionPathStage} — locked: authoritative complete requires BOTH effective precise heap (precision===precise && finite positive delta) AND #messages production selectors proof; fallback [id^="message-"]/global stale DOM or bucketed delta never satisfies complete (see perf-c02-heap-calibration.spec.ts activateReduxProjection).`
+      detail: `derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed); effectiveInformative=${effectiveInformative ? 1 : 0} (precision=${precision}, delta=${amplification.heapDeltaBytes}); authoritativeComplete=${authoritativeComplete ? 1 : 0}; stage=${safeProductionPathStage} — locked: authoritative complete requires BOTH effective precise heap (precision===precise && finite positive delta) AND derived #messages proof per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor OR partial divider inside #messages with final-owned anchor); fallback [id^="message-"]/global stale DOM or bucketed delta or omitted inside signal never satisfies complete (see perf-c02-heap-calibration.spec.ts activateReduxProjection).`
     },
     {
       id: 'projection.finalTopicOwnership',
       name: 'final clicked synthetic topic owns the measured #messages DOM — #messages [data-message-id] scoped to final topic equals global and expectedVisible (no global stale count or [id^="message-"] satisfies complete)',
       kind: 'correctness',
-      passed: allocation.projectionStats.finalTopicDomProof,
-      detail: `finalTopicDomProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}; scoped=${allocation.projectionStats.displayMessages}, global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages}, expectedVisible=${expectedVisible} (min(N, productionWindow ${C02_PRODUCTION_WINDOW_MAX}) — large retains 150 logically but projects 100), strict #messages [data-message-id] only, [id^="message-"] diagnostic-only excluded`
+      passed: derivedFinalTopicDomProof,
+      detail: `finalTopicDomProof=${derivedFinalTopicDomProof ? 1 : 0} (derived scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages} vs expectedVisible=${expectedVisible}); scoped=${allocation.projectionStats.displayMessages}, global=${allocation.projectionStats.globalDisplayMessages}, expectedVisible=${expectedVisible} (min(N, productionWindow ${C02_PRODUCTION_WINDOW_MAX}) — large retains 150 logically but projects 100), strict #messages [data-message-id] only, [id^="message-"] diagnostic-only excluded — caller ${allocation.projectionStats.finalTopicDomProof ? 1 : 0} ignored when invalid (fail-closed)`
     },
     {
       id: 'projection.contextBoundaryExplicit',
-      name: 'context boundary presence is explicit via #messages [data-context-boundary] inside #messages with final-topic-owned anchor — absent/global/outside is not converted to first group as fake anchor (partial/inconclusive when absent)',
+      name: 'context boundary explicit per LOCK-004 — whole-topic windows (1..25) require no divider anywhere + null anchor (valid absent), partial windows require divider inside #messages + final-owned anchor (valid present); outside/global invalid — explicit inside signal mandatory (fail-closed when omitted)',
       kind: 'correctness',
-      passed:
-        allocation.projectionStats.contextBoundaryPresent &&
-        allocation.projectionStats.anchorGroupKey !== null &&
-        anchorFinalTopicOwned,
-      detail: `contextBoundaryPresent inside #messages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0}, anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0}; when absent or outside #messages or not final-topic-owned the artifact is partial/inconclusive and does not infer first [data-stable-group-id] as anchor; global [data-context-boundary] outside #messages never satisfies`
+      passed: contextEvidenceValid,
+      detail: `contextEvidenceValid=${contextEvidenceValid ? 1 : 0} via LOCK-004 predicate (wholeTopic=${isC02WholeTopicWindow(expectedVisible) ? 1 : 0} expectedVisible=${expectedVisible} positive integer 1..25 branch); contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${contextBoundaryInsideMessagesForGate ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0} (exact boundary-safe isC02ExactTopicOwned); whole-topic (1..25) valid only with no divider anywhere + null anchor, partial requires divider inside #messages with final-topic-owned anchor, global/outside never satisfies; inside signal mandatory (fail-closed when absent)`
     },
     {
       id: 'calibration.complete',
-      name: 'authoritative calibration complete — effective precise heap (precision===precise && finite positive delta) AND final-topic-owned #messages production DOM with exact groups and explicit context boundary inside #messages (invalid heap or fallback/global DOM never yields complete)',
+      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal; invalid heap or invalid/omitted inside signal never yields complete)',
       kind: 'correctness',
       passed: authoritativeComplete,
-      detail: `authoritativeComplete=${authoritativeComplete ? 1 : 0}; effectiveInformative=${effectiveInformative ? 1 : 0} (precision=${precision}, delta=${amplification.heapDeltaBytes}), productionPathComplete=${allocation.productionPathComplete ? 1 : 0} (finalTopicProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}, groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}, contextInsideMessages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0}); complete evidence strictly requires precise && finite positive heap delta AND #messages [data-message-id]/[data-stable-group-id]/[data-context-boundary] with final-topic-owned anchor — zero/negative/non-finite/bucketed deltas, [id^="message-"] fallback, or global selectors are inconclusive`
+      detail: `authoritativeComplete=${authoritativeComplete ? 1 : 0}; effectiveInformative=${effectiveInformative ? 1 : 0} (derived from measured delta=${amplification.heapDeltaBytes} precision=${precision}, caller ${informativeness.informative ? 1 : 0} ignored when invalid, fail-closed) derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed) (finalTopicProof=${derivedFinalTopicDomProof ? 1 : 0}, groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}, contextInsideMessages=${allocation.projectionStats.contextBoundaryInsideMessages ? 1 : 0}); complete evidence strictly requires precise && finite positive heap delta AND #messages [data-message-id]/[data-stable-group-id]/[data-context-boundary] with LOCK-004 branch validity (whole-topic 1..25 no-divider/null-anchor OR partial divider inside + final-owned anchor) — zero/negative/non-finite/bucketed deltas, [id^="message-"] fallback, global/outside, or omitted inside signal are inconclusive`
     },
     {
       id: 'environment.abi145',
@@ -1277,25 +1479,60 @@ export function buildC02MixedBenchmarkResult(
   informativeness: { informative: boolean; reason: string },
   precision: HeapPrecisionLabel
 ): BenchmarkResult {
+  if (typeof allocation.projectionStats.contextBoundaryInsideMessages !== 'boolean') {
+    throw new Error(
+      '[PERF-C02] fail-closed: contextBoundaryInsideMessages is required (boolean) — whole-topic windows (1..25) require no divider anywhere + null anchor; partial windows require divider inside #messages + final-owned anchor (LOCK-004)'
+    )
+  }
   const amplification = computeHeapAmplification(heapBefore, heapAfter, logicalBytes)
   const scale = buildC02MixedScaleMap(profile, heapBefore.method, precision)
-  const effectiveInformative = informativeness.informative && precision === 'precise'
+  // Derive effective informativeness from measured heap delta + precision — caller boolean is diagnostic only (fail-closed)
+  const effectiveInformative = deriveEffectiveHeapInformative(amplification.heapDeltaBytes, precision)
+  void informativeness
   const effectiveDeltaRatio = effectiveInformative ? amplification.deltaRatio : 0
   const effectiveAbsoluteRatio = effectiveInformative ? amplification.absoluteRatio : 0
-  const authoritativeComplete = effectiveInformative && !!allocation.productionPathComplete
   const lastSpec = profile.topicSpecs[profile.topicSpecs.length - 1]!
   const expectedVisible = c02MixedExpectedVisibleCountForSpec(lastSpec)
-  const anchorFinalTopicOwned =
-    allocation.projectionStats.anchorGroupKey !== null &&
-    allocation.projectionStats.contextBoundaryPresent &&
-    allocation.projectionStats.finalTopicDomProof
+  const lastTopicIdForContext = `c02-mixed-topic-${String(profile.topicSpecs.length - 1).padStart(2, '0')}`
+  const contextBoundaryInsideMessagesForGate = allocation.projectionStats.contextBoundaryInsideMessages
+  const anchorFinalTopicOwned = isC02ExactTopicOwned(allocation.projectionStats.anchorGroupKey, lastTopicIdForContext)
+  const contextEvidenceValid = isC02ContextEvidenceValid({
+    contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
+    contextBoundaryInsideMessages: contextBoundaryInsideMessagesForGate,
+    anchorGroupKey: allocation.projectionStats.anchorGroupKey,
+    lastTopicId: lastTopicIdForContext,
+    expectedVisibleFinal: expectedVisible
+  })
+  // Derive DOM/group validity from observed scalar counts — caller booleans are diagnostic only (fail-closed)
+  const derivedFinalTopicDomProofMixed = deriveFinalTopicDomProof(
+    allocation.projectionStats.displayMessages,
+    allocation.projectionStats.globalDisplayMessages,
+    expectedVisible
+  )
+  const derivedGroupCountExactMixed = deriveGroupCountExact(allocation.projectionStats.groupCount, expectedVisible)
+  const derivedGroupOwnershipProofMixed =
+    (allocation.projectionStats.groupsWithFinalTopic ?? 0) === expectedVisible && derivedGroupCountExactMixed
+  const derivedProductionPathComplete = isC02ProductionPathComplete({
+    reduxVerified: allocation.reduxVerified,
+    finalTopicDomProof: derivedFinalTopicDomProofMixed,
+    groupCountExact: derivedGroupCountExactMixed,
+    groupOwnershipProof: derivedGroupOwnershipProofMixed,
+    contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
+    contextBoundaryInsideMessages: allocation.projectionStats.contextBoundaryInsideMessages,
+    anchorGroupKey: allocation.projectionStats.anchorGroupKey,
+    lastTopicId: lastTopicIdForContext,
+    expectedVisibleFinal: expectedVisible
+  })
+  const effectiveProductionPathComplete = derivedProductionPathComplete
+  void allocation.productionPathComplete
+  const authoritativeComplete = effectiveInformative && effectiveProductionPathComplete
   const safeHeapDeltaCategory = deriveSafeHeapDeltaCategory(
     amplification.heapDeltaBytes,
     precision,
     effectiveInformative
   )
   const safeHeapMethodLabel = deriveSafeHeapMethodLabel(heapBefore.method)
-  const safeProductionPathStage = deriveSafeProductionPathStage(allocation.productionPathComplete)
+  const safeProductionPathStage = deriveSafeProductionPathStage(effectiveProductionPathComplete)
 
   const metrics: BenchmarkMetric[] = [
     {
@@ -1403,7 +1640,9 @@ export function buildC02MixedBenchmarkResult(
     {
       id: 'projection.displayMessagesGlobal',
       name: 'global displayMessages count via actual rendered DOM #messages [data-message-id] (mixed must equal scoped)',
-      value: allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages,
+      value: Number.isFinite(allocation.projectionStats.globalDisplayMessages)
+        ? allocation.projectionStats.globalDisplayMessages
+        : 0,
       unit: 'count'
     },
     {
@@ -1414,25 +1653,25 @@ export function buildC02MixedBenchmarkResult(
     },
     {
       id: 'projection.finalTopicDomProof',
-      name: 'final-topic DOM ownership proof via #messages [data-message-id] (mixed 1= scoped===global===expectedVisible)',
-      value: allocation.projectionStats.finalTopicDomProof ? 1 : 0,
+      name: 'final-topic DOM ownership proof via #messages [data-message-id] (mixed 1= scoped===global===expectedVisible, derived from counts, caller ignored fail-closed)',
+      value: derivedFinalTopicDomProofMixed ? 1 : 0,
       unit: 'count'
     },
     {
       id: 'projection.contextBoundaryPresent',
-      name: 'context boundary presence via #messages [data-context-boundary] inside #messages with final-topic-owned anchor (mixed)',
+      name: 'context boundary inside #messages mandatory signal per LOCK-004 (mixed) — whole-topic windows (1..25) require no divider anywhere + null anchor (valid 0), partial windows require divider inside #messages + final-owned anchor (valid 1); outside/global invalid; explicit inside signal mandatory (fail-closed)',
       value: allocation.projectionStats.contextBoundaryPresent ? 1 : 0,
       unit: 'count'
     },
     {
       id: 'projection.productionPathComplete',
-      name: 'productionPath complete flag via #messages production selectors only (mixed)',
-      value: allocation.productionPathComplete ? 1 : 0,
+      name: 'productionPath complete derived from evidence predicate (LOCK-004 mixed) — whole-topic (1..25) no-divider/null-anchor branch and partial inside-divider/final-owned branch; 1= derived true, 0= partial/inconclusive — caller bool cannot override (fail-closed)',
+      value: effectiveProductionPathComplete ? 1 : 0,
       unit: 'count'
     },
     {
       id: 'calibration.complete',
-      name: 'authoritative calibration complete — effective precise heap AND productionPath complete (mixed)',
+      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal) (mixed)',
       value: authoritativeComplete ? 1 : 0,
       unit: 'count'
     }
@@ -1478,41 +1717,38 @@ export function buildC02MixedBenchmarkResult(
     },
     {
       id: 'allocation.resident',
-      name: 'Redux entity projection + derived viewport/group/context via actual rendered Chat path (mixed) — authoritative complete requires effective heap AND productionPath',
+      name: 'Redux entity projection + derived viewport/group/context via actual rendered Chat path (mixed) — authoritative complete requires effective heap AND derived productionPath per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor OR partial inside-divider/final-owned)',
       kind: 'correctness',
       passed: authoritativeComplete,
-      detail: `mixed Redux ${allocation.projectionStats.reduxMessages} msgs ${allocation.projectionStats.reduxBlocks} blocks; derived groups ${allocation.projectionStats.groupCount} exact=${allocation.projectionStats.groupExactMatched ? 1 : 0}, display scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages} finalTopicProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}; contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0}; stage=${safeProductionPathStage} complete=${allocation.productionPathComplete ? 1 : 0} effective=${effectiveInformative ? 1 : 0} category=${safeHeapDeltaCategory}`
+      detail: `mixed Redux ${allocation.projectionStats.reduxMessages} msgs ${allocation.projectionStats.reduxBlocks} blocks; derived groups ${allocation.projectionStats.groupCount} exact=${derivedGroupCountExactMixed ? 1 : 0} (derived groupCount=${allocation.projectionStats.groupCount} vs expectedVisible=${expectedVisible}, caller ${allocation.projectionStats.groupExactMatched ?? 'undef'} ignored fail-closed), display scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages} finalTopicProof=${derivedFinalTopicDomProofMixed ? 1 : 0} (derived scoped/global vs expectedVisible, caller ${allocation.projectionStats.finalTopicDomProof ? 1 : 0} ignored fail-closed); contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${allocation.projectionStats.contextBoundaryInsideMessages ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0} (exact boundary-safe isC02ExactTopicOwned); stage=${safeProductionPathStage} derivedComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed) effective=${effectiveInformative ? 1 : 0} (derived delta=${amplification.heapDeltaBytes} precision=${precision}, caller ${informativeness.informative ? 1 : 0} ignored fail-closed) category=${safeHeapDeltaCategory}; valid branches: whole-topic (1..25) no-divider/null-anchor, partial inside-divider/final-owned; omitted inside signal never yields complete`
     },
     {
       id: 'productionPath.complete',
-      name: 'productionPath complete lock (mixed) — final clicked synthetic topic owns #messages DOM',
+      name: 'productionPath complete derived from evidence predicate (LOCK-004 mixed) — whole-topic (1..25) no-divider/null-anchor branch and partial inside-divider/final-owned branch',
       kind: 'correctness',
       passed: authoritativeComplete,
-      detail: `mixed productionPathComplete=${allocation.productionPathComplete ? 1 : 0}; effective=${effectiveInformative ? 1 : 0}; stage=${safeProductionPathStage} category=${safeHeapDeltaCategory}`
+      detail: `mixed derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed); effective=${effectiveInformative ? 1 : 0}; stage=${safeProductionPathStage} category=${safeHeapDeltaCategory}; branches: whole-topic (1..25) no-divider/null-anchor OR partial divider inside #messages with final-owned anchor; omitted inside signal never satisfies`
     },
     {
       id: 'projection.finalTopicOwnership',
-      name: 'final clicked synthetic topic owns the measured #messages DOM (mixed)',
+      name: 'final clicked synthetic topic owns the measured #messages DOM (mixed) — derived scoped/global vs expectedVisible (fail-closed)',
       kind: 'correctness',
-      passed: allocation.projectionStats.finalTopicDomProof,
-      detail: `mixed finalTopicDomProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}; scoped=${allocation.projectionStats.displayMessages}, global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages}, expectedVisible=${expectedVisible}`
+      passed: derivedFinalTopicDomProofMixed,
+      detail: `mixed finalTopicDomProof=${derivedFinalTopicDomProofMixed ? 1 : 0} (derived scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages} vs expectedVisible=${expectedVisible}, caller ${allocation.projectionStats.finalTopicDomProof ? 1 : 0} ignored fail-closed); scoped=${allocation.projectionStats.displayMessages}, global=${allocation.projectionStats.globalDisplayMessages}, expectedVisible=${expectedVisible}`
     },
     {
       id: 'projection.contextBoundaryExplicit',
-      name: 'context boundary presence is explicit via #messages [data-context-boundary] inside #messages with final-topic-owned anchor (mixed)',
+      name: 'context boundary explicit per LOCK-004 (mixed) — whole-topic windows (1..25) require no divider anywhere + null anchor (valid absent), partial windows require divider inside #messages + final-owned anchor (valid present); outside/global invalid — explicit inside signal mandatory (fail-closed when omitted)',
       kind: 'correctness',
-      passed:
-        allocation.projectionStats.contextBoundaryPresent &&
-        allocation.projectionStats.anchorGroupKey !== null &&
-        anchorFinalTopicOwned,
-      detail: `mixed contextBoundaryPresent inside #messages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0}, anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0}`
+      passed: contextEvidenceValid,
+      detail: `mixed contextEvidenceValid=${contextEvidenceValid ? 1 : 0} via LOCK-004 predicate (wholeTopic=${isC02WholeTopicWindow(expectedVisible) ? 1 : 0} expectedVisible=${expectedVisible} positive integer 1..25 branch); contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${contextBoundaryInsideMessagesForGate ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0}; whole-topic (1..25) valid only with no divider anywhere + null anchor, partial requires divider inside #messages with final-topic-owned anchor, global/outside never satisfies; inside signal mandatory (fail-closed when absent)`
     },
     {
       id: 'calibration.complete',
-      name: 'authoritative calibration complete — effective precise heap AND final-topic-owned #messages production DOM with exact groups and explicit context boundary inside #messages (mixed)',
+      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal) (mixed)',
       kind: 'correctness',
       passed: authoritativeComplete,
-      detail: `mixed authoritativeComplete=${authoritativeComplete ? 1 : 0}; effective=${effectiveInformative ? 1 : 0}, productionPathComplete=${allocation.productionPathComplete ? 1 : 0}`
+      detail: `mixed authoritativeComplete=${authoritativeComplete ? 1 : 0}; effective=${effectiveInformative ? 1 : 0}, derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed); branches: whole-topic (1..25) no-divider/null-anchor OR partial inside-divider/final-owned; omitted inside signal never yields complete`
     },
     {
       id: 'environment.abi145',
@@ -1556,6 +1792,8 @@ export function buildC02MultiBenchmarkResult(
     allocation: C02AllocationForArtifact
     informativeness: { informative: boolean; reason: string }
     precision: HeapPrecisionLabel
+    /** Actual activated final topic ID produced by activation (e.g. `c02-${profileId}-topic-03`). Mandatory — no reconstructed fallback. */
+    finalTopicId: string
   }>
 ): BenchmarkResult {
   const allMetrics: BenchmarkMetric[] = []
@@ -1569,18 +1807,65 @@ export function buildC02MultiBenchmarkResult(
     firstPrecision
   )
   for (const entry of entries) {
+    if (typeof entry.allocation.projectionStats.contextBoundaryInsideMessages !== 'boolean') {
+      throw new Error(
+        `[PERF-C02] fail-closed: contextBoundaryInsideMessages is required (boolean) for ${entry.profileId} — whole-topic windows (1..25) require no divider anywhere + null anchor; partial windows require divider inside #messages + final-owned anchor (LOCK-004)`
+      )
+    }
     const safeProfileLabel = deriveSafeProfileLabel(entry.profileId)
     const prefix = safeProfileLabel.replace(/-/g, '_')
     const amplification = computeHeapAmplification(entry.heapBefore, entry.heapAfter, entry.logicalBytes)
-    const effectiveInformative = entry.informativeness.informative && entry.precision === 'precise'
+    // Derive effective informativeness from measured heap delta + precision — caller boolean is diagnostic only (fail-closed)
+    const effectiveInformative = deriveEffectiveHeapInformative(amplification.heapDeltaBytes, entry.precision)
+    void entry.informativeness
     const effectiveDeltaRatio = effectiveInformative ? amplification.deltaRatio : 0
     const effectiveAbsoluteRatio = effectiveInformative ? amplification.absoluteRatio : 0
+    const isMixed = isC02MixedHeapProfile(entry.profile)
+    const expectedVisibleMulti = isMixed
+      ? c02MixedExpectedVisibleCountForSpec(
+          (entry.profile as C02MixedHeapProfile).topicSpecs[
+            (entry.profile as C02MixedHeapProfile).topicSpecs.length - 1
+          ]!
+        )
+      : c02ExpectedVisibleCount(entry.profile as C02HeapProfile)
+    if (typeof entry.finalTopicId !== 'string' || entry.finalTopicId.trim().length === 0) {
+      throw new Error(
+        `[PERF-C02] fail-closed: finalTopicId is required (non-empty string) for ${entry.profileId} — actual activated final topic ID must be provided, no reconstructed fallback`
+      )
+    }
+    const lastTopicIdMulti = entry.finalTopicId
+    // Derive DOM/group validity from observed scalar counts — caller booleans are diagnostic only (fail-closed)
+    const derivedFinalTopicDomProofMulti = deriveFinalTopicDomProof(
+      entry.allocation.projectionStats.displayMessages,
+      entry.allocation.projectionStats.globalDisplayMessages,
+      expectedVisibleMulti
+    )
+    const derivedGroupCountExactMulti = deriveGroupCountExact(
+      entry.allocation.projectionStats.groupCount,
+      expectedVisibleMulti
+    )
+    const derivedGroupOwnershipProofMulti =
+      (entry.allocation.projectionStats.groupsWithFinalTopic ?? 0) === expectedVisibleMulti &&
+      derivedGroupCountExactMulti
+    const derivedProductionPathCompleteMulti = isC02ProductionPathComplete({
+      reduxVerified: entry.allocation.reduxVerified,
+      finalTopicDomProof: derivedFinalTopicDomProofMulti,
+      groupCountExact: derivedGroupCountExactMulti,
+      groupOwnershipProof: derivedGroupOwnershipProofMulti,
+      contextBoundaryPresent: entry.allocation.projectionStats.contextBoundaryPresent,
+      contextBoundaryInsideMessages: entry.allocation.projectionStats.contextBoundaryInsideMessages,
+      anchorGroupKey: entry.allocation.projectionStats.anchorGroupKey,
+      lastTopicId: lastTopicIdMulti,
+      expectedVisibleFinal: expectedVisibleMulti
+    })
+    const effectiveProductionPathCompleteMulti = derivedProductionPathCompleteMulti
+    void entry.allocation.productionPathComplete
     const safeHeapDeltaCategory = deriveSafeHeapDeltaCategory(
       amplification.heapDeltaBytes,
       entry.precision,
       effectiveInformative
     )
-    const safeProductionPathStage = deriveSafeProductionPathStage(entry.allocation.productionPathComplete)
+    const safeProductionPathStage = deriveSafeProductionPathStage(effectiveProductionPathCompleteMulti)
     allMetrics.push(
       {
         id: `${prefix}.logical.bytes`,
@@ -1638,8 +1923,8 @@ export function buildC02MultiBenchmarkResult(
       },
       {
         id: `${prefix}.calibration.complete`,
-        name: `${safeProfileLabel} authoritative calibration complete (effective heap AND productionPath complete)`,
-        value: effectiveInformative && !!entry.allocation.productionPathComplete ? 1 : 0,
+        name: `${safeProfileLabel} authoritative calibration complete — effective heap AND derived productionPath complete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal)`,
+        value: effectiveInformative && effectiveProductionPathCompleteMulti ? 1 : 0,
         unit: 'count'
       },
       {
@@ -1655,7 +1940,7 @@ export function buildC02MultiBenchmarkResult(
         unit: 'bytes'
       }
     )
-    const authoritativeComplete = effectiveInformative && !!entry.allocation.productionPathComplete
+    const authoritativeComplete = effectiveInformative && effectiveProductionPathCompleteMulti
     allGates.push(
       {
         id: `${prefix}.heap.deltaInformative`,
@@ -1668,20 +1953,20 @@ export function buildC02MultiBenchmarkResult(
       },
       {
         id: `${prefix}.calibration.complete`,
-        name: `${safeProfileLabel} authoritative calibration complete — effective heap AND #messages proof`,
+        name: `${safeProfileLabel} authoritative calibration complete — effective heap AND derived #messages proof per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned)`,
         kind: 'correctness',
         passed: authoritativeComplete,
-        detail: `profile ${safeProfileLabel}: authoritativeComplete=${authoritativeComplete ? 1 : 0} effective=${effectiveInformative ? 1 : 0} productionPathComplete=${entry.allocation.productionPathComplete ? 1 : 0} stage=${safeProductionPathStage} category=${safeHeapDeltaCategory}`
+        detail: `profile ${safeProfileLabel}: authoritativeComplete=${authoritativeComplete ? 1 : 0} effective=${effectiveInformative ? 1 : 0} derivedProductionPathComplete=${effectiveProductionPathCompleteMulti ? 1 : 0} (caller ${entry.allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed) stage=${safeProductionPathStage} category=${safeHeapDeltaCategory} — valid branches: whole-topic (1..25) no-divider/null-anchor OR partial divider inside #messages with final-owned anchor; omitted inside signal never satisfies`
       }
     )
   }
   const allComplete = allGates.filter((g) => g.id.endsWith('.calibration.complete')).every((g) => g.passed)
   allGates.push({
     id: 'calibration.matrix.complete',
-    name: 'matrix calibration complete — all profiles effective heap AND productionPath complete (relation across multiple profiles)',
+    name: 'matrix calibration complete — all profiles effective heap AND derived productionPath complete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal) (relation across multiple profiles)',
     kind: 'correctness',
     passed: allComplete,
-    detail: `matrix profileCount=${profileCount} allComplete=${allComplete ? 1 : 0} — each profile uses existing production activation path and precise memory sampling (directional synthetic)`
+    detail: `matrix profileCount=${profileCount} allComplete=${allComplete ? 1 : 0} — each profile derived per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor OR partial inside-divider/final-owned) with explicit inside signal mandatory (fail-closed); each profile uses existing production activation path and precise memory sampling (directional synthetic)`
   })
   return {
     schemaVersion: BENCH_RESULT_SCHEMA_VERSION,

@@ -34,11 +34,10 @@
  *   blocker). No new IPC/preload/schema/migration/context-window/sync changes.
  *   productionPath is complete ONLY when the final clicked synthetic topic
  *   demonstrably owns #messages DOM (scoped===global===expectedVisible via #messages [data-message-id]), the exact
- *   expected stable group count inside #messages is observed with ownership proof, and
- *   #messages [data-context-boundary] is explicitly present inside #messages with a resolvable final-topic-owned anchor;
+ *   expected stable group count inside #messages is observed with ownership proof, and LOCK-004 context evidence is valid per explicit inside-messages signal (mandatory fail-closed): whole-topic windows (positive integer 1..25) require no divider anywhere + null anchor (valid absent), partial windows require divider inside #messages with final-topic-owned anchor (valid present); outside/global divider is invalid in either branch;
  *   fallback [id^="message-"], global document queries, or inferred first-group anchor never satisfies
  *   complete — incomplete/ambiguous observations are explicitly partial/inconclusive. Authoritative calibration complete
- *   strictly requires precise && finite positive heap delta in addition to this #messages production DOM proof.
+ *   strictly requires precise && finite positive heap delta in addition to this #messages production DOM proof and derived predicate-valid productionPath (caller bool cannot override invalid evidence).
  * - Sampling uses the least invasive available renderer API: Chromium
  *   `performance.memory` (usedJSHeapSize/totalJSHeapSize/jsHeapSizeLimit) via
  *   `page.evaluate`. No Node `process.memoryUsage` proxy — that would be main-process.
@@ -114,13 +113,18 @@ import {
   c02ExpectedVisibleCountForTopic,
   c02HeapGateEnabled,
   c02MixedTotalMessages,
+  C02_DEFAULT_CONTEXTCOUNT,
   C02_PRODUCTION_WINDOW_MAX,
   c02PerTopicExpectedVisibleCounts,
   canonicalBytesForTopics,
   classifyEffectiveHeapDeltaInformative,
   computeHeapAmplification,
   detectHeapPrecisionLabel,
+  isC02ContextEvidenceValid,
+  isC02ExactTopicOwned,
   isC02MixedHeapProfile,
+  isC02ProductionPathComplete,
+  isC02WholeTopicWindow,
   RENDERER_HEAP_METHOD,
   resolveC02HeapProfile,
   resolveC02HeapProfiles,
@@ -260,11 +264,12 @@ async function activateReduxProjection(
     displayMessages: number
     anchorGroupKey: string | null
     contextBoundaryPresent: boolean
+    contextBoundaryInsideMessages: boolean
     finalTopicDomProof: boolean
     groupExactMatched?: boolean
     contextBoundaryObservedWait?: boolean
     groupsWithFinalTopic?: number
-    globalDisplayMessages?: number
+    globalDisplayMessages: number
   }
   productionPath: string
   productionPathComplete?: boolean
@@ -289,7 +294,9 @@ async function activateReduxProjection(
         displayMessages: 0,
         anchorGroupKey: null,
         contextBoundaryPresent: false,
-        finalTopicDomProof: false
+        contextBoundaryInsideMessages: false,
+        finalTopicDomProof: false,
+        globalDisplayMessages: 0
       },
       productionPath: 'blocked: syntheticTopics empty — no canonical input to activate',
       failedBlocker:
@@ -341,7 +348,9 @@ async function activateReduxProjection(
         displayMessages: 0,
         anchorGroupKey: null,
         contextBoundaryPresent: false,
-        finalTopicDomProof: false
+        contextBoundaryInsideMessages: false,
+        finalTopicDomProof: false,
+        globalDisplayMessages: 0
       },
       productionPath:
         'blocked: live assistant id unavailable from renderer store — cannot dispatch assistants/addTopic without production hook',
@@ -394,7 +403,9 @@ async function activateReduxProjection(
           displayMessages: 0,
           anchorGroupKey: null,
           contextBoundaryPresent: false,
-          finalTopicDomProof: false
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: false,
+          globalDisplayMessages: 0
         },
         productionPath: 'blocked: assistants/addTopic dispatch failed',
         failedBlocker: `assistants/addTopic failed for ${t.topicId}: ${addOk.err}`
@@ -456,7 +467,9 @@ async function activateReduxProjection(
           displayMessages: 0,
           anchorGroupKey: null,
           contextBoundaryPresent: false,
-          finalTopicDomProof: false
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: false,
+          globalDisplayMessages: 0
         },
         productionPath: 'blocked: ChatDb persist failed via ensureTopic/pasteMessagesToTopic',
         failedBlocker: `typed ChatDb persist failed for ${t.topicId}: ${persist.err}`
@@ -492,7 +505,9 @@ async function activateReduxProjection(
           displayMessages: 0,
           anchorGroupKey: null,
           contextBoundaryPresent: false,
-          finalTopicDomProof: false
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: false,
+          globalDisplayMessages: 0
         },
         productionPath: 'blocked: setDisplayCount verification failed',
         failedBlocker: `newMessages/setDisplayCount failed: expected ${desiredDisplayCount}, got ${String(actual)}`
@@ -545,7 +560,9 @@ async function activateReduxProjection(
           displayMessages: 0,
           anchorGroupKey: null,
           contextBoundaryPresent: false,
-          finalTopicDomProof: false
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: false,
+          globalDisplayMessages: 0
         },
         productionPath: 'blocked: topic-item click failed — sidebar item not interactable',
         failedBlocker: `canonical topic-item click failed for ${topicId}: ${e instanceof Error ? e.message : String(e)}`
@@ -577,7 +594,9 @@ async function activateReduxProjection(
           displayMessages: 0,
           anchorGroupKey: null,
           contextBoundaryPresent: false,
-          finalTopicDomProof: false
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: false,
+          globalDisplayMessages: 0
         },
         productionPath: 'blocked: Redux messageIdsByTopic / loading wait timed out after topic-item click',
         failedBlocker: `Redux wait failed for ${topicId}: ${e instanceof Error ? e.message : String(e)}`
@@ -611,7 +630,9 @@ async function activateReduxProjection(
           displayMessages: 0,
           anchorGroupKey: null,
           contextBoundaryPresent: false,
-          finalTopicDomProof: false
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: false,
+          globalDisplayMessages: 0
         },
         productionPath: 'blocked: DOM message count wait timed out after topic-item click',
         failedBlocker: `DOM #messages [data-message-id] scoped wait failed for ${topicId}: expected ${topicExpected} visible messages owned by that topic (global===scoped===expected); [id^="message-"] is diagnostic-only and not authoritative: ${e instanceof Error ? e.message : String(e)}`
@@ -692,26 +713,58 @@ async function activateReduxProjection(
     const domDisplayMessagesGlobal = globalData
 
     // Groups that contain the final topic's messages (proof that groups are not stale) — strictly production group selectors
+    // Collision-safe exact ownership: gid must contain topicId as exact token with boundary (not substring prefix like c02-heap-topic-01 inside c02-heap-topic-011)
+    function isExactTopicOwnedLocal(anchor: string | null, topicId: string): boolean {
+      if (anchor === null || typeof anchor !== 'string' || typeof topicId !== 'string') return false
+      if (anchor.length === 0 || topicId.length === 0) return false
+      let idx = anchor.indexOf(topicId)
+      while (idx !== -1) {
+        const beforeChar = idx > 0 ? anchor[idx - 1] : ''
+        const beforeOk =
+          idx === 0 ||
+          beforeChar === ':' ||
+          beforeChar === '|' ||
+          beforeChar === '-' ||
+          beforeChar === '_' ||
+          !/[A-Za-z0-9]/.test(beforeChar)
+        const afterIdx = idx + topicId.length
+        const afterChar = afterIdx < anchor.length ? anchor[afterIdx] : ''
+        const afterOk =
+          afterIdx === anchor.length || afterChar === '-' || afterChar === ':' || afterChar === '|' || afterChar === '_'
+        if (beforeOk && afterOk) return true
+        idx = anchor.indexOf(topicId, idx + 1)
+      }
+      return false
+    }
     let groupsWithFinalTopic = 0
     for (let i = 0; i < groupEls.length; i++) {
       const el = groupEls[i] as HTMLElement
       const gid = el.getAttribute('data-stable-group-id') ?? ''
-      if (gid.includes(lastTopicId)) {
+      if (isExactTopicOwnedLocal(gid, lastTopicId)) {
         groupsWithFinalTopic++
         continue
       }
       // Strict descendant check — only [data-message-id], never [id^="message-"] for authoritative ownership
+      // This selector `^=` is already exact boundary-safe (topicId + '-msg-')
       const hasDesc = el.querySelector(`[data-message-id^="${lastTopicId}-msg-"]`) !== null
       if (hasDesc) groupsWithFinalTopic++
     }
 
     // Strict context boundary — must be inside #messages subtree; anchor must be final-topic-owned
+    // Improved: detect ALL boundary elements and reject if ANY lies outside #messages even when valid inside exists (simultaneous inside+outside false-positive fix)
     let anchorGroupKey: string | null = null
     let contextBoundaryPresent = false
     let contextBoundaryInsideMessages = false
-    // Strict query: only boundary inside #messages qualifies for authoritative proof
-    const boundary = document.querySelector('#messages [data-context-boundary]')
-    if (boundary && root && root.contains(boundary)) {
+    const allBoundaries = document.querySelectorAll('[data-context-boundary]')
+    const insideBoundaries = document.querySelectorAll('#messages [data-context-boundary]')
+    const hasOutside = Array.from(allBoundaries).some((el) => !el.closest('#messages'))
+    if (hasOutside) {
+      // Any divider outside #messages invalidates evidence even when inside valid divider exists — fail-closed mixed rejection per LOCK-004
+      contextBoundaryPresent = true
+      contextBoundaryInsideMessages = false
+      anchorGroupKey = null
+    } else if (insideBoundaries.length > 0 && root && root.contains(insideBoundaries[0] as Element)) {
+      const boundary = insideBoundaries[0] as Element
       contextBoundaryPresent = true
       contextBoundaryInsideMessages = true
       let prev = boundary.previousElementSibling
@@ -736,18 +789,10 @@ async function activateReduxProjection(
       }
       anchorGroupKey = found
     } else {
-      // Diagnostic: check if a global boundary exists outside #messages — never satisfies authoritative complete
-      const globalBoundary = document.querySelector('[data-context-boundary]')
-      if (globalBoundary) {
-        // Exists globally but not inside #messages — explicitly not authoritative
-        contextBoundaryPresent = false
-        contextBoundaryInsideMessages = false
-        anchorGroupKey = null
-      } else {
-        contextBoundaryPresent = false
-        contextBoundaryInsideMessages = false
-        anchorGroupKey = null
-      }
+      // No divider anywhere — valid only for whole-topic <=25 with null anchor; empty allBoundaries also falls here (no outside, no inside)
+      contextBoundaryPresent = false
+      contextBoundaryInsideMessages = false
+      anchorGroupKey = null
     }
 
     return {
@@ -764,25 +809,46 @@ async function activateReduxProjection(
   }, lastTopicId)
 
   // Authoritative productionPath lock: complete ONLY when final-topic-owned #messages production selectors,
-  // exact expected DOM counts, and explicit context boundary inside #messages with final-topic-owned anchor all pass.
-  // Fallback [id^="message-"], global document queries, or arbitrary non-zero fallbacks never satisfy complete.
+  // exact expected DOM counts, and context evidence (strict divider with ownership OR valid whole-topic absent) passes.
+  // Fallback [id^="message-"], global document queries, or arbitrary non-zero fallbacks never satisfy complete outside whole-topic.
   const finalTopicDomProof =
     domStats.domDisplayMessagesScoped === expectedVisibleFinal &&
     domStats.domDisplayMessagesGlobal === expectedVisibleFinal
   const groupCountExact = domStats.domGroupCount === expectedVisibleFinal
   const groupOwnershipProof = domStats.groupsWithFinalTopic === expectedVisibleFinal && groupCountExact
-  const anchorOwnedByFinalTopic = domStats.anchorGroupKey !== null && domStats.anchorGroupKey.includes(lastTopicId)
-  const contextEvidenceOk =
-    domStats.contextBoundaryPresent &&
-    domStats.contextBoundaryInsideMessages &&
-    domStats.anchorGroupKey !== null &&
-    anchorOwnedByFinalTopic
-  const productionPathComplete =
-    reduxVerified && finalTopicDomProof && groupCountExact && groupOwnershipProof && contextEvidenceOk
+  const anchorOwnedByFinalTopic = isC02ExactTopicOwned(domStats.anchorGroupKey, lastTopicId)
+  const isWholeTopic = isC02WholeTopicWindow(expectedVisibleFinal)
+  const wholeTopicNoDividerValid =
+    isWholeTopic &&
+    !domStats.contextBoundaryPresent &&
+    !domStats.contextBoundaryInsideMessages &&
+    domStats.anchorGroupKey === null
+  const contextEvidenceOk = isC02ContextEvidenceValid({
+    contextBoundaryPresent: domStats.contextBoundaryPresent,
+    contextBoundaryInsideMessages: domStats.contextBoundaryInsideMessages,
+    anchorGroupKey: domStats.anchorGroupKey,
+    lastTopicId,
+    expectedVisibleFinal
+  })
+  const productionPathComplete = isC02ProductionPathComplete({
+    reduxVerified,
+    finalTopicDomProof,
+    groupCountExact,
+    groupOwnershipProof,
+    contextBoundaryPresent: domStats.contextBoundaryPresent,
+    contextBoundaryInsideMessages: domStats.contextBoundaryInsideMessages,
+    anchorGroupKey: domStats.anchorGroupKey,
+    lastTopicId,
+    expectedVisibleFinal
+  })
 
   let productionPathDetail: string
   if (productionPathComplete) {
-    productionPathDetail = `canonical user path complete: assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id="${lastTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/[data-message-id]/[data-context-boundary]; productionPath complete — finalTopic=${lastTopicId} owns #messages DOM (scoped ${domStats.domDisplayMessagesScoped}/${expectedVisibleFinal}, global ${domStats.domDisplayMessagesGlobal}/${expectedVisibleFinal} via #messages [data-message-id]), groups exact ${domStats.domGroupCount}/${expectedVisibleFinal} (owned ${domStats.groupsWithFinalTopic}/${expectedVisibleFinal} via #messages [data-stable-group-id]), contextBoundary inside #messages anchor=${domStats.anchorGroupKey} (final-topic-owned, [id^="message-"] fallback diagnostic-only excluded)`
+    if (wholeTopicNoDividerValid) {
+      productionPathDetail = `canonical user path complete: assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id="${lastTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/[data-message-id] (no [data-context-boundary] by design — whole-topic window ${expectedVisibleFinal} <= ${C02_DEFAULT_CONTEXTCOUNT} turns, divider absent is valid); productionPath complete — finalTopic=${lastTopicId} owns #messages DOM (scoped ${domStats.domDisplayMessagesScoped}/${expectedVisibleFinal}, global ${domStats.domDisplayMessagesGlobal}/${expectedVisibleFinal} via #messages [data-message-id]), groups exact ${domStats.domGroupCount}/${expectedVisibleFinal} (owned ${domStats.groupsWithFinalTopic}/${expectedVisibleFinal} via #messages [data-stable-group-id]), whole-topic context valid (no divider, anchor null by design)`
+    } else {
+      productionPathDetail = `canonical user path complete: assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id="${lastTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/[data-message-id]/[data-context-boundary]; productionPath complete — finalTopic=${lastTopicId} owns #messages DOM (scoped ${domStats.domDisplayMessagesScoped}/${expectedVisibleFinal}, global ${domStats.domDisplayMessagesGlobal}/${expectedVisibleFinal} via #messages [data-message-id]), groups exact ${domStats.domGroupCount}/${expectedVisibleFinal} (owned ${domStats.groupsWithFinalTopic}/${expectedVisibleFinal} via #messages [data-stable-group-id]), contextBoundary inside #messages anchor=${domStats.anchorGroupKey} (final-topic-owned, [id^="message-"] fallback diagnostic-only excluded)`
+    }
   } else {
     const reasons: string[] = []
     if (!reduxVerified)
@@ -801,22 +867,30 @@ async function activateReduxProjection(
       reasons.push(
         `group ownership failed (groupsWithFinalTopic ${domStats.groupsWithFinalTopic}/${expectedVisibleFinal} — groups do not demonstrably belong to final topic)`
       )
-    if (!domStats.contextBoundaryPresent)
-      reasons.push(
-        '[data-context-boundary] absent inside #messages — context evidence unavailable (global boundary outside #messages or missing; not inferred from first group; partial/inconclusive; diagnostic alt counts not authoritative)'
-      )
-    else if (!domStats.contextBoundaryInsideMessages)
-      reasons.push(
-        '[data-context-boundary] found globally but not inside #messages subtree — strict proof requires #messages [data-context-boundary]; inconclusive'
-      )
-    else if (!domStats.anchorGroupKey)
-      reasons.push(
-        'context boundary present inside #messages but anchorGroupKey unresolvable (no predecessor [data-stable-group-id]; inconclusive)'
-      )
-    else if (!anchorOwnedByFinalTopic)
-      reasons.push(
-        `context boundary anchor not final-topic-owned (anchor=${domStats.anchorGroupKey} does not contain ${lastTopicId}; explicit final-topic ownership required; diagnostic [id^="message-"] fallback never satisfies complete)`
-      )
+    if (!contextEvidenceOk) {
+      if (isWholeTopic && !domStats.contextBoundaryPresent && domStats.anchorGroupKey === null) {
+        // Whole-topic absent is valid, but we are here only when contextEvidenceOk false,
+        // so this branch should not happen for valid whole-topic; treat as inconclusive due to other evidence
+        reasons.push(
+          `whole-topic divider absent but context evidence still invalid for ${lastTopicId} (unexpected — isWholeTopic=${isWholeTopic} expectedVisible=${expectedVisibleFinal} present=${domStats.contextBoundaryPresent} anchor=${domStats.anchorGroupKey ?? 'null'})`
+        )
+      } else if (!domStats.contextBoundaryPresent)
+        reasons.push(
+          '[data-context-boundary] absent inside #messages — context evidence unavailable (global boundary outside #messages or missing; not inferred from first group; partial/inconclusive outside whole-topic <=25; diagnostic alt counts not authoritative)'
+        )
+      else if (!domStats.contextBoundaryInsideMessages)
+        reasons.push(
+          '[data-context-boundary] found globally but not inside #messages subtree — strict proof requires #messages [data-context-boundary]; inconclusive'
+        )
+      else if (!domStats.anchorGroupKey)
+        reasons.push(
+          'context boundary present inside #messages but anchorGroupKey unresolvable (no predecessor [data-stable-group-id]; inconclusive)'
+        )
+      else if (!anchorOwnedByFinalTopic)
+        reasons.push(
+          `context boundary anchor not final-topic-owned (anchor=${domStats.anchorGroupKey} does not contain ${lastTopicId}; explicit final-topic ownership required; diagnostic [id^="message-"] fallback never satisfies complete)`
+        )
+    }
     productionPathDetail = `canonical user path attempted: assistants/addTopic (live assistant ID) → ChatDb → [data-testid="topic-item"][data-topic-id="${lastTopicId}"] click → HomePage/useActiveTopic → loadTopicMessagesThunk → Messages/Chat; productionPath partial/inconclusive — ${reasons.join('; ')}; heap delta reflects Redux entity only when DOM incomplete, derived counts narrowed (inconclusive group/context)`
   }
 
@@ -887,6 +961,7 @@ async function activateReduxProjection(
       displayMessages: domStats.domDisplayMessagesScoped,
       anchorGroupKey: domStats.anchorGroupKey,
       contextBoundaryPresent: domStats.contextBoundaryPresent,
+      contextBoundaryInsideMessages: domStats.contextBoundaryInsideMessages,
       finalTopicDomProof,
       groupExactMatched: groupCountExact,
       groupsWithFinalTopic: domStats.groupsWithFinalTopic,
@@ -1007,7 +1082,7 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
       const expectedSingleVisible = c02ExpectedVisibleCountForTopic(syntheticTopics[syntheticTopics.length - 1]!)
       expect(
         allocation.projectionStats.finalTopicDomProof,
-        `final-topic DOM proof must be true for ${finalTopicId} via #messages [data-message-id]: scoped ${allocation.projectionStats.displayMessages} vs global ${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages} vs expected ${expectedSingleVisible} (min(N, productionWindow ${C02_PRODUCTION_WINDOW_MAX}) — retains 150 logically but projects 100 for large; scoped===global===expected inside #messages required; global/stale or [id^="message-"] fallback is not proof)`
+        `final-topic DOM proof must be true for ${finalTopicId} via #messages [data-message-id]: scoped ${allocation.projectionStats.displayMessages} vs global ${allocation.projectionStats.globalDisplayMessages} vs expected ${expectedSingleVisible} (min(N, productionWindow ${C02_PRODUCTION_WINDOW_MAX}) — retains 150 logically but projects 100 for large; scoped===global===expected inside #messages required; global/stale or [id^="message-"] fallback is not proof)`
       ).toBe(true)
       expect(
         allocation.projectionStats.groupCount,
@@ -1017,14 +1092,44 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
         allocation.projectionStats.groupsWithFinalTopic,
         `groups must demonstrably belong to final topic ${finalTopicId} via #messages [data-stable-group-id]/[data-message-id] (groupsWithFinalTopic === expectedVisible ${expectedSingleVisible}); [id^="message-"] descendant never satisfies`
       ).toBe(expectedSingleVisible)
+      // Context evidence per LOCK-004 (fail-closed, explicit inside-messages signal mandatory): whole-topic windows (positive integer 1..25) require no divider anywhere + null anchor (valid absent), partial windows require divider inside #messages + final-owned anchor (valid present); outside/global invalid
+      const isWholeTopicSingle = isC02WholeTopicWindow(expectedSingleVisible)
+      if (isWholeTopicSingle) {
+        expect(
+          allocation.projectionStats.contextBoundaryPresent,
+          `whole-topic window ${expectedSingleVisible} <= ${C02_DEFAULT_CONTEXTCOUNT} must have no divider by design (boundaryMessageId null when startIndex 0) — contextBoundaryPresent must be false`
+        ).toBe(false)
+        expect(
+          allocation.projectionStats.contextBoundaryInsideMessages,
+          `whole-topic window ${expectedSingleVisible} <= ${C02_DEFAULT_CONTEXTCOUNT} must have no divider anywhere by design — contextBoundaryInsideMessages must be false (explicit inside signal mandatory per LOCK-004; whole-topic 1..25 no-divider/null-anchor branch)`
+        ).toBe(false)
+        expect(
+          allocation.projectionStats.anchorGroupKey,
+          `whole-topic window has no resolvable divider anchor by design — anchorGroupKey must be null for ${finalTopicId}`
+        ).toBeNull()
+      } else {
+        expect(
+          allocation.projectionStats.contextBoundaryPresent,
+          '#messages [data-context-boundary] must be present explicitly inside #messages — absent or global boundary outside #messages is not converted to first group as fake anchor; partial/inconclusive when absent outside whole-topic <=25'
+        ).toBe(true)
+        expect(
+          allocation.projectionStats.contextBoundaryInsideMessages,
+          '#messages [data-context-boundary] must be present explicitly inside #messages (mandatory explicit inside signal per LOCK-004; partial windows require divider inside #messages + final-owned anchor) — contextBoundaryInsideMessages must be true'
+        ).toBe(true)
+        expect(
+          isC02ExactTopicOwned(allocation.projectionStats.anchorGroupKey, finalTopicId),
+          `context boundary anchor must be resolvable inside #messages and final-topic-owned (exact boundary-safe isC02ExactTopicOwned predecessor #messages [data-stable-group-id] containing ${finalTopicId}) when boundary present — anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'}`
+        ).toBe(true)
+      }
       expect(
-        allocation.projectionStats.contextBoundaryPresent,
-        '#messages [data-context-boundary] must be present explicitly inside #messages — absent or global boundary outside #messages is not converted to first group as fake anchor; partial/inconclusive when absent'
-      ).toBe(true)
-      expect(
-        allocation.projectionStats.anchorGroupKey !== null &&
-          allocation.projectionStats.anchorGroupKey.includes(finalTopicId),
-        `context boundary anchor must be resolvable inside #messages and final-topic-owned (predecessor #messages [data-stable-group-id] containing ${finalTopicId}) when boundary present — anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'}`
+        isC02ContextEvidenceValid({
+          contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
+          contextBoundaryInsideMessages: allocation.projectionStats.contextBoundaryInsideMessages,
+          anchorGroupKey: allocation.projectionStats.anchorGroupKey,
+          lastTopicId: finalTopicId,
+          expectedVisibleFinal: expectedSingleVisible
+        }),
+        `context evidence must be valid via harness predicate per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor OR partial inside-divider/final-owned with explicit inside signal mandatory, fail-closed when omitted) for ${finalTopicId} expectedVisible=${expectedSingleVisible} present=${allocation.projectionStats.contextBoundaryPresent} insideMessages=${allocation.projectionStats.contextBoundaryInsideMessages} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'}`
       ).toBe(true)
       expect(
         !!allocation.productionPathComplete,
@@ -1165,10 +1270,10 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
         )
       }
       console.log(
-        `[PERF-C02] MEASURED AUTHORITY: Redux entity projection (messages entity + messageIdsByTopic + blocks entity) + derived viewport/group/context via actual rendered DOM (groups=${allocation.projectionStats.groupCount} exact=${allocation.projectionStats.groupExactMatched ? 1 : 0}, display scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages ?? allocation.projectionStats.displayMessages} groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}, finalTopicProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}) — productionPath: ${allocation.productionPath}`
+        `[PERF-C02] MEASURED AUTHORITY: Redux entity projection (messages entity + messageIdsByTopic + blocks entity) + derived viewport/group/context via actual rendered DOM (groups=${allocation.projectionStats.groupCount} exact=${allocation.projectionStats.groupExactMatched ? 1 : 0}, display scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages} groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}, finalTopicProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}) — productionPath: ${allocation.productionPath}`
       )
       console.log(
-        `[PERF-C02] PRODUCTION PROJECTION PATH (canonical): assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required, clamped to latest-window ${C02_PRODUCTION_WINDOW_MAX}) → [data-testid="topic-item"][data-topic-id="${finalTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/#messages [data-message-id]/#messages [data-context-boundary]; productionPath=${allocation.productionPath}; productionPathComplete=${allocation.productionPathComplete ? 1 : 0} authoritativeCalibrationComplete=${baseInformativeness.informative && !!allocation.productionPathComplete ? 1 : 0} (requires precise && finite positive delta + final-topic-owned #messages proof) groups exact ${allocation.projectionStats.groupCount}/${expectedSingleVisible} via #messages [data-stable-group-id] (logical retained ${isMixedSingle ? c02MixedTotalMessages(profile as C02MixedHeapProfile) + ' total' : (profile as C02HeapProfile).syntheticMessagesPerTopic + ' per topic'} , projected ${expectedSingleVisible}) contextBoundaryInsideMessages=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'} finalTopicOwned=${allocation.projectionStats.anchorGroupKey?.includes(finalTopicId) ? 1 : 0} (fallback [id^="message-"]/global never satisfies; [data-context-boundary] must be inside #messages with final-topic anchor)`
+        `[PERF-C02] PRODUCTION PROJECTION PATH (canonical): assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required, clamped to latest-window ${C02_PRODUCTION_WINDOW_MAX}) → [data-testid="topic-item"][data-topic-id="${finalTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/#messages [data-message-id]/#messages [data-context-boundary]; productionPath=${allocation.productionPath}; derivedProductionPathComplete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor OR partial inside-divider/final-owned with explicit inside signal mandatory, fail-closed; caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid) authoritativeCalibrationComplete per derived predicate; groups exact ${allocation.projectionStats.groupCount}/${expectedSingleVisible} via #messages [data-stable-group-id] (logical retained ${isMixedSingle ? c02MixedTotalMessages(profile as C02MixedHeapProfile) + ' total' : (profile as C02HeapProfile).syntheticMessagesPerTopic + ' per topic'} , projected ${expectedSingleVisible}) contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${allocation.projectionStats.contextBoundaryInsideMessages ? 1 : 0} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'} finalTopicOwned=${isC02ExactTopicOwned(allocation.projectionStats.anchorGroupKey, finalTopicId) ? 1 : 0} (exact boundary-safe isC02ExactTopicOwned, fallback [id^="message-"]/global never satisfies; valid branches: whole-topic 1..25 no-divider/null-anchor, partial divider inside #messages with final-owned anchor; explicit inside signal mandatory per LOCK-004)`
       )
       if (isMixedSingle) {
         const mixed = profile as C02MixedHeapProfile
@@ -1201,6 +1306,7 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
         allocation: Awaited<ReturnType<typeof activateReduxProjection>>
         informativeness: { informative: boolean; reason: string }
         precision: HeapPrecisionLabel
+        finalTopicId: string
       }> = []
       const effectiveMockPort = mockPort
       for (const entry of profiles) {
@@ -1320,7 +1426,8 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
             heapAfter,
             allocation,
             informativeness: baseInformativeness,
-            precision: precisionLabel
+            precision: precisionLabel,
+            finalTopicId: syntheticTopics[syntheticTopics.length - 1]!.topicId
           })
           console.log(
             `[PERF-C02] matrix profile ${entry.id}: isolated profile ${isolatedUserDataDir} logicalBytes=${logicalBytes}, heapDelta=${amplification.heapDeltaBytes}, deltaRatio=${amplification.deltaRatio.toFixed(3)}, precision=${precisionLabel}`
