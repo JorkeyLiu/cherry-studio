@@ -755,4 +755,166 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     expect(snap.b09).toBeDefined()
     expect(snap.resident).toBeDefined()
   })
+
+  it('staged failure when listSegments rejects while window read resolves — counted once, not discarded, no publication, privacy-safe', async () => {
+    const { getResidentReadDiagnostics, resetResidentReadDiagnosticsForTests } = await import(
+      '@renderer/services/residentReadDiagnostics'
+    )
+    const { getPhase4Snapshot, getPhase4BoundScalars } = await import('@renderer/services/phase4Observability')
+    const { loadTopicMessagesThunk } = await import('../messageThunk')
+
+    resetResidentReadDiagnosticsForTests()
+    mocks.publishResidentComplete.mockClear()
+
+    const topicId = 't-seg-reject'
+    delete storeState.messages.messageIdsByTopic[topicId]
+    delete storeState.residentRegistry.entries[topicId]
+
+    const before = getResidentReadDiagnostics()
+    // Deterministic Promise.all rejection: window resolves, segment leg rejects.
+    // Order is deterministic — window promise settles before segment rejection;
+    // Promise.all still rejects once via the segment leg. No timing assertions.
+    const windowResponse = makeWindowResponse(
+      { kind: 'latest', topicId, limit: 10 } as unknown as FetchMessagesWindowRequest,
+      [{ id: 'm-seg-0', topicId, blocks: [] }]
+    )
+    mocks.fetchMessagesWindow.mockImplementationOnce(async () => windowResponse)
+    mocks.listSegments.mockRejectedValueOnce(new Error('segment leg failure'))
+
+    const dispatch = vi.fn((a: unknown) => {
+      if (typeof a === 'function') return (a as any)(dispatch, () => storeState)
+      return a
+    })
+    const getState = () => storeState
+
+    await loadTopicMessagesThunk(topicId)(dispatch, getState as any)
+
+    expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
+    expect(mocks.listSegments).toHaveBeenCalledTimes(1)
+    expect(mocks.fetchMessagesWindow).toHaveBeenCalledWith(expect.objectContaining({ topicId }))
+    expect(mocks.listSegments).toHaveBeenCalledWith(topicId)
+
+    const after = getResidentReadDiagnostics()
+    // staged counters increase exactly once per invocation; failure increments, success does not
+    expect(after.stagedCount - before.stagedCount).toBe(1)
+    expect(after.stagedFailedCount - before.stagedFailedCount).toBe(1)
+    expect(after.stagedSuccessCount - before.stagedSuccessCount).toBe(0)
+    // latency scalars remain finite/non-negative
+    expect(after.stagedTotalMs).toBeGreaterThanOrEqual(0)
+    expect(after.stagedMaxMs).toBeGreaterThanOrEqual(0)
+    expect(Number.isFinite(after.stagedTotalMs)).toBe(true)
+    expect(Number.isFinite(after.stagedMaxMs)).toBe(true)
+    expect(after.stagedLastMs).not.toBeNull()
+    expect(Number.isFinite(after.stagedLastMs!)).toBe(true)
+    expect(after.stagedLastMs! >= 0).toBe(true)
+    expect(after.stagedAvgMs === null || (Number.isFinite(after.stagedAvgMs) && after.stagedAvgMs >= 0)).toBe(true)
+    // discarded counters and per-reason counters remain unchanged; no invented category
+    expect(after.discardedCount - before.discardedCount).toBe(0)
+    expect(after.discardedSuperseded - before.discardedSuperseded).toBe(0)
+    expect(after.discardedCurrentMoved - before.discardedCurrentMoved).toBe(0)
+    expect(after.discardedDeletedDuringFetch - before.discardedDeletedDuringFetch).toBe(0)
+    expect(after.discardedGenerationMismatch - before.discardedGenerationMismatch).toBe(0)
+    expect(after.discardedMalformed - before.discardedMalformed).toBe(0)
+    expect((after as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
+    // no complete resident publication for the failed topic (LOCK-005 semantics: staged failure, not discarded validation)
+    const segFailCalls = mocks.publishResidentComplete.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { topicId?: string })?.topicId === topicId
+    )
+    expect(segFailCalls.length).toBe(0)
+    const entry = storeState.residentRegistry.entries[topicId]
+    expect(!entry || entry.residentTopic !== true).toBe(true)
+    // snapshot/bound-scalar composition remains consistent/privacy-safe for residentRead diagnostics
+    const snap = getPhase4Snapshot(null)
+    expect(snap.residentRead.stagedCount).toBe(after.stagedCount)
+    expect(snap.residentRead.stagedFailedCount).toBe(after.stagedFailedCount)
+    expect(snap.residentRead.stagedSuccessCount).toBe(after.stagedSuccessCount)
+    expect(snap.residentRead.discardedCount).toBe(after.discardedCount)
+    const scalars = getPhase4BoundScalars(null)
+    expect(scalars.readStagedCount).toBe(after.stagedCount)
+    expect(scalars.readStagedFailedCount).toBe(after.stagedFailedCount)
+    expect(scalars.readStagedSuccessCount).toBe(after.stagedSuccessCount)
+    expect(scalars.readDiscardedCount).toBe(after.discardedCount)
+    expect(JSON.stringify(after)).not.toContain(topicId)
+    expect(JSON.stringify(snap.residentRead)).not.toContain(topicId)
+    expect(JSON.stringify(snap.residentRead)).not.toContain('m-seg-0')
+    // bounded scalar-only
+    for (const v of Object.values(snap.residentRead)) {
+      expect(v === null || typeof v === 'number').toBe(true)
+    }
+  })
+
+  it('staged failure when both window and segment legs reject — counted once, not discarded, no publication, privacy-safe', async () => {
+    const { getResidentReadDiagnostics, resetResidentReadDiagnosticsForTests } = await import(
+      '@renderer/services/residentReadDiagnostics'
+    )
+    const { getPhase4Snapshot, getPhase4BoundScalars } = await import('@renderer/services/phase4Observability')
+    const { loadTopicMessagesThunk } = await import('../messageThunk')
+
+    resetResidentReadDiagnosticsForTests()
+    mocks.publishResidentComplete.mockClear()
+
+    const topicId = 't-both-reject'
+    delete storeState.messages.messageIdsByTopic[topicId]
+    delete storeState.residentRegistry.entries[topicId]
+
+    const before = getResidentReadDiagnostics()
+    // Deterministic Promise.all failure: both legs reject. Promise.all rejects on first settled rejection,
+    // still counted exactly once. No timing assertions — both mocks reject immediately.
+    mocks.fetchMessagesWindow.mockRejectedValueOnce(new Error('window leg failure'))
+    mocks.listSegments.mockRejectedValueOnce(new Error('segment leg failure'))
+
+    const dispatch = vi.fn((a: unknown) => {
+      if (typeof a === 'function') return (a as any)(dispatch, () => storeState)
+      return a
+    })
+    const getState = () => storeState
+
+    await loadTopicMessagesThunk(topicId)(dispatch, getState as any)
+
+    expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
+    expect(mocks.listSegments).toHaveBeenCalledTimes(1)
+    expect(mocks.fetchMessagesWindow).toHaveBeenCalledWith(expect.objectContaining({ topicId }))
+    expect(mocks.listSegments).toHaveBeenCalledWith(topicId)
+
+    const after = getResidentReadDiagnostics()
+    expect(after.stagedCount - before.stagedCount).toBe(1)
+    expect(after.stagedFailedCount - before.stagedFailedCount).toBe(1)
+    expect(after.stagedSuccessCount - before.stagedSuccessCount).toBe(0)
+    expect(after.stagedTotalMs).toBeGreaterThanOrEqual(0)
+    expect(after.stagedMaxMs).toBeGreaterThanOrEqual(0)
+    expect(Number.isFinite(after.stagedTotalMs)).toBe(true)
+    expect(Number.isFinite(after.stagedMaxMs)).toBe(true)
+    expect(after.stagedLastMs).not.toBeNull()
+    expect(Number.isFinite(after.stagedLastMs!)).toBe(true)
+    expect(after.stagedLastMs! >= 0).toBe(true)
+    expect(after.stagedAvgMs === null || (Number.isFinite(after.stagedAvgMs) && after.stagedAvgMs >= 0)).toBe(true)
+    expect(after.discardedCount - before.discardedCount).toBe(0)
+    expect(after.discardedSuperseded - before.discardedSuperseded).toBe(0)
+    expect(after.discardedCurrentMoved - before.discardedCurrentMoved).toBe(0)
+    expect(after.discardedDeletedDuringFetch - before.discardedDeletedDuringFetch).toBe(0)
+    expect(after.discardedGenerationMismatch - before.discardedGenerationMismatch).toBe(0)
+    expect(after.discardedMalformed - before.discardedMalformed).toBe(0)
+    expect((after as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
+    const bothFailCalls = mocks.publishResidentComplete.mock.calls.filter(
+      (c: unknown[]) => (c[0] as { topicId?: string })?.topicId === topicId
+    )
+    expect(bothFailCalls.length).toBe(0)
+    const entry = storeState.residentRegistry.entries[topicId]
+    expect(!entry || entry.residentTopic !== true).toBe(true)
+    const snap = getPhase4Snapshot(null)
+    expect(snap.residentRead.stagedCount).toBe(after.stagedCount)
+    expect(snap.residentRead.stagedFailedCount).toBe(after.stagedFailedCount)
+    expect(snap.residentRead.stagedSuccessCount).toBe(after.stagedSuccessCount)
+    expect(snap.residentRead.discardedCount).toBe(after.discardedCount)
+    const scalars = getPhase4BoundScalars(null)
+    expect(scalars.readStagedCount).toBe(after.stagedCount)
+    expect(scalars.readStagedFailedCount).toBe(after.stagedFailedCount)
+    expect(scalars.readStagedSuccessCount).toBe(after.stagedSuccessCount)
+    expect(scalars.readDiscardedCount).toBe(after.discardedCount)
+    expect(JSON.stringify(after)).not.toContain(topicId)
+    expect(JSON.stringify(snap.residentRead)).not.toContain(topicId)
+    for (const v of Object.values(snap.residentRead)) {
+      expect(v === null || typeof v === 'number').toBe(true)
+    }
+  })
 })
