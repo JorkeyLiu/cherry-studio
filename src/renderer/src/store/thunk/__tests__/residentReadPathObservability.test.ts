@@ -1384,4 +1384,315 @@ describe('resident read-path observability — bounded scalar diagnostics wired 
     expect(afterReset.stagedCount).toBe(0)
     expect(afterReset.discardedCount).toBe(0)
   })
+
+  it('comprehensive bounded identities: all six miss reasons + five discard reasons accumulate with exact derived sums, avg, finite, privacy, scalar-only, snapshot parity', async () => {
+    const {
+      getResidentReadDiagnostics,
+      resetResidentReadDiagnosticsForTests,
+      recordResidentReadHit,
+      recordResidentReadMiss,
+      recordResidentReadDiscard,
+      recordStagedLatency
+    } = await import('@renderer/services/residentReadDiagnostics')
+    const { getPhase4Snapshot, getPhase4BoundScalars } = await import('@renderer/services/phase4Observability')
+
+    resetResidentReadDiagnosticsForTests()
+    const { resetAllDeletionGenerationsForTests } = await import('@renderer/services/topicDeletionInvalidation')
+    resetAllDeletionGenerationsForTests()
+
+    // Deterministic accumulation: 1 hit + 6 distinct miss reasons + 5 staged (3 success + 2 fail) + 5 discard reasons
+    recordResidentReadHit()
+    expect(getResidentReadDiagnostics().hitCount).toBe(1)
+    recordResidentReadMiss('forced')
+    recordResidentReadMiss('noIndex')
+    recordResidentReadMiss('deletion')
+    recordResidentReadMiss('legacyEmpty')
+    recordResidentReadMiss('noEntry')
+    recordResidentReadMiss('incomplete')
+    // staged latency: durations chosen to make avg = total/count within tolerance, max/median checks deterministic
+    recordStagedLatency(10, true)
+    recordStagedLatency(20, true)
+    recordStagedLatency(30, true)
+    recordStagedLatency(5, false)
+    recordStagedLatency(15, false)
+    // discard reasons — all five taxonomy entries once each
+    recordResidentReadDiscard('superseded')
+    recordResidentReadDiscard('currentMoved')
+    recordResidentReadDiscard('deletedDuringFetch')
+    recordResidentReadDiscard('generationMismatch')
+    recordResidentReadDiscard('malformed')
+
+    const diag = getResidentReadDiagnostics()
+    // hit/miss derived identities
+    expect(diag.hitCount).toBe(1)
+    expect(diag.missForced).toBe(1)
+    expect(diag.missNoIndex).toBe(1)
+    expect(diag.missDeletion).toBe(1)
+    expect(diag.missLegacyEmpty).toBe(1)
+    expect(diag.missNoEntry).toBe(1)
+    expect(diag.missIncomplete).toBe(1)
+    expect(diag.missCount).toBe(6)
+    expect(diag.missCount).toBe(
+      diag.missForced +
+        diag.missNoIndex +
+        diag.missDeletion +
+        diag.missLegacyEmpty +
+        diag.missNoEntry +
+        diag.missIncomplete
+    )
+    expect(diag.totalRequests).toBe(diag.hitCount + diag.missCount)
+    expect(diag.totalRequests).toBe(7)
+    // staged derived identities
+    expect(diag.stagedCount).toBe(5)
+    expect(diag.stagedSuccessCount).toBe(3)
+    expect(diag.stagedFailedCount).toBe(2)
+    expect(diag.stagedCount).toBe(diag.stagedSuccessCount + diag.stagedFailedCount)
+    expect(diag.stagedTotalMs).toBe(80)
+    expect(diag.stagedMaxMs).toBe(30)
+    expect(diag.stagedLastMs).toBe(15)
+    expect(diag.stagedAvgMs).not.toBeNull()
+    expect(diag.stagedAvgMs!).toBeGreaterThanOrEqual(0)
+    expect(Number.isFinite(diag.stagedAvgMs!)).toBe(true)
+    expect(Math.abs(diag.stagedAvgMs! - diag.stagedTotalMs / diag.stagedCount)).toBeLessThan(1e-6)
+    expect(diag.stagedAvgMs).toBe(16)
+    expect(diag.stagedTotalMs >= diag.stagedMaxMs).toBe(true)
+    expect(diag.stagedMaxMs >= diag.stagedLastMs!).toBe(true)
+    // discard derived identity
+    expect(diag.discardedSuperseded).toBe(1)
+    expect(diag.discardedCurrentMoved).toBe(1)
+    expect(diag.discardedDeletedDuringFetch).toBe(1)
+    expect(diag.discardedGenerationMismatch).toBe(1)
+    expect(diag.discardedMalformed).toBe(1)
+    expect(diag.discardedCount).toBe(5)
+    expect(diag.discardedCount).toBe(
+      diag.discardedSuperseded +
+        diag.discardedCurrentMoved +
+        diag.discardedDeletedDuringFetch +
+        diag.discardedGenerationMismatch +
+        diag.discardedMalformed
+    )
+    // LOCK-005: no staged-failure-as-discarded category
+    expect((diag as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
+    expect((diag as unknown as Record<string, unknown>).missUnknown).toBeUndefined()
+
+    // finite/non-negative scalar-only, bounded shape
+    const expectedKeys = [
+      'hitCount',
+      'missCount',
+      'totalRequests',
+      'missForced',
+      'missNoIndex',
+      'missDeletion',
+      'missLegacyEmpty',
+      'missNoEntry',
+      'missIncomplete',
+      'stagedCount',
+      'stagedSuccessCount',
+      'stagedFailedCount',
+      'stagedTotalMs',
+      'stagedMaxMs',
+      'stagedLastMs',
+      'stagedAvgMs',
+      'discardedCount',
+      'discardedSuperseded',
+      'discardedCurrentMoved',
+      'discardedDeletedDuringFetch',
+      'discardedGenerationMismatch',
+      'discardedMalformed'
+    ].sort()
+    expect(Object.keys(diag).sort()).toEqual(expectedKeys)
+    for (const v of Object.values(diag)) {
+      expect(v === null || typeof v === 'number').toBe(true)
+      if (typeof v === 'number') {
+        expect(Number.isFinite(v)).toBe(true)
+        expect(v).toBeGreaterThanOrEqual(0)
+      }
+    }
+    // privacy: bounded scalars only, no identifiers, paths, credentials, content, histories
+    const diagJson = JSON.stringify(diag)
+    expect(diagJson).not.toContain('topic-')
+    expect(diagJson).not.toContain('path')
+    expect(diagJson).not.toContain('credential')
+    expect(diagJson).not.toContain('content')
+    expect(diagJson).not.toContain('blocks')
+    expect(diagJson).not.toContain('m-0')
+
+    // Phase4 snapshot/bound scalar composition parity
+    const snap = getPhase4Snapshot(null)
+    expect(snap.residentRead).toEqual(diag)
+    expect(snap.residentRead.hitCount).toBe(diag.hitCount)
+    expect(snap.residentRead.missCount).toBe(diag.missCount)
+    expect(snap.residentRead.totalRequests).toBe(diag.totalRequests)
+    expect(snap.residentRead.stagedCount).toBe(diag.stagedCount)
+    expect(snap.residentRead.stagedAvgMs).toBe(diag.stagedAvgMs)
+    expect(snap.residentRead.discardedCount).toBe(diag.discardedCount)
+    for (const v of Object.values(snap.residentRead)) {
+      expect(v === null || typeof v === 'number').toBe(true)
+    }
+    expect(JSON.stringify(snap.residentRead)).not.toContain('path')
+    expect(JSON.stringify(snap.residentRead)).not.toContain('credential')
+
+    const scalars = getPhase4BoundScalars(null)
+    expect(scalars.readHitCount).toBe(diag.hitCount)
+    expect(scalars.readMissCount).toBe(diag.missCount)
+    expect(scalars.readTotalRequests).toBe(diag.totalRequests)
+    expect(scalars.readMissForced).toBe(diag.missForced)
+    expect(scalars.readMissNoIndex).toBe(diag.missNoIndex)
+    expect(scalars.readMissDeletion).toBe(diag.missDeletion)
+    expect(scalars.readMissLegacyEmpty).toBe(diag.missLegacyEmpty)
+    expect(scalars.readMissNoEntry).toBe(diag.missNoEntry)
+    expect(scalars.readMissIncomplete).toBe(diag.missIncomplete)
+    expect(scalars.readStagedCount).toBe(diag.stagedCount)
+    expect(scalars.readStagedSuccessCount).toBe(diag.stagedSuccessCount)
+    expect(scalars.readStagedFailedCount).toBe(diag.stagedFailedCount)
+    expect(scalars.readStagedTotalMs).toBe(diag.stagedTotalMs)
+    expect(scalars.readStagedMaxMs).toBe(diag.stagedMaxMs)
+    expect(scalars.readStagedLastMs).toBe(diag.stagedLastMs)
+    expect(scalars.readStagedAvgMs).toBe(diag.stagedAvgMs)
+    expect(scalars.readDiscardedCount).toBe(diag.discardedCount)
+    expect(scalars.readDiscardedSuperseded).toBe(diag.discardedSuperseded)
+    expect(scalars.readDiscardedCurrentMoved).toBe(diag.discardedCurrentMoved)
+    expect(scalars.readDiscardedDeletedDuringFetch).toBe(diag.discardedDeletedDuringFetch)
+    expect(scalars.readDiscardedGenerationMismatch).toBe(diag.discardedGenerationMismatch)
+    expect(scalars.readDiscardedMalformed).toBe(diag.discardedMalformed)
+    expect((scalars as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
+
+    // cleanup
+    resetResidentReadDiagnosticsForTests()
+    resetAllDeletionGenerationsForTests()
+    const afterReset = getResidentReadDiagnostics()
+    expect(afterReset.totalRequests).toBe(0)
+    expect(afterReset.missCount).toBe(0)
+    expect(afterReset.stagedCount).toBe(0)
+    expect(afterReset.discardedCount).toBe(0)
+    expect(afterReset.stagedAvgMs).toBeNull()
+  })
+
+  it('legacy non-empty hit parity: absent registry + non-empty index records hit, not legacyEmpty, avoids staged/discard, privacy-safe', async () => {
+    const { getResidentReadDiagnostics, resetResidentReadDiagnosticsForTests } = await import(
+      '@renderer/services/residentReadDiagnostics'
+    )
+    const { getPhase4Snapshot, getPhase4BoundScalars } = await import('@renderer/services/phase4Observability')
+    const { loadTopicMessagesThunk } = await import('../messageThunk')
+    const { resetAllDeletionGenerationsForTests } = await import('@renderer/services/topicDeletionInvalidation')
+
+    resetResidentReadDiagnosticsForTests()
+    resetAllDeletionGenerationsForTests()
+    mocks.publishResidentComplete.mockClear()
+    mocks.fetchMessagesWindow.mockClear()
+    mocks.listSegments.mockClear()
+    mocks.bumpGeneration.mockClear()
+    // ensure default impls restored for other topics but not used for this hit
+    mocks.fetchMessagesWindow.mockImplementation(async (req: FetchMessagesWindowRequest) => {
+      const msgs = [{ id: `m-${req.topicId}`, topicId: req.topicId, blocks: [] }]
+      return makeWindowResponse(req, msgs as any)
+    })
+    mocks.listSegments.mockResolvedValue([])
+
+    const legacyTopicId = 't-legacy-hit-nonempty-unique-99'
+    // state without residentRegistry, but with non-empty cached index (legacy hit condition)
+    const legacyState: any = {
+      assistants: { assistants: [{ id: 'asst-1', topics: [{ id: legacyTopicId }] }] },
+      messages: {
+        entities: {},
+        messageIdsByTopic: { [legacyTopicId]: ['m-0', 'm-1'] },
+        loadingByTopic: {},
+        fulfilledByTopic: {},
+        currentTopicId: legacyTopicId,
+        displayCount: 10
+      },
+      messageBlocks: { entities: {} },
+      topicSegments: { segments: { entities: {}, ids: [] }, segmentsByTopic: {} }
+      // residentRegistry intentionally absent to simulate legacy store shape
+    }
+
+    const dispatch = vi.fn((a: unknown) => {
+      if (typeof a === 'function') return (a as any)(dispatch, () => legacyState)
+      return a
+    })
+    const getState = () => legacyState
+
+    const before = getResidentReadDiagnostics()
+    await loadTopicMessagesThunk(legacyTopicId)(dispatch, getState as any)
+
+    // hit increments, no miss, no staged, no discard
+    const after = getResidentReadDiagnostics()
+    expect(after.hitCount - before.hitCount).toBe(1)
+    expect(after.missCount - before.missCount).toBe(0)
+    expect(after.totalRequests - before.totalRequests).toBe(1)
+    expect(after.missLegacyEmpty - before.missLegacyEmpty).toBe(0)
+    expect(after.missForced - before.missForced).toBe(0)
+    expect(after.missNoIndex - before.missNoIndex).toBe(0)
+    expect(after.missDeletion - before.missDeletion).toBe(0)
+    expect(after.missNoEntry - before.missNoEntry).toBe(0)
+    expect(after.missIncomplete - before.missIncomplete).toBe(0)
+    expect(after.stagedCount - before.stagedCount).toBe(0)
+    expect(after.stagedSuccessCount - before.stagedSuccessCount).toBe(0)
+    expect(after.stagedFailedCount - before.stagedFailedCount).toBe(0)
+    expect(after.discardedCount - before.discardedCount).toBe(0)
+    expect(after.discardedSuperseded - before.discardedSuperseded).toBe(0)
+    expect(after.discardedCurrentMoved - before.discardedCurrentMoved).toBe(0)
+    expect(after.discardedDeletedDuringFetch - before.discardedDeletedDuringFetch).toBe(0)
+    expect(after.discardedGenerationMismatch - before.discardedGenerationMismatch).toBe(0)
+    expect(after.discardedMalformed - before.discardedMalformed).toBe(0)
+    // staged fetch avoided
+    expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
+    expect(mocks.listSegments).not.toHaveBeenCalled()
+    // no publication attempted for hit (no staged data to publish)
+    expect(mocks.publishResidentComplete).not.toHaveBeenCalled()
+    expect(mocks.bumpGeneration).not.toHaveBeenCalled()
+    // derived identities hold
+    expect(after.totalRequests).toBe(after.hitCount + after.missCount)
+    expect(after.missCount).toBe(
+      after.missForced +
+        after.missNoIndex +
+        after.missDeletion +
+        after.missLegacyEmpty +
+        after.missNoEntry +
+        after.missIncomplete
+    )
+    expect(after.discardedCount).toBe(
+      after.discardedSuperseded +
+        after.discardedCurrentMoved +
+        after.discardedDeletedDuringFetch +
+        after.discardedGenerationMismatch +
+        after.discardedMalformed
+    )
+    // finite/non-negative, scalar-only
+    for (const v of Object.values(after)) {
+      expect(v === null || typeof v === 'number').toBe(true)
+      if (typeof v === 'number') {
+        expect(Number.isFinite(v)).toBe(true)
+        expect(v).toBeGreaterThanOrEqual(0)
+      }
+    }
+    expect((after as unknown as Record<string, unknown>).discardedFetchFailed).toBeUndefined()
+    expect(JSON.stringify(after)).not.toContain(legacyTopicId)
+    expect(JSON.stringify(after)).not.toContain('m-0')
+    // snapshot/bound composition mirrors diagnostics, privacy-safe
+    const snap = getPhase4Snapshot(null)
+    expect(snap.residentRead.hitCount).toBe(after.hitCount)
+    expect(snap.residentRead.missCount).toBe(after.missCount)
+    expect(snap.residentRead.totalRequests).toBe(after.totalRequests)
+    expect(snap.residentRead.missLegacyEmpty).toBe(after.missLegacyEmpty)
+    expect(snap.residentRead.stagedCount).toBe(after.stagedCount)
+    expect(snap.residentRead.discardedCount).toBe(after.discardedCount)
+    expect(JSON.stringify(snap.residentRead)).not.toContain(legacyTopicId)
+    const scalars = getPhase4BoundScalars(null)
+    expect(scalars.readHitCount).toBe(after.hitCount)
+    expect(scalars.readMissCount).toBe(after.missCount)
+    expect(scalars.readTotalRequests).toBe(after.totalRequests)
+    expect(scalars.readStagedCount).toBe(after.stagedCount)
+    expect(scalars.readDiscardedCount).toBe(after.discardedCount)
+    for (const v of Object.values(snap.residentRead)) {
+      expect(v === null || typeof v === 'number').toBe(true)
+    }
+
+    // cleanup
+    resetResidentReadDiagnosticsForTests()
+    resetAllDeletionGenerationsForTests()
+    const afterReset = getResidentReadDiagnostics()
+    expect(afterReset.hitCount).toBe(0)
+    expect(afterReset.missCount).toBe(0)
+  })
 })

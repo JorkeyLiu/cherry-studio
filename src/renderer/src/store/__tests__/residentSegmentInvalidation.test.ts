@@ -12,8 +12,15 @@
  *    invalidate originating, while inbound copy (fromSync) still does.
  */
 import { configureStore } from '@reduxjs/toolkit'
+import { getPhase4BoundScalars, getPhase4Snapshot } from '@renderer/services/phase4Observability'
+import { getResidentDiagnostics, getResidentDiagnosticsFromState } from '@renderer/services/residentDiagnostics'
 import { rootReducer } from '@renderer/store'
-import { bumpGeneration, publishResidentComplete } from '@renderer/store/residentRegistry'
+import {
+  bumpGeneration,
+  clearEntry as clearResidentEntry,
+  publishResidentComplete,
+  resetAllResidentRegistry
+} from '@renderer/store/residentRegistry'
 import {
   addSegment,
   clearSegmentsForTopic,
@@ -433,5 +440,146 @@ describe('resident segment invalidation — centralized LOCK-302', () => {
     expect(entry.applicabilityGeneration).toBe(beforeGen2 + 1)
 
     void gen
+  })
+
+  it('representative structural invalidation via public rootReducer proves scalar composition/completeness, generation recomputation, per-topic isolation, maxGeneration, and Phase4 parity/privacy', () => {
+    // Isolate from prior tests — ensure store starts empty for scalar determinism
+    store.dispatch(resetAllResidentRegistry())
+    // Establish two resident topics with distinct generations: t-iso-a @1, t-iso-b @3
+    const genA = establishResident('t-iso-a')
+    expect(genA).toBe(1)
+    // bump t-iso-b to gen 3 before publishing
+    store.dispatch(bumpGeneration('t-iso-b'))
+    store.dispatch(bumpGeneration('t-iso-b'))
+    store.dispatch(bumpGeneration('t-iso-b'))
+    const genBPre = (store.getState() as any).residentRegistry.entries['t-iso-b'].applicabilityGeneration as number
+    expect(genBPre).toBe(3)
+    const wrB = makeWindowResponse('t-iso-b', [{ id: 'm-t-iso-b' }])
+    const segB = makeSegment('seg-t-iso-b', 't-iso-b')
+    store.dispatch(
+      publishResidentComplete({ topicId: 't-iso-b', generation: genBPre, windowResponse: wrB, segments: [segB] })
+    )
+    const genB = (store.getState() as any).residentRegistry.entries['t-iso-b'].applicabilityGeneration as number
+    expect(genB).toBe(3)
+
+    // Before: both resident true, scalar composition baseline
+    const beforeDiag = getResidentDiagnosticsFromState(store.getState())
+    expect(beforeDiag.entryCount).toBe(2)
+    expect(beforeDiag.residentCount).toBe(2)
+    expect(beforeDiag.chatDataCount).toBe(2)
+    expect(beforeDiag.segmentsCount).toBe(2)
+    expect(beforeDiag.incompleteCount).toBe(0)
+    expect(beforeDiag.incompleteCount).toBe(beforeDiag.entryCount - beforeDiag.residentCount)
+    expect(beforeDiag.maxGeneration).toBe(3)
+    expect(beforeDiag.maxGeneration).toBe(Math.max(genA, genB))
+    // composition invariants: residentCount <= min(chatData, segments)
+    expect(beforeDiag.residentCount).toBeLessThanOrEqual(Math.min(beforeDiag.chatDataCount, beforeDiag.segmentsCount))
+    // Phase4 parity before invalidation
+    const snapBefore = getPhase4Snapshot(null, (store.getState() as any).residentRegistry.entries)
+    expect(snapBefore.resident).toEqual(beforeDiag)
+    const scalarsBefore = getPhase4BoundScalars(null, (store.getState() as any).residentRegistry.entries)
+    expect(scalarsBefore.residentEntryCount).toBe(2)
+    expect(scalarsBefore.residentResidentCount).toBe(2)
+    expect(scalarsBefore.residentIncompleteCount).toBe(0)
+    expect(scalarsBefore.residentMaxGeneration).toBe(3)
+    // privacy: bounded scalar-only, no topic ids or payload retention
+    const beforeJson = JSON.stringify(beforeDiag)
+    expect(beforeJson).not.toContain('t-iso-a')
+    expect(beforeJson).not.toContain('t-iso-b')
+    expect(beforeJson).not.toContain('path')
+    expect(beforeJson).not.toContain('credential')
+    expect(Object.keys(beforeDiag).sort()).toEqual(
+      ['chatDataCount', 'entryCount', 'incompleteCount', 'maxGeneration', 'residentCount', 'segmentsCount'].sort()
+    )
+
+    // Representative structural path via public rootReducer: unpaired addSegment for t-iso-a only
+    const segNew = makeSegment('seg-iso-a-new', 't-iso-a', ['m-a-2'])
+    store.dispatch(addSegment(segNew))
+
+    const afterEntryA = (store.getState() as any).residentRegistry.entries['t-iso-a']
+    const afterEntryB = (store.getState() as any).residentRegistry.entries['t-iso-b']
+    // t-iso-a invalidated: generation+1, resident false, chatData false, segments true
+    expect(afterEntryA.residentTopic).toBe(false)
+    expect(afterEntryA.chatData).toBe(false)
+    expect(afterEntryA.segments).toBe(true)
+    expect(afterEntryA.applicabilityGeneration).toBe(genA + 1)
+    expect(afterEntryA.applicabilityGeneration).toBe(2)
+    // per-topic isolation: t-iso-b untouched
+    expect(afterEntryB.residentTopic).toBe(true)
+    expect(afterEntryB.applicabilityGeneration).toBe(3)
+    expect((store.getState() as any).topicSegments.segmentsByTopic['t-iso-b']).toEqual(['seg-t-iso-b'])
+
+    // After invalidation: scalar composition recomputed, maxGeneration still 3 (higher survivor remains)
+    const afterDiag = getResidentDiagnosticsFromState(store.getState())
+    expect(afterDiag.entryCount).toBe(2)
+    expect(afterDiag.residentCount).toBe(1)
+    expect(afterDiag.chatDataCount).toBe(1) // only t-iso-b
+    expect(afterDiag.segmentsCount).toBe(2) // both have segments true (t-iso-a standalone marker)
+    expect(afterDiag.incompleteCount).toBe(1)
+    expect(afterDiag.incompleteCount).toBe(afterDiag.entryCount - afterDiag.residentCount)
+    expect(afterDiag.maxGeneration).toBe(3)
+    expect(afterDiag.residentCount).toBeLessThanOrEqual(Math.min(afterDiag.chatDataCount, afterDiag.segmentsCount)) // 1 <= 1
+    // finite/non-negative, bounded keys
+    for (const v of Object.values(afterDiag)) {
+      expect(typeof v).toBe('number')
+      expect(Number.isFinite(v)).toBe(true)
+      expect(v).toBeGreaterThanOrEqual(0)
+    }
+    expect(Object.keys(afterDiag).sort()).toEqual(
+      ['chatDataCount', 'entryCount', 'incompleteCount', 'maxGeneration', 'residentCount', 'segmentsCount'].sort()
+    )
+    // direct adapter equals fromState
+    expect(getResidentDiagnostics((store.getState() as any).residentRegistry.entries)).toEqual(afterDiag)
+
+    // Phase4 parity after invalidation
+    const snapAfter = getPhase4Snapshot(null, (store.getState() as any).residentRegistry.entries)
+    expect(snapAfter.resident).toEqual(afterDiag)
+    expect(snapAfter.resident.residentCount).toBe(1)
+    expect(snapAfter.resident.incompleteCount).toBe(1)
+    expect(snapAfter.resident.maxGeneration).toBe(3)
+    const scalarsAfter = getPhase4BoundScalars(null, (store.getState() as any).residentRegistry.entries)
+    expect(scalarsAfter.residentEntryCount).toBe(2)
+    expect(scalarsAfter.residentResidentCount).toBe(1)
+    expect(scalarsAfter.residentChatDataCount).toBe(1)
+    expect(scalarsAfter.residentSegmentsCount).toBe(2)
+    expect(scalarsAfter.residentIncompleteCount).toBe(1)
+    expect(scalarsAfter.residentMaxGeneration).toBe(3)
+    // privacy after
+    const afterJson = JSON.stringify(afterDiag)
+    expect(afterJson).not.toContain('t-iso-a')
+    expect(afterJson).not.toContain('t-iso-b')
+    expect(afterJson).not.toContain('path')
+    expect(JSON.stringify(snapAfter.resident)).not.toContain('t-iso-a')
+    for (const v of Object.values(snapAfter.resident)) {
+      expect(typeof v).toBe('number')
+    }
+
+    // Max-generation recomputation: clear highest-generation entry (t-iso-b @3) and prove recompute to 2
+    store.dispatch(clearResidentEntry('t-iso-b'))
+    expect((store.getState() as any).residentRegistry.entries['t-iso-b']).toBeUndefined()
+    const afterClearDiag = getResidentDiagnosticsFromState(store.getState())
+    expect(afterClearDiag.entryCount).toBe(1)
+    expect(afterClearDiag.residentCount).toBe(0) // survivor t-iso-a is incomplete
+    expect(afterClearDiag.chatDataCount).toBe(0)
+    expect(afterClearDiag.segmentsCount).toBe(1)
+    expect(afterClearDiag.incompleteCount).toBe(1)
+    expect(afterClearDiag.incompleteCount).toBe(afterClearDiag.entryCount - afterClearDiag.residentCount)
+    expect(afterClearDiag.maxGeneration).toBe(2) // recomputed from survivor
+    expect(afterClearDiag.maxGeneration).toBeLessThan(afterDiag.maxGeneration)
+    const snapAfterClear = getPhase4Snapshot(null, (store.getState() as any).residentRegistry.entries)
+    expect(snapAfterClear.resident).toEqual(afterClearDiag)
+    expect(snapAfterClear.resident.maxGeneration).toBe(2)
+    const scalarsAfterClear = getPhase4BoundScalars(null, (store.getState() as any).residentRegistry.entries)
+    expect(scalarsAfterClear.residentMaxGeneration).toBe(2)
+    expect(scalarsAfterClear.residentEntryCount).toBe(1)
+    expect(scalarsAfterClear.residentResidentCount).toBe(0)
+
+    // privacy after clear
+    expect(JSON.stringify(afterClearDiag)).not.toContain('t-iso-b')
+    expect(JSON.stringify(snapAfterClear.resident)).not.toContain('t-iso-b')
+
+    // cleanup for isolation
+    store.dispatch(resetAllResidentRegistry())
+    expect(getResidentDiagnosticsFromState(store.getState()).entryCount).toBe(0)
   })
 })

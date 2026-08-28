@@ -495,4 +495,235 @@ describe('residentDiagnostics pure adapter — bounded scalars, read-only', () =
     // pure adapter: global diagnostics also zero when entries cleared
     expect(getResidentDiagnosticsFromState(store.getState())).toEqual(afterReset)
   })
+
+  it('cross-surface reset isolation: resetAllResidentRegistry does not clear read diagnostics and resetResidentReadDiagnostics does not clear lifecycle, Phase4 parity and privacy preserved', async () => {
+    const store = configureStore({ reducer: { residentRegistry: residentRegistryReducer } })
+    const {
+      getResidentReadDiagnostics,
+      resetResidentReadDiagnosticsForTests,
+      recordResidentReadHit,
+      recordResidentReadMiss,
+      recordResidentReadDiscard,
+      recordStagedLatency
+    } = await import('@renderer/services/residentReadDiagnostics')
+
+    resetResidentReadDiagnosticsForTests()
+    // Seed resident lifecycle scalars: two topics, one complete resident, one incomplete
+    store.dispatch(bumpGeneration('t-iso-1'))
+    const g1 = (store.getState() as any).residentRegistry.entries['t-iso-1'].applicabilityGeneration as number
+    store.dispatch(
+      publishResidentComplete({
+        topicId: 't-iso-1',
+        generation: g1,
+        windowResponse: makeWindowResponse('t-iso-1', [{ id: 'm-1' }]),
+        segments: []
+      })
+    )
+    store.dispatch(bumpGeneration('t-iso-2')) // partial entry
+    const beforeResident = getResidentDiagnostics(entriesFromStore(store))
+    expect(beforeResident.entryCount).toBe(2)
+    expect(beforeResident.residentCount).toBe(1)
+    expect(beforeResident.incompleteCount).toBe(1)
+    expect(beforeResident.incompleteCount).toBe(beforeResident.entryCount - beforeResident.residentCount)
+    expect(beforeResident.maxGeneration).toBe(1)
+
+    // Seed read diagnostics: hit + one of each taxonomy (forced, noIndex, generationMismatch) + staged + discard
+    recordResidentReadHit()
+    recordResidentReadMiss('forced')
+    recordResidentReadMiss('noIndex')
+    recordStagedLatency(12, true)
+    recordStagedLatency(8, false)
+    recordResidentReadDiscard('generationMismatch')
+    const beforeRead = getResidentReadDiagnostics()
+    expect(beforeRead.hitCount).toBe(1)
+    expect(beforeRead.missCount).toBe(2)
+    expect(beforeRead.totalRequests).toBe(3)
+    expect(beforeRead.stagedCount).toBe(2)
+    expect(beforeRead.discardedCount).toBe(1)
+    // snapshot parity before any reset
+    const snapBefore = getPhase4Snapshot(null, entriesFromStore(store))
+    expect(snapBefore.resident).toEqual(beforeResident)
+    expect(snapBefore.residentRead).toEqual(beforeRead)
+    const scalarsBefore = getPhase4BoundScalars(null, entriesFromStore(store))
+    expect(scalarsBefore.residentEntryCount).toBe(beforeResident.entryCount)
+    expect(scalarsBefore.readHitCount).toBe(beforeRead.hitCount)
+    expect(scalarsBefore.readMissCount).toBe(beforeRead.missCount)
+
+    // 1) resetAllResidentRegistry must NOT clear residentRead diagnostics
+    store.dispatch(resetAllResidentRegistry())
+    const afterResidentReset = getResidentDiagnostics(entriesFromStore(store))
+    expect(afterResidentReset).toEqual({
+      entryCount: 0,
+      residentCount: 0,
+      chatDataCount: 0,
+      segmentsCount: 0,
+      incompleteCount: 0,
+      maxGeneration: 0
+    })
+    const afterResidentResetRead = getResidentReadDiagnostics()
+    expect(afterResidentResetRead).toEqual(beforeRead)
+    expect(afterResidentResetRead.hitCount).toBe(1)
+    expect(afterResidentResetRead.missCount).toBe(2)
+    expect(afterResidentResetRead.stagedCount).toBe(2)
+    expect(afterResidentResetRead.discardedCount).toBe(1)
+    // Phase4 snapshot after resident reset: resident zeroed, residentRead preserved
+    const snapAfterResidentReset = getPhase4Snapshot(null, entriesFromStore(store))
+    expect(snapAfterResidentReset.resident).toEqual(afterResidentReset)
+    expect(snapAfterResidentReset.resident.entryCount).toBe(0)
+    expect(snapAfterResidentReset.residentRead).toEqual(beforeRead)
+    expect(snapAfterResidentReset.residentRead.hitCount).toBe(1)
+    const scalarsAfterResidentReset = getPhase4BoundScalars(null, entriesFromStore(store))
+    expect(scalarsAfterResidentReset.residentEntryCount).toBe(0)
+    expect(scalarsAfterResidentReset.residentMaxGeneration).toBe(0)
+    expect(scalarsAfterResidentReset.readHitCount).toBe(beforeRead.hitCount)
+    expect(scalarsAfterResidentReset.readStagedCount).toBe(beforeRead.stagedCount)
+    expect(scalarsAfterResidentReset.readDiscardedCount).toBe(beforeRead.discardedCount)
+    // privacy: resident reset does not leak read topic ids, read retains scalar-only
+    expect(JSON.stringify(snapAfterResidentReset.resident)).not.toContain('t-iso-1')
+    expect(JSON.stringify(snapAfterResidentReset.residentRead)).not.toContain('t-iso')
+    for (const v of Object.values(snapAfterResidentReset.residentRead)) {
+      expect(v === null || typeof v === 'number').toBe(true)
+    }
+    expect(
+      (snapAfterResidentReset.residentRead as unknown as Record<string, unknown>).discardedFetchFailed
+    ).toBeUndefined()
+
+    // Re-seed resident lifecycle for second direction check
+    store.dispatch(bumpGeneration('t-re-seed'))
+    const gRe = (store.getState() as any).residentRegistry.entries['t-re-seed'].applicabilityGeneration as number
+    store.dispatch(
+      publishResidentComplete({
+        topicId: 't-re-seed',
+        generation: gRe,
+        windowResponse: makeWindowResponse('t-re-seed', [{ id: 'm-re' }]),
+        segments: []
+      })
+    )
+    const reseededResident = getResidentDiagnostics(entriesFromStore(store))
+    expect(reseededResident.entryCount).toBe(1)
+    expect(reseededResident.residentCount).toBe(1)
+    // augment read diagnostics further to prove second reset isolates correctly
+    recordResidentReadMiss('incomplete')
+    recordStagedLatency(20, true)
+    recordResidentReadDiscard('malformed')
+    const beforeSecondRead = getResidentReadDiagnostics()
+    expect(beforeSecondRead.missCount).toBe(3) // forced, noIndex, incomplete
+    expect(beforeSecondRead.stagedCount).toBe(3)
+    expect(beforeSecondRead.discardedCount).toBe(2)
+    expect(beforeSecondRead.totalRequests).toBe(beforeSecondRead.hitCount + beforeSecondRead.missCount)
+    expect(beforeSecondRead.missCount).toBe(
+      beforeSecondRead.missForced +
+        beforeSecondRead.missNoIndex +
+        beforeSecondRead.missDeletion +
+        beforeSecondRead.missLegacyEmpty +
+        beforeSecondRead.missNoEntry +
+        beforeSecondRead.missIncomplete
+    )
+    expect(beforeSecondRead.discardedCount).toBe(
+      beforeSecondRead.discardedSuperseded +
+        beforeSecondRead.discardedCurrentMoved +
+        beforeSecondRead.discardedDeletedDuringFetch +
+        beforeSecondRead.discardedGenerationMismatch +
+        beforeSecondRead.discardedMalformed
+    )
+    // staged avg identity
+    expect(
+      Math.abs(beforeSecondRead.stagedAvgMs! - beforeSecondRead.stagedTotalMs / beforeSecondRead.stagedCount)
+    ).toBeLessThan(1e-6)
+
+    // 2) resetResidentReadDiagnosticsForTests must NOT clear resident lifecycle scalars
+    resetResidentReadDiagnosticsForTests()
+    const afterReadResetRead = getResidentReadDiagnostics()
+    expect(afterReadResetRead).toEqual({
+      hitCount: 0,
+      missCount: 0,
+      totalRequests: 0,
+      missForced: 0,
+      missNoIndex: 0,
+      missDeletion: 0,
+      missLegacyEmpty: 0,
+      missNoEntry: 0,
+      missIncomplete: 0,
+      stagedCount: 0,
+      stagedSuccessCount: 0,
+      stagedFailedCount: 0,
+      stagedTotalMs: 0,
+      stagedMaxMs: 0,
+      stagedLastMs: null,
+      stagedAvgMs: null,
+      discardedCount: 0,
+      discardedSuperseded: 0,
+      discardedCurrentMoved: 0,
+      discardedDeletedDuringFetch: 0,
+      discardedGenerationMismatch: 0,
+      discardedMalformed: 0
+    })
+    const afterReadResetResident = getResidentDiagnostics(entriesFromStore(store))
+    expect(afterReadResetResident).toEqual(reseededResident)
+    expect(afterReadResetResident.entryCount).toBe(1)
+    expect(afterReadResetResident.residentCount).toBe(1)
+    expect(afterReadResetResident.maxGeneration).toBe(1)
+    // Phase4 snapshot after read reset: resident preserved, read zeroed
+    const snapAfterReadReset = getPhase4Snapshot(null, entriesFromStore(store))
+    expect(snapAfterReadReset.resident).toEqual(reseededResident)
+    expect(snapAfterReadReset.residentRead).toEqual(afterReadResetRead)
+    expect(snapAfterReadReset.resident.entryCount).toBe(1)
+    expect(snapAfterReadReset.residentRead.totalRequests).toBe(0)
+    const scalarsAfterReadReset = getPhase4BoundScalars(null, entriesFromStore(store))
+    expect(scalarsAfterReadReset.residentEntryCount).toBe(1)
+    expect(scalarsAfterReadReset.readHitCount).toBe(0)
+    expect(scalarsAfterReadReset.readMissCount).toBe(0)
+    expect(scalarsAfterReadReset.readStagedCount).toBe(0)
+    expect(scalarsAfterReadReset.readDiscardedCount).toBe(0)
+    expect(scalarsAfterReadReset.readStagedAvgMs).toBeNull()
+    // privacy & scalar-only after read reset
+    expect(JSON.stringify(snapAfterReadReset.residentRead)).not.toContain('t-re-seed')
+    expect(JSON.stringify(snapAfterReadReset.resident)).not.toContain('path')
+    for (const v of Object.values(snapAfterReadReset.resident)) {
+      expect(typeof v).toBe('number')
+      expect(Number.isFinite(v)).toBe(true)
+      expect(v).toBeGreaterThanOrEqual(0)
+    }
+    for (const v of Object.values(snapAfterReadReset.residentRead)) {
+      expect(v === null || typeof v === 'number').toBe(true)
+      if (typeof v === 'number') {
+        expect(Number.isFinite(v)).toBe(true)
+        expect(v).toBeGreaterThanOrEqual(0)
+      }
+    }
+    expect(Object.keys(snapAfterReadReset.resident).sort()).toEqual(
+      ['chatDataCount', 'entryCount', 'incompleteCount', 'maxGeneration', 'residentCount', 'segmentsCount'].sort()
+    )
+    const expectedReadKeys = [
+      'hitCount',
+      'missCount',
+      'totalRequests',
+      'missForced',
+      'missNoIndex',
+      'missDeletion',
+      'missLegacyEmpty',
+      'missNoEntry',
+      'missIncomplete',
+      'stagedCount',
+      'stagedSuccessCount',
+      'stagedFailedCount',
+      'stagedTotalMs',
+      'stagedMaxMs',
+      'stagedLastMs',
+      'stagedAvgMs',
+      'discardedCount',
+      'discardedSuperseded',
+      'discardedCurrentMoved',
+      'discardedDeletedDuringFetch',
+      'discardedGenerationMismatch',
+      'discardedMalformed'
+    ].sort()
+    expect(Object.keys(snapAfterReadReset.residentRead).sort()).toEqual(expectedReadKeys)
+
+    // final cleanup
+    resetResidentReadDiagnosticsForTests()
+    store.dispatch(resetAllResidentRegistry())
+    expect(getResidentReadDiagnostics().totalRequests).toBe(0)
+    expect(getResidentDiagnostics(entriesFromStore(store)).entryCount).toBe(0)
+  })
 })
