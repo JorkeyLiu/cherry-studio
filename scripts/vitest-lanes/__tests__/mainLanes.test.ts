@@ -190,6 +190,7 @@ describe('package.json main bench scripts (bench lane audit)', () => {
     expect(allBench).toEqual([
       'src/main/services/chatDb/__tests__/logicalPayload.bench.ts',
       'src/main/services/chatDb/__tests__/m4FtsDuplication.bench.ts',
+      'src/main/services/chatDb/__tests__/m5FileDualState.bench.ts',
       'src/main/services/chatDb/__tests__/m8L3ArchiveHealth.bench.ts',
       'src/main/services/chatDb/__tests__/pinnedWorkingSet.bench.ts',
       'src/main/services/chatDb/__tests__/search.bench.ts',
