@@ -98,6 +98,8 @@
     "bench:renderer": "pnpm native:run node -- vitest bench --run --project renderer",
     "bench:aicore": "pnpm native:run node -- vitest bench --run --project aiCore",
     "bench:shared": "pnpm native:run node -- vitest bench --run --project shared",
+    "calibration:phase4": "tsx scripts/calibration-phase4.ts",
+    "bench:phase4-calibration": "tsx scripts/calibration-phase4.ts",
     "prepare": "git config blame.ignoreRevsFile .git-blame-ignore-revs && prek install",
     "claude": "dotenv -e .env -- claude",
     "changeset": "changeset",
