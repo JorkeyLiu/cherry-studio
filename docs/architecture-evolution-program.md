@@ -550,9 +550,10 @@ PERF-DB-HEALTH reclassified per architecture dependency splits.
 | **M2** | Short (<3 codepoint) LIKE full-table scan — stage attribution | None |
 | **M3** | Index/query opportunity — query-plan diagnosis | None |
 | **M7** | Cold open/load path — DB volume impact attribution | None |
+| **M4** | FTS/normalized storage-duplication volume diagnostic — read-only numeric-only aggregation (row counts, char/UTF-8 bytes, FTS smoke; logical duplication only, no observed physical DB size) | None — harness Implemented 2026-08-28, inactive by default (`M4_FTS_DUP_BENCH=1` + `M4_FTS_DUP_SCALE=1k|10k|50k` default 10k), `m4FtsDuplication.bench.ts` + `m4FtsDuplication.ts` + pure helper tests; isolated `mkdtemp` + `registerChatDbNormalize` + `runMigrations` schema-v1 + existing `generateCorpus`; S6.5 remains Candidate — Not Authorized, M4 remains unexecuted, harness is not execution |
 | **M8** | Backup/restore health — L3 archive metadata | None — harness Authorized & Implemented 2026-08-24, inactive by default (`M8_L3_ARCHIVE_BENCH=1`), executed on clean HEAD producing gitignored schema-v1 directional artifact; no baseline/closure/authorization |
 
-All are read-only with respect to production/user state (M8 permitted owned temporary backup/restore writes inside isolated `mkdtemp` root only). They do not require governance/ADR but require explicit Main/user activation before execution (`performance-program.md`).
+All are read-only with respect to production/user state (M8 permitted owned temporary backup/restore writes inside isolated `mkdtemp` root only; M4 is read-only post-seed numeric aggregation). They do not require governance/ADR but require explicit Main/user activation before execution (`performance-program.md`). Harness implementation is not execution and does not authorize S6.5.
 
 ### 7.2 Architecture-phase-dependent (requires governance)
 

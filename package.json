@@ -95,6 +95,7 @@
     "bench:logical-payload": "pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/logicalPayload.bench.ts",
     "bench:pinned-working-set": "pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/pinnedWorkingSet.bench.ts",
     "bench:m8-l3-archive": "M8_L3_ARCHIVE_BENCH=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/m8L3ArchiveHealth.bench.ts",
+    "bench:m4-fts-dup": "M4_FTS_DUP_BENCH=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/m4FtsDuplication.bench.ts",
     "bench:renderer": "pnpm native:run node -- vitest bench --run --project renderer",
     "bench:aicore": "pnpm native:run node -- vitest bench --run --project aiCore",
     "bench:shared": "pnpm native:run node -- vitest bench --run --project shared",
