@@ -3,7 +3,7 @@
 > **Document status**: **Approved Strategy (program-level)**. Canonical program-level source for architecture intent, approved locks, target qualities, debt registry, phased evolution, and decision triggers. Not an ADR; does not override identity, release, platform, SQLite migration, or context-window governance.
 > **Authority boundary**: Architecture correctness, elegance, unity, and long-term evolvability lead. Performance symptoms expose architecture debt; performance is validation evidence, not the sole design objective. Startup speed and bounded memory are enablement goals but do not override correctness (ARCH-002). Sync is future compatibility only, vendor-neutral, and must adapt to application architecture — never the reverse.
 > **Relation to current architecture reference**: [`architecture.md`](./architecture.md) describes implemented reality only. This program describes target evolution intent.
-> **Last updated**: 2026-08-26 — compressed revision (600-900 line target). Prior detailed history in Git log; no chained provenance header is maintained.
+> **Last updated**: 2026-08-28 — compressed revision (600-900 line target). Prior detailed history in Git log; no chained provenance header is maintained.
 
 ---
 
@@ -38,6 +38,7 @@ Canonical architecture evolution program for Cherry Chat. It:
 | [`sqlite-migration.md`](./sqlite-migration.md) | SQLite chat authority governance | Authoritative; schema changes require ADR |
 | [`context-window.md`](./context-window.md) | Context window governance | Authoritative; anchor semantics unchanged |
 | [`cherry-chat-application-identity.md`](./cherry-chat-application-identity.md) | Identity / compatibility / release / platform governance | Authoritative; not modified by this program |
+| [`../specs/architecture-evolution/progress-tracker.md`](../specs/architecture-evolution/progress-tracker.md) | Current architecture-evolution execution state | Mutable current-state projection; non-authoritative; Git owns history |
 
 ### 1.4 Document writing policy
 
