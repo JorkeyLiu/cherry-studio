@@ -907,7 +907,7 @@ const NotesPage: FC = () => {
   }, [activeNode?.id, activeFilePath, notesTree, dispatch, invalidateFileContent])
 
   return (
-    <Container id="notes-page">
+    <Container id="notes-page" data-testid="notes-page">
       <Navbar>
         <NavbarCenter style={{ borderRight: 'none' }}>{t('notes.title')}</NavbarCenter>
       </Navbar>

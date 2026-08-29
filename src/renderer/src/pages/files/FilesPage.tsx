@@ -122,7 +122,7 @@ const FilesPage: FC = () => {
   ] as const
 
   return (
-    <Container>
+    <Container data-testid="files-page">
       <Navbar>
         <NavbarCenter style={{ borderRight: 'none' }}>{t('files.title')}</NavbarCenter>
       </Navbar>

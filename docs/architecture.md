@@ -81,13 +81,15 @@ aiCore/          # Legacy AI pipeline (deprecated, migrating to packages/aiCore)
 components/      # Shared UI components (Ant Design 5 + styled-components + TailwindCSS v4)
 databases/       # Dexie (IndexedDB) — files catalog, settings, knowledge notes, translation history/languages, quick phrases
 hooks/           # React hooks (useAssistant, useChatContext, useModel, etc.)
-pages/           # Route pages (home, settings, knowledge, notes, files, history, etc.)
+pages/           # Route pages (home eager; files/notes/knowledge/settings/launchpad lazy-loaded as separate chunks — see route loading below)
 services/        # Frontend services (ApiService, ModelService, MemoryService, etc.) consuming the preload window.api typed surface
 store/           # Redux Toolkit slices
 types/           # TypeScript type definitions
 workers/         # Web Workers
 windows/         # Multi-window entry points (mini, chat import)
 ```
+
+Route loading (implemented 2026-08-30, renderer-only): `HomePage` eager; `FilesPage`/`NotesPage`/`KnowledgePage`/`SettingsPage`/`LaunchpadPage` lazy-loaded as separate production chunks via `React.lazy`/`Suspense` with bounded localized fallback; tagged chunk-load failures show explicit retry/Home recovery, untagged render errors bubble to the global boundary — no Main/preload/shared IPC/SQLite/Dexie/StoreSync/identity/sync governance crossing.
 
 ## Redux Store (`src/renderer/src/store/`)
 

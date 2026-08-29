@@ -100,7 +100,7 @@ const KnowledgePage: FC = () => {
   })
 
   return (
-    <Container>
+    <Container data-testid="knowledge-page">
       <Navbar>
         <NavbarCenter style={{ borderRight: 'none' }}>{t('knowledge.title')}</NavbarCenter>
       </Navbar>

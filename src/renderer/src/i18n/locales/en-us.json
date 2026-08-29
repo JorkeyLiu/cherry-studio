@@ -3673,6 +3673,15 @@
       "undo": "Undo"
     }
   },
+  "route": {
+    "error": {
+      "back_to_home": "Back to Home",
+      "description": "The page failed to load. Please try again or return home.",
+      "retry": "Retry",
+      "title": "Failed to load page"
+    },
+    "loading": "Loading..."
+  },
   "selection": {
     "action": {
       "builtin": {

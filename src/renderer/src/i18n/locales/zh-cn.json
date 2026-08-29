@@ -3673,6 +3673,15 @@
       "undo": "撤销"
     }
   },
+  "route": {
+    "error": {
+      "back_to_home": "返回首页",
+      "description": "页面加载失败，请重试或返回首页。",
+      "retry": "重试",
+      "title": "页面加载失败"
+    },
+    "loading": "加载中..."
+  },
   "selection": {
     "action": {
       "builtin": {

@@ -40,7 +40,7 @@ const SettingsPage: FC = () => {
   const isRoute = (path: string): string => (pathname.startsWith(path) ? 'active' : '')
 
   return (
-    <Container>
+    <Container data-testid="settings-page">
       <Navbar>
         <NavbarCenter style={{ borderRight: 'none' }}>{t('settings.title')}</NavbarCenter>
       </Navbar>

@@ -3673,6 +3673,15 @@
       "undo": "復原"
     }
   },
+  "route": {
+    "error": {
+      "back_to_home": "返回首頁",
+      "description": "頁面載入失敗，請重試或返回首頁。",
+      "retry": "重試",
+      "title": "頁面載入失敗"
+    },
+    "loading": "載入中..."
+  },
   "selection": {
     "action": {
       "builtin": {

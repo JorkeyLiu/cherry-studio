@@ -3673,6 +3673,15 @@
       "undo": "Rückgängig"
     }
   },
+  "route": {
+    "error": {
+      "back_to_home": "[to be translated]:Back to Home",
+      "description": "[to be translated]:The page failed to load. Please try again or return home.",
+      "retry": "[to be translated]:Retry",
+      "title": "[to be translated]:Failed to load page"
+    },
+    "loading": "[to be translated]:Loading..."
+  },
   "selection": {
     "action": {
       "builtin": {

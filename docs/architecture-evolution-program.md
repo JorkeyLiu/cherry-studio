@@ -3,7 +3,7 @@
 > **Document status**: **Approved Strategy (program-level)**. Canonical program-level source for architecture intent, approved locks, target qualities, debt registry, phased evolution, and decision triggers. Not an ADR; does not override identity, release, platform, SQLite migration, or context-window governance.
 > **Authority boundary**: Architecture correctness, elegance, unity, and long-term evolvability lead. Performance symptoms expose architecture debt; performance is validation evidence, not the sole design objective. Startup speed and bounded memory are enablement goals but do not override correctness (ARCH-002). Sync is future compatibility only, vendor-neutral, and must adapt to application architecture — never the reverse.
 > **Relation to current architecture reference**: [`architecture.md`](./architecture.md) describes implemented reality only. This program describes target evolution intent.
-> **Last updated**: 2026-08-29 — compressed revision (600-900 line target). Prior detailed history in Git log; no chained provenance header is maintained.
+> **Last updated**: 2026-08-30 — S7.1 implemented closure (600-900 line target). Prior detailed history in Git log; no chained provenance header is maintained.
 
 ---
 
@@ -221,7 +221,7 @@ Phases have dependencies but are not all sequential or approved for implementati
 | **4** | Bounded Memory and Cache | **Closed 2026-08-29 (outcome/residual-risk)** | Phase 2 |
 | **5** | Data-Access Contract | **Closed 2026-08-29 (outcome/residual-risk)** | Phase 2 + Phase 4 inputs |
 | **6** | DB-Health Implementation | **S6.1–S6.3 Authorized & Implemented; S6.4 SQ-01 Rejected 2026-08-29 — no ADR, no production implementation, current LIKE retained; S6.5 Candidate — Not Authorized; no ready-now DB-health evidence batch** | Phase 5 contract |
-| **7** | Startup Architecture | **S7.1 Authorized for Implementation (2026-08-29) — renderer-only lazy secondary routes; S7.2+ Open (deferred)** | Phase 2; Phase 3 for conversation-startup |
+| **7** | Startup Architecture | **S7.1 Implemented & Closed 2026-08-30 (outcome/residual-risk) — five secondary routes lazy, Home/sidebar/navigation/App gates eager; S7.2+ Open (deferred); no ready-now batch** | Phase 2; Phase 3 for conversation-startup |
 | **8** | Future Sync Decision | **Open** (deferred) | Phases 2-5 + governance decision |
 
 PERF-TOPIC-SWITCH, PERF-ECHO, PERF-STREAMING, PERF-DB-HEALTH remain independent post-refactor workstreams per ARCH-011; architecture closure does not close them.
@@ -545,9 +545,9 @@ Future reopening boundary: SQ-01 may not be silently revived. Future short-query
 
 ### 6.8 Phase 7: Startup Architecture
 
-- **Status**: **S7.1 Authorized for Implementation (2026-08-29)** — renderer-only bundle/activation boundary: lazy-load secondary top-level routes while keeping first-window `/` chat eager. **S7.2+ Open (deferred)** — no other Phase 7 slice authorized; Main startup reorder, Antd locale splitting, Inputbar changes, telemetry/retention/deletion deferral remain not authorized.
+- **Status**: **S7.1 Implemented & Closed 2026-08-30 (outcome/residual-risk)** — renderer-only lazy five secondary routes; Home/sidebar/navigation/App gates eager. **Phase 7 remains partially Open — S7.2+ Open (deferred); no next ready-now batch authorized.** No other Phase 7 slice authorized; Main startup reorder, Antd locale splitting, Inputbar changes, telemetry/retention/deletion deferral remain not authorized.
 - **Entry**: Phase 2 complete; explicit approval. Conversation-startup (S3.5) already closed; S7.1 independent of Phase 4/5/6 and does not depend on M4/M5/M6.
-- **Exit (S7.1)**: Secondary route chunks separate from eager home contract — production-build artifact/resource assertion proves all five secondary routes separately lazy-loaded and Home eager, plus bounded localized fallback and explicit chunk-load failure retry/recovery validated via focused Vitest + fresh-build Playwright using the shared fixture navigating/rendering all five routes (localized loading/recoverable failure as technically feasible); no governance crossing; `pnpm build:check` passes on exact worktree; residual risks accepted.
+- **Exit (S7.1)**: Implemented outcome satisfies renderer-only bundle/activation boundary — five secondary routes separately lazy-loaded with distinct production chunks and Home eager; bounded localized loading scoped to route outlet; tagged chunk-load recovery with retry/Home affordance, untagged render errors bubble to global boundary; no governance crossing; evidenced by production-build distinct chunks + focused Vitest + fresh-build shared-fixture Playwright (all five routes rendered, resource deltas verified) + diagnostic observation + independent audit + authoritative `pnpm build:check`; residual risks accepted.
 - **Dependencies**: Phase 2; Phase 3 stable host for conversation-startup (already satisfied). S7.1 touches only renderer bundle/activation; no Main/preload/shared/IPC/SQLite/Dexie/StoreSync/identity/sync/context-window dependency.
 - **Relationship**: See §8 — S7.1 is the bundle/activation track; conversation lazy activation (S3.5) remains distinct and not duplicated; independent boot-service tracks remain deferred under S7.2+.
 
@@ -555,37 +555,13 @@ Future reopening boundary: SQ-01 may not be silently revived. Future short-query
 
 Observed current-state facts at authorization time: `src/renderer/src/Router.tsx` eagerly statically imports `HomePage`, `FilesPage`, `NotesPage`, `KnowledgePage`, `SettingsPage`, `LaunchpadPage` and mounts them via `<Routes>` inside `<HashRouter>` with `<Sidebar />` and `<NavigationHandler />` always rendered; `src/renderer/src/App.tsx` provider/gate chain (`Provider` → `QueryClientProvider` → `StyleSheetManager` → `ThemeProvider` → `AntdProvider` → `NotificationProvider` → `CodeStyleProvider` → `PersistGate` → `SidebarWidthInitializer` → `CatalogHandoffBoundary` → `ImportProjectionGate` → `TopViewContainer` → `Router`) is eager and unchanged; `/` (`HomePage`) is the first-window critical route. Main startup reorder candidates were considered and not selected due to lifecycle races. Existing S3.5 ContentSearch (parent-owned lazy mount) and EditMode (light gate) lazy activation must not be duplicated by S7.1.
 
-#### 6.8.2 S7.1 Contract — Renderer-Only Lazy Secondary Routes
+#### 6.8.2 S7.1 Implemented Outcome — Renderer-Only Lazy Secondary Routes (2026-08-30, outcome/residual-risk)
 
-**Intent**: Establish a renderer-only bundle/activation boundary that keeps the first-window `/` chat path eager while deferring non-home top-level route code to separate chunks loaded on demand.
+**Outcome**: Five secondary top-level routes (`FilesPage`/`NotesPage`/`KnowledgePage`/`SettingsPage`/`LaunchpadPage` at `/files`, `/notes`, `/knowledge`, `/settings/*`, `/launchpad`) lazy-loaded as separate production chunks; `HomePage`/`Sidebar`/`NavigationHandler`/full `App` provider/gate chain (`Provider`→`QueryClientProvider`→`StyleSheetManager`→`ThemeProvider`→`AntdProvider`→`NotificationProvider`→`CodeStyleProvider`→`PersistGate`→`SidebarWidthInitializer`→`CatalogHandoffBoundary`→`ImportProjectionGate`→`TopViewContainer`→`Router`) remain eager; route paths, navigation semantics, layout/sidebar continuity, and provider contexts preserved; localized bounded loading scoped to route outlet; tagged chunk-load failures present explicit recovery with retry/Home affordance; untagged render errors bubble to global boundary; renderer-only — no Main/preload/shared IPC, SQLite/Dexie, persistence, StoreSync, identity/sync/context-window change; `architecture.md` describes implemented reality only; one semantic revert to eager imports, no migration.
 
-**Current-state facts**: As above — six top-level pages eagerly imported in `Router.tsx`; Sidebar, NavigationHandler, and App provider/gate chain eager; no existing route-level lazy boundary for Files/Notes/Knowledge/Settings/Launchpad.
+**Verification**: Production build distinct chunks (five secondary separate, Home eager) + focused Vitest (eager Home vs lazy secondary, bounded fallback, tagged recovery) + fresh-build shared-fixture Playwright (eager Home plus all five secondary routes rendered, verified via route-associated resource deltas) + diagnostic `ui:observe` on representative routes (not regression proof) + independent audit pass + authoritative `pnpm build:check` (exit 0) on exact implementation worktree; no threshold/baseline/SLA; ARCH-010 disposition satisfied.
 
-**Scope**: Keep `HomePage`, `Sidebar`, `NavigationHandler`, and the full `App` provider/gate chain eager. Lazy-load only `FilesPage`, `NotesPage`, `KnowledgePage`, `SettingsPage`, `LaunchpadPage` at their existing routes (`/files`, `/notes`, `/knowledge`, `/settings/*`, `/launchpad`). No route path, navigation semantics, layout/sidebar continuity, or provider context change.
-
-**Non-goals**: No Main/preload/shared IPC, SQLite/Dexie schema, persistence key/version, StoreSync, identity/compatibility/release/platform, context-window, sync, or `architecture.md` change. No Main service init reorder, no Antd locale splitting, no Inputbar changes, no telemetry/retention/deletion work, no other Phase 7 slice. No S3.5 duplication. No absolute performance threshold/baseline/SLA introduction.
-
-**Behavior / failure / fallback / rollback**:
-- **Behavior**: Route paths and navigation semantics preserved; layout/sidebar continuity preserved; provider context (Theme/Antd/Notification/CodeStyle/QueryClient/Redux Persist) preserved; `CatalogHandoffBoundary`/`ImportProjectionGate` recovery/import projection gates preserved; first `/` chat behavior unchanged; i18n rules unchanged (no hardcoded strings; `i18n:check`/`i18n:sync` still govern).
-- **Failure**: Chunk-load failure must be user-visible and explicit — no silent fallback or hidden substitution; error recovery must allow retry/navigation without requiring app restart (exact mechanism may follow house style, e.g., retry affordance or error boundary recovery, but must be explicit and not a blank indefinite surface).
-- **Fallback**: Route loading must have a bounded localized fallback (e.g., localized suspense/loading surface scoped to the route outlet, not a full-app blank) — no blank indefinite surface.
-- **Rollback**: One semantic revert to eager static route imports and removal of lazy boundary/fallback. No data migration or state repair.
-
-**Verification / audit / gate**:
-- **Production-build artifact/resource assertion**: Fresh production build artifact/resource inspection proves all five secondary routes (`FilesPage`, `NotesPage`, `KnowledgePage`, `SettingsPage`, `LaunchpadPage`) are each separately lazy-loaded in distinct chunks and `HomePage` (`/`) remains eager (no lazy indirection), without brittle filename/hash assertions and without inventing an unavailable manifest — chunk/resource topology evidence only.
-- **Focused Vitest/component tests**: Eager Home vs lazy secondary route contract and loading/error behavior — Home (`/`) remains eager and renders without lazy indirection; secondary routes are lazy-deferred (separate chunks) and exhibit bounded localized fallback on loading and explicit user-visible failure/retry recovery on chunk error (no blank indefinite surface).
-- **Fresh-build Playwright using shared fixture (integrated)**: Fresh production build + shared Playwright fixture launches app, verifies eager `/` Home, then navigates/renders all five secondary routes (`/files`, `/notes`, `/knowledge`, `/settings/*`, `/launchpad`) proving chunk load and render, plus localized fallback and recoverable failure contract verification as technically feasible — bundle chunk loading is integrated behavior.
-- **Diagnostic UI observation** (`pnpm ui:observe` or equivalent) may supplement but never proves regression.
-- **Audit & gate**: One independent audit and one authoritative `pnpm build:check` for the exact final implementation worktree state are mandatory per §10.3. No formal performance threshold, baseline, SLA, or mandatory calibration — structural result is separate secondary route chunks and unchanged eager home contract; any reproducible material controlled regression under same-state comparison must be dispositioned per ARCH-010.
-
-**Residual risks (accepted at authorization)**:
-- Chunk-load failure surface depends on network/build integrity; retry path must be explicit but adds a transient error state.
-- Localized fallback adds a brief loading surface on first secondary navigation (bounded, not blank).
-- Bundle split increases chunk count; misconfiguration could regress eager home chunk size — gated by build output inspection and `pnpm build:check`.
-- No Main/IPC/schema boundary crossed, so no migration or cross-process regression expected; renderer-only risk remains scoped to route activation.
-- PERF workstreams remain independent/open per ARCH-011; no threshold adopted.
-
-**Authorization**: **Authorized for Implementation** — S7.1 as defined above is the single authorized Phase 7 production implementation slice. The next commit after this docs batch is direct production implementation with no additional candidate/evidence/authorization docs-only commit. This S7.1 batch definition is complete; no further pre-implementation design/evidence/authorization docs-only commit is required unless a new governance/product conflict emerges.
+**Residual risks (accepted)**: First navigation transient loading; retry best-effort if underlying resource remains unavailable; chunk count/topology may evolve; E2E uses route-associated resource deltas not names; diagnostics limited to representative routes and not regression proof; PERF workstreams independent/open.
 
 ### 6.9 Phase 8: Future Sync Decision
 
@@ -659,7 +635,7 @@ Independent/deferred tracks not blocked by S7.1 (S7.2+ deferred):
 | Redux rehydration | redux-persist hydration from IndexedDB | Independent | Deferred |
 | Dexie init | IndexedDB upgrade/connection | Independent | Deferred |
 | SQLite cold open | First DB open latency (`<500 ms` in `performance-measurement.md`) | Main-process, independent | Deferred |
-| Bundle loading (S7.1) | Secondary route chunks (Files/Notes/Knowledge/Settings/Launchpad) | Build/tooling, renderer-only | **S7.1 Authorized for Implementation** |
+| Bundle loading (S7.1) | Secondary route chunks (Files/Notes/Knowledge/Settings/Launchpad) — five secondary lazy, Home eager, localized fallback, tagged retry/Home recovery; renderer-only, distinct production chunks | Build/tooling, renderer-only | **S7.1 Implemented & Closed 2026-08-30 (outcome/residual-risk); S7.2+ deferred; no ready-now batch** |
 | Background windows | Trace viewer, import window lifecycle | Independent, deferrable | Deferred |
 
 ---
@@ -763,7 +739,7 @@ Each phase requires:
 | File dual-state resolution | Phase 6 | **Candidate S6.5 — Not Authorized**; depends on M5; ADR if schema/authority |
 | FTS storage dedup | Phase 6 | **Candidate S6.5 — Not Authorized**; bounded synthetic M4 profiles (1k/10k/50k) are complete as directional evidence, but no threshold/baseline/benefit or production authorization follows; real-corpus/physical-size evidence remains unresolved; exact metrics in `performance-measurement.md` §6 and status summary in `performance-workstreams.md` §2.4; any further diagnostic or production work requires an explicit decision, privacy review where applicable, and governance/ADR |
 | Data-access implementation (windowed fetch, authority-aware actions, context closure) | Phase 6 | **S6.1–S6.3 Authorized & Implemented**; **S6.4 SQ-01 Rejected 2026-08-29 (no ADR, current LIKE retained; M2/M3 batch closed; no ready-now DB-health batch)**; S6.5 Candidate — Not Authorized |
-| Startup improvements (S7.1) | Phase 7 | **S7.1 Authorized for Implementation (2026-08-29) — renderer-only lazy secondary routes (Files/Notes/Knowledge/Settings/Launchpad) with bounded localized fallback and explicit chunk-load failure retry/recovery; eager Home/Sidebar/NavigationHandler/App gates preserved; no Main/IPC/schema/StoreSync/identity/sync/context-window/architecture.md change; verification: production-build artifact/resource assertion (five secondary routes separately lazy-loaded, Home eager, without brittle filename/hash) + focused Vitest + fresh-build Playwright using shared fixture covering all five routes (localized loading/recoverable failure as technically feasible), diagnostic UI observation supplemental only; audit + pnpm build:check mandatory; no threshold/baseline/SLA; rollback one semantic revert; no further docs-only commit required unless governance/product conflict; S7.2+ Open (deferred)** |
+| Startup improvements (S7.1) | Phase 7 | **S7.1 Implemented & Closed 2026-08-30 (outcome/residual-risk) — five secondary routes lazy as distinct production chunks, Home/sidebar/navigation/App gates eager; localized bounded loading; tagged chunk-load recovery with retry/Home, untagged bubble global; renderer-only, no governance crossing; verification: production distinct chunks + focused Vitest + fresh-build shared-fixture Playwright (route-associated resource deltas, all five rendered) + diagnostic observation + independent audit + authoritative `pnpm build:check`; no threshold/baseline/SLA; rollback one semantic revert, no migration; Phase 7 remains partially Open (S7.2+ deferred); no ready-now batch** |
 | Sync architecture decisions | Phase 8 | Open (deferred) |
 
 ### 10.5 Cross-document ownership

@@ -30,7 +30,7 @@ const LaunchpadPage: FC = () => {
   ]
 
   return (
-    <Container>
+    <Container data-testid="launchpad-page">
       <Content>
         <Section>
           <SectionTitle>{t('launchpad.apps')}</SectionTitle>
