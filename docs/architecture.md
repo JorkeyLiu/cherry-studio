@@ -105,7 +105,7 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 | `websearch` | Web search settings |
 | `shortcuts` | Keyboard shortcuts |
 | `tabs` | Tab management |
-| `residentRegistry` | Renderer-local non-persisted per-topic completeness (`chatData`, `segments`, `residentTopic = chatData && segments`) and monotonic `applicabilityGeneration`; staged joint publication of latest-window chat-data plus segments via one dispatch (`resident/jointPublishComplete`) — lifecycle foundation only, no B-01–B-05 retention/eviction/TTL/LRU/pin policy, capacity defaults, or heap thresholds adopted (Phase 4 groundwork) |
+| `residentRegistry` | Renderer-local non-persisted per-topic completeness (`chatData`, `segments`, `residentTopic = chatData && segments`) and monotonic `applicabilityGeneration`; staged joint publication of latest-window chat-data plus segments via one dispatch (`resident/jointPublishComplete`) — lifecycle foundation only (retention policy defaults are target program, see `architecture-evolution-program.md` §6.5; not yet enforced, Phase 4 Open) |
 
 ## Database Layer
 

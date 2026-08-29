@@ -1,16 +1,17 @@
 # Cherry Chat 性能工程（Performance Engineering）— 稳定方法论入口
 
 > **文档状态**：本文件是性能工程工作的**稳定方法论入口**——非 ADR，不新增任何架构/身份/数据/发布/治理权威（PERF-LOCK-001）。
-> **定位**：本文件是**稳定的方法论**，不是活性跨会话上下文、不是会话交接文档、不是变更日志、不是证据仓库（DOC-003）。
+> **定位**：本文件是**稳定的方法论**，不是活性跨会话上下文、不是会话交接文档、不是变更日志、不是证据仓库（DOC-003）。本文件是**证据比例与路由的 canonical**（proportionality/routing）；`performance-measurement.md` 拥有**形式化测量机制**；`performance-workstreams.md` / `progress-tracker.md` 为**可变当前态投影**。
 > **Git 拥有历史**：会话流水、重复运行叙述、瞬时 artifact 路径、校验和清单与逐日期变更明细**一律不进本套文档**，由 Git 历史承担（DOC-002）。本套文档只保留**持久、可验证、可行动**的内容。
 
 ## 1. 定位与非目标（Purpose / Non-goals）
 
 ### 1.1 目的
 
-1. 提供性能工程工作的**稳定方法论**：放大优先优先级、假设驱动生命周期、状态词汇、证据原则、完成/关闭规则、ADR 触发。
+1. 提供性能工程工作的**稳定方法论**：放大优先优先级、假设驱动生命周期、证据比例与任务契约、状态词汇、证据原则、完成/关闭规则、ADR 触发。
 2. 固定**三份权威文档**的分工，避免单一巨石文档（DOC-001）。
 3. 明确**测量完成 ≠ 产品问题关闭**：Done 要求已接受的用户可见结果、需要时的集成实现，与匹配边界的回归证据（DOC-004）。
+4. 明确**产品收益领先、证据比例适配**：合规选项中产品收益与用户体验领先选择；证据成本随风险/不可逆性/不确定性/复用度伸缩；每个证据任务绑定命名决策/断言/方法/停止条件。
 
 ### 1.2 非目标
 
@@ -35,9 +36,9 @@
 
 | 文档 | 责任 | 权威边界 |
 |---|---|---|
-| **本文件** `performance-program.md` | 方法论入口：定位/非目标、治理链接、放大优先、假设驱动生命周期、状态词汇、证据原则、完成/关闭规则、ADR 触发、Git 拥有历史 | 方法论与生命周期（稳定） |
-| [`performance-measurement.md`](./performance-measurement.md) | 持久测量契约：固定工具链/lane、证据层级 L1–L4、schema v1 封闭集契约与代码位置、artifact 存储/隐私/保留、规模维度/Profile、harness 清单/命令、阈值策略 | 测量契约（稳定） |
-| [`performance-workstreams.md`](./performance-workstreams.md) | 当前可行动状态：开放工作流、证据、有界成本模型/假设、明确未知项、下一实验/分析目标、验收框架；产品问题状态与测量切片状态分离 | 当前可行动状态（可变） |
+| **本文件** `performance-program.md` | 方法论入口：定位/非目标、治理链接、放大优先、证据比例与任务契约、假设驱动生命周期、状态词汇、证据原则、完成/关闭规则、ADR 触发、Git 拥有历史 | 方法论与生命周期（稳定）— **证据比例/路由与任务契约的 canonical** |
+| [`performance-measurement.md`](./performance-measurement.md) | 持久测量契约：固定工具链/lane、证据层级 L1–L4、schema v1 封闭集契约与代码位置、artifact 存储/隐私/保留、规模维度/Profile、harness 清单/命令、阈值策略；通用保障（隐私/真实上下文与溯源/不虚构基线·阈值·根因、适用运行时 lane）始终强制，形式化机制（schema v1 / 产物发射/存储/保留 / 形式化产物元数据与溯源封装）仅在显式选择的形式化定量/可复用测量契约时强制 | 测量契约（稳定）— **通用保障始终强制，形式化机制仅在显式选择的形式化定量/可复用产物时强制** |
+| [`performance-workstreams.md`](./performance-workstreams.md) | 当前可行动状态：开放工作流、证据、有界成本模型/假设、明确未知项、下一实验/分析目标、验收框架；产品问题状态与测量切片状态分离；证据-only 工作仅在绑定显式激活的决策/结果且齐备四要素时方可记为进展 | 当前可行动状态（可变）— **证据-only 默认不计进展** |
 
 本文件是**主发现入口**（DOC-007）：从根 `AGENTS.md`「Detailed References」链接到本文件，再由本文件链接到测量契约与工作流状态。
 
@@ -102,6 +103,22 @@
 
 同一 Approved/Active 工作流下可定义多个子活动（candidate probes），各子活动独立执行高流循环。Active 唯一性保持在**父工作流层级**——子活动的独立探测不违反 Active 唯一性约束。子活动默认顺序执行；仅在 isolated worktree/build/disposable profile 且 writes/instrumentation 不重叠时允许并行。并行隔离的具体执行规则由 strategic-orchestration skill 或等效协调机制管辖。
 
+## 4B. 证据比例与任务契约（Proportional Evidence & Evidence-Task Contract）
+
+本节为本文件的 canonical 证据比例/路由与任务契约；`performance-measurement.md` 的形式化机制（schema v1 / 产物发射/存储/保留 / 形式化产物元数据与溯源封装）仅在显式选择的形式化定量/可复用场景时强制，通用保障（隐私/真实上下文与溯源/不虚构基线·阈值·根因、适用运行时 lane）始终强制。
+
+- **产品收益领先**：合规选项中产品收益与用户体验领先选择。
+- **证据服务决策**：证据服务于决策，证据生产本身不是交付物。
+- **三个独立、不可互换轨道**：
+  1. **决策证据（Decision evidence）** — 绑定命名决策/结果、具体断言、最小充分方法与停止条件；成本随风险、不可逆性、不确定性、预期复用度伸缩。
+  2. **实现回归证据（Implementation regression evidence）** — 与变更边界匹配；证明变更不回退受保护契约（见 AGENTS.md Change Propagation；匹配边界的 `pnpm test` / E2E / 观察）。
+  3. **聚合交付验证（Aggregate delivery validation）** — `pnpm build:check` 为唯一权威聚合 gate（精确 worktree 状态；docs-only 例外见 AGENTS.md Validation gates）。
+- **每个证据任务绑定四要素且需显式激活**：仅当绑定显式激活的决策/结果（explicitly activated decision/outcome）并齐备四要素（命名决策/结果、具体断言、最小充分方法、停止条件）时，证据执行方可计为有效/进展；显式激活本身不足 — 缺任一要素即不计为有效/进展。无显式激活或缺要素的证据-only 工作默认**不计为进展**，不关闭阶段/工作流。
+- **最小充分证据**：从风险/不可逆性/不确定性/复用度推导所需证据量；可逆 renderer-local 预设可用保守初值 + 聚焦回归证据 + 用户可见观察 + 回滚，无需定制测量基建。
+- **停止条件**：达到绑定断言的判定阈值、证伪、或 Main/用户显式接受残余风险；停止条件在任务启动时声明，满足即停止，不因 harness 完整性继续。
+- **通用保障与形式化边界**：通用保障（隐私/真实上下文与溯源/不虚构基线·阈值·根因、适用运行时 lane）适用于一切证据活动；形式化机制（schema v1 / 产物发射/存储/保留 / 形式化产物元数据与溯源封装）仅在**显式选择的形式化定量断言或可复用测量契约**时强制（`performance-measurement.md`）；可逆预设不默认要求形式化 artifact。
+- **证据-only 不默认进展**：未绑定显式激活的决策/结果或缺任一要素的证据-only 工作（harness/校准/探测）不自动推进 Phase/工作流；仅当服务于显式激活的决策/结果且四要素齐备时方可记为进展。
+
 ## 5. 假设驱动生命周期（Hypothesis-Driven Lifecycle）
 
 每个工作流沿以下生命周期推进；每步分配稳定 ID（`performance-workstreams.md`）并伴随对应证据：
@@ -143,12 +160,17 @@ Problem Open → Cost Model → Attributed → Candidate → Experiment → Inte
 
 ## 7. 证据原则（Evidence Principles）
 
-证据类型不可互换（PERF-LOCK-003）。判断回归、验收、优先级时引用证据；完整层级与定义见 [`performance-measurement.md`](./performance-measurement.md) §2。以下为性能工作的使用要点：
+证据类型不可互换（PERF-LOCK-003）。判断回归、验收、优先级时引用证据；完整层级与定义见 [`performance-measurement.md`](./performance-measurement.md) §2。本文件拥有比例/路由 canonical；通用保障（隐私/真实上下文与溯源/不虚构基线·阈值·根因、适用运行时 lane）始终适用，测量契约的形式化机制（schema v1 / 产物发射/存储/保留 / 形式化产物元数据与溯源封装）仅在显式选择的形式化定量/可复用场景强制。
 
-- **L1 仓库可验证回归证据**：唯一可进入"已验证"的证据。用于集成契约级/结构级回归判断。
+- **通用保障适用于一切证据活动**：隐私（不记录内容/凭据/路径/原始 DB 体积）、真实上下文与溯源、不虚构基线/阈值/根因、适用运行时 lane — 适用于一切证据活动，无论是否形式化（PERF-LOCK-006/007, PERF-LOCK-003, DOC-002）。
+- **三轨道不可互换**（见 §4B）：决策证据、实现回归证据、聚合交付验证 — 三者用途、方法、停止条件分离，不可互换。
+- **L1 仓库可验证回归证据**：唯一可进入"已验证"的实现回归证据。用于集成契约级/结构级回归判断；需匹配所跨边界。
 - **L2 诊断性证据**：仅用于问题定位（`ui:observe`、CDP、截图），不构成回归或验收判断。
-- **L3 手工基准证据**：仅用于方向判断；须按测量契约重测确认后方可升级。
+- **L3 手工基准证据**：仅用于方向判断；须按测量契约重测确认后方可升级为决策证据。
 - **L4 用户报告历史结果**：不可作为当前基线。
+- **比例原则**：证据成本与方法随风险/不可逆性/不确定性/复用度伸缩；可逆 renderer-local 预设用保守初值 + 聚焦回归 + 用户可见观察 + 回滚即可，不默认要求形式化 artifact。
+- **形式化机制条件性**：schema v1 / 产物发射/存储/保留 / 形式化产物元数据与溯源封装 仅在显式选择的形式化定量断言或可复用测量契约时强制（`performance-measurement.md`）；通用保障（隐私/真实上下文与溯源/不虚构基线·阈值·根因、适用运行时 lane）仍适用于一切证据活动；其余场景按 §4B 最小充分证据执行。
+- **与边界匹配**：证据须与所跨边界匹配（AGENTS.md「Evidence and Judgment」）；可逆预设与形式化定量分流。
 
 一次生产构建 E2E 运行可同时产生 **L1 确定性证据**（正确性 gate、结构断言、退出码）与 **L3 暂定数值**（p50/p95 等机器可读输出）——两者并存但不可互换。证据须与所跨边界匹配（AGENTS.md「Evidence and Judgment」）。
 
@@ -158,21 +180,27 @@ Problem Open → Cost Model → Attributed → Candidate → Experiment → Inte
 
 - **触发条件**：性能工作流中出现以下任一情况——变更涉及运行时职责/权威移动、持久化/迁移语义变更、生命周期/多窗口/原生能力变更、兼容语义变更——即停止实现，走 ADR 决策点（PERF-LOCK-008），并将工作交由架构演进程序接管。
 - **架构-性能政策（ARCH-009..011 镜像）**：架构重构追求结构更优且自然更快；性能测量记录重构的自然结果——架构推进不以绝对性能指标/阈值为常规门槛，也不要求直接的自然性能提升方可前进（ARCH-009）。但在受控同态对比（controlled same-state comparison）下可复现的实质性回退（material degradation）是对架构正确性的反证，必须在阶段退出前完成归因与处置：修复、经论证接受的权衡，或保持阶段 Open（ARCH-010）。剩余性能问题作为独立的重基线/重评估性能工作在重构后另行处置；架构关闭不等同于关闭 PERF 产品问题（ARCH-011）。
-- **工作流重分类（2026-08-21）**：PERF-TOPIC-SWITCH 和 PERF-ECHO 原为架构接受表面，现重分类为**架构重构后的独立参考/重评估工作流**（`performance-workstreams.md` §2.1/§2.3），保持 **Open 且不阻塞架构阶段关闭**（ARCH-011）；其既有 `bfc1c61713a689275324c85a4cafa23b35040abc`（2026-08-20，clean）与新增 `4df885d4d7fc055c2a2c5c742dfad79ff82ab991`（2026-08-21，clean）均为 **L3 方向性参考**，按 ARCH-012 保留溯源且不被重标为阈值/基线；由于不存在受控同态前后对比，不作改进/回退断言。
+- **工作流重分类**：PERF-TOPIC-SWITCH 和 PERF-ECHO 为**架构重构后的独立参考/重评估工作流**（`performance-workstreams.md` §2.1/§2.3），保持 **Open 且不阻塞架构阶段关闭**（ARCH-011）；均为 **L3 方向性参考**，按 ARCH-012 保留溯源且不被重标为阈值/基线；由于不存在受控同态前后对比，不作改进/回退断言。
 - **已取代**：PERF-RENDER-FLOW 的战术候选队列已被架构演进程序取代（`performance-workstreams.md` §2.5）。
 - **性能程序不成为架构权威**：性能工作流提出方向和证据，架构决策权属于架构演进程序和 ADR 流程。
+- **B-01..B-05 状态**：B-01..B-05 为**已批准的初始 renderer-local 保留策略默认值**，生产实现待定，非经验最优、非基线/SLA；校准 harness 可选、非阻塞；Phase 4 退出保持 Open。
 
 ## 8. 完成与关闭规则（Completion / Closure Rules）
 
 1. **测量完成不关闭产品问题**（DOC-004）：`Experiment` 结束、`Done` 的测量切片，不代表其对应的用户可见问题已解决。
-2. **Done 的关闭条件**：
+2. **三轨道分离**：决策证据、实现回归证据、聚合交付验证为独立轨道，不可互换（§4B §7）。
+3. **Done 的关闭条件**：
    - **已接受的用户可见结果**（用户/Main 接受该问题已按预期解决，或显式接受为未复现/不可证伪并保持 Open）；
    - **需要时集成实现**（若根因归属后需要修复，候选实现已集成）；
-   - **匹配边界的回归证据**（Protect 阶段已建立相应断言/E2E）。
-3. **未解决的用户可见问题保持 Open**：topic 切换、流式/多模型输出、消息回显当前为 Open 产品问题（`performance-workstreams.md`），其既有 PERF-101/102/103 测量资产仅是**证据**，不是关闭。架构重构后的剩余问题另行重基线/重评估，架构关闭不关闭它们（ARCH-011）。
-4. **不把 L3 数值当作阈值/根因**：除非经显式校准决策并提交阈值，否则数值保持暂定（PERF-LOCK-003；唯一已提交阈值见测量契约 §7）。历史 `bfc1c61713a689275324c85a4cafa23b35040abc` 与新增 `4df885d4d7fc055c2a2c5c742dfad79ff82ab991` 的 L3 均为方向性参考，保留溯源且不被重标为阈值/基线（ARCH-012）。
-5. **受控回退挑战规则（ARCH-010）**：常规架构阶段不以绝对阈值为门槛（ARCH-009），但在受控同态对比下可复现的实质性回退属于架构正确性反证，必须在退出前完成归因与处置（修复 / 经论证接受的权衡 / 保持 Open），否则不得关闭。
-6. **关闭不自动激活**任何新工作流：后续激活须 Main/用户显式授权（Active 同一层级唯一）。
+   - **匹配边界的回归证据**（Protected 阶段已建立相应断言/E2E，边界匹配）。
+4. **聚合验证强制**：精确 worktree 状态的 `pnpm build:check` 为唯一聚合 gate；docs-only 例外见 AGENTS.md Validation gates。
+5. **条件性可观测性不阻塞关闭**：Phase 4 及其他阶段的条件性可观测性/工作集度量与 B-01..B-05 校准为可选、非阻塞；除非绑定显式激活的决策/结果或形式化定量/可复用契约，否则不作为阶段关闭门槛。Harness 完整性本身不关闭阶段/工作流。
+6. **未解决的用户可见问题保持 Open**：topic 切换、流式/多模型输出、消息回显当前为 Open 产品问题（`performance-workstreams.md`），其既有 PERF-101/102/103 测量资产仅是**证据**，不是关闭。架构重构后的剩余问题另行重基线/重评估，架构关闭不关闭它们（ARCH-011）。
+7. **不把 L3 数值当作阈值/根因**：除非经显式校准决策并提交阈值，否则数值保持暂定（PERF-LOCK-003；唯一已提交阈值见测量契约 §7）。L3 方向性参考保留溯源且不被重标为阈值/基线（ARCH-012）。
+8. **受控回退挑战规则（ARCH-010）**：常规阶段不以绝对阈值为门槛（ARCH-009），但在受控同态对比下可复现的实质性回退属于架构正确性反证，必须在退出前完成归因与处置（修复 / 经论证接受的权衡 / 保持 Open），否则不得关闭。
+9. **显式残余风险接受**：关闭要求 Main/用户对残余风险的显式接受；harness 完整性不关闭阶段/工作流。
+10. **证据任务停止条件与四要素门槛**：每个证据任务在启动时声明停止条件（判定阈值/证伪/接受）；仅当绑定显式激活的决策/结果且齐备四要素时方可计为有效/进展；满足停止条件即停止，不因 harness 完整性继续。
+11. **关闭不自动激活**任何新工作流：后续激活须 Main/用户显式授权（显式激活的决策/结果，Active 同一层级唯一）。
 
 ## 9. ADR 触发条件（ADR Triggers）
 
@@ -197,14 +225,14 @@ Renderer-only presentation/local-state 变更，只要不跨越以下任一边�
 - 兼容语义变更（§9.5）
 - 平台/发布范围变更（§9.6）
 
-**安全区内的操作**包括但不限于：React 组件 memo 策略调整、selector 粒度优化、渲染子树结构重排、projected array identity 稳定化、effect/subscription fanout 缩减——只要这些改动不改变以上任何边界的语义。
+**安全区内的操作**包括但不限于：React 组件 memo 策略调整、selector 粒度优化、渲染子树结构重排、projected array identity 稳定化、effect/subscription fanout 缩减——只要这些改动不改变以上任何边界的语义。此类可逆预设适用 §4B 最小充分证据（保守初值 + 聚焦回归 + 用户可见观察 + 回滚），不默认要求形式化测量基建。
 
 跨越上述任一边界仍须停止并走 ADR（PERF-LOCK-008），不论变更幅度大小。
 
 ## 10. 相关文档
 
-- **测量契约（持久）**：[`performance-measurement.md`](./performance-measurement.md) — 固定工具链/lane、证据层级、schema v1、artifact 存储/隐私/保留、规模维度、harness 清单、阈值策略。
-- **当前可行动状态（可变）**：[`performance-workstreams.md`](./performance-workstreams.md) — 开放工作流（PERF-TOPIC-SWITCH / PERF-STREAMING / PERF-ECHO）、证据、有界成本模型/假设、未知项、下一实验目标、验收框架。
-- **架构演进程序**：[`architecture-evolution-program.md`](./architecture-evolution-program.md) — 架构正确性/优雅性/统一性引领；性能债务交接入口；Phase 3 于 2026-08-21 基于结构/治理/功能证据关闭（ARCH-009/ARCH-010），PERF-TOPIC-SWITCH/PERF-ECHO 重分类为独立重构后参考/重评估工作流（ARCH-011，Open 非阻塞）；测量溯源 bfc1c617 + 4df885d 均为 L3 方向性（ARCH-012）。
+- **测量契约（持久）**：[`performance-measurement.md`](./performance-measurement.md) — 固定工具链/lane、证据层级、schema v1、artifact 存储/隐私/保留、规模维度、harness 清单、阈值策略；**通用保障与适用运行时 lane 始终强制，形式化机制（schema v1 / 产物发射/存储/保留 / 形式化产物元数据与溯源封装）仅在显式选择的形式化定量/可复用契约时强制**。
+- **当前可行动状态（可变）**：[`performance-workstreams.md`](./performance-workstreams.md) — 开放工作流（PERF-TOPIC-SWITCH / PERF-STREAMING / PERF-ECHO）、证据、有界成本模型/假设、未知项、下一实验目标、验收框架；**证据-only 默认不计进展，除非绑定显式激活的决策/结果且齐备四要素**。
+- **架构演进程序**：[`architecture-evolution-program.md`](./architecture-evolution-program.md) — 架构正确性/优雅性/统一性引领；性能债务交接入口；Phase 3 基于结构/治理/功能证据关闭（ARCH-009/ARCH-010），PERF-TOPIC-SWITCH/PERF-ECHO 重分类为独立重构后参考/重评估工作流（ARCH-011，Open 非阻塞）；测量溯源按 ARCH-012 保留为方向性 L3（Git 拥有 provenance）；**B-01..B-05 已批准为初始预设，校准可选非阻塞，Phase 4 仍 Open**。
 - **治理**：[`sqlite-migration.md`](./sqlite-migration.md)、[`cherry-chat-application-identity.md`](./cherry-chat-application-identity.md)、[`architecture.md`](./architecture.md)。
 - **根代理规则**：根 [`AGENTS.md`](../AGENTS.md)「Detailed References」发现本文件。

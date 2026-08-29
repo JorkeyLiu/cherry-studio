@@ -22,6 +22,22 @@ This is the canonical, always-on repository contract for AI coding assistants wo
 - **Write conventional commits**: Commit small, focused changes using Conventional Commit messages (e.g., `feat:`, `fix:`, `refactor:`, `docs:`).
 - **Sign commits**: Use `git commit --signoff` as required by contributor guidelines.
 
+## Product-First and Proportional Evidence (MUST FOLLOW)
+
+- **Product benefit leads.** Among governance-compliant options, product benefit and user experience lead selection.
+- **Evidence informs decisions, not deliverables.** Evidence informs a named decision/outcome; evidence production is not the deliverable.
+- **Three distinct, non-substitutable purposes:**
+  1. *Decision evidence* — informs an explicitly activated decision/outcome; bound to a specific claim, minimum sufficient method, and stopping condition (all four required; explicit activation alone is insufficient). Cost scales with risk, irreversibility, uncertainty, and expected reuse.
+  2. *Implementation regression evidence* — boundary-matched to the change (see Change Propagation); proves the change does not regress protected contracts.
+  3. *Aggregate delivery validation* — `pnpm build:check` is the sole authoritative gate for the exact worktree state (see Validation gates); docs-only exception is narrowly scoped.
+- **Universal safeguards.** Privacy (no content/credentials/paths/raw DB size), truthful context/provenance, no false baseline/threshold/root-cause, and the applicable runtime lane for every command entering Node/Electron lanes apply to every evidence activity; only formal mechanics (schema-v1, artifact emission/storage/retention, formal artifact metadata/provenance packaging for reusable artifacts) are conditional on explicitly selected formal quantitative/reusable claims (canonical in `performance-measurement.md`).
+- **Reversible renderer-local defaults.** Conservative initial values with focused regression evidence, user-visible observation (`ui-verify-change`), and rollback are sufficient without bespoke measurement infrastructure.
+- **Formal artifacts reserved.** Schema-v1, artifact emission/storage/retention, and formal artifact metadata/provenance packaging are required only for explicitly selected formal quantitative claims or reusable measurement contracts (canonical in `performance-measurement.md`); universal safeguards (privacy, truthful context/provenance, no false claims, applicable runtime lane) remain mandatory for all evidence work.
+- **Evidence-task contract.** Every evidence task binds to an explicitly activated decision/outcome, claim, minimum sufficient method, and stopping condition (all four required); evidence-only work without all four does not count as progress and cannot close a phase/workflow.
+- **Conditional observability.** Phase 4 and other conditional observability/working-set metrics and B-01..B-05 calibration are optional/non-blocking and do not gate phase closure unless bound to an explicitly activated decision/outcome or formal quantitative/reusable claim.
+- **Phase closure.** Accepted outcomes + boundary-matched regression + mandatory governance/delivery validation + explicitly accepted residual risk. Harness completeness never closes a phase.
+- **B-01..B-05 status.** Approved initial renderer-local retention policy defaults; production implementation pending; not empirically optimal, not baselines/SLA; calibration harness optional, non-blocking, inactive by default; Phase 4 exit remains Open.
+
 ## Skill Routing
 
 Load the matching skill before starting the task. If a referenced skill is missing, read its `SKILL.md` under `.agents/skills/<name>/` and follow it manually.
@@ -149,7 +165,7 @@ The higher the boundary, the broader the evidence and the higher the decision: a
 
 The split is explicit: specialists gather facts; the Main Agent makes judgment. Inspectors and focused agents produce observable local evidence — code, tests, runtime artifacts, runtime behavior — and the Main Agent interprets meaning, scope, and risk, and chooses the remedy. This section is a mental model, not a path map: code search and file location are specialist work, and AGENTS is not a substitute for them.
 
-Evidence has distinct claims that are not interchangeable: static/type-level facts and isolated component tests establish local behavior; Playwright E2E against a fresh production build establishes contract-worthy integrated behavior (lifecycle, IPC, persistence, native, multi-window); screenshots, CDP sessions, and dev-mode observation are diagnostic only — never regression proof. When an implementation changes user-visible behavior, rendered and interactive behavior must be verified (route the evidence tier through `ui-verify-change`; see Testing and UI/E2E Evidence), and the weight of evidence must match the boundary the change crosses.
+Evidence has distinct purposes that are not interchangeable (see Product-First and Proportional Evidence): decision evidence with a bound claim/method/stopping condition, implementation regression evidence matched to the boundary crossed, and aggregate delivery validation. Cost and rigor scale with risk, irreversibility, uncertainty, and reuse. Concrete tiers: static/type-level facts and isolated component tests establish local behavior; Playwright E2E against a fresh production build establishes contract-worthy integrated behavior (lifecycle, IPC, persistence, native, multi-window); screenshots, CDP sessions, and dev-mode observation are diagnostic only — never regression proof. For reversible renderer-local defaults, conservative values + focused regression + user-visible observation + rollback suffice without bespoke measurement; formal artifacts are reserved for formal quantitative claims. When an implementation changes user-visible behavior, rendered and interactive behavior must be verified (route the tier through `ui-verify-change`; see Testing and UI/E2E Evidence), and the weight of evidence must match the boundary crossed.
 
 ### Mental Model in One Paragraph
 
