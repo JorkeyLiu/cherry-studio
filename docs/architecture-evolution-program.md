@@ -560,12 +560,14 @@ All are read-only with respect to production/user state (M8 permitted owned temp
 
 ### 7.2 Architecture-phase-dependent (requires governance)
 
+**B-01–B-05/M6 status:** B-01–B-05 and M6 are **harness Implemented, inactive by default, not yet executed**. B-01–B-05 remains calibration-candidate-only; M6 remains analysis-only with no schema/migration/sync design. M6's fixed fingerprint is 4 `schema-absent` categories (`revision-version`, `ordering-cursor`, `deletion-tombstone`, `outbox-checkpoint`) and 5 `open-design` categories (`device-local-leakage`, `idempotence-atomicity`, `checkpoint-boundary`, `conflict-matrix`, `extra-field-governance`); its scoped inventory is 5 required structural tables (`topics`, `messages`, `message_blocks`, `topic_segments`, `topic_segment_messages`) plus 1 explicitly excluded `file_references` table, with 11 excluded sync domains tracked separately. No execution provenance is recorded here until an actual run exists.
+
 | Item | Scope | Dependencies |
 |---|---|---|
 | **Full-topic/windowed fetch/cache joins** | Data-access contract implementation | Phase 5 contract; implementation is Phase 6 candidate requiring coordinated IPC review |
 | **M4** FTS dedup | Volume/write-amplification + schema | ADR |
 | **M5 production resolution** | File dual-state consistency/authority resolution | M5 synthetic directional evidence; ADR/governance if production schema/authority is touched |
-| **M6** Sync metadata gap | Schema impact analysis | ADR; analysis only |
+| **M6** Sync metadata gap | Schema impact analysis | ADR; **harness Implemented, inactive by default, not yet executed; analysis-only, no schema/migration/sync design** |
 
 ### 7.3 Diagnostic calibration summary (directional, non-adoption)
 
@@ -573,6 +575,8 @@ All are read-only with respect to production/user state (M8 permitted owned temp
 - **M2/M3/M7** clean-HEAD directional evidence demonstrates harness correctness and attribution (50k corpus for M2/M3, ~1k messages for M7) with parity and correctness gates; no index benefit or threshold adoption.
 - **M4** 1k, default 10k, and explicitly activated 50k synthetic directional evidence — all executed 2026-08-28 via `pnpm bench:m4-fts-dup` (exit 0, directional only; S6.5 remains Candidate — Not Authorized; real corpora and physical DB size remain unresolved; exact metrics remain solely in `performance-measurement.md` §6 and summary status in `performance-workstreams.md` §2.4). Further M4 real-corpus/physical-size work requires an explicit decision, privacy review where applicable, and governance/ADR; no production batch is Ready now.
 - **M8** backup/restore harness validates archive safety, authoritative `chat.db` presence, excluded artifact absence, snapshot integrity, and staged restore parity (inside `preExitCleanup` callback) via isolated synthetic fixtures; no real relaunch/startup promotion proven; single-machine synthetic only.
+- **B-01–B-05** synthetic calibration harness is **harness Implemented, inactive by default, not yet executed**; it is directional calibration-candidate-only evidence and does not adopt policy, thresholds, baselines, capacity, eviction, or defaults. Exact execution provenance is intentionally absent until an actual run is recorded.
+- **M6** synthetic sync metadata gap harness is **harness Implemented, inactive by default, not yet executed**; it is analysis-only and does not define schema, migration, sync design, or authorization. Exact execution provenance is intentionally absent until an actual run is recorded.
 
 ### 7.4 Design contract — M8 Backup/restore (summary)
 

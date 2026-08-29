@@ -188,9 +188,11 @@ describe('package.json main bench scripts (bench lane audit)', () => {
   it('aggregate and native bench commands each resolve the main bench files exactly once', () => {
     const allBench = enumerateMainBenchFiles().sort()
     expect(allBench).toEqual([
+      'src/main/services/chatDb/__tests__/b0105Calibration.bench.ts',
       'src/main/services/chatDb/__tests__/logicalPayload.bench.ts',
       'src/main/services/chatDb/__tests__/m4FtsDuplication.bench.ts',
       'src/main/services/chatDb/__tests__/m5FileDualState.bench.ts',
+      'src/main/services/chatDb/__tests__/m6SyncMetadataGap.bench.ts',
       'src/main/services/chatDb/__tests__/m8L3ArchiveHealth.bench.ts',
       'src/main/services/chatDb/__tests__/pinnedWorkingSet.bench.ts',
       'src/main/services/chatDb/__tests__/search.bench.ts',
@@ -218,6 +220,18 @@ describe('package.json main bench scripts (bench lane audit)', () => {
         ).toBeGreaterThan(0)
       }
     }
+  })
+
+  it('declares the canonical M6 synthetic benchmark command on the node native lane', () => {
+    expect(scripts['bench:m6-sync-gap']).toBe(
+      'M6_SYNC_GAP_BENCH=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/m6SyncMetadataGap.bench.ts'
+    )
+  })
+
+  it('declares the canonical B0105 synthetic calibration command on the node native lane', () => {
+    expect(scripts['bench:b0105-calibration']).toBe(
+      'B0105_CALIBRATION=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/b0105Calibration.bench.ts'
+    )
   })
 })
 

@@ -97,6 +97,8 @@
     "bench:m8-l3-archive": "M8_L3_ARCHIVE_BENCH=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/m8L3ArchiveHealth.bench.ts",
     "bench:m4-fts-dup": "M4_FTS_DUP_BENCH=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/m4FtsDuplication.bench.ts",
     "bench:m5-file-dual-state": "M5_FILE_DUAL_BENCH=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/m5FileDualState.bench.ts",
+    "bench:b0105-calibration": "B0105_CALIBRATION=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/b0105Calibration.bench.ts",
+    "bench:m6-sync-gap": "M6_SYNC_GAP_BENCH=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/m6SyncMetadataGap.bench.ts",
     "bench:renderer": "pnpm native:run node -- vitest bench --run --project renderer",
     "bench:aicore": "pnpm native:run node -- vitest bench --run --project aiCore",
     "bench:shared": "pnpm native:run node -- vitest bench --run --project shared",
