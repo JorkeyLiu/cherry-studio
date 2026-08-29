@@ -1752,6 +1752,9 @@ export const loadTopicMessagesThunk =
           // Legacy: only non-empty cached topics are hits; empty falls through to fetch
           if (cachedIds.length > 0) {
             recordResidentReadHit()
+            // Supersede any older in-flight same-topic staged load before completing cache-hit activation
+            const requestSeq = ++loadTopicMessagesRequestSeq
+            latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
             const cachedState = getState()
             const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
               asst.topics.some((t) => t.id === topicId)
@@ -1768,6 +1771,9 @@ export const loadTopicMessagesThunk =
             !!residentEntry && residentEntry.residentTopic && residentEntry.chatData && residentEntry.segments
           if (isResidentHit) {
             recordResidentReadHit()
+            // Supersede any older in-flight same-topic staged load before completing cache-hit activation
+            const requestSeq = ++loadTopicMessagesRequestSeq
+            latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
             const cachedState = getState()
             const cachedTopicOwner = cachedState.assistants.assistants.find((asst) =>
               asst.topics.some((t) => t.id === topicId)
@@ -1955,6 +1961,14 @@ export const loadTopicMessagesThunk =
       const topicOwner = loadedState.assistants.assistants.find((asst) => asst.topics.some((t) => t.id === topicId))
       if (topicOwner) {
         await ensureTopicAnchorEstablished(dispatch, getState, topicOwner.id, topicId)
+      }
+      // Renderer-local retention enforcement after joint publication (admission while pinned).
+      // Does not retain content; pinned topics are excluded via policy.
+      try {
+        const { enforceRetention } = await import('@renderer/services/residentRetention')
+        enforceRetention(Date.now(), store as any)
+      } catch {
+        // best-effort retention enforcement; never break load
       }
     } catch (error) {
       logger.error(`Failed to load messages for topic ${topicId}:`, error as Error)

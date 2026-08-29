@@ -28,6 +28,20 @@ export const JOINT_PUBLISH_COMPLETE = 'resident/jointPublishComplete'
 
 export const publishResidentComplete = createAction<JointPublishPayload>(JOINT_PUBLISH_COMPLETE)
 
+export const RETENTION_EVICT = 'retention/evictTopic'
+/**
+ * Dedicated renderer-local retention fencing action.
+ *
+ * Advances only the renderer applicability generation to fence in-flight
+ * staged fetches that captured a prior generation. This is not an
+ * authoritative deletion generation and must never be confused with
+ * topicDeletionInvalidation's deletion generation. Retention eviction
+ * removes only renderer projections (messages/blocks/segments/window
+ * completeness/context closure) while preserving scroll snapshots and
+ * without touching SQLite or terminating streams.
+ */
+export const retentionEvict = createAction<string>(RETENTION_EVICT)
+
 const residentRegistrySlice = createSlice({
   name: 'residentRegistry',
   initialState,
@@ -95,6 +109,17 @@ const residentRegistrySlice = createSlice({
       entry.chatData = true
       entry.segments = true
       entry.residentTopic = true
+    })
+    builder.addCase(retentionEvict, (state, action) => {
+      const topicId = action.payload
+      const prev = state.entries[topicId]
+      const nextGen = (prev?.applicabilityGeneration ?? 0) + 1
+      state.entries[topicId] = {
+        chatData: false,
+        segments: false,
+        residentTopic: false,
+        applicabilityGeneration: nextGen
+      }
     })
   }
 })

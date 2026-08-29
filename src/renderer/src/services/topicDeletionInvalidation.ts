@@ -24,6 +24,7 @@ import {
   clearLatestWindowCompleteness
 } from '@renderer/pages/home/Messages/messageWindow'
 import { bumpAndInvalidate, clearCachedContextClosure } from '@renderer/services/contextClosure'
+import { clearRetentionForTopicIfAvailable } from '@renderer/services/retentionClearHandler'
 import { removeScrollSnapshotsForTopicIds } from '@renderer/services/scrollSnapshotCache'
 import store from '@renderer/store'
 import { removeManyBlocks } from '@renderer/store/messageBlock'
@@ -124,6 +125,10 @@ export function bumpDeletionGeneration(topicId: string): number {
 export function invalidateTopicDeletion(topicId: string): void {
   bumpDeletionGeneration(topicId)
   purgeResidentProjectionsForTopics([topicId])
+  // Reclaim renderer-local retention metadata (lastAccess + byte cache) without
+  // changing authoritative deletion semantics or B-07 scroll snapshot contract.
+  // Uses handler registered by residentRetention to avoid static import cycle.
+  clearRetentionForTopicIfAvailable(topicId)
   try {
     removeScrollSnapshotsForTopicIds([topicId])
   } catch {
@@ -139,6 +144,10 @@ export function invalidateTopicsDeletion(topicIds: string[]): void {
     bumpDeletionGeneration(id)
   }
   purgeResidentProjectionsForTopics(valid)
+  // Reclaim retention metadata for all hard-deleted topics via handler.
+  for (const id of valid) {
+    clearRetentionForTopicIfAvailable(id)
+  }
   try {
     removeScrollSnapshotsForTopicIds(valid)
   } catch {

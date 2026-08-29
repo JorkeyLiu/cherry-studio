@@ -21,7 +21,7 @@ import { createEntityAdapter, createSlice } from '@reduxjs/toolkit'
 import type { Message } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 
-import { publishResidentComplete } from './residentRegistry'
+import { publishResidentComplete, retentionEvict } from './residentRegistry'
 
 const logger = loggerService.withContext('newMessage')
 
@@ -318,6 +318,18 @@ export const messagesSlice = createSlice({
       messagesAdapter.upsertMany(state as any, messages as any)
       state.messageIdsByTopic[topicId] = messages.map((m) => m.id)
       state.currentTopicId = topicId
+    })
+    builder.addCase(retentionEvict, (state, action) => {
+      const topicId = action.payload
+      const messageIds = state.messageIdsByTopic[topicId]
+      if (messageIds) {
+        messagesAdapter.removeMany(state as any, [...messageIds] as any)
+        delete state.messageIdsByTopic[topicId]
+      }
+      // Clear loading/fulfilled markers for evicted topic; active topic is pinned and never evicted
+      if (state.loadingByTopic[topicId] !== undefined) delete state.loadingByTopic[topicId]
+      if (state.fulfilledByTopic[topicId] !== undefined) delete state.fulfilledByTopic[topicId]
+      if (state.currentTopicId === topicId) state.currentTopicId = null
     })
   }
 })

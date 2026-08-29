@@ -12,6 +12,25 @@ import store from './store'
 
 loggerService.initWindowSource('mainWindow')
 
+// Start renderer-local retention enforcement (B-01..B-05) — bounded TTL timer, subscription, no content retention.
+// ESM-safe dynamic import avoids renderer import cycle/mock-hoist cascade while retaining logged failure behavior (LOCK-002).
+// No CommonJS require; startup failures are logged centrally via loggerService and not swallowed silently.
+void import('./services/residentRetention')
+  .then(({ startResidentRetention }) => {
+    try {
+      startResidentRetention(store as any)
+    } catch (e) {
+      loggerService
+        .withContext('Store')
+        .warn('[store] resident retention startup failed — retention inactive', e as Error)
+    }
+  })
+  .catch((e) => {
+    loggerService
+      .withContext('Store')
+      .warn('[store] resident retention startup failed — retention inactive', e as Error)
+  })
+
 // LOCK-RETIRE-001: Cherry Chat is the single application identity. Resolve the
 // main-window title from the identity-derived constant at startup — the title
 // seam always produces `Cherry Chat` and overrides the shared static HTML title.

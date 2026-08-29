@@ -45,7 +45,11 @@ const fileCountSource: FileCountSource = {
 
 class DbService implements MessageDataSource {
   private static instance: DbService
-  private readonly ordinarySource = new SqliteMessageDataSource()
+  private _ordinarySource: SqliteMessageDataSource | null = null
+  private get ordinarySource(): SqliteMessageDataSource {
+    if (!this._ordinarySource) this._ordinarySource = new SqliteMessageDataSource()
+    return this._ordinarySource
+  }
 
   static getInstance(): DbService {
     if (!DbService.instance) DbService.instance = new DbService()

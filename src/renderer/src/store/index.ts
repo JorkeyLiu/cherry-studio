@@ -22,7 +22,11 @@ import { useDispatch, useSelector, useStore } from 'react-redux'
 import { FLUSH, PAUSE, PERSIST, persistReducer, persistStore, PURGE, REGISTER, REHYDRATE } from 'redux-persist'
 import storage from 'redux-persist/lib/storage'
 
-import { setLatestWindowCompleteness } from '../pages/home/Messages/messageWindow'
+import {
+  clearLatestWindowCompleteness as clearLatestWindowCompletenessFn,
+  setLatestWindowCompleteness
+} from '../pages/home/Messages/messageWindow'
+import { clearCachedContextClosure as clearClosureCache } from '../services/contextClosure'
 import * as closureCache from '../services/contextClosure'
 import { applyPendingImportProjection } from '../services/importProjection'
 import { runReduxStoreBoot } from '../services/importProjectionReadiness'
@@ -45,7 +49,11 @@ import note from './note'
 import nutstore from './nutstore'
 import ocr from './ocr'
 import preprocess from './preprocess'
-import residentRegistryReducer, { JOINT_PUBLISH_COMPLETE, shouldDiscardJointPublish } from './residentRegistry'
+import residentRegistryReducer, {
+  JOINT_PUBLISH_COMPLETE,
+  RETENTION_EVICT,
+  shouldDiscardJointPublish
+} from './residentRegistry'
 import runtime from './runtime'
 import settings from './settings'
 import shortcuts from './shortcuts'
@@ -164,6 +172,88 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
     } catch {
       // best-effort window completeness; never break dispatch
     }
+  }
+
+  // Retention eviction: atomically remove exclusive blocks with full cross-slice visibility
+  // and clear window/closure side-effects in the same dispatch. This is the dedicated
+  // retention generation path, distinct from deletion generation.
+  if (action?.type === RETENTION_EVICT) {
+    const topicId = action.payload as string
+    // Capture prev block ownership before reducer clears messages
+    const prevMessageIds: string[] = (state as any)?.messages?.messageIdsByTopic?.[topicId] ?? []
+    const prevEntities = (state as any)?.messages?.entities ?? {}
+    const prevBlockEntities = (state as any)?.messageBlocks?.entities ?? {}
+    const nextStatePre = appReducer(state, action)
+
+    // Best-effort window/closure clears (Maps outside Redux) — same dispatch atomicity
+    try {
+      clearLatestWindowCompletenessFn(topicId)
+    } catch {}
+    try {
+      clearClosureCache(topicId)
+    } catch {}
+
+    // Exclusive blocks: remove only blocks whose messageId belongs to evicted topic and not shared elsewhere
+    try {
+      const nextMessageIdsByTopic = (nextStatePre as any)?.messages?.messageIdsByTopic ?? {}
+      const nextEntities = (nextStatePre as any)?.messages?.entities ?? {}
+      const nextBlockEntities = (nextStatePre as any)?.messageBlocks?.entities ?? {}
+
+      // Build set of blockIds still referenced by surviving topics
+      const otherTopicBlockIds = new Set<string>()
+      const survivingMessageIds = new Set<string>()
+      for (const [tid, mids] of Object.entries(nextMessageIdsByTopic as Record<string, string[]>)) {
+        if (tid === topicId) continue
+        for (const mid of mids) {
+          survivingMessageIds.add(mid)
+          const msg = nextEntities[mid] ?? prevEntities[mid]
+          // Prefer nextEntities but fallback to prev for orphan detection
+          const blocks = msg?.blocks as string[] | undefined
+          if (Array.isArray(blocks)) {
+            for (const bid of blocks) otherTopicBlockIds.add(bid)
+          }
+        }
+      }
+      // Orphan blocks for surviving topics (partial projection)
+      for (const block of Object.values(nextBlockEntities as Record<string, any>)) {
+        if (block && typeof block.messageId === 'string' && survivingMessageIds.has(block.messageId)) {
+          otherTopicBlockIds.add(block.id)
+        }
+      }
+
+      // Collect evicted blockIds
+      const evictedBlockIds: string[] = []
+      for (const mid of prevMessageIds) {
+        const msg = prevEntities[mid]
+        if (msg?.blocks) evictedBlockIds.push(...(msg.blocks as string[]))
+      }
+      // Orphan blocks whose messageId is in evicted messageIds
+      const evictedSet = new Set(prevMessageIds)
+      for (const block of Object.values(prevBlockEntities as Record<string, any>)) {
+        if (block && typeof block.messageId === 'string' && evictedSet.has(block.messageId)) {
+          evictedBlockIds.push(block.id)
+        }
+      }
+      const exclusive = [...new Set(evictedBlockIds)].filter((bid) => !otherTopicBlockIds.has(bid))
+      if (exclusive.length > 0) {
+        const curEntities = (nextStatePre as any).messageBlocks.entities
+        const curIds = (nextStatePre as any).messageBlocks.ids as string[]
+        const newEntities = { ...curEntities }
+        for (const bid of exclusive) delete newEntities[bid]
+        const newIds = curIds.filter((id) => !exclusive.includes(id))
+        return {
+          ...nextStatePre,
+          messageBlocks: {
+            ...(nextStatePre as any).messageBlocks,
+            entities: newEntities,
+            ids: newIds
+          }
+        } as any
+      }
+    } catch {
+      // best-effort exclusive removal
+    }
+    return nextStatePre as any
   }
 
   // Centralized unpaired segment invalidation — capture before

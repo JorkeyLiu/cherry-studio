@@ -24,7 +24,7 @@ import type { CitationMessageBlock, MessageBlock } from '@renderer/types/newMess
 import { MessageBlockType } from '@renderer/types/newMessage'
 
 import type { RootState } from './index' // 确认 RootState 从 store/index.ts 导出
-import { publishResidentComplete } from './residentRegistry'
+import { publishResidentComplete, retentionEvict } from './residentRegistry'
 
 // Create a simplified type for the entity adapter to avoid circular type issues
 type MessageBlockEntity = MessageBlock
@@ -84,6 +84,9 @@ export const messageBlocksSlice = createSlice({
         messageBlocksAdapter.upsertMany(state as any, blocks as any)
       }
     })
+    // Exclusive block removal is handled atomically in rootReducer with full cross-slice visibility
+    // to avoid cross-topic shared block deletion. See store/index.ts RETENTION_EVICT handling.
+    builder.addCase(retentionEvict, () => {})
   }
 })
 

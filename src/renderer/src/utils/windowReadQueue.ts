@@ -23,6 +23,8 @@ const logger = loggerService.withContext('WindowReadQueue')
  * out from under queued callers could strand their promises or permit
  * same-topic overlap.
  */
+import { notifyWindowReadIdle } from './windowReadQueueIdle'
+
 const windowReadQueues = new Map<string, PQueue>()
 
 /** Structured observability fields emitted for every queued window read. */
@@ -47,6 +49,7 @@ const getQueue = (topicId: string): PQueue => {
 const tryReclaimIdleQueue = (topicId: string, queue: PQueue): void => {
   if (windowReadQueues.get(topicId) === queue && queue.pending === 0 && queue.size === 0) {
     windowReadQueues.delete(topicId)
+    notifyWindowReadIdle(topicId)
   }
 }
 

@@ -1,7 +1,7 @@
 import { createEntityAdapter, createSlice, type PayloadAction } from '@reduxjs/toolkit'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 
-import { publishResidentComplete } from './residentRegistry'
+import { publishResidentComplete, retentionEvict } from './residentRegistry'
 
 const topicSegmentAdapter = createEntityAdapter<TopicSegment>()
 
@@ -75,6 +75,16 @@ const topicSegmentSlice = createSlice({
       topicSegmentAdapter.removeMany(state.segments, oldIds)
       topicSegmentAdapter.upsertMany(state.segments, segments)
       state.segmentsByTopic[topicId] = segments.map((s) => s.id)
+    })
+    builder.addCase(retentionEvict, (state, action) => {
+      const topicId = action.payload
+      const ids = state.segmentsByTopic[topicId]
+      if (ids !== undefined) {
+        if (ids.length > 0) {
+          topicSegmentAdapter.removeMany(state.segments, ids)
+        }
+        delete state.segmentsByTopic[topicId]
+      }
     })
   }
 })
