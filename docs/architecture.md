@@ -105,7 +105,7 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 | `websearch` | Web search settings |
 | `shortcuts` | Keyboard shortcuts |
 | `tabs` | Tab management |
-| `residentRegistry` | Renderer-local non-persisted per-topic completeness (`chatData`, `segments`, `residentTopic = chatData && segments`) and monotonic `applicabilityGeneration`; staged joint publication of latest-window chat-data plus segments via one dispatch (`resident/jointPublishComplete`) — lifecycle foundation only (retention policy defaults are target program, see `architecture-evolution-program.md` §6.5; not yet enforced, Phase 4 Open) |
+| `residentRegistry` | Renderer-local non-persisted per-topic completeness (`chatData`, `segments`, `residentTopic = chatData && segments`) and monotonic `applicabilityGeneration`; staged joint publication of latest-window chat-data plus segments via one dispatch (`resident/jointPublishComplete`) — lifecycle foundation with B-01..B-05 retention enforcement implemented renderer-local per `architecture-evolution-program.md` §6.5; Phase 4 closed 2026-08-29 |
 
 ## Database Layer
 
@@ -132,6 +132,7 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 - Main → Renderer: `webContents.send(channel, data)`.
 - Tracing: `tracedInvoke()` in preload attaches OpenTelemetry span context to IPC calls.
 - Typed API surface exposed via `contextBridge` as `window.api`.
+- Data-access contract R-02..R-06 (Phase 5) implemented via S6.1-S6.3: windowed reads R-02/R-03 (`chatdb:fetch-messages-window`), authority-aware answer-group/branch/insert/search-hit (R-05/R-04), context closure R-06 with typed completeness, stable-ID anchoring, deterministic `sort_order`->`id`, viewport/context separation, generation applicability-only; Main SQLite remains authoritative; coordinated IPC contract preserved; Phase 5 closed 2026-08-29 (outcome/residual-risk).
 
 ## AI Core (`packages/aiCore/`)
 

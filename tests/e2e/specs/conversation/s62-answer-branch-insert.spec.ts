@@ -7,7 +7,8 @@
  * - Branch by anchor: real MessageMenubar NEW_BRANCH click → branchMessagesToTopic (Main prefix)
  * - Insert after anchor: real MessageMenubar insert click → insertMessagesAfterAnchor (group-tail)
  *
- * Deterministic seed via ensureTopic + pasteMessagesToTopic; displayCount=20, synthetic total=50.
+ * Deterministic seed via ensureTopic + pasteMessagesToTopic; displayCount=20 groups (R-02: counts complete viewport groups, not raw messages), synthetic total=50.
+ * When the oldest visible group straddles the boundary, messageIds length may exceed DISPLAY_LIMIT (e.g. 21-22); bootstrap invariant is >= DISPLAY_LIMIT.
  * Standard fixture, fresh build, disposable profile, mock provider.
  * No direct Redux publication for action path; direct fetch/branch/insert IPC used only as supplemental authority probe.
  */
@@ -48,20 +49,23 @@ async function activateTopicAndWaitForBootstrap(page: any, topicId: string): Pro
   await topicItem.scrollIntoViewIfNeeded()
   await topicItem.waitFor({ state: 'visible', timeout: 15000 })
   await topicItem.click()
+  // R-02: latest window limit counts complete viewport groups (MessageGroup), not raw message rows.
+  // A boundary group straddling the 20-group limit may make messageIds length exceed DISPLAY_LIMIT (e.g. 21-22).
+  // Bootstrap readiness is therefore group-compatible: loading complete and message count >= DISPLAY_LIMIT.
   await page.waitForFunction(
-    ({ topicId, expected }: { topicId: string; expected: number }) => {
+    ({ topicId, atLeast }: { topicId: string; atLeast: number }) => {
       const s = (window as any).store.getState()
       const ids = s.messages?.messageIdsByTopic?.[topicId]
       const loading = s.messages?.loadingByTopic?.[topicId]
-      return Array.isArray(ids) && ids.length === expected && loading !== true
+      return Array.isArray(ids) && ids.length >= atLeast && loading !== true
     },
-    { topicId, expected: DISPLAY_LIMIT },
+    { topicId, atLeast: DISPLAY_LIMIT },
     { timeout: 30000 }
   )
-  // Viewport displayMessages may lag behind Redux ids briefly; wait for at least expected DOM elements
-  // (folded members are hidden via CSS but still in DOM under [data-message-id], so exact expected is typical)
+  // Viewport displayMessages may lag behind Redux ids briefly; wait for at least DISPLAY_LIMIT DOM elements.
+  // Folded members are hidden via CSS but still in DOM under [data-message-id]; >= is the stable group-compatible invariant.
   await page.waitForFunction(
-    (expected: number) => document.querySelectorAll('#messages [data-message-id]').length >= expected,
+    (atLeast: number) => document.querySelectorAll('#messages [data-message-id]').length >= atLeast,
     DISPLAY_LIMIT,
     { timeout: 30000 }
   )
@@ -399,10 +403,13 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
       },
       { topicId, missingId }
     )
-    expect(pre.count).toBe(DISPLAY_LIMIT)
-    expect(pre.hasMissing).toBe(false)
-    expect(pre.ids).not.toContain(missingId)
-    // visible ids must be present
+    // R-02 group-compatible readiness: latest 20 complete groups may yield >20 messages when a boundary group straddles.
+    // Stale exact-20 oracle expected missing outside window (30..49); group-compatible window is 28..49 (22 msgs) with full group 29-31 included.
+    // Update incidental count + membership oracle to group-compatible while preserving visible checks and complete-group authority probe.
+    expect(pre.count).toBeGreaterThanOrEqual(DISPLAY_LIMIT)
+    expect(pre.hasMissing).toBe(true)
+    expect(pre.ids).toContain(missingId)
+    // visible ids must be present (contract-essential: group members visible)
     expect(pre.ids).toContain(visibleIds[0])
     expect(pre.ids).toContain(visibleIds[1])
 
@@ -421,11 +428,104 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     expect(preGroup.value.messageIds).toContain(visibleIds[0])
     expect(preGroup.value.messageIds).toContain(visibleIds[1])
 
+    // DELIBERATE TEST-ONLY DISPOSABLE PROJECTION SETUP — not product behavior.
+    // Remove exactly one renderer member and its companion block via existing window.store.dispatch
+    // to create a partial projection (exactly one member missing before click) while Main/SQLite
+    // remain authoritative with all 3 members. Must not mutate resident registry, topic segments,
+    // generation, or SQLite — only newMessages/messageBlocks slices.
+    // Derive companion block id from the entity's blocks array to guarantee deterministic removal
+    // matches the actual stored block, falling back to the deterministic pad id.
+    const missingBlockId: string = await page.evaluate(
+      ({ topicId, missingId, fallback }: { topicId: string; missingId: string; fallback: string }) => {
+        const s = (window as any).store.getState()
+        const msg = s.messages?.entities?.[missingId] as any
+        const bid = Array.isArray(msg?.blocks) && msg.blocks.length > 0 ? (msg.blocks[0] as string) : fallback
+        return bid as string
+      },
+      { topicId, missingId, fallback: `${topicId}-block-${pad(groupStart, 5)}` }
+    )
+    // DELIBERATE TEST-ONLY DISPOSABLE PROJECTION: same-tick dispatch proves local removal
+    const dispatchDebug = await page.evaluate(
+      ({ topicId, missingId, missingBlockId }: { topicId: string; missingId: string; missingBlockId: string }) => {
+        const store = (window as any).store
+        const beforeMsg = (store.getState() as any).messages?.entities?.[missingId]
+        const beforeBlock = (store.getState() as any).messageBlocks?.entities?.[missingBlockId]
+        store.dispatch({ type: 'newMessages/removeMessages', payload: { topicId, messageIds: [missingId] } })
+        const midState = store.getState() as any
+        const afterMsgIds = midState.messages?.messageIdsByTopic?.[topicId] ?? []
+        const afterMsgEntity = midState.messages?.entities?.[missingId]
+        store.dispatch({ type: 'messageBlocks/removeManyBlocks', payload: [missingBlockId] })
+        const afterBlock = (store.getState() as any).messageBlocks?.entities?.[missingBlockId]
+        return {
+          beforeMsgExists: !!beforeMsg,
+          beforeBlockExists: !!beforeBlock,
+          afterMsgIdsIncludes: afterMsgIds.includes(missingId),
+          afterMsgEntityExists: !!afterMsgEntity,
+          afterBlockExists: !!afterBlock,
+          missingBlockId
+        }
+      },
+      { topicId, missingId, missingBlockId }
+    )
+    expect(dispatchDebug.beforeMsgExists, `beforeMsg must exist ${JSON.stringify(dispatchDebug)}`).toBe(true)
+    expect(dispatchDebug.beforeBlockExists, `beforeBlock must exist ${JSON.stringify(dispatchDebug)}`).toBe(true)
+    expect(dispatchDebug.afterMsgIdsIncludes, `after dispatch msg absent ${JSON.stringify(dispatchDebug)}`).toBe(false)
+    expect(
+      dispatchDebug.afterMsgEntityExists,
+      `after dispatch msg entity absent ${JSON.stringify(dispatchDebug)}`
+    ).toBe(false)
+    expect(
+      dispatchDebug.afterBlockExists,
+      `afterBlock must be removed immediately ${JSON.stringify(dispatchDebug)}`
+    ).toBe(false)
+
+    // Redux proof already captured in dispatchDebug immediate tick (before inter-evaluate gap where closure may re-upsert)
+    // dispatchDebug.afterBlockExists false proves companion block absent locally at dispatch time;
+    // a subsequent poll would race the closure's ~1.5s re-upsert and fail, so we rely on immediate proof
+
+    // Poll/assert DOM until missing container absent and tail selector remains visible/selectable
+    await page.waitForFunction(
+      ({ missingId, tailId }: { missingId: string; tailId: string }) => {
+        const esc = (v: string) => (typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(v) : v)
+        const miss = esc(missingId)
+        const tail = esc(tailId)
+        const missingEl = document.querySelector(`[id="message-${miss}"][data-message-id="${miss}"]`)
+        const tailSelector = document.querySelector(`[data-testid="answer-group-selector"][data-message-id="${tail}"]`)
+        return missingEl === null && tailSelector !== null
+      },
+      { missingId, tailId },
+      { timeout: 15000 }
+    )
+    const stillVisibleSelector = page.locator(`[data-testid="answer-group-selector"][data-message-id="${tailId}"]`)
+    await expect(
+      stillVisibleSelector,
+      `tail selector for ${tailId} must remain visible after disposable projection removal`
+    ).toBeVisible({
+      timeout: 15000
+    })
+
+    // Prove Main still owns all 3 group members despite local partial projection (no SQLite/segment mutation)
+    const mainStillComplete: any = await page.evaluate(
+      async ({ topicId, anchorId }: { topicId: string; anchorId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.fetchAnswerGroup({ topicId, anchorMessageId: anchorId })
+      },
+      { topicId, anchorId }
+    )
+    expect(mainStillComplete.ok).toBe(true)
+    expect(mainStillComplete.value.messageIds).toHaveLength(3)
+    expect(mainStillComplete.value.messageIds).toContain(missingId)
+    expect(mainStillComplete.value.messageIds).toContain(visibleIds[0])
+    expect(mainStillComplete.value.messageIds).toContain(visibleIds[1])
+
     // Find the group container and click the selector for tailId (second visible) to switch selection
     // MessageGroupModelList renders avatars for the grouped messages; locate by data-message-id
     // The group containing our visibleIds is the one near the top of column-reverse? Search globally.
     const selector = page.locator(`[data-testid="answer-group-selector"][data-message-id="${tailId}"]`)
-    await expect(selector, `answer-group selector for ${tailId} must be visible (partial group)`).toBeVisible({
+    await expect(
+      selector,
+      `answer-group selector for ${tailId} must be visible (partial projection ready)`
+    ).toBeVisible({
       timeout: 15000
     })
     await selector.click()
@@ -490,9 +590,6 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
       const extra = row.extra ? (typeof row.extra === 'string' ? JSON.parse(row.extra) : row.extra) : {}
       // foldSelected is merged into extra via overflow delta; check directly
       const foldSelected = (extra as any).foldSelected
-      if (row.id === tailId) expect(foldSelected).toBe(true)
-      else expect(foldSelected === false || foldSelected === undefined).toBeTruthy()
-      // The selected message should be true, others false/undefined (aggregate writes false explicitly)
       if (row.id === tailId) expect(foldSelected).toBe(true)
       else expect(foldSelected).toBe(false)
     }

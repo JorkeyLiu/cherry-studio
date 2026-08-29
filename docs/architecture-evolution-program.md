@@ -219,7 +219,7 @@ Phases have dependencies but are not all sequential or approved for implementati
 | **2** | Conversation Ownership and Lifecycle | **Complete** (design, 2026-08-19) | Phase 1 |
 | **3** | Stable Render/State/Action Graph | **Structurally Complete / Closed 2026-08-21** | Phase 2 |
 | **4** | Bounded Memory and Cache | **Closed 2026-08-29 (outcome/residual-risk)** | Phase 2 |
-| **5** | Data-Access Contract | **Design complete; exit Open** | Phase 2 + Phase 4 inputs |
+| **5** | Data-Access Contract | **Closed 2026-08-29 (outcome/residual-risk)** | Phase 2 + Phase 4 inputs |
 | **6** | DB-Health Implementation | **S6.1-S6.3 Authorized & Implemented; S6.4-S6.5 Candidate — Not Authorized** | Phase 5 contract |
 | **7** | Startup Architecture | **Open** (deferred) | Phase 2; Phase 3 for conversation-startup |
 | **8** | Future Sync Decision | **Open** (deferred) | Phases 2-5 + governance decision |
@@ -412,15 +412,15 @@ Phase 4 closed 2026-08-29 — outcome/residual-risk based per product-first mode
 
 ### 6.6 Phase 5: Data-Access Contract
 
-- **Status**: **Design study complete (2026-08-20) — documentation only; exit Open**.
+- **Status**: **Closed 2026-08-29 (outcome/residual-risk)** — R-02..R-06 satisfied by existing S6.1-S6.3 implementation with boundary-matched static + Vitest + Playwright 10/10 (six-spec, preceding test state) plus final S6.2 focused 3/3 (three independent disposable profiles, final test state covering later semantic delta) and authoritative `pnpm build:check` exit 0 on exact final code/test state; closure accepted after final gate; calibration/harness completeness not gating.
 - **Entry**: Phase 1 complete; Phase 2 complete; Phase 4 design complete as input; explicit approval. M1/M2/M3/M7 diagnostics are independent and do not gate this design.
 - **Content**: Stable-ID-anchored windowed read intents, deterministic `sort_order`->`id` ordering, completeness semantics, renderer-local generation applicability, separate viewport vs context projections, mutation/stream/cache rules.
-- **Exit**: Must validate scoped window/closure reads with defined counting units, typed completeness with validated derivation, deterministic ordering with stable-ID anchoring, separate projections with renderer-owned anchor, pinned streams with structural vs content-only invalidation, and deferred window eviction granularity. Not claimed.
+- **Exit**: Validates scoped window/closure reads with defined counting units, typed completeness with validated derivation, deterministic ordering with stable-ID anchoring, separate projections with renderer-owned anchor, pinned streams with structural vs content-only invalidation, and deferred window eviction granularity. Satisfied by S6.1-S6.3 evidenced implementation.
 - **Dependencies**: Phase 2; Phase 4 capacity defaults; Phase 3 stable host.
 
 #### 6.6.1 Design constraints
 
-- Design/documentation only; no implementation or `architecture.md` edit.
+- At the design-review stage: documentation only; implementation and `architecture.md` edits were excluded.
 - Main SQLite remains sole chat authority.
 - Intents anchored by stable IDs (topic/message), not tuple cursors; intra-response deterministic order `sort_order`->`id`.
 - Completeness is semantic (`whole-topic`/`window`/`answer-group`/`context closure`); partial never masquerades as complete; empty requires explicit marker.
@@ -503,11 +503,15 @@ Reviews executed per mandatory stop/review obligation across shared types/channe
 - **R-02/R-03** — reviewed (2026-08-22) against current whole-topic-only path; findings: any windowed read requires both-side contract change; Main-local dormant keyset pagination exists but not a conformant primitive; envelope precedent on adjacent channels; wholesale-replace reducer cannot yet install partial windows. Direction approved via scoped approval record (windowed reads with coverage-check cache-joins; selects no payload/channel/SQL/cursor/N-K/eviction value).
 - **R-04/R-05/R-06** — reviewed (2026-08-22) and direction approved via separate scoped record: R-04 around-message window, R-05 answer-group and stable-anchor positioning, R-06 context closure. All reviews are documentation-only; selects no concrete field/value.
 
-Coordinated-review precondition for R-02..R-06 is executed and direction-approved. Calibration (§6.5.9, §7.3) and §6.6 acceptance remain Open. Decision lock LOCK-P5-005 (no concrete value selection) preserved.
+Coordinated-review precondition for R-02..R-06 is executed and direction-approved. Phase 5 closed 2026-08-29 (outcome/residual-risk); calibration (§6.5.9, §7.3) remains optional/non-blocking, measurement-only directional. Decision lock LOCK-P5-005 (no concrete value selection) preserved.
+
+#### 6.6.10 Acceptance disposition
+
+Phase 5 closed 2026-08-29 — outcome/residual-risk based. R-02..R-06 validated via boundary-matched static + Vitest + Playwright 10/10 (six-spec, preceding test state) plus final S6.2 focused 3/3 (three independent disposable profiles, final test state covering later semantic delta) and authoritative `pnpm build:check` exit 0 on exact final code/test state; closure accepted after final gate; preserves Main SQLite authority, stable-ID anchoring, deterministic `sort_order`->`id`, semantic completeness isolation, viewport/context separation, generation applicability-only, coordinated IPC contract. Accepted residual risks: no tuple-cursor/revision/snapshot/linearizability; unbounded context closure when governed anchor requires it; active/in-flight/window-read pinned working set and per-topic FIFO have no global cap/progress guarantee; active-topic-only closure retention may refetch; coarse renderer invalidation/fingerprint remain implementation risks; S6.4/S6.5 and PERF workstreams remain open/independent. Calibration remains optional/non-blocking, measurement-only directional; LOCK-P5-005 preserved.
 
 ### 6.7 Phase 6: DB-Health Implementation
 
-- **Status**: **S6.1, S6.2, and S6.3 bounded slices Authorized & Implemented; S6.4/S6.5 Candidate — Not Authorized**. Per-slice explicit approval required; Phase 5/6 exits remain Open (Phase 4 closed); no capacity-threshold adoption.
+- **Status**: **S6.1, S6.2, and S6.3 bounded slices Authorized & Implemented; S6.4/S6.5 Candidate — Not Authorized**. Per-slice explicit approval required; Phase 5 closed 2026-08-29, Phase 6 partially Open (S6.4/S6.5); no capacity-threshold adoption.
 - **Entry**: Phase 5 contract complete; calibration inputs per slice as needed; governance/ADR for any schema changes (M4/M5/M6).
 - **Exit (per-slice)**: Slice-specific acceptance validated without violating contract invariants and without adopting a threshold unless owned by `performance-measurement.md`.
 - **Dependencies**: Phase 5 contract; Phase 4 calibration where sizing touched; governance/ADR.
@@ -567,7 +571,7 @@ All are read-only with respect to production/user state (M8 permitted owned temp
 
 | Item | Scope | Dependencies |
 |---|---|---|
-| **Full-topic/windowed fetch/cache joins** | Data-access contract implementation | Phase 5 contract; implementation is Phase 6 candidate requiring coordinated IPC review |
+| **Full-topic/windowed fetch/cache joins** | Data-access contract implementation | Phase 5 contract; S6.1-S6.3 implemented; S6.4/S6.5 Candidate — Not Authorized |
 | **M4** FTS dedup | Volume/write-amplification + schema | ADR |
 | **M5 production resolution** | File dual-state consistency/authority resolution | M5 synthetic directional evidence; ADR/governance if production schema/authority is touched |
 | **M6** Sync metadata gap | Schema impact analysis | ADR; **harness Implemented, inactive by default, not yet executed; analysis-only, no schema/migration/sync design** |
@@ -701,7 +705,7 @@ Each phase requires:
 | Render/state/action graph structure | Phase 3 | **Structurally Complete / Closed 2026-08-21** (S3.1-S3.5) |
 | Cache invalidation rules and bounds | Phase 4 | **Closed 2026-08-29 (outcome/residual-risk)** — B-01..B-09 enforced renderer-local per §6.5.5–§6.5.6 (B-01..B-05: max 8 inactive evictable topics, 32 MiB logical budget, 30-minute TTL, deterministic LRU/lexical tie-break, oversized fail-closed and evictable after unpin), not thresholds/baselines/SLA, calibration optional/non-blocking, measurement-only directional; evidenced by focused regression (Vitest), direct diagnostic UI observation (diagnostic only, not regression proof), independent audit pass (scalar-only, privacy-safe), and authoritative `pnpm build:check` pass; residual risks accepted (contextCount=null large, pinned working set excluded, no global stream cap, logical bytes not heap SLA, tuning may change, PERF independent/open) |
 | Retention/eviction policy design | Phase 4 | **Closed 2026-08-29** — B-01..B-05 renderer-local enforcement implemented and enforced; outcome/residual-risk closure per §6.5.9 |
-| Data-access contract (R-02..R-06, completeness, ordering, context) | Phase 5 | **Design complete; exit Open** — intents direction-approved (R-02/R-03 and R-04..R-06); implementation slices S6.1-S6.3 done; §6.6 validation Open (calibration outcomes §6.5.9, §7.3); S6.4/S6.5 Candidate |
+| Data-access contract (R-02..R-06, completeness, ordering, context) | Phase 5 | **Closed 2026-08-29 (outcome/residual-risk)** — R-02..R-06 satisfied by S6.1-S6.3; calibration optional/non-blocking; S6.4/S6.5 Candidate — Not Authorized |
 | Specific index/query optimizations | Phase 6 | **Candidate S6.4 — Not Authorized**; depends on M1/M2/M3; ADR if schema/index change |
 | File dual-state resolution | Phase 6 | **Candidate S6.5 — Not Authorized**; depends on M5; ADR if schema/authority |
 | FTS storage dedup | Phase 6 | **Candidate S6.5 — Not Authorized**; bounded synthetic M4 profiles (1k/10k/50k) are complete as directional evidence, but no threshold/baseline/benefit or production authorization follows; real-corpus/physical-size evidence remains unresolved; exact metrics in `performance-measurement.md` §6 and status summary in `performance-workstreams.md` §2.4; any further diagnostic or production work requires an explicit decision, privacy review where applicable, and governance/ADR |
