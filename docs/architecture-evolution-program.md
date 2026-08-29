@@ -220,8 +220,8 @@ Phases have dependencies but are not all sequential or approved for implementati
 | **3** | Stable Render/State/Action Graph | **Structurally Complete / Closed 2026-08-21** | Phase 2 |
 | **4** | Bounded Memory and Cache | **Closed 2026-08-29 (outcome/residual-risk)** | Phase 2 |
 | **5** | Data-Access Contract | **Closed 2026-08-29 (outcome/residual-risk)** | Phase 2 + Phase 4 inputs |
-| **6** | DB-Health Implementation | **S6.1–S6.3 Authorized & Implemented; S6.4 SQ-01 Rejected 2026-08-29 — no ADR, no production implementation, current LIKE retained; S6.5 Candidate — Not Authorized; no evidence batch ready** | Phase 5 contract |
-| **7** | Startup Architecture | **Open** (deferred) | Phase 2; Phase 3 for conversation-startup |
+| **6** | DB-Health Implementation | **S6.1–S6.3 Authorized & Implemented; S6.4 SQ-01 Rejected 2026-08-29 — no ADR, no production implementation, current LIKE retained; S6.5 Candidate — Not Authorized; no ready-now DB-health evidence batch** | Phase 5 contract |
+| **7** | Startup Architecture | **S7.1 Authorized for Implementation (2026-08-29) — renderer-only lazy secondary routes; S7.2+ Open (deferred)** | Phase 2; Phase 3 for conversation-startup |
 | **8** | Future Sync Decision | **Open** (deferred) | Phases 2-5 + governance decision |
 
 PERF-TOPIC-SWITCH, PERF-ECHO, PERF-STREAMING, PERF-DB-HEALTH remain independent post-refactor workstreams per ARCH-011; architecture closure does not close them.
@@ -511,7 +511,7 @@ Phase 5 closed 2026-08-29 — outcome/residual-risk based. R-02..R-06 validated 
 
 ### 6.7 Phase 6: DB-Health Implementation
 
-- **Status**: **S6.1–S6.3 Authorized & Implemented; S6.4 SQ-01 Rejected 2026-08-29 — no ADR, no production implementation, current LIKE retained; S6.5 Candidate — Not Authorized; M2/M3 evidence batch closed; no ready-now batch**. Per-slice explicit approval required; Phase 5 closed 2026-08-29, Phase 6 partially Open (S6.4 closed by rejection); no capacity-threshold adoption.
+- **Status**: **S6.1–S6.3 Authorized & Implemented; S6.4 SQ-01 Rejected 2026-08-29 — no ADR, no production implementation, current LIKE retained; S6.5 Candidate — Not Authorized; M2/M3 evidence batch closed; no ready-now DB-health batch**. Per-slice explicit approval required; Phase 5 closed 2026-08-29, Phase 6 partially Open (S6.4 closed by rejection); no capacity-threshold adoption.
 - **Entry**: Phase 5 contract complete; calibration inputs per slice as needed; governance/ADR for any schema changes (M4/M5/M6).
 - **Exit (per-slice)**: Slice-specific acceptance validated without violating contract invariants and without adopting a threshold unless owned by `performance-measurement.md`.
 - **Dependencies**: Phase 5 contract; Phase 4 calibration where sizing touched; governance/ADR.
@@ -531,7 +531,7 @@ Notes: S6.1/S6.2 concrete request bounds (`limit`/`before`/`after` each 1..100) 
 
 Prior review 2026-08-29 Need Specific Evidence (ARCH-001..012 unchanged; no production code/tests/schema/index/migration/IPC/StoreSync/S6.5/sync/startup/retention/threshold/baseline/SLA/`architecture.md` change; M1 dense-order O(N) shifts, M2 <3-codepoint LIKE scan with trigram FTS unable to serve <3 and no alternative evaluated, M3 current-plan diagnosis — all directional only; M1 and M2/M3 independent, evidence not pooled; any schema/index ADR-gated) authorized only an isolated disposable synthetic comparison. Candidate shape was finite and production-not-authorized: derived auxiliary 1–2 Unicode-codepoint gram projection keyed by (gram, block_id) for exact gram lookup (codepoints not UTF-16 units) of normalized main_text; terms ≥3 retain trigram FTS, terms <3 use indexed gram lookup with per-term AND; exact regex remains authority for whole-word/CJK matching only; independent from M1 and S6.5.
 
-Decision outcome: SQ-01 **Rejected 2026-08-29**. No ADR and no production design/implementation follows. Current production behavior remains unchanged: <3 codepoint normalized LIKE fallback, ≥3 trigram FTS, exact regex matching authority, actual SearchRepository deterministic order `created_at -> message.id -> block_id`, cursor/pagination and failure semantics unchanged. M2/M3 evidence batch closed; no ready-now architecture batch remains.
+Decision outcome: SQ-01 **Rejected 2026-08-29**. No ADR and no production design/implementation follows. Current production behavior remains unchanged: <3 codepoint normalized LIKE fallback, ≥3 trigram FTS, exact regex matching authority, actual SearchRepository deterministic order `created_at -> message.id -> block_id`, cursor/pagination and failure semantics unchanged. M2/M3 evidence batch closed; no ready-now Phase 6/DB-health architecture batch remains.
 
 Rationale (architecture cost allocation, not threshold): indexed SEARCH and exact tested parity were demonstrated, but the candidate imposes global character-proportional auxiliary rows, substantial directional storage growth scaling with normalized content, and trigger maintenance on hot insert/update/delete paths to optimize only the <3-codepoint search fallback. This is an unfavorable architecture cost allocation. Do not reinterpret as “no query improvement” or threshold failure.
 
@@ -545,11 +545,47 @@ Future reopening boundary: SQ-01 may not be silently revived. Future short-query
 
 ### 6.8 Phase 7: Startup Architecture
 
-- **Entry**: Phase 2 complete; explicit approval. Conversation-startup depends on Phase 3.
-- **Content**: Validate Phase 3 activation effects (ContentSearch/EditMode invocation gating, optional panels); optimize boot services, Redux rehydration, Dexie init, SQLite cold open, bundle loading; background window lifecycle.
-- **Exit**: Startup improvements validated (conversation-startup integrated, boot ordering/bundle improved). Cold-open `<500 ms` threshold owned by `performance-measurement.md`, not this program.
-- **Dependencies**: Phase 2; Phase 3 for conversation-startup; boot tracks independent.
-- **Relationship**: See §8 — conversation tracks enable lazy activation but do not block independent boot optimizations.
+- **Status**: **S7.1 Authorized for Implementation (2026-08-29)** — renderer-only bundle/activation boundary: lazy-load secondary top-level routes while keeping first-window `/` chat eager. **S7.2+ Open (deferred)** — no other Phase 7 slice authorized; Main startup reorder, Antd locale splitting, Inputbar changes, telemetry/retention/deletion deferral remain not authorized.
+- **Entry**: Phase 2 complete; explicit approval. Conversation-startup (S3.5) already closed; S7.1 independent of Phase 4/5/6 and does not depend on M4/M5/M6.
+- **Exit (S7.1)**: Secondary route chunks separate from eager home contract — production-build artifact/resource assertion proves all five secondary routes separately lazy-loaded and Home eager, plus bounded localized fallback and explicit chunk-load failure retry/recovery validated via focused Vitest + fresh-build Playwright using the shared fixture navigating/rendering all five routes (localized loading/recoverable failure as technically feasible); no governance crossing; `pnpm build:check` passes on exact worktree; residual risks accepted.
+- **Dependencies**: Phase 2; Phase 3 stable host for conversation-startup (already satisfied). S7.1 touches only renderer bundle/activation; no Main/preload/shared/IPC/SQLite/Dexie/StoreSync/identity/sync/context-window dependency.
+- **Relationship**: See §8 — S7.1 is the bundle/activation track; conversation lazy activation (S3.5) remains distinct and not duplicated; independent boot-service tracks remain deferred under S7.2+.
+
+#### 6.8.1 Reconnaissance (2026-08-29, docs-only)
+
+Observed current-state facts at authorization time: `src/renderer/src/Router.tsx` eagerly statically imports `HomePage`, `FilesPage`, `NotesPage`, `KnowledgePage`, `SettingsPage`, `LaunchpadPage` and mounts them via `<Routes>` inside `<HashRouter>` with `<Sidebar />` and `<NavigationHandler />` always rendered; `src/renderer/src/App.tsx` provider/gate chain (`Provider` → `QueryClientProvider` → `StyleSheetManager` → `ThemeProvider` → `AntdProvider` → `NotificationProvider` → `CodeStyleProvider` → `PersistGate` → `SidebarWidthInitializer` → `CatalogHandoffBoundary` → `ImportProjectionGate` → `TopViewContainer` → `Router`) is eager and unchanged; `/` (`HomePage`) is the first-window critical route. Main startup reorder candidates were considered and not selected due to lifecycle races. Existing S3.5 ContentSearch (parent-owned lazy mount) and EditMode (light gate) lazy activation must not be duplicated by S7.1.
+
+#### 6.8.2 S7.1 Contract — Renderer-Only Lazy Secondary Routes
+
+**Intent**: Establish a renderer-only bundle/activation boundary that keeps the first-window `/` chat path eager while deferring non-home top-level route code to separate chunks loaded on demand.
+
+**Current-state facts**: As above — six top-level pages eagerly imported in `Router.tsx`; Sidebar, NavigationHandler, and App provider/gate chain eager; no existing route-level lazy boundary for Files/Notes/Knowledge/Settings/Launchpad.
+
+**Scope**: Keep `HomePage`, `Sidebar`, `NavigationHandler`, and the full `App` provider/gate chain eager. Lazy-load only `FilesPage`, `NotesPage`, `KnowledgePage`, `SettingsPage`, `LaunchpadPage` at their existing routes (`/files`, `/notes`, `/knowledge`, `/settings/*`, `/launchpad`). No route path, navigation semantics, layout/sidebar continuity, or provider context change.
+
+**Non-goals**: No Main/preload/shared IPC, SQLite/Dexie schema, persistence key/version, StoreSync, identity/compatibility/release/platform, context-window, sync, or `architecture.md` change. No Main service init reorder, no Antd locale splitting, no Inputbar changes, no telemetry/retention/deletion work, no other Phase 7 slice. No S3.5 duplication. No absolute performance threshold/baseline/SLA introduction.
+
+**Behavior / failure / fallback / rollback**:
+- **Behavior**: Route paths and navigation semantics preserved; layout/sidebar continuity preserved; provider context (Theme/Antd/Notification/CodeStyle/QueryClient/Redux Persist) preserved; `CatalogHandoffBoundary`/`ImportProjectionGate` recovery/import projection gates preserved; first `/` chat behavior unchanged; i18n rules unchanged (no hardcoded strings; `i18n:check`/`i18n:sync` still govern).
+- **Failure**: Chunk-load failure must be user-visible and explicit — no silent fallback or hidden substitution; error recovery must allow retry/navigation without requiring app restart (exact mechanism may follow house style, e.g., retry affordance or error boundary recovery, but must be explicit and not a blank indefinite surface).
+- **Fallback**: Route loading must have a bounded localized fallback (e.g., localized suspense/loading surface scoped to the route outlet, not a full-app blank) — no blank indefinite surface.
+- **Rollback**: One semantic revert to eager static route imports and removal of lazy boundary/fallback. No data migration or state repair.
+
+**Verification / audit / gate**:
+- **Production-build artifact/resource assertion**: Fresh production build artifact/resource inspection proves all five secondary routes (`FilesPage`, `NotesPage`, `KnowledgePage`, `SettingsPage`, `LaunchpadPage`) are each separately lazy-loaded in distinct chunks and `HomePage` (`/`) remains eager (no lazy indirection), without brittle filename/hash assertions and without inventing an unavailable manifest — chunk/resource topology evidence only.
+- **Focused Vitest/component tests**: Eager Home vs lazy secondary route contract and loading/error behavior — Home (`/`) remains eager and renders without lazy indirection; secondary routes are lazy-deferred (separate chunks) and exhibit bounded localized fallback on loading and explicit user-visible failure/retry recovery on chunk error (no blank indefinite surface).
+- **Fresh-build Playwright using shared fixture (integrated)**: Fresh production build + shared Playwright fixture launches app, verifies eager `/` Home, then navigates/renders all five secondary routes (`/files`, `/notes`, `/knowledge`, `/settings/*`, `/launchpad`) proving chunk load and render, plus localized fallback and recoverable failure contract verification as technically feasible — bundle chunk loading is integrated behavior.
+- **Diagnostic UI observation** (`pnpm ui:observe` or equivalent) may supplement but never proves regression.
+- **Audit & gate**: One independent audit and one authoritative `pnpm build:check` for the exact final implementation worktree state are mandatory per §10.3. No formal performance threshold, baseline, SLA, or mandatory calibration — structural result is separate secondary route chunks and unchanged eager home contract; any reproducible material controlled regression under same-state comparison must be dispositioned per ARCH-010.
+
+**Residual risks (accepted at authorization)**:
+- Chunk-load failure surface depends on network/build integrity; retry path must be explicit but adds a transient error state.
+- Localized fallback adds a brief loading surface on first secondary navigation (bounded, not blank).
+- Bundle split increases chunk count; misconfiguration could regress eager home chunk size — gated by build output inspection and `pnpm build:check`.
+- No Main/IPC/schema boundary crossed, so no migration or cross-process regression expected; renderer-only risk remains scoped to route activation.
+- PERF workstreams remain independent/open per ARCH-011; no threshold adopted.
+
+**Authorization**: **Authorized for Implementation** — S7.1 as defined above is the single authorized Phase 7 production implementation slice. The next commit after this docs batch is direct production implementation with no additional candidate/evidence/authorization docs-only commit. This S7.1 batch definition is complete; no further pre-implementation design/evidence/authorization docs-only commit is required unless a new governance/product conflict emerges.
 
 ### 6.9 Phase 8: Future Sync Decision
 
@@ -579,7 +615,7 @@ PERF-DB-HEALTH reclassified per architecture dependency splits.
 
 All are read-only with respect to production/user state (M8 permitted owned temporary backup/restore writes inside isolated `mkdtemp` root only; M4 is read-only post-seed numeric aggregation; M5 uses only owned synthetic SQLite rows plus explicit synthetic catalog/physical booleans). They do not require governance/ADR but require explicitly activated decision/outcome with all four evidence-task fields before execution can count as valid/progress (`performance-program.md` §4B); explicit activation alone is insufficient. Harness implementation or synthetic execution is not production authorization and does not authorize S6.5.
 
-**Current DB-health frontier:** S6.4 SQ-01 Rejected 2026-08-29 — no ADR, no production implementation, current LIKE retained; M2/M3 evidence batch closed. M4 bounded synthetic profiles (1k, 10k, and 50k) and the bounded M5 small/medium synthetic matrix are implemented/executed only as measurement-only directional L3 evidence. M5 does not access user data or real profile/ZIP/Dexie/Files state and emits no paths, content, credentials, or observed raw DB size. Real-corpus/physical-size evidence and any production file dual-state resolution remain unresolved; M5 future runs are inactive by default. No production authority/schema/IPC/persistence behavior changed; no threshold/baseline/capacity/eviction/policy, runtime-consistency proof, S6.5 authorization, or Phase 4/5/6 closure follows. Any real-corpus/physical-size diagnostic or production S6.5 work remains ADR/governance-gated; no evidence batch ready and no ready-now architecture batch remains.
+**Current DB-health frontier:** S6.4 SQ-01 Rejected 2026-08-29 — no ADR, no production implementation, current LIKE retained; M2/M3 evidence batch closed. M4 bounded synthetic profiles (1k, 10k, and 50k) and the bounded M5 small/medium synthetic matrix are implemented/executed only as measurement-only directional L3 evidence. M5 does not access user data or real profile/ZIP/Dexie/Files state and emits no paths, content, credentials, or observed raw DB size. Real-corpus/physical-size evidence and any production file dual-state resolution remain unresolved; M5 future runs are inactive by default. No production authority/schema/IPC/persistence behavior changed; no threshold/baseline/capacity/eviction/policy, runtime-consistency proof, S6.5 authorization, or Phase 4/5/6 closure follows. Any real-corpus/physical-size diagnostic or production S6.5 work remains ADR/governance-gated; no DB-health evidence batch ready and no ready-now Phase 6/DB-health architecture batch remains.
 
 ### 7.2 Architecture-phase-dependent (requires governance)
 
@@ -596,7 +632,7 @@ All are read-only with respect to production/user state (M8 permitted owned temp
 
 - **C-01 logical payload**, **C-02 heap**, **pinned working-set** calibrations are synthetic, measurement-only, directional, non-adoption. They demonstrate canonical invariants (lexicographic keys, compact JSON, determinism), partition-sum exactness, orphan/non-finite rejection, and single-machine heap-amplification sampling (GC-sensitive, `performance.memory` precise mode). Per-profile values and enlargement ratios are traceable via gitignored artifacts under `test-results/bench-results/` with schema v1; they are not thresholds, baselines, or capacity policies. **C-01 canonical accounting is shared pure cross-runtime infrastructure** (`packages/shared/chatDb/logicalPayload.ts`, `TextEncoder`/`utf8ByteLength`, Buffer parity proved; `phase4-logical-payload-v1`, B-01/B-02/B-05 values, strict boundary semantics, and schema v1/benchmark IDs preserved) — no working-set policy, IPC, persistence, or capacity-threshold adoption. The full Phase 4 sequence is executable on demand via the explicit opt-in composite command `pnpm calibration:phase4` (alias `pnpm bench:phase4-calibration`, `scripts/calibration-phase4.ts`; §6.5.9) which runs in order `pnpm bench:logical-payload` (Node) → `pnpm bench:pinned-working-set` (Node) → `pnpm build` (Electron) → `pnpm test:e2e -- tests/e2e/specs/conversation/perf-c02-heap-calibration.spec.ts` (Electron, C-02 mixed; `C02_HEAP_CALIBRATION=mixed` injected only into that final child environment via cross-platform `spawnSync` env merge, not shell prefix) with C02 env isolated to the final step, fail-closed per step, and preserves independent schema-v1 artifacts (`logical-retained-payload-calibration`, `pinned-working-set-calibration`, `chatdb-c02-renderer-heap-e2e` under `test-results/`, gitignored, privacy-safe); execution is measurement-only, does not close Phase 5 (Phase 4 already closed via outcome/residual-risk), does not adopt B-01..B-05, has no CI auto-invocation, and requires pinned toolchain Node 24.11.1/pnpm 10.27.0. Git log retains run provenance; this program retains only the assessment that full distribution calibration and exercised-workload validation remain Open.
 - **M2/M3/M7** clean-HEAD directional evidence demonstrates harness correctness and attribution (50k corpus for M2/M3, ~1k messages for M7) with parity and correctness gates; no index benefit or threshold adoption.
-- **M4** 1k, 10k, and 50k synthetic directional evidence — via `pnpm bench:m4-fts-dup` (directional only, measurement-only; S6.5 remains Candidate — Not Authorized; real corpora and physical DB size remain unresolved; provenance in Git, exact metrics in `performance-measurement.md` §6 summary and `performance-workstreams.md` §2.4). Further M4 real-corpus/physical-size work requires explicitly activated decision/outcome + four fields and governance/ADR; no production batch is Ready now.
+- **M4** 1k, 10k, and 50k synthetic directional evidence — via `pnpm bench:m4-fts-dup` (directional only, measurement-only; S6.5 remains Candidate — Not Authorized; real corpora and physical DB size remain unresolved; provenance in Git, exact metrics in `performance-measurement.md` §6 summary and `performance-workstreams.md` §2.4). Further M4 real-corpus/physical-size work requires explicitly activated decision/outcome + four fields and governance/ADR; no DB-health production batch is Ready now.
 - **M8** backup/restore harness validates archive safety, authoritative `chat.db` presence, excluded artifact absence, snapshot integrity, and staged restore parity (inside `preExitCleanup` callback) via isolated synthetic fixtures; no real relaunch/startup promotion proven; single-machine synthetic only.
 - **B-01..B-05** calibration harness is implemented, inactive by default, optional/non-blocking; B-01..B-05 are now enforced renderer-local retention and the harness remains measurement-only directional — not thresholds/baselines/capacity eviction adoption beyond implemented defaults. Phase 4 closed 2026-08-29 (outcome/residual-risk).
 - **M6** synthetic sync metadata gap harness is **harness Implemented, inactive by default, not yet executed**; it is analysis-only and does not define schema, migration, sync design, or authorization. Exact execution provenance is intentionally absent until an actual run is recorded.
@@ -611,19 +647,20 @@ Contract `chatdb-m8-l3-archive-health` as `main-native` Node lane (ABI 137) with
 
 Conversation lifecycle design directly enables:
 
-- **Lazy activation**: Deferred mount of ContentSearch/EditMode/optional panels.
-- **Bounded state**: Scoped, GC-able topic projections.
+- **Lazy activation (S3.5)**: Deferred mount of ContentSearch/EditMode/optional panels — closed, not duplicated by S7.1.
+- **Bounded state**: Scoped, GC-able topic projections (Phase 4).
+- **Bundle/activation boundary (S7.1)**: Secondary top-level routes deferred to separate chunks while `/` chat remains eager — renderer-only, no Main/IPC/schema boundary.
 
-Independent tracks not blocked by conversation refactoring:
+Independent/deferred tracks not blocked by S7.1 (S7.2+ deferred):
 
-| Track | Description | Independence |
-|---|---|---|
-| App boot services | Service init order/parallelism | Independent |
-| Redux rehydration | redux-persist hydration from IndexedDB | Independent |
-| Dexie init | IndexedDB upgrade/connection | Independent |
-| SQLite cold open | First DB open latency (`<500 ms` in `performance-measurement.md`) | Main-process, independent |
-| Bundle loading | JS bundle size/load time | Build/tooling, independent |
-| Background windows | Trace viewer, import window lifecycle | Independent, deferrable |
+| Track | Description | Independence | Status |
+|---|---|---|---|
+| App boot services | Service init order/parallelism | Independent | S7.2+ deferred (not selected, lifecycle races) |
+| Redux rehydration | redux-persist hydration from IndexedDB | Independent | Deferred |
+| Dexie init | IndexedDB upgrade/connection | Independent | Deferred |
+| SQLite cold open | First DB open latency (`<500 ms` in `performance-measurement.md`) | Main-process, independent | Deferred |
+| Bundle loading (S7.1) | Secondary route chunks (Files/Notes/Knowledge/Settings/Launchpad) | Build/tooling, renderer-only | **S7.1 Authorized for Implementation** |
+| Background windows | Trace viewer, import window lifecycle | Independent, deferrable | Deferred |
 
 ---
 
@@ -725,8 +762,8 @@ Each phase requires:
 | Specific index/query optimizations | Phase 6 | **S6.4 SQ-01 Rejected 2026-08-29 — no ADR, no production implementation; current LIKE retained; M2/M3 batch closed** — prior 2026-08-29 Need Specific Evidence rationale preserved concisely in §6.7.1; accepted exact tested parity and deterministic SEARCH improvement, but directional storage scales with normalized content and trigger maintenance adds hot-write cost — unfavorable cost allocation (not threshold failure); synthetic evidence not a baseline/threshold/SLA; see §6.7.1 for decision, rationale, ordering correction (`created_at -> message.id -> block_id` evidence-only) and future reopening boundary (new candidate with materially different cost structure + fresh four-field contract; SQ-01 not silently revived); any schema/index remains ADR-gated |
 | File dual-state resolution | Phase 6 | **Candidate S6.5 — Not Authorized**; depends on M5; ADR if schema/authority |
 | FTS storage dedup | Phase 6 | **Candidate S6.5 — Not Authorized**; bounded synthetic M4 profiles (1k/10k/50k) are complete as directional evidence, but no threshold/baseline/benefit or production authorization follows; real-corpus/physical-size evidence remains unresolved; exact metrics in `performance-measurement.md` §6 and status summary in `performance-workstreams.md` §2.4; any further diagnostic or production work requires an explicit decision, privacy review where applicable, and governance/ADR |
-| Data-access implementation (windowed fetch, authority-aware actions, context closure) | Phase 6 | **S6.1–S6.3 Authorized & Implemented**; **S6.4 SQ-01 Rejected 2026-08-29 (no ADR, current LIKE retained; M2/M3 batch closed; no ready-now batch)**; S6.5 Candidate — Not Authorized |
-| Startup improvements | Phase 7 | Open (deferred) |
+| Data-access implementation (windowed fetch, authority-aware actions, context closure) | Phase 6 | **S6.1–S6.3 Authorized & Implemented**; **S6.4 SQ-01 Rejected 2026-08-29 (no ADR, current LIKE retained; M2/M3 batch closed; no ready-now DB-health batch)**; S6.5 Candidate — Not Authorized |
+| Startup improvements (S7.1) | Phase 7 | **S7.1 Authorized for Implementation (2026-08-29) — renderer-only lazy secondary routes (Files/Notes/Knowledge/Settings/Launchpad) with bounded localized fallback and explicit chunk-load failure retry/recovery; eager Home/Sidebar/NavigationHandler/App gates preserved; no Main/IPC/schema/StoreSync/identity/sync/context-window/architecture.md change; verification: production-build artifact/resource assertion (five secondary routes separately lazy-loaded, Home eager, without brittle filename/hash) + focused Vitest + fresh-build Playwright using shared fixture covering all five routes (localized loading/recoverable failure as technically feasible), diagnostic UI observation supplemental only; audit + pnpm build:check mandatory; no threshold/baseline/SLA; rollback one semantic revert; no further docs-only commit required unless governance/product conflict; S7.2+ Open (deferred)** |
 | Sync architecture decisions | Phase 8 | Open (deferred) |
 
 ### 10.5 Cross-document ownership
