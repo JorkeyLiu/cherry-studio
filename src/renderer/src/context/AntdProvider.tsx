@@ -1,21 +1,14 @@
+import { loggerService } from '@logger'
 import { useSettings } from '@renderer/hooks/useSettings'
-import type { LanguageVarious } from '@renderer/types'
 import { ConfigProvider, theme } from 'antd'
-import deDE from 'antd/locale/de_DE'
-import elGR from 'antd/locale/el_GR'
-import enUS from 'antd/locale/en_US'
-import esES from 'antd/locale/es_ES'
-import frFR from 'antd/locale/fr_FR'
-import jaJP from 'antd/locale/ja_JP'
-import ptPT from 'antd/locale/pt_PT'
-import roRO from 'antd/locale/ro_RO'
-import ruRU from 'antd/locale/ru_RU'
-import viVN from 'antd/locale/vi_VN'
-import zhCN from 'antd/locale/zh_CN'
-import zhTW from 'antd/locale/zh_TW'
 import type { FC, PropsWithChildren } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
+import type { AntdLocale } from './antdLocaleLoaders'
+import { antdLocaleCache, antdLocaleLoaders, normalizeAntdLanguage } from './antdLocaleLoaders'
 import { useTheme } from './ThemeProvider'
+
+const logger = loggerService.withContext('AntdProvider')
 
 const AntdProvider: FC<PropsWithChildren> = ({ children }) => {
   const {
@@ -23,10 +16,50 @@ const AntdProvider: FC<PropsWithChildren> = ({ children }) => {
     userTheme: { colorPrimary }
   } = useSettings()
   const { theme: _theme } = useTheme()
+  const [locale, setLocale] = useState<AntdLocale | undefined>(() => {
+    const normalized = normalizeAntdLanguage(language as string)
+    return antdLocaleCache.get(normalized)
+  })
+  const requestIdRef = useRef(0)
+
+  useEffect(() => {
+    const normalized = normalizeAntdLanguage(language as string)
+    const requestId = ++requestIdRef.current
+    const cached = antdLocaleCache.get(normalized)
+    if (cached) {
+      setLocale(cached)
+      return () => {
+        if (requestIdRef.current === requestId) {
+          requestIdRef.current++
+        }
+      }
+    }
+    const loader = antdLocaleLoaders[normalized]
+    loader()
+      .then((mod) => {
+        const loaded = (mod as { default: AntdLocale }).default ?? (mod as unknown as AntdLocale)
+        antdLocaleCache.set(normalized, loaded)
+        if (requestIdRef.current !== requestId) {
+          return
+        }
+        setLocale(loaded)
+      })
+      .catch((error) => {
+        if (requestIdRef.current !== requestId) {
+          return
+        }
+        logger.error('Failed to load Antd locale', error as Error, { language: normalized })
+      })
+    return () => {
+      if (requestIdRef.current === requestId) {
+        requestIdRef.current++
+      }
+    }
+  }, [language])
 
   return (
     <ConfigProvider
-      locale={getAntdLocale(language)}
+      locale={locale}
       theme={{
         cssVar: true,
         hashed: false,
@@ -119,37 +152,6 @@ const AntdProvider: FC<PropsWithChildren> = ({ children }) => {
       {children}
     </ConfigProvider>
   )
-}
-
-function getAntdLocale(language: LanguageVarious) {
-  switch (language) {
-    case 'zh-CN':
-      return zhCN
-    case 'zh-TW':
-      return zhTW
-    case 'en-US':
-      return enUS
-    case 'de-DE':
-      return deDE
-    case 'ru-RU':
-      return ruRU
-    case 'ja-JP':
-      return jaJP
-    case 'el-GR':
-      return elGR
-    case 'es-ES':
-      return esES
-    case 'fr-FR':
-      return frFR
-    case 'pt-PT':
-      return ptPT
-    case 'ro-RO':
-      return roRO
-    case 'vi-VN':
-      return viVN
-    default:
-      return zhCN
-  }
 }
 
 export default AntdProvider
