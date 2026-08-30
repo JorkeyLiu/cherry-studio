@@ -465,4 +465,76 @@ describe('B-08 bounded ContentSearch', () => {
     expect(highlightArgs.every((a) => a.length <= 500)).toBe(true)
     document.body.removeChild(target)
   })
+
+  it('synchronous mutation without yielding: same-chunk navigation drains pending observer records and rescans', async () => {
+    const filter = makeFilter()
+    const target = document.createElement('div')
+    target.innerHTML = '<div>foo foo foo</div>'
+    document.body.appendChild(target)
+    const ref = { current: null as any } as React.RefObject<ContentSearchRef>
+    render(<ContentSearch ref={ref} searchTarget={target} filter={filter} onClose={() => {}} />)
+    const host = screen.getByTestId('content-search')
+    const liveHost = screen.getByTestId('content-search-host')
+    const input = host.querySelector('input') as HTMLInputElement
+    input.value = 'foo'
+    await act(async () => {
+      ref.current?.search()
+    })
+    await waitFor(() => expect(host.textContent).toContain('1/3'))
+    expect(liveHost.getAttribute('data-live-ranges')).toBe('3')
+    // Synchronous mutation: append text without yielding to MutationObserver async delivery
+    const extra = document.createElement('div')
+    extra.textContent = 'foo foo'
+    // Immediately navigate without setTimeout / rAF — must synchronously drain via takeRecords
+    await act(async () => {
+      target.appendChild(extra)
+      ref.current?.searchNext()
+    })
+    await waitFor(() => expect(host.textContent).toContain('2/5'))
+    expect(liveHost.getAttribute('data-live-ranges')).toBe('5')
+    expect(highlightArgs.some((a) => a.length === 5)).toBe(true)
+    expect(highlightArgs.every((a) => a.length <= 500)).toBe(true)
+    document.body.removeChild(target)
+  })
+
+  it('synchronous attribute mutation affecting filter without yielding triggers rescan via drained observer', async () => {
+    const target = document.createElement('div')
+    target.innerHTML =
+      '<div class="message message-assistant"><div class="message-content-container">hello world</div></div>' +
+      '<div class="message message-user"><div class="message-content-container">hello world</div></div>'
+    document.body.appendChild(target)
+    const chatFilterExcludeUser: NodeFilter = {
+      acceptNode(node) {
+        const container = (node.parentElement as HTMLElement)?.closest('.message-content-container')
+        if (!container) return NodeFilter.FILTER_REJECT
+        const message = container.closest('.message')
+        if (!message) return NodeFilter.FILTER_REJECT
+        if (message.classList.contains('message-assistant')) return NodeFilter.FILTER_ACCEPT
+        return NodeFilter.FILTER_REJECT
+      }
+    } as any
+    const ref = { current: null as any } as React.RefObject<ContentSearchRef>
+    render(<ContentSearch ref={ref} searchTarget={target} filter={chatFilterExcludeUser} onClose={() => {}} />)
+    const host = screen.getByTestId('content-search')
+    const liveHost = screen.getByTestId('content-search-host')
+    const input = host.querySelector('input') as HTMLInputElement
+    input.value = 'hello'
+    await act(async () => {
+      ref.current?.search()
+    })
+    await waitFor(() => expect(host.textContent).toContain('1/1'))
+    expect(liveHost.getAttribute('data-live-ranges')).toBe('1')
+    const userMsg = target.querySelector('.message-user') as HTMLElement
+    expect(userMsg).not.toBeNull()
+    // Synchronous attribute mutation (class) — snapshot textLength/childCount unchanged, observer attributes:true must invalidate
+    await act(async () => {
+      userMsg.classList.remove('message-user')
+      userMsg.classList.add('message-assistant')
+      ref.current?.searchNext()
+    })
+    await waitFor(() => expect(host.textContent).toContain('/2'))
+    expect(liveHost.getAttribute('data-live-ranges')).toBe('2')
+    expect(highlightArgs.some((a) => a.length === 2)).toBe(true)
+    document.body.removeChild(target)
+  })
 })

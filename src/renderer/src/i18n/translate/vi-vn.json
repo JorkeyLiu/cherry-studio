@@ -5733,6 +5733,16 @@
       "title": "Zoom de página"
     }
   },
+  "startup": {
+    "readiness": {
+      "error": {
+        "description": "Tải dữ liệu khởi động thất bại. Vui lòng thử lại.",
+        "retry": "Thử lại",
+        "title": "Tải không gian làm việc thất bại"
+      },
+      "loading": "Đang tải không gian làm việc..."
+    }
+  },
   "title": {
     "apps": "Ứng dụng",
     "code": "Mã",

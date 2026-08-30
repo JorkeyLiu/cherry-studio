@@ -5733,6 +5733,16 @@
       "title": "缩放"
     }
   },
+  "startup": {
+    "readiness": {
+      "error": {
+        "description": "启动数据加载失败，请重试。",
+        "retry": "重试",
+        "title": "工作区加载失败"
+      },
+      "loading": "正在加载工作区..."
+    }
+  },
   "title": {
     "apps": "小程序",
     "code": "Code",

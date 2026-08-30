@@ -5733,6 +5733,16 @@
       "title": "Escala"
     }
   },
+  "startup": {
+    "readiness": {
+      "error": {
+        "description": "Falha ao carregar os dados de arranque. Por favor, tente novamente.",
+        "retry": "Tentar novamente",
+        "title": "Falha ao carregar o espaço de trabalho"
+      },
+      "loading": "A carregar espaço de trabalho..."
+    }
+  },
   "title": {
     "apps": "Miniaplicativos",
     "code": "Código",

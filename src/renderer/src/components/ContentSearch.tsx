@@ -221,6 +221,7 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     const domGenerationRef = useRef(0)
     const domDirtyRef = useRef(false)
     const lastDomSnapshotRef = useRef<{ textLength: number; childCount: number } | null>(null)
+    const observerRef = useRef<MutationObserver | null>(null)
     // B-08 owner protocol: numeric owner created once per instance; commit claims only active/newer owner; no mount-time claim
     // Lazy initialization avoids allocating an ID on every render (preserves sessionCounter monotonic budget)
     const ownerIdRef = useRef<number>(null as unknown as number)
@@ -293,6 +294,67 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
         return null
       }
     }, [target])
+
+    // Synchronously process mutation records using the same invalidation/filtering as the async observer.
+    // Returns true when a relevant mutation was found and dirty state was marked.
+    const handleRelevantMutations = useCallback((records: MutationRecord[]) => {
+      const searchText = searchInputRef.current?.value.trim() ?? ''
+      if (!searchText) return false
+      if (searchCompletedRef.current === SearchCompletedState.NotSearched) {
+        return false
+      }
+      const host = containerRef.current
+      let hasRelevant = false
+      for (const record of records) {
+        const t = record.target
+        if (host && (t === host || host.contains(t))) {
+          continue
+        }
+        if (record.type === 'childList' && host) {
+          const nodes: Node[] = [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)]
+          let isHostStructure = false
+          for (const n of nodes) {
+            if (n === host) {
+              isHostStructure = true
+              break
+            }
+          }
+          if (isHostStructure) continue
+        }
+        hasRelevant = true
+        break
+      }
+      if (!hasRelevant) return false
+      domDirtyRef.current = true
+      domGenerationRef.current += 1
+      recordContentSearchInvalidation(ownerIdRef.current, domGenerationRef.current)
+      safeClearHighlights()
+      return true
+    }, [])
+
+    const drainPendingMutations = useCallback(() => {
+      const obs = observerRef.current
+      if (!obs) return false
+      const pending = obs.takeRecords()
+      if (pending.length === 0) return false
+      return handleRelevantMutations(pending)
+    }, [handleRelevantMutations])
+
+    // Decide staleness for same-chunk / zero-result navigation:
+    // - synchronously drain pending observer records first
+    // - if dirty already, stale without snapshot
+    // - if clean but we have a previous snapshot, skip snapshot and treat as clean
+    // - otherwise fallback to snapshot diff (covers null last or missing observer)
+    const isStaleForNavigation = useCallback(() => {
+      drainPendingMutations()
+      if (domDirtyRef.current) return true
+      const last = lastDomSnapshotRef.current
+      if (!last || !observerRef.current) {
+        const snapshot = captureDomSnapshot()
+        return !snapshot || !last || snapshot.textLength !== last.textLength || snapshot.childCount !== last.childCount
+      }
+      return false
+    }, [captureDomSnapshot, drainPendingMutations])
 
     const commitLiveChunk = useCallback(
       (ranges: Range[], nextChunkIndex: number, nextTotal: number, nextGlobal: number) => {
@@ -424,45 +486,15 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
     useEffect(() => {
       if (!target) return
       const observer = new MutationObserver((mutations) => {
-        const searchText = searchInputRef.current?.value.trim() ?? ''
-        if (!searchText) return
-        if (searchCompletedRef.current === SearchCompletedState.NotSearched) {
-          return
-        }
-        // Ignore mutations whose target is inside the ContentSearch host UI,
-        // even when the observed searchTarget (Chat mainRef) contains that host.
-        const host = containerRef.current
-        let hasRelevant = false
-        for (const record of mutations) {
-          const t = record.target
-          if (host && (t === host || host.contains(t))) {
-            continue
-          }
-          if (record.type === 'childList' && host) {
-            const nodes: Node[] = [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)]
-            let isHostStructure = false
-            for (const n of nodes) {
-              if (n === host) {
-                isHostStructure = true
-                break
-              }
-            }
-            if (isHostStructure) continue
-          }
-          hasRelevant = true
-          break
-        }
-        if (!hasRelevant) return
-        domDirtyRef.current = true
-        domGenerationRef.current += 1
-        // B-08 diagnostics: owner-aware invalidation on relevant DOM mutation
-        recordContentSearchInvalidation(ownerIdRef.current, domGenerationRef.current)
-        // Invalidate current highlights to avoid stale current-match pointing at detached ranges
-        safeClearHighlights()
+        handleRelevantMutations(mutations)
       })
+      observerRef.current = observer
       observer.observe(target, { childList: true, subtree: true, characterData: true, attributes: true })
-      return () => observer.disconnect()
-    }, [target])
+      return () => {
+        observer.disconnect()
+        if (observerRef.current === observer) observerRef.current = null
+      }
+    }, [target, handleRelevantMutations])
 
     // Target identity invalidation: active session is a completed nonempty query
     // regardless of match count. On target loss (null) synchronously clear stale result metadata;
@@ -599,14 +631,7 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
           const currentChunk = chunkIndexRef.current
           if (currentTotal === 0) {
             if (!target) return
-            const snapshot = captureDomSnapshot()
-            const last = lastDomSnapshotRef.current
-            const isDomStale =
-              domDirtyRef.current ||
-              !last ||
-              snapshot?.textLength !== last.textLength ||
-              snapshot?.childCount !== last.childCount
-            if (!isDomStale) return
+            if (!isStaleForNavigation()) return
             liveRangesRef.current = []
             safeClearHighlights()
             const result = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, 0)
@@ -651,14 +676,8 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
             }
             // Same-chunk: rescan only when rendered DOM generation is stale to preserve bounded cost.
             // Fast path (no DOM change) just advances index without materializing new Ranges.
-            const snapshot = captureDomSnapshot()
-            const last = lastDomSnapshotRef.current
-            const isDomStale =
-              domDirtyRef.current ||
-              !last ||
-              snapshot?.textLength !== last.textLength ||
-              snapshot?.childCount !== last.childCount
-            if (!isDomStale) {
+            // Synchronously drain pending observer records before trusting clean flag; skip snapshot when clean.
+            if (!isStaleForNavigation()) {
               setGlobalIndex(nextGlobal)
               return
             }
@@ -728,14 +747,7 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
           const currentChunk = chunkIndexRef.current
           if (currentTotal === 0) {
             if (!target) return
-            const snapshot = captureDomSnapshot()
-            const last = lastDomSnapshotRef.current
-            const isDomStale =
-              domDirtyRef.current ||
-              !last ||
-              snapshot?.textLength !== last.textLength ||
-              snapshot?.childCount !== last.childCount
-            if (!isDomStale) return
+            if (!isStaleForNavigation()) return
             liveRangesRef.current = []
             safeClearHighlights()
             const result = scanTargetForChunk(target, filter, searchText, isCaseSensitive, isWholeWord, 0)
@@ -778,14 +790,7 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
               setGlobalIndex(prevGlobal)
               return
             }
-            const snapshot = captureDomSnapshot()
-            const last = lastDomSnapshotRef.current
-            const isDomStale =
-              domDirtyRef.current ||
-              !last ||
-              snapshot?.textLength !== last.textLength ||
-              snapshot?.childCount !== last.childCount
-            if (!isDomStale) {
+            if (!isStaleForNavigation()) {
               setGlobalIndex(prevGlobal)
               return
             }
@@ -875,7 +880,7 @@ export const ContentSearch = React.forwardRef<ContentSearchRef, Props>(
         clearLiveChunk,
         scheduleFocusRaf,
         scheduleSearchRaf,
-        captureDomSnapshot
+        isStaleForNavigation
       ]
     )
 

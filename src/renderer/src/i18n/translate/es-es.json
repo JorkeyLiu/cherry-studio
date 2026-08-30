@@ -5733,6 +5733,16 @@
       "title": "Escala"
     }
   },
+  "startup": {
+    "readiness": {
+      "error": {
+        "description": "No se pudieron cargar los datos de inicio. Por favor, inténtelo de nuevo.",
+        "retry": "Reintentar",
+        "title": "Error al cargar el espacio de trabajo"
+      },
+      "loading": "Cargando espacio de trabajo..."
+    }
+  },
   "title": {
     "apps": "Aplicaciones",
     "code": "Código",

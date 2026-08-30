@@ -5733,6 +5733,16 @@
       "title": "Zoom pagină"
     }
   },
+  "startup": {
+    "readiness": {
+      "error": {
+        "description": "Datele de pornire nu au putut fi încărcate. Vă rugăm să reîncercați.",
+        "retry": "Reîncercare",
+        "title": "Încărcarea spațiului de lucru a eșuat"
+      },
+      "loading": "Se încarcă spațiul de lucru..."
+    }
+  },
   "title": {
     "apps": "Aplicații",
     "code": "Cod",

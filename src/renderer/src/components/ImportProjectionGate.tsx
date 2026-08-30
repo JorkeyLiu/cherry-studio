@@ -7,27 +7,51 @@
  * `applyPendingImportProjection` has replaced/flushed/acked the imported
  * navigation. This gate renders NO children until the import projection
  * readiness settles successfully (`importProjectionReadiness`); while
- * pending or after a failure it renders nothing, so the ordinary chat tree
- * stays unmounted and no stale topic load can occur. A failure leaves the
- * pending row unacked for next-startup retry (no infinite retry here).
+ * pending it shows a localized accessible loading state (S7.2), and after a
+ * failure it shows a localized actionable retry surface — the ordinary chat
+ * tree stays unmounted and no stale topic load can occur until a successful
+ * settlement. A failure leaves the pending row unacked for next-startup
+ * retry; S7.2 also offers an in-session retry that reruns the captured
+ * dispatch → flush → ack path without re-notifying ReduxStoreReady.
  *
  * Placement: INSIDE `CatalogHandoffBoundary` (in App.tsx), because the
  * catalog recovery handler must still register at App mount in every window
  * (LOCK-BRIDGE-1 handshake) — the gate only blocks the ordinary
  * TopViewContainer/Router tree.
- *
- * `null` loading is deliberate and testable: this boot window is normally a
- * few IPC round-trips (read → replace-all dispatch → flush → ack), and a
- * blank frame is safer than any flash of stale navigation.
  */
 
-import { useEffect, useState } from 'react'
+import { Alert, Button, Spin } from 'antd'
+import { useCallback, useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import styled from 'styled-components'
 
-import { isImportProjectionReady, subscribeImportProjectionReadiness } from '../services/importProjectionReadiness'
+import type { ImportProjectionReadinessState } from '../services/importProjectionReadiness'
+import {
+  getImportProjectionReadinessState,
+  isImportProjectionReady,
+  retryImportProjectionReadiness,
+  subscribeImportProjectionReadiness
+} from '../services/importProjectionReadiness'
+
+const Container = styled.div`
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  min-height: 200px;
+  padding: 24px;
+`
+
+const StyledAlert = styled(Alert)`
+  max-width: 560px;
+  width: 100%;
+`
 
 /**
- * React view of the import projection readiness singleton. `true` only after
+ * React view of the import projection readiness boolean. `true` only after
  * the projection has safely settled (applied or verified no-pending).
+ * Retained for backward compatibility.
  */
 export function useImportProjectionReadiness(): boolean {
   const [ready, setReady] = useState<boolean>(() => isImportProjectionReady())
@@ -48,12 +72,80 @@ export function useImportProjectionReadiness(): boolean {
   return ready
 }
 
+/**
+ * React view of the raw readiness state — enables the gate to distinguish
+ * `pending` (loading) from `failed` (retry surface) while still preventing
+ * children from mounting (LOCK-PROJECTION).
+ */
+export function useImportProjectionReadinessState(): ImportProjectionReadinessState {
+  const [readinessState, setReadinessState] = useState<ImportProjectionReadinessState>(() =>
+    getImportProjectionReadinessState()
+  )
+
+  useEffect(() => {
+    const unsubscribe = subscribeImportProjectionReadiness(() => {
+      setReadinessState(getImportProjectionReadinessState())
+    })
+    // Re-read after subscription in case state settled between render and effect
+    setReadinessState(getImportProjectionReadinessState())
+    return unsubscribe
+  }, [])
+
+  return readinessState
+}
+
 export function ImportProjectionGate({ children }: { children: React.ReactNode }) {
-  const ready = useImportProjectionReadiness()
-  if (!ready) {
-    return null
+  const state = useImportProjectionReadinessState()
+  const { t } = useTranslation()
+  const [retrying, setRetrying] = useState(false)
+
+  const handleRetry = useCallback(async () => {
+    if (retrying) return
+    setRetrying(true)
+    try {
+      await retryImportProjectionReadiness()
+    } finally {
+      setRetrying(false)
+    }
+  }, [retrying])
+
+  if (state === 'ready') {
+    return <>{children}</>
   }
-  return <>{children}</>
+
+  if (state === 'failed') {
+    return (
+      <Container data-testid="startup-readiness-error" role="alert" aria-live="assertive">
+        <StyledAlert
+          type="error"
+          showIcon
+          message={t('startup.readiness.error.title')}
+          description={t('startup.readiness.error.description')}
+          action={
+            <Button
+              size="small"
+              type="primary"
+              onClick={handleRetry}
+              loading={retrying}
+              disabled={retrying}
+              data-testid="startup-readiness-retry"
+              aria-label={t('startup.readiness.error.retry')}>
+              {t('startup.readiness.error.retry')}
+            </Button>
+          }
+        />
+      </Container>
+    )
+  }
+
+  // pending — localized accessible loading while still gating children
+  return (
+    <Container data-testid="startup-readiness-loading" aria-busy="true" aria-label={t('startup.readiness.loading')}>
+      <Spin tip={t('startup.readiness.loading')} size="default">
+        <div style={{ padding: 40 }} />
+      </Spin>
+    </Container>
+  )
 }
 
 export default ImportProjectionGate

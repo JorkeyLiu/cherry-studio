@@ -5733,6 +5733,16 @@
       "title": "縮放"
     }
   },
+  "startup": {
+    "readiness": {
+      "error": {
+        "description": "啟動資料載入失敗，請重試。",
+        "retry": "重試",
+        "title": "載入工作區失敗"
+      },
+      "loading": "正在載入工作區..."
+    }
+  },
   "title": {
     "apps": "小程式",
     "code": "程式碼",

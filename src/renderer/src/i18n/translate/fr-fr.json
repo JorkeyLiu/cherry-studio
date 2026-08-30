@@ -5733,6 +5733,16 @@
       "title": "Zoom"
     }
   },
+  "startup": {
+    "readiness": {
+      "error": {
+        "description": "Le chargement des données de démarrage a échoué. Veuillez réessayer.",
+        "retry": "Réessayer",
+        "title": "Échec du chargement de l'espace de travail"
+      },
+      "loading": "Chargement de l'espace de travail..."
+    }
+  },
   "title": {
     "apps": "Mini-programmes",
     "code": "Code",

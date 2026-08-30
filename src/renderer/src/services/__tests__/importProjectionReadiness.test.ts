@@ -15,6 +15,7 @@ import {
   getImportProjectionReadinessState,
   isImportProjectionReady,
   resetImportProjectionReadiness,
+  retryImportProjectionReadiness,
   runImportProjectionBoot,
   runReduxStoreBoot,
   settleImportProjectionReadiness,
@@ -180,5 +181,84 @@ describe('runReduxStoreBoot (LOCK-003 store boot seam)', () => {
     expect(result).toBe('ready')
     expect(isImportProjectionReady()).toBe(true)
     expect(getImportProjectionReadinessState()).toBe('ready')
+  })
+})
+
+describe('retryImportProjectionReadiness (S7.2 renderer-local recovery)', () => {
+  beforeEach(() => {
+    resetImportProjectionReadiness()
+  })
+
+  it('is noop when state is pending or ready', async () => {
+    expect(await retryImportProjectionReadiness()).toBe('noop')
+    expect(getImportProjectionReadinessState()).toBe('pending')
+    await runImportProjectionBoot({ apply: async () => true })
+    expect(getImportProjectionReadinessState()).toBe('ready')
+    expect(await retryImportProjectionReadiness()).toBe('noop')
+    expect(getImportProjectionReadinessState()).toBe('ready')
+  })
+
+  it('transitions failed -> pending then ready on successful retry and notifies', async () => {
+    let shouldFail = true
+    const flakyApply = async () => {
+      if (shouldFail) throw new Error('fail once')
+      return true
+    }
+    await runImportProjectionBoot({ apply: flakyApply })
+    expect(getImportProjectionReadinessState()).toBe('failed')
+    const listener = vi.fn()
+    const unsubscribe = subscribeImportProjectionReadiness(listener)
+    try {
+      shouldFail = false
+      const result = await retryImportProjectionReadiness()
+      expect(result).toBe('ready')
+      expect(isImportProjectionReady()).toBe(true)
+      // failed -> pending (1) then pending -> ready (1) = 2 notifications
+      expect(listener).toHaveBeenCalledTimes(2)
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('failed -> pending -> failed on retry failure remains gated', async () => {
+    await runImportProjectionBoot({
+      apply: async () => {
+        throw new Error('first fail')
+      }
+    })
+    expect(getImportProjectionReadinessState()).toBe('failed')
+    const result = await retryImportProjectionReadiness()
+    expect(result).toBe('failed')
+    expect(getImportProjectionReadinessState()).toBe('failed')
+    expect(isImportProjectionReady()).toBe(false)
+  })
+
+  it('retry notifies pending before success so gate can show loading', async () => {
+    const states: string[] = []
+    const unsubscribe = subscribeImportProjectionReadiness(() => states.push(getImportProjectionReadinessState()))
+    let resolveDeferred!: (v: boolean) => void
+    const deferredApply = () =>
+      new Promise<boolean>((resolve) => {
+        resolveDeferred = resolve
+      })
+    // First boot fails with deferred apply captured as storedApply (rejected)
+    // Use a flaky that fails once to capture deferred? Simpler: use deferred that rejects first then resolves
+    let deferredShouldFail = true
+    const flakyDeferred = async () => {
+      if (deferredShouldFail) throw new Error('fail once')
+      return deferredApply()
+    }
+    await runImportProjectionBoot({ apply: flakyDeferred })
+    expect(getImportProjectionReadinessState()).toBe('failed')
+    states.length = 0
+    deferredShouldFail = false
+    const retryPromise = retryImportProjectionReadiness()
+    // Immediately after retry call, state should be pending (loading)
+    expect(getImportProjectionReadinessState()).toBe('pending')
+    expect(states).toContain('pending')
+    resolveDeferred(true)
+    await retryPromise
+    expect(getImportProjectionReadinessState()).toBe('ready')
+    unsubscribe()
   })
 })

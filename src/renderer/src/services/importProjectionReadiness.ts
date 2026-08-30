@@ -38,6 +38,7 @@ export type ImportProjectionReadinessState = 'pending' | 'ready' | 'failed'
 
 let state: ImportProjectionReadinessState = 'pending'
 const listeners = new Set<() => void>()
+let storedApply: (() => Promise<boolean>) | null = null
 
 /** True only after the projection has safely settled (applied or no-pending). */
 export function isImportProjectionReady(): boolean {
@@ -74,10 +75,12 @@ export function settleImportProjectionReadiness(next: Exclude<ImportProjectionRe
 
 /**
  * Test-only: reset to `pending` so each test controls its own settle path.
- * Listeners persist; a fresh settle re-notifies them.
+ * Listeners persist; a fresh settle re-notifies them. Clears the captured
+ * apply so retry without a fresh boot is a no-op.
  */
 export function resetImportProjectionReadiness(): void {
   state = 'pending'
+  storedApply = null
 }
 
 /** Dependencies injected by the store (post-rehydrate), not imported. */
@@ -105,6 +108,7 @@ export interface ImportProjectionBootDeps {
  * guard only.
  */
 export async function runImportProjectionBoot(deps: ImportProjectionBootDeps): Promise<'ready' | 'failed'> {
+  storedApply = deps.apply
   let applied: boolean
   try {
     applied = await deps.apply()
@@ -146,6 +150,7 @@ export interface ReduxStoreBootDeps {
  * projection boot still runs.
  */
 export async function runReduxStoreBoot(deps: ReduxStoreBootDeps): Promise<'ready' | 'failed'> {
+  storedApply = deps.apply
   try {
     deps.notifyMain()
   } catch (error) {
@@ -154,4 +159,32 @@ export async function runReduxStoreBoot(deps: ReduxStoreBootDeps): Promise<'read
     logger.warn('ReduxStoreReady notification failed (store still selectable):', error as Error)
   }
   return runImportProjectionBoot({ apply: deps.apply })
+}
+
+/**
+ * Retry the one-shot L2 navigation projection after a previous failure
+ * (S7.2 renderer-local recovery).
+ *
+ * Only valid from `failed` — transitions `failed` → `pending` so the gate
+ * shows the localized loading state again, then reruns the captured
+ * `applyPendingImportProjection` path (dispatch → flush → ack). A successful
+ * retry settles `ready` and opens the ordinary tree; a failed retry re-settles
+ * `failed` and the tree stays gated. Pending/ready retries are no-ops.
+ * Never acknowledges a failed projection before a successful flush — that
+ * ordering is enforced by `applyPendingImportProjection` itself.
+ */
+export async function retryImportProjectionReadiness(): Promise<'ready' | 'failed' | 'noop'> {
+  if (state !== 'failed') {
+    return 'noop'
+  }
+  if (!storedApply) {
+    logger.warn('Import projection retry requested without captured apply — cannot retry')
+    return 'failed'
+  }
+  // failed -> pending so the gate shows loading again during the retry
+  state = 'pending'
+  for (const listener of [...listeners]) {
+    listener()
+  }
+  return runImportProjectionBoot({ apply: storedApply })
 }

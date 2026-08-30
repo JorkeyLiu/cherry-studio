@@ -5733,6 +5733,16 @@
       "title": "Zoom"
     }
   },
+  "startup": {
+    "readiness": {
+      "error": {
+        "description": "Startdaten konnten nicht geladen werden. Bitte erneut versuchen.",
+        "retry": "Wiederholen",
+        "title": "Arbeitsbereich konnte nicht geladen werden"
+      },
+      "loading": "Arbeitsbereich wird geladen..."
+    }
+  },
   "title": {
     "apps": "Mini-Apps",
     "code": "Code",

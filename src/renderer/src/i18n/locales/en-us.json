@@ -5733,6 +5733,16 @@
       "title": "Page Zoom"
     }
   },
+  "startup": {
+    "readiness": {
+      "error": {
+        "description": "Startup data failed to load. Please retry.",
+        "retry": "Retry",
+        "title": "Failed to load workspace"
+      },
+      "loading": "Loading workspace..."
+    }
+  },
   "title": {
     "apps": "Apps",
     "code": "Code",
