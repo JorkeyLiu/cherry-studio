@@ -1,5 +1,7 @@
-import * as XLSX from '@e965/xlsx'
+import type * as XLSX from '@e965/xlsx'
 import dayjs from 'dayjs'
+
+import { loadXLSX } from './xlsxLoader'
 
 /**
  * 解析 Markdown 表格为二维数组
@@ -43,6 +45,14 @@ export function parseMarkdownTable(markdown: string): string[][] {
   return data
 }
 
+type XLSXModule = typeof XLSX
+type XLSXWithDefault = XLSXModule & { default?: XLSXModule }
+
+function resolveXLSX(mod: XLSXModule): XLSXModule {
+  const maybeDefault = (mod as XLSXWithDefault).default
+  return maybeDefault ?? mod
+}
+
 /**
  * 导出 Markdown 表格为 Excel 文件
  * @param markdown Markdown 格式的表格字符串
@@ -54,6 +64,9 @@ export async function exportTableToExcel(markdown: string): Promise<boolean> {
   if (data.length === 0) {
     return false
   }
+
+  const mod = await loadXLSX()
+  const XLSX = resolveXLSX(mod)
 
   // 创建工作表
   const worksheet = XLSX.utils.aoa_to_sheet(data)
