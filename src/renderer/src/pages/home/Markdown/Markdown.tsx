@@ -1,8 +1,6 @@
-import 'katex/dist/katex.min.css'
-import 'katex/dist/contrib/copy-tex'
-import 'katex/dist/contrib/mhchem'
 import 'remark-github-blockquote-alert/alert.css'
 
+import { loggerService } from '@logger'
 import ImageViewer from '@renderer/components/ImageViewer'
 import MarkdownShadowDOMRenderer from '@renderer/components/MarkdownShadowDOMRenderer'
 import { useSmoothStream } from '@renderer/hooks/useSmoothStream'
@@ -13,17 +11,17 @@ import { isEmpty } from 'lodash'
 import { type FC, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import ReactMarkdown, { type Components, defaultUrlTransform } from 'react-markdown'
-import rehypeKatex from 'rehype-katex'
 import rehypeRaw from 'rehype-raw'
 import remarkCjkFriendly from 'remark-cjk-friendly'
 import remarkGfm from 'remark-gfm'
 import remarkAlert from 'remark-github-blockquote-alert'
-import remarkMath from 'remark-math'
 import type { Pluggable } from 'unified'
 
 import CodeBlock from './CodeBlock'
+import { containsMath } from './containsMath'
 import Link from './Link'
 import MarkdownSvgRenderer from './MarkdownSvgRenderer'
+import { loadMathRuntime, type MathRuntime } from './mathLoader'
 import { scheduleParsedContentCommit } from './parsedContentSchedule'
 import rehypeHeadingIds from './plugins/rehypeHeadingIds'
 import rehypeScalableSvg from './plugins/rehypeScalableSvg'
@@ -43,6 +41,7 @@ const DISALLOWED_ELEMENTS = ['iframe', 'script']
  * cost — not all updates within this window will produce a visible commit.
  */
 const MARKDOWN_PARSE_CADENCE_MS = 50
+const MATH_LOAD_MAX_ATTEMPTS_PER_BLOCK = 2
 
 interface Props {
   // message: Message & { content: string }
@@ -66,21 +65,6 @@ interface MarkdownBodyProps {
 }
 
 const MarkdownBody: FC<MarkdownBodyProps> = memo(({ blockId, isPausedEmpty, parsedContent, t }: MarkdownBodyProps) => {
-  // Hoisted/stabilized plugin configuration: module-level plugin references
-  // and a fixed plugin list — the array identity does not change between
-  // parses, so ReactMarkdown's processor inputs are stable per parsed commit.
-  const remarkPlugins = useMemo(() => {
-    const plugins = [
-      [remarkGfm, { singleTilde: false }] as Pluggable,
-      [remarkAlert] as Pluggable,
-      remarkCjkFriendly,
-      remarkDisableConstructs(['codeIndented']),
-      // LOCK-106: single-dollar math is always enabled.
-      [remarkMath, { singleDollarTextMath: true }] as Pluggable
-    ]
-    return plugins
-  }, [])
-
   const messageContent = useMemo(() => {
     if (isPausedEmpty) {
       return t('message.chat.completion.paused')
@@ -88,16 +72,81 @@ const MarkdownBody: FC<MarkdownBodyProps> = memo(({ blockId, isPausedEmpty, pars
     return removeSvgEmptyLines(processLatexBrackets(parsedContent))
   }, [isPausedEmpty, parsedContent, t])
 
+  const [mathRuntime, setMathRuntime] = useState<MathRuntime | null>(null)
+  const mathFailureCountRef = useRef(0)
+  const lastMathBlockIdRef = useRef(blockId)
+  const logger = useMemo(() => loggerService.withContext('Markdown'), [])
+
+  useEffect(() => {
+    if (blockId !== lastMathBlockIdRef.current) {
+      mathFailureCountRef.current = 0
+      lastMathBlockIdRef.current = blockId
+    }
+    if (!containsMath(messageContent)) {
+      if (mathFailureCountRef.current !== 0) {
+        mathFailureCountRef.current = 0
+      }
+      return
+    }
+    if (mathRuntime) {
+      return
+    }
+    if (mathFailureCountRef.current >= MATH_LOAD_MAX_ATTEMPTS_PER_BLOCK) {
+      return
+    }
+    let cancelled = false
+    loadMathRuntime()
+      .then((runtime) => {
+        if (cancelled) {
+          return
+        }
+        setMathRuntime(runtime)
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return
+        }
+        if (blockId === lastMathBlockIdRef.current) {
+          mathFailureCountRef.current += 1
+        }
+        const err = error instanceof Error ? error : new Error(String(error))
+        logger.error('Failed to load math runtime', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  })
+
+  // Hoisted/stabilized plugin configuration: module-level plugin references
+  // and a fixed plugin list — the array identity does not change between
+  // parses, so ReactMarkdown's processor inputs are stable per parsed commit.
+  // Math plugins are only included after the atomic runtime load succeeds,
+  // preserving ordinary Markdown rendering during pending/failure.
+  const remarkPlugins = useMemo(() => {
+    const plugins: Pluggable[] = [
+      [remarkGfm, { singleTilde: false }] as Pluggable,
+      [remarkAlert] as Pluggable,
+      remarkCjkFriendly,
+      remarkDisableConstructs(['codeIndented'])
+    ]
+    if (mathRuntime) {
+      plugins.push([mathRuntime.remarkMath, { singleDollarTextMath: true }] as Pluggable)
+    }
+    return plugins
+  }, [mathRuntime])
+
   const rehypePlugins = useMemo(() => {
     const plugins: Pluggable[] = []
     if (ALLOWED_ELEMENTS.test(messageContent)) {
       plugins.push(rehypeRaw, rehypeScalableSvg)
     }
     plugins.push([rehypeHeadingIds, { prefix: `heading-${blockId}` }])
-    // LOCK-106: KaTeX is the fixed math renderer.
-    plugins.push(rehypeKatex)
+    if (mathRuntime) {
+      // LOCK-106: KaTeX is the fixed math renderer; atomic with remarkMath.
+      plugins.push(mathRuntime.rehypeKatex as unknown as Pluggable)
+    }
     return plugins
-  }, [messageContent, blockId])
+  }, [messageContent, blockId, mathRuntime])
 
   const components = useMemo(() => {
     return {
