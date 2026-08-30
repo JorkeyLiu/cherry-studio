@@ -4,7 +4,7 @@ import { isMac, LATEST_PRIVACY_POLICY_VERSION } from '@renderer/config/constant'
 import { isLocalAi } from '@renderer/config/env'
 import { useTheme } from '@renderer/context/ThemeProvider'
 import db from '@renderer/databases'
-import i18n, { setDayjsLocale } from '@renderer/i18n'
+import i18n from '@renderer/i18n'
 import KnowledgeQueue from '@renderer/queue/KnowledgeQueue'
 import MemoryService from '@renderer/services/MemoryService'
 import { handleSaveData, useAppDispatch, useAppSelector } from '@renderer/store'
@@ -123,7 +123,6 @@ export function useAppInit() {
   useEffect(() => {
     const currentLanguage = language || navigator.language || defaultLanguage
     void i18n.changeLanguage(currentLanguage)
-    setDayjsLocale(currentLanguage)
   }, [language])
 
   useEffect(() => {
