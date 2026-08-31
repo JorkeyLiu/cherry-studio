@@ -791,7 +791,7 @@ Independent/deferred tracks not blocked by S7.1–S7.11 — S7.1–S7.11 Impleme
 | Track | Description | Independence | Status |
 |---|---|---|---|
 | App boot services | Service init order/parallelism (remaining beyond S7.11) | Independent | S7.12+ deferred (not selected without explicit activation) |
-| Redux rehydration | redux-persist hydration from IndexedDB | Independent | Deferred |
+| Redux rehydration | redux-persist hydration from localStorage (`redux-persist/lib/storage`, key `persist:cherry-studio`) | Independent | Deferred |
 | Dexie init | IndexedDB upgrade/connection | Independent | Deferred |
 | SQLite cold open | First DB open latency (`<500 ms` in `performance-measurement.md`) | Main-process, independent | Deferred |
 | Bundle loading (S7.1) | Secondary route chunks (Files/Notes/Knowledge/Settings/Launchpad) — five secondary lazy, Home eager, localized fallback, tagged retry/Home recovery; renderer-only, distinct production chunks | Build/tooling, renderer-only | **S7.1 Implemented & Closed 2026-08-30 (outcome/residual-risk)** |
@@ -806,6 +806,8 @@ Independent/deferred tracks not blocked by S7.1–S7.11 — S7.1–S7.11 Impleme
 | Maintenance activation (S7.10) | Scroll 0ms bounded post-bootstrap global TTL/LRU sweep + retention 60s timer + queueIdle/windowReadIdle background registration split with check-before-refresh fix; Keyv creation/init and lifecycle/deletion/byte-cache stay eager/sync via plain `setTimeout(0)` — directional topology/activation only | Renderer-only, no IPC/SQLite/Dexie/StoreSync/governance | **S7.10 Implemented & Closed 2026-08-31 (outcome/residual-risk) — entry `index-DXjM4Z9p.js` with `residentRetention-BjzUo1ip.js` proves timer boundary, focused 31/31 + `pnpm build`/`pnpm build:check` verified** |
 | Critical bootstrap failure isolation (S7.11) | Static synchronous StoreSync→TopicDeletion→WebTrace with independent try/catch, one Bootstrap logger, bounded distinct warnings; changes only the bootstrap call site; no StoreSync service-internal/authority/contract/Main/preload/shared IPC/persistence/lifecycle/delay/dynamic import/buffering/replay/readiness change; topology only | Renderer-only, no IPC/SQLite/Dexie/StoreSync/governance | **S7.11 Implemented & Closed 2026-08-31 (outcome/residual-risk) — focused 13/13 + re-audit 0 findings + pnpm build/build:check exit 0, renderer 363/5156, ABI 145/SQL probe** |
 | Background windows | Trace viewer, import window lifecycle | Independent, deferrable | Deferred |
+
+> **S7.12 note (2026-08-31, factual correction + attribution scope)**: `Redux rehydration` row corrected to `localStorage` (`redux-persist/lib/storage`, key `persist:cherry-studio`) per `src/renderer/src/store/index.ts:23,312-314` and corroborated by `docs/sqlite-migration.md:114` and `cherry-chat-application-identity.md` (LOCK-COMPAT-003); `persist:cherry-studio` compatibility key preserved, no ADR meaning change. **S7.12+ remains deferred for production implementation** — any S7.12 reconnaissance/harness work is **attribution-only, directional only** and does not establish baselines/thresholds/SLA or regression proof; production optimization not implemented without explicit activation (LOCK-002). Dexie timing omitted where the resulting harness artifact omits it; no production code, package/config, or governance redesign; no numeric findings claimed as baselines/SLA until harness correction reports actual evidence (LOCK-001/LOCK-004).
 
 ---
 
