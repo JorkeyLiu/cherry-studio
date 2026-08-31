@@ -20,9 +20,15 @@ const shikiInitializer = new AsyncInitializer(async () => {
 
 /**
  * 获取 shiki package
+ * Bounded retry: clear cached rejection so subsequent demand can retry.
  */
 export async function getShiki() {
-  return shikiInitializer.get()
+  try {
+    return await shikiInitializer.get()
+  } catch (err) {
+    shikiInitializer.resetIfRejected()
+    throw err
+  }
 }
 
 /**
@@ -38,9 +44,15 @@ const highlighterInitializer = new AsyncInitializer(async (langs?: string[], the
 
 /**
  * 获取 shiki highlighter
+ * Bounded retry: clear cached rejection so subsequent demand can retry.
  */
 export async function getHighlighter(langs?: string[], themes?: string[]) {
-  return highlighterInitializer.get(langs, themes)
+  try {
+    return await highlighterInitializer.get(langs, themes)
+  } catch (err) {
+    highlighterInitializer.resetIfRejected()
+    throw err
+  }
 }
 
 /**
