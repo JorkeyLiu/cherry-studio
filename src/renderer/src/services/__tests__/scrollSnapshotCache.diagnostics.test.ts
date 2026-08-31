@@ -122,10 +122,10 @@ describe('B-07 diagnostics exports and raw/success semantics', () => {
     }
     enforceScrollSnapshotBounds(now)
     const diag = getScrollSnapshotDiagnostics()
-    // 3 entries over budget, but 2 failures so success 1
+    // 3 entries over budget, but 2 failures so success 1; failed remain => 258
     expect(diag.lastEnforcement!.indexCountBefore).toBe(total)
     expect(diag.lastEnforcement!.lruEvicted).toBe(1)
-    expect(diag.lastEnforcement!.indexCountAfter).toBe(SCROLL_SNAPSHOT_MAX_COUNT)
+    expect(diag.lastEnforcement!.indexCountAfter).toBe(SCROLL_SNAPSHOT_MAX_COUNT + 2)
     expect(diag.lastEnforcement!.didRebuild).toBe(false)
   })
 

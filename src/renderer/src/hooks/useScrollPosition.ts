@@ -108,7 +108,8 @@ export default function useScrollPosition(key: string, throttleWait?: number) {
       result = { scrollTop: saved, anchorId: null, isAtBottom: false }
     }
     if (result !== null) {
-      handleScrollSnapshotRead(scrollKeyRef.current)
+      const available = handleScrollSnapshotRead(scrollKeyRef.current)
+      if (!available) return null
     }
     return result
   }, [])

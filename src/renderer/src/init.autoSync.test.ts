@@ -168,7 +168,10 @@ describe('initAutoSync — demand activation (S7.9)', () => {
     const mockApplyMainWindowTitle = vi.fn()
 
     vi.doMock('./config/title', () => ({ applyMainWindowTitle: mockApplyMainWindowTitle }))
-    vi.doMock('./services/scrollSnapshotCache', () => ({ initScrollSnapshotCache: mockInitScrollSnapshotCache }))
+    vi.doMock('./services/scrollSnapshotCache', () => ({
+      initScrollSnapshotCache: mockInitScrollSnapshotCache,
+      scheduleScrollSnapshotStartupSweep: vi.fn()
+    }))
     vi.doMock('./services/StoreSyncService', () => ({ default: { subscribe: mockSubscribeStoreSync } }))
     vi.doMock('./services/topicDeletionSubscription', () => ({
       subscribeTopicDeletionEvents: mockSubscribeTopicDeletion

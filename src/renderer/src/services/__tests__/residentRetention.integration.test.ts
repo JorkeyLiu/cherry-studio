@@ -1,6 +1,6 @@
 /**
  * Integration tests for B-01..B-05 renderer-local retention enforcement.
- * Production rootReducer is the artifact under test (LOCK-004).
+ * Production rootReducer is the artifact under test — eager vs deferred split with post-bootstrap immediate correctness.
  */
 
 import { configureStore } from '@reduxjs/toolkit'
@@ -710,7 +710,7 @@ describe('B-01..B-05 retention integration — renderer-local only (production r
         createdAt: new Date().toISOString()
       }
     } as any)
-    // Byte cache must have been invalidated by renderer-local subscriber (LOCK-003)
+    // Byte cache must have been invalidated by renderer-local subscriber — immediate correctness, no stale cache
     expect(retention.__test_getByteCacheMap().has('t-byte-mutate')).toBe(false)
     const recomputed = retention.__test_computeBytes('t-byte-mutate', store.getState())
     expect(recomputed).toBeGreaterThan(RETENTION_MAX_BYTES)
@@ -721,7 +721,7 @@ describe('B-01..B-05 retention integration — renderer-local only (production r
     retention.stopResidentRetention()
   })
 
-  it('cache-hit activation supersedes older in-flight same-topic staged load (LOCK-004)', async () => {
+  it('cache-hit activation supersedes older in-flight same-topic staged load — immediate correctness with eager handler', async () => {
     const store = buildStore()
     // Seed resident so cache-hit path is available for second activation
     seedResidentTopic(store, 't-cache-super', ['m-cache-1'])
@@ -774,7 +774,7 @@ describe('B-01..B-05 retention integration — renderer-local only (production r
 
   it('retention eviction unconditionally removes segmentsByTopic index including empty arrays', async () => {
     const store = buildStore()
-    // Create resident with empty segmentsByTopic (no segments) — remain resident (LOCK-005)
+    // Create resident with empty segmentsByTopic (no segments) — remain resident — bounded diagnostics
     store.dispatch(bumpGeneration('t-empty-seg'))
     const genEmpty = (store.getState() as any).residentRegistry.entries['t-empty-seg'].applicabilityGeneration
     const wrEmpty = makeWindowResponse('t-empty-seg', ['m-empty-1'])
@@ -811,6 +811,8 @@ describe('B-01..B-05 retention integration — renderer-local only (production r
     for (let i = 0; i < 10; i++) seedResidentTopic(store, `t-qidle-${i}`, [`m-q-${i}`])
     store.dispatch(newMessagesActions.setCurrentTopicId(null as any))
     retention.startResidentRetention(store as any)
+    // S7.10: background queue callback registration is deferred 0ms
+    await new Promise((r) => setTimeout(r, 0))
     for (let i = 0; i < 10; i++) retention.setRetentionLastAccessForTests(`t-qidle-${i}`, NOW - 10000 + i)
     const { getTopicQueue, clearTopicQueue } = await import('@renderer/utils/queue')
     const q = getTopicQueue('t-qidle-0')
@@ -839,10 +841,12 @@ describe('B-01..B-05 retention integration — renderer-local only (production r
     retention.stopResidentRetention()
   })
 
-  it('timer lifecycle bounded/cleaned and does not retain content (60s per LOCK-002)', () => {
+  it('timer lifecycle bounded/cleaned and does not retain content (60s interval, post-bootstrap)', async () => {
     const store = buildStore()
     expect(retention.isRetentionTimerActiveForTests()).toBe(false)
     retention.startResidentRetention(store as any)
+    // S7.10: timer registration deferred 0ms
+    await new Promise((r) => setTimeout(r, 0))
     expect(retention.isRetentionTimerActiveForTests()).toBe(true)
     retention.stopResidentRetention()
     expect(retention.isRetentionTimerActiveForTests()).toBe(false)

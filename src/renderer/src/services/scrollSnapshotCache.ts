@@ -25,6 +25,8 @@ export const SCROLL_SNAPSHOT_INDEX_KEY = 'scroll:__index__'
 export const SCROLL_SNAPSHOT_PREFIX = 'scroll:'
 export const SCROLL_SNAPSHOT_TOPIC_PREFIX = 'scroll:topic-'
 
+import { loggerService } from '@logger'
+
 export interface ScrollSnapshotIndexEntry {
   key: string // full key e.g., "scroll:topic-xxx"
   lastAccess: number // epoch ms
@@ -33,6 +35,14 @@ export interface ScrollSnapshotIndexEntry {
 // Session-local hard-delete invalidation: pending throttled writes for these
 // keys must not recreate snapshots after authoritative hard delete.
 const invalidatedTopicScrollKeys = new Set<string>()
+
+const logger = loggerService.withContext('ScrollSnapshotCache')
+
+let pendingStartupSweepTimer: ReturnType<typeof setTimeout> | null = null
+
+function isExpired(lastAccess: number, now: number): boolean {
+  return lastAccess < now - SCROLL_SNAPSHOT_TTL_MS
+}
 
 // ---------------------------------------------------------------------------
 // B-07 local scalar diagnostics — renderer-local, no content/keys retained
@@ -298,18 +308,20 @@ export function enforceScrollSnapshotBounds(now = Date.now()): void {
     }
   }
 
-  // Count only successful Keyv removals (false return or throw = not removed)
+  // Success-then-remove: retain expired entry on physical delete failure (false or throw) for retry
   let expiredRemoved = 0
+  const failedExpired: ScrollSnapshotIndexEntry[] = []
   for (const e of expired) {
     try {
       const res = keyv.remove(e.key)
       if (res !== false) expiredRemoved += 1
+      else failedExpired.push(e)
     } catch {
-      // best-effort: not counted
+      failedExpired.push(e)
     }
   }
 
-  let working = remaining
+  let working = [...remaining, ...failedExpired]
   let evicted = false
   let lruEvicted = 0
 
@@ -322,15 +334,17 @@ export function enforceScrollSnapshotBounds(now = Date.now()): void {
     const toEvictCount = working.length - SCROLL_SNAPSHOT_MAX_COUNT
     const toEvict = working.slice(0, toEvictCount)
     const toKeep = working.slice(toEvictCount)
+    const failedEvict: ScrollSnapshotIndexEntry[] = []
     for (const e of toEvict) {
       try {
         const res = keyv.remove(e.key)
         if (res !== false) lruEvicted += 1
+        else failedEvict.push(e)
       } catch {
-        // best-effort: not counted
+        failedEvict.push(e)
       }
     }
-    working = toKeep
+    working = [...toKeep, ...failedEvict]
     evicted = true
   }
 
@@ -431,7 +445,14 @@ export function handleScrollSnapshotSaved(scrollKey: string, now = Date.now()): 
   }
   const existing = index.findIndex((e) => e.key === scrollKey)
   if (existing >= 0) {
-    index[existing] = { key: scrollKey, lastAccess: now }
+    if (isExpired(index[existing].lastAccess, now)) {
+      // Expired index entry must not be resurrected — drop stale entry and treat as fresh save
+      // Storage already contains the newly saved snapshot (caller set before handle), so keep it
+      index.splice(existing, 1)
+      index.push({ key: scrollKey, lastAccess: now })
+    } else {
+      index[existing] = { key: scrollKey, lastAccess: now }
+    }
   } else {
     index.push({ key: scrollKey, lastAccess: now })
   }
@@ -441,13 +462,14 @@ export function handleScrollSnapshotSaved(scrollKey: string, now = Date.now()): 
 
 /**
  * Called after a snapshot is read/restored. Updates recency.
- * Caller should ensure snapshot actually existed before invoking.
+ * Returns true if snapshot is available and recency was refreshed, false if expired/invalidated/missing.
+ * Backward-compatible: callers ignoring return value keep working — post-bootstrap immediate correctness.
  */
-export function handleScrollSnapshotRead(scrollKey: string, now = Date.now()): void {
-  if (!isScrollSnapshotKey(scrollKey)) return
-  if (isScrollSnapshotInvalidated(scrollKey)) return
+export function handleScrollSnapshotRead(scrollKey: string, now = Date.now()): boolean {
+  if (!isScrollSnapshotKey(scrollKey)) return true
+  if (isScrollSnapshotInvalidated(scrollKey)) return false
   const keyv = getKeyv()
-  if (!keyv) return
+  if (!keyv) return false
 
   // Verify snapshot still exists before updating index (avoid polluting index for missing keys)
   // Use try/catch; if get throws or returns undefined and no actual key, skip
@@ -463,33 +485,68 @@ export function handleScrollSnapshotRead(scrollKey: string, now = Date.now()): v
     const keys = safeKeys()
     exists = keys.includes(scrollKey)
   }
-  if (!exists) return
+  if (!exists) return false
 
   let index = getScrollSnapshotIndex()
   if (index === null) {
     index = rebuildScrollSnapshotIndex(now)
     const idx = index.findIndex((e) => e.key === scrollKey)
     if (idx >= 0) {
+      if (isExpired(index[idx].lastAccess, now)) {
+        // Rebuilt entry inherits now, so not expired in practice; guard for future
+        let removed = false
+        try {
+          const res = keyv.remove(scrollKey)
+          removed = res !== false
+        } catch {
+          removed = false
+        }
+        if (removed) {
+          const filtered = index.filter((e) => e.key !== scrollKey)
+          saveIndex(filtered)
+        }
+        return false
+      }
       index[idx] = { key: scrollKey, lastAccess: now }
       saveIndex(index)
     } else {
       index.push({ key: scrollKey, lastAccess: now })
       saveIndex(index)
     }
-    enforceScrollSnapshotBounds(now)
-    return
+    try {
+      enforceScrollSnapshotBounds(now)
+    } catch {}
+    return true
   }
 
   const can = canonicalizeEntries(index)
   if (can.changed) index = can.canonical
   const existing = index.findIndex((e) => e.key === scrollKey)
   if (existing >= 0) {
+    if (isExpired(index[existing].lastAccess, now)) {
+      // Check-before-refresh: expired snapshot must be deleted, not resurrected; retain on failure — immediate correctness with check-before-refresh
+      let removed = false
+      try {
+        const res = keyv.remove(scrollKey)
+        removed = res !== false
+      } catch {
+        removed = false
+      }
+      if (removed) {
+        const filtered = index.filter((e) => e.key !== scrollKey)
+        saveIndex(filtered)
+      }
+      return false
+    }
     index[existing] = { key: scrollKey, lastAccess: now }
   } else {
     index.push({ key: scrollKey, lastAccess: now })
   }
   saveIndex(index)
-  enforceScrollSnapshotBounds(now)
+  try {
+    enforceScrollSnapshotBounds(now)
+  } catch {}
+  return true
 }
 
 /**
@@ -589,6 +646,50 @@ export function initScrollSnapshotCache(now = Date.now()): void {
 }
 
 /**
+ * S7.10 — bounded 0ms post-bootstrap startup sweep — plain setTimeout(0) post-bootstrap, Keyv creation/init stays in bootstrap.
+ * Idempotent, cancellable; plain setTimeout(0) house-style, no idle callback.
+ */
+export function scheduleScrollSnapshotStartupSweep(): void {
+  if (pendingStartupSweepTimer !== null) return
+  try {
+    pendingStartupSweepTimer = setTimeout(() => {
+      pendingStartupSweepTimer = null
+      try {
+        enforceScrollSnapshotBounds(Date.now())
+      } catch (e) {
+        try {
+          logger.warn('[scrollSnapshotCache] startup sweep failed', e as Error)
+        } catch {}
+      }
+    }, 0)
+    if (
+      pendingStartupSweepTimer &&
+      typeof (pendingStartupSweepTimer as unknown as { unref?: () => void }).unref === 'function'
+    ) {
+      ;(pendingStartupSweepTimer as unknown as { unref: () => void }).unref()
+    }
+  } catch (e) {
+    pendingStartupSweepTimer = null
+    try {
+      logger.warn('[scrollSnapshotCache] startup sweep schedule failed', e as Error)
+    } catch {}
+  }
+}
+
+export function cancelScheduledScrollSnapshotStartupSweep(): void {
+  if (pendingStartupSweepTimer !== null) {
+    try {
+      clearTimeout(pendingStartupSweepTimer)
+    } catch {}
+    pendingStartupSweepTimer = null
+  }
+}
+
+export function isScrollSnapshotStartupSweepPendingForTests(): boolean {
+  return pendingStartupSweepTimer !== null
+}
+
+/**
  * B-07 local scalar diagnostics getters — renderer-local, no sensitive values
  */
 
@@ -620,6 +721,7 @@ export function resetScrollSnapshotDiagnosticsForTests(): void {
 /** Test helpers */
 
 export function resetScrollSnapshotCacheForTests(): void {
+  cancelScheduledScrollSnapshotStartupSweep()
   const keyv = getKeyv()
   if (keyv && typeof keyv.remove === 'function') {
     try {

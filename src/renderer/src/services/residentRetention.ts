@@ -78,6 +78,7 @@ let windowReadIdleUnsubscribe: (() => void) | null = null
 let prevMessagesForBytes: any = null
 let prevBlocksForBytes: any = null
 let prevSegmentsForBytes: any = null
+let pendingBackgroundTimer: ReturnType<typeof setTimeout> | null = null
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -169,7 +170,7 @@ function computeLogicalBytesForTopic(topicId: string, state: any): number {
     return result.byteLength
   } catch (e) {
     logger.warn('[residentRetention] logical payload compute failed — fail-closed as oversized', { topicId } as any)
-    // Fail-closed per LOCK-003: inability to compute bytes must never be treated as zero
+    // Fail-closed immediate correctness: inability to compute bytes must never be treated as zero
     // or allow capacity bounds to be satisfied falsely. Treat as oversized (>32 MiB)
     // so B-02/B-05 enforcement evicts the non-accountable resident.
     const failBytes = RETENTION_MAX_BYTES + 1
@@ -398,8 +399,88 @@ export function __test_getPendingCount(topicId: string): number {
 // Timer + subscription lifecycle — bounded, cleaned, no content retained
 // ---------------------------------------------------------------------------
 
+function scheduleRetentionBackground(): void {
+  try {
+    pendingBackgroundTimer = setTimeout(() => {
+      pendingBackgroundTimer = null
+      // If stopped before task fired, boundStore is null — do not late-register — idempotent post-bootstrap registration
+      if (boundStore === null) return
+      if (queueIdleUnsubscribe === null) {
+        try {
+          queueIdleUnsubscribe = registerQueueIdleCallback((topicId: string) => {
+            try {
+              if (maybeRecordUnpin(topicId, Date.now())) void enforceRetention(Date.now())
+              else {
+                const st = boundStore?.getState?.()
+                if (st && !isTopicPinned(topicId, st)) void enforceRetention(Date.now())
+              }
+            } catch {}
+          })
+        } catch (e) {
+          try {
+            logger.warn('[residentRetention] queueIdle registration failed', e as Error)
+          } catch {}
+        }
+      }
+      if (windowReadIdleUnsubscribe === null) {
+        try {
+          windowReadIdleUnsubscribe = registerWindowReadQueueIdleCallback((topicId: string) => {
+            try {
+              if (maybeRecordUnpin(topicId, Date.now())) void enforceRetention(Date.now())
+              else {
+                const st = boundStore?.getState?.()
+                if (st && !isTopicPinned(topicId, st)) void enforceRetention(Date.now())
+              }
+            } catch {}
+          })
+        } catch (e) {
+          try {
+            logger.warn('[residentRetention] windowReadIdle registration failed', e as Error)
+          } catch {}
+        }
+      }
+      // At-most-60s TTL sweep — exact 60s interval, not retaining content
+      if (ttlTimer === null) {
+        try {
+          ttlTimer = setInterval(() => {
+            try {
+              void enforceRetention(Date.now())
+            } catch {}
+          }, 60_000)
+          if (ttlTimer && typeof (ttlTimer as any).unref === 'function') {
+            ;(ttlTimer as any).unref()
+          }
+        } catch (e) {
+          try {
+            logger.warn('[residentRetention] timer registration failed', e as Error)
+          } catch {}
+        }
+      }
+    }, 0)
+    if (
+      pendingBackgroundTimer &&
+      typeof (pendingBackgroundTimer as unknown as { unref?: () => void }).unref === 'function'
+    ) {
+      ;(pendingBackgroundTimer as unknown as { unref: () => void }).unref()
+    }
+  } catch (e) {
+    pendingBackgroundTimer = null
+    try {
+      logger.warn('[residentRetention] background registration schedule failed', e as Error)
+    } catch {}
+  }
+}
+
 export function startResidentRetention(store: Store): void {
-  if (ttlTimer !== null) return
+  // Idempotent covering pending 0ms task; retryable on partial failure — idempotent post-bootstrap registration
+  if (pendingBackgroundTimer !== null) return
+  if (boundStore !== null) {
+    const fullyRegistered = ttlTimer !== null && queueIdleUnsubscribe !== null && windowReadIdleUnsubscribe !== null
+    if (fullyRegistered) return
+    // partial background registration failure — retry without re-doing eager setup
+    scheduleRetentionBackground()
+    return
+  }
   boundStore = store
   const initState = store.getState()
   prevCurrentTopic = initState?.messages?.currentTopicId ?? null
@@ -416,39 +497,12 @@ export function startResidentRetention(store: Store): void {
   prevBlocksForBytes = initState?.messageBlocks ?? null
   prevSegmentsForBytes = initState?.topicSegments ?? null
 
-  // Wire queue-idle settlement to prompt enforcement (bounded fallback timer remains).
-  // Uses production queue lifecycle via registered idle callbacks — no broad redesign.
-  try {
-    queueIdleUnsubscribe = registerQueueIdleCallback((topicId: string) => {
-      try {
-        if (maybeRecordUnpin(topicId, Date.now())) void enforceRetention(Date.now())
-        else {
-          // Even if unpin not recorded (already evictable), still enforce promptly on settle
-          // when queue had pinned this topic — store subscription will have updated prevPinned,
-          // but idle may occur without a store dispatch, so enforce anyway if now unpinned.
-          const st = boundStore?.getState?.()
-          if (st && !isTopicPinned(topicId, st)) void enforceRetention(Date.now())
-        }
-      } catch {}
-    })
-  } catch {}
-  try {
-    windowReadIdleUnsubscribe = registerWindowReadQueueIdleCallback((topicId: string) => {
-      try {
-        if (maybeRecordUnpin(topicId, Date.now())) void enforceRetention(Date.now())
-        else {
-          const st = boundStore?.getState?.()
-          if (st && !isTopicPinned(topicId, st)) void enforceRetention(Date.now())
-        }
-      } catch {}
-    })
-  } catch {}
-
+  // Eager correctness setup: store subscriber + deletion reclamation handler + byte-cache invalidation
   storeUnsubscribe = store.subscribe(() => {
     try {
       const state = store.getState()
       // Invalidate byte cache on ordinary resident message/block/segment projection mutations
-      // per LOCK-003 — no stale cache may permit escape from B-02/B-05.
+      // immediate correctness — no stale byte cache may permit escape from B-02/B-05.
       try {
         const curMsgs = state?.messages ?? null
         const curBlocks = state?.messageBlocks ?? null
@@ -508,24 +562,25 @@ export function startResidentRetention(store: Store): void {
     }
   })
 
-  // Register retention clear handler for hard-delete reclamation without static import cycle
+  // Register retention clear handler for hard-delete reclamation without static import cycle — eager
   try {
     setRetentionClearHandler(clearRetentionForTopic)
-  } catch {}
-
-  // At-most-60s TTL sweep — exact 60s interval, not retaining content
-  ttlTimer = setInterval(() => {
+  } catch (e) {
     try {
-      void enforceRetention(Date.now())
+      logger.warn('[residentRetention] setRetentionClearHandler failed', e as Error)
     } catch {}
-  }, 60_000)
-  // Do not prevent process exit
-  if (ttlTimer && typeof (ttlTimer as any).unref === 'function') {
-    ;(ttlTimer as any).unref()
   }
+
+  scheduleRetentionBackground()
 }
 
 export function stopResidentRetention(): void {
+  if (pendingBackgroundTimer !== null) {
+    try {
+      clearTimeout(pendingBackgroundTimer)
+    } catch {}
+    pendingBackgroundTimer = null
+  }
   if (ttlTimer !== null) {
     clearInterval(ttlTimer)
     ttlTimer = null
@@ -564,8 +619,20 @@ export function isRetentionTimerActiveForTests(): boolean {
   return ttlTimer !== null
 }
 
+export function isRetentionBackgroundPendingForTests(): boolean {
+  return pendingBackgroundTimer !== null
+}
+
+export function isRetentionQueueIdleRegisteredForTests(): boolean {
+  return queueIdleUnsubscribe !== null
+}
+
+export function isRetentionWindowIdleRegisteredForTests(): boolean {
+  return windowReadIdleUnsubscribe !== null
+}
+
 // Test-only helpers for diagnostics without exposing production non-scalar API.
-// Production diagnostics are bounded scalars via getResidentRetentionDiagnostics only (LOCK-005).
+// Production diagnostics are bounded scalars via getResidentRetentionDiagnostics only — post-bootstrap bounded diagnostics.
 export function __test_getLastAccessMap(): Map<string, number> {
   return new Map(lastAccessByTopic)
 }

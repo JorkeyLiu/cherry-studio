@@ -2,7 +2,7 @@ import KeyvStorage from '@kangfenmao/keyv-storage'
 import { loggerService } from '@logger'
 
 import { applyMainWindowTitle } from './config/title'
-import { initScrollSnapshotCache } from './services/scrollSnapshotCache'
+import { scheduleScrollSnapshotStartupSweep } from './services/scrollSnapshotCache'
 import storeSyncService from './services/StoreSyncService'
 import { subscribeTopicDeletionEvents } from './services/topicDeletionSubscription'
 import { webTraceService } from './services/WebTraceService'
@@ -11,7 +11,7 @@ import store from './store'
 loggerService.initWindowSource('mainWindow')
 
 // Start renderer-local retention enforcement (B-01..B-05) — bounded TTL timer, subscription, no content retention.
-// ESM-safe dynamic import avoids renderer import cycle/mock-hoist cascade while retaining logged failure behavior (LOCK-002).
+// ESM-safe dynamic import avoids renderer import cycle/mock-hoist cascade while retaining immediate correctness with bounded logging.
 // No CommonJS require; startup failures are logged centrally via loggerService and not swallowed silently.
 void import('./services/residentRetention')
   .then(({ startResidentRetention }) => {
@@ -36,10 +36,14 @@ applyMainWindowTitle()
 
 function initKeyv() {
   window.keyv = new KeyvStorage()
-  void window.keyv.init()
-  // B-07: enforce bounded scroll snapshot cache at startup (TTL then LRU)
+  void window.keyv.init().catch((e) => {
+    try {
+      loggerService.withContext('Store').warn('[store] keyv init failed', e as Error)
+    } catch {}
+  })
+  // B-07: startup global TTL/LRU sweep via 0ms bounded post-bootstrap task — Keyv creation + init() stay in synchronous bootstrap; sweep is deferred (best-effort, not authoritative, post-bootstrap)
   try {
-    initScrollSnapshotCache()
+    scheduleScrollSnapshotStartupSweep()
   } catch {
     // best-effort; renderer-local only
   }
