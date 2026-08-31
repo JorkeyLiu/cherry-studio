@@ -17,7 +17,7 @@
 - **Phase 4 Bounded Memory and Cache — closed 2026-08-29 (outcome/residual-risk based).** Renderer-local retention enforcement B-01..B-05 enforced alongside lifecycle foundation and B-06/B-07/B-08/B-09; bounded scalar diagnostics. Calibration optional/non-blocking. Controlled regression and protected boundaries remain mandatory (§10.1).
 - **Phase 5 Data-Access Contract — closed 2026-08-29 (outcome/residual-risk).** R-02..R-06 satisfied by S6.1-S6.3 implementation; S6.4 Rejected, S6.5 Candidate — Not Authorized. LOCK-P5-005 preserved.
 - **Phase 6 DB-Health — `S6.1..S6.3` Authorized & Implemented; `S6.4 SQ-01 Rejected 2026-08-29; M2/M3 batch closed; `S6.5` Candidate — Not Authorized.** See program §6.7.1 for decision and future reopening boundary.
-- **Phase 7 Startup — S7.1 + S7.2 + S7.3 + S7.4 + S7.5 + S7.6 + S7.7 + S7.8 + S7.9 + S7.10 Implemented & Closed 2026-08-31 (outcome/residual-risk); S7.11+ deferred. See canonical §6.8.11 for outcome, verification (validation/audits passed), and residual risks. Phase 7 remains partially Open.**
+- **Phase 7 Startup — S7.1–S7.11 Implemented & Closed 2026-08-31 (outcome/residual-risk); S7.12+ deferred. See canonical §6.8.12 for outcome, verification (validation/audits passed), and residual risks. Phase 7 remains partially Open.**
 - **Phase 8 Future Sync — deferred, Open.** No activation; sync remains vendor-neutral compatibility only.
 
 ---
@@ -27,9 +27,9 @@
 - `ARCH-001..ARCH-012` locked in the canonical program; not reinterpreted here. Phase closure is outcome/residual-risk based — accepted outcomes + boundary-matched regression + governance/delivery validation + explicitly accepted residual risk; harness completeness never closes (ARCH-009..012).
 - `B-01..B-05` are **implemented renderer-local retention enforcement, not empirically optimal, not baselines/SLA, calibration optional/non-blocking**. No IPC/SQLite/schema/StoreSync/Main change.
 - `S6.4` SQ-01 **Rejected 2026-08-29** and `S6.5` **Candidate — Not Authorized** — see program §6.7.1 for future reopening boundary; any schema/index ADR-gated.
-- **S7.1–S7.10 Implemented & Closed 2026-08-31 (outcome/residual-risk) — canonical §6.8.2–§6.8.11** (renderer-local lazy/demand activation, directional topology/activation only; validation/audits passed per canonical §6.8.11, no governance crossing). S7.10 renderer-local maintenance activation with LOCK-001 (0ms setTimeout house-style), LOCK-002 (Keyv create/init in bootstrap, sweep deferred), LOCK-003 (check-before-refresh), LOCK-004 (retention eager vs deferred), LOCK-005 (start/stop/idempotency), LOCK-006 (no IPC/StoreSync/redux/persistence/lifecycle/policy), LOCK-007 (failures via loggerService), LOCK-008 (build proves topology only), LOCK-009 (docs Implemented & Closed after final gates).
+- **S7.1–S7.11 Implemented & Closed 2026-08-31 (outcome/residual-risk) — canonical §6.8.2–§6.8.12** (renderer-local; validation/audits passed per canonical §6.8.12, no governance crossing). S7.11 changes only the bootstrap call site for StoreSyncService.subscribe(), subscribeTopicDeletionEvents(), webTraceService.init() (static imports, synchronous StoreSync→TopicDeletion→WebTrace, independent try/catch, one Bootstrap logger, bounded distinct warnings; no StoreSync service-internal/authority/contract/Main/preload/shared IPC/persistence/lifecycle/delay/dynamic import/buffering/replay/readiness change; topology only). Historical S7.1–S7.10 details in canonical §6.8.2–§6.8.11; S7.12+ deferred.
 - **No boundary crossing without applicable governance.** IPC/preload/shared-contract (§10.1.3), persistence/migration/schema (`sqlite-migration.md`), runtime authority, context-window anchor (`context-window.md`), identity/compatibility/release/platform (`cherry-chat-application-identity.md`), and sync infrastructure/transport/vendor/account/E2EE (`sync-mvp.md` / `sync-powersync-spike.md`) remain blocked without review/ADR. Renderer-local work must not introduce IPC, schema, persistence, StoreSync, or governed state changes.
-- Phase exits: Phase 4 closed 2026-08-29, Phase 5 closed 2026-08-29, Phase 6 partially Open (S6.4 Rejected/closed, S6.5 Candidate — Not Authorized), Phase 7 S7.1–S7.10 Implemented & Closed 2026-08-31 (outcome/residual-risk); S7.11+ deferred / Phase 7 remains partially Open, Phase 8 Open (deferred); no ready-now batch unless explicitly activated.
+- Phase exits: Phase 4 closed 2026-08-29, Phase 5 closed 2026-08-29, Phase 6 partially Open (S6.4 Rejected/closed, S6.5 Candidate — Not Authorized), Phase 7 S7.1–S7.11 Implemented & Closed 2026-08-31 (outcome/residual-risk); S7.12+ deferred / Phase 7 remains partially Open, Phase 8 Open (deferred); no ready-now batch unless explicitly activated.
 - **Evidence-task contract**: every evidence task binds to an explicitly activated decision/outcome, claim, minimum sufficient method, and stopping condition (all four required); evidence-only work without all four does not count as progress and cannot close a phase/workflow.
 
 ---
@@ -51,7 +51,7 @@ Execution is batched at the **semantic-risk boundary**, not at file or test gran
 
 Ready-now means independently authorized under current locks, renderer-local, and without governance crossing. Batches should be cohesive and are not required to be one file each.
 
-- No ready-now batch. S7.10 Implemented & Closed per canonical §6.8.11 (validation/audits passed); next batch requires explicit activation.
+- No ready-now batch. S7.11 Implemented & Closed per canonical §6.8.12 (validation/audits passed); next batch requires explicit activation.
 
 If no cohesive ready-now batch exists, the queue is empty until the next reconnaissance pass identifies one. Future short-query reopening requires a new explicitly defined candidate with materially different cost structure and a fresh four-field evidence contract; SQ-01 may not be silently revived.
 
@@ -59,7 +59,7 @@ If no cohesive ready-now batch exists, the queue is empty until the next reconna
 
 - Calibration activation for `B-01..B-05` (now enforced renderer-local defaults, not empirically optimal; calibration optional/non-blocking, measurement-only directional, not thresholds/baselines/SLA; requires explicitly activated decision/outcome + four fields to count as valid/progress and did not block Phase 4 closure; Phase 4 closed outcome/residual-risk).
 - `S6.5` file dual-state / FTS dedup — **Candidate — Not Authorized**, each needs slice evidence plus ADR/governance; M4/M5 synthetic directional evidence does not authorize production inference. Real-corpus/physical-size remain unresolved; any S6.5 work still requires explicit Main/user activation, decision, privacy review where applicable, and ADR.
-- Phase 7 S7.11+ and Phase 8 sync implementation — deferred (S7.1–S7.10 Implemented & Closed; S7.11+ not authorized — no Main/preload/shared IPC/SQLite/Dexie/StoreSync/identity/release/migration/sync/background/telemetry expansion beyond S7.10 scope and no Markdown/ReactMarkdown or editor KaTeX Inputbar/Main startup reorder/Redux/Dexie/SQLite/background windows/S6.5/Phase 8 expansion beyond S7.10); Phase 8 requires governance activation and remains vendor-neutral.
+- Phase 7 S7.12+ and Phase 8 sync implementation — deferred (S7.1–S7.11 Implemented & Closed; S7.12+ not authorized — no Main/preload/shared IPC/SQLite/Dexie/StoreSync/identity/release/migration/sync/background/telemetry expansion beyond S7.11 scope and no Markdown/ReactMarkdown or editor KaTeX Inputbar/Main startup reorder/Redux/Dexie/SQLite/background windows/S6.5/Phase 8 expansion beyond S7.11); Phase 8 requires governance activation and remains vendor-neutral.
 
 ---
 

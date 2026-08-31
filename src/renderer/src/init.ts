@@ -10,6 +10,8 @@ import store from './store'
 
 loggerService.initWindowSource('mainWindow')
 
+const bootstrapLogger = loggerService.withContext('Bootstrap')
+
 // Start renderer-local retention enforcement (B-01..B-05) — bounded TTL timer, subscription, no content retention.
 // ESM-safe dynamic import avoids renderer import cycle/mock-hoist cascade while retaining immediate correctness with bounded logging.
 // No CommonJS require; startup failures are logged centrally via loggerService and not swallowed silently.
@@ -78,15 +80,27 @@ function initAutoSync() {
 }
 
 function initStoreSync() {
-  storeSyncService.subscribe()
+  try {
+    storeSyncService.subscribe()
+  } catch (e) {
+    bootstrapLogger.warn('[Bootstrap] StoreSync subscribe failed', e as Error)
+  }
 }
 
 function initTopicDeletionSubscription() {
-  subscribeTopicDeletionEvents()
+  try {
+    subscribeTopicDeletionEvents()
+  } catch (e) {
+    bootstrapLogger.warn('[Bootstrap] TopicDeletion subscribe failed', e as Error)
+  }
 }
 
 function initWebTrace() {
-  webTraceService.init()
+  try {
+    webTraceService.init()
+  } catch (e) {
+    bootstrapLogger.warn('[Bootstrap] WebTrace init failed', e as Error)
+  }
 }
 
 initKeyv()
