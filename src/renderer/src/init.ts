@@ -2,8 +2,6 @@ import KeyvStorage from '@kangfenmao/keyv-storage'
 import { loggerService } from '@logger'
 
 import { applyMainWindowTitle } from './config/title'
-import { startAutoSync } from './services/BackupService'
-import { startNutstoreAutoSync } from './services/NutstoreService'
 import { initScrollSnapshotCache } from './services/scrollSnapshotCache'
 import storeSyncService from './services/StoreSyncService'
 import { subscribeTopicDeletionEvents } from './services/topicDeletionSubscription'
@@ -51,11 +49,26 @@ function initAutoSync() {
   setTimeout(() => {
     const { webdavAutoSync, localBackupAutoSync, s3 } = store.getState().settings
     const { nutstoreAutoSync } = store.getState().nutstore
+    const autoSyncLogger = loggerService.withContext('AutoSync')
     if (webdavAutoSync || (s3 && s3.autoSync) || localBackupAutoSync) {
-      startAutoSync()
+      void import('./services/BackupService')
+        .then(({ startAutoSync }) => {
+          try {
+            startAutoSync()
+          } catch (e) {
+            autoSyncLogger.warn('[AutoSync] backup auto-sync startup failed', e as Error)
+          }
+        })
+        .catch((e) => {
+          autoSyncLogger.warn('[AutoSync] backup auto-sync startup failed', e as Error)
+        })
     }
     if (nutstoreAutoSync) {
-      void startNutstoreAutoSync()
+      void import('./services/NutstoreService')
+        .then(({ startNutstoreAutoSync }) => startNutstoreAutoSync())
+        .catch((e) => {
+          autoSyncLogger.warn('[AutoSync] nutstore auto-sync startup failed', e as Error)
+        })
     }
   }, 8000)
 }
