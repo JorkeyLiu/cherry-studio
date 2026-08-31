@@ -122,6 +122,53 @@ export const STREAM_PERSIST_COMPLETION_STATUS = 'success'
 /** Deterministic streaming status for the pre-completion rows. */
 export const STREAM_PERSIST_STREAMING_STATUS = 'streaming'
 
+/**
+ * Deterministic round-aware status for a profile flush.
+ *
+ * - `growth` / `nochange`: always `streaming` (status-stable).
+ * - `completion`: `streaming` during warmup (1..WARMUP) and `success`
+ *   during measured rounds (WARMUP+1 .. WARMUP+MEASURE), so the
+ *   `streaming → success` transition is measured in both lanes.
+ */
+export function streamPersistStatus(profile: StreamPersistProfileKey, round: number): string {
+  if (profile === 'completion') {
+    return round <= STREAM_PERSIST_WARMUP_ROUNDS ? STREAM_PERSIST_STREAMING_STATUS : STREAM_PERSIST_COMPLETION_STATUS
+  }
+  return STREAM_PERSIST_STREAMING_STATUS
+}
+
+/**
+ * Pure seam distinguishing whether the deterministic measurement sequence
+ * performs the pre-timing heat write for a given profile/round.
+ *
+ * The first measured completion round skips the heat so the timed
+ * `streaming -> success` transition itself is measured in both lanes
+ * (no prior unmeasured success write for that round). All other
+ * profile/round combinations retain the heat write.
+ */
+export function streamPersistShouldHeatBeforeTimed(profile: StreamPersistProfileKey, round: number): boolean {
+  if (profile === 'completion' && round === STREAM_PERSIST_WARMUP_ROUNDS + 1) return false
+  return true
+}
+
+/**
+ * Deterministic expected normalized rowid advancement for the complete
+ * sequence (warmup + measured rounds, all profiles), derived from the
+ * actual heat-before-timed decisions rather than a fixed product.
+ * Each heat or timed content UPDATE fires the rowid DELETE+INSERT
+ * trigger, so the advance equals the exact count of those writes.
+ */
+export function streamPersistExpectedRowidAdvance(): number {
+  let total = 0
+  for (const profile of STREAM_PERSIST_PROFILES) {
+    for (let round = 1; round <= STREAM_PERSIST_WARMUP_ROUNDS + STREAM_PERSIST_MEASURE_ROUNDS; round++) {
+      if (streamPersistShouldHeatBeforeTimed(profile, round)) total += 1
+      if (round > STREAM_PERSIST_WARMUP_ROUNDS) total += 1
+    }
+  }
+  return total
+}
+
 // ---------------------------------------------------------------------------
 // Sample record + differential arithmetic
 // ---------------------------------------------------------------------------
@@ -306,6 +353,7 @@ export interface StreamPersistGates {
   postBaseParity: boolean
   projectionEquivalence: boolean
   projectionOps: boolean
+  completionFlip: boolean
   samplesComplete: boolean
   abi137: boolean
   schemaV1: boolean
@@ -341,10 +389,17 @@ export function buildStreamPersistGates(gates: StreamPersistGates, detail: Recor
     },
     {
       id: 'counts.projectionOps',
-      name: 'projection row-op accounting — trigger-on updates report strictly more changed rows than base-only (derived DELETE+INSERT rows) and the projection stays a 1:1 pair',
+      name: 'projection row-op accounting — trigger fires per update verified by normalized rowid advance plus 1:1 projection row invariant (base-only changes=1; better-sqlite3 exposes only base row)',
       kind: 'correctness',
       passed: gates.projectionOps,
       detail: detail.projectionOps
+    },
+    {
+      id: 'parity.completionFlip',
+      name: 'completion status flip — streaming during warmup and success during measured rounds in both lanes',
+      kind: 'correctness',
+      passed: gates.completionFlip,
+      detail: detail.completionFlip
     },
     {
       id: 'samples.complete',

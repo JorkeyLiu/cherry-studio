@@ -22,17 +22,24 @@
  * reported as a differential estimate only, never as root cause.
  *
  * Correctness/parity ALL run BEFORE any timing (fail-closed aborts with no
- * artifact):
+ * artifact) — preflight on fresh equivalent DBs validates complete
+ * base-table parity, projection equivalence after explicit rebuild, 1:1
+ * projection row invariant, normalized rowid advance proving trigger fires
+ * per content update (including identical rewrites), base-only changes=1
+ * (better-sqlite3 exposes only base row), and completion warmup-streaming
+ * → measured-success transition in both lanes — without contaminating the
+ * measured state:
  *   - seed parity: base tables AND projections equal across both DBs;
+ *   - preflight parity/projection/rowid/1:1/completionFlip on fresh equivalent
+ *     DBs before timing;
  *   - post parity: base tables equal after the identical update sequences
  *     (the base-only lane wrote identical content);
  *   - projection equivalence: after explicitly rebuilding the base-only lane's
  *     projection (production candidate rebuild), it equals the
  *     trigger-maintained lane's projection.
- *   - projection row-op accounting: `stmt.run().changes` proves the derived
- *     DELETE+INSERT rows fire per content update (4 trigger-side row ops on
- *     the trigger-maintained lane, 0 on the base-only lane — with sqlite3
- *     counting trigger-side changes).
+ *   - projection row-op accounting: trigger fires per update verified by
+ *     normalized rowid advance plus 1:1 projection row invariant
+ *     (base-only changes=1; better-sqlite3 exposes only base row).
  *
  * ENV-GATED (default skip): the diagnostic body runs ONLY when
  * `STREAM_PERSIST_BENCH=1` (canonical `pnpm bench:stream-persist`). Under the
@@ -92,9 +99,12 @@ import {
   STREAM_PERSIST_STREAMING_STATUS,
   STREAM_PERSIST_WARMUP_ROUNDS,
   streamPersistContent,
+  streamPersistExpectedRowidAdvance,
   type StreamPersistLaneSamples,
   type StreamPersistProfileKey,
-  streamPersistScale
+  streamPersistScale,
+  streamPersistShouldHeatBeforeTimed,
+  streamPersistStatus
 } from './streamPersistBench'
 
 // ---------------------------------------------------------------------------
@@ -124,25 +134,61 @@ if (!streamPersistEnabled) {
   /** Open a FRESH deterministic temp DB with the exact production schema. */
   function openFreshDb(dir: string): FreshDb {
     const sqlite = new Database(realPath.join(dir, 'chat.db'))
-    sqlite.pragma('journal_mode = WAL')
-    sqlite.pragma('foreign_keys = ON')
-    sqlite.pragma('synchronous = NORMAL')
-    sqlite.pragma('busy_timeout = 5000')
-    const db = drizzle(sqlite, { schema })
-    registerChatDbNormalize(sqlite)
-    runMigrations(db, sqlite)
-    return { sqlite, dir }
+    try {
+      sqlite.pragma('journal_mode = WAL')
+      sqlite.pragma('foreign_keys = ON')
+      sqlite.pragma('synchronous = NORMAL')
+      sqlite.pragma('busy_timeout = 5000')
+      const db = drizzle(sqlite, { schema })
+      registerChatDbNormalize(sqlite)
+      runMigrations(db, sqlite)
+      return { sqlite, dir }
+    } catch (e) {
+      try {
+        sqlite.close()
+      } catch {
+        /* already closed */
+      }
+      throw e
+    }
   }
 
   const dirOn = realPath.join(tempDir, 'on')
   const dirOff = realPath.join(tempDir, 'off')
   realFs.mkdirSync(dirOn, { recursive: true })
   realFs.mkdirSync(dirOff, { recursive: true })
-  const { sqlite: dbOn } = openFreshDb(dirOn)
-  const { sqlite: dbOff } = openFreshDb(dirOff)
-
+  let dbOn: Database.Database
+  let dbOff: Database.Database
+  {
+    let tmpOn: Database.Database | null = null
+    try {
+      const openedOn = openFreshDb(dirOn)
+      tmpOn = openedOn.sqlite
+      const openedOff = openFreshDb(dirOff)
+      const tmpOff = openedOff.sqlite
+      dbOn = tmpOn
+      dbOff = tmpOff
+    } catch (e) {
+      if (tmpOn !== null) {
+        try {
+          tmpOn.close()
+        } catch {
+          /* already closed */
+        }
+      }
+      try {
+        realFs.rmSync(tempDir, { recursive: true, force: true })
+      } catch {
+        /* already removed */
+      }
+      throw e
+    }
+  }
   const CLEANUP: Database.Database[] = [dbOn, dbOff]
+  let cleanupDone = false
   function cleanup(): void {
+    if (cleanupDone) return
+    cleanupDone = true
     for (const sqlite of CLEANUP) {
       try {
         sqlite.close()
@@ -150,7 +196,11 @@ if (!streamPersistEnabled) {
         /* already closed */
       }
     }
-    realFs.rmSync(tempDir, { recursive: true, force: true })
+    try {
+      realFs.rmSync(tempDir, { recursive: true, force: true })
+    } catch {
+      /* already removed */
+    }
   }
   process.once('exit', cleanup)
 
@@ -303,6 +353,16 @@ if (!streamPersistEnabled) {
     return a.length === b.length && a.every((row, i) => row.join('\u0000') === b[i].join('\u0000'))
   }
 
+  function baseEqualOf(aSqlite: Database.Database, bSqlite: Database.Database): boolean {
+    const a = baseRowsOf(aSqlite)
+    const b = baseRowsOf(bSqlite)
+    return a.length === b.length && a.every((row, i) => row.join('\u0000') === b[i].join('\u0000'))
+  }
+
+  function projectionEqualOf(aSqlite: Database.Database, bSqlite: Database.Database): boolean {
+    return projectionEqual(projectionRowsOf(aSqlite), projectionRowsOf(bSqlite))
+  }
+
   // -------------------------------------------------------------------------
   // Seed parity checks — BEFORE any timing
   // -------------------------------------------------------------------------
@@ -332,6 +392,185 @@ if (!streamPersistEnabled) {
   }
 
   // -------------------------------------------------------------------------
+  // Fresh-equivalent preflight — complete parity/projection/rowid/1:1/completionFlip BEFORE timing
+  // (uses disposable clones so measured state/rowid baseline stays pristine)
+  // -------------------------------------------------------------------------
+
+  {
+    const preDirOn = realPath.join(tempDir, 'preflight-on')
+    const preDirOff = realPath.join(tempDir, 'preflight-off')
+    realFs.mkdirSync(preDirOn, { recursive: true })
+    realFs.mkdirSync(preDirOff, { recursive: true })
+    let preOn: Database.Database | null = null
+    let preOff: Database.Database | null = null
+    const preflightErrors: string[] = []
+    try {
+      const openedOn = openFreshDb(preDirOn)
+      preOn = openedOn.sqlite
+      const openedOff = openFreshDb(preDirOff)
+      preOff = openedOff.sqlite
+      seedDb(preOn)
+      seedDb(preOff)
+      preOff.exec(
+        [
+          'DROP TRIGGER IF EXISTS message_blocks_normalized_insert',
+          'DROP TRIGGER IF EXISTS message_blocks_normalized_update',
+          'DROP TRIGGER IF EXISTS ' + MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER
+        ].join(';\n')
+      )
+
+      if (!baseEqualOf(preOn, preOff)) {
+        preflightErrors.push('preflight: base tables differ between lanes (fresh clones)')
+      }
+      if (!projectionEqualOf(preOn, preOff)) {
+        preflightErrors.push('preflight: projections differ between lanes (fresh clones)')
+      }
+
+      const preStmtOn = preOn.prepare('UPDATE message_blocks SET content = ?, status = ? WHERE id = ?')
+      const preStmtOff = preOff.prepare('UPDATE message_blocks SET content = ?, status = ? WHERE id = ?')
+      const preRowidBefore = (
+        preOn.prepare('SELECT rowid FROM message_blocks_normalized WHERE block_id = ?').get(STREAM_BLOCK_ID) as {
+          rowid: number
+        }
+      ).rowid
+      const preOpsOn: number[] = []
+      const preOpsOff: number[] = []
+      let preWarmupStreaming = false
+      let preMeasuredSuccess = false
+      let preFirstTimedOnStatus: string | null = null
+      let preFirstTimedOffStatus: string | null = null
+      for (const profile of STREAM_PERSIST_PROFILES) {
+        for (let round = 1; round <= STREAM_PERSIST_WARMUP_ROUNDS + STREAM_PERSIST_MEASURE_ROUNDS; round++) {
+          const content = streamPersistContent(profile, Math.min(round, STREAM_PERSIST_MEASURE_ROUNDS))
+          const status = streamPersistStatus(profile, round)
+          if (profile === 'completion') {
+            if (round <= STREAM_PERSIST_WARMUP_ROUNDS && status === STREAM_PERSIST_STREAMING_STATUS) {
+              preWarmupStreaming = true
+            }
+            if (round > STREAM_PERSIST_WARMUP_ROUNDS && status === 'success') {
+              preMeasuredSuccess = true
+            }
+          }
+          if (streamPersistShouldHeatBeforeTimed(profile, round)) {
+            preStmtOn.run(content, status, STREAM_BLOCK_ID)
+            preStmtOff.run(content, status, STREAM_BLOCK_ID)
+          }
+          if (round <= STREAM_PERSIST_WARMUP_ROUNDS) continue
+          const rOn = preStmtOn.run(content, status, STREAM_BLOCK_ID)
+          const rOff = preStmtOff.run(content, status, STREAM_BLOCK_ID)
+          preOpsOn.push(rOn.changes)
+          preOpsOff.push(rOff.changes)
+          if (profile === 'completion' && round === STREAM_PERSIST_WARMUP_ROUNDS + 1) {
+            preFirstTimedOnStatus = (
+              preOn.prepare('SELECT status FROM message_blocks WHERE id = ?').get(STREAM_BLOCK_ID) as { status: string }
+            ).status
+            preFirstTimedOffStatus = (
+              preOff.prepare('SELECT status FROM message_blocks WHERE id = ?').get(STREAM_BLOCK_ID) as {
+                status: string
+              }
+            ).status
+          }
+        }
+      }
+      const preRowidAfter = (
+        preOn.prepare('SELECT rowid FROM message_blocks_normalized WHERE block_id = ?').get(STREAM_BLOCK_ID) as {
+          rowid: number
+        }
+      ).rowid
+      const expectedPreAdvance = streamPersistExpectedRowidAdvance()
+      if (preRowidAfter - preRowidBefore !== expectedPreAdvance) {
+        preflightErrors.push(
+          `preflight: normalized rowid advanced ${preRowidAfter - preRowidBefore}, expected ${expectedPreAdvance}`
+        )
+      }
+      if (!baseEqualOf(preOn, preOff)) {
+        preflightErrors.push('preflight: base tables differ after deterministic replay')
+      }
+      preOff.exec(DERIVED_PROJECTION_REBUILD_SQL.join(';\n'))
+      if (!projectionEqualOf(preOn, preOff)) {
+        preflightErrors.push('preflight: rebuilt projection differs from trigger-maintained projection')
+      }
+      const preNormCount = (preOn.prepare('SELECT COUNT(*) AS n FROM message_blocks_normalized').get() as { n: number })
+        .n
+      const preFtsCount = (preOn.prepare('SELECT COUNT(*) AS n FROM message_blocks_fts').get() as { n: number }).n
+      if (preNormCount !== SEED_LENGTH + 1 || preFtsCount !== SEED_LENGTH + 1) {
+        preflightErrors.push(
+          `preflight: projection row invariant failed (normalized=${preNormCount}, fts=${preFtsCount}, expected=${SEED_LENGTH + 1})`
+        )
+      }
+      if (!preOpsOff.every((c) => c === 1)) {
+        preflightErrors.push(
+          `preflight: base-only changes not all 1 (got ${JSON.stringify([...new Set(preOpsOff)].slice(0, 4))})`
+        )
+      }
+      if (!preWarmupStreaming || !preMeasuredSuccess) {
+        preflightErrors.push(
+          `preflight: completion status flip not verified (warmup streaming=${preWarmupStreaming} measured success=${preMeasuredSuccess})`
+        )
+      }
+      if (
+        preFirstTimedOnStatus !== STREAM_PERSIST_COMPLETION_STATUS ||
+        preFirstTimedOffStatus !== STREAM_PERSIST_COMPLETION_STATUS
+      ) {
+        preflightErrors.push(
+          `preflight: first timed completion transition did not persist success in both lanes (on=${preFirstTimedOnStatus} off=${preFirstTimedOffStatus})`
+        )
+      }
+      const preFinalOnStatus = (
+        preOn.prepare('SELECT status FROM message_blocks WHERE id = ?').get(STREAM_BLOCK_ID) as { status: string }
+      ).status
+      const preFinalOffStatus = (
+        preOff.prepare('SELECT status FROM message_blocks WHERE id = ?').get(STREAM_BLOCK_ID) as { status: string }
+      ).status
+      if (preFinalOnStatus !== 'success' || preFinalOffStatus !== 'success') {
+        preflightErrors.push(
+          `preflight: final persisted status not success (on=${preFinalOnStatus} off=${preFinalOffStatus})`
+        )
+      }
+      if (preflightErrors.length > 0) {
+        throw new Error(preflightErrors.join('\n'))
+      }
+    } catch (e) {
+      if (preOn) {
+        try {
+          preOn.close()
+        } catch {
+          /* already closed */
+        }
+      }
+      if (preOff) {
+        try {
+          preOff.close()
+        } catch {
+          /* already closed */
+        }
+      }
+      realFs.rmSync(preDirOn, { recursive: true, force: true })
+      realFs.rmSync(preDirOff, { recursive: true, force: true })
+      cleanup()
+      throw new Error(
+        `Streaming persist benchmark aborted — preflight parity failed BEFORE timing:\n${e instanceof Error ? e.message : String(e)}`
+      )
+    }
+    if (preOn) {
+      try {
+        preOn.close()
+      } catch {
+        /* already closed */
+      }
+    }
+    if (preOff) {
+      try {
+        preOff.close()
+      } catch {
+        /* already closed */
+      }
+    }
+    realFs.rmSync(preDirOn, { recursive: true, force: true })
+    realFs.rmSync(preDirOff, { recursive: true, force: true })
+  }
+
+  // -------------------------------------------------------------------------
   // Profile measurement — deterministic update sequences in lockstep rounds
   // -------------------------------------------------------------------------
 
@@ -347,12 +586,18 @@ if (!streamPersistEnabled) {
   // (migration 004), so a fired trigger advances the streaming block's
   // normalized rowid by exactly one. Captured before/after the profiles: if the
   // trigger fires on EVERY content update (including identical-content
-  // rewrites), the rowid advances by exactly (warmup + measure) × profiles.
+  // rewrites), the rowid advances by exactly the deterministic heat+timed count
+  // via streamPersistExpectedRowidAdvance() — currently 149 heat + 120 timed = 269.
   const streamingNormRowidBefore = (
     dbOn.prepare('SELECT rowid FROM message_blocks_normalized WHERE block_id = ?').get(STREAM_BLOCK_ID) as {
       rowid: number
     }
   ).rowid
+
+  let completionWarmupSeenStreaming = false
+  let completionMeasuredSeenSuccess = false
+  let completionFirstTimedOnStatus: string | null = null
+  let completionFirstTimedOffStatus: string | null = null
 
   for (const profile of STREAM_PERSIST_PROFILES) {
     const timing: StreamPersistLaneSamples = { triggerOn: [], baseOnly: [] }
@@ -360,11 +605,20 @@ if (!streamPersistEnabled) {
 
     for (let round = 1; round <= STREAM_PERSIST_WARMUP_ROUNDS + STREAM_PERSIST_MEASURE_ROUNDS; round++) {
       const content = streamPersistContent(profile, Math.min(round, STREAM_PERSIST_MEASURE_ROUNDS))
-      const status = profile === 'completion' ? STREAM_PERSIST_COMPLETION_STATUS : STREAM_PERSIST_STREAMING_STATUS
+      const status = streamPersistStatus(profile, round)
+      if (profile === 'completion') {
+        if (round <= STREAM_PERSIST_WARMUP_ROUNDS && status === STREAM_PERSIST_STREAMING_STATUS) {
+          completionWarmupSeenStreaming = true
+        }
+        if (round > STREAM_PERSIST_WARMUP_ROUNDS && status === STREAM_PERSIST_COMPLETION_STATUS) {
+          completionMeasuredSeenSuccess = true
+        }
+      }
 
-      // Heat the statement caches on both lanes every round in lockstep.
-      stmtOn.run(content, status, STREAM_BLOCK_ID)
-      stmtOff.run(content, status, STREAM_BLOCK_ID)
+      if (streamPersistShouldHeatBeforeTimed(profile, round)) {
+        stmtOn.run(content, status, STREAM_BLOCK_ID)
+        stmtOff.run(content, status, STREAM_BLOCK_ID)
+      }
       const isMeasured = round > STREAM_PERSIST_WARMUP_ROUNDS
       if (!isMeasured) continue
 
@@ -378,6 +632,15 @@ if (!streamPersistEnabled) {
       const rOff = stmtOff.run(content, status, STREAM_BLOCK_ID)
       timing.baseOnly.push(performance.now() - tOff)
       ops.baseOnly.push(rOff.changes)
+
+      if (profile === 'completion' && round === STREAM_PERSIST_WARMUP_ROUNDS + 1) {
+        completionFirstTimedOnStatus = (
+          dbOn.prepare('SELECT status FROM message_blocks WHERE id = ?').get(STREAM_BLOCK_ID) as { status: string }
+        ).status
+        completionFirstTimedOffStatus = (
+          dbOff.prepare('SELECT status FROM message_blocks WHERE id = ?').get(STREAM_BLOCK_ID) as { status: string }
+        ).status
+      }
     }
 
     samples.set(profile, timing)
@@ -385,19 +648,15 @@ if (!streamPersistEnabled) {
   }
 
   // After all profiles: the streaming block's normalized rowid must have
-  // advanced by exactly (warmup + measure) × profiles — proving the UPDATE
-  // trigger (rowid DELETE+INSERT) fired on EVERY content update, including the
-  // identical-content nochange/completion rewrites.
+  // advanced by exactly the deterministic count of heat + timed writes —
+  // proving the UPDATE trigger (rowid DELETE+INSERT) fired on EVERY content
+  // update, including the identical-content nochange/completion rewrites.
   const streamingNormRowidAfter = (
     dbOn.prepare('SELECT rowid FROM message_blocks_normalized WHERE block_id = ?').get(STREAM_BLOCK_ID) as {
       rowid: number
     }
   ).rowid
-  // Each measured round runs the trigger-on UPDATE twice (a statement/row-cache
-  // heat run in lockstep with the base-only lane, then the timed window), and
-  // each warmup round once — every fire advances the normalized rowid by one.
-  const expectedRowidAdvance =
-    STREAM_PERSIST_PROFILES.length * (STREAM_PERSIST_WARMUP_ROUNDS + 2 * STREAM_PERSIST_MEASURE_ROUNDS)
+  const expectedRowidAdvance = streamPersistExpectedRowidAdvance()
   const triggerFiresOnEveryUpdate = streamingNormRowidAfter - streamingNormRowidBefore === expectedRowidAdvance
 
   // -------------------------------------------------------------------------
@@ -438,6 +697,22 @@ if (!streamPersistEnabled) {
     .baseOnly.concat(opCounts.get('nochange')!.baseOnly, opCounts.get('completion')!.baseOnly)
   const projectionOpsOk = opsOff.every((c) => c === 1) && triggerFiresOnEveryUpdate && projectionRowInvariantOk
 
+  const finalOnStatus = (
+    dbOn.prepare('SELECT status FROM message_blocks WHERE id = ?').get(STREAM_BLOCK_ID) as { status: string }
+  ).status
+  const finalOffStatus = (
+    dbOff.prepare('SELECT status FROM message_blocks WHERE id = ?').get(STREAM_BLOCK_ID) as { status: string }
+  ).status
+  const completionFirstTransitionOk =
+    completionFirstTimedOnStatus === STREAM_PERSIST_COMPLETION_STATUS &&
+    completionFirstTimedOffStatus === STREAM_PERSIST_COMPLETION_STATUS
+  const completionFlipOk =
+    completionWarmupSeenStreaming &&
+    completionMeasuredSeenSuccess &&
+    completionFirstTransitionOk &&
+    finalOnStatus === STREAM_PERSIST_COMPLETION_STATUS &&
+    finalOffStatus === STREAM_PERSIST_COMPLETION_STATUS
+
   const postErrors: string[] = []
   if (!baseParityOk) postErrors.push('post: base tables differ after the update sequences')
   if (!projectionEquivalenceOk)
@@ -449,12 +724,16 @@ if (!streamPersistEnabled) {
   if (!triggerFiresOnEveryUpdate)
     postErrors.push(
       `post: the projection trigger did NOT fire on every update (normalized rowid advanced ${streamingNormRowidAfter - streamingNormRowidBefore}, ` +
-        `expected ${expectedRowidAdvance} = ${STREAM_PERSIST_PROFILES.length} profiles × (${STREAM_PERSIST_WARMUP_ROUNDS} warmup + 2×${STREAM_PERSIST_MEASURE_ROUNDS} measured heat+timed fires))`
+        `expected ${expectedRowidAdvance} deterministic heat+timed writes per streamPersistExpectedRowidAdvance())`
     )
   if (!projectionOpsOk)
     postErrors.push(
       `post: projection row-op accounting failed (triggerOn changes=${JSON.stringify([...new Set(opsOn)].slice(0, 4))}, ` +
         `baseOnly changes=${JSON.stringify([...new Set(opsOff)].slice(0, 4))})`
+    )
+  if (!completionFlipOk)
+    postErrors.push(
+      `post: completion status flip not verified (warmup streaming=${completionWarmupSeenStreaming} measured success=${completionMeasuredSeenSuccess} firstTimed on/off ${completionFirstTimedOnStatus}/${completionFirstTimedOffStatus} final on/off ${finalOnStatus}/${finalOffStatus})`
     )
   if (postErrors.length > 0) {
     cleanup()
@@ -529,12 +808,13 @@ if (!streamPersistEnabled) {
   ]
   const gatesDetail = {
     seedParity: `${STREAM_PERSIST_CORPUS_BLOCKS} corpus blocks + streaming block seeded identically; base tables and projections equal; base-only lane has 0 sync triggers`,
-    postBaseParity: 'base tables equal after the identical update sequences (all 3 profiles)',
+    postBaseParity: `preflight base-table parity passed before timing; base tables equal after the identical update sequences (all 3 profiles)`,
     projectionEquivalence:
-      'explicit candidate rebuild of the base-only lane matched the trigger-maintained projection (normalized + FTS rows, content-level)',
+      'preflight projection equivalence passed before timing; explicit candidate rebuild of the base-only lane matched the trigger-maintained projection (normalized + FTS rows, content-level)',
     projectionOps:
-      `base-only lane reported changes=1 (base row only); the trigger-maintained normalized rowid advanced exactly ${streamingNormRowidAfter - streamingNormRowidBefore} ` +
-      `(= ${expectedRowidAdvance} = ${STREAM_PERSIST_PROFILES.length} profiles × (${STREAM_PERSIST_WARMUP_ROUNDS} warmup + 2×${STREAM_PERSIST_MEASURE_ROUNDS} heat+timed fires)) — proving the rowid DELETE+INSERT trigger fired on EVERY content update including identical-content rewrites; projection stayed 1:1 (${normOnCount} rows)`,
+      `preflight projection row-op accounting passed before timing; base-only lane reported changes=1 (base row only); the trigger-maintained normalized rowid advanced exactly ${streamingNormRowidAfter - streamingNormRowidBefore} ` +
+      `(= ${expectedRowidAdvance} deterministic heat+timed writes per streamPersistExpectedRowidAdvance()) — proving the rowid DELETE+INSERT trigger fired on EVERY content update including identical-content rewrites; projection stayed 1:1 (${normOnCount} rows)`,
+    completionFlip: `warmup streaming=${completionWarmupSeenStreaming} measured success=${completionMeasuredSeenSuccess} firstTimed on/off ${completionFirstTimedOnStatus}/${completionFirstTimedOffStatus} final on/off ${finalOnStatus}/${finalOffStatus} preflight firstTimed also success`,
     samplesComplete: `${sampleValidation.verifiedProfiles.length}/${STREAM_PERSIST_PROFILES.length} profiles recorded with exactly ${sampleValidation.expectedCount} samples in each of ${sampleValidation.verifiedLanes.length} lanes (fail-fast guard passed before artifact build)`,
     abi137: 'Node lane, abi=137'
   }
@@ -563,6 +843,7 @@ if (!streamPersistEnabled) {
         postBaseParity: baseParityOk,
         projectionEquivalence: projectionEquivalenceOk,
         projectionOps: projectionOpsOk,
+        completionFlip: completionFlipOk,
         samplesComplete: sampleValidation.ok,
         abi137: abi137Gate,
         schemaV1: true
@@ -582,7 +863,7 @@ if (!streamPersistEnabled) {
       () => {
         for (const profile of [...STREAM_PERSIST_PROFILES].reverse()) {
           const content = streamPersistContent(profile, STREAM_PERSIST_MEASURE_ROUNDS)
-          const status = profile === 'completion' ? STREAM_PERSIST_COMPLETION_STATUS : STREAM_PERSIST_STREAMING_STATUS
+          const status = streamPersistStatus(profile, STREAM_PERSIST_MEASURE_ROUNDS)
           stmtOn.run(content, status, STREAM_BLOCK_ID)
           stmtOff.run(content, status, STREAM_BLOCK_ID)
         }

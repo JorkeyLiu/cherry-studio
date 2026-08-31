@@ -29,14 +29,15 @@ import {
   B02_MAX_BYTES,
   B05_CALIBRATION_CANDIDATE_BYTES,
   canonicalizeLogicalPayload,
-  LOGICAL_PAYLOAD_ACCOUNTING_VERSION
+  LOGICAL_PAYLOAD_ACCOUNTING_VERSION,
+  type LogicalPayloadTopicInput
 } from '@shared/chatDb/logicalPayload'
 
 import {
   BENCH_RESULT_SCHEMA_VERSION,
   type BenchmarkResult,
   collectEnvironmentMetadata,
-  emitBenchmarkResultAfterSuccessfulTasks
+  emitBenchmarkResultAfterSuccessfulTasksAndGates
 } from './benchResult'
 import { createSyntheticTopic, getLogicalPayloadProfileMatrix, SYNTHETIC_PROFILE_IDS } from './logicalPayload'
 import { buildLogicalPayloadBenchmarkContract } from './logicalPayload.benchContract'
@@ -48,16 +49,159 @@ import { buildLogicalPayloadBenchmarkContract } from './logicalPayload.benchCont
 // Guard: verify canonical encoding invariants before any metric collection
 const correctnessErrors: string[] = []
 
-// 1) Compact JSON and lexicographic ordering smoke checks via a small topic
+function findLexicographicViolation(value: unknown, path = '$'): string | null {
+  if (Array.isArray(value)) {
+    for (let i = 0; i < (value as unknown[]).length; i++) {
+      const violation = findLexicographicViolation((value as unknown[])[i], `${path}[${i}]`)
+      if (violation) return violation
+    }
+    return null
+  }
+  if (value !== null && typeof value === 'object') {
+    const obj = value as Record<string, unknown>
+    const keys = Object.keys(obj)
+    const sorted = [...keys].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== sorted[i]) {
+        return `${path}: keys [${keys.join(',')}] not lexicographically sorted (expected [${sorted.join(',')}])`
+      }
+    }
+    for (const k of keys) {
+      const violation = findLexicographicViolation(obj[k], `${path}.${k}`)
+      if (violation) return violation
+    }
+  }
+  return null
+}
+
+// 1) Compact JSON, recursive lexicographic ordering, UTF-8 byte length, determinism — independent verification
 try {
   const probe = createSyntheticTopic({ topicId: 'calibration-probe', messageCount: 2, blockContentSize: 16 })
-  const { canonicalJson, byteLength } = canonicalizeLogicalPayload(probe)
+  const { canonicalJson, byteLength, canonicalFrame } = canonicalizeLogicalPayload(probe)
   if (canonicalJson.includes(': ') || canonicalJson.includes(', ')) {
     correctnessErrors.push('probe: canonical JSON contains whitespace')
   }
-  if (byteLength !== utf8ByteLength(canonicalJson)) {
-    correctnessErrors.push('probe: byteLength mismatch')
+  if (canonicalJson.includes('\n')) {
+    correctnessErrors.push('probe: canonical JSON contains newline')
   }
+  // Independent recursive lexicographic key ordering assertion
+  const violation = findLexicographicViolation(canonicalFrame)
+  if (violation !== null) {
+    correctnessErrors.push(`probe: lexicographic ordering violated at ${violation}`)
+  }
+  // Independent unsorted-input sorting verification (keys deliberately out of lexical order)
+  try {
+    const unsortedInput: LogicalPayloadTopicInput = {
+      topicId: 'lexicographic-probe',
+      messages: [
+        {
+          z: 'last',
+          a: 'first',
+          m: 'middle',
+          id: 'msg-001',
+          sortOrder: 0,
+          topicId: 'lexicographic-probe',
+          blocks: ['b1']
+        } as Record<string, unknown>
+      ],
+      blocks: [
+        { id: 'b1', messageId: 'msg-001', type: 'main_text', content: 'hi', z: 1, a: 0 } as Record<string, unknown>
+      ],
+      segments: [] as Record<string, unknown>[],
+      completeness: { chatData: true, segments: true, residentTopic: true },
+      applicabilityGeneration: 0
+    }
+    const lex = canonicalizeLogicalPayload(unsortedInput)
+    const lexViolation = findLexicographicViolation(lex.canonicalFrame)
+    if (lexViolation !== null) {
+      correctnessErrors.push(`lexicographic-probe: ordering violated at ${lexViolation}`)
+    }
+    const msgSlice = lex.canonicalJson.slice(lex.canonicalJson.indexOf('"messages"'))
+    const aIdx = msgSlice.indexOf('"a"')
+    const mIdx = msgSlice.indexOf('"m"')
+    const zIdx = msgSlice.indexOf('"z"')
+    if (!(aIdx !== -1 && mIdx !== -1 && zIdx !== -1 && aIdx < mIdx && mIdx < zIdx)) {
+      correctnessErrors.push('lexicographic-probe: unsorted keys not correctly reordered in canonical JSON (a<m<z)')
+    }
+  } catch (e) {
+    correctnessErrors.push(`lexicographic-probe: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
+  // Independent UTF-8 byte length: cross-check byteLength against two independent encoders and known vectors
+  const bufferLen = Buffer.byteLength(canonicalJson, 'utf8')
+  const encoderLen = new TextEncoder().encode(canonicalJson).byteLength
+  if (byteLength !== utf8ByteLength(canonicalJson)) {
+    correctnessErrors.push('probe: byteLength mismatch vs utf8ByteLength')
+  }
+  if (byteLength !== bufferLen) {
+    correctnessErrors.push(`probe: byteLength ${byteLength} != Buffer.byteLength ${bufferLen}`)
+  }
+  if (byteLength !== encoderLen) {
+    correctnessErrors.push(`probe: byteLength ${byteLength} != TextEncoder.byteLength ${encoderLen}`)
+  }
+  // Known-value vector check independent of probe (hard-coded expected UTF-8 byte lengths)
+  const knownVectors: Array<[string, number]> = [
+    ['', 0],
+    ['a', 1],
+    ['abc', 3],
+    ['é', 2],
+    ['文', 3],
+    ['😀', 4],
+    ['a文😀', 8],
+    ['Hello 世界 🌍', 17]
+  ]
+  for (const [str, expected] of knownVectors) {
+    const viaShared = utf8ByteLength(str)
+    const viaBuffer = Buffer.byteLength(str, 'utf8')
+    const viaEncoder = new TextEncoder().encode(str).byteLength
+    if (viaShared !== expected) {
+      correctnessErrors.push(`utf8 vector '${str}': utf8ByteLength ${viaShared} != expected ${expected}`)
+    }
+    if (viaBuffer !== expected) {
+      correctnessErrors.push(`utf8 vector '${str}': Buffer.byteLength ${viaBuffer} != expected ${expected}`)
+    }
+    if (viaEncoder !== expected) {
+      correctnessErrors.push(`utf8 vector '${str}': TextEncoder ${viaEncoder} != expected ${expected}`)
+    }
+    if (viaShared !== viaBuffer || viaShared !== viaEncoder) {
+      correctnessErrors.push(
+        `utf8 vector '${str}': encoder mismatch shared=${viaShared} buffer=${viaBuffer} encoder=${viaEncoder}`
+      )
+    }
+  }
+  // Unicode canonical payload byteLength independent verification
+  try {
+    const unicodeTopic: LogicalPayloadTopicInput = {
+      topicId: 'utf8-probe',
+      messages: [{ id: 'msg-001', topicId: 'utf8-probe', sortOrder: 0, blocks: ['b1'] } as Record<string, unknown>],
+      blocks: [
+        {
+          id: 'b1',
+          messageId: 'msg-001',
+          type: 'main_text',
+          content: '中文😀 a',
+          status: 'success'
+        } as Record<string, unknown>
+      ],
+      segments: [] as Record<string, unknown>[],
+      completeness: { chatData: true, segments: true, residentTopic: true },
+      applicabilityGeneration: 0
+    }
+    const uni = canonicalizeLogicalPayload(unicodeTopic)
+    const uniBuffer = Buffer.byteLength(uni.canonicalJson, 'utf8')
+    const uniEncoder = new TextEncoder().encode(uni.canonicalJson).byteLength
+    if (uni.byteLength !== uniBuffer || uni.byteLength !== uniEncoder) {
+      correctnessErrors.push(
+        `utf8-probe: byteLength ${uni.byteLength} mismatch buffer ${uniBuffer} encoder ${uniEncoder}`
+      )
+    }
+    if (uni.byteLength <= uni.canonicalJson.length) {
+      correctnessErrors.push('utf8-probe: expected byteLength > string length for multibyte content')
+    }
+  } catch (e) {
+    correctnessErrors.push(`utf8-probe: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
   const second = canonicalizeLogicalPayload(probe)
   if (second.canonicalJson !== canonicalJson || second.byteLength !== byteLength) {
     correctnessErrors.push('probe: determinism mismatch')
@@ -243,9 +387,9 @@ describe('logical-retained-payload calibration — canonicalization throughput',
   )
 })
 
-// File-level afterAll — artifact only after all bench tasks passed (audit F1)
+// File-level afterAll — artifact only after all bench tasks AND gates passed (fail-closed)
 afterAll((suite) => {
-  const artifactPath = emitBenchmarkResultAfterSuccessfulTasks(suite, logicalPayloadBenchmarkResult)
+  const artifactPath = emitBenchmarkResultAfterSuccessfulTasksAndGates(suite, logicalPayloadBenchmarkResult)
   if (artifactPath !== null) {
     console.log(`Result artifact: ${artifactPath}`)
   }
