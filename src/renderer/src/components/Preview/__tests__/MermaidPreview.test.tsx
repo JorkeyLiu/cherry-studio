@@ -93,6 +93,7 @@ describe('MermaidPreview', () => {
     it('should handle valid mermaid content', () => {
       render(<MermaidPreview>{mermaidCode}</MermaidPreview>)
 
+      expect(mocks.useMermaid).toHaveBeenCalled()
       expect(screen.getByTestId('image-preview-layout')).toBeInTheDocument()
       expect(mocks.useDebouncedRender).toHaveBeenCalledWith(
         mermaidCode,

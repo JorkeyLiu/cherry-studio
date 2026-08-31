@@ -1,5 +1,4 @@
 import { useTheme } from '@renderer/context/ThemeProvider'
-import { useMermaid } from '@renderer/hooks/useMermaid'
 import { useSettings } from '@renderer/hooks/useSettings'
 import type { HighlightChunkResult, ShikiPreProperties } from '@renderer/services/ShikiStreamService'
 import { shikiStreamService } from '@renderer/services/ShikiStreamService'
@@ -44,7 +43,6 @@ export const CodeStyleProvider: React.FC<PropsWithChildren> = ({ children }) => 
   const { codeViewer } = useSettings()
   const { theme } = useTheme()
   const [shikiThemesInfo, setShikiThemesInfo] = useState<BundledThemeInfo[]>([])
-  useMermaid()
 
   useEffect(() => {
     void getShiki().then(({ bundledThemesInfo }) => {
