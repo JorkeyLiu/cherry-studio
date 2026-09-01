@@ -464,6 +464,10 @@ export class ChatDbAggregateService {
 
         const firstMessageId = closureMessages.length > 0 ? closureMessages[0].id : null
         const lastMessageId = closureMessages.length > 0 ? closureMessages[closureMessages.length - 1].id : null
+        // LOCK-001: derive authoritative counts and boundary from same complete turn set and resolved anchor
+        const totalTurnCount = turns.length
+        const selectedTurnCount = turns.length - anchorTurnIdx
+        const boundaryMessageId = anchorTurnIdx > 0 ? turns[anchorTurnIdx].messages[0].id : null
 
         return {
           messages: messagesWithBlocks,
@@ -474,7 +478,10 @@ export class ChatDbAggregateService {
             anchorGroupKey: request.anchorGroupKey,
             firstMessageId,
             lastMessageId,
-            returnedCount: closureMessages.length
+            returnedCount: closureMessages.length,
+            totalTurnCount,
+            selectedTurnCount,
+            boundaryMessageId
           }
         }
       })

@@ -528,9 +528,19 @@ describe('ensureTopicAnchorEstablished', () => {
     const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('msg-00000') } })
     const dispatch = vi.fn()
     fetchContextClosureMock.mockResolvedValueOnce({
-      messages: [{ id: 'msg-00000' }],
+      messages: [{ id: 'msg-00000', role: 'user', topicId } as any],
       blocks: [],
-      closure: { topicId, anchorGroupKey: 'msg-00000', completeness: 'context-closure' }
+      closure: {
+        completeness: 'context-closure',
+        topicId,
+        anchorGroupKey: 'msg-00000',
+        firstMessageId: 'msg-00000',
+        lastMessageId: 'msg-00000',
+        returnedCount: 1,
+        totalTurnCount: 1,
+        selectedTurnCount: 1,
+        boundaryMessageId: null
+      }
     } as any)
 
     await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)

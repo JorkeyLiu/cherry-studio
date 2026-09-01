@@ -16,7 +16,7 @@ import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { computeClosureFingerprint, getFreshValidatedClosure } from '@renderer/services/contextClosure'
-import { computeContextInfo } from '@renderer/services/contextInfoService'
+import { computeContextInfo, deriveContextInfoFromClosure } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { currentPhaseCorrelation, recordPhaseDurationForCorrelation } from '@renderer/services/phaseTimingDiagnostics'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
@@ -104,29 +104,28 @@ const Chat: FC<Props> = (props) => {
   const topicBlocks = useTopicReferencedBlocks(props.activeTopic.id)
   const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[props.activeTopic.id]?.groupKey ?? null
   const { closure } = useContextClosure(props.activeTopic.id, anchorGroupKey)
-  // R-06: closure-sourced rows feed shared computeContextInfo when fresh; viewport remains for viewport groups.
-  // Centralized helper combines structural + anchor + full-closure freshness (generation + fingerprint); fail-closed to viewport.
+  // R-06: authoritative closure supplies message lists and full-topic metadata; fallback preserves bounded behavior
   const currentFingerprint = useMemo(() => computeClosureFingerprint(topicMessages as any), [topicMessages])
-  const contextClosureMessages = useMemo(() => {
+  const freshClosure = useMemo(() => {
     void closure // keep hook subscription; actual freshness is gated via centralized helper reading cache
-    const fresh = getFreshValidatedClosure(props.activeTopic.id, anchorGroupKey, currentFingerprint)
-    if (fresh) return fresh.messages as any
-    return null
+    return getFreshValidatedClosure(props.activeTopic.id, anchorGroupKey, currentFingerprint)
   }, [props.activeTopic.id, anchorGroupKey, currentFingerprint, closure])
-  const contextSourceMessages = contextClosureMessages ?? topicMessages
   // Subscribe to closure-referenced blocks when closure is active so filterEmptyMessages invalidation covers closure blocks
   const closureBlockIds = useMemo(
-    () => (contextClosureMessages ? contextClosureMessages.flatMap((m: any) => (m.blocks ?? []) as string[]) : []),
-    [contextClosureMessages]
+    () => (freshClosure ? freshClosure.messages.flatMap((m: any) => (m.blocks ?? []) as string[]) : []),
+    [freshClosure]
   )
   const closureBlocks = useAppSelector((state) => selectMessageBlocksByIds(state, closureBlockIds), shallowEqual)
   // Use closure blocks for memo invalidation when closure active; otherwise use viewport blocks
-  const activeBlocksForContext = contextClosureMessages ? closureBlocks : topicBlocks
+  const activeBlocksForContext = freshClosure ? closureBlocks : topicBlocks
   const sharedContextInfo = useMemo(() => {
     const active = currentPhaseCorrelation()
     const startedAt = active ? performance.now() : 0
-    const result = computeContextInfo(contextSourceMessages, assistant, props.activeTopic.id)
-    if (active && contextSourceMessages.length > 0) {
+    // LOCK-001/003: authoritative closure supplies anchorGroupKey, boundaryMessageId and contextCount {current:selectedTurnCount,max:totalTurnCount} when fresh; otherwise bounded fallback
+    const result = freshClosure
+      ? deriveContextInfoFromClosure(freshClosure as any)
+      : computeContextInfo(topicMessages as any, assistant, props.activeTopic.id)
+    if (active && (topicMessages as any).length > 0) {
       recordPhaseDurationForCorrelation(
         active.correlationId,
         active.path,
@@ -135,7 +134,7 @@ const Chat: FC<Props> = (props) => {
       )
     }
     return result
-  }, [contextSourceMessages, activeBlocksForContext, assistant, props.activeTopic.id])
+  }, [freshClosure, topicMessages, activeBlocksForContext, assistant, props.activeTopic.id])
 
   const enableContentSearch = React.useCallback((initialText?: string) => {
     if (isSearchActiveRef.current) {

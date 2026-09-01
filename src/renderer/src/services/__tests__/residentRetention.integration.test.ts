@@ -139,7 +139,10 @@ function seedResidentTopic(
         anchorGroupKey: 'u1',
         firstMessageId: 'u1',
         lastMessageId: 'u1',
-        returnedCount: 1
+        returnedCount: 1,
+        totalTurnCount: 1,
+        selectedTurnCount: 1,
+        boundaryMessageId: null
       }
     } as any,
     fp

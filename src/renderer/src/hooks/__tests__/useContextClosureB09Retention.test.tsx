@@ -96,6 +96,12 @@ function makeResp(topicId: string, anchor: string, ids: string[] = ['u1', 'a1', 
     topicId,
     ...(id.startsWith('a') ? { askId: 'u1' } : {})
   }))
+  // Coherent authoritative metadata: user-count turns; whole when anchor===first, else partial with boundary==first
+  const userCount = ids.filter((id) => id.startsWith('u')).length || 1
+  const totalTurnCount = userCount
+  const isWhole = anchor === ids[0]
+  const selectedTurnCount = isWhole ? totalTurnCount : 1
+  const boundaryMessageId = isWhole ? null : (ids[0] ?? null)
   return {
     messages: messages as any,
     blocks: [{ id: `b-${topicId}`, messageId: ids[0], type: 'main_text', content: `block-${topicId}` }] as any,
@@ -105,7 +111,10 @@ function makeResp(topicId: string, anchor: string, ids: string[] = ['u1', 'a1', 
       anchorGroupKey: anchor,
       firstMessageId: ids[0] ?? null,
       lastMessageId: ids[ids.length - 1] ?? null,
-      returnedCount: ids.length
+      returnedCount: ids.length,
+      totalTurnCount,
+      selectedTurnCount,
+      boundaryMessageId
     }
   } as any
 }

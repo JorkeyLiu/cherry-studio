@@ -1077,7 +1077,10 @@ describe('SqliteMessageDataSource', () => {
         anchorGroupKey: 'u1',
         firstMessageId: 'u1',
         lastMessageId: 'a1',
-        returnedCount: 2
+        returnedCount: 2,
+        totalTurnCount: 1,
+        selectedTurnCount: 1,
+        boundaryMessageId: null
       }
     }
     it('calls api.fetchContextClosure with exact request', async () => {

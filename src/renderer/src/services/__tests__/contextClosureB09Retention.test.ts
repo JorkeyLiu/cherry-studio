@@ -33,7 +33,10 @@ function makeResp(topicId = 't1', anchor = 'u1', ids: string[] = ['u1', 'a1', 'u
       anchorGroupKey: anchor,
       firstMessageId: ids[0] ?? null,
       lastMessageId: ids[ids.length - 1] ?? null,
-      returnedCount: ids.length
+      returnedCount: ids.length,
+      totalTurnCount: 2,
+      selectedTurnCount: 2,
+      boundaryMessageId: null
     }
   } as any
 }

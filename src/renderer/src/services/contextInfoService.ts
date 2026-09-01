@@ -16,11 +16,13 @@ import {
   filterUsefulMessages,
   filterUserRoleStartMessages
 } from '@renderer/utils/messageUtils/filters'
+import type { FetchContextClosureResponse } from '@shared/chatDb'
 
 /**
- * The single unified pipeline for computing all context-related information.
+ * The single unified pipeline for computing all context-related information
+ * when no authoritative closure is available (bounded fallback).
  *
- * This function is the sole source of truth for:
+ * This function is the sole source of truth for fallback derivation:
  *   - Which messages the model actually receives (uiMessages)
  *   - Which messages the token estimator uses (tokenEstimationMessages — retains trailing assistant)
  *   - Where the context window boundary divider should render (boundaryMessageId)
@@ -74,11 +76,7 @@ import {
  *
  * This is a pure function — it reads store state for block lookups but makes no mutations.
  */
-export function computeContextInfo(
-  messages: Message[],
-  assistant: Assistant | undefined,
-  topicId?: string
-): {
+export type ContextInfo = {
   uiMessages: Message[]
   tokenEstimationMessages: Message[]
   boundaryMessageId: string | null
@@ -86,7 +84,13 @@ export function computeContextInfo(
   /** Canonical resolved anchor: the start turn's group key, or null for an
    *  empty/undefined window. Sole expression of the effective window start. */
   anchorGroupKey: string | null
-} {
+}
+
+export function computeContextInfo(
+  messages: Message[],
+  assistant: Assistant | undefined,
+  topicId?: string
+): ContextInfo {
   if (!assistant) {
     return {
       uiMessages: [],
@@ -163,5 +167,45 @@ export function computeContextInfo(
     boundaryMessageId,
     contextCount: { current: currentCount, max: maxCount },
     anchorGroupKey
+  }
+}
+
+/**
+ * Derive context info from an authoritative validated closure (LOCK-001/003).
+ *
+ * The closure is the authoritative anchor-to-newest slice from Main (SQLite).
+ * Metadata (anchorGroupKey, boundaryMessageId, contextCount) is taken directly
+ * from closure.closure — which was derived from the complete authority-ordered
+ * turn set and resolved anchor — never recomputed from bounded renderer state.
+ * Message filtering (model/token/UI) is applied to closure.messages using the
+ * same filter pipeline as the fallback, so the working set stays bounded while
+ * the counts remain full-topic.
+ *
+ * Callers must ensure the closure has passed isValidContextClosureResponse /
+ * getFreshValidatedClosure; this helper does not revalidate counts, it
+ * projects them.
+ */
+export function deriveContextInfoFromClosure(closure: FetchContextClosureResponse): ContextInfo {
+  // Filter pipeline on authoritative closure messages (anchor-to-end)
+  const expandedMessages = closure.messages as unknown as Message[]
+  const usefulMessages = filterUsefulMessages(expandedMessages)
+  const withoutErrorOnlyPairs = filterErrorOnlyMessagesWithRelated(usefulMessages)
+
+  const withoutTrailingAssistant = filterLastAssistantMessage(withoutErrorOnlyPairs)
+  const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
+
+  const nonEmptyMessages = filterEmptyMessages(withoutAdjacentUsers)
+  const uiMessages = filterUserRoleStartMessages(nonEmptyMessages)
+
+  const tokenWithoutAdjacentUsers = filterAdjacentUserMessaegs(withoutErrorOnlyPairs)
+  const tokenNonEmptyMessages = filterEmptyMessages(tokenWithoutAdjacentUsers)
+  const tokenEstimationMessages = filterUserRoleStartMessages(tokenNonEmptyMessages)
+
+  return {
+    uiMessages,
+    tokenEstimationMessages,
+    boundaryMessageId: closure.closure.boundaryMessageId,
+    contextCount: { current: closure.closure.selectedTurnCount, max: closure.closure.totalTurnCount },
+    anchorGroupKey: closure.closure.anchorGroupKey
   }
 }

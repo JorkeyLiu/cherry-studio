@@ -123,6 +123,11 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     expect(v.closure.firstMessageId).toBe('u1')
     expect(v.closure.lastMessageId).toBe('u3')
     expect(v.blocks.length).toBe(6)
+    // LOCK-001: whole-topic since anchor at first turn
+    expect(v.closure.totalTurnCount).toBe(3)
+    expect(v.closure.selectedTurnCount).toBe(3)
+    expect(v.closure.boundaryMessageId).toBeNull()
+    expect(() => validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: v } as any)).not.toThrow()
   })
 
   it('assistant askId anchor fallback: orphan assistant askId resolves', () => {
@@ -140,6 +145,9 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     const v = okValue(res)
     expect(v.messages.map((m: any) => m.id)).toEqual(['aOrphan', 'u2', 'a2'])
     expect(v.closure.firstMessageId).toBe('aOrphan')
+    expect(v.closure.totalTurnCount).toBe(2)
+    expect(v.closure.selectedTurnCount).toBe(2)
+    expect(v.closure.boundaryMessageId).toBeNull()
   })
 
   it('orphan/system own-id anchor: assistant without askId and system singleton', () => {
@@ -154,12 +162,21 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     // anchor = own id aNoAsk → should return from aNoAsk through newest
     const res1 = agg.fetchContextClosure({ topicId, anchorGroupKey: 'aNoAsk' })
     expect(res1.ok).toBe(true)
-    expect(okValue(res1).messages.map((m: any) => m.id)).toEqual(['aNoAsk', 's1', 'u1', 'a1'])
+    const v1 = okValue(res1)
+    expect(v1.messages.map((m: any) => m.id)).toEqual(['aNoAsk', 's1', 'u1', 'a1'])
+    expect(v1.closure.totalTurnCount).toBe(3)
+    expect(v1.closure.selectedTurnCount).toBe(3)
+    expect(v1.closure.boundaryMessageId).toBeNull()
 
     // anchor = system own id s1 → should return from s1 through newest (s1 is singleton)
     const res2 = agg.fetchContextClosure({ topicId, anchorGroupKey: 's1' })
     expect(res2.ok).toBe(true)
-    expect(okValue(res2).messages.map((m: any) => m.id)).toEqual(['s1', 'u1', 'a1'])
+    const v2 = okValue(res2)
+    expect(v2.messages.map((m: any) => m.id)).toEqual(['s1', 'u1', 'a1'])
+    expect(v2.closure.totalTurnCount).toBe(3)
+    expect(v2.closure.selectedTurnCount).toBe(2)
+    expect(v2.closure.boundaryMessageId).toBe('s1')
+    expect(v2.closure.boundaryMessageId).toBe(v2.closure.firstMessageId)
   })
 
   it('complete anchor turn: consecutive assistant retries stay together', () => {
@@ -176,6 +193,9 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     const v = okValue(res)
     expect(v.messages.map((m: any) => m.id)).toEqual(['u1', 'a1', 'a1r', 'u2'])
     expect(v.closure.returnedCount).toBe(4)
+    expect(v.closure.totalTurnCount).toBe(2)
+    expect(v.closure.selectedTurnCount).toBe(2)
+    expect(v.closure.boundaryMessageId).toBeNull()
   })
 
   it('anchor-to-newest ordering is sort_order ASC, id ASC and distinguishes from viewport grouping', () => {
@@ -196,6 +216,9 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     // ordering is deterministic: already verified via listByTopic sort_order
     expect(v.messages[0].id).toBe('u2')
     expect(v.messages[1].id).toBe('a2')
+    expect(v.closure.totalTurnCount).toBe(2)
+    expect(v.closure.selectedTurnCount).toBe(1)
+    expect(v.closure.boundaryMessageId).toBe('u2')
   })
 
   it('no viewport truncation beyond 100 rows/groups — closure is independent of viewport limits', () => {
@@ -220,6 +243,9 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     expect(v.messages[0].id).toBe(firstId)
     expect(v.messages[v.messages.length - 1].id).toBe('a149')
     expect(v.closure.completeness).toBe('context-closure')
+    expect(v.closure.totalTurnCount).toBe(150)
+    expect(v.closure.selectedTurnCount).toBe(150)
+    expect(v.closure.boundaryMessageId).toBeNull()
   })
 
   it('missing topic returns NOT_FOUND', () => {
@@ -252,9 +278,16 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     const v = okValue(res)
     // From u1 turn start → newest = all 4
     expect(v.messages.map((m: any) => m.id)).toEqual(['u1', 'a1', 'u2', 'a2'])
+    expect(v.closure.totalTurnCount).toBe(3)
+    expect(v.closure.selectedTurnCount).toBe(3)
+    expect(v.closure.boundaryMessageId).toBeNull()
     // anchor own-id a2 should resolve to turn2
     const res2 = agg.fetchContextClosure({ topicId, anchorGroupKey: 'a2' })
-    expect(okValue(res2).messages.map((m: any) => m.id)).toEqual(['a2'])
+    const v2 = okValue(res2)
+    expect(v2.messages.map((m: any) => m.id)).toEqual(['a2'])
+    expect(v2.closure.totalTurnCount).toBe(3)
+    expect(v2.closure.selectedTurnCount).toBe(1)
+    expect(v2.closure.boundaryMessageId).toBe('a2')
   })
 
   it('block completeness: each returned message has its blocks and ordering', () => {
@@ -274,6 +307,9 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     const a1Wire = v.messages.find((m: any) => m.id === 'a1') as any
     expect(u1Wire.blocks).toEqual(['bU1'])
     expect(a1Wire.blocks).toEqual(['bA1_1', 'bA1_2'])
+    expect(v.closure.totalTurnCount).toBe(1)
+    expect(v.closure.selectedTurnCount).toBe(1)
+    expect(v.closure.boundaryMessageId).toBeNull()
   })
 
   it('closure metadata consistency: completeness exactly context-closure, no hasMore, no 1..100 bound', () => {
@@ -286,6 +322,9 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     expect((v.closure as any).hasMore).toBeUndefined()
     expect((v.closure as any).hasMoreBefore).toBeUndefined()
     expect((v as any).hasMore).toBeUndefined()
+    expect(v.closure.totalTurnCount).toBe(1)
+    expect(v.closure.selectedTurnCount).toBe(1)
+    expect(v.closure.boundaryMessageId).toBeNull()
     // Validate via contract
     expect(() => validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: v } as any)).not.toThrow()
   })
@@ -303,6 +342,9 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     const res = agg.fetchContextClosure({ topicId, anchorGroupKey: 'aaa' })
     const v = okValue(res)
     expect(v.messages.map((m: any) => m.id)).toEqual(['aaa', 'bbb'])
+    expect(v.closure.totalTurnCount).toBe(3)
+    expect(v.closure.selectedTurnCount).toBe(2)
+    expect(v.closure.boundaryMessageId).toBe('aaa')
   })
 
   it('nullable/unknown role between user and matching assistant is ignored for turn grouping (renderer-aligned)', () => {
@@ -343,6 +385,10 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     expect(v.messages.map((m: any) => m.id)).toEqual(['u1', 'x-null', 'x-tool', 'a1'])
     expect(v.closure.firstMessageId).toBe('u1')
     expect(v.closure.lastMessageId).toBe('a1')
+    // totalTurnCount counts only recognized turns, unknown rows are ignored for turn count but present in slice
+    expect(v.closure.totalTurnCount).toBe(1)
+    expect(v.closure.selectedTurnCount).toBe(1)
+    expect(v.closure.boundaryMessageId).toBeNull()
     // Anchor for the unknown row itself must be NOT_FOUND (no turn was created for it)
     const resUnknownNull = agg.fetchContextClosure({ topicId, anchorGroupKey: 'x-null' })
     expect(resUnknownNull.ok).toBe(false)
@@ -352,5 +398,32 @@ describe('ChatDbAggregateService — context closure S6.3 R-06', () => {
     if (!resUnknownTool.ok) expect(resUnknownTool.error.code).toBe(ERR_NOT_FOUND)
     // Validate via contract — must still be valid success envelope for the u1 closure
     expect(() => validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: v } as any)).not.toThrow()
+  })
+
+  it('authoritative counts derive from same complete turn set and resolved anchor — whole vs partial', () => {
+    const topicId = `t-${uid()}`
+    // 10 turns: 20 messages alternating
+    for (let i = 0; i < 10; i++) {
+      const u = makeMsg(topicId, `u${i}`, 'user')
+      const a = makeMsg(topicId, `a${i}`, 'assistant', `u${i}`)
+      agg.appendMessage(topicId, u as any, [makeBlock(`u${i}`) as any])
+      agg.appendMessage(topicId, a as any, [makeBlock(`a${i}`) as any])
+    }
+    // whole-topic: anchor at first turn
+    const whole = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u0' }))
+    expect(whole.closure.totalTurnCount).toBe(10)
+    expect(whole.closure.selectedTurnCount).toBe(10)
+    expect(whole.closure.boundaryMessageId).toBeNull()
+    // partial: anchor at turn 4 (u4)
+    const partial = okValue(agg.fetchContextClosure({ topicId, anchorGroupKey: 'u4' }))
+    expect(partial.closure.totalTurnCount).toBe(10)
+    expect(partial.closure.selectedTurnCount).toBe(6)
+    expect(partial.closure.boundaryMessageId).toBe('u4')
+    expect(partial.closure.boundaryMessageId).toBe(partial.closure.firstMessageId)
+    // validate both
+    expect(() => validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: whole } as any)).not.toThrow()
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-context-closure', { ok: true, value: partial } as any)
+    ).not.toThrow()
   })
 })

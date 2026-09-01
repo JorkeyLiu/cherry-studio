@@ -32,7 +32,10 @@ function makeClosure(topicId: string, anchor: string): FetchContextClosureRespon
       anchorGroupKey: anchor,
       firstMessageId: anchor,
       lastMessageId: 'a1',
-      returnedCount: 2
+      returnedCount: 2,
+      totalTurnCount: 1,
+      selectedTurnCount: 1,
+      boundaryMessageId: null
     }
   }
 }
@@ -139,6 +142,9 @@ describe('topicDeletion precise resident cleanup', () => {
         firstMessageId: null,
         lastMessageId: null,
         returnedCount: 0,
+        totalTurnCount: 1,
+        selectedTurnCount: 1,
+        boundaryMessageId: null,
         hasMoreBefore: false,
         hasMoreAfter: false
       }

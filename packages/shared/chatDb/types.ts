@@ -373,6 +373,12 @@ export interface FetchContextClosureMeta {
   lastMessageId: string | null
   /** Number of messages returned. */
   returnedCount: number
+  /** Total turn count in the topic (authority-ordered context turns). */
+  totalTurnCount: number
+  /** Selected turn count from anchor through newest. */
+  selectedTurnCount: number
+  /** Boundary divider message id, null iff selected===total else firstMessageId. */
+  boundaryMessageId: string | null
 }
 
 /** @see IpcChannel.ChatDb_FetchContextClosure */

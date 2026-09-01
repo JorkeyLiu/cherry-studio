@@ -24,7 +24,10 @@ function makeResp(topicId = 't-uncached', anchor = 'u1'): FetchContextClosureRes
       anchorGroupKey: anchor,
       firstMessageId: 'u1',
       lastMessageId: 'a1',
-      returnedCount: 2
+      returnedCount: 2,
+      totalTurnCount: 1,
+      selectedTurnCount: 1,
+      boundaryMessageId: null
     }
   } as any
 }

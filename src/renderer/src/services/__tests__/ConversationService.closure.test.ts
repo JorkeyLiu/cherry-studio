@@ -52,7 +52,10 @@ describe('ConversationService closure-sourced', () => {
         anchorGroupKey: 'u1',
         firstMessageId: 'u1',
         lastMessageId: 'a1',
-        returnedCount: 2
+        returnedCount: 2,
+        totalTurnCount: 1,
+        selectedTurnCount: 1,
+        boundaryMessageId: null
       }
     }
     vi.mocked(getFreshValidatedClosure).mockReturnValue(closure)
@@ -99,7 +102,10 @@ describe('ConversationService closure-sourced', () => {
         anchorGroupKey: 'u9',
         firstMessageId: 'u9',
         lastMessageId: 'u9',
-        returnedCount: 1
+        returnedCount: 1,
+        totalTurnCount: 1,
+        selectedTurnCount: 1,
+        boundaryMessageId: null
       }
     }
     void _closure
@@ -135,7 +141,10 @@ describe('ConversationService closure-sourced', () => {
         anchorGroupKey: 'u1',
         firstMessageId: 'u1',
         lastMessageId: 'a1',
-        returnedCount: 2
+        returnedCount: 2,
+        totalTurnCount: 1,
+        selectedTurnCount: 1,
+        boundaryMessageId: null
       }
     }
     vi.mocked(getFreshValidatedClosure).mockReturnValue(closure)

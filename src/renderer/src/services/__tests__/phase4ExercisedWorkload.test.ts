@@ -132,7 +132,10 @@ function makeClosureResp(
       anchorGroupKey: anchor,
       firstMessageId: ids[0] ?? null,
       lastMessageId: ids[ids.length - 1] ?? null,
-      returnedCount: ids.length
+      returnedCount: ids.length,
+      totalTurnCount: 2,
+      selectedTurnCount: 2,
+      boundaryMessageId: null
     }
   } as any
 }

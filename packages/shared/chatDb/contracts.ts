@@ -1670,7 +1670,10 @@ const FETCH_CONTEXT_CLOSURE_CLOSURE_KEYS = new Set([
   'anchorGroupKey',
   'firstMessageId',
   'lastMessageId',
-  'returnedCount'
+  'returnedCount',
+  'totalTurnCount',
+  'selectedTurnCount',
+  'boundaryMessageId'
 ])
 
 const fetchContextClosureContract: ChatDbContract = {
@@ -1786,6 +1789,56 @@ const fetchContextClosureContract: ChatDbContract = {
           throw new ValidationError(
             'result.value.closure.lastMessageId',
             '[chatdb:fetch-context-closure] lastMessageId must match last message id'
+          )
+        }
+      }
+      // LOCK-001: authoritative counts and boundary — integer >=1, selected<=total, boundary null iff selected===total else non-empty and exactly firstMessageId
+      if (
+        typeof c.totalTurnCount !== 'number' ||
+        !Number.isFinite(c.totalTurnCount) ||
+        !Number.isInteger(c.totalTurnCount) ||
+        c.totalTurnCount < 1
+      ) {
+        throw new ValidationError(
+          'result.value.closure.totalTurnCount',
+          '[chatdb:fetch-context-closure] Expected integer totalTurnCount >=1'
+        )
+      }
+      if (
+        typeof c.selectedTurnCount !== 'number' ||
+        !Number.isFinite(c.selectedTurnCount) ||
+        !Number.isInteger(c.selectedTurnCount) ||
+        c.selectedTurnCount < 1
+      ) {
+        throw new ValidationError(
+          'result.value.closure.selectedTurnCount',
+          '[chatdb:fetch-context-closure] Expected integer selectedTurnCount >=1'
+        )
+      }
+      if (c.selectedTurnCount > c.totalTurnCount) {
+        throw new ValidationError(
+          'result.value.closure.selectedTurnCount',
+          '[chatdb:fetch-context-closure] selectedTurnCount must be <= totalTurnCount'
+        )
+      }
+      if (c.selectedTurnCount === c.totalTurnCount) {
+        if (c.boundaryMessageId !== null) {
+          throw new ValidationError(
+            'result.value.closure.boundaryMessageId',
+            '[chatdb:fetch-context-closure] boundaryMessageId must be null when selected===total (whole-topic)'
+          )
+        }
+      } else {
+        if (typeof c.boundaryMessageId !== 'string' || c.boundaryMessageId.length === 0) {
+          throw new ValidationError(
+            'result.value.closure.boundaryMessageId',
+            '[chatdb:fetch-context-closure] boundaryMessageId must be non-empty string when selected<total (partial)'
+          )
+        }
+        if (c.boundaryMessageId !== c.firstMessageId) {
+          throw new ValidationError(
+            'result.value.closure.boundaryMessageId',
+            '[chatdb:fetch-context-closure] boundaryMessageId must equal firstMessageId when partial'
           )
         }
       }

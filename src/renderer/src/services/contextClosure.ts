@@ -22,7 +22,12 @@ export function isValidContextClosureResponse(
 ): boolean {
   if (!response || typeof response !== 'object') return false
   const r = response as Record<string, unknown>
-  // Masquerading viewport window: must not have window property
+  // LOCK-001: exact response root keys — only messages, blocks, closure; fail-closed on unknown root (mirrors Shared)
+  const allowedRootKeys = new Set(['messages', 'blocks', 'closure'])
+  for (const key of Object.keys(r)) {
+    if (!allowedRootKeys.has(key)) return false
+  }
+  // Masquerading viewport window: must not have window property (already covered by root check, kept for explicit fail-closed)
   if ('window' in r) return false
   const closure = (r as unknown as FetchContextClosureResponse).closure
   const messages = (r as unknown as FetchContextClosureResponse).messages
@@ -44,6 +49,36 @@ export function isValidContextClosureResponse(
   const lastId = (messages[(messages as unknown[]).length - 1] as Record<string, unknown>)?.id
   if (c.firstMessageId !== firstId) return false
   if (c.lastMessageId !== lastId) return false
+  // LOCK-001: authoritative counts and boundary — integer >=1, selected<=total, boundary null iff selected===total else non-empty and exactly firstMessageId
+  const totalTurnCount = c.totalTurnCount
+  const selectedTurnCount = c.selectedTurnCount
+  const boundaryMessageId = c.boundaryMessageId
+  if (typeof totalTurnCount !== 'number' || !Number.isInteger(totalTurnCount) || totalTurnCount < 1) return false
+  if (typeof selectedTurnCount !== 'number' || !Number.isInteger(selectedTurnCount) || selectedTurnCount < 1)
+    return false
+  if (selectedTurnCount > totalTurnCount) return false
+  // unknown keys rejected where current validators enforce keys — fail closed if extra keys beyond expected set present
+  // Existing validator already checks for allowed closure keys in shared contracts; renderer mirrors that strictly for new fields
+  const allowedClosureKeys = new Set([
+    'completeness',
+    'topicId',
+    'anchorGroupKey',
+    'firstMessageId',
+    'lastMessageId',
+    'returnedCount',
+    'totalTurnCount',
+    'selectedTurnCount',
+    'boundaryMessageId'
+  ])
+  for (const key of Object.keys(c)) {
+    if (!allowedClosureKeys.has(key)) return false
+  }
+  if (selectedTurnCount === totalTurnCount) {
+    if (boundaryMessageId !== null) return false
+  } else {
+    if (typeof boundaryMessageId !== 'string' || boundaryMessageId.length === 0) return false
+    if (boundaryMessageId !== c.firstMessageId) return false
+  }
   // missing anchor row: messages must contain a row that resolves to anchorGroupKey
   // Resolution priority: user id, assistant askId, recognized non-user id (assistant/system only)
   // LOCK-R06-005: nullable/unknown/tool roles never resolve as own-id anchors
@@ -108,6 +143,13 @@ export function isValidContextClosureCacheHit(
 ): boolean {
   if (!cached || !cached.closure) return false
   if (!currentAnchorGroupKey) return false
+  // LOCK-001: exact root keys — only messages, blocks, closure
+  const allowedRootKeys = new Set(['messages', 'blocks', 'closure'])
+  for (const key of Object.keys(cached as unknown as Record<string, unknown>)) {
+    if (!allowedRootKeys.has(key)) return false
+  }
+  if (!Array.isArray((cached as unknown as Record<string, unknown>).messages)) return false
+  if (!Array.isArray((cached as unknown as Record<string, unknown>).blocks)) return false
   if (cached.closure.completeness !== 'context-closure') return false
   if (cached.closure.topicId !== currentTopicId) return false
   if (cached.closure.anchorGroupKey !== currentAnchorGroupKey) return false
@@ -116,6 +158,34 @@ export function isValidContextClosureCacheHit(
   // LOCK-R06-004: reject every empty anchor-based closure
   if (cached.closure.returnedCount === 0) return false
   if (cached.closure.firstMessageId === null || cached.closure.lastMessageId === null) return false
+  // LOCK-001: authoritative counts and boundary — integer >=1, selected<=total, boundary null iff selected===total else firstMessageId
+  const totalTurnCount = (cached.closure as unknown as Record<string, unknown>).totalTurnCount as number
+  const selectedTurnCount = (cached.closure as unknown as Record<string, unknown>).selectedTurnCount as number
+  const boundaryMessageId = (cached.closure as unknown as Record<string, unknown>).boundaryMessageId
+  if (typeof totalTurnCount !== 'number' || !Number.isInteger(totalTurnCount) || totalTurnCount < 1) return false
+  if (typeof selectedTurnCount !== 'number' || !Number.isInteger(selectedTurnCount) || selectedTurnCount < 1)
+    return false
+  if (selectedTurnCount > totalTurnCount) return false
+  const allowedCacheKeys = new Set([
+    'completeness',
+    'topicId',
+    'anchorGroupKey',
+    'firstMessageId',
+    'lastMessageId',
+    'returnedCount',
+    'totalTurnCount',
+    'selectedTurnCount',
+    'boundaryMessageId'
+  ])
+  for (const key of Object.keys(cached.closure as unknown as Record<string, unknown>)) {
+    if (!allowedCacheKeys.has(key)) return false
+  }
+  if (selectedTurnCount === totalTurnCount) {
+    if (boundaryMessageId !== null) return false
+  } else {
+    if (typeof boundaryMessageId !== 'string' || boundaryMessageId.length === 0) return false
+    if (boundaryMessageId !== cached.closure.firstMessageId) return false
+  }
   // LOCK-R06-006: fingerprint freshness — same-length mutation invalidates
   if (
     typeof currentFingerprint === 'string' &&

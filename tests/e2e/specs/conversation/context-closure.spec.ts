@@ -365,13 +365,72 @@ test.describe('S6.3 R-06 context closure — Main typed closure unbounded distin
     expect((val.closure as any).limit).toBeUndefined()
     expect((val.closure as any).before).toBeUndefined()
     expect((val.closure as any).after).toBeUndefined()
-    // Validate closure object keys are exactly the allowed set
+    // Validate closure object keys are exactly the allowed set (LOCK-001 authoritative metadata)
     const closureKeys = Object.keys(val.closure).sort()
     expect(closureKeys).toEqual(
-      ['anchorGroupKey', 'completeness', 'firstMessageId', 'lastMessageId', 'returnedCount', 'topicId'].sort()
+      [
+        'anchorGroupKey',
+        'boundaryMessageId',
+        'completeness',
+        'firstMessageId',
+        'lastMessageId',
+        'returnedCount',
+        'selectedTurnCount',
+        'topicId',
+        'totalTurnCount'
+      ].sort()
     )
     const valueKeys = Object.keys(val).sort()
     expect(valueKeys).toEqual(['blocks', 'closure', 'messages'].sort())
+
+    // LOCK-001 whole-topic authoritative metadata: anchor at 0 covers all turns
+    expect(typeof val.closure.totalTurnCount).toBe('number')
+    expect(typeof val.closure.selectedTurnCount).toBe('number')
+    expect(Number.isInteger(val.closure.totalTurnCount)).toBe(true)
+    expect(Number.isInteger(val.closure.selectedTurnCount)).toBe(true)
+    expect(val.closure.totalTurnCount).toBeGreaterThan(0)
+    expect(val.closure.selectedTurnCount).toBe(val.closure.totalTurnCount)
+    expect(val.closure.boundaryMessageId).toBeNull()
+    // Validate partial semantics via mid-anchor (selected < total, boundary == firstMessageId)
+    const partialAnchor = `${topicId}-msg-${pad(30, 5)}`
+    const partialRes: any = await page.evaluate(
+      async ({ topicId, anchorGroupKey }: { topicId: string; anchorGroupKey: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.fetchContextClosure({ topicId, anchorGroupKey })
+      },
+      { topicId, anchorGroupKey: partialAnchor }
+    )
+    expect(partialRes.ok, `partial fetchContextClosure failed ${JSON.stringify(partialRes)}`).toBe(true)
+    const pval: any = partialRes.value
+    expect(pval.closure.completeness).toBe('context-closure')
+    expect(pval.closure.topicId).toBe(topicId)
+    expect(pval.closure.anchorGroupKey).toBe(partialAnchor)
+    expect(pval.closure.totalTurnCount).toBe(val.closure.totalTurnCount)
+    expect(pval.closure.selectedTurnCount).toBeLessThan(pval.closure.totalTurnCount)
+    expect(pval.closure.selectedTurnCount).toBeGreaterThan(0)
+    expect(pval.closure.boundaryMessageId).toBe(pval.closure.firstMessageId)
+    expect(typeof pval.closure.boundaryMessageId).toBe('string')
+    expect(pval.closure.boundaryMessageId.length).toBeGreaterThan(0)
+    // Partial closure keys also exact
+    expect(Object.keys(pval.closure).sort()).toEqual(
+      [
+        'anchorGroupKey',
+        'boundaryMessageId',
+        'completeness',
+        'firstMessageId',
+        'lastMessageId',
+        'returnedCount',
+        'selectedTurnCount',
+        'topicId',
+        'totalTurnCount'
+      ].sort()
+    )
+    expect(Object.keys(pval).sort()).toEqual(['blocks', 'closure', 'messages'].sort())
+    expect(pval.closure.returnedCount).toBe(pval.messages.length)
+    expect(pval.closure.returnedCount).toBeGreaterThan(0)
+    expect(pval.closure.returnedCount).toBeLessThan(val.closure.returnedCount)
+    expect(pval.closure.firstMessageId).toBe(partialAnchor)
+    expect(pval.messages[0].id).toBe(pval.closure.firstMessageId)
 
     // Ordered unique IDs
     const ids: string[] = val.messages.map((m: any) => m.id)

@@ -71,12 +71,36 @@ describe('S6.3 context closure — contract validation', () => {
           anchorGroupKey: 'g1',
           firstMessageId: 'm1',
           lastMessageId: 'm1',
-          returnedCount: 1
+          returnedCount: 1,
+          totalTurnCount: 1,
+          selectedTurnCount: 1,
+          boundaryMessageId: null
         }
       }
     }
     it('accepts valid success', () => {
       expect(() => validateChatDbResult('chatdb:fetch-context-closure', baseSuccess)).not.toThrow()
+    })
+    it('accepts valid partial success with boundary equals firstMessageId', () => {
+      const partial = {
+        ok: true as const,
+        value: {
+          messages: [{ id: 'm1' }, { id: 'm2' }],
+          blocks: [],
+          closure: {
+            completeness: 'context-closure' as const,
+            topicId: 't1',
+            anchorGroupKey: 'g1',
+            firstMessageId: 'm1',
+            lastMessageId: 'm2',
+            returnedCount: 2,
+            totalTurnCount: 5,
+            selectedTurnCount: 2,
+            boundaryMessageId: 'm1'
+          }
+        }
+      }
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', partial)).not.toThrow()
     })
     it('rejects empty closure with supplied anchorGroupKey and returnedCount 0 / null bounds (never a valid success)', () => {
       const empty = {
@@ -90,7 +114,10 @@ describe('S6.3 context closure — contract validation', () => {
             anchorGroupKey: 'g1',
             firstMessageId: null,
             lastMessageId: null,
-            returnedCount: 0
+            returnedCount: 0,
+            totalTurnCount: 1,
+            selectedTurnCount: 1,
+            boundaryMessageId: null
           }
         }
       }
@@ -108,7 +135,10 @@ describe('S6.3 context closure — contract validation', () => {
             anchorGroupKey: 'g1',
             firstMessageId: 'm1',
             lastMessageId: null,
-            returnedCount: 0
+            returnedCount: 0,
+            totalTurnCount: 1,
+            selectedTurnCount: 1,
+            boundaryMessageId: null
           }
         }
       }
@@ -180,7 +210,10 @@ describe('S6.3 context closure — contract validation', () => {
             anchorGroupKey: 'g1',
             firstMessageId: 'm1',
             lastMessageId: 'wrong',
-            returnedCount: 2
+            returnedCount: 2,
+            totalTurnCount: 2,
+            selectedTurnCount: 2,
+            boundaryMessageId: null
           }
         }
       }
@@ -199,7 +232,10 @@ describe('S6.3 context closure — contract validation', () => {
               anchorGroupKey: 'g1',
               firstMessageId: 'm1',
               lastMessageId: 'm1',
-              returnedCount: rc
+              returnedCount: rc,
+              totalTurnCount: 1,
+              selectedTurnCount: 1,
+              boundaryMessageId: null
             } as any
           }
         }
@@ -222,6 +258,9 @@ describe('S6.3 context closure — contract validation', () => {
         firstMessageId = 'm1'
         lastMessageId = 'm1'
         returnedCount = 1
+        totalTurnCount = 1
+        selectedTurnCount = 1
+        boundaryMessageId = null
       }
       const bad = {
         ok: true as const,
@@ -244,6 +283,137 @@ describe('S6.3 context closure — contract validation', () => {
         value: { ...baseSuccess.value, closure: { ...baseSuccess.value.closure, hasMoreAfter: true } as any }
       }
       expect(() => validateChatDbResult('chatdb:fetch-context-closure', bad2)).toThrow(ValidationError)
+    })
+
+    // LOCK-001 authoritative counts and boundary
+    it('rejects missing totalTurnCount/selectedTurnCount/boundaryMessageId', () => {
+      const missingTotal = {
+        ...baseSuccess,
+        value: { ...baseSuccess.value, closure: { ...baseSuccess.value.closure, totalTurnCount: undefined } as any }
+      }
+      delete missingTotal.value.closure.totalTurnCount
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', missingTotal)).toThrow(ValidationError)
+      const missingSelected = {
+        ...baseSuccess,
+        value: { ...baseSuccess.value, closure: { ...baseSuccess.value.closure, selectedTurnCount: undefined } as any }
+      }
+      delete missingSelected.value.closure.selectedTurnCount
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', missingSelected)).toThrow(ValidationError)
+      const missingBoundary = {
+        ...baseSuccess,
+        value: { ...baseSuccess.value, closure: { ...baseSuccess.value.closure, boundaryMessageId: undefined } as any }
+      }
+      delete missingBoundary.value.closure.boundaryMessageId
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', missingBoundary)).toThrow(ValidationError)
+    })
+    it('rejects totalTurnCount/selectedTurnCount <1 or non-integer', () => {
+      for (const badVal of [0, -1, 1.5, '1' as any, null as any]) {
+        const bad = {
+          ...baseSuccess,
+          value: {
+            ...baseSuccess.value,
+            closure: {
+              ...baseSuccess.value.closure,
+              totalTurnCount: badVal,
+              selectedTurnCount: 1,
+              boundaryMessageId: null
+            } as any
+          }
+        }
+        expect(() => validateChatDbResult('chatdb:fetch-context-closure', bad)).toThrow(ValidationError)
+        const bad2 = {
+          ...baseSuccess,
+          value: {
+            ...baseSuccess.value,
+            closure: {
+              ...baseSuccess.value.closure,
+              totalTurnCount: 5,
+              selectedTurnCount: badVal,
+              boundaryMessageId: 'm1'
+            } as any
+          }
+        }
+        expect(() => validateChatDbResult('chatdb:fetch-context-closure', bad2)).toThrow(ValidationError)
+      }
+    })
+    it('rejects selectedTurnCount > totalTurnCount', () => {
+      const bad = {
+        ...baseSuccess,
+        value: {
+          ...baseSuccess.value,
+          closure: {
+            ...baseSuccess.value.closure,
+            totalTurnCount: 2,
+            selectedTurnCount: 3,
+            boundaryMessageId: 'm1'
+          } as any
+        }
+      }
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', bad)).toThrow(ValidationError)
+    })
+    it('rejects boundaryMessageId not null when selected===total (whole-topic)', () => {
+      const bad = {
+        ...baseSuccess,
+        value: {
+          ...baseSuccess.value,
+          closure: {
+            ...baseSuccess.value.closure,
+            totalTurnCount: 2,
+            selectedTurnCount: 2,
+            boundaryMessageId: 'm1'
+          } as any
+        }
+      }
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', bad)).toThrow(ValidationError)
+    })
+    it('rejects boundaryMessageId null when selected<total (partial)', () => {
+      const bad = {
+        ok: true as const,
+        value: {
+          messages: [{ id: 'm1' }, { id: 'm2' }],
+          blocks: [],
+          closure: {
+            completeness: 'context-closure' as const,
+            topicId: 't1',
+            anchorGroupKey: 'g1',
+            firstMessageId: 'm1',
+            lastMessageId: 'm2',
+            returnedCount: 2,
+            totalTurnCount: 5,
+            selectedTurnCount: 2,
+            boundaryMessageId: null
+          }
+        }
+      }
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', bad)).toThrow(ValidationError)
+    })
+    it('rejects boundaryMessageId not equal to firstMessageId when partial', () => {
+      const bad = {
+        ok: true as const,
+        value: {
+          messages: [{ id: 'm1' }, { id: 'm2' }],
+          blocks: [],
+          closure: {
+            completeness: 'context-closure' as const,
+            topicId: 't1',
+            anchorGroupKey: 'g1',
+            firstMessageId: 'm1',
+            lastMessageId: 'm2',
+            returnedCount: 2,
+            totalTurnCount: 5,
+            selectedTurnCount: 2,
+            boundaryMessageId: 'wrong'
+          }
+        }
+      }
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', bad)).toThrow(ValidationError)
+    })
+    it('rejects unknown closure key for new fields', () => {
+      const bad = {
+        ...baseSuccess,
+        value: { ...baseSuccess.value, closure: { ...baseSuccess.value.closure, extraField: 123 } as any }
+      }
+      expect(() => validateChatDbResult('chatdb:fetch-context-closure', bad)).toThrow(ValidationError)
     })
   })
 })
