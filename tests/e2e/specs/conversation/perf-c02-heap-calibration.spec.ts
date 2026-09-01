@@ -34,7 +34,7 @@
  *   blocker). No new IPC/preload/schema/migration/context-window/sync changes.
  *   productionPath is complete ONLY when the final clicked synthetic topic
  *   demonstrably owns #messages DOM (scoped===global===expectedVisible via #messages [data-message-id]), the exact
- *   expected stable group count inside #messages is observed with ownership proof, and LOCK-004 context evidence is valid per explicit inside-messages signal (mandatory fail-closed): whole-topic windows (positive integer 1..25) require no divider anywhere + null anchor (valid absent), partial windows require divider inside #messages with final-topic-owned anchor (valid present); outside/global divider is invalid in either branch;
+ *   expected stable group count inside #messages is observed with ownership proof, and context evidence is valid per explicit inside-messages signal and persisted canonical anchor proof (mandatory fail-closed,): whole-topic via turn oracle startIndex===0 (derived from actual persisted contextCount and production-equivalent turn construction) requires no divider anywhere + DOM null anchor and valid persisted anchor equals expected canonical anchor and is final-topic-owned (valid absent), partial windows require divider inside #messages with final-topic-owned DOM anchor and persisted canonical anchor equals expected (valid present); missing or mismatched persisted/expected anchor or expectedContext fails closed; outside/global divider is invalid in either branch;
  *   fallback [id^="message-"], global document queries, or inferred first-group anchor never satisfies
  *   complete — incomplete/ambiguous observations are explicitly partial/inconclusive. Authoritative calibration complete
  *   strictly requires precise && finite positive heap delta in addition to this #messages production DOM proof and derived predicate-valid productionPath (caller bool cannot override invalid evidence).
@@ -109,19 +109,26 @@ import {
   buildC02MultiBenchmarkResult,
   buildC02SyntheticTopics,
   buildC02SyntheticTopicsWithPrefix,
+  c02BuildContextTurns,
+  c02DecodeCanonicalDomAnchor,
+  c02DeriveExpectedContext,
+  c02DeriveExpectedContextForTopic,
   c02ExpectedProjectedTotalForTopics,
+  c02ExpectedStartIndexForTurnCount,
   c02ExpectedVisibleCountForTopic,
   c02HeapGateEnabled,
   c02MixedTotalMessages,
-  C02_DEFAULT_CONTEXTCOUNT,
-  C02_PRODUCTION_WINDOW_MAX,
   c02PerTopicExpectedVisibleCounts,
+  c02StrictDecodeStableGroupId,
   canonicalBytesForTopics,
   classifyEffectiveHeapDeltaInformative,
   computeHeapAmplification,
   detectHeapPrecisionLabel,
   isC02ContextEvidenceValid,
+  isC02ExactAnchorIdentity,
   isC02ExactTopicOwned,
+  isC02PersistedTopicOwned,
+  isC02ExpectedContextValid,
   isC02MixedHeapProfile,
   isC02ProductionPathComplete,
   isC02WholeTopicWindow,
@@ -131,6 +138,7 @@ import {
   validateHeapSample,
   validateLogicalBytes,
   validateSyntheticTopics,
+  type C02ExpectedContext,
   type C02HeapProfile,
   type C02MixedHeapProfile,
   type HeapPrecisionLabel,
@@ -168,6 +176,370 @@ const C02_MATRIX_TIMEOUT_MS = 300_000
  * No production source, profile size, gate, or artifact change.
  */
 const C02_MATRIX_WAIT_TIMEOUT_MS = 60_000
+
+// ---------------------------------------------------------------------------
+// C-02 sanitization and strict decoder helpers (LOCK-002/005)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sanitize raw caught error text and absolute disposable profile/root/runtime
+ * paths to fixed categories, safe scalar labels, or basenames (LOCK-005).
+ * Never emits raw productionPath or absolute paths.
+ */
+function sanitizeC02Error(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  const lower = raw.toLowerCase()
+  if (lower.includes('topic-item')) return 'c02-error-topic-item-category'
+  if (lower.includes('redux')) return 'c02-error-redux-category'
+  if (lower.includes('dom')) return 'c02-error-dom-category'
+  if (lower.includes('persisted')) return 'c02-error-persisted-category'
+  if (lower.includes('timeout')) return 'c02-error-timeout-category'
+  return 'c02-error-category-unknown'
+}
+
+function sanitizeC02PathForLog(p: string): string {
+  try {
+    return path.basename(p)
+  } catch {
+    return 'path-basename-unknown'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared final settled observation — one implementation for single and matrix (LOCK-003)
+// ---------------------------------------------------------------------------
+
+interface C02FinalSettledObservation {
+  reduxOk: boolean
+  persistedOk: boolean
+  contextCountOk: boolean
+  oracleOk: boolean
+  domOk: boolean
+  groupOk: boolean
+  groupOwnedOk: boolean
+  boundaryOk: boolean
+  anchorOk: boolean
+  hasOutside: boolean
+  scoped: number
+  global: number
+  groupCount: number
+  groupsWithFinalTopic: number
+  actualContextCount: number | null | undefined
+  persistedGroupKey: string | null
+  expectedAnchor: string | null
+  decodedAnchor: string | null
+}
+
+/**
+ * One shared final settled observation implementation immediately before every
+ * single and matrix heap sample (LOCK-003). Jointly re-reads and validates
+ * Redux final-topic IDs/loading, actual persisted contextCount, persisted
+ * anchor, that topic oracle, scoped/global message counts, group count and
+ * exact topic ownership via strict decoded grammar, divider presence inside
+ * #messages, absence outside #messages, and decoded canonical anchor identity.
+ * A transient earlier observation is insufficient.
+ */
+async function observeFinalSettledProjection(
+  page: Page,
+  finalTopicId: string,
+  expectedVisible: number,
+  expectedContext: C02ExpectedContext,
+  expectedAnchor: string | null,
+  actualContextCount: number | null
+): Promise<C02FinalSettledObservation> {
+  const raw = await page.evaluate(
+    ({
+      finalTopicId,
+      expectedVisible,
+      expectedAnchor,
+      expectedBoundaryPresent,
+      expectedContext,
+      actualContextCount
+    }) => {
+      // Strict decoder inlined for browser context (LOCK-002)
+      function strictDecode(groupId: string | null): string[] | null {
+        if (groupId === null || typeof groupId !== 'string') return null
+        if (groupId.length === 0) return null
+        if (groupId === 'group:empty') return null
+        if (groupId.startsWith('|') || groupId.endsWith('|') || groupId.includes('||')) return null
+        const result: string[] = []
+        let pos = 0
+        while (pos < groupId.length) {
+          const colonIdx = groupId.indexOf(':', pos)
+          if (colonIdx === -1) return null
+          const lenStr = groupId.slice(pos, colonIdx)
+          if (lenStr.length === 0 || !/^\d+$/.test(lenStr)) return null
+          if (lenStr.length > 1 && lenStr[0] === '0') return null
+          const len = Number(lenStr)
+          if (!Number.isFinite(len) || !Number.isInteger(len) || len < 0) return null
+          if (String(len) !== lenStr) return null
+          const idStart = colonIdx + 1
+          const idEnd = idStart + len
+          if (idEnd > groupId.length) return null
+          const id = groupId.slice(idStart, idEnd)
+          if (id.length !== len) return null
+          result.push(id)
+          if (idEnd === groupId.length) {
+            pos = idEnd
+            break
+          }
+          if (groupId[idEnd] !== '|') return null
+          if (idEnd + 1 >= groupId.length) return null
+          pos = idEnd + 1
+        }
+        if (pos !== groupId.length) return null
+        if (result.length === 0) return null
+        return result
+      }
+      function decodeCanonical(groupId: string | null): string | null {
+        const dec = strictDecode(groupId)
+        if (!dec || dec.length !== 1) return null
+        return dec[0]
+      }
+      function isTopicOwned(anchor: string | null, topicId: string): boolean {
+        if (anchor === null || typeof anchor !== 'string' || typeof topicId !== 'string') return false
+        if (anchor.length === 0 || topicId.length === 0) return false
+        const dec = strictDecode(anchor)
+        if (dec === null || dec.length !== 1) return false
+        const id = dec[0] as string
+        if (id === topicId) return true
+        if (id.startsWith(topicId + '-')) return true
+        return false
+      }
+      function isPersistedOwned(anchor: string | null, topicId: string): boolean {
+        if (anchor === null || typeof anchor !== 'string' || typeof topicId !== 'string') return false
+        if (anchor.length === 0 || topicId.length === 0) return false
+        const dec = strictDecode(anchor)
+        if (dec !== null) {
+          for (const id of dec) {
+            if (id === topicId) return true
+            if (id.startsWith(topicId + '-')) return true
+          }
+          return false
+        }
+        if (anchor === topicId) return true
+        if (anchor.startsWith(topicId + '-')) return true
+        return false
+      }
+      const s = (window as unknown as Record<string, unknown>).store as unknown as
+        | { getState: () => Record<string, unknown> }
+        | undefined
+      const state = s?.getState() as Record<string, unknown> | undefined
+      const msgState = state?.messages as Record<string, unknown> | undefined
+      const ids = (msgState?.messageIdsByTopic as Record<string, string[]> | undefined)?.[finalTopicId] as
+        | string[]
+        | undefined
+      const loading = (msgState?.loadingByTopic as Record<string, unknown> | undefined)?.[finalTopicId]
+      const reduxOk = Array.isArray(ids) && ids.length === expectedVisible && loading !== true
+
+      const assistantsState = state?.assistants as Record<string, unknown> | undefined
+      const list = (assistantsState?.assistants ?? []) as Array<{ id: string; settings?: Record<string, unknown> }>
+      const defaultAss = assistantsState?.defaultAssistant as
+        | { id?: string; settings?: Record<string, unknown> }
+        | undefined
+      let persisted: { kind: string; groupKey: string } | null = null
+      let actualCount: number | null | undefined = undefined
+      for (const a of list) {
+        const map = (a.settings?.contextWindowAnchor ?? {}) as Record<string, unknown>
+        if ((map as Record<string, unknown>)[finalTopicId]) {
+          persisted = (map as Record<string, unknown>)[finalTopicId] as { kind: string; groupKey: string }
+          actualCount = (a.settings as Record<string, unknown>)?.contextCount as number | null | undefined
+          break
+        }
+      }
+      if (!persisted) {
+        const dMap = (defaultAss?.settings?.contextWindowAnchor ?? {}) as Record<string, unknown>
+        if ((dMap as Record<string, unknown>)[finalTopicId]) {
+          persisted = (dMap as Record<string, unknown>)[finalTopicId] as { kind: string; groupKey: string }
+          actualCount = (defaultAss?.settings as Record<string, unknown>)?.contextCount as number | null | undefined
+        } else {
+          // Fallback to any assistant's contextCount if anchor not found (still need count)
+          for (const a of list) {
+            const c = (a.settings as Record<string, unknown>)?.contextCount
+            if (c !== undefined) {
+              actualCount = c as number | null | undefined
+              break
+            }
+          }
+          if (actualCount === undefined && defaultAss?.settings) {
+            actualCount = (defaultAss.settings as Record<string, unknown>)?.contextCount as number | null | undefined
+          }
+        }
+      }
+      // If still undefined, try to find any contextCount
+      if (actualCount === undefined) {
+        for (const a of list) {
+          const c = (a.settings as Record<string, unknown>)?.contextCount
+          if (c !== undefined) {
+            actualCount = c as number | null | undefined
+            break
+          }
+        }
+      }
+      const persistedGroupKey = persisted?.groupKey ?? null
+      const persistedKind = persisted?.kind ?? null
+      const persistedOk =
+        !!persisted &&
+        persistedKind === 'active' &&
+        typeof persistedGroupKey === 'string' &&
+        persistedGroupKey.length > 0 &&
+        persistedGroupKey === expectedAnchor &&
+        isPersistedOwned(persistedGroupKey, finalTopicId)
+      const contextCountOk =
+        actualCount === expectedContext.contextCount &&
+        (actualCount === null ||
+          (typeof actualCount === 'number' &&
+            Number.isFinite(actualCount) &&
+            Number.isInteger(actualCount) &&
+            actualCount >= 1) ||
+          actualCount === null)
+      function isExpectedContextValidLocal(ctx: unknown): boolean {
+        if (typeof ctx !== 'object' || ctx === null) return false
+        const c = ctx as Record<string, unknown>
+        const turnCount = c.turnCount as unknown
+        const contextCount = c.contextCount as unknown
+        const startIndex = c.startIndex as unknown
+        const anchorGroupKey = c.anchorGroupKey as unknown
+        const isWholeTopic = c.isWholeTopic as unknown
+        const boundaryPresent = c.boundaryPresent as unknown
+        if (
+          typeof turnCount !== 'number' ||
+          !Number.isFinite(turnCount) ||
+          !Number.isInteger(turnCount) ||
+          turnCount < 0
+        )
+          return false
+        if (contextCount !== null) {
+          if (
+            typeof contextCount !== 'number' ||
+            !Number.isFinite(contextCount) ||
+            !Number.isInteger(contextCount) ||
+            contextCount < 1
+          )
+            return false
+        }
+        if (typeof startIndex !== 'number' || !Number.isFinite(startIndex) || !Number.isInteger(startIndex))
+          return false
+        let expectedStart: number
+        if ((turnCount as number) === 0) expectedStart = -1
+        else if ((contextCount as number | null) === null) expectedStart = 0
+        else {
+          const n = Math.max(1, Math.floor(contextCount as number))
+          expectedStart = Math.max(0, (turnCount as number) - n)
+        }
+        if ((startIndex as number) !== expectedStart) return false
+        if ((turnCount as number) === 0) {
+          if (anchorGroupKey !== null) return false
+        } else {
+          if (typeof anchorGroupKey !== 'string' || (anchorGroupKey as string).length === 0) return false
+        }
+        if (typeof isWholeTopic !== 'boolean' || typeof boundaryPresent !== 'boolean') return false
+        const expectedWhole = (turnCount as number) > 0 ? (startIndex as number) === 0 : false
+        if ((isWholeTopic as boolean) !== expectedWhole) return false
+        const expectedBoundary = (startIndex as number) > 0
+        if ((boundaryPresent as boolean) !== expectedBoundary) return false
+        return true
+      }
+      const oracleOk =
+        isExpectedContextValidLocal(expectedContext) &&
+        actualCount === expectedContext.contextCount &&
+        expectedAnchor === expectedContext.anchorGroupKey
+
+      const scoped = document.querySelectorAll(`#messages [data-message-id^="${finalTopicId}-msg-"]`).length
+      const global = document.querySelectorAll('#messages [data-message-id]').length
+      const domOk = scoped === expectedVisible && global === expectedVisible
+
+      const groupEls = document.querySelectorAll('#messages [data-stable-group-id]')
+      const groupCount = groupEls.length
+      const groupOk = groupCount === expectedVisible
+      let groupsWithFinalTopic = 0
+      for (let i = 0; i < groupEls.length; i++) {
+        const el = groupEls[i] as HTMLElement
+        const gid = el.getAttribute('data-stable-group-id') ?? ''
+        const dec = strictDecode(gid)
+        let owned = false
+        if (dec !== null && dec.length === 1) {
+          const id = dec[0] as string
+          if (id === finalTopicId || id.startsWith(finalTopicId + '-')) owned = true
+        }
+        if (owned) groupsWithFinalTopic++
+      }
+      const groupOwnedOk = groupsWithFinalTopic === expectedVisible && groupOk
+
+      const allBoundaries = document.querySelectorAll('[data-context-boundary]')
+      const insideBoundaries = document.querySelectorAll('#messages [data-context-boundary]')
+      const hasOutside = Array.from(allBoundaries).some((el) => !el.closest('#messages'))
+      const present = insideBoundaries.length > 0
+      const inside = present && !!document.querySelector('#messages')?.contains(insideBoundaries[0] as Element)
+      const boundaryOk = !hasOutside && present === expectedBoundaryPresent && inside === expectedBoundaryPresent
+
+      let anchorOk = false
+      let decodedAnchor: string | null = null
+      if (expectedBoundaryPresent) {
+        const boundary = insideBoundaries[0] as Element | undefined
+        if (boundary) {
+          let prev = boundary.previousElementSibling
+          let found: string | null = null
+          let hops = 0
+          while (prev && hops < 20) {
+            const gid = (prev as HTMLElement).getAttribute('data-stable-group-id')
+            if (gid) {
+              found = gid
+              break
+            }
+            const inner = prev.querySelector('[data-stable-group-id]')
+            if (inner) {
+              const innerGid = inner.getAttribute('data-stable-group-id')
+              if (innerGid) {
+                found = innerGid
+                break
+              }
+            }
+            prev = prev.previousElementSibling
+            hops++
+          }
+          decodedAnchor = decodeCanonical(found)
+          anchorOk = decodedAnchor !== null && decodedAnchor === expectedAnchor && isTopicOwned(found, finalTopicId)
+        } else {
+          anchorOk = false
+        }
+      } else {
+        decodedAnchor = null
+        anchorOk = !present && !hasOutside
+      }
+
+      return {
+        reduxOk,
+        persistedOk,
+        contextCountOk: contextCountOk,
+        oracleOk,
+        domOk,
+        groupOk,
+        groupOwnedOk,
+        boundaryOk,
+        anchorOk,
+        hasOutside,
+        scoped,
+        global,
+        groupCount,
+        groupsWithFinalTopic,
+        actualContextCount: actualCount,
+        persistedGroupKey,
+        expectedAnchor,
+        decodedAnchor
+      }
+    },
+    {
+      finalTopicId,
+      expectedVisible,
+      expectedAnchor,
+      expectedBoundaryPresent: expectedContext.boundaryPresent,
+      expectedContext,
+      actualContextCount
+    }
+  )
+  return raw as C02FinalSettledObservation
+}
 
 // ---------------------------------------------------------------------------
 // Renderer heap sampling — actual renderer process via performance.memory
@@ -246,11 +618,8 @@ async function sampleRendererHeap(page: Page): Promise<RendererHeapSample | null
  * without a production hook (Electron bundle isolation) — the rendered DOM
  * observation is the narrowest hook-free production derivation.
  */
-async function activateReduxProjection(
-  page: Page,
-  syntheticTopics: LogicalPayloadTopicInput[],
-  opts?: { waitTimeoutMs?: number }
-): Promise<{
+type C02ActivationSuccess = {
+  kind: 'success'
   rendererLogicalBytes: number
   topicsCreated: number
   messagesCreated: number
@@ -266,15 +635,46 @@ async function activateReduxProjection(
     contextBoundaryPresent: boolean
     contextBoundaryInsideMessages: boolean
     finalTopicDomProof: boolean
-    groupExactMatched?: boolean
-    contextBoundaryObservedWait?: boolean
-    groupsWithFinalTopic?: number
+    groupsWithFinalTopic: number
     globalDisplayMessages: number
+    persistedAnchorGroupKey: string | null
+    expectedAnchorGroupKey: string | null
+    expectedContext: C02ExpectedContext
+    contextCount: number | null
   }
   productionPath: string
-  productionPathComplete?: boolean
-  failedBlocker?: string
-}> {
+  productionPathComplete: boolean
+}
+
+type C02ActivationBlocked = {
+  kind: 'blocked'
+  blocker: string
+  productionPath: string
+  topicsCreated: number
+  messagesCreated: number
+  blocksCreated: number
+  usedTypedPath: boolean
+  reduxVerified: boolean
+  projectionStats: {
+    reduxMessages: number
+    reduxBlocks: number
+    groupCount: number
+    displayMessages: number
+    anchorGroupKey: string | null
+    contextBoundaryPresent: boolean
+    contextBoundaryInsideMessages: boolean
+    finalTopicDomProof: boolean
+    globalDisplayMessages: number
+  }
+}
+
+type C02ActivationResult = C02ActivationSuccess | C02ActivationBlocked
+
+async function activateReduxProjection(
+  page: Page,
+  syntheticTopics: LogicalPayloadTopicInput[],
+  opts?: { waitTimeoutMs?: number }
+): Promise<C02ActivationResult> {
   // Single-source canonical activation: use the exact syntheticTopics already
   // constructed for canonicalBytesForTopics (same IDs/prefixes/payload). No
   // independent profile-based reconstruction — the canonical objects are the sole
@@ -299,7 +699,8 @@ async function activateReduxProjection(
         globalDisplayMessages: 0
       },
       productionPath: 'blocked: syntheticTopics empty — no canonical input to activate',
-      failedBlocker:
+      kind: 'blocked',
+      blocker:
         'syntheticTopics empty: activation requires the same non-empty canonical topics used for canonicalBytesForTopics'
     }
   }
@@ -354,7 +755,8 @@ async function activateReduxProjection(
       },
       productionPath:
         'blocked: live assistant id unavailable from renderer store — cannot dispatch assistants/addTopic without production hook',
-      failedBlocker:
+      kind: 'blocked',
+      blocker:
         'live assistant id unavailable: renderer store has no assistants[0].id — cannot register synthetic topic via canonical path'
     }
   }
@@ -408,7 +810,8 @@ async function activateReduxProjection(
           globalDisplayMessages: 0
         },
         productionPath: 'blocked: assistants/addTopic dispatch failed',
-        failedBlocker: `assistants/addTopic failed for ${t.topicId}: ${addOk.err}`
+        kind: 'blocked',
+        blocker: `assistants/addTopic failed for ${t.topicId}: ${sanitizeC02Error(addOk.err)}`
       }
     }
 
@@ -472,7 +875,8 @@ async function activateReduxProjection(
           globalDisplayMessages: 0
         },
         productionPath: 'blocked: ChatDb persist failed via ensureTopic/pasteMessagesToTopic',
-        failedBlocker: `typed ChatDb persist failed for ${t.topicId}: ${persist.err}`
+        kind: 'blocked',
+        blocker: `typed ChatDb persist failed for ${t.topicId}: ${sanitizeC02Error(persist.err)}`
       }
     }
   }
@@ -510,7 +914,8 @@ async function activateReduxProjection(
           globalDisplayMessages: 0
         },
         productionPath: 'blocked: setDisplayCount verification failed',
-        failedBlocker: `newMessages/setDisplayCount failed: expected ${desiredDisplayCount}, got ${String(actual)}`
+        kind: 'blocked',
+        blocker: `newMessages/setDisplayCount failed: expected ${desiredDisplayCount}, got ${String(actual)}`
       }
     }
   }
@@ -528,6 +933,23 @@ async function activateReduxProjection(
   // Matrix-only bounded wait for the largest existing profile (3×150×4096B).
   // Single-profile retains legacy 30s; matrix caller passes C02_MATRIX_WAIT_TIMEOUT_MS (60s).
   const helperWaitTimeoutMs = opts?.waitTimeoutMs ?? 30_000
+
+  // Fetch actual persisted contextCount once for per-topic oracle derivation (LOCK-001)
+  const actualContextCountForPerTopic = await page.evaluate(
+    ({ assistantId }) => {
+      const s = (window as unknown as Record<string, unknown>).store.getState() as Record<string, unknown>
+      const assistantsState = s.assistants as Record<string, unknown> | undefined
+      const list = (assistantsState?.assistants ?? []) as Array<{ id: string; settings?: Record<string, unknown> }>
+      const defaultAss = assistantsState?.defaultAssistant as
+        | { id?: string; settings?: Record<string, unknown> }
+        | undefined
+      const ass = list.find((a) => a.id === assistantId) ?? defaultAss ?? null
+      const settings = (ass?.settings ?? {}) as Record<string, unknown>
+      const raw = (settings as Record<string, unknown>).contextCount
+      return raw as unknown as number | null | undefined
+    },
+    { assistantId: liveAssistantId }
+  )
 
   // Step 3: canonical activation via existing rendered topic-item clicks — one click per synthetic topic
   // so all synthetic topics become resident in Redux via the production loadTopicMessagesThunk path
@@ -565,7 +987,8 @@ async function activateReduxProjection(
           globalDisplayMessages: 0
         },
         productionPath: 'blocked: topic-item click failed — sidebar item not interactable',
-        failedBlocker: `canonical topic-item click failed for ${topicId}: ${e instanceof Error ? e.message : String(e)}`
+        kind: 'blocked',
+        blocker: `canonical topic-item click failed for ${topicId}: ${sanitizeC02Error(e)}`
       }
     }
     try {
@@ -599,7 +1022,8 @@ async function activateReduxProjection(
           globalDisplayMessages: 0
         },
         productionPath: 'blocked: Redux messageIdsByTopic / loading wait timed out after topic-item click',
-        failedBlocker: `Redux wait failed for ${topicId}: ${e instanceof Error ? e.message : String(e)}`
+        kind: 'blocked',
+        blocker: `Redux wait failed for ${topicId}: ${sanitizeC02Error(e)}`
       }
     }
     try {
@@ -635,47 +1059,357 @@ async function activateReduxProjection(
           globalDisplayMessages: 0
         },
         productionPath: 'blocked: DOM message count wait timed out after topic-item click',
-        failedBlocker: `DOM #messages [data-message-id] scoped wait failed for ${topicId}: expected ${topicExpected} visible messages owned by that topic (global===scoped===expected); [id^="message-"] is diagnostic-only and not authoritative: ${e instanceof Error ? e.message : String(e)}`
+        kind: 'blocked',
+        blocker: `DOM #messages [data-message-id] scoped wait failed for ${topicId}: expected ${topicExpected} visible messages owned by that topic (global===scoped===expected); [id^="message-"] is diagnostic-only and not authoritative: ${sanitizeC02Error(e)}`
+      }
+    }
+    // Derive per-topic oracle from actual contextCount and synthetic messages (LOCK-001)
+    const topicMessagesForOracle = syntheticTopics[topicIdx]!.messages as unknown as Array<Record<string, unknown>>
+    const expectedCtxForTopic = c02DeriveExpectedContext(
+      topicMessagesForOracle as unknown as Array<Record<string, unknown>>,
+      actualContextCountForPerTopic as number | null
+    )
+    const expectedAnchorForTopic = expectedCtxForTopic.anchorGroupKey
+    if (!isC02ExpectedContextValid(expectedCtxForTopic)) {
+      return {
+        rendererLogicalBytes: 0,
+        topicsCreated: topics.length,
+        messagesCreated: messageTotal,
+        blocksCreated: messageTotal,
+        usedTypedPath,
+        reduxVerified: false,
+        projectionStats: {
+          reduxMessages: 0,
+          reduxBlocks: 0,
+          groupCount: 0,
+          displayMessages: 0,
+          anchorGroupKey: null,
+          contextBoundaryPresent: false,
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: false,
+          globalDisplayMessages: 0
+        },
+        productionPath: 'blocked: per-topic oracle invalid',
+        kind: 'blocked',
+        blocker: `per-topic oracle invalid for ${topicId} (turnCount/contextCount/startIndex/anchor validation failed)`
+      }
+    }
+    // Per-topic persisted canonical anchor proof for every activated topic (LOCK-001/002) — validate exact equality and strict ownership via decoded grammar
+    try {
+      const perTopicPersistedOk = await page.evaluate(
+        ({ topicId, assistantId, expectedAnchor }) => {
+          const s = (window as any).store.getState() as Record<string, unknown>
+          const assistantsState = s.assistants as Record<string, unknown> | undefined
+          const list = (assistantsState?.assistants ?? []) as Array<{ id: string; settings?: Record<string, unknown> }>
+          const defaultAss = assistantsState?.defaultAssistant as
+            | { id?: string; settings?: Record<string, unknown> }
+            | undefined
+          const ass = list.find((a) => a.id === assistantId) ?? defaultAss ?? null
+          const settings = (ass?.settings ?? {}) as Record<string, unknown>
+          const anchorMap = (settings.contextWindowAnchor ?? {}) as Record<
+            string,
+            { kind: string; groupKey: string } | undefined
+          >
+          const persisted = anchorMap[topicId] ?? null
+          if (
+            !persisted ||
+            persisted.kind !== 'active' ||
+            typeof persisted.groupKey !== 'string' ||
+            persisted.groupKey.length === 0
+          )
+            return false
+          if (persisted.groupKey !== expectedAnchor) return false
+          // Strict topic ownership via exact prefix on plain IDs (LOCK-002) — persisted anchors are plain message IDs, not encoded groups
+          const topicIdStr = String(topicId)
+          const anchor = String(persisted.groupKey)
+          if (anchor === topicIdStr) return true
+          if (anchor.startsWith(topicIdStr + '-')) return true
+          return false
+        },
+        { topicId, assistantId: liveAssistantId, expectedAnchor: expectedAnchorForTopic as string | null }
+      )
+      if (!perTopicPersistedOk) {
+        return {
+          rendererLogicalBytes: 0,
+          topicsCreated: topics.length,
+          messagesCreated: messageTotal,
+          blocksCreated: messageTotal,
+          usedTypedPath,
+          reduxVerified: false,
+          projectionStats: {
+            reduxMessages: 0,
+            reduxBlocks: 0,
+            groupCount: 0,
+            displayMessages: 0,
+            anchorGroupKey: null,
+            contextBoundaryPresent: false,
+            contextBoundaryInsideMessages: false,
+            finalTopicDomProof: false,
+            globalDisplayMessages: 0
+          },
+          productionPath: 'blocked: per-topic persisted anchor proof failed',
+          kind: 'blocked',
+          blocker: `per-topic persisted anchor invalid for ${topicId} (missing/not owned/not equal oracle anchor)`
+        }
+      }
+      // Additional Node-side strict check via persisted helper (plain prefix)
+      if (expectedAnchorForTopic !== null && !isC02PersistedTopicOwned(expectedAnchorForTopic, topicId)) {
+        return {
+          rendererLogicalBytes: 0,
+          topicsCreated: topics.length,
+          messagesCreated: messageTotal,
+          blocksCreated: messageTotal,
+          usedTypedPath,
+          reduxVerified: false,
+          projectionStats: {
+            reduxMessages: 0,
+            reduxBlocks: 0,
+            groupCount: 0,
+            displayMessages: 0,
+            anchorGroupKey: null,
+            contextBoundaryPresent: false,
+            contextBoundaryInsideMessages: false,
+            finalTopicDomProof: false,
+            globalDisplayMessages: 0
+          },
+          productionPath: 'blocked: per-topic oracle anchor not owned',
+          kind: 'blocked',
+          blocker: `per-topic oracle anchor not owned for ${topicId}`
+        }
+      }
+    } catch (e) {
+      return {
+        rendererLogicalBytes: 0,
+        topicsCreated: topics.length,
+        messagesCreated: messageTotal,
+        blocksCreated: messageTotal,
+        usedTypedPath,
+        reduxVerified: false,
+        projectionStats: {
+          reduxMessages: 0,
+          reduxBlocks: 0,
+          groupCount: 0,
+          displayMessages: 0,
+          anchorGroupKey: null,
+          contextBoundaryPresent: false,
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: false,
+          globalDisplayMessages: 0
+        },
+        productionPath: 'blocked: per-topic persisted anchor check error',
+        kind: 'blocked',
+        blocker: `per-topic persisted check error for ${topicId}: ${sanitizeC02Error(e)}`
       }
     }
   }
 
-  // Stable groups: exact expected count required for productionPath complete.
-  // Authoritative proof is strictly #messages [data-stable-group-id]; arbitrary non-zero fallback may NOT satisfy complete — it is diagnostic only and forces partial/inconclusive.
+  // Pure expected-turn/anchor/boundary oracle using production-equivalent turn rules and actual persisted contextCount — LOCK-001 no inferred 25, fail closed if missing/invalid
+  const actualContextState = await page.evaluate(
+    ({ topicId, assistantId }) => {
+      const s = (window as any).store.getState() as Record<string, unknown>
+      const assistantsState = s.assistants as Record<string, unknown> | undefined
+      const list = (assistantsState?.assistants ?? []) as Array<{ id: string; settings?: Record<string, unknown> }>
+      const defaultAss = assistantsState?.defaultAssistant as
+        | { id?: string; settings?: Record<string, unknown> }
+        | undefined
+      const ass = list.find((a) => a.id === assistantId) ?? defaultAss ?? null
+      const settings = (ass?.settings ?? {}) as Record<string, unknown>
+      const raw = (settings as Record<string, unknown>).contextCount
+      // Preserve undefined as invalid marker — do not infer 25 (LOCK-001)
+      const contextCount = raw as unknown as number | null | undefined
+      const anchorMap = (settings.contextWindowAnchor ?? {}) as Record<
+        string,
+        { kind: string; groupKey: string } | undefined
+      >
+      const persisted = anchorMap[topicId] ?? null
+      return {
+        contextCount: contextCount as unknown as number | null | undefined,
+        persistedGroupKey: (persisted?.groupKey ?? null) as string | null,
+        persistedKind: (persisted?.kind ?? null) as string | null
+      }
+    },
+    { topicId: lastTopicId, assistantId: liveAssistantId }
+  )
+  // Fail closed if contextCount missing/invalid — do not infer, derive will be invalid and gate will be false (LOCK-001)
+  const contextCountForOracle: number | null | undefined = actualContextState.contextCount
+  const isContextCountValidForOracle =
+    contextCountForOracle === null ||
+    (typeof contextCountForOracle === 'number' &&
+      Number.isFinite(contextCountForOracle) &&
+      Number.isInteger(contextCountForOracle) &&
+      contextCountForOracle >= 1)
+  // If invalid/missing, we still derive but predicate will reject; log diagnostic basename only, no path
+  const finalTopicForOracle = syntheticTopics.find((t) => t.topicId === lastTopicId)!
+  // Use captured actual as sole value; if missing/invalid, derive with undefined -> will be invalid and predicate fails closed (no literal 25)
+  const expectedContext = c02DeriveExpectedContextForTopic(
+    finalTopicForOracle as unknown as { messages: Record<string, unknown>[] },
+    isContextCountValidForOracle ? (contextCountForOracle as number | null) : (undefined as unknown as number | null)
+  )
+  const expectedBoundaryPresent = expectedContext.boundaryPresent
+  const expectedAnchor = expectedContext.anchorGroupKey
+
+  // Final settled wait combines Redux completeness/loading, persisted anchor validity (public store), expected boundary presence/absence, inside/global divider ownership, and exact message/group counts — replaces discarded best-effort boundary observation.
   let groupExactMatched = false
+  const boundaryObserved = expectedBoundaryPresent
   try {
     await page.waitForFunction(
-      (expected) => document.querySelectorAll('#messages [data-stable-group-id]').length === expected,
-      expectedVisibleFinal,
-      { timeout: 15000 }
+      ({ expectedVisible, expectedAnchor, expectedBoundaryPresent, lastTopicId, expectedProjectedTotal }) => {
+        const s = (window as any).store.getState() as Record<string, unknown>
+        const msgState = s.messages as Record<string, unknown> | undefined
+        const idsByTopic = (msgState?.messageIdsByTopic ?? {}) as Record<string, string[]>
+        const loadingByTopic = (msgState?.loadingByTopic ?? {}) as Record<string, unknown>
+        const ids = idsByTopic[lastTopicId]
+        const loading = loadingByTopic[lastTopicId]
+        if (!Array.isArray(ids) || ids.length !== expectedVisible || loading === true) return false
+        // Verify all topics projected (for multi-topic harness the earlier per-topic checks already ensure per-topic, but verify total for completeness)
+        // Persisted anchor proof via public renderer store — must be valid non-null and equal expected canonical anchor
+        const assistantsState = s.assistants as Record<string, unknown> | undefined
+        const list = (assistantsState?.assistants ?? []) as Array<{ id: string; settings?: Record<string, unknown> }>
+        const defaultAss = assistantsState?.defaultAssistant as
+          | { id?: string; settings?: Record<string, unknown> }
+          | undefined
+        // Find live assistant by checking which has the topic
+        let persisted: { kind: string; groupKey: string } | null = null
+        for (const a of list) {
+          const map = (a.settings?.contextWindowAnchor ?? {}) as Record<string, unknown>
+          if (map[lastTopicId]) {
+            persisted = map[lastTopicId] as { kind: string; groupKey: string }
+            break
+          }
+        }
+        if (!persisted) {
+          const dMap = (defaultAss?.settings?.contextWindowAnchor ?? {}) as Record<string, unknown>
+          if (dMap[lastTopicId]) persisted = dMap[lastTopicId] as { kind: string; groupKey: string }
+        }
+        if (
+          !persisted ||
+          persisted.kind !== 'active' ||
+          typeof persisted.groupKey !== 'string' ||
+          persisted.groupKey.length === 0
+        )
+          return false
+        if (persisted.groupKey !== expectedAnchor) return false
+        // Plain persisted IDs: exact equality or explicit `${topicId}-` prefix only
+        if (persisted.groupKey !== lastTopicId && !persisted.groupKey.startsWith(lastTopicId + '-')) return false
+        // Strict decoder for group IDs — one production grammar
+        function strictDecodeLocal(groupId: string | null): string[] | null {
+          if (groupId === null || typeof groupId !== 'string') return null
+          if (groupId.length === 0) return null
+          if (groupId === 'group:empty') return null
+          if (groupId.startsWith('|') || groupId.endsWith('|') || groupId.includes('||')) return null
+          const result: string[] = []
+          let pos = 0
+          while (pos < groupId.length) {
+            const colonIdx = groupId.indexOf(':', pos)
+            if (colonIdx === -1) return null
+            const lenStr = groupId.slice(pos, colonIdx)
+            if (lenStr.length === 0 || !/^\d+$/.test(lenStr)) return null
+            if (lenStr.length > 1 && lenStr[0] === '0') return null
+            const len = Number(lenStr)
+            if (!Number.isFinite(len) || !Number.isInteger(len) || len < 0) return null
+            if (String(len) !== lenStr) return null
+            const idStart = colonIdx + 1
+            const idEnd = idStart + len
+            if (idEnd > groupId.length) return null
+            const id = groupId.slice(idStart, idEnd)
+            if (id.length !== len) return null
+            result.push(id)
+            if (idEnd === groupId.length) {
+              pos = idEnd
+              break
+            }
+            if (groupId[idEnd] !== '|') return null
+            if (idEnd + 1 >= groupId.length) return null
+            pos = idEnd + 1
+          }
+          if (pos !== groupId.length) return null
+          if (result.length === 0) return null
+          return result
+        }
+
+        // DOM exact counts — strictly #messages production selectors
+        const scoped = document.querySelectorAll(`#messages [data-message-id^="${lastTopicId}-msg-"]`).length
+        const global = document.querySelectorAll('#messages [data-message-id]').length
+        if (scoped !== expectedVisible || global !== expectedVisible) return false
+        const groupCount = document.querySelectorAll('#messages [data-stable-group-id]').length
+        if (groupCount !== expectedVisible) return false
+        const groupEls = document.querySelectorAll('#messages [data-stable-group-id]')
+        let groupsWithFinal = 0
+        for (let i = 0; i < groupEls.length; i++) {
+          const el = groupEls[i] as HTMLElement
+          const gid = el.getAttribute('data-stable-group-id') ?? ''
+          const dec = strictDecodeLocal(gid)
+          let owned = false
+          if (dec !== null && dec.length === 1) {
+            const id = dec[0] as string
+            if (id === lastTopicId || id.startsWith(lastTopicId + '-')) owned = true
+          }
+          if (owned) groupsWithFinal++
+        }
+        if (groupsWithFinal !== expectedVisible) return false
+
+        // Divider ownership tied to canonical persisted anchor — stable DOM ID only proves topic ownership
+        const allBoundaries = document.querySelectorAll('[data-context-boundary]')
+        const insideBoundaries = document.querySelectorAll('#messages [data-context-boundary]')
+        const hasOutside = Array.from(allBoundaries).some((el) => !el.closest('#messages'))
+        if (hasOutside) return false
+        const present = insideBoundaries.length > 0
+        const inside = present && !!document.querySelector('#messages')?.contains(insideBoundaries[0] as Element)
+        if (present !== expectedBoundaryPresent) return false
+        if (inside !== expectedBoundaryPresent) return false
+        if (expectedBoundaryPresent) {
+          const boundary = insideBoundaries[0] as Element
+          let prev = boundary.previousElementSibling
+          let found: string | null = null
+          let hops = 0
+          while (prev && hops < 20) {
+            const gid = (prev as HTMLElement).getAttribute('data-stable-group-id')
+            if (gid) {
+              found = gid
+              break
+            }
+            const inner = prev.querySelector('[data-stable-group-id]')
+            if (inner) {
+              const innerGid = inner.getAttribute('data-stable-group-id')
+              if (innerGid) {
+                found = innerGid
+                break
+              }
+            }
+            prev = prev.previousElementSibling
+            hops++
+          }
+          function decodeCanonicalLocal(groupId: string | null): string | null {
+            const dec = strictDecodeLocal(groupId)
+            if (!dec || dec.length !== 1) return null
+            return dec[0]
+          }
+          const decodedFound = decodeCanonicalLocal(found)
+          if (decodedFound === null || decodedFound !== expectedAnchor) return false
+          {
+            const decFound = strictDecodeLocal(found)
+            if (decFound === null || decFound.length !== 1) return false
+            const id = decFound[0] as string
+            if (id !== lastTopicId && !id.startsWith(lastTopicId + '-')) return false
+          }
+        } else {
+          if (present || inside) return false
+        }
+        return true
+      },
+      {
+        expectedVisible: expectedVisibleFinal,
+        expectedAnchor,
+        expectedBoundaryPresent,
+        lastTopicId,
+        expectedProjectedTotal
+      },
+      { timeout: helperWaitTimeoutMs }
     )
     groupExactMatched = true
   } catch {
     groupExactMatched = false
-    // Diagnostic fallback: observe whether ANY groups materialized inside #messages, without claiming completeness.
-    await page
-      .waitForFunction(() => document.querySelectorAll('#messages [data-stable-group-id]').length > 0, undefined, {
-        timeout: 5000
-      })
-      .catch(() => {})
   }
-
-  // Deterministic context-boundary observation: wait for the divider that the production
-  // projection emits inside #messages ([data-context-boundary]). Presence is explicit and
-  // must be inside #messages; absence is not converted to a fake anchor. This wait is
-  // best-effort — final evaluation marks context evidence unavailable when absent and makes
-  // productionPath partial/inconclusive.
-  let boundaryObserved = false
-  try {
-    await page.waitForFunction(() => !!document.querySelector('#messages [data-context-boundary]'), undefined, {
-      timeout: 5000
-    })
-    boundaryObserved = true
-  } catch {
-    boundaryObserved = false
-  }
-  // Keep for narrowing detail (diagnostic, never satisfies complete)
-  void groupExactMatched
   void boundaryObserved
 
   // Verify Redux residency post-activation (useActiveTopic → loadTopicMessagesThunk path)
@@ -712,42 +1446,51 @@ async function activateReduxProjection(
     const domDisplayMessagesScoped = scopedData
     const domDisplayMessagesGlobal = globalData
 
-    // Groups that contain the final topic's messages (proof that groups are not stale) — strictly production group selectors
-    // Collision-safe exact ownership: gid must contain topicId as exact token with boundary (not substring prefix like c02-heap-topic-01 inside c02-heap-topic-011)
-    function isExactTopicOwnedLocal(anchor: string | null, topicId: string): boolean {
-      if (anchor === null || typeof anchor !== 'string' || typeof topicId !== 'string') return false
-      if (anchor.length === 0 || topicId.length === 0) return false
-      let idx = anchor.indexOf(topicId)
-      while (idx !== -1) {
-        const beforeChar = idx > 0 ? anchor[idx - 1] : ''
-        const beforeOk =
-          idx === 0 ||
-          beforeChar === ':' ||
-          beforeChar === '|' ||
-          beforeChar === '-' ||
-          beforeChar === '_' ||
-          !/[A-Za-z0-9]/.test(beforeChar)
-        const afterIdx = idx + topicId.length
-        const afterChar = afterIdx < anchor.length ? anchor[afterIdx] : ''
-        const afterOk =
-          afterIdx === anchor.length || afterChar === '-' || afterChar === ':' || afterChar === '|' || afterChar === '_'
-        if (beforeOk && afterOk) return true
-        idx = anchor.indexOf(topicId, idx + 1)
+    function strictDecodeForOwnership(groupId: string | null): string[] | null {
+      if (groupId === null || typeof groupId !== 'string') return null
+      if (groupId.length === 0) return null
+      if (groupId === 'group:empty') return null
+      if (groupId.startsWith('|') || groupId.endsWith('|') || groupId.includes('||')) return null
+      const result: string[] = []
+      let pos = 0
+      while (pos < groupId.length) {
+        const colonIdx = groupId.indexOf(':', pos)
+        if (colonIdx === -1) return null
+        const lenStr = groupId.slice(pos, colonIdx)
+        if (lenStr.length === 0 || !/^\d+$/.test(lenStr)) return null
+        if (lenStr.length > 1 && lenStr[0] === '0') return null
+        const len = Number(lenStr)
+        if (!Number.isFinite(len) || !Number.isInteger(len) || len < 0) return null
+        if (String(len) !== lenStr) return null
+        const idStart = colonIdx + 1
+        const idEnd = idStart + len
+        if (idEnd > groupId.length) return null
+        const id = groupId.slice(idStart, idEnd)
+        if (id.length !== len) return null
+        result.push(id)
+        if (idEnd === groupId.length) {
+          pos = idEnd
+          break
+        }
+        if (groupId[idEnd] !== '|') return null
+        if (idEnd + 1 >= groupId.length) return null
+        pos = idEnd + 1
       }
-      return false
+      if (pos !== groupId.length) return null
+      if (result.length === 0) return null
+      return result
     }
     let groupsWithFinalTopic = 0
     for (let i = 0; i < groupEls.length; i++) {
       const el = groupEls[i] as HTMLElement
       const gid = el.getAttribute('data-stable-group-id') ?? ''
-      if (isExactTopicOwnedLocal(gid, lastTopicId)) {
-        groupsWithFinalTopic++
-        continue
+      const dec = strictDecodeForOwnership(gid)
+      let owned = false
+      if (dec !== null && dec.length === 1) {
+        const id = dec[0] as string
+        if (id === lastTopicId || id.startsWith(lastTopicId + '-')) owned = true
       }
-      // Strict descendant check — only [data-message-id], never [id^="message-"] for authoritative ownership
-      // This selector `^=` is already exact boundary-safe (topicId + '-msg-')
-      const hasDesc = el.querySelector(`[data-message-id^="${lastTopicId}-msg-"]`) !== null
-      if (hasDesc) groupsWithFinalTopic++
+      if (owned) groupsWithFinalTopic++
     }
 
     // Strict context boundary — must be inside #messages subtree; anchor must be final-topic-owned
@@ -789,7 +1532,7 @@ async function activateReduxProjection(
       }
       anchorGroupKey = found
     } else {
-      // No divider anywhere — valid only for whole-topic <=25 with null anchor; empty allBoundaries also falls here (no outside, no inside)
+      // No divider anywhere — valid only for whole-topic via turn oracle startIndex===0 with null anchor; empty allBoundaries also falls here (no outside, no inside)
       contextBoundaryPresent = false
       contextBoundaryInsideMessages = false
       anchorGroupKey = null
@@ -809,45 +1552,67 @@ async function activateReduxProjection(
   }, lastTopicId)
 
   // Authoritative productionPath lock: complete ONLY when final-topic-owned #messages production selectors,
-  // exact expected DOM counts, and context evidence (strict divider with ownership OR valid whole-topic absent) passes.
+  // exact expected DOM counts, and context evidence (strict divider with ownership tied to canonical persisted anchor OR valid whole-topic with valid anchor and no divider) passes.
+  // Stable DOM ID [data-stable-group-id] only proves topic ownership; canonical anchor proof is via persisted store (expectedContext.anchorGroupKey).
   // Fallback [id^="message-"], global document queries, or arbitrary non-zero fallbacks never satisfy complete outside whole-topic.
   const finalTopicDomProof =
     domStats.domDisplayMessagesScoped === expectedVisibleFinal &&
     domStats.domDisplayMessagesGlobal === expectedVisibleFinal
   const groupCountExact = domStats.domGroupCount === expectedVisibleFinal
   const groupOwnershipProof = domStats.groupsWithFinalTopic === expectedVisibleFinal && groupCountExact
+  // DOM anchor ownership is strict decode; persisted is plain prefix
   const anchorOwnedByFinalTopic = isC02ExactTopicOwned(domStats.anchorGroupKey, lastTopicId)
-  const isWholeTopic = isC02WholeTopicWindow(expectedVisibleFinal)
+  const persistedOwnedByFinalTopic = isC02PersistedTopicOwned(actualContextState.persistedGroupKey, lastTopicId)
+  const isWholeTopic = expectedContext.isWholeTopic
   const wholeTopicNoDividerValid =
     isWholeTopic &&
     !domStats.contextBoundaryPresent &&
     !domStats.contextBoundaryInsideMessages &&
-    domStats.anchorGroupKey === null
-  const contextEvidenceOk = isC02ContextEvidenceValid({
-    contextBoundaryPresent: domStats.contextBoundaryPresent,
-    contextBoundaryInsideMessages: domStats.contextBoundaryInsideMessages,
-    anchorGroupKey: domStats.anchorGroupKey,
-    lastTopicId,
-    expectedVisibleFinal
-  })
-  const productionPathComplete = isC02ProductionPathComplete({
-    reduxVerified,
-    finalTopicDomProof,
-    groupCountExact,
-    groupOwnershipProof,
-    contextBoundaryPresent: domStats.contextBoundaryPresent,
-    contextBoundaryInsideMessages: domStats.contextBoundaryInsideMessages,
-    anchorGroupKey: domStats.anchorGroupKey,
-    lastTopicId,
-    expectedVisibleFinal
-  })
+    domStats.anchorGroupKey === null &&
+    actualContextState.persistedGroupKey !== null &&
+    actualContextState.persistedGroupKey === expectedAnchor &&
+    persistedOwnedByFinalTopic
+  // Context evidence must match expected turn/anchor oracle: boundary presence equals expectedBoundaryPresent, inside matches, and divider ownership tied to canonical persisted anchor
+  const expectedBoundaryMatches =
+    domStats.contextBoundaryPresent === expectedBoundaryPresent &&
+    domStats.contextBoundaryInsideMessages === expectedBoundaryPresent
+  const domAnchorExactIdentity = isC02ExactAnchorIdentity(domStats.anchorGroupKey, expectedAnchor)
+  const domAnchorMatchesCanonical = expectedBoundaryPresent
+    ? domStats.anchorGroupKey !== null && domAnchorExactIdentity && anchorOwnedByFinalTopic
+    : domStats.anchorGroupKey === null
+  const persistedMatchesExpected = actualContextState.persistedGroupKey === expectedAnchor && persistedOwnedByFinalTopic
+  const contextEvidenceOk =
+    expectedBoundaryMatches &&
+    domAnchorMatchesCanonical &&
+    persistedMatchesExpected &&
+    isC02ContextEvidenceValid({
+      contextBoundaryPresent: domStats.contextBoundaryPresent,
+      contextBoundaryInsideMessages: domStats.contextBoundaryInsideMessages,
+      anchorGroupKey: domStats.anchorGroupKey,
+      persistedAnchorGroupKey: actualContextState.persistedGroupKey,
+      expectedAnchorGroupKey: expectedAnchor,
+      expectedContext: expectedContext,
+      lastTopicId,
+      expectedVisibleFinal
+    }) &&
+    // Additionally ensure persisted validity per turn oracle (whole-topic requires valid anchor)
+    (isWholeTopic ? actualContextState.persistedGroupKey !== null && persistedOwnedByFinalTopic : true)
+  const productionPathComplete =
+    reduxVerified &&
+    finalTopicDomProof &&
+    groupCountExact &&
+    groupOwnershipProof &&
+    expectedBoundaryMatches &&
+    domAnchorMatchesCanonical &&
+    persistedMatchesExpected &&
+    contextEvidenceOk
 
   let productionPathDetail: string
   if (productionPathComplete) {
     if (wholeTopicNoDividerValid) {
-      productionPathDetail = `canonical user path complete: assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id="${lastTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/[data-message-id] (no [data-context-boundary] by design — whole-topic window ${expectedVisibleFinal} <= ${C02_DEFAULT_CONTEXTCOUNT} turns, divider absent is valid); productionPath complete — finalTopic=${lastTopicId} owns #messages DOM (scoped ${domStats.domDisplayMessagesScoped}/${expectedVisibleFinal}, global ${domStats.domDisplayMessagesGlobal}/${expectedVisibleFinal} via #messages [data-message-id]), groups exact ${domStats.domGroupCount}/${expectedVisibleFinal} (owned ${domStats.groupsWithFinalTopic}/${expectedVisibleFinal} via #messages [data-stable-group-id]), whole-topic context valid (no divider, anchor null by design)`
+      productionPathDetail = `canonical user path complete: assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id="${lastTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/[data-message-id] (no [data-context-boundary] by design — whole-topic window via turn oracle turnCount ${expectedContext.turnCount} <= contextCount ${String(actualContextState.contextCount)} , divider absent with valid persisted anchor ${expectedAnchor}); productionPath complete — finalTopic=${lastTopicId} owns #messages DOM (scoped ${domStats.domDisplayMessagesScoped}/${expectedVisibleFinal}, global ${domStats.domDisplayMessagesGlobal}/${expectedVisibleFinal} via #messages [data-message-id]), groups exact ${domStats.domGroupCount}/${expectedVisibleFinal} (owned ${domStats.groupsWithFinalTopic}/${expectedVisibleFinal} via #messages [data-stable-group-id] topic ownership only), whole-topic context valid (no divider, persisted anchor valid ${expectedAnchor})`
     } else {
-      productionPathDetail = `canonical user path complete: assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id="${lastTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/[data-message-id]/[data-context-boundary]; productionPath complete — finalTopic=${lastTopicId} owns #messages DOM (scoped ${domStats.domDisplayMessagesScoped}/${expectedVisibleFinal}, global ${domStats.domDisplayMessagesGlobal}/${expectedVisibleFinal} via #messages [data-message-id]), groups exact ${domStats.domGroupCount}/${expectedVisibleFinal} (owned ${domStats.groupsWithFinalTopic}/${expectedVisibleFinal} via #messages [data-stable-group-id]), contextBoundary inside #messages anchor=${domStats.anchorGroupKey} (final-topic-owned, [id^="message-"] fallback diagnostic-only excluded)`
+      productionPathDetail = `canonical user path complete: assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id="${lastTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/[data-message-id]/[data-context-boundary]; productionPath complete — finalTopic=${lastTopicId} owns #messages DOM (scoped ${domStats.domDisplayMessagesScoped}/${expectedVisibleFinal}, global ${domStats.domDisplayMessagesGlobal}/${expectedVisibleFinal} via #messages [data-message-id]), groups exact ${domStats.domGroupCount}/${expectedVisibleFinal} (owned ${domStats.groupsWithFinalTopic}/${expectedVisibleFinal} via #messages [data-stable-group-id] topic ownership only), contextBoundary inside #messages anchor=${domStats.anchorGroupKey} persisted canonical=${expectedAnchor} (final-topic-owned via store, stable ID only topic ownership, [id^="message-"] fallback diagnostic-only excluded)`
     }
   } else {
     const reasons: string[] = []
@@ -868,27 +1633,26 @@ async function activateReduxProjection(
         `group ownership failed (groupsWithFinalTopic ${domStats.groupsWithFinalTopic}/${expectedVisibleFinal} — groups do not demonstrably belong to final topic)`
       )
     if (!contextEvidenceOk) {
-      if (isWholeTopic && !domStats.contextBoundaryPresent && domStats.anchorGroupKey === null) {
-        // Whole-topic absent is valid, but we are here only when contextEvidenceOk false,
-        // so this branch should not happen for valid whole-topic; treat as inconclusive due to other evidence
+      if (
+        isWholeTopic &&
+        !domStats.contextBoundaryPresent &&
+        domStats.anchorGroupKey === null &&
+        expectedAnchor !== null
+      ) {
         reasons.push(
-          `whole-topic divider absent but context evidence still invalid for ${lastTopicId} (unexpected — isWholeTopic=${isWholeTopic} expectedVisible=${expectedVisibleFinal} present=${domStats.contextBoundaryPresent} anchor=${domStats.anchorGroupKey ?? 'null'})`
+          `whole-topic divider absent but persisted anchor mismatch for ${lastTopicId} (isWholeTopic=${isWholeTopic} expectedVisible=${expectedVisibleFinal} expectedAnchor=${expectedAnchor ?? 'null'} persisted=${actualContextState.persistedGroupKey ?? 'null'} present=${domStats.contextBoundaryPresent} anchor=${domStats.anchorGroupKey ?? 'null'} persistedOwned=${persistedOwnedByFinalTopic})`
         )
-      } else if (!domStats.contextBoundaryPresent)
+      } else if (!expectedBoundaryMatches)
         reasons.push(
-          '[data-context-boundary] absent inside #messages — context evidence unavailable (global boundary outside #messages or missing; not inferred from first group; partial/inconclusive outside whole-topic <=25; diagnostic alt counts not authoritative)'
+          `context boundary mismatch vs turn oracle for ${lastTopicId} (expectedBoundaryPresent=${expectedBoundaryPresent} turnCount ${expectedContext.turnCount} isWholeTopic=${isWholeTopic} expectedAnchor=${expectedAnchor ?? 'null'} vs DOM present=${domStats.contextBoundaryPresent} inside=${domStats.contextBoundaryInsideMessages} persisted=${actualContextState.persistedGroupKey ?? 'null'}) — stable ID only proves topic ownership, canonical anchor via store`
         )
-      else if (!domStats.contextBoundaryInsideMessages)
+      else if (!persistedMatchesExpected)
         reasons.push(
-          '[data-context-boundary] found globally but not inside #messages subtree — strict proof requires #messages [data-context-boundary]; inconclusive'
+          `persisted anchor mismatch vs turn oracle for ${lastTopicId} (expectedAnchor=${expectedAnchor ?? 'null'} persisted=${actualContextState.persistedGroupKey ?? 'null'} persistedOwned=${persistedOwnedByFinalTopic} contextCount=${String(actualContextState.contextCount)} turnCount=${expectedContext.turnCount}) — stable DOM ID does not validate anchor`
         )
-      else if (!domStats.anchorGroupKey)
+      else if (!domAnchorMatchesCanonical)
         reasons.push(
-          'context boundary present inside #messages but anchorGroupKey unresolvable (no predecessor [data-stable-group-id]; inconclusive)'
-        )
-      else if (!anchorOwnedByFinalTopic)
-        reasons.push(
-          `context boundary anchor not final-topic-owned (anchor=${domStats.anchorGroupKey} does not contain ${lastTopicId}; explicit final-topic ownership required; diagnostic [id^="message-"] fallback never satisfies complete)`
+          `DOM divider anchor mismatch vs canonical persisted anchor for ${lastTopicId} (DOM anchor=${domStats.anchorGroupKey ?? 'null'} expected canonical=${expectedAnchor ?? 'null'} owned=${anchorOwnedByFinalTopic} expectedBoundaryPresent=${expectedBoundaryPresent}) — stable [data-stable-group-id] only proves topic ownership`
         )
     }
     productionPathDetail = `canonical user path attempted: assistants/addTopic (live assistant ID) → ChatDb → [data-testid="topic-item"][data-topic-id="${lastTopicId}"] click → HomePage/useActiveTopic → loadTopicMessagesThunk → Messages/Chat; productionPath partial/inconclusive — ${reasons.join('; ')}; heap delta reflects Redux entity only when DOM incomplete, derived counts narrowed (inconclusive group/context)`
@@ -947,7 +1711,47 @@ async function activateReduxProjection(
     rendererLogicalBytes = 0
   }
 
+  // LOCK-002: gate success construction on computed producer proofs — never assert proof booleans as true
+  if (
+    !reduxVerified ||
+    !finalTopicDomProof ||
+    !groupCountExact ||
+    !groupOwnershipProof ||
+    !groupExactMatched ||
+    !productionPathComplete
+  ) {
+    const failed: string[] = []
+    if (!reduxVerified) failed.push('reduxVerified')
+    if (!finalTopicDomProof) failed.push('finalTopicDomProof')
+    if (!groupCountExact) failed.push('groupCountExact')
+    if (!groupOwnershipProof) failed.push('groupOwnershipProof')
+    if (!groupExactMatched) failed.push('groupExactMatched')
+    if (!productionPathComplete) failed.push('productionPathComplete')
+    return {
+      kind: 'blocked' as const,
+      blocker: `productionPath incomplete: ${failed.join(',')} — c02-blocked-productionPath-incomplete`,
+      productionPath: productionPathDetail,
+      topicsCreated: topics.length,
+      messagesCreated: messageTotal,
+      blocksCreated: messageTotal,
+      usedTypedPath,
+      reduxVerified,
+      projectionStats: {
+        reduxMessages: reduxInfo.reduxMessages,
+        reduxBlocks: reduxInfo.reduxBlocks,
+        groupCount: domStats.domGroupCount,
+        displayMessages: domStats.domDisplayMessagesScoped,
+        anchorGroupKey: domStats.anchorGroupKey,
+        contextBoundaryPresent: domStats.contextBoundaryPresent,
+        contextBoundaryInsideMessages: domStats.contextBoundaryInsideMessages,
+        finalTopicDomProof,
+        globalDisplayMessages: domStats.domDisplayMessagesGlobal
+      }
+    }
+  }
+
   return {
+    kind: 'success' as const,
     rendererLogicalBytes,
     topicsCreated: topics.length,
     messagesCreated: messageTotal,
@@ -963,9 +1767,12 @@ async function activateReduxProjection(
       contextBoundaryPresent: domStats.contextBoundaryPresent,
       contextBoundaryInsideMessages: domStats.contextBoundaryInsideMessages,
       finalTopicDomProof,
-      groupExactMatched: groupCountExact,
       groupsWithFinalTopic: domStats.groupsWithFinalTopic,
-      globalDisplayMessages: domStats.domDisplayMessagesGlobal
+      globalDisplayMessages: domStats.domDisplayMessagesGlobal,
+      persistedAnchorGroupKey: actualContextState.persistedGroupKey,
+      expectedAnchorGroupKey: expectedAnchor,
+      expectedContext: expectedContext,
+      contextCount: actualContextState.contextCount as number | null
     },
     productionPath: productionPathDetail,
     productionPathComplete
@@ -1031,9 +1838,9 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
       // Bounded correction: pass the exact same syntheticTopics used for canonicalBytesForTopics
       // (single source) — no prefix default/mutation; IDs match accounting.
       const allocation = await activateReduxProjection(mainWindow, syntheticTopics)
-      if (allocation.failedBlocker) {
+      if (allocation.kind === 'blocked') {
         throw new Error(
-          `[PERF-C02] heap calibration blocked: ${allocation.failedBlocker}. No artifact emitted — this is fail-closed per decision rights; do not retain detached holder or Node proxy.`
+          `[PERF-C02] heap calibration blocked: ${allocation.blocker}. No artifact emitted — this is fail-closed per decision rights; do not retain detached holder or Node proxy.`
         )
       }
       if (isMixedSingle) {
@@ -1092,25 +1899,58 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
         allocation.projectionStats.groupsWithFinalTopic,
         `groups must demonstrably belong to final topic ${finalTopicId} via #messages [data-stable-group-id]/[data-message-id] (groupsWithFinalTopic === expectedVisible ${expectedSingleVisible}); [id^="message-"] descendant never satisfies`
       ).toBe(expectedSingleVisible)
-      // Context evidence per LOCK-004 (fail-closed, explicit inside-messages signal mandatory): whole-topic windows (positive integer 1..25) require no divider anywhere + null anchor (valid absent), partial windows require divider inside #messages + final-owned anchor (valid present); outside/global invalid
-      const isWholeTopicSingle = isC02WholeTopicWindow(expectedSingleVisible)
+      // Context evidence per LOCK-001/002: whole-topic via turn oracle (startIndex===0) requires no divider + valid persisted anchor; partial requires exact anchor identity — derive from actual captured contextCount, not literal 25 (LOCK-001 no inferred 25)
+      const finalTopicObjForSingle = syntheticTopics[syntheticTopics.length - 1]!
+      const actualContextCountSingle = allocation.projectionStats.contextCount as unknown as number | null | undefined
+      const isActualContextCountValidSingle =
+        actualContextCountSingle === null ||
+        (typeof actualContextCountSingle === 'number' &&
+          Number.isFinite(actualContextCountSingle) &&
+          Number.isInteger(actualContextCountSingle) &&
+          actualContextCountSingle >= 1)
+      expect(
+        isActualContextCountValidSingle,
+        `actual persisted contextCount must be present and valid (finite integer >=1 or null), not missing/undefined — got ${String(actualContextCountSingle)} — fail closed per LOCK-001 (no inferred 25)`
+      ).toBe(true)
+      const expectedCtxSingle = c02DeriveExpectedContextForTopic(
+        finalTopicObjForSingle as unknown as { messages: Record<string, unknown>[] },
+        actualContextCountSingle as number | null
+      )
+      const isWholeTopicSingle = expectedCtxSingle.isWholeTopic
+      // Ensure expectedContext from actual equals allocation's expectedContext canonical anchor
+      expect(
+        allocation.projectionStats.expectedContext?.anchorGroupKey,
+        `expectedContext.anchorGroupKey must equal derived oracle anchor ${String(expectedCtxSingle.anchorGroupKey)} — expectedAnchorGroupKey must equal expectedContext.anchorGroupKey per LOCK-001`
+      ).toBe(expectedCtxSingle.anchorGroupKey)
+      expect(
+        allocation.projectionStats.expectedAnchorGroupKey,
+        `expectedAnchorGroupKey must equal expectedContext.anchorGroupKey ${String(expectedCtxSingle.anchorGroupKey)} per LOCK-001`
+      ).toBe(expectedCtxSingle.anchorGroupKey)
+      expect(
+        allocation.projectionStats.contextCount,
+        `actual contextCount must equal expectedContext.contextCount ${String(expectedCtxSingle.contextCount)} per LOCK-001`
+      ).toBe(expectedCtxSingle.contextCount)
       if (isWholeTopicSingle) {
         expect(
           allocation.projectionStats.contextBoundaryPresent,
-          `whole-topic window ${expectedSingleVisible} <= ${C02_DEFAULT_CONTEXTCOUNT} must have no divider by design (boundaryMessageId null when startIndex 0) — contextBoundaryPresent must be false`
+          `whole-topic window via turn oracle turnCount ${expectedCtxSingle.turnCount} <= contextCount ${String(actualContextCountSingle)} must have no divider by design — contextBoundaryPresent must be false (persisted anchor ${expectedCtxSingle.anchorGroupKey} valid separately)`
         ).toBe(false)
         expect(
           allocation.projectionStats.contextBoundaryInsideMessages,
-          `whole-topic window ${expectedSingleVisible} <= ${C02_DEFAULT_CONTEXTCOUNT} must have no divider anywhere by design — contextBoundaryInsideMessages must be false (explicit inside signal mandatory per LOCK-004; whole-topic 1..25 no-divider/null-anchor branch)`
+          `whole-topic window via turn oracle must have no divider anywhere by design — contextBoundaryInsideMessages must be false (explicit inside signal mandatory per LOCK-004; whole-topic DOM anchor null, persisted valid)`
         ).toBe(false)
         expect(
           allocation.projectionStats.anchorGroupKey,
-          `whole-topic window has no resolvable divider anchor by design — anchorGroupKey must be null for ${finalTopicId}`
+          `whole-topic window via turn oracle has no DOM divider anchor by design — anchorGroupKey must be null for ${finalTopicId} (DOM anchor null, persisted anchor ${expectedCtxSingle.anchorGroupKey} valid separately per )`
         ).toBeNull()
       } else {
         expect(
           allocation.projectionStats.contextBoundaryPresent,
-          '#messages [data-context-boundary] must be present explicitly inside #messages — absent or global boundary outside #messages is not converted to first group as fake anchor; partial/inconclusive when absent outside whole-topic <=25'
+          '#messages [data-context-boundary] must be present explicitly inside #messages — absent or global boundary outside #messages is not converted to first group as fake anchor; partial/inconclusive when absent (turnCount ' +
+            expectedCtxSingle.turnCount +
+            ' > contextCount ' +
+            String(actualContextCountSingle) +
+            ')'
         ).toBe(true)
         expect(
           allocation.projectionStats.contextBoundaryInsideMessages,
@@ -1118,7 +1958,11 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
         ).toBe(true)
         expect(
           isC02ExactTopicOwned(allocation.projectionStats.anchorGroupKey, finalTopicId),
-          `context boundary anchor must be resolvable inside #messages and final-topic-owned (exact boundary-safe isC02ExactTopicOwned predecessor #messages [data-stable-group-id] containing ${finalTopicId}) when boundary present — anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'}`
+          `context boundary anchor must be resolvable inside #messages and final-topic-owned (exact boundary-safe isC02ExactTopicOwned predecessor #messages [data-stable-group-id] containing ${finalTopicId}) when boundary present — anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'} expected ${expectedCtxSingle.anchorGroupKey ?? 'null'}`
+        ).toBe(true)
+        expect(
+          isC02ExactAnchorIdentity(allocation.projectionStats.anchorGroupKey, expectedCtxSingle.anchorGroupKey),
+          `context boundary anchor must exactly equal canonical expected anchor (LOCK-002 exact identity, not substring) — DOM anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'} expected canonical=${expectedCtxSingle.anchorGroupKey ?? 'null'}`
         ).toBe(true)
       }
       expect(
@@ -1126,10 +1970,15 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
           contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
           contextBoundaryInsideMessages: allocation.projectionStats.contextBoundaryInsideMessages,
           anchorGroupKey: allocation.projectionStats.anchorGroupKey,
+          persistedAnchorGroupKey: allocation.projectionStats.persistedAnchorGroupKey as string | null,
+          expectedAnchorGroupKey: allocation.projectionStats.expectedAnchorGroupKey as string | null,
+          expectedContext: allocation.projectionStats.expectedContext as unknown as
+            | import('../../utils/perfHeapCalibration').C02ExpectedContext
+            | null,
           lastTopicId: finalTopicId,
           expectedVisibleFinal: expectedSingleVisible
         }),
-        `context evidence must be valid via harness predicate per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor OR partial inside-divider/final-owned with explicit inside signal mandatory, fail-closed when omitted) for ${finalTopicId} expectedVisible=${expectedSingleVisible} present=${allocation.projectionStats.contextBoundaryPresent} insideMessages=${allocation.projectionStats.contextBoundaryInsideMessages} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'}`
+        `context evidence must be valid via harness predicate per LOCK-004 DOM branches (whole-topic via turn oracle DOM null OR partial inside-divider/final-owned with explicit inside signal mandatory, fail-closed when omitted) for ${finalTopicId} expectedVisible=${expectedSingleVisible} turnCount=${expectedCtxSingle.turnCount} expectedBoundaryPresent=${expectedCtxSingle.boundaryPresent} expectedAnchor=${expectedCtxSingle.anchorGroupKey ?? 'null'} present=${allocation.projectionStats.contextBoundaryPresent} insideMessages=${allocation.projectionStats.contextBoundaryInsideMessages} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'}`
       ).toBe(true)
       expect(
         !!allocation.productionPathComplete,
@@ -1142,6 +1991,47 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
 
       // Small settle after deterministic waits already performed inside activation (React commit)
       await mainWindow.waitForTimeout(250)
+
+      // Single final settled observation via shared helper immediately before heap sampling (LOCK-003) — jointly validates Redux, persisted contextCount, anchor, oracle, DOM, groups, divider
+      const finalCombinedProofSingle = await observeFinalSettledProjection(
+        mainWindow,
+        finalTopicId,
+        expectedSingleVisible,
+        expectedCtxSingle,
+        expectedCtxSingle.anchorGroupKey,
+        actualContextCountSingle as number | null
+      )
+      expect(finalCombinedProofSingle.reduxOk, 'final combined Redux/loading must be stable').toBe(true)
+      expect(
+        finalCombinedProofSingle.persistedOk,
+        'final combined persisted anchor must be stable and equal expected'
+      ).toBe(true)
+      expect(
+        finalCombinedProofSingle.contextCountOk,
+        'final combined actual contextCount must equal oracle contextCount'
+      ).toBe(true)
+      expect(finalCombinedProofSingle.oracleOk, 'final combined oracle must be valid').toBe(true)
+      expect(
+        finalCombinedProofSingle.domOk,
+        'final combined DOM scoped/global must be stable and equal expectedVisible'
+      ).toBe(true)
+      expect(
+        finalCombinedProofSingle.groupOk,
+        'final combined group count must be stable and equal expectedVisible'
+      ).toBe(true)
+      expect(
+        finalCombinedProofSingle.groupOwnedOk,
+        'final combined group ownership via strict decoded grammar must be stable'
+      ).toBe(true)
+      expect(
+        finalCombinedProofSingle.boundaryOk,
+        'final combined boundary inside/outside must be stable and equal expected'
+      ).toBe(true)
+      expect(
+        finalCombinedProofSingle.anchorOk,
+        'final combined anchor exact identity via strict decoded singleton must be stable'
+      ).toBe(true)
+      expect(finalCombinedProofSingle.hasOutside, 'final combined must have no outside divider').toBe(false)
 
       // Sample heap AFTER activation — actual renderer process
       const heapAfter = await sampleRendererHeap(mainWindow)
@@ -1273,7 +2163,7 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
         `[PERF-C02] MEASURED AUTHORITY: Redux entity projection (messages entity + messageIdsByTopic + blocks entity) + derived viewport/group/context via actual rendered DOM (groups=${allocation.projectionStats.groupCount} exact=${allocation.projectionStats.groupExactMatched ? 1 : 0}, display scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages} groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}, finalTopicProof=${allocation.projectionStats.finalTopicDomProof ? 1 : 0}) — productionPath: ${allocation.productionPath}`
       )
       console.log(
-        `[PERF-C02] PRODUCTION PROJECTION PATH (canonical): assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required, clamped to latest-window ${C02_PRODUCTION_WINDOW_MAX}) → [data-testid="topic-item"][data-topic-id="${finalTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/#messages [data-message-id]/#messages [data-context-boundary]; productionPath=${allocation.productionPath}; derivedProductionPathComplete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor OR partial inside-divider/final-owned with explicit inside signal mandatory, fail-closed; caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid) authoritativeCalibrationComplete per derived predicate; groups exact ${allocation.projectionStats.groupCount}/${expectedSingleVisible} via #messages [data-stable-group-id] (logical retained ${isMixedSingle ? c02MixedTotalMessages(profile as C02MixedHeapProfile) + ' total' : (profile as C02HeapProfile).syntheticMessagesPerTopic + ' per topic'} , projected ${expectedSingleVisible}) contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${allocation.projectionStats.contextBoundaryInsideMessages ? 1 : 0} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'} finalTopicOwned=${isC02ExactTopicOwned(allocation.projectionStats.anchorGroupKey, finalTopicId) ? 1 : 0} (exact boundary-safe isC02ExactTopicOwned, fallback [id^="message-"]/global never satisfies; valid branches: whole-topic 1..25 no-divider/null-anchor, partial divider inside #messages with final-owned anchor; explicit inside signal mandatory per LOCK-004)`
+        `[PERF-C02] PRODUCTION PROJECTION PATH (canonical): assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required, clamped to latest-window ${C02_PRODUCTION_WINDOW_MAX}) → [data-testid="topic-item"][data-topic-id="${finalTopicId}"] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/#messages [data-message-id]/#messages [data-context-boundary]; productionPath=${allocation.productionPath}; derivedProductionPathComplete per turn oracle branches (whole-topic startIndex===0 no-divider/null-anchor + persisted canonical OR partial divider inside #messages with final-owned + persisted, explicit inside signal mandatory, fail-closed; caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid) authoritativeCalibrationComplete per derived predicate; groups exact ${allocation.projectionStats.groupCount}/${expectedSingleVisible} via #messages [data-stable-group-id] (logical retained ${isMixedSingle ? c02MixedTotalMessages(profile as C02MixedHeapProfile) + ' total' : (profile as C02HeapProfile).syntheticMessagesPerTopic + ' per topic'} , projected ${expectedSingleVisible}) contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${allocation.projectionStats.contextBoundaryInsideMessages ? 1 : 0} anchor=${allocation.projectionStats.anchorGroupKey ?? 'null'} persisted=${allocation.projectionStats.persistedAnchorGroupKey ?? 'null'} expected=${allocation.projectionStats.expectedAnchorGroupKey ?? 'null'} finalTopicOwned=${isC02ExactTopicOwned(allocation.projectionStats.anchorGroupKey, finalTopicId) ? 1 : 0} persistedOwned=${isC02PersistedTopicOwned(allocation.projectionStats.persistedAnchorGroupKey, finalTopicId) ? 1 : 0} (exact boundary-safe isC02ExactTopicOwned, turn oracle isWholeTopic=${allocation.projectionStats.expectedContext?.isWholeTopic ? 1 : 0}, fallback [id^="message-"]/global never satisfies; valid branches: whole-topic startIndex===0 no-divider/null-anchor + persisted canonical, partial divider inside #messages with final-owned + persisted; explicit inside signal mandatory per)`
       )
       if (isMixedSingle) {
         const mixed = profile as C02MixedHeapProfile
@@ -1359,9 +2249,9 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
           const allocation = await activateReduxProjection(isolatedWindow, syntheticTopics, {
             waitTimeoutMs: C02_MATRIX_WAIT_TIMEOUT_MS
           })
-          if (allocation.failedBlocker) {
+          if (allocation.kind === 'blocked') {
             throw new Error(
-              `[PERF-C02] heap calibration blocked for profile ${entry.id}: ${allocation.failedBlocker}. No artifact emitted.`
+              `[PERF-C02] heap calibration blocked for profile ${entry.id}: ${allocation.blocker}. No artifact emitted.`
             )
           }
           if (isMixedEntry) {
@@ -1391,6 +2281,41 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
           expect(!!allocation.productionPathComplete, `productionPath must be complete for ${entry.id}`).toBe(true)
 
           await isolatedWindow.waitForTimeout(250)
+          // Matrix final settled observation via shared helper immediately before heap sampling (LOCK-003) — jointly validates Redux, persisted contextCount, anchor, oracle, DOM, groups, divider
+          const expectedVisibleForMatrix = isMixedEntry
+            ? c02MixedExpectedVisibleCountForSpec(
+                (entry.profile as C02MixedHeapProfile).topicSpecs[
+                  (entry.profile as C02MixedHeapProfile).topicSpecs.length - 1
+                ]!
+              )
+            : c02ExpectedVisibleCount(entry.profile as C02HeapProfile)
+          const expectedCtxForMatrix = allocation.projectionStats.expectedContext as C02ExpectedContext
+          const expectedAnchorForMatrix = allocation.projectionStats.expectedAnchorGroupKey as string | null
+          const actualContextCountForMatrix = allocation.projectionStats.contextCount as number | null
+          const finalCombinedForMatrix = await observeFinalSettledProjection(
+            isolatedWindow,
+            finalTopicId,
+            expectedVisibleForMatrix,
+            expectedCtxForMatrix,
+            expectedAnchorForMatrix,
+            actualContextCountForMatrix
+          )
+          if (
+            !finalCombinedForMatrix.reduxOk ||
+            !finalCombinedForMatrix.persistedOk ||
+            !finalCombinedForMatrix.contextCountOk ||
+            !finalCombinedForMatrix.oracleOk ||
+            !finalCombinedForMatrix.domOk ||
+            !finalCombinedForMatrix.groupOk ||
+            !finalCombinedForMatrix.groupOwnedOk ||
+            !finalCombinedForMatrix.boundaryOk ||
+            !finalCombinedForMatrix.anchorOk ||
+            finalCombinedForMatrix.hasOutside
+          ) {
+            throw new Error(
+              `[PERF-C02] matrix final combined proof unstable for ${entry.id}: reduxOk=${finalCombinedForMatrix.reduxOk} persistedOk=${finalCombinedForMatrix.persistedOk} contextCountOk=${finalCombinedForMatrix.contextCountOk} oracleOk=${finalCombinedForMatrix.oracleOk} domOk=${finalCombinedForMatrix.domOk} groupOk=${finalCombinedForMatrix.groupOk} groupOwnedOk=${finalCombinedForMatrix.groupOwnedOk} boundaryOk=${finalCombinedForMatrix.boundaryOk} anchorOk=${finalCombinedForMatrix.anchorOk} hasOutside=${finalCombinedForMatrix.hasOutside} scoped=${finalCombinedForMatrix.scoped} global=${finalCombinedForMatrix.global} groupCount=${finalCombinedForMatrix.groupCount} groupsWithFinalTopic=${finalCombinedForMatrix.groupsWithFinalTopic} decodedAnchor=${String(finalCombinedForMatrix.decodedAnchor)} expectedAnchor=${String(finalCombinedForMatrix.expectedAnchor)}`
+            )
+          }
           const heapAfter = await sampleRendererHeap(isolatedWindow)
           const afterProblems = validateHeapSample(heapAfter)
           if (heapAfter === null) {
@@ -1430,7 +2355,7 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
             finalTopicId: syntheticTopics[syntheticTopics.length - 1]!.topicId
           })
           console.log(
-            `[PERF-C02] matrix profile ${entry.id}: isolated profile ${isolatedUserDataDir} logicalBytes=${logicalBytes}, heapDelta=${amplification.heapDeltaBytes}, deltaRatio=${amplification.deltaRatio.toFixed(3)}, precision=${precisionLabel}`
+            `[PERF-C02] matrix profile ${entry.id}: isolated profile ${path.basename(isolatedUserDataDir)} (id=${entry.id}) logicalBytes=${logicalBytes}, heapDelta=${amplification.heapDeltaBytes}, deltaRatio=${amplification.deltaRatio.toFixed(3)}, precision=${precisionLabel}`
           )
         } finally {
           try {
@@ -1443,14 +2368,14 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
             }
           } catch (e) {
             throw new Error(
-              `[PERF-C02] matrix isolation cleanup failed for ${entry.id} (${isolatedUserDataDir}): ${e instanceof Error ? e.message : String(e)}`
+              `[PERF-C02] matrix isolation cleanup failed for ${entry.id} (profile=${sanitizeC02PathForLog(isolatedUserDataDir)}): ${sanitizeC02Error(e)}`
             )
           } finally {
             try {
               await removeOwnedTmpRoot(isolatedRoot, [isolatedUserDataDir])
             } catch (e) {
               throw new Error(
-                `[PERF-C02] matrix isolation root cleanup failed for ${entry.id} (${isolatedRoot}): ${e instanceof Error ? e.message : String(e)}`
+                `[PERF-C02] matrix isolation root cleanup failed for ${entry.id} (root=${sanitizeC02PathForLog(isolatedRoot)}): ${sanitizeC02Error(e)}`
               )
             }
           }

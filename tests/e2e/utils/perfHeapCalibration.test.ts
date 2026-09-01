@@ -15,6 +15,13 @@ import {
   buildC02ScaleMap,
   buildC02SyntheticTopics,
   buildC02SyntheticTopicsWithPrefix,
+  c02DecodeCanonicalDomAnchor,
+  c02DeriveExpectedContext,
+  c02DeriveExpectedContextForTopic,
+  c02ExpectedStartIndexForTurnCount,
+  c02ResolveDefaultAnchorIndex,
+  c02StrictDecodeStableGroupId,
+  c02TurnCountForMessageCount,
   C02_BENCHMARK_ID,
   C02_DEFAULT_CONTEXTCOUNT,
   C02_HEAP_PROFILE_IDS,
@@ -38,6 +45,7 @@ import {
   classifyEffectiveHeapDeltaInformative,
   classifyHeapDeltaInformative,
   computeHeapAmplification,
+  createC02VerifiedEvidenceForTest,
   DEFAULT_C02_HEAP_PROFILE,
   deriveEffectiveHeapInformative,
   deriveFinalTopicDomProof,
@@ -47,7 +55,11 @@ import {
   HEAP_METHOD_CODE,
   HEAP_PRECISION_CODE,
   isC02ContextEvidenceValid,
+  isC02ExactAnchorIdentity,
   isC02ExactTopicOwned,
+  isC02PersistedAnchorIdentity,
+  isC02PersistedTopicOwned,
+  isC02ExpectedContextValid,
   isC02MixedHeapProfile,
   isC02ProductionPathComplete,
   isC02WholeTopicWindow,
@@ -60,6 +72,7 @@ import {
   validateHeapSample,
   validateLogicalBytes,
   validateSyntheticTopics,
+  type C02ExpectedContext,
   type RendererHeapSample
 } from './perfHeapCalibration'
 import { validateBenchmarkResult, type BenchmarkResult } from '../../../src/main/services/chatDb/__tests__/benchResult'
@@ -76,6 +89,31 @@ function withEnv(value: string | undefined, fn: () => void): void {
     if (previous === undefined) delete process.env[PERF_C02_HEAP_ENV]
     else process.env[PERF_C02_HEAP_ENV] = previous
   }
+}
+
+function c02DomEncodeForTest(plain: string | null): string | null {
+  if (plain === null) return null
+  return `${plain.length}:${plain}`
+}
+
+function c02MakeExpectedContextForTest(
+  lastTopicId: string,
+  messageCount: number,
+  contextCount: number | null
+): C02ExpectedContext {
+  // Production-equivalent derivation from actual synthetic messages (paired askId), not fabricated turn keys
+  const msgs: Array<Record<string, unknown>> = []
+  for (let i = 0; i < messageCount; i++) {
+    const role = i % 2 === 0 ? 'user' : 'assistant'
+    const id = `${lastTopicId}-msg-${String(i).padStart(3, '0')}`
+    if (role === 'user') {
+      msgs.push({ id, role, topicId: lastTopicId } as any)
+    } else {
+      const prevId = `${lastTopicId}-msg-${String(i - 1).padStart(3, '0')}`
+      msgs.push({ id, role, askId: prevId, topicId: lastTopicId } as any)
+    }
+  }
+  return c02DeriveExpectedContext(msgs as any, contextCount)
 }
 
 describe('c02HeapGateEnabled', () => {
@@ -910,8 +948,8 @@ describe('C02 privacy seam regression — builders must not leak arbitrary free-
     const informativeness = { informative: true, reason: SENTINEL_REASON_HEAP_INJECT }
     const expectedVisible = c02ExpectedVisibleCount(profile)
     const expectedProjected = c02ExpectedProjectedTotal(profile)
-    // Anchor must be valid per LOCK-004 (contain lastTopicId) while still injecting sentinel for privacy — valid owned anchor that also contains sentinel should be redacted and still yield complete via derived predicate.
-    const validOwnedAnchorHeap = `c02-heap-topic-01-${SENTINEL_ANCHOR_HEAP_INJECT}`
+    // Valid proof derived from actual synthetic messages (paired askId) — exact anchor identity, not substring; sentinels injected via other free-text fields remain redacted
+    const verifiedUniform = createC02VerifiedEvidenceForTest('c02-heap-topic-01', 100, 10)
     const allocation = {
       topicsCreated: profile.syntheticTopics,
       messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
@@ -923,13 +961,17 @@ describe('C02 privacy seam regression — builders must not leak arbitrary free-
         reduxBlocks: expectedProjected,
         groupCount: expectedVisible,
         displayMessages: expectedVisible,
-        anchorGroupKey: validOwnedAnchorHeap,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedUniform.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedUniform.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedUniform.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: verifiedUniform.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedUniform.expectedAnchorGroupKey,
+        expectedContext: verifiedUniform.expectedContext,
+        contextCount: verifiedUniform.contextCount
       },
       productionPath: SENTINEL_PRODUCTION_HEAP_INJECT,
       productionPathComplete: true
@@ -1012,8 +1054,8 @@ describe('C02 privacy seam regression — builders must not leak arbitrary free-
     const lastSpec = profile.topicSpecs[profile.topicSpecs.length - 1]!
     const expectedVisible = c02MixedExpectedVisibleCountForSpec(lastSpec)
     const expectedProjected = c02MixedExpectedProjectedTotal(profile)
-    // Anchor must be valid per LOCK-004 (contain lastTopicId c02-mixed-topic-03) while still injecting sentinel — valid owned anchor redacted and still yields complete.
-    const validOwnedAnchorMixed = `c02-mixed-topic-03-${SENTINEL_ANCHOR_MIXED_INJECT}`
+    // Valid proof derived from actual synthetic messages — exact anchor identity; sentinels via other fields
+    const verifiedMixed = createC02VerifiedEvidenceForTest('c02-mixed-topic-03', 150, 10)
     const allocation = {
       topicsCreated: profile.topicSpecs.length,
       messagesCreated: c02MixedTotalMessages(profile),
@@ -1025,13 +1067,17 @@ describe('C02 privacy seam regression — builders must not leak arbitrary free-
         reduxBlocks: expectedProjected,
         groupCount: expectedVisible,
         displayMessages: expectedVisible,
-        anchorGroupKey: validOwnedAnchorMixed,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedMixed.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedMixed.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedMixed.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: verifiedMixed.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedMixed.expectedAnchorGroupKey,
+        expectedContext: verifiedMixed.expectedContext,
+        contextCount: verifiedMixed.contextCount
       },
       productionPath: SENTINEL_PRODUCTION_MIXED_INJECT,
       productionPathComplete: true
@@ -1209,8 +1255,8 @@ describe('C02 ACTIVE E2E call-graph — sanitized multi builder with heterogeneo
     expect(Number.isFinite(uniformBytes) && uniformBytes > 0).toBe(true)
     expect(Number.isFinite(mixedBytes) && mixedBytes > 0).toBe(true)
 
-    // Allocations carry malicious free-text anchors/paths/reasons that must NOT appear in artifact — anchors are made valid per LOCK-004 (contain lastTopicId) while still injecting sentinel for privacy, so derived predicate valid and artifact redacts sentinel.
-    const validUniformAnchorForSmall = `c02-heap-topic-00-${SENTINEL_ANCHOR_UNIFORM}`
+    // Allocations carry malicious free-text via other fields (productionPath/reason) that must NOT appear in artifact — anchors are valid exact derived from actual synthetic messages (paired askId), not sentinel substring, so derived predicate valid and artifact redacts sentinel via safe labels
+    const verifiedUniformSmall = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 50, 10)
     const uniformAllocation = {
       topicsCreated: uniformProfile.syntheticTopics,
       messagesCreated: uniformProfile.syntheticTopics * uniformProfile.syntheticMessagesPerTopic,
@@ -1222,18 +1268,22 @@ describe('C02 ACTIVE E2E call-graph — sanitized multi builder with heterogeneo
         reduxBlocks: c02ExpectedProjectedTotal(uniformProfile),
         groupCount: c02ExpectedVisibleCount(uniformProfile),
         displayMessages: c02ExpectedVisibleCount(uniformProfile),
-        anchorGroupKey: validUniformAnchorForSmall,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedUniformSmall.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedUniformSmall.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedUniformSmall.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: c02ExpectedVisibleCount(uniformProfile),
-        globalDisplayMessages: c02ExpectedVisibleCount(uniformProfile)
+        globalDisplayMessages: c02ExpectedVisibleCount(uniformProfile),
+        persistedAnchorGroupKey: verifiedUniformSmall.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedUniformSmall.expectedAnchorGroupKey,
+        expectedContext: verifiedUniformSmall.expectedContext,
+        contextCount: verifiedUniformSmall.contextCount
       },
       productionPath: SENTINEL_PRODUCTION_UNIFORM,
       productionPathComplete: true
     }
-    const validMixedAnchorForBalanced = `c02-mixed-topic-03-${SENTINEL_ANCHOR_MIXED}`
+    const verifiedMixedBalanced = createC02VerifiedEvidenceForTest('c02-mixed-topic-03', 150, 10)
     const mixedAllocation = {
       topicsCreated: mixedProfile.topicSpecs.length,
       messagesCreated: c02MixedTotalMessages(mixedProfile),
@@ -1247,9 +1297,9 @@ describe('C02 ACTIVE E2E call-graph — sanitized multi builder with heterogeneo
         displayMessages: c02MixedExpectedVisibleCountForSpec(
           mixedProfile.topicSpecs[mixedProfile.topicSpecs.length - 1]!
         ),
-        anchorGroupKey: validMixedAnchorForBalanced,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedMixedBalanced.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedMixedBalanced.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedMixedBalanced.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: c02MixedExpectedVisibleCountForSpec(
@@ -1257,7 +1307,11 @@ describe('C02 ACTIVE E2E call-graph — sanitized multi builder with heterogeneo
         ),
         globalDisplayMessages: c02MixedExpectedVisibleCountForSpec(
           mixedProfile.topicSpecs[mixedProfile.topicSpecs.length - 1]!
-        )
+        ),
+        persistedAnchorGroupKey: verifiedMixedBalanced.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedMixedBalanced.expectedAnchorGroupKey,
+        expectedContext: verifiedMixedBalanced.expectedContext,
+        contextCount: verifiedMixedBalanced.contextCount
       },
       productionPath: SENTINEL_PRODUCTION_MIXED,
       productionPathComplete: true
@@ -1266,7 +1320,7 @@ describe('C02 ACTIVE E2E call-graph — sanitized multi builder with heterogeneo
     const maliciousUniformProfile = C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.default]!
     const maliciousTopics = buildC02SyntheticTopics(maliciousUniformProfile)
     const maliciousBytes = canonicalBytesForTopics(maliciousTopics)
-    const validMaliciousAnchor = `c02-heap-topic-01-SENTINEL_MALICIOUS_ANCHOR_SHOULD_NOT_LEAK_3`
+    const verifiedMalicious = createC02VerifiedEvidenceForTest('c02-heap-topic-01', 100, 10)
     const maliciousAllocation = {
       topicsCreated: maliciousUniformProfile.syntheticTopics,
       messagesCreated: maliciousUniformProfile.syntheticTopics * maliciousUniformProfile.syntheticMessagesPerTopic,
@@ -1278,13 +1332,17 @@ describe('C02 ACTIVE E2E call-graph — sanitized multi builder with heterogeneo
         reduxBlocks: c02ExpectedProjectedTotal(maliciousUniformProfile),
         groupCount: c02ExpectedVisibleCount(maliciousUniformProfile),
         displayMessages: c02ExpectedVisibleCount(maliciousUniformProfile),
-        anchorGroupKey: validMaliciousAnchor,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedMalicious.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedMalicious.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedMalicious.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: c02ExpectedVisibleCount(maliciousUniformProfile),
-        globalDisplayMessages: c02ExpectedVisibleCount(maliciousUniformProfile)
+        globalDisplayMessages: c02ExpectedVisibleCount(maliciousUniformProfile),
+        persistedAnchorGroupKey: verifiedMalicious.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedMalicious.expectedAnchorGroupKey,
+        expectedContext: verifiedMalicious.expectedContext,
+        contextCount: verifiedMalicious.contextCount
       },
       productionPath: 'SENTINEL_MALICIOUS_PRODUCTION_PATH_SHOULD_NOT_LEAK_3 /tmp/bogus',
       productionPathComplete: true
@@ -1766,17 +1824,45 @@ describe('C02 harness predicate correction — whole-topic divider (LOCK-004)', 
     expect(isC02WholeTopicWindow(-5 as any)).toBe(false)
   })
 
-  it('(a) boundary-present validation: partial window >25 requires divider with final-topic-owned anchor', () => {
+  it('(a) boundary-present validation: partial window via turn oracle requires divider with final-topic-owned anchor', () => {
     const lastTopicId = 'c02-mixed-topic-03'
-    const expectedVisibleFinal = 50 // >25 => partial, divider required
+    const expectedVisibleFinal = 60 // 30 turns >25 => partial via turn oracle, divider required
+    const _expA2 = c02MakeExpectedContextForTest(lastTopicId, expectedVisibleFinal, 25)
     const validEvidence = {
       contextBoundaryPresent: true,
       contextBoundaryInsideMessages: true,
-      anchorGroupKey: `${lastTopicId}-msg-00010-group`,
+      anchorGroupKey: c02DomEncodeForTest(_expA2.anchorGroupKey),
+      persistedAnchorGroupKey: _expA2.anchorGroupKey,
+      expectedAnchorGroupKey: _expA2.anchorGroupKey,
+      expectedContext: _expA2,
       lastTopicId,
       expectedVisibleFinal
     }
     expect(isC02ContextEvidenceValid(validEvidence)).toBe(true)
+    // Encoded composite containing expected token must FAIL (LOCK-002 singleton required)
+    const encodedCompositeInvalid = {
+      contextBoundaryPresent: true,
+      contextBoundaryInsideMessages: true,
+      anchorGroupKey: `${_expA2.anchorGroupKey!.length}:${_expA2.anchorGroupKey}|5:other`,
+      persistedAnchorGroupKey: _expA2.anchorGroupKey,
+      expectedAnchorGroupKey: _expA2.anchorGroupKey,
+      expectedContext: _expA2,
+      lastTopicId,
+      expectedVisibleFinal
+    }
+    expect(isC02ContextEvidenceValid(encodedCompositeInvalid)).toBe(false)
+    // Singleton encoded exact valid
+    const encodedSingletonValid = {
+      contextBoundaryPresent: true,
+      contextBoundaryInsideMessages: true,
+      anchorGroupKey: `${_expA2.anchorGroupKey!.length}:${_expA2.anchorGroupKey}`,
+      persistedAnchorGroupKey: _expA2.anchorGroupKey,
+      expectedAnchorGroupKey: _expA2.anchorGroupKey,
+      expectedContext: _expA2,
+      lastTopicId,
+      expectedVisibleFinal
+    }
+    expect(isC02ContextEvidenceValid(encodedSingletonValid)).toBe(true)
     // Missing divider for partial window must be invalid
     const missingForPartial = {
       contextBoundaryPresent: false,
@@ -1817,7 +1903,7 @@ describe('C02 harness predicate correction — whole-topic divider (LOCK-004)', 
       })
     ).toBe(false)
 
-    // Full productionPathComplete requires ownership proof too
+    // Full productionPathComplete requires ownership proof too (with verified context) — exact anchor identity
     const fullEvidence = {
       reduxVerified: true,
       finalTopicDomProof: true,
@@ -1825,7 +1911,10 @@ describe('C02 harness predicate correction — whole-topic divider (LOCK-004)', 
       groupOwnershipProof: true,
       contextBoundaryPresent: true,
       contextBoundaryInsideMessages: true,
-      anchorGroupKey: `${lastTopicId}-msg-00010-group`,
+      anchorGroupKey: c02DomEncodeForTest(_expA2.anchorGroupKey),
+      persistedAnchorGroupKey: _expA2.anchorGroupKey,
+      expectedAnchorGroupKey: _expA2.anchorGroupKey,
+      expectedContext: _expA2,
       lastTopicId,
       expectedVisibleFinal
     }
@@ -1841,13 +1930,17 @@ describe('C02 harness predicate correction — whole-topic divider (LOCK-004)', 
     ).toBe(false)
   })
 
-  it('(b) valid boundary-absent whole-topic window: 20 <=25 without divider and null anchor is valid', () => {
+  it('(b) valid boundary-absent whole-topic window: 20 via turn oracle without divider and null DOM anchor with valid persisted anchor is valid', () => {
     const lastTopicId = 'c02-mixed-topic-03'
-    const expectedVisibleFinal = 20 // <=25 => whole-topic, divider absent by design
+    const expectedVisibleFinal = 20 // 10 turns <=25 => whole-topic via turn oracle, divider absent
+    const _expB = c02MakeExpectedContextForTest(lastTopicId, expectedVisibleFinal, 25)
     const wholeTopicValidEvidence = {
       contextBoundaryPresent: false,
       contextBoundaryInsideMessages: false,
       anchorGroupKey: null,
+      persistedAnchorGroupKey: _expB.anchorGroupKey,
+      expectedAnchorGroupKey: _expB.anchorGroupKey,
+      expectedContext: _expB,
       lastTopicId,
       expectedVisibleFinal
     }
@@ -1861,23 +1954,30 @@ describe('C02 harness predicate correction — whole-topic divider (LOCK-004)', 
       contextBoundaryPresent: false,
       contextBoundaryInsideMessages: false,
       anchorGroupKey: null,
+      persistedAnchorGroupKey: _expB.anchorGroupKey,
+      expectedAnchorGroupKey: _expB.anchorGroupKey,
+      expectedContext: _expB,
       lastTopicId,
       expectedVisibleFinal
     }
     expect(isC02ProductionPathComplete(fullWholeTopicEvidence)).toBe(true)
 
-    // Oversized-contrast final topic concrete: 20 messages -> 20 visible -> whole-topic
+    // Oversized-contrast final topic concrete: 20 messages -> 20 visible -> whole-topic via turn oracle (10 turns <=25)
     const oversized = C02_MIXED_HEAP_PROFILES[C02_MIXED_HEAP_PROFILE_IDS.oversizedContrast]!
     const topics = buildC02MixedSyntheticTopics(oversized)
     const finalTopic = topics[topics.length - 1]!
     const finalVisible = c02ExpectedVisibleCountForTopic(finalTopic)
     expect(finalVisible).toBe(20)
     expect(isC02WholeTopicWindow(finalVisible)).toBe(true)
+    const _expOversized = c02MakeExpectedContextForTest(finalTopic.topicId, finalVisible, 25)
     expect(
       isC02ContextEvidenceValid({
         contextBoundaryPresent: false,
         contextBoundaryInsideMessages: false,
         anchorGroupKey: null,
+        persistedAnchorGroupKey: _expOversized.anchorGroupKey,
+        expectedAnchorGroupKey: _expOversized.anchorGroupKey,
+        expectedContext: _expOversized,
         lastTopicId: finalTopic.topicId,
         expectedVisibleFinal: finalVisible
       })
@@ -2089,16 +2189,24 @@ describe('C02 audit correction — decisive whole-topic, hardened visible, globa
 
   it('invalid visible counts are rejected for both branches (0, negative, NaN, Infinity, non-integer)', () => {
     const lastTopicId = 'c02-heap-topic-00'
+    const _expStrict60 = c02MakeExpectedContextForTest(lastTopicId, 60, 25)
+    const _expWhole1 = c02MakeExpectedContextForTest(lastTopicId, 1, 25)
     const validStrict = {
       contextBoundaryPresent: true,
       contextBoundaryInsideMessages: true,
-      anchorGroupKey: `${lastTopicId}-group`,
+      anchorGroupKey: c02DomEncodeForTest(_expStrict60.anchorGroupKey),
+      persistedAnchorGroupKey: _expStrict60.anchorGroupKey,
+      expectedAnchorGroupKey: _expStrict60.anchorGroupKey,
+      expectedContext: _expStrict60,
       lastTopicId
     }
     const validWhole = {
       contextBoundaryPresent: false,
       contextBoundaryInsideMessages: false,
       anchorGroupKey: null,
+      persistedAnchorGroupKey: _expWhole1.anchorGroupKey,
+      expectedAnchorGroupKey: _expWhole1.anchorGroupKey,
+      expectedContext: _expWhole1,
       lastTopicId
     }
     const invalidCounts: number[] = [0, -1, -5, NaN, Infinity, -Infinity, 0.5, 20.5, 25.1, 101, 150]
@@ -2167,6 +2275,8 @@ describe('C02 audit correction — decisive whole-topic, hardened visible, globa
     const expectedVisible = c02ExpectedVisibleCount(profile as any)
     expect(expectedVisible).toBe(20)
     expect(isC02WholeTopicWindow(expectedVisible)).toBe(true)
+    const lastTopicIdUniform = 'c02-heap-topic-00'
+    const verifiedUniform = createC02VerifiedEvidenceForTest(lastTopicIdUniform, 20, 25)
     const allocation = {
       topicsCreated: profile.syntheticTopics,
       messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
@@ -2184,9 +2294,14 @@ describe('C02 audit correction — decisive whole-topic, hardened visible, globa
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: verifiedUniform.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedUniform.expectedAnchorGroupKey,
+        expectedContext: verifiedUniform.expectedContext,
+        contextCount: verifiedUniform.contextCount
       },
-      productionPath: 'canonical whole-topic valid no divider',
+      productionPath:
+        'canonical whole-topic valid no divider via turn oracle (10 turns <=25) with valid persisted anchor',
       productionPathComplete: true
     }
     // Verify predicate itself is true for this allocation
@@ -2195,6 +2310,9 @@ describe('C02 audit correction — decisive whole-topic, hardened visible, globa
         contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
         contextBoundaryInsideMessages: allocation.projectionStats.contextBoundaryInsideMessages!,
         anchorGroupKey: allocation.projectionStats.anchorGroupKey,
+        persistedAnchorGroupKey: verifiedUniform.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedUniform.expectedAnchorGroupKey,
+        expectedContext: verifiedUniform.expectedContext,
         lastTopicId: 'c02-heap-topic-00',
         expectedVisibleFinal: expectedVisible
       })
@@ -2256,6 +2374,8 @@ describe('C02 audit correction — decisive whole-topic, hardened visible, globa
     expect(expectedVisible).toBe(20)
     expect(isC02WholeTopicWindow(expectedVisible)).toBe(true)
     const expectedProjected = c02MixedExpectedProjectedTotal(profile)
+    const lastTopicIdMixed = `c02-mixed-topic-${String(profile.topicSpecs.length - 1).padStart(2, '0')}`
+    const verifiedMixed = createC02VerifiedEvidenceForTest(lastTopicIdMixed, 20, 25)
     const allocation = {
       topicsCreated: profile.topicSpecs.length,
       messagesCreated: c02MixedTotalMessages(profile),
@@ -2273,9 +2393,14 @@ describe('C02 audit correction — decisive whole-topic, hardened visible, globa
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: verifiedMixed.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedMixed.expectedAnchorGroupKey,
+        expectedContext: verifiedMixed.expectedContext,
+        contextCount: verifiedMixed.contextCount
       },
-      productionPath: 'canonical whole-topic valid no divider mixed',
+      productionPath:
+        'canonical whole-topic valid no divider mixed via turn oracle (10 turns <=25) with valid persisted anchor',
       productionPathComplete: true
     }
     expect(
@@ -2283,7 +2408,10 @@ describe('C02 audit correction — decisive whole-topic, hardened visible, globa
         contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
         contextBoundaryInsideMessages: allocation.projectionStats.contextBoundaryInsideMessages!,
         anchorGroupKey: allocation.projectionStats.anchorGroupKey,
-        lastTopicId: `c02-mixed-topic-${String(profile.topicSpecs.length - 1).padStart(2, '0')}`,
+        persistedAnchorGroupKey: verifiedMixed.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedMixed.expectedAnchorGroupKey,
+        expectedContext: verifiedMixed.expectedContext,
+        lastTopicId: lastTopicIdMixed,
         expectedVisibleFinal: expectedVisible
       })
     ).toBe(true)
@@ -2400,8 +2528,10 @@ describe('C02 builder-interface integrity — fail-closed on invalid/omitted con
     expect(resultA.gates.find((g) => g.id === 'allocation.resident')?.passed).toBe(false)
     expect(resultA.gates.find((g) => g.id === 'calibration.complete')?.passed).toBe(false)
     const jsonA = JSON.stringify(resultA)
-    expect(jsonA).toContain('whole-topic windows (1..25) require no divider anywhere + null anchor')
-    expect(jsonA).toContain('partial windows require divider inside #messages + final-owned anchor')
+    expect(jsonA).toContain(
+      'whole-topic via turn oracle startIndex===0 requires no divider anywhere + DOM null with valid persisted anchor'
+    )
+    expect(jsonA).toContain('partial requires divider inside #messages + final-owned anchor')
 
     // Case B: whole-topic window 20 with spurious divider inside but caller true — must be incomplete (decisive whole-topic branch)
     const wholeProfile = {
@@ -2541,8 +2671,10 @@ describe('C02 builder-interface integrity — fail-closed on invalid/omitted con
     expect(result.gates.find((g) => g.id === 'calibration.complete')?.passed).toBe(false)
     expect(result.gates.find((g) => g.id === 'projection.contextBoundaryExplicit')?.passed).toBe(false)
     const json = JSON.stringify(result)
-    expect(json).toContain('whole-topic windows (1..25) require no divider anywhere + null anchor')
-    expect(json).toContain('partial windows require divider inside #messages + final-owned anchor')
+    expect(json).toContain(
+      'whole-topic via turn oracle startIndex===0 requires no divider anywhere + DOM null with valid persisted anchor'
+    )
+    expect(json).toContain('partial requires divider inside #messages + final-owned anchor')
   })
 
   it('multi builder: caller productionPathComplete true with invalid context evidence cannot yield complete per-entry and matrix fails', () => {
@@ -2560,6 +2692,7 @@ describe('C02 builder-interface integrity — fail-closed on invalid/omitted con
       'precise'
     )
     const expectedVisibleUniform = c02ExpectedVisibleCount(uniformProfile)
+    const verifiedUniformSmall = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 50, 10)
     const validAllocation: any = {
       topicsCreated: uniformProfile.syntheticTopics,
       messagesCreated: uniformProfile.syntheticTopics * uniformProfile.syntheticMessagesPerTopic,
@@ -2571,13 +2704,17 @@ describe('C02 builder-interface integrity — fail-closed on invalid/omitted con
         reduxBlocks: c02ExpectedProjectedTotal(uniformProfile),
         groupCount: expectedVisibleUniform,
         displayMessages: expectedVisibleUniform,
-        anchorGroupKey: 'c02-heap-topic-00-group',
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedUniformSmall.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedUniformSmall.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedUniformSmall.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisibleUniform,
-        globalDisplayMessages: expectedVisibleUniform
+        globalDisplayMessages: expectedVisibleUniform,
+        persistedAnchorGroupKey: verifiedUniformSmall.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedUniformSmall.expectedAnchorGroupKey,
+        expectedContext: verifiedUniformSmall.expectedContext,
+        contextCount: verifiedUniformSmall.contextCount
       },
       productionPath: 'valid partial',
       productionPathComplete: true
@@ -2762,7 +2899,7 @@ describe('C02 builder-interface integrity — fail-closed on invalid/omitted con
     expect(() => buildC02MultiBenchmarkResult(makeTestEnvironment(), multiEntries)).toThrow(/fail-closed/)
   })
 
-  it('wording-sensitive: artifact metric/gate names and details explicitly state both valid branches (whole-topic 1..25 no-divider/null-anchor and partial inside-divider/final-owned) with mandatory inside signal', () => {
+  it('wording-sensitive: artifact metric/gate names and details explicitly state both valid branches (whole-topic startIndex===0 no-divider/null-anchor + persisted canonical and partial inside-divider/final-owned + persisted) with mandatory inside signal', () => {
     const profile = C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.small]!
     const topics = buildC02SyntheticTopics(profile)
     const logicalBytes = canonicalBytesForTopics(topics)
@@ -2807,18 +2944,20 @@ describe('C02 builder-interface integrity — fail-closed on invalid/omitted con
     )
     const json = JSON.stringify(result)
     // Metrics and gates must contain both branch descriptions
-    expect(json).toContain('whole-topic windows (1..25) require no divider anywhere + null anchor')
-    expect(json).toContain('partial windows require divider inside #messages + final-owned anchor')
+    expect(json).toContain(
+      'whole-topic via turn oracle startIndex===0 requires no divider anywhere + DOM null with valid persisted anchor'
+    )
+    expect(json).toContain('partial requires divider inside #messages + final-owned anchor')
     expect(json).toContain('explicit inside signal mandatory')
     expect(json).toContain('fail-closed')
-    // ProductionPath metric name must indicate derived per LOCK-004 branches
+    // ProductionPath metric name must indicate derived per turn oracle branches
     const prodMetric = result.metrics.find((m) => m.id === 'projection.productionPathComplete')
-    expect(prodMetric?.name).toContain(
-      'whole-topic (1..25) no-divider/null-anchor branch and partial inside-divider/final-owned branch'
-    )
+    expect(prodMetric?.name).toContain('whole-topic startIndex===0 no-divider/null-anchor + persisted')
     const contextGate = result.gates.find((g) => g.id === 'projection.contextBoundaryExplicit')
-    expect(contextGate?.name).toContain('whole-topic windows (1..25) require no divider anywhere + null anchor')
-    expect(contextGate?.name).toContain('partial windows require divider inside #messages + final-owned anchor')
+    expect(contextGate?.name).toContain(
+      'whole-topic startIndex===0 requires no divider anywhere + DOM null with valid persisted anchor'
+    )
+    expect(contextGate?.name).toContain('partial requires divider inside #messages + final-owned anchor')
     // Mixed also wording-sensitive
     const mixedProfile = C02_MIXED_HEAP_PROFILES[C02_MIXED_HEAP_PROFILE_IDS.oversizedContrast]! // whole-topic final 20
     const mixedTopics = buildC02MixedSyntheticTopics(mixedProfile)
@@ -2861,8 +3000,10 @@ describe('C02 builder-interface integrity — fail-closed on invalid/omitted con
       'precise'
     )
     const mixedJson = JSON.stringify(mixedResult)
-    expect(mixedJson).toContain('whole-topic windows (1..25) require no divider anywhere + null anchor')
-    expect(mixedJson).toContain('partial windows require divider inside #messages + final-owned anchor')
+    expect(mixedJson).toContain(
+      'whole-topic via turn oracle startIndex===0 requires no divider anywhere + DOM null with valid persisted anchor'
+    )
+    expect(mixedJson).toContain('partial requires divider inside #messages + final-owned anchor')
   })
 })
 
@@ -2906,6 +3047,7 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
     const expectedProjected = c02ExpectedProjectedTotal(profile)
     const { before: heapBefore, after: heapAfter } = makeHeapPair(2_500_000)
     const informativeness = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+    const verifiedForSmall = createC02VerifiedEvidenceForTest(finalTopicId, 50, 10)
     const validAllocation: any = {
       topicsCreated: profile.syntheticTopics,
       messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
@@ -2917,13 +3059,17 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
         reduxBlocks: expectedProjected,
         groupCount: expectedVisible,
         displayMessages: expectedVisible,
-        anchorGroupKey: `${finalTopicId}-group-00`,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedForSmall.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedForSmall.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedForSmall.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: verifiedForSmall.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedForSmall.expectedAnchorGroupKey,
+        expectedContext: verifiedForSmall.expectedContext,
+        contextCount: verifiedForSmall.contextCount
       },
       productionPath: 'valid isolated partial',
       productionPathComplete: true
@@ -3030,6 +3176,7 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
     const expectedProjected = c02MixedExpectedProjectedTotal(profile)
     const { before: heapBefore, after: heapAfter } = makeHeapPair(3_000_000)
     const informativeness = classifyEffectiveHeapDeltaInformative(3_000_000, 'precise')
+    const verifiedMixed = createC02VerifiedEvidenceForTest(finalTopicId, 150, 10)
     const allocation: any = {
       topicsCreated: profile.topicSpecs.length,
       messagesCreated: c02MixedTotalMessages(profile),
@@ -3041,13 +3188,17 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
         reduxBlocks: expectedProjected,
         groupCount: expectedVisible,
         displayMessages: expectedVisible,
-        anchorGroupKey: `${finalTopicId}-anchor`,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedMixed.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedMixed.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedMixed.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: verifiedMixed.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedMixed.expectedAnchorGroupKey,
+        expectedContext: verifiedMixed.expectedContext,
+        contextCount: verifiedMixed.contextCount
       },
       productionPath: 'mixed isolated valid',
       productionPathComplete: true
@@ -3095,6 +3246,7 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
     const expectedProjected = c02ExpectedProjectedTotal(profile)
     const { before: heapBefore, after: heapAfter } = makeHeapPair(2_500_000)
     const informativeness = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+    const verifiedForMandatory = createC02VerifiedEvidenceForTest(finalTopicId, 50, 10)
     const allocation: any = {
       topicsCreated: profile.syntheticTopics,
       messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
@@ -3106,13 +3258,17 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
         reduxBlocks: expectedProjected,
         groupCount: expectedVisible,
         displayMessages: expectedVisible,
-        anchorGroupKey: `${finalTopicId}-group`,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedForMandatory.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedForMandatory.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedForMandatory.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: verifiedForMandatory.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedForMandatory.expectedAnchorGroupKey,
+        expectedContext: verifiedForMandatory.expectedContext,
+        contextCount: verifiedForMandatory.contextCount
       },
       productionPath: 'valid partial mandatory ID',
       productionPathComplete: true
@@ -3165,6 +3321,7 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
     const mixedExpectedProjected = c02MixedExpectedProjectedTotal(mixedProfile)
     const { before: heapBefore2, after: heapAfter2 } = makeHeapPair(3_000_000)
     const informativeness2 = classifyEffectiveHeapDeltaInformative(3_000_000, 'precise')
+    const verifiedMixedForMatrix = createC02VerifiedEvidenceForTest(mixedFinalId, 150, 10)
     const mixedAlloc: any = {
       topicsCreated: mixedProfile.topicSpecs.length,
       messagesCreated: c02MixedTotalMessages(mixedProfile),
@@ -3176,13 +3333,17 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
         reduxBlocks: mixedExpectedProjected,
         groupCount: mixedExpectedVisible,
         displayMessages: mixedExpectedVisible,
-        anchorGroupKey: `${mixedFinalId}-anchor`,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedMixedForMatrix.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedMixedForMatrix.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedMixedForMatrix.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: mixedExpectedVisible,
-        globalDisplayMessages: mixedExpectedVisible
+        globalDisplayMessages: mixedExpectedVisible,
+        persistedAnchorGroupKey: verifiedMixedForMatrix.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedMixedForMatrix.expectedAnchorGroupKey,
+        expectedContext: verifiedMixedForMatrix.expectedContext,
+        contextCount: verifiedMixedForMatrix.contextCount
       },
       productionPath: 'mixed valid',
       productionPathComplete: true
@@ -3223,6 +3384,7 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
     const logicalBytes = canonicalBytesForTopics(topics)
     const { before: heapBefore, after: heapAfter } = makeHeapPair(2_500_000)
     const informativeness = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+    const verifiedForSmall50 = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 50, 10)
     const makeAllocation = (inside: boolean | undefined): any => ({
       topicsCreated: profile.syntheticTopics,
       messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
@@ -3234,14 +3396,18 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
         reduxBlocks: c02ExpectedProjectedTotal(profile),
         groupCount: 50,
         displayMessages: 50,
-        anchorGroupKey: 'c02-heap-topic-00-group',
+        anchorGroupKey: c02DomEncodeForTest(verifiedForSmall50.expectedAnchorGroupKey),
         contextBoundaryPresent: true,
         // inside intentionally omitted or set
         ...(inside !== undefined ? { contextBoundaryInsideMessages: inside } : {}),
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: 50,
-        globalDisplayMessages: 50
+        globalDisplayMessages: 50,
+        persistedAnchorGroupKey: verifiedForSmall50.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedForSmall50.expectedAnchorGroupKey,
+        expectedContext: verifiedForSmall50.expectedContext,
+        contextCount: verifiedForSmall50.contextCount
       },
       productionPath: 'test',
       productionPathComplete: true
@@ -3313,10 +3479,14 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
 
   it('simultaneous inside+outside divider rejection: mixed evidence invalidates both whole-topic and partial branches', () => {
     // Whole-topic 20 with no divider valid, but mixed inside+outside must be invalid
+    const _expWhole20 = c02MakeExpectedContextForTest('c02-heap-topic-00', 20, 25)
     const wholeTopicValid = isC02ContextEvidenceValid({
       contextBoundaryPresent: false,
       contextBoundaryInsideMessages: false,
       anchorGroupKey: null,
+      persistedAnchorGroupKey: _expWhole20.anchorGroupKey,
+      expectedAnchorGroupKey: _expWhole20.anchorGroupKey,
+      expectedContext: _expWhole20,
       lastTopicId: 'c02-heap-topic-00',
       expectedVisibleFinal: 20
     })
@@ -3338,13 +3508,17 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
       expectedVisibleFinal: 20
     })
     expect(wholeTopicWithInsideWrongly).toBe(false)
-    // Partial 50 valid case
+    // Partial 60 valid case (30 turns >25 => partial via turn oracle)
+    const _expPartial60 = c02MakeExpectedContextForTest('c02-heap-topic-00', 60, 25)
     const partialValid = isC02ContextEvidenceValid({
       contextBoundaryPresent: true,
       contextBoundaryInsideMessages: true,
-      anchorGroupKey: 'c02-heap-topic-00-group',
+      anchorGroupKey: c02DomEncodeForTest(_expPartial60.anchorGroupKey),
+      persistedAnchorGroupKey: _expPartial60.anchorGroupKey,
+      expectedAnchorGroupKey: _expPartial60.anchorGroupKey,
+      expectedContext: _expPartial60,
       lastTopicId: 'c02-heap-topic-00',
-      expectedVisibleFinal: 50
+      expectedVisibleFinal: 60
     })
     expect(partialValid).toBe(true)
     // Partial with outside encoded as present true inside false -> invalid even though anchor would have been owned
@@ -3353,7 +3527,7 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
       contextBoundaryInsideMessages: false,
       anchorGroupKey: null,
       lastTopicId: 'c02-heap-topic-00',
-      expectedVisibleFinal: 50
+      expectedVisibleFinal: 60
     })
     expect(partialMixedRejected).toBe(false)
     // Also partial with inside true but anchor not owned -> invalid
@@ -3362,7 +3536,7 @@ describe('C-02 harness correctness audit — matrix identity, inside signal type
       contextBoundaryInsideMessages: true,
       anchorGroupKey: 'other-topic-group',
       lastTopicId: 'c02-heap-topic-00',
-      expectedVisibleFinal: 50
+      expectedVisibleFinal: 60
     })
     expect(partialBadAnchor).toBe(false)
     // Matrix builder with mixed inside+outside encoding must yield incomplete
@@ -3442,24 +3616,34 @@ describe('C-02 audit — fail-closed derivation from measured heap, exact DOM/gr
   }
 
   it('isC02ExactTopicOwned is collision-safe: substring prefix does not own', () => {
-    // Exact match
-    expect(isC02ExactTopicOwned('c02-heap-topic-01-group', 'c02-heap-topic-01')).toBe(true)
+    // Strict DOM: plain fallback rejected — encoded only
+    expect(isC02ExactTopicOwned('c02-heap-topic-01-group', 'c02-heap-topic-01')).toBe(false)
+    expect(isC02PersistedTopicOwned('c02-heap-topic-01-group', 'c02-heap-topic-01')).toBe(true)
     expect(
-      isC02ExactTopicOwned('18:c02-heap-topic-01-msg-00000|18:c02-heap-topic-01-msg-00001', 'c02-heap-topic-01')
+      isC02ExactTopicOwned('27:c02-heap-topic-01-msg-00000|27:c02-heap-topic-01-msg-00001', 'c02-heap-topic-01')
+    ).toBe(false)
+    expect(
+      isC02PersistedTopicOwned('27:c02-heap-topic-01-msg-00000|27:c02-heap-topic-01-msg-00001', 'c02-heap-topic-01')
     ).toBe(true)
-    expect(isC02ExactTopicOwned('c02-heap-topic-01', 'c02-heap-topic-01')).toBe(true)
+    expect(isC02ExactTopicOwned('c02-heap-topic-01', 'c02-heap-topic-01')).toBe(false)
+    expect(isC02PersistedTopicOwned('c02-heap-topic-01', 'c02-heap-topic-01')).toBe(true)
     // Collision: topic 01 substring inside 011 must NOT own
     expect(isC02ExactTopicOwned('c02-heap-topic-011-group', 'c02-heap-topic-01')).toBe(false)
+    expect(isC02PersistedTopicOwned('c02-heap-topic-011-group', 'c02-heap-topic-01')).toBe(false)
     expect(isC02ExactTopicOwned('18:c02-heap-topic-011-msg-00000', 'c02-heap-topic-01')).toBe(false)
+    expect(isC02PersistedTopicOwned('18:c02-heap-topic-011-msg-00000', 'c02-heap-topic-01')).toBe(false)
     expect(isC02ExactTopicOwned('c02-heap-topic-011', 'c02-heap-topic-01')).toBe(false)
+    expect(isC02PersistedTopicOwned('c02-heap-topic-011', 'c02-heap-topic-01')).toBe(false)
     // Different prefix
     expect(isC02ExactTopicOwned('c02-c02-small-v1-topic-00-group', 'c02-heap-topic-00')).toBe(false)
     // Null / empty
     expect(isC02ExactTopicOwned(null, 'c02-heap-topic-01')).toBe(false)
+    expect(isC02PersistedTopicOwned(null, 'c02-heap-topic-01')).toBe(false)
     expect(isC02ExactTopicOwned('', 'c02-heap-topic-01')).toBe(false)
     expect(isC02ExactTopicOwned('c02-heap-topic-01-group', '')).toBe(false)
     // Ensure before boundary: topic inside longer alphanumeric without separator is not owned
     expect(isC02ExactTopicOwned('xc02-heap-topic-01-group', 'c02-heap-topic-01')).toBe(false)
+    expect(isC02PersistedTopicOwned('xc02-heap-topic-01-group', 'c02-heap-topic-01')).toBe(false)
   })
 
   it('deriveEffectiveHeapInformative is pure: measured delta + precision only, caller boolean cannot override', () => {
@@ -3745,11 +3929,19 @@ describe('C-02 audit — fail-closed derivation from measured heap, exact DOM/gr
     expect(resultCollision.gates.find((g) => g.id === 'projection.contextBoundaryExplicit')?.passed).toBe(false)
     expect(resultCollision.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(0)
     expect(resultCollision.gates.find((g) => g.id === 'calibration.complete')?.passed).toBe(false)
-    // Exact anchor must still pass
-    const exactAnchor = 'c02-heap-topic-00-group'
+    // Exact anchor must still pass — use verified canonical anchor, encoded for DOM
+    const verifiedForExact = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 50, 10)
+    const exactAnchor = verifiedForExact.expectedAnchorGroupKey!
     const allocExact: any = {
       ...allocCollision,
-      projectionStats: { ...allocCollision.projectionStats, anchorGroupKey: exactAnchor }
+      projectionStats: {
+        ...allocCollision.projectionStats,
+        anchorGroupKey: c02DomEncodeForTest(exactAnchor),
+        persistedAnchorGroupKey: exactAnchor,
+        expectedAnchorGroupKey: exactAnchor,
+        expectedContext: verifiedForExact.expectedContext,
+        contextCount: verifiedForExact.contextCount
+      }
     }
     const resultExact = buildC02BenchmarkResult(
       makeTestEnvironment(),
@@ -3778,6 +3970,7 @@ describe('C-02 audit — fail-closed derivation from measured heap, exact DOM/gr
 
     // Heap zero with caller true -> incomplete, ratio 0
     const zeroHeap = makeHeapPair(0)
+    const verifiedForHeap = createC02VerifiedEvidenceForTest('c02-mixed-topic-03', 150, 10)
     const allocValidForHeap: any = {
       topicsCreated: profile.topicSpecs.length,
       messagesCreated: c02MixedTotalMessages(profile),
@@ -3789,13 +3982,17 @@ describe('C-02 audit — fail-closed derivation from measured heap, exact DOM/gr
         reduxBlocks: expectedProjected,
         groupCount: expectedVisible,
         displayMessages: expectedVisible,
-        anchorGroupKey: `c02-mixed-topic-03-group`,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedForHeap.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedForHeap.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedForHeap.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: verifiedForHeap.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedForHeap.expectedAnchorGroupKey,
+        expectedContext: verifiedForHeap.expectedContext,
+        contextCount: verifiedForHeap.contextCount
       },
       productionPath: 'valid',
       productionPathComplete: true
@@ -3914,6 +4111,7 @@ describe('C-02 audit — fail-closed derivation from measured heap, exact DOM/gr
     const heapValid = makeHeapPair(2500)
     const heapZero = makeHeapPair(0)
     const callerTrue = { informative: true, reason: 'caller true lie' }
+    const verifiedUniformForMatrix = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 50, 10)
     const validUniformAlloc: any = {
       topicsCreated: uniformProfile.syntheticTopics,
       messagesCreated: uniformProfile.syntheticTopics * uniformProfile.syntheticMessagesPerTopic,
@@ -3925,17 +4123,22 @@ describe('C-02 audit — fail-closed derivation from measured heap, exact DOM/gr
         reduxBlocks: c02ExpectedProjectedTotal(uniformProfile),
         groupCount: expectedUniformVisible,
         displayMessages: expectedUniformVisible,
-        anchorGroupKey: `c02-heap-topic-00-group`,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedUniformForMatrix.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedUniformForMatrix.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedUniformForMatrix.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedUniformVisible,
-        globalDisplayMessages: expectedUniformVisible
+        globalDisplayMessages: expectedUniformVisible,
+        persistedAnchorGroupKey: verifiedUniformForMatrix.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedUniformForMatrix.expectedAnchorGroupKey,
+        expectedContext: verifiedUniformForMatrix.expectedContext,
+        contextCount: verifiedUniformForMatrix.contextCount
       },
       productionPath: 'valid uniform',
       productionPathComplete: true
     }
+    const verifiedMixedForMatrixZero = createC02VerifiedEvidenceForTest('c02-mixed-topic-03', 150, 10)
     const zeroMixedAlloc: any = {
       topicsCreated: mixedProfile.topicSpecs.length,
       messagesCreated: c02MixedTotalMessages(mixedProfile),
@@ -3947,13 +4150,17 @@ describe('C-02 audit — fail-closed derivation from measured heap, exact DOM/gr
         reduxBlocks: c02MixedExpectedProjectedTotal(mixedProfile),
         groupCount: expectedMixedVisible,
         displayMessages: expectedMixedVisible,
-        anchorGroupKey: `c02-mixed-topic-03-group`,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedMixedForMatrixZero.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedMixedForMatrixZero.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedMixedForMatrixZero.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedMixedVisible,
-        globalDisplayMessages: expectedMixedVisible
+        globalDisplayMessages: expectedMixedVisible,
+        persistedAnchorGroupKey: verifiedMixedForMatrixZero.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedMixedForMatrixZero.expectedAnchorGroupKey,
+        expectedContext: verifiedMixedForMatrixZero.expectedContext,
+        contextCount: verifiedMixedForMatrixZero.contextCount
       },
       productionPath: 'valid mixed but heap zero',
       productionPathComplete: true
@@ -4043,6 +4250,7 @@ describe('C-02 audit — fail-closed derivation from measured heap, exact DOM/gr
 
     // Valid matrix both entries pass
     const heapMixedValid = makeHeapPair(3000)
+    const verifiedForMixed2 = createC02VerifiedEvidenceForTest('c02-mixed-topic-03', 150, 10)
     const validMixedAlloc2: any = {
       topicsCreated: mixedProfile.topicSpecs.length,
       messagesCreated: c02MixedTotalMessages(mixedProfile),
@@ -4054,13 +4262,17 @@ describe('C-02 audit — fail-closed derivation from measured heap, exact DOM/gr
         reduxBlocks: c02MixedExpectedProjectedTotal(mixedProfile),
         groupCount: expectedMixedVisible,
         displayMessages: expectedMixedVisible,
-        anchorGroupKey: `c02-mixed-topic-03-group`,
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedForMixed2.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedForMixed2.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedForMixed2.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedMixedVisible,
-        globalDisplayMessages: expectedMixedVisible
+        globalDisplayMessages: expectedMixedVisible,
+        persistedAnchorGroupKey: verifiedForMixed2.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedForMixed2.expectedAnchorGroupKey,
+        expectedContext: verifiedForMixed2.expectedContext,
+        contextCount: verifiedForMixed2.contextCount
       },
       productionPath: 'valid mixed 2',
       productionPathComplete: true
@@ -4133,6 +4345,7 @@ describe('C02 global display count mandatory — fail-closed completeness across
     const expectedVisible = c02ExpectedVisibleCount(profile)
     const heap = makeHeapPair(2500)
     const info = { informative: true, reason: 'x' }
+    const verifiedForGlobalUniform2 = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 50, 10)
     const baseAllocation = {
       topicsCreated: profile.syntheticTopics,
       messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
@@ -4144,13 +4357,17 @@ describe('C02 global display count mandatory — fail-closed completeness across
         reduxBlocks: c02ExpectedProjectedTotal(profile),
         groupCount: expectedVisible,
         displayMessages: expectedVisible,
-        anchorGroupKey: 'c02-heap-topic-00-group',
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedForGlobalUniform2.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedForGlobalUniform2.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedForGlobalUniform2.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: verifiedForGlobalUniform2.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedForGlobalUniform2.expectedAnchorGroupKey,
+        expectedContext: verifiedForGlobalUniform2.expectedContext,
+        contextCount: verifiedForGlobalUniform2.contextCount
       },
       productionPath: 'valid partial',
       productionPathComplete: true
@@ -4206,6 +4423,7 @@ describe('C02 global display count mandatory — fail-closed completeness across
     const expectedProjected = c02MixedExpectedProjectedTotal(profile)
     const heap = makeHeapPair(3000)
     const info = { informative: true, reason: 'x' }
+    const verifiedForGlobalMixed2 = createC02VerifiedEvidenceForTest('c02-mixed-topic-03', 150, 10)
     const baseAllocation = {
       topicsCreated: profile.topicSpecs.length,
       messagesCreated: c02MixedTotalMessages(profile),
@@ -4217,13 +4435,17 @@ describe('C02 global display count mandatory — fail-closed completeness across
         reduxBlocks: expectedProjected,
         groupCount: expectedVisible,
         displayMessages: expectedVisible,
-        anchorGroupKey: 'c02-mixed-topic-03-group',
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedForGlobalMixed2.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedForGlobalMixed2.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedForGlobalMixed2.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: verifiedForGlobalMixed2.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedForGlobalMixed2.expectedAnchorGroupKey,
+        expectedContext: verifiedForGlobalMixed2.expectedContext,
+        contextCount: verifiedForGlobalMixed2.contextCount
       },
       productionPath: 'valid mixed',
       productionPathComplete: true
@@ -4277,6 +4499,7 @@ describe('C02 global display count mandatory — fail-closed completeness across
     )
     const heapValid = makeHeapPair(2500)
     const info = { informative: true, reason: 'x' }
+    const verifiedForGlobalMatrixUniform = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 50, 10)
     const validUniformAlloc: any = {
       topicsCreated: uniformProfile.syntheticTopics,
       messagesCreated: uniformProfile.syntheticTopics * uniformProfile.syntheticMessagesPerTopic,
@@ -4288,17 +4511,22 @@ describe('C02 global display count mandatory — fail-closed completeness across
         reduxBlocks: c02ExpectedProjectedTotal(uniformProfile),
         groupCount: uniformVisible,
         displayMessages: uniformVisible,
-        anchorGroupKey: 'c02-heap-topic-00-group',
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedForGlobalMatrixUniform.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedForGlobalMatrixUniform.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedForGlobalMatrixUniform.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: uniformVisible,
-        globalDisplayMessages: uniformVisible
+        globalDisplayMessages: uniformVisible,
+        persistedAnchorGroupKey: verifiedForGlobalMatrixUniform.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedForGlobalMatrixUniform.expectedAnchorGroupKey,
+        expectedContext: verifiedForGlobalMatrixUniform.expectedContext,
+        contextCount: verifiedForGlobalMatrixUniform.contextCount
       },
       productionPath: 'valid uniform',
       productionPathComplete: true
     }
+    const verifiedForGlobalMatrixMixed = createC02VerifiedEvidenceForTest('c02-mixed-topic-03', 150, 10)
     const validMixedAlloc: any = {
       topicsCreated: mixedProfile.topicSpecs.length,
       messagesCreated: c02MixedTotalMessages(mixedProfile),
@@ -4310,13 +4538,17 @@ describe('C02 global display count mandatory — fail-closed completeness across
         reduxBlocks: c02MixedExpectedProjectedTotal(mixedProfile),
         groupCount: mixedVisible,
         displayMessages: mixedVisible,
-        anchorGroupKey: 'c02-mixed-topic-03-group',
-        contextBoundaryPresent: true,
-        contextBoundaryInsideMessages: true,
+        anchorGroupKey: c02DomEncodeForTest(verifiedForGlobalMatrixMixed.expectedAnchorGroupKey),
+        contextBoundaryPresent: verifiedForGlobalMatrixMixed.expectedContext.boundaryPresent,
+        contextBoundaryInsideMessages: verifiedForGlobalMatrixMixed.expectedContext.boundaryPresent,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: mixedVisible,
-        globalDisplayMessages: mixedVisible
+        globalDisplayMessages: mixedVisible,
+        persistedAnchorGroupKey: verifiedForGlobalMatrixMixed.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedForGlobalMatrixMixed.expectedAnchorGroupKey,
+        expectedContext: verifiedForGlobalMatrixMixed.expectedContext,
+        contextCount: verifiedForGlobalMatrixMixed.contextCount
       },
       productionPath: 'valid mixed',
       productionPathComplete: true
@@ -4417,5 +4649,1038 @@ describe('C02 global display count mandatory — fail-closed completeness across
       }
     ])
     expect(bothValid.gates.find((g) => g.id === 'calibration.matrix.complete')?.passed).toBe(true)
+  })
+
+  // New fail-closed tests: no synthetic fallback, missing/mismatched proof must yield incomplete
+  describe('C02 fail-closed — missing/mismatched persisted anchor and missing expected context cannot complete', () => {
+    function makeEnv(): BenchmarkResult['environment'] {
+      return {
+        timestamp: new Date().toISOString(),
+        node: 'v24.11.1',
+        pnpm: '10.27.0',
+        abiLane: 'electron' as const,
+        abi: '145',
+        command: 'pnpm test:e2e',
+        git: { commit: 'abc123def456abc123def456abc123def456abcd', dirty: false }
+      }
+    }
+    function makeHeap() {
+      const before: RendererHeapSample = {
+        method: RENDERER_HEAP_METHOD,
+        usedJSHeapSize: 20_000_000,
+        totalJSHeapSize: 80_000_000,
+        jsHeapSizeLimit: 2_000_000_000
+      }
+      const after: RendererHeapSample = {
+        method: RENDERER_HEAP_METHOD,
+        usedJSHeapSize: 22_500_000,
+        totalJSHeapSize: 80_000_000,
+        jsHeapSizeLimit: 2_000_000_000
+      }
+      return { before, after }
+    }
+
+    it('uniform: missing persistedAnchorGroupKey yields incomplete (fail-closed, no fallback)', () => {
+      const profile = C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.default]!
+      const topics = buildC02SyntheticTopics(profile)
+      const lb = canonicalBytesForTopics(topics)
+      const { before, after } = makeHeap()
+      const info = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+      const expectedVisible = c02ExpectedVisibleCount(profile)
+      const verified = createC02VerifiedEvidenceForTest('c02-heap-topic-01', 100, 10)
+      // Intentionally omit persistedAnchorGroupKey
+      const alloc: any = {
+        topicsCreated: profile.syntheticTopics,
+        messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        blocksCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: c02ExpectedProjectedTotal(profile),
+          reduxBlocks: c02ExpectedProjectedTotal(profile),
+          groupCount: expectedVisible,
+          displayMessages: expectedVisible,
+          anchorGroupKey: c02DomEncodeForTest(verified.expectedAnchorGroupKey),
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          finalTopicDomProof: true,
+          groupExactMatched: true,
+          groupsWithFinalTopic: expectedVisible,
+          globalDisplayMessages: expectedVisible,
+          // missing persistedAnchorGroupKey
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
+          contextCount: verified.contextCount
+        },
+        productionPath: 'missing persisted',
+        productionPathComplete: true
+      }
+      delete alloc.projectionStats.persistedAnchorGroupKey
+      const result = buildC02BenchmarkResult(makeEnv(), profile, lb, lb, before, after, alloc, info, 'precise')
+      expect(result.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(0)
+      expect(result.gates.find((g) => g.id === 'calibration.complete')?.passed).toBe(false)
+      expect(result.metrics.find((m) => m.id === 'projection.productionPathComplete')?.value).toBe(0)
+    })
+
+    it('uniform: mismatched persisted vs expected anchor yields incomplete', () => {
+      const profile = C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.default]!
+      const topics = buildC02SyntheticTopics(profile)
+      const lb = canonicalBytesForTopics(topics)
+      const { before, after } = makeHeap()
+      const info = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+      const expectedVisible = c02ExpectedVisibleCount(profile)
+      const verified = createC02VerifiedEvidenceForTest('c02-heap-topic-01', 100, 10)
+      const mismatchedPersisted = 'c02-heap-topic-01-mismatched-anchor'
+      const alloc: any = {
+        topicsCreated: profile.syntheticTopics,
+        messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        blocksCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: c02ExpectedProjectedTotal(profile),
+          reduxBlocks: c02ExpectedProjectedTotal(profile),
+          groupCount: expectedVisible,
+          displayMessages: expectedVisible,
+          anchorGroupKey: c02DomEncodeForTest(verified.expectedAnchorGroupKey),
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          finalTopicDomProof: true,
+          groupExactMatched: true,
+          groupsWithFinalTopic: expectedVisible,
+          globalDisplayMessages: expectedVisible,
+          persistedAnchorGroupKey: mismatchedPersisted,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
+          contextCount: verified.contextCount
+        },
+        productionPath: 'mismatched persisted',
+        productionPathComplete: true
+      }
+      const result = buildC02BenchmarkResult(makeEnv(), profile, lb, lb, before, after, alloc, info, 'precise')
+      expect(result.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(0)
+      expect(result.gates.find((g) => g.id === 'calibration.complete')?.passed).toBe(false)
+    })
+
+    it('uniform: missing expectedContext yields incomplete', () => {
+      const profile = C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.default]!
+      const topics = buildC02SyntheticTopics(profile)
+      const lb = canonicalBytesForTopics(topics)
+      const { before, after } = makeHeap()
+      const info = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+      const expectedVisible = c02ExpectedVisibleCount(profile)
+      const verified = createC02VerifiedEvidenceForTest('c02-heap-topic-01', 100, 10)
+      const alloc: any = {
+        topicsCreated: profile.syntheticTopics,
+        messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        blocksCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: c02ExpectedProjectedTotal(profile),
+          reduxBlocks: c02ExpectedProjectedTotal(profile),
+          groupCount: expectedVisible,
+          displayMessages: expectedVisible,
+          anchorGroupKey: c02DomEncodeForTest(verified.expectedAnchorGroupKey),
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          finalTopicDomProof: true,
+          groupExactMatched: true,
+          groupsWithFinalTopic: expectedVisible,
+          globalDisplayMessages: expectedVisible,
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: null as any,
+          contextCount: verified.contextCount
+        },
+        productionPath: 'missing expectedContext',
+        productionPathComplete: true
+      }
+      const result = buildC02BenchmarkResult(makeEnv(), profile, lb, lb, before, after, alloc, info, 'precise')
+      expect(result.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(0)
+      expect(result.gates.find((g) => g.id === 'calibration.complete')?.passed).toBe(false)
+    })
+
+    it('uniform: valid whole-topic anchor is non-null and no divider is accepted (turn oracle)', () => {
+      const profile = {
+        syntheticTopics: 1,
+        syntheticMessagesPerTopic: 20,
+        blockContentBytes: 512,
+        segmentCountPerTopic: 0,
+        applicabilityGeneration: 0
+      } as any
+      const topics = buildC02SyntheticTopics(profile)
+      const lb = canonicalBytesForTopics(topics)
+      const { before, after } = makeHeap()
+      const info = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+      const expectedVisible = c02ExpectedVisibleCount(profile as any)
+      expect(expectedVisible).toBe(20)
+      const verified = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 20, 25)
+      expect(verified.expectedContext.isWholeTopic).toBe(true)
+      expect(verified.persistedAnchorGroupKey).not.toBeNull()
+      const alloc: any = {
+        topicsCreated: 1,
+        messagesCreated: 20,
+        blocksCreated: 20,
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: expectedVisible,
+          reduxBlocks: expectedVisible,
+          groupCount: expectedVisible,
+          displayMessages: expectedVisible,
+          anchorGroupKey: null,
+          contextBoundaryPresent: false,
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: true,
+          groupExactMatched: true,
+          groupsWithFinalTopic: expectedVisible,
+          globalDisplayMessages: expectedVisible,
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
+          contextCount: verified.contextCount
+        },
+        productionPath: 'valid whole-topic via turn oracle',
+        productionPathComplete: true
+      }
+      const result = buildC02BenchmarkResult(makeEnv(), profile as any, lb, lb, before, after, alloc, info, 'precise')
+      expect(result.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(1)
+      expect(result.gates.find((g) => g.id === 'calibration.complete')?.passed).toBe(true)
+      expect(result.metrics.find((m) => m.id === 'projection.productionPathComplete')?.value).toBe(1)
+    })
+
+    it('mixed and multi: missing proof also fail-closed', () => {
+      const mixedProfile = C02_MIXED_HEAP_PROFILES[C02_MIXED_HEAP_PROFILE_IDS.balanced]!
+      const topics = buildC02MixedSyntheticTopics(mixedProfile)
+      const lb = canonicalBytesForTopics(topics)
+      const { before, after } = makeHeap()
+      const info = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+      const expectedVisible = c02MixedExpectedVisibleCountForSpec(
+        mixedProfile.topicSpecs[mixedProfile.topicSpecs.length - 1]!
+      )
+      const verified = createC02VerifiedEvidenceForTest('c02-mixed-topic-03', 150, 10)
+      const allocMixed: any = {
+        topicsCreated: mixedProfile.topicSpecs.length,
+        messagesCreated: c02MixedTotalMessages(mixedProfile),
+        blocksCreated: c02MixedTotalMessages(mixedProfile),
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: c02MixedExpectedProjectedTotal(mixedProfile),
+          reduxBlocks: c02MixedExpectedProjectedTotal(mixedProfile),
+          groupCount: expectedVisible,
+          displayMessages: expectedVisible,
+          anchorGroupKey: c02DomEncodeForTest(verified.expectedAnchorGroupKey),
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          finalTopicDomProof: true,
+          groupExactMatched: true,
+          groupsWithFinalTopic: expectedVisible,
+          globalDisplayMessages: expectedVisible,
+          // missing persisted
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
+          contextCount: verified.contextCount
+        },
+        productionPath: 'mixed missing persisted',
+        productionPathComplete: true
+      }
+      delete allocMixed.projectionStats.persistedAnchorGroupKey
+      const resultMixed = buildC02MixedBenchmarkResult(
+        makeEnv(),
+        mixedProfile,
+        lb,
+        lb,
+        before,
+        after,
+        allocMixed,
+        info,
+        'precise'
+      )
+      expect(resultMixed.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(0)
+
+      const uniformProfile = C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.small]!
+      const uTopics = buildC02SyntheticTopics(uniformProfile)
+      const uLb = canonicalBytesForTopics(uTopics)
+      const verU = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 50, 10)
+      const allocU: any = {
+        topicsCreated: 1,
+        messagesCreated: 50,
+        blocksCreated: 50,
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: 50,
+          reduxBlocks: 50,
+          groupCount: 50,
+          displayMessages: 50,
+          anchorGroupKey: verU.expectedAnchorGroupKey,
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          finalTopicDomProof: true,
+          groupExactMatched: true,
+          groupsWithFinalTopic: 50,
+          globalDisplayMessages: 50,
+          persistedAnchorGroupKey: verU.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verU.expectedAnchorGroupKey,
+          expectedContext: null as any,
+          contextCount: 10
+        },
+        productionPath: 'uniform missing expectedContext',
+        productionPathComplete: true
+      }
+      const multiResult = buildC02MultiBenchmarkResult(makeEnv(), [
+        {
+          profileId: C02_HEAP_PROFILE_IDS.small,
+          profile: uniformProfile,
+          logicalBytes: uLb,
+          rendererLogicalBytes: uLb,
+          heapBefore: before,
+          heapAfter: after,
+          allocation: allocU,
+          informativeness: info,
+          precision: 'precise',
+          finalTopicId: 'c02-heap-topic-00'
+        }
+      ])
+      expect(multiResult.metrics.find((m) => m.id === 'c02_small_v1.calibration.complete')?.value).toBe(0)
+    })
+  })
+
+  // LOCK-001/002 additional proof-contract tests — exact canonical anchor, no fallback, no inferred 25, no path leakage
+  describe('C02 LOCK-001/002 — exact anchor identity, no fallback, no inferred contextCount, path-safe', () => {
+    function makeEnv(): BenchmarkResult['environment'] {
+      return {
+        timestamp: new Date().toISOString(),
+        node: 'v24.11.1',
+        pnpm: '10.27.0',
+        abiLane: 'electron' as const,
+        abi: '145',
+        command: 'pnpm test:e2e',
+        git: { commit: 'abc123def456abc123def456abc123def456abcd', dirty: false }
+      }
+    }
+    function makeHeap() {
+      const before: RendererHeapSample = {
+        method: RENDERER_HEAP_METHOD,
+        usedJSHeapSize: 20_000_000,
+        totalJSHeapSize: 80_000_000,
+        jsHeapSizeLimit: 2_000_000_000
+      }
+      const after: RendererHeapSample = {
+        method: RENDERER_HEAP_METHOD,
+        usedJSHeapSize: 22_500_000,
+        totalJSHeapSize: 80_000_000,
+        jsHeapSizeLimit: 2_000_000_000
+      }
+      return { before, after }
+    }
+
+    it('omitted expectedAnchorGroupKey fails closed (LOCK-001 no fallback)', () => {
+      const lastTopicId = 'c02-heap-topic-01'
+      const exp = c02MakeExpectedContextForTest(lastTopicId, 60, 10)
+      expect(
+        isC02ContextEvidenceValid({
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          anchorGroupKey: exp.anchorGroupKey,
+          persistedAnchorGroupKey: exp.anchorGroupKey,
+          // expectedAnchorGroupKey omitted
+          expectedContext: exp,
+          lastTopicId,
+          expectedVisibleFinal: 60
+        } as any)
+      ).toBe(false)
+      // Builder also fails when expectedAnchorGroupKey omitted
+      const profile = C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.default]!
+      const topics = buildC02SyntheticTopics(profile)
+      const lb = canonicalBytesForTopics(topics)
+      const { before, after } = makeHeap()
+      const info = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+      const expectedVisible = c02ExpectedVisibleCount(profile)
+      const verified = createC02VerifiedEvidenceForTest(lastTopicId, 100, 10)
+      const alloc: any = {
+        topicsCreated: profile.syntheticTopics,
+        messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        blocksCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: c02ExpectedProjectedTotal(profile),
+          reduxBlocks: c02ExpectedProjectedTotal(profile),
+          groupCount: expectedVisible,
+          displayMessages: expectedVisible,
+          anchorGroupKey: c02DomEncodeForTest(verified.expectedAnchorGroupKey),
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          finalTopicDomProof: true,
+          groupExactMatched: true,
+          groupsWithFinalTopic: expectedVisible,
+          globalDisplayMessages: expectedVisible,
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          // expectedAnchorGroupKey omitted
+          expectedContext: verified.expectedContext,
+          contextCount: verified.contextCount
+        },
+        productionPath: 'omitted expectedAnchor',
+        productionPathComplete: true
+      }
+      delete alloc.projectionStats.expectedAnchorGroupKey
+      const result = buildC02BenchmarkResult(makeEnv(), profile, lb, lb, before, after, alloc, info, 'precise')
+      expect(result.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(0)
+    })
+
+    it('mismatched expectedAnchorGroupKey vs expectedContext.anchorGroupKey fails closed (LOCK-001)', () => {
+      const lastTopicId = 'c02-heap-topic-01'
+      const exp = c02MakeExpectedContextForTest(lastTopicId, 60, 10)
+      const mismatched = `${lastTopicId}-turn-99`
+      expect(
+        isC02ContextEvidenceValid({
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          anchorGroupKey: mismatched,
+          persistedAnchorGroupKey: mismatched,
+          expectedAnchorGroupKey: mismatched,
+          expectedContext: exp, // exp.anchorGroupKey !== mismatched
+          lastTopicId,
+          expectedVisibleFinal: 60
+        })
+      ).toBe(false)
+      // isC02ExactAnchorIdentity must be false for mismatched even if substring includes
+      expect(isC02ExactAnchorIdentity(mismatched, exp.anchorGroupKey)).toBe(false)
+    })
+
+    it('omitted/mismatched contextCount fails closed (LOCK-001 no inferred 25)', () => {
+      const lastTopicId = 'c02-heap-topic-01'
+      const expValid = c02MakeExpectedContextForTest(lastTopicId, 60, 10)
+      // Omitted contextCount (undefined) in expectedContext
+      const expMissing = { ...expValid, contextCount: undefined as unknown as number | null }
+      expect(
+        isC02ContextEvidenceValid({
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          anchorGroupKey: expValid.anchorGroupKey,
+          persistedAnchorGroupKey: expValid.anchorGroupKey,
+          expectedAnchorGroupKey: expValid.anchorGroupKey,
+          expectedContext: expMissing as any,
+          lastTopicId,
+          expectedVisibleFinal: 60
+        })
+      ).toBe(false)
+      // Mismatched actual contextCount vs expectedContext.contextCount
+      const profile = C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.default]!
+      const topics = buildC02SyntheticTopics(profile)
+      const lb = canonicalBytesForTopics(topics)
+      const { before, after } = makeHeap()
+      const info = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+      const expectedVisible = c02ExpectedVisibleCount(profile)
+      const verified = createC02VerifiedEvidenceForTest(lastTopicId, 100, 10)
+      const allocMismatch: any = {
+        topicsCreated: profile.syntheticTopics,
+        messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        blocksCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: c02ExpectedProjectedTotal(profile),
+          reduxBlocks: c02ExpectedProjectedTotal(profile),
+          groupCount: expectedVisible,
+          displayMessages: expectedVisible,
+          anchorGroupKey: c02DomEncodeForTest(verified.expectedAnchorGroupKey),
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          finalTopicDomProof: true,
+          groupExactMatched: true,
+          groupsWithFinalTopic: expectedVisible,
+          globalDisplayMessages: expectedVisible,
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
+          contextCount: 999 // mismatched vs expectedContext.contextCount (10)
+        },
+        productionPath: 'mismatched contextCount',
+        productionPathComplete: true
+      }
+      const result = buildC02BenchmarkResult(makeEnv(), profile, lb, lb, before, after, allocMismatch, info, 'precise')
+      expect(result.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(0)
+      expect(result.gates.find((g) => g.id === 'projection.contextBoundaryExplicit')?.passed).toBe(false)
+    })
+
+    it('non-exact partial DOM anchor fails closed even if substring includes and owned (LOCK-002)', () => {
+      const lastTopicId = 'c02-heap-topic-01'
+      const exp = c02MakeExpectedContextForTest(lastTopicId, 60, 10)
+      // expected anchor is e.g. c02-heap-topic-01-turn-05, create dom anchor that includes it as substring but with extra alphanumeric boundary (not exact token)
+      const exactAnchor = exp.anchorGroupKey!
+      const nonExactDomAnchor = `${exactAnchor}X` // extra X without boundary -> not exact
+      expect(nonExactDomAnchor.includes(exactAnchor)).toBe(true)
+      expect(isC02ExactAnchorIdentity(nonExactDomAnchor, exactAnchor)).toBe(false)
+      expect(isC02ExactTopicOwned(nonExactDomAnchor, lastTopicId)).toBe(false) // strict DOM rejects plain
+      expect(isC02PersistedTopicOwned(nonExactDomAnchor, lastTopicId)).toBe(true) // persisted plain still owned, but DOM identity fails
+      expect(
+        isC02ContextEvidenceValid({
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          anchorGroupKey: nonExactDomAnchor,
+          persistedAnchorGroupKey: exactAnchor,
+          expectedAnchorGroupKey: exactAnchor,
+          expectedContext: exp,
+          lastTopicId,
+          expectedVisibleFinal: 60
+        })
+      ).toBe(false)
+      // Encoded stable group id composite containing expected token must FAIL (LOCK-002) — singleton required, composite not exact
+      const encodedExactComposite = `18:${exactAnchor}|20:other`
+      expect(isC02ExactAnchorIdentity(encodedExactComposite, exactAnchor)).toBe(false)
+      expect(
+        isC02ContextEvidenceValid({
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          anchorGroupKey: encodedExactComposite,
+          persistedAnchorGroupKey: exactAnchor,
+          expectedAnchorGroupKey: exactAnchor,
+          expectedContext: exp,
+          lastTopicId,
+          expectedVisibleFinal: 60
+        })
+      ).toBe(false)
+      // Singleton encoded exact must pass
+      const encodedSingleton = `${exactAnchor.length}:${exactAnchor}`
+      expect(isC02ExactAnchorIdentity(encodedSingleton, exactAnchor)).toBe(true)
+      expect(
+        isC02ContextEvidenceValid({
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          anchorGroupKey: encodedSingleton,
+          persistedAnchorGroupKey: exactAnchor,
+          expectedAnchorGroupKey: exactAnchor,
+          expectedContext: exp,
+          lastTopicId,
+          expectedVisibleFinal: 60
+        })
+      ).toBe(true)
+      // Strict decoder must reject malformed/sentinel/trailing/length-mismatch (LOCK-002)
+      expect(c02StrictDecodeStableGroupId('group:empty')).toBeNull()
+      expect(c02StrictDecodeStableGroupId('')).toBeNull()
+      expect(c02StrictDecodeStableGroupId(null)).toBeNull()
+      expect(c02StrictDecodeStableGroupId('5:hello|')).toBeNull() // trailing
+      expect(c02StrictDecodeStableGroupId('|5:hello')).toBeNull() // leading
+      expect(c02StrictDecodeStableGroupId('5:hello||5:world')).toBeNull() // double
+      expect(c02StrictDecodeStableGroupId('5hello')).toBeNull() // missing colon
+      expect(c02StrictDecodeStableGroupId('xx:hello')).toBeNull() // non-decimal
+      expect(c02StrictDecodeStableGroupId('01:hello')).toBeNull() // leading zero
+      expect(c02StrictDecodeStableGroupId('5:hell')).toBeNull() // length mismatch short
+      expect(c02StrictDecodeStableGroupId('3:hello')).toBeNull() // length mismatch long
+      expect(c02StrictDecodeStableGroupId('3:a:b')).not.toBeNull() // ID contains colon, valid via length prefix
+      expect(c02StrictDecodeStableGroupId('3:a|b')).not.toBeNull() // ID contains pipe, valid
+      expect(c02StrictDecodeStableGroupId('1:a|1:b')).toEqual(['a', 'b'])
+      expect(c02DecodeCanonicalDomAnchor('1:a|1:b')).toBeNull() // composite not singleton
+      expect(c02DecodeCanonicalDomAnchor('1:a')).toBe('a')
+      expect(c02DecodeCanonicalDomAnchor('3:foo')).toBe('foo')
+      expect(c02DecodeCanonicalDomAnchor('group:empty')).toBeNull()
+      // Topic ownership via strict decoded prefix
+      expect(c02StrictDecodeStableGroupId('5:hello')?.[0]).toBe('hello')
+      // Non-exact encoded with extra alphanumeric should fail
+      const encodedNonExact = `18:${exactAnchor}X|20:other`
+      expect(isC02ExactAnchorIdentity(encodedNonExact, exactAnchor)).toBe(false)
+      expect(
+        isC02ContextEvidenceValid({
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          anchorGroupKey: encodedNonExact,
+          persistedAnchorGroupKey: exactAnchor,
+          expectedAnchorGroupKey: exactAnchor,
+          expectedContext: exp,
+          lastTopicId,
+          expectedVisibleFinal: 60
+        })
+      ).toBe(false)
+    })
+
+    it('no absolute disposable profile/root paths in artifact diagnostics (LOCK-004) — test-only helper proof', () => {
+      const profile = C02_HEAP_PROFILES[C02_HEAP_PROFILE_IDS.small]!
+      const topics = buildC02SyntheticTopics(profile)
+      const lb = canonicalBytesForTopics(topics)
+      const { before, after } = makeHeap()
+      const info = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+      const expectedVisible = c02ExpectedVisibleCount(profile)
+      const verified = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 50, 10)
+      const alloc: any = {
+        topicsCreated: profile.syntheticTopics,
+        messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        blocksCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: c02ExpectedProjectedTotal(profile),
+          reduxBlocks: c02ExpectedProjectedTotal(profile),
+          groupCount: expectedVisible,
+          displayMessages: expectedVisible,
+          anchorGroupKey: c02DomEncodeForTest(verified.expectedAnchorGroupKey),
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          finalTopicDomProof: true,
+          groupExactMatched: true,
+          groupsWithFinalTopic: expectedVisible,
+          globalDisplayMessages: expectedVisible,
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
+          contextCount: verified.contextCount
+        },
+        productionPath: `test path /tmp/disposable-${Date.now()} should not leak but artifact must not contain it`,
+        productionPathComplete: true
+      }
+      const result = buildC02BenchmarkResult(makeEnv(), profile, lb, lb, before, after, alloc, info, 'precise')
+      const json = JSON.stringify(result)
+      expect(json).not.toContain('/tmp')
+      expect(json).not.toContain('disposable')
+      expect(json).not.toContain('SENTINEL')
+      // Also ensure gate details use safe labels, not raw paths
+      for (const g of result.gates) {
+        expect(g.detail).not.toContain('/tmp')
+        expect(g.detail).not.toContain('/var/folders')
+      }
+    })
+
+    it('test-only Auto helpers remain test-only and do not weaken production builder (builder fails without Auto)', () => {
+      // Use whole-topic profile (20 msgs, 10 turns <=25) where no divider is valid
+      const profile: any = {
+        syntheticTopics: 1,
+        syntheticMessagesPerTopic: 20,
+        blockContentBytes: 512,
+        segmentCountPerTopic: 0,
+        applicabilityGeneration: 0
+      }
+      const topics = buildC02SyntheticTopics(profile)
+      const lb = canonicalBytesForTopics(topics)
+      const { before, after } = makeHeap()
+      const info = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+      const expectedVisible = c02ExpectedVisibleCount(profile)
+      // Direct builder without proof must be incomplete — no helper may synthesize omitted proof
+      const allocMissing: any = {
+        topicsCreated: profile.syntheticTopics,
+        messagesCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        blocksCreated: profile.syntheticTopics * profile.syntheticMessagesPerTopic,
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: c02ExpectedProjectedTotal(profile),
+          reduxBlocks: c02ExpectedProjectedTotal(profile),
+          groupCount: expectedVisible,
+          displayMessages: expectedVisible,
+          anchorGroupKey: null,
+          contextBoundaryPresent: false,
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: true,
+          groupExactMatched: true,
+          groupsWithFinalTopic: expectedVisible,
+          globalDisplayMessages: expectedVisible
+          // missing persisted/expected/contextCount
+        },
+        productionPath: 'missing proof without Auto',
+        productionPathComplete: true
+      }
+      const resultDirect = buildC02BenchmarkResult(
+        makeEnv(),
+        profile,
+        lb,
+        lb,
+        before,
+        after,
+        allocMissing,
+        info,
+        'precise'
+      )
+      expect(resultDirect.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(0)
+      // No Auto helper exists — incomplete evidence stays incomplete, no synthesized fallback
+      expect((globalThis as any).buildC02BenchmarkResultAuto).toBeUndefined()
+    })
+  })
+
+  describe('C-02 audit blockers — malformed/collision DOM, sanitizer, invalid oracle, proof typing, sampling contract', () => {
+    it('strict decoder rejects malformed group IDs', () => {
+      expect(c02StrictDecodeStableGroupId(null as any)).toBeNull()
+      expect(c02StrictDecodeStableGroupId('')).toBeNull()
+      expect(c02StrictDecodeStableGroupId('group:empty')).toBeNull()
+      expect(c02StrictDecodeStableGroupId('|5:hello')).toBeNull()
+      expect(c02StrictDecodeStableGroupId('5:hello|')).toBeNull()
+      expect(c02StrictDecodeStableGroupId('5:hello||5:world')).toBeNull()
+      expect(c02StrictDecodeStableGroupId('hello')).toBeNull()
+      expect(c02StrictDecodeStableGroupId('05:hello')).toBeNull()
+      expect(c02StrictDecodeStableGroupId('5:hell')).toBeNull()
+      expect(c02StrictDecodeStableGroupId('5:hello|extra')).toBeNull()
+      expect(c02StrictDecodeStableGroupId('2:ab|')).toBeNull()
+      // valid singleton
+      expect(c02StrictDecodeStableGroupId('5:hello')).toEqual(['hello'])
+      expect(c02StrictDecodeStableGroupId('5:hello|5:world')).toEqual(['hello', 'world'])
+      expect(c02StrictDecodeStableGroupId('11:hello:world')).toEqual(['hello:world'])
+      expect(c02StrictDecodeStableGroupId('5:a|b|c')).toEqual(['a|b|c']) // | inside encoded via length prefix is valid
+      // IDs may contain : and | via length prefix
+      const idWithColon = 'a:b|c'
+      expect(c02StrictDecodeStableGroupId(`${idWithColon.length}:${idWithColon}`)).toEqual([idWithColon])
+    })
+
+    it('exact topic ownership rejects collision and uses strict prefix', () => {
+      // Persisted plain collision: c02-heap-topic-01 should not own c02-heap-topic-011 via persisted helper
+      expect(isC02PersistedTopicOwned('c02-heap-topic-011-msg-000', 'c02-heap-topic-01')).toBe(false)
+      expect(isC02PersistedTopicOwned('c02-heap-topic-01-msg-000', 'c02-heap-topic-01')).toBe(true)
+      expect(isC02PersistedTopicOwned('c02-heap-topic-01', 'c02-heap-topic-01')).toBe(true)
+      expect(isC02PersistedTopicOwned('prefix-c02-heap-topic-01-suffix', 'c02-heap-topic-01')).toBe(false)
+      // DOM strict rejects plain (no decode)
+      expect(isC02ExactTopicOwned('c02-heap-topic-011-msg-000', 'c02-heap-topic-01')).toBe(false)
+      expect(isC02ExactTopicOwned('c02-heap-topic-01-msg-000', 'c02-heap-topic-01')).toBe(false)
+      expect(isC02ExactTopicOwned('c02-heap-topic-01', 'c02-heap-topic-01')).toBe(false)
+      // Encoded collision: decode strictly (use dynamic length)
+      const idCollision = 'c02-heap-topic-011-msg-000'
+      const encodedCollision = `${idCollision.length}:${idCollision}`
+      expect(isC02ExactTopicOwned(encodedCollision, 'c02-heap-topic-01')).toBe(false)
+      const idOwn = 'c02-heap-topic-01-msg-000'
+      const encodedOwn = `${idOwn.length}:${idOwn}`
+      expect(isC02ExactTopicOwned(encodedOwn, 'c02-heap-topic-01')).toBe(true)
+      // Composite encoded containing owned id must be false — DOM strict singleton only
+      const idOwn2 = 'c02-heap-topic-01-msg-001'
+      const composite = `${idOwn.length}:${idOwn}|${idOwn2.length}:${idOwn2}`
+      expect(isC02ExactTopicOwned(composite, 'c02-heap-topic-01')).toBe(false)
+      const compositeOther = `${idCollision.length}:${idCollision}|${idOwn.length}:${idOwn}`
+      expect(isC02ExactTopicOwned(compositeOther, 'c02-heap-topic-01')).toBe(false)
+      const idOther2 = 'c02-heap-topic-011-msg-001'
+      const compositeOnlyOther = `${idCollision.length}:${idCollision}|${idOther2.length}:${idOther2}`
+      expect(isC02ExactTopicOwned(compositeOnlyOther, 'c02-heap-topic-01')).toBe(false)
+    })
+
+    it('exact anchor identity rejects composite and substring', () => {
+      const anchor = 'c02-heap-topic-01-msg-005'
+      expect(isC02ExactAnchorIdentity(`${anchor.length}:${anchor}`, anchor)).toBe(true)
+      expect(isC02ExactAnchorIdentity(`${anchor.length}:${anchor}|5:other`, anchor)).toBe(false)
+      expect(isC02ExactAnchorIdentity(`${anchor.length}:${anchor}`, 'c02-heap-topic-01-msg-00')).toBe(false)
+      expect(isC02ExactAnchorIdentity(anchor, anchor)).toBe(false)
+      expect(isC02PersistedAnchorIdentity(anchor, anchor)).toBe(true)
+      expect(isC02ExactAnchorIdentity(anchor + '-extra', anchor)).toBe(false)
+      expect(isC02ExactAnchorIdentity(null, anchor)).toBe(false)
+      expect(isC02ExactAnchorIdentity(anchor, null)).toBe(false)
+    })
+
+    it('canonical DOM anchor decodes singleton only', () => {
+      expect(c02DecodeCanonicalDomAnchor(null)).toBeNull()
+      expect(c02DecodeCanonicalDomAnchor('group:empty')).toBeNull()
+      const anchor = 'c02-heap-topic-01-msg-010'
+      expect(c02DecodeCanonicalDomAnchor(`${anchor.length}:${anchor}`)).toBe(anchor)
+      expect(c02DecodeCanonicalDomAnchor(`${anchor.length}:${anchor}|5:other`)).toBeNull()
+      expect(c02DecodeCanonicalDomAnchor(anchor)).toBeNull() // plain not encoded
+    })
+
+    it('sanitizer returns only allow-listed categories (no raw leak)', async () => {
+      const fs = await import('fs')
+      const path = await import('path')
+      const specPath = path.resolve('tests/e2e/specs/conversation/perf-c02-heap-calibration.spec.ts')
+      const content = fs.readFileSync(specPath, 'utf8')
+      // Extract sanitizeC02Error body
+      const match = content.match(/function sanitizeC02Error[\s\S]*?return 'c02-error-category-unknown'/)
+      expect(match, 'sanitizeC02Error must exist').not.toBeNull()
+      const body = match![0]
+      expect(body).not.toContain('truncated')
+      expect(body).not.toContain('slice(0, 60)')
+      expect(body).not.toContain('[path:')
+      expect(body).not.toContain('withBasenames')
+      // Must contain allow-list categories only
+      expect(body).toContain('c02-error-topic-item-category')
+      expect(body).toContain('c02-error-redux-category')
+      expect(body).toContain('c02-error-dom-category')
+      expect(body).toContain('c02-error-persisted-category')
+      expect(body).toContain('c02-error-timeout-category')
+      expect(body).toContain('c02-error-category-unknown')
+      expect((body.match(/c02-error-/g) || []).length).toBeGreaterThanOrEqual(6)
+      // Ensure no dynamic raw interpolation beyond fixed categories
+      expect(body).not.toMatch(/return `c02-error-category:\${/)
+    })
+
+    it('invalid oracle fails validation (turn oracle)', () => {
+      expect(isC02ExpectedContextValid(null as any)).toBe(false)
+      expect(isC02ExpectedContextValid({} as any)).toBe(false)
+      expect(
+        isC02ExpectedContextValid({
+          turnCount: -1,
+          startIndex: -1,
+          anchorGroupKey: null,
+          boundaryPresent: false,
+          isWholeTopic: false,
+          contextCount: null
+        } as any)
+      ).toBe(false)
+      const valid = c02DeriveExpectedContext(
+        [{ id: 'a', role: 'user' } as any, { id: 'b', role: 'assistant', askId: 'a' } as any],
+        1
+      )
+      expect(isC02ExpectedContextValid(valid)).toBe(true)
+      // mutate to invalid startIndex
+      expect(isC02ExpectedContextValid({ ...valid, startIndex: 999 } as any)).toBe(false)
+      expect(isC02ExpectedContextValid({ ...valid, isWholeTopic: !valid.isWholeTopic } as any)).toBe(false)
+      expect(isC02ExpectedContextValid({ ...valid, boundaryPresent: !valid.boundaryPresent } as any)).toBe(false)
+      expect(isC02ExpectedContextValid({ ...valid, contextCount: 0 } as any)).toBe(false)
+      expect(isC02ExpectedContextValid({ ...valid, turnCount: 1, anchorGroupKey: null } as any)).toBe(false)
+      // contextCount mismatch would be caught by oracleOk equality check (tested via isC02ContextEvidenceValid)
+      const lastTopicId = 'c02-heap-topic-01'
+      const exp = c02DeriveExpectedContext([{ id: `${lastTopicId}-msg-000`, role: 'user' } as any], 10)
+      expect(
+        isC02ContextEvidenceValid({
+          contextBoundaryPresent: exp.boundaryPresent,
+          contextBoundaryInsideMessages: exp.boundaryPresent,
+          anchorGroupKey: exp.anchorGroupKey,
+          persistedAnchorGroupKey: exp.anchorGroupKey,
+          expectedAnchorGroupKey: exp.anchorGroupKey,
+          expectedContext: { ...exp, contextCount: 999 } as any,
+          lastTopicId,
+          expectedVisibleFinal: 1
+        })
+      ).toBe(false)
+    })
+
+    it('proof typing/runtime guard: builder requires proof fields and fails closed without them', () => {
+      const profile: any = {
+        syntheticTopics: 1,
+        syntheticMessagesPerTopic: 20,
+        blockContentBytes: 512,
+        segmentCountPerTopic: 0,
+        applicabilityGeneration: 0
+      }
+      const topics = buildC02SyntheticTopics(profile)
+      const lb = canonicalBytesForTopics(topics)
+      const before: RendererHeapSample = {
+        method: RENDERER_HEAP_METHOD,
+        usedJSHeapSize: 20_000_000,
+        totalJSHeapSize: 80_000_000,
+        jsHeapSizeLimit: 2_000_000_000
+      }
+      const after: RendererHeapSample = {
+        method: RENDERER_HEAP_METHOD,
+        usedJSHeapSize: 22_500_000,
+        totalJSHeapSize: 80_000_000,
+        jsHeapSizeLimit: 2_000_000_000
+      }
+      const info = classifyEffectiveHeapDeltaInformative(2_500_000, 'precise')
+      const env: any = {
+        timestamp: new Date().toISOString(),
+        node: 'v24.11.1',
+        pnpm: '10.27.0',
+        abiLane: 'electron',
+        abi: '145',
+        command: 'pnpm test:e2e',
+        git: { commit: 'abc123', dirty: false }
+      }
+      const expectedVisible = c02ExpectedVisibleCount(profile)
+      // Missing proof fields -> calibration.complete must be 0 (fail-closed)
+      const missingProof: any = {
+        topicsCreated: 1,
+        messagesCreated: 20,
+        blocksCreated: 20,
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: expectedVisible,
+          reduxBlocks: expectedVisible,
+          groupCount: expectedVisible,
+          displayMessages: expectedVisible,
+          anchorGroupKey: null,
+          contextBoundaryPresent: false,
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: true,
+          groupsWithFinalTopic: expectedVisible,
+          globalDisplayMessages: expectedVisible
+          // no persisted/expected/contextCount
+        },
+        productionPath: 'missing proof',
+        productionPathComplete: true
+      }
+      const resultMissing = buildC02BenchmarkResult(env, profile, lb, lb, before, after, missingProof, info, 'precise')
+      expect(resultMissing.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(0)
+      expect(resultMissing.metrics.find((m) => m.id === 'projection.productionPathComplete')?.value).toBe(0)
+      // Valid proof -> complete 1
+      const verified = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 20, 25)
+      const validAlloc: any = {
+        topicsCreated: 1,
+        messagesCreated: 20,
+        blocksCreated: 20,
+        usedTypedPath: true,
+        reduxVerified: true,
+        projectionStats: {
+          reduxMessages: expectedVisible,
+          reduxBlocks: expectedVisible,
+          groupCount: expectedVisible,
+          displayMessages: expectedVisible,
+          anchorGroupKey: null,
+          contextBoundaryPresent: false,
+          contextBoundaryInsideMessages: false,
+          finalTopicDomProof: true,
+          groupsWithFinalTopic: expectedVisible,
+          globalDisplayMessages: expectedVisible,
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
+          contextCount: verified.contextCount
+        },
+        productionPath: 'valid proof',
+        productionPathComplete: true
+      }
+      const resultValid = buildC02BenchmarkResult(env, profile, lb, lb, before, after, validAlloc, info, 'precise')
+      expect(resultValid.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(1)
+      // Mismatched persisted vs expected -> fail closed
+      const mismatched: any = {
+        ...validAlloc,
+        projectionStats: { ...validAlloc.projectionStats, persistedAnchorGroupKey: 'other-anchor' }
+      }
+      const resultMismatch = buildC02BenchmarkResult(env, profile, lb, lb, before, after, mismatched, info, 'precise')
+      expect(resultMismatch.metrics.find((m) => m.id === 'calibration.complete')?.value).toBe(0)
+    })
+
+    it('post-activation observer-before-heapAfter ordering and heapBefore pre-activation', async () => {
+      const fs = await import('fs')
+      const path = await import('path')
+      const specPath = path.resolve('tests/e2e/specs/conversation/perf-c02-heap-calibration.spec.ts')
+      const content = fs.readFileSync(specPath, 'utf8')
+      // heapBefore must be before activateReduxProjection
+      const heapBeforeIdx = content.indexOf('const heapBefore = await sampleRendererHeap')
+      const activateIdx = content.indexOf('const allocation = await activateReduxProjection')
+      expect(heapBeforeIdx).toBeGreaterThan(0)
+      expect(activateIdx).toBeGreaterThan(heapBeforeIdx)
+      // Every heapAfter must be immediately preceded by observeFinalSettledProjection
+      // Check single profile section
+      const singleObserver = content.indexOf('const finalCombinedProofSingle = await observeFinalSettledProjection')
+      const singleHeapAfter = content.indexOf('const heapAfter = await sampleRendererHeap', singleObserver)
+      expect(singleObserver).toBeGreaterThan(activateIdx)
+      expect(singleHeapAfter).toBeGreaterThan(singleObserver)
+      // Ensure no sampleRendererHeap between observer and heapAfter (immediate)
+      const betweenSingle = content.slice(singleObserver, singleHeapAfter)
+      expect(betweenSingle).not.toContain('sampleRendererHeap')
+      expect(betweenSingle).toContain('observeFinalSettledProjection')
+      // Matrix section
+      const matrixObserver = content.indexOf('const finalCombinedForMatrix = await observeFinalSettledProjection')
+      const matrixHeapAfter = content.indexOf(
+        'const heapAfter = await sampleRendererHeap(isolatedWindow)',
+        matrixObserver
+      )
+      expect(matrixObserver).toBeGreaterThan(0)
+      expect(matrixHeapAfter).toBeGreaterThan(matrixObserver)
+      const betweenMatrix = content.slice(matrixObserver, matrixHeapAfter)
+      expect(betweenMatrix).not.toContain('sampleRendererHeap')
+      // Verify heapBefore is NOT preceded by observer call (pre-activation baseline)
+      const preActivationSlice = content.slice(heapBeforeIdx - 2000, heapBeforeIdx)
+      expect(preActivationSlice).not.toContain('await observeFinalSettledProjection')
+      // Also verify no "observer before heapBefore" call (definition is before, but call must be after)
+      expect(content).not.toMatch(
+        /await observeFinalSettledProjection[\s\S]*?heapBefore = await sampleRendererHeap\(mainWindow\)/
+      )
+    })
+
+    it('blocked activation cannot be passed to builders (type guard)', async () => {
+      const fs = await import('fs')
+      const path = await import('path')
+      const specPath = path.resolve('tests/e2e/specs/conversation/perf-c02-heap-calibration.spec.ts')
+      const content = fs.readFileSync(specPath, 'utf8')
+      expect(content).toContain('type C02ActivationSuccess')
+      expect(content).toContain('type C02ActivationBlocked')
+      expect(content).toContain("kind: 'blocked'")
+      expect(content).toContain("kind: 'success'")
+      expect(content).toContain("if (allocation.kind === 'blocked')")
+      // Builders should not appear with blocker path
+      const builderCalls = [...content.matchAll(/buildC02BenchmarkResult\(/g)]
+      for (const m of builderCalls) {
+        const snippet = content.slice(Math.max(0, m.index! - 300), m.index! + 200)
+        // Each builder call should be after a blocked guard
+        expect(snippet).not.toContain('failedBlocker')
+      }
+    })
+  })
+
+  describe('C-02 bounded re-audit — LOCK-001 strict DOM vs persisted separation and LOCK-002 gated success', () => {
+    it('LOCK-001: DOM stable-group ownership is strict decode only — plain fallback rejected, persisted plain accepted', () => {
+      expect(isC02ExactTopicOwned('c02-heap-topic-01-group', 'c02-heap-topic-01')).toBe(false)
+      expect(isC02ExactTopicOwned('c02-heap-topic-011', 'c02-heap-topic-01')).toBe(false)
+      expect(isC02ExactTopicOwned('xc02-heap-topic-01-group', 'c02-heap-topic-01')).toBe(false)
+      expect(isC02PersistedTopicOwned('c02-heap-topic-01-group', 'c02-heap-topic-01')).toBe(true)
+      expect(isC02PersistedTopicOwned('c02-heap-topic-01-msg-000', 'c02-heap-topic-01')).toBe(true)
+      expect(isC02PersistedTopicOwned('c02-heap-topic-011-group', 'c02-heap-topic-01')).toBe(false)
+      expect(isC02PersistedTopicOwned('c02-heap-topic-011', 'c02-heap-topic-01')).toBe(false)
+      expect(isC02ExactTopicOwned('27:c02-heap-topic-01-msg-00000', 'c02-heap-topic-01')).toBe(true)
+      expect(
+        isC02ExactTopicOwned('27:c02-heap-topic-01-msg-00000|27:c02-heap-topic-01-msg-00001', 'c02-heap-topic-01')
+      ).toBe(false)
+      expect(isC02ExactTopicOwned('18:c02-heap-topic-011-msg-00000', 'c02-heap-topic-01')).toBe(false)
+      expect(isC02ExactTopicOwned('not-encoded', 'c02-heap-topic-01')).toBe(false)
+      expect(isC02ExactTopicOwned('5:abc', 'c02-heap-topic-01')).toBe(false)
+    })
+
+    it('LOCK-001: DOM anchor identity is strict singleton decode — plain equality rejected, persisted equality allowed', () => {
+      const expected = 'c02-heap-topic-01-msg-00000'
+      const encodedSingleton = `${expected.length}:${expected}`
+      const encodedComposite = `${expected.length}:${expected}|5:other`
+      expect(isC02ExactAnchorIdentity(expected, expected)).toBe(false)
+      expect(isC02ExactAnchorIdentity(encodedSingleton, expected)).toBe(true)
+      expect(isC02ExactAnchorIdentity(encodedComposite, expected)).toBe(false)
+      expect(isC02ExactAnchorIdentity('not-encoded', expected)).toBe(false)
+      expect(isC02ExactAnchorIdentity(null, expected)).toBe(false)
+      expect(isC02PersistedAnchorIdentity(expected, expected)).toBe(true)
+      expect(isC02PersistedAnchorIdentity('other', expected)).toBe(false)
+      expect(c02DecodeCanonicalDomAnchor(encodedSingleton)).toBe(expected)
+      expect(c02DecodeCanonicalDomAnchor(encodedComposite)).toBeNull()
+      expect(c02DecodeCanonicalDomAnchor(expected)).toBeNull()
+    })
+
+    it('LOCK-001: source contains strict DOM helpers without plain fallback and persisted helper with plain fallback', async () => {
+      const fs = await import('fs')
+      const path = await import('path')
+      const utilsPath = path.resolve('tests/e2e/utils/perfHeapCalibration.ts')
+      const content = fs.readFileSync(utilsPath, 'utf8')
+      expect(content).toContain('isC02PersistedTopicOwned')
+      expect(content).toContain("anchor.startsWith(topicId + '-')")
+      const strictTopicBlock = content.slice(
+        content.indexOf('export function isC02ExactTopicOwned'),
+        content.indexOf('export function isC02PersistedTopicOwned')
+      )
+      expect(strictTopicBlock).toContain('decoded.length !== 1')
+      expect(strictTopicBlock).not.toContain('anchor === topicId')
+      const strictAnchorBlock = content.slice(
+        content.indexOf('export function isC02ExactAnchorIdentity'),
+        content.indexOf('export function isC02PersistedAnchorIdentity')
+      )
+      expect(strictAnchorBlock).toContain('if (decoded === null) return false')
+      expect(strictAnchorBlock).not.toContain('return domAnchor === expectedAnchor')
+      const specPath = path.resolve('tests/e2e/specs/conversation/perf-c02-heap-calibration.spec.ts')
+      const specContent = fs.readFileSync(specPath, 'utf8')
+      expect(specContent).toContain('isC02PersistedTopicOwned')
+      expect(specContent).toContain('isC02ExactTopicOwned(domStats.anchorGroupKey')
+      expect(specContent).toContain('isC02ExactAnchorIdentity(domStats.anchorGroupKey')
+      expect(specContent).toContain('isC02PersistedTopicOwned(actualContextState.persistedGroupKey')
+      expect(specContent).toContain('isC02PersistedTopicOwned(expectedAnchorForTopic')
+      expect(specContent).not.toContain("if (gid === lastTopicId || gid.startsWith(lastTopicId + '-')) owned = true")
+    })
+
+    it('LOCK-002: activateReduxProjection success is gated on computed proofs — no true as const assertions, blocked before builder', async () => {
+      const fs = await import('fs')
+      const path = await import('path')
+      const specPath = path.resolve('tests/e2e/specs/conversation/perf-c02-heap-calibration.spec.ts')
+      const content = fs.readFileSync(specPath, 'utf8')
+      expect(content).not.toContain('reduxVerified: true as const')
+      expect(content).not.toContain('finalTopicDomProof: true as const')
+      expect(content).not.toContain('productionPathComplete: true as const')
+      expect(content).not.toContain('usedTypedPath: true as const')
+      expect(content).toContain('!reduxVerified')
+      expect(content).toContain('!finalTopicDomProof')
+      expect(content).toContain('!groupCountExact')
+      expect(content).toContain('!groupOwnershipProof')
+      expect(content).toContain('!groupExactMatched')
+      expect(content).toContain('!productionPathComplete')
+      expect(content).toContain("kind: 'blocked'")
+      expect(content).toContain('c02-blocked-productionPath-incomplete')
+      const successIdx = content.indexOf("kind: 'success' as const")
+      const successBlock = content.slice(successIdx, successIdx + 1500)
+      expect(successBlock).toContain('reduxVerified,')
+      expect(successBlock).toContain('finalTopicDomProof,')
+      expect(successBlock).toContain('productionPathComplete')
+      expect(successBlock).not.toContain('true as const')
+      const blockedIdx = content.indexOf('c02-blocked-productionPath-incomplete')
+      expect(blockedIdx).toBeGreaterThan(0)
+      expect(blockedIdx).toBeLessThan(successIdx)
+    })
   })
 })

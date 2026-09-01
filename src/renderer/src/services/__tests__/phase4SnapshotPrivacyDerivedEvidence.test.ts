@@ -71,15 +71,22 @@ import {
   c02MixedExpectedVisibleCountForSpec,
   canonicalBytesForTopics,
   classifyEffectiveHeapDeltaInformative,
+  createC02VerifiedEvidenceForTest,
   deriveEffectiveHeapInformative,
   deriveFinalTopicDomProof,
   deriveGroupCountExact,
   isC02ContextEvidenceValid,
   isC02ExactTopicOwned,
+  isC02PersistedTopicOwned,
   isC02ProductionPathComplete,
   isC02WholeTopicWindow,
   RENDERER_HEAP_METHOD
 } from '../../../../../tests/e2e/utils/perfHeapCalibration'
+
+function c02DomEncodeForTest(plain: string | null): string | null {
+  if (plain === null) return null
+  return `${plain.length}:${plain}`
+}
 
 // ---------------------------------------------------------------------------
 // Sentinels — must never appear in any scalar snapshot/serialized output
@@ -748,12 +755,16 @@ describe('C-02 hardened predicates — whole-topic/partial/outside-divider/inval
     const wholeCounts = [1, 20, 25]
     for (const expectedVisibleFinal of wholeCounts) {
       expect(isC02WholeTopicWindow(expectedVisibleFinal)).toBe(true)
-      // valid: no divider anywhere, null anchor
+      const verified = createC02VerifiedEvidenceForTest(lastTopicId, expectedVisibleFinal, 25)
+      // valid: no divider anywhere, null anchor, with canonical persisted proof (LOCK-001 whole-topic requires valid persisted anchor)
       expect(
         isC02ContextEvidenceValid({
           contextBoundaryPresent: false,
           contextBoundaryInsideMessages: false,
           anchorGroupKey: null,
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
           lastTopicId,
           expectedVisibleFinal
         })
@@ -794,12 +805,16 @@ describe('C-02 hardened predicates — whole-topic/partial/outside-divider/inval
     const partialCounts = [26, 50, 100]
     for (const expectedVisibleFinal of partialCounts) {
       expect(isC02WholeTopicWindow(expectedVisibleFinal)).toBe(false)
+      const verified = createC02VerifiedEvidenceForTest(lastTopicId, expectedVisibleFinal, 10)
       // missing divider => invalid
       expect(
         isC02ContextEvidenceValid({
           contextBoundaryPresent: false,
           contextBoundaryInsideMessages: false,
           anchorGroupKey: null,
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
           lastTopicId,
           expectedVisibleFinal
         })
@@ -809,7 +824,10 @@ describe('C-02 hardened predicates — whole-topic/partial/outside-divider/inval
         isC02ContextEvidenceValid({
           contextBoundaryPresent: true,
           contextBoundaryInsideMessages: false,
-          anchorGroupKey: `${lastTopicId}-group`,
+          anchorGroupKey: c02DomEncodeForTest(verified.expectedAnchorGroupKey),
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
           lastTopicId,
           expectedVisibleFinal
         })
@@ -820,6 +838,9 @@ describe('C-02 hardened predicates — whole-topic/partial/outside-divider/inval
           contextBoundaryPresent: true,
           contextBoundaryInsideMessages: true,
           anchorGroupKey: 'other-topic-group',
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
           lastTopicId,
           expectedVisibleFinal
         })
@@ -830,21 +851,40 @@ describe('C-02 hardened predicates — whole-topic/partial/outside-divider/inval
           contextBoundaryPresent: true,
           contextBoundaryInsideMessages: true,
           anchorGroupKey: null,
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
           lastTopicId,
           expectedVisibleFinal
         })
       ).toBe(false)
-      // valid: present inside with exact owned anchor (collision-safe)
-      const validAnchor = `${lastTopicId}-msg-00010-group`
+      // valid: present inside with exact owned anchor (collision-safe, exact identity LOCK-002) — DOM requires encoded singleton
+      const validAnchor = verified.expectedAnchorGroupKey
       expect(
         isC02ContextEvidenceValid({
           contextBoundaryPresent: true,
           contextBoundaryInsideMessages: true,
-          anchorGroupKey: validAnchor,
+          anchorGroupKey: c02DomEncodeForTest(validAnchor),
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
           lastTopicId,
           expectedVisibleFinal
         })
       ).toBe(true)
+      // non-exact anchor (extra char) should fail even if owned
+      expect(
+        isC02ContextEvidenceValid({
+          contextBoundaryPresent: true,
+          contextBoundaryInsideMessages: true,
+          anchorGroupKey: `${validAnchor}X`,
+          persistedAnchorGroupKey: verified.persistedAnchorGroupKey,
+          expectedAnchorGroupKey: verified.expectedAnchorGroupKey,
+          expectedContext: verified.expectedContext,
+          lastTopicId,
+          expectedVisibleFinal
+        })
+      ).toBe(false)
       // collision case: anchor contains substring of topic but not exact token -> invalid
       // Our exact matcher allows before/after boundary; prefix with '-' after is valid, so 'c02-mixed-topic-03-extra-group' is still owned
       // For true collision, use topic-03 substring inside topic-031
@@ -929,17 +969,22 @@ describe('C-02 hardened predicates — whole-topic/partial/outside-divider/inval
   })
 
   it('isC02ExactTopicOwned collision-safe: exact boundary required', () => {
-    expect(isC02ExactTopicOwned('c02-heap-topic-01-group', 'c02-heap-topic-01')).toBe(true)
-    expect(isC02ExactTopicOwned('12:c02-heap-topic-01|34:c02-heap-topic-01', 'c02-heap-topic-01')).toBe(true)
+    expect(isC02ExactTopicOwned('c02-heap-topic-01-group', 'c02-heap-topic-01')).toBe(false)
+    expect(isC02PersistedTopicOwned('c02-heap-topic-01-group', 'c02-heap-topic-01')).toBe(true)
+    expect(isC02ExactTopicOwned('17:c02-heap-topic-01|17:c02-heap-topic-01', 'c02-heap-topic-01')).toBe(false)
+    expect(isC02PersistedTopicOwned('c02-heap-topic-011-group', 'c02-heap-topic-01')).toBe(false)
     expect(isC02ExactTopicOwned('c02-heap-topic-011-group', 'c02-heap-topic-01')).toBe(false)
-    expect(isC02ExactTopicOwned('prefix-c02-heap-topic-01', 'c02-heap-topic-01')).toBe(true) // '-' boundary before
-    expect(isC02ExactTopicOwned('c02-heap-topic-01extra', 'c02-heap-topic-01')).toBe(false) // no boundary after (alphanum)
+    expect(isC02PersistedTopicOwned('prefix-c02-heap-topic-01', 'c02-heap-topic-01')).toBe(false)
+    expect(isC02ExactTopicOwned('prefix-c02-heap-topic-01', 'c02-heap-topic-01')).toBe(false)
+    expect(isC02PersistedTopicOwned('c02-heap-topic-01extra', 'c02-heap-topic-01')).toBe(false)
+    expect(isC02ExactTopicOwned('c02-heap-topic-01extra', 'c02-heap-topic-01')).toBe(false)
     expect(isC02ExactTopicOwned(null, 'c02-heap-topic-01')).toBe(false)
     expect(isC02ExactTopicOwned('', 'c02-heap-topic-01')).toBe(false)
   })
 
   it('isC02ProductionPathComplete combines all proofs fail-closed', () => {
     const lastTopicId = 'c02-heap-topic-00'
+    const verifiedGood = createC02VerifiedEvidenceForTest(lastTopicId, 20, 25)
     const goodWhole = {
       reduxVerified: true,
       finalTopicDomProof: true,
@@ -948,6 +993,9 @@ describe('C-02 hardened predicates — whole-topic/partial/outside-divider/inval
       contextBoundaryPresent: false,
       contextBoundaryInsideMessages: false,
       anchorGroupKey: null,
+      persistedAnchorGroupKey: verifiedGood.persistedAnchorGroupKey,
+      expectedAnchorGroupKey: verifiedGood.expectedAnchorGroupKey,
+      expectedContext: verifiedGood.expectedContext,
       lastTopicId,
       expectedVisibleFinal: 20
     }
@@ -1089,6 +1137,7 @@ describe('C-02 derived-evidence fail-closed — heap/DOM/group based on measured
     expect(prodGate.passed).toBe(false)
     // Now caller lies opposite: says false but measured evidence is valid => derived should still be true when precise and counts match
     const { before: b2, after: a2 } = makeHeapPair(1_000)
+    const verifiedFor20 = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 20, 25)
     const allocationValidCountsButCallerFalse = {
       topicsCreated: 1,
       messagesCreated: 20,
@@ -1106,7 +1155,11 @@ describe('C-02 derived-evidence fail-closed — heap/DOM/group based on measured
         finalTopicDomProof: false, // caller false, derived true
         groupExactMatched: false,
         groupsWithFinalTopic: 20,
-        globalDisplayMessages: 20
+        globalDisplayMessages: 20,
+        persistedAnchorGroupKey: verifiedFor20.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedFor20.expectedAnchorGroupKey,
+        expectedContext: verifiedFor20.expectedContext,
+        contextCount: verifiedFor20.contextCount
       },
       productionPath: 'valid but caller false',
       productionPathComplete: false
@@ -1142,7 +1195,8 @@ describe('C-02 derived-evidence fail-closed — heap/DOM/group based on measured
     const logicalWhole = canonicalBytesForTopics(topicsWhole)
     const { before, after } = makeHeapPair(1000)
     const env = makeEnvironment()
-    // whole-topic valid
+    // whole-topic valid — requires persisted proof
+    const verifiedWholeAlloc = createC02VerifiedEvidenceForTest('c02-heap-topic-00', 20, 25)
     const allocWholeValid = {
       topicsCreated: 1,
       messagesCreated: 20,
@@ -1158,6 +1212,10 @@ describe('C-02 derived-evidence fail-closed — heap/DOM/group based on measured
         contextBoundaryPresent: false,
         contextBoundaryInsideMessages: false,
         finalTopicDomProof: true,
+        persistedAnchorGroupKey: verifiedWholeAlloc.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedWholeAlloc.expectedAnchorGroupKey,
+        expectedContext: verifiedWholeAlloc.expectedContext,
+        contextCount: verifiedWholeAlloc.contextCount,
         groupExactMatched: true,
         groupsWithFinalTopic: 20,
         globalDisplayMessages: 20
@@ -1222,6 +1280,7 @@ describe('C-02 derived-evidence fail-closed — heap/DOM/group based on measured
     const expectedPartial = c02ExpectedVisibleCount(profilePartial)
     expect(expectedPartial).toBe(100)
     const lastTopicId = `c02-heap-topic-${String(profilePartial.syntheticTopics - 1).padStart(2, '0')}`
+    const verifiedPartialAlloc = createC02VerifiedEvidenceForTest(lastTopicId, 100, 10)
     const allocPartialValid = {
       topicsCreated: profilePartial.syntheticTopics,
       messagesCreated: profilePartial.syntheticTopics * profilePartial.syntheticMessagesPerTopic,
@@ -1233,13 +1292,17 @@ describe('C-02 derived-evidence fail-closed — heap/DOM/group based on measured
         reduxBlocks: expectedPartial,
         groupCount: expectedPartial,
         displayMessages: expectedPartial,
-        anchorGroupKey: `${lastTopicId}-group`,
+        anchorGroupKey: c02DomEncodeForTest(verifiedPartialAlloc.expectedAnchorGroupKey),
         contextBoundaryPresent: true,
         contextBoundaryInsideMessages: true,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedPartial,
-        globalDisplayMessages: expectedPartial
+        globalDisplayMessages: expectedPartial,
+        persistedAnchorGroupKey: verifiedPartialAlloc.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedPartialAlloc.expectedAnchorGroupKey,
+        expectedContext: verifiedPartialAlloc.expectedContext,
+        contextCount: verifiedPartialAlloc.contextCount
       },
       productionPath: 'partial valid',
       productionPathComplete: true
@@ -1284,6 +1347,8 @@ describe('C-02 derived-evidence fail-closed — heap/DOM/group based on measured
     const env = makeEnvironment()
     const expectedFinal = c02MixedExpectedVisibleCountForSpec(profile.topicSpecs[profile.topicSpecs.length - 1])
     expect(expectedFinal).toBe(20)
+    const lastTopicIdWhole = `c02-mixed-topic-${String(profile.topicSpecs.length - 1).padStart(2, '0')}`
+    const verifiedWhole = createC02VerifiedEvidenceForTest(lastTopicIdWhole, 20, 25)
     const allocWhole = {
       topicsCreated: profile.topicSpecs.length,
       messagesCreated: 260,
@@ -1301,7 +1366,11 @@ describe('C-02 derived-evidence fail-closed — heap/DOM/group based on measured
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedFinal,
-        globalDisplayMessages: expectedFinal
+        globalDisplayMessages: expectedFinal,
+        persistedAnchorGroupKey: verifiedWhole.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedWhole.expectedAnchorGroupKey,
+        expectedContext: verifiedWhole.expectedContext,
+        contextCount: verifiedWhole.contextCount
       },
       productionPath: 'mixed whole-topic final valid',
       productionPathComplete: true
@@ -1328,9 +1397,10 @@ describe('C-02 derived-evidence fail-closed — heap/DOM/group based on measured
     const env = makeEnvironment()
     const expectedFinal = c02MixedExpectedVisibleCountForSpec(profile.topicSpecs[profile.topicSpecs.length - 1])
     expect(expectedFinal).toBe(100)
-    // partial valid requires inside-messages divider + exact final-topic-owned anchor
+    // partial valid requires inside-messages divider + exact final-topic-owned anchor (LOCK-002 exact identity)
     expect(isC02WholeTopicWindow(expectedFinal)).toBe(false)
     const lastTopicId = `c02-mixed-topic-${String(profile.topicSpecs.length - 1).padStart(2, '0')}`
+    const verifiedPartial = createC02VerifiedEvidenceForTest(lastTopicId, 150, 10)
     const allocValid = {
       topicsCreated: profile.topicSpecs.length,
       messagesCreated: 320,
@@ -1342,13 +1412,17 @@ describe('C-02 derived-evidence fail-closed — heap/DOM/group based on measured
         reduxBlocks: expectedFinal,
         groupCount: expectedFinal,
         displayMessages: expectedFinal,
-        anchorGroupKey: `${lastTopicId}-group`,
+        anchorGroupKey: c02DomEncodeForTest(verifiedPartial.expectedAnchorGroupKey),
         contextBoundaryPresent: true,
         contextBoundaryInsideMessages: true,
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedFinal,
-        globalDisplayMessages: expectedFinal
+        globalDisplayMessages: expectedFinal,
+        persistedAnchorGroupKey: verifiedPartial.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedPartial.expectedAnchorGroupKey,
+        expectedContext: verifiedPartial.expectedContext,
+        contextCount: verifiedPartial.contextCount
       },
       productionPath: 'mixed partial valid',
       productionPathComplete: true
@@ -1490,21 +1564,41 @@ describe('C-02 derived-evidence fail-closed — heap/DOM/group based on measured
     expect(resWholeInvalid.gates.find((g) => g.id === 'projection.contextBoundaryExplicit')!.passed).toBe(false)
     expect(resWholeInvalid.gates.find((g) => g.id === 'calibration.complete')!.passed).toBe(false)
 
-    // Direct predicate checks for mixed partial branch via isC02ContextEvidenceValid
+    // Direct predicate checks for mixed partial branch via isC02ContextEvidenceValid — now requires exact canonical proof (LOCK-001/002)
+    const verifiedFor30 = createC02VerifiedEvidenceForTest(lastTopicId, 60, 10)
     expect(
       isC02ContextEvidenceValid({
         contextBoundaryPresent: true,
         contextBoundaryInsideMessages: true,
-        anchorGroupKey: `${lastTopicId}-group`,
+        anchorGroupKey: c02DomEncodeForTest(verifiedFor30.expectedAnchorGroupKey),
+        persistedAnchorGroupKey: verifiedFor30.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedFor30.expectedAnchorGroupKey,
+        expectedContext: verifiedFor30.expectedContext,
         lastTopicId,
         expectedVisibleFinal: 30
       })
     ).toBe(true)
+    // Non-exact anchor should fail even if owned
+    expect(
+      isC02ContextEvidenceValid({
+        contextBoundaryPresent: true,
+        contextBoundaryInsideMessages: true,
+        anchorGroupKey: `${verifiedFor30.expectedAnchorGroupKey}X`,
+        persistedAnchorGroupKey: verifiedFor30.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedFor30.expectedAnchorGroupKey,
+        expectedContext: verifiedFor30.expectedContext,
+        lastTopicId,
+        expectedVisibleFinal: 30
+      })
+    ).toBe(false)
     expect(
       isC02ContextEvidenceValid({
         contextBoundaryPresent: true,
         contextBoundaryInsideMessages: false,
-        anchorGroupKey: `${lastTopicId}-group`,
+        anchorGroupKey: c02DomEncodeForTest(verifiedFor30.expectedAnchorGroupKey),
+        persistedAnchorGroupKey: verifiedFor30.persistedAnchorGroupKey,
+        expectedAnchorGroupKey: verifiedFor30.expectedAnchorGroupKey,
+        expectedContext: verifiedFor30.expectedContext,
         lastTopicId,
         expectedVisibleFinal: 30
       })

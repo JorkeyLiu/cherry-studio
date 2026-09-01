@@ -15,6 +15,14 @@
  * - Heap amplification is computed separately from logical bytes (heap delta / logical,
  *   heap used / logical) and reported as distinct L3 directional metrics.
  * - All synthetic profiles are labeled non-adoption, directional, synthetic.
+ * - Context completeness is fail-closed via persisted canonical anchor proof and
+ *   expected-context turn oracle: whole-topic is
+ *   `expectedContext.isWholeTopic` (startIndex===0 via actual persisted
+ *   contextCount and production-equivalent turn construction), not a
+ *   message-count 1..25 heuristic. Missing or mismatched
+ *   persistedAnchorGroupKey/expectedAnchorGroupKey/expectedContext/contextCount
+ *   yields productionPath.complete=false and calibration.complete=false; no
+ *   synthetic fallback anchors/contexts are synthesized in artifact builders.
  *
  * No runtime cache/window/eviction/TTL/LRU/admission/heap-capacity policy is
  * implemented here. No IPC/schema/preload/migration changes. No threshold or
@@ -96,14 +104,22 @@ export const C02_PRODUCTION_WINDOW_MAX = 100
  * Mirrored here for harness-only whole-topic validation — no production behavior
  * change, no threshold adoption. A whole-topic window at or below this count has
  * no divider by design (computeContextInfo boundaryMessageId null when startIndex 0).
+ *
+ * Note: this constant is the production default only. Artifact completeness does
+ * NOT use a message-count 1..25 heuristic; it uses the turn oracle
+ * `expectedContext.isWholeTopic` (startIndex===0) derived from actual persisted
+ * contextCount and production-equivalent turn construction ().
  */
 export const C02_DEFAULT_CONTEXTCOUNT = 25
 
 /**
- * Whether the final-topic window is a whole-topic window where no divider is
- * expected by design. Pure, deterministic, harness-only.
- * Valid only for positive integer counts in 1..C02_DEFAULT_CONTEXTCOUNT (25).
- * Non-finite, non-integer, zero, negative, or >25 are not whole-topic.
+ * @deprecated Legacy message-count whole-topic heuristic (1..25) — kept for
+ * diagnostic compatibility only. Artifact completeness MUST use the turn oracle
+ * `expectedContext.isWholeTopic` (startIndex===0 via actual contextCount) and
+ * persisted canonical anchor proof. This helper is not used
+ * in artifact builders or gate evaluation; it does not reflect production turn
+ * semantics and must not be used to claim whole-topic in emitted artifact
+ * details. See `isC02ContextEvidenceValid` and `c02DeriveExpectedContext`.
  */
 export function isC02WholeTopicWindow(expectedVisibleFinal: number): boolean {
   return (
@@ -115,43 +131,140 @@ export function isC02WholeTopicWindow(expectedVisibleFinal: number): boolean {
 }
 
 /**
- * Collision-safe exact topic ownership matcher appropriate to the generated
- * stable-id grammar (phase4 logical payload + messageRenderLayers stable ids).
+ * Strict production stable-group grammar decoder (LOCK-002).
  *
- * Topic ids are `${prefix}-${pad}` (e.g. c02-heap-topic-01, c02-mixed-topic-03,
- * c02-c02-small-v1-topic-00). Message ids are `${topicId}-msg-${pad}`.
- * Group stable ids encode messages as `${len}:${msgId}|${len}:${msgId}`.
- * Anchor group keys are stable group ids or synthetic `${topicId}-group-...`.
- *
- * Valid ownership requires topicId appears as an exact token with boundary:
- * before char is start, `:`, `|`, or non-alphanumeric, and after char is
- * `-`, `:`, `|`, `_`, or end. This prevents substring collisions like
- * `c02-heap-topic-01` matching inside `c02-heap-topic-011` where the next
- * char is `1` (alphanumeric) rather than a boundary.
+ * Production `deriveStableGroupId` encodes as `${id.length}:${id}` joined by `|`.
+ * IDs may contain `:` and `|`; length prefix is decimal UTF-16 length.
+ * This decoder strictly validates: rejects sentinel `group:empty`, empty string,
+ * trailing/leading/double delimiters, missing colon, non-decimal or leading-zero
+ * length prefix, length mismatch, or trailing characters.
+ * Returns decoded ID array on success, null on malformed.
  *
  * Pure, deterministic, reusable for uniform/mixed/matrix builders and spec.
+ */
+export function c02StrictDecodeStableGroupId(groupId: string | null): string[] | null {
+  if (groupId === null || typeof groupId !== 'string') return null
+  if (groupId.length === 0) return null
+  if (groupId === 'group:empty') return null
+  if (groupId.startsWith('|') || groupId.endsWith('|') || groupId.includes('||')) return null
+  const result: string[] = []
+  let pos = 0
+  while (pos < groupId.length) {
+    const colonIdx = groupId.indexOf(':', pos)
+    if (colonIdx === -1) return null
+    const lenStr = groupId.slice(pos, colonIdx)
+    if (lenStr.length === 0 || !/^\d+$/.test(lenStr)) return null
+    if (lenStr.length > 1 && lenStr[0] === '0') return null
+    const len = Number(lenStr)
+    if (!Number.isFinite(len) || !Number.isInteger(len) || len < 0) return null
+    if (String(len) !== lenStr) return null
+    const idStart = colonIdx + 1
+    const idEnd = idStart + len
+    if (idEnd > groupId.length) return null
+    const id = groupId.slice(idStart, idEnd)
+    if (id.length !== len) return null
+    result.push(id)
+    if (idEnd === groupId.length) {
+      pos = idEnd
+      break
+    }
+    if (groupId[idEnd] !== '|') return null
+    if (idEnd + 1 >= groupId.length) return null
+    pos = idEnd + 1
+  }
+  if (pos !== groupId.length) return null
+  if (result.length === 0) return null
+  return result
+}
+
+/**
+ * Decode the canonical DOM anchor for C-02 paired fixtures (LOCK-002).
+ *
+ * For paired fixtures the divider predecessor is a user singleton group;
+ * the canonical anchor must be the sole decoded message ID and equal the
+ * expectedContext.anchorGroupKey. Composite groups (multiple decoded IDs)
+ * or malformed values yield null and fail exact identity.
+ */
+export function c02DecodeCanonicalDomAnchor(groupId: string | null): string | null {
+  const decoded = c02StrictDecodeStableGroupId(groupId)
+  if (!decoded || decoded.length !== 1) return null
+  return decoded[0]
+}
+
+/**
+ * Strict DOM stable-group ownership via decoded length-prefix grammar (LOCK-001).
+ *
+ * DOM stable-group ownership/identity must strictly decode to exactly one
+ * message ID owned by the topic (decoded.length===1 and exact topic prefix).
+ * Composite, malformed, sentinel, or plain undecodable values fail.
+ * Descendant data-message-id cannot substitute for invalid stable-group identity.
+ * Collision `c02-heap-topic-01` inside `c02-heap-topic-011` is rejected because
+ * decoded ID `c02-heap-topic-011-msg-...` does not start with `c02-heap-topic-01-`.
  */
 export function isC02ExactTopicOwned(anchor: string | null, topicId: string): boolean {
   if (anchor === null || typeof anchor !== 'string' || typeof topicId !== 'string') return false
   if (anchor.length === 0 || topicId.length === 0) return false
-  let idx = anchor.indexOf(topicId)
-  while (idx !== -1) {
-    const beforeChar = idx > 0 ? anchor[idx - 1] : ''
-    const beforeOk =
-      idx === 0 ||
-      beforeChar === ':' ||
-      beforeChar === '|' ||
-      beforeChar === '-' ||
-      beforeChar === '_' ||
-      !/[A-Za-z0-9]/.test(beforeChar)
-    const afterIdx = idx + topicId.length
-    const afterChar = afterIdx < anchor.length ? anchor[afterIdx] : ''
-    const afterOk =
-      afterIdx === anchor.length || afterChar === '-' || afterChar === ':' || afterChar === '|' || afterChar === '_'
-    if (beforeOk && afterOk) return true
-    idx = anchor.indexOf(topicId, idx + 1)
-  }
+  const decoded = c02StrictDecodeStableGroupId(anchor)
+  if (decoded === null || decoded.length !== 1) return false
+  const id = decoded[0] as string
+  if (id === topicId) return true
+  if (id.startsWith(topicId + '-')) return true
   return false
+}
+
+/**
+ * Persisted plain-anchor ownership (LOCK-001).
+ *
+ * Persisted anchor may use exact `${topicId}-` prefix/equality. This helper is
+ * for persisted canonical anchors only (plain message IDs), never for DOM
+ * stable-group IDs. Handles both plain and (if ever) encoded persisted values:
+ * first tries strict decode, then falls back to plain exact prefix/equality.
+ */
+export function isC02PersistedTopicOwned(anchor: string | null, topicId: string): boolean {
+  if (anchor === null || typeof anchor !== 'string' || typeof topicId !== 'string') return false
+  if (anchor.length === 0 || topicId.length === 0) return false
+  const decoded = c02StrictDecodeStableGroupId(anchor)
+  if (decoded !== null) {
+    for (const id of decoded) {
+      if (id === topicId) return true
+      if (id.startsWith(topicId + '-')) return true
+    }
+    return false
+  }
+  if (anchor === topicId) return true
+  if (anchor.startsWith(topicId + '-')) return true
+  return false
+}
+
+/**
+ * Strict DOM anchor identity via decoded singleton grammar (LOCK-001/LOCK-002).
+ *
+ * For partial divider, DOM anchor must be the singleton decoded message ID
+ * exactly equal to the canonical expected/persisted anchor. Composite groups
+ * containing the expected token are NOT exact and fail. Substring `includes`
+ * on the encoded string is forbidden. Decode failure is false — no plain
+ * fallback for DOM.
+ */
+export function isC02ExactAnchorIdentity(domAnchor: string | null, expectedAnchor: string | null): boolean {
+  if (domAnchor === null || expectedAnchor === null) return false
+  if (typeof domAnchor !== 'string' || typeof expectedAnchor !== 'string') return false
+  if (domAnchor.length === 0 || expectedAnchor.length === 0) return false
+  const decoded = c02StrictDecodeStableGroupId(domAnchor)
+  if (decoded === null) return false
+  if (decoded.length !== 1) return false
+  return decoded[0] === expectedAnchor
+}
+
+/**
+ * Persisted anchor identity — plain exact equality for persisted canonical
+ * anchors only. DOM must use strict isC02ExactAnchorIdentity with singleton
+ * decode. This helper never decodes.
+ */
+export function isC02PersistedAnchorIdentity(persistedAnchor: string | null, expectedAnchor: string | null): boolean {
+  if (persistedAnchor === null || expectedAnchor === null) return false
+  if (typeof persistedAnchor !== 'string' || typeof expectedAnchor !== 'string') return false
+  if (persistedAnchor.length === 0 || expectedAnchor.length === 0) return false
+  return persistedAnchor === expectedAnchor
 }
 
 /**
@@ -200,23 +313,35 @@ export interface C02ProductionPathEvidence {
   contextBoundaryPresent: boolean
   contextBoundaryInsideMessages: boolean
   anchorGroupKey: string | null
+  persistedAnchorGroupKey?: string | null
+  expectedAnchorGroupKey?: string | null
+  expectedContext?: C02ExpectedContext | null
   lastTopicId: string
   expectedVisibleFinal: number
 }
 
 /**
- * Narrow harness predicate correction for context evidence.
- * Whole-topic mode (positive integer 1..DEFAULT_CONTEXTCOUNT) is decisive and
- * valid ONLY with no divider anywhere (both flags false) and null anchor.
- * Any divider (inside or global outside) is invalid for whole-topic.
- * Partial-window mode requires divider inside #messages with final-topic-owned anchor.
- * Invalid counts (non-finite, non-integer, <1, >100) are always false.
- * A divider outside #messages is invalid in either branch (LOCK-004).
+ * Narrow harness predicate correction for context evidence ( + C-02 audit + LOCK-001/002).
+ * Whole-topic is derived from the turn oracle (`expectedContext.isWholeTopic` i.e. startIndex===0)
+ * using the actual persisted contextCount, not a hardcoded 25. Missing or mismatched
+ * persisted anchor fails closed (LOCK-001). Whole-topic (non-empty) requires a valid
+ * non-null persisted anchor that equals the expected canonical anchor and is
+ * final-topic-owned, with no divider anywhere and DOM anchor null (LOCK-002 whole-topic).
+ * Partial windows require divider inside #messages with final-topic-owned DOM anchor that
+ * exactly equals the canonical expected/persisted anchor (LOCK-002 partial) and the same
+ * persisted canonical proof via boundary-safe exact identity. Invalid counts, missing
+ * expectedContext, null expected anchor for non-empty topics, mismatched
+ * expectedAnchorGroupKey vs expectedContext.anchorGroupKey, persisted vs expected,
+ * missing/undefined/invalid actual contextCount, or outside/global divider are all invalid.
+ * No inferred 25 fallback; no expected-anchor fallback.
  */
 export function isC02ContextEvidenceValid(evidence: {
   contextBoundaryPresent: boolean
   contextBoundaryInsideMessages: boolean
   anchorGroupKey: string | null
+  persistedAnchorGroupKey?: string | null
+  expectedAnchorGroupKey?: string | null
+  expectedContext?: C02ExpectedContext | null
   lastTopicId: string
   expectedVisibleFinal: number
 }): boolean {
@@ -224,20 +349,44 @@ export function isC02ContextEvidenceValid(evidence: {
   const isValidCount =
     Number.isFinite(v) && Number.isInteger(v) && v >= C02_PRODUCTION_WINDOW_MIN && v <= C02_PRODUCTION_WINDOW_MAX
   if (!isValidCount) return false
-  const wholeTopic = isC02WholeTopicWindow(v)
+  if (evidence.expectedContext === undefined || evidence.expectedContext === null) return false
+  const exp = evidence.expectedContext
+  if (!isC02ExpectedContextValid(exp)) return false
+  if (typeof exp.isWholeTopic !== 'boolean' || typeof exp.boundaryPresent !== 'boolean') return false
+  if (evidence.persistedAnchorGroupKey === undefined || evidence.expectedAnchorGroupKey === undefined) return false
+  if (exp.contextCount === undefined) return false
+  if (exp.contextCount !== null) {
+    if (!Number.isFinite(exp.contextCount) || !Number.isInteger(exp.contextCount) || exp.contextCount < 1) return false
+  }
+  // Require exact equality: expectedAnchorGroupKey must equal canonical oracle anchor, and persisted must equal expected
+  const persisted = evidence.persistedAnchorGroupKey
+  const expectedAnchor = evidence.expectedAnchorGroupKey
+  if (expectedAnchor !== exp.anchorGroupKey) return false
+  if (persisted !== expectedAnchor) return false
+  const isNonEmpty = exp.turnCount > 0
+  if (isNonEmpty && (expectedAnchor === null || persisted === null)) return false
+  const persistedValid =
+    persisted !== null &&
+    expectedAnchor !== null &&
+    persisted === expectedAnchor &&
+    isC02PersistedTopicOwned(persisted, evidence.lastTopicId)
+  if (!persistedValid) return false
+  const wholeTopic = exp.isWholeTopic
   if (wholeTopic) {
-    // Decisive whole-topic branch — no divider anywhere, null anchor
+    // Whole-topic: no divider anywhere, DOM anchor null, persisted valid non-null (LOCK-002 whole-topic)
     return (
       !evidence.contextBoundaryPresent && !evidence.contextBoundaryInsideMessages && evidence.anchorGroupKey === null
     )
   }
-  // Partial window — strict divider inside #messages with final-topic-owned anchor (exact, collision-safe)
+  // Partial window — strict divider inside #messages with final-topic-owned anchor and exact canonical identity (LOCK-002 partial)
+  if (evidence.anchorGroupKey === null) return false
   const anchorOwnedByFinalTopic = isC02ExactTopicOwned(evidence.anchorGroupKey, evidence.lastTopicId)
+  const anchorExactIdentity = isC02ExactAnchorIdentity(evidence.anchorGroupKey, expectedAnchor)
   return (
     evidence.contextBoundaryPresent &&
     evidence.contextBoundaryInsideMessages &&
-    evidence.anchorGroupKey !== null &&
-    anchorOwnedByFinalTopic
+    anchorOwnedByFinalTopic &&
+    anchorExactIdentity
   )
 }
 
@@ -253,6 +402,198 @@ export function isC02ProductionPathComplete(evidence: C02ProductionPathEvidence)
     evidence.groupOwnershipProof &&
     isC02ContextEvidenceValid(evidence)
   )
+}
+
+// ---------------------------------------------------------------------------
+// Pure expected-turn/anchor/boundary oracle — production-equivalent turn rules
+// ---------------------------------------------------------------------------
+
+/** Minimal turn shape for the pure oracle (mirrors contextTurnService). */
+export interface C02Turn {
+  key: string
+  messages: Array<Record<string, unknown>>
+}
+
+/**
+ * Pure, production-equivalent turn construction for the harness oracle.
+ * Mirrors `src/renderer/src/services/contextTurnService.ts:buildContextTurns`:
+ * user starts new turn keyed by its id; assistant with askId === current key joins;
+ * otherwise assistant starts new turn keyed by askId or own id; system standalone;
+ * unknown roles ignored.
+ */
+export function c02BuildContextTurns(messages: Array<Record<string, unknown>>): C02Turn[] {
+  const turns: Array<{ key: string; messages: Array<Record<string, unknown>> }> = []
+  let currentTurnKey: string | null = null
+  for (const message of messages) {
+    const role = (message as any).role as string | undefined
+    const id = (message as any).id as string | undefined
+    const askId = (message as any).askId as string | undefined
+    if (!id) continue
+    if (role === 'system') {
+      currentTurnKey = id
+      turns.push({ key: currentTurnKey, messages: [message] })
+    } else if (role === 'user') {
+      currentTurnKey = id
+      turns.push({ key: currentTurnKey, messages: [message] })
+    } else if (role === 'assistant') {
+      if (askId && askId === currentTurnKey) {
+        turns[turns.length - 1]!.messages.push(message)
+      } else {
+        if (askId) currentTurnKey = askId
+        else currentTurnKey = id
+        turns.push({ key: currentTurnKey, messages: [message] })
+      }
+    } else {
+      continue
+    }
+  }
+  return turns
+}
+
+export function c02ResolveDefaultAnchorIndex(turns: readonly C02Turn[], contextCount: number | null): number {
+  if (turns.length === 0) return -1
+  if (contextCount === null) return 0
+  const n = Math.max(1, Math.floor(contextCount))
+  return Math.max(0, turns.length - n)
+}
+
+export interface C02ExpectedContext {
+  turnCount: number
+  startIndex: number
+  anchorGroupKey: string | null
+  boundaryPresent: boolean
+  isWholeTopic: boolean
+  contextCount: number | null
+}
+
+/**
+ * Pure helper to compute expected startIndex from turnCount/contextCount alone
+ * (mirrors c02ResolveDefaultAnchorIndex without needing turn objects).
+ */
+export function c02ExpectedStartIndexForTurnCount(turnCount: number, contextCount: number | null): number {
+  if (!Number.isFinite(turnCount) || !Number.isInteger(turnCount) || turnCount < 0) return -2
+  if (turnCount === 0) return -1
+  if (contextCount === null) return 0
+  const n = Math.max(1, Math.floor(contextCount))
+  return Math.max(0, turnCount - n)
+}
+
+/**
+ * Runtime validation for C02ExpectedContext proof (LOCK-004).
+ * Returns true iff all required fields satisfy:
+ * - turnCount integer >=0
+ * - contextCount null or integer >=1
+ * - startIndex consistent with turnCount/contextCount via c02ExpectedStartIndexForTurnCount
+ * - anchor null iff turnCount 0 else non-empty string (when turnCount>0, anchor must be non-empty; when 0, anchor must be null)
+ * - isWholeTopic iff startIndex===0 for non-empty (turnCount>0 ? isWholeTopic===(startIndex===0) : isWholeTopic===false)
+ * - boundaryPresent iff startIndex>0
+ * Missing/malformed/mismatched proof fails closed.
+ */
+export function isC02ExpectedContextValid(ctx: unknown): boolean {
+  if (typeof ctx !== 'object' || ctx === null) return false
+  const c = ctx as Record<string, unknown>
+  const turnCount = c.turnCount as unknown
+  const contextCount = c.contextCount as unknown
+  const startIndex = c.startIndex as unknown
+  const anchorGroupKey = c.anchorGroupKey as unknown
+  const isWholeTopic = c.isWholeTopic as unknown
+  const boundaryPresent = c.boundaryPresent as unknown
+  if (typeof turnCount !== 'number' || !Number.isFinite(turnCount) || !Number.isInteger(turnCount) || turnCount < 0)
+    return false
+  if (contextCount !== null) {
+    if (
+      typeof contextCount !== 'number' ||
+      !Number.isFinite(contextCount) ||
+      !Number.isInteger(contextCount) ||
+      contextCount < 1
+    )
+      return false
+  }
+  if (typeof startIndex !== 'number' || !Number.isFinite(startIndex) || !Number.isInteger(startIndex)) return false
+  const expectedStart = c02ExpectedStartIndexForTurnCount(turnCount as number, contextCount as number | null)
+  if (startIndex !== expectedStart) return false
+  if (turnCount === 0) {
+    if (anchorGroupKey !== null) return false
+  } else {
+    if (typeof anchorGroupKey !== 'string' || (anchorGroupKey as string).length === 0) return false
+  }
+  if (typeof isWholeTopic !== 'boolean' || typeof boundaryPresent !== 'boolean') return false
+  const expectedWhole = turnCount > 0 ? startIndex === 0 : false
+  if (isWholeTopic !== expectedWhole) return false
+  const expectedBoundary = startIndex > 0
+  if (boundaryPresent !== expectedBoundary) return false
+  return true
+}
+
+/**
+ * Pure expected context derivation from production-equivalent turns and actual
+ * persisted contextCount (not hardcoded visible count). Whole-topic is
+ * `startIndex === 0` (turnCount <= contextCount or unlimited). Boundary is
+ * present iff startIndex > 0. Anchor is turns[startIndex].key when present.
+ */
+export function c02DeriveExpectedContext(
+  messages: Array<Record<string, unknown>>,
+  contextCount: number | null
+): C02ExpectedContext {
+  const turns = c02BuildContextTurns(messages)
+  const turnCount = turns.length
+  const startIndex = c02ResolveDefaultAnchorIndex(turns, contextCount)
+  const anchorGroupKey = startIndex >= 0 ? turns[startIndex]!.key : null
+  const isWholeTopic = startIndex === 0
+  const boundaryPresent = startIndex > 0
+  return { turnCount, startIndex, anchorGroupKey, boundaryPresent, isWholeTopic, contextCount }
+}
+
+export function c02DeriveExpectedContextForTopic(
+  topic: LogicalPayloadTopicInput,
+  contextCount: number | null
+): C02ExpectedContext {
+  return c02DeriveExpectedContext(topic.messages as Array<Record<string, unknown>>, contextCount)
+}
+
+/**
+ * Verified canonical context evidence required for artifact
+ * completeness. All four fields are required for `productionPath.complete` /
+ * `calibration.complete` to be true; builders never synthesize fallback anchors
+ * or contexts. Missing or mismatched evidence fails closed (complete=false).
+ */
+export interface C02VerifiedContextEvidence {
+  persistedAnchorGroupKey: string | null
+  expectedAnchorGroupKey: string | null
+  expectedContext: C02ExpectedContext
+  contextCount: number | null
+}
+
+/**
+ * Explicit verified fixture helper for focused tests. Derives production-equivalent
+ * expectedContext from paired messageCount and actual contextCount, and returns
+ * matching persisted/expected anchors that are final-topic-owned. Use this in unit
+ * tests instead of relying on synthetic fallback.
+ */
+export function createC02VerifiedEvidenceForTest(
+  lastTopicId: string,
+  messageCount: number,
+  contextCount: number | null
+): C02VerifiedContextEvidence {
+  // Derive from production-equivalent synthetic messages (paired askId), not fabricated turn keys
+  const msgs: Array<Record<string, unknown>> = []
+  for (let i = 0; i < messageCount; i++) {
+    const role = i % 2 === 0 ? 'user' : 'assistant'
+    const id = `${lastTopicId}-msg-${String(i).padStart(3, '0')}`
+    if (role === 'user') msgs.push({ id, role, topicId: lastTopicId } as any)
+    else {
+      const prevId = `${lastTopicId}-msg-${String(i - 1).padStart(3, '0')}`
+      msgs.push({ id, role, askId: prevId, topicId: lastTopicId } as any)
+    }
+  }
+  const expectedContext = c02DeriveExpectedContext(msgs as any, contextCount)
+  const anchor = expectedContext.anchorGroupKey
+  return {
+    persistedAnchorGroupKey: anchor,
+    expectedAnchorGroupKey: anchor,
+    expectedContext,
+    contextCount
+  }
 }
 
 /** Expected visible/projected count for a profile — production latest-window count. */
@@ -566,9 +907,32 @@ function pad(n: number, width: number): string {
 }
 
 /**
+ * C-02-only paired askId correction (LOCK-004): synthetic assistant messages
+ * must carry askId linking to the preceding user message so that production
+ * turn construction (`buildContextTurns`) groups them as paired user/assistant
+ * turns (1 turn = user + following assistant with matching askId). Without
+ * askId each assistant becomes an orphan turn, doubling turn count and breaking
+ * context-window anchor derivation. This patch is C-02-only and does not alter
+ * the shared `createSyntheticTopic` semantics for unrelated corpus (C-01).
+ */
+function c02PatchPairedAskIdForTopic(topic: LogicalPayloadTopicInput): void {
+  const msgs = topic.messages as Array<Record<string, unknown>>
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i] as Record<string, unknown> & { role?: string; id?: string; askId?: string | null }
+    if (m.role === 'assistant') {
+      const prev = i > 0 ? (msgs[i - 1] as Record<string, unknown> & { role?: string; id?: string }) : null
+      if (prev && prev.role === 'user' && typeof prev.id === 'string') {
+        m.askId = prev.id
+      }
+    }
+  }
+}
+
+/**
  * Build a deterministic synthetic topic set matching the given profile.
  * Uses the canonical `createSyntheticTopic` helper so byte accounting is
- * identical to C-01 logical payload calibration.
+ * identical to C-01 logical payload calibration, then applies C-02-only paired
+ * askId correction so turn construction is production-equivalent.
  */
 export function buildC02SyntheticTopics(profile: C02HeapProfile): LogicalPayloadTopicInput[] {
   return buildC02SyntheticTopicsWithPrefix(profile, 'c02-heap-topic')
@@ -578,15 +942,15 @@ export function buildC02SyntheticTopics(profile: C02HeapProfile): LogicalPayload
 export function buildC02SyntheticTopicsWithPrefix(profile: C02HeapProfile, prefix: string): LogicalPayloadTopicInput[] {
   const topics: LogicalPayloadTopicInput[] = []
   for (let t = 0; t < profile.syntheticTopics; t++) {
-    topics.push(
-      createSyntheticTopic({
-        topicId: `${prefix}-${pad(t, 2)}`,
-        messageCount: profile.syntheticMessagesPerTopic,
-        blockContentSize: profile.blockContentBytes,
-        segmentCount: profile.segmentCountPerTopic,
-        generation: profile.applicabilityGeneration
-      })
-    )
+    const topic = createSyntheticTopic({
+      topicId: `${prefix}-${pad(t, 2)}`,
+      messageCount: profile.syntheticMessagesPerTopic,
+      blockContentSize: profile.blockContentBytes,
+      segmentCount: profile.segmentCountPerTopic,
+      generation: profile.applicabilityGeneration
+    })
+    c02PatchPairedAskIdForTopic(topic)
+    topics.push(topic)
   }
   return topics
 }
@@ -603,17 +967,23 @@ export function buildC02MixedSyntheticTopicsWithPrefix(
   const topics: LogicalPayloadTopicInput[] = []
   for (let t = 0; t < profile.topicSpecs.length; t++) {
     const spec = profile.topicSpecs[t]!
-    topics.push(
-      createSyntheticTopic({
-        topicId: `${prefix}-${pad(t, 2)}`,
-        messageCount: spec.messageCount,
-        blockContentSize: spec.blockContentBytes,
-        segmentCount: spec.segmentCountPerTopic,
-        generation: profile.applicabilityGeneration
-      })
-    )
+    const topic = createSyntheticTopic({
+      topicId: `${prefix}-${pad(t, 2)}`,
+      messageCount: spec.messageCount,
+      blockContentSize: spec.blockContentBytes,
+      segmentCount: spec.segmentCountPerTopic,
+      generation: profile.applicabilityGeneration
+    })
+    c02PatchPairedAskIdForTopic(topic)
+    topics.push(topic)
   }
   return topics
+}
+
+/** Turn count for a message count under paired askId (user+assistant per turn). */
+export function c02TurnCountForMessageCount(messageCount: number): number {
+  if (!Number.isFinite(messageCount) || messageCount <= 0) return 0
+  return Math.ceil(messageCount / 2)
 }
 
 /** Canonical logical bytes for a single topic (phase4-logical-payload-v1). */
@@ -1131,12 +1501,20 @@ export interface C02AllocationForArtifact {
     displayMessages: number
     anchorGroupKey: string | null
     contextBoundaryPresent: boolean
-    /** Strict inside-messages signal — mandatory fail-closed per LOCK-004; whole-topic (1..25) requires no divider anywhere + null anchor, partial requires divider inside #messages + final-owned anchor. */
+    /** Strict inside-messages signal — mandatory fail-closed per LOCK-004; whole-topic via turn oracle requires no divider anywhere + DOM null with valid persisted anchor, partial requires divider inside #messages + final-owned anchor. */
     contextBoundaryInsideMessages: boolean
     finalTopicDomProof: boolean
     groupExactMatched?: boolean
     groupsWithFinalTopic?: number
     globalDisplayMessages: number
+    /** Persisted canonical anchor proof — must equal expected oracle anchor and be final-topic-owned; missing/mismatched fails closed (). Required for completeness. */
+    persistedAnchorGroupKey: string | null
+    /** Expected canonical anchor from turn oracle (turns + actual contextCount); must equal persisted for complete (). Required for completeness. */
+    expectedAnchorGroupKey: string | null
+    /** Expected context oracle derived from production-equivalent turns + actual persisted contextCount; whole-topic = startIndex===0 (). Required for completeness. */
+    expectedContext: C02ExpectedContext | null
+    /** Actual persisted contextCount from store (scalar, null=unlimited). Required for completeness — mirrors expectedContext.contextCount. */
+    contextCount: number | null
   }
   productionPath: string
   productionPathComplete?: boolean
@@ -1161,7 +1539,7 @@ export function buildC02BenchmarkResult(
 ): BenchmarkResult {
   if (typeof allocation.projectionStats.contextBoundaryInsideMessages !== 'boolean') {
     throw new Error(
-      '[PERF-C02] fail-closed: contextBoundaryInsideMessages is required (boolean) — whole-topic windows (1..25) require no divider anywhere + null anchor; partial windows require divider inside #messages + final-owned anchor (LOCK-004)'
+      '[PERF-C02] fail-closed: contextBoundaryInsideMessages is required (boolean) — whole-topic via turn oracle startIndex===0 requires no divider anywhere + DOM null with valid persisted anchor; partial windows require divider inside #messages + final-owned anchor (LOCK-004)'
     )
   }
   const amplification = computeHeapAmplification(heapBefore, heapAfter, logicalBytes)
@@ -1175,16 +1553,50 @@ export function buildC02BenchmarkResult(
 
   const expectedVisible = c02ExpectedVisibleCount(profile)
   const expectedTopicSuffix = `c02-heap-topic-${String(profile.syntheticTopics - 1).padStart(2, '0')}`
-  const anchorFinalTopicOwned = isC02ExactTopicOwned(allocation.projectionStats.anchorGroupKey, expectedTopicSuffix)
   const lastTopicIdForContext = expectedTopicSuffix
+  // LOCK-001/004 fail-closed: never synthesize proof. Missing/undefined/invalid persisted/expected/contextCount yields complete=false. No fallback. Required proof fields (LOCK-004) — runtime validation covers turnCount/contextCount/startIndex/anchor/isWholeTopic/boundaryPresent.
+  const expectedContext = allocation.projectionStats.expectedContext
+  const expectedAnchorGroupKey = allocation.projectionStats.expectedAnchorGroupKey
+  const persistedAnchorGroupKey = allocation.projectionStats.persistedAnchorGroupKey
+  const actualContextCount = allocation.projectionStats.contextCount
+  const expectedContextValid = expectedContext !== null && isC02ExpectedContextValid(expectedContext)
+  const actualContextCountValid =
+    expectedContextValid &&
+    (actualContextCount === null ||
+      (typeof actualContextCount === 'number' &&
+        Number.isFinite(actualContextCount) &&
+        Number.isInteger(actualContextCount) &&
+        actualContextCount >= 1))
+  const contextCountMatches =
+    expectedContext !== null && expectedContextValid && actualContextCount === expectedContext.contextCount
+  const anchorFinalTopicOwned = isC02ExactTopicOwned(allocation.projectionStats.anchorGroupKey, lastTopicIdForContext)
+  const persistedOwned =
+    persistedAnchorGroupKey !== null ? isC02PersistedTopicOwned(persistedAnchorGroupKey, lastTopicIdForContext) : false
+  const persistedEqualsExpected =
+    persistedAnchorGroupKey !== null &&
+    expectedAnchorGroupKey !== null &&
+    persistedAnchorGroupKey === expectedAnchorGroupKey
+  const persistedValid =
+    persistedEqualsExpected && persistedOwned && actualContextCountValid && contextCountMatches && expectedContextValid
+  const expectedAnchorEqualsOracle =
+    expectedContext !== null && expectedContextValid && expectedAnchorGroupKey === expectedContext.anchorGroupKey
   const contextBoundaryInsideMessagesForGate = allocation.projectionStats.contextBoundaryInsideMessages
-  const contextEvidenceValid = isC02ContextEvidenceValid({
+  const rawContextEvidenceValid = isC02ContextEvidenceValid({
     contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
     contextBoundaryInsideMessages: contextBoundaryInsideMessagesForGate,
     anchorGroupKey: allocation.projectionStats.anchorGroupKey,
+    persistedAnchorGroupKey: persistedAnchorGroupKey,
+    expectedAnchorGroupKey: expectedAnchorGroupKey,
+    expectedContext: expectedContext,
     lastTopicId: lastTopicIdForContext,
     expectedVisibleFinal: expectedVisible
   })
+  const contextEvidenceValid =
+    rawContextEvidenceValid &&
+    expectedAnchorEqualsOracle &&
+    contextCountMatches &&
+    actualContextCountValid &&
+    expectedContextValid
   // Derive DOM/group validity from observed scalar counts — caller booleans are diagnostic only (fail-closed)
   const derivedFinalTopicDomProof = deriveFinalTopicDomProof(
     allocation.projectionStats.displayMessages,
@@ -1202,10 +1614,18 @@ export function buildC02BenchmarkResult(
     contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
     contextBoundaryInsideMessages: allocation.projectionStats.contextBoundaryInsideMessages,
     anchorGroupKey: allocation.projectionStats.anchorGroupKey,
+    persistedAnchorGroupKey: persistedAnchorGroupKey,
+    expectedAnchorGroupKey: expectedAnchorGroupKey,
+    expectedContext: expectedContext,
     lastTopicId: lastTopicIdForContext,
     expectedVisibleFinal: expectedVisible
   })
-  const effectiveProductionPathComplete = derivedProductionPathComplete
+  const effectiveProductionPathComplete =
+    derivedProductionPathComplete &&
+    expectedAnchorEqualsOracle &&
+    contextCountMatches &&
+    actualContextCountValid &&
+    expectedContextValid
   void allocation.productionPathComplete
   const authoritativeComplete = effectiveInformative && effectiveProductionPathComplete
   const safeHeapDeltaCategory = deriveSafeHeapDeltaCategory(
@@ -1345,19 +1765,19 @@ export function buildC02BenchmarkResult(
     },
     {
       id: 'projection.contextBoundaryPresent',
-      name: 'context boundary inside #messages mandatory signal per LOCK-004 — whole-topic windows (1..25) require no divider anywhere + null anchor (valid 0), partial windows require divider inside #messages + final-owned anchor (valid 1); outside/global invalid; explicit inside signal mandatory (fail-closed)',
+      name: 'context boundary inside #messages mandatory signal per LOCK-004 — whole-topic via turn oracle startIndex===0 requires no divider anywhere + DOM null with valid persisted anchor, partial requires divider inside #messages + final-owned anchor; outside/global invalid; explicit inside signal mandatory (fail-closed)',
       value: allocation.projectionStats.contextBoundaryPresent ? 1 : 0,
       unit: 'count'
     },
     {
       id: 'projection.productionPathComplete',
-      name: 'productionPath complete derived from evidence predicate (LOCK-004) — whole-topic (1..25) no-divider/null-anchor branch and partial inside-divider/final-owned branch; 1= derived predicate true (Redux verified + final-topic ownership + exact groups + valid context per branch), 0= partial/inconclusive — caller bool cannot override invalid evidence (fail-closed)',
+      name: 'productionPath complete derived from turn oracle — whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial inside-divider/final-owned + persisted; 1= derived true, 0= partial/inconclusive — caller bool cannot override invalid evidence (fail-closed)',
       value: effectiveProductionPathComplete ? 1 : 0,
       unit: 'count'
     },
     {
       id: 'calibration.complete',
-      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal; invalid heap or invalid/omitted inside signal never yields complete)',
+      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete per turn oracle (whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial inside-divider/final-owned + persisted with explicit inside signal; invalid heap or invalid/omitted inside signal never yields complete)',
       value: authoritativeComplete ? 1 : 0,
       unit: 'count'
     }
@@ -1401,17 +1821,17 @@ export function buildC02BenchmarkResult(
     },
     {
       id: 'allocation.resident',
-      name: 'Redux entity projection + derived viewport/group/context via actual rendered Chat path — authoritative calibration complete requires effective heap AND derived productionPath (LOCK-004 branches: whole-topic 1..25 no-divider/null-anchor OR partial inside-divider/final-owned) (renderer heap)',
+      name: 'Redux entity projection + derived viewport/group/context via actual rendered Chat path — authoritative calibration complete requires effective heap AND derived productionPath per turn oracle (whole-topic startIndex===0 no-divider/null-anchor + persisted canonical OR partial inside-divider/final-owned + persisted) (renderer heap)',
       kind: 'correctness',
       passed: authoritativeComplete,
       detail: `directional synthetic: Redux projection — ${allocation.projectionStats.reduxMessages} messages, ${allocation.projectionStats.reduxBlocks} blocks; derived DOM — ${allocation.projectionStats.groupCount} groups (#messages [data-stable-group-id]) exact=${derivedGroupCountExact ? 1 : 0} (derived groupCount=${allocation.projectionStats.groupCount} vs expectedVisible=${expectedVisible}, caller ${allocation.projectionStats.groupExactMatched ?? 'undef'} ignored fail-closed), displayMessages scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages} (finalTopicProof=${derivedFinalTopicDomProof ? 1 : 0} derived scoped/global vs expectedVisible, caller ${allocation.projectionStats.finalTopicDomProof ? 1 : 0} ignored fail-closed via #messages [data-message-id]), groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}; contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${allocation.projectionStats.contextBoundaryInsideMessages ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0} (exact boundary-safe isC02ExactTopicOwned); stage=${safeProductionPathStage}; derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed); effectiveInformative=${effectiveInformative ? 1 : 0} (derived measured delta=${amplification.heapDeltaBytes} precision=${precision}, caller ${informativeness.informative ? 1 : 0} ignored fail-closed); authoritativeComplete=${authoritativeComplete ? 1 : 0} (requires precise && finite positive delta && valid LOCK-004 context branch; fallback/global never satisfies; invalid heap or omitted inside signal never yields complete). Detached holder removed; heap cost is renderer entity + production-derived projections when authoritative complete, otherwise Redux entity only and derived counts are inconclusive.`
     },
     {
       id: 'productionPath.complete',
-      name: 'productionPath complete derived from evidence predicate (LOCK-004) — whole-topic (1..25) no-divider/null-anchor branch and partial inside-divider/final-owned branch — final clicked topic owns #messages DOM with valid context per branch (no fallback/global satisfies)',
+      name: 'productionPath complete derived from turn oracle — whole-topic startIndex===0 no-divider/null-anchor + persisted canonical OR partial inside-divider/final-owned + persisted — final clicked topic owns #messages DOM with valid context per branch (no fallback/global satisfies)',
       kind: 'correctness',
       passed: authoritativeComplete,
-      detail: `derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed); effectiveInformative=${effectiveInformative ? 1 : 0} (precision=${precision}, delta=${amplification.heapDeltaBytes}); authoritativeComplete=${authoritativeComplete ? 1 : 0}; stage=${safeProductionPathStage} — locked: authoritative complete requires BOTH effective precise heap (precision===precise && finite positive delta) AND derived #messages proof per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor OR partial divider inside #messages with final-owned anchor); fallback [id^="message-"]/global stale DOM or bucketed delta or omitted inside signal never satisfies complete (see perf-c02-heap-calibration.spec.ts activateReduxProjection).`
+      detail: `derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed); effectiveInformative=${effectiveInformative ? 1 : 0} (precision=${precision}, delta=${amplification.heapDeltaBytes}); authoritativeComplete=${authoritativeComplete ? 1 : 0}; stage=${safeProductionPathStage} — locked: authoritative complete requires BOTH effective precise heap (precision===precise && finite positive delta) AND derived #messages proof per turn oracle (whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial divider inside #messages with final-owned + persisted); fallback [id^="message-"]/global stale DOM or bucketed delta or omitted inside signal never satisfies complete (see perf-c02-heap-calibration.spec.ts activateReduxProjection).`
     },
     {
       id: 'projection.finalTopicOwnership',
@@ -1422,17 +1842,17 @@ export function buildC02BenchmarkResult(
     },
     {
       id: 'projection.contextBoundaryExplicit',
-      name: 'context boundary explicit per LOCK-004 — whole-topic windows (1..25) require no divider anywhere + null anchor (valid absent), partial windows require divider inside #messages + final-owned anchor (valid present); outside/global invalid — explicit inside signal mandatory (fail-closed when omitted)',
+      name: 'context boundary explicit per turn oracle — whole-topic startIndex===0 requires no divider anywhere + DOM null with valid persisted anchor (valid absent), partial requires divider inside #messages + final-owned anchor + persisted canonical; outside/global invalid — explicit inside signal mandatory (fail-closed when omitted)',
       kind: 'correctness',
       passed: contextEvidenceValid,
-      detail: `contextEvidenceValid=${contextEvidenceValid ? 1 : 0} via LOCK-004 predicate (wholeTopic=${isC02WholeTopicWindow(expectedVisible) ? 1 : 0} expectedVisible=${expectedVisible} positive integer 1..25 branch); contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${contextBoundaryInsideMessagesForGate ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0} (exact boundary-safe isC02ExactTopicOwned); whole-topic (1..25) valid only with no divider anywhere + null anchor, partial requires divider inside #messages with final-topic-owned anchor, global/outside never satisfies; inside signal mandatory (fail-closed when absent)`
+      detail: `contextEvidenceValid=${contextEvidenceValid ? 1 : 0} via turn oracle (turnCount=${expectedContext?.turnCount ?? 0} isWholeTopic=${expectedContext?.isWholeTopic ? 1 : 0} startIndex=${expectedContext?.startIndex ?? -1} contextCount=${String(expectedContext?.contextCount ?? null)} expectedAnchorPresent=${expectedAnchorGroupKey !== null ? 1 : 0} persistedValid=${persistedValid ? 1 : 0}); contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${contextBoundaryInsideMessagesForGate ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0} persistedOwned=${persistedOwned ? 1 : 0} persistedEqualsExpected=${persistedEqualsExpected ? 1 : 0} (exact boundary-safe isC02ExactTopicOwned); whole-topic (startIndex===0) valid only with no divider anywhere + DOM null + persisted canonical anchor, partial requires divider inside #messages with final-topic-owned anchor + persisted canonical, global/outside never satisfies; inside signal mandatory (fail-closed when absent)`
     },
     {
       id: 'calibration.complete',
-      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal; invalid heap or invalid/omitted inside signal never yields complete)',
+      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete per turn oracle (whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial inside-divider/final-owned + persisted with explicit inside signal; invalid heap or invalid/omitted inside signal never yields complete)',
       kind: 'correctness',
       passed: authoritativeComplete,
-      detail: `authoritativeComplete=${authoritativeComplete ? 1 : 0}; effectiveInformative=${effectiveInformative ? 1 : 0} (derived from measured delta=${amplification.heapDeltaBytes} precision=${precision}, caller ${informativeness.informative ? 1 : 0} ignored when invalid, fail-closed) derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed) (finalTopicProof=${derivedFinalTopicDomProof ? 1 : 0}, groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}, contextInsideMessages=${allocation.projectionStats.contextBoundaryInsideMessages ? 1 : 0}); complete evidence strictly requires precise && finite positive heap delta AND #messages [data-message-id]/[data-stable-group-id]/[data-context-boundary] with LOCK-004 branch validity (whole-topic 1..25 no-divider/null-anchor OR partial divider inside + final-owned anchor) — zero/negative/non-finite/bucketed deltas, [id^="message-"] fallback, global/outside, or omitted inside signal are inconclusive`
+      detail: `authoritativeComplete=${authoritativeComplete ? 1 : 0}; effectiveInformative=${effectiveInformative ? 1 : 0} (derived from measured delta=${amplification.heapDeltaBytes} precision=${precision}, caller ${informativeness.informative ? 1 : 0} ignored when invalid, fail-closed) derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed) (finalTopicProof=${derivedFinalTopicDomProof ? 1 : 0}, groupsWithFinalTopic=${allocation.projectionStats.groupsWithFinalTopic ?? 0}, contextInsideMessages=${allocation.projectionStats.contextBoundaryInsideMessages ? 1 : 0} persistedValid=${persistedValid ? 1 : 0} expectedIsWholeTopic=${expectedContext?.isWholeTopic ? 1 : 0}); complete evidence strictly requires precise && finite positive heap delta AND #messages [data-message-id]/[data-stable-group-id]/[data-context-boundary] with turn oracle validity (whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial divider inside + final-owned + persisted) — zero/negative/non-finite/bucketed deltas, [id^="message-"] fallback, global/outside, or omitted inside signal are inconclusive`
     },
     {
       id: 'environment.abi145',
@@ -1481,7 +1901,7 @@ export function buildC02MixedBenchmarkResult(
 ): BenchmarkResult {
   if (typeof allocation.projectionStats.contextBoundaryInsideMessages !== 'boolean') {
     throw new Error(
-      '[PERF-C02] fail-closed: contextBoundaryInsideMessages is required (boolean) — whole-topic windows (1..25) require no divider anywhere + null anchor; partial windows require divider inside #messages + final-owned anchor (LOCK-004)'
+      '[PERF-C02] fail-closed: contextBoundaryInsideMessages is required (boolean) — whole-topic via turn oracle startIndex===0 requires no divider anywhere + DOM null with valid persisted anchor; partial windows require divider inside #messages + final-owned anchor (LOCK-004)'
     )
   }
   const amplification = computeHeapAmplification(heapBefore, heapAfter, logicalBytes)
@@ -1494,15 +1914,60 @@ export function buildC02MixedBenchmarkResult(
   const lastSpec = profile.topicSpecs[profile.topicSpecs.length - 1]!
   const expectedVisible = c02MixedExpectedVisibleCountForSpec(lastSpec)
   const lastTopicIdForContext = `c02-mixed-topic-${String(profile.topicSpecs.length - 1).padStart(2, '0')}`
+  // LOCK-001/004 fail-closed: never synthesize proof. Missing/undefined/invalid persisted/expected/contextCount yields complete=false. No fallback. Required proof fields — runtime validation covers turnCount/contextCount/startIndex/anchor/isWholeTopic/boundaryPresent.
+  const expectedContextMixed = allocation.projectionStats.expectedContext
+  const expectedAnchorGroupKeyMixed = allocation.projectionStats.expectedAnchorGroupKey
+  const persistedAnchorGroupKeyMixed = allocation.projectionStats.persistedAnchorGroupKey
+  const actualContextCountMixed = allocation.projectionStats.contextCount
+  const expectedContextMixedValid = expectedContextMixed !== null && isC02ExpectedContextValid(expectedContextMixed)
+  const actualMixedValid =
+    expectedContextMixedValid &&
+    (actualContextCountMixed === null ||
+      (typeof actualContextCountMixed === 'number' &&
+        Number.isFinite(actualContextCountMixed) &&
+        Number.isInteger(actualContextCountMixed) &&
+        actualContextCountMixed >= 1))
+  const contextCountMatchesMixed =
+    expectedContextMixed !== null &&
+    expectedContextMixedValid &&
+    actualContextCountMixed === expectedContextMixed.contextCount
+  const expectedAnchorEqualsOracleMixed =
+    expectedContextMixed !== null &&
+    expectedContextMixedValid &&
+    expectedAnchorGroupKeyMixed === expectedContextMixed.anchorGroupKey
   const contextBoundaryInsideMessagesForGate = allocation.projectionStats.contextBoundaryInsideMessages
   const anchorFinalTopicOwned = isC02ExactTopicOwned(allocation.projectionStats.anchorGroupKey, lastTopicIdForContext)
-  const contextEvidenceValid = isC02ContextEvidenceValid({
+  const persistedOwnedMixed =
+    persistedAnchorGroupKeyMixed !== null
+      ? isC02PersistedTopicOwned(persistedAnchorGroupKeyMixed, lastTopicIdForContext)
+      : false
+  const persistedEqualsExpectedMixed =
+    persistedAnchorGroupKeyMixed !== null &&
+    expectedAnchorGroupKeyMixed !== null &&
+    persistedAnchorGroupKeyMixed === expectedAnchorGroupKeyMixed
+  const persistedValidMixed =
+    persistedEqualsExpectedMixed &&
+    persistedOwnedMixed &&
+    actualMixedValid &&
+    contextCountMatchesMixed &&
+    expectedAnchorEqualsOracleMixed &&
+    expectedContextMixedValid
+  const rawContextEvidenceValidMixed = isC02ContextEvidenceValid({
     contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
     contextBoundaryInsideMessages: contextBoundaryInsideMessagesForGate,
     anchorGroupKey: allocation.projectionStats.anchorGroupKey,
+    persistedAnchorGroupKey: persistedAnchorGroupKeyMixed,
+    expectedAnchorGroupKey: expectedAnchorGroupKeyMixed,
+    expectedContext: expectedContextMixed,
     lastTopicId: lastTopicIdForContext,
     expectedVisibleFinal: expectedVisible
   })
+  const contextEvidenceValid =
+    rawContextEvidenceValidMixed &&
+    expectedAnchorEqualsOracleMixed &&
+    contextCountMatchesMixed &&
+    actualMixedValid &&
+    expectedContextMixedValid
   // Derive DOM/group validity from observed scalar counts — caller booleans are diagnostic only (fail-closed)
   const derivedFinalTopicDomProofMixed = deriveFinalTopicDomProof(
     allocation.projectionStats.displayMessages,
@@ -1520,10 +1985,18 @@ export function buildC02MixedBenchmarkResult(
     contextBoundaryPresent: allocation.projectionStats.contextBoundaryPresent,
     contextBoundaryInsideMessages: allocation.projectionStats.contextBoundaryInsideMessages,
     anchorGroupKey: allocation.projectionStats.anchorGroupKey,
+    persistedAnchorGroupKey: persistedAnchorGroupKeyMixed,
+    expectedAnchorGroupKey: expectedAnchorGroupKeyMixed,
+    expectedContext: expectedContextMixed,
     lastTopicId: lastTopicIdForContext,
     expectedVisibleFinal: expectedVisible
   })
-  const effectiveProductionPathComplete = derivedProductionPathComplete
+  const effectiveProductionPathComplete =
+    derivedProductionPathComplete &&
+    expectedAnchorEqualsOracleMixed &&
+    contextCountMatchesMixed &&
+    actualMixedValid &&
+    expectedContextMixedValid
   void allocation.productionPathComplete
   const authoritativeComplete = effectiveInformative && effectiveProductionPathComplete
   const safeHeapDeltaCategory = deriveSafeHeapDeltaCategory(
@@ -1659,19 +2132,19 @@ export function buildC02MixedBenchmarkResult(
     },
     {
       id: 'projection.contextBoundaryPresent',
-      name: 'context boundary inside #messages mandatory signal per LOCK-004 (mixed) — whole-topic windows (1..25) require no divider anywhere + null anchor (valid 0), partial windows require divider inside #messages + final-owned anchor (valid 1); outside/global invalid; explicit inside signal mandatory (fail-closed)',
+      name: 'context boundary inside #messages mandatory signal per LOCK-004 (mixed) — whole-topic via turn oracle startIndex===0 requires no divider anywhere + DOM null with valid persisted anchor, partial requires divider inside #messages + final-owned anchor; outside/global invalid; explicit inside signal mandatory (fail-closed)',
       value: allocation.projectionStats.contextBoundaryPresent ? 1 : 0,
       unit: 'count'
     },
     {
       id: 'projection.productionPathComplete',
-      name: 'productionPath complete derived from evidence predicate (LOCK-004 mixed) — whole-topic (1..25) no-divider/null-anchor branch and partial inside-divider/final-owned branch; 1= derived true, 0= partial/inconclusive — caller bool cannot override (fail-closed)',
+      name: 'productionPath complete derived from turn oracle (mixed) — whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial inside-divider/final-owned + persisted; 1= derived true, 0= partial/inconclusive — caller bool cannot override (fail-closed)',
       value: effectiveProductionPathComplete ? 1 : 0,
       unit: 'count'
     },
     {
       id: 'calibration.complete',
-      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal) (mixed)',
+      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete per turn oracle (whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial inside-divider/final-owned + persisted with explicit inside signal) (mixed)',
       value: authoritativeComplete ? 1 : 0,
       unit: 'count'
     }
@@ -1717,17 +2190,17 @@ export function buildC02MixedBenchmarkResult(
     },
     {
       id: 'allocation.resident',
-      name: 'Redux entity projection + derived viewport/group/context via actual rendered Chat path (mixed) — authoritative complete requires effective heap AND derived productionPath per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor OR partial inside-divider/final-owned)',
+      name: 'Redux entity projection + derived viewport/group/context via actual rendered Chat path (mixed) — authoritative complete requires effective heap AND derived productionPath per turn oracle (whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial inside-divider/final-owned + persisted)',
       kind: 'correctness',
       passed: authoritativeComplete,
-      detail: `mixed Redux ${allocation.projectionStats.reduxMessages} msgs ${allocation.projectionStats.reduxBlocks} blocks; derived groups ${allocation.projectionStats.groupCount} exact=${derivedGroupCountExactMixed ? 1 : 0} (derived groupCount=${allocation.projectionStats.groupCount} vs expectedVisible=${expectedVisible}, caller ${allocation.projectionStats.groupExactMatched ?? 'undef'} ignored fail-closed), display scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages} finalTopicProof=${derivedFinalTopicDomProofMixed ? 1 : 0} (derived scoped/global vs expectedVisible, caller ${allocation.projectionStats.finalTopicDomProof ? 1 : 0} ignored fail-closed); contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${allocation.projectionStats.contextBoundaryInsideMessages ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0} (exact boundary-safe isC02ExactTopicOwned); stage=${safeProductionPathStage} derivedComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed) effective=${effectiveInformative ? 1 : 0} (derived delta=${amplification.heapDeltaBytes} precision=${precision}, caller ${informativeness.informative ? 1 : 0} ignored fail-closed) category=${safeHeapDeltaCategory}; valid branches: whole-topic (1..25) no-divider/null-anchor, partial inside-divider/final-owned; omitted inside signal never yields complete`
+      detail: `mixed Redux ${allocation.projectionStats.reduxMessages} msgs ${allocation.projectionStats.reduxBlocks} blocks; derived groups ${allocation.projectionStats.groupCount} exact=${derivedGroupCountExactMixed ? 1 : 0} (derived groupCount=${allocation.projectionStats.groupCount} vs expectedVisible=${expectedVisible}, caller ${allocation.projectionStats.groupExactMatched ?? 'undef'} ignored fail-closed), display scoped=${allocation.projectionStats.displayMessages} global=${allocation.projectionStats.globalDisplayMessages} finalTopicProof=${derivedFinalTopicDomProofMixed ? 1 : 0} (derived scoped/global vs expectedVisible, caller ${allocation.projectionStats.finalTopicDomProof ? 1 : 0} ignored fail-closed); contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${allocation.projectionStats.contextBoundaryInsideMessages ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0} (exact boundary-safe isC02ExactTopicOwned); stage=${safeProductionPathStage} derivedComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed) effective=${effectiveInformative ? 1 : 0} (derived delta=${amplification.heapDeltaBytes} precision=${precision}, caller ${informativeness.informative ? 1 : 0} ignored fail-closed) category=${safeHeapDeltaCategory}; valid branches: whole-topic (startIndex===0) no-divider/null-anchor + persisted, partial inside-divider/final-owned; omitted inside signal never yields complete`
     },
     {
       id: 'productionPath.complete',
-      name: 'productionPath complete derived from evidence predicate (LOCK-004 mixed) — whole-topic (1..25) no-divider/null-anchor branch and partial inside-divider/final-owned branch',
+      name: 'productionPath complete derived from turn oracle (mixed) — whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial inside-divider/final-owned + persisted',
       kind: 'correctness',
       passed: authoritativeComplete,
-      detail: `mixed derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed); effective=${effectiveInformative ? 1 : 0}; stage=${safeProductionPathStage} category=${safeHeapDeltaCategory}; branches: whole-topic (1..25) no-divider/null-anchor OR partial divider inside #messages with final-owned anchor; omitted inside signal never satisfies`
+      detail: `mixed derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed); effective=${effectiveInformative ? 1 : 0}; stage=${safeProductionPathStage} category=${safeHeapDeltaCategory}; branches: whole-topic (startIndex===0) no-divider/null-anchor + persisted OR partial divider inside #messages with final-owned anchor; omitted inside signal never satisfies`
     },
     {
       id: 'projection.finalTopicOwnership',
@@ -1738,17 +2211,17 @@ export function buildC02MixedBenchmarkResult(
     },
     {
       id: 'projection.contextBoundaryExplicit',
-      name: 'context boundary explicit per LOCK-004 (mixed) — whole-topic windows (1..25) require no divider anywhere + null anchor (valid absent), partial windows require divider inside #messages + final-owned anchor (valid present); outside/global invalid — explicit inside signal mandatory (fail-closed when omitted)',
+      name: 'context boundary explicit per turn oracle (mixed) — whole-topic startIndex===0 requires no divider anywhere + DOM null with valid persisted, partial requires divider inside #messages + final-owned + persisted; outside/global invalid — explicit inside signal mandatory (fail-closed when omitted)',
       kind: 'correctness',
       passed: contextEvidenceValid,
-      detail: `mixed contextEvidenceValid=${contextEvidenceValid ? 1 : 0} via LOCK-004 predicate (wholeTopic=${isC02WholeTopicWindow(expectedVisible) ? 1 : 0} expectedVisible=${expectedVisible} positive integer 1..25 branch); contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${contextBoundaryInsideMessagesForGate ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0}; whole-topic (1..25) valid only with no divider anywhere + null anchor, partial requires divider inside #messages with final-topic-owned anchor, global/outside never satisfies; inside signal mandatory (fail-closed when absent)`
+      detail: `mixed contextEvidenceValid=${contextEvidenceValid ? 1 : 0} via turn oracle (turnCount=${expectedContextMixed?.turnCount ?? 0} isWholeTopic=${expectedContextMixed?.isWholeTopic ? 1 : 0} startIndex=${expectedContextMixed?.startIndex ?? -1} contextCount=${String(expectedContextMixed?.contextCount ?? null)} expectedAnchorPresent=${expectedAnchorGroupKeyMixed !== null ? 1 : 0} persistedValid=${persistedValidMixed ? 1 : 0}); contextBoundaryPresent=${allocation.projectionStats.contextBoundaryPresent ? 1 : 0} insideMessages=${contextBoundaryInsideMessagesForGate ? 1 : 0} anchorPresent=${allocation.projectionStats.anchorGroupKey !== null ? 1 : 0} finalTopicOwned=${anchorFinalTopicOwned ? 1 : 0} persistedOwned=${persistedOwnedMixed ? 1 : 0} persistedEqualsExpected=${persistedEqualsExpectedMixed ? 1 : 0}; whole-topic (startIndex===0) valid only with no divider anywhere + DOM null + persisted canonical anchor, partial requires divider inside #messages with final-topic-owned anchor + persisted canonical, global/outside never satisfies; inside signal mandatory (fail-closed when absent)`
     },
     {
       id: 'calibration.complete',
-      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal) (mixed)',
+      name: 'authoritative calibration complete — effective precise heap AND derived productionPath complete per turn oracle (whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial inside-divider/final-owned + persisted with explicit inside signal) (mixed)',
       kind: 'correctness',
       passed: authoritativeComplete,
-      detail: `mixed authoritativeComplete=${authoritativeComplete ? 1 : 0}; effective=${effectiveInformative ? 1 : 0}, derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed); branches: whole-topic (1..25) no-divider/null-anchor OR partial inside-divider/final-owned; omitted inside signal never yields complete`
+      detail: `mixed authoritativeComplete=${authoritativeComplete ? 1 : 0}; effective=${effectiveInformative ? 1 : 0}, derivedProductionPathComplete=${effectiveProductionPathComplete ? 1 : 0} (caller ${allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed); branches: whole-topic (startIndex===0) no-divider/null-anchor + persisted OR partial inside-divider/final-owned; omitted inside signal never yields complete`
     },
     {
       id: 'environment.abi145',
@@ -1809,7 +2282,7 @@ export function buildC02MultiBenchmarkResult(
   for (const entry of entries) {
     if (typeof entry.allocation.projectionStats.contextBoundaryInsideMessages !== 'boolean') {
       throw new Error(
-        `[PERF-C02] fail-closed: contextBoundaryInsideMessages is required (boolean) for ${entry.profileId} — whole-topic windows (1..25) require no divider anywhere + null anchor; partial windows require divider inside #messages + final-owned anchor (LOCK-004)`
+        `[PERF-C02] fail-closed: contextBoundaryInsideMessages is required (boolean) for ${entry.profileId} — whole-topic via turn oracle startIndex===0 requires no divider anywhere + DOM null with valid persisted anchor; partial windows require divider inside #messages + final-owned anchor (LOCK-004)`
       )
     }
     const safeProfileLabel = deriveSafeProfileLabel(entry.profileId)
@@ -1847,7 +2320,29 @@ export function buildC02MultiBenchmarkResult(
     const derivedGroupOwnershipProofMulti =
       (entry.allocation.projectionStats.groupsWithFinalTopic ?? 0) === expectedVisibleMulti &&
       derivedGroupCountExactMulti
-    const derivedProductionPathCompleteMulti = isC02ProductionPathComplete({
+    // LOCK-001/004 fail-closed: never synthesize proof. Missing/undefined/invalid yields incomplete. No fallback. Required proof fields — runtime validation covers turnCount/contextCount/startIndex/anchor/isWholeTopic/boundaryPresent.
+    const expectedContextMulti = entry.allocation.projectionStats.expectedContext
+    const expectedAnchorGroupKeyMulti = entry.allocation.projectionStats.expectedAnchorGroupKey
+    const persistedAnchorGroupKeyMulti = entry.allocation.projectionStats.persistedAnchorGroupKey
+    const actualContextCountMulti = entry.allocation.projectionStats.contextCount
+    const expectedContextMultiValid = expectedContextMulti !== null && isC02ExpectedContextValid(expectedContextMulti)
+    const actualMultiValid =
+      expectedContextMultiValid &&
+      (actualContextCountMulti === null ||
+        (typeof actualContextCountMulti === 'number' &&
+          Number.isFinite(actualContextCountMulti) &&
+          Number.isInteger(actualContextCountMulti) &&
+          actualContextCountMulti >= 1))
+    const contextCountMatchesMulti =
+      expectedContextMulti !== null &&
+      expectedContextMultiValid &&
+      actualContextCountMulti === expectedContextMulti.contextCount
+    const expectedAnchorEqualsOracleMulti =
+      expectedContextMulti !== null &&
+      expectedContextMultiValid &&
+      expectedAnchorGroupKeyMulti === expectedContextMulti.anchorGroupKey
+    // Pre-check for multi: if contextCount invalid/mismatch or anchor mismatch, derived will be forced false via predicate
+    const derivedProductionPathCompleteMultiRaw = isC02ProductionPathComplete({
       reduxVerified: entry.allocation.reduxVerified,
       finalTopicDomProof: derivedFinalTopicDomProofMulti,
       groupCountExact: derivedGroupCountExactMulti,
@@ -1855,9 +2350,19 @@ export function buildC02MultiBenchmarkResult(
       contextBoundaryPresent: entry.allocation.projectionStats.contextBoundaryPresent,
       contextBoundaryInsideMessages: entry.allocation.projectionStats.contextBoundaryInsideMessages,
       anchorGroupKey: entry.allocation.projectionStats.anchorGroupKey,
+      persistedAnchorGroupKey: persistedAnchorGroupKeyMulti,
+      expectedAnchorGroupKey: expectedAnchorGroupKeyMulti,
+      expectedContext: expectedContextMulti,
       lastTopicId: lastTopicIdMulti,
       expectedVisibleFinal: expectedVisibleMulti
     })
+    // Enforce LOCK-001/002/004 exact equalities for multi completeness
+    const derivedProductionPathCompleteMulti =
+      derivedProductionPathCompleteMultiRaw &&
+      expectedAnchorEqualsOracleMulti &&
+      contextCountMatchesMulti &&
+      actualMultiValid &&
+      expectedContextMultiValid
     const effectiveProductionPathCompleteMulti = derivedProductionPathCompleteMulti
     void entry.allocation.productionPathComplete
     const safeHeapDeltaCategory = deriveSafeHeapDeltaCategory(
@@ -1923,7 +2428,7 @@ export function buildC02MultiBenchmarkResult(
       },
       {
         id: `${prefix}.calibration.complete`,
-        name: `${safeProfileLabel} authoritative calibration complete — effective heap AND derived productionPath complete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal)`,
+        name: `${safeProfileLabel} authoritative calibration complete — effective heap AND derived productionPath complete per turn oracle (whole-topic startIndex===0 no-divider/null-anchor + persisted canonical OR partial inside-divider/final-owned + persisted)`,
         value: effectiveInformative && effectiveProductionPathCompleteMulti ? 1 : 0,
         unit: 'count'
       },
@@ -1953,20 +2458,20 @@ export function buildC02MultiBenchmarkResult(
       },
       {
         id: `${prefix}.calibration.complete`,
-        name: `${safeProfileLabel} authoritative calibration complete — effective heap AND derived #messages proof per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned)`,
+        name: `${safeProfileLabel} authoritative calibration complete — effective heap AND derived #messages proof per turn oracle (whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial inside-divider/final-owned + persisted)`,
         kind: 'correctness',
         passed: authoritativeComplete,
-        detail: `profile ${safeProfileLabel}: authoritativeComplete=${authoritativeComplete ? 1 : 0} effective=${effectiveInformative ? 1 : 0} derivedProductionPathComplete=${effectiveProductionPathCompleteMulti ? 1 : 0} (caller ${entry.allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed) stage=${safeProductionPathStage} category=${safeHeapDeltaCategory} — valid branches: whole-topic (1..25) no-divider/null-anchor OR partial divider inside #messages with final-owned anchor; omitted inside signal never satisfies`
+        detail: `profile ${safeProfileLabel}: authoritativeComplete=${authoritativeComplete ? 1 : 0} effective=${effectiveInformative ? 1 : 0} derivedProductionPathComplete=${effectiveProductionPathCompleteMulti ? 1 : 0} (caller ${entry.allocation.productionPathComplete ? 1 : 0} ignored when invalid, fail-closed) stage=${safeProductionPathStage} category=${safeHeapDeltaCategory} — valid branches: whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial divider inside #messages with final-owned + persisted; omitted inside signal never satisfies`
       }
     )
   }
   const allComplete = allGates.filter((g) => g.id.endsWith('.calibration.complete')).every((g) => g.passed)
   allGates.push({
     id: 'calibration.matrix.complete',
-    name: 'matrix calibration complete — all profiles effective heap AND derived productionPath complete per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor or partial inside-divider/final-owned with explicit inside signal) (relation across multiple profiles)',
+    name: 'matrix calibration complete — all profiles effective heap AND derived productionPath complete per turn oracle (whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial inside-divider/final-owned + persisted with explicit inside signal) (relation across multiple profiles)',
     kind: 'correctness',
     passed: allComplete,
-    detail: `matrix profileCount=${profileCount} allComplete=${allComplete ? 1 : 0} — each profile derived per LOCK-004 branches (whole-topic 1..25 no-divider/null-anchor OR partial inside-divider/final-owned) with explicit inside signal mandatory (fail-closed); each profile uses existing production activation path and precise memory sampling (directional synthetic)`
+    detail: `matrix profileCount=${profileCount} allComplete=${allComplete ? 1 : 0} — each profile derived per turn oracle (whole-topic startIndex===0 no-divider/null-anchor + persisted OR partial inside-divider/final-owned + persisted) with explicit inside signal mandatory (fail-closed); each profile uses existing production activation path and precise memory sampling (directional synthetic)`
   })
   return {
     schemaVersion: BENCH_RESULT_SCHEMA_VERSION,
