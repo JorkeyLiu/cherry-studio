@@ -183,7 +183,7 @@ Problem Open → Cost Model → Attributed → Candidate → Experiment → Inte
 - **工作流重分类**：PERF-TOPIC-SWITCH 和 PERF-ECHO 为**架构重构后的独立参考/重评估工作流**（`performance-workstreams.md` §2.1/§2.3），保持 **Open 且不阻塞架构阶段关闭**（ARCH-011）；均为 **L3 方向性参考**，按 ARCH-012 保留溯源且不被重标为阈值/基线；由于不存在受控同态前后对比，不作改进/回退断言。
 - **已取代**：PERF-RENDER-FLOW 的战术候选队列已被架构演进程序取代（`performance-workstreams.md` §2.5）。
 - **性能程序不成为架构权威**：性能工作流提出方向和证据，架构决策权属于架构演进程序和 ADR 流程。
-- **B-01..B-05 状态**：B-01..B-05 为**已批准的初始 renderer-local 保留策略默认值**，生产实现待定，非经验最优、非基线/SLA；校准 harness 可选、非阻塞；Phase 4 退出保持 Open。
+- **B-01..B-05 状态**：B-01..B-05 为**已实现的 renderer-local 保留策略强制/默认值**（max 8 inactive evictable topics、32 MiB logical budget、30-minute TTL、deterministic LRU/lexical tie-break、oversized fail-closed 且解钉后可驱逐），非经验最优、非基线/SLA/阈值/容量策略；校准 harness 可选、非阻塞、测量仅方向性/合成隔离；Phase 4 已于 2026-08-29 关闭（outcome/residual-risk）。
 
 ## 8. 完成与关闭规则（Completion / Closure Rules）
 
@@ -233,6 +233,6 @@ Renderer-only presentation/local-state 变更，只要不跨越以下任一边�
 
 - **测量契约（持久）**：[`performance-measurement.md`](./performance-measurement.md) — 固定工具链/lane、证据层级、schema v1、artifact 存储/隐私/保留、规模维度、harness 清单、阈值策略；**通用保障与适用运行时 lane 始终强制，形式化机制（schema v1 / 产物发射/存储/保留 / 形式化产物元数据与溯源封装）仅在显式选择的形式化定量/可复用契约时强制**。
 - **当前可行动状态（可变）**：[`performance-workstreams.md`](./performance-workstreams.md) — 开放工作流（PERF-TOPIC-SWITCH / PERF-STREAMING / PERF-ECHO）、证据、有界成本模型/假设、未知项、下一实验目标、验收框架；**证据-only 默认不计进展，除非绑定显式激活的决策/结果且齐备四要素**。
-- **架构演进程序**：[`architecture-evolution-program.md`](./architecture-evolution-program.md) — 架构正确性/优雅性/统一性引领；性能债务交接入口；Phase 3 基于结构/治理/功能证据关闭（ARCH-009/ARCH-010），PERF-TOPIC-SWITCH/PERF-ECHO 重分类为独立重构后参考/重评估工作流（ARCH-011，Open 非阻塞）；测量溯源按 ARCH-012 保留为方向性 L3（Git 拥有 provenance）；**B-01..B-05 已批准为初始预设，校准可选非阻塞，Phase 4 仍 Open**。
+- **架构演进程序**：[`architecture-evolution-program.md`](./architecture-evolution-program.md) — 架构正确性/优雅性/统一性引领；性能债务交接入口；Phase 3 基于结构/治理/功能证据关闭（ARCH-009/ARCH-010），PERF-TOPIC-SWITCH/PERF-ECHO 重分类为独立重构后参考/重评估工作流（ARCH-011，Open 非阻塞）；测量溯源按 ARCH-012 保留为方向性 L3（Git 拥有 provenance）；**B-01..B-05 已实现为 renderer-local 保留强制/默认值（max 8 inactive evictable topics、32 MiB logical budget、30-minute TTL、deterministic LRU/lexical tie-break、oversized fail-closed 且解钉后可驱逐），非经验最优/非基线/SLA/阈值/容量策略，校准可选非阻塞、测量仅方向性/合成隔离，Phase 4 已于 2026-08-29 关闭（outcome/residual-risk）**。
 - **治理**：[`sqlite-migration.md`](./sqlite-migration.md)、[`cherry-chat-application-identity.md`](./cherry-chat-application-identity.md)、[`architecture.md`](./architecture.md)。
 - **根代理规则**：根 [`AGENTS.md`](../AGENTS.md)「Detailed References」发现本文件。
