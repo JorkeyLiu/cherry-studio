@@ -23,6 +23,7 @@ import NutstoreSettings from './NutstoreSettings'
 import ObsidianSettings from './ObsidianSettings'
 import S3Settings from './S3Settings'
 import SiyuanSettings from './SiyuanSettings'
+import SyncSettings from './SyncSettings'
 import WebDavSettings from './WebDavSettings'
 import YuqueSettings from './YuqueSettings'
 
@@ -35,6 +36,11 @@ const DataSettings: FC = () => {
     { key: 'divider_0', isDivider: true, text: t('settings.data.divider.basic') },
     { key: 'data', title: t('settings.data.data.title'), icon: <FolderCog size={16} /> },
     { key: 'divider_1', isDivider: true, text: t('settings.data.divider.cloud_storage') },
+    {
+      key: 'sync',
+      title: t('settings.sync.title', 'Synchronization'),
+      icon: <CloudSyncOutlined style={{ fontSize: 16 }} />
+    },
     { key: 'local_backup', title: t('settings.data.local.title'), icon: <FolderCog size={16} /> },
     { key: 'webdav', title: t('settings.data.webdav.title'), icon: <CloudSyncOutlined style={{ fontSize: 16 }} /> },
     { key: 'nutstore', title: t('settings.data.nutstore.title'), icon: <NutstoreIcon /> },
@@ -101,6 +107,7 @@ const DataSettings: FC = () => {
       </MenuList>
       <SettingContainer theme={theme} style={{ display: 'flex', flex: 1, height: '100%' }}>
         {menu === 'data' && <BasicDataSettings />}
+        {menu === 'sync' && <SyncSettings />}
         {menu === 'webdav' && <WebDavSettings />}
         {menu === 'nutstore' && <NutstoreSettings />}
         {menu === 's3' && <S3Settings />}

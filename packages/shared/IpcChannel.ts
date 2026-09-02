@@ -442,5 +442,11 @@ export enum IpcChannel {
   // handler registration (the previous 60s per-request timeout race).
   CherryImport_CatalogRequest = 'cherry-import:catalog-request',
   CherryImport_CatalogRespond = 'cherry-import:catalog-respond',
-  CherryImport_CatalogReady = 'cherry-import:catalog-ready'
+  CherryImport_CatalogReady = 'cherry-import:catalog-ready',
+
+  // Sync — app-level operation log + HTTP relay (MVP)
+  Sync_GetConfig = 'sync:get-config',
+  Sync_SetConfig = 'sync:set-config',
+  Sync_GetStatus = 'sync:get-status',
+  Sync_Sync = 'sync:sync'
 }

@@ -138,3 +138,45 @@ export const fileReferences = sqliteTable(
     uniqueIndex('file_references_block_id_file_id_uniq').on(table.blockId, table.fileId)
   ]
 )
+
+// ---------------------------------------------------------------------------
+// sync metadata — additive, isolated (MVP 005)
+// ---------------------------------------------------------------------------
+export const syncOutbox = sqliteTable(
+  'sync_outbox',
+  {
+    id: text('id').primaryKey(),
+    entityType: text('entity_type').notNull(),
+    op: text('op').notNull(),
+    entityId: text('entity_id').notNull(),
+    timestamp: integer('timestamp').notNull(),
+    deviceId: text('device_id').notNull(),
+    payloadJson: text('payload_json'),
+    createdAt: text('created_at')
+  },
+  (table) => [
+    index('sync_outbox_entity_id_idx').on(table.entityId),
+    index('sync_outbox_timestamp_idx').on(table.timestamp)
+  ]
+)
+
+export const syncApplied = sqliteTable('sync_applied', {
+  operationId: text('operation_id').primaryKey(),
+  appliedAt: text('applied_at')
+})
+
+export const syncState = sqliteTable('sync_state', {
+  key: text('key').primaryKey(),
+  value: text('value')
+})
+
+export const syncEntityClock = sqliteTable(
+  'sync_entity_clock',
+  {
+    entityType: text('entity_type').notNull(),
+    entityId: text('entity_id').notNull(),
+    timestamp: integer('timestamp').notNull(),
+    operationId: text('operation_id').notNull()
+  },
+  (table) => [primaryKey({ columns: [table.entityType, table.entityId] })]
+)

@@ -5516,6 +5516,27 @@
       "viewSource": "查看原始碼",
       "zip": "ZIP"
     },
+    "sync": {
+      "actions": "操作",
+      "cursor": "游標",
+      "enabled": "啟用",
+      "endpoint": "中繼位址",
+      "endpoint_help": "應用儲存並呼叫單一 URL；不區分雲端/自託管。",
+      "help": "透過配置的 HTTP 中繼同步聊天話題、訊息和區塊。僅手動同步。",
+      "last_error": "上次錯誤",
+      "last_sync": "上次同步",
+      "no_status": "暫無狀態",
+      "pending": "待同步",
+      "save_success": "同步設定已儲存",
+      "status": "狀態",
+      "sync_now": "立即同步",
+      "sync_success": "同步完成",
+      "syncing": "同步中...",
+      "title": "同步",
+      "token": "存取權杖",
+      "token_help": "權杖不會包含在同步承載或日誌中。",
+      "token_placeholder": "選用的 Bearer 權杖"
+    },
     "theme": {
       "color_primary": "主題顏色",
       "dark": "深色",

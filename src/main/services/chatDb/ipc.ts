@@ -82,6 +82,7 @@ import { IpcChannel } from '@shared/IpcChannel'
 import { BrowserWindow, ipcMain } from 'electron'
 
 import { logMainDiagnostic } from '../diagnostics'
+import { handleChatDbSuccessForSync } from '../sync/chatDbHook'
 import { ChatDbAggregateService } from './ChatDbAggregateService'
 import { internalStorageFailure, mapErrorToResult, validateConstructedResult } from './errors'
 import { chatDbService } from './index'
@@ -281,6 +282,16 @@ export function registerChatDbIpc(): () => void {
           if (ids && ids.length > 0) {
             const senderId = _event.sender?.id
             broadcastTopicDeletion(ids, senderId)
+          }
+        }
+
+        // Sync outbox — capture failure is surfaced durably via syncState, never affects ChatDb result envelope
+        if (result.ok === true) {
+          try {
+            handleChatDbSuccessForSync(channel, request)
+          } catch (e) {
+            // hook already records capture failure durably; never break IPC result
+            logger.warn(`[ChatDbIpc] sync hook exception for ${channel}: ${(e as Error).message}`)
           }
         }
 

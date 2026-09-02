@@ -876,6 +876,10 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   // CherryImport — L2 Cherry Studio ZIP import control (Phase 6.3)
   registerCherryImportControlIpc(mainWindow.webContents)
 
+  // Sync — app-level operation log + HTTP relay (MVP)
+  const { registerSyncIpc } = await import('./services/sync/syncIpc')
+  registerSyncIpc()
+
   ipcMain.handle(IpcChannel.App_QuoteToMain, (_, text: string) => windowService.quoteToMainWindow(text))
 
   ipcMain.handle(IpcChannel.App_SetDisableHardwareAcceleration, (_, isDisable: boolean) => {

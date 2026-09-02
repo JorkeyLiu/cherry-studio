@@ -5516,6 +5516,27 @@
       "viewSource": "View Source",
       "zip": "ZIP"
     },
+    "sync": {
+      "actions": "Actions",
+      "cursor": "Cursor",
+      "enabled": "Enabled",
+      "endpoint": "Relay Endpoint",
+      "endpoint_help": "Application stores and calls one URL; no cloud/self-hosted distinction.",
+      "help": "Synchronize chat topics, messages and blocks via a configured HTTP relay. Manual sync only.",
+      "last_error": "Last error",
+      "last_sync": "Last sync",
+      "no_status": "No status yet",
+      "pending": "Pending",
+      "save_success": "Sync settings saved",
+      "status": "Status",
+      "sync_now": "Sync Now",
+      "sync_success": "Sync completed",
+      "syncing": "Syncing...",
+      "title": "Synchronization",
+      "token": "Access Token",
+      "token_help": "Token is never included in sync payload or logs.",
+      "token_placeholder": "Optional bearer token"
+    },
     "theme": {
       "color_primary": "Primary Color",
       "dark": "Dark",

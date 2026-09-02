@@ -996,6 +996,39 @@ export const MIGRATIONS: MigrationEntry[] = [
       CREATE_MESSAGE_BLOCKS_NORMALIZED_UPDATE_TRIGGER_SQL,
       CREATE_MESSAGE_BLOCKS_NORMALIZED_DELETE_TRIGGER_SQL
     ]
+  },
+  {
+    key: '005_sync_metadata',
+    description: 'Additive sync metadata: outbox, applied ids, cursor/device state and entity clocks',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS sync_outbox (
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        op TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        device_id TEXT NOT NULL,
+        payload_json TEXT,
+        created_at TEXT
+      )`,
+      `CREATE INDEX IF NOT EXISTS sync_outbox_entity_id_idx ON sync_outbox(entity_id)`,
+      `CREATE INDEX IF NOT EXISTS sync_outbox_timestamp_idx ON sync_outbox(timestamp)`,
+      `CREATE TABLE IF NOT EXISTS sync_applied (
+        operation_id TEXT PRIMARY KEY,
+        applied_at TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS sync_state (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS sync_entity_clock (
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        operation_id TEXT NOT NULL,
+        PRIMARY KEY (entity_type, entity_id)
+      )`
+    ]
   }
 ]
 
