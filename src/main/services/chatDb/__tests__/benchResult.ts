@@ -7,8 +7,11 @@
  * and scale, reproducibility metadata (command, timestamp, Node and pnpm
  * versions, ABI lane, git commit + worktree-dirty state), metric values, and
  * correctness/threshold gate outcomes — and nothing else. No message content,
- * credentials, user paths, attachment content, raw database sizes, or profile
- * data can be represented (PERF-LOCK-006/007).
+ * credentials, user paths, attachment content, observed/user database sizes,
+ * or profile data can be represented (PERF-LOCK-006/007); owned synthetic
+ * isolated DB file bytes via the approved four-field raw proxy (page_count,
+ * page_size, freelist_count, isolated synthetic DB file bytes) remain
+ * permitted as a directional synthetic proxy only.
  *
  * Emission contract (audit F1): artifacts are written only after every
  * registered tinybench task completed successfully. The bench files wire the

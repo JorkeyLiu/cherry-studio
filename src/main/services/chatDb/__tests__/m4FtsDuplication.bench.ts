@@ -1,8 +1,10 @@
 /**
  * M4 FTS Duplication Volume — Measurement-Only Diagnostic
  *
- * MEASUREMENT-ONLY: read-only post-seed aggregation of FTS/normalized
- * derived-storage duplication volume in an isolated synthetic SQLite database.
+ * MEASUREMENT-ONLY: no corpus writes after seed; one isolated WAL checkpoint/TRUNCATE
+ * normalization step outside timed probe; then read-only metric collection of
+ * FTS/normalized derived-storage duplication volume PLUS directional synthetic
+ * physical-page proxies in an isolated synthetic SQLite database.
  * No schema/migration/trigger/production query/storage change; S6.5 not
  * authorized. Output is directional measurement evidence only, never a
  * threshold, baseline, capacity policy, or adoption decision.
@@ -17,13 +19,22 @@
  *  - Deterministic synthetic corpus via existing searchBenchHarness
  *    generateCorpus / ALL_CORPUS cycling; bounded profile 1k/10k/50k
  *    (default 10k for fast on-demand diagnostics) via M4_FTS_DUP_SCALE.
- *  - Read-only post-seed aggregation (no writes after seed):
+ *  - No corpus writes after seed; one isolated WAL checkpoint/TRUNCATE normalization step outside timed probe; then read-only metric collection:
  *    canonical/main_text row counts, normalized/FTS row counts,
  *    normalized char + UTF-8 byte totals (via Buffer.byteLength), optional
  *    FTS char/byte totals (when readable), duplication logical totals.
+ *  - Physical-page proxy (directional synthetic proxies only, numeric-only):
+ *    perform a single WAL checkpoint TRUNCATE outside the timed probe,
+ *    inspect checkpoint busy status fail-closed, then collect the four
+ *    approved raw physical metrics: page_count, page_size, freelist_count,
+ *    isolated synthetic DB file byte size (via fs.statSync after checkpoint).
+ *    No derived pageBytes/freelistBytes are emitted (audit). The timed
+ *    bench probe remains read-only and never performs checkpoint/truncation.
  *  - Fail-closed gates: row-count parity (canonical==normalized==FTS),
  *    FTS smoke (FTS_SMOKE_TOKEN MATCH), corpus completeness (rows==blocks),
- *    finite-value invariants. Any gate failure aborts with no artifact.
+ *    finite-value invariants. Incomplete/busy checkpoint aborts with no
+ *    artifact (no physical metrics emitted). Any gate failure aborts with no
+ *    artifact.
  *  - Artifact: schema-v1 closed contract (benchResult.ts) with stable
  *    profile-dependent id, emitted only after every registered tinybench task
  *    succeeded AND every gate passed (fail-closed).
@@ -58,15 +69,22 @@ import {
 import {
   aggregateCharCount,
   aggregateUtf8Bytes,
+  assertCheckpointComplete,
   assertM4PrivacyInvariants,
   assertM4SampleCompleteness,
+  buildM4BusyCheckpointFailureMessage,
+  buildM4CheckpointFailureMessage,
   buildM4FtsDuplicationGates,
   buildM4FtsDuplicationMetrics,
+  buildM4FtsSmokeFailureDetail,
+  buildM4PhysicalMetrics,
+  buildM4StatFailureMessage,
   M4_FTS_DUP_BENCH_ENV,
   M4_FTS_DUP_COMMAND,
   M4_FTS_DUP_PROFILES,
   M4_FTS_DUP_SCALE_ENV,
   m4FtsDupScaleMetadata,
+  parseCheckpointBusy,
   resolveM4FtsDupGate,
   resolveM4FtsDupScale
 } from './m4FtsDuplication'
@@ -167,9 +185,9 @@ if (!m4Enabled) {
       .get(FTS_SMOKE_TOKEN)
     ftsSmokePassed = true
     ftsSmokeDetail = 'FTS smoke passed: MATCH token executed without throw'
-  } catch (e) {
+  } catch (_e) {
     ftsSmokePassed = false
-    ftsSmokeDetail = `FTS smoke failed: ${e instanceof Error ? e.message.slice(0, 80) : String(e).slice(0, 80)}`
+    ftsSmokeDetail = buildM4FtsSmokeFailureDetail()
   }
 
   // Fail-closed completeness guard before metric/gate construction
@@ -178,8 +196,8 @@ if (!m4Enabled) {
     profile.blocks
   )
 
-  // Metrics — numeric-only, privacy-safe (logical row/char/UTF-8 duplication only; no observed physical DB size)
-  const metrics = buildM4FtsDuplicationMetrics({
+  // Metrics — numeric-only, privacy-safe (logical row/char/UTF-8 duplication only)
+  const logicalMetrics = buildM4FtsDuplicationMetrics({
     canonicalRows,
     normalizedRows,
     ftsRows,
@@ -188,6 +206,67 @@ if (!m4Enabled) {
     ftsChars,
     ftsBytesUtf8
   })
+
+  // -------------------------------------------------------------------------
+  // Physical-page proxy — WAL checkpoint + four raw physical metrics (outside timing)
+  // -------------------------------------------------------------------------
+  // Single checkpoint TRUNCATE outside the timed probe; inspect busy/status
+  // fail-closed before any stat/artifact. Timed probe remains read-only.
+  let checkpointRaw: unknown
+  try {
+    // Use prepare.get for explicit object shape; fallback to pragma simple:false if needed
+    checkpointRaw = sqlite.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()
+    // If prepare.get returns undefined (some builds), try pragma shape
+    if (checkpointRaw === undefined) {
+      checkpointRaw = sqlite.pragma('wal_checkpoint(TRUNCATE)', { simple: false })
+    }
+  } catch (_e) {
+    cleanup()
+    throw new Error(buildM4CheckpointFailureMessage())
+  }
+
+  // Inspect checkpoint busy/status before any physical stat — incomplete/busy => fail closed
+  try {
+    assertCheckpointComplete(checkpointRaw)
+  } catch (_e) {
+    // If checkpoint status cannot be verified without unsafe assumptions, fail closed as well
+    const busyParsed = (() => {
+      try {
+        return parseCheckpointBusy(checkpointRaw)
+      } catch {
+        return 'unverifiable'
+      }
+    })()
+    cleanup()
+    throw new Error(buildM4BusyCheckpointFailureMessage(busyParsed))
+  }
+
+  // Collect four approved raw physical metrics after successful checkpoint
+  const pageCountRaw = sqlite.pragma('page_count', { simple: true })
+  const pageSizeRaw = sqlite.pragma('page_size', { simple: true })
+  const freelistCountRaw = sqlite.pragma('freelist_count', { simple: true })
+
+  const pageCount = typeof pageCountRaw === 'number' ? pageCountRaw : Number(pageCountRaw)
+  const pageSize = typeof pageSizeRaw === 'number' ? pageSizeRaw : Number(pageSizeRaw)
+  const freelistCount = typeof freelistCountRaw === 'number' ? freelistCountRaw : Number(freelistCountRaw)
+
+  let dbFileBytes: number
+  try {
+    const stat = realFs.statSync(dbPath)
+    dbFileBytes = stat.size
+  } catch (_e) {
+    cleanup()
+    throw new Error(buildM4StatFailureMessage())
+  }
+
+  const physicalMetrics = buildM4PhysicalMetrics({
+    pageCount,
+    pageSize,
+    freelistCount,
+    dbFileBytes
+  })
+
+  const metrics = [...logicalMetrics, ...physicalMetrics]
 
   // Validate privacy/finite invariants before artifact build (fail-closed)
   assertM4PrivacyInvariants(metrics)
@@ -222,7 +301,8 @@ if (!m4Enabled) {
     `\n=== M4 FTS Duplication Volume (on-demand diagnostic, measurement-only) ===\n` +
       `Profile: ${scaleKey} blocks=${profile.blocks}\n` +
       `Canonical=${canonicalRows} Normalized=${normalizedRows} FTS=${ftsRows} normalizedChars=${normalizedChars} normalizedBytes=${normalizedBytesUtf8}` +
-      (ftsBytesUtf8 !== undefined ? ` ftsBytes=${ftsBytesUtf8}` : '')
+      (ftsBytesUtf8 !== undefined ? ` ftsBytes=${ftsBytesUtf8}` : '') +
+      ` pageCount=${pageCount} pageSize=${pageSize} freelistCount=${freelistCount} dbFileBytes=${dbFileBytes}`
   )
 
   // -------------------------------------------------------------------------
@@ -246,6 +326,7 @@ if (!m4Enabled) {
   // Tinybench tasks — single read-only aggregation probe (comparison output;
   // authoritative metrics are the manual aggregation above). Exists so the
   // artifact emission gate observes completed bench tasks (audit F1).
+  // NOTE: This probe is strictly read-only — no checkpoint/truncation/stat.
   describe(`M4 FTS duplication volume — ${scaleKey} corpus (${profile.blocks} blocks)`, () => {
     bench(
       'read-only duplication aggregation probe (counts + char/byte totals)',

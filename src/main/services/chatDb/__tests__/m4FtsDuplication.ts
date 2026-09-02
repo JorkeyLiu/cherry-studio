@@ -388,6 +388,146 @@ export function assertM4PrivacyInvariants(metrics: readonly BenchmarkMetric[]): 
 }
 
 // ---------------------------------------------------------------------------
+// Physical-page proxy — isolated synthetic raw physical metrics (directional only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Raw physical aggregation — the four approved directional synthetic proxies
+ * (LOCK-003): page_count, page_size, freelist_count, isolated synthetic DB
+ * file byte size. Numeric-only, no derived bytes, no path leakage.
+ * All values must be finite integers; file bytes >0 after WAL checkpoint.
+ */
+export interface M4PhysicalAggregation {
+  pageCount: number
+  pageSize: number
+  freelistCount: number
+  dbFileBytes: number
+}
+
+/**
+ * Parse WAL checkpoint result into the busy flag.
+ * better-sqlite3 shapes:
+ *  - pragma(..., {simple:true})  -> number (busy)
+ *  - pragma(..., {simple:false}) -> [{busy, log, checkpointed}]
+ *  - prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() -> {busy, log, checkpointed}
+ * Throws fail-closed if the shape cannot be verified without unsafe
+ * assumptions — caller must NOT emit physical metrics in that case.
+ */
+export function parseCheckpointBusy(raw: unknown): number {
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw)) throw new Error('parseCheckpointBusy: non-finite busy number')
+    return raw
+  }
+  if (Array.isArray(raw) && raw.length > 0) {
+    const first = raw[0] as Record<string, unknown>
+    if (first && typeof first.busy === 'number' && Number.isFinite(first.busy)) return first.busy
+    throw new Error('parseCheckpointBusy: array entry missing finite busy')
+  }
+  if (raw !== null && typeof raw === 'object' && 'busy' in (raw as Record<string, unknown>)) {
+    const busy = (raw as Record<string, unknown>).busy
+    if (typeof busy === 'number' && Number.isFinite(busy)) return busy
+    throw new Error('parseCheckpointBusy: object busy non-finite')
+  }
+  throw new Error('parseCheckpointBusy: unverifiable checkpoint result shape — fail closed')
+}
+
+/**
+ * Assert checkpoint completed (busy === 0). Throws fail-closed when busy or
+ * unverifiable. Call BEFORE stat/artifact construction.
+ */
+export function assertCheckpointComplete(raw: unknown): void {
+  const busy = parseCheckpointBusy(raw)
+  if (busy !== 0) {
+    throw new Error(
+      `assertCheckpointComplete: WAL checkpoint incomplete/busy (busy=${busy}) — physical proxy fail-closed`
+    )
+  }
+}
+
+/**
+ * Privacy-safe fixed categories for M4 physical proxy failures and FTS smoke.
+ * These are stable, path-free, and do not interpolate native exception text
+ * which may contain the temporary isolated DB path (M4 audit privacy finding).
+ * Callers must use these helpers — never interpolate `e.message` directly.
+ */
+export const M4_CHECKPOINT_FAILURE_CATEGORY = 'checkpoint_failed'
+export const M4_STAT_FAILURE_CATEGORY = 'stat_failed'
+export const M4_FTS_SMOKE_FAILURE_CATEGORY = 'fts_smoke_failed'
+
+export function buildM4CheckpointFailureMessage(): string {
+  return `M4 physical proxy: WAL checkpoint TRUNCATE failed — fail-closed before stat/artifact: ${M4_CHECKPOINT_FAILURE_CATEGORY}`
+}
+
+export function buildM4BusyCheckpointFailureMessage(busy: number | string): string {
+  return `M4 physical proxy: incomplete/busy checkpoint cannot produce physical artifact (busy=${String(busy)}) — physical proxy fail-closed`
+}
+
+export function buildM4StatFailureMessage(): string {
+  return `M4 physical proxy: fs stat of isolated synthetic DB failed — fail-closed: ${M4_STAT_FAILURE_CATEGORY}`
+}
+
+export function buildM4FtsSmokeFailureDetail(): string {
+  return `FTS smoke failed: MATCH token threw — ${M4_FTS_SMOKE_FAILURE_CATEGORY}`
+}
+
+/**
+ * Validate and build numeric-only physical metrics from raw aggregation.
+ * Exactly four metrics, no derived fields. Throws fail-closed on non-finite.
+ */
+export function buildM4PhysicalMetrics(agg: M4PhysicalAggregation): BenchmarkMetric[] {
+  const { pageCount, pageSize, freelistCount, dbFileBytes } = agg
+  for (const [id, v] of [
+    ['physical.page_count', pageCount],
+    ['physical.page_size', pageSize],
+    ['physical.freelist_count', freelistCount],
+    ['physical.dbFileBytes', dbFileBytes]
+  ] as const) {
+    if (!Number.isFinite(v) || v < 0)
+      throw new Error(`buildM4PhysicalMetrics: ${id} non-finite/non-negative: ${String(v)}`)
+    if (!Number.isInteger(v)) throw new Error(`buildM4PhysicalMetrics: ${id} must be integer: ${String(v)}`)
+  }
+  if (pageCount === 0) throw new Error('buildM4PhysicalMetrics: page_count must be >0')
+  if (pageSize === 0) throw new Error('buildM4PhysicalMetrics: page_size must be >0')
+  if (dbFileBytes === 0) throw new Error('buildM4PhysicalMetrics: dbFileBytes must be >0')
+  const metrics: BenchmarkMetric[] = [
+    {
+      id: 'physical.page_count',
+      name: 'Synthetic DB page count (PRAGMA page_count, directional proxy only)',
+      value: pageCount
+    },
+    {
+      id: 'physical.page_size',
+      name: 'Synthetic DB page size bytes (PRAGMA page_size)',
+      value: pageSize,
+      unit: 'bytes'
+    },
+    {
+      id: 'physical.freelist_count',
+      name: 'Synthetic DB freelist count (PRAGMA freelist_count)',
+      value: freelistCount
+    },
+    {
+      id: 'physical.dbFileBytes',
+      name: 'Synthetic DB file size bytes (isolated mkdtemp DB after WAL checkpoint TRUNCATE)',
+      value: dbFileBytes,
+      unit: 'bytes'
+    }
+  ]
+  for (const m of metrics) {
+    if (/[\\/]/.test(m.id)) throw new Error(`buildM4PhysicalMetrics: id must not contain path segment: ${m.id}`)
+    if (!Number.isFinite(m.value)) throw new Error(`buildM4PhysicalMetrics: metric ${m.id} non-finite`)
+  }
+  return metrics
+}
+
+/**
+ * Privacy/finite guard for physical aggregation before metric construction.
+ */
+export function assertM4PhysicalInvariants(agg: M4PhysicalAggregation): void {
+  buildM4PhysicalMetrics(agg)
+}
+
+// ---------------------------------------------------------------------------
 // Scale metadata — numeric-only, schema-v1 compliant
 // ---------------------------------------------------------------------------
 

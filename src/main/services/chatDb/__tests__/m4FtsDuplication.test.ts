@@ -12,16 +12,26 @@ import { describe, expect, it } from 'vitest'
 import {
   aggregateCharCount,
   aggregateUtf8Bytes,
+  assertCheckpointComplete,
   assertM4PrivacyInvariants,
   assertM4SampleCompleteness,
+  buildM4BusyCheckpointFailureMessage,
+  buildM4CheckpointFailureMessage,
   buildM4FtsDuplicationGates,
   buildM4FtsDuplicationMetrics,
+  buildM4FtsSmokeFailureDetail,
+  buildM4PhysicalMetrics,
+  buildM4StatFailureMessage,
   DEFAULT_M4_FTS_DUP_SCALE,
+  M4_CHECKPOINT_FAILURE_CATEGORY,
   M4_FTS_DUP_BENCH_ENV,
   M4_FTS_DUP_COMMAND,
   M4_FTS_DUP_PROFILES,
   M4_FTS_DUP_SCALE_ENV,
+  M4_FTS_SMOKE_FAILURE_CATEGORY,
+  M4_STAT_FAILURE_CATEGORY,
   m4FtsDupScaleMetadata,
+  parseCheckpointBusy,
   resolveM4FtsDupGate,
   resolveM4FtsDupScale,
   utf8ByteLength
@@ -321,5 +331,276 @@ describe('assertM4SampleCompleteness & privacy invariants', () => {
     expect(() => assertM4PrivacyInvariants([{ id: 'a.b', name: 'a', value: Number.NaN } as never])).toThrow(
       /non-finite/
     )
+  })
+})
+
+describe('M4 physical-page proxy — four raw metrics only (no derived)', () => {
+  it('emits exactly four approved raw physical metrics', () => {
+    const metrics = buildM4PhysicalMetrics({ pageCount: 12, pageSize: 4096, freelistCount: 1, dbFileBytes: 49152 })
+    expect(metrics.map((m) => m.id)).toEqual([
+      'physical.page_count',
+      'physical.page_size',
+      'physical.freelist_count',
+      'physical.dbFileBytes'
+    ])
+    expect(metrics).toHaveLength(4)
+    for (const m of metrics) expect(Number.isFinite(m.value)).toBe(true)
+  })
+  it('does not emit derived pageBytes/freelistBytes', () => {
+    const metrics = buildM4PhysicalMetrics({ pageCount: 10, pageSize: 4096, freelistCount: 0, dbFileBytes: 40960 })
+    const ids = metrics.map((m) => m.id)
+    expect(ids).not.toContain('physical.pageBytes')
+    expect(ids).not.toContain('physical.freelistBytes')
+    expect(ids).not.toContain('physical.page_bytes')
+    expect(ids).not.toContain('physical.freelist_bytes')
+  })
+  it('units only on byte metrics', () => {
+    const metrics = buildM4PhysicalMetrics({ pageCount: 5, pageSize: 4096, freelistCount: 0, dbFileBytes: 20480 })
+    expect(metrics.find((m) => m.id === 'physical.page_count')!.unit).toBeUndefined()
+    expect(metrics.find((m) => m.id === 'physical.freelist_count')!.unit).toBeUndefined()
+    expect(metrics.find((m) => m.id === 'physical.page_size')!.unit).toBe('bytes')
+    expect(metrics.find((m) => m.id === 'physical.dbFileBytes')!.unit).toBe('bytes')
+  })
+  it('throws on non-finite or negative physical values', () => {
+    expect(() =>
+      buildM4PhysicalMetrics({ pageCount: Number.NaN, pageSize: 4096, freelistCount: 0, dbFileBytes: 1000 })
+    ).toThrow(/non-finite/)
+    expect(() =>
+      buildM4PhysicalMetrics({ pageCount: -1, pageSize: 4096, freelistCount: 0, dbFileBytes: 1000 })
+    ).toThrow(/non-finite/)
+    expect(() => buildM4PhysicalMetrics({ pageCount: 1, pageSize: 0, freelistCount: 0, dbFileBytes: 1000 })).toThrow(
+      /page_size/
+    )
+  })
+  it('ids are stable ASCII without path segments', () => {
+    const metrics = buildM4PhysicalMetrics({ pageCount: 2, pageSize: 4096, freelistCount: 0, dbFileBytes: 8192 })
+    for (const m of metrics) {
+      expect(m.id).toMatch(/^[A-Za-z0-9._]+$/)
+      expect(m.id).not.toMatch(/[\\/]/)
+    }
+  })
+})
+
+describe('WAL checkpoint busy/status parsing — fail-closed before stat/artifact', () => {
+  it('parses busy=0 from number shape (simple:true)', () => {
+    expect(parseCheckpointBusy(0)).toBe(0)
+    expect(parseCheckpointBusy(1)).toBe(1)
+  })
+  it('parses busy from array shape (simple:false)', () => {
+    expect(parseCheckpointBusy([{ busy: 0, log: 0, checkpointed: 0 }])).toBe(0)
+    expect(parseCheckpointBusy([{ busy: 1, log: 5, checkpointed: 2 }])).toBe(1)
+  })
+  it('parses busy from object shape (prepare.get)', () => {
+    expect(parseCheckpointBusy({ busy: 0, log: 0, checkpointed: 0 })).toBe(0)
+    expect(parseCheckpointBusy({ busy: 1, log: 1, checkpointed: 0 })).toBe(1)
+  })
+  it('throws on unverifiable shape — fail closed', () => {
+    expect(() => parseCheckpointBusy(undefined)).toThrow(/unverifiable/)
+    expect(() => parseCheckpointBusy(null)).toThrow(/unverifiable/)
+    expect(() => parseCheckpointBusy({})).toThrow(/unverifiable/)
+    expect(() => parseCheckpointBusy([])).toThrow(/unverifiable/)
+    expect(() => parseCheckpointBusy('busy')).toThrow(/unverifiable/)
+  })
+  it('assertCheckpointComplete passes only when busy==0', () => {
+    expect(() => assertCheckpointComplete(0)).not.toThrow()
+    expect(() => assertCheckpointComplete([{ busy: 0, log: 0, checkpointed: 0 }])).not.toThrow()
+    expect(() => assertCheckpointComplete({ busy: 0, log: 0, checkpointed: 0 })).not.toThrow()
+    expect(() => assertCheckpointComplete(1)).toThrow(/incomplete\/busy/)
+    expect(() => assertCheckpointComplete([{ busy: 1, log: 0, checkpointed: 0 }])).toThrow(/incomplete\/busy/)
+  })
+  it('assertCheckpointComplete fails closed on unverifiable shape', () => {
+    expect(() => assertCheckpointComplete(undefined)).toThrow(/unverifiable/)
+  })
+})
+
+describe('M4 privacy audit — checkpoint/stat failure messages are path-free', () => {
+  const fakeDbPath = '/tmp/chatdb-m4-fts-dup-abc123/chat.db'
+  const fakePathError = new Error(`disk I/O error at ${fakeDbPath}: SQLITE_IOERR`)
+
+  function assertPathFree(message: string): void {
+    // Path-like means temp dir, DB filename, or synthetic prefix — not generic slash in "stat/artifact" / "incomplete/busy"
+    expect(message).not.toContain('/tmp')
+    expect(message).not.toContain('/var/folders')
+    expect(message).not.toContain('chat.db')
+    expect(message).not.toContain(fakeDbPath)
+    expect(message).not.toContain('chatdb-m4-fts-dup')
+    expect(message).not.toContain('/private')
+    // Also ensure no Windows path fragment
+    expect(message).not.toContain(':\\')
+  }
+
+  it('buildM4CheckpointFailureMessage is fixed path-free category', () => {
+    const msg = buildM4CheckpointFailureMessage()
+    expect(msg).toContain(M4_CHECKPOINT_FAILURE_CATEGORY)
+    assertPathFree(msg)
+    // Must not interpolate native error text even when error contains path
+    expect(msg).not.toContain(fakeDbPath)
+    expect(msg).not.toContain(fakePathError.message)
+  })
+
+  it('buildM4StatFailureMessage is fixed path-free category', () => {
+    const msg = buildM4StatFailureMessage()
+    expect(msg).toContain(M4_STAT_FAILURE_CATEGORY)
+    assertPathFree(msg)
+    expect(msg).not.toContain(fakeDbPath)
+    expect(msg).not.toContain(fakePathError.message)
+  })
+
+  it('buildM4BusyCheckpointFailureMessage is path-free and encodes busy only', () => {
+    for (const busy of [0, 1, 'unverifiable'] as const) {
+      const msg = buildM4BusyCheckpointFailureMessage(busy)
+      expect(msg).toContain(`busy=${String(busy)}`)
+      assertPathFree(msg)
+      expect(msg).not.toContain(fakeDbPath)
+    }
+  })
+
+  it('assertCheckpointComplete failure messages are path-free', () => {
+    const cases: unknown[] = [
+      { busy: 1, log: 0, checkpointed: 0 },
+      1,
+      [{ busy: 1, log: 0, checkpointed: 0 }],
+      undefined
+    ]
+    for (const raw of cases) {
+      try {
+        assertCheckpointComplete(raw)
+        throw new Error('expected throw')
+      } catch (e) {
+        const msg = (e as Error).message
+        // Should not contain path separators or dbPath text
+        assertPathFree(msg)
+        expect(msg).not.toContain(fakeDbPath)
+      }
+    }
+  })
+
+  it('parseCheckpointBusy failure messages are path-free', () => {
+    const cases: unknown[] = [undefined, null, {}, [], 'busy']
+    for (const raw of cases) {
+      try {
+        parseCheckpointBusy(raw)
+        throw new Error('expected throw')
+      } catch (e) {
+        const msg = (e as Error).message
+        assertPathFree(msg)
+        expect(msg).not.toContain(fakeDbPath)
+      }
+    }
+  })
+
+  it('sanitized helpers remain path-free even when underlying error contains path', () => {
+    // Simulate bench catch where native error has path; helper must not leak it
+    const nativeWithPath = new Error(`/var/folders/abc/T/chatdb-m4-fts-dup-xyz/chat.db: unable to open`)
+    const checkpointMsg = buildM4CheckpointFailureMessage()
+    const statMsg = buildM4StatFailureMessage()
+    const busyMsg = buildM4BusyCheckpointFailureMessage('unverifiable')
+    for (const msg of [checkpointMsg, statMsg, busyMsg]) {
+      expect(msg).not.toContain(nativeWithPath.message)
+      expect(msg).not.toContain('/var/folders')
+      expect(msg).not.toContain('chat.db')
+      assertPathFree(msg)
+    }
+  })
+})
+
+describe('M4 FTS smoke failure detail is fixed path-free category (audit M4 — no native path leak)', () => {
+  const pathShapedNativeErrors: Array<{ label: string; error: Error }> = [
+    { label: 'macOS /tmp', error: new Error('no such table: /tmp/chatdb-m4-fts-dup-abc123/chat.db') },
+    {
+      label: 'macOS /private/tmp',
+      error: new Error('disk I/O error at /private/tmp/chatdb-m4-fts-dup-xyz/chat.db: SQLITE_IOERR')
+    },
+    {
+      label: 'macOS /var/folders',
+      error: new Error('/var/folders/ab/cd/T/chatdb-m4-fts-dup-xyz/chat.db: unable to open')
+    },
+    { label: 'macOS /private/var/folders', error: new Error('FTS error at /private/var/folders/zz/T/m4-fts/chat.db') },
+    {
+      label: 'Windows C:\\',
+      error: new Error('SQLITE_CANTOPEN: C:\\Users\\test\\AppData\\Temp\\chatdb-m4-fts-dup\\chat.db')
+    },
+    {
+      label: 'Windows D:\\ with backslash',
+      error: new Error('failed at D:\\tmp\\chatdb-m4-fts-dup\\chat.db: permission denied')
+    },
+    { label: 'Windows relative backslash', error: new Error('error at .\\chat.db: not found') },
+    { label: 'relative ./', error: new Error('no such file: ./chatdb-m4-fts-dup/chat.db') },
+    { label: 'relative ../', error: new Error('attempt at ../tmp/chat.db failed') },
+    { label: 'relative tmp/', error: new Error('tmp/chat.db: SQLITE_ERROR') },
+    { label: 'POSIX absolute', error: new Error('/tmp/m4-smoke/chat.db: virtual table missing') }
+  ]
+
+  function assertSmokePathFree(detail: string): void {
+    expect(detail).not.toContain('/tmp')
+    expect(detail).not.toContain('/private')
+    expect(detail).not.toContain('/var/folders')
+    expect(detail).not.toContain('chat.db')
+    expect(detail).not.toContain('chatdb-m4-fts-dup')
+    expect(detail).not.toContain(':\\')
+    // Also ensure no relative path fragment leaked
+    expect(detail).not.toContain('./')
+    expect(detail).not.toContain('../')
+  }
+
+  it('buildM4FtsSmokeFailureDetail returns fixed category without native text', () => {
+    const detail = buildM4FtsSmokeFailureDetail()
+    expect(detail).toContain(M4_FTS_SMOKE_FAILURE_CATEGORY)
+    expect(detail).toContain('FTS smoke failed')
+    assertSmokePathFree(detail)
+    expect(Buffer.byteLength(detail, 'utf8')).toBeLessThanOrEqual(256)
+  })
+
+  it('fixed detail does not interpolate macOS/private/Windows/relative path-shaped native errors', () => {
+    for (const { error } of pathShapedNativeErrors) {
+      const fixed = buildM4FtsSmokeFailureDetail()
+      // Simulate old vulnerable interpolation would have leaked error.message
+      // Fixed detail must not contain any fragment of the native error path
+      expect(fixed).not.toContain(error.message)
+      // Explicit path substrings must not appear
+      if (error.message.includes('/tmp')) expect(fixed).not.toContain('/tmp')
+      if (error.message.includes('/private')) expect(fixed).not.toContain('/private')
+      if (error.message.includes('/var/folders')) expect(fixed).not.toContain('/var/folders')
+      if (error.message.includes(':\\')) expect(fixed).not.toContain(':\\')
+      if (error.message.includes('chat.db')) expect(fixed).not.toContain('chat.db')
+      assertSmokePathFree(fixed)
+    }
+  })
+
+  it('FTS smoke gate detail via fixed helper is bounded, path-free, and fails closed', () => {
+    const fixedDetail = buildM4FtsSmokeFailureDetail()
+    const gates = buildM4FtsDuplicationGates({
+      canonicalRows: 10,
+      normalizedRows: 10,
+      ftsRows: 10,
+      ftsSmokePassed: false,
+      ftsSmokeDetail: fixedDetail,
+      corpusBlocks: 10,
+      finitePassed: true,
+      finiteDetail: 'finite ok'
+    })
+    const smokeGate = gates.find((g) => g.id === 'fts.smoke')!
+    expect(smokeGate.passed).toBe(false)
+    expect(smokeGate.detail).toBe(fixedDetail)
+    expect(smokeGate.detail).toContain(M4_FTS_SMOKE_FAILURE_CATEGORY)
+    assertSmokePathFree(smokeGate.detail!)
+    expect(Buffer.byteLength(smokeGate.detail!, 'utf8')).toBeLessThanOrEqual(256)
+    // Ensure even when native error contains every path form, the gate detail remains path-free
+    for (const { error } of pathShapedNativeErrors) {
+      expect(smokeGate.detail).not.toContain(error.message.slice(0, 20))
+    }
+  })
+
+  it('sanitized FTS smoke detail remains path-free when bench catch swallows native path error', () => {
+    for (const { error } of pathShapedNativeErrors) {
+      let detail = ''
+      try {
+        throw error
+      } catch (_e) {
+        detail = buildM4FtsSmokeFailureDetail()
+      }
+      assertSmokePathFree(detail)
+      expect(detail).not.toContain(error.message)
+    }
   })
 })
