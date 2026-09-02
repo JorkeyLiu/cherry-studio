@@ -33,8 +33,9 @@ Canonical architecture evolution program for Cherry Chat. It:
 | [`performance-program.md`](./performance-program.md) | Performance methodology entry | Evidence feeds this program when structural debt is exposed |
 | [`performance-measurement.md`](./performance-measurement.md) | Measurement contract | Owns methodology, lane, schema, and artifact contract |
 | [`performance-workstreams.md`](./performance-workstreams.md) | Current actionable performance state | Product problems reference this program for architecture acceptance |
-| [`sync-mvp.md`](./sync-mvp.md) | Sync first-phase boundary | Sync must adapt to this program; never the reverse |
-| [`sync-powersync-spike.md`](./sync-powersync-spike.md) | PowerSync No-Go record | Vendor-specific No-Go; not a target constraint |
+| [`sync-architecture-selection.md`](./sync-architecture-selection.md) | Sync S8 selection validation — canonical product/selection authority | Canonical; governs product target, four-dimension method, candidate taxonomy, and S8 spikes; sync must adapt to this program, never the reverse |
+| [`sync-mvp.md`](./sync-mvp.md) | Sync MVP proposal — historical record | Historical; Phase 0/1 proposal and open-question framing superseded by `sync-architecture-selection.md`; retained for prior locks/inventory audit |
+| [`sync-powersync-spike.md`](./sync-powersync-spike.md) | PowerSync disposable spike — historical experiment record | Historical; constraint-specific No-Go evidence for S8 re-evaluation, not a permanent ban or target constraint |
 | [`sqlite-migration.md`](./sqlite-migration.md) | SQLite chat authority governance | Authoritative; schema changes require ADR |
 | [`context-window.md`](./context-window.md) | Context window governance | Authoritative; anchor semantics unchanged |
 | [`cherry-chat-application-identity.md`](./cherry-chat-application-identity.md) | Identity / compatibility / release / platform governance | Authoritative; not modified by this program |
@@ -85,10 +86,10 @@ Historical measurement provenance (pre-S3.1 and prior clean L3 records) remains 
 |---|---|---|
 | **ARCH-001** | Architecture correctness, elegance, unity, and long-term evolvability lead. Performance is validation evidence, not the sole design objective. | **Locked** |
 | **ARCH-002** | Future startup speed and bounded memory are explicit architecture enablement goals — they influence phase prioritization but do not override correctness. | **Locked** |
-| **ARCH-003** | Sync is future compatibility only and vendor-neutral. Sync architecture/technology must adapt to the application architecture, never the reverse. | **Locked** |
-| **ARCH-004** | PowerSync remains No-Go (see [`sync-powersync-spike.md`](./sync-powersync-spike.md)). Target architecture must not be optimized for or constrained by PowerSync. | **Locked** |
+| **ARCH-003** | Sync is future compatibility only and vendor-neutral. Sync architecture/technology must adapt to the application architecture, never the reverse. Canonical S8 product/selection detail is governed by [`sync-architecture-selection.md`](./sync-architecture-selection.md). | **Locked** |
+| **ARCH-004** | PowerSync historical No-Go was constraint-specific under zero-production-change scope (see historical [`sync-powersync-spike.md`](./sync-powersync-spike.md)). Target architecture must not be optimized for or constrained by PowerSync; the historical No-Go is evidence for S8 re-evaluation (S8-SP1), not a permanent ban or target constraint — selection among formal finalists per [`sync-architecture-selection.md`](./sync-architecture-selection.md) §4–§8 remains vendor-neutral. | **Locked** |
 | **ARCH-005** | Sync-ready means preserving good structural properties only: clear authority, stable IDs, typed explicit commands, atomic/idempotent mutations, deterministic ordering, stable/final checkpoints, disposable projections, bounded caches, device-local-state separation. | **Locked** |
-| **ARCH-006** | No sync schema, metadata, tombstone, conflict engine, vendor adapter, transport, account/E2EE/attachment decision, or production sync path is authorized by this program. | **Locked** |
+| **ARCH-006** | No sync schema, metadata, tombstone, conflict engine, vendor adapter, transport, account/E2EE/attachment decision, or production sync path is authorized by this program or by S8 selection validation — S8 is documentation/research only (see [`sync-architecture-selection.md`](./sync-architecture-selection.md) §7, §12). | **Locked** |
 | **ARCH-007** | Main SQLite authority and existing identity, SQLite migration, context-window, compatibility, and release/platform governance remain authoritative until separate decisions. | **Locked** |
 | **ARCH-008** | Existing `architecture.md` must describe only implemented reality, not target architecture. | **Locked** |
 | **ARCH-009** | Architecture refactoring seeks structurally better and naturally faster architecture; performance measurements record the natural result — no absolute performance metric/target is a routine phase gate and architecture progression does not require direct natural performance improvement to progress. | **Locked** |
@@ -203,7 +204,7 @@ Classification: **Observed structure** (concrete property), **Candidate conseque
 - No performance thresholds — owned by `performance-measurement.md`.
 - No sync schema/metadata/tombstone/conflict/transport/account/E2EE implementation.
 - No governance changes for identity, SQLite migration, context-window, compatibility, release/platform.
-- No root `AGENTS.md` changes.
+- No root `AGENTS.md` redesign or restructuring — narrow canonical-reference maintenance (e.g., updating a sync canonical reference in the guide) is permitted, but the architecture program does not own or redesign the root guide.
 
 ---
 
@@ -222,7 +223,7 @@ Phases have dependencies but are not all sequential or approved for implementati
 | **5** | Data-Access Contract | **Closed 2026-08-29 (outcome/residual-risk)** | Phase 2 + Phase 4 inputs |
 | **6** | DB-Health Implementation | **Closed 2026-09-02 (outcome/residual-risk) — S6.1–S6.3 Authorized & Implemented (retained), S6.4 SQ-01 Rejected 2026-08-29 — no ADR, no production implementation, current LIKE retained (retained), S6.5 Closed / Not Implemented 2026-09-02 — no ADR, no production file/FTS change; 2026-09-02 M4 physical proxy extension (S6.5-E1, synthetic isolated, four raw metrics, S6.5 remains Closed / Not Implemented) and single-profile directional evidence (see §7.3.4); no ready-now DB-health batch** | Phase 5 contract |
 | **7** | Startup Architecture | **Closed 2026-09-02 (outcome/residual-risk) — S7.1–S7.13 Implemented & Closed (S7.12 attribution-only, S7.13 attribution-only instrumentation, bounded privacy-safe, no production optimization/baseline/SLA/threshold; S7.14-E1 first-data attribution evidence integrated 2026-09-02 directional, S7.14 not upgraded); S7.14 Startup Optimization Assessment and Finalization Closed 2026-09-02 via controlled non-adoption (user-approved “了解。关闭。”; no demonstrably high-return winner at current first-screen architecture; see §6.8.16); Phase 7 Closed — See §6.8.2–§6.8.16** | Phase 2; Phase 3 for conversation-startup |
-| **8** | Future Sync Decision | **Open** (deferred) | Phases 2-5 + governance decision |
+| **8** | Future Sync Decision — S8 Selection Validation | **Active — Selection Validation (documentation/research only, no implementation authorization)** — governed by [`sync-architecture-selection.md`](./sync-architecture-selection.md); formal finalists PowerSync complete stack / cr-sqlite + relay / app operation-log + relay / Turso Database + Turso Database Sync; balanced four-dimension method (SYNC-S8-003) | Phases 2-5 + user activation (met 2026-09-02; see §6.9) |
 
 PERF-TOPIC-SWITCH, PERF-ECHO, PERF-STREAMING, PERF-DB-HEALTH remain independent post-refactor workstreams per ARCH-011; architecture closure does not close them.
 
@@ -888,13 +889,15 @@ Observed current-state facts at authorization time: `src/renderer/src/Router.tsx
 - Future startup work gated to explicit PERF/governance activation triggered only by concrete user symptom, reproducible regression, or natural feature change — not by this closure.
 - No threshold/baseline/SLA/winner adopted; Phase 7 Closed does not permanently prohibit optimization.
 
-### 6.9 Phase 8: Future Sync Decision
+### 6.9 Phase 8: Future Sync Decision — S8 Selection Validation (Active, documentation/research only)
 
-- **Entry**: Phases 2-5 structural foundation + governance decision to pursue sync.
-- **Content**: Vendor-neutral architecture decisions (cross-device authority, conflict, transport); remaining sync-readiness validation against ARCH-005.
-- **Exit**: Sync architecture decisions documented; sync-readiness validated.
-- **Dependencies**: Phases 2-5; governance approval required.
-- **Interpretation**: ARCH-004 (PowerSync No-Go) is vendor-specific and not a target constraint; target must be vendor-neutral.
+- **Status**: **Active — Selection Validation (documentation/research only, no implementation authorization)**. Governed by canonical [`sync-architecture-selection.md`](./sync-architecture-selection.md); historical [`sync-mvp.md`](./sync-mvp.md) and [`sync-powersync-spike.md`](./sync-powersync-spike.md) are retained as historical records only.
+- **Entry**: Phases 2-5 structural foundation + user activation of S8 — **met 2026-09-02** (explicit user direction for Syncthing-like local-first product and balanced four-dimension validation).
+- **Content**: Balanced four-dimension selection validation (§3) across formal finalists (PowerSync complete stack, cr-sqlite + relay, application operation-log + relay, Turso Database + Turso Database Sync) on equal scenarios (SCE-01..08); Automerge Repo conditional fallback (CF); Electric/RxDB/Couch deferred for specific fit gaps (see canonical §4); write-amplification gate after each candidate's replay model; remaining sync-readiness validation against ARCH-005.
+- **Exit**: Selected sync architecture documented with four-dimension trade-offs and residual risks accepted, readiness validated, and implementation preconditions (ADR/migration/contract) stated. No production implementation is authorized by this exit — production requires a separate governed decision.
+- **Dependencies**: Phases 2-5; governance approval required for any production schema/migration/IPC change.
+- **Interpretation**: ARCH-003 vendor-neutral and ARCH-004 PowerSync historical No-Go (constraint-specific, not a permanent ban — see historical spike) remain; target must be vendor-neutral and not constrained by any candidate. ARCH-006 prohibits implementation authorization from this phase; S8 spikes are documentation/research only with disposable harnesses.
+- **No implementation authorization**: See [`sync-architecture-selection.md`](./sync-architecture-selection.md) §7, §12 — bounded four-spike plan (S8-SP1..SP4) is documentation/research only; no production batch exists yet.
 
 ---
 
@@ -1100,9 +1103,9 @@ Only stable/final block checkpoints are future sync candidates (SYNC-004). Strea
 
 `extra` on messages/blocks is a general extension point, not a sync metadata store. Any sync metadata design requires Phase 8 governance.
 
-### 9.6 PowerSync No-Go interpretation
+### 9.6 PowerSync historical No-Go interpretation
 
-PowerSync No-Go (see [`sync-powersync-spike.md`](./sync-powersync-spike.md)) documented managed-table-as-view conflict with current FTS/trigger schema under zero-production-change constraints. It must not become a target architecture constraint; future decisions are vendor-neutral against §3 qualities.
+PowerSync historical No-Go (see historical [`sync-powersync-spike.md`](./sync-powersync-spike.md) §5) documented managed-table-as-view conflict with current FTS/trigger schema under zero-production-change constraints. It must not become a target architecture constraint; future decisions are vendor-neutral against §3 qualities. Canonical S8 selection (see [`sync-architecture-selection.md`](./sync-architecture-selection.md) §5.1, §7) treats this as constraint-specific evidence for re-evaluation (S8-SP1), not a permanent ban — PowerSync complete stack is a formal finalist under the balanced four-dimension method (SYNC-S8-003/004).
 
 ---
 
@@ -1117,7 +1120,7 @@ PowerSync No-Go (see [`sync-powersync-spike.md`](./sync-powersync-spike.md)) doc
 5. **Native/app/window/multi-window lifecycle**: Window/native capability/app lifecycle changes -> governance decision.
 6. **Identity/compatibility**: Database names, persistence keys, import schema, compatibility identifiers (governed by `cherry-chat-application-identity.md`) -> Application Identity governance decision.
 7. **Release/platform**: Release scope or platform behavior -> Application Identity governance decision.
-8. **Sync boundary**: Any sync infrastructure, metadata, transport, vendor, account, and E2EE decisions -> sync governance owner docs (`sync-mvp.md` / `sync-powersync-spike.md`); Phase 8 is activation phase, not authority.
+8. **Sync boundary**: Any sync infrastructure, metadata, transport, vendor, pairing/device-trust, and E2EE/attachment decisions -> sync governance owner doc canonical [`sync-architecture-selection.md`](./sync-architecture-selection.md) (historical [`sync-mvp.md`](./sync-mvp.md) / [`sync-powersync-spike.md`](./sync-powersync-spike.md) retained as historical records); Phase 8 is S8 Selection Validation (Active, documentation/research only; no implementation authorization).
 
 A formal ADR is required where the authoritative owner document/mandated process requires it. The mandatory rule is the decision gate itself.
 
@@ -1134,7 +1137,7 @@ Renderer component/topic lifecycle is not a decision gate trigger (program-level
 | Native/app/window/multi-window lifecycle | Any phase | Governance decision |
 | Identity/compatibility | Any phase | Application Identity governance |
 | Release/platform | Any phase | Application Identity governance |
-| Sync vendor/transport/account/E2EE | Phase 8 | Sync governance owner docs; Phase 8 is activation phase |
+| Sync vendor/transport/pairing/E2EE/attachment | Phase 8 (S8 Selection Validation — Active) | Canonical [`sync-architecture-selection.md`](./sync-architecture-selection.md); Phase 8 is selection validation (documentation/research only; no implementation authorization) |
 | Conversation ownership model | Phase 2 | **Resolved** (this program §6.3) |
 
 ### 10.3 Acceptance model
@@ -1163,7 +1166,7 @@ Each phase requires:
 | FTS storage dedup | Phase 6 | **Closed / Not Implemented 2026-09-02 — no ADR, no production FTS change**; bounded synthetic M4 profiles (1k/10k/50k — 50k 2026-09-01 `chatdb-m4-fts-duplication-50k`, synthetic directional L3, logical duplication only) + 2026-09-02 physical proxy (S6.5-E1, four raw metrics `page_count`/`page_size`/`freelist_count`/`dbFileBytes` via WAL checkpoint + stat, sanitized failure paths, synthetic isolated, directional; full record in §7.3.3) and single-profile directional evidence (see §7.3.4) — FTS derived storage duplication significant at that profile scale but existing search is not approved for rebuild; local optimization is not pursued as it would incur migration/validation cost replaceable only if a future explicit search-rebuild decision were approved — no threshold/baseline/benefit/physical-cost or production authorization follows; real-corpus/physical-size/physical-cost/incidence/threshold remain bounded directional unknowns, not thresholds (details in §7.3.2/§7.3.3/§7.3.4 and `performance-measurement.md` §6); any future search work requires new explicit search-rebuild decision with four-field contract, privacy review where applicable, and governance/ADR — not auto-reactivated; no external-content/FTS5 or specific future scheme promised |
 | Data-access implementation (windowed fetch, authority-aware actions, context closure) | Phase 6 | **Closed 2026-09-02 (outcome/residual-risk) — S6.1–S6.3 Authorized & Implemented (retained); S6.4 SQ-01 Rejected 2026-08-29 (no ADR, current LIKE retained; M2/M3 batch closed); S6.5 Closed / Not Implemented 2026-09-02 — no ADR, no production file/FTS change; no ready-now DB-health batch (see §7.3.4)** |
 | Startup improvements (S7.1–S7.14) | Phase 7 | **Closed 2026-09-02 (outcome/residual-risk) — S7.1–S7.13 Implemented & Closed (S7.12 attribution-only, S7.13 attribution-only instrumentation, bounded privacy-safe, no production optimization/baseline/SLA/threshold/winner) + S7.14-E1 first-data attribution evidence integrated 2026-09-02 directional + S7.14 Startup Optimization Assessment and Finalization Closed 2026-09-02 via controlled non-adoption (user-approved “了解。关闭。”; no demonstrably high-return winner at current first-screen architecture; see §6.8.16); Phase 7 Closed — See §6.8.2–§6.8.16; S7.12 static topology (§6.8.13): PersistGate (`persist:cherry-studio`) then ImportProjectionGate sequential blockers, Dexie module blocking/timing unknown, Main restore/SQLite before window, handler/preload gap unresolved, trace/import/search lazy, PowerMonitor out-of-scope; S7.13 instrumentation (§6.8.14): independent `__STARTUP_STAGE_ATTR__` gate default-off fail-closed, Main-authoritative exact disposable validation + opaque `__CHERRY_STARTUP_STAGE_VALIDATED` marker, bounded privacy-safe closed records (one per stage/session, no content/paths/credentials/raw DB size), 9 Main + 4 renderer boundaries without changing startup order/authority/IPC/preload/persistence/schema/migration/StoreSync/Dexie-open, renderer `importProjectionReady` → `ordinaryTreeReady` verified with first-data/Dexie milestone intentionally omitted; S7.14-E1 (§6.8.15): `renderer.firstData` interval `ordinaryTreeReady` → first eligible active-topic `fetchMessagesWindow` settlement, closed union 14 stages, bounded numeric-only, one-shot, default-off fail-closed, stale/eligibility gating (active-before + consumption, stale/deletion/generation/superseded discard); shared diagnostic stage-union extension only, no IPC/preload/shared application contract/schema/migration/StoreSync/persist-key change; S7.14 (§6.8.16): controlled non-adoption assessment — no production optimization/baseline/SLA/threshold/winner/measurement change, segments not claimed as proven bottleneck, messages/segments coupling examined and left unimplemented (would require new two-phase residency/invalidation); no production optimization/baseline/SLA/threshold/winner/regression; verification: S7.13 independent audit + re-audit 0 findings, focused Vitest, `git diff --check`, `pnpm build:check` exit 0 on exact worktree under Node 24.11.1/pnpm 10.27.0, plus fresh enabled Electron runtime E2E `STARTUP_STAGE_ATTR=1 pnpm build` exit 0 then `STARTUP_STAGE_ATTR=1 STARTUP_STAGE_SYNTHETIC=1 pnpm test:e2e -- startup-stage-instrumentation.spec.ts` exit 0, 1 passed (Main/renderer markers, enabled state, bounded/privacy-safe records, epoch comparability, Main stages, renderer milestone ordering; disposable profile fixture; harness callback arity fix only; audit passed) + S7.14-E1 focused Vitest (renderer `startupFirstData` 9 suites + thunk `messageThunk.firstData` 14 suites, stale-race corrected, no leakage, fail-closed), `git diff --check`, final sharded audit 0 findings + S7.14 docs-only finalization (no production code, `git diff --check`); Phase 7 Closed; accepted residuals: handler/preload ordering, Dexie open/upgrade timing, first-data/physical cost/incidence, messages/segments coupling — future explicit PERF/governance activation only; no winner selected** |
-| Sync architecture decisions | Phase 8 | Open (deferred) |
+| Sync architecture decisions | Phase 8 — S8 Selection Validation | **Active — Selection Validation (documentation/research only, no implementation authorization)** — canonical [`sync-architecture-selection.md`](./sync-architecture-selection.md) governs product target (SYNC-S8-001), baseline (SYNC-S8-002), balanced four-dimension method (SYNC-S8-003), candidate taxonomy/shortlist (SYNC-S8-004), equal-scenario criteria, four-spike plan (S8-SP1..SP4), decision rules, and write-amplification gate (SYNC-S8-006); entry met 2026-09-02; exit requires selected architecture documented and readiness validated; historical [`sync-mvp.md`](./sync-mvp.md) / [`sync-powersync-spike.md`](./sync-powersync-spike.md) retained as historical records only |
 
 ### 10.5 Cross-document ownership
 
@@ -1173,7 +1176,7 @@ Each phase requires:
 | SQLite chat authority/migration | `sqlite-migration.md` | Not modified; schema requires ADR |
 | Context window anchor semantics | `context-window.md` | Not modified |
 | Performance methodology/measurement | `performance-program.md` / `performance-measurement.md` | Not modified; feeds this program |
-| Sync boundaries/vendor | `sync-mvp.md` / `sync-powersync-spike.md` | Sync adapts to this program |
+| Sync product/selection | `sync-architecture-selection.md` (canonical) + historical `sync-mvp.md` / `sync-powersync-spike.md` | Sync adapts to this program; S8 selection validation governed by canonical doc; historical docs retained for audit only |
 | Architecture evolution phases/qualities | **This document** | Owns evolution path |
 | Implemented architecture | `architecture.md` | Current reality only |
 
@@ -1187,8 +1190,9 @@ Cross-document ownership in §10.5. For navigation:
 - [`performance-program.md`](./performance-program.md) — Performance methodology entry.
 - [`performance-measurement.md`](./performance-measurement.md) — Measurement contract.
 - [`performance-workstreams.md`](./performance-workstreams.md) — Current actionable performance state.
-- [`sync-mvp.md`](./sync-mvp.md) — Sync first-phase boundary.
-- [`sync-powersync-spike.md`](./sync-powersync-spike.md) — PowerSync No-Go record.
+- [`sync-architecture-selection.md`](./sync-architecture-selection.md) — Sync S8 selection validation — canonical product/selection authority (Active, documentation/research only).
+- [`sync-mvp.md`](./sync-mvp.md) — Sync MVP proposal — historical record (superseded).
+- [`sync-powersync-spike.md`](./sync-powersync-spike.md) — PowerSync disposable spike — historical experiment record (constraint-specific No-Go, evidence for S8 re-evaluation).
 - [`sqlite-migration.md`](./sqlite-migration.md) — SQLite governance.
 - [`context-window.md`](./context-window.md) — Context window governance.
 - [`cherry-chat-application-identity.md`](./cherry-chat-application-identity.md) — Identity/compatibility governance.

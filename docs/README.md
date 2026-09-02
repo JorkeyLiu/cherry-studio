@@ -18,8 +18,9 @@ This directory contains the project documentation in multiple languages.
 | [Performance Program](./performance-program.md) | Performance methodology entry (amplification-first, hypothesis-driven lifecycle, evidence principles) |
 | [Performance Measurement](./performance-measurement.md) | Persistent measurement contract (toolchain, evidence hierarchy, schema v1, thresholds) |
 | [Performance Workstreams](./performance-workstreams.md) | Current actionable performance state (open product problems, evidence, acceptance framework) |
-| [Sync MVP Proposal](./sync-mvp.md) | Synchronization first-phase boundary (scope, data surface, open decisions) |
-| [PowerSync Spike Plan](./sync-powersync-spike.md) | PowerSync disposable spike: No-Go conclusion, historical evidence, vendor-specific (not a target constraint) |
+| [Sync Architecture Selection](./sync-architecture-selection.md) | **Canonical S8 selection validation (Active, documentation/research only)** — product target, balanced four-dimension method, candidate taxonomy/shortlist, research findings, equal-scenario criteria, four-spike plan (S8-SP1..SP4), decision rules, write-amplification gate |
+| [Sync MVP Proposal](./sync-mvp.md) | Historical record — first-phase boundary proposal superseded by Sync Architecture Selection |
+| [PowerSync Spike Historical Record](./sync-powersync-spike.md) | Historical experiment record — disposable spike constraint-specific No-Go, evidence for S8 re-evaluation (not a permanent ban) |
 
 ---
 
