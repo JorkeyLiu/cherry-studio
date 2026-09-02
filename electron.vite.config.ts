@@ -87,6 +87,24 @@ function resolvePhaseAttrDefine(): string {
 }
 const phaseAttrDefine = resolvePhaseAttrDefine()
 
+// S7.13 startup stage instrumentation (LOCK-001..003): independent default-off
+// fail-closed synthetic-disposable-profile-only harness. Plain builds inline
+// 'false' (inert); instrumentation build sets STARTUP_STAGE_ATTR=1 at build
+// time. Malformed non-empty throws (fail-closed) for explicit builds; ordinary
+// builds remain false. Renderer and Main defines are derived from the SAME env
+// so they stay coherent.
+function resolveStartupStageDefine(): string {
+  const value = process.env.STARTUP_STAGE_ATTR
+  if (value === undefined || value.trim().length === 0) return 'false'
+  const normalized = value.trim().toLowerCase()
+  if (normalized === '1' || normalized === 'true') return 'true'
+  throw new Error(
+    `STARTUP_STAGE_ATTR must be '1'/'true' to enable or unset/empty to skip (got '${value}'). ` +
+      'Enable only for the documented instrumentation build.'
+  )
+}
+const startupStageDefine = resolveStartupStageDefine()
+
 export default defineConfig({
   main: {
     plugins: [
@@ -116,7 +134,8 @@ export default defineConfig({
       // from the SAME build env as the renderer switch so the two processes
       // are guaranteed consistent in a measurement build (LOCK-STREAM-ATTR-001).
       __PERF_STREAM_ATTR__: JSON.stringify(streamAttrDefine),
-      __PERF_PHASE_ATTR__: JSON.stringify(phaseAttrDefine)
+      __PERF_PHASE_ATTR__: JSON.stringify(phaseAttrDefine),
+      __STARTUP_STAGE_ATTR__: JSON.stringify(startupStageDefine)
     },
     build: {
       rollupOptions: {
@@ -178,7 +197,8 @@ export default defineConfig({
     define: {
       // PERF-STREAM-ATTR-001: inlined measurement switch (see above).
       __PERF_STREAM_ATTR__: JSON.stringify(streamAttrDefine),
-      __PERF_PHASE_ATTR__: JSON.stringify(phaseAttrDefine)
+      __PERF_PHASE_ATTR__: JSON.stringify(phaseAttrDefine),
+      __STARTUP_STAGE_ATTR__: JSON.stringify(startupStageDefine)
     },
     resolve: {
       alias: {

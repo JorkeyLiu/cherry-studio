@@ -9,3 +9,4 @@
 interface ImportMetaEnv {}
 
 declare const __PERF_PHASE_ATTR__: string
+declare const __STARTUP_STAGE_ATTR__: string

@@ -43,6 +43,20 @@ export default defineConfig({
             'Enable only through the documented measurement build/run.'
         )
       })()
+    ),
+    // S7.13 startup stage instrumentation — independent default-off harness
+    // (LOCK-001..003). Coherent with electron.vite.config.ts define.
+    __STARTUP_STAGE_ATTR__: JSON.stringify(
+      (() => {
+        const value = process.env.STARTUP_STAGE_ATTR
+        if (value === undefined || value.trim().length === 0) return 'false'
+        const normalized = value.trim().toLowerCase()
+        if (normalized === '1' || normalized === 'true') return 'true'
+        throw new Error(
+          `STARTUP_STAGE_ATTR must be '1'/'true' to enable or unset/empty to skip (got '${value}'). ` +
+            'Enable only for the documented instrumentation build.'
+        )
+      })()
     )
   },
   test: {

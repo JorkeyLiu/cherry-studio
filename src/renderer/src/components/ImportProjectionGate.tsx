@@ -99,6 +99,20 @@ export function ImportProjectionGate({ children }: { children: React.ReactNode }
   const { t } = useTranslation()
   const [retrying, setRetrying] = useState(false)
 
+  // S7.13: renderer.ordinaryTreeReady — ordinary chat tree ready boundary.
+  // Guarded in effect (not render) so retries/re-renders remain idempotent;
+  // marks only once per startup when the gate first becomes 'ready'.
+  useEffect(() => {
+    if (state !== 'ready') return
+    void import('../services/startupStageDiagnostics')
+      .then(({ markStartupMilestone }) => {
+        try {
+          markStartupMilestone('renderer.ordinaryTreeReady')
+        } catch {}
+      })
+      .catch(() => {})
+  }, [state])
+
   const handleRetry = useCallback(async () => {
     if (retrying) return
     setRetrying(true)

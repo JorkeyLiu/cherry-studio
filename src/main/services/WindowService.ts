@@ -22,6 +22,9 @@ import { initSessionUserAgent } from './WebviewService'
 // const logger = loggerService.withContext('WindowService')
 const logger = loggerService.withContext('WindowService')
 
+// S7.13: windowReady stage uses stored creation perfMs to compute blocking duration
+let windowCreatePerfMs: number | null = null
+
 // Create nativeImage for Linux window icon (required for Wayland)
 const linuxIcon = isLinux ? nativeImage.createFromPath(iconPath) : undefined
 
@@ -43,6 +46,9 @@ export class WindowService {
       this.mainWindow.focus()
       return this.mainWindow
     }
+
+    // S7.13: capture creation perf anchor for windowReady duration without changing window lifecycle
+    windowCreatePerfMs = performance.now()
 
     const mainWindowState = windowStateKeeper({
       defaultWidth: MIN_WINDOW_WIDTH,
@@ -173,6 +179,21 @@ export class WindowService {
 
   private setupWindowEvents(mainWindow: BrowserWindow) {
     mainWindow.once('ready-to-show', () => {
+      // S7.13: record windowReady stage without changing lifecycle/ordering.
+      // Uses fail-closed synthetic-only gate; does not add IPC or file writes.
+      try {
+        const { isStartupStageEnabled, readStartupState, recordStartupStage } = require('./startupStageDiagnostics')
+        if (isStartupStageEnabled() && windowCreatePerfMs !== null) {
+          const duration = performance.now() - windowCreatePerfMs
+          // Guard dedup via shared primitive; bounded scalar status only.
+          if (!readStartupState().records.some((r) => r.stage === 'main.windowReady')) {
+            recordStartupStage('main.windowReady', duration, 'ok')
+          }
+        }
+      } catch {}
+      // Clear anchor for next window creation without leaking perf timing
+      windowCreatePerfMs = null
+
       mainWindow.webContents.setZoomFactor(configManager.getZoomFactor())
 
       // show window only when laucn to tray not set

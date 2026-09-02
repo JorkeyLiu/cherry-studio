@@ -33,6 +33,7 @@ declare global {
    */
   const __PERF_STREAM_ATTR__: string
   const __PERF_PHASE_ATTR__: string
+  const __STARTUP_STAGE_ATTR__: string
 
   interface Window {
     root: HTMLElement

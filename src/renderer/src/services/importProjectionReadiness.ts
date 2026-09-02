@@ -71,6 +71,18 @@ export function settleImportProjectionReadiness(next: Exclude<ImportProjectionRe
   for (const listener of [...listeners]) {
     listener()
   }
+  // S7.13: renderer.importProjectionReady milestone — gate-ready boundary.
+  // Idempotent per startup, fail-closed, synthetic-only via diagnostics gate.
+  // Dynamic import avoids cycle; if diagnostics not enabled the call is inert.
+  if (next === 'ready') {
+    void import('./startupStageDiagnostics')
+      .then(({ markStartupMilestone }) => {
+        try {
+          markStartupMilestone('renderer.importProjectionReady')
+        } catch {}
+      })
+      .catch(() => {})
+  }
 }
 
 /**

@@ -16,6 +16,9 @@
  */
 import { loggerService } from '@logger'
 import type { Middleware } from '@reduxjs/toolkit'
+
+// S7.13 startup stage anchor for persist rehydration (fail-closed diagnostic only).
+const persistStartPerfMs = performance.now()
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
 import { IpcChannel } from '@shared/IpcChannel'
 import { useDispatch, useSelector, useStore } from 'react-redux'
@@ -393,6 +396,17 @@ export type RootState = ReturnType<typeof rootReducer>
 export type AppDispatch = typeof store.dispatch
 
 export const persistor = persistStore(store, undefined, () => {
+  // S7.13: renderer.persistRehydrate — marks stable persist:cherry-studio rehydration boundary.
+  // Guarded idempotent mark; does not change rehydration semantics or ordering.
+  // Uses dynamic import to avoid store/import cycle; fail-closed when disabled.
+  void import('../services/startupStageDiagnostics')
+    .then(({ markStartupStage }) => {
+      try {
+        markStartupStage('renderer.persistRehydrate', persistStartPerfMs)
+      } catch {}
+    })
+    .catch(() => {})
+
   // Initialize notes path after rehydration if empty
   const state = store.getState()
   if (!state.note.notesPath) {

@@ -8,6 +8,11 @@ import { subscribeTopicDeletionEvents } from './services/topicDeletionSubscripti
 import { webTraceService } from './services/WebTraceService'
 import store from './store'
 
+// S7.13 startup stage bootstrap anchor — capture perf now before any init work.
+// The actual mark is emitted after synchronous bootstrap completes. Fail-closed
+// harness ensures ordinary build stays inert with zero overhead beyond a perf.now().
+const bootstrapStartPerfMs = performance.now()
+
 loggerService.initWindowSource('mainWindow')
 
 const bootstrapLogger = loggerService.withContext('Bootstrap')
@@ -108,3 +113,13 @@ initAutoSync()
 initStoreSync()
 initTopicDeletionSubscription()
 initWebTrace()
+
+// S7.13: renderer.bootstrap — synchronous bootstrap completion, idempotent once.
+// Fail-closed diagnostic only; uses dynamic import to avoid cycle.
+void import('./services/startupStageDiagnostics')
+  .then(({ markStartupStage }) => {
+    try {
+      markStartupStage('renderer.bootstrap', bootstrapStartPerfMs)
+    } catch {}
+  })
+  .catch(() => {})
