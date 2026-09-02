@@ -4,7 +4,7 @@
 
 This is the detailed architecture reference for the Cherry Chat codebase. The top-level [AGENTS.md](../AGENTS.md) guide is the always-on repository contract and keeps the awareness-level rules; this document carries the full detailed tables (services, directories, Redux slices, AI Core layering, database, IPC, multi-window, tracing, tech stack, source compatibility).
 
-Governance is owned by the canonical decision documents, not restated as canonical here: the [Application Identity ADR](./cherry-chat-application-identity.md) (Cherry Chat identity, compatibility boundary, updater/release freeze, platform scope), the [SQLite migration governance](./sqlite-migration.md) (SQLite chat authority, L2 Cherry Studio ZIP compatibility import), and the [Context window governance](./context-window.md) (stable topic context anchor, allowed anchor transitions, compatibility repair, persistence boundary). Multi-client synchronization is governed by the canonical [Sync Architecture Selection](./sync-architecture-selection.md) (S8 Selection Validation — Active, documentation/research only; product target, four-dimension method, candidate taxonomy, and spike plan); the [Sync MVP proposal](./sync-mvp.md) and the [PowerSync Spike Historical Record](./sync-powersync-spike.md) are retained as historical records only. This reference links those documents instead of duplicating their decision tables.
+Governance is owned by the canonical decision documents, not restated as canonical here: the [Application Identity ADR](./cherry-chat-application-identity.md) (Cherry Chat identity, compatibility boundary, updater/release freeze, platform scope), the [SQLite migration governance](./sqlite-migration.md) (SQLite chat authority, L2 Cherry Studio ZIP compatibility import), and the [Context window governance](./context-window.md) (stable topic context anchor, allowed anchor transitions, compatibility repair, persistence boundary). Multi-client synchronization is governed by the canonical [Sync Architecture Selection](./sync-architecture-selection.md) (S8 Selection Validation — Active; MVP implementation slice complete at `cef4689726` — limited validation, not production-ready; broader S8 remains open); the [Sync MVP proposal](./sync-mvp.md) and the [PowerSync Spike Historical Record](./sync-powersync-spike.md) are retained as historical records only. This reference links those documents instead of duplicating their decision tables.
 
 ## Contents
 
@@ -64,6 +64,7 @@ Node.js backend services. Key services:
 | `ChatDbService` | SQLite chat database (`Data/chat.db`) connection lifecycle, schema migrations, integrity checks, and maintenance coordination — see `src/main/services/chatDb/` |
 | `ChatDbAggregateService` | Command-oriented typed access to the chat database (topics, messages, blocks, topic_segments, file references); the `ChatDb_*` IPC channels map 1:1 onto its capabilities |
 | `ChatDbImport` | L2 Cherry Studio ZIP compatibility import pipeline (ZIP intake, candidate build, verification, atomic promotion) — see `src/main/services/chatDbImport/` |
+| `SyncService` / `SyncClient` / `chatDbHook` | Sync MVP — Main-owned operation-log outbox, LWW apply, manual HTTP relay sync (additive `005_sync_metadata`; filtered payloads; `SyncService.ts`, `SyncClient.ts`, `chatDbHook.ts`); IPC `sync:*`; reference relay `scripts/sync-relay/server.ts` (non-production); limited validation, not production-ready full sync |
 | `ApiServerService` | Express HTTP API server (Swagger docs at `/api-docs`) |
 | `AppUpdater` | electron-updater auto-update (frozen; see the Application Identity ADR) |
 | `ShortcutService` | Global keyboard shortcuts |
@@ -116,6 +117,7 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 - `Data/chat.db` lives in the main process, written through `ChatDbAggregateService` (Drizzle ORM + better-sqlite3).
 - The renderer never holds a SQLite connection — it accesses chat data via typed IPC (`api.*` wrappers) through `SqliteMessageDataSource` (`src/renderer/src/services/db/SqliteMessageDataSource.ts`).
 - See `src/main/services/chatDb/` (connection lifecycle, migrations, repositories, import) and `src/main/services/chatDbImport/` (L2 ZIP compatibility import). Governance: [SQLite migration governance](./sqlite-migration.md).
+- Sync MVP (2026-09-03, `cef4689726`): additive sync metadata migration `005_sync_metadata` (`sync_outbox`, `sync_applied`, `sync_state`, `sync_entity_clock`); Main-owned better-sqlite3 remains local authority; sync is manual endpoint-driven LWW with filtered payloads — limited validation, not production-ready full sync (see [Sync Architecture Selection](./sync-architecture-selection.md)).
 
 ### IndexedDB (Dexie)
 
@@ -135,6 +137,7 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 - Tracing: `tracedInvoke()` in preload attaches OpenTelemetry span context to IPC calls.
 - Typed API surface exposed via `contextBridge` as `window.api`.
 - Data-access contract R-02..R-06 (Phase 5) implemented via S6.1-S6.3: windowed reads R-02/R-03 (`chatdb:fetch-messages-window`), authority-aware answer-group/branch/insert/search-hit (R-05/R-04), context closure R-06 with typed completeness, stable-ID anchoring, deterministic `sort_order`->`id`, viewport/context separation, generation applicability-only; Main SQLite remains authoritative; coordinated IPC contract preserved; Phase 5 closed 2026-08-29 (outcome/residual-risk).
+- Sync MVP (2026-09-03, `cef4689726`): manual sync channels `sync:get-config` / `set-config` / `get-status` / `sync:sync` (typed via `packages/shared/IpcChannel.ts` + preload `window.api.sync`); limited validation, not production-ready full sync.
 
 ## AI Core (`packages/aiCore/`)
 
