@@ -43,6 +43,12 @@ import {
   recordStagedLatency
 } from '@renderer/services/residentReadDiagnostics'
 import { endSpan } from '@renderer/services/SpanManagerService'
+import {
+  canRecordFirstDataNow,
+  consumeFirstDataWindow,
+  hasOrdinaryTreeReady,
+  instrumentFirstDataWindow
+} from '@renderer/services/startupStageDiagnostics'
 import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/services/StreamProcessingService'
 import {
   captureDeletionGeneration,
@@ -1730,7 +1736,35 @@ const latestLoadTopicMessagesRequestByTopic = new Map<string, number>()
 export const loadTopicMessagesThunk =
   (topicId: string, forceReload: boolean = false) =>
   async (dispatch: AppDispatch, getState: () => RootState) => {
-    const state = getState()
+    // S7.14-E1 independent eligibility: capture state BEFORE own setCurrentTopicId dispatch.
+    // Do not prove eligibility via post-dispatch currentTopicId equality (self-assignment).
+    // Use topic existence + pre-dispatch active-topic equality (observable before mutation); fail closed otherwise.
+    const stateBefore = getState()
+    const trimmedBefore = typeof topicId === 'string' ? topicId.trim() : ''
+    let topicExistsBefore = false
+    if (trimmedBefore.length > 0) {
+      try {
+        const assistants = (stateBefore as any).assistants?.assistants
+        if (Array.isArray(assistants)) {
+          topicExistsBefore = assistants.some(
+            (a: any) => Array.isArray(a.topics) && a.topics.some((t: any) => t.id === trimmedBefore)
+          )
+        }
+      } catch {}
+    }
+    const rawCurrentBefore = (stateBefore as any).messages?.currentTopicId
+    const currentBeforeTrimmed = typeof rawCurrentBefore === 'string' ? rawCurrentBefore.trim() : ''
+    const activeBefore =
+      trimmedBefore.length > 0 && currentBeforeTrimmed.length > 0 && currentBeforeTrimmed === trimmedBefore
+    const windowOpenBefore = hasOrdinaryTreeReady() && canRecordFirstDataNow()
+    const eligibleBefore = windowOpenBefore && trimmedBefore.length > 0 && topicExistsBefore && activeBefore
+    // First startup candidate includes cache-hit/no-topic/unavailable: consume window fail-closed
+    // so later History/navigation/force loads cannot emit. Eligible candidates defer to settlement.
+    if (windowOpenBefore && !eligibleBefore) {
+      consumeFirstDataWindow()
+    }
+
+    const state = stateBefore
 
     dispatch(newMessagesActions.setCurrentTopicId(topicId))
 
@@ -1752,6 +1786,10 @@ export const loadTopicMessagesThunk =
           // Legacy: only non-empty cached topics are hits; empty falls through to fetch
           if (cachedIds.length > 0) {
             recordResidentReadHit()
+            // S7.14-E1: cache-hit startup candidate closes one-shot window without attribution
+            if (eligibleBefore) {
+              consumeFirstDataWindow()
+            }
             // Supersede any older in-flight same-topic staged load before completing cache-hit activation
             const requestSeq = ++loadTopicMessagesRequestSeq
             latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
@@ -1771,6 +1809,10 @@ export const loadTopicMessagesThunk =
             !!residentEntry && residentEntry.residentTopic && residentEntry.chatData && residentEntry.segments
           if (isResidentHit) {
             recordResidentReadHit()
+            // S7.14-E1: cache-hit startup candidate closes one-shot window without attribution
+            if (eligibleBefore) {
+              consumeFirstDataWindow()
+            }
             // Supersede any older in-flight same-topic staged load before completing cache-hit activation
             const requestSeq = ++loadTopicMessagesRequestSeq
             latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
@@ -1839,6 +1881,34 @@ export const loadTopicMessagesThunk =
       const windowPromise: Promise<FetchMessagesWindowResponse> = runTopicWindowRead(topicId, request.kind, () =>
         dbService.fetchMessagesWindow(request)
       )
+      // S7.14-E1: renderer.firstData — first eligible active-topic startup window
+      // settlement after ordinaryTreeReady, elapsed interval, one-shot numeric-only,
+      // default-off fail-closed. Eligibility proven via topic existence + pre-dispatch
+      // active-topic equality before own setCurrentTopicId dispatch (independent of
+      // self-assignment); settlement-time applicability predicate mirrors the thunk's
+      // established stale validation (superseded same-topic sequence, deletion
+      // generation, applicability generation, current-topic) so a request the thunk
+      // discards is never recorded. Does not change message loading semantics;
+      // fail-closed when cannot prove.
+      try {
+        if (eligibleBefore) {
+          instrumentFirstDataWindow(windowPromise as unknown as Promise<unknown>, () => {
+            try {
+              const cur = getState().messages.currentTopicId
+              const curTrim = typeof cur === 'string' ? cur.trim() : ''
+              if (curTrim.length === 0 || curTrim !== trimmedBefore) return false
+              if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== requestSeq) return false
+              if (isDeletionStale(topicId, deletionGenAtStart)) return false
+              const currentGeneration = ((getState() as any).residentRegistry?.entries?.[topicId]
+                ?.applicabilityGeneration ?? 0) as number
+              if (currentGeneration !== generation) return false
+              return true
+            } catch {
+              return false
+            }
+          })
+        }
+      } catch {}
       const segmentsPromise: Promise<any[]> = (
         dbService.listSegments ? dbService.listSegments(topicId) : Promise.resolve([])
       ) as Promise<any[]>

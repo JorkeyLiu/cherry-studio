@@ -1,5 +1,5 @@
 /**
- * Renderer-process startup stage instrumentation adapter (S7.13).
+ * Renderer-process startup stage instrumentation adapter (S7.13, S7.14-E1).
  *
  * Independent default-off/fail-closed synthetic-disposable-profile-only
  * harness. Never changes production startup semantics.
@@ -19,10 +19,10 @@
  *
  * Records are bounded/privacy-safe via shared primitives (LOCK-002).
  * Idempotent per stage — retries/re-renders guard against duplicate marks.
- * No Dexie open is forced. First data milestone is NOT recorded here;
- * renderer marks cover bootstrap → persistRehydrate → importProjectionReady →
- * ordinaryTreeReady. First-usable/data milestone is left explicitly unknown
- * (see README comment) rather than inventing an unsafe boundary.
+ * No Dexie open is forced. S7.13: bootstrap → persistRehydrate →
+ * importProjectionReady → ordinaryTreeReady. S7.14-E1 adds renderer.firstData:
+ * elapsed from ordinaryTreeReady to the first active-topic fetchMessagesWindow
+ * settlement (one-shot, bounded numeric-only, default-off, fail-closed).
  */
 
 import { loggerService } from '@logger'
@@ -131,6 +131,15 @@ const initialEnabled = computeEnabled()
 
 const startupState: StartupState = createStartupState(initialEnabled)
 
+// S7.14-E1: first ordinary window-data settlement attribution — timestamp after
+// ordinaryTreeReady, one-shot bounded numeric-only. Fail-closed when no ready.
+// Eligibility requires ordinaryTreeReady timestamp and active-topic settlement;
+// stale/no-topic/unrelated loads must not be attributed (LOCK-003). Without a
+// cross-process active-topic contract, the diagnostic stays fail-closed rather
+// than inferring eligibility from arbitrary topic IDs.
+let ordinaryTreeReadyPerfMs: number | null = null
+let firstDataRecorded = false
+
 export function isStartupStageEnabled(): boolean {
   return computeEnabled()
 }
@@ -151,6 +160,8 @@ export function resetStartupState(): void {
   if (vitest !== 'true' && isEffectivelyEnabled()) return
   startupState.records.length = 0
   startupState.overflowed = false
+  ordinaryTreeReadyPerfMs = null
+  firstDataRecorded = false
 }
 
 function recordInternal(stage: StartupStage, durationMs: number, status: StartupStageStatus, reason?: string): void {
@@ -223,9 +234,109 @@ export function markStartupStageOnce(
 export function markStartupMilestone(stage: StartupStage, status: StartupStageStatus = 'ok', reason?: string): void {
   if (!isEffectivelyEnabled()) return
   if (startupState.records.some((r) => r.stage === stage)) return
-  const elapsed = performance.now() - startupState.perfAnchorMs
+  const now = performance.now()
+  const elapsed = now - startupState.perfAnchorMs
   if (!Number.isFinite(elapsed) || elapsed < 0) return
   recordInternal(stage, elapsed, status, reason)
+  // S7.14-E1: capture timestamp after ordinaryTreeReady for first-data interval.
+  // Only once per startup, fail-closed when disabled, numeric-only.
+  if (stage === 'renderer.ordinaryTreeReady' && ordinaryTreeReadyPerfMs === null) {
+    // Use the same `now` that was used for the milestone to keep interval
+    // deterministic and bounded; subsequent settlements compute interval from here.
+    ordinaryTreeReadyPerfMs = now
+  }
+}
+
+/**
+ * S7.14-E1: record first active-topic fetchMessagesWindow settlement interval.
+ * Elapsed from ordinaryTreeReady timestamp to now; bounded, privacy-safe,
+ * one-shot, ordered after ordinaryTreeReady. Fail-closed when no ready or
+ * disabled or already recorded.
+ */
+export function markFirstDataSettlement(status: StartupStageStatus = 'ok', reason?: string): boolean {
+  if (!isEffectivelyEnabled()) return false
+  if (firstDataRecorded) return false
+  if (ordinaryTreeReadyPerfMs === null) return false
+  if (startupState.records.some((r) => r.stage === 'renderer.firstData')) return false
+  const now = performance.now()
+  const interval = now - ordinaryTreeReadyPerfMs
+  if (!Number.isFinite(interval) || interval < 0) return false
+  const before = startupState.records.length
+  recordInternal('renderer.firstData', interval, status, reason)
+  if (startupState.records.length > before) {
+    firstDataRecorded = true
+    return true
+  }
+  return false
+}
+
+/**
+ * Whether a first-data settlement could be recorded right now (ordinaryTreeReady
+ * has occurred, not yet recorded, diagnostic enabled). Does not check topic
+ * eligibility — caller must verify active-topic if needed. Fail-closed.
+ */
+export function canRecordFirstDataNow(): boolean {
+  if (!isEffectivelyEnabled()) return false
+  if (firstDataRecorded) return false
+  if (ordinaryTreeReadyPerfMs === null) return false
+  if (startupState.records.some((r) => r.stage === 'renderer.firstData')) return false
+  return true
+}
+
+/**
+ * S7.14-E1 — consume the one-shot first-data window without recording.
+ * Called for the first startup candidate that is ineligible (invalid/missing/
+ * cache-hit) so later History/navigation/force loads cannot emit
+ * renderer.firstData. Fail-closed when disabled or no ready or already
+ * consumed/recorded. Returns true when window was open and is now consumed.
+ */
+export function consumeFirstDataWindow(): boolean {
+  if (!isEffectivelyEnabled()) return false
+  if (firstDataRecorded) return false
+  if (ordinaryTreeReadyPerfMs === null) return false
+  if (startupState.records.some((r) => r.stage === 'renderer.firstData')) return false
+  firstDataRecorded = true
+  return true
+}
+
+/**
+ * Whether ordinaryTreeReady has been marked in this session.
+ */
+export function hasOrdinaryTreeReady(): boolean {
+  return ordinaryTreeReadyPerfMs !== null
+}
+
+/**
+ * Attach one-shot settlement instrumentation to the first active-topic
+ * fetchMessagesWindow promise. Preserves all existing promise semantics:
+ * does not change error handling, no extra IPC, no content recorded.
+ * Settlement (resolve or reject) records renderer.firstData once with
+ * bounded numeric-only interval from ordinaryTreeReady.
+ * Optional `isStillEligible` is evaluated at settlement time to discard
+ * stale/no-topic or topic-moved settlements without attribution. If it
+ * returns false, the settlement is ignored (fail-closed).
+ */
+export function instrumentFirstDataWindow(promise: Promise<unknown>, isStillEligible?: () => boolean): void {
+  if (!isEffectivelyEnabled()) return
+  if (firstDataRecorded) return
+  if (ordinaryTreeReadyPerfMs === null) return
+  if (startupState.records.some((r) => r.stage === 'renderer.firstData')) return
+  try {
+    void promise.then(
+      () => {
+        try {
+          if (isStillEligible && !isStillEligible()) return
+          markFirstDataSettlement('ok')
+        } catch {}
+      },
+      () => {
+        try {
+          if (isStillEligible && !isStillEligible()) return
+          markFirstDataSettlement('error')
+        } catch {}
+      }
+    )
+  } catch {}
 }
 
 // Test seam — always exposed; reflects current effective enabled state.
@@ -241,6 +352,10 @@ globalAny.__startupStageReset = () => {
   resetStartupState()
 }
 globalAny.__startupStageEnabled = () => isEffectivelyEnabled()
+globalAny.__startupStageFirstDataStateForTest = () => ({
+  ordinaryTreeReadyPerfMs,
+  firstDataRecorded
+})
 
 // Export for E2E validation of synthetic gate
 export { getRuntimeEnv as _getRuntimeEnvForTest }

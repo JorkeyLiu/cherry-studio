@@ -1,5 +1,5 @@
 /**
- * Shared closed primitives for startup stage instrumentation (S7.13).
+ * Shared closed primitives for startup stage instrumentation (S7.13, S7.14-E1 — S7.14-E1 extends shared diagnostic stage union with renderer.firstData; renderer-owned behavior plus shared diagnostic stage-union extension, no IPC/preload/shared application contract change).
  *
  * Independent gate/stage namespace — never reuse PERF_PHASE_ATTR or
  * PERF_STREAM_ATTR. Default-off/fail-closed, synthetic-disposable-profile-only,
@@ -53,12 +53,13 @@ export const MAIN_STARTUP_STAGES = [
   'main.registerIpc'
 ] as const
 
-/** Closed union of renderer startup stages (bootstrap → rehydration → gates). */
+/** Closed union of renderer startup stages (bootstrap → rehydration → gates → first data). */
 export const RENDERER_STARTUP_STAGES = [
   'renderer.bootstrap',
   'renderer.persistRehydrate',
   'renderer.importProjectionReady',
-  'renderer.ordinaryTreeReady'
+  'renderer.ordinaryTreeReady',
+  'renderer.firstData'
 ] as const
 
 export const STARTUP_STAGE_VALUES = [...MAIN_STARTUP_STAGES, ...RENDERER_STARTUP_STAGES] as const

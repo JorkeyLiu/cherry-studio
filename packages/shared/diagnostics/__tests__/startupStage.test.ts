@@ -112,6 +112,7 @@ describe('appendStartupRecord', () => {
     expect(VALID_STARTUP_STAGES.has('main.restore')).toBe(true)
     expect(VALID_STARTUP_STAGES.has('renderer.persistRehydrate')).toBe(true)
     expect(VALID_STARTUP_STAGES.has('renderer.ordinaryTreeReady')).toBe(true)
+    expect(VALID_STARTUP_STAGES.has('renderer.firstData')).toBe(true)
     expect(VALID_STARTUP_STAGES.has('main.windowReady')).toBe(true)
   })
 
