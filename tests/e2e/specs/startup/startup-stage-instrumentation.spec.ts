@@ -28,7 +28,7 @@ test.describe('startup stage instrumentation (synthetic disposable)', () => {
 
   test('records bounded privacy-safe stages on comparable epoch timeline', async ({ mainWindow, electronApp }) => {
     // Prove causal Main-authoritative marker without raw paths — check opaque marker presence
-    const mainMarker = await electronApp.evaluate((envName) => {
+    const mainMarker = await electronApp.evaluate((_, envName) => {
       try {
         return (process as any).env?.[envName] ?? null
       } catch {
