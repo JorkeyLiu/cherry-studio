@@ -292,7 +292,11 @@ if (isMain) {
   const server = createRelayServer(db, { token })
   // Bind to loopback only — isolated non-production
   server.listen(port, '127.0.0.1', () => {
+    // Report the actual bound port so `--port 0` (ephemeral) is observable;
+    // fixed ports log unchanged.
+    const addr = server.address()
+    const boundPort = typeof addr === 'object' && addr ? addr.port : port
     // Bounded readiness output — no sensitive path
-    console.log(`[sync-relay] listening on http://127.0.0.1:${port}`)
+    console.log(`[sync-relay] listening on http://127.0.0.1:${boundPort}`)
   })
 }

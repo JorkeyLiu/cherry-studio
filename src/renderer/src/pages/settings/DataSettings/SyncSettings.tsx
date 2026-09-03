@@ -113,7 +113,7 @@ const SyncSettings: React.FC = () => {
       <SettingDivider />
       <SettingRow>
         <SettingRowTitle>{t('settings.sync.enabled', 'Enabled')}</SettingRowTitle>
-        <Switch checked={enabled} onChange={setEnabled} />
+        <Switch checked={enabled} onChange={setEnabled} data-testid="sync-enabled-switch" />
       </SettingRow>
       <SettingDivider />
       <SettingRow>
@@ -123,6 +123,7 @@ const SyncSettings: React.FC = () => {
           value={endpoint}
           onChange={(e) => setEndpoint(e.target.value)}
           style={{ width: 320 }}
+          data-testid="sync-endpoint-input"
         />
       </SettingRow>
       <SettingRow>
@@ -138,6 +139,7 @@ const SyncSettings: React.FC = () => {
           value={token}
           onChange={(e) => setToken(e.target.value)}
           style={{ width: 320 }}
+          data-testid="sync-token-input"
         />
       </SettingRow>
       <SettingRow>
@@ -149,10 +151,14 @@ const SyncSettings: React.FC = () => {
       <SettingRow>
         <SettingRowTitle>{t('settings.sync.actions', 'Actions')}</SettingRowTitle>
         <div style={{ display: 'flex', gap: 8 }}>
-          <Button type="primary" onClick={onSave} loading={saving}>
+          <Button type="primary" onClick={onSave} loading={saving} data-testid="sync-save-button">
             {t('common.save', 'Save')}
           </Button>
-          <Button onClick={onSync} loading={syncing || !!status?.syncing} disabled={!enabled || !endpoint}>
+          <Button
+            onClick={onSync}
+            loading={syncing || !!status?.syncing}
+            disabled={!enabled || !endpoint}
+            data-testid="sync-now-button">
             {t('settings.sync.sync_now', 'Sync Now')}
           </Button>
           <Button onClick={() => void load()}>{t('common.refresh', 'Refresh')}</Button>
@@ -161,12 +167,13 @@ const SyncSettings: React.FC = () => {
       <SettingDivider />
       <SettingRow>
         <SettingRowTitle>{t('settings.sync.status', 'Status')}</SettingRowTitle>
-        <div style={{ flex: 1, fontSize: 12, color: 'var(--color-text-2)' }}>
+        <div style={{ flex: 1, fontSize: 12, color: 'var(--color-text-2)' }} data-testid="sync-status">
           {status ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span>
-                {t('settings.sync.pending', 'Pending')}: {status.pendingCount} | {t('settings.sync.cursor', 'Cursor')}:{' '}
-                {status.cursor}
+              <span data-testid="sync-pending-cursor">
+                {t('settings.sync.pending', 'Pending')}:{' '}
+                <span data-testid="sync-pending-count">{status.pendingCount}</span> |{' '}
+                {t('settings.sync.cursor', 'Cursor')}: <span data-testid="sync-cursor">{status.cursor}</span>
               </span>
               {status.lastSyncAt && (
                 <span>
@@ -175,12 +182,12 @@ const SyncSettings: React.FC = () => {
               )}
               {status.lastError && (
                 <Tooltip title={status.lastError}>
-                  <span style={{ color: 'var(--color-error)' }}>
+                  <span style={{ color: 'var(--color-error)' }} data-testid="sync-last-error">
                     {t('settings.sync.last_error', 'Last error')}: {status.lastError.slice(0, 200)}
                   </span>
                 </Tooltip>
               )}
-              {status.syncing && <span>{t('settings.sync.syncing', 'Syncing...')}</span>}
+              {status.syncing && <span data-testid="sync-syncing">{t('settings.sync.syncing', 'Syncing...')}</span>}
             </div>
           ) : (
             <span>{t('settings.sync.no_status', 'No status yet')}</span>

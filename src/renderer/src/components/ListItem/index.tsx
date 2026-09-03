@@ -11,11 +11,23 @@ interface ListItemProps {
   onClick?: () => void
   rightContent?: ReactNode
   style?: React.CSSProperties
+  /** Stable E2E hook; rendered as data-testid on the container. No behavior change. */
+  testId?: string
 }
 
-const ListItem = ({ active, icon, title, subtitle, titleStyle, onClick, rightContent, style }: ListItemProps) => {
+const ListItem = ({
+  active,
+  icon,
+  title,
+  subtitle,
+  titleStyle,
+  onClick,
+  rightContent,
+  style,
+  testId
+}: ListItemProps) => {
   return (
-    <ListItemContainer className={active ? 'active' : ''} onClick={onClick} style={style}>
+    <ListItemContainer className={active ? 'active' : ''} onClick={onClick} style={style} data-testid={testId}>
       <ListItemContent>
         {icon && <IconWrapper>{icon}</IconWrapper>}
         <TextContainer>

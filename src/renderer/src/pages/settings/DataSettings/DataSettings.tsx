@@ -101,6 +101,7 @@ const DataSettings: FC = () => {
               onClick={() => setMenu(item.key)}
               titleStyle={{ fontWeight: 500 }}
               icon={item.icon}
+              testId={item.key === 'sync' ? 'data-menu-sync' : undefined}
             />
           )
         )}
