@@ -41,10 +41,21 @@ const SyncSettings: React.FC = () => {
     }
   }
 
+  const loadStatusOnly = async () => {
+    try {
+      const st = await window.api.sync.getStatus()
+      setStatus(st)
+    } catch (e) {
+      logger.error('load sync status failed', e as Error)
+    }
+  }
+
   useEffect(() => {
     void load()
+    // Poll status only — never overwrite the dirty endpoint/token form while
+    // the user is editing. Config is reloaded explicitly on save/refresh.
     const id = setInterval(() => {
-      void load()
+      void loadStatusOnly()
     }, 5000)
     return () => clearInterval(id)
   }, [])
@@ -67,10 +78,16 @@ const SyncSettings: React.FC = () => {
     try {
       const res = await window.api.sync.sync()
       setStatus(res)
-      window.toast.success(t('settings.sync.sync_success', 'Sync completed'))
+      // Sync F2: a durable failure is persisted as lastError; never report
+      // success when the status carries it. Status remains inspectable.
+      if (res.lastError) {
+        window.toast.error(res.lastError)
+      } else {
+        window.toast.success(t('settings.sync.sync_success', 'Sync completed'))
+      }
     } catch (e) {
       window.toast.error(String((e as Error).message))
-      await load()
+      await loadStatusOnly()
     } finally {
       setSyncing(false)
     }
@@ -85,6 +102,14 @@ const SyncSettings: React.FC = () => {
           'Synchronize chat topics, messages and blocks via a configured HTTP relay. Manual sync only.'
         )}
       </SettingHelpText>
+      <SettingRow>
+        <SettingHelpText>
+          {t(
+            'settings.sync.scope_note',
+            'Synced: topic create, message append with blocks, single message/block edits, single/batch block adds, simple message/block deletes, message reorder, topic soft-delete/restore/hard-delete. No-op or foreign-target requests are not sent. Not synced: ownership transfer, assistant reset, purge/empty trash, segments, attachments, search index, UI state, or compound copy/paste/branch/clone/insert-after/resend/select flows.'
+          )}
+        </SettingHelpText>
+      </SettingRow>
       <SettingDivider />
       <SettingRow>
         <SettingRowTitle>{t('settings.sync.enabled', 'Enabled')}</SettingRowTitle>
@@ -94,7 +119,7 @@ const SyncSettings: React.FC = () => {
       <SettingRow>
         <SettingRowTitle>{t('settings.sync.endpoint', 'Relay Endpoint')}</SettingRowTitle>
         <Input
-          placeholder="http://localhost:3000"
+          placeholder={t('settings.sync.endpoint_placeholder', 'http://127.0.0.1:3030')}
           value={endpoint}
           onChange={(e) => setEndpoint(e.target.value)}
           style={{ width: 320 }}

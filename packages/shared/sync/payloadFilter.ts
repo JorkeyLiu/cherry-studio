@@ -105,3 +105,127 @@ export function validateSyncPayloadAllowlist(op: {
   }
   return null
 }
+
+/**
+ * Canonical tombstone operation-ID bound: non-empty, colon-free, at most 256
+ * characters. Single source of truth shared by the tombstone writer, the
+ * tombstone parser, and the wire validator so all three agree exactly.
+ */
+export const SYNC_TOMBSTONE_OPERATION_ID_MAX_LENGTH = 256
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === 'string' && v.length > 0
+}
+
+function isOptionalStringOrNull(v: unknown): boolean {
+  return v === null || v === undefined || typeof v === 'string'
+}
+
+/**
+ * Entity-specific required/type validation for sync operations.
+ * Single shared source of truth for operation shape (relay ingress and
+ * SyncClient pull boundary both delegate here).
+ * Bounded MVP contract (deterministic LWW, stable topics/messages/blocks only):
+ * - Structural: non-empty id/entityId/deviceId, finite timestamp, known entityType/op.
+ * - Delete: must not carry a non-empty payload.
+ * - Upsert: payload object, allowlisted keys only; payload.id when present
+ *   must agree with entityId; required relation IDs enforced; every allowed
+ *   field type-checked; sortOrder when present must be a finite integer.
+ * - Upsert topic: no required fields.
+ * - Upsert message: payload must carry non-empty string topicId.
+ * - Upsert block: payload must carry non-empty string messageId.
+ * Returns an error string, or null when valid.
+ */
+export function validateSyncOperationStrict(op: {
+  id?: unknown
+  entityType?: unknown
+  op?: unknown
+  entityId?: unknown
+  timestamp?: unknown
+  deviceId?: unknown
+  payload?: unknown
+}): string | null {
+  if (!isNonEmptyString(op.id)) return 'invalid id'
+  // Canonical tombstone operation-ID contract: operation IDs enter over the
+  // wire and become tombstone operation IDs, so the wire validator enforces
+  // the same non-empty/colon-free/max-length bound as writer and parser.
+  // Rejected here before any tombstone persistence (no future poison row).
+  const opId = op.id
+  if (opId.includes(':')) return 'invalid id: must not contain colon'
+  if (opId.length > SYNC_TOMBSTONE_OPERATION_ID_MAX_LENGTH) return 'invalid id: too long'
+  if (op.entityType !== 'topic' && op.entityType !== 'message' && op.entityType !== 'message_block') {
+    return `invalid entityType ${String(op.entityType)}`
+  }
+  if (op.op !== 'upsert' && op.op !== 'delete') return `invalid op ${String(op.op)}`
+  if (!isNonEmptyString(op.entityId)) return 'invalid entityId'
+  if (typeof op.timestamp !== 'number' || !Number.isFinite(op.timestamp)) return 'invalid timestamp'
+  if (!isNonEmptyString(op.deviceId)) return 'invalid deviceId'
+  const entityType = op.entityType as string
+  const kind = op.op as string
+  const payload = op.payload as Record<string, unknown> | undefined | null
+  if (kind === 'delete') {
+    if (payload !== undefined && payload !== null) {
+      if (typeof payload !== 'object' || Array.isArray(payload)) return 'invalid payload'
+      if (Object.keys(payload).length > 0) return 'delete must not have payload'
+    }
+    return null
+  }
+  // upsert
+  if (payload === undefined || payload === null) return 'upsert missing payload'
+  if (typeof payload !== 'object' || Array.isArray(payload)) return 'invalid payload'
+  const allowErr = validateSyncPayloadAllowlist({ entityType, payload })
+  if (allowErr) return allowErr
+  // Payload identity agreement: payload.id when present must equal entityId.
+  if ('id' in payload && payload.id !== undefined && payload.id !== null) {
+    if (!isNonEmptyString(payload.id) || payload.id !== (op as { entityId?: unknown }).entityId) {
+      return 'payload id must agree with entityId'
+    }
+  }
+  if (entityType === 'topic') {
+    if ('name' in payload && !isOptionalStringOrNull(payload.name)) return 'invalid topic name'
+    if ('assistantId' in payload && !isOptionalStringOrNull(payload.assistantId)) return 'invalid topic assistantId'
+    if ('createdAt' in payload && !isOptionalStringOrNull(payload.createdAt)) return 'invalid topic createdAt'
+    if ('updatedAt' in payload && !isOptionalStringOrNull(payload.updatedAt)) return 'invalid topic updatedAt'
+    if ('deletedAt' in payload && !isOptionalStringOrNull(payload.deletedAt)) return 'invalid topic deletedAt'
+    return null
+  }
+  if (entityType === 'message') {
+    if (!isNonEmptyString(payload.topicId)) return 'message upsert missing topicId'
+    if ('role' in payload && !isOptionalStringOrNull(payload.role)) return 'invalid message role'
+    if ('content' in payload && !isOptionalStringOrNull(payload.content)) return 'invalid message content'
+    if ('status' in payload && !isOptionalStringOrNull(payload.status)) return 'invalid message status'
+    if ('askId' in payload && !isOptionalStringOrNull(payload.askId)) return 'invalid message askId'
+    if ('model' in payload && !isOptionalStringOrNull(payload.model)) return 'invalid message model'
+    if ('modelId' in payload && !isOptionalStringOrNull(payload.modelId)) return 'invalid message modelId'
+    if ('assistantId' in payload && !isOptionalStringOrNull(payload.assistantId)) return 'invalid message assistantId'
+    if ('createdAt' in payload && !isOptionalStringOrNull(payload.createdAt)) return 'invalid message createdAt'
+    if ('updatedAt' in payload && !isOptionalStringOrNull(payload.updatedAt)) return 'invalid message updatedAt'
+    if ('sortOrder' in payload && payload.sortOrder !== undefined && payload.sortOrder !== null) {
+      if (
+        typeof payload.sortOrder !== 'number' ||
+        !Number.isFinite(payload.sortOrder) ||
+        !Number.isInteger(payload.sortOrder)
+      ) {
+        return 'invalid message sortOrder'
+      }
+    }
+    return null
+  }
+  // message_block
+  if (!isNonEmptyString(payload.messageId)) return 'block upsert missing messageId'
+  if ('type' in payload && !isOptionalStringOrNull(payload.type)) return 'invalid block type'
+  if ('content' in payload && !isOptionalStringOrNull(payload.content)) return 'invalid block content'
+  if ('status' in payload && !isOptionalStringOrNull(payload.status)) return 'invalid block status'
+  if ('createdAt' in payload && !isOptionalStringOrNull(payload.createdAt)) return 'invalid block createdAt'
+  if ('updatedAt' in payload && !isOptionalStringOrNull(payload.updatedAt)) return 'invalid block updatedAt'
+  if ('sortOrder' in payload && payload.sortOrder !== undefined && payload.sortOrder !== null) {
+    if (
+      typeof payload.sortOrder !== 'number' ||
+      !Number.isFinite(payload.sortOrder) ||
+      !Number.isInteger(payload.sortOrder)
+    ) {
+      return 'invalid block sortOrder'
+    }
+  }
+  return null
+}

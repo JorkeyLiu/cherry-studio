@@ -12,6 +12,8 @@ import { dirname, resolve } from 'node:path'
 
 import Database from 'better-sqlite3'
 
+import { validateSyncOperationStrict as validateSyncOperationStrictShared } from '../../packages/shared/sync/payloadFilter'
+
 const SYNC_MAX_OPERATIONS_PER_PUSH = 200
 const SYNC_MAX_OPERATIONS_PER_PULL = 200
 const SYNC_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
@@ -70,79 +72,19 @@ function initDb(dbPath: string): Database.Database {
   return db
 }
 
-// Validation helpers — mirrors shared/sync/payloadFilter allowlist
-const TOPIC_ALLOW = new Set(['id', 'name', 'createdAt', 'updatedAt', 'assistantId', 'deletedAt'])
-const MESSAGE_ALLOW = new Set([
-  'id',
-  'topicId',
-  'role',
-  'content',
-  'status',
-  'askId',
-  'model',
-  'modelId',
-  'assistantId',
-  'createdAt',
-  'updatedAt',
-  'sortOrder'
-])
-const BLOCK_ALLOW = new Set(['id', 'messageId', 'type', 'content', 'status', 'createdAt', 'updatedAt', 'sortOrder'])
-const ALLOWED_ENTITY = new Set(['topic', 'message', 'message_block'])
-const ALLOWED_OP = new Set(['upsert', 'delete'])
-
-function isPayloadSafe(payload: unknown): boolean {
-  if (!payload || typeof payload !== 'object') return true
-  const obj = payload as Record<string, unknown>
-  for (const k of Object.keys(obj)) {
-    const lk = k.toLowerCase()
-    if (
-      lk.includes('credential') ||
-      lk.includes('password') ||
-      lk.includes('secret') ||
-      lk === 'file_path' ||
-      lk === 'filepath'
-    ) {
-      return false
-    }
-    const v = obj[k]
-    if (v && typeof v === 'object' && !Array.isArray(v)) {
-      if (!isPayloadSafe(v)) return false
-    }
-  }
-  return true
-}
-
-function validatePayloadAllowlist(entityType: string, payload?: Record<string, unknown>): string | null {
-  if (!payload) return null
-  if (!isPayloadSafe(payload)) return 'payload contains denied field'
-  if ('fts' in payload || 'fts_content' in payload) return 'fts field denied'
-  if ('contextWindowAnchor' in payload) return 'contextWindowAnchor denied'
-  const allow = entityType === 'topic' ? TOPIC_ALLOW : entityType === 'message' ? MESSAGE_ALLOW : BLOCK_ALLOW
-  for (const k of Object.keys(payload)) {
-    if (!allow.has(k)) return `field ${k} not allowlisted for ${entityType}`
-  }
-  return null
-}
-
+// Operation validation delegates to the shared strict validator
+// (packages/shared/sync/payloadFilter) as the single source of truth;
+// relay adds only transport byte limits here.
 function validateOp(op: SyncOperation): string | null {
-  if (!op.id || typeof op.id !== 'string') return 'invalid id'
-  if (!ALLOWED_ENTITY.has(op.entityType)) return `invalid entityType ${op.entityType}`
-  if (!ALLOWED_OP.has(op.op)) return `invalid op ${op.op}`
-  if (!op.entityId || typeof op.entityId !== 'string') return 'invalid entityId'
-  if (typeof op.timestamp !== 'number' || !Number.isFinite(op.timestamp)) return 'invalid timestamp'
-  if (!op.deviceId || typeof op.deviceId !== 'string') return 'invalid deviceId'
-  if (op.op === 'delete' && op.payload !== undefined && op.payload !== null) {
-    // delete should not carry payload
-    if (Object.keys(op.payload).length > 0) return 'delete must not have payload'
-  }
+  // Single source of truth: shared strict validator covers structure,
+  // allowlist, identity agreement, relation IDs, and per-field types.
+  const sharedErr = validateSyncOperationStrictShared(op as any)
+  if (sharedErr) return sharedErr
   if (op.payload !== undefined && op.payload !== null) {
-    if (typeof op.payload !== 'object' || Array.isArray(op.payload)) return 'invalid payload'
     const payloadStr = JSON.stringify(op.payload)
     if (Buffer.byteLength(payloadStr, 'utf8') > SYNC_MAX_SERIALIZED_PAYLOAD_BYTES) {
       return 'payload too large'
     }
-    const allowErr = validatePayloadAllowlist(op.entityType, op.payload)
-    if (allowErr) return allowErr
   }
   return null
 }

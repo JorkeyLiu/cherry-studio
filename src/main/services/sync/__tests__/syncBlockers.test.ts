@@ -397,10 +397,15 @@ describe('cursor semantics: push must not advance pull cursor', () => {
         }
         return { operations: [], cursor } as any
       })
-    await syncService.sync()
+    await expect(syncService.sync()).rejects.toThrow(/orphan|blocked/i)
     const cur = db.select().from(schema.syncState).where(eq(schema.syncState.key, 'cursor')).get()
+    // Deferred orphan recovery: the later topic IS applied, but the cursor
+    // does not skip the unresolved orphan entry. The durable blocked error
+    // rejects (truthful failure) instead of resolving as success.
     expect(cur?.value).toBe('0')
-    expect(sqlite.prepare('SELECT id FROM topics WHERE id=?').get('t-after-orphan')).toBeUndefined()
+    expect(sqlite.prepare('SELECT id FROM topics WHERE id=?').get('t-after-orphan')).toBeTruthy()
+    const errRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, 'lastError')).get()
+    expect(errRow?.value).toMatch(/orphan|blocked/i)
     pull1.mockRestore()
     pushMock.mockRestore()
   })

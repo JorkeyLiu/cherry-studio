@@ -288,7 +288,7 @@ export function registerChatDbIpc(): () => void {
         // Sync outbox — capture failure is surfaced durably via syncState, never affects ChatDb result envelope
         if (result.ok === true) {
           try {
-            handleChatDbSuccessForSync(channel, request)
+            handleChatDbSuccessForSync(channel, request, result)
           } catch (e) {
             // hook already records capture failure durably; never break IPC result
             logger.warn(`[ChatDbIpc] sync hook exception for ${channel}: ${(e as Error).message}`)

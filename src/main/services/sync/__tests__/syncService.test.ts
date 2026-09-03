@@ -167,10 +167,9 @@ describe('sync outbox + idempotence + LWW', () => {
       timestamp: Date.now() - 2000,
       payload: { id: 'm1', topicId: 't1', role: 'user', content: 'hi' }
     })
-    // The block payload contains denied field; our apply will reject via allowlist? It contains filePath which is not allowlisted -> validate will reject
-    // Instead we use filtered payload: the service's recordUpsert would filter; direct apply with raw payload should be rejected
-    const result = syncService.applyIncomingOperation(op)
-    expect(result).toBe(false) // rejected due to allowlist
+    // The block payload contains denied field; direct apply with raw payload must be rejected before persistence
+    const result = (): boolean => syncService.applyIncomingOperation(op)
+    expect(result).toThrow()
     // Now with allowlisted payload it succeeds
     const goodBlockOp: any = {
       id: 'op-block-2',

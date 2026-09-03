@@ -729,6 +729,16 @@ export class ChatDbAggregateService {
           const existing = repos.messages.getById(messageData.id)
 
           if (existing.found) {
+            // Authoritative ownership guard (sync F1): an existing message ID
+            // owned by another topic must not be mutated and must not emit
+            // sync capture. Reject before any message/block processing so the
+            // transaction aborts with zero entity mutation; the IPC hook only
+            // captures on success, so no outbox capture is emitted.
+            if (existing.data.topicId !== topicId) {
+              throw new ChatDbConflictError(
+                `Message ${messageData.id} belongs to topic ${existing.data.topicId}, cannot reparent to ${topicId}`
+              )
+            }
             // Existing ID: preserve current position (update metadata only)
             const patch = wireToMessagePatch(messageJson)
             delete patch.id

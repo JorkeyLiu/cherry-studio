@@ -7,6 +7,8 @@ import {
   filterBlockPayload,
   filterMessagePayload,
   filterTopicPayload,
+  SYNC_TOMBSTONE_OPERATION_ID_MAX_LENGTH,
+  validateSyncOperationStrict,
   validateSyncPayloadAllowlist
 } from '@shared/sync'
 import { SYNC_MAX_OPERATIONS_PER_PULL, SYNC_MAX_OPERATIONS_PER_PUSH } from '@shared/sync'
@@ -25,11 +27,25 @@ const STATE_LAST_ERROR = 'lastError'
 const STATE_CURSOR = 'cursor'
 const STATE_DEVICE_ID = 'deviceId'
 const STATE_CAPTURE_ERROR = 'lastCaptureError'
+const TOMBSTONE_TOPIC_PREFIX = 'tombstone:topic:'
+const TOMBSTONE_MESSAGE_PREFIX = 'tombstone:message:'
+
+// Outbox push priority: parents before children so relay seq preserves
+// dependency order (topic < message < block). Within the same priority,
+// timestamp then id order applies.
+const ENTITY_PUSH_PRIORITY: Record<string, number> = { topic: 0, message: 1, message_block: 2 }
 
 export class SyncOrphanError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'SyncOrphanError'
+  }
+}
+
+export class SyncTombstoneError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SyncTombstoneError'
   }
 }
 
@@ -142,6 +158,11 @@ export class SyncService {
   }
 
   enqueueOperation(op: SyncOperation): void {
+    const strictErr = validateSyncOperationStrict(op as any)
+    if (strictErr) {
+      logger.warn(`[enqueueOperation] strict validation rejected: ${strictErr}`)
+      throw new Error(strictErr)
+    }
     const allowErr = validateSyncPayloadAllowlist(op)
     if (allowErr) {
       logger.warn(`[enqueueOperation] payload allowlist rejected: ${allowErr}`)
@@ -195,12 +216,233 @@ export class SyncService {
           })
           .run()
       }
+      // Additive tombstone for hard-delete containment, inside the same
+      // outbox/clock transaction: a late (older-or-equal) child upsert cannot
+      // resurrect a hard-deleted parent. Stored in existing sync_state.
+      // Fail closed: a tombstone write failure must roll back the enclosing
+      // outbox/clock transaction (propagates to the outer catch/ROLLBACK).
+      if (inserted && op.op === 'delete' && (op.entityType === 'topic' || op.entityType === 'message')) {
+        this.setTombstoneInDb(db, op.entityType, op.entityId, op.timestamp, op.id)
+      }
       sqlite.exec('COMMIT')
     } catch (e) {
       try {
         sqlite.exec('ROLLBACK')
       } catch {}
       throw e
+    }
+  }
+
+  private tombstoneKey(entityType: string, entityId: string): string {
+    return entityType === 'topic' ? `${TOMBSTONE_TOPIC_PREFIX}${entityId}` : `${TOMBSTONE_MESSAGE_PREFIX}${entityId}`
+  }
+
+  // Common deterministic LWW ordering: timestamp, then operation ID
+  // (lexicographic). Single source of truth for entity clocks, outbox
+  // candidates, and tombstone comparisons.
+  private compareLww(aTimestamp: number, aId: string, bTimestamp: number, bId: string): number {
+    if (aTimestamp !== bTimestamp) return aTimestamp < bTimestamp ? -1 : 1
+    if (aId === bId) return 0
+    return aId < bId ? -1 : 1
+  }
+
+  private formatTombstone(timestamp: number, operationId: string | null): string {
+    if (operationId === null) return String(timestamp)
+    return `${String(timestamp)}:${operationId}`
+  }
+
+  private parseTombstone(value: string | null | undefined): { timestamp: number; operationId: string | null } | null {
+    // Absent row (no stored value) is the only null case. Any present-but-
+    // malformed stored value throws fail-closed so it is never treated as
+    // absence and never permits stale children past hard-delete containment.
+    if (value === null || value === undefined) return null
+    if (typeof value !== 'string' || value.length === 0 || value.length > 500) {
+      throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(String(value)).slice(0, 80)}`)
+    }
+    const idx = value.indexOf(':')
+    if (idx < 0) {
+      // Canonical legacy timestamp-only form: non-negative safe integer with
+      // no leading zeros, no whitespace, no trailing junk.
+      if (!/^(0|[1-9][0-9]*)$/.test(value)) {
+        throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(value).slice(0, 80)}`)
+      }
+      const ts = Number(value)
+      if (!Number.isSafeInteger(ts)) {
+        throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(value).slice(0, 80)}`)
+      }
+      // Legacy timestamp-only row: deterministic safe interpretation is
+      // conservative — it wins equal-timestamp ties (suppresses) so an
+      // upgrade can never resurrect data the old code suppressed.
+      return { timestamp: ts, operationId: null }
+    }
+    const tsPart = value.slice(0, idx)
+    const opPart = value.slice(idx + 1)
+    // Canonical new form: `timestamp:non-empty-operationId` with exactly one
+    // colon. Timestamp obeys the legacy canonical rules; operation ID obeys
+    // the operation constraint (non-empty string) and must not contain a
+    // colon so the stored form stays unambiguous.
+    if (!/^(0|[1-9][0-9]*)$/.test(tsPart) || opPart.length === 0 || opPart.includes(':')) {
+      throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(value).slice(0, 80)}`)
+    }
+    const ts = Number(tsPart)
+    if (!Number.isSafeInteger(ts)) {
+      throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(value).slice(0, 80)}`)
+    }
+    if (opPart.length > SYNC_TOMBSTONE_OPERATION_ID_MAX_LENGTH) {
+      throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(value).slice(0, 80)}`)
+    }
+    return { timestamp: ts, operationId: opPart }
+  }
+
+  // True when an incoming op with (opTimestamp, opId) loses to the tombstone
+  // under LWW semantics: older loses; equal timestamp loses unless its
+  // operation ID is strictly greater than the delete's ID. Legacy
+  // timestamp-only tombstones suppress all equal-timestamp ops.
+  private isSuppressedByTombstone(
+    opTimestamp: number,
+    opId: string,
+    tomb: { timestamp: number; operationId: string | null }
+  ): boolean {
+    if (tomb.operationId === null) return opTimestamp <= tomb.timestamp
+    if (opTimestamp !== tomb.timestamp) return opTimestamp < tomb.timestamp
+    return opId <= tomb.operationId
+  }
+
+  private setTombstoneInDb(
+    db: BetterSQLite3Database<typeof schema>,
+    entityType: 'topic' | 'message',
+    entityId: string,
+    timestamp: number,
+    operationId: string | null
+  ): void {
+    // Fail closed on write inputs so a malformed value is never persisted.
+    // Canonical operation-ID contract matches the parser and the shared wire
+    // validator exactly: non-empty, colon-free, at most 256 characters.
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
+      throw new SyncTombstoneError(`malformed tombstone timestamp ${String(timestamp).slice(0, 40)}`)
+    }
+    if (
+      operationId !== null &&
+      (typeof operationId !== 'string' ||
+        operationId.length === 0 ||
+        operationId.includes(':') ||
+        operationId.length > SYNC_TOMBSTONE_OPERATION_ID_MAX_LENGTH)
+    ) {
+      throw new SyncTombstoneError(
+        `malformed tombstone operationId ${JSON.stringify(String(operationId)).slice(0, 80)}`
+      )
+    }
+    const key = this.tombstoneKey(entityType, entityId)
+    const existing = db.select().from(schema.syncState).where(eq(schema.syncState.key, key)).get()
+    if (!existing) {
+      const value = this.formatTombstone(timestamp, operationId)
+      db.insert(schema.syncState)
+        .values({ key, value })
+        .onConflictDoUpdate({ target: schema.syncState.key, set: { value } })
+        .run()
+      return
+    }
+    // Fail closed: only an absent row means absence. A present row with a
+    // missing value is malformed (never silently overwritten) so the
+    // enclosing outbox/apply transaction rolls back.
+    if (existing.value === null || existing.value === undefined) {
+      throw new SyncTombstoneError(`malformed tombstone value for ${entityType}/${entityId}: missing`)
+    }
+    // Fail closed: a malformed existing row throws here (never silently
+    // overwritten) so the enclosing outbox/apply transaction rolls back.
+    const parsed = this.parseTombstone(existing.value)
+    if (parsed) {
+      if (parsed.operationId === null || operationId === null) {
+        // Any legacy side wins ties conservatively: keep the larger
+        // timestamp; on equal timestamps keep the existing row so old
+        // suppression is never weakened by an upgrade.
+        if (parsed.timestamp >= timestamp) return
+      } else {
+        if (this.compareLww(timestamp, operationId, parsed.timestamp, parsed.operationId) <= 0) return
+      }
+    }
+    const value = this.formatTombstone(timestamp, operationId)
+    db.insert(schema.syncState)
+      .values({ key, value })
+      .onConflictDoUpdate({ target: schema.syncState.key, set: { value } })
+      .run()
+  }
+
+  private getTombstone(
+    entityType: 'topic' | 'message',
+    entityId: string
+  ): { timestamp: number; operationId: string | null } | null {
+    // Fail closed: a read failure or a malformed stored value must propagate
+    // (never interpreted as absence) so the caller transaction rolls back
+    // and the operation is left unapplied with a durable sync failure.
+    const db = this.getDb()
+    const row = db
+      .select()
+      .from(schema.syncState)
+      .where(eq(schema.syncState.key, this.tombstoneKey(entityType, entityId)))
+      .get()
+    if (!row) return null
+    // A present row with a missing value is malformed, not absent.
+    if (row.value === null || row.value === undefined) {
+      throw new SyncTombstoneError(`malformed tombstone value for ${entityType}/${entityId}: missing`)
+    }
+    return this.parseTombstone(row.value)
+  }
+
+  /** True when the entity was ever tracked via clock or pending outbox (no row fallback). */
+  isTrackedEntity(entityType: SyncOperation['entityType'], entityId: string): boolean {
+    try {
+      const db = this.getDb()
+      const clock = db
+        .select()
+        .from(schema.syncEntityClock)
+        .where(eq(schema.syncEntityClock.entityType, entityType))
+        .all()
+        .find((r) => r.entityId === entityId)
+      if (clock) return true
+      return db
+        .select()
+        .from(schema.syncOutbox)
+        .where(eq(schema.syncOutbox.entityId, entityId))
+        .all()
+        .some((r) => r.entityType === entityType)
+    } catch {
+      return false
+    }
+  }
+
+  /** True when the entity was ever observed locally (clock or pending outbox). Guards foreign destructive deletes. */
+  isKnownEntity(entityType: SyncOperation['entityType'], entityId: string): boolean {
+    try {
+      const db = this.getDb()
+      const clock = db
+        .select()
+        .from(schema.syncEntityClock)
+        .where(eq(schema.syncEntityClock.entityType, entityType))
+        .all()
+        .find((r) => r.entityId === entityId)
+      if (clock) return true
+      const pending = db
+        .select()
+        .from(schema.syncOutbox)
+        .where(eq(schema.syncOutbox.entityId, entityId))
+        .all()
+        .some((r) => r.entityType === entityType)
+      if (pending) return true
+      const applied = db.select().from(schema.syncApplied).all().length
+      void applied
+      // Fall back to current-row existence for pre-sync data (bounded: row
+      // present means local ownership is plausible; row absent + no clock
+      // means never seen -> do not emit destructive delete).
+      if (entityType === 'topic') {
+        return !!db.select().from(schema.topics).where(eq(schema.topics.id, entityId)).get()
+      }
+      if (entityType === 'message') {
+        return !!db.select().from(schema.messages).where(eq(schema.messages.id, entityId)).get()
+      }
+      return !!db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, entityId)).get()
+    } catch {
+      return false
     }
   }
 
@@ -257,7 +499,7 @@ export class SyncService {
       .from(schema.syncOutbox)
       .orderBy(asc(schema.syncOutbox.timestamp), asc(schema.syncOutbox.id))
       .all()
-    return rows.map((r) => ({
+    const mapped = rows.map((r) => ({
       id: r.id,
       entityType: r.entityType as SyncOperation['entityType'],
       op: r.op as SyncOperation['op'],
@@ -266,6 +508,18 @@ export class SyncService {
       deviceId: r.deviceId,
       payload: r.payloadJson ? (JSON.parse(r.payloadJson) as Record<string, unknown>) : undefined
     }))
+    // Dependency order takes precedence over timestamps for the same drain:
+    // parents before children so relay seq preserves topic < message < block
+    // even when a child timestamp is earlier than its parent. Within the same
+    // priority, timestamp then id order applies. LWW comparison semantics are
+    // unchanged (shouldApplyIncoming still compares timestamps per entity).
+    return mapped.sort((a, b) => {
+      const pa = ENTITY_PUSH_PRIORITY[a.entityType] ?? 9
+      const pb = ENTITY_PUSH_PRIORITY[b.entityType] ?? 9
+      if (pa !== pb) return pa - pb
+      if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp
+      return a.id.localeCompare(b.id)
+    })
   }
 
   clearOutboxByIds(ids: string[]): void {
@@ -286,9 +540,7 @@ export class SyncService {
       .all()
       .find((r) => r.entityId === incoming.entityId)
     if (clockRow) {
-      if (incoming.timestamp > clockRow.timestamp) return true
-      if (incoming.timestamp < clockRow.timestamp) return false
-      return incoming.id > clockRow.operationId
+      return this.compareLww(incoming.timestamp, incoming.id, clockRow.timestamp, clockRow.operationId) > 0
     }
     // No clock row — check outbox for pending local op that is newer
     const outboxRows = db
@@ -303,9 +555,7 @@ export class SyncService {
         return b.id.localeCompare(a.id)
       })[0]
     if (candidate) {
-      if (incoming.timestamp > candidate.timestamp) return true
-      if (incoming.timestamp < candidate.timestamp) return false
-      return incoming.id > candidate.id
+      return this.compareLww(incoming.timestamp, incoming.id, candidate.timestamp, candidate.id) > 0
     }
     return true
   }
@@ -320,18 +570,29 @@ export class SyncService {
       return false
     }
 
-    if (!this.shouldApplyIncoming(op)) {
-      db.transaction((tx) => {
-        tx.insert(schema.syncApplied).values({ operationId: op.id, appliedAt: new Date().toISOString() }).run()
-      })
-      logger.info(`[applyIncoming] LWW rejected ${op.id} for ${op.entityType}/${op.entityId}`)
-      return false
+    // Defense-in-depth: validate before LWW so a malformed old operation
+    // that loses LWW is rejected (throws) rather than being marked applied
+    // as a silent LWW loss. Known-operation idempotence above is preserved.
+    const strictErr = validateSyncOperationStrict(op as any)
+    if (strictErr) {
+      // Malformed: reject before persistence. Throw (not poison-ack) so the
+      // pull loop records a truthful durable sync failure instead of silently
+      // advancing the cursor or reporting success.
+      logger.warn(`[applyIncoming] strict validation rejected ${op.id}: ${strictErr}`)
+      throw new Error(`malformed sync operation ${op.id}: ${strictErr}`)
     }
 
     const allowErr = validateSyncPayloadAllowlist(op)
     if (allowErr) {
       logger.warn(`[applyIncoming] payload rejected ${op.id}: ${allowErr}`)
-      db.insert(schema.syncApplied).values({ operationId: op.id, appliedAt: new Date().toISOString() }).run()
+      throw new Error(`malformed sync operation ${op.id}: ${allowErr}`)
+    }
+
+    if (!this.shouldApplyIncoming(op)) {
+      db.transaction((tx) => {
+        tx.insert(schema.syncApplied).values({ operationId: op.id, appliedAt: new Date().toISOString() }).run()
+      })
+      logger.info(`[applyIncoming] LWW rejected ${op.id} for ${op.entityType}/${op.entityId}`)
       return false
     }
 
@@ -392,6 +653,31 @@ export class SyncService {
       const id = op.entityId
       const topicId = (p.topicId as string) ?? ''
       if (!topicId) throw new Error('message upsert missing topicId')
+      // Tombstone guard (common LWW comparator): a losing child must not
+      // resurrect a hard-deleted parent. An equal-timestamp op wins only
+      // when its operation ID is strictly greater than the delete's ID.
+      const topicTomb = this.getTombstone('topic', topicId)
+      if (topicTomb !== null && this.isSuppressedByTombstone(op.timestamp, op.id, topicTomb)) {
+        logger.warn(`[applyUpsert] message ${id} suppressed by topic tombstone ${topicId}`)
+        // Narrow containment: materialize an exact message tombstone for this
+        // suppressed (never-local) message so a later stale block for the
+        // same message is recognized and suppressed via its specific parent
+        // tombstone. Identity inherits the topic tombstone (the delete), not
+        // the stale op, so any block stale relative to the delete is covered.
+        // Runs inside the caller's transaction: atomic with clock/applied.
+        // Fail closed: materialization failure propagates so the suppressed
+        // op is not marked applied and its entity clock does not advance.
+        this.setTombstoneInDb(db, 'message', id, topicTomb.timestamp, topicTomb.operationId)
+        return
+      }
+      const existingPre = db.select().from(schema.messages).where(eq(schema.messages.id, id)).get()
+      if (existingPre && existingPre.topicId !== topicId) {
+        // Immutable parent identity: never reparent an existing message.
+        // Skip mutation (clock/applied still advance via caller) and keep
+        // the existing topicId.
+        logger.warn(`[applyUpsert] message ${id} reparent ${existingPre.topicId} -> ${topicId} rejected`)
+        return
+      }
       const topicRow = db.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
       if (!topicRow) {
         db.insert(schema.topics)
@@ -408,8 +694,9 @@ export class SyncService {
       const assistantId = (p.assistantId as string | null) ?? null
       const createdAt = (p.createdAt as string | null) ?? nowIso
       const updatedAt = (p.updatedAt as string | null) ?? nowIso
-      const sortOrder = (p.sortOrder as number | null) ?? 0
-      const existing = db.select().from(schema.messages).where(eq(schema.messages.id, id)).get()
+      const rawSort = p.sortOrder as number | null | undefined
+      const sortOrder = typeof rawSort === 'number' && Number.isFinite(rawSort) ? rawSort : 0
+      const existing = existingPre ?? db.select().from(schema.messages).where(eq(schema.messages.id, id)).get()
       if (!existing) {
         const maxRow = db.select().from(schema.messages).where(eq(schema.messages.topicId, topicId)).all()
         const maxSort = maxRow.length > 0 ? Math.max(...maxRow.map((r) => r.sortOrder)) + 1 : sortOrder
@@ -433,8 +720,11 @@ export class SyncService {
           })
           .run()
       } else {
+        // Bounded ordering: preserve full incoming ordering state on existing
+        // rows so reorder converges via LWW. Per-entity LWW (not a broad
+        // ordering redesign); duplicates remain possible but converge equally.
         db.update(schema.messages)
-          .set({ topicId, role, content, status, askId, model, modelId, assistantId, createdAt, updatedAt })
+          .set({ role, content, status, askId, model, modelId, assistantId, createdAt, updatedAt, sortOrder })
           .where(eq(schema.messages.id, id))
           .run()
       }
@@ -442,17 +732,39 @@ export class SyncService {
       const id = op.entityId
       const messageId = (p.messageId as string) ?? ''
       if (!messageId) throw new Error('block upsert missing messageId')
+      // Tombstone first (common LWW comparator): a stale late child of a
+      // hard-deleted parent must be rejected (suppressed), never stall as
+      // a retryable orphan. Equal timestamp wins only with a strictly
+      // greater operation ID.
+      const msgTomb = this.getTombstone('message', messageId)
+      if (msgTomb !== null && this.isSuppressedByTombstone(op.timestamp, op.id, msgTomb)) {
+        logger.warn(`[applyUpsert] block ${id} suppressed by message tombstone ${messageId}`)
+        return
+      }
       const msg = db.select().from(schema.messages).where(eq(schema.messages.id, messageId)).get()
       if (!msg) {
+        // Missing parent with no specific message tombstone is a retryable
+        // orphan: defer until the parent arrives. Suppression requires exact
+        // parent evidence (the message tombstone above); an unrelated topic
+        // tombstone must never suppress this block (sync F3). Topic-cascade
+        // positives are preserved because topic hard-delete records explicit
+        // per-child message tombstones in applyDelete.
         throw new SyncOrphanError(`orphan block ${id} parent ${messageId} missing`)
+      }
+      const existingPreB = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, id)).get()
+      if (existingPreB && existingPreB.messageId !== messageId) {
+        logger.warn(`[applyUpsert] block ${id} reparent ${existingPreB.messageId} -> ${messageId} rejected`)
+        return
       }
       const type = (p.type as string | null) ?? null
       const content = (p.content as string | null) ?? null
       const status = (p.status as string | null) ?? null
       const createdAt = (p.createdAt as string | null) ?? nowIso
       const updatedAt = (p.updatedAt as string | null) ?? nowIso
-      const sortOrder = (p.sortOrder as number | null) ?? 0
-      const existing = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, id)).get()
+      const rawSortB = p.sortOrder as number | null | undefined
+      const sortOrder = typeof rawSortB === 'number' && Number.isFinite(rawSortB) ? rawSortB : 0
+      const existing =
+        existingPreB ?? db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, id)).get()
       if (!existing) {
         const siblings = db
           .select()
@@ -467,7 +779,7 @@ export class SyncService {
           .run()
       } else {
         db.update(schema.messageBlocks)
-          .set({ messageId, type, content, status, createdAt, updatedAt })
+          .set({ type, content, status, createdAt, updatedAt, sortOrder })
           .where(eq(schema.messageBlocks.id, id))
           .run()
       }
@@ -477,9 +789,24 @@ export class SyncService {
   private applyDelete(op: SyncOperation): void {
     const db = this.getDb()
     if (op.entityType === 'topic') {
+      // Collect child message ids before the FK cascade so their tombstones
+      // survive the cascade and reject stale late blocks. Fail closed: any
+      // collection or tombstone persistence failure propagates so the
+      // caller's transaction rolls back (no clock/applied advance).
+      const childMessageIds: string[] = db
+        .select({ id: schema.messages.id })
+        .from(schema.messages)
+        .where(eq(schema.messages.topicId, op.entityId))
+        .all()
+        .map((r) => r.id)
       db.delete(schema.topics).where(eq(schema.topics.id, op.entityId)).run()
+      this.setTombstoneInDb(db, 'topic', op.entityId, op.timestamp, op.id)
+      for (const mid of childMessageIds) {
+        this.setTombstoneInDb(db, 'message', mid, op.timestamp, op.id)
+      }
     } else if (op.entityType === 'message') {
       db.delete(schema.messages).where(eq(schema.messages.id, op.entityId)).run()
+      this.setTombstoneInDb(db, 'message', op.entityId, op.timestamp, op.id)
     } else if (op.entityType === 'message_block') {
       db.delete(schema.messageBlocks).where(eq(schema.messageBlocks.id, op.entityId)).run()
     }
@@ -530,11 +857,36 @@ export class SyncService {
       let outboxOps = this.listOutbox()
       while (outboxOps.length > 0) {
         const chunk = outboxOps.slice(0, SYNC_MAX_OPERATIONS_PER_PUSH)
+        const chunkIds = new Set(chunk.map((o) => o.id))
         const pushReq: SyncPushRequest = { deviceId, operations: chunk }
         try {
           const pushRes = await syncClient.push(cfg.endpoint, cfg.token, pushReq)
-          const acked = pushRes.acceptedIds
-          if (acked.length > 0) this.clearOutboxByIds(acked)
+          const acked = pushRes.acceptedIds ?? []
+          // Sync F4: only clear IDs contained in the exact current chunk. An
+          // ack for an operation outside this chunk (later outbox row or
+          // unknown ID) is a faulty/malicious relay response: record it
+          // durably and fail truthfully without clearing unrelated rows.
+          const expected = acked.filter((id) => chunkIds.has(id))
+          const unexpected = acked.filter((id) => !chunkIds.has(id))
+          if (expected.length > 0) this.clearOutboxByIds(expected)
+          if (unexpected.length > 0) {
+            const msg =
+              `push ack contained ${unexpected.length} unexpected id(s): ${unexpected.slice(0, 5).join(',')}`.slice(
+                0,
+                500
+              )
+            this.updateLastError(msg)
+            throw new Error(msg)
+          }
+          // Push progress guard: a success response for a non-empty chunk
+          // must acknowledge at least one valid in-chunk operation. An empty
+          // ack would otherwise loop indefinitely on the same chunk. Fail
+          // closed with a durable error: outbox retained, no pull, no success.
+          if (expected.length === 0) {
+            const msg = `push made no progress: relay accepted 0 of ${chunk.length} operation(s)`.slice(0, 500)
+            this.updateLastError(msg)
+            throw new Error(msg)
+          }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e)
           this.updateLastError(msg)
@@ -545,14 +897,59 @@ export class SyncService {
         if (outboxOps.length === 0) break
       }
 
-      // Pull loop — page until exhausted, advance cursor only after successful application
-      let currentCursor = cursor
+      // Pull loop — page until exhausted. Two cursors: fetchCursor pages the
+      // relay stream (last seq returned); commitCursor is the durable
+      // contiguous cursor (never skips an unresolved gap). An orphan in an
+      // early page is buffered in-memory and retried as later pages arrive;
+      // a later-page parent resolves it without starvation. Applied later
+      // entries stay applied (idempotent replay); commitCursor never jumps a
+      // gap. Unresolved orphans after the stream end as a durable blocked
+      // error with no success timestamp.
+      let fetchCursor = cursor
+      let commitCursor = cursor
       let pagingDone = false
       let pullError: unknown = null
+      let applyError: unknown = null
+      const resolved = new Map<number, boolean>()
+      const deferred: Array<{ op: any; seq: number }> = []
+      const seenSeq = new Set<number>()
+      const markOwnEcho = (op: any): void => {
+        const already = db.select().from(schema.syncApplied).where(eq(schema.syncApplied.operationId, op.id)).get()
+        if (!already) {
+          db.insert(schema.syncApplied).values({ operationId: op.id, appliedAt: new Date().toISOString() }).run()
+        }
+        if (typeof op.seq === 'number') resolved.set(op.seq, true)
+      }
+      const tryApplyDeferred = (): unknown => {
+        if (deferred.length === 0) return null
+        const still: typeof deferred = []
+        let failed: unknown = null
+        for (const entry of deferred) {
+          try {
+            this.applyIncomingOperation(entry.op as SyncOperation)
+            resolved.set(entry.seq, true)
+          } catch (inner) {
+            if (inner instanceof SyncOrphanError) {
+              still.push(entry)
+            } else {
+              failed = inner
+              // Keep unprocessed remainder buffered
+              const idx = deferred.indexOf(entry)
+              for (let k = idx + 1; k < deferred.length; k++) still.push(deferred[k])
+              deferred.length = 0
+              deferred.push(...still)
+              return failed
+            }
+          }
+        }
+        deferred.length = 0
+        deferred.push(...still)
+        return null
+      }
       while (!pagingDone) {
         let pullRes: { operations: any[]; cursor: number }
         try {
-          pullRes = await syncClient.pull(cfg.endpoint, cfg.token, currentCursor, deviceId)
+          pullRes = await syncClient.pull(cfg.endpoint, cfg.token, fetchCursor, deviceId)
         } catch (e) {
           pullError = e
           const msg = e instanceof Error ? e.message : String(e)
@@ -560,76 +957,188 @@ export class SyncService {
           throw e
         }
         const ops = pullRes.operations ?? []
+        // Defense-in-depth contiguous framing at the service boundary (covers
+        // mocked/bypassed clients): each op seq must equal fetchCursor +
+        // position, and response cursor must equal last seq. Gaps reject
+        // before any application or fetch-cursor advance.
+        try {
+          this.assertContiguousPull(fetchCursor, pullRes as { operations: Array<{ seq?: unknown }>; cursor: number })
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          pullError = e
+          applyError = e
+          this.updateLastError(msg.slice(0, 1000))
+          throw e
+        }
         if (ops.length === 0) {
           pagingDone = true
           break
         }
-        // Apply each op in seq order; track contiguous success
-        let lastSuccessfulSeq = currentCursor
-        let encounteredOrphan = false
+        let failedNonOrphan: unknown = null
         for (const op of ops) {
+          if (typeof op.seq === 'number') {
+            if (seenSeq.has(op.seq)) continue
+            seenSeq.add(op.seq)
+          }
           if (op.deviceId === deviceId) {
-            const already = db.select().from(schema.syncApplied).where(eq(schema.syncApplied.operationId, op.id)).get()
-            if (!already) {
-              db.insert(schema.syncApplied).values({ operationId: op.id, appliedAt: new Date().toISOString() }).run()
-            }
-            // Own echo advances cursor contiguously
-            if (typeof op.seq === 'number') lastSuccessfulSeq = op.seq
+            markOwnEcho(op)
             continue
           }
           try {
             this.applyIncomingOperation(op as SyncOperation)
-            if (typeof op.seq === 'number') lastSuccessfulSeq = op.seq
+            if (typeof op.seq === 'number') resolved.set(op.seq, true)
           } catch (inner) {
             if (inner instanceof SyncOrphanError) {
-              logger.warn(`[sync] orphan ${op.id} deferred, cursor stays at ${lastSuccessfulSeq}`)
-              encounteredOrphan = true
-              // Do not advance beyond orphan; keep cursor at last success before orphan
-              // Break applying remaining ops in this page to preserve contiguous advancement
-              break
+              logger.warn(`[sync] orphan ${op.id} buffered for later-page retry`)
+              if (typeof op.seq === 'number') deferred.push({ op, seq: op.seq })
+              continue
             }
             logger.error(`[sync] apply ${op.id} failed`, inner as Error)
-            // Non-orphan error — also keep cursor at last success, but continue? Fail closed: stop advancing
-            encounteredOrphan = true
+            failedNonOrphan = inner
             break
           }
         }
-        // Advance cursor only to contiguously successful seq
-        if (lastSuccessfulSeq > currentCursor) {
-          this.updateCursor(lastSuccessfulSeq)
-          currentCursor = lastSuccessfulSeq
+        // A later parent in this page (or any buffered parent) may resolve
+        // earlier orphans — retry the cross-page buffer after every page.
+        if (!failedNonOrphan) {
+          // In-page second pass then cross-page buffer retry
+          failedNonOrphan = tryApplyDeferred()
         }
-        if (encounteredOrphan) {
-          // Do not page further — retry orphan next sync
+        if (failedNonOrphan) {
+          const msg = failedNonOrphan instanceof Error ? failedNonOrphan.message : String(failedNonOrphan)
+          applyError = failedNonOrphan
+          this.updateLastError(`apply failed: ${msg}`.slice(0, 1000))
+          const contiguous = this.contiguousCursor(
+            commitCursor,
+            [...seenSeq].sort((a, b) => a - b),
+            resolved
+          )
+          if (contiguous > commitCursor) {
+            this.updateCursor(contiguous)
+            commitCursor = contiguous
+          }
           pagingDone = true
           break
         }
-        // If we returned full page, there may be more — continue pulling from lastSuccessfulSeq (which equals last seq of page if no orphan)
-        // The relay returns last seq returned; if ops.length < limit we are done
+        // Advance the durable cursor only contiguously; page on via the
+        // relay fetch cursor (last seq returned) so later pages still arrive.
+        const contiguous = this.contiguousCursor(
+          commitCursor,
+          [...seenSeq].sort((a, b) => a - b),
+          resolved
+        )
+        if (contiguous > commitCursor) {
+          this.updateCursor(contiguous)
+          commitCursor = contiguous
+        }
+        const lastSeq =
+          ops.length > 0 && typeof ops[ops.length - 1].seq === 'number' ? ops[ops.length - 1].seq : fetchCursor
+        fetchCursor = Math.max(fetchCursor, lastSeq)
         if (ops.length < SYNC_MAX_OPERATIONS_PER_PULL) {
           pagingDone = true
-        } else {
-          // If ops.length == limit, loop will pull next page; but ensure we use returned cursor not global max
-          // If lastSuccessfulSeq didn't move (all were own echoes?), still advance to ops[ops.length-1].seq
-          if (lastSuccessfulSeq === currentCursor && ops.length > 0) {
-            // All ops were duplicates/own? Then advance to last seq
-            const lastSeq = ops[ops.length - 1].seq
-            if (typeof lastSeq === 'number' && lastSeq > currentCursor) {
-              this.updateCursor(lastSeq)
-              currentCursor = lastSeq
-            }
-          }
-          // Continue loop to check next page
         }
       }
-      if (!pullError) {
+      // Final retry of buffered orphans against the full traversed stream.
+      if (!pullError && !applyError && deferred.length > 0) {
+        const failed = tryApplyDeferred()
+        if (failed) {
+          const msg = failed instanceof Error ? failed.message : String(failed)
+          applyError = failed
+          this.updateLastError(`apply failed: ${msg}`.slice(0, 1000))
+        } else if (deferred.length > 0) {
+          const ids = deferred.map((d) => String(d.op?.id ?? d.seq)).join(',')
+          applyError = new SyncOrphanError(`orphan blocked: ${ids}`.slice(0, 500))
+          this.updateLastError(`sync blocked: ${deferred.length} orphan operation(s) unresolved`.slice(0, 1000))
+        }
+        const contiguous = this.contiguousCursor(
+          commitCursor,
+          [...seenSeq].sort((a, b) => a - b),
+          resolved
+        )
+        if (contiguous > commitCursor) {
+          this.updateCursor(contiguous)
+          commitCursor = contiguous
+        }
+      }
+      if (!pullError && !applyError) {
         this.updateLastSyncAt(new Date().toISOString())
         this.updateLastError(null)
+      }
+      // Sync F2: a durable pull/apply/orphan failure must never report
+      // success. Status remains inspectable via getStatus (cursor + lastError
+      // already persisted above); reject here so IPC/renderer observe failure
+      // instead of a normal status. ChatDb envelopes are untouched.
+      if (applyError) {
+        throw applyError instanceof Error ? applyError : new Error(String(applyError))
       }
       return this.getStatus()
     } finally {
       this.statusSyncing = false
     }
+  }
+
+  /** Contiguous pull framing: ops must be exactly fetchCursor+1 ... fetchCursor+n, cursor must equal last seq. */
+  private assertContiguousPull(
+    fetchCursor: number,
+    pullRes: { operations: Array<{ seq?: unknown }>; cursor: number }
+  ): void {
+    const ops = pullRes.operations ?? []
+    if (ops.length === 0) {
+      if (pullRes.cursor !== fetchCursor) {
+        throw new Error(
+          `pull response malformed: empty-page cursor ${String(pullRes.cursor)} must equal request cursor ${String(fetchCursor)}`
+        )
+      }
+      return
+    }
+    for (let i = 0; i < ops.length; i++) {
+      const seq: unknown = (ops[i] as { seq?: unknown })?.seq
+      const expected = fetchCursor + i + 1
+      if (typeof seq !== 'number' || !Number.isInteger(seq) || seq !== expected) {
+        throw new Error(
+          `pull response non-contiguous: expected seq ${String(expected)} at position ${String(i)} but got ${String(seq)} (request cursor ${String(fetchCursor)})`
+        )
+      }
+    }
+    const lastSeq = (ops[ops.length - 1] as { seq?: unknown }).seq as number
+    if (pullRes.cursor !== lastSeq) {
+      throw new Error(
+        `pull response malformed: cursor ${String(pullRes.cursor)} must equal last seq ${String(lastSeq)}`
+      )
+    }
+  }
+
+  /** Contiguous cursor: largest seq such that every seq in (current, candidate] resolved. */
+  private contiguousCursor(
+    currentCursor: number,
+    ops: Array<{ seq?: unknown }> | number[],
+    resolved: Map<number, boolean>
+  ): number {
+    const seqs = (
+      Array.isArray(ops) && ops.length > 0 && typeof ops[0] === 'number'
+        ? (ops as number[]).slice()
+        : (ops as Array<{ seq?: unknown }>)
+            .map((o) => (typeof o.seq === 'number' ? o.seq : null))
+            .filter((s): s is number => s !== null)
+    ).sort((a, b) => a - b)
+    let c = currentCursor
+    for (const s of seqs) {
+      if (s <= c) continue
+      if (s === c + 1 && resolved.get(s)) {
+        c = s
+        continue
+      }
+      // Gap or unresolved: if seqs are dense from relay, any missing
+      // resolved entry stops advancement. Allow jumping only over seqs that
+      // were never returned? No — seqs are exactly the returned page, so stop.
+      if (s > c + 1) {
+        // Check whether all intermediate (c, s) resolved; they are not in page
+        // only if page is non-dense (should not happen). Stop to avoid skip.
+        break
+      }
+      break
+    }
+    return c
   }
 
   clearAllForTests(): void {
