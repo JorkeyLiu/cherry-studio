@@ -1,34 +1,45 @@
 import type { SyncPullResponse, SyncPushRequest } from '@shared/sync'
-import { SYNC_REQUEST_TIMEOUT_MS, validateSyncOperationStrict } from '@shared/sync'
+import { SYNC_REQUEST_TIMEOUT_MS, validateSyncEndpointUrl, validateSyncOperationStrict } from '@shared/sync'
 
 export function validateEndpointUrl(raw: string): string | null {
-  if (!raw || typeof raw !== 'string') return 'endpoint is required'
-  const trimmed = raw.trim()
-  if (trimmed.length === 0) return 'endpoint is required'
-  if (trimmed.length > 2048) return 'endpoint too long'
-  let url: URL
-  try {
-    url = new URL(trimmed)
-  } catch {
-    return 'endpoint must be a valid URL'
+  return validateSyncEndpointUrl(raw)
+}
+
+/**
+ * Strict canonical request/response cursor guard (LOCK-RT-002): only
+ * canonical non-negative safe integers are accepted. Local to SyncClient so
+ * no import cycle with SyncService arises; the rule mirrors
+ * `parseStrictCursor` number branch exactly (typeof number +
+ * Number.isSafeInteger + >= 0, never reinterpreted).
+ */
+function assertSafeCursor(value: unknown, where: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${where} malformed: cursor must be non-negative safe integer`)
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return 'endpoint must be http or https'
-  }
-  return null
+  return value
 }
 
 export class SyncClient {
   async push(
     endpoint: string,
     token: string | undefined,
-    req: SyncPushRequest
+    req: SyncPushRequest,
+    externalSignal?: AbortSignal
   ): Promise<{ cursor: number; acceptedIds: string[] }> {
     const validation = validateEndpointUrl(endpoint)
     if (validation) throw new Error(validation)
     const url = endpoint.replace(/\/$/, '') + '/sync/push'
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), SYNC_REQUEST_TIMEOUT_MS)
+    const onExternalAbort = (): void => {
+      try {
+        controller.abort()
+      } catch {}
+    }
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort()
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+    }
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
       if (token) headers['Authorization'] = `Bearer ${token}`
@@ -48,10 +59,10 @@ export class SyncClient {
       }
       if (
         typeof (data as any).cursor !== 'number' ||
-        !Number.isInteger((data as any).cursor) ||
+        !Number.isSafeInteger((data as any).cursor) ||
         (data as any).cursor < 0
       ) {
-        throw new Error('push response malformed: cursor must be non-negative integer')
+        throw new Error('push response malformed: cursor must be non-negative safe integer')
       }
       for (const id of (data as any).acceptedIds) {
         if (typeof id !== 'string' || id.length === 0) {
@@ -60,22 +71,46 @@ export class SyncClient {
       }
       return data
     } catch (e) {
+      if ((e as Error).name === 'AbortError' && externalSignal?.aborted) throw e
       const msg = e instanceof Error ? e.message : String(e)
       if ((e as Error).name === 'AbortError') throw new Error(`push timeout after ${SYNC_REQUEST_TIMEOUT_MS}ms`)
       throw new Error(msg)
     } finally {
       clearTimeout(timeout)
+      if (externalSignal) {
+        try {
+          externalSignal.removeEventListener('abort', onExternalAbort)
+        } catch {}
+      }
     }
   }
 
-  async pull(endpoint: string, token: string | undefined, cursor: number, deviceId: string): Promise<SyncPullResponse> {
+  async pull(
+    endpoint: string,
+    token: string | undefined,
+    cursor: number,
+    deviceId: string,
+    externalSignal?: AbortSignal
+  ): Promise<SyncPullResponse> {
     const validation = validateEndpointUrl(endpoint)
     if (validation) throw new Error(validation)
+    // Strict request cursor (LOCK-RT-002): never stringify a malformed or
+    // unsafe cursor into the relay request; fail closed before any transport.
+    assertSafeCursor(cursor, 'pull request')
     const url = new URL(endpoint.replace(/\/$/, '') + '/sync/pull')
     url.searchParams.set('cursor', String(cursor))
     url.searchParams.set('deviceId', deviceId)
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), SYNC_REQUEST_TIMEOUT_MS)
+    const onExternalAbort = (): void => {
+      try {
+        controller.abort()
+      } catch {}
+    }
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort()
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+    }
     try {
       const headers: Record<string, string> = {}
       if (token) headers['Authorization'] = `Bearer ${token}`
@@ -88,8 +123,8 @@ export class SyncClient {
       if (!data || typeof data !== 'object' || !Array.isArray(data.operations)) {
         throw new Error('pull response malformed: operations must be array')
       }
-      if (typeof data.cursor !== 'number' || !Number.isInteger(data.cursor) || data.cursor < 0) {
-        throw new Error('pull response malformed: cursor must be non-negative integer')
+      if (typeof data.cursor !== 'number' || !Number.isSafeInteger(data.cursor) || data.cursor < 0) {
+        throw new Error('pull response malformed: cursor must be non-negative safe integer')
       }
       // Strict pull framing: every operation requires a positive integer seq;
       // cursor/operation consistency is validated before any application.
@@ -104,7 +139,7 @@ export class SyncClient {
         const op = data.operations[i]
         const rec = op as Record<string, unknown>
         const seq: unknown = rec['seq']
-        if (typeof seq !== 'number' || !Number.isInteger(seq) || seq <= 0) {
+        if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq <= 0) {
           throw new Error(`pull response malformed: invalid seq for ${String(rec['id'] ?? '')}`)
         }
         const expectedSeq = prevSeq + 1
@@ -133,10 +168,18 @@ export class SyncClient {
       }
       return data
     } catch (e) {
-      if ((e as Error).name === 'AbortError') throw new Error(`pull timeout after ${SYNC_REQUEST_TIMEOUT_MS}ms`)
+      if ((e as Error).name === 'AbortError') {
+        if (externalSignal?.aborted) throw e
+        throw new Error(`pull timeout after ${SYNC_REQUEST_TIMEOUT_MS}ms`)
+      }
       throw e
     } finally {
       clearTimeout(timeout)
+      if (externalSignal) {
+        try {
+          externalSignal.removeEventListener('abort', onExternalAbort)
+        } catch {}
+      }
     }
   }
 }

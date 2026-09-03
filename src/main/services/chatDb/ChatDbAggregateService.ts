@@ -43,13 +43,15 @@ import type {
 import type { ChatDbResult } from '@shared/chatDb'
 import type { SearchMessagesRequest, SearchMessagesResponse } from '@shared/chatDb'
 import { elapsedMs, MAX_APPEND_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
+import { isStableBlockStatus, isStableMessageStatus, isUnsupportedBlockForSync } from '@shared/sync'
 import type Database from 'better-sqlite3'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { logMainDiagnostic } from '../diagnostics'
 import { isPhaseAttrMainEnabled, recordMainPhaseDuration } from '../phaseTimingDiagnostics'
 import { spanCacheService } from '../SpanCacheService'
-import type { FileReferenceData, MessageBlockData, MessageData } from './domain/types'
+import { syncService, type SyncTxExecutor } from '../sync/SyncService'
+import type { FileReferenceData, MessageBlockData, MessageData, TopicData } from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
 import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
@@ -102,6 +104,374 @@ export class ChatDbAggregateService {
   }
 
   // =========================================================================
+  // Transaction-bound sync capture (LOCK-PERSONAL-005/006/010)
+  //
+  // Supported stable mutations enqueue their sync intent INSIDE the same
+  // aggregate Drizzle transaction via SyncService tx-bound helpers (no nested
+  // BEGIN). A throw rolls back the enclosing mutation — a committed row
+  // without durable outbox intent is impossible. Updates carry only
+  // intentional changed allowlisted fields + identity/immutable relation
+  // fields (never sortOrder); creates carry the full allowlisted set.
+  // After a successful commit the caller wakes automation via notifyEnqueued.
+  // =========================================================================
+
+  /**
+   * Capture context acquired OUTSIDE the aggregate tx (deviceId setup is
+   * idempotent). Fail-closed (LOCK-PERSONAL-006): when capture is enabled, an
+   * infrastructure failure acquiring the context throws (rolls back the
+   * enclosing mutation) instead of silently skipping capture (no silent loss).
+   * Disabled capture returns null (no intent). Callers record a durable
+   * visible capture failure outside the rolled-back tx before propagating.
+   */
+  private syncCtx(channel = 'chatDb'): { deviceId: string; ts: number } | null {
+    let enabled = false
+    try {
+      enabled = syncService.isCaptureEnabled()
+    } catch (e) {
+      // Cannot prove disabled: fail closed with a durable record, then throw.
+      // A capture-error persistence failure (SyncCaptureError) preserves the
+      // original message and propagates instead of being swallowed.
+      try {
+        syncService.recordCaptureFailure(channel, e)
+      } catch (secondary) {
+        throw secondary instanceof Error ? secondary : new Error(String(secondary))
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+    if (!enabled) return null
+    try {
+      // Fail closed (LOCK-PERSONAL-001/006): getDeviceId throws on any
+      // infrastructure failure (except proven pre-005 compatibility), so an
+      // enabled mutation cannot commit without durable device identity.
+      return { deviceId: syncService.getDeviceId(), ts: Date.now() }
+    } catch (e) {
+      try {
+        syncService.recordCaptureFailure(channel, e)
+      } catch (secondary) {
+        throw secondary instanceof Error ? secondary : new Error(String(secondary))
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  /** True for domain rejections that must never become capture failures. */
+  private isDomainRejection(e: unknown): boolean {
+    const name = e instanceof Error ? e.constructor.name : ''
+    return (
+      name === 'ChatDbConflictError' ||
+      name === 'ChatDbNotFoundError' ||
+      name === 'ChatDbValidationError' ||
+      (e instanceof Error && /belongs to topic|cannot reparent|Duplicate block ID/.test(e.message))
+    )
+  }
+
+  /**
+   * Durable capture-failure record OUTSIDE a rolled-back aggregate tx
+   * (LOCK-PERSONAL-006/009): the chat mutation is already rolled back (no
+   * chat change committed); the sync_state failure write runs on the live
+   * connection outside that tx so it survives. Never throws. Skips domain
+   * rejections (foreign/no-op validation) which are not capture failures.
+   */
+  private recordSyncTxFailure(channel: string, ctx: { deviceId: string; ts: number } | null, e: unknown): void {
+    if (!ctx) return
+    if (this.isDomainRejection(e)) return
+    // Outside the rolled-back tx so the record survives. A persistence
+    // failure (SyncCaptureError, already carrying the original message) is
+    // logged and propagated — never swallowed — while the caller still throws
+    // so the rolled-back mutation never appears committed.
+    try {
+      syncService.recordCaptureFailure(channel, e)
+    } catch (secondary) {
+      const detail = secondary instanceof Error ? secondary.message : String(secondary)
+      loggerService
+        .withContext('ChatDbAggregate')
+        .error(`[recordSyncTxFailure] ${channel} persistence failed: ${detail}`)
+      throw secondary instanceof Error ? secondary : new Error(String(secondary))
+    }
+  }
+
+  private syncTopicPayload(data: TopicData): Record<string, unknown> {
+    const payload: Record<string, unknown> = {
+      id: data.id,
+      name: data.name,
+      assistantId: data.assistantId,
+      createdAt: data.createdAt,
+      updatedAt: data.updatedAt,
+      deletedAt: data.deletedAt
+    }
+    for (const k of ['pinned', 'prompt', 'isNameManuallyEdited'] as const) {
+      if (Object.prototype.hasOwnProperty.call(data.overflow ?? {}, k)) {
+        const v = data.overflow[k]
+        if (v !== undefined) payload[k] = v
+      }
+    }
+    return payload
+  }
+
+  private syncMessagePayloadFull(data: MessageData): Record<string, unknown> {
+    return {
+      id: data.id,
+      topicId: data.topicId,
+      role: data.role,
+      content: data.content,
+      status: data.status,
+      askId: data.askId,
+      model: data.model,
+      modelId: data.modelId,
+      assistantId: data.assistantId,
+      createdAt: data.createdAt,
+      updatedAt: data.updatedAt,
+      sortOrder: data.sortOrder
+    }
+  }
+
+  private syncBlockPayloadFull(data: MessageBlockData): Record<string, unknown> {
+    return {
+      id: data.id,
+      messageId: data.messageId,
+      type: data.type,
+      content: data.content,
+      status: data.status,
+      createdAt: data.createdAt,
+      updatedAt: data.updatedAt,
+      sortOrder: data.sortOrder
+    }
+  }
+
+  /** Intentional message patch → sync field patch (allowlisted only, never identity/sortOrder). */
+  private syncMessagePatchPayload(
+    topicId: string,
+    messageId: string,
+    patch: Record<string, unknown>
+  ): Record<string, unknown> | null {
+    const allow = new Set([
+      'role',
+      'content',
+      'status',
+      'askId',
+      'model',
+      'modelId',
+      'assistantId',
+      'createdAt',
+      'updatedAt'
+    ])
+    const out: Record<string, unknown> = { id: messageId, topicId }
+    for (const [k, v] of Object.entries(patch)) {
+      if (k === 'overflow' || k === 'id' || k === 'topicId' || k === 'sortOrder') continue
+      if (!allow.has(k)) continue
+      if (v !== undefined) out[k] = v
+    }
+    return Object.keys(out).length > 2 ? out : null
+  }
+
+  /** Intentional block patch → sync field patch (allowlisted only, never identity/sortOrder). */
+  private syncBlockPatchPayload(
+    messageId: string,
+    blockId: string,
+    patch: Record<string, unknown>
+  ): Record<string, unknown> | null {
+    const allow = new Set(['type', 'content', 'status', 'createdAt', 'updatedAt'])
+    const out: Record<string, unknown> = { id: blockId, messageId }
+    for (const [k, v] of Object.entries(patch)) {
+      if (k === 'overflow' || k === 'id' || k === 'messageId' || k === 'sortOrder') continue
+      if (!allow.has(k)) continue
+      if (v !== undefined) out[k] = v
+    }
+    return Object.keys(out).length > 2 ? out : null
+  }
+
+  /**
+   * Direct parent closure inside the aggregate tx (bounded to the direct
+   * chain block→message→topic). Untracked but locally present parents are
+   * captured first with strictly earlier timestamps. Throws fail-closed when
+   * a required parent row is missing (rolls back the mutation).
+   */
+  private ensureTopicClosureInTx(tx: SyncTxExecutor, topicId: string, childTs: number, deviceId: string): void {
+    if (syncService.isTrackedEntityInTx(tx, 'topic', topicId)) return
+    const repos = createRepositories(tx as unknown as BetterSQLite3Database<typeof schema>)
+    const found = repos.topics.getById(topicId)
+    if (!found.found) throw new Error(`sync closure: topic ${topicId} missing in transaction`)
+    syncService.enqueueUpsertInTx(
+      tx,
+      'topic',
+      topicId,
+      this.syncTopicPayload(found.data),
+      Math.max(0, childTs - 2),
+      deviceId
+    )
+  }
+
+  private ensureMessageClosureInTx(tx: SyncTxExecutor, messageId: string, childTs: number, deviceId: string): void {
+    const repos = createRepositories(tx as unknown as BetterSQLite3Database<typeof schema>)
+    const mrow = repos.messages.getById(messageId)
+    if (!mrow.found) throw new Error(`sync closure: message ${messageId} missing in transaction`)
+    const topicId = mrow.data.topicId
+    if (!topicId) throw new Error(`sync closure: message ${messageId} has no topic`)
+    this.ensureTopicClosureInTx(tx, topicId, childTs, deviceId)
+    if (syncService.isTrackedEntityInTx(tx, 'message', messageId)) return
+    // Stable-checkpoint gate (LOCK-PERSONAL-004): a transient assistant
+    // parent (streaming/pending/processing/searching) must never be emitted
+    // through child closure. Fail closed — the enclosing mutation rolls back
+    // with a durable capture failure and is deferred until the parent reaches
+    // a stable checkpoint; the transient row itself is never synced and the
+    // child emits nothing (no cursor poisoning: no outbox row is written).
+    const full = repos.messages.getById(messageId)
+    if (!full.found) throw new Error(`sync closure: message ${messageId} missing in transaction`)
+    if (!isStableMessageStatus(full.data.status)) {
+      throw new Error(`sync closure: parent message ${messageId} transient (${String(full.data.status)}), defer`)
+    }
+    syncService.enqueueUpsertInTx(
+      tx,
+      'message',
+      messageId,
+      this.syncMessagePayloadFull(full.data),
+      Math.max(0, childTs - 1),
+      deviceId
+    )
+  }
+
+  private ensureBlockParentClosureInTx(tx: SyncTxExecutor, blockId: string, childTs: number, deviceId: string): void {
+    const repos = createRepositories(tx as unknown as BetterSQLite3Database<typeof schema>)
+    const brow = repos.blocks.getById(blockId)
+    if (!brow.found) throw new Error(`sync closure: block ${blockId} missing in transaction`)
+    this.ensureMessageClosureInTx(tx, brow.data.messageId, childTs, deviceId)
+  }
+
+  /**
+   * Unsupported structured/attachment-bearing block gate (LOCK-PERSONAL-004).
+   * A block whose canonical content lives in overflow (or whose type carries
+   * binary/structured canonical payload) is not fully representable in the
+   * allowlisted sync payload and must never emit a partial null-content
+   * shell. Returns true when the block must be skipped for sync (caller
+   * records a durable explicit unsupported outcome; no outbox row is
+   * written). Ordinary text blocks return false and keep syncing.
+   * No-op/foreign rows never reach this predicate (callers handle those as
+   * non-errors first).
+   */
+  private isUnsupportedBlock(data: MessageBlockData): boolean {
+    return isUnsupportedBlockForSync({ type: data.type, overflow: data.overflow })
+  }
+
+  /**
+   * Durable explicit unsupported-block outcome after a successful chat commit
+   * (LOCK-PERSONAL-004/006/009): the chat mutation stays committed; no
+   * partial outbox row was written; the skip is recorded via the existing
+   * capture-error mechanism (sync_state lastCaptureError + lastError) so it
+   * cannot disappear silently. Never throws: a persistence failure is logged
+   * (fail-closed observable) without rewriting the committed chat result.
+   */
+  private recordUnsupportedBlocksAfterCommit(channel: string, blockIds: ReadonlyArray<string>): void {
+    if (blockIds.length === 0) return
+    const ids = [...new Set(blockIds)].slice(0, 5).join(',')
+    try {
+      syncService.recordCaptureFailure(
+        channel,
+        new Error(`unsupported block(s) not representable for sync, skipped without partial payload: ${ids}`)
+      )
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e)
+      loggerService
+        .withContext('ChatDbAggregate')
+        .error(`[unsupportedBlock] ${channel} capture-error persistence failed: ${detail}`)
+    }
+  }
+
+  /**
+   * Stable-promotion descendant backfill (LOCK-PERSONAL-004): when a transient
+   * assistant parent becomes stable, every committed stable block descendant
+   * that was never tracked must join the same stable checkpoint. Parent
+   * (topic/message) intent is already enqueued by the caller with an earlier
+   * timestamp, so per-block +1 offsets preserve parent-before-child order.
+   * Only stable + untracked + unexcluded + supported rows enqueue; transient
+   * rows never emit; unsupported structured/attachment-bearing rows never
+   * emit a partial shell (collected for a durable unsupported outcome).
+   * Throws fail-closed (rolls back the promotion) on infrastructure
+   * failure. Returns true when at least one descendant was captured.
+   */
+  private captureUntrackedStableBlocksInTx(
+    tx: SyncTxExecutor,
+    repos: ChatDbRepositories,
+    messageId: string,
+    baseTs: number,
+    deviceId: string,
+    excludeIds: ReadonlySet<string>,
+    unsupportedIds?: string[]
+  ): boolean {
+    const siblings = repos.blocks.listByMessage(messageId)
+    let captured = false
+    let offset = 0
+    for (const b of siblings) {
+      if (excludeIds.has(b.id)) continue
+      if (!isStableBlockStatus(b.status)) continue
+      if (this.isUnsupportedBlock(b)) {
+        unsupportedIds?.push(b.id)
+        continue
+      }
+      if (syncService.isTrackedEntityInTx(tx, 'message_block', b.id)) continue
+      syncService.enqueueUpsertInTx(
+        tx,
+        'message_block',
+        b.id,
+        this.syncBlockPayloadFull(b),
+        Math.max(0, baseTs + offset + 1),
+        deviceId
+      )
+      offset += 1
+      captured = true
+    }
+    return captured
+  }
+
+  /**
+   * Pre/post diff for full-object block writes: only actually changed
+   * allowlisted fields become sync intent (never sortOrder, never identity).
+   * Null (pre absent) means create — caller uses the full payload instead.
+   */
+  private diffBlockPayload(pre: MessageBlockData | null, post: MessageBlockData): Record<string, unknown> | null {
+    if (!pre) return this.syncBlockPayloadFull(post)
+    const out: Record<string, unknown> = { id: post.id, messageId: post.messageId }
+    for (const k of ['type', 'content', 'status', 'createdAt', 'updatedAt'] as const) {
+      const a = pre[k] ?? null
+      const b = post[k] ?? null
+      if (!Object.is(a, b) && JSON.stringify(a) !== JSON.stringify(b)) out[k] = post[k]
+    }
+    return Object.keys(out).length > 2 ? out : null
+  }
+
+  /** Pre/post diff for full-object message writes (same patch-only rule). */
+  private diffMessagePayload(pre: MessageData | null, post: MessageData): Record<string, unknown> | null {
+    if (!pre) return this.syncMessagePayloadFull(post)
+    const out: Record<string, unknown> = { id: post.id, topicId: post.topicId }
+    for (const k of [
+      'role',
+      'content',
+      'status',
+      'askId',
+      'model',
+      'modelId',
+      'assistantId',
+      'createdAt',
+      'updatedAt'
+    ] as const) {
+      const a = pre[k] ?? null
+      const b = post[k] ?? null
+      if (!Object.is(a, b) && JSON.stringify(a) !== JSON.stringify(b)) out[k] = post[k]
+    }
+    return Object.keys(out).length > 2 ? out : null
+  }
+
+  /**
+   * Stable-checkpoint gate for creation paths (LOCK-PERSONAL-004): user
+   * messages and independently stable non-assistant creations capture;
+   * assistant stubs capture only at stable success/error/paused checkpoints.
+   * Transient assistant rows are legitimate skips (no failure, no outbox).
+   */
+  private shouldCaptureMessageCreate(data: MessageData): boolean {
+    if (data.role !== 'assistant') return true
+    return isStableMessageStatus(data.status)
+  }
+
+  // =========================================================================
   // Command implementations
   // =========================================================================
 
@@ -110,18 +480,19 @@ export class ChatDbAggregateService {
    * Returns consistent ordered message/block snapshot.
    * Rebuilds each message.blocks relationally.
    *
-   * Topic priming: if the topic is absent, ensure/create it within
-   * the same aggregate transaction and return empty arrays.
+   * Pure read (LOCK-PERSONAL-001/006): a missing topic returns empty
+   * arrays without creating any topic row, so a read can never leave a
+   * hidden local topic without sync intent. Explicit creation stays on
+   * ensureTopic (transactional outbox); appendMessage ensures its parent.
    */
   fetchMessages(topicId: string): ChatDbResult<FetchMessagesResult> {
     return wrapResult(() => {
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
-        // Absent topic → ensure it exists, return empty result
+        // Absent topic → pure read, no implicit mutation.
         const topic = repos.topics.getById(topicId)
         if (!topic.found) {
-          repos.topics.ensure(topicId)
           return { messages: [], blocks: [] }
         }
 
@@ -666,12 +1037,45 @@ export class ChatDbAggregateService {
   /**
    * Ensure a topic exists. Create-only: only sets assistantId on creation.
    * Does not overwrite existing topic's assistantId.
+   * Sync intent (create-only full payload) commits atomically in the same tx.
    */
   ensureTopic(topicId: string, assistantId?: string, name?: string | null): ChatDbResult<null> {
     return wrapResult(() => {
-      const { topics } = this.repos()
-      topics.ensure(topicId, assistantId, name)
-      return null
+      const ctx = this.syncCtx('ensureTopic')
+      let notify = false
+      let result: null
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          // Create-only gate (LOCK-PERSONAL-005): capture depends on actual
+          // pre-mutation row existence, not trackedness. An existing row —
+          // even untracked (pre-sync legacy data) — is a no-op: it emits no
+          // fresh full snapshot so a stale ensure can never overwrite newer
+          // remote field values. Only a row absent before this command is a
+          // true creation and emits the create-union payload.
+          const existedBefore = repos.topics.getById(topicId).found
+          repos.topics.ensure(topicId, assistantId, name)
+          if (ctx && !existedBefore) {
+            const created = repos.topics.getById(topicId)
+            if (!created.found) throw new Error(`ensureTopic ${topicId} missing after ensure`)
+            syncService.enqueueUpsertInTx(
+              tx as unknown as SyncTxExecutor,
+              'topic',
+              topicId,
+              this.syncTopicPayload(created.data),
+              ctx.ts,
+              ctx.deviceId
+            )
+            notify = true
+          }
+          return null
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('ensureTopic', ctx, e)
+        throw e
+      }
+      if (notify) syncService.notifyEnqueued()
+      return result
     }, `ensureTopic(${topicId})`)
   }
 
@@ -719,52 +1123,169 @@ export class ChatDbAggregateService {
         convertDurationMs = elapsedMs(tConvert)
 
         const tTx = performance.now()
-        const txResult = this.db.transaction((tx) => {
-          const repos = createRepositories(tx)
+        const syncCtx = this.syncCtx('appendMessage')
+        let syncNotify = false
+        const unsupportedBlockIds: string[] = []
+        let txResult: null
+        try {
+          txResult = this.db.transaction((tx) => {
+            const repos = createRepositories(tx)
+            const stx = tx as unknown as SyncTxExecutor
 
-          // Ensure topic exists
-          repos.topics.ensure(topicId)
+            const trackedTopicBefore = syncCtx ? syncService.isTrackedEntityInTx(stx, 'topic', topicId) : true
+            // Ensure topic exists
+            repos.topics.ensure(topicId)
 
-          // Check if message already exists
-          const existing = repos.messages.getById(messageData.id)
+            // Check if message already exists
+            const existing = repos.messages.getById(messageData.id)
+            const messageExistedBefore = existing.found
+            const messagePre = existing.found
+              ? ({ ...existing.data, overflow: { ...existing.data.overflow } } as MessageData)
+              : null
 
-          if (existing.found) {
-            // Authoritative ownership guard (sync F1): an existing message ID
-            // owned by another topic must not be mutated and must not emit
-            // sync capture. Reject before any message/block processing so the
-            // transaction aborts with zero entity mutation; the IPC hook only
-            // captures on success, so no outbox capture is emitted.
-            if (existing.data.topicId !== topicId) {
-              throw new ChatDbConflictError(
-                `Message ${messageData.id} belongs to topic ${existing.data.topicId}, cannot reparent to ${topicId}`
-              )
-            }
-            // Existing ID: preserve current position (update metadata only)
-            const patch = wireToMessagePatch(messageJson)
-            delete patch.id
-            delete patch.topicId
-            delete patch.sortOrder
-            if (Object.keys(patch).length > 0) {
-              repos.messages.update(topicId, messageData.id, patch)
-            }
-          } else {
-            // New message: insert at index or append
-            if (insertIndex !== undefined) {
-              repos.messages.insertAt(messageData, insertIndex)
+            if (existing.found) {
+              // Authoritative ownership guard (sync F1): an existing message ID
+              // owned by another topic must not be mutated and must not emit
+              // sync capture. Reject before any message/block processing so the
+              // transaction aborts with zero entity mutation; the IPC hook only
+              // captures on success, so no outbox capture is emitted.
+              if (existing.data.topicId !== topicId) {
+                throw new ChatDbConflictError(
+                  `Message ${messageData.id} belongs to topic ${existing.data.topicId}, cannot reparent to ${topicId}`
+                )
+              }
+              // Existing ID: preserve current position (update metadata only)
+              const patch = wireToMessagePatch(messageJson)
+              delete patch.id
+              delete patch.topicId
+              delete patch.sortOrder
+              if (Object.keys(patch).length > 0) {
+                repos.messages.update(topicId, messageData.id, patch)
+              }
             } else {
-              repos.messages.append(messageData)
+              // New message: insert at index or append
+              if (insertIndex !== undefined) {
+                repos.messages.insertAt(messageData, insertIndex)
+              } else {
+                repos.messages.append(messageData)
+              }
             }
-          }
 
-          // Upsert blocks (preserves existing order for existing blocks)
-          if (blockDataList.length > 0) {
-            repos.blocks.upsertMany(blockDataList)
+            // Pre-state snapshot for existing blocks (field-patch diffing).
+            const preBlockRows = new Map<string, MessageBlockData>()
+            if (syncCtx && blockDataList.length > 0) {
+              for (const block of blockDataList) {
+                const pre = repos.blocks.getById(block.id)
+                if (pre.found) preBlockRows.set(block.id, { ...pre.data, overflow: { ...pre.data.overflow } })
+              }
+            }
+            // Upsert blocks (preserves existing order for existing blocks)
+            if (blockDataList.length > 0) {
+              repos.blocks.upsertMany(blockDataList)
 
-            // Sync file references for file/image blocks
-            this.syncFileReferences(repos, blockDataList)
-          }
-          return null
-        })
+              // Sync file references for file/image blocks
+              this.syncFileReferences(repos, blockDataList)
+            }
+
+            // Transaction-bound sync intent (same atomic boundary). Stable
+            // checkpoint gate (LOCK-PERSONAL-004): transient assistant stubs
+            // (pending/processing/searching/streaming) are legitimate skips —
+            // no outbox, no failure. Unsupported structured/attachment blocks
+            // skip without a partial null-content shell (durable unsupported
+            // outcome recorded after commit). User messages and stable
+            // creations capture; existing IDs emit intentional patches only
+            // (LOCK-PERSONAL-005). A throw rolls back the whole append; the
+            // outer catch records a durable capture failure outside the tx.
+            if (syncCtx) {
+              const mrow = repos.messages.getById(messageData.id)
+              if (!mrow.found) throw new Error(`appendMessage message ${messageData.id} missing in transaction`)
+              const messageStable = this.shouldCaptureMessageCreate(mrow.data)
+              if (!messageStable) {
+                return null
+              }
+              if (!trackedTopicBefore) {
+                const trow = repos.topics.getById(topicId)
+                if (!trow.found) throw new Error(`appendMessage topic ${topicId} missing in transaction`)
+                syncService.enqueueUpsertInTx(
+                  stx,
+                  'topic',
+                  topicId,
+                  this.syncTopicPayload(trow.data),
+                  Math.max(0, syncCtx.ts - 2),
+                  syncCtx.deviceId
+                )
+                syncNotify = true
+              }
+              if (!messageExistedBefore) {
+                syncService.enqueueUpsertInTx(
+                  stx,
+                  'message',
+                  messageData.id,
+                  this.syncMessagePayloadFull(mrow.data),
+                  syncCtx.ts,
+                  syncCtx.deviceId
+                )
+                syncNotify = true
+              } else {
+                const patchPayload = this.diffMessagePayload(messagePre, mrow.data)
+                if (patchPayload) {
+                  syncService.enqueueUpsertInTx(
+                    stx,
+                    'message',
+                    messageData.id,
+                    patchPayload,
+                    syncCtx.ts,
+                    syncCtx.deviceId
+                  )
+                  syncNotify = true
+                }
+              }
+              for (let i = 0; i < blockDataList.length; i++) {
+                const bid = blockDataList[i].id
+                const brow = repos.blocks.getById(bid)
+                if (!brow.found) throw new Error(`appendMessage block ${bid} missing in transaction`)
+                if (!isStableBlockStatus(brow.data.status)) continue
+                if (this.isUnsupportedBlock(brow.data)) {
+                  unsupportedBlockIds.push(bid)
+                  continue
+                }
+                const pre = preBlockRows.get(bid) ?? null
+                if (!pre) {
+                  this.ensureBlockParentClosureInTx(stx, bid, syncCtx.ts + i + 1, syncCtx.deviceId)
+                  syncService.enqueueUpsertInTx(
+                    stx,
+                    'message_block',
+                    bid,
+                    this.syncBlockPayloadFull(brow.data),
+                    syncCtx.ts + i + 1,
+                    syncCtx.deviceId
+                  )
+                  syncNotify = true
+                } else {
+                  if (brow.data.messageId !== pre.messageId) continue
+                  const blockPatch = this.diffBlockPayload(pre, brow.data)
+                  if (!blockPatch) continue
+                  this.ensureBlockParentClosureInTx(stx, bid, syncCtx.ts + i + 1, syncCtx.deviceId)
+                  syncService.enqueueUpsertInTx(
+                    stx,
+                    'message_block',
+                    bid,
+                    blockPatch,
+                    syncCtx.ts + i + 1,
+                    syncCtx.deviceId
+                  )
+                  syncNotify = true
+                }
+              }
+            }
+            return null
+          })
+        } catch (e) {
+          this.recordSyncTxFailure('appendMessage', syncCtx, e)
+          throw e
+        }
+        if (syncNotify) syncService.notifyEnqueued()
+        this.recordUnsupportedBlocksAfterCommit('appendMessage', unsupportedBlockIds)
         txDurationMs = elapsedMs(tTx)
         outcomeOk = true
         return txResult
@@ -804,6 +1325,8 @@ export class ChatDbAggregateService {
    * Update a message by ID.
    * Missing target: no-op (returns success).
    * Identity/reparenting fields rejected at contract level.
+   * Supported stable field patches enqueue sync intent atomically in the
+   * same tx (field patch only; transient statuses skip capture, no failure).
    */
   updateMessage(topicId: string, messageId: string, updatesJson: JsonObject): ChatDbResult<null> {
     return wrapResult(() => {
@@ -813,9 +1336,107 @@ export class ChatDbAggregateService {
       delete patch.topicId
       delete patch.sortOrder
 
-      const { messages } = this.repos()
-      messages.update(topicId, messageId, patch)
-      return null
+      const ctx = this.syncCtx('updateMessage')
+      // Empty patch (no mutable keys): no mutation intent; keep read-only.
+      if (Object.keys(patch).filter((k) => k !== 'overflow').length === 0 && !patch.overflow) {
+        const { messages } = this.repos()
+        messages.update(topicId, messageId, patch)
+        return null
+      }
+      let notify = false
+      let result: null
+      const unsupportedBlockIds: string[] = []
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          // Pre-state for the final-transition rule: only a transient→stable
+          // promotion of a never-tracked row creates full initial state.
+          // Pre-sync stable rows keep patch-only semantics (established).
+          const preRow = ctx ? repos.messages.getInTopic(messageId, topicId) : null
+          const preStable = preRow && preRow.found ? isStableMessageStatus(preRow.data.status) : true
+          repos.messages.update(topicId, messageId, patch)
+          if (ctx) {
+            // Post-state proof inside the same tx: missing/foreign targets are
+            // repository no-ops or throws — only capture when the owned row
+            // survives with the requested topic.
+            const row = repos.messages.getInTopic(messageId, topicId)
+            if (!row.found) return null
+            if (!isStableMessageStatus(row.data.status)) return null
+            this.ensureTopicClosureInTx(stx, topicId, ctx.ts, ctx.deviceId)
+            // Final-transition full state (LOCK-PERSONAL-004/005): a
+            // never-tracked row promoted from a transient stub by this very
+            // update creates its full initial state; all other cases stay
+            // patch-only.
+            const tracked = syncService.isTrackedEntityInTx(stx, 'message', messageId)
+            if (!tracked && !preStable) {
+              syncService.enqueueUpsertInTx(
+                stx,
+                'message',
+                messageId,
+                this.syncMessagePayloadFull(row.data),
+                ctx.ts,
+                ctx.deviceId
+              )
+              notify = true
+              // Promotion backfill: stable blocks committed with the transient
+              // stub (appendMessage skips all intent while transient) join this
+              // stable checkpoint parent-first. Fail closed on error.
+              // Unsupported structured/attachment descendants skip without a
+              // partial shell (durable outcome recorded after commit).
+              if (
+                this.captureUntrackedStableBlocksInTx(
+                  stx,
+                  repos,
+                  messageId,
+                  ctx.ts,
+                  ctx.deviceId,
+                  new Set<string>(),
+                  unsupportedBlockIds
+                )
+              ) {
+                notify = true
+              }
+            } else {
+              const payload = this.syncMessagePatchPayload(
+                topicId,
+                messageId,
+                patch as unknown as Record<string, unknown>
+              )
+              if (payload) {
+                syncService.enqueueUpsertInTx(stx, 'message', messageId, payload, ctx.ts, ctx.deviceId)
+                notify = true
+              }
+              // Deterministic rescan (LOCK-PERSONAL-004): every stable message
+              // capture re-checks all committed stable descendants against
+              // tracked/outbox state, even when the parent is already tracked.
+              // A prior partial backfill (fallback child failure) can never be
+              // silently abandoned — the next stable promotion retries the
+              // remainder. Fail closed on infrastructure error.
+              if (
+                this.captureUntrackedStableBlocksInTx(
+                  stx,
+                  repos,
+                  messageId,
+                  ctx.ts,
+                  ctx.deviceId,
+                  new Set<string>(),
+                  unsupportedBlockIds
+                )
+              ) {
+                notify = true
+              }
+            }
+          }
+          return null
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('updateMessage', ctx, e)
+        throw e
+      }
+      if (notify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('updateMessage', unsupportedBlockIds)
+      return result
     }, `updateMessage(${topicId}, ${messageId})`)
   }
 
@@ -844,72 +1465,178 @@ export class ChatDbAggregateService {
       delete messagePatch.sortOrder
 
       const blockDataList = blocksToUpdateJson.map(wireToBlock)
+      const syncCtx = this.syncCtx('updateMessageAndBlocks')
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
 
-      return this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
+      let txResult: FileCleanupResult
+      try {
+        txResult = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
 
-        // Check message exists
-        const existing = repos.messages.getInTopic(messageId, topicId)
-        if (!existing.found) {
-          // No-op: follow Dexie-compatible semantics — empty cleanup
-          return { affectedFileIds: [], remainingReferenceCounts: {} }
-        }
-
-        // Phase 1: Resolve every block through its parent message and verify ownership.
-        // Missing blocks follow delete no-op semantics. Existing blocks must belong
-        // to the message being updated, not merely to the requested topic.
-        let affectedFileIds: string[] = []
-        if (blockIdsToDelete.length > 0) {
-          const ownedBlockIds: string[] = []
-          for (const blockId of blockIdsToDelete) {
-            const block = repos.blocks.getById(blockId)
-            if (!block.found) {
-              // Missing block: skip (consistent with no-op semantics)
-              continue
-            }
-            if (block.data.messageId !== messageId) {
-              throw new ChatDbConflictError(
-                `Block ${blockId} belongs to message ${block.data.messageId}, cannot delete from message ${messageId}`
-              )
-            }
-            // Resolve block → message → topic ownership
-            const msg = repos.messages.getInTopic(block.data.messageId, topicId)
-            if (!msg.found) {
-              throw new ChatDbConflictError(
-                `Block ${blockId} belongs to message ${block.data.messageId} which is not in topic ${topicId}`
-              )
-            }
-            ownedBlockIds.push(blockId)
+          // Check message exists
+          const existing = repos.messages.getInTopic(messageId, topicId)
+          if (!existing.found) {
+            // No-op: follow Dexie-compatible semantics — empty cleanup
+            return { affectedFileIds: [], remainingReferenceCounts: {} }
           }
 
-          // Collect affected file IDs from owned blocks only
-          if (ownedBlockIds.length > 0) {
-            const allRefs: FileReferenceData[] = []
-            for (const blockId of ownedBlockIds) {
-              const refs = repos.fileRefs.listByBlock(blockId)
-              allRefs.push(...refs)
+          // Phase 1: Resolve every block through its parent message and verify ownership.
+          // Missing blocks follow delete no-op semantics. Existing blocks must belong
+          // to the message being updated, not merely to the requested topic.
+          let affectedFileIds: string[] = []
+          if (blockIdsToDelete.length > 0) {
+            const ownedBlockIds: string[] = []
+            for (const blockId of blockIdsToDelete) {
+              const block = repos.blocks.getById(blockId)
+              if (!block.found) {
+                // Missing block: skip (consistent with no-op semantics)
+                continue
+              }
+              if (block.data.messageId !== messageId) {
+                throw new ChatDbConflictError(
+                  `Block ${blockId} belongs to message ${block.data.messageId}, cannot delete from message ${messageId}`
+                )
+              }
+              // Resolve block → message → topic ownership
+              const msg = repos.messages.getInTopic(block.data.messageId, topicId)
+              if (!msg.found) {
+                throw new ChatDbConflictError(
+                  `Block ${blockId} belongs to message ${block.data.messageId} which is not in topic ${topicId}`
+                )
+              }
+              ownedBlockIds.push(blockId)
             }
-            affectedFileIds = collectAffectedFileIds(allRefs)
 
-            // Delete owned blocks (FK cascade removes file_references)
-            repos.blocks.deleteMany(ownedBlockIds)
+            // Collect affected file IDs from owned blocks only
+            if (ownedBlockIds.length > 0) {
+              const allRefs: FileReferenceData[] = []
+              for (const blockId of ownedBlockIds) {
+                const refs = repos.fileRefs.listByBlock(blockId)
+                allRefs.push(...refs)
+              }
+              affectedFileIds = collectAffectedFileIds(allRefs)
+
+              // Delete owned blocks (FK cascade removes file_references)
+              repos.blocks.deleteMany(ownedBlockIds)
+            }
           }
-        }
 
-        // Apply message patch
-        if (Object.keys(messagePatch).length > 0) {
-          repos.messages.update(topicId, messageId, messagePatch)
-        }
+          // Apply message patch
+          if (Object.keys(messagePatch).length > 0) {
+            repos.messages.update(topicId, messageId, messagePatch)
+          }
 
-        // Upsert blocks
-        if (blockDataList.length > 0) {
-          repos.blocks.upsertMany(blockDataList)
+          // Upsert blocks (snapshot pre-state for field-patch diffing)
+          const preBlockRows = new Map<string, MessageBlockData>()
+          if (syncCtx && blockDataList.length > 0) {
+            for (const block of blockDataList) {
+              const pre = repos.blocks.getById(block.id)
+              if (pre.found) preBlockRows.set(block.id, { ...pre.data, overflow: { ...pre.data.overflow } })
+            }
+          }
+          if (blockDataList.length > 0) {
+            repos.blocks.upsertMany(blockDataList)
 
-          // Sync file references
-          this.syncFileReferences(repos, blockDataList)
-        }
-        return buildFileCleanupResult(repos, affectedFileIds)
-      })
+            // Sync file references
+            this.syncFileReferences(repos, blockDataList)
+          }
+
+          // Transaction-bound sync intent (same atomic boundary).
+          if (syncCtx) {
+            const deletedOwned: string[] = []
+            // Re-resolve owned deletes post-state: surviving rows are no-ops.
+            for (const blockId of blockIdsToDelete) {
+              if (typeof blockId !== 'string' || blockId.length === 0) continue
+              const gone = !repos.blocks.getById(blockId).found
+              if (gone && syncService.isKnownEntityInTx(stx, 'message_block', blockId)) deletedOwned.push(blockId)
+            }
+            const mrow = repos.messages.getInTopic(messageId, topicId)
+            if (mrow.found) {
+              // Final-transition full state: only a transient→stable promotion
+              // of a never-tracked message creates full state; pre-sync stable
+              // rows keep patch/diff semantics.
+              const messageTracked = syncService.isTrackedEntityInTx(stx, 'message', messageId)
+              const preMessageStable = isStableMessageStatus(existing.data.status)
+              const isPromotion = !messageTracked && !preMessageStable
+              const msgPayload = isPromotion
+                ? this.syncMessagePayloadFull(mrow.data)
+                : this.diffMessagePayload(existing.data, mrow.data)
+              if (msgPayload && isStableMessageStatus(mrow.data.status)) {
+                this.ensureTopicClosureInTx(stx, topicId, syncCtx.ts, syncCtx.deviceId)
+                syncService.enqueueUpsertInTx(stx, 'message', messageId, msgPayload, syncCtx.ts, syncCtx.deviceId)
+                syncNotify = true
+                // Promotion backfill + deterministic rescan (LOCK-PERSONAL-004):
+                // committed stable descendants created with the transient stub
+                // (outside this request's block list) join the stable
+                // checkpoint parent-first. Every stable message capture
+                // rescans all stable descendants against tracked/outbox state,
+                // even when the parent is already tracked, so a prior partial
+                // backfill is retried instead of silently abandoned.
+                // Fail closed on error.
+                if (isStableMessageStatus(mrow.data.status)) {
+                  const requestedIds = new Set(blockDataList.map((b) => b.id))
+                  if (
+                    this.captureUntrackedStableBlocksInTx(
+                      stx,
+                      repos,
+                      messageId,
+                      syncCtx.ts,
+                      syncCtx.deviceId,
+                      requestedIds,
+                      unsupportedBlockIds
+                    )
+                  ) {
+                    syncNotify = true
+                  }
+                }
+              }
+              for (const block of blockDataList) {
+                const brow = repos.blocks.getById(block.id)
+                if (!brow.found) continue
+                if (brow.data.messageId !== messageId) continue
+                if (!isStableBlockStatus(brow.data.status)) continue
+                if (this.isUnsupportedBlock(brow.data)) {
+                  unsupportedBlockIds.push(block.id)
+                  continue
+                }
+                // Field patch via pre/post diff; only a transient→stable
+                // promotion of a never-tracked block creates full state.
+                const pre = preBlockRows.get(block.id) ?? null
+                const blockTracked = syncService.isTrackedEntityInTx(stx, 'message_block', block.id)
+                const preBlockStable = pre ? isStableBlockStatus(pre.status) : true
+                const patchPayload =
+                  !pre || (!blockTracked && !preBlockStable)
+                    ? this.syncBlockPayloadFull(brow.data)
+                    : this.diffBlockPayload(pre, brow.data)
+                if (!patchPayload) continue
+                this.ensureBlockParentClosureInTx(stx, block.id, syncCtx.ts, syncCtx.deviceId)
+                syncService.enqueueUpsertInTx(
+                  stx,
+                  'message_block',
+                  block.id,
+                  patchPayload,
+                  syncCtx.ts,
+                  syncCtx.deviceId
+                )
+                syncNotify = true
+              }
+            }
+            for (const bid of deletedOwned) {
+              syncService.enqueueDeleteInTx(stx, 'message_block', bid, syncCtx.ts, syncCtx.deviceId)
+              syncNotify = true
+            }
+          }
+          return buildFileCleanupResult(repos, affectedFileIds)
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('updateMessageAndBlocks', syncCtx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('updateMessageAndBlocks', unsupportedBlockIds)
+      return txResult
     }, `updateMessageAndBlocks(${topicId}, ${messageUpdatesJson.id})`)
   }
 
@@ -972,36 +1699,75 @@ export class ChatDbAggregateService {
 
   /**
    * Delete a single message. Only deletes if owned by the specified topic.
-   * Missing/foreign IDs: no-op.
+   * Missing/foreign IDs: no-op. Delete intent commits atomically in the
+   * same tx (known entities only — unknown ids never emit remotely).
    */
   deleteMessage(topicId: string, messageId: string): ChatDbResult<null> {
     return wrapResult(() => {
-      const { messages } = this.repos()
-      // Verify ownership before delete
-      const existing = messages.getInTopic(messageId, topicId)
-      if (!existing.found) return null // no-op for missing/foreign IDs
-      messages.delete(messageId)
-      return null
+      const ctx = this.syncCtx('deleteMessage')
+      let notify = false
+      let result: null
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          // Verify ownership before delete
+          const existing = repos.messages.getInTopic(messageId, topicId)
+          if (!existing.found) return null // no-op for missing/foreign IDs
+          const known = ctx ? syncService.isKnownEntityInTx(stx, 'message', messageId) : false
+          repos.messages.delete(messageId)
+          if (ctx && known) {
+            syncService.enqueueDeleteInTx(stx, 'message', messageId, ctx.ts, ctx.deviceId)
+            notify = true
+          }
+          return null
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('deleteMessage', ctx, e)
+        throw e
+      }
+      if (notify) syncService.notifyEnqueued()
+      return result
     }, `deleteMessage(${topicId}, ${messageId})`)
   }
 
   /**
    * Delete multiple messages. Only deletes messages owned by the specified topic.
-   * Missing/foreign IDs: no-op.
+   * Missing/foreign IDs: no-op. Delete intents commit atomically in the same tx.
    */
   deleteMessages(topicId: string, messageIds: string[]): ChatDbResult<null> {
     return wrapResult(() => {
-      const { messages } = this.repos()
-      // Filter to messages actually owned by this topic
-      const ownedIds: string[] = []
-      for (const id of messageIds) {
-        const existing = messages.getInTopic(id, topicId)
-        if (existing.found) ownedIds.push(id)
+      const ctx = this.syncCtx('deleteMessages')
+      let notify = false
+      let result: null
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          // Filter to messages actually owned by this topic
+          const ownedIds: string[] = []
+          for (const id of messageIds) {
+            const existing = repos.messages.getInTopic(id, topicId)
+            if (existing.found) ownedIds.push(id)
+          }
+          const knownIds = ctx ? ownedIds.filter((id) => syncService.isKnownEntityInTx(stx, 'message', id)) : []
+          if (ownedIds.length > 0) {
+            repos.messages.deleteMany(ownedIds)
+          }
+          if (ctx) {
+            for (const id of knownIds) {
+              syncService.enqueueDeleteInTx(stx, 'message', id, ctx.ts, ctx.deviceId)
+              notify = true
+            }
+          }
+          return null
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('deleteMessages', ctx, e)
+        throw e
       }
-      if (ownedIds.length > 0) {
-        messages.deleteMany(ownedIds)
-      }
-      return null
+      if (notify) syncService.notifyEnqueued()
+      return result
     }, `deleteMessages(${topicId}, ${messageIds.length} ids)`)
   }
 
@@ -1059,13 +1825,71 @@ export class ChatDbAggregateService {
       // wire->domain mapping done above); main.tx and existing semantics are
       // preserved.
       convertDurationMs = elapsedMs(tConvert)
-      this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
-        repos.blocks.upsertMany(blockDataList)
+      const syncCtx = this.syncCtx('updateBlocks')
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
+      try {
+        this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          // Pre-state snapshot for field-patch diffing (same tx, pre-write).
+          const preRows = new Map<string, MessageBlockData>()
+          if (syncCtx) {
+            for (const block of blockDataList) {
+              const pre = repos.blocks.getById(block.id)
+              if (pre.found) preRows.set(block.id, { ...pre.data, overflow: { ...pre.data.overflow } })
+            }
+          }
+          repos.blocks.upsertMany(blockDataList)
 
-        // Sync file references within the same transaction
-        this.syncFileReferences(repos, blockDataList)
-      })
+          // Sync file references within the same transaction
+          this.syncFileReferences(repos, blockDataList)
+
+          // Transaction-bound sync intent: creates → full union payload;
+          // existing → diff field patch at stable checkpoints only. Only a
+          // transient→stable promotion of a never-tracked row creates full
+          // state; pre-sync stable rows keep patch semantics. Unsupported
+          // structured/attachment rows skip without a partial shell.
+          if (syncCtx) {
+            for (const block of blockDataList) {
+              const post = repos.blocks.getById(block.id)
+              if (!post.found) continue
+              if (!isStableBlockStatus(post.data.status)) continue
+              if (this.isUnsupportedBlock(post.data)) {
+                unsupportedBlockIds.push(block.id)
+                continue
+              }
+              const pre = preRows.get(block.id) ?? null
+              const tracked = syncService.isTrackedEntityInTx(stx, 'message_block', block.id)
+              const preStable = pre ? isStableBlockStatus(pre.status) : true
+              if (!pre || (!tracked && !preStable)) {
+                this.ensureBlockParentClosureInTx(stx, block.id, syncCtx.ts, syncCtx.deviceId)
+                syncService.enqueueUpsertInTx(
+                  stx,
+                  'message_block',
+                  block.id,
+                  this.syncBlockPayloadFull(post.data),
+                  syncCtx.ts,
+                  syncCtx.deviceId
+                )
+                syncNotify = true
+                continue
+              }
+              if (post.data.messageId !== pre.messageId) continue
+              const patchPayload = this.diffBlockPayload(pre, post.data)
+              if (!patchPayload) continue
+              this.ensureBlockParentClosureInTx(stx, block.id, syncCtx.ts, syncCtx.deviceId)
+              syncService.enqueueUpsertInTx(stx, 'message_block', block.id, patchPayload, syncCtx.ts, syncCtx.deviceId)
+              syncNotify = true
+            }
+          }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('updateBlocks', syncCtx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('updateBlocks', unsupportedBlockIds)
       txDurationMs = elapsedMs(tTx)
       outcomeOk = true
       return null
@@ -1149,50 +1973,99 @@ export class ChatDbAggregateService {
       // wire->domain patch mapping done above); main.tx and existing semantics
       // are preserved.
       convertDurationMs = elapsedMs(tConvert)
-      this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
+      const syncCtx = this.syncCtx('updateSingleBlock')
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
+      try {
+        this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
 
-        const existing = repos.blocks.getById(blockId)
-        if (!existing.found) return // no-op for missing
+          const existing = repos.blocks.getById(blockId)
+          if (!existing.found) return // no-op for missing
 
-        // Apply patch to the existing block to get the merged result
-        const merged: Record<string, unknown> = { ...existing.data }
-        for (const [key, value] of Object.entries(patch)) {
-          if (key !== 'overflow') {
-            merged[key] = value
+          // Apply patch to the existing block to get the merged result
+          const merged: Record<string, unknown> = { ...existing.data }
+          for (const [key, value] of Object.entries(patch)) {
+            if (key !== 'overflow') {
+              merged[key] = value
+            }
           }
-        }
-        // Merge overflow
-        if (patch.overflow) {
-          merged.overflow = { ...existing.data.overflow, ...patch.overflow }
-        }
+          // Merge overflow
+          if (patch.overflow) {
+            merged.overflow = { ...existing.data.overflow, ...patch.overflow }
+          }
 
-        // LOCK-STREAM-ATTR-001/003: measurement-only changed-content vs
-        // unchanged-content classification. Values are already in hand (the
-        // current row and the merged patch) — zero extra reads, zero semantic
-        // effect. Only content-touching updates classify; absent content in
-        // the patch leaves the count unset.
-        if (isMeasured && Object.prototype.hasOwnProperty.call(patch, 'content')) {
-          contentChanged = existing.data.content !== merged.content
-          contentLength = typeof merged.content === 'string' ? merged.content.length : 0
-        }
+          // LOCK-STREAM-ATTR-001/003: measurement-only changed-content vs
+          // unchanged-content classification. Values are already in hand (the
+          // current row and the merged patch) — zero extra reads, zero semantic
+          // effect. Only content-touching updates classify; absent content in
+          // the patch leaves the count unset.
+          if (isMeasured && Object.prototype.hasOwnProperty.call(patch, 'content')) {
+            contentChanged = existing.data.content !== merged.content
+            contentLength = typeof merged.content === 'string' ? merged.content.length : 0
+          }
 
-        // Apply the update
-        repos.blocks.update(existing.data.messageId, blockId, patch)
+          // Apply the update
+          repos.blocks.update(existing.data.messageId, blockId, patch)
 
-        // Recompute file references from merged block (same tx)
-        const mergedBlock = merged as unknown as MessageBlockData
-        const newRefs = projectFileReferences(mergedBlock)
-        const oldRefs = repos.fileRefs.listByBlock(blockId)
+          // Recompute file references from merged block (same tx)
+          const mergedBlock = merged as unknown as MessageBlockData
+          const newRefs = projectFileReferences(mergedBlock)
+          const oldRefs = repos.fileRefs.listByBlock(blockId)
 
-        // Replace stale references
-        if (oldRefs.length > 0) {
-          repos.fileRefs.deleteByBlock(blockId)
-        }
-        if (newRefs.length > 0) {
-          repos.fileRefs.createMany(newRefs)
-        }
-      })
+          // Replace stale references
+          if (oldRefs.length > 0) {
+            repos.fileRefs.deleteByBlock(blockId)
+          }
+          if (newRefs.length > 0) {
+            repos.fileRefs.createMany(newRefs)
+          }
+
+          // Transaction-bound sync intent: only a transient→stable promotion
+          // of a never-tracked block creates full state; otherwise intentional
+          // patch keys. Transient skips, never a failure. Unsupported
+          // structured/attachment rows skip without a partial shell.
+          if (syncCtx) {
+            const post = repos.blocks.getById(blockId)
+            if (post.found && isStableBlockStatus(post.data.status)) {
+              if (this.isUnsupportedBlock(post.data)) {
+                unsupportedBlockIds.push(blockId)
+              } else {
+                this.ensureBlockParentClosureInTx(stx, blockId, syncCtx.ts, syncCtx.deviceId)
+                const tracked = syncService.isTrackedEntityInTx(stx, 'message_block', blockId)
+                const preStable = isStableBlockStatus(existing.data.status)
+                if (!tracked && !preStable) {
+                  syncService.enqueueUpsertInTx(
+                    stx,
+                    'message_block',
+                    blockId,
+                    this.syncBlockPayloadFull(post.data),
+                    syncCtx.ts,
+                    syncCtx.deviceId
+                  )
+                  syncNotify = true
+                } else {
+                  const payload = this.syncBlockPatchPayload(
+                    post.data.messageId,
+                    blockId,
+                    patch as unknown as Record<string, unknown>
+                  )
+                  if (payload) {
+                    syncService.enqueueUpsertInTx(stx, 'message_block', blockId, payload, syncCtx.ts, syncCtx.deviceId)
+                    syncNotify = true
+                  }
+                }
+              }
+            }
+          }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('updateSingleBlock', syncCtx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('updateSingleBlock', unsupportedBlockIds)
       txDurationMs = elapsedMs(tTx)
       outcomeOk = true
       return null
@@ -1241,25 +2114,65 @@ export class ChatDbAggregateService {
   bulkAddBlocks(blocksJson: JsonObject[]): ChatDbResult<null> {
     return wrapResult(() => {
       const blockDataList = blocksJson.map(wireToBlock)
+      const syncCtx = this.syncCtx('bulkAddBlocks')
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
 
-      this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
+      try {
+        this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
 
-        // Check for duplicate IDs in the batch
-        const seenIds = new Set<string>()
-        for (const block of blockDataList) {
-          if (seenIds.has(block.id)) {
-            throw new ChatDbConflictError(`Duplicate block ID in batch: ${block.id}`)
+          // Check for duplicate IDs in the batch
+          const seenIds = new Set<string>()
+          for (const block of blockDataList) {
+            if (seenIds.has(block.id)) {
+              throw new ChatDbConflictError(`Duplicate block ID in batch: ${block.id}`)
+            }
+            seenIds.add(block.id)
           }
-          seenIds.add(block.id)
-        }
 
-        // Insert only (not upsert) — createMany will throw on existing IDs
-        repos.blocks.createMany(blockDataList)
+          // Insert only (not upsert) — createMany will throw on existing IDs
+          repos.blocks.createMany(blockDataList)
 
-        // Sync file references
-        this.syncFileReferences(repos, blockDataList)
-      })
+          // Sync file references
+          this.syncFileReferences(repos, blockDataList)
+
+          // Transaction-bound sync intent: stable creations only
+          // (LOCK-PERSONAL-004) with per-block ordering offsets. Transient
+          // blocks are legitimate skips; unsupported structured/attachment
+          // blocks skip without a partial shell; their stable update later
+          // records the same durable unsupported outcome with parent closure.
+          if (syncCtx) {
+            for (let i = 0; i < blockDataList.length; i++) {
+              const bid = blockDataList[i].id
+              const childTs = syncCtx.ts + i
+              const brow = repos.blocks.getById(bid)
+              if (!brow.found) throw new Error(`bulkAddBlocks block ${bid} missing in transaction`)
+              if (!isStableBlockStatus(brow.data.status)) continue
+              if (this.isUnsupportedBlock(brow.data)) {
+                unsupportedBlockIds.push(bid)
+                continue
+              }
+              this.ensureBlockParentClosureInTx(stx, bid, childTs, syncCtx.deviceId)
+              syncService.enqueueUpsertInTx(
+                stx,
+                'message_block',
+                bid,
+                this.syncBlockPayloadFull(brow.data),
+                childTs,
+                syncCtx.deviceId
+              )
+              syncNotify = true
+            }
+          }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('bulkAddBlocks', syncCtx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('bulkAddBlocks', unsupportedBlockIds)
 
       return null
     }, `bulkAddBlocks(${blocksJson.length} blocks)`)
@@ -1272,19 +2185,44 @@ export class ChatDbAggregateService {
    * cleanup (file_references.blockId → messageBlocks.id ON DELETE CASCADE).
    * No pre-transaction destructive reference deletes.
    * Normalize affected message block order via repository.
+   * Known-entity deletes enqueue intent atomically in the same tx.
    */
   deleteBlocks(blockIds: string[]): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      return this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
-        const affectedFileIds = collectAffectedFileIds(
-          blockIds.flatMap((blockId) => repos.fileRefs.listByBlock(blockId))
-        )
-        // blocks.deleteMany handles order normalization within its own
-        // savepoint transaction. FK cascade removes file_references.
-        repos.blocks.deleteMany(blockIds)
-        return buildFileCleanupResult(repos, affectedFileIds)
-      })
+      const syncCtx = this.syncCtx('deleteBlocks')
+      let syncNotify = false
+      let result: FileCleanupResult
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          const knownIds = syncCtx
+            ? blockIds.filter(
+                (bid) =>
+                  typeof bid === 'string' && bid.length > 0 && syncService.isKnownEntityInTx(stx, 'message_block', bid)
+              )
+            : []
+          const affectedFileIds = collectAffectedFileIds(
+            blockIds.flatMap((blockId) => repos.fileRefs.listByBlock(blockId))
+          )
+          // blocks.deleteMany handles order normalization within its own
+          // savepoint transaction. FK cascade removes file_references.
+          repos.blocks.deleteMany(blockIds)
+          if (syncCtx) {
+            for (const bid of knownIds) {
+              if (repos.blocks.getById(bid).found) continue // surviving row = no-op, never a remote delete
+              syncService.enqueueDeleteInTx(stx, 'message_block', bid, syncCtx.ts, syncCtx.deviceId)
+              syncNotify = true
+            }
+          }
+          return buildFileCleanupResult(repos, affectedFileIds)
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('deleteBlocks', syncCtx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      return result
     }, `deleteBlocks(${blockIds.length} blocks)`)
   }
 
@@ -1520,74 +2458,124 @@ export class ChatDbAggregateService {
     isNameManuallyEdited?: boolean | null
   ): ChatDbResult<JsonObject> {
     return wrapResult(() => {
-      return this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
+      const ctx = this.syncCtx('updateTopicMetadata')
+      let notify = false
+      let result: JsonObject
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
 
-        const existing = repos.topics.getById(topicId)
-        if (!existing.found) {
-          throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
-        }
+          const existing = repos.topics.getById(topicId)
+          if (!existing.found) {
+            throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+          }
 
-        // Build patch from allowed fields
-        const patch: Record<string, unknown> = {}
-        if (name !== undefined) patch.name = name
-        if (pinned !== undefined) patch.pinned = pinned
-        if (prompt !== undefined) patch.prompt = prompt
-        if (isNameManuallyEdited !== undefined) patch.isNameManuallyEdited = isNameManuallyEdited
+          // Build patch from allowed fields
+          const patch: Record<string, unknown> = {}
+          if (name !== undefined) patch.name = name
+          if (pinned !== undefined) patch.pinned = pinned
+          if (prompt !== undefined) patch.prompt = prompt
+          if (isNameManuallyEdited !== undefined) patch.isNameManuallyEdited = isNameManuallyEdited
 
-        if (Object.keys(patch).length === 0) {
-          // No-op: return current state
-          return topicToWireFull(existing.data)
-        }
+          if (Object.keys(patch).length === 0) {
+            // No-op: return current state
+            return topicToWireFull(existing.data)
+          }
 
-        // Maintain updatedAt consistently
-        patch.updatedAt = new Date().toISOString()
+          // Maintain updatedAt consistently
+          patch.updatedAt = new Date().toISOString()
 
-        // Split into columns vs overflow
-        const domainPatch: Record<string, unknown> = {}
-        const overflowDelta: Record<string, unknown> = {}
+          // Split into columns vs overflow
+          const domainPatch: Record<string, unknown> = {}
+          const overflowDelta: Record<string, unknown> = {}
 
-        if ('name' in patch || 'updatedAt' in patch) {
-          if ('name' in patch) domainPatch.name = patch.name
-          domainPatch.updatedAt = patch.updatedAt
-        }
-        if ('pinned' in patch) overflowDelta.pinned = patch.pinned
-        if ('prompt' in patch) overflowDelta.prompt = patch.prompt
-        if ('isNameManuallyEdited' in patch) overflowDelta.isNameManuallyEdited = patch.isNameManuallyEdited
+          if ('name' in patch || 'updatedAt' in patch) {
+            if ('name' in patch) domainPatch.name = patch.name
+            domainPatch.updatedAt = patch.updatedAt
+          }
+          if ('pinned' in patch) overflowDelta.pinned = patch.pinned
+          if ('prompt' in patch) overflowDelta.prompt = patch.prompt
+          if ('isNameManuallyEdited' in patch) overflowDelta.isNameManuallyEdited = patch.isNameManuallyEdited
 
-        // Merge overflow into existing topic
-        const mergedOverflow = { ...existing.data.overflow, ...overflowDelta }
-        // Remove keys with OVERFLOW_REMOVE sentinel
-        for (const [k, v] of Object.entries(overflowDelta)) {
-          if (v === undefined) delete mergedOverflow[k]
-        }
+          // Merge overflow into existing topic
+          const mergedOverflow = { ...existing.data.overflow, ...overflowDelta }
+          // Remove keys with OVERFLOW_REMOVE sentinel
+          for (const [k, v] of Object.entries(overflowDelta)) {
+            if (v === undefined) delete mergedOverflow[k]
+          }
 
-        repos.topics.updatePatch(topicId, {
-          ...domainPatch,
-          overflow: mergedOverflow
-        } as any)
+          repos.topics.updatePatch(topicId, {
+            ...domainPatch,
+            overflow: mergedOverflow
+          } as any)
 
-        // Read back
-        const updated = repos.topics.getById(topicId)
-        if (!updated.found) {
-          throw new ChatDbNotFoundError(`Topic ${topicId} was deleted during update`)
-        }
-        return topicToWireFull(updated.data)
-      })
+          // Read back
+          const updated = repos.topics.getById(topicId)
+          if (!updated.found) {
+            throw new ChatDbNotFoundError(`Topic ${topicId} was deleted during update`)
+          }
+          // Transaction-bound sync intent: intentional patch keys only.
+          if (ctx) {
+            const payload: Record<string, unknown> = { id: topicId }
+            for (const k of Object.keys(patch)) {
+              if (
+                k === 'name' ||
+                k === 'pinned' ||
+                k === 'prompt' ||
+                k === 'isNameManuallyEdited' ||
+                k === 'updatedAt'
+              ) {
+                const v = patch[k]
+                if (v !== undefined) payload[k] = v
+              }
+            }
+            syncService.enqueueUpsertInTx(stx, 'topic', topicId, payload, ctx.ts, ctx.deviceId)
+            notify = true
+          }
+          return topicToWireFull(updated.data)
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('updateTopicMetadata', ctx, e)
+        throw e
+      }
+      if (notify) syncService.notifyEnqueued()
+      return result
     }, `updateTopicMetadata(${topicId})`)
   }
 
   /**
    * Soft-delete a topic by setting deletedAt.
-   * Missing topic: no-op (returns success).
+   * Missing topic: no-op (returns success). Intent commits atomically.
    */
   softDeleteTopic(topicId: string, name?: string | null): ChatDbResult<null> {
     return wrapResult(() => {
-      this.db.transaction((tx) => {
-        const { topics } = createRepositories(tx)
-        topics.softDelete(topicId, name)
-      })
-      return null
+      const ctx = this.syncCtx('softDeleteTopic')
+      let notify = false
+      let result: null
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          const before = repos.topics.getById(topicId)
+          repos.topics.softDelete(topicId, name)
+          if (ctx && before.found) {
+            const after = repos.topics.getById(topicId)
+            if (after.found && after.data.deletedAt != null) {
+              const payload: Record<string, unknown> = { id: topicId, deletedAt: after.data.deletedAt }
+              if (name !== undefined) payload.name = after.data.name
+              syncService.enqueueUpsertInTx(stx, 'topic', topicId, payload, ctx.ts, ctx.deviceId)
+              notify = true
+            }
+          }
+          return null
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('softDeleteTopic', ctx, e)
+        throw e
+      }
+      if (notify) syncService.notifyEnqueued()
+      return result
     }, `softDeleteTopic(${topicId})`)
   }
 
@@ -1596,27 +2584,43 @@ export class ChatDbAggregateService {
    * entity (LOCK-532). Returns null when no soft-deleted row exists for the
    * ID at command time (missing topic, or topic not in trash) — in that
    * case NO mutation occurs. Callers must dispatch only the returned row,
-   * never a separately listed snapshot.
+   * never a separately listed snapshot. Intent commits atomically.
    */
   restoreTopic(topicId: string): ChatDbResult<JsonObject | null> {
     return wrapResult(() => {
-      return this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
+      const ctx = this.syncCtx('restoreTopic')
+      let notify = false
+      let result: JsonObject | null
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
 
-        const existing = repos.topics.getById(topicId)
-        if (!existing.found || existing.data.deletedAt == null) {
-          // No deleted row was restored — explicit null, no mutation.
-          return null
-        }
+          const existing = repos.topics.getById(topicId)
+          if (!existing.found || existing.data.deletedAt == null) {
+            // No deleted row was restored — explicit null, no mutation.
+            return null
+          }
 
-        repos.topics.restore(topicId)
+          repos.topics.restore(topicId)
 
-        const restored = repos.topics.getById(topicId)
-        if (!restored.found) {
-          throw new ChatDbNotFoundError(`Topic ${topicId} disappeared during restore`)
-        }
-        return topicToWireFull(restored.data)
-      })
+          const restored = repos.topics.getById(topicId)
+          if (!restored.found) {
+            throw new ChatDbNotFoundError(`Topic ${topicId} disappeared during restore`)
+          }
+          if (ctx) {
+            // Explicit null deletedAt is intent to clear (payload-key semantics).
+            syncService.enqueueUpsertInTx(stx, 'topic', topicId, { id: topicId, deletedAt: null }, ctx.ts, ctx.deviceId)
+            notify = true
+          }
+          return topicToWireFull(restored.data)
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('restoreTopic', ctx, e)
+        throw e
+      }
+      if (notify) syncService.notifyEnqueued()
+      return result
     }, `restoreTopic(${topicId})`)
   }
 
@@ -1659,29 +2663,47 @@ export class ChatDbAggregateService {
     return wrapResult(() => {
       // LOCK-004: exact deleted topic IDs are collected inside the transaction.
       const deletedTopicIds: string[] = []
-      const cleanup = this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
+      const ctx = this.syncCtx('hardDeleteTopic')
+      let syncNotify = false
+      let cleanup: { affectedFileIds: string[]; remainingReferenceCounts: Record<string, number> }
+      try {
+        cleanup = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
 
-        // Check topic exists
-        const existing = repos.topics.getById(topicId)
-        if (!existing.found) {
-          return { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
-        }
-        deletedTopicIds.push(topicId)
+          // Check topic exists
+          const existing = repos.topics.getById(topicId)
+          if (!existing.found) {
+            return { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
+          }
+          const known = ctx ? syncService.isKnownEntityInTx(stx, 'topic', topicId) : false
+          deletedTopicIds.push(topicId)
 
-        // Collect affected file IDs before cascade deletion
-        const messages = repos.messages.listByTopic(topicId)
-        const messageIds = messages.map((m) => m.id)
-        const refsBeforeDelete = repos.fileRefs.listByMessages(messageIds)
-        const affectedFileIds = collectAffectedFileIds(refsBeforeDelete)
+          // Collect affected file IDs before cascade deletion
+          const messages = repos.messages.listByTopic(topicId)
+          const messageIds = messages.map((m) => m.id)
+          const refsBeforeDelete = repos.fileRefs.listByMessages(messageIds)
+          const affectedFileIds = collectAffectedFileIds(refsBeforeDelete)
 
-        // FK cascade: topic → messages → blocks → file_references
-        // Also topic → topic_segments → topic_segment_messages
-        repos.topics.hardDelete(topicId)
+          // FK cascade: topic → messages → blocks → file_references
+          // Also topic → topic_segments → topic_segment_messages
+          repos.topics.hardDelete(topicId)
 
-        // Compute remaining counts after cascade
-        return buildFileCleanupResult(repos, affectedFileIds)
-      })
+          // Transaction-bound sync intent: hard-delete tombstone in the same
+          // atomic boundary (known entities only — unknown ids never emit).
+          if (ctx && known) {
+            syncService.enqueueDeleteInTx(stx, 'topic', topicId, ctx.ts, ctx.deviceId)
+            syncNotify = true
+          }
+
+          // Compute remaining counts after cascade
+          return buildFileCleanupResult(repos, affectedFileIds)
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('hardDeleteTopic', ctx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
 
       // LOCK-004: clean ordinary-chat traces after the DB commit, using the
       // exact deleted topic IDs. Cleanup failure is logged and non-fatal; it

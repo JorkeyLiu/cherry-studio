@@ -40,6 +40,8 @@ import { windowService } from './services/WindowService'
 import { initWebviewHotkeys } from './services/WebviewService'
 import { chatDbService } from './services/chatDb'
 import { disposeActiveImport, recoverOrphanedImportArtifacts } from './services/chatDbImport'
+import { syncService } from './services/sync/SyncService'
+import { syncAutoService } from './services/sync/syncAuto'
 import { disposeCherryImportControl } from './services/chatDbImport/importControlIpc'
 import { runStartupRecoveryGate } from './services/chatDbImport/promotion/gate'
 import { readPromotionJournal } from './services/chatDbImport/promotion/journalStore'
@@ -377,6 +379,15 @@ if (!app.requestSingleInstanceLock()) {
 
     await withStartupStage('main.registerIpc', () => registerIpc(mainWindow, app))
 
+    // Sync realtime closure (Main-owned): start automation after chatDb init
+    // and IPC registration so saved enabled endpoint config resumes SSE +
+    // debounced auto sync. Failures are contained, never block startup.
+    try {
+      syncAutoService.start()
+    } catch (error) {
+      logger.warn('Failed to start sync automation (non-fatal)', error as Error)
+    }
+
     replaceDevtoolsFont(mainWindow)
 
     // Setup deep link for AppImage on Linux
@@ -458,6 +469,23 @@ if (!app.requestSingleInstanceLock()) {
       disposeActiveImport()
     } catch (error) {
       logger.warn('Error disposing active import session:', error as Error)
+    }
+
+    // Stop sync synchronously (abort SSE/timers + invalidate in-flight
+    // SyncService.sync network/database loops) BEFORE chatDb close so no sync
+    // continuation races teardown with post-close DB access. Synchronous calls
+    // only — no await is permitted on this path before chatDbService.close().
+    // stopSync() already invalidates SyncService.sync; the direct
+    // beginShutdown() covers manual sync when automation never started.
+    try {
+      syncAutoService.stopSync()
+    } catch (error) {
+      logger.warn('Error stopping sync automation:', error as Error)
+    }
+    try {
+      syncService.beginShutdown()
+    } catch (error) {
+      logger.warn('Error invalidating in-flight sync:', error as Error)
     }
 
     // CRITICAL (Finding 6): close() MUST execute synchronously and BEFORE

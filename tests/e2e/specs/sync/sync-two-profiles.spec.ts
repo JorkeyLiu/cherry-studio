@@ -303,4 +303,54 @@ test.describe('Sync MVP two-profile real path', () => {
       await closeProfileAndRelay(profileB, relay)
     }
   })
+
+  test('automatic convergence without manual sync plus reconnect recovery', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+
+      // Both profiles configure the same relay; automation starts on save.
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      // Profile A makes a supported mutation; neither profile invokes manual sync.
+      const topic1 = 'e2e-sync-auto-topic-1'
+      const msg1 = 'e2e-sync-auto-msg-1'
+      const blk1 = 'e2e-sync-auto-blk-1'
+      const content1 = 'hello automatic convergence one'
+      await ensureTopicViaApi(pageA, topic1, 'Sync Auto Topic One')
+      await appendMessageViaApi(pageA, topic1, messageJson(msg1, topic1, content1), [blockJson(blk1, msg1, content1)])
+
+      // B automatically receives the exact topic/message/block fields.
+      await pollForConvergence(pageB, topic1, msg1, blk1, content1, 90000)
+
+      // Short subscriber interruption: B disables sync, A writes again.
+      // B must not converge while disabled.
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: false })
+      const topic2 = 'e2e-sync-auto-topic-2'
+      const msg2 = 'e2e-sync-auto-msg-2'
+      const blk2 = 'e2e-sync-auto-blk-2'
+      const content2 = 'hello automatic reconnect two'
+      await ensureTopicViaApi(pageA, topic2, 'Sync Auto Topic Two')
+      await appendMessageViaApi(pageA, topic2, messageJson(msg2, topic2, content2), [blockJson(blk2, msg2, content2)])
+      await new Promise((resolve) => setTimeout(resolve, 5000))
+      const stillMissing = await topicExistsViaApi(pageB, topic2)
+      expect(stillMissing).toBe(false)
+
+      // Re-enable B: reconnect uses the strict existing cursor pull and
+      // converges without any manual sync invocation.
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pollForConvergence(pageB, topic2, msg2, blk2, content2, 90000)
+    } finally {
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
 })

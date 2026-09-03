@@ -34,6 +34,10 @@ export function registerSyncIpc(): () => void {
     if (config.enabled !== undefined && typeof config.enabled !== 'boolean') throw new Error('enabled must be boolean')
     const updated = syncService.setConfig(config)
     logger.info('[Sync_SetConfig] updated')
+    try {
+      const { syncAutoService } = await import('./syncAuto')
+      syncAutoService.refresh()
+    } catch {}
     return updated
   })
 

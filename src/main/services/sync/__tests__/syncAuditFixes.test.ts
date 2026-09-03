@@ -272,7 +272,9 @@ describe('blocker 4: immutable parent identity', () => {
       deviceId: 'd2',
       payload: { id: 'm-reparent', topicId: 't-other', role: 'user', content: 'hi' }
     } as any)
-    expect(res).toBe(true)
+    // Per-field merge: the reparent is rejected so no field mutates — the
+    // honest applied flag is false while the immutable parent is preserved.
+    expect(res).toBe(false)
     const row = sqlite.prepare('SELECT topic_id as t FROM messages WHERE id=?').get('m-reparent') as { t: string }
     expect(row.t).toBe('t-home')
   })

@@ -275,7 +275,7 @@ describe('Migration 004 — FTS rowid identity', () => {
     const db = wrapDrizzle(sqlite)
 
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(5)
+    expect(applied).toBe(6)
 
     // New normalized schema: INTEGER PRIMARY KEY rowid + UNIQUE block_id.
     const normalizedCols = getColumnInfo(sqlite, 'message_blocks_normalized')
@@ -337,7 +337,7 @@ describe('Migration 004 — FTS rowid identity', () => {
 
     // Apply 004 (the only pending migration).
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(2)
+    expect(applied).toBe(3)
 
     // New schema.
     const postCols = getColumnInfo(sqlite, 'message_blocks_normalized')
@@ -379,7 +379,7 @@ describe('Migration 004 — FTS rowid identity', () => {
 
     applyMigrationsUpTo003(db, sqlite)
     seedLegacyData(sqlite)
-    expect(runMigrations(db, sqlite)).toBe(2)
+    expect(runMigrations(db, sqlite)).toBe(3)
 
     const maxRowid = (
       sqlite.prepare('SELECT COALESCE(MAX(rowid), 0) AS n FROM message_blocks_normalized').get() as { n: number }
@@ -412,7 +412,7 @@ describe('Migration 004 — FTS rowid identity', () => {
 
     applyMigrationsUpTo003(db, sqlite)
     seedLegacyData(sqlite)
-    expect(runMigrations(db, sqlite)).toBe(2)
+    expect(runMigrations(db, sqlite)).toBe(3)
 
     // UPDATE content → projection refreshed (rowid identity preserved).
     sqlite.exec(`UPDATE message_blocks SET content = 'Fourth version' WHERE id = 'b3'`)
@@ -469,7 +469,7 @@ describe('Migration 004 — FTS rowid identity', () => {
 
     applyMigrationsUpTo003(db, sqlite)
     seedLegacyData(sqlite)
-    expect(runMigrations(db, sqlite)).toBe(2)
+    expect(runMigrations(db, sqlite)).toBe(3)
 
     // The NEW trigger shape: DELETE by rowid from an indexed block_id lookup.
     const newPlan = sqlite
@@ -548,7 +548,7 @@ describe('Migration 004 — FTS rowid identity', () => {
 
     // Re-running after the failure source is removed succeeds and upgrades.
     const applied = runMigrations(db, sqlite)
-    expect(applied).toBe(2)
+    expect(applied).toBe(3)
     expectRowidParity(sqlite)
     expectCountParity(sqlite)
 
@@ -561,7 +561,7 @@ describe('Migration 004 — FTS rowid identity', () => {
     registerNormalizeFunction(sqlite)
     const db = wrapDrizzle(sqlite)
 
-    expect(runMigrations(db, sqlite)).toBe(5)
+    expect(runMigrations(db, sqlite)).toBe(6)
     expect(runMigrations(db, sqlite)).toBe(0)
 
     const states = sqlite.prepare('SELECT * FROM migration_state ORDER BY key').all() as Array<{ key: string }>
@@ -570,7 +570,8 @@ describe('Migration 004 — FTS rowid identity', () => {
       '002_corrective_schema',
       '003_fts5_normalized_search',
       '004_fts_rowid_identity',
-      '005_sync_metadata'
+      '005_sync_metadata',
+      '006_sync_field_merge'
     ])
 
     sqlite.close()
@@ -606,7 +607,7 @@ describe('Migration 004 — FTS rowid identity', () => {
     expectFtsIntegrityOk(sqlite)
     const searchBefore = searchBlockIds(sqlite, 'updated body')
 
-    expect(runMigrations(db, sqlite)).toBe(2)
+    expect(runMigrations(db, sqlite)).toBe(3)
 
     // LOCK-002: the FTS virtual table was NOT rebuilt — rootpages and SQL
     // definitions identical, every document byte-identical, index still valid.
@@ -710,7 +711,7 @@ describe('Migration 004 — FTS rowid identity', () => {
     // Removing the drift source allows the migration to succeed (LOCK-003
     // fail-closed semantics; re-run resumes from the untouched state).
     sqlite.exec(`UPDATE ${MESSAGE_BLOCKS_FTS_TABLE} SET block_id = 'b1' WHERE rowid = 1`)
-    expect(runMigrations(db, sqlite)).toBe(2)
+    expect(runMigrations(db, sqlite)).toBe(3)
     expectRowidParity(sqlite)
     expectCountParity(sqlite)
 
@@ -755,7 +756,7 @@ describe('Migration 004 — FTS rowid identity', () => {
     sqlite
       .prepare(`INSERT INTO ${MESSAGE_BLOCKS_FTS_TABLE} (rowid, block_id, normalized_content) VALUES (1, 'b1', ?)`)
       .run(b1Content)
-    expect(runMigrations(db, sqlite)).toBe(2)
+    expect(runMigrations(db, sqlite)).toBe(3)
     expectRowidParity(sqlite)
 
     sqlite.close()
@@ -797,7 +798,7 @@ describe('Migration 004 — FTS rowid identity', () => {
 
     // Remove the orphan and re-run succeeds.
     sqlite.exec(`DELETE FROM ${MESSAGE_BLOCKS_FTS_TABLE} WHERE rowid = 9999`)
-    expect(runMigrations(db, sqlite)).toBe(2)
+    expect(runMigrations(db, sqlite)).toBe(3)
     expectRowidParity(sqlite)
 
     sqlite.close()
@@ -890,7 +891,7 @@ describe('Migration 004 — FTS rowid identity', () => {
     // Remove the stale canonical row (reinstalled delete trigger fires, has
     // no projection to remove) and the migration succeeds.
     sqlite.exec(`DELETE FROM message_blocks WHERE id = 'b5'`)
-    expect(runMigrations(db, sqlite)).toBe(2)
+    expect(runMigrations(db, sqlite)).toBe(3)
     expectRowidParity(sqlite)
     expectCountParity(sqlite)
 
@@ -948,7 +949,7 @@ describe('Migration 004 — FTS rowid identity', () => {
 
     // Restoring the content and re-running succeeds.
     sqlite.prepare(`UPDATE ${MESSAGE_BLOCKS_FTS_TABLE} SET normalized_content = ? WHERE rowid = 1`).run(b1Content)
-    expect(runMigrations(db, sqlite)).toBe(2)
+    expect(runMigrations(db, sqlite)).toBe(3)
     expectRowidParity(sqlite)
 
     sqlite.close()

@@ -21,9 +21,11 @@ const SyncSettings: React.FC = () => {
     endpoint: string
     lastSyncAt: string | null
     lastError: string | null
+    lastCaptureError: string | null
     pendingCount: number
     cursor: number
     syncing: boolean
+    conflictCount: number
   } | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -99,14 +101,14 @@ const SyncSettings: React.FC = () => {
       <SettingHelpText>
         {t(
           'settings.sync.help',
-          'Synchronize chat topics, messages and blocks via a configured HTTP relay. Manual sync only.'
+          'Synchronize chat topics, messages and blocks via a configured HTTP relay. Automatic personal multi-device sync; pending validation, not production-ready.'
         )}
       </SettingHelpText>
       <SettingRow>
         <SettingHelpText>
           {t(
             'settings.sync.scope_note',
-            'Synced: topic create, message append with blocks, single message/block edits, single/batch block adds, simple message/block deletes, message reorder, topic soft-delete/restore/hard-delete. No-op or foreign-target requests are not sent. Not synced: ownership transfer, assistant reset, purge/empty trash, segments, attachments, search index, UI state, or compound copy/paste/branch/clone/insert-after/resend/select flows.'
+            'Synced: topic create, message append with blocks, single message/block edits at stable checkpoints (success/error/paused only; streaming/pending/processing/searching states are not sent), single/batch block adds, simple message/block deletes, topic soft-delete/restore/hard-delete. No-op or foreign-target requests are not sent. Not synced: message reorder/ordering (unsupported), ownership transfer, assistant reset, purge/empty trash, segments, attachments, search index, UI state, or compound copy/paste/branch/clone/insert-after/resend/select flows.'
           )}
         </SettingHelpText>
       </SettingRow>
@@ -186,6 +188,22 @@ const SyncSettings: React.FC = () => {
                     {t('settings.sync.last_error', 'Last error')}: {status.lastError.slice(0, 200)}
                   </span>
                 </Tooltip>
+              )}
+              {status.lastCaptureError && (
+                <Tooltip title={status.lastCaptureError}>
+                  <span style={{ color: 'var(--color-error)' }} data-testid="sync-capture-error">
+                    {t('settings.sync.capture_error', 'Capture error')}: {status.lastCaptureError.slice(0, 200)}
+                  </span>
+                </Tooltip>
+              )}
+              {(status.conflictCount ?? 0) > 0 && (
+                <span style={{ color: 'var(--color-warning)' }} data-testid="sync-conflict-count">
+                  {t(
+                    'settings.sync.conflicts_pending',
+                    'Conflicting edits: {{count}} field(s) kept the newest value; the overwritten value is stored for a future restore (automatic restore not available yet).',
+                    { count: status.conflictCount }
+                  )}
+                </span>
               )}
               {status.syncing && <span data-testid="sync-syncing">{t('settings.sync.syncing', 'Syncing...')}</span>}
             </div>

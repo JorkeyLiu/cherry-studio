@@ -4,7 +4,20 @@
  */
 
 // Allowlisted topic fields — deletedAt included for soft-delete sync (hard delete uses op=delete)
-const TOPIC_ALLOW = new Set(['id', 'name', 'createdAt', 'updatedAt', 'assistantId', 'deletedAt'])
+// pinned/prompt/isNameManuallyEdited are syncable mutable topic metadata
+// (overflow keys surfaced top-level). contextWindowAnchor and all other
+// overflow keys remain excluded.
+const TOPIC_ALLOW = new Set([
+  'id',
+  'name',
+  'createdAt',
+  'updatedAt',
+  'assistantId',
+  'deletedAt',
+  'pinned',
+  'prompt',
+  'isNameManuallyEdited'
+])
 // Message allowlist
 const MESSAGE_ALLOW = new Set([
   'id',
@@ -187,6 +200,23 @@ export function validateSyncOperationStrict(op: {
     if ('createdAt' in payload && !isOptionalStringOrNull(payload.createdAt)) return 'invalid topic createdAt'
     if ('updatedAt' in payload && !isOptionalStringOrNull(payload.updatedAt)) return 'invalid topic updatedAt'
     if ('deletedAt' in payload && !isOptionalStringOrNull(payload.deletedAt)) return 'invalid topic deletedAt'
+    if (
+      'pinned' in payload &&
+      payload.pinned !== undefined &&
+      payload.pinned !== null &&
+      typeof payload.pinned !== 'boolean'
+    ) {
+      return 'invalid topic pinned'
+    }
+    if ('prompt' in payload && !isOptionalStringOrNull(payload.prompt)) return 'invalid topic prompt'
+    if (
+      'isNameManuallyEdited' in payload &&
+      payload.isNameManuallyEdited !== undefined &&
+      payload.isNameManuallyEdited !== null &&
+      typeof payload.isNameManuallyEdited !== 'boolean'
+    ) {
+      return 'invalid topic isNameManuallyEdited'
+    }
     return null
   }
   if (entityType === 'message') {

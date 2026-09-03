@@ -90,6 +90,30 @@ import { recordStreamAttrRecord } from './streamingMeasure'
 
 const logger = loggerService.withContext('ChatDbIpc')
 
+/**
+ * Channels whose sync intent already committed atomically inside the
+ * aggregate Drizzle transaction (LOCK-PERSONAL-006). The IPC layer must not
+ * invoke post-commit hook capture for them — a second op with a fresh id
+ * would duplicate intent. The hook remains as fallback for direct (test)
+ * callers whose rows bypassed the aggregate.
+ */
+const TX_OWNED_SYNC_CHANNELS: ReadonlySet<string> = new Set<string>([
+  IpcChannel.ChatDb_EnsureTopic,
+  IpcChannel.ChatDb_AppendMessage,
+  IpcChannel.ChatDb_UpdateMessage,
+  IpcChannel.ChatDb_UpdateMessageAndBlocks,
+  IpcChannel.ChatDb_UpdateBlocks,
+  IpcChannel.ChatDb_UpdateSingleBlock,
+  IpcChannel.ChatDb_BulkAddBlocks,
+  IpcChannel.ChatDb_DeleteBlocks,
+  IpcChannel.ChatDb_DeleteMessage,
+  IpcChannel.ChatDb_DeleteMessages,
+  IpcChannel.ChatDb_UpdateTopicMetadata,
+  IpcChannel.ChatDb_SoftDeleteTopic,
+  IpcChannel.ChatDb_HardDeleteTopic,
+  IpcChannel.ChatDb_RestoreTopic
+])
+
 // ---------------------------------------------------------------------------
 // Module-level registration state — tracks the active registration for
 // safe re-registration and stale-disposer ownership.
@@ -285,8 +309,11 @@ export function registerChatDbIpc(): () => void {
           }
         }
 
-        // Sync outbox — capture failure is surfaced durably via syncState, never affects ChatDb result envelope
-        if (result.ok === true) {
+        // Sync outbox — capture failure is surfaced durably via syncState, never affects ChatDb result envelope.
+        // Tx-owned channels already committed their intent atomically inside
+        // the aggregate transaction: invoking the post-commit hook would
+        // enqueue a duplicate op, so it is skipped here by channel.
+        if (result.ok === true && !TX_OWNED_SYNC_CHANNELS.has(channel)) {
           try {
             handleChatDbSuccessForSync(channel, request, result)
           } catch (e) {

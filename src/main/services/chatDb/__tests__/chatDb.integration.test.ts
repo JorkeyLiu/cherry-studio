@@ -109,7 +109,7 @@ describe('ChatDbService Production-Path Integration', () => {
       const db = wrapDrizzle(sqlite)
 
       const count = runMigrations(db, sqlite)
-      expect(count).toBe(5)
+      expect(count).toBe(6)
 
       // Verify tables exist
       const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as Array<{
@@ -124,6 +124,9 @@ describe('ChatDbService Production-Path Integration', () => {
       expect(tableNames).toContain('topic_segments')
       expect(tableNames).toContain('topic_segment_messages')
       expect(tableNames).toContain('file_references')
+      expect(tableNames).toContain('sync_outbox')
+      expect(tableNames).toContain('sync_field_clock')
+      expect(tableNames).toContain('sync_conflict_log')
 
       sqlite.close()
     })

@@ -289,30 +289,32 @@ describe('ChatDbAggregateService', () => {
       expect(okValue(result).blocks).toEqual([])
     })
 
-    it('primes absent topic — topic exists after fetch', () => {
+    it('does not prime absent topic — pure read leaves no row', () => {
       const topicId = `t-${uid()}`
       const result = agg.fetchMessages(topicId)
       expect(result.ok).toBe(true)
       expect(okValue(result).messages).toEqual([])
       expect(okValue(result).blocks).toEqual([])
 
-      // Topic should now exist (primed in same transaction)
+      // Pure read: no implicit topic row is created
       const exists = agg.topicExists(topicId)
       expect(exists.ok).toBe(true)
-      expect(okValue(exists)).toBe(true)
+      expect(okValue(exists)).toBe(false)
     })
 
-    it('primes topic within transaction — atomic with read', () => {
+    it('repeated missing-topic reads stay empty without creating rows', () => {
       const topicId = `t-${uid()}`
-      // First call creates topic + returns empty
       const result1 = agg.fetchMessages(topicId)
       expect(result1.ok).toBe(true)
       expect(okValue(result1).messages).toEqual([])
 
-      // Second call should still return empty (topic persists, no messages yet)
+      // Second call should still return empty (no topic created, no messages)
       const result2 = agg.fetchMessages(topicId)
       expect(result2.ok).toBe(true)
       expect(okValue(result2).messages).toEqual([])
+      const exists = agg.topicExists(topicId)
+      expect(exists.ok).toBe(true)
+      expect(okValue(exists)).toBe(false)
     })
 
     it('reconstructs message.blocks relationally', () => {

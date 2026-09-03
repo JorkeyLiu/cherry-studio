@@ -180,3 +180,37 @@ export const syncEntityClock = sqliteTable(
   },
   (table) => [primaryKey({ columns: [table.entityType, table.entityId] })]
 )
+
+// ---------------------------------------------------------------------------
+// sync field clocks + bounded conflict log — additive (MVP 006)
+// Per-field LWW for independent scalar merges; same-field losers retained
+// as bounded durable records for future recovery (no restore UI yet).
+// ---------------------------------------------------------------------------
+export const syncFieldClock = sqliteTable(
+  'sync_field_clock',
+  {
+    entityType: text('entity_type').notNull(),
+    entityId: text('entity_id').notNull(),
+    field: text('field').notNull(),
+    timestamp: integer('timestamp').notNull(),
+    operationId: text('operation_id').notNull()
+  },
+  (table) => [primaryKey({ columns: [table.entityType, table.entityId, table.field] })]
+)
+
+export const syncConflictLog = sqliteTable(
+  'sync_conflict_log',
+  {
+    id: text('id').primaryKey(),
+    entityType: text('entity_type').notNull(),
+    entityId: text('entity_id').notNull(),
+    field: text('field').notNull(),
+    loserValueJson: text('loser_value_json'),
+    loserTimestamp: integer('loser_timestamp').notNull(),
+    loserOperationId: text('loser_operation_id').notNull(),
+    winnerTimestamp: integer('winner_timestamp').notNull(),
+    winnerOperationId: text('winner_operation_id').notNull(),
+    createdAt: text('created_at')
+  },
+  (table) => [index('sync_conflict_log_entity_idx').on(table.entityType, table.entityId)]
+)

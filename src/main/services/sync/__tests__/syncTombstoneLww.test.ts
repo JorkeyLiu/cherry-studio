@@ -27,7 +27,7 @@ import { eq } from 'drizzle-orm'
 import { chatDbService } from '../../chatDb'
 import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
-import { SyncOrphanError, syncService } from '../SyncService'
+import { syncService } from '../SyncService'
 
 let sqlite: Database.Database
 let db: BetterSQLite3Database<typeof schema>
@@ -189,7 +189,7 @@ describe('topic delete/message upsert equal timestamp tie-break (tombstone LWW)'
     expect(tomb?.value).toBe(`${String(T)}:${DEL_MID}`)
   })
 
-  it('higher op ID wins: message materialized with placeholder topic', () => {
+  it('higher op ID still suppressed (delete-wins): no resurrection via child update', () => {
     syncService.applyIncomingOperation({
       id: 'op-t2-base',
       entityType: 'topic',
@@ -207,18 +207,26 @@ describe('topic delete/message upsert equal timestamp tie-break (tombstone LWW)'
       timestamp: T,
       deviceId: 'd1'
     } as any)
-    const res = syncService.applyIncomingOperation({
-      id: HIGHER,
-      entityType: 'message',
-      op: 'upsert',
-      entityId: 'm-t2',
-      timestamp: T,
-      deviceId: 'd2',
-      payload: { id: 'm-t2', topicId: 't-t2', role: 'user', content: 'late-high' }
-    } as any)
-    expect(res).toBe(true)
-    expect(sqlite.prepare('SELECT id FROM messages WHERE id=?').get('m-t2')).toBeTruthy()
-    expect(sqlite.prepare('SELECT id FROM topics WHERE id=?').get('t-t2')).toBeTruthy()
+    // Delete-wins (LOCK-PERSONAL-007): even an equal-timestamp higher-ID
+    // child update must not implicitly resurrect the hard-deleted parent.
+    // Explicit recreation must arrive as a parent topic creation operation.
+    let threw = false
+    try {
+      syncService.applyIncomingOperation({
+        id: HIGHER,
+        entityType: 'message',
+        op: 'upsert',
+        entityId: 'm-t2',
+        timestamp: T,
+        deviceId: 'd2',
+        payload: { id: 'm-t2', topicId: 't-t2', role: 'user', content: 'late-high' }
+      } as any)
+    } catch {
+      threw = true
+    }
+    expect(threw).toBe(false)
+    expect(sqlite.prepare('SELECT id FROM messages WHERE id=?').get('m-t2')).toBeUndefined()
+    expect(sqlite.prepare('SELECT id FROM topics WHERE id=?').get('t-t2')).toBeUndefined()
   })
 })
 
@@ -390,7 +398,7 @@ describe('malformed losing op rejected before LWW applied-mark', () => {
     expect(res2).toBe(false)
   })
 
-  it('higher block without resurrected parent defers as orphan (not suppressed, not applied)', () => {
+  it('higher block without resurrected parent is suppressed (delete-wins, not orphan)', () => {
     seedLikeTopicMessage()
     function seedLikeTopicMessage(): void {
       syncService.applyIncomingOperation({
@@ -420,7 +428,11 @@ describe('malformed losing op rejected before LWW applied-mark', () => {
       timestamp: T,
       deviceId: 'd1'
     } as any)
-    expect(() =>
+    // Delete-wins: exact parent tombstone + absent parent row consumes the
+    // late descendant (even higher-ID equal-timestamp) instead of stalling
+    // as a retryable orphan.
+    let threw = false
+    try {
       syncService.applyIncomingOperation({
         id: 'op-zzzz-orph-block',
         entityType: 'message_block',
@@ -430,12 +442,16 @@ describe('malformed losing op rejected before LWW applied-mark', () => {
         deviceId: 'd2',
         payload: { id: 'b-orph-high', messageId: 'm-orph', type: 'text', content: 'win' }
       } as any)
-    ).toThrow(SyncOrphanError)
+    } catch {
+      threw = true
+    }
+    expect(threw).toBe(false)
+    expect(sqlite.prepare('SELECT id FROM message_blocks WHERE id=?').get('b-orph-high')).toBeUndefined()
     const applied = db
       .select()
       .from(schema.syncApplied)
       .where(eq(schema.syncApplied.operationId, 'op-zzzz-orph-block'))
       .get()
-    expect(applied).toBeUndefined()
+    expect(applied).toBeTruthy()
   })
 })

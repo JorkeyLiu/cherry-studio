@@ -100,25 +100,37 @@ export async function getSyncStatusViaApi(page: Page): Promise<SyncStatusShape> 
  * Typed manual sync via the production preload surface.
  * Returns the status on success; on failure records the thrown message and
  * returns the durable status via getStatus (lastError persisted).
+ * Transient `already in progress` collisions with background automation are
+ * retried (bounded) so manual-sync assertions observe the manual outcome,
+ * not a busy race. All other failures return immediately.
  */
-export async function runSyncViaApi(page: Page): Promise<{ status: SyncStatusShape; threw: string | null }> {
-  const outcome = await page.evaluate(async () => {
-    const api = (window as any).api
-    try {
-      const status = await api.sync.sync()
-      return { ok: true as const, status, error: null }
-    } catch (err: any) {
-      let status: any = null
+export async function runSyncViaApi(
+  page: Page,
+  retryBusyMs = 15000
+): Promise<{ status: SyncStatusShape; threw: string | null }> {
+  const deadline = Date.now() + retryBusyMs
+  for (;;) {
+    const outcome = await page.evaluate(async () => {
+      const api = (window as any).api
       try {
-        status = await api.sync.getStatus()
-      } catch {}
-      return { ok: false as const, status, error: String(err?.message ?? err) }
+        const status = await api.sync.sync()
+        return { ok: true as const, status, error: null }
+      } catch (err: any) {
+        let status: any = null
+        try {
+          status = await api.sync.getStatus()
+        } catch {}
+        return { ok: false as const, status, error: String(err?.message ?? err) }
+      }
+    })
+    if (!outcome.status || typeof outcome.status !== 'object') {
+      throw new Error(`runSyncViaApi has no durable status: ${outcome.error ?? 'unknown'}`)
     }
-  })
-  if (!outcome.status || typeof outcome.status !== 'object') {
-    throw new Error(`runSyncViaApi has no durable status: ${outcome.error ?? 'unknown'}`)
+    if (outcome.ok || !outcome.error?.includes('already in progress') || Date.now() >= deadline) {
+      return { status: outcome.status as SyncStatusShape, threw: outcome.ok ? null : (outcome.error as string) }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
   }
-  return { status: outcome.status as SyncStatusShape, threw: outcome.ok ? null : (outcome.error as string) }
 }
 
 /** Typed ensureTopic via ChatDb IPC; asserts the success envelope. */

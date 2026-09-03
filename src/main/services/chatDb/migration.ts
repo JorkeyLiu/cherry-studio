@@ -1029,6 +1029,34 @@ export const MIGRATIONS: MigrationEntry[] = [
         PRIMARY KEY (entity_type, entity_id)
       )`
     ]
+  },
+  {
+    key: '006_sync_field_merge',
+    description:
+      'Additive sync field merge: per-field clocks for independent scalar merges and bounded same-field conflict log',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS sync_field_clock (
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        field TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        operation_id TEXT NOT NULL,
+        PRIMARY KEY (entity_type, entity_id, field)
+      )`,
+      `CREATE TABLE IF NOT EXISTS sync_conflict_log (
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        field TEXT NOT NULL,
+        loser_value_json TEXT,
+        loser_timestamp INTEGER NOT NULL,
+        loser_operation_id TEXT NOT NULL,
+        winner_timestamp INTEGER NOT NULL,
+        winner_operation_id TEXT NOT NULL,
+        created_at TEXT
+      )`,
+      `CREATE INDEX IF NOT EXISTS sync_conflict_log_entity_idx ON sync_conflict_log(entity_type, entity_id)`
+    ]
   }
 ]
 

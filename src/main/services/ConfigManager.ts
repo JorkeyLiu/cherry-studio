@@ -216,6 +216,10 @@ export class ConfigManager {
   get<T>(key: string, defaultValue?: T) {
     return this.store.get(key, defaultValue) as T
   }
+
+  has(key: string): boolean {
+    return this.store.has(key)
+  }
 }
 
 export const configManager = new ConfigManager()

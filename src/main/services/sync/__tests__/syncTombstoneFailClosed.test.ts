@@ -396,7 +396,8 @@ describe('fail closed 5: malformed persisted tombstones throw, never treated as 
   })
 
   it('canonical legacy timestamp-only and timestamp:operationId forms remain accepted', () => {
-    // Legacy form suppresses older-or-equal, admits newer
+    // Legacy form: stale child suppressed; newer child also suppressed via
+    // delete-wins when the exact parent is still absent (no resurrection).
     db.insert(schema.syncState)
       .values({ key: 'tombstone:topic:t-leg', value: String(T) })
       .onConflictDoUpdate({ target: schema.syncState.key, set: { value: String(T) } })
@@ -424,22 +425,35 @@ describe('fail closed 5: malformed persisted tombstones throw, never treated as 
       deviceId: 'd2',
       payload: { id: freshLegMsg, topicId: 't-leg', role: 'user', content: 'fresh' }
     } as any)
-    expect(sqlite.prepare('SELECT id FROM messages WHERE id=?').get(freshLegMsg)).toBeTruthy()
-    // Canonical new form: LWW via timestamp then operationId
-    db.insert(schema.syncState)
-      .values({ key: 'tombstone:message:m-new', value: `${T}:op-aaa` })
-      .onConflictDoUpdate({ target: schema.syncState.key, set: { value: `${T}:op-aaa` } })
-      .run()
-    // Parent message must exist for block upserts (created via the apply path)
+    // Delete-wins: newer child with absent parent is consumed, not resurrected.
+    expect(sqlite.prepare('SELECT id FROM messages WHERE id=?').get(freshLegMsg)).toBeUndefined()
+    expect(sqlite.prepare('SELECT id FROM topics WHERE id=?').get('t-leg')).toBeUndefined()
+    expect(appliedRow(freshLegId)).toBeTruthy()
+    // Canonical new form: LWW via timestamp then operationId (parent present).
+    // Explicitly recreate a live parent chain first so block LWW is isolated
+    // from topic delete-wins.
     syncService.applyIncomingOperation({
-      id: `op-leg-parent-${Math.random().toString(36).slice(2)}`,
+      id: `op-leg-t-new-${Math.random().toString(36).slice(2)}`,
+      entityType: 'topic',
+      op: 'upsert',
+      entityId: 't-new-parent',
+      timestamp: T + 10,
+      deviceId: 'd2',
+      payload: { id: 't-new-parent', name: 'P' }
+    } as any)
+    syncService.applyIncomingOperation({
+      id: `op-leg-m-new-${Math.random().toString(36).slice(2)}`,
       entityType: 'message',
       op: 'upsert',
       entityId: 'm-new',
       timestamp: T + 10,
       deviceId: 'd2',
-      payload: { id: 'm-new', topicId: 't-leg', role: 'user', content: 'parent' }
+      payload: { id: 'm-new', topicId: 't-new-parent', role: 'user', content: 'parent' }
     } as any)
+    db.insert(schema.syncState)
+      .values({ key: 'tombstone:message:m-new', value: `${T}:op-aaa` })
+      .onConflictDoUpdate({ target: schema.syncState.key, set: { value: `${T}:op-aaa` } })
+      .run()
     const loseBlock = `b-lose-${Math.random().toString(36).slice(2)}`
     syncService.applyIncomingOperation({
       id: 'op-aaa',

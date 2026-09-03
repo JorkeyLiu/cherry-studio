@@ -7,7 +7,11 @@ import {
   filterBlockPayload,
   filterMessagePayload,
   filterTopicPayload,
+  SYNC_BLOCK_PATCH_FIELDS,
+  SYNC_CONFLICT_LOG_MAX,
+  SYNC_MESSAGE_PATCH_FIELDS,
   SYNC_TOMBSTONE_OPERATION_ID_MAX_LENGTH,
+  SYNC_TOPIC_PATCH_FIELDS,
   validateSyncOperationStrict,
   validateSyncPayloadAllowlist
 } from '@shared/sync'
@@ -27,8 +31,18 @@ const STATE_LAST_ERROR = 'lastError'
 const STATE_CURSOR = 'cursor'
 const STATE_DEVICE_ID = 'deviceId'
 const STATE_CAPTURE_ERROR = 'lastCaptureError'
+// Unambiguous missing sentinel for config device identity: passed as the
+// electron-store default so a truly absent key is the ONLY case that returns
+// this reference. Present null/empty/whitespace/non-string values are returned
+// as-is and fail closed via isValidDeviceId.
+const CONFIG_DEVICE_ID_MISSING: unique symbol = Symbol('sync-device-id-missing')
 const TOMBSTONE_TOPIC_PREFIX = 'tombstone:topic:'
 const TOMBSTONE_MESSAGE_PREFIX = 'tombstone:message:'
+const TOMBSTONE_BLOCK_PREFIX = 'tombstone:message_block:'
+// Bounded cross-page orphan buffer: a single sync() cycle never buffers more
+// than this many retryable orphans in memory. Past the budget the cycle fails
+// closed with a durable blocked error (cursor unmoved, no skip).
+const MAX_DEFERRED_ORPHANS = 500
 
 // Outbox push priority: parents before children so relay seq preserves
 // dependency order (topic < message < block). Within the same priority,
@@ -49,8 +63,315 @@ export class SyncTombstoneError extends Error {
   }
 }
 
+export class SyncShutdownError extends Error {
+  constructor(message = 'sync cancelled (shutdown)') {
+    super(message)
+    this.name = 'SyncShutdownError'
+  }
+}
+
+export class SyncStaleConfigError extends Error {
+  constructor(message = 'sync cancelled: configuration changed') {
+    super(message)
+    this.name = 'SyncStaleConfigError'
+  }
+}
+
+export class SyncCaptureError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options as ErrorOptions)
+    this.name = 'SyncCaptureError'
+  }
+}
+
+export class SyncCursorError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SyncCursorError'
+  }
+}
+
+export class SyncDeviceIdentityError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options as ErrorOptions)
+    this.name = 'SyncDeviceIdentityError'
+  }
+}
+
+export class SyncConfigPreflightError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options as ErrorOptions)
+    this.name = 'SyncConfigPreflightError'
+  }
+}
+
+/**
+ * Strict canonical cursor parser (LOCK-PERSONAL-001): only canonical
+ * non-negative safe-integer forms are accepted. Numbers must be safe
+ * integers >= 0; strings must match /^(0|[1-9][0-9]*)$/ exactly (no
+ * whitespace, no leading zeros, no trailing junk like `12junk`) and decode
+ * to a safe integer. Anything else throws SyncCursorError — never reinterpreted.
+ */
+export function parseStrictCursor(value: unknown): number {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new SyncCursorError(`malformed cursor ${JSON.stringify(String(value)).slice(0, 80)}`)
+    }
+    return value
+  }
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new SyncCursorError(`malformed cursor ${JSON.stringify(String(value)).slice(0, 80)}`)
+  }
+  const n = Number(value)
+  if (!Number.isSafeInteger(n)) {
+    throw new SyncCursorError(`malformed cursor ${JSON.stringify(value).slice(0, 80)}`)
+  }
+  return n
+}
+
+/** True for any SQLite missing-table error (candidate pre-migration OR post-migration damage). */
+function isMissingSyncTableError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e)
+  return /no such table/i.test(msg)
+}
+
+const MIGRATION_005_KEY = '005_sync_metadata'
+const MIGRATION_006_KEY = '006_sync_field_merge'
+
+/**
+ * Device-identity validity (LOCK-PERSONAL-001/006): a present identity must be
+ * a non-empty string (1..256 chars, not whitespace-only). NULL/empty/
+ * whitespace/malformed values are never valid and fail closed — never treated
+ * as absence and never silently replaced by the other store.
+ */
+function isValidDeviceId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 && value.trim().length > 0
+}
+
+/**
+ * Migration-state proof (LOCK-PERSONAL-006): a missing-table error is a
+ * truthful pre-migration miss ONLY when a present migration_state table on
+ * the SAME database explicitly proves the owning migration was never applied
+ * (absent row). For the 005 compatibility path proof additionally requires
+ * no later sync migration marker (including 006) and no surviving sync
+ * metadata tables (checked via sqlite_master); otherwise fail closed so a
+ * damaged post-migration DB with a missing 005 marker is never treated as
+ * pre-005 compatibility. A missing migration_state table itself is damage
+ * (fail closed) unless an independent pre-migration marker proves the
+ * database never reached the sync migrations: no sync tables exist at all on
+ * the same database (checked via sqlite_master). A present migration row,
+ * any other migration-state read failure, or any surviving sync table
+ * alongside a missing migration_state table returns false (post-migration
+ * damage).
+ */
+function isProvenMigrationNotApplied(dbLike: unknown, migrationKey: string): boolean {
+  try {
+    const typed = dbLike as BetterSQLite3Database<typeof schema>
+    const row = typed.select().from(schema.migrationState).where(eq(schema.migrationState.key, migrationKey)).get()
+    if (row) return false
+    if (migrationKey === MIGRATION_005_KEY) {
+      try {
+        const later = typed
+          .select()
+          .from(schema.migrationState)
+          .where(eq(schema.migrationState.key, MIGRATION_006_KEY))
+          .get()
+        if (later) return false
+      } catch {
+        return false
+      }
+      try {
+        const raw = getRawSqliteForProof(dbLike)
+        if (!raw) return false
+        const rows = raw
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sync_state','sync_outbox','sync_applied','sync_entity_clock','sync_field_clock','sync_conflict_log')"
+          )
+          .all()
+        if (Array.isArray(rows) && rows.length > 0) return false
+        return true
+      } catch {
+        return false
+      }
+    }
+    return true
+  } catch (inner) {
+    if (!isMissingSyncTableError(inner)) return false
+    try {
+      const raw = getRawSqliteForProof(dbLike)
+      if (!raw) return false
+      const rows = raw
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sync_state','sync_outbox','sync_applied','sync_entity_clock','sync_field_clock','sync_conflict_log')"
+        )
+        .all()
+      if (Array.isArray(rows) && rows.length > 0) return false
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+/** Best-effort raw better-sqlite3 handle for the same database behind a Drizzle executor. */
+function getRawSqliteForProof(dbLike: unknown): Database.Database | null {
+  try {
+    const candidate = dbLike as {
+      $client?: unknown
+      session?: { client?: unknown }
+    }
+    const raw = candidate.$client ?? candidate.session?.client ?? null
+    if (raw && typeof (raw as Database.Database).prepare === 'function') {
+      return raw as Database.Database
+    }
+  } catch {}
+  return null
+}
+
+/** Tolerate ONLY a proven pre-migration missing table on the same database; all other errors fail closed. */
+function isTolerableMissingSyncTable(dbLike: unknown, e: unknown, migrationKey: string): boolean {
+  if (!isMissingSyncTableError(e)) return false
+  try {
+    return isProvenMigrationNotApplied(dbLike, migrationKey)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Transaction executor compatible with both the root Drizzle database and a
+ * `db.transaction((tx) => ...)` executor. The aggregate owns the atomic
+ * mutation boundary; SyncService helpers here never open their own
+ * BEGIN/COMMIT so no nested transaction can occur.
+ */
+export type SyncTxExecutor = BetterSQLite3Database<typeof schema>
+
+// Mutable clocked fields per entity for per-field LWW. Identity/immutable
+// relation fields (`id`, `topicId`, `messageId`) are never clocked.
+// `sortOrder` is clocked on apply for old-full-payload convergence, but new
+// local update patches never send it (reorder unsupported).
+const TOPIC_CLOCKED = new Set<string>(SYNC_TOPIC_PATCH_FIELDS as readonly string[])
+const MESSAGE_CLOCKED = new Set<string>([...(SYNC_MESSAGE_PATCH_FIELDS as readonly string[]), 'sortOrder'])
+const BLOCK_CLOCKED = new Set<string>([...(SYNC_BLOCK_PATCH_FIELDS as readonly string[]), 'sortOrder'])
+
+function clockedFieldsFor(entityType: SyncOperation['entityType']): Set<string> {
+  return entityType === 'topic' ? TOPIC_CLOCKED : entityType === 'message' ? MESSAGE_CLOCKED : BLOCK_CLOCKED
+}
+
 export class SyncService {
   private statusSyncing = false
+  private enqueueListeners = new Set<() => void>()
+  private shutdownRequested = false
+  private activeFetchControllers = new Set<AbortController>()
+  /**
+   * Config generation (LOCK-PERSONAL-001): bumped on every disable /
+   * endpoint / token transition. An active sync() snapshots the generation at
+   * start and aborts with SyncStaleConfigError before any further stale
+   * transport or post-transition database/status effect.
+   */
+  private configGeneration = 0
+  private configFailureListeners = new Set<(error: unknown) => void>()
+
+  /** Current config generation (tests + automation coordination). */
+  getConfigGeneration(): number {
+    return this.configGeneration
+  }
+
+  /**
+   * Decoupled lifecycle seam (LOCK-PERSONAL-001/006): SyncService never
+   * imports syncAuto; automation registers a callback to stop its
+   * subscriber/timers when setConfig fails (even though setConfig throws and
+   * syncIpc refreshes only on success). Listener errors never propagate into
+   * the setConfig throw path (they are scoped-logged).
+   */
+  onConfigFailure(listener: (error: unknown) => void): () => void {
+    this.configFailureListeners.add(listener)
+    return () => {
+      this.configFailureListeners.delete(listener)
+    }
+  }
+
+  private emitConfigFailure(error: unknown): void {
+    for (const listener of [...this.configFailureListeners]) {
+      try {
+        listener(error)
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : String(e)
+        logger.error(`[emitConfigFailure] listener failed: ${detail.slice(0, 200)}`)
+      }
+    }
+  }
+
+  /**
+   * Invalidate in-flight sync() cycles for a disable/endpoint/token change
+   * that bypassed setConfig (e.g. direct store writes observed by refresh).
+   * Idempotent: callers bump only on a detected transition.
+   */
+  invalidateForConfigChange(): void {
+    this.configGeneration += 1
+  }
+
+  private throwIfStaleConfig(syncGen: number): void {
+    if (syncGen !== this.configGeneration) throw new SyncStaleConfigError()
+  }
+
+  /** True while a sync() push/pull cycle holds the exclusive lock. */
+  isSyncing(): boolean {
+    return this.statusSyncing
+  }
+
+  /**
+   * Synchronous shutdown invalidation for Electron will-quit (no await).
+   * Sets the shutdown flag and aborts in-flight relay fetches so a pending
+   * sync() continuation observes cancellation before any post-close database
+   * work. Must be called synchronously before ChatDb close.
+   */
+  beginShutdown(): void {
+    this.shutdownRequested = true
+    for (const c of [...this.activeFetchControllers]) {
+      try {
+        c.abort()
+      } catch {}
+    }
+  }
+
+  /** True after beginShutdown() until reset (tests only). */
+  isShutdown(): boolean {
+    return this.shutdownRequested
+  }
+
+  /** Test-only reset for the shutdown flag. */
+  resetShutdownForTests(): void {
+    this.shutdownRequested = false
+  }
+
+  private throwIfShutdown(): void {
+    if (this.shutdownRequested) throw new SyncShutdownError()
+  }
+
+  /** Register a fetch abort controller for shutdown coordination. */
+  trackFetchController(controller: AbortController): () => void {
+    this.activeFetchControllers.add(controller)
+    return () => {
+      this.activeFetchControllers.delete(controller)
+    }
+  }
+
+  /** Subscribe to successful local outbox enqueues (inserted only, not duplicates). */
+  onEnqueue(listener: () => void): () => void {
+    this.enqueueListeners.add(listener)
+    return () => {
+      this.enqueueListeners.delete(listener)
+    }
+  }
+
+  private emitEnqueue(): void {
+    for (const listener of [...this.enqueueListeners]) {
+      try {
+        listener()
+      } catch {}
+    }
+  }
 
   private getDb(): BetterSQLite3Database<typeof schema> {
     return chatDbService.getDatabase()
@@ -67,6 +388,29 @@ export class SyncService {
   }
 
   setConfig(config: Partial<SyncConfig>): SyncConfig {
+    // Fail closed (LOCK-PERSONAL-001/006): the previous routing snapshot must
+    // be knowable before comparing. Never fabricate a disabled snapshot; on
+    // prior-read failure conservatively invalidate stale work and rethrow the
+    // original error without applying the update.
+    let before: SyncConfig
+    try {
+      before = this.getConfig()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      logger.error(`[setConfig] prior config read failed: ${msg.slice(0, 300)}`)
+      try {
+        this.recordCaptureFailure('sync:setConfig:prior-read', e)
+      } catch (persistErr) {
+        const detail = persistErr instanceof Error ? persistErr.message : String(persistErr)
+        logger.error(`[setConfig] capture-error persistence failed: ${detail.slice(0, 300)}`)
+        this.configGeneration += 1
+        this.emitConfigFailure(e)
+        throw persistErr instanceof Error ? persistErr : new Error(String(persistErr))
+      }
+      this.configGeneration += 1
+      this.emitConfigFailure(e)
+      throw e instanceof Error ? e : new Error(String(e))
+    }
     if (config.endpoint !== undefined) {
       const err = validateEndpointUrl(config.endpoint)
       if (config.endpoint !== '' && err) throw new Error(err)
@@ -78,39 +422,141 @@ export class SyncService {
     if (config.enabled !== undefined) {
       configManager.set('sync:enabled', !!config.enabled)
     }
-    return this.getConfig()
+    // Post-write snapshot unknowable: writes already applied, so invalidate
+    // conservatively and rethrow instead of comparing against a guess.
+    let after: SyncConfig
+    try {
+      after = this.getConfig()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      logger.error(`[setConfig] post config read failed: ${msg.slice(0, 300)}`)
+      try {
+        this.recordCaptureFailure('sync:setConfig:post-read', e)
+      } catch (persistErr) {
+        const detail = persistErr instanceof Error ? persistErr.message : String(persistErr)
+        logger.error(`[setConfig] capture-error persistence failed: ${detail.slice(0, 300)}`)
+        this.configGeneration += 1
+        this.emitConfigFailure(e)
+        throw persistErr instanceof Error ? persistErr : new Error(String(persistErr))
+      }
+      this.configGeneration += 1
+      this.emitConfigFailure(e)
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+    // Any disable/endpoint/token transition invalidates in-flight sync()
+    // cycles so they never continue on stale transport or commit
+    // post-transition database/status effects.
+    if (before.enabled !== after.enabled || before.endpoint !== after.endpoint || before.token !== after.token) {
+      this.configGeneration += 1
+    }
+    return after
   }
 
   getStatus(): SyncStatus {
     const cfg = this.getConfig()
     const sqlite = this.tryGetSqlite()
-    let pendingCount = 0
-    let cursor = 0
-    let lastSyncAt: string | null = null
-    let lastError: string | null = null
-    if (sqlite) {
-      try {
-        const db = this.getDb()
-        pendingCount = db.select().from(schema.syncOutbox).all().length
-        const cursorRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).get()
-        cursor = cursorRow ? parseInt(cursorRow.value ?? '0', 10) || 0 : 0
-        const lastSyncRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_LAST_SYNC_AT)).get()
-        lastSyncAt = lastSyncRow?.value ?? null
-        const errRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_LAST_ERROR)).get()
-        lastError = errRow?.value ?? null
-      } catch {
-        // ignore if migration not yet applied
+    if (!sqlite) {
+      throw new Error('sync database unavailable')
+    }
+    let db: BetterSQLite3Database<typeof schema>
+    try {
+      db = this.getDb()
+    } catch (e) {
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+    try {
+      const pendingCount = db.select().from(schema.syncOutbox).all().length
+      const cursorRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).get()
+      // Strict persisted cursor (LOCK-PERSONAL-001): a present row must hold a
+      // canonical non-negative safe integer; malformed state fails closed via
+      // the catch below (durable lastError + throw), never reinterpreted.
+      // Absent row (never synced) is the only 0 default.
+      let cursor = 0
+      if (cursorRow) {
+        if (cursorRow.value === null || cursorRow.value === undefined) {
+          throw new SyncCursorError('malformed persisted cursor: missing value')
+        }
+        cursor = parseStrictCursor(cursorRow.value)
       }
+      const lastSyncRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_LAST_SYNC_AT)).get()
+      const lastSyncAt = lastSyncRow?.value ?? null
+      const errRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_LAST_ERROR)).get()
+      const lastError = errRow?.value ?? null
+      const capRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CAPTURE_ERROR)).get()
+      const lastCaptureError = capRow?.value ?? null
+      const conflictCount = this.getConflictCount()
+      return {
+        enabled: cfg.enabled,
+        endpoint: cfg.endpoint,
+        lastSyncAt,
+        lastError,
+        lastCaptureError,
+        pendingCount,
+        cursor,
+        syncing: this.statusSyncing,
+        conflictCount
+      }
+    } catch (e) {
+      // Proven pre-migration database (005 never applied): truthful empty
+      // status, not a failure. Anything else is infrastructure damage — persist
+      // a durable status error best-effort, then fail closed (throw) instead
+      // of fabricating zero/null convergence.
+      if (isTolerableMissingSyncTable(db!, e, MIGRATION_005_KEY)) {
+        let conflictCount = 0
+        try {
+          conflictCount = this.getConflictCount()
+        } catch {
+          conflictCount = 0
+        }
+        return {
+          enabled: cfg.enabled,
+          endpoint: cfg.endpoint,
+          lastSyncAt: null,
+          lastError: null,
+          lastCaptureError: null,
+          pendingCount: 0,
+          cursor: 0,
+          syncing: this.statusSyncing,
+          conflictCount
+        }
+      }
+      const msg = e instanceof Error ? e.message : String(e)
+      try {
+        this.updateLastError(`status read failed: ${msg}`.slice(0, 1000))
+      } catch {}
+      throw e instanceof Error ? e : new Error(String(e))
     }
-    return {
-      enabled: cfg.enabled,
-      endpoint: cfg.endpoint,
-      lastSyncAt,
-      lastError,
-      pendingCount,
-      cursor,
-      syncing: this.statusSyncing
+  }
+
+  /**
+   * Bounded durable same-field conflict record count. Returns 0 ONLY for a
+   * proven pre-006 database (a present migration_state table proves 006 never
+   * applied). Any other read failure — including a missing migration_state
+   * table — throws fail-closed (LOCK-PERSONAL-001/006/009) instead of
+   * fabricating zero.
+   */
+  getConflictCount(): number {
+    const db = this.getDb()
+    try {
+      return db.select().from(schema.syncConflictLog).all().length
+    } catch (e) {
+      if (isTolerableMissingSyncTable(db, e, MIGRATION_006_KEY)) return 0
+      throw e instanceof Error ? e : new Error(String(e))
     }
+  }
+
+  /** True when sync capture is enabled (safe outside transactions). */
+  isCaptureEnabled(): boolean {
+    // Fail closed (LOCK-PERSONAL-001/006): an infrastructure failure reading
+    // capture configuration must propagate (caller rolls back + records a
+    // durable capture failure) instead of silently disabling capture. A
+    // confirmed-disabled config is the only false return.
+    return !!this.getConfig().enabled
+  }
+
+  /** Wake automation after an aggregate transaction commits outbox intent. */
+  notifyEnqueued(): void {
+    this.emitEnqueue()
   }
 
   private tryGetSqlite(): Database.Database | null {
@@ -121,29 +567,146 @@ export class SyncService {
     }
   }
 
+  /**
+   * Durable device identity (LOCK-PERSONAL-001/006): the durable DB row is
+   * authoritative and is never overwritten by config. Missing config is
+   * repaired from a valid durable row; a fresh UUID is generated ONLY when
+   * both stores prove absence (no config + no durable row, or proven pre-005
+   * with no durable store). Present NULL/empty/malformed values in either
+   * store fail closed, and two differing valid identities fail closed rather
+   * than silently choosing one. The ONLY tolerated missing-table case is
+   * proven pre-005 compatibility (a present migration_state table on the same
+   * database explicitly proves 005 never applied) — then the config identity
+   * is returned without DB persistence. Post-005 damage (migration row
+   * present, or any migration-state read failure including a missing
+   * migration_state table) throws SyncDeviceIdentityError so enabled capture
+   * cannot proceed without durable identity persistence.
+   */
   getDeviceId(): string {
-    let deviceId = configManager.get<string>(STATE_DEVICE_ID as any, '') ?? ''
-    if (!deviceId) {
-      deviceId = randomUUID()
-      configManager.set(STATE_DEVICE_ID as any, deviceId)
-      try {
-        const db = this.getDb()
-        db.insert(schema.syncState)
-          .values({ key: STATE_DEVICE_ID, value: deviceId })
-          .onConflictDoUpdate({ target: schema.syncState.key, set: { value: deviceId } })
-          .run()
-      } catch {}
+    let configRaw: unknown
+    let configPresent: boolean
+    try {
+      const hasFn = (configManager as unknown as { has?: unknown }).has
+      if (typeof hasFn === 'function') {
+        configPresent = (hasFn as (key: string) => boolean).call(configManager, STATE_DEVICE_ID)
+        configRaw = configPresent ? configManager.get(STATE_DEVICE_ID as any) : (CONFIG_DEVICE_ID_MISSING as unknown)
+      } else {
+        configRaw = configManager.get(STATE_DEVICE_ID as any, CONFIG_DEVICE_ID_MISSING as any)
+        configPresent = configRaw !== (CONFIG_DEVICE_ID_MISSING as unknown)
+      }
+    } catch (e) {
+      throw new SyncDeviceIdentityError(
+        `sync device identity config read failed: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e }
+      )
     }
+    if (configPresent && !isValidDeviceId(configRaw)) {
+      throw new SyncDeviceIdentityError('sync device identity config malformed: present value is not a valid identity')
+    }
+    const configId = configPresent ? (configRaw as string) : null
+    let dbForCheck: BetterSQLite3Database<typeof schema> | null = null
     try {
       const db = this.getDb()
+      dbForCheck = db
       const row = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_DEVICE_ID)).get()
-      if (!row) {
-        db.insert(schema.syncState).values({ key: STATE_DEVICE_ID, value: deviceId }).run()
+      if (row) {
+        const rawValue: unknown = row.value
+        if (!isValidDeviceId(rawValue)) {
+          throw new SyncDeviceIdentityError(
+            'sync device identity durable malformed: present DB value is NULL/empty/malformed'
+          )
+        }
+        const durableId = rawValue
+        if (configId === null) {
+          try {
+            configManager.set(STATE_DEVICE_ID as any, durableId)
+          } catch (e) {
+            throw new SyncDeviceIdentityError(
+              `sync device identity config repair failed: ${e instanceof Error ? e.message : String(e)}`,
+              { cause: e }
+            )
+          }
+          return durableId
+        }
+        if (configId !== durableId) {
+          throw new SyncDeviceIdentityError('sync device identity mismatch: config and durable DB identities differ')
+        }
+        return durableId
       }
-    } catch {}
-    return deviceId
+      if (configId !== null) {
+        try {
+          db.insert(schema.syncState).values({ key: STATE_DEVICE_ID, value: configId }).run()
+        } catch (e) {
+          const dbLike = this.tryGetDbForTableCheck() ?? db
+          if (isTolerableMissingSyncTable(dbLike, e, MIGRATION_005_KEY)) return configId
+          throw new SyncDeviceIdentityError(
+            `sync device identity persistence failed: ${e instanceof Error ? e.message : String(e)}`,
+            { cause: e }
+          )
+        }
+        return configId
+      }
+      const fresh = randomUUID()
+      try {
+        configManager.set(STATE_DEVICE_ID as any, fresh)
+      } catch (e) {
+        throw new SyncDeviceIdentityError(
+          `sync device identity config persist failed: ${e instanceof Error ? e.message : String(e)}`,
+          { cause: e }
+        )
+      }
+      try {
+        db.insert(schema.syncState).values({ key: STATE_DEVICE_ID, value: fresh }).run()
+      } catch (e) {
+        const dbLike = this.tryGetDbForTableCheck() ?? db
+        if (isTolerableMissingSyncTable(dbLike, e, MIGRATION_005_KEY)) return fresh
+        throw new SyncDeviceIdentityError(
+          `sync device identity persistence failed: ${e instanceof Error ? e.message : String(e)}`,
+          { cause: e }
+        )
+      }
+      return fresh
+    } catch (e) {
+      if (e instanceof SyncDeviceIdentityError) throw e
+      const dbLike = this.tryGetDbForTableCheck() ?? dbForCheck
+      if (dbLike && isTolerableMissingSyncTable(dbLike, e, MIGRATION_005_KEY)) {
+        if (configId !== null) return configId
+        const fresh = randomUUID()
+        try {
+          configManager.set(STATE_DEVICE_ID as any, fresh)
+        } catch (setErr) {
+          throw new SyncDeviceIdentityError(
+            `sync device identity config persist failed: ${setErr instanceof Error ? setErr.message : String(setErr)}`,
+            { cause: setErr }
+          )
+        }
+        return fresh
+      }
+      throw new SyncDeviceIdentityError(
+        `sync device identity read failed: ${e instanceof Error ? e.message : String(e)}`,
+        {
+          cause: e
+        }
+      )
+    }
   }
 
+  /** Best-effort DB accessor for missing-table compatibility checks (never throws). */
+  private tryGetDbForTableCheck(): BetterSQLite3Database<typeof schema> | null {
+    try {
+      return this.getDb()
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Durable capture-failure record (LOCK-PERSONAL-006/009): persists the
+   * original failure to sync_state and logs it. A persistence failure is
+   * never swallowed — it is logged and thrown as SyncCaptureError carrying
+   * the original message, so the failure remains inspectable and the caller
+   * cannot treat the mutation as successfully captured.
+   */
   recordCaptureFailure(channel: string, error: unknown): void {
     const msg = error instanceof Error ? error.message : String(error)
     try {
@@ -154,7 +717,13 @@ export class SyncService {
         .run()
       this.updateLastError(`capture failed for ${channel}: ${msg}`.slice(0, 1000))
       logger.error(`[recordCaptureFailure] ${channel}: ${msg}`)
-    } catch {}
+    } catch (persistErr) {
+      const detail = persistErr instanceof Error ? persistErr.message : String(persistErr)
+      logger.error(`[recordCaptureFailure] persistence failed for ${channel}: ${detail}; original: ${msg}`)
+      throw new SyncCaptureError(`capture failure persistence failed for ${channel}: ${detail}; original: ${msg}`, {
+        cause: persistErr
+      })
+    }
   }
 
   enqueueOperation(op: SyncOperation): void {
@@ -221,10 +790,20 @@ export class SyncService {
       // resurrect a hard-deleted parent. Stored in existing sync_state.
       // Fail closed: a tombstone write failure must roll back the enclosing
       // outbox/clock transaction (propagates to the outer catch/ROLLBACK).
-      if (inserted && op.op === 'delete' && (op.entityType === 'topic' || op.entityType === 'message')) {
+      if (
+        inserted &&
+        op.op === 'delete' &&
+        (op.entityType === 'topic' || op.entityType === 'message' || op.entityType === 'message_block')
+      ) {
         this.setTombstoneInDb(db, op.entityType, op.entityId, op.timestamp, op.id)
       }
+      if (inserted && op.op === 'upsert' && op.payload) {
+        this.updateFieldClocksInDb(db, op.entityType, op.entityId, op.payload, op.timestamp, op.id)
+      }
       sqlite.exec('COMMIT')
+      // Notify automation only for a newly inserted outbox row; duplicates
+      // carry no new work and must not wake the auto sync loop.
+      if (inserted) this.emitEnqueue()
     } catch (e) {
       try {
         sqlite.exec('ROLLBACK')
@@ -233,8 +812,172 @@ export class SyncService {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Transaction-bound capture (LOCK-PERSONAL-006): the aggregate owns the
+  // atomic mutation boundary and calls these helpers INSIDE its existing
+  // Drizzle transaction. No BEGIN/COMMIT here — a throw rolls back the
+  // enclosing aggregate mutation so a committed row without durable sync
+  // intent is impossible. The caller emits via notifyEnqueued() after commit.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Validate + insert outbox/clock/field-clock/tombstone intent using only
+   * the provided aggregate transaction executor. Throws fail-closed on any
+   * validation or persistence failure (rolls back the aggregate mutation).
+   * Duplicate operation IDs are ignored idempotently (no clocks advanced).
+   * Returns true when a new outbox row was inserted.
+   */
+  enqueueOperationInTx(tx: SyncTxExecutor, op: SyncOperation): boolean {
+    const strictErr = validateSyncOperationStrict(op as any)
+    if (strictErr) throw new Error(strictErr)
+    const allowErr = validateSyncPayloadAllowlist(op)
+    if (allowErr) throw new Error(allowErr)
+    const existing = tx.select().from(schema.syncOutbox).where(eq(schema.syncOutbox.id, op.id)).get()
+    if (existing) {
+      logger.warn(`[enqueueOperationInTx] duplicate id ${op.id} ignored`)
+      return false
+    }
+    tx.insert(schema.syncOutbox)
+      .values({
+        id: op.id,
+        entityType: op.entityType,
+        op: op.op,
+        entityId: op.entityId,
+        timestamp: op.timestamp,
+        deviceId: op.deviceId,
+        payloadJson: op.payload ? JSON.stringify(op.payload) : null,
+        createdAt: new Date().toISOString()
+      })
+      .onConflictDoNothing()
+      .run()
+    // Conditional entity-clock advance (deterministic LWW) inside the same tx.
+    const clockRow = tx
+      .select()
+      .from(schema.syncEntityClock)
+      .where(eq(schema.syncEntityClock.entityType, op.entityType))
+      .all()
+      .find((r) => r.entityId === op.entityId) as typeof schema.syncEntityClock.$inferSelect | undefined
+    let advance = true
+    if (clockRow) {
+      if (this.compareLww(op.timestamp, op.id, clockRow.timestamp, clockRow.operationId) <= 0) advance = false
+    }
+    if (advance) {
+      tx.insert(schema.syncEntityClock)
+        .values({ entityType: op.entityType, entityId: op.entityId, timestamp: op.timestamp, operationId: op.id })
+        .onConflictDoUpdate({
+          target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
+          set: { timestamp: op.timestamp, operationId: op.id }
+        })
+        .run()
+    }
+    if (op.op === 'upsert' && op.payload) {
+      this.updateFieldClocksInDb(
+        tx as unknown as BetterSQLite3Database<typeof schema>,
+        op.entityType,
+        op.entityId,
+        op.payload,
+        op.timestamp,
+        op.id
+      )
+    }
+    if (
+      op.op === 'delete' &&
+      (op.entityType === 'topic' || op.entityType === 'message' || op.entityType === 'message_block')
+    ) {
+      this.setTombstoneInDb(
+        tx as unknown as BetterSQLite3Database<typeof schema>,
+        op.entityType,
+        op.entityId,
+        op.timestamp,
+        op.id
+      )
+    }
+    return true
+  }
+
+  /** Build + enqueue an upsert intent inside the aggregate tx. Returns op id. */
+  enqueueUpsertInTx(
+    tx: SyncTxExecutor,
+    entityType: SyncOperation['entityType'],
+    entityId: string,
+    payload: Record<string, unknown>,
+    timestamp: number,
+    deviceId: string
+  ): string {
+    const op: SyncOperation = { id: randomUUID(), entityType, op: 'upsert', entityId, timestamp, deviceId, payload }
+    this.enqueueOperationInTx(tx, op)
+    return op.id
+  }
+
+  /** Build + enqueue a delete intent inside the aggregate tx. Returns op id. */
+  enqueueDeleteInTx(
+    tx: SyncTxExecutor,
+    entityType: SyncOperation['entityType'],
+    entityId: string,
+    timestamp: number,
+    deviceId: string
+  ): string {
+    const op: SyncOperation = { id: randomUUID(), entityType, op: 'delete', entityId, timestamp, deviceId }
+    this.enqueueOperationInTx(tx, op)
+    return op.id
+  }
+
+  /** Tx-bound tracked check (clock or pending outbox via the same executor). */
+  isTrackedEntityInTx(tx: SyncTxExecutor, entityType: SyncOperation['entityType'], entityId: string): boolean {
+    try {
+      const clock = tx
+        .select()
+        .from(schema.syncEntityClock)
+        .where(eq(schema.syncEntityClock.entityType, entityType))
+        .all()
+        .find((r) => r.entityId === entityId)
+      if (clock) return true
+      return tx
+        .select()
+        .from(schema.syncOutbox)
+        .where(eq(schema.syncOutbox.entityId, entityId))
+        .all()
+        .some((r) => r.entityType === entityType)
+    } catch (e) {
+      // Fail closed (LOCK-PERSONAL-001/006): an infrastructure read failure
+      // inside the aggregate tx must roll back the enclosing mutation (never
+      // a silent untracked verdict). Only a proven pre-005 missing sync table
+      // (migration_state proves 005 never applied) is a truthful miss.
+      if (isTolerableMissingSyncTable(tx, e, MIGRATION_005_KEY)) return false
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  /** Tx-bound known check (tracked or surviving local row via the same executor). */
+  isKnownEntityInTx(tx: SyncTxExecutor, entityType: SyncOperation['entityType'], entityId: string): boolean {
+    try {
+      if (this.isTrackedEntityInTx(tx, entityType, entityId)) return true
+      const pending = tx
+        .select()
+        .from(schema.syncOutbox)
+        .where(eq(schema.syncOutbox.entityId, entityId))
+        .all()
+        .some((r) => r.entityType === entityType)
+      if (pending) return true
+      if (entityType === 'topic') {
+        return !!tx.select().from(schema.topics).where(eq(schema.topics.id, entityId)).get()
+      }
+      if (entityType === 'message') {
+        return !!tx.select().from(schema.messages).where(eq(schema.messages.id, entityId)).get()
+      }
+      return !!tx.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, entityId)).get()
+    } catch (e) {
+      // Fail closed: propagate infrastructure failures to the enclosing tx
+      // rollback; only a proven pre-005 missing sync table is a truthful miss.
+      if (isTolerableMissingSyncTable(tx, e, MIGRATION_005_KEY)) return false
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
   private tombstoneKey(entityType: string, entityId: string): string {
-    return entityType === 'topic' ? `${TOMBSTONE_TOPIC_PREFIX}${entityId}` : `${TOMBSTONE_MESSAGE_PREFIX}${entityId}`
+    if (entityType === 'topic') return `${TOMBSTONE_TOPIC_PREFIX}${entityId}`
+    if (entityType === 'message_block') return `${TOMBSTONE_BLOCK_PREFIX}${entityId}`
+    return `${TOMBSTONE_MESSAGE_PREFIX}${entityId}`
   }
 
   // Common deterministic LWW ordering: timestamp, then operation ID
@@ -310,7 +1053,7 @@ export class SyncService {
 
   private setTombstoneInDb(
     db: BetterSQLite3Database<typeof schema>,
-    entityType: 'topic' | 'message',
+    entityType: 'topic' | 'message' | 'message_block',
     entityId: string,
     timestamp: number,
     operationId: string | null
@@ -368,8 +1111,189 @@ export class SyncService {
       .run()
   }
 
+  // -------------------------------------------------------------------------
+  // Per-field clocks + bounded conflict log (LOCK-PERSONAL-010)
+  // -------------------------------------------------------------------------
+
+  private getFieldClocksInDb(
+    db: BetterSQLite3Database<typeof schema>,
+    entityType: SyncOperation['entityType'],
+    entityId: string
+  ): Map<string, { timestamp: number; operationId: string }> {
+    const out = new Map<string, { timestamp: number; operationId: string }>()
+    try {
+      const rows = db
+        .select()
+        .from(schema.syncFieldClock)
+        .where(eq(schema.syncFieldClock.entityType, entityType))
+        .all()
+        .filter((r) => r.entityId === entityId)
+      for (const r of rows) out.set(r.field, { timestamp: r.timestamp, operationId: r.operationId })
+    } catch (e) {
+      // Proven pre-006 compatibility ONLY (LOCK-PERSONAL-006): migration_state
+      // on the same database must prove 006 never applied. Post-006 damage
+      // (migration row present) propagates so the enclosing outbox/apply
+      // transaction rolls back (fail closed, LOCK-PERSONAL-001/006).
+      if (isTolerableMissingSyncTable(db, e, MIGRATION_006_KEY)) return out
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+    return out
+  }
+
+  /** Conditional per-field clock advance for payload intent fields (same tx). Fail closed except pre-006 missing table. */
+  private updateFieldClocksInDb(
+    db: BetterSQLite3Database<typeof schema>,
+    entityType: SyncOperation['entityType'],
+    entityId: string,
+    payload: Record<string, unknown>,
+    timestamp: number,
+    operationId: string
+  ): void {
+    const clocked = clockedFieldsFor(entityType)
+    // Read failure (other than a proven missing pre-006 table) throws above
+    // and rolls back the enclosing transaction — never an empty-clock write.
+    const existing = this.getFieldClocksInDb(db, entityType, entityId)
+    for (const key of Object.keys(payload)) {
+      if (!clocked.has(key)) continue
+      const prior = existing.get(key)
+      if (prior && this.compareLww(timestamp, operationId, prior.timestamp, prior.operationId) <= 0) continue
+      try {
+        db.insert(schema.syncFieldClock)
+          .values({ entityType, entityId, field: key, timestamp, operationId })
+          .onConflictDoUpdate({
+            target: [schema.syncFieldClock.entityType, schema.syncFieldClock.entityId, schema.syncFieldClock.field],
+            set: { timestamp, operationId }
+          })
+          .run()
+      } catch (e) {
+        // Proven pre-006 table absent only (migration_state proves 006 never
+        // applied): skip silently (entity clock still governs). Post-006
+        // damage propagates so the enclosing outbox/apply transaction rolls
+        // back (LOCK-PERSONAL-001/006).
+        if (isTolerableMissingSyncTable(db, e, MIGRATION_006_KEY)) continue
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+    }
+  }
+
+  private fieldValuesEqual(a: unknown, b: unknown): boolean {
+    if (a === b) return true
+    try {
+      return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Record a same-field loser with only allowlisted safe scalar values.
+   * Bounded to SYNC_CONFLICT_LOG_MAX rows (oldest evicted). Fail closed
+   * (LOCK-PERSONAL-010): any persistence or eviction failure throws so the
+   * enclosing apply transaction rolls back — the incoming operation is left
+   * unapplied (no sync_applied row, no clock advance) and the sync cycle
+   * records a durable error without advancing the cursor. Conflict retention
+   * must never silently disappear while the winner commits.
+   */
+  private recordConflictInDb(
+    db: BetterSQLite3Database<typeof schema>,
+    args: {
+      entityType: string
+      entityId: string
+      field: string
+      loserValue: unknown
+      loserTimestamp: number
+      loserOperationId: string
+      winnerTimestamp: number
+      winnerOperationId: string
+    }
+  ): void {
+    // Safety: only clocked (allowlisted scalar) fields are ever recorded.
+    // A non-clocked field carries no conflict record (not a failure).
+    const clocked = clockedFieldsFor(args.entityType as SyncOperation['entityType'])
+    if (!clocked.has(args.field)) return
+    // Always valid bounded JSON (never throws): oversized or unserializable
+    // values become a truncated structured record, never invalid JSON.
+    const loserJson = this.toBoundedConflictJson(args.loserValue)
+    db.insert(schema.syncConflictLog)
+      .values({
+        id: randomUUID(),
+        entityType: args.entityType,
+        entityId: args.entityId,
+        field: args.field,
+        loserValueJson: loserJson,
+        loserTimestamp: args.loserTimestamp,
+        loserOperationId: args.loserOperationId.slice(0, 256),
+        winnerTimestamp: args.winnerTimestamp,
+        winnerOperationId: args.winnerOperationId.slice(0, 256),
+        createdAt: new Date().toISOString()
+      })
+      .onConflictDoNothing()
+      .run()
+    // Bounded cap: evict oldest beyond the fixed limit. Eviction failure
+    // propagates (fail closed) rather than silently growing or dropping.
+    const rows = db.select({ id: schema.syncConflictLog.id }).from(schema.syncConflictLog).all()
+    if (rows.length > SYNC_CONFLICT_LOG_MAX) {
+      const excess = rows.length - SYNC_CONFLICT_LOG_MAX
+      const oldest = db
+        .select()
+        .from(schema.syncConflictLog)
+        .orderBy(asc(schema.syncConflictLog.createdAt), asc(schema.syncConflictLog.id))
+        .all()
+        .slice(0, excess)
+      for (const r of oldest) {
+        db.delete(schema.syncConflictLog).where(eq(schema.syncConflictLog.id, r.id)).run()
+      }
+    }
+  }
+
+  /**
+   * Valid bounded structured conflict value (LOCK-PERSONAL-010): always valid
+   * JSON, with the FINAL serialized form bounded to maxLen characters AND
+   * maxLen UTF-8 bytes. Short values keep their exact JSON form
+   * (recovery-usable); oversized values become a truncated structured record
+   * `{ truncated: true, preview }` so slicing can never emit invalid JSON and
+   * escaping can never exceed the declared bound.
+   */
+  private toBoundedConflictJson(value: unknown, maxLen = 2000): string | null {
+    let full: string | null = null
+    try {
+      full = JSON.stringify(value ?? null) ?? 'null'
+    } catch {
+      return this.toBoundedTruncatedRecord(String(value).slice(0, 1000), maxLen)
+    }
+    if (full.length <= maxLen && Buffer.byteLength(full, 'utf8') <= maxLen) return full
+    return this.toBoundedTruncatedRecord(full, maxLen)
+  }
+
+  /**
+   * Shrink a truncated `{ truncated: true, preview }` record until the FINAL
+   * serialized JSON (after escaping) fits maxLen characters and bytes.
+   * Preview carries only allowlisted scalar JSON text; structure stays valid.
+   */
+  private toBoundedTruncatedRecord(rawPreview: string, maxLen: number): string | null {
+    let preview = rawPreview
+    // Shrink the preview until the escaped serialized form fits. Halving
+    // converges in O(log n) even for escaping-heavy values (quotes,
+    // backslashes, CJK/emoji) where one preview char can cost up to 6 output
+    // chars.
+    for (let guard = 0; guard < 24; guard++) {
+      let serialized: string
+      try {
+        serialized = JSON.stringify({ truncated: true, preview }) ?? '{"truncated":true,"preview":""}'
+      } catch {
+        preview = preview.slice(0, Math.floor(preview.length / 2))
+        if (preview.length === 0) return JSON.stringify({ truncated: true, preview: 'unserializable' })
+        continue
+      }
+      if (serialized.length <= maxLen && Buffer.byteLength(serialized, 'utf8') <= maxLen) return serialized
+      if (preview.length === 0) return JSON.stringify({ truncated: true, preview: '' })
+      preview = preview.slice(0, Math.max(0, Math.floor(preview.length / 2)))
+    }
+    return JSON.stringify({ truncated: true, preview: preview.slice(0, 64) })
+  }
+
   private getTombstone(
-    entityType: 'topic' | 'message',
+    entityType: 'topic' | 'message' | 'message_block',
     entityId: string
   ): { timestamp: number; operationId: string | null } | null {
     // Fail closed: a read failure or a malformed stored value must propagate
@@ -391,8 +1315,8 @@ export class SyncService {
 
   /** True when the entity was ever tracked via clock or pending outbox (no row fallback). */
   isTrackedEntity(entityType: SyncOperation['entityType'], entityId: string): boolean {
+    const db = this.getDb()
     try {
-      const db = this.getDb()
       const clock = db
         .select()
         .from(schema.syncEntityClock)
@@ -406,15 +1330,19 @@ export class SyncService {
         .where(eq(schema.syncOutbox.entityId, entityId))
         .all()
         .some((r) => r.entityType === entityType)
-    } catch {
-      return false
+    } catch (e) {
+      // Fail closed (LOCK-PERSONAL-001/006): hook callers record a durable
+      // capture failure on throw instead of silently skipping. Only a proven
+      // pre-005 missing sync table is a truthful miss.
+      if (isTolerableMissingSyncTable(db, e, MIGRATION_005_KEY)) return false
+      throw e instanceof Error ? e : new Error(String(e))
     }
   }
 
   /** True when the entity was ever observed locally (clock or pending outbox). Guards foreign destructive deletes. */
   isKnownEntity(entityType: SyncOperation['entityType'], entityId: string): boolean {
+    const db = this.getDb()
     try {
-      const db = this.getDb()
       const clock = db
         .select()
         .from(schema.syncEntityClock)
@@ -441,8 +1369,12 @@ export class SyncService {
         return !!db.select().from(schema.messages).where(eq(schema.messages.id, entityId)).get()
       }
       return !!db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, entityId)).get()
-    } catch {
-      return false
+    } catch (e) {
+      // Fail closed: propagate infrastructure failures so the hook records a
+      // durable capture failure instead of silently skipping a delete. Only a
+      // proven pre-005 missing sync table is a truthful miss.
+      if (isTolerableMissingSyncTable(db, e, MIGRATION_005_KEY)) return false
+      throw e instanceof Error ? e : new Error(String(e))
     }
   }
 
@@ -588,7 +1520,10 @@ export class SyncService {
       throw new Error(`malformed sync operation ${op.id}: ${allowErr}`)
     }
 
-    if (!this.shouldApplyIncoming(op)) {
+    // Deletes stay entity-level LWW (delete/tombstone precedence). Upserts
+    // merge per field: absent payload keys carry no intent and are preserved,
+    // so an old full snapshot never wipes an independent newer patch field.
+    if (op.op === 'delete' && !this.shouldApplyIncoming(op)) {
       db.transaction((tx) => {
         tx.insert(schema.syncApplied).values({ operationId: op.id, appliedAt: new Date().toISOString() }).run()
       })
@@ -600,20 +1535,39 @@ export class SyncService {
     let appliedEntity = false
     try {
       if (op.op === 'upsert') {
-        this.applyUpsert(op)
-        appliedEntity = true
+        appliedEntity = this.applyUpsert(op)
       } else if (op.op === 'delete') {
         this.applyDelete(op)
         appliedEntity = true
       }
-      // Only update clock/applied if entity mutation succeeded (orphan throws before here)
-      db.insert(schema.syncEntityClock)
-        .values({ entityType: op.entityType, entityId: op.entityId, timestamp: op.timestamp, operationId: op.id })
-        .onConflictDoUpdate({
-          target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
-          set: { timestamp: op.timestamp, operationId: op.id }
-        })
-        .run()
+      // Advance the entity clock only when the mutation path won something:
+      // per-field upserts advance conditionally inside applyUpsert; deletes
+      // advance here. Orphan throws before here (no clock/applied advance).
+      if (op.op === 'delete') {
+        db.insert(schema.syncEntityClock)
+          .values({ entityType: op.entityType, entityId: op.entityId, timestamp: op.timestamp, operationId: op.id })
+          .onConflictDoUpdate({
+            target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
+            set: { timestamp: op.timestamp, operationId: op.id }
+          })
+          .run()
+      } else if (appliedEntity) {
+        const clockRow = db
+          .select()
+          .from(schema.syncEntityClock)
+          .where(eq(schema.syncEntityClock.entityType, op.entityType))
+          .all()
+          .find((r) => r.entityId === op.entityId) as typeof schema.syncEntityClock.$inferSelect | undefined
+        if (!clockRow || this.compareLww(op.timestamp, op.id, clockRow.timestamp, clockRow.operationId) > 0) {
+          db.insert(schema.syncEntityClock)
+            .values({ entityType: op.entityType, entityId: op.entityId, timestamp: op.timestamp, operationId: op.id })
+            .onConflictDoUpdate({
+              target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
+              set: { timestamp: op.timestamp, operationId: op.id }
+            })
+            .run()
+        }
+      }
       db.insert(schema.syncApplied).values({ operationId: op.id, appliedAt: new Date().toISOString() }).run()
       sqlite.exec('COMMIT')
       return appliedEntity
@@ -630,53 +1584,203 @@ export class SyncService {
     }
   }
 
-  private applyUpsert(op: SyncOperation): void {
+  /**
+   * Per-field LWW upsert (LOCK-PERSONAL-010): absent payload keys carry no
+   * intent and are preserved; present keys win/lose per field against
+   * sync_field_clock using timestamp + operationId tie-break. Same-field
+   * losers are recorded with allowlisted safe values in the bounded conflict
+   * log. Returns true when a row was created or at least one field won.
+   */
+  private applyUpsert(op: SyncOperation): boolean {
     const db = this.getDb()
     const nowIso = new Date().toISOString()
     const p = op.payload ?? {}
     if (op.entityType === 'topic') {
       const id = op.entityId
-      const name = (p.name as string | null) ?? null
-      const assistantId = (p.assistantId as string | null) ?? null
-      const createdAt = (p.createdAt as string | null) ?? nowIso
-      const updatedAt = (p.updatedAt as string | null) ?? nowIso
-      const deletedAt = (p.deletedAt as string | null) ?? null
-      // Upsert topic — preserve soft-delete semantics
-      db.insert(schema.topics)
-        .values({ id, name, assistantId, createdAt, updatedAt, deletedAt, extra: null })
-        .onConflictDoUpdate({
-          target: schema.topics.id,
-          set: { name, assistantId, updatedAt, deletedAt }
-        })
+      // Fail closed on wrong metadata types so a malformed op never silently
+      // drops metadata (strict validator already enforces; defense in depth).
+      if (Object.prototype.hasOwnProperty.call(p, 'pinned')) {
+        const v = p.pinned
+        if (v !== undefined && v !== null && typeof v !== 'boolean') {
+          throw new Error(`topic upsert invalid pinned for ${id}`)
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(p, 'prompt')) {
+        const v = p.prompt
+        if (v !== undefined && v !== null && typeof v !== 'string') {
+          throw new Error(`topic upsert invalid prompt for ${id}`)
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(p, 'isNameManuallyEdited')) {
+        const v = p.isNameManuallyEdited
+        if (v !== undefined && v !== null && typeof v !== 'boolean') {
+          throw new Error(`topic upsert invalid isNameManuallyEdited for ${id}`)
+        }
+      }
+      // Own-tombstone delete-wins: a hard delete suppresses stale late
+      // upserts for the same entity (deterministic LWW); a newer upsert may
+      // still resurrect. Checked before any row mutation.
+      const ownTopicTomb = this.getTombstone('topic', id)
+      if (ownTopicTomb && this.isSuppressedByTombstone(op.timestamp, op.id, ownTopicTomb)) {
+        logger.warn(`[applyUpsert] topic ${id} suppressed by own tombstone (delete-wins)`)
+        return false
+      }
+      const existingTopic = db.select().from(schema.topics).where(eq(schema.topics.id, id)).get()
+      let baseOverflow: Record<string, unknown> = {}
+      if (existingTopic?.extra) {
+        try {
+          const parsed: unknown = JSON.parse(existingTopic.extra)
+          if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            baseOverflow = parsed as Record<string, unknown>
+          } else if (parsed !== null) {
+            throw new Error(`topic upsert malformed extra for ${id}`)
+          }
+        } catch (e) {
+          if (e instanceof Error && e.message.includes(`topic upsert`)) throw e
+          throw new Error(`topic upsert malformed extra for ${id}`)
+        }
+      }
+      const fieldClocks = this.getFieldClocksInDb(db, 'topic', id)
+      const columnOf: Record<string, 'name' | 'assistantId' | 'createdAt' | 'updatedAt' | 'deletedAt'> = {
+        name: 'name',
+        assistantId: 'assistantId',
+        createdAt: 'createdAt',
+        updatedAt: 'updatedAt',
+        deletedAt: 'deletedAt'
+      }
+      const currentOf = (field: string): unknown => {
+        if (field in columnOf) {
+          if (!existingTopic) return null
+          return (existingTopic as unknown as Record<string, unknown>)[columnOf[field]] ?? null
+        }
+        return Object.prototype.hasOwnProperty.call(baseOverflow, field) ? baseOverflow[field] : null
+      }
+      if (!existingTopic) {
+        // Create-union: no row — full insert from provided-or-default values.
+        const name = (p.name as string | null) ?? null
+        const assistantId = (p.assistantId as string | null) ?? null
+        const createdAt = (p.createdAt as string | null) ?? nowIso
+        const updatedAt = (p.updatedAt as string | null) ?? nowIso
+        const deletedAt = (p.deletedAt as string | null) ?? null
+        const mergedOverflow: Record<string, unknown> = { ...baseOverflow }
+        for (const k of ['pinned', 'prompt', 'isNameManuallyEdited'] as const) {
+          if (Object.prototype.hasOwnProperty.call(p, k) && p[k] !== undefined) mergedOverflow[k] = p[k]
+        }
+        const extraValue = Object.keys(mergedOverflow).length > 0 ? JSON.stringify(mergedOverflow) : null
+        db.insert(schema.topics)
+          .values({ id, name, assistantId, createdAt, updatedAt, deletedAt, extra: extraValue })
+          .onConflictDoNothing()
+          .run()
+        const provided: Record<string, unknown> = {}
+        for (const k of Object.keys(p)) if (TOPIC_CLOCKED.has(k) && p[k] !== undefined) provided[k] = p[k]
+        this.updateFieldClocksInDb(db, 'topic', id, provided, op.timestamp, op.id)
+        return true
+      }
+      // Existing row: per-field contest only for present intent keys.
+      const winners: Array<{ field: string; value: unknown }> = []
+      for (const field of Object.keys(p)) {
+        if (!TOPIC_CLOCKED.has(field)) continue
+        const v = p[field]
+        if (v === undefined) continue
+        const incomingVal = (v ?? null) as unknown
+        const prior = fieldClocks.get(field)
+        if (!prior || this.compareLww(op.timestamp, op.id, prior.timestamp, prior.operationId) > 0) {
+          const currentVal = currentOf(field)
+          if (prior && !this.fieldValuesEqual(incomingVal, currentVal)) {
+            this.recordConflictInDb(db, {
+              entityType: 'topic',
+              entityId: id,
+              field,
+              loserValue: currentVal,
+              loserTimestamp: prior.timestamp,
+              loserOperationId: prior.operationId,
+              winnerTimestamp: op.timestamp,
+              winnerOperationId: op.id
+            })
+          }
+          winners.push({ field, value: incomingVal })
+        } else {
+          const currentVal = currentOf(field)
+          if (!this.fieldValuesEqual(incomingVal, currentVal)) {
+            this.recordConflictInDb(db, {
+              entityType: 'topic',
+              entityId: id,
+              field,
+              loserValue: incomingVal,
+              loserTimestamp: op.timestamp,
+              loserOperationId: op.id,
+              winnerTimestamp: prior.timestamp,
+              winnerOperationId: prior.operationId
+            })
+          }
+        }
+      }
+      if (winners.length === 0) return false
+      const colSet: Record<string, unknown> = {}
+      const mergedOverflow: Record<string, unknown> = { ...baseOverflow }
+      const wonPayload: Record<string, unknown> = {}
+      for (const w of winners) {
+        wonPayload[w.field] = p[w.field]
+        if (w.field in columnOf) {
+          colSet[columnOf[w.field]] = w.value
+        } else {
+          mergedOverflow[w.field] = w.value
+        }
+      }
+      const extraValue = Object.keys(mergedOverflow).length > 0 ? JSON.stringify(mergedOverflow) : null
+      db.update(schema.topics)
+        .set({ ...colSet, extra: extraValue })
+        .where(eq(schema.topics.id, id))
         .run()
+      this.updateFieldClocksInDb(db, 'topic', id, wonPayload, op.timestamp, op.id)
+      return true
     } else if (op.entityType === 'message') {
       const id = op.entityId
       const topicId = (p.topicId as string) ?? ''
       if (!topicId) throw new Error('message upsert missing topicId')
-      // Tombstone guard (common LWW comparator): a losing child must not
-      // resurrect a hard-deleted parent. An equal-timestamp op wins only
-      // when its operation ID is strictly greater than the delete's ID.
+      // Hard-delete delete-wins for late descendants (LOCK-PERSONAL-007): when
+      // the exact parent topic tombstone exists and the parent row is still
+      // absent, the child must be consumed/suppressed even when its timestamp
+      // is newer than the delete — it must neither resurrect a placeholder
+      // parent nor stall as a retryable orphan. Explicit future recreation
+      // must arrive as a parent topic creation operation first: when the
+      // parent row exists (recreated), fall back to the common LWW comparator
+      // (stale loses, newer wins). Unrelated missing parents (no exact
+      // tombstone) remain retryable orphans via the placeholder path below.
+      // Own-tombstone delete-wins for direct message deletes (same LWW rule
+      // as topics; a newer upsert may still resurrect per the higher-ID test).
+      const ownMsgTomb = this.getTombstone('message', id)
+      if (ownMsgTomb && this.isSuppressedByTombstone(op.timestamp, op.id, ownMsgTomb)) {
+        logger.warn(`[applyUpsert] message ${id} suppressed by own tombstone (delete-wins)`)
+        return false
+      }
       const topicTomb = this.getTombstone('topic', topicId)
-      if (topicTomb !== null && this.isSuppressedByTombstone(op.timestamp, op.id, topicTomb)) {
-        logger.warn(`[applyUpsert] message ${id} suppressed by topic tombstone ${topicId}`)
-        // Narrow containment: materialize an exact message tombstone for this
-        // suppressed (never-local) message so a later stale block for the
-        // same message is recognized and suppressed via its specific parent
-        // tombstone. Identity inherits the topic tombstone (the delete), not
-        // the stale op, so any block stale relative to the delete is covered.
-        // Runs inside the caller's transaction: atomic with clock/applied.
-        // Fail closed: materialization failure propagates so the suppressed
-        // op is not marked applied and its entity clock does not advance.
-        this.setTombstoneInDb(db, 'message', id, topicTomb.timestamp, topicTomb.operationId)
-        return
+      if (topicTomb !== null) {
+        const topicRowForTomb = db.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
+        if (!topicRowForTomb) {
+          logger.warn(`[applyUpsert] message ${id} suppressed by topic tombstone ${topicId} (delete-wins)`)
+          // Narrow containment: materialize an exact message tombstone for this
+          // suppressed (never-local) message so a later stale block for the
+          // same message is recognized and suppressed via its specific parent
+          // tombstone. Identity inherits the topic tombstone (the delete), not
+          // the stale op, so any block stale relative to the delete is covered.
+          // Runs inside the caller's transaction: atomic with clock/applied.
+          // Fail closed: materialization failure propagates so the suppressed
+          // op is not marked applied and its entity clock does not advance.
+          this.setTombstoneInDb(db, 'message', id, topicTomb.timestamp, topicTomb.operationId)
+          return false
+        }
+        if (this.isSuppressedByTombstone(op.timestamp, op.id, topicTomb)) {
+          logger.warn(`[applyUpsert] message ${id} suppressed by topic tombstone ${topicId}`)
+          this.setTombstoneInDb(db, 'message', id, topicTomb.timestamp, topicTomb.operationId)
+          return false
+        }
       }
       const existingPre = db.select().from(schema.messages).where(eq(schema.messages.id, id)).get()
       if (existingPre && existingPre.topicId !== topicId) {
         // Immutable parent identity: never reparent an existing message.
-        // Skip mutation (clock/applied still advance via caller) and keep
-        // the existing topicId.
         logger.warn(`[applyUpsert] message ${id} reparent ${existingPre.topicId} -> ${topicId} rejected`)
-        return
+        return false
       }
       const topicRow = db.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
       if (!topicRow) {
@@ -685,19 +1789,24 @@ export class SyncService {
           .onConflictDoNothing()
           .run()
       }
-      const role = (p.role as string | null) ?? null
-      const content = (p.content as string | null) ?? null
-      const status = (p.status as string | null) ?? null
-      const askId = (p.askId as string | null) ?? null
-      const model = (p.model as string | null) ?? null
-      const modelId = (p.modelId as string | null) ?? null
-      const assistantId = (p.assistantId as string | null) ?? null
-      const createdAt = (p.createdAt as string | null) ?? nowIso
-      const updatedAt = (p.updatedAt as string | null) ?? nowIso
-      const rawSort = p.sortOrder as number | null | undefined
-      const sortOrder = typeof rawSort === 'number' && Number.isFinite(rawSort) ? rawSort : 0
       const existing = existingPre ?? db.select().from(schema.messages).where(eq(schema.messages.id, id)).get()
+      const valOf = (v: unknown, fallback: null | number): unknown => {
+        if (v === undefined) return fallback
+        return (v ?? null) as unknown
+      }
       if (!existing) {
+        // Create-union: full insert from provided-or-default values.
+        const role = (p.role as string | null) ?? null
+        const content = (p.content as string | null) ?? null
+        const status = (p.status as string | null) ?? null
+        const askId = (p.askId as string | null) ?? null
+        const model = (p.model as string | null) ?? null
+        const modelId = (p.modelId as string | null) ?? null
+        const assistantId = (p.assistantId as string | null) ?? null
+        const createdAt = (p.createdAt as string | null) ?? nowIso
+        const updatedAt = (p.updatedAt as string | null) ?? nowIso
+        const rawSort = p.sortOrder as number | null | undefined
+        const sortOrder = typeof rawSort === 'number' && Number.isFinite(rawSort) ? rawSort : 0
         const maxRow = db.select().from(schema.messages).where(eq(schema.messages.topicId, topicId)).all()
         const maxSort = maxRow.length > 0 ? Math.max(...maxRow.map((r) => r.sortOrder)) + 1 : sortOrder
         let insertSort = typeof sortOrder === 'number' ? sortOrder : maxSort
@@ -719,27 +1828,99 @@ export class SyncService {
             extra: null
           })
           .run()
-      } else {
-        // Bounded ordering: preserve full incoming ordering state on existing
-        // rows so reorder converges via LWW. Per-entity LWW (not a broad
-        // ordering redesign); duplicates remain possible but converge equally.
-        db.update(schema.messages)
-          .set({ role, content, status, askId, model, modelId, assistantId, createdAt, updatedAt, sortOrder })
-          .where(eq(schema.messages.id, id))
-          .run()
+        const provided: Record<string, unknown> = {}
+        for (const k of Object.keys(p)) if (MESSAGE_CLOCKED.has(k) && p[k] !== undefined) provided[k] = p[k]
+        this.updateFieldClocksInDb(db, 'message', id, provided, op.timestamp, op.id)
+        return true
       }
+      // Existing row: per-field contest for present intent keys only.
+      const fieldClocksM = this.getFieldClocksInDb(db, 'message', id)
+      const currentM = (field: string): unknown => {
+        if (field === 'sortOrder') return (existing as unknown as Record<string, unknown>).sortOrder ?? 0
+        return ((existing as unknown as Record<string, unknown>)[field] ?? null) as unknown
+      }
+      const winnersM: Array<{ field: string; value: unknown }> = []
+      for (const field of Object.keys(p)) {
+        if (!MESSAGE_CLOCKED.has(field)) continue
+        const raw = p[field]
+        if (raw === undefined) continue
+        let incomingVal: unknown
+        if (field === 'sortOrder') {
+          incomingVal =
+            typeof raw === 'number' && Number.isFinite(raw) ? (Number.isInteger(raw) ? raw : Math.trunc(raw)) : 0
+        } else {
+          incomingVal = valOf(raw, null)
+        }
+        const prior = fieldClocksM.get(field)
+        if (!prior || this.compareLww(op.timestamp, op.id, prior.timestamp, prior.operationId) > 0) {
+          const cur = currentM(field)
+          if (prior && !this.fieldValuesEqual(incomingVal, cur)) {
+            this.recordConflictInDb(db, {
+              entityType: 'message',
+              entityId: id,
+              field,
+              loserValue: cur,
+              loserTimestamp: prior.timestamp,
+              loserOperationId: prior.operationId,
+              winnerTimestamp: op.timestamp,
+              winnerOperationId: op.id
+            })
+          }
+          winnersM.push({ field, value: incomingVal })
+        } else {
+          const cur = currentM(field)
+          if (!this.fieldValuesEqual(incomingVal, cur)) {
+            this.recordConflictInDb(db, {
+              entityType: 'message',
+              entityId: id,
+              field,
+              loserValue: incomingVal,
+              loserTimestamp: op.timestamp,
+              loserOperationId: op.id,
+              winnerTimestamp: prior.timestamp,
+              winnerOperationId: prior.operationId
+            })
+          }
+        }
+      }
+      if (winnersM.length === 0) return false
+      const setM: Record<string, unknown> = {}
+      const wonM: Record<string, unknown> = {}
+      for (const w of winnersM) {
+        wonM[w.field] = p[w.field]
+        setM[w.field] = w.value
+      }
+      db.update(schema.messages).set(setM).where(eq(schema.messages.id, id)).run()
+      this.updateFieldClocksInDb(db, 'message', id, wonM, op.timestamp, op.id)
+      return true
     } else if (op.entityType === 'message_block') {
       const id = op.entityId
       const messageId = (p.messageId as string) ?? ''
       if (!messageId) throw new Error('block upsert missing messageId')
-      // Tombstone first (common LWW comparator): a stale late child of a
-      // hard-deleted parent must be rejected (suppressed), never stall as
-      // a retryable orphan. Equal timestamp wins only with a strictly
-      // greater operation ID.
+      // Own-tombstone delete-wins for direct block deletes (LOCK-PERSONAL-007):
+      // a late upsert at or below the delete loses; a newer upsert may still
+      // resurrect per the higher-ID LWW rule. Checked before any row mutation.
+      const ownBlockTomb = this.getTombstone('message_block', id)
+      if (ownBlockTomb && this.isSuppressedByTombstone(op.timestamp, op.id, ownBlockTomb)) {
+        logger.warn(`[applyUpsert] block ${id} suppressed by own tombstone (delete-wins)`)
+        return false
+      }
+      // Hard-delete delete-wins for late descendants (LOCK-PERSONAL-007): when
+      // the exact parent message tombstone exists and the parent row is still
+      // absent, the child must be consumed/suppressed even when newer — never
+      // stall as a retryable orphan. When the parent row exists (recreated),
+      // fall back to the common LWW comparator.
       const msgTomb = this.getTombstone('message', messageId)
-      if (msgTomb !== null && this.isSuppressedByTombstone(op.timestamp, op.id, msgTomb)) {
-        logger.warn(`[applyUpsert] block ${id} suppressed by message tombstone ${messageId}`)
-        return
+      if (msgTomb !== null) {
+        const msgRowForTomb = db.select().from(schema.messages).where(eq(schema.messages.id, messageId)).get()
+        if (!msgRowForTomb) {
+          logger.warn(`[applyUpsert] block ${id} suppressed by message tombstone ${messageId} (delete-wins)`)
+          return false
+        }
+        if (this.isSuppressedByTombstone(op.timestamp, op.id, msgTomb)) {
+          logger.warn(`[applyUpsert] block ${id} suppressed by message tombstone ${messageId}`)
+          return false
+        }
       }
       const msg = db.select().from(schema.messages).where(eq(schema.messages.id, messageId)).get()
       if (!msg) {
@@ -754,18 +1935,18 @@ export class SyncService {
       const existingPreB = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, id)).get()
       if (existingPreB && existingPreB.messageId !== messageId) {
         logger.warn(`[applyUpsert] block ${id} reparent ${existingPreB.messageId} -> ${messageId} rejected`)
-        return
+        return false
       }
-      const type = (p.type as string | null) ?? null
-      const content = (p.content as string | null) ?? null
-      const status = (p.status as string | null) ?? null
-      const createdAt = (p.createdAt as string | null) ?? nowIso
-      const updatedAt = (p.updatedAt as string | null) ?? nowIso
-      const rawSortB = p.sortOrder as number | null | undefined
-      const sortOrder = typeof rawSortB === 'number' && Number.isFinite(rawSortB) ? rawSortB : 0
       const existing =
         existingPreB ?? db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, id)).get()
       if (!existing) {
+        const type = (p.type as string | null) ?? null
+        const content = (p.content as string | null) ?? null
+        const status = (p.status as string | null) ?? null
+        const createdAt = (p.createdAt as string | null) ?? nowIso
+        const updatedAt = (p.updatedAt as string | null) ?? nowIso
+        const rawSortB = p.sortOrder as number | null | undefined
+        const sortOrder = typeof rawSortB === 'number' && Number.isFinite(rawSortB) ? rawSortB : 0
         const siblings = db
           .select()
           .from(schema.messageBlocks)
@@ -777,13 +1958,73 @@ export class SyncService {
         db.insert(schema.messageBlocks)
           .values({ id, messageId, type, content, status, createdAt, updatedAt, sortOrder: insertSort, extra: null })
           .run()
-      } else {
-        db.update(schema.messageBlocks)
-          .set({ type, content, status, createdAt, updatedAt, sortOrder })
-          .where(eq(schema.messageBlocks.id, id))
-          .run()
+        const provided: Record<string, unknown> = {}
+        for (const k of Object.keys(p)) if (BLOCK_CLOCKED.has(k) && p[k] !== undefined) provided[k] = p[k]
+        this.updateFieldClocksInDb(db, 'message_block', id, provided, op.timestamp, op.id)
+        return true
       }
+      const fieldClocksB = this.getFieldClocksInDb(db, 'message_block', id)
+      const currentB = (field: string): unknown => {
+        if (field === 'sortOrder') return (existing as unknown as Record<string, unknown>).sortOrder ?? 0
+        return ((existing as unknown as Record<string, unknown>)[field] ?? null) as unknown
+      }
+      const winnersB: Array<{ field: string; value: unknown }> = []
+      for (const field of Object.keys(p)) {
+        if (!BLOCK_CLOCKED.has(field)) continue
+        const raw = p[field]
+        if (raw === undefined) continue
+        const incomingVal: unknown =
+          field === 'sortOrder'
+            ? typeof raw === 'number' && Number.isFinite(raw)
+              ? Number.isInteger(raw)
+                ? raw
+                : Math.trunc(raw)
+              : 0
+            : ((raw ?? null) as unknown)
+        const prior = fieldClocksB.get(field)
+        if (!prior || this.compareLww(op.timestamp, op.id, prior.timestamp, prior.operationId) > 0) {
+          const cur = currentB(field)
+          if (prior && !this.fieldValuesEqual(incomingVal, cur)) {
+            this.recordConflictInDb(db, {
+              entityType: 'message_block',
+              entityId: id,
+              field,
+              loserValue: cur,
+              loserTimestamp: prior.timestamp,
+              loserOperationId: prior.operationId,
+              winnerTimestamp: op.timestamp,
+              winnerOperationId: op.id
+            })
+          }
+          winnersB.push({ field, value: incomingVal })
+        } else {
+          const cur = currentB(field)
+          if (!this.fieldValuesEqual(incomingVal, cur)) {
+            this.recordConflictInDb(db, {
+              entityType: 'message_block',
+              entityId: id,
+              field,
+              loserValue: incomingVal,
+              loserTimestamp: op.timestamp,
+              loserOperationId: op.id,
+              winnerTimestamp: prior.timestamp,
+              winnerOperationId: prior.operationId
+            })
+          }
+        }
+      }
+      if (winnersB.length === 0) return false
+      const setB: Record<string, unknown> = {}
+      const wonB: Record<string, unknown> = {}
+      for (const w of winnersB) {
+        wonB[w.field] = p[w.field]
+        setB[w.field] = w.value
+      }
+      db.update(schema.messageBlocks).set(setB).where(eq(schema.messageBlocks.id, id)).run()
+      this.updateFieldClocksInDb(db, 'message_block', id, wonB, op.timestamp, op.id)
+      return true
     }
+    return false
   }
 
   private applyDelete(op: SyncOperation): void {
@@ -809,6 +2050,7 @@ export class SyncService {
       this.setTombstoneInDb(db, 'message', op.entityId, op.timestamp, op.id)
     } else if (op.entityType === 'message_block') {
       db.delete(schema.messageBlocks).where(eq(schema.messageBlocks.id, op.entityId)).run()
+      this.setTombstoneInDb(db, 'message_block', op.entityId, op.timestamp, op.id)
     }
   }
 
@@ -842,25 +2084,97 @@ export class SyncService {
 
   async sync(): Promise<SyncStatus> {
     if (this.statusSyncing) throw new Error('sync already in progress')
-    const cfg = this.getConfig()
-    if (!cfg.enabled) throw new Error('sync is disabled')
-    const endpointErr = validateEndpointUrl(cfg.endpoint)
-    if (endpointErr) throw new Error(endpointErr)
+    this.throwIfShutdown()
+    // Initial config/preflight reads under the durable error-reporting
+    // boundary (LOCK-PERSONAL-001/006/009): failures are logged and recorded
+    // durably where the DB is available, then the original exception is
+    // rethrown with no stale transport. A damaged DB keeps scoped logging +
+    // rethrow (never swallowed).
+    let cfg: SyncConfig
+    try {
+      cfg = this.getConfig()
+      if (!cfg.enabled) throw new Error('sync is disabled')
+      const endpointErr = validateEndpointUrl(cfg.endpoint)
+      if (endpointErr) throw new Error(endpointErr)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      logger.warn(`[sync] config preflight failed: ${msg.slice(0, 300)}`)
+      try {
+        this.updateLastError(`sync preflight failed: ${msg}`.slice(0, 1000))
+      } catch {}
+      if (e instanceof SyncConfigPreflightError) throw e
+      throw new SyncConfigPreflightError(msg, { cause: e })
+    }
+    // Snapshot the config generation with the validated transport: every
+    // subsequent transport and database commit re-checks it so a
+    // disable/endpoint/token transition aborts the stale cycle before any
+    // further stale-config work (LOCK-PERSONAL-001). An already-started
+    // SQLite transaction finishes atomically; the stale check fires between
+    // operations. Manual sync semantics are unchanged when no transition
+    // occurs mid-flight.
+    const syncGen = this.configGeneration
     this.statusSyncing = true
     try {
-      const deviceId = this.getDeviceId()
+      // Preflight identity/outbox reads (LOCK-PERSONAL-006/009): failures
+      // here must be durably visible where possible before rethrow — never a
+      // silent escape, never a cursor advance, original error preserved. When
+      // sync_state itself is damaged the lastError write fails and the
+      // original error still propagates (existing fail-closed behavior).
+      let deviceId: string
+      try {
+        deviceId = this.getDeviceId()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`sync preflight failed: ${msg}`.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
       const db = this.getDb()
-      const cursorRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).get()
-      const cursor = cursorRow ? parseInt(cursorRow.value ?? '0', 10) || 0 : 0
+      // Strict persisted cursor (LOCK-PERSONAL-001): malformed state records
+      // a durable error and fails closed before any pull — never skip history.
+      let cursor = 0
+      try {
+        const cursorRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).get()
+        if (cursorRow) {
+          if (cursorRow.value === null || cursorRow.value === undefined) {
+            throw new SyncCursorError('malformed persisted cursor: missing value')
+          }
+          cursor = parseStrictCursor(cursorRow.value)
+        }
+      } catch (e) {
+        if (isTolerableMissingSyncTable(db, e, MIGRATION_005_KEY)) {
+          cursor = 0
+        } else {
+          const msg = e instanceof Error ? e.message : String(e)
+          try {
+            this.updateLastError(`persisted cursor invalid: ${msg}`.slice(0, 1000))
+          } catch {}
+          throw e instanceof Error ? e : new Error(String(e))
+        }
+      }
 
       // Push all outbox chunks — never advance pull cursor on push
-      let outboxOps = this.listOutbox()
+      let outboxOps: SyncOperation[]
+      try {
+        outboxOps = this.listOutbox()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`sync preflight failed: ${msg}`.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
       while (outboxOps.length > 0) {
+        this.throwIfShutdown()
+        this.throwIfStaleConfig(syncGen)
         const chunk = outboxOps.slice(0, SYNC_MAX_OPERATIONS_PER_PUSH)
         const chunkIds = new Set(chunk.map((o) => o.id))
         const pushReq: SyncPushRequest = { deviceId, operations: chunk }
         try {
-          const pushRes = await syncClient.push(cfg.endpoint, cfg.token, pushReq)
+          const pushRes = await this.pushWithShutdown(cfg.endpoint, cfg.token, pushReq)
+          this.throwIfShutdown()
+          this.throwIfStaleConfig(syncGen)
           const acked = pushRes.acceptedIds ?? []
           // Sync F4: only clear IDs contained in the exact current chunk. An
           // ack for an operation outside this chunk (later outbox row or
@@ -888,10 +2202,17 @@ export class SyncService {
             throw new Error(msg)
           }
         } catch (e) {
+          if (e instanceof SyncShutdownError) throw e
+          // A stale-config abort is never a transport failure: rethrow
+          // without durable lastError writes (no post-transition status).
+          if (e instanceof SyncStaleConfigError) throw e
           const msg = e instanceof Error ? e.message : String(e)
+          this.throwIfShutdown()
           this.updateLastError(msg)
           throw e
         }
+        this.throwIfShutdown()
+        this.throwIfStaleConfig(syncGen)
         outboxOps = this.listOutbox()
         // Break after one chunk if we had limit? but keep looping until drained — guards large outbox
         if (outboxOps.length === 0) break
@@ -947,10 +2268,16 @@ export class SyncService {
         return null
       }
       while (!pagingDone) {
+        this.throwIfShutdown()
+        this.throwIfStaleConfig(syncGen)
         let pullRes: { operations: any[]; cursor: number }
         try {
-          pullRes = await syncClient.pull(cfg.endpoint, cfg.token, fetchCursor, deviceId)
+          pullRes = await this.pullWithShutdown(cfg.endpoint, cfg.token, fetchCursor, deviceId)
+          this.throwIfShutdown()
+          this.throwIfStaleConfig(syncGen)
         } catch (e) {
+          if (e instanceof SyncShutdownError) throw e
+          if (e instanceof SyncStaleConfigError) throw e
           pullError = e
           const msg = e instanceof Error ? e.message : String(e)
           this.updateLastError(msg)
@@ -989,8 +2316,20 @@ export class SyncService {
             if (typeof op.seq === 'number') resolved.set(op.seq, true)
           } catch (inner) {
             if (inner instanceof SyncOrphanError) {
-              logger.warn(`[sync] orphan ${op.id} buffered for later-page retry`)
-              if (typeof op.seq === 'number') deferred.push({ op, seq: op.seq })
+              if (typeof op.seq === 'number') {
+                if (deferred.length >= MAX_DEFERRED_ORPHANS) {
+                  logger.error(`[sync] orphan budget exceeded (${MAX_DEFERRED_ORPHANS}), fail closed`)
+                  failedNonOrphan = new SyncOrphanError(
+                    `orphan budget exceeded: ${MAX_DEFERRED_ORPHANS} buffered (e.g. ${String(op.id).slice(0, 80)})`.slice(
+                      0,
+                      500
+                    )
+                  )
+                  break
+                }
+                logger.warn(`[sync] orphan ${op.id} buffered for later-page retry`)
+                deferred.push({ op, seq: op.seq })
+              }
               continue
             }
             logger.error(`[sync] apply ${op.id} failed`, inner as Error)
@@ -1008,6 +2347,7 @@ export class SyncService {
           const msg = failedNonOrphan instanceof Error ? failedNonOrphan.message : String(failedNonOrphan)
           applyError = failedNonOrphan
           this.updateLastError(`apply failed: ${msg}`.slice(0, 1000))
+          this.throwIfStaleConfig(syncGen)
           const contiguous = this.contiguousCursor(
             commitCursor,
             [...seenSeq].sort((a, b) => a - b),
@@ -1022,6 +2362,7 @@ export class SyncService {
         }
         // Advance the durable cursor only contiguously; page on via the
         // relay fetch cursor (last seq returned) so later pages still arrive.
+        this.throwIfStaleConfig(syncGen)
         const contiguous = this.contiguousCursor(
           commitCursor,
           [...seenSeq].sort((a, b) => a - b),
@@ -1040,6 +2381,7 @@ export class SyncService {
       }
       // Final retry of buffered orphans against the full traversed stream.
       if (!pullError && !applyError && deferred.length > 0) {
+        this.throwIfStaleConfig(syncGen)
         const failed = tryApplyDeferred()
         if (failed) {
           const msg = failed instanceof Error ? failed.message : String(failed)
@@ -1050,6 +2392,7 @@ export class SyncService {
           applyError = new SyncOrphanError(`orphan blocked: ${ids}`.slice(0, 500))
           this.updateLastError(`sync blocked: ${deferred.length} orphan operation(s) unresolved`.slice(0, 1000))
         }
+        this.throwIfStaleConfig(syncGen)
         const contiguous = this.contiguousCursor(
           commitCursor,
           [...seenSeq].sort((a, b) => a - b),
@@ -1060,8 +2403,14 @@ export class SyncService {
           commitCursor = contiguous
         }
       }
+      this.throwIfShutdown()
+      this.throwIfStaleConfig(syncGen)
       if (!pullError && !applyError) {
         this.updateLastSyncAt(new Date().toISOString())
+        // Ordinary transport/reconciliation success clears lastError only.
+        // A durable capture failure (lastCaptureError) is never cleared here;
+        // it remains user-visible via getStatus until the next successful
+        // stable capture path (explicit clear API may follow in later work).
         this.updateLastError(null)
       }
       // Sync F2: a durable pull/apply/orphan failure must never report
@@ -1077,11 +2426,28 @@ export class SyncService {
     }
   }
 
-  /** Contiguous pull framing: ops must be exactly fetchCursor+1 ... fetchCursor+n, cursor must equal last seq. */
+  /**
+   * Contiguous pull framing (LOCK-PERSONAL-001): strict client + relay cursor
+   * contract. Request cursor, response cursor, and every op seq must be
+   * canonical non-negative safe integers; string forms are parsed strictly
+   * (no `12junk`, no leading zeros). Ops must be exactly fetchCursor+1 ...
+   * fetchCursor+n and response cursor must equal last seq.
+   */
   private assertContiguousPull(
     fetchCursor: number,
-    pullRes: { operations: Array<{ seq?: unknown }>; cursor: number }
+    pullRes: { operations: Array<{ seq?: unknown }>; cursor: unknown }
   ): void {
+    // Strict client request cursor: never advance from a malformed base.
+    if (!Number.isSafeInteger(fetchCursor) || fetchCursor < 0) {
+      throw new SyncCursorError(`malformed client cursor ${JSON.stringify(String(fetchCursor)).slice(0, 80)}`)
+    }
+    // Strict relay response cursor: canonical form only, never reinterpreted.
+    const relayCursor: unknown = pullRes.cursor
+    if (typeof relayCursor === 'string') {
+      parseStrictCursor(relayCursor)
+    } else if (typeof relayCursor !== 'number' || !Number.isSafeInteger(relayCursor) || relayCursor < 0) {
+      throw new SyncCursorError(`malformed relay cursor ${JSON.stringify(String(relayCursor)).slice(0, 80)}`)
+    }
     const ops = pullRes.operations ?? []
     if (ops.length === 0) {
       if (pullRes.cursor !== fetchCursor) {
@@ -1094,7 +2460,7 @@ export class SyncService {
     for (let i = 0; i < ops.length; i++) {
       const seq: unknown = (ops[i] as { seq?: unknown })?.seq
       const expected = fetchCursor + i + 1
-      if (typeof seq !== 'number' || !Number.isInteger(seq) || seq !== expected) {
+      if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq !== expected) {
         throw new Error(
           `pull response non-contiguous: expected seq ${String(expected)} at position ${String(i)} but got ${String(seq)} (request cursor ${String(fetchCursor)})`
         )
@@ -1141,12 +2507,68 @@ export class SyncService {
     return c
   }
 
+  /**
+   * Shutdown-aware push/pull wrappers: the relay fetch aborts synchronously
+   * on beginShutdown() via a linked AbortController. Shutdown surfaces as
+   * SyncShutdownError without durable lastError writes (no post-close DB).
+   */
+  private async pushWithShutdown(
+    endpoint: string,
+    token: string | undefined,
+    req: SyncPushRequest
+  ): Promise<{ cursor: number; acceptedIds: string[] }> {
+    const controller = new AbortController()
+    const untrack = this.trackFetchController(controller)
+    try {
+      return await syncClient.push(endpoint, token, req, controller.signal)
+    } catch (e) {
+      if (this.shutdownRequested || (e as Error)?.name === 'AbortError') {
+        try {
+          ;(e as Error).name
+        } catch {}
+        if (this.shutdownRequested) throw new SyncShutdownError()
+      }
+      throw e
+    } finally {
+      untrack()
+    }
+  }
+
+  private async pullWithShutdown(
+    endpoint: string,
+    token: string | undefined,
+    cursor: number,
+    deviceId: string
+  ): Promise<{ operations: any[]; cursor: number }> {
+    const controller = new AbortController()
+    const untrack = this.trackFetchController(controller)
+    try {
+      return (await syncClient.pull(endpoint, token, cursor, deviceId, controller.signal)) as unknown as {
+        operations: any[]
+        cursor: number
+      }
+    } catch (e) {
+      if (this.shutdownRequested) throw new SyncShutdownError()
+      throw e
+    } finally {
+      untrack()
+    }
+  }
+
   clearAllForTests(): void {
+    this.resetShutdownForTests()
+    this.configGeneration = 0
     try {
       const db = this.getDb()
       db.delete(schema.syncOutbox).run()
       db.delete(schema.syncApplied).run()
       db.delete(schema.syncEntityClock).run()
+      try {
+        db.delete(schema.syncFieldClock).run()
+      } catch {}
+      try {
+        db.delete(schema.syncConflictLog).run()
+      } catch {}
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).run()
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_LAST_SYNC_AT)).run()
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_LAST_ERROR)).run()

@@ -55,10 +55,58 @@ export interface SyncStatus {
   endpoint: string
   lastSyncAt: string | null
   lastError: string | null
+  lastCaptureError: string | null
   pendingCount: number
   cursor: number
   syncing: boolean
+  /**
+   * Unresolved same-field conflict records (bounded durable log).
+   * Deterministic LWW winner applied; loser retained for future recovery.
+   * Dedicated restore UI is deferred — count is honest pending-conflict state.
+   */
+  conflictCount: number
 }
+
+/**
+ * Field-level patch semantics (LOCK-PERSONAL-005/010):
+ * upsert payloads carry only intentional changed allowlisted fields plus
+ * identity/immutable relation fields (`id` always; `topicId` for messages,
+ * `messageId` for blocks). Absent keys mean no intent and must be preserved
+ * on apply (never wiped). Present keys including explicit null are intent.
+ * Creates carry the full allowlisted set; updates carry the changed subset
+ * (never `sortOrder` — reorder is unsupported).
+ */
+
+/** Mutable allowlisted topic fields with per-field clocks (identity `id` excluded). */
+export const SYNC_TOPIC_PATCH_FIELDS = [
+  'name',
+  'assistantId',
+  'createdAt',
+  'updatedAt',
+  'deletedAt',
+  'pinned',
+  'prompt',
+  'isNameManuallyEdited'
+] as const
+
+/** Mutable allowlisted message fields with per-field clocks (`topicId` is immutable identity). */
+export const SYNC_MESSAGE_PATCH_FIELDS = [
+  'role',
+  'content',
+  'status',
+  'askId',
+  'model',
+  'modelId',
+  'assistantId',
+  'createdAt',
+  'updatedAt'
+] as const
+
+/** Mutable allowlisted block fields with per-field clocks (`messageId` is immutable identity). */
+export const SYNC_BLOCK_PATCH_FIELDS = ['type', 'content', 'status', 'createdAt', 'updatedAt'] as const
+
+/** Fixed bound for the durable same-field conflict record log. */
+export const SYNC_CONFLICT_LOG_MAX = 100
 
 export const SYNC_MAX_OPERATIONS_PER_PUSH = 200
 export const SYNC_MAX_OPERATIONS_PER_PULL = 200
