@@ -1,10 +1,12 @@
 # 同步 MVP 提案（Synchronization MVP Proposal）— Historical Record
 
-> **Historical notice — superseded.** This document is a **historical record** of the Cherry Chat first-phase synchronization boundary proposal as of 2026-08-19. Its **Phase 0/1 proposal framing and open-question stance are superseded** by the canonical authority [`sync-architecture-selection.md`](./sync-architecture-selection.md) (S8 Selection Validation — Active, documentation/research only). Current product target, balanced four-dimension selection method, candidate taxonomy/shortlist, and S8 spike plan are governed **only** by that canonical document. Do not use this file as an active design input.
+> **Archived — historical record, not current.** This document is preserved unchanged below for audit. The current reference is [`../multi-device-sync.md`](../multi-device-sync.md). Do not use this file as an active design input.
+
+> **Historical notice — superseded.** This document is a **historical record** of the Cherry Chat first-phase synchronization boundary proposal as of 2026-08-19. Its **Phase 0/1 proposal framing and open-question stance are superseded**. Current sync status is owned by [`../multi-device-sync.md`](../multi-device-sync.md); candidate analysis is preserved as fallback reference in [`../sync-architecture-selection.md`](../sync-architecture-selection.md). Do not use this file as an active design input.
 > **What remains historically relevant**: the four durable boundary locks (SYNC-001…004), data-scope exclusion inventory, device-local vs cross-device authority distinction, and conflict-matrix inventory — preserved below in compressed form for audit.
-> **What is no longer open**: "account vs no-account" is resolved — SYNC-S8-001 locks **no Cherry Chat account, device pairing, one user-selected service** (pairing/device trust distinct from an account system). "Whether S8 is activated" is resolved — S8 Selection Validation is **active**. Vendor selection and implementation authorization remain governed by the canonical document, not by this proposal.
+> **What is no longer open**: "account vs no-account" is resolved — SYNC-S8-001 locks **no Cherry Chat account, device pairing, one user-selected service** (pairing/device trust distinct from an account system). Vendor selection and implementation authorization are not governed by this proposal.
 > **Status at archival**: Proposal/Draft as of 2026-08-19; zero production code, dependency, schema, or vendor commitment. One disposable PowerSync spike executed under zero-production-change scope; harness disposed (see historical [`sync-powersync-spike.md`](./sync-powersync-spike.md)).
-> **Related governance**: SQLite chat authority by [SQLite migration governance](./sqlite-migration.md); identity/platform/release by [Application Identity ADR](./cherry-chat-application-identity.md); context-window anchor by [Context window governance](./context-window.md); program-level S8 by [Architecture Evolution Program](./architecture-evolution-program.md) Phase 8.
+> **Related governance**: SQLite chat authority by [SQLite migration governance](../sqlite-migration.md); identity/platform/release by [Application Identity ADR](../cherry-chat-application-identity.md); context-window anchor by [Context window governance](../context-window.md); program-level S8 by [Architecture Evolution Program](../architecture-evolution-program.md) Phase 8.
 
 ---
 
@@ -43,7 +45,7 @@ No privacy-policy change was made by this proposal; `PRIVACY.md` wording at prop
 
 ## 6. Supersession
 
-- **For all new sync work**: read [`sync-architecture-selection.md`](./sync-architecture-selection.md) first. It owns product target (SYNC-S8-001), current baseline (SYNC-S8-002), balanced four-dimension method (SYNC-S8-003), candidate taxonomy/shortlist (SYNC-S8-004), comparison criteria, four-spike plan (S8-SP1..SP4), decision rules, DB write-amplification gate (SYNC-S8-006), and open decisions.
+- **For all new sync work**: read [`../multi-device-sync.md`](../multi-device-sync.md) first. Candidate analysis in [`../sync-architecture-selection.md`](../sync-architecture-selection.md) is a conditional fallback reference only.
 - **This file** remains only to preserve prior locks, exclusion inventory, and conflict taxonomy for audit. It does not authorize implementation, vendor commitment, schema change, or E2EE/account/attachment decisions.
 
-*End of historical record — for superseded Phase 0/1 proposal; current authority is `sync-architecture-selection.md`.*
+*End of historical record — for superseded Phase 0/1 proposal; current reference is `../multi-device-sync.md`.*
