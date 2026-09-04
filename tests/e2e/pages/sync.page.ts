@@ -22,9 +22,17 @@ export interface SyncStatusShape {
   endpoint: string
   lastSyncAt: string | null
   lastError: string | null
+  lastCaptureError: string | null
   pendingCount: number
   cursor: number
   syncing: boolean
+  conflictCount: number
+}
+
+export interface SyncConfigShape {
+  endpoint: string
+  token?: string
+  enabled: boolean
 }
 
 export class SyncSettingsPage extends BasePage {
@@ -87,13 +95,73 @@ export async function setSyncConfigViaApi(page: Page, config: SyncConfigInput): 
   if (!result.ok) throw new Error(`setSyncConfigViaApi failed: ${(result as any).error}`)
 }
 
-/** Typed getStatus via the production preload surface. */
+/**
+ * Shared strict SyncStatus validator (fail-closed, no defaults).
+ * Every required SyncStatus field must be present with the production type.
+ * Missing/malformed fields throw instead of falling back to healthy
+ * defaults. Actual values are preserved as-is. Credential-free: status
+ * carries no token, and errors report only field/shape, never values.
+ */
+function toStrictSyncStatusShape(raw: unknown, source: string): SyncStatusShape {
+  if (!raw || typeof raw !== 'object') throw new Error(`${source} returned non-object`)
+  const s = raw as Record<string, unknown>
+  if (typeof s.enabled !== 'boolean') throw new Error(`${source}: enabled must be boolean`)
+  // Production SyncStatus.endpoint is a string ('' when unset).
+  if (typeof s.endpoint !== 'string') throw new Error(`${source}: endpoint must be string`)
+  if (!(typeof s.lastSyncAt === 'string' || s.lastSyncAt === null))
+    throw new Error(`${source}: lastSyncAt must be string|null`)
+  if (!(typeof s.lastError === 'string' || s.lastError === null))
+    throw new Error(`${source}: lastError must be string|null`)
+  if (!(typeof s.lastCaptureError === 'string' || s.lastCaptureError === null))
+    throw new Error(`${source}: lastCaptureError must be string|null`)
+  for (const field of ['pendingCount', 'cursor', 'conflictCount'] as const) {
+    const v = s[field]
+    if (typeof v !== 'number' || !Number.isSafeInteger(v) || (v as number) < 0)
+      throw new Error(`${source}: ${field} must be a non-negative integer`)
+  }
+  if (typeof s.syncing !== 'boolean') throw new Error(`${source}: syncing must be boolean`)
+  return {
+    enabled: s.enabled as boolean,
+    endpoint: s.endpoint as string,
+    lastSyncAt: s.lastSyncAt as string | null,
+    lastError: s.lastError as string | null,
+    lastCaptureError: s.lastCaptureError as string | null,
+    pendingCount: s.pendingCount as number,
+    cursor: s.cursor as number,
+    syncing: s.syncing as boolean,
+    conflictCount: s.conflictCount as number
+  }
+}
+
+/**
+ * Exact redacted sync-token assertion. Preserves strict equality while
+ * reporting only presence/shape/mismatch — never credential values.
+ */
+export function assertSyncTokenExactRedacted(actual: unknown, expectedToken: string, context = 'sync token'): void {
+  if (typeof actual !== 'string' || actual.length === 0) throw new Error(`${context} missing or empty`)
+  if (typeof expectedToken !== 'string' || expectedToken.length === 0) throw new Error(`${context} expectation missing`)
+  if (actual !== expectedToken) throw new Error(`${context} mismatch`)
+}
+
+/** Typed getStatus via the production preload surface (fail-closed, no defaults). */
 export async function getSyncStatusViaApi(page: Page): Promise<SyncStatusShape> {
   const status = await page.evaluate(async () => {
     return await (window as any).api.sync.getStatus()
   })
-  if (!status || typeof status !== 'object') throw new Error('getSyncStatusViaApi returned non-object')
-  return status as SyncStatusShape
+  return toStrictSyncStatusShape(status, 'getSyncStatusViaApi')
+}
+
+/** Typed getConfig via the production preload surface (persisted sync config). */
+export async function getSyncConfigViaApi(page: Page): Promise<SyncConfigShape> {
+  const config = await page.evaluate(async () => {
+    return await (window as any).api.sync.getConfig()
+  })
+  if (!config || typeof config !== 'object') throw new Error('getSyncConfigViaApi returned non-object')
+  return {
+    endpoint: String((config as any).endpoint ?? ''),
+    token: typeof (config as any).token === 'string' ? ((config as any).token as string) : undefined,
+    enabled: Boolean((config as any).enabled)
+  }
 }
 
 /**
@@ -126,8 +194,9 @@ export async function runSyncViaApi(
     if (!outcome.status || typeof outcome.status !== 'object') {
       throw new Error(`runSyncViaApi has no durable status: ${outcome.error ?? 'unknown'}`)
     }
+    const strictStatus = toStrictSyncStatusShape(outcome.status, 'runSyncViaApi')
     if (outcome.ok || !outcome.error?.includes('already in progress') || Date.now() >= deadline) {
-      return { status: outcome.status as SyncStatusShape, threw: outcome.ok ? null : (outcome.error as string) }
+      return { status: strictStatus, threw: outcome.ok ? null : (outcome.error as string) }
     }
     await new Promise((resolve) => setTimeout(resolve, 500))
   }

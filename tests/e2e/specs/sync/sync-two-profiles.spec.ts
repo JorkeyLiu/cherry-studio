@@ -17,14 +17,17 @@ import { expect, test } from '../../fixtures/electron.fixture'
 import {
   closeSecondSyncProfile,
   launchSecondSyncProfile,
+  relaunchSecondSyncProfile,
   type SecondSyncProfile
 } from '../../utils/sync-second-profile'
 import { startTestRelay, type TestRelayHandle } from '../../utils/sync-relay'
 import {
   appendMessageViaApi,
+  assertSyncTokenExactRedacted,
   deleteMessageViaApi,
   ensureTopicViaApi,
   fetchMessagesViaApi,
+  getSyncConfigViaApi,
   getSyncStatusViaApi,
   hardDeleteTopicViaApi,
   isoNow,
@@ -886,6 +889,500 @@ test.describe('Sync delete/recovery convergence', () => {
       }
       void lastDetail
       void blk
+    } finally {
+      try {
+        relay?.setPaused(false)
+      } catch {}
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+})
+
+/**
+ * Ordinary message edit + offline concurrent edit semantics on the
+ * operation-log + thin relay path.
+ *
+ * LOCK-001: Main SQLite is the sole runtime chat authority; every assertion
+ * reads production IPC-visible ChatDb state plus durable sync metadata.
+ * LOCK-002: the operation log is sync intent only, never a second authority.
+ * LOCK-003: strict authenticated push/pull+cursor is authoritative; SSE is
+ * notification only (tests below never assert SSE-delivered data).
+ * LOCK-008: edits use stable message allowlisted scalar fields only
+ * (content/status); no structured block/attachment joint edits.
+ * LOCK-009: same-field conflicts use existing timestamp-then-operationId LWW
+ * and observe conflictCount; no new winner rule or conflict UI.
+ * LOCK-010: recovery means clean close with pending edit then same-profile
+ * relaunch and continued convergence only; no crash/SIGKILL/WAL claim.
+ * LOCK-011: the same in-memory relay instance stays alive across relaunch;
+ * no relay restart persistence is tested.
+ */
+
+/** Bounded poll until the message row carries the expected content. */
+async function pollForMessageContent(
+  page: Page,
+  topicId: string,
+  messageId: string,
+  expectedContent: string,
+  timeoutMs = 90000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let last = ''
+  while (Date.now() < deadline) {
+    const { messages } = await fetchMessagesViaApi(page, topicId)
+    const found = (messages as any[]).find((m: any) => m?.id === messageId) as any
+    if (found && found.content === expectedContent) return
+    last = found ? `content=${JSON.stringify(found.content)}` : `absent messages=${messages.length}`
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(
+    `message-content timeout for ${topicId}/${messageId} expected=${JSON.stringify(expectedContent)} last=${last}`
+  )
+}
+
+/** Bounded poll until the message row carries the expected content+status. */
+async function pollForMessageFields(
+  page: Page,
+  topicId: string,
+  messageId: string,
+  expected: { content: string; status: string },
+  timeoutMs = 90000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let last = ''
+  while (Date.now() < deadline) {
+    const { messages } = await fetchMessagesViaApi(page, topicId)
+    const found = (messages as any[]).find((m: any) => m?.id === messageId) as any
+    if (found && found.content === expected.content && found.status === expected.status) return
+    last = found
+      ? `content=${JSON.stringify(found.content)} status=${JSON.stringify(found.status)}`
+      : `absent messages=${messages.length}`
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(
+    `message-fields timeout for ${topicId}/${messageId} expected=${JSON.stringify(expected)} last=${last}`
+  )
+}
+
+/**
+ * Bounded poll until both profiles agree on the same message content, which
+ * must be one of the allowed candidates. Returns the agreed winner content.
+ * Callers asserting LOCK-009 must additionally compare the returned content
+ * against the relay-computed timestamp-then-operationId winner.
+ */
+async function pollForSameContentAgreement(
+  pageA: Page,
+  pageB: Page,
+  topicId: string,
+  messageId: string,
+  candidates: string[],
+  timeoutMs = 120000
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  let last = ''
+  while (Date.now() < deadline) {
+    const [fetchA, fetchB] = await Promise.all([
+      fetchMessagesViaApi(pageA, topicId).catch(() => null),
+      fetchMessagesViaApi(pageB, topicId).catch(() => null)
+    ])
+    const msgA = fetchA?.messages.find((m: any) => m?.id === messageId) as any
+    const msgB = fetchB?.messages.find((m: any) => m?.id === messageId) as any
+    if (
+      msgA &&
+      msgB &&
+      typeof msgA.content === 'string' &&
+      msgA.content === msgB.content &&
+      candidates.includes(msgA.content)
+    ) {
+      return msgA.content as string
+    }
+    last = `A=${msgA ? JSON.stringify(msgA.content) : 'absent'} B=${msgB ? JSON.stringify(msgB.content) : 'absent'}`
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`same-content agreement timeout for ${topicId}/${messageId}: ${last}`)
+}
+
+interface RelayMessageUpsert {
+  id: string
+  timestamp: number
+  content: string
+}
+
+/**
+ * Poll the existing authenticated relay pull path from a pre-mutation cursor
+ * until both same-field message upserts for the entity are observable, then
+ * compute the existing timestamp-then-operationId LWW winner (mirror of the
+ * production compareLww: timestamp numeric, operationId lexicographic).
+ * Test-only; uses the relay HTTP pull capability already used elsewhere.
+ */
+async function pollForRelayLwwWinner(
+  endpoint: string,
+  token: string,
+  baseCursor: number,
+  entityId: string,
+  candidates: string[],
+  timeoutMs = 120000
+): Promise<RelayMessageUpsert> {
+  const deadline = Date.now() + timeoutMs
+  let last = ''
+  while (Date.now() < deadline) {
+    const res = await fetch(`${endpoint}/sync/pull?cursor=${baseCursor}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { operations: any[] }
+    const ops = (Array.isArray(body.operations) ? body.operations : []).filter(
+      (o: any) =>
+        o?.entityType === 'message' &&
+        o?.entityId === entityId &&
+        o?.op === 'upsert' &&
+        typeof o?.id === 'string' &&
+        typeof o?.timestamp === 'number' &&
+        typeof o?.payload?.content === 'string' &&
+        candidates.includes(String(o.payload.content))
+    ) as any[]
+    // Both distinct candidate contents must be present before deciding.
+    const seen = new Set(ops.map((o) => String(o.payload.content)))
+    if (ops.length >= 2 && candidates.every((c) => seen.has(c))) {
+      let winner = ops[0]
+      for (const op of ops.slice(1)) {
+        if (
+          op.timestamp > winner.timestamp ||
+          (op.timestamp === winner.timestamp && String(op.id) > String(winner.id))
+        ) {
+          winner = op
+        }
+      }
+      return { id: String(winner.id), timestamp: winner.timestamp as number, content: String(winner.payload.content) }
+    }
+    last = `ops=${ops.length} seen=[${[...seen].join(',')}]`
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`relay LWW winner timeout for ${entityId}: ${last}`)
+}
+
+test.describe('Sync ordinary edit and concurrent edit semantics', () => {
+  test.setTimeout(300000)
+
+  test('online ordinary message content edit converges automatically', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      // Deterministic baseline, drained via labeled manual setup rounds.
+      const topic = 'e2e-sync-edit-topic-1'
+      const msg = 'e2e-sync-edit-msg-1'
+      const blk = 'e2e-sync-edit-blk-1'
+      const base = 'edit baseline content one'
+      await ensureTopicViaApi(pageA, topic, 'Edit Topic One')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, base), [blockJson(blk, msg, base)])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, base)
+
+      const cursorA0 = (await getSyncStatusViaApi(pageA)).cursor
+      const cursorB0 = (await getSyncStatusViaApi(pageB)).cursor
+      const conflictsA0 = (await getSyncStatusViaApi(pageA)).conflictCount
+      const conflictsB0 = (await getSyncStatusViaApi(pageB)).conflictCount
+
+      // Ordinary allowlisted scalar edit on A only (message row; block untouched).
+      const edited = 'edit online converged content one'
+      await updateMessageViaApi(pageA, topic, msg, { content: edited })
+      await pollForMessageContent(pageA, topic, msg, edited, 30000)
+
+      // Automatic convergence: no manual runSync after the edit. B's
+      // automation pulls the strict push/pull+cursor path (SSE hint only).
+      await pollForMessageContent(pageB, topic, msg, edited, 90000)
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusA.lastError).toBeNull()
+      expect(statusB.lastError).toBeNull()
+      expect(statusA.lastCaptureError).toBeNull()
+      expect(statusB.lastCaptureError).toBeNull()
+      expect(statusA.cursor).toBeGreaterThan(cursorA0)
+      expect(statusB.cursor).toBeGreaterThan(cursorB0)
+      // Existing LWW semantics: the writer observes no contest locally while
+      // the receiver records the deterministic same-field loser (old value
+      // overwritten by the newer edit). Observe honestly without a new rule.
+      expect(statusA.conflictCount).toBe(conflictsA0)
+      expect(statusB.conflictCount).toBeGreaterThan(conflictsB0)
+      // Block row keeps its original content: no joint block edit occurred.
+      const afterB = await fetchMessagesViaApi(pageB, topic)
+      const blkAfter = (afterB.blocks as any[]).find((b: any) => b?.id === blk) as any
+      expect(blkAfter?.content).toBe(base)
+    } finally {
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('offline independent-field edits merge preserving both fields', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      // Deterministic baseline, drained via labeled manual setup rounds.
+      const topic = 'e2e-sync-edit-topic-2'
+      const msg = 'e2e-sync-edit-msg-2'
+      const blk = 'e2e-sync-edit-blk-2'
+      const base = 'edit baseline content two'
+      await ensureTopicViaApi(pageA, topic, 'Edit Topic Two')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, base), [blockJson(blk, msg, base)])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, base)
+      const conflictsA0 = (await getSyncStatusViaApi(pageA)).conflictCount
+      const conflictsB0 = (await getSyncStatusViaApi(pageB)).conflictCount
+      const cursorA0 = (await getSyncStatusViaApi(pageA)).cursor
+
+      // Gate transport before either mutation so automation cannot exchange
+      // one intent before the other exists. Both profiles stay enabled.
+      await relay.waitForQuiescent()
+      const relayCursorBase = relay.getCursor()
+      const relayOpsBase = relay.getOperationCount()
+      relay.setPaused(true)
+      expect(relay.isPaused()).toBe(true)
+
+      // Independent allowlisted scalar fields: A edits content, B edits status.
+      const contentA = 'edit independent content from A'
+      const statusB = 'error'
+      await updateMessageViaApi(pageA, topic, msg, { content: contentA })
+      await updateMessageViaApi(pageB, topic, msg, { status: statusB })
+
+      // Both operations are locally captured/pending before any release.
+      const pendingA = await getSyncStatusViaApi(pageA)
+      const pendingB = await getSyncStatusViaApi(pageB)
+      expect(pendingA.pendingCount).toBeGreaterThan(0)
+      expect(pendingB.pendingCount).toBeGreaterThan(0)
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBase)
+      expect(relay.getOperationCount()).toBe(relayOpsBase)
+
+      // Release transport; convergence is automatic only (no post-release
+      // manual sync). The strict push/pull+cursor path merges independent
+      // fields; SSE is hint-only.
+      relay.setPaused(false)
+      expect(relay.isPaused()).toBe(false)
+      await pollForMessageFields(pageA, topic, msg, { content: contentA, status: statusB }, 120000)
+      await pollForMessageFields(pageB, topic, msg, { content: contentA, status: statusB }, 120000)
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusBFinal = await getSyncStatusViaApi(pageB)
+      expect(statusA.lastError).toBeNull()
+      expect(statusBFinal.lastError).toBeNull()
+      expect(statusA.lastCaptureError).toBeNull()
+      expect(statusBFinal.lastCaptureError).toBeNull()
+      expect(statusA.cursor).toBeGreaterThan(cursorA0)
+      // Existing field-clock semantics: the baseline full upsert seeds a field
+      // clock for every clocked field, so each receiver applies a newer
+      // disjoint changed value over an existing baseline clock whose current
+      // value differs and records the overwritten baseline value as a
+      // conflict (SyncService winning path), even though the fields never
+      // contest each other. Both fields still merge; no product rule changes.
+      expect(statusA.conflictCount).toBeGreaterThan(conflictsA0)
+      expect(statusBFinal.conflictCount).toBeGreaterThan(conflictsB0)
+      expect(statusA.conflictCount + statusBFinal.conflictCount).toBeGreaterThan(conflictsA0 + conflictsB0)
+    } finally {
+      try {
+        relay?.setPaused(false)
+      } catch {}
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('offline same-field content edits converge to the LWW winner with conflictCount', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      // Deterministic baseline, drained via labeled manual setup rounds.
+      const topic = 'e2e-sync-edit-topic-3'
+      const msg = 'e2e-sync-edit-msg-3'
+      const blk = 'e2e-sync-edit-blk-3'
+      const base = 'edit baseline content three'
+      await ensureTopicViaApi(pageA, topic, 'Edit Topic Three')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, base), [blockJson(blk, msg, base)])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, base)
+      const conflictsA0 = (await getSyncStatusViaApi(pageA)).conflictCount
+      const conflictsB0 = (await getSyncStatusViaApi(pageB)).conflictCount
+
+      // Gate transport before either mutation.
+      await relay.waitForQuiescent()
+      const relayCursorBase = relay.getCursor()
+      const relayOpsBase = relay.getOperationCount()
+      relay.setPaused(true)
+      expect(relay.isPaused()).toBe(true)
+
+      // Same allowlisted scalar field from both sides with distinct values.
+      const contentA = 'edit same-field content from A'
+      const contentB = 'edit same-field content from B'
+      await updateMessageViaApi(pageA, topic, msg, { content: contentA })
+      await updateMessageViaApi(pageB, topic, msg, { content: contentB })
+
+      // Both pending before release; nothing exchanged while gated.
+      const pendingA = await getSyncStatusViaApi(pageA)
+      const pendingB = await getSyncStatusViaApi(pageB)
+      expect(pendingA.pendingCount).toBeGreaterThan(0)
+      expect(pendingB.pendingCount).toBeGreaterThan(0)
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBase)
+      expect(relay.getOperationCount()).toBe(relayOpsBase)
+
+      // Release transport; exchange is automatic only (no post-release manual
+      // sync). The winner is the existing timestamp-then-operationId LWW
+      // winner computed from the authenticated relay pull path.
+      relay.setPaused(false)
+      expect(relay.isPaused()).toBe(false)
+      const lwwWinner = await pollForRelayLwwWinner(relay.endpoint, RELAY_TOKEN, relayCursorBase, msg, [
+        contentA,
+        contentB
+      ])
+      expect([contentA, contentB]).toContain(lwwWinner.content)
+      const winner = await pollForSameContentAgreement(pageA, pageB, topic, msg, [contentA, contentB], 120000)
+      expect(winner).toBe(lwwWinner.content)
+      // Both profiles carry exactly the computed winner content.
+      await pollForMessageContent(pageA, topic, msg, lwwWinner.content, 60000)
+      await pollForMessageContent(pageB, topic, msg, lwwWinner.content, 60000)
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusA.lastError).toBeNull()
+      expect(statusB.lastError).toBeNull()
+      expect(statusA.lastCaptureError).toBeNull()
+      expect(statusB.lastCaptureError).toBeNull()
+      // The loser side(s) observe the existing deterministic conflict record.
+      // Each side applies the remote same-field value against its own newer
+      // local value, so both record the deterministic loser on this path.
+      expect(statusA.conflictCount).toBeGreaterThan(conflictsA0)
+      expect(statusB.conflictCount).toBeGreaterThan(conflictsB0)
+      expect(statusA.conflictCount + statusB.conflictCount).toBeGreaterThan(conflictsA0 + conflictsB0)
+    } finally {
+      try {
+        relay?.setPaused(false)
+      } catch {}
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('pending edit survives clean same-profile relaunch then converges', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      let pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      // Deterministic baseline, drained via labeled manual setup rounds.
+      const topic = 'e2e-sync-edit-topic-4'
+      const msg = 'e2e-sync-edit-msg-4'
+      const blk = 'e2e-sync-edit-blk-4'
+      const base = 'edit baseline content four'
+      await ensureTopicViaApi(pageA, topic, 'Edit Topic Four')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, base), [blockJson(blk, msg, base)])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, base)
+
+      // Gate transport, then queue a pending edit on the second profile.
+      await relay.waitForQuiescent()
+      const relayCursorBase = relay.getCursor()
+      const relayOpsBase = relay.getOperationCount()
+      relay.setPaused(true)
+      expect(relay.isPaused()).toBe(true)
+      const recoveryContent = 'edit pending recovery content four'
+      await updateMessageViaApi(pageB, topic, msg, { content: recoveryContent })
+      await pollForMessageContent(pageB, topic, msg, recoveryContent, 30000)
+      const beforeClose = await getSyncStatusViaApi(pageB)
+      expect(beforeClose.pendingCount).toBeGreaterThan(0)
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBase)
+      expect(relay.getOperationCount()).toBe(relayOpsBase)
+
+      // Clean close + same-profile relaunch while the same relay stays alive.
+      const userDataDirBefore = profileB.userDataDir
+      profileB = await relaunchSecondSyncProfile(profileB, ownedTmpRoot, mockPort, {
+        expectedEndpoint: relay.endpoint,
+        expectedToken: RELAY_TOKEN,
+        expectedEnabled: true
+      })
+      pageB = profileB.page
+      expect(profileB.userDataDir).toBe(userDataDirBefore)
+
+      // Post-relaunch durable state: outbox survived the clean close, the
+      // cursor did not advance while gated, and sync config persisted. The
+      // raw persisted config is asserted BEFORE any repair (the relaunch
+      // helper performs no repair; repairSecondSyncConfig is setup-only and
+      // is not called on this path). Missing/empty token fails.
+      const rawRelaunchedConfig = (await pageB.evaluate(async () => {
+        return await (window as any).api.sync.getConfig()
+      })) as any
+      expect(rawRelaunchedConfig.endpoint).toBe(relay.endpoint)
+      expect(rawRelaunchedConfig.enabled).toBe(true)
+      assertSyncTokenExactRedacted(rawRelaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      const afterRelaunch = await getSyncStatusViaApi(pageB)
+      expect(afterRelaunch.pendingCount).toBeGreaterThan(0)
+      expect(afterRelaunch.cursor).toBe(beforeClose.cursor)
+      const relaunchedConfig = await getSyncConfigViaApi(pageB)
+      expect(relaunchedConfig.endpoint).toBe(relay.endpoint)
+      expect(relaunchedConfig.enabled).toBe(true)
+      assertSyncTokenExactRedacted(relaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      await pollForMessageContent(pageB, topic, msg, recoveryContent, 30000)
+
+      // Release transport; the recovered pending edit converges automatically
+      // (no post-release manual sync). Scope is clean-close pending outbox
+      // recovery only.
+      relay.setPaused(false)
+      expect(relay.isPaused()).toBe(false)
+      await pollForMessageContent(pageA, topic, msg, recoveryContent, 120000)
+      await pollForPendingDrained(pageB, 90000)
+      await pollForPendingDrained(pageA, 90000)
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusA.lastError).toBeNull()
+      expect(statusB.lastError).toBeNull()
+      expect(statusA.lastCaptureError).toBeNull()
+      expect(statusB.lastCaptureError).toBeNull()
     } finally {
       try {
         relay?.setPaused(false)

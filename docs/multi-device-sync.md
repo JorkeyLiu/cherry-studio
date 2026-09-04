@@ -29,18 +29,22 @@ The selected path is application operation-log plus thin personal-hosted HTTP re
 - Main-owned SQLite remains the chat authority with the operation log captured alongside the enclosing mutation for supported stable paths. The log is sync intent only, not a second authority.
 - The relay path moves operations between two profiles and converges them on covered topic, message, and message-block shapes, including offline backlog with retry and fail-closed behavior on authentication failure. Automatic online convergence and cursor-based recovery after short disconnection are validated for those covered shapes; assertions cover sync status, durable cursor advance, outbox drain, and truthful errors.
 - Delete/recovery semantics are validated for covered topic/message/message-block paths: online hard delete propagation, offline hard delete with automatic recovery on reconnect, late-child suppression via the parent tombstone, soft-delete topic -> restoreTopic round trip with content preserved, and concurrent delete/edit convergence to a single agreed result without asserting a fixed winner.
+- Ordinary edit semantics are validated for covered message shapes: online content edit automatic convergence; paused-transport independent-field edits preserving both fields; paused same-field edits converging to the existing timestamp-then-operationId LWW winner with observable conflict-count evidence; and pending-edit recovery across clean-close same-profile relaunch while the same relay instance stays alive.
+- Field-clock conflict records may increase even for disjoint edits over an existing baseline clock, while fields still merge. This is current baseline-field-clock recording behavior, not a new product decision.
 - The authoritative sync path is strictly authenticated push/pull plus cursor; SSE is notification-only and never decides convergence. Auth precedence (401 before any interruption handling), 503 pause behavior with counter/cursor preservation, resume, and independent push/pull direction barriers are validated under a controlled in-memory network-interruption harness only.
-- The above is limited validation of the covered shapes and the reference relay only. It does not establish durability across relay restart or production readiness.
+- The above is limited validation of the covered shapes and the reference relay only. It does not establish durability across relay restart, crash/SIGKILL/WAL durability, or production readiness.
 
 ## 4. Current gap to target
 
-- Coverage beyond the validated topic, message, and message-block shapes remains unproven, including compound operations, ordering under replay, and structured content, attachments, and incomplete snapshots, which stay excluded from sync payloads.
-- Relay production lifecycle (durability across restart, deployment, upgrade, backup) remains unproven; pause/resume evidence is controlled in-memory interruption only and never durable restart evidence.
-- Push ordering beyond the covered delete/recovery paths (parents before children, deferred orphan handling, fail-closed acknowledgements and malformed payloads) and any fixed winner for concurrent delete/edit remain ungoverned.
+- Coverage beyond the validated topic, message, and message-block shapes remains unproven, including compound/complex operations, ordering under replay, and structured content, attachments, and incomplete snapshots, which stay excluded from sync payloads.
+- Scale beyond covered history/outbox sizes remains unproven, including large history and large outbox behavior.
+- Lifecycle durability remains unproven: pending-edit recovery is clean-close same-profile relaunch only with the same relay instance alive — crash/SIGKILL/WAL durability is explicitly unproven; relay production lifecycle (durability across restart, deployment, upgrade, backup) remains unproven; pause/resume evidence is controlled in-memory interruption only and never durable restart evidence.
+- Push ordering beyond the covered delete/recovery and ordinary-edit paths (parents before children, deferred orphan handling, fail-closed acknowledgements and malformed payloads) and any fixed winner for concurrent delete/edit beyond the current LWW remain ungoverned.
+- Conflict recovery UX remains deferred: same-field resolution stays at the existing timestamp-then-operationId LWW with bounded conflict-count record only; there is no row-level conflict visibility and no dedicated recovery experience.
 
 ## 5. Next decision and step
 
-Extend coverage from the proven automatic-convergence plus delete/recovery base only, either to additional shapes or to relay lifecycle hardening.
+Extend coverage from the proven automatic-convergence plus delete/recovery and ordinary-edit base only, either to additional shapes or to relay lifecycle hardening.
 
 - Entry: an explicitly activated decision with claim, minimum sufficient method, and stopping condition.
 - Exit: documented convergence and recovery behavior with accepted trade-offs and residual risks, or a reproducible blocker that triggers the fallback condition below.
@@ -52,16 +56,17 @@ These judgments guide the next step only. They are not product authority and cha
 
 - Transactional outbox for supported stable mutations: intent is enqueued inside the same aggregate transaction so a failed mutation leaves no orphaned intent.
 - Authoritative path is strictly authenticated push/pull plus cursor; notification is never data authority: any push hint only wakes the device, and the authenticated pull and reconciliation path decides what converges.
-- Field-level handling for covered shapes: creates merge by identity; updates carry only intentional changed fields; independent fields merge; same-field conflicts resolve deterministically with a bounded observable conflict record while dedicated restore experience stays deferred.
+- Field-level handling for covered shapes: creates merge by identity; updates carry only intentional changed fields; independent fields merge; same-field conflicts resolve by the existing timestamp-then-operationId LWW with a bounded observable conflict record while dedicated restore/conflict recovery experience stays deferred. Conflict records may increase even for disjoint edits over an existing baseline clock while fields still merge; this is current recording behavior, not a new winner or UI semantic.
 - Deletion of covered shapes wins over late descendants: a late child arriving after the parent tombstone is suppressed and must not resurrect the parent; ordering-only changes are not propagated as sync operations; capture failures are reported truthfully and never as silent convergence.
 - Restore means soft-delete topic -> restoreTopic round trip with content preserved; hard delete is irreversible and is not a restore feature.
 - Payloads carry only allowlisted shareable fields; structured content, attachments, and incomplete snapshots stay excluded, as do credentials, derived data, device-local paths, and UI state.
-- Relay pause/resume and push/pull direction barriers are in-memory network-interruption controls for evidence only, never durable relay restart evidence; concurrent delete/edit converges to one stable result with no fixed winner asserted.
+- Relay pause/resume and push/pull direction barriers are in-memory network-interruption controls for evidence only, never durable relay restart evidence; the relay stays the same in-memory instance with no restart persistence claim; concurrent delete/edit converges to one stable result with no fixed winner asserted beyond the current LWW.
+- Pending-edit recovery is clean-close same-profile relaunch only with the same relay instance alive; it establishes no crash/SIGKILL/WAL durability.
 
 ## 7. Evidence pointers
 
 - Implementation: `src/main/services/sync/` (operation-log capture, apply, client), `packages/shared/sync/` (payload shape and filtering), `scripts/sync-relay/server.ts` (reference relay, non-production), additive sync metadata migrations `005_sync_metadata` + `006_sync_field_merge`.
-- Integrated behavior: `tests/e2e/specs/sync/sync-two-profiles.spec.ts` (two-profile sync scope, including delete/recovery convergence).
+- Integrated behavior: `tests/e2e/specs/sync/sync-two-profiles.spec.ts` (two-profile sync scope, including delete/recovery and ordinary-edit/concurrent-edit convergence plus clean-close pending-edit recovery).
 - Unit behavior: operation-log, apply, and relay suites alongside the paths above, plus `tests/e2e/utils/sync-relay-pause.test.ts` (in-memory pause/resume and direction-barrier determinism).
 - Git owns run history; this document carries no per-run history.
 
