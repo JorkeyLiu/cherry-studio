@@ -22,13 +22,19 @@ import {
 import { startTestRelay, type TestRelayHandle } from '../../utils/sync-relay'
 import {
   appendMessageViaApi,
+  deleteMessageViaApi,
   ensureTopicViaApi,
   fetchMessagesViaApi,
   getSyncStatusViaApi,
+  hardDeleteTopicViaApi,
   isoNow,
+  listTrashTopicIdsViaApi,
+  restoreTopicViaApi,
   runSyncViaApi,
   setSyncConfigViaApi,
+  softDeleteTopicViaApi,
   topicExistsViaApi,
+  updateMessageViaApi,
   SyncSettingsPage
 } from '../../pages/sync.page'
 
@@ -174,6 +180,77 @@ async function pollForConvergence(
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
   throw new Error(`convergence timeout for ${topicId}/${messageId}/${blockId}: ${lastError}`)
+}
+
+/**
+ * Bounded poll until the message (and its blocks) are absent on the profile.
+ * A missing parent topic counts as absent; a fetch failure while the topic
+ * is gone also counts as absent. Throws on timeout.
+ */
+async function pollForMessageAbsent(page: Page, topicId: string, messageId: string, timeoutMs = 30000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastError: string | null = null
+  while (Date.now() < deadline) {
+    try {
+      const exists = await topicExistsViaApi(page, topicId)
+      if (!exists) return
+      try {
+        const { messages, blocks } = await fetchMessagesViaApi(page, topicId)
+        const msgGone = !messages.some((m: any) => m?.id === messageId)
+        const blkGone = !blocks.some((b: any) => (b as any)?.messageId === messageId)
+        if (msgGone && blkGone) return
+        lastError = `message still present (messages=${messages.length}, blocks=${blocks.length})`
+      } catch (e) {
+        // The topic row may vanish between exists-check and fetch; re-check.
+        const stillExists = await topicExistsViaApi(page, topicId).catch(() => true)
+        if (!stillExists) return
+        lastError = String((e as Error).message)
+      }
+    } catch (e) {
+      lastError = String((e as Error).message)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`message-absent timeout for ${topicId}/${messageId}: ${lastError}`)
+}
+
+/** Bounded poll until the topic row is absent on the profile. */
+async function pollForTopicAbsent(page: Page, topicId: string, timeoutMs = 30000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!(await topicExistsViaApi(page, topicId))) return
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`topic-absent timeout for ${topicId}`)
+}
+
+/** Bounded poll until trash membership matches expectation on the profile. */
+async function pollForTrashState(
+  page: Page,
+  topicId: string,
+  shouldContain: boolean,
+  timeoutMs = 30000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const ids = await listTrashTopicIdsViaApi(page)
+    if (ids.includes(topicId) === shouldContain) return
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`trash-state timeout for ${topicId} shouldContain=${shouldContain}`)
+}
+
+/** Bounded poll until pendingCount drains to zero with no lastError. */
+async function pollForPendingDrained(page: Page, timeoutMs = 60000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let last = ''
+  while (Date.now() < deadline) {
+    const status = await getSyncStatusViaApi(page)
+    if (status.pendingCount === 0 && status.lastError === null) return
+    last = `pending=${status.pendingCount} error=${status.lastError}`
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`pending-drain timeout: ${last}`)
 }
 
 test.describe('Sync MVP two-profile real path', () => {
@@ -350,6 +427,469 @@ test.describe('Sync MVP two-profile real path', () => {
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await pollForConvergence(pageB, topic2, msg2, blk2, content2, 90000)
     } finally {
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+})
+
+/**
+ * Delete/recovery convergence on the operation-log + thin relay path.
+ *
+ * LOCK-001: Main SQLite is the sole runtime chat authority; every assertion
+ * below reads production IPC-visible ChatDb state (topicExists/fetchMessages/
+ * listTrashTopics) plus durable sync metadata (cursor/pendingCount/lastError).
+ * LOCK-006: restore means soft-delete-topic -> restoreTopic; hard delete is
+ * irreversible and late descendants must not resurrect the parent.
+ * Relay pause/resume below is an in-memory network interruption only — never
+ * durable restart evidence.
+ */
+test.describe('Sync delete/recovery convergence', () => {
+  test.setTimeout(300000)
+
+  test('online hard message delete converges to absence', async ({ mainWindow, ownedTmpRoot, mockPort }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      const topic = 'e2e-sync-del-topic-1'
+      const msg = 'e2e-sync-del-msg-1'
+      const blk = 'e2e-sync-del-blk-1'
+      const content = 'online delete me'
+      await ensureTopicViaApi(pageA, topic, 'Online Delete Topic')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, content), [blockJson(blk, msg, content)])
+      const syncA0 = await runSyncViaApi(pageA)
+      expect(syncA0.threw).toBeNull()
+      const syncB0 = await runSyncViaApi(pageB)
+      expect(syncB0.threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, content)
+
+      // Baseline cursors before the delete (delete must advance both).
+      const cursorA0 = (await getSyncStatusViaApi(pageA)).cursor
+      const cursorB0 = (await getSyncStatusViaApi(pageB)).cursor
+
+      await deleteMessageViaApi(pageA, topic, msg)
+      const syncA1 = await runSyncViaApi(pageA)
+      expect(syncA1.threw).toBeNull()
+      expect(syncA1.status.lastError).toBeNull()
+      expect(syncA1.status.pendingCount).toBe(0)
+      const statusA1 = await getSyncStatusViaApi(pageA)
+      expect(statusA1.cursor).toBeGreaterThan(cursorA0)
+      await pollForMessageAbsent(pageA, topic, msg)
+
+      const syncB1 = await runSyncViaApi(pageB)
+      expect(syncB1.threw).toBeNull()
+      await pollForMessageAbsent(pageB, topic, msg)
+      const statusB1 = await getSyncStatusViaApi(pageB)
+      expect(statusB1.cursor).toBeGreaterThan(cursorB0)
+      expect(statusB1.pendingCount).toBe(0)
+      // Parent topic survives a single message hard delete.
+      expect(await topicExistsViaApi(pageB, topic)).toBe(true)
+    } finally {
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('offline hard delete reconciles after pause/resume with outbox recovery', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      const topic = 'e2e-sync-del-topic-2'
+      const msg = 'e2e-sync-del-msg-2'
+      const blk = 'e2e-sync-del-blk-2'
+      const content = 'offline delete me'
+      await ensureTopicViaApi(pageA, topic, 'Offline Delete Topic')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, content), [blockJson(blk, msg, content)])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, content)
+
+      const cursorBefore = (await getSyncStatusViaApi(pageA)).cursor
+      // Quiesce admitted requests before snapshotting relay counters so the
+      // pause-state assertions below cannot race an in-flight commit.
+      await relay.waitForQuiescent()
+      const relayCursorBefore = relay.getCursor()
+      const relayOpsBefore = relay.getOperationCount()
+
+      // Controlled interruption: in-memory pause, log + cursor preserved.
+      relay.setPaused(true)
+      expect(relay.isPaused()).toBe(true)
+      await deleteMessageViaApi(pageA, topic, msg)
+      const failed = await runSyncViaApi(pageA)
+      expect(failed.threw).not.toBeNull()
+      const failedStatus = await getSyncStatusViaApi(pageA)
+      expect(failedStatus.lastError).not.toBeNull()
+      expect(failedStatus.pendingCount).toBeGreaterThan(0)
+      // Pause preserves relay state: no new ops, no cursor motion. Quiesce
+      // first so already-admitted requests settle before the comparison.
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBefore)
+      expect(relay.getOperationCount()).toBe(relayOpsBefore)
+
+      // Restoration: resume the same in-memory relay (not a restart).
+      // Recovery from here is automatic only: no manual runSync is invoked
+      // after resume. A's automation pushes the queued delete and the relay
+      // SSE hint drives B's automatic pull; both are asserted below.
+      relay.setPaused(false)
+      expect(relay.isPaused()).toBe(false)
+      await pollForPendingDrained(pageA, 90000)
+      const recovered = await getSyncStatusViaApi(pageA)
+      expect(recovered.lastError).toBeNull()
+      expect(recovered.cursor).toBeGreaterThan(cursorBefore)
+      await pollForMessageAbsent(pageA, topic, msg)
+
+      await pollForMessageAbsent(pageB, topic, msg, 90000)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusB.lastError).toBeNull()
+      expect(statusB.pendingCount).toBe(0)
+    } finally {
+      try {
+        relay?.setPaused(false)
+      } catch {}
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('late child after parent hard delete does not resurrect', async ({ mainWindow, ownedTmpRoot, mockPort }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      const topic = 'e2e-sync-late-topic-1'
+      const msg = 'e2e-sync-late-msg-1'
+      const blk = 'e2e-sync-late-blk-1'
+      const content = 'late child parent'
+      await ensureTopicViaApi(pageA, topic, 'Late Child Topic')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, content), [blockJson(blk, msg, content)])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, content)
+
+      // Deterministic barrier BEFORE the parent delete is exchanged: block
+      // pulls (pushes stay open) so B's automatic pull cannot pre-consume
+      // the delete via SSE hint. Both profiles stay sync-enabled (capture
+      // stays on); only transport pull is gated. In-memory ops/seq and
+      // SSE hint-only semantics are unchanged.
+      await relay.waitForQuiescent()
+      const relayCursorBase = relay.getCursor()
+      const relayOpsBase = relay.getOperationCount()
+      const cursorABase = (await getSyncStatusViaApi(pageA)).cursor
+      const cursorBBase = (await getSyncStatusViaApi(pageB)).cursor
+      relay.setPullPaused(true)
+      expect(relay.isPullPaused()).toBe(true)
+      expect(relay.isPushPaused()).toBe(false)
+
+      // A hard-deletes the parent topic; the delete must reach the relay
+      // while B cannot pull it. sync() pushes first then pulls, so with
+      // pulls gated the manual cycle reports the pull failure (threw) while
+      // the push still commits: outbox drains, relay advances.
+      await hardDeleteTopicViaApi(pageA, topic)
+      await pollForTopicAbsent(pageA, topic)
+      await runSyncViaApi(pageA)
+      await relay.waitForQuiescent()
+      const relayCursorAfterDelete = relay.getCursor()
+      const relayOpsAfterDelete = relay.getOperationCount()
+      expect(relayCursorAfterDelete).toBeGreaterThan(relayCursorBase)
+      expect(relayOpsAfterDelete).toBeGreaterThan(relayOpsBase)
+      const statusAAfterPush = await getSyncStatusViaApi(pageA)
+      expect(statusAAfterPush.pendingCount).toBe(0)
+      // B demonstrably did NOT pre-consume: parent still present locally and
+      // B's durable pull cursor has not advanced past the baseline.
+      expect(await topicExistsViaApi(pageB, topic)).toBe(true)
+      const cursorBAfterDelete = (await getSyncStatusViaApi(pageB)).cursor
+      expect(cursorBAfterDelete).toBe(cursorBBase)
+
+      // Snapshot pre-child relay evidence, then freeze pushes as well so the
+      // late-child capture is observable before automation can push it.
+      // B stays enabled: the child is captured to the local outbox (disabling
+      // B would disable capture and queue nothing).
+      const relayCursorBeforeChild = relayCursorAfterDelete
+      const relayOpsBeforeChild = relayOpsAfterDelete
+      relay.setPushPaused(true)
+      expect(relay.isPushPaused()).toBe(true)
+      expect(relay.isPullPaused()).toBe(true)
+
+      // Late descendant: B still holds the parent locally, so it appends a
+      // newer child after the delete wall-clock. Capture must queue it.
+      expect(await topicExistsViaApi(pageB, topic)).toBe(true)
+      const lateMsg = 'e2e-sync-late-msg-2'
+      const lateBlk = 'e2e-sync-late-blk-2'
+      const lateContent = 'late descendant must not resurrect'
+      await appendMessageViaApi(pageB, topic, messageJson(lateMsg, topic, lateContent), [
+        blockJson(lateBlk, lateMsg, lateContent)
+      ])
+      const queuedStatus = await getSyncStatusViaApi(pageB)
+      expect(queuedStatus.pendingCount).toBeGreaterThan(0)
+      // Both directions fail closed: nothing admitted while fully gated.
+      // Quiesce first so already-admitted requests settle deterministically.
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBeforeChild)
+      expect(relay.getOperationCount()).toBe(relayOpsBeforeChild)
+
+      // Controlled release, pushes first: B pushes the late child while pulls
+      // stay gated. Push commits (relay advances) but no profile can consume
+      // yet; B's outbox drains while its pull cursor stays at baseline.
+      relay.setPushPaused(false)
+      expect(relay.isPushPaused()).toBe(false)
+      expect(relay.isPullPaused()).toBe(true)
+      await runSyncViaApi(pageB)
+      await relay.waitForQuiescent()
+      const relayCursorAfterChild = relay.getCursor()
+      const relayOpsAfterChild = relay.getOperationCount()
+      expect(relayCursorAfterChild).toBeGreaterThan(relayCursorBeforeChild)
+      expect(relayOpsAfterChild).toBeGreaterThan(relayOpsBeforeChild)
+      const statusBAfterPush = await getSyncStatusViaApi(pageB)
+      expect(statusBAfterPush.pendingCount).toBe(0)
+      expect(statusBAfterPush.cursor).toBe(cursorBBase)
+      const cursorABeforeFinalPull = (await getSyncStatusViaApi(pageA)).cursor
+      expect(cursorABeforeFinalPull).toBe(cursorABase)
+
+      // Release pulls: B pulls the parent delete (cascade-removes the parent
+      // locally); A pulls the late child and suppresses it via the exact
+      // parent tombstone. Manual rounds only after both barriers are clear.
+      relay.setPullPaused(false)
+      expect(relay.isPullPaused()).toBe(false)
+      expect(relay.isPushPaused()).toBe(false)
+      const syncB1 = await runSyncViaApi(pageB)
+      expect(syncB1.threw).toBeNull()
+      await pollForTopicAbsent(pageB, topic)
+      const syncA2 = await runSyncViaApi(pageA)
+      expect(syncA2.threw).toBeNull()
+      // Second round so any relay-held late child reaches A and is consumed.
+      const syncB2 = await runSyncViaApi(pageB)
+      expect(syncB2.threw).toBeNull()
+
+      // Relay evidence: the late child was actually delivered (ops + cursor
+      // advanced past the pre-child snapshot) and the log holds its entity.
+      await relay.waitForQuiescent()
+      expect(relay.getOperationCount()).toBeGreaterThan(relayOpsBeforeChild)
+      expect(relay.getCursor()).toBeGreaterThan(relayCursorBeforeChild)
+      const deliveredRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBeforeChild}`, {
+        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
+      })
+      expect(deliveredRes.status).toBe(200)
+      const deliveredBody = (await deliveredRes.json()) as { operations: any[]; cursor: number }
+      const deliveredEntityIds = deliveredBody.operations.map((o: any) => String(o?.entityId))
+      expect(deliveredEntityIds).toContain(lateMsg)
+      // Profile-consumption proof (not pre-existing absence): the target
+      // profile A actually pulled past the late-child sequence — its durable
+      // cursor advanced beyond the pre-pull snapshot to at least the
+      // relay-held child cursor. Same for B past the parent delete.
+      const statusAFinal = await getSyncStatusViaApi(pageA)
+      const statusBFinal = await getSyncStatusViaApi(pageB)
+      expect(statusAFinal.cursor).toBeGreaterThan(cursorABeforeFinalPull)
+      expect(statusAFinal.cursor).toBeGreaterThanOrEqual(relayCursorAfterChild)
+      expect(statusBFinal.cursor).toBeGreaterThan(cursorBBase)
+      expect(statusAFinal.pendingCount).toBe(0)
+      expect(statusBFinal.pendingCount).toBe(0)
+
+      // Neither the parent nor the late descendant is observable anywhere.
+      await pollForTopicAbsent(pageA, topic)
+      await pollForTopicAbsent(pageB, topic)
+      await pollForMessageAbsent(pageA, topic, lateMsg)
+      await pollForMessageAbsent(pageB, topic, lateMsg)
+      await pollForMessageAbsent(pageB, topic, msg)
+    } finally {
+      try {
+        relay?.setPaused(false)
+      } catch {}
+      try {
+        relay?.setPushPaused(false)
+      } catch {}
+      try {
+        relay?.setPullPaused(false)
+      } catch {}
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('soft-delete then restoreTopic converges on both profiles', async ({ mainWindow, ownedTmpRoot, mockPort }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      const topic = 'e2e-sync-trash-topic-1'
+      const msg = 'e2e-sync-trash-msg-1'
+      const blk = 'e2e-sync-trash-blk-1'
+      const content = 'trash and restore me'
+      await ensureTopicViaApi(pageA, topic, 'Trash Topic')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, content), [blockJson(blk, msg, content)])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, content)
+      const cursor0 = (await getSyncStatusViaApi(pageA)).cursor
+
+      // Soft-delete converges as trash state; messages are preserved.
+      await softDeleteTopicViaApi(pageA, topic)
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      await pollForTrashState(pageA, topic, true)
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForTrashState(pageB, topic, true)
+      const statusTrashed = await getSyncStatusViaApi(pageA)
+      expect(statusTrashed.cursor).toBeGreaterThan(cursor0)
+
+      // Restore converges back; content survives the round-trip.
+      const restored = await restoreTopicViaApi(pageA, topic)
+      expect(restored).not.toBeNull()
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      await pollForTrashState(pageA, topic, false)
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForTrashState(pageB, topic, false)
+      expect(await topicExistsViaApi(pageB, topic)).toBe(true)
+      await pollForConvergence(pageB, topic, msg, blk, content)
+      await pollForConvergence(pageA, topic, msg, blk, content)
+    } finally {
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('concurrent delete/edit converges both profiles to one result', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      const topic = 'e2e-sync-race-topic-1'
+      const msg = 'e2e-sync-race-msg-1'
+      const blk = 'e2e-sync-race-blk-1'
+      const content = 'race base content'
+      await ensureTopicViaApi(pageA, topic, 'Race Topic')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, content), [blockJson(blk, msg, content)])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, content)
+
+      // Deterministic concurrency: gate transport BEFORE either mutation so
+      // automation cannot exchange one intent before the other exists. Both
+      // profiles stay capture-enabled; only the in-memory relay is paused
+      // (ops/seq preserved, never durable restart evidence).
+      await relay.waitForQuiescent()
+      const relayCursorBase = relay.getCursor()
+      const relayOpsBase = relay.getOperationCount()
+      relay.setPaused(true)
+      expect(relay.isPaused()).toBe(true)
+
+      // Concurrent mutations while transport is gated: A deletes, B edits.
+      // No winner is asserted (LWW timing decides); only that both profiles
+      // deterministically agree afterwards.
+      await deleteMessageViaApi(pageA, topic, msg)
+      const editedContent = 'race edited content'
+      await updateMessageViaApi(pageB, topic, msg, { content: editedContent })
+
+      // Both local intents are pending before any transport release: neither
+      // op could have been exchanged early.
+      const statusAPending = await getSyncStatusViaApi(pageA)
+      const statusBPending = await getSyncStatusViaApi(pageB)
+      expect(statusAPending.pendingCount).toBeGreaterThan(0)
+      expect(statusBPending.pendingCount).toBeGreaterThan(0)
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBase)
+      expect(relay.getOperationCount()).toBe(relayOpsBase)
+
+      // Release transport, then exchange. Two full rounds so each side sees
+      // the other's intent.
+      relay.setPaused(false)
+      expect(relay.isPaused()).toBe(false)
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+
+      const deadline = Date.now() + 60000
+      let agreement: string | null = null
+      let lastDetail = ''
+      while (Date.now() < deadline) {
+        const existsA = await topicExistsViaApi(pageA, topic)
+        const existsB = await topicExistsViaApi(pageB, topic)
+        const fetchA = existsA ? await fetchMessagesViaApi(pageA, topic).catch(() => null) : null
+        const fetchB = existsB ? await fetchMessagesViaApi(pageB, topic).catch(() => null) : null
+        const msgA = fetchA?.messages.find((m: any) => m?.id === msg) as any
+        const msgB = fetchB?.messages.find((m: any) => m?.id === msg) as any
+        if (!msgA && !msgB) {
+          agreement = 'deleted-both'
+          break
+        }
+        if (msgA && msgB && msgA.content === msgB.content) {
+          agreement = `present-both:${String(msgA.content)}`
+          break
+        }
+        lastDetail = `A=${msgA ? JSON.stringify(msgA.content) : 'absent'} B=${msgB ? JSON.stringify(msgB.content) : 'absent'}`
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      expect(agreement).not.toBeNull()
+      // Settle once more; agreement must be stable, not a transient read.
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusA.pendingCount).toBe(0)
+      expect(statusB.pendingCount).toBe(0)
+      expect(statusA.lastError).toBeNull()
+      expect(statusB.lastError).toBeNull()
+      if (agreement === 'deleted-both') {
+        await pollForMessageAbsent(pageA, topic, msg)
+        await pollForMessageAbsent(pageB, topic, msg)
+      } else {
+        // Edit-wins: only the message row carries the edit; the block keeps
+        // its original content, so assert message-content agreement directly.
+        const contentAgreed = (agreement as string).split(':').slice(1).join(':')
+        for (const page of [pageA, pageB]) {
+          const msgDeadline = Date.now() + 30000
+          for (;;) {
+            const { messages } = await fetchMessagesViaApi(page, topic)
+            const found = (messages as any[]).find((m: any) => m?.id === msg) as any
+            if (found && found.content === contentAgreed) break
+            if (Date.now() >= msgDeadline) {
+              throw new Error(`message-content timeout: expected ${JSON.stringify(contentAgreed)}`)
+            }
+            await new Promise((resolve) => setTimeout(resolve, 500))
+          }
+        }
+      }
+      void lastDetail
+      void blk
+    } finally {
+      try {
+        relay?.setPaused(false)
+      } catch {}
       await closeProfileAndRelay(profileB, relay)
     }
   })

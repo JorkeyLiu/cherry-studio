@@ -25,20 +25,21 @@ The selected path is application operation-log plus thin personal-hosted HTTP re
 
 ## 3. What current evidence establishes
 
-- Main-owned SQLite remains the chat authority with the operation log captured alongside the enclosing mutation for supported stable paths.
-- The relay path moves operations between two profiles and converges them on covered topic, message, and message-block shapes, including offline backlog with retry and fail-closed behavior on authentication failure.
-- Push ordering places parents before children with deferred handling of temporarily orphaned children; acknowledgements fail closed when no progress is confirmed; malformed payloads fail closed rather than converging silently.
-- The above is limited validation of the covered shapes and the reference relay only. It does not establish production readiness.
+- Main-owned SQLite remains the chat authority with the operation log captured alongside the enclosing mutation for supported stable paths. The log is sync intent only, not a second authority.
+- The relay path moves operations between two profiles and converges them on covered topic, message, and message-block shapes, including offline backlog with retry and fail-closed behavior on authentication failure. Automatic online convergence and cursor-based recovery after short disconnection are validated for those covered shapes; assertions cover sync status, durable cursor advance, outbox drain, and truthful errors.
+- Delete/recovery semantics are validated for covered topic/message/message-block paths: online hard delete propagation, offline hard delete with automatic recovery on reconnect, late-child suppression via the parent tombstone, soft-delete topic -> restoreTopic round trip with content preserved, and concurrent delete/edit convergence to a single agreed result without asserting a fixed winner.
+- The authoritative sync path is strictly authenticated push/pull plus cursor; SSE is notification-only and never decides convergence. Auth precedence (401 before any interruption handling), 503 pause behavior with counter/cursor preservation, resume, and independent push/pull direction barriers are validated under a controlled in-memory network-interruption harness only.
+- The above is limited validation of the covered shapes and the reference relay only. It does not establish durability across relay restart or production readiness.
 
 ## 4. Current gap to target
 
-- Automatic online convergence and cursor-based recovery after short disconnection are the target but are not yet the validated behavior; current validated behavior is endpoint-driven.
-- Coverage beyond the validated topic, message, and message-block shapes, including compound operations, ordering under replay, and structured content handling, remains unproven.
-- Relay production lifecycle (durability, deployment, upgrade, backup) remains unproven for the reference relay.
+- Coverage beyond the validated topic, message, and message-block shapes remains unproven, including compound operations, ordering under replay, and structured content, attachments, and incomplete snapshots, which stay excluded from sync payloads.
+- Relay production lifecycle (durability across restart, deployment, upgrade, backup) remains unproven; pause/resume evidence is controlled in-memory interruption only and never durable restart evidence.
+- Push ordering beyond the covered delete/recovery paths (parents before children, deferred orphan handling, fail-closed acknowledgements and malformed payloads) and any fixed winner for concurrent delete/edit remain ungoverned.
 
 ## 5. Next decision and step
 
-Validate automatic online convergence with cursor-based recovery on the primary operation-log plus relay path for the covered shapes, then extend coverage only from that proven base.
+Extend coverage from the proven automatic-convergence plus delete/recovery base only, either to additional shapes or to relay lifecycle hardening.
 
 - Entry: an explicitly activated decision with claim, minimum sufficient method, and stopping condition.
 - Exit: documented convergence and recovery behavior with accepted trade-offs and residual risks, or a reproducible blocker that triggers the fallback condition below.
@@ -49,15 +50,18 @@ Validate automatic online convergence with cursor-based recovery on the primary 
 These judgments guide the next step only. They are not product authority and change when evidence requires it.
 
 - Transactional outbox for supported stable mutations: intent is enqueued inside the same aggregate transaction so a failed mutation leaves no orphaned intent.
-- Notification is never data authority: any push hint only wakes the device; the authenticated pull and reconciliation path decides what converges.
+- Authoritative path is strictly authenticated push/pull plus cursor; notification is never data authority: any push hint only wakes the device, and the authenticated pull and reconciliation path decides what converges.
 - Field-level handling for covered shapes: creates merge by identity; updates carry only intentional changed fields; independent fields merge; same-field conflicts resolve deterministically with a bounded observable conflict record while dedicated restore experience stays deferred.
-- Deletion of covered shapes wins over late descendants; ordering-only changes are not propagated as sync operations; capture failures are reported truthfully and never as silent convergence.
+- Deletion of covered shapes wins over late descendants: a late child arriving after the parent tombstone is suppressed and must not resurrect the parent; ordering-only changes are not propagated as sync operations; capture failures are reported truthfully and never as silent convergence.
+- Restore means soft-delete topic -> restoreTopic round trip with content preserved; hard delete is irreversible and is not a restore feature.
+- Payloads carry only allowlisted shareable fields; structured content, attachments, and incomplete snapshots stay excluded, as do credentials, derived data, device-local paths, and UI state.
+- Relay pause/resume and push/pull direction barriers are in-memory network-interruption controls for evidence only, never durable relay restart evidence; concurrent delete/edit converges to one stable result with no fixed winner asserted.
 
 ## 7. Evidence pointers
 
 - Implementation: `src/main/services/sync/` (operation-log capture, apply, client), `packages/shared/sync/` (payload shape and filtering), `scripts/sync-relay/server.ts` (reference relay, non-production), additive sync metadata migrations `005_sync_metadata` + `006_sync_field_merge`.
-- Integrated behavior: `tests/e2e/specs/sync/sync-two-profiles.spec.ts` (two-profile sync scope).
-- Unit behavior: operation-log, apply, and relay suites alongside the paths above.
+- Integrated behavior: `tests/e2e/specs/sync/sync-two-profiles.spec.ts` (two-profile sync scope, including delete/recovery convergence).
+- Unit behavior: operation-log, apply, and relay suites alongside the paths above, plus `tests/e2e/utils/sync-relay-pause.test.ts` (in-memory pause/resume and direction-barrier determinism).
 - Git owns run history; this document carries no per-run history.
 
 ## 8. Fallback activation condition

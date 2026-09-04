@@ -160,6 +160,75 @@ export async function appendMessageViaApi(
   if (!result || result.ok !== true) throw new Error(`appendMessage failed: ${JSON.stringify((result as any)?.error)}`)
 }
 
+/** Typed deleteMessage via ChatDb IPC; asserts the success envelope. */
+export async function deleteMessageViaApi(page: Page, topicId: string, messageId: string): Promise<void> {
+  const result = await page.evaluate(
+    async ({ topicId, messageId }: { topicId: string; messageId: string }) => {
+      return await (window as any).api.chatDb.deleteMessage({ topicId, messageId })
+    },
+    { topicId, messageId }
+  )
+  if (!result || result.ok !== true) throw new Error(`deleteMessage failed: ${JSON.stringify((result as any)?.error)}`)
+}
+
+/** Typed updateMessage (content/edit patch) via ChatDb IPC; asserts the success envelope. */
+export async function updateMessageViaApi(
+  page: Page,
+  topicId: string,
+  messageId: string,
+  updates: Record<string, unknown>
+): Promise<void> {
+  const result = await page.evaluate(
+    async ({ topicId, messageId, updates }: { topicId: string; messageId: string; updates: any }) => {
+      return await (window as any).api.chatDb.updateMessage({ topicId, messageId, updates })
+    },
+    { topicId, messageId, updates }
+  )
+  if (!result || result.ok !== true) throw new Error(`updateMessage failed: ${JSON.stringify((result as any)?.error)}`)
+}
+
+/** Typed softDeleteTopic via ChatDb IPC; asserts the success envelope. */
+export async function softDeleteTopicViaApi(page: Page, topicId: string, name?: string | null): Promise<void> {
+  const result = await page.evaluate(
+    async ({ topicId, name }: { topicId: string; name?: string | null }) => {
+      return await (window as any).api.chatDb.softDeleteTopic({ topicId, name: name ?? null })
+    },
+    { topicId, name }
+  )
+  if (!result || result.ok !== true)
+    throw new Error(`softDeleteTopic failed: ${JSON.stringify((result as any)?.error)}`)
+}
+
+/** Typed restoreTopic via ChatDb IPC; asserts the envelope and returns the restored wire or null. */
+export async function restoreTopicViaApi(page: Page, topicId: string): Promise<any | null> {
+  const result = await page.evaluate(async (topicId: string) => {
+    return await (window as any).api.chatDb.restoreTopic({ topicId })
+  }, topicId)
+  if (!result || result.ok !== true) throw new Error(`restoreTopic failed: ${JSON.stringify((result as any)?.error)}`)
+  return (result as any).value ?? null
+}
+
+/** Typed hardDeleteTopic via ChatDb IPC; asserts the success envelope. */
+export async function hardDeleteTopicViaApi(page: Page, topicId: string): Promise<void> {
+  const result = await page.evaluate(async (topicId: string) => {
+    return await (window as any).api.chatDb.hardDeleteTopic({ topicId })
+  }, topicId)
+  if (!result || result.ok !== true)
+    throw new Error(`hardDeleteTopic failed: ${JSON.stringify((result as any)?.error)}`)
+}
+
+/** Typed listTrashTopics read; returns the trashed topic ids visible on the given profile. */
+export async function listTrashTopicIdsViaApi(page: Page): Promise<string[]> {
+  const result = await page.evaluate(async () => {
+    return await (window as any).api.chatDb.listTrashTopics({})
+  })
+  if (!result || result.ok !== true)
+    throw new Error(`listTrashTopics failed: ${JSON.stringify((result as any)?.error)}`)
+  const items = (result as any).value?.items
+  if (!Array.isArray(items)) throw new Error('listTrashTopics value.items is not an array')
+  return items.map((t: any) => String(t?.id))
+}
+
 /** Typed topicExists read on the given profile. */
 export async function topicExistsViaApi(page: Page, topicId: string): Promise<boolean> {
   const result = await page.evaluate(async (topicId: string) => {

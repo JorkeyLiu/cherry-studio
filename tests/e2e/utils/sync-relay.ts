@@ -38,6 +38,40 @@ export interface TestRelayHandle {
   port: number
   token: string
   close: () => Promise<void>
+  /**
+   * Reversible controlled network interruption for E2E. While paused, push
+   * and pull fail closed (503) without touching the in-memory operation log
+   * or cursor. This is NOT durable restart evidence: state lives only in
+   * this process and close() discards it.
+   */
+  setPaused: (paused: boolean) => void
+  isPaused: () => boolean
+  /**
+   * Independent direction barriers (test-only, in-memory). Push and pull
+   * fail closed (503) independently when their barrier is set, without
+   * touching the in-memory operation log or cursor. Auth precedence is
+   * unchanged (401 wins over 503). SSE remains hint-only and is never
+   * gated by these barriers. Combined with the legacy full pause: a push
+   * is blocked while paused OR push-blocked; a pull is blocked while
+   * paused OR pull-blocked. Clearing requires resetting each flag set.
+   */
+  setPushPaused: (paused: boolean) => void
+  setPullPaused: (paused: boolean) => void
+  isPushPaused: () => boolean
+  isPullPaused: () => boolean
+  /** Current relay cursor (sequence of the last stored operation). */
+  getCursor: () => number
+  /** Number of stored operations (in-memory log length). */
+  getOperationCount: () => number
+  /**
+   * Number of push/pull requests currently admitted and executing.
+   * Long-lived SSE subscriptions are never counted. Snapshot relay
+   * cursor/operation counters only after {@link waitForQuiescent} so an
+   * already-admitted request cannot commit after the snapshot.
+   */
+  getInFlightCount: () => number
+  /** Resolve once no admitted push/pull request is still executing. */
+  waitForQuiescent: (timeoutMs?: number) => Promise<void>
 }
 
 function checkAuth(req: IncomingMessage, expectedToken: string): boolean {
@@ -123,6 +157,25 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
   if (!token || typeof token !== 'string') throw new Error('startTestRelay requires a non-empty token')
   const ops: StoredOperation[] = []
   let seq = 0
+  let paused = false
+  let pushPaused = false
+  let pullPaused = false
+  // Admitted push/pull requests still executing. Tracked so tests can wait
+  // for quiescence before snapshotting cursor/operation counters; otherwise
+  // an already-admitted request could commit after the snapshot and race the
+  // assertion. SSE subscriptions are long-lived and never counted here.
+  let inFlight = 0
+  const trackInFlight = (res: ServerResponse): void => {
+    inFlight += 1
+    let done = false
+    const finish = (): void => {
+      if (done) return
+      done = true
+      inFlight = Math.max(0, inFlight - 1)
+    }
+    res.on('finish', finish)
+    res.on('close', finish)
+  }
   // Notification-only SSE subscribers: cursor hint only, never operations.
   const sseClients = new Set<ServerResponse>()
   const broadcastSyncHint = (cursor: number): void => {
@@ -165,11 +218,21 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/push') {
+      // Auth precedence: invalid/missing auth stays 401 even while paused;
+      // only authenticated requests observe the 503 pause signal.
       if (!checkAuth(req, token)) {
         res.writeHead(401, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'unauthorized' }))
         return
       }
+      if (paused || pushPaused) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'relay paused' }))
+        return
+      }
+      // Admitted from here: finish/close listeners in trackInFlight
+      // decrement once this response completes.
+      trackInFlight(res)
       const clHeader = req.headers['content-length']
       const clStr = Array.isArray(clHeader) ? (clHeader[0] ?? '0') : (clHeader ?? '0')
       const contentLength = Number(clStr)
@@ -273,11 +336,20 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'GET' && url.pathname === '/sync/pull') {
+      // Auth precedence mirrors push: 401 wins over the 503 pause signal.
       if (!checkAuth(req, token)) {
         res.writeHead(401, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'unauthorized' }))
         return
       }
+      if (paused || pullPaused) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'relay paused' }))
+        return
+      }
+      // Admitted from here: finish/close listeners in trackInFlight
+      // decrement once this response completes.
+      trackInFlight(res)
       const cursorParam = url.searchParams.get('cursor') ?? '0'
       let cursor: number
       try {
@@ -371,6 +443,28 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
         endpoint,
         port: addr.port,
         token,
+        setPaused: (p: boolean) => {
+          paused = p === true
+        },
+        isPaused: () => paused,
+        setPushPaused: (p: boolean) => {
+          pushPaused = p === true
+        },
+        setPullPaused: (p: boolean) => {
+          pullPaused = p === true
+        },
+        isPushPaused: () => paused || pushPaused,
+        isPullPaused: () => paused || pullPaused,
+        getCursor: () => seq,
+        getOperationCount: () => ops.length,
+        getInFlightCount: () => inFlight,
+        waitForQuiescent: async (timeoutMs = 5000) => {
+          const deadline = Date.now() + timeoutMs
+          while (inFlight > 0) {
+            if (Date.now() >= deadline) throw new Error(`relay not quiescent: ${inFlight} in flight`)
+            await new Promise((resolve) => setTimeout(resolve, 25))
+          }
+        },
         close: () =>
           new Promise<void>((resolveClose, rejectClose) => {
             try {
