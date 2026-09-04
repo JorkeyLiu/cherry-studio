@@ -3,6 +3,7 @@
 > **Status**: Current reference for personal multi-device sync. Limited validation; not production-ready.
 > **Role**: This document owns sync goal, current approach, current status/limits, evidence, gaps, and next decision.
 > **Fallback reference (conditional only)**: [Sync Architecture Selection](./sync-architecture-selection.md) — candidate analysis reusable only on a concrete current-path blocker with clear technical advantage.
+> **Development principle**: This sync effort is initiated and evolved under `adaptive-development` principles: the intended outcome remains the anchor, current state and gap determine the next step, and design, implementation, evidence, and validation evolve together.
 
 ## 1. Goal
 
