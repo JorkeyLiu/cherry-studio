@@ -2198,4 +2198,484 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       await closeProfileAndRelay(profileB, relay)
     }
   })
+
+  test('pull interruption after push holds reader then auto-converges', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    // Writer is the second profile; the main window is the reader. Pulls are
+    // gated while pushes stay open: writer commits advance the relay while
+    // neither profile pull cursor moves; release auto-converges the reader
+    // with no post-release manual sync.
+    const pageReader = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageWriter = profileB.page
+      await setSyncConfigViaApi(pageReader, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageWriter, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      // Deterministic baseline: one topic with 3 messages, drained via manual rounds.
+      const topic = 'e2e-sync-edit-topic-10'
+      const msgA = 'e2e-sync-edit-msg-10a'
+      const blkA = 'e2e-sync-edit-blk-10a'
+      const baseA = 'edit baseline content ten A'
+      const msgB = 'e2e-sync-edit-msg-10b'
+      const blkB = 'e2e-sync-edit-blk-10b'
+      const baseB = 'edit baseline content ten B'
+      const msgC = 'e2e-sync-edit-msg-10c'
+      const blkC = 'e2e-sync-edit-blk-10c'
+      const baseC = 'edit baseline content ten C'
+      await ensureTopicViaApi(pageReader, topic, 'Edit Topic Ten')
+      await appendMessageViaApi(pageReader, topic, messageJson(msgA, topic, baseA), [blockJson(blkA, msgA, baseA)])
+      await appendMessageViaApi(pageReader, topic, messageJson(msgB, topic, baseB), [blockJson(blkB, msgB, baseB)])
+      await appendMessageViaApi(pageReader, topic, messageJson(msgC, topic, baseC), [blockJson(blkC, msgC, baseC)])
+      expect((await runSyncViaApi(pageReader)).threw).toBeNull()
+      expect((await runSyncViaApi(pageWriter)).threw).toBeNull()
+      await pollForConvergence(pageWriter, topic, msgA, blkA, baseA)
+      await pollForConvergence(pageWriter, topic, msgB, blkB, baseB)
+      await pollForConvergence(pageWriter, topic, msgC, blkC, baseC)
+      await pollForPendingDrained(pageReader, 90000)
+      await pollForPendingDrained(pageWriter, 90000)
+      await relay.waitForQuiescent()
+      const relayCursorBase = relay.getCursor()
+      const relayOpsBase = relay.getOperationCount()
+      const cursorReaderBase = (await getSyncStatusViaApi(pageReader)).cursor
+      const cursorWriterBase = (await getSyncStatusViaApi(pageWriter)).cursor
+
+      // Direction barrier BEFORE any mutation so automation cannot exchange
+      // early. Pulls gated, pushes open; both profiles stay capture-enabled.
+      relay.setPullPaused(true)
+      expect(relay.isPullPaused()).toBe(true)
+      expect(relay.isPushPaused()).toBe(false)
+
+      // Writer edits one stable content field per message in order A -> B -> C.
+      const editA = 'edit pull-barrier content ten A one'
+      const editB = 'edit pull-barrier content ten B one'
+      const editC = 'edit pull-barrier content ten C one'
+      await updateMessageViaApi(pageWriter, topic, msgA, { content: editA })
+      await pollForMessageContent(pageWriter, topic, msgA, editA, 30000)
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      await updateMessageViaApi(pageWriter, topic, msgB, { content: editB })
+      await pollForMessageContent(pageWriter, topic, msgB, editB, 30000)
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      await updateMessageViaApi(pageWriter, topic, msgC, { content: editC })
+      await pollForMessageContent(pageWriter, topic, msgC, editC, 30000)
+
+      // Automatic push while pulls stay gated: writer outbox drains on its
+      // own (no manual sync invoked here), relay advances by exactly 3. The
+      // gated pull fails truthfully (503) so lastError stays non-null while
+      // gated; only pending drain is asserted here, not error cleanliness.
+      await pollForPendingCount(pageWriter, 0, 90000)
+      await relay.waitForQuiescent()
+      expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
+      expect(relay.getCursor()).toBe(relayCursorBase + 3)
+      const writerAfterPush = await getSyncStatusViaApi(pageWriter)
+      expect(writerAfterPush.pendingCount).toBe(0)
+      // Writer pull cursor stays pinned: pushes do not advance the pull cursor.
+      expect(writerAfterPush.cursor).toBe(cursorWriterBase)
+
+      // Reader demonstrably held: cursor pinned, pending clean, contents stale.
+      const readerHeld = await getSyncStatusViaApi(pageReader)
+      expect(readerHeld.cursor).toBe(cursorReaderBase)
+      expect(readerHeld.pendingCount).toBe(0)
+      for (const [msg, base] of [
+        [msgA, baseA],
+        [msgB, baseB],
+        [msgC, baseC]
+      ] as const) {
+        const { messages } = await fetchMessagesViaApi(pageReader, topic)
+        const found = (messages as any[]).find((m: any) => m?.id === msg) as any
+        expect(found?.content).toBe(base)
+      }
+      // Relay evidence from the baseline cursor: exactly 3 message upserts
+      // with globally continuous seq and per-entity content mapping.
+      const heldPull = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
+        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
+      })
+      // Pull is gated, so the contract-level pull fails closed here; the
+      // in-memory counters above are the push-commit proof while gated.
+      expect(heldPull.status).toBe(503)
+
+      // Release pulls: convergence is automatic only (no post-release manual sync).
+      relay.setPullPaused(false)
+      expect(relay.isPullPaused()).toBe(false)
+      await pollForMessageContent(pageReader, topic, msgA, editA, 120000)
+      await pollForMessageContent(pageReader, topic, msgB, editB, 120000)
+      await pollForMessageContent(pageReader, topic, msgC, editC, 120000)
+      await pollForPendingDrained(pageWriter, 90000)
+      await pollForPendingDrained(pageReader, 90000)
+
+      // Final relay payload proof: 3 ops, continuous seq, expected entity set.
+      await relay.waitForQuiescent()
+      expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
+      expect(relay.getCursor()).toBe(relayCursorBase + 3)
+      const pullRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
+        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
+      })
+      expect(pullRes.status).toBe(200)
+      const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
+      const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
+        .filter(
+          (o: any) =>
+            o?.entityType === 'message' && o?.op === 'upsert' && [msgA, msgB, msgC].includes(String(o?.entityId))
+        )
+        .sort((a: any, b: any) => Number(a?.seq) - Number(b?.seq))
+      expect(msgOps.length).toBe(3)
+      expect(msgOps.map((o: any) => Number(o?.seq))).toEqual([
+        relayCursorBase + 1,
+        relayCursorBase + 2,
+        relayCursorBase + 3
+      ])
+      const byEntity = (id: string): string[] =>
+        msgOps.filter((o: any) => String(o?.entityId) === id).map((o: any) => String(o?.payload?.content))
+      expect(byEntity(msgA)).toEqual([editA])
+      expect(byEntity(msgB)).toEqual([editB])
+      expect(byEntity(msgC)).toEqual([editC])
+
+      const statusWriter = await getSyncStatusViaApi(pageWriter)
+      const statusReader = await getSyncStatusViaApi(pageReader)
+      expect(statusWriter.lastError).toBeNull()
+      expect(statusReader.lastError).toBeNull()
+      expect(statusWriter.lastCaptureError).toBeNull()
+      expect(statusReader.lastCaptureError).toBeNull()
+      expect(statusWriter.pendingCount).toBe(0)
+      expect(statusReader.pendingCount).toBe(0)
+      expect(statusWriter.cursor).toBeGreaterThan(cursorWriterBase)
+      expect(statusReader.cursor).toBeGreaterThan(cursorReaderBase)
+      // Block rows keep original contents: no joint block edit occurred.
+      const afterReader = await fetchMessagesViaApi(pageReader, topic)
+      for (const [blk, base] of [
+        [blkA, baseA],
+        [blkB, baseB],
+        [blkC, baseC]
+      ] as const) {
+        const found = (afterReader.blocks as any[]).find((b: any) => b?.id === blk) as any
+        expect(found?.content).toBe(base)
+      }
+    } finally {
+      try {
+        relay?.setPullPaused(false)
+      } catch {}
+      try {
+        relay?.setPushPaused(false)
+      } catch {}
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('push interruption holds relay then auto-retries after release', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    // Writer is the second profile; the main window is the peer. Pushes are
+    // gated while pulls stay open: relay stays pinned, writer outbox holds
+    // exactly 3 rows and fails truthfully; release auto-retries with no
+    // post-release manual sync.
+    const pageReader = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageWriter = profileB.page
+      await setSyncConfigViaApi(pageReader, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageWriter, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      // Deterministic baseline: one topic with 3 messages, drained via manual rounds.
+      const topic = 'e2e-sync-edit-topic-11'
+      const msgA = 'e2e-sync-edit-msg-11a'
+      const blkA = 'e2e-sync-edit-blk-11a'
+      const baseA = 'edit baseline content eleven A'
+      const msgB = 'e2e-sync-edit-msg-11b'
+      const blkB = 'e2e-sync-edit-blk-11b'
+      const baseB = 'edit baseline content eleven B'
+      const msgC = 'e2e-sync-edit-msg-11c'
+      const blkC = 'e2e-sync-edit-blk-11c'
+      const baseC = 'edit baseline content eleven C'
+      await ensureTopicViaApi(pageReader, topic, 'Edit Topic Eleven')
+      await appendMessageViaApi(pageReader, topic, messageJson(msgA, topic, baseA), [blockJson(blkA, msgA, baseA)])
+      await appendMessageViaApi(pageReader, topic, messageJson(msgB, topic, baseB), [blockJson(blkB, msgB, baseB)])
+      await appendMessageViaApi(pageReader, topic, messageJson(msgC, topic, baseC), [blockJson(blkC, msgC, baseC)])
+      expect((await runSyncViaApi(pageReader)).threw).toBeNull()
+      expect((await runSyncViaApi(pageWriter)).threw).toBeNull()
+      await pollForConvergence(pageWriter, topic, msgA, blkA, baseA)
+      await pollForConvergence(pageWriter, topic, msgB, blkB, baseB)
+      await pollForConvergence(pageWriter, topic, msgC, blkC, baseC)
+      await pollForPendingDrained(pageReader, 90000)
+      await pollForPendingDrained(pageWriter, 90000)
+      const cursorReaderBase = (await getSyncStatusViaApi(pageReader)).cursor
+      const cursorWriterBase = (await getSyncStatusViaApi(pageWriter)).cursor
+      const pendingWriterBase = (await getSyncStatusViaApi(pageWriter)).pendingCount
+      expect(pendingWriterBase).toBe(0)
+
+      // Direction barrier BEFORE any mutation so automation cannot push
+      // early. Pushes gated, pulls open; both profiles stay capture-enabled.
+      await relay.waitForQuiescent()
+      const relayCursorBase = relay.getCursor()
+      const relayOpsBase = relay.getOperationCount()
+      relay.setPushPaused(true)
+      expect(relay.isPushPaused()).toBe(true)
+      expect(relay.isPullPaused()).toBe(false)
+
+      // Writer edits one stable content field per message in order A -> B -> C.
+      const editA = 'edit push-barrier content eleven A one'
+      const editB = 'edit push-barrier content eleven B one'
+      const editC = 'edit push-barrier content eleven C one'
+      await updateMessageViaApi(pageWriter, topic, msgA, { content: editA })
+      await pollForMessageContent(pageWriter, topic, msgA, editA, 30000)
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      await updateMessageViaApi(pageWriter, topic, msgB, { content: editB })
+      await pollForMessageContent(pageWriter, topic, msgB, editB, 30000)
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      await updateMessageViaApi(pageWriter, topic, msgC, { content: editC })
+      await pollForMessageContent(pageWriter, topic, msgC, editC, 30000)
+
+      // Exact outbox accumulation: 3 edits map to exactly 3 pending rows.
+      // Automation cannot drain pushes while the push barrier holds.
+      await pollForPendingCount(pageWriter, pendingWriterBase + 3, 30000)
+      const queued = await getSyncStatusViaApi(pageWriter)
+      expect(queued.pendingCount).toBe(pendingWriterBase + 3)
+      expect(queued.cursor).toBe(cursorWriterBase)
+      expect(queued.lastCaptureError).toBeNull()
+      // Relay stays pinned while pushes are gated; pulls still served.
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBase)
+      expect(relay.getOperationCount()).toBe(relayOpsBase)
+      // Reader observably stale while the barrier holds.
+      for (const [msg, base] of [
+        [msgA, baseA],
+        [msgB, baseB],
+        [msgC, baseC]
+      ] as const) {
+        const { messages } = await fetchMessagesViaApi(pageReader, topic)
+        const found = (messages as any[]).find((m: any) => m?.id === msg) as any
+        expect(found?.content).toBe(base)
+      }
+
+      // Truthful failure while gated: pending retained, cursor pinned.
+      const failed = await runSyncViaApi(pageWriter)
+      expect(failed.threw).not.toBeNull()
+      const failedStatus = await getSyncStatusViaApi(pageWriter)
+      expect(failedStatus.lastError).not.toBeNull()
+      expect(failedStatus.lastCaptureError).toBeNull()
+      expect(failedStatus.pendingCount).toBe(pendingWriterBase + 3)
+      expect(failedStatus.cursor).toBe(cursorWriterBase)
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBase)
+      expect(relay.getOperationCount()).toBe(relayOpsBase)
+
+      // Release pushes: retry is automatic only (no post-release manual sync).
+      relay.setPushPaused(false)
+      expect(relay.isPushPaused()).toBe(false)
+      await pollForMessageContent(pageReader, topic, msgA, editA, 120000)
+      await pollForMessageContent(pageReader, topic, msgB, editB, 120000)
+      await pollForMessageContent(pageReader, topic, msgC, editC, 120000)
+      await pollForPendingDrained(pageWriter, 90000)
+      await pollForPendingDrained(pageReader, 90000)
+
+      // Relay evidence from the baseline cursor: exactly 3 new operations with
+      // globally continuous seq and per-entity content mapping.
+      await relay.waitForQuiescent()
+      expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
+      expect(relay.getCursor()).toBe(relayCursorBase + 3)
+      const pullRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
+        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
+      })
+      expect(pullRes.status).toBe(200)
+      const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
+      const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
+        .filter(
+          (o: any) =>
+            o?.entityType === 'message' && o?.op === 'upsert' && [msgA, msgB, msgC].includes(String(o?.entityId))
+        )
+        .sort((a: any, b: any) => Number(a?.seq) - Number(b?.seq))
+      expect(msgOps.length).toBe(3)
+      expect(msgOps.map((o: any) => Number(o?.seq))).toEqual([
+        relayCursorBase + 1,
+        relayCursorBase + 2,
+        relayCursorBase + 3
+      ])
+      const byEntity = (id: string): string[] =>
+        msgOps.filter((o: any) => String(o?.entityId) === id).map((o: any) => String(o?.payload?.content))
+      expect(byEntity(msgA)).toEqual([editA])
+      expect(byEntity(msgB)).toEqual([editB])
+      expect(byEntity(msgC)).toEqual([editC])
+
+      const statusWriter = await getSyncStatusViaApi(pageWriter)
+      const statusReader = await getSyncStatusViaApi(pageReader)
+      expect(statusWriter.lastError).toBeNull()
+      expect(statusReader.lastError).toBeNull()
+      expect(statusWriter.lastCaptureError).toBeNull()
+      expect(statusReader.lastCaptureError).toBeNull()
+      expect(statusWriter.pendingCount).toBe(0)
+      expect(statusReader.pendingCount).toBe(0)
+      expect(statusWriter.cursor).toBeGreaterThan(cursorWriterBase)
+      expect(statusReader.cursor).toBeGreaterThan(cursorReaderBase)
+      // Block rows keep original contents: no joint block edit occurred.
+      const afterWriter = await fetchMessagesViaApi(pageWriter, topic)
+      for (const [blk, base] of [
+        [blkA, baseA],
+        [blkB, baseB],
+        [blkC, baseC]
+      ] as const) {
+        const found = (afterWriter.blocks as any[]).find((b: any) => b?.id === blk) as any
+        expect(found?.content).toBe(base)
+      }
+    } finally {
+      try {
+        relay?.setPushPaused(false)
+      } catch {}
+      try {
+        relay?.setPullPaused(false)
+      } catch {}
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('identical operation replay is idempotent at the relay', async ({ mainWindow, ownedTmpRoot, mockPort }) => {
+    // Test-side replay only proves the existing relay idempotent-accept rule
+    // (same id + identical content returns 200/acceptedIds with no new seq).
+    // It does not claim a real client lost-response retry sequence.
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      // Deterministic baseline, drained via labeled manual setup rounds.
+      const topic = 'e2e-sync-edit-topic-12'
+      const msg = 'e2e-sync-edit-msg-12'
+      const blk = 'e2e-sync-edit-blk-12'
+      const base = 'edit baseline content twelve'
+      await ensureTopicViaApi(pageA, topic, 'Edit Topic Twelve')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, base), [blockJson(blk, msg, base)])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, base)
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      await relay.waitForQuiescent()
+      const relayCursorBase = relay.getCursor()
+      const relayOpsBase = relay.getOperationCount()
+
+      // One successful ordinary edit pushed and pulled on both profiles.
+      const edited = 'edit identical replay content twelve'
+      await updateMessageViaApi(pageA, topic, msg, { content: edited })
+      await pollForMessageContent(pageA, topic, msg, edited, 30000)
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForMessageContent(pageB, topic, msg, edited, 90000)
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      await relay.waitForQuiescent()
+      const relayCursorAfterPush = relay.getCursor()
+      const relayOpsAfterPush = relay.getOperationCount()
+      expect(relayOpsAfterPush).toBe(relayOpsBase + 1)
+      expect(relayCursorAfterPush).toBe(relayCursorBase + 1)
+
+      // Capture the committed operation over the existing relay contract.
+      const pullRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
+        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
+      })
+      expect(pullRes.status).toBe(200)
+      const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
+      expect(pullBody.cursor).toBe(relayCursorAfterPush)
+      const pulled = (Array.isArray(pullBody.operations) ? pullBody.operations : []).filter(
+        (o: any) => o?.entityType === 'message' && o?.entityId === msg && o?.op === 'upsert'
+      )
+      expect(pulled.length).toBe(1)
+      const committed = pulled[0] as any
+      const committedSeq = Number(committed?.seq)
+      expect(committedSeq).toBe(relayCursorAfterPush)
+      // Rebuild the push-shaped identical operation strictly from relay
+      // contract fields (production push never sends seq).
+      const replayOp = {
+        id: String(committed.id),
+        entityType: String(committed.entityType),
+        op: String(committed.op),
+        entityId: String(committed.entityId),
+        timestamp: Number(committed.timestamp),
+        deviceId: String(committed.deviceId),
+        payload: committed.payload as Record<string, unknown>
+      }
+      expect(String((replayOp.payload as any)?.content)).toBe(edited)
+
+      // Identical replay once via the existing test-side HTTP push path.
+      const replayRes1 = await fetch(`${relay.endpoint}/sync/push`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operations: [replayOp] })
+      })
+      expect(replayRes1.status).toBe(200)
+      const replayBody1 = (await replayRes1.json()) as { acceptedIds: string[]; cursor: number }
+      expect(replayBody1.acceptedIds).toEqual([replayOp.id])
+      expect(replayBody1.cursor).toBe(relayCursorAfterPush)
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorAfterPush)
+      expect(relay.getOperationCount()).toBe(relayOpsAfterPush)
+
+      // One bounded repeat: still accepted with no new sequence.
+      const replayRes2 = await fetch(`${relay.endpoint}/sync/push`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operations: [replayOp] })
+      })
+      expect(replayRes2.status).toBe(200)
+      const replayBody2 = (await replayRes2.json()) as { acceptedIds: string[]; cursor: number }
+      expect(replayBody2.acceptedIds).toEqual([replayOp.id])
+      expect(replayBody2.cursor).toBe(relayCursorAfterPush)
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorAfterPush)
+      expect(relay.getOperationCount()).toBe(relayOpsAfterPush)
+
+      // Pull still carries exactly one operation with the original seq.
+      const pullAfter = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
+        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
+      })
+      expect(pullAfter.status).toBe(200)
+      const pullAfterBody = (await pullAfter.json()) as { operations: any[]; cursor: number }
+      const afterOps = (Array.isArray(pullAfterBody.operations) ? pullAfterBody.operations : []).filter(
+        (o: any) => o?.entityType === 'message' && o?.entityId === msg && o?.op === 'upsert'
+      )
+      expect(afterOps.length).toBe(1)
+      expect(Number((afterOps[0] as any)?.seq)).toBe(committedSeq)
+      expect(String((afterOps[0] as any)?.id)).toBe(replayOp.id)
+      expect(pullAfterBody.cursor).toBe(relayCursorAfterPush)
+
+      // No duplicate business application: both profiles still carry the
+      // single edited content, outboxes drained, cursors/errors clean.
+      await pollForMessageContent(pageA, topic, msg, edited, 30000)
+      await pollForMessageContent(pageB, topic, msg, edited, 30000)
+      await pollForPendingDrained(pageA, 30000)
+      await pollForPendingDrained(pageB, 30000)
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusA.lastError).toBeNull()
+      expect(statusB.lastError).toBeNull()
+      expect(statusA.lastCaptureError).toBeNull()
+      expect(statusB.lastCaptureError).toBeNull()
+      expect(statusA.pendingCount).toBe(0)
+      expect(statusB.pendingCount).toBe(0)
+      const afterB = await fetchMessagesViaApi(pageB, topic)
+      const blkAfter = (afterB.blocks as any[]).find((b: any) => b?.id === blk) as any
+      expect(blkAfter?.content).toBe(base)
+    } finally {
+      try {
+        relay?.setPushPaused(false)
+      } catch {}
+      try {
+        relay?.setPullPaused(false)
+      } catch {}
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
 })
