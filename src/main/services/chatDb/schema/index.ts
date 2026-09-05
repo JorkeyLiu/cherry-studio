@@ -214,3 +214,16 @@ export const syncConflictLog = sqliteTable(
   },
   (table) => [index('sync_conflict_log_entity_idx').on(table.entityType, table.entityId)]
 )
+
+// ---------------------------------------------------------------------------
+// sync device trust — additive (007): durable explicit pairing trust.
+// Renderer never touches this table directly; all access goes through
+// SyncService via typed IPC. Relay trust is authoritative for transport;
+// this table is the local durable mirror that survives restarts.
+// ---------------------------------------------------------------------------
+export const syncTrustedDevices = sqliteTable('sync_trusted_devices', {
+  deviceId: text('device_id').primaryKey(),
+  deviceName: text('device_name'),
+  trustedAt: text('trusted_at'),
+  source: text('source')
+})

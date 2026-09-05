@@ -37,11 +37,23 @@ export interface SyncPushRequest {
 export interface SyncPushResponse {
   acceptedIds: string[]
   cursor: number
+  /**
+   * One-time device credential plaintext, present only when the relay newly
+   * issues a credential for the calling device (founder bootstrap). The
+   * caller must persist it and present it as `X-Sync-Device-Auth` on all
+   * later calls. Absent otherwise.
+   */
+  deviceAuth?: string
 }
 
 export interface SyncPullResponse {
   operations: SyncRelayOperation[]
   cursor: number
+  /**
+   * One-time device credential plaintext, present only when the relay newly
+   * issues a credential for the calling device (founder bootstrap via pull).
+   */
+  deviceAuth?: string
 }
 
 export interface SyncConfig {

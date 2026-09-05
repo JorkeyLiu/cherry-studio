@@ -633,7 +633,18 @@ const api = {
     setConfig: (config: { endpoint?: string; token?: string; enabled?: boolean }) =>
       ipcRenderer.invoke(IpcChannel.Sync_SetConfig, config),
     getStatus: () => ipcRenderer.invoke(IpcChannel.Sync_GetStatus),
-    sync: () => ipcRenderer.invoke(IpcChannel.Sync_Sync)
+    sync: () => ipcRenderer.invoke(IpcChannel.Sync_Sync),
+    getDeviceId: () => ipcRenderer.invoke(IpcChannel.Sync_GetDeviceId),
+    createInvite: () => ipcRenderer.invoke(IpcChannel.Sync_CreateInvite),
+    requestPairing: (args: { code: string; deviceName?: string }) =>
+      ipcRenderer.invoke(IpcChannel.Sync_RequestPairing, args),
+    listPairingRequests: () => ipcRenderer.invoke(IpcChannel.Sync_ListPairingRequests),
+    acceptPairing: (requestId: string) => ipcRenderer.invoke(IpcChannel.Sync_AcceptPairing, { requestId }),
+    rejectPairing: (requestId: string) => ipcRenderer.invoke(IpcChannel.Sync_RejectPairing, { requestId }),
+    listTrusted: () => ipcRenderer.invoke(IpcChannel.Sync_ListTrusted),
+    refreshTrusted: () => ipcRenderer.invoke(IpcChannel.Sync_RefreshTrusted),
+    getPairingStatus: () => ipcRenderer.invoke(IpcChannel.Sync_GetPairingStatus),
+    revokeDevice: (targetDeviceId: string) => ipcRenderer.invoke(IpcChannel.Sync_RevokeDevice, { targetDeviceId })
   },
   chatDb: {
     fetchMessages: (request: FetchMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_FetchMessages, request),

@@ -861,6 +861,30 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
         payload_json TEXT,
         created_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS sync_trusted_devices (
+        device_id TEXT PRIMARY KEY,
+        device_name TEXT,
+        trusted_at TEXT,
+        source TEXT,
+        device_secret_hash TEXT
+      );
+      CREATE TABLE IF NOT EXISTS sync_pairing_invites (
+        code TEXT PRIMARY KEY,
+        inviter_device_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS sync_pairing_requests (
+        id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        device_name TEXT,
+        code TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        device_secret_hash TEXT
+      );
     `)
     const server = createRelayServer(relayDb as any)
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
@@ -882,6 +906,19 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
         body: JSON.stringify({ deviceId: 'd1', operations: [badTopic] })
       })
       expect(res1.status).toBe(400)
+      const issuedAuth = (
+        (await res1
+          .clone()
+          .json()
+          .catch(() => ({}))) as { deviceAuth?: unknown }
+      ).deviceAuth
+      const authHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+      // Founder bootstrap may have enrolled d1 before rejecting the invalid
+      // op; prove identity on the second call when a credential was issued.
+      if (typeof issuedAuth === 'string') {
+        authHeaders['x-sync-device-id'] = 'd1'
+        authHeaders['x-sync-device-auth'] = issuedAuth
+      }
       const badMismatch = {
         id: 'op-relay-mismatch',
         entityType: 'message',
@@ -893,7 +930,7 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
       }
       const res2 = await fetch(`${base}/sync/push`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({ deviceId: 'd1', operations: [badMismatch] })
       })
       expect(res2.status).toBe(400)

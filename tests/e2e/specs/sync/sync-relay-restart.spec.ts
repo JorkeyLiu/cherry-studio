@@ -27,6 +27,7 @@ import {
   fetchMessagesViaApi,
   getSyncStatusViaApi,
   isoNow,
+  pairProfilesViaApi,
   runSyncViaApi,
   setSyncConfigViaApi,
   topicExistsViaApi,
@@ -148,13 +149,69 @@ interface RelayPullBody {
   cursor: number
 }
 
+interface RelayObserver {
+  deviceId: string
+  deviceAuth: string
+}
+
+/**
+ * Pair a test-side diagnostic observer device through the production pairing
+ * flow (F-001/F-002): the observer requests pairing with an approver-minted
+ * invite code over raw HTTP (receiving its credential), and the trusted
+ * approver accepts via production IPC. Raw diagnostic pulls then
+ * authenticate as this already-trusted member. No trust is ever minted
+ * outside the explicit pairing flow.
+ */
+async function ensureObserverPaired(endpoint: string, approverPage: Page): Promise<RelayObserver> {
+  const deviceId = 'e2e-observer'
+  const invite = await approverPage.evaluate(async () => {
+    return await (window as any).api.sync.createInvite()
+  })
+  if (!invite || typeof invite.code !== 'string') throw new Error('observer pairing: invite code missing')
+  const reqRes = await fetch(`${endpoint}/sync/pair/request`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId, code: invite.code })
+  })
+  if (reqRes.status !== 200) throw new Error(`observer pairing: request failed ${reqRes.status}`)
+  const reqBody = (await reqRes.json()) as { requestId?: unknown; deviceAuth?: unknown }
+  if (typeof reqBody.requestId !== 'string' || typeof reqBody.deviceAuth !== 'string') {
+    throw new Error('observer pairing: request response malformed')
+  }
+  const pending = await approverPage.evaluate(async () => {
+    return await (window as any).api.sync.listPairingRequests()
+  })
+  const found = Array.isArray(pending?.requests)
+    ? pending.requests.some((r: any) => r?.id === reqBody.requestId)
+    : false
+  if (!found) throw new Error('observer pairing: request not visible to approver')
+  await approverPage.evaluate(async (requestId: string) => {
+    return await (window as any).api.sync.acceptPairing(requestId)
+  }, reqBody.requestId as string)
+  return { deviceId, deviceAuth: reqBody.deviceAuth as string }
+}
+
 async function authedPull(
   endpoint: string,
   token: string,
-  cursor: number
+  cursor: number,
+  observer?: RelayObserver
 ): Promise<{ status: number; body: RelayPullBody }> {
-  const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}`, {
-    headers: { Authorization: `Bearer ${token}` }
+  // Without an observer the legacy token-only form is used (401-first
+  // negative paths); positive diagnostics pass the paired observer.
+  if (!observer) {
+    const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    const body = (await res.json().catch(() => ({ operations: [], cursor }))) as RelayPullBody
+    return { status: res.status, body }
+  }
+  const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent(observer.deviceId)}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'x-sync-device-id': observer.deviceId,
+      'x-sync-device-auth': observer.deviceAuth
+    }
   })
   const body = (await res.json().catch(() => ({ operations: [], cursor }))) as RelayPullBody
   return { status: res.status, body }
@@ -289,6 +346,9 @@ test.describe('Sync file-backed relay restart', () => {
 
       await setSyncConfigViaApi(pageA, { endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
+      // Diagnostic observer for raw pull evidence (trusted via pairing flow).
+      const observer = await ensureObserverPaired(endpoint, pageA)
 
       // Stable baseline topic/message converged on both profiles.
       const topic = 'e2e-sync-restart-topic-1'
@@ -302,7 +362,7 @@ test.describe('Sync file-backed relay restart', () => {
       await pollForConvergence(pageB, topic, msg, blk, base)
 
       // Strict pull evidence from cursor 0: contiguous retained operations.
-      const baseline = await authedPull(endpoint, RELAY_TOKEN, 0)
+      const baseline = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
       expect(baseline.status).toBe(200)
       expect(baseline.body.operations.length).toBeGreaterThan(0)
       const seqs = baseline.body.operations.map((o: any) => o.seq as number)
@@ -317,7 +377,7 @@ test.describe('Sync file-backed relay restart', () => {
       })
       expect(denied.status).toBe(401)
       await denied.json().catch(() => ({}))
-      const afterDenied = await authedPull(endpoint, RELAY_TOKEN, 0)
+      const afterDenied = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
       expect(afterDenied.status).toBe(200)
       expect(afterDenied.body.cursor).toBe(cursorBefore)
       expect(stableOpProjection(afterDenied.body.operations)).toEqual(stableOpProjection(baseline.body.operations))
@@ -342,7 +402,7 @@ test.describe('Sync file-backed relay restart', () => {
       })
       expect(deniedPush.status).toBe(401)
       await deniedPush.json().catch(() => ({}))
-      const afterDeniedPush = await authedPull(endpoint, RELAY_TOKEN, 0)
+      const afterDeniedPush = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
       expect(afterDeniedPush.status).toBe(200)
       expect(afterDeniedPush.body.cursor).toBe(cursorBefore)
       expect(stableOpProjection(afterDeniedPush.body.operations)).toEqual(stableOpProjection(baseline.body.operations))
@@ -401,7 +461,7 @@ test.describe('Sync file-backed relay restart', () => {
       await health.json().catch(() => ({}))
 
       // Retained operations and sequence continuity after restart.
-      const retained = await authedPull(endpoint, RELAY_TOKEN, 0)
+      const retained = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
       expect(retained.status).toBe(200)
       expect(retained.body.cursor).toBe(cursorBefore)
       expect(retained.body.operations.map((o: any) => o.seq)).toEqual(seqs)

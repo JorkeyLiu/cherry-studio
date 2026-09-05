@@ -2,16 +2,29 @@ import { randomUUID } from 'node:crypto'
 
 import { loggerService } from '@logger'
 import { configManager } from '@main/services/ConfigManager'
-import type { SyncConfig, SyncOperation, SyncPushRequest, SyncStatus } from '@shared/sync'
+import type {
+  SyncConfig,
+  SyncOperation,
+  SyncPairingRequest,
+  SyncPairingStatus,
+  SyncPushRequest,
+  SyncStatus,
+  SyncTrustedDevice
+} from '@shared/sync'
 import {
   filterBlockPayload,
   filterMessagePayload,
   filterTopicPayload,
+  isValidSyncDeviceAuth,
+  isValidSyncDeviceId,
+  normalizePairingCode,
   SYNC_BLOCK_PATCH_FIELDS,
   SYNC_CONFLICT_LOG_MAX,
   SYNC_MESSAGE_PATCH_FIELDS,
   SYNC_TOMBSTONE_OPERATION_ID_MAX_LENGTH,
   SYNC_TOPIC_PATCH_FIELDS,
+  validatePairingCode,
+  validateSyncDeviceName,
   validateSyncOperationStrict,
   validateSyncPayloadAllowlist
 } from '@shared/sync'
@@ -31,6 +44,7 @@ const STATE_LAST_ERROR = 'lastError'
 const STATE_CURSOR = 'cursor'
 const STATE_DEVICE_ID = 'deviceId'
 const STATE_CAPTURE_ERROR = 'lastCaptureError'
+const STATE_DEVICE_AUTH = 'sync:deviceAuth'
 // Unambiguous missing sentinel for config device identity: passed as the
 // electron-store default so a truly absent key is the ONLY case that returns
 // this reference. Present null/empty/whitespace/non-string values are returned
@@ -137,6 +151,7 @@ function isMissingSyncTableError(e: unknown): boolean {
 
 const MIGRATION_005_KEY = '005_sync_metadata'
 const MIGRATION_006_KEY = '006_sync_field_merge'
+const MIGRATION_007_KEY = '007_sync_pairing_trust'
 
 /**
  * Device-identity validity (LOCK-PERSONAL-001/006): a present identity must be
@@ -2130,6 +2145,17 @@ export class SyncService {
         } catch {}
         throw e instanceof Error ? e : new Error(String(e))
       }
+      let deviceAuth: string | undefined
+      try {
+        deviceAuth = this.getDeviceAuth()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`sync preflight failed: ${msg}`.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      this.assertLocalTrustForSync(deviceId)
       const db = this.getDb()
       // Strict persisted cursor (LOCK-PERSONAL-001): malformed state records
       // a durable error and fails closed before any pull — never skip history.
@@ -2172,7 +2198,22 @@ export class SyncService {
         const chunkIds = new Set(chunk.map((o) => o.id))
         const pushReq: SyncPushRequest = { deviceId, operations: chunk }
         try {
-          const pushRes = await this.pushWithShutdown(cfg.endpoint, cfg.token, pushReq)
+          const pushRes = await this.pushWithShutdown(cfg.endpoint, cfg.token, pushReq, deviceAuth)
+          this.throwIfShutdown()
+          this.throwIfStaleConfig(syncGen)
+          // A relay-issued credential (founder bootstrap) must be durably
+          // persisted before any success is reported. Persistence failure is
+          // a sync failure: durable error + throw, outbox retained.
+          if (pushRes.deviceAuth !== undefined) {
+            try {
+              this.persistIssuedDeviceAuth(pushRes.deviceAuth)
+              deviceAuth = pushRes.deviceAuth
+            } catch (persistErr) {
+              const pmsg = persistErr instanceof Error ? persistErr.message : String(persistErr)
+              this.updateLastError(`sync credential persistence failed: ${pmsg}`.slice(0, 1000))
+              throw this.credentialPersistenceError(pushRes.deviceAuth, 'sync credential', persistErr)
+            }
+          }
           this.throwIfShutdown()
           this.throwIfStaleConfig(syncGen)
           const acked = pushRes.acceptedIds ?? []
@@ -2206,6 +2247,21 @@ export class SyncService {
           // A stale-config abort is never a transport failure: rethrow
           // without durable lastError writes (no post-transition status).
           if (e instanceof SyncStaleConfigError) throw e
+          // Bootstrap lockout guard: persist a relay-issued credential
+          // carried on the transport error before failing, so a rejected
+          // founder bootstrap never strands the device without its credential.
+          const issuedOnError = (e as { deviceAuth?: unknown })?.deviceAuth
+          if (isValidSyncDeviceAuth(issuedOnError)) {
+            try {
+              this.persistIssuedDeviceAuth(issuedOnError)
+              deviceAuth = issuedOnError
+            } catch (persistErr) {
+              const pmsg = persistErr instanceof Error ? persistErr.message : String(persistErr)
+              this.throwIfShutdown()
+              this.updateLastError(`sync credential persistence failed: ${pmsg}`.slice(0, 1000))
+              throw this.credentialPersistenceError(issuedOnError, 'sync credential', persistErr)
+            }
+          }
           const msg = e instanceof Error ? e.message : String(e)
           this.throwIfShutdown()
           this.updateLastError(msg)
@@ -2270,14 +2326,39 @@ export class SyncService {
       while (!pagingDone) {
         this.throwIfShutdown()
         this.throwIfStaleConfig(syncGen)
-        let pullRes: { operations: any[]; cursor: number }
+        let pullRes: { operations: any[]; cursor: number; deviceAuth?: string }
         try {
-          pullRes = await this.pullWithShutdown(cfg.endpoint, cfg.token, fetchCursor, deviceId)
+          pullRes = await this.pullWithShutdown(cfg.endpoint, cfg.token, fetchCursor, deviceId, deviceAuth)
+          this.throwIfShutdown()
+          this.throwIfStaleConfig(syncGen)
+          if (pullRes.deviceAuth !== undefined) {
+            try {
+              this.persistIssuedDeviceAuth(pullRes.deviceAuth)
+              deviceAuth = pullRes.deviceAuth
+            } catch (persistErr) {
+              const pmsg = persistErr instanceof Error ? persistErr.message : String(persistErr)
+              pullError = persistErr
+              this.updateLastError(`sync credential persistence failed: ${pmsg}`.slice(0, 1000))
+              throw this.credentialPersistenceError(pullRes.deviceAuth, 'sync credential', persistErr)
+            }
+          }
           this.throwIfShutdown()
           this.throwIfStaleConfig(syncGen)
         } catch (e) {
           if (e instanceof SyncShutdownError) throw e
           if (e instanceof SyncStaleConfigError) throw e
+          const issuedOnError = (e as { deviceAuth?: unknown })?.deviceAuth
+          if (isValidSyncDeviceAuth(issuedOnError)) {
+            try {
+              this.persistIssuedDeviceAuth(issuedOnError)
+              deviceAuth = issuedOnError
+            } catch (persistErr) {
+              const pmsg = persistErr instanceof Error ? persistErr.message : String(persistErr)
+              pullError = persistErr
+              this.updateLastError(`sync credential persistence failed: ${pmsg}`.slice(0, 1000))
+              throw this.credentialPersistenceError(issuedOnError, 'sync credential', persistErr)
+            }
+          }
           pullError = e
           const msg = e instanceof Error ? e.message : String(e)
           this.updateLastError(msg)
@@ -2406,6 +2487,19 @@ export class SyncService {
       this.throwIfShutdown()
       this.throwIfStaleConfig(syncGen)
       if (!pullError && !applyError) {
+        // F-008 fail-closed ordering: durable trust + credential persistence
+        // complete BEFORE the success timestamp is written. Any persistence
+        // failure records a durable error and rejects — never a success
+        // status with unpersisted trust.
+        try {
+          this.recordBootstrapTrust(deviceId)
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          try {
+            this.updateLastError(`sync trust persistence failed: ${msg}`.slice(0, 1000))
+          } catch {}
+          throw new Error(`sync trust persistence failed: ${msg}`.slice(0, 1000))
+        }
         this.updateLastSyncAt(new Date().toISOString())
         // Ordinary transport/reconciliation success clears lastError only.
         // A durable capture failure (lastCaptureError) is never cleared here;
@@ -2515,12 +2609,13 @@ export class SyncService {
   private async pushWithShutdown(
     endpoint: string,
     token: string | undefined,
-    req: SyncPushRequest
-  ): Promise<{ cursor: number; acceptedIds: string[] }> {
+    req: SyncPushRequest,
+    deviceAuth?: string
+  ): Promise<{ cursor: number; acceptedIds: string[]; deviceAuth?: string }> {
     const controller = new AbortController()
     const untrack = this.trackFetchController(controller)
     try {
-      return await syncClient.push(endpoint, token, req, controller.signal)
+      return await syncClient.push(endpoint, token, req, controller.signal, deviceAuth)
     } catch (e) {
       if (this.shutdownRequested || (e as Error)?.name === 'AbortError') {
         try {
@@ -2538,14 +2633,16 @@ export class SyncService {
     endpoint: string,
     token: string | undefined,
     cursor: number,
-    deviceId: string
-  ): Promise<{ operations: any[]; cursor: number }> {
+    deviceId: string,
+    deviceAuth?: string
+  ): Promise<{ operations: any[]; cursor: number; deviceAuth?: string }> {
     const controller = new AbortController()
     const untrack = this.trackFetchController(controller)
     try {
-      return (await syncClient.pull(endpoint, token, cursor, deviceId, controller.signal)) as unknown as {
+      return (await syncClient.pull(endpoint, token, cursor, deviceId, controller.signal, deviceAuth)) as unknown as {
         operations: any[]
         cursor: number
+        deviceAuth?: string
       }
     } catch (e) {
       if (this.shutdownRequested) throw new SyncShutdownError()
@@ -2555,9 +2652,400 @@ export class SyncService {
     }
   }
 
+  /**
+   * Per-device relay credential (F-001): issued once by the relay at founder
+   * bootstrap or pairing-request, persisted in config alongside the token,
+   * and presented on every device-authenticated call. Never logged.
+   * Returns undefined when no credential was ever issued (pre-bootstrap).
+   * A present-but-malformed value fails closed.
+   */
+  getDeviceAuth(): string | undefined {
+    let raw: unknown
+    try {
+      raw = configManager.get(STATE_DEVICE_AUTH as never, undefined as never)
+    } catch (e) {
+      throw new SyncDeviceIdentityError(
+        `sync device auth config read failed: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e }
+      )
+    }
+    if (raw === undefined || raw === null || raw === '') return undefined
+    if (!isValidSyncDeviceAuth(raw)) {
+      throw new SyncDeviceIdentityError('sync device auth config malformed: present value is not a valid credential')
+    }
+    return raw
+  }
+
+  private persistDeviceAuth(secret: string): void {
+    if (!isValidSyncDeviceAuth(secret)) throw new SyncDeviceIdentityError('sync device auth response malformed')
+    try {
+      configManager.set(STATE_DEVICE_AUTH as never, secret as never)
+    } catch (e) {
+      throw new SyncDeviceIdentityError(
+        `sync device auth persistence failed: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e }
+      )
+    }
+  }
+
+  /** Persist a relay-issued credential when present; fail closed on write error. */
+  private persistIssuedDeviceAuth(issued: string | undefined): void {
+    if (issued === undefined) return
+    this.persistDeviceAuth(issued)
+  }
+
+  /**
+   * Recoverable credential-persistence failure (F-001): the plaintext
+   * credential travels only on the error object (`deviceAuth`), never in
+   * the message text or logs. Callers/retries can extract it via
+   * `(e as { deviceAuth?: unknown }).deviceAuth` and re-attempt persistence,
+   * so a local store failure never silently drops a relay-issued secret.
+   */
+  private credentialPersistenceError(issued: string, context: string, cause: unknown): Error {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    const err = new Error(`${context}: sync device auth persistence failed: ${detail}`.slice(0, 1000))
+    ;(err as { deviceAuth?: string }).deviceAuth = issued
+    if (cause instanceof Error) {
+      try {
+        ;(err as { cause?: unknown }).cause = cause
+      } catch {}
+    }
+    return err
+  }
+
+  // -------------------------------------------------------------------------
+  // Device pairing + durable trust (explicit user action, restart-persistent)
+  // -------------------------------------------------------------------------
+
+  listTrustedDevices(): SyncTrustedDevice[] {
+    const db = this.getDb()
+    try {
+      const rows = db.select().from(schema.syncTrustedDevices).all()
+      return rows.map((r) => ({
+        deviceId: r.deviceId,
+        deviceName: r.deviceName ?? undefined,
+        trustedAt: r.trustedAt ?? new Date(0).toISOString(),
+        source: r.source ?? 'unknown'
+      }))
+    } catch (e) {
+      if (isTolerableMissingSyncTable(db, e, MIGRATION_007_KEY)) return []
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  isDeviceTrusted(deviceId: string): boolean {
+    if (!isValidSyncDeviceId(deviceId)) return false
+    try {
+      return this.listTrustedDevices().some((d) => d.deviceId === deviceId)
+    } catch {
+      return false
+    }
+  }
+
+  private upsertTrustedDevice(device: SyncTrustedDevice): void {
+    const db = this.getDb()
+    try {
+      db.insert(schema.syncTrustedDevices)
+        .values({
+          deviceId: device.deviceId,
+          deviceName: device.deviceName ?? null,
+          trustedAt: device.trustedAt,
+          source: device.source
+        })
+        .onConflictDoUpdate({
+          target: schema.syncTrustedDevices.deviceId,
+          set: { deviceName: device.deviceName ?? null, trustedAt: device.trustedAt, source: device.source }
+        })
+        .run()
+    } catch (e) {
+      if (isTolerableMissingSyncTable(db, e, MIGRATION_007_KEY)) {
+        throw new SyncDeviceIdentityError('sync pairing trust store unavailable: migration 007 not applied')
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  private removeTrustedDeviceRow(deviceId: string): void {
+    const db = this.getDb()
+    try {
+      db.delete(schema.syncTrustedDevices).where(eq(schema.syncTrustedDevices.deviceId, deviceId)).run()
+    } catch (e) {
+      if (isTolerableMissingSyncTable(db, e, MIGRATION_007_KEY)) {
+        throw new SyncDeviceIdentityError('sync pairing trust store unavailable: migration 007 not applied')
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  private pairingTransport(): { endpoint: string; token: string | undefined } {
+    const cfg = this.getConfig()
+    const endpointErr = validateEndpointUrl(cfg.endpoint)
+    if (endpointErr) throw new Error(endpointErr)
+    return { endpoint: cfg.endpoint, token: cfg.token }
+  }
+
+  async createPairingInvite(): Promise<{ code: string; expiresAt: string }> {
+    const { endpoint, token } = this.pairingTransport()
+    const deviceId = this.getDeviceId()
+    const deviceAuth = this.getDeviceAuth()
+    let res: { code: string; expiresAt: string; deviceAuth?: string }
+    try {
+      res = await syncClient.createInvite(endpoint, token, deviceId, deviceAuth)
+    } catch (e) {
+      // F-001 production-path recovery: a relay error that still issues the
+      // founder credential carries it on the error object (never in the
+      // message). Persist the validated credential before rethrowing so a
+      // bootstrap-adjacent invite failure never strands the device without
+      // its credential. Persistence failure fails closed with a recoverable
+      // carrier error; the original transport error is otherwise rethrown
+      // unchanged (already redacted by SyncClient).
+      const issuedOnError = (e as { deviceAuth?: unknown })?.deviceAuth
+      if (isValidSyncDeviceAuth(issuedOnError)) {
+        try {
+          this.persistIssuedDeviceAuth(issuedOnError)
+        } catch (persistErr) {
+          const pmsg = persistErr instanceof Error ? persistErr.message : String(persistErr)
+          try {
+            this.updateLastError(`pairing invite credential persistence failed: ${pmsg}`.slice(0, 1000))
+          } catch {}
+          throw this.credentialPersistenceError(issuedOnError, 'pairing invite credential', persistErr)
+        }
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+    // Founder issuance: persist the relay credential before reporting
+    // success; a persistence failure fails closed (throw, no success).
+    if (res.deviceAuth !== undefined) {
+      try {
+        this.persistIssuedDeviceAuth(res.deviceAuth)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`pairing invite credential persistence failed: ${msg}`.slice(0, 1000))
+        } catch {}
+        throw this.credentialPersistenceError(res.deviceAuth, 'pairing invite credential', e)
+      }
+    }
+    logger.info('[createPairingInvite] invite created')
+    return { code: res.code, expiresAt: res.expiresAt }
+  }
+
+  async requestPairing(code: string, deviceName?: string): Promise<{ requestId: string; status: string }> {
+    const codeErr = validatePairingCode(code)
+    if (codeErr) throw new Error(codeErr)
+    const nameErr = validateSyncDeviceName(deviceName ?? undefined)
+    if (nameErr) throw new Error(nameErr)
+    const { endpoint, token } = this.pairingTransport()
+    const deviceId = this.getDeviceId()
+    let res: { requestId: string; status: string; deviceAuth: string }
+    try {
+      res = await syncClient.requestPairing(endpoint, token, {
+        deviceId,
+        deviceName,
+        code: normalizePairingCode(code)
+      })
+    } catch (e) {
+      // F-001 production-path recovery: same issued-credential-on-error
+      // contract as createPairingInvite. Persist the validated joiner
+      // credential before rethrowing so a bootstrap-adjacent request failure
+      // never strands the device. Persistence failure fails closed with a
+      // recoverable carrier error; otherwise rethrow the redacted error.
+      const issuedOnError = (e as { deviceAuth?: unknown })?.deviceAuth
+      if (isValidSyncDeviceAuth(issuedOnError)) {
+        try {
+          this.persistIssuedDeviceAuth(issuedOnError)
+        } catch (persistErr) {
+          const pmsg = persistErr instanceof Error ? persistErr.message : String(persistErr)
+          try {
+            this.updateLastError(`pairing request credential persistence failed: ${pmsg}`.slice(0, 1000))
+          } catch {}
+          throw this.credentialPersistenceError(issuedOnError, 'pairing request credential', persistErr)
+        }
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+    // The relay credential is the joiner's only proof of identity for all
+    // later push/pull calls: persist before reporting success. Failure fails
+    // closed (durable lastError + throw) so the caller never believes the
+    // request succeeded without holding the credential.
+    try {
+      this.persistIssuedDeviceAuth(res.deviceAuth)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      try {
+        this.updateLastError(`pairing request credential persistence failed: ${msg}`.slice(0, 1000))
+      } catch {}
+      throw this.credentialPersistenceError(res.deviceAuth, 'pairing request credential', e)
+    }
+    logger.info('[requestPairing] request submitted')
+    return { requestId: res.requestId, status: res.status }
+  }
+
+  async listPairingRequests(): Promise<SyncPairingRequest[]> {
+    const { endpoint, token } = this.pairingTransport()
+    const deviceId = this.getDeviceId()
+    const deviceAuth = this.getDeviceAuth()
+    const res = await syncClient.listPending(endpoint, token, deviceId, deviceAuth)
+    return res.requests
+  }
+
+  async acceptPairing(requestId: string): Promise<SyncTrustedDevice> {
+    if (typeof requestId !== 'string' || requestId.length === 0) throw new Error('request id invalid')
+    const { endpoint, token } = this.pairingTransport()
+    const approverDeviceId = this.getDeviceId()
+    const deviceAuth = this.getDeviceAuth()
+    const res = await syncClient.acceptPairing(endpoint, token, { approverDeviceId, requestId }, deviceAuth)
+    if (!isValidSyncDeviceId(res.trusted?.deviceId)) throw new Error('accept response malformed')
+    // F-003 atomic trust mirror: peer + self rows commit in one SQLite
+    // transaction (existing BEGIN IMMEDIATE/COMMIT pattern). Any write
+    // failure rolls back the whole batch and propagates — never a partial
+    // mirror (peer without self or vice versa).
+    const sqlite = this.getSqlite()
+    sqlite.exec('BEGIN IMMEDIATE')
+    try {
+      this.upsertTrustedDevice({
+        deviceId: res.trusted.deviceId,
+        deviceName: res.trusted.deviceName,
+        trustedAt: res.trusted.trustedAt ?? new Date().toISOString(),
+        source: 'pairing-accept'
+      })
+      // The approver itself is a trusted member; ensure self is mirrored locally
+      // so restart persistence holds on both sides of the trust relation.
+      this.upsertTrustedDevice({
+        deviceId: approverDeviceId,
+        trustedAt: new Date().toISOString(),
+        source: 'pairing-accept-self'
+      })
+      sqlite.exec('COMMIT')
+    } catch (e) {
+      try {
+        sqlite.exec('ROLLBACK')
+      } catch {}
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+    logger.info('[acceptPairing] request accepted')
+    return res.trusted
+  }
+
+  async rejectPairing(requestId: string): Promise<void> {
+    if (typeof requestId !== 'string' || requestId.length === 0) throw new Error('request id invalid')
+    const { endpoint, token } = this.pairingTransport()
+    const approverDeviceId = this.getDeviceId()
+    const deviceAuth = this.getDeviceAuth()
+    await syncClient.rejectPairing(endpoint, token, { approverDeviceId, requestId }, deviceAuth)
+    logger.info('[rejectPairing] request rejected')
+  }
+
+  async refreshTrustedDevices(): Promise<SyncTrustedDevice[]> {
+    const { endpoint, token } = this.pairingTransport()
+    const deviceId = this.getDeviceId()
+    const deviceAuth = this.getDeviceAuth()
+    const res = await syncClient.listTrusted(endpoint, token, deviceId, deviceAuth)
+    // F-003 atomic trust mirror: the whole refresh batch commits in one
+    // SQLite transaction. Any row-write failure rolls back the batch and
+    // propagates — never a partially refreshed mirror.
+    const validDevices = res.devices.filter((d) => isValidSyncDeviceId(d?.deviceId))
+    const sqlite = this.getSqlite()
+    sqlite.exec('BEGIN IMMEDIATE')
+    try {
+      for (const d of validDevices) {
+        this.upsertTrustedDevice({
+          deviceId: d.deviceId,
+          deviceName: d.deviceName,
+          trustedAt: d.trustedAt ?? new Date().toISOString(),
+          source: d.source ?? 'relay-refresh'
+        })
+      }
+      sqlite.exec('COMMIT')
+    } catch (e) {
+      try {
+        sqlite.exec('ROLLBACK')
+      } catch {}
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+    return this.listTrustedDevices()
+  }
+
+  async getPairingStatus(): Promise<SyncPairingStatus> {
+    const { endpoint, token } = this.pairingTransport()
+    const deviceId = this.getDeviceId()
+    const status = await syncClient.getPairingStatus(endpoint, token, deviceId)
+    if (status.trusted) {
+      // Requester learns acceptance: mirror self + relay list locally so
+      // restart retains trust without another explicit action. AUD-003: the
+      // local trust-mirror refresh is the persistence confirmation — its
+      // failure must propagate (fail closed) with the real error durably
+      // recorded, never a trusted=true success.
+      try {
+        await this.refreshTrustedDevices()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`pairing status trust refresh failed: ${msg}`.slice(0, 1000))
+        } catch {}
+        logger.error(`[getPairingStatus] trusted refresh failed: ${msg.slice(0, 200)}`)
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+    }
+    return status
+  }
+
+  async revokeTrustedDevice(targetDeviceId: string): Promise<void> {
+    if (!isValidSyncDeviceId(targetDeviceId)) throw new Error('device id invalid')
+    const { endpoint, token } = this.pairingTransport()
+    const approverDeviceId = this.getDeviceId()
+    if (targetDeviceId === approverDeviceId) throw new Error('cannot revoke own device')
+    const deviceAuth = this.getDeviceAuth()
+    await syncClient.revokeDevice(endpoint, token, { approverDeviceId, targetDeviceId }, deviceAuth)
+    this.removeTrustedDeviceRow(targetDeviceId)
+    logger.info('[revokeTrustedDevice] device revoked')
+  }
+
+  /**
+   * Main-side sync authorization (LOCK-004): a relay token alone is never
+   * trust. When the local durable trust mirror is non-empty, the local
+   * device must be a member; otherwise sync fails closed before transport
+   * with a durable lastError. An empty mirror is the founder bootstrap case
+   * (first device forms the group); after a successful bootstrap sync the
+   * local device is mirrored as trusted.
+   */
+  private assertLocalTrustForSync(deviceId: string): void {
+    let trusted: SyncTrustedDevice[]
+    try {
+      trusted = this.listTrustedDevices()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      try {
+        this.updateLastError(`sync authorization failed: ${msg}`.slice(0, 1000))
+      } catch {}
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+    if (trusted.length > 0 && !trusted.some((d) => d.deviceId === deviceId)) {
+      const msg = 'sync blocked: device-not-trusted (pairing required)'
+      try {
+        this.updateLastError(msg)
+      } catch {}
+      throw new Error(msg)
+    }
+  }
+
+  private recordBootstrapTrust(deviceId: string): void {
+    // F-008 fail-closed: bootstrap trust persistence failure must never be
+    // swallowed. Throw so sync() records a durable error and rejects instead
+    // of reporting success. Callers persist the issued device credential
+    // separately via persistIssuedDeviceAuth (also fail-closed).
+    const trusted = this.listTrustedDevices()
+    if (trusted.length === 0) {
+      this.upsertTrustedDevice({ deviceId, trustedAt: new Date().toISOString(), source: 'bootstrap' })
+    }
+  }
+
   clearAllForTests(): void {
     this.resetShutdownForTests()
     this.configGeneration = 0
+    try {
+      configManager.set(STATE_DEVICE_AUTH as never, '' as never)
+    } catch {}
     try {
       const db = this.getDb()
       db.delete(schema.syncOutbox).run()
@@ -2568,6 +3056,9 @@ export class SyncService {
       } catch {}
       try {
         db.delete(schema.syncConflictLog).run()
+      } catch {}
+      try {
+        db.delete(schema.syncTrustedDevices).run()
       } catch {}
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).run()
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_LAST_SYNC_AT)).run()

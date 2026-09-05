@@ -20,6 +20,7 @@ let relay: TestRelayHandle | null = null
 
 beforeEach(async () => {
   relay = await startTestRelay(TOKEN)
+  deviceAuth = undefined
 })
 
 afterEach(async () => {
@@ -30,21 +31,37 @@ afterEach(async () => {
 })
 
 async function push(ops: Record<string, unknown>[]): Promise<{ status: number; body: any }> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${TOKEN}`,
+    'x-sync-device-id': 'd1'
+  }
+  if (deviceAuth) headers['x-sync-device-auth'] = deviceAuth
   const res = await fetch(`${relay!.endpoint}/sync/push`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-    body: JSON.stringify({ operations: ops })
+    headers,
+    body: JSON.stringify({ deviceId: 'd1', operations: ops })
   })
   const body = await res.json().catch(() => ({}))
+  if (typeof body?.deviceAuth === 'string') deviceAuth = body.deviceAuth
   return { status: res.status, body }
 }
 
+let deviceAuth: string | undefined
+
 async function pull(cursor = 0): Promise<any> {
-  const res = await fetch(`${relay!.endpoint}/sync/pull?cursor=${cursor}`, {
-    headers: { Authorization: `Bearer ${TOKEN}` }
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${TOKEN}`,
+    'x-sync-device-id': 'd1'
+  }
+  if (deviceAuth) headers['x-sync-device-auth'] = deviceAuth
+  const res = await fetch(`${relay!.endpoint}/sync/pull?cursor=${cursor}&deviceId=d1`, {
+    headers
   })
   expect(res.status).toBe(200)
-  return res.json()
+  const body = await res.json()
+  if (typeof body?.deviceAuth === 'string') deviceAuth = body.deviceAuth
+  return body
 }
 
 describe('test relay batch atomicity (LOCK-RT-005/006)', () => {

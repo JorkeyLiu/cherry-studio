@@ -732,14 +732,15 @@ describe('BetterSqlite3BackupAdapter', () => {
 // ---------------------------------------------------------------------------
 
 describe('Migration registry', () => {
-  it('should have exactly six migrations (001 + 002 + 003 + 004 + 005 + 006)', () => {
-    expect(MIGRATIONS).toHaveLength(6)
+  it('should have exactly seven migrations (001 + 002 + 003 + 004 + 005 + 006 + 007)', () => {
+    expect(MIGRATIONS).toHaveLength(7)
     expect(MIGRATIONS[0].key).toBe('001_initial_schema')
     expect(MIGRATIONS[1].key).toBe('002_corrective_schema')
     expect(MIGRATIONS[2].key).toBe('003_fts5_normalized_search')
     expect(MIGRATIONS[3].key).toBe('004_fts_rowid_identity')
     expect(MIGRATIONS[4].key).toBe('005_sync_metadata')
     expect(MIGRATIONS[5].key).toBe('006_sync_field_merge')
+    expect(MIGRATIONS[6].key).toBe('007_sync_pairing_trust')
   })
 
   it('001_initial_schema should have SQL statements', () => {

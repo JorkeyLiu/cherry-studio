@@ -29,6 +29,17 @@ const SyncSettings: React.FC = () => {
   } | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [deviceId, setDeviceId] = useState('')
+  const [invite, setInvite] = useState<{ code: string; expiresAt: string } | null>(null)
+  const [joinCode, setJoinCode] = useState('')
+  const [deviceName, setDeviceName] = useState('')
+  const [pairing, setPairing] = useState<{ trusted: boolean; pending: boolean } | null>(null)
+  const [trusted, setTrusted] = useState<Array<{ deviceId: string; deviceName?: string }>>([])
+  const [pending, setPending] = useState<
+    Array<{ id: string; deviceId: string; deviceName?: string; expiresAt: string }>
+  >([])
+  const [pairingError, setPairingError] = useState<string | null>(null)
+  const [pairingBusy, setPairingBusy] = useState(false)
 
   const load = async () => {
     try {
@@ -52,8 +63,35 @@ const SyncSettings: React.FC = () => {
     }
   }
 
+  const loadPairing = async () => {
+    try {
+      setPairingError(null)
+      const idRes = await window.api.sync.getDeviceId()
+      setDeviceId(String(idRes?.deviceId ?? ''))
+      const st = await window.api.sync.getPairingStatus()
+      setPairing({ trusted: !!st?.trusted, pending: !!st?.pending })
+      try {
+        const list = await window.api.sync.listTrusted()
+        setTrusted(Array.isArray(list?.devices) ? list.devices : [])
+      } catch {
+        setTrusted([])
+      }
+      try {
+        const reqs = await window.api.sync.listPairingRequests()
+        setPending(Array.isArray(reqs?.requests) ? reqs.requests : [])
+      } catch {
+        setPending([])
+      }
+    } catch (e) {
+      const msg = String((e as Error).message ?? e).slice(0, 500)
+      setPairingError(msg)
+      logger.error('load pairing failed', e as Error)
+    }
+  }
+
   useEffect(() => {
     void load()
+    void loadPairing()
     // Poll status only — never overwrite the dirty endpoint/token form while
     // the user is editing. Config is reloaded explicitly on save/refresh.
     const id = setInterval(() => {
@@ -164,6 +202,182 @@ const SyncSettings: React.FC = () => {
             {t('settings.sync.sync_now', 'Sync Now')}
           </Button>
           <Button onClick={() => void load()}>{t('common.refresh', 'Refresh')}</Button>
+        </div>
+      </SettingRow>
+      <SettingDivider />
+      <SettingRow>
+        <SettingRowTitle>{t('settings.sync.pairing_title', 'Device pairing')}</SettingRowTitle>
+        <div style={{ flex: 1, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <SettingHelpText>
+            {t(
+              'settings.sync.pairing_help',
+              'Pairing is an explicit user action on both devices. The relay token alone never grants sync access; an untrusted device is rejected with device-not-trusted.'
+            )}
+          </SettingHelpText>
+          <span data-testid="sync-device-id">
+            {t('settings.sync.device_label', 'This device')}: {deviceId || '—'}
+          </span>
+          <span data-testid="sync-pairing-status">
+            {t('settings.sync.pairing_status', 'Pairing status')}:{' '}
+            {pairing
+              ? pairing.trusted
+                ? t('settings.sync.trusted_state', 'Trusted')
+                : pairing.pending
+                  ? t('settings.sync.pending_state', 'Pending')
+                  : t('settings.sync.untrusted_state', 'Not trusted')
+              : '—'}
+          </span>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Button
+              onClick={async () => {
+                setPairingBusy(true)
+                setPairingError(null)
+                try {
+                  const res = await window.api.sync.createInvite()
+                  setInvite(res)
+                } catch (e) {
+                  setPairingError(String((e as Error).message).slice(0, 500))
+                } finally {
+                  setPairingBusy(false)
+                }
+              }}
+              loading={pairingBusy}
+              data-testid="sync-create-invite">
+              {t('settings.sync.create_invite', 'Create invite code')}
+            </Button>
+            <Button onClick={() => void loadPairing()} data-testid="sync-pairing-refresh">
+              {t('settings.sync.refresh', 'Refresh')}
+            </Button>
+          </div>
+          {invite && (
+            <span data-testid="sync-invite-code">
+              {t('settings.sync.invite_code', 'Invite code')}: {invite.code} |{' '}
+              {t('settings.sync.invite_expires', 'Expires')}: {dayjs(invite.expiresAt).format('YYYY-MM-DD HH:mm:ss')}
+            </span>
+          )}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <Input
+              placeholder={t('settings.sync.join_code_placeholder', 'Enter 8-character code')}
+              value={joinCode}
+              onChange={(e) => setJoinCode(e.target.value)}
+              style={{ width: 200 }}
+              data-testid="sync-join-code-input"
+            />
+            <Input
+              placeholder={t('settings.sync.device_name_placeholder', 'e.g. work laptop')}
+              value={deviceName}
+              onChange={(e) => setDeviceName(e.target.value)}
+              style={{ width: 200 }}
+              data-testid="sync-device-name-input"
+            />
+            <Button
+              onClick={async () => {
+                setPairingBusy(true)
+                setPairingError(null)
+                try {
+                  await window.api.sync.requestPairing({ code: joinCode, deviceName: deviceName || undefined })
+                  setJoinCode('')
+                  await loadPairing()
+                } catch (e) {
+                  setPairingError(String((e as Error).message).slice(0, 500))
+                } finally {
+                  setPairingBusy(false)
+                }
+              }}
+              loading={pairingBusy}
+              data-testid="sync-request-pairing">
+              {t('settings.sync.request_pairing', 'Request pairing')}
+            </Button>
+          </div>
+          <span>
+            {t('settings.sync.pending_requests', 'Pending requests')}:{' '}
+            <span data-testid="sync-pending-count-pairing">{pending.length}</span>
+          </span>
+          {pending.length === 0 ? (
+            <span>{t('settings.sync.no_pending', 'No pending requests')}</span>
+          ) : (
+            pending.map((r) => (
+              <div key={r.id} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <span data-testid={`sync-pending-${r.id}`}>
+                  {r.deviceId}
+                  {r.deviceName ? ` (${r.deviceName})` : ''}
+                </span>
+                <Button
+                  size="small"
+                  type="primary"
+                  onClick={async () => {
+                    setPairingBusy(true)
+                    try {
+                      await window.api.sync.acceptPairing(r.id)
+                      await loadPairing()
+                    } catch (e) {
+                      setPairingError(String((e as Error).message).slice(0, 500))
+                    } finally {
+                      setPairingBusy(false)
+                    }
+                  }}
+                  data-testid={`sync-accept-${r.id}`}>
+                  {t('settings.sync.accept', 'Accept')}
+                </Button>
+                <Button
+                  size="small"
+                  onClick={async () => {
+                    setPairingBusy(true)
+                    try {
+                      await window.api.sync.rejectPairing(r.id)
+                      await loadPairing()
+                    } catch (e) {
+                      setPairingError(String((e as Error).message).slice(0, 500))
+                    } finally {
+                      setPairingBusy(false)
+                    }
+                  }}
+                  data-testid={`sync-reject-${r.id}`}>
+                  {t('settings.sync.reject', 'Reject')}
+                </Button>
+              </div>
+            ))
+          )}
+          <span>
+            {t('settings.sync.trusted_devices', 'Trusted devices')}:{' '}
+            <span data-testid="sync-trusted-count">{trusted.length}</span>
+          </span>
+          {trusted.length === 0 ? (
+            <span>{t('settings.sync.no_trusted', 'No trusted devices yet')}</span>
+          ) : (
+            trusted.map((d) => (
+              <div key={d.deviceId} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <span data-testid={`sync-trusted-${d.deviceId}`}>
+                  {d.deviceId}
+                  {d.deviceName ? ` (${d.deviceName})` : ''}
+                  {d.deviceId === deviceId ? ' *' : ''}
+                </span>
+                {d.deviceId !== deviceId && (
+                  <Button
+                    size="small"
+                    onClick={async () => {
+                      setPairingBusy(true)
+                      try {
+                        await window.api.sync.revokeDevice(d.deviceId)
+                        await loadPairing()
+                      } catch (e) {
+                        setPairingError(String((e as Error).message).slice(0, 500))
+                      } finally {
+                        setPairingBusy(false)
+                      }
+                    }}
+                    data-testid={`sync-revoke-${d.deviceId}`}>
+                    {t('settings.sync.revoke', 'Revoke')}
+                  </Button>
+                )}
+              </div>
+            ))
+          )}
+          {pairingError && (
+            <span style={{ color: 'var(--color-error)' }} data-testid="sync-pairing-error">
+              {pairingError.slice(0, 500)}
+            </span>
+          )}
         </div>
       </SettingRow>
       <SettingDivider />

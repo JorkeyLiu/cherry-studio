@@ -35,6 +35,7 @@ import {
   isoNow,
   listTrashTopicIdsViaApi,
   restoreTopicViaApi,
+  pairProfilesViaApi,
   runSyncViaApi,
   setSyncConfigViaApi,
   softDeleteTopicViaApi,
@@ -44,6 +45,34 @@ import {
 } from '../../pages/sync.page'
 
 const RELAY_TOKEN = 'e2e-sync-token-1'
+
+/**
+ * Device-identity framing for raw relay diagnostics (F-001/F-002): test-side
+ * raw pulls and replay pushes authenticate as an already-trusted relay
+ * member with the runner-observed issued credential. Production traffic
+ * always goes through SyncClient; these helpers cover raw HTTP diagnostics
+ * only and never mint trust.
+ */
+function relayTrustedDeviceId(relay: TestRelayHandle): string {
+  const ids = relay.listTrustedDeviceIdsForTests()
+  if (ids.length === 0) throw new Error('relay trust set empty: pair apps before raw relay diagnostics')
+  return ids[0]
+}
+
+function relayDeviceHeaders(relay: TestRelayHandle, deviceId: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${RELAY_TOKEN}`,
+    'x-sync-device-id': deviceId
+  }
+  const auth = relay.getIssuedDeviceAuthForTests(deviceId)
+  if (auth) headers['x-sync-device-auth'] = auth
+  return headers
+}
+
+function relayPullUrl(relay: TestRelayHandle, cursor: number | string, deviceId?: string): string {
+  const did = deviceId ?? relayTrustedDeviceId(relay)
+  return `${relay.endpoint}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent(did)}`
+}
 
 interface OfflineBlocker {
   endpoint: string
@@ -274,6 +303,7 @@ test.describe('Sync MVP two-profile real path', () => {
       // Both profiles configure the same endpoint/token.
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
       const statusA0 = await getSyncStatusViaApi(pageA)
       const statusB0 = await getSyncStatusViaApi(pageB)
       expect(statusA0.enabled).toBe(true)
@@ -402,6 +432,7 @@ test.describe('Sync MVP two-profile real path', () => {
       // Both profiles configure the same relay; automation starts on save.
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       // Profile A makes a supported mutation; neither profile invokes manual sync.
       const topic1 = 'e2e-sync-auto-topic-1'
@@ -430,6 +461,7 @@ test.describe('Sync MVP two-profile real path', () => {
       // Re-enable B: reconnect uses the strict existing cursor pull and
       // converges without any manual sync invocation.
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
       await pollForConvergence(pageB, topic2, msg2, blk2, content2, 90000)
     } finally {
       await closeProfileAndRelay(profileB, relay)
@@ -461,6 +493,7 @@ test.describe('Sync delete/recovery convergence', () => {
       const pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       const topic = 'e2e-sync-del-topic-1'
       const msg = 'e2e-sync-del-msg-1'
@@ -514,6 +547,7 @@ test.describe('Sync delete/recovery convergence', () => {
       const pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       const topic = 'e2e-sync-del-topic-2'
       const msg = 'e2e-sync-del-msg-2'
@@ -581,6 +615,7 @@ test.describe('Sync delete/recovery convergence', () => {
       const pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       const topic = 'e2e-sync-late-topic-1'
       const msg = 'e2e-sync-late-msg-1'
@@ -691,9 +726,11 @@ test.describe('Sync delete/recovery convergence', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBeGreaterThan(relayOpsBeforeChild)
       expect(relay.getCursor()).toBeGreaterThan(relayCursorBeforeChild)
-      const deliveredRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBeforeChild}`, {
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
-      })
+      const deliveredDid = relayTrustedDeviceId(relay)
+      const deliveredRes = await fetch(
+        `${relay.endpoint}/sync/pull?cursor=${relayCursorBeforeChild}&deviceId=${encodeURIComponent(deliveredDid)}`,
+        { headers: relayDeviceHeaders(relay, deliveredDid) }
+      )
       expect(deliveredRes.status).toBe(200)
       const deliveredBody = (await deliveredRes.json()) as { operations: any[]; cursor: number }
       const deliveredEntityIds = deliveredBody.operations.map((o: any) => String(o?.entityId))
@@ -740,6 +777,7 @@ test.describe('Sync delete/recovery convergence', () => {
       const pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       const topic = 'e2e-sync-trash-topic-1'
       const msg = 'e2e-sync-trash-msg-1'
@@ -790,6 +828,7 @@ test.describe('Sync delete/recovery convergence', () => {
       const pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       const topic = 'e2e-sync-race-topic-1'
       const msg = 'e2e-sync-race-msg-1'
@@ -1035,14 +1074,22 @@ async function pollForRelayLwwWinner(
   baseCursor: number,
   entityId: string,
   candidates: string[],
-  timeoutMs = 120000
+  timeoutMs = 120000,
+  relay?: TestRelayHandle
 ): Promise<RelayMessageUpsert> {
   const deadline = Date.now() + timeoutMs
   let last = ''
   while (Date.now() < deadline) {
-    const res = await fetch(`${endpoint}/sync/pull?cursor=${baseCursor}`, {
-      headers: { Authorization: `Bearer ${token}` }
-    })
+    // Device-identity framing when the runner relay is available; the legacy
+    // token-only form is kept only for callers without a handle.
+    let url = `${endpoint}/sync/pull?cursor=${baseCursor}`
+    let headers: Record<string, string> = { Authorization: `Bearer ${token}` }
+    if (relay) {
+      const did = relayTrustedDeviceId(relay)
+      url = `${endpoint}/sync/pull?cursor=${baseCursor}&deviceId=${encodeURIComponent(did)}`
+      headers = relayDeviceHeaders(relay, did)
+    }
+    const res = await fetch(url, { headers })
     expect(res.status).toBe(200)
     const body = (await res.json()) as { operations: any[] }
     const ops = (Array.isArray(body.operations) ? body.operations : []).filter(
@@ -1092,6 +1139,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
       const topic = 'e2e-sync-edit-topic-1'
@@ -1155,6 +1203,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
       const topic = 'e2e-sync-edit-topic-2'
@@ -1240,6 +1289,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
       const topic = 'e2e-sync-edit-topic-3'
@@ -1281,10 +1331,15 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       // winner computed from the authenticated relay pull path.
       relay.setPaused(false)
       expect(relay.isPaused()).toBe(false)
-      const lwwWinner = await pollForRelayLwwWinner(relay.endpoint, RELAY_TOKEN, relayCursorBase, msg, [
-        contentA,
-        contentB
-      ])
+      const lwwWinner = await pollForRelayLwwWinner(
+        relay.endpoint,
+        RELAY_TOKEN,
+        relayCursorBase,
+        msg,
+        [contentA, contentB],
+        120000,
+        relay
+      )
       expect([contentA, contentB]).toContain(lwwWinner.content)
       const winner = await pollForSameContentAgreement(pageA, pageB, topic, msg, [contentA, contentB], 120000)
       expect(winner).toBe(lwwWinner.content)
@@ -1327,6 +1382,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       let pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
       const topic = 'e2e-sync-edit-topic-4'
@@ -1423,6 +1479,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       let pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
       const topic = 'e2e-sync-edit-topic-7'
@@ -1522,11 +1579,15 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       // winner computed from the authenticated relay pull path.
       relay.setPaused(false)
       expect(relay.isPaused()).toBe(false)
-      const lwwWinner = await pollForRelayLwwWinner(relay.endpoint, RELAY_TOKEN, relayCursorBase, msg, [
-        edit1,
-        edit2,
-        edit3
-      ])
+      const lwwWinner = await pollForRelayLwwWinner(
+        relay.endpoint,
+        RELAY_TOKEN,
+        relayCursorBase,
+        msg,
+        [edit1, edit2, edit3],
+        120000,
+        relay
+      )
       const winner = await pollForSameContentAgreement(pageB, pageA, topic, msg, [edit1, edit2, edit3], 120000)
       expect(winner).toBe(lwwWinner.content)
       await pollForMessageContent(pageA, topic, msg, lwwWinner.content, 60000)
@@ -1540,9 +1601,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
       expect(relay.getCursor()).toBe(relayCursorBase + 3)
-      const pullRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
-      })
+      const pullDid = relayTrustedDeviceId(relay)
+      const pullRes = await fetch(
+        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
+        { headers: relayDeviceHeaders(relay, pullDid) }
+      )
       expect(pullRes.status).toBe(200)
       const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
       const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
@@ -1594,6 +1657,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       let pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline: one topic with 3 messages, drained via manual rounds.
       const topic = 'e2e-sync-edit-topic-8'
@@ -1708,9 +1772,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
       expect(relay.getCursor()).toBe(relayCursorBase + 3)
-      const pullRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
-      })
+      const pullDid = relayTrustedDeviceId(relay)
+      const pullRes = await fetch(
+        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
+        { headers: relayDeviceHeaders(relay, pullDid) }
+      )
       expect(pullRes.status).toBe(200)
       const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
       const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
@@ -1778,6 +1844,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       let pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline: one topic with 3 messages, drained via manual rounds.
       const topic = 'e2e-sync-edit-topic-9'
@@ -1896,9 +1963,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBe(relayOpsBase + 4)
       expect(relay.getCursor()).toBe(relayCursorBase + 4)
-      const pullRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
-      })
+      const pullDid = relayTrustedDeviceId(relay)
+      const pullRes = await fetch(
+        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
+        { headers: relayDeviceHeaders(relay, pullDid) }
+      )
       expect(pullRes.status).toBe(200)
       const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
       const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
@@ -1962,6 +2031,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       let pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
       const topic = 'e2e-sync-edit-topic-5'
@@ -2084,6 +2154,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       let pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
       const topic = 'e2e-sync-edit-topic-6'
@@ -2217,6 +2288,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const pageWriter = profileB.page
       await setSyncConfigViaApi(pageReader, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageWriter, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageReader, pageWriter)
 
       // Deterministic baseline: one topic with 3 messages, drained via manual rounds.
       const topic = 'e2e-sync-edit-topic-10'
@@ -2293,9 +2365,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       }
       // Relay evidence from the baseline cursor: exactly 3 message upserts
       // with globally continuous seq and per-entity content mapping.
-      const heldPull = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
-      })
+      const heldDid = relayTrustedDeviceId(relay)
+      const heldPull = await fetch(
+        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(heldDid)}`,
+        { headers: relayDeviceHeaders(relay, heldDid) }
+      )
       // Pull is gated, so the contract-level pull fails closed here; the
       // in-memory counters above are the push-commit proof while gated.
       expect(heldPull.status).toBe(503)
@@ -2313,9 +2387,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
       expect(relay.getCursor()).toBe(relayCursorBase + 3)
-      const pullRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
-      })
+      const pullDid = relayTrustedDeviceId(relay)
+      const pullRes = await fetch(
+        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
+        { headers: relayDeviceHeaders(relay, pullDid) }
+      )
       expect(pullRes.status).toBe(200)
       const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
       const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
@@ -2385,6 +2461,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const pageWriter = profileB.page
       await setSyncConfigViaApi(pageReader, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageWriter, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageReader, pageWriter)
 
       // Deterministic baseline: one topic with 3 messages, drained via manual rounds.
       const topic = 'e2e-sync-edit-topic-11'
@@ -2483,9 +2560,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
       expect(relay.getCursor()).toBe(relayCursorBase + 3)
-      const pullRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
-      })
+      const pullDid = relayTrustedDeviceId(relay)
+      const pullRes = await fetch(
+        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
+        { headers: relayDeviceHeaders(relay, pullDid) }
+      )
       expect(pullRes.status).toBe(200)
       const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
       const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
@@ -2550,6 +2629,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const pageB = profileB.page
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
       const topic = 'e2e-sync-edit-topic-12'
@@ -2583,9 +2663,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       expect(relayCursorAfterPush).toBe(relayCursorBase + 1)
 
       // Capture the committed operation over the existing relay contract.
-      const pullRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
-      })
+      const pullDid = relayTrustedDeviceId(relay)
+      const pullRes = await fetch(
+        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
+        { headers: relayDeviceHeaders(relay, pullDid) }
+      )
       expect(pullRes.status).toBe(200)
       const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
       expect(pullBody.cursor).toBe(relayCursorAfterPush)
@@ -2609,11 +2691,12 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       }
       expect(String((replayOp.payload as any)?.content)).toBe(edited)
 
-      // Identical replay once via the existing test-side HTTP push path.
+      // Identical replay once via the existing test-side HTTP push path
+      // (top-level deviceId mirrors the production push contract).
       const replayRes1 = await fetch(`${relay.endpoint}/sync/push`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operations: [replayOp] })
+        headers: { ...relayDeviceHeaders(relay, replayOp.deviceId), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: replayOp.deviceId, operations: [replayOp] })
       })
       expect(replayRes1.status).toBe(200)
       const replayBody1 = (await replayRes1.json()) as { acceptedIds: string[]; cursor: number }
@@ -2626,8 +2709,8 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       // One bounded repeat: still accepted with no new sequence.
       const replayRes2 = await fetch(`${relay.endpoint}/sync/push`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operations: [replayOp] })
+        headers: { ...relayDeviceHeaders(relay, replayOp.deviceId), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: replayOp.deviceId, operations: [replayOp] })
       })
       expect(replayRes2.status).toBe(200)
       const replayBody2 = (await replayRes2.json()) as { acceptedIds: string[]; cursor: number }
@@ -2638,9 +2721,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       expect(relay.getOperationCount()).toBe(relayOpsAfterPush)
 
       // Pull still carries exactly one operation with the original seq.
-      const pullAfter = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
-      })
+      const afterDid = relayTrustedDeviceId(relay)
+      const pullAfter = await fetch(
+        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(afterDid)}`,
+        { headers: relayDeviceHeaders(relay, afterDid) }
+      )
       expect(pullAfter.status).toBe(200)
       const pullAfterBody = (await pullAfter.json()) as { operations: any[]; cursor: number }
       const afterOps = (Array.isArray(pullAfterBody.operations) ? pullAfterBody.operations : []).filter(

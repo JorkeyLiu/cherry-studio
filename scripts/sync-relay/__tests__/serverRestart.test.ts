@@ -185,28 +185,40 @@ async function pushOps(
   ops: unknown[],
   token: string = TOKEN
 ): Promise<{ acceptedIds: string[]; cursor: number; status: number }> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
+    'x-sync-device-id': 'spike-device-1'
+  }
+  if (deviceAuthState) headers['x-sync-device-auth'] = deviceAuthState
   const res = await fetchWithTimeout(
     `${baseUrl}/sync/push`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers,
       body: JSON.stringify({ deviceId: 'spike-device-1', operations: ops })
     },
     REQUEST_TIMEOUT_MS
   )
-  const body = (await res.json()) as { acceptedIds?: string[]; cursor?: number }
+  const body = (await res.json()) as { acceptedIds?: string[]; cursor?: number; deviceAuth?: unknown }
+  if (typeof body?.deviceAuth === 'string') deviceAuthState = body.deviceAuth
   return { acceptedIds: body.acceptedIds ?? [], cursor: body.cursor ?? -1, status: res.status }
 }
 
-async function pullOps(baseUrl: string, cursor: number, token: string = TOKEN) {
+let deviceAuthState: string | undefined
+
+async function pullOps(baseUrl: string, cursor: number, token: string = TOKEN, deviceId = 'spike-device-1') {
+  const headers: Record<string, string> = { Authorization: `Bearer ${token}`, 'x-sync-device-id': deviceId }
+  if (deviceAuthState && deviceId === 'spike-device-1') headers['x-sync-device-auth'] = deviceAuthState
   const res = await fetchWithTimeout(
-    `${baseUrl}/sync/pull?cursor=${cursor}`,
+    `${baseUrl}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent(deviceId)}`,
     {
-      headers: { Authorization: `Bearer ${token}` }
+      headers
     },
     REQUEST_TIMEOUT_MS
   )
-  const body = (await res.json()) as { operations?: any[]; cursor?: number }
+  const body = (await res.json()) as { operations?: any[]; cursor?: number; deviceAuth?: unknown }
+  if (typeof body?.deviceAuth === 'string' && deviceId === 'spike-device-1') deviceAuthState = body.deviceAuth
   return { status: res.status, operations: body.operations ?? [], cursor: body.cursor ?? -1 }
 }
 

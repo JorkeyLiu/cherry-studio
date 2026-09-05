@@ -68,7 +68,7 @@ describe('test relay content-length parity (LOCK-RT-005/006)', () => {
     // 413; the body limit still applies. Node truncates the stream to the
     // leading numeric prefix, so JSON framing fails with 400 — the parity
     // point is that it is never an early 413 for a tiny body.
-    const body = JSON.stringify({ operations: [topicOp('op-cl-junk', 't-cl-junk')] })
+    const body = JSON.stringify({ deviceId: 'd1', operations: [topicOp('op-cl-junk', 't-cl-junk')] })
     const res = await rawPushWithContentLength(relay!.endpoint, '12junk', body)
     expect(res.status).not.toBe(413)
     expect(res.status).toBe(400)
@@ -93,10 +93,14 @@ describe('test relay content-length parity (LOCK-RT-005/006)', () => {
 
   it('oversize body still fails closed (413) through the body limit', async () => {
     const bigPayload = 'x'.repeat(3 * 1024 * 1024)
-    const body = JSON.stringify({ operations: [topicOp('op-cl-big', 't-cl-big', bigPayload)] })
+    const body = JSON.stringify({ deviceId: 'd1', operations: [topicOp('op-cl-big', 't-cl-big', bigPayload)] })
     const res = await fetch(`${relay!.endpoint}/sync/push`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${TOKEN}`,
+        'x-sync-device-id': 'd1'
+      },
       body
     })
     expect(res.status).toBe(413)

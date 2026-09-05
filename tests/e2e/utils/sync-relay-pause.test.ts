@@ -18,8 +18,11 @@ function topicOp(id: string, entityId: string, name = 'N', ts = Date.now()): Rec
 
 let relay: TestRelayHandle | null = null
 
+let deviceAuth: string | undefined
+
 beforeEach(async () => {
   relay = await startTestRelay(TOKEN)
+  deviceAuth = undefined
 })
 
 afterEach(async () => {
@@ -39,22 +42,26 @@ afterEach(async () => {
 })
 
 async function pushRaw(ops: Record<string, unknown>[], token: string | null): Promise<{ status: number; body: any }> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'x-sync-device-id': 'd1' }
   if (token !== null) headers.Authorization = `Bearer ${token}`
+  if (deviceAuth) headers['x-sync-device-auth'] = deviceAuth
   const res = await fetch(`${relay!.endpoint}/sync/push`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ operations: ops })
+    body: JSON.stringify({ deviceId: 'd1', operations: ops })
   })
   const body = await res.json().catch(() => ({}))
+  if (typeof body?.deviceAuth === 'string') deviceAuth = body.deviceAuth
   return { status: res.status, body }
 }
 
 async function pullRaw(cursor = 0, token: string | null = TOKEN): Promise<{ status: number; body: any }> {
-  const headers: Record<string, string> = {}
+  const headers: Record<string, string> = { 'x-sync-device-id': 'd1' }
   if (token !== null) headers.Authorization = `Bearer ${token}`
-  const res = await fetch(`${relay!.endpoint}/sync/pull?cursor=${cursor}`, { headers })
+  if (deviceAuth) headers['x-sync-device-auth'] = deviceAuth
+  const res = await fetch(`${relay!.endpoint}/sync/pull?cursor=${cursor}&deviceId=d1`, { headers })
   const body = await res.json().catch(() => ({}))
+  if (typeof body?.deviceAuth === 'string') deviceAuth = body.deviceAuth
   return { status: res.status, body }
 }
 

@@ -1,4 +1,5 @@
 export * from './endpoint'
+export * from './pairing'
 export * from './payloadFilter'
 export * from './stableStatus'
 export * from './types'

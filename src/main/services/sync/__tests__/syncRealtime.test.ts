@@ -51,6 +51,30 @@ describe('relay SSE notification-only', () => {
         payload_json TEXT,
         created_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS sync_trusted_devices (
+        device_id TEXT PRIMARY KEY,
+        device_name TEXT,
+        trusted_at TEXT,
+        source TEXT,
+        device_secret_hash TEXT
+      );
+      CREATE TABLE IF NOT EXISTS sync_pairing_invites (
+        code TEXT PRIMARY KEY,
+        inviter_device_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS sync_pairing_requests (
+        id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        device_name TEXT,
+        code TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        device_secret_hash TEXT
+      );
     `)
     server = createRelayServer(db, { token: relayToken })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
@@ -110,6 +134,8 @@ describe('relay SSE notification-only', () => {
     expect(first!).toContain(': connected')
     expect(first!).not.toContain('operations')
     // Successful push emits exactly a cursor hint with no operation payload.
+    // Founder bootstrap issues the device credential once; capture it for
+    // subsequent device-authenticated calls (not logged).
     const pushRes = await fetch(`${baseUrl}/sync/push`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${relayToken}` },
@@ -290,6 +316,30 @@ describe('relay idempotent push acknowledgement', () => {
         payload_json TEXT,
         created_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS sync_trusted_devices (
+        device_id TEXT PRIMARY KEY,
+        device_name TEXT,
+        trusted_at TEXT,
+        source TEXT,
+        device_secret_hash TEXT
+      );
+      CREATE TABLE IF NOT EXISTS sync_pairing_invites (
+        code TEXT PRIMARY KEY,
+        inviter_device_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS sync_pairing_requests (
+        id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        device_name TEXT,
+        code TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        device_secret_hash TEXT
+      );
     `)
     server = createRelayServer(db, { token })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
@@ -304,12 +354,26 @@ describe('relay idempotent push acknowledgement', () => {
     } catch {}
   })
 
-  const push = async (ops: Record<string, unknown>[]): Promise<Response> =>
-    fetch(`${baseUrl}/sync/push`, {
+  const deviceAuths = new Map<string, string>()
+  const push = async (ops: Record<string, unknown>[]): Promise<Response> => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      'x-sync-device-id': 'd1'
+    }
+    const held = deviceAuths.get('d1')
+    if (held) headers['x-sync-device-auth'] = held
+    const res = await fetch(`${baseUrl}/sync/push`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers,
       body: JSON.stringify({ deviceId: 'd1', operations: ops })
     })
+    try {
+      const body = (await res.clone().json()) as { deviceAuth?: unknown }
+      if (typeof body?.deviceAuth === 'string') deviceAuths.set('d1', body.deviceAuth)
+    } catch {}
+    return res
+  }
 
   it('replays identical lost-push-response without stranding (same ack, no seq growth)', async () => {
     const op = validOp('idem-op-1', 11)

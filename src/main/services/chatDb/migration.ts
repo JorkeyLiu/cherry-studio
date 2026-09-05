@@ -1057,6 +1057,18 @@ export const MIGRATIONS: MigrationEntry[] = [
       )`,
       `CREATE INDEX IF NOT EXISTS sync_conflict_log_entity_idx ON sync_conflict_log(entity_type, entity_id)`
     ]
+  },
+  {
+    key: '007_sync_pairing_trust',
+    description: 'Additive sync pairing trust: durable trusted-device mirror for explicit pairing',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS sync_trusted_devices (
+        device_id TEXT PRIMARY KEY,
+        device_name TEXT,
+        trusted_at TEXT,
+        source TEXT
+      )`
+    ]
   }
 ]
 

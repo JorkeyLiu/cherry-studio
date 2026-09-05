@@ -448,5 +448,15 @@ export enum IpcChannel {
   Sync_GetConfig = 'sync:get-config',
   Sync_SetConfig = 'sync:set-config',
   Sync_GetStatus = 'sync:get-status',
-  Sync_Sync = 'sync:sync'
+  Sync_Sync = 'sync:sync',
+  Sync_GetDeviceId = 'sync:get-device-id',
+  Sync_CreateInvite = 'sync:create-invite',
+  Sync_RequestPairing = 'sync:request-pairing',
+  Sync_ListPairingRequests = 'sync:list-pairing-requests',
+  Sync_AcceptPairing = 'sync:accept-pairing',
+  Sync_RejectPairing = 'sync:reject-pairing',
+  Sync_ListTrusted = 'sync:list-trusted',
+  Sync_RefreshTrusted = 'sync:refresh-trusted',
+  Sync_GetPairingStatus = 'sync:get-pairing-status',
+  Sync_RevokeDevice = 'sync:revoke-device'
 }

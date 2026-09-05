@@ -131,19 +131,23 @@ function topicOp(id: string, entityId: string, name = 'N', ts = 1000): Record<st
 let ownedTmpRoot: string | null = null
 let relay: FileBackedRelayHandle | null = null
 
+let deviceAuthState: string | undefined
+
 async function pushRaw(
   endpoint: string,
   ops: Record<string, unknown>[],
   token: string | null
 ): Promise<{ status: number; body: any }> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'x-sync-device-id': 'd1' }
   if (token !== null) headers.Authorization = `Bearer ${token}`
+  if (deviceAuthState) headers['x-sync-device-auth'] = deviceAuthState
   const res = await fetch(`${endpoint}/sync/push`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ operations: ops })
+    body: JSON.stringify({ deviceId: 'd1', operations: ops })
   })
   const body = await res.json().catch(() => ({}))
+  if (typeof body?.deviceAuth === 'string') deviceAuthState = body.deviceAuth
   return { status: res.status, body }
 }
 
@@ -152,10 +156,12 @@ async function pullRaw(
   cursor: number,
   token: string | null = TOKEN
 ): Promise<{ status: number; body: any }> {
-  const headers: Record<string, string> = {}
+  const headers: Record<string, string> = { 'x-sync-device-id': 'd1' }
   if (token !== null) headers.Authorization = `Bearer ${token}`
-  const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}`, { headers })
+  if (deviceAuthState) headers['x-sync-device-auth'] = deviceAuthState
+  const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}&deviceId=d1`, { headers })
   const body = await res.json().catch(() => ({}))
+  if (typeof body?.deviceAuth === 'string') deviceAuthState = body.deviceAuth
   return { status: res.status, body }
 }
 
@@ -180,6 +186,7 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
   })
   beforeEach(() => {
     ownedTmpRoot = createOwnedTmpRoot()
+    deviceAuthState = undefined
   })
 
   afterEach(async () => {
@@ -337,8 +344,13 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
     const nonArray = await (async () => {
       const res = await fetch(`${relay!.endpoint}/sync/push`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-        body: JSON.stringify({ operations: 'not-an-array' })
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${TOKEN}`,
+          'x-sync-device-id': 'd1',
+          ...(deviceAuthState ? { 'x-sync-device-auth': deviceAuthState } : {})
+        },
+        body: JSON.stringify({ deviceId: 'd1', operations: 'not-an-array' })
       })
       return { status: res.status, body: await res.json().catch(() => ({})) }
     })()
@@ -354,21 +366,33 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
     const seed = await pushRaw(relay.endpoint, [topicOp('op-cur-1', 't-cur-1', 'Seed', 1000)], TOKEN)
     expect(seed.status).toBe(200)
     for (const bad of ['07', '00', '01', ' 1', '1 ', '12junk', '-1', 'abc', '1.5', '..', '%2e%2e']) {
-      const res = await fetch(`${relay.endpoint}/sync/pull?cursor=${encodeURIComponent(bad)}`, {
-        headers: { Authorization: `Bearer ${TOKEN}` }
+      const res = await fetch(`${relay.endpoint}/sync/pull?cursor=${encodeURIComponent(bad)}&deviceId=d1`, {
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'x-sync-device-id': 'd1',
+          ...(deviceAuthState ? { 'x-sync-device-auth': deviceAuthState } : {})
+        }
       })
       await res.json().catch(() => ({}))
       expect(res.status, `cursor ${bad}`).toBe(400)
     }
     // Exact intentional limit behavior: noncanonical limit is 400, while
     // limit=0 falls back to the default window (200) instead of 400.
-    const badLimit = await fetch(`${relay.endpoint}/sync/pull?cursor=0&limit=abc`, {
-      headers: { Authorization: `Bearer ${TOKEN}` }
+    const badLimit = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=d1&limit=abc`, {
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'x-sync-device-id': 'd1',
+        ...(deviceAuthState ? { 'x-sync-device-auth': deviceAuthState } : {})
+      }
     })
     await badLimit.json().catch(() => ({}))
     expect(badLimit.status).toBe(400)
-    const zeroLimit = await fetch(`${relay.endpoint}/sync/pull?cursor=0&limit=0`, {
-      headers: { Authorization: `Bearer ${TOKEN}` }
+    const zeroLimit = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=d1&limit=0`, {
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'x-sync-device-id': 'd1',
+        ...(deviceAuthState ? { 'x-sync-device-auth': deviceAuthState } : {})
+      }
     })
     const zeroBody = (await zeroLimit.json().catch(() => ({}))) as any
     expect(zeroLimit.status).toBe(200)

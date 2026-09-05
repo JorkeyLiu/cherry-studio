@@ -50,6 +50,56 @@ export function registerSyncIpc(): () => void {
     return result
   })
 
+  register(IpcChannel.Sync_GetDeviceId, async () => {
+    return { deviceId: syncService.getDeviceId() }
+  })
+
+  register(IpcChannel.Sync_CreateInvite, async () => {
+    return await syncService.createPairingInvite()
+  })
+
+  register(IpcChannel.Sync_RequestPairing, async (_e, args: { code?: string; deviceName?: string }) => {
+    if (!args || typeof args !== 'object') throw new Error('invalid pairing request')
+    if (typeof args.code !== 'string') throw new Error('code must be string')
+    if (args.deviceName !== undefined && typeof args.deviceName !== 'string') {
+      throw new Error('device name must be string')
+    }
+    return await syncService.requestPairing(args.code, args.deviceName)
+  })
+
+  register(IpcChannel.Sync_ListPairingRequests, async () => {
+    return { requests: await syncService.listPairingRequests() }
+  })
+
+  register(IpcChannel.Sync_AcceptPairing, async (_e, args: { requestId?: string }) => {
+    if (!args || typeof args.requestId !== 'string') throw new Error('request id must be string')
+    return { trusted: await syncService.acceptPairing(args.requestId) }
+  })
+
+  register(IpcChannel.Sync_RejectPairing, async (_e, args: { requestId?: string }) => {
+    if (!args || typeof args.requestId !== 'string') throw new Error('request id must be string')
+    await syncService.rejectPairing(args.requestId)
+    return { ok: true }
+  })
+
+  register(IpcChannel.Sync_ListTrusted, async () => {
+    return { devices: syncService.listTrustedDevices() }
+  })
+
+  register(IpcChannel.Sync_RefreshTrusted, async () => {
+    return { devices: await syncService.refreshTrustedDevices() }
+  })
+
+  register(IpcChannel.Sync_GetPairingStatus, async () => {
+    return await syncService.getPairingStatus()
+  })
+
+  register(IpcChannel.Sync_RevokeDevice, async (_e, args: { targetDeviceId?: string }) => {
+    if (!args || typeof args.targetDeviceId !== 'string') throw new Error('device id must be string')
+    await syncService.revokeTrustedDevice(args.targetDeviceId)
+    return { ok: true }
+  })
+
   logger.info(`Registered ${handlers.length} Sync IPC handlers`)
 
   return () => {

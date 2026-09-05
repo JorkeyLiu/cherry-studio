@@ -23,6 +23,30 @@ describe('relay http hardening', () => {
         payload_json TEXT,
         created_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS sync_trusted_devices (
+        device_id TEXT PRIMARY KEY,
+        device_name TEXT,
+        trusted_at TEXT,
+        source TEXT,
+        device_secret_hash TEXT
+      );
+      CREATE TABLE IF NOT EXISTS sync_pairing_invites (
+        code TEXT PRIMARY KEY,
+        inviter_device_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS sync_pairing_requests (
+        id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        device_name TEXT,
+        code TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        device_secret_hash TEXT
+      );
     `)
     server = createRelayServer(db, { token })
     await new Promise<void>((resolve) => {
@@ -37,20 +61,39 @@ describe('relay http hardening', () => {
     db.close()
   })
 
-  async function push(ops: any[], withToken = true): Promise<Response> {
+  async function push(ops: any[], withToken = true, deviceId = 'd1'): Promise<Response> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (withToken) headers['Authorization'] = `Bearer ${token}`
-    return fetch(`${baseUrl}/sync/push`, {
+    headers['x-sync-device-id'] = deviceId
+    if (deviceAuthFor(deviceId)) headers['x-sync-device-auth'] = deviceAuthFor(deviceId) as string
+    const res = await fetch(`${baseUrl}/sync/push`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ deviceId: 'd1', operations: ops })
+      body: JSON.stringify({ deviceId, operations: ops })
     })
+    await captureDeviceAuth(deviceId, res.clone())
+    return res
   }
 
-  async function pull(cursor: number, withToken = true): Promise<Response> {
+  const deviceAuths = new Map<string, string>()
+  function deviceAuthFor(deviceId: string): string | undefined {
+    return deviceAuths.get(deviceId)
+  }
+  async function captureDeviceAuth(deviceId: string, res: Response): Promise<void> {
+    try {
+      const body = (await res.json()) as { deviceAuth?: unknown }
+      if (typeof body?.deviceAuth === 'string') deviceAuths.set(deviceId, body.deviceAuth)
+    } catch {}
+  }
+
+  async function pull(cursor: number, withToken = true, deviceId = 'd1'): Promise<Response> {
     const headers: Record<string, string> = {}
     if (withToken) headers['Authorization'] = `Bearer ${token}`
-    return fetch(`${baseUrl}/sync/pull?cursor=${cursor}&deviceId=d1`, { headers })
+    headers['x-sync-device-id'] = deviceId
+    if (deviceAuthFor(deviceId)) headers['x-sync-device-auth'] = deviceAuthFor(deviceId) as string
+    const res = await fetch(`${baseUrl}/sync/pull?cursor=${cursor}&deviceId=${deviceId}`, { headers })
+    await captureDeviceAuth(deviceId, res.clone())
+    return res
   }
 
   it('rejects push without token when required', async () => {
@@ -223,7 +266,8 @@ describe('relay http hardening', () => {
     const b1 = await r1.json()
     expect(b1.operations.length).toBe(5)
     const cursorBeforePush = b1.cursor
-    // Push new op (seq 6)
+    // Push new op (seq 6) as the same bootstrap device (cross-device push
+    // requires pairing under device-identity binding).
     const pushRes = await push([
       {
         id: 'new-push-1',
@@ -231,7 +275,7 @@ describe('relay http hardening', () => {
         op: 'upsert',
         entityId: 't-new',
         timestamp: Date.now(),
-        deviceId: 'd2',
+        deviceId: 'd1',
         payload: { id: 't-new', name: 'New' }
       }
     ])

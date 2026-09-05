@@ -202,6 +202,42 @@ export async function runSyncViaApi(
   }
 }
 
+/**
+ * Pair two profiles via the production pairing IPC (explicit user actions on
+ * both sides): the approver mints an invite code, the requester submits a
+ * pairing request with it, the approver accepts, and the requester confirms
+ * trusted status (which also refreshes its durable trust mirror). Asserts
+ * each step; throws fail-closed on any deviation. Credential values are never
+ * logged.
+ */
+export async function pairProfilesViaApi(approverPage: Page, requesterPage: Page): Promise<void> {
+  // Idempotent: a requester that is already trusted needs no new pairing.
+  const pre = await requesterPage.evaluate(async () => {
+    return await (window as any).api.sync.getPairingStatus()
+  })
+  if (pre && pre.trusted === true) return
+  const invite = await approverPage.evaluate(async () => {
+    return await (window as any).api.sync.createInvite()
+  })
+  if (!invite || typeof invite.code !== 'string') throw new Error('pairProfilesViaApi: invite code missing')
+  const req = await requesterPage.evaluate(async (code: string) => {
+    return await (window as any).api.sync.requestPairing({ code })
+  }, invite.code)
+  if (!req || typeof req.requestId !== 'string') throw new Error('pairProfilesViaApi: request id missing')
+  const pending = await approverPage.evaluate(async () => {
+    return await (window as any).api.sync.listPairingRequests()
+  })
+  const found = Array.isArray(pending?.requests) ? pending.requests.some((r: any) => r?.id === req.requestId) : false
+  if (!found) throw new Error('pairProfilesViaApi: pending request not visible to approver')
+  await approverPage.evaluate(async (requestId: string) => {
+    return await (window as any).api.sync.acceptPairing(requestId)
+  }, req.requestId)
+  const status = await requesterPage.evaluate(async () => {
+    return await (window as any).api.sync.getPairingStatus()
+  })
+  if (!status || status.trusted !== true) throw new Error('pairProfilesViaApi: requester not trusted after accept')
+}
+
 /** Typed ensureTopic via ChatDb IPC; asserts the success envelope. */
 export async function ensureTopicViaApi(page: Page, topicId: string, name?: string): Promise<void> {
   const result = await page.evaluate(
