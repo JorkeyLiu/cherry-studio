@@ -39,7 +39,13 @@ import {
 } from '../utils/prepare-app'
 import { findProcessesByUserDataDir, terminateProcessesByUserDataDir } from '../utils/process-cleanup'
 import { probeAndAssertRuntimeAppData } from '../utils/runtime-app-data'
-import { createOwnedTmpRoot, removeOwnedTmpRoot, validateProfileLaunchToken } from '../utils/run-ownership'
+import {
+  assertNoLiveOwnedRelayChild,
+  assertNoUnresolvedOwnedRelayCleanup,
+  createOwnedTmpRoot,
+  removeOwnedTmpRoot,
+  validateProfileLaunchToken
+} from '../utils/run-ownership'
 import {
   queryChatDbWithBoundedRetry,
   runChatDbQueryAttempt,
@@ -198,6 +204,22 @@ export const test = base.extend<ElectronFixtures>({
       await use(root)
     } finally {
       try {
+        // Fail-closed: block root removal while any owned relay handle is
+        // unresolved (live child, uncleaned artifacts, or unclosed handle).
+        // The gate lives in run-ownership (ABI-neutral, already loaded) so
+        // this teardown never imports the relay-process implementation (raw
+        // TS cold-load under the fixture module system). The root is
+        // preserved for retry/reporting; never delete a relay child's
+        // artifacts while ownership is unresolved.
+        try {
+          assertNoUnresolvedOwnedRelayCleanup('fixture owned root removal')
+        } catch (e) {
+          throw new AggregateError(
+            [e instanceof Error ? e : new Error(String(e))],
+            `Fixture owned root preserved (unresolved relay ownership): ${root}`
+          )
+        }
+        assertNoLiveOwnedRelayChild('fixture owned root removal')
         // Fail-closed: exact-clean every still-registered profile, then remove
         // the exact root. On any failure the root is preserved and the error
         // propagates. There is no global teardown that deletes roots.

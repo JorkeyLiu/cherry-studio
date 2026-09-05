@@ -4,8 +4,10 @@
  * Each test owns EXACTLY ONE atomic canonical temp root created by mkdtemp
  * under the canonical OS temp dir. Every test-owned child temp path/profile
  * lives beneath that root. Cleanup is exact-token process cleanup plus
- * fail-closed root removal; there is no global registry, no cross-run or
- * global deletion, and no formal proof/tombstone machinery.
+ * fail-closed root removal; there is no global temp scan/deletion, no
+ * cross-run or global deletion, and no formal proof/tombstone machinery.
+ * The only registry is the explicit ABI-neutral owned-relay handle registry
+ * below (process-aware in-module Set), not a global temp scan.
  *
  * Accepted residual: a hard runner SIGKILL, machine loss, or cleanup-code
  * failure may leave the uniquely prefixed disposable root behind for manual
@@ -24,6 +26,116 @@ import {
 } from './process-cleanup'
 
 export const OWNED_TMPROOT_PREFIX = 'cherry-e2e-owned-'
+
+/**
+ * ABI-neutral owned-relay registry (fail-closed root gate).
+ *
+ * The Electron fixture teardown must block owned-root removal while a
+ * file-backed relay child is live or a relay handle is unresolved, WITHOUT
+ * importing the relay-process implementation (which cold-loads raw TS under
+ * the Playwright fixture module system). Relay handles register here via a
+ * structural probe (isRunning/pid only); the fixture statically imports only
+ * this module (already safely loaded) to enforce the gate. No better-sqlite3,
+ * no Electron binary, no esbuild — only node:fs/os/path plus the local
+ * exact-token process-cleanup helpers.
+ */
+export interface OwnedRelayProbe {
+  isRunning(): boolean
+  pid(): number | null
+}
+
+const ownedRelayHandles = new Set<OwnedRelayProbe>()
+
+/** Register an owned relay handle; idempotent (Set semantics, no duplicates). */
+export function registerOwnedRelayHandle(handle: OwnedRelayProbe): void {
+  if (!handle || typeof handle !== 'object') throw new Error('registerOwnedRelayHandle requires a handle object')
+  if (typeof handle.isRunning !== 'function' || typeof handle.pid !== 'function') {
+    throw new Error('registerOwnedRelayHandle requires isRunning()/pid() functions')
+  }
+  ownedRelayHandles.add(handle)
+}
+
+/**
+ * Remove a registration. Call ONLY after the handle fully resolved
+ * (stop + artifact cleanup verified); a failed close must keep registration.
+ */
+export function unregisterOwnedRelayHandle(handle: OwnedRelayProbe): void {
+  ownedRelayHandles.delete(handle)
+}
+
+/** True when any registered relay handle still owns a live child. */
+export function hasLiveOwnedRelayChild(): boolean {
+  for (const handle of ownedRelayHandles) {
+    try {
+      if (handle.isRunning()) return true
+    } catch {
+      return true
+    }
+  }
+  return false
+}
+
+/** True while any registered relay handle is unresolved (not yet closed), live or not. */
+export function hasUnresolvedOwnedRelayCleanup(): boolean {
+  return ownedRelayHandles.size > 0
+}
+
+/**
+ * Fail-closed gate for root teardown: throws while any owned relay handle is
+ * unresolved (child live, artifacts uncleaned, or close() not yet called).
+ * Stricter than assertNoLiveOwnedRelayChild: a reaped-but-uncleaned handle
+ * still blocks root removal so its artifacts are never deleted out from
+ * under it.
+ */
+export function assertNoUnresolvedOwnedRelayCleanup(label = 'owned root removal'): void {
+  if (ownedRelayHandles.size === 0) return
+  const detail: string[] = []
+  for (const handle of ownedRelayHandles) {
+    let running = true
+    try {
+      running = handle.isRunning()
+    } catch {
+      running = true
+    }
+    let pid: number | null = null
+    try {
+      pid = handle.pid()
+    } catch {
+      pid = null
+    }
+    detail.push(`PID ${pid ?? 'unknown'} running=${running}`)
+  }
+  throw new Error(
+    `run-ownership: ${label} blocked while ${ownedRelayHandles.size} owned relay handle(s) unresolved (${detail.join(', ')}); close the relay first`
+  )
+}
+
+/** Fail-closed gate for root teardown: throws while any owned relay child lives. */
+export function assertNoLiveOwnedRelayChild(label = 'owned root removal'): void {
+  const live: Array<{ pid: number | null }> = []
+  for (const handle of ownedRelayHandles) {
+    let running = false
+    try {
+      running = handle.isRunning()
+    } catch {
+      running = true
+    }
+    if (running) {
+      let pid: number | null = null
+      try {
+        pid = handle.pid()
+      } catch {
+        pid = null
+      }
+      live.push({ pid })
+    }
+  }
+  if (live.length > 0) {
+    throw new Error(
+      `run-ownership: ${label} blocked while ${live.length} owned relay child(ren) live (${live.map((e) => `PID ${e.pid ?? 'unknown'}`).join(', ')}); stop/close the relay first`
+    )
+  }
+}
 
 function isEnoent(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT'
