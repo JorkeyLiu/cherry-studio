@@ -39,8 +39,9 @@ export interface SecondSyncProfile {
   runtimeAppDataPath: string
   chatDbPath: string
   /**
-   * Ownership marker set by relaunchSecondSyncProfile or
-   * relaunchSecondSyncProfileAfterControlledSigterm on the consumed input
+   * Ownership marker set by relaunchSecondSyncProfile,
+   * relaunchSecondSyncProfileAfterControlledSigterm, or
+   * relaunchSecondSyncProfileAfterDirectSigkill on the consumed input
    * handle before awaiting its clean close. A consumed handle must not be closed again:
    * closeSecondSyncProfile treats it as a no-op and preserves the launch-token
    * registration for the owned-root teardown.
@@ -99,8 +100,9 @@ export async function launchSecondSyncProfile(ownedTmpRoot: string, mockPort: nu
 /** Exact-token close + unregister for a second profile. Throws on failure. */
 export async function closeSecondSyncProfile(profile: SecondSyncProfile | null | undefined): Promise<void> {
   if (!profile) return
-  // Ownership-safe: a handle consumed by relaunchSecondSyncProfile or
-  // relaunchSecondSyncProfileAfterControlledSigterm was already
+  // Ownership-safe: a handle consumed by relaunchSecondSyncProfile,
+  // relaunchSecondSyncProfileAfterControlledSigterm, or
+  // relaunchSecondSyncProfileAfterDirectSigkill was already
   // closed/terminated; closing it again would double-clean a stale handle. Skip
   // process cleanup AND unregistration so the owned-root teardown still owns
   // the token.
@@ -273,6 +275,128 @@ export async function relaunchSecondSyncProfileAfterControlledSigterm(
     // Fail-closed: exact-clean the relaunched app; the launch token stays
     // registered so the owned-root teardown still owns it. The original error
     // is preserved (cleanup errors never mask it). The SIGTERM'd original
+    // handle is never touched here (no app.close on the dead handle).
+    try {
+      await closeElectronWithExactCleanup(userDataDir, {
+        close: () => (app ? app.close() : Promise.resolve()),
+        findExactProcesses: findProcessesByUserDataDir,
+        terminateExactProcesses: (profileDir) => terminateProcessesByUserDataDir(profileDir, null)
+      })
+    } catch {
+      // Preserve the original failure; cleanup errors surface via the
+      // still-registered token in the owned-root teardown.
+    }
+    throw error
+  }
+}
+
+/**
+ * Direct SIGKILL-only relaunch for the second disposable sync profile.
+ *
+ * Disposable macOS process-level scope only (never power loss, OS crash, or
+ * production WAL durability): finds the exact-token Electron processes for the
+ * profile userDataDir, sends SIGKILL DIRECTLY to every match without any prior
+ * SIGTERM and without invoking the normal `app.close()` API on the killed
+ * profile, waits for terminal exit with SIGKILL-only polling (no SIGTERM
+ * fallback, no automatic escalation — stragglers fail closed), then relaunches
+ * the SAME userDataDir and strictly verifies the persisted sync config with
+ * NO repair. Ownership mirrors the controlled-SIGTERM relaunch: the input
+ * handle is marked consumed upfront, the launch token stays registered, and
+ * the caller must replace its handle with the returned profile. The in-memory
+ * relay instance is untouched. Credential values are never logged.
+ *
+ * This helper never calls `profile.app.close()` on the killed handle and never
+ * calls terminateProcessesByUserDataDir (which sends SIGTERM first); the
+ * bypass is structural (only killProcess SIGKILL + relaunch). Final teardown
+ * still uses the existing exact-cleanup path.
+ */
+export async function relaunchSecondSyncProfileAfterDirectSigkill(
+  profile: SecondSyncProfile,
+  ownedTmpRoot: string,
+  mockPort: number,
+  expected: RelaunchSecondSyncProfileOptions
+): Promise<SecondSyncProfile> {
+  if (!profile?.userDataDir)
+    throw new Error('relaunchSecondSyncProfileAfterDirectSigkill requires a profile userDataDir')
+  if (!ownedTmpRoot || typeof ownedTmpRoot !== 'string') throw new Error('ownedTmpRoot is required')
+  if (!Number.isInteger(mockPort) || mockPort <= 0) throw new Error(`mockPort must be positive, got ${mockPort}`)
+  if (profile.consumed === true)
+    throw new Error('relaunchSecondSyncProfileAfterDirectSigkill: input handle already consumed')
+  const userDataDir = profile.userDataDir
+  // Ownership transfer BEFORE signaling so a signal failure cannot leave the
+  // caller holding a stale closable handle. The launch token stays registered.
+  profile.consumed = true
+
+  // Exact-token SIGKILL only: never app.close(), never SIGTERM, never
+  // terminateProcessesByUserDataDir. A failed scan or kill throws
+  // (fail-closed); an empty initial scan throws because there is no live app
+  // to prove SIGKILL recovery against.
+  const initial = findProcessesByUserDataDir(userDataDir)
+  if (initial.length === 0) {
+    throw new Error('direct SIGKILL found no exact-token processes; expected a live second profile')
+  }
+  for (const target of initial) {
+    const res = killProcess(target.pid, 'SIGKILL')
+    if (!res.ok) {
+      throw new Error(`direct SIGKILL failed for PID ${target.pid}: ${res.error ?? 'unknown'}`)
+    }
+  }
+  // SIGKILL-only exit wait: poll exact-token matches + PID liveness without
+  // any SIGTERM fallback. Stragglers fail closed (no retry signal); the caller
+  // reports the blocker without widening scope.
+  const deadline = Date.now() + 20000
+  for (;;) {
+    let current: { pid: number; args: string }[]
+    try {
+      current = findProcessesByUserDataDir(userDataDir)
+    } catch (e) {
+      throw new Error(`direct SIGKILL exit scan failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    const alive: number[] = []
+    for (const entry of current) {
+      let exists: boolean
+      try {
+        exists = processExists(entry.pid)
+      } catch (e) {
+        throw new Error(`direct SIGKILL exit probe failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      if (exists) alive.push(entry.pid)
+    }
+    if (alive.length === 0) break
+    if (Date.now() >= deadline) {
+      throw new Error(`direct SIGKILL exit timeout; PIDs still alive: ${alive.join(', ')} (no SIGTERM sent)`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300))
+  }
+  // Safe-close quiescence consistent with the fixture post-close delay.
+  await new Promise((resolve) => setTimeout(resolve, 3000))
+
+  let app = null as SecondSyncProfile['app'] | null
+  try {
+    app = await launchElectronApp({ userDataDir, ownedTmpRoot })
+    const page = await waitForMainElectronWindow(app)
+    const probed = await probeAndAssertRuntimeAppData(page, userDataDir)
+    await bypassOnboarding(page)
+    await seedMockProvider(page, mockPort)
+    await waitForHomeReady(page)
+    await assertChatDbReady(page)
+    await assertTextareaReady(page)
+    const relaunched: SecondSyncProfile = {
+      app,
+      page,
+      userDataDir,
+      runtimeAppDataPath: probed.runtimeAppDataPath,
+      chatDbPath: probed.chatDbPath
+    }
+    // Strict verification BEFORE any repair: persisted config must match
+    // exactly. No setConfig is invoked on this path.
+    const current = await readRawSyncConfig(relaunched.page)
+    assertPersistedSyncConfigStrict(current, expected)
+    return relaunched
+  } catch (error) {
+    // Fail-closed: exact-clean the relaunched app; the launch token stays
+    // registered so the owned-root teardown still owns it. The original error
+    // is preserved (cleanup errors never mask it). The SIGKILL'd original
     // handle is never touched here (no app.close on the dead handle).
     try {
       await closeElectronWithExactCleanup(userDataDir, {
