@@ -919,6 +919,19 @@ test.describe('Sync delete/recovery convergence', () => {
  * no relay restart persistence is tested.
  */
 
+/** Bounded poll until pendingCount equals the expected exact value. */
+async function pollForPendingCount(page: Page, expected: number, timeoutMs = 30000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let last = ''
+  while (Date.now() < deadline) {
+    const status = await getSyncStatusViaApi(page)
+    if (status.pendingCount === expected) return
+    last = `pending=${status.pendingCount} expected=${expected} error=${status.lastError}`
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new Error(`pending-count timeout: ${last}`)
+}
+
 /** Bounded poll until the message row carries the expected content. */
 async function pollForMessageContent(
   page: Page,
@@ -1385,6 +1398,178 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       expect(statusB.lastError).toBeNull()
       expect(statusA.lastCaptureError).toBeNull()
       expect(statusB.lastCaptureError).toBeNull()
+    } finally {
+      try {
+        relay?.setPaused(false)
+      } catch {}
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('clean-close backlog of 3 stable edits survives relaunch then converges', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    // Writer is the relaunchable second profile (existing clean-close helper
+    // only relaunches the second profile); the main window is the peer. This
+    // mirrors the single-edit clean-close shape with a 3-edit backlog.
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      let pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      // Deterministic baseline, drained via labeled manual setup rounds.
+      const topic = 'e2e-sync-edit-topic-7'
+      const msg = 'e2e-sync-edit-msg-7'
+      const blk = 'e2e-sync-edit-blk-7'
+      const base = 'edit baseline content seven'
+      await ensureTopicViaApi(pageA, topic, 'Edit Topic Seven')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, base), [blockJson(blk, msg, base)])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, base)
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      const cursorABase = (await getSyncStatusViaApi(pageA)).cursor
+      const cursorBBase = (await getSyncStatusViaApi(pageB)).cursor
+      const pendingBBase = (await getSyncStatusViaApi(pageB)).pendingCount
+      expect(pendingBBase).toBe(0)
+
+      // Gate transport, then queue 3 distinct stable content edits on B. A
+      // minimal inter-edit delay keeps Date.now() timestamps strictly
+      // increasing so the existing timestamp-then-operationId LWW rule has a
+      // deterministic winner; the test still computes the winner from the
+      // relay pull path rather than assuming it.
+      await relay.waitForQuiescent()
+      const relayCursorBase = relay.getCursor()
+      const relayOpsBase = relay.getOperationCount()
+      relay.setPaused(true)
+      expect(relay.isPaused()).toBe(true)
+      const edit1 = 'edit backlog content seven one'
+      const edit2 = 'edit backlog content seven two'
+      const edit3 = 'edit backlog content seven three'
+      await updateMessageViaApi(pageB, topic, msg, { content: edit1 })
+      await pollForMessageContent(pageB, topic, msg, edit1, 30000)
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      await updateMessageViaApi(pageB, topic, msg, { content: edit2 })
+      await pollForMessageContent(pageB, topic, msg, edit2, 30000)
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      await updateMessageViaApi(pageB, topic, msg, { content: edit3 })
+      await pollForMessageContent(pageB, topic, msg, edit3, 30000)
+
+      // Exact outbox accumulation: each tracked edit is one independent outbox
+      // row, so pending grows by exactly 3. Cursor stays pinned; capture clean.
+      await pollForPendingCount(pageB, pendingBBase + 3, 30000)
+      const queued = await getSyncStatusViaApi(pageB)
+      expect(queued.pendingCount).toBe(pendingBBase + 3)
+      expect(queued.cursor).toBe(cursorBBase)
+      expect(queued.lastCaptureError).toBeNull()
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBase)
+      expect(relay.getOperationCount()).toBe(relayOpsBase)
+
+      // Truthful failure while gated: pending retained, cursor pinned, the
+      // transport error is durable and capture stays clean.
+      const failed = await runSyncViaApi(pageB)
+      expect(failed.threw).not.toBeNull()
+      const failedStatus = await getSyncStatusViaApi(pageB)
+      expect(failedStatus.lastError).not.toBeNull()
+      expect(failedStatus.lastCaptureError).toBeNull()
+      expect(failedStatus.pendingCount).toBe(pendingBBase + 3)
+      expect(failedStatus.cursor).toBe(cursorBBase)
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBase)
+      expect(relay.getOperationCount()).toBe(relayOpsBase)
+      const beforeClose = failedStatus
+
+      // Clean close + same-profile relaunch while the same relay stays alive.
+      const userDataDirBefore = profileB.userDataDir
+      profileB = await relaunchSecondSyncProfile(profileB, ownedTmpRoot, mockPort, {
+        expectedEndpoint: relay.endpoint,
+        expectedToken: RELAY_TOKEN,
+        expectedEnabled: true
+      })
+      pageB = profileB.page
+      expect(profileB.userDataDir).toBe(userDataDirBefore)
+
+      // Post-relaunch durable state: full 3-edit backlog survived, cursor did
+      // not jump or regress, config persisted with no repair, final local
+      // content readable. Raw config asserted BEFORE any repair.
+      const rawRelaunchedConfig = (await pageB.evaluate(async () => {
+        return await (window as any).api.sync.getConfig()
+      })) as any
+      expect(rawRelaunchedConfig.endpoint).toBe(relay.endpoint)
+      expect(rawRelaunchedConfig.enabled).toBe(true)
+      assertSyncTokenExactRedacted(rawRelaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      await pollForPendingCount(pageB, pendingBBase + 3, 30000)
+      const afterRelaunch = await getSyncStatusViaApi(pageB)
+      expect(afterRelaunch.pendingCount).toBe(pendingBBase + 3)
+      expect(afterRelaunch.cursor).toBe(beforeClose.cursor)
+      const relaunchedConfig = await getSyncConfigViaApi(pageB)
+      expect(relaunchedConfig.endpoint).toBe(relay.endpoint)
+      expect(relaunchedConfig.enabled).toBe(true)
+      assertSyncTokenExactRedacted(relaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      await pollForMessageContent(pageB, topic, msg, edit3, 30000)
+
+      // Release transport; recovery is automatic only (no post-release manual
+      // sync). The winner is the existing timestamp-then-operationId LWW
+      // winner computed from the authenticated relay pull path.
+      relay.setPaused(false)
+      expect(relay.isPaused()).toBe(false)
+      const lwwWinner = await pollForRelayLwwWinner(relay.endpoint, RELAY_TOKEN, relayCursorBase, msg, [
+        edit1,
+        edit2,
+        edit3
+      ])
+      const winner = await pollForSameContentAgreement(pageB, pageA, topic, msg, [edit1, edit2, edit3], 120000)
+      expect(winner).toBe(lwwWinner.content)
+      await pollForMessageContent(pageA, topic, msg, lwwWinner.content, 60000)
+      await pollForMessageContent(pageB, topic, msg, lwwWinner.content, 60000)
+      await pollForPendingDrained(pageB, 90000)
+      await pollForPendingDrained(pageA, 90000)
+
+      // Relay evidence: exactly 3 new operations past the baseline, with the
+      // pull payload carrying all 3 contents in sequence order. This is the
+      // order proof; without it only opcount + LWW winner may be claimed.
+      await relay.waitForQuiescent()
+      expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
+      expect(relay.getCursor()).toBe(relayCursorBase + 3)
+      const pullRes = await fetch(`${relay.endpoint}/sync/pull?cursor=${relayCursorBase}`, {
+        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
+      })
+      expect(pullRes.status).toBe(200)
+      const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
+      const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
+        .filter((o: any) => o?.entityType === 'message' && o?.entityId === msg && o?.op === 'upsert')
+        .sort((a: any, b: any) => Number(a?.seq) - Number(b?.seq))
+      expect(msgOps.length).toBe(3)
+      expect(msgOps.map((o: any) => String(o?.payload?.content))).toEqual([edit1, edit2, edit3])
+      expect(msgOps.map((o: any) => Number(o?.seq))).toEqual([
+        relayCursorBase + 1,
+        relayCursorBase + 2,
+        relayCursorBase + 3
+      ])
+
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusA.lastError).toBeNull()
+      expect(statusB.lastError).toBeNull()
+      expect(statusA.lastCaptureError).toBeNull()
+      expect(statusB.lastCaptureError).toBeNull()
+      expect(statusA.pendingCount).toBe(0)
+      expect(statusB.pendingCount).toBe(0)
+      expect(statusA.cursor).toBeGreaterThan(cursorABase)
+      expect(statusB.cursor).toBeGreaterThan(beforeClose.cursor)
+      // Block row keeps its original content: no joint block edit occurred.
+      const afterB = await fetchMessagesViaApi(pageB, topic)
+      const blkAfter = (afterB.blocks as any[]).find((b: any) => b?.id === blk) as any
+      expect(blkAfter?.content).toBe(base)
     } finally {
       try {
         relay?.setPaused(false)
