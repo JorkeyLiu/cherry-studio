@@ -18,6 +18,7 @@ import {
   closeSecondSyncProfile,
   launchSecondSyncProfile,
   relaunchSecondSyncProfile,
+  relaunchSecondSyncProfileAfterControlledSigterm,
   type SecondSyncProfile
 } from '../../utils/sync-second-profile'
 import { startTestRelay, type TestRelayHandle } from '../../utils/sync-relay'
@@ -1383,6 +1384,128 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       expect(statusB.lastError).toBeNull()
       expect(statusA.lastCaptureError).toBeNull()
       expect(statusB.lastCaptureError).toBeNull()
+    } finally {
+      try {
+        relay?.setPaused(false)
+      } catch {}
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('pending edit survives controlled SIGTERM same-profile relaunch then converges', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      let pageB = profileB.page
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+
+      // Deterministic baseline, drained via labeled manual setup rounds.
+      const topic = 'e2e-sync-edit-topic-5'
+      const msg = 'e2e-sync-edit-msg-5'
+      const blk = 'e2e-sync-edit-blk-5'
+      const base = 'edit baseline content five'
+      await ensureTopicViaApi(pageA, topic, 'Edit Topic Five')
+      await appendMessageViaApi(pageA, topic, messageJson(msg, topic, base), [blockJson(blk, msg, base)])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForConvergence(pageB, topic, msg, blk, base)
+      const cursorBBase = (await getSyncStatusViaApi(pageB)).cursor
+
+      // Gate transport, then queue a stable message content edit on B.
+      await relay.waitForQuiescent()
+      const relayCursorBase = relay.getCursor()
+      const relayOpsBase = relay.getOperationCount()
+      relay.setPaused(true)
+      expect(relay.isPaused()).toBe(true)
+      const recoveryContent = 'edit sigterm recovery content five'
+      await updateMessageViaApi(pageB, topic, msg, { content: recoveryContent })
+      await pollForMessageContent(pageB, topic, msg, recoveryContent, 30000)
+      const localAfterEdit = await fetchMessagesViaApi(pageB, topic)
+      expect(localAfterEdit.messages.some((m: any) => m?.id === msg && m?.content === recoveryContent)).toBe(true)
+      const queued = await getSyncStatusViaApi(pageB)
+      expect(queued.pendingCount).toBeGreaterThan(0)
+      expect(queued.cursor).toBe(cursorBBase)
+      expect(queued.lastCaptureError).toBeNull()
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBase)
+      expect(relay.getOperationCount()).toBe(relayOpsBase)
+
+      // Truthful failure while gated: pending retained, cursor pinned, the
+      // transport error is durable and capture stays clean.
+      const failed = await runSyncViaApi(pageB)
+      expect(failed.threw).not.toBeNull()
+      const failedStatus = await getSyncStatusViaApi(pageB)
+      expect(failedStatus.lastError).not.toBeNull()
+      expect(failedStatus.lastCaptureError).toBeNull()
+      expect(failedStatus.pendingCount).toBeGreaterThan(0)
+      expect(failedStatus.cursor).toBe(cursorBBase)
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBase)
+      expect(relay.getOperationCount()).toBe(relayOpsBase)
+      const beforeSigterm = failedStatus
+
+      // Controlled SIGTERM without app.close() + same-profile relaunch while
+      // the same relay stays alive. The helper never calls app.close() on the
+      // terminated handle; the bypass is structural. No SIGKILL is sent.
+      const userDataDirBefore = profileB.userDataDir
+      profileB = await relaunchSecondSyncProfileAfterControlledSigterm(profileB, ownedTmpRoot, mockPort, {
+        expectedEndpoint: relay.endpoint,
+        expectedToken: RELAY_TOKEN,
+        expectedEnabled: true
+      })
+      pageB = profileB.page
+      expect(profileB.userDataDir).toBe(userDataDirBefore)
+
+      // Post-relaunch durable state: outbox survived SIGTERM, the cursor did
+      // not jump while gated, and sync config persisted. The raw persisted
+      // config is asserted BEFORE any repair (the relaunch helper performs no
+      // repair; repairSecondSyncConfig is setup-only and is not called here).
+      const rawRelaunchedConfig = (await pageB.evaluate(async () => {
+        return await (window as any).api.sync.getConfig()
+      })) as any
+      expect(rawRelaunchedConfig.endpoint).toBe(relay.endpoint)
+      expect(rawRelaunchedConfig.enabled).toBe(true)
+      assertSyncTokenExactRedacted(rawRelaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after SIGTERM')
+      const afterRelaunch = await getSyncStatusViaApi(pageB)
+      expect(afterRelaunch.pendingCount).toBeGreaterThan(0)
+      expect(afterRelaunch.cursor).toBe(beforeSigterm.cursor)
+      expect(afterRelaunch.lastError).not.toBeNull()
+      expect(afterRelaunch.lastCaptureError).toBeNull()
+      const relaunchedConfig = await getSyncConfigViaApi(pageB)
+      expect(relaunchedConfig.endpoint).toBe(relay.endpoint)
+      expect(relaunchedConfig.enabled).toBe(true)
+      assertSyncTokenExactRedacted(relaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after SIGTERM')
+      await pollForMessageContent(pageB, topic, msg, recoveryContent, 30000)
+
+      // Release transport; the recovered pending edit converges automatically
+      // (no post-release manual sync). Scope is controlled-SIGTERM pending
+      // outbox recovery only.
+      relay.setPaused(false)
+      expect(relay.isPaused()).toBe(false)
+      await pollForMessageContent(pageA, topic, msg, recoveryContent, 120000)
+      await pollForPendingDrained(pageB, 90000)
+      await pollForPendingDrained(pageA, 90000)
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusA.lastError).toBeNull()
+      expect(statusB.lastError).toBeNull()
+      expect(statusA.lastCaptureError).toBeNull()
+      expect(statusB.lastCaptureError).toBeNull()
+      expect(statusA.cursor).toBeGreaterThan(cursorBBase)
+      expect(statusB.cursor).toBeGreaterThan(beforeSigterm.cursor)
+      expect(relay.getCursor()).toBeGreaterThan(relayCursorBase)
+      // Block row keeps its original content: no joint block edit occurred.
+      const afterB = await fetchMessagesViaApi(pageB, topic)
+      const blkAfter = (afterB.blocks as any[]).find((b: any) => b?.id === blk) as any
+      expect(blkAfter?.content).toBe(base)
     } finally {
       try {
         relay?.setPaused(false)
