@@ -1,6 +1,7 @@
 import { useTheme } from '@renderer/context/ThemeProvider'
 import { loggerService } from '@renderer/services/LoggerService'
-import { Button, Input, Switch, Tooltip } from 'antd'
+import { isNonLoopbackHttpEndpoint } from '@shared/sync'
+import { Alert, Button, Input, Switch, Tooltip } from 'antd'
 import dayjs from 'dayjs'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -170,10 +171,23 @@ const SyncSettings: React.FC = () => {
         <SettingHelpText>
           {t(
             'settings.sync.endpoint_help',
-            'Loopback endpoints may use plain HTTP; non-loopback endpoints require HTTPS with a trusted certificate.'
+            'Use http:// for direct LAN access or https:// when your deployment provides TLS. Plain HTTP is unencrypted.'
           )}
         </SettingHelpText>
       </SettingRow>
+      {isNonLoopbackHttpEndpoint(endpoint) && (
+        <SettingRow>
+          <Alert
+            type="warning"
+            showIcon
+            data-testid="sync-http-warning"
+            message={t(
+              'settings.sync.http_warning',
+              'This endpoint uses unencrypted HTTP on a non-local host. Anyone on the network path can read or modify synced data. Use HTTPS when available.'
+            )}
+          />
+        </SettingRow>
+      )}
       <SettingDivider />
       <SettingRow>
         <SettingRowTitle>{t('settings.sync.token', 'Access Token')}</SettingRowTitle>

@@ -1,0 +1,59 @@
+# Cherry Chat personal sync relay — Linux x64/arm64 home-server deployment.
+#
+# Standard Docker bridge networking: the relay binds the container-internal
+# 0.0.0.0 address and Docker publishes the port to the host below (plain
+# bridge networking with no LAN-IP parameter). The relay generates no
+# certificates: by default it serves plain HTTP on the published port; point
+# clients at `http://<server>:<port>` (unencrypted — see the Sync Settings
+# warning) or terminate HTTPS outside the relay and use `https://...`.
+#
+# User flow:
+#   1. Start the relay:
+#        docker compose up -d --build
+#   2. Read the first-start log lines (port, token-file path, config path —
+#      never the token itself):
+#        docker compose logs sync-relay
+#   3. Fetch the persistent bearer token from the protected file:
+#        docker compose exec sync-relay cat /data/relay-token
+#   4. On the first Cherry Chat client, enter the server endpoint
+#      (`http://<server>:<port>` or your externally provided `https://...`)
+#      plus the token, and connect: that client becomes the founder and
+#      accepts later devices through the existing client pairing UI. There
+#      is no independent web admin UI.
+#
+# All relay state persists in one user-owned bind mount (./relay-data):
+# the SQLite DB/WAL sidecars, the mode-0600 token file, and (only when
+# RELAY_PUBLIC_URL is set) the public relay-config.cherry artifact.
+name: cherry-chat-relay
+
+services:
+  sync-relay:
+    build:
+      context: .
+      dockerfile: deploy/sync-relay/Dockerfile
+    image: cherry-chat-sync-relay:0.1.0
+    # Standard bridge port publishing: the left side is the host port
+    # (override with RELAY_PORT); the container listens on 3030.
+    ports:
+      - '${RELAY_PORT:-3030}:3030'
+    restart: unless-stopped
+    environment:
+      RELAY_PORT: 3030
+      RELAY_DATA_DIR: /data
+      RELAY_NAME: ${RELAY_NAME:-cherry-relay}
+      # Optional: public URL advertised to clients (e.g. your LAN address or
+      # externally provided HTTPS origin). When set, init writes it into the
+      # public relay-config.cherry artifact; when unset, no config artifact
+      # is written and users enter the endpoint manually.
+      RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL:-}
+      # Optional: custom token-file location (default /data/relay-token).
+      RELAY_TOKEN_FILE: ${RELAY_TOKEN_FILE:-}
+      # Optional: user-supplied certificate/key passthrough pair for native
+      # relay HTTPS (both or neither; mount your files and set both paths).
+      # The relay never generates certificates itself.
+      RELAY_TLS_CERT_FILE: ${RELAY_TLS_CERT_FILE:-}
+      RELAY_TLS_KEY_FILE: ${RELAY_TLS_KEY_FILE:-}
+    volumes:
+      - ./relay-data:/data
+      # Example for user-supplied TLS files (uncomment and adjust):
+      # - ./relay-certs:/certs:ro

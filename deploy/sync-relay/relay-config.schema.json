@@ -1,0 +1,36 @@
+{
+  "$id": "https://cherry-chat.local/schemas/relay-config-2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Public, transferable relay config artifact. Carries only operator-supplied endpoint metadata (public URL, relay name, schema/init versions) so a client can be pointed at the relay. NEVER carries a bearer token, certificate, private key, or fingerprint (the token lives separately in the mode-0600 relay-token file; the relay generates no certificates). Written only when RELAY_PUBLIC_URL is set; without it, users enter the server endpoint manually. The init implementation (deploy/sync-relay/relay-init.mjs) remains the authoritative validator: it enforces exact keys, exact primitive types, http/https publicUrl, and RFC3339 date-time issuedAt with calendar validity.",
+  "properties": {
+    "issuedAt": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "publicUrl": {
+      "description": "Operator-supplied relay endpoint (http:// for direct LAN access, https:// when the deployment provides TLS). Users enter this as the client endpoint.",
+      "maxLength": 2048,
+      "minLength": 1,
+      "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\s]+$",
+      "type": "string"
+    },
+    "relayInitVersion": {
+      "const": 2,
+      "description": "Init-contract version that produced this artifact."
+    },
+    "relayName": {
+      "description": "Relay display name (1-128 characters, enforced before write).",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 2,
+      "description": "Public config schema version. Bump on any incompatible field change."
+    }
+  },
+  "required": ["schemaVersion", "relayInitVersion", "relayName", "publicUrl", "issuedAt"],
+  "title": "Cherry Chat relay public config (relay-config.cherry)",
+  "type": "object"
+}

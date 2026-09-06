@@ -1,11 +1,15 @@
 /**
- * Focused LAN HTTPS contract for the personal sync relay.
+ * Focused LAN transport contract for the personal sync relay.
  *
- * Covers the single supported secure non-loopback topology (relay-native
- * HTTPS + explicit LAN host binding, LOCK-002):
- * - non-loopback hosts require --cert/--key (no plaintext LAN binding);
- * - missing/empty/mismatched cert/key fails before the DB is created;
- * - native HTTPS readiness/health works with a disposable cert/key;
+ * Covers both supported non-loopback transports (explicit product boundary):
+ * - Plain HTTP is an explicit supported transport for explicit numeric
+ *   non-loopback hosts (unencrypted — the client shows a visible warning).
+ * - Native HTTPS stays supported with user-supplied --cert/--key (generic
+ *   cert/key support; the relay never generates certificates).
+ * - Missing/empty/mismatched cert/key fails before the DB is created.
+ * - The container-internal 0.0.0.0/:: bind requires
+ *   --allow-unspecified-bind and is never a user-facing endpoint.
+ * - Native HTTPS readiness/health works with a disposable cert/key;
  * - loopback plain HTTP still works without cert/key (regression).
  *
  * Trust is explicit only: TLS clients verify with the disposable `ca`
@@ -28,11 +32,15 @@ import { describe, expect, it } from 'vitest'
 import {
   createRelayServer,
   formatRelayHostForUrl,
+  formatRelayReadiness,
   hasZoneSuffix,
+  isBridgeBindAttested,
   isNumericIpHost,
   isWildcardHost,
   normalizeRelayBindHost,
   parseRelayArgs,
+  RELAY_BRIDGE_ATTEST_ENV,
+  RELAY_BRIDGE_ATTEST_VALUE,
   resolveRelayTls
 } from '../server'
 
@@ -126,9 +134,56 @@ describe('relay LAN HTTPS TLS config (fail-closed, before DB)', () => {
     expect(resolveRelayTls('localhost').scheme).toBe('http')
   })
 
-  it('non-loopback without cert/key is rejected (no plaintext LAN)', () => {
-    expect(() => resolveRelayTls('192.168.1.10')).toThrow(/requires --cert and --key/)
-    expect(() => resolveRelayTls('192.168.1.10', undefined, undefined)).toThrow(/plaintext LAN binding rejected/)
+  it('non-loopback without cert/key serves plain HTTP (explicit supported transport)', () => {
+    expect(resolveRelayTls('192.168.1.10').scheme).toBe('http')
+    expect(resolveRelayTls('192.168.1.10', undefined, undefined).scheme).toBe('http')
+    expect(parseRelayArgs(['--host', '192.168.1.10'], {}).host).toBe('192.168.1.10')
+  })
+
+  it('container-internal unspecified bind requires deployment attestation (flag + marker + container)', () => {
+    expect(() => resolveRelayTls('0.0.0.0')).toThrow(/wildcard.*forbidden/)
+    expect(() => resolveRelayTls('0.0.0.0', undefined, undefined, { allowUnspecifiedBind: false })).toThrow(
+      /wildcard.*forbidden/
+    )
+    // Flag without attestation fails (direct host escape closed).
+    expect(() => resolveRelayTls('0.0.0.0', undefined, undefined, { allowUnspecifiedBind: true })).toThrow(
+      /allow-unspecified-bind.*deployment-scoped/
+    )
+    expect(() => parseRelayArgs(['--host', '0.0.0.0', '--allow-unspecified-bind'], {})).toThrow(
+      /allow-unspecified-bind.*deployment-scoped/
+    )
+    expect(() => parseRelayArgs(['--host', '0.0.0.0'], {})).toThrow(/wildcard/)
+    // Attested Docker-bridge path (internal marker + container indicator).
+    const attestedEnv = { [RELAY_BRIDGE_ATTEST_ENV]: RELAY_BRIDGE_ATTEST_VALUE } as NodeJS.ProcessEnv
+    const containerExists = (p: string): boolean => p === '/.dockerenv'
+    expect(isBridgeBindAttested(attestedEnv, containerExists)).toBe(true)
+    expect(isBridgeBindAttested(attestedEnv, () => false)).toBe(false)
+    expect(
+      resolveRelayTls('0.0.0.0', undefined, undefined, {
+        allowUnspecifiedBind: true,
+        env: attestedEnv,
+        bridgeExists: containerExists
+      }).scheme
+    ).toBe('http')
+    expect(parseRelayArgs(['--host', '0.0.0.0', '--allow-unspecified-bind'], attestedEnv, containerExists).host).toBe(
+      '0.0.0.0'
+    )
+    expect(parseRelayArgs(['--host', '::', '--allow-unspecified-bind'], attestedEnv, containerExists).host).toBe('::')
+  })
+
+  it('internal unspecified readiness is non-URL while explicit hosts stay URL-shaped', () => {
+    expect(formatRelayReadiness('0.0.0.0', 'http', 3030)).toBe(
+      '[sync-relay] listening on http (internal bind) port 3030'
+    )
+    expect(formatRelayReadiness('::', 'http', 3030)).toBe('[sync-relay] listening on http (internal bind) port 3030')
+    expect(formatRelayReadiness('0.0.0.0', 'http', 3030)).not.toContain('http://')
+    expect(formatRelayReadiness('::', 'http', 3030)).not.toContain('http://')
+    expect(formatRelayReadiness('192.168.1.10', 'http', 3030)).toBe(
+      '[sync-relay] listening on http://192.168.1.10:3030'
+    )
+    expect(formatRelayReadiness('192.168.1.10', 'https', 3030)).toBe(
+      '[sync-relay] listening on https://192.168.1.10:3030'
+    )
   })
 
   it('wildcard/all-interface binds are forbidden even before cert checks', () => {
@@ -269,7 +324,7 @@ describe('relay LAN HTTPS TLS config (fail-closed, before DB)', () => {
     try {
       const { certPath } = generateServerCert(root, '127.0.0.1', 'partial')
       expect(() => resolveRelayTls('127.0.0.1', certPath, undefined)).toThrow(/both --cert and --key/)
-      expect(() => resolveRelayTls('192.168.1.10', certPath, undefined)).toThrow(/requires --cert and --key/)
+      expect(() => resolveRelayTls('192.168.1.10', certPath, undefined)).toThrow(/both --cert and --key/)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -317,14 +372,10 @@ describe('relay LAN HTTPS TLS config (fail-closed, before DB)', () => {
     }
   })
 
-  it('CLI rejects non-loopback HTTP and bad TLS before creating the DB', () => {
+  it('CLI rejects bad TLS and wildcard binds before creating the DB', () => {
     const root = mkdtempSync(join(tmpdir(), 'sync-relay-tls-cli-'))
     try {
       const cases: { args: string[]; match: RegExp }[] = [
-        {
-          args: ['--host', '192.168.1.10', '--db', join(root, 'c1.db'), '--token', TOKEN],
-          match: /requires --cert and --key/
-        },
         {
           args: ['--host', '0.0.0.0', '--db', join(root, 'c-wild.db'), '--token', TOKEN],
           match: /wildcard/
@@ -370,7 +421,7 @@ describe('relay LAN HTTPS TLS config (fail-closed, before DB)', () => {
       // Partial (cert without key) case.
       cases.push({
         args: ['--host', '192.168.1.10', '--db', join(root, 'c4.db'), '--token', TOKEN, '--cert', a.certPath],
-        match: /requires --cert and --key/
+        match: /both --cert and --key/
       })
       // Wildcard with valid cert/key must still fail before DB creation.
       cases.push({
@@ -412,16 +463,7 @@ describe('relay LAN HTTPS TLS config (fail-closed, before DB)', () => {
         expect(res.status).toBe(2)
         expect(`${String(res.stderr)}${String(res.stdout)}`).toMatch(c.match)
       }
-      for (const f of [
-        'c1.db',
-        'c2.db',
-        'c3.db',
-        'c4.db',
-        'c-wild.db',
-        'c-wild6.db',
-        'c-wild-tls.db',
-        'c-wild-mapped-tls.db'
-      ]) {
+      for (const f of ['c2.db', 'c3.db', 'c4.db', 'c-wild.db', 'c-wild6.db', 'c-wild-tls.db', 'c-wild-mapped-tls.db']) {
         expect(existsSync(join(root, f))).toBe(false)
       }
     } finally {
@@ -468,6 +510,56 @@ describe('relay native HTTPS serving (disposable cert/key)', () => {
       rmSync(root, { recursive: true, force: true })
     }
   }, 60000)
+
+  it('container-internal bridge bind serves plain HTTP without cert/key (deployment attestation)', async () => {
+    const db = new Database(':memory:')
+    let server: ReturnType<typeof createRelayServer> | undefined
+    try {
+      // Exact Docker bridge transport: 0.0.0.0 is container-internal only
+      // (never a user-facing endpoint); health is reached via loopback.
+      // Direct flag use without attestation fails; the attested entrypoint
+      // path resolves to plain HTTP.
+      expect(() => resolveRelayTls('0.0.0.0', undefined, undefined, { allowUnspecifiedBind: true })).toThrow(
+        /allow-unspecified-bind.*deployment-scoped/
+      )
+      const attestedEnv = { [RELAY_BRIDGE_ATTEST_ENV]: RELAY_BRIDGE_ATTEST_VALUE } as NodeJS.ProcessEnv
+      const containerExists = (p: string): boolean => p === '/.dockerenv'
+      expect(
+        resolveRelayTls('0.0.0.0', undefined, undefined, {
+          allowUnspecifiedBind: true,
+          env: attestedEnv,
+          bridgeExists: containerExists
+        }).scheme
+      ).toBe('http')
+      server = createRelayServer(db, { token: TOKEN })
+      const port = await new Promise<number>((resolvePort, rejectPort) => {
+        server!.listen(0, '0.0.0.0', () => {
+          const addr = server!.address()
+          if (typeof addr === 'object' && addr) resolvePort(addr.port)
+          else rejectPort(new Error('no bound port'))
+        })
+        server!.on('error', rejectPort)
+      })
+      const res = await fetch(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      })
+      expect(res.status).toBe(200)
+      expect(((await res.json()) as { ok?: unknown }).ok).toBe(true)
+    } finally {
+      try {
+        await new Promise<void>((res) => server?.close(() => res()) ?? res())
+      } catch {}
+      try {
+        db.close()
+      } catch {}
+    }
+  }, 30000)
+
+  it('explicit numeric LAN IP resolves to plain HTTP without cert/key (explicit transport, no encryption claim)', () => {
+    expect(resolveRelayTls('192.168.1.10').scheme).toBe('http')
+    expect(resolveRelayTls('192.168.1.10', undefined, undefined).scheme).toBe('http')
+    expect(parseRelayArgs(['--host', '192.168.1.10'], {}).host).toBe('192.168.1.10')
+  })
 
   it('loopback plain HTTP regression: health works without cert/key', async () => {
     const db = new Database(':memory:')

@@ -93,21 +93,19 @@ const KILL_GRACE_MS = 5000
 const HEALTH_POLL_MS = 250
 
 /**
- * Fail-closed launcher gate mirroring the relay TLS contract: an explicitly
- * supplied non-loopback bind host requires the native HTTPS cert/key pair.
- * Default loopback (no explicit host) and explicit loopback
- * (`127.0.0.1`/`localhost`, including bracketed `[127.0.0.1]`) remain plain
- * HTTP without cert/key. Throws before any child is spawned or DB path is
- * touched, so invalid launcher configuration never creates a child/DB.
+ * Launcher gate mirroring the relay transport contract: both plain HTTP and
+ * native HTTPS are explicit supported transports for loopback and explicit
+ * numeric non-loopback hosts. Plain HTTP is unencrypted (the client shows a
+ * visible warning); HTTPS uses ordinary verification. The relay itself owns
+ * no certificates. This gate keeps its signature for compatibility and no
+ * longer rejects plaintext LAN — it only exists to document the policy.
+ * Throws before any child is spawned or DB path is touched only for hosts
+ * the relay itself would reject (handled by the relay CLI).
  */
 export function assertUserRelayHostTlsConfig(normalizedHost: string, hasTls: boolean, hostWasExplicit: boolean): void {
-  if (!hostWasExplicit) return
-  const loopback = normalizedHost === '127.0.0.1' || normalizedHost === 'localhost'
-  if (!loopback && !hasTls) {
-    throw new Error(
-      'sync-relay-user-entrypoint: non-loopback host requires certPath and keyPath (native HTTPS required; plaintext LAN binding rejected)'
-    )
-  }
+  void normalizedHost
+  void hasTls
+  void hostWasExplicit
 }
 
 /**
@@ -252,16 +250,17 @@ export async function startUserEntrypointRelay(
   if (path.relative(ownedTmpRoot, path.resolve(dbPath)).startsWith('..')) {
     throw new Error('sync-relay-user-entrypoint: DB escapes the owned root')
   }
-  // LAN HTTPS opt-in validation: host/cert/key travel together (fail-closed).
+  // Transport opt-in validation: host/cert/key travel together (fail-closed).
   // Loopback HTTP (default/explicit 127.0.0.1 or explicit localhost, no
   // cert/key) serves plain HTTP with `http://127.0.0.1:<port>` readiness
-  // (production normalizes localhost to 127.0.0.1 before bind); non-loopback
-  // LAN hosts require --cert/--key, serve native HTTPS only, and advertise
-  // `https://<host>:<port>` readiness (IPv6 bracketed). The raw normalized
-  // bind host is passed to --host for server.listen except explicit localhost
-  // loopback, which binds the canonical 127.0.0.1; the bracketed URL form
-  // is used only for readiness matching, endpoint advertisement, and health
-  // URLs. IPv4/loopback formatting is unchanged.
+  // (production normalizes localhost to 127.0.0.1 before bind); explicit
+  // non-loopback hosts serve plain HTTP by default or native HTTPS with
+  // user-supplied --cert/--key, and advertise `<scheme>://<host>:<port>`
+  // readiness (IPv6 bracketed). The raw normalized bind host is passed to
+  // --host for server.listen except explicit localhost loopback, which binds
+  // the canonical 127.0.0.1; the bracketed URL form is used only for
+  // readiness matching, endpoint advertisement, and health URLs. IPv4/
+  // loopback formatting is unchanged.
   const lanHostRaw = options.host ?? '127.0.0.1'
   let lanHost: string
   try {
@@ -335,10 +334,13 @@ export async function startUserEntrypointRelay(
   }
 
   async function startChild(requestedPort: number, budgetMs: number): Promise<{ endpoint: string; port: number }> {
-    const tlsArgs = useTls ? ['--host', advertisedHostRaw, '--cert', lanCert as string, '--key', lanKey as string] : []
+    // An explicit host is always forwarded so the child binds what the
+    // launcher advertises (loopback default binds 127.0.0.1 implicitly).
+    const hostArgs = options.host !== undefined ? ['--host', advertisedHostRaw] : []
+    const tlsArgs = useTls ? ['--cert', lanCert as string, '--key', lanKey as string] : []
     const proc = spawn(
       electronBinary,
-      [tsxCli, serverTs, '--port', String(requestedPort), '--db', dbPath, '--token', token, ...tlsArgs],
+      [tsxCli, serverTs, '--port', String(requestedPort), '--db', dbPath, '--token', token, ...hostArgs, ...tlsArgs],
       {
         env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe']

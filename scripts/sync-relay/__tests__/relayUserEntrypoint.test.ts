@@ -3,12 +3,13 @@
  *
  * Covers the one supported launch contract (`pnpm sync:relay` ->
  * `scripts/sync-relay/server.ts`): stable CLI args, SYNC_RELAY_TOKEN fallback,
- * loopback HTTP plus non-loopback HTTPS host/TLS guard (loopback
- * `127.0.0.1`/`localhost` serves plain HTTP; non-loopback explicit numeric
- * LAN IPs require --cert/--key and advertise `https://<host>:<port>`
- * readiness, IPv6 bracketed), --help, and graceful SIGTERM shutdown that
- * retains the DB. The runner never imports better-sqlite3; the owned child
- * owns the SQLite binding under the pinned Node/tsx runtime.
+ * loopback HTTP plus non-loopback HTTP/HTTPS host/TLS behavior (loopback
+ * `127.0.0.1`/`localhost` serves plain HTTP; explicit numeric non-loopback
+ * LAN IPs serve plain HTTP unless --cert/--key select native HTTPS; the
+ * container-internal 0.0.0.0/:: bind requires --allow-unspecified-bind and
+ * is never a user-facing advertised endpoint), --help, and graceful SIGTERM
+ * shutdown that retains the DB. The runner never imports better-sqlite3; the
+ * owned child owns the SQLite binding under the pinned Node/tsx runtime.
  */
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -17,7 +18,18 @@ import { join, resolve } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { isLoopbackHost, isWildcardHost, parseRelayArgs, RELAY_HELP_TEXT, resolveRelayTls } from '../server'
+import {
+  formatRelayReadiness,
+  isBridgeBindAttested,
+  isLoopbackHost,
+  isUnspecifiedBindHost,
+  isWildcardHost,
+  parseRelayArgs,
+  RELAY_BRIDGE_ATTEST_ENV,
+  RELAY_BRIDGE_ATTEST_VALUE,
+  RELAY_HELP_TEXT,
+  resolveRelayTls
+} from '../server'
 
 const SERVER_ENTRY = resolve(process.cwd(), 'scripts/sync-relay/server.ts')
 const TSX_ENTRY = resolve(process.cwd(), 'node_modules/tsx/dist/cli.mjs')
@@ -58,18 +70,69 @@ describe('relay user-entrypoint CLI contract', () => {
     expect(RELAY_HELP_TEXT).toContain('pnpm sync:relay')
   })
 
-  it('rejects invalid port and requires cert/key for non-loopback hosts without touching the DB', () => {
+  it('rejects invalid port and guards hosts without touching the DB', () => {
     expect(() => parseRelayArgs(['--port', 'abc'], {})).toThrow(/invalid --port/)
     expect(() => parseRelayArgs(['--port', '-1'], {})).toThrow(/invalid --port/)
     expect(() => parseRelayArgs(['--port', '70000'], {})).toThrow(/invalid --port/)
-    // Non-loopback hosts parse but require native HTTPS: fail-closed in
-    // resolveRelayTls (before the DB is opened), never plaintext LAN.
+    // Non-loopback hosts parse and serve plain HTTP by default; --cert/--key
+    // select native HTTPS. Plain HTTP is unencrypted (client warns).
     expect(parseRelayArgs(['--host', '192.168.1.2'], {}).host).toBe('192.168.1.2')
-    expect(() => resolveRelayTls('192.168.1.2')).toThrow(/requires --cert and --key/)
+    expect(resolveRelayTls('192.168.1.2').scheme).toBe('http')
+    // Wildcard binds stay forbidden for direct host runs, even with cert/key.
     expect(() => resolveRelayTls('0.0.0.0')).toThrow(/wildcard.*forbidden/)
     expect(() => resolveRelayTls('::')).toThrow(/wildcard.*forbidden/)
     expect(() => parseRelayArgs(['--host', '0.0.0.0'], {})).toThrow(/wildcard/)
     expect(() => parseRelayArgs(['--host', '::'], {})).toThrow(/wildcard/)
+    // The container-internal bridge bind is deployment-scoped: allowed only
+    // with --allow-unspecified-bind plus Docker-bridge attestation (internal
+    // entrypoint marker + container indicator), never a user-facing endpoint.
+    expect(isUnspecifiedBindHost('0.0.0.0')).toBe(true)
+    expect(isUnspecifiedBindHost('::')).toBe(true)
+    expect(isUnspecifiedBindHost('192.168.1.2')).toBe(false)
+    // Direct host runs: the flag alone is rejected even with an unspecified host.
+    expect(() => parseRelayArgs(['--host', '0.0.0.0', '--allow-unspecified-bind'], {})).toThrow(
+      /allow-unspecified-bind.*deployment-scoped/
+    )
+    expect(() => parseRelayArgs(['--allow-unspecified-bind'], {})).toThrow(/allow-unspecified-bind.*deployment-scoped/)
+    expect(() => resolveRelayTls('0.0.0.0', undefined, undefined, { allowUnspecifiedBind: true })).toThrow(
+      /allow-unspecified-bind.*deployment-scoped/
+    )
+    expect(() => resolveRelayTls('0.0.0.0', undefined, undefined, { allowUnspecifiedBind: false })).toThrow(
+      /wildcard.*forbidden/
+    )
+    // Marker alone without a container indicator does not attest.
+    expect(isBridgeBindAttested({ [RELAY_BRIDGE_ATTEST_ENV]: RELAY_BRIDGE_ATTEST_VALUE }, () => false)).toBe(false)
+    expect(isBridgeBindAttested({}, () => true)).toBe(false)
+    const attestedEnv = { [RELAY_BRIDGE_ATTEST_ENV]: RELAY_BRIDGE_ATTEST_VALUE } as NodeJS.ProcessEnv
+    const containerExists = (p: string): boolean => p === '/.dockerenv'
+    expect(isBridgeBindAttested(attestedEnv, containerExists)).toBe(true)
+    expect(parseRelayArgs(['--host', '0.0.0.0', '--allow-unspecified-bind'], attestedEnv, containerExists).host).toBe(
+      '0.0.0.0'
+    )
+    expect(parseRelayArgs(['--host', '::', '--allow-unspecified-bind'], attestedEnv, containerExists).host).toBe('::')
+    expect(
+      resolveRelayTls('0.0.0.0', undefined, undefined, {
+        allowUnspecifiedBind: true,
+        env: attestedEnv,
+        bridgeExists: containerExists
+      }).scheme
+    ).toBe('http')
+    // Marker with a non-container filesystem still fails.
+    expect(() => parseRelayArgs(['--host', '0.0.0.0', '--allow-unspecified-bind'], attestedEnv, () => false)).toThrow(
+      /allow-unspecified-bind.*deployment-scoped/
+    )
+    // Readiness contract: unspecified binds never emit URL-shaped wildcards.
+    expect(formatRelayReadiness('0.0.0.0', 'http', 3030)).toBe(
+      '[sync-relay] listening on http (internal bind) port 3030'
+    )
+    expect(formatRelayReadiness('::', 'http', 3030)).toBe('[sync-relay] listening on http (internal bind) port 3030')
+    expect(formatRelayReadiness('0.0.0.0', 'https', 3030)).toBe(
+      '[sync-relay] listening on https (internal bind) port 3030'
+    )
+    expect(formatRelayReadiness('0.0.0.0', 'http', 3030)).not.toContain('http://0.0.0.0')
+    expect(formatRelayReadiness('::', 'http', 3030)).not.toContain('http://')
+    expect(formatRelayReadiness('127.0.0.1', 'http', 4123)).toBe('[sync-relay] listening on http://127.0.0.1:4123')
+    expect(formatRelayReadiness('192.168.1.2', 'http', 4123)).toBe('[sync-relay] listening on http://192.168.1.2:4123')
     expect(isWildcardHost('0.0.0.0')).toBe(true)
     expect(isWildcardHost('::')).toBe(true)
     expect(resolveRelayTls('127.0.0.1').scheme).toBe('http')
@@ -95,20 +158,32 @@ describe('relay user-entrypoint CLI contract', () => {
     expect(String(res.stdout)).toContain('--port')
   }, 30000)
 
-  it('non-loopback without cert/key exits 2 without creating the DB', () => {
+  it('direct --allow-unspecified-bind without bridge attestation fails before DB creation', () => {
     const root = mkdtempSync(join(tmpdir(), 'sync-relay-cli-'))
     const dbPath = join(root, 'should-not-exist.db')
     try {
+      // Direct host run: Docker-bridge flag without the internal entrypoint
+      // attestation (marker + container indicator) must fail. No marker is
+      // provided here, so startup rejects before the DB is opened.
       const res = spawnSync(
         process.execPath,
-        [TSX_ENTRY, SERVER_ENTRY, '--host', '192.168.1.2', '--db', dbPath, '--token', TOKEN],
-        {
-          timeout: 30000,
-          encoding: 'utf8'
-        }
+        [
+          TSX_ENTRY,
+          SERVER_ENTRY,
+          '--host',
+          '0.0.0.0',
+          '--allow-unspecified-bind',
+          '--port',
+          '0',
+          '--db',
+          dbPath,
+          '--token',
+          TOKEN
+        ],
+        { timeout: 30000, encoding: 'utf8', env: { ...process.env, [RELAY_BRIDGE_ATTEST_ENV]: '' } }
       )
       expect(res.status).toBe(2)
-      expect(`${String(res.stderr)}${String(res.stdout)}`).toMatch(/requires --cert and --key/)
+      expect(`${String(res.stderr)}${String(res.stdout)}`).toMatch(/allow-unspecified-bind.*deployment-scoped/)
       expect(existsSync(dbPath)).toBe(false)
     } finally {
       rmSync(root, { recursive: true, force: true })

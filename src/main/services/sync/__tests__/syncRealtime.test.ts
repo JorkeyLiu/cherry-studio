@@ -487,18 +487,42 @@ describe('SSE CRLF framing', () => {
 })
 
 describe('endpoint transport security', () => {
-  it('rejects non-loopback plaintext HTTP but allows loopback HTTP and remote HTTPS', async () => {
+  it('accepts http and https for loopback and non-loopback hosts with a warning predicate for plaintext LAN', async () => {
     const shared = await import('../../../../../packages/shared/sync/endpoint')
-    expect(shared.validateSyncEndpointUrl('http://example.com')).toMatch(/https/)
-    expect(shared.validateSyncEndpointUrl('http://192.168.1.10:3000')).toMatch(/https/)
+    // Both transports are accepted everywhere; plaintext non-loopback HTTP
+    // is an explicit supported transport with a visible UI warning.
+    expect(shared.validateSyncEndpointUrl('http://example.com')).toBeNull()
+    expect(shared.validateSyncEndpointUrl('http://192.168.1.10:3000')).toBeNull()
     expect(shared.validateSyncEndpointUrl('http://localhost:3000')).toBeNull()
     expect(shared.validateSyncEndpointUrl('http://127.0.0.1:3030')).toBeNull()
     expect(shared.validateSyncEndpointUrl('http://[::1]:3030')).toBeNull()
     expect(shared.validateSyncEndpointUrl('https://example.com')).toBeNull()
     expect(shared.validateSyncEndpointUrl('https://192.168.1.10/sync')).toBeNull()
+    expect(shared.validateSyncEndpointUrl('ftp://example.com')).not.toBeNull()
+    expect(shared.validateSyncEndpointUrl('not-a-url')).not.toBeNull()
+    // Malformed authority forms without an explicit http(s):// prefix fail.
+    expect(shared.validateSyncEndpointUrl('http:example.com')).not.toBeNull()
+    expect(shared.validateSyncEndpointUrl('http:///example.com')).not.toBeNull()
+    expect(shared.validateSyncEndpointUrl('HTTP://192.168.1.10:3000')).toBeNull()
+    // Warning predicate: only non-loopback http warns; loopback http,
+    // https, malformed, and invalid input never warn.
+    expect(shared.isNonLoopbackHttpEndpoint('http://192.168.1.10:3000')).toBe(true)
+    expect(shared.isNonLoopbackHttpEndpoint('http://example.com')).toBe(true)
+    expect(shared.isNonLoopbackHttpEndpoint('http://localhost:3000')).toBe(false)
+    expect(shared.isNonLoopbackHttpEndpoint('http://127.0.0.1:3030')).toBe(false)
+    expect(shared.isNonLoopbackHttpEndpoint('http://[::1]:3030')).toBe(false)
+    expect(shared.isNonLoopbackHttpEndpoint('https://192.168.1.10:3000')).toBe(false)
+    expect(shared.isNonLoopbackHttpEndpoint('https://example.com')).toBe(false)
+    expect(shared.isNonLoopbackHttpEndpoint('http:example.com')).toBe(false)
+    expect(shared.isNonLoopbackHttpEndpoint('http:///example.com')).toBe(false)
+    expect(shared.isNonLoopbackHttpEndpoint('not-a-url')).toBe(false)
+    expect(shared.isNonLoopbackHttpEndpoint('')).toBe(false)
     const { validateEndpointUrl } = await import('../SyncClient')
-    expect(validateEndpointUrl('http://example.com')).toMatch(/https/)
+    expect(validateEndpointUrl('http://192.168.1.10:3030')).toBeNull()
     expect(validateEndpointUrl('http://127.0.0.1:3030')).toBeNull()
+    expect(validateEndpointUrl('https://192.168.1.10:3030')).toBeNull()
+    expect(validateEndpointUrl('http:example.com')).not.toBeNull()
+    expect(validateEndpointUrl('http:///example.com')).not.toBeNull()
   })
 })
 

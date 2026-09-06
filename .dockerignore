@@ -1,0 +1,60 @@
+# Cherry Chat relay image — keep the Compose root build context narrow so
+# secrets and unrelated artifacts never reach the Docker daemon.
+# The Dockerfile copies only: deploy/sync-relay/{package.json,pnpm-lock.yaml,
+# relay-init.mjs,docker-entrypoint.sh}, scripts/sync-relay/, packages/shared/.
+
+# Persistent relay state and credentials (volume content).
+relay-data/
+relay-data
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+relay-token
+relay-config.cherry
+
+# Environment and secret files.
+.env
+.env.*
+!.env.example
+*.secret
+*.token
+secrets/
+credentials/
+credential*
+
+# Version control and OS artifacts.
+.git/
+.gitignore
+.gitattributes
+.svn/
+.hg/
+.DS_Store
+Thumbs.db
+
+# Dependencies and build outputs.
+node_modules/
+out/
+dist/
+build/
+.next/
+coverage/
+*.log
+
+# Test, E2E, and Playwright artifacts.
+test-results/
+playwright-report/
+tests/
+specs/
+
+# Electron packaging and local tooling.
+.vscode/
+.idea/
+.zed/
+.playwright-mcp/
+.context/
+.code-review-graph/
+.claude/
+.kilo/
+*.code-workspace

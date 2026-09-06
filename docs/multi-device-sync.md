@@ -4,7 +4,7 @@
 > **Role**: This document owns sync goal, current approach, current status/limits, evidence, gaps, and next decision.
 > **Fallback reference (conditional only)**: [Sync Architecture Selection](./sync-architecture-selection.md) — candidate analysis reusable only on a concrete current-path blocker with clear technical advantage.
 > **Development principle**: This sync effort is initiated and evolved under `adaptive-development` principles: the intended outcome remains the anchor, current state and gap determine the next step, and design, implementation, evidence, and validation evolve together.
-> **Last updated**: 2026-09-06 — native LAN HTTPS relay path landed (one `pnpm sync:relay` entrypoint with `--host/--cert/--key` for non-loopback HTTPS, loopback HTTP preserved, two-profile LAN HTTPS restart E2E); status remains limited validation, not production-ready.
+> **Last updated**: 2026-09-06 — Docker Compose relay deployment contract revised to the approved product boundary (standard bridge networking + ports, relay-owned token/SQLite only, optional HTTP/HTTPS transport, no relay-owned certificates, non-blocking HTTP warning in Sync Settings; image execution not validated — no Docker daemon on this macOS host); status remains limited validation, not production-ready.
 
 ## 1. Goal
 
@@ -25,22 +25,116 @@ The selected path is application operation-log plus thin personal-hosted HTTP re
 - Replay applies operations idempotently with deterministic last-writer-wins resolution and tombstone propagation for deletions.
 - Payloads carry only allowlisted shareable fields. Credentials, derived data, device-local paths, and UI state stay out of the sync channel.
 
-### 2.1 Supported personal relay path (this phase, macOS-arm64-first)
+### 2.1 Supported personal relay paths (this phase)
 
-Exactly one explicit runnable path is supported in this phase, with two bind
-modes sharing one entrypoint. Do not use Docker/systemd/cloud variants,
-reverse proxies, or fallback technologies.
+Two shapes share one relay protocol; both support plain HTTP and native
+HTTPS transports and preserve the loopback `pnpm sync:relay` path, tests,
+and strict TLS semantics. The relay never generates, manages, installs, or
+rotates certificates: HTTPS is served only with operator-supplied
+certificate/key files, using ordinary verification with no bypass or
+auto-trust. Do not use systemd/cloud variants, reverse proxies, or fallback
+technologies. There is no independent web admin UI: the existing Cherry Chat
+client pairing UI remains the trust/acceptance control plane.
 
 - Command (loopback): `pnpm sync:relay -- --port <port> --db <path> --token <token>` (token fallback: `SYNC_RELAY_TOKEN` env; explicit `--token` wins). Help: `pnpm sync:relay -- --help`. The command runs `scripts/sync-relay/server.ts` with the repository's pinned Node/pnpm conventions.
-- Command (secure LAN): `pnpm sync:relay -- --host <LAN-IP> --port <port> --db <path> --token <token> --cert <cert.pem> --key <key.pem>`. This is the one supported secure LAN path: the relay itself terminates native HTTPS (Node stdlib `node:https`, no new dependency) and binds the user-selected non-loopback LAN address. There is no reverse-proxy, Docker, service-manager, or cloud variant.
+- Command (LAN): `pnpm sync:relay -- --host <LAN-IP> --port <port> --db <path> --token <token> [--cert <cert.pem> --key <key.pem>]`. This is the supported direct host-run LAN shape alongside the Docker Compose deployment in Section 2.2 (Linux x64/arm64 home servers). Without `--cert`/`--key` the relay serves plain HTTP (unencrypted — the client shows a visible non-blocking warning for non-loopback `http://` endpoints); with a user-supplied `--cert`/`--key` pair it serves native HTTPS (Node stdlib `node:https`, no new dependency) and binds the user-selected non-loopback LAN address. There is no reverse-proxy, service-manager, or cloud variant.
 - Prerequisites: macOS-arm64-first scope, pinned Node v24.11.1 and pnpm 10.27.0, repository checkout with dependencies installed.
 - Loopback mode: binds `127.0.0.1` by default (`--host localhost` also allowed) and serves plain HTTP without cert/key. Existing loopback behavior, CLI defaults, and tests are preserved.
-- Secure LAN mode: a non-loopback `--host` requires both `--cert` and `--key` and serves native HTTPS only. Plaintext non-loopback HTTP cannot start (fail-closed). Cert/key files are read before the DB is opened; missing, empty, or mismatched material aborts startup without creating the DB. The readiness line advertises the actual scheme and bound host/port (`https://<LAN-IP>:<port>`).
-- Certificate provisioning contract (user-owned, no automation): generate or provision a PEM certificate and private key whose Subject Alternative Name covers the LAN host/IP (example: `openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=<LAN-IP>" -addext "subjectAltName=IP:<LAN-IP>"`), then configure trust explicitly via `NODE_EXTRA_CA_CERTS`/OS trust as applicable to the runtime. Verification is never disabled in app code or tests.
-- Two-profile setup/pairing flow over LAN: start one relay in secure LAN mode, set the same `https://<LAN-IP>:<port>` endpoint (plus token) on both app instances, ensure both runtimes trust the certificate, then complete the explicit pairing request -> accept flow on both devices and sync covered topic/message/message-block data. Trust persists in Main SQLite and on the relay across app restarts.
-- Persistent DB/token handling: `--db` selects the relay SQLite file and `--token` the Bearer token. Restart with the same `--db`/`--token` (plus `--cert`/`--key` for LAN HTTPS) retains relay trust/operations/cursor. A normal stop (`SIGTERM`/`SIGINT`) shuts down exactly once — stops accepting requests, closes active SSE streams, closes the HTTPS/HTTP server and SQLite connection cleanly — and never deletes the DB. User-owned relay data (DB/cert/key files) is never deleted by normal stop/close.
-- Restart/recovery behavior: after a relay restart on the same DB/token (and cert/key for LAN), retained operations stay contiguous from cursor 0, the sequence continues, paired devices need no re-pairing, queued edits push and converge, and durable cursors advance. A short interruption surfaces a truthful sync error with pending work retained and cursors pinned until recovery.
-- Explicit boundary: this path provides a runnable LAN HTTPS relay contract and validation only. It claims no certificate issuance/installation automation, no certificate rotation, no backups, no capacity/SLA, no WAN/public-internet exposure, no WAL/OS-crash/power-loss durability, and no full production operations (deployment, upgrade, backup).
+- LAN mode: a non-loopback `--host` must be an explicit numeric LAN IP and serves plain HTTP unless both `--cert` and `--key` are given (native HTTPS). Plain HTTP is unencrypted: use it only on networks you trust, or terminate HTTPS outside the relay. Cert/key files are read before the DB is opened; missing, empty, or mismatched material aborts startup without creating the DB; a partial pair (one without the other) is rejected. The readiness line advertises the actual scheme and bound host/port (`http://<LAN-IP>:<port>` or `https://<LAN-IP>:<port>`).
+- Container bridge bind: `--host 0.0.0.0 --allow-unspecified-bind` is deployment-scoped for the Docker bridge image only (container-internal bind; Docker controls host exposure via `ports:`). It is never a user-facing advertised endpoint and must not be used for direct host runs.
+- Certificate provisioning contract (user-owned, no automation): to serve HTTPS, generate or provision a PEM certificate and private key covering the LAN host/IP yourself (example: `openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=<LAN-IP>" -addext "subjectAltName=IP:<LAN-IP>"`), then configure trust explicitly via `NODE_EXTRA_CA_CERTS`/OS trust as applicable to the runtime. Verification is never disabled in app code or tests. The relay and Docker image never perform this step for you.
+- Two-profile setup/pairing flow over LAN: start one relay in LAN mode, set the same `http://<LAN-IP>:<port>` (or `https://<LAN-IP>:<port>` when you provided TLS) endpoint plus token on both app instances (for HTTPS, ensure both runtimes trust the certificate), then complete the explicit pairing request -> accept flow on both devices and sync covered topic/message/message-block data. Trust persists in Main SQLite and on the relay across app restarts.
+- Client endpoint policy: both valid `http://` and `https://` endpoints are accepted for loopback and non-loopback hosts. A non-loopback `http://` endpoint shows a visible non-blocking warning in Sync Settings (unencrypted transport); saving and syncing remain possible.
+- Persistent DB/token handling: `--db` selects the relay SQLite file and `--token` the Bearer token. Restart with the same `--db`/`--token` (plus `--cert`/`--key` for HTTPS) retains relay trust/operations/cursor. A normal stop (`SIGTERM`/`SIGINT`) shuts down exactly once — stops accepting requests, closes active SSE streams, closes the HTTPS/HTTP server and SQLite connection cleanly — and never deletes the DB. User-owned relay data (DB/cert/key files) is never deleted by normal stop/close.
+- Restart/recovery behavior: after a relay restart on the same DB/token (and cert/key for HTTPS), retained operations stay contiguous from cursor 0, the sequence continues, paired devices need no re-pairing, queued edits push and converge, and durable cursors advance. A short interruption surfaces a truthful sync error with pending work retained and cursors pinned until recovery.
+- Explicit boundary: this path provides a runnable LAN relay contract and validation only. It claims no certificate issuance/installation automation, no certificate rotation, no backups, no capacity/SLA, no WAN/public-internet exposure, no WAL/OS-crash/power-loss durability, and no full production operations (deployment, upgrade, backup).
+
+### 2.2 Docker Compose relay deployment (Linux x64/arm64 home servers)
+
+Docker Compose is the supported containerized relay deployment shape for
+this phase, alongside the direct host-run shapes in Section 2.1.
+Target: Linux x64/arm64 home servers only. Docker Desktop/macOS/Windows
+support is not claimed. The relay generates no certificates: by default the
+deployment serves plain HTTP; HTTPS is only served when the operator mounts
+their own certificate/key files (passthrough, never generated or managed).
+Contract files: `docker-compose.yml` (root), root `.dockerignore` (keeps
+secrets and unrelated artifacts out of the build context),
+`deploy/sync-relay/Dockerfile` (multi-arch-capable Node 24.11.1 image with
+pnpm 10.27.0, carrying only the relay server, the shared sync contract, and
+a reproducible better-sqlite3 + tsx install from
+`deploy/sync-relay/pnpm-lock.yaml` via `--frozen-lockfile` — never the
+Electron app, never OpenSSL),
+`deploy/sync-relay/docker-entrypoint.sh` (restrictive umask 077, then init,
+then exec), and `deploy/sync-relay/relay-init.mjs` (testable without
+Docker).
+
+- Compose contract: standard bridge networking with `ports:`
+  (`${RELAY_PORT:-3030}:3030`; the container listens on 3030), restart
+  policy `unless-stopped`, and one user-owned persistent bind mount
+  (`./relay-data:/data`) holding the SQLite DB/WAL sidecars, the mode-0600
+  token file, and (only when `RELAY_PUBLIC_URL` is set) the public
+  `relay-config.cherry` artifact. There is no `network_mode: host`, no
+  `RELAY_LAN_IP`, and no wildcard advertised endpoint: the relay binds the
+  container-internal `0.0.0.0` (deployment-scoped
+  `--allow-unspecified-bind`) and Docker controls host exposure.
+- First-start init (once; reused byte-identical on restart): sets a
+  restrictive umask (077) so DB WAL/SHM sidecars default to owner-only,
+  creates a cryptographically strong token (0600, atomic temp + rename),
+  ensures the DB placeholder, and — only when `RELAY_PUBLIC_URL` is set —
+  writes a small versioned public config carrying only operator-supplied
+  endpoint metadata (public URL, relay name, versions; never any token,
+  certificate, or key). Existing token/config artifacts are strictly
+  validated before reuse (corrupt token, unknown/secret config keys, bad
+  types, invalid issuedAt, or public-URL mismatch fail closed without a
+  rewrite). Reused on restart; no automatic rotation, backup, WAN exposure,
+  reverse proxy, service manager, or cloud variant in this phase. A legacy
+  `RELAY_LAN_IP` variable fails fast with an explicit error. There is no
+  independent web admin UI and this path claims no production readiness.
+- Transport choices (both explicitly supported): direct LAN HTTP
+  (`http://<server>:<port>` — unencrypted; the client shows a visible
+  non-blocking warning and the operator accepts responsibility for the
+  untrusted network) or externally provided HTTPS (terminate TLS outside
+  the relay, or mount your own cert/key via `RELAY_TLS_CERT_FILE` /
+  `RELAY_TLS_KEY_FILE` for native relay HTTPS with ordinary verification).
+  Docker itself never generates or manages certificates.
+- First-start logs show only safe values: container port and bind note,
+  token-file path (with retrieval instructions), DB path, config path or
+  the no-public-URL note, public URL or none, and TLS passthrough paths or
+  the plain-HTTP note, plus first-start/reuse status. The full token is
+  never printed and no certificate/private-key artifacts are generated.
+- Exact user flow: server `docker compose up -d` -> retrieve the token
+  from the protected file (`docker compose exec sync-relay cat
+  /data/relay-token`) -> on the first Cherry Chat client, enter the server
+  endpoint (`http://<server>:<port>` or your externally provided
+  `https://...`) plus the token, and connect: that client becomes the
+  founder and accepts later devices through the existing client pairing UI.
+  When `RELAY_PUBLIC_URL` is set, `relay-data/relay-config.cherry` records
+  the operator-supplied public URL for reference; otherwise users enter the
+  endpoint manually.
+- Public config schema (`deploy/sync-relay/relay-config.schema.json`,
+  version 2): relay name, operator-supplied public URL (`http://` or
+  `https://`), and schema/init version metadata; JSON content in
+  `relay-config.cherry` (mode 0644, atomic writes). No token, no
+  certificate, no key, no fingerprint.
+- Entrypoint preserves relay semantics: it runs init, then `exec`s the
+  unchanged `scripts/sync-relay/server.ts` CLI with the container-internal
+  bridge bind (`--host 0.0.0.0 --allow-unspecified-bind --port/--db`, token
+  via the `SYNC_RELAY_TOKEN` env fallback so the secret never appears in
+  `ps`, plus `--cert/--key` only when the operator supplied the TLS
+  passthrough pair), keeping the CLI startup order (token/TLS validation
+  before DB/listen) and direct SIGTERM/SIGINT delivery for graceful
+  shutdown.
+- No client config-import UI exists in this phase. The intended client step
+  is: enter the endpoint, enter the token, connect, and pair via the
+  existing pairing UI. Client import work is a separate decision.
+- Explicit non-goals: no Web admin UI, no cloud-specific deployment, no
+  reverse-proxy setup, no certificate automation, no backup, no rotation,
+  and no WAN claims.
+- Validation boundary: the init contract is proven by focused tests without
+  a Docker daemon (see Section 7). Docker image build/execution was NOT
+  validated: the current host is macOS arm64 with no Docker binary/daemon,
+  so Linux x64/arm64 image execution remains unproven. This path claims no
+  production readiness.
 
 ## 3. What current evidence establishes
 
@@ -86,12 +180,13 @@ These judgments guide the next step only. They are not product authority and cha
 
 ## 7. Evidence pointers
 
-- Implementation: `src/main/services/sync/` (operation-log capture, apply, client, pairing trust), `packages/shared/sync/` (payload shape, filtering, pairing validation, and endpoint validation that requires `https://` for non-loopback hosts), `scripts/sync-relay/server.ts` (reference relay, non-production; user entrypoint via `pnpm sync:relay` with `--port/--db/--token/--host/--cert/--key/--help`, loopback HTTP preserved, non-loopback native HTTPS required, exactly-once SIGTERM/SIGINT graceful shutdown), additive sync metadata migrations `005_sync_metadata` + `006_sync_field_merge` + `007_sync_pairing_trust`.
+- Implementation: `src/main/services/sync/` (operation-log capture, apply, client, pairing trust), `packages/shared/sync/` (payload shape, filtering, pairing validation, and endpoint validation accepting valid `http://`/`https://` endpoints for loopback and non-loopback hosts plus the non-loopback-HTTP warning predicate consumed by Sync Settings), `scripts/sync-relay/server.ts` (reference relay, non-production; user entrypoint via `pnpm sync:relay` with `--port/--db/--token/--host/--cert/--key/--allow-unspecified-bind/--help`, loopback and LAN plain HTTP by default, native HTTPS with user-supplied cert/key, container-internal `0.0.0.0` bridge bind only with the deployment flag, exactly-once SIGTERM/SIGINT graceful shutdown), additive sync metadata migrations `005_sync_metadata` + `006_sync_field_merge` + `007_sync_pairing_trust`.
 - Pairing behavior: `tests/e2e/specs/sync/sync-pairing.spec.ts` (real two-profile request -> accept -> trusted persistence across restart, post-pairing message-edit convergence, rejection never trusted); `tests/e2e/utils/sync-relay-pairing.test.ts` (relay founder bootstrap, 403 for untrusted push/pull, idempotent duplicate requests, revoke); `src/main/services/sync/__tests__/syncPairingTrust.test.ts` (durable trust mirror, input validation); `packages/shared/sync/__tests__/pairing.test.ts` (field validation).
 - Integrated behavior: `tests/e2e/specs/sync/sync-two-profiles.spec.ts` (two-profile sync scope, including delete/recovery and ordinary-edit/concurrent-edit convergence; bounded outbox/app-restart backlog — `clean-close backlog of 3 stable edits survives relaunch then converges` [`9170ee3`], `clean-close multi-entity backlog of 3 messages each one edit survives relaunch then converges` plus `clean-close mixed backlog of A twice plus B/C once survives relaunch then converges` [`4648cff`], `pending edit survives controlled SIGTERM same-profile relaunch then converges` [`a78b128`], `pending edit survives direct SIGKILL same-profile relaunch then converges` [`5ae9a5f`]; direction-level interruption and idempotent replay — `pull interruption after push holds reader then auto-converges`, `push interruption holds relay then auto-retries after release`, `identical operation replay is idempotent at the relay` [`1022f889`]); `tests/e2e/specs/sync/sync-relay-restart.spec.ts` (bounded file-backed relay SIGTERM restart: operation/cursor retention and post-restart pending-edit convergence).
 - Unit behavior: operation-log, apply, and relay suites alongside the paths above, plus `tests/e2e/utils/sync-relay-pause.test.ts` (in-memory pause/resume and direction-barrier determinism), `tests/e2e/utils/sync-relay-process.ts` (explicit file-backed relay lifecycle test harness with ownership/cleanup boundaries; disposable database, controlled owned process), and `scripts/sync-relay/__tests__/relayUserEntrypoint.test.ts` (user-entrypoint CLI contract: `sync:relay` mapping, arg/env precedence, loopback/host/port validation, `--help`, graceful SIGTERM retaining the DB with restart continuity).
 - User-entrypoint persistence: `tests/e2e/specs/sync/sync-user-entrypoint.spec.ts` (two real profiles through the user entrypoint file with explicit `--db/--token`: independent config, pairing/trust, covered sync, relay stop with truthful failure and pinned cursors, same DB/token restart with retained trust/operations/cursor and post-restart convergence) via `tests/e2e/utils/sync-relay-user-entrypoint.ts` (same entrypoint file and CLI args as `pnpm sync:relay`; Electron-as-Node launcher only for the ABI 145 lane; disposable owned root only).
-- Secure LAN path: `scripts/sync-relay/__tests__/relayLanHttps.test.ts` (non-loopback HTTP rejection, cert+key requirement, fail-before-DB on missing/empty/mismatched material, native HTTPS health/readiness with disposable cert/key and explicit CA trust, loopback HTTP regression) and `tests/e2e/specs/sync/sync-lan-https.spec.ts` (two real profiles over dynamically discovered non-loopback HTTPS with explicit CA trust: pairing/trust, covered sync, relay stop with truthful failure and pinned cursors, same DB/cert/key/token restart with retained trust/operations/cursor and post-restart convergence; explicit skip when no suitable interface is available).
+- LAN path: `scripts/sync-relay/__tests__/relayLanHttps.test.ts` (non-loopback plain HTTP as an explicit supported transport with health coverage, user-supplied cert/key HTTPS, fail-before-DB on missing/empty/mismatched/partial material, container-internal unspecified bind gated on the deployment flag, native HTTPS health/readiness with disposable cert/key and explicit CA trust, loopback HTTP regression) and `tests/e2e/specs/sync/sync-lan-https.spec.ts` (two real profiles over dynamically discovered non-loopback HTTPS with explicit CA trust: pairing/trust, covered sync, relay stop with truthful failure and pinned cursors, same DB/cert/key/token restart with retained trust/operations/cursor and post-restart convergence; explicit skip when no suitable interface is available).
+- Docker Compose deployment contract: `scripts/sync-relay/__tests__/dockerRelayInit.test.ts` (focused suite, no Docker daemon: first init creates token/DB with safe modes and secret-free logs and no certificate artifacts; `RELAY_PUBLIC_URL` writes a metadata-only public config; second init reuses byte-identical artifacts; corrupt token/config fails closed; legacy `RELAY_LAN_IP` fails fast; public config matches `deploy/sync-relay/relay-config.schema.json` v2; Dockerfile/Compose/entrypoint structural checks for bridge networking, ports, and the container-internal bind) over `deploy/sync-relay/relay-init.mjs` (first-start init/reuse/fail-closed logic for token/DB/optional public config/optional TLS passthrough), `deploy/sync-relay/docker-entrypoint.sh` (Linux check, init, `exec` of the unchanged relay CLI with `--host 0.0.0.0 --allow-unspecified-bind --port/--db` and token via `SYNC_RELAY_TOKEN`, plus `--cert/--key` only for the operator-supplied passthrough pair), `deploy/sync-relay/Dockerfile` (multi-arch Node 24.11.1 + pnpm 10.27.0, narrow relay payload, no OpenSSL), and root `docker-compose.yml` (standard bridge networking with `ports:`, no `RELAY_LAN_IP`/host network, one `./relay-data:/data` mount). Docker image build/execution not validated on the macOS host (no Docker binary/daemon).
 - Current validation (implementation regression evidence, not production readiness): `pnpm test:e2e tests/e2e/specs/sync/sync-two-profiles.spec.ts --timeout=300000` — 17/17 passed after the bounded backlog matrix, 20/20 passed after the interruption/replay matrix; `pnpm build:check` — exit 0 on the exact replay worktree (lint/openapi/full Vitest passed, approximately 12052 passed / 90 skipped / 0 failed, Node ABI lane with Electron ABI 145 restored and SQL probe passed) and exit 0 with the same aggregate result on the prior backlog-matrix worktree; focused controlled-SIGTERM/direct-SIGKILL/clean-close recovery tests passed during their phases. All evidence is bounded synthetic/disposable macOS Electron E2E/test-side relay scope and must not be extrapolated to production readiness, capacity/SLA, power-loss/OS-crash/WAL durability, E2EE, attachments, or complex operations.
 - Git owns run history; this document carries no per-run history.
 

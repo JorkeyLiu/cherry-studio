@@ -1,42 +1,22 @@
 /**
  * Focused launcher-contract tests for the user-entrypoint relay launcher.
  *
- * Covers only the pre-spawn TLS gate: an explicitly supplied non-loopback
- * host without cert/key fails immediately (no child spawned, no DB created),
- * while default loopback, explicit loopback, and LAN HTTPS with cert/key
- * remain valid. Never spawns a relay child.
+ * Covers the transport gate: both plain HTTP and native HTTPS are explicit
+ * supported transports, so an explicitly supplied non-loopback host without
+ * cert/key is accepted (plain HTTP, unencrypted — the client warns), while
+ * default loopback, explicit loopback, and LAN with cert/key remain valid.
+ * Never spawns a relay child.
  */
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-import { createOwnedTmpRoot, removeOwnedTmpRoot } from './run-ownership'
-import {
-  assertUserRelayHostTlsConfig,
-  getUserRelayHandle,
-  resolveUserRelayUrlHost,
-  startUserEntrypointRelay
-} from './sync-relay-user-entrypoint'
+import { assertUserRelayHostTlsConfig, resolveUserRelayUrlHost } from './sync-relay-user-entrypoint'
 import { formatRelayHostForUrl } from '../../../scripts/sync-relay/relayHost'
 
 const LAN_HOST = '192.168.1.10'
-const DB_FILE = 'launcher-gate-invalid.db'
 
-let ownedTmpRoot: string | null = null
-
-afterEach(async () => {
-  if (ownedTmpRoot) {
-    const root = ownedTmpRoot
-    ownedTmpRoot = null
-    await removeOwnedTmpRoot(root, [])
-  }
-})
-
-describe('sync-relay-user-entrypoint TLS gate', () => {
-  it('rejects an explicit non-loopback host without cert/key', () => {
-    expect(() => assertUserRelayHostTlsConfig(LAN_HOST, false, true)).toThrow(
-      /non-loopback host requires certPath and keyPath/
-    )
+describe('sync-relay-user-entrypoint transport gate', () => {
+  it('accepts an explicit non-loopback host without cert/key (plain HTTP transport)', () => {
+    expect(() => assertUserRelayHostTlsConfig(LAN_HOST, false, true)).not.toThrow()
   })
 
   it('preserves default loopback without cert/key', () => {
@@ -50,23 +30,6 @@ describe('sync-relay-user-entrypoint TLS gate', () => {
 
   it('preserves LAN HTTPS with cert/key', () => {
     expect(() => assertUserRelayHostTlsConfig(LAN_HOST, true, true)).not.toThrow()
-  })
-
-  it('launcher fails before spawn without creating a child/DB', async () => {
-    ownedTmpRoot = createOwnedTmpRoot()
-    const root = ownedTmpRoot
-    const error = await startUserEntrypointRelay({
-      ownedTmpRoot: root,
-      token: 'launcher-gate-token',
-      host: LAN_HOST,
-      dbFileName: DB_FILE
-    }).catch((e: unknown) => e)
-    expect(error).toBeInstanceOf(Error)
-    expect((error as Error).message).toMatch(/non-loopback host requires certPath and keyPath/)
-    expect(getUserRelayHandle(error)).toBeNull()
-    for (const target of [DB_FILE, `${DB_FILE}-wal`, `${DB_FILE}-shm`, `${DB_FILE}-journal`]) {
-      expect(fs.existsSync(path.join(root, target))).toBe(false)
-    }
   })
 })
 

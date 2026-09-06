@@ -3,7 +3,9 @@
  * Minimal persistent operation log with endpoint handlers.
  * Must NOT be imported by production app code.
  * Runnable via:  npx tsx scripts/sync-relay/server.ts [--port 3000] [--db /tmp/sync-relay.db] [--token secret]
- * LAN HTTPS via: npx tsx scripts/sync-relay/server.ts --host <LAN-IP> --cert <cert.pem> --key <key.pem> [--port ...] [--db ...] [--token ...]
+ * LAN via: npx tsx scripts/sync-relay/server.ts --host <LAN-IP> [--cert <cert.pem> --key <key.pem>] [--port ...] [--db ...] [--token ...]
+ *   (plain HTTP by default; native HTTPS when user-supplied --cert/--key are given; the relay never generates certificates)
+ * Container bridge via: --host 0.0.0.0 --allow-unspecified-bind (Docker bridge internal bind only)
  */
 
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
@@ -54,6 +56,74 @@ export const RELAY_LOOPBACK_HOSTS = ['127.0.0.1', 'localhost'] as const
 
 export function isLoopbackHost(host: string): boolean {
   return (RELAY_LOOPBACK_HOSTS as readonly string[]).includes(host)
+}
+
+/**
+ * Container-internal unspecified bind forms. `0.0.0.0` (and `::`) are never
+ * a user-facing advertised endpoint — they are only the Docker bridge
+ * container-internal bind (Docker controls host exposure via `ports:`).
+ * They are accepted only with the deployment-scoped
+ * `--allow-unspecified-bind` flag so direct host runs keep the strict
+ * explicit-IP policy.
+ */
+export const RELAY_UNSPECIFIED_BIND_HOSTS = ['0.0.0.0', '::', '[::]'] as const
+
+export function isUnspecifiedBindHost(host: string): boolean {
+  const n = host.trim().toLowerCase()
+  return n === '0.0.0.0' || n === '::' || n === '[::]'
+}
+
+/**
+ * Internal Docker-bridge attestation for the container-internal
+ * unspecified bind. The value is set only by `deploy/sync-relay/
+ * docker-entrypoint.sh` after it validates its own controlled path
+ * (init, token file); it is never a user-facing CLI option. Direct host
+ * runs must not set it: `parseRelayArgs`/`resolveRelayTls` additionally
+ * require a container-runtime indicator (`/.dockerenv` or
+ * `/run/.containerenv`) so merely exporting the variable on a host does
+ * not weaken wildcard protection.
+ */
+export const RELAY_BRIDGE_ATTEST_ENV = 'CHERRY_RELAY_BRIDGE_BIND'
+export const RELAY_BRIDGE_ATTEST_VALUE = 'docker-bridge-v1'
+
+export function isBridgeBindAttested(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (p: string) => boolean = existsSync
+): boolean {
+  if (env?.[RELAY_BRIDGE_ATTEST_ENV] !== RELAY_BRIDGE_ATTEST_VALUE) return false
+  try {
+    if (exists('/.dockerenv') || exists('/run/.containerenv')) return true
+  } catch {
+    return false
+  }
+  return false
+}
+
+function requireBridgeBindAttested(env: NodeJS.ProcessEnv, exists: (p: string) => boolean): void {
+  if (!isBridgeBindAttested(env, exists)) {
+    throw new Error(
+      'invalid --allow-unspecified-bind (deployment-scoped Docker bridge bind only; direct host runs must use an explicit LAN IP address)'
+    )
+  }
+}
+
+/**
+ * Readiness line formatter (single shared helper so tests lock the
+ * contract). Explicit hosts stay URL-shaped (`http(s)://host:port`);
+ * the internal unspecified bind never emits a URL-shaped wildcard and
+ * instead reports a non-URL status (`http (internal bind) port N`).
+ */
+export function formatRelayReadiness(host: string, scheme: 'http' | 'https', port: number): string {
+  if (isUnspecifiedBindHost(host)) {
+    return `[sync-relay] listening on ${scheme} (internal bind) port ${port}`
+  }
+  if (scheme === 'https') {
+    return `[sync-relay] listening on https://${formatRelayHostForUrl(host)}:${port}`
+  }
+  if (isLoopbackHost(host)) {
+    return `[sync-relay] listening on http://127.0.0.1:${port}`
+  }
+  return `[sync-relay] listening on http://${formatRelayHostForUrl(host)}:${port}`
 }
 
 /**
@@ -225,7 +295,7 @@ export const RELAY_HELP_TEXT = [
   '',
   'Usage:',
   '  pnpm sync:relay -- --port <port> --db <path> --token <token>',
-  '  pnpm sync:relay -- --host <LAN-IP> --port <port> --db <path> --token <token> --cert <cert.pem> --key <key.pem>',
+  '  pnpm sync:relay -- --host <LAN-IP> --port <port> --db <path> --token <token> [--cert <cert.pem> --key <key.pem>]',
   '  pnpm sync:relay -- --help',
   '',
   'Options:',
@@ -233,24 +303,32 @@ export const RELAY_HELP_TEXT = [
   '  --db <path>      SQLite file for relay state (persistent; never deleted on stop)',
   '  --token <token>  Bearer token (fallback: SYNC_RELAY_TOKEN env; required for the supported path)',
   '  --host <host>    Bind host: 127.0.0.1 or localhost for loopback HTTP (default 127.0.0.1);',
-  '                     a non-loopback LAN address requires --cert and --key (native HTTPS)',
+  '                     an explicit non-loopback LAN IP serves plain HTTP by default,',
+  '                     or native HTTPS when both --cert and --key are given.',
   '                     Non-loopback hosts must be an explicit numeric LAN IP;',
-  '                     wildcard/all-interface binds (0.0.0.0, ::, equivalents, *) are forbidden.',
-  '  --cert <path>    PEM certificate file for non-loopback HTTPS (required with --key)',
-  '  --key <path>     PEM private-key file for non-loopback HTTPS (required with --cert)',
+  '                     wildcard/all-interface binds (0.0.0.0, ::, equivalents, *) are forbidden,',
+  '                     except 0.0.0.0/:: with --allow-unspecified-bind (container-internal',
+  '                     Docker bridge bind only; never a user-facing advertised endpoint).',
+  '  --cert <path>    PEM certificate file for HTTPS (required with --key)',
+  '  --key <path>     PEM private-key file for HTTPS (required with --cert)',
+  '  --allow-unspecified-bind  Permit the container-internal 0.0.0.0/:: bind.',
+  '                     Deployment-scoped (Docker bridge entrypoint only; direct host runs are rejected).',
   '  --help, -h       Show this help and exit 0',
   '',
   'Notes:',
-  '  - Loopback binds serve plain HTTP without cert/key; non-loopback hosts',
-  '    require both --cert and --key and serve native HTTPS only.',
-  '    Plaintext non-loopback HTTP is rejected (fail-closed).',
+  '  - Loopback binds serve plain HTTP without cert/key.',
+  '  - Non-loopback binds serve plain HTTP unless both --cert and --key are',
+  '    given, in which case they serve native HTTPS. Plain HTTP is',
+  '    unencrypted: only use it on networks you trust, or expose HTTPS',
+  '    outside the relay (the relay never manages certificates itself).',
   '  - Non-loopback hosts must be an explicit numeric LAN IP address;',
   '    wildcard/all-interface binds (0.0.0.0, ::, equivalents, *) and',
-  '    non-numeric hostnames are rejected before the DB is opened.',
+  '    non-numeric hostnames are rejected before the DB is opened, unless',
+  '    --allow-unspecified-bind permits the container-internal 0.0.0.0/:: bind.',
   '  - Cert/key files are read before the DB is opened; missing, empty, or',
   '    mismatched cert/key aborts startup without creating the DB.',
   '  - SIGTERM/SIGINT shut down gracefully exactly once without deleting the DB.',
-  '  - Same --db/--token (--cert/--key for LAN HTTPS) on restart retains relay state.'
+  '  - Same --db/--token (--cert/--key for HTTPS) on restart retains relay state.'
 ].join('\n')
 
 export interface RelayCliArgs {
@@ -260,10 +338,15 @@ export interface RelayCliArgs {
   token?: string
   certPath?: string
   keyPath?: string
+  allowUnspecifiedBind: boolean
   help: boolean
 }
 
-export function parseRelayArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): RelayCliArgs {
+export function parseRelayArgs(
+  argv: string[],
+  env: NodeJS.ProcessEnv = process.env,
+  bridgeExists: (p: string) => boolean = existsSync
+): RelayCliArgs {
   let port = 3030
   let dbPath = resolve(process.cwd(), 'tmp-sync-relay.db')
   let host = '127.0.0.1'
@@ -272,11 +355,18 @@ export function parseRelayArgs(argv: string[], env: NodeJS.ProcessEnv = process.
   if (typeof envToken === 'string' && envToken.length > 0) token = envToken
   let certPath: string | undefined
   let keyPath: string | undefined
+  // Deployment-scoped container-internal bind opt-in (Docker bridge only).
+  // Pre-scanned so flag position relative to --host does not matter.
+  let allowUnspecifiedBind = argv.includes('--allow-unspecified-bind')
   let help = false
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') {
       help = true
+      continue
+    }
+    if (arg === '--allow-unspecified-bind') {
+      allowUnspecifiedBind = true
       continue
     }
     if (
@@ -326,11 +416,12 @@ export function parseRelayArgs(argv: string[], env: NodeJS.ProcessEnv = process.
       // arg === '--host': loopback hosts normalize localhost to 127.0.0.1
       // so bind and readiness share one reachable IPv4 contract.
       // Non-loopback LAN hosts must be explicit numeric IP addresses that
-      // are not unspecified/wildcard (LOCK-002); the cert/key requirement
-      // is enforced in resolveRelayTls before the DB is opened. Plaintext
-      // LAN binding is never permitted. Bracketed IPv6 literals (`[::1]`)
-      // normalize to raw form (`::1`) for `server.listen()`; URL/readiness
-      // serialization keeps brackets via formatRelayHostForUrl().
+      // are not unspecified/wildcard; they serve plain HTTP unless --cert
+      // and --key select native HTTPS. The container-internal 0.0.0.0/:: bind
+      // is accepted only with --allow-unspecified-bind (Docker bridge) and
+      // is never a user-facing advertised endpoint. Bracketed IPv6 literals
+      // (`[::1]`) normalize to raw form (`::1`) for `server.listen()`; URL/
+      // readiness serialization keeps brackets via formatRelayHostForUrl().
       if (typeof raw !== 'string' || raw.length === 0 || raw.length > 253) {
         throw new Error('invalid --host (expected a hostname or IP address)')
       }
@@ -338,40 +429,49 @@ export function parseRelayArgs(argv: string[], env: NodeJS.ProcessEnv = process.
         host = raw === 'localhost' ? '127.0.0.1' : raw
       } else {
         if (isWildcardHost(raw)) {
-          throw new Error(
-            `invalid --host '${String(raw).slice(0, 64)}' (wildcard/all-interface binds are forbidden; use an explicit LAN IP address)`
-          )
-        }
-        if (hasZoneSuffix(raw)) {
-          throw new Error(
-            `invalid --host '${String(raw).slice(0, 64)}' (zone-scoped IPv6 addresses are unsupported; use an unscoped explicit LAN IP address)`
-          )
-        }
-        let normalized: string
-        try {
-          normalized = normalizeRelayBindHost(raw)
-        } catch (e) {
-          throw e instanceof Error ? e : new Error(String(e))
-        }
-        if (isLoopbackHost(normalized)) {
-          host = normalized === 'localhost' ? '127.0.0.1' : normalized
-        } else {
-          if (isWildcardHost(normalized)) {
+          if (allowUnspecifiedBind && isUnspecifiedBindHost(raw)) {
+            host = raw.trim().toLowerCase() === '[::]' ? '::' : raw.trim().toLowerCase()
+          } else {
             throw new Error(
               `invalid --host '${String(raw).slice(0, 64)}' (wildcard/all-interface binds are forbidden; use an explicit LAN IP address)`
             )
           }
-          if (hasZoneSuffix(normalized)) {
-            throw new Error(
-              `invalid --host '${String(raw).slice(0, 64)}' (zone-scoped IPv6 addresses are unsupported; use an unscoped explicit LAN IP address)`
-            )
+        } else if (hasZoneSuffix(raw)) {
+          throw new Error(
+            `invalid --host '${String(raw).slice(0, 64)}' (zone-scoped IPv6 addresses are unsupported; use an unscoped explicit LAN IP address)`
+          )
+        } else {
+          let normalized: string
+          try {
+            normalized = normalizeRelayBindHost(raw)
+          } catch (e) {
+            throw e instanceof Error ? e : new Error(String(e))
           }
-          if (!isNumericIpHost(normalized)) {
-            throw new Error(
-              `invalid --host '${String(raw).slice(0, 64)}' (expected an explicit numeric LAN IP address for non-loopback binds)`
-            )
+          if (isLoopbackHost(normalized)) {
+            host = normalized === 'localhost' ? '127.0.0.1' : normalized
+          } else {
+            if (isWildcardHost(normalized)) {
+              if (allowUnspecifiedBind && isUnspecifiedBindHost(normalized)) {
+                host = normalized.trim().toLowerCase()
+              } else {
+                throw new Error(
+                  `invalid --host '${String(raw).slice(0, 64)}' (wildcard/all-interface binds are forbidden; use an explicit LAN IP address)`
+                )
+              }
+            } else {
+              if (hasZoneSuffix(normalized)) {
+                throw new Error(
+                  `invalid --host '${String(raw).slice(0, 64)}' (zone-scoped IPv6 addresses are unsupported; use an unscoped explicit LAN IP address)`
+                )
+              }
+              if (!isNumericIpHost(normalized)) {
+                throw new Error(
+                  `invalid --host '${String(raw).slice(0, 64)}' (expected an explicit numeric LAN IP address for non-loopback binds)`
+                )
+              }
+              host = normalized
+            }
           }
-          host = normalized
         }
       }
       i++
@@ -382,7 +482,10 @@ export function parseRelayArgs(argv: string[], env: NodeJS.ProcessEnv = process.
     }
     throw new Error(`unknown option '${String(arg).slice(0, 64)}'`)
   }
-  return { port, dbPath, host, token, certPath, keyPath, help }
+  if (allowUnspecifiedBind) {
+    requireBridgeBindAttested(env, bridgeExists)
+  }
+  return { port, dbPath, host, token, certPath, keyPath, allowUnspecifiedBind, help }
 }
 
 export interface RelayTlsConfig {
@@ -393,14 +496,33 @@ export interface RelayTlsConfig {
 
 /**
  * Resolve the transport for a parsed CLI host/cert/key triple. Fail-closed:
- * non-loopback hosts require both --cert and --key; cert/key files are read
- * here (before the DB is opened by the caller) and missing/empty/mismatched
- * material throws. Loopback hosts serve plain HTTP unless both --cert/--key
- * are given (loopback HTTPS opt-in); one without the other throws.
+ * cert/key files are read here (before the DB is opened by the caller) and
+ * missing/empty/mismatched material throws. Loopback and explicit
+ * non-loopback hosts serve plain HTTP unless both --cert/--key are given
+ * (HTTPS opt-in); one without the other throws. Plain HTTP is unencrypted —
+ * the relay never manages certificates itself. The container-internal
+ * 0.0.0.0/:: bind requires `options.allowUnspecifiedBind` plus Docker-bridge
+ * attestation (internal entrypoint marker + container indicator); all other
+ * wildcard forms stay forbidden.
  */
-export function resolveRelayTls(host: string, certPath?: string, keyPath?: string): RelayTlsConfig {
+export function resolveRelayTls(
+  host: string,
+  certPath?: string,
+  keyPath?: string,
+  options?: { allowUnspecifiedBind?: boolean; env?: NodeJS.ProcessEnv; bridgeExists?: (p: string) => boolean }
+): RelayTlsConfig {
+  const allowUnspecified = options?.allowUnspecifiedBind === true
+  if (allowUnspecified) {
+    requireBridgeBindAttested(options?.env ?? process.env, options?.bridgeExists ?? existsSync)
+  }
+  const unspecified = isUnspecifiedBindHost(host)
+  if (unspecified && !allowUnspecified) {
+    throw new Error(
+      `wildcard --host '${String(host).slice(0, 64)}' forbidden (bind an explicit LAN IP address; wildcard/all-interface binds are rejected)`
+    )
+  }
   const loopback = isLoopbackHost(host)
-  if (!loopback) {
+  if (!loopback && !unspecified) {
     if (isWildcardHost(host)) {
       throw new Error(
         `wildcard --host '${String(host).slice(0, 64)}' forbidden (bind an explicit LAN IP address; wildcard/all-interface binds are rejected)`
@@ -415,13 +537,13 @@ export function resolveRelayTls(host: string, certPath?: string, keyPath?: strin
       throw new Error(`non-loopback --host '${String(host).slice(0, 64)}' must be an explicit numeric LAN IP address`)
     }
   }
-  if (loopback && !certPath && !keyPath) return { scheme: 'http' }
+  if (!certPath && !keyPath) return { scheme: 'http' }
   if (!certPath || !keyPath) {
-    if (loopback) {
-      throw new Error(`loopback --host with partial TLS config requires both --cert and --key`)
+    if (loopback || unspecified) {
+      throw new Error(`--host with partial TLS config requires both --cert and --key`)
     }
     throw new Error(
-      `non-loopback --host '${String(host).slice(0, 64)}' requires --cert and --key (native HTTPS required; plaintext LAN binding rejected)`
+      `non-loopback --host '${String(host).slice(0, 64)}' with partial TLS config requires both --cert and --key (supply both for HTTPS, or neither for plain HTTP)`
     )
   }
   let cert: Buffer
@@ -2022,7 +2144,7 @@ if (isMain) {
     console.log(RELAY_HELP_TEXT)
     process.exit(0)
   }
-  const { port, dbPath, host, token, certPath, keyPath } = parsed
+  const { port, dbPath, host, token, certPath, keyPath, allowUnspecifiedBind } = parsed
   if (typeof token !== 'string' || token.length === 0) {
     console.error('[sync-relay] missing --token (or SYNC_RELAY_TOKEN env); refusing unauthenticated startup')
     console.error(RELAY_HELP_TEXT)
@@ -2030,11 +2152,11 @@ if (isMain) {
   }
   // TLS/cert material loads before the DB is opened: any missing, empty, or
   // mismatched configuration aborts startup without creating the DB.
-  // Non-loopback hosts require --cert/--key (native HTTPS); loopback serves
-  // plain HTTP unless both are given. Never log secret or key material.
+  // Non-loopback hosts serve plain HTTP unless both --cert/--key are given
+  // (native HTTPS). Never log secret or key material.
   let tls: RelayTlsConfig
   try {
-    tls = resolveRelayTls(host, certPath, keyPath)
+    tls = resolveRelayTls(host, certPath, keyPath, { allowUnspecifiedBind })
   } catch (e) {
     console.error(`[sync-relay] ${(e as Error).message.slice(0, 300)}`)
     console.error(RELAY_HELP_TEXT)
@@ -2128,21 +2250,20 @@ if (isMain) {
     process.exit(1)
   })
   // Bind the configured host: loopback HTTP stays the local default;
-  // non-loopback hosts serve native HTTPS only (enforced above).
+  // non-loopback hosts serve plain HTTP unless --cert/--key select HTTPS.
+  // The container-internal 0.0.0.0/:: bind (Docker bridge) is never a
+  // user-facing advertised endpoint: Docker controls host exposure via ports.
   server.listen(port, host, () => {
     // Report the actual bound port so `--port 0` (ephemeral) is observable.
     // Loopback keeps the stable 127.0.0.1 readiness form so bundled/test
-    // harnesses match one contract; non-loopback advertises the actual
-    // scheme and bound host/port.
+    // harnesses match one contract; other explicit binds advertise the
+    // actual scheme and bound host/port. The internal unspecified bind never
+    // emits a URL-shaped wildcard; Docker controls host exposure via ports.
     const addr = server.address()
     const boundPort = typeof addr === 'object' && addr ? addr.port : port
     // Bounded readiness output — no sensitive path, token, or key material.
-    // IPv6 literals serialize bracketed so the line stays a valid URL; the
-    // raw unbracketed host is used only for server.listen above.
-    if (relayTls.scheme === 'https') {
-      console.log(`[sync-relay] listening on https://${formatRelayHostForUrl(host)}:${boundPort}`)
-    } else {
-      console.log(`[sync-relay] listening on http://127.0.0.1:${boundPort}`)
-    }
+    // IPv6 literals serialize bracketed so explicit-host lines stay valid
+    // URLs; the raw unbracketed host is used only for server.listen above.
+    console.log(formatRelayReadiness(host, relayTls.scheme, boundPort))
   })
 }
