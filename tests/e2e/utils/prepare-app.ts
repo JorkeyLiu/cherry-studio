@@ -29,6 +29,12 @@ export interface LaunchElectronOptions {
    * `os.tmpdir()` resolves inside the owned root for exact cleanup.
    */
   ownedTmpRoot: string | null
+  /**
+   * Narrowly scoped extra launch env merged over process.env before spawn.
+   * Used by LAN HTTPS E2E to inject `NODE_EXTRA_CA_CERTS` for explicit CA
+   * trust before the app process is launched (no verification bypass).
+   */
+  extraEnv?: Record<string, string>
 }
 
 /** Launch the built Cherry Chat app with the disposable profile and owned temp env. */
@@ -56,7 +62,7 @@ export function launchElectronApp(options: LaunchElectronOptions): Promise<Elect
 
   return electron.launch({
     args: ['.', `--user-data-dir=${options.userDataDir}`, '--no-sandbox', '--disable-gpu', ...preciseArgs],
-    env: { ...process.env, NODE_ENV: 'development', ELECTRON_RUN_AS_NODE: '', ...tmpEnv },
+    env: { ...process.env, NODE_ENV: 'development', ELECTRON_RUN_AS_NODE: '', ...tmpEnv, ...options.extraEnv },
     timeout: 120000
   })
 }

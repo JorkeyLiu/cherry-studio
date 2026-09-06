@@ -54,7 +54,11 @@ export interface SecondSyncProfile {
  * Fail-closed: any readiness failure throws before the handle is returned;
  * the caller must close the returned handle exactly (closeSecondSyncProfile).
  */
-export async function launchSecondSyncProfile(ownedTmpRoot: string, mockPort: number): Promise<SecondSyncProfile> {
+export async function launchSecondSyncProfile(
+  ownedTmpRoot: string,
+  mockPort: number,
+  extraEnv?: Record<string, string>
+): Promise<SecondSyncProfile> {
   if (!ownedTmpRoot || typeof ownedTmpRoot !== 'string') throw new Error('ownedTmpRoot is required')
   if (!Number.isInteger(mockPort) || mockPort <= 0) throw new Error(`mockPort must be positive, got ${mockPort}`)
   const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -64,7 +68,7 @@ export async function launchSecondSyncProfile(ownedTmpRoot: string, mockPort: nu
 
   let app: ElectronApplication | null = null
   try {
-    app = await launchElectronApp({ userDataDir, ownedTmpRoot })
+    app = await launchElectronApp({ userDataDir, ownedTmpRoot, ...(extraEnv ? { extraEnv } : {}) })
     const page = await waitForMainElectronWindow(app)
     // Runtime appDataPath assertion BEFORE any mutation (same as fixture).
     const probed = await probeAndAssertRuntimeAppData(page, userDataDir)

@@ -3,9 +3,12 @@
  *
  * Covers the one supported launch contract (`pnpm sync:relay` ->
  * `scripts/sync-relay/server.ts`): stable CLI args, SYNC_RELAY_TOKEN fallback,
- * loopback-only host guard, --help, and graceful SIGTERM shutdown that retains
- * the DB. The runner never imports better-sqlite3; the owned child owns the
- * SQLite binding under the pinned Node/tsx runtime.
+ * loopback HTTP plus non-loopback HTTPS host/TLS guard (loopback
+ * `127.0.0.1`/`localhost` serves plain HTTP; non-loopback explicit numeric
+ * LAN IPs require --cert/--key and advertise `https://<host>:<port>`
+ * readiness, IPv6 bracketed), --help, and graceful SIGTERM shutdown that
+ * retains the DB. The runner never imports better-sqlite3; the owned child
+ * owns the SQLite binding under the pinned Node/tsx runtime.
  */
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -14,7 +17,7 @@ import { join, resolve } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { isLoopbackHost, parseRelayArgs, RELAY_HELP_TEXT } from '../server'
+import { isLoopbackHost, isWildcardHost, parseRelayArgs, RELAY_HELP_TEXT, resolveRelayTls } from '../server'
 
 const SERVER_ENTRY = resolve(process.cwd(), 'scripts/sync-relay/server.ts')
 const TSX_ENTRY = resolve(process.cwd(), 'node_modules/tsx/dist/cli.mjs')
@@ -55,12 +58,21 @@ describe('relay user-entrypoint CLI contract', () => {
     expect(RELAY_HELP_TEXT).toContain('pnpm sync:relay')
   })
 
-  it('rejects invalid port and non-loopback host without touching the DB', () => {
+  it('rejects invalid port and requires cert/key for non-loopback hosts without touching the DB', () => {
     expect(() => parseRelayArgs(['--port', 'abc'], {})).toThrow(/invalid --port/)
     expect(() => parseRelayArgs(['--port', '-1'], {})).toThrow(/invalid --port/)
     expect(() => parseRelayArgs(['--port', '70000'], {})).toThrow(/invalid --port/)
-    expect(() => parseRelayArgs(['--host', '0.0.0.0'], {})).toThrow(/loopback only/)
-    expect(() => parseRelayArgs(['--host', '192.168.1.2'], {})).toThrow(/loopback only/)
+    // Non-loopback hosts parse but require native HTTPS: fail-closed in
+    // resolveRelayTls (before the DB is opened), never plaintext LAN.
+    expect(parseRelayArgs(['--host', '192.168.1.2'], {}).host).toBe('192.168.1.2')
+    expect(() => resolveRelayTls('192.168.1.2')).toThrow(/requires --cert and --key/)
+    expect(() => resolveRelayTls('0.0.0.0')).toThrow(/wildcard.*forbidden/)
+    expect(() => resolveRelayTls('::')).toThrow(/wildcard.*forbidden/)
+    expect(() => parseRelayArgs(['--host', '0.0.0.0'], {})).toThrow(/wildcard/)
+    expect(() => parseRelayArgs(['--host', '::'], {})).toThrow(/wildcard/)
+    expect(isWildcardHost('0.0.0.0')).toBe(true)
+    expect(isWildcardHost('::')).toBe(true)
+    expect(resolveRelayTls('127.0.0.1').scheme).toBe('http')
     expect(() => parseRelayArgs(['--port'], {})).toThrow(/missing value for --port/)
     expect(() => parseRelayArgs(['--db'], {})).toThrow(/missing value for --db/)
     expect(() => parseRelayArgs(['--token'], {})).toThrow(/missing value for --token/)
@@ -83,16 +95,20 @@ describe('relay user-entrypoint CLI contract', () => {
     expect(String(res.stdout)).toContain('--port')
   }, 30000)
 
-  it('invalid --host exits 2 without creating the DB', () => {
+  it('non-loopback without cert/key exits 2 without creating the DB', () => {
     const root = mkdtempSync(join(tmpdir(), 'sync-relay-cli-'))
     const dbPath = join(root, 'should-not-exist.db')
     try {
-      const res = spawnSync(process.execPath, [TSX_ENTRY, SERVER_ENTRY, '--host', '0.0.0.0', '--db', dbPath], {
-        timeout: 30000,
-        encoding: 'utf8'
-      })
+      const res = spawnSync(
+        process.execPath,
+        [TSX_ENTRY, SERVER_ENTRY, '--host', '192.168.1.2', '--db', dbPath, '--token', TOKEN],
+        {
+          timeout: 30000,
+          encoding: 'utf8'
+        }
+      )
       expect(res.status).toBe(2)
-      expect(`${String(res.stderr)}${String(res.stdout)}`).toMatch(/loopback only/)
+      expect(`${String(res.stderr)}${String(res.stdout)}`).toMatch(/requires --cert and --key/)
       expect(existsSync(dbPath)).toBe(false)
     } finally {
       rmSync(root, { recursive: true, force: true })

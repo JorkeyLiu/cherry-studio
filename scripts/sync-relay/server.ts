@@ -3,13 +3,21 @@
  * Minimal persistent operation log with endpoint handlers.
  * Must NOT be imported by production app code.
  * Runnable via:  npx tsx scripts/sync-relay/server.ts [--port 3000] [--db /tmp/sync-relay.db] [--token secret]
+ * LAN HTTPS via: npx tsx scripts/sync-relay/server.ts --host <LAN-IP> --cert <cert.pem> --key <key.pem> [--port ...] [--db ...] [--token ...]
  */
 
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { createServer } from 'node:http'
+import { createServer as createHttpServer } from 'node:http'
+import { createServer as createHttpsServer } from 'node:https'
+import { isIP } from 'node:net'
 import { dirname, resolve } from 'node:path'
+import { createSecureContext } from 'node:tls'
+
+import { formatRelayHostForUrl, normalizeRelayBindHost } from './relayHost'
+
+export { formatRelayHostForUrl, normalizeRelayBindHost } from './relayHost'
 
 import Database from 'better-sqlite3'
 
@@ -38,6 +46,8 @@ interface SyncOperation {
 export interface RelayOptions {
   /** If set, Bearer token is required for push/pull */
   token?: string
+  /** If set, the relay terminates native TLS with this cert/key pair. */
+  tls?: { cert: string | Buffer; key: string | Buffer }
 }
 
 export const RELAY_LOOPBACK_HOSTS = ['127.0.0.1', 'localhost'] as const
@@ -46,24 +56,201 @@ export function isLoopbackHost(host: string): boolean {
   return (RELAY_LOOPBACK_HOSTS as readonly string[]).includes(host)
 }
 
+/**
+ * True when the host carries a zone suffix (`%eth0`, inside or outside
+ * brackets). Zone-scoped literals have platform-dependent `listen`/TLS
+ * behavior, so non-loopback relay binds reject them explicitly instead of
+ * producing an ambiguous URL.
+ */
+export function hasZoneSuffix(host: string): boolean {
+  const n = host.trim()
+  if (n.startsWith('[')) {
+    const close = n.indexOf(']')
+    if (close !== -1) {
+      if (n.slice(1, close).includes('%')) return true
+      return n.slice(close + 1).startsWith('%')
+    }
+  }
+  return n.includes('%')
+}
+
+/**
+ * True for wildcard/all-interface bind forms (LOCK-002 forbids them for
+ * non-loopback HTTPS). Covers `0.0.0.0`, `::`, equivalent all-zero IPv6
+ * forms (`0:0:0:0:0:0:0:0`, `0::`, `::0`, `0::0`, bracketed `[::]`), the
+ * IPv4-mapped unspecified forms Node binds as `::` (`::ffff:0.0.0.0` and its
+ * compressed/expanded/hex/case variants such as `0:0:0:0:0:ffff:0.0.0.0`,
+ * `::ffff:0:0`, `0:0:0:0:0:ffff:0:0`, `[::ffff:0.0.0.0]`), the deprecated
+ * IPv4-compatible unspecified form (`::0.0.0.0`), and the bare `*` form.
+ * Zone-suffixed representations (`::%eth0`, `::ffff:0.0.0.0%eth0`) are
+ * stripped before the check so Node-wildcard zone forms also fail.
+ * Fail-closed: any all-zero IPv6 literal or mapped-unspecified literal is
+ * wildcard. Detection is stdlib-based (`net.isIP` + deterministic hextet
+ * expansion); the legacy all-zero heuristic is kept as a fallback OR.
+ */
+export function isWildcardHost(host: string): boolean {
+  let n = host.trim().toLowerCase()
+  if (n.startsWith('[')) {
+    const close = n.indexOf(']')
+    if (close !== -1) {
+      // Bracketed literal: zone may sit inside (`[::%eth0]`, RFC 6874) or
+      // trailing outside (`[::]%eth0`); both strip to the bare address.
+      let inner = n.slice(1, close)
+      const pctIn = inner.indexOf('%')
+      if (pctIn !== -1) inner = inner.slice(0, pctIn)
+      n = inner
+    } else {
+      if (n.startsWith('[') && n.endsWith(']')) n = n.slice(1, -1)
+      const pct = n.indexOf('%')
+      if (pct !== -1) n = n.slice(0, pct)
+    }
+  } else {
+    const pct = n.indexOf('%')
+    if (pct !== -1) n = n.slice(0, pct)
+  }
+  if (n === '*' || n === '0.0.0.0' || n === '::') return true
+  if (n.includes(':')) {
+    const expanded = expandIpv6Hextets(n)
+    if (expanded) {
+      const allZero = expanded.every((g) => g === 0)
+      if (allZero) return true
+      // IPv4-mapped unspecified: ::ffff:0.0.0.0 in any compressed/expanded/
+      // hex/case form (first five groups 0, sixth 0xffff, last two 0).
+      if (
+        expanded[0] === 0 &&
+        expanded[1] === 0 &&
+        expanded[2] === 0 &&
+        expanded[3] === 0 &&
+        expanded[4] === 0 &&
+        expanded[5] === 0xffff &&
+        expanded[6] === 0 &&
+        expanded[7] === 0
+      ) {
+        return true
+      }
+      return false
+    }
+    const withoutZeroColonDot = n.replace(/[:0.]/g, '')
+    if (withoutZeroColonDot === '') return true
+  }
+  return false
+}
+
+/**
+ * Deterministically expand an IPv6 literal (already lowercased, brackets and
+ * zone stripped) to eight 16-bit groups. Handles embedded IPv4 dotted tails
+ * (`::ffff:0.0.0.0`, `::0.0.0.0`). Returns null when the literal does not
+ * parse as IPv6.
+ */
+function expandIpv6Hextets(addr: string): number[] | null {
+  const parseHextet = (part: string): number | null => {
+    if (!/^[0-9a-f]{1,4}$/.test(part)) return null
+    return parseInt(part, 16)
+  }
+  const parseIpv4Tail = (tail: string): [number, number] | null => {
+    const octets = tail.split('.')
+    if (octets.length !== 4) return null
+    const bytes: number[] = []
+    for (const o of octets) {
+      if (!/^[0-9]{1,3}$/.test(o)) return null
+      const v = Number(o)
+      if (!Number.isSafeInteger(v) || v < 0 || v > 255) return null
+      bytes.push(v)
+    }
+    return [bytes[0] * 256 + bytes[1], bytes[2] * 256 + bytes[3]]
+  }
+  const expandHead = (head: string, slots: number): number[] | null => {
+    if (head === '') return new Array(slots).fill(0)
+    if (head.includes('::')) {
+      const parts = head.split('::')
+      if (parts.length !== 2) return null
+      const left = parts[0] === '' ? [] : parts[0].split(':')
+      const right = parts[1] === '' ? [] : parts[1].split(':')
+      const leftVals: number[] = []
+      for (const p of left) {
+        const v = parseHextet(p)
+        if (v === null) return null
+        leftVals.push(v)
+      }
+      const rightVals: number[] = []
+      for (const p of right) {
+        const v = parseHextet(p)
+        if (v === null) return null
+        rightVals.push(v)
+      }
+      if (leftVals.length + rightVals.length > slots) return null
+      const zeros = new Array(slots - leftVals.length - rightVals.length).fill(0)
+      return [...leftVals, ...zeros, ...rightVals]
+    }
+    const pieces = head.split(':')
+    if (pieces.length !== slots) return null
+    const vals: number[] = []
+    for (const p of pieces) {
+      const v = parseHextet(p)
+      if (v === null) return null
+      vals.push(v)
+    }
+    return vals
+  }
+  if (isIP(addr) !== 6) return null
+  if (addr.includes('.')) {
+    const lastColon = addr.lastIndexOf(':')
+    if (lastColon === -1) return null
+    const head = addr.slice(0, lastColon)
+    const tail = addr.slice(lastColon + 1)
+    const tailGroups = parseIpv4Tail(tail)
+    if (!tailGroups) return null
+    const headGroups = expandHead(head, 6)
+    if (!headGroups) return null
+    return [...headGroups, ...tailGroups]
+  }
+  return expandHead(addr, 8)
+}
+
+/**
+ * True only for explicit numeric IP literals (IPv4 or IPv6). Non-loopback
+ * relay binds require this (LOCK-002 single secure topology): hostnames are
+ * never accepted for non-loopback binds.
+ */
+export function isNumericIpHost(host: string): boolean {
+  let n = host.trim()
+  if (n.startsWith('[') && n.endsWith(']')) n = n.slice(1, -1)
+  const pct = n.indexOf('%')
+  if (pct !== -1) n = n.slice(0, pct)
+  return isIP(n) !== 0
+}
+
 export const RELAY_HELP_TEXT = [
-  'Cherry Chat personal sync relay (loopback-only, reference implementation).',
+  'Cherry Chat personal sync relay (reference implementation).',
   '',
   'Usage:',
   '  pnpm sync:relay -- --port <port> --db <path> --token <token>',
+  '  pnpm sync:relay -- --host <LAN-IP> --port <port> --db <path> --token <token> --cert <cert.pem> --key <key.pem>',
   '  pnpm sync:relay -- --help',
   '',
   'Options:',
   '  --port <port>    TCP port to bind (0 = ephemeral, otherwise 1-65535; default 3030)',
   '  --db <path>      SQLite file for relay state (persistent; never deleted on stop)',
   '  --token <token>  Bearer token (fallback: SYNC_RELAY_TOKEN env; required for the supported path)',
-  '  --host <host>    Bind host, loopback only: 127.0.0.1 or localhost (default 127.0.0.1)',
+  '  --host <host>    Bind host: 127.0.0.1 or localhost for loopback HTTP (default 127.0.0.1);',
+  '                     a non-loopback LAN address requires --cert and --key (native HTTPS)',
+  '                     Non-loopback hosts must be an explicit numeric LAN IP;',
+  '                     wildcard/all-interface binds (0.0.0.0, ::, equivalents, *) are forbidden.',
+  '  --cert <path>    PEM certificate file for non-loopback HTTPS (required with --key)',
+  '  --key <path>     PEM private-key file for non-loopback HTTPS (required with --cert)',
   '  --help, -h       Show this help and exit 0',
   '',
   'Notes:',
-  '  - Binds loopback only; non-loopback hosts are rejected.',
+  '  - Loopback binds serve plain HTTP without cert/key; non-loopback hosts',
+  '    require both --cert and --key and serve native HTTPS only.',
+  '    Plaintext non-loopback HTTP is rejected (fail-closed).',
+  '  - Non-loopback hosts must be an explicit numeric LAN IP address;',
+  '    wildcard/all-interface binds (0.0.0.0, ::, equivalents, *) and',
+  '    non-numeric hostnames are rejected before the DB is opened.',
+  '  - Cert/key files are read before the DB is opened; missing, empty, or',
+  '    mismatched cert/key aborts startup without creating the DB.',
   '  - SIGTERM/SIGINT shut down gracefully exactly once without deleting the DB.',
-  '  - Same --db/--token on restart retains relay state.'
+  '  - Same --db/--token (--cert/--key for LAN HTTPS) on restart retains relay state.'
 ].join('\n')
 
 export interface RelayCliArgs {
@@ -71,6 +258,8 @@ export interface RelayCliArgs {
   dbPath: string
   host: string
   token?: string
+  certPath?: string
+  keyPath?: string
   help: boolean
 }
 
@@ -81,6 +270,8 @@ export function parseRelayArgs(argv: string[], env: NodeJS.ProcessEnv = process.
   let token: string | undefined
   const envToken = env.SYNC_RELAY_TOKEN
   if (typeof envToken === 'string' && envToken.length > 0) token = envToken
+  let certPath: string | undefined
+  let keyPath: string | undefined
   let help = false
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -88,7 +279,14 @@ export function parseRelayArgs(argv: string[], env: NodeJS.ProcessEnv = process.
       help = true
       continue
     }
-    if (arg === '--port' || arg === '--db' || arg === '--token' || arg === '--host') {
+    if (
+      arg === '--port' ||
+      arg === '--db' ||
+      arg === '--token' ||
+      arg === '--host' ||
+      arg === '--cert' ||
+      arg === '--key'
+    ) {
       const raw = argv[i + 1]
       if (raw === undefined) {
         throw new Error(`missing value for ${arg} (expected a value)`)
@@ -113,12 +311,69 @@ export function parseRelayArgs(argv: string[], env: NodeJS.ProcessEnv = process.
         i++
         continue
       }
-      // arg === '--host': accept loopback only, normalize localhost to
-      // 127.0.0.1 so bind and readiness share one reachable IPv4 contract.
-      if (!isLoopbackHost(raw)) {
-        throw new Error(`non-loopback --host '${String(raw).slice(0, 64)}' rejected (loopback only)`)
+      if (arg === '--cert') {
+        if (typeof raw !== 'string' || raw.length === 0) throw new Error('invalid --cert (expected a file path)')
+        certPath = resolve(raw)
+        i++
+        continue
       }
-      host = raw === 'localhost' ? '127.0.0.1' : raw
+      if (arg === '--key') {
+        if (typeof raw !== 'string' || raw.length === 0) throw new Error('invalid --key (expected a file path)')
+        keyPath = resolve(raw)
+        i++
+        continue
+      }
+      // arg === '--host': loopback hosts normalize localhost to 127.0.0.1
+      // so bind and readiness share one reachable IPv4 contract.
+      // Non-loopback LAN hosts must be explicit numeric IP addresses that
+      // are not unspecified/wildcard (LOCK-002); the cert/key requirement
+      // is enforced in resolveRelayTls before the DB is opened. Plaintext
+      // LAN binding is never permitted. Bracketed IPv6 literals (`[::1]`)
+      // normalize to raw form (`::1`) for `server.listen()`; URL/readiness
+      // serialization keeps brackets via formatRelayHostForUrl().
+      if (typeof raw !== 'string' || raw.length === 0 || raw.length > 253) {
+        throw new Error('invalid --host (expected a hostname or IP address)')
+      }
+      if (isLoopbackHost(raw)) {
+        host = raw === 'localhost' ? '127.0.0.1' : raw
+      } else {
+        if (isWildcardHost(raw)) {
+          throw new Error(
+            `invalid --host '${String(raw).slice(0, 64)}' (wildcard/all-interface binds are forbidden; use an explicit LAN IP address)`
+          )
+        }
+        if (hasZoneSuffix(raw)) {
+          throw new Error(
+            `invalid --host '${String(raw).slice(0, 64)}' (zone-scoped IPv6 addresses are unsupported; use an unscoped explicit LAN IP address)`
+          )
+        }
+        let normalized: string
+        try {
+          normalized = normalizeRelayBindHost(raw)
+        } catch (e) {
+          throw e instanceof Error ? e : new Error(String(e))
+        }
+        if (isLoopbackHost(normalized)) {
+          host = normalized === 'localhost' ? '127.0.0.1' : normalized
+        } else {
+          if (isWildcardHost(normalized)) {
+            throw new Error(
+              `invalid --host '${String(raw).slice(0, 64)}' (wildcard/all-interface binds are forbidden; use an explicit LAN IP address)`
+            )
+          }
+          if (hasZoneSuffix(normalized)) {
+            throw new Error(
+              `invalid --host '${String(raw).slice(0, 64)}' (zone-scoped IPv6 addresses are unsupported; use an unscoped explicit LAN IP address)`
+            )
+          }
+          if (!isNumericIpHost(normalized)) {
+            throw new Error(
+              `invalid --host '${String(raw).slice(0, 64)}' (expected an explicit numeric LAN IP address for non-loopback binds)`
+            )
+          }
+          host = normalized
+        }
+      }
       i++
       continue
     }
@@ -127,10 +382,71 @@ export function parseRelayArgs(argv: string[], env: NodeJS.ProcessEnv = process.
     }
     throw new Error(`unknown option '${String(arg).slice(0, 64)}'`)
   }
-  return { port, dbPath, host, token, help }
+  return { port, dbPath, host, token, certPath, keyPath, help }
 }
 
-function parseArgs(): { port: number; dbPath: string; host: string; token?: string; help: boolean } {
+export interface RelayTlsConfig {
+  scheme: 'http' | 'https'
+  cert?: Buffer
+  key?: Buffer
+}
+
+/**
+ * Resolve the transport for a parsed CLI host/cert/key triple. Fail-closed:
+ * non-loopback hosts require both --cert and --key; cert/key files are read
+ * here (before the DB is opened by the caller) and missing/empty/mismatched
+ * material throws. Loopback hosts serve plain HTTP unless both --cert/--key
+ * are given (loopback HTTPS opt-in); one without the other throws.
+ */
+export function resolveRelayTls(host: string, certPath?: string, keyPath?: string): RelayTlsConfig {
+  const loopback = isLoopbackHost(host)
+  if (!loopback) {
+    if (isWildcardHost(host)) {
+      throw new Error(
+        `wildcard --host '${String(host).slice(0, 64)}' forbidden (bind an explicit LAN IP address; wildcard/all-interface binds are rejected)`
+      )
+    }
+    if (hasZoneSuffix(host)) {
+      throw new Error(
+        `non-loopback --host '${String(host).slice(0, 64)}' with a zone suffix is unsupported (use an unscoped explicit LAN IP address)`
+      )
+    }
+    if (!isNumericIpHost(host)) {
+      throw new Error(`non-loopback --host '${String(host).slice(0, 64)}' must be an explicit numeric LAN IP address`)
+    }
+  }
+  if (loopback && !certPath && !keyPath) return { scheme: 'http' }
+  if (!certPath || !keyPath) {
+    if (loopback) {
+      throw new Error(`loopback --host with partial TLS config requires both --cert and --key`)
+    }
+    throw new Error(
+      `non-loopback --host '${String(host).slice(0, 64)}' requires --cert and --key (native HTTPS required; plaintext LAN binding rejected)`
+    )
+  }
+  let cert: Buffer
+  let key: Buffer
+  try {
+    cert = readFileSync(certPath)
+  } catch {
+    throw new Error(`cannot read --cert file (expected a PEM certificate)`)
+  }
+  try {
+    key = readFileSync(keyPath)
+  } catch {
+    throw new Error(`cannot read --key file (expected a PEM private key)`)
+  }
+  if (cert.length === 0) throw new Error('invalid --cert (file is empty)')
+  if (key.length === 0) throw new Error('invalid --key (file is empty)')
+  try {
+    createSecureContext({ cert, key })
+  } catch {
+    throw new Error('mismatched certificate/key (TLS context creation failed)')
+  }
+  return { scheme: 'https', cert, key }
+}
+
+function parseArgs(): RelayCliArgs {
   return parseRelayArgs(process.argv.slice(2), process.env)
 }
 
@@ -511,7 +827,7 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     ;(heartbeat as unknown as { unref?: () => void }).unref?.()
   } catch {}
 
-  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  const requestHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const host = req.headers.host ?? 'localhost'
     const url = new URL(req.url ?? '/', `http://${host}`)
     res.setHeader('Access-Control-Allow-Origin', '*')
@@ -1670,7 +1986,12 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
 
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'not found' }))
-  })
+  }
+  // Native TLS termination lives in the relay itself (no reverse proxy):
+  // with cert/key the same handler serves HTTPS, otherwise plain HTTP.
+  const server = opts?.tls
+    ? createHttpsServer({ cert: opts.tls.cert, key: opts.tls.key }, requestHandler)
+    : createHttpServer(requestHandler)
   server.on('close', () => {
     try {
       clearInterval(heartbeat)
@@ -1688,7 +2009,7 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
 
 const isMain = typeof require !== 'undefined' && (require as any).main === module
 if (isMain) {
-  let cli: { port: number; dbPath: string; host: string; token?: string; help: boolean } | undefined
+  let cli: RelayCliArgs | undefined
   try {
     cli = parseArgs()
   } catch (e) {
@@ -1696,17 +2017,30 @@ if (isMain) {
     console.error(RELAY_HELP_TEXT)
     process.exit(2)
   }
-  const parsed = cli as { port: number; dbPath: string; host: string; token?: string; help: boolean }
+  const parsed = cli
   if (parsed.help) {
     console.log(RELAY_HELP_TEXT)
     process.exit(0)
   }
-  const { port, dbPath, host, token } = parsed
+  const { port, dbPath, host, token, certPath, keyPath } = parsed
   if (typeof token !== 'string' || token.length === 0) {
     console.error('[sync-relay] missing --token (or SYNC_RELAY_TOKEN env); refusing unauthenticated startup')
     console.error(RELAY_HELP_TEXT)
     process.exit(2)
   }
+  // TLS/cert material loads before the DB is opened: any missing, empty, or
+  // mismatched configuration aborts startup without creating the DB.
+  // Non-loopback hosts require --cert/--key (native HTTPS); loopback serves
+  // plain HTTP unless both are given. Never log secret or key material.
+  let tls: RelayTlsConfig
+  try {
+    tls = resolveRelayTls(host, certPath, keyPath)
+  } catch (e) {
+    console.error(`[sync-relay] ${(e as Error).message.slice(0, 300)}`)
+    console.error(RELAY_HELP_TEXT)
+    process.exit(2)
+  }
+  const relayTls: RelayTlsConfig = tls
   let db: Database.Database
   try {
     db = initDb(dbPath)
@@ -1715,7 +2049,12 @@ if (isMain) {
     process.exit(1)
   }
   const relayDb: Database.Database = db
-  const server = createRelayServer(relayDb, { token })
+  const server = createRelayServer(
+    relayDb,
+    relayTls.scheme === 'https' && relayTls.cert && relayTls.key
+      ? { token, tls: { cert: relayTls.cert, key: relayTls.key } }
+      : { token }
+  )
   let shuttingDown = false
   let dbClosed = false
   const closeDbOnce = (): boolean => {
@@ -1788,14 +2127,22 @@ if (isMain) {
     void ok
     process.exit(1)
   })
-  // Bind to loopback only — isolated non-production
+  // Bind the configured host: loopback HTTP stays the local default;
+  // non-loopback hosts serve native HTTPS only (enforced above).
   server.listen(port, host, () => {
-    // Report the actual bound port so `--port 0` (ephemeral) is observable;
-    // fixed ports log unchanged. The readiness line keeps the stable
-    // 127.0.0.1 form so bundled/test harnesses and docs match one contract.
+    // Report the actual bound port so `--port 0` (ephemeral) is observable.
+    // Loopback keeps the stable 127.0.0.1 readiness form so bundled/test
+    // harnesses match one contract; non-loopback advertises the actual
+    // scheme and bound host/port.
     const addr = server.address()
     const boundPort = typeof addr === 'object' && addr ? addr.port : port
-    // Bounded readiness output — no sensitive path
-    console.log(`[sync-relay] listening on http://127.0.0.1:${boundPort}`)
+    // Bounded readiness output — no sensitive path, token, or key material.
+    // IPv6 literals serialize bracketed so the line stays a valid URL; the
+    // raw unbracketed host is used only for server.listen above.
+    if (relayTls.scheme === 'https') {
+      console.log(`[sync-relay] listening on https://${formatRelayHostForUrl(host)}:${boundPort}`)
+    } else {
+      console.log(`[sync-relay] listening on http://127.0.0.1:${boundPort}`)
+    }
   })
 }

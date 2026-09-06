@@ -168,7 +168,10 @@ const SyncSettings: React.FC = () => {
       </SettingRow>
       <SettingRow>
         <SettingHelpText>
-          {t('settings.sync.endpoint_help', 'Application stores and calls one URL; no cloud/self-hosted distinction.')}
+          {t(
+            'settings.sync.endpoint_help',
+            'Loopback endpoints may use plain HTTP; non-loopback endpoints require HTTPS with a trusted certificate.'
+          )}
         </SettingHelpText>
       </SettingRow>
       <SettingDivider />

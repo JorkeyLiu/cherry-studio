@@ -3,15 +3,17 @@
  *
  * Spawns the exact first-party user entrypoint file
  * (`scripts/sync-relay/server.ts`, wired as `pnpm sync:relay`) with the same
- * stable CLI args (`--port/--db/--token`) a user passes. The only deliberate
+ * stable CLI args (`--port/--db/--token`, plus `--host/--cert/--key` for the
+ * LAN HTTPS opt-in) a user passes. The only deliberate
  * difference from a shell `pnpm sync:relay` is the runtime launcher: the E2E
  * lane runs the entrypoint under the Electron binary as Node
  * (`ELECTRON_RUN_AS_NODE=1`) so the better-sqlite3 binding loads as ABI 145,
  * while a user shell runs the same file via `tsx` under Node ABI 137. The
  * script file, CLI contract, readiness line, and relay semantics are
  * identical — verified below by asserting the package script mapping before
- * spawn and the stable `[sync-relay] listening on http://127.0.0.1:PORT`
- * readiness line after spawn.
+ * spawn and the stable readiness line after spawn: loopback HTTP advertises
+ * `http://127.0.0.1:PORT`, while non-loopback LAN HTTPS advertises
+ * `https://<host>:PORT` (IPv6 bracketed via the shared URL formatter).
  *
  * Ownership: the DB lives under the caller-owned temp root. stop() retains
  * the DB (normal stop never deletes user data); close() stops the exact owned
@@ -21,10 +23,12 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import * as fs from 'node:fs'
+import { get as httpsGet } from 'node:https'
 import { createRequire } from 'node:module'
 import * as path from 'node:path'
 
 import { registerOwnedRelayHandle, unregisterOwnedRelayHandle, validateOwnedRoot } from './run-ownership'
+import { formatRelayHostForUrl, normalizeRelayBindHost } from '../../../scripts/sync-relay/relayHost'
 
 export interface UserEntrypointRelayOptions {
   ownedTmpRoot: string
@@ -32,6 +36,18 @@ export interface UserEntrypointRelayOptions {
   dbFileName?: string
   readyTimeoutMs?: number
   stopTimeoutMs?: number
+  /**
+   * LAN HTTPS opt-in (single supported secure LAN topology): non-loopback
+   * bind host with the relay-native HTTPS cert/key pair. When set, the child
+   * spawns with `--host/--cert/--key`, readiness advertises
+   * `https://<host>:<port>`, and health is verified with explicit `ca` trust
+   * (never verification bypass). Omitted: loopback plain HTTP (unchanged).
+   */
+  host?: string
+  certPath?: string
+  keyPath?: string
+  /** Explicit CA file for health verification; defaults to certPath. */
+  caPath?: string
 }
 
 export interface UserEntrypointRelayHandle {
@@ -71,11 +87,44 @@ export function getUserRelayHandle(error: unknown): UserEntrypointRelayHandle | 
   return null
 }
 
-const READY_RE = /\[sync-relay\] listening on http:\/\/127\.0\.0\.1:(\d+)/
 const READY_DEFAULT_MS = 30000
 const STOP_DEFAULT_MS = 10000
 const KILL_GRACE_MS = 5000
 const HEALTH_POLL_MS = 250
+
+/**
+ * Fail-closed launcher gate mirroring the relay TLS contract: an explicitly
+ * supplied non-loopback bind host requires the native HTTPS cert/key pair.
+ * Default loopback (no explicit host) and explicit loopback
+ * (`127.0.0.1`/`localhost`, including bracketed `[127.0.0.1]`) remain plain
+ * HTTP without cert/key. Throws before any child is spawned or DB path is
+ * touched, so invalid launcher configuration never creates a child/DB.
+ */
+export function assertUserRelayHostTlsConfig(normalizedHost: string, hasTls: boolean, hostWasExplicit: boolean): void {
+  if (!hostWasExplicit) return
+  const loopback = normalizedHost === '127.0.0.1' || normalizedHost === 'localhost'
+  if (!loopback && !hasTls) {
+    throw new Error(
+      'sync-relay-user-entrypoint: non-loopback host requires certPath and keyPath (native HTTPS required; plaintext LAN binding rejected)'
+    )
+  }
+}
+
+/**
+ * Canonical advertised host for readiness/endpoint/health URLs.
+ *
+ * Mirrors the production relay canonicalization (`scripts/sync-relay/server.ts`
+ * normalizes explicit `localhost` to `127.0.0.1` before bind and always emits
+ * loopback HTTP readiness as `http://127.0.0.1:<port>`): explicit/default
+ * loopback (`127.0.0.1`/`localhost`) advertises as `127.0.0.1`. All other
+ * hosts (explicit LAN IP, IPv6 literals) pass through unchanged; the raw
+ * normalized host remains appropriate only for `server.listen` (`--host`).
+ */
+export function resolveUserRelayUrlHost(normalizedHost: string): string {
+  const trimmed = normalizedHost.trim()
+  if (trimmed === 'localhost' || trimmed === '127.0.0.1') return '127.0.0.1'
+  return normalizedHost
+}
 
 function uniqueSuffix(): string {
   return `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -133,18 +182,44 @@ async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<bool
   return child.exitCode !== null || child.signalCode !== null
 }
 
-async function waitForHealth(endpoint: string, timeoutMs: number): Promise<void> {
+async function waitForHealth(endpoint: string, timeoutMs: number, caPath?: string): Promise<void> {
   const deadline = Date.now() + timeoutMs
   let last = ''
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(5000) })
-      if (res.status === 200) {
-        const body = (await res.json()) as { ok?: unknown }
-        if (body?.ok === true) return
-        last = 'health body missing {ok:true}'
-      } else {
+      if (caPath && endpoint.startsWith('https://')) {
+        // Explicit CA trust for native HTTPS relays (no bypass).
+        const res = await new Promise<{ status: number; ok: boolean }>((resolvePromise, rejectPromise) => {
+          const req = httpsGet(`${endpoint}/health`, { ca: fs.readFileSync(caPath), timeout: 5000 }, (incoming) => {
+            let data = ''
+            incoming.on('data', (c: Buffer) => {
+              data += c.toString('utf8')
+            })
+            incoming.on('end', () => {
+              try {
+                resolvePromise({
+                  status: incoming.statusCode ?? 0,
+                  ok: (JSON.parse(data) as { ok?: unknown }).ok === true
+                })
+              } catch (e) {
+                rejectPromise(e)
+              }
+            })
+          })
+          req.on('timeout', () => req.destroy(new Error('health timeout')))
+          req.on('error', rejectPromise)
+        })
+        if (res.status === 200 && res.ok) return
         last = `status ${res.status}`
+      } else {
+        const res = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(5000) })
+        if (res.status === 200) {
+          const body = (await res.json()) as { ok?: unknown }
+          if (body?.ok === true) return
+          last = 'health body missing {ok:true}'
+        } else {
+          last = `status ${res.status}`
+        }
       }
     } catch (e) {
       last = String((e as Error).message).slice(0, 120)
@@ -177,6 +252,42 @@ export async function startUserEntrypointRelay(
   if (path.relative(ownedTmpRoot, path.resolve(dbPath)).startsWith('..')) {
     throw new Error('sync-relay-user-entrypoint: DB escapes the owned root')
   }
+  // LAN HTTPS opt-in validation: host/cert/key travel together (fail-closed).
+  // Loopback HTTP (default/explicit 127.0.0.1 or explicit localhost, no
+  // cert/key) serves plain HTTP with `http://127.0.0.1:<port>` readiness
+  // (production normalizes localhost to 127.0.0.1 before bind); non-loopback
+  // LAN hosts require --cert/--key, serve native HTTPS only, and advertise
+  // `https://<host>:<port>` readiness (IPv6 bracketed). The raw normalized
+  // bind host is passed to --host for server.listen except explicit localhost
+  // loopback, which binds the canonical 127.0.0.1; the bracketed URL form
+  // is used only for readiness matching, endpoint advertisement, and health
+  // URLs. IPv4/loopback formatting is unchanged.
+  const lanHostRaw = options.host ?? '127.0.0.1'
+  let lanHost: string
+  try {
+    lanHost = normalizeRelayBindHost(lanHostRaw.trim())
+  } catch (e) {
+    throw new Error(`sync-relay-user-entrypoint: ${(e as Error).message}`)
+  }
+  const lanCert = options.certPath
+  const lanKey = options.keyPath
+  const lanCa = options.caPath ?? lanCert
+  if ((lanCert !== undefined || lanKey !== undefined) && (!lanCert || !lanKey)) {
+    throw new Error('sync-relay-user-entrypoint: certPath and keyPath are required together')
+  }
+  const useTls = !!lanCert && !!lanKey
+  assertUserRelayHostTlsConfig(lanHost, useTls, options.host !== undefined)
+  const scheme = useTls ? 'https' : 'http'
+  // Canonicalize explicit/default localhost loopback to 127.0.0.1 for
+  // readiness/endpoint/health, matching production readiness
+  // (`http://127.0.0.1:<port>` for loopback HTTP, `https://127.0.0.1:<port>`
+  // for loopback HTTPS opt-in). Non-loopback hosts keep the raw normalized
+  // form for --host (server.listen); IPv6 URL bracketing applies only to the
+  // advertised URL form.
+  const advertisedHostRaw = resolveUserRelayUrlHost(lanHost)
+  const urlHost = formatRelayHostForUrl(advertisedHostRaw)
+  const escapedHost = urlHost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const readyRe = new RegExp(`\\[sync-relay\\] listening on ${scheme}://${escapedHost}:(\\d+)`)
 
   let child: ChildProcess | null = null
   let boundPort: number | null = null
@@ -224,9 +335,10 @@ export async function startUserEntrypointRelay(
   }
 
   async function startChild(requestedPort: number, budgetMs: number): Promise<{ endpoint: string; port: number }> {
+    const tlsArgs = useTls ? ['--host', advertisedHostRaw, '--cert', lanCert as string, '--key', lanKey as string] : []
     const proc = spawn(
       electronBinary,
-      [tsxCli, serverTs, '--port', String(requestedPort), '--db', dbPath, '--token', token],
+      [tsxCli, serverTs, '--port', String(requestedPort), '--db', dbPath, '--token', token, ...tlsArgs],
       {
         env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe']
@@ -239,7 +351,7 @@ export async function startUserEntrypointRelay(
       const onData = (chunk: Buffer): void => {
         out += chunk.toString('utf8')
         if (out.length > 65536) out = out.slice(-65536)
-        const m = READY_RE.exec(out)
+        const m = readyRe.exec(out)
         if (m) {
           clearTimeout(timer)
           cleanup()
@@ -268,10 +380,10 @@ export async function startUserEntrypointRelay(
       const detail = String((e as Error).message).slice(0, 300)
       throw { detail, cleanupErr, phase: 'startup' as const }
     })
-    const nextEndpoint = `http://127.0.0.1:${port}`
+    const nextEndpoint = `${scheme}://${urlHost}:${port}`
     const remaining = budgetMs - 1000
     try {
-      await waitForHealth(nextEndpoint, Math.max(1000, remaining))
+      await waitForHealth(nextEndpoint, Math.max(1000, remaining), useTls ? lanCa : undefined)
     } catch (e) {
       const cleanupErr = await reapAfterFailure(proc)
       const detail = String((e as Error).message).slice(0, 300)

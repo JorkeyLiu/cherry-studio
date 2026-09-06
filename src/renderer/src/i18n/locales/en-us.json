@@ -5528,7 +5528,7 @@
       "device_name_placeholder": "e.g. work laptop",
       "enabled": "Enabled",
       "endpoint": "Relay Endpoint",
-      "endpoint_help": "Application stores and calls one URL; no cloud/self-hosted distinction.",
+      "endpoint_help": "Loopback endpoints may use plain HTTP; non-loopback endpoints require HTTPS with a trusted certificate.",
       "endpoint_placeholder": "http://127.0.0.1:3030",
       "help": "Synchronize chat topics, messages and blocks via a configured HTTP relay. Automatic personal multi-device sync; pending validation, not production-ready.",
       "invite_code": "Invite code",

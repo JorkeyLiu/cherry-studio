@@ -5528,7 +5528,7 @@
       "device_name_placeholder": "[to be translated]:e.g. work laptop",
       "enabled": "啟用",
       "endpoint": "中繼位址",
-      "endpoint_help": "應用儲存並呼叫單一 URL；不區分雲端/自託管。",
+      "endpoint_help": "迴環位址可使用明文 HTTP；非迴環位址必須使用 HTTPS 並信任憑證。",
       "endpoint_placeholder": "[to be translated]:http://127.0.0.1:3030",
       "help": "透過配置的 HTTP 中繼同步聊天話題、訊息和區塊。自動個人多裝置同步；尚未完成驗證，非生產就緒。",
       "invite_code": "[to be translated]:Invite code",

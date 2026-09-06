@@ -5528,7 +5528,7 @@
       "device_name_placeholder": "例如工作笔记本",
       "enabled": "启用",
       "endpoint": "中继地址",
-      "endpoint_help": "应用存储并调用单一 URL；不区分云端/自托管。",
+      "endpoint_help": "回环地址可使用明文 HTTP；非回环地址必须使用 HTTPS 并信任证书。",
       "endpoint_placeholder": "http://127.0.0.1:3030",
       "help": "通过配置的 HTTP 中继同步聊天话题、消息和块。自动个人多设备同步；尚未完成验证，非生产就绪。",
       "invite_code": "邀请码",
