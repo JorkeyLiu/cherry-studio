@@ -62,6 +62,7 @@
     "skills:check": "tsx scripts/skills-check.ts",
     "update:languages": "tsx scripts/update-languages.ts",
     "update:upgrade-config": "tsx scripts/update-app-upgrade-config.ts",
+    "sync:relay": "tsx scripts/sync-relay/server.ts",
     "test": "pnpm native:run node -- pnpm test:run",
     "test:run": "pnpm test:main && pnpm test:renderer && pnpm test:aicore && pnpm test:shared && pnpm test:scripts && pnpm test:e2e-utils",
     "test:main": "pnpm native:run node -- pnpm test:main:run",

@@ -40,22 +40,98 @@ export interface RelayOptions {
   token?: string
 }
 
-function parseArgs(): { port: number; dbPath: string; token?: string } {
-  const args = process.argv.slice(2)
+export const RELAY_LOOPBACK_HOSTS = ['127.0.0.1', 'localhost'] as const
+
+export function isLoopbackHost(host: string): boolean {
+  return (RELAY_LOOPBACK_HOSTS as readonly string[]).includes(host)
+}
+
+export const RELAY_HELP_TEXT = [
+  'Cherry Chat personal sync relay (loopback-only, reference implementation).',
+  '',
+  'Usage:',
+  '  pnpm sync:relay -- --port <port> --db <path> --token <token>',
+  '  pnpm sync:relay -- --help',
+  '',
+  'Options:',
+  '  --port <port>    TCP port to bind (0 = ephemeral, otherwise 1-65535; default 3030)',
+  '  --db <path>      SQLite file for relay state (persistent; never deleted on stop)',
+  '  --token <token>  Bearer token (fallback: SYNC_RELAY_TOKEN env; required for the supported path)',
+  '  --host <host>    Bind host, loopback only: 127.0.0.1 or localhost (default 127.0.0.1)',
+  '  --help, -h       Show this help and exit 0',
+  '',
+  'Notes:',
+  '  - Binds loopback only; non-loopback hosts are rejected.',
+  '  - SIGTERM/SIGINT shut down gracefully exactly once without deleting the DB.',
+  '  - Same --db/--token on restart retains relay state.'
+].join('\n')
+
+export interface RelayCliArgs {
+  port: number
+  dbPath: string
+  host: string
+  token?: string
+  help: boolean
+}
+
+export function parseRelayArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): RelayCliArgs {
   let port = 3030
   let dbPath = resolve(process.cwd(), 'tmp-sync-relay.db')
+  let host = '127.0.0.1'
   let token: string | undefined
-  const envToken = process.env.SYNC_RELAY_TOKEN
-  if (envToken && envToken.length > 0) token = envToken
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--port' && args[i + 1]) {
-      const parsed = Number(args[i + 1])
-      if (Number.isSafeInteger(parsed) && parsed >= 0) port = parsed
+  const envToken = env.SYNC_RELAY_TOKEN
+  if (typeof envToken === 'string' && envToken.length > 0) token = envToken
+  let help = false
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--help' || arg === '-h') {
+      help = true
+      continue
     }
-    if (args[i] === '--db' && args[i + 1]) dbPath = resolve(args[i + 1])
-    if (args[i] === '--token' && args[i + 1]) token = args[i + 1]
+    if (arg === '--port' || arg === '--db' || arg === '--token' || arg === '--host') {
+      const raw = argv[i + 1]
+      if (raw === undefined) {
+        throw new Error(`missing value for ${arg} (expected a value)`)
+      }
+      if (arg === '--port') {
+        const parsed = Number(raw)
+        if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 65535) {
+          throw new Error(`invalid --port '${String(raw).slice(0, 32)}' (expected 0-65535)`)
+        }
+        port = parsed
+        i++
+        continue
+      }
+      if (arg === '--db') {
+        if (typeof raw !== 'string' || raw.length === 0) throw new Error('invalid --db (expected a file path)')
+        dbPath = resolve(raw)
+        i++
+        continue
+      }
+      if (arg === '--token') {
+        token = raw
+        i++
+        continue
+      }
+      // arg === '--host': accept loopback only, normalize localhost to
+      // 127.0.0.1 so bind and readiness share one reachable IPv4 contract.
+      if (!isLoopbackHost(raw)) {
+        throw new Error(`non-loopback --host '${String(raw).slice(0, 64)}' rejected (loopback only)`)
+      }
+      host = raw === 'localhost' ? '127.0.0.1' : raw
+      i++
+      continue
+    }
+    if (arg.startsWith('-')) {
+      throw new Error(`unknown option '${String(arg).slice(0, 64)}'`)
+    }
+    throw new Error(`unknown option '${String(arg).slice(0, 64)}'`)
   }
-  return { port, dbPath, token }
+  return { port, dbPath, host, token, help }
+}
+
+function parseArgs(): { port: number; dbPath: string; host: string; token?: string; help: boolean } {
+  return parseRelayArgs(process.argv.slice(2), process.env)
 }
 
 const SYNC_PAIRING_INVITE_TTL_MS = 15 * 60 * 1000
@@ -1606,18 +1682,117 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     }
     sseClients.clear()
   })
+  ;(server as unknown as { __relaySseClients?: Set<ServerResponse> }).__relaySseClients = sseClients
   return server
 }
 
 const isMain = typeof require !== 'undefined' && (require as any).main === module
 if (isMain) {
-  const { port, dbPath, token } = parseArgs()
-  const db = initDb(dbPath)
-  const server = createRelayServer(db, { token })
+  let cli: { port: number; dbPath: string; host: string; token?: string; help: boolean } | undefined
+  try {
+    cli = parseArgs()
+  } catch (e) {
+    console.error(`[sync-relay] ${(e as Error).message}`)
+    console.error(RELAY_HELP_TEXT)
+    process.exit(2)
+  }
+  const parsed = cli as { port: number; dbPath: string; host: string; token?: string; help: boolean }
+  if (parsed.help) {
+    console.log(RELAY_HELP_TEXT)
+    process.exit(0)
+  }
+  const { port, dbPath, host, token } = parsed
+  if (typeof token !== 'string' || token.length === 0) {
+    console.error('[sync-relay] missing --token (or SYNC_RELAY_TOKEN env); refusing unauthenticated startup')
+    console.error(RELAY_HELP_TEXT)
+    process.exit(2)
+  }
+  let db: Database.Database
+  try {
+    db = initDb(dbPath)
+  } catch (e) {
+    console.error(`[sync-relay] failed to open database: ${(e as Error).message.slice(0, 300)}`)
+    process.exit(1)
+  }
+  const relayDb: Database.Database = db
+  const server = createRelayServer(relayDb, { token })
+  let shuttingDown = false
+  let dbClosed = false
+  const closeDbOnce = (): boolean => {
+    if (dbClosed) return true
+    dbClosed = true
+    try {
+      relayDb.close()
+      return true
+    } catch (e) {
+      console.error(`[sync-relay] database close failed: ${(e as Error).message.slice(0, 300)}`)
+      return false
+    }
+  }
+  const shutdown = (signal: string): void => {
+    if (shuttingDown) return
+    shuttingDown = true
+    console.log(`[sync-relay] received ${signal}, shutting down`)
+    const finish = (code: number): void => {
+      const ok = closeDbOnce()
+      if (!ok) {
+        process.exit(1)
+        return
+      }
+      console.log('[sync-relay] shutdown complete')
+      process.exit(code)
+    }
+    try {
+      // Active SSE streams hold their sockets open and would block
+      // server.close() forever; end them first so close can complete.
+      try {
+        const peer = server as unknown as {
+          closeIdleConnections?: () => void
+          closeAllConnections?: () => void
+        }
+        const clients = (server as unknown as { __relaySseClients?: Iterable<ServerResponse> }).__relaySseClients
+        if (clients) {
+          for (const client of [...clients]) {
+            try {
+              client.end()
+            } catch {}
+          }
+        }
+        peer.closeIdleConnections?.()
+        peer.closeAllConnections?.()
+      } catch {}
+      server.close((err?: Error) => {
+        if (err) {
+          console.error(`[sync-relay] server close failed: ${String(err.message).slice(0, 300)}`)
+          finish(1)
+          return
+        }
+        finish(0)
+      })
+    } catch (e) {
+      console.error(`[sync-relay] shutdown failed: ${(e as Error).message.slice(0, 300)}`)
+      finish(1)
+    }
+  }
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  process.on('SIGINT', () => shutdown('SIGINT'))
+  server.on('error', (err: Error) => {
+    console.error(`[sync-relay] server error: ${err.message.slice(0, 300)}`)
+    if (shuttingDown) {
+      closeDbOnce()
+      process.exit(1)
+      return
+    }
+    shuttingDown = true
+    const ok = closeDbOnce()
+    void ok
+    process.exit(1)
+  })
   // Bind to loopback only — isolated non-production
-  server.listen(port, '127.0.0.1', () => {
+  server.listen(port, host, () => {
     // Report the actual bound port so `--port 0` (ephemeral) is observable;
-    // fixed ports log unchanged.
+    // fixed ports log unchanged. The readiness line keeps the stable
+    // 127.0.0.1 form so bundled/test harnesses and docs match one contract.
     const addr = server.address()
     const boundPort = typeof addr === 'object' && addr ? addr.port : port
     // Bounded readiness output — no sensitive path

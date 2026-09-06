@@ -7,10 +7,10 @@
  * Limited validation slice only (not production infrastructure). The test runner
  * never imports better-sqlite3: the child runs under the pinned Node/tsx runtime
  * and owns the SQLite binding. Only the owned child PID is ever terminated and
- * only the owned temp root is ever removed (fail-closed). The server CLI has no
- * SIGTERM handler and performs no clean db.close on SIGTERM; evidence covers only
- * bounded SIGTERM process restart, not hard-kill WAL durability or production
- * deployment.
+ * only the owned temp root is ever removed (fail-closed). The server CLI shuts
+ * down gracefully on SIGTERM (exactly-once close of HTTP + SQLite without
+ * deleting the DB); evidence covers only bounded SIGTERM process restart, not
+ * hard-kill WAL durability or production deployment.
  */
 import { type ChildProcess, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
