@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { startTestRelay, type TestRelayHandle } from './sync-relay'
+import {
+  provisionPairedDevices,
+  provisionedHeaders,
+  startTestRelay,
+  type ProvisionedDevice,
+  type TestRelayHandle
+} from './sync-relay'
 
 const TOKEN = 'pause-precedence-token'
 
@@ -18,11 +24,11 @@ function topicOp(id: string, entityId: string, name = 'N', ts = Date.now()): Rec
 
 let relay: TestRelayHandle | null = null
 
-let deviceAuth: string | undefined
+let dev: ProvisionedDevice | null = null
 
 beforeEach(async () => {
   relay = await startTestRelay(TOKEN)
-  deviceAuth = undefined
+  dev = (await provisionPairedDevices(relay.endpoint, TOKEN, 2))[0]
 })
 
 afterEach(async () => {
@@ -42,26 +48,22 @@ afterEach(async () => {
 })
 
 async function pushRaw(ops: Record<string, unknown>[], token: string | null): Promise<{ status: number; body: any }> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'x-sync-device-id': 'd1' }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...provisionedHeaders(dev!) }
   if (token !== null) headers.Authorization = `Bearer ${token}`
-  if (deviceAuth) headers['x-sync-device-auth'] = deviceAuth
   const res = await fetch(`${relay!.endpoint}/sync/push`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ deviceId: 'd1', operations: ops })
   })
   const body = await res.json().catch(() => ({}))
-  if (typeof body?.deviceAuth === 'string') deviceAuth = body.deviceAuth
   return { status: res.status, body }
 }
 
 async function pullRaw(cursor = 0, token: string | null = TOKEN): Promise<{ status: number; body: any }> {
-  const headers: Record<string, string> = { 'x-sync-device-id': 'd1' }
+  const headers: Record<string, string> = { ...provisionedHeaders(dev!) }
   if (token !== null) headers.Authorization = `Bearer ${token}`
-  if (deviceAuth) headers['x-sync-device-auth'] = deviceAuth
   const res = await fetch(`${relay!.endpoint}/sync/pull?cursor=${cursor}&deviceId=d1`, { headers })
   const body = await res.json().catch(() => ({}))
-  if (typeof body?.deviceAuth === 'string') deviceAuth = body.deviceAuth
   return { status: res.status, body }
 }
 
@@ -141,9 +143,10 @@ describe('test relay pause precedence and determinism (LOCK-007)', () => {
     const badPull = await pullRaw(0, 'wrong-token')
     expect(badPull.status).toBe(401)
 
-    // SSE hint subscription is never gated by the pull barrier (hint-only).
+    // SSE hint subscription is never gated by the pull barrier (hint-only);
+    // it still authenticates as the paired channel member.
     const sseRes = await fetch(`${relay!.endpoint}/sync/subscribe?cursor=0`, {
-      headers: { Authorization: `Bearer ${TOKEN}` }
+      headers: { Authorization: `Bearer ${TOKEN}`, ...provisionedHeaders(dev!) }
     })
     expect(sseRes.status).toBe(200)
     await sseRes.body?.cancel?.().catch(() => {})

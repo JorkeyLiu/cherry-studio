@@ -27,6 +27,7 @@ import { chatDbService } from '../../chatDb'
 import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
 import { syncService } from '../SyncService'
+import { seedRegisteredAttachedSyncService } from './helpers/syncTestRegistration'
 
 let sqlite: Database.Database
 let db: BetterSQLite3Database<typeof schema>
@@ -49,6 +50,7 @@ beforeEach(() => {
   ;(chatDbService as any).sqlite = sqlite
   ;(chatDbService as any).db = db
   syncService.clearAllForTests()
+  seedRegisteredAttachedSyncService(configStore, db)
 })
 
 afterEach(() => {
@@ -275,7 +277,15 @@ describe('fourth audit 3: contiguous pull framing rejects gaps', () => {
     async function pullWith(body: any, cursor = 0): Promise<unknown> {
       ;(globalThis as any).fetch = async () => ({ ok: true, json: async () => body }) as any
       try {
-        return await syncClient.pull('http://127.0.0.1:9', undefined, cursor, 'd1')
+        return await syncClient.pull(
+          'http://127.0.0.1:9',
+          undefined,
+          cursor,
+          'd1',
+          undefined,
+          'ABCD2345',
+          'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+        )
       } finally {
         ;(globalThis as any).fetch = origFetch
       }

@@ -251,14 +251,50 @@ describe('relay user-entrypoint graceful shutdown', () => {
   it('SIGTERM closes cleanly once, retains the DB, and restart retains state', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sync-relay-user-'))
     const dbPath = join(root, 'relay.db')
-    let deviceAuth: string | undefined
+    // Registered + paired channel identity for the data plane (SYNC-CC-*).
+    let paired: { code: string; secret: string } | null = null
+    const provisionPair = async (baseUrl: string): Promise<{ code: string; secret: string }> => {
+      if (paired) return paired
+      const authed = { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` }
+      const reg = async (deviceId: string): Promise<{ code: string; secret: string }> => {
+        const res = await fetch(`${baseUrl}/sync/register`, {
+          method: 'POST',
+          headers: authed,
+          body: JSON.stringify({ deviceId }),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        })
+        if (res.status !== 200) throw new Error(`provision register failed: ${res.status}`)
+        const body = (await res.json()) as { deviceCode: string; deviceSecret: string }
+        return { code: body.deviceCode, secret: body.deviceSecret }
+      }
+      const a = await reg('user-device-1')
+      const b = await reg('user-device-2')
+      const req = await fetch(`${baseUrl}/sync/pair/request`, {
+        method: 'POST',
+        headers: { ...authed, 'x-sync-device-code': b.code, 'x-sync-device-secret': b.secret },
+        body: JSON.stringify({ targetCode: a.code }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      })
+      if (req.status !== 200) throw new Error(`provision request failed: ${req.status}`)
+      const reqBody = (await req.json()) as { requestId: string }
+      const accept = await fetch(`${baseUrl}/sync/pair/accept`, {
+        method: 'POST',
+        headers: { ...authed, 'x-sync-device-code': a.code, 'x-sync-device-secret': a.secret },
+        body: JSON.stringify({ requestId: reqBody.requestId }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      })
+      if (accept.status !== 200) throw new Error(`provision accept failed: ${accept.status}`)
+      paired = a
+      return a
+    }
     const push = async (baseUrl: string, n: number): Promise<{ status: number; cursor: number }> => {
+      const dev = await provisionPair(baseUrl)
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${TOKEN}`,
-        'x-sync-device-id': 'user-device-1'
+        'x-sync-device-code': dev.code,
+        'x-sync-device-secret': dev.secret
       }
-      if (deviceAuth) headers['x-sync-device-auth'] = deviceAuth
       const res = await fetch(`${baseUrl}/sync/push`, {
         method: 'POST',
         headers,
@@ -278,25 +314,24 @@ describe('relay user-entrypoint graceful shutdown', () => {
         }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
       })
-      const body = (await res.json()) as { cursor?: number; deviceAuth?: unknown }
-      if (typeof body?.deviceAuth === 'string') deviceAuth = body.deviceAuth
+      const body = (await res.json()) as { cursor?: number }
       return { status: res.status, cursor: body.cursor ?? -1 }
     }
     const pull = async (
       baseUrl: string,
       cursor: number
     ): Promise<{ status: number; cursor: number; ids: string[] }> => {
+      const dev = await provisionPair(baseUrl)
       const headers: Record<string, string> = {
         Authorization: `Bearer ${TOKEN}`,
-        'x-sync-device-id': 'user-device-1'
+        'x-sync-device-code': dev.code,
+        'x-sync-device-secret': dev.secret
       }
-      if (deviceAuth) headers['x-sync-device-auth'] = deviceAuth
       const res = await fetch(`${baseUrl}/sync/pull?cursor=${cursor}&deviceId=user-device-1`, {
         headers,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
       })
-      const body = (await res.json()) as { operations?: Array<{ id: string }>; cursor?: number; deviceAuth?: unknown }
-      if (typeof body?.deviceAuth === 'string') deviceAuth = body.deviceAuth
+      const body = (await res.json()) as { operations?: Array<{ id: string }>; cursor?: number }
       return { status: res.status, cursor: body.cursor ?? -1, ids: (body.operations ?? []).map((o) => o.id) }
     }
     const waitExit = (child: ChildProcess, ms: number): Promise<void> =>

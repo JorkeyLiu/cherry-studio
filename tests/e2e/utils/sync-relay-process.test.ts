@@ -15,6 +15,7 @@ import * as path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { createOwnedTmpRoot, removeOwnedTmpRoot } from './run-ownership'
+import { provisionPairedDevices, provisionedHeaders, type ProvisionedDevice } from './sync-relay'
 import {
   assertNoLiveRelayChild,
   assertNoUnresolvedRelayCleanup,
@@ -131,23 +132,31 @@ function topicOp(id: string, entityId: string, name = 'N', ts = 1000): Record<st
 let ownedTmpRoot: string | null = null
 let relay: FileBackedRelayHandle | null = null
 
-let deviceAuthState: string | undefined
+let provisioned: ProvisionedDevice | null = null
+let provisionedEndpoint = ''
+
+async function ensureProvisioned(endpoint: string): Promise<ProvisionedDevice> {
+  if (provisioned && provisionedEndpoint === endpoint) return provisioned
+  const devices = await provisionPairedDevices(endpoint, TOKEN, 2)
+  provisioned = devices[0]
+  provisionedEndpoint = endpoint
+  return provisioned
+}
 
 async function pushRaw(
   endpoint: string,
   ops: Record<string, unknown>[],
   token: string | null
 ): Promise<{ status: number; body: any }> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'x-sync-device-id': 'd1' }
+  const dev = await ensureProvisioned(endpoint)
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...provisionedHeaders(dev) }
   if (token !== null) headers.Authorization = `Bearer ${token}`
-  if (deviceAuthState) headers['x-sync-device-auth'] = deviceAuthState
   const res = await fetch(`${endpoint}/sync/push`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ deviceId: 'd1', operations: ops })
   })
   const body = await res.json().catch(() => ({}))
-  if (typeof body?.deviceAuth === 'string') deviceAuthState = body.deviceAuth
   return { status: res.status, body }
 }
 
@@ -156,12 +165,11 @@ async function pullRaw(
   cursor: number,
   token: string | null = TOKEN
 ): Promise<{ status: number; body: any }> {
-  const headers: Record<string, string> = { 'x-sync-device-id': 'd1' }
+  const dev = await ensureProvisioned(endpoint)
+  const headers: Record<string, string> = { ...provisionedHeaders(dev) }
   if (token !== null) headers.Authorization = `Bearer ${token}`
-  if (deviceAuthState) headers['x-sync-device-auth'] = deviceAuthState
   const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}&deviceId=d1`, { headers })
   const body = await res.json().catch(() => ({}))
-  if (typeof body?.deviceAuth === 'string') deviceAuthState = body.deviceAuth
   return { status: res.status, body }
 }
 
@@ -186,7 +194,8 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
   })
   beforeEach(() => {
     ownedTmpRoot = createOwnedTmpRoot()
-    deviceAuthState = undefined
+    provisioned = null
+    provisionedEndpoint = ''
   })
 
   afterEach(async () => {
@@ -347,8 +356,7 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${TOKEN}`,
-          'x-sync-device-id': 'd1',
-          ...(deviceAuthState ? { 'x-sync-device-auth': deviceAuthState } : {})
+          ...provisionedHeaders(await ensureProvisioned(relay!.endpoint))
         },
         body: JSON.stringify({ deviceId: 'd1', operations: 'not-an-array' })
       })
@@ -369,8 +377,7 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
       const res = await fetch(`${relay.endpoint}/sync/pull?cursor=${encodeURIComponent(bad)}&deviceId=d1`, {
         headers: {
           Authorization: `Bearer ${TOKEN}`,
-          'x-sync-device-id': 'd1',
-          ...(deviceAuthState ? { 'x-sync-device-auth': deviceAuthState } : {})
+          ...provisionedHeaders(await ensureProvisioned(relay!.endpoint))
         }
       })
       await res.json().catch(() => ({}))
@@ -381,8 +388,7 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
     const badLimit = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=d1&limit=abc`, {
       headers: {
         Authorization: `Bearer ${TOKEN}`,
-        'x-sync-device-id': 'd1',
-        ...(deviceAuthState ? { 'x-sync-device-auth': deviceAuthState } : {})
+        ...provisionedHeaders(await ensureProvisioned(relay.endpoint))
       }
     })
     await badLimit.json().catch(() => ({}))
@@ -390,8 +396,7 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
     const zeroLimit = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=d1&limit=0`, {
       headers: {
         Authorization: `Bearer ${TOKEN}`,
-        'x-sync-device-id': 'd1',
-        ...(deviceAuthState ? { 'x-sync-device-auth': deviceAuthState } : {})
+        ...provisionedHeaders(await ensureProvisioned(relay.endpoint))
       }
     })
     const zeroBody = (await zeroLimit.json().catch(() => ({}))) as any
@@ -620,7 +625,7 @@ describe('file-backed relay failure paths (no Electron ABI required)', () => {
       await expect(waitForRelayHealth(slowUrl, 1200)).rejects.toThrow(/readiness timeout/)
       expect(Date.now() - start).toBeLessThan(5000)
     } finally {
-      await new Promise((r) => slow.close(() => r()))
+      await new Promise<void>((r) => slow.close(() => r()))
     }
     // Oversized server: declared and actual bodies above the cap are rejected
     // before JSON parsing.
@@ -633,7 +638,7 @@ describe('file-backed relay failure paths (no Electron ABI required)', () => {
     try {
       await expect(fetchRelayHealthOnce(bigUrl, 2000)).rejects.toThrow(/oversized/)
     } finally {
-      await new Promise((r) => big.close(() => r()))
+      await new Promise<void>((r) => big.close(() => r()))
     }
   })
 

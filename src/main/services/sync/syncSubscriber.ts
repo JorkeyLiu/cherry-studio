@@ -1,4 +1,12 @@
 import { loggerService } from '@logger'
+import {
+  isValidSyncDeviceAuth,
+  SYNC_DEVICE_CODE_HEADER,
+  SYNC_DEVICE_SECRET_HEADER,
+  validatePairingCode
+} from '@shared/sync'
+
+import { relayHttpError, sanitizeRelayErrorBody } from './relayError'
 
 const logger = loggerService.withContext('SyncSubscriber')
 
@@ -61,6 +69,11 @@ export function parseSseCursorHints(buffer: string): { hints: number[]; rest: st
  * dependency). The stream carries only a non-authoritative cursor hint;
  * all data moves through the existing authenticated HTTP push/pull path.
  */
+export interface SyncSubscriberDevice {
+  deviceCode: string
+  deviceSecret: string
+}
+
 export class SyncSubscriber {
   private abort: AbortController | null = null
   private stopped = true
@@ -70,14 +83,19 @@ export class SyncSubscriber {
     return this.running
   }
 
-  start(endpoint: string, token: string | undefined, events: SyncSubscriberEvents): void {
+  start(
+    endpoint: string,
+    token: string | undefined,
+    events: SyncSubscriberEvents,
+    device?: SyncSubscriberDevice
+  ): void {
     this.stop()
     this.stopped = false
     const url = `${endpoint.replace(/\/$/, '')}/sync/subscribe?cursor=0`
     const controller = new AbortController()
     this.abort = controller
     this.running = true
-    void this.connect(url, token, events, controller.signal)
+    void this.connect(url, token, events, controller.signal, device)
   }
 
   stop(): void {
@@ -96,7 +114,8 @@ export class SyncSubscriber {
     url: string,
     token: string | undefined,
     events: SyncSubscriberEvents,
-    signal: AbortSignal
+    signal: AbortSignal,
+    device?: SyncSubscriberDevice
   ): Promise<void> {
     let notifiedDisconnect = false
     const disconnectOnce = (error?: Error): void => {
@@ -114,14 +133,31 @@ export class SyncSubscriber {
     try {
       const headers: Record<string, string> = { Accept: 'text/event-stream' }
       if (token) headers['Authorization'] = `Bearer ${token}`
+      // Channel-scoped SSE (SYNC-CC-016): the subscription authenticates as
+      // the registered device so the relay binds it to exactly one channel.
+      // Validation failures throw before transport (fail closed).
+      if (device !== undefined) {
+        const codeErr = validatePairingCode(device.deviceCode)
+        if (codeErr) throw new Error(`subscribe failed: device code invalid: ${codeErr}`)
+        if (!isValidSyncDeviceAuth(device.deviceSecret)) throw new Error('subscribe failed: device auth invalid')
+        headers[SYNC_DEVICE_CODE_HEADER] = device.deviceCode.trim().toUpperCase()
+        headers[SYNC_DEVICE_SECRET_HEADER] = device.deviceSecret
+      }
       const res = await fetch(url, { method: 'GET', headers, signal })
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => '')
-        throw new Error(`subscribe failed ${res.status}: ${text.slice(0, 200)}`)
+        // Centralized sanitizer: SSE non-2xx bodies never echo raw text
+        // (plain text cannot reliably identify an arbitrary secret); only
+        // the fixed safe summary or a strictly allowlisted code plus the
+        // HTTP status survives, with no raw body on `cause`.
+        throw relayHttpError('subscribe', res.status, text)
       }
       const contentType = res.headers.get('content-type') ?? ''
       if (!contentType.includes('text/event-stream')) {
-        throw new Error(`subscribe failed: unexpected content-type ${contentType.slice(0, 80)}`)
+        // Header values are untrusted relay input as well: only a strictly
+        // sanitized fragment is ever recorded.
+        const safeContentType = sanitizeRelayErrorBody(contentType, res.status)
+        throw new Error(`subscribe failed: unexpected content-type ${safeContentType}`.slice(0, 300))
       }
       const reader = res.body.getReader()
       const decoder = new TextDecoder()

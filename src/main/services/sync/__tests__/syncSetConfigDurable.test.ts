@@ -50,6 +50,8 @@ beforeEach(() => {
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
   configStore.set('sync:token', '')
+  configStore.set('sync:deviceCode', 'ABCD2345')
+  configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)
@@ -74,6 +76,11 @@ describe('setConfig prior-read failure is durable and lifecycle-invalidating', (
     const stopSpy = vi.fn()
     const svc = new Cls({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: () => Promise.resolve(null),
       createSubscriber: () => ({ start: vi.fn(), stop: stopSpy }) as never
     })
@@ -118,6 +125,11 @@ describe('setConfig post-write-read failure leaves no stale subscriber', () => {
     const stopSpy = vi.fn()
     const svc = new Cls({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: () => Promise.resolve(null),
       createSubscriber: () => ({ start: vi.fn(), stop: stopSpy }) as never
     })
@@ -167,6 +179,11 @@ describe('nested sync config preflight invalidates auto without retry', () => {
     const stopSpy = vi.fn()
     const svc = new Cls({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync,
       createSubscriber: () => ({ start: vi.fn(), stop: stopSpy }) as never
     })
@@ -194,6 +211,11 @@ describe('nested sync config preflight invalidates auto without retry', () => {
     const runSync = vi.fn(() => Promise.reject(new Error('transport-boom')))
     const svc = new Cls({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync,
       createSubscriber: () => ({ start: vi.fn(), stop: vi.fn() }) as never
     })

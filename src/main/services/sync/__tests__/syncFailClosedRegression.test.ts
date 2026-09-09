@@ -274,6 +274,8 @@ describe('finding 3: conflict-log fail-closed', () => {
 
   it('sync cycle holds cursor and records a durable error preserving the original failure', async () => {
     configStore.set('sync:token', '')
+    configStore.set('sync:deviceCode', 'ABCD2345')
+    configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     expect(applyTopicUpsert('t-cycle', 'op-cycle-1', T0, 'A')).toBe(true)
     db.insert(schema.syncState)
       .values({ key: 'cursor', value: '0' })

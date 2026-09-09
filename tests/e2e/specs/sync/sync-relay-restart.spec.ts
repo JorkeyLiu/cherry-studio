@@ -28,6 +28,7 @@ import {
   getSyncStatusViaApi,
   isoNow,
   pairProfilesViaApi,
+  provisionObserverViaRaw,
   runSyncViaApi,
   setSyncConfigViaApi,
   topicExistsViaApi,
@@ -150,45 +151,19 @@ interface RelayPullBody {
 }
 
 interface RelayObserver {
-  deviceId: string
-  deviceAuth: string
+  code: string
+  secret: string
 }
 
 /**
  * Pair a test-side diagnostic observer device through the production pairing
- * flow (F-001/F-002): the observer requests pairing with an approver-minted
- * invite code over raw HTTP (receiving its credential), and the trusted
- * approver accepts via production IPC. Raw diagnostic pulls then
- * authenticate as this already-trusted member. No trust is ever minted
- * outside the explicit pairing flow.
+ * flow (SYNC-CC-*): the observer registers over raw HTTP, requests pairing
+ * with the approver's public device code, and the approver accepts via
+ * production IPC. Raw diagnostic pulls then authenticate as this paired
+ * channel member. No pairing state is ever minted outside the explicit flow.
  */
 async function ensureObserverPaired(endpoint: string, approverPage: Page): Promise<RelayObserver> {
-  const deviceId = 'e2e-observer'
-  const invite = await approverPage.evaluate(async () => {
-    return await (window as any).api.sync.createInvite()
-  })
-  if (!invite || typeof invite.code !== 'string') throw new Error('observer pairing: invite code missing')
-  const reqRes = await fetch(`${endpoint}/sync/pair/request`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ deviceId, code: invite.code })
-  })
-  if (reqRes.status !== 200) throw new Error(`observer pairing: request failed ${reqRes.status}`)
-  const reqBody = (await reqRes.json()) as { requestId?: unknown; deviceAuth?: unknown }
-  if (typeof reqBody.requestId !== 'string' || typeof reqBody.deviceAuth !== 'string') {
-    throw new Error('observer pairing: request response malformed')
-  }
-  const pending = await approverPage.evaluate(async () => {
-    return await (window as any).api.sync.listPairingRequests()
-  })
-  const found = Array.isArray(pending?.requests)
-    ? pending.requests.some((r: any) => r?.id === reqBody.requestId)
-    : false
-  if (!found) throw new Error('observer pairing: request not visible to approver')
-  await approverPage.evaluate(async (requestId: string) => {
-    return await (window as any).api.sync.acceptPairing(requestId)
-  }, reqBody.requestId as string)
-  return { deviceId, deviceAuth: reqBody.deviceAuth as string }
+  return await provisionObserverViaRaw(endpoint, RELAY_TOKEN, approverPage)
 }
 
 async function authedPull(
@@ -197,8 +172,8 @@ async function authedPull(
   cursor: number,
   observer?: RelayObserver
 ): Promise<{ status: number; body: RelayPullBody }> {
-  // Without an observer the legacy token-only form is used (401-first
-  // negative paths); positive diagnostics pass the paired observer.
+  // Without an observer the token-only form is used (401-first negative
+  // paths); positive diagnostics pass the paired observer.
   if (!observer) {
     const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}`, {
       headers: { Authorization: `Bearer ${token}` }
@@ -206,11 +181,11 @@ async function authedPull(
     const body = (await res.json().catch(() => ({ operations: [], cursor }))) as RelayPullBody
     return { status: res.status, body }
   }
-  const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent(observer.deviceId)}`, {
+  const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent('raw-observer')}`, {
     headers: {
       Authorization: `Bearer ${token}`,
-      'x-sync-device-id': observer.deviceId,
-      'x-sync-device-auth': observer.deviceAuth
+      'x-sync-device-code': observer.code,
+      'x-sync-device-secret': observer.secret
     }
   })
   const body = (await res.json().catch(() => ({ operations: [], cursor }))) as RelayPullBody
@@ -418,6 +393,52 @@ test.describe('Sync file-backed relay restart', () => {
       const cursorB0 = statusBBase.cursor
       const conflictsB0 = statusBBase.conflictCount
 
+      // Capture the observer channel for post-restart membership retention.
+      const observerStateBeforeRes = await fetch(`${endpoint}/sync/state`, {
+        headers: {
+          Authorization: `Bearer ${RELAY_TOKEN}`,
+          'x-sync-device-code': observer.code,
+          'x-sync-device-secret': observer.secret
+        }
+      })
+      expect(observerStateBeforeRes.status).toBe(200)
+      const observerStateBefore = (await observerStateBeforeRes.json()) as {
+        paired: boolean
+        channelId: string | null
+      }
+      expect(observerStateBefore.paired).toBe(true)
+      expect(typeof observerStateBefore.channelId).toBe('string')
+      const observerChannelBefore = observerStateBefore.channelId as string
+
+      // Stage a pending pairing request that must survive the restart and
+      // stay resolvable afterwards (two fresh raw devices, unpaired).
+      const rawRegister = async (): Promise<RelayObserver> => {
+        const res = await fetch(`${endpoint}/sync/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RELAY_TOKEN}` },
+          body: JSON.stringify({})
+        })
+        expect(res.status).toBe(200)
+        const body = (await res.json()) as { deviceCode: string; deviceSecret: string }
+        return { code: body.deviceCode, secret: body.deviceSecret }
+      }
+      const pendingRequester = await rawRegister()
+      const pendingTarget = await rawRegister()
+      const pendingReqRes = await fetch(`${endpoint}/sync/pair/request`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${RELAY_TOKEN}`,
+          'x-sync-device-code': pendingRequester.code,
+          'x-sync-device-secret': pendingRequester.secret
+        },
+        body: JSON.stringify({ targetCode: pendingTarget.code })
+      })
+      expect(pendingReqRes.status).toBe(200)
+      const pendingReqBody = (await pendingReqRes.json()) as { requestId: string }
+      expect(typeof pendingReqBody.requestId).toBe('string')
+      const pendingRequestId = pendingReqBody.requestId
+
       // Stop the owned relay child with bounded SIGTERM; the DB is retained.
       const relayPid = relay.pid()
       expect(relayPid).toBeGreaterThan(0)
@@ -466,7 +487,144 @@ test.describe('Sync file-backed relay restart', () => {
       expect(retained.body.cursor).toBe(cursorBefore)
       expect(retained.body.operations.map((o: any) => o.seq)).toEqual(seqs)
 
+      // Stable device code/credential reattach on the same DB/token: the
+      // observer reattaches with its durable secret (same code, no rotation).
+      const reattachRes = await fetch(`${endpoint}/sync/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RELAY_TOKEN}` },
+        body: JSON.stringify({ deviceCode: observer.code, deviceSecret: observer.secret })
+      })
+      expect(reattachRes.status).toBe(200)
+      const reattachBody = (await reattachRes.json()) as { deviceCode: string; deviceSecret?: unknown }
+      expect(reattachBody.deviceCode).toBe(observer.code)
+      expect(reattachBody.deviceSecret).toBeUndefined()
+      // Unknown credentials still fail closed after restart.
+      const unknownRes = await fetch(`${endpoint}/sync/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RELAY_TOKEN}` },
+        body: JSON.stringify({ deviceCode: 'ZZZZ9999', deviceSecret: '0'.repeat(64) })
+      })
+      expect(unknownRes.status).toBe(403)
+      await unknownRes.json().catch(() => ({}))
+
+      // Membership/channel retained for the observer.
+      const observerStateAfterRes = await fetch(`${endpoint}/sync/state`, {
+        headers: {
+          Authorization: `Bearer ${RELAY_TOKEN}`,
+          'x-sync-device-code': observer.code,
+          'x-sync-device-secret': observer.secret
+        }
+      })
+      expect(observerStateAfterRes.status).toBe(200)
+      const observerStateAfter = (await observerStateAfterRes.json()) as {
+        paired: boolean
+        channelId: string | null
+      }
+      expect(observerStateAfter.paired).toBe(true)
+      expect(observerStateAfter.channelId).toBe(observerChannelBefore)
+
+      // Pending request retained across restart and resolvable afterwards.
+      const pendingStateBeforeRes = await fetch(`${endpoint}/sync/state`, {
+        headers: {
+          Authorization: `Bearer ${RELAY_TOKEN}`,
+          'x-sync-device-code': pendingRequester.code,
+          'x-sync-device-secret': pendingRequester.secret
+        }
+      })
+      expect(pendingStateBeforeRes.status).toBe(200)
+      const pendingStateBefore = (await pendingStateBeforeRes.json()) as {
+        outgoing: { id: string } | null
+      }
+      expect(pendingStateBefore.outgoing?.id).toBe(pendingRequestId)
+      const pendingAcceptRes = await fetch(`${endpoint}/sync/pair/accept`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${RELAY_TOKEN}`,
+          'x-sync-device-code': pendingTarget.code,
+          'x-sync-device-secret': pendingTarget.secret
+        },
+        body: JSON.stringify({ requestId: pendingRequestId })
+      })
+      expect(pendingAcceptRes.status).toBe(200)
+      const pendingAcceptBody = (await pendingAcceptRes.json()) as { channelId: string }
+      expect(typeof pendingAcceptBody.channelId).toBe('string')
+
+      // Per-channel ops/cursor continuous and appendable N+1 via the raw
+      // observer identity (registration binds to 'e2e-raw-observer').
+      const rawOpId = 'e2e-restart-raw-n1'
+      const rawPushRes = await fetch(`${endpoint}/sync/push`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${RELAY_TOKEN}`,
+          'x-sync-device-code': observer.code,
+          'x-sync-device-secret': observer.secret
+        },
+        body: JSON.stringify({
+          deviceId: 'e2e-raw-observer',
+          operations: [
+            {
+              id: rawOpId,
+              entityType: 'topic',
+              op: 'upsert',
+              entityId: 'e2e-restart-raw-t-n1',
+              timestamp: 1000,
+              deviceId: 'e2e-raw-observer',
+              payload: { id: 'e2e-restart-raw-t-n1', name: 'RawN1' }
+            }
+          ]
+        })
+      })
+      expect(rawPushRes.status).toBe(200)
+      const rawPushBody = (await rawPushRes.json()) as { cursor: number; acceptedIds: string[] }
+      expect(rawPushBody.acceptedIds).toEqual([rawOpId])
+      expect(rawPushBody.cursor).toBe(cursorBefore + 1)
+      const afterRaw = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
+      expect(afterRaw.status).toBe(200)
+      expect(afterRaw.body.cursor).toBe(cursorBefore + 1)
+      expect(afterRaw.body.operations.map((o: any) => o.seq)).toEqual(
+        Array.from({ length: seqs.length + 1 }, (_, i) => i + 1)
+      )
+      const cursorAfterRaw = (afterRaw.body.cursor as number) ?? cursorBefore + 1
+
+      // Identity spoof fails closed with 403 and no mutation.
+      const spoofRes = await fetch(`${endpoint}/sync/push`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${RELAY_TOKEN}`,
+          'x-sync-device-code': observer.code,
+          'x-sync-device-secret': observer.secret
+        },
+        body: JSON.stringify({
+          deviceId: 'spoofed-device',
+          operations: [
+            {
+              id: 'e2e-restart-spoof-1',
+              entityType: 'topic',
+              op: 'upsert',
+              entityId: 'e2e-restart-spoof-t-1',
+              timestamp: 1001,
+              deviceId: 'spoofed-device',
+              payload: { id: 'e2e-restart-spoof-t-1', name: 'Spoof' }
+            }
+          ]
+        })
+      })
+      expect(spoofRes.status).toBe(403)
+      const spoofBody = (await spoofRes.json().catch(() => ({}))) as { error?: string }
+      expect(String(spoofBody.error ?? '')).toContain('device identity mismatch')
+      const afterSpoof = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
+      expect(afterSpoof.status).toBe(200)
+      expect(afterSpoof.body.cursor).toBe(cursorAfterRaw)
+      expect(stableOpProjection(afterSpoof.body.operations)).toEqual(stableOpProjection(afterRaw.body.operations))
+
       // Strict push/pull reconciliation: A pushes the queued edit, B pulls it.
+      // Full production relay app flow in this spec: Connect/register ->
+      // device-code request -> accept -> real chat sync already happened above
+      // via pairProfilesViaApi + append/update + runSync; the queued edit now
+      // converges after the restart on the same file-backed relay.
       const pushed = await runSyncViaApi(pageA)
       expect(pushed.threw).toBeNull()
       expect(pushed.status.lastError).toBeNull()

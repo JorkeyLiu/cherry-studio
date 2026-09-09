@@ -148,17 +148,17 @@ export function c02StrictDecodeStableGroupId(groupId: string | null): string[] |
   if (groupId === 'group:empty') return null
   if (groupId.startsWith('|') || groupId.endsWith('|') || groupId.includes('||')) return null
   const result: string[] = []
-  let pos = 0
+  let pos: number = 0
   while (pos < groupId.length) {
-    const colonIdx = groupId.indexOf(':', pos)
+    const colonIdx: number = groupId.indexOf(':', pos)
     if (colonIdx === -1) return null
-    const lenStr = groupId.slice(pos, colonIdx)
+    const lenStr: string = groupId.slice(pos, colonIdx)
     if (lenStr.length === 0 || !/^\d+$/.test(lenStr)) return null
     if (lenStr.length > 1 && lenStr[0] === '0') return null
-    const len = Number(lenStr)
+    const len: number = Number(lenStr)
     if (!Number.isFinite(len) || !Number.isInteger(len) || len < 0) return null
     if (String(len) !== lenStr) return null
-    const idStart = colonIdx + 1
+    const idStart: number = colonIdx + 1
     const idEnd = idStart + len
     if (idEnd > groupId.length) return null
     const id = groupId.slice(idStart, idEnd)

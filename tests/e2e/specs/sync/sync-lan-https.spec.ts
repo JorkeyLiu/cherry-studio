@@ -337,22 +337,42 @@ test.describe('Sync native LAN HTTPS relay', () => {
       await setSyncConfigViaApi(pageA, { endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint, token: RELAY_TOKEN, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
-      // Independent trusted observer proves retained trust/operations/cursor.
-      const invite = await pageA.evaluate(async () => await (window as any).api.sync.createInvite())
-      if (!invite || typeof invite.code !== 'string') throw new Error('observer pairing: invite missing')
+      // Independent paired observer proves retained registration/channel/cursor.
+      const targetCode = (await pageA.evaluate(async () => await (window as any).api.sync.getDeviceCode())) as {
+        deviceCode: string
+      }
+      if (!targetCode || typeof targetCode.deviceCode !== 'string') {
+        throw new Error('observer pairing: approver device code missing')
+      }
+      const regRes = await httpsJson(
+        endpoint,
+        'POST',
+        '/sync/register',
+        certPath,
+        { Authorization: `Bearer ${RELAY_TOKEN}` },
+        {}
+      )
+      if (regRes.status !== 200) throw new Error(`observer pairing: register ${regRes.status}`)
+      if (typeof regRes.body.deviceCode !== 'string' || typeof regRes.body.deviceSecret !== 'string') {
+        throw new Error('observer pairing: malformed register response')
+      }
+      const observer = { code: regRes.body.deviceCode as string, secret: regRes.body.deviceSecret as string }
       const reqRes = await httpsJson(
         endpoint,
         'POST',
         '/sync/pair/request',
         certPath,
-        { Authorization: `Bearer ${RELAY_TOKEN}` },
-        { deviceId: 'e2e-lan-https-observer', code: invite.code }
+        {
+          Authorization: `Bearer ${RELAY_TOKEN}`,
+          'x-sync-device-code': observer.code,
+          'x-sync-device-secret': observer.secret
+        },
+        { targetCode: targetCode.deviceCode }
       )
       if (reqRes.status !== 200) throw new Error(`observer pairing: request ${reqRes.status}`)
-      if (typeof reqRes.body.requestId !== 'string' || typeof reqRes.body.deviceAuth !== 'string') {
+      if (typeof reqRes.body.requestId !== 'string') {
         throw new Error('observer pairing: malformed response')
       }
-      const observer = { deviceId: 'e2e-lan-https-observer', deviceAuth: reqRes.body.deviceAuth as string }
       await pageA.evaluate(
         async (requestId: string) => await (window as any).api.sync.acceptPairing(requestId),
         reqRes.body.requestId as string
@@ -361,12 +381,12 @@ test.describe('Sync native LAN HTTPS relay', () => {
         await httpsJson(
           endpoint,
           'GET',
-          `/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent(observer.deviceId)}`,
+          `/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent('raw-observer')}`,
           certPath,
           {
             Authorization: `Bearer ${RELAY_TOKEN}`,
-            'x-sync-device-id': observer.deviceId,
-            'x-sync-device-auth': observer.deviceAuth
+            'x-sync-device-code': observer.code,
+            'x-sync-device-secret': observer.secret
           }
         )
 

@@ -38,28 +38,41 @@ export interface SyncPushResponse {
   acceptedIds: string[]
   cursor: number
   /**
-   * One-time device credential plaintext, present only when the relay newly
-   * issues a credential for the calling device (founder bootstrap). The
-   * caller must persist it and present it as `X-Sync-Device-Auth` on all
-   * later calls. Absent otherwise.
+   * Stable internal channel identity scoping this cursor (SYNC-CC-016).
+   * Internal only: used for per-channel cursor scoping, never shown in UI.
    */
-  deviceAuth?: string
+  channelId?: string
 }
 
 export interface SyncPullResponse {
   operations: SyncRelayOperation[]
   cursor: number
   /**
-   * One-time device credential plaintext, present only when the relay newly
-   * issues a credential for the calling device (founder bootstrap via pull).
+   * Stable internal channel identity scoping this cursor (SYNC-CC-016).
+   * Internal only: used for per-channel cursor scoping, never shown in UI.
    */
-  deviceAuth?: string
+  channelId?: string
 }
 
 export interface SyncConfig {
   endpoint: string
   token?: string
   enabled: boolean
+}
+
+/**
+ * Relay service connection state (SYNC-CC-003/004/006), observed per client.
+ * Separate from channel pairing state. Reports this client's own observed
+ * relay attachment, never broadcast presence of other devices.
+ */
+export type SyncServiceState = 'unregistered' | 'connected' | 'disconnected'
+
+export interface SyncServiceStatus {
+  state: SyncServiceState
+  /** This device's public device code when registered. Safe to display. */
+  deviceCode: string | null
+  /** True after an explicit user Disconnect (attachment stopped, registration kept). */
+  explicitDisconnect: boolean
 }
 
 export interface SyncStatus {

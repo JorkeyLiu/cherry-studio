@@ -290,6 +290,8 @@ describe('cursor semantics: push must not advance pull cursor', () => {
     // Setup config
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
     configStore.set('sync:token', '')
+    configStore.set('sync:deviceCode', 'ABCD2345')
+    configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     configStore.set('sync:enabled', true)
     // Set initial pull cursor to 5
     db.insert(schema.syncState)
@@ -356,6 +358,8 @@ describe('cursor semantics: push must not advance pull cursor', () => {
   it('orphan block prevents cursor advancement beyond it', async () => {
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
     configStore.set('sync:token', '')
+    configStore.set('sync:deviceCode', 'ABCD2345')
+    configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     configStore.set('sync:enabled', true)
     db.insert(schema.syncState)
       .values({ key: 'cursor', value: '0' })

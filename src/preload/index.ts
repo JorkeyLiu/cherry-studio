@@ -635,16 +635,16 @@ const api = {
     getStatus: () => ipcRenderer.invoke(IpcChannel.Sync_GetStatus),
     sync: () => ipcRenderer.invoke(IpcChannel.Sync_Sync),
     getDeviceId: () => ipcRenderer.invoke(IpcChannel.Sync_GetDeviceId),
-    createInvite: () => ipcRenderer.invoke(IpcChannel.Sync_CreateInvite),
-    requestPairing: (args: { code: string; deviceName?: string }) =>
-      ipcRenderer.invoke(IpcChannel.Sync_RequestPairing, args),
-    listPairingRequests: () => ipcRenderer.invoke(IpcChannel.Sync_ListPairingRequests),
+    connect: () => ipcRenderer.invoke(IpcChannel.Sync_Connect),
+    disconnect: () => ipcRenderer.invoke(IpcChannel.Sync_Disconnect),
+    getServiceStatus: () => ipcRenderer.invoke(IpcChannel.Sync_GetServiceStatus),
+    getDeviceCode: () => ipcRenderer.invoke(IpcChannel.Sync_GetDeviceCode),
+    getPairState: () => ipcRenderer.invoke(IpcChannel.Sync_GetPairState),
+    requestPairing: (args: { targetCode: string }) => ipcRenderer.invoke(IpcChannel.Sync_RequestPairing, args),
+    cancelPairing: (args?: { requestId?: string }) => ipcRenderer.invoke(IpcChannel.Sync_CancelPairing, args),
     acceptPairing: (requestId: string) => ipcRenderer.invoke(IpcChannel.Sync_AcceptPairing, { requestId }),
     rejectPairing: (requestId: string) => ipcRenderer.invoke(IpcChannel.Sync_RejectPairing, { requestId }),
-    listTrusted: () => ipcRenderer.invoke(IpcChannel.Sync_ListTrusted),
-    refreshTrusted: () => ipcRenderer.invoke(IpcChannel.Sync_RefreshTrusted),
-    getPairingStatus: () => ipcRenderer.invoke(IpcChannel.Sync_GetPairingStatus),
-    revokeDevice: (targetDeviceId: string) => ipcRenderer.invoke(IpcChannel.Sync_RevokeDevice, { targetDeviceId })
+    unpair: () => ipcRenderer.invoke(IpcChannel.Sync_Unpair)
   },
   chatDb: {
     fetchMessages: (request: FetchMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_FetchMessages, request),

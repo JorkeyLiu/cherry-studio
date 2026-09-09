@@ -180,17 +180,64 @@ async function stopRelayProcess(child: ChildProcess): Promise<void> {
   await stopChildBounded(child)
 }
 
+// Registered + paired channel identity for the data plane (SYNC-CC-*),
+// provisioned per relay base URL (same DB restart reuses the same identity).
+const pairedByBase = new Map<string, { code: string; secret: string }>()
+async function provisionPair(baseUrl: string, scopeKey?: string): Promise<{ code: string; secret: string }> {
+  const scope = scopeKey ?? baseUrl
+  const cached = pairedByBase.get(scope)
+  if (cached) return cached
+  const authed = { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` }
+  const reg = async (deviceId: string): Promise<{ code: string; secret: string }> => {
+    const res = await fetchWithTimeout(
+      `${baseUrl}/sync/register`,
+      { method: 'POST', headers: authed, body: JSON.stringify({ deviceId }) },
+      REQUEST_TIMEOUT_MS
+    )
+    if (res.status !== 200) throw new Error(`provision register failed: ${res.status}`)
+    const body = (await res.json()) as { deviceCode: string; deviceSecret: string }
+    return { code: body.deviceCode, secret: body.deviceSecret }
+  }
+  const a = await reg('spike-device-1')
+  const b = await reg('spike-device-2')
+  const req = await fetchWithTimeout(
+    `${baseUrl}/sync/pair/request`,
+    {
+      method: 'POST',
+      headers: { ...authed, 'x-sync-device-code': b.code, 'x-sync-device-secret': b.secret },
+      body: JSON.stringify({ targetCode: a.code })
+    },
+    REQUEST_TIMEOUT_MS
+  )
+  if (req.status !== 200) throw new Error(`provision request failed: ${req.status}`)
+  const reqBody = (await req.json()) as { requestId: string }
+  const accept = await fetchWithTimeout(
+    `${baseUrl}/sync/pair/accept`,
+    {
+      method: 'POST',
+      headers: { ...authed, 'x-sync-device-code': a.code, 'x-sync-device-secret': a.secret },
+      body: JSON.stringify({ requestId: reqBody.requestId })
+    },
+    REQUEST_TIMEOUT_MS
+  )
+  if (accept.status !== 200) throw new Error(`provision accept failed: ${accept.status}`)
+  pairedByBase.set(scope, a)
+  return a
+}
+
 async function pushOps(
   baseUrl: string,
   ops: unknown[],
-  token: string = TOKEN
+  token: string = TOKEN,
+  scopeKey?: string
 ): Promise<{ acceptedIds: string[]; cursor: number; status: number }> {
+  const dev = await provisionPair(baseUrl, scopeKey)
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${token}`,
-    'x-sync-device-id': 'spike-device-1'
+    'x-sync-device-code': dev.code,
+    'x-sync-device-secret': dev.secret
   }
-  if (deviceAuthState) headers['x-sync-device-auth'] = deviceAuthState
   const res = await fetchWithTimeout(
     `${baseUrl}/sync/push`,
     {
@@ -200,16 +247,23 @@ async function pushOps(
     },
     REQUEST_TIMEOUT_MS
   )
-  const body = (await res.json()) as { acceptedIds?: string[]; cursor?: number; deviceAuth?: unknown }
-  if (typeof body?.deviceAuth === 'string') deviceAuthState = body.deviceAuth
+  const body = (await res.json()) as { acceptedIds?: string[]; cursor?: number }
   return { acceptedIds: body.acceptedIds ?? [], cursor: body.cursor ?? -1, status: res.status }
 }
 
-let deviceAuthState: string | undefined
-
-async function pullOps(baseUrl: string, cursor: number, token: string = TOKEN, deviceId = 'spike-device-1') {
-  const headers: Record<string, string> = { Authorization: `Bearer ${token}`, 'x-sync-device-id': deviceId }
-  if (deviceAuthState && deviceId === 'spike-device-1') headers['x-sync-device-auth'] = deviceAuthState
+async function pullOps(
+  baseUrl: string,
+  cursor: number,
+  token: string = TOKEN,
+  deviceId = 'spike-device-1',
+  scopeKey?: string
+) {
+  const dev = await provisionPair(baseUrl, scopeKey)
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    'x-sync-device-code': dev.code,
+    'x-sync-device-secret': dev.secret
+  }
   const res = await fetchWithTimeout(
     `${baseUrl}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent(deviceId)}`,
     {
@@ -217,8 +271,7 @@ async function pullOps(baseUrl: string, cursor: number, token: string = TOKEN, d
     },
     REQUEST_TIMEOUT_MS
   )
-  const body = (await res.json()) as { operations?: any[]; cursor?: number; deviceAuth?: unknown }
-  if (typeof body?.deviceAuth === 'string' && deviceId === 'spike-device-1') deviceAuthState = body.deviceAuth
+  const body = (await res.json()) as { operations?: any[]; cursor?: number }
   return { status: res.status, operations: body.operations ?? [], cursor: body.cursor ?? -1 }
 }
 
@@ -276,12 +329,12 @@ describe('sync relay CLI restart spike', () => {
 
       const op1 = buildOp(1, 1700000000001)
       const op2 = buildOp(2, 1700000000002)
-      const pushRes = await pushOps(first.baseUrl, [op1, op2])
+      const pushRes = await pushOps(first.baseUrl, [op1, op2], TOKEN, dbPath)
       expect(pushRes.status).toBe(200)
       expect(pushRes.acceptedIds).toEqual(['spike-op-1', 'spike-op-2'])
       expect(pushRes.cursor).toBe(2)
 
-      const pullRes = await pullOps(first.baseUrl, 0)
+      const pullRes = await pullOps(first.baseUrl, 0, TOKEN, 'spike-device-1', dbPath)
       expect(pullRes.status).toBe(200)
       expect(pullRes.cursor).toBe(2)
       expect(pullRes.operations.map((o) => o.id)).toEqual(['spike-op-1', 'spike-op-2'])
@@ -320,25 +373,25 @@ describe('sync relay CLI restart spike', () => {
     try {
       await waitForHealth(second.baseUrl)
 
-      const retained = await pullOps(second.baseUrl, 0)
+      const retained = await pullOps(second.baseUrl, 0, TOKEN, 'spike-device-1', dbPath)
       expect(retained.status).toBe(200)
       expect(retained.cursor).toBe(2)
       expect(retained.operations.map((o) => o.id)).toEqual(['spike-op-1', 'spike-op-2'])
       expect(retained.operations.map((o) => o.seq)).toEqual([1, 2])
 
       const op3 = buildOp(3, 1700000000003)
-      const push3 = await pushOps(second.baseUrl, [op3])
+      const push3 = await pushOps(second.baseUrl, [op3], TOKEN, dbPath)
       expect(push3.status).toBe(200)
       expect(push3.acceptedIds).toEqual(['spike-op-3'])
       expect(push3.cursor).toBe(3)
 
-      const delta = await pullOps(second.baseUrl, 2)
+      const delta = await pullOps(second.baseUrl, 2, TOKEN, 'spike-device-1', dbPath)
       expect(delta.status).toBe(200)
       expect(delta.cursor).toBe(3)
       expect(delta.operations.map((o) => o.id)).toEqual(['spike-op-3'])
       expect(delta.operations.map((o) => o.seq)).toEqual([3])
 
-      const full = await pullOps(second.baseUrl, 0)
+      const full = await pullOps(second.baseUrl, 0, TOKEN, 'spike-device-1', dbPath)
       expect(full.operations.map((o) => o.seq)).toEqual([1, 2, 3])
       expect(full.cursor).toBe(3)
     } finally {

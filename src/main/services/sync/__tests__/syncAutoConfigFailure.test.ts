@@ -66,6 +66,8 @@ beforeEach(() => {
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
   configStore.set('sync:token', '')
+  configStore.set('sync:deviceCode', 'ABCD2345')
+  configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)
@@ -93,6 +95,11 @@ describe('requestAutoSync config-read failure is visible and invalidates stale w
     const fakeSubscriber = { start: vi.fn(), stop: stopSpy }
     const svc = new Cls({
       getConfig: valid,
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync,
       createSubscriber: () => fakeSubscriber as never
     })
@@ -125,6 +132,11 @@ describe('requestAutoSync config-read failure is visible and invalidates stale w
     const { SyncAutoService: Cls } = await import('../syncAuto')
     const svc = new Cls({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: () => Promise.resolve(null),
       createSubscriber: () => ({ start: vi.fn(), stop: vi.fn() }) as never
     })
@@ -150,6 +162,11 @@ describe('reconciliation config-read failure is visible and invalidates stale wo
     const fakeSubscriber = { start: vi.fn(), stop: stopSpy }
     const svc = new Cls({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync,
       createSubscriber: () => fakeSubscriber as never
     })

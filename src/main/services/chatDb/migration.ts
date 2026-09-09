@@ -1069,6 +1069,15 @@ export const MIGRATIONS: MigrationEntry[] = [
         source TEXT
       )`
     ]
+  },
+  {
+    key: '008_sync_channel_reset',
+    description:
+      'Reset superseded invite/founder/trust pairing state for the registration/channel protocol (SYNC-CC-013): drop the obsolete local trust mirror and clear the pre-channel global cursor so cursor values are never reused across channels. Local chats, outbox intent, clocks, and conflict records are preserved.',
+    sql: [
+      `DROP TABLE IF EXISTS sync_trusted_devices`,
+      `DELETE FROM sync_state WHERE key IN ('cursor', 'sync:channelKey')`
+    ]
   }
 ]
 

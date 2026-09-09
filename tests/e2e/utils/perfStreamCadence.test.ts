@@ -659,8 +659,8 @@ describe('Terminal snapshot types', () => {
 
   it('stale same-length DOM state cannot pass exactMatch', () => {
     // DOM has stale text at same length as expected — normalized text differs
-    const staleNormalized = 'HelloWorld!' // different from expected
-    const expectedNormalized = 'HelloWorld'
+    const staleNormalized: string = 'HelloWorld!' // different from expected
+    const expectedNormalized: string = 'HelloWorld'
     const snapshot = {
       observationTime: 1000,
       rawTextLength: 11,
@@ -672,8 +672,8 @@ describe('Terminal snapshot types', () => {
 
   it('stale same-length Redux content cannot pass exactContentMatch', () => {
     // Redux has different content at same length — genuinely equal-length mismatch
-    const staleContent = 'JelloWorld' // 10 chars, same length as expected but different content
-    const expectedContent = 'HelloWorld' // 10 chars
+    const staleContent: string = 'JelloWorld' // 10 chars, same length as expected but different content
+    const expectedContent: string = 'HelloWorld' // 10 chars
     const snapshot = {
       observationTime: 1000,
       rawContent: staleContent,
@@ -857,8 +857,8 @@ describe('same-length nonmatching terminal snapshots', () => {
   it('DOM snapshot with same length but different normalized text fails exactMatch', () => {
     // Expected: "HelloWorld" (10 chars normalized)
     // DOM has: "JelloWorld" → normalized "JelloWorld" (10 chars, same length, different content)
-    const expectedNormalized = 'HelloWorld'
-    const domNormalized = 'JelloWorld' // genuinely equal-length mismatch (10 === 10)
+    const expectedNormalized: string = 'HelloWorld'
+    const domNormalized: string = 'JelloWorld' // genuinely equal-length mismatch (10 === 10)
     const snapshot = {
       observationTime: 1000,
       rawTextLength: 10,
@@ -870,8 +870,8 @@ describe('same-length nonmatching terminal snapshots', () => {
   })
 
   it('Redux snapshot with same length but different content fails exactContentMatch', () => {
-    const expectedContent = 'HelloWorld'
-    const actualContent = 'JelloWorld' // genuinely equal-length mismatch (10 === 10)
+    const expectedContent: string = 'HelloWorld'
+    const actualContent: string = 'JelloWorld' // genuinely equal-length mismatch (10 === 10)
     const snapshot = {
       observationTime: 1000,
       rawContent: actualContent,

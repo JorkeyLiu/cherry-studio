@@ -35,7 +35,11 @@ import {
   isoNow,
   listTrashTopicIdsViaApi,
   restoreTopicViaApi,
+  connectViaApi,
   pairProfilesViaApi,
+  provisionObserverViaRaw,
+  RAW_OBSERVER_CLIENT_DEVICE_ID,
+  type ProvisionedObserver,
   runSyncViaApi,
   setSyncConfigViaApi,
   softDeleteTopicViaApi,
@@ -47,31 +51,31 @@ import {
 const RELAY_TOKEN = 'e2e-sync-token-1'
 
 /**
- * Device-identity framing for raw relay diagnostics (F-001/F-002): test-side
- * raw pulls and replay pushes authenticate as an already-trusted relay
- * member with the runner-observed issued credential. Production traffic
- * always goes through SyncClient; these helpers cover raw HTTP diagnostics
- * only and never mint trust.
+ * Raw relay diagnostics (SYNC-CC-*): test-side raw pulls and replay pushes
+ * authenticate as a dedicated observer device that joins the apps' channel
+ * through the production pairing flow (register over raw HTTP, request with
+ * the approver's public device code, accept via the approver's IPC).
+ * Production traffic always goes through SyncClient; these helpers cover
+ * raw HTTP diagnostics only. Secrets live in the test process and are never
+ * logged. The observer identity (code/secret/clientDeviceId) is typed as the
+ * single-source ProvisionedObserver from the helper.
  */
-function relayTrustedDeviceId(relay: TestRelayHandle): string {
-  const ids = relay.listTrustedDeviceIdsForTests()
-  if (ids.length === 0) throw new Error('relay trust set empty: pair apps before raw relay diagnostics')
-  return ids[0]
+type RawObserver = ProvisionedObserver
+
+async function ensureRawObserver(relay: TestRelayHandle, approverPage: Page): Promise<RawObserver> {
+  return await provisionObserverViaRaw(relay.endpoint, RELAY_TOKEN, approverPage)
 }
 
-function relayDeviceHeaders(relay: TestRelayHandle, deviceId: string): Record<string, string> {
-  const headers: Record<string, string> = {
+function relayDeviceHeaders(observer: RawObserver): Record<string, string> {
+  return {
     Authorization: `Bearer ${RELAY_TOKEN}`,
-    'x-sync-device-id': deviceId
+    'x-sync-device-code': observer.code,
+    'x-sync-device-secret': observer.secret
   }
-  const auth = relay.getIssuedDeviceAuthForTests(deviceId)
-  if (auth) headers['x-sync-device-auth'] = auth
-  return headers
 }
 
-function relayPullUrl(relay: TestRelayHandle, cursor: number | string, deviceId?: string): string {
-  const did = deviceId ?? relayTrustedDeviceId(relay)
-  return `${relay.endpoint}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent(did)}`
+function relayPullUrl(relay: TestRelayHandle, cursor: number | string): string {
+  return `${relay.endpoint}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent('raw-observer')}`
 }
 
 interface OfflineBlocker {
@@ -393,6 +397,13 @@ test.describe('Sync MVP two-profile real path', () => {
 
       await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
       await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: 'wrong-token', enabled: true })
+
+      // A connects and pairs with a raw observer (wrong-token B can never
+      // attach, so it cannot be the pairing peer).
+      await connectViaApi(pageA)
+      await provisionObserverViaRaw(relay.endpoint, RELAY_TOKEN, pageA)
+      // B's explicit Connect fails closed on the wrong token (401 wins).
+      await expect(connectViaApi(pageB)).rejects.toThrow(/401/)
 
       const topic = 'e2e-sync-topic-denied'
       const msg = 'e2e-sync-msg-denied'
@@ -726,11 +737,10 @@ test.describe('Sync delete/recovery convergence', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBeGreaterThan(relayOpsBeforeChild)
       expect(relay.getCursor()).toBeGreaterThan(relayCursorBeforeChild)
-      const deliveredDid = relayTrustedDeviceId(relay)
-      const deliveredRes = await fetch(
-        `${relay.endpoint}/sync/pull?cursor=${relayCursorBeforeChild}&deviceId=${encodeURIComponent(deliveredDid)}`,
-        { headers: relayDeviceHeaders(relay, deliveredDid) }
-      )
+      const deliveredObserver = await ensureRawObserver(relay, pageA)
+      const deliveredRes = await fetch(relayPullUrl(relay, relayCursorBeforeChild), {
+        headers: relayDeviceHeaders(deliveredObserver)
+      })
       expect(deliveredRes.status).toBe(200)
       const deliveredBody = (await deliveredRes.json()) as { operations: any[]; cursor: number }
       const deliveredEntityIds = deliveredBody.operations.map((o: any) => String(o?.entityId))
@@ -1075,19 +1085,18 @@ async function pollForRelayLwwWinner(
   entityId: string,
   candidates: string[],
   timeoutMs = 120000,
-  relay?: TestRelayHandle
+  observer?: RawObserver
 ): Promise<RelayMessageUpsert> {
   const deadline = Date.now() + timeoutMs
   let last = ''
   while (Date.now() < deadline) {
-    // Device-identity framing when the runner relay is available; the legacy
-    // token-only form is kept only for callers without a handle.
+    // Channel-member framing via the provisioned observer; the legacy
+    // token-only form is kept only for callers without an observer.
     let url = `${endpoint}/sync/pull?cursor=${baseCursor}`
     let headers: Record<string, string> = { Authorization: `Bearer ${token}` }
-    if (relay) {
-      const did = relayTrustedDeviceId(relay)
-      url = `${endpoint}/sync/pull?cursor=${baseCursor}&deviceId=${encodeURIComponent(did)}`
-      headers = relayDeviceHeaders(relay, did)
+    if (observer) {
+      url = `${endpoint}/sync/pull?cursor=${baseCursor}&deviceId=${encodeURIComponent('raw-observer')}`
+      headers = relayDeviceHeaders(observer)
     }
     const res = await fetch(url, { headers })
     expect(res.status).toBe(200)
@@ -1331,6 +1340,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       // winner computed from the authenticated relay pull path.
       relay.setPaused(false)
       expect(relay.isPaused()).toBe(false)
+      const lwwObserver = await ensureRawObserver(relay, pageA)
       const lwwWinner = await pollForRelayLwwWinner(
         relay.endpoint,
         RELAY_TOKEN,
@@ -1338,7 +1348,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
         msg,
         [contentA, contentB],
         120000,
-        relay
+        lwwObserver
       )
       expect([contentA, contentB]).toContain(lwwWinner.content)
       const winner = await pollForSameContentAgreement(pageA, pageB, topic, msg, [contentA, contentB], 120000)
@@ -1579,6 +1589,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       // winner computed from the authenticated relay pull path.
       relay.setPaused(false)
       expect(relay.isPaused()).toBe(false)
+      const lwwObserver = await ensureRawObserver(relay, pageA)
       const lwwWinner = await pollForRelayLwwWinner(
         relay.endpoint,
         RELAY_TOKEN,
@@ -1586,7 +1597,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
         msg,
         [edit1, edit2, edit3],
         120000,
-        relay
+        lwwObserver
       )
       const winner = await pollForSameContentAgreement(pageB, pageA, topic, msg, [edit1, edit2, edit3], 120000)
       expect(winner).toBe(lwwWinner.content)
@@ -1601,11 +1612,10 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
       expect(relay.getCursor()).toBe(relayCursorBase + 3)
-      const pullDid = relayTrustedDeviceId(relay)
-      const pullRes = await fetch(
-        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
-        { headers: relayDeviceHeaders(relay, pullDid) }
-      )
+      const rawObserver = await ensureRawObserver(relay, pageA)
+      const pullRes = await fetch(relayPullUrl(relay, relayCursorBase), {
+        headers: relayDeviceHeaders(rawObserver)
+      })
       expect(pullRes.status).toBe(200)
       const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
       const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
@@ -1772,11 +1782,10 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
       expect(relay.getCursor()).toBe(relayCursorBase + 3)
-      const pullDid = relayTrustedDeviceId(relay)
-      const pullRes = await fetch(
-        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
-        { headers: relayDeviceHeaders(relay, pullDid) }
-      )
+      const rawObserver = await ensureRawObserver(relay, pageA)
+      const pullRes = await fetch(relayPullUrl(relay, relayCursorBase), {
+        headers: relayDeviceHeaders(rawObserver)
+      })
       expect(pullRes.status).toBe(200)
       const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
       const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
@@ -1963,11 +1972,10 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBe(relayOpsBase + 4)
       expect(relay.getCursor()).toBe(relayCursorBase + 4)
-      const pullDid = relayTrustedDeviceId(relay)
-      const pullRes = await fetch(
-        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
-        { headers: relayDeviceHeaders(relay, pullDid) }
-      )
+      const rawObserver = await ensureRawObserver(relay, pageA)
+      const pullRes = await fetch(relayPullUrl(relay, relayCursorBase), {
+        headers: relayDeviceHeaders(rawObserver)
+      })
       expect(pullRes.status).toBe(200)
       const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
       const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
@@ -2365,11 +2373,10 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       }
       // Relay evidence from the baseline cursor: exactly 3 message upserts
       // with globally continuous seq and per-entity content mapping.
-      const heldDid = relayTrustedDeviceId(relay)
-      const heldPull = await fetch(
-        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(heldDid)}`,
-        { headers: relayDeviceHeaders(relay, heldDid) }
-      )
+      const heldObserver = await ensureRawObserver(relay, pageReader)
+      const heldPull = await fetch(relayPullUrl(relay, relayCursorBase), {
+        headers: relayDeviceHeaders(heldObserver)
+      })
       // Pull is gated, so the contract-level pull fails closed here; the
       // in-memory counters above are the push-commit proof while gated.
       expect(heldPull.status).toBe(503)
@@ -2387,11 +2394,10 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
       expect(relay.getCursor()).toBe(relayCursorBase + 3)
-      const pullDid = relayTrustedDeviceId(relay)
-      const pullRes = await fetch(
-        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
-        { headers: relayDeviceHeaders(relay, pullDid) }
-      )
+      const rawObserver = await ensureRawObserver(relay, pageReader)
+      const pullRes = await fetch(relayPullUrl(relay, relayCursorBase), {
+        headers: relayDeviceHeaders(rawObserver)
+      })
       expect(pullRes.status).toBe(200)
       const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
       const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
@@ -2560,11 +2566,10 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       await relay.waitForQuiescent()
       expect(relay.getOperationCount()).toBe(relayOpsBase + 3)
       expect(relay.getCursor()).toBe(relayCursorBase + 3)
-      const pullDid = relayTrustedDeviceId(relay)
-      const pullRes = await fetch(
-        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
-        { headers: relayDeviceHeaders(relay, pullDid) }
-      )
+      const rawObserver = await ensureRawObserver(relay, pageReader)
+      const pullRes = await fetch(relayPullUrl(relay, relayCursorBase), {
+        headers: relayDeviceHeaders(rawObserver)
+      })
       expect(pullRes.status).toBe(200)
       const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
       const msgOps = (Array.isArray(pullBody.operations) ? pullBody.operations : [])
@@ -2617,9 +2622,13 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
   })
 
   test('identical operation replay is idempotent at the relay', async ({ mainWindow, ownedTmpRoot, mockPort }) => {
-    // Test-side replay only proves the existing relay idempotent-accept rule
-    // (same id + identical content returns 200/acceptedIds with no new seq).
-    // It does not claim a real client lost-response retry sequence.
+    // Observer-self-signed replay only proves the existing relay
+    // idempotent-accept rule (same id + identical content returns
+    // 200/acceptedIds with no new seq). It does not claim a real client
+    // lost-response retry sequence. The replayed operation is constructed
+    // fresh by the raw observer itself (body + op deviceId both equal the
+    // observer registration client id) — never a pull of A's op replayed
+    // under foreign credentials, which would violate identity binding.
     const pageA = mainWindow
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
@@ -2647,60 +2656,66 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const relayCursorBase = relay.getCursor()
       const relayOpsBase = relay.getOperationCount()
 
-      // One successful ordinary edit pushed and pulled on both profiles.
-      const edited = 'edit identical replay content twelve'
-      await updateMessageViaApi(pageA, topic, msg, { content: edited })
-      await pollForMessageContent(pageA, topic, msg, edited, 30000)
-      expect((await runSyncViaApi(pageA)).threw).toBeNull()
-      expect((await runSyncViaApi(pageB)).threw).toBeNull()
-      await pollForMessageContent(pageB, topic, msg, edited, 90000)
-      await pollForPendingDrained(pageA, 90000)
-      await pollForPendingDrained(pageB, 90000)
+      // Fresh observer-signed operation: legal, brand-new, self-signed.
+      // Both the push body deviceId and the op deviceId equal the observer
+      // registration client id (single typed source from the helper).
+      const rawObserver = await ensureRawObserver(relay, pageA)
+      const observerDeviceId = rawObserver.clientDeviceId
+      expect(observerDeviceId).toBe(RAW_OBSERVER_CLIENT_DEVICE_ID)
+      const opId = 'e2e-observer-replay-op-1'
+      const entityId = 'e2e-observer-replay-t-1'
+      const opTimestamp = Date.now()
+      const observerOp = {
+        id: opId,
+        entityType: 'topic',
+        op: 'upsert',
+        entityId,
+        timestamp: opTimestamp,
+        deviceId: observerDeviceId,
+        payload: { id: entityId, name: 'observer replay topic' }
+      }
+
+      // Identity binding is retained: a forged body/op deviceId that agrees
+      // with itself but not with the registration still fails closed.
+      const forgedRes = await fetch(`${relay.endpoint}/sync/push`, {
+        method: 'POST',
+        headers: { ...relayDeviceHeaders(rawObserver), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceId: 'forged-id',
+          operations: [{ ...observerOp, deviceId: 'forged-id' }]
+        })
+      })
+      expect(forgedRes.status).toBe(403)
+      expect(JSON.stringify(await forgedRes.json().catch(() => ({})))).toContain('device identity mismatch')
+      await relay.waitForQuiescent()
+      expect(relay.getCursor()).toBe(relayCursorBase)
+      expect(relay.getOperationCount()).toBe(relayOpsBase)
+
+      // First push commits exactly one new sequenced operation.
+      const firstRes = await fetch(`${relay.endpoint}/sync/push`, {
+        method: 'POST',
+        headers: { ...relayDeviceHeaders(rawObserver), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: observerDeviceId, operations: [observerOp] })
+      })
+      expect(firstRes.status).toBe(200)
+      const firstBody = (await firstRes.json()) as { acceptedIds: string[]; cursor: number }
+      expect(firstBody.acceptedIds).toEqual([opId])
+      expect(firstBody.cursor).toBe(relayCursorBase + 1)
       await relay.waitForQuiescent()
       const relayCursorAfterPush = relay.getCursor()
       const relayOpsAfterPush = relay.getOperationCount()
       expect(relayOpsAfterPush).toBe(relayOpsBase + 1)
       expect(relayCursorAfterPush).toBe(relayCursorBase + 1)
 
-      // Capture the committed operation over the existing relay contract.
-      const pullDid = relayTrustedDeviceId(relay)
-      const pullRes = await fetch(
-        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(pullDid)}`,
-        { headers: relayDeviceHeaders(relay, pullDid) }
-      )
-      expect(pullRes.status).toBe(200)
-      const pullBody = (await pullRes.json()) as { operations: any[]; cursor: number }
-      expect(pullBody.cursor).toBe(relayCursorAfterPush)
-      const pulled = (Array.isArray(pullBody.operations) ? pullBody.operations : []).filter(
-        (o: any) => o?.entityType === 'message' && o?.entityId === msg && o?.op === 'upsert'
-      )
-      expect(pulled.length).toBe(1)
-      const committed = pulled[0] as any
-      const committedSeq = Number(committed?.seq)
-      expect(committedSeq).toBe(relayCursorAfterPush)
-      // Rebuild the push-shaped identical operation strictly from relay
-      // contract fields (production push never sends seq).
-      const replayOp = {
-        id: String(committed.id),
-        entityType: String(committed.entityType),
-        op: String(committed.op),
-        entityId: String(committed.entityId),
-        timestamp: Number(committed.timestamp),
-        deviceId: String(committed.deviceId),
-        payload: committed.payload as Record<string, unknown>
-      }
-      expect(String((replayOp.payload as any)?.content)).toBe(edited)
-
-      // Identical replay once via the existing test-side HTTP push path
-      // (top-level deviceId mirrors the production push contract).
+      // Verbatim replay once: still accepted with no new sequence.
       const replayRes1 = await fetch(`${relay.endpoint}/sync/push`, {
         method: 'POST',
-        headers: { ...relayDeviceHeaders(relay, replayOp.deviceId), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deviceId: replayOp.deviceId, operations: [replayOp] })
+        headers: { ...relayDeviceHeaders(rawObserver), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: observerDeviceId, operations: [observerOp] })
       })
       expect(replayRes1.status).toBe(200)
       const replayBody1 = (await replayRes1.json()) as { acceptedIds: string[]; cursor: number }
-      expect(replayBody1.acceptedIds).toEqual([replayOp.id])
+      expect(replayBody1.acceptedIds).toEqual([opId])
       expect(replayBody1.cursor).toBe(relayCursorAfterPush)
       await relay.waitForQuiescent()
       expect(relay.getCursor()).toBe(relayCursorAfterPush)
@@ -2709,37 +2724,43 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       // One bounded repeat: still accepted with no new sequence.
       const replayRes2 = await fetch(`${relay.endpoint}/sync/push`, {
         method: 'POST',
-        headers: { ...relayDeviceHeaders(relay, replayOp.deviceId), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deviceId: replayOp.deviceId, operations: [replayOp] })
+        headers: { ...relayDeviceHeaders(rawObserver), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: observerDeviceId, operations: [observerOp] })
       })
       expect(replayRes2.status).toBe(200)
       const replayBody2 = (await replayRes2.json()) as { acceptedIds: string[]; cursor: number }
-      expect(replayBody2.acceptedIds).toEqual([replayOp.id])
+      expect(replayBody2.acceptedIds).toEqual([opId])
       expect(replayBody2.cursor).toBe(relayCursorAfterPush)
       await relay.waitForQuiescent()
       expect(relay.getCursor()).toBe(relayCursorAfterPush)
       expect(relay.getOperationCount()).toBe(relayOpsAfterPush)
 
-      // Pull still carries exactly one operation with the original seq.
-      const afterDid = relayTrustedDeviceId(relay)
-      const pullAfter = await fetch(
-        `${relay.endpoint}/sync/pull?cursor=${relayCursorBase}&deviceId=${encodeURIComponent(afterDid)}`,
-        { headers: relayDeviceHeaders(relay, afterDid) }
-      )
+      // Pull still carries exactly one operation with full semantics intact.
+      const pullAfter = await fetch(relayPullUrl(relay, relayCursorBase), {
+        headers: relayDeviceHeaders(rawObserver)
+      })
       expect(pullAfter.status).toBe(200)
       const pullAfterBody = (await pullAfter.json()) as { operations: any[]; cursor: number }
       const afterOps = (Array.isArray(pullAfterBody.operations) ? pullAfterBody.operations : []).filter(
-        (o: any) => o?.entityType === 'message' && o?.entityId === msg && o?.op === 'upsert'
+        (o: any) => String(o?.id) === opId
       )
       expect(afterOps.length).toBe(1)
-      expect(Number((afterOps[0] as any)?.seq)).toBe(committedSeq)
-      expect(String((afterOps[0] as any)?.id)).toBe(replayOp.id)
+      const afterOp = afterOps[0] as any
+      expect(Number(afterOp?.seq)).toBe(relayCursorAfterPush)
+      expect(String(afterOp?.id)).toBe(opId)
+      expect(String(afterOp?.entityType)).toBe('topic')
+      expect(String(afterOp?.op)).toBe('upsert')
+      expect(String(afterOp?.entityId)).toBe(entityId)
+      expect(Number(afterOp?.timestamp)).toBe(opTimestamp)
+      expect(String(afterOp?.deviceId)).toBe(observerDeviceId)
+      expect(afterOp?.payload).toEqual({ id: entityId, name: 'observer replay topic' })
       expect(pullAfterBody.cursor).toBe(relayCursorAfterPush)
 
-      // No duplicate business application: both profiles still carry the
-      // single edited content, outboxes drained, cursors/errors clean.
-      await pollForMessageContent(pageA, topic, msg, edited, 30000)
-      await pollForMessageContent(pageB, topic, msg, edited, 30000)
+      // No duplicate business application on the profiles: the baseline
+      // message still carries its single content, outboxes drained, no
+      // durable errors. The observer topic op adds no profile-visible edit.
+      await pollForMessageContent(pageA, topic, msg, base, 30000)
+      await pollForMessageContent(pageB, topic, msg, base, 30000)
       await pollForPendingDrained(pageA, 30000)
       await pollForPendingDrained(pageB, 30000)
       const statusA = await getSyncStatusViaApi(pageA)

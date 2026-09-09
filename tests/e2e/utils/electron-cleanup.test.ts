@@ -19,8 +19,8 @@ describe('Electron exact-profile cleanup', () => {
     expect(error).toBeInstanceOf(AggregateError)
     const messages = error.errors.map((entry: Error) => entry.message)
     expect(messages).toContain('close failed')
-    expect(messages.some((m) => m.includes('terminate failed'))).toBe(true)
-    expect(messages.some((m) => m.includes('scan failed'))).toBe(true)
+    expect(messages.some((m: string) => m.includes('terminate failed'))).toBe(true)
+    expect(messages.some((m: string) => m.includes('scan failed'))).toBe(true)
     expect(close).toHaveBeenCalledOnce()
     expect(terminate).toHaveBeenCalledWith('/owned/profile')
   })
@@ -55,7 +55,7 @@ describe('Electron exact-profile cleanup', () => {
     expect(error).toBeInstanceOf(AggregateError)
     const messages = error.errors.map((entry: Error) => entry.message)
     expect(messages).toContain('SIGKILL 8: permission denied')
-    expect(messages.some((m) => m.includes('processes remained'))).toBe(true)
+    expect(messages.some((m: string) => m.includes('processes remained'))).toBe(true)
   })
 
   it('succeeds even when close rejects but the exact profile becomes clean', async () => {

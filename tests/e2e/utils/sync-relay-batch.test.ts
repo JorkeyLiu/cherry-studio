@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { startTestRelay, type TestRelayHandle } from './sync-relay'
+import {
+  provisionPairedDevices,
+  provisionedHeaders,
+  startTestRelay,
+  type ProvisionedDevice,
+  type TestRelayHandle
+} from './sync-relay'
 
 const TOKEN = 'batch-atomicity-token'
 
@@ -17,10 +23,11 @@ function topicOp(id: string, entityId: string, name = 'N', ts = Date.now()): Rec
 }
 
 let relay: TestRelayHandle | null = null
+let dev: ProvisionedDevice | null = null
 
 beforeEach(async () => {
   relay = await startTestRelay(TOKEN)
-  deviceAuth = undefined
+  dev = (await provisionPairedDevices(relay.endpoint, TOKEN, 2))[0]
 })
 
 afterEach(async () => {
@@ -34,33 +41,27 @@ async function push(ops: Record<string, unknown>[]): Promise<{ status: number; b
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${TOKEN}`,
-    'x-sync-device-id': 'd1'
+    ...provisionedHeaders(dev!)
   }
-  if (deviceAuth) headers['x-sync-device-auth'] = deviceAuth
   const res = await fetch(`${relay!.endpoint}/sync/push`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ deviceId: 'd1', operations: ops })
   })
   const body = await res.json().catch(() => ({}))
-  if (typeof body?.deviceAuth === 'string') deviceAuth = body.deviceAuth
   return { status: res.status, body }
 }
-
-let deviceAuth: string | undefined
 
 async function pull(cursor = 0): Promise<any> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${TOKEN}`,
-    'x-sync-device-id': 'd1'
+    ...provisionedHeaders(dev!)
   }
-  if (deviceAuth) headers['x-sync-device-auth'] = deviceAuth
   const res = await fetch(`${relay!.endpoint}/sync/pull?cursor=${cursor}&deviceId=d1`, {
     headers
   })
   expect(res.status).toBe(200)
   const body = await res.json()
-  if (typeof body?.deviceAuth === 'string') deviceAuth = body.deviceAuth
   return body
 }
 

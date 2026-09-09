@@ -266,17 +266,17 @@ async function observeFinalSettledProjection(
         if (groupId === 'group:empty') return null
         if (groupId.startsWith('|') || groupId.endsWith('|') || groupId.includes('||')) return null
         const result: string[] = []
-        let pos = 0
+        let pos: number = 0
         while (pos < groupId.length) {
-          const colonIdx = groupId.indexOf(':', pos)
+          const colonIdx: number = groupId.indexOf(':', pos)
           if (colonIdx === -1) return null
-          const lenStr = groupId.slice(pos, colonIdx)
+          const lenStr: string = groupId.slice(pos, colonIdx)
           if (lenStr.length === 0 || !/^\d+$/.test(lenStr)) return null
           if (lenStr.length > 1 && lenStr[0] === '0') return null
-          const len = Number(lenStr)
+          const len: number = Number(lenStr)
           if (!Number.isFinite(len) || !Number.isInteger(len) || len < 0) return null
           if (String(len) !== lenStr) return null
-          const idStart = colonIdx + 1
+          const idStart: number = colonIdx + 1
           const idEnd = idStart + len
           if (idEnd > groupId.length) return null
           const id = groupId.slice(idStart, idEnd)
@@ -638,6 +638,7 @@ type C02ActivationSuccess = {
     contextBoundaryPresent: boolean
     contextBoundaryInsideMessages: boolean
     finalTopicDomProof: boolean
+    groupExactMatched?: boolean
     groupsWithFinalTopic: number
     globalDisplayMessages: number
     persistedAnchorGroupKey: string | null
@@ -653,6 +654,7 @@ type C02ActivationBlocked = {
   kind: 'blocked'
   blocker: string
   productionPath: string
+  rendererLogicalBytes: number
   topicsCreated: number
   messagesCreated: number
   blocksCreated: number
@@ -940,7 +942,7 @@ async function activateReduxProjection(
   // Fetch actual persisted contextCount once for per-topic oracle derivation (LOCK-001)
   const actualContextCountForPerTopic = await page.evaluate(
     ({ assistantId }) => {
-      const s = (window as unknown as Record<string, unknown>).store.getState() as Record<string, unknown>
+      const s = (window as unknown as { store: { getState(): Record<string, unknown> } }).store.getState()
       const assistantsState = s.assistants as Record<string, unknown> | undefined
       const list = (assistantsState?.assistants ?? []) as Array<{ id: string; settings?: Record<string, unknown> }>
       const defaultAss = assistantsState?.defaultAssistant as
@@ -1245,7 +1247,7 @@ async function activateReduxProjection(
   const finalTopicForOracle = syntheticTopics.find((t) => t.topicId === lastTopicId)!
   // Use captured actual as sole value; if missing/invalid, derive with undefined -> will be invalid and predicate fails closed (no literal 25)
   const expectedContext = c02DeriveExpectedContextForTopic(
-    finalTopicForOracle as unknown as { messages: Record<string, unknown>[] },
+    finalTopicForOracle,
     isContextCountValidForOracle ? (contextCountForOracle as number | null) : (undefined as unknown as number | null)
   )
   const expectedBoundaryPresent = expectedContext.boundaryPresent
@@ -1301,17 +1303,17 @@ async function activateReduxProjection(
           if (groupId === 'group:empty') return null
           if (groupId.startsWith('|') || groupId.endsWith('|') || groupId.includes('||')) return null
           const result: string[] = []
-          let pos = 0
+          let pos: number = 0
           while (pos < groupId.length) {
-            const colonIdx = groupId.indexOf(':', pos)
+            const colonIdx: number = groupId.indexOf(':', pos)
             if (colonIdx === -1) return null
-            const lenStr = groupId.slice(pos, colonIdx)
+            const lenStr: string = groupId.slice(pos, colonIdx)
             if (lenStr.length === 0 || !/^\d+$/.test(lenStr)) return null
             if (lenStr.length > 1 && lenStr[0] === '0') return null
-            const len = Number(lenStr)
+            const len: number = Number(lenStr)
             if (!Number.isFinite(len) || !Number.isInteger(len) || len < 0) return null
             if (String(len) !== lenStr) return null
-            const idStart = colonIdx + 1
+            const idStart: number = colonIdx + 1
             const idEnd = idStart + len
             if (idEnd > groupId.length) return null
             const id = groupId.slice(idStart, idEnd)
@@ -1455,17 +1457,17 @@ async function activateReduxProjection(
       if (groupId === 'group:empty') return null
       if (groupId.startsWith('|') || groupId.endsWith('|') || groupId.includes('||')) return null
       const result: string[] = []
-      let pos = 0
+      let pos: number = 0
       while (pos < groupId.length) {
-        const colonIdx = groupId.indexOf(':', pos)
+        const colonIdx: number = groupId.indexOf(':', pos)
         if (colonIdx === -1) return null
-        const lenStr = groupId.slice(pos, colonIdx)
+        const lenStr: string = groupId.slice(pos, colonIdx)
         if (lenStr.length === 0 || !/^\d+$/.test(lenStr)) return null
         if (lenStr.length > 1 && lenStr[0] === '0') return null
-        const len = Number(lenStr)
+        const len: number = Number(lenStr)
         if (!Number.isFinite(len) || !Number.isInteger(len) || len < 0) return null
         if (String(len) !== lenStr) return null
-        const idStart = colonIdx + 1
+        const idStart: number = colonIdx + 1
         const idEnd = idStart + len
         if (idEnd > groupId.length) return null
         const id = groupId.slice(idStart, idEnd)
@@ -1734,6 +1736,7 @@ async function activateReduxProjection(
       kind: 'blocked' as const,
       blocker: `productionPath incomplete: ${failed.join(',')} — c02-blocked-productionPath-incomplete`,
       productionPath: productionPathDetail,
+      rendererLogicalBytes,
       topicsCreated: topics.length,
       messagesCreated: messageTotal,
       blocksCreated: messageTotal,
@@ -1916,7 +1919,7 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
         `actual persisted contextCount must be present and valid (finite integer >=1 or null), not missing/undefined — got ${String(actualContextCountSingle)} — fail closed per LOCK-001 (no inferred 25)`
       ).toBe(true)
       const expectedCtxSingle = c02DeriveExpectedContextForTopic(
-        finalTopicObjForSingle as unknown as { messages: Record<string, unknown>[] },
+        finalTopicObjForSingle,
         actualContextCountSingle as number | null
       )
       const isWholeTopicSingle = expectedCtxSingle.isWholeTopic
@@ -2196,7 +2199,7 @@ test.describe('PERF-C02 renderer heap calibration (measurement-only, directional
         rendererLogicalBytes: number
         heapBefore: RendererHeapSample
         heapAfter: RendererHeapSample
-        allocation: Awaited<ReturnType<typeof activateReduxProjection>>
+        allocation: C02ActivationSuccess
         informativeness: { informative: boolean; reason: string }
         precision: HeapPrecisionLabel
         finalTopicId: string

@@ -1,12 +1,13 @@
 /**
- * Test-owned in-memory reference relay for sync E2E.
+ * Test-owned in-memory reference relay for sync E2E (SYNC-CC-* protocol).
  *
  * Per-spec, in-process, loopback-bound to an ephemeral port, token-protected,
  * fully closed/cleaned in teardown. Mirrors the transport contract of
- * scripts/sync-relay/server.ts (auth, limits, push/pull framing) WITHOUT
- * loading better-sqlite3 in the Playwright runner process — the runner must
- * stay ABI-neutral (the native binding belongs to the Electron lane; E2E
- * SQLite access goes through the Electron binary only).
+ * scripts/sync-relay/server.ts (auth, limits, registration, channel pairing,
+ * per-channel push/pull framing) WITHOUT loading better-sqlite3 in the
+ * Playwright runner process — the runner must stay ABI-neutral (the native
+ * binding belongs to the Electron lane; E2E SQLite access goes through the
+ * Electron binary only).
  *
  * Operation shape validation delegates to the shared strict validator
  * (packages/shared/sync/payloadFilter) as the single source of truth.
@@ -61,30 +62,25 @@ export interface TestRelayHandle {
   setPullPaused: (paused: boolean) => void
   isPushPaused: () => boolean
   isPullPaused: () => boolean
-  /** Current relay cursor (sequence of the last stored operation). */
-  getCursor: () => number
-  /** Number of stored operations (in-memory log length). */
+  /** Total stored operations across channels (diagnostic only). */
   getOperationCount: () => number
   /**
-   * Test-only trust-store failure injection (F-003): while set, every
-   * trust read/write fails closed with 500 trust-store-unavailable and no
-   * bootstrap or success is returned.
+   * Highest per-channel sequence observed across channels (diagnostic
+   * only; single-channel tests equal that channel's cursor).
    */
-  setTrustStoreFailure: (fail: boolean) => void
-  isTrustStoreFailure: () => boolean
+  getCursor: () => number
   /**
-   * Test-only trust-state observers (never over HTTP): the relay retains the
-   * plaintext it issued so the test runner can authenticate raw diagnostic
-   * calls as an already-trusted device. Production code must never use these;
-   * device credentials travel only in issuance responses and auth headers.
+   * Test-only registration/pairing observers (never over HTTP): device codes
+   * are public by design; secrets are never exposed here.
    */
-  getIssuedDeviceAuthForTests: (deviceId: string) => string | undefined
-  listTrustedDeviceIdsForTests: () => string[]
+  listDeviceCodesForTests: () => string[]
+  getChannelOfForTests: (deviceCode: string) => string | null
+  listPairRequestsForTests: () => Array<{ id: string; requester: string; target: string; status: string }>
   /**
    * Number of push/pull requests currently admitted and executing.
-   * Long-lived SSE subscriptions are never counted. Snapshot relay
-   * cursor/operation counters only after {@link waitForQuiescent} so an
-   * already-admitted request cannot commit after the snapshot.
+   * Long-lived SSE subscriptions are never counted. Snapshot counters only
+   * after {@link waitForQuiescent} so an already-admitted request cannot
+   * commit after the snapshot.
    */
   getInFlightCount: () => number
   /** Resolve once no admitted push/pull request is still executing. */
@@ -172,25 +168,25 @@ function storedEquals(stored: StoredOperation, op: any): boolean {
  */
 export function startTestRelay(token: string): Promise<TestRelayHandle> {
   if (!token || typeof token !== 'string') throw new Error('startTestRelay requires a non-empty token')
-  const ops: StoredOperation[] = []
-  let seq = 0
+  // Registration / channel / pairing state (in-memory mirror of the
+  // reference relay). Secrets are stored hashed; plaintext is never retained.
+  const devices = new Map<string, { secretHash: string; clientDeviceId?: string }>()
+  const channels = new Map<string, { dissolved: boolean }>()
+  const memberships = new Map<string, string>()
+  const requests = new Map<
+    string,
+    { id: string; requester: string; target: string; status: string; createdAt: string }
+  >()
+  // Per-channel operation logs with contiguous per-channel sequences.
+  const channelOps = new Map<string, StoredOperation[]>()
+  const channelByOpId = new Map<string, Map<string, StoredOperation>>()
   let paused = false
   let pushPaused = false
   let pullPaused = false
-  // Pairing/trust state (in-memory test mirror of the reference relay).
-  const trusted = new Map<string, { deviceId: string; deviceName?: string; trustedAt: string; source: string }>()
-  const deviceSecretHash = new Map<string, string>()
-  // Test-only retention of issued plaintext (runner-process memory only, never
-  // over HTTP, never logged): lets E2E specs authenticate raw diagnostic
-  // calls as an already-trusted device without minting new trust.
-  const issuedPlaintext = new Map<string, string>()
-  const rememberIssued = (deviceId: string, secret: string): void => {
-    issuedPlaintext.set(deviceId, secret)
-  }
-  const DEVICE_AUTH_PATTERN = /^[0-9a-fA-F]{64}$/
-  const isValidAuth = (v: unknown): v is string => typeof v === 'string' && DEVICE_AUTH_PATTERN.test(v)
-  const genDeviceAuth = (): string => randomBytes(32).toString('hex')
-  const hashAuth = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex')
+  const DEVICE_SECRET_PATTERN = /^[0-9a-fA-F]{64}$/
+  const isValidSecret = (v: unknown): v is string => typeof v === 'string' && DEVICE_SECRET_PATTERN.test(v)
+  const genSecret = (): string => randomBytes(32).toString('hex')
+  const hashSecret = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex')
   const secretEquals = (aHex: string, bHex: string): boolean => {
     try {
       const a = Buffer.from(aHex, 'hex')
@@ -207,78 +203,56 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     if (Array.isArray(v)) return v[0] ?? ''
     return ''
   }
-  let trustStoreFailure = false
-  const failTrust = (): boolean => trustStoreFailure === true
-  const verifyAuth = (deviceId: string, secret: string): boolean => {
-    const stored = deviceSecretHash.get(deviceId)
-    if (!stored) return false
-    return secretEquals(hashAuth(secret), stored)
-  }
-  const invites = new Map<string, { code: string; inviterDeviceId: string; createdAt: string; expiresAt: string }>()
-  const requests = new Map<
-    string,
-    {
-      id: string
-      deviceId: string
-      deviceName?: string
-      code: string
-      createdAt: string
-      expiresAt: string
-      status: string
-      deviceSecretHash?: string
-    }
-  >()
-  const PAIRING_TTL_MS = 15 * 60 * 1000
   const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
   const genCode = (): string => {
-    const bytes = randomBytes(8)
-    let out = ''
-    for (const b of bytes) out += CODE_ALPHABET[b % CODE_ALPHABET.length]
-    return out
+    for (let attempt = 0; attempt < 16; attempt++) {
+      const bytes = randomBytes(8)
+      let out = ''
+      for (const b of bytes) out += CODE_ALPHABET[b % CODE_ALPHABET.length]
+      if (!devices.has(out)) return out
+    }
+    throw new Error('store-unavailable')
   }
   const isValidDevice = (v: unknown): v is string =>
     typeof v === 'string' && v.length > 0 && v.length <= 256 && v.trim().length > 0
-  const sweep = (): void => {
-    const now = Date.now()
+  const isValidCode = (v: unknown): v is string => typeof v === 'string' && validatePairingCode(v) === null
+  // Returns the verified device code, or sends the HTTP error and returns null.
+  const requireAuth = (req: IncomingMessage, res: ServerResponse): string | null => {
+    const code = readHeader(req, 'x-sync-device-code')
+    const secret = readHeader(req, 'x-sync-device-secret')
+    if (!isValidCode(code) || !isValidSecret(secret)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'invalid-credential' }))
+      return null
+    }
+    const normalized = normalizePairingCode(code)
+    const row = devices.get(normalized)
+    if (!row) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'unknown-credential' }))
+      return null
+    }
+    if (!secretEquals(hashSecret(secret), row.secretHash)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'invalid-credential' }))
+      return null
+    }
+    return normalized
+  }
+  const outgoingOf = (code: string): { id: string; target: string; createdAt: string } | null => {
     for (const r of requests.values()) {
-      if (r.status === 'pending' && new Date(r.expiresAt).getTime() < now) r.status = 'expired'
+      if (r.requester === code && r.status === 'pending') return { id: r.id, target: r.target, createdAt: r.createdAt }
     }
+    return null
   }
-  // F-001/F-002: proven tracks first successful credential proof; recovery
-  // is allowed only for the sole unproven founder (delivery-loss window).
-  const provenDevices = new Set<string>()
-  const verifyAndMark = (deviceId: string, secret: string): boolean => {
-    const ok = verifyAuth(deviceId, secret)
-    if (ok) provenDevices.add(deviceId)
-    return ok
+  const incomingOf = (code: string): Array<{ id: string; requester: string; createdAt: string }> => {
+    return [...requests.values()]
+      .filter((r) => r.target === code && r.status === 'pending')
+      .map((r) => ({ id: r.id, requester: r.requester, createdAt: r.createdAt }))
   }
-  // Atomic founder bootstrap (F-001): empty-check + insert is one synchronous
-  // critical section under the Node event loop and mirrors the reference
-  // relay single-statement atomic guard — concurrent founders serialize, the
-  // loser observes a non-empty set. Throws trust-already-initialized on loss.
-  const ensureBootstrap = (deviceId: string, source: string): string => {
-    if (!isValidDevice(deviceId)) throw new Error('device id invalid')
-    if (trusted.size !== 0) throw new Error('trust-already-initialized')
-    if (trusted.has(deviceId)) throw new Error('trust-already-initialized')
-    const secret = genDeviceAuth()
-    trusted.set(deviceId, { deviceId, trustedAt: new Date().toISOString(), source })
-    deviceSecretHash.set(deviceId, hashAuth(secret))
-    rememberIssued(deviceId, secret)
-    // Confirm synchronously; on mismatch roll back (atomic rollback) so a
-    // retry bootstraps fresh instead of trusted-without-secret.
-    const stored = deviceSecretHash.get(deviceId)
-    if (!stored || !secretEquals(hashAuth(secret), stored)) {
-      trusted.delete(deviceId)
-      deviceSecretHash.delete(deviceId)
-      throw new Error('trust-store-unavailable')
-    }
-    return secret
-  }
-  // F-002 decision parity: no unauthenticated rotation. Confirm failures
-  // roll back; delivery loss is explicit 403 + operator reset recovery.
   // Admitted push/pull requests still executing. Tracked so tests can wait
-  // for quiescence before snapshotting cursor/operation counters; otherwise
-  // an already-admitted request could commit after the snapshot and race the
+  // for quiescence before snapshotting counters; otherwise an
+  // already-admitted request could commit after the snapshot and race the
   // assertion. SSE subscriptions are long-lived and never counted here.
   let inFlight = 0
   const trackInFlight = (res: ServerResponse): void => {
@@ -292,11 +266,15 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     res.on('finish', finish)
     res.on('close', finish)
   }
-  // Notification-only SSE subscribers: cursor hint only, never operations.
-  const sseClients = new Set<ServerResponse>()
-  const broadcastSyncHint = (cursor: number): void => {
+  // Notification-only SSE subscribers bound to one device + channel each:
+  // cursor hint only, never operations. One channel's hints never reach
+  // another channel. Mirrors the production relay binding so departed
+  // devices never keep their old channel's stream.
+  const sseClients = new Map<ServerResponse, { channelId: string; deviceCode: string }>()
+  const broadcastSyncHint = (channelId: string, cursor: number): void => {
     const line = `event: sync\ndata: ${JSON.stringify({ cursor })}\n\n`
-    for (const client of [...sseClients]) {
+    for (const [client, bound] of [...sseClients]) {
+      if (bound.channelId !== channelId) continue
       try {
         client.write(line)
       } catch {
@@ -306,8 +284,23 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
       }
     }
   }
+  /**
+   * Close every open subscriber bound to the given channel whose device is
+   * no longer a member of it (membership left or dissolved). Survivors of a
+   * non-dissolved channel keep their streams. Mirrors production semantics.
+   */
+  const closeDissolvedChannelSubscribers = (channelId: string, dissolvedCodes: Set<string>): void => {
+    for (const [client, bound] of [...sseClients]) {
+      if (bound.channelId !== channelId) continue
+      if (!dissolvedCodes.has(bound.deviceCode)) continue
+      sseClients.delete(client)
+      try {
+        client.end()
+      } catch {}
+    }
+  }
   const heartbeat = setInterval(() => {
-    for (const client of [...sseClients]) {
+    for (const client of [...sseClients.keys()]) {
       try {
         client.write(': heartbeat\n\n')
       } catch {
@@ -326,10 +319,396 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     const url = new URL(req.url ?? '/', `http://${host}`)
     res.setHeader('Access-Control-Allow-Origin', '*')
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Sync-Device-Id,X-Sync-Device-Auth')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Sync-Device-Code,X-Sync-Device-Secret')
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
       res.end()
+      return
+    }
+
+    if (req.method === 'POST' && url.pathname === '/sync/register') {
+      if (!checkAuth(req, token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      try {
+        const body = await jsonBodyWithLimit(req, 64 * 1024)
+        const rawCode: unknown = body.deviceCode
+        const rawSecret: unknown = body.deviceSecret
+        if (rawCode === undefined && rawSecret === undefined) {
+          const rawClientId: unknown = body.deviceId
+          if (rawClientId !== undefined && !isValidDevice(rawClientId)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'device id invalid' }))
+            return
+          }
+          let code = ''
+          try {
+            code = genCode()
+          } catch {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'store-unavailable' }))
+            return
+          }
+          const secret = genSecret()
+          devices.set(code, {
+            secretHash: hashSecret(secret),
+            clientDeviceId: typeof rawClientId === 'string' ? rawClientId : undefined
+          })
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ deviceCode: code, deviceSecret: secret }))
+          return
+        }
+        if (!isValidCode(rawCode) || !isValidSecret(rawSecret)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid-credential' }))
+          return
+        }
+        const code = normalizePairingCode(rawCode as string)
+        const row = devices.get(code)
+        if (!row) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unknown-credential' }))
+          return
+        }
+        if (!secretEquals(hashSecret(rawSecret as string), row.secretHash)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid-credential' }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ deviceCode: code }))
+        return
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: (e as Error).message.slice(0, 500) }))
+        return
+      }
+    }
+
+    if (req.method === 'GET' && url.pathname === '/sync/state') {
+      if (!checkAuth(req, token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      const caller = requireAuth(req, res)
+      if (!caller) return
+      const channel = memberships.get(caller) ?? null
+      const outgoing = outgoingOf(caller)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          deviceCode: caller,
+          paired: channel !== null,
+          channelId: channel,
+          outgoing: outgoing ? { id: outgoing.id, targetCode: outgoing.target, createdAt: outgoing.createdAt } : null,
+          incoming: incomingOf(caller).map((r) => ({
+            id: r.id,
+            requesterCode: r.requester,
+            createdAt: r.createdAt
+          }))
+        })
+      )
+      return
+    }
+
+    if (req.method === 'POST' && url.pathname === '/sync/pair/request') {
+      if (!checkAuth(req, token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      const caller = requireAuth(req, res)
+      if (!caller) return
+      try {
+        const body = await jsonBodyWithLimit(req, 64 * 1024)
+        const rawTarget: unknown = body.targetCode
+        if (typeof rawTarget !== 'string' || validatePairingCode(rawTarget)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'device-code-invalid' }))
+          return
+        }
+        const target = normalizePairingCode(rawTarget)
+        if (target === caller) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'cannot-pair-with-self' }))
+          return
+        }
+        if (!devices.has(target)) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'unknown-device' }))
+          return
+        }
+        if (memberships.has(caller)) {
+          res.writeHead(409, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'pairing-already-paired' }))
+          return
+        }
+        const existing = outgoingOf(caller)
+        if (existing && existing.target === target) {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ requestId: existing.id, status: 'pending' }))
+          return
+        }
+        // Single-outgoing-pending invariant (mirrors the file-backed relay
+        // partial unique index): the read/replace/insert below runs
+        // synchronously with no interleaving await, and the trailing guard
+        // fails closed if two pendings ever exist for one requester.
+        if (existing) {
+          const old = requests.get(existing.id)
+          if (old && old.status === 'pending') old.status = 'replaced'
+        }
+        const id = randomUUID()
+        requests.set(id, { id, requester: caller, target, status: 'pending', createdAt: new Date().toISOString() })
+        const pendings = [...requests.values()].filter((r) => r.requester === caller && r.status === 'pending')
+        if (pendings.length !== 1) {
+          requests.delete(id)
+          res.writeHead(409, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'concurrent-request' }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ requestId: id, status: 'pending' }))
+        return
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: (e as Error).message.slice(0, 500) }))
+        return
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/sync/pair/cancel') {
+      if (!checkAuth(req, token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      const caller = requireAuth(req, res)
+      if (!caller) return
+      try {
+        const body = await jsonBodyWithLimit(req, 64 * 1024)
+        const rawId: unknown = body.requestId
+        let row: { id: string } | null = null
+        if (typeof rawId === 'string' && rawId.length > 0) {
+          const found = requests.get(rawId)
+          if (found && found.requester === caller && found.status === 'pending') row = { id: found.id }
+          else if (found && found.requester === caller && found.status !== 'pending') {
+            res.writeHead(410, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: `request-${found.status}` }))
+            return
+          }
+        } else {
+          row = outgoingOf(caller)
+        }
+        if (!row) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'no-pending-request' }))
+          return
+        }
+        // Atomic CAS: only pending moves to cancelled; an already terminal
+        // row keeps its state and surfaces as 410 above.
+        const target = requests.get(row.id)
+        if (!target || target.status !== 'pending') {
+          res.writeHead(410, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `request-${target?.status ?? 'unknown'}` }))
+          return
+        }
+        target.status = 'cancelled'
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, requestId: row.id }))
+        return
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: (e as Error).message.slice(0, 500) }))
+        return
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/sync/pair/accept') {
+      if (!checkAuth(req, token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      const caller = requireAuth(req, res)
+      if (!caller) return
+      try {
+        const body = await jsonBodyWithLimit(req, 64 * 1024)
+        const rawId: unknown = body.requestId
+        if (typeof rawId !== 'string' || rawId.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'request id invalid' }))
+          return
+        }
+        const row = requests.get(rawId)
+        if (!row) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'request-not-found' }))
+          return
+        }
+        if (row.target !== caller) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'not-request-target' }))
+          return
+        }
+        if (row.status !== 'pending') {
+          res.writeHead(410, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `request-${row.status}` }))
+          return
+        }
+        if (memberships.has(row.requester)) {
+          // Late-accept parity with the file-backed relay: the requester
+          // paired since the request, so settle the pending row as
+          // rejected-equivalent terminal without membership (no merge).
+          // CAS: only a still-pending row moves; an already-settled row
+          // keeps its terminal state.
+          if (row.status === 'pending') row.status = 'rejected'
+          res.writeHead(409, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'requester-already-paired' }))
+          return
+        }
+        // CAS terminal guard with membership in one synchronous block: a
+        // concurrently settled row never creates membership and an accepted
+        // row is never overwritten by a later terminal transition.
+        if (row.status !== 'pending') {
+          res.writeHead(410, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `request-${row.status}` }))
+          return
+        }
+        const targetChannel = memberships.get(caller) ?? null
+        let channelId: string
+        if (targetChannel !== null) {
+          channelId = targetChannel
+          memberships.set(row.requester, channelId)
+        } else {
+          channelId = randomUUID()
+          channels.set(channelId, { dissolved: false })
+          memberships.set(row.requester, channelId)
+          memberships.set(caller, channelId)
+          channelOps.set(channelId, [])
+          channelByOpId.set(channelId, new Map())
+        }
+        row.status = 'accepted'
+        // Stale-intent cleanup parity with production: both devices are paired
+        // as of this commit, so any other pending outgoing of either device
+        // must never revive after a later unpair. Terminal state is
+        // 'replaced', consistent with the request-replacement path.
+        for (const r of requests.values()) {
+          if (r.id === row.id) continue
+          if (r.status !== 'pending') continue
+          if (r.requester === row.requester || r.requester === caller) r.status = 'replaced'
+        }
+        // Close stale subscribers of both newly-paired devices still bound to
+        // a previous channel so the old stream never receives hints again.
+        try {
+          const settled: string = channelId
+          for (const [client, bound] of [...sseClients]) {
+            if (bound.channelId === settled) continue
+            if (bound.deviceCode !== row.requester && bound.deviceCode !== caller) continue
+            sseClients.delete(client)
+            try {
+              client.end()
+            } catch {}
+          }
+        } catch {}
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, channelId }))
+        return
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: (e as Error).message.slice(0, 500) }))
+        return
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/sync/pair/reject') {
+      if (!checkAuth(req, token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      const caller = requireAuth(req, res)
+      if (!caller) return
+      try {
+        const body = await jsonBodyWithLimit(req, 64 * 1024)
+        const rawId: unknown = body.requestId
+        if (typeof rawId !== 'string' || rawId.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'request id invalid' }))
+          return
+        }
+        const row = requests.get(rawId)
+        if (!row) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'request-not-found' }))
+          return
+        }
+        if (row.target !== caller) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'not-request-target' }))
+          return
+        }
+        if (row.status !== 'pending') {
+          res.writeHead(410, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `request-${row.status}` }))
+          return
+        }
+        row.status = 'rejected'
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true }))
+        return
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: (e as Error).message.slice(0, 500) }))
+        return
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/sync/pair/unpair') {
+      if (!checkAuth(req, token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      const caller = requireAuth(req, res)
+      if (!caller) return
+      const channel = memberships.get(caller) ?? null
+      if (!channel) {
+        res.writeHead(409, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'not-paired' }))
+        return
+      }
+      // Capture the full member set before mutation so the dissolve path can
+      // close every affected subscriber precisely (production parity).
+      const membersBefore: string[] = []
+      for (const [code, ch] of memberships) {
+        if (ch === channel) membersBefore.push(code)
+      }
+      memberships.delete(caller)
+      let remaining = 0
+      for (const ch of memberships.values()) {
+        if (ch === channel) remaining += 1
+      }
+      let dissolvedCodes: string[] = []
+      if (remaining < 2) {
+        for (const [code, ch] of [...memberships]) {
+          if (ch === channel) memberships.delete(code)
+        }
+        channels.set(channel, { dissolved: true })
+        dissolvedCodes = membersBefore
+      }
+      // Membership changed atomically above: the caller always left its
+      // channel, and on dissolve every former member left it. Close exactly
+      // those stale subscribers; survivors of a non-dissolved channel keep
+      // their streams.
+      try {
+        const departed = dissolvedCodes.length > 0 ? new Set(dissolvedCodes) : new Set([caller])
+        closeDissolvedChannelSubscribers(channel, departed)
+      } catch {}
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
       return
     }
 
@@ -359,9 +738,8 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
       }
       try {
         const body = await jsonBodyWithLimit(req, SYNC_MAX_PAYLOAD_BYTES)
-        sweep()
-        // AUD-001: all operation/payload validation runs BEFORE any trust
-        // bootstrap write, so an illegal push never persists founder trust.
+        const caller = requireAuth(req, res)
+        if (!caller) return
         const pushDeviceId: unknown = (body as { deviceId?: unknown })?.deviceId
         if (!isValidDevice(pushDeviceId)) {
           res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -406,57 +784,31 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
           res.end(JSON.stringify({ error: 'payload too large' }))
           return
         }
-        if (failTrust()) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
+        const channel = memberships.get(caller) ?? null
+        if (!channel) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'pairing-required' }))
           return
         }
-        const headerId = readHeader(req, 'x-sync-device-id')
-        const headerAuth = readHeader(req, 'x-sync-device-auth')
-        let issuedAuth: string | undefined
-        if (trusted.size === 0) {
-          if (headerId !== '' && headerId !== pushDeviceId) {
-            res.writeHead(400, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'device id mismatch' }))
-            return
-          }
-          try {
-            issuedAuth = ensureBootstrap(pushDeviceId, 'bootstrap-sync')
-          } catch (e) {
-            if ((e as Error)?.message === 'trust-already-initialized') {
-              res.writeHead(403, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ error: 'device-not-trusted' }))
-              return
-            }
-            res.writeHead(500, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-            return
-          }
-          if (!issuedAuth) {
-            res.writeHead(500, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-            return
-          }
-        } else {
-          if (!isValidDevice(headerId) || headerId !== pushDeviceId) {
-            res.writeHead(403, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'device-not-trusted' }))
-            return
-          }
-          if (!isValidAuth(headerAuth) || !verifyAndMark(headerId, headerAuth)) {
-            res.writeHead(403, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'device-not-trusted' }))
-            return
-          }
+        // Operation identity binding parity with production: the push body
+        // device id (which every operation already equals) must equal the
+        // authenticated registration's client device id. A forged device id
+        // fails closed with 403; the code/secret are never echoed.
+        const registeredClientId = devices.get(caller)?.clientDeviceId ?? null
+        if (registeredClientId !== null && pushDeviceId !== registeredClientId) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'device identity mismatch' }))
+          return
         }
-        // Transactional parity with the reference relay (LOCK-RT-005/006):
-        // validate and stage the full batch before committing any state, so
-        // a rejected batch leaves no partial ops/sequence behind.
+        // Transactional parity with the reference relay: validate and stage
+        // the full batch before committing any state, so a rejected batch
+        // leaves no partial ops/sequence behind.
+        const ops = channelOps.get(channel) ?? []
+        const byId = channelByOpId.get(channel) ?? new Map()
         const acceptedIds: string[] = []
-        const byId = new Map(ops.map((o) => [o.id, o]))
         const staged: StoredOperation[] = []
         const stagedById = new Map<string, StoredOperation>()
-        let stagedSeq = seq
+        let stagedSeq = ops.length > 0 ? ops[ops.length - 1].seq : 0
         for (const op of rawOps as any[]) {
           const existing = stagedById.get(op.id) ?? byId.get(op.id)
           if (existing) {
@@ -465,13 +817,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
             // Mismatched ID content is a collision and is rejected.
             if (!storedEquals(existing, op)) {
               res.writeHead(409, { 'Content-Type': 'application/json' })
-              res.end(
-                JSON.stringify(
-                  issuedAuth
-                    ? { error: `id collision for operation ${String(op.id).slice(0, 80)}`, deviceAuth: issuedAuth }
-                    : { error: `id collision for operation ${String(op.id).slice(0, 80)}` }
-                )
-              )
+              res.end(JSON.stringify({ error: `id collision for operation ${String(op.id).slice(0, 80)}` }))
               return
             }
             acceptedIds.push(op.id)
@@ -492,19 +838,18 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
           stagedById.set(op.id, stagedOp)
           acceptedIds.push(op.id)
         }
-        for (const s of staged) {
-          ops.push(s)
-          byId.set(s.id, s)
+        for (const st of staged) {
+          ops.push(st)
+          byId.set(st.id, st)
         }
-        seq = stagedSeq
+        channelOps.set(channel, ops)
+        channelByOpId.set(channel, byId)
+        const cursor = ops.length > 0 ? ops[ops.length - 1].seq : 0
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(
-          JSON.stringify(
-            issuedAuth ? { acceptedIds, cursor: seq, deviceAuth: issuedAuth } : { acceptedIds, cursor: seq }
-          )
-        )
-        // Notify only after successful push commit; cursor hint only.
-        if (acceptedIds.length > 0) broadcastSyncHint(seq)
+        res.end(JSON.stringify({ acceptedIds, cursor, channelId: channel }))
+        // Notify only after successful push commit; cursor hint only,
+        // scoped to this channel's subscribers.
+        if (acceptedIds.length > 0) broadcastSyncHint(channel, cursor)
       } catch (e) {
         const msg = (e as Error).message
         if (msg === 'payload too large') {
@@ -530,17 +875,12 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
         res.end(JSON.stringify({ error: 'relay paused' }))
         return
       }
-      // Admitted from here: finish/close listeners in trackInFlight
-      // decrement once this response completes.
-      // AUD-001: cursor/limit framing is validated BEFORE any trust
-      // bootstrap write, so a malformed pull never persists founder trust.
-      sweep()
+      const caller = requireAuth(req, res)
+      if (!caller) return
       const pullDeviceId = url.searchParams.get('deviceId') ?? ''
-      const pullHeaderId = readHeader(req, 'x-sync-device-id')
-      const pullHeaderAuth = readHeader(req, 'x-sync-device-auth')
-      if (!isValidDevice(pullDeviceId) || !isValidDevice(pullHeaderId) || pullDeviceId !== pullHeaderId) {
-        res.writeHead(403, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'device-not-trusted' }))
+      if (!isValidDevice(pullDeviceId)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'device id invalid' }))
         return
       }
       const cursorParam = url.searchParams.get('cursor') ?? '0'
@@ -563,539 +903,34 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
           return
         }
       }
-      if (failTrust()) {
-        res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-        return
-      }
       if (limit <= 0) limit = SYNC_MAX_OPERATIONS_PER_PULL
       if (limit > SYNC_MAX_OPERATIONS_PER_PULL) limit = SYNC_MAX_OPERATIONS_PER_PULL
-      // F-002 parity with the reference relay: the pull page is computed
-      // BEFORE the bootstrap write so a read failure never leaves
-      // enrolled-without-credential trust; post-bootstrap response
-      // construction carries the credential on its error path. Pre-bootstrap
-      // semantic validation (shared strict + payload limit) rejects a
-      // legal-JSON but protocol-illegal page with no bootstrap or credential.
-      const page = ops.filter((o) => o.seq > cursor).slice(0, limit)
-      let pullIssuedAuth: string | undefined
-      if (trusted.size === 0) {
-        for (const op of page) {
-          const semanticsErr = validateSyncOperationStrict(op as any)
-          if (semanticsErr) {
-            res.writeHead(500, { 'Content-Type': 'application/json' })
-            res.end(
-              JSON.stringify({
-                error: `invalid operation ${String((op as any)?.id ?? '')}: ${semanticsErr}`.slice(0, 500)
-              })
-            )
-            return
-          }
-          const payload = (op as StoredOperation).payload
-          if (payload !== undefined && payload !== null) {
-            const payloadStr = JSON.stringify(payload)
-            if (Buffer.byteLength(payloadStr, 'utf8') > SYNC_MAX_SERIALIZED_PAYLOAD_BYTES) {
-              res.writeHead(500, { 'Content-Type': 'application/json' })
-              res.end(
-                JSON.stringify({
-                  error: `invalid operation ${String((op as any)?.id ?? '')}: payload too large`.slice(0, 500)
-                })
-              )
-              return
-            }
-          }
-        }
-        try {
-          pullIssuedAuth = ensureBootstrap(pullDeviceId, 'bootstrap-sync')
-        } catch (e) {
-          if ((e as Error)?.message === 'trust-already-initialized') {
-            res.writeHead(403, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'device-not-trusted' }))
-            return
-          }
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-          return
-        }
-        if (!pullIssuedAuth) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-          return
-        }
-      } else if (!isValidAuth(pullHeaderAuth) || !verifyAndMark(pullHeaderId, pullHeaderAuth)) {
+      const channel = memberships.get(caller) ?? null
+      if (!channel) {
         res.writeHead(403, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'device-not-trusted' }))
+        res.end(JSON.stringify({ error: 'pairing-required' }))
         return
       }
       trackInFlight(res)
+      const ops = channelOps.get(channel) ?? []
+      const page = ops.filter((o) => o.seq > cursor).slice(0, limit)
       const returnedCursor = page.length > 0 ? page[page.length - 1].seq : cursor
       let respStr: string
       try {
-        const respObj = pullIssuedAuth
-          ? { operations: page, cursor: returnedCursor, deviceAuth: pullIssuedAuth }
-          : { operations: page, cursor: returnedCursor }
-        respStr = JSON.stringify(respObj)
+        respStr = JSON.stringify({ operations: page, cursor: returnedCursor, channelId: channel })
       } catch {
         res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end(
-          JSON.stringify(
-            pullIssuedAuth
-              ? { error: 'trust-store-unavailable', deviceAuth: pullIssuedAuth }
-              : { error: 'trust-store-unavailable' }
-          )
-        )
+        res.end(JSON.stringify({ error: 'store-unavailable' }))
         return
       }
       if (Buffer.byteLength(respStr, 'utf8') > SYNC_MAX_PAYLOAD_BYTES) {
         res.writeHead(413, { 'Content-Type': 'application/json' })
-        res.end(
-          JSON.stringify(
-            pullIssuedAuth ? { error: 'payload too large', deviceAuth: pullIssuedAuth } : { error: 'payload too large' }
-          )
-        )
+        res.end(JSON.stringify({ error: 'payload too large' }))
         return
       }
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(respStr)
       return
-    }
-
-    if (req.method === 'POST' && url.pathname === '/sync/pair/invite') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
-      try {
-        sweep()
-        if (failTrust()) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-          return
-        }
-        const body = await jsonBodyWithLimit(req, 64 * 1024)
-        const inviterId: unknown = body.deviceId
-        if (!isValidDevice(inviterId)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'device id invalid' }))
-          return
-        }
-        const inviteHeaderId = readHeader(req, 'x-sync-device-id')
-        const inviteHeaderAuth = readHeader(req, 'x-sync-device-auth')
-        let inviteIssuedAuth: string | undefined
-        if (trusted.size === 0) {
-          if (inviteHeaderId !== '' && inviteHeaderId !== inviterId) {
-            res.writeHead(400, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'device id mismatch' }))
-            return
-          }
-          try {
-            inviteIssuedAuth = ensureBootstrap(inviterId, 'bootstrap-invite')
-          } catch (e) {
-            if ((e as Error)?.message === 'trust-already-initialized') {
-              res.writeHead(403, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ error: 'device-not-trusted' }))
-              return
-            }
-            res.writeHead(500, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-            return
-          }
-          if (!inviteIssuedAuth) {
-            res.writeHead(500, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-            return
-          }
-        } else {
-          if (!isValidDevice(inviteHeaderId) || inviteHeaderId !== inviterId) {
-            res.writeHead(403, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'device-not-trusted' }))
-            return
-          }
-          if (!isValidAuth(inviteHeaderAuth) || !verifyAndMark(inviteHeaderId, inviteHeaderAuth)) {
-            res.writeHead(403, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'device-not-trusted' }))
-            return
-          }
-        }
-        const code = genCode()
-        const now = new Date()
-        invites.set(code, {
-          code,
-          inviterDeviceId: inviterId,
-          createdAt: now.toISOString(),
-          expiresAt: new Date(now.getTime() + PAIRING_TTL_MS).toISOString()
-        })
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(
-          JSON.stringify(
-            inviteIssuedAuth
-              ? { code, expiresAt: invites.get(code)!.expiresAt, deviceAuth: inviteIssuedAuth }
-              : { code, expiresAt: invites.get(code)!.expiresAt }
-          )
-        )
-        return
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: (e as Error).message.slice(0, 500) }))
-        return
-      }
-    }
-
-    if (req.method === 'POST' && url.pathname === '/sync/pair/request') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
-      try {
-        sweep()
-        if (failTrust()) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-          return
-        }
-        const body = await jsonBodyWithLimit(req, 64 * 1024)
-        const deviceId: unknown = body.deviceId
-        const deviceName: unknown = body.deviceName
-        const rawCode: unknown = body.code
-        if (!isValidDevice(deviceId)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'device id invalid' }))
-          return
-        }
-        if (typeof rawCode !== 'string' || validatePairingCode(rawCode)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'pairing code invalid' }))
-          return
-        }
-        const code = normalizePairingCode(rawCode)
-        const invite = invites.get(code)
-        if (!invite) {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'invite not found' }))
-          return
-        }
-        if (new Date(invite.expiresAt).getTime() < Date.now()) {
-          res.writeHead(410, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'invite expired' }))
-          return
-        }
-        if (trusted.has(deviceId)) {
-          res.writeHead(409, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'device already trusted' }))
-          return
-        }
-        for (const r of requests.values()) {
-          if (r.deviceId === deviceId && r.code === code && r.status === 'pending') {
-            const replaySecret = genDeviceAuth()
-            r.deviceSecretHash = hashAuth(replaySecret)
-            rememberIssued(deviceId as string, replaySecret)
-            res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ requestId: r.id, status: r.status, deviceAuth: replaySecret }))
-            return
-          }
-        }
-        const now = new Date()
-        const id = randomUUID()
-        const pendingSecret = genDeviceAuth()
-        rememberIssued(deviceId as string, pendingSecret)
-        requests.set(id, {
-          id,
-          deviceId,
-          deviceName: typeof deviceName === 'string' ? deviceName.slice(0, 64) : undefined,
-          code,
-          createdAt: now.toISOString(),
-          expiresAt: new Date(now.getTime() + PAIRING_TTL_MS).toISOString(),
-          status: 'pending',
-          deviceSecretHash: hashAuth(pendingSecret)
-        })
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ requestId: id, status: 'pending', deviceAuth: pendingSecret }))
-        return
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: (e as Error).message.slice(0, 500) }))
-        return
-      }
-    }
-
-    if (req.method === 'GET' && url.pathname === '/sync/pair/pending') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
-      sweep()
-      if (failTrust()) {
-        res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-        return
-      }
-      const caller = url.searchParams.get('deviceId') ?? ''
-      const pendingHeaderId = readHeader(req, 'x-sync-device-id')
-      const pendingHeaderAuth = readHeader(req, 'x-sync-device-auth')
-      if (!isValidDevice(caller) || pendingHeaderId !== caller) {
-        res.writeHead(403, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'device-not-trusted' }))
-        return
-      }
-      if (!isValidAuth(pendingHeaderAuth) || !verifyAndMark(caller, pendingHeaderAuth)) {
-        res.writeHead(403, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'device-not-trusted' }))
-        return
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ requests: [...requests.values()].filter((r) => r.status === 'pending') }))
-      return
-    }
-
-    if (req.method === 'POST' && url.pathname === '/sync/pair/accept') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
-      try {
-        sweep()
-        if (failTrust()) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-          return
-        }
-        const body = await jsonBodyWithLimit(req, 64 * 1024)
-        const approver: unknown = body.approverDeviceId
-        const requestId: unknown = body.requestId
-        if (!isValidDevice(approver)) {
-          res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'device-not-trusted' }))
-          return
-        }
-        const acceptHeaderId = readHeader(req, 'x-sync-device-id')
-        const acceptHeaderAuth = readHeader(req, 'x-sync-device-auth')
-        if (
-          acceptHeaderId !== approver ||
-          !isValidAuth(acceptHeaderAuth) ||
-          !verifyAndMark(acceptHeaderId, acceptHeaderAuth)
-        ) {
-          res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'device-not-trusted' }))
-          return
-        }
-        if (typeof requestId !== 'string' || requestId.length === 0) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'request id invalid' }))
-          return
-        }
-        const row = requests.get(requestId)
-        if (!row) {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'request not found' }))
-          return
-        }
-        if (row.status !== 'pending') {
-          res.writeHead(410, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: `request ${row.status}` }))
-          return
-        }
-        if (!row.deviceSecretHash) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-          return
-        }
-        const nowIso = new Date().toISOString()
-        const existingHash = deviceSecretHash.get(row.deviceId)
-        if (existingHash && !secretEquals(existingHash, row.deviceSecretHash)) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-          return
-        }
-        trusted.set(row.deviceId, {
-          deviceId: row.deviceId,
-          deviceName: row.deviceName,
-          trustedAt: nowIso,
-          source: 'pairing-accept'
-        })
-        deviceSecretHash.set(row.deviceId, row.deviceSecretHash)
-        row.status = 'accepted'
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ trusted: trusted.get(row.deviceId) }))
-        return
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: (e as Error).message.slice(0, 500) }))
-        return
-      }
-    }
-
-    if (req.method === 'POST' && url.pathname === '/sync/pair/reject') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
-      try {
-        sweep()
-        if (failTrust()) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-          return
-        }
-        const body = await jsonBodyWithLimit(req, 64 * 1024)
-        const approver: unknown = body.approverDeviceId
-        const requestId: unknown = body.requestId
-        if (!isValidDevice(approver)) {
-          res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'device-not-trusted' }))
-          return
-        }
-        const rejectHeaderId = readHeader(req, 'x-sync-device-id')
-        const rejectHeaderAuth = readHeader(req, 'x-sync-device-auth')
-        if (
-          rejectHeaderId !== approver ||
-          !isValidAuth(rejectHeaderAuth) ||
-          !verifyAndMark(rejectHeaderId, rejectHeaderAuth)
-        ) {
-          res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'device-not-trusted' }))
-          return
-        }
-        if (typeof requestId !== 'string' || requestId.length === 0) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'request id invalid' }))
-          return
-        }
-        const row = requests.get(requestId)
-        if (!row) {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'request not found' }))
-          return
-        }
-        if (row.status !== 'pending') {
-          res.writeHead(410, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: `request ${row.status}` }))
-          return
-        }
-        row.status = 'rejected'
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ ok: true }))
-        return
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: (e as Error).message.slice(0, 500) }))
-        return
-      }
-    }
-
-    if (req.method === 'GET' && url.pathname === '/sync/pair/trusted') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
-      const caller = url.searchParams.get('deviceId') ?? ''
-      const trustedHeaderId = readHeader(req, 'x-sync-device-id')
-      const trustedHeaderAuth = readHeader(req, 'x-sync-device-auth')
-      if (!isValidDevice(caller) || trustedHeaderId !== caller) {
-        res.writeHead(403, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'device-not-trusted' }))
-        return
-      }
-      if (failTrust()) {
-        res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-        return
-      }
-      if (!isValidAuth(trustedHeaderAuth) || !verifyAndMark(caller, trustedHeaderAuth)) {
-        res.writeHead(403, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'device-not-trusted' }))
-        return
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ devices: [...trusted.values()] }))
-      return
-    }
-
-    if (req.method === 'GET' && url.pathname === '/sync/pair/status') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
-      sweep()
-      const caller = url.searchParams.get('deviceId') ?? ''
-      if (!isValidDevice(caller)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'device id invalid' }))
-        return
-      }
-      if (failTrust()) {
-        res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-        return
-      }
-      const pending = [...requests.values()].some((r) => r.deviceId === caller && r.status === 'pending')
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ trusted: trusted.has(caller), pending }))
-      return
-    }
-
-    if (req.method === 'POST' && url.pathname === '/sync/pair/revoke') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
-      try {
-        const body = await jsonBodyWithLimit(req, 64 * 1024)
-        const approver: unknown = body.approverDeviceId
-        const target: unknown = body.targetDeviceId
-        if (!isValidDevice(approver)) {
-          res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'device-not-trusted' }))
-          return
-        }
-        const revokeHeaderId = readHeader(req, 'x-sync-device-id')
-        const revokeHeaderAuth = readHeader(req, 'x-sync-device-auth')
-        if (failTrust()) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'trust-store-unavailable' }))
-          return
-        }
-        if (
-          revokeHeaderId !== approver ||
-          !isValidAuth(revokeHeaderAuth) ||
-          !verifyAndMark(revokeHeaderId, revokeHeaderAuth)
-        ) {
-          res.writeHead(403, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'device-not-trusted' }))
-          return
-        }
-        if (!isValidDevice(target)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'device id invalid' }))
-          return
-        }
-        if ((approver as string) === (target as string)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'cannot revoke own device' }))
-          return
-        }
-        if (!trusted.has(target as string)) {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'device not trusted' }))
-          return
-        }
-        trusted.delete(target as string)
-        deviceSecretHash.delete(target as string)
-        provenDevices.delete(target as string)
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ ok: true }))
-        return
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: (e as Error).message.slice(0, 500) }))
-        return
-      }
     }
 
     if (req.method === 'GET' && url.pathname === '/health') {
@@ -1118,6 +953,14 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
         res.end(JSON.stringify({ error: 'invalid cursor' }))
         return
       }
+      const caller = requireAuth(req, res)
+      if (!caller) return
+      const channel = memberships.get(caller) ?? null
+      if (!channel) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'pairing-required' }))
+        return
+      }
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -1127,7 +970,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
         ;(res as unknown as { flushHeaders?: () => void }).flushHeaders?.()
       } catch {}
       res.write(': connected\n\n')
-      sseClients.add(res)
+      sseClients.set(res, { channelId: channel, deviceCode: caller })
       const cleanup = (): void => {
         sseClients.delete(res)
       }
@@ -1167,14 +1010,22 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
         },
         isPushPaused: () => paused || pushPaused,
         isPullPaused: () => paused || pullPaused,
-        getCursor: () => seq,
-        getOperationCount: () => ops.length,
-        setTrustStoreFailure: (fail: boolean) => {
-          trustStoreFailure = fail === true
+        getOperationCount: () => {
+          let n = 0
+          for (const ops of channelOps.values()) n += ops.length
+          return n
         },
-        isTrustStoreFailure: () => trustStoreFailure,
-        getIssuedDeviceAuthForTests: (deviceId: string) => issuedPlaintext.get(deviceId),
-        listTrustedDeviceIdsForTests: () => [...trusted.keys()],
+        getCursor: () => {
+          let max = 0
+          for (const ops of channelOps.values()) {
+            if (ops.length > 0) max = Math.max(max, ops[ops.length - 1].seq)
+          }
+          return max
+        },
+        listDeviceCodesForTests: () => [...devices.keys()],
+        getChannelOfForTests: (deviceCode: string) => memberships.get(deviceCode) ?? null,
+        listPairRequestsForTests: () =>
+          [...requests.values()].map((r) => ({ id: r.id, requester: r.requester, target: r.target, status: r.status })),
         getInFlightCount: () => inFlight,
         waitForQuiescent: async (timeoutMs = 5000) => {
           const deadline = Date.now() + timeoutMs
@@ -1188,7 +1039,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
             try {
               clearInterval(heartbeat)
             } catch {}
-            for (const client of [...sseClients]) {
+            for (const client of [...sseClients.keys()]) {
               try {
                 client.end()
               } catch {}
@@ -1203,4 +1054,59 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
       resolve(handle)
     })
   })
+}
+
+/**
+ * Test-only provisioning helper (never production code): registers `count`
+ * devices on the relay and pairs them all into ONE hidden channel (devices
+ * 1..n request device 0, which accepts). Returns the public codes plus the
+ * durable secrets (test-process memory only, never logged).
+ */
+export interface ProvisionedDevice {
+  code: string
+  secret: string
+}
+
+export function provisionedHeaders(dev: ProvisionedDevice): Record<string, string> {
+  return { 'x-sync-device-code': dev.code, 'x-sync-device-secret': dev.secret }
+}
+
+export async function provisionPairedDevices(endpoint: string, token: string, count = 2): Promise<ProvisionedDevice[]> {
+  if (!Number.isSafeInteger(count) || count < 1) throw new Error('provisionPairedDevices requires count >= 1')
+  const base = endpoint.replace(/\/$/, '')
+  const authedJson = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
+  const devices: ProvisionedDevice[] = []
+  for (let i = 0; i < count; i++) {
+    // Intentionally registers without a client device id (null binding) so
+    // generic push/pull tests can use any well-formed body deviceId (e.g.
+    // 'd1') on both relays. Identity-binding semantics are covered
+    // explicitly by the shared conformance with bound registrations.
+    const res = await fetch(`${base}/sync/register`, {
+      method: 'POST',
+      headers: authedJson,
+      body: JSON.stringify({})
+    })
+    if (res.status !== 200) throw new Error(`provision register ${i} failed: ${res.status}`)
+    const body = (await res.json()) as { deviceCode: string; deviceSecret: string }
+    if (typeof body.deviceCode !== 'string' || typeof body.deviceSecret !== 'string') {
+      throw new Error('provision register response malformed')
+    }
+    devices.push({ code: body.deviceCode, secret: body.deviceSecret })
+  }
+  for (let i = 1; i < devices.length; i++) {
+    const req = await fetch(`${base}/sync/pair/request`, {
+      method: 'POST',
+      headers: { ...authedJson, ...provisionedHeaders(devices[i]) },
+      body: JSON.stringify({ targetCode: devices[0].code })
+    })
+    if (req.status !== 200) throw new Error(`provision request ${i} failed: ${req.status}`)
+    const reqBody = (await req.json()) as { requestId: string }
+    const accept = await fetch(`${base}/sync/pair/accept`, {
+      method: 'POST',
+      headers: { ...authedJson, ...provisionedHeaders(devices[0]) },
+      body: JSON.stringify({ requestId: reqBody.requestId })
+    })
+    if (accept.status !== 200) throw new Error(`provision accept ${i} failed: ${accept.status}`)
+  }
+  return devices
 }

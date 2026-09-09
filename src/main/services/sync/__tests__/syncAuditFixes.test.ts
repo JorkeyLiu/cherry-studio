@@ -29,6 +29,7 @@ import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
 import { handleChatDbSuccessForSync } from '../chatDbHook'
 import { syncService } from '../SyncService'
+import { seedRegisteredAttachedSyncService } from './helpers/syncTestRegistration'
 
 let sqlite: Database.Database
 let db: BetterSQLite3Database<typeof schema>
@@ -50,6 +51,7 @@ beforeEach(() => {
   ;(chatDbService as any).sqlite = sqlite
   ;(chatDbService as any).db = db
   syncService.clearAllForTests()
+  seedRegisteredAttachedSyncService(configStore, db)
 })
 
 afterEach(() => {
@@ -88,6 +90,8 @@ describe('blocker 1: dependency ordering / orphan recovery', () => {
 
   it('child-precedes-parent recovers within one sync via deferred retry', async () => {
     configStore.set('sync:token', '')
+    configStore.set('sync:deviceCode', 'ABCD2345')
+    configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     db.insert(schema.syncState)
       .values({ key: 'cursor', value: '0' })
       .onConflictDoUpdate({ target: schema.syncState.key, set: { value: '0' } })
@@ -415,7 +419,17 @@ describe('blocker 5: entity-specific strict validation', () => {
         })
       }) as any
     try {
-      await expect(syncClient.pull('http://127.0.0.1:9', undefined, 0, 'd1')).rejects.toThrow(/topicId/)
+      await expect(
+        syncClient.pull(
+          'http://127.0.0.1:9',
+          undefined,
+          0,
+          'd1',
+          undefined,
+          'ABCD2345',
+          'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+        )
+      ).rejects.toThrow(/topicId/)
     } finally {
       ;(globalThis as any).fetch = origFetch
     }
@@ -553,6 +567,8 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
 
   it('second-audit B2: later-page parent resolves early-page orphan', async () => {
     configStore.set('sync:token', '')
+    configStore.set('sync:deviceCode', 'ABCD2345')
+    configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     db.insert(schema.syncState)
       .values({ key: 'cursor', value: '0' })
       .onConflictDoUpdate({ target: schema.syncState.key, set: { value: '0' } })
@@ -628,6 +644,8 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
 
   it('second-audit B2b: unresolved orphan is a durable blocked error, not success', async () => {
     configStore.set('sync:token', '')
+    configStore.set('sync:deviceCode', 'ABCD2345')
+    configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     db.insert(schema.syncState)
       .values({ key: 'cursor', value: '0' })
       .onConflictDoUpdate({ target: schema.syncState.key, set: { value: '0' } })
@@ -847,94 +865,87 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
   })
 
   it('second-audit B5b: relay ingress rejects malformed typed payloads', async () => {
-    const { createRelayServer } = await import('../../../../../scripts/sync-relay/server')
+    const { createRelayServer, ensureRelaySchema } = await import('../../../../../scripts/sync-relay/server')
     const relayDb = new Database(':memory:')
-    relayDb.exec(`
-      CREATE TABLE operations (
-        seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        id TEXT UNIQUE NOT NULL,
-        entity_type TEXT NOT NULL,
-        op TEXT NOT NULL,
-        entity_id TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        device_id TEXT NOT NULL,
-        payload_json TEXT,
-        created_at TEXT
-      );
-      CREATE TABLE IF NOT EXISTS sync_trusted_devices (
-        device_id TEXT PRIMARY KEY,
-        device_name TEXT,
-        trusted_at TEXT,
-        source TEXT,
-        device_secret_hash TEXT
-      );
-      CREATE TABLE IF NOT EXISTS sync_pairing_invites (
-        code TEXT PRIMARY KEY,
-        inviter_device_id TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        used INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE TABLE IF NOT EXISTS sync_pairing_requests (
-        id TEXT PRIMARY KEY,
-        device_id TEXT NOT NULL,
-        device_name TEXT,
-        code TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        status TEXT NOT NULL,
-        device_secret_hash TEXT
-      );
-    `)
-    const server = createRelayServer(relayDb as any)
+    ensureRelaySchema(relayDb as any)
+    const server = createRelayServer(relayDb as any, {})
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
     const addr = server.address() as { port: number }
     const base = `http://127.0.0.1:${addr.port}`
     try {
+      // New model setup: register two devices + pair forming a channel.
+      const uuidA = 'uuid-b5b-a'
+      const regA = (await (
+        await fetch(`${base}/sync/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId: uuidA })
+        })
+      ).json()) as { deviceCode: string; deviceSecret: string }
+      const regB = (await (
+        await fetch(`${base}/sync/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId: 'uuid-b5b-b' })
+        })
+      ).json()) as { deviceCode: string; deviceSecret: string }
+      const pairReq = (await (
+        await fetch(`${base}/sync/pair/request`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-sync-device-code': regB.deviceCode,
+            'x-sync-device-secret': regB.deviceSecret
+          },
+          body: JSON.stringify({ targetCode: regA.deviceCode })
+        })
+      ).json()) as { requestId: string }
+      const acceptRes = await fetch(`${base}/sync/pair/accept`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-sync-device-code': regA.deviceCode,
+          'x-sync-device-secret': regA.deviceSecret
+        },
+        body: JSON.stringify({ requestId: pairReq.requestId })
+      })
+      expect(acceptRes.status).toBe(200)
+      const authHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-sync-device-code': regA.deviceCode,
+        'x-sync-device-secret': regA.deviceSecret
+      }
       const badTopic = {
         id: 'op-relay-bad-topic',
         entityType: 'topic',
         op: 'upsert',
         entityId: 't-relay-bad',
         timestamp: Date.now(),
-        deviceId: 'd1',
+        deviceId: uuidA,
         payload: { id: 't-relay-bad', name: 123 }
       }
       const res1 = await fetch(`${base}/sync/push`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deviceId: 'd1', operations: [badTopic] })
+        headers: authHeaders,
+        body: JSON.stringify({ deviceId: uuidA, operations: [badTopic] })
       })
       expect(res1.status).toBe(400)
-      const issuedAuth = (
-        (await res1
-          .clone()
-          .json()
-          .catch(() => ({}))) as { deviceAuth?: unknown }
-      ).deviceAuth
-      const authHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
-      // Founder bootstrap may have enrolled d1 before rejecting the invalid
-      // op; prove identity on the second call when a credential was issued.
-      if (typeof issuedAuth === 'string') {
-        authHeaders['x-sync-device-id'] = 'd1'
-        authHeaders['x-sync-device-auth'] = issuedAuth
-      }
       const badMismatch = {
         id: 'op-relay-mismatch',
         entityType: 'message',
         op: 'upsert',
         entityId: 'm-relay',
         timestamp: Date.now(),
-        deviceId: 'd1',
+        deviceId: uuidA,
         payload: { id: 'm-other', topicId: 't1' }
       }
       const res2 = await fetch(`${base}/sync/push`, {
         method: 'POST',
         headers: authHeaders,
-        body: JSON.stringify({ deviceId: 'd1', operations: [badMismatch] })
+        body: JSON.stringify({ deviceId: uuidA, operations: [badMismatch] })
       })
       expect(res2.status).toBe(400)
-      const rows = relayDb.prepare('SELECT COUNT(*) as c FROM operations').get() as { c: number }
+      const rows = relayDb.prepare('SELECT COUNT(*) as c FROM sync_channel_operations').get() as { c: number }
       expect(rows.c).toBe(0)
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
@@ -948,7 +959,15 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
     async function pullWith(body: any, cursor = 0): Promise<unknown> {
       ;(globalThis as any).fetch = async () => ({ ok: true, json: async () => body }) as any
       try {
-        return await syncClient.pull('http://127.0.0.1:9', undefined, cursor, 'd1')
+        return await syncClient.pull(
+          'http://127.0.0.1:9',
+          undefined,
+          cursor,
+          'd1',
+          undefined,
+          'ABCD2345',
+          'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+        )
       } finally {
         ;(globalThis as any).fetch = origFetch
       }
@@ -973,6 +992,8 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
 
   it('malformed apply produces truthful durable sync failure (no success report)', async () => {
     configStore.set('sync:token', '')
+    configStore.set('sync:deviceCode', 'ABCD2345')
+    configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     db.insert(schema.syncState)
       .values({ key: 'cursor', value: '0' })
       .onConflictDoUpdate({ target: schema.syncState.key, set: { value: '0' } })

@@ -35,6 +35,7 @@ import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
 import { handleChatDbSuccessForSync } from '../chatDbHook'
 import { SyncCaptureError, syncService } from '../SyncService'
+import { seedRegisteredAttachedSyncService } from './helpers/syncTestRegistration'
 
 let sqlite: Database.Database
 let db: BetterSQLite3Database<typeof schema>
@@ -57,6 +58,7 @@ beforeEach(() => {
   ;(chatDbService as never as { sqlite: unknown }).sqlite = sqlite
   ;(chatDbService as never as { db: unknown }).db = db
   syncService.clearAllForTests()
+  seedRegisteredAttachedSyncService(configStore, db)
 })
 
 afterEach(() => {
@@ -191,44 +193,9 @@ describe('relay strict cursor framing', () => {
   let baseUrl: string
 
   beforeEach(async () => {
+    const { ensureRelaySchema } = await import('../../../../../scripts/sync-relay/server')
     relayDb = new Database(':memory:')
-    relayDb.exec(`
-      CREATE TABLE IF NOT EXISTS operations (
-        seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        id TEXT UNIQUE NOT NULL,
-        entity_type TEXT NOT NULL,
-        op TEXT NOT NULL,
-        entity_id TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        device_id TEXT NOT NULL,
-        payload_json TEXT,
-        created_at TEXT
-      );
-      CREATE TABLE IF NOT EXISTS sync_trusted_devices (
-        device_id TEXT PRIMARY KEY,
-        device_name TEXT,
-        trusted_at TEXT,
-        source TEXT,
-        device_secret_hash TEXT
-      );
-      CREATE TABLE IF NOT EXISTS sync_pairing_invites (
-        code TEXT PRIMARY KEY,
-        inviter_device_id TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        used INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE TABLE IF NOT EXISTS sync_pairing_requests (
-        id TEXT PRIMARY KEY,
-        device_id TEXT NOT NULL,
-        device_name TEXT,
-        code TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        status TEXT NOT NULL,
-        device_secret_hash TEXT
-      );
-    `)
+    ensureRelaySchema(relayDb)
     server = createRelayServer(relayDb, {})
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
     const addr = server.address() as { port: number }
@@ -240,27 +207,62 @@ describe('relay strict cursor framing', () => {
     relayDb.close()
   })
 
-  it('rejects 12junk and 07 on pull, preserves canonical 0', async () => {
-    // Founder bootstrap to obtain the device credential; cursor framing is
-    // validated after device-identity authorization.
-    const boot = await fetch(`${baseUrl}/sync/push`, {
+  async function registerDevice(deviceId: string): Promise<{ code: string; secret: string }> {
+    const res = await fetch(`${baseUrl}/sync/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deviceId: 'd1', operations: [] })
+      body: JSON.stringify({ deviceId })
     })
-    expect(boot.status).toBe(200)
-    const bootBody = (await boot.json()) as { deviceAuth?: unknown }
-    const auth = bootBody.deviceAuth as string
-    const headers: Record<string, string> = { 'x-sync-device-id': 'd1', 'x-sync-device-auth': auth }
-    const bad1 = await fetch(`${baseUrl}/sync/pull?cursor=12junk&deviceId=d1`, { headers })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { deviceCode: string; deviceSecret: string }
+    return { code: body.deviceCode, secret: body.deviceSecret }
+  }
+
+  async function pairDevices(codeA: string, secretA: string, codeB: string, secretB: string): Promise<void> {
+    const reqRes = await fetch(`${baseUrl}/sync/pair/request`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-sync-device-code': codeB,
+        'x-sync-device-secret': secretB
+      },
+      body: JSON.stringify({ targetCode: codeA })
+    })
+    expect(reqRes.status).toBe(200)
+    const { requestId } = (await reqRes.json()) as { requestId: string }
+    const acceptRes = await fetch(`${baseUrl}/sync/pair/accept`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-sync-device-code': codeA,
+        'x-sync-device-secret': secretA
+      },
+      body: JSON.stringify({ requestId })
+    })
+    expect(acceptRes.status).toBe(200)
+  }
+
+  it('rejects 12junk and 07 on pull, preserves canonical 0', async () => {
+    // New model setup: register two devices + pair forming a channel.
+    const regA = await registerDevice('uuid-eighth-a')
+    const regB = await registerDevice('uuid-eighth-b')
+    await pairDevices(regA.code, regA.secret, regB.code, regB.secret)
+    const headers: Record<string, string> = {
+      'x-sync-device-code': regA.code,
+      'x-sync-device-secret': regA.secret
+    }
+    // No auth is an independent 403 (never a cursor 400).
+    const noAuth = await fetch(`${baseUrl}/sync/pull?cursor=0&deviceId=uuid-eighth-a`)
+    expect(noAuth.status).toBe(403)
+    const bad1 = await fetch(`${baseUrl}/sync/pull?cursor=12junk&deviceId=uuid-eighth-a`, { headers })
     expect(bad1.status).toBe(400)
-    const bad2 = await fetch(`${baseUrl}/sync/pull?cursor=07&deviceId=d1`, { headers })
+    const bad2 = await fetch(`${baseUrl}/sync/pull?cursor=07&deviceId=uuid-eighth-a`, { headers })
     expect(bad2.status).toBe(400)
-    const bad3 = await fetch(`${baseUrl}/sync/pull?cursor=%2012&deviceId=d1`, { headers })
+    const bad3 = await fetch(`${baseUrl}/sync/pull?cursor=%2012&deviceId=uuid-eighth-a`, { headers })
     expect(bad3.status).toBe(400)
-    const bad4 = await fetch(`${baseUrl}/sync/pull?cursor=-1&deviceId=d1`, { headers })
+    const bad4 = await fetch(`${baseUrl}/sync/pull?cursor=-1&deviceId=uuid-eighth-a`, { headers })
     expect(bad4.status).toBe(400)
-    const ok = await fetch(`${baseUrl}/sync/pull?cursor=0&deviceId=d1`, { headers })
+    const ok = await fetch(`${baseUrl}/sync/pull?cursor=0&deviceId=uuid-eighth-a`, { headers })
     expect(ok.status).toBe(200)
     const body = await ok.json()
     expect(body.cursor).toBe(0)
@@ -275,18 +277,14 @@ describe('relay strict cursor framing', () => {
   })
 
   it('does not advance or query on failure: 400 carries no operations/cursor', async () => {
-    const boot = await fetch(`${baseUrl}/sync/push`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deviceId: 'd1', operations: [] })
-    })
-    expect(boot.status).toBe(200)
-    const bootBody = (await boot.json()) as { deviceAuth?: unknown }
+    const regA = await registerDevice('uuid-eighth-c')
+    const regB = await registerDevice('uuid-eighth-d')
+    await pairDevices(regA.code, regA.secret, regB.code, regB.secret)
     const headers: Record<string, string> = {
-      'x-sync-device-id': 'd1',
-      'x-sync-device-auth': bootBody.deviceAuth as string
+      'x-sync-device-code': regA.code,
+      'x-sync-device-secret': regA.secret
     }
-    const res = await fetch(`${baseUrl}/sync/pull?cursor=12junk&deviceId=d1`, { headers })
+    const res = await fetch(`${baseUrl}/sync/pull?cursor=12junk&deviceId=uuid-eighth-c`, { headers })
     expect(res.status).toBe(400)
     const body = await res.json()
     expect(body.error).toMatch(/invalid cursor/i)

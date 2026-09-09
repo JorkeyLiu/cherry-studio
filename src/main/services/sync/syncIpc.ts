@@ -54,26 +54,55 @@ export function registerSyncIpc(): () => void {
     return { deviceId: syncService.getDeviceId() }
   })
 
-  register(IpcChannel.Sync_CreateInvite, async () => {
-    return await syncService.createPairingInvite()
+  register(IpcChannel.Sync_Connect, async () => {
+    const status = await syncService.connect()
+    try {
+      const { syncAutoService } = await import('./syncAuto')
+      syncAutoService.refresh()
+    } catch {}
+    return status
   })
 
-  register(IpcChannel.Sync_RequestPairing, async (_e, args: { code?: string; deviceName?: string }) => {
+  register(IpcChannel.Sync_Disconnect, async () => {
+    const status = await syncService.disconnect()
+    try {
+      const { syncAutoService } = await import('./syncAuto')
+      syncAutoService.refresh()
+    } catch {}
+    return status
+  })
+
+  register(IpcChannel.Sync_GetServiceStatus, async () => {
+    return syncService.getServiceStatus()
+  })
+
+  register(IpcChannel.Sync_GetDeviceCode, async () => {
+    return { deviceCode: syncService.getDeviceCodeOrNull() }
+  })
+
+  register(IpcChannel.Sync_GetPairState, async () => {
+    return await syncService.getPairState()
+  })
+
+  register(IpcChannel.Sync_RequestPairing, async (_e, args: { targetCode?: string }) => {
     if (!args || typeof args !== 'object') throw new Error('invalid pairing request')
-    if (typeof args.code !== 'string') throw new Error('code must be string')
-    if (args.deviceName !== undefined && typeof args.deviceName !== 'string') {
-      throw new Error('device name must be string')
-    }
-    return await syncService.requestPairing(args.code, args.deviceName)
+    if (typeof args.targetCode !== 'string') throw new Error('target code must be string')
+    return await syncService.requestPairing(args.targetCode)
   })
 
-  register(IpcChannel.Sync_ListPairingRequests, async () => {
-    return { requests: await syncService.listPairingRequests() }
+  register(IpcChannel.Sync_CancelPairing, async (_e, args?: { requestId?: string }) => {
+    if (args !== undefined && (typeof args !== 'object' || args === null)) {
+      throw new Error('invalid cancel request')
+    }
+    if (args?.requestId !== undefined && typeof args.requestId !== 'string') {
+      throw new Error('request id must be string')
+    }
+    return await syncService.cancelPairing(args?.requestId)
   })
 
   register(IpcChannel.Sync_AcceptPairing, async (_e, args: { requestId?: string }) => {
     if (!args || typeof args.requestId !== 'string') throw new Error('request id must be string')
-    return { trusted: await syncService.acceptPairing(args.requestId) }
+    return await syncService.acceptPairing(args.requestId)
   })
 
   register(IpcChannel.Sync_RejectPairing, async (_e, args: { requestId?: string }) => {
@@ -82,21 +111,8 @@ export function registerSyncIpc(): () => void {
     return { ok: true }
   })
 
-  register(IpcChannel.Sync_ListTrusted, async () => {
-    return { devices: syncService.listTrustedDevices() }
-  })
-
-  register(IpcChannel.Sync_RefreshTrusted, async () => {
-    return { devices: await syncService.refreshTrustedDevices() }
-  })
-
-  register(IpcChannel.Sync_GetPairingStatus, async () => {
-    return await syncService.getPairingStatus()
-  })
-
-  register(IpcChannel.Sync_RevokeDevice, async (_e, args: { targetDeviceId?: string }) => {
-    if (!args || typeof args.targetDeviceId !== 'string') throw new Error('device id must be string')
-    await syncService.revokeTrustedDevice(args.targetDeviceId)
+  register(IpcChannel.Sync_Unpair, async () => {
+    await syncService.unpair()
     return { ok: true }
   })
 

@@ -29,6 +29,16 @@ export interface SyncAutoDeps {
   getConfig: () => { endpoint: string; token?: string; enabled: boolean }
   runSync: () => Promise<unknown>
   createSubscriber: () => SyncSubscriber
+  /**
+   * Attachment gate (SYNC-CC-004/005): automation runs only for registered,
+   * non-disconnected service. Defaults to the live service state.
+   */
+  isAttached: () => boolean
+  /**
+   * Channel-scoped SSE credentials. Defaults to the live service
+   * registration (Main-internal only, never IPC/UI).
+   */
+  getCredentials: () => { deviceCode: string; deviceSecret: string } | null
 }
 
 /**
@@ -59,6 +69,7 @@ export class SyncAutoService {
   private generation = 0
   private enqueueUnsub: (() => void) | null = null
   private configFailureUnsub: (() => void) | null = null
+  private channelChangeUnsub: (() => void) | null = null
   private lastConfigKey: string | null = null
 
   constructor(deps?: Partial<SyncAutoDeps>) {
@@ -66,6 +77,8 @@ export class SyncAutoService {
       getConfig: () => syncService.getConfig(),
       runSync: () => syncService.sync(),
       createSubscriber: () => new SyncSubscriber(),
+      isAttached: () => syncService.isAutoSyncAllowed(),
+      getCredentials: () => syncService.getAutoCredentials(),
       ...deps
     }
   }
@@ -93,6 +106,15 @@ export class SyncAutoService {
     if (!this.configFailureUnsub) {
       try {
         this.configFailureUnsub = syncService.onConfigFailure((err) => this.notifyExternalConfigFailure(err))
+      } catch {}
+    }
+    if (!this.channelChangeUnsub) {
+      // Channel-identity change (SYNC-CC-016): an accept/unpair/pair-state
+      // observation that moves the channel restarts the channel-bound SSE
+      // subscriber immediately so the new channel notifies in realtime
+      // instead of relying on the 30s reconcile fallback.
+      try {
+        this.channelChangeUnsub = syncService.onChannelChange(() => this.refresh())
       } catch {}
     }
     this.refresh()
@@ -128,6 +150,12 @@ export class SyncAutoService {
         this.configFailureUnsub()
       } catch {}
       this.configFailureUnsub = null
+    }
+    if (this.channelChangeUnsub) {
+      try {
+        this.channelChangeUnsub()
+      } catch {}
+      this.channelChangeUnsub = null
     }
     this.autoRunning = false
     this.pending = false
@@ -202,6 +230,16 @@ export class SyncAutoService {
       this.handleAutoConfigFailure('refresh', e)
       return
     }
+    // Attachment gate (SYNC-CC-005): a disconnected or unregistered service
+    // stops attachment/auto-reconnect while registration, membership, and
+    // local outbox intent are preserved. Reconnect resumes via Connect.
+    let attached = false
+    try {
+      attached = this.deps.isAttached()
+    } catch (e) {
+      this.handleAutoConfigFailure('refresh', e)
+      return
+    }
     // Config-lifecycle invalidation: any disabled/endpoint/token transition
     // cancels pending automatic work so stale debounced cycles never run
     // against the new config. The generation bump invalidates in-flight
@@ -210,9 +248,9 @@ export class SyncAutoService {
     // (snapshotted at start): a detected transition also invalidates it so
     // the stale cycle aborts before further stale transport or
     // post-transition database/status effects (LOCK-PERSONAL-001).
-    const configKey = `${enabled ? '1' : '0'}|${endpoint}|${token ?? ''}`
+    const configKey = `${enabled ? '1' : '0'}|${endpoint}|${token ?? ''}|${attached ? '1' : '0'}`
     const configChanged = this.lastConfigKey !== null && this.lastConfigKey !== configKey
-    const becameInvalid = !enabled || !endpoint || !!validateEndpointUrl(endpoint)
+    const becameInvalid = !enabled || !endpoint || !!validateEndpointUrl(endpoint) || !attached
     if (configChanged) {
       this.invalidateAutoWork()
       try {
@@ -226,15 +264,41 @@ export class SyncAutoService {
       this.stopSubscriber()
       return
     }
+    let credentials: { deviceCode: string; deviceSecret: string } | null = null
+    try {
+      credentials = this.deps.getCredentials()
+    } catch (e) {
+      this.handleAutoConfigFailure('refresh', e)
+      return
+    }
+    if (!credentials) {
+      this.invalidateAutoWork()
+      this.stopSubscriber()
+      return
+    }
     // Restart the single connection so endpoint/token changes reconnect cleanly.
     this.stopSubscriber()
     const subscriber = this.deps.createSubscriber()
     this.subscriber = subscriber
     try {
-      subscriber.start(endpoint, token, {
-        onNotify: () => this.notifyRemote(),
-        onDisconnect: () => this.scheduleReconnect()
-      })
+      subscriber.start(
+        endpoint,
+        token,
+        {
+          onNotify: () => this.notifyRemote(),
+          // SSE/relay disconnect promptly marks the observed service state
+          // disconnected (SYNC-CC-006); the next successful authenticated
+          // round-trip restores it via markRelayContact(true). One-directional
+          // call (auto -> service) so no import cycle arises.
+          onDisconnect: (err) => {
+            try {
+              syncService.notifyRelayDisconnect(err)
+            } catch {}
+            this.scheduleReconnect()
+          }
+        },
+        credentials
+      )
     } catch (e) {
       logger.warn(`[refresh] subscriber start failed: ${(e as Error).message.slice(0, 200)}`)
       this.subscriber = null
@@ -297,6 +361,7 @@ export class SyncAutoService {
     try {
       const cfg = this.deps.getConfig()
       if (!cfg.enabled || !cfg.endpoint || validateEndpointUrl(cfg.endpoint)) return
+      if (!this.deps.isAttached()) return
     } catch (e) {
       this.handleAutoConfigFailure('requestAutoSync', e)
       return
@@ -398,6 +463,7 @@ export class SyncAutoService {
       try {
         const cfg = this.deps.getConfig()
         if (!cfg.enabled || !cfg.endpoint || validateEndpointUrl(cfg.endpoint)) return
+        if (!this.deps.isAttached()) return
       } catch (e) {
         this.handleAutoConfigFailure('reconcile', e)
         return

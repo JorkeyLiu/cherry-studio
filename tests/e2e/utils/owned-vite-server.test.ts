@@ -83,8 +83,11 @@ function startWithScript(mode: string, port: number, options: Record<string, unk
       // no-readiness coverage overrides this to a bounded 1000ms.
       readinessTimeoutMs: 5000,
       stopGraceMs: 50,
-      spawnImpl: (_command, args, spawnOptions) =>
-        spawn(process.execPath, [fixture, String(args.at(-1))], spawnOptions),
+      spawnImpl: ((
+        _command: string,
+        args: readonly string[] | undefined,
+        spawnOptions: import('node:child_process').SpawnOptions | undefined
+      ) => spawn(process.execPath, [fixture, String(args?.at(-1))], spawnOptions ?? {})) as typeof spawn,
       ...options
     })
   }

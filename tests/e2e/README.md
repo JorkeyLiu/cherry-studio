@@ -5,10 +5,12 @@ end-to-end (E2E) operations and authoring. It is maintained in sync with the com
 harness in `tests/e2e/` and `playwright.config.ts`. If the harness changes, update this
 document in the same change.
 
-**CI status (factual):** E2E is **not** part of standard CI today. `.github/workflows/ci.yml`
-contains no `test:e2e` / Playwright step, and `ci:test-check` covers only the Vitest projects
-(main, renderer, aiCore, shared, scripts). E2E currently runs **locally/manually**. Do not
-report CI E2E results.
+**CI status (factual):** CI runs only the focused sync relay restart E2E
+(`sync-relay-restart-e2e` in `.github/workflows/ci.yml`: `macos-latest`, fresh
+`pnpm build`, then `pnpm test:e2e tests/e2e/specs/sync/sync-relay-restart.spec.ts`;
+gated by `main`/`shared` changes plus `push`/`workflow_dispatch`). The full
+Playwright suite still runs **locally/manually** via `pnpm test:e2e` (see §3).
+Do not report full-suite CI E2E results.
 
 ---
 

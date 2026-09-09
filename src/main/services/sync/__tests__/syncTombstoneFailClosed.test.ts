@@ -28,6 +28,7 @@ import { chatDbService } from '../../chatDb'
 import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
 import { syncService } from '../SyncService'
+import { seedRegisteredAttachedSyncService } from './helpers/syncTestRegistration'
 
 let sqlite: Database.Database
 let db: BetterSQLite3Database<typeof schema>
@@ -52,6 +53,7 @@ beforeEach(() => {
   ;(chatDbService as any).sqlite = sqlite
   ;(chatDbService as any).db = db
   syncService.clearAllForTests()
+  seedRegisteredAttachedSyncService(configStore, db)
 })
 
 afterEach(() => {

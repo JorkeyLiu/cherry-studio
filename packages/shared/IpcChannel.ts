@@ -444,19 +444,20 @@ export enum IpcChannel {
   CherryImport_CatalogRespond = 'cherry-import:catalog-respond',
   CherryImport_CatalogReady = 'cherry-import:catalog-ready',
 
-  // Sync — app-level operation log + HTTP relay (MVP)
+  // Sync — explicit service connection + registration + hidden channel pairing (SYNC-CC-*)
   Sync_GetConfig = 'sync:get-config',
   Sync_SetConfig = 'sync:set-config',
   Sync_GetStatus = 'sync:get-status',
   Sync_Sync = 'sync:sync',
   Sync_GetDeviceId = 'sync:get-device-id',
-  Sync_CreateInvite = 'sync:create-invite',
+  Sync_Connect = 'sync:connect',
+  Sync_Disconnect = 'sync:disconnect',
+  Sync_GetServiceStatus = 'sync:get-service-status',
+  Sync_GetDeviceCode = 'sync:get-device-code',
+  Sync_GetPairState = 'sync:get-pair-state',
   Sync_RequestPairing = 'sync:request-pairing',
-  Sync_ListPairingRequests = 'sync:list-pairing-requests',
+  Sync_CancelPairing = 'sync:cancel-pairing',
   Sync_AcceptPairing = 'sync:accept-pairing',
   Sync_RejectPairing = 'sync:reject-pairing',
-  Sync_ListTrusted = 'sync:list-trusted',
-  Sync_RefreshTrusted = 'sync:refresh-trusted',
-  Sync_GetPairingStatus = 'sync:get-pairing-status',
-  Sync_RevokeDevice = 'sync:revoke-device'
+  Sync_Unpair = 'sync:unpair'
 }

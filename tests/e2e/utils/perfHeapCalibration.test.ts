@@ -73,6 +73,7 @@ import {
   validateLogicalBytes,
   validateSyntheticTopics,
   type C02ExpectedContext,
+  type C02HeapProfile,
   type RendererHeapSample
 } from './perfHeapCalibration'
 import { validateBenchmarkResult, type BenchmarkResult } from '../../../src/main/services/chatDb/__tests__/benchResult'
@@ -143,7 +144,8 @@ describe('resolveC02HeapProfile', () => {
     })
     withEnv('TRUE', () => {
       const p = resolveC02HeapProfile()
-      expect(p.syntheticTopics).toBe(2)
+      expect(isC02MixedHeapProfile(p)).toBe(false)
+      if (!isC02MixedHeapProfile(p)) expect(p.syntheticTopics).toBe(2)
     })
   })
 
@@ -786,7 +788,11 @@ describe('C02 complete BenchmarkResult artifact — schema-v1 privacy and struct
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: null,
+        expectedAnchorGroupKey: null,
+        expectedContext: null,
+        contextCount: null
       },
       productionPath:
         'canonical user path complete: assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/[data-message-id]/[data-context-boundary]; productionPath complete — final synthetic topic owns #messages DOM (scoped 100/100, global 100/100 via #messages [data-message-id]), groups exact 100/100 (owned 100/100 via #messages [data-stable-group-id]), contextBoundary inside #messages anchorPresent=1 finalTopicOwned=1 (final-topic-owned, [id^="message-"] fallback diagnostic-only excluded)',
@@ -857,7 +863,11 @@ describe('C02 complete BenchmarkResult artifact — schema-v1 privacy and struct
         finalTopicDomProof: true,
         groupExactMatched: true,
         groupsWithFinalTopic: expectedVisible,
-        globalDisplayMessages: expectedVisible
+        globalDisplayMessages: expectedVisible,
+        persistedAnchorGroupKey: null,
+        expectedAnchorGroupKey: null,
+        expectedContext: null,
+        contextCount: null
       },
       productionPath:
         'canonical user path complete (mixed): assistants/addTopic (live assistant ID) → ChatDb ensureTopic/pasteMessagesToTopic → newMessages/setDisplayCount (when required) → [data-testid="topic-item"][data-topic-id] click → HomePage setActiveTopic → useActiveTopic → loadTopicMessagesThunk → Chat/Messages production projections (createLatestMessageWindow → createMessageViewportGroupModel → projectMessageViewportGroups + computeContextInfo) observed via DOM #messages [data-stable-group-id]/[data-message-id]/[data-context-boundary]; productionPath complete — mixed distribution (4 topics heterogeneous: 20×512B, 50×1024B, 100×2048B, 150×4096B) final synthetic topic owns #messages DOM (scoped 100/100, global 100/100 via #messages [data-message-id]), groups exact 100/100 (owned 100/100 via #messages [data-stable-group-id]), contextBoundary inside #messages anchorPresent=1 finalTopicOwned=1 (final-topic-owned, [id^="message-"] fallback diagnostic-only excluded)',
@@ -1165,7 +1175,11 @@ describe('C02 privacy seam regression — builders must not leak arbitrary free-
         finalTopicDomProof: false,
         groupExactMatched: false,
         groupsWithFinalTopic: 0,
-        globalDisplayMessages: 0
+        globalDisplayMessages: 0,
+        persistedAnchorGroupKey: null,
+        expectedAnchorGroupKey: null,
+        expectedContext: null,
+        contextCount: null
       },
       productionPath: SENTINEL_UNKNOWN_PATH,
       productionPathComplete: false

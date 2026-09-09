@@ -60,7 +60,16 @@ async function getTopicContext(page: Page): Promise<{ topicId: string; assistant
   })
 }
 
-async function getAssistantMessages(page: Page, topicId: string) {
+/** Renderer message snapshot shape consumed by the reorder assertions. */
+interface AssistantMessageSnapshot {
+  id: string
+  askId: string
+  status: string
+  modelId: unknown
+  blockIds: string[]
+}
+
+async function getAssistantMessages(page: Page, topicId: string): Promise<AssistantMessageSnapshot[]> {
   return page.evaluate((id: string) => {
     const state = (window as any).store.getState()
     const messageIds = state.messages.messageIdsByTopic[id] || []

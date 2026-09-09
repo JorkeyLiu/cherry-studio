@@ -35,51 +35,51 @@ describe('relay SSE notification-only', () => {
   let db: Database.Database
   let server: ReturnType<typeof createRelayServer>
   let baseUrl: string
+  let codeA = ''
+  let secretA = ''
 
   beforeAll(async () => {
     const { createRelayServer } = await import('../../../../../scripts/sync-relay/server')
     db = new Database(':memory:')
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS operations (
-        seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        id TEXT UNIQUE NOT NULL,
-        entity_type TEXT NOT NULL,
-        op TEXT NOT NULL,
-        entity_id TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        device_id TEXT NOT NULL,
-        payload_json TEXT,
-        created_at TEXT
-      );
-      CREATE TABLE IF NOT EXISTS sync_trusted_devices (
-        device_id TEXT PRIMARY KEY,
-        device_name TEXT,
-        trusted_at TEXT,
-        source TEXT,
-        device_secret_hash TEXT
-      );
-      CREATE TABLE IF NOT EXISTS sync_pairing_invites (
-        code TEXT PRIMARY KEY,
-        inviter_device_id TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        used INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE TABLE IF NOT EXISTS sync_pairing_requests (
-        id TEXT PRIMARY KEY,
-        device_id TEXT NOT NULL,
-        device_name TEXT,
-        code TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        status TEXT NOT NULL,
-        device_secret_hash TEXT
-      );
-    `)
+    const { ensureRelaySchema } = await import('../../../../../scripts/sync-relay/server')
+    ensureRelaySchema(db)
     server = createRelayServer(db, { token: relayToken })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
     const addr = server.address() as { port: number }
     baseUrl = `http://127.0.0.1:${addr.port}`
+    // Register two devices and pair them so the data plane is reachable.
+    // Registrations carry their real client device ids (operation identity
+    // binding: push deviceId must equal the registered client id).
+    const authed = { Authorization: `Bearer ${relayToken}`, 'Content-Type': 'application/json' }
+    const regA = (await (
+      await fetch(`${baseUrl}/sync/register`, {
+        method: 'POST',
+        headers: authed,
+        body: JSON.stringify({ deviceId: 'd1' })
+      })
+    ).json()) as { deviceCode: string; deviceSecret: string }
+    const regB = (await (
+      await fetch(`${baseUrl}/sync/register`, {
+        method: 'POST',
+        headers: authed,
+        body: JSON.stringify({ deviceId: 'd2' })
+      })
+    ).json()) as { deviceCode: string; deviceSecret: string }
+    codeA = regA.deviceCode
+    secretA = regA.deviceSecret
+    const req = (await (
+      await fetch(`${baseUrl}/sync/pair/request`, {
+        method: 'POST',
+        headers: { ...authed, 'x-sync-device-code': regB.deviceCode, 'x-sync-device-secret': regB.deviceSecret },
+        body: JSON.stringify({ targetCode: codeA })
+      })
+    ).json()) as { requestId: string }
+    const accept = await fetch(`${baseUrl}/sync/pair/accept`, {
+      method: 'POST',
+      headers: { ...authed, 'x-sync-device-code': codeA, 'x-sync-device-secret': secretA },
+      body: JSON.stringify({ requestId: req.requestId })
+    })
+    expect(accept.status).toBe(200)
   })
 
   afterAll(async () => {
@@ -106,7 +106,12 @@ describe('relay SSE notification-only', () => {
   it('emits cursor-hint only after successful push commit, with heartbeat', async () => {
     const controller = new AbortController()
     const res = await fetch(`${baseUrl}/sync/subscribe?cursor=0`, {
-      headers: { Authorization: `Bearer ${relayToken}`, Accept: 'text/event-stream' },
+      headers: {
+        Authorization: `Bearer ${relayToken}`,
+        Accept: 'text/event-stream',
+        'x-sync-device-code': codeA,
+        'x-sync-device-secret': secretA
+      },
       signal: controller.signal
     })
     expect(res.status).toBe(200)
@@ -134,11 +139,14 @@ describe('relay SSE notification-only', () => {
     expect(first!).toContain(': connected')
     expect(first!).not.toContain('operations')
     // Successful push emits exactly a cursor hint with no operation payload.
-    // Founder bootstrap issues the device credential once; capture it for
-    // subsequent device-authenticated calls (not logged).
     const pushRes = await fetch(`${baseUrl}/sync/push`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${relayToken}` },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${relayToken}`,
+        'x-sync-device-code': codeA,
+        'x-sync-device-secret': secretA
+      },
       body: JSON.stringify({ deviceId: 'd1', operations: [validOp('sse-op-1', 1)] })
     })
     expect(pushRes.status).toBe(200)
@@ -182,6 +190,11 @@ describe('auto coalescing vs manual semantics', () => {
     })
     const svc = new SyncAutoService({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: async () => {
         calls += 1
         if (calls === 1) await gate
@@ -218,6 +231,11 @@ describe('auto coalescing vs manual semantics', () => {
     let calls = 0
     const svc = new SyncAutoService({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: async () => {
         calls += 1
         return { ok: true }
@@ -300,51 +318,48 @@ describe('relay idempotent push acknowledgement', () => {
   let server: ReturnType<typeof createRelayServer>
   let baseUrl: string
   const token = 'idem-token-1'
+  let codeA = ''
+  let secretA = ''
 
   beforeAll(async () => {
     const { createRelayServer } = await import('../../../../../scripts/sync-relay/server')
     db = new Database(':memory:')
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS operations (
-        seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        id TEXT UNIQUE NOT NULL,
-        entity_type TEXT NOT NULL,
-        op TEXT NOT NULL,
-        entity_id TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        device_id TEXT NOT NULL,
-        payload_json TEXT,
-        created_at TEXT
-      );
-      CREATE TABLE IF NOT EXISTS sync_trusted_devices (
-        device_id TEXT PRIMARY KEY,
-        device_name TEXT,
-        trusted_at TEXT,
-        source TEXT,
-        device_secret_hash TEXT
-      );
-      CREATE TABLE IF NOT EXISTS sync_pairing_invites (
-        code TEXT PRIMARY KEY,
-        inviter_device_id TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        used INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE TABLE IF NOT EXISTS sync_pairing_requests (
-        id TEXT PRIMARY KEY,
-        device_id TEXT NOT NULL,
-        device_name TEXT,
-        code TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        status TEXT NOT NULL,
-        device_secret_hash TEXT
-      );
-    `)
+    const { ensureRelaySchema } = await import('../../../../../scripts/sync-relay/server')
+    ensureRelaySchema(db)
     server = createRelayServer(db, { token })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
     const addr = server.address() as { port: number }
     baseUrl = `http://127.0.0.1:${addr.port}`
+    const authed = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+    const regA = (await (
+      await fetch(`${baseUrl}/sync/register`, {
+        method: 'POST',
+        headers: authed,
+        body: JSON.stringify({ deviceId: 'd1' })
+      })
+    ).json()) as { deviceCode: string; deviceSecret: string }
+    const regB = (await (
+      await fetch(`${baseUrl}/sync/register`, {
+        method: 'POST',
+        headers: authed,
+        body: JSON.stringify({ deviceId: 'd2' })
+      })
+    ).json()) as { deviceCode: string; deviceSecret: string }
+    codeA = regA.deviceCode
+    secretA = regA.deviceSecret
+    const req = (await (
+      await fetch(`${baseUrl}/sync/pair/request`, {
+        method: 'POST',
+        headers: { ...authed, 'x-sync-device-code': regB.deviceCode, 'x-sync-device-secret': regB.deviceSecret },
+        body: JSON.stringify({ targetCode: codeA })
+      })
+    ).json()) as { requestId: string }
+    const accept = await fetch(`${baseUrl}/sync/pair/accept`, {
+      method: 'POST',
+      headers: { ...authed, 'x-sync-device-code': codeA, 'x-sync-device-secret': secretA },
+      body: JSON.stringify({ requestId: req.requestId })
+    })
+    expect(accept.status).toBe(200)
   })
 
   afterAll(async () => {
@@ -354,24 +369,18 @@ describe('relay idempotent push acknowledgement', () => {
     } catch {}
   })
 
-  const deviceAuths = new Map<string, string>()
   const push = async (ops: Record<string, unknown>[]): Promise<Response> => {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
-      'x-sync-device-id': 'd1'
+      'x-sync-device-code': codeA,
+      'x-sync-device-secret': secretA
     }
-    const held = deviceAuths.get('d1')
-    if (held) headers['x-sync-device-auth'] = held
     const res = await fetch(`${baseUrl}/sync/push`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ deviceId: 'd1', operations: ops })
     })
-    try {
-      const body = (await res.clone().json()) as { deviceAuth?: unknown }
-      if (typeof body?.deviceAuth === 'string') deviceAuths.set('d1', body.deviceAuth)
-    } catch {}
     return res
   }
 
@@ -427,6 +436,8 @@ describe('SyncService clears only confirmed current-chunk IDs', () => {
       if (k === 'sync:endpoint') return 'http://127.0.0.1:9'
       if (k === 'sync:token') return ''
       if (k === 'sync:enabled') return true
+      if (k === 'sync:deviceCode') return 'ABCD2345'
+      if (k === 'sync:deviceAuth') return 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
       return origGet(k as never, def as never)
     }) as never)
     vi.spyOn(configManager, 'set').mockImplementation(((k: string, v: unknown) => {
@@ -537,6 +548,11 @@ describe('auto bounded retry with active subscriber', () => {
     let calls = 0
     const svc = new SyncAutoService({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: async () => {
         calls += 1
         if (calls <= 2) throw new Error('pull failed 500: transient')
@@ -561,6 +577,11 @@ describe('auto bounded retry with active subscriber', () => {
     let calls = 0
     const svc = new SyncAutoService({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: async () => {
         calls += 1
         throw new Error('push failed: network down')
@@ -590,6 +611,11 @@ describe('auto cancellation and reconciliation lifecycle', () => {
     })
     const svc = new SyncAutoService({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: async () => {
         calls += 1
         await gate
@@ -615,6 +641,11 @@ describe('auto cancellation and reconciliation lifecycle', () => {
     let calls = 0
     const svc = new SyncAutoService({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: async () => {
         calls += 1
         return { ok: true }
@@ -641,6 +672,11 @@ describe('auto cancellation and reconciliation lifecycle', () => {
     let calls = 0
     const svc = new SyncAutoService({
       getConfig: () => ({ endpoint: '', token: undefined, enabled: false }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: async () => {
         calls += 1
         return { ok: true }

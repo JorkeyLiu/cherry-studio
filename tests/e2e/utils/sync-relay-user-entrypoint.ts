@@ -160,11 +160,15 @@ export function assertPackageEntrypoint(repoRoot: string): string {
 function resolveElectronBinary(repoRoot: string): string {
   const runnerRequire: NodeRequire =
     typeof require !== 'undefined' ? require : createRequire(path.join(repoRoot, 'package.json'))
-  const electronPath = runnerRequire('electron') as string
-  if (!electronPath || typeof electronPath !== 'string') {
+  // Static `electron` types describe the in-Electron API namespace
+  // (CrossProcessExports); the install-time runner entry resolves to the
+  // binary path string. Narrow via unknown so a non-string export fails
+  // closed instead of an unsafe namespace-to-string cast.
+  const electronExport: unknown = runnerRequire('electron')
+  if (typeof electronExport !== 'string' || electronExport.length === 0) {
     throw new Error('sync-relay-user-entrypoint: electron binary path missing')
   }
-  return electronPath
+  return electronExport
 }
 
 function sleep(ms: number): Promise<void> {

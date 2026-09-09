@@ -121,11 +121,12 @@ async function createSecondAssistantViaUI(page: Page): Promise<{ id: string; nam
       const state = (window as any).store?.getState()
       return state?.assistants?.assistants?.some((assistant: any) => !beforeIds.includes(assistant.id))
     },
-    before.assistants.map((assistant) => assistant.id)
+    before.assistants.map((assistant: { id: string }) => assistant.id)
   )
   const after = await getState(page)
   const created = after.assistants.find(
-    (assistant) => !before.assistants.some((beforeAssistant) => beforeAssistant.id === assistant.id)
+    (assistant: { id: string }) =>
+      !before.assistants.some((beforeAssistant: { id: string }) => beforeAssistant.id === assistant.id)
   )
   if (!created) throw new Error('Second assistant was not created through the UI')
   expect(created.name).toBe(assistantName)

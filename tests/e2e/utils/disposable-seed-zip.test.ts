@@ -681,7 +681,7 @@ describe('embedded file bag metadata (LOCK-E2-FIX FileManager realism)', () => {
     expect(file.origin_name).toBe(row.origin_name)
     // Fake source path is retained unchanged on the embedded bag.
     expect(file.path).toBe(row.path)
-    expect(file.path.startsWith('/fake/')).toBe(true)
+    expect(String(file.path).startsWith('/fake/')).toBe(true)
     expect(file.type).toBe(row.type)
     expect(file.size).toBe(row.size)
     expect(file.count).toBe(row.count)

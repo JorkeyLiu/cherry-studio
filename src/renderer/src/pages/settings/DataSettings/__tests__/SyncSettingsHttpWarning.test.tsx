@@ -34,10 +34,8 @@ function mockSyncApi(endpoint: string): void {
       syncing: false,
       conflictCount: 0
     })),
-    getDeviceId: vi.fn(async () => ({ deviceId: 'device-1' })),
-    getPairingStatus: vi.fn(async () => ({ trusted: false, pending: false })),
-    listTrusted: vi.fn(async () => ({ devices: [] })),
-    listPairingRequests: vi.fn(async () => ({ requests: [] }))
+    getServiceStatus: vi.fn(async () => ({ state: 'connected', deviceCode: 'ABCD2345', explicitDisconnect: false })),
+    getPairState: vi.fn(async () => ({ deviceCode: 'ABCD2345', state: 'paired', outgoing: null, incoming: [] }))
   }
   Object.defineProperty(window, 'api', { value: { sync: api }, configurable: true, writable: true })
   Object.defineProperty(window, 'toast', {

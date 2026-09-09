@@ -1,10 +1,9 @@
 /**
- * Audit closure regressions (AUD-001/AUD-002/AUD-003):
- * - Illegal push / malformed pull never bootstrap relay trust.
- * - SyncClient non-2xx preserves the validated issued credential without
- *   leaking the secret into the message.
- * - getPairingStatus propagates local trust-mirror persistence failure
- *   instead of reporting trusted=true.
+ * Audit closure regressions (SYNC-CC-*, Main + relay lanes):
+ * - Illegal push / malformed pull framing never writes channel state and
+ *   issues no credential.
+ * - SyncClient redacts relay error bodies (never carries secrets in text).
+ * - Unpaired pull/push is refused without touching channel cursors.
  */
 import Database from 'better-sqlite3'
 import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
@@ -30,6 +29,7 @@ import { chatDbService } from '../../chatDb'
 import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
 import { syncService } from '../SyncService'
+import { seedRegisteredAttachedSyncService } from './helpers/syncTestRegistration'
 
 let sqlite: Database.Database
 let db: BetterSQLite3Database<typeof schema>
@@ -52,6 +52,7 @@ beforeEach(() => {
   ;(chatDbService as never as { sqlite: unknown }).sqlite = sqlite
   ;(chatDbService as never as { db: unknown }).db = db
   syncService.clearAllForTests()
+  seedRegisteredAttachedSyncService(configStore, db)
   syncService.resetShutdownForTests()
   vi.restoreAllMocks()
 })
@@ -65,57 +66,41 @@ afterEach(() => {
   ;(chatDbService as never as { db: unknown }).db = null
 })
 
-function openRelayDb(): Database.Database {
-  const r = new Database(':memory:')
-  r.exec(`
-    CREATE TABLE operations (
-      seq INTEGER PRIMARY KEY AUTOINCREMENT,
-      id TEXT UNIQUE NOT NULL,
-      entity_type TEXT NOT NULL,
-      op TEXT NOT NULL,
-      entity_id TEXT NOT NULL,
-      timestamp INTEGER NOT NULL,
-      device_id TEXT NOT NULL,
-      payload_json TEXT,
-      created_at TEXT
-    );
-    CREATE TABLE IF NOT EXISTS sync_trusted_devices (
-      device_id TEXT PRIMARY KEY,
-      device_name TEXT,
-      trusted_at TEXT,
-      source TEXT,
-      device_secret_hash TEXT
-    );
-    CREATE TABLE IF NOT EXISTS sync_pairing_invites (
-      code TEXT PRIMARY KEY,
-      inviter_device_id TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      expires_at TEXT NOT NULL,
-      used INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS sync_pairing_requests (
-      id TEXT PRIMARY KEY,
-      device_id TEXT NOT NULL,
-      device_name TEXT,
-      code TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      expires_at TEXT NOT NULL,
-      status TEXT NOT NULL,
-      device_secret_hash TEXT
-    );
-  `)
-  return r
+async function openRelay(): Promise<{ base: string; relayDb: Database.Database; close: () => Promise<void> }> {
+  const { createRelayServer, ensureRelaySchema } = await import('../../../../../scripts/sync-relay/server')
+  const relayDb = new Database(':memory:')
+  ensureRelaySchema(relayDb)
+  const server = createRelayServer(relayDb, {})
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const addr = server.address() as { port: number }
+  return {
+    base: `http://127.0.0.1:${addr.port}`,
+    relayDb,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve()))
+  }
 }
 
-describe('AUD-001: reference relay defers bootstrap until validation passes', () => {
-  it('illegal push does not bootstrap trust and issues no credential', async () => {
-    const { createRelayServer } = await import('../../../../../scripts/sync-relay/server')
-    const relayDb = openRelayDb()
-    const server = createRelayServer(relayDb as never)
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
-    const addr = server.address() as { port: number }
-    const base = `http://127.0.0.1:${addr.port}`
+async function registerRaw(base: string): Promise<{ code: string; secret: string }> {
+  const res = await fetch(`${base}/sync/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  })
+  expect(res.status).toBe(200)
+  const body = (await res.json()) as { deviceCode: string; deviceSecret: string }
+  return { code: body.deviceCode, secret: body.deviceSecret }
+}
+
+describe('relay validation runs before any channel write', () => {
+  it('illegal push writes nothing and issues no credential', async () => {
+    const { base, relayDb, close } = await openRelay()
     try {
+      const reg = await registerRaw(base)
+      const headers = {
+        'Content-Type': 'application/json',
+        'x-sync-device-code': reg.code,
+        'x-sync-device-secret': reg.secret
+      }
       const badTopic = {
         id: 'op-audit-bad',
         entityType: 'topic',
@@ -127,47 +112,64 @@ describe('AUD-001: reference relay defers bootstrap until validation passes', ()
       }
       const res = await fetch(`${base}/sync/push`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ deviceId: 'd-audit', operations: [badTopic] })
       })
       expect(res.status).toBe(400)
-      const body = (await res.json().catch(() => ({}))) as { deviceAuth?: unknown }
+      const body = (await res.json().catch(() => ({}))) as { deviceSecret?: unknown; deviceAuth?: unknown }
+      expect(body.deviceSecret).toBeUndefined()
       expect(body.deviceAuth).toBeUndefined()
-      const count = (relayDb.prepare('SELECT COUNT(*) as n FROM sync_trusted_devices').get() as { n: number }).n
-      expect(count).toBe(0)
-      const ops = (relayDb.prepare('SELECT COUNT(*) as c FROM operations').get() as { c: number }).c
+      const ops = (relayDb.prepare('SELECT COUNT(*) as c FROM sync_channel_operations').get() as { c: number }).c
       expect(ops).toBe(0)
     } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await close()
       relayDb.close()
     }
   })
 
-  it('malformed pull cursor does not bootstrap trust', async () => {
-    const { createRelayServer } = await import('../../../../../scripts/sync-relay/server')
-    const relayDb = openRelayDb()
-    const server = createRelayServer(relayDb as never)
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
-    const addr = server.address() as { port: number }
-    const base = `http://127.0.0.1:${addr.port}`
+  it('malformed pull cursor is rejected before any data access', async () => {
+    const { base, relayDb, close } = await openRelay()
     try {
+      const reg = await registerRaw(base)
       const res = await fetch(`${base}/sync/pull?cursor=12junk&deviceId=d-audit`, {
-        headers: { 'x-sync-device-id': 'd-audit' }
+        headers: { 'x-sync-device-code': reg.code, 'x-sync-device-secret': reg.secret }
       })
       expect(res.status).toBe(400)
-      const body = (await res.json().catch(() => ({}))) as { deviceAuth?: unknown }
-      expect(body.deviceAuth).toBeUndefined()
-      const count = (relayDb.prepare('SELECT COUNT(*) as n FROM sync_trusted_devices').get() as { n: number }).n
-      expect(count).toBe(0)
+      const body = (await res.json().catch(() => ({}))) as { deviceSecret?: unknown }
+      expect(body.deviceSecret).toBeUndefined()
     } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await close()
+      relayDb.close()
+    }
+  })
+
+  it('unpaired push/pull is refused without channel state', async () => {
+    const { base, relayDb, close } = await openRelay()
+    try {
+      const reg = await registerRaw(base)
+      const headers = {
+        'Content-Type': 'application/json',
+        'x-sync-device-code': reg.code,
+        'x-sync-device-secret': reg.secret
+      }
+      const push = await fetch(`${base}/sync/push`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ deviceId: 'd-audit', operations: [] })
+      })
+      expect(push.status).toBe(403)
+      expect(((await push.json()) as { error: string }).error).toMatch(/pairing-required/)
+      const ops = (relayDb.prepare('SELECT COUNT(*) as c FROM sync_channel_operations').get() as { c: number }).c
+      expect(ops).toBe(0)
+    } finally {
+      await close()
       relayDb.close()
     }
   })
 })
 
-describe('AUD-002: SyncClient preserves issued credential without leaking secret', () => {
-  it('non-2xx push error carries deviceAuth and redacts it from the message', async () => {
+describe('SyncClient redacts relay error bodies', () => {
+  it('non-2xx push error never carries secret material in the message', async () => {
     const { syncClient } = await import('../SyncClient')
     const issued = 'ab'.repeat(32)
     const origFetch = globalThis.fetch
@@ -175,22 +177,24 @@ describe('AUD-002: SyncClient preserves issued credential without leaking secret
       ({
         ok: false,
         status: 400,
-        text: async () => JSON.stringify({ error: 'invalid operation x: bad', deviceAuth: issued })
+        text: async () => JSON.stringify({ error: 'invalid operation x: bad', deviceSecret: issued })
       }) as never) as never
     try {
-      const err = await syncClient.push('http://127.0.0.1:9', undefined, { deviceId: 'd1', operations: [] }).then(
-        () => null,
-        (e: unknown) => e as Error & { deviceAuth?: unknown }
-      )
+      const err = await syncClient
+        .push('http://127.0.0.1:9', undefined, { deviceId: 'd1', operations: [] }, undefined, 'ABCD2345', issued)
+        .then(
+          () => null,
+          (e: unknown) => e as Error
+        )
       expect(err).not.toBeNull()
-      expect(err?.deviceAuth).toBe(issued)
       expect(String(err?.message)).not.toContain(issued)
+      expect(String(err?.message)).toMatch(/invalid operation/)
     } finally {
       ;(globalThis as unknown as { fetch: unknown }).fetch = origFetch
     }
   })
 
-  it('non-2xx pull error carries deviceAuth and redacts it from the message', async () => {
+  it('non-2xx pull error never carries secret material in the message', async () => {
     const { syncClient } = await import('../SyncClient')
     const issued = 'cd'.repeat(32)
     const origFetch = globalThis.fetch
@@ -198,15 +202,14 @@ describe('AUD-002: SyncClient preserves issued credential without leaking secret
       ({
         ok: false,
         status: 400,
-        text: async () => JSON.stringify({ error: 'invalid cursor', deviceAuth: issued })
+        text: async () => JSON.stringify({ error: 'invalid cursor', deviceSecret: issued })
       }) as never) as never
     try {
-      const err = await syncClient.pull('http://127.0.0.1:9', undefined, 0, 'd1').then(
+      const err = await syncClient.pull('http://127.0.0.1:9', undefined, 0, 'd1', undefined, 'ABCD2345', issued).then(
         () => null,
-        (e: unknown) => e as Error & { deviceAuth?: unknown }
+        (e: unknown) => e as Error
       )
       expect(err).not.toBeNull()
-      expect(err?.deviceAuth).toBe(issued)
       expect(String(err?.message)).not.toContain(issued)
     } finally {
       ;(globalThis as unknown as { fetch: unknown }).fetch = origFetch
@@ -214,16 +217,11 @@ describe('AUD-002: SyncClient preserves issued credential without leaking secret
   })
 })
 
-describe('AUD-003: pairing status fails closed when local trust persistence fails', () => {
-  it('getPairingStatus rejects instead of reporting trusted=true', async () => {
+describe('getPairState fails closed when the relay is unreachable', () => {
+  it('transport failure propagates instead of a forged unpaired state', async () => {
     const { syncClient } = await import('../SyncClient')
-    syncService.getDeviceId()
-    vi.spyOn(syncClient, 'getPairingStatus').mockResolvedValue({ trusted: true, pending: false })
-    vi.spyOn(syncClient, 'listTrusted').mockResolvedValue({
-      devices: [{ deviceId: 'peer-x', trustedAt: new Date().toISOString(), source: 'relay-refresh' }]
-    } as never)
-    // Break the local trust mirror so refresh persistence fails.
-    sqlite.exec('DROP TABLE IF EXISTS sync_trusted_devices')
-    await expect(syncService.getPairingStatus()).rejects.toThrow()
+    vi.spyOn(syncClient, 'getPairState').mockRejectedValue(new Error('fetch failed'))
+    await expect(syncService.getPairState()).rejects.toThrow(/fetch failed/)
+    expect(syncService.getServiceStatus().state).toBe('disconnected')
   })
 })

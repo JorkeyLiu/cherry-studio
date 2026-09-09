@@ -2,7 +2,13 @@ import { request as httpRequest } from 'node:http'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { startTestRelay, type TestRelayHandle } from './sync-relay'
+import {
+  provisionPairedDevices,
+  provisionedHeaders,
+  startTestRelay,
+  type ProvisionedDevice,
+  type TestRelayHandle
+} from './sync-relay'
 
 const TOKEN = 'content-length-parity-token'
 
@@ -19,9 +25,11 @@ function topicOp(id: string, entityId: string, name = 'N', ts = Date.now()): Rec
 }
 
 let relay: TestRelayHandle | null = null
+let dev: ProvisionedDevice | null = null
 
 beforeEach(async () => {
   relay = await startTestRelay(TOKEN)
+  dev = (await provisionPairedDevices(relay.endpoint, TOKEN, 2))[0]
 })
 
 afterEach(async () => {
@@ -34,7 +42,8 @@ afterEach(async () => {
 function rawPushWithContentLength(
   endpoint: string,
   contentLengthHeader: string,
-  body: string
+  body: string,
+  dev?: ProvisionedDevice
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const url = new URL(`${endpoint}/sync/push`)
@@ -47,7 +56,8 @@ function rawPushWithContentLength(
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${TOKEN}`,
-          'Content-Length': contentLengthHeader
+          'Content-Length': contentLengthHeader,
+          ...(dev ? provisionedHeaders(dev) : {})
         }
       },
       (res) => {
@@ -69,7 +79,7 @@ describe('test relay content-length parity (LOCK-RT-005/006)', () => {
     // leading numeric prefix, so JSON framing fails with 400 — the parity
     // point is that it is never an early 413 for a tiny body.
     const body = JSON.stringify({ deviceId: 'd1', operations: [topicOp('op-cl-junk', 't-cl-junk')] })
-    const res = await rawPushWithContentLength(relay!.endpoint, '12junk', body)
+    const res = await rawPushWithContentLength(relay!.endpoint, '12junk', body, dev!)
     expect(res.status).not.toBe(413)
     expect(res.status).toBe(400)
   })
@@ -99,7 +109,7 @@ describe('test relay content-length parity (LOCK-RT-005/006)', () => {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${TOKEN}`,
-        'x-sync-device-id': 'd1'
+        'x-sync-device-code': 'd1'
       },
       body
     })

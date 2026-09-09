@@ -1,197 +1,234 @@
 /**
- * Pairing/trust verification for the test relay mirror with device-identity
- * binding (F-001/F-002/F-003): request -> explicit accept -> trusted with a
- * per-device credential; forged identities, body/op mismatches, missing pull
- * identity, and trust-store failures all fail closed.
+ * Registration/channel/pairing verification for the test relay mirror
+ * (SYNC-CC-*): explicit registration, code-without-secret authorization
+ * failure, request -> explicit accept -> paired channel, forged identities
+ * and unpaired data-plane access all fail closed.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { runRelayConformanceCore } from './sync-relay-conformance'
 import { startTestRelay, type TestRelayHandle } from './sync-relay'
 
 const TOKEN = 'pairing-test-token'
 
 let relay: TestRelayHandle
 
-const authFor = new Map<string, string>()
+const secrets = new Map<string, string>()
+const codes = new Map<string, string>()
 
 beforeEach(async () => {
   relay = await startTestRelay(TOKEN)
-  authFor.clear()
+  secrets.clear()
+  codes.clear()
 })
 
 afterEach(async () => {
   await relay.close()
 })
 
-function authHeaders(deviceId?: string): Record<string, string> {
+async function registerAs(alias: string): Promise<{ code: string; secret: string }> {
+  const res = await fetch(`${relay.endpoint}/sync/register`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: alias })
+  })
+  expect(res.status).toBe(200)
+  const body = (await res.json()) as { deviceCode: string; deviceSecret: string }
+  secrets.set(alias, body.deviceSecret)
+  codes.set(alias, body.deviceCode)
+  return { code: body.deviceCode, secret: body.deviceSecret }
+}
+
+function authHeaders(alias: string): Record<string, string> {
   const headers: Record<string, string> = { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }
-  if (deviceId) {
-    headers['x-sync-device-id'] = deviceId
-    const held = authFor.get(deviceId)
-    if (held) headers['x-sync-device-auth'] = held
-  }
+  const code = codes.get(alias)
+  if (code) headers['x-sync-device-code'] = code
+  const held = secrets.get(alias)
+  if (held) headers['x-sync-device-secret'] = held
   return headers
 }
 
-function pullHeaders(deviceId?: string): Record<string, string> {
+function pullHeaders(alias: string): Record<string, string> {
   const headers: Record<string, string> = { Authorization: `Bearer ${TOKEN}` }
-  if (deviceId) {
-    headers['x-sync-device-id'] = deviceId
-    const held = authFor.get(deviceId)
-    if (held) headers['x-sync-device-auth'] = held
-  }
+  const code = codes.get(alias)
+  if (code) headers['x-sync-device-code'] = code
+  const held = secrets.get(alias)
+  if (held) headers['x-sync-device-secret'] = held
   return headers
 }
 
-async function post(
-  path: string,
-  body: unknown,
-  deviceId?: string,
-  token = TOKEN
-): Promise<{ status: number; json: any }> {
-  const headers: Record<string, string> = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-  if (deviceId) {
-    headers['x-sync-device-id'] = deviceId
-    const held = authFor.get(deviceId)
-    if (held) headers['x-sync-device-auth'] = held
-  }
+async function post(path: string, body: unknown, alias?: string): Promise<{ status: number; json: any }> {
   const res = await fetch(`${relay.endpoint}${path}`, {
     method: 'POST',
-    headers,
+    headers: authHeaders(alias ?? ''),
     body: JSON.stringify(body)
   })
-  const json = await res.json().catch(() => ({}))
-  if (typeof (json as { deviceAuth?: unknown })?.deviceAuth === 'string') {
-    const id = (body as { deviceId?: unknown })?.deviceId
-    if (typeof id === 'string') authFor.set(id, (json as { deviceAuth: string }).deviceAuth)
-  }
-  return { status: res.status, json }
-}
-
-async function get(path: string, deviceId?: string): Promise<{ status: number; json: any }> {
-  const res = await fetch(`${relay.endpoint}${path}`, { headers: pullHeaders(deviceId) })
   return { status: res.status, json: await res.json().catch(() => ({})) }
 }
 
-describe('pairing trust on the test relay', () => {
-  it('founder bootstrap issues a credential then enforces trust', async () => {
-    // Empty group: founder push auto-trusts and issues the credential once.
-    const push = await post('/sync/push', { deviceId: 'device-a', operations: [] }, 'device-a')
-    expect(push.status).toBe(200)
-    expect(typeof push.json.deviceAuth).toBe('string')
-    // Same token but unknown device is now rejected on push and pull.
+async function getState(alias: string): Promise<{ status: number; json: any }> {
+  const res = await fetch(`${relay.endpoint}/sync/state`, { headers: pullHeaders(alias) })
+  return { status: res.status, json: await res.json().catch(() => ({})) }
+}
+
+describe('channel pairing on the test relay', () => {
+  it('registration issues code + secret; the code alone authorizes nothing', async () => {
+    const reg = await registerAs('device-a')
+    expect(reg.code).toMatch(/^[A-HJ-NP-Z2-9]{8}$/)
+    // Same token but an unregistered well-formed code is rejected.
+    const ghost = await fetch(`${relay.endpoint}/sync/push`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'Content-Type': 'application/json',
+        'x-sync-device-code': 'ZZZZ9999',
+        'x-sync-device-secret': '0'.repeat(64)
+      },
+      body: JSON.stringify({ deviceId: 'device-evil', operations: [] })
+    })
+    expect(ghost.status).toBe(403)
+    expect(JSON.stringify(await ghost.json().catch(() => ({})))).toContain('unknown-credential')
     const deniedPush = await post('/sync/push', { deviceId: 'device-evil', operations: [] }, 'device-evil')
     expect(deniedPush.status).toBe(403)
-    expect(JSON.stringify(deniedPush.json)).toContain('device-not-trusted')
     const pullRes = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=device-evil`, {
       headers: pullHeaders('device-evil')
     })
     expect(pullRes.status).toBe(403)
-    // Founder still passes with its credential.
-    const okPull = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=device-a`, {
-      headers: pullHeaders('device-a')
-    })
-    expect(okPull.status).toBe(200)
-  })
-
-  it('request -> accept establishes trust; duplicate request re-issues credential', async () => {
-    await post('/sync/push', { deviceId: 'device-a', operations: [] }, 'device-a')
-    const invite = await post('/sync/pair/invite', { deviceId: 'device-a' }, 'device-a')
-    expect(invite.status).toBe(200)
-    const code = invite.json.code as string
-    const req1 = await post('/sync/pair/request', { deviceId: 'device-b', code }, undefined)
-    expect(req1.status).toBe(200)
-    expect(typeof req1.json.deviceAuth).toBe('string')
-    const firstAuth = req1.json.deviceAuth as string
-    const req2 = await post('/sync/pair/request', { deviceId: 'device-b', code }, undefined)
-    expect(req2.status).toBe(200)
-    expect(req2.json.requestId).toBe(req1.json.requestId)
-    // Replay re-issues: the latest credential is the live one.
-    expect(typeof req2.json.deviceAuth).toBe('string')
-    authFor.set('device-b', req2.json.deviceAuth as string)
-    expect((req2.json.deviceAuth as string) === firstAuth).toBe(false)
-    // Untrusted caller cannot list pending.
-    const pendingDenied = await get('/sync/pair/pending?deviceId=device-b', 'device-b')
-    expect(pendingDenied.status).toBe(403)
-    const pending = await get('/sync/pair/pending?deviceId=device-a', 'device-a')
-    expect(pending.status).toBe(200)
-    expect(pending.json.requests).toHaveLength(1)
-    // Explicit accept makes B trusted (promotes the latest credential).
-    const accept = await post(
-      '/sync/pair/accept',
-      { approverDeviceId: 'device-a', requestId: req1.json.requestId },
-      'device-a'
-    )
-    expect(accept.status).toBe(200)
-    const status = await get('/sync/pair/status?deviceId=device-b')
-    expect(status.json.trusted).toBe(true)
-    // B can now push/pull with its issued credential.
-    const pushB = await post('/sync/push', { deviceId: 'device-b', operations: [] }, 'device-b')
-    expect(pushB.status).toBe(200)
-    // Re-accepting the same request cannot duplicate trust.
-    const acceptAgain = await post(
-      '/sync/pair/accept',
-      { approverDeviceId: 'device-a', requestId: req1.json.requestId },
-      'device-a'
-    )
-    expect(acceptAgain.status).toBe(410)
-    const trusted = await get('/sync/pair/trusted?deviceId=device-a', 'device-a')
-    expect(trusted.json.devices).toHaveLength(2)
-  })
-
-  it('rejected request never becomes trusted', async () => {
-    await post('/sync/push', { deviceId: 'device-a', operations: [] }, 'device-a')
-    const invite = await post('/sync/pair/invite', { deviceId: 'device-a' }, 'device-a')
-    const req = await post('/sync/pair/request', { deviceId: 'device-b', code: invite.json.code }, undefined)
-    const reject = await post(
-      '/sync/pair/reject',
-      { approverDeviceId: 'device-a', requestId: req.json.requestId },
-      'device-a'
-    )
-    expect(reject.status).toBe(200)
-    const status = await get('/sync/pair/status?deviceId=device-b')
-    expect(status.json.trusted).toBe(false)
-    const pushB = await post('/sync/push', { deviceId: 'device-b', operations: [] }, 'device-b')
-    expect(pushB.status).toBe(403)
-  })
-
-  it('revoked device is rejected again', async () => {
-    await post('/sync/push', { deviceId: 'device-a', operations: [] }, 'device-a')
-    const invite = await post('/sync/pair/invite', { deviceId: 'device-a' }, 'device-a')
-    const req = await post('/sync/pair/request', { deviceId: 'device-b', code: invite.json.code }, undefined)
-    await post('/sync/pair/accept', { approverDeviceId: 'device-a', requestId: req.json.requestId }, 'device-a')
-    const revoke = await post(
-      '/sync/pair/revoke',
-      { approverDeviceId: 'device-a', targetDeviceId: 'device-b' },
-      'device-a'
-    )
-    expect(revoke.status).toBe(200)
-    const pushB = await post('/sync/push', { deviceId: 'device-b', operations: [] }, 'device-b')
-    expect(pushB.status).toBe(403)
-  })
-
-  it('F-001: forging a trusted deviceId with the shared token alone is rejected', async () => {
-    await post('/sync/push', { deviceId: 'device-a', operations: [] }, 'device-a')
-    // Attacker holds the shared token and claims device-a without its
-    // per-device credential.
+    // The public code without its secret is refused even though the code is valid.
     const forged = await fetch(`${relay.endpoint}/sync/push`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${TOKEN}`,
         'Content-Type': 'application/json',
-        'x-sync-device-id': 'device-a'
+        'x-sync-device-code': reg.code
       },
       body: JSON.stringify({ deviceId: 'device-a', operations: [] })
     })
     expect(forged.status).toBe(403)
-    const forgedPull = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=device-a`, {
-      headers: { Authorization: `Bearer ${TOKEN}`, 'x-sync-device-id': 'device-a' }
-    })
-    expect(forgedPull.status).toBe(403)
   })
 
-  it('F-001: body deviceId and operation deviceId must bind to the authenticated identity', async () => {
-    await post('/sync/push', { deviceId: 'device-a', operations: [] }, 'device-a')
+  it('request -> accept pairs into a channel; duplicate request is idempotent', async () => {
+    await registerAs('device-a')
+    const regB = await registerAs('device-b')
+    const req1 = await post('/sync/pair/request', { targetCode: codes.get('device-a') }, 'device-b')
+    expect(req1.status).toBe(200)
+    expect(typeof req1.json.requestId).toBe('string')
+    const req2 = await post('/sync/pair/request', { targetCode: codes.get('device-a') }, 'device-b')
+    expect(req2.status).toBe(200)
+    expect(req2.json.requestId).toBe(req1.json.requestId)
+    // Target observes the incoming request via state.
+    const stateA = await getState('device-a')
+    expect(stateA.status).toBe(200)
+    expect(stateA.json.incoming).toHaveLength(1)
+    expect(stateA.json.incoming[0].requesterCode).toBe(regB.code)
+    // Explicit accept pairs both into one hidden channel.
+    const accept = await post('/sync/pair/accept', { requestId: req1.json.requestId }, 'device-a')
+    expect(accept.status).toBe(200)
+    expect(typeof accept.json.channelId).toBe('string')
+    const afterA = await getState('device-a')
+    const afterB = await getState('device-b')
+    expect(afterA.json.paired).toBe(true)
+    expect(afterB.json.paired).toBe(true)
+    expect(afterA.json.channelId).toBe(afterB.json.channelId)
+    // Both can now push/pull.
+    const pushB = await post('/sync/push', { deviceId: 'device-b', operations: [] }, 'device-b')
+    expect(pushB.status).toBe(200)
+    // Re-accepting the same request cannot duplicate membership.
+    const acceptAgain = await post('/sync/pair/accept', { requestId: req1.json.requestId }, 'device-a')
+    expect(acceptAgain.status).toBe(410)
+  })
+
+  it('rejected request never pairs', async () => {
+    await registerAs('device-a')
+    await registerAs('device-b')
+    const req = await post('/sync/pair/request', { targetCode: codes.get('device-a') }, 'device-b')
+    const reject = await post('/sync/pair/reject', { requestId: req.json.requestId }, 'device-a')
+    expect(reject.status).toBe(200)
+    const stateB = await getState('device-b')
+    expect(stateB.json.paired).toBe(false)
+    const pushB = await post('/sync/push', { deviceId: 'device-b', operations: [] }, 'device-b')
+    expect(pushB.status).toBe(403)
+    expect(JSON.stringify(pushB.json)).toContain('pairing-required')
+  })
+
+  it('unpair dissolves the channel and the survivor observes unpaired', async () => {
+    await registerAs('device-a')
+    await registerAs('device-b')
+    const req = await post('/sync/pair/request', { targetCode: codes.get('device-a') }, 'device-b')
+    await post('/sync/pair/accept', { requestId: req.json.requestId }, 'device-a')
+    const unpair = await post('/sync/pair/unpair', {}, 'device-a')
+    expect(unpair.status).toBe(200)
+    const stateB = await getState('device-b')
+    expect(stateB.json.paired).toBe(false)
+    expect(stateB.json.channelId).toBeNull()
+    // Registration survives: B can pair again immediately.
+    await registerAs('device-c')
+    const req2 = await post('/sync/pair/request', { targetCode: codes.get('device-c') }, 'device-b')
+    expect(req2.status).toBe(200)
+  })
+
+  it('paired requester cannot initiate; unpaired data access fails closed', async () => {
+    await registerAs('device-a')
+    await registerAs('device-b')
+    await registerAs('device-c')
+    const req = await post('/sync/pair/request', { targetCode: codes.get('device-a') }, 'device-b')
+    await post('/sync/pair/accept', { requestId: req.json.requestId }, 'device-a')
+    // A (paired) cannot initiate another pairing.
+    const bad = await post('/sync/pair/request', { targetCode: codes.get('device-c') }, 'device-a')
+    expect(bad.status).toBe(409)
+    // C (unpaired) cannot push or pull.
+    const pushC = await post('/sync/push', { deviceId: 'device-c', operations: [] }, 'device-c')
+    expect(pushC.status).toBe(403)
+    const pullC = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=device-c`, {
+      headers: pullHeaders('device-c')
+    })
+    expect(pullC.status).toBe(403)
+  })
+
+  it('late accept after the requester paired settles the stale request without merge', async () => {
+    await registerAs('device-a')
+    const regB = await registerAs('device-b')
+    const regOut = await registerAs('device-outsider')
+    // B requests A while both are unpaired (stays pending).
+    const stale = await post('/sync/pair/request', { targetCode: codes.get('device-a') }, 'device-b')
+    expect(stale.status).toBe(200)
+    // Outsider requests B; B accepts first and becomes paired.
+    const fresh = await post('/sync/pair/request', { targetCode: regB.code }, 'device-outsider')
+    expect(fresh.status).toBe(200)
+    const acceptFresh = await post('/sync/pair/accept', { requestId: fresh.json.requestId }, 'device-b')
+    expect(acceptFresh.status).toBe(200)
+    const channelBefore = relay.getChannelOfForTests(regB.code)
+    expect(channelBefore).toBe(relay.getChannelOfForTests(regOut.code))
+    // A's late accept of the stale request fails with no merge. Production
+    // parity: the accept that paired B atomically replaced B's other pending
+    // (B->A), so the late accept observes terminal 410 request-replaced
+    // (never a merge, never revivable).
+    const late = await post('/sync/pair/accept', { requestId: stale.json.requestId }, 'device-a')
+    expect(late.status).toBe(410)
+    expect(JSON.stringify(late.json)).toContain('request-replaced')
+    // The stale row is terminal via the same-transaction stale-intent cleanup.
+    const staleRow = relay.listPairRequestsForTests().find((r) => r.id === stale.json.requestId)
+    expect(staleRow?.status).toBe('replaced')
+    // The old pending no longer surfaces as incoming/outgoing.
+    const stateA = await getState('device-a')
+    const stateB = await getState('device-b')
+    expect(stateA.json.paired).toBe(false)
+    expect(stateA.json.incoming).toEqual([])
+    expect(stateA.json.outgoing).toBeNull()
+    expect(stateB.json.paired).toBe(true)
+    expect(stateB.json.outgoing).toBeNull()
+    expect(stateB.json.incoming).toEqual([])
+    // Memberships unchanged: A stays unpaired, B/outsider keep their channel.
+    expect(relay.getChannelOfForTests(codes.get('device-a')!)).toBeNull()
+    expect(relay.getChannelOfForTests(regB.code)).toBe(channelBefore)
+    expect(relay.getChannelOfForTests(regOut.code)).toBe(channelBefore)
+  })
+
+  it('body deviceId and operation deviceId must agree', async () => {
+    await registerAs('device-a')
+    await registerAs('device-b')
+    const req = await post('/sync/pair/request', { targetCode: codes.get('device-a') }, 'device-b')
+    await post('/sync/pair/accept', { requestId: req.json.requestId }, 'device-a')
     const op = {
       id: 'op-mismatch-1',
       entityType: 'topic',
@@ -204,60 +241,38 @@ describe('pairing trust on the test relay', () => {
     const mismatch = await post('/sync/push', { deviceId: 'device-a', operations: [op] }, 'device-a')
     expect(mismatch.status).toBe(400)
     expect(JSON.stringify(mismatch.json)).toContain('mismatch')
-    // Header/body disagreement is also rejected.
-    const disagree = await fetch(`${relay.endpoint}/sync/push`, {
-      method: 'POST',
-      headers: authHeaders('device-a'),
-      body: JSON.stringify({ deviceId: 'device-evil', operations: [] })
-    })
-    expect(disagree.status).toBe(403)
   })
 
-  it('F-002: pull without a valid device identity is rejected (no legacy compat)', async () => {
-    await post('/sync/push', { deviceId: 'device-a', operations: [] }, 'device-a')
-    const missing = await fetch(`${relay.endpoint}/sync/pull?cursor=0`, {
-      headers: { Authorization: `Bearer ${TOKEN}` }
-    })
-    expect(missing.status).toBe(403)
-    const emptyId = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=`, {
-      headers: { Authorization: `Bearer ${TOKEN}` }
-    })
-    expect(emptyId.status).toBe(403)
-    const disagree = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=device-a`, {
-      headers: pullHeaders('device-evil')
-    })
-    expect(disagree.status).toBe(403)
+  it('shared SYNC-CC core conformance (memory TestRelay observable contract)', async () => {
+    await runRelayConformanceCore({ endpoint: relay.endpoint, token: TOKEN })
   })
 
-  it('F-003: trust-store failure fails closed with 500, never bootstrap success', async () => {
-    relay.setTrustStoreFailure(true)
-    const push = await post('/sync/push', { deviceId: 'device-a', operations: [] }, 'device-a')
-    expect(push.status).toBe(500)
-    expect(JSON.stringify(push.json)).toContain('trust-store-unavailable')
-    const pull = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=device-a`, {
-      headers: pullHeaders('device-a')
-    })
-    expect(pull.status).toBe(500)
-    relay.setTrustStoreFailure(false)
-    // Recovery works after the failure clears.
-    const ok = await post('/sync/push', { deviceId: 'device-a', operations: [] }, 'device-a')
-    expect(ok.status).toBe(200)
-  })
-
-  it('restart regression: accept persists trust across relay handle restart state', async () => {
-    // In-memory relay state is process-local; this guards the accept ->
-    // trusted -> push/pull chain twice in a row (duplicate/restart path).
-    await post('/sync/push', { deviceId: 'device-a', operations: [] }, 'device-a')
-    const invite = await post('/sync/pair/invite', { deviceId: 'device-a' }, 'device-a')
-    const req = await post('/sync/pair/request', { deviceId: 'device-b', code: invite.json.code }, undefined)
-    await post('/sync/pair/accept', { approverDeviceId: 'device-a', requestId: req.json.requestId }, 'device-a')
-    for (let i = 0; i < 2; i += 1) {
-      const pushB = await post('/sync/push', { deviceId: 'device-b', operations: [] }, 'device-b')
-      expect(pushB.status).toBe(200)
-      const pullB = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=device-b`, {
-        headers: pullHeaders('device-b')
-      })
-      expect(pullB.status).toBe(200)
+  it('channels isolate traffic with independent contiguous cursors', async () => {
+    const regA = await registerAs('device-a')
+    await registerAs('device-b')
+    const regC = await registerAs('device-c')
+    await registerAs('device-d')
+    const reqAB = await post('/sync/pair/request', { targetCode: regA.code }, 'device-b')
+    await post('/sync/pair/accept', { requestId: reqAB.json.requestId }, 'device-a')
+    const reqCD = await post('/sync/pair/request', { targetCode: regC.code }, 'device-d')
+    await post('/sync/pair/accept', { requestId: reqCD.json.requestId }, 'device-c')
+    const opA = {
+      id: 'op-iso-a',
+      entityType: 'topic',
+      op: 'upsert',
+      entityId: 't-iso-a',
+      timestamp: 1000,
+      deviceId: 'device-a',
+      payload: { id: 't-iso-a', name: 'A' }
     }
+    const pushA = await post('/sync/push', { deviceId: 'device-a', operations: [opA] }, 'device-a')
+    expect(pushA.status).toBe(200)
+    expect(pushA.json.cursor).toBe(1)
+    const pullD = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=device-d`, {
+      headers: pullHeaders('device-d')
+    })
+    expect(pullD.status).toBe(200)
+    const pullDBody = (await pullD.json()) as { operations: unknown[] }
+    expect(pullDBody.operations).toEqual([])
   })
 })

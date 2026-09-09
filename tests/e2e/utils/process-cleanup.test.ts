@@ -15,10 +15,10 @@ describe('exact-token process cleanup', () => {
       scanCount += 1
       return scanCount === 3 ? [{ pid: 77, args: '--user-data-dir=/owned/profile' }] : []
     })
-    const kill = vi.fn(() => ({ ok: true }))
+    const kill = vi.fn((_pid: number) => ({ ok: true }))
     const killed = new Set<number>()
     const exists = vi.fn((pid: number) => !killed.has(pid))
-    kill.mockImplementation((pid) => {
+    kill.mockImplementation((pid: number) => {
       killed.add(pid)
       return { ok: true }
     })

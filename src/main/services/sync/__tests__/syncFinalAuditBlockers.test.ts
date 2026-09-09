@@ -33,6 +33,7 @@ import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
 import { handleChatDbSuccessForSync } from '../chatDbHook'
 import { syncService } from '../SyncService'
+import { seedRegisteredAttachedSyncService } from './helpers/syncTestRegistration'
 
 let sqlite: Database.Database
 let db: BetterSQLite3Database<typeof schema>
@@ -114,6 +115,7 @@ beforeEach(() => {
   ;(chatDbService as never as { sqlite: unknown }).sqlite = sqlite
   ;(chatDbService as never as { db: unknown }).db = db
   syncService.clearAllForTests()
+  seedRegisteredAttachedSyncService(configStore, db)
 })
 
 afterEach(() => {
@@ -257,6 +259,11 @@ describe('syncAuto.refresh config-read failure invalidates active SyncService cy
       getConfig: (): { endpoint: string; token?: string; enabled: boolean } => {
         throw new Error('config-boom')
       },
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: () => Promise.resolve(null),
       createSubscriber: () => fakeSubscriber as never
     })

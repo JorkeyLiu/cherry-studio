@@ -455,7 +455,7 @@ test.describe('Stable Context Window Contract', () => {
     const tokenCount = page.locator('[data-testid="token-count-context"]')
     const boundary = page.locator('[data-testid="context-boundary"]')
     // ── Step 0: deterministic setup (seeded contextCount=3) ──────────────
-    let topicId: string
+    let topicId: string = ''
     await test.step('0: Seed contextCount=3 via Redux; empty topic has no anchor', async () => {
       await seedContextConfig(page, 3)
       const ctx = await getActiveContext(page)

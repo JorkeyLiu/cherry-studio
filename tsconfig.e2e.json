@@ -1,0 +1,30 @@
+{
+  "extends": "@electron-toolkit/tsconfig/tsconfig.node.json",
+  "include": ["tests/e2e/**/*.ts", "src/main/env.d.ts", "src/renderer/src/env.d.ts"],
+  "exclude": ["tests/e2e/**/*.test.ts", "tests/e2e/**/__tests__/**"],
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "paths": {
+      "@renderer/*": ["./src/renderer/src/*"],
+      "@shared/*": ["./packages/shared/*"],
+      "@types": ["./src/renderer/src/types/index.ts"],
+      "@logger": ["./src/main/services/LoggerService"],
+      "@main/*": ["./src/main/*"],
+      "@mcp-trace/*": ["./packages/mcp-trace/*"]
+    }
+  }
+}

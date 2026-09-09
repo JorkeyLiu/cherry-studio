@@ -3,12 +3,37 @@ import { loggerService } from '@renderer/services/LoggerService'
 import { isNonLoopbackHttpEndpoint } from '@shared/sync'
 import { Alert, Button, Input, Switch, Tooltip } from 'antd'
 import dayjs from 'dayjs'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { SettingDivider, SettingGroup, SettingHelpText, SettingRow, SettingRowTitle, SettingTitle } from '..'
 
 const logger = loggerService.withContext('SyncSettings')
+
+interface SyncDataStatus {
+  enabled: boolean
+  endpoint: string
+  lastSyncAt: string | null
+  lastError: string | null
+  lastCaptureError: string | null
+  pendingCount: number
+  cursor: number
+  syncing: boolean
+  conflictCount: number
+}
+
+interface ServiceStatus {
+  state: 'unregistered' | 'connected' | 'disconnected'
+  deviceCode: string | null
+  explicitDisconnect: boolean
+}
+
+interface PairState {
+  deviceCode: string
+  state: 'unpaired' | 'outgoing' | 'incoming' | 'paired'
+  outgoing: { id: string; targetCode: string; createdAt: string } | null
+  incoming: Array<{ id: string; requesterCode: string; createdAt: string }>
+}
 
 const SyncSettings: React.FC = () => {
   const { t } = useTranslation()
@@ -17,96 +42,99 @@ const SyncSettings: React.FC = () => {
   const [endpoint, setEndpoint] = useState('')
   const [token, setToken] = useState('')
   const [enabled, setEnabled] = useState(false)
-  const [status, setStatus] = useState<{
-    enabled: boolean
-    endpoint: string
-    lastSyncAt: string | null
-    lastError: string | null
-    lastCaptureError: string | null
-    pendingCount: number
-    cursor: number
-    syncing: boolean
-    conflictCount: number
-  } | null>(null)
+  const [status, setStatus] = useState<SyncDataStatus | null>(null)
+  const [service, setService] = useState<ServiceStatus | null>(null)
+  const [pairing, setPairing] = useState<PairState | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [deviceId, setDeviceId] = useState('')
-  const [invite, setInvite] = useState<{ code: string; expiresAt: string } | null>(null)
-  const [joinCode, setJoinCode] = useState('')
-  const [deviceName, setDeviceName] = useState('')
-  const [pairing, setPairing] = useState<{ trusted: boolean; pending: boolean } | null>(null)
-  const [trusted, setTrusted] = useState<Array<{ deviceId: string; deviceName?: string }>>([])
-  const [pending, setPending] = useState<
-    Array<{ id: string; deviceId: string; deviceName?: string; expiresAt: string }>
-  >([])
+  const [connecting, setConnecting] = useState(false)
+  const [targetCode, setTargetCode] = useState('')
   const [pairingError, setPairingError] = useState<string | null>(null)
   const [pairingBusy, setPairingBusy] = useState(false)
+  // Latest-only refresh generation: Connect/Disconnect bump the generation
+  // so an older in-flight live/config/pair response can never overwrite the
+  // newer attached/detached observation.
+  const refreshGen = useRef(0)
+  const bumpRefreshGen = useCallback(() => {
+    refreshGen.current += 1
+    return refreshGen.current
+  }, [])
 
-  const load = async () => {
+  const loadConfigAndStatus = useCallback(async () => {
+    const gen = refreshGen.current
     try {
-      const cfg = await window.api.sync.getConfig()
+      const [cfg, st, svc] = await Promise.all([
+        window.api.sync.getConfig(),
+        window.api.sync.getStatus().catch(() => null),
+        window.api.sync.getServiceStatus().catch(() => null)
+      ])
+      if (gen !== refreshGen.current) return
       setEndpoint(cfg.endpoint ?? '')
       setToken(cfg.token ?? '')
       setEnabled(!!cfg.enabled)
-      const st = await window.api.sync.getStatus()
-      setStatus(st)
+      if (st) setStatus(st)
+      if (svc) setService(svc)
     } catch (e) {
+      if (gen !== refreshGen.current) return
       logger.error('load sync config failed', e as Error)
     }
-  }
+  }, [])
 
-  const loadStatusOnly = async () => {
-    try {
-      const st = await window.api.sync.getStatus()
-      setStatus(st)
-    } catch (e) {
-      logger.error('load sync status failed', e as Error)
-    }
-  }
+  const loadLiveState = useCallback(async () => {
+    const gen = refreshGen.current
+    const [st, svc, pair] = await Promise.all([
+      window.api.sync.getStatus().catch(() => null),
+      window.api.sync.getServiceStatus().catch(() => null),
+      // Pairing state requires an attached service; while disconnected or
+      // unregistered there is nothing to show (not an error).
+      window.api.sync
+        .getPairState()
+        .catch(() => null)
+    ])
+    if (gen !== refreshGen.current) return
+    if (st) setStatus(st)
+    if (svc) setService(svc)
+    // Disconnected/offline retains the last known pairing observation: only
+    // a successful (non-null) fetch replaces it, so membership semantics are
+    // never reset to unknown by a failed poll.
+    if (pair !== null) setPairing(pair)
+  }, [])
 
-  const loadPairing = async () => {
+  const loadPairing = useCallback(async () => {
+    const gen = refreshGen.current
     try {
       setPairingError(null)
-      const idRes = await window.api.sync.getDeviceId()
-      setDeviceId(String(idRes?.deviceId ?? ''))
-      const st = await window.api.sync.getPairingStatus()
-      setPairing({ trusted: !!st?.trusted, pending: !!st?.pending })
-      try {
-        const list = await window.api.sync.listTrusted()
-        setTrusted(Array.isArray(list?.devices) ? list.devices : [])
-      } catch {
-        setTrusted([])
-      }
-      try {
-        const reqs = await window.api.sync.listPairingRequests()
-        setPending(Array.isArray(reqs?.requests) ? reqs.requests : [])
-      } catch {
-        setPending([])
-      }
+      const pair = await window.api.sync.getPairState()
+      if (gen !== refreshGen.current) return
+      setPairing(pair)
+      const svc = await window.api.sync.getServiceStatus().catch(() => null)
+      if (gen !== refreshGen.current) return
+      if (svc) setService(svc)
     } catch (e) {
+      if (gen !== refreshGen.current) return
       const msg = String((e as Error).message ?? e).slice(0, 500)
       setPairingError(msg)
       logger.error('load pairing failed', e as Error)
     }
-  }
+  }, [])
 
   useEffect(() => {
-    void load()
+    void loadConfigAndStatus()
     void loadPairing()
-    // Poll status only — never overwrite the dirty endpoint/token form while
-    // the user is editing. Config is reloaded explicitly on save/refresh.
+    // Poll live state only — never overwrite the dirty endpoint/token form
+    // while the user is editing. Config is reloaded explicitly on save.
     const id = setInterval(() => {
-      void loadStatusOnly()
+      void loadLiveState()
     }, 5000)
     return () => clearInterval(id)
-  }, [])
+  }, [loadConfigAndStatus, loadLiveState, loadPairing])
 
   const onSave = async () => {
     setSaving(true)
     try {
       await window.api.sync.setConfig({ endpoint: endpoint.trim(), token: token.trim(), enabled })
       window.toast.success(t('settings.sync.save_success', 'Sync settings saved'))
-      await load()
+      await loadConfigAndStatus()
     } catch (e) {
       window.toast.error(String((e as Error).message))
     } finally {
@@ -128,11 +156,82 @@ const SyncSettings: React.FC = () => {
       }
     } catch (e) {
       window.toast.error(String((e as Error).message))
-      await loadStatusOnly()
+      await loadLiveState()
     } finally {
       setSyncing(false)
     }
   }
+
+  const onConnect = async () => {
+    const gen = bumpRefreshGen()
+    setConnecting(true)
+    try {
+      setPairingError(null)
+      const svc = await window.api.sync.connect()
+      if (gen !== refreshGen.current) return
+      setService(svc)
+      await loadPairing()
+      window.toast.success(t('settings.sync.connect_success', 'Connected to relay'))
+    } catch (e) {
+      if (gen !== refreshGen.current) return
+      const msg = String((e as Error).message)
+      setPairingError(msg.slice(0, 500))
+      window.toast.error(msg)
+      await loadLiveState()
+    } finally {
+      if (gen === refreshGen.current) setConnecting(false)
+    }
+  }
+
+  const onDisconnect = async () => {
+    const gen = bumpRefreshGen()
+    setConnecting(true)
+    try {
+      const svc = await window.api.sync.disconnect()
+      if (gen !== refreshGen.current) return
+      setService(svc)
+      // Retain the last known pairing observation across Disconnect/offline:
+      // online-only actions stay disabled via pairingActionsDisabled, but the
+      // membership state is never reset to unknown.
+    } catch (e) {
+      if (gen !== refreshGen.current) return
+      window.toast.error(String((e as Error).message))
+    } finally {
+      if (gen === refreshGen.current) setConnecting(false)
+    }
+  }
+
+  const runPairingAction = async (action: () => Promise<unknown>, after?: () => void) => {
+    setPairingBusy(true)
+    setPairingError(null)
+    try {
+      await action()
+      after?.()
+      await loadPairing()
+    } catch (e) {
+      setPairingError(String((e as Error).message).slice(0, 500))
+    } finally {
+      setPairingBusy(false)
+    }
+  }
+
+  const serviceConnected = service?.state === 'connected'
+  // Network-disconnected (registered, not an explicit Disconnect) offers
+  // both Connect (resume) and Disconnect (explicitly stop); an explicit
+  // Disconnect or unregistered state offers Connect only.
+  const showDisconnect =
+    serviceConnected || (service?.state === 'disconnected' && !service?.explicitDisconnect && !!service?.deviceCode)
+  const showConnect = !serviceConnected
+  const pairingActionsDisabled = !serviceConnected || pairingBusy
+  const pairingStateLabel = !pairing
+    ? '—'
+    : pairing.state === 'paired'
+      ? t('settings.sync.paired_state', 'Paired')
+      : pairing.state === 'outgoing'
+        ? t('settings.sync.outgoing_state', 'Request pending')
+        : pairing.state === 'incoming'
+          ? t('settings.sync.incoming_state', 'Approval needed')
+          : t('settings.sync.unpaired_state', 'Not paired')
 
   return (
     <SettingGroup theme={theme}>
@@ -218,7 +317,58 @@ const SyncSettings: React.FC = () => {
             data-testid="sync-now-button">
             {t('settings.sync.sync_now', 'Sync Now')}
           </Button>
-          <Button onClick={() => void load()}>{t('common.refresh', 'Refresh')}</Button>
+          <Button onClick={() => void loadConfigAndStatus()}>{t('common.refresh', 'Refresh')}</Button>
+        </div>
+      </SettingRow>
+      <SettingDivider />
+      <SettingRow>
+        <SettingRowTitle>{t('settings.sync.service_title', 'Relay service')}</SettingRowTitle>
+        <div style={{ flex: 1, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span
+              data-testid="sync-service-indicator"
+              data-state={service?.state ?? 'unknown'}
+              style={{
+                width: 10,
+                height: 10,
+                borderRadius: '50%',
+                backgroundColor: serviceConnected ? 'var(--color-success, #52c41a)' : 'var(--color-error, #ff4d4f)'
+              }}
+            />
+            <span data-testid="sync-service-status">
+              {t('settings.sync.service_status', 'Service')}:{' '}
+              {!service
+                ? '—'
+                : service.state === 'connected'
+                  ? t('settings.sync.connected_state', 'Connected')
+                  : service.state === 'unregistered'
+                    ? t('settings.sync.unregistered_state', 'Not connected')
+                    : t('settings.sync.disconnected_state', 'Disconnected')}
+            </span>
+          </div>
+          {service?.deviceCode && (
+            <span data-testid="sync-device-code">
+              {t('settings.sync.device_code_label', 'This device code')}: {service.deviceCode}
+            </span>
+          )}
+          <SettingHelpText>
+            {t(
+              'settings.sync.device_code_hint',
+              'The device code is public: read it aloud to pair another of your devices. It cannot authorize anything by itself.'
+            )}
+          </SettingHelpText>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {showConnect && (
+              <Button type="primary" onClick={onConnect} loading={connecting} data-testid="sync-connect">
+                {t('settings.sync.connect', 'Connect')}
+              </Button>
+            )}
+            {showDisconnect && (
+              <Button onClick={onDisconnect} loading={connecting} data-testid="sync-disconnect">
+                {t('settings.sync.disconnect', 'Disconnect')}
+              </Button>
+            )}
+          </div>
         </div>
       </SettingRow>
       <SettingDivider />
@@ -228,167 +378,107 @@ const SyncSettings: React.FC = () => {
           <SettingHelpText>
             {t(
               'settings.sync.pairing_help',
-              'Pairing is an explicit user action on both devices. The relay token alone never grants sync access; an untrusted device is rejected with device-not-trusted.'
+              'Pairing joins your own devices into a private channel. Enter the other device code to request pairing; the other device accepts. Channels are private per device group.'
             )}
           </SettingHelpText>
-          <span data-testid="sync-device-id">
-            {t('settings.sync.device_label', 'This device')}: {deviceId || '—'}
-          </span>
           <span data-testid="sync-pairing-status">
-            {t('settings.sync.pairing_status', 'Pairing status')}:{' '}
-            {pairing
-              ? pairing.trusted
-                ? t('settings.sync.trusted_state', 'Trusted')
-                : pairing.pending
-                  ? t('settings.sync.pending_state', 'Pending')
-                  : t('settings.sync.untrusted_state', 'Not trusted')
-              : '—'}
+            {t('settings.sync.pairing_status', 'Pairing status')}: {pairingStateLabel}
           </span>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <Button
-              onClick={async () => {
-                setPairingBusy(true)
-                setPairingError(null)
-                try {
-                  const res = await window.api.sync.createInvite()
-                  setInvite(res)
-                } catch (e) {
-                  setPairingError(String((e as Error).message).slice(0, 500))
-                } finally {
-                  setPairingBusy(false)
-                }
-              }}
-              loading={pairingBusy}
-              data-testid="sync-create-invite">
-              {t('settings.sync.create_invite', 'Create invite code')}
-            </Button>
-            <Button onClick={() => void loadPairing()} data-testid="sync-pairing-refresh">
-              {t('settings.sync.refresh', 'Refresh')}
-            </Button>
-          </div>
-          {invite && (
-            <span data-testid="sync-invite-code">
-              {t('settings.sync.invite_code', 'Invite code')}: {invite.code} |{' '}
-              {t('settings.sync.invite_expires', 'Expires')}: {dayjs(invite.expiresAt).format('YYYY-MM-DD HH:mm:ss')}
-            </span>
+          {!serviceConnected && (
+            <SettingHelpText>
+              {t(
+                'settings.sync.pairing_disabled_hint',
+                'Connect the relay service first; pairing actions are unavailable while disconnected.'
+              )}
+            </SettingHelpText>
           )}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <Input
-              placeholder={t('settings.sync.join_code_placeholder', 'Enter 8-character code')}
-              value={joinCode}
-              onChange={(e) => setJoinCode(e.target.value)}
-              style={{ width: 200 }}
-              data-testid="sync-join-code-input"
-            />
-            <Input
-              placeholder={t('settings.sync.device_name_placeholder', 'e.g. work laptop')}
-              value={deviceName}
-              onChange={(e) => setDeviceName(e.target.value)}
-              style={{ width: 200 }}
-              data-testid="sync-device-name-input"
-            />
-            <Button
-              onClick={async () => {
-                setPairingBusy(true)
-                setPairingError(null)
-                try {
-                  await window.api.sync.requestPairing({ code: joinCode, deviceName: deviceName || undefined })
-                  setJoinCode('')
-                  await loadPairing()
-                } catch (e) {
-                  setPairingError(String((e as Error).message).slice(0, 500))
-                } finally {
-                  setPairingBusy(false)
+          {pairing?.state === 'unpaired' && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <Input
+                placeholder={t('settings.sync.target_code_placeholder', 'Other device code')}
+                value={targetCode}
+                onChange={(e) => setTargetCode(e.target.value)}
+                style={{ width: 200 }}
+                data-testid="sync-target-code-input"
+              />
+              <Button
+                onClick={() =>
+                  void runPairingAction(
+                    () => window.api.sync.requestPairing({ targetCode }),
+                    () => setTargetCode('')
+                  )
                 }
-              }}
-              loading={pairingBusy}
-              data-testid="sync-request-pairing">
-              {t('settings.sync.request_pairing', 'Request pairing')}
-            </Button>
-          </div>
-          <span>
-            {t('settings.sync.pending_requests', 'Pending requests')}:{' '}
-            <span data-testid="sync-pending-count-pairing">{pending.length}</span>
-          </span>
-          {pending.length === 0 ? (
-            <span>{t('settings.sync.no_pending', 'No pending requests')}</span>
-          ) : (
-            pending.map((r) => (
-              <div key={r.id} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <span data-testid={`sync-pending-${r.id}`}>
-                  {r.deviceId}
-                  {r.deviceName ? ` (${r.deviceName})` : ''}
-                </span>
-                <Button
-                  size="small"
-                  type="primary"
-                  onClick={async () => {
-                    setPairingBusy(true)
-                    try {
-                      await window.api.sync.acceptPairing(r.id)
-                      await loadPairing()
-                    } catch (e) {
-                      setPairingError(String((e as Error).message).slice(0, 500))
-                    } finally {
-                      setPairingBusy(false)
-                    }
-                  }}
-                  data-testid={`sync-accept-${r.id}`}>
-                  {t('settings.sync.accept', 'Accept')}
-                </Button>
-                <Button
-                  size="small"
-                  onClick={async () => {
-                    setPairingBusy(true)
-                    try {
-                      await window.api.sync.rejectPairing(r.id)
-                      await loadPairing()
-                    } catch (e) {
-                      setPairingError(String((e as Error).message).slice(0, 500))
-                    } finally {
-                      setPairingBusy(false)
-                    }
-                  }}
-                  data-testid={`sync-reject-${r.id}`}>
-                  {t('settings.sync.reject', 'Reject')}
-                </Button>
-              </div>
-            ))
+                loading={pairingBusy}
+                disabled={pairingActionsDisabled}
+                data-testid="sync-request-pairing">
+                {t('settings.sync.request_pairing', 'Request pairing')}
+              </Button>
+            </div>
           )}
-          <span>
-            {t('settings.sync.trusted_devices', 'Trusted devices')}:{' '}
-            <span data-testid="sync-trusted-count">{trusted.length}</span>
-          </span>
-          {trusted.length === 0 ? (
-            <span>{t('settings.sync.no_trusted', 'No trusted devices yet')}</span>
-          ) : (
-            trusted.map((d) => (
-              <div key={d.deviceId} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <span data-testid={`sync-trusted-${d.deviceId}`}>
-                  {d.deviceId}
-                  {d.deviceName ? ` (${d.deviceName})` : ''}
-                  {d.deviceId === deviceId ? ' *' : ''}
-                </span>
-                {d.deviceId !== deviceId && (
+          {pairing?.state === 'outgoing' && pairing.outgoing && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span data-testid="sync-outgoing-request">
+                {t('settings.sync.outgoing_request', 'Requested')}: {pairing.outgoing.targetCode}
+              </span>
+              <Button
+                size="small"
+                onClick={() => void runPairingAction(() => window.api.sync.cancelPairing())}
+                loading={pairingBusy}
+                disabled={pairingActionsDisabled}
+                data-testid="sync-cancel-request">
+                {t('settings.sync.cancel', 'Cancel')}
+              </Button>
+            </div>
+          )}
+          {pairing && pairing.incoming.length > 0
+            ? pairing.incoming.map((r) => (
+                <div key={r.id} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <span data-testid={`sync-incoming-${r.id}`}>{r.requesterCode}</span>
                   <Button
                     size="small"
-                    onClick={async () => {
-                      setPairingBusy(true)
-                      try {
-                        await window.api.sync.revokeDevice(d.deviceId)
-                        await loadPairing()
-                      } catch (e) {
-                        setPairingError(String((e as Error).message).slice(0, 500))
-                      } finally {
-                        setPairingBusy(false)
-                      }
-                    }}
-                    data-testid={`sync-revoke-${d.deviceId}`}>
-                    {t('settings.sync.revoke', 'Revoke')}
+                    type="primary"
+                    onClick={() => void runPairingAction(() => window.api.sync.acceptPairing(r.id))}
+                    loading={pairingBusy}
+                    disabled={pairingActionsDisabled}
+                    data-testid={`sync-accept-${r.id}`}>
+                    {t('settings.sync.accept', 'Accept')}
                   </Button>
-                )}
-              </div>
-            ))
+                  <Button
+                    size="small"
+                    onClick={() => void runPairingAction(() => window.api.sync.rejectPairing(r.id))}
+                    loading={pairingBusy}
+                    disabled={pairingActionsDisabled}
+                    data-testid={`sync-reject-${r.id}`}>
+                    {t('settings.sync.reject', 'Reject')}
+                  </Button>
+                </div>
+              ))
+            : pairing?.state === 'incoming' && <span>{t('settings.sync.no_pending', 'No pending requests')}</span>}
+          {pairing?.state === 'paired' && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <Button
+                onClick={() => void runPairingAction(() => window.api.sync.unpair())}
+                loading={pairingBusy}
+                disabled={pairingActionsDisabled}
+                data-testid="sync-unpair">
+                {t('settings.sync.unpair', 'Unpair')}
+              </Button>
+            </div>
+          )}
+          {pairing?.state === 'paired' && pairing.outgoing && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span data-testid="sync-paired-stale-outgoing">
+                {t('settings.sync.outgoing_request', 'Requested')}: {pairing.outgoing.targetCode}
+              </span>
+              <Button
+                size="small"
+                onClick={() => void runPairingAction(() => window.api.sync.cancelPairing())}
+                loading={pairingBusy}
+                disabled={pairingActionsDisabled}
+                data-testid="sync-cancel-stale-request">
+                {t('settings.sync.cancel', 'Cancel')}
+              </Button>
+            </div>
           )}
           {pairingError && (
             <span style={{ color: 'var(--color-error)' }} data-testid="sync-pairing-error">

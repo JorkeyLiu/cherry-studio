@@ -33,6 +33,7 @@ import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
 import { handleChatDbSuccessForSync } from '../chatDbHook'
 import { syncService, SyncStaleConfigError } from '../SyncService'
+import { seedRegisteredAttachedSyncService } from './helpers/syncTestRegistration'
 
 let sqlite: Database.Database
 let db: BetterSQLite3Database<typeof schema>
@@ -81,6 +82,7 @@ beforeEach(() => {
   ;(chatDbService as any).sqlite = sqlite
   ;(chatDbService as any).db = db
   syncService.clearAllForTests()
+  seedRegisteredAttachedSyncService(configStore, db)
 })
 
 afterEach(() => {
@@ -239,6 +241,11 @@ describe('blocker 3: config generation cancels stale in-flight sync (LOCK-PERSON
     let calls = 0
     const svc = new SyncAutoService({
       getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      isAttached: () => true,
+      getCredentials: () => ({
+        deviceCode: 'ABCD2345',
+        deviceSecret: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+      }),
       runSync: async () => {
         calls += 1
         throw new SyncStaleConfigError()

@@ -203,39 +203,211 @@ export async function runSyncViaApi(
 }
 
 /**
- * Pair two profiles via the production pairing IPC (explicit user actions on
- * both sides): the approver mints an invite code, the requester submits a
- * pairing request with it, the approver accepts, and the requester confirms
- * trusted status (which also refreshes its durable trust mirror). Asserts
- * each step; throws fail-closed on any deviation. Credential values are never
- * logged.
+ * Pair two profiles via the production connection/pairing IPC (SYNC-CC-*):
+ * both sides Connect (register once, re-attach afterwards), the requester
+ * submits a device-code pairing request, the approver accepts, and the
+ * requester confirms paired state. Asserts each step; throws fail-closed on
+ * any deviation. Secrets are never handled here (registration responses stay
+ * in Main); only the public device code crosses this boundary.
  */
 export async function pairProfilesViaApi(approverPage: Page, requesterPage: Page): Promise<void> {
-  // Idempotent: a requester that is already trusted needs no new pairing.
-  const pre = await requesterPage.evaluate(async () => {
-    return await (window as any).api.sync.getPairingStatus()
-  })
-  if (pre && pre.trusted === true) return
-  const invite = await approverPage.evaluate(async () => {
-    return await (window as any).api.sync.createInvite()
-  })
-  if (!invite || typeof invite.code !== 'string') throw new Error('pairProfilesViaApi: invite code missing')
-  const req = await requesterPage.evaluate(async (code: string) => {
-    return await (window as any).api.sync.requestPairing({ code })
-  }, invite.code)
+  await connectViaApi(approverPage)
+  await connectViaApi(requesterPage)
+  // Idempotent: a requester that is already paired needs no new pairing.
+  const pre = await getPairStateViaApi(requesterPage)
+  if (pre.state === 'paired') return
+  const target = await getDeviceCodeViaApi(approverPage)
+  if (!target.deviceCode) throw new Error('pairProfilesViaApi: approver device code missing')
+  const req = await requesterPage.evaluate(async (targetCode: string) => {
+    return await (window as any).api.sync.requestPairing({ targetCode })
+  }, target.deviceCode)
   if (!req || typeof req.requestId !== 'string') throw new Error('pairProfilesViaApi: request id missing')
-  const pending = await approverPage.evaluate(async () => {
-    return await (window as any).api.sync.listPairingRequests()
-  })
-  const found = Array.isArray(pending?.requests) ? pending.requests.some((r: any) => r?.id === req.requestId) : false
-  if (!found) throw new Error('pairProfilesViaApi: pending request not visible to approver')
+  // Approver observes the incoming request, then accepts.
+  const deadline = Date.now() + 30000
+  let incomingId: string | null = null
+  while (Date.now() < deadline) {
+    const state = await getPairStateViaApi(approverPage)
+    const found = (state.incoming as Array<{ id: string }>).find((r) => r?.id === req.requestId)
+    if (found) {
+      incomingId = found.id
+      break
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  if (!incomingId) throw new Error('pairProfilesViaApi: pending request not visible to approver')
   await approverPage.evaluate(async (requestId: string) => {
     return await (window as any).api.sync.acceptPairing(requestId)
-  }, req.requestId)
-  const status = await requesterPage.evaluate(async () => {
-    return await (window as any).api.sync.getPairingStatus()
+  }, incomingId)
+  const confirmDeadline = Date.now() + 30000
+  for (;;) {
+    const status = await getPairStateViaApi(requesterPage)
+    if (status.state === 'paired') return
+    if (Date.now() >= confirmDeadline) throw new Error('pairProfilesViaApi: requester not paired after accept')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+}
+
+/** Explicit Connect via the production preload surface (registers or re-attaches). */
+export async function connectViaApi(page: Page): Promise<{ state: string; deviceCode: string | null }> {
+  const status = await page.evaluate(async () => {
+    return await (window as any).api.sync.connect()
   })
-  if (!status || status.trusted !== true) throw new Error('pairProfilesViaApi: requester not trusted after accept')
+  if (!status || typeof status.state !== 'string') throw new Error('connectViaApi returned malformed status')
+  return status as { state: string; deviceCode: string | null }
+}
+
+/** Explicit Disconnect via the production preload surface (registration preserved). */
+export async function disconnectViaApi(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    return await (window as any).api.sync.disconnect()
+  })
+}
+
+/** Unpair this profile via the production preload surface (service preserved). */
+export async function unpairViaApi(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    return await (window as any).api.sync.unpair()
+  })
+}
+
+export interface SyncServiceStatusShape {
+  state: 'unregistered' | 'connected' | 'disconnected'
+  deviceCode: string | null
+  explicitDisconnect: boolean
+}
+
+/** Service connection status via the production preload surface. */
+export async function getServiceStatusViaApi(page: Page): Promise<SyncServiceStatusShape> {
+  const status = await page.evaluate(async () => {
+    return await (window as any).api.sync.getServiceStatus()
+  })
+  if (!status || typeof status.state !== 'string') throw new Error('getServiceStatusViaApi returned malformed status')
+  return status as SyncServiceStatusShape
+}
+
+export interface SyncPairStateShape {
+  deviceCode: string
+  state: 'unpaired' | 'outgoing' | 'incoming' | 'paired'
+  outgoing: { id: string; targetCode: string; createdAt: string } | null
+  incoming: Array<{ id: string; requesterCode: string; createdAt: string }>
+}
+
+/** Channel pairing state via the production preload surface. */
+export async function getPairStateViaApi(page: Page): Promise<SyncPairStateShape> {
+  const state = await page.evaluate(async () => {
+    return await (window as any).api.sync.getPairState()
+  })
+  if (!state || typeof state.state !== 'string') throw new Error('getPairStateViaApi returned malformed state')
+  return state as SyncPairStateShape
+}
+
+/** This profile's public device code via the production preload surface. */
+export async function getDeviceCodeViaApi(page: Page): Promise<{ deviceCode: string | null }> {
+  const res = await page.evaluate(async () => {
+    return await (window as any).api.sync.getDeviceCode()
+  })
+  if (!res || !(typeof res.deviceCode === 'string' || res.deviceCode === null)) {
+    throw new Error('getDeviceCodeViaApi returned malformed response')
+  }
+  return res as { deviceCode: string | null }
+}
+
+/**
+ * Single typed source for the raw observer's registration client device id.
+ * The test relay binds push identity to this id; every observer-signed
+ * operation must carry it as both body and op deviceId.
+ */
+export const RAW_OBSERVER_CLIENT_DEVICE_ID = 'e2e-raw-observer'
+
+export interface ProvisionedObserver {
+  code: string
+  secret: string
+  clientDeviceId: string
+}
+
+/**
+ * Raw relay observer for HTTP-level diagnostics (SYNC-CC-*): registers a
+ * dedicated observer device over raw HTTP, has it request pairing with the
+ * approver's public device code, and completes the accept through the
+ * approver's production IPC. Returns the observer code + secret + registration
+ * client device id for raw authenticated pull/push diagnostics (channel
+ * member traffic only). Secrets live in the test process only and are never
+ * logged.
+ */
+export async function provisionObserverViaRaw(
+  endpoint: string,
+  token: string,
+  approverPage: Page
+): Promise<ProvisionedObserver> {
+  const base = endpoint.replace(/\/$/, '')
+  const authedJson = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
+  const regRes = await fetch(`${base}/sync/register`, {
+    method: 'POST',
+    headers: authedJson,
+    body: JSON.stringify({ deviceId: RAW_OBSERVER_CLIENT_DEVICE_ID })
+  })
+  if (regRes.status !== 200) throw new Error(`observer register failed: ${regRes.status}`)
+  const reg = (await regRes.json()) as { deviceCode: string; deviceSecret: string }
+  const target = await getDeviceCodeViaApi(approverPage)
+  if (!target.deviceCode) throw new Error('observer pairing: approver device code missing')
+  const reqRes = await fetch(`${base}/sync/pair/request`, {
+    method: 'POST',
+    headers: {
+      ...authedJson,
+      'x-sync-device-code': reg.deviceCode,
+      'x-sync-device-secret': reg.deviceSecret
+    },
+    body: JSON.stringify({ targetCode: target.deviceCode })
+  })
+  if (reqRes.status !== 200) throw new Error(`observer request failed: ${reqRes.status}`)
+  const reqBody = (await reqRes.json()) as { requestId: string }
+  if (typeof reqBody.requestId !== 'string') throw new Error('observer request id missing')
+  await approverPage.evaluate(async (requestId: string) => {
+    return await (window as any).api.sync.acceptPairing(requestId)
+  }, reqBody.requestId)
+  return { code: reg.deviceCode, secret: reg.deviceSecret, clientDeviceId: RAW_OBSERVER_CLIENT_DEVICE_ID }
+}
+
+/** Raw authenticated pull for relay-level diagnostics (observer must be paired). */
+export async function rawObserverPull(
+  endpoint: string,
+  token: string,
+  observer: { code: string; secret: string },
+  cursor: number | string,
+  queryDeviceId = 'raw-observer'
+): Promise<{ status: number; body: any }> {
+  const res = await fetch(
+    `${endpoint.replace(/\/$/, '')}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent(queryDeviceId)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'x-sync-device-code': observer.code,
+        'x-sync-device-secret': observer.secret
+      }
+    }
+  )
+  return { status: res.status, body: await res.json().catch(() => ({})) }
+}
+
+/** Raw authenticated push for relay-level diagnostics (observer must be paired). */
+export async function rawObserverPush(
+  endpoint: string,
+  token: string,
+  observer: { code: string; secret: string },
+  bodyDeviceId: string,
+  operations: unknown[]
+): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${endpoint.replace(/\/$/, '')}/sync/push`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      'x-sync-device-code': observer.code,
+      'x-sync-device-secret': observer.secret
+    },
+    body: JSON.stringify({ deviceId: bodyDeviceId, operations })
+  })
+  return { status: res.status, body: await res.json().catch(() => ({})) }
 }
 
 /** Typed ensureTopic via ChatDb IPC; asserts the success envelope. */

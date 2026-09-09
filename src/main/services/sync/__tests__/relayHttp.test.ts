@@ -1,59 +1,83 @@
 import Database from 'better-sqlite3'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { createRelayServer } from '../../../../../scripts/sync-relay/server'
+import { createRelayServer, ensureRelaySchema } from '../../../../../scripts/sync-relay/server'
 
-describe('relay http hardening', () => {
+describe('relay http hardening (channel protocol)', () => {
   let db: Database.Database
   let server: ReturnType<typeof createRelayServer>
   let baseUrl: string
   const token = 'test-token-123'
+  // Registered + paired device codes for the data-plane tests.
+  let codeA = ''
+  let secretA = ''
+  const uuidA = 'uuid-a'
 
   beforeAll(async () => {
     db = new Database(':memory:')
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS operations (
-        seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        id TEXT UNIQUE NOT NULL,
-        entity_type TEXT NOT NULL,
-        op TEXT NOT NULL,
-        entity_id TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        device_id TEXT NOT NULL,
-        payload_json TEXT,
-        created_at TEXT
-      );
-      CREATE TABLE IF NOT EXISTS sync_trusted_devices (
-        device_id TEXT PRIMARY KEY,
-        device_name TEXT,
-        trusted_at TEXT,
-        source TEXT,
-        device_secret_hash TEXT
-      );
-      CREATE TABLE IF NOT EXISTS sync_pairing_invites (
-        code TEXT PRIMARY KEY,
-        inviter_device_id TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        used INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE TABLE IF NOT EXISTS sync_pairing_requests (
-        id TEXT PRIMARY KEY,
-        device_id TEXT NOT NULL,
-        device_name TEXT,
-        code TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        status TEXT NOT NULL,
-        device_secret_hash TEXT
-      );
-    `)
+    ensureRelaySchema(db)
     server = createRelayServer(db, { token })
     await new Promise<void>((resolve) => {
       server.listen(0, '127.0.0.1', () => resolve())
     })
     const addr = server.address() as { port: number }
     baseUrl = `http://127.0.0.1:${addr.port}`
+    const authed = (init?: RequestInit): RequestInit => ({
+      ...init,
+      headers: { ...init?.headers, Authorization: `Bearer ${token}` }
+    })
+    // Register two devices and pair them: A <- B request, A accepts.
+    // Registrations carry their real client device ids so the operation
+    // identity binding (push deviceId === registered client id) holds.
+    const regA = (await (
+      await fetch(
+        `${baseUrl}/sync/register`,
+        authed({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId: uuidA })
+        })
+      )
+    ).json()) as { deviceCode: string; deviceSecret: string }
+    const regB = (await (
+      await fetch(
+        `${baseUrl}/sync/register`,
+        authed({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId: 'uuid-b' })
+        })
+      )
+    ).json()) as { deviceCode: string; deviceSecret: string }
+    codeA = regA.deviceCode
+    secretA = regA.deviceSecret
+    const req = (await (
+      await fetch(
+        `${baseUrl}/sync/pair/request`,
+        authed({
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-sync-device-code': regB.deviceCode,
+            'x-sync-device-secret': regB.deviceSecret
+          },
+          body: JSON.stringify({ targetCode: codeA })
+        })
+      )
+    ).json()) as { requestId: string }
+    const accept = await fetch(
+      `${baseUrl}/sync/pair/accept`,
+      authed({
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-sync-device-code': codeA,
+          'x-sync-device-secret': secretA
+        },
+        body: JSON.stringify({ requestId: req.requestId })
+      })
+    )
+    expect(accept.status).toBe(200)
   })
 
   afterAll(async () => {
@@ -61,38 +85,25 @@ describe('relay http hardening', () => {
     db.close()
   })
 
-  async function push(ops: any[], withToken = true, deviceId = 'd1'): Promise<Response> {
+  async function push(ops: any[], withToken = true): Promise<Response> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (withToken) headers['Authorization'] = `Bearer ${token}`
-    headers['x-sync-device-id'] = deviceId
-    if (deviceAuthFor(deviceId)) headers['x-sync-device-auth'] = deviceAuthFor(deviceId) as string
+    headers['x-sync-device-code'] = codeA
+    headers['x-sync-device-secret'] = secretA
     const res = await fetch(`${baseUrl}/sync/push`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ deviceId, operations: ops })
+      body: JSON.stringify({ deviceId: uuidA, operations: ops })
     })
-    await captureDeviceAuth(deviceId, res.clone())
     return res
   }
 
-  const deviceAuths = new Map<string, string>()
-  function deviceAuthFor(deviceId: string): string | undefined {
-    return deviceAuths.get(deviceId)
-  }
-  async function captureDeviceAuth(deviceId: string, res: Response): Promise<void> {
-    try {
-      const body = (await res.json()) as { deviceAuth?: unknown }
-      if (typeof body?.deviceAuth === 'string') deviceAuths.set(deviceId, body.deviceAuth)
-    } catch {}
-  }
-
-  async function pull(cursor: number, withToken = true, deviceId = 'd1'): Promise<Response> {
+  async function pull(cursor: number, withToken = true): Promise<Response> {
     const headers: Record<string, string> = {}
     if (withToken) headers['Authorization'] = `Bearer ${token}`
-    headers['x-sync-device-id'] = deviceId
-    if (deviceAuthFor(deviceId)) headers['x-sync-device-auth'] = deviceAuthFor(deviceId) as string
-    const res = await fetch(`${baseUrl}/sync/pull?cursor=${cursor}&deviceId=${deviceId}`, { headers })
-    await captureDeviceAuth(deviceId, res.clone())
+    headers['x-sync-device-code'] = codeA
+    headers['x-sync-device-secret'] = secretA
+    const res = await fetch(`${baseUrl}/sync/pull?cursor=${cursor}&deviceId=${uuidA}`, { headers })
     return res
   }
 
@@ -105,7 +116,7 @@ describe('relay http hardening', () => {
           op: 'upsert',
           entityId: 't1',
           timestamp: Date.now(),
-          deviceId: 'd1',
+          deviceId: uuidA,
           payload: { id: 't1', name: 'A' }
         }
       ],
@@ -127,7 +138,7 @@ describe('relay http hardening', () => {
         op: 'upsert',
         entityId: 't1',
         timestamp: Date.now(),
-        deviceId: 'd1',
+        deviceId: uuidA,
         payload: { id: 't1' }
       }
     ])
@@ -144,7 +155,7 @@ describe('relay http hardening', () => {
         op: 'upsert',
         entityId: 't1',
         timestamp: Date.now(),
-        deviceId: 'd1',
+        deviceId: uuidA,
         payload: { id: 't1', credentials: 'secret' }
       }
     ])
@@ -160,7 +171,7 @@ describe('relay http hardening', () => {
         op: 'upsert',
         entityId: 't1',
         timestamp: Date.now(),
-        deviceId: 'd1',
+        deviceId: uuidA,
         payload: { id: 't1', rogue: 'x' }
       }
     ])
@@ -175,7 +186,7 @@ describe('relay http hardening', () => {
       op: 'upsert',
       entityId: `t-${i}`,
       timestamp: Date.now() + i,
-      deviceId: 'd1',
+      deviceId: uuidA,
       payload: { id: `t-${i}`, name: 'X' }
     }))
     const res = await push(ops)
@@ -192,7 +203,7 @@ describe('relay http hardening', () => {
         op: 'upsert',
         entityId: 't-large',
         timestamp: Date.now(),
-        deviceId: 'd1',
+        deviceId: uuidA,
         payload: largePayload
       }
     ])
@@ -200,22 +211,25 @@ describe('relay http hardening', () => {
     expect([400, 413]).toContain(res.status)
   })
 
-  it('cursor paging: pull returns last seq actually returned, not global max', async () => {
-    // Clear and insert 250 ops
-    db.exec('DELETE FROM operations')
-    // Reset autoincrement
-    db.exec("DELETE FROM sqlite_sequence WHERE name='operations'")
+  it('cursor paging: pull returns last seq actually returned, not channel max', async () => {
+    // Clear the channel log and insert 250 ops directly.
+    db.exec('DELETE FROM sync_channel_operations')
+    const channelId = (
+      db.prepare('SELECT channel_id FROM sync_memberships WHERE device_code = ?').get(codeA) as { channel_id: string }
+    ).channel_id
     const insert = db.prepare(
-      `INSERT INTO operations (id, entity_type, op, entity_id, timestamp, device_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO sync_channel_operations (channel_id, seq, id, entity_type, op, entity_id, timestamp, device_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     for (let i = 0; i < 250; i++) {
       insert.run(
+        channelId,
+        i + 1,
         `pg-${i}`,
         'topic',
         'upsert',
         `t-pg-${i}`,
         1000 + i,
-        'd1',
+        uuidA,
         JSON.stringify({ id: `t-pg-${i}`, name: `N${i}` }),
         new Date().toISOString()
       )
@@ -225,10 +239,8 @@ describe('relay http hardening', () => {
     const body1 = await res1.json()
     expect(body1.operations.length).toBe(200)
     expect(body1.cursor).toBe(body1.operations[199].seq)
-    // Ensure cursor is not global max (250)
-    const maxSeqRow = db.prepare('SELECT MAX(seq) as m FROM operations').get() as { m: number }
-    expect(maxSeqRow.m).toBe(250)
-    expect(body1.cursor).not.toBe(maxSeqRow.m)
+    // Ensure cursor is not channel max (250)
+    expect(body1.cursor).not.toBe(250)
     expect(body1.cursor).toBe(200)
 
     const res2 = await pull(body1.cursor)
@@ -244,19 +256,23 @@ describe('relay http hardening', () => {
   })
 
   it('push does not advance pull cursor beyond returned page (simulated)', async () => {
-    db.exec('DELETE FROM operations')
-    db.exec("DELETE FROM sqlite_sequence WHERE name='operations'")
+    db.exec('DELETE FROM sync_channel_operations')
+    const channelId = (
+      db.prepare('SELECT channel_id FROM sync_memberships WHERE device_code = ?').get(codeA) as { channel_id: string }
+    ).channel_id
     const insert = db.prepare(
-      `INSERT INTO operations (id, entity_type, op, entity_id, timestamp, device_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO sync_channel_operations (channel_id, seq, id, entity_type, op, entity_id, timestamp, device_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     for (let i = 0; i < 5; i++) {
       insert.run(
+        channelId,
+        i + 1,
         `pre-${i}`,
         'topic',
         'upsert',
         `t-pre-${i}`,
         1000 + i,
-        'd1',
+        uuidA,
         JSON.stringify({ id: `t-pre-${i}` }),
         new Date().toISOString()
       )
@@ -266,8 +282,6 @@ describe('relay http hardening', () => {
     const b1 = await r1.json()
     expect(b1.operations.length).toBe(5)
     const cursorBeforePush = b1.cursor
-    // Push new op (seq 6) as the same bootstrap device (cross-device push
-    // requires pairing under device-identity binding).
     const pushRes = await push([
       {
         id: 'new-push-1',
@@ -275,7 +289,7 @@ describe('relay http hardening', () => {
         op: 'upsert',
         entityId: 't-new',
         timestamp: Date.now(),
-        deviceId: 'd1',
+        deviceId: uuidA,
         payload: { id: 't-new', name: 'New' }
       }
     ])
@@ -289,15 +303,14 @@ describe('relay http hardening', () => {
   })
 
   it('actual HTTP push/pull with valid payload succeeds', async () => {
-    db.exec('DELETE FROM operations')
-    db.exec("DELETE FROM sqlite_sequence WHERE name='operations'")
+    db.exec('DELETE FROM sync_channel_operations')
     const op = {
       id: 'op-http-valid',
       entityType: 'message',
       op: 'upsert',
       entityId: 'm1',
       timestamp: Date.now(),
-      deviceId: 'd1',
+      deviceId: uuidA,
       payload: { id: 'm1', topicId: 't1', role: 'user', content: 'hi' }
     }
     const pr = await push([op])

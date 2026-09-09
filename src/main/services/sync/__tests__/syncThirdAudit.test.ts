@@ -28,6 +28,7 @@ import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
 import { handleChatDbSuccessForSync } from '../chatDbHook'
 import { SyncOrphanError, syncService } from '../SyncService'
+import { seedRegisteredAttachedSyncService } from './helpers/syncTestRegistration'
 
 let sqlite: Database.Database
 let db: BetterSQLite3Database<typeof schema>
@@ -76,6 +77,7 @@ beforeEach(() => {
   ;(chatDbService as any).sqlite = sqlite
   ;(chatDbService as any).db = db
   syncService.clearAllForTests()
+  seedRegisteredAttachedSyncService(configStore, db)
 })
 
 afterEach(() => {
@@ -321,7 +323,14 @@ describe('F4: push acks constrained to current chunk', () => {
     async function pushWith(body: any): Promise<unknown> {
       ;(globalThis as any).fetch = async () => ({ ok: true, json: async () => body }) as any
       try {
-        return await syncClient.push('http://127.0.0.1:9', undefined, { deviceId: 'd1', operations: [] } as any)
+        return await syncClient.push(
+          'http://127.0.0.1:9',
+          undefined,
+          { deviceId: 'd1', operations: [] } as any,
+          undefined,
+          'ABCD2345',
+          'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
+        )
       } finally {
         ;(globalThis as any).fetch = origFetch
       }

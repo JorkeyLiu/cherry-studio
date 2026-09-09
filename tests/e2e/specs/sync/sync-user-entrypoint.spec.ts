@@ -22,6 +22,7 @@ import {
   getSyncStatusViaApi,
   isoNow,
   pairProfilesViaApi,
+  provisionObserverViaRaw,
   runSyncViaApi,
   setSyncConfigViaApi,
   topicExistsViaApi,
@@ -111,36 +112,16 @@ async function pollForPendingDrained(page: Page, ms = 90000): Promise<void> {
   throw new Error(`pending-drain timeout: ${last}`)
 }
 
-async function ensureObserverPaired(
-  endpoint: string,
-  approverPage: Page
-): Promise<{ deviceId: string; deviceAuth: string }> {
-  const deviceId = 'e2e-user-entrypoint-observer'
-  const invite = await approverPage.evaluate(async () => await (window as any).api.sync.createInvite())
-  if (!invite || typeof invite.code !== 'string') throw new Error('observer pairing: invite missing')
-  const reqRes = await fetch(`${endpoint}/sync/pair/request`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ deviceId, code: invite.code })
-  })
-  if (reqRes.status !== 200) throw new Error(`observer pairing: request ${reqRes.status}`)
-  const reqBody = (await reqRes.json()) as { requestId?: unknown; deviceAuth?: unknown }
-  if (typeof reqBody.requestId !== 'string' || typeof reqBody.deviceAuth !== 'string') {
-    throw new Error('observer pairing: malformed response')
-  }
-  await approverPage.evaluate(
-    async (requestId: string) => await (window as any).api.sync.acceptPairing(requestId),
-    reqBody.requestId
-  )
-  return { deviceId, deviceAuth: reqBody.deviceAuth }
+async function ensureObserverPaired(endpoint: string, approverPage: Page): Promise<{ code: string; secret: string }> {
+  return await provisionObserverViaRaw(endpoint, RELAY_TOKEN, approverPage)
 }
 
-async function authedPull(endpoint: string, cursor: number, observer: { deviceId: string; deviceAuth: string }) {
-  const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent(observer.deviceId)}`, {
+async function authedPull(endpoint: string, cursor: number, observer: { code: string; secret: string }) {
+  const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent('raw-observer')}`, {
     headers: {
       Authorization: `Bearer ${RELAY_TOKEN}`,
-      'x-sync-device-id': observer.deviceId,
-      'x-sync-device-auth': observer.deviceAuth
+      'x-sync-device-code': observer.code,
+      'x-sync-device-secret': observer.secret
     }
   })
   const body = (await res.json().catch(() => ({ operations: [], cursor }))) as { operations: any[]; cursor: number }

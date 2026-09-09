@@ -449,7 +449,7 @@ describe('VALID_CLOSED_STAGES', () => {
   })
 
   it('does not contain topic.activation', () => {
-    expect(VALID_CLOSED_STAGES.has('topic.activation')).toBe(false)
+    expect((VALID_CLOSED_STAGES as Set<string>).has('topic.activation')).toBe(false)
   })
 
   it('VALID_CLOSED_STAGES_ARRAY matches VALID_CLOSED_STAGES set', () => {

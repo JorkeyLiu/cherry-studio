@@ -216,14 +216,8 @@ export const syncConflictLog = sqliteTable(
 )
 
 // ---------------------------------------------------------------------------
-// sync device trust — additive (007): durable explicit pairing trust.
-// Renderer never touches this table directly; all access goes through
-// SyncService via typed IPC. Relay trust is authoritative for transport;
-// this table is the local durable mirror that survives restarts.
+// sync device trust (007, superseded by 008_sync_channel_reset): the local
+// trust mirror table is dropped by migration 008 for the SYNC-CC-*
+// registration/channel protocol. No product code references this table;
+// the declaration is intentionally removed (not kept as a zombie).
 // ---------------------------------------------------------------------------
-export const syncTrustedDevices = sqliteTable('sync_trusted_devices', {
-  deviceId: text('device_id').primaryKey(),
-  deviceName: text('device_name'),
-  trustedAt: text('trusted_at'),
-  source: text('source')
-})
