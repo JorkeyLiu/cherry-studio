@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { NATIVE_PACKAGE, PROBE_MARKER, PROBE_MARKER_ENV, PROBE_MODULE_ENV, PROBE_TEST_SEAM_ENV } from './constants'
-import type { DirListing, Effects, SpawnResult } from './types'
+import type { DirListing, Effects, ProbeResult, SpawnResult } from './types'
 
 /**
  * Real I/O wiring for the native ABI tool. All side effects are confined here
@@ -16,6 +16,42 @@ import type { DirListing, Effects, SpawnResult } from './types'
 const require_ = createRequire(import.meta.url)
 const here = path.dirname(fileURLToPath(import.meta.url))
 export const PROBE_PATH = path.join(here, 'probe.cjs')
+
+function probeNodeBindingInChild(): ProbeResult {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    NATIVE_ABI_PROBE_MARKER: PROBE_MARKER
+  }
+  const result = spawnSync(process.execPath, [PROBE_PATH], { encoding: 'utf8', env })
+  const line = result.stdout.split(/\r?\n/).find((candidate) => candidate.startsWith(`${PROBE_MARKER} `))
+  if (!line) {
+    return {
+      ok: false,
+      sqlOk: false,
+      error: `Node probe produced no parseable output (exit ${result.status ?? 1})`
+    }
+  }
+  try {
+    const record = JSON.parse(line.slice(PROBE_MARKER.length).trim()) as {
+      ok?: unknown
+      sqlOk?: unknown
+      error?: unknown
+      closeError?: unknown
+    }
+    return {
+      ok: record.ok === true,
+      sqlOk: record.sqlOk === true,
+      error: typeof record.error === 'string' ? record.error : undefined,
+      closeError: typeof record.closeError === 'string' ? record.closeError : undefined
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      sqlOk: false,
+      error: `Node probe output was invalid: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+}
 
 /** Minimal better-sqlite3 surface the in-process Node probe relies on. */
 interface ProbeDatabase {
@@ -400,6 +436,12 @@ export function createEffects(): Effects {
       }
     },
     probeNodeBinding: () => {
+      // Windows keeps loaded .node files locked. Probe in a short-lived child
+      // there so the parent can switch from Node ABI 137 to Electron ABI 145
+      // during lane finalization without an EPERM unlink failure.
+      if (process.platform === 'win32') {
+        return probeNodeBindingInChild()
+      }
       // Finding D/H: the Database is always closed (finally) and both the primary
       // probe error and any close error are preserved; a failed close is a
       // resource leak and therefore a failed probe.
@@ -476,7 +518,12 @@ export function createEffects(): Effects {
       return { code: res.status ?? 1, stdout: res.stdout ?? '', stderr: res.stderr ?? '' }
     },
     pnpmVersion: () => {
-      const res = spawnSync('pnpm', ['--version'], { encoding: 'utf8' })
+      // Windows package-manager shims are .cmd files, which Node cannot spawn
+      // directly without a shell. Use cmd.exe only for this version probe so
+      // the lane validates the same pnpm command users invoke from a terminal.
+      const command = process.platform === 'win32' ? 'cmd.exe' : 'pnpm'
+      const args = process.platform === 'win32' ? ['/d', '/s', '/c', 'pnpm --version'] : ['--version']
+      const res = spawnSync(command, args, { encoding: 'utf8' })
       if (res.status !== 0) {
         return undefined
       }

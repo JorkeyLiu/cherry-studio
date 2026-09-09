@@ -195,7 +195,7 @@ export interface Effects {
   resolvePackageJsonPath(pkg: string): string | undefined
   /** require.resolve a spec (undefined on failure); used for binding paths. */
   resolveFilePath(spec: string): string | undefined
-  /** In-process probe against the running Node runtime (check:node). */
+  /** Runtime probe against the running Node runtime (check:node). */
   probeNodeBinding(): ProbeResult
   /** Path to the installed Electron executable (undefined when absent). */
   electronBinPath(): string | undefined

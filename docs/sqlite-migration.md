@@ -1685,9 +1685,9 @@ Dexie/IndexedDB **支持事务且启用 strict durability**，具备 ACID 基础
 | 命令 | 行为 |
 |---|---|
 | `pnpm native:check:node` | 只读；要求当前 Node ≥24.11.1 且 ABI137；校验 resolved better-sqlite3 **精确 12.11.1**；打印 runtime name/version/ABI/platform/arch、better-sqlite3 package realpath、实际 resolved binding path（`compiled/<node runtime version>/…` 候选使用目标 runtime 的 Node 版本，非 package 版本）；真实 `Database(':memory:')` + `select 1 as ok` + close；失败给出修复或依赖 remediation |
-| `pnpm native:check:electron` | 只读；要求 darwin arm64 + Electron 精确 41.2.1 + ABI145；校验 resolved better-sqlite3 精确 12.11.1；通过 `ELECTRON_RUN_AS_NODE=1` 以安装的 Electron 可执行文件运行仓库自有 probe（`scripts/native-abi/probe.cjs`），保留 child stdout/stderr 与 exit code，失败时仍报告 probe 运行时事实与 resolved binding path。**LOCK-ABI-2 加固**：probe 生产模式硬编码 resolved `better-sqlite3` 模块合同（`NATIVE_ABI_PROBE_MODULE` 仅在该探针的显式 test-seam gate 下生效），且 `spawnElectronProbe` 在 spawn 前**显式删除** `NATIVE_ABI_PROBE_MODULE` 与 test-seam 变量——继承的恶意环境无法重定向真实运行时 SQL 证明 |
+| `pnpm native:check:electron` | 只读；要求 darwin arm64 或 win32 x64 + Electron 精确 41.2.1 + ABI145；校验 resolved better-sqlite3 精确 12.11.1；通过 `ELECTRON_RUN_AS_NODE=1` 以安装的 Electron 可执行文件运行仓库自有 probe（`scripts/native-abi/probe.cjs`），保留 child stdout/stderr 与 exit code，失败时仍报告 probe 运行时事实与 resolved binding path。**LOCK-ABI-2 加固**：probe 生产模式硬编码 resolved `better-sqlite3` 模块合同（`NATIVE_ABI_PROBE_MODULE` 仅在该探针的显式 test-seam gate 下生效），且 `spawnElectronProbe` 在 spawn 前**显式删除** `NATIVE_ABI_PROBE_MODULE` 与 test-seam 变量——继承的恶意环境无法重定向真实运行时 SQL 证明 |
 | `pnpm native:rebuild:node` | 显式 node-gyp source build（仅 better-sqlite3 realpath，`--nodedir` 指向已验证 Node 的头文件，`nodeDirFromExecPath` 必须证明 `<prefix>/include/node/node.h` 存在——缺失时在 spawn 子进程前以精确错误 fail precondition，绝不 fallback）；**child env 已 sanitize（LOCK-ABI-5/7）**：剥离全部 target-affecting npm/node-gyp 变量（runtime/target/target_arch/arch/dist_url/nodedir/devdir/electron_version/build_from_source 及大小写 `npm_config`/`NPM_CONFIG` 变体）并显式注入已验证 arch/platform/`--arch`/`--nodedir`/`--platform` 受控参数，保留 proxy/compiler 变量；前置校验 Node/ABI/execPath/pnpm10.27.0/PATH + 依赖版本精确 12.11.1；自动执行 `native:check:node` 并失败即停；清理（marker/stale bin）失败使 rebuild 结果 FAIL（不吞错） |
-| `pnpm native:rebuild:electron` | 显式 `@electron/rebuild` API（`force=true`、`buildFromSource=true`、`onlyModules=['better-sqlite3']`、sequential、显式 resolved buildPath/projectRootPath）；前置校验同上 + darwin arm64 + Electron 41.2.1；自动执行 `native:check:electron` 并失败即停 |
+| `pnpm native:rebuild:electron` | 显式 `@electron/rebuild` API（`force=true`、`buildFromSource=true`、`onlyModules=['better-sqlite3']`、sequential、显式 resolved buildPath/projectRootPath）；前置校验同上 + darwin arm64 或 win32 x64 + Electron 41.2.1；自动执行 `native:check:electron` 并失败即停 |
 
 ### 依赖版本强制（LOCK-ABI finding A）
 
@@ -1765,7 +1765,7 @@ lane，不再需要任何手工 `native:check:*` / `native:rebuild:*` 顺序（�
 
 | 风险 | 说明 |
 |---|---|
-| 平台范围 | Electron rebuild/check 当前限定 darwin arm64（LOCK-ABI-5）；其他平台按设计 fail 而非猜测 |
+| 平台范围 | Electron rebuild/check 当前支持 darwin arm64 与 win32 x64（LOCK-ABI-5）；其他平台按设计 fail 而非猜测 |
 | Node 头文件 | Node rebuild **必须**以已验证 Node 的 `include/node`（`--nodedir`，`nodeDirFromExecPath` 证明 `<prefix>/include/node/node.h` 存在）构建；本地头文件缺失 ⇒ **在 spawn 任何子进程之前**以精确错误 fail precondition（绝不 fallback 到网络下载或继承的 `npm_config_nodedir`） |
 | 单一 binding | 两个 runtime 共享一个 binding，任何时刻只能服务一个目标；这是 LOCK-ABI-9 接受的架构限制 |
 | 全量 gates | 全量 `pnpm test`/lint/format 需在 Node ABI137 状态下运行（与既有 Phase 5.4/6 全量验证证据一致）；本实现阶段按要求未跑全量 gates |

@@ -6,6 +6,7 @@ import {
   ELECTRON_ARCH,
   ELECTRON_PLATFORM,
   ELECTRON_VERSION,
+  electronTargetFor,
   NATIVE_BINDING_NAME,
   NATIVE_PACKAGE,
   NATIVE_PACKAGE_VERSION,
@@ -177,6 +178,7 @@ export function runNodeCheck(effects: Effects): CheckReport {
 /** Check the better-sqlite3 binding against the installed Electron runtime. */
 export function runElectronCheck(effects: Effects): CheckReport {
   const info = effects.runtimeInfo()
+  const target = electronTargetFor(info.platform, info.arch)
   const report: CheckReport = {
     target: 'electron',
     ok: false,
@@ -184,8 +186,8 @@ export function runElectronCheck(effects: Effects): CheckReport {
     // Expected locked facts; overwritten by probe-detected facts when available.
     runtimeVersion: ELECTRON_VERSION,
     abi: ELECTRON_ABI,
-    platform: ELECTRON_PLATFORM,
-    arch: ELECTRON_ARCH,
+    platform: target?.platform ?? ELECTRON_PLATFORM,
+    arch: target?.arch ?? ELECTRON_ARCH,
     markerState: 'ignored',
     sqlVerified: false,
     failures: [],
@@ -193,9 +195,9 @@ export function runElectronCheck(effects: Effects): CheckReport {
   }
 
   const hostLabel = `host node ${info.nodeVersion} (ABI ${info.modulesAbi}, ${info.platform}/${info.arch})`
-  if (info.platform !== ELECTRON_PLATFORM || info.arch !== ELECTRON_ARCH) {
+  if (!target) {
     report.failures.push(
-      `Electron native checks are currently supported on ${ELECTRON_PLATFORM} ${ELECTRON_ARCH} only; detected ${info.platform} ${info.arch}.`,
+      `Electron native checks are currently supported on darwin arm64 or win32 x64; detected ${info.platform} ${info.arch}.`,
       `Host runtime: ${hostLabel}`
     )
     return report
@@ -209,8 +211,8 @@ export function runElectronCheck(effects: Effects): CheckReport {
   report.packagePath = resolved.packagePath
   // Best-effort candidate before the probe (embedded Node version unknown yet).
   report.bindingPath = bindingPathFor(effects, resolved.packagePath, {
-    platform: ELECTRON_PLATFORM,
-    arch: ELECTRON_ARCH,
+    platform: target.platform,
+    arch: target.arch,
     abi: ELECTRON_ABI,
     nodeRuntimeVersion: info.nodeVersion
   })
