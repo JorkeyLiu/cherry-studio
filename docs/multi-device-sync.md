@@ -4,7 +4,9 @@
 > **Role**: This document owns sync goal, current approach, current status/limits, evidence, gaps, and next decision.
 > **Fallback reference (conditional only)**: [Sync Architecture Selection](./sync-architecture-selection.md) — candidate analysis reusable only on a concrete current-path blocker with clear technical advantage.
 > **Development principle**: This sync effort is initiated and evolved under `adaptive-development` principles: the intended outcome remains the anchor, current state and gap determine the next step, and design, implementation, evidence, and validation evolve together.
-> **Last updated**: 2026-09-06 — Docker Compose relay deployment contract revised to the approved product boundary (standard bridge networking + ports, relay-owned token/SQLite only, optional HTTP/HTTPS transport, no relay-owned certificates, non-blocking HTTP warning in Sync Settings; image execution not validated — no Docker daemon on this macOS host); status remains limited validation, not production-ready.
+> **Target connection/channel governance**: [Sync Connection, Registration, and Hidden Multi-Channel Pairing ADR](./sync-connection-channel.md) (`SYNC-CC-*`, approved 2026-09-09) owns target relay service connection/registration/channel/pairing semantics. This document does not duplicate its decision tables.
+> **Implementation-vs-target**: the current invite/founder/global-trust behavior described below is implementation-to-be-replaced. It is preserved as historical current-state evidence only; the target model is explicit Connect + stable public device code + durable secret, separate service/pairing state machines, hidden per-channel pairing, and per-channel sequencing. The target model is not implemented.
+> **Last updated**: 2026-09-09 — target connection/channel ADR adopted as governance (see above); current implementation, evidence, gaps, and fallback condition unchanged; Docker relay docs still describe the current implementation, not the ADR target.
 
 ## 1. Goal
 
@@ -107,7 +109,7 @@ Docker).
   /data/relay-token`) -> on the first Cherry Chat client, enter the server
   endpoint (`http://<server>:<port>` or your externally provided
   `https://...`) plus the token, and connect: that client becomes the
-  founder and accepts later devices through the existing client pairing UI.
+   founder and accepts later devices through the existing client pairing UI (current implementation only; the target model in the [connection/channel ADR](./sync-connection-channel.md) has no founder — explicit Connect plus device-code pairing).
   When `RELAY_PUBLIC_URL` is set, `relay-data/relay-config.cherry` records
   the operator-supplied public URL for reference; otherwise users enter the
   endpoint manually.
@@ -146,7 +148,7 @@ Docker).
 - The authoritative sync path is strictly authenticated push/pull plus cursor; SSE is notification-only and never decides convergence. Auth precedence (401 before any interruption handling), 503 pause behavior with counter/cursor preservation, resume, and independent push/pull direction barriers are validated under a controlled in-memory network-interruption harness only. Direction-level interruption is additionally proven on the real two-profile path: pull interruption after the relay accepted operations with pull held then auto-convergence, and push interruption with pending retained then automatic retry after release. Batch-internal partial push and page-internal partial pull are explicitly not claimed: relay push is atomic and no deterministic in-request barrier exists.
 - Relay-side identical operation replay is accepted idempotently without cursor/opcount growth on the bounded test-side relay. This proves idempotent-accept handling only; it proves no real lost-response client timing.
 - Bounded file-backed reference-relay restart is validated for covered shapes: operation/cursor retention and sequence continuity across a controlled owned-process SIGTERM restart with a disposable database, including a pending stable message edit queued during the outage converging after restart through two disposable profiles and Main SQLite IPC. Convergence is decided by strictly authenticated push/pull plus cursor; SSE remains hint-only.
-- Device pairing and trust are implemented with limited validation: two devices complete an explicit request -> accept flow through a user-shared invite code; trust persists in Main SQLite (`007_sync_pairing_trust`) and on the relay, surviving app restart. Relay push/pull and Main sync require membership beyond the relay token (untrusted devices get an explicit `device-not-trusted` rejection surfaced in the UI); a relay token alone never grants sync access. Reference relay remains a test/reference implementation, not production-ready.
+- Device pairing and trust are implemented with limited validation: two devices complete an explicit request -> accept flow through a user-shared invite code; trust persists in Main SQLite (`007_sync_pairing_trust`) and on the relay, surviving app restart. Relay push/pull and Main sync require membership beyond the relay token (untrusted devices get an explicit `device-not-trusted` rejection surfaced in the UI); a relay token alone never grants sync access. Reference relay remains a test/reference implementation, not production-ready. This invite/founder/global-trust shape is implementation-to-be-replaced by the [connection/channel ADR](./sync-connection-channel.md) target model; it is retained here as historical current-state evidence, not as target semantics.
 - The above remains limited implementation-validation evidence for the covered shapes and the reference/test-side relay only. It establishes no larger/longer backlog or capacity behavior, no WAL/OS-crash/power-loss durability, no production relay lifecycle (deployment, upgrade, backup) readiness, and no compound/structured content, attachment, E2EE, or full product readiness.
 
 ## 4. Current gap to target
@@ -159,10 +161,10 @@ Docker).
 
 ## 5. Next decision and step
 
-The next decision is explicitly open and not authorized by this document: based on product priority, choose a bounded capacity/write-amplification probe versus entering compound/structured content validation, extending from the proven automatic-convergence plus delete/recovery, bounded outbox/app-restart, direction-level interruption, and idempotent-replay base only.
+The next decision is implementation of the service connection + registration + channel namespace/pairing foundation governed by the [Sync Connection, Registration, and Hidden Multi-Channel Pairing ADR](./sync-connection-channel.md) (`SYNC-CC-*`), replacing the current invite/founder/global-trust implementation. Initial snapshot/existing-data convergence stays a separate pre-existing sync-data problem and is not part of that foundation step.
 
 - Entry: an explicitly activated decision with claim, minimum sufficient method, and stopping condition.
-- Exit: documented convergence and recovery behavior with accepted trade-offs and residual risks, or a reproducible blocker that triggers the fallback condition below.
+- Exit: documented foundation behavior per the ADR conformance requirements with accepted trade-offs and residual risks, or a reproducible blocker that triggers the fallback condition below.
 - No production rollout follows from this step alone; production authorization remains a separate governed decision. No implementation authorization follows from this document update.
 
 ## 6. Temporary working judgments

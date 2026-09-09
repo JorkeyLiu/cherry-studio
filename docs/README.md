@@ -19,6 +19,7 @@ This directory contains the project documentation in multiple languages.
 | [Performance Measurement](./performance-measurement.md) | Persistent measurement contract (toolchain, evidence hierarchy, schema v1, thresholds) |
 | [Performance Workstreams](./performance-workstreams.md) | Current actionable performance state (open product problems, evidence, acceptance framework) |
 | [Personal Multi-Device Sync](./multi-device-sync.md) | Current reference — goal, approach, evidence, gaps, next decision, fallback condition (personal-hosted relay; operation-log + thin HTTP relay; limited validation, not production-ready) |
+| [Sync Connection & Channel ADR](./sync-connection-channel.md) | Approved target — relay service connection/registration/channel/pairing semantics (`SYNC-CC-*`; implementation-to-be-replaced vs current invite/founder model) |
 | [Sync Architecture Selection](./sync-architecture-selection.md) | Fallback/reference — candidate analysis for conditional reuse only (not current status) |
 
 ---
