@@ -4,9 +4,8 @@ import { captureMarkers, removeMarkers, removeStaleBinDirs } from './binding'
 import { runCheck, verifyPackageVersion } from './check'
 import {
   ELECTRON_ABI,
-  ELECTRON_ARCH,
-  ELECTRON_PLATFORM,
   ELECTRON_VERSION,
+  electronTargetFor,
   NATIVE_PACKAGE,
   NODE_ABI,
   NODE_MIN_VERSION,
@@ -44,9 +43,9 @@ function verifyPreconditions(effects: Effects, target: Target, info: ReturnType<
     )
   }
   if (target === 'electron') {
-    if (info.platform !== ELECTRON_PLATFORM || info.arch !== ELECTRON_ARCH) {
+    if (!electronTargetFor(info.platform, info.arch)) {
       failures.push(
-        `Electron rebuild is currently supported on ${ELECTRON_PLATFORM} ${ELECTRON_ARCH} only; detected ${info.platform} ${info.arch}.`
+        `Electron rebuild is currently supported on darwin arm64 or win32 x64; detected ${info.platform} ${info.arch}.`
       )
     }
     const installed = effects.electronVersion()
@@ -170,11 +169,12 @@ export async function runRebuild(effects: Effects, target: Target): Promise<Rebu
     run =
       spawned.code === 0 ? { ok: true, logs } : { ok: false, logs, error: `node-gyp exited with code ${spawned.code}` }
   } else {
+    const electronTarget = electronTargetFor(info.platform, info.arch)
     run = await effects.rebuildElectron({
       buildPath: effects.projectRoot(),
       electronVersion: ELECTRON_VERSION,
-      platform: ELECTRON_PLATFORM,
-      arch: ELECTRON_ARCH,
+      platform: electronTarget?.platform ?? info.platform,
+      arch: electronTarget?.arch ?? info.arch,
       onlyModules: [NATIVE_PACKAGE],
       force: true,
       buildFromSource: true,

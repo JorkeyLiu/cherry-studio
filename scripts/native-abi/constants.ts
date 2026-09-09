@@ -32,12 +32,21 @@ export const ELECTRON_VERSION = '41.2.1'
 export const ELECTRON_ABI = 145
 
 /**
- * Currently supported Electron rebuild platform/arch (LOCK-ABI-5). The
- * electron-builder / better-sqlite3 prebuilt scope is darwin arm64 today;
- * checks on other platforms fail with the repair command instead of guessing.
+ * Currently supported Electron rebuild platform/arch pairs (LOCK-ABI-5).
+ * Keep the legacy darwin/arm64 pair and add the Windows x64 lane used by the
+ * Windows packaging command; checks on other platforms fail closed.
  */
 export const ELECTRON_PLATFORM = 'darwin'
 export const ELECTRON_ARCH = 'arm64'
+
+export const ELECTRON_TARGETS = [
+  { platform: 'darwin', arch: 'arm64' },
+  { platform: 'win32', arch: 'x64' }
+] as const
+
+export function electronTargetFor(platform: string, arch: string): (typeof ELECTRON_TARGETS)[number] | undefined {
+  return ELECTRON_TARGETS.find((target) => target.platform === platform && target.arch === arch)
+}
 
 /** Exact pnpm version (see `packageManager`). */
 export const PNPM_VERSION = '10.27.0'

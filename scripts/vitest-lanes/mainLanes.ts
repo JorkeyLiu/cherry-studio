@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { globSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /**
@@ -80,11 +80,15 @@ function readFile(relativePath: string): string {
 }
 
 export function enumerateMainTestFiles(): string[] {
-  return globSync(MAIN_TEST_GLOB, { cwd: REPO_ROOT }).sort()
+  return globSync(MAIN_TEST_GLOB, { cwd: REPO_ROOT })
+    .map((file) => file.split(sep).join('/'))
+    .sort()
 }
 
 export function enumerateMainBenchFiles(): string[] {
-  return globSync(MAIN_BENCH_GLOB, { cwd: REPO_ROOT }).sort()
+  return globSync(MAIN_BENCH_GLOB, { cwd: REPO_ROOT })
+    .map((file) => file.split(sep).join('/'))
+    .sort()
 }
 
 /** True when the file directly loads the better-sqlite3 native binding. */

@@ -2,7 +2,7 @@
  * Injectable child-process executor (bounded process primitive for the Native
  * ABI Runtime Lane lifecycle).
  *
- * Runs an explicit executable + argv without a shell, inherits a supplied
+ * Runs an explicit executable + argv without enabling shell parsing, inherits a supplied
  * environment, preserves exit/signal/spawn outcomes, forwards parent
  * SIGINT/SIGTERM to a running child, waits for child completion, and always
  * unregisters the parent signal handlers. It does not acquire locks, inspect
@@ -70,6 +70,22 @@ export interface ExecuteOptions {
   /** Parent signals forwarded to a running child; default `['SIGINT', 'SIGTERM']`. */
   forwardedSignals?: readonly NodeJS.Signals[]
 }
+
+/** Windows command shims used by the repository's native ABI lanes. */
+const WINDOWS_CMD_SHIMS = new Set([
+  'pnpm',
+  'pnpm.cmd',
+  'vitest',
+  'vitest.cmd',
+  'electron-vite',
+  'electron-vite.cmd',
+  'dotenv',
+  'dotenv.cmd',
+  'tsx',
+  'tsx.cmd',
+  'playwright',
+  'playwright.cmd'
+])
 
 /**
  * Discriminated outcome of a child run. `kind` is the single source the later
@@ -151,7 +167,15 @@ function errnoCode(error: unknown): string | undefined {
 /** Real wiring: `node:child_process` spawn + `process.on`/`off` signal registration. */
 export function createProcessExecutorSeams(): ProcessExecutorSeams {
   return {
-    spawn: (command, args, options) => spawn(command, args, options),
+    spawn: (command, args, options) => {
+      // Windows package shims are .cmd files. Node cannot execute a .cmd file
+      // directly with spawn(), so route the fixed lane commands through the
+      // system command interpreter while preserving their explicit argv.
+      if (process.platform === 'win32' && WINDOWS_CMD_SHIMS.has(command)) {
+        return spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', command, ...args], options)
+      }
+      return spawn(command, args, options)
+    },
     onSignal: (signal, handler) => {
       process.on(signal, handler)
       return () => {

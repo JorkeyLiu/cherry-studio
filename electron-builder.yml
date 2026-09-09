@@ -66,11 +66,21 @@ files:
   - "!node_modules/tesseract.js-core/{tesseract-core-simd-lstm.js,tesseract-core-simd-lstm.wasm,tesseract-core-simd-lstm.wasm.js}" # we don't need source files
   - "!**/*.{h,iobj,ipdb,tlog,recipe,vcxproj,vcxproj.filters,Makefile,*.Makefile}" # filter .node build files
   - "resources/**/*" # include all files in resources, and unpack them from asar for runtime access
+  - from: node_modules/.pnpm/ms@2.1.3/node_modules/ms
+    to: node_modules/ms
+    filter:
+      - "**/*"
 asarUnpack:
   - out/proxy/**
   - resources/**
   - "**/*.{metal,exp,lib}"
   - "node_modules/@img/sharp-*/**"
+  - "node_modules/@paymoapp/electron-shutdown-handler/build/Release/**"
+
+# The native ABI lane rebuilds better-sqlite3 before packaging. Letting
+# electron-builder rebuild every native dependency again re-enters the Windows
+# long-path/MSBuild failure mode and can overwrite the verified ABI.
+npmRebuild: false
 
 win:
   executableName: Cherry Chat
@@ -81,6 +91,9 @@ win:
   signtoolOptions:
     sign: scripts/win-sign.js
   verifyUpdateCodeSignature: false
+  # Local/CI builds without a certificate must not extract winCodeSign, which
+  # requires Windows symlink privilege even when no signing is performed.
+  signAndEditExecutable: false
 nsis:
   artifactName: ${productName}-${version}-${arch}-setup.${ext}
   shortcutName: ${productName}
