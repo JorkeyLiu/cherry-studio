@@ -84,6 +84,11 @@ export interface LocalSyncBaselineFieldClock {
   operationId: string
 }
 
+export interface LocalSyncBaselineParentMembershipClock {
+  timestamp: number
+  operationId: string
+}
+
 export interface LocalSyncBaselineEntity {
   entityType: 'topic' | 'message' | 'message_block'
   entityId: string
@@ -93,6 +98,8 @@ export interface LocalSyncBaselineEntity {
   entityClock: LocalSyncBaselineEntityClock | null
   /** Only fields admitted by the exact allowlist for this entity, sorted by field. */
   fieldClocks: LocalSyncBaselineFieldClock[]
+  /** Parent-membership clock for message/message_block; null when unversioned, absent for topic. */
+  parentMembershipClock?: LocalSyncBaselineParentMembershipClock | null
 }
 
 export interface LocalSyncBaselineTombstone {
@@ -118,6 +125,7 @@ export interface LocalSyncBaselineManifest {
   tombstoneCount: number
   unversionedEntityCount: number
   unversionedFieldCount: number
+  unversionedMembershipCount: number
   excludedTransientMessages: number
   excludedTransientBlocks: number
   excludedUnsupportedBlocks: number
@@ -405,6 +413,7 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   const syncStateRows = tx.select().from(schema.syncState).all()
   const entityClockRows = tx.select().from(schema.syncEntityClock).all()
   const fieldClockRows = tx.select().from(schema.syncFieldClock).all()
+  const membershipRows = tx.select().from(schema.syncMembershipClock).all()
   const pendingOutboxCount = tx.select({ id: schema.syncOutbox.id }).from(schema.syncOutbox).all().length
 
   const entityClockByKey = new Map<string, LocalSyncBaselineEntityClock>()
@@ -439,6 +448,42 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     if (list.some((entry) => entry.field === row.field)) continue
     list.push({ field: row.field, timestamp: row.timestamp, operationId: row.operationId })
     fieldClocksByKey.set(key, list)
+  }
+
+  // Membership clocks: validate row type/id/parent/timestamp/operationId fail-closed.
+  // A membership row for an emitted child must match its actual current parent;
+  // malformed/duplicate/inconsistent rows throw SyncBaselineError. No
+  // substitution via entityClock/fieldClock/createdAt/current time.
+  const membershipByKey = new Map<string, { parentId: string; timestamp: number; operationId: string }>()
+  for (const row of membershipRows) {
+    const childType = (row as unknown as { childEntityType: unknown }).childEntityType
+    const childId = (row as unknown as { childEntityId: unknown }).childEntityId
+    const parentId = (row as unknown as { parentId: unknown }).parentId
+    const timestamp = (row as unknown as { timestamp: unknown }).timestamp
+    const operationId = (row as unknown as { operationId: unknown }).operationId
+    if (childType !== 'message' && childType !== 'message_block') {
+      fail(`baseline malformed membership child type ${String(childType)} for ${String(childId)}`)
+    }
+    if (typeof childId !== 'string' || childId.length === 0) {
+      fail(`baseline malformed membership child id for ${String(childType)}/${String(childId)}`)
+    }
+    if (typeof parentId !== 'string' || parentId.length === 0) {
+      fail(`baseline malformed membership parent for ${childType}/${childId}`)
+    }
+    if (typeof timestamp !== 'number' || !Number.isSafeInteger(timestamp) || timestamp < 0) {
+      fail(`baseline malformed membership timestamp for ${childType}/${childId}`)
+    }
+    try {
+      parseSyncOperationIdShape(operationId)
+    } catch (e) {
+      fail(
+        `baseline malformed membership operationId for ${childType}/${childId}: ${e instanceof Error ? e.message : String(e)}`,
+        e
+      )
+    }
+    const key = `${childType}:${childId}`
+    if (membershipByKey.has(key)) fail(`baseline duplicate membership for ${key}`)
+    membershipByKey.set(key, { parentId: parentId, timestamp: timestamp, operationId: operationId as string })
   }
 
   // Topics: full current state (soft-deleted rows stay; hard-deleted rows are
@@ -504,12 +549,22 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
       sortOrder: row.sortOrder
     })
     const key = `message:${row.id}`
+    const membership = membershipByKey.get(key)
+    if (membership && membership.parentId !== row.topicId) {
+      fail(
+        `baseline membership parent mismatch for message/${row.id}: membership parent ${membership.parentId} vs actual ${row.topicId}`
+      )
+    }
+    const parentMembershipClock = membership
+      ? { timestamp: membership.timestamp, operationId: membership.operationId }
+      : null
     entities.push({
       entityType: 'message',
       entityId: row.id,
       payload,
       entityClock: entityClockByKey.get(key) ?? null,
-      fieldClocks: (fieldClocksByKey.get(key) ?? []).slice().sort((a, b) => compareLexical(a.field, b.field))
+      fieldClocks: (fieldClocksByKey.get(key) ?? []).slice().sort((a, b) => compareLexical(a.field, b.field)),
+      parentMembershipClock
     })
     emittedMessageIds.add(row.id)
   }
@@ -551,12 +606,22 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
       sortOrder: row.sortOrder
     })
     const key = `message_block:${row.id}`
+    const membership = membershipByKey.get(key)
+    if (membership && membership.parentId !== row.messageId) {
+      fail(
+        `baseline membership parent mismatch for message_block/${row.id}: membership parent ${membership.parentId} vs actual ${row.messageId}`
+      )
+    }
+    const parentMembershipClock = membership
+      ? { timestamp: membership.timestamp, operationId: membership.operationId }
+      : null
     entities.push({
       entityType: 'message_block',
       entityId: row.id,
       payload,
       entityClock: entityClockByKey.get(key) ?? null,
-      fieldClocks: (fieldClocksByKey.get(key) ?? []).slice().sort((a, b) => compareLexical(a.field, b.field))
+      fieldClocks: (fieldClocksByKey.get(key) ?? []).slice().sort((a, b) => compareLexical(a.field, b.field)),
+      parentMembershipClock
     })
   }
 
@@ -620,6 +685,74 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     return compareLexical(a.entityId, b.entityId)
   })
 
+  // Membership orphan / retained / excluded handling:
+  // - Emitted stable child: already validated parent match above, must be used.
+  // - Retained deletion: membership for a deleted child with representable tombstone is allowed and omitted.
+  // - Transient/unsupported inventory-excluded child with current business row: may be omitted; parent mismatch still fails where actual parent available.
+  // - No business row and no tombstone: orphan/corrupt => fail closed.
+  // - Duplicate keys already rejected.
+  {
+    const messageById = new Map<string, (typeof messageRows)[number]>()
+    for (const row of messageRows) messageById.set(row.id, row)
+    const blockById = new Map<string, (typeof blockRows)[number]>()
+    for (const row of blockRows) blockById.set(row.id, row)
+    const emittedKeys = new Set<string>(entities.map((e) => `${e.entityType}:${e.entityId}`))
+    const tombstoneKeys = new Set<string>(tombstones.map((t) => `${t.entityType}:${t.entityId}`))
+    for (const [key, membership] of membershipByKey) {
+      if (emittedKeys.has(key)) continue
+      const [childType, childId] = key.split(':') as ['message' | 'message_block', string]
+      let businessRow: { parentId: string } | null = null
+      let isExcludedTransientOrUnsupported = false
+      if (childType === 'message') {
+        const row = messageById.get(childId)
+        if (row) {
+          businessRow = { parentId: row.topicId }
+          if (!isStableMessageStatus(row.status)) isExcludedTransientOrUnsupported = true
+          else if (!emittedTopicIds.has(row.topicId)) isExcludedTransientOrUnsupported = true // orphan suppressed still counts as excluded path but parent available
+        }
+      } else {
+        const row = blockById.get(childId)
+        if (row) {
+          businessRow = { parentId: row.messageId }
+          if (!isStableBlockStatus(row.status)) isExcludedTransientOrUnsupported = true
+          else {
+            let overflow: Record<string, unknown> = {}
+            try {
+              overflow = decodeOverflow(row.extra, 'message_blocks', row.id)
+            } catch {}
+            if (isUnsupportedBlockForSync({ type: row.type, overflow })) isExcludedTransientOrUnsupported = true
+            else if (!emittedMessageIds.has(row.messageId)) isExcludedTransientOrUnsupported = true
+          }
+        }
+      }
+      if (businessRow) {
+        if (businessRow.parentId !== membership.parentId) {
+          fail(
+            `baseline membership parent mismatch for ${childType}/${childId}: membership parent ${membership.parentId} vs actual ${businessRow.parentId}`
+          )
+        }
+        if (isExcludedTransientOrUnsupported) {
+          // Membership for current transient/unsupported/orphan-suppressed child may be omitted; existing diagnostics already truthful.
+          continue
+        }
+        // Stable child with present row but not emitted should not happen (would have been emitted); if it does, treat as allowed omission only if tombstone exists, else fail as orphan
+        // Fall through to tombstone check below for non-excluded case: if not emitted stable, it's still an orphan business row without emission -> check tombstone
+        if (tombstoneKeys.has(key)) continue
+        // If stable not emitted and no tombstone, this is an orphan that should have been emitted: treat as orphan suppressed already counted, but membership extra is corrupt if not covered by tombstone.
+        // For stable emitted-parent case that was unexpectedly not emitted, fail as orphan membership (not a transient exclusion).
+        // However to avoid forcing product domains, only fail when no tombstone and not transient/unsupported.
+        // This path: business row exists, not excluded, not emitted, no tombstone => fail closed as orphan/corrupt.
+        fail(
+          `baseline orphan membership for ${key} with no tombstone: retained membership for live stable child that was not emitted`
+        )
+      } else {
+        // No current business row
+        if (tombstoneKeys.has(key)) continue
+        fail(`baseline orphan membership for ${key} with no business row or tombstone`)
+      }
+    }
+  }
+
   // Provisional local watermark observation: current channel key and strict
   // cursor observed only. Either absent means unbound (never a SYNC-DATA-007
   // no-gap watermark claim). Present-but-malformed state fails closed.
@@ -677,6 +810,15 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     }
   }
   if (unversionedFieldCount > 0) reasons.add('unversioned-field')
+  let unversionedMembershipCount = 0
+  for (const entity of entities) {
+    if (entity.entityType !== 'topic') {
+      const pm = (entity as { parentMembershipClock?: { timestamp: number; operationId: string } | null })
+        .parentMembershipClock
+      if (!pm) unversionedMembershipCount += 1
+    }
+  }
+  if (unversionedMembershipCount > 0) reasons.add('unversioned-membership')
   if (pendingOutboxCount > 0) reasons.add('pending-outbox')
   // An emitted aggregate with any non-emitted child row is incomplete.
   let aggregateIncompleteParents = 0
@@ -709,6 +851,7 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     tombstoneCount: tombstones.length,
     unversionedEntityCount,
     unversionedFieldCount,
+    unversionedMembershipCount,
     excludedTransientMessages,
     excludedTransientBlocks,
     excludedUnsupportedBlocks,

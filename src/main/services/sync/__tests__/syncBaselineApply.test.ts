@@ -186,6 +186,19 @@ function seedFullFieldsOn(
   for (const f of fields) seedFieldClockOn(db, type, id, f, ts, op)
 }
 
+function seedMembershipOn(
+  db: BetterSQLite3Database<typeof schema>,
+  childType: 'message' | 'message_block',
+  childId: string,
+  parentId: string,
+  ts: number,
+  op: string
+): void {
+  db.insert(schema.syncMembershipClock)
+    .values({ childEntityType: childType, childEntityId: childId, parentId, timestamp: ts, operationId: op })
+    .run()
+}
+
 function seedBoundOn(sqlite: Database.Database, cursor = '7', channel = 'chan-1'): void {
   sqlite.prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)').run('cursor', cursor)
   sqlite.prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)').run('sync:channelKey', channel)
@@ -207,6 +220,8 @@ function seedCompleteSource(
   seedFullFieldsOn(srcDb, 'topic', topicId, ts, `${opPrefix}-t`)
   seedFullFieldsOn(srcDb, 'message', messageId, ts, `${opPrefix}-m`)
   seedFullFieldsOn(srcDb, 'message_block', blockId, ts, `${opPrefix}-b`)
+  seedMembershipOn(srcDb, 'message', messageId, topicId, ts, `${opPrefix}-m`)
+  seedMembershipOn(srcDb, 'message_block', blockId, messageId, ts, `${opPrefix}-b`)
   seedBoundOn(srcSqlite)
   const candidate = captureLocalSyncBaselineCandidate(srcDb)
   expect(candidate.completeness.state).toBe('complete')
@@ -229,6 +244,11 @@ function refreshCountsAndDigest(c: LocalSyncBaselineCandidate): void {
     total: c.entities.length
   }
   c.manifest.tombstoneCount = c.tombstones.length
+  c.manifest.unversionedMembershipCount = c.entities.filter((e) => {
+    if (e.entityType === 'topic') return false
+    const pm = (e as unknown as { parentMembershipClock?: unknown }).parentMembershipClock
+    return pm === null || pm === undefined
+  }).length
   refreshDigest(c)
 }
 
@@ -242,6 +262,7 @@ function snapshotTarget(): string {
     'sync_applied',
     'sync_entity_clock',
     'sync_field_clock',
+    'sync_membership_clock',
     'sync_conflict_log'
   ]
   const dump: Record<string, unknown> = {}
@@ -326,6 +347,7 @@ describe('field merge', () => {
       if (f === 'content') seedFieldClockOn(srcDb, 'message', 'm-tie', f, T, 'op-mmm-high')
       else seedFieldClockOn(srcDb, 'message', 'm-tie', f, T, 'op-mmm-high')
     }
+    seedMembershipOn(srcDb, 'message', 'm-tie', 't-tie', T, 'op-mmm-high')
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -339,6 +361,7 @@ describe('field merge', () => {
       if (f === 'content') seedFieldClockOn(dstDb, 'message', 'm-tie', f, T, 'op-aaa-low')
       else seedFieldClockOn(dstDb, 'message', 'm-tie', f, T, 'op-aaa-low')
     }
+    seedMembershipOn(dstDb, 'message', 'm-tie', 't-tie', T, 'op-mmm-high')
     const res = applyLocalSyncBaselineCandidate(dstDb, candidate)
     expect(res.updated).toBe(1)
     const row = dstSqlite.prepare('SELECT content FROM messages WHERE id=?').get('m-tie') as { content: string }
@@ -352,6 +375,7 @@ describe('field merge', () => {
     seedEntityClockOn(srcDb, 'message', 'm-weak', T, 'op-weak-low')
     seedFullFieldsOn(srcDb, 'topic', 't-weak', T, 'op-weak-t')
     seedFullFieldsOn(srcDb, 'message', 'm-weak', T, 'op-weak-low')
+    seedMembershipOn(srcDb, 'message', 'm-weak', 't-weak', T, 'op-weak-low')
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
 
@@ -361,6 +385,7 @@ describe('field merge', () => {
     seedEntityClockOn(dstDb, 'message', 'm-weak', T + 100, 'op-weak-high')
     seedFullFieldsOn(dstDb, 'topic', 't-weak', T, 'op-weak-t2')
     seedFullFieldsOn(dstDb, 'message', 'm-weak', T + 100, 'op-weak-high')
+    seedMembershipOn(dstDb, 'message', 'm-weak', 't-weak', T, 'op-weak-low')
     const before = dstSqlite.prepare('SELECT content FROM messages WHERE id=?').get('m-weak') as { content: string }
     expect(before.content).toBe('new-content')
     const res = applyLocalSyncBaselineCandidate(dstDb, candidate)
@@ -421,6 +446,8 @@ describe('absence and tombstones', () => {
     seedFullFieldsOn(srcDb, 'topic', 't-del', T, 'op-src-t')
     seedFullFieldsOn(srcDb, 'message', 'm-del', T, 'op-src-m')
     seedFullFieldsOn(srcDb, 'message_block', 'b-del', T, 'op-src-b')
+    seedMembershipOn(srcDb, 'message', 'm-del', 't-del', T, 'op-src-m')
+    seedMembershipOn(srcDb, 'message_block', 'b-del', 'm-del', T, 'op-src-b')
     srcSqlite
       .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
       .run('tombstone:topic:t-del', `${T + 100}:op-del-win`)
@@ -481,6 +508,7 @@ describe('absence and tombstones', () => {
     seedEntityClockOn(srcDb, 'message', 'm-child', T, 'op-c-old')
     seedFullFieldsOn(srcDb, 'topic', 't-pdel', T, 'op-p')
     seedFullFieldsOn(srcDb, 'message', 'm-child', T, 'op-c-old')
+    seedMembershipOn(srcDb, 'message', 'm-child', 't-pdel', T, 'op-c-old')
     srcSqlite
       .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
       .run('tombstone:topic:t-pdel', `${T + 100}:op-del-p`)
@@ -638,10 +666,17 @@ describe('candidate validation fails closed', () => {
         role: 'user',
         content: 'x',
         status: 'success',
+        askId: null,
+        model: null,
+        modelId: null,
+        assistantId: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-02T00:00:00.000Z',
         sortOrder: 0
       },
       entityClock: { timestamp: T, operationId: 'op-orphan' },
-      fieldClocks: MESSAGE_CLOCKED.map((field) => ({ field, timestamp: T, operationId: 'op-orphan' }))
+      fieldClocks: MESSAGE_CLOCKED.map((field) => ({ field, timestamp: T, operationId: 'op-orphan' })),
+      parentMembershipClock: { timestamp: T, operationId: 'op-orphan' }
     })
     orphan.entities.sort((a, b) => {
       const order: Record<string, number> = { topic: 0, message: 1, message_block: 2 }
@@ -659,6 +694,51 @@ describe('candidate validation fails closed', () => {
     bEnt!.payload.type = 'tool'
     refreshDigest(unsup)
     expect(() => applyLocalSyncBaselineCandidate(dstDb, unsup)).toThrow(/unsupported/)
+    expect(snapshotTarget()).toBe(before)
+  })
+
+  it('tampered null/missing membership with recomputed digest still fails closed and leaves target unchanged', () => {
+    const valid = seedCompleteSource('t-v2', 'm-v2', 'b-v2')
+    const before = snapshotTarget()
+    // Null membership but claims complete & zero missing with self-consistent digest
+    const nullMembership = cloneCandidate(valid)
+    const mEnt2 = nullMembership.entities.find((e) => e.entityType === 'message')!
+    ;(mEnt2 as unknown as Record<string, unknown>).parentMembershipClock = null
+    // Keep manifest claiming complete/zero but recompute digest to be self-consistent
+    nullMembership.manifest.unversionedMembershipCount = 0
+    nullMembership.manifest.completenessState = 'complete' as unknown as string as any
+    nullMembership.manifest.completenessReasons = []
+    nullMembership.completeness.state = 'complete' as unknown as string as any
+    nullMembership.completeness.reasons = []
+    refreshDigest(nullMembership)
+    expect(() => applyLocalSyncBaselineCandidate(dstDb, nullMembership)).toThrow(/membership/)
+    expect(snapshotTarget()).toBe(before)
+
+    // Missing key variant
+    const missingMembership = cloneCandidate(valid)
+    const mEnt3 = missingMembership.entities.find((e) => e.entityType === 'message')! as unknown as Record<
+      string,
+      unknown
+    >
+    delete mEnt3['parentMembershipClock']
+    missingMembership.manifest.unversionedMembershipCount = 0
+    missingMembership.manifest.completenessState = 'complete' as unknown as string as any
+    missingMembership.manifest.completenessReasons = []
+    missingMembership.completeness.state = 'complete' as unknown as string as any
+    missingMembership.completeness.reasons = []
+    refreshDigest(missingMembership)
+    expect(() => applyLocalSyncBaselineCandidate(dstDb, missingMembership)).toThrow(/membership/)
+    expect(snapshotTarget()).toBe(before)
+
+    // Count mismatch: manifest says zero but computed missing is 1
+    const countMismatch = cloneCandidate(valid)
+    const mEnt4 = countMismatch.entities.find((e) => e.entityType === 'message')!
+    ;(mEnt4 as unknown as Record<string, unknown>).parentMembershipClock = null
+    countMismatch.manifest.unversionedMembershipCount = 0
+    // recompute digest so digest matches tampered manifest, but structural check recomputes missing
+    refreshDigest(countMismatch)
+    // Even though manifest says 0, validator recomputes and finds mismatch
+    expect(() => applyLocalSyncBaselineCandidate(dstDb, countMismatch)).toThrow(/membership/)
     expect(snapshotTarget()).toBe(before)
   })
 })
@@ -769,6 +849,8 @@ describe('mid-transaction rollback', () => {
       seedEntityClockOn(srcDb, type, id, T, `op-${id}`)
       seedFullFieldsOn(srcDb, type, id, T, `op-${id}`)
     }
+    seedMembershipOn(srcDb, 'message', 'm-conflict', 't-src-parent', T, 'op-m-conflict')
+    seedMembershipOn(srcDb, 'message_block', 'b-new', 'm-conflict', T, 'op-b-new')
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -780,10 +862,58 @@ describe('mid-transaction rollback', () => {
     seedEntityClockOn(dstDb, 'message', 'm-conflict', T, 'op-dst-m')
     seedFullFieldsOn(dstDb, 'topic', 't-dst-parent', T, 'op-dst-parent')
     seedFullFieldsOn(dstDb, 'message', 'm-conflict', T, 'op-dst-m')
+    seedMembershipOn(dstDb, 'message', 'm-conflict', 't-dst-parent', T, 'op-dst-m')
     const before = snapshotTarget()
-    expect(() => applyLocalSyncBaselineCandidate(dstDb, candidate)).toThrow(/immutable|parent mismatch/)
+    expect(() => applyLocalSyncBaselineCandidate(dstDb, candidate)).toThrow(
+      /immutable|parent mismatch|membership parent conflict/
+    )
     expect(snapshotTarget()).toBe(before)
     expect(dstSqlite.prepare('SELECT id FROM topics WHERE id=?').get('t-new')).toBeUndefined()
+  })
+
+  it('earlier membership/entity writes roll back when later membership clock conflicts', () => {
+    // Source: two topics + two messages, lexical order ensures m-aaa writes before m-zzz.
+    insertTopicOn(srcSqlite, 't-aaa')
+    insertTopicOn(srcSqlite, 't-zzz')
+    insertMessageOn(srcSqlite, 'm-aaa', 't-aaa', 'hello-aaa')
+    insertMessageOn(srcSqlite, 'm-zzz', 't-zzz', 'hello-zzz')
+    for (const [type, id] of [
+      ['topic', 't-aaa'],
+      ['topic', 't-zzz'],
+      ['message', 'm-aaa'],
+      ['message', 'm-zzz']
+    ] as const) {
+      seedEntityClockOn(srcDb, type, id, T, `op-${id}`)
+      seedFullFieldsOn(srcDb, type, id, T, `op-${id}`)
+    }
+    seedMembershipOn(srcDb, 'message', 'm-aaa', 't-aaa', T, 'op-m-aaa')
+    seedMembershipOn(srcDb, 'message', 'm-zzz', 't-zzz', T + 100, 'op-m-zzz-new')
+    seedBoundOn(srcSqlite)
+    const candidate = captureLocalSyncBaselineCandidate(srcDb)
+    expect(candidate.completeness.state).toBe('complete')
+
+    // Target: pre-seed m-zzz with same parent but different clock (exact tuple conflict)
+    insertTopicOn(dstSqlite, 't-zzz')
+    insertMessageOn(dstSqlite, 'm-zzz', 't-zzz', 'hello-zzz')
+    seedEntityClockOn(dstDb, 'topic', 't-zzz', T, 'op-t-zzz')
+    seedEntityClockOn(dstDb, 'message', 'm-zzz', T, 'op-m-zzz-old')
+    seedFullFieldsOn(dstDb, 'topic', 't-zzz', T, 'op-t-zzz')
+    seedFullFieldsOn(dstDb, 'message', 'm-zzz', T, 'op-m-zzz-old')
+    seedMembershipOn(dstDb, 'message', 'm-zzz', 't-zzz', T, 'op-m-zzz-old')
+    const before = snapshotTarget()
+    expect(() => applyLocalSyncBaselineCandidate(dstDb, candidate)).toThrow(/membership clock conflict/)
+    expect(snapshotTarget()).toBe(before)
+    // Earlier entity m-aaa and its membership must have been rolled back
+    expect(dstSqlite.prepare('SELECT id FROM topics WHERE id=?').get('t-aaa')).toBeUndefined()
+    expect(dstSqlite.prepare('SELECT id FROM messages WHERE id=?').get('m-aaa')).toBeUndefined()
+    expect(
+      dstSqlite.prepare('SELECT child_entity_id FROM sync_membership_clock WHERE child_entity_id=?').get('m-aaa')
+    ).toBeUndefined()
+    // Original membership for m-zzz preserved
+    const row = dstSqlite
+      .prepare('SELECT operation_id as op FROM sync_membership_clock WHERE child_entity_id=?')
+      .get('m-zzz') as { op: string }
+    expect(row.op).toBe('op-m-zzz-old')
   })
 })
 
@@ -871,6 +1001,8 @@ describe('F1 canonical full payload', () => {
     seedFullFieldsOn(srcDb, 'topic', 't-opt', T, 'op-opt-t', ['pinned', 'prompt'])
     seedFullFieldsOn(srcDb, 'message', 'm-opt', T, 'op-opt-m')
     seedFullFieldsOn(srcDb, 'message_block', 'b-opt', T, 'op-opt-b')
+    seedMembershipOn(srcDb, 'message', 'm-opt', 't-opt', T, 'op-opt-m')
+    seedMembershipOn(srcDb, 'message_block', 'b-opt', 'm-opt', T, 'op-opt-b')
     seedBoundOn(srcSqlite)
     const withOpt = captureLocalSyncBaselineCandidate(srcDb)
     expect(withOpt.completeness.state).toBe('complete')
@@ -948,6 +1080,7 @@ describe('F3 missing field clock with entity clock', () => {
     seedEntityClockOn(srcDb, 'message', 'm-f3', T + 10, 'op-f3-m')
     seedFullFieldsOn(srcDb, 'topic', 't-f3', T, 'op-f3-t')
     seedFullFieldsOn(srcDb, 'message', 'm-f3', T + 10, 'op-f3-m')
+    seedMembershipOn(srcDb, 'message', 'm-f3', 't-f3', T + 10, 'op-f3-m')
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -957,6 +1090,7 @@ describe('F3 missing field clock with entity clock', () => {
     seedEntityClockOn(dstDb, 'topic', 't-f3', T, 'op-f3-t2')
     seedEntityClockOn(dstDb, 'message', 'm-f3', T + 5, 'op-f3-m2')
     seedFullFieldsOn(dstDb, 'topic', 't-f3', T, 'op-f3-t2')
+    seedMembershipOn(dstDb, 'message', 'm-f3', 't-f3', T + 10, 'op-f3-m')
     // Target message has entity clock but missing content field clock (seed all except content).
     for (const f of MESSAGE_CLOCKED) {
       if (f === 'content') continue
@@ -979,6 +1113,7 @@ describe('F3 missing field clock with entity clock', () => {
     seedEntityClockOn(srcDb, 'message', 'm-f3e', T + 10, 'op-f3e-m')
     seedFullFieldsOn(srcDb, 'topic', 't-f3e', T, 'op-f3e-t')
     seedFullFieldsOn(srcDb, 'message', 'm-f3e', T + 10, 'op-f3e-m')
+    seedMembershipOn(srcDb, 'message', 'm-f3e', 't-f3e', T + 10, 'op-f3e-m')
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
 
@@ -987,6 +1122,7 @@ describe('F3 missing field clock with entity clock', () => {
     seedEntityClockOn(dstDb, 'topic', 't-f3e', T, 'op-f3e-t2')
     seedEntityClockOn(dstDb, 'message', 'm-f3e', T + 5, 'op-f3e-m2')
     seedFullFieldsOn(dstDb, 'topic', 't-f3e', T, 'op-f3e-t2')
+    seedMembershipOn(dstDb, 'message', 'm-f3e', 't-f3e', T + 10, 'op-f3e-m')
     for (const f of MESSAGE_CLOCKED) {
       if (f === 'content') continue
       seedFieldClockOn(dstDb, 'message', 'm-f3e', f, T + 5, 'op-f3e-m2')
@@ -1045,6 +1181,8 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
     seedFullFieldsOn(srcDb, 'topic', 't-full', T, 'op-full-t', ['pinned', 'prompt', 'isNameManuallyEdited'])
     seedFullFieldsOn(srcDb, 'message', 'm-full', T, 'op-full-m')
     seedFullFieldsOn(srcDb, 'message_block', 'b-full', T, 'op-full-b')
+    seedMembershipOn(srcDb, 'message', 'm-full', 't-full', T, 'op-full-m')
+    seedMembershipOn(srcDb, 'message_block', 'b-full', 'm-full', T, 'op-full-b')
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -1152,6 +1290,10 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
       seedEntityClockOn(srcDb, type, id, T, `op-src-${id}`)
       seedFullFieldsOn(srcDb, type, id, T, `op-src-${id}`)
     }
+    seedMembershipOn(srcDb, 'message', 'm-c1', 't-cascade', T, 'op-src-m-c1')
+    seedMembershipOn(srcDb, 'message', 'm-c2', 't-cascade', T, 'op-src-m-c2')
+    seedMembershipOn(srcDb, 'message_block', 'b-c1', 'm-c1', T, 'op-src-b-c1')
+    seedMembershipOn(srcDb, 'message_block', 'b-c2', 'm-c2', T, 'op-src-b-c2')
     srcSqlite
       .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
       .run('tombstone:topic:t-cascade', `${T + 100}:op-del-cascade`)
@@ -1235,6 +1377,10 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
       seedEntityClockOn(srcDb, type, id, T, `op-src-${id}`)
       seedFullFieldsOn(srcDb, type, id, T, `op-src-${id}`)
     }
+    seedMembershipOn(srcDb, 'message', 'm-del1', 't-mdel', T, 'op-src-m-del1')
+    seedMembershipOn(srcDb, 'message', 'm-keep1', 't-mdel', T, 'op-src-m-keep1')
+    seedMembershipOn(srcDb, 'message_block', 'b-del1', 'm-del1', T, 'op-src-b-del1')
+    seedMembershipOn(srcDb, 'message_block', 'b-keep1', 'm-keep1', T, 'op-src-b-keep1')
     srcSqlite
       .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
       .run('tombstone:message:m-del1', `${T + 100}:op-del-m`)
@@ -1294,6 +1440,27 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
             .values({ entityType: type, entityId: id, field: f, timestamp: T, operationId: `op-b-${id}` })
             .run()
       }
+      // Membership for the live children in this second candidate.
+      db3
+        .insert(schema.syncMembershipClock)
+        .values({
+          childEntityType: 'message',
+          childEntityId: 'm-keep1',
+          parentId: 't-mdel',
+          timestamp: T,
+          operationId: 'op-src-m-keep1'
+        })
+        .run()
+      db3
+        .insert(schema.syncMembershipClock)
+        .values({
+          childEntityType: 'message_block',
+          childEntityId: 'b-keep1',
+          parentId: 'm-keep1',
+          timestamp: T,
+          operationId: 'op-src-b-keep1'
+        })
+        .run()
       src3
         .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
         .run('tombstone:message_block:b-keep1', `${T + 200}:op-del-b`)

@@ -338,6 +338,8 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
   if (manifest.unversionedEntityCount !== 0) fail('baseline apply manifest must have zero unversioned entities')
   const unversionedFieldCount = (manifest as { unversionedFieldCount?: unknown }).unversionedFieldCount
   if (unversionedFieldCount !== 0) fail('baseline apply manifest must have zero unversioned fields')
+  const unversionedMembershipCount = (manifest as { unversionedMembershipCount?: unknown }).unversionedMembershipCount
+  if (unversionedMembershipCount !== 0) fail('baseline apply manifest must have zero unversioned memberships')
   if (manifest.excludedTransientMessages !== 0) fail('baseline apply manifest must exclude no transient messages')
   if (manifest.excludedTransientBlocks !== 0) fail('baseline apply manifest must exclude no transient blocks')
   if (manifest.excludedUnsupportedBlocks !== 0) fail('baseline apply manifest must exclude no unsupported blocks')
@@ -354,6 +356,23 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
     manifest.entityCounts.message_block !== candidate.entities.filter((e) => e.entityType === 'message_block').length
   ) {
     fail('baseline apply per-type entity count mismatch')
+  }
+  // Manifest membership count consistency: computed missing must match manifest value and reasons.
+  {
+    const computedMissing = candidate.entities.filter((e) => {
+      if (e.entityType === 'topic') return false
+      const pm = (e as unknown as { parentMembershipClock?: unknown }).parentMembershipClock
+      return pm === null || pm === undefined
+    }).length
+    const manifestMissing = (manifest as { unversionedMembershipCount?: unknown }).unversionedMembershipCount
+    if (typeof manifestMissing !== 'number' || manifestMissing !== computedMissing) {
+      fail(
+        `baseline apply membership count mismatch: manifest ${String(manifestMissing)} vs computed ${computedMissing}`
+      )
+    }
+    // For complete candidates missing must be zero; partial would have reason (but we already require complete above).
+    // Keep reason consistency check for future: if missing>0 manifest must contain reason, but complete rejects any.
+    if (computedMissing !== 0) fail('baseline apply requires zero missing memberships for complete')
   }
 
   // Entity/tombstone structural validation.
@@ -474,6 +493,30 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
         fail(`baseline apply field clock without payload field for ${entity.entityId}/${f}`)
       }
     }
+    // Parent-membership clock validation.
+    if (entity.entityType === 'topic') {
+      if (Object.prototype.hasOwnProperty.call(entity as unknown as Record<string, unknown>, 'parentMembershipClock')) {
+        fail(`baseline apply unexpected topic membership for ${entity.entityId}`)
+      }
+    } else {
+      if (
+        !Object.prototype.hasOwnProperty.call(entity as unknown as Record<string, unknown>, 'parentMembershipClock')
+      ) {
+        fail(`baseline apply missing parent membership for ${entity.entityId}`)
+      }
+      const pm = (entity as unknown as { parentMembershipClock: unknown }).parentMembershipClock
+      if (pm === null || pm === undefined) {
+        fail(`baseline apply missing parent membership for ${entity.entityId}`)
+      }
+      if (typeof pm !== 'object' || Array.isArray(pm) || pm === null) {
+        fail(`baseline apply malformed parent membership for ${entity.entityId}`)
+      }
+      const pmObj = pm as { timestamp?: unknown; operationId?: unknown }
+      if (!isValidTimestamp(pmObj.timestamp)) {
+        fail(`baseline apply malformed parent membership timestamp for ${entity.entityId}`)
+      }
+      requireOperationId(pmObj.operationId, `${entity.entityType}/${entity.entityId}/parentMembershipClock`)
+    }
   }
 
   // Parent closure inside the candidate (no placeholders downstream).
@@ -542,6 +585,7 @@ interface LocalClocks {
   entityClockByKey: Map<string, { timestamp: number; operationId: string }>
   fieldClockByKey: Map<string, Map<string, { timestamp: number; operationId: string }>>
   tombstoneByKey: Map<string, { timestamp: number; operationId: string | null; value: string }>
+  membershipByKey: Map<string, { parentId: string; timestamp: number; operationId: string }>
 }
 
 function loadLocalClocks(tx: BaselineTx): LocalClocks {
@@ -615,7 +659,30 @@ function loadLocalClocks(tx: BaselineTx): LocalClocks {
       tombstoneByKey.set(key, { timestamp: parsed.timestamp, operationId: parsed.operationId, value: row.value })
     }
   }
-  return { entityClockByKey, fieldClockByKey, tombstoneByKey }
+  const membershipByKey = new Map<string, { parentId: string; timestamp: number; operationId: string }>()
+  for (const row of tx.select().from(schema.syncMembershipClock).all()) {
+    const key = `${row.childEntityType}:${row.childEntityId}`
+    if (membershipByKey.has(key)) continue
+    if (row.childEntityType !== 'message' && row.childEntityType !== 'message_block') {
+      fail(`baseline apply malformed local membership child type for ${key}`)
+    }
+    if (typeof row.childEntityId !== 'string' || row.childEntityId.length === 0) {
+      fail(`baseline apply malformed local membership child id for ${key}`)
+    }
+    if (typeof row.parentId !== 'string' || row.parentId.length === 0) {
+      fail(`baseline apply malformed local membership parent for ${key}`)
+    }
+    if (!isValidTimestamp(row.timestamp)) {
+      fail(`baseline apply malformed local membership timestamp for ${key}`)
+    }
+    try {
+      parseSyncOperationIdShape(row.operationId)
+    } catch (e) {
+      fail(`baseline apply malformed local membership op for ${key}`, e)
+    }
+    membershipByKey.set(key, { parentId: row.parentId, timestamp: row.timestamp, operationId: row.operationId })
+  }
+  return { entityClockByKey, fieldClockByKey, tombstoneByKey, membershipByKey }
 }
 
 function decodeTopicOverflow(extra: string | null, id: string): Record<string, unknown> {
@@ -742,6 +809,34 @@ function upsertFieldClock(
     .run()
   inner.set(field, { timestamp, operationId })
   return true
+}
+
+function upsertMembershipClock(
+  tx: BaselineTx,
+  childEntityType: 'message' | 'message_block',
+  childEntityId: string,
+  parentId: string,
+  timestamp: number,
+  operationId: string,
+  local: Map<string, { parentId: string; timestamp: number; operationId: string }>
+): void {
+  const key = `${childEntityType}:${childEntityId}`
+  const existing = local.get(key)
+  if (existing) {
+    if (existing.parentId !== parentId) {
+      fail(
+        `baseline apply membership parent conflict for ${childEntityType}/${childEntityId}: retained ${existing.parentId} vs incoming ${parentId}`
+      )
+    }
+    if (existing.timestamp === timestamp && existing.operationId === operationId) return
+    fail(
+      `baseline apply membership clock conflict for ${childEntityType}/${childEntityId}: retained (${existing.timestamp}:${existing.operationId}) vs incoming (${timestamp}:${operationId})`
+    )
+  }
+  tx.insert(schema.syncMembershipClock)
+    .values({ childEntityType, childEntityId, parentId, timestamp, operationId })
+    .run()
+  local.set(key, { parentId, timestamp, operationId })
 }
 
 function deleteEmptySegmentsForTopic(tx: BaselineTx, topicId: string): void {
@@ -871,7 +966,7 @@ export function applyLocalSyncBaselineCandidate(
 
   db.transaction((tx) => {
     const inner = tx as unknown as BaselineTx
-    const { entityClockByKey, fieldClockByKey, tombstoneByKey } = loadLocalClocks(inner)
+    const { entityClockByKey, fieldClockByKey, tombstoneByKey, membershipByKey } = loadLocalClocks(inner)
 
     // Resolve live+tombstone deterministically by versions (not array order).
     const suppressedLiveKeys = new Set<string>()
@@ -1076,6 +1171,33 @@ export function applyLocalSyncBaselineCandidate(
           result.suppressed += 1
           continue
         }
+      }
+
+      // Membership clock handling for non-suppressed message/message_block.
+      // Complete candidates carry non-null parentMembershipClock; suppressed lives already continued above.
+      if (entity.entityType === 'message' || entity.entityType === 'message_block') {
+        const pm = (entity as unknown as { parentMembershipClock?: unknown }).parentMembershipClock as
+          | { timestamp: number; operationId: string }
+          | null
+          | undefined
+        // Pure validation already guaranteed non-null for complete, but fail closed if missing here.
+        if (!pm || typeof pm !== 'object') {
+          fail(`baseline apply missing parent membership for ${entity.entityId}`)
+        }
+        const incomingParentId =
+          entity.entityType === 'message' ? (payload.topicId as string) : (payload.messageId as string)
+        if (typeof incomingParentId !== 'string' || incomingParentId.length === 0) {
+          fail(`baseline apply missing parent id for ${entity.entityId}`)
+        }
+        upsertMembershipClock(
+          inner,
+          entity.entityType,
+          entity.entityId,
+          incomingParentId,
+          pm.timestamp,
+          pm.operationId,
+          membershipByKey
+        )
       }
 
       // Existing vs missing.

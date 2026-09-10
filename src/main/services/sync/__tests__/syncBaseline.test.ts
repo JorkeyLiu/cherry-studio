@@ -170,6 +170,18 @@ function seedFullFieldClocks(
   for (const field of fields) seedFieldClock(entityType, entityId, field, timestamp, operationId)
 }
 
+function seedMembership(
+  childType: 'message' | 'message_block',
+  childId: string,
+  parentId: string,
+  timestamp: number,
+  operationId: string
+): void {
+  db.insert(schema.syncMembershipClock)
+    .values({ childEntityType: childType, childEntityId: childId, parentId, timestamp, operationId })
+    .run()
+}
+
 function seedState(key: string, value: string | null): void {
   sqlite.prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)').run(key, value)
 }
@@ -369,6 +381,8 @@ describe('allowlist and non-leakage', () => {
       seedEntityClock(type, id, T, `op-${id}`)
       seedFullFieldClocks(type, id, T, `op-${id}`, ['pinned', 'prompt', 'isNameManuallyEdited'])
     }
+    seedMembership('message', 'm-leak', 't-leak', T, 'op-m-leak')
+    seedMembership('message_block', 'b-leak', 'm-leak', T, 'op-b-leak')
     seedBoundWatermark()
     const candidate = captureLocalSyncBaselineCandidate(db)
     const json = JSON.stringify(candidate)
@@ -462,11 +476,13 @@ describe('transient and unsupported exclusions', () => {
         'transient-block-excluded',
         'transient-message-excluded',
         'unsupported-block-excluded',
-        'unversioned-field'
+        'unversioned-field',
+        'unversioned-membership'
       ].sort()
     )
     expect(candidate.manifest.aggregateIncompleteParents).toBe(2)
     expect(candidate.manifest.unversionedFieldCount).toBeGreaterThan(0)
+    expect(candidate.manifest.unversionedMembershipCount).toBe(2)
   })
 })
 
@@ -616,11 +632,14 @@ describe('field clocks and unversioned entities', () => {
       seedEntityClock(type, id, T, `op-${id}`)
       seedFullFieldClocks(type, id, T, `op-${id}`)
     }
+    seedMembership('message', 'm-c', 't-c', T, 'op-m-c')
+    seedMembership('message_block', 'b-c', 'm-c', T, 'op-b-c')
     seedBoundWatermark()
     const candidate = captureLocalSyncBaselineCandidate(db)
     expect(candidate.completeness).toEqual({ state: 'complete', reasons: [] })
     expect(candidate.manifest.completenessState).toBe('complete')
     expect(candidate.manifest.unversionedFieldCount).toBe(0)
+    expect(candidate.manifest.unversionedMembershipCount).toBe(0)
   })
 
   it('marks partial when a clocked payload field lacks a field clock', () => {
@@ -676,6 +695,7 @@ describe('operation ID shape validation', () => {
     seedEntityClock('message', 'm-max', T, maxId)
     seedFullFieldClocks('topic', 't-max', T, maxId)
     seedFullFieldClocks('message', 'm-max', T, maxId)
+    seedMembership('message', 'm-max', 't-max', T, maxId)
     seedState('tombstone:message:m-max-gone', `${T}:${maxId}`)
     seedBoundWatermark()
     const candidate = captureLocalSyncBaselineCandidate(db)
