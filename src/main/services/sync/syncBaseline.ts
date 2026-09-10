@@ -47,6 +47,9 @@ export const LOCAL_SYNC_BASELINE_KIND = 'local_sync_baseline_candidate'
 export const LOCAL_SYNC_BASELINE_SCHEMA_VERSION = 'local-sync-baseline-v1'
 /** Version of the provisional syncable-data inventory covered here. */
 export const LOCAL_SYNC_BASELINE_INVENTORY_VERSION = 'topic-message-stable-block-v1'
+/** Provisional non-wire scope of the candidate envelope. */
+export const LOCAL_SYNC_BASELINE_SCOPE =
+  'topics + stable messages + stable supported message blocks + representable tombstones + entity/field version metadata (provisional subset only; not complete-product sync)'
 
 export class SyncBaselineError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -114,6 +117,7 @@ export interface LocalSyncBaselineManifest {
   entityCounts: { topic: number; message: number; message_block: number; total: number }
   tombstoneCount: number
   unversionedEntityCount: number
+  unversionedFieldCount: number
   excludedTransientMessages: number
   excludedTransientBlocks: number
   excludedUnsupportedBlocks: number
@@ -173,6 +177,15 @@ const FIELD_CLOCK_ALLOW: Record<LocalSyncBaselineEntity['entityType'], ReadonlyS
   message_block: new Set<string>([...(SYNC_BLOCK_PATCH_FIELDS as readonly string[]), 'sortOrder'])
 }
 
+/**
+ * Shared field-clock allowlist for baseline capture and bounded apply.
+ * Identity/immutable relation fields are never clocked.
+ */
+export const BASELINE_FIELD_CLOCK_ALLOW: Record<
+  LocalSyncBaselineEntity['entityType'],
+  ReadonlySet<string>
+> = FIELD_CLOCK_ALLOW
+
 function fail(message: string, cause?: unknown): never {
   throw new SyncBaselineError(message, cause === undefined ? undefined : { cause })
 }
@@ -213,6 +226,42 @@ export function canonicalizeSyncJson(value: unknown): string {
 
 function sha256HexUtf8(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex')
+}
+
+/**
+ * Recompute the SHA-256 manifest digest over canonical semantic content
+ * (candidate minus `manifest.digest`). Shared by capture and bounded apply
+ * so tamper validation cannot drift.
+ */
+export function computeLocalSyncBaselineDigest(candidate: LocalSyncBaselineCandidate): string {
+  const manifestWithoutDigest = { ...(candidate.manifest as unknown as Record<string, unknown>) }
+  delete manifestWithoutDigest.digest
+  const unsigned = {
+    kind: candidate.kind,
+    schemaVersion: candidate.schemaVersion,
+    inventoryVersion: candidate.inventoryVersion,
+    entities: candidate.entities,
+    tombstones: candidate.tombstones,
+    observedLocalChannelKey: candidate.observedLocalChannelKey,
+    observedLocalCursor: candidate.observedLocalCursor,
+    observationBinding: candidate.observationBinding,
+    pendingOutboxCount: candidate.pendingOutboxCount,
+    completeness: candidate.completeness,
+    manifest: manifestWithoutDigest
+  }
+  return sha256HexUtf8(canonicalizeSyncJson(unsigned))
+}
+
+/** True when the manifest digest matches recomputed canonical content. */
+export function verifyLocalSyncBaselineDigest(candidate: LocalSyncBaselineCandidate): boolean {
+  if (!candidate || typeof candidate !== 'object') return false
+  const manifest = (candidate as { manifest?: { digest?: unknown } }).manifest
+  if (!manifest || typeof manifest.digest !== 'string') return false
+  try {
+    return computeLocalSyncBaselineDigest(candidate) === manifest.digest
+  } catch {
+    return false
+  }
 }
 
 function parseEntityClockRow(
@@ -610,6 +659,24 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     if (!entity.entityClock) unversionedEntityCount += 1
   }
   if (unversionedEntityCount > 0) reasons.add('unversioned-entity')
+  // Sufficient per-field version metadata: every clocked payload field must
+  // carry a field clock, and every field clock must correspond to a present
+  // payload field. A `complete` candidate must be fully versioned at
+  // both entity and field granularity so bounded apply never infers causality
+  // from row `updatedAt` or capture time. Extra clocks for absent fields also
+  // mark partial so `complete` implies exact apply acceptance.
+  let unversionedFieldCount = 0
+  for (const entity of entities) {
+    const allow = FIELD_CLOCK_ALLOW[entity.entityType]
+    const present = new Set(entity.fieldClocks.map((entry) => entry.field))
+    for (const key of Object.keys(entity.payload)) {
+      if (allow.has(key) && !present.has(key)) unversionedFieldCount += 1
+    }
+    for (const field of present) {
+      if (!Object.prototype.hasOwnProperty.call(entity.payload, field)) unversionedFieldCount += 1
+    }
+  }
+  if (unversionedFieldCount > 0) reasons.add('unversioned-field')
   if (pendingOutboxCount > 0) reasons.add('pending-outbox')
   // An emitted aggregate with any non-emitted child row is incomplete.
   let aggregateIncompleteParents = 0
@@ -637,11 +704,11 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   const manifestWithoutDigest = {
     schemaVersion: LOCAL_SYNC_BASELINE_SCHEMA_VERSION,
     inventoryVersion: LOCAL_SYNC_BASELINE_INVENTORY_VERSION,
-    scope:
-      'topics + stable messages + stable supported message blocks + representable tombstones + entity/field version metadata (provisional subset only; not complete-product sync)',
+    scope: LOCAL_SYNC_BASELINE_SCOPE,
     entityCounts,
     tombstoneCount: tombstones.length,
     unversionedEntityCount,
+    unversionedFieldCount,
     excludedTransientMessages,
     excludedTransientBlocks,
     excludedUnsupportedBlocks,
