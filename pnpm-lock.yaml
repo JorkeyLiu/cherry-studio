@@ -123,6 +123,9 @@ importers:
       better-sqlite3:
         specifier: 12.11.1
         version: 12.11.1
+      canonicalize:
+        specifier: ^2.1.0
+        version: 2.1.0
       express:
         specifier: 5.1.0
         version: 5.1.0
@@ -6471,6 +6474,10 @@ packages:
 
   caniuse-lite@1.0.30001762:
     resolution: {integrity: sha512-PxZwGNvH7Ak8WX5iXzoK1KPZttBXNPuaOvI2ZYU7NrlM+d9Ov+TUvlLOBNGzVXAntMSMMlJPd+jY6ovrVjSmUw==}
+
+  canonicalize@2.1.0:
+    resolution: {integrity: sha512-F705O3xrsUtgt98j7leetNhTWPe+5S72rlL5O4jA1pKqBVQ/dT1O1D6PFxmSXvc0SUOinWS57DKx0I3CHrXJHQ==}
+    hasBin: true
 
   caseless@0.12.0:
     resolution: {integrity: sha512-4tYFyifaFfGacoiObjJegolkwSU4xQNGbVgUiNYVUxbQ2x2lUsFvY4hVgVzGiIe6WLOPqycWXA40l+PWsxthUw==}
@@ -19116,6 +19123,8 @@ snapshots:
   camelize@1.0.1: {}
 
   caniuse-lite@1.0.30001762: {}
+
+  canonicalize@2.1.0: {}
 
   caseless@0.12.0: {}
 

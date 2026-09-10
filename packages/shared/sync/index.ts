@@ -1,3 +1,4 @@
+export * from './baselineWire'
 export * from './endpoint'
 export * from './pairing'
 export * from './payloadFilter'
