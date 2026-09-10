@@ -5,8 +5,9 @@
 > **Fallback reference (conditional only)**: [Sync Architecture Selection](./sync-architecture-selection.md) — candidate analysis reusable only on a concrete current-path blocker with clear technical advantage.
 > **Development principle**: This sync effort is initiated and evolved under `adaptive-development` principles: the intended outcome remains the anchor, current state and gap determine the next step, and design, implementation, evidence, and validation evolve together.
 > **Target connection/channel governance**: [Sync Connection, Registration, and Hidden Multi-Channel Pairing ADR](./sync-connection-channel.md) (`SYNC-CC-*`, approved 2026-09-09) owns target relay service connection/registration/channel/pairing semantics. This document does not duplicate its decision tables.
+> **Target data-convergence governance**: [Sync Data Convergence ADR](./sync-data-convergence.md) (`SYNC-DATA-*`, approved 2026-09-10) owns target complete-synchronization semantics (logical baseline/bootstrap + operation log + manifest reconciliation/repair). This document does not duplicate its decision tables. The ADR is approved but not implemented: no baseline, bootstrap, reconciliation, retention, inventory, or convergence-status work follows from citing it.
 > **Implementation-vs-target**: the SYNC-CC connection/registration/channel/pairing foundation is implemented with limited validation on the current exact worktree (see §7 Current validation). This is implementation regression evidence for covered shapes only; it is not production readiness.
-> **Last updated**: 2026-09-10 — SYNC-CC foundation limited validation completed on current worktree; not production-ready (see §7 Current validation). Docker relay docs still describe deployment mechanics, not pairing semantics.
+> **Last updated**: 2026-09-10 — SYNC-DATA convergence ADR approved as target-only (not implemented); SYNC-CC foundation limited validation completed on current worktree; not production-ready (see §7 Current validation). Docker relay docs still describe deployment mechanics, not pairing semantics.
 
 ## 1. Goal
 
@@ -193,6 +194,7 @@ Docker).
 
 ## 4. Current gap to target
 
+- Data convergence per the approved [Sync Data Convergence ADR](./sync-data-convergence.md) (`SYNC-DATA-*`) is not implemented: no logical baseline/bootstrap, no watermark-bound replay handoff, no manifest/digest reconciliation with targeted repair, no versioned syncable-data inventory, and no per-domain convergence status. The current topic/message/message-block operation-log scope is not complete-product sync; structured content, ordering/segments/branches, and attachments/attachment bytes have no convergence contract.
 - Coverage beyond the validated topic, message, and message-block shapes remains unproven, including compound/complex operations, ordering under replay, and structured content, attachments, and incomplete snapshots, which stay excluded from sync payloads.
 - Scale beyond covered history/outbox sizes remains unproven, including larger/longer backlog and capacity/write-amplification behavior. No capacity threshold or SLA is claimed.
 - Lifecycle durability beyond the bounded restart and bounded single-edit app-restart cases remains unproven: multi-edit SIGTERM/SIGKILL backlog combinations are unproven; WAL/OS-crash/power-loss durability is explicitly unproven (direct SIGKILL relaunch proves bounded same-profile pending-edit recovery only, not storage durability under crash or power loss); relay production lifecycle (deployment, upgrade, backup) remains unproven; interruption evidence beyond direction-level push/pull barriers plus the bounded restart is unproven — batch-internal partial push and page-internal partial pull stay unclaimed.
@@ -206,6 +208,7 @@ The service connection + registration + channel namespace/pairing foundation gov
 - Entry: an explicitly activated decision with claim, minimum sufficient method, and stopping condition.
 - Exit: documented foundation behavior per the ADR conformance requirements with accepted trade-offs and residual risks. Exit is met as limited implementation regression evidence only; it authorizes no production readiness claim.
 - No production rollout follows from this step alone; production authorization remains a separate governed decision. No implementation authorization follows from this document update.
+- Next natural implementation boundary (separately activated, not authorized here): a bounded bootstrap/convergence increment under the approved `SYNC-DATA-*` target (e.g. watermark-bound baseline + replay handoff with local/outbox preservation, or manifest/digest comparison with targeted repair for the currently validated shapes). The current UI refinement work remains independent of that increment and is not its entry condition.
 
 ## 6. Temporary working judgments
 

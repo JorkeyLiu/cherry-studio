@@ -20,9 +20,10 @@ vi.mock('@renderer/context/ThemeProvider', () => ({
   useTheme: () => ({ theme: 'light' })
 }))
 
-function mockSyncApi(endpoint: string): void {
+function mockSyncApi(endpoint: string): Record<string, ReturnType<typeof vi.fn>> {
   const api = {
     getConfig: vi.fn(async () => ({ endpoint, token: '', enabled: true })),
+    setConfig: vi.fn(async (cfg: unknown) => cfg),
     getStatus: vi.fn(async () => ({
       enabled: true,
       endpoint,
@@ -43,24 +44,37 @@ function mockSyncApi(endpoint: string): void {
     configurable: true,
     writable: true
   })
+  return api
 }
 
-async function renderWithEndpoint(endpoint: string): Promise<void> {
-  mockSyncApi(endpoint)
+async function renderWithEndpoint(endpoint: string): Promise<Record<string, ReturnType<typeof vi.fn>>> {
+  const api = mockSyncApi(endpoint)
   const { default: SyncSettings } = await import('../SyncSettings')
   render(<SyncSettings />)
   await waitFor(() => {
     expect(screen.getByTestId('sync-endpoint-input')).toHaveValue(endpoint)
   })
+  return api
 }
 
 describe('SyncSettings non-loopback HTTP warning', () => {
   it('shows a non-blocking warning for a non-loopback http endpoint', async () => {
-    await renderWithEndpoint('http://192.168.1.10:3030')
+    const api = await renderWithEndpoint('http://192.168.1.10:3030')
     const warning = await screen.findByTestId('sync-http-warning')
     expect(warning.textContent).toMatch(/unencrypted HTTP/i)
-    // Non-blocking: save remains possible.
-    expect(screen.getByTestId('sync-save-button')).toBeEnabled()
+    // Non-blocking: blur auto-save remains possible with the warning visible.
+    fireEvent.change(screen.getByTestId('sync-endpoint-input'), {
+      target: { value: 'http://192.168.1.11:3030' }
+    })
+    fireEvent.blur(screen.getByTestId('sync-endpoint-input'))
+    await waitFor(() => {
+      expect(api.setConfig).toHaveBeenCalledWith({
+        endpoint: 'http://192.168.1.11:3030',
+        token: '',
+        enabled: true
+      })
+    })
+    expect(screen.getByTestId('sync-http-warning')).toBeInTheDocument()
   })
 
   it('does not warn for loopback http or https endpoints', async () => {

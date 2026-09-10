@@ -1,14 +1,31 @@
 import { useTheme } from '@renderer/context/ThemeProvider'
 import { loggerService } from '@renderer/services/LoggerService'
 import { isNonLoopbackHttpEndpoint } from '@shared/sync'
-import { Alert, Button, Input, Switch, Tooltip } from 'antd'
+import { Alert, Button, Input, Switch } from 'antd'
 import dayjs from 'dayjs'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { SettingDivider, SettingGroup, SettingHelpText, SettingRow, SettingRowTitle, SettingTitle } from '..'
+import {
+  SettingDivider,
+  SettingGroup,
+  SettingHelpText,
+  SettingRow,
+  SettingRowTitle,
+  SettingSubtitle,
+  SettingTitle
+} from '..'
 
 const logger = loggerService.withContext('SyncSettings')
+
+// Wrapped, keyboard-accessible error text: full content is rendered inline
+// (never Tooltip-only) so long URLs/tokens remain readable without hover.
+const errorTextStyle: CSSProperties = {
+  color: 'var(--color-error)',
+  fontSize: 12,
+  overflowWrap: 'break-word',
+  wordBreak: 'break-word'
+}
 
 interface SyncDataStatus {
   enabled: boolean
@@ -35,6 +52,25 @@ interface PairState {
   incoming: Array<{ id: string; requesterCode: string; createdAt: string }>
 }
 
+// Configuration form (user intent: enabled/endpoint/token). Service state
+// (attached/detached/device code) is a separate observation and is never
+// mixed into this form: config edits persist via setConfig, service state
+// changes only via connect/disconnect/live polling.
+interface SyncForm {
+  endpoint: string
+  token: string
+  enabled: boolean
+}
+
+const normalizeConfig = (form: SyncForm): SyncForm => ({
+  endpoint: form.endpoint.trim(),
+  token: form.token.trim(),
+  enabled: form.enabled
+})
+
+const sameConfig = (a: SyncForm, b: SyncForm): boolean =>
+  a.endpoint === b.endpoint && a.token === b.token && a.enabled === b.enabled
+
 const SyncSettings: React.FC = () => {
   const { t } = useTranslation()
   const { theme } = useTheme()
@@ -46,11 +82,21 @@ const SyncSettings: React.FC = () => {
   const [service, setService] = useState<ServiceStatus | null>(null)
   const [pairing, setPairing] = useState<PairState | null>(null)
   const [syncing, setSyncing] = useState(false)
-  const [saving, setSaving] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [targetCode, setTargetCode] = useState('')
   const [pairingError, setPairingError] = useState<string | null>(null)
   const [pairingBusy, setPairingBusy] = useState(false)
+  const [configError, setConfigError] = useState<string | null>(null)
+  // Raw mount-time config load failure, if any. Rendered through i18n at
+  // render time so the load callback stays independent of the t identity.
+  // Mutually exclusive with save errors: without hydration no save can run.
+  const [configLoadError, setConfigLoadError] = useState<string | null>(null)
+  // Hydration gate: no setConfig may be sent before a valid getConfig result
+  // has established the full persisted config. Until then the endpoint/token/
+  // Enabled controls stay disabled so defaults can never be persisted as if
+  // they were authoritative. Service/pairing/status observation is unaffected.
+  const [hydrated, setHydrated] = useState(false)
+  const hydratedRef = useRef(false)
   // Latest-only refresh generation: Connect/Disconnect bump the generation
   // so an older in-flight live/config/pair response can never overwrite the
   // newer attached/detached observation.
@@ -60,25 +106,134 @@ const SyncSettings: React.FC = () => {
     return refreshGen.current
   }, [])
 
+  // Live form mirror: blur/toggle handlers persist the full normalized config
+  // atomically, so a partial-field save never overwrites another current form
+  // value with a stale closure.
+  const formRef = useRef<SyncForm>({ endpoint: '', token: '', enabled: false })
+  // Last successfully persisted config: saves of unchanged values are no-ops.
+  const persistedRef = useRef<SyncForm>({ endpoint: '', token: '', enabled: false })
+  // Single-flight save guard: overlapping saves coalesce to the latest form
+  // instead of running concurrently, and completion only records the exact
+  // payload it sent, so stale completion can never revert newer edits.
+  const savingRef = useRef(false)
+  const queuedRef = useRef(false)
+  // Form authority generation: every local config interaction (edit, blur trim,
+  // toggle) and every successful save bumps it. The mount-time config response
+  // may hydrate the form only if nothing made it stale since that request
+  // began, so a deferred getConfig can never overwrite newer edits or reset a
+  // newer persisted/autosave snapshot.
+  const formGen = useRef(0)
+  const updateService = useCallback((svc: ServiceStatus | null) => {
+    if (svc) setService(svc)
+  }, [])
+
+  const persistConfig = useCallback(async () => {
+    // An in-flight save always coalesces a concurrent trigger: the loop below
+    // re-reads the latest form on completion, so a newer edit can never be
+    // reverted by stale completion even when it momentarily matches the old
+    // persisted snapshot.
+    // Persistence requires hydration: never send defaults for config fields
+    // that have not yet been established by a valid getConfig result.
+    if (!hydratedRef.current) return
+    if (savingRef.current) {
+      queuedRef.current = true
+      return
+    }
+    const desired = normalizeConfig(formRef.current)
+    if (sameConfig(desired, persistedRef.current)) return
+    savingRef.current = true
+    try {
+      let next = desired
+      // Bounded attempts: each pass sends the latest known form; a pass that
+      // fails surfaces the error and retries once with the newest edits only
+      // when edits arrived mid-save. The form itself is never rewritten here,
+      // so a failure always preserves current local edits.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await window.api.sync.setConfig(next)
+        } catch (e) {
+          const msg = String((e as Error)?.message ?? e)
+          setConfigError(msg.slice(0, 500))
+          window.toast.error(msg)
+          logger.error('save sync config failed', e as Error)
+          const latest = normalizeConfig(formRef.current)
+          if (queuedRef.current && !sameConfig(latest, persistedRef.current)) {
+            queuedRef.current = false
+            next = latest
+            continue
+          }
+          return
+        }
+        persistedRef.current = next
+        // A save completion is form authority: a stale mount-time config that
+        // resolves afterwards must not replace this newer persisted snapshot.
+        formGen.current += 1
+        setConfigError(null)
+        if (queuedRef.current) {
+          queuedRef.current = false
+          const latest = normalizeConfig(formRef.current)
+          if (sameConfig(latest, persistedRef.current)) return
+          next = latest
+          continue
+        }
+        return
+      }
+    } finally {
+      savingRef.current = false
+      if (queuedRef.current) {
+        queuedRef.current = false
+        void persistConfig()
+      }
+    }
+  }, [])
+
   const loadConfigAndStatus = useCallback(async () => {
     const gen = refreshGen.current
+    const cfgGen = formGen.current
     try {
-      const [cfg, st, svc] = await Promise.all([
-        window.api.sync.getConfig(),
+      // getConfig is isolated from the live observations: its failure must
+      // neither block status/service updates nor mark defaults authoritative.
+      const cfgResult:
+        | { ok: true; cfg: { endpoint?: string; token?: string; enabled?: boolean } }
+        | { ok: false; error: unknown } = await window.api.sync.getConfig().then(
+        (cfg) => ({ ok: true as const, cfg }),
+        (error: unknown) => ({ ok: false as const, error })
+      )
+      const [st, svc] = await Promise.all([
         window.api.sync.getStatus().catch(() => null),
         window.api.sync.getServiceStatus().catch(() => null)
       ])
       if (gen !== refreshGen.current) return
-      setEndpoint(cfg.endpoint ?? '')
-      setToken(cfg.token ?? '')
-      setEnabled(!!cfg.enabled)
+      // Status/service observations are independent of form authority and may
+      // still update even when the config payload itself is stale or failed.
       if (st) setStatus(st)
-      if (svc) setService(svc)
+      updateService(svc)
+      if (!cfgResult.ok) {
+        setConfigLoadError(String((cfgResult.error as Error)?.message ?? cfgResult.error).slice(0, 500))
+        logger.error('load sync config failed', cfgResult.error as Error)
+        return
+      }
+      // Hydrate the form only if no local interaction or save made this
+      // response stale since the request began.
+      if (cfgGen !== formGen.current) return
+      const cfg = cfgResult.cfg
+      const loaded: SyncForm = {
+        endpoint: cfg.endpoint ?? '',
+        token: cfg.token ?? '',
+        enabled: !!cfg.enabled
+      }
+      setEndpoint(loaded.endpoint)
+      setToken(loaded.token)
+      setEnabled(loaded.enabled)
+      formRef.current = loaded
+      persistedRef.current = normalizeConfig(loaded)
+      hydratedRef.current = true
+      setHydrated(true)
     } catch (e) {
       if (gen !== refreshGen.current) return
       logger.error('load sync config failed', e as Error)
     }
-  }, [])
+  }, [updateService])
 
   const loadLiveState = useCallback(async () => {
     const gen = refreshGen.current
@@ -93,53 +248,96 @@ const SyncSettings: React.FC = () => {
     ])
     if (gen !== refreshGen.current) return
     if (st) setStatus(st)
-    if (svc) setService(svc)
+    updateService(svc)
     // Disconnected/offline retains the last known pairing observation: only
     // a successful (non-null) fetch replaces it, so membership semantics are
-    // never reset to unknown by a failed poll.
+    // never reset to unknown by a failed poll. Live polling never touches the
+    // endpoint/token/enabled form, so active local edits are preserved.
     if (pair !== null) setPairing(pair)
-  }, [])
+  }, [updateService])
 
   const loadPairing = useCallback(async () => {
     const gen = refreshGen.current
     try {
-      setPairingError(null)
-      const pair = await window.api.sync.getPairState()
-      if (gen !== refreshGen.current) return
-      setPairing(pair)
+      // Coordinated refresh: observe the service first so a pairing failure is
+      // classified against the current attachment observation from this same
+      // refresh — never against a stale or not-yet-loaded service mirror.
       const svc = await window.api.sync.getServiceStatus().catch(() => null)
       if (gen !== refreshGen.current) return
-      if (svc) setService(svc)
+      updateService(svc)
+      let pair: PairState
+      try {
+        pair = await window.api.sync.getPairState()
+      } catch (e) {
+        if (gen !== refreshGen.current) return
+        logger.error('load pairing failed', e as Error)
+        // Expected inability while the service is not attached (disconnected /
+        // unregistered, including the initial load) is not an error: the last
+        // known pairing observation is retained silently. A failure observed
+        // while connected surfaces truthfully, still retaining last-known
+        // pairing state (it is only ever replaced by a successful fetch).
+        if (svc?.state === 'connected') {
+          setPairingError(String((e as Error).message ?? e).slice(0, 500))
+        }
+        return
+      }
+      if (gen !== refreshGen.current) return
+      setPairing(pair)
+      setPairingError(null)
     } catch (e) {
       if (gen !== refreshGen.current) return
-      const msg = String((e as Error).message ?? e).slice(0, 500)
-      setPairingError(msg)
       logger.error('load pairing failed', e as Error)
     }
-  }, [])
+  }, [updateService])
 
   useEffect(() => {
     void loadConfigAndStatus()
     void loadPairing()
-    // Poll live state only — never overwrite the dirty endpoint/token form
-    // while the user is editing. Config is reloaded explicitly on save.
+    // Poll live state only — never the config form, so the five-second poll
+    // cannot overwrite endpoint/token edits in progress.
     const id = setInterval(() => {
       void loadLiveState()
     }, 5000)
     return () => clearInterval(id)
   }, [loadConfigAndStatus, loadLiveState, loadPairing])
 
-  const onSave = async () => {
-    setSaving(true)
-    try {
-      await window.api.sync.setConfig({ endpoint: endpoint.trim(), token: token.trim(), enabled })
-      window.toast.success(t('settings.sync.save_success', 'Sync settings saved'))
-      await loadConfigAndStatus()
-    } catch (e) {
-      window.toast.error(String((e as Error).message))
-    } finally {
-      setSaving(false)
+  const onEndpointChange = (value: string) => {
+    setEndpoint(value)
+    formRef.current.endpoint = value
+    formGen.current += 1
+  }
+
+  const onTokenChange = (value: string) => {
+    setToken(value)
+    formRef.current.token = value
+    formGen.current += 1
+  }
+
+  const onEndpointBlur = () => {
+    const trimmed = formRef.current.endpoint.trim()
+    if (trimmed !== formRef.current.endpoint) {
+      formRef.current.endpoint = trimmed
+      setEndpoint(trimmed)
+      formGen.current += 1
     }
+    void persistConfig()
+  }
+
+  const onTokenBlur = () => {
+    const trimmed = formRef.current.token.trim()
+    if (trimmed !== formRef.current.token) {
+      formRef.current.token = trimmed
+      setToken(trimmed)
+      formGen.current += 1
+    }
+    void persistConfig()
+  }
+
+  const onEnabledChange = (value: boolean) => {
+    setEnabled(value)
+    formRef.current.enabled = value
+    formGen.current += 1
+    void persistConfig()
   }
 
   const onSync = async () => {
@@ -169,7 +367,7 @@ const SyncSettings: React.FC = () => {
       setPairingError(null)
       const svc = await window.api.sync.connect()
       if (gen !== refreshGen.current) return
-      setService(svc)
+      updateService(svc)
       await loadPairing()
       window.toast.success(t('settings.sync.connect_success', 'Connected to relay'))
     } catch (e) {
@@ -189,7 +387,7 @@ const SyncSettings: React.FC = () => {
     try {
       const svc = await window.api.sync.disconnect()
       if (gen !== refreshGen.current) return
-      setService(svc)
+      updateService(svc)
       // Retain the last known pairing observation across Disconnect/offline:
       // online-only actions stay disabled via pairingActionsDisabled, but the
       // membership state is never reset to unknown.
@@ -239,91 +437,78 @@ const SyncSettings: React.FC = () => {
       <SettingHelpText>
         {t(
           'settings.sync.help',
-          'Synchronize chat topics, messages and blocks via a configured HTTP relay. Automatic personal multi-device sync; pending validation, not production-ready.'
+          'Automatic personal-device sync through your own relay is experimental with limited coverage and pending validation — not production-ready.'
         )}
       </SettingHelpText>
-      <SettingRow>
-        <SettingHelpText>
-          {t(
-            'settings.sync.scope_note',
-            'Synced: topic create, message append with blocks, single message/block edits at stable checkpoints (success/error/paused only; streaming/pending/processing/searching states are not sent), single/batch block adds, simple message/block deletes, topic soft-delete/restore/hard-delete. No-op or foreign-target requests are not sent. Not synced: message reorder/ordering (unsupported), ownership transfer, assistant reset, purge/empty trash, segments, attachments, search index, UI state, or compound copy/paste/branch/clone/insert-after/resend/select flows.'
-          )}
-        </SettingHelpText>
-      </SettingRow>
       <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.sync.enabled', 'Enabled')}</SettingRowTitle>
-        <Switch checked={enabled} onChange={setEnabled} data-testid="sync-enabled-switch" />
-      </SettingRow>
-      <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.sync.endpoint', 'Relay Endpoint')}</SettingRowTitle>
-        <Input
-          placeholder={t('settings.sync.endpoint_placeholder', 'http://127.0.0.1:3030')}
-          value={endpoint}
-          onChange={(e) => setEndpoint(e.target.value)}
-          style={{ width: 320 }}
-          data-testid="sync-endpoint-input"
-        />
-      </SettingRow>
-      <SettingRow>
-        <SettingHelpText>
-          {t(
-            'settings.sync.endpoint_help',
-            'Use http:// for direct LAN access or https:// when your deployment provides TLS. Plain HTTP is unencrypted.'
-          )}
-        </SettingHelpText>
-      </SettingRow>
-      {isNonLoopbackHttpEndpoint(endpoint) && (
+      <div role="group" aria-labelledby="sync-section-relay">
+        <SettingSubtitle id="sync-section-relay">{t('settings.sync.service_title', 'Relay service')}</SettingSubtitle>
         <SettingRow>
-          <Alert
-            type="warning"
-            showIcon
-            data-testid="sync-http-warning"
-            message={t(
-              'settings.sync.http_warning',
-              'This endpoint uses unencrypted HTTP on a non-local host. Anyone on the network path can read or modify synced data. Use HTTPS when available.'
-            )}
+          <SettingRowTitle>{t('settings.sync.enabled', 'Enabled')}</SettingRowTitle>
+          <Switch checked={enabled} onChange={onEnabledChange} disabled={!hydrated} data-testid="sync-enabled-switch" />
+        </SettingRow>
+        <SettingRow>
+          <SettingRowTitle>{t('settings.sync.endpoint', 'Relay Endpoint')}</SettingRowTitle>
+          <Input
+            placeholder={t('settings.sync.endpoint_placeholder', 'http://127.0.0.1:3030')}
+            value={endpoint}
+            onChange={(e) => onEndpointChange(e.target.value)}
+            onBlur={onEndpointBlur}
+            disabled={!hydrated}
+            style={{ flex: '1 1 auto', maxWidth: 320, minWidth: 0, marginLeft: 12 }}
+            data-testid="sync-endpoint-input"
           />
         </SettingRow>
-      )}
-      <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.sync.token', 'Access Token')}</SettingRowTitle>
-        <Input.Password
-          placeholder={t('settings.sync.token_placeholder', 'Optional bearer token')}
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          style={{ width: 320 }}
-          data-testid="sync-token-input"
-        />
-      </SettingRow>
-      <SettingRow>
-        <SettingHelpText>
-          {t('settings.sync.token_help', 'Token is never included in sync payload or logs.')}
-        </SettingHelpText>
-      </SettingRow>
-      <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.sync.actions', 'Actions')}</SettingRowTitle>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Button type="primary" onClick={onSave} loading={saving} data-testid="sync-save-button">
-            {t('common.save', 'Save')}
-          </Button>
-          <Button
-            onClick={onSync}
-            loading={syncing || !!status?.syncing}
-            disabled={!enabled || !endpoint}
-            data-testid="sync-now-button">
-            {t('settings.sync.sync_now', 'Sync Now')}
-          </Button>
-          <Button onClick={() => void loadConfigAndStatus()}>{t('common.refresh', 'Refresh')}</Button>
-        </div>
-      </SettingRow>
-      <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.sync.service_title', 'Relay service')}</SettingRowTitle>
-        <div style={{ flex: 1, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <SettingRow>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <SettingHelpText>
+              {t(
+                'settings.sync.endpoint_help',
+                'Use http:// for direct LAN access or https:// when your deployment provides TLS. Plain HTTP is unencrypted.'
+              )}
+            </SettingHelpText>
+            {isNonLoopbackHttpEndpoint(endpoint) && (
+              <Alert
+                type="warning"
+                showIcon
+                data-testid="sync-http-warning"
+                message={t(
+                  'settings.sync.http_warning',
+                  'This endpoint uses unencrypted HTTP on a non-local host. Anyone on the network path can read or modify synced data. Use HTTPS when available.'
+                )}
+              />
+            )}
+          </div>
+        </SettingRow>
+        <SettingRow>
+          <SettingRowTitle>{t('settings.sync.token', 'Access Token')}</SettingRowTitle>
+          <Input.Password
+            placeholder={t('settings.sync.token_placeholder', 'Optional bearer token')}
+            value={token}
+            onChange={(e) => onTokenChange(e.target.value)}
+            onBlur={onTokenBlur}
+            disabled={!hydrated}
+            style={{ flex: '1 1 auto', maxWidth: 320, minWidth: 0, marginLeft: 12 }}
+            data-testid="sync-token-input"
+          />
+        </SettingRow>
+        <SettingRow>
+          <SettingHelpText>
+            {t('settings.sync.token_help', 'Token is never included in sync payload or logs.')}
+          </SettingHelpText>
+        </SettingRow>
+        {(configLoadError || configError) && (
+          <SettingRow>
+            <span style={errorTextStyle} data-testid="sync-config-error">
+              {configLoadError
+                ? t('settings.sync.config_load_error', 'Failed to load sync configuration: {{message}}', {
+                    message: configLoadError
+                  }).slice(0, 500)
+                : (configError ?? '').slice(0, 500)}
+            </span>
+          </SettingRow>
+        )}
+        <div style={{ flex: 1, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <span
               data-testid="sync-service-indicator"
@@ -332,7 +517,11 @@ const SyncSettings: React.FC = () => {
                 width: 10,
                 height: 10,
                 borderRadius: '50%',
-                backgroundColor: serviceConnected ? 'var(--color-success, #52c41a)' : 'var(--color-error, #ff4d4f)'
+                backgroundColor: !service
+                  ? 'var(--color-text-3, #8c8c8c)'
+                  : serviceConnected
+                    ? 'var(--color-success, #52c41a)'
+                    : 'var(--color-error, #ff4d4f)'
               }}
             />
             <span data-testid="sync-service-status">
@@ -370,10 +559,12 @@ const SyncSettings: React.FC = () => {
             )}
           </div>
         </div>
-      </SettingRow>
+      </div>
       <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.sync.pairing_title', 'Device pairing')}</SettingRowTitle>
+      <div role="group" aria-labelledby="sync-section-pairing">
+        <SettingSubtitle id="sync-section-pairing">
+          {t('settings.sync.pairing_title', 'Device pairing')}
+        </SettingSubtitle>
         <div style={{ flex: 1, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
           <SettingHelpText>
             {t(
@@ -398,7 +589,7 @@ const SyncSettings: React.FC = () => {
                 placeholder={t('settings.sync.target_code_placeholder', 'Other device code')}
                 value={targetCode}
                 onChange={(e) => setTargetCode(e.target.value)}
-                style={{ width: 200 }}
+                style={{ flex: '1 1 auto', maxWidth: 200, minWidth: 0 }}
                 data-testid="sync-target-code-input"
               />
               <Button
@@ -481,58 +672,67 @@ const SyncSettings: React.FC = () => {
             </div>
           )}
           {pairingError && (
-            <span style={{ color: 'var(--color-error)' }} data-testid="sync-pairing-error">
+            <span style={errorTextStyle} data-testid="sync-pairing-error">
               {pairingError.slice(0, 500)}
             </span>
           )}
         </div>
-      </SettingRow>
+      </div>
       <SettingDivider />
-      <SettingRow>
-        <SettingRowTitle>{t('settings.sync.status', 'Status')}</SettingRowTitle>
-        <div style={{ flex: 1, fontSize: 12, color: 'var(--color-text-2)' }} data-testid="sync-status">
-          {status ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span data-testid="sync-pending-cursor">
-                {t('settings.sync.pending', 'Pending')}:{' '}
-                <span data-testid="sync-pending-count">{status.pendingCount}</span> |{' '}
-                {t('settings.sync.cursor', 'Cursor')}: <span data-testid="sync-cursor">{status.cursor}</span>
-              </span>
-              {status.lastSyncAt && (
-                <span>
-                  {t('settings.sync.last_sync', 'Last sync')}: {dayjs(status.lastSyncAt).format('YYYY-MM-DD HH:mm:ss')}
+      <div role="group" aria-labelledby="sync-section-data">
+        <SettingSubtitle id="sync-section-data">{t('settings.sync.status', 'Status')}</SettingSubtitle>
+        <div style={{ flex: 1, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ flex: 1, fontSize: 12, color: 'var(--color-text-2)' }} data-testid="sync-status">
+            {status ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span data-testid="sync-pending-cursor">
+                  {t('settings.sync.pending', 'Pending')}:{' '}
+                  <span data-testid="sync-pending-count">{status.pendingCount}</span> |{' '}
+                  {t('settings.sync.cursor', 'Cursor')}: <span data-testid="sync-cursor">{status.cursor}</span>
                 </span>
-              )}
-              {status.lastError && (
-                <Tooltip title={status.lastError}>
-                  <span style={{ color: 'var(--color-error)' }} data-testid="sync-last-error">
-                    {t('settings.sync.last_error', 'Last error')}: {status.lastError.slice(0, 200)}
+                {status.lastSyncAt && (
+                  <span>
+                    {t('settings.sync.last_sync', 'Last sync')}:{' '}
+                    {dayjs(status.lastSyncAt).format('YYYY-MM-DD HH:mm:ss')}
                   </span>
-                </Tooltip>
-              )}
-              {status.lastCaptureError && (
-                <Tooltip title={status.lastCaptureError}>
-                  <span style={{ color: 'var(--color-error)' }} data-testid="sync-capture-error">
-                    {t('settings.sync.capture_error', 'Capture error')}: {status.lastCaptureError.slice(0, 200)}
+                )}
+                {status.lastError && (
+                  <span style={errorTextStyle} data-testid="sync-last-error">
+                    {t('settings.sync.last_error', 'Last error')}: {status.lastError}
                   </span>
-                </Tooltip>
-              )}
-              {(status.conflictCount ?? 0) > 0 && (
-                <span style={{ color: 'var(--color-warning)' }} data-testid="sync-conflict-count">
-                  {t(
-                    'settings.sync.conflicts_pending',
-                    'Conflicting edits: {{count}} field(s) kept the newest value; the overwritten value is stored for a future restore (automatic restore not available yet).',
-                    { count: status.conflictCount }
-                  )}
-                </span>
-              )}
-              {status.syncing && <span data-testid="sync-syncing">{t('settings.sync.syncing', 'Syncing...')}</span>}
-            </div>
-          ) : (
-            <span>{t('settings.sync.no_status', 'No status yet')}</span>
-          )}
+                )}
+                {status.lastCaptureError && (
+                  <span style={errorTextStyle} data-testid="sync-capture-error">
+                    {t('settings.sync.capture_error', 'Capture error')}: {status.lastCaptureError}
+                  </span>
+                )}
+                {(status.conflictCount ?? 0) > 0 && (
+                  <span style={{ color: 'var(--color-warning)' }} data-testid="sync-conflict-count">
+                    {t(
+                      'settings.sync.conflicts_pending',
+                      'Conflicting edits: {{count}} field(s) kept the newest value; the overwritten value is stored for a future restore (automatic restore not available yet).',
+                      { count: status.conflictCount }
+                    )}
+                  </span>
+                )}
+                {status.syncing && <span data-testid="sync-syncing">{t('settings.sync.syncing', 'Syncing...')}</span>}
+              </div>
+            ) : (
+              <span>{t('settings.sync.no_status', 'No status yet')}</span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Button
+              type="primary"
+              onClick={onSync}
+              loading={syncing || !!status?.syncing}
+              disabled={!enabled || !endpoint}
+              data-testid="sync-now-button">
+              {t('settings.sync.sync_now', 'Sync Now')}
+            </Button>
+          </div>
         </div>
-      </SettingRow>
+      </div>
     </SettingGroup>
   )
 }

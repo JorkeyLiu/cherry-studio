@@ -41,6 +41,7 @@ export class SyncSettingsPage extends BasePage {
   readonly tokenInput: Locator
   readonly enabledSwitch: Locator
   readonly saveButton: Locator
+  readonly refreshButton: Locator
   readonly syncNowButton: Locator
   readonly statusContainer: Locator
   readonly pendingCount: Locator
@@ -54,6 +55,9 @@ export class SyncSettingsPage extends BasePage {
     this.tokenInput = page.getByTestId('sync-token-input')
     this.enabledSwitch = page.getByTestId('sync-enabled-switch')
     this.saveButton = page.getByTestId('sync-save-button')
+    // No Refresh control exists in production (autosave contract): this
+    // locator stays at count 0 and proves no Refresh control was added.
+    this.refreshButton = page.getByTestId('sync-refresh-button')
     this.syncNowButton = page.getByTestId('sync-now-button')
     this.statusContainer = page.getByTestId('sync-status')
     this.pendingCount = page.getByTestId('sync-pending-count')
@@ -77,6 +81,35 @@ export class SyncSettingsPage extends BasePage {
   /** Wait for the Sync Settings form to be attached. */
   async waitForSyncForm(timeout = 30000): Promise<void> {
     await this.endpointInput.first().waitFor({ state: 'attached', timeout })
+  }
+
+  /**
+   * Wait for configuration hydration: the endpoint control is disabled until
+   * a valid getConfig result establishes the full persisted config, so an
+   * enabled endpoint proves hydration completed (no defaults-as-authority).
+   */
+  async waitForHydrated(timeout = 30000): Promise<void> {
+    await this.waitForSyncForm(timeout)
+    await this.page.waitForFunction(
+      () => {
+        const el = document.querySelector('[data-testid="sync-endpoint-input"]') as HTMLInputElement | null
+        return !!el && !el.disabled
+      },
+      null,
+      { timeout }
+    )
+  }
+
+  /** Edit the relay endpoint through the rendered input and blur to autosave. */
+  async fillEndpointAndBlur(value: string): Promise<void> {
+    await this.endpointInput.fill(value)
+    await this.endpointInput.blur()
+  }
+
+  /** Edit the access token through the rendered input and blur to autosave. */
+  async fillTokenAndBlur(value: string): Promise<void> {
+    await this.tokenInput.fill(value)
+    await this.tokenInput.blur()
   }
 }
 

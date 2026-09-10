@@ -294,6 +294,14 @@ describe('SyncSettings service indicator and pairing matrix', () => {
     api.getServiceStatus.mockReturnValueOnce(staleGate)
     const { default: SyncSettings } = await import('../SyncSettings')
     render(<SyncSettings />)
+    // Let mount observations settle first: only the pairing refresh holds the
+    // stale gate, so the config load completes disconnected and the Connect
+    // button is a stable live node (not an initial-paint node a re-render
+    // could detach before the click lands).
+    await waitFor(() => {
+      expect(screen.getByTestId('sync-service-status').textContent).toMatch(/Disconnected/)
+    })
+    expect(screen.getByTestId('sync-service-indicator').getAttribute('data-state')).toBe('disconnected')
     // Newer Connect resolves first with connected state.
     api.getServiceStatus.mockResolvedValue({ state: 'connected', deviceCode: 'ABCD2345', explicitDisconnect: false })
     api.connect.mockResolvedValue({ state: 'connected', deviceCode: 'ABCD2345', explicitDisconnect: false })
@@ -303,7 +311,10 @@ describe('SyncSettings service indicator and pairing matrix', () => {
       outgoing: null,
       incoming: []
     })
-    fireEvent.click(await screen.findByTestId('sync-connect'))
+    fireEvent.click(screen.getByTestId('sync-connect'))
+    await waitFor(() => {
+      expect(api.connect).toHaveBeenCalled()
+    })
     await waitFor(() => {
       expect(screen.getByTestId('sync-service-indicator').getAttribute('data-state')).toBe('connected')
     })

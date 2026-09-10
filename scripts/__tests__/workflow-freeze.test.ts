@@ -29,6 +29,7 @@ const EXISTING_WORKFLOW_FILES = [
   'claude-translator.yml',
   'claude.yml',
   'dispatch-docs-update.yml',
+  'docker-relay-publish.yml',
   'github-issue-tracker.yml',
   'issue-management.yml',
   'pr-description-check.yml',
