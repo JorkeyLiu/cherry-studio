@@ -45,18 +45,19 @@ import type { SearchMessagesRequest, SearchMessagesResponse } from '@shared/chat
 import { elapsedMs, MAX_APPEND_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
 import { isStableBlockStatus, isStableMessageStatus, isUnsupportedBlockForSync } from '@shared/sync'
 import type Database from 'better-sqlite3'
+import { eq } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { logMainDiagnostic } from '../diagnostics'
 import { isPhaseAttrMainEnabled, recordMainPhaseDuration } from '../phaseTimingDiagnostics'
 import { spanCacheService } from '../SpanCacheService'
-import { syncService, type SyncTxExecutor } from '../sync/SyncService'
+import { SyncFrameError, syncService, type SyncTxExecutor } from '../sync/SyncService'
 import type { FileReferenceData, MessageBlockData, MessageData, TopicData } from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
 import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
 import { SearchRepository } from './repository/SearchRepository'
-import type * as schema from './schema'
+import * as schema from './schema'
 import { isStreamAttrMeasureEnabled, recordStreamAttrRecord } from './streamingMeasure'
 import { computeTrashRetentionDecision, parseStrictCanonicalIsoMs } from './trashRetention'
 import {
@@ -1000,6 +1001,21 @@ export class ChatDbAggregateService {
           this.syncFileReferences(repos, plan.blocks)
         }
 
+        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
+        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
+        // Compound affected parents: invalidate every existing messageBlock parent whose blocks may be inserted/replaced/changed
+        {
+          const affectedMids = new Set<string>()
+          for (const plan of phase4Plans) {
+            for (const blk of plan.blocks) {
+              affectedMids.add(blk.messageId)
+            }
+          }
+          for (const mid of affectedMids) {
+            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', mid)
+          }
+        }
+
         const uniqueAffectedIds = [...new Set(allAffectedFileIds)].sort()
         return buildFileCleanupResult(repos, uniqueAffectedIds)
       })
@@ -1077,6 +1093,9 @@ export class ChatDbAggregateService {
               ctx.deviceId
             )
             notify = true
+            // New trustworthy topic creation: persist empty topicMessage frame with dedicated truthful clock.
+            // Existing/pre-010 observations must not be backfilled — only when actually newly created/captured here.
+            syncService.refreshParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
           }
           return null
         })
@@ -1210,7 +1229,14 @@ export class ChatDbAggregateService {
               const mrow = repos.messages.getById(messageData.id)
               if (!mrow.found) throw new Error(`appendMessage message ${messageData.id} missing in transaction`)
               const messageStable = this.shouldCaptureMessageCreate(mrow.data)
+              const postStableForFrameEarly = isStableMessageStatus(mrow.data.status)
+              const preStableForFrameEarly =
+                messageExistedBefore && messagePre ? isStableMessageStatus(messagePre.status) : false
               if (!messageStable) {
+                if (preStableForFrameEarly && !postStableForFrameEarly) {
+                  syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+                  syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageData.id)
+                }
                 return null
               }
               if (!trackedTopicBefore) {
@@ -1288,6 +1314,63 @@ export class ChatDbAggregateService {
                     syncCtx.deviceId
                   )
                   syncNotify = true
+                }
+              }
+              // Local parent order frame (010) — inventory-inclusion gated (task 1).
+              // Refresh topicMessage only when message is newly included (true newly created stable message,
+              // or actual pre/post excluded→included transition). Existing stable→stable content edits must
+              // not advance topic frame and must not strictly require membership. New/included block changes
+              // still update only messageBlock as appropriate.
+              {
+                const postStableForFrame = isStableMessageStatus(mrow.data.status)
+                const preStableForFrame =
+                  messageExistedBefore && messagePre ? isStableMessageStatus(messagePre.status) : false
+                const isNewlyIncludedMsg =
+                  (!messageExistedBefore && postStableForFrame) ||
+                  (messageExistedBefore && !preStableForFrame && postStableForFrame)
+                const isStableToStableMsg = messageExistedBefore && preStableForFrame && postStableForFrame
+                if (isNewlyIncludedMsg) {
+                  const topicRow = repos.topics.getById(topicId)
+                  if (topicRow.found) {
+                    if (!messageExistedBefore) {
+                      syncService.refreshParentFrameInTx(stx, 'topicMessage', topicId)
+                    } else {
+                      syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+                    }
+                  }
+                  const parentMsg = repos.messages.getById(messageData.id)
+                  if (parentMsg.found && isStableMessageStatus(parentMsg.data.status)) {
+                    syncService.refreshParentFrameInTx(stx, 'messageBlock', messageData.id)
+                  } else if (parentMsg.found) {
+                    syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageData.id)
+                  }
+                } else if (isStableToStableMsg) {
+                  // Stable→stable: do NOT advance topic frame; handle messageBlock only for new/included block changes
+                  let hasTrueCreateIncluded = false
+                  let hasBlockInclusionTransition = false
+                  for (const b of blockDataList) {
+                    const pre = preBlockRows.get(b.id) ?? null
+                    const postRow = repos.blocks.getById(b.id)
+                    if (!postRow.found) continue
+                    const postIncluded =
+                      isStableBlockStatus(postRow.data.status) && !this.isUnsupportedBlock(postRow.data)
+                    if (!pre) {
+                      if (postIncluded) hasTrueCreateIncluded = true
+                    } else {
+                      const preIncluded = isStableBlockStatus(pre.status) && !this.isUnsupportedBlock(pre)
+                      if (preIncluded !== postIncluded) hasBlockInclusionTransition = true
+                    }
+                  }
+                  if (hasTrueCreateIncluded && !hasBlockInclusionTransition) {
+                    const parentMsg = repos.messages.getById(messageData.id)
+                    if (parentMsg.found && isStableMessageStatus(parentMsg.data.status)) {
+                      syncService.refreshParentFrameInTx(stx, 'messageBlock', messageData.id)
+                    } else if (parentMsg.found) {
+                      syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageData.id)
+                    }
+                  } else if (hasBlockInclusionTransition) {
+                    syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', messageData.id)
+                  }
                 }
               }
             }
@@ -1372,10 +1455,34 @@ export class ChatDbAggregateService {
           if (ctx) {
             // Post-state proof inside the same tx: missing/foreign targets are
             // repository no-ops or throws — only capture when the owned row
-            // survives with the requested topic.
+            // survives with the requested topic. Frame inclusion transitions
+            // are evaluated regardless of stable capture outcome.
             const row = repos.messages.getInTopic(messageId, topicId)
-            if (!row.found) return null
-            if (!isStableMessageStatus(row.data.status)) return null
+            if (!row.found) {
+              // Message deleted/missing after patch: no frame maintenance (topic frame handled by delete path)
+              return null
+            }
+            const postStable = isStableMessageStatus(row.data.status)
+            // Inclusion transition handling (stable↔transient) with truthful membership gating
+            if (preStable && !postStable) {
+              // Stable→transient: topic frame must exclude child; use helper for missing membership fallback; invalidate messageBlock because parent excluded.
+              syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+              syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
+              return null
+            }
+            if (!preStable && postStable) {
+              // Transient→stable: membership-aware topic refresh vs invalidate; messageBlock parent refresh gated on block membership
+              // Use helper that invalidates if any included sibling lacks membership
+              syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+              syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', messageId)
+              // Continue to sync capture below for stable row
+            } else if (preStable && postStable) {
+              // Ordinary stable→stable content edits do not advance frames — skip frame maintenance
+            } else {
+              // Transient→transient: no frame
+              return null
+            }
+            if (!postStable) return null
             this.ensureTopicClosureInTx(stx, topicId, ctx.ts, ctx.deviceId)
             // Final-transition full state (LOCK-PERSONAL-004/005): a
             // never-tracked row promoted from a transient stub by this very
@@ -1503,6 +1610,7 @@ export class ChatDbAggregateService {
           // Missing blocks follow delete no-op semantics. Existing blocks must belong
           // to the message being updated, not merely to the requested topic.
           let affectedFileIds: string[] = []
+          const deletedPreIncluded = new Set<string>()
           if (blockIdsToDelete.length > 0) {
             const ownedBlockIds: string[] = []
             for (const blockId of blockIdsToDelete) {
@@ -1524,6 +1632,39 @@ export class ChatDbAggregateService {
                 )
               }
               ownedBlockIds.push(blockId)
+            }
+
+            // BEFORE deletion: capture each deletion candidate's actual pre-state inventory inclusion
+            // (isStableBlockStatus && !isUnsupportedBlockForSync using parsed overflow fail-closed).
+            // Only previously included deletions count as frame membership transitions.
+            // Malformed overflow fails closed and rolls back.
+            for (const bid of ownedBlockIds) {
+              const raw = (tx as unknown as BetterSQLite3Database<typeof schema>)
+                .select()
+                .from(schema.messageBlocks)
+                .where(eq(schema.messageBlocks.id, bid))
+                .get() as unknown as
+                | { id: string; status: string | null; type: string | null; extra: string | null }
+                | undefined
+              if (!raw) continue
+              let overflow: Record<string, unknown> = {}
+              if (raw.extra) {
+                try {
+                  const parsed = JSON.parse(raw.extra)
+                  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    throw new SyncFrameError(`malformed block extra JSON for ${bid}: not an object`)
+                  }
+                  overflow = parsed as Record<string, unknown>
+                } catch (e) {
+                  if (e instanceof SyncFrameError) throw e
+                  throw new SyncFrameError(
+                    `malformed block extra JSON for ${bid}: ${e instanceof Error ? e.message : String(e)}`
+                  )
+                }
+              }
+              const included =
+                isStableBlockStatus(raw.status) && !isUnsupportedBlockForSync({ type: raw.type, overflow })
+              if (included) deletedPreIncluded.add(bid)
             }
 
             // Collect affected file IDs from owned blocks only
@@ -1662,6 +1803,80 @@ export class ChatDbAggregateService {
               syncService.enqueueDeleteInTx(stx, 'message_block', bid, syncCtx.ts, syncCtx.deviceId)
               syncNotify = true
             }
+            // Local parent order frame (010) — inclusion-aware maintenance
+            if (syncCtx) {
+              // Message inclusion transition (stable ↔ transient) handling for topicMessage and messageBlock
+              const preMsgStable = isStableMessageStatus(existing.data.status)
+              const mrowForFrame = repos.messages.getInTopic(messageId, topicId)
+              const postMsgStable = mrowForFrame.found ? isStableMessageStatus(mrowForFrame.data.status) : false
+              let messageTransitionHandled = false
+              if (preMsgStable && !postMsgStable) {
+                // Stable→transient: refresh topic excluding child (helper for missing), invalidate messageBlock
+                syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
+                messageTransitionHandled = true
+              } else if (!preMsgStable && postMsgStable) {
+                // Transient→stable: topic refresh vs invalidate based on retained membership; messageBlock helper
+                syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+                syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', messageId)
+                messageTransitionHandled = true
+              } else if (preMsgStable && postMsgStable) {
+                // Stable→stable: ordinary content edits do not advance topic frame
+              } else {
+                // Transient→transient: no frame
+                messageTransitionHandled = true
+              }
+
+              // Block inclusion transitions (stable && supported) — helper path; ordinary included→included does not advance
+              // Deletion handling uses pre-state inclusion captured before delete (fail-closed on malformed overflow).
+              // Only previously included deletions count as frame membership transition; transient/unsupported deletes must not mint/advance.
+              let hasBlockInclusionChange = false
+              if (!messageTransitionHandled) {
+                if (deletedPreIncluded.size > 0) {
+                  const mrow2 = repos.messages.getInTopic(messageId, topicId)
+                  if (mrow2.found && isStableMessageStatus(mrow2.data.status)) {
+                    syncService.refreshParentFrameInTx(stx, 'messageBlock', messageId)
+                  } else if (mrow2.found) {
+                    syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
+                  }
+                  hasBlockInclusionChange = true
+                }
+              }
+              // Check block upserts for inclusion changes (existing blocks)
+              let hasTrueCreateStrict = false
+              for (const b of blockDataList) {
+                const pre = preBlockRows.get(b.id) ?? null
+                if (!pre) {
+                  // True create: if post included, strict refresh path (keep rollback)
+                  const brow = repos.blocks.getById(b.id)
+                  if (brow.found && isStableBlockStatus(brow.data.status) && !this.isUnsupportedBlock(brow.data)) {
+                    hasTrueCreateStrict = true
+                  }
+                  continue
+                }
+                const preIncluded = isStableBlockStatus(pre.status) && !this.isUnsupportedBlock(pre)
+                const postRow = repos.blocks.getById(b.id)
+                const postIncluded = postRow.found
+                  ? isStableBlockStatus(postRow.data.status) && !this.isUnsupportedBlock(postRow.data)
+                  : false
+                if (preIncluded !== postIncluded) {
+                  hasBlockInclusionChange = true
+                }
+              }
+              if (hasTrueCreateStrict && !hasBlockInclusionChange) {
+                // Strict refresh for true-create stable supported blocks (keep rollback on missing membership)
+                const mrow2 = repos.messages.getInTopic(messageId, topicId)
+                if (mrow2.found && isStableMessageStatus(mrow2.data.status)) {
+                  syncService.refreshParentFrameInTx(stx, 'messageBlock', messageId)
+                } else if (mrow2.found) {
+                  syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
+                }
+              } else if (hasBlockInclusionChange) {
+                // Inclusion transition helper: refresh only if all post-state included children have membership else invalidate
+                syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', messageId)
+              }
+              // Ordinary included→included content edits: no frame advance (do nothing)
+            }
           }
           return buildFileCleanupResult(repos, affectedFileIds)
         })
@@ -1727,6 +1942,10 @@ export class ChatDbAggregateService {
           repos.messages.update(topicId, id, { overflow: { foldSelected: id === selectedMessageId } })
         }
 
+        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
+        // Local prerequisite only; even though foldSelected does not change order, we invalidate to avoid stale frame.
+        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
+
         return null
       })
     }, `selectAnswerMessage(${topicId})`)
@@ -1754,6 +1973,15 @@ export class ChatDbAggregateService {
           if (ctx && known) {
             syncService.enqueueDeleteInTx(stx, 'message', messageId, ctx.ts, ctx.deviceId)
             notify = true
+          }
+          // Local parent order frame (010) — truthful persistence prerequisite only
+          // Soft-deleted topic still requires its topicMessage frame; only absent/hard-deleted has no frame.
+          if (ctx) {
+            syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
+            const topicRow = repos.topics.getById(topicId)
+            if (topicRow.found) {
+              syncService.refreshParentFrameInTx(stx, 'topicMessage', topicId)
+            }
           }
           return null
         })
@@ -1793,6 +2021,17 @@ export class ChatDbAggregateService {
             for (const id of knownIds) {
               syncService.enqueueDeleteInTx(stx, 'message', id, ctx.ts, ctx.deviceId)
               notify = true
+            }
+          }
+          // Local parent order frame (010) — truthful persistence prerequisite only
+          // Soft-deleted topic still requires its topicMessage frame; only absent/hard-deleted has no frame.
+          if (ctx && ownedIds.length > 0) {
+            for (const did of ownedIds) {
+              syncService.invalidateParentFrameInTx(stx, 'messageBlock', did)
+            }
+            const topicRow = repos.topics.getById(topicId)
+            if (topicRow.found) {
+              syncService.refreshParentFrameInTx(stx, 'topicMessage', topicId)
             }
           }
           return null
@@ -1940,6 +2179,49 @@ export class ChatDbAggregateService {
               this.ensureBlockParentClosureInTx(stx, block.id, syncCtx.ts, syncCtx.deviceId)
               syncService.enqueueUpsertInTx(stx, 'message_block', block.id, patchPayload, syncCtx.ts, syncCtx.deviceId)
               syncNotify = true
+            }
+          }
+          // Local parent order frame (010) — inclusion-aware
+          if (syncCtx) {
+            const affectedParentsStrict = new Set<string>()
+            const affectedParentsHelper = new Set<string>()
+            for (const b of blockDataList) {
+              const pre = preRows.get(b.id) ?? null
+              const postRow = repos.blocks.getById(b.id)
+              if (!postRow.found) continue
+              if (!pre) {
+                if (isStableBlockStatus(postRow.data.status) && !this.isUnsupportedBlock(postRow.data)) {
+                  affectedParentsStrict.add(postRow.data.messageId)
+                }
+              } else {
+                const preIncluded = isStableBlockStatus(pre.status) && !this.isUnsupportedBlock(pre)
+                const postIncluded = isStableBlockStatus(postRow.data.status) && !this.isUnsupportedBlock(postRow.data)
+                if (preIncluded !== postIncluded) {
+                  affectedParentsHelper.add(postRow.data.messageId)
+                }
+                // Ordinary included→included content edits do not advance — no frame change
+              }
+            }
+            for (const pid of affectedParentsStrict) {
+              if (affectedParentsHelper.has(pid)) continue // helper will handle (transition takes precedence)
+              const parentMsg = repos.messages.getById(pid)
+              if (parentMsg.found && isStableMessageStatus(parentMsg.data.status)) {
+                syncService.refreshParentFrameInTx(stx, 'messageBlock', pid)
+              } else if (parentMsg.found) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
+              }
+            }
+            for (const pid of affectedParentsHelper) {
+              const parentMsg = repos.messages.getById(pid)
+              if (!parentMsg.found) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
+                continue
+              }
+              if (!isStableMessageStatus(parentMsg.data.status)) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
+                continue
+              }
+              syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', pid)
             }
           }
         })
@@ -2120,6 +2402,27 @@ export class ChatDbAggregateService {
               }
             }
           }
+          // Local parent order frame — block inclusion transition (stable && supported) with helper; ordinary included→included does not advance
+          if (syncCtx) {
+            const postRow2 = repos.blocks.getById(blockId)
+            if (postRow2.found) {
+              const preIncluded = isStableBlockStatus(existing.data.status) && !this.isUnsupportedBlock(existing.data)
+              const postIncluded = isStableBlockStatus(postRow2.data.status) && !this.isUnsupportedBlock(postRow2.data)
+              if (preIncluded !== postIncluded) {
+                const parentId = postRow2.data.messageId
+                const parentMsg = repos.messages.getById(parentId)
+                if (!parentMsg.found || !isStableMessageStatus(parentMsg.data.status)) {
+                  syncService.invalidateParentFrameInTx(stx, 'messageBlock', parentId)
+                } else {
+                  syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', parentId)
+                }
+              }
+            } else {
+              // block deleted via update? treat as invalidation
+              const parentId = existing.data.messageId
+              syncService.invalidateParentFrameInTx(stx, 'messageBlock', parentId)
+            }
+          }
         })
       } catch (e) {
         this.recordSyncTxFailure('updateSingleBlock', syncCtx, e)
@@ -2228,6 +2531,24 @@ export class ChatDbAggregateService {
               syncNotify = true
             }
           }
+          // Local parent order frame (010) — truthful refresh for each affected messageBlock parent (local prerequisite only)
+          if (syncCtx) {
+            const affectedParents = new Set<string>()
+            for (const b of blockDataList) {
+              const brow = repos.blocks.getById(b.id)
+              if (brow.found && isStableBlockStatus(brow.data.status) && !this.isUnsupportedBlock(brow.data)) {
+                affectedParents.add(brow.data.messageId)
+              }
+            }
+            for (const pid of affectedParents) {
+              const parentMsg = repos.messages.getById(pid)
+              if (parentMsg.found && isStableMessageStatus(parentMsg.data.status)) {
+                syncService.refreshParentFrameInTx(stx, 'messageBlock', pid)
+              } else if (parentMsg.found) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
+              }
+            }
+          }
         })
       } catch (e) {
         this.recordSyncTxFailure('bulkAddBlocks', syncCtx, e)
@@ -2264,6 +2585,12 @@ export class ChatDbAggregateService {
                   typeof bid === 'string' && bid.length > 0 && syncService.isKnownEntityInTx(stx, 'message_block', bid)
               )
             : []
+          // Collect affected parent messageIds before deletion for frame invalidation/refresh
+          const affectedParentIds = new Set<string>()
+          for (const bid of blockIds) {
+            const blk = repos.blocks.getById(bid)
+            if (blk.found) affectedParentIds.add(blk.data.messageId)
+          }
           const affectedFileIds = collectAffectedFileIds(
             blockIds.flatMap((blockId) => repos.fileRefs.listByBlock(blockId))
           )
@@ -2275,6 +2602,20 @@ export class ChatDbAggregateService {
               if (repos.blocks.getById(bid).found) continue // surviving row = no-op, never a remote delete
               syncService.enqueueDeleteInTx(stx, 'message_block', bid, syncCtx.ts, syncCtx.deviceId)
               syncNotify = true
+            }
+          }
+          // Local parent order frame (010) — truthful refresh for each surviving messageBlock parent (local prerequisite only)
+          if (syncCtx && affectedParentIds.size > 0) {
+            for (const pid of affectedParentIds) {
+              const parentMsg = repos.messages.getById(pid)
+              if (parentMsg.found && isStableMessageStatus(parentMsg.data.status)) {
+                syncService.refreshParentFrameInTx(stx, 'messageBlock', pid)
+              } else if (parentMsg.found) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
+              } else {
+                // Parent message was deleted (should not happen for block delete), ensure no orphan frame
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
+              }
             }
           }
           return buildFileCleanupResult(repos, affectedFileIds)
@@ -2455,12 +2796,18 @@ export class ChatDbAggregateService {
   /**
    * Reorder all messages in a topic atomically.
    * Validates exact membership and dense order via repository.
+   * Unsupported structural path (010): truthful invalidation inside same transaction — delete stale
+   * topicMessage frame rather than leave stale valid-looking state. Do not mint clocks or outbox.
    */
   reorderMessages(topicId: string, messageIds: string[]): ChatDbResult<null> {
     return wrapResult(() => {
-      const { messages } = this.repos()
-      messages.replaceOrder(topicId, messageIds)
-      return null
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        repos.messages.replaceOrder(topicId, messageIds)
+        // Local prerequisite only: invalidate frame atomically (no clock mint)
+        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
+        return null
+      })
     }, `reorderMessages(${topicId})`)
   }
 
@@ -2741,11 +3088,18 @@ export class ChatDbAggregateService {
           const known = ctx ? syncService.isKnownEntityInTx(stx, 'topic', topicId) : false
           deletedTopicIds.push(topicId)
 
-          // Collect affected file IDs before cascade deletion
+          // Collect affected file IDs and descendant message IDs before cascade for frame invalidation
           const messages = repos.messages.listByTopic(topicId)
           const messageIds = messages.map((m) => m.id)
           const refsBeforeDelete = repos.fileRefs.listByMessages(messageIds)
           const affectedFileIds = collectAffectedFileIds(refsBeforeDelete)
+
+          // Local parent order frame (010): atomically invalidate topicMessage frame plus every descendant messageBlock frame before cascade.
+          // Collect descendant message IDs before cascade and invalidate frames inside same transaction, no clock mint.
+          for (const mid of messageIds) {
+            syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+          }
+          syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
 
           // FK cascade: topic → messages → blocks → file_references
           // Also topic → topic_segments → topic_segment_messages
@@ -2861,7 +3215,7 @@ export class ChatDbAggregateService {
             // `deletedAt < cutoff` semantics).
             if (decision.effectiveStartMs >= cutoffMs) continue
 
-            // Collect affected file IDs before cascade
+            // Collect affected file IDs and descendant frames before cascade
             const messages = repos.messages.listByTopic(topic.id)
             const messageIds = messages.map((m) => m.id)
             const refs = repos.fileRefs.listByMessages(messageIds)
@@ -2869,6 +3223,14 @@ export class ChatDbAggregateService {
             allAffectedFileIds.push(...ids)
 
             deletedTopicIds.push(topic.id)
+
+            // Local frame invalidation (010): atomically invalidate topicMessage and every descendant messageBlock frame, no clock mint.
+            // Sync-unaware hard-delete lifecycle path — no outbox.
+            const stx = tx as unknown as SyncTxExecutor
+            for (const mid of messageIds) {
+              syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+            }
+            syncService.invalidateParentFrameInTx(stx, 'topicMessage', topic.id)
 
             // FK cascade: hard delete
             repos.topics.hardDelete(topic.id)
@@ -2933,13 +3295,20 @@ export class ChatDbAggregateService {
           const page = repos.topics.listTrashPage({ limit: 100, direction: 'desc', cursor }, { assistantId })
 
           for (const topic of page.items) {
-            // Collect affected file IDs before cascade
+            // Collect affected file IDs and descendant frames before cascade
             const messages = repos.messages.listByTopic(topic.id)
             const messageIds = messages.map((m) => m.id)
             const refs = repos.fileRefs.listByMessages(messageIds)
             allAffectedFileIds.push(...collectAffectedFileIds(refs))
 
             deletedTopicIds.push(topic.id)
+
+            // Local frame invalidation (010): atomically invalidate topicMessage and every descendant messageBlock frame, no clock mint.
+            const stx = tx as unknown as SyncTxExecutor
+            for (const mid of messageIds) {
+              syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+            }
+            syncService.invalidateParentFrameInTx(stx, 'topicMessage', topic.id)
 
             // FK cascade: hard delete
             repos.topics.hardDelete(topic.id)
@@ -3004,6 +3373,12 @@ export class ChatDbAggregateService {
             const messageIds = repos.messages.listByTopic(topic.id).map((message) => message.id)
             affectedFileIds.push(...collectAffectedFileIds(repos.fileRefs.listByMessages(messageIds)))
             deletedTopicIds.push(topic.id)
+            // Local frame invalidation (010): atomically invalidate topicMessage and every descendant messageBlock frame, no clock mint.
+            const stx2 = tx as unknown as SyncTxExecutor
+            for (const mid of messageIds) {
+              syncService.invalidateParentFrameInTx(stx2, 'messageBlock', mid)
+            }
+            syncService.invalidateParentFrameInTx(stx2, 'topicMessage', topic.id)
             repos.topics.hardDelete(topic.id)
           }
           activeCursor = activePage.nextCursor
@@ -3168,6 +3543,16 @@ export class ChatDbAggregateService {
           this.syncFileReferences(repos, allNewBlocks)
         }
 
+        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
+        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', targetTopicId)
+        {
+          const mids = new Set<string>()
+          for (const blk of allNewBlocks) mids.add(blk.messageId)
+          for (const mid of mids) {
+            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', mid)
+          }
+        }
+
         // Build wire response for renderer projection (no second read)
         const wireMessages = messagesToWire(newMessages)
         const wireBlocks = blocksToWire(allNewBlocks)
@@ -3275,6 +3660,18 @@ export class ChatDbAggregateService {
             this.syncFileReferences(repos, plan.blocks)
           }
         }
+
+        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
+        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', targetTopicId)
+        {
+          const mids = new Set<string>()
+          for (const plan of phase4Plans) {
+            for (const blk of plan.blocks) mids.add(blk.messageId)
+          }
+          for (const mid of mids) {
+            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', mid)
+          }
+        }
       })
 
       return null
@@ -3320,6 +3717,13 @@ export class ChatDbAggregateService {
           }
         }
 
+        // Capture parent messageIds for frame invalidation before deletion (still present)
+        const ownedBlockParentIds = new Set<string>()
+        for (const bid of ownedBlockIds) {
+          const blk = repos.blocks.getById(bid)
+          if (blk.found) ownedBlockParentIds.add(blk.data.messageId)
+        }
+
         // Phase 2: Collect affected file IDs from owned blocks only
         let affectedFileIds: string[] = []
         if (ownedBlockIds.length > 0) {
@@ -3363,6 +3767,17 @@ export class ChatDbAggregateService {
           topicId,
           repos.messages.listByTopic(topicId).map((m) => m.id)
         )
+
+        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
+        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
+        const resetMsgIds = new Set<string>(ownedBlockParentIds)
+        for (const item of messages) {
+          const mid = typeof item === 'string' ? item : ((item as { message: JsonObject }).message?.id as string)
+          if (typeof mid === 'string' && mid.length > 0) resetMsgIds.add(mid)
+        }
+        for (const mid of resetMsgIds) {
+          syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', mid)
+        }
 
         return buildFileCleanupResult(repos, affectedFileIds)
       })
@@ -3411,6 +3826,14 @@ export class ChatDbAggregateService {
         // Phase 4: Delete owned messages (FK cascade: blocks → file_references)
         if (ownedIds.length > 0) {
           repos.messages.deleteMany(ownedIds)
+        }
+
+        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
+        if (ownedIds.length > 0) {
+          for (const did of ownedIds) {
+            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', did)
+          }
+          syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
         }
 
         return buildFileCleanupResult(repos, affectedFileIds)
@@ -3557,6 +3980,18 @@ export class ChatDbAggregateService {
           }
           repos.blocks.upsertMany(plan.blocks)
           this.syncFileReferences(repos, plan.blocks)
+        }
+
+        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
+        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
+        {
+          const mids = new Set<string>()
+          for (const plan of phase4Plans) {
+            for (const blk of plan.blocks) mids.add(blk.messageId)
+          }
+          for (const mid of mids) {
+            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', mid)
+          }
         }
 
         // Deduplicate affected IDs and compute remaining counts

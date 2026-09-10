@@ -1095,6 +1095,22 @@ export const MIGRATIONS: MigrationEntry[] = [
       )`,
       `CREATE INDEX IF NOT EXISTS sync_membership_clock_parent_id_idx ON sync_membership_clock(parent_id)`
     ]
+  },
+  {
+    key: '010_sync_parent_order_frame',
+    description:
+      'Additive sync parent order frame: persistent per-parent winning-frame state for local SQLite mutation transactions only (SYNC-DATA-033..036/044). Frames only for topic→message (topicMessage) and message→block (messageBlock); topic ordering excluded. Each frame stores inventory-included live children in current local order; live zero-child parent may have empty []; deleted parent has no frame. Per-row sortOrder remains local projection. No backfill — existing parents remain without frame. Local persistence prerequisite only; not remote/wire/candidate integration.',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS sync_parent_order_frame (
+        kind TEXT NOT NULL CHECK (kind IN ('topicMessage','messageBlock')),
+        parent_id TEXT NOT NULL CHECK (length(parent_id) > 0 AND length(parent_id) <= 256),
+        frame_version TEXT NOT NULL CHECK (frame_version = 'parent-order-frame-v1'),
+        ordered_child_ids_json TEXT NOT NULL CHECK (json_valid(ordered_child_ids_json)),
+        timestamp INTEGER NOT NULL CHECK (timestamp >= 0 AND timestamp <= 9007199254740991),
+        operation_id TEXT NOT NULL CHECK (length(operation_id) > 0 AND length(operation_id) <= 256 AND operation_id NOT LIKE '%:%'),
+        PRIMARY KEY (kind, parent_id)
+      )`
+    ]
   }
 ]
 

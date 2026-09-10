@@ -15,6 +15,9 @@ import {
   filterBlockPayload,
   filterMessagePayload,
   filterTopicPayload,
+  isStableBlockStatus,
+  isStableMessageStatus,
+  isUnsupportedBlockForSync,
   isValidSyncDeviceAuth,
   SYNC_BLOCK_PATCH_FIELDS,
   SYNC_CONFLICT_LOG_MAX,
@@ -27,7 +30,7 @@ import {
 } from '@shared/sync'
 import { SYNC_MAX_OPERATIONS_PER_PULL, SYNC_MAX_OPERATIONS_PER_PUSH } from '@shared/sync'
 import type Database from 'better-sqlite3'
-import { asc, eq } from 'drizzle-orm'
+import { and, asc, eq } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { chatDbService } from '../chatDb'
@@ -128,6 +131,13 @@ export class SyncConfigPreflightError extends Error {
   }
 }
 
+export class SyncFrameError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options as ErrorOptions)
+    this.name = 'SyncFrameError'
+  }
+}
+
 /**
  * Strict canonical cursor parser (LOCK-PERSONAL-001): only canonical
  * non-negative safe-integer forms are accepted. Numbers must be safe
@@ -161,6 +171,21 @@ function isMissingSyncTableError(e: unknown): boolean {
 const MIGRATION_005_KEY = '005_sync_metadata'
 const MIGRATION_006_KEY = '006_sync_field_merge'
 const MIGRATION_009_KEY = '009_sync_membership_clock'
+const MIGRATION_010_KEY = '010_sync_parent_order_frame'
+
+/**
+ * Local frame persistence prerequisite (SYNC-DATA-033..036/044).
+ * Not remote/wire/candidate integration — authoritative local SQLite
+ * mutation transactions only. Frames only for topic→message
+ * (kind: topicMessage) and message→block (kind: messageBlock); topic
+ * ordering excluded. Every persisted frame represents inventory-included
+ * live children in current local user-visible order; live zero-child parent
+ * may have empty []; deleted parent has no frame. Per-row sortOrder remains
+ * local projection only.
+ */
+export const PARENT_ORDER_FRAME_VERSION = 'parent-order-frame-v1' as const
+export const VALID_PARENT_FRAME_KINDS: ReadonlySet<string> = new Set(['topicMessage', 'messageBlock'])
+const FRAME_MAX_SAFE_TIMESTAMP = 9007199254740991
 
 /**
  * Device-identity validity (LOCK-PERSONAL-001/006): a present identity must be
@@ -1304,6 +1329,478 @@ export class SyncService {
     } catch (e) {
       if (isTolerableMissingSyncTable(tx, e, MIGRATION_009_KEY)) return null
       throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Parent order frame — additive, durable (010)
+  // Local frame persistence prerequisite only (SYNC-DATA-033..036/044):
+  // not remote/wire/candidate integration. Frames only for topic→message
+  // (topicMessage) and message→block (messageBlock). See migration 010.
+  // Helpers are tx-bound where noted; fail-closed on validation/missing
+  // membership/timestamp exhaustion so the enclosing aggregate transaction
+  // rolls back atomically. No outbox enqueue here — frameClock is local
+  // truthful state only.
+  // -------------------------------------------------------------------------
+
+  private isValidFrameKind(kind: string): kind is 'topicMessage' | 'messageBlock' {
+    return VALID_PARENT_FRAME_KINDS.has(kind)
+  }
+
+  private validateFrameShape(frame: {
+    kind: string
+    parentId: string
+    frameVersion: string
+    orderedChildIds: unknown
+    timestamp: unknown
+    operationId: unknown
+  }): void {
+    if (!this.isValidFrameKind(frame.kind)) {
+      throw new SyncFrameError(`invalid frame kind ${String(frame.kind).slice(0, 40)}`)
+    }
+    if (typeof frame.parentId !== 'string' || frame.parentId.length === 0 || frame.parentId.length > 256) {
+      throw new SyncFrameError(`invalid frame parentId ${String(frame.parentId).slice(0, 40)}`)
+    }
+    if (frame.parentId.includes(':')) {
+      // Parent IDs are entity IDs; colon-free mirrors operationId bound for safety
+      // but not strictly required — we keep length check only for parent
+      // The wire spec forbids colon only for operationId, not parent, so we
+      // only guard length here. If a colon appears we do NOT throw for parent.
+      void 0
+    }
+    if (frame.frameVersion !== PARENT_ORDER_FRAME_VERSION) {
+      throw new SyncFrameError(`invalid frameVersion ${String(frame.frameVersion).slice(0, 40)}`)
+    }
+    if (!Array.isArray(frame.orderedChildIds)) {
+      throw new SyncFrameError('orderedChildIds must be array')
+    }
+    const ids = frame.orderedChildIds as unknown[]
+    const seen = new Set<string>()
+    for (const v of ids) {
+      if (typeof v !== 'string' || v.length === 0 || v.length > 256) {
+        throw new SyncFrameError(`invalid orderedChildId ${String(v).slice(0, 40)}`)
+      }
+      if (seen.has(v)) {
+        throw new SyncFrameError(`duplicate orderedChildId ${String(v).slice(0, 40)}`)
+      }
+      seen.add(v)
+    }
+    // Deterministic JSON serialization check: the stored JSON must be the
+    // strict JSON array of strings without extra whitespace. We enforce that
+    // JSON.stringify produces the same bytes as the stored value when we
+    // validate persistence; here we just validate shape.
+    if (
+      !Number.isSafeInteger(frame.timestamp as number) ||
+      (frame.timestamp as number) < 0 ||
+      (frame.timestamp as number) > FRAME_MAX_SAFE_TIMESTAMP
+    ) {
+      throw new SyncFrameError(`invalid frame timestamp ${String(frame.timestamp).slice(0, 40)}`)
+    }
+    try {
+      parseSyncOperationIdShape(frame.operationId as string)
+    } catch (e) {
+      throw new SyncFrameError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  private validateOrderedChildIdsJson(jsonStr: string): string[] {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(jsonStr)
+    } catch {
+      throw new SyncFrameError('ordered_child_ids_json is not valid JSON')
+    }
+    if (!Array.isArray(parsed)) {
+      throw new SyncFrameError('ordered_child_ids_json must be JSON array')
+    }
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const v of parsed as unknown[]) {
+      if (typeof v !== 'string' || v.length === 0 || v.length > 256) {
+        throw new SyncFrameError(`invalid orderedChildId in JSON ${String(v).slice(0, 40)}`)
+      }
+      if (seen.has(v)) {
+        throw new SyncFrameError(`duplicate orderedChildId in JSON ${String(v).slice(0, 40)}`)
+      }
+      seen.add(v)
+      out.push(v)
+    }
+    // Strict determinism: serialized form must be JSON.stringify(out)
+    const canonical = JSON.stringify(out)
+    if (canonical !== jsonStr) {
+      throw new SyncFrameError('ordered_child_ids_json not in canonical strict JSON array form')
+    }
+    return out
+  }
+
+  /**
+   * Read parent frame inside an existing transaction (tx-bound).
+   * Returns null when absent or when table is proven pre-010 (no backfill).
+   * Fail-closed on malformed persisted row so the enclosing transaction rolls back.
+   */
+  getParentFrameInTx(
+    tx: SyncTxExecutor,
+    kind: 'topicMessage' | 'messageBlock',
+    parentId: string
+  ): {
+    kind: string
+    parentId: string
+    frameVersion: string
+    orderedChildIds: string[]
+    timestamp: number
+    operationId: string
+  } | null {
+    if (!this.isValidFrameKind(kind)) throw new SyncFrameError(`invalid frame kind ${kind}`)
+    if (typeof parentId !== 'string' || parentId.length === 0) throw new SyncFrameError(`invalid parentId ${parentId}`)
+    try {
+      const row = tx
+        .select()
+        .from(schema.syncParentOrderFrame)
+        .where(eq(schema.syncParentOrderFrame.kind, kind))
+        .all()
+        .find((r) => r.parentId === parentId) as typeof schema.syncParentOrderFrame.$inferSelect | undefined
+      if (!row) return null
+      // Fail-closed validation of persisted row
+      if (row.frameVersion !== PARENT_ORDER_FRAME_VERSION) {
+        throw new SyncFrameError(`persisted frameVersion mismatch for ${kind}/${parentId}`)
+      }
+      const orderedChildIds = this.validateOrderedChildIdsJson(row.orderedChildIdsJson)
+      if (!Number.isSafeInteger(row.timestamp) || row.timestamp < 0 || row.timestamp > FRAME_MAX_SAFE_TIMESTAMP) {
+        throw new SyncFrameError(`persisted frame timestamp invalid for ${kind}/${parentId}`)
+      }
+      try {
+        parseSyncOperationIdShape(row.operationId)
+      } catch (e) {
+        throw new SyncFrameError(e instanceof Error ? e.message : String(e))
+      }
+      return {
+        kind: row.kind,
+        parentId: row.parentId,
+        frameVersion: row.frameVersion,
+        orderedChildIds,
+        timestamp: row.timestamp,
+        operationId: row.operationId
+      }
+    } catch (e) {
+      if (e instanceof SyncFrameError) throw e
+      if (isTolerableMissingSyncTable(tx, e, MIGRATION_010_KEY)) return null
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  /** Read-only accessor for verification/testing. */
+  getParentFrame(
+    kind: 'topicMessage' | 'messageBlock',
+    parentId: string
+  ): {
+    kind: string
+    parentId: string
+    frameVersion: string
+    orderedChildIds: string[]
+    timestamp: number
+    operationId: string
+  } | null {
+    const db = this.getDb()
+    try {
+      const row = db
+        .select()
+        .from(schema.syncParentOrderFrame)
+        .where(eq(schema.syncParentOrderFrame.kind, kind))
+        .all()
+        .find((r) => r.parentId === parentId) as typeof schema.syncParentOrderFrame.$inferSelect | undefined
+      if (!row) return null
+      if (row.frameVersion !== PARENT_ORDER_FRAME_VERSION) {
+        throw new SyncFrameError(`persisted frameVersion mismatch for ${kind}/${parentId}`)
+      }
+      const orderedChildIds = this.validateOrderedChildIdsJson(row.orderedChildIdsJson)
+      if (!Number.isSafeInteger(row.timestamp) || row.timestamp < 0 || row.timestamp > FRAME_MAX_SAFE_TIMESTAMP) {
+        throw new SyncFrameError(`persisted frame timestamp invalid for ${kind}/${parentId}`)
+      }
+      parseSyncOperationIdShape(row.operationId)
+      return {
+        kind: row.kind,
+        parentId: row.parentId,
+        frameVersion: row.frameVersion,
+        orderedChildIds,
+        timestamp: row.timestamp,
+        operationId: row.operationId
+      }
+    } catch (e) {
+      if (e instanceof SyncFrameError) throw e
+      if (isTolerableMissingSyncTable(db, e, MIGRATION_010_KEY)) return null
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  /**
+   * Persist a frame inside an existing transaction (tx-bound).
+   * Validates frame shape/json/clock/version fail-closed.
+   * Repeating exact frame is idempotent (no write).
+   * Different frame is accepted only if incoming frameClock wins current by
+   * timestamp+operationId total order; otherwise fail-closed (throw) so a
+   * business mutation cannot commit with a stale frame. Winning higher clock applies.
+   * Returns { applied: boolean, reason: string }.
+   * Local generated writes should always allocate a winning clock before calling.
+   */
+  persistParentFrameInTx(
+    tx: SyncTxExecutor,
+    frame: {
+      kind: 'topicMessage' | 'messageBlock'
+      parentId: string
+      frameVersion: string
+      orderedChildIds: string[]
+      timestamp: number
+      operationId: string
+    }
+  ): { applied: boolean; reason: 'inserted' | 'updated' | 'idempotent' } {
+    this.validateFrameShape({
+      kind: frame.kind,
+      parentId: frame.parentId,
+      frameVersion: frame.frameVersion,
+      orderedChildIds: frame.orderedChildIds,
+      timestamp: frame.timestamp,
+      operationId: frame.operationId
+    })
+    const jsonStr = JSON.stringify(frame.orderedChildIds)
+    // Extra canonical check: already validated via shape, but ensure deterministic
+    if ((JSON.parse(jsonStr) as unknown) === null) {
+      throw new SyncFrameError('frame orderedChildIds JSON round-trip failed')
+    }
+    try {
+      const existing = this.getParentFrameInTx(tx, frame.kind, frame.parentId)
+      if (existing) {
+        const sameJson = JSON.stringify(existing.orderedChildIds) === jsonStr
+        const sameClock = existing.timestamp === frame.timestamp && existing.operationId === frame.operationId
+        const sameVersion = existing.frameVersion === frame.frameVersion
+        if (
+          sameJson &&
+          sameClock &&
+          sameVersion &&
+          existing.kind === frame.kind &&
+          existing.parentId === frame.parentId
+        ) {
+          return { applied: false, reason: 'idempotent' }
+        }
+        const cmp = this.compareLww(frame.timestamp, frame.operationId, existing.timestamp, existing.operationId)
+        if (cmp <= 0) {
+          throw new SyncFrameError(
+            `conflicting frame clock for ${frame.kind}/${frame.parentId}: incoming (${frame.timestamp},${frame.operationId}) does not win existing (${existing.timestamp},${existing.operationId})`
+          )
+        }
+      }
+      tx.insert(schema.syncParentOrderFrame)
+        .values({
+          kind: frame.kind,
+          parentId: frame.parentId,
+          frameVersion: frame.frameVersion,
+          orderedChildIdsJson: jsonStr,
+          timestamp: frame.timestamp,
+          operationId: frame.operationId
+        })
+        .onConflictDoUpdate({
+          target: [schema.syncParentOrderFrame.kind, schema.syncParentOrderFrame.parentId],
+          set: {
+            frameVersion: frame.frameVersion,
+            orderedChildIdsJson: jsonStr,
+            timestamp: frame.timestamp,
+            operationId: frame.operationId
+          }
+        })
+        .run()
+      return { applied: true, reason: existing ? 'updated' : 'inserted' }
+    } catch (e) {
+      if (e instanceof SyncFrameError) throw e
+      if (isTolerableMissingSyncTable(tx, e, MIGRATION_010_KEY)) {
+        throw new SyncFrameError(`parent order frame table missing for ${frame.kind}/${frame.parentId}`)
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  /** Invalidate (delete) a single parent frame inside an existing transaction. Idempotent. */
+  invalidateParentFrameInTx(tx: SyncTxExecutor, kind: 'topicMessage' | 'messageBlock', parentId: string): void {
+    if (!this.isValidFrameKind(kind)) throw new SyncFrameError(`invalid frame kind ${kind}`)
+    if (typeof parentId !== 'string' || parentId.length === 0) throw new SyncFrameError(`invalid parentId ${parentId}`)
+    try {
+      tx.delete(schema.syncParentOrderFrame)
+        .where(and(eq(schema.syncParentOrderFrame.kind, kind), eq(schema.syncParentOrderFrame.parentId, parentId)))
+        .run()
+    } catch (e) {
+      if (e instanceof SyncFrameError) throw e
+      if (isTolerableMissingSyncTable(tx, e, MIGRATION_010_KEY)) return
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  /** Allocate a dedicated winning frameClock for a parent inside same aggregate transaction. */
+  allocateWinningFrameClockInTx(
+    tx: SyncTxExecutor,
+    kind: 'topicMessage' | 'messageBlock',
+    parentId: string,
+    includedChildIds: string[]
+  ): { timestamp: number; operationId: string } {
+    if (!this.isValidFrameKind(kind)) throw new SyncFrameError(`invalid frame kind ${kind}`)
+    if (typeof parentId !== 'string' || parentId.length === 0) throw new SyncFrameError(`invalid parentId ${parentId}`)
+    // Existing frame clock
+    const existing = this.getParentFrameInTx(tx, kind, parentId)
+    let maxTs = -1
+    if (existing) {
+      if (
+        !Number.isSafeInteger(existing.timestamp) ||
+        existing.timestamp < 0 ||
+        existing.timestamp > FRAME_MAX_SAFE_TIMESTAMP
+      ) {
+        throw new SyncFrameError(`existing frame timestamp malformed for ${kind}/${parentId}`)
+      }
+      maxTs = Math.max(maxTs, existing.timestamp)
+    }
+    const childType = kind === 'topicMessage' ? 'message' : 'message_block'
+    for (const childId of includedChildIds) {
+      if (typeof childId !== 'string' || childId.length === 0) {
+        throw new SyncFrameError(`invalid included childId ${String(childId).slice(0, 40)}`)
+      }
+      const mem = this.getMembershipClockInTx(tx, childType, childId)
+      if (!mem) {
+        throw new SyncFrameError(
+          `missing membership clock for included child ${childType}/${childId} parent ${parentId}`
+        )
+      }
+      if (!Number.isSafeInteger(mem.timestamp) || mem.timestamp < 0 || mem.timestamp > FRAME_MAX_SAFE_TIMESTAMP) {
+        throw new SyncFrameError(`malformed membership timestamp for ${childType}/${childId}`)
+      }
+      try {
+        parseSyncOperationIdShape(mem.operationId)
+      } catch (e) {
+        throw new SyncFrameError(e instanceof Error ? e.message : String(e))
+      }
+      if (mem.parentId !== parentId) {
+        throw new SyncFrameError(
+          `membership parent mismatch for ${childType}/${childId}: ${mem.parentId} vs ${parentId}`
+        )
+      }
+      maxTs = Math.max(maxTs, mem.timestamp)
+    }
+    if (maxTs === FRAME_MAX_SAFE_TIMESTAMP) {
+      throw new SyncFrameError(
+        `frame clock timestamp exhaustion for ${kind}/${parentId}: max relevant timestamp is MAX_SAFE_INTEGER`
+      )
+    }
+    const newTs = maxTs === -1 ? 0 : maxTs + 1
+    if (!Number.isSafeInteger(newTs) || newTs < 0 || newTs > FRAME_MAX_SAFE_TIMESTAMP) {
+      throw new SyncFrameError(`allocated frame timestamp invalid for ${kind}/${parentId}`)
+    }
+    const newOpId = randomUUID()
+    // Validate operationId shape (randomUUID is valid)
+    parseSyncOperationIdShape(newOpId)
+    return { timestamp: newTs, operationId: newOpId }
+  }
+
+  private getOrderedMessageIdsForTopicInTx(tx: SyncTxExecutor, topicId: string): string[] {
+    // Read final child order after repository normalization: sortOrder ASC, id ASC
+    // Filter to inventory-included stable messages (transient statuses excluded)
+    const rows = tx
+      .select({ id: schema.messages.id, sortOrder: schema.messages.sortOrder, status: schema.messages.status })
+      .from(schema.messages)
+      .where(eq(schema.messages.topicId, topicId))
+      .all()
+      .sort((a, b) => {
+        if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder
+        return a.id.localeCompare(b.id)
+      })
+    const filtered: string[] = []
+    for (const r of rows) {
+      if (!isStableMessageStatus(r.status)) continue
+      filtered.push(r.id)
+    }
+    return filtered
+  }
+
+  private getOrderedBlockIdsForMessageInTx(tx: SyncTxExecutor, messageId: string): string[] {
+    const rows = tx
+      .select({
+        id: schema.messageBlocks.id,
+        sortOrder: schema.messageBlocks.sortOrder,
+        status: schema.messageBlocks.status,
+        type: schema.messageBlocks.type,
+        extra: schema.messageBlocks.extra
+      })
+      .from(schema.messageBlocks)
+      .where(eq(schema.messageBlocks.messageId, messageId))
+      .all()
+      .sort((a, b) => {
+        if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder
+        return a.id.localeCompare(b.id)
+      })
+    const filtered: string[] = []
+    for (const r of rows) {
+      if (!isStableBlockStatus(r.status)) continue
+      let overflow: Record<string, unknown> = {}
+      if (r.extra) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(r.extra)
+        } catch (e) {
+          throw new SyncFrameError(
+            `malformed block extra JSON for ${r.id}: ${e instanceof Error ? e.message : String(e)}`
+          )
+        }
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new SyncFrameError(`malformed block extra JSON for ${r.id}: not an object`)
+        }
+        overflow = parsed as Record<string, unknown>
+      }
+      if (isUnsupportedBlockForSync({ type: r.type, overflow })) continue
+      filtered.push(r.id)
+    }
+    return filtered
+  }
+
+  /**
+   * Truthful refresh: read final order, allocate winning clock, persist.
+   * If parent has no live included children, persists empty [] with winning clock.
+   * Caller must ensure parent is live (deleted parent should invalidate instead).
+   */
+  refreshParentFrameInTx(tx: SyncTxExecutor, kind: 'topicMessage' | 'messageBlock', parentId: string): void {
+    const orderedIds =
+      kind === 'topicMessage'
+        ? this.getOrderedMessageIdsForTopicInTx(tx, parentId)
+        : this.getOrderedBlockIdsForMessageInTx(tx, parentId)
+    const clock = this.allocateWinningFrameClockInTx(tx, kind, parentId, orderedIds)
+    this.persistParentFrameInTx(tx, {
+      kind,
+      parentId,
+      frameVersion: PARENT_ORDER_FRAME_VERSION,
+      orderedChildIds: orderedIds,
+      timestamp: clock.timestamp,
+      operationId: clock.operationId
+    })
+  }
+
+  /**
+   * Transition/unsupported helper: attempt truthful refresh only when all
+   * included children have valid matching membership; if any included child
+   * is missing membership, invalidate the parent frame and continue the user
+   * mutation. Malformed membership/overflow remains fail-closed (throws and
+   * rolls back the enclosing transaction). Local prerequisite only — no clock mint on invalidate.
+   */
+  tryRefreshOrInvalidateParentFrameInTx(
+    tx: SyncTxExecutor,
+    kind: 'topicMessage' | 'messageBlock',
+    parentId: string
+  ): void {
+    try {
+      this.refreshParentFrameInTx(tx, kind, parentId)
+    } catch (e) {
+      if (e instanceof SyncFrameError) {
+        const msg = e.message
+        // Missing membership for included child: truthful invalidation path, not rollback.
+        if (msg.includes('missing membership clock for included child')) {
+          this.invalidateParentFrameInTx(tx, kind, parentId)
+          return
+        }
+        // Parent mismatch, malformed overflow/extra, timestamp exhaustion, malformed clocks remain fail-closed
+      }
+      throw e
     }
   }
 
@@ -3683,6 +4180,12 @@ export class SyncService {
       } catch {}
       try {
         db.delete(schema.syncConflictLog).run()
+      } catch {}
+      try {
+        db.delete(schema.syncMembershipClock).run()
+      } catch {}
+      try {
+        db.delete(schema.syncParentOrderFrame).run()
       } catch {}
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).run()
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_CHANNEL_KEY)).run()

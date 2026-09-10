@@ -246,3 +246,28 @@ export const syncMembershipClock = sqliteTable(
     index('sync_membership_clock_parent_id_idx').on(table.parentId)
   ]
 )
+
+// ---------------------------------------------------------------------------
+// sync parent order frame — additive, isolated (010)
+// Persistent per-parent winning-frame state for local SQLite mutation
+// transactions only (SYNC-DATA-033..036/044). Frames only for
+// topic→message (kind: topicMessage) and message→block (kind: messageBlock);
+// topic ordering excluded. Each frame stores inventory-included live children
+// in current local user-visible order; live zero-child parent may have empty
+// []; deleted parent has no frame. Per-row sortOrder remains local
+// projection. This is the local persistence prerequisite only — not remote
+// wire/candidate integration, not baseline candidate/apply, not relay/network,
+// not IPC/UI. See migration 010.
+// ---------------------------------------------------------------------------
+export const syncParentOrderFrame = sqliteTable(
+  'sync_parent_order_frame',
+  {
+    kind: text('kind').notNull(),
+    parentId: text('parent_id').notNull(),
+    frameVersion: text('frame_version').notNull(),
+    orderedChildIdsJson: text('ordered_child_ids_json').notNull(),
+    timestamp: integer('timestamp').notNull(),
+    operationId: text('operation_id').notNull()
+  },
+  (table) => [primaryKey({ columns: [table.kind, table.parentId] })]
+)
