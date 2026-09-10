@@ -19,7 +19,6 @@ import {
   SYNC_BLOCK_PATCH_FIELDS,
   SYNC_CONFLICT_LOG_MAX,
   SYNC_MESSAGE_PATCH_FIELDS,
-  SYNC_TOMBSTONE_OPERATION_ID_MAX_LENGTH,
   SYNC_TOPIC_PATCH_FIELDS,
   validatePairingCode,
   validatePairingRequestId,
@@ -34,6 +33,12 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { chatDbService } from '../chatDb'
 import * as schema from '../chatDb/schema'
 import { syncClient, validateEndpointUrl } from './SyncClient'
+import {
+  formatSyncTombstoneValue,
+  parseSyncChannelKeyValue,
+  parseSyncOperationIdShape,
+  parseSyncTombstoneValue
+} from './syncTombstoneCodec'
 
 const logger = loggerService.withContext('SyncService')
 
@@ -1039,52 +1044,14 @@ export class SyncService {
     return aId < bId ? -1 : 1
   }
 
-  private formatTombstone(timestamp: number, operationId: string | null): string {
-    if (operationId === null) return String(timestamp)
-    return `${String(timestamp)}:${operationId}`
-  }
-
   private parseTombstone(value: string | null | undefined): { timestamp: number; operationId: string | null } | null {
-    // Absent row (no stored value) is the only null case. Any present-but-
-    // malformed stored value throws fail-closed so it is never treated as
-    // absence and never permits stale children past hard-delete containment.
-    if (value === null || value === undefined) return null
-    if (typeof value !== 'string' || value.length === 0 || value.length > 500) {
-      throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(String(value)).slice(0, 80)}`)
+    // Shared strict semantics live in syncTombstoneCodec; the SyncTombstoneError
+    // boundary is preserved here so callers observe the identical failure.
+    try {
+      return parseSyncTombstoneValue(value)
+    } catch (e) {
+      throw new SyncTombstoneError(e instanceof Error ? e.message : String(e))
     }
-    const idx = value.indexOf(':')
-    if (idx < 0) {
-      // Canonical legacy timestamp-only form: non-negative safe integer with
-      // no leading zeros, no whitespace, no trailing junk.
-      if (!/^(0|[1-9][0-9]*)$/.test(value)) {
-        throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(value).slice(0, 80)}`)
-      }
-      const ts = Number(value)
-      if (!Number.isSafeInteger(ts)) {
-        throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(value).slice(0, 80)}`)
-      }
-      // Legacy timestamp-only row: deterministic safe interpretation is
-      // conservative — it wins equal-timestamp ties (suppresses) so an
-      // upgrade can never resurrect data the old code suppressed.
-      return { timestamp: ts, operationId: null }
-    }
-    const tsPart = value.slice(0, idx)
-    const opPart = value.slice(idx + 1)
-    // Canonical new form: `timestamp:non-empty-operationId` with exactly one
-    // colon. Timestamp obeys the legacy canonical rules; operation ID obeys
-    // the operation constraint (non-empty string) and must not contain a
-    // colon so the stored form stays unambiguous.
-    if (!/^(0|[1-9][0-9]*)$/.test(tsPart) || opPart.length === 0 || opPart.includes(':')) {
-      throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(value).slice(0, 80)}`)
-    }
-    const ts = Number(tsPart)
-    if (!Number.isSafeInteger(ts)) {
-      throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(value).slice(0, 80)}`)
-    }
-    if (opPart.length > SYNC_TOMBSTONE_OPERATION_ID_MAX_LENGTH) {
-      throw new SyncTombstoneError(`malformed tombstone value ${JSON.stringify(value).slice(0, 80)}`)
-    }
-    return { timestamp: ts, operationId: opPart }
   }
 
   // True when an incoming op with (opTimestamp, opId) loses to the tombstone
@@ -1110,25 +1077,23 @@ export class SyncService {
   ): void {
     // Fail closed on write inputs so a malformed value is never persisted.
     // Canonical operation-ID contract matches the parser and the shared wire
-    // validator exactly: non-empty, colon-free, at most 256 characters.
+    // validator exactly: non-empty, colon-free, at most 256 characters. The
+    // shape rule itself lives in syncTombstoneCodec; the SyncTombstoneError
+    // boundary is preserved here so callers observe the identical failure.
     if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
       throw new SyncTombstoneError(`malformed tombstone timestamp ${String(timestamp).slice(0, 40)}`)
     }
-    if (
-      operationId !== null &&
-      (typeof operationId !== 'string' ||
-        operationId.length === 0 ||
-        operationId.includes(':') ||
-        operationId.length > SYNC_TOMBSTONE_OPERATION_ID_MAX_LENGTH)
-    ) {
-      throw new SyncTombstoneError(
-        `malformed tombstone operationId ${JSON.stringify(String(operationId)).slice(0, 80)}`
-      )
+    if (operationId !== null) {
+      try {
+        parseSyncOperationIdShape(operationId)
+      } catch (e) {
+        throw new SyncTombstoneError(e instanceof Error ? e.message : String(e))
+      }
     }
     const key = this.tombstoneKey(entityType, entityId)
     const existing = db.select().from(schema.syncState).where(eq(schema.syncState.key, key)).get()
     if (!existing) {
-      const value = this.formatTombstone(timestamp, operationId)
+      const value = formatSyncTombstoneValue(timestamp, operationId)
       db.insert(schema.syncState)
         .values({ key, value })
         .onConflictDoUpdate({ target: schema.syncState.key, set: { value } })
@@ -1154,7 +1119,7 @@ export class SyncService {
         if (this.compareLww(timestamp, operationId, parsed.timestamp, parsed.operationId) <= 0) return
       }
     }
-    const value = this.formatTombstone(timestamp, operationId)
+    const value = formatSyncTombstoneValue(timestamp, operationId)
     db.insert(schema.syncState)
       .values({ key, value })
       .onConflictDoUpdate({ target: schema.syncState.key, set: { value } })
@@ -3319,10 +3284,11 @@ export class SyncService {
     try {
       const row = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CHANNEL_KEY)).get()
       if (!row) return null
-      if (typeof row.value !== 'string' || row.value.length === 0 || row.value.length > 256) {
+      try {
+        return parseSyncChannelKeyValue(row.value)
+      } catch {
         throw new SyncCursorError('malformed persisted channel key')
       }
-      return row.value
     } catch (e) {
       if (e instanceof SyncCursorError) throw e
       if (isTolerableMissingSyncTable(db, e, MIGRATION_005_KEY)) return null
