@@ -1,0 +1,173 @@
+name: Docker relay publish (manual)
+
+# Manual-only relay image publishing. No automatic push, tag, deploy, or
+# `latest` handling lives here: an operator runs this workflow explicitly,
+# reviews the commit-derived `sha-<12-hex>` tag it produces, and deploys the
+# server with `docker compose pull` + `docker compose up -d --no-build`
+# (see docker-compose.yml and docs/multi-device-sync.md). This workflow
+# never touches the application release/update flows.
+#
+# Pinning: relay-checks checks out the operator-supplied ref once, resolves
+# the full commit SHA, and publish checks out that exact SHA (never the
+# mutable ref again). The tag is derived from that SHA.
+#
+# Pre-publish gate is intentionally minimal (relay init contract + relay
+# file static checks, no Docker daemon required). The full
+# `pnpm build:check` aggregate gate is NOT required for an image publish.
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build and publish (branch, tag, or SHA).'
+        required: false
+        default: 'jorkey/integration'
+
+env:
+  RELAY_IMAGE_NAME: docker.io/jorkeyliu/cherry-chat-sync-relay
+
+jobs:
+  relay-checks:
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+    env:
+      CI: true
+    steps:
+      - name: Check out Git repository (explicit input ref)
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Resolve pinned commit SHA
+        id: resolve
+        shell: bash
+        run: |
+          FULL_SHA="$(git rev-parse HEAD)"
+          if ! [[ "${FULL_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Resolved HEAD '${FULL_SHA}' is not a 40-char lowercase hex SHA."
+            exit 1
+          fi
+          echo "commit_sha=${FULL_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Pinned commit ${FULL_SHA} resolved from input ref '${{ inputs.ref }}'."
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: '.node-version'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v5
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm dependencies
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Install Dependencies
+        run: pnpm install
+
+      - name: Relay init contract tests (no Docker daemon required)
+        run: pnpm native:run node -- vitest run scripts/sync-relay/__tests__/dockerRelayInit.test.ts
+
+      - name: Relay file static checks (no Docker daemon required)
+        run: |
+          node --check deploy/sync-relay/relay-init.mjs
+          sh -n deploy/sync-relay/docker-entrypoint.sh
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: relay-checks
+    steps:
+      - name: Check out pinned commit SHA
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.relay-checks.outputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Resolve commit-derived image tag
+        id: tag
+        shell: bash
+        env:
+          PINNED_SHA: ${{ needs.relay-checks.outputs.commit_sha }}
+        run: |
+          if ! [[ "${PINNED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Pinned SHA '${PINNED_SHA}' is not a 40-char lowercase hex SHA."
+            exit 1
+          fi
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if ! [[ "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Checked-out HEAD '${HEAD_SHA}' is not a 40-char lowercase hex SHA."
+            exit 1
+          fi
+          if [[ "${HEAD_SHA}" != "${PINNED_SHA}" ]]; then
+            echo "::error::Checked-out HEAD '${HEAD_SHA}' does not match pinned SHA '${PINNED_SHA}'. Refusing to build."
+            exit 1
+          fi
+          SHORT_SHA="${HEAD_SHA:0:12}"
+          if ! [[ "${SHORT_SHA}" =~ ^[0-9a-f]{12}$ ]]; then
+            echo "::error::Derived short SHA '${SHORT_SHA}' is not 12 lowercase hex chars."
+            exit 1
+          fi
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Commit-derived tag sha-${SHORT_SHA} from ${HEAD_SHA}."
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Fail closed if image tag already exists
+        shell: bash
+        run: |
+          IMAGE_REF="${{ env.RELAY_IMAGE_NAME }}:${{ steps.tag.outputs.image_tag }}"
+          set +e
+          INSPECT_OUT="$(docker buildx imagetools inspect "${IMAGE_REF}" 2>&1)"
+          INSPECT_STATUS=$?
+          set -e
+          echo "${INSPECT_OUT}"
+          if [ "${INSPECT_STATUS}" -eq 0 ]; then
+            echo "::error::Image tag ${IMAGE_REF} already exists in the registry. Refusing to overwrite."
+            exit 1
+          fi
+          if echo "${INSPECT_OUT}" | grep -Ei "not[[:space:]]*found|manifest[[:space:]]*unknown|unknown.*manifest|no such|404" >/dev/null; then
+            echo "Tag ${IMAGE_REF} does not exist; continuing to build and push."
+          else
+            echo "::error::Tag existence check for ${IMAGE_REF} was inconclusive (exit ${INSPECT_STATUS}). Refusing to push rather than risk overwrite."
+            exit 1
+          fi
+
+      - name: Build and push multi-arch relay image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/sync-relay/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # Commit-derived tag only. No `latest`, no overwrite of an
+          # existing tag (the previous step fails closed when the tag
+          # exists or the existence check is inconclusive), no automatic
+          # deployment. Concurrent racing publishes of the same tag are
+          # still resolved by the registry; this workflow alone does not
+          # claim absolute registry-level immutability.
+          tags: ${{ env.RELAY_IMAGE_NAME }}:${{ steps.tag.outputs.image_tag }}

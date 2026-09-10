@@ -31,7 +31,18 @@ services:
     build:
       context: .
       dockerfile: deploy/sync-relay/Dockerfile
-    image: cherry-chat-sync-relay:0.1.0
+    # Image selection (single whole-value substitution, per Compose
+    # interpolation rules): local default keeps `docker compose up --build`
+    # working from a fresh checkout with no environment set. To run a
+    # manually published Docker Hub image instead, set the full reference
+    # (commit-derived `sha-<12-hex>` tag from the manual
+    # `docker-relay-publish` workflow run, which fails closed when the tag
+    # already exists — never `latest`) and deploy pull-only without building:
+    #   SYNC_RELAY_IMAGE=docker.io/jorkeyliu/cherry-chat-sync-relay:sha-<12-hex> \
+    #     docker compose pull
+    #   SYNC_RELAY_IMAGE=docker.io/jorkeyliu/cherry-chat-sync-relay:sha-<12-hex> \
+    #     docker compose up -d --no-build
+    image: ${SYNC_RELAY_IMAGE:-cherry-chat-sync-relay:0.1.0}
     # Standard bridge port publishing: the left side is the host port
     # (override with RELAY_PORT); the container listens on 3030.
     ports:

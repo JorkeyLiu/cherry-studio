@@ -133,10 +133,43 @@ Docker).
 - Explicit non-goals: no Web admin UI, no cloud-specific deployment, no
   reverse-proxy setup, no certificate automation, no backup, no rotation,
   and no WAN claims.
+- Manual Docker Hub publish with pull-only server deployment (mechanics
+  only, execution unvalidated): `.github/workflows/docker-relay-publish.yml`
+  is `workflow_dispatch`-only with an optional `ref` input defaulting to
+  `jorkey/integration` (manual-run meaning at start: the HEAD of that
+  branch; `fetch-depth: 0`). The `relay-checks` job checks out that ref
+  once, resolves the full 40-hex commit SHA, and passes it to `publish`
+  via a job output; `publish` checks out that exact fixed SHA (never the
+  mutable ref again), validates the 40-hex shape, verifies checked-out
+  HEAD matches the pinned SHA, and derives the tag by explicitly taking
+  the first 12 hex characters with length/character validation. The
+  pre-publish gate is intentionally minimal — the relay init contract
+  suite (`scripts/sync-relay/__tests__/dockerRelayInit.test.ts`) plus
+  `node --check`/`sh -n` static checks, none requiring a Docker daemon —
+  and is not the full `pnpm build:check` aggregate gate. On success it
+  builds with Docker Buildx for `linux/amd64,linux/arm64` and pushes to
+  `docker.io/jorkeyliu/cherry-chat-sync-relay` under one commit-derived
+  `sha-<12-hex-commit>` tag (Docker Hub login via `DOCKERHUB_USERNAME` /
+  `DOCKERHUB_TOKEN` secrets). After login and before push it runs
+  `docker buildx imagetools inspect` on the target reference: tag exists
+  fails closed, definitive not-found continues, and any inconclusive
+  registry answer fails closed rather than risking an overwrite. It never
+  publishes `latest` and never deploys. Servers consume a published image
+  pull-only by pinning the full reference and skipping the local build:
+  `SYNC_RELAY_IMAGE=docker.io/jorkeyliu/cherry-chat-sync-relay:sha-<12-hex>
+  docker compose pull`, then the same `SYNC_RELAY_IMAGE=... docker compose
+  up -d --no-build`. When `SYNC_RELAY_IMAGE` is unset the Compose default
+  keeps the local `docker compose up -d --build` path. The workflow
+  refuses an already-existing tag but concurrent racing publishes of the
+  same tag are still resolved by the registry, so the workflow alone does
+  not claim absolute registry-level immutability. This changes no
+  relay protocol or behavior and no application release/update flow; the
+  updater/release freeze and identity boundaries are untouched.
 - Validation boundary: the init contract is proven by focused tests without
   a Docker daemon (see Section 7). Docker image build/execution was NOT
   validated: the current host is macOS arm64 with no Docker binary/daemon,
-  so Linux x64/arm64 image execution remains unproven. This path claims no
+  so Linux x64/arm64 image execution remains unproven, and the manual
+  publish workflow itself has no successful run evidence yet. This path claims no
   production readiness.
 
 ## 3. What current evidence establishes
