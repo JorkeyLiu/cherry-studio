@@ -221,3 +221,28 @@ export const syncConflictLog = sqliteTable(
 // registration/channel protocol. No product code references this table;
 // the declaration is intentionally removed (not kept as a zombie).
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// sync parent-membership clock — additive, isolated (009)
+// Dedicated parent-membership clock keyed by child entity type+id, storing
+// parent id + creation timestamp + operationId. Restricted to message and
+// message_block — never a substitute for entityClock/field clocks and never
+// updated by ordinary edits. Clock is set only on true first creation (local
+// or remote) atomically in the same transaction; existing rows without a
+// trustworthy creation source remain absent (no backfill/guess). Tombstones
+// retain clock metadata (smallest state — deterministic history preserved).
+// ---------------------------------------------------------------------------
+export const syncMembershipClock = sqliteTable(
+  'sync_membership_clock',
+  {
+    childEntityType: text('child_entity_type').notNull(),
+    childEntityId: text('child_entity_id').notNull(),
+    parentId: text('parent_id').notNull(),
+    timestamp: integer('timestamp').notNull(),
+    operationId: text('operation_id').notNull()
+  },
+  (table) => [
+    primaryKey({ columns: [table.childEntityType, table.childEntityId] }),
+    index('sync_membership_clock_parent_id_idx').on(table.parentId)
+  ]
+)

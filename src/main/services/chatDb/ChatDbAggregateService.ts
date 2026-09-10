@@ -320,6 +320,10 @@ export class ChatDbAggregateService {
     if (!isStableMessageStatus(full.data.status)) {
       throw new Error(`sync closure: parent message ${messageId} transient (${String(full.data.status)}), defer`)
     }
+    // Closure emits a snapshot for field-clock sync only; it must never
+    // fabricate a parent-membership clock for a pre-existing untracked parent.
+    // Only a row inserted by the SAME current aggregate transaction with a real
+    // creation operation may get membership (see appendMessage/bulkAddBlocks).
     syncService.enqueueUpsertInTx(
       tx,
       'message',
@@ -408,6 +412,12 @@ export class ChatDbAggregateService {
         continue
       }
       if (syncService.isTrackedEntityInTx(tx, 'message_block', b.id)) continue
+      // Intentionally no membership clock for promotion-rescanned siblings:
+      // these are existing rows with no trustworthy creation source (append
+      // while parent transient or legacy pre-sync). Fabricating a clock from
+      // the promotion timestamp would be a guess (no real operationId).
+      // They remain absent/unversioned per 009 semantics; only true first
+      // creations via direct aggregate paths get a membership clock.
       syncService.enqueueUpsertInTx(
         tx,
         'message_block',
@@ -1217,7 +1227,7 @@ export class ChatDbAggregateService {
                 syncNotify = true
               }
               if (!messageExistedBefore) {
-                syncService.enqueueUpsertInTx(
+                const opId = syncService.enqueueUpsertInTx(
                   stx,
                   'message',
                   messageData.id,
@@ -1225,6 +1235,7 @@ export class ChatDbAggregateService {
                   syncCtx.ts,
                   syncCtx.deviceId
                 )
+                syncService.setMembershipClockInTx(stx, 'message', messageData.id, mrow.data.topicId, syncCtx.ts, opId)
                 syncNotify = true
               } else {
                 const patchPayload = this.diffMessagePayload(messagePre, mrow.data)
@@ -1252,14 +1263,16 @@ export class ChatDbAggregateService {
                 const pre = preBlockRows.get(bid) ?? null
                 if (!pre) {
                   this.ensureBlockParentClosureInTx(stx, bid, syncCtx.ts + i + 1, syncCtx.deviceId)
-                  syncService.enqueueUpsertInTx(
+                  const opTs = syncCtx.ts + i + 1
+                  const opId = syncService.enqueueUpsertInTx(
                     stx,
                     'message_block',
                     bid,
                     this.syncBlockPayloadFull(brow.data),
-                    syncCtx.ts + i + 1,
+                    opTs,
                     syncCtx.deviceId
                   )
+                  syncService.setMembershipClockInTx(stx, 'message_block', bid, brow.data.messageId, opTs, opId)
                   syncNotify = true
                 } else {
                   if (brow.data.messageId !== pre.messageId) continue
@@ -1370,6 +1383,10 @@ export class ChatDbAggregateService {
             // patch-only.
             const tracked = syncService.isTrackedEntityInTx(stx, 'message', messageId)
             if (!tracked && !preStable) {
+              // Transient->stable promotion of a pre-existing row: emit field-clock
+              // snapshot for sync, but never fabricate a parent-membership clock.
+              // Only rows inserted by the SAME current transaction with a real
+              // creation operation may get membership (appendMessage/bulkAddBlocks).
               syncService.enqueueUpsertInTx(
                 stx,
                 'message',
@@ -1565,6 +1582,10 @@ export class ChatDbAggregateService {
                 : this.diffMessagePayload(existing.data, mrow.data)
               if (msgPayload && isStableMessageStatus(mrow.data.status)) {
                 this.ensureTopicClosureInTx(stx, topicId, syncCtx.ts, syncCtx.deviceId)
+                // Promotion of pre-existing row must not fabricate membership;
+                // only true inserts by same tx get membership (handled in
+                // appendMessage/bulkAddBlocks). All promotion paths remain
+                // unversioned for parent-membership.
                 syncService.enqueueUpsertInTx(stx, 'message', messageId, msgPayload, syncCtx.ts, syncCtx.deviceId)
                 syncNotify = true
                 // Promotion backfill + deterministic rescan (LOCK-PERSONAL-004):
@@ -1601,18 +1622,22 @@ export class ChatDbAggregateService {
                   unsupportedBlockIds.push(block.id)
                   continue
                 }
-                // Field patch via pre/post diff; only a transient→stable
-                // promotion of a never-tracked block creates full state.
+                // Field patch via pre/post diff; only a row inserted by the SAME
+                // current transaction (pre == null) may get parent-membership.
+                // Transient->stable promotion of a pre-existing row remains
+                // unversioned for membership (no fabrication).
                 const pre = preBlockRows.get(block.id) ?? null
                 const blockTracked = syncService.isTrackedEntityInTx(stx, 'message_block', block.id)
                 const preBlockStable = pre ? isStableBlockStatus(pre.status) : true
+                const isTrueCreate = !pre
+                const isPromotion = !isTrueCreate && !blockTracked && !preBlockStable
                 const patchPayload =
-                  !pre || (!blockTracked && !preBlockStable)
+                  isTrueCreate || isPromotion
                     ? this.syncBlockPayloadFull(brow.data)
                     : this.diffBlockPayload(pre, brow.data)
                 if (!patchPayload) continue
                 this.ensureBlockParentClosureInTx(stx, block.id, syncCtx.ts, syncCtx.deviceId)
-                syncService.enqueueUpsertInTx(
+                const blkOpId = syncService.enqueueUpsertInTx(
                   stx,
                   'message_block',
                   block.id,
@@ -1620,6 +1645,16 @@ export class ChatDbAggregateService {
                   syncCtx.ts,
                   syncCtx.deviceId
                 )
+                if (isTrueCreate) {
+                  syncService.setMembershipClockInTx(
+                    stx,
+                    'message_block',
+                    block.id,
+                    brow.data.messageId,
+                    syncCtx.ts,
+                    blkOpId
+                  )
+                }
                 syncNotify = true
               }
             }
@@ -1862,7 +1897,31 @@ export class ChatDbAggregateService {
               const pre = preRows.get(block.id) ?? null
               const tracked = syncService.isTrackedEntityInTx(stx, 'message_block', block.id)
               const preStable = pre ? isStableBlockStatus(pre.status) : true
-              if (!pre || (!tracked && !preStable)) {
+              if (!pre) {
+                // True insertion by same tx: trustworthy creation -> membership
+                this.ensureBlockParentClosureInTx(stx, block.id, syncCtx.ts, syncCtx.deviceId)
+                const opId = syncService.enqueueUpsertInTx(
+                  stx,
+                  'message_block',
+                  block.id,
+                  this.syncBlockPayloadFull(post.data),
+                  syncCtx.ts,
+                  syncCtx.deviceId
+                )
+                syncService.setMembershipClockInTx(
+                  stx,
+                  'message_block',
+                  block.id,
+                  post.data.messageId,
+                  syncCtx.ts,
+                  opId
+                )
+                syncNotify = true
+                continue
+              }
+              if (!tracked && !preStable) {
+                // Pre-existing transient->stable promotion: emit field snapshot
+                // but never fabricate membership (no trustworthy creation op).
                 this.ensureBlockParentClosureInTx(stx, block.id, syncCtx.ts, syncCtx.deviceId)
                 syncService.enqueueUpsertInTx(
                   stx,
@@ -2036,6 +2095,8 @@ export class ChatDbAggregateService {
                 const tracked = syncService.isTrackedEntityInTx(stx, 'message_block', blockId)
                 const preStable = isStableBlockStatus(existing.data.status)
                 if (!tracked && !preStable) {
+                  // Pre-existing transient->stable promotion: field sync only,
+                  // never fabricate membership (no trustworthy creation op).
                   syncService.enqueueUpsertInTx(
                     stx,
                     'message_block',
@@ -2155,7 +2216,7 @@ export class ChatDbAggregateService {
                 continue
               }
               this.ensureBlockParentClosureInTx(stx, bid, childTs, syncCtx.deviceId)
-              syncService.enqueueUpsertInTx(
+              const opId = syncService.enqueueUpsertInTx(
                 stx,
                 'message_block',
                 bid,
@@ -2163,6 +2224,7 @@ export class ChatDbAggregateService {
                 childTs,
                 syncCtx.deviceId
               )
+              syncService.setMembershipClockInTx(stx, 'message_block', bid, brow.data.messageId, childTs, opId)
               syncNotify = true
             }
           }

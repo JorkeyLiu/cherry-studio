@@ -359,7 +359,7 @@ describe('Migration 002', () => {
       const db = wrapDrizzle(sqlite)
 
       const count = runMigrations(db, sqlite)
-      expect(count).toBe(8)
+      expect(count).toBe(9)
 
       const tables = getTableNames(sqlite)
       expect(tables).toContain('migration_state')
@@ -497,7 +497,7 @@ describe('Migration 002', () => {
       // Apply 002 (+003, +004 — all pending)
       const db2 = wrapDrizzle(sqlite)
       const count = runMigrations(db2, sqlite)
-      expect(count).toBe(7)
+      expect(count).toBe(8)
 
       // Verify topic data survived
       const topic = sqlite.prepare('SELECT * FROM topics WHERE id = ?').get('topic-1') as Record<string, unknown>
@@ -879,7 +879,7 @@ describe('Migration 002', () => {
       const db = wrapDrizzle(sqlite)
 
       const first = runMigrations(db, sqlite)
-      expect(first).toBe(8)
+      expect(first).toBe(9)
 
       const second = runMigrations(db, sqlite)
       expect(second).toBe(0)
@@ -957,8 +957,8 @@ describe('Migration 002', () => {
   // =========================================================================
 
   describe('Migration registry', () => {
-    it('should have exactly eight migrations', () => {
-      expect(MIGRATIONS).toHaveLength(8)
+    it('should have exactly nine migrations', () => {
+      expect(MIGRATIONS).toHaveLength(9)
       expect(MIGRATIONS[0].key).toBe('001_initial_schema')
       expect(MIGRATIONS[1].key).toBe('002_corrective_schema')
       expect(MIGRATIONS[2].key).toBe('003_fts5_normalized_search')
@@ -967,6 +967,7 @@ describe('Migration 002', () => {
       expect(MIGRATIONS[5].key).toBe('006_sync_field_merge')
       expect(MIGRATIONS[6].key).toBe('007_sync_pairing_trust')
       expect(MIGRATIONS[7].key).toBe('008_sync_channel_reset')
+      expect(MIGRATIONS[8].key).toBe('009_sync_membership_clock')
     })
 
     it('002 should have SQL statements', () => {
@@ -1794,7 +1795,7 @@ describe('Migration 002 — duplicate file_references collapse', () => {
     // Apply 002 (+003, +004 — all pending)
     const db = drizzle(sqlite, { schema })
     const count = runMigrations(db, sqlite)
-    expect(count).toBe(7)
+    expect(count).toBe(8)
 
     // Only one row should survive (ref-a has lower id lexicographically)
     const refs = sqlite.prepare('SELECT * FROM file_references').all() as Array<Record<string, unknown>>
@@ -1951,7 +1952,7 @@ describe('Migration 002 — multi-block file reference resolution', () => {
     // Apply 002 (+003, +004 — all pending)
     const db = drizzle(sqlite, { schema })
     const count = runMigrations(db, sqlite)
-    expect(count).toBe(7)
+    expect(count).toBe(8)
 
     // Exactly one reference should survive
     const refs = sqlite.prepare('SELECT * FROM file_references').all() as Array<Record<string, unknown>>

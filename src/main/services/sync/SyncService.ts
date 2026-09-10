@@ -160,6 +160,7 @@ function isMissingSyncTableError(e: unknown): boolean {
 
 const MIGRATION_005_KEY = '005_sync_metadata'
 const MIGRATION_006_KEY = '006_sync_field_merge'
+const MIGRATION_009_KEY = '009_sync_membership_clock'
 
 /**
  * Device-identity validity (LOCK-PERSONAL-001/006): a present identity must be
@@ -1191,6 +1192,121 @@ export class SyncService {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Parent-membership clock — additive, durable (009)
+  // Only for message/message_block. Insert-if-absent: true first creation clock
+  // is preserved; ordinary edits/idempotent retries never move it forward.
+  // Tombstones retain membership clock (deterministic history).
+  // -------------------------------------------------------------------------
+
+  private restrictMembershipChildType(childType: string): childType is 'message' | 'message_block' {
+    return childType === 'message' || childType === 'message_block'
+  }
+
+  /**
+   * Fail-closed, idempotent parent-membership clock for a true child creation.
+   * Only a row inserted by the SAME current aggregate transaction with a real
+   * creation sync operation may get membership. Insert when absent; when present,
+   * accept only exact child type/id + parentId + timestamp + operationId match
+   * (idempotent retry); any difference throws so the enclosing transaction rolls
+   * back (no partial business/sync mutation survives). Supported only for
+   * message/message_block creation paths carrying a trustworthy creation
+   * operation (appendMessage new row, bulkAddBlocks new row, remote true-create).
+   * Currently skipped compound/branch/clone/paste/reset operations remain
+   * explicitly unversioned in this unit rather than fabricating clocks.
+   */
+  setMembershipClockInTx(
+    tx: SyncTxExecutor,
+    childEntityType: 'message' | 'message_block',
+    childEntityId: string,
+    parentId: string,
+    timestamp: number,
+    operationId: string
+  ): void {
+    if (!this.restrictMembershipChildType(childEntityType)) return
+    if (!childEntityId || !parentId) {
+      throw new SyncTombstoneError('membership clock requires child and parent ids')
+    }
+    try {
+      parseSyncOperationIdShape(operationId)
+    } catch (e) {
+      throw new SyncTombstoneError(e instanceof Error ? e.message : String(e))
+    }
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
+      throw new SyncTombstoneError(`malformed membership clock timestamp ${String(timestamp).slice(0, 40)}`)
+    }
+    try {
+      const existing = tx
+        .select()
+        .from(schema.syncMembershipClock)
+        .where(eq(schema.syncMembershipClock.childEntityType, childEntityType))
+        .all()
+        .find((r) => r.childEntityId === childEntityId) as typeof schema.syncMembershipClock.$inferSelect | undefined
+      if (!existing) {
+        tx.insert(schema.syncMembershipClock)
+          .values({ childEntityType, childEntityId, parentId, timestamp, operationId })
+          .run()
+        return
+      }
+      // Idempotent exact retry: same parent+clock => no-op
+      if (existing.parentId === parentId && existing.timestamp === timestamp && existing.operationId === operationId) {
+        return
+      }
+      // Conflicting retained parent/clock => fail-closed (rollback)
+      throw new SyncTombstoneError(
+        `membership clock conflict for ${childEntityType}/${childEntityId}: retained parent ${existing.parentId} clock ${existing.timestamp}:${existing.operationId.slice(0, 8)} vs incoming ${parentId} ${timestamp}:${operationId.slice(0, 8)}`
+      )
+    } catch (e) {
+      if (e instanceof SyncTombstoneError) throw e
+      if (isTolerableMissingSyncTable(tx, e, MIGRATION_009_KEY)) return
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  /** Read-only accessor for verification/testing: membership clock for a child. */
+  getMembershipClock(
+    childEntityType: 'message' | 'message_block',
+    childEntityId: string
+  ): { parentId: string; timestamp: number; operationId: string } | null {
+    if (!this.restrictMembershipChildType(childEntityType)) return null
+    const db = this.getDb()
+    try {
+      const row = db
+        .select()
+        .from(schema.syncMembershipClock)
+        .where(eq(schema.syncMembershipClock.childEntityType, childEntityType))
+        .all()
+        .find((r) => r.childEntityId === childEntityId)
+      if (!row) return null
+      return { parentId: row.parentId, timestamp: row.timestamp, operationId: row.operationId }
+    } catch (e) {
+      if (isTolerableMissingSyncTable(db, e, MIGRATION_009_KEY)) return null
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  /** Tx-bound read for atomic checks inside same transaction. */
+  getMembershipClockInTx(
+    tx: SyncTxExecutor,
+    childEntityType: 'message' | 'message_block',
+    childEntityId: string
+  ): { parentId: string; timestamp: number; operationId: string } | null {
+    if (!this.restrictMembershipChildType(childEntityType)) return null
+    try {
+      const row = tx
+        .select()
+        .from(schema.syncMembershipClock)
+        .where(eq(schema.syncMembershipClock.childEntityType, childEntityType))
+        .all()
+        .find((r) => r.childEntityId === childEntityId)
+      if (!row) return null
+      return { parentId: row.parentId, timestamp: row.timestamp, operationId: row.operationId }
+    } catch (e) {
+      if (isTolerableMissingSyncTable(tx, e, MIGRATION_009_KEY)) return null
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
   private fieldValuesEqual(a: unknown, b: unknown): boolean {
     if (a === b) return true
     try {
@@ -1810,6 +1926,16 @@ export class SyncService {
         return (v ?? null) as unknown
       }
       if (!existing) {
+        // Retained membership check for remote reappearance (009):
+        // - Same parent: preserve historical membership (do not overwrite).
+        // - Different parent: fail closed and rollback (reparent unsupported).
+        // - No retained row: establish from this operation.
+        const retained = this.getMembershipClockInTx(db as unknown as SyncTxExecutor, 'message', id)
+        if (retained && retained.parentId !== topicId) {
+          throw new SyncTombstoneError(
+            `membership clock conflict for message/${id}: retained parent ${retained.parentId} vs incoming ${topicId}`
+          )
+        }
         // Create-union: full insert from provided-or-default values.
         const role = (p.role as string | null) ?? null
         const content = (p.content as string | null) ?? null
@@ -1846,6 +1972,11 @@ export class SyncService {
         const provided: Record<string, unknown> = {}
         for (const k of Object.keys(p)) if (MESSAGE_CLOCKED.has(k) && p[k] !== undefined) provided[k] = p[k]
         this.updateFieldClocksInDb(db, 'message', id, provided, op.timestamp, op.id)
+        // Dedicated parent-membership clock for true creates only (atomic with row + field clocks).
+        // Preserve historical membership when same parent already retained; only establish when absent.
+        if (!retained) {
+          this.setMembershipClockInTx(db as unknown as SyncTxExecutor, 'message', id, topicId, op.timestamp, op.id)
+        }
         return true
       }
       // Existing row: per-field contest for present intent keys only.
@@ -1955,6 +2086,12 @@ export class SyncService {
       const existing =
         existingPreB ?? db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, id)).get()
       if (!existing) {
+        const retainedBlk = this.getMembershipClockInTx(db as unknown as SyncTxExecutor, 'message_block', id)
+        if (retainedBlk && retainedBlk.parentId !== messageId) {
+          throw new SyncTombstoneError(
+            `membership clock conflict for message_block/${id}: retained parent ${retainedBlk.parentId} vs incoming ${messageId}`
+          )
+        }
         const type = (p.type as string | null) ?? null
         const content = (p.content as string | null) ?? null
         const status = (p.status as string | null) ?? null
@@ -1976,6 +2113,16 @@ export class SyncService {
         const provided: Record<string, unknown> = {}
         for (const k of Object.keys(p)) if (BLOCK_CLOCKED.has(k) && p[k] !== undefined) provided[k] = p[k]
         this.updateFieldClocksInDb(db, 'message_block', id, provided, op.timestamp, op.id)
+        if (!retainedBlk) {
+          this.setMembershipClockInTx(
+            db as unknown as SyncTxExecutor,
+            'message_block',
+            id,
+            messageId,
+            op.timestamp,
+            op.id
+          )
+        }
         return true
       }
       const fieldClocksB = this.getFieldClocksInDb(db, 'message_block', id)

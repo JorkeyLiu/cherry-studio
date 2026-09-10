@@ -1078,6 +1078,23 @@ export const MIGRATIONS: MigrationEntry[] = [
       `DROP TABLE IF EXISTS sync_trusted_devices`,
       `DELETE FROM sync_state WHERE key IN ('cursor', 'sync:channelKey')`
     ]
+  },
+  {
+    key: '009_sync_membership_clock',
+    description:
+      'Additive sync parent-membership clock: dedicated clock keyed by child entity type+id (message/message_block only), storing parent id + creation timestamp + operationId. Set only on true first creation (local or remote) atomically in the same transaction; existing rows without trustworthy creation remain absent (no backfill). Retains membership clock on delete/tombstone for deterministic history.',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS sync_membership_clock (
+        child_entity_type TEXT NOT NULL,
+        child_entity_id TEXT NOT NULL,
+        parent_id TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        operation_id TEXT NOT NULL,
+        PRIMARY KEY (child_entity_type, child_entity_id),
+        CHECK (child_entity_type IN ('message','message_block'))
+      )`,
+      `CREATE INDEX IF NOT EXISTS sync_membership_clock_parent_id_idx ON sync_membership_clock(parent_id)`
+    ]
   }
 ]
 
