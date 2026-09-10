@@ -5,7 +5,7 @@
 > **Role**: This ADR owns target relay service connection, device registration, channel, and pairing semantics only. It does not own current implementation status, evidence, gaps, or next step — those live in [Personal Multi-Device Sync](./multi-device-sync.md). It does not own candidate/fallback analysis — that lives in [Sync Architecture Selection](./sync-architecture-selection.md) (conditional fallback reference only).
 > **Non-implementation**: No protocol/code implementation is authorized by this ADR. Implementation requires a separate explicitly activated decision and step.
 > **Development principle**: This ADR is governed by `adaptive-development` principles: the intended outcome remains the anchor, current state and gap determine the next step, and design, implementation, evidence, and validation evolve together.
-> **Last updated**: 2026-09-09
+> **Last updated**: 2026-09-10 — baseline persistence/offline-bootstrap amendment (`SYNC-CC-017`–`SYNC-CC-018`, target-only, no implementation authorized) plus serialized publish-gate/in-flight-retention amendment (`SYNC-CC-019`, target-only, no implementation authorized)
 
 ---
 
@@ -17,9 +17,9 @@ Prior invite/founder/trust single-channel behavior is superseded rationale: it c
 
 ## 2. Authority boundary
 
-- **This ADR owns**: target service connection/registration semantics, channel/pairing semantics, device-code semantics, request lifecycle, channel creation/join/unpair/dissolve rules, per-channel sequencing requirements, and the Disconnect-vs-Unpair contract.
-- **This ADR does not own**: current implementation status/evidence/gaps/next step ([multi-device-sync.md](./multi-device-sync.md)); fallback candidate analysis ([sync-architecture-selection.md](./sync-architecture-selection.md)); application identity, updater/release freeze, platform scope ([cherry-chat-application-identity.md](./cherry-chat-application-identity.md)); SQLite chat authority and migration process ([sqlite-migration.md](./sqlite-migration.md)); context-window semantics ([context-window.md](./context-window.md)); initial snapshot/existing-data convergence (separate pre-existing sync-data problem, explicitly out of scope — see §12).
-- **This ADR does not authorize**: protocol implementation, endpoint shapes, schema migrations, IPC changes, or any code change. It creates no permissions/admin/merge/GC/snapshot/WAN/TLS-management decisions beyond what is written here.
+- **This ADR owns**: target service connection/registration semantics, channel/pairing semantics, device-code semantics, request lifecycle, channel creation/join/unpair/dissolve rules, per-channel sequencing requirements, relay per-channel current-effective baseline envelope storage/distribution infrastructure with serialized publish gating and in-flight bootstrap retention (`SYNC-CC-019`), offline-bootstrap distribution without presence election, and the Disconnect-vs-Unpair contract.
+- **This ADR does not own**: current implementation status/evidence/gaps/next step ([multi-device-sync.md](./multi-device-sync.md)); data-convergence semantics — baseline origin/content truth, watermark three-segment boundary, baseline publish serialization with watermark-monotonic/coverage gating and in-flight bootstrap protection, receiver merge, retention coverage, reconciliation, and convergence status ([sync-data-convergence.md](./sync-data-convergence.md), `SYNC-DATA-019`–`SYNC-DATA-024`); fallback candidate analysis ([sync-architecture-selection.md](./sync-architecture-selection.md)); application identity, updater/release freeze, platform scope ([cherry-chat-application-identity.md](./cherry-chat-application-identity.md)); SQLite chat authority and migration process ([sqlite-migration.md](./sqlite-migration.md)); context-window semantics ([context-window.md](./context-window.md)); initial snapshot/existing-data convergence content rules beyond the infrastructure duty stated here (separate sync-data problem owned by `SYNC-DATA-*` — see §12).
+- **This ADR does not authorize**: protocol implementation, HTTP paths/verbs, endpoint shapes, lease/ack endpoints, timeouts, schema migrations, chunking, capacity thresholds, retained history version counts, retained physical old-baseline counts, old-baseline physical reclamation mechanics, GC mechanics, IPC changes, or any code change. It creates no permissions/admin/merge/GC/snapshot/WAN/TLS-management decisions beyond what is written here.
 
 ## 3. Decision table (`SYNC-CC-*`)
 
@@ -38,9 +38,12 @@ Prior invite/founder/trust single-channel behavior is superseded rationale: it c
 | **SYNC-CC-011** | Unpair lifecycle: allowed only while the relay is connected; atomically removes self membership; never disconnects the service and never deletes local chats. If durable channel membership drops below two, the relay automatically dissolves the channel; the remaining member becomes unpaired on next relay observation. Offline/sleep/network loss/app or relay restart never changes membership. | **Locked** |
 | **SYNC-CC-012** | Zombie channels/rows may remain and must never block users; garbage collection is deferred. | **Locked** |
 | **SYNC-CC-013** | Reset without migration: current test-stage invite/founder/trusted state may be reset with no compatibility migration burden. Existing local chats remain local; old pairing state may be discarded for the new protocol. | **Locked** |
-| **SYNC-CC-014** | Initial snapshot and existing-data convergence is a separate pre-existing sync-data problem and is not owned by this ADR. This ADR governs connection/channel/pairing only. | **Locked** |
-| **SYNC-CC-015** | Infrastructure/authority boundary preserved: relay remains no-account/no-Web-admin store-and-forward infrastructure; Main SQLite remains chat authority. Docker bridge deployment and HTTP/HTTPS deployment choice remain external to channel logic. | **Locked** |
+| **SYNC-CC-014** | Initial snapshot and existing-data convergence content rules are a separate sync-data problem owned by [sync-data-convergence.md](./sync-data-convergence.md) (`SYNC-DATA-*`) and are not owned by this ADR. This ADR governs connection/channel/pairing plus the relay baseline envelope storage/distribution infrastructure (`SYNC-CC-017`–`SYNC-CC-019`) only. | **Locked** |
+| **SYNC-CC-015** | Infrastructure/authority boundary preserved: relay remains no-account/no-Web-admin store-and-forward infrastructure — including when it persists and serves baselines — and never merges or adjudicates business content; Main SQLite remains chat authority on each device. Docker bridge deployment and HTTP/HTTPS deployment choice remain external to channel logic. | **Locked** |
 | **SYNC-CC-016** | Per-channel operation sequence and cursor are required. A global sparse filter over one shared sequence cannot preserve the current contiguous cursor contract; channel-scoped contiguous sequencing is an implementation requirement. This decides sequencing scope only, not snapshot semantics. | **Locked** |
+| **SYNC-CC-017** | Relay per-channel current-effective baseline persistence as infrastructure: per channel the relay durably stores one current effective baseline blob plus schema/digest/watermark metadata alongside the per-channel operation log. The relay validates the protocol envelope and saves/distributes only; it never merges and never adjudicates business content. Baseline content truth and watermark/merge rules are owned by `SYNC-DATA-019`/`SYNC-DATA-021`–`SYNC-DATA-022`. | **Locked** |
+| **SYNC-CC-018** | Offline bootstrap distribution without presence election: a joining device may fetch the channel's current effective baseline from the relay even when all prior devices are offline, then continue via per-channel cursor replay. Online-device temporary supply is not the main path; no presence tracking and no baseline source election are introduced. | **Locked** |
+| **SYNC-CC-019** | Relay serialized baseline publish with coverage-gated replace and in-flight bootstrap retention as infrastructure: per channel, baseline publishes serialize so replacement is decided one candidate at a time. The relay rejects a candidate that fails the `SYNC-DATA-023` gate — watermark not relay-continuously-persist-confirmed, watermark regressing into an unrecoverable range, or candidate not covering the compacted prefix plus required tombstone/delete evidence — with the effective baseline unchanged. Atomic replacement never removes the N+1 continuous replay/repair path of any successfully issued baseline before its bootstrap completes or explicitly fails: until completion or explicit failure the relay retains sufficient baseline/log/delete evidence, or provides an equivalent recoverable mechanism, per `SYNC-DATA-024`. Baseline content/coverage truth is owned by `SYNC-DATA-023`–`SYNC-DATA-024`; lease/ack endpoints, timeouts, retained physical old-baseline counts, and GC/reclamation mechanics remain deferred and are not decided here. | **Locked** |
 
 ## 4. Definitions
 
@@ -108,8 +111,9 @@ The relay is responsible for, at minimum:
 4. Automatic dissolve: when durable membership drops below two, dissolve the channel; the remaining member resolves to unpaired on next observation.
 5. Per-channel operation sequencing and cursors (§10) scoped to channel members only; devices outside the channel never observe the channel's operations.
 6. Truthful failure semantics: unauthenticated/unregistered/unpaired access fails closed with an explicit reason; unreachable relay surfaces as Service disconnected with pending work retained client-side (pending-work retention itself is existing sync-data behavior, not decided here).
+7. Per-channel current-effective baseline envelope persistence and distribution (§10, `SYNC-CC-017`): one current effective baseline blob plus schema/digest/watermark metadata per channel, envelope validation with save/distribute only, serialized coverage-gated atomic replacement and in-flight bootstrap retention per `SYNC-CC-019` (`SYNC-DATA-023`–`SYNC-DATA-024`), and offline fetch availability per `SYNC-CC-018`. Baseline content truth, watermark proof, receiver merge, and retention coverage are owned by `SYNC-DATA-*` and are not decided here.
 
-Endpoint paths, verbs, payload schemas, and exact error codes are implementation decisions under a later activated step; this ADR constrains only the behaviors above.
+HTTP paths/verbs, lease/ack endpoints, timeouts, payload schemas, chunking, capacity thresholds, retained history version counts, retained physical old-baseline counts, and old-baseline physical reclamation/GC mechanics are implementation decisions under a later activated step; this ADR constrains only the behaviors above.
 
 ## 10. Internal data model requirements
 
@@ -121,6 +125,7 @@ Any implementation must durably represent, at minimum:
 - **Pair requests**: directed requester→target records with lifecycle `pending → accepted | rejected | cancelled | replaced`; at most one outgoing `pending` per requester; no expiry timestamp semantics.
 - **Channel operations**: sync payload log partitioned by channel.
 - **Per-channel sequence/cursor**: each channel has its own contiguous operation sequence and cursor. Rationale (SYNC-CC-016): the current sync contract relies on a contiguous cursor; multiplexing independent channels onto one global sequence with sparse per-device filtering breaks contiguity for each observer. Therefore channel-scoped contiguous sequencing is required. This is an implementation requirement on sequencing scope; it does not decide snapshot, retention, or GC policy.
+- **Channel baselines**: per channel, one current effective baseline blob plus schema/digest/watermark metadata (SYNC-CC-017). A new publish replaces the effective baseline atomically only when gated by SYNC-CC-019 (serialized per-channel decision; reject on watermark-monotonic/coverage failure with effective baseline unchanged) and with in-flight bootstraps protected per SYNC-CC-019 (retain sufficient baseline/log/delete evidence or an equivalent recoverable mechanism until completion or explicit failure). Prior-version physical reclamation mechanics, retained physical old-baseline counts, lease/ack endpoints, timeouts, and GC mechanics are deferred. This row is envelope storage/distribution infrastructure only; baseline content truth, watermark proof, receiver merge, and retention coverage are owned by `SYNC-DATA-*`.
 
 ## 11. Lifecycle and error semantics
 
@@ -131,7 +136,7 @@ Any implementation must durably represent, at minimum:
 
 ## 12. Non-goals and boundaries (not owned by this ADR)
 
-- Initial snapshot and existing-data convergence (what historical operations a newly paired device receives) is a separate pre-existing sync-data problem. This ADR assumes a working per-channel operation stream exists; it does not define backfill, snapshot, retention, or conflict-resolution behavior.
+- Initial snapshot and existing-data convergence content rules (what historical state a newly paired device receives, watermark proof with monotonic/coverage gating, in-flight bootstrap protection, receiver merge, retention coverage, reconciliation) are a separate sync-data problem owned by [sync-data-convergence.md](./sync-data-convergence.md) (`SYNC-DATA-019`–`SYNC-DATA-024`). This ADR assumes a working per-channel operation stream plus relay-persisted current-effective baseline distribution exists; it does not define backfill content, watermark proof, merge, retention coverage, or conflict-resolution behavior.
 - No founder/admin/permission/revoke-other model is created. No channel merge path exists. No per-user multi-group management UX beyond one channel per client is created.
 - WAN exposure, TLS/certificate management, Docker image operations, backup/rotation, capacity/SLA, E2EE, attachments, and compound-operation coverage are unchanged by this ADR and remain under their existing governance.
 
@@ -140,6 +145,9 @@ Any implementation must durably represent, at minimum:
 - **Global single channel as an inherent relay constraint — rejected** (SYNC-CC-001). The relay inherently supports multiple internal sync channels; treating one global channel as a product constraint would leak other users' devices into every user's sync scope. Channels are hidden infrastructure, never user-visible.
 - **Invite/founder/admin/revoke-other model — rejected** (SYNC-CC-007, SYNC-CC-010). Pairing is a direct device-code request plus explicit target accept, with no invite creation or expiry, no founder privilege, no admin role, and no revoking other devices. Rationale: the pairing set is the user's own devices, so there is no other party to administer.
 - **Presence-based membership and dissolve — rejected** (SYNC-CC-011). Offline, sleep, network loss, and app or relay restart never create, move, or delete membership. Dissolve follows only from durable membership dropping below two, observed on next relay contact — never from transient unreachability.
+- **Online-device temporary supply as the main bootstrap path and presence/source election — rejected** (SYNC-CC-018). The main offline path is the relay-persisted current effective baseline; no presence tracking and no baseline source election are introduced.
+- **Relay merge/adjudication of baseline business content — rejected** (SYNC-CC-015, SYNC-CC-017). The relay validates the envelope and saves/distributes; chat truth stays in per-device Main SQLite under `SYNC-DATA-*` semantics.
+- **Unserialized or coverage-less baseline replacement and severing in-flight bootstraps — rejected** (SYNC-CC-019). Replacement without per-channel serialization, without the `SYNC-DATA-023` watermark-monotonic/coverage gate, or by removing an issued baseline's N+1 path before completion or explicit failure is not the infrastructure behavior.
 - **Channel merge — not selected** (SYNC-CC-002, SYNC-CC-009). Acceptance never merges two existing channels: a paired requester cannot initiate, and late acceptance after the requester became paired fails with no membership change. Multi-group or merge behavior is deferred, not designed here.
 - **Relay Web administration plane — rejected** (SYNC-CC-015). The relay remains no-account store-and-forward infrastructure with no user accounts, passwords, or web management plane; the client pairing UI is the only control plane.
 
@@ -148,7 +156,7 @@ Any implementation must durably represent, at minimum:
 - The device code is public within the relay scope by design (transcribed by the user) and carries no authorization power. Authorization derives only from the durable secret credential plus channel membership.
 - Secrets are never displayed, logged, or transcribed; evidence and logs carry counts/statuses only, never codes, credentials, paths, content, or raw sizes.
 - The relay remains no-account/no-Web-admin infrastructure: no user accounts, no passwords, no web management plane are introduced by channel semantics.
-- Main SQLite remains the chat authority; the relay remains store-and-forward and never owns chat truth.
+- Main SQLite remains the chat authority; the relay remains store-and-forward and never owns chat truth, including when it persists and serves per-channel current-effective baselines.
 
 ## 15. Reset and no-migration decision (SYNC-CC-013)
 
@@ -164,7 +172,8 @@ An implementation conforms to this ADR only when its observed behavior satisfies
 4. Pending request lifecycle (accept/reject/cancel/replace, no expiry, single outgoing, idempotent retry) behaves per §6/§9.
 5. Unpair requires connected relay, removes only self, keeps service connected and local chats intact; sub-two membership dissolves the channel with the survivor resolving to unpaired.
 6. Per-channel contiguous sequence/cursor holds independently per channel; one channel's traffic is never observable from another channel.
-7. Zombie rows never block Connect/pairing/sync user flows.
+7. Per-channel current-effective baseline envelope holds: one effective baseline blob plus schema/digest/watermark metadata per channel with serialized coverage-gated atomic replacement, envelope validation with save/distribute only, in-flight bootstrap N+1 replay/repair retention per SYNC-CC-019, and offline fetch availability without presence/source election.
+8. Zombie rows never block Connect/pairing/sync user flows.
 
 Conformance is a property of observed behavior against the statements above. This ADR does not prescribe test shape, evidence form, or implementation sequence.
 
@@ -172,7 +181,8 @@ Conformance is a property of observed behavior against the statements above. Thi
 
 - Channel garbage collection (reaping dissolved/empty/zombie rows): deferred. Consequence: orphan rows may accumulate; they must never block users. A later decision may define reaping without changing user-visible semantics.
 - Multi-group per client, merge, delegation/admin, and recovery UX (device loss, credential rotation): deferred. Consequence: one channel per client, no merge, no admin — loss/recovery stays manual until a later decision.
-- Snapshot/backfill, retention/GC of operations, and WAN/TLS operations: owned elsewhere or deferred as stated in §12. Consequence: pairing a fresh device does not by itself solve what history it receives.
+- Snapshot/backfill content, watermark proof with monotonic/coverage gating, in-flight bootstrap protection, receiver merge, retention coverage, and reconciliation: owned by `SYNC-DATA-019`–`SYNC-DATA-024`. Consequence: pairing a fresh device plus the relay baseline infrastructure does not by itself implement what history it receives; that behavior still requires its own explicitly activated step.
+- Prior-version baseline physical reclamation mechanics, retained physical old-baseline counts, lease/ack endpoints, timeouts, GC mechanics, and HTTP paths/verbs, chunking, capacity thresholds, and retained history version counts: deferred. Consequence: only the single-current-effective-baseline replacement semantic with SYNC-CC-019 serialized gating and in-flight retention is locked; how old blobs are reclaimed, how completion/failure is signalled, which transport limits apply, and how many physical old baselines are kept stays undecided.
 
 ## 18. ADR change policy
 
