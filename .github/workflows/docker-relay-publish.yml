@@ -2,8 +2,9 @@ name: Docker relay publish (manual)
 
 # Manual-only relay image publishing. No automatic push, tag, deploy, or
 # `latest` handling lives here: an operator runs this workflow explicitly,
-# reviews the commit-derived `sha-<12-hex>` tag it produces, and deploys the
-# server with `docker compose pull` + `docker compose up -d --no-build`
+# reviews the commit-derived `sha-<12-hex>` tag it produces (plus the mutable
+# `dev` tag pointing at the same manifest), and deploys the server with
+# `docker compose pull` + `docker compose up -d --no-build`
 # (see docker-compose.yml and docs/multi-device-sync.md). This workflow
 # never touches the application release/update flows.
 #
@@ -137,7 +138,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Fail closed if image tag already exists
+      - name: Fail closed if sha image tag already exists (dev tag is mutable, excluded)
         shell: bash
         run: |
           IMAGE_REF="${{ env.RELAY_IMAGE_NAME }}:${{ steps.tag.outputs.image_tag }}"
@@ -164,10 +165,15 @@ jobs:
           file: deploy/sync-relay/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          # Commit-derived tag only. No `latest`, no overwrite of an
-          # existing tag (the previous step fails closed when the tag
-          # exists or the existence check is inconclusive), no automatic
-          # deployment. Concurrent racing publishes of the same tag are
+          # One multi-arch build/push publishes the same manifest under two
+          # tags: the commit-derived `sha-<12-hex>` tag plus the mutable
+          # `dev` tag. No `latest`, no overwrite of an existing `sha-*` tag
+          # (the previous step fails closed when the sha tag exists or the
+          # existence check is inconclusive; `dev` is explicitly allowed to
+          # move and is never immutability-checked), no automatic
+          # deployment. Concurrent racing publishes of the same sha tag are
           # still resolved by the registry; this workflow alone does not
           # claim absolute registry-level immutability.
-          tags: ${{ env.RELAY_IMAGE_NAME }}:${{ steps.tag.outputs.image_tag }}
+          tags: |
+            ${{ env.RELAY_IMAGE_NAME }}:${{ steps.tag.outputs.image_tag }}
+            ${{ env.RELAY_IMAGE_NAME }}:dev

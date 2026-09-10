@@ -35,9 +35,19 @@ services:
     # interpolation rules): local default keeps `docker compose up --build`
     # working from a fresh checkout with no environment set. To run a
     # manually published Docker Hub image instead, set the full reference
-    # (commit-derived `sha-<12-hex>` tag from the manual
-    # `docker-relay-publish` workflow run, which fails closed when the tag
-    # already exists — never `latest`) and deploy pull-only without building:
+    # and deploy pull-only without building. Each manual
+    # `docker-relay-publish` run pushes the same manifest under two tags: a
+    # commit-derived immutable `sha-<12-hex>` tag (fails closed when the tag
+    # already exists — never `latest`) for tracking/rollback, and a mutable
+    # `dev` tag that moves on every publish (explicitly allowed to overwrite,
+    # never immutability-checked). Dev servers can track `dev` and, after
+    # every publish, refresh pull-only:
+    #   SYNC_RELAY_IMAGE=docker.io/jorkeyliu/cherry-chat-sync-relay:dev \
+    #     docker compose pull
+    #   SYNC_RELAY_IMAGE=docker.io/jorkeyliu/cherry-chat-sync-relay:dev \
+    #     docker compose up -d --no-build
+    # `dev` is mutable and unsuitable as a strict production version; use the
+    # `sha-<12-hex>` tag to track/roll back to an exact commit:
     #   SYNC_RELAY_IMAGE=docker.io/jorkeyliu/cherry-chat-sync-relay:sha-<12-hex> \
     #     docker compose pull
     #   SYNC_RELAY_IMAGE=docker.io/jorkeyliu/cherry-chat-sync-relay:sha-<12-hex> \

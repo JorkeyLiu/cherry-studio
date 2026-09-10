@@ -147,22 +147,28 @@ Docker).
   suite (`scripts/sync-relay/__tests__/dockerRelayInit.test.ts`) plus
   `node --check`/`sh -n` static checks, none requiring a Docker daemon —
   and is not the full `pnpm build:check` aggregate gate. On success it
-  builds with Docker Buildx for `linux/amd64,linux/arm64` and pushes to
-  `docker.io/jorkeyliu/cherry-chat-sync-relay` under one commit-derived
-  `sha-<12-hex-commit>` tag (Docker Hub login via `DOCKERHUB_USERNAME` /
-  `DOCKERHUB_TOKEN` secrets). After login and before push it runs
-  `docker buildx imagetools inspect` on the target reference: tag exists
-  fails closed, definitive not-found continues, and any inconclusive
-  registry answer fails closed rather than risking an overwrite. It never
-  publishes `latest` and never deploys. Servers consume a published image
-  pull-only by pinning the full reference and skipping the local build:
-  `SYNC_RELAY_IMAGE=docker.io/jorkeyliu/cherry-chat-sync-relay:sha-<12-hex>
+  builds once with Docker Buildx for `linux/amd64,linux/arm64` and pushes
+  the same manifest under two tags to
+  `docker.io/jorkeyliu/cherry-chat-sync-relay`: one commit-derived
+  `sha-<12-hex-commit>` tag plus the mutable `dev` tag (Docker Hub login
+  via `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets). After login and
+  before push it runs `docker buildx imagetools inspect` on the
+  `sha-<12-hex>` reference only: tag exists fails closed, definitive
+  not-found continues, and any inconclusive registry answer fails closed
+  rather than risking an overwrite; the `dev` tag is explicitly mutable, is
+  never immutability-checked, and moves on every publish. It never
+  publishes `latest` and never deploys. Dev servers track `dev` pull-only
+  by setting the full reference and skipping the local build:
+  `SYNC_RELAY_IMAGE=docker.io/jorkeyliu/cherry-chat-sync-relay:dev
   docker compose pull`, then the same `SYNC_RELAY_IMAGE=... docker compose
-  up -d --no-build`. When `SYNC_RELAY_IMAGE` is unset the Compose default
-  keeps the local `docker compose up -d --build` path. The workflow
-  refuses an already-existing tag but concurrent racing publishes of the
-  same tag are still resolved by the registry, so the workflow alone does
-  not claim absolute registry-level immutability. This changes no
+  up -d --no-build` after every publish. `dev` is mutable and unsuitable as
+  a strict production version; use the `sha-<12-hex>` tag to track/roll back
+  to an exact commit with the same pull + `up -d --no-build` shape. When
+  `SYNC_RELAY_IMAGE` is unset the Compose default keeps the local
+  `docker compose up -d --build` path. The workflow refuses an
+  already-existing sha tag but concurrent racing publishes of the same sha
+  tag are still resolved by the registry, so the workflow alone does not
+  claim absolute registry-level immutability. This changes no
   relay protocol or behavior and no application release/update flow; the
   updater/release freeze and identity boundaries are untouched.
 - Validation boundary: the init contract is proven by focused tests without
