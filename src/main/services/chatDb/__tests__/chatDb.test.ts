@@ -732,8 +732,8 @@ describe('BetterSqlite3BackupAdapter', () => {
 // ---------------------------------------------------------------------------
 
 describe('Migration registry', () => {
-  it('should have exactly eleven migrations (001 + 002 + 003 + 004 + 005 + 006 + 007 + 008 + 009 + 010 + 011)', () => {
-    expect(MIGRATIONS).toHaveLength(11)
+  it('should have exactly twelve migrations (001 + 002 + 003 + 004 + 005 + 006 + 007 + 008 + 009 + 010 + 011 + 012)', () => {
+    expect(MIGRATIONS).toHaveLength(12)
     expect(MIGRATIONS[0].key).toBe('001_initial_schema')
     expect(MIGRATIONS[1].key).toBe('002_corrective_schema')
     expect(MIGRATIONS[2].key).toBe('003_fts5_normalized_search')
@@ -745,6 +745,7 @@ describe('Migration registry', () => {
     expect(MIGRATIONS[8].key).toBe('009_sync_membership_clock')
     expect(MIGRATIONS[9].key).toBe('010_sync_parent_order_frame')
     expect(MIGRATIONS[10].key).toBe('011_sync_parent_order_frame_parent_id_unbounded')
+    expect(MIGRATIONS[11].key).toBe('012_sync_frame_high_water')
   })
 
   it('001_initial_schema should have SQL statements', () => {

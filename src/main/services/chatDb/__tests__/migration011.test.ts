@@ -35,7 +35,6 @@ afterEach(() => {
 
 describe('011_sync_parent_order_frame_parent_id_unbounded', () => {
   it('is registered as 11th migration with correct unbounded DDL', () => {
-    expect(MIGRATIONS.length).toBe(11)
     expect(MIGRATIONS[10].key).toBe('011_sync_parent_order_frame_parent_id_unbounded')
     const joined = MIGRATIONS[10].sql.join(' ')
     expect(joined).toContain('ALTER TABLE sync_parent_order_frame RENAME TO sync_parent_order_frame_mig_old')
@@ -84,6 +83,8 @@ describe('011_sync_parent_order_frame_parent_id_unbounded', () => {
       .all()
 
     const applied = runMigrations(db as never, sqlite)
+    // Only 011 re-runs here (012 was already applied by the first full run
+    // and its marker is intact)
     expect(applied).toBe(1)
     const after = sqlite
       .prepare(
@@ -246,6 +247,7 @@ describe('011_sync_parent_order_frame_parent_id_unbounded', () => {
       expect(beforeCount).toBe(1)
       // No rollback test needed; seam not practical, but we still verify migration would preserve valid rows if run
       const applied = runMigrations(db as never, sqlite)
+      // Only 011 re-runs here (012 marker intact from the first full run)
       expect(applied).toBe(1)
       const afterTbl = sqlite
         .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='sync_parent_order_frame'`)

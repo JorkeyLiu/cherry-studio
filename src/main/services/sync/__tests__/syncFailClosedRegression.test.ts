@@ -165,11 +165,46 @@ describe('finding 1: EnsureTopic existence-based capture', () => {
   it('true creation still emits outbox + entity clock', () => {
     const result = aggregate.ensureTopic('t-brand-new', 'a1', 'New')
     expect(result.ok).toBe(true)
+    // True creation emits exactly two ops in drain order: the topic entity
+    // upsert plus the empty topicMessage order_frame (SYNC-DATA-048) reusing
+    // the winning frameClock — no contradiction with the no-op cases above,
+    // which emit nothing because no row is created.
     const outbox = syncService.listOutbox()
-    expect(outbox).toHaveLength(1)
+    expect(outbox).toHaveLength(2)
+    expect(outbox[0].op).toBe('upsert')
     expect(outbox[0].entityType).toBe('topic')
     expect(outbox[0].entityId).toBe('t-brand-new')
     expect(entityClock('topic', 't-brand-new')).not.toBeNull()
+    const frameOp = outbox[1]
+    expect(frameOp.op).toBe('order_frame')
+    expect(frameOp.entityType).toBe('topic')
+    expect(frameOp.entityId).toBe('t-brand-new')
+    const payload = frameOp.payload as unknown as {
+      frameVersion: string
+      kind: string
+      parentId: string
+      orderedChildIds: string[]
+      frameClock: { timestamp: number; operationId: string }
+    }
+    expect(payload).toEqual({
+      frameVersion: 'parent-order-frame-v1',
+      kind: 'topicMessage',
+      parentId: 't-brand-new',
+      orderedChildIds: [],
+      frameClock: { timestamp: frameOp.timestamp, operationId: frameOp.id }
+    })
+    // Clock mirror: envelope id/timestamp reuse the winning frameClock.
+    expect(frameOp.id).toBe(payload.frameClock.operationId)
+    expect(frameOp.timestamp).toBe(payload.frameClock.timestamp)
+    // The winning frame row is persisted with the same clock.
+    const frameRow = sqlite
+      .prepare(
+        `SELECT ordered_child_ids_json AS json, timestamp, operation_id AS operationId FROM sync_parent_order_frame WHERE kind='topicMessage' AND parent_id=?`
+      )
+      .get('t-brand-new') as { json: string; timestamp: number; operationId: string }
+    expect(JSON.parse(frameRow.json)).toEqual([])
+    expect(frameRow.timestamp).toBe(frameOp.timestamp)
+    expect(frameRow.operationId).toBe(frameOp.id)
   })
 
   it('no stale EnsureTopic overwrite: no-op after a newer remote value emits nothing', () => {

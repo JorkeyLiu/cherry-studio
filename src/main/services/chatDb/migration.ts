@@ -1130,6 +1130,20 @@ export const MIGRATIONS: MigrationEntry[] = [
       `INSERT INTO sync_parent_order_frame SELECT * FROM sync_parent_order_frame_mig_old`,
       `DROP TABLE sync_parent_order_frame_mig_old`
     ]
+  },
+  {
+    key: '012_sync_frame_high_water',
+    description:
+      'Additive sync frame timestamp high-water: per-(kind, parent_id) monotonic guard for winning-frame clocks (SYNC-DATA-048 local implementation invariant). Creates sync_frame_high_water with (kind, parent_id) PK and safe-nonnegative max_timestamp, backfilled from current sync_parent_order_frame timestamps so the first post-upgrade invalidate cannot drop an old high-water mark. Invalidation deletes winning frames but never lowers this mark; later re-mints allocate strictly above it. Only max timestamp stored (no operationId); never on wire; never affects candidate completeness/authority.',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS sync_frame_high_water (
+        kind TEXT NOT NULL CHECK (kind IN ('topicMessage','messageBlock')),
+        parent_id TEXT NOT NULL CHECK (length(parent_id) > 0),
+        max_timestamp INTEGER NOT NULL CHECK (max_timestamp >= 0 AND max_timestamp <= 9007199254740991),
+        PRIMARY KEY (kind, parent_id)
+      )`,
+      `INSERT INTO sync_frame_high_water (kind, parent_id, max_timestamp) SELECT kind, parent_id, timestamp FROM sync_parent_order_frame AS f WHERE NOT EXISTS (SELECT 1 FROM sync_frame_high_water AS h WHERE h.kind = f.kind AND h.parent_id = f.parent_id)`
+    ]
   }
 ]
 

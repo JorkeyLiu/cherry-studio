@@ -490,8 +490,10 @@ describe('auto local mutation -> debounce/drain -> publish -> B bootstrap -> N+1
         .all()
         .find((r) => r.kind === 'topicMessage' && r.parentId === 'auto-topic-1')
       expect(frameTopic).toBeTruthy()
-      // Auto-published snapshot covers m1..m3; N+1 (m4) arrives via op-log rows/sort_order.
-      expect(JSON.parse(frameTopic!.orderedChildIdsJson)).toEqual(['auto-m1', 'auto-m2', 'auto-m3'])
+      // Incremental order_frame convergence (SYNC-DATA-048): N+1 (m4)
+      // minted a winning frame plus a matching order_frame op, so B's winning
+      // frame advances past the auto-published snapshot.
+      expect(JSON.parse(frameTopic!.orderedChildIdsJson)).toEqual(['auto-m1', 'auto-m2', 'auto-m3', 'auto-m4'])
       const frameEmpty = dbB!
         .select()
         .from(schema.syncParentOrderFrame)

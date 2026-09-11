@@ -149,6 +149,68 @@ function isOptionalStringOrNull(v: unknown): boolean {
  * - Upsert block: payload must carry non-empty string messageId.
  * Returns an error string, or null when valid.
  */
+function isValidUnicodeScalarStringLocal(str: string): boolean {
+  let i = 0
+  const len = str.length
+  while (i < len) {
+    const cp = str.codePointAt(i)!
+    if (cp >= 0xd800 && cp <= 0xdfff) return false
+    if (cp > 0x10ffff) return false
+    i += cp > 0xffff ? 2 : 1
+  }
+  return true
+}
+
+function validateOrderFramePayloadStrict(
+  op: { id?: unknown; entityType?: unknown; entityId?: unknown; timestamp?: unknown; deviceId?: unknown },
+  payload: unknown
+): string | null {
+  if (op.entityType !== 'topic') return 'order_frame only supports entityType topic'
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return 'order_frame missing payload'
+  const p = payload as Record<string, unknown>
+  const keys = Object.keys(p).sort()
+  const expected = ['frameClock', 'frameVersion', 'kind', 'orderedChildIds', 'parentId'].sort()
+  if (keys.length !== expected.length || !keys.every((k, i) => k === expected[i])) {
+    return 'order_frame payload must be exactly {frameVersion,kind,parentId,orderedChildIds,frameClock}'
+  }
+  if (p.frameVersion !== 'parent-order-frame-v1') return 'order_frame unknown frameVersion'
+  if (p.kind !== 'topicMessage') return 'order_frame unknown kind'
+  if (typeof p.parentId !== 'string' || p.parentId.length === 0 || !isValidUnicodeScalarStringLocal(p.parentId)) {
+    return 'order_frame invalid parentId'
+  }
+  if (p.parentId !== (op as { entityId?: unknown }).entityId) return 'order_frame parentId must equal entityId'
+  if (!Array.isArray(p.orderedChildIds)) return 'order_frame orderedChildIds must be array'
+  const seen = new Set<string>()
+  for (const v of p.orderedChildIds as unknown[]) {
+    if (typeof v !== 'string' || v.length === 0 || !isValidUnicodeScalarStringLocal(v)) {
+      return 'order_frame invalid orderedChildId'
+    }
+    if (seen.has(v)) return 'order_frame duplicate orderedChildId'
+    seen.add(v)
+  }
+  const fc = p.frameClock as Record<string, unknown> | null | undefined
+  if (typeof fc !== 'object' || fc === null || Array.isArray(fc)) return 'order_frame invalid frameClock'
+  const fcKeys = Object.keys(fc).sort()
+  if (fcKeys.length !== 2 || fcKeys[0] !== 'operationId' || fcKeys[1] !== 'timestamp') {
+    return 'order_frame frameClock must be exactly {timestamp,operationId}'
+  }
+  if (typeof fc.timestamp !== 'number' || !Number.isSafeInteger(fc.timestamp) || fc.timestamp < 0) {
+    return 'order_frame invalid frameClock timestamp'
+  }
+  if (
+    typeof fc.operationId !== 'string' ||
+    fc.operationId.length === 0 ||
+    fc.operationId.length > 256 ||
+    fc.operationId.includes(':') ||
+    !isValidUnicodeScalarStringLocal(fc.operationId)
+  ) {
+    return 'order_frame invalid frameClock operationId'
+  }
+  if (fc.timestamp !== op.timestamp) return 'order_frame timestamp must mirror frameClock.timestamp'
+  if (fc.operationId !== op.id) return 'order_frame id must mirror frameClock.operationId'
+  return null
+}
+
 export function validateSyncOperationStrict(op: {
   id?: unknown
   entityType?: unknown
@@ -169,13 +231,16 @@ export function validateSyncOperationStrict(op: {
   if (op.entityType !== 'topic' && op.entityType !== 'message' && op.entityType !== 'message_block') {
     return `invalid entityType ${String(op.entityType)}`
   }
-  if (op.op !== 'upsert' && op.op !== 'delete') return `invalid op ${String(op.op)}`
+  if (op.op !== 'upsert' && op.op !== 'delete' && op.op !== 'order_frame') return `invalid op ${String(op.op)}`
   if (!isNonEmptyString(op.entityId)) return 'invalid entityId'
   if (typeof op.timestamp !== 'number' || !Number.isFinite(op.timestamp)) return 'invalid timestamp'
   if (!isNonEmptyString(op.deviceId)) return 'invalid deviceId'
   const entityType = op.entityType as string
   const kind = op.op as string
   const payload = op.payload as Record<string, unknown> | undefined | null
+  if (kind === 'order_frame') {
+    return validateOrderFramePayloadStrict(op, payload)
+  }
   if (kind === 'delete') {
     if (payload !== undefined && payload !== null) {
       if (typeof payload !== 'object' || Array.isArray(payload)) return 'invalid payload'

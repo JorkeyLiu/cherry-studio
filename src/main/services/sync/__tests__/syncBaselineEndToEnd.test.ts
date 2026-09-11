@@ -467,10 +467,10 @@ describe('baseline publish -> persist -> bootstrap -> N+1', () => {
       .all()
       .find((r) => r.kind === 'topicMessage' && r.parentId === 'bl-topic-1')
     expect(frameTopic).toBeTruthy()
-    // Baseline snapshot order is preserved; remote incremental frame ops are
-    // code-less target, so the N+1 child arrives via op-log rows/sort_order
-    // while the winning frame stays at the published snapshot.
-    expect(JSON.parse(frameTopic!.orderedChildIdsJson)).toEqual(['bl-m1', 'bl-m2'])
+    // Incremental order_frame convergence (SYNC-DATA-048): the N+1 append
+    // minted a winning frame plus a matching order_frame op, so B's winning
+    // frame advances to the post-replay effective order.
+    expect(JSON.parse(frameTopic!.orderedChildIdsJson)).toEqual(['bl-m1', 'bl-m2', 'bl-m3'])
     const frameEmpty = dbB!
       .select()
       .from(schema.syncParentOrderFrame)

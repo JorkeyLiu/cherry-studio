@@ -61,6 +61,7 @@ import {
   validateOrdinaryIdStrict,
   validateTimestampStrict
 } from './syncFrameEvaluation'
+import { advanceFrameHighWater } from './syncFrameHighWater'
 import { parseStrictCursor } from './SyncService'
 import {
   formatSyncTombstoneValue,
@@ -2454,6 +2455,10 @@ export function mergeValidatedBaselineInTx(
           operationId: frame.frameClock.operationId
         })
         .run()
+      // High-water (SYNC-DATA-048): every accepted winning-frame persist
+      // advances the per-parent mark in the same merge tx, so a later local
+      // invalidate + re-mint can never reuse this timestamp.
+      advanceFrameHighWater(inner, frame.kind, frame.parentId, frame.frameClock.timestamp)
       localFrames.set(key, {
         kind: frame.kind,
         parentId: frame.parentId,
@@ -2492,6 +2497,7 @@ export function mergeValidatedBaselineInTx(
           }
         })
         .run()
+      advanceFrameHighWater(inner, frame.kind, frame.parentId, frame.frameClock.timestamp)
       localFrames.set(key, {
         kind: frame.kind,
         parentId: frame.parentId,
@@ -2622,6 +2628,7 @@ export function mergeValidatedBaselineInTx(
             set: { orderedChildIdsJson: JSON.stringify(frame.orderedChildIds) }
           })
           .run()
+        advanceFrameHighWater(inner, frame.kind, frame.parentId, existing.timestamp)
         localFrames.set(key, { ...existing, orderedChildIds: [...frame.orderedChildIds] })
       }
       affectedParents.add(key)

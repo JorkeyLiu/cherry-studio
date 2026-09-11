@@ -40,6 +40,8 @@ import { assertBarrierSnapshotProof, buildPublishEnvelope, SyncBaselinePublishEr
 import { applyWireSyncEnvelopeInTx } from './syncBaselineWireApply'
 import type { BaselineFetchResult, BaselinePublishResult } from './SyncClient'
 import { syncClient, validateEndpointUrl } from './SyncClient'
+import { compareClock as compareFrameClock, evaluateEffectiveOrder } from './syncFrameEvaluation'
+import { advanceFrameHighWater, getFrameHighWater } from './syncFrameHighWater'
 import {
   formatSyncTombstoneValue,
   parseSyncChannelKeyValue,
@@ -75,9 +77,17 @@ const TOMBSTONE_BLOCK_PREFIX = 'tombstone:message_block:'
 const MAX_DEFERRED_ORPHANS = 500
 
 // Outbox push priority: parents before children so relay seq preserves
-// dependency order (topic < message < block). Within the same priority,
-// timestamp then id order applies.
+// dependency order (topic < message < block < order_frame). Order frames
+// reuse entityType 'topic' but must sort after their member message ops
+// (their frameClock is already greater, yet priority would otherwise invert
+// it), so the op kind takes precedence over the entity priority.
+// Within the same priority, timestamp then id order applies.
 const ENTITY_PUSH_PRIORITY: Record<string, number> = { topic: 0, message: 1, message_block: 2 }
+
+function pushPriorityOf(op: { entityType: string; op: string }): number {
+  if (op.op === 'order_frame') return 3
+  return ENTITY_PUSH_PRIORITY[op.entityType] ?? 9
+}
 
 export class SyncOrphanError extends Error {
   constructor(message: string) {
@@ -886,6 +896,10 @@ export class SyncService {
       logger.warn(`[enqueueOperation] strict validation rejected: ${strictErr}`)
       throw new Error(strictErr)
     }
+    if (op.op === 'order_frame') {
+      this.enqueueOrderFrameRaw(op)
+      return
+    }
     const allowErr = validateSyncPayloadAllowlist(op)
     if (allowErr) {
       logger.warn(`[enqueueOperation] payload allowlist rejected: ${allowErr}`)
@@ -966,6 +980,45 @@ export class SyncService {
     }
   }
 
+  /**
+   * Raw outbox-only insert for an order_frame op (no entity/field clock, no
+   * tombstone). Used only by the non-tx standalone path; the aggregate path
+   * uses the tx-bound variant below so chat/order/frame/outbox commit atomically.
+   */
+  private enqueueOrderFrameRaw(op: SyncOperation): void {
+    const db = this.getDb()
+    const sqlite = this.getSqlite()
+    sqlite.exec('BEGIN IMMEDIATE')
+    try {
+      db.insert(schema.syncOutbox)
+        .values({
+          id: op.id,
+          entityType: op.entityType,
+          op: op.op,
+          entityId: op.entityId,
+          timestamp: op.timestamp,
+          deviceId: op.deviceId,
+          payloadJson: op.payload ? JSON.stringify(op.payload) : null,
+          createdAt: new Date().toISOString()
+        })
+        .onConflictDoNothing()
+        .run()
+      const ch = sqlite.prepare('SELECT changes() as c').get() as { c: number }
+      const inserted = ch.c > 0
+      sqlite.exec('COMMIT')
+      if (!inserted) {
+        logger.warn(`[enqueueOperation] duplicate id ${op.id} ignored`)
+        return
+      }
+      this.emitEnqueue()
+    } catch (e) {
+      try {
+        sqlite.exec('ROLLBACK')
+      } catch {}
+      throw e
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Transaction-bound capture (LOCK-PERSONAL-006): the aggregate owns the
   // atomic mutation boundary and calls these helpers INSIDE its existing
@@ -984,6 +1037,9 @@ export class SyncService {
   enqueueOperationInTx(tx: SyncTxExecutor, op: SyncOperation): boolean {
     const strictErr = validateSyncOperationStrict(op as any)
     if (strictErr) throw new Error(strictErr)
+    if (op.op === 'order_frame') {
+      return this.enqueueOrderFrameInTx(tx, op)
+    }
     const allowErr = validateSyncPayloadAllowlist(op)
     if (allowErr) throw new Error(allowErr)
     const existing = tx.select().from(schema.syncOutbox).where(eq(schema.syncOutbox.id, op.id)).get()
@@ -1074,6 +1130,113 @@ export class SyncService {
     const op: SyncOperation = { id: randomUUID(), entityType, op: 'delete', entityId, timestamp, deviceId }
     this.enqueueOperationInTx(tx, op)
     return op.id
+  }
+
+  /**
+   * Tx-bound outbox-only insert for an order_frame op (SYNC-DATA-048).
+   * The caller must have persisted the winning frame first; this helper
+   * reuses the winning frameClock verbatim (id === frameClock.operationId,
+   * timestamp === frameClock.timestamp) so no dual clock is ever minted.
+   * Never touches entity/field clocks or tombstones; the upsert field
+   * allowlist is never entered for this branch. Duplicate ids are ignored
+   * idempotently without clock effects. Returns true on new insert.
+   */
+  enqueueOrderFrameInTx(tx: SyncTxExecutor, op: SyncOperation): boolean {
+    const strictErr = validateSyncOperationStrict(op as unknown as Record<string, unknown>)
+    if (strictErr) throw new Error(strictErr)
+    if (op.op !== 'order_frame') throw new Error('enqueueOrderFrameInTx requires op order_frame')
+    const existing = tx.select().from(schema.syncOutbox).where(eq(schema.syncOutbox.id, op.id)).get()
+    if (existing) {
+      logger.warn(`[enqueueOrderFrameInTx] duplicate id ${op.id} ignored`)
+      return false
+    }
+    tx.insert(schema.syncOutbox)
+      .values({
+        id: op.id,
+        entityType: op.entityType,
+        op: op.op,
+        entityId: op.entityId,
+        timestamp: op.timestamp,
+        deviceId: op.deviceId,
+        payloadJson: op.payload ? JSON.stringify(op.payload) : null,
+        createdAt: new Date().toISOString()
+      })
+      .onConflictDoNothing()
+      .run()
+    return true
+  }
+
+  /**
+   * Refresh the topicMessage winning frame for a live topic and enqueue the
+   * matching order_frame op in the same aggregate transaction
+   * (SYNC-DATA-048). Strict: missing membership, malformed overflow, or
+   * timestamp exhaustion throws so the enclosing chat mutation rolls back.
+   * The enqueued op reuses the persisted winning frameClock verbatim.
+   * Returns true when a new outbox row was inserted.
+   */
+  refreshTopicMessageFrameAndEnqueueInTx(tx: SyncTxExecutor, parentId: string, deviceId: string): boolean {
+    this.refreshParentFrameInTx(tx, 'topicMessage', parentId)
+    const frame = this.getParentFrameInTx(tx, 'topicMessage', parentId)
+    if (!frame) throw new SyncFrameError(`missing topicMessage frame for ${parentId} after refresh`)
+    const op: SyncOperation = {
+      id: frame.operationId,
+      entityType: 'topic',
+      op: 'order_frame',
+      entityId: parentId,
+      timestamp: frame.timestamp,
+      deviceId,
+      payload: {
+        frameVersion: 'parent-order-frame-v1',
+        kind: 'topicMessage',
+        parentId,
+        orderedChildIds: [...frame.orderedChildIds],
+        frameClock: { timestamp: frame.timestamp, operationId: frame.operationId }
+      }
+    }
+    return this.enqueueOrderFrameInTx(tx, op)
+  }
+
+  /**
+   * Reorder-path helper (SYNC-DATA-048): when stored membership is complete,
+   * mint/persist the winning frame and enqueue the matching order_frame in
+   * the same transaction (returns 'refreshed'). When an included child lacks
+   * membership, truthfully invalidate the frame and continue the user
+   * mutation without any op (returns 'invalidated'). All other frame errors
+   * remain fail-closed and roll back the enclosing transaction.
+   */
+  tryRefreshTopicMessageFrameAndEnqueueInTx(
+    tx: SyncTxExecutor,
+    parentId: string,
+    deviceId: string
+  ): 'refreshed' | 'invalidated' {
+    try {
+      this.refreshParentFrameInTx(tx, 'topicMessage', parentId)
+    } catch (e) {
+      if (e instanceof SyncFrameError && e.message.includes('missing membership clock for included child')) {
+        this.invalidateParentFrameInTx(tx, 'topicMessage', parentId)
+        return 'invalidated'
+      }
+      throw e
+    }
+    const frame = this.getParentFrameInTx(tx, 'topicMessage', parentId)
+    if (!frame) throw new SyncFrameError(`missing topicMessage frame for ${parentId} after refresh`)
+    const op: SyncOperation = {
+      id: frame.operationId,
+      entityType: 'topic',
+      op: 'order_frame',
+      entityId: parentId,
+      timestamp: frame.timestamp,
+      deviceId,
+      payload: {
+        frameVersion: 'parent-order-frame-v1',
+        kind: 'topicMessage',
+        parentId,
+        orderedChildIds: [...frame.orderedChildIds],
+        frameClock: { timestamp: frame.timestamp, operationId: frame.operationId }
+      }
+    }
+    this.enqueueOrderFrameInTx(tx, op)
+    return 'refreshed'
   }
 
   /** Tx-bound tracked check (clock or pending outbox via the same executor). */
@@ -1431,7 +1594,7 @@ export class SyncService {
     if (!this.isValidFrameKind(frame.kind)) {
       throw new SyncFrameError(`invalid frame kind ${String(frame.kind).slice(0, 40)}`)
     }
-    if (typeof frame.parentId !== 'string' || frame.parentId.length === 0 || frame.parentId.length > 256) {
+    if (typeof frame.parentId !== 'string' || frame.parentId.length === 0) {
       throw new SyncFrameError(`invalid frame parentId ${String(frame.parentId).slice(0, 40)}`)
     }
     if (frame.parentId.includes(':')) {
@@ -1450,7 +1613,7 @@ export class SyncService {
     const ids = frame.orderedChildIds as unknown[]
     const seen = new Set<string>()
     for (const v of ids) {
-      if (typeof v !== 'string' || v.length === 0 || v.length > 256) {
+      if (typeof v !== 'string' || v.length === 0) {
         throw new SyncFrameError(`invalid orderedChildId ${String(v).slice(0, 40)}`)
       }
       if (seen.has(v)) {
@@ -1489,7 +1652,7 @@ export class SyncService {
     const out: string[] = []
     const seen = new Set<string>()
     for (const v of parsed as unknown[]) {
-      if (typeof v !== 'string' || v.length === 0 || v.length > 256) {
+      if (typeof v !== 'string' || v.length === 0) {
         throw new SyncFrameError(`invalid orderedChildId in JSON ${String(v).slice(0, 40)}`)
       }
       if (seen.has(v)) {
@@ -1652,6 +1815,15 @@ export class SyncService {
           existing.kind === frame.kind &&
           existing.parentId === frame.parentId
         ) {
+          // Idempotent content, but still ensure the high-water mark covers
+          // it (e.g. rows predating the mark or exotic pre-012 state).
+          try {
+            advanceFrameHighWater(tx, frame.kind, frame.parentId, frame.timestamp)
+          } catch (e) {
+            throw e instanceof SyncFrameError
+              ? e
+              : new SyncFrameError(`frame high-water advance failed: ${(e as Error).message}`)
+          }
           return { applied: false, reason: 'idempotent' }
         }
         const cmp = this.compareLww(frame.timestamp, frame.operationId, existing.timestamp, existing.operationId)
@@ -1680,6 +1852,16 @@ export class SyncService {
           }
         })
         .run()
+      // High-water (SYNC-DATA-048): every accepted winning-frame persist
+      // advances the per-parent mark in the same tx, so remote incremental
+      // apply and baseline merges guard future local mints identically.
+      try {
+        advanceFrameHighWater(tx, frame.kind, frame.parentId, frame.timestamp)
+      } catch (e) {
+        throw e instanceof SyncFrameError
+          ? e
+          : new SyncFrameError(`frame high-water advance failed: ${(e as Error).message}`)
+      }
       return { applied: true, reason: existing ? 'updated' : 'inserted' }
     } catch (e) {
       if (e instanceof SyncFrameError) throw e
@@ -1714,9 +1896,19 @@ export class SyncService {
   ): { timestamp: number; operationId: string } {
     if (!this.isValidFrameKind(kind)) throw new SyncFrameError(`invalid frame kind ${kind}`)
     if (typeof parentId !== 'string' || parentId.length === 0) throw new SyncFrameError(`invalid parentId ${parentId}`)
+    // High-water mark first (SYNC-DATA-048): invalidation deletes the winning
+    // row but never lowers this mark, so a re-mint can never reuse an old
+    // timestamp with a fresh operationId.
+    let maxTs = -1
+    try {
+      maxTs = Math.max(maxTs, getFrameHighWater(tx, kind, parentId))
+    } catch (e) {
+      throw e instanceof SyncFrameError
+        ? e
+        : new SyncFrameError(`frame high-water read failed: ${(e as Error).message}`)
+    }
     // Existing frame clock
     const existing = this.getParentFrameInTx(tx, kind, parentId)
-    let maxTs = -1
     if (existing) {
       if (
         !Number.isSafeInteger(existing.timestamp) ||
@@ -1765,6 +1957,16 @@ export class SyncService {
     const newOpId = randomUUID()
     // Validate operationId shape (randomUUID is valid)
     parseSyncOperationIdShape(newOpId)
+    // Advance the high-water mark in the same tx BEFORE persist/enqueue: any
+    // later failure in the enclosing aggregate transaction rolls the mark
+    // back atomically — never an early commit.
+    try {
+      advanceFrameHighWater(tx, kind, parentId, newTs)
+    } catch (e) {
+      throw e instanceof SyncFrameError
+        ? e
+        : new SyncFrameError(`frame high-water advance failed: ${(e as Error).message}`)
+    }
     return { timestamp: newTs, operationId: newOpId }
   }
 
@@ -2147,8 +2349,8 @@ export class SyncService {
     // priority, timestamp then id order applies. LWW comparison semantics are
     // unchanged (shouldApplyIncoming still compares timestamps per entity).
     return mapped.sort((a, b) => {
-      const pa = ENTITY_PUSH_PRIORITY[a.entityType] ?? 9
-      const pb = ENTITY_PUSH_PRIORITY[b.entityType] ?? 9
+      const pa = pushPriorityOf(a)
+      const pb = pushPriorityOf(b)
       if (pa !== pb) return pa - pb
       if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp
       return a.id.localeCompare(b.id)
@@ -2198,10 +2400,15 @@ export class SyncService {
     const sqlite = this.getSqlite()
 
     const already = db.select().from(schema.syncApplied).where(eq(schema.syncApplied.operationId, op.id)).get()
-    if (already) {
+    if (already && op.op !== 'order_frame') {
       logger.info(`[applyIncoming] duplicate ${op.id} skipped`)
       return false
     }
+    // order_frame duplicates bypass the blind skip: the same (timestamp,
+    // operationId) clock with different orderedChildIds is an equal-clock
+    // divergence and must fail closed, not silently pass as idempotent. The
+    // frame path below re-evaluates LWW + semantic effective comparison, and
+    // its applied insert is conflict-tolerant (see commit below).
 
     // Defense-in-depth: validate before LWW so a malformed old operation
     // that loses LWW is rejected (throws) rather than being marked applied
@@ -2215,10 +2422,12 @@ export class SyncService {
       throw new Error(`malformed sync operation ${op.id}: ${strictErr}`)
     }
 
-    const allowErr = validateSyncPayloadAllowlist(op)
-    if (allowErr) {
-      logger.warn(`[applyIncoming] payload rejected ${op.id}: ${allowErr}`)
-      throw new Error(`malformed sync operation ${op.id}: ${allowErr}`)
+    if (op.op !== 'order_frame') {
+      const allowErr = validateSyncPayloadAllowlist(op)
+      if (allowErr) {
+        logger.warn(`[applyIncoming] payload rejected ${op.id}: ${allowErr}`)
+        throw new Error(`malformed sync operation ${op.id}: ${allowErr}`)
+      }
     }
 
     // Deletes stay entity-level LWW (delete/tombstone precedence). Upserts
@@ -2235,7 +2444,9 @@ export class SyncService {
     sqlite.exec('BEGIN IMMEDIATE')
     let appliedEntity = false
     try {
-      if (op.op === 'upsert') {
+      if (op.op === 'order_frame') {
+        appliedEntity = this.applyOrderFrame(op)
+      } else if (op.op === 'upsert') {
         appliedEntity = this.applyUpsert(op)
       } else if (op.op === 'delete') {
         this.applyDelete(op)
@@ -2269,7 +2480,14 @@ export class SyncService {
             .run()
         }
       }
-      db.insert(schema.syncApplied).values({ operationId: op.id, appliedAt: new Date().toISOString() }).run()
+      if (op.op === 'order_frame') {
+        db.insert(schema.syncApplied)
+          .values({ operationId: op.id, appliedAt: new Date().toISOString() })
+          .onConflictDoNothing()
+          .run()
+      } else {
+        db.insert(schema.syncApplied).values({ operationId: op.id, appliedAt: new Date().toISOString() }).run()
+      }
       sqlite.exec('COMMIT')
       return appliedEntity
     } catch (e) {
@@ -2282,6 +2500,186 @@ export class SyncService {
       }
       logger.error(`[applyIncoming] tx failed ${op.id}`, e as Error)
       throw e
+    }
+  }
+
+  /**
+   * Incremental order_frame apply (SYNC-DATA-048, topicMessage only).
+   * Runs inside the caller's apply transaction (BEGIN IMMEDIATE...COMMIT in
+   * applyIncomingOperation): the winning-frame persist, the dense sortOrder
+   * projection, and the sync_applied row commit atomically; any throw rolls
+   * back all three so the cursor never advances past an unapplied frame.
+   * Never creates/deletes/reparents entities, never resurrects tombstones,
+   * never overwrites content fields — only the frame row plus sortOrder.
+   * Returns true when the frame won and was materialized, false for consumed
+   * no-ops (duplicate already handled earlier; older loser; equal-clock
+   * idempotent; deleted-parent suppression). Throws SyncOrphanError for
+   * retryable arrival gaps (unknown parent with no tombstone; listed member
+   * not yet arrived) so the pull loop buffers without poison-ack. All other
+   * violations (incomplete coverage, wrong parent, missing/incomparable
+   * membership, equal-clock divergence) throw fail-closed.
+   */
+  private applyOrderFrame(op: SyncOperation): boolean {
+    const db = this.getDb()
+    const payload = op.payload as unknown as {
+      frameVersion: string
+      kind: string
+      parentId: string
+      orderedChildIds: string[]
+      frameClock: { timestamp: number; operationId: string }
+    }
+    const parentId = payload.parentId
+    const frameClock = { timestamp: payload.frameClock.timestamp, operationId: payload.frameClock.operationId }
+    // Parent liveness: a present topic row (including soft-deleted deletedAt)
+    // is live; an absent row with an exact topic tombstone is deleted
+    // (consume without materializing); an absent row without tombstone is an
+    // arrival gap (orphan, retryable).
+    const topicRow = db.select().from(schema.topics).where(eq(schema.topics.id, parentId)).get()
+    if (!topicRow) {
+      const topicTomb = this.getTombstone('topic', parentId)
+      if (topicTomb) {
+        logger.warn(`[applyOrderFrame] parent ${parentId} tombstoned: frame ${op.id} suppressed without materializing`)
+        return false
+      }
+      throw new SyncOrphanError(`orphan order_frame ${op.id} parent ${parentId} missing`)
+    }
+    // Collect live stable messages for this parent with tombstone suppression.
+    const messageRows = db.select().from(schema.messages).where(eq(schema.messages.topicId, parentId)).all()
+    const liveChildren = new Map<string, { timestamp: number; operationId: string }>()
+    for (const row of messageRows) {
+      if (!isStableMessageStatus(row.status)) continue
+      const ownTomb = this.getTombstone('message', row.id)
+      const mem = this.getMembershipClock('message', row.id)
+      if (ownTomb) {
+        // Suppress only when the tombstone covers the member's clock; a newer
+        // member may still resurrect per the higher-clock rule.
+        if (!mem) {
+          throw new Error(`order_frame ${op.id}: live child ${row.id} has tombstone but no membership clock`)
+        }
+        if (this.isSuppressedByTombstone(mem.timestamp, mem.operationId, ownTomb)) continue
+      }
+      if (!mem) {
+        throw new Error(`order_frame ${op.id}: live child ${row.id} missing membership clock`)
+      }
+      if (mem.parentId !== parentId) {
+        throw new Error(`order_frame ${op.id}: membership parent mismatch for ${row.id}`)
+      }
+      liveChildren.set(row.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+    }
+    const childParentLookup = (
+      childId: string
+    ): { parentId: string | null; exists: boolean; isLiveForThisParent?: boolean } | null => {
+      const row = db.select().from(schema.messages).where(eq(schema.messages.id, childId)).get()
+      if (row) return { parentId: row.topicId, exists: true, isLiveForThisParent: row.topicId === parentId }
+      const tomb = this.getTombstone('message', childId)
+      if (tomb) return { parentId: null, exists: true }
+      return null
+    }
+    // Listed-but-unknown members are arrival gaps (orphan). Tombstoned listed
+    // members filter below; wrong-parent listed members fail closed inside
+    // evaluateEffectiveOrder via the lookup above.
+    for (const cid of payload.orderedChildIds) {
+      const row = db.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
+      if (row) {
+        if (row.topicId !== parentId) {
+          throw new Error(`order_frame ${op.id}: child ${cid} belongs to ${row.topicId}, not ${parentId}`)
+        }
+        continue
+      }
+      const tomb = this.getTombstone('message', cid)
+      if (tomb) continue
+      throw new SyncOrphanError(`orphan order_frame ${op.id} member ${cid} missing`)
+    }
+    const evaluated = evaluateEffectiveOrder({
+      kind: 'topicMessage',
+      parentId,
+      orderedChildIds: [...payload.orderedChildIds],
+      frameClock,
+      liveChildren,
+      childParentLookup
+    })
+    if (evaluated.incomplete) {
+      // Fail-closed coverage gate (SYNC-DATA-035): a frame must never exclude
+      // a member the receiver still holds alive/stable — frames carry no
+      // member-exclusion authority over such children. SyncOrphanError stays
+      // reserved for genuinely resolvable arrival gaps (unknown parent or a
+      // listed member not yet arrived); incompleteness fails closed with
+      // rollback and no cursor advance.
+      throw new Error(
+        `order_frame ${op.id} incomplete: missing ${evaluated.missingIds.slice(0, 5).join(',')} for ${parentId}`
+      )
+    }
+    const effective = evaluated.effective
+    const existing = this.getParentFrame('topicMessage', parentId)
+    if (!existing) {
+      this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+        kind: 'topicMessage',
+        parentId,
+        frameVersion: 'parent-order-frame-v1',
+        orderedChildIds: effective,
+        timestamp: frameClock.timestamp,
+        operationId: frameClock.operationId
+      })
+      this.materializeTopicMessageOrder(db, parentId, effective)
+      return true
+    }
+    const cmp = compareFrameClock(frameClock, { timestamp: existing.timestamp, operationId: existing.operationId })
+    if (cmp < 0) {
+      logger.info(`[applyOrderFrame] older frame ${op.id} loses to ${existing.operationId} for ${parentId}`)
+      return false
+    }
+    if (cmp === 0) {
+      const existingEvaluated = evaluateEffectiveOrder({
+        kind: 'topicMessage',
+        parentId,
+        orderedChildIds: [...existing.orderedChildIds],
+        frameClock: { timestamp: existing.timestamp, operationId: existing.operationId },
+        liveChildren,
+        childParentLookup
+      })
+      if (existingEvaluated.incomplete) {
+        throw new Error(`order_frame ${op.id}: existing frame for ${parentId} is incomplete under merged state`)
+      }
+      const same =
+        existingEvaluated.effective.length === effective.length &&
+        existingEvaluated.effective.every((id, i) => id === effective[i])
+      if (same) {
+        // Idempotent: optionally normalize stored content while retaining clock.
+        if (JSON.stringify(existing.orderedChildIds) !== JSON.stringify(effective)) {
+          this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+            kind: 'topicMessage',
+            parentId,
+            frameVersion: 'parent-order-frame-v1',
+            orderedChildIds: effective,
+            timestamp: existing.timestamp,
+            operationId: existing.operationId
+          })
+          this.materializeTopicMessageOrder(db, parentId, effective)
+        }
+        return false
+      }
+      throw new Error(`order_frame ${op.id}: equal-clock divergence for ${parentId}`)
+    }
+    this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+      kind: 'topicMessage',
+      parentId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: effective,
+      timestamp: frameClock.timestamp,
+      operationId: frameClock.operationId
+    })
+    this.materializeTopicMessageOrder(db, parentId, effective)
+    return true
+  }
+
+  /** Dense sortOrder projection for a topicMessage effective order (local projection only). */
+  private materializeTopicMessageOrder(
+    db: BetterSQLite3Database<typeof schema>,
+    _parentId: string,
+    effective: string[]
+  ): void {
+    for (let i = 0; i < effective.length; i++) {
+      db.update(schema.messages).set({ sortOrder: i }).where(eq(schema.messages.id, effective[i])).run()
     }
   }
 
@@ -4899,6 +5297,9 @@ export class SyncService {
       } catch {}
       try {
         db.delete(schema.syncParentOrderFrame).run()
+      } catch {}
+      try {
+        db.delete(schema.syncFrameHighWater).run()
       } catch {}
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).run()
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_CHANNEL_KEY)).run()

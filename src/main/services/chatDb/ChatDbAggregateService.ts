@@ -1111,9 +1111,10 @@ export class ChatDbAggregateService {
               ctx.deviceId
             )
             notify = true
-            // New trustworthy topic creation: persist empty topicMessage frame with dedicated truthful clock.
+            // New trustworthy topic creation: persist empty topicMessage frame with dedicated truthful clock
+            // and enqueue the matching order_frame op reusing that clock (SYNC-DATA-048, same tx).
             // Existing/pre-010 observations must not be backfilled — only when actually newly created/captured here.
-            syncService.refreshParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
+            syncService.refreshTopicMessageFrameAndEnqueueInTx(tx as unknown as SyncTxExecutor, topicId, ctx.deviceId)
           }
           return null
         })
@@ -1252,7 +1253,13 @@ export class ChatDbAggregateService {
                 messageExistedBefore && messagePre ? isStableMessageStatus(messagePre.status) : false
               if (!messageStable) {
                 if (preStableForFrameEarly && !postStableForFrameEarly) {
-                  syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+                  // Stable→transient overwrite exclusion (SYNC-DATA-048
+                  // errata): transient status never rides the wire, so the
+                  // frame has no member-exclusion authority — invalidate
+                  // locally in the same tx with 0 frame op; the user
+                  // overwrite still succeeds and the candidate stays
+                  // truthful partial.
+                  syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
                   syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageData.id)
                 }
                 return null
@@ -1351,9 +1358,16 @@ export class ChatDbAggregateService {
                   const topicRow = repos.topics.getById(topicId)
                   if (topicRow.found) {
                     if (!messageExistedBefore) {
-                      syncService.refreshParentFrameInTx(stx, 'topicMessage', topicId)
+                      if (syncService.refreshTopicMessageFrameAndEnqueueInTx(stx, topicId, syncCtx.deviceId)) {
+                        syncNotify = true
+                      }
                     } else {
-                      syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+                      if (
+                        syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, syncCtx.deviceId) ===
+                        'refreshed'
+                      ) {
+                        syncNotify = true
+                      }
                     }
                   }
                   const parentMsg = repos.messages.getById(messageData.id)
@@ -1389,6 +1403,14 @@ export class ChatDbAggregateService {
                   } else if (hasBlockInclusionTransition) {
                     syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', messageData.id)
                   }
+                } else if (messageExistedBefore && preStableForFrame && !postStableForFrame) {
+                  // Stable→transient overwrite exclusion via appendMessage
+                  // (SYNC-DATA-048 errata): transient status never rides the
+                  // wire, so no frame op is minted — invalidate locally in
+                  // the same tx; the overwrite still succeeds and the
+                  // candidate stays truthful partial.
+                  syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+                  syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageData.id)
                 }
               }
             }
@@ -1483,15 +1505,23 @@ export class ChatDbAggregateService {
             const postStable = isStableMessageStatus(row.data.status)
             // Inclusion transition handling (stable↔transient) with truthful membership gating
             if (preStable && !postStable) {
-              // Stable→transient: topic frame must exclude child; use helper for missing membership fallback; invalidate messageBlock because parent excluded.
-              syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+              // Stable→transient exclusion (SYNC-DATA-048 errata): transient
+              // status never rides the wire, so the frame has no
+              // member-exclusion authority — invalidate locally in the same
+              // tx with 0 frame op; the user edit still succeeds and the
+              // candidate stays truthful partial. Invalidate messageBlock
+              // because the parent is excluded.
+              syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
               syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
               return null
             }
             if (!preStable && postStable) {
-              // Transient→stable: membership-aware topic refresh vs invalidate; messageBlock parent refresh gated on block membership
-              // Use helper that invalidates if any included sibling lacks membership
-              syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+              // Transient→stable inclusion (SYNC-DATA-048): refresh + exactly
+              // one order_frame reusing the winning clock, else truthful
+              // invalidate with 0 op; messageBlock parent refresh gated on block membership
+              if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
+                notify = true
+              }
               syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', messageId)
               // Continue to sync capture below for stable row
             } else if (preStable && postStable) {
@@ -1829,13 +1859,22 @@ export class ChatDbAggregateService {
               const postMsgStable = mrowForFrame.found ? isStableMessageStatus(mrowForFrame.data.status) : false
               let messageTransitionHandled = false
               if (preMsgStable && !postMsgStable) {
-                // Stable→transient: refresh topic excluding child (helper for missing), invalidate messageBlock
-                syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+                // Stable→transient exclusion (SYNC-DATA-048 errata): transient
+                // status never rides the wire, so no frame op is minted —
+                // invalidate the topic frame locally in the same tx;
+                // invalidate messageBlock because the parent is excluded.
+                syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
                 syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
                 messageTransitionHandled = true
               } else if (!preMsgStable && postMsgStable) {
-                // Transient→stable: topic refresh vs invalidate based on retained membership; messageBlock helper
-                syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'topicMessage', topicId)
+                // Transient→stable inclusion (SYNC-DATA-048): topic refresh +
+                // exactly one order_frame reusing the winning clock, else
+                // truthful invalidate with 0 op; messageBlock helper unchanged
+                if (
+                  syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, syncCtx.deviceId) === 'refreshed'
+                ) {
+                  syncNotify = true
+                }
                 syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', messageId)
                 messageTransitionHandled = true
               } else if (preMsgStable && postMsgStable) {
@@ -1993,13 +2032,16 @@ export class ChatDbAggregateService {
             syncService.enqueueDeleteInTx(stx, 'message', messageId, ctx.ts, ctx.deviceId)
             notify = true
           }
-          // Local parent order frame (010) — truthful persistence prerequisite only
+          // Local parent order frame (SYNC-DATA-048) — strict refresh plus
+          // matching order_frame op reusing the winning frameClock (same tx).
           // Soft-deleted topic still requires its topicMessage frame; only absent/hard-deleted has no frame.
           if (ctx) {
             syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
             const topicRow = repos.topics.getById(topicId)
             if (topicRow.found) {
-              syncService.refreshParentFrameInTx(stx, 'topicMessage', topicId)
+              if (syncService.refreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId)) {
+                notify = true
+              }
             }
           }
           return null
@@ -2042,7 +2084,8 @@ export class ChatDbAggregateService {
               notify = true
             }
           }
-          // Local parent order frame (010) — truthful persistence prerequisite only
+          // Local parent order frame (SYNC-DATA-048) — strict refresh plus
+          // matching order_frame op reusing the winning frameClock (same tx).
           // Soft-deleted topic still requires its topicMessage frame; only absent/hard-deleted has no frame.
           if (ctx && ownedIds.length > 0) {
             for (const did of ownedIds) {
@@ -2050,7 +2093,9 @@ export class ChatDbAggregateService {
             }
             const topicRow = repos.topics.getById(topicId)
             if (topicRow.found) {
-              syncService.refreshParentFrameInTx(stx, 'topicMessage', topicId)
+              if (syncService.refreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId)) {
+                notify = true
+              }
             }
           }
           return null
@@ -2824,14 +2869,36 @@ export class ChatDbAggregateService {
    */
   reorderMessages(topicId: string, messageIds: string[]): ChatDbResult<null> {
     return wrapResult(() => {
-      syncService.throwIfPublishBarrierHeld('reorderMessages')
-      return this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
-        repos.messages.replaceOrder(topicId, messageIds)
-        // Local prerequisite only: invalidate frame atomically (no clock mint)
-        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
-        return null
-      })
+      const ctx = this.syncCtx('reorderMessages')
+      let notify = false
+      let result: null
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          repos.messages.replaceOrder(topicId, messageIds)
+          // Incremental order_frame issuance (SYNC-DATA-048): with complete
+          // stored membership, mint/persist the winning frame and enqueue the
+          // matching order_frame reusing that clock (same tx). With missing
+          // membership, truthfully invalidate without any op and keep the
+          // user reorder successful (existing tryRefreshOrInvalidate semantics).
+          if (ctx) {
+            const outcome = syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(
+              tx as unknown as SyncTxExecutor,
+              topicId,
+              ctx.deviceId
+            )
+            if (outcome === 'refreshed') notify = true
+          } else {
+            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
+          }
+          return null
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('reorderMessages', ctx, e)
+        throw e
+      }
+      if (notify) syncService.notifyEnqueued()
+      return result
     }, `reorderMessages(${topicId})`)
   }
 

@@ -476,7 +476,7 @@ describe('sync parent order frame — missing/malformed/exhaustion rollback', ()
 })
 
 describe('sync parent order frame — unsupported structural paths invalidate', () => {
-  it('reorderMessages, branch, clone, etc invalidate prior frames atomically and do not enqueue frame ops', () => {
+  it('reorderMessages issues order_frame when membership complete; branch/clone/etc still invalidate without frame ops', () => {
     const topicId = 't-unsupported'
     sqlite
       .prepare(`INSERT INTO topics (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`)
@@ -491,13 +491,39 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
     expect(frameBefore.orderedChildIds).toEqual([m1, m2])
     const outboxBefore = outboxCount()
 
-    // reorderMessages should invalidate frame
+    // reorderMessages with complete membership mints a new winning frame +
+    // exactly one order_frame op reusing that clock (SYNC-DATA-048)
     const reorder = agg.reorderMessages(topicId, [m2, m1])
     expect(reorder.ok).toBe(true)
-    expect(frameExists('topicMessage', topicId)).toBe(false)
-    expect(outboxCount()).toBe(outboxBefore) // no new frame op enqueued
+    const frameAfterReorder = getFrame('topicMessage', topicId)!
+    expect(frameAfterReorder.orderedChildIds).toEqual([m2, m1])
+    expect(frameAfterReorder.timestamp).toBeGreaterThan(frameBefore.timestamp)
+    expect(outboxCount()).toBe(outboxBefore + 1)
+    const reorderCandidates = db
+      .select()
+      .from(schema.syncOutbox)
+      .all()
+      .filter((r) => r.op === 'order_frame' && r.entityId === topicId)
+    const reorderOp = reorderCandidates[reorderCandidates.length - 1]
+    expect(reorderOp).toBeDefined()
+    expect(reorderOp.timestamp).toBe(frameAfterReorder.timestamp)
+    expect(reorderOp.id).toBe(frameAfterReorder.operationId)
+    const reorderPayload = JSON.parse(reorderOp.payloadJson as string) as {
+      frameVersion: string
+      kind: string
+      parentId: string
+      orderedChildIds: string[]
+      frameClock: { timestamp: number; operationId: string }
+    }
+    expect(reorderPayload).toEqual({
+      frameVersion: 'parent-order-frame-v1',
+      kind: 'topicMessage',
+      parentId: topicId,
+      orderedChildIds: [m2, m1],
+      frameClock: { timestamp: frameAfterReorder.timestamp, operationId: frameAfterReorder.operationId }
+    })
 
-    // Re-create frame via append new message to have a frame again
+    // Append m3 on top of the reordered frame
     vi.spyOn(Date, 'now').mockReturnValue(2_300_000_000_010)
     // Need to fix legacy missing membership issue: delete existing messages without membership? Actually m1,m2 have membership, but after reorder we lost frame. Append new should recreate with correct max logic using existing memberships.
     // However m1,m2 are still there with correct order [m2,m1] after reorder. The next append's refresh will include all three and need membership for all.
@@ -1005,7 +1031,7 @@ describe('sync parent order frame — soft-delete/restore and hard-delete lifecy
 })
 
 describe('sync parent order frame — inclusion transitions and ordinary edits', () => {
-  it('stable→transient invalidates/refreshes appropriately and transient→stable gates on membership', () => {
+  it('stable→transient invalidates locally (transient exclusion is not a cross-device op) and transient→stable gates on membership', () => {
     const topicId = 't-transition-msg'
     sqlite
       .prepare(`INSERT INTO topics (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`)
@@ -1028,19 +1054,21 @@ describe('sync parent order frame — inclusion transitions and ordinary edits',
     const fBefore = getFrame('topicMessage', topicId)!
     expect(fBefore.orderedChildIds).toEqual(['m-tr-1', 'm-tr-2'])
     expect(frameExists('messageBlock', 'm-tr-1')).toBe(true)
-    // Stable→transient: m-tr-2 becomes streaming
+    // Stable→transient: m-tr-2 becomes streaming (SYNC-DATA-048 errata —
+    // transient status never rides the wire, so the frame has no
+    // member-exclusion authority: same-tx local invalidation, 0 frame op).
+    const outboxBeforeTransient = outboxCount()
     const upd = agg.updateMessage(topicId, 'm-tr-2', { status: 'streaming' } as never)
     expect(upd.ok).toBe(true)
-    const fAfterTransient = getFrame('topicMessage', topicId)!
-    expect(fAfterTransient.orderedChildIds).toEqual(['m-tr-1'])
+    expect(frameExists('topicMessage', topicId)).toBe(false)
+    expect(outboxCount()).toBe(outboxBeforeTransient) // no frame op, no entity op
     // messageBlock frame for excluded parent should be invalidated
     expect(frameExists('messageBlock', 'm-tr-2')).toBe(false)
-    // Ordinary stable→stable content edit does not advance
-    const tsBeforeEdit = getFrame('topicMessage', topicId)!.timestamp
+    // Ordinary stable→stable content edit on the remaining member does not
+    // recreate the frame (frameless stays frameless without a minting path)
     const edit = agg.updateMessage(topicId, 'm-tr-1', { content: 'edited' } as never)
     expect(edit.ok).toBe(true)
-    const fAfterEdit = getFrame('topicMessage', topicId)!
-    expect(fAfterEdit.timestamp).toBe(tsBeforeEdit)
+    expect(frameExists('topicMessage', topicId)).toBe(false)
     // Transient→stable promotion: m-tr-2 retains its original membership (created stable), so refresh should succeed
     const promote = agg.updateMessage(topicId, 'm-tr-2', { status: 'success' } as never)
     expect(promote.ok).toBe(true)

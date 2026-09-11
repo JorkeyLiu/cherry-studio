@@ -5,7 +5,23 @@
 
 export type SyncEntityType = 'topic' | 'message' | 'message_block'
 
-export type SyncOperationKind = 'upsert' | 'delete'
+export type SyncOperationKind = 'upsert' | 'delete' | 'order_frame'
+
+export const PARENT_ORDER_FRAME_VERSION = 'parent-order-frame-v1' as const
+export const ORDER_FRAME_KIND_TOPIC_MESSAGE = 'topicMessage' as const
+
+export interface SyncOrderFrameClock {
+  timestamp: number
+  operationId: string
+}
+
+export interface SyncOrderFramePayload {
+  frameVersion: typeof PARENT_ORDER_FRAME_VERSION
+  kind: typeof ORDER_FRAME_KIND_TOPIC_MESSAGE
+  parentId: string
+  orderedChildIds: string[]
+  frameClock: SyncOrderFrameClock
+}
 
 export interface SyncOperation {
   /** Globally unique operation ID (uuid v4). Tie-break for LWW. */

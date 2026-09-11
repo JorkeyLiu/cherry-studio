@@ -271,3 +271,26 @@ export const syncParentOrderFrame = sqliteTable(
   },
   (table) => [primaryKey({ columns: [table.kind, table.parentId] })]
 )
+
+// ---------------------------------------------------------------------------
+// sync frame timestamp high-water — additive, isolated (012)
+// Per-(kind, parent_id) monotonic guard for winning-frame clocks
+// (SYNC-DATA-048 local implementation invariant): invalidation deletes the
+// winning frame row but MUST NOT lower this mark, so a later re-mint always
+// allocates strictly above every previously persisted winner timestamp for
+// the same parent — even when membership clocks alone would reuse an old
+// timestamp with a fresh random operationId (which could otherwise lose LWW
+// remotely to the invalidated winner). Only a max timestamp is stored (no
+// operationId): local mints always advance strictly +1 above the max.
+// Never on wire; never affects candidate completeness/authority.
+// See migration 012.
+// ---------------------------------------------------------------------------
+export const syncFrameHighWater = sqliteTable(
+  'sync_frame_high_water',
+  {
+    kind: text('kind').notNull(),
+    parentId: text('parent_id').notNull(),
+    maxTimestamp: integer('max_timestamp').notNull()
+  },
+  (table) => [primaryKey({ columns: [table.kind, table.parentId] })]
+)
