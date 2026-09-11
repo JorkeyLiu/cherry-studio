@@ -148,10 +148,9 @@ const MESSAGE_CLOCKED_FIELDS = [
   'modelId',
   'assistantId',
   'createdAt',
-  'updatedAt',
-  'sortOrder'
+  'updatedAt'
 ]
-const BLOCK_CLOCKED_FIELDS = ['type', 'content', 'status', 'createdAt', 'updatedAt', 'sortOrder']
+const BLOCK_CLOCKED_FIELDS = ['type', 'content', 'status', 'createdAt', 'updatedAt']
 
 function seedFullFieldClocks(
   entityType: string,
@@ -184,6 +183,20 @@ function seedMembership(
 
 function seedState(key: string, value: string | null): void {
   sqlite.prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)').run(key, value)
+}
+
+function seedFrame(
+  kind: 'topicMessage' | 'messageBlock',
+  parentId: string,
+  ordered: string[],
+  ts: number,
+  op: string
+): void {
+  sqlite
+    .prepare(
+      'INSERT OR REPLACE INTO sync_parent_order_frame (kind, parent_id, frame_version, ordered_child_ids_json, timestamp, operation_id) VALUES (?, ?, ?, ?, ?, ?)'
+    )
+    .run(kind, parentId, 'parent-order-frame-v1', JSON.stringify(ordered), ts, op)
 }
 
 function seedBoundWatermark(cursor = '7', channel = 'chan-1'): void {
@@ -285,7 +298,7 @@ describe('repeat and insertion-order determinism', () => {
     expect(first.manifest.digest).toMatch(/^[0-9a-f]{64}$/)
     expect(first.kind).toBe('local_sync_baseline_candidate')
     expect(first.schemaVersion).toBe('local-sync-baseline-v1')
-    expect(first.inventoryVersion).toBe('topic-message-stable-block-v1')
+    expect(first.inventoryVersion).toBe('topic-message-stable-block-order-v1')
   })
 
   it('insertion order does not change canonical content or digest', () => {
@@ -383,6 +396,8 @@ describe('allowlist and non-leakage', () => {
     }
     seedMembership('message', 'm-leak', 't-leak', T, 'op-m-leak')
     seedMembership('message_block', 'b-leak', 'm-leak', T, 'op-b-leak')
+    seedFrame('topicMessage', 't-leak', ['m-leak'], T + 10, 'op-frame-leak-t')
+    seedFrame('messageBlock', 'm-leak', ['b-leak'], T + 10, 'op-frame-leak-m')
     seedBoundWatermark()
     const candidate = captureLocalSyncBaselineCandidate(db)
     const json = JSON.stringify(candidate)
@@ -430,13 +445,12 @@ describe('allowlist and non-leakage', () => {
         'role',
         'status',
         'topicId',
-        'updatedAt',
-        'sortOrder'
+        'updatedAt'
       ].sort()
     )
     const block = candidate.entities.find((e) => e.entityId === 'b-leak')
     expect(Object.keys(block?.payload ?? {}).sort()).toEqual(
-      ['content', 'createdAt', 'id', 'messageId', 'status', 'type', 'updatedAt', 'sortOrder'].sort()
+      ['content', 'createdAt', 'id', 'messageId', 'status', 'type', 'updatedAt'].sort()
     )
     expect(candidate.completeness.state).toBe('complete')
   })
@@ -472,6 +486,7 @@ describe('transient and unsupported exclusions', () => {
     expect(candidate.completeness.reasons).toEqual(
       [
         'aggregate-incomplete-child-excluded',
+        'missing-order-frame',
         'orphan-child-suppressed',
         'transient-block-excluded',
         'transient-message-excluded',
@@ -634,6 +649,8 @@ describe('field clocks and unversioned entities', () => {
     }
     seedMembership('message', 'm-c', 't-c', T, 'op-m-c')
     seedMembership('message_block', 'b-c', 'm-c', T, 'op-b-c')
+    seedFrame('topicMessage', 't-c', ['m-c'], T + 10, 'op-frame-tc')
+    seedFrame('messageBlock', 'm-c', ['b-c'], T + 10, 'op-frame-mc')
     seedBoundWatermark()
     const candidate = captureLocalSyncBaselineCandidate(db)
     expect(candidate.completeness).toEqual({ state: 'complete', reasons: [] })
@@ -697,6 +714,8 @@ describe('operation ID shape validation', () => {
     seedFullFieldClocks('message', 'm-max', T, maxId)
     seedMembership('message', 'm-max', 't-max', T, maxId)
     seedState('tombstone:message:m-max-gone', `${T}:${maxId}`)
+    seedFrame('topicMessage', 't-max', ['m-max'], T + 10, maxId)
+    seedFrame('messageBlock', 'm-max', [], T + 10, maxId)
     seedBoundWatermark()
     const candidate = captureLocalSyncBaselineCandidate(db)
     expect(candidate.entities.find((e) => e.entityId === 't-max')?.entityClock).toEqual({
@@ -704,18 +723,9 @@ describe('operation ID shape validation', () => {
       operationId: maxId
     })
     expect(candidate.entities.find((e) => e.entityId === 'm-max')?.fieldClocks).toEqual(
-      [
-        'askId',
-        'assistantId',
-        'content',
-        'createdAt',
-        'model',
-        'modelId',
-        'role',
-        'sortOrder',
-        'status',
-        'updatedAt'
-      ].map((field) => ({ field, timestamp: T, operationId: maxId }))
+      ['askId', 'assistantId', 'content', 'createdAt', 'model', 'modelId', 'role', 'status', 'updatedAt'].map(
+        (field) => ({ field, timestamp: T, operationId: maxId })
+      )
     )
     expect(candidate.tombstones.find((t) => t.entityId === 'm-max-gone')).toMatchObject({
       entityType: 'message',
@@ -731,6 +741,7 @@ describe('observed watermark binding', () => {
     insertTopic('t-w')
     seedEntityClock('topic', 't-w', T, 'op-t-w')
     seedFullFieldClocks('topic', 't-w', T, 'op-t-w')
+    seedFrame('topicMessage', 't-w', [], T + 10, 'op-frame-tw')
     seedBoundWatermark('12', 'chan-abc')
     const candidate = captureLocalSyncBaselineCandidate(db)
     expect(candidate.observedLocalChannelKey).toBe('chan-abc')

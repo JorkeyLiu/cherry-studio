@@ -36,8 +36,9 @@ afterEach(() => {
 
 describe('010_sync_parent_order_frame', () => {
   it('is registered with correct additive DDL and registry count', () => {
-    expect(MIGRATIONS.length).toBe(10)
+    expect(MIGRATIONS.length).toBe(11)
     expect(MIGRATIONS[9].key).toBe('010_sync_parent_order_frame')
+    expect(MIGRATIONS[10].key).toBe('011_sync_parent_order_frame_parent_id_unbounded')
     const joined = MIGRATIONS[9].sql.join(' ')
     expect(joined).toContain('CREATE TABLE IF NOT EXISTS sync_parent_order_frame')
     expect(joined).toContain("CHECK (kind IN ('topicMessage','messageBlock'))")
@@ -52,9 +53,10 @@ describe('010_sync_parent_order_frame', () => {
     const db = drizzle(sqlite, {})
     // Apply through 009 to get pre-010 DB with business data
     runMigrations(db as never, sqlite)
-    // Roll back 010
+    // Roll back 010+011 to simulate pre-010 state (011 depends on 010)
     sqlite.exec('DROP TABLE IF EXISTS sync_parent_order_frame')
     sqlite.prepare(`DELETE FROM migration_state WHERE key='010_sync_parent_order_frame'`).run()
+    sqlite.prepare(`DELETE FROM migration_state WHERE key='011_sync_parent_order_frame_parent_id_unbounded'`).run()
     // Seed business rows that existed BEFORE 010 (no frame should be fabricated)
     sqlite
       .prepare(`INSERT INTO topics (id, assistant_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`)
@@ -69,9 +71,9 @@ describe('010_sync_parent_order_frame', () => {
         `INSERT INTO message_blocks (id, message_id, type, content, status, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run('b-legacy-010', 'm-legacy-010', 'main_text', 'hello', 'success', '2026-01-01', '2026-01-01', 0)
-    // Now apply 010 and assert no frames fabricated
+    // Now apply 010+011 and assert no frames fabricated and final schema is 011 (no 256 cap)
     const applied = runMigrations(db as never, sqlite)
-    expect(applied).toBe(1)
+    expect(applied).toBe(2)
     const count = (sqlite.prepare(`SELECT COUNT(*) as n FROM sync_parent_order_frame`).get() as { n: number }).n
     expect(count).toBe(0)
     const tbl = sqlite
@@ -79,6 +81,8 @@ describe('010_sync_parent_order_frame', () => {
       .get() as { sql: string } | undefined
     expect(tbl?.sql).toContain("CHECK (kind IN ('topicMessage','messageBlock'))")
     expect(tbl?.sql).toContain("frame_version = 'parent-order-frame-v1'")
+    expect(tbl?.sql).toContain('CHECK (length(parent_id) > 0)')
+    expect(tbl?.sql).not.toContain('length(parent_id) <= 256')
   })
 
   it('rejects invalid kind via CHECK', () => {

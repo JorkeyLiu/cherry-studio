@@ -209,7 +209,7 @@ describe('CandidateFtsProjection — deferred search projection maintenance', ()
   it('migration 004 creates the full derived-object inventory (LOCK-FTS-2/6)', () => {
     const sqlite = openTestDb(realPath.join(tempDir, 'chat.db'))
     const applied = applyAllMigrations(sqlite)
-    expect(applied).toBe(10)
+    expect(applied).toBe(11)
 
     expectDerivedPresent(sqlite)
     expect(tableNames(sqlite)).toContain(MESSAGE_BLOCKS_NORMALIZED_TABLE)

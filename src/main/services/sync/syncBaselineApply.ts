@@ -32,7 +32,7 @@ import {
   validateSyncOperationStrict,
   validateSyncPayloadAllowlist
 } from '@shared/sync'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { decodeJson, encodeJson } from '../chatDb/domain/codec'
@@ -42,12 +42,24 @@ import {
   computeLocalSyncBaselineDigest,
   LOCAL_SYNC_BASELINE_INVENTORY_VERSION,
   LOCAL_SYNC_BASELINE_KIND,
+  LOCAL_SYNC_BASELINE_ORDER_FRAME_VERSION,
   LOCAL_SYNC_BASELINE_SCHEMA_VERSION,
   LOCAL_SYNC_BASELINE_SCOPE,
   type LocalSyncBaselineCandidate,
   type LocalSyncBaselineEntity,
   type LocalSyncBaselineTombstone
 } from './syncBaseline'
+import {
+  compareDeletionClock,
+  compareUtf8ByteLex,
+  evaluateEffectiveOrder,
+  isTombstoneWinningOverLive,
+  isValidUnicodeScalarString,
+  validateFrameRowStrict,
+  validateOperationIdStrict,
+  validateOrdinaryIdStrict,
+  validateTimestampStrict
+} from './syncFrameEvaluation'
 import { parseStrictCursor } from './SyncService'
 import {
   formatSyncTombstoneValue,
@@ -89,8 +101,8 @@ const TOMBSTONE_PREFIX: Record<EntityType, string> = {
  * and insertion/update persistence:
  * - topic: 6 required + 3 explicitly optional overflow fields. Absent
  *   optional means canonical null / no overflow entry (never a placeholder).
- * - message: 12 required, always materialized (null allowed except ids/sortOrder).
- * - block: 8 required, always materialized.
+ * - message: 11 required (sortOrder excluded per SYNC-DATA-038), always materialized.
+ * - block: 7 required (sortOrder excluded), always materialized.
  * Required fields must not be removable from a recomputed-digest `complete`
  * candidate. Insert mapping never invents defaults for absent required fields.
  */
@@ -107,19 +119,9 @@ const BASELINE_MESSAGE_REQUIRED = [
   'modelId',
   'assistantId',
   'createdAt',
-  'updatedAt',
-  'sortOrder'
+  'updatedAt'
 ] as const
-const BASELINE_BLOCK_REQUIRED = [
-  'id',
-  'messageId',
-  'type',
-  'content',
-  'status',
-  'createdAt',
-  'updatedAt',
-  'sortOrder'
-] as const
+const BASELINE_BLOCK_REQUIRED = ['id', 'messageId', 'type', 'content', 'status', 'createdAt', 'updatedAt'] as const
 
 function fail(message: string, cause?: unknown): never {
   throw new SyncBaselineApplyError(message, cause === undefined ? undefined : { cause })
@@ -133,25 +135,43 @@ function compareLexical(a: string, b: string): number {
 function compareLww(aTs: number, aId: string, bTs: number, bId: string): number {
   if (aTs !== bTs) return aTs < bTs ? -1 : 1
   if (aId === bId) return 0
-  return aId < bId ? -1 : 1
+  return compareUtf8ByteLex(aId, bId)
 }
 
 function isValidTimestamp(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+  try {
+    validateTimestampStrict(value, 'timestamp')
+    return true
+  } catch {
+    return false
+  }
 }
 
 function requireOperationId(value: unknown, context: string): string {
   try {
-    return parseSyncOperationIdShape(value)
+    return validateOperationIdStrict(value, context)
   } catch (e) {
     fail(`baseline apply malformed operationId for ${context}: ${e instanceof Error ? e.message : String(e)}`, e)
   }
 }
 
+function requireOrdinaryId(value: unknown, context: string): string {
+  try {
+    return validateOrdinaryIdStrict(value, context)
+  } catch (e) {
+    fail(`baseline apply malformed id for ${context}: ${e instanceof Error ? e.message : String(e)}`, e)
+  }
+}
+
+function isValidOrdinaryId(value: unknown): boolean {
+  return typeof value === 'string' && value.length > 0 && isValidUnicodeScalarString(value)
+}
+
 function isSuppressedByTombstone(opTs: number, opId: string, tombTs: number, tombOpId: string | null): boolean {
+  // D2: (T,null) > (T,nonNull); legacy null tombstone suppresses equal-T live operations
   if (tombOpId === null) return opTs <= tombTs
   if (opTs !== tombTs) return opTs < tombTs
-  return opId <= tombOpId
+  return compareUtf8ByteLex(opId, tombOpId) <= 0
 }
 
 function fieldValuesEqual(a: unknown, b: unknown): boolean {
@@ -173,10 +193,6 @@ function isStringOrNull(value: unknown): value is string | null {
 
 function isBooleanOrNull(value: unknown): value is boolean | null {
   return value === null || typeof value === 'boolean'
-}
-
-function isSafeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value)
 }
 
 /**
@@ -229,6 +245,7 @@ function validateBaselineFullPayload(entityType: EntityType, entityId: string, p
     for (const k of keys) {
       if (!required.has(k)) fail(`baseline apply unexpected message field for ${entityId}: ${k}`)
       if (payload[k] === undefined) fail(`baseline apply undefined message field for ${entityId}: ${k}`)
+      if (k === 'sortOrder') fail(`baseline apply unexpected message field for ${entityId}: sortOrder`)
     }
     for (const k of BASELINE_MESSAGE_REQUIRED) {
       if (!Object.prototype.hasOwnProperty.call(payload, k)) {
@@ -250,7 +267,9 @@ function validateBaselineFullPayload(entityType: EntityType, entityId: string, p
     ] as const) {
       if (!isStringOrNull(payload[k])) fail(`baseline apply invalid message ${k} for ${entityId}`)
     }
-    if (!isSafeInteger(payload.sortOrder)) fail(`baseline apply invalid message sortOrder for ${entityId}`)
+    if (Object.prototype.hasOwnProperty.call(payload, 'sortOrder')) {
+      fail(`baseline apply unexpected message sortOrder for ${entityId}`)
+    }
     return
   }
   const required = new Set<string>(BASELINE_BLOCK_REQUIRED)
@@ -260,6 +279,7 @@ function validateBaselineFullPayload(entityType: EntityType, entityId: string, p
   for (const k of keys) {
     if (!required.has(k)) fail(`baseline apply unexpected block field for ${entityId}: ${k}`)
     if (payload[k] === undefined) fail(`baseline apply undefined block field for ${entityId}: ${k}`)
+    if (k === 'sortOrder') fail(`baseline apply unexpected block field for ${entityId}: sortOrder`)
   }
   for (const k of BASELINE_BLOCK_REQUIRED) {
     if (!Object.prototype.hasOwnProperty.call(payload, k)) {
@@ -271,7 +291,9 @@ function validateBaselineFullPayload(entityType: EntityType, entityId: string, p
   for (const k of ['type', 'content', 'status', 'createdAt', 'updatedAt'] as const) {
     if (!isStringOrNull(payload[k])) fail(`baseline apply invalid block ${k} for ${entityId}`)
   }
-  if (!isSafeInteger(payload.sortOrder)) fail(`baseline apply invalid block sortOrder for ${entityId}`)
+  if (Object.prototype.hasOwnProperty.call(payload, 'sortOrder')) {
+    fail(`baseline apply unexpected block sortOrder for ${entityId}`)
+  }
 }
 
 function tombstoneKey(entityType: EntityType, entityId: string): string {
@@ -289,11 +311,19 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
   if (candidate.inventoryVersion !== LOCAL_SYNC_BASELINE_INVENTORY_VERSION) {
     fail('baseline apply inventory version mismatch')
   }
+  if (candidate.orderFrameVersion !== LOCAL_SYNC_BASELINE_ORDER_FRAME_VERSION)
+    fail('baseline apply orderFrameVersion mismatch')
   const manifest = candidate.manifest as LocalSyncBaselineCandidate['manifest'] | undefined
   if (!manifest || typeof manifest !== 'object') fail('baseline apply malformed manifest')
   if (manifest.schemaVersion !== LOCAL_SYNC_BASELINE_SCHEMA_VERSION) fail('baseline apply manifest schema mismatch')
   if (manifest.inventoryVersion !== LOCAL_SYNC_BASELINE_INVENTORY_VERSION) {
     fail('baseline apply manifest inventory mismatch')
+  }
+  if (
+    (manifest as unknown as { orderFrameVersion?: unknown }).orderFrameVersion !==
+    LOCAL_SYNC_BASELINE_ORDER_FRAME_VERSION
+  ) {
+    fail('baseline apply manifest orderFrameVersion mismatch')
   }
   if (manifest.scope !== LOCAL_SYNC_BASELINE_SCOPE) fail('baseline apply scope mismatch')
   if (typeof manifest.digest !== 'string' || !/^[0-9a-f]{64}$/.test(manifest.digest)) {
@@ -307,7 +337,176 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
   }
   if (recomputed !== manifest.digest) fail('baseline apply digest mismatch (tampered candidate)')
 
-  // Bounded safe path only.
+  // --- Manifest exact-keys and numeric shape ---
+  const ec = (manifest as unknown as { entityCounts?: unknown }).entityCounts as Record<string, unknown> | undefined
+  if (!ec || typeof ec !== 'object' || Array.isArray(ec)) fail('baseline apply malformed entityCounts')
+  const ecKeys = Object.keys(ec).sort()
+  const expectedEcKeys = ['message', 'message_block', 'topic', 'total'].sort()
+  if (JSON.stringify(ecKeys) !== JSON.stringify(expectedEcKeys)) fail('baseline apply entityCounts exact keys mismatch')
+  for (const k of expectedEcKeys) {
+    const v = ec[k]
+    if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) fail(`baseline apply malformed entityCounts ${k}`)
+  }
+  const fcRaw = (manifest as unknown as { frameCounts?: unknown }).frameCounts
+  if (!fcRaw || typeof fcRaw !== 'object' || Array.isArray(fcRaw)) fail('baseline apply malformed frameCounts')
+  const fcKeys = Object.keys(fcRaw as Record<string, unknown>).sort()
+  const expectedFcKeys = ['messageBlock', 'topicMessage'].sort()
+  if (JSON.stringify(fcKeys) !== JSON.stringify(expectedFcKeys)) fail('baseline apply frameCounts exact keys mismatch')
+  const frameCounts = fcRaw as { topicMessage: unknown; messageBlock: unknown }
+  if (
+    typeof frameCounts.topicMessage !== 'number' ||
+    !Number.isSafeInteger(frameCounts.topicMessage) ||
+    frameCounts.topicMessage < 0
+  )
+    fail('baseline apply malformed frameCounts topicMessage')
+  if (
+    typeof frameCounts.messageBlock !== 'number' ||
+    !Number.isSafeInteger(frameCounts.messageBlock) ||
+    frameCounts.messageBlock < 0
+  )
+    fail('baseline apply malformed frameCounts messageBlock')
+
+  // Validate numeric counters are safe ints >=0
+  const numericFields: Array<keyof typeof manifest> = [
+    'tombstoneCount',
+    'unversionedEntityCount',
+    'unversionedFieldCount',
+    'unversionedMembershipCount',
+    'excludedTransientMessages',
+    'excludedTransientBlocks',
+    'excludedUnsupportedBlocks',
+    'orphanSuppressedChildren',
+    'aggregateIncompleteParents',
+    'missingOrderFrameCount',
+    'incompleteOrderFrameCount',
+    'pendingOutboxCount'
+  ] as never
+  for (const f of numericFields) {
+    const v = (manifest as unknown as Record<string, unknown>)[f as string]
+    if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0)
+      fail(`baseline apply malformed manifest ${String(f)}`)
+  }
+
+  // --- Candidate/manifest echo exact match for derivable scalars ---
+  if (candidate.pendingOutboxCount !== manifest.pendingOutboxCount)
+    fail('baseline apply pendingOutboxCount echo mismatch')
+  if (candidate.observationBinding !== manifest.observationBinding)
+    fail('baseline apply observationBinding echo mismatch')
+  if (candidate.completeness.state !== manifest.completenessState)
+    fail('baseline apply completenessState echo mismatch')
+  if (
+    JSON.stringify([...candidate.completeness.reasons].sort()) !==
+    JSON.stringify([...manifest.completenessReasons].sort())
+  )
+    fail('baseline apply completenessReasons echo mismatch')
+  if (candidate.schemaVersion !== manifest.schemaVersion) fail('baseline apply schemaVersion echo mismatch')
+  if (candidate.inventoryVersion !== manifest.inventoryVersion) fail('baseline apply inventoryVersion echo mismatch')
+  if (candidate.orderFrameVersion !== (manifest as unknown as { orderFrameVersion: string }).orderFrameVersion)
+    fail('baseline apply orderFrameVersion echo mismatch')
+
+  // --- Known reasons and sorted unique check ---
+  const KNOWN_REASONS = new Set<string>([
+    'observed-watermark-unbound',
+    'transient-message-excluded',
+    'transient-block-excluded',
+    'unsupported-block-excluded',
+    'orphan-child-suppressed',
+    'unversioned-entity',
+    'unversioned-field',
+    'unversioned-membership',
+    'pending-outbox',
+    'aggregate-incomplete-child-excluded',
+    'missing-order-frame',
+    'incomplete-order-frame'
+  ])
+  const checkReasons = (reasons: unknown, ctx: string): string[] => {
+    if (!Array.isArray(reasons)) fail(`baseline apply malformed ${ctx} reasons`)
+    const arr = reasons as unknown[]
+    for (const r of arr) if (typeof r !== 'string') fail(`baseline apply malformed reason ${String(r)} in ${ctx}`)
+    const sorted = [...(arr as string[])].sort()
+    if (JSON.stringify(arr) !== JSON.stringify(sorted)) fail(`baseline apply ${ctx} reasons not sorted`)
+    if (new Set(arr).size !== arr.length) fail(`baseline apply ${ctx} reasons not unique`)
+    for (const r of arr as string[]) if (!KNOWN_REASONS.has(r)) fail(`baseline apply unknown reason ${r} in ${ctx}`)
+    return arr as string[]
+  }
+  const candReasons = checkReasons(candidate.completeness.reasons, 'candidate completeness')
+  const manifestReasons = checkReasons(manifest.completenessReasons, 'manifest completeness')
+  // Ensure candidate and manifest reasons match exactly (already sorted)
+  if (JSON.stringify(candReasons) !== JSON.stringify(manifestReasons))
+    fail('baseline apply completeness reasons echo mismatch')
+
+  // --- Source-observation internal consistency (non-derivable counters) ---
+  const counterReasonMap: Array<[keyof typeof manifest, string]> = [
+    ['excludedTransientMessages', 'transient-message-excluded'],
+    ['excludedTransientBlocks', 'transient-block-excluded'],
+    ['excludedUnsupportedBlocks', 'unsupported-block-excluded'],
+    ['orphanSuppressedChildren', 'orphan-child-suppressed'],
+    ['aggregateIncompleteParents', 'aggregate-incomplete-child-excluded'],
+    ['missingOrderFrameCount', 'missing-order-frame'],
+    ['incompleteOrderFrameCount', 'incomplete-order-frame'],
+    ['pendingOutboxCount', 'pending-outbox'],
+    ['unversionedEntityCount', 'unversioned-entity'],
+    ['unversionedFieldCount', 'unversioned-field'],
+    ['unversionedMembershipCount', 'unversioned-membership']
+  ] as never
+  for (const [field, reason] of counterReasonMap) {
+    const cnt = (manifest as unknown as Record<string, unknown>)[field as string] as number
+    const hasReason = manifestReasons.includes(reason)
+    if (cnt > 0 && !hasReason) fail(`baseline apply manifest ${String(field)}=${cnt} >0 but reason ${reason} absent`)
+    if (cnt === 0 && hasReason) fail(`baseline apply manifest ${String(field)}=0 but reason ${reason} present`)
+  }
+  // aggregateIncompleteParents >0 requires at least one relevant excluded/orphan >0
+  if (manifest.aggregateIncompleteParents > 0) {
+    const relevant =
+      manifest.excludedTransientMessages +
+      manifest.excludedTransientBlocks +
+      manifest.excludedUnsupportedBlocks +
+      manifest.orphanSuppressedChildren
+    if (relevant === 0) fail('baseline apply aggregateIncompleteParents >0 but no excluded/orphan counts >0')
+  }
+  // observation binding consistency
+  if (candidate.observationBinding === 'unbound' || manifest.observationBinding === 'unbound') {
+    if (candidate.observationBinding !== 'unbound' || manifest.observationBinding !== 'unbound')
+      fail('baseline apply observationBinding mismatch bound/unbound')
+    if (candidate.observedLocalChannelKey !== null || candidate.observedLocalCursor !== null)
+      fail('baseline apply unbound must have null observed key/cursor')
+    if ((manifest as unknown as Record<string, unknown>).observationBinding !== 'unbound')
+      fail('baseline apply manifest unbound binding mismatch')
+    if (manifest.completenessState !== 'unbound') fail('baseline apply manifest unbound must have completeness unbound')
+    if (!manifestReasons.includes('observed-watermark-unbound'))
+      fail('baseline apply unbound missing observed-watermark-unbound reason')
+  } else {
+    // bound
+    if (candidate.observedLocalChannelKey === null || candidate.observedLocalCursor === null)
+      fail('baseline apply bound must have non-null observed key/cursor')
+  }
+  // bound+complete iff all reasons empty and all source-diagnostic counters zero; bound+partial iff reasons nonempty
+  const allDiagnosticZero =
+    manifest.excludedTransientMessages === 0 &&
+    manifest.excludedTransientBlocks === 0 &&
+    manifest.excludedUnsupportedBlocks === 0 &&
+    manifest.orphanSuppressedChildren === 0 &&
+    manifest.aggregateIncompleteParents === 0 &&
+    manifest.missingOrderFrameCount === 0 &&
+    manifest.incompleteOrderFrameCount === 0 &&
+    manifest.pendingOutboxCount === 0 &&
+    manifest.unversionedEntityCount === 0 &&
+    manifest.unversionedFieldCount === 0 &&
+    manifest.unversionedMembershipCount === 0
+  if (candidate.observationBinding === 'bound') {
+    if (candidate.completeness.state === 'complete') {
+      if (candReasons.length !== 0) fail('baseline apply bound+complete must have empty reasons')
+      if (!allDiagnosticZero) fail('baseline apply bound+complete must have all diagnostic counters zero')
+      if (manifest.completenessState !== 'complete') fail('baseline apply manifest bound+complete must be complete')
+    } else if (candidate.completeness.state === 'partial') {
+      if (candReasons.length === 0) fail('baseline apply bound+partial must have nonempty reasons')
+      if (manifest.completenessState !== 'partial') fail('baseline apply manifest bound+partial mismatch')
+    } else if (candidate.completeness.state === 'unbound') {
+      fail('baseline apply bound cannot have unbound completeness')
+    }
+  }
+
+  // Bounded safe path only (still enforce complete for apply)
   if (!candidate.completeness || candidate.completeness.state !== 'complete') {
     fail('baseline apply requires complete candidate')
   }
@@ -335,6 +534,7 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
   if (manifest.completenessState !== 'complete') fail('baseline apply manifest must be complete')
   if (manifest.completenessReasons.length !== 0) fail('baseline apply manifest must have empty reasons')
   if (manifest.pendingOutboxCount !== 0) fail('baseline apply manifest must have zero pending outbox')
+  // unversioned counts already checked via counterReasonMap, but keep zero checks for complete
   if (manifest.unversionedEntityCount !== 0) fail('baseline apply manifest must have zero unversioned entities')
   const unversionedFieldCount = (manifest as { unversionedFieldCount?: unknown }).unversionedFieldCount
   if (unversionedFieldCount !== 0) fail('baseline apply manifest must have zero unversioned fields')
@@ -345,6 +545,38 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
   if (manifest.excludedUnsupportedBlocks !== 0) fail('baseline apply manifest must exclude no unsupported blocks')
   if (manifest.orphanSuppressedChildren !== 0) fail('baseline apply manifest must suppress no orphans')
   if (manifest.aggregateIncompleteParents !== 0) fail('baseline apply manifest must have no incomplete parents')
+  // Frame manifest
+  if (
+    (manifest as unknown as { orderFrameVersion?: unknown }).orderFrameVersion !==
+    LOCAL_SYNC_BASELINE_ORDER_FRAME_VERSION
+  ) {
+    fail('baseline apply manifest orderFrameVersion mismatch')
+  }
+  if (!Array.isArray((candidate as unknown as { orderFrames?: unknown }).orderFrames))
+    fail('baseline apply malformed orderFrames')
+  const candidateFrames = (candidate as unknown as { orderFrames: unknown[] })
+    .orderFrames as LocalSyncBaselineCandidate['orderFrames']
+  if (typeof (manifest as unknown as { frameCounts?: unknown }).frameCounts !== 'object')
+    fail('baseline apply malformed frameCounts')
+  const frameCounts2 = (manifest as unknown as { frameCounts: { topicMessage: unknown; messageBlock: unknown } })
+    .frameCounts
+  if (typeof frameCounts2.topicMessage !== 'number' || typeof frameCounts2.messageBlock !== 'number') {
+    fail('baseline apply malformed frameCounts')
+  }
+  if (frameCounts2.topicMessage !== candidateFrames.filter((f) => f.kind === 'topicMessage').length) {
+    fail('baseline apply frameCount topicMessage mismatch')
+  }
+  if (frameCounts2.messageBlock !== candidateFrames.filter((f) => f.kind === 'messageBlock').length) {
+    fail('baseline apply frameCount messageBlock mismatch')
+  }
+  const missingOrderFrameCount = (manifest as unknown as { missingOrderFrameCount?: unknown }).missingOrderFrameCount
+  const incompleteOrderFrameCount = (manifest as unknown as { incompleteOrderFrameCount?: unknown })
+    .incompleteOrderFrameCount
+  if (typeof missingOrderFrameCount !== 'number' || typeof incompleteOrderFrameCount !== 'number') {
+    fail('baseline apply malformed missing/incomplete frame counts')
+  }
+  if (missingOrderFrameCount !== 0) fail('baseline apply manifest must have zero missing order frames')
+  if (incompleteOrderFrameCount !== 0) fail('baseline apply manifest must have zero incomplete order frames')
   if (!Array.isArray(candidate.entities) || !Array.isArray(candidate.tombstones)) {
     fail('baseline apply malformed entities/tombstones')
   }
@@ -357,8 +589,26 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
   ) {
     fail('baseline apply per-type entity count mismatch')
   }
-  // Manifest membership count consistency: computed missing must match manifest value and reasons.
+  // Exact recompute for unversioned counts (derivable)
   {
+    const computedUnversionedEntity = candidate.entities.filter((e) => !e.entityClock).length
+    if ((manifest.unversionedEntityCount as unknown as number) !== computedUnversionedEntity)
+      fail(
+        `baseline apply unversionedEntityCount mismatch manifest ${manifest.unversionedEntityCount} vs computed ${computedUnversionedEntity}`
+      )
+    // unversionedFieldCount: for each entity, count payload clocked fields missing clocks
+    let computedUnversionedField = 0
+    for (const e of candidate.entities) {
+      const allow = BASELINE_FIELD_CLOCK_ALLOW[e.entityType]
+      const present = new Set<string>(Object.keys(e.payload).filter((k) => allow.has(k)))
+      const seen = new Set<string>(e.fieldClocks.map((fc) => fc.field))
+      for (const k of present) if (!seen.has(k)) computedUnversionedField++
+      // extra clocks for absent fields already validated earlier but also count as mismatch? Actually unversionedFieldCount counts missing, not extra; but if extra exists, it would be validated as error earlier. So just missing.
+    }
+    if ((manifest.unversionedFieldCount as unknown as number) !== computedUnversionedField)
+      fail(
+        `baseline apply unversionedFieldCount mismatch manifest ${manifest.unversionedFieldCount} vs computed ${computedUnversionedField}`
+      )
     const computedMissing = candidate.entities.filter((e) => {
       if (e.entityType === 'topic') return false
       const pm = (e as unknown as { parentMembershipClock?: unknown }).parentMembershipClock
@@ -370,9 +620,9 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
         `baseline apply membership count mismatch: manifest ${String(manifestMissing)} vs computed ${computedMissing}`
       )
     }
-    // For complete candidates missing must be zero; partial would have reason (but we already require complete above).
-    // Keep reason consistency check for future: if missing>0 manifest must contain reason, but complete rejects any.
     if (computedMissing !== 0) fail('baseline apply requires zero missing memberships for complete')
+    if (computedUnversionedField !== 0) fail('baseline apply requires zero missing field clocks for complete')
+    if (computedUnversionedEntity !== 0) fail('baseline apply requires zero unversioned entities for complete')
   }
 
   // Entity/tombstone structural validation.
@@ -386,8 +636,11 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
     if (entity.entityType !== 'topic' && entity.entityType !== 'message' && entity.entityType !== 'message_block') {
       fail(`baseline apply unknown entityType ${String((entity as { entityType?: unknown }).entityType)}`)
     }
-    if (typeof entity.entityId !== 'string' || entity.entityId.length === 0) {
-      fail('baseline apply malformed entityId')
+    if (!isValidOrdinaryId(entity.entityId)) fail('baseline apply malformed entityId')
+    try {
+      requireOrdinaryId(entity.entityId, `${entity.entityType}/${entity.entityId}`)
+    } catch (e) {
+      throw e
     }
     const key = `${entity.entityType}:${entity.entityId}`
     if (entityKeys.has(key)) fail(`baseline apply duplicate entity ${entity.entityType}/${entity.entityId}`)
@@ -414,25 +667,16 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
     if (allowErr) fail(`baseline apply payload not allowlisted for ${entity.entityId}: ${allowErr}`)
     validateBaselineFullPayload(entity.entityType, entity.entityId, payload)
     if (entity.entityType === 'message') {
-      if (typeof payload.topicId !== 'string' || payload.topicId.length === 0) {
-        fail(`baseline apply message missing topicId for ${entity.entityId}`)
-      }
+      requireOrdinaryId(payload.topicId, `message/${entity.entityId} topicId`)
       if (!isStableMessageStatus(payload.status)) fail(`baseline apply transient message for ${entity.entityId}`)
     }
     if (entity.entityType === 'message_block') {
-      if (typeof payload.messageId !== 'string' || payload.messageId.length === 0) {
-        fail(`baseline apply block missing messageId for ${entity.entityId}`)
-      }
+      requireOrdinaryId(payload.messageId, `block/${entity.entityId} messageId`)
       if (!isStableBlockStatus(payload.status)) fail(`baseline apply transient block for ${entity.entityId}`)
       const blockType = typeof payload.type === 'string' ? payload.type.toLowerCase() : ''
       if (UNSUPPORTED_BLOCK_TYPES.has(blockType)) {
         fail(`baseline apply unsupported block type for ${entity.entityId}`)
       }
-      // Overflow-carried structured content cannot be represented in the
-      // allowlisted payload; a text-typed shell with such overflow would have
-      // been excluded at capture, so a complete candidate must not carry it.
-      // Observable here only via type gate above; content-shape depth stays
-      // with capture exclusion + completeness.
       if (isUnsupportedBlockForSync({ type: typeof payload.type === 'string' ? payload.type : null })) {
         fail(`baseline apply unsupported block for ${entity.entityId}`)
       }
@@ -474,11 +718,6 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
       }
       requireOperationId(fc.operationId, `${entity.entityType}/${entity.entityId}/${fc.field}`)
     }
-    // Sufficient incoming version metadata: every clocked payload field must
-    // carry a field clock, and every field clock must correspond to a present
-    // allowlisted payload field. Never infer from updatedAt/capture time.
-    // Identity/relation fields (id/topicId/messageId) are excluded: they are
-    // covered by the entity version, not field clocks.
     const presentClocked = new Set<string>()
     for (const k of Object.keys(payload)) {
       if (allow.has(k)) presentClocked.add(k)
@@ -511,11 +750,22 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
       if (typeof pm !== 'object' || Array.isArray(pm) || pm === null) {
         fail(`baseline apply malformed parent membership for ${entity.entityId}`)
       }
-      const pmObj = pm as { timestamp?: unknown; operationId?: unknown }
+      const pmObj = pm as { timestamp?: unknown; operationId?: unknown; parentId?: unknown }
       if (!isValidTimestamp(pmObj.timestamp)) {
         fail(`baseline apply malformed parent membership timestamp for ${entity.entityId}`)
       }
       requireOperationId(pmObj.operationId, `${entity.entityType}/${entity.entityId}/parentMembershipClock`)
+      // Validate parentId via ordinary ID (no 256 bound)
+      if (typeof pmObj.parentId !== 'string' || !isValidOrdinaryId(pmObj.parentId))
+        fail(`baseline apply malformed parentId for ${entity.entityId}`)
+      requireOrdinaryId(pmObj.parentId, `${entity.entityType}/${entity.entityId} parentId`)
+      // Also ensure payload parent matches membership parent
+      const payloadParent =
+        entity.entityType === 'message' ? (payload.topicId as string) : (payload.messageId as string)
+      if (pmObj.parentId !== payloadParent)
+        fail(
+          `baseline apply parentId mismatch for ${entity.entityId}: membership ${pmObj.parentId} vs payload ${payloadParent}`
+        )
     }
   }
 
@@ -542,7 +792,7 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
     if (tomb.entityType !== 'topic' && tomb.entityType !== 'message' && tomb.entityType !== 'message_block') {
       fail('baseline apply unknown tombstone entityType')
     }
-    if (typeof tomb.entityId !== 'string' || tomb.entityId.length === 0) fail('baseline apply malformed tombstone id')
+    requireOrdinaryId(tomb.entityId, `tombstone/${tomb.entityType}`)
     const key = `${tomb.entityType}:${tomb.entityId}`
     if (tombKeys.has(key)) fail(`baseline apply duplicate tombstone ${key}`)
     tombKeys.add(key)
@@ -564,7 +814,6 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
       }
       requireOperationId(tomb.entityClock.operationId, `tombstone-clock/${key}`)
     }
-    // Tombstone value shape must round-trip through the shared codec.
     try {
       const formatted = formatSyncTombstoneValue(tomb.timestamp, tomb.operationId)
       const parsed = parseSyncTombstoneValue(formatted)
@@ -573,6 +822,184 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
       }
     } catch (e) {
       fail(`baseline apply malformed tombstone value for ${key}: ${e instanceof Error ? e.message : String(e)}`, e)
+    }
+  }
+
+  // Order frames validation (strict, fail-closed)
+  {
+    const frames = candidate.orderFrames
+    if (!Array.isArray(frames)) fail('baseline apply malformed orderFrames')
+    const seenKeys = new Set<string>()
+    let lastKind: 'topicMessage' | 'messageBlock' | null = null
+    let lastParentId = ''
+    const kindRank = (k: string): number => (k === 'topicMessage' ? 0 : 1)
+    const frameByKey = new Map<string, (typeof frames)[number]>()
+    for (let idx = 0; idx < frames.length; idx++) {
+      const f = frames[idx] as unknown as Record<string, unknown>
+      if (!f || typeof f !== 'object') fail(`baseline apply malformed orderFrame at index ${idx}`)
+      if (f.frameVersion !== LOCAL_SYNC_BASELINE_ORDER_FRAME_VERSION) {
+        fail(`baseline apply frameVersion mismatch at index ${idx}`)
+      }
+      if (f.kind !== 'topicMessage' && f.kind !== 'messageBlock') {
+        fail(`baseline apply frame kind mismatch at index ${idx}`)
+      }
+      requireOrdinaryId(f.parentId, `frame/${String(f.parentId)} parentId`)
+      if (!Array.isArray(f.orderedChildIds)) fail(`baseline apply malformed orderedChildIds at index ${idx}`)
+      const ids = f.orderedChildIds as unknown[]
+      const seenChild = new Set<string>()
+      for (const cid of ids) {
+        requireOrdinaryId(cid, `frame/${String(f.parentId)} childId`)
+        if (seenChild.has(cid as string))
+          fail(`baseline apply duplicate orderedChildId ${cid} in frame ${String(f.parentId)}`)
+        seenChild.add(cid as string)
+      }
+      if (typeof f.frameClock !== 'object' || f.frameClock === null || Array.isArray(f.frameClock)) {
+        fail(`baseline apply malformed frameClock at index ${idx}`)
+      }
+      const fc = f.frameClock as { timestamp?: unknown; operationId?: unknown }
+      if (!isValidTimestamp(fc.timestamp)) fail(`baseline apply malformed frameClock timestamp at index ${idx}`)
+      requireOperationId(fc.operationId, `frameClock/${String(f.parentId)}`)
+      const key = `${f.kind}:${f.parentId}`
+      if (seenKeys.has(key)) fail(`baseline apply duplicate frame ${key}`)
+      seenKeys.add(key)
+      if (frameByKey.has(key)) fail(`baseline apply duplicate frame ${key}`)
+      frameByKey.set(key, f as never)
+      if (lastKind !== null) {
+        const curRank = kindRank(f.kind as string)
+        const prevRank = kindRank(lastKind as string)
+        if (curRank < prevRank) fail('baseline apply orderFrames not sorted by kind rank')
+        if (curRank === prevRank) {
+          const cmp = compareUtf8ByteLex(lastParentId, f.parentId as string)
+          if (cmp >= 0) {
+            if (cmp === 0) fail(`baseline apply duplicate frame ${key}`)
+            fail('baseline apply orderFrames not sorted by parentId')
+          }
+        }
+      }
+      lastKind = f.kind as never
+      lastParentId = f.parentId as string
+    }
+    const suppressedForFrame = new Set<string>()
+    for (const e of candidate.entities) {
+      const tKey = `${e.entityType}:${e.entityId}`
+      if (!tombKeys.has(tKey) || !e.entityClock) continue
+      const tomb = candidate.tombstones.find((t) => `${t.entityType}:${t.entityId}` === tKey)!
+      const liveTs = e.entityClock.timestamp
+      const liveOp = e.entityClock.operationId
+      let isSuppressed = false
+      if (tomb.operationId === null) {
+        isSuppressed = liveTs <= tomb.timestamp
+      } else {
+        if (liveTs !== tomb.timestamp) isSuppressed = liveTs < tomb.timestamp
+        else isSuppressed = compareUtf8ByteLex(liveOp, tomb.operationId) <= 0
+      }
+      if (isSuppressed) suppressedForFrame.add(tKey)
+    }
+    for (const tid of topicIds) {
+      if (suppressedForFrame.has(`topic:${tid}`)) continue
+      const k = `topicMessage:${tid}`
+      if (!frameByKey.has(k)) fail(`baseline apply missing topicMessage frame for topic "${tid}"`)
+    }
+    for (const mid of messageIds) {
+      if (suppressedForFrame.has(`message:${mid}`)) continue
+      const k = `messageBlock:${mid}`
+      if (!frameByKey.has(k)) fail(`baseline apply missing messageBlock frame for message "${mid}"`)
+    }
+    for (const [, f] of frameByKey) {
+      const kind = (f as unknown as { kind: string }).kind
+      const pid = (f as unknown as { parentId: string }).parentId
+      if (kind === 'topicMessage') {
+        if (!topicIds.has(pid)) fail(`baseline apply frame parent topic unknown/tombstoned "${pid}"`)
+        if (suppressedForFrame.has(`topic:${pid}`)) fail(`baseline apply frame parent topic tombstoned "${pid}"`)
+      } else {
+        if (!messageIds.has(pid)) fail(`baseline apply frame parent message unknown/tombstoned "${pid}"`)
+        if (suppressedForFrame.has(`message:${pid}`)) fail(`baseline apply frame parent message tombstoned "${pid}"`)
+      }
+    }
+    const messagesByTopic = new Map<
+      string,
+      Array<{ id: string; membership: { timestamp: number; operationId: string } }>
+    >()
+    for (const e of candidate.entities) {
+      if (e.entityType === 'message') {
+        if (suppressedForFrame.has(`message:${e.entityId}`)) continue
+        const tid = e.payload.topicId as string
+        const pm = e.parentMembershipClock as { timestamp: number; operationId: string }
+        const arr = messagesByTopic.get(tid) ?? []
+        arr.push({ id: e.entityId, membership: pm })
+        messagesByTopic.set(tid, arr)
+      }
+    }
+    const blocksByMessage = new Map<
+      string,
+      Array<{ id: string; membership: { timestamp: number; operationId: string } }>
+    >()
+    for (const e of candidate.entities) {
+      if (e.entityType === 'message_block') {
+        if (suppressedForFrame.has(`message_block:${e.entityId}`)) continue
+        const mid = e.payload.messageId as string
+        if (suppressedForFrame.has(`message:${mid}`)) continue
+        const pm = e.parentMembershipClock as { timestamp: number; operationId: string }
+        const arr = blocksByMessage.get(mid) ?? []
+        arr.push({ id: e.entityId, membership: pm })
+        blocksByMessage.set(mid, arr)
+      }
+    }
+    for (const f of frames as unknown as Array<{
+      kind: string
+      parentId: string
+      orderedChildIds: string[]
+      frameClock: { timestamp: number; operationId: string }
+    }>) {
+      const isTopic = f.kind === 'topicMessage'
+      const liveChildren = isTopic ? (messagesByTopic.get(f.parentId) ?? []) : (blocksByMessage.get(f.parentId) ?? [])
+      const liveIdSet = new Set(liveChildren.map((c) => c.id))
+      if (f.orderedChildIds.length !== liveIdSet.size) {
+        fail(
+          `baseline apply orderedChildIds length ${f.orderedChildIds.length} != live children ${liveIdSet.size} for parent ${f.parentId}`
+        )
+      }
+      for (const cid of f.orderedChildIds) {
+        if (!liveIdSet.has(cid))
+          fail(`baseline apply orderedChildIds contains unknown/deleted child "${cid}" for parent ${f.parentId}`)
+      }
+      if (new Set(f.orderedChildIds).size !== f.orderedChildIds.length) fail('baseline apply duplicate orderedChildIds')
+      const childMembershipById = new Map<string, { timestamp: number; operationId: string }>()
+      for (const c of liveChildren) childMembershipById.set(c.id, c.membership)
+      let seenGreater = false
+      const suffix: Array<{ id: string; clock: { timestamp: number; operationId: string } }> = []
+      for (let idx = 0; idx < f.orderedChildIds.length; idx++) {
+        const childId = f.orderedChildIds[idx]
+        const mem = childMembershipById.get(childId)!
+        const cmpLex =
+          mem.timestamp !== f.frameClock.timestamp
+            ? mem.timestamp - f.frameClock.timestamp
+            : compareUtf8ByteLex(mem.operationId, f.frameClock.operationId)
+        const isGreater = cmpLex > 0
+        if (isGreater) {
+          seenGreater = true
+          suffix.push({ id: childId, clock: mem })
+        } else {
+          if (seenGreater) {
+            fail(
+              `baseline apply membershipClock suffix violation: covered child "${childId}" after greater-than-frame child for parent ${f.parentId}`
+            )
+          }
+        }
+      }
+      const expectedSuffix = [...suffix].sort((a, b) => {
+        const c =
+          a.clock.timestamp !== b.clock.timestamp
+            ? a.clock.timestamp - b.clock.timestamp
+            : compareUtf8ByteLex(a.clock.operationId, b.clock.operationId)
+        if (c !== 0) return c
+        return compareUtf8ByteLex(a.id, b.id)
+      })
+      for (let i = 0; i < suffix.length; i++) {
+        if (suffix[i].id !== expectedSuffix[i].id) {
+          fail(`baseline apply membershipClock suffix not sorted deterministically for parent ${f.parentId}`)
+        }
+      }
     }
   }
 }
@@ -596,8 +1023,14 @@ function loadLocalClocks(tx: BaselineTx): LocalClocks {
     if (!isValidTimestamp(row.timestamp)) {
       fail(`baseline apply malformed local entity clock for ${key}`)
     }
+    if (typeof row.entityId !== 'string' || row.entityId.length === 0 || !isValidUnicodeScalarString(row.entityId)) {
+      fail(`baseline apply malformed local entity clock id for ${key}`)
+    }
     try {
-      parseSyncOperationIdShape(row.operationId)
+      const parsed = parseSyncOperationIdShape(row.operationId)
+      if (!isValidUnicodeScalarString(parsed)) {
+        throw new Error(`malformed operationId unicode scalar for ${key}`)
+      }
     } catch (e) {
       fail(`baseline apply malformed local entity clock op for ${key}`, e)
     }
@@ -605,6 +1038,7 @@ function loadLocalClocks(tx: BaselineTx): LocalClocks {
   }
   const fieldClockByKey = new Map<string, Map<string, { timestamp: number; operationId: string }>>()
   for (const row of tx.select().from(schema.syncFieldClock).all()) {
+    if (row.field === 'sortOrder') continue // E: legacy sortOrder ignored
     const key = `${row.entityType}:${row.entityId}`
     let inner = fieldClockByKey.get(key)
     if (!inner) {
@@ -615,8 +1049,14 @@ function loadLocalClocks(tx: BaselineTx): LocalClocks {
     if (!isValidTimestamp(row.timestamp)) {
       fail(`baseline apply malformed local field clock for ${key}/${row.field}`)
     }
+    if (typeof row.entityId !== 'string' || row.entityId.length === 0 || !isValidUnicodeScalarString(row.entityId)) {
+      fail(`baseline apply malformed local field clock id for ${key}/${row.field}`)
+    }
     try {
-      parseSyncOperationIdShape(row.operationId)
+      const parsed = parseSyncOperationIdShape(row.operationId)
+      if (!isValidUnicodeScalarString(parsed)) {
+        throw new Error(`malformed operationId unicode scalar for ${key}/${row.field}`)
+      }
     } catch (e) {
       fail(`baseline apply malformed local field clock op for ${key}/${row.field}`, e)
     }
@@ -639,7 +1079,8 @@ function loadLocalClocks(tx: BaselineTx): LocalClocks {
     } else {
       fail(`baseline apply malformed local tombstone key ${JSON.stringify(row.key).slice(0, 80)}`)
     }
-    if (!entityType || entityId.length === 0) fail('baseline apply malformed local tombstone key')
+    if (!entityType || entityId.length === 0 || !isValidUnicodeScalarString(entityId))
+      fail('baseline apply malformed local tombstone key')
     if (row.value === null || row.value === undefined) {
       fail(`baseline apply malformed local tombstone value for ${entityType}/${entityId}: missing`)
     }
@@ -647,6 +1088,9 @@ function loadLocalClocks(tx: BaselineTx): LocalClocks {
     try {
       const result = parseSyncTombstoneValue(row.value)
       if (!result) fail(`baseline apply malformed local tombstone for ${entityType}/${entityId}`)
+      if (result.operationId !== null && !isValidUnicodeScalarString(result.operationId)) {
+        throw new Error(`malformed tombstone operationId unicode scalar for ${entityType}/${entityId}`)
+      }
       parsed = result
     } catch (e) {
       fail(
@@ -666,17 +1110,24 @@ function loadLocalClocks(tx: BaselineTx): LocalClocks {
     if (row.childEntityType !== 'message' && row.childEntityType !== 'message_block') {
       fail(`baseline apply malformed local membership child type for ${key}`)
     }
-    if (typeof row.childEntityId !== 'string' || row.childEntityId.length === 0) {
+    if (
+      typeof row.childEntityId !== 'string' ||
+      row.childEntityId.length === 0 ||
+      !isValidUnicodeScalarString(row.childEntityId)
+    ) {
       fail(`baseline apply malformed local membership child id for ${key}`)
     }
-    if (typeof row.parentId !== 'string' || row.parentId.length === 0) {
+    if (typeof row.parentId !== 'string' || row.parentId.length === 0 || !isValidUnicodeScalarString(row.parentId)) {
       fail(`baseline apply malformed local membership parent for ${key}`)
     }
     if (!isValidTimestamp(row.timestamp)) {
       fail(`baseline apply malformed local membership timestamp for ${key}`)
     }
     try {
-      parseSyncOperationIdShape(row.operationId)
+      const parsed = parseSyncOperationIdShape(row.operationId)
+      if (!isValidUnicodeScalarString(parsed)) {
+        throw new Error(`malformed operationId unicode scalar for ${key}`)
+      }
     } catch (e) {
       fail(`baseline apply malformed local membership op for ${key}`, e)
     }
@@ -712,13 +1163,11 @@ function topicLocalFieldValue(
 
 function messageLocalFieldValue(row: typeof schema.messages.$inferSelect, field: string): unknown {
   const record = row as unknown as Record<string, unknown>
-  if (field === 'sortOrder') return record.sortOrder ?? 0
   return record[field] ?? null
 }
 
 function blockLocalFieldValue(row: typeof schema.messageBlocks.$inferSelect, field: string): unknown {
   const record = row as unknown as Record<string, unknown>
-  if (field === 'sortOrder') return record.sortOrder ?? 0
   return record[field] ?? null
 }
 
@@ -728,11 +1177,12 @@ function incomingTombstoneBeatsLocal(
   localTs: number,
   localOp: string | null
 ): boolean {
-  if (incomingOp === null || localOp === null) {
-    // Legacy-conservative: larger timestamp wins; equal keeps existing.
-    return incomingTs > localTs
-  }
-  return compareLww(incomingTs, incomingOp, localTs, localOp) > 0
+  return (
+    compareDeletionClock(
+      { timestamp: incomingTs, operationId: incomingOp },
+      { timestamp: localTs, operationId: localOp }
+    ) > 0
+  )
 }
 
 function incomingTombstoneWinsOverLocal(
@@ -967,6 +1417,160 @@ export function applyLocalSyncBaselineCandidate(
   db.transaction((tx) => {
     const inner = tx as unknown as BaselineTx
     const { entityClockByKey, fieldClockByKey, tombstoneByKey, membershipByKey } = loadLocalClocks(inner)
+    // Track affected parents for fixed-point materialization
+    const affectedParents = new Set<string>()
+    // Load local frames for LWW with centralized strict validation (A3)
+    const localFrames = new Map<
+      string,
+      {
+        kind: string
+        parentId: string
+        frameVersion: string
+        orderedChildIds: string[]
+        timestamp: number
+        operationId: string
+      }
+    >()
+    try {
+      const rows = inner.select().from(schema.syncParentOrderFrame).all()
+      for (const r of rows) {
+        const key = `${r.kind}:${r.parentId}`
+        let validated: {
+          kind: 'topicMessage' | 'messageBlock'
+          parentId: string
+          orderedChildIds: string[]
+          timestamp: number
+          operationId: string
+        }
+        try {
+          validated = validateFrameRowStrict(
+            {
+              kind: r.kind,
+              parentId: r.parentId,
+              frameVersion: r.frameVersion,
+              orderedChildIdsJson: r.orderedChildIdsJson,
+              timestamp: r.timestamp,
+              operationId: r.operationId
+            },
+            `persisted-frame/${key}`
+          )
+        } catch (e) {
+          throw new SyncBaselineApplyError(
+            `persisted frame malformed for ${key}: ${e instanceof Error ? e.message : String(e)}`,
+            { cause: e }
+          )
+        }
+        localFrames.set(key, {
+          kind: validated.kind,
+          parentId: validated.parentId,
+          frameVersion: 'parent-order-frame-v1',
+          orderedChildIds: validated.orderedChildIds,
+          timestamp: validated.timestamp,
+          operationId: validated.operationId
+        })
+      }
+    } catch (e) {
+      if (e instanceof SyncBaselineApplyError) throw e
+      const msg = e instanceof Error ? e.message : String(e)
+      if (/no such table/i.test(msg)) {
+        // pre-010 table missing is allowed; treat as empty
+      } else {
+        throw e
+      }
+    }
+
+    // --- Persisted target frame parent/liveness validation on load (every row) ---
+    {
+      const toPurge = new Set<string>()
+      for (const [key, frame] of [...localFrames.entries()]) {
+        const kind = frame.kind
+        const parentId = frame.parentId
+        const topicExists = !!inner.select().from(schema.topics).where(eq(schema.topics.id, parentId)).get()
+        const messageExists = !!inner.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+        const blockExists = !!inner
+          .select()
+          .from(schema.messageBlocks)
+          .where(eq(schema.messageBlocks.id, parentId))
+          .get()
+        if (kind === 'topicMessage') {
+          if (messageExists || blockExists) {
+            throw new SyncBaselineApplyError(
+              'persisted wrong-kind frame parent for topicMessage/' +
+                parentId +
+                ': known parent is ' +
+                (messageExists ? 'message' : 'message_block')
+            )
+          }
+          if (!topicExists) {
+            const tomb = tombstoneByKey.get('topic:' + parentId)
+            const liveClock = entityClockByKey.get('topic:' + parentId)
+            let tombWins = false
+            if (tomb) {
+              if (liveClock) tombWins = isTombstoneWinningOverLive(tomb, liveClock)
+              else tombWins = true
+            }
+            if (tombWins) {
+              toPurge.add(key)
+              continue
+            }
+            throw new SyncBaselineApplyError(
+              'persisted orphan frame for topicMessage/' + parentId + ' with no business row or tombstone'
+            )
+          }
+          const tomb = tombstoneByKey.get('topic:' + parentId)
+          const liveClock = entityClockByKey.get('topic:' + parentId)
+          if (tomb && liveClock && isTombstoneWinningOverLive(tomb, liveClock)) {
+            toPurge.add(key)
+            continue
+          }
+        } else {
+          if (topicExists || blockExists) {
+            const wrong = topicExists ? 'topic' : 'message_block'
+            throw new SyncBaselineApplyError(
+              'persisted wrong-kind frame parent for messageBlock/' + parentId + ': known parent is ' + wrong
+            )
+          }
+          if (!messageExists) {
+            const tomb = tombstoneByKey.get('message:' + parentId)
+            const liveClock = entityClockByKey.get('message:' + parentId)
+            let tombWins = false
+            if (tomb) {
+              if (liveClock) tombWins = isTombstoneWinningOverLive(tomb, liveClock)
+              else tombWins = true
+            }
+            if (tombWins) {
+              toPurge.add(key)
+              continue
+            }
+            throw new SyncBaselineApplyError(
+              'persisted orphan frame for messageBlock/' + parentId + ' with no business row or tombstone'
+            )
+          }
+          const msgRow = inner.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+          if (msgRow && !isStableMessageStatus(msgRow.status)) {
+            toPurge.add(key)
+            continue
+          }
+          const tomb = tombstoneByKey.get('message:' + parentId)
+          const liveClock = entityClockByKey.get('message:' + parentId)
+          if (tomb && liveClock && isTombstoneWinningOverLive(tomb, liveClock)) {
+            toPurge.add(key)
+            continue
+          }
+        }
+      }
+      for (const k of toPurge) {
+        const fr = localFrames.get(k)
+        if (!fr) continue
+        inner
+          .delete(schema.syncParentOrderFrame)
+          .where(
+            and(eq(schema.syncParentOrderFrame.kind, fr.kind), eq(schema.syncParentOrderFrame.parentId, fr.parentId))
+          )
+          .run()
+        localFrames.delete(k)
+      }
+    }
 
     // Resolve live+tombstone deterministically by versions (not array order).
     const suppressedLiveKeys = new Set<string>()
@@ -1177,23 +1781,30 @@ export function applyLocalSyncBaselineCandidate(
       // Complete candidates carry non-null parentMembershipClock; suppressed lives already continued above.
       if (entity.entityType === 'message' || entity.entityType === 'message_block') {
         const pm = (entity as unknown as { parentMembershipClock?: unknown }).parentMembershipClock as
-          | { timestamp: number; operationId: string }
+          | { parentId: string; timestamp: number; operationId: string }
           | null
           | undefined
         // Pure validation already guaranteed non-null for complete, but fail closed if missing here.
-        if (!pm || typeof pm !== 'object') {
+        if (!pm || typeof pm !== 'object' || typeof (pm as { parentId?: unknown }).parentId !== 'string') {
           fail(`baseline apply missing parent membership for ${entity.entityId}`)
         }
-        const incomingParentId =
+        // parentId is mandatory and must equal payload parent; no fallback to payload-only
+        if (typeof pm.parentId !== 'string' || !isValidOrdinaryId(pm.parentId)) {
+          fail(`baseline apply malformed parentId for ${entity.entityId}`)
+        }
+        requireOrdinaryId(pm.parentId, `${entity.entityType}/${entity.entityId} parentId`)
+        const payloadParentId =
           entity.entityType === 'message' ? (payload.topicId as string) : (payload.messageId as string)
-        if (typeof incomingParentId !== 'string' || incomingParentId.length === 0) {
-          fail(`baseline apply missing parent id for ${entity.entityId}`)
+        if (pm.parentId !== payloadParentId) {
+          fail(
+            `baseline apply parentId mismatch for ${entity.entityId}: membership ${pm.parentId} vs payload ${payloadParentId}`
+          )
         }
         upsertMembershipClock(
           inner,
           entity.entityType,
           entity.entityId,
-          incomingParentId,
+          pm.parentId,
           pm.timestamp,
           pm.operationId,
           membershipByKey
@@ -1373,10 +1984,7 @@ export function applyLocalSyncBaselineCandidate(
             fail(`baseline apply orphan message ${entity.entityId} parent ${topicId} missing`)
           }
           // Full payload required: no defaults compensate for absent fields.
-          if (!isSafeInteger(payload.sortOrder)) {
-            fail(`baseline apply missing required message sortOrder for ${entity.entityId}`)
-          }
-          const sortOrder = payload.sortOrder
+          const sortOrder = 0 // provisional, materialization will write dense
           inner
             .insert(schema.messages)
             .values({
@@ -1407,6 +2015,7 @@ export function applyLocalSyncBaselineCandidate(
             upsertFieldClock(inner, 'message', entity.entityId, fc.field, fc.timestamp, fc.operationId, fieldClockByKey)
           }
           insertedMessageIds.add(entity.entityId)
+          affectedParents.add(`topicMessage:${topicId}`)
           result.inserted += 1
           continue
         }
@@ -1426,12 +2035,7 @@ export function applyLocalSyncBaselineCandidate(
           if (!BASELINE_FIELD_CLOCK_ALLOW.message.has(field)) continue
           const incomingFc = incomingFcs.get(field)
           if (!incomingFc) fail(`baseline apply missing field clock for ${entity.entityId}/${field}`)
-          let incomingVal: unknown = (payload[field] ?? null) as unknown
-          if (field === 'sortOrder') {
-            const raw = payload[field] as number | null | undefined
-            if (!isSafeInteger(raw)) fail(`baseline apply invalid message sortOrder for ${entity.entityId}`)
-            incomingVal = raw
-          }
+          const incomingVal: unknown = (payload[field] ?? null) as unknown
           const localVal = messageLocalFieldValue(local, field)
           if (fieldValuesEqual(incomingVal, localVal)) {
             const prior = localFcs.get(field)
@@ -1497,6 +2101,7 @@ export function applyLocalSyncBaselineCandidate(
             )
           }
           insertedMessageIds.add(entity.entityId)
+          affectedParents.add(`topicMessage:${topicId}`)
           continue
         }
         const setM: Record<string, unknown> = {}
@@ -1516,6 +2121,7 @@ export function applyLocalSyncBaselineCandidate(
           entityClockByKey
         )
         insertedMessageIds.add(entity.entityId)
+        affectedParents.add(`topicMessage:${topicId}`)
         result.updated += 1
         continue
       }
@@ -1533,10 +2139,7 @@ export function applyLocalSyncBaselineCandidate(
           if (!parentRow && !insertedMessageIds.has(messageId)) {
             fail(`baseline apply orphan block ${entity.entityId} parent ${messageId} missing`)
           }
-          if (!isSafeInteger(payload.sortOrder)) {
-            fail(`baseline apply missing required block sortOrder for ${entity.entityId}`)
-          }
-          const sortOrder = payload.sortOrder
+          const sortOrder = 0 // provisional
           inner
             .insert(schema.messageBlocks)
             .values({
@@ -1571,6 +2174,7 @@ export function applyLocalSyncBaselineCandidate(
             )
           }
           result.inserted += 1
+          affectedParents.add(`messageBlock:${messageId}`)
           continue
         }
         if (local.messageId !== messageId) {
@@ -1589,12 +2193,7 @@ export function applyLocalSyncBaselineCandidate(
           if (!BASELINE_FIELD_CLOCK_ALLOW.message_block.has(field)) continue
           const incomingFc = incomingFcs.get(field)
           if (!incomingFc) fail(`baseline apply missing field clock for ${entity.entityId}/${field}`)
-          let incomingVal: unknown = (payload[field] ?? null) as unknown
-          if (field === 'sortOrder') {
-            const raw = payload[field] as number | null | undefined
-            if (!isSafeInteger(raw)) fail(`baseline apply invalid block sortOrder for ${entity.entityId}`)
-            incomingVal = raw
-          }
+          const incomingVal: unknown = (payload[field] ?? null) as unknown
           const localVal = blockLocalFieldValue(local, field)
           if (fieldValuesEqual(incomingVal, localVal)) {
             const prior = localFcs.get(field)
@@ -1659,6 +2258,7 @@ export function applyLocalSyncBaselineCandidate(
               entityClockByKey
             )
           }
+          affectedParents.add(`messageBlock:${messageId}`)
           continue
         }
         const setB: Record<string, unknown> = {}
@@ -1685,14 +2285,18 @@ export function applyLocalSyncBaselineCandidate(
           incomingEntityClock.operationId,
           entityClockByKey
         )
+        affectedParents.add(`messageBlock:${messageId}`)
         result.updated += 1
         continue
       }
     }
 
+    // Tombstone application comes before frame merge so that liveness is final.
     // Apply winning tombstones with cascade/containment. F2 runs before the
     // winning check so any tombstone targeting unversioned live fails closed
     // regardless of strength; whole transaction rolls back.
+    // Capture affected parents for each winning delete before row removal.
+    const tombstoneAffectedParents = new Set<string>()
     for (const tomb of candidate.tombstones) {
       const key = `${tomb.entityType}:${tomb.entityId}`
       requireVersionedLiveForTombstone(inner, tomb.entityType, tomb.entityId, entityClockByKey)
@@ -1701,15 +2305,16 @@ export function applyLocalSyncBaselineCandidate(
         continue
       }
       if (tomb.entityType === 'topic') {
+        // Capture child messages before delete for containment tombstones and frame cleanup
         const childIds: string[] = inner
           .select({ id: schema.messages.id })
           .from(schema.messages)
           .where(eq(schema.messages.topicId, tomb.entityId))
           .all()
           .map((r) => r.id)
+        // Capture membership parent for each child to know descendant blocks? Use membership map
         const existing = inner.select().from(schema.topics).where(eq(schema.topics.id, tomb.entityId)).get()
         if (existing) {
-          // FK cascade removes messages/blocks/file_refs/segments/memberships.
           inner.delete(schema.topics).where(eq(schema.topics.id, tomb.entityId)).run()
           result.deleted += 1
         } else {
@@ -1730,14 +2335,23 @@ export function applyLocalSyncBaselineCandidate(
         }
         for (const mid of childIds) {
           persistTombstone(inner, 'message', mid, tomb.timestamp, tomb.operationId, tombstoneByKey)
+          // Mark descendant block frames for removal; they will be cleaned after frame merge
+          tombstoneAffectedParents.add(`messageBlock:${mid}`)
         }
-        // If the live candidate also carried the same topic suppressed above,
-        // the delete above already accounts for it; suppressed count stays.
+        tombstoneAffectedParents.add(`topicMessage:${tomb.entityId}`)
+        // Also mark topic's own frame for removal
+        affectedParents.add(`topicMessage:${tomb.entityId}`)
+        for (const mid of childIds) affectedParents.add(`messageBlock:${mid}`)
       } else if (tomb.entityType === 'message') {
+        // Capture parent topic before delete for fixed-point
         const existing = inner.select().from(schema.messages).where(eq(schema.messages.id, tomb.entityId)).get()
-        const topicIdForCleanup = existing?.topicId ?? null
+        const topicIdForCleanup = existing?.topicId ?? membershipByKey.get(`message:${tomb.entityId}`)?.parentId ?? null
+        // Capture before delete for affectedParents
+        if (topicIdForCleanup) affectedParents.add(`topicMessage:${topicIdForCleanup}`)
+        affectedParents.add(`messageBlock:${tomb.entityId}`)
+        tombstoneAffectedParents.add(`messageBlock:${tomb.entityId}`)
+        if (topicIdForCleanup) tombstoneAffectedParents.add(`topicMessage:${topicIdForCleanup}`)
         if (existing) {
-          // FK cascade removes blocks/file_refs/memberships.
           inner.delete(schema.messages).where(eq(schema.messages.id, tomb.entityId)).run()
           if (topicIdForCleanup) deleteEmptySegmentsForTopic(inner, topicIdForCleanup)
           result.deleted += 1
@@ -1758,13 +2372,19 @@ export function applyLocalSyncBaselineCandidate(
           )
         }
       } else {
+        // message_block
         const existing = inner
           .select()
           .from(schema.messageBlocks)
           .where(eq(schema.messageBlocks.id, tomb.entityId))
           .get()
+        const parentMessageId =
+          existing?.messageId ?? membershipByKey.get(`message_block:${tomb.entityId}`)?.parentId ?? null
+        if (parentMessageId) {
+          affectedParents.add(`messageBlock:${parentMessageId}`)
+          tombstoneAffectedParents.add(`messageBlock:${parentMessageId}`)
+        }
         if (existing) {
-          // FK cascade removes file_refs.
           inner.delete(schema.messageBlocks).where(eq(schema.messageBlocks.id, tomb.entityId)).run()
           result.deleted += 1
         } else {
@@ -1783,6 +2403,508 @@ export function applyLocalSyncBaselineCandidate(
             entityClockByKey
           )
         }
+      }
+    }
+
+    // Merge winning frames with normalized-baseline semantics (B).
+    // After entity/tombstone/membership merge, evaluate existing local raw winner's semantic effective
+    // sequence under merged live state. Higher clock wins (persist incoming normalized), lower loses
+    // (keep existing), equal clock: compare semantic effective sequences under merged state; if equal
+    // accept idempotently (optionally normalize stored row while retaining clock), if divergent fail closed.
+    // This is arrival-order independent because effective is always re-derived from the selected raw winner.
+    for (const frame of candidate.orderFrames) {
+      const key = `${frame.kind}:${frame.parentId}`
+      // Skip persisting frame for tombstoned (deleted) parents where tombstone actually wins over live
+      const parentEntityType = frame.kind === 'topicMessage' ? 'topic' : 'message'
+      const parentKey = `${parentEntityType}:${frame.parentId}`
+      const parentLiveClock = entityClockByKey.get(parentKey)
+      const parentTomb = tombstoneByKey.get(parentKey)
+      let parentIsLive = false
+      if (parentTomb && parentLiveClock) {
+        // Check if tombstone actually wins over live
+        if (isTombstoneWinningOverLive(parentTomb, parentLiveClock)) parentIsLive = false
+        else parentIsLive = true
+      } else if (parentTomb && !parentLiveClock) {
+        // No live row but tombstone exists => deleted (no frame)
+        parentIsLive = false
+      } else {
+        // Check if parent row exists
+        let exists = false
+        if (frame.kind === 'topicMessage')
+          exists = !!inner.select().from(schema.topics).where(eq(schema.topics.id, frame.parentId)).get()
+        else exists = !!inner.select().from(schema.messages).where(eq(schema.messages.id, frame.parentId)).get()
+        parentIsLive = exists
+      }
+      if (!parentIsLive) {
+        // Ensure no frame remains for deleted parent
+        inner
+          .delete(schema.syncParentOrderFrame)
+          .where(
+            and(
+              eq(schema.syncParentOrderFrame.kind, frame.kind),
+              eq(schema.syncParentOrderFrame.parentId, frame.parentId)
+            )
+          )
+          .run()
+        localFrames.delete(key)
+        affectedParents.delete(key)
+        continue
+      }
+      const existing = localFrames.get(key)
+      if (!existing) {
+        inner
+          .insert(schema.syncParentOrderFrame)
+          .values({
+            kind: frame.kind,
+            parentId: frame.parentId,
+            frameVersion: frame.frameVersion,
+            orderedChildIdsJson: JSON.stringify(frame.orderedChildIds),
+            timestamp: frame.frameClock.timestamp,
+            operationId: frame.frameClock.operationId
+          })
+          .run()
+        localFrames.set(key, {
+          kind: frame.kind,
+          parentId: frame.parentId,
+          frameVersion: frame.frameVersion,
+          orderedChildIds: [...frame.orderedChildIds],
+          timestamp: frame.frameClock.timestamp,
+          operationId: frame.frameClock.operationId
+        })
+        affectedParents.add(key)
+        continue
+      }
+      const cmp = compareLww(
+        frame.frameClock.timestamp,
+        frame.frameClock.operationId,
+        existing.timestamp,
+        existing.operationId
+      )
+      if (cmp > 0) {
+        inner
+          .insert(schema.syncParentOrderFrame)
+          .values({
+            kind: frame.kind,
+            parentId: frame.parentId,
+            frameVersion: frame.frameVersion,
+            orderedChildIdsJson: JSON.stringify(frame.orderedChildIds),
+            timestamp: frame.frameClock.timestamp,
+            operationId: frame.frameClock.operationId
+          })
+          .onConflictDoUpdate({
+            target: [schema.syncParentOrderFrame.kind, schema.syncParentOrderFrame.parentId],
+            set: {
+              frameVersion: frame.frameVersion,
+              orderedChildIdsJson: JSON.stringify(frame.orderedChildIds),
+              timestamp: frame.frameClock.timestamp,
+              operationId: frame.frameClock.operationId
+            }
+          })
+          .run()
+        localFrames.set(key, {
+          kind: frame.kind,
+          parentId: frame.parentId,
+          frameVersion: frame.frameVersion,
+          orderedChildIds: [...frame.orderedChildIds],
+          timestamp: frame.frameClock.timestamp,
+          operationId: frame.frameClock.operationId
+        })
+        affectedParents.add(key)
+      } else if (cmp < 0) {
+        // Lower loses, keep existing but still mark affected for fixed-point
+        affectedParents.add(key)
+      } else {
+        // Equal clock: compare semantic effective sequences under merged live state
+        // Build liveChildren for this parent strictly (fail if any live child missing membership)
+        const buildLiveStrict = (
+          kind: 'topicMessage' | 'messageBlock',
+          parentId: string
+        ): Map<string, { timestamp: number; operationId: string }> => {
+          if (kind === 'topicMessage') {
+            const rows = inner
+              .select({ id: schema.messages.id })
+              .from(schema.messages)
+              .where(eq(schema.messages.topicId, parentId))
+              .all()
+            const map = new Map<string, { timestamp: number; operationId: string }>()
+            for (const r of rows) {
+              const mem = membershipByKey.get(`message:${r.id}`)
+              if (!mem || mem.parentId !== parentId)
+                fail(`baseline apply missing valid membership for live message ${r.id} under ${parentId}`)
+              const msgRow = inner.select().from(schema.messages).where(eq(schema.messages.id, r.id)).get()
+              if (!msgRow || !isStableMessageStatus(msgRow.status)) continue
+              map.set(r.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+            }
+            return map
+          } else {
+            const rows = inner
+              .select({ id: schema.messageBlocks.id })
+              .from(schema.messageBlocks)
+              .where(eq(schema.messageBlocks.messageId, parentId))
+              .all()
+            const map = new Map<string, { timestamp: number; operationId: string }>()
+            for (const r of rows) {
+              const mem = membershipByKey.get(`message_block:${r.id}`)
+              if (!mem || mem.parentId !== parentId)
+                fail(`baseline apply missing valid membership for live block ${r.id} under ${parentId}`)
+              const blkRow = inner.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, r.id)).get()
+              if (!blkRow || !isStableBlockStatus(blkRow.status)) continue
+              let overflow: Record<string, unknown> = {}
+              try {
+                overflow = blkRow.extra ? (JSON.parse(blkRow.extra) as Record<string, unknown>) : {}
+              } catch {}
+              if (isUnsupportedBlockForSync({ type: blkRow.type, overflow })) continue
+              map.set(r.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+            }
+            return map
+          }
+        }
+        const liveMap = buildLiveStrict(frame.kind, frame.parentId)
+        const childParentLookup = (cid: string): { parentId: string | null; exists: boolean } | null => {
+          if (frame.kind === 'topicMessage') {
+            const row = inner.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
+            if (!row) return { parentId: null, exists: false }
+            const mem = membershipByKey.get(`message:${cid}`)
+            if (mem) return { parentId: mem.parentId, exists: true }
+            return { parentId: row.topicId, exists: true }
+          } else {
+            const row = inner.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, cid)).get()
+            if (!row) return { parentId: null, exists: false }
+            const mem = membershipByKey.get(`message_block:${cid}`)
+            if (mem) return { parentId: mem.parentId, exists: true }
+            return { parentId: row.messageId, exists: true }
+          }
+        }
+        let existingEffective: string[]
+        let incomingEffective: string[]
+        try {
+          const exEval = evaluateEffectiveOrder({
+            kind: frame.kind,
+            parentId: frame.parentId,
+            orderedChildIds: existing.orderedChildIds,
+            frameClock: { timestamp: existing.timestamp, operationId: existing.operationId },
+            liveChildren: liveMap,
+            childParentLookup
+          })
+          existingEffective = exEval.effective
+        } catch (e) {
+          fail(
+            `baseline apply frame parent mismatch for ${key} existing: ${e instanceof Error ? e.message : String(e)}`,
+            e
+          )
+        }
+        try {
+          const incEval = evaluateEffectiveOrder({
+            kind: frame.kind,
+            parentId: frame.parentId,
+            orderedChildIds: frame.orderedChildIds,
+            frameClock: { timestamp: frame.frameClock.timestamp, operationId: frame.frameClock.operationId },
+            liveChildren: liveMap,
+            childParentLookup
+          })
+          incomingEffective = incEval.effective
+        } catch (e) {
+          fail(
+            `baseline apply frame parent mismatch for ${key} incoming: ${e instanceof Error ? e.message : String(e)}`,
+            e
+          )
+        }
+        if (JSON.stringify(existingEffective) !== JSON.stringify(incomingEffective)) {
+          fail(
+            `baseline apply frame clock conflict for ${key}: equal clock with semantically divergent effective content`
+          )
+        }
+        // Idempotent: optionally normalize stored row to incoming normalized (retain clock)
+        if (JSON.stringify(existing.orderedChildIds) !== JSON.stringify(frame.orderedChildIds)) {
+          inner
+            .insert(schema.syncParentOrderFrame)
+            .values({
+              kind: frame.kind,
+              parentId: frame.parentId,
+              frameVersion: frame.frameVersion,
+              orderedChildIdsJson: JSON.stringify(frame.orderedChildIds),
+              timestamp: existing.timestamp,
+              operationId: existing.operationId
+            })
+            .onConflictDoUpdate({
+              target: [schema.syncParentOrderFrame.kind, schema.syncParentOrderFrame.parentId],
+              set: { orderedChildIdsJson: JSON.stringify(frame.orderedChildIds) }
+            })
+            .run()
+          localFrames.set(key, { ...existing, orderedChildIds: [...frame.orderedChildIds] })
+        }
+        affectedParents.add(key)
+      }
+    }
+
+    // Clean up frames for tombstoned parents that may have been missed (winning tombstones)
+    for (const tomb of candidate.tombstones) {
+      const k = `${tomb.entityType}:${tomb.entityId}`
+      if (!winningTombKeys.has(k)) continue
+      if (tomb.entityType === 'topic') {
+        inner
+          .delete(schema.syncParentOrderFrame)
+          .where(
+            and(
+              eq(schema.syncParentOrderFrame.kind, 'topicMessage'),
+              eq(schema.syncParentOrderFrame.parentId, tomb.entityId)
+            )
+          )
+          .run()
+        localFrames.delete(`topicMessage:${tomb.entityId}`)
+        affectedParents.delete(`topicMessage:${tomb.entityId}`)
+        // Descendant messageBlock frames already handled via tombstoneAffectedParents
+        for (const kk of [...tombstoneAffectedParents]) {
+          if (kk.startsWith('messageBlock:')) {
+            const mid = kk.slice('messageBlock:'.length)
+            inner
+              .delete(schema.syncParentOrderFrame)
+              .where(
+                and(eq(schema.syncParentOrderFrame.kind, 'messageBlock'), eq(schema.syncParentOrderFrame.parentId, mid))
+              )
+              .run()
+            localFrames.delete(kk)
+            affectedParents.delete(kk)
+          }
+        }
+      } else if (tomb.entityType === 'message') {
+        inner
+          .delete(schema.syncParentOrderFrame)
+          .where(
+            and(
+              eq(schema.syncParentOrderFrame.kind, 'messageBlock'),
+              eq(schema.syncParentOrderFrame.parentId, tomb.entityId)
+            )
+          )
+          .run()
+        localFrames.delete(`messageBlock:${tomb.entityId}`)
+        affectedParents.delete(`messageBlock:${tomb.entityId}`)
+      }
+    }
+
+    // Fixed-point re-evaluation and dense sortOrder materialization for every affected parent (C)
+    // C1: enumerate ALL live stable/inventory-supported children; if any lacks valid matching membership clock, fail closed before materializing
+    // C2: absence never deletes local-only children; versioned local-only with membership > frameClock append deterministically, <= missing from winner => incomplete => fail
+    // C3: every structurally affected parent already collected in affectedParents (child create/update, block tombstone parent, message tombstone parent+own block, topic cascade, reappearance)
+    // C4/C5: liveness via actual winner between live entity clock and tombstone deletion clock (null barrier, UTF-8 lex); only winning tombstone deletes frame, live parent requires winning frame, empty child set materializes empty
+    const loadLiveChildrenForTopicStrict = (
+      topicId: string
+    ): Map<string, { timestamp: number; operationId: string }> => {
+      const rows = inner
+        .select({ id: schema.messages.id, status: schema.messages.status })
+        .from(schema.messages)
+        .where(eq(schema.messages.topicId, topicId))
+        .all()
+      const map = new Map<string, { timestamp: number; operationId: string }>()
+      for (const r of rows as Array<{ id: string; status: string | null }>) {
+        if (!isStableMessageStatus(r.status)) continue
+        const mem = membershipByKey.get(`message:${r.id}`)
+        if (!mem || mem.parentId !== topicId)
+          fail(`baseline apply missing valid membership for live message ${r.id} under topic ${topicId}`)
+        // Validate membership clock shape strictly
+        try {
+          validateFrameRowStrict(
+            {
+              kind: 'topicMessage',
+              parentId: topicId,
+              frameVersion: 'parent-order-frame-v1',
+              orderedChildIdsJson: '[]',
+              timestamp: mem.timestamp,
+              operationId: mem.operationId
+            },
+            `membership/${r.id}`
+          )
+        } catch (e) {
+          fail(
+            `baseline apply malformed membership clock for message/${r.id}: ${e instanceof Error ? e.message : String(e)}`,
+            e
+          )
+        }
+        map.set(r.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+      }
+      return map
+    }
+    const loadLiveChildrenForMessageStrict = (
+      messageId: string
+    ): Map<string, { timestamp: number; operationId: string }> => {
+      const rows = inner
+        .select({
+          id: schema.messageBlocks.id,
+          status: schema.messageBlocks.status,
+          type: schema.messageBlocks.type,
+          extra: schema.messageBlocks.extra
+        })
+        .from(schema.messageBlocks)
+        .where(eq(schema.messageBlocks.messageId, messageId))
+        .all()
+      const map = new Map<string, { timestamp: number; operationId: string }>()
+      for (const r of rows as Array<{ id: string; status: string | null; type: string | null; extra: string | null }>) {
+        if (!isStableBlockStatus(r.status)) continue
+        let overflow: Record<string, unknown> = {}
+        try {
+          overflow = r.extra ? (JSON.parse(r.extra) as Record<string, unknown>) : {}
+        } catch (e) {
+          fail(`baseline apply malformed block extra for ${r.id}: ${e instanceof Error ? e.message : String(e)}`, e)
+        }
+        if (isUnsupportedBlockForSync({ type: r.type, overflow })) continue
+        const mem = membershipByKey.get(`message_block:${r.id}`)
+        if (!mem || mem.parentId !== messageId)
+          fail(`baseline apply missing valid membership for live block ${r.id} under message ${messageId}`)
+        try {
+          validateFrameRowStrict(
+            {
+              kind: 'messageBlock',
+              parentId: messageId,
+              frameVersion: 'parent-order-frame-v1',
+              orderedChildIdsJson: '[]',
+              timestamp: mem.timestamp,
+              operationId: mem.operationId
+            },
+            `membership/${r.id}`
+          )
+        } catch (e) {
+          fail(
+            `baseline apply malformed membership clock for block/${r.id}: ${e instanceof Error ? e.message : String(e)}`,
+            e
+          )
+        }
+        map.set(r.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+      }
+      return map
+    }
+    for (const key of [...affectedParents]) {
+      let kind: 'topicMessage' | 'messageBlock'
+      let parentId: string
+      if (key.startsWith('topicMessage:')) {
+        kind = 'topicMessage'
+        parentId = key.slice('topicMessage:'.length)
+      } else if (key.startsWith('messageBlock:')) {
+        kind = 'messageBlock'
+        parentId = key.slice('messageBlock:'.length)
+      } else {
+        fail(`baseline apply malformed affected parent key ${JSON.stringify(key).slice(0, 80)}`)
+      }
+      const tKey = kind === 'topicMessage' ? `topic:${parentId}` : `message:${parentId}`
+      // C4: determine actual liveness via winner between live entity clock and tombstone deletion clock
+      const liveClock = entityClockByKey.get(tKey)
+      const tomb = tombstoneByKey.get(tKey)
+      let isLive = false
+      let isTombstoneWinning = false
+      if (tomb && liveClock) {
+        if (isTombstoneWinningOverLive(tomb, liveClock)) {
+          isLive = false
+          isTombstoneWinning = true
+        } else {
+          isLive = true
+          isTombstoneWinning = false
+        }
+      } else if (tomb && !liveClock) {
+        // Check if parent row actually exists (hard delete without clock? but tombstone without live => deleted)
+        let rowExists = false
+        if (kind === 'topicMessage')
+          rowExists = !!inner.select().from(schema.topics).where(eq(schema.topics.id, parentId)).get()
+        else rowExists = !!inner.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+        if (rowExists) {
+          // Unversioned live row with tombstone => fail closed already handled in requireVersionedLiveForTombstone, but here treat as live winning? Actually F2 would have failed, but if we reach here, treat as tombstone not winning if no liveClock?
+          // For safety, if row exists but no liveClock, we already failed earlier; but to be strict, consider tombstone not winning if liveClock missing? However C1 says unversioned live with tombstone fails closed, so we would have thrown.
+          isLive = !rowExists
+          isTombstoneWinning = rowExists ? false : true
+        } else {
+          isLive = false
+          isTombstoneWinning = true
+        }
+      } else {
+        let rowExists = false
+        if (kind === 'topicMessage')
+          rowExists = !!inner.select().from(schema.topics).where(eq(schema.topics.id, parentId)).get()
+        else rowExists = !!inner.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+        isLive = rowExists
+      }
+      if (isTombstoneWinning) {
+        // C5: tombstoned/deleted parent removes persistent frame only when tombstone actually wins
+        inner
+          .delete(schema.syncParentOrderFrame)
+          .where(and(eq(schema.syncParentOrderFrame.kind, kind), eq(schema.syncParentOrderFrame.parentId, parentId)))
+          .run()
+        localFrames.delete(key)
+        continue
+      }
+      if (!isLive) {
+        // Parent gone without winning tombstone (should not happen for complete candidate, but skip)
+        inner
+          .delete(schema.syncParentOrderFrame)
+          .where(and(eq(schema.syncParentOrderFrame.kind, kind), eq(schema.syncParentOrderFrame.parentId, parentId)))
+          .run()
+        continue
+      }
+      const winning = localFrames.get(key)
+      if (!winning) {
+        fail(`baseline apply missing winning frame for live parent ${key}`)
+      }
+      // Validate persisted winning frame strictly (centralized) before evaluation
+      try {
+        validateFrameRowStrict(
+          {
+            kind: winning.kind,
+            parentId: winning.parentId,
+            frameVersion: winning.frameVersion,
+            orderedChildIdsJson: JSON.stringify(winning.orderedChildIds),
+            timestamp: winning.timestamp,
+            operationId: winning.operationId
+          },
+          `persisted-frame/${key}`
+        )
+      } catch (e) {
+        fail(`baseline apply malformed persisted frame for ${key}: ${e instanceof Error ? e.message : String(e)}`, e)
+      }
+      const liveMap =
+        kind === 'topicMessage' ? loadLiveChildrenForTopicStrict(parentId) : loadLiveChildrenForMessageStrict(parentId)
+      const childParentLookup = (cid: string): { parentId: string | null; exists: boolean } | null => {
+        if (kind === 'topicMessage') {
+          const row = inner.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
+          if (!row) return { parentId: null, exists: false }
+          const mem = membershipByKey.get(`message:${cid}`)
+          if (mem) return { parentId: mem.parentId, exists: true }
+          return { parentId: row.topicId, exists: true }
+        } else {
+          const row = inner.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, cid)).get()
+          if (!row) return { parentId: null, exists: false }
+          const mem = membershipByKey.get(`message_block:${cid}`)
+          if (mem) return { parentId: mem.parentId, exists: true }
+          return { parentId: row.messageId, exists: true }
+        }
+      }
+      let evaluation: ReturnType<typeof evaluateEffectiveOrder>
+      try {
+        evaluation = evaluateEffectiveOrder({
+          kind,
+          parentId,
+          orderedChildIds: winning.orderedChildIds,
+          frameClock: { timestamp: winning.timestamp, operationId: winning.operationId },
+          liveChildren: liveMap,
+          childParentLookup
+        })
+      } catch (e) {
+        fail(`baseline apply frame parent mismatch for ${key}: ${e instanceof Error ? e.message : String(e)}`, e)
+      }
+      if (evaluation.incomplete) {
+        fail(
+          `baseline apply incomplete frame for ${key}: missing <= frameClock child ${evaluation.missingIds.join(',')}`
+        )
+      }
+      // C2: materialize one dense 0..n-1 sequence covering every live inventory child
+      const effective = evaluation.effective
+      // Verify dense coverage: effective must cover all liveMap keys (incomplete already ensures <= missing, suffix ensures > included)
+      if (effective.length !== liveMap.size)
+        fail(`baseline apply effective length ${effective.length} != live children ${liveMap.size} for ${key}`)
+      for (const id of liveMap.keys())
+        if (!effective.includes(id)) fail(`baseline apply effective missing live child ${id} for ${key}`)
+      for (let idx = 0; idx < effective.length; idx++) {
+        const childId = effective[idx]
+        if (kind === 'topicMessage')
+          inner.update(schema.messages).set({ sortOrder: idx }).where(eq(schema.messages.id, childId)).run()
+        else
+          inner.update(schema.messageBlocks).set({ sortOrder: idx }).where(eq(schema.messageBlocks.id, childId)).run()
       }
     }
   })

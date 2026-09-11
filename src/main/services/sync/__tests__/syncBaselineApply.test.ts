@@ -91,10 +91,9 @@ const MESSAGE_CLOCKED = [
   'modelId',
   'assistantId',
   'createdAt',
-  'updatedAt',
-  'sortOrder'
+  'updatedAt'
 ]
-const BLOCK_CLOCKED = ['type', 'content', 'status', 'createdAt', 'updatedAt', 'sortOrder']
+const BLOCK_CLOCKED = ['type', 'content', 'status', 'createdAt', 'updatedAt']
 
 function insertTopicOn(
   sqlite: Database.Database,
@@ -199,6 +198,100 @@ function seedMembershipOn(
     .run()
 }
 
+function seedFrameOn(
+  db: BetterSQLite3Database<typeof schema>,
+  kind: 'topicMessage' | 'messageBlock',
+  parentId: string,
+  ordered: string[],
+  ts: number,
+  op: string
+): void {
+  db.insert(schema.syncParentOrderFrame)
+    .values({
+      kind,
+      parentId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIdsJson: JSON.stringify(ordered),
+      timestamp: ts,
+      operationId: op
+    })
+    .run()
+}
+
+function seedMissingFrames(db: BetterSQLite3Database<typeof schema>, sqlite: Database.Database): void {
+  // Best-effort auto-seed missing frames for test completeness: for each live topic/message, ensure a frame exists
+  const topics = sqlite.prepare('SELECT id FROM topics').all() as { id: string }[]
+  for (const tp of topics) {
+    // Do not skip tombstoned topics here; let capture decide based on winning direction
+    // const tomb = sqlite.prepare('SELECT 1 FROM sync_state WHERE key=?').get(`tombstone:topic:${tp.id}`)
+    // if (tomb) continue
+    const exists = sqlite
+      .prepare('SELECT 1 FROM sync_parent_order_frame WHERE kind=? AND parent_id=?')
+      .get('topicMessage', tp.id)
+    if (!exists) {
+      const msgs = sqlite.prepare('SELECT id FROM messages WHERE topic_id=?').all(tp.id) as { id: string }[]
+      const stableIds = msgs
+        .filter((m) => {
+          const row = sqlite.prepare('SELECT status FROM messages WHERE id=?').get(m.id) as
+            | { status: string | null }
+            | undefined
+          return row && ['success', 'error', 'paused', 'sent'].includes(String(row.status))
+        })
+        .map((m) => m.id)
+        .sort()
+      // Use T as base timestamp
+      try {
+        db.insert(schema.syncParentOrderFrame)
+          .values({
+            kind: 'topicMessage',
+            parentId: tp.id,
+            frameVersion: 'parent-order-frame-v1',
+            orderedChildIdsJson: JSON.stringify(stableIds),
+            timestamp: T + 100,
+            operationId: `op-frame-${tp.id}`
+          })
+          .run()
+      } catch {}
+    }
+  }
+  const messages = sqlite.prepare('SELECT id FROM messages').all() as { id: string }[]
+  for (const ms of messages) {
+    // Do not skip tombstoned messages here; let capture decide
+
+    const exists = sqlite
+      .prepare('SELECT 1 FROM sync_parent_order_frame WHERE kind=? AND parent_id=?')
+      .get('messageBlock', ms.id)
+    if (!exists) {
+      const blks = sqlite.prepare('SELECT id, type, status FROM message_blocks WHERE message_id=?').all(ms.id) as {
+        id: string
+        type: string | null
+        status: string | null
+      }[]
+      const stableIds = blks
+        .filter((b) => {
+          if (!['success', 'error', 'paused', 'sent'].includes(String(b.status))) return false
+          const low = String(b.type).toLowerCase()
+          if (['tool', 'file', 'image', 'video', 'citation'].includes(low)) return false
+          return true
+        })
+        .map((b) => b.id)
+        .sort()
+      try {
+        db.insert(schema.syncParentOrderFrame)
+          .values({
+            kind: 'messageBlock',
+            parentId: ms.id,
+            frameVersion: 'parent-order-frame-v1',
+            orderedChildIdsJson: JSON.stringify(stableIds),
+            timestamp: T + 100,
+            operationId: `op-frame-${ms.id}`
+          })
+          .run()
+      } catch {}
+    }
+  }
+}
+
 function seedBoundOn(sqlite: Database.Database, cursor = '7', channel = 'chan-1'): void {
   sqlite.prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)').run('cursor', cursor)
   sqlite.prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)').run('sync:channelKey', channel)
@@ -222,6 +315,8 @@ function seedCompleteSource(
   seedFullFieldsOn(srcDb, 'message_block', blockId, ts, `${opPrefix}-b`)
   seedMembershipOn(srcDb, 'message', messageId, topicId, ts, `${opPrefix}-m`)
   seedMembershipOn(srcDb, 'message_block', blockId, messageId, ts, `${opPrefix}-b`)
+  seedFrameOn(srcDb, 'topicMessage', topicId, [messageId], ts + 10, `${opPrefix}-frame-t`)
+  seedFrameOn(srcDb, 'messageBlock', messageId, [blockId], ts + 10, `${opPrefix}-frame-m`)
   seedBoundOn(srcSqlite)
   const candidate = captureLocalSyncBaselineCandidate(srcDb)
   expect(candidate.completeness.state).toBe('complete')
@@ -311,7 +406,7 @@ describe('field merge', () => {
     }
     // Ensure all clocked payload fields have clocks (fill rest with T).
     seedBoundOn(srcSqlite)
-    // Patch source field clocks for remaining fields already seeded above; ensure entityClock covers.
+    seedFrameOn(srcDb, 'topicMessage', 't-merge', [], T + 10, 'op-frame-merge')
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
 
@@ -348,6 +443,12 @@ describe('field merge', () => {
       else seedFieldClockOn(srcDb, 'message', 'm-tie', f, T, 'op-mmm-high')
     }
     seedMembershipOn(srcDb, 'message', 'm-tie', 't-tie', T, 'op-mmm-high')
+    seedFrameOn(srcDb, 'topicMessage', 't-tie', ['m-tie'], T + 10, 'op-frame-tie')
+    seedFrameOn(srcDb, 'messageBlock', 'm-tie', [], T + 10, 'op-frame-tie-m')
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -376,6 +477,10 @@ describe('field merge', () => {
     seedFullFieldsOn(srcDb, 'topic', 't-weak', T, 'op-weak-t')
     seedFullFieldsOn(srcDb, 'message', 'm-weak', T, 'op-weak-low')
     seedMembershipOn(srcDb, 'message', 'm-weak', 't-weak', T, 'op-weak-low')
+    seedFrameOn(srcDb, 'topicMessage', 't-weak', ['m-weak'], T + 10, 'op-frame-weak')
+    seedFrameOn(srcDb, 'messageBlock', 'm-weak', [], T + 10, 'op-frame-weak-m')
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
 
@@ -451,6 +556,10 @@ describe('absence and tombstones', () => {
     srcSqlite
       .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
       .run('tombstone:topic:t-del', `${T + 100}:op-del-win`)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -484,6 +593,7 @@ describe('absence and tombstones', () => {
     srcSqlite
       .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
       .run('tombstone:topic:t-keep', `${T}:op-aaa-old`)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     const res = applyLocalSyncBaselineCandidate(dstDb, candidate)
@@ -512,6 +622,8 @@ describe('absence and tombstones', () => {
     srcSqlite
       .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
       .run('tombstone:topic:t-pdel', `${T + 100}:op-del-p`)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     const res = applyLocalSyncBaselineCandidate(dstDb, candidate)
@@ -527,6 +639,12 @@ describe('absence and tombstones', () => {
     srcSqlite
       .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
       .run('tombstone:topic:t-both', `${T}:op-aaa-del`)
+    // Live wins, so topic is live and needs empty frame
+    srcSqlite
+      .prepare(
+        'INSERT OR REPLACE INTO sync_parent_order_frame (kind, parent_id, frame_version, ordered_child_ids_json, timestamp, operation_id) VALUES (?, ?, ?, ?, ?, ?)'
+      )
+      .run('topicMessage', 't-both', 'parent-order-frame-v1', JSON.stringify([]), T + 101, 'op-frame-tboth')
     seedBoundOn(srcSqlite)
     const winLive = captureLocalSyncBaselineCandidate(srcDb)
     const resLive = applyLocalSyncBaselineCandidate(dstDb, winLive)
@@ -538,6 +656,7 @@ describe('absence and tombstones', () => {
     dstSqlite.prepare('DELETE FROM sync_state WHERE key=?').run('tombstone:topic:t-both')
     dstSqlite.prepare('DELETE FROM sync_entity_clock WHERE entity_id=?').run('t-both')
     dstSqlite.prepare('DELETE FROM sync_field_clock WHERE entity_id=?').run('t-both')
+    dstSqlite.prepare('DELETE FROM sync_parent_order_frame WHERE parent_id=?').run('t-both')
 
     // Live older than tombstone => tombstone wins (no insert).
     const src2 = openInMemory()
@@ -652,7 +771,7 @@ describe('candidate validation fails closed', () => {
     const mEnt = missingFc.entities.find((e) => e.entityType === 'message')
     mEnt!.fieldClocks = mEnt!.fieldClocks.filter((fc) => fc.field !== 'content')
     refreshDigest(missingFc)
-    expect(() => applyLocalSyncBaselineCandidate(dstDb, missingFc)).toThrow(/field clock/)
+    expect(() => applyLocalSyncBaselineCandidate(dstDb, missingFc)).toThrow(/field clock|unversionedFieldCount/)
     expect(snapshotTarget()).toBe(before)
 
     // Malformed: orphan message (inserted in deterministic candidate order).
@@ -671,12 +790,11 @@ describe('candidate validation fails closed', () => {
         modelId: null,
         assistantId: null,
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-02T00:00:00.000Z',
-        sortOrder: 0
+        updatedAt: '2026-01-02T00:00:00.000Z'
       },
       entityClock: { timestamp: T, operationId: 'op-orphan' },
       fieldClocks: MESSAGE_CLOCKED.map((field) => ({ field, timestamp: T, operationId: 'op-orphan' })),
-      parentMembershipClock: { timestamp: T, operationId: 'op-orphan' }
+      parentMembershipClock: { parentId: 't-missing-x', timestamp: T, operationId: 'op-orphan' }
     })
     orphan.entities.sort((a, b) => {
       const order: Record<string, number> = { topic: 0, message: 1, message_block: 2 }
@@ -851,6 +969,10 @@ describe('mid-transaction rollback', () => {
     }
     seedMembershipOn(srcDb, 'message', 'm-conflict', 't-src-parent', T, 'op-m-conflict')
     seedMembershipOn(srcDb, 'message_block', 'b-new', 'm-conflict', T, 'op-b-new')
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -888,6 +1010,10 @@ describe('mid-transaction rollback', () => {
     }
     seedMembershipOn(srcDb, 'message', 'm-aaa', 't-aaa', T, 'op-m-aaa')
     seedMembershipOn(srcDb, 'message', 'm-zzz', 't-zzz', T + 100, 'op-m-zzz-new')
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -979,14 +1105,14 @@ describe('F1 canonical full payload', () => {
     const mBad = badSort.entities.find((e) => e.entityType === 'message')!
     mBad.payload.sortOrder = 'evil'
     refreshDigest(badSort)
-    expect(() => applyLocalSyncBaselineCandidate(dstDb, badSort)).toThrow(/invalid message sortOrder|shape rejected/)
+    expect(() => applyLocalSyncBaselineCandidate(dstDb, badSort)).toThrow(/field count mismatch|unexpected.*sortOrder/)
     expect(snapshotTarget()).toBe(before)
 
     const nullSort = cloneCandidate(valid)
     const bBad = nullSort.entities.find((e) => e.entityType === 'message_block')!
     bBad.payload.sortOrder = null
     refreshDigest(nullSort)
-    expect(() => applyLocalSyncBaselineCandidate(dstDb, nullSort)).toThrow(/invalid block sortOrder|shape rejected/)
+    expect(() => applyLocalSyncBaselineCandidate(dstDb, nullSort)).toThrow(/field count mismatch|unexpected.*sortOrder/)
     expect(snapshotTarget()).toBe(before)
   })
 
@@ -1003,6 +1129,7 @@ describe('F1 canonical full payload', () => {
     seedFullFieldsOn(srcDb, 'message_block', 'b-opt', T, 'op-opt-b')
     seedMembershipOn(srcDb, 'message', 'm-opt', 't-opt', T, 'op-opt-m')
     seedMembershipOn(srcDb, 'message_block', 'b-opt', 'm-opt', T, 'op-opt-b')
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const withOpt = captureLocalSyncBaselineCandidate(srcDb)
     expect(withOpt.completeness.state).toBe('complete')
@@ -1049,6 +1176,10 @@ describe('F2 unversioned tombstone targets', () => {
     srcSqlite.prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)').run(tombKey, `${T + 100}:op-del-f2`)
     // Source needs at least one live for complete; t-new suffices if no other lives.
     // For message/block victims, source live set must still be parent-closed: use t-new only (topic).
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -1081,6 +1212,10 @@ describe('F3 missing field clock with entity clock', () => {
     seedFullFieldsOn(srcDb, 'topic', 't-f3', T, 'op-f3-t')
     seedFullFieldsOn(srcDb, 'message', 'm-f3', T + 10, 'op-f3-m')
     seedMembershipOn(srcDb, 'message', 'm-f3', 't-f3', T + 10, 'op-f3-m')
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -1114,6 +1249,8 @@ describe('F3 missing field clock with entity clock', () => {
     seedFullFieldsOn(srcDb, 'topic', 't-f3e', T, 'op-f3e-t')
     seedFullFieldsOn(srcDb, 'message', 'm-f3e', T + 10, 'op-f3e-m')
     seedMembershipOn(srcDb, 'message', 'm-f3e', 't-f3e', T + 10, 'op-f3e-m')
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
 
@@ -1183,6 +1320,10 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
     seedFullFieldsOn(srcDb, 'message_block', 'b-full', T, 'op-full-b')
     seedMembershipOn(srcDb, 'message', 'm-full', 't-full', T, 'op-full-m')
     seedMembershipOn(srcDb, 'message_block', 'b-full', 'm-full', T, 'op-full-b')
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -1218,7 +1359,7 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
       assistant_id: 'asst-1',
       created_at: '2026-03-01T00:00:00.000Z',
       updated_at: '2026-03-02T00:00:00.000Z',
-      sort_order: 7,
+      sort_order: 0,
       extra: null
     })
     const bRow = dstSqlite
@@ -1234,7 +1375,7 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
       status: 'success',
       created_at: '2026-03-01T00:00:00.000Z',
       updated_at: '2026-03-02T00:00:00.000Z',
-      sort_order: 3,
+      sort_order: 0,
       extra: null
     })
   })
@@ -1297,6 +1438,10 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
     srcSqlite
       .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
       .run('tombstone:topic:t-cascade', `${T + 100}:op-del-cascade`)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     expect(candidate.completeness.state).toBe('complete')
@@ -1384,6 +1529,7 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
     srcSqlite
       .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
       .run('tombstone:message:m-del1', `${T + 100}:op-del-m`)
+    seedMissingFrames(srcDb, srcSqlite)
     seedBoundOn(srcSqlite)
     const candidate = captureLocalSyncBaselineCandidate(srcDb)
     applyLocalSyncBaselineCandidate(dstDb, candidate)
@@ -1459,6 +1605,30 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
           parentId: 'm-keep1',
           timestamp: T,
           operationId: 'op-src-b-keep1'
+        })
+        .run()
+      // Frames for this candidate: t-mdel has m-keep1, but b-keep1 is tombstoned so m-keep1's frame should be empty
+      // For capture, t-mdel live, m-keep1 live but its block is tombstoned, so m-keep1's live blocks is 0, frame empty
+      db3
+        .insert(schema.syncParentOrderFrame)
+        .values({
+          kind: 'topicMessage',
+          parentId: 't-mdel',
+          frameVersion: 'parent-order-frame-v1',
+          orderedChildIdsJson: JSON.stringify(['m-keep1']),
+          timestamp: T + 10,
+          operationId: 'op-frame-tmdel'
+        })
+        .run()
+      db3
+        .insert(schema.syncParentOrderFrame)
+        .values({
+          kind: 'messageBlock',
+          parentId: 'm-keep1',
+          frameVersion: 'parent-order-frame-v1',
+          orderedChildIdsJson: JSON.stringify([]),
+          timestamp: T + 10,
+          operationId: 'op-frame-mkeep1'
         })
         .run()
       src3

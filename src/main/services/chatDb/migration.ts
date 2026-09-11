@@ -1111,6 +1111,25 @@ export const MIGRATIONS: MigrationEntry[] = [
         PRIMARY KEY (kind, parent_id)
       )`
     ]
+  },
+  {
+    key: '011_sync_parent_order_frame_parent_id_unbounded',
+    description:
+      'Additive rebuild of sync_parent_order_frame to remove the 256-character cap on parent_id: ordinary IDs (id/topicId/messageId/parentId/orderedChildIds) have no upper bound, only non-empty valid Unicode scalar. Transactionally rebuilds the table with the same PK/kind/frameVersion/json/timestamp/operationId constraints but parent_id CHECK length>0 only (no <=256), preserving all rows byte-for-byte. No backfill or data change; existing frames retained. Follows SQLite table-rebuild pattern with FK enforcement off (handled by runner) and full transaction rollback on violation.',
+    sql: [
+      `ALTER TABLE sync_parent_order_frame RENAME TO sync_parent_order_frame_mig_old`,
+      `CREATE TABLE sync_parent_order_frame (
+        kind TEXT NOT NULL CHECK (kind IN ('topicMessage','messageBlock')),
+        parent_id TEXT NOT NULL CHECK (length(parent_id) > 0),
+        frame_version TEXT NOT NULL CHECK (frame_version = 'parent-order-frame-v1'),
+        ordered_child_ids_json TEXT NOT NULL CHECK (json_valid(ordered_child_ids_json)),
+        timestamp INTEGER NOT NULL CHECK (timestamp >= 0 AND timestamp <= 9007199254740991),
+        operation_id TEXT NOT NULL CHECK (length(operation_id) > 0 AND length(operation_id) <= 256 AND operation_id NOT LIKE '%:%'),
+        PRIMARY KEY (kind, parent_id)
+      )`,
+      `INSERT INTO sync_parent_order_frame SELECT * FROM sync_parent_order_frame_mig_old`,
+      `DROP TABLE sync_parent_order_frame_mig_old`
+    ]
   }
 ]
 
