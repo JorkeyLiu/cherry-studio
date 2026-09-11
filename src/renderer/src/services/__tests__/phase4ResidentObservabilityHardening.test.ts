@@ -15,8 +15,13 @@
  */
 
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
-import type { getResidentDiagnostics } from '@renderer/services/residentDiagnostics'
-import type { getResidentReadDiagnostics } from '@renderer/services/residentReadDiagnostics'
+import { getPhase4BoundScalars, getPhase4Snapshot } from '@renderer/services/phase4Observability'
+import { getResidentDiagnostics } from '@renderer/services/residentDiagnostics'
+import {
+  getResidentReadDiagnostics,
+  resetResidentReadDiagnosticsForTests
+} from '@renderer/services/residentReadDiagnostics'
+import { resetAllDeletionGenerationsForTests } from '@renderer/services/topicDeletionInvalidation'
 import messageBlocksReducer from '@renderer/store/messageBlock'
 import newMessagesReducer from '@renderer/store/newMessage'
 import residentRegistryReducer, {
@@ -24,6 +29,7 @@ import residentRegistryReducer, {
   JOINT_PUBLISH_COMPLETE,
   resetAllResidentRegistry
 } from '@renderer/store/residentRegistry'
+import { loadTopicMessagesThunk } from '@renderer/store/thunk/messageThunk'
 import topicSegmentReducer from '@renderer/store/topicSegment'
 import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse } from '@shared/chatDb'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -405,11 +411,9 @@ function createIsolatedTestStore(topicIds: string[], recordedActions?: any[]) {
 }
 
 describe('Phase 4 resident observability hardening — cohesive lifecycle/read-path (renderer-local)', () => {
-  beforeEach(async () => {
+  beforeEach(() => {
     vi.clearAllMocks()
-    const { resetResidentReadDiagnosticsForTests } = await import('@renderer/services/residentReadDiagnostics')
     resetResidentReadDiagnosticsForTests()
-    const { resetAllDeletionGenerationsForTests } = await import('@renderer/services/topicDeletionInvalidation')
     resetAllDeletionGenerationsForTests()
 
     mocks.fetchMessagesWindow.mockImplementation(async (req: FetchMessagesWindowRequest) => {
@@ -426,11 +430,6 @@ describe('Phase 4 resident observability hardening — cohesive lifecycle/read-p
   })
 
   it('staged fetch failure (single and both legs) increments stagedFailed never discarded, then stale-generation discard in same isolated state — snapshot/bound invariants and privacy', async () => {
-    const { getResidentReadDiagnostics } = await import('@renderer/services/residentReadDiagnostics')
-    const { getResidentDiagnostics } = await import('@renderer/services/residentDiagnostics')
-    const { getPhase4Snapshot, getPhase4BoundScalars } = await import('@renderer/services/phase4Observability')
-    const { loadTopicMessagesThunk } = await import('@renderer/store/thunk/messageThunk')
-
     const topicSingle = 't-hardening-fail-single'
     const topicBoth = 't-hardening-fail-both'
     const topicDiscard = 't-hardening-discard-gen'
@@ -596,13 +595,6 @@ describe('Phase 4 resident observability hardening — cohesive lifecycle/read-p
   })
 
   it('resident lifecycle reset/retry through local seams recomputes resident and read diagnostics coherently', async () => {
-    const { getResidentDiagnostics } = await import('@renderer/services/residentDiagnostics')
-    const { getResidentReadDiagnostics, resetResidentReadDiagnosticsForTests } = await import(
-      '@renderer/services/residentReadDiagnostics'
-    )
-    const { getPhase4Snapshot, getPhase4BoundScalars } = await import('@renderer/services/phase4Observability')
-    const { loadTopicMessagesThunk } = await import('@renderer/store/thunk/messageThunk')
-
     const topic = 't-hardening-lifecycle'
     const store = createIsolatedTestStore([topic])
     const getEntries = () => store.getState().residentRegistry.entries as Record<string, any>
@@ -746,11 +738,6 @@ describe('Phase 4 resident observability hardening — cohesive lifecycle/read-p
   })
 
   it('malformed versus generation-mismatch via thunk-driven paths have distinct discard counters and no publication', async () => {
-    const { getResidentReadDiagnostics } = await import('@renderer/services/residentReadDiagnostics')
-    const { getResidentDiagnostics } = await import('@renderer/services/residentDiagnostics')
-    const { getPhase4Snapshot, getPhase4BoundScalars } = await import('@renderer/services/phase4Observability')
-    const { loadTopicMessagesThunk } = await import('@renderer/store/thunk/messageThunk')
-
     const topicMalformed = 't-hardening-malformed'
     const topicGenMismatch = 't-hardening-gen-mismatch'
     const recordedActions: any[] = []
