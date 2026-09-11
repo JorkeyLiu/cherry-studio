@@ -35,6 +35,8 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { chatDbService } from '../chatDb'
 import * as schema from '../chatDb/schema'
+import { applyWireSyncEnvelopeInTx } from './syncBaselineWireApply'
+import type { BaselineFetchResult } from './SyncClient'
 import { syncClient, validateEndpointUrl } from './SyncClient'
 import {
   formatSyncTombstoneValue,
@@ -2837,6 +2839,72 @@ export class SyncService {
           throw e instanceof Error ? e : new Error(String(e))
         }
       }
+      // Strict local channel binding for receiver bootstrap (SYNC-CC-023):
+      // malformed state fails closed; absent (null) means unbound and skips
+      // the baseline path (existing push/pull will bind via reconcile).
+      let localChannelKey: string | null = null
+      try {
+        localChannelKey = this.getChannelKey()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`persisted channel invalid: ${msg}`.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+
+      // Receiver-first baseline bootstrap (SYNC-CC-023/SYNC-DATA-047): only
+      // when registered/attached, locally channel-bound, and strictly
+      // cursor==0 — before any ordinary push/pull in this cycle. cursor>0
+      // never fetches. 404 continues with the existing push/pull; 200 merges
+      // in one transaction and commits cursor=N, then push/pull resume from N.
+      if (cursor === 0 && localChannelKey !== null) {
+        this.throwIfShutdown()
+        this.throwIfStaleConfig(syncGen)
+        let fetched: BaselineFetchResult
+        try {
+          fetched = await this.fetchBaselineWithShutdown(cfg.endpoint, cfg.token, deviceCode, deviceSecret)
+          this.throwIfShutdown()
+          this.throwIfStaleConfig(syncGen)
+          this.markRelayContact(true)
+        } catch (e) {
+          if (e instanceof SyncShutdownError) throw e
+          if (e instanceof SyncStaleConfigError) throw e
+          this.markRelayContact(false, e)
+          const msg = e instanceof Error ? e.message : String(e)
+          this.throwIfShutdown()
+          try {
+            this.updateLastError(msg.slice(0, 1000))
+          } catch {}
+          throw e instanceof Error ? e : new Error(String(e))
+        }
+        if (fetched.found) {
+          const envelope = fetched.envelope
+          if (envelope.channelId !== localChannelKey) {
+            const msg =
+              `baseline envelope channel mismatch: envelope ${envelope.channelId} vs local ${localChannelKey}`.slice(
+                0,
+                500
+              )
+            try {
+              this.updateLastError(msg)
+            } catch {}
+            throw new SyncCursorError(msg)
+          }
+          try {
+            const watermark = this.runBaselineBootstrapTransaction(envelope, localChannelKey, syncGen)
+            cursor = watermark
+          } catch (e) {
+            if (e instanceof SyncShutdownError) throw e
+            if (e instanceof SyncStaleConfigError) throw e
+            const msg = e instanceof Error ? e.message : String(e)
+            try {
+              this.updateLastError(`baseline bootstrap failed: ${msg}`.slice(0, 1000))
+            } catch {}
+            throw e instanceof Error ? e : new Error(String(e))
+          }
+        }
+      }
 
       // Push all outbox chunks — never advance pull cursor on push
       let outboxOps: SyncOperation[]
@@ -3301,6 +3369,90 @@ export class SyncService {
     } finally {
       untrack()
     }
+  }
+
+  private async fetchBaselineWithShutdown(
+    endpoint: string,
+    token: string | undefined,
+    deviceCode: string,
+    deviceSecret: string
+  ): Promise<BaselineFetchResult> {
+    const controller = new AbortController()
+    const untrack = this.trackFetchController(controller)
+    try {
+      return await syncClient.fetchBaseline(endpoint, token, deviceCode, deviceSecret, controller.signal)
+    } catch (e) {
+      if (this.shutdownRequested) throw new SyncShutdownError()
+      throw e
+    } finally {
+      untrack()
+    }
+  }
+
+  /**
+   * Receiver bootstrap transaction (SYNC-DATA-047/SYNC-CC-023): in ONE SQLite
+   * transaction, assert the persisted cursor is still 0 and the persisted
+   * channel still matches the envelope, merge the wire baseline via the
+   * shared merge core, and commit `sync_state.cursor=N`. Preserves
+   * `sync_outbox`/`sync_applied`/pre-pair rows untouched; never clears the
+   * outbox and never requires it empty. Fails closed with full rollback on
+   * any validation/channel/cursor/DB failure (cursor stays 0).
+   */
+  private runBaselineBootstrapTransaction(envelope: unknown, expectedChannelKey: string, syncGen: number): number {
+    this.throwIfShutdown()
+    this.throwIfStaleConfig(syncGen)
+    const db = this.getDb()
+    let watermark = -1
+    db.transaction((tx) => {
+      const inner = tx as unknown as BetterSQLite3Database<typeof schema>
+      this.throwIfShutdown()
+      this.throwIfStaleConfig(syncGen)
+      const cursorRow = inner.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).get()
+      let current = 0
+      if (cursorRow) {
+        if (cursorRow.value === null || cursorRow.value === undefined) {
+          throw new SyncCursorError('malformed persisted cursor: missing value')
+        }
+        current = parseStrictCursor(cursorRow.value)
+      }
+      if (current !== 0) {
+        throw new SyncCursorError(`baseline bootstrap requires cursor 0 but found ${String(current)}`)
+      }
+      const channelRow = inner.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CHANNEL_KEY)).get()
+      if (!channelRow || channelRow.value === null || channelRow.value === undefined) {
+        throw new SyncCursorError('baseline bootstrap requires bound channel but found none')
+      }
+      let persistedChannel: string
+      try {
+        persistedChannel = parseSyncChannelKeyValue(channelRow.value)
+      } catch (e) {
+        throw new SyncCursorError(`malformed persisted channel key: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      if (persistedChannel !== expectedChannelKey) {
+        throw new SyncCursorError(
+          `baseline bootstrap channel changed before commit: expected ${expectedChannelKey} but found ${persistedChannel}`
+        )
+      }
+      const applied = applyWireSyncEnvelopeInTx(inner, envelope, { expectedChannelId: expectedChannelKey })
+      if (applied.channelId !== persistedChannel) {
+        throw new SyncCursorError(
+          `baseline bootstrap envelope channel mismatch: envelope ${applied.channelId} vs local ${persistedChannel}`
+        )
+      }
+      watermark = applied.watermark
+      if (!Number.isSafeInteger(watermark) || watermark < 0) {
+        throw new SyncCursorError(`malformed baseline watermark ${String(watermark)}`)
+      }
+      inner
+        .insert(schema.syncState)
+        .values({ key: STATE_CURSOR, value: String(watermark) })
+        .onConflictDoUpdate({ target: schema.syncState.key, set: { value: String(watermark) } })
+        .run()
+    })
+    this.throwIfShutdown()
+    this.throwIfStaleConfig(syncGen)
+    if (watermark < 0) throw new SyncCursorError('baseline bootstrap transaction produced no watermark')
+    return watermark
   }
 
   /**

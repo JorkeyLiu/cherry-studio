@@ -1,8 +1,15 @@
-import type { SyncIncomingPairRequest, SyncOutgoingPairRequest, SyncPullResponse, SyncPushRequest } from '@shared/sync'
+import type {
+  SyncEnvelope,
+  SyncIncomingPairRequest,
+  SyncOutgoingPairRequest,
+  SyncPullResponse,
+  SyncPushRequest
+} from '@shared/sync'
 import {
   isValidSyncDeviceAuth,
   isValidSyncDeviceId,
   normalizePairingCode,
+  parseEnvelopeJson,
   SYNC_DEVICE_CODE_HEADER,
   SYNC_DEVICE_SECRET_HEADER,
   SYNC_REQUEST_TIMEOUT_MS,
@@ -39,6 +46,29 @@ export interface SyncPairStateResponse {
   channelId: string | null
   outgoing: SyncOutgoingPairRequest | null
   incoming: SyncIncomingPairRequest[]
+}
+
+export type BaselineFetchResult = { found: false } | { found: true; envelope: SyncEnvelope; rawText: string }
+
+/**
+ * Strict 404 empty-state gate (SYNC-CC-023): only the exact relay
+ * `{error:'baseline-not-found'}` body (exact single `error` key per the
+ * existing relay `{error}` contract style) is the legitimate empty state.
+ * HTML, empty, other error codes, or extra keys fail closed via the standard
+ * relayFailure path and never masquerade as no-baseline.
+ */
+function isBaselineNotFoundBody(text: string): boolean {
+  if (!text || text.trim().length === 0) return false
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text.trim())
+  } catch {
+    return false
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false
+  const obj = parsed as Record<string, unknown>
+  if (Object.keys(obj).length !== 1 || !Object.prototype.hasOwnProperty.call(obj, 'error')) return false
+  return obj['error'] === 'baseline-not-found'
 }
 
 export class SyncClient {
@@ -258,6 +288,79 @@ export class SyncClient {
       if ((e as Error).name === 'AbortError') {
         if (externalSignal?.aborted) throw e
         throw new Error(`pull timeout after ${SYNC_REQUEST_TIMEOUT_MS}ms`)
+      }
+      throw e
+    } finally {
+      clearTimeout(timeout)
+      if (externalSignal) {
+        try {
+          externalSignal.removeEventListener('abort', onExternalAbort)
+        } catch {}
+      }
+    }
+  }
+
+  /**
+   * Receiver bootstrap fetch (SYNC-CC-022/023, SYNC-DATA-046/047): GET the
+   * caller's channel current-effective `sync-baseline-wire-v1` envelope.
+   * Auth follows the existing device-header plane; Bearer token added when
+   * present. 200 strictly parses the raw body via the shared
+   * `parseEnvelopeJson` (exact keys/duplicate-key rejection, no reinterpret);
+   * digest recompute stays in the wire apply adapter. 404 with the strict
+   * `{error:'baseline-not-found'}` body is the explicit no-baseline typed
+   * result (empty channel, not a routing error); any other 404 body (HTML,
+   * empty, other error, extra keys) throws via the existing safe mapping.
+   * Other non-2xx retain the relay `{error}` via the existing safe mapping.
+   */
+  async fetchBaseline(
+    endpoint: string,
+    token: string | undefined,
+    deviceCode: string,
+    deviceSecret: string,
+    externalSignal?: AbortSignal
+  ): Promise<BaselineFetchResult> {
+    const validation = validateEndpointUrl(endpoint)
+    if (validation) throw new Error(validation)
+    if (!deviceCode || !deviceSecret) {
+      throw new Error('baseline fetch failed: service not connected (registration required)')
+    }
+    const url = endpoint.replace(/\/$/, '') + '/sync/baseline'
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), SYNC_REQUEST_TIMEOUT_MS)
+    const onExternalAbort = (): void => {
+      try {
+        controller.abort()
+      } catch {}
+    }
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort()
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+    }
+    try {
+      const headers: Record<string, string> = { ...this.deviceHeaders(deviceCode, deviceSecret) }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(url, { method: 'GET', headers, signal: controller.signal })
+      if (res.status === 404) {
+        const text = await res.text().catch(() => '')
+        if (isBaselineNotFoundBody(text)) return { found: false }
+        throw this.relayFailure('baseline fetch', res.status, text)
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        throw this.relayFailure('baseline fetch', res.status, text)
+      }
+      const rawText = await res.text()
+      let envelope: SyncEnvelope
+      try {
+        envelope = parseEnvelopeJson(rawText)
+      } catch (e) {
+        throw new Error(`baseline fetch response malformed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      return { found: true, envelope, rawText }
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        if (externalSignal?.aborted) throw e
+        throw new Error(`baseline fetch timeout after ${SYNC_REQUEST_TIMEOUT_MS}ms`)
       }
       throw e
     } finally {
