@@ -22,6 +22,16 @@
  * other read failure, so a non-ENOENT-unreadable lock fails closed as an
  * observable error and is never reclaimed, and liveness EINVAL (indeterminate)
  * is never treated as stale.
+ *
+ * Atomic publish: a lock file is never written in place. The publisher writes
+ * the complete payload to a unique sibling temp path (`wx` create-only) and
+ * then atomically creates the lock path as a hard link to it
+ * (`linkTemp`: `linkSync`, EEXIST = contention). Readers therefore observe
+ * only absence or complete bytes — never an empty/partial file — so no
+ * time-based grace is needed or used. The public lock path stays a regular
+ * file; no overwrite-rename is ever used. Each publisher best-effort removes
+ * only its own temp link; a crashed publisher may leave an inert sibling
+ * temp file behind (never read as a lock, never scanned or reclaimed here).
  */
 
 import { randomUUID } from 'node:crypto'
@@ -66,6 +76,24 @@ export const DEFAULT_POLL_INTERVAL_MS = 100
 /** Derive the checkout-scoped lock file path (absolute). */
 export function defaultLockPath(checkoutRoot: string): string {
   return path.join(path.resolve(checkoutRoot), LOCK_FILE_NAME)
+}
+
+/**
+ * Bounded temp-name collision retries inside one atomic publish. Temp names
+ * are unique per acquisition (pid + token), so a collision only means a
+ * leftover temp from a crashed owner with a recycled name; exceeding the bound
+ * is an observable error, never an infinite loop.
+ */
+export const MAX_PUBLISH_TEMP_ATTEMPTS = 10
+
+/**
+ * Sibling temp path for the atomic publish of `lockPath`. Same directory as
+ * the lock (hard links require it), unique per acquisition attempt, and never
+ * equal to the lock path itself.
+ */
+export function tempPublishPath(lockPath: string, owner: LockOwner, attempt: number): string {
+  const safeToken = owner.token.replace(/[^A-Za-z0-9_-]/g, '_')
+  return `${lockPath}.tmp.${owner.pid}.${safeToken}.${attempt}`
 }
 
 /** Serialize a lock file for atomic creation. */
@@ -169,11 +197,24 @@ export type LockReadResult =
  */
 export interface LockFs {
   /**
-   * Atomic create-only write. Returns 'created' when the file was written,
-   * 'exists' when the target already exists, or an error message string on
-   * any other failure (which must never be mistaken for 'exists').
+   * Create-only write of a sibling temp file (the first half of the atomic
+   * publish). Returns 'written' when the temp file was fully written,
+   * 'exists' when that temp path already exists (caller retries with the next
+   * attempt suffix), or an error message string on any other failure.
+   * Required: there is no non-atomic fallback — every lock file reaches the
+   * lock path only through `linkTemp` below.
    */
-  createExclusive(p: string, content: string): 'created' | 'exists' | string
+  writeTemp(tempPath: string, content: string): 'written' | 'exists' | string
+  /**
+   * Atomically create the lock path as a hard link to an already-written temp
+   * file (the second half of the atomic publish; never an overwriting
+   * rename). Returns 'linked' when this caller won, 'exists' when the lock
+   * path already exists (contention — the caller lost), or an error message
+   * string on any other failure (e.g. EPERM, ENOENT, EXDEV). The temp link is
+   * always cleaned up best-effort by the caller afterwards. Required: the
+   * pair is the only publish path, so readers never observe a partial file.
+   */
+  linkTemp(tempPath: string, lockPath: string): 'linked' | 'exists' | string
   /**
    * Read a text file with discriminated results: 'ok' with the content,
    * 'absent' for a missing file (ENOENT), or 'error' for any other read
@@ -203,15 +244,26 @@ function errnoCode(err: unknown): string | undefined {
 /** Real I/O wiring: filesystem + `process.kill(pid, 0)` + real time. */
 export function createLockFs(): LockFs {
   return {
-    createExclusive: (p, content) => {
+    writeTemp: (tempPath, content) => {
       try {
-        fs.writeFileSync(p, content, { flag: 'wx' })
-        return 'created'
+        fs.writeFileSync(tempPath, content, { flag: 'wx' })
+        return 'written'
       } catch (err) {
         if (errnoCode(err) === 'EEXIST') {
           return 'exists'
         }
-        return `writeFileSync(${p}): ${err instanceof Error ? err.message : String(err)}`
+        return `writeFileSync(${tempPath}): ${err instanceof Error ? err.message : String(err)}`
+      }
+    },
+    linkTemp: (tempPath, lockPath) => {
+      try {
+        fs.linkSync(tempPath, lockPath)
+        return 'linked'
+      } catch (err) {
+        if (errnoCode(err) === 'EEXIST') {
+          return 'exists'
+        }
+        return `linkSync(${tempPath} -> ${lockPath}): ${err instanceof Error ? err.message : String(err)}`
       }
     },
     readFile: (p) => {
@@ -271,32 +323,89 @@ export type LockAcquireResult =
   | { acquired: false; reason: 'error'; error: string; lockPath: string }
 
 /**
- * `true` when two parsed lock files show the same owner identity (token is
- * unique per acquisition). Two malformed reads (both undefined) are "the same"
- * — the still-malformed file is safe to reclaim. One undefined with one owner
- * means the file changed between reads and must NOT be removed.
+ * `true` only when two parsed lock files both carry a valid owner with the
+ * same acquisition token. An unparseable read (undefined) never proves
+ * identity and never matches through this guard; malformed orphans follow
+ * their own explicit double-read reclaim branch in `acquireLock`.
  */
 function sameLockIdentity(a: LockFile | undefined, b: LockFile | undefined): boolean {
   if (a === undefined || b === undefined) {
-    return a === b
+    return false
   }
   return a.owner.token === b.owner.token
 }
 
 /**
+ * Atomically publish `content` at `lockPath`: write the complete payload to a
+ * unique sibling temp path, then hard-link it as the lock path. Returns
+ * 'created' when this caller won, 'exists' on contention, or an error message
+ * string. The caller's own temp link is removed best-effort on every path
+ * after the write (cleanup failures are ignored); a temp name collision
+ * retries with the next attempt suffix. There is deliberately no non-atomic
+ * fallback: the pair is required on `LockFs`, so a seam without it does not
+ * compile and production can never silently downgrade to a partial-visible
+ * write.
+ */
+function publishExclusiveLock(
+  fs_: LockFs,
+  lockPath: string,
+  content: string,
+  owner: LockOwner
+): 'created' | 'exists' | string {
+  for (let attempt = 0; attempt < MAX_PUBLISH_TEMP_ATTEMPTS; attempt++) {
+    const tempPath = tempPublishPath(lockPath, owner, attempt)
+    const written = fs_.writeTemp(tempPath, content)
+    if (written === 'exists') {
+      continue
+    }
+    if (written !== 'written') {
+      fs_.removeFile(tempPath)
+      return written
+    }
+    const linked = fs_.linkTemp(tempPath, lockPath)
+    fs_.removeFile(tempPath)
+    if (linked === 'linked') {
+      return 'created'
+    }
+    if (linked === 'exists') {
+      return 'exists'
+    }
+    return linked
+  }
+  return `publish temp collision: too many temp files for ${lockPath}`
+}
+
+/**
  * Acquire the checkout-scoped lane lock.
  *
- * Atomic create (`O_EXCL`): the first acquirer wins. On contention the current
- * owner is read and classified:
+ * Atomic publish (sibling temp write + `linkSync` hard-link create): the
+ * first publisher wins — once the publish returns `'created'`, that owner
+ * holds the lane and no other contender may delete the new file. Readers
+ * observe only absence or complete bytes, so there is no partial-write window
+ * and no time-based grace anywhere in this policy; `timeoutMs === 0` is a
+ * single attempt that never sleeps. On contention the current owner is read
+ * and classified:
  *  - live owner (valid lock, PID alive): poll until the bounded deadline, then
  *    report `'locked'` (immediate, `timeoutMs === 0`) or `'timeout'` (waited);
- *  - stale owner (dead PID or unparseable file): reclaim — re-read the file and
- *    only remove it when it still shows the same owner identity (token guard),
- *    then retry the create. A lock re-acquired between the reads is never
- *    removed; the next iteration re-evaluates the fresh owner.
+ *  - dead owner (valid lock, PID dead): reclaim — re-read the file and only
+ *    remove it when it still shows the same valid owner identity (strict token
+ *    guard; a malformed/absent guard never matches), then retry the publish. A
+ *    lock re-acquired between the reads is never removed; the next iteration
+ *    re-evaluates the fresh owner.
+ *  - present-but-unparseable: safe to reclaim after one guard re-read ONLY
+ *    because every current writer publishes atomically (sibling temp write +
+ *    hard-link create), so no in-repo writer can ever present a partial file
+ *    to a reader. A malformed payload is therefore an old-version, external,
+ *    or legacy orphan — never a live writer mid-write. Re-read once so a
+ *    valid lock published between the reads is never deleted (a fresh live
+ *    owner honors the deadline; a fresh dead owner is re-evaluated next
+ *    pass); a still-malformed guard is reclaimed immediately with no waiting.
+ *  - absent after `exists` (removed between the calls): retry the publish
+ *    immediately without deleting anything.
  *
  * Every non-contention I/O failure is returned as an observable `'error'`
- * result (cleanup/liveness failures are never silently swallowed).
+ * result (lock-target cleanup/removal failures are never silently swallowed;
+ * own-temp cleanup is best-effort and ignored).
  */
 export async function acquireLock(opts: AcquireLockOptions): Promise<LockAcquireResult> {
   const fs_ = opts.fs ?? createLockFs()
@@ -334,12 +443,12 @@ export async function acquireLock(opts: AcquireLockOptions): Promise<LockAcquire
   const lockFile = serializeLockFile({ version: LOCK_FILE_VERSION, owner })
 
   for (;;) {
-    const created = fs_.createExclusive(lockPath, lockFile)
-    if (created === 'created') {
+    const published = publishExclusiveLock(fs_, lockPath, lockFile, owner)
+    if (published === 'created') {
       return { acquired: true, owner, lockPath }
     }
-    if (created !== 'exists') {
-      return { acquired: false, reason: 'error', error: created, lockPath }
+    if (published !== 'exists') {
+      return { acquired: false, reason: 'error', error: published, lockPath }
     }
 
     const currentRead = fs_.readFile(lockPath)
@@ -348,55 +457,111 @@ export async function acquireLock(opts: AcquireLockOptions): Promise<LockAcquire
       // reclaimed or deleted — report it as an observable error.
       return { acquired: false, reason: 'error', error: `reading lock file: ${currentRead.error}`, lockPath }
     }
-    const existing = parseLockFile(currentRead.status === 'ok' ? currentRead.content : undefined)
-    const stale = existing === undefined || !fs_.isPidAlive(existing.owner.pid)
+    if (currentRead.status === 'absent') {
+      // The file vanished between `exists` and the read (a rival reclaimed it
+      // or the winner was removed): nothing to delete, retry the publish.
+      continue
+    }
+    const existing = parseLockFile(currentRead.content)
+    if (existing !== undefined) {
+      if (fs_.isPidAlive(existing.owner.pid)) {
+        // A live owner holds the lock: wait only while the budget allows.
+        if (fs_.now() >= deadline) {
+          return {
+            acquired: false,
+            reason: timeoutMs === 0 ? 'locked' : 'timeout',
+            owner: existing.owner,
+            lockPath
+          }
+        }
+        await fs_.sleep(pollIntervalMs)
+        continue
+      }
 
-    if (!stale) {
-      // A live owner holds the lock: wait only while the budget allows.
-      if (fs_.now() >= deadline) {
+      // Dead valid owner: reclaim only under the strict token guard. The guard
+      // must still show the same valid owner; a malformed/absent/changed guard
+      // never matches and is re-evaluated (never deleted) on the next pass.
+      const guardRead = fs_.readFile(lockPath)
+      if (guardRead.status === 'error') {
+        // Fail closed on the guard re-read too: never remove a lock whose
+        // current content we could not prove stale.
         return {
           acquired: false,
-          reason: timeoutMs === 0 ? 'locked' : 'timeout',
-          owner: existing.owner,
+          reason: 'error',
+          error: `reading lock file (reclaim guard): ${guardRead.error}`,
           lockPath
         }
       }
-      await fs_.sleep(pollIntervalMs)
+      if (guardRead.status === 'absent') {
+        continue
+      }
+      const before = parseLockFile(guardRead.content)
+      if (!sameLockIdentity(before, existing)) {
+        // Owner changed between the reads: never delete the fresh content. A
+        // fresh live owner honors the bounded deadline immediately
+        // (preserving the zero-budget 'locked' report without sleeping); any
+        // other fresh state is re-evaluated on the next pass.
+        if (before !== undefined && fs_.isPidAlive(before.owner.pid) && fs_.now() >= deadline) {
+          return {
+            acquired: false,
+            reason: timeoutMs === 0 ? 'locked' : 'timeout',
+            owner: before.owner,
+            lockPath
+          }
+        }
+        continue
+      }
+      const removalError = fs_.removeFile(lockPath)
+      if (removalError !== undefined) {
+        return { acquired: false, reason: 'error', error: `stale lock removal failed: ${removalError}`, lockPath }
+      }
+      // Loop to retry the publish; a concurrent acquirer may have won the
+      // reclaim race, in which case the next iteration re-evaluates the fresh
+      // owner.
       continue
     }
 
-    // Stale owner (dead PID or unparseable/absent file): reclaim under the
-    // token guard. Re-read the file and confirm the same owner identity before
-    // removing, so a lock re-acquired between the reads is never removed.
-    const guardRead = fs_.readFile(lockPath)
-    if (guardRead.status === 'error') {
-      // Fail closed on the guard re-read too: never remove a lock whose
-      // current content we could not prove stale.
+    // Present-but-unparseable: every current writer publishes atomically, so
+    // this cannot be a live writer mid-write — only an old-version, external,
+    // or legacy orphan (there is no in-repo legacy partial writer left: the
+    // non-atomic path was removed, not deprecated). Re-read once so a valid
+    // lock published between the reads is never deleted; no waiting, so
+    // `timeoutMs: 0` never sleeps here.
+    const malformedGuard = fs_.readFile(lockPath)
+    if (malformedGuard.status === 'error') {
       return {
         acquired: false,
         reason: 'error',
-        error: `reading lock file (reclaim guard): ${guardRead.error}`,
+        error: `reading lock file (malformed guard): ${malformedGuard.error}`,
         lockPath
       }
     }
-    const before = parseLockFile(guardRead.status === 'ok' ? guardRead.content : undefined)
-    if (!sameLockIdentity(before, existing)) {
-      if (fs_.now() >= deadline) {
-        return {
-          acquired: false,
-          reason: timeoutMs === 0 ? 'locked' : 'timeout',
-          owner: before?.owner ?? existing?.owner ?? owner,
-          lockPath
-        }
-      }
+    if (malformedGuard.status === 'absent') {
       continue
     }
-    const removalError = fs_.removeFile(lockPath)
-    if (removalError !== undefined) {
-      return { acquired: false, reason: 'error', error: `stale lock removal failed: ${removalError}`, lockPath }
+    const guardParsed = parseLockFile(malformedGuard.content)
+    if (guardParsed !== undefined) {
+      if (fs_.isPidAlive(guardParsed.owner.pid)) {
+        if (fs_.now() >= deadline) {
+          return {
+            acquired: false,
+            reason: timeoutMs === 0 ? 'locked' : 'timeout',
+            owner: guardParsed.owner,
+            lockPath
+          }
+        }
+        await fs_.sleep(pollIntervalMs)
+        continue
+      }
+      // Fresh dead valid owner: re-evaluate through the token-guard path.
+      continue
     }
-    // Loop to retry the create; a concurrent acquirer may have won the reclaim
-    // race, in which case the next iteration re-evaluates the fresh owner.
+    // Still malformed on both reads: a genuine orphan under atomic publish.
+    // Reclaim immediately with no waiting.
+    const orphanRemoval = fs_.removeFile(lockPath)
+    if (orphanRemoval !== undefined) {
+      return { acquired: false, reason: 'error', error: `stale lock removal failed: ${orphanRemoval}`, lockPath }
+    }
   }
 }
 

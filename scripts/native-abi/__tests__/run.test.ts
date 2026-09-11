@@ -274,12 +274,23 @@ class FakeLockFs implements LockFs {
     this.order = order
   }
 
-  createExclusive(p: string, content: string): 'created' | 'exists' | string {
-    if (this.files.has(p)) {
+  writeTemp(tempPath: string, content: string): 'written' | 'exists' | string {
+    if (this.files.has(tempPath)) {
       return 'exists'
     }
-    this.files.set(p, content)
-    return 'created'
+    this.files.set(tempPath, content)
+    return 'written'
+  }
+
+  linkTemp(tempPath: string, lockPath: string): 'linked' | 'exists' | string {
+    if (!this.files.has(tempPath)) {
+      return `ENOENT: temp missing: ${tempPath}`
+    }
+    if (this.files.has(lockPath)) {
+      return 'exists'
+    }
+    this.files.set(lockPath, this.files.get(tempPath)!)
+    return 'linked'
   }
 
   readFile(p: string): LockReadResult {
@@ -288,6 +299,18 @@ class FakeLockFs implements LockFs {
   }
 
   removeFile(p: string): string | undefined {
+    if (p.includes('.tmp.')) {
+      // Atomic-publish temp hygiene: never an observable release, so it stays
+      // out of the order/dispatch/removedPaths tracking (mirrors production,
+      // where temp cleanup is best-effort and ignored).
+      const tempError = this.removeErrors.get(p)
+      if (tempError !== undefined) {
+        this.removeErrors.delete(p)
+        return tempError
+      }
+      this.files.delete(p)
+      return undefined
+    }
     this.order?.push('release')
     if (this.dispatchOnRemove !== undefined && this.signalDispatcher !== undefined) {
       this.signalDispatcher(this.dispatchOnRemove)
