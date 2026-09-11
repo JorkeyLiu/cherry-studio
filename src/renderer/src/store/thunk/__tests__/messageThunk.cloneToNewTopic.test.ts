@@ -11,7 +11,9 @@
 
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { cloneMessagesToNewTopicThunk } from '../messageThunk'
 
 // --- Mocks ----------------------------------------------------------------
 
@@ -137,6 +139,9 @@ const newTopic = { id: 'new-topic', assistantId: 'assistant-1' } as any
 
 describe('cloneMessagesToNewTopicThunk — O(M+B) entry assembly', () => {
   beforeEach(() => {
+    // clearAllMocks preserves no hoisted implementations here, but keeps
+    // per-test mockResolvedValue setups explicit below; afterEach clears
+    // late timeout-continuation calls before the next test.
     vi.clearAllMocks()
     mocks.cloneMessagesToTopic.mockResolvedValue(undefined)
     mocks.updateFileCount.mockResolvedValue(undefined)
@@ -144,6 +149,10 @@ describe('cloneMessagesToNewTopicThunk — O(M+B) entry assembly', () => {
       messages: { entities: {}, messageIdsByTopic: {} },
       messageBlocks: { entities: {} }
     }
+  })
+
+  afterEach(() => {
+    vi.clearAllMocks()
   })
 
   it('groups cloned blocks per message in order with correct ownership', async () => {
@@ -161,7 +170,6 @@ describe('cloneMessagesToNewTopicThunk — O(M+B) entry assembly', () => {
     }
     mocks.selectMessagesForTopic.mockReturnValue([srcUser, srcAsst])
 
-    const { cloneMessagesToNewTopicThunk } = await import('../messageThunk')
     const ok = await cloneMessagesToNewTopicThunk('topic-1', 2, newTopic)(mocks.dispatch, () => storeState as any)
 
     expect(ok).toBe(true)
@@ -222,7 +230,6 @@ describe('cloneMessagesToNewTopicThunk — O(M+B) entry assembly', () => {
     }
     mocks.selectMessagesForTopic.mockReturnValue([srcUser])
 
-    const { cloneMessagesToNewTopicThunk } = await import('../messageThunk')
     const ok = await cloneMessagesToNewTopicThunk('topic-1', 1, newTopic)(mocks.dispatch, () => storeState as any)
 
     expect(ok).toBe(true)
@@ -240,7 +247,6 @@ describe('cloneMessagesToNewTopicThunk — O(M+B) entry assembly', () => {
     })
     mocks.selectMessagesForTopic.mockReturnValue([srcUser, srcAsst])
 
-    const { cloneMessagesToNewTopicThunk } = await import('../messageThunk')
     const ok = await cloneMessagesToNewTopicThunk('topic-1', 2, newTopic)(mocks.dispatch, () => storeState as any)
 
     expect(ok).toBe(true)

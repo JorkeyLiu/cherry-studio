@@ -17,7 +17,9 @@
  * `messageThunk.anchorEstablishment.test.ts`.
  */
 import type { Message } from '@renderer/types/newMessage'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { loadTopicMessagesThunk } from '../messageThunk'
 
 // --- Mocks ----------------------------------------------------------------
 
@@ -189,14 +191,20 @@ const makeStoreState = (settings: Record<string, unknown>, messageIds: string[])
 
 describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', () => {
   beforeEach(() => {
+    // clearAllMocks (not reset) preserves the hoisted fetchMessagesWindow
+    // implementation while isolating call counts between its.
     vi.clearAllMocks()
     storeState = makeStoreState({ contextCount: 1 }, ['u1', 'a1', 'u2'])
+  })
+
+  afterEach(() => {
+    // Drop any late timeout-continuation calls so the next test starts clean.
+    vi.clearAllMocks()
   })
 
   it('writes the default anchor for a cached NON-EMPTY topic with no anchor (no refetch)', async () => {
     // Turns [u1, u2]; contextCount=1 → default window position is the LAST
     // turn (u2).
-    const { loadTopicMessagesThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
     const getState = () => storeState as never
 
@@ -222,7 +230,6 @@ describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', (
       'u2'
     ])
 
-    const { loadTopicMessagesThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
     const getState = () => storeState as never
 
@@ -242,7 +249,6 @@ describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', (
       'u2'
     ])
 
-    const { loadTopicMessagesThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
     const getState = () => storeState as never
 
@@ -261,7 +267,6 @@ describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', (
     storeState = makeStoreState({ contextCount: 1 }, [])
     // empty topic via window fetch already mocked to return empty window
 
-    const { loadTopicMessagesThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
     const getState = () => storeState as never
 

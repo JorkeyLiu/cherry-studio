@@ -11,9 +11,9 @@
  * - A disconnected initial pairing fetch (expected getPairState inability)
  *   shows no raw IPC error and keeps the last-known pairing observation.
  */
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { StrictMode } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -48,6 +48,47 @@ interface MockOptions {
   pairState?: { deviceCode: string; state: 'unpaired'; outgoing: null; incoming: [] } | null
   pairError?: string | null
 }
+
+// Ownership tracking: every render is unmounted in afterEach (clearing the
+// component's 5s poll interval and pending saves), RTL state is cleaned, and
+// window.api/window.toast are restored to their pre-test state so a
+// timeout/failure never leaks intervals, spies or globals.
+const mounted: Array<{ unmount: () => void }> = []
+let origApiDescriptor: PropertyDescriptor | undefined
+let origToastDescriptor: PropertyDescriptor | undefined
+
+beforeEach(() => {
+  origApiDescriptor = Object.getOwnPropertyDescriptor(window, 'api')
+  origToastDescriptor = Object.getOwnPropertyDescriptor(window, 'toast')
+})
+
+afterEach(() => {
+  for (const m of mounted.splice(0)) {
+    try {
+      m.unmount()
+    } catch {}
+  }
+  cleanup()
+  vi.clearAllMocks()
+  if (origApiDescriptor) {
+    Object.defineProperty(window, 'api', origApiDescriptor)
+  } else {
+    try {
+      // @ts-ignore
+      delete (window as any).api
+    } catch {}
+  }
+  if (origToastDescriptor) {
+    Object.defineProperty(window, 'toast', origToastDescriptor)
+  } else {
+    try {
+      // @ts-ignore
+      delete (window as any).toast
+    } catch {}
+  }
+  origApiDescriptor = undefined
+  origToastDescriptor = undefined
+})
 
 function mockSyncApi(options: MockOptions = {}): Record<string, ReturnType<typeof vi.fn>> {
   const {
@@ -96,19 +137,25 @@ function mockSyncApi(options: MockOptions = {}): Record<string, ReturnType<typeo
   return api
 }
 
+function renderTracked(ui: React.ReactElement) {
+  const result = render(ui)
+  mounted.push(result)
+  return result
+}
+
 async function renderSettings(options: MockOptions = {}): Promise<{ api: Record<string, ReturnType<typeof vi.fn>> }> {
   const api = mockSyncApi(options)
   const { default: SyncSettings } = await import('../SyncSettings')
-  render(<SyncSettings />)
+  renderTracked(<SyncSettings />)
+  // Single stable hydration predicate (was three sequential waitFors):
+  // input mounted + initial getConfig issued + form hydrated with the
+  // authoritative endpoint and enabled for editing.
+  const expectedEndpoint = options.endpoint ?? 'http://127.0.0.1:3030'
   await waitFor(() => {
     expect(screen.getByTestId('sync-endpoint-input')).toBeInTheDocument()
-  })
-  // Wait for the initial config load to populate the form.
-  await waitFor(() => {
     expect(api.getConfig).toHaveBeenCalled()
-  })
-  await waitFor(() => {
-    expect(screen.getByTestId('sync-endpoint-input')).toHaveValue(options.endpoint ?? 'http://127.0.0.1:3030')
+    expect(screen.getByTestId('sync-endpoint-input')).toHaveValue(expectedEndpoint)
+    expect(screen.getByTestId('sync-endpoint-input')).not.toBeDisabled()
   })
   return { api }
 }
@@ -164,8 +211,20 @@ describe('SyncSettings auto-save', () => {
     const { api } = await renderSettings()
     fireEvent.blur(screen.getByTestId('sync-endpoint-input'))
     fireEvent.blur(screen.getByTestId('sync-token-input'))
-    await new Promise((r) => setTimeout(r, 50))
+    // Real settlement: drain the blur-triggered persistConfig microtask chain
+    // plus every in-flight status observation, then flush React effects. A
+    // buggy save would have called setConfig by the time these settle (the
+    // mocked backend resolves immediately, so no wall-time wait is needed).
+    await act(async () => {
+      const pending = api.getStatus.mock.results
+        .map((r) => r.value)
+        .filter((v): v is Promise<unknown> => v instanceof Promise)
+      await Promise.allSettled(pending)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
     expect(api.setConfig).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('sync-config-error')).toBeNull()
   })
 
   it('preserves local edits and surfaces save failures truthfully', async () => {
@@ -251,28 +310,51 @@ describe('SyncSettings auto-save', () => {
   })
 
   it('disconnected initial pairing fetch shows no raw IPC error', async () => {
-    await renderSettings({
+    const { api } = await renderSettings({
       service: { state: 'disconnected', deviceCode: 'ABCD2345', explicitDisconnect: true },
       pairState: null
     })
     await waitFor(() => {
       expect(screen.getByTestId('sync-service-status').textContent).toMatch(/Disconnected/)
     })
-    await new Promise((r) => setTimeout(r, 50))
+    await waitFor(() => {
+      expect(api.getPairState).toHaveBeenCalled()
+    })
+    // Real settlement: the initial pairing fetch rejects while disconnected
+    // and is swallowed silently (no observable UI change), so await the
+    // observed getPairState promises to complete and flush React effects
+    // before asserting the negative claims.
+    await act(async () => {
+      const pending = api.getPairState.mock.results
+        .map((r) => r.value)
+        .filter((v): v is Promise<unknown> => v instanceof Promise)
+      await Promise.allSettled(pending)
+    })
+    expect(screen.getByTestId('sync-pairing-status').textContent).toMatch(/Pairing status/)
     expect(screen.queryByTestId('sync-pairing-error')).toBeNull()
     expect(document.body.textContent ?? '').not.toMatch(/explicit disconnect; Connect to resume/)
-    expect(screen.getByTestId('sync-pairing-status').textContent).toMatch(/Pairing status/)
   })
 
   it('unregistered service shows no raw IPC error on initial load', async () => {
-    await renderSettings({
+    const { api } = await renderSettings({
       service: { state: 'unregistered', deviceCode: null, explicitDisconnect: false },
       pairState: null
     })
     await waitFor(() => {
       expect(screen.getByTestId('sync-service-status').textContent).toMatch(/Not connected/)
     })
-    await new Promise((r) => setTimeout(r, 50))
+    await waitFor(() => {
+      expect(api.getPairState).toHaveBeenCalled()
+    })
+    // Real settlement: same silent-rejection path as the disconnected case —
+    // await the observed getPairState promises, then flush effects.
+    await act(async () => {
+      const pending = api.getPairState.mock.results
+        .map((r) => r.value)
+        .filter((v): v is Promise<unknown> => v instanceof Promise)
+      await Promise.allSettled(pending)
+    })
+    expect(screen.getByTestId('sync-pairing-status').textContent).toMatch(/Pairing status/)
     expect(screen.queryByTestId('sync-pairing-error')).toBeNull()
   })
 
@@ -284,7 +366,7 @@ describe('SyncSettings auto-save', () => {
     const api = mockSyncApi()
     api.getConfig.mockReturnValueOnce(configGate)
     const { default: SyncSettings } = await import('../SyncSettings')
-    render(<SyncSettings />)
+    renderTracked(<SyncSettings />)
     await waitFor(() => {
       expect(screen.getByTestId('sync-endpoint-input')).toBeInTheDocument()
     })
@@ -294,13 +376,12 @@ describe('SyncSettings auto-save', () => {
     expect(screen.getByTestId('sync-token-input')).toBeDisabled()
     expect(screen.getByTestId('sync-enabled-switch')).toBeDisabled()
     fireEvent.blur(screen.getByTestId('sync-endpoint-input'))
-    await new Promise((r) => setTimeout(r, 50))
-    expect(api.setConfig).not.toHaveBeenCalled()
-    expect(screen.queryByTestId('sync-config-error')).toBeNull()
-    // Service/pairing/status observation proceeds independently of hydration.
+    // Service observation proceeds independently of hydration (no fixed sleep).
     await waitFor(() => {
       expect(screen.getByTestId('sync-service-status').textContent).toMatch(/Connected/)
     })
+    expect(api.setConfig).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('sync-config-error')).toBeNull()
     // Hydration enables the controls with the authoritative values.
     await act(async () => {
       resolveConfig({ endpoint: 'http://127.0.0.1:3030', token: '', enabled: true })
@@ -328,7 +409,7 @@ describe('SyncSettings auto-save', () => {
     const api = mockSyncApi()
     api.getConfig.mockReturnValueOnce(firstGate).mockReturnValueOnce(secondGate)
     const { default: SyncSettings } = await import('../SyncSettings')
-    render(
+    renderTracked(
       <StrictMode>
         <SyncSettings />
       </StrictMode>
@@ -348,8 +429,11 @@ describe('SyncSettings auto-save', () => {
     await act(async () => {
       resolveSecond({ endpoint: 'http://192.168.0.1:3030', token: 'stale', enabled: false })
     })
-    await new Promise((r) => setTimeout(r, 50))
-    expect(screen.getByTestId('sync-endpoint-input')).toHaveValue('http://10.3.3.3:3030')
+    // No fixed sleep: the stale response has resolved inside act, so the
+    // preserved edit is asserted as final state.
+    await waitFor(() => {
+      expect(screen.getByTestId('sync-endpoint-input')).toHaveValue('http://10.3.3.3:3030')
+    })
     // The preserved edit still saves atomically against the hydrated snapshot.
     fireEvent.blur(screen.getByTestId('sync-endpoint-input'))
     await waitFor(() => {
@@ -365,7 +449,7 @@ describe('SyncSettings auto-save', () => {
     const api = mockSyncApi()
     api.getConfig.mockRejectedValueOnce(new Error('main store offline'))
     const { default: SyncSettings } = await import('../SyncSettings')
-    render(<SyncSettings />)
+    renderTracked(<SyncSettings />)
     await waitFor(() => {
       expect(screen.getByTestId('sync-service-status')).toBeInTheDocument()
     })
@@ -377,11 +461,12 @@ describe('SyncSettings auto-save', () => {
     expect(screen.getByTestId('sync-token-input')).toBeDisabled()
     expect(screen.getByTestId('sync-enabled-switch')).toBeDisabled()
     fireEvent.blur(screen.getByTestId('sync-endpoint-input'))
-    await new Promise((r) => setTimeout(r, 50))
+    // Service observation still proceeds independently of the config failure.
+    await waitFor(() => {
+      expect(screen.getByTestId('sync-service-status').textContent).toMatch(/Connected/)
+    })
     expect(api.setConfig).not.toHaveBeenCalled()
     expect(window.toast.success as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
-    // Service observation still proceeds independently of the config failure.
-    expect(screen.getByTestId('sync-service-status').textContent).toMatch(/Connected/)
   })
 
   it('connected service with failing pairing fetch surfaces a truthful error', async () => {
@@ -448,7 +533,7 @@ describe('SyncSettings auto-save', () => {
     })
     api.getServiceStatus.mockReturnValue(serviceGate)
     const { default: SyncSettings } = await import('../SyncSettings')
-    render(<SyncSettings />)
+    renderTracked(<SyncSettings />)
     const indicator = await screen.findByTestId('sync-service-indicator')
     expect(indicator.getAttribute('data-state')).toBe('unknown')
     // Neutral pending color: neither success green nor error red.
@@ -478,7 +563,7 @@ describe('SyncSettings auto-save', () => {
       conflictCount: 0
     })
     const { default: SyncSettings } = await import('../SyncSettings')
-    render(<SyncSettings />)
+    renderTracked(<SyncSettings />)
     await waitFor(() => {
       expect(screen.getByTestId('sync-last-error').textContent).toContain(tailMarker)
     })

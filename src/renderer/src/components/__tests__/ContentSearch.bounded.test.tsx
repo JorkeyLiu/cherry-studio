@@ -1,5 +1,5 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   CONTENT_SEARCH_CHUNK_SIZE,
@@ -44,10 +44,41 @@ const makeFilter = (): NodeFilter =>
     acceptNode: () => NodeFilter.FILTER_ACCEPT
   }) as any
 
-beforeEach(() => {
+// Ownership tracking: every appended search target is removed in afterEach,
+// and every RTL render is unmounted via cleanup(), so a timeout/assertion
+// failure never leaks DOM, observers, rAF, debounce timers or highlights.
+let appendedTargets: HTMLElement[] = []
+
+const trackTarget = (el: HTMLElement): HTMLElement => {
+  appendedTargets.push(el)
+  document.body.appendChild(el)
+  return el
+}
+
+const resetHighlightGlobals = () => {
   highlightsMock.clear.mockClear()
   highlightsMock.set.mockClear()
+  highlightsMock.delete.mockClear()
   highlightArgs = []
+}
+
+const expectBoundedHighlights = () => {
+  expect(highlightArgs.every((a) => a.length <= CONTENT_SEARCH_CHUNK_SIZE)).toBe(true)
+}
+
+beforeEach(() => {
+  resetHighlightGlobals()
+})
+
+afterEach(() => {
+  cleanup()
+  for (const t of appendedTargets) {
+    try {
+      t.remove()
+    } catch {}
+  }
+  appendedTargets = []
+  resetHighlightGlobals()
 })
 
 describe('B-08 bounded ContentSearch', () => {
@@ -56,12 +87,11 @@ describe('B-08 bounded ContentSearch', () => {
   })
 
   it('scanTargetForChunk caps live Ranges at 500 and reports total', () => {
-    const target = document.createElement('div')
+    const target = trackTarget(document.createElement('div'))
     // 600 containers * 2 matches each = 1200 total "hello"
     target.innerHTML = Array.from({ length: 600 })
       .map(() => '<div class="msg">hello world hello</div>')
       .join('')
-    document.body.appendChild(target)
     const filter = makeFilter()
 
     const c0 = scanTargetForChunk(target, filter, 'hello', false, false, 0)
@@ -83,29 +113,24 @@ describe('B-08 bounded ContentSearch', () => {
     const c3 = scanTargetForChunk(target, filter, 'hello', false, false, 3)
     expect(c3.ranges.length).toBe(0)
     expect(c3.totalCount).toBe(1200)
-
-    document.body.removeChild(target)
   })
 
   it('scanTargetForChunk descriptors bounded — does not materialize unbounded list', () => {
-    const target = document.createElement('div')
+    const target = trackTarget(document.createElement('div'))
     target.innerHTML = Array.from({ length: 1000 })
       .map(() => '<span>foo</span>')
       .join(' ')
-    document.body.appendChild(target)
     const filter = makeFilter()
     const r = scanTargetForChunk(target, filter, 'foo', false, false, 0)
     expect(r.totalCount).toBe(1000)
     expect(r.ranges.length).toBe(500)
     // Only current chunk materialized
-    document.body.removeChild(target)
   })
 
   it('createSearchRegex respects case-sensitive and whole-word semantics', () => {
     const filter = makeFilter()
-    const target = document.createElement('div')
+    const target = trackTarget(document.createElement('div'))
     target.innerHTML = '<div>Hello hello HELLO</div>'
-    document.body.appendChild(target)
     // case-insensitive (default for non-latin check? Latin but caseSensitive false => gi)
     let r = scanTargetForChunk(target, filter, 'hello', false, false, 0)
     expect(r.totalCount).toBe(3)
@@ -116,17 +141,15 @@ describe('B-08 bounded ContentSearch', () => {
     target.innerHTML = '<div>helloworld hello helloWorld</div>'
     r = scanTargetForChunk(target, filter, 'hello', false, true, 0)
     expect(r.totalCount).toBe(1)
-    document.body.removeChild(target)
     // regex helper direct
     expect(createSearchRegex('a.b', false, false).source).toContain('\\.')
   })
 
   it('component: <=500 matches — preserves count/navigation/highlight', async () => {
     const filter = makeFilter()
-    const target = document.createElement('div')
+    const target = trackTarget(document.createElement('div'))
     target.innerHTML =
       '<div class="message message-assistant"><div class="message-content-container">apple banana apple banana apple</div></div>'
-    document.body.appendChild(target)
     const ref = { current: null as any } as React.RefObject<ContentSearchRef>
     render(<ContentSearch ref={ref} searchTarget={target} filter={filter} onClose={() => {}} />)
     const input = screen.getByTestId('content-search').querySelector('input') as HTMLInputElement
@@ -172,17 +195,17 @@ describe('B-08 bounded ContentSearch', () => {
     await waitFor(() => {
       expect(screen.getByTestId('content-search').textContent).toContain('3/3')
     })
-    document.body.removeChild(target)
   })
 
   it('component: >500 — bounded chunk, cross-chunk navigation rescans rendered DOM', async () => {
     const filter = makeFilter()
-    const target = document.createElement('div')
-    // 620 containers * 2 = 1240 matches -> 3 chunks (500,500,240)
-    target.innerHTML = Array.from({ length: 620 })
+    const target = trackTarget(document.createElement('div'))
+    // Minimal >500 fixture: 251 containers * 2 = 502 matches -> 2 chunks
+    // (500, 2). Chunk boundaries 500/501, last (502) and wrap are reachable
+    // via public prev/next wrap in O(steps) instead of 499/740 stepwise acts.
+    target.innerHTML = Array.from({ length: 251 })
       .map(() => '<div>hello world hello</div>')
       .join('')
-    document.body.appendChild(target)
     const ref = { current: null as any } as React.RefObject<ContentSearchRef>
     render(<ContentSearch ref={ref} searchTarget={target} filter={filter} onClose={() => {}} />)
     const host = screen.getByTestId('content-search')
@@ -192,79 +215,92 @@ describe('B-08 bounded ContentSearch', () => {
       ref.current?.search()
     })
     await waitFor(() => {
-      expect(host.textContent).toContain('1/1240')
+      expect(host.textContent).toContain('1/502')
     })
     // initial chunk materialized is 500 highlights
     expect(highlightArgs.some((a) => a.length === 500)).toBe(true)
     // verify no highlight was created with >500
-    expect(highlightArgs.every((a) => a.length <= 500)).toBe(true)
+    expectBoundedHighlights()
 
-    // navigate forward 500 times to cross chunk boundary: we will directly test crossing
-    // advance to index 499 (last of chunk0) then next should rescan chunk1
-    // Do 499 nexts from 0 -> reach 499
-    for (let i = 0; i < 499; i++) {
-      await act(async () => {
-        ref.current?.searchNext()
-      })
-    }
-    await waitFor(() => {
-      expect(host.textContent).toContain('500/1240')
+    // Backward wrap from start reaches the last chunk in one public step.
+    await act(async () => {
+      ref.current?.searchPrev()
     })
+    await waitFor(() => {
+      expect(host.textContent).toContain('502/502')
+    })
+    expectBoundedHighlights()
+    expect(highlightArgs.some((a) => a.length === 2)).toBe(true)
+
+    // Step back once more within the last chunk.
+    await act(async () => {
+      ref.current?.searchPrev()
+    })
+    await waitFor(() => {
+      expect(host.textContent).toContain('501/502')
+    })
+    expectBoundedHighlights()
+
+    // One more prev crosses chunk1 -> chunk0 backward (500/502 boundary).
     highlightArgs = []
     highlightsMock.clear.mockClear()
-    // next crosses to chunk 1, should rescan and show 501/1240
+    await act(async () => {
+      ref.current?.searchPrev()
+    })
+    await waitFor(() => {
+      expect(host.textContent).toContain('500/502')
+    })
+    expect(highlightArgs.some((a) => a.length === 500)).toBe(true)
+    expectBoundedHighlights()
+
+    // Next crosses chunk0 -> chunk1 forward (501/502 boundary).
+    highlightArgs = []
     await act(async () => {
       ref.current?.searchNext()
     })
     await waitFor(() => {
-      expect(host.textContent).toContain('501/1240')
+      expect(host.textContent).toContain('501/502')
     })
-    // after cross-chunk, new highlight should be for chunk 1 (500)
-    expect(highlightArgs.some((a) => a.length === 500)).toBe(true)
-    expect(highlightArgs.every((a) => a.length <= 500)).toBe(true)
+    expect(highlightArgs.some((a) => a.length === 2)).toBe(true)
+    expectBoundedHighlights()
 
-    // navigate prev back across chunk boundary to chunk 0
+    // Navigate prev back across chunk boundary to chunk 0.
     highlightArgs = []
     await act(async () => {
       ref.current?.searchPrev()
     })
     await waitFor(() => {
-      expect(host.textContent).toContain('500/1240')
+      expect(host.textContent).toContain('500/502')
     })
     expect(highlightArgs.some((a) => a.length === 500)).toBe(true)
 
-    // navigate to last chunk via prev from start style
-    // from 500/1240 go to 1 via wrap? Test wrap forward across many chunks
-    // Go to 1240 then next wraps to 1
-    // Fast-forward to 1240
-    // currently at 500, need 740 more nexts to reach 1240
-    for (let i = 0; i < 740; i++) {
-      await act(async () => {
-        ref.current?.searchNext()
-      })
-    }
-    await waitFor(() => {
-      expect(host.textContent).toContain('1240/1240')
+    // Forward to last via two nexts, then wrap to first.
+    await act(async () => {
+      ref.current?.searchNext()
     })
-    // chunk 2 has 240
-    // verify highlight bounded still
-    expect(highlightArgs.every((a) => a.length <= 500)).toBe(true)
+    await waitFor(() => {
+      expect(host.textContent).toContain('501/502')
+    })
+    await act(async () => {
+      ref.current?.searchNext()
+    })
+    await waitFor(() => {
+      expect(host.textContent).toContain('502/502')
+    })
+    expectBoundedHighlights()
 
     await act(async () => {
       ref.current?.searchNext()
     })
     await waitFor(() => {
-      expect(host.textContent).toContain('1/1240')
+      expect(host.textContent).toContain('1/502')
     })
-
-    document.body.removeChild(target)
   })
 
   it('component: silentSearch keeps bounded chunk but does not select current', async () => {
     const filter = makeFilter()
-    const target = document.createElement('div')
+    const target = trackTarget(document.createElement('div'))
     target.innerHTML = '<div>foo foo foo foo</div>'
-    document.body.appendChild(target)
     const ref = { current: null as any } as React.RefObject<ContentSearchRef>
     render(<ContentSearch ref={ref} searchTarget={target} filter={filter} onClose={() => {}} />)
     const input = screen.getByTestId('content-search').querySelector('input') as HTMLInputElement
@@ -285,56 +321,61 @@ describe('B-08 bounded ContentSearch', () => {
     await waitFor(() => {
       expect(screen.getByTestId('content-search').textContent).toContain('1/4')
     })
-    document.body.removeChild(target)
   })
 
   it('component: rescan reflects mutated rendered DOM on cross-chunk navigation', async () => {
     const filter = makeFilter()
-    const target = document.createElement('div')
-    // start with 600*2 =1200
-    target.innerHTML = Array.from({ length: 600 })
+    const target = trackTarget(document.createElement('div'))
+    // Small fixture: start 150*2=300, then append 150*2 -> 600 total.
+    // A single same-chunk next after mutation must already rescan and refresh
+    // the total; a two-step backward wrap then proves cross-chunk on the new
+    // total without 499 stepwise acts.
+    target.innerHTML = Array.from({ length: 150 })
       .map(() => '<div>hello hello</div>')
       .join('')
-    document.body.appendChild(target)
     const ref = { current: null as any } as React.RefObject<ContentSearchRef>
     render(<ContentSearch ref={ref} searchTarget={target} filter={filter} onClose={() => {}} />)
-    const input = screen.getByTestId('content-search').querySelector('input') as HTMLInputElement
+    const host = screen.getByTestId('content-search')
+    const input = host.querySelector('input') as HTMLInputElement
     input.value = 'hello'
     await act(async () => {
       ref.current?.search()
     })
     await waitFor(() => {
-      expect(screen.getByTestId('content-search').textContent).toContain('1/1200')
+      expect(host.textContent).toContain('1/300')
     })
-    // mutate DOM: add 600 more hello (another 1200 matches total becomes 2400)
-    target.innerHTML += Array.from({ length: 600 })
+    // mutate DOM: total becomes 600 (2 chunks: 500 + 100)
+    target.innerHTML += Array.from({ length: 150 })
       .map(() => '<div>hello hello</div>')
       .join('')
     // navigate within same chunk — per generation invalidation, before same-chunk navigation can continue
     // the rendered DOM must be rescanned, so total refreshes even before crossing chunk boundary
-    for (let i = 0; i < 499; i++) {
-      await act(async () => {
-        ref.current?.searchNext()
-      })
-    }
-    await waitFor(() => {
-      expect(screen.getByTestId('content-search').textContent).toContain('500/2400')
-    })
-    // next crosses to chunk 1 and stays on refreshed total
     await act(async () => {
       ref.current?.searchNext()
     })
     await waitFor(() => {
-      expect(screen.getByTestId('content-search').textContent).toContain('501/2400')
+      expect(host.textContent).toContain('2/600')
     })
-    document.body.removeChild(target)
+    // backward wrap crosses to the last chunk and stays on refreshed total
+    await act(async () => {
+      ref.current?.searchPrev()
+    })
+    await waitFor(() => {
+      expect(host.textContent).toContain('1/600')
+    })
+    await act(async () => {
+      ref.current?.searchPrev()
+    })
+    await waitFor(() => {
+      expect(host.textContent).toContain('600/600')
+    })
+    expectBoundedHighlights()
   })
 
   it('component: cleanup clears highlights and bounded state on disable/escape/unmount', async () => {
     const filter = makeFilter()
-    const target = document.createElement('div')
+    const target = trackTarget(document.createElement('div'))
     target.innerHTML = '<div>hello hello hello</div>'
-    document.body.appendChild(target)
     const onClose = vi.fn()
     const ref = { current: null as any } as React.RefObject<ContentSearchRef>
     const { unmount } = render(<ContentSearch ref={ref} searchTarget={target} filter={filter} onClose={onClose} />)
@@ -356,17 +397,16 @@ describe('B-08 bounded ContentSearch', () => {
     highlightsMock.clear.mockClear()
     unmount()
     expect(highlightsMock.clear).toHaveBeenCalled()
-    document.body.removeChild(target)
   })
 
   it('component: legacy hidden mode retains bounded behavior', async () => {
     const filter = makeFilter()
-    const target = document.createElement('div')
-    // 550 matches -> 2 chunks
-    target.innerHTML = Array.from({ length: 550 })
+    const target = trackTarget(document.createElement('div'))
+    // Minimal >500 legacy fixture: 502 single-match spans -> 2 chunks
+    // (500, 2); 500/501 boundary reachable via backward wrap + one forward.
+    target.innerHTML = Array.from({ length: 502 })
       .map(() => '<span>legacy</span>')
       .join(' ')
-    document.body.appendChild(target)
     const ref = { current: null as any } as React.RefObject<ContentSearchRef>
     render(<ContentSearch ref={ref} searchTarget={target} filter={filter} />)
     const host = screen.getByTestId('content-search-host')
@@ -376,22 +416,33 @@ describe('B-08 bounded ContentSearch', () => {
     })
     await waitFor(() => expect(host.style.display).not.toBe('none'))
     const input = screen.getByTestId('content-search').querySelector('input') as HTMLInputElement
-    // after enable with text, result is either silent (0/550) or jumped (1/550) depending on rAF/effect race — both prove bounded total
-    await waitFor(() => expect(screen.getByTestId('content-search').textContent).toMatch(/0\/550|1\/550/))
+    // after enable with text, result is either silent (0/502) or jumped (1/502) depending on rAF/effect race — both prove bounded total
+    await waitFor(() => expect(screen.getByTestId('content-search').textContent).toMatch(/0\/502|1\/502/))
     // actual search jump
     input.value = 'legacy'
     await act(async () => {
       ref.current?.search()
     })
-    await waitFor(() => expect(screen.getByTestId('content-search').textContent).toContain('1/550'))
+    await waitFor(() => expect(screen.getByTestId('content-search').textContent).toContain('1/502'))
     expect(highlightArgs.every((a) => a.length <= 500)).toBe(true)
-    // navigate across chunk
-    for (let i = 0; i < 500; i++) {
-      await act(async () => {
-        ref.current?.searchNext()
-      })
-    }
-    await waitFor(() => expect(screen.getByTestId('content-search').textContent).toContain('501/550'))
+    // navigate across chunk backward via wrap: 1 -> 502 -> 501 -> 500, then forward 500 -> 501
+    await act(async () => {
+      ref.current?.searchPrev()
+    })
+    await waitFor(() => expect(screen.getByTestId('content-search').textContent).toContain('502/502'))
+    await act(async () => {
+      ref.current?.searchPrev()
+    })
+    await waitFor(() => expect(screen.getByTestId('content-search').textContent).toContain('501/502'))
+    await act(async () => {
+      ref.current?.searchPrev()
+    })
+    await waitFor(() => expect(screen.getByTestId('content-search').textContent).toContain('500/502'))
+    await act(async () => {
+      ref.current?.searchNext()
+    })
+    await waitFor(() => expect(screen.getByTestId('content-search').textContent).toContain('501/502'))
+    expect(highlightArgs.every((a) => a.length <= 500)).toBe(true)
     // disable hides again and clears
     highlightsMock.clear.mockClear()
     await act(async () => {
@@ -399,16 +450,14 @@ describe('B-08 bounded ContentSearch', () => {
     })
     await waitFor(() => expect(host.style.display).toBe('none'))
     expect(highlightsMock.clear).toHaveBeenCalled()
-    document.body.removeChild(target)
   })
 
   it('component: includeUser filter governs rendered-DOM-only search', async () => {
     // Simulate Chat filter that excludes user messages when includeUser false
-    const target = document.createElement('div')
+    const target = trackTarget(document.createElement('div'))
     target.innerHTML =
       '<div class="message message-user"><div class="message-content-container">secret hello</div></div>' +
       '<div class="message message-assistant"><div class="message-content-container">hello world</div></div>'
-    document.body.appendChild(target)
     const chatFilterExcludeUser: NodeFilter = {
       acceptNode(node) {
         const container = (node.parentElement as HTMLElement)?.closest('.message-content-container')
@@ -440,14 +489,12 @@ describe('B-08 bounded ContentSearch', () => {
       ref.current?.search()
     })
     await waitFor(() => expect(screen.getByTestId('content-search').textContent).toContain('1/2'))
-    document.body.removeChild(target)
   })
 
   it('highlights bounded after case-sensitive and whole-word toggles', async () => {
     const filter = makeFilter()
-    const target = document.createElement('div')
+    const target = trackTarget(document.createElement('div'))
     target.innerHTML = '<div>Hello hello HELLO hello</div>'
-    document.body.appendChild(target)
     const ref = { current: null as any } as React.RefObject<ContentSearchRef>
     render(<ContentSearch ref={ref} searchTarget={target} filter={filter} onClose={() => {}} />)
     const input = screen.getByTestId('content-search').querySelector('input') as HTMLInputElement
@@ -463,14 +510,12 @@ describe('B-08 bounded ContentSearch', () => {
       ref.current?.search()
     })
     expect(highlightArgs.every((a) => a.length <= 500)).toBe(true)
-    document.body.removeChild(target)
   })
 
   it('synchronous mutation without yielding: same-chunk navigation drains pending observer records and rescans', async () => {
     const filter = makeFilter()
-    const target = document.createElement('div')
+    const target = trackTarget(document.createElement('div'))
     target.innerHTML = '<div>foo foo foo</div>'
-    document.body.appendChild(target)
     const ref = { current: null as any } as React.RefObject<ContentSearchRef>
     render(<ContentSearch ref={ref} searchTarget={target} filter={filter} onClose={() => {}} />)
     const host = screen.getByTestId('content-search')
@@ -494,15 +539,13 @@ describe('B-08 bounded ContentSearch', () => {
     expect(liveHost.getAttribute('data-live-ranges')).toBe('5')
     expect(highlightArgs.some((a) => a.length === 5)).toBe(true)
     expect(highlightArgs.every((a) => a.length <= 500)).toBe(true)
-    document.body.removeChild(target)
   })
 
   it('synchronous attribute mutation affecting filter without yielding triggers rescan via drained observer', async () => {
-    const target = document.createElement('div')
+    const target = trackTarget(document.createElement('div'))
     target.innerHTML =
       '<div class="message message-assistant"><div class="message-content-container">hello world</div></div>' +
       '<div class="message message-user"><div class="message-content-container">hello world</div></div>'
-    document.body.appendChild(target)
     const chatFilterExcludeUser: NodeFilter = {
       acceptNode(node) {
         const container = (node.parentElement as HTMLElement)?.closest('.message-content-container')
@@ -535,6 +578,5 @@ describe('B-08 bounded ContentSearch', () => {
     await waitFor(() => expect(host.textContent).toContain('/2'))
     expect(liveHost.getAttribute('data-live-ranges')).toBe('2')
     expect(highlightArgs.some((a) => a.length === 2)).toBe(true)
-    document.body.removeChild(target)
   })
 })
