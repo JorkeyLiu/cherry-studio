@@ -369,6 +369,25 @@ function ensureMessageParentClosure(messageId: string, childTs: number): boolean
  * limitation, not claimed atomicity.
  */
 export function handleChatDbSuccessForSync(channel: string, request: any, result?: any): void {
+  // Publisher-barrier quiescence (SYNC-DATA-026): the post-commit fallback
+  // cannot roll back already-committed rows, so while the barrier is held it
+  // refuses capture fail-closed — no outbox intent is written — and records
+  // the missing intent durably instead of silently diverging. Aggregate-gated
+  // local mutations never reach here under the barrier; only a bypass path
+  // that committed behind the gate can. Follows the existing
+  // recordCaptureFailure observability (LOCK-PERSONAL-009), never throws into
+  // the ChatDb result envelope.
+  if (syncService.isPublishBarrierHeld()) {
+    logger.warn(`[handleChatDbSuccessForSync] ${channel} capture refused while publish barrier held`)
+    try {
+      syncService.recordCaptureFailure(channel, new Error('sync capture refused while publish barrier held'))
+    } catch (secondary) {
+      const detail = secondary instanceof Error ? secondary.message : String(secondary)
+      logger.error(`[handleChatDbSuccessForSync] ${channel} capture-error persistence failed: ${detail}`)
+      throw secondary instanceof Error ? secondary : new Error(String(secondary))
+    }
+    return
+  }
   try {
     const cfg = syncService.getConfig()
     if (!cfg.enabled) return

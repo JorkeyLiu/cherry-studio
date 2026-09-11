@@ -116,6 +116,19 @@ export class ChatDbAggregateService {
   // After a successful commit the caller wakes automation via notifyEnqueued.
   // =========================================================================
 
+  // =========================================================================
+  // Publisher-barrier quiescence gate (SYNC-DATA-026)
+  //
+  // While SyncService holds the publish barrier, every public aggregate
+  // mutation fails here — inside wrapResult so callers observe a truthful
+  // failure envelope — before any SQLite transaction opens. Chat rows and
+  // outbox intent therefore cannot commit under the barrier (the enclosing
+  // aggregate transaction never starts; tx-owned capture is never reached).
+  // Remote pull/apply internal writes never enter the aggregate. Supported
+  // tx-owned methods reach this gate through syncCtx(); all other mutating
+  // methods call it explicitly at entry. Reads never call it.
+  // =========================================================================
+
   /**
    * Capture context acquired OUTSIDE the aggregate tx (deviceId setup is
    * idempotent). Fail-closed (LOCK-PERSONAL-006): when capture is enabled, an
@@ -123,8 +136,12 @@ export class ChatDbAggregateService {
    * enclosing mutation) instead of silently skipping capture (no silent loss).
    * Disabled capture returns null (no intent). Callers record a durable
    * visible capture failure outside the rolled-back tx before propagating.
+   *
+   * Publisher-barrier quiescence (SYNC-DATA-026) is enforced first: a held
+   * barrier throws SyncPublishBarrierError before any transaction opens.
    */
   private syncCtx(channel = 'chatDb'): { deviceId: string; ts: number } | null {
+    syncService.throwIfPublishBarrierHeld(channel)
     let enabled = false
     try {
       enabled = syncService.isCaptureEnabled()
@@ -919,6 +936,7 @@ export class ChatDbAggregateService {
     entries: Array<{ message: JsonObject; blocks: JsonObject[] }>
   ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('insertMessagesAfterAnchor')
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
@@ -1913,6 +1931,7 @@ export class ChatDbAggregateService {
    */
   selectAnswerMessage(topicId: string, selectedMessageId: string, messageIds: string[]): ChatDbResult<null> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('selectAnswerMessage')
       // Defense-in-depth (the shared contract already rejects duplicates and
       // missing selected). Fail early on programmer error before any write.
       const uniqueIds = new Set(messageIds)
@@ -2662,6 +2681,7 @@ export class ChatDbAggregateService {
     color: string | null | undefined
   ): ChatDbResult<SegmentWire> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('upsertSegment')
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
@@ -2731,6 +2751,7 @@ export class ChatDbAggregateService {
     color: string | null | undefined
   ): ChatDbResult<SegmentWire> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('updateSegmentMetadata')
       const repos = this.repos()
       const existing = repos.segments.getById(segmentId)
       if (!existing.found) {
@@ -2763,6 +2784,7 @@ export class ChatDbAggregateService {
    */
   deleteSegment(segmentId: string): ChatDbResult<null> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('deleteSegment')
       const { segments } = this.repos()
       segments.delete(segmentId)
       return null
@@ -2776,6 +2798,7 @@ export class ChatDbAggregateService {
    */
   replaceSegmentMembership(segmentId: string, messageIds: string[]): ChatDbResult<SegmentWire | null> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('replaceSegmentMembership')
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         repos.segments.replaceMessageIds(segmentId, messageIds)
@@ -2801,6 +2824,7 @@ export class ChatDbAggregateService {
    */
   reorderMessages(topicId: string, messageIds: string[]): ChatDbResult<null> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('reorderMessages')
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         repos.messages.replaceOrder(topicId, messageIds)
@@ -3163,6 +3187,7 @@ export class ChatDbAggregateService {
    */
   purgeExpiredTopics(cutoffTimestamp: string): ChatDbResult<PurgeExpiredTopicsResponse> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('purgeExpiredTopics')
       // LOCK-TRASH-10/13: the cutoff is caller-generated and shared-validated
       // at the IPC boundary; a fail-safe strict parse here rejects an invalid
       // cutoff with the existing typed validation semantics. LOCK-TRASH-13:
@@ -3278,6 +3303,7 @@ export class ChatDbAggregateService {
    */
   emptyTrashTopics(assistantId: string): ChatDbResult<EmptyTrashTopicsResponse> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('emptyTrashTopics')
       // LOCK-004: exact deleted topic IDs collected inside the transaction.
       const deletedTopicIds: string[] = []
 
@@ -3335,6 +3361,7 @@ export class ChatDbAggregateService {
 
   transferTopicOwnership(topicId: string, assistantId: string): ChatDbResult<null> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('transferTopicOwnership')
       this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         const topic = repos.topics.getById(topicId)
@@ -3350,6 +3377,7 @@ export class ChatDbAggregateService {
 
   resetAssistantTopics(assistantId: string, replacementTopicId: string): ChatDbResult<ResetAssistantTopicsResponse> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('resetAssistantTopics')
       // LOCK-004: exact hard-deleted topic IDs are collected inside the
       // transaction; the replacement topic is excluded from both deletion
       // and trace cleanup.
@@ -3454,6 +3482,7 @@ export class ChatDbAggregateService {
     assistantId?: string
   ): ChatDbResult<{ messages: JsonObject[]; blocks: JsonObject[] }> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('branchMessagesToTopic')
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
@@ -3568,6 +3597,7 @@ export class ChatDbAggregateService {
     assistantId?: string
   ): ChatDbResult<null> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('cloneMessagesToTopic')
       this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
@@ -3694,6 +3724,7 @@ export class ChatDbAggregateService {
     blockIdsToDelete: string[]
   ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('resetMessagesForResend')
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
@@ -3800,6 +3831,7 @@ export class ChatDbAggregateService {
    */
   deleteMessagesWithSegments(topicId: string, messageIds: string[]): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('deleteMessagesWithSegments')
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
@@ -3881,6 +3913,7 @@ export class ChatDbAggregateService {
     insertIndex?: number
   ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('pasteMessagesToTopic')
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 

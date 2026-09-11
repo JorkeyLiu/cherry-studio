@@ -35,8 +35,10 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { chatDbService } from '../chatDb'
 import * as schema from '../chatDb/schema'
+import { captureLocalSyncBaselineCandidate } from './syncBaseline'
+import { assertBarrierSnapshotProof, buildPublishEnvelope, SyncBaselinePublishError } from './syncBaselinePublish'
 import { applyWireSyncEnvelopeInTx } from './syncBaselineWireApply'
-import type { BaselineFetchResult } from './SyncClient'
+import type { BaselineFetchResult, BaselinePublishResult } from './SyncClient'
 import { syncClient, validateEndpointUrl } from './SyncClient'
 import {
   formatSyncTombstoneValue,
@@ -137,6 +139,13 @@ export class SyncFrameError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options as ErrorOptions)
     this.name = 'SyncFrameError'
+  }
+}
+
+export class SyncPublishBarrierError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options as ErrorOptions)
+    this.name = 'SyncPublishBarrierError'
   }
 }
 
@@ -312,6 +321,14 @@ function clockedFieldsFor(entityType: SyncOperation['entityType']): Set<string> 
 export class SyncService {
   private statusSyncing = false
   /**
+   * Publisher barrier hold (SYNC-DATA-026): true while a `publishBaseline()`
+   * cycle holds the exclusive barrier from quiescence proof through the single
+   * PUT until release after success or any failure. Always released in
+   * `finally` — including shutdown/stale-config aborts — so a held barrier
+   * can never wedge later publishes.
+   */
+  private publishBarrierHeld = false
+  /**
    * Last observed relay reachability (SYNC-CC-004/006). False until a relay
    * round-trip succeeds; transport failures without a response clear it.
    * In-memory only: startup always re-observes via auto-reconnect.
@@ -376,6 +393,25 @@ export class SyncService {
   /** True while a sync() push/pull cycle holds the exclusive lock. */
   isSyncing(): boolean {
     return this.statusSyncing
+  }
+
+  /** True while a publishBaseline() cycle holds the publisher barrier. */
+  isPublishBarrierHeld(): boolean {
+    return this.publishBarrierHeld
+  }
+
+  /**
+   * Fail-closed local-mutation gate for the publisher barrier (SYNC-DATA-026).
+   * While `publishBaseline()` holds the barrier, supported local chat
+   * mutations must fail before committing (aggregate TX path rolls back via
+   * its own transaction boundary; the post-commit hook fallback refuses
+   * capture). Remote pull/apply internal writes never pass through this gate.
+   * In-memory only: no queueing, no lease/ack, no new persisted state.
+   */
+  throwIfPublishBarrierHeld(channel = 'chatDb'): void {
+    if (this.publishBarrierHeld) {
+      throw new SyncPublishBarrierError(`local mutation blocked while publish barrier held (${channel})`)
+    }
   }
 
   /**
@@ -3390,6 +3426,30 @@ export class SyncService {
   }
 
   /**
+   * Shutdown-aware single-PUT wrapper: the relay fetch aborts synchronously
+   * on beginShutdown() via a linked AbortController. Shutdown surfaces as
+   * SyncShutdownError without durable lastError writes (no post-close DB).
+   */
+  private async publishWithShutdown(
+    endpoint: string,
+    token: string | undefined,
+    envelope: BaselinePublishResult['envelope'],
+    deviceCode: string,
+    deviceSecret: string
+  ): Promise<BaselinePublishResult> {
+    const controller = new AbortController()
+    const untrack = this.trackFetchController(controller)
+    try {
+      return await syncClient.publishBaseline(endpoint, token, envelope, deviceCode, deviceSecret, controller.signal)
+    } catch (e) {
+      if (this.shutdownRequested) throw new SyncShutdownError()
+      throw e
+    } finally {
+      untrack()
+    }
+  }
+
+  /**
    * Receiver bootstrap transaction (SYNC-DATA-047/SYNC-CC-023): in ONE SQLite
    * transaction, assert the persisted cursor is still 0 and the persisted
    * channel still matches the envelope, merge the wire baseline via the
@@ -3453,6 +3513,306 @@ export class SyncService {
     this.throwIfStaleConfig(syncGen)
     if (watermark < 0) throw new SyncCursorError('baseline bootstrap transaction produced no watermark')
     return watermark
+  }
+
+  /**
+   * Publisher barrier publish (SYNC-DATA-025/026/027/032, SYNC-CC-019/020/021/022).
+   *
+   * Verification-only explicit entry (no auto-publish from `sync()`): the
+   * caller drains via `sync()` first, then publishes one barrier-proven
+   * snapshot with a single client-declared `PUT /sync/baseline` (no
+   * fence/token/prepare). Strict barrier order, fail closed with no PUT when
+   * any precondition is unmet:
+   *
+   * 1. Attached + channel-bound + exclusive barrier (quiescence: no concurrent
+   *    sync/publish cycle; shutdown/config preflight first).
+   * 2. Outbox fully drained and confirmed empty before the barrier snapshot.
+   * 3. Pull to an empty page with no unresolved gap at the durable cursor
+   *    (service-boundary contiguity re-checked; non-empty page fails closed
+   *    with cursor/outbox/chat untouched for the next `sync()` cycle).
+   * 4. One SQLite snapshot captures logical baseline + clocks + tombstones +
+   *    channel binding + cursor N + outbox=0; N is proven ONLY by that
+   *    snapshot (`observedLocalCursor`/`observedLocalChannelKey`), never by a
+   *    separately observed cursor.
+   * 5. Locked wire envelope built from the proven snapshot (payload-only
+   *    `jcs-sha256-v1` digest; manifest recomputed by the shared validator).
+   * 6. Single PUT; barrier releases after success or any failure. 200 with a
+   *    full-match (channel/N/digest) response is success; 400/401/403/409/500
+   *    are truthful errors with no silent overwrite and no automatic fallback.
+   *
+   * Shutdown/config/channel transitions abort with no PUT and no
+   * post-transition chat/cursor/outbox writes: shutdown and stale-config
+   * aborts write no durable status either; channel changes record a truthful
+   * `lastError` but never mutate cursor/outbox/chat. Receiver semantics,
+   * relay semantics, and renderer/preload/IPC/UI are untouched.
+   */
+  async publishBaseline(): Promise<{ watermark: number; digest: string; channelId: string }> {
+    if (this.statusSyncing || this.publishBarrierHeld) throw new Error('sync already in progress')
+    this.throwIfShutdown()
+    let cfg: SyncConfig
+    try {
+      cfg = this.getConfig()
+      if (!cfg.enabled) throw new Error('sync is disabled')
+      const endpointErr = validateEndpointUrl(cfg.endpoint)
+      if (endpointErr) throw new Error(endpointErr)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      logger.warn(`[publishBaseline] config preflight failed: ${msg.slice(0, 300)}`)
+      try {
+        this.updateLastError(`publish preflight failed: ${msg}`.slice(0, 1000))
+      } catch {}
+      if (e instanceof SyncConfigPreflightError) throw e
+      throw new SyncConfigPreflightError(msg, { cause: e })
+    }
+    const syncGen = this.configGeneration
+    this.statusSyncing = true
+    this.publishBarrierHeld = true
+    try {
+      try {
+        this.ensurePairingGeneration()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`publish preflight failed: ${msg}`.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      let attached: { deviceCode: string; deviceSecret: string }
+      try {
+        attached = this.requireAttachedService()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`publish preflight failed: ${msg}`.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      const deviceCode = attached.deviceCode
+      const deviceSecret = attached.deviceSecret
+      let deviceId: string
+      try {
+        deviceId = this.getDeviceId()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`publish preflight failed: ${msg}`.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      const db = this.getDb()
+      let cursor = 0
+      try {
+        const cursorRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).get()
+        if (cursorRow) {
+          if (cursorRow.value === null || cursorRow.value === undefined) {
+            throw new SyncCursorError('malformed persisted cursor: missing value')
+          }
+          cursor = parseStrictCursor(cursorRow.value)
+        }
+      } catch (e) {
+        if (isTolerableMissingSyncTable(db, e, MIGRATION_005_KEY)) {
+          cursor = 0
+        } else {
+          const msg = e instanceof Error ? e.message : String(e)
+          try {
+            this.updateLastError(`persisted cursor invalid: ${msg}`.slice(0, 1000))
+          } catch {}
+          throw e instanceof Error ? e : new Error(String(e))
+        }
+      }
+      let localChannelKey: string | null = null
+      try {
+        localChannelKey = this.getChannelKey()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`persisted channel invalid: ${msg}`.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      if (localChannelKey === null) {
+        const msg = 'publish blocked: no bound channel (pair before publishing)'
+        try {
+          this.updateLastError(msg)
+        } catch {}
+        throw new SyncBaselinePublishError(msg)
+      }
+      const channelKey: string = localChannelKey
+      this.throwIfShutdown()
+      this.throwIfStaleConfig(syncGen)
+      // Barrier gate 1 — outbox drained before the snapshot (fail closed, never PUT).
+      let outboxOps: SyncOperation[]
+      try {
+        outboxOps = this.listOutbox()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`publish preflight failed: ${msg}`.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      if (outboxOps.length > 0) {
+        const msg = `publish blocked: outbox not drained (${String(outboxOps.length)} pending; sync() first)`
+        try {
+          this.updateLastError(msg.slice(0, 1000))
+        } catch {}
+        throw new SyncBaselinePublishError(msg)
+      }
+      this.throwIfShutdown()
+      this.throwIfStaleConfig(syncGen)
+      // Barrier gate 2 — pull to an empty page with no unresolved gap at N.
+      // A non-empty page means concurrent channel history this snapshot does
+      // not cover: fail closed with cursor/outbox/chat untouched (next sync()
+      // converges first). Channel switches abort with no post-transition write.
+      let pullRes: { operations: any[]; cursor: number; channelId?: string }
+      try {
+        pullRes = await this.pullWithShutdown(cfg.endpoint, cfg.token, cursor, deviceId, deviceCode, deviceSecret)
+        this.throwIfShutdown()
+        this.throwIfStaleConfig(syncGen)
+        this.markRelayContact(true)
+        if (pullRes.channelId !== undefined && pullRes.channelId !== channelKey) {
+          const msg = `publish blocked: channel changed before snapshot (local ${channelKey})`
+          try {
+            this.updateLastError(msg.slice(0, 1000))
+          } catch {}
+          throw new SyncBaselinePublishError(msg)
+        }
+        if (this.getChannelKey() !== channelKey) {
+          const msg = 'publish blocked: channel changed before snapshot'
+          try {
+            this.updateLastError(msg.slice(0, 1000))
+          } catch {}
+          throw new SyncBaselinePublishError(msg)
+        }
+        this.throwIfShutdown()
+        this.throwIfStaleConfig(syncGen)
+        try {
+          this.assertContiguousPull(cursor, pullRes as { operations: Array<{ seq?: unknown }>; cursor: unknown })
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          try {
+            this.updateLastError(msg.slice(0, 1000))
+          } catch {}
+          throw e instanceof Error ? e : new Error(String(e))
+        }
+        if ((pullRes.operations ?? []).length > 0) {
+          const msg = `publish blocked: pull not empty at cursor ${String(cursor)} (${String(pullRes.operations.length)} operation(s) pending; sync() first)`
+          try {
+            this.updateLastError(msg.slice(0, 1000))
+          } catch {}
+          throw new SyncBaselinePublishError(msg)
+        }
+      } catch (e) {
+        if (e instanceof SyncShutdownError) throw e
+        if (e instanceof SyncStaleConfigError) throw e
+        if (e instanceof SyncBaselinePublishError) throw e
+        this.markRelayContact(false, e)
+        const msg = e instanceof Error ? e.message : String(e)
+        this.throwIfShutdown()
+        try {
+          this.updateLastError(msg.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      this.throwIfShutdown()
+      this.throwIfStaleConfig(syncGen)
+      // Barrier gate 3 — same-snapshot capture + proof: candidate content,
+      // clocks, tombstones, binding, cursor N, and outbox=0 from one SQLite
+      // snapshot. N is proven only by this snapshot.
+      let proof: { watermarkN: number; channelId: string }
+      let envelope: BaselinePublishResult['envelope']
+      let digest: string
+      try {
+        const candidate = captureLocalSyncBaselineCandidate(db)
+        this.throwIfShutdown()
+        this.throwIfStaleConfig(syncGen)
+        proof = assertBarrierSnapshotProof(candidate, channelKey, cursor)
+        const built = buildPublishEnvelope(candidate, channelKey, proof.watermarkN)
+        envelope = built.envelope
+        digest = built.digest
+      } catch (e) {
+        if (e instanceof SyncShutdownError) throw e
+        if (e instanceof SyncStaleConfigError) throw e
+        const msg = e instanceof Error ? e.message : String(e)
+        this.throwIfShutdown()
+        try {
+          this.updateLastError(msg.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      this.throwIfShutdown()
+      this.throwIfStaleConfig(syncGen)
+      // Pre-PUT re-verify: no post-snapshot transition (read-only, no writes).
+      if (this.getChannelKey() !== channelKey) {
+        const msg = 'publish blocked: channel changed after snapshot (no PUT)'
+        try {
+          this.updateLastError(msg.slice(0, 1000))
+        } catch {}
+        throw new SyncBaselinePublishError(msg)
+      }
+      try {
+        const cursorRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).get()
+        const current = cursorRow ? parseStrictCursor(cursorRow.value) : 0
+        if (current !== proof.watermarkN) {
+          const msg = `publish blocked: durable cursor changed after snapshot (expected ${String(proof.watermarkN)} found ${String(current)}; no PUT)`
+          try {
+            this.updateLastError(msg.slice(0, 1000))
+          } catch {}
+          throw new SyncBaselinePublishError(msg)
+        }
+      } catch (e) {
+        if (e instanceof SyncBaselinePublishError) throw e
+        const msg = e instanceof Error ? e.message : String(e)
+        try {
+          this.updateLastError(`publish blocked: cursor re-verify failed: ${msg}`.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      this.throwIfShutdown()
+      this.throwIfStaleConfig(syncGen)
+      // Single client-declared PUT. Any failure (400/401/403/409/500,
+      // shutdown, stale config) releases the barrier with no silent overwrite
+      // and no automatic fallback; cursor/outbox/chat stay truthful.
+      let returned: BaselinePublishResult
+      try {
+        returned = await this.publishWithShutdown(cfg.endpoint, cfg.token, envelope, deviceCode, deviceSecret)
+        this.throwIfShutdown()
+        this.throwIfStaleConfig(syncGen)
+        this.markRelayContact(true)
+      } catch (e) {
+        if (e instanceof SyncShutdownError) throw e
+        if (e instanceof SyncStaleConfigError) throw e
+        this.markRelayContact(false, e)
+        const msg = e instanceof Error ? e.message : String(e)
+        this.throwIfShutdown()
+        try {
+          this.updateLastError(msg.slice(0, 1000))
+        } catch {}
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      // Full-match idempotent success: the relay 200 must echo this exact
+      // candidate (channel/N/digest). Anything else fails closed truthfully.
+      if (
+        returned.envelope.channelId !== channelKey ||
+        returned.envelope.watermark !== proof.watermarkN ||
+        returned.envelope.digest !== digest
+      ) {
+        const msg = `publish response mismatch: expected channel/N/digest match for N=${String(proof.watermarkN)} (no silent overwrite)`
+        try {
+          this.updateLastError(msg.slice(0, 1000))
+        } catch {}
+        throw new SyncBaselinePublishError(msg)
+      }
+      this.throwIfShutdown()
+      this.throwIfStaleConfig(syncGen)
+      this.updateLastSyncAt(new Date().toISOString())
+      this.updateLastError(null)
+      logger.info(`[publishBaseline] published baseline N=${String(proof.watermarkN)} digest=${digest.slice(0, 12)}`)
+      return { watermark: proof.watermarkN, digest, channelId: channelKey }
+    } finally {
+      this.statusSyncing = false
+      this.publishBarrierHeld = false
+    }
   }
 
   /**
@@ -4313,6 +4673,8 @@ export class SyncService {
     this.resetShutdownForTests()
     this.configGeneration = 0
     this.serviceConnected = false
+    this.statusSyncing = false
+    this.publishBarrierHeld = false
     try {
       configManager.set(STATE_DEVICE_AUTH as never, '' as never)
     } catch {}

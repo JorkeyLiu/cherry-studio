@@ -13,6 +13,7 @@ import {
   SYNC_DEVICE_CODE_HEADER,
   SYNC_DEVICE_SECRET_HEADER,
   SYNC_REQUEST_TIMEOUT_MS,
+  validateEnvelope,
   validatePairingCode,
   validatePairingRequestId,
   validateSyncDeviceName,
@@ -49,6 +50,11 @@ export interface SyncPairStateResponse {
 }
 
 export type BaselineFetchResult = { found: false } | { found: true; envelope: SyncEnvelope; rawText: string }
+
+export interface BaselinePublishResult {
+  envelope: SyncEnvelope
+  rawText: string
+}
 
 /**
  * Strict 404 empty-state gate (SYNC-CC-023): only the exact relay
@@ -361,6 +367,88 @@ export class SyncClient {
       if ((e as Error).name === 'AbortError') {
         if (externalSignal?.aborted) throw e
         throw new Error(`baseline fetch timeout after ${SYNC_REQUEST_TIMEOUT_MS}ms`)
+      }
+      throw e
+    } finally {
+      clearTimeout(timeout)
+      if (externalSignal) {
+        try {
+          externalSignal.removeEventListener('abort', onExternalAbort)
+        } catch {}
+      }
+    }
+  }
+
+  /**
+   * Publisher single-stage publish (SYNC-CC-022/SYNC-DATA-025/046): exactly one
+   * client-declared `PUT /sync/baseline` per call with the locked
+   * `sync-baseline-wire-v1` envelope as the direct JSON body. No relay-issued
+   * fence, token, or prepare handshake exists and none is performed here.
+   * Auth follows the existing device-header plane; Bearer token added when
+   * present. The envelope is strictly validated before transport (fail closed,
+   * never PUT); the 200 body is strictly parsed via the shared
+   * `parseEnvelopeJson` (exact keys/duplicate-key rejection). Non-2xx
+   * (400/401/403/409/500) retain the relay `{error}` via the existing safe
+   * mapping with no silent overwrite and no automatic fallback.
+   */
+  async publishBaseline(
+    endpoint: string,
+    token: string | undefined,
+    envelope: SyncEnvelope,
+    deviceCode: string,
+    deviceSecret: string,
+    externalSignal?: AbortSignal
+  ): Promise<BaselinePublishResult> {
+    const validation = validateEndpointUrl(endpoint)
+    if (validation) throw new Error(validation)
+    if (!deviceCode || !deviceSecret) {
+      throw new Error('baseline publish failed: service not connected (registration required)')
+    }
+    try {
+      validateEnvelope(envelope)
+    } catch (e) {
+      throw new Error(`baseline publish envelope invalid: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    const url = endpoint.replace(/\/$/, '') + '/sync/baseline'
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), SYNC_REQUEST_TIMEOUT_MS)
+    const onExternalAbort = (): void => {
+      try {
+        controller.abort()
+      } catch {}
+    }
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort()
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+    }
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...this.deviceHeaders(deviceCode, deviceSecret)
+      }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(url, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(envelope),
+        signal: controller.signal
+      })
+      if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        throw this.relayFailure('baseline publish', res.status, text)
+      }
+      const rawText = await res.text()
+      let returned: SyncEnvelope
+      try {
+        returned = parseEnvelopeJson(rawText)
+      } catch (e) {
+        throw new Error(`baseline publish response malformed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      return { envelope: returned, rawText }
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        if (externalSignal?.aborted) throw e
+        throw new Error(`baseline publish timeout after ${SYNC_REQUEST_TIMEOUT_MS}ms`)
       }
       throw e
     } finally {
