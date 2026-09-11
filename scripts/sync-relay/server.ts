@@ -24,6 +24,11 @@ export { formatRelayHostForUrl, normalizeRelayBindHost } from './relayHost'
 import Database from 'better-sqlite3'
 
 import {
+  canonicalizePayload as canonicalizeBaselinePayloadShared,
+  parseEnvelopeJson as parseBaselineEnvelopeJsonShared,
+  verifyEnvelopeDigest as verifyBaselineEnvelopeDigestShared
+} from '../../packages/shared/sync/baselineWire'
+import {
   normalizePairingCode as normalizePairingCodeShared,
   SYNC_DEVICE_CODE_HEADER as SHARED_DEVICE_CODE_HEADER,
   SYNC_DEVICE_SECRET_HEADER as SHARED_DEVICE_SECRET_HEADER,
@@ -638,22 +643,27 @@ function readDeviceHeader(req: IncomingMessage, name: string): string {
  * Relay schema for the registration/channel/pairing model (SYNC-CC-*).
  * Exported for unit tests so the file-backed CLI path (`initDb`) and the
  * in-memory/HTTP test harnesses share one schema. Current pairing state
- * (`sync_pair_requests`) is never dropped: only the superseded global
+ * (`sync_pair_requests`) and current baseline state (`sync_channel_baselines`)
+ * are never dropped: only the superseded global
  * `operations` table and explicit legacy tables from the superseded
  * invite/founder/global-trust stages are removed once, and only when an
  * explicit legacy schema is present without the versioned meta marker
  * (SYNC-CC-013). Fresh installs (no legacy, no marker) only record the
  * marker; a second startup against the same DB is a no-op for existing
- * rows, so pending requests survive relay restarts.
+ * rows, so pending requests and published baselines survive relay restarts.
+ * The `cc-1` → `cc-2` migration is purely additive (creates
+ * `sync_channel_baselines` when absent, then advances the marker) and never
+ * touches devices, channels, memberships, requests, or operations.
  */
-export const RELAY_SCHEMA_VERSION = 'cc-1'
+export const RELAY_SCHEMA_VERSION = 'cc-2'
 const RELAY_SCHEMA_META_KEY = 'schema_version'
 
 /**
  * Legacy tables replaced by the channel-scoped model. Allowlisted: only
  * these names are ever dropped by the one-time reset. Current tables
  * (`sync_devices`, `sync_channels`, `sync_memberships`,
- * `sync_pair_requests`, `sync_channel_operations`, `relay_schema_meta`)
+ * `sync_pair_requests`, `sync_channel_operations`, `sync_channel_baselines`,
+ * `relay_schema_meta`)
  * are never in this set.
  */
 const RELAY_LEGACY_TABLES = [
@@ -679,6 +689,24 @@ function listPresentLegacyRelayTables(db: Database.Database): string[] {
 }
 
 export function ensureRelaySchema(db: Database.Database): void {
+  // Read the marker before any write: an unknown marker (future version,
+  // empty string, or garbage) fails closed with zero side effects — no
+  // table created, nothing overwritten, nothing dropped. The caller surfaces
+  // a store init error instead of opening the database.
+  let applied: string | null = null
+  try {
+    const row = db.prepare('SELECT value FROM relay_schema_meta WHERE key = ?').get(RELAY_SCHEMA_META_KEY) as
+      | { value: string }
+      | undefined
+    applied = row?.value ?? null
+  } catch {
+    applied = null
+  }
+  if (applied !== null && applied !== 'cc-1' && applied !== RELAY_SCHEMA_VERSION) {
+    throw new Error(
+      `unsupported relay schema version '${applied}' (expected '${RELAY_SCHEMA_VERSION}' or migratable 'cc-1'); refusing to overwrite`
+    )
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS sync_devices (
       device_code TEXT PRIMARY KEY,
@@ -722,29 +750,35 @@ export function ensureRelaySchema(db: Database.Database): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS sync_channel_operations_id_idx ON sync_channel_operations(channel_id, id);
     CREATE INDEX IF NOT EXISTS sync_channel_operations_entity_idx ON sync_channel_operations(channel_id, entity_id);
+    CREATE TABLE IF NOT EXISTS sync_channel_baselines (
+      channel_id TEXT PRIMARY KEY,
+      watermark INTEGER NOT NULL,
+      digest_scheme TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      wire_version TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      envelope_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS relay_schema_meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
   `)
-  let applied: string | null = null
-  try {
-    const row = db.prepare('SELECT value FROM relay_schema_meta WHERE key = ?').get(RELAY_SCHEMA_META_KEY) as
-      | { value: string }
-      | undefined
-    applied = row?.value ?? null
-  } catch {
-    applied = null
-  }
   if (applied === RELAY_SCHEMA_VERSION) return
   // One-time deterministic reset of explicit legacy tables only, gated on an
   // explicit legacy schema without the marker. Current tables above (notably
-  // `sync_pair_requests` and `sync_channel_operations`) are never dropped;
-  // the version marker makes later restarts a no-op so pending rows survive.
-  const legacyTables = listPresentLegacyRelayTables(db)
-  if (legacyTables.length > 0) {
-    for (const table of legacyTables) {
-      db.exec(`DROP TABLE IF EXISTS "${table}"`)
+  // `sync_pair_requests`, `sync_channel_operations`, and
+  // `sync_channel_baselines`) are never dropped; the version marker makes
+  // later restarts a no-op so pending rows and published baselines survive.
+  // A `cc-1` database keeps every row: the additive `cc-2` table above was
+  // already created idempotently, so only the marker advances here.
+  if (applied === null) {
+    const legacyTables = listPresentLegacyRelayTables(db)
+    if (legacyTables.length > 0) {
+      for (const table of legacyTables) {
+        db.exec(`DROP TABLE IF EXISTS "${table}"`)
+      }
     }
   }
   db.prepare(
@@ -878,6 +912,86 @@ function channelMaxSeqOrThrow(db: Database.Database, channelId: string): number 
     .prepare('SELECT COALESCE(MAX(seq),0) as maxSeq FROM sync_channel_operations WHERE channel_id = ?')
     .get(channelId) as { maxSeq: number }
   return row?.maxSeq ?? 0
+}
+
+/**
+ * Relay baseline resource helpers (SYNC-CC-022 / SYNC-DATA-046).
+ * Per-channel single current-effective baseline envelope, persisted in
+ * `sync_channel_baselines` (one row per channel). The relay validates the
+ * strict `sync-baseline-wire-v1` envelope via the shared `baselineWire`
+ * protocol module (single source of truth — no copied rules), recomputes the
+ * payload-only `jcs-sha256-v1` digest with Node crypto, and decides
+ * create/idempotent/replace/conflict inside one synchronous SQLite
+ * transaction per publish so concurrent publishes serialize on the single DB
+ * connection and cannot split-brain. No size threshold / 413 exists on this
+ * resource (deferred); no compaction exists so the SYNC-DATA-023 coverage
+ * gate under full op-log retention reduces to N <= relay head.
+ */
+
+function baselineHashHex(canonicalUtf8: Uint8Array): string {
+  return createHash('sha256').update(canonicalUtf8).digest('hex')
+}
+
+interface BaselineRow {
+  channel_id: string
+  watermark: number
+  digest_scheme: string
+  digest: string
+  wire_version: string
+  payload_json: string
+  envelope_json: string
+}
+
+function getBaselineRowOrThrow(db: Database.Database, channelId: string): BaselineRow | null {
+  const row = db
+    .prepare(
+      'SELECT channel_id, watermark, digest_scheme, digest, wire_version, payload_json, envelope_json FROM sync_channel_baselines WHERE channel_id = ?'
+    )
+    .get(channelId) as BaselineRow | undefined
+  return row ?? null
+}
+
+function serializeBaselineEnvelope(envelope: {
+  wireVersion: string
+  channelId: string
+  watermark: number
+  digestScheme: string
+  digest: string
+  payload: unknown
+}): string {
+  // Fixed outer key order per the locked envelope spelling; payload key order
+  // is insignificant (digest covers JCS canonical bytes, idempotency compares
+  // canonical payload strings).
+  return JSON.stringify({
+    wireVersion: envelope.wireVersion,
+    channelId: envelope.channelId,
+    watermark: envelope.watermark,
+    digestScheme: envelope.digestScheme,
+    digest: envelope.digest,
+    payload: envelope.payload
+  })
+}
+
+function readRawBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolveBody, reject) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk: Buffer) => {
+      // Accumulate raw bytes; decode once after all chunks arrive so a
+      // multibyte UTF-8 sequence split across chunk boundaries decodes
+      // exactly (per-chunk string decode would emit U+FFFD and corrupt the
+      // strict envelope parse/digest below). No size threshold here: this
+      // resource has no 413 behavior (deferred).
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    })
+    req.on('end', () => {
+      try {
+        resolveBody(Buffer.concat(chunks).toString('utf8'))
+      } catch (e) {
+        reject(e)
+      }
+    })
+    req.on('error', reject)
+  })
 }
 
 // Operation validation delegates to the shared strict validator
@@ -1042,7 +1156,7 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     const host = req.headers.host ?? 'localhost'
     const url = new URL(req.url ?? '/', `http://${host}`)
     res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS')
     res.setHeader(
       'Access-Control-Allow-Headers',
       `Content-Type,Authorization,${SHARED_DEVICE_CODE_HEADER},${SHARED_DEVICE_SECRET_HEADER}`
@@ -1346,6 +1460,234 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(respStr)
+      return
+    }
+
+    // ---- Per-channel current-effective baseline resource (SYNC-CC-022) ----
+    // `PUT /sync/baseline` publishes (idempotent replace) and
+    // `GET /sync/baseline` fetches the single current-effective
+    // `sync-baseline-wire-v1` envelope for the caller's channel. Request and
+    // success response bodies are directly the locked `SyncEnvelope` JSON.
+    // Auth follows the existing channel data-plane semantics: Bearer token
+    // `401`, device credential `403`, unpaired `403 pairing-required`.
+    if (req.method === 'PUT' && url.pathname === '/sync/baseline') {
+      if (tokenRequired && !checkAuth(req, expectedToken)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      let caller: string
+      try {
+        caller = requireDeviceAuthOrThrow(db, req).deviceCode
+      } catch (authErr) {
+        const ae = authErr as { status?: number; error?: string }
+        res.writeHead(ae.status === 500 ? 500 : 403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: ae.error ?? 'invalid-credential' }))
+        return
+      }
+      let rawText: string
+      try {
+        rawText = await readRawBody(req)
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'store-unavailable' }))
+        return
+      }
+      // Strict envelope validation (single source of truth: shared
+      // baselineWire — exact keys, versions, I-JSON/Unicode/safe-int/clocks,
+      // closure, manifest recompute, duplicate-key rejection on raw text).
+      let envelope: {
+        wireVersion: string
+        channelId: string
+        watermark: number
+        digestScheme: string
+        digest: string
+        payload: unknown
+      }
+      try {
+        envelope = parseBaselineEnvelopeJsonShared(rawText) as unknown as typeof envelope
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid-envelope' }))
+        return
+      }
+      // Channel binding: the envelope channel must equal the authenticated
+      // member channel; cross-channel publish is refused without disclosure.
+      let channel: string | null
+      try {
+        channel = getMembershipChannelOrThrow(db, caller)
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'store-unavailable' }))
+        return
+      }
+      if (!channel) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'pairing-required' }))
+        return
+      }
+      const channelId: string = channel
+      if (envelope.channelId !== channelId) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'channel-mismatch' }))
+        return
+      }
+      // Payload-only digest recompute (proves byte-identity only, never
+      // semantic truth nor correspondence to N per SYNC-DATA-028/032).
+      let digestOk = false
+      try {
+        digestOk = verifyBaselineEnvelopeDigestShared(envelope as never, baselineHashHex)
+      } catch {
+        digestOk = false
+      }
+      if (!digestOk) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'digest-mismatch' }))
+        return
+      }
+      // Serialized per-channel decision: current-row read, head read, and
+      // conditional write commit in one synchronous transaction.
+      let storedJson: string | null = null
+      try {
+        const txn = db.transaction(() => {
+          const head = channelMaxSeqOrThrow(db, channelId)
+          if (envelope.watermark > head) {
+            throw { status: 400, error: 'watermark-above-head' }
+          }
+          const current = getBaselineRowOrThrow(db, channelId)
+          if (!current) {
+            // Empty state: the first legal N (relay-confirmed, at most head)
+            // is accepted; coverage holds under full retention.
+            const nowIso = new Date().toISOString()
+            const payloadJson = JSON.stringify(envelope.payload)
+            const envelopeJson = serializeBaselineEnvelope(envelope)
+            db.prepare(
+              'INSERT INTO sync_channel_baselines (channel_id, watermark, digest_scheme, digest, wire_version, payload_json, envelope_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+            ).run(
+              channelId,
+              envelope.watermark,
+              envelope.digestScheme,
+              envelope.digest,
+              envelope.wireVersion,
+              payloadJson,
+              envelopeJson,
+              nowIso
+            )
+            storedJson = envelopeJson
+            return
+          }
+          if (envelope.watermark < current.watermark) {
+            throw { status: 409, error: 'baseline-conflict' }
+          }
+          if (envelope.watermark === current.watermark) {
+            // Idempotent 200 only on full match (channel binding already
+            // equal, plus N, digest scheme, digest, canonical payload).
+            let currentCanonical: string
+            let incomingCanonical: string
+            try {
+              currentCanonical = canonicalizeBaselinePayloadShared(JSON.parse(current.payload_json) as never)
+              incomingCanonical = canonicalizeBaselinePayloadShared(envelope.payload as never)
+            } catch {
+              throw { status: 500, error: 'store-unavailable' }
+            }
+            if (
+              envelope.digestScheme === current.digest_scheme &&
+              envelope.digest === current.digest &&
+              incomingCanonical === currentCanonical
+            ) {
+              storedJson = current.envelope_json
+              return
+            }
+            throw { status: 409, error: 'baseline-conflict' }
+          }
+          // N > current: replace when the coverage gate holds. With no
+          // compaction and the full op log retained, the N+1 onward replay
+          // path is intact for every relay-confirmed N (N <= head, checked
+          // above), so replacement proceeds.
+          const nowIso = new Date().toISOString()
+          const payloadJson = JSON.stringify(envelope.payload)
+          const envelopeJson = serializeBaselineEnvelope(envelope)
+          db.prepare(
+            'UPDATE sync_channel_baselines SET watermark = ?, digest_scheme = ?, digest = ?, wire_version = ?, payload_json = ?, envelope_json = ?, updated_at = ? WHERE channel_id = ?'
+          ).run(
+            envelope.watermark,
+            envelope.digestScheme,
+            envelope.digest,
+            envelope.wireVersion,
+            payloadJson,
+            envelopeJson,
+            nowIso,
+            channelId
+          )
+          storedJson = envelopeJson
+        })
+        txn()
+      } catch (e) {
+        const te = e as { status?: number; error?: string; message?: string }
+        if (typeof te?.status === 'number' && typeof te?.error === 'string') {
+          res.writeHead(te.status, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: te.error }))
+          return
+        }
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'store-unavailable' }))
+        return
+      }
+      if (storedJson === null) {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'store-unavailable' }))
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(storedJson)
+      return
+    }
+
+    if (req.method === 'GET' && url.pathname === '/sync/baseline') {
+      if (tokenRequired && !checkAuth(req, expectedToken)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      let caller: string
+      try {
+        caller = requireDeviceAuthOrThrow(db, req).deviceCode
+      } catch (authErr) {
+        const ae = authErr as { status?: number; error?: string }
+        res.writeHead(ae.status === 500 ? 500 : 403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: ae.error ?? 'invalid-credential' }))
+        return
+      }
+      let channel: string | null
+      try {
+        channel = getMembershipChannelOrThrow(db, caller)
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'store-unavailable' }))
+        return
+      }
+      if (!channel) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'pairing-required' }))
+        return
+      }
+      let row: BaselineRow | null
+      try {
+        row = getBaselineRowOrThrow(db, channel)
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'store-unavailable' }))
+        return
+      }
+      if (!row) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'baseline-not-found' }))
+        return
+      }
+      // Serves only the caller's own channel row; cross-channel rows are
+      // never addressable (channel binding is auth-derived, never a param).
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(row.envelope_json)
       return
     }
 

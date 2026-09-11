@@ -109,7 +109,7 @@ describe('relay pairing atomicity', () => {
     const metaFirst = db.prepare('SELECT value FROM relay_schema_meta WHERE key = ?').get('schema_version') as
       | { value: string }
       | undefined
-    expect(metaFirst?.value).toBe('cc-1')
+    expect(metaFirst?.value).toBe('cc-2')
     // Pending rows survive restarts: current state is never deleted per call.
     db.prepare(
       "INSERT INTO sync_pair_requests (id, requester_code, target_code, status, created_at) VALUES (?, ?, ?, 'pending', ?)"
@@ -125,7 +125,7 @@ describe('relay pairing atomicity', () => {
     const meta = db.prepare('SELECT value FROM relay_schema_meta WHERE key = ?').get('schema_version') as
       | { value: string }
       | undefined
-    expect(meta?.value).toBe('cc-1')
+    expect(meta?.value).toBe('cc-2')
   })
 
   it('partial unique index forbids two pendings for one requester', () => {
