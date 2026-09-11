@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 
 import { validateEndpointUrl } from './SyncClient'
+import type { BaselineAutoPublishResult } from './SyncService'
 import { syncService } from './SyncService'
 import { SyncSubscriber } from './syncSubscriber'
 
@@ -28,6 +29,12 @@ export function computeAutoRetryDelay(attempt: number): number {
 export interface SyncAutoDeps {
   getConfig: () => { endpoint: string; token?: string; enabled: boolean }
   runSync: () => Promise<unknown>
+  /**
+   * Conservative auto-publish attempt (local-triggered success only).
+   * Defaults to the live `SyncService.publishBaselineIfEligible()`. Never
+   * recurses into `runSync`; at most one PUT per successful sync cycle.
+   */
+  tryPublishBaseline: () => Promise<BaselineAutoPublishResult>
   createSubscriber: () => SyncSubscriber
   /**
    * Attachment gate (SYNC-CC-004/005): automation runs only for registered,
@@ -66,6 +73,18 @@ export class SyncAutoService {
   private reconnectAttempts = 0
   private autoRunning = false
   private pending = false
+  /**
+   * Local publish intent (conservative auto-publish, in-memory only).
+   * Set only by `notifyLocalChange()` (successful local chat outbox enqueue).
+   * Remote SSE/hint, reconnect, reconcile, channel-change refresh, and manual
+   * `SyncService.sync()` never set it. Consumed only after one publish attempt
+   * (`published`/`skipped`/`deferred`) or an explicit ineligible skip; retained
+   * across ordinary sync failures and `needs-sync` barrier contention. Cleared
+   * on stop/invalidation. `localPublishSeq` guards against an older attempt
+   * clearing a newer trigger that arrived during the PUT barrier.
+   */
+  private localPublishIntent = false
+  private localPublishSeq = 0
   private generation = 0
   private enqueueUnsub: (() => void) | null = null
   private configFailureUnsub: (() => void) | null = null
@@ -76,6 +95,7 @@ export class SyncAutoService {
     this.deps = {
       getConfig: () => syncService.getConfig(),
       runSync: () => syncService.sync(),
+      tryPublishBaseline: () => syncService.publishBaselineIfEligible(),
       createSubscriber: () => new SyncSubscriber(),
       isAttached: () => syncService.isAutoSyncAllowed(),
       getCredentials: () => syncService.getAutoCredentials(),
@@ -159,10 +179,16 @@ export class SyncAutoService {
     }
     this.autoRunning = false
     this.pending = false
+    this.localPublishIntent = false
   }
 
   stop(): void {
     this.stopSync()
+  }
+
+  /** Test-only accessor for the in-memory local publish intent (never persisted). */
+  hasLocalPublishIntentForTests(): boolean {
+    return this.localPublishIntent
   }
 
   /**
@@ -315,6 +341,8 @@ export class SyncAutoService {
   /** Debounced local trigger after a successful local operation enqueue. */
   notifyLocalChange(): void {
     if (!this.started) return
+    this.localPublishIntent = true
+    this.localPublishSeq += 1
     if (this.localTimer) clearTimeout(this.localTimer)
     const gen = this.generation
     this.localTimer = setTimeout(() => {
@@ -389,6 +417,47 @@ export class SyncAutoService {
           await this.deps.runSync()
           if (isStale()) return
           consecutiveFailures = 0
+          // Conservative auto-publish: only a successful ordinary sync cycle
+          // that contains an unconsumed local trigger may attempt one baseline
+          // publish. Remote/reconnect/reconcile/manual cycles have no intent
+          // and never PUT. At most one attempt per success; the attempt never
+          // recurses into runSync and never wakes another auto cycle by itself.
+          if (this.localPublishIntent) {
+            const seqBefore = this.localPublishSeq
+            let result: BaselineAutoPublishResult | null = null
+            try {
+              result = await this.deps.tryPublishBaseline()
+              if (isStale()) return
+            } catch (e) {
+              if (isStale()) return
+              if ((e as Error)?.name === 'SyncShutdownError') return
+              if ((e as Error)?.name === 'SyncStaleConfigError') {
+                logger.info(`[autoSync] auto-publish invalidated by config change, stop`)
+                return
+              }
+              if ((e as Error)?.name === 'SyncConfigPreflightError') {
+                try {
+                  this.handleAutoConfigFailure('autoSync', e)
+                } catch {}
+                return
+              }
+              const msg = e instanceof Error ? e.message : String(e)
+              logger.warn(`[autoSync] auto-publish unexpected deferred: ${msg.slice(0, 300)}`)
+            }
+            // Intent accounting: `needs-sync` (outbox not drained, concurrent
+            // barrier block, busy) retains the intent so the next successful
+            // sync cycle retries after draining. `published`/`skipped`/
+            // `deferred` (incl. 409/transport, already truthfully recorded
+            // without failing the op-log sync) consume the round's intent —
+            // but only when no newer local trigger arrived during the attempt.
+            if (result !== null && result.kind === 'needs-sync') {
+              // Retain: a newer trigger already set pending via requestAutoSync
+              // (or its debounce fires next), so the next cycle converges first.
+            } else if (this.localPublishSeq === seqBefore) {
+              this.localPublishIntent = false
+            }
+            if (isStale()) return
+          }
         } catch (e) {
           if (isStale()) return
           const msg = e instanceof Error ? e.message : String(e)
@@ -510,6 +579,7 @@ export class SyncAutoService {
       this.reconnectTimer = null
     }
     this.pending = false
+    this.localPublishIntent = false
   }
 
   private clearReconnectTimer(): void {

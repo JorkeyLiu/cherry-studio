@@ -150,6 +150,41 @@ export class SyncPublishBarrierError extends Error {
 }
 
 /**
+ * Structured busy contention (finding-01): a concurrent `sync()` or
+ * `publishBaseline()` cycle already holds the exclusive lock/barrier.
+ * Message text stays `sync already in progress` for backward compatibility;
+ * classification must use `instanceof SyncBusyError`, never message strings.
+ */
+export class SyncBusyError extends Error {
+  constructor(message = 'sync already in progress', options?: { cause?: unknown }) {
+    super(message, options as ErrorOptions)
+    this.name = 'SyncBusyError'
+  }
+}
+
+/**
+ * Conservative auto-publish outcome (no exception-string classification).
+ * - `published`: single PUT succeeded (consumes the local publish intent).
+ * - `skipped`: explicit ineligible without PUT and without error status
+ *   (unbound channel / watermark N==0 / candidate not complete-bound-drained;
+ *   consumes the local intent for this round).
+ * - `needs-sync`: barrier could not prove a snapshot for this round (outbox
+ *   not drained / concurrent barrier block / busy with a concurrent
+ *   sync-publish cycle). No PUT, no error status; retains the local intent so
+ *   the next successful sync cycle retries after draining.
+ * - `deferred`: PUT attempted but relay/transport refused (409 conflict or
+ *   other publish failure). The successful op-log sync stays successful; the
+ *   error is already truthfully recorded by the barrier path (lastError +
+ *   scoped log). Consumes the local intent for this round with no immediate
+ *   re-capture/retry; the next local-change-driven successful sync retries.
+ */
+export type BaselineAutoPublishResult =
+  | { kind: 'published'; watermark: number; digest: string; channelId: string }
+  | { kind: 'skipped'; reason: 'unbound-channel' | 'watermark-zero' | 'candidate-ineligible'; detail: string }
+  | { kind: 'needs-sync'; reason: 'outbox-not-drained' | 'barrier-blocked' | 'busy'; detail: string }
+  | { kind: 'deferred'; reason: 'conflict' | 'publish-failed'; detail: string }
+
+/**
  * Strict canonical cursor parser (LOCK-PERSONAL-001): only canonical
  * non-negative safe-integer forms are accepted. Numbers must be safe
  * integers >= 0; strings must match /^(0|[1-9][0-9]*)$/ exactly (no
@@ -2780,7 +2815,7 @@ export class SyncService {
   }
 
   async sync(): Promise<SyncStatus> {
-    if (this.statusSyncing) throw new Error('sync already in progress')
+    if (this.statusSyncing) throw new SyncBusyError()
     this.throwIfShutdown()
     // Initial config/preflight reads under the durable error-reporting
     // boundary (LOCK-PERSONAL-001/006/009): failures are logged and recorded
@@ -3547,7 +3582,7 @@ export class SyncService {
    * relay semantics, and renderer/preload/IPC/UI are untouched.
    */
   async publishBaseline(): Promise<{ watermark: number; digest: string; channelId: string }> {
-    if (this.statusSyncing || this.publishBarrierHeld) throw new Error('sync already in progress')
+    if (this.statusSyncing || this.publishBarrierHeld) throw new SyncBusyError()
     this.throwIfShutdown()
     let cfg: SyncConfig
     try {
@@ -3812,6 +3847,170 @@ export class SyncService {
     } finally {
       this.statusSyncing = false
       this.publishBarrierHeld = false
+    }
+  }
+
+  /**
+   * Conservative auto-publish eligibility + single attempt for local-triggered
+   * auto-sync only. Callers must invoke this at most once after an ordinary
+   * `sync()` success when an unconsumed local publish intent exists. Never
+   * called from `sync()` itself (manual `sync()` never auto-publishes) and
+   * never recurses into auto-sync: exactly one barrier PUT at most, no new
+   * timers, no new persisted state, full op-log retention untouched.
+   *
+   * Classification uses only direct snapshot reads plus `instanceof` and the
+   * numeric relay `cause.status` — never exception message strings. The strict
+   * `publishBaseline()` barrier stays the single PUT executor with unchanged
+   * fail-closed semantics.
+   *
+   * - `skipped` (unbound/N==0/ineligible): non-error, no PUT, no `lastError`
+   *   overwrite; caller consumes the intent for this round.
+   * - `needs-sync`: no PUT, no `lastError` overwrite; caller retains the
+   *   intent so the next successful sync cycle retries after draining.
+   * - `deferred` (409/other PUT failure): the op-log sync stays successful;
+   *   the barrier path already recorded the failure truthfully (`lastError` +
+   *   scoped log). Caller consumes the intent with no immediate retry.
+   * - Shutdown/stale-config/config-preflight propagate as thrown errors so
+   *   automation aborts without retry; they never become deferred.
+   */
+  async publishBaselineIfEligible(): Promise<BaselineAutoPublishResult> {
+    this.throwIfShutdown()
+    const syncGen = this.configGeneration
+    this.throwIfStaleConfig(syncGen)
+    if (this.statusSyncing || this.publishBarrierHeld) {
+      return { kind: 'needs-sync', reason: 'busy', detail: 'sync or publish already in progress' }
+    }
+    let channelKey: string | null
+    try {
+      channelKey = this.getChannelKey()
+    } catch (e) {
+      if (e instanceof SyncShutdownError) throw e
+      if (e instanceof SyncStaleConfigError) throw e
+      if (e instanceof SyncConfigPreflightError) throw e
+      const detail = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
+      logger.warn(`[publishBaselineIfEligible] channel read deferred: ${detail}`)
+      return { kind: 'deferred', reason: 'publish-failed', detail: detail || 'channel read failed' }
+    }
+    if (channelKey === null) {
+      logger.info('[publishBaselineIfEligible] skip: unbound channel (no PUT)')
+      return { kind: 'skipped', reason: 'unbound-channel', detail: 'no bound channel' }
+    }
+    const db = this.getDb()
+    let cursor = 0
+    try {
+      const cursorRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).get()
+      if (cursorRow) {
+        if (cursorRow.value === null || cursorRow.value === undefined) {
+          throw new SyncCursorError('malformed persisted cursor: missing value')
+        }
+        cursor = parseStrictCursor(cursorRow.value)
+      }
+    } catch (e) {
+      if (e instanceof SyncShutdownError) throw e
+      if (e instanceof SyncStaleConfigError) throw e
+      if (e instanceof SyncConfigPreflightError) throw e
+      if (isTolerableMissingSyncTable(db, e, MIGRATION_005_KEY)) {
+        cursor = 0
+      } else {
+        const detail = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
+        logger.warn(`[publishBaselineIfEligible] cursor read deferred: ${detail}`)
+        return { kind: 'deferred', reason: 'publish-failed', detail: detail || 'cursor read failed' }
+      }
+    }
+    if (cursor === 0) {
+      logger.info('[publishBaselineIfEligible] skip: watermark N==0 (no PUT)')
+      return { kind: 'skipped', reason: 'watermark-zero', detail: 'watermark N==0' }
+    }
+    let outboxOps: SyncOperation[]
+    try {
+      outboxOps = this.listOutbox()
+    } catch (e) {
+      if (e instanceof SyncShutdownError) throw e
+      if (e instanceof SyncStaleConfigError) throw e
+      if (e instanceof SyncConfigPreflightError) throw e
+      const detail = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
+      logger.warn(`[publishBaselineIfEligible] outbox read deferred: ${detail}`)
+      return { kind: 'deferred', reason: 'publish-failed', detail: detail || 'outbox read failed' }
+    }
+    if (outboxOps.length > 0) {
+      return {
+        kind: 'needs-sync',
+        reason: 'outbox-not-drained',
+        detail: `outbox not drained (${String(outboxOps.length)} pending)`
+      }
+    }
+    let candidate: ReturnType<typeof captureLocalSyncBaselineCandidate>
+    try {
+      candidate = captureLocalSyncBaselineCandidate(db)
+    } catch (e) {
+      if (e instanceof SyncShutdownError) throw e
+      if (e instanceof SyncStaleConfigError) throw e
+      if (e instanceof SyncConfigPreflightError) throw e
+      const detail = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
+      logger.warn(`[publishBaselineIfEligible] candidate capture deferred: ${detail}`)
+      return { kind: 'deferred', reason: 'publish-failed', detail: detail || 'candidate capture failed' }
+    }
+    this.throwIfShutdown()
+    this.throwIfStaleConfig(syncGen)
+    if (candidate.observationBinding !== 'bound' || candidate.observedLocalChannelKey === null) {
+      logger.info('[publishBaselineIfEligible] skip: candidate unbound (no PUT)')
+      return { kind: 'skipped', reason: 'unbound-channel', detail: 'candidate observation unbound' }
+    }
+    if (candidate.observedLocalCursor !== cursor || candidate.observedLocalChannelKey !== channelKey) {
+      return {
+        kind: 'needs-sync',
+        reason: 'barrier-blocked',
+        detail: 'snapshot binding changed before publish'
+      }
+    }
+    if (typeof candidate.observedLocalCursor !== 'number' || candidate.observedLocalCursor === 0) {
+      logger.info('[publishBaselineIfEligible] skip: watermark N==0 (no PUT)')
+      return { kind: 'skipped', reason: 'watermark-zero', detail: 'watermark N==0' }
+    }
+    if (
+      candidate.completeness?.state !== 'complete' ||
+      candidate.pendingOutboxCount !== 0 ||
+      typeof candidate.observedLocalCursor !== 'number'
+    ) {
+      const reasons = Array.isArray(candidate.completeness?.reasons)
+        ? candidate.completeness.reasons.join(',').slice(0, 300)
+        : String(candidate.completeness?.state ?? 'missing').slice(0, 300)
+      logger.info(`[publishBaselineIfEligible] skip: candidate ineligible (${reasons}; no PUT)`)
+      return { kind: 'skipped', reason: 'candidate-ineligible', detail: reasons || 'candidate not complete' }
+    }
+    try {
+      const res = await this.publishBaseline()
+      return { kind: 'published', watermark: res.watermark, digest: res.digest, channelId: res.channelId }
+    } catch (e) {
+      if (e instanceof SyncShutdownError) throw e
+      if (e instanceof SyncStaleConfigError) throw e
+      if (e instanceof SyncConfigPreflightError) throw e
+      if (e instanceof SyncBusyError) {
+        // TOCTOU finding-01: pre-check passed but a concurrent sync/publish
+        // won the exclusive lock/barrier before entry. No PUT happened, no
+        // `lastError` overwrite (early barrier throw writes nothing); retain
+        // the local intent for the next successful cycle. Structured
+        // `instanceof` classification only — never message strings.
+        return { kind: 'needs-sync', reason: 'busy', detail: 'sync or publish already in progress' }
+      }
+      if (e instanceof SyncCursorError) {
+        const detail = e.message.slice(0, 300)
+        logger.warn(`[publishBaselineIfEligible] cursor blocked deferred: ${detail}`)
+        return { kind: 'deferred', reason: 'publish-failed', detail }
+      }
+      if (e instanceof SyncBaselinePublishError) {
+        const detail = e.message.slice(0, 300)
+        logger.info(`[publishBaselineIfEligible] barrier blocked, needs-sync (no retry this round): ${detail}`)
+        return { kind: 'needs-sync', reason: 'barrier-blocked', detail }
+      }
+      const status = (e as { cause?: { status?: unknown } })?.cause?.status
+      const detail = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
+      if (status === 409) {
+        logger.info(`[publishBaselineIfEligible] baseline-conflict deferred (no immediate retry): ${detail}`)
+        return { kind: 'deferred', reason: 'conflict', detail: detail || 'baseline-conflict' }
+      }
+      logger.warn(`[publishBaselineIfEligible] publish failed deferred (sync stays success): ${detail}`)
+      return { kind: 'deferred', reason: 'publish-failed', detail: detail || 'publish failed' }
     }
   }
 
